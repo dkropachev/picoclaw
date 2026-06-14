@@ -1137,7 +1137,7 @@ func (r *sandboxFs) WriteFile(path string, data []byte) error {
 		// Sync directory to ensure rename is durable
 		if dirFile, err := root.Open("."); err == nil {
 			_ = dirFile.Sync()
-			dirFile.Close()
+			_ = dirFile.Close()
 		}
 
 		return nil
