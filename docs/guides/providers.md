@@ -124,6 +124,8 @@ This design also enables **multi-agent support** with flexible provider selectio
 | `provider` | string | No | Preferred provider identifier. When present, PicoClaw sends `model` unchanged to that provider                                                                                                                                              |
 | `model` | string | Yes | Native model ID when `provider` is set. If `provider` is omitted, the legacy `provider/model` form is still supported                                                                                                                       |
 | `api_keys` | string[] | Yes* | API key(s) for authentication. Multiple keys enable per-request rotation. Not required for local providers (Ollama, LM Studio, VLLM)                                                                                                        |
+| `auth_method` | string | No | Authentication method for providers with non-API-key auth. Supported values include `oauth` and `token`                                                                                                                                     |
+| `credential_id` | string | No | Named OAuth/token credential from the auth store. Empty uses the provider default (for example `openai`); bare names are provider-scoped (for example `work` becomes `openai:work`)                                                        |
 | `api_base` | string | No | Override the default API endpoint URL                                                                                                                                                                                                       |
 | `proxy` | string | No | HTTP proxy URL for this model entry                                                                                                                                                                                                         |
 | `user_agent` | string | No | Custom `User-Agent` header sent with API requests (supported by OpenAI-compatible, Gemini, Anthropic, and Azure providers)                                                                                                                  |
@@ -142,6 +144,48 @@ When streaming is disabled, omit the `streaming` block. Writing `"streaming": {"
 
 `extra_body` is especially useful for model-specific TTS fields on OpenAI-compatible
 speech routes, for example custom `voice` names or `response_format: "mp3"`.
+
+#### Multiple OAuth Accounts for the Same Provider
+
+OAuth/token credentials can be saved under provider-scoped names and selected
+per `model_list` entry with `credential_id`. This is useful for separate
+OpenAI/Codex subscription accounts that should participate in model fallback.
+
+```bash
+picoclaw auth login --provider openai --device-code --credential-id work
+picoclaw auth login --provider openai --device-code --credential-id personal
+```
+
+```json
+{
+  "model_list": [
+    {
+      "model_name": "codex-work",
+      "provider": "openai",
+      "model": "gpt-5.3-codex",
+      "auth_method": "oauth",
+      "credential_id": "openai:work",
+      "fallbacks": ["codex-personal"]
+    },
+    {
+      "model_name": "codex-personal",
+      "provider": "openai",
+      "model": "gpt-5.3-codex",
+      "auth_method": "oauth",
+      "credential_id": "openai:personal"
+    }
+  ],
+  "agents": {
+    "defaults": {
+      "model_name": "codex-work"
+    }
+  }
+}
+```
+
+The fallback engine still reacts to provider errors such as quota or rate-limit
+responses. `credential_id` only makes each candidate use a different stored
+credential.
 
 #### Tool Schema Compatibility
 

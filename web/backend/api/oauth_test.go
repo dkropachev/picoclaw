@@ -262,6 +262,150 @@ func TestOAuthLogoutClearsAuthMethodForExplicitProviderField(t *testing.T) {
 	}
 }
 
+func TestOAuthTokenLoginPersistsNamedCredentialAndModel(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/oauth/login",
+		bytes.NewBufferString(`{"provider":"openai","credential_id":"work","method":"token","token":"named-token"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	cred, err := auth.GetCredential("openai:work")
+	if err != nil {
+		t.Fatalf("GetCredential named error: %v", err)
+	}
+	if cred == nil || cred.AccessToken != "named-token" {
+		t.Fatalf("named credential = %#v, want token", cred)
+	}
+	defaultCred, err := auth.GetCredential("openai")
+	if err != nil {
+		t.Fatalf("GetCredential default error: %v", err)
+	}
+	if defaultCred != nil {
+		t.Fatalf("default credential should not be overwritten, got %#v", defaultCred)
+	}
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+	var found bool
+	for _, m := range cfg.ModelList {
+		if m.ModelName == "gpt-5.4-work" {
+			found = true
+			if m.CredentialID != "openai:work" {
+				t.Fatalf("CredentialID = %q, want openai:work", m.CredentialID)
+			}
+			if m.AuthMethod != "token" {
+				t.Fatalf("AuthMethod = %q, want token", m.AuthMethod)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("named model entry not found in %#v", cfg.ModelList)
+	}
+}
+
+func TestOAuthLogoutNamedCredentialOnlyClearsMatchingModel(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName:  "gpt-default",
+			Provider:   "openai",
+			Model:      "gpt-5.4",
+			AuthMethod: "oauth",
+		},
+		{
+			ModelName:    "gpt-work",
+			Provider:     "openai",
+			Model:        "gpt-5.4",
+			AuthMethod:   "oauth",
+			CredentialID: "openai:work",
+		},
+	}
+	if err = config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig error: %v", err)
+	}
+	if err = auth.SetCredential("openai", &auth.AuthCredential{
+		AccessToken: "default-token",
+		Provider:    "openai",
+		AuthMethod:  "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential default error: %v", err)
+	}
+	if err = auth.SetCredential("openai:work", &auth.AuthCredential{
+		AccessToken: "work-token",
+		Provider:    "openai",
+		AuthMethod:  "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential named error: %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/oauth/logout",
+		bytes.NewBufferString(`{"provider":"openai","credential_id":"work"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	defaultCred, err := auth.GetCredential("openai")
+	if err != nil {
+		t.Fatalf("GetCredential default error: %v", err)
+	}
+	if defaultCred == nil {
+		t.Fatal("default credential was deleted")
+	}
+	namedCred, err := auth.GetCredential("openai:work")
+	if err != nil {
+		t.Fatalf("GetCredential named error: %v", err)
+	}
+	if namedCred != nil {
+		t.Fatalf("named credential should be deleted, got %#v", namedCred)
+	}
+
+	updated, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+	if updated.ModelList[0].AuthMethod != "oauth" {
+		t.Fatalf("default auth_method = %q, want oauth", updated.ModelList[0].AuthMethod)
+	}
+	if updated.ModelList[1].AuthMethod != "" {
+		t.Fatalf("named auth_method = %q, want empty", updated.ModelList[1].AuthMethod)
+	}
+}
+
 func setupOAuthTestEnv(t *testing.T) (string, func()) {
 	t.Helper()
 
@@ -313,6 +457,7 @@ func resetOAuthHooks(t *testing.T) {
 	origGetCredential := oauthGetCredential
 	origSetCredential := oauthSetCredential
 	origDeleteCredential := oauthDeleteCredential
+	origLoadStore := oauthLoadStore
 	origLoadConfig := oauthLoadConfig
 	origSaveConfig := oauthSaveConfig
 	origFetchProject := oauthFetchAntigravityProject
@@ -329,6 +474,7 @@ func resetOAuthHooks(t *testing.T) {
 		oauthGetCredential = origGetCredential
 		oauthSetCredential = origSetCredential
 		oauthDeleteCredential = origDeleteCredential
+		oauthLoadStore = origLoadStore
 		oauthLoadConfig = origLoadConfig
 		oauthSaveConfig = origSaveConfig
 		oauthFetchAntigravityProject = origFetchProject

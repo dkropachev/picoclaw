@@ -62,6 +62,7 @@ interface EditForm {
   apiBase: string
   proxy: string
   authMethod: string
+  credentialID: string
   connectMode: string
   workspace: string
   rpm: string
@@ -90,6 +91,7 @@ function buildInitialEditForm(model: ModelInfo): EditForm {
     apiBase: model.api_base ?? "",
     proxy: model.proxy ?? "",
     authMethod: model.auth_method ?? "",
+    credentialID: model.credential_id ?? "",
     connectMode: model.connect_mode ?? "",
     workspace: model.workspace ?? "",
     rpm: model.rpm ? String(model.rpm) : "",
@@ -122,6 +124,7 @@ export function EditModelSheet({
     apiBase: "",
     proxy: "",
     authMethod: "",
+    credentialID: "",
     connectMode: "",
     workspace: "",
     rpm: "",
@@ -306,6 +309,8 @@ export function EditModelSheet({
     .trim()
     .toLowerCase()
   const isOAuth = effectiveAuthMethod === "oauth"
+  const usesCredential =
+    effectiveAuthMethod === "oauth" || effectiveAuthMethod === "token"
   const defaultModelAllowed = providerDef?.defaultModelAllowed === true
   const apiBasePlaceholder =
     getProviderDefaultAPIBase(form.provider, providerOptions) ||
@@ -375,6 +380,7 @@ export function EditModelSheet({
         auth_method: authMethodLocked
           ? defaultAuthMethod || undefined
           : form.authMethod.trim() || undefined,
+        credential_id: form.credentialID.trim() || undefined,
         connect_mode: form.connectMode.trim() || undefined,
         workspace: form.workspace.trim() || undefined,
         rpm: form.rpm ? Number(form.rpm) : undefined,
@@ -634,6 +640,24 @@ export function EditModelSheet({
                     disabled={authMethodLocked}
                   />
                 </Field>
+
+                {usesCredential && (
+                  <Field
+                    label={t("models.field.credentialID", "Credential ID")}
+                    hint={t(
+                      "models.field.credentialIDHint",
+                      "Optional named credential, for example openai:work. Leave blank for the provider default.",
+                    )}
+                  >
+                    <Input
+                      value={form.credentialID}
+                      onChange={setField("credentialID")}
+                      placeholder={
+                        form.provider ? `${form.provider}:work` : "openai:work"
+                      }
+                    />
+                  </Field>
+                )}
 
                 <Field
                   label={t("models.field.connectMode")}

@@ -21,6 +21,11 @@ function getProviderLabel(provider: OAuthProvider | ""): string {
   return ""
 }
 
+function credentialPayload(value: string): string | undefined {
+  const trimmed = value.trim()
+  return trimmed ? trimmed : undefined
+}
+
 export function useCredentialsPage() {
   const { t } = useTranslation()
   const [providers, setProviders] = useState<OAuthProviderStatus[]>([])
@@ -36,12 +41,14 @@ export function useCredentialsPage() {
   const [pollIntervalMs, setPollIntervalMs] = useState(2000)
 
   const [openAIToken, setOpenAIToken] = useState("")
+  const [openAICredentialID, setOpenAICredentialID] = useState("")
   const [anthropicToken, setAnthropicToken] = useState("")
 
   const [logoutDialogOpen, setLogoutDialogOpen] = useState(false)
   const [logoutConfirmProvider, setLogoutConfirmProvider] = useState<
     OAuthProvider | ""
   >("")
+  const [logoutConfirmCredentialID, setLogoutConfirmCredentialID] = useState("")
 
   const [deviceSheetOpen, setDeviceSheetOpen] = useState(false)
   const [deviceFlow, setDeviceFlow] = useState<OAuthFlowState | null>(null)
@@ -180,7 +187,7 @@ export function useCredentialsPage() {
   }, [])
 
   const startBrowserOAuth = useCallback(
-    async (provider: OAuthProvider) => {
+    async (provider: OAuthProvider, credentialID?: string) => {
       const actionToken = bumpActionToken()
       setActiveAction(`${provider}:browser`)
       setError("")
@@ -196,7 +203,11 @@ export function useCredentialsPage() {
       }
 
       try {
-        const resp = await loginOAuth({ provider, method: "browser" })
+        const resp = await loginOAuth({
+          provider,
+          credential_id: credentialID,
+          method: "browser",
+        })
         if (!isActionTokenCurrent(actionToken)) {
           authTab.close()
           return
@@ -210,6 +221,7 @@ export function useCredentialsPage() {
         setActiveFlow({
           flow_id: resp.flow_id,
           provider,
+          credential_id: resp.credential_id,
           method: "browser",
           status: "pending",
           expires_at: resp.expires_at,
@@ -234,61 +246,71 @@ export function useCredentialsPage() {
     [bumpActionToken, isActionTokenCurrent, t],
   )
 
-  const startOpenAIDeviceCode = useCallback(async () => {
-    const actionToken = bumpActionToken()
-    setActiveAction("openai:device")
-    setError("")
+  const startOpenAIDeviceCode = useCallback(
+    async (credentialID?: string) => {
+      const actionToken = bumpActionToken()
+      setActiveAction("openai:device")
+      setError("")
 
-    try {
-      const resp = await loginOAuth({
-        provider: "openai",
-        method: "device_code",
-      })
-      if (!isActionTokenCurrent(actionToken)) {
-        return
-      }
-      if (!resp.flow_id || !resp.user_code || !resp.verify_url) {
-        throw new Error(t("credentials.errors.invalidDeviceResponse"))
-      }
+      try {
+        const resp = await loginOAuth({
+          provider: "openai",
+          credential_id: credentialID,
+          method: "device_code",
+        })
+        if (!isActionTokenCurrent(actionToken)) {
+          return
+        }
+        if (!resp.flow_id || !resp.user_code || !resp.verify_url) {
+          throw new Error(t("credentials.errors.invalidDeviceResponse"))
+        }
 
-      const flow: OAuthFlowState = {
-        flow_id: resp.flow_id,
-        provider: "openai",
-        method: "device_code",
-        status: "pending",
-        user_code: resp.user_code,
-        verify_url: resp.verify_url,
-        interval: resp.interval,
-        expires_at: resp.expires_at,
-      }
+        const flow: OAuthFlowState = {
+          flow_id: resp.flow_id,
+          provider: "openai",
+          credential_id: resp.credential_id,
+          method: "device_code",
+          status: "pending",
+          user_code: resp.user_code,
+          verify_url: resp.verify_url,
+          interval: resp.interval,
+          expires_at: resp.expires_at,
+        }
 
-      setDeviceFlow(flow)
-      setDeviceSheetOpen(true)
-      setActiveFlow(flow)
-      setWatchFlowID(resp.flow_id)
-      setWatchMode("poll")
-      setPollIntervalMs(Math.max(1000, (resp.interval ?? 5) * 1000))
-    } catch (err) {
-      if (!isActionTokenCurrent(actionToken)) {
-        return
+        setDeviceFlow(flow)
+        setDeviceSheetOpen(true)
+        setActiveFlow(flow)
+        setWatchFlowID(resp.flow_id)
+        setWatchMode("poll")
+        setPollIntervalMs(Math.max(1000, (resp.interval ?? 5) * 1000))
+      } catch (err) {
+        if (!isActionTokenCurrent(actionToken)) {
+          return
+        }
+        setActiveAction("")
+        setError(
+          err instanceof Error
+            ? err.message
+            : t("credentials.errors.loginFailed"),
+        )
       }
-      setActiveAction("")
-      setError(
-        err instanceof Error
-          ? err.message
-          : t("credentials.errors.loginFailed"),
-      )
-    }
-  }, [bumpActionToken, isActionTokenCurrent, t])
+    },
+    [bumpActionToken, isActionTokenCurrent, t],
+  )
 
   const saveToken = useCallback(
-    async (provider: OAuthProvider, token: string) => {
+    async (provider: OAuthProvider, token: string, credentialID?: string) => {
       const actionID = `${provider}:token`
       setActiveAction(actionID)
       setError("")
 
       try {
-        await loginOAuth({ provider, method: "token", token })
+        await loginOAuth({
+          provider,
+          credential_id: credentialID,
+          method: "token",
+          token,
+        })
         if (provider === "openai") {
           setOpenAIToken("")
         }
@@ -310,13 +332,13 @@ export function useCredentialsPage() {
   )
 
   const doLogout = useCallback(
-    async (provider: OAuthProvider) => {
+    async (provider: OAuthProvider, credentialID?: string) => {
       const actionID = `${provider}:logout`
       setActiveAction(actionID)
       setError("")
 
       try {
-        await logoutOAuth(provider)
+        await logoutOAuth(provider, credentialID)
         await loadProviders()
       } catch (err) {
         setError(
@@ -331,24 +353,33 @@ export function useCredentialsPage() {
     [loadProviders, t],
   )
 
-  const askLogout = useCallback((provider: OAuthProvider) => {
-    setLogoutConfirmProvider(provider)
-    setLogoutDialogOpen(true)
-  }, [])
+  const askLogout = useCallback(
+    (provider: OAuthProvider, credentialID?: string) => {
+      setLogoutConfirmProvider(provider)
+      setLogoutConfirmCredentialID(credentialID ?? "")
+      setLogoutDialogOpen(true)
+    },
+    [],
+  )
 
   const handleConfirmLogout = useCallback(async () => {
     if (!logoutConfirmProvider) {
       return
     }
-    await doLogout(logoutConfirmProvider)
+    await doLogout(
+      logoutConfirmProvider,
+      credentialPayload(logoutConfirmCredentialID),
+    )
     setLogoutDialogOpen(false)
     setLogoutConfirmProvider("")
-  }, [doLogout, logoutConfirmProvider])
+    setLogoutConfirmCredentialID("")
+  }, [doLogout, logoutConfirmCredentialID, logoutConfirmProvider])
 
   const handleLogoutDialogOpenChange = useCallback((open: boolean) => {
     setLogoutDialogOpen(open)
     if (!open) {
       setLogoutConfirmProvider("")
+      setLogoutConfirmCredentialID("")
     }
   }, [])
 
@@ -388,7 +419,9 @@ export function useCredentialsPage() {
     setActiveFlow((prev) => (prev?.status === "pending" ? null : prev))
   }, [bumpActionToken])
 
-  const logoutProviderLabel = getProviderLabel(logoutConfirmProvider)
+  const logoutProviderLabel = logoutConfirmCredentialID
+    ? `${getProviderLabel(logoutConfirmProvider)} (${logoutConfirmCredentialID})`
+    : getProviderLabel(logoutConfirmProvider)
 
   const flowHint = useMemo(() => {
     if (!activeFlow) {
@@ -413,6 +446,7 @@ export function useCredentialsPage() {
     activeFlow,
     flowHint,
     openAIToken,
+    openAICredentialID,
     anthropicToken,
     openaiStatus,
     anthropicStatus,
@@ -423,6 +457,7 @@ export function useCredentialsPage() {
     deviceSheetOpen,
     deviceFlow,
     setOpenAIToken,
+    setOpenAICredentialID,
     setAnthropicToken,
     startBrowserOAuth,
     startOpenAIDeviceCode,

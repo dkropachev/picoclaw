@@ -794,9 +794,10 @@ type ModelConfig struct {
 	Fallbacks []string `json:"fallbacks,omitempty"` // Fallback model names for failover
 
 	// Special providers (CLI-based, OAuth, etc.)
-	AuthMethod  string `json:"auth_method,omitempty"`  // Authentication method: oauth, token
-	ConnectMode string `json:"connect_mode,omitempty"` // Connection mode: stdio, grpc
-	Workspace   string `json:"workspace,omitempty"`    // Workspace path for CLI-based providers
+	AuthMethod   string `json:"auth_method,omitempty"`   // Authentication method: oauth, token
+	CredentialID string `json:"credential_id,omitempty"` // Auth store credential key for OAuth/token providers
+	ConnectMode  string `json:"connect_mode,omitempty"`  // Connection mode: stdio, grpc
+	Workspace    string `json:"workspace,omitempty"`     // Workspace path for CLI-based providers
 
 	// Optional optimizations
 	RPM                 int                  `json:"rpm,omitempty"`              // Requests per minute limit
@@ -1807,6 +1808,7 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 				APIKeys:             SimpleSecureStrings(keys[i]),
 				Proxy:               m.Proxy,
 				AuthMethod:          m.AuthMethod,
+				CredentialID:        m.CredentialID,
 				ConnectMode:         m.ConnectMode,
 				Workspace:           m.Workspace,
 				RPM:                 m.RPM,
@@ -1832,6 +1834,7 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 			APIBase:             m.APIBase,
 			Proxy:               m.Proxy,
 			AuthMethod:          m.AuthMethod,
+			CredentialID:        m.CredentialID,
 			ConnectMode:         m.ConnectMode,
 			Workspace:           m.Workspace,
 			RPM:                 m.RPM,

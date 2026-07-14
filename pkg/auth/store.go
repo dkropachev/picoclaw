@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,58 @@ func canonicalProvider(provider string) string {
 	default:
 		return normalized
 	}
+}
+
+func validCredentialIDPart(part string) bool {
+	if part == "" {
+		return false
+	}
+	for _, r := range part {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// NormalizeCredentialID returns the auth-store key for a provider credential.
+// An empty credentialID maps to the provider default ("openai"). A bare name
+// maps to a provider-scoped key ("openai:work"). A fully-qualified key must use
+// the same provider prefix.
+func NormalizeCredentialID(provider, credentialID string) (string, error) {
+	canonical := canonicalProvider(provider)
+	if canonical == "" {
+		return "", fmt.Errorf("provider is required")
+	}
+
+	raw := strings.ToLower(strings.TrimSpace(credentialID))
+	if raw == "" || raw == canonical {
+		return canonical, nil
+	}
+
+	if strings.Contains(raw, ":") {
+		prefix, name, ok := strings.Cut(raw, ":")
+		if !ok || name == "" {
+			return "", fmt.Errorf("invalid credential_id %q", credentialID)
+		}
+		prefix = canonicalProvider(prefix)
+		if prefix != canonical {
+			return "", fmt.Errorf("credential_id %q does not belong to provider %q", credentialID, provider)
+		}
+		if !validCredentialIDPart(name) {
+			return "", fmt.Errorf("credential_id %q contains invalid characters", credentialID)
+		}
+		return prefix + ":" + name, nil
+	}
+
+	if !validCredentialIDPart(raw) {
+		return "", fmt.Errorf("credential_id %q contains invalid characters", credentialID)
+	}
+	return canonical + ":" + raw, nil
 }
 
 func cloneCredential(cred *AuthCredential) *AuthCredential {

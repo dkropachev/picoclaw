@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -117,7 +118,11 @@ func hasStoredOAuthCredential(m *config.ModelConfig) (bool, bool) {
 	if !ok {
 		return false, false
 	}
-	cred, err := oauthGetCredential(provider)
+	credentialID, err := auth.NormalizeCredentialID(provider, m.CredentialID)
+	if err != nil {
+		return false, true
+	}
+	cred, err := oauthGetCredential(credentialID)
 	if err != nil || cred == nil {
 		return false, true
 	}

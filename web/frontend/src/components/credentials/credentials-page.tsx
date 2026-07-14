@@ -19,6 +19,7 @@ export function CredentialsPage() {
     activeFlow,
     flowHint,
     openAIToken,
+    openAICredentialID,
     anthropicToken,
     openaiStatus,
     anthropicStatus,
@@ -29,6 +30,7 @@ export function CredentialsPage() {
     deviceSheetOpen,
     deviceFlow,
     setOpenAIToken,
+    setOpenAICredentialID,
     setAnthropicToken,
     startBrowserOAuth,
     startOpenAIDeviceCode,
@@ -75,12 +77,31 @@ export function CredentialsPage() {
               status={openaiStatus}
               activeAction={activeAction}
               token={openAIToken}
+              credentialID={openAICredentialID}
               onTokenChange={setOpenAIToken}
-              onStartBrowserOAuth={() => void startBrowserOAuth("openai")}
-              onStartDeviceCode={() => void startOpenAIDeviceCode()}
+              onCredentialIDChange={setOpenAICredentialID}
+              onStartBrowserOAuth={() =>
+                void startBrowserOAuth(
+                  "openai",
+                  openAICredentialID.trim() || undefined,
+                )
+              }
+              onStartDeviceCode={() =>
+                void startOpenAIDeviceCode(
+                  openAICredentialID.trim() || undefined,
+                )
+              }
               onStopLoading={stopLoading}
-              onSaveToken={() => void saveToken("openai", openAIToken.trim())}
-              onAskLogout={() => askLogout("openai")}
+              onSaveToken={() =>
+                void saveToken(
+                  "openai",
+                  openAIToken.trim(),
+                  openAICredentialID.trim() || undefined,
+                )
+              }
+              onAskLogout={() =>
+                askLogout("openai", openAICredentialID.trim() || undefined)
+              }
             />
 
             <AnthropicCredentialCard

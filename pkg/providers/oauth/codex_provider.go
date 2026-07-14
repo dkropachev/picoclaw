@@ -259,13 +259,21 @@ func buildCodexParams(
 }
 
 func CreateCodexTokenSource() func() (string, string, error) {
+	return CreateCodexTokenSourceForCredential("openai")
+}
+
+func CreateCodexTokenSourceForCredential(credentialID string) func() (string, string, error) {
 	return func() (string, string, error) {
-		cred, err := auth.GetCredential("openai")
+		cred, err := auth.GetCredential(credentialID)
 		if err != nil {
 			return "", "", fmt.Errorf("loading auth credentials: %w", err)
 		}
 		if cred == nil {
-			return "", "", fmt.Errorf("no credentials for openai. Run: picoclaw auth login --provider openai")
+			return "", "", fmt.Errorf(
+				"no credentials for %s. Run: picoclaw auth login --provider openai --credential-id %s",
+				credentialID,
+				credentialID,
+			)
 		}
 
 		if cred.AuthMethod == "oauth" && cred.NeedsRefresh() && cred.RefreshToken != "" {
@@ -277,7 +285,7 @@ func CreateCodexTokenSource() func() (string, string, error) {
 			if refreshed.AccountID == "" {
 				refreshed.AccountID = cred.AccountID
 			}
-			if err := auth.SetCredential("openai", refreshed); err != nil {
+			if err := auth.SetCredential(credentialID, refreshed); err != nil {
 				return "", "", fmt.Errorf("saving refreshed token: %w", err)
 			}
 			return refreshed.AccessToken, refreshed.AccountID, nil

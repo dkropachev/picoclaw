@@ -57,13 +57,24 @@ func (p *ClaudeProvider) GetDefaultModel() string {
 }
 
 func CreateClaudeTokenSource(getCredential func(string) (*auth.AuthCredential, error)) func() (string, error) {
+	return CreateClaudeTokenSourceForCredential(getCredential, "anthropic")
+}
+
+func CreateClaudeTokenSourceForCredential(
+	getCredential func(string) (*auth.AuthCredential, error),
+	credentialID string,
+) func() (string, error) {
 	return func() (string, error) {
-		cred, err := getCredential("anthropic")
+		cred, err := getCredential(credentialID)
 		if err != nil {
 			return "", fmt.Errorf("loading auth credentials: %w", err)
 		}
 		if cred == nil {
-			return "", fmt.Errorf("no credentials for anthropic. Run: picoclaw auth login --provider anthropic")
+			return "", fmt.Errorf(
+				"no credentials for %s. Run: picoclaw auth login --provider anthropic --credential-id %s",
+				credentialID,
+				credentialID,
+			)
 		}
 		return cred.AccessToken, nil
 	}

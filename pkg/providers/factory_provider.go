@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
 	anthropicmessages "github.com/sipeed/picoclaw/pkg/providers/anthropic_messages"
 	"github.com/sipeed/picoclaw/pkg/providers/azure"
@@ -19,27 +20,54 @@ import (
 )
 
 // createClaudeAuthProvider creates a Claude provider using OAuth credentials from auth store.
-func createClaudeAuthProvider() (LLMProvider, error) {
-	cred, err := getCredential("anthropic")
+func createClaudeAuthProvider(cfg *config.ModelConfig) (LLMProvider, error) {
+	credentialID, err := credentialIDForModel(cfg, "anthropic")
+	if err != nil {
+		return nil, err
+	}
+	cred, err := getCredential(credentialID)
 	if err != nil {
 		return nil, fmt.Errorf("loading auth credentials: %w", err)
 	}
 	if cred == nil {
-		return nil, fmt.Errorf("no credentials for anthropic. Run: picoclaw auth login --provider anthropic")
+		return nil, fmt.Errorf(
+			"no credentials for %s. Run: picoclaw auth login --provider anthropic --credential-id %s",
+			credentialID,
+			credentialID,
+		)
 	}
-	return NewClaudeProviderWithTokenSource(cred.AccessToken, createClaudeTokenSource()), nil
+	return NewClaudeProviderWithTokenSource(cred.AccessToken, createClaudeTokenSourceForCredential(credentialID)), nil
 }
 
 // createCodexAuthProvider creates a Codex provider using OAuth credentials from auth store.
-func createCodexAuthProvider() (LLMProvider, error) {
-	cred, err := getCredential("openai")
+func createCodexAuthProvider(cfg *config.ModelConfig) (LLMProvider, error) {
+	credentialID, err := credentialIDForModel(cfg, "openai")
+	if err != nil {
+		return nil, err
+	}
+	cred, err := getCredential(credentialID)
 	if err != nil {
 		return nil, fmt.Errorf("loading auth credentials: %w", err)
 	}
 	if cred == nil {
-		return nil, fmt.Errorf("no credentials for openai. Run: picoclaw auth login --provider openai")
+		return nil, fmt.Errorf(
+			"no credentials for %s. Run: picoclaw auth login --provider openai --credential-id %s",
+			credentialID,
+			credentialID,
+		)
 	}
-	return NewCodexProviderWithTokenSource(cred.AccessToken, cred.AccountID, createCodexTokenSource()), nil
+	return NewCodexProviderWithTokenSource(
+		cred.AccessToken,
+		cred.AccountID,
+		createCodexTokenSourceForCredential(credentialID),
+	), nil
+}
+
+func credentialIDForModel(cfg *config.ModelConfig, provider string) (string, error) {
+	if cfg == nil {
+		return auth.NormalizeCredentialID(provider, "")
+	}
+	return auth.NormalizeCredentialID(provider, cfg.CredentialID)
 }
 
 // ExtractProtocol extracts the effective protocol and model identifier from a
@@ -109,7 +137,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 	case "openai":
 		// OpenAI with OAuth/token auth (Codex-style)
 		if authMethod == "oauth" || authMethod == "token" {
-			provider, err := createCodexAuthProvider()
+			provider, err := createCodexAuthProvider(cfg)
 			if err != nil {
 				return nil, "", err
 			}
@@ -275,7 +303,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 	case "anthropic":
 		if authMethod == "oauth" || authMethod == "token" {
 			// Use OAuth credentials from auth store
-			provider, err := createClaudeAuthProvider()
+			provider, err := createClaudeAuthProvider(cfg)
 			if err != nil {
 				return nil, "", err
 			}

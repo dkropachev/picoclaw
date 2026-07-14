@@ -17,7 +17,9 @@ interface OpenAICredentialCardProps {
   status?: OAuthProviderStatus
   activeAction: string
   token: string
+  credentialID: string
   onTokenChange: (value: string) => void
+  onCredentialIDChange: (value: string) => void
   onStartBrowserOAuth: () => void
   onStartDeviceCode: () => void
   onStopLoading: () => void
@@ -29,7 +31,9 @@ export function OpenAICredentialCard({
   status,
   activeAction,
   token,
+  credentialID,
   onTokenChange,
+  onCredentialIDChange,
   onStartBrowserOAuth,
   onStartDeviceCode,
   onStopLoading,
@@ -42,6 +46,7 @@ export function OpenAICredentialCard({
   const deviceLoading = activeAction === "openai:device"
   const oauthLoading = browserLoading || deviceLoading
   const tokenLoading = activeAction === "openai:token"
+  const credentials = status?.credentials ?? []
 
   return (
     <CredentialCard
@@ -57,15 +62,32 @@ export function OpenAICredentialCard({
       status={status?.status ?? "not_logged_in"}
       authMethod={status?.auth_method}
       details={
-        status?.account_id ? (
-          <p>
-            {t("credentials.labels.account")}: {status.account_id}
-          </p>
-        ) : null
+        <div className="space-y-1">
+          {status?.account_id ? (
+            <p>
+              {t("credentials.labels.account")}: {status.account_id}
+            </p>
+          ) : null}
+          {credentials.length > 0 ? (
+            <p>
+              {t("models.field.credentialID", "Credential ID")}:{" "}
+              {credentials.map((item) => item.credential_id).join(", ")}
+            </p>
+          ) : null}
+        </div>
       }
       actions={
-        <div className="border-muted flex h-[120px] flex-col rounded-lg border p-3">
+        <div className="border-muted flex h-[164px] flex-col rounded-lg border p-3">
           <div className="flex h-full flex-col gap-3">
+            <Input
+              value={credentialID}
+              onChange={(e) => onCredentialIDChange(e.target.value)}
+              placeholder={t(
+                "models.field.credentialIDHint",
+                "Optional named credential, for example openai:work. Leave blank for the provider default.",
+              )}
+            />
+
             <div className="min-h-8">
               <div className="flex flex-nowrap items-center gap-2 overflow-x-auto">
                 <Button

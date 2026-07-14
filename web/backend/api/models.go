@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/audio/asr"
+	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -35,14 +36,15 @@ func (h *Handler) registerModelRoutes(mux *http.ServeMux) {
 // modelResponse is the JSON structure returned for each model in the list.
 // All ModelConfig fields are included so the frontend can display and edit them.
 type modelResponse struct {
-	Index      int    `json:"index"`
-	ModelName  string `json:"model_name"`
-	Provider   string `json:"provider,omitempty"`
-	Model      string `json:"model"`
-	APIBase    string `json:"api_base,omitempty"`
-	APIKey     string `json:"api_key"`
-	Proxy      string `json:"proxy,omitempty"`
-	AuthMethod string `json:"auth_method,omitempty"`
+	Index        int    `json:"index"`
+	ModelName    string `json:"model_name"`
+	Provider     string `json:"provider,omitempty"`
+	Model        string `json:"model"`
+	APIBase      string `json:"api_base,omitempty"`
+	APIKey       string `json:"api_key"`
+	Proxy        string `json:"proxy,omitempty"`
+	AuthMethod   string `json:"auth_method,omitempty"`
+	CredentialID string `json:"credential_id,omitempty"`
 	// Advanced fields
 	ConnectMode         string                      `json:"connect_mode,omitempty"`
 	Workspace           string                      `json:"workspace,omitempty"`
@@ -82,6 +84,11 @@ func normalizeStoredModelConfig(mc *config.ModelConfig) bool {
 	authMethod := strings.ToLower(strings.TrimSpace(mc.AuthMethod))
 	if authMethod != mc.AuthMethod {
 		mc.AuthMethod = authMethod
+		changed = true
+	}
+	credentialID := strings.TrimSpace(mc.CredentialID)
+	if credentialID != mc.CredentialID {
+		mc.CredentialID = credentialID
 		changed = true
 	}
 
@@ -134,6 +141,7 @@ func normalizeIncomingModelConfig(mc *config.ModelConfig) {
 	mc.Model = strings.TrimSpace(mc.Model)
 	mc.Provider = strings.TrimSpace(mc.Provider)
 	mc.AuthMethod = strings.ToLower(strings.TrimSpace(mc.AuthMethod))
+	mc.CredentialID = strings.TrimSpace(mc.CredentialID)
 	if mc.Provider == "" {
 		mc.Provider, mc.Model = providers.SplitModelProviderAndID(mc.Model, "openai")
 	} else {
@@ -149,6 +157,11 @@ func normalizeIncomingModelConfig(mc *config.ModelConfig) {
 	}
 	if mc.Provider == "antigravity" && mc.AuthMethod == "" {
 		mc.AuthMethod = "oauth"
+	}
+	if mc.CredentialID != "" {
+		if credentialID, err := auth.NormalizeCredentialID(mc.Provider, mc.CredentialID); err == nil {
+			mc.CredentialID = credentialID
+		}
 	}
 }
 
@@ -205,6 +218,11 @@ func validateIncomingModelConfig(mc *config.ModelConfig, existing *config.ModelC
 	}
 	if !providers.IsSupportedModelProvider(mc.Provider) {
 		return fmt.Errorf("provider %q is not supported", mc.Provider)
+	}
+	if strings.TrimSpace(mc.CredentialID) != "" {
+		if _, err := auth.NormalizeCredentialID(mc.Provider, mc.CredentialID); err != nil {
+			return err
+		}
 	}
 	if mc.Provider == "elevenlabs" && strings.TrimSpace(mc.Model) != asr.ElevenLabsSupportedModelID() {
 		return fmt.Errorf("provider %q only supports model %q", mc.Provider, asr.ElevenLabsSupportedModelID())
@@ -274,6 +292,7 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 			APIKey:              maskAPIKey(m.APIKey()),
 			Proxy:               m.Proxy,
 			AuthMethod:          m.AuthMethod,
+			CredentialID:        m.CredentialID,
 			ConnectMode:         m.ConnectMode,
 			Workspace:           m.Workspace,
 			RPM:                 m.RPM,
@@ -432,6 +451,9 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, ok := rawFields["streaming"]; !ok {
 		mc.Streaming = cfg.ModelList[idx].Streaming
+	}
+	if _, ok := rawFields["credential_id"]; !ok {
+		mc.CredentialID = cfg.ModelList[idx].CredentialID
 	}
 	// Preserve the existing Provider when the caller omits it. This keeps the
 	// update API backward-compatible for clients that haven't started sending

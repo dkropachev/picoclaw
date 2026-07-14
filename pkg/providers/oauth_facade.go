@@ -51,10 +51,10 @@ func FetchAntigravityModels(accessToken, projectID string) ([]AntigravityModelIn
 	return oauthprovider.FetchAntigravityModels(accessToken, projectID)
 }
 
-func createClaudeTokenSource() func() (string, error) {
-	return oauthprovider.CreateClaudeTokenSource(getCredential)
+func createClaudeTokenSourceForCredential(credentialID string) func() (string, error) {
+	return oauthprovider.CreateClaudeTokenSourceForCredential(getCredential, credentialID)
 }
 
-func createCodexTokenSource() func() (string, string, error) {
-	return oauthprovider.CreateCodexTokenSource()
+func createCodexTokenSourceForCredential(credentialID string) func() (string, string, error) {
+	return oauthprovider.CreateCodexTokenSourceForCredential(credentialID)
 }

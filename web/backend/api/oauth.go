@@ -8,6 +8,7 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -67,6 +68,7 @@ var (
 	oauthGetCredential            = auth.GetCredential
 	oauthSetCredential            = auth.SetCredential
 	oauthDeleteCredential         = auth.DeleteCredential
+	oauthLoadStore                = auth.LoadStore
 	oauthLoadConfig               = config.LoadConfig
 	oauthSaveConfig               = config.SaveConfig
 	oauthFetchAntigravityProject  = providers.FetchAntigravityProjectID
@@ -76,6 +78,7 @@ var (
 type oauthFlow struct {
 	ID           string
 	Provider     string
+	CredentialID string
 	Method       string
 	Status       string
 	CreatedAt    time.Time
@@ -92,28 +95,76 @@ type oauthFlow struct {
 }
 
 type oauthProviderStatus struct {
-	Provider    string   `json:"provider"`
-	DisplayName string   `json:"display_name"`
-	Methods     []string `json:"methods"`
-	LoggedIn    bool     `json:"logged_in"`
-	Status      string   `json:"status"`
-	AuthMethod  string   `json:"auth_method,omitempty"`
-	ExpiresAt   string   `json:"expires_at,omitempty"`
-	AccountID   string   `json:"account_id,omitempty"`
-	Email       string   `json:"email,omitempty"`
-	ProjectID   string   `json:"project_id,omitempty"`
+	Provider     string                `json:"provider"`
+	CredentialID string                `json:"credential_id,omitempty"`
+	DisplayName  string                `json:"display_name"`
+	Methods      []string              `json:"methods"`
+	LoggedIn     bool                  `json:"logged_in"`
+	Status       string                `json:"status"`
+	AuthMethod   string                `json:"auth_method,omitempty"`
+	ExpiresAt    string                `json:"expires_at,omitempty"`
+	AccountID    string                `json:"account_id,omitempty"`
+	Email        string                `json:"email,omitempty"`
+	ProjectID    string                `json:"project_id,omitempty"`
+	Credentials  []oauthProviderStatus `json:"credentials,omitempty"`
 }
 
 type oauthFlowResponse struct {
-	FlowID    string `json:"flow_id"`
-	Provider  string `json:"provider"`
-	Method    string `json:"method"`
-	Status    string `json:"status"`
-	ExpiresAt string `json:"expires_at,omitempty"`
-	Error     string `json:"error,omitempty"`
-	UserCode  string `json:"user_code,omitempty"`
-	VerifyURL string `json:"verify_url,omitempty"`
-	Interval  int    `json:"interval,omitempty"`
+	FlowID       string `json:"flow_id"`
+	Provider     string `json:"provider"`
+	CredentialID string `json:"credential_id,omitempty"`
+	Method       string `json:"method"`
+	Status       string `json:"status"`
+	ExpiresAt    string `json:"expires_at,omitempty"`
+	Error        string `json:"error,omitempty"`
+	UserCode     string `json:"user_code,omitempty"`
+	VerifyURL    string `json:"verify_url,omitempty"`
+	Interval     int    `json:"interval,omitempty"`
+}
+
+func newOAuthProviderCredentialStatus(
+	provider, credentialID string,
+	cred *auth.AuthCredential,
+) oauthProviderStatus {
+	s := oauthProviderStatus{}
+	s.Provider = provider
+	s.CredentialID = credentialID
+	s.DisplayName = oauthProviderLabels[provider]
+	s.Methods = oauthProviderMethods[provider]
+	s.Status = "not_logged_in"
+	s.applyCredential(provider, credentialID, cred)
+	return s
+}
+
+func (s *oauthProviderStatus) applyCredential(provider, credentialID string, cred *auth.AuthCredential) {
+	s.Provider = provider
+	s.CredentialID = credentialID
+	if s.DisplayName == "" {
+		s.DisplayName = oauthProviderLabels[provider]
+	}
+	if s.Methods == nil {
+		s.Methods = oauthProviderMethods[provider]
+	}
+	s.Status = "not_logged_in"
+	if cred == nil {
+		return
+	}
+	s.LoggedIn = true
+	s.AuthMethod = cred.AuthMethod
+	s.AccountID = cred.AccountID
+	s.Email = cred.Email
+	s.ProjectID = cred.ProjectID
+	if !cred.ExpiresAt.IsZero() {
+		s.ExpiresAt = cred.ExpiresAt.Format(time.RFC3339)
+	}
+	switch {
+	case cred.IsExpired():
+		s.Status = "expired"
+	case cred.NeedsRefresh():
+		s.Status = "needs_refresh"
+	default:
+		s.Status = "connected"
+	}
 }
 
 // registerOAuthRoutes binds OAuth login/logout endpoints to the ServeMux.
@@ -127,38 +178,38 @@ func (h *Handler) registerOAuthRoutes(mux *http.ServeMux) {
 }
 
 func (h *Handler) handleListOAuthProviders(w http.ResponseWriter, r *http.Request) {
+	store, err := oauthLoadStore()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to load credentials: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	providersResp := make([]oauthProviderStatus, 0, len(oauthProviderOrder))
 
 	for _, provider := range oauthProviderOrder {
-		cred, err := oauthGetCredential(provider)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to load credentials: %v", err), http.StatusInternalServerError)
-			return
-		}
-
 		item := oauthProviderStatus{
-			Provider:    provider,
-			DisplayName: oauthProviderLabels[provider],
-			Methods:     oauthProviderMethods[provider],
-			Status:      "not_logged_in",
+			Provider:     provider,
+			CredentialID: provider,
+			DisplayName:  oauthProviderLabels[provider],
+			Methods:      oauthProviderMethods[provider],
+			Status:       "not_logged_in",
 		}
-		if cred != nil {
-			item.LoggedIn = true
-			item.AuthMethod = cred.AuthMethod
-			item.AccountID = cred.AccountID
-			item.Email = cred.Email
-			item.ProjectID = cred.ProjectID
-			if !cred.ExpiresAt.IsZero() {
-				item.ExpiresAt = cred.ExpiresAt.Format(time.RFC3339)
+		if cred := store.Credentials[provider]; cred != nil {
+			item.applyCredential(provider, provider, cred)
+		}
+		credentialIDs := make([]string, 0, len(store.Credentials))
+		for credentialID := range store.Credentials {
+			if !credentialIDBelongsToProvider(provider, credentialID) {
+				continue
 			}
-			switch {
-			case cred.IsExpired():
-				item.Status = "expired"
-			case cred.NeedsRefresh():
-				item.Status = "needs_refresh"
-			default:
-				item.Status = "connected"
-			}
+			credentialIDs = append(credentialIDs, credentialID)
+		}
+		sort.Strings(credentialIDs)
+		for _, credentialID := range credentialIDs {
+			item.Credentials = append(
+				item.Credentials,
+				newOAuthProviderCredentialStatus(provider, credentialID, store.Credentials[credentialID]),
+			)
 		}
 
 		providersResp = append(providersResp, item)
@@ -179,9 +230,10 @@ func (h *Handler) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var req struct {
-		Provider string `json:"provider"`
-		Method   string `json:"method"`
-		Token    string `json:"token"`
+		Provider     string `json:"provider"`
+		CredentialID string `json:"credential_id"`
+		Method       string `json:"method"`
+		Token        string `json:"token"`
 	}
 	if err = json.Unmarshal(body, &req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid JSON: %v", err), http.StatusBadRequest)
@@ -189,6 +241,11 @@ func (h *Handler) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	provider, err := normalizeOAuthProvider(req.Provider)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	credentialID, err := auth.NormalizeCredentialID(provider, req.CredentialID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -217,16 +274,17 @@ func (h *Handler) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 			Provider:    provider,
 			AuthMethod:  oauthMethodToken,
 		}
-		if err := h.persistCredentialAndConfig(provider, oauthMethodToken, cred); err != nil {
+		if err := h.persistCredentialAndConfig(provider, credentialID, oauthMethodToken, cred); err != nil {
 			http.Error(w, fmt.Sprintf("token login failed: %v", err), http.StatusInternalServerError)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status":   "ok",
-			"provider": provider,
-			"method":   method,
+			"status":        "ok",
+			"provider":      provider,
+			"credential_id": credentialID,
+			"method":        method,
 		})
 		return
 
@@ -242,6 +300,7 @@ func (h *Handler) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 		flow := &oauthFlow{
 			ID:           newOAuthFlowID(),
 			Provider:     provider,
+			CredentialID: credentialID,
 			Method:       method,
 			Status:       oauthFlowPending,
 			CreatedAt:    now,
@@ -256,14 +315,15 @@ func (h *Handler) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status":     "ok",
-			"provider":   provider,
-			"method":     method,
-			"flow_id":    flow.ID,
-			"user_code":  flow.UserCode,
-			"verify_url": flow.VerifyURL,
-			"interval":   flow.Interval,
-			"expires_at": flow.ExpiresAt.Format(time.RFC3339),
+			"status":        "ok",
+			"provider":      provider,
+			"credential_id": credentialID,
+			"method":        method,
+			"flow_id":       flow.ID,
+			"user_code":     flow.UserCode,
+			"verify_url":    flow.VerifyURL,
+			"interval":      flow.Interval,
+			"expires_at":    flow.ExpiresAt.Format(time.RFC3339),
 		})
 		return
 
@@ -292,6 +352,7 @@ func (h *Handler) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 		flow := &oauthFlow{
 			ID:           newOAuthFlowID(),
 			Provider:     provider,
+			CredentialID: credentialID,
 			Method:       method,
 			Status:       oauthFlowPending,
 			CreatedAt:    now,
@@ -305,12 +366,13 @@ func (h *Handler) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status":     "ok",
-			"provider":   provider,
-			"method":     method,
-			"flow_id":    flow.ID,
-			"auth_url":   authURL,
-			"expires_at": flow.ExpiresAt.Format(time.RFC3339),
+			"status":        "ok",
+			"provider":      provider,
+			"credential_id": credentialID,
+			"method":        method,
+			"flow_id":       flow.ID,
+			"auth_url":      authURL,
+			"expires_at":    flow.ExpiresAt.Format(time.RFC3339),
 		})
 		return
 	default:
@@ -380,7 +442,12 @@ func (h *Handler) handlePollOAuthFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.persistCredentialAndConfig(flow.Provider, oauthMethodTokenOrOAuth(flow.Method), cred); err != nil {
+	if err := h.persistCredentialAndConfig(
+		flow.Provider,
+		flow.CredentialID,
+		oauthMethodTokenOrOAuth(flow.Method),
+		cred,
+	); err != nil {
 		h.setOAuthFlowError(flowID, fmt.Sprintf("failed to save credential: %v", err))
 		updated, _ := h.getOAuthFlow(flowID)
 		w.Header().Set("Content-Type", "application/json")
@@ -442,7 +509,12 @@ func (h *Handler) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.persistCredentialAndConfig(flow.Provider, oauthMethodTokenOrOAuth(flow.Method), cred); err != nil {
+	if err := h.persistCredentialAndConfig(
+		flow.Provider,
+		flow.CredentialID,
+		oauthMethodTokenOrOAuth(flow.Method),
+		cred,
+	); err != nil {
 		h.setOAuthFlowError(flow.ID, fmt.Sprintf("failed to save credential: %v", err))
 		renderOAuthCallbackPage(w, flow.ID, oauthFlowError, "Failed to save credential", err.Error())
 		return
@@ -461,7 +533,8 @@ func (h *Handler) handleOAuthLogout(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var req struct {
-		Provider string `json:"provider"`
+		Provider     string `json:"provider"`
+		CredentialID string `json:"credential_id"`
 	}
 	if err = json.Unmarshal(body, &req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid JSON: %v", err), http.StatusBadRequest)
@@ -473,20 +546,26 @@ func (h *Handler) handleOAuthLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	credentialID, err := auth.NormalizeCredentialID(provider, req.CredentialID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
-	if err := oauthDeleteCredential(provider); err != nil {
+	if err := oauthDeleteCredential(credentialID); err != nil {
 		http.Error(w, fmt.Sprintf("failed to delete credential: %v", err), http.StatusInternalServerError)
 		return
 	}
-	if err := h.syncProviderAuthMethod(provider, ""); err != nil {
+	if err := h.syncProviderAuthMethod(provider, credentialID, ""); err != nil {
 		http.Error(w, fmt.Sprintf("failed to update config: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":   "ok",
-		"provider": provider,
+		"status":        "ok",
+		"provider":      provider,
+		"credential_id": credentialID,
 	})
 }
 
@@ -534,6 +613,15 @@ func normalizeOAuthProvider(raw string) (string, error) {
 	}
 }
 
+func credentialIDBelongsToProvider(provider, credentialID string) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	credentialID = strings.ToLower(strings.TrimSpace(credentialID))
+	if credentialID == provider {
+		return true
+	}
+	return strings.HasPrefix(credentialID, provider+":")
+}
+
 func isOAuthMethodSupported(provider, method string) bool {
 	methods := oauthProviderMethods[provider]
 	for _, m := range methods {
@@ -575,11 +663,12 @@ func buildOAuthRedirectURI(r *http.Request) string {
 
 func flowToResponse(flow *oauthFlow) oauthFlowResponse {
 	resp := oauthFlowResponse{
-		FlowID:   flow.ID,
-		Provider: flow.Provider,
-		Method:   flow.Method,
-		Status:   flow.Status,
-		Error:    flow.Error,
+		FlowID:       flow.ID,
+		Provider:     flow.Provider,
+		CredentialID: flow.CredentialID,
+		Method:       flow.Method,
+		Status:       flow.Status,
+		Error:        flow.Error,
 	}
 	if !flow.ExpiresAt.IsZero() {
 		resp.ExpiresAt = flow.ExpiresAt.Format(time.RFC3339)
@@ -699,9 +788,16 @@ func (h *Handler) gcOAuthFlowsLocked(now time.Time) {
 	}
 }
 
-func (h *Handler) persistCredentialAndConfig(provider, authMethod string, cred *auth.AuthCredential) error {
+func (h *Handler) persistCredentialAndConfig(
+	provider, credentialID, authMethod string,
+	cred *auth.AuthCredential,
+) error {
 	if cred == nil {
 		return fmt.Errorf("empty credential")
+	}
+	normalizedCredentialID, err := auth.NormalizeCredentialID(provider, credentialID)
+	if err != nil {
+		return err
 	}
 
 	cp := *cred
@@ -729,34 +825,59 @@ func (h *Handler) persistCredentialAndConfig(provider, authMethod string, cred *
 		}
 	}
 
-	if err := oauthSetCredential(provider, &cp); err != nil {
+	if err := oauthSetCredential(normalizedCredentialID, &cp); err != nil {
 		return fmt.Errorf("saving credential: %w", err)
 	}
-	if err := h.syncProviderAuthMethod(provider, authMethod); err != nil {
+	if err := h.syncProviderAuthMethod(provider, normalizedCredentialID, authMethod); err != nil {
 		return fmt.Errorf("syncing provider auth config: %w", err)
 	}
 	return nil
 }
 
-func (h *Handler) syncProviderAuthMethod(provider, authMethod string) error {
+func (h *Handler) syncProviderAuthMethod(provider, credentialID, authMethod string) error {
 	cfg, err := oauthLoadConfig(h.configPath)
+	if err != nil {
+		return err
+	}
+	normalizedCredentialID, err := auth.NormalizeCredentialID(provider, credentialID)
 	if err != nil {
 		return err
 	}
 
 	found := false
 	for i := range cfg.ModelList {
-		if modelBelongsToProvider(provider, cfg.ModelList[i]) {
-			cfg.ModelList[i].AuthMethod = authMethod
-			found = true
+		if !modelBelongsToProvider(provider, cfg.ModelList[i]) {
+			continue
 		}
+		if modelCredentialID(provider, cfg.ModelList[i]) != normalizedCredentialID {
+			continue
+		}
+		cfg.ModelList[i].AuthMethod = authMethod
+		if authMethod != "" && normalizedCredentialID != provider {
+			cfg.ModelList[i].CredentialID = normalizedCredentialID
+		}
+		found = true
 	}
 
 	if !found && authMethod != "" {
-		cfg.ModelList = append(cfg.ModelList, defaultModelConfigForProvider(provider, authMethod))
+		cfg.ModelList = append(
+			cfg.ModelList,
+			defaultModelConfigForProvider(provider, normalizedCredentialID, authMethod),
+		)
 	}
 
 	return oauthSaveConfig(h.configPath, cfg)
+}
+
+func modelCredentialID(provider string, modelCfg *config.ModelConfig) string {
+	if modelCfg == nil {
+		return ""
+	}
+	credentialID, err := auth.NormalizeCredentialID(provider, modelCfg.CredentialID)
+	if err != nil {
+		return ""
+	}
+	return credentialID
 }
 
 func modelBelongsToProvider(provider string, modelCfg *config.ModelConfig) bool {
@@ -773,32 +894,49 @@ func modelBelongsToProvider(provider string, modelCfg *config.ModelConfig) bool 
 	}
 }
 
-func defaultModelConfigForProvider(provider, authMethod string) *config.ModelConfig {
+func defaultModelConfigForProvider(provider, credentialID, authMethod string) *config.ModelConfig {
+	modelNameSuffix := ""
+	if credentialID != provider {
+		_, suffix, _ := strings.Cut(credentialID, ":")
+		if suffix != "" {
+			modelNameSuffix = "-" + suffix
+		}
+	}
 	switch provider {
 	case oauthProviderOpenAI:
 		return &config.ModelConfig{
-			ModelName:  "gpt-5.4",
-			Provider:   "openai",
-			Model:      "gpt-5.4",
-			AuthMethod: authMethod,
+			ModelName:    "gpt-5.4" + modelNameSuffix,
+			Provider:     "openai",
+			Model:        "gpt-5.4",
+			AuthMethod:   authMethod,
+			CredentialID: credentialIDForConfig(provider, credentialID),
 		}
 	case oauthProviderAnthropic:
 		return &config.ModelConfig{
-			ModelName:  "claude-sonnet-4.6",
-			Provider:   "anthropic",
-			Model:      "claude-sonnet-4.6",
-			AuthMethod: authMethod,
+			ModelName:    "claude-sonnet-4.6" + modelNameSuffix,
+			Provider:     "anthropic",
+			Model:        "claude-sonnet-4.6",
+			AuthMethod:   authMethod,
+			CredentialID: credentialIDForConfig(provider, credentialID),
 		}
 	case oauthProviderGoogleAntigravity:
 		return &config.ModelConfig{
-			ModelName:  "gemini-flash",
-			Provider:   "antigravity",
-			Model:      "gemini-3-flash",
-			AuthMethod: authMethod,
+			ModelName:    "gemini-flash" + modelNameSuffix,
+			Provider:     "antigravity",
+			Model:        "gemini-3-flash",
+			AuthMethod:   authMethod,
+			CredentialID: credentialIDForConfig(provider, credentialID),
 		}
 	default:
 		return &config.ModelConfig{}
 	}
+}
+
+func credentialIDForConfig(provider, credentialID string) string {
+	if credentialID == provider {
+		return ""
+	}
+	return credentialID
 }
 
 func fetchGoogleUserEmail(accessToken string) (string, error) {
