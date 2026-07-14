@@ -150,7 +150,7 @@ func (t *ThreadsTool) Parameters() map[string]any {
 			"mode": map[string]any{
 				"type":        "string",
 				"description": "For set_policy: policy mode. auto creates/switches when rules match; suggest only suggests; off disables policy.",
-				"enum":        []string{"auto", "suggest", "off"},
+				"enum":        []string{"auto", "tool", "suggest", "off"},
 			},
 			"instructions": map[string]any{
 				"type":        "string",
