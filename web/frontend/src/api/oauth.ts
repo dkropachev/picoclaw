@@ -5,6 +5,7 @@ export type OAuthMethod = "browser" | "device_code" | "token"
 
 export interface OAuthProviderStatus {
   provider: OAuthProvider
+  credential_id?: string
   display_name: string
   methods: OAuthMethod[]
   logged_in: boolean
@@ -14,11 +15,13 @@ export interface OAuthProviderStatus {
   account_id?: string
   email?: string
   project_id?: string
+  credentials?: OAuthProviderStatus[]
 }
 
 export interface OAuthFlowState {
   flow_id: string
   provider: OAuthProvider
+  credential_id?: string
   method: OAuthMethod
   status: "pending" | "success" | "error" | "expired"
   expires_at?: string
@@ -30,6 +33,7 @@ export interface OAuthFlowState {
 
 export interface OAuthLoginRequest {
   provider: OAuthProvider
+  credential_id?: string
   method: OAuthMethod
   token?: string
 }
@@ -37,6 +41,7 @@ export interface OAuthLoginRequest {
 export interface OAuthLoginResponse {
   status: string
   provider: OAuthProvider
+  credential_id?: string
   method: OAuthMethod
   flow_id?: string
   auth_url?: string
@@ -92,13 +97,19 @@ export async function pollOAuthFlow(flowID: string): Promise<OAuthFlowState> {
 
 export async function logoutOAuth(
   provider: OAuthProvider,
-): Promise<{ status: string; provider: OAuthProvider }> {
-  return request<{ status: string; provider: OAuthProvider }>(
-    "/api/oauth/logout",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider }),
-    },
-  )
+  credentialID?: string,
+): Promise<{
+  status: string
+  provider: OAuthProvider
+  credential_id?: string
+}> {
+  return request<{
+    status: string
+    provider: OAuthProvider
+    credential_id?: string
+  }>("/api/oauth/logout", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, credential_id: credentialID }),
+  })
 }

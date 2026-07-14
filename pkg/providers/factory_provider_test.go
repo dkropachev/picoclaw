@@ -749,6 +749,42 @@ func TestCreateProviderFromConfig_OpenAIMixedCaseAuthMethodUsesOAuthBranch(t *te
 	}
 }
 
+func TestCreateProviderFromConfig_OpenAIOAuthUsesCredentialID(t *testing.T) {
+	origGetCredential := getCredential
+	getCredential = func(provider string) (*auth.AuthCredential, error) {
+		if provider != "openai:work" {
+			t.Fatalf("provider = %q, want %q", provider, "openai:work")
+		}
+		return &auth.AuthCredential{
+			AccessToken: "test-token",
+			AccountID:   "acct-test",
+			Provider:    "openai",
+			AuthMethod:  "oauth",
+		}, nil
+	}
+	t.Cleanup(func() {
+		getCredential = origGetCredential
+	})
+
+	cfg := &config.ModelConfig{
+		ModelName:    "test-openai-oauth-work",
+		Model:        "openai/gpt-5.4",
+		AuthMethod:   "oauth",
+		CredentialID: "work",
+	}
+
+	provider, modelID, err := CreateProviderFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("CreateProviderFromConfig() error = %v", err)
+	}
+	if provider == nil {
+		t.Fatal("CreateProviderFromConfig() returned nil provider")
+	}
+	if modelID != "gpt-5.4" {
+		t.Errorf("modelID = %q, want %q", modelID, "gpt-5.4")
+	}
+}
+
 func TestCreateProviderFromConfig_MissingAPIKey(t *testing.T) {
 	cfg := &config.ModelConfig{
 		ModelName: "test-no-key",

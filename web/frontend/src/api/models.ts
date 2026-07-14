@@ -12,6 +12,7 @@ export interface ModelInfo {
   api_key: string
   proxy?: string
   auth_method?: string
+  credential_id?: string
   // Advanced fields
   connect_mode?: string
   workspace?: string
@@ -144,6 +145,7 @@ export interface TestModelInlineRequest {
   api_base?: string
   api_key?: string
   auth_method?: string
+  credential_id?: string
   model_index?: number
 }
 

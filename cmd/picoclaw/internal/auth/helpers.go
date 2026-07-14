@@ -21,24 +21,27 @@ const (
 	defaultAnthropicModel = "claude-sonnet-4.6"
 )
 
-func authLoginCmd(provider string, useDeviceCode bool, useOauth bool, noBrowser bool) error {
+func authLoginCmd(provider string, credentialID string, useDeviceCode bool, useOauth bool, noBrowser bool) error {
 	switch provider {
 	case "openai":
-		return authLoginOpenAI(useDeviceCode, noBrowser)
+		return authLoginOpenAI(useDeviceCode, noBrowser, credentialID)
 	case "anthropic":
-		return authLoginAnthropic(useOauth)
+		return authLoginAnthropic(useOauth, credentialID)
 	case "google-antigravity", "antigravity":
-		return authLoginGoogleAntigravity(noBrowser)
+		return authLoginGoogleAntigravity(noBrowser, credentialID)
 	default:
 		return fmt.Errorf("unsupported provider: %s (%s)", provider, supportedProvidersMsg)
 	}
 }
 
-func authLoginOpenAI(useDeviceCode bool, noBrowser bool) error {
+func authLoginOpenAI(useDeviceCode bool, noBrowser bool, credentialID string) error {
 	cfg := auth.OpenAIOAuthConfig()
+	storeKey, err := auth.NormalizeCredentialID("openai", credentialID)
+	if err != nil {
+		return err
+	}
 
 	var cred *auth.AuthCredential
-	var err error
 
 	if useDeviceCode {
 		cred, err = auth.LoginDeviceCode(cfg)
@@ -50,7 +53,8 @@ func authLoginOpenAI(useDeviceCode bool, noBrowser bool) error {
 		return fmt.Errorf("login failed: %w", err)
 	}
 
-	if err = auth.SetCredential("openai", cred); err != nil {
+	cred.Provider = "openai"
+	if err = auth.SetCredential(storeKey, cred); err != nil {
 		return fmt.Errorf("failed to save credentials: %w", err)
 	}
 
@@ -59,8 +63,9 @@ func authLoginOpenAI(useDeviceCode bool, noBrowser bool) error {
 		// Update or add openai in ModelList
 		foundOpenAI := false
 		for i := range appCfg.ModelList {
-			if isOpenAIModel(appCfg.ModelList[i]) {
+			if isOpenAIModel(appCfg.ModelList[i]) && modelCredentialID("openai", appCfg.ModelList[i]) == storeKey {
 				appCfg.ModelList[i].AuthMethod = "oauth"
+				appCfg.ModelList[i].CredentialID = credentialIDForConfig("openai", storeKey)
 				foundOpenAI = true
 				break
 			}
@@ -69,14 +74,16 @@ func authLoginOpenAI(useDeviceCode bool, noBrowser bool) error {
 		// If no openai in ModelList, add it
 		if !foundOpenAI {
 			appCfg.ModelList = append(appCfg.ModelList, &config.ModelConfig{
-				ModelName:  "gpt-5.4",
-				Model:      "openai/gpt-5.4",
-				AuthMethod: "oauth",
+				ModelName:    modelNameForCredential("gpt-5.4", "openai", storeKey),
+				Model:        "openai/gpt-5.4",
+				AuthMethod:   "oauth",
+				CredentialID: credentialIDForConfig("openai", storeKey),
 			})
 		}
 
-		// Update default model to use OpenAI
-		appCfg.Agents.Defaults.ModelName = "gpt-5.4"
+		if storeKey == "openai" || appCfg.Agents.Defaults.GetModelName() == "" {
+			appCfg.Agents.Defaults.ModelName = modelNameForCredential("gpt-5.4", "openai", storeKey)
+		}
 
 		if err = config.SaveConfig(internal.GetConfigPath(), appCfg); err != nil {
 			return fmt.Errorf("could not update config: %w", err)
@@ -84,16 +91,23 @@ func authLoginOpenAI(useDeviceCode bool, noBrowser bool) error {
 	}
 
 	fmt.Println("Login successful!")
+	fmt.Printf("Credential ID: %s\n", storeKey)
 	if cred.AccountID != "" {
 		fmt.Printf("Account: %s\n", cred.AccountID)
 	}
-	fmt.Println("Default model set to: gpt-5.4")
+	if storeKey == "openai" {
+		fmt.Println("Default model set to: gpt-5.4")
+	}
 
 	return nil
 }
 
-func authLoginGoogleAntigravity(noBrowser bool) error {
+func authLoginGoogleAntigravity(noBrowser bool, credentialID string) error {
 	cfg := auth.GoogleAntigravityOAuthConfig()
+	storeKey, err := auth.NormalizeCredentialID("google-antigravity", credentialID)
+	if err != nil {
+		return err
+	}
 
 	cred, err := auth.LoginBrowserWithOptions(cfg, auth.LoginBrowserOptions{NoBrowser: noBrowser})
 	if err != nil {
@@ -121,7 +135,7 @@ func authLoginGoogleAntigravity(noBrowser bool) error {
 		fmt.Printf("Project: %s\n", projectID)
 	}
 
-	if err = auth.SetCredential("google-antigravity", cred); err != nil {
+	if err = auth.SetCredential(storeKey, cred); err != nil {
 		return fmt.Errorf("failed to save credentials: %w", err)
 	}
 
@@ -130,8 +144,10 @@ func authLoginGoogleAntigravity(noBrowser bool) error {
 		// Update or add antigravity in ModelList
 		foundAntigravity := false
 		for i := range appCfg.ModelList {
-			if isAntigravityModel(appCfg.ModelList[i]) {
+			if isAntigravityModel(appCfg.ModelList[i]) &&
+				modelCredentialID("google-antigravity", appCfg.ModelList[i]) == storeKey {
 				appCfg.ModelList[i].AuthMethod = "oauth"
+				appCfg.ModelList[i].CredentialID = credentialIDForConfig("google-antigravity", storeKey)
 				foundAntigravity = true
 				break
 			}
@@ -140,14 +156,16 @@ func authLoginGoogleAntigravity(noBrowser bool) error {
 		// If no antigravity in ModelList, add it
 		if !foundAntigravity {
 			appCfg.ModelList = append(appCfg.ModelList, &config.ModelConfig{
-				ModelName:  "gemini-flash",
-				Model:      "antigravity/gemini-3-flash",
-				AuthMethod: "oauth",
+				ModelName:    modelNameForCredential("gemini-flash", "google-antigravity", storeKey),
+				Model:        "antigravity/gemini-3-flash",
+				AuthMethod:   "oauth",
+				CredentialID: credentialIDForConfig("google-antigravity", storeKey),
 			})
 		}
 
-		// Update default model
-		appCfg.Agents.Defaults.ModelName = "gemini-flash"
+		if storeKey == "google-antigravity" || appCfg.Agents.Defaults.GetModelName() == "" {
+			appCfg.Agents.Defaults.ModelName = modelNameForCredential("gemini-flash", "google-antigravity", storeKey)
+		}
 
 		if err := config.SaveConfig(internal.GetConfigPath(), appCfg); err != nil {
 			fmt.Printf("Warning: could not update config: %v\n", err)
@@ -155,15 +173,18 @@ func authLoginGoogleAntigravity(noBrowser bool) error {
 	}
 
 	fmt.Println("\n✓ Google Antigravity login successful!")
-	fmt.Println("Default model set to: gemini-flash")
+	fmt.Printf("Credential ID: %s\n", storeKey)
+	if storeKey == "google-antigravity" {
+		fmt.Println("Default model set to: gemini-flash")
+	}
 	fmt.Println("Try it: picoclaw agent -m \"Hello world\"")
 
 	return nil
 }
 
-func authLoginAnthropic(useOauth bool) error {
+func authLoginAnthropic(useOauth bool, credentialID string) error {
 	if useOauth {
-		return authLoginAnthropicSetupToken()
+		return authLoginAnthropicSetupToken(credentialID)
 	}
 
 	fmt.Println("Anthropic login method:")
@@ -183,22 +204,26 @@ func authLoginAnthropic(useOauth bool) error {
 
 		switch choice {
 		case "1":
-			return authLoginAnthropicSetupToken()
+			return authLoginAnthropicSetupToken(credentialID)
 		case "2":
-			return authLoginPasteToken("anthropic")
+			return authLoginPasteToken("anthropic", credentialID)
 		default:
 			fmt.Printf("Invalid choice: %s. Please enter 1 or 2.\n", choice)
 		}
 	}
 }
 
-func authLoginAnthropicSetupToken() error {
+func authLoginAnthropicSetupToken(credentialID string) error {
+	storeKey, err := auth.NormalizeCredentialID("anthropic", credentialID)
+	if err != nil {
+		return err
+	}
 	cred, err := auth.LoginSetupToken(os.Stdin)
 	if err != nil {
 		return fmt.Errorf("login failed: %w", err)
 	}
 
-	if err = auth.SetCredential("anthropic", cred); err != nil {
+	if err = auth.SetCredential(storeKey, cred); err != nil {
 		return fmt.Errorf("failed to save credentials: %w", err)
 	}
 
@@ -206,21 +231,24 @@ func authLoginAnthropicSetupToken() error {
 	if err == nil {
 		found := false
 		for i := range appCfg.ModelList {
-			if isAnthropicModel(appCfg.ModelList[i]) {
+			if isAnthropicModel(appCfg.ModelList[i]) &&
+				modelCredentialID("anthropic", appCfg.ModelList[i]) == storeKey {
 				appCfg.ModelList[i].AuthMethod = "oauth"
+				appCfg.ModelList[i].CredentialID = credentialIDForConfig("anthropic", storeKey)
 				found = true
 				break
 			}
 		}
 		if !found {
 			appCfg.ModelList = append(appCfg.ModelList, &config.ModelConfig{
-				ModelName:  defaultAnthropicModel,
-				Model:      "anthropic/" + defaultAnthropicModel,
-				AuthMethod: "oauth",
+				ModelName:    modelNameForCredential(defaultAnthropicModel, "anthropic", storeKey),
+				Model:        "anthropic/" + defaultAnthropicModel,
+				AuthMethod:   "oauth",
+				CredentialID: credentialIDForConfig("anthropic", storeKey),
 			})
 			// Only set default model if user has no default configured yet
 			if appCfg.Agents.Defaults.GetModelName() == "" {
-				appCfg.Agents.Defaults.ModelName = defaultAnthropicModel
+				appCfg.Agents.Defaults.ModelName = modelNameForCredential(defaultAnthropicModel, "anthropic", storeKey)
 			}
 		}
 
@@ -229,7 +257,7 @@ func authLoginAnthropicSetupToken() error {
 		}
 	}
 
-	fmt.Println("Setup token saved for Anthropic!")
+	fmt.Printf("Setup token saved for Anthropic as %s!\n", storeKey)
 
 	return nil
 }
@@ -265,13 +293,17 @@ func fetchGoogleUserEmail(accessToken string) (string, error) {
 	return userInfo.Email, nil
 }
 
-func authLoginPasteToken(provider string) error {
+func authLoginPasteToken(provider string, credentialID string) error {
+	storeKey, err := auth.NormalizeCredentialID(provider, credentialID)
+	if err != nil {
+		return err
+	}
 	cred, err := auth.LoginPasteToken(provider, os.Stdin)
 	if err != nil {
 		return fmt.Errorf("login failed: %w", err)
 	}
 
-	if err = auth.SetCredential(provider, cred); err != nil {
+	if err = auth.SetCredential(storeKey, cred); err != nil {
 		return fmt.Errorf("failed to save credentials: %w", err)
 	}
 
@@ -282,46 +314,58 @@ func authLoginPasteToken(provider string) error {
 			// Update ModelList
 			found := false
 			for i := range appCfg.ModelList {
-				if isAnthropicModel(appCfg.ModelList[i]) {
+				if isAnthropicModel(appCfg.ModelList[i]) &&
+					modelCredentialID("anthropic", appCfg.ModelList[i]) == storeKey {
 					appCfg.ModelList[i].AuthMethod = "token"
+					appCfg.ModelList[i].CredentialID = credentialIDForConfig("anthropic", storeKey)
 					found = true
 					break
 				}
 			}
 			if !found {
 				appCfg.ModelList = append(appCfg.ModelList, &config.ModelConfig{
-					ModelName:  defaultAnthropicModel,
-					Model:      "anthropic/" + defaultAnthropicModel,
-					AuthMethod: "token",
+					ModelName:    modelNameForCredential(defaultAnthropicModel, "anthropic", storeKey),
+					Model:        "anthropic/" + defaultAnthropicModel,
+					AuthMethod:   "token",
+					CredentialID: credentialIDForConfig("anthropic", storeKey),
 				})
-				appCfg.Agents.Defaults.ModelName = defaultAnthropicModel
+				if storeKey == "anthropic" || appCfg.Agents.Defaults.GetModelName() == "" {
+					appCfg.Agents.Defaults.ModelName = modelNameForCredential(
+						defaultAnthropicModel,
+						"anthropic",
+						storeKey,
+					)
+				}
 			}
 		case "openai":
 			// Update ModelList
 			found := false
 			for i := range appCfg.ModelList {
-				if isOpenAIModel(appCfg.ModelList[i]) {
+				if isOpenAIModel(appCfg.ModelList[i]) && modelCredentialID("openai", appCfg.ModelList[i]) == storeKey {
 					appCfg.ModelList[i].AuthMethod = "token"
+					appCfg.ModelList[i].CredentialID = credentialIDForConfig("openai", storeKey)
 					found = true
 					break
 				}
 			}
 			if !found {
 				appCfg.ModelList = append(appCfg.ModelList, &config.ModelConfig{
-					ModelName:  "gpt-5.4",
-					Model:      "openai/gpt-5.4",
-					AuthMethod: "token",
+					ModelName:    modelNameForCredential("gpt-5.4", "openai", storeKey),
+					Model:        "openai/gpt-5.4",
+					AuthMethod:   "token",
+					CredentialID: credentialIDForConfig("openai", storeKey),
 				})
 			}
-			// Update default model
-			appCfg.Agents.Defaults.ModelName = "gpt-5.4"
+			if storeKey == "openai" || appCfg.Agents.Defaults.GetModelName() == "" {
+				appCfg.Agents.Defaults.ModelName = modelNameForCredential("gpt-5.4", "openai", storeKey)
+			}
 		}
 		if err := config.SaveConfig(internal.GetConfigPath(), appCfg); err != nil {
 			return fmt.Errorf("could not update config: %w", err)
 		}
 	}
 
-	fmt.Printf("Token saved for %s!\n", provider)
+	fmt.Printf("Token saved for %s as %s!\n", provider, storeKey)
 
 	if appCfg != nil {
 		fmt.Printf("Default model set to: %s\n", appCfg.Agents.Defaults.GetModelName())
@@ -330,10 +374,14 @@ func authLoginPasteToken(provider string) error {
 	return nil
 }
 
-func authLogoutCmd(provider string) error {
+func authLogoutCmd(provider string, credentialID string) error {
 	if provider != "" {
-		if err := auth.DeleteCredential(provider); err != nil {
-			return fmt.Errorf("failed to remove credentials: %w", err)
+		storeKey, err := auth.NormalizeCredentialID(provider, credentialID)
+		if err != nil {
+			return err
+		}
+		if deleteErr := auth.DeleteCredential(storeKey); deleteErr != nil {
+			return fmt.Errorf("failed to remove credentials: %w", deleteErr)
 		}
 
 		appCfg, err := internal.LoadConfig()
@@ -342,15 +390,18 @@ func authLogoutCmd(provider string) error {
 			for i := range appCfg.ModelList {
 				switch provider {
 				case "openai":
-					if isOpenAIModel(appCfg.ModelList[i]) {
+					if isOpenAIModel(appCfg.ModelList[i]) &&
+						modelCredentialID("openai", appCfg.ModelList[i]) == storeKey {
 						appCfg.ModelList[i].AuthMethod = ""
 					}
 				case "anthropic":
-					if isAnthropicModel(appCfg.ModelList[i]) {
+					if isAnthropicModel(appCfg.ModelList[i]) &&
+						modelCredentialID("anthropic", appCfg.ModelList[i]) == storeKey {
 						appCfg.ModelList[i].AuthMethod = ""
 					}
 				case "google-antigravity", "antigravity":
-					if isAntigravityModel(appCfg.ModelList[i]) {
+					if isAntigravityModel(appCfg.ModelList[i]) &&
+						modelCredentialID("google-antigravity", appCfg.ModelList[i]) == storeKey {
 						appCfg.ModelList[i].AuthMethod = ""
 					}
 				}
@@ -358,9 +409,12 @@ func authLogoutCmd(provider string) error {
 			config.SaveConfig(internal.GetConfigPath(), appCfg)
 		}
 
-		fmt.Printf("Logged out from %s\n", provider)
+		fmt.Printf("Logged out from %s\n", storeKey)
 
 		return nil
+	}
+	if strings.TrimSpace(credentialID) != "" {
+		return fmt.Errorf("--credential-id requires --provider")
 	}
 
 	if err := auth.DeleteAllCredentials(); err != nil {
@@ -482,6 +536,35 @@ func authModelsCmd() error {
 	}
 
 	return nil
+}
+
+func modelCredentialID(provider string, modelCfg *config.ModelConfig) string {
+	if modelCfg == nil {
+		return ""
+	}
+	credentialID, err := auth.NormalizeCredentialID(provider, modelCfg.CredentialID)
+	if err != nil {
+		return ""
+	}
+	return credentialID
+}
+
+func credentialIDForConfig(provider, credentialID string) string {
+	if credentialID == provider {
+		return ""
+	}
+	return credentialID
+}
+
+func modelNameForCredential(baseName, provider, credentialID string) string {
+	if credentialID == provider {
+		return baseName
+	}
+	_, suffix, ok := strings.Cut(credentialID, ":")
+	if !ok || suffix == "" {
+		return baseName
+	}
+	return baseName + "-" + suffix
 }
 
 // isAntigravityModel checks if a model config belongs to an Antigravity provider.

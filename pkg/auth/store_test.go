@@ -152,6 +152,89 @@ func TestStoreMultiProvider(t *testing.T) {
 	}
 }
 
+func TestStoreMultipleCredentialsForSameProvider(t *testing.T) {
+	setTestAuthHome(t)
+
+	if err := SetCredential("openai", &AuthCredential{
+		AccessToken: "default-token",
+		Provider:    "openai",
+		AuthMethod:  "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential(openai) error: %v", err)
+	}
+	if err := SetCredential("openai:work", &AuthCredential{
+		AccessToken: "work-token",
+		Provider:    "openai",
+		AuthMethod:  "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential(openai:work) error: %v", err)
+	}
+
+	defaultCred, err := GetCredential("openai")
+	if err != nil {
+		t.Fatalf("GetCredential(openai) error: %v", err)
+	}
+	if defaultCred.AccessToken != "default-token" {
+		t.Fatalf("default token = %q, want default-token", defaultCred.AccessToken)
+	}
+	workCred, err := GetCredential("openai:work")
+	if err != nil {
+		t.Fatalf("GetCredential(openai:work) error: %v", err)
+	}
+	if workCred.AccessToken != "work-token" {
+		t.Fatalf("work token = %q, want work-token", workCred.AccessToken)
+	}
+	if workCred.Provider != "openai" {
+		t.Fatalf("work provider = %q, want openai", workCred.Provider)
+	}
+}
+
+func TestNormalizeCredentialID(t *testing.T) {
+	tests := []struct {
+		name         string
+		provider     string
+		credentialID string
+		want         string
+		wantErr      bool
+	}{
+		{name: "default", provider: "openai", want: "openai"},
+		{name: "bare name", provider: "openai", credentialID: "work", want: "openai:work"},
+		{name: "qualified", provider: "openai", credentialID: "openai:work", want: "openai:work"},
+		{name: "case and whitespace", provider: "OpenAI", credentialID: " Work ", want: "openai:work"},
+		{
+			name:         "antigravity alias",
+			provider:     "antigravity",
+			credentialID: "personal",
+			want:         "google-antigravity:personal",
+		},
+		{
+			name:         "provider mismatch",
+			provider:     "openai",
+			credentialID: "anthropic:work",
+			wantErr:      true,
+		},
+		{name: "invalid chars", provider: "openai", credentialID: "work account", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeCredentialID(tt.provider, tt.credentialID)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("NormalizeCredentialID() error = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeCredentialID() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("NormalizeCredentialID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDeleteCredential(t *testing.T) {
 	setTestAuthHome(t)
 
