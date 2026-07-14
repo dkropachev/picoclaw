@@ -2,8 +2,8 @@
 
 ## Decision
 
-Use one canonical feature requirements format: a reconstruction-oriented
-behavior contract.
+Use one canonical feature requirements format: the **Reconstruction Contract
+Matrix**.
 
 This format is optimized for two outcomes:
 
@@ -11,6 +11,12 @@ This format is optimized for two outcomes:
    behavior.
 2. A coding agent can recreate same or similar implementation behavior from the
    spec by following explicit contracts, state, ordering, tests, and anchors.
+
+The format was selected after a generative benchmark in which Codex agents
+recreated the redacted `FR-EVENTS` implementation from ten candidate feature
+formats. The matrix format tied for perfect behavior score and used the fewest
+tokens among the perfect-scoring formats. See
+[Feature Requirements Format Benchmark](feature-requirements-format-benchmark.md).
 
 ## Required Shape
 
@@ -21,10 +27,10 @@ Each feature spec must use these sections:
 | `Feature ID` | Stable `FR-<FEATURE>` namespace for requirement IDs. |
 | `Behavior Summary` | Capability boundary in user-facing terms. |
 | `Reconstruction Notes` | Direct guidance for recreating similar code shape. |
-| `Requirements` | Observable behavior contracts with IDs, level, and rationale. |
+| `Requirements` | The behavior contract matrix: observable trigger, output, state, failure, and rationale rows. |
 | `Data And State Model` | Durable files, config, in-memory state, keys, IDs, schemas, and ownership boundaries. |
 | `Surface Ownership` | Machine-readable `Owns:` mappings for APIs, config, tests, events, and code surfaces. |
-| `Auxiliary Interfaces` | HTTP, CLI, config, event, storage, and runtime interfaces that expose the feature. |
+| `Auxiliary Interfaces` | Public surface contract for HTTP, CLI, config, event, storage, runtime, and code APIs. |
 | `Algorithms And Ordering` | Required validation, normalization, lookup, mutation, side effects, fallbacks, and emitted events. |
 | `Cross-Feature Behavior` | Interactions with other feature specs and ownership boundaries. |
 | `Failure And Edge Cases` | Defaults, invalid inputs, conflicts, security failures, retries, and resource limits. |
@@ -44,16 +50,44 @@ Each feature spec must use these sections:
 
 ## Requirement Contract
 
-Requirements are the behavior contract matrix. Each row must describe observable
-behavior, not implementation preference. Good requirements include at least one
-of input, output, state mutation, persistence, ordering, default behavior, or
-error behavior.
+Requirements are the behavior contract matrix. Each row must describe behavior,
+not implementation preference. The strongest row shape is:
+
+| Column | Meaning |
+| --- | --- |
+| `ID` | Stable requirement ID. |
+| `Level` | `MUST`, `SHOULD`, or `MAY`. |
+| `Trigger/Input` | The API call, command, event, config, state, or user action that starts behavior. |
+| `Required Output` | Observable response, emitted event, return value, file, state, or side effect. |
+| `State Mutation` | Durable or in-memory state that must change, remain unchanged, or be initialized. |
+| `Failure/Edge` | Error handling, defaults, invalid input, retries, ordering, concurrency, or security behavior. |
+| `Rationale` | Why this behavior exists. |
+
+Existing specs may keep a compact `Requirement` column when the behavior is
+simple, but new or high-risk requirements should use the expanded matrix
+columns. A coding agent should not need to infer state mutation or edge behavior
+from prose elsewhere when it belongs in the contract row.
 
 Use these levels:
 
 - `MUST`: behavior required for correctness or compatibility.
 - `SHOULD`: expected behavior that can vary only with documented rationale.
 - `MAY`: optional behavior that still needs ownership and evidence when present.
+
+## Auxiliary Interface Contract
+
+`Auxiliary Interfaces` is the public surface contract. Rows should be precise
+enough to preserve compatibility:
+
+| Column | Meaning |
+| --- | --- |
+| `Type` | HTTP, CLI, config, event, storage, Go API, file, process, or workflow. |
+| `Surface` | Route, command, config path, event kind, package symbol, file path, or workflow. |
+| `Contract` | Inputs, outputs, schema, method signatures, side effects, and versioning constraints. |
+| `Requirement IDs` | Requirements that define the surface behavior. |
+
+For code-facing features, include public type/function/interface names or exact
+method signatures where compatibility depends on them.
 
 ## Evidence Contract
 
@@ -82,8 +116,9 @@ lines make the contract auditable by tooling.
 
 ## Why This Format
 
-The format keeps the current requirement-table workflow but adds the missing
-information a coding agent needs to recreate code:
+The format keeps the current requirement-table workflow but makes the table
+behave like a reconstruction matrix. It adds the missing information a coding
+agent needs to recreate code:
 
 - what similar code should look like,
 - which types/functions define the behavior,

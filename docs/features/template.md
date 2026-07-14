@@ -17,9 +17,9 @@ Describe the user-facing capability and its boundary.
 
 ## Requirements
 
-| ID | Level | Requirement | Rationale |
-| --- | --- | --- | --- |
-| `FR-EXAMPLE-001` | MUST | State observable behavior with inputs, outputs, persistence, and errors where relevant. | Explain why the behavior exists. |
+| ID | Level | Trigger/Input | Required Output | State Mutation | Failure/Edge | Rationale |
+| --- | --- | --- | --- | --- | --- | --- |
+| `FR-EXAMPLE-001` | MUST | Describe the API call, command, event, config, state, or user action. | State observable response, event, file, return value, or side effect. | State what changes, persists, initializes, or must remain unchanged. | Describe defaults, invalid input, retries, ordering, concurrency, or security behavior. | Explain why the behavior exists. |
 
 ## Data And State Model
 

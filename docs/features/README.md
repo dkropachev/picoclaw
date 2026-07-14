@@ -10,8 +10,10 @@ with the code change. The `make lint-features` gate verifies that feature specs
 own discovered repository surfaces and that each requirement has acceptance
 evidence.
 
-The canonical spec format is defined in
-[Feature Requirements Format](../design/feature-requirements-format.md).
+The canonical spec format is the Reconstruction Contract Matrix, defined in
+[Feature Requirements Format](../design/feature-requirements-format.md) and
+selected by the
+[Feature Requirements Format Benchmark](../design/feature-requirements-format-benchmark.md).
 
 ## Canonical Specs
 
