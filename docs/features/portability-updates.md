@@ -10,6 +10,20 @@ PicoClaw builds and updates across supported desktop, server, embedded, and
 container targets while keeping startup, binary size, and resource expectations
 compatible with low-cost hardware.
 
+## Reconstruction Notes
+
+- Similarity target: recreate cross-platform build targets, launcher packaging,
+  release/update asset selection, retrying downloads, and benchmark tooling.
+- Core types/functions: Makefile build targets, release workflow matrix,
+  launcher build scripts, updater package, update API handler, Docker build
+  workflow, and memory benchmark command.
+- Runtime ordering: select platform and architecture, build or locate the
+  matching artifact, validate names and prerequisites, retry transient update
+  downloads, then report explicit status.
+- Non-obvious constraints: unsupported targets must fail rather than select a
+  neighboring binary, frontend assets are part of launcher packaging, and
+  benchmark code must stay outside runtime packages.
+
 ## Requirements
 
 | ID | Level | Requirement | Rationale |
@@ -20,11 +34,20 @@ compatible with low-cost hardware.
 | `FR-PORT-004` | SHOULD | Docker and release workflows keep dependency setup explicit for Go, Node, pnpm, QEMU, and GoReleaser. | CI/release builds must be repeatable. |
 | `FR-PORT-005` | SHOULD | Memory benchmark tools measure ingestion/evaluation behavior without affecting runtime packages. | Low-resource goals need measurable support. |
 
-## Auxiliary Interfaces
+## Data And State Model
+
+Portability state includes target OS/architecture tuples, release asset names,
+launcher frontend build output, packaged backend binaries, Docker/QEMU build
+inputs, updater status and retry counters, downloaded asset metadata, and
+memory benchmark inputs and metrics.
+
+## Surface Ownership
 
 Owns: TEST pkg/updater/*
 Owns: TEST cmd/membench/*
 Owns: TEST integration/*
+
+## Auxiliary Interfaces
 
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
@@ -32,6 +55,20 @@ Owns: TEST integration/*
 | CI | GitHub Actions release, nightly, build, Docker, DMG workflows | Repeatable packaging and release automation. | `FR-PORT-004` |
 | Updater | Update endpoint and updater package | Download, retry, platform asset selection, and status. | `FR-PORT-003` |
 | Bench | `cmd/membench` | Memory benchmark ingestion, metrics, and evaluation. | `FR-PORT-005` |
+
+## Algorithms And Ordering
+
+1. Build commands resolve version metadata and target tuples before invoking Go,
+   frontend, packaging, or cross-compilation steps.
+2. Launcher packaging builds frontend assets, embeds or copies them into the
+   backend distribution path, then emits platform-specific artifacts.
+3. Release workflows install explicit Go, Node, pnpm, QEMU, Docker, and
+   GoReleaser prerequisites before build or publish steps.
+4. Updater logic maps current platform data to an expected release asset, rejects
+   missing or mismatched assets, retries transient HTTP failures, and reports
+   clear final status.
+5. Memory benchmark commands load fixtures, run ingestion/evaluation paths,
+   record metrics, and avoid importing benchmark behavior into runtime packages.
 
 ## Cross-Feature Behavior
 

@@ -10,6 +10,13 @@ Hooks let PicoClaw observe runtime events and intercept LLM/tool stages.
 Built-in and process hooks can continue, modify, respond, deny, or approve
 according to stage-specific rules.
 
+## Reconstruction Notes
+
+- Similarity target: recreate hook mounting, observer/interceptor/approval dispatch, process hook JSON protocol, stage-specific actions, and timeout/error handling.
+- Core types/functions: hook config loader, mount registry, process hook client, hook decision types, before/after LLM/tool handlers, and approval path.
+- Runtime ordering: mount enabled hooks by priority, dispatch observer events, invoke interceptors around LLM/tool stages, apply valid decisions, enforce timeout, continue on failures.
+- Non-obvious constraints: `respond` and `deny_tool` are tool-stage only, observer hooks must not mutate execution, and malformed process responses must not crash host runtime.
+
 ## Requirements
 
 | ID | Level | Requirement | Rationale |
@@ -22,16 +29,32 @@ according to stage-specific rules.
 | `FR-HOOKS-006` | MUST | Approval hooks decide whether sensitive tool execution may proceed. | Tool approval is a safety boundary. |
 | `FR-HOOKS-007` | SHOULD | Process hook JSON protocol failures are reported and do not crash the host. | External hook processes are unreliable by nature. |
 
-## Auxiliary Interfaces
+## Data And State Model
+
+Hook state includes global defaults, built-in and process hook definitions,
+priority order, timeout values, observe/intercept stage lists, process command
+state, JSON-RPC request IDs, and hook decisions.
+
+## Surface Ownership
 
 Owns: CONFIG.hooks*
 Owns: TEST pkg/agent/hooks*
 Owns: TEST pkg/agent/hook*
 
+## Auxiliary Interfaces
+
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Config | `hooks.enabled`, `hooks.defaults`, `hooks.builtins`, `hooks.processes` | Hook enablement, priority, timeout, process transport, observe, and intercept fields. | `FR-HOOKS-001`, `FR-HOOKS-002` |
 | Runtime | Hook mount and process pipeline | Stage dispatch, decisions, and tool short-circuiting. | `FR-HOOKS-003` through `FR-HOOKS-007` |
+
+## Algorithms And Ordering
+
+1. Read hook config and skip all mounting when disabled.
+2. Sort enabled hooks by priority and attach observer/interceptor/approval capabilities.
+3. At each runtime stage, call matching hooks with bounded timeout.
+4. Validate returned action for the stage before mutating requests/results.
+5. Continue host execution after hook errors unless a valid deny/respond decision applies.
 
 ## Cross-Feature Behavior
 

@@ -10,6 +10,13 @@ PicoClaw connects configured MCP servers, discovers tools, wraps remote calls as
 agent tools, supports eager and deferred discovery, and provides CLI and launcher
 management for server configuration.
 
+## Reconstruction Notes
+
+- Similarity target: recreate an MCP manager that connects configured servers, lists tools, wraps remote tools, handles reconnect cases, and exposes CLI config management.
+- Core types/functions: MCP manager, server connection, command/HTTP transport setup, tool wrapper, runtime event publisher, and Cobra MCP subcommands.
+- Runtime ordering: load enabled servers, connect transport, initialize session, list tools, register wrappers eagerly or behind discovery, execute remote calls, publish events.
+- Non-obvious constraints: CLI mutates config only, server names prefix tool names, env files and headers are transport-specific, and empty server removal disables MCP globally.
+
 ## Requirements
 
 | ID | Level | Requirement | Rationale |
@@ -22,7 +29,13 @@ management for server configuration.
 | `FR-MCP-006` | MUST | Removing the final MCP server disables global MCP enablement. | Empty MCP config should not imply active integration. |
 | `FR-MCP-007` | SHOULD | Live server inspection reports reachable status and tool counts without mutating configuration. | Operators need safe diagnostics. |
 
-## Auxiliary Interfaces
+## Data And State Model
+
+MCP state includes global discovery config, per-server config, live client
+sessions, discovered remote tool definitions, generated local tool names,
+runtime event metadata, and CLI-managed JSON config entries.
+
+## Surface Ownership
 
 Owns: CLI cmd/picoclaw/internal/mcp/*
 Owns: CONFIG.tools.mcp*
@@ -32,12 +45,22 @@ Owns: TEST pkg/tools/integration/mcp*
 Owns: INTEGRATION *
 Owns: EVENT mcp.*
 
+## Auxiliary Interfaces
+
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Config | `tools.mcp.*` | Global enablement, discovery settings, and per-server transport details. | `FR-MCP-001`, `FR-MCP-003` |
 | CLI | `picoclaw mcp add/list/show/test/edit/remove` | Config management and live diagnostics. | `FR-MCP-005`, `FR-MCP-006`, `FR-MCP-007` |
 | Runtime | MCP manager and MCP tool wrapper | Connection lifecycle, discovery, and remote tool execution. | `FR-MCP-001`, `FR-MCP-002`, `FR-MCP-004` |
 | Integration | Docker-backed MCP streamable suite | Real server protocol compatibility. | `FR-MCP-001`, `FR-MCP-004` |
+
+## Algorithms And Ordering
+
+1. Normalize server transport from config or CLI flags.
+2. For stdio, build command/env/env-file transport; for remote, build streamable HTTP transport with headers.
+3. Initialize the client session and list remote tools.
+4. Register tools eagerly or hide them behind discovery based on global/per-server deferral.
+5. On tool call, forward arguments and convert MCP content into PicoClaw tool result text/media.
 
 ## Cross-Feature Behavior
 

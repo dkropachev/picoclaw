@@ -11,6 +11,13 @@ candidates, calls an LLM, executes requested tools, streams or finalizes
 responses, and records turn state. Provider, model, CLI, and config surfaces are
 auxiliary to this capability.
 
+## Reconstruction Notes
+
+- Similarity target: recreate an agent loop that builds prompt context, selects provider candidates, executes tool calls, and stores a final turn.
+- Core types/functions: `AgentLoop`, agent instance creation, context builder, pipeline setup/execute/finalize helpers, provider factory, and tool registry.
+- Runtime ordering: normalize input, resolve route/session, build prompt, select model candidate, call provider, execute tool calls, stream/finalize response, persist history, emit runtime events.
+- Non-obvious constraints: tool iteration limits, media limits, turn profile block disabling, fallback candidates, and child-turn concurrency must stay explicit.
+
 ## Requirements
 
 | ID | Level | Requirement | Rationale |
@@ -25,7 +32,14 @@ auxiliary to this capability.
 | `FR-AGENT-008` | SHOULD | Thinking or reasoning content is preserved for surfaces that display it and omitted from ordinary final replies unless configured. | Reasoning display is auxiliary, not the answer itself. |
 | `FR-AGENT-009` | MUST | CLI direct-agent commands use the same agent runtime path as gateway turns, with command-specific input/output wrapping only. | CLI must not fork behavior from gateway runtime. |
 
-## Auxiliary Interfaces
+## Data And State Model
+
+Agent state includes configured defaults, resolved candidate providers, registered
+tools, skills filter, MCP allowlist, context builder cache, runtime event bus,
+turn scope, and session store references. A turn records user input, media,
+assistant content, tool calls/results, optional reasoning, and runtime metadata.
+
+## Surface Ownership
 
 Owns: CLI cmd/picoclaw/main.go *
 Owns: CLI cmd/picoclaw/internal/agent/*
@@ -55,12 +69,22 @@ Owns: TOOL subagent
 Owns: TOOL delegate
 Owns: EVENT agent.*
 
+## Auxiliary Interfaces
+
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | CLI | `picoclaw agent`, `picoclaw model`, `picoclaw status`, `picoclaw version` | Direct agent use, model selection, status, and build metadata. | `FR-AGENT-003`, `FR-AGENT-009` |
 | Config | `agents.*`, `model_list.*` | Agent defaults, per-agent models, fallbacks, turn profile, retry, token, media, and tool iteration policy. | `FR-AGENT-002`, `FR-AGENT-003`, `FR-AGENT-004` |
 | Tools | `spawn`, `spawn_status`, `subagent`, `delegate` | Child work delegation and status reporting. | `FR-AGENT-007` |
 | Events | `agent.*` | Turn, LLM, tool, steering, interrupt, subturn, and error telemetry. | `FR-AGENT-001`, `FR-AGENT-004`, `FR-AGENT-006` |
+
+## Algorithms And Ordering
+
+1. Build an `InboundContext` and resolve the route/session before prompt work.
+2. Resolve prompt contributors and turn profile decisions before provider calls.
+3. Select model candidates, then execute provider attempts with retry/fallback policy.
+4. For each tool-call response, validate tool availability and arguments, run hooks and registry execution, append tool results, and re-enter provider execution until done or capped.
+5. Write final messages and summaries after the assistant response is known.
 
 ## Cross-Feature Behavior
 

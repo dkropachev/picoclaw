@@ -10,6 +10,13 @@ PicoClaw persists conversation state by routed session scope. Session behavior
 defines how chat/user/topic dimensions become keys, how JSONL history is stored,
 how legacy aliases are promoted, and how launcher history views expose records.
 
+## Reconstruction Notes
+
+- Similarity target: recreate scoped session allocation, canonical key generation, JSONL history backend, legacy alias promotion, and launcher history endpoints.
+- Core types/functions: `SessionScope`, route session allocator, canonical key helpers, JSONL backend, memory store, and session API handlers.
+- Runtime ordering: normalize route policy, derive dimensions, canonicalize identity, create metadata, promote aliases only when safe, append/read messages, expose list/detail/delete.
+- Non-obvious constraints: invalid dimensions are dropped, corrupt JSONL lines are skipped, existing canonical history is never overwritten by alias promotion.
+
 ## Requirements
 
 | ID | Level | Requirement | Rationale |
@@ -22,7 +29,13 @@ how legacy aliases are promoted, and how launcher history views expose records.
 | `FR-SESSION-006` | MUST | Launcher session APIs list, fetch, and delete session history without exposing unrelated workspace files. | History management is a user-facing launcher capability. |
 | `FR-SESSION-007` | SHOULD | Explicit session keys supplied by trusted callers are preserved when compatible with canonical or legacy formats. | Tests, direct calls, and compatibility flows need determinism. |
 
-## Auxiliary Interfaces
+## Data And State Model
+
+Persistent state is session JSONL message files plus metadata containing scoped
+identity and aliases. Runtime state includes allocated scope fields, canonical
+keys, legacy aliases, summaries, and per-session append locks.
+
+## Surface Ownership
 
 Owns: CONFIG.session*
 Owns: HTTP * /api/sessions*
@@ -32,11 +45,21 @@ Owns: TEST pkg/identity/*
 Owns: TEST pkg/state/*
 Owns: TEST web/backend/api/session*
 
+## Auxiliary Interfaces
+
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Config | `session.dimensions`, `session.identity_links`, legacy `dm_scope` | Session isolation policy and compatibility input. | `FR-SESSION-001`, `FR-SESSION-003` |
 | HTTP | `GET /api/sessions`, `GET /api/sessions/{id}`, `DELETE /api/sessions/{id}` | Launcher history list/detail/delete behavior. | `FR-SESSION-006` |
 | Storage | Workspace session JSONL files and metadata | Durable conversation messages, summaries, and aliases. | `FR-SESSION-004`, `FR-SESSION-005` |
+
+## Algorithms And Ordering
+
+1. Convert inbound context and route policy into normalized scope dimensions.
+2. Build canonical key from agent and selected dimensions.
+3. Create metadata and promote legacy alias history only when canonical history is empty.
+4. Append messages in JSONL order under per-session synchronization.
+5. Read history by skipping corrupt lines and applying summary/compaction policy.
 
 ## Cross-Feature Behavior
 

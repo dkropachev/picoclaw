@@ -10,6 +10,13 @@ PicoClaw routes inbound messages to agents, aligns session dimensions with the
 matched route, and selects light or primary model candidates according to
 message complexity.
 
+## Reconstruction Notes
+
+- Similarity target: recreate route resolution, default agent fallback, session policy handoff, identity-link sender canonicalization, and light/heavy model routing.
+- Core types/functions: route resolver, dispatch view, selector matching, session policy, feature extractor, rule classifier, and router.
+- Runtime ordering: normalize inbound fields, build dispatch view, scan rules in order, validate agent target, hand session policy to allocator, score complexity, select model candidate.
+- Non-obvious constraints: empty rules are skipped, first match wins, invalid dimensions are dropped, attachments force high complexity, and explicit session keys can override route-derived keys later.
+
 ## Requirements
 
 | ID | Level | Requirement | Rationale |
@@ -22,15 +29,31 @@ message complexity.
 | `FR-ROUTE-006` | MUST | Model routing computes structural complexity and selects light model below threshold when enabled and available. | Cost-saving model selection must be predictable. |
 | `FR-ROUTE-007` | SHOULD | Code blocks, attachments, long prompts, tool-call-heavy history, and deep conversations increase complexity. | Complex turns should avoid weak models. |
 
-## Auxiliary Interfaces
+## Data And State Model
+
+Routing state includes configured agent list/defaults, dispatch rules, selector
+fields, identity link maps, session dimensions, structural feature vectors,
+classifier score, and selected model name.
+
+## Surface Ownership
 
 Owns: CONFIG.routing*
 Owns: TEST pkg/routing/*
+
+## Auxiliary Interfaces
 
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Config | `agents.dispatch.*`, `session.identity_links`, `agents.defaults.routing.*`, `routing.*` | Dispatch, session handoff, and model routing policy. | `FR-ROUTE-001` through `FR-ROUTE-007` |
 | Runtime | Route resolver and router | Agent dispatch and model candidate selection. | `FR-ROUTE-001`, `FR-ROUTE-006` |
+
+## Algorithms And Ordering
+
+1. Normalize inbound channel/account/scope/sender fields.
+2. Build a dispatch view and scan rules top to bottom.
+3. Return the first rule whose non-empty selectors all match exactly.
+4. Resolve default agent when no rule matches or the target is invalid.
+5. Extract complexity features and compare classifier score with threshold.
 
 ## Cross-Feature Behavior
 

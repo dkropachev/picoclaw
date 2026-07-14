@@ -11,6 +11,13 @@ execution, web search/fetch, media delivery, hardware access, and channel
 actions. The registry presents tool schemas to providers and executes tool calls
 with context, limits, filtering, and error normalization.
 
+## Reconstruction Notes
+
+- Similarity target: recreate a concurrent tool registry plus built-in tools for filesystem, exec, web, media, hardware, and channel action behavior.
+- Core types/functions: `Tool` interface, `ToolRegistry`, tool result types, filesystem tool constructors, exec session manager, web search/fetch providers, and tool schema transforms.
+- Runtime ordering: register enabled tools, export provider schemas, validate tool call args/context, enforce path/network/command policies, execute, filter result, normalize output.
+- Non-obvious constraints: response-handled tools suppress duplicate assistant text, registry must recover panics, workspace restriction and allow path patterns must be checked before file mutation.
+
 ## Requirements
 
 | ID | Level | Requirement | Rationale |
@@ -23,7 +30,13 @@ with context, limits, filtering, and error normalization.
 | `FR-TOOL-006` | SHOULD | Media, reaction, message, TTS, and hardware tools return handled responses when user-visible delivery is completed outside normal assistant text. | The agent should not duplicate already-delivered output. |
 | `FR-TOOL-007` | MUST | Tool schema transformations preserve provider compatibility for OpenAI, Anthropic, Gemini, and compatibility adapters. | Provider-specific schemas must not change tool behavior. |
 
-## Auxiliary Interfaces
+## Data And State Model
+
+Tool state includes visible and hidden registry maps, allowlists, TTL metadata,
+tool context, media store references, exec background sessions, filesystem roots,
+web provider config, and redaction caches for sensitive values.
+
+## Surface Ownership
 
 Owns: CONFIG.tools.allow_read_paths
 Owns: CONFIG.tools.allow_write_paths
@@ -68,11 +81,21 @@ Owns: TOOL web_fetch
 Owns: TOOL web_search
 Owns: TOOL write_file
 
+## Auxiliary Interfaces
+
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Tools | `read_file`, `write_file`, `edit_file`, `append_file`, `list_dir`, `load_image`, `send_file`, `exec`, `web_search`, `web_fetch`, hardware and delivery tools | Built-in tool schemas and execution behavior. | `FR-TOOL-001` through `FR-TOOL-007` |
 | HTTP | `/api/tools`, `/api/tools/{name}/state`, `/api/tools/web-search-config` | Launcher tool state and web search configuration. | `FR-TOOL-004` |
 | Config | `tools.*` subtrees except MCP, skills, and cron ownership in their feature specs | Tool enablement, limits, providers, filtering, and policies. | `FR-TOOL-002` through `FR-TOOL-006` |
+
+## Algorithms And Ordering
+
+1. Build the registry from config, registering only enabled tools and preserving discovery tools where allowed.
+2. Convert registry definitions to provider-specific tool schemas.
+3. On execution, inject context, validate args, enforce security constraints, then call the tool.
+4. Recover panics and nil results into normalized tool errors.
+5. Apply sensitive-data filtering before returning model-visible content.
 
 ## Cross-Feature Behavior
 

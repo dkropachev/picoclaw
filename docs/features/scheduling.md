@@ -10,6 +10,13 @@ PicoClaw schedules reminders and recurring work through cron commands and the
 agent-callable cron tool. Jobs persist in the workspace and can deliver prompts
 through channels or run gated shell commands.
 
+## Reconstruction Notes
+
+- Similarity target: recreate cron tool actions, persistent job storage, CLI job management, execution delivery modes, command gates, and heartbeat scheduling.
+- Core types/functions: cron tool, job parser/store, Cobra cron subcommands, heartbeat service, gateway delivery handler, and exec gate checks.
+- Runtime ordering: parse schedule, validate command/delivery gates, persist job, list/enable/disable/remove, run due jobs, route delivered prompts or execute command jobs.
+- Non-obvious constraints: command jobs require both cron and exec permissions, disabled jobs stay stored, and heartbeat uses ordinary agent execution.
+
 ## Requirements
 
 | ID | Level | Requirement | Rationale |
@@ -21,7 +28,13 @@ through channels or run gated shell commands.
 | `FR-SCHED-005` | MUST | CLI cron add/list/enable/disable/remove reflects persisted job state. | Operators need direct schedule management. |
 | `FR-SCHED-006` | SHOULD | Heartbeat prompts run on configured interval and share the normal agent execution path. | Periodic assistant behavior should stay consistent. |
 
-## Auxiliary Interfaces
+## Data And State Model
+
+Schedule state includes persisted cron job records, enabled flags, schedule
+expressions/times, delivery target metadata, command payloads, execution timeout,
+and heartbeat interval/prompt state.
+
+## Surface Ownership
 
 Owns: CLI cmd/picoclaw/internal/cron/*
 Owns: CONFIG.tools.cron*
@@ -31,11 +44,21 @@ Owns: TEST pkg/cron/*
 Owns: TEST pkg/heartbeat/*
 Owns: TOOL cron
 
+## Auxiliary Interfaces
+
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | CLI | `picoclaw cron add/list/enable/disable/remove` | Persistent job management. | `FR-SCHED-005` |
 | Tool | `cron` | Agent-callable scheduling actions. | `FR-SCHED-001` through `FR-SCHED-004` |
 | Config | `tools.cron.*`, `heartbeat.*` | Command gates, timeout, allowed remotes, and heartbeat interval. | `FR-SCHED-004`, `FR-SCHED-006` |
+
+## Algorithms And Ordering
+
+1. Parse requested schedule and reject invalid time/cron forms.
+2. Validate command gates and delivery target before persistence.
+3. Persist job state and expose CLI list/status operations from the same store.
+4. On due execution, either enqueue an agent prompt for delivery or run the gated command.
+5. Heartbeat periodically submits configured prompts through the same agent path.
 
 ## Cross-Feature Behavior
 

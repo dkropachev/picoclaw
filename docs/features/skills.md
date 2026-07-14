@@ -10,6 +10,13 @@ PicoClaw loads skills from workspace, global, and builtin locations, includes
 selected skill prompts in agent context, supports registry search and install,
 and lets chat users force a skill for one request or the next message.
 
+## Reconstruction Notes
+
+- Similarity target: recreate skill discovery/loading, registry search, install/import/remove, and chat command forced-skill behavior.
+- Core types/functions: skill loader, registry manager, ClawHub/GitHub registries, installer, search cache, CLI handlers, launcher handlers, and command executor handlers.
+- Runtime ordering: resolve skill roots, load valid `SKILL.md` files, search configured registries, install/import to workspace, refresh list/search detail, apply `/use` selection during command execution.
+- Non-obvious constraints: workspace skills override lower-precedence roots, registry failures remain scoped, and deletion must not remove builtin/global content.
+
 ## Requirements
 
 | ID | Level | Requirement | Rationale |
@@ -22,7 +29,13 @@ and lets chat users force a skill for one request or the next message.
 | `FR-SKILLS-006` | MUST | `/use` and related commands force a selected skill for the requested message scope and can clear pending selection. | Chat workflows need direct skill control. |
 | `FR-SKILLS-007` | SHOULD | Deprecated GitHub registry config remains accepted while canonical registry config is preferred. | Existing configs must keep working. |
 
-## Auxiliary Interfaces
+## Data And State Model
+
+Skill state includes workspace/global/builtin roots, parsed skill metadata and
+content, registry definitions, cached search results, install target paths, and
+per-chat pending forced-skill command state.
+
+## Surface Ownership
 
 Owns: CLI cmd/picoclaw/internal/skills/*
 Owns: CONFIG.tools.skills*
@@ -37,12 +50,22 @@ Owns: TEST web/backend/api/skills*
 Owns: TOOL find_skills
 Owns: TOOL install_skill
 
+## Auxiliary Interfaces
+
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | CLI | `picoclaw skills list/search/show/install/remove/list-builtin/install-builtin` | Workspace and registry skill management. | `FR-SKILLS-001` through `FR-SKILLS-005` |
 | HTTP | `/api/skills*` | Launcher list, detail, search, install, import, and delete. | `FR-SKILLS-003`, `FR-SKILLS-004`, `FR-SKILLS-005` |
 | Tools | `find_skills`, `install_skill` | Agent-callable registry search and install. | `FR-SKILLS-003`, `FR-SKILLS-004` |
 | Config | `tools.skills.*` | Registries, cache, concurrency, and legacy GitHub fields. | `FR-SKILLS-003`, `FR-SKILLS-007` |
+
+## Algorithms And Ordering
+
+1. Resolve builtin, global, and workspace roots.
+2. Load valid skill directories and apply precedence.
+3. For search, query enabled registries with cache/concurrency controls.
+4. For install/import, validate source content and write to workspace.
+5. During command execution, apply or clear forced-skill state before normal agent prompt construction.
 
 ## Cross-Feature Behavior
 

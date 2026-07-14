@@ -10,6 +10,13 @@ Self-evolution records successful completed turns, clusters repeated patterns,
 generates skill drafts, and optionally applies accepted drafts into workspace
 skills depending on configured mode.
 
+## Reconstruction Notes
+
+- Similarity target: recreate evolution runtime modes, learning record capture, cold-path clustering, draft generation/review, and guarded skill apply.
+- Core types/functions: evolution runtime, store, pattern clusterer, cold path runner, draft generator, draft reviewer, applier, and agent bridge.
+- Runtime ordering: observe completed turn, write learning record, run cold path after trigger, cluster successful patterns, generate draft, validate, optionally apply with backup.
+- Non-obvious constraints: disabled mode is side-effect free, heartbeat turns are skipped, generated skill content is prompt-sensitive, and rollback is manual from backups.
+
 ## Requirements
 
 | ID | Level | Requirement | Rationale |
@@ -21,15 +28,31 @@ skills depending on configured mode.
 | `FR-EVO-005` | MUST | Cold path execution supports after-turn and scheduled triggers, with manual mode disabling automatic runs. | Draft timing must follow config. |
 | `FR-EVO-006` | SHOULD | Invalid drafts are rejected without creating partial skill directories. | Bad generated content must not pollute workspace. |
 
-## Auxiliary Interfaces
+## Data And State Model
+
+Evolution state includes learning records, clustered pattern records, candidate
+drafts, skill profiles, configured thresholds, cold-path trigger state, and
+backup copies for replaced workspace skills.
+
+## Surface Ownership
 
 Owns: CONFIG.evolution*
 Owns: TEST pkg/evolution/*
+
+## Auxiliary Interfaces
 
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Config | `evolution.*` | Enablement, mode, state directory, thresholds, and cold path trigger. | `FR-EVO-001` through `FR-EVO-005` |
 | Storage | Workspace evolution state | Learning records, clusters, drafts, profiles, and backups. | `FR-EVO-002`, `FR-EVO-004` |
+
+## Algorithms And Ordering
+
+1. Gate all behavior on `evolution.enabled` and effective mode.
+2. Capture completed non-heartbeat turn summaries and metadata.
+3. Run cold path after turn or scheduled time according to config.
+4. Cluster records and require threshold success before draft generation.
+5. Validate draft content and apply only in apply mode, creating backups first.
 
 ## Cross-Feature Behavior
 

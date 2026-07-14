@@ -10,6 +10,19 @@ Runtime events provide observable envelopes for agent, channel, gateway, bus,
 and MCP behavior. Event logging filters decide which published events are printed
 without changing event publication.
 
+## Reconstruction Notes
+
+- Similarity target: recreate the event bus, stable event kind constants,
+  subscriber filtering, logging filters, and payload redaction conventions.
+- Core types/functions: Event, Bus, subscription filters, event kind registry,
+  logging config, runtime event logger, and safe payload builders.
+- Runtime ordering: construct event envelope, publish to bus, match subscribers,
+  enqueue or close channels according to bus state, then independently apply
+  logging filters for printed diagnostics.
+- Non-obvious constraints: logging configuration never suppresses publication,
+  closed buses close subscriber channels, and payloads prefer counts/lengths over
+  full sensitive args.
+
 ## Requirements
 
 | ID | Level | Requirement | Rationale |
@@ -20,17 +33,39 @@ without changing event publication.
 | `FR-EVENTS-004` | MUST | Known event names cover agent, channel, bus, gateway, and MCP domains. | Feature telemetry must be discoverable. |
 | `FR-EVENTS-005` | SHOULD | Event payloads avoid full sensitive args by default and include lengths/counts when safer. | Logs should be useful without leaking secrets. |
 
-## Auxiliary Interfaces
+## Data And State Model
+
+Event state includes immutable event envelopes with kind, timestamp, severity,
+scope, and payload fields; subscriber registrations with prefix filters and
+buffered channels; bus closed state; event logging include/exclude/min-severity
+config; and known kind constants for each runtime domain.
+
+## Surface Ownership
 
 Owns: CONFIG.events*
 Owns: TEST pkg/events/*
 Owns: TEST pkg/config/events*
 Owns: EVENT *
 
+## Auxiliary Interfaces
+
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Config | `events.logging.*` | Event logging enablement, filters, payload inclusion, and severity threshold. | `FR-EVENTS-003`, `FR-EVENTS-005` |
 | Events | `agent.*`, `channel.*`, `bus.*`, `gateway.*`, `mcp.*` | Published runtime event kinds. | `FR-EVENTS-001`, `FR-EVENTS-004` |
+
+## Algorithms And Ordering
+
+1. Create events with a stable kind, current timestamp, severity, optional
+   scope, and a payload already reduced for sensitive fields when necessary.
+2. When subscribing, register a prefix filter and buffered channel under bus
+   synchronization; immediately fail or close if the bus is already closed.
+3. On publish, copy current subscribers, match each subscriber by kind prefix,
+   and deliver through bounded channel behavior without letting slow consumers
+   mutate the event.
+4. On bus close, mark closed state once and close all subscriber channels.
+5. For runtime logging, evaluate include, exclude, and severity filters against
+   published events and print only matching entries without affecting delivery.
 
 ## Cross-Feature Behavior
 

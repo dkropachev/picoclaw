@@ -10,6 +10,21 @@ PicoClaw protects credentials, dashboard access, local files, network requests,
 tool execution, and optional isolated subprocesses. These requirements define
 security behavior that other feature specs rely on.
 
+## Reconstruction Notes
+
+- Similarity target: recreate secret-preserving config behavior, credential
+  store CRUD, dashboard auth controls, HTTP guard checks, and optional process
+  isolation with fail-closed setup.
+- Core types/functions: secure string config helpers, credential store,
+  dashboard auth middleware, CSRF/logout handlers, HTTP guard, isolation runtime,
+  token and PKCE helpers.
+- Runtime ordering: load security config, normalize protected values, validate
+  access or target, execute guarded storage/network/process operation, redact
+  sensitive output, and emit clear errors.
+- Non-obvious constraints: masked secure values preserve existing secrets,
+  private network denial is the default, unsupported isolation does not fall back
+  to unisolated execution, and generated auth tokens must remain revocable.
+
 ## Requirements
 
 | ID | Level | Requirement | Rationale |
@@ -22,7 +37,14 @@ security behavior that other feature specs rely on.
 | `FR-SEC-006` | MUST | Isolation runtime starts supported commands with configured exposed paths and fails closed on unsupported/invalid setup. | Optional isolation must not silently weaken execution. |
 | `FR-SEC-007` | SHOULD | Key generation and token helpers produce unique, parseable, and revocable values for auth flows. | Auth flows need reliable primitives. |
 
-## Auxiliary Interfaces
+## Data And State Model
+
+Security state includes secure-string sentinels, credential records keyed by
+provider and auth method, dashboard password/session data, login attempt
+counters, configured secret filters, private-host allowlists, isolation exposed
+paths, generated token IDs, and revocation metadata.
+
+## Surface Ownership
 
 Owns: CONFIG.isolation*
 Owns: TEST pkg/auth/*
@@ -42,11 +64,28 @@ Owns: TEST pkg/config/multikey*
 Owns: TEST pkg/config/register*
 Owns: TEST pkg/config/version*
 
+## Auxiliary Interfaces
+
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Config | Secure strings, `isolation.*`, filtering fields | Secret preservation, isolation controls, and sensitive-data filtering. | `FR-SEC-001`, `FR-SEC-003`, `FR-SEC-006` |
 | Storage | Credential store | Provider credential CRUD and auth method metadata. | `FR-SEC-002`, `FR-SEC-007` |
 | Network | Safe HTTP client and net binding helpers | Private host controls and bind behavior. | `FR-SEC-005` |
+
+## Algorithms And Ordering
+
+1. Normalize config and request inputs before comparing or persisting any secret
+   values.
+2. Preserve existing secure-string values when updates contain masked values;
+   replace, clear, or reject secrets only through explicit update semantics.
+3. Authenticate dashboard requests before protected handlers and require POST
+   semantics for logout so browser navigation cannot clear sessions.
+4. Resolve HTTP targets to concrete host/IP data, deny private or internal
+   destinations unless allow rules apply, then execute the request through the
+   guarded client.
+5. Build isolation command specs from supported runtime configuration, validate
+   exposed paths, start only supported commands, and return errors rather than
+   weakening to unisolated execution.
 
 ## Cross-Feature Behavior
 

@@ -34,12 +34,15 @@ evidence.
 1. Run `make feature-inventory` to inspect currently discovered surfaces.
 2. Update the relevant feature spec when changing behavior.
 3. Link unit or integration tests in `Acceptance Evidence`.
-4. Run `make lint-features`, `make test`, and affected integration suites.
+4. Run `make evaluate-feature-formats` when changing the spec format itself.
+5. Run `make lint-features`, `make test`, and affected integration suites.
 
 ## Requirement Rules
 
 - Requirement IDs are unique and stable: `FR-<FEATURE>-NNN`.
 - Requirement text uses observable behavior: inputs, state, output, errors,
   persistence, ordering, and defaults where applicable.
+- Reconstruction notes, data/state models, and algorithms must be detailed
+  enough for a coding agent to recreate similar code from the spec.
 - Auxiliary interfaces are implementation contracts, not standalone features.
 - An `Owns:` line maps discovered repo surfaces to a feature spec.

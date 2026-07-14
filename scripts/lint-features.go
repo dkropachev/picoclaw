@@ -14,12 +14,16 @@ import (
 var requiredFeatureHeadings = []string{
 	"## Feature ID",
 	"## Behavior Summary",
+	"## Reconstruction Notes",
 	"## Requirements",
+	"## Data And State Model",
 	"## Auxiliary Interfaces",
+	"## Algorithms And Ordering",
 	"## Cross-Feature Behavior",
 	"## Failure And Edge Cases",
 	"## Acceptance Evidence",
 	"## Implementation Anchors",
+	"## Surface Ownership",
 }
 
 func main() {

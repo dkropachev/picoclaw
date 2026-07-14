@@ -10,6 +10,13 @@ The web launcher provides authenticated browser management for configuration,
 models, OAuth credentials, tools, skills, sessions, gateway process lifecycle,
 startup behavior, update, and runtime version metadata.
 
+## Reconstruction Notes
+
+- Similarity target: recreate authenticated launcher APIs for dashboard auth, config/model/OAuth/tool/skill/session/gateway/system management, and JSON error behavior.
+- Core types/functions: API handler/router, dashboard auth middleware/store, launcher config, model handlers, OAuth flow state, gateway process manager, startup/update/version handlers.
+- Runtime ordering: authenticate dashboard requests, load config, validate request body, mutate specific subsystem, save atomically where applicable, apply runtime side effects, return JSON.
+- Non-obvious constraints: secrets are preserved/redacted, logout is POST-only, login is rate-limited, OAuth flow state expires, and gateway logs remain inspectable after failures.
+
 ## Requirements
 
 | ID | Level | Requirement | Rationale |
@@ -22,7 +29,13 @@ startup behavior, update, and runtime version metadata.
 | `FR-LAUNCHER-006` | MUST | Startup, launcher config, update, and version endpoints report or mutate only their documented system settings. | System management must be narrow and auditable. |
 | `FR-LAUNCHER-007` | SHOULD | API errors return JSON responses with actionable messages and appropriate status codes. | Frontend UX needs consistent failures. |
 
-## Auxiliary Interfaces
+## Data And State Model
+
+Launcher state includes dashboard password/session storage, launcher-specific
+config, OAuth flow maps, config file path, gateway process state/logs, model
+catalog entries, startup settings, and update request status.
+
+## Surface Ownership
 
 Owns: CLI cmd/picoclaw/internal/auth/*
 Owns: CLI cmd/picoclaw/internal/config/*
@@ -56,11 +69,29 @@ Owns: TEST web/backend/api/wecom*
 Owns: TEST web/backend/api/weixin*
 Owns: TEST pkg/migrate/*
 
+## Auxiliary Interfaces
+
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | HTTP | `/api/auth*`, `/api/config*`, `/api/models*`, `/api/oauth*`, `/api/system*`, `/api/update`, `/api/weixin*`, `/api/wecom*` | Authenticated launcher management endpoints. | `FR-LAUNCHER-001` through `FR-LAUNCHER-007` |
 | CLI | `picoclaw auth`, `picoclaw config`, `picoclaw onboard`, `picoclaw migrate` | Non-browser setup, auth, and migration helpers. | `FR-LAUNCHER-002`, `FR-LAUNCHER-004` |
 | Config | Launcher config file beside app config | Port/public/access options and dashboard auth migration. | `FR-LAUNCHER-001`, `FR-LAUNCHER-006` |
+
+## Algorithms And Ordering
+
+1. Route launcher requests through access control and dashboard authentication
+   before handler-specific parsing.
+2. For config and model writes, decode JSON, validate schema-specific fields,
+   preserve stored secure strings when masked values are submitted, write the
+   config atomically, and apply runtime log-level changes.
+3. For OAuth requests, create bounded flow state, redirect or poll provider
+   login, exchange callback state for credentials, then persist or clear
+   provider auth records.
+4. For gateway lifecycle requests, inspect current process state first, execute
+   start/stop/restart transitions only when valid, and retain log buffers for
+   status and diagnostics responses.
+5. Return JSON for success and error paths with status codes that match
+   validation, auth, not-found, conflict, or internal failure classes.
 
 ## Cross-Feature Behavior
 
