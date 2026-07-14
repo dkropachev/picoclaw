@@ -39,33 +39,50 @@ interface NavItem {
   url: string
   icon: React.ComponentType<{ className?: string }>
   translateTitle?: boolean
+  tourId?: string
 }
 
-interface NavGroup {
+interface NavSection {
   label: string
-  defaultOpen: boolean
   items: NavItem[]
-  isChannelsGroup?: boolean
+  isChannelsSection?: boolean
 }
 
-const baseNavGroups: Omit<NavGroup, "items">[] = [
-  {
-    label: "navigation.chat",
-    defaultOpen: true,
-  },
-  {
-    label: "navigation.model_group",
-    defaultOpen: true,
-  },
-  {
-    label: "navigation.agent_group",
-    defaultOpen: true,
-  },
-  {
-    label: "navigation.services",
-    defaultOpen: true,
-  },
-]
+const chatNavItem: NavItem = {
+  title: "navigation.chat",
+  url: "/",
+  icon: IconMessageCircle,
+  translateTitle: true,
+}
+
+const logsNavItem: NavItem = {
+  title: "navigation.logs",
+  url: "/logs",
+  icon: IconListDetails,
+  translateTitle: true,
+}
+
+const configNavItem: NavItem = {
+  title: "navigation.config",
+  url: "/config",
+  icon: IconSettings,
+  translateTitle: true,
+}
+
+const modelNavItem: NavItem = {
+  title: "navigation.models",
+  url: "/models",
+  icon: IconAtom,
+  translateTitle: true,
+  tourId: "models-nav",
+}
+
+const credentialsNavItem: NavItem = {
+  title: "navigation.credentials",
+  url: "/credentials",
+  icon: IconKey,
+  translateTitle: true,
+}
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const routerState = useRouterState()
@@ -88,49 +105,20 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     }
   }, [isMobile, setOpenMobile])
 
-  const navGroups: NavGroup[] = React.useMemo(() => {
+  const serviceSections: NavSection[] = React.useMemo(() => {
     return [
       {
-        ...baseNavGroups[0],
-        items: [
-          {
-            title: "navigation.chat",
-            url: "/",
-            icon: IconMessageCircle,
-            translateTitle: true,
-          },
-        ],
-      },
-      {
-        ...baseNavGroups[1],
-        items: [
-          {
-            title: "navigation.models",
-            url: "/models",
-            icon: IconAtom,
-            translateTitle: true,
-          },
-          {
-            title: "navigation.credentials",
-            url: "/credentials",
-            icon: IconKey,
-            translateTitle: true,
-          },
-        ],
-      },
-      {
         label: "navigation.channels_group",
-        defaultOpen: true,
         items: channelItems.map((item) => ({
           title: item.title,
           url: item.url,
           icon: item.icon,
           translateTitle: false,
         })),
-        isChannelsGroup: true,
+        isChannelsSection: true,
       },
       {
-        ...baseNavGroups[2],
+        label: "navigation.agent_group",
         items: [
           {
             title: "navigation.hub",
@@ -152,25 +140,71 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           },
         ],
       },
-      {
-        ...baseNavGroups[3],
-        items: [
-          {
-            title: "navigation.config",
-            url: "/config",
-            icon: IconSettings,
-            translateTitle: true,
-          },
-          {
-            title: "navigation.logs",
-            url: "/logs",
-            icon: IconListDetails,
-            translateTitle: true,
-          },
-        ],
-      },
     ]
   }, [channelItems])
+
+  const renderNavItem = (item: NavItem) => {
+    const isActive =
+      currentPath === item.url ||
+      (item.url !== "/" && currentPath.startsWith(`${item.url}/`))
+
+    return (
+      <SidebarMenuItem key={`${item.url}-${item.title}`}>
+        <SidebarMenuButton
+          asChild
+          isActive={isActive}
+          onClick={handleNavItemClick}
+          data-tour={item.tourId}
+          className={`h-9 px-3 ${isActive ? "bg-accent/80 text-foreground font-medium" : "text-muted-foreground hover:bg-muted/60"}`}
+        >
+          <Link to={item.url}>
+            <item.icon
+              className={`size-4 ${isActive ? "opacity-100" : "opacity-60"}`}
+            />
+            <span className={isActive ? "opacity-100" : "opacity-80"}>
+              {item.translateTitle === false ? item.title : t(item.title)}
+            </span>
+          </Link>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    )
+  }
+
+  const renderServiceSection = (section: NavSection) => (
+    <Collapsible
+      key={section.label}
+      className="group/service-section mb-1 last:mb-0"
+    >
+      <CollapsibleTrigger className="text-sidebar-foreground/60 hover:bg-muted/60 flex h-8 w-full cursor-pointer items-center justify-between rounded-md px-3 text-xs font-medium transition-colors">
+        <span>{t(section.label)}</span>
+        <IconChevronRight className="size-3.5 opacity-50 transition-transform duration-200 group-data-[state=open]/service-section:rotate-90" />
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <SidebarMenu className="border-border/40 ml-3 border-l pt-1 pl-2">
+          {section.items.map(renderNavItem)}
+          {section.isChannelsSection && hasMoreChannels && (
+            <SidebarMenuItem key="channels-more-toggle">
+              <SidebarMenuButton
+                onClick={toggleShowAllChannels}
+                className="text-muted-foreground hover:bg-muted/60 h-9 px-3"
+              >
+                {showAllChannels ? (
+                  <IconChevronsUp className="size-4 opacity-60" />
+                ) : (
+                  <IconChevronsDown className="size-4 opacity-60" />
+                )}
+                <span className="opacity-80">
+                  {showAllChannels
+                    ? t("navigation.show_less_channels")
+                    : t("navigation.show_more_channels")}
+                </span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          )}
+        </SidebarMenu>
+      </CollapsibleContent>
+    </Collapsible>
+  )
 
   return (
     <Sidebar
@@ -178,81 +212,43 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       className="bg-background border-r-border/20 border-r pt-3"
     >
       <SidebarContent className="bg-background">
-        {navGroups.map((group) => (
-          <Collapsible
-            key={group.label}
-            defaultOpen={group.defaultOpen}
-            className="group/collapsible mb-1"
-          >
-            <SidebarGroup className="px-2 py-0">
-              <SidebarGroupLabel asChild>
-                <CollapsibleTrigger className="hover:bg-muted/60 flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 transition-colors">
-                  <span>{t(group.label)}</span>
-                  <IconChevronRight className="size-3.5 opacity-50 transition-transform duration-200 group-data-[state=open]/collapsible:rotate-90" />
-                </CollapsibleTrigger>
-              </SidebarGroupLabel>
-              <CollapsibleContent>
-                <SidebarGroupContent className="pt-1">
-                  <SidebarMenu>
-                    {group.items.map((item) => {
-                      const isActive =
-                        currentPath === item.url ||
-                        (item.url !== "/" &&
-                          currentPath.startsWith(`${item.url}/`))
-                      return (
-                        <SidebarMenuItem key={item.title}>
-                          <SidebarMenuButton
-                            asChild
-                            isActive={isActive}
-                            onClick={handleNavItemClick}
-                            data-tour={
-                              item.url === "/models" ? "models-nav" : undefined
-                            }
-                            className={`h-9 px-3 ${isActive ? "bg-accent/80 text-foreground font-medium" : "text-muted-foreground hover:bg-muted/60"}`}
-                          >
-                            <Link to={item.url}>
-                              <item.icon
-                                className={`size-4 ${isActive ? "opacity-100" : "opacity-60"}`}
-                              />
-                              <span
-                                className={
-                                  isActive ? "opacity-100" : "opacity-80"
-                                }
-                              >
-                                {item.translateTitle === false
-                                  ? item.title
-                                  : t(item.title)}
-                              </span>
-                            </Link>
-                          </SidebarMenuButton>
-                        </SidebarMenuItem>
-                      )
-                    })}
-                    {group.isChannelsGroup && hasMoreChannels && (
-                      <SidebarMenuItem key="channels-more-toggle">
-                        <SidebarMenuButton
-                          onClick={toggleShowAllChannels}
-                          className="text-muted-foreground hover:bg-muted/60 h-9 px-3"
-                        >
-                          {showAllChannels ? (
-                            <IconChevronsUp className="size-4 opacity-60" />
-                          ) : (
-                            <IconChevronsDown className="size-4 opacity-60" />
-                          )}
-                          <span className="opacity-80">
-                            {showAllChannels
-                              ? t("navigation.show_less_channels")
-                              : t("navigation.show_more_channels")}
-                          </span>
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    )}
-                  </SidebarMenu>
-                </SidebarGroupContent>
-              </CollapsibleContent>
-            </SidebarGroup>
-          </Collapsible>
-        ))}
+        <Collapsible defaultOpen className="group/chat-collapsible mb-1">
+          <SidebarGroup className="px-2 py-0">
+            <SidebarGroupLabel asChild>
+              <CollapsibleTrigger className="hover:bg-muted/60 flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 transition-colors">
+                <span>{t("navigation.chat")}</span>
+                <IconChevronRight className="size-3.5 opacity-50 transition-transform duration-200 group-data-[state=open]/chat-collapsible:rotate-90" />
+              </CollapsibleTrigger>
+            </SidebarGroupLabel>
+            <CollapsibleContent>
+              <SidebarGroupContent className="pt-1">
+                <SidebarMenu>{renderNavItem(chatNavItem)}</SidebarMenu>
+              </SidebarGroupContent>
+            </CollapsibleContent>
+          </SidebarGroup>
+        </Collapsible>
+
+        <Collapsible className="group/services-collapsible mb-1">
+          <SidebarGroup className="px-2 py-0">
+            <SidebarGroupLabel asChild>
+              <CollapsibleTrigger className="hover:bg-muted/60 flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 transition-colors">
+                <span>{t("navigation.services")}</span>
+                <IconChevronRight className="size-3.5 opacity-50 transition-transform duration-200 group-data-[state=open]/services-collapsible:rotate-90" />
+              </CollapsibleTrigger>
+            </SidebarGroupLabel>
+            <CollapsibleContent>
+              <SidebarGroupContent className="pt-1">
+                <SidebarMenu className="mb-1">
+                  {renderNavItem(configNavItem)}
+                  {renderNavItem(modelNavItem)}
+                  {renderNavItem(credentialsNavItem)}
+                </SidebarMenu>
+                {serviceSections.map(renderServiceSection)}
+                <SidebarMenu>{renderNavItem(logsNavItem)}</SidebarMenu>
+              </SidebarGroupContent>
+            </CollapsibleContent>
+          </SidebarGroup>
+        </Collapsible>
       </SidebarContent>
       <SidebarRail />
     </Sidebar>
