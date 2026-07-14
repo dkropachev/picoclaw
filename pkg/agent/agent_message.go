@@ -208,8 +208,11 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 
 	opts := processOptions{
 		Dispatch: DispatchRequest{
-			SessionKey:     sessionKey,
-			SessionAliases: buildSessionAliases(sessionKey, append(allocation.SessionAliases, msg.SessionKey, scopeKey)...),
+			SessionKey: sessionKey,
+			SessionAliases: buildSessionAliases(
+				sessionKey,
+				append(allocation.SessionAliases, msg.SessionKey, scopeKey)...,
+			),
 			InboundContext: cloneInboundContext(&msg.Context),
 			RouteResult:    cloneResolvedRoute(&route),
 			SessionScope:   session.CloneScope(&allocation.Scope),

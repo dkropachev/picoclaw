@@ -20,6 +20,21 @@ const (
 	defaultThreadToolSize  = 8
 )
 
+var validThreadActions = []string{
+	"find",
+	"search",
+	"propose_switch",
+	"create",
+	"register_current",
+	"attach_current",
+	"switch",
+	"return_to_origin",
+	"detach_current",
+	"update_metadata",
+	"get_policy",
+	"set_policy",
+}
+
 type ThreadsTool struct {
 	cfg        *config.Config
 	configPath string
@@ -442,7 +457,7 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 		return threadSearchResult(query, []threadstore.Thread{thread})
 
 	default:
-		return ErrorResult("action must be one of: find, search, propose_switch, create, register_current, attach_current, switch, return_to_origin, detach_current, update_metadata, get_policy, set_policy")
+		return ErrorResult("action must be one of: " + strings.Join(validThreadActions, ", "))
 	}
 }
 

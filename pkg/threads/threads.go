@@ -146,11 +146,6 @@ type PicoAllocation struct {
 	AgentID   string
 }
 
-type metaFile struct {
-	meta memory.SessionMeta
-	base string
-}
-
 func ResolveWorkspace(workspace string) string {
 	workspace = strings.TrimSpace(workspace)
 	if workspace == "" {
@@ -489,69 +484,6 @@ func MergeContext(base map[string]string, overlays ...map[string]string) map[str
 	return merged
 }
 
-func (s Store) threadFromMetaFile(mf metaFile) (Thread, bool) {
-	meta := mf.meta
-	key := strings.TrimSpace(meta.Key)
-	if key == "" {
-		key = sessionKeyFromSanitizedBase(mf.base)
-	}
-	id, ok := picoSessionIDFromMeta(meta)
-	if !ok || id == "" {
-		if fallbackKey, fallbackID, fallbackOK := sessionKeyAndIDFromJSONLFilename(mf.base + ".jsonl"); fallbackOK {
-			key = fallbackKey
-			id = fallbackID
-			ok = true
-		}
-	}
-	if !ok || id == "" {
-		return Thread{}, false
-	}
-
-	messages, _ := readMessages(filepath.Join(s.Dir, sanitizeSessionKey(key)+".jsonl"), meta.Skip)
-	visible := visibleMessages(messages)
-	title, preview := titleAndPreview(meta, visible)
-	created := meta.CreatedAt
-	updated := meta.UpdatedAt
-	if created.IsZero() || updated.IsZero() {
-		if info, err := os.Stat(filepath.Join(s.Dir, sanitizeSessionKey(key)+".jsonl")); err == nil {
-			if created.IsZero() {
-				created = info.ModTime()
-			}
-			if updated.IsZero() {
-				updated = info.ModTime()
-			}
-		}
-	}
-	if created.IsZero() {
-		created = updated
-	}
-	if updated.IsZero() {
-		updated = created
-	}
-	if created.IsZero() && updated.IsZero() {
-		return Thread{}, false
-	}
-
-	context := MergeContext(scopeContext(meta.Scope), meta.ThreadContext)
-	threadType := NormalizeType(meta.ThreadType)
-	if threadType == TypeGeneral {
-		threadType = NormalizeType(InferType(title + " " + preview + " " + contextText(context)))
-	}
-
-	return Thread{
-		ID:           id,
-		SessionKey:   key,
-		Title:        title,
-		Preview:      preview,
-		Type:         threadType,
-		Context:      context,
-		MessageCount: len(visible),
-		Created:      created,
-		Updated:      updated,
-		SourceQuery:  strings.TrimSpace(meta.ThreadSourceQuery),
-	}, true
-}
-
 func titleAndPreview(meta memory.SessionMeta, messages []providers.Message) (string, string) {
 	title := strings.TrimSpace(meta.ThreadTitle)
 	preview := ""
@@ -827,27 +759,6 @@ func writeMeta(path string, meta memory.SessionMeta) error {
 		return err
 	}
 	return fileutil.WriteFileAtomic(path, data, 0o644)
-}
-
-func sessionKeyAndIDFromJSONLFilename(name string) (string, string, bool) {
-	if !strings.HasSuffix(name, ".jsonl") {
-		return "", "", false
-	}
-	base := strings.TrimSuffix(name, ".jsonl")
-	if base == "" {
-		return "", "", false
-	}
-	legacyPrefix := sanitizeSessionKey(legacyPicoSessionPrefix)
-	if strings.HasPrefix(base, legacyPrefix) {
-		id := strings.TrimPrefix(base, legacyPrefix)
-		if id != "" {
-			return legacyPicoSessionPrefix + id, id, true
-		}
-	}
-	if session.IsOpaqueSessionKey(base) {
-		return base, base, true
-	}
-	return "", "", false
 }
 
 func sessionKeyFromSanitizedBase(base string) string {

@@ -44,7 +44,11 @@ func TestThreadsToolCreateSearchAndSwitchCards(t *testing.T) {
 		t.Fatal("created thread ID is empty")
 	}
 	if switchCard.TargetSessionID == "" || switchCard.TargetSessionID != switchCard.Thread.UISessionID {
-		t.Fatalf("switch target = %q, thread ui session = %q", switchCard.TargetSessionID, switchCard.Thread.UISessionID)
+		t.Fatalf(
+			"switch target = %q, thread ui session = %q",
+			switchCard.TargetSessionID,
+			switchCard.Thread.UISessionID,
+		)
 	}
 	if switchCard.Thread.Type != threadstore.TypeCoding {
 		t.Fatalf("created thread type = %q", switchCard.Thread.Type)

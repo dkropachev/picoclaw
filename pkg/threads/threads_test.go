@@ -146,11 +146,11 @@ func TestListExcludesPlainOpaqueSessions(t *testing.T) {
 		t.Fatalf("NewJSONLStore() error = %v", err)
 	}
 	key := session.BuildOpaqueSessionKey("agent:main:test:plain")
-	if err := store.AddFullMessage(context.Background(), key, providers.Message{
+	if addErr := store.AddFullMessage(context.Background(), key, providers.Message{
 		Role:    "user",
 		Content: "plain transport session",
-	}); err != nil {
-		t.Fatalf("AddFullMessage() error = %v", err)
+	}); addErr != nil {
+		t.Fatalf("AddFullMessage() error = %v", addErr)
 	}
 
 	items, err := NewStoreFromWorkspace(cfg.Agents.Defaults.Workspace).List()

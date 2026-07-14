@@ -1112,11 +1112,12 @@ type ThreadsToolConfig struct {
 }
 
 type ThreadPolicyConfig struct {
-	Enabled      bool                         `json:"enabled"      env:"PICOCLAW_TOOLS_THREADS_POLICY_ENABLED"`
-	Mode         string                       `json:"mode"         env:"PICOCLAW_TOOLS_THREADS_POLICY_MODE"`
-	Instructions string                       `json:"instructions" env:"PICOCLAW_TOOLS_THREADS_POLICY_INSTRUCTIONS"`
-	Rules        []ThreadPolicyRule           `json:"rules"`
-	Agents       map[string]ThreadAgentPolicy `json:"agents,omitempty"`
+	Enabled      bool               `json:"enabled"      env:"PICOCLAW_TOOLS_THREADS_POLICY_ENABLED"`
+	Mode         string             `json:"mode"         env:"PICOCLAW_TOOLS_THREADS_POLICY_MODE"`
+	Instructions string             `json:"instructions" env:"PICOCLAW_TOOLS_THREADS_POLICY_INSTRUCTIONS"`
+	Rules        []ThreadPolicyRule `json:"rules"`
+
+	Agents map[string]ThreadAgentPolicy `json:"agents,omitempty"`
 }
 
 type ThreadPolicyRule struct {
