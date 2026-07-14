@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean help test integration-test build-all lint-docs feature-inventory evaluate-feature-formats lint-features
+.PHONY: all build install uninstall clean help test integration-test build-all lint-docs feature-inventory lint-features
 
 # Build variables
 BINARY_NAME=picoclaw
@@ -394,10 +394,6 @@ lint-docs:
 ## feature-inventory: Print discovered feature-relevant repo surfaces
 feature-inventory:
 	@$(GO) run -tags featuretools ./scripts/feature_inventory.go ./scripts/featuretools_lib.go
-
-## evaluate-feature-formats: Score feature spec formats for code-regeneration readiness
-evaluate-feature-formats:
-	@$(GO) run -tags featuretools ./scripts/evaluate-feature-formats.go
 
 ## lint-features: Check feature requirements and surface ownership
 lint-features:

@@ -10,6 +10,9 @@ with the code change. The `make lint-features` gate verifies that feature specs
 own discovered repository surfaces and that each requirement has acceptance
 evidence.
 
+The canonical spec format is defined in
+[Feature Requirements Format](../design/feature-requirements-format.md).
+
 ## Canonical Specs
 
 | Feature | Spec |
@@ -34,8 +37,7 @@ evidence.
 1. Run `make feature-inventory` to inspect currently discovered surfaces.
 2. Update the relevant feature spec when changing behavior.
 3. Link unit or integration tests in `Acceptance Evidence`.
-4. Run `make evaluate-feature-formats` when changing the spec format itself.
-5. Run `make lint-features`, `make test`, and affected integration suites.
+4. Run `make lint-features`, `make test`, and affected integration suites.
 
 ## Requirement Rules
 
