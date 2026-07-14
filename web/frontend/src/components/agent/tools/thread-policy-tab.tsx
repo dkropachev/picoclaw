@@ -2,10 +2,7 @@ import { IconPlus, IconTrash } from "@tabler/icons-react"
 import type { ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 
-import type {
-  ThreadPolicyConfig,
-  ThreadPolicyRuleType,
-} from "@/api/tools"
+import type { ThreadPolicyConfig, ThreadPolicyRuleType } from "@/api/tools"
 import { ConfigChangeNotice } from "@/components/config-change-notice"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -130,7 +127,7 @@ export function ThreadPolicyTab({
                   label={t("pages.agent.tools.thread_policy.mode", "Mode")}
                   description={t(
                     "pages.agent.tools.thread_policy.mode_desc",
-                    "Auto creates or switches matching threads; suggest only surfaces the option.",
+                    "Auto creates or switches matching threads; tool lets the model register or attach threads; suggest only surfaces the option.",
                   )}
                 >
                   <Select
@@ -147,7 +144,16 @@ export function ThreadPolicyTab({
                     </SelectTrigger>
                     <SelectContent className="border-border/40 rounded-xl shadow-lg">
                       <SelectItem value="auto">
-                        {t("pages.agent.tools.thread_policy.modes.auto", "Auto")}
+                        {t(
+                          "pages.agent.tools.thread_policy.modes.auto",
+                          "Auto",
+                        )}
+                      </SelectItem>
+                      <SelectItem value="tool">
+                        {t(
+                          "pages.agent.tools.thread_policy.modes.tool",
+                          "Tool",
+                        )}
                       </SelectItem>
                       <SelectItem value="suggest">
                         {t(

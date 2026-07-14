@@ -3,6 +3,7 @@ import { useSetAtom } from "jotai"
 import { useEffect, useRef } from "react"
 import { useTranslation } from "react-i18next"
 
+import type { ThreadSummary } from "@/api/threads"
 import { ThreadTile } from "@/components/threads/thread-tile"
 import { switchChatSession } from "@/features/chat/controller"
 import type { ThreadCardPayload } from "@/features/chat/thread-cards"
@@ -17,26 +18,50 @@ export function ThreadCardMessage({ payload }: { payload: ThreadCardPayload }) {
   const setFocusNonce = useSetAtom(threadSearchFocusNonceAtom)
   const autoSwitchedThreadIdRef = useRef<string | null>(null)
 
-  const searchQuery =
-    payload.type === "picoclaw.thread_search.v1"
-      ? payload.query
-      : (payload.query ?? "")
-  const threads =
-    payload.type === "picoclaw.thread_search.v1"
-      ? payload.threads
-      : [payload.thread]
+  let searchQuery = ""
+  let threads: ThreadSummary[] = []
+  switch (payload.type) {
+    case "picoclaw.thread_search.v1":
+    case "picoclaw.thread_search.v2":
+    case "picoclaw.thread_proposal.v1":
+      searchQuery = payload.query ?? ""
+      threads = payload.threads
+      break
+    case "picoclaw.thread_switch.v1":
+    case "picoclaw.thread_switch.v2":
+      searchQuery = payload.query ?? ""
+      threads = [payload.thread]
+      break
+    case "picoclaw.thread_return.v1":
+      break
+  }
 
   useEffect(() => {
     if (
-      payload.type === "picoclaw.thread_switch.v1" &&
+      (payload.type === "picoclaw.thread_switch.v1" ||
+        payload.type === "picoclaw.thread_switch.v2") &&
       payload.auto_switch &&
       payload.thread.id
     ) {
-      if (autoSwitchedThreadIdRef.current === payload.thread.id) {
+      const targetSessionId =
+        payload.target_session_id ||
+        payload.thread.ui_session_id ||
+        payload.thread.id
+      if (autoSwitchedThreadIdRef.current === targetSessionId) {
         return
       }
-      autoSwitchedThreadIdRef.current = payload.thread.id
-      void switchChatSession(payload.thread.id)
+      autoSwitchedThreadIdRef.current = targetSessionId
+      void switchChatSession(targetSessionId)
+    }
+    if (
+      payload.type === "picoclaw.thread_return.v1" &&
+      payload.target_session_id
+    ) {
+      if (autoSwitchedThreadIdRef.current === payload.target_session_id) {
+        return
+      }
+      autoSwitchedThreadIdRef.current = payload.target_session_id
+      void switchChatSession(payload.target_session_id)
     }
   }, [payload])
 
@@ -60,7 +85,9 @@ export function ThreadCardMessage({ payload }: { payload: ThreadCardPayload }) {
           <IconSearch className="text-muted-foreground size-4 shrink-0" />
           <div className="min-w-0">
             <div className="text-sm font-semibold">
-              {payload.type === "picoclaw.thread_switch.v1"
+              {payload.type === "picoclaw.thread_switch.v1" ||
+              payload.type === "picoclaw.thread_switch.v2" ||
+              payload.type === "picoclaw.thread_return.v1"
                 ? t("threads.switching")
                 : t("threads.searchResult")}
             </div>
@@ -73,7 +100,11 @@ export function ThreadCardMessage({ payload }: { payload: ThreadCardPayload }) {
       </button>
 
       <div className="border-border/40 space-y-2 border-t p-3">
-        {threads.length === 0 ? (
+        {payload.type === "picoclaw.thread_return.v1" ? (
+          <div className="text-muted-foreground px-2 py-4 text-center text-xs">
+            {t("threads.switching")}
+          </div>
+        ) : threads.length === 0 ? (
           <div className="text-muted-foreground px-2 py-4 text-center text-xs">
             {t("threads.emptySearch")}
           </div>

@@ -53,6 +53,8 @@ type SessionMeta struct {
 	ThreadTitle       string            `json:"thread_title,omitempty"`
 	ThreadContext     map[string]string `json:"thread_context,omitempty"`
 	ThreadSourceQuery string            `json:"thread_source_query,omitempty"`
+	ThreadID          string            `json:"thread_id,omitempty"`
+	ThreadAttachedAt  time.Time         `json:"thread_attached_at,omitempty"`
 }
 
 // JSONLStore implements Store using append-only JSONL files.

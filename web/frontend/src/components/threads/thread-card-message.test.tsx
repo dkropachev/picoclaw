@@ -104,4 +104,26 @@ describe("ThreadCardMessage", () => {
 
     expect(switchChatSession).toHaveBeenCalledTimes(1)
   })
+
+  it("auto-switches v2 cards with target session id", async () => {
+    vi.mocked(switchChatSession).mockClear()
+
+    render(
+      <Provider>
+        <ThreadCardMessage
+          payload={{
+            type: "picoclaw.thread_switch.v2",
+            query: "coding",
+            auto_switch: true,
+            thread,
+            target_session_id: "ui-session-target",
+          }}
+        />
+      </Provider>,
+    )
+
+    await waitFor(() => {
+      expect(switchChatSession).toHaveBeenCalledWith("ui-session-target")
+    })
+  })
 })

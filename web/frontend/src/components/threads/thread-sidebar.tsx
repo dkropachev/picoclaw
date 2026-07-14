@@ -86,7 +86,7 @@ export function ThreadSidebar() {
         thread,
         ...prev.filter((item) => item.id !== thread.id),
       ])
-      void switchChatSession(thread.id)
+      void switchChatSession(thread.ui_session_id || thread.id)
     } catch (error) {
       console.error("Failed to create thread:", error)
       setLoadError(true)
@@ -168,7 +168,7 @@ export function ThreadSidebar() {
             <ThreadTile
               key={thread.id}
               thread={thread}
-              active={thread.id === activeSessionId}
+              active={(thread.ui_session_id || thread.id) === activeSessionId}
               onOpen={openThread}
             />
           ))}

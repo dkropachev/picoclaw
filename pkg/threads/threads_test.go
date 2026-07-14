@@ -10,6 +10,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
 
 func testConfig(t *testing.T) *config.Config {
@@ -131,6 +132,75 @@ func TestListIncludesExistingPicoSessionMetadata(t *testing.T) {
 	}
 	if items[0].Type != TypeInvestigating {
 		t.Fatalf("items[0].Type = %q, want %q", items[0].Type, TypeInvestigating)
+	}
+}
+
+func TestListExcludesPlainOpaqueSessions(t *testing.T) {
+	cfg := testConfig(t)
+	dir := ResolveSessionsDir(cfg.Agents.Defaults.Workspace)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	store, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatalf("NewJSONLStore() error = %v", err)
+	}
+	key := session.BuildOpaqueSessionKey("agent:main:test:plain")
+	if err := store.AddFullMessage(context.Background(), key, providers.Message{
+		Role:    "user",
+		Content: "plain transport session",
+	}); err != nil {
+		t.Fatalf("AddFullMessage() error = %v", err)
+	}
+
+	items, err := NewStoreFromWorkspace(cfg.Agents.Defaults.Workspace).List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("List() = %#v, want no registered threads", items)
+	}
+}
+
+func TestAttachCurrentLinksSessionAndCreatesHandoff(t *testing.T) {
+	cfg := testConfig(t)
+	store := NewStoreFromWorkspace(cfg.Agents.Defaults.Workspace)
+	thread, err := store.CreatePicoThread(context.Background(), cfg, CreateRequest{
+		Type:        TypeCoding,
+		Title:       "Fix CI",
+		SourceQuery: "fix CI",
+	})
+	if err != nil {
+		t.Fatalf("CreatePicoThread() error = %v", err)
+	}
+
+	currentKey := session.BuildOpaqueSessionKey("agent:main:pico:direct:other")
+	attached, handoff, err := store.AttachCurrent(context.Background(), AttachRequest{
+		ThreadID:        thread.ID,
+		SessionKey:      currentKey,
+		OriginSessionID: "other",
+		Summary:         "User clarified this is the CI thread.",
+	})
+	if err != nil {
+		t.Fatalf("AttachCurrent() error = %v", err)
+	}
+	if attached.ID != thread.ID {
+		t.Fatalf("attached.ID = %q, want %q", attached.ID, thread.ID)
+	}
+	if handoff.TargetSessionID != thread.UISessionID {
+		t.Fatalf("handoff.TargetSessionID = %q, want %q", handoff.TargetSessionID, thread.UISessionID)
+	}
+
+	metaStore, err := memory.NewJSONLStore(ResolveSessionsDir(cfg.Agents.Defaults.Workspace))
+	if err != nil {
+		t.Fatalf("NewJSONLStore() error = %v", err)
+	}
+	meta, err := metaStore.GetSessionMeta(context.Background(), currentKey)
+	if err != nil {
+		t.Fatalf("GetSessionMeta() error = %v", err)
+	}
+	if meta.ThreadID != thread.ID {
+		t.Fatalf("meta.ThreadID = %q, want %q", meta.ThreadID, thread.ID)
 	}
 }
 

@@ -70,10 +70,11 @@ type webSearchConfigRequest struct {
 }
 
 type threadPolicyRequest struct {
-	Enabled      bool                      `json:"enabled"`
-	Mode         string                    `json:"mode"`
-	Instructions string                    `json:"instructions"`
-	Rules        []config.ThreadPolicyRule `json:"rules"`
+	Enabled      bool                                `json:"enabled"`
+	Mode         string                              `json:"mode"`
+	Instructions string                              `json:"instructions"`
+	Rules        []config.ThreadPolicyRule           `json:"rules"`
+	Agents       map[string]config.ThreadAgentPolicy `json:"agents,omitempty"`
 }
 
 var toolCatalog = []toolCatalogEntry{
@@ -580,6 +581,7 @@ func (h *Handler) handleUpdateThreadPolicy(w http.ResponseWriter, r *http.Reques
 		Mode:         mode,
 		Instructions: strings.TrimSpace(req.Instructions),
 		Rules:        rules,
+		Agents:       normalizeThreadAgentPolicies(req.Agents),
 	}
 
 	if err := config.SaveConfig(h.configPath, cfg); err != nil {
@@ -604,6 +606,7 @@ func normalizedThreadPolicy(policy config.ThreadPolicyConfig) config.ThreadPolic
 	if policy.Rules == nil {
 		policy.Rules = []config.ThreadPolicyRule{}
 	}
+	policy.Agents = normalizeThreadAgentPolicies(policy.Agents)
 	return policy
 }
 
@@ -611,6 +614,8 @@ func normalizeThreadPolicyMode(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", config.ThreadPolicyModeAuto:
 		return config.ThreadPolicyModeAuto, nil
+	case config.ThreadPolicyModeTool:
+		return config.ThreadPolicyModeTool, nil
 	case config.ThreadPolicyModeSuggest:
 		return config.ThreadPolicyModeSuggest, nil
 	case config.ThreadPolicyModeOff:
@@ -618,6 +623,30 @@ func normalizeThreadPolicyMode(value string) (string, error) {
 	default:
 		return "", fmt.Errorf("invalid thread policy mode")
 	}
+}
+
+func normalizeThreadAgentPolicies(src map[string]config.ThreadAgentPolicy) map[string]config.ThreadAgentPolicy {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]config.ThreadAgentPolicy, len(src))
+	for agentID, policy := range src {
+		agentID = strings.TrimSpace(agentID)
+		if agentID == "" {
+			continue
+		}
+		if strings.TrimSpace(policy.Mode) != "" {
+			policy.Mode = config.NormalizeThreadPolicyMode(policy.Mode)
+		}
+		if strings.TrimSpace(policy.AttachStrategy) != "" {
+			policy.AttachStrategy = config.NormalizeThreadAttachStrategy(policy.AttachStrategy)
+		}
+		out[agentID] = policy
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func normalizeWebSearchProvider(provider string) string {

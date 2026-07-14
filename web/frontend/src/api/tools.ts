@@ -44,7 +44,11 @@ export interface WebSearchConfigResponse {
   settings: Record<string, WebSearchProviderConfig>
 }
 
-export type ThreadPolicyMode = "auto" | "suggest" | "off"
+export type ThreadPolicyMode = "auto" | "tool" | "suggest" | "off"
+export type ThreadAttachStrategy =
+  | "search_then_create"
+  | "search_then_ask"
+  | "never"
 export type ThreadPolicyRuleType =
   | "general"
   | "coding"
@@ -54,6 +58,15 @@ export type ThreadPolicyRuleType =
 export interface ThreadPolicyRule {
   type: ThreadPolicyRuleType
   description: string
+  mode?: ThreadPolicyMode
+  attach_strategy?: ThreadAttachStrategy
+  min_auto_confidence?: number
+  confirm_if_multiple?: boolean
+}
+
+export interface ThreadAgentPolicy {
+  mode?: ThreadPolicyMode
+  attach_strategy?: ThreadAttachStrategy
 }
 
 export interface ThreadPolicyConfig {
@@ -61,6 +74,7 @@ export interface ThreadPolicyConfig {
   mode: ThreadPolicyMode
   instructions: string
   rules: ThreadPolicyRule[]
+  agents?: Record<string, ThreadAgentPolicy>
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {

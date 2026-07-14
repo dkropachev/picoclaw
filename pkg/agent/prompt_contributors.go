@@ -122,6 +122,11 @@ func formatThreadPolicyPrompt(policy config.ThreadPolicyConfig) string {
 			lines,
 			"Mode: suggest. Search or propose a matching thread, but do not create or switch threads unless the user asks.",
 		)
+	case config.ThreadPolicyModeTool:
+		lines = append(
+			lines,
+			"Mode: tool. When a rule matches, use `threads` to find an existing thread and either `register_current` or `attach_current` when the current session should become part of that thread.",
+		)
 	default:
 		lines = append(
 			lines,

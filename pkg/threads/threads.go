@@ -47,21 +47,28 @@ var (
 )
 
 type Store struct {
-	Dir string
+	Dir         string
+	Workspace   string
+	ThreadsDir  string
+	HandoffsDir string
 }
 
 type Thread struct {
-	ID           string            `json:"id"`
-	SessionKey   string            `json:"session_key,omitempty"`
-	Title        string            `json:"title"`
-	Preview      string            `json:"preview"`
-	Type         string            `json:"type"`
-	Context      map[string]string `json:"context,omitempty"`
-	MessageCount int               `json:"message_count"`
-	Created      time.Time         `json:"created"`
-	Updated      time.Time         `json:"updated"`
-	SourceQuery  string            `json:"source_query,omitempty"`
-	Score        int               `json:"score,omitempty"`
+	ID                string            `json:"id"`
+	UISessionID       string            `json:"ui_session_id,omitempty"`
+	SessionKey        string            `json:"session_key,omitempty"`
+	PrimarySessionKey string            `json:"primary_session_key,omitempty"`
+	AgentID           string            `json:"agent_id,omitempty"`
+	OwnerIdentity     string            `json:"owner_identity,omitempty"`
+	Title             string            `json:"title"`
+	Preview           string            `json:"preview"`
+	Type              string            `json:"type"`
+	Context           map[string]string `json:"context,omitempty"`
+	MessageCount      int               `json:"message_count"`
+	Created           time.Time         `json:"created"`
+	Updated           time.Time         `json:"updated"`
+	SourceQuery       string            `json:"source_query,omitempty"`
+	Score             int               `json:"score,omitempty"`
 }
 
 type SearchOptions struct {
@@ -73,11 +80,62 @@ type SearchOptions struct {
 }
 
 type CreateRequest struct {
-	ID          string
-	Type        string
+	ID                string
+	Type              string
+	Title             string
+	Context           map[string]string
+	SourceQuery       string
+	AgentID           string
+	OwnerIdentity     string
+	Registration      string
+	UISessionID       string
+	PrimarySessionKey string
+	SessionKeys       []string
+}
+
+type AttachRequest struct {
+	ThreadID        string
+	SessionKey      string
+	AgentID         string
+	OwnerIdentity   string
+	OriginSessionID string
+	Summary         string
+	Scope           *session.SessionScope
+}
+
+type UpdateRequest struct {
 	Title       string
+	Type        string
 	Context     map[string]string
 	SourceQuery string
+}
+
+type ThreadMeta struct {
+	ID                string            `json:"id"`
+	UISessionID       string            `json:"ui_session_id"`
+	PrimarySessionKey string            `json:"primary_session_key"`
+	AgentID           string            `json:"agent_id"`
+	OwnerIdentity     string            `json:"owner_identity"`
+	Title             string            `json:"title"`
+	Type              string            `json:"type"`
+	Context           map[string]string `json:"context,omitempty"`
+	SourceQuery       string            `json:"source_query,omitempty"`
+	SessionKeys       []string          `json:"session_keys"`
+	Aliases           []string          `json:"aliases,omitempty"`
+	Registration      string            `json:"registration"`
+	CreatedAt         time.Time         `json:"created_at"`
+	UpdatedAt         time.Time         `json:"updated_at"`
+}
+
+type ThreadHandoff struct {
+	ID               string    `json:"id"`
+	OriginSessionKey string    `json:"origin_session_key"`
+	OriginSessionID  string    `json:"origin_session_id,omitempty"`
+	TargetThreadID   string    `json:"target_thread_id"`
+	TargetSessionID  string    `json:"target_session_id"`
+	AgentID          string    `json:"agent_id"`
+	Summary          string    `json:"summary,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 type PicoAllocation struct {
@@ -93,7 +151,7 @@ type metaFile struct {
 	base string
 }
 
-func ResolveSessionsDir(workspace string) string {
+func ResolveWorkspace(workspace string) string {
 	workspace = strings.TrimSpace(workspace)
 	if workspace == "" {
 		home, _ := os.UserHomeDir()
@@ -106,11 +164,29 @@ func ResolveSessionsDir(workspace string) string {
 		home, _ := os.UserHomeDir()
 		workspace = home
 	}
-	return filepath.Join(workspace, "sessions")
+	return workspace
+}
+
+func ResolveSessionsDir(workspace string) string {
+	return filepath.Join(ResolveWorkspace(workspace), "sessions")
+}
+
+func ResolveThreadsDir(workspace string) string {
+	return filepath.Join(ResolveWorkspace(workspace), "threads")
+}
+
+func ResolveHandoffsDir(workspace string) string {
+	return filepath.Join(ResolveThreadsDir(workspace), "handoffs")
 }
 
 func NewStoreFromWorkspace(workspace string) Store {
-	return Store{Dir: ResolveSessionsDir(workspace)}
+	workspace = ResolveWorkspace(workspace)
+	return Store{
+		Dir:         filepath.Join(workspace, "sessions"),
+		Workspace:   workspace,
+		ThreadsDir:  filepath.Join(workspace, "threads"),
+		HandoffsDir: filepath.Join(workspace, "threads", "handoffs"),
+	}
 }
 
 func (s Store) Search(opts SearchOptions) ([]Thread, error) {
@@ -157,72 +233,19 @@ func (s Store) Search(opts SearchOptions) ([]Thread, error) {
 }
 
 func (s Store) List() ([]Thread, error) {
-	if s.Dir == "" {
-		return nil, errors.New("threads: sessions directory is empty")
-	}
-	entries, err := os.ReadDir(s.Dir)
-	if os.IsNotExist(err) {
-		return []Thread{}, nil
-	}
+	s = s.withDefaults()
+	metas, err := s.listThreadMetas()
 	if err != nil {
 		return nil, err
 	}
-
-	metas := make(map[string]metaFile)
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".meta.json") {
-			continue
-		}
-		path := filepath.Join(s.Dir, entry.Name())
-		meta, err := readMeta(path, "")
-		if err != nil {
-			continue
-		}
-		base := strings.TrimSuffix(entry.Name(), ".meta.json")
-		metas[base] = metaFile{meta: meta, base: base}
-	}
-
 	items := make([]Thread, 0, len(metas))
-	seen := make(map[string]struct{})
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-			continue
-		}
-		base := strings.TrimSuffix(entry.Name(), ".jsonl")
-		mf, ok := metas[base]
-		if !ok {
-			key, id, validSessionFile := sessionKeyAndIDFromJSONLFilename(entry.Name())
-			if !validSessionFile {
-				continue
-			}
-			mf = metaFile{meta: memory.SessionMeta{Key: key}, base: base}
-			if _, exists := seen[id]; exists {
-				continue
-			}
-		}
-		thread, ok := s.threadFromMetaFile(mf)
+	for _, meta := range metas {
+		thread, ok := s.threadFromRegistryMeta(meta)
 		if !ok {
 			continue
 		}
-		seen[thread.ID] = struct{}{}
 		items = append(items, thread)
 	}
-
-	for base, mf := range metas {
-		if _, ok := seen[base]; ok {
-			continue
-		}
-		thread, ok := s.threadFromMetaFile(mf)
-		if !ok {
-			continue
-		}
-		if _, exists := seen[thread.ID]; exists {
-			continue
-		}
-		seen[thread.ID] = struct{}{}
-		items = append(items, thread)
-	}
-
 	sort.SliceStable(items, func(i, j int) bool {
 		return items[i].Updated.After(items[j].Updated)
 	})
@@ -230,6 +253,7 @@ func (s Store) List() ([]Thread, error) {
 }
 
 func (s Store) CreatePicoThread(ctx context.Context, cfg *config.Config, req CreateRequest) (Thread, error) {
+	s = s.withDefaults()
 	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}
@@ -274,6 +298,8 @@ func (s Store) CreatePicoThread(ctx context.Context, cfg *config.Config, req Cre
 	meta.ThreadTitle = truncateRunes(firstNonEmpty(req.Title, req.SourceQuery, "New thread"), 80)
 	meta.ThreadContext = MergeContext(ExtractContext(req.SourceQuery+" "+req.Title), req.Context)
 	meta.ThreadSourceQuery = strings.TrimSpace(req.SourceQuery)
+	meta.ThreadID = allocation.SessionID
+	meta.ThreadAttachedAt = now
 	if strings.TrimSpace(meta.Summary) == "" {
 		meta.Summary = meta.ThreadTitle
 	}
@@ -282,12 +308,19 @@ func (s Store) CreatePicoThread(ctx context.Context, cfg *config.Config, req Cre
 		return Thread{}, err
 	}
 
-	thread, ok := s.threadFromMetaFile(metaFile{meta: meta, base: sanitizeSessionKey(allocation.Key)})
-	if !ok {
-		return Thread{}, errors.New("threads: created thread could not be loaded")
-	}
-	_ = ctx
-	return thread, nil
+	return s.CreateThread(ctx, CreateRequest{
+		ID:                allocation.SessionID,
+		UISessionID:       allocation.SessionID,
+		PrimarySessionKey: allocation.Key,
+		SessionKeys:       []string{allocation.Key},
+		AgentID:           firstNonEmpty(req.AgentID, allocation.AgentID),
+		OwnerIdentity:     firstNonEmpty(req.OwnerIdentity, ownerIdentityFromScope(&allocation.Scope)),
+		Type:              meta.ThreadType,
+		Title:             meta.ThreadTitle,
+		Context:           meta.ThreadContext,
+		SourceQuery:       meta.ThreadSourceQuery,
+		Registration:      firstNonEmpty(req.Registration, RegistrationManual),
+	})
 }
 
 func (s Store) Get(id string) (Thread, bool, error) {

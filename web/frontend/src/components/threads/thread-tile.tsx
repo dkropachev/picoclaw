@@ -44,6 +44,7 @@ export function ThreadTile({
   onOpen: (threadId: string) => void
 }) {
   const Icon = TYPE_ICONS[thread.type] ?? IconTag
+  const openSessionId = thread.ui_session_id || thread.id
   const contextEntries = Object.entries(thread.context ?? {}).filter(
     ([key, value]) => key && value,
   )
@@ -57,7 +58,7 @@ export function ThreadTile({
         active && "border-primary/35 bg-accent text-accent-foreground",
         compact && "p-2.5",
       )}
-      onClick={() => onOpen(thread.id)}
+      onClick={() => onOpen(openSessionId)}
     >
       <div className="flex min-w-0 flex-1 flex-col gap-2">
         <div className="flex min-w-0 items-start justify-between gap-2">

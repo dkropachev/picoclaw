@@ -4,7 +4,11 @@ export type ThreadType = "general" | "coding" | "reviewing" | "investigating"
 
 export interface ThreadSummary {
   id: string
+  ui_session_id?: string
   session_key?: string
+  primary_session_key?: string
+  agent_id?: string
+  owner_identity?: string
   title: string
   preview: string
   type: ThreadType

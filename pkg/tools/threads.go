@@ -12,10 +12,12 @@ import (
 )
 
 const (
-	ThreadsToolName       = "threads"
-	threadSearchCardType  = "picoclaw.thread_search.v1"
-	threadSwitchCardType  = "picoclaw.thread_switch.v1"
-	defaultThreadToolSize = 8
+	ThreadsToolName        = "threads"
+	threadSearchCardType   = "picoclaw.thread_search.v2"
+	threadProposalCardType = "picoclaw.thread_proposal.v1"
+	threadSwitchCardType   = "picoclaw.thread_switch.v2"
+	threadReturnCardType   = "picoclaw.thread_return.v1"
+	defaultThreadToolSize  = 8
 )
 
 type ThreadsTool struct {
@@ -30,11 +32,27 @@ type threadSearchCard struct {
 	Total   int                  `json:"total"`
 }
 
+type threadProposalCard struct {
+	Type    string               `json:"type"`
+	Query   string               `json:"query,omitempty"`
+	Reason  string               `json:"reason,omitempty"`
+	Threads []threadstore.Thread `json:"threads"`
+	Total   int                  `json:"total"`
+}
+
 type threadSwitchCard struct {
-	Type       string             `json:"type"`
-	Query      string             `json:"query,omitempty"`
-	AutoSwitch bool               `json:"auto_switch"`
-	Thread     threadstore.Thread `json:"thread"`
+	Type            string                     `json:"type"`
+	Query           string                     `json:"query,omitempty"`
+	AutoSwitch      bool                       `json:"auto_switch"`
+	Thread          threadstore.Thread         `json:"thread"`
+	TargetSessionID string                     `json:"target_session_id"`
+	Handoff         *threadstore.ThreadHandoff `json:"handoff,omitempty"`
+}
+
+type threadReturnCard struct {
+	Type            string `json:"type"`
+	TargetSessionID string `json:"target_session_id"`
+	HandoffID       string `json:"handoff_id"`
 }
 
 func NewThreadsTool(cfg *config.Config, configPath ...string) *ThreadsTool {
@@ -50,7 +68,7 @@ func (t *ThreadsTool) Name() string {
 }
 
 func (t *ThreadsTool) Description() string {
-	return "Search, create, or switch PicoClaw UI threads, and inspect or update the automatic thread routing policy. Use when a request belongs in a separate thread, when the user asks to find previous threads, or when context like repo/location/branch/pr identifies an existing thread."
+	return "Find, propose, register, attach, switch, return from, or update PicoClaw UI threads, and inspect or update the automatic thread routing policy. Use when a request belongs in a separate thread, when the user asks to find previous threads, or when context like repo/location/branch/pr identifies an existing thread."
 }
 
 func (t *ThreadsTool) Parameters() map[string]any {
@@ -59,8 +77,12 @@ func (t *ThreadsTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"action": map[string]any{
 				"type":        "string",
-				"description": "Action to take: search, create, switch, get_policy, or set_policy.",
-				"enum":        []string{"search", "create", "switch", "get_policy", "set_policy"},
+				"description": "Action to take.",
+				"enum": []string{
+					"find", "search", "propose_switch", "create", "register_current",
+					"attach_current", "switch", "return_to_origin", "detach_current",
+					"update_metadata", "get_policy", "set_policy",
+				},
 			},
 			"query": map[string]any{
 				"type":        "string",
@@ -94,6 +116,18 @@ func (t *ThreadsTool) Parameters() map[string]any {
 				"type":        "boolean",
 				"description": "For switch: create a new matching thread when no existing thread matches.",
 			},
+			"handoff_summary": map[string]any{
+				"type":        "string",
+				"description": "For attach_current: concise summary to write into the target thread.",
+			},
+			"handoff_id": map[string]any{
+				"type":        "string",
+				"description": "For return_to_origin: handoff id returned by attach_current/switch.",
+			},
+			"clear_active_thread": map[string]any{
+				"type":        "boolean",
+				"description": "For return_to_origin/detach_current: clear current session's active thread link.",
+			},
 			"policy_enabled": map[string]any{
 				"type":        "boolean",
 				"description": "For set_policy: enable or disable automatic thread routing policy.",
@@ -122,8 +156,45 @@ func (t *ThreadsTool) Parameters() map[string]any {
 							"type":        "string",
 							"description": "Natural-language condition for when this rule should match.",
 						},
+						"mode": map[string]any{
+							"type":        "string",
+							"enum":        []string{"auto", "tool", "suggest", "off"},
+							"description": "Optional rule-specific mode.",
+						},
+						"attach_strategy": map[string]any{
+							"type":        "string",
+							"enum":        []string{"search_then_create", "search_then_ask", "never"},
+							"description": "Optional rule-specific attach strategy.",
+						},
+						"min_auto_confidence": map[string]any{
+							"type":        "number",
+							"description": "Optional confidence threshold for automatic attach/switch.",
+						},
+						"confirm_if_multiple": map[string]any{
+							"type":        "boolean",
+							"description": "Ask before switching when multiple plausible threads match.",
+						},
 					},
 					"required": []string{"type", "description"},
+				},
+			},
+			"agents": map[string]any{
+				"type":        "object",
+				"description": "For set_policy: per-agent thread policy overrides keyed by agent id.",
+				"additionalProperties": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"mode": map[string]any{
+							"type":        "string",
+							"enum":        []string{"auto", "tool", "suggest", "off"},
+							"description": "Agent-specific mode.",
+						},
+						"attach_strategy": map[string]any{
+							"type":        "string",
+							"enum":        []string{"search_then_create", "search_then_ask", "never"},
+							"description": "Agent-specific attach strategy.",
+						},
+					},
 				},
 			},
 		},
@@ -144,6 +215,8 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 	threadID := strings.TrimSpace(stringArg(args, "id"))
 	title := strings.TrimSpace(stringArg(args, "title"))
 	contextTags := contextArg(args["context"])
+	handoffSummary := strings.TrimSpace(stringArg(args, "handoff_summary"))
+	handoffID := strings.TrimSpace(stringArg(args, "handoff_id"))
 	limit := intArg(args["limit"], defaultThreadToolSize)
 	if limit <= 0 {
 		limit = defaultThreadToolSize
@@ -161,7 +234,7 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 		t.cfg = updatedCfg
 		return t.threadPolicyResult(policy)
 
-	case "search":
+	case "find", "search":
 		items, err := store.Search(threadstore.SearchOptions{
 			Query:   query,
 			Type:    threadType,
@@ -173,18 +246,122 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 		}
 		return threadSearchResult(query, items)
 
+	case "propose_switch":
+		items, err := store.Search(threadstore.SearchOptions{
+			Query:   query,
+			Type:    threadType,
+			Context: contextTags,
+			Limit:   limit,
+		})
+		if err != nil {
+			return ErrorResult("searching threads: " + err.Error()).WithError(err)
+		}
+		return threadProposalResult(query, "confirm before switching", items)
+
 	case "create":
 		thread, err := store.CreatePicoThread(ctx, cfg, threadstore.CreateRequest{
-			ID:          threadID,
-			Type:        threadType,
-			Title:       title,
-			Context:     contextTags,
-			SourceQuery: query,
+			ID:           threadID,
+			Type:         threadType,
+			Title:        title,
+			Context:      contextTags,
+			SourceQuery:  query,
+			Registration: threadstore.RegistrationManual,
 		})
 		if err != nil {
 			return ErrorResult("creating thread: " + err.Error()).WithError(err)
 		}
 		return threadSwitchResult(query, thread)
+
+	case "register_current":
+		sessionKey := ToolSessionKey(ctx)
+		if strings.TrimSpace(sessionKey) == "" {
+			return ErrorResult("registering current thread: current session is unavailable")
+		}
+		if !strings.EqualFold(strings.TrimSpace(ToolChannel(ctx)), "pico") {
+			thread, err := store.CreatePicoThread(ctx, cfg, threadstore.CreateRequest{
+				ID:           threadID,
+				Type:         threadType,
+				Title:        firstNonEmptyString(title, query, "New thread"),
+				Context:      contextTags,
+				SourceQuery:  query,
+				AgentID:      ToolAgentID(ctx),
+				Registration: threadstore.RegistrationTool,
+			})
+			if err != nil {
+				return ErrorResult("registering current thread: " + err.Error()).WithError(err)
+			}
+			attached, handoff, err := store.AttachCurrent(ctx, threadstore.AttachRequest{
+				ThreadID:        thread.ID,
+				SessionKey:      sessionKey,
+				AgentID:         ToolAgentID(ctx),
+				OriginSessionID: ToolChatID(ctx),
+				Summary:         handoffSummary,
+				Scope:           ToolSessionScope(ctx),
+			})
+			if err != nil {
+				return ErrorResult("attaching current session: " + err.Error()).WithError(err)
+			}
+			return threadSwitchResultWithHandoff(query, attached, &handoff)
+		}
+		thread, err := store.RegisterCurrent(ctx, threadstore.CreateRequest{
+			ID:                threadID,
+			Type:              threadType,
+			Title:             firstNonEmptyString(title, query, "New thread"),
+			Context:           contextTags,
+			SourceQuery:       query,
+			PrimarySessionKey: sessionKey,
+			AgentID:           ToolAgentID(ctx),
+			Registration:      threadstore.RegistrationTool,
+		}, ToolSessionScope(ctx))
+		if err != nil {
+			return ErrorResult("registering current thread: " + err.Error()).WithError(err)
+		}
+		return threadSwitchResult(query, thread)
+
+	case "attach_current":
+		sessionKey := ToolSessionKey(ctx)
+		if strings.TrimSpace(sessionKey) == "" {
+			return ErrorResult("attaching current session: current session is unavailable")
+		}
+		thread, ok, err := resolveThreadForTool(store, threadID, query, threadType, contextTags, limit)
+		if err != nil {
+			return ErrorResult("finding thread: " + err.Error()).WithError(err)
+		}
+		if !ok {
+			if !boolArg(args["create_if_missing"]) {
+				items, searchErr := store.Search(threadstore.SearchOptions{
+					Query: query, Type: threadType, Context: contextTags, Limit: limit,
+				})
+				if searchErr != nil {
+					return ErrorResult("searching threads: " + searchErr.Error()).WithError(searchErr)
+				}
+				return threadProposalResult(query, "no exact thread selected", items)
+			}
+			created, createErr := store.CreatePicoThread(ctx, cfg, threadstore.CreateRequest{
+				ID:           threadID,
+				Type:         threadType,
+				Title:        firstNonEmptyString(title, query, "New thread"),
+				Context:      contextTags,
+				SourceQuery:  query,
+				Registration: threadstore.RegistrationTool,
+			})
+			if createErr != nil {
+				return ErrorResult("creating thread: " + createErr.Error()).WithError(createErr)
+			}
+			thread = created
+		}
+		attached, handoff, err := store.AttachCurrent(ctx, threadstore.AttachRequest{
+			ThreadID:        thread.ID,
+			SessionKey:      sessionKey,
+			AgentID:         ToolAgentID(ctx),
+			OriginSessionID: ToolChatID(ctx),
+			Summary:         handoffSummary,
+			Scope:           ToolSessionScope(ctx),
+		})
+		if err != nil {
+			return ErrorResult("attaching current session: " + err.Error()).WithError(err)
+		}
+		return threadSwitchResultWithHandoff(query, attached, &handoff)
 
 	case "switch":
 		if threadID != "" {
@@ -211,21 +388,61 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 		}
 		if len(items) == 0 && boolArg(args["create_if_missing"]) {
 			thread, err := store.CreatePicoThread(ctx, cfg, threadstore.CreateRequest{
-				ID:          threadID,
-				Type:        threadType,
-				Title:       firstNonEmptyString(title, query, "New thread"),
-				Context:     contextTags,
-				SourceQuery: query,
+				ID:           threadID,
+				Type:         threadType,
+				Title:        firstNonEmptyString(title, query, "New thread"),
+				Context:      contextTags,
+				SourceQuery:  query,
+				Registration: threadstore.RegistrationTool,
 			})
 			if err != nil {
 				return ErrorResult("creating thread: " + err.Error()).WithError(err)
 			}
 			return threadSwitchResult(query, thread)
 		}
-		return threadSearchResult(query, items)
+		return threadProposalResult(query, "multiple or no matching threads", items)
+
+	case "return_to_origin":
+		if handoffID == "" {
+			handoffID = threadID
+		}
+		handoff, ok, err := store.ReturnToOrigin(handoffID)
+		if err != nil {
+			return ErrorResult("returning to origin: " + err.Error()).WithError(err)
+		}
+		if !ok {
+			return ErrorResult("returning to origin: handoff not found")
+		}
+		if boolArg(args["clear_active_thread"]) {
+			if err := store.DetachCurrent(ToolSessionKey(ctx)); err != nil {
+				return ErrorResult("clearing current thread: " + err.Error()).WithError(err)
+			}
+		}
+		return threadReturnResult(handoff)
+
+	case "detach_current":
+		if err := store.DetachCurrent(ToolSessionKey(ctx)); err != nil {
+			return ErrorResult("detaching current session: " + err.Error()).WithError(err)
+		}
+		return NewToolResult("Detached the current session from its active thread.")
+
+	case "update_metadata":
+		if threadID == "" {
+			return ErrorResult("updating thread metadata: id is required")
+		}
+		thread, ok, err := store.UpdateThread(threadID, threadstore.UpdateRequest{
+			Title: title, Type: threadType, Context: contextTags, SourceQuery: query,
+		})
+		if err != nil {
+			return ErrorResult("updating thread metadata: " + err.Error()).WithError(err)
+		}
+		if !ok {
+			return ErrorResult("updating thread metadata: thread not found")
+		}
+		return threadSearchResult(query, []threadstore.Thread{thread})
 
 	default:
-		return ErrorResult("action must be one of: search, create, switch, get_policy, set_policy")
+		return ErrorResult("action must be one of: find, search, propose_switch, create, register_current, attach_current, switch, return_to_origin, detach_current, update_metadata, get_policy, set_policy")
 	}
 }
 
@@ -262,6 +479,13 @@ func (t *ThreadsTool) updateThreadPolicy(args map[string]any) (*config.Config, c
 			return nil, config.ThreadPolicyConfig{}, err
 		}
 		policy.Rules = rules
+	}
+	if rawAgents, ok := args["agents"]; ok {
+		agents, err := threadPolicyAgentsArg(rawAgents)
+		if err != nil {
+			return nil, config.ThreadPolicyConfig{}, err
+		}
+		policy.Agents = agents
 	}
 	if policy.Mode == "" {
 		policy.Mode = config.ThreadPolicyModeAuto
@@ -312,11 +536,21 @@ func threadSearchResult(query string, items []threadstore.Thread) *ToolResult {
 }
 
 func threadSwitchResult(query string, thread threadstore.Thread) *ToolResult {
+	return threadSwitchResultWithHandoff(query, thread, nil)
+}
+
+func threadSwitchResultWithHandoff(
+	query string,
+	thread threadstore.Thread,
+	handoff *threadstore.ThreadHandoff,
+) *ToolResult {
 	card := threadSwitchCard{
-		Type:       threadSwitchCardType,
-		Query:      query,
-		AutoSwitch: true,
-		Thread:     thread,
+		Type:            threadSwitchCardType,
+		Query:           query,
+		AutoSwitch:      true,
+		Thread:          thread,
+		TargetSessionID: firstNonEmptyString(thread.UISessionID, thread.ID),
+		Handoff:         handoff,
 	}
 	payload, err := json.Marshal(card)
 	if err != nil {
@@ -326,6 +560,65 @@ func threadSwitchResult(query string, thread threadstore.Thread) *ToolResult {
 		ForLLM:  fmt.Sprintf("Switching UI to thread %s (%s).", thread.ID, thread.Title),
 		ForUser: string(payload),
 	}).WithResponseHandled()
+}
+
+func threadProposalResult(query, reason string, items []threadstore.Thread) *ToolResult {
+	card := threadProposalCard{
+		Type:    threadProposalCardType,
+		Query:   query,
+		Reason:  reason,
+		Threads: items,
+		Total:   len(items),
+	}
+	payload, err := json.Marshal(card)
+	if err != nil {
+		return ErrorResult("formatting thread proposal result: " + err.Error()).WithError(err)
+	}
+	return (&ToolResult{
+		ForLLM:  fmt.Sprintf("Found %d candidate thread(s) for query %q; ask before switching.", len(items), query),
+		ForUser: string(payload),
+	}).WithResponseHandled()
+}
+
+func threadReturnResult(handoff threadstore.ThreadHandoff) *ToolResult {
+	target := firstNonEmptyString(handoff.OriginSessionID, handoff.OriginSessionKey)
+	card := threadReturnCard{
+		Type:            threadReturnCardType,
+		TargetSessionID: target,
+		HandoffID:       handoff.ID,
+	}
+	payload, err := json.Marshal(card)
+	if err != nil {
+		return ErrorResult("formatting thread return result: " + err.Error()).WithError(err)
+	}
+	return (&ToolResult{
+		ForLLM:  fmt.Sprintf("Returning UI to original session %s.", target),
+		ForUser: string(payload),
+	}).WithResponseHandled()
+}
+
+func resolveThreadForTool(
+	store threadstore.Store,
+	threadID, query, threadType string,
+	contextTags map[string]string,
+	limit int,
+) (threadstore.Thread, bool, error) {
+	if strings.TrimSpace(threadID) != "" {
+		thread, ok, err := store.Get(threadID)
+		if err != nil || ok {
+			return thread, ok, err
+		}
+	}
+	items, err := store.Search(threadstore.SearchOptions{
+		Query: query, Type: threadType, Context: contextTags, Limit: limit,
+	})
+	if err != nil {
+		return threadstore.Thread{}, false, err
+	}
+	if len(items) == 1 {
+		return items[0], true, nil
+	}
+	return threadstore.Thread{}, false, nil
 }
 
 func stringArg(args map[string]any, key string) string {
@@ -355,6 +648,24 @@ func intArg(raw any, fallback int) int {
 	case json.Number:
 		if parsed, err := value.Int64(); err == nil {
 			return int(parsed)
+		}
+	}
+	return fallback
+}
+
+func floatArg(raw any, fallback float64) float64 {
+	switch value := raw.(type) {
+	case float32:
+		return float64(value)
+	case float64:
+		return value
+	case int:
+		return float64(value)
+	case int64:
+		return float64(value)
+	case json.Number:
+		if parsed, err := value.Float64(); err == nil {
+			return parsed
 		}
 	}
 	return fallback
@@ -399,10 +710,12 @@ func normalizeThreadPolicyMode(value string) (string, error) {
 		return config.ThreadPolicyModeAuto, nil
 	case config.ThreadPolicyModeSuggest:
 		return config.ThreadPolicyModeSuggest, nil
+	case config.ThreadPolicyModeTool:
+		return config.ThreadPolicyModeTool, nil
 	case config.ThreadPolicyModeOff:
 		return config.ThreadPolicyModeOff, nil
 	default:
-		return "", fmt.Errorf("mode must be one of: auto, suggest, off")
+		return "", fmt.Errorf("mode must be one of: auto, tool, suggest, off")
 	}
 }
 
@@ -422,15 +735,85 @@ func threadPolicyRulesArg(raw any) ([]config.ThreadPolicyRule, error) {
 			if strings.TrimSpace(description) == "" {
 				return nil, fmt.Errorf("rule description is required")
 			}
+			mode, _ := obj["mode"].(string)
+			attachStrategy, _ := obj["attach_strategy"].(string)
+			minAutoConfidence := floatArg(obj["min_auto_confidence"], 0)
+			confirmIfMultiple := boolArg(obj["confirm_if_multiple"])
 			out = append(out, config.ThreadPolicyRule{
-				Type:        config.NormalizeThreadPolicyType(threadType),
-				Description: strings.TrimSpace(description),
+				Type:              config.NormalizeThreadPolicyType(threadType),
+				Description:       strings.TrimSpace(description),
+				Mode:              optionalThreadPolicyMode(mode),
+				AttachStrategy:    optionalThreadAttachStrategy(attachStrategy),
+				MinAutoConfidence: minAutoConfidence,
+				ConfirmIfMultiple: confirmIfMultiple,
 			})
 		}
 		return config.NormalizeThreadPolicyRules(out), nil
 	default:
 		return nil, fmt.Errorf("rules must be an array")
 	}
+}
+
+func optionalThreadPolicyMode(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return config.NormalizeThreadPolicyMode(value)
+}
+
+func optionalThreadAttachStrategy(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return config.NormalizeThreadAttachStrategy(value)
+}
+
+func threadPolicyAgentsArg(raw any) (map[string]config.ThreadAgentPolicy, error) {
+	switch agents := raw.(type) {
+	case map[string]config.ThreadAgentPolicy:
+		return normalizeThreadAgentPolicies(agents), nil
+	case map[string]any:
+		out := make(map[string]config.ThreadAgentPolicy, len(agents))
+		for agentID, rawPolicy := range agents {
+			obj, ok := rawPolicy.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("agents must map to objects")
+			}
+			mode, _ := obj["mode"].(string)
+			attachStrategy, _ := obj["attach_strategy"].(string)
+			out[agentID] = config.ThreadAgentPolicy{
+				Mode:           optionalThreadPolicyMode(mode),
+				AttachStrategy: optionalThreadAttachStrategy(attachStrategy),
+			}
+		}
+		return normalizeThreadAgentPolicies(out), nil
+	default:
+		return nil, fmt.Errorf("agents must be an object")
+	}
+}
+
+func normalizeThreadAgentPolicies(src map[string]config.ThreadAgentPolicy) map[string]config.ThreadAgentPolicy {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]config.ThreadAgentPolicy, len(src))
+	for agentID, policy := range src {
+		agentID = strings.TrimSpace(agentID)
+		if agentID == "" {
+			continue
+		}
+		if strings.TrimSpace(policy.Mode) != "" {
+			policy.Mode = config.NormalizeThreadPolicyMode(policy.Mode)
+		}
+		if strings.TrimSpace(policy.AttachStrategy) != "" {
+			policy.AttachStrategy = config.NormalizeThreadAttachStrategy(policy.AttachStrategy)
+		}
+		out[agentID] = policy
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func firstNonEmptyString(values ...string) string {

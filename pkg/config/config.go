@@ -1099,6 +1099,11 @@ const (
 	ThreadPolicyModeOff     = "off"
 	ThreadPolicyModeSuggest = "suggest"
 	ThreadPolicyModeAuto    = "auto"
+	ThreadPolicyModeTool    = "tool"
+
+	ThreadAttachStrategySearchThenCreate = "search_then_create"
+	ThreadAttachStrategySearchThenAsk    = "search_then_ask"
+	ThreadAttachStrategyNever            = "never"
 )
 
 type ThreadsToolConfig struct {
@@ -1107,15 +1112,25 @@ type ThreadsToolConfig struct {
 }
 
 type ThreadPolicyConfig struct {
-	Enabled      bool               `json:"enabled"      env:"PICOCLAW_TOOLS_THREADS_POLICY_ENABLED"`
-	Mode         string             `json:"mode"         env:"PICOCLAW_TOOLS_THREADS_POLICY_MODE"`
-	Instructions string             `json:"instructions" env:"PICOCLAW_TOOLS_THREADS_POLICY_INSTRUCTIONS"`
-	Rules        []ThreadPolicyRule `json:"rules"`
+	Enabled      bool                         `json:"enabled"      env:"PICOCLAW_TOOLS_THREADS_POLICY_ENABLED"`
+	Mode         string                       `json:"mode"         env:"PICOCLAW_TOOLS_THREADS_POLICY_MODE"`
+	Instructions string                       `json:"instructions" env:"PICOCLAW_TOOLS_THREADS_POLICY_INSTRUCTIONS"`
+	Rules        []ThreadPolicyRule           `json:"rules"`
+	Agents       map[string]ThreadAgentPolicy `json:"agents,omitempty"`
 }
 
 type ThreadPolicyRule struct {
-	Type        string `json:"type"`
-	Description string `json:"description"`
+	Type              string  `json:"type"`
+	Description       string  `json:"description"`
+	Mode              string  `json:"mode,omitempty"`
+	AttachStrategy    string  `json:"attach_strategy,omitempty"`
+	MinAutoConfidence float64 `json:"min_auto_confidence,omitempty"`
+	ConfirmIfMultiple bool    `json:"confirm_if_multiple,omitempty"`
+}
+
+type ThreadAgentPolicy struct {
+	Mode           string `json:"mode,omitempty"`
+	AttachStrategy string `json:"attach_strategy,omitempty"`
 }
 
 func (p ThreadPolicyConfig) EffectiveMode() string {
@@ -1124,10 +1139,40 @@ func (p ThreadPolicyConfig) EffectiveMode() string {
 		return ThreadPolicyModeOff
 	case ThreadPolicyModeSuggest:
 		return ThreadPolicyModeSuggest
+	case ThreadPolicyModeTool:
+		return ThreadPolicyModeTool
 	case "", ThreadPolicyModeAuto:
 		return ThreadPolicyModeAuto
 	default:
 		return ThreadPolicyModeAuto
+	}
+}
+
+func NormalizeThreadPolicyMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case ThreadPolicyModeOff:
+		return ThreadPolicyModeOff
+	case ThreadPolicyModeSuggest:
+		return ThreadPolicyModeSuggest
+	case ThreadPolicyModeTool:
+		return ThreadPolicyModeTool
+	case "", ThreadPolicyModeAuto:
+		return ThreadPolicyModeAuto
+	default:
+		return ThreadPolicyModeAuto
+	}
+}
+
+func NormalizeThreadAttachStrategy(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case ThreadAttachStrategySearchThenAsk:
+		return ThreadAttachStrategySearchThenAsk
+	case ThreadAttachStrategyNever:
+		return ThreadAttachStrategyNever
+	case "", ThreadAttachStrategySearchThenCreate:
+		return ThreadAttachStrategySearchThenCreate
+	default:
+		return ThreadAttachStrategySearchThenCreate
 	}
 }
 
@@ -1151,11 +1196,29 @@ func NormalizeThreadPolicyRules(rules []ThreadPolicyRule) []ThreadPolicyRule {
 			continue
 		}
 		out = append(out, ThreadPolicyRule{
-			Type:        NormalizeThreadPolicyType(rule.Type),
-			Description: description,
+			Type:              NormalizeThreadPolicyType(rule.Type),
+			Description:       description,
+			Mode:              normalizeOptionalThreadPolicyMode(rule.Mode),
+			AttachStrategy:    normalizeOptionalThreadAttachStrategy(rule.AttachStrategy),
+			MinAutoConfidence: rule.MinAutoConfidence,
+			ConfirmIfMultiple: rule.ConfirmIfMultiple,
 		})
 	}
 	return out
+}
+
+func normalizeOptionalThreadPolicyMode(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return NormalizeThreadPolicyMode(value)
+}
+
+func normalizeOptionalThreadAttachStrategy(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return NormalizeThreadAttachStrategy(value)
 }
 
 const (

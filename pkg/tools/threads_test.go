@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/session"
 	threadstore "github.com/sipeed/picoclaw/pkg/threads"
 )
 
@@ -41,6 +42,9 @@ func TestThreadsToolCreateSearchAndSwitchCards(t *testing.T) {
 	}
 	if switchCard.Thread.ID == "" {
 		t.Fatal("created thread ID is empty")
+	}
+	if switchCard.TargetSessionID == "" || switchCard.TargetSessionID != switchCard.Thread.UISessionID {
+		t.Fatalf("switch target = %q, thread ui session = %q", switchCard.TargetSessionID, switchCard.Thread.UISessionID)
 	}
 	if switchCard.Thread.Type != threadstore.TypeCoding {
 		t.Fatalf("created thread type = %q", switchCard.Thread.Type)
@@ -85,6 +89,42 @@ func TestThreadsToolCreateSearchAndSwitchCards(t *testing.T) {
 	}
 	if switchCard.Type != threadSwitchCardType || switchCard.Thread.ID == "" {
 		t.Fatalf("explicit switchCard = %#v", switchCard)
+	}
+}
+
+func TestThreadsToolRegisterCurrentUsesToolContext(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = filepath.Join(t.TempDir(), "workspace")
+	tool := NewThreadsTool(cfg)
+
+	scope := &session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "main",
+		Channel:    "pico",
+		Dimensions: []string{"chat"},
+		Values:     map[string]string{"chat": "direct:pico:current-ui-session"},
+	}
+	sessionKey := session.BuildSessionKey(*scope)
+	ctx := WithToolContext(context.Background(), "pico", "current-ui-session")
+	ctx = WithToolSessionContext(ctx, "main", sessionKey, scope)
+	result := tool.Execute(ctx, map[string]any{
+		"action": "register_current",
+		"title":  "Current coding session",
+		"type":   "coding",
+	})
+	if result.IsError {
+		t.Fatalf("register_current result error: %s", result.ForLLM)
+	}
+
+	var switchCard threadSwitchCard
+	if err := json.Unmarshal([]byte(result.ForUser), &switchCard); err != nil {
+		t.Fatalf("Unmarshal(register ForUser) error = %v", err)
+	}
+	if switchCard.Thread.SessionKey != sessionKey {
+		t.Fatalf("registered session key = %q, want %q", switchCard.Thread.SessionKey, sessionKey)
+	}
+	if switchCard.TargetSessionID != "current-ui-session" {
+		t.Fatalf("target session id = %q, want current-ui-session", switchCard.TargetSessionID)
 	}
 }
 
