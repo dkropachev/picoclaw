@@ -1,0 +1,107 @@
+import { render, screen, waitFor } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
+import { Provider, createStore } from "jotai"
+import { describe, expect, it, vi } from "vitest"
+
+import type { ThreadSummary } from "@/api/threads"
+import { ThreadCardMessage } from "@/components/threads/thread-card-message"
+import { switchChatSession } from "@/features/chat/controller"
+import {
+  threadSearchFocusNonceAtom,
+  threadSearchQueryAtom,
+} from "@/store/threads"
+
+vi.mock("@/features/chat/controller", () => ({
+  switchChatSession: vi.fn(),
+}))
+
+const thread: ThreadSummary = {
+  id: "session-coding",
+  title: "Implement thread sidebar",
+  preview: "Code in /extra/dkropachev/picoclaw",
+  type: "coding",
+  context: {
+    location: "/extra/dkropachev/picoclaw",
+    branch: "main",
+  },
+  message_count: 3,
+  created: "2026-07-14T12:00:00Z",
+  updated: "2026-07-14T12:05:00Z",
+}
+
+describe("ThreadCardMessage", () => {
+  it("opens exact model query in thread sidebar search", async () => {
+    const store = createStore()
+    const user = userEvent.setup()
+
+    render(
+      <Provider store={store}>
+        <ThreadCardMessage
+          payload={{
+            type: "picoclaw.thread_search.v1",
+            query: "location:/extra/dkropachev/picoclaw",
+            threads: [thread],
+            total: 1,
+          }}
+        />
+      </Provider>,
+    )
+
+    await user.click(screen.getByRole("button", { name: /thread search/i }))
+
+    expect(store.get(threadSearchQueryAtom)).toBe(
+      "location:/extra/dkropachev/picoclaw",
+    )
+    expect(store.get(threadSearchFocusNonceAtom)).toBe(1)
+  })
+
+  it("switches when a thread tile is clicked", async () => {
+    const user = userEvent.setup()
+    vi.mocked(switchChatSession).mockClear()
+
+    render(
+      <Provider>
+        <ThreadCardMessage
+          payload={{
+            type: "picoclaw.thread_search.v1",
+            query: "coding",
+            threads: [thread],
+            total: 1,
+          }}
+        />
+      </Provider>,
+    )
+
+    await user.click(screen.getByRole("button", { name: /implement thread/i }))
+
+    expect(switchChatSession).toHaveBeenCalledWith("session-coding")
+  })
+
+  it("auto-switches for switch cards", async () => {
+    vi.mocked(switchChatSession).mockClear()
+    const payload = {
+      type: "picoclaw.thread_switch.v1" as const,
+      query: "coding",
+      auto_switch: true,
+      thread,
+    }
+
+    const { rerender } = render(
+      <Provider>
+        <ThreadCardMessage payload={payload} />
+      </Provider>,
+    )
+
+    await waitFor(() => {
+      expect(switchChatSession).toHaveBeenCalledWith("session-coding")
+    })
+
+    rerender(
+      <Provider>
+        <ThreadCardMessage payload={{ ...payload }} />
+      </Provider>,
+    )
+
+    expect(switchChatSession).toHaveBeenCalledTimes(1)
+  })
+})

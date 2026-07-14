@@ -486,6 +486,9 @@ func DefaultConfig() *Config {
 			Subagent: ToolConfig{
 				Enabled: true,
 			},
+			Threads: ToolConfig{
+				Enabled: true,
+			},
 			WebFetch: ToolConfig{
 				Enabled: true,
 			},

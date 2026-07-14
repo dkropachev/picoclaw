@@ -1,6 +1,7 @@
 {
   "navigation": {
     "chat": "Chat",
+    "threads": "Vlákna",
     "model_group": "Modely",
     "models": "Modely",
     "credentials": "Přihlašovací údaje",

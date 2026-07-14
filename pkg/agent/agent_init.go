@@ -160,6 +160,10 @@ func registerSharedTools(
 			agent.Tools.Register(tools.NewSerialTool())
 		}
 
+		if cfg.Tools.IsToolEnabled("threads") {
+			agent.Tools.Register(tools.NewThreadsTool(cfg))
+		}
+
 		// Message tool
 		if cfg.Tools.IsToolEnabled("message") {
 			messageTool := tools.NewMessageTool()

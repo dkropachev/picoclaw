@@ -1,6 +1,7 @@
 {
   "navigation": {
     "chat": "Chat",
+    "threads": "Threads",
     "model_group": "Models",
     "models": "Models",
     "credentials": "Credentials",
@@ -591,6 +592,25 @@
       "clientIdPlaceholder": "Auto-generated if blank",
       "secretSet": "Already configured. Leave blank to keep unchanged.",
       "secretEmpty": "Not configured"
+    }
+  },
+  "threads": {
+    "title": "Threads",
+    "newThread": "New thread",
+    "searchPlaceholder": "Search threads...",
+    "loadFailed": "Failed to load threads",
+    "loading": "Loading threads...",
+    "empty": "No threads yet",
+    "emptySearch": "No matching threads",
+    "searchResult": "Thread search",
+    "switching": "Switching thread",
+    "allThreads": "All threads",
+    "types": {
+      "all": "All types",
+      "general": "General",
+      "coding": "Coding",
+      "reviewing": "Reviewing",
+      "investigating": "Investigating"
     }
   },
   "pages": {
