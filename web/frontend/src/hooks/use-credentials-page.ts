@@ -43,6 +43,7 @@ export function useCredentialsPage() {
   const [openAIToken, setOpenAIToken] = useState("")
   const [openAICredentialID, setOpenAICredentialID] = useState("")
   const [anthropicToken, setAnthropicToken] = useState("")
+  const [anthropicCredentialID, setAnthropicCredentialID] = useState("")
 
   const [logoutDialogOpen, setLogoutDialogOpen] = useState(false)
   const [logoutConfirmProvider, setLogoutConfirmProvider] = useState<
@@ -448,6 +449,7 @@ export function useCredentialsPage() {
     openAIToken,
     openAICredentialID,
     anthropicToken,
+    anthropicCredentialID,
     openaiStatus,
     anthropicStatus,
     antigravityStatus,
@@ -459,6 +461,7 @@ export function useCredentialsPage() {
     setOpenAIToken,
     setOpenAICredentialID,
     setAnthropicToken,
+    setAnthropicCredentialID,
     startBrowserOAuth,
     startOpenAIDeviceCode,
     stopLoading,

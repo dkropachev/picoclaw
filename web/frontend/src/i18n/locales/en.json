@@ -191,7 +191,8 @@
       "deviceCode": "Device Code",
       "stopLoading": "Stop Loading",
       "saveToken": "Save",
-      "logout": "Logout"
+      "logout": "Logout",
+      "use": "Use"
     },
     "logoutDialog": {
       "title": "Logout provider?",
@@ -204,7 +205,11 @@
     "labels": {
       "account": "Account",
       "email": "Email",
-      "project": "Project"
+      "project": "Project",
+      "saved": "Saved",
+      "selected": "Selected",
+      "default": "Default",
+      "noneSaved": "No saved credentials"
     },
     "errors": {
       "loadFailed": "Failed to load credentials",
