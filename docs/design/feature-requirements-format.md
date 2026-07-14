@@ -12,12 +12,6 @@ This format is optimized for two outcomes:
 2. A coding agent can recreate same or similar implementation behavior from the
    spec by following explicit contracts, state, ordering, tests, and anchors.
 
-The format was selected after a generative benchmark in which Codex agents
-recreated the redacted `FR-EVENTS` implementation from ten candidate feature
-formats. The matrix format tied for perfect behavior score and used the fewest
-tokens among the perfect-scoring formats. See
-[Feature Requirements Format Benchmark](feature-requirements-format-benchmark.md).
-
 ## Required Shape
 
 Each feature spec must use these sections:

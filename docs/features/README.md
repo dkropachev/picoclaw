@@ -11,9 +11,7 @@ own discovered repository surfaces and that each requirement has acceptance
 evidence.
 
 The canonical spec format is the Reconstruction Contract Matrix, defined in
-[Feature Requirements Format](../design/feature-requirements-format.md) and
-selected by the
-[Feature Requirements Format Benchmark](../design/feature-requirements-format-benchmark.md).
+[Feature Requirements Format](../design/feature-requirements-format.md).
 
 ## Canonical Specs
 
