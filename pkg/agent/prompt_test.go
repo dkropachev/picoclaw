@@ -429,7 +429,9 @@ func TestContextBuilder_IncludesThreadPolicyContributor(t *testing.T) {
 	system := messages[0]
 	if !strings.Contains(system.Content, "## Thread Routing Policy") ||
 		!strings.Contains(system.Content, "Move code work into a coding thread.") ||
-		!strings.Contains(system.Content, "action=\"switch\"") {
+		!strings.Contains(system.Content, "action=\"switch\"") ||
+		!strings.Contains(system.Content, "thread navigation, not new work") ||
+		!strings.Contains(system.Content, "without `create_if_missing`") {
 		t.Fatalf("system prompt missing thread policy: %q", system.Content)
 	}
 }

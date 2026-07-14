@@ -136,6 +136,8 @@ func formatThreadPolicyPrompt(policy config.ThreadPolicyConfig) string {
 	lines = append(
 		lines,
 		"The user can ask you to inspect or change this policy from chat; use `threads` with `action=\"get_policy\"` or `action=\"set_policy\"`.",
+		"Requests to find, search, show, list, open, switch to, or continue an existing thread are thread navigation, not new work. Use `find`, `search`, `propose_switch`, or `switch` without `create_if_missing`; do not create, register, or attach a new thread unless the user explicitly asks to create one.",
+		"After a successful switch for a thread navigation request, the navigation request is complete. Continue in that selected thread for later user work instead of creating another thread from the navigation text.",
 	)
 	if len(rules) > 0 {
 		lines = append(lines, "")

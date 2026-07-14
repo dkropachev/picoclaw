@@ -9,6 +9,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	threadstore "github.com/sipeed/picoclaw/pkg/threads"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 const (
@@ -129,7 +130,7 @@ func (t *ThreadsTool) Parameters() map[string]any {
 			},
 			"create_if_missing": map[string]any{
 				"type":        "boolean",
-				"description": "For switch: create a new matching thread when no existing thread matches.",
+				"description": "For switch/attach_current: create a new matching thread when no existing thread matches. Do not set this for requests to find, search, show, or list existing threads.",
 			},
 			"handoff_summary": map[string]any{
 				"type":        "string",
@@ -232,6 +233,7 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 	contextTags := contextArg(args["context"])
 	handoffSummary := strings.TrimSpace(stringArg(args, "handoff_summary"))
 	handoffID := strings.TrimSpace(stringArg(args, "handoff_id"))
+	lookupRequest := isThreadLookupRequest(query, title)
 	limit := intArg(args["limit"], defaultThreadToolSize)
 	if limit <= 0 {
 		limit = defaultThreadToolSize
@@ -274,6 +276,9 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 		return threadProposalResult(query, "confirm before switching", items)
 
 	case "create":
+		if lookupRequest {
+			return threadLookupCreateDeniedResult("creating thread")
+		}
 		thread, err := store.CreatePicoThread(ctx, cfg, threadstore.CreateRequest{
 			ID:           threadID,
 			Type:         threadType,
@@ -291,6 +296,9 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 		sessionKey := ToolSessionKey(ctx)
 		if strings.TrimSpace(sessionKey) == "" {
 			return ErrorResult("registering current thread: current session is unavailable")
+		}
+		if lookupRequest {
+			return threadLookupCreateDeniedResult("registering current thread")
 		}
 		if !strings.EqualFold(strings.TrimSpace(ToolChannel(ctx)), "pico") {
 			thread, err := store.CreatePicoThread(ctx, cfg, threadstore.CreateRequest{
@@ -352,6 +360,15 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 				}
 				return threadProposalResult(query, "no exact thread selected", items)
 			}
+			if lookupRequest {
+				items, searchErr := store.Search(threadstore.SearchOptions{
+					Query: query, Type: threadType, Context: contextTags, Limit: limit,
+				})
+				if searchErr != nil {
+					return ErrorResult("searching threads: " + searchErr.Error()).WithError(searchErr)
+				}
+				return threadProposalResult(query, "thread lookup did not authorize creating a new thread", items)
+			}
 			created, createErr := store.CreatePicoThread(ctx, cfg, threadstore.CreateRequest{
 				ID:           threadID,
 				Type:         threadType,
@@ -402,6 +419,9 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 			return threadSwitchResult(query, items[0])
 		}
 		if len(items) == 0 && boolArg(args["create_if_missing"]) {
+			if lookupRequest {
+				return threadProposalResult(query, "thread lookup did not authorize creating a new thread", items)
+			}
 			thread, err := store.CreatePicoThread(ctx, cfg, threadstore.CreateRequest{
 				ID:           threadID,
 				Type:         threadType,
@@ -634,6 +654,92 @@ func resolveThreadForTool(
 		return items[0], true, nil
 	}
 	return threadstore.Thread{}, false, nil
+}
+
+func threadLookupCreateDeniedResult(action string) *ToolResult {
+	return ErrorResult(
+		action + ": thread lookup requests must not create or register a new thread; " +
+			"use action=\"find\", action=\"search\", or action=\"switch\" without create_if_missing, " +
+			"or continue in the already selected thread.",
+	)
+}
+
+func isThreadLookupRequest(parts ...string) bool {
+	text := normalizedThreadLookupText(parts...)
+	if text == "" {
+		return false
+	}
+	if !strings.Contains(text, " thread ") && !strings.Contains(text, " threads ") {
+		return false
+	}
+	lookupPhrases := []string{
+		" find me a thread ",
+		" find me threads ",
+		" find a thread ",
+		" find the thread ",
+		" find threads ",
+		" search thread ",
+		" search threads ",
+		" search for a thread ",
+		" search for threads ",
+		" look up a thread ",
+		" look up threads ",
+		" lookup thread ",
+		" lookup threads ",
+		" show me a thread ",
+		" show me threads ",
+		" show thread ",
+		" show threads ",
+		" list thread ",
+		" list threads ",
+	}
+	for _, phrase := range lookupPhrases {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	lookupWords := []string{" find ", " search ", " lookup "}
+	threadQualifiers := []string{
+		" thread about ",
+		" thread regarding ",
+		" thread related ",
+		" thread on ",
+		" threads about ",
+		" threads regarding ",
+		" threads related ",
+		" threads on ",
+	}
+	for _, word := range lookupWords {
+		if !strings.Contains(text, word) {
+			continue
+		}
+		for _, qualifier := range threadQualifiers {
+			if strings.Contains(text, qualifier) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizedThreadLookupText(parts ...string) string {
+	joined := strings.ToLower(strings.TrimSpace(strings.Join(parts, " ")))
+	if joined == "" {
+		return ""
+	}
+	hint := strings.ToLower(utils.ToolFeedbackContinuationHint)
+	if strings.HasPrefix(joined, hint) {
+		joined = strings.TrimLeft(strings.TrimPrefix(joined, hint), " \t\r\n:.-")
+	}
+	joined = strings.Map(func(r rune) rune {
+		switch r {
+		case '.', ',', ';', ':', '!', '?', '"', '\'', '`', '(', ')', '[', ']', '{', '}':
+			return ' '
+		default:
+			return r
+		}
+	}, joined)
+	return " " + strings.Join(strings.Fields(joined), " ") + " "
 }
 
 func stringArg(args map[string]any, key string) string {

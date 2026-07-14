@@ -10,6 +10,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/session"
 	threadstore "github.com/sipeed/picoclaw/pkg/threads"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 func TestThreadsToolCreateSearchAndSwitchCards(t *testing.T) {
@@ -132,6 +133,97 @@ func TestThreadsToolRegisterCurrentUsesToolContext(t *testing.T) {
 	}
 }
 
+func TestThreadsToolLookupRequestsDoNotCreateDuplicateThreads(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = filepath.Join(t.TempDir(), "workspace")
+	tool := NewThreadsTool(cfg)
+
+	createResult := tool.Execute(context.Background(), map[string]any{
+		"action": "create",
+		"query":  "japan travel planning",
+		"title":  "Japan travel",
+		"type":   "general",
+	})
+	if createResult.IsError {
+		t.Fatalf("create result error: %s", createResult.ForLLM)
+	}
+	var createdCard threadSwitchCard
+	if err := json.Unmarshal([]byte(createResult.ForUser), &createdCard); err != nil {
+		t.Fatalf("Unmarshal(create ForUser) error = %v", err)
+	}
+
+	switchResult := tool.Execute(context.Background(), map[string]any{
+		"action":            "switch",
+		"query":             "find me a thread regarding japan",
+		"create_if_missing": true,
+	})
+	if switchResult.IsError {
+		t.Fatalf("switch result error: %s", switchResult.ForLLM)
+	}
+	var switchedCard threadSwitchCard
+	if err := json.Unmarshal([]byte(switchResult.ForUser), &switchedCard); err != nil {
+		t.Fatalf("Unmarshal(switch ForUser) error = %v", err)
+	}
+	if switchedCard.Thread.ID != createdCard.Thread.ID {
+		t.Fatalf("switched thread ID = %q, want %q", switchedCard.Thread.ID, createdCard.Thread.ID)
+	}
+	assertThreadCount(t, cfg, 1)
+
+	continuationTitle := utils.ToolFeedbackContinuationHint + ": find me a thread regarding japan"
+	duplicateCreate := tool.Execute(context.Background(), map[string]any{
+		"action": "create",
+		"title":  continuationTitle,
+		"type":   "general",
+	})
+	if !duplicateCreate.IsError || !strings.Contains(duplicateCreate.ForLLM, "lookup requests must not create") {
+		t.Fatalf("duplicate create result = %#v", duplicateCreate)
+	}
+	assertThreadCount(t, cfg, 1)
+
+	scope := &session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "main",
+		Channel:    "pico",
+		Dimensions: []string{"chat"},
+		Values:     map[string]string{"chat": "direct:pico:current-ui-session"},
+	}
+	sessionKey := session.BuildSessionKey(*scope)
+	ctx := WithToolContext(context.Background(), "pico", "current-ui-session")
+	ctx = WithToolSessionContext(ctx, "main", sessionKey, scope)
+	duplicateRegister := tool.Execute(ctx, map[string]any{
+		"action": "register_current",
+		"title":  continuationTitle,
+		"type":   "general",
+	})
+	if !duplicateRegister.IsError || !strings.Contains(duplicateRegister.ForLLM, "lookup requests must not create") {
+		t.Fatalf("duplicate register result = %#v", duplicateRegister)
+	}
+	assertThreadCount(t, cfg, 1)
+}
+
+func TestThreadsToolLookupSwitchCreateIfMissingDoesNotCreate(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = filepath.Join(t.TempDir(), "workspace")
+	tool := NewThreadsTool(cfg)
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"action":            "switch",
+		"query":             "find me a thread regarding atlantis",
+		"create_if_missing": true,
+	})
+	if result.IsError {
+		t.Fatalf("switch result error: %s", result.ForLLM)
+	}
+	var proposalCard threadProposalCard
+	if err := json.Unmarshal([]byte(result.ForUser), &proposalCard); err != nil {
+		t.Fatalf("Unmarshal(switch ForUser) error = %v", err)
+	}
+	if proposalCard.Type != threadProposalCardType || proposalCard.Total != 0 {
+		t.Fatalf("proposalCard = %#v", proposalCard)
+	}
+	assertThreadCount(t, cfg, 0)
+}
+
 func TestThreadsToolSetPolicyPersistsConfig(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
@@ -176,5 +268,17 @@ func TestThreadsToolSetPolicyPersistsConfig(t *testing.T) {
 	if len(updated.Tools.Threads.Policy.Rules) != 1 ||
 		updated.Tools.Threads.Policy.Rules[0].Type != "coding" {
 		t.Fatalf("rules = %#v", updated.Tools.Threads.Policy.Rules)
+	}
+}
+
+func assertThreadCount(t *testing.T, cfg *config.Config, want int) {
+	t.Helper()
+	store := threadstore.NewStoreFromWorkspace(cfg.Agents.Defaults.Workspace)
+	items, err := store.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(items) != want {
+		t.Fatalf("thread count = %d, want %d; items = %#v", len(items), want, items)
 	}
 }
