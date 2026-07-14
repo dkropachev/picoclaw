@@ -27,5 +27,8 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Feature requirements lint
+        run: make lint-features
+
       - name: Build core binaries
         run: make build-all

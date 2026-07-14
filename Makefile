@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean help test integration-test build-all lint-docs
+.PHONY: all build install uninstall clean help test integration-test build-all lint-docs feature-inventory lint-features
 
 # Build variables
 BINARY_NAME=picoclaw
@@ -391,10 +391,19 @@ fmt:
 lint-docs:
 	@./scripts/lint-docs.sh
 
+## feature-inventory: Print discovered feature-relevant repo surfaces
+feature-inventory:
+	@$(GO) run -tags featuretools ./scripts/feature_inventory.go ./scripts/featuretools_lib.go
+
+## lint-features: Check feature requirements and surface ownership
+lint-features:
+	@$(GO) run -tags featuretools ./scripts/lint-features.go ./scripts/featuretools_lib.go
+
 ## lint: Run linters
 lint:
 	@$(GOLANGCI_LINT) run --build-tags $(GO_BUILD_TAGS)
 	@./scripts/lint-docs.sh
+	@$(GO) run -tags featuretools ./scripts/lint-features.go ./scripts/featuretools_lib.go
 
 ## fix: Fix linting issues
 fix:
@@ -411,7 +420,7 @@ update-deps:
 	@$(GO) mod tidy
 
 ## check: Run deps, fmt, vet, tests, and docs consistency checks
-check: deps fmt vet test lint-docs
+check: deps fmt vet test lint-docs lint-features
 
 ## run: Build and run picoclaw
 run: build

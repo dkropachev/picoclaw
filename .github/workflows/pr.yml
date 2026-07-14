@@ -25,6 +25,9 @@ jobs:
           version: v2.10.1
           args: --build-tags=goolm,stdjson
 
+      - name: Feature requirements lint
+        run: make lint-features
+
   vuln_check:
     name: Security Check
     runs-on: ubuntu-latest
