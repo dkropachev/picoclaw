@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { Provider, createStore } from "jotai"
-import { describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { ThreadSummary } from "@/api/threads"
 import { ThreadCardMessage } from "@/components/threads/thread-card-message"
@@ -11,8 +11,14 @@ import {
   threadSearchQueryAtom,
 } from "@/store/threads"
 
+const navigateMock = vi.hoisted(() => vi.fn())
+
 vi.mock("@/features/chat/controller", () => ({
   switchChatSession: vi.fn(),
+}))
+
+vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => navigateMock,
 }))
 
 const thread: ThreadSummary = {
@@ -30,6 +36,10 @@ const thread: ThreadSummary = {
 }
 
 describe("ThreadCardMessage", () => {
+  beforeEach(() => {
+    navigateMock.mockReset()
+  })
+
   it("opens exact model query in thread sidebar search", async () => {
     const store = createStore()
     const user = userEvent.setup()
@@ -53,9 +63,10 @@ describe("ThreadCardMessage", () => {
       "location:/extra/dkropachev/picoclaw",
     )
     expect(store.get(threadSearchFocusNonceAtom)).toBe(1)
+    expect(navigateMock).toHaveBeenCalledWith({ to: "/threads" })
   })
 
-  it("switches when a thread tile is clicked", async () => {
+  it("switches into the thread workspace when a thread tile is clicked", async () => {
     const user = userEvent.setup()
     vi.mocked(switchChatSession).mockClear()
 
@@ -75,6 +86,7 @@ describe("ThreadCardMessage", () => {
     await user.click(screen.getByRole("button", { name: /implement thread/i }))
 
     expect(switchChatSession).toHaveBeenCalledWith("session-coding")
+    expect(navigateMock).toHaveBeenCalledWith({ to: "/threads" })
   })
 
   it("auto-switches for switch cards", async () => {
@@ -95,6 +107,7 @@ describe("ThreadCardMessage", () => {
     await waitFor(() => {
       expect(switchChatSession).toHaveBeenCalledWith("session-coding")
     })
+    expect(navigateMock).toHaveBeenCalledWith({ to: "/threads" })
 
     rerender(
       <Provider>
@@ -125,5 +138,6 @@ describe("ThreadCardMessage", () => {
     await waitFor(() => {
       expect(switchChatSession).toHaveBeenCalledWith("ui-session-target")
     })
+    expect(navigateMock).toHaveBeenCalledWith({ to: "/threads" })
   })
 })
