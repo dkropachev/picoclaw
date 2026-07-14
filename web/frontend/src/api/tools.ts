@@ -44,6 +44,25 @@ export interface WebSearchConfigResponse {
   settings: Record<string, WebSearchProviderConfig>
 }
 
+export type ThreadPolicyMode = "auto" | "suggest" | "off"
+export type ThreadPolicyRuleType =
+  | "general"
+  | "coding"
+  | "reviewing"
+  | "investigating"
+
+export interface ThreadPolicyRule {
+  type: ThreadPolicyRuleType
+  description: string
+}
+
+export interface ThreadPolicyConfig {
+  enabled: boolean
+  mode: ThreadPolicyMode
+  instructions: string
+  rules: ThreadPolicyRule[]
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await launcherFetch(path, options)
   if (!res.ok) {
@@ -92,6 +111,20 @@ export async function updateWebSearchConfig(
   payload: WebSearchConfigResponse,
 ): Promise<WebSearchConfigResponse> {
   return request<WebSearchConfigResponse>("/api/tools/web-search-config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function getThreadPolicy(): Promise<ThreadPolicyConfig> {
+  return request<ThreadPolicyConfig>("/api/tools/thread-policy")
+}
+
+export async function updateThreadPolicy(
+  payload: ThreadPolicyConfig,
+): Promise<ThreadPolicyConfig> {
+  return request<ThreadPolicyConfig>("/api/tools/thread-policy", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

@@ -66,6 +66,23 @@ func (cb *ContextBuilder) WithToolDiscovery(useBM25, useRegex bool) *ContextBuil
 	return cb
 }
 
+func (cb *ContextBuilder) WithThreadPolicy(cfg *config.Config) *ContextBuilder {
+	if cfg != nil && cfg.Tools.IsToolEnabled("threads") {
+		if err := cb.RegisterPromptContributor(threadPolicyPromptContributor{
+			cfg: cfg,
+		}); err != nil {
+			logger.WarnCF(
+				"agent",
+				"Failed to register thread policy prompt contributor",
+				map[string]any{
+					"error": err.Error(),
+				},
+			)
+		}
+	}
+	return cb
+}
+
 func (cb *ContextBuilder) WithSplitOnMarker(enabled bool) *ContextBuilder {
 	cb.splitOnMarker = enabled
 	return cb

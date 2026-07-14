@@ -742,6 +742,33 @@
           "api_key_placeholder": "Enter API key, leave it blank to keep the original key",
           "none": "Unavailable"
         },
+        "thread_policy": {
+          "title": "Thread Policy",
+          "description": "Configure when the main chat model should move work into PicoClaw threads.",
+          "load_error": "Failed to load thread policy.",
+          "save": "Save Changes",
+          "open_settings": "Open Thread Policy",
+          "save_success": "Thread policy saved successfully.",
+          "save_error": "Failed to save thread policy.",
+          "unsaved_prompt": "Save thread policy changes to update model routing behavior.",
+          "behavior": "Behavior",
+          "enabled": "Enable Policy",
+          "enabled_desc": "When enabled, the model sees the thread routing policy in the main chat prompt.",
+          "mode": "Mode",
+          "mode_desc": "Auto creates or switches matching threads; suggest only surfaces the option.",
+          "modes": {
+            "auto": "Auto",
+            "suggest": "Suggest",
+            "off": "Off"
+          },
+          "rules": "Rules",
+          "add_rule": "Add Rule",
+          "remove_rule": "Remove rule",
+          "no_rules": "No routing rules configured.",
+          "rule_placeholder": "When should this thread type be used?",
+          "instructions": "Instructions",
+          "instructions_placeholder": "Additional instructions for the model..."
+        },
         "status": {
           "enabled": "Enabled",
           "disabled": "Disabled",

@@ -69,6 +69,13 @@ type webSearchConfigRequest struct {
 	Settings     map[string]webSearchProviderConfig `json:"settings"`
 }
 
+type threadPolicyRequest struct {
+	Enabled      bool                      `json:"enabled"`
+	Mode         string                    `json:"mode"`
+	Instructions string                    `json:"instructions"`
+	Rules        []config.ThreadPolicyRule `json:"rules"`
+}
+
 var toolCatalog = []toolCatalogEntry{
 	{
 		Name:        "read_file",
@@ -161,6 +168,12 @@ var toolCatalog = []toolCatalogEntry{
 		ConfigKey:   "spawn_status",
 	},
 	{
+		Name:        "threads",
+		Description: "Search, create, switch, and configure PicoClaw UI threads.",
+		Category:    "agents",
+		ConfigKey:   "threads",
+	},
+	{
 		Name:        "i2c",
 		Description: "Interact with I2C hardware devices exposed on the host.",
 		Category:    "hardware",
@@ -197,6 +210,8 @@ func (h *Handler) registerToolRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/tools/{name}/state", h.handleUpdateToolState)
 	mux.HandleFunc("GET /api/tools/web-search-config", h.handleGetWebSearchConfig)
 	mux.HandleFunc("PUT /api/tools/web-search-config", h.handleUpdateWebSearchConfig)
+	mux.HandleFunc("GET /api/tools/thread-policy", h.handleGetThreadPolicy)
+	mux.HandleFunc("PUT /api/tools/thread-policy", h.handleUpdateThreadPolicy)
 }
 
 func (h *Handler) handleListTools(w http.ResponseWriter, r *http.Request) {
@@ -379,6 +394,8 @@ func applyToolState(cfg *config.Config, toolName string, enabled bool) error {
 			cfg.Tools.Spawn.Enabled = true
 			cfg.Tools.Subagent.Enabled = true
 		}
+	case "threads":
+		cfg.Tools.Threads.Enabled = enabled
 	case "i2c":
 		cfg.Tools.I2C.Enabled = enabled
 	case "spi":
@@ -515,6 +532,91 @@ func (h *Handler) handleUpdateWebSearchConfig(w http.ResponseWriter, r *http.Req
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(buildWebSearchConfigResponse(cfg)); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+func (h *Handler) handleGetThreadPolicy(w http.ResponseWriter, r *http.Request) {
+	cfg, err := config.LoadConfig(h.configPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	policy := normalizedThreadPolicy(cfg.Tools.Threads.Policy)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(policy); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+func (h *Handler) handleUpdateThreadPolicy(w http.ResponseWriter, r *http.Request) {
+	cfg, err := config.LoadConfig(h.configPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	var req threadPolicyRequest
+	if decodeErr := json.NewDecoder(r.Body).Decode(&req); decodeErr != nil {
+		http.Error(w, fmt.Sprintf("Invalid JSON: %v", decodeErr), http.StatusBadRequest)
+		return
+	}
+
+	mode, err := normalizeThreadPolicyMode(req.Mode)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	rules := config.NormalizeThreadPolicyRules(req.Rules)
+	for _, rule := range rules {
+		if strings.TrimSpace(rule.Description) == "" {
+			http.Error(w, "thread policy rule description is required", http.StatusBadRequest)
+			return
+		}
+	}
+
+	cfg.Tools.Threads.Policy = config.ThreadPolicyConfig{
+		Enabled:      req.Enabled,
+		Mode:         mode,
+		Instructions: strings.TrimSpace(req.Instructions),
+		Rules:        rules,
+	}
+
+	if err := config.SaveConfig(h.configPath, cfg); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	policy := normalizedThreadPolicy(cfg.Tools.Threads.Policy)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(policy); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+func normalizedThreadPolicy(policy config.ThreadPolicyConfig) config.ThreadPolicyConfig {
+	if policy.Mode == "" {
+		policy.Mode = config.ThreadPolicyModeAuto
+	}
+	policy.Mode = policy.EffectiveMode()
+	policy.Instructions = strings.TrimSpace(policy.Instructions)
+	policy.Rules = config.NormalizeThreadPolicyRules(policy.Rules)
+	if policy.Rules == nil {
+		policy.Rules = []config.ThreadPolicyRule{}
+	}
+	return policy
+}
+
+func normalizeThreadPolicyMode(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", config.ThreadPolicyModeAuto:
+		return config.ThreadPolicyModeAuto, nil
+	case config.ThreadPolicyModeSuggest:
+		return config.ThreadPolicyModeSuggest, nil
+	case config.ThreadPolicyModeOff:
+		return config.ThreadPolicyModeOff, nil
+	default:
+		return "", fmt.Errorf("invalid thread policy mode")
 	}
 }
 

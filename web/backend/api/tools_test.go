@@ -254,6 +254,67 @@ func TestHandleUpdateToolState(t *testing.T) {
 	}
 }
 
+func TestHandleThreadPolicyConfig(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tools/thread-policy", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var initial config.ThreadPolicyConfig
+	if err := json.Unmarshal(rec.Body.Bytes(), &initial); err != nil {
+		t.Fatalf("Unmarshal(GET) error = %v", err)
+	}
+	if !initial.Enabled || initial.Mode != config.ThreadPolicyModeAuto {
+		t.Fatalf("initial policy = %#v, want enabled auto", initial)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(
+		http.MethodPut,
+		"/api/tools/thread-policy",
+		bytes.NewBufferString(`{
+			"enabled": true,
+			"mode": "suggest",
+			"instructions": "Ask before moving deploy work.",
+			"rules": [
+				{
+					"type": "coding",
+					"description": "Move implementation requests into coding threads."
+				}
+			]
+		}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	updated, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig(updated) error = %v", err)
+	}
+	if updated.Tools.Threads.Policy.Mode != config.ThreadPolicyModeSuggest {
+		t.Fatalf("mode = %q, want suggest", updated.Tools.Threads.Policy.Mode)
+	}
+	if updated.Tools.Threads.Policy.Instructions != "Ask before moving deploy work." {
+		t.Fatalf("instructions = %q", updated.Tools.Threads.Policy.Instructions)
+	}
+	if len(updated.Tools.Threads.Policy.Rules) != 1 ||
+		updated.Tools.Threads.Policy.Rules[0].Type != "coding" {
+		t.Fatalf("rules = %#v", updated.Tools.Threads.Policy.Rules)
+	}
+}
+
 func TestHandleListTools_ReportsWebSearchEnabledWhenToolIsOn(t *testing.T) {
 	tests := []struct {
 		name         string

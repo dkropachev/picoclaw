@@ -33,10 +33,11 @@ import (
 
 type AgentLoop struct {
 	// Core dependencies
-	bus      interfaces.MessageBus
-	cfg      *config.Config
-	registry *AgentRegistry
-	state    *state.Manager
+	bus        interfaces.MessageBus
+	cfg        *config.Config
+	configPath string
+	registry   *AgentRegistry
+	state      *state.Manager
 
 	// Runtime event system
 	runtimeEvents      runtimeevents.Bus

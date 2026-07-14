@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/config"
 )
 
 func TestPromptRegistry_RejectsRegisteredSourceWrongPlacement(t *testing.T) {
@@ -403,6 +405,47 @@ func TestContextBuilder_CustomToolAllowListSuppressesUnallowedToolContributors(t
 		case string(PromptSourceToolDiscovery), string(PromptSourceAgentDiscovery), "mcp:github_server":
 			t.Fatalf("system parts include unallowed tool contributor: %#v", part)
 		}
+	}
+}
+
+func TestContextBuilder_IncludesThreadPolicyContributor(t *testing.T) {
+	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
+	cfg := config.DefaultConfig()
+	cfg.Tools.Threads.Policy = config.ThreadPolicyConfig{
+		Enabled: true,
+		Mode:    config.ThreadPolicyModeAuto,
+		Rules: []config.ThreadPolicyRule{
+			{
+				Type:        "coding",
+				Description: "Move code work into a coding thread.",
+			},
+		},
+	}
+	cb := NewContextBuilder(t.TempDir()).WithThreadPolicy(cfg)
+
+	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{
+		CurrentMessage: "please code this",
+	})
+	system := messages[0]
+	if !strings.Contains(system.Content, "## Thread Routing Policy") ||
+		!strings.Contains(system.Content, "Move code work into a coding thread.") ||
+		!strings.Contains(system.Content, "action=\"switch\"") {
+		t.Fatalf("system prompt missing thread policy: %q", system.Content)
+	}
+}
+
+func TestContextBuilder_SuppressesThreadPolicyWithoutThreadsTool(t *testing.T) {
+	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
+	cfg := config.DefaultConfig()
+	cb := NewContextBuilder(t.TempDir()).WithThreadPolicy(cfg)
+
+	messages := cb.BuildMessagesFromPrompt(PromptBuildRequest{
+		CurrentMessage: "please code this",
+		AllowedTools:   []string{"echo_text"},
+	})
+	system := messages[0]
+	if strings.Contains(system.Content, "## Thread Routing Policy") {
+		t.Fatalf("system prompt includes thread policy despite tool allowlist: %q", system.Content)
 	}
 }
 

@@ -486,8 +486,26 @@ func DefaultConfig() *Config {
 			Subagent: ToolConfig{
 				Enabled: true,
 			},
-			Threads: ToolConfig{
+			Threads: ThreadsToolConfig{
 				Enabled: true,
+				Policy: ThreadPolicyConfig{
+					Enabled: true,
+					Mode:    ThreadPolicyModeAuto,
+					Rules: []ThreadPolicyRule{
+						{
+							Type:        "coding",
+							Description: "Use a coding thread when the user asks to implement, modify, debug, run tests, inspect a repository, create a pull request, fix CI, or otherwise perform software engineering work.",
+						},
+						{
+							Type:        "reviewing",
+							Description: "Use a reviewing thread when the user asks for code review, PR review, diff analysis, risk assessment, or release readiness checks.",
+						},
+						{
+							Type:        "investigating",
+							Description: "Use an investigating thread when the user asks for multi-step research, diagnostics, log analysis, or root-cause investigation that should be isolated from the main chat.",
+						},
+					},
+				},
 			},
 			WebFetch: ToolConfig{
 				Enabled: true,

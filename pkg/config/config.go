@@ -1096,6 +1096,69 @@ type ReadFileToolConfig struct {
 }
 
 const (
+	ThreadPolicyModeOff     = "off"
+	ThreadPolicyModeSuggest = "suggest"
+	ThreadPolicyModeAuto    = "auto"
+)
+
+type ThreadsToolConfig struct {
+	Enabled bool               `json:"enabled" yaml:"-" env:"PICOCLAW_TOOLS_THREADS_ENABLED"`
+	Policy  ThreadPolicyConfig `json:"policy"  yaml:"-"`
+}
+
+type ThreadPolicyConfig struct {
+	Enabled      bool               `json:"enabled"      env:"PICOCLAW_TOOLS_THREADS_POLICY_ENABLED"`
+	Mode         string             `json:"mode"         env:"PICOCLAW_TOOLS_THREADS_POLICY_MODE"`
+	Instructions string             `json:"instructions" env:"PICOCLAW_TOOLS_THREADS_POLICY_INSTRUCTIONS"`
+	Rules        []ThreadPolicyRule `json:"rules"`
+}
+
+type ThreadPolicyRule struct {
+	Type        string `json:"type"`
+	Description string `json:"description"`
+}
+
+func (p ThreadPolicyConfig) EffectiveMode() string {
+	switch strings.ToLower(strings.TrimSpace(p.Mode)) {
+	case ThreadPolicyModeOff:
+		return ThreadPolicyModeOff
+	case ThreadPolicyModeSuggest:
+		return ThreadPolicyModeSuggest
+	case "", ThreadPolicyModeAuto:
+		return ThreadPolicyModeAuto
+	default:
+		return ThreadPolicyModeAuto
+	}
+}
+
+func NormalizeThreadPolicyType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "coding", "reviewing", "investigating":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "general"
+	}
+}
+
+func NormalizeThreadPolicyRules(rules []ThreadPolicyRule) []ThreadPolicyRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make([]ThreadPolicyRule, 0, len(rules))
+	for _, rule := range rules {
+		description := strings.TrimSpace(rule.Description)
+		if description == "" {
+			continue
+		}
+		out = append(out, ThreadPolicyRule{
+			Type:        NormalizeThreadPolicyType(rule.Type),
+			Description: description,
+		})
+	}
+	return out
+}
+
+const (
 	ReadFileModeBytes = "bytes"
 	ReadFileModeLines = "lines"
 )
@@ -1144,7 +1207,7 @@ type ToolsConfig struct {
 	SpawnStatus     ToolConfig         `json:"spawn_status"      yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPAWN_STATUS_"`
 	SPI             ToolConfig         `json:"spi"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPI_"`
 	Subagent        ToolConfig         `json:"subagent"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
-	Threads         ToolConfig         `json:"threads"           yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_THREADS_"`
+	Threads         ThreadsToolConfig  `json:"threads"           yaml:"-"`
 	WebFetch        ToolConfig         `json:"web_fetch"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
 	WriteFile       ToolConfig         `json:"write_file"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
 }

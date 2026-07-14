@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -18,7 +19,8 @@ const (
 )
 
 type ThreadsTool struct {
-	cfg *config.Config
+	cfg        *config.Config
+	configPath string
 }
 
 type threadSearchCard struct {
@@ -35,8 +37,12 @@ type threadSwitchCard struct {
 	Thread     threadstore.Thread `json:"thread"`
 }
 
-func NewThreadsTool(cfg *config.Config) *ThreadsTool {
-	return &ThreadsTool{cfg: cfg}
+func NewThreadsTool(cfg *config.Config, configPath ...string) *ThreadsTool {
+	path := ""
+	if len(configPath) > 0 {
+		path = strings.TrimSpace(configPath[0])
+	}
+	return &ThreadsTool{cfg: cfg, configPath: path}
 }
 
 func (t *ThreadsTool) Name() string {
@@ -44,7 +50,7 @@ func (t *ThreadsTool) Name() string {
 }
 
 func (t *ThreadsTool) Description() string {
-	return "Search, create, or switch PicoClaw UI threads. Use when a request belongs in a separate thread, when the user asks to find previous threads, or when context like repo/location/branch/pr identifies an existing thread."
+	return "Search, create, or switch PicoClaw UI threads, and inspect or update the automatic thread routing policy. Use when a request belongs in a separate thread, when the user asks to find previous threads, or when context like repo/location/branch/pr identifies an existing thread."
 }
 
 func (t *ThreadsTool) Parameters() map[string]any {
@@ -53,8 +59,8 @@ func (t *ThreadsTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"action": map[string]any{
 				"type":        "string",
-				"description": "Action to take: search, create, or switch.",
-				"enum":        []string{"search", "create", "switch"},
+				"description": "Action to take: search, create, switch, get_policy, or set_policy.",
+				"enum":        []string{"search", "create", "switch", "get_policy", "set_policy"},
 			},
 			"query": map[string]any{
 				"type":        "string",
@@ -88,6 +94,38 @@ func (t *ThreadsTool) Parameters() map[string]any {
 				"type":        "boolean",
 				"description": "For switch: create a new matching thread when no existing thread matches.",
 			},
+			"policy_enabled": map[string]any{
+				"type":        "boolean",
+				"description": "For set_policy: enable or disable automatic thread routing policy.",
+			},
+			"mode": map[string]any{
+				"type":        "string",
+				"description": "For set_policy: policy mode. auto creates/switches when rules match; suggest only suggests; off disables policy.",
+				"enum":        []string{"auto", "suggest", "off"},
+			},
+			"instructions": map[string]any{
+				"type":        "string",
+				"description": "For set_policy: additional model-facing routing instructions. Pass an empty string to clear.",
+			},
+			"rules": map[string]any{
+				"type":        "array",
+				"description": "For set_policy: replacement routing rules.",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"type": map[string]any{
+							"type":        "string",
+							"enum":        []string{"general", "coding", "reviewing", "investigating"},
+							"description": "Thread type to create or switch to when the rule matches.",
+						},
+						"description": map[string]any{
+							"type":        "string",
+							"description": "Natural-language condition for when this rule should match.",
+						},
+					},
+					"required": []string{"type", "description"},
+				},
+			},
 		},
 		"required": []string{"action"},
 	}
@@ -112,6 +150,17 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 	}
 
 	switch action {
+	case "get_policy":
+		return t.threadPolicyResult(cfg.Tools.Threads.Policy)
+
+	case "set_policy":
+		updatedCfg, policy, err := t.updateThreadPolicy(args)
+		if err != nil {
+			return ErrorResult("updating thread policy: " + err.Error()).WithError(err)
+		}
+		t.cfg = updatedCfg
+		return t.threadPolicyResult(policy)
+
 	case "search":
 		items, err := store.Search(threadstore.SearchOptions{
 			Query:   query,
@@ -176,8 +225,73 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 		return threadSearchResult(query, items)
 
 	default:
-		return ErrorResult("action must be one of: search, create, switch")
+		return ErrorResult("action must be one of: search, create, switch, get_policy, set_policy")
 	}
+}
+
+func (t *ThreadsTool) updateThreadPolicy(args map[string]any) (*config.Config, config.ThreadPolicyConfig, error) {
+	cfg := t.cfg
+	if cfg == nil {
+		cfg = config.DefaultConfig()
+	}
+	if t.configPath != "" {
+		loaded, err := config.LoadConfig(t.configPath)
+		if err != nil {
+			return nil, config.ThreadPolicyConfig{}, err
+		}
+		cfg = loaded
+	}
+
+	policy := cfg.Tools.Threads.Policy
+	if enabled, ok := boolArgOK(args["policy_enabled"]); ok {
+		policy.Enabled = enabled
+	}
+	if mode, ok := stringArgOK(args, "mode"); ok {
+		normalized, err := normalizeThreadPolicyMode(mode)
+		if err != nil {
+			return nil, config.ThreadPolicyConfig{}, err
+		}
+		policy.Mode = normalized
+	}
+	if instructions, ok := stringArgOK(args, "instructions"); ok {
+		policy.Instructions = strings.TrimSpace(instructions)
+	}
+	if rawRules, ok := args["rules"]; ok {
+		rules, err := threadPolicyRulesArg(rawRules)
+		if err != nil {
+			return nil, config.ThreadPolicyConfig{}, err
+		}
+		policy.Rules = rules
+	}
+	if policy.Mode == "" {
+		policy.Mode = config.ThreadPolicyModeAuto
+	}
+	policy.Rules = config.NormalizeThreadPolicyRules(policy.Rules)
+	cfg.Tools.Threads.Policy = policy
+
+	if t.configPath != "" {
+		if err := config.SaveConfig(t.configPath, cfg); err != nil {
+			return nil, config.ThreadPolicyConfig{}, err
+		}
+	} else if path := strings.TrimSpace(os.Getenv(config.EnvConfig)); path != "" {
+		if err := config.SaveConfig(path, cfg); err != nil {
+			return nil, config.ThreadPolicyConfig{}, err
+		}
+	}
+
+	return cfg, policy, nil
+}
+
+func (t *ThreadsTool) threadPolicyResult(policy config.ThreadPolicyConfig) *ToolResult {
+	if policy.Mode == "" {
+		policy.Mode = config.ThreadPolicyModeAuto
+	}
+	policy.Rules = config.NormalizeThreadPolicyRules(policy.Rules)
+	payload, err := json.MarshalIndent(policy, "", "  ")
+	if err != nil {
+		return ErrorResult("formatting thread policy: " + err.Error()).WithError(err)
+	}
+	return NewToolResult("Thread routing policy:\n" + string(payload))
 }
 
 func threadSearchResult(query string, items []threadstore.Thread) *ToolResult {
@@ -222,6 +336,14 @@ func stringArg(args map[string]any, key string) string {
 	return value
 }
 
+func stringArgOK(args map[string]any, key string) (string, bool) {
+	if args == nil {
+		return "", false
+	}
+	value, ok := args[key].(string)
+	return value, ok
+}
+
 func intArg(raw any, fallback int) int {
 	switch value := raw.(type) {
 	case int:
@@ -241,6 +363,11 @@ func intArg(raw any, fallback int) int {
 func boolArg(raw any) bool {
 	value, _ := raw.(bool)
 	return value
+}
+
+func boolArgOK(raw any) (bool, bool) {
+	value, ok := raw.(bool)
+	return value, ok
 }
 
 func contextArg(raw any) map[string]string {
@@ -264,6 +391,46 @@ func contextArg(raw any) map[string]string {
 		return nil
 	}
 	return context
+}
+
+func normalizeThreadPolicyMode(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", config.ThreadPolicyModeAuto:
+		return config.ThreadPolicyModeAuto, nil
+	case config.ThreadPolicyModeSuggest:
+		return config.ThreadPolicyModeSuggest, nil
+	case config.ThreadPolicyModeOff:
+		return config.ThreadPolicyModeOff, nil
+	default:
+		return "", fmt.Errorf("mode must be one of: auto, suggest, off")
+	}
+}
+
+func threadPolicyRulesArg(raw any) ([]config.ThreadPolicyRule, error) {
+	switch rules := raw.(type) {
+	case []config.ThreadPolicyRule:
+		return config.NormalizeThreadPolicyRules(rules), nil
+	case []any:
+		out := make([]config.ThreadPolicyRule, 0, len(rules))
+		for _, item := range rules {
+			obj, ok := item.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("rules must contain objects")
+			}
+			threadType, _ := obj["type"].(string)
+			description, _ := obj["description"].(string)
+			if strings.TrimSpace(description) == "" {
+				return nil, fmt.Errorf("rule description is required")
+			}
+			out = append(out, config.ThreadPolicyRule{
+				Type:        config.NormalizeThreadPolicyType(threadType),
+				Description: strings.TrimSpace(description),
+			})
+		}
+		return config.NormalizeThreadPolicyRules(out), nil
+	default:
+		return nil, fmt.Errorf("rules must be an array")
+	}
 }
 
 func firstNonEmptyString(values ...string) string {

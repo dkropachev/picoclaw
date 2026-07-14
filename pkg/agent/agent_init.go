@@ -161,7 +161,7 @@ func registerSharedTools(
 		}
 
 		if cfg.Tools.IsToolEnabled("threads") {
-			agent.Tools.Register(tools.NewThreadsTool(cfg))
+			agent.Tools.Register(tools.NewThreadsTool(cfg, al.configPath))
 		}
 
 		// Message tool

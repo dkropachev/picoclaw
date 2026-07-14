@@ -1,6 +1,10 @@
 package agent
 
-import runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+import (
+	"strings"
+
+	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+)
 
 // AgentLoopOption configures an AgentLoop at construction time.
 type AgentLoopOption func(*AgentLoop)
@@ -16,5 +20,11 @@ func WithRuntimeEvents(bus runtimeevents.Bus) AgentLoopOption {
 		}
 		al.runtimeEvents = bus
 		al.ownsRuntimeEvents = false
+	}
+}
+
+func WithConfigPath(path string) AgentLoopOption {
+	return func(al *AgentLoop) {
+		al.configPath = strings.TrimSpace(path)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
@@ -52,6 +53,98 @@ func (c toolDiscoveryPromptContributor) ContributePrompt(
 			Cache:   PromptCacheEphemeral,
 		},
 	}, nil
+}
+
+type threadPolicyPromptContributor struct {
+	cfg *config.Config
+}
+
+func (c threadPolicyPromptContributor) PromptSource() PromptSourceDescriptor {
+	return PromptSourceDescriptor{
+		ID:              PromptSourceThreadPolicy,
+		Owner:           "threads",
+		Description:     "Thread routing policy",
+		Allowed:         []PromptPlacement{{Layer: PromptLayerInstruction, Slot: PromptSlotWorkspace}},
+		StableByDefault: true,
+	}
+}
+
+func (c threadPolicyPromptContributor) ContributePrompt(
+	_ context.Context,
+	req PromptBuildRequest,
+) ([]PromptPart, error) {
+	if req.SuppressToolUseRule || c.cfg == nil || !c.cfg.Tools.IsToolEnabled("threads") {
+		return nil, nil
+	}
+	if !promptAllowsTool(req, tools.ThreadsToolName) {
+		return nil, nil
+	}
+	content := formatThreadPolicyPrompt(c.cfg.Tools.Threads.Policy)
+	if strings.TrimSpace(content) == "" {
+		return nil, nil
+	}
+
+	return []PromptPart{
+		{
+			ID:      "instruction.thread_policy",
+			Layer:   PromptLayerInstruction,
+			Slot:    PromptSlotWorkspace,
+			Source:  PromptSource{ID: PromptSourceThreadPolicy, Name: "thread:policy"},
+			Title:   "thread routing policy",
+			Content: content,
+			Stable:  true,
+			Cache:   PromptCacheEphemeral,
+		},
+	}, nil
+}
+
+func formatThreadPolicyPrompt(policy config.ThreadPolicyConfig) string {
+	if !policy.Enabled || policy.EffectiveMode() == config.ThreadPolicyModeOff {
+		return ""
+	}
+
+	rules := config.NormalizeThreadPolicyRules(policy.Rules)
+	instructions := strings.TrimSpace(policy.Instructions)
+	if len(rules) == 0 && instructions == "" {
+		return ""
+	}
+
+	var lines []string
+	lines = append(lines, "## Thread Routing Policy")
+	lines = append(lines, "")
+	lines = append(
+		lines,
+		"Use the `threads` tool to keep substantial work in a separate full-window PicoClaw UI thread when the policy below matches.",
+	)
+	switch policy.EffectiveMode() {
+	case config.ThreadPolicyModeSuggest:
+		lines = append(
+			lines,
+			"Mode: suggest. Search or propose a matching thread, but do not create or switch threads unless the user asks.",
+		)
+	default:
+		lines = append(
+			lines,
+			"Mode: auto. When a rule matches, call `threads` before doing the work with `action=\"switch\"`, the matching `type`, `query` set to the user's request, a concise `title`, and `create_if_missing=true`; then continue the work in the selected thread.",
+		)
+	}
+	lines = append(
+		lines,
+		"The user can ask you to inspect or change this policy from chat; use `threads` with `action=\"get_policy\"` or `action=\"set_policy\"`.",
+	)
+	if len(rules) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, "Rules:")
+		for _, rule := range rules {
+			lines = append(lines, fmt.Sprintf("- %s: %s", rule.Type, rule.Description))
+		}
+	}
+	if instructions != "" {
+		lines = append(lines, "")
+		lines = append(lines, "Additional instructions:")
+		lines = append(lines, instructions)
+	}
+	return strings.Join(lines, "\n")
 }
 
 type mcpServerPromptContributor struct {
