@@ -21,6 +21,7 @@ export function CredentialsPage() {
     openAIToken,
     openAICredentialID,
     anthropicToken,
+    anthropicCredentialID,
     openaiStatus,
     anthropicStatus,
     antigravityStatus,
@@ -32,6 +33,7 @@ export function CredentialsPage() {
     setOpenAIToken,
     setOpenAICredentialID,
     setAnthropicToken,
+    setAnthropicCredentialID,
     startBrowserOAuth,
     startOpenAIDeviceCode,
     stopLoading,
@@ -80,6 +82,7 @@ export function CredentialsPage() {
               credentialID={openAICredentialID}
               onTokenChange={setOpenAIToken}
               onCredentialIDChange={setOpenAICredentialID}
+              onSelectCredentialID={setOpenAICredentialID}
               onStartBrowserOAuth={() =>
                 void startBrowserOAuth(
                   "openai",
@@ -102,18 +105,36 @@ export function CredentialsPage() {
               onAskLogout={() =>
                 askLogout("openai", openAICredentialID.trim() || undefined)
               }
+              onAskLogoutCredential={(credentialID) =>
+                askLogout("openai", credentialID)
+              }
             />
 
             <AnthropicCredentialCard
               status={anthropicStatus}
               activeAction={activeAction}
               token={anthropicToken}
+              credentialID={anthropicCredentialID}
               onTokenChange={setAnthropicToken}
+              onCredentialIDChange={setAnthropicCredentialID}
+              onSelectCredentialID={setAnthropicCredentialID}
               onStopLoading={stopLoading}
               onSaveToken={() =>
-                void saveToken("anthropic", anthropicToken.trim())
+                void saveToken(
+                  "anthropic",
+                  anthropicToken.trim(),
+                  anthropicCredentialID.trim() || undefined,
+                )
               }
-              onAskLogout={() => askLogout("anthropic")}
+              onAskLogout={() =>
+                askLogout(
+                  "anthropic",
+                  anthropicCredentialID.trim() || undefined,
+                )
+              }
+              onAskLogoutCredential={(credentialID) =>
+                askLogout("anthropic", credentialID)
+              }
             />
 
             <AntigravityCredentialCard

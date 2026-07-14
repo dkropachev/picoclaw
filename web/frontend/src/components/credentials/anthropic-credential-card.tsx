@@ -11,30 +11,40 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 
 import { CredentialCard } from "./credential-card"
+import { NamedCredentialList } from "./named-credential-list"
 
 interface AnthropicCredentialCardProps {
   status?: OAuthProviderStatus
   activeAction: string
   token: string
+  credentialID: string
   onTokenChange: (value: string) => void
+  onCredentialIDChange: (value: string) => void
+  onSelectCredentialID: (value: string) => void
   onStopLoading: () => void
   onSaveToken: () => void
   onAskLogout: () => void
+  onAskLogoutCredential: (credentialID: string) => void
 }
 
 export function AnthropicCredentialCard({
   status,
   activeAction,
   token,
+  credentialID,
   onTokenChange,
+  onCredentialIDChange,
+  onSelectCredentialID,
   onStopLoading,
   onSaveToken,
   onAskLogout,
+  onAskLogoutCredential,
 }: AnthropicCredentialCardProps) {
   const { t } = useTranslation()
   const actionBusy = activeAction !== ""
   const tokenLoading = activeAction === "anthropic:token"
   const stopLabel = t("credentials.actions.stopLoading")
+  const credentials = status?.credentials ?? []
 
   return (
     <CredentialCard
@@ -49,10 +59,35 @@ export function AnthropicCredentialCard({
       description={t("credentials.providers.anthropic.description")}
       status={status?.status ?? "not_logged_in"}
       authMethod={status?.auth_method}
+      details={
+        credentials.length > 0 ? (
+          <p>
+            {t("credentials.labels.saved", "Saved")}: {credentials.length}
+          </p>
+        ) : null
+      }
       actions={
-        <div className="border-muted flex h-[120px] flex-col justify-center rounded-lg border p-3">
+        <div className="border-muted flex min-h-[208px] flex-col rounded-lg border p-3">
           <div className="flex h-full flex-col gap-3">
-            <div className="flex h-full items-center gap-2">
+            <Input
+              value={credentialID}
+              onChange={(e) => onCredentialIDChange(e.target.value)}
+              placeholder={t(
+                "models.field.credentialIDHint",
+                "Optional named credential, for example anthropic:work. Leave blank for the provider default.",
+              )}
+            />
+
+            <NamedCredentialList
+              provider="anthropic"
+              credentials={credentials}
+              selectedCredentialID={credentialID}
+              actionBusy={actionBusy}
+              onSelectCredentialID={onSelectCredentialID}
+              onAskLogout={onAskLogoutCredential}
+            />
+
+            <div className="flex items-center gap-2">
               <Input
                 value={token}
                 onChange={(e) => onTokenChange(e.target.value)}

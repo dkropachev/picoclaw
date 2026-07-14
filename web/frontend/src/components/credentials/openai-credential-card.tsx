@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 
 import { CredentialCard } from "./credential-card"
+import { NamedCredentialList } from "./named-credential-list"
 
 interface OpenAICredentialCardProps {
   status?: OAuthProviderStatus
@@ -20,11 +21,13 @@ interface OpenAICredentialCardProps {
   credentialID: string
   onTokenChange: (value: string) => void
   onCredentialIDChange: (value: string) => void
+  onSelectCredentialID: (value: string) => void
   onStartBrowserOAuth: () => void
   onStartDeviceCode: () => void
   onStopLoading: () => void
   onSaveToken: () => void
   onAskLogout: () => void
+  onAskLogoutCredential: (credentialID: string) => void
 }
 
 export function OpenAICredentialCard({
@@ -34,11 +37,13 @@ export function OpenAICredentialCard({
   credentialID,
   onTokenChange,
   onCredentialIDChange,
+  onSelectCredentialID,
   onStartBrowserOAuth,
   onStartDeviceCode,
   onStopLoading,
   onSaveToken,
   onAskLogout,
+  onAskLogoutCredential,
 }: OpenAICredentialCardProps) {
   const { t } = useTranslation()
   const actionBusy = activeAction !== ""
@@ -70,14 +75,13 @@ export function OpenAICredentialCard({
           ) : null}
           {credentials.length > 0 ? (
             <p>
-              {t("models.field.credentialID", "Credential ID")}:{" "}
-              {credentials.map((item) => item.credential_id).join(", ")}
+              {t("credentials.labels.saved", "Saved")}: {credentials.length}
             </p>
           ) : null}
         </div>
       }
       actions={
-        <div className="border-muted flex h-[164px] flex-col rounded-lg border p-3">
+        <div className="border-muted flex min-h-[248px] flex-col rounded-lg border p-3">
           <div className="flex h-full flex-col gap-3">
             <Input
               value={credentialID}
@@ -86,6 +90,15 @@ export function OpenAICredentialCard({
                 "models.field.credentialIDHint",
                 "Optional named credential, for example openai:work. Leave blank for the provider default.",
               )}
+            />
+
+            <NamedCredentialList
+              provider="openai"
+              credentials={credentials}
+              selectedCredentialID={credentialID}
+              actionBusy={actionBusy}
+              onSelectCredentialID={onSelectCredentialID}
+              onAskLogout={onAskLogoutCredential}
             />
 
             <div className="min-h-8">
