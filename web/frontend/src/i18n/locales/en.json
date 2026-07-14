@@ -602,6 +602,8 @@
     "loading": "Loading threads...",
     "empty": "No threads yet",
     "emptySearch": "No matching threads",
+    "chatEmptyTitle": "No messages in this thread yet",
+    "chatEmptyDescription": "“{{title}}” is ready.",
     "searchResult": "Thread search",
     "switching": "Switching thread",
     "allThreads": "All threads",

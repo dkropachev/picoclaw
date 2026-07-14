@@ -77,6 +77,30 @@ func TestHandleThreads_CreateListAndOpenSession(t *testing.T) {
 	if detailRec.Code != http.StatusOK {
 		t.Fatalf("detail status = %d, body=%s", detailRec.Code, detailRec.Body.String())
 	}
+	var detail struct {
+		Messages []any  `json:"messages"`
+		Summary  string `json:"summary"`
+	}
+	if err := json.Unmarshal(detailRec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("Unmarshal(detail) error = %v", err)
+	}
+	if len(detail.Messages) != 0 {
+		t.Fatalf("len(detail.Messages) = %d, want empty thread", len(detail.Messages))
+	}
+	if detail.Summary != "Implement threads" {
+		t.Fatalf("detail.Summary = %q, want thread title", detail.Summary)
+	}
+
+	threadBySessionRec := httptest.NewRecorder()
+	threadBySessionReq := httptest.NewRequest(http.MethodGet, "/api/threads/"+created.UISessionID, nil)
+	mux.ServeHTTP(threadBySessionRec, threadBySessionReq)
+	if threadBySessionRec.Code != http.StatusOK {
+		t.Fatalf(
+			"thread by session status = %d, body=%s",
+			threadBySessionRec.Code,
+			threadBySessionRec.Body.String(),
+		)
+	}
 }
 
 func TestHandleThreads_SearchContextFilter(t *testing.T) {

@@ -1,11 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router"
 
-import { ThreadSidebar } from "@/components/threads/thread-sidebar"
+import { ThreadsPage } from "@/components/threads/threads-page"
 
 export const Route = createFileRoute("/threads")({
-  component: ThreadsRoute,
+  component: ThreadsPage,
 })
-
-function ThreadsRoute() {
-  return <ThreadSidebar />
-}

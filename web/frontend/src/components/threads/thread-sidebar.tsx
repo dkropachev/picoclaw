@@ -21,6 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { switchChatSession } from "@/features/chat/controller"
+import { cn } from "@/lib/utils"
 import { chatAtom } from "@/store/chat"
 import {
   threadSearchFocusNonceAtom,
@@ -35,9 +36,14 @@ const THREAD_TYPES: Array<ThreadType | "all"> = [
   "general",
 ]
 
-export function ThreadSidebar() {
+interface ThreadSidebarProps {
+  layout?: "page" | "pane"
+}
+
+export function ThreadSidebar({ layout = "page" }: ThreadSidebarProps) {
   const { t } = useTranslation()
   const inputRef = useRef<HTMLInputElement>(null)
+  const isPane = layout === "pane"
   const [query, setQuery] = useAtom(threadSearchQueryAtom)
   const focusNonce = useAtomValue(threadSearchFocusNonceAtom)
   const { activeSessionId } = useAtomValue(chatAtom)
@@ -95,7 +101,12 @@ export function ThreadSidebar() {
 
   return (
     <section className="bg-background flex min-h-0 flex-1 flex-col">
-      <div className="border-border/50 flex h-14 shrink-0 items-center justify-between border-b px-4">
+      <div
+        className={cn(
+          "border-border/50 flex h-14 shrink-0 items-center justify-between border-b",
+          isPane ? "px-3" : "px-4",
+        )}
+      >
         <div className="flex items-center gap-2">
           <IconSearch className="text-muted-foreground size-4" />
           <h1 className="text-base font-semibold">{t("threads.title")}</h1>
@@ -104,17 +115,24 @@ export function ThreadSidebar() {
           type="button"
           variant="outline"
           size="sm"
-          className="h-9 gap-2"
+          className={cn("h-9 gap-2", isPane && "px-2.5")}
           title={t("threads.newThread")}
           aria-label={t("threads.newThread")}
           onClick={() => void handleCreateThread()}
         >
           <IconPlus className="size-4" />
-          <span>{t("threads.newThread")}</span>
+          <span className={cn(isPane && "hidden xl:inline")}>
+            {t("threads.newThread")}
+          </span>
         </Button>
       </div>
 
-      <div className="border-border/50 flex shrink-0 flex-col gap-3 border-b p-4 md:flex-row">
+      <div
+        className={cn(
+          "border-border/50 flex shrink-0 flex-col gap-3 border-b",
+          isPane ? "p-3" : "p-4 md:flex-row",
+        )}
+      >
         <div className="relative min-w-0 flex-1">
           <IconSearch className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
           <Input
@@ -131,7 +149,9 @@ export function ThreadSidebar() {
             setSelectedType(value as ThreadType | "all")
           }
         >
-          <SelectTrigger className="h-9 w-full md:w-[220px]">
+          <SelectTrigger
+            className={cn("h-9 w-full", !isPane && "md:w-[220px]")}
+          >
             <div className="flex items-center gap-2">
               <IconFilter className="text-muted-foreground size-4" />
               <SelectValue />
@@ -148,7 +168,13 @@ export function ThreadSidebar() {
       </div>
 
       <ScrollArea className="min-h-0 flex-1">
-        <div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-3">
+        <div
+          className={cn(
+            isPane
+              ? "flex flex-col gap-2 p-3"
+              : "grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-3",
+          )}
+        >
           {loadError && (
             <div className="text-destructive bg-destructive/5 rounded-md px-3 py-2 text-sm md:col-span-2 xl:col-span-3">
               {t("threads.loadFailed")}
@@ -169,6 +195,7 @@ export function ThreadSidebar() {
               key={thread.id}
               thread={thread}
               active={(thread.ui_session_id || thread.id) === activeSessionId}
+              compact={isPane}
               onOpen={openThread}
             />
           ))}

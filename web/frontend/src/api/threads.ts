@@ -57,6 +57,24 @@ export async function getThreads({
   return res.json()
 }
 
+export async function getThread(id: string): Promise<ThreadSummary | null> {
+  const normalizedID = id.trim()
+  if (!normalizedID) {
+    return null
+  }
+
+  const res = await launcherFetch(
+    `/api/threads/${encodeURIComponent(normalizedID)}`,
+  )
+  if (res.status === 404) {
+    return null
+  }
+  if (!res.ok) {
+    throw new Error(`Failed to fetch thread ${normalizedID}: ${res.status}`)
+  }
+  return res.json()
+}
+
 export async function createThread(
   input: CreateThreadInput = {},
 ): Promise<ThreadSummary> {

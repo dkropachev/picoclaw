@@ -18,7 +18,8 @@ vi.mock("@/features/chat/controller", () => ({
 }))
 
 const thread: ThreadSummary = {
-  id: "session-sidebar",
+  id: "thread-sidebar",
+  ui_session_id: "session-sidebar",
   title: "Investigate websocket routing",
   preview: "Find why websocket routing fails",
   type: "investigating",
@@ -87,5 +88,23 @@ describe("ThreadSidebar", () => {
       )
       expect(switchChatSession).toHaveBeenCalledWith("session-sidebar")
     })
+  })
+
+  it("opens the thread UI session from a tile", async () => {
+    const user = userEvent.setup()
+
+    render(
+      <Provider>
+        <ThreadSidebar />
+      </Provider>,
+    )
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: /investigate websocket routing/i,
+      }),
+    )
+
+    expect(switchChatSession).toHaveBeenCalledWith("session-sidebar")
   })
 })

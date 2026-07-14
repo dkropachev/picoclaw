@@ -1,4 +1,4 @@
-import { IconPlus } from "@tabler/icons-react"
+import { IconMessages, IconPlus } from "@tabler/icons-react"
 import { useAtom } from "jotai"
 import {
   type ChangeEvent,
@@ -10,6 +10,7 @@ import {
 } from "react"
 import { useTranslation } from "react-i18next"
 
+import { type ThreadSummary, getThread } from "@/api/threads"
 import { AssistantMessage } from "@/components/chat/assistant-message"
 import {
   ChatComposer,
@@ -21,6 +22,7 @@ import { SessionHistoryMenu } from "@/components/chat/session-history-menu"
 import { TypingIndicator } from "@/components/chat/typing-indicator"
 import { UserMessage } from "@/components/chat/user-message"
 import { PageHeader } from "@/components/page-header"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Select,
@@ -47,6 +49,10 @@ import {
   shouldShowAssistantMessage,
 } from "@/store/chat"
 import type { GatewayState } from "@/store/gateway"
+
+interface ChatPageProps {
+  fallbackTitle?: string
+}
 
 function resolveChatInputDisabledReason({
   hasDefaultModel,
@@ -100,7 +106,40 @@ function resolveChatInputDisabledReason({
   return null
 }
 
-export function ChatPage() {
+function ThreadChatEmptyState({ thread }: { thread: ThreadSummary }) {
+  const { t } = useTranslation()
+  const contextEntries = Object.entries(thread.context ?? {}).filter(
+    ([key, value]) => key && value,
+  )
+
+  return (
+    <div className="mx-auto flex max-w-xl flex-col items-center justify-center py-20 text-center">
+      <div className="mb-6 flex h-14 w-14 items-center justify-center rounded-xl bg-sky-500/10 text-sky-600 dark:text-sky-400">
+        <IconMessages className="h-7 w-7" />
+      </div>
+      <h3 className="mb-2 text-lg font-medium">
+        {t("threads.chatEmptyTitle")}
+      </h3>
+      <p className="text-muted-foreground text-sm">
+        {t("threads.chatEmptyDescription", { title: thread.title })}
+      </p>
+      {contextEntries.length > 0 && (
+        <div className="mt-4 flex max-w-full flex-wrap justify-center gap-1.5">
+          {contextEntries.slice(0, 6).map(([key, value]) => (
+            <span
+              key={`${thread.id}-${key}`}
+              className="bg-muted text-muted-foreground max-w-full truncate rounded px-2 py-1 text-xs"
+            >
+              {key}:{value}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function ChatPage({ fallbackTitle }: ChatPageProps = {}) {
   const { t } = useTranslation()
   const scrollRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -110,6 +149,7 @@ export function ChatPage() {
   const [input, setInput] = useState("")
   const [attachments, setAttachments] = useState<ChatAttachment[]>([])
   const [isDragActive, setIsDragActive] = useState(false)
+  const [activeThread, setActiveThread] = useState<ThreadSummary | null>(null)
   const [assistantDetailVisibility, setAssistantDetailVisibility] = useAtom(
     assistantDetailVisibilityAtom,
   )
@@ -137,6 +177,34 @@ export function ChatPage() {
     switchSession,
     newChat,
   } = usePicoChat()
+
+  useEffect(() => {
+    let cancelled = false
+    setActiveThread(null)
+
+    if (!activeSessionId) {
+      return () => {
+        cancelled = true
+      }
+    }
+
+    void getThread(activeSessionId)
+      .then((thread) => {
+        if (!cancelled) {
+          setActiveThread(thread)
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to load active thread metadata:", error)
+        if (!cancelled) {
+          setActiveThread(null)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeSessionId])
 
   const { state: gwState } = useGateway()
   const isGatewayRunning = gwState === "running"
@@ -307,24 +375,37 @@ export function ChatPage() {
 
   const canSubmit =
     canInput && (Boolean(input.trim()) || attachments.length > 0)
+  const title = activeThread?.title || fallbackTitle || t("navigation.chat")
+  const showThreadEmptyState =
+    Boolean(activeThread) &&
+    hasAvailableModels &&
+    Boolean(defaultModelName) &&
+    isGatewayRunning
 
   return (
     <div className="bg-background/95 flex h-full flex-col">
       <PageHeader
-        title={t("navigation.chat")}
+        title={title}
         className={`transition-shadow ${
           hasScrolled ? "shadow-xs" : "shadow-none"
         }`}
         titleExtra={
-          hasAvailableModels && (
-            <ModelSelector
-              defaultModelName={defaultModelName}
-              apiKeyModels={apiKeyModels}
-              oauthModels={oauthModels}
-              localModels={localModels}
-              onValueChange={handleSetDefault}
-            />
-          )
+          <>
+            {activeThread && (
+              <Badge variant="secondary" className="hidden md:inline-flex">
+                {t(`threads.types.${activeThread.type}`)}
+              </Badge>
+            )}
+            {hasAvailableModels && (
+              <ModelSelector
+                defaultModelName={defaultModelName}
+                apiKeyModels={apiKeyModels}
+                oauthModels={oauthModels}
+                localModels={localModels}
+                onValueChange={handleSetDefault}
+              />
+            )}
+          </>
         }
       >
         <div className="border-border/60 hidden items-center gap-2 rounded-lg border px-3 py-1.5 sm:flex">
@@ -388,11 +469,17 @@ export function ChatPage() {
       >
         <div className="mx-auto flex w-full max-w-250 flex-col gap-8 pb-8">
           {messages.length === 0 && !isTyping && (
-            <ChatEmptyState
-              hasAvailableModels={hasAvailableModels}
-              defaultModelName={defaultModelName}
-              isConnected={isGatewayRunning}
-            />
+            <>
+              {showThreadEmptyState && activeThread ? (
+                <ThreadChatEmptyState thread={activeThread} />
+              ) : (
+                <ChatEmptyState
+                  hasAvailableModels={hasAvailableModels}
+                  defaultModelName={defaultModelName}
+                  isConnected={isGatewayRunning}
+                />
+              )}
+            </>
           )}
 
           {messages.map((msg) => {

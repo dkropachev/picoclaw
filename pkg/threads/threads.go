@@ -319,12 +319,19 @@ func (s Store) CreatePicoThread(ctx context.Context, cfg *config.Config, req Cre
 }
 
 func (s Store) Get(id string) (Thread, bool, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Thread{}, false, nil
+	}
 	items, err := s.List()
 	if err != nil {
 		return Thread{}, false, err
 	}
 	for _, item := range items {
-		if item.ID == id {
+		if item.ID == id ||
+			item.UISessionID == id ||
+			item.SessionKey == id ||
+			item.PrimarySessionKey == id {
 			return item, true, nil
 		}
 	}
