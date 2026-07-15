@@ -2,7 +2,11 @@ import { IconPlus, IconTrash } from "@tabler/icons-react"
 import type { ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 
-import type { ThreadPolicyConfig, ThreadPolicyRuleType } from "@/api/tools"
+import type {
+  ThreadPolicyConfig,
+  ThreadPolicyRuleType,
+  ThreadPolicyThresholdLogic,
+} from "@/api/tools"
 import { ConfigChangeNotice } from "@/components/config-change-notice"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -70,7 +74,7 @@ export function ThreadPolicyTab({
               <p className="text-muted-foreground/80 text-[14px] leading-relaxed">
                 {t(
                   "pages.agent.tools.thread_policy.description",
-                  "Configure when the main chat model should move work into PicoClaw threads.",
+                  "Configure when the main chat may become or join a PicoClaw thread.",
                 )}
               </p>
             </div>
@@ -127,7 +131,7 @@ export function ThreadPolicyTab({
                   label={t("pages.agent.tools.thread_policy.mode", "Mode")}
                   description={t(
                     "pages.agent.tools.thread_policy.mode_desc",
-                    "Auto creates or switches matching threads; tool lets the model register or attach threads; suggest only surfaces the option.",
+                    "Tool registers or attaches after rule thresholds; auto may create or switch after thresholds; suggest only surfaces the option.",
                   )}
                 >
                   <Select
@@ -185,7 +189,13 @@ export function ThreadPolicyTab({
                       ...current,
                       rules: [
                         ...current.rules,
-                        { type: "coding", description: "" },
+                        {
+                          type: "coding",
+                          description: "",
+                          min_messages: 12,
+                          min_text_chars: 6000,
+                          threshold_logic: "any",
+                        },
                       ],
                     }))
                   }
@@ -283,6 +293,116 @@ export function ThreadPolicyTab({
                       >
                         <IconTrash className="size-4" />
                       </Button>
+
+                      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_12rem] md:col-span-3">
+                        <label className="space-y-1">
+                          <span className="text-muted-foreground text-[12px] font-medium">
+                            {t(
+                              "pages.agent.tools.thread_policy.min_messages",
+                              "Min Messages",
+                            )}
+                          </span>
+                          <Input
+                            type="number"
+                            min={0}
+                            inputMode="numeric"
+                            value={rule.min_messages ?? ""}
+                            onChange={(event) =>
+                              onUpdateDraft((current) => ({
+                                ...current,
+                                rules: current.rules.map((item, itemIndex) =>
+                                  itemIndex === index
+                                    ? {
+                                        ...item,
+                                        min_messages: parseThresholdInteger(
+                                          event.target.value,
+                                        ),
+                                      }
+                                    : item,
+                                ),
+                              }))
+                            }
+                            className="bg-muted/40 hover:bg-muted/60 focus-visible:bg-background focus-visible:border-border/80 focus-visible:ring-foreground/5 rounded-xl border-transparent shadow-none transition-all duration-300"
+                            placeholder="0"
+                          />
+                        </label>
+
+                        <label className="space-y-1">
+                          <span className="text-muted-foreground text-[12px] font-medium">
+                            {t(
+                              "pages.agent.tools.thread_policy.min_text_chars",
+                              "Min Text Chars",
+                            )}
+                          </span>
+                          <Input
+                            type="number"
+                            min={0}
+                            inputMode="numeric"
+                            value={rule.min_text_chars ?? ""}
+                            onChange={(event) =>
+                              onUpdateDraft((current) => ({
+                                ...current,
+                                rules: current.rules.map((item, itemIndex) =>
+                                  itemIndex === index
+                                    ? {
+                                        ...item,
+                                        min_text_chars: parseThresholdInteger(
+                                          event.target.value,
+                                        ),
+                                      }
+                                    : item,
+                                ),
+                              }))
+                            }
+                            className="bg-muted/40 hover:bg-muted/60 focus-visible:bg-background focus-visible:border-border/80 focus-visible:ring-foreground/5 rounded-xl border-transparent shadow-none transition-all duration-300"
+                            placeholder="0"
+                          />
+                        </label>
+
+                        <label className="space-y-1">
+                          <span className="text-muted-foreground text-[12px] font-medium">
+                            {t(
+                              "pages.agent.tools.thread_policy.threshold_logic",
+                              "Threshold Logic",
+                            )}
+                          </span>
+                          <Select
+                            value={rule.threshold_logic ?? "any"}
+                            onValueChange={(value) =>
+                              onUpdateDraft((current) => ({
+                                ...current,
+                                rules: current.rules.map((item, itemIndex) =>
+                                  itemIndex === index
+                                    ? {
+                                        ...item,
+                                        threshold_logic:
+                                          value as ThreadPolicyThresholdLogic,
+                                      }
+                                    : item,
+                                ),
+                              }))
+                            }
+                          >
+                            <SelectTrigger className="bg-muted/40 hover:bg-muted/60 focus:ring-foreground/5 focus:border-border/80 rounded-xl border-transparent shadow-none transition-all">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent className="border-border/40 rounded-xl shadow-lg">
+                              <SelectItem value="any">
+                                {t(
+                                  "pages.agent.tools.thread_policy.threshold_any",
+                                  "Any Limit",
+                                )}
+                              </SelectItem>
+                              <SelectItem value="all">
+                                {t(
+                                  "pages.agent.tools.thread_policy.threshold_all",
+                                  "All Limits",
+                                )}
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </label>
+                      </div>
                     </div>
                   ))
                 )}
@@ -316,6 +436,14 @@ export function ThreadPolicyTab({
       )}
     </div>
   )
+}
+
+function parseThresholdInteger(value: string): number | undefined {
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined
+  }
+  return parsed
 }
 
 function SettingRow({

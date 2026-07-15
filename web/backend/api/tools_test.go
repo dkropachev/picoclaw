@@ -273,8 +273,14 @@ func TestHandleThreadPolicyConfig(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &initial); err != nil {
 		t.Fatalf("Unmarshal(GET) error = %v", err)
 	}
-	if !initial.Enabled || initial.Mode != config.ThreadPolicyModeAuto {
-		t.Fatalf("initial policy = %#v, want enabled auto", initial)
+	if !initial.Enabled || initial.Mode != config.ThreadPolicyModeTool {
+		t.Fatalf("initial policy = %#v, want enabled tool", initial)
+	}
+	if len(initial.Rules) == 0 ||
+		initial.Rules[0].MinMessages != 12 ||
+		initial.Rules[0].MinTextChars != 6000 ||
+		initial.Rules[0].ThresholdLogic != config.ThreadPolicyThresholdAny {
+		t.Fatalf("initial policy rules = %#v, want threshold defaults", initial.Rules)
 	}
 
 	rec = httptest.NewRecorder()
@@ -288,7 +294,10 @@ func TestHandleThreadPolicyConfig(t *testing.T) {
 			"rules": [
 				{
 					"type": "coding",
-					"description": "Move implementation requests into coding threads."
+					"description": "Move implementation requests into coding threads.",
+					"min_messages": 8,
+					"min_text_chars": 3000,
+					"threshold_logic": "all"
 				}
 			]
 		}`),
@@ -310,7 +319,10 @@ func TestHandleThreadPolicyConfig(t *testing.T) {
 		t.Fatalf("instructions = %q", updated.Tools.Threads.Policy.Instructions)
 	}
 	if len(updated.Tools.Threads.Policy.Rules) != 1 ||
-		updated.Tools.Threads.Policy.Rules[0].Type != "coding" {
+		updated.Tools.Threads.Policy.Rules[0].Type != "coding" ||
+		updated.Tools.Threads.Policy.Rules[0].MinMessages != 8 ||
+		updated.Tools.Threads.Policy.Rules[0].MinTextChars != 3000 ||
+		updated.Tools.Threads.Policy.Rules[0].ThresholdLogic != config.ThreadPolicyThresholdAll {
 		t.Fatalf("rules = %#v", updated.Tools.Threads.Policy.Rules)
 	}
 }

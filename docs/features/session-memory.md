@@ -78,7 +78,9 @@ Owns: TEST web/backend/api/session*
 
 Routing supplies the session policy. Agent conversations read and write session
 history. Chat channels provide normalized scope values. Launcher management
-exposes the history surface.
+exposes the history surface. Threads store discoverable thread records and
+handoff links on top of session metadata without deleting the underlying
+conversation history.
 
 ## Failure And Edge Cases
 

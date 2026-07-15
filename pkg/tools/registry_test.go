@@ -108,6 +108,30 @@ func TestToolRegistry_RegisterAndGet(t *testing.T) {
 	}
 }
 
+func TestToolRegistry_Unregister(t *testing.T) {
+	r := NewToolRegistry()
+	r.Register(newMockTool("echo", "echoes input"))
+
+	if !r.HasRegistered("echo") {
+		t.Fatal("expected echo to be registered")
+	}
+	before := r.Version()
+	r.Unregister("echo")
+
+	if r.HasRegistered("echo") {
+		t.Fatal("expected echo to be removed")
+	}
+	if _, ok := r.Get("echo"); ok {
+		t.Fatal("expected removed tool to be unavailable")
+	}
+	if got := r.List(); len(got) != 0 {
+		t.Fatalf("registry list = %v, want empty", got)
+	}
+	if r.Version() <= before {
+		t.Fatalf("registry version did not advance after unregister")
+	}
+}
+
 func TestToolRegistry_AllowlistFiltersRegistrations(t *testing.T) {
 	r := NewToolRegistry()
 	r.SetAllowlist([]string{"Allowed_Tool"})

@@ -46,6 +46,11 @@ memory benchmark inputs and metrics.
 Owns: CODE cmd/membench/**
 Owns: CODE pkg/updater/**
 Owns: CODE scripts/copydir.go
+Owns: CODE scripts/coverage_delta.go
+Owns: CODE scripts/feature_delta_guard.go
+Owns: CODE scripts/feature_inventory.go
+Owns: CODE scripts/featuretools_lib.go
+Owns: CODE scripts/lint-features.go
 Owns: TEST pkg/updater/*
 Owns: TEST cmd/membench/*
 Owns: TEST integration/*
@@ -77,7 +82,9 @@ Owns: TEST scripts/portability_requirements_test.go *
 ## Cross-Feature Behavior
 
 Launcher management invokes update behavior. CI gates feature requirements,
-tests, integration suites, and builds. Security controls apply to downloads and
+tests, integration suites, and builds. Feature inventory, delta, and coverage
+guard scripts are packaging and maintenance tooling that enforce feature specs
+for changed code in pull requests. Security controls apply to downloads and
 credentialed release publishing.
 
 ## Failure And Edge Cases

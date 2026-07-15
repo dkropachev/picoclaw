@@ -598,7 +598,7 @@ func (h *Handler) handleUpdateThreadPolicy(w http.ResponseWriter, r *http.Reques
 
 func normalizedThreadPolicy(policy config.ThreadPolicyConfig) config.ThreadPolicyConfig {
 	if policy.Mode == "" {
-		policy.Mode = config.ThreadPolicyModeAuto
+		policy.Mode = config.ThreadPolicyModeTool
 	}
 	policy.Mode = policy.EffectiveMode()
 	policy.Instructions = strings.TrimSpace(policy.Instructions)
@@ -612,8 +612,10 @@ func normalizedThreadPolicy(policy config.ThreadPolicyConfig) config.ThreadPolic
 
 func normalizeThreadPolicyMode(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", config.ThreadPolicyModeAuto:
+	case config.ThreadPolicyModeAuto:
 		return config.ThreadPolicyModeAuto, nil
+	case "":
+		return config.ThreadPolicyModeTool, nil
 	case config.ThreadPolicyModeTool:
 		return config.ThreadPolicyModeTool, nil
 	case config.ThreadPolicyModeSuggest:

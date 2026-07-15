@@ -152,7 +152,7 @@ func (t *ThreadsTool) Parameters() map[string]any {
 			},
 			"mode": map[string]any{
 				"type":        "string",
-				"description": "For set_policy: policy mode. auto creates/switches when rules match; suggest only suggests; off disables policy.",
+				"description": "For set_policy: policy mode. tool registers or attaches only after rule thresholds are satisfied; auto may create/switch after thresholds; suggest only suggests; off disables policy.",
 				"enum":        []string{"auto", "tool", "suggest", "off"},
 			},
 			"instructions": map[string]any{
@@ -183,6 +183,21 @@ func (t *ThreadsTool) Parameters() map[string]any {
 							"type":        "string",
 							"enum":        []string{"search_then_create", "search_then_ask", "never"},
 							"description": "Optional rule-specific attach strategy.",
+						},
+						"min_messages": map[string]any{
+							"type":        "integer",
+							"minimum":     0,
+							"description": "Minimum visible user/assistant message count in the current chat before this rule can create, register, attach, or switch a thread. Use 0 for no message threshold.",
+						},
+						"min_text_chars": map[string]any{
+							"type":        "integer",
+							"minimum":     0,
+							"description": "Minimum combined visible user/assistant text characters in the current chat before this rule can create, register, attach, or switch a thread. Use 0 for no text threshold.",
+						},
+						"threshold_logic": map[string]any{
+							"type":        "string",
+							"enum":        []string{"any", "all"},
+							"description": "Whether any configured threshold is enough, or all configured thresholds must be satisfied.",
 						},
 						"min_auto_confidence": map[string]any{
 							"type":        "number",
@@ -542,7 +557,7 @@ func (t *ThreadsTool) updateThreadPolicy(args map[string]any) (*config.Config, c
 		policy.Agents = agents
 	}
 	if policy.Mode == "" {
-		policy.Mode = config.ThreadPolicyModeAuto
+		policy.Mode = config.ThreadPolicyModeTool
 	}
 	policy.Rules = config.NormalizeThreadPolicyRules(policy.Rules)
 	cfg.Tools.Threads.Policy = policy
@@ -562,7 +577,7 @@ func (t *ThreadsTool) updateThreadPolicy(args map[string]any) (*config.Config, c
 
 func (t *ThreadsTool) threadPolicyResult(policy config.ThreadPolicyConfig) *ToolResult {
 	if policy.Mode == "" {
-		policy.Mode = config.ThreadPolicyModeAuto
+		policy.Mode = config.ThreadPolicyModeTool
 	}
 	policy.Rules = config.NormalizeThreadPolicyRules(policy.Rules)
 	payload, err := json.MarshalIndent(policy, "", "  ")
@@ -846,8 +861,10 @@ func contextArg(raw any) map[string]string {
 
 func normalizeThreadPolicyMode(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", config.ThreadPolicyModeAuto:
+	case config.ThreadPolicyModeAuto:
 		return config.ThreadPolicyModeAuto, nil
+	case "":
+		return config.ThreadPolicyModeTool, nil
 	case config.ThreadPolicyModeSuggest:
 		return config.ThreadPolicyModeSuggest, nil
 	case config.ThreadPolicyModeTool:
@@ -877,6 +894,9 @@ func threadPolicyRulesArg(raw any) ([]config.ThreadPolicyRule, error) {
 			}
 			mode, _ := obj["mode"].(string)
 			attachStrategy, _ := obj["attach_strategy"].(string)
+			thresholdLogic, _ := obj["threshold_logic"].(string)
+			minMessages := intArg(obj["min_messages"], 0)
+			minTextChars := intArg(obj["min_text_chars"], 0)
 			minAutoConfidence := floatArg(obj["min_auto_confidence"], 0)
 			confirmIfMultiple := boolArg(obj["confirm_if_multiple"])
 			out = append(out, config.ThreadPolicyRule{
@@ -884,6 +904,9 @@ func threadPolicyRulesArg(raw any) ([]config.ThreadPolicyRule, error) {
 				Description:       strings.TrimSpace(description),
 				Mode:              optionalThreadPolicyMode(mode),
 				AttachStrategy:    optionalThreadAttachStrategy(attachStrategy),
+				MinMessages:       minMessages,
+				MinTextChars:      minTextChars,
+				ThresholdLogic:    config.NormalizeThreadPolicyThresholdLogic(thresholdLogic),
 				MinAutoConfidence: minAutoConfidence,
 				ConfirmIfMultiple: confirmIfMultiple,
 			})

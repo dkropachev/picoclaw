@@ -1,12 +1,16 @@
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { Provider } from "jotai"
+import { Provider, createStore } from "jotai"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { ThreadSummary } from "@/api/threads"
 import { createThread, dropThread, getThreads } from "@/api/threads"
 import { ThreadSidebar } from "@/components/threads/thread-sidebar"
-import { switchChatSession } from "@/features/chat/controller"
+import {
+  switchChatSession,
+  switchChatSessionAndSend,
+} from "@/features/chat/controller"
+import { threadOpenSessionIdAtom } from "@/store/threads"
 
 const navigateMock = vi.hoisted(() => vi.fn())
 
@@ -18,6 +22,7 @@ vi.mock("@/api/threads", () => ({
 
 vi.mock("@/features/chat/controller", () => ({
   switchChatSession: vi.fn(),
+  switchChatSessionAndSend: vi.fn(),
 }))
 
 vi.mock("@tanstack/react-router", () => ({
@@ -45,6 +50,7 @@ describe("ThreadSidebar", () => {
     vi.mocked(createThread).mockReset()
     vi.mocked(dropThread).mockReset()
     vi.mocked(switchChatSession).mockReset()
+    vi.mocked(switchChatSessionAndSend).mockReset()
     navigateMock.mockReset()
     vi.mocked(getThreads).mockResolvedValue([thread])
     vi.mocked(createThread).mockResolvedValue(thread)
@@ -95,13 +101,47 @@ describe("ThreadSidebar", () => {
       expect(createThread).toHaveBeenCalledWith(
         expect.objectContaining({
           type: "general",
+          source_query: "New thread",
         }),
       )
       expect(switchChatSession).toHaveBeenCalledWith("session-sidebar")
+      expect(switchChatSessionAndSend).not.toHaveBeenCalled()
       expect(navigateMock).toHaveBeenCalledWith({
         to: "/threads/open/$threadId",
         params: { threadId: "session-sidebar" },
       })
+    })
+  })
+
+  it("uses the search text as the initial thread prompt", async () => {
+    const user = userEvent.setup()
+
+    render(
+      <Provider>
+        <ThreadSidebar />
+      </Provider>,
+    )
+
+    await screen.findByText("Investigate websocket routing")
+    await user.type(
+      screen.getByPlaceholderText("Search threads..."),
+      "japan relocation",
+    )
+    await user.click(screen.getByRole("button", { name: "New thread" }))
+
+    await waitFor(() => {
+      expect(createThread).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "japan relocation",
+          source_query: "japan relocation",
+        }),
+      )
+      expect(switchChatSessionAndSend).toHaveBeenCalledWith(
+        "session-sidebar",
+        {
+          content: "japan relocation",
+        },
+      )
     })
   })
 
@@ -128,10 +168,12 @@ describe("ThreadSidebar", () => {
   })
 
   it("drops a thread from the sidebar without deleting the session", async () => {
+    const store = createStore()
+    store.set(threadOpenSessionIdAtom, "session-sidebar")
     const user = userEvent.setup()
 
     render(
-      <Provider>
+      <Provider store={store}>
         <ThreadSidebar />
       </Provider>,
     )
@@ -145,6 +187,7 @@ describe("ThreadSidebar", () => {
     await waitFor(() => {
       expect(dropThread).toHaveBeenCalledWith("thread-sidebar")
     })
+    expect(store.get(threadOpenSessionIdAtom)).toBe("")
     expect(
       screen.queryByText("Investigate websocket routing"),
     ).not.toBeInTheDocument()

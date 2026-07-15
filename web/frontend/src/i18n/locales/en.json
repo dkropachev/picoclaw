@@ -751,7 +751,7 @@
         },
         "thread_policy": {
           "title": "Thread Policy",
-          "description": "Configure when the main chat model should move work into PicoClaw threads.",
+          "description": "Configure when the main chat may become or join a PicoClaw thread.",
           "load_error": "Failed to load thread policy.",
           "save": "Save Changes",
           "open_settings": "Open Thread Policy",
@@ -762,9 +762,10 @@
           "enabled": "Enable Policy",
           "enabled_desc": "When enabled, the model sees the thread routing policy in the main chat prompt.",
           "mode": "Mode",
-          "mode_desc": "Auto creates or switches matching threads; suggest only surfaces the option.",
+          "mode_desc": "Tool registers or attaches after rule thresholds; auto may create or switch after thresholds; suggest only surfaces the option.",
           "modes": {
             "auto": "Auto",
+            "tool": "Tool",
             "suggest": "Suggest",
             "off": "Off"
           },
@@ -773,6 +774,11 @@
           "remove_rule": "Remove rule",
           "no_rules": "No routing rules configured.",
           "rule_placeholder": "When should this thread type be used?",
+          "min_messages": "Min Messages",
+          "min_text_chars": "Min Text Chars",
+          "threshold_logic": "Threshold Logic",
+          "threshold_any": "Any Limit",
+          "threshold_all": "All Limits",
           "instructions": "Instructions",
           "instructions_placeholder": "Additional instructions for the model..."
         },

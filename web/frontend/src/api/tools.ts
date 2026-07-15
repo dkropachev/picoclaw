@@ -49,6 +49,7 @@ export type ThreadAttachStrategy =
   | "search_then_create"
   | "search_then_ask"
   | "never"
+export type ThreadPolicyThresholdLogic = "any" | "all"
 export type ThreadPolicyRuleType =
   | "general"
   | "coding"
@@ -60,6 +61,9 @@ export interface ThreadPolicyRule {
   description: string
   mode?: ThreadPolicyMode
   attach_strategy?: ThreadAttachStrategy
+  min_messages?: number
+  min_text_chars?: number
+  threshold_logic?: ThreadPolicyThresholdLogic
   min_auto_confidence?: number
   confirm_if_multiple?: boolean
 }

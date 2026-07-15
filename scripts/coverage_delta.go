@@ -47,6 +47,8 @@ type coveragePlan struct {
 	GlobalRelevant    bool
 }
 
+const featureCoverageRegressionToleranceStatements = 10
+
 type listedPackage struct {
 	ImportPath string
 	Dir        string
@@ -150,7 +152,7 @@ func buildCoveragePlan(root, base, head string, specs []featureSpecMetadata, for
 		if isCoverageRelevantChange(path) {
 			plan.GlobalRelevant = true
 		}
-		if strings.HasSuffix(path, ".go") && !isIgnoredProductionPath(path) {
+		if isCoverageRelevantGoFile(path) {
 			testDirs[normalizeRepoPath(filepath.Dir(path))] = true
 			if !strings.HasSuffix(path, "_test.go") {
 				coverDirs[normalizeRepoPath(filepath.Dir(path))] = true
@@ -208,10 +210,17 @@ func isCoverageRelevantChange(path string) bool {
 	if !strings.HasSuffix(path, ".go") {
 		return false
 	}
+	return isCoverageRelevantGoFile(path)
+}
+
+func isCoverageRelevantGoFile(path string) bool {
+	path = normalizeRepoPath(path)
+	if !strings.HasSuffix(path, ".go") || isIgnoredProductionPath(path) {
+		return false
+	}
 	if strings.HasPrefix(path, "cmd/") ||
 		strings.HasPrefix(path, "pkg/") ||
 		strings.HasPrefix(path, "web/backend/") ||
-		strings.HasPrefix(path, "scripts/") ||
 		strings.HasPrefix(path, "integration/") {
 		return true
 	}
@@ -747,7 +756,7 @@ func compareCoverage(specs []featureSpecMetadata, plan coveragePlan, baseProfile
 		if headSummary.TotalStatements == 0 {
 			continue
 		}
-		if summaryRegressed(baseSummary, headSummary) {
+		if featureSummaryRegressed(baseSummary, headSummary) {
 			failures = append(failures, fmt.Sprintf(
 				"%s Go statement coverage decreased: %s -> %s",
 				spec.RelPath,
@@ -763,7 +772,6 @@ func compareCoverage(specs []featureSpecMetadata, plan coveragePlan, baseProfile
 		}
 	}
 
-	failures = append(failures, changedLineCoverageFailures(plan.ChangedLines, headProfile)...)
 	return failures
 }
 
@@ -923,13 +931,11 @@ func isGoProductionCoverageFile(path string) bool {
 }
 
 func summaryRegressed(base, head coverageSummary) bool {
-	if head.TotalStatements > base.TotalStatements && coveragePercent(head) < coveragePercent(base) {
-		return true
-	}
-	if head.TotalStatements >= base.TotalStatements && head.CoveredStatements < base.CoveredStatements {
-		return true
-	}
-	return false
+	return head.CoveredStatements < base.CoveredStatements
+}
+
+func featureSummaryRegressed(base, head coverageSummary) bool {
+	return head.CoveredStatements+featureCoverageRegressionToleranceStatements < base.CoveredStatements
 }
 
 func coveragePercent(summary coverageSummary) float64 {

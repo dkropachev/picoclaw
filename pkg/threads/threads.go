@@ -305,14 +305,15 @@ func (s Store) CreatePicoThread(ctx context.Context, cfg *config.Config, req Cre
 	if meta.CreatedAt.IsZero() {
 		meta.CreatedAt = now
 	}
+	sourceQuery := strings.TrimSpace(firstNonEmpty(req.SourceQuery, req.Title, "New thread"))
 	meta.UpdatedAt = now
 	meta.Key = allocation.Key
 	meta.Scope = rawScope
 	meta.Aliases = normalizeAliases(allocation.Key, allocation.Aliases)
-	meta.ThreadType = NormalizeType(firstNonEmpty(req.Type, InferType(req.Title+" "+req.SourceQuery)))
+	meta.ThreadType = NormalizeType(firstNonEmpty(req.Type, InferType(req.Title+" "+sourceQuery)))
 	meta.ThreadTitle = truncateRunes(firstNonEmpty(req.Title, req.SourceQuery, "New thread"), 80)
-	meta.ThreadContext = MergeContext(ExtractContext(req.SourceQuery+" "+req.Title), req.Context)
-	meta.ThreadSourceQuery = strings.TrimSpace(req.SourceQuery)
+	meta.ThreadContext = MergeContext(ExtractContext(sourceQuery+" "+req.Title), req.Context)
+	meta.ThreadSourceQuery = sourceQuery
 	meta.ThreadID = allocation.SessionID
 	meta.ThreadAttachedAt = now
 	if strings.TrimSpace(meta.Summary) == "" {

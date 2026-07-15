@@ -20,6 +20,7 @@ import { Route as AgentRouteImport } from './routes/agent'
 import { Route as ChannelsRouteRouteImport } from './routes/channels/route'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ThreadsSearchRouteImport } from './routes/threads.search'
+import { Route as ThreadsOpenRouteImport } from './routes/threads.open'
 import { Route as ThreadsThreadIdRouteImport } from './routes/threads.$threadId'
 import { Route as ConfigRawRouteImport } from './routes/config.raw'
 import { Route as ChannelsNameRouteImport } from './routes/channels/$name'
@@ -83,6 +84,11 @@ const ThreadsSearchRoute = ThreadsSearchRouteImport.update({
   path: '/search',
   getParentRoute: () => ThreadsRoute,
 } as any)
+const ThreadsOpenRoute = ThreadsOpenRouteImport.update({
+  id: '/open',
+  path: '/open',
+  getParentRoute: () => ThreadsRoute,
+} as any)
 const ThreadsThreadIdRoute = ThreadsThreadIdRouteImport.update({
   id: '/$threadId',
   path: '/$threadId',
@@ -114,9 +120,9 @@ const AgentHubRoute = AgentHubRouteImport.update({
   getParentRoute: () => AgentRoute,
 } as any)
 const ThreadsOpenThreadIdRoute = ThreadsOpenThreadIdRouteImport.update({
-  id: '/open/$threadId',
-  path: '/open/$threadId',
-  getParentRoute: () => ThreadsRoute,
+  id: '/$threadId',
+  path: '/$threadId',
+  getParentRoute: () => ThreadsOpenRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
@@ -136,6 +142,7 @@ export interface FileRoutesByFullPath {
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
+  '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
@@ -156,6 +163,7 @@ export interface FileRoutesByTo {
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
+  '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
@@ -177,6 +185,7 @@ export interface FileRoutesById {
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
+  '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
@@ -199,6 +208,7 @@ export interface FileRouteTypes {
     | '/channels/$name'
     | '/config/raw'
     | '/threads/$threadId'
+    | '/threads/open'
     | '/threads/search'
     | '/threads/open/$threadId'
   fileRoutesByTo: FileRoutesByTo
@@ -219,6 +229,7 @@ export interface FileRouteTypes {
     | '/channels/$name'
     | '/config/raw'
     | '/threads/$threadId'
+    | '/threads/open'
     | '/threads/search'
     | '/threads/open/$threadId'
   id:
@@ -239,6 +250,7 @@ export interface FileRouteTypes {
     | '/channels/$name'
     | '/config/raw'
     | '/threads/$threadId'
+    | '/threads/open'
     | '/threads/search'
     | '/threads/open/$threadId'
   fileRoutesById: FileRoutesById
@@ -335,6 +347,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ThreadsSearchRouteImport
       parentRoute: typeof ThreadsRoute
     }
+    '/threads/open': {
+      id: '/threads/open'
+      path: '/open'
+      fullPath: '/threads/open'
+      preLoaderRoute: typeof ThreadsOpenRouteImport
+      parentRoute: typeof ThreadsRoute
+    }
     '/threads/$threadId': {
       id: '/threads/$threadId'
       path: '/$threadId'
@@ -379,10 +398,10 @@ declare module '@tanstack/react-router' {
     }
     '/threads/open/$threadId': {
       id: '/threads/open/$threadId'
-      path: '/open/$threadId'
+      path: '/$threadId'
       fullPath: '/threads/open/$threadId'
       preLoaderRoute: typeof ThreadsOpenThreadIdRouteImport
-      parentRoute: typeof ThreadsRoute
+      parentRoute: typeof ThreadsOpenRoute
     }
   }
 }
@@ -424,16 +443,28 @@ const ConfigRouteChildren: ConfigRouteChildren = {
 const ConfigRouteWithChildren =
   ConfigRoute._addFileChildren(ConfigRouteChildren)
 
+interface ThreadsOpenRouteChildren {
+  ThreadsOpenThreadIdRoute: typeof ThreadsOpenThreadIdRoute
+}
+
+const ThreadsOpenRouteChildren: ThreadsOpenRouteChildren = {
+  ThreadsOpenThreadIdRoute: ThreadsOpenThreadIdRoute,
+}
+
+const ThreadsOpenRouteWithChildren = ThreadsOpenRoute._addFileChildren(
+  ThreadsOpenRouteChildren,
+)
+
 interface ThreadsRouteChildren {
   ThreadsThreadIdRoute: typeof ThreadsThreadIdRoute
+  ThreadsOpenRoute: typeof ThreadsOpenRouteWithChildren
   ThreadsSearchRoute: typeof ThreadsSearchRoute
-  ThreadsOpenThreadIdRoute: typeof ThreadsOpenThreadIdRoute
 }
 
 const ThreadsRouteChildren: ThreadsRouteChildren = {
   ThreadsThreadIdRoute: ThreadsThreadIdRoute,
+  ThreadsOpenRoute: ThreadsOpenRouteWithChildren,
   ThreadsSearchRoute: ThreadsSearchRoute,
-  ThreadsOpenThreadIdRoute: ThreadsOpenThreadIdRoute,
 }
 
 const ThreadsRouteWithChildren =

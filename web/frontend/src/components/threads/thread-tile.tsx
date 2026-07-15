@@ -1,9 +1,9 @@
 import {
   IconCode,
-  IconEyeOff,
   IconGitPullRequest,
   IconSearch,
   IconTag,
+  IconTrash,
 } from "@tabler/icons-react"
 import dayjs from "dayjs"
 import type { ComponentType } from "react"
@@ -124,7 +124,7 @@ export function ThreadTile({
             onDrop(thread)
           }}
         >
-          <IconEyeOff className="size-4" />
+          <IconTrash className="size-4" />
         </Button>
       ) : null}
     </div>

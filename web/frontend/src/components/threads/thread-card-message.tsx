@@ -1,14 +1,20 @@
 import { IconArrowRight, IconSearch } from "@tabler/icons-react"
 import { useNavigate } from "@tanstack/react-router"
-import { useSetAtom } from "jotai"
-import { useCallback, useEffect, useRef } from "react"
+import { useAtomValue, useSetAtom } from "jotai"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
-import type { ThreadSummary } from "@/api/threads"
+import { dropThread, type ThreadSummary } from "@/api/threads"
 import { ThreadTile } from "@/components/threads/thread-tile"
-import { switchChatSession } from "@/features/chat/controller"
-import type { ThreadCardPayload } from "@/features/chat/thread-cards"
 import {
+  switchChatSession,
+  switchChatSessionAndSend,
+} from "@/features/chat/controller"
+import { buildThreadInitialPromptFromCandidates } from "@/features/chat/thread-seed"
+import type { ThreadCardPayload } from "@/features/chat/thread-cards"
+import { chatAtom } from "@/store/chat"
+import {
+  threadOpenSessionIdAtom,
   threadSearchFocusNonceAtom,
   threadSearchQueryAtom,
 } from "@/store/threads"
@@ -16,17 +22,23 @@ import {
 export function ThreadCardMessage({ payload }: { payload: ThreadCardPayload }) {
   const { t } = useTranslation()
   const navigate = useNavigate()
+  const { activeSessionId } = useAtomValue(chatAtom)
+  const setThreadOpenSessionId = useSetAtom(threadOpenSessionIdAtom)
   const setThreadSearchQuery = useSetAtom(threadSearchQueryAtom)
   const setFocusNonce = useSetAtom(threadSearchFocusNonceAtom)
   const autoSwitchedThreadIdRef = useRef<string | null>(null)
+  const [droppedThreadIds, setDroppedThreadIds] = useState<Set<string>>(
+    () => new Set(),
+  )
   const navigateToThread = useCallback(
     (threadId: string) => {
+      setThreadOpenSessionId(threadId)
       void navigate({
         to: "/threads/open/$threadId",
         params: { threadId },
       })
     },
-    [navigate],
+    [navigate, setThreadOpenSessionId],
   )
 
   let searchQuery = ""
@@ -62,7 +74,22 @@ export function ThreadCardMessage({ payload }: { payload: ThreadCardPayload }) {
         return
       }
       autoSwitchedThreadIdRef.current = targetSessionId
-      void switchChatSession(targetSessionId)
+      const seedMessage =
+        payload.thread.message_count === 0
+          ? buildThreadInitialPromptFromCandidates(
+              payload.query,
+              payload.thread.source_query,
+              payload.thread.preview,
+              payload.thread.title,
+            )
+          : ""
+      if (seedMessage) {
+        void switchChatSessionAndSend(targetSessionId, {
+          content: seedMessage,
+        })
+      } else {
+        void switchChatSession(targetSessionId)
+      }
       navigateToThread(targetSessionId)
     }
     if (
@@ -90,6 +117,30 @@ export function ThreadCardMessage({ payload }: { payload: ThreadCardPayload }) {
     void switchChatSession(threadId)
     navigateToThread(threadId)
   }
+
+  const handleDropThread = async (thread: ThreadSummary) => {
+    try {
+      await dropThread(thread.id)
+      const threadSessionId = thread.ui_session_id || thread.id
+      setThreadOpenSessionId((current) =>
+        current === thread.id || current === threadSessionId ? "" : current,
+      )
+      setDroppedThreadIds((prev) => {
+        const next = new Set(prev)
+        next.add(thread.id)
+        return next
+      })
+      if (threadSessionId === activeSessionId) {
+        void navigate({ to: "/threads/open" })
+      }
+    } catch (error) {
+      console.error("Failed to drop thread:", error)
+    }
+  }
+
+  const visibleThreads = threads.filter(
+    (thread) => !droppedThreadIds.has(thread.id),
+  )
 
   return (
     <div className="border-border/60 bg-card text-card-foreground overflow-hidden rounded-xl border">
@@ -121,17 +172,19 @@ export function ThreadCardMessage({ payload }: { payload: ThreadCardPayload }) {
           <div className="text-muted-foreground px-2 py-4 text-center text-xs">
             {t("threads.switching")}
           </div>
-        ) : threads.length === 0 ? (
+        ) : visibleThreads.length === 0 ? (
           <div className="text-muted-foreground px-2 py-4 text-center text-xs">
             {t("threads.emptySearch")}
           </div>
         ) : (
-          threads.map((thread) => (
+          visibleThreads.map((thread) => (
             <ThreadTile
               key={thread.id}
               thread={thread}
               compact
               onOpen={openThread}
+              onDrop={(item) => void handleDropThread(item)}
+              dropLabel={t("threads.dropThread")}
             />
           ))
         )}

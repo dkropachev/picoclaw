@@ -117,6 +117,23 @@ func (r *ToolRegistry) RegisterHidden(tool Tool) {
 	logger.DebugCF("tools", "Registered hidden tool", map[string]any{"name": name})
 }
 
+// Unregister removes a tool from the registry if it is present.
+func (r *ToolRegistry) Unregister(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	if _, exists := r.tools[name]; !exists {
+		return
+	}
+	delete(r.tools, name)
+	r.version.Add(1)
+	logger.DebugCF("tools", "Unregistered tool", map[string]any{"name": name})
+}
+
 // SetMediaStore injects a MediaStore into all registered tools that can
 // consume it, and remembers it for future registrations.
 func (r *ToolRegistry) SetMediaStore(store media.MediaStore) {

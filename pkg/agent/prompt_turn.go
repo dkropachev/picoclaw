@@ -50,7 +50,31 @@ func promptBuildRequestForTurn(
 	if ts.profile.Enabled && ts.profile.ToolsMode == config.TurnProfileModeCustom {
 		req.AllowedTools = append([]string(nil), ts.profile.AllowedTools...)
 	}
+	restrictChildPromptToRegisteredTools(ts, &req)
 	return req
+}
+
+func restrictChildPromptToRegisteredTools(ts *turnState, req *PromptBuildRequest) {
+	if ts == nil || req == nil || ts.depth <= 0 || ts.agent == nil || ts.agent.Tools == nil {
+		return
+	}
+
+	registered := ts.agent.Tools.List()
+	if len(registered) == 0 {
+		req.SuppressToolUseRule = true
+		req.AllowedTools = nil
+		return
+	}
+
+	if len(req.AllowedTools) == 0 {
+		req.AllowedTools = registered
+		return
+	}
+
+	req.AllowedTools = filterNamesByTurnProfile(registered, req.AllowedTools)
+	if len(req.AllowedTools) == 0 {
+		req.SuppressToolUseRule = true
+	}
 }
 
 func turnProfileNativeSearchCallable(

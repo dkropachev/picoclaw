@@ -295,8 +295,11 @@ func TestThreadsToolSetPolicyPersistsConfig(t *testing.T) {
 		"instructions":   "Ask first for risky production work.",
 		"rules": []any{
 			map[string]any{
-				"type":        "coding",
-				"description": "Move implementation work to a coding thread.",
+				"type":            "coding",
+				"description":     "Move implementation work to a coding thread.",
+				"min_messages":    8,
+				"min_text_chars":  3000,
+				"threshold_logic": "all",
 			},
 		},
 	})
@@ -305,6 +308,9 @@ func TestThreadsToolSetPolicyPersistsConfig(t *testing.T) {
 	}
 	if !strings.Contains(result.ForLLM, `"mode": "suggest"`) {
 		t.Fatalf("set_policy result missing updated mode: %s", result.ForLLM)
+	}
+	if !strings.Contains(result.ForLLM, `"min_messages": 8`) {
+		t.Fatalf("set_policy result missing threshold fields: %s", result.ForLLM)
 	}
 
 	updated, err := config.LoadConfig(configPath)
@@ -321,7 +327,10 @@ func TestThreadsToolSetPolicyPersistsConfig(t *testing.T) {
 		t.Fatalf("instructions = %q", updated.Tools.Threads.Policy.Instructions)
 	}
 	if len(updated.Tools.Threads.Policy.Rules) != 1 ||
-		updated.Tools.Threads.Policy.Rules[0].Type != "coding" {
+		updated.Tools.Threads.Policy.Rules[0].Type != "coding" ||
+		updated.Tools.Threads.Policy.Rules[0].MinMessages != 8 ||
+		updated.Tools.Threads.Policy.Rules[0].MinTextChars != 3000 ||
+		updated.Tools.Threads.Policy.Rules[0].ThresholdLogic != config.ThreadPolicyThresholdAll {
 		t.Fatalf("rules = %#v", updated.Tools.Threads.Policy.Rules)
 	}
 }

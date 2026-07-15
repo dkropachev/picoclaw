@@ -59,6 +59,22 @@ func TestCreatePicoThreadPersistsSearchableContext(t *testing.T) {
 	}
 }
 
+func TestCreatePicoThreadDefaultsSourceQuery(t *testing.T) {
+	cfg := testConfig(t)
+	store := NewStoreFromWorkspace(cfg.Agents.Defaults.Workspace)
+
+	thread, err := store.CreatePicoThread(context.Background(), cfg, CreateRequest{})
+	if err != nil {
+		t.Fatalf("CreatePicoThread() error = %v", err)
+	}
+	if thread.SourceQuery == "" {
+		t.Fatal("thread.SourceQuery is empty")
+	}
+	if thread.SourceQuery != "New thread" {
+		t.Fatalf("thread.SourceQuery = %q, want New thread", thread.SourceQuery)
+	}
+}
+
 func TestSearchRanksUpdatedThreadAndFiltersContext(t *testing.T) {
 	cfg := testConfig(t)
 	store := NewStoreFromWorkspace(cfg.Agents.Defaults.Workspace)

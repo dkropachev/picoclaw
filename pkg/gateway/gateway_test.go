@@ -114,6 +114,28 @@ func TestGatewayRunStartupFailureHelper(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestLogChannelVoiceCapabilitiesHandlesNilManager(t *testing.T) {
+	t.Parallel()
+
+	logChannelVoiceCapabilities(nil, true, true)
+}
+
+func TestStartupBlockedProviderReportsReason(t *testing.T) {
+	t.Parallel()
+
+	provider := &startupBlockedProvider{reason: "startup blocked"}
+	resp, err := provider.Chat(context.Background(), nil, nil, "", nil)
+	if err == nil || err.Error() != "startup blocked" {
+		t.Fatalf("Chat() error = %v, want startup blocked", err)
+	}
+	if resp != nil {
+		t.Fatalf("Chat() response = %#v, want nil", resp)
+	}
+	if model := provider.GetDefaultModel(); model != "" {
+		t.Fatalf("GetDefaultModel() = %q, want empty", model)
+	}
+}
+
 func TestCollectGatewayStartupStatusHandlesMalformedInfo(t *testing.T) {
 	t.Parallel()
 

@@ -1104,6 +1104,9 @@ const (
 	ThreadAttachStrategySearchThenCreate = "search_then_create"
 	ThreadAttachStrategySearchThenAsk    = "search_then_ask"
 	ThreadAttachStrategyNever            = "never"
+
+	ThreadPolicyThresholdAny = "any"
+	ThreadPolicyThresholdAll = "all"
 )
 
 type ThreadsToolConfig struct {
@@ -1125,6 +1128,9 @@ type ThreadPolicyRule struct {
 	Description       string  `json:"description"`
 	Mode              string  `json:"mode,omitempty"`
 	AttachStrategy    string  `json:"attach_strategy,omitempty"`
+	MinMessages       int     `json:"min_messages,omitempty"`
+	MinTextChars      int     `json:"min_text_chars,omitempty"`
+	ThresholdLogic    string  `json:"threshold_logic,omitempty"`
 	MinAutoConfidence float64 `json:"min_auto_confidence,omitempty"`
 	ConfirmIfMultiple bool    `json:"confirm_if_multiple,omitempty"`
 }
@@ -1142,10 +1148,12 @@ func (p ThreadPolicyConfig) EffectiveMode() string {
 		return ThreadPolicyModeSuggest
 	case ThreadPolicyModeTool:
 		return ThreadPolicyModeTool
-	case "", ThreadPolicyModeAuto:
+	case ThreadPolicyModeAuto:
 		return ThreadPolicyModeAuto
+	case "":
+		return ThreadPolicyModeTool
 	default:
-		return ThreadPolicyModeAuto
+		return ThreadPolicyModeTool
 	}
 }
 
@@ -1157,10 +1165,12 @@ func NormalizeThreadPolicyMode(value string) string {
 		return ThreadPolicyModeSuggest
 	case ThreadPolicyModeTool:
 		return ThreadPolicyModeTool
-	case "", ThreadPolicyModeAuto:
+	case ThreadPolicyModeAuto:
 		return ThreadPolicyModeAuto
+	case "":
+		return ThreadPolicyModeTool
 	default:
-		return ThreadPolicyModeAuto
+		return ThreadPolicyModeTool
 	}
 }
 
@@ -1186,6 +1196,17 @@ func NormalizeThreadPolicyType(value string) string {
 	}
 }
 
+func NormalizeThreadPolicyThresholdLogic(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case ThreadPolicyThresholdAll:
+		return ThreadPolicyThresholdAll
+	case "", ThreadPolicyThresholdAny:
+		return ThreadPolicyThresholdAny
+	default:
+		return ThreadPolicyThresholdAny
+	}
+}
+
 func NormalizeThreadPolicyRules(rules []ThreadPolicyRule) []ThreadPolicyRule {
 	if len(rules) == 0 {
 		return nil
@@ -1196,16 +1217,32 @@ func NormalizeThreadPolicyRules(rules []ThreadPolicyRule) []ThreadPolicyRule {
 		if description == "" {
 			continue
 		}
+		minMessages := normalizeNonNegativeInt(rule.MinMessages)
+		minTextChars := normalizeNonNegativeInt(rule.MinTextChars)
+		thresholdLogic := ""
+		if minMessages > 0 || minTextChars > 0 {
+			thresholdLogic = NormalizeThreadPolicyThresholdLogic(rule.ThresholdLogic)
+		}
 		out = append(out, ThreadPolicyRule{
 			Type:              NormalizeThreadPolicyType(rule.Type),
 			Description:       description,
 			Mode:              normalizeOptionalThreadPolicyMode(rule.Mode),
 			AttachStrategy:    normalizeOptionalThreadAttachStrategy(rule.AttachStrategy),
+			MinMessages:       minMessages,
+			MinTextChars:      minTextChars,
+			ThresholdLogic:    thresholdLogic,
 			MinAutoConfidence: rule.MinAutoConfidence,
 			ConfirmIfMultiple: rule.ConfirmIfMultiple,
 		})
 	}
 	return out
+}
+
+func normalizeNonNegativeInt(value int) int {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 func normalizeOptionalThreadPolicyMode(value string) string {

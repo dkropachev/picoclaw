@@ -243,6 +243,7 @@ func (s Store) CreateThread(ctx context.Context, req CreateRequest) (Thread, err
 	if registration == "" {
 		registration = RegistrationManual
 	}
+	sourceQuery := strings.TrimSpace(firstNonEmpty(req.SourceQuery, req.Title, "New thread"))
 	sessionKeys := append([]string{primarySessionKey}, req.SessionKeys...)
 	meta := ThreadMeta{
 		ID:                threadID,
@@ -250,10 +251,10 @@ func (s Store) CreateThread(ctx context.Context, req CreateRequest) (Thread, err
 		PrimarySessionKey: primarySessionKey,
 		AgentID:           firstNonEmpty(req.AgentID, routingAgentFromSessionKey(primarySessionKey), "main"),
 		OwnerIdentity:     firstNonEmpty(req.OwnerIdentity, "unknown"),
-		Title:             truncateRunes(firstNonEmpty(req.Title, req.SourceQuery, "New thread"), 80),
-		Type:              NormalizeType(firstNonEmpty(req.Type, InferType(req.Title+" "+req.SourceQuery))),
-		Context:           MergeContext(ExtractContext(req.SourceQuery+" "+req.Title), req.Context),
-		SourceQuery:       strings.TrimSpace(req.SourceQuery),
+		Title:             truncateRunes(firstNonEmpty(req.Title, sourceQuery, "New thread"), 80),
+		Type:              NormalizeType(firstNonEmpty(req.Type, InferType(req.Title+" "+sourceQuery))),
+		Context:           MergeContext(ExtractContext(sourceQuery+" "+req.Title), req.Context),
+		SourceQuery:       sourceQuery,
 		SessionKeys:       uniqueStrings(sessionKeys),
 		Registration:      registration,
 		CreatedAt:         now,

@@ -1,6 +1,6 @@
 import { IconFilter, IconPlus, IconSearch } from "@tabler/icons-react"
 import { useNavigate } from "@tanstack/react-router"
-import { useAtom, useAtomValue } from "jotai"
+import { useAtom, useAtomValue, useSetAtom } from "jotai"
 import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -22,10 +22,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { switchChatSession } from "@/features/chat/controller"
+import {
+  switchChatSession,
+  switchChatSessionAndSend,
+} from "@/features/chat/controller"
+import {
+  buildThreadInitialPrompt,
+  buildThreadSourceQuery,
+} from "@/features/chat/thread-seed"
 import { cn } from "@/lib/utils"
 import { chatAtom } from "@/store/chat"
 import {
+  threadOpenSessionIdAtom,
   threadSearchFocusNonceAtom,
   threadSearchQueryAtom,
 } from "@/store/threads"
@@ -59,6 +67,7 @@ export function ThreadSidebar({
   const isPane = layout === "pane"
   const [query, setQuery] = useAtom(threadSearchQueryAtom)
   const focusNonce = useAtomValue(threadSearchFocusNonceAtom)
+  const setThreadOpenSessionId = useSetAtom(threadOpenSessionIdAtom)
   const { activeSessionId } = useAtomValue(chatAtom)
   const [selectedType, setSelectedType] = useState<ThreadType | "all">("all")
   const [threads, setThreads] = useState<ThreadSummary[]>([])
@@ -120,6 +129,7 @@ export function ThreadSidebar({
   }, [query, selectedType, activeSessionId])
 
   const openThread = (threadId: string) => {
+    setThreadOpenSessionId(threadId)
     void switchChatSession(threadId)
     void navigate({
       to: "/threads/open/$threadId",
@@ -129,17 +139,25 @@ export function ThreadSidebar({
 
   const handleCreateThread = async () => {
     try {
+      const initialPrompt = buildThreadInitialPrompt(query)
       const thread = await createThread({
         type: selectedType === "all" ? "general" : selectedType,
         title: query.trim() || t("threads.newThread"),
-        source_query: query.trim(),
+        source_query: buildThreadSourceQuery(query),
       })
       setThreads((prev) => [
         thread,
         ...prev.filter((item) => item.id !== thread.id),
       ])
       const threadSessionId = thread.ui_session_id || thread.id
-      void switchChatSession(threadSessionId)
+      setThreadOpenSessionId(threadSessionId)
+      if (initialPrompt) {
+        void switchChatSessionAndSend(threadSessionId, {
+          content: initialPrompt,
+        })
+      } else {
+        void switchChatSession(threadSessionId)
+      }
       void navigate({
         to: "/threads/open/$threadId",
         params: { threadId: threadSessionId },
@@ -154,9 +172,12 @@ export function ThreadSidebar({
     try {
       await dropThread(thread.id)
       const threadSessionId = thread.ui_session_id || thread.id
+      setThreadOpenSessionId((current) =>
+        current === thread.id || current === threadSessionId ? "" : current,
+      )
       setThreads((prev) => prev.filter((item) => item.id !== thread.id))
       if (threadSessionId === activeSessionId) {
-        void navigate({ to: "/threads/search" })
+        void navigate({ to: "/threads/open" })
       }
     } catch (error) {
       console.error("Failed to drop thread:", error)

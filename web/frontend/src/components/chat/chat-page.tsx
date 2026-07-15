@@ -4,6 +4,7 @@ import {
   type ChangeEvent,
   type ClipboardEvent,
   type DragEvent,
+  type ReactNode,
   useEffect,
   useRef,
   useState,
@@ -52,6 +53,11 @@ import type { GatewayState } from "@/store/gateway"
 
 interface ChatPageProps {
   fallbackTitle?: string
+  newChatLabel?: string
+  onNewChat?: () => void
+  headerActions?: ReactNode
+  activeThreadActions?: (thread: ThreadSummary) => ReactNode
+  showSessionHistory?: boolean
 }
 
 function resolveChatInputDisabledReason({
@@ -139,7 +145,14 @@ function ThreadChatEmptyState({ thread }: { thread: ThreadSummary }) {
   )
 }
 
-export function ChatPage({ fallbackTitle }: ChatPageProps = {}) {
+export function ChatPage({
+  fallbackTitle,
+  newChatLabel,
+  onNewChat,
+  headerActions,
+  activeThreadActions,
+  showSessionHistory = true,
+}: ChatPageProps = {}) {
   const { t } = useTranslation()
   const scrollRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -376,6 +389,8 @@ export function ChatPage({ fallbackTitle }: ChatPageProps = {}) {
   const canSubmit =
     canInput && (Boolean(input.trim()) || attachments.length > 0)
   const title = activeThread?.title || fallbackTitle || t("navigation.chat")
+  const resolvedNewChatLabel = newChatLabel ?? t("chat.newChat")
+  const handleNewChat = onNewChat ?? newChat
   const showThreadEmptyState =
     Boolean(activeThread) &&
     hasAvailableModels &&
@@ -435,31 +450,36 @@ export function ChatPage({ fallbackTitle }: ChatPageProps = {}) {
           </Select>
         </div>
 
+        {activeThread && activeThreadActions?.(activeThread)}
+        {headerActions}
+
         <Button
           variant="secondary"
           size="sm"
-          onClick={newChat}
+          onClick={handleNewChat}
           className="h-9 gap-2"
         >
           <IconPlus className="size-4" />
-          <span className="hidden sm:inline">{t("chat.newChat")}</span>
+          <span className="hidden sm:inline">{resolvedNewChatLabel}</span>
         </Button>
 
-        <SessionHistoryMenu
-          sessions={sessions}
-          activeSessionId={activeSessionId}
-          hasMore={hasMore}
-          loadError={loadError}
-          loadErrorMessage={loadErrorMessage}
-          observerRef={observerRef}
-          onOpenChange={(open) => {
-            if (open) {
-              void loadSessions(true)
-            }
-          }}
-          onSwitchSession={switchSession}
-          onDeleteSession={handleDeleteSession}
-        />
+        {showSessionHistory && (
+          <SessionHistoryMenu
+            sessions={sessions}
+            activeSessionId={activeSessionId}
+            hasMore={hasMore}
+            loadError={loadError}
+            loadErrorMessage={loadErrorMessage}
+            observerRef={observerRef}
+            onOpenChange={(open) => {
+              if (open) {
+                void loadSessions(true)
+              }
+            }}
+            onSwitchSession={switchSession}
+            onDeleteSession={handleDeleteSession}
+          />
+        )}
       </PageHeader>
 
       <div

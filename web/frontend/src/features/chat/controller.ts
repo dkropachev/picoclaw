@@ -21,6 +21,8 @@ import {
 import { type GatewayState, gatewayAtom } from "@/store/gateway"
 
 const store = getDefaultStore()
+const SEND_AFTER_SWITCH_TIMEOUT_MS = 5000
+const SEND_AFTER_SWITCH_POLL_MS = 50
 
 let wsRef: WebSocket | null = null
 let isConnecting = false
@@ -405,6 +407,52 @@ export async function switchChatSession(sessionId: string) {
     console.error("Failed to load session history:", error)
     toast.error(i18n.t("chat.historyOpenFailed"))
   }
+}
+
+function waitForSessionSocketOpen(sessionId: string) {
+  if (
+    activeSessionIdRef === sessionId &&
+    wsRef &&
+    wsRef.readyState === WebSocket.OPEN
+  ) {
+    return Promise.resolve(true)
+  }
+
+  return new Promise<boolean>((resolve) => {
+    const startedAt = Date.now()
+
+    const check = () => {
+      if (activeSessionIdRef !== sessionId) {
+        resolve(false)
+        return
+      }
+      if (wsRef && wsRef.readyState === WebSocket.OPEN) {
+        resolve(true)
+        return
+      }
+      if (Date.now() - startedAt >= SEND_AFTER_SWITCH_TIMEOUT_MS) {
+        resolve(false)
+        return
+      }
+      window.setTimeout(check, SEND_AFTER_SWITCH_POLL_MS)
+    }
+
+    check()
+  })
+}
+
+export async function switchChatSessionAndSend(
+  sessionId: string,
+  input: SendChatMessageInput,
+) {
+  await switchChatSession(sessionId)
+  if (activeSessionIdRef !== sessionId) {
+    return false
+  }
+  if (!(await waitForSessionSocketOpen(sessionId))) {
+    return false
+  }
+  return sendChatMessage(input)
 }
 
 export async function newChatSession() {

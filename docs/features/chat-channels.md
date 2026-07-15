@@ -100,7 +100,9 @@ Owns: EVENT bus.*
 
 Routing and sessions consume normalized inbound context. Agent conversations
 produce outbound responses. Security rules control dashboard and channel
-credentials. Runtime events expose delivery status.
+credentials. Runtime events expose delivery status. Thread card payloads can
+render inside chat messages and route users into thread search or open-thread
+views without changing the channel delivery contract.
 
 ## Failure And Edge Cases
 

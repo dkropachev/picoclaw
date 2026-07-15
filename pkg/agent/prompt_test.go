@@ -413,11 +413,14 @@ func TestContextBuilder_IncludesThreadPolicyContributor(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Tools.Threads.Policy = config.ThreadPolicyConfig{
 		Enabled: true,
-		Mode:    config.ThreadPolicyModeAuto,
+		Mode:    config.ThreadPolicyModeTool,
 		Rules: []config.ThreadPolicyRule{
 			{
-				Type:        "coding",
-				Description: "Move code work into a coding thread.",
+				Type:           "coding",
+				Description:    "Move code work into a coding thread.",
+				MinMessages:    12,
+				MinTextChars:   6000,
+				ThresholdLogic: config.ThreadPolicyThresholdAll,
 			},
 		},
 	}
@@ -427,9 +430,12 @@ func TestContextBuilder_IncludesThreadPolicyContributor(t *testing.T) {
 		CurrentMessage: "please code this",
 	})
 	system := messages[0]
+	thresholdSnippet := "12 visible user/assistant messages and 6000 visible user/assistant text characters"
 	if !strings.Contains(system.Content, "## Thread Routing Policy") ||
+		!strings.Contains(system.Content, "Start the main chat as a normal chat") ||
 		!strings.Contains(system.Content, "Move code work into a coding thread.") ||
-		!strings.Contains(system.Content, "action=\"switch\"") ||
+		!strings.Contains(system.Content, "register_current") ||
+		!strings.Contains(system.Content, thresholdSnippet) ||
 		!strings.Contains(system.Content, "thread navigation, not new work") ||
 		!strings.Contains(system.Content, "without `create_if_missing`") {
 		t.Fatalf("system prompt missing thread policy: %q", system.Content)
