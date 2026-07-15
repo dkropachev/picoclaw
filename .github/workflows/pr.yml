@@ -10,6 +10,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -24,6 +26,15 @@ jobs:
         with:
           version: v2.10.1
           args: --build-tags=goolm,stdjson
+
+      - name: Feature requirements lint
+        run: make lint-features
+
+      - name: Fetch base ref
+        run: git fetch origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+
+      - name: Feature requirements delta guard
+        run: make feature-delta BASE_REF=origin/${{ github.base_ref }} HEAD_REF=HEAD
 
   vuln_check:
     name: Security Check
@@ -53,6 +64,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v6
@@ -64,6 +77,12 @@ jobs:
 
       - name: Run go test
         run: go test -tags goolm,stdjson ./...
+
+      - name: Fetch base ref
+        run: git fetch origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+
+      - name: Coverage delta guard
+        run: make coverage-delta BASE_REF=origin/${{ github.base_ref }} HEAD_REF=HEAD
 
   integration:
     name: Integration Tests

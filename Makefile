@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean help test integration-test build-all lint-docs
+.PHONY: all build install uninstall clean help test integration-test build-all lint-docs feature-inventory lint-features feature-delta coverage-delta
 
 # Build variables
 BINARY_NAME=picoclaw
@@ -37,6 +37,10 @@ WEB_GO?=$(GO)
 CGO_ENABLED?=0
 GO_BUILD_TAGS?=goolm,stdjson
 GOFLAGS?=-v -tags $(GO_BUILD_TAGS)
+BASE_REF?=origin/main
+HEAD_REF?=HEAD
+COVERAGE_PACKAGES?=
+COVERAGE_INTEGRATION?=true
 GOCACHE?=$(CURDIR)/.cache/go-build
 GOMODCACHE?=$(CURDIR)/.cache/go-mod
 GOTOOLCHAIN?=local
@@ -391,10 +395,27 @@ fmt:
 lint-docs:
 	@./scripts/lint-docs.sh
 
+## feature-inventory: Print discovered feature-relevant repo surfaces
+feature-inventory:
+	@$(GO) run -tags featuretools ./scripts/feature_inventory.go ./scripts/featuretools_lib.go
+
+## lint-features: Check feature requirements and surface ownership
+lint-features:
+	@$(GO) run -tags featuretools ./scripts/lint-features.go ./scripts/featuretools_lib.go
+
+## feature-delta: Require prod code changes to update owning feature specs
+feature-delta:
+	@$(GO) run -tags featuretools ./scripts/feature_delta_guard.go ./scripts/featuretools_lib.go --base "$(BASE_REF)" --head "$(HEAD_REF)"
+
+## coverage-delta: Require global and per-feature Go coverage to not decrease
+coverage-delta:
+	@$(GO) run -tags featuretools ./scripts/coverage_delta.go ./scripts/featuretools_lib.go --base "$(BASE_REF)" --head "$(HEAD_REF)" --tags "$(GO_BUILD_TAGS)" --packages "$(COVERAGE_PACKAGES)" --integration=$(COVERAGE_INTEGRATION)
+
 ## lint: Run linters
 lint:
 	@$(GOLANGCI_LINT) run --build-tags $(GO_BUILD_TAGS)
 	@./scripts/lint-docs.sh
+	@$(GO) run -tags featuretools ./scripts/lint-features.go ./scripts/featuretools_lib.go
 
 ## fix: Fix linting issues
 fix:
@@ -411,7 +432,7 @@ update-deps:
 	@$(GO) mod tidy
 
 ## check: Run deps, fmt, vet, tests, and docs consistency checks
-check: deps fmt vet test lint-docs
+check: deps fmt vet test lint-docs lint-features
 
 ## run: Build and run picoclaw
 run: build

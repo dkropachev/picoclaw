@@ -12,6 +12,7 @@ If you are browsing docs rather than reorganizing them, start with these directo
 
 - [Guides](guides/README.md): setup, configuration, provider, and workflow guides.
 - [Reference](reference/README.md): precise configuration and behavior reference.
+- [Feature Requirements](features/README.md): canonical behavior source of truth for product capabilities.
 - [Operations](operations/README.md): debugging and troubleshooting material.
 - [Security](security/README.md): security-focused guides and controls.
 - [Architecture](architecture/README.md): implementation notes and internal design docs.
@@ -33,6 +34,7 @@ For channel-specific setup, start with [Chat Apps Configuration](guides/chat-app
 - `docs/project/`: translated project entry documents such as `README.zh.md` and `CONTRIBUTING.zh.md`.
 - `docs/guides/`: setup and usage guides.
 - `docs/reference/`: reference material and detailed configuration docs.
+- `docs/features/`: canonical feature requirements and auxiliary surface ownership.
 - `docs/operations/`: debugging and troubleshooting docs.
 - `docs/security/`: security-related documentation.
 - `docs/architecture/`: architecture and internal design notes.
