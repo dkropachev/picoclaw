@@ -54,6 +54,9 @@ func TestThreadsToolCreateSearchAndSwitchCards(t *testing.T) {
 	if switchCard.Thread.Type != threadstore.TypeCoding {
 		t.Fatalf("created thread type = %q", switchCard.Thread.Type)
 	}
+	if switchCard.Thread.SourceQuery != "code in /extra/dkropachev/picoclaw branch:main" {
+		t.Fatalf("created thread source query = %q", switchCard.Thread.SourceQuery)
+	}
 	if got := switchCard.Thread.Context["branch"]; got != "main" {
 		t.Fatalf("created thread branch context = %q", got)
 	}
@@ -199,6 +202,39 @@ func TestThreadsToolLookupRequestsDoNotCreateDuplicateThreads(t *testing.T) {
 		t.Fatalf("duplicate register result = %#v", duplicateRegister)
 	}
 	assertThreadCount(t, cfg, 1)
+}
+
+func TestThreadsToolCreateRequiresConcreteQuery(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = filepath.Join(t.TempDir(), "workspace")
+	tool := NewThreadsTool(cfg)
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"action": "create",
+		"title":  "Planning relocation to Japan for family of 3",
+		"type":   "general",
+	})
+	if !result.IsError || !strings.Contains(result.ForLLM, "query is required") {
+		t.Fatalf("create result = %#v, want query-required error", result)
+	}
+	assertThreadCount(t, cfg, 0)
+}
+
+func TestThreadsToolSwitchCreateIfMissingRequiresConcreteQuery(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = filepath.Join(t.TempDir(), "workspace")
+	tool := NewThreadsTool(cfg)
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"action":            "switch",
+		"title":             "Planning relocation to Japan for family of 3",
+		"type":              "general",
+		"create_if_missing": true,
+	})
+	if !result.IsError || !strings.Contains(result.ForLLM, "query is required") {
+		t.Fatalf("switch result = %#v, want query-required error", result)
+	}
+	assertThreadCount(t, cfg, 0)
 }
 
 func TestThreadsToolLookupSwitchCreateIfMissingDoesNotCreate(t *testing.T) {

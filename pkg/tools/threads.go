@@ -104,7 +104,7 @@ func (t *ThreadsTool) Parameters() map[string]any {
 			},
 			"query": map[string]any{
 				"type":        "string",
-				"description": "Exact user/model search query. The UI thread search tile will reuse this exact query.",
+				"description": "Exact user/model search query. For create or switch/attach_current with create_if_missing, this is required and must be the concrete user request or task that should seed the new thread. The UI thread search tile will reuse this exact query.",
 			},
 			"id": map[string]any{
 				"type":        "string",
@@ -117,7 +117,7 @@ func (t *ThreadsTool) Parameters() map[string]any {
 			},
 			"title": map[string]any{
 				"type":        "string",
-				"description": "Title for a created thread.",
+				"description": "Display title for a created thread. Do not use title as the only task text; set query to the concrete user request when creating a thread.",
 			},
 			"context": map[string]any{
 				"type":                 "object",
@@ -296,6 +296,9 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 		if lookupRequest {
 			return threadLookupCreateDeniedResult("creating thread")
 		}
+		if result := requireThreadCreationQuery("creating thread", query); result != nil {
+			return result
+		}
 		thread, err := store.CreatePicoThread(ctx, cfg, threadstore.CreateRequest{
 			ID:           threadID,
 			Type:         threadType,
@@ -386,6 +389,9 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 				}
 				return threadProposalResult(query, "thread lookup did not authorize creating a new thread", items)
 			}
+			if result := requireThreadCreationQuery("creating thread", query); result != nil {
+				return result
+			}
 			created, createErr := store.CreatePicoThread(ctx, cfg, threadstore.CreateRequest{
 				ID:           threadID,
 				Type:         threadType,
@@ -438,6 +444,9 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 		if len(items) == 0 && boolArg(args["create_if_missing"]) {
 			if lookupRequest {
 				return threadProposalResult(query, "thread lookup did not authorize creating a new thread", items)
+			}
+			if result := requireThreadCreationQuery("creating thread", query); result != nil {
+				return result
 			}
 			thread, err := store.CreatePicoThread(ctx, cfg, threadstore.CreateRequest{
 				ID:           threadID,
@@ -695,6 +704,17 @@ func threadLookupCreateDeniedResult(action string) *ToolResult {
 		action + ": thread lookup requests must not create or register a new thread; " +
 			"use action=\"find\", action=\"search\", or action=\"switch\" without create_if_missing, " +
 			"or continue in the already selected thread.",
+	)
+}
+
+func requireThreadCreationQuery(action, query string) *ToolResult {
+	if strings.TrimSpace(query) != "" {
+		return nil
+	}
+	return ErrorResult(
+		action + ": query is required when creating a thread; set query to the concrete " +
+			"user request or work item that should seed the new thread, and use title " +
+			"only as display metadata.",
 	)
 }
 

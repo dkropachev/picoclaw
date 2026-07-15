@@ -34,7 +34,7 @@ dropped threads from discovery while preserving durable records.
 | `FR-THREADS-002` | MUST | Launcher thread APIs list/search, fetch, create, update, attach, return, and drop thread records without deleting underlying session data. | The UI needs durable management without losing conversation history. |
 | `FR-THREADS-003` | MUST | Thread policy rules define type, description, optional mode/attach strategy, confidence behavior, and per-rule `min_messages`, `min_text_chars`, and `threshold_logic` gates before chat may become or join a thread. | Normal chat should not create threads just because a rule matches; long or substantial chats can become threads predictably. |
 | `FR-THREADS-004` | SHOULD | Thread UI provides a search workspace and an open-thread chat view, thread cards route directly to `/threads/open/{thread-id}` while search lives under `/threads/search`, and all thread UI surfaces expose thread-native creation/drop actions instead of normal chat history actions. | Search, active thread work, and thread lifecycle actions are distinct user workflows. |
-| `FR-THREADS-005` | MUST | When a model/tool-created auto-switch card opens a newly created empty thread from a user request, the UI seeds that thread with the concrete requested task, using the card query or thread source query; blank UI-created threads store non-empty metadata but must not fabricate a generic first chat message. | A user asking to start a thread expects the requested work to begin there, while a blank New Thread action should not pollute the thread with generic filler. |
+| `FR-THREADS-005` | MUST | When a model/tool-created auto-switch card opens a newly created empty thread from a user request, the UI seeds that thread exactly once with the concrete requested task, using the card query or thread source query; blank UI-created threads store non-empty metadata but must not fabricate a generic first chat message. | A user asking to start a thread expects the requested work to begin there, while a blank New Thread action should not pollute the thread with generic filler. |
 | `FR-THREADS-006` | MUST | The `threads` tool and thread policy prompt are available by default only to the root/default user-facing agent, never inherited by subturn/spawn child agents, and available to non-default configured agents only when explicitly listed in that agent's `AGENT.md` tools allowlist. | Thread lifecycle changes are UI/session control-plane actions and should not be exposed to background agents accidentally. |
 
 ## Data And State Model
@@ -106,6 +106,9 @@ Every navigation that creates, switches to, or opens a thread must use
 `target_session_id || thread.ui_session_id || thread.id`. A generated thread
 with zero messages must receive the seeded task message before or while the UI
 switches when the card query or thread source query contains a real user task.
+That seed is idempotent for the target session and task text: repeated card
+renders, React remounts, reconnects, or already-loaded session history must not
+send the same first user message again.
 The seed message is derived from the user request by removing thread-control
 phrasing, such as `can you start a thread about`, and preferring the embedded
 work directive, such as `I want you to go over ...`. For example,
@@ -137,6 +140,8 @@ from the current result list.
    existing thread before registering, attaching, or switching.
 3. For create/register/attach/switch actions, normalize type, title, query,
    context tags, active session key, and handoff metadata before writing records.
+   Tool-created new threads must provide `query` as the concrete user task;
+   `title` is display metadata only and cannot be the sole seed source.
 4. For dropped threads, set discoverability false and exclude them from normal
    list/search while preserving direct lookup and session metadata.
 5. For UI card payloads, render search results as non-switching tiles and render
@@ -182,8 +187,13 @@ root turns.
   the user explicitly asks to create one.
 - Model/tool-created empty threads from a concrete user request must not remain
   blank after they open; the persisted source query is non-empty and the first
-  sent prompt is the cleaned requested task. Blank UI-created threads keep a
-  non-empty source query placeholder but send no generic first prompt.
+  sent prompt is the cleaned requested task. The same target session and seed
+  text must not be sent twice after duplicate switch-card renders or session
+  history reloads. Blank UI-created threads keep a non-empty source query
+  placeholder but send no generic first prompt.
+- Tool `create` and `switch`/`attach_current` with `create_if_missing` fail
+  clearly when creating a new thread without `query`; the model must retry with
+  the concrete user request instead of relying on `title`.
 - Thread routes must not show the normal chat history menu in place of
   thread-specific New Thread and Drop Thread controls.
 - A concrete `/threads/open/{id}` URL returned by a model switch card or thread

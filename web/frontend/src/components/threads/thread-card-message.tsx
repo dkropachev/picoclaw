@@ -4,14 +4,18 @@ import { useAtomValue, useSetAtom } from "jotai"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
-import { dropThread, type ThreadSummary } from "@/api/threads"
+import { type ThreadSummary, dropThread } from "@/api/threads"
+import {
+  claimThreadSeed,
+  releaseThreadSeed,
+} from "@/components/threads/thread-card-auto-seed"
 import { ThreadTile } from "@/components/threads/thread-tile"
 import {
   switchChatSession,
   switchChatSessionAndSend,
 } from "@/features/chat/controller"
-import { buildThreadInitialPromptFromCandidates } from "@/features/chat/thread-seed"
 import type { ThreadCardPayload } from "@/features/chat/thread-cards"
+import { buildThreadInitialPromptFromCandidates } from "@/features/chat/thread-seed"
 import { chatAtom } from "@/store/chat"
 import {
   threadOpenSessionIdAtom,
@@ -84,8 +88,19 @@ export function ThreadCardMessage({ payload }: { payload: ThreadCardPayload }) {
             )
           : ""
       if (seedMessage) {
-        void switchChatSessionAndSend(targetSessionId, {
-          content: seedMessage,
+        if (!claimThreadSeed(targetSessionId, seedMessage)) {
+          void switchChatSession(targetSessionId)
+          navigateToThread(targetSessionId)
+          return
+        }
+        void Promise.resolve(
+          switchChatSessionAndSend(targetSessionId, {
+            content: seedMessage,
+          }),
+        ).then((sent) => {
+          if (!sent) {
+            releaseThreadSeed(targetSessionId, seedMessage)
+          }
         })
       } else {
         void switchChatSession(targetSessionId)

@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { dropThread } from "@/api/threads"
 import type { ThreadSummary } from "@/api/threads"
+import { resetThreadCardAutoSeedForTests } from "@/components/threads/thread-card-auto-seed"
 import { ThreadCardMessage } from "@/components/threads/thread-card-message"
 import {
   switchChatSession,
@@ -53,6 +54,8 @@ describe("ThreadCardMessage", () => {
     vi.mocked(dropThread).mockResolvedValue({ ...thread, discoverable: false })
     vi.mocked(switchChatSession).mockReset()
     vi.mocked(switchChatSessionAndSend).mockReset()
+    vi.mocked(switchChatSessionAndSend).mockResolvedValue(true)
+    resetThreadCardAutoSeedForTests()
   })
 
   it("opens exact model query in thread sidebar search", async () => {
@@ -130,7 +133,9 @@ describe("ThreadCardMessage", () => {
     await waitFor(() => {
       expect(dropThread).toHaveBeenCalledWith("session-coding")
     })
-    expect(screen.queryByText("Implement thread sidebar")).not.toBeInTheDocument()
+    expect(
+      screen.queryByText("Implement thread sidebar"),
+    ).not.toBeInTheDocument()
   })
 
   it("auto-switches for switch cards", async () => {
@@ -188,13 +193,10 @@ describe("ThreadCardMessage", () => {
     )
 
     await waitFor(() => {
-      expect(switchChatSessionAndSend).toHaveBeenCalledWith(
-        "session-coding",
-        {
-          content:
-            "go over all the possible options how we as a family of 3 can relocate to japan",
-        },
-      )
+      expect(switchChatSessionAndSend).toHaveBeenCalledWith("session-coding", {
+        content:
+          "go over all the possible options how we as a family of 3 can relocate to japan",
+      })
     })
     expect(switchChatSession).not.toHaveBeenCalled()
     expect(navigateMock).toHaveBeenCalledWith({
@@ -227,15 +229,56 @@ describe("ThreadCardMessage", () => {
     )
 
     await waitFor(() => {
-      expect(switchChatSessionAndSend).toHaveBeenCalledWith(
-        "session-coding",
-        {
-          content:
-            "go over all the possible options how we as a family of 3 can relocate to japan",
-        },
-      )
+      expect(switchChatSessionAndSend).toHaveBeenCalledWith("session-coding", {
+        content:
+          "go over all the possible options how we as a family of 3 can relocate to japan",
+      })
     })
     expect(switchChatSession).not.toHaveBeenCalled()
+  })
+
+  it("seeds an empty switch card only once when the same card remounts", async () => {
+    const emptyThread = {
+      ...thread,
+      message_count: 0,
+      title: "Japan relocation planning",
+      preview: "Planning to relocate to Japan",
+      source_query:
+        "can you start a thread about planning to relocate to japan, i want you to go over all the possible options how we as family of 3 can go there",
+    }
+    const payload = {
+      type: "picoclaw.thread_switch.v2" as const,
+      query: "",
+      auto_switch: true,
+      thread: emptyThread,
+    }
+
+    const { unmount } = render(
+      <Provider>
+        <ThreadCardMessage payload={payload} />
+      </Provider>,
+    )
+
+    await waitFor(() => {
+      expect(switchChatSessionAndSend).toHaveBeenCalledTimes(1)
+    })
+
+    unmount()
+
+    render(
+      <Provider>
+        <ThreadCardMessage payload={payload} />
+      </Provider>,
+    )
+
+    await waitFor(() => {
+      expect(navigateMock).toHaveBeenCalledWith({
+        to: "/threads/open/$threadId",
+        params: { threadId: "session-coding" },
+      })
+    })
+    expect(switchChatSessionAndSend).toHaveBeenCalledTimes(1)
+    expect(switchChatSession).toHaveBeenCalledWith("session-coding")
   })
 
   it("auto-switches empty threads without fabricating a generic prompt", async () => {
