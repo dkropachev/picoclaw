@@ -3,7 +3,14 @@ import type { ChatToolCall } from "@/store/chat"
 
 const DEFAULT_THREAD_TOOL_SEARCH_LIMIT = 8
 const MAX_THREAD_TOOL_SEARCH_LIMIT = 100
-const THREAD_SEARCH_ACTIONS = ["find", "search", "propose_switch"] as const
+const THREAD_SEARCH_ACTIONS = ["find", "search"] as const
+const THREAD_SWITCH_ACTIONS = [
+  "attach_current",
+  "create",
+  "register_current",
+  "switch",
+  "update_metadata",
+] as const
 const THREAD_TYPES = [
   "general",
   "coding",
@@ -11,7 +18,11 @@ const THREAD_TYPES = [
   "investigating",
 ] as const satisfies readonly ThreadType[]
 
-export interface ThreadToolSearchRequest {
+export type ThreadToolCardMode = "proposal" | "search" | "switch"
+
+export interface ThreadToolCardRequest {
+  mode: ThreadToolCardMode
+  id?: string
   query: string
   type: ThreadType | ""
   context?: Record<string, string>
@@ -87,7 +98,7 @@ function normalizeContext(value: unknown): Record<string, string> | undefined {
 
 export function parseThreadToolSearchRequest(
   toolCalls: ChatToolCall[] | undefined,
-): ThreadToolSearchRequest | null {
+): ThreadToolCardRequest | null {
   for (const toolCall of toolCalls ?? []) {
     if (!isThreadsToolName(toolCall.function?.name)) {
       continue
@@ -99,20 +110,42 @@ export function parseThreadToolSearchRequest(
     }
 
     const action = stringValue(args.action).toLowerCase()
-    if (
-      !THREAD_SEARCH_ACTIONS.includes(
-        action as (typeof THREAD_SEARCH_ACTIONS)[number],
-      )
-    ) {
-      continue
-    }
-
     const requestedType = stringValue(args.type).toLowerCase()
-    return {
-      query: stringValue(args.query),
+    const query = stringValue(args.query)
+    const title = stringValue(args.title)
+    const baseRequest: Omit<ThreadToolCardRequest, "mode"> = {
+      id: stringValue(args.id) || undefined,
+      query: query || title,
       type: isThreadType(requestedType) ? requestedType : "",
       context: normalizeContext(args.context),
       limit: normalizeLimit(args.limit),
+    }
+
+    if (
+      THREAD_SEARCH_ACTIONS.includes(
+        action as (typeof THREAD_SEARCH_ACTIONS)[number],
+      )
+    ) {
+      return {
+        ...baseRequest,
+        mode: "search",
+      }
+    }
+    if (action === "propose_switch") {
+      return {
+        ...baseRequest,
+        mode: "proposal",
+      }
+    }
+    if (
+      THREAD_SWITCH_ACTIONS.includes(
+        action as (typeof THREAD_SWITCH_ACTIONS)[number],
+      )
+    ) {
+      return {
+        ...baseRequest,
+        mode: "switch",
+      }
     }
   }
 

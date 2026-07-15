@@ -20,7 +20,7 @@ import {
   MessageCodeBlock,
 } from "@/components/chat/message-code-block"
 import { ThreadCardMessage } from "@/components/threads/thread-card-message"
-import { ThreadToolCallSearchCard } from "@/components/threads/thread-tool-call-search-card"
+import { ThreadToolCallCard } from "@/components/threads/thread-tool-call-card"
 import { Button } from "@/components/ui/button"
 import { parseThreadCardPayload } from "@/features/chat/thread-cards"
 import { parseThreadToolSearchRequest } from "@/features/chat/thread-tool-calls"
@@ -125,7 +125,7 @@ export function AssistantMessage({
             )}
           </div>
         </div>
-        <ThreadToolCallSearchCard request={threadToolSearchRequest} />
+        <ThreadToolCallCard request={threadToolSearchRequest} />
       </div>
     )
   }
