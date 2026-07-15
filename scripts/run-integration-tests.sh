@@ -91,10 +91,39 @@ run_suite() {
       docker compose "${compose_args[@]}" up -d --build --wait "${dependency_services[@]}"
     fi
 
+    local run_command="$TEST_COMMAND"
+    local run_env=()
+    if [[ -n "${INTEGRATION_COVERPROFILE_DIR:-}" ]]; then
+      local cover_profile="$INTEGRATION_COVERPROFILE_DIR/$suite_name.cover.out"
+      local host_cover_dir=""
+      if [[ "$INTEGRATION_COVERPROFILE_DIR" == /workspace/* ]]; then
+        host_cover_dir="$ROOT_DIR/${INTEGRATION_COVERPROFILE_DIR#/workspace/}"
+      else
+        host_cover_dir="$INTEGRATION_COVERPROFILE_DIR"
+      fi
+      mkdir -p "$host_cover_dir"
+      run_env+=(-e "INTEGRATION_COVERPKG=${INTEGRATION_COVERPKG:-}")
+      run_env+=(-e "INTEGRATION_COVERPROFILE=$cover_profile")
+      run_command='go() {
+  if [[ "$1" == "test" ]]; then
+    shift
+    if [[ -n "${INTEGRATION_COVERPKG:-}" ]]; then
+      command go test -buildvcs=false -covermode=atomic -coverpkg="$INTEGRATION_COVERPKG" -coverprofile="$INTEGRATION_COVERPROFILE" "$@"
+    else
+      command go test -buildvcs=false -covermode=atomic -coverprofile="$INTEGRATION_COVERPROFILE" "$@"
+    fi
+  else
+    command go "$@"
+  fi
+}
+export -f go
+'"$TEST_COMMAND"
+    fi
+
     echo "==> [$suite_name] running: $TEST_COMMAND"
     # integration-runner already uses `bash -c` as its entrypoint, so pass the
     # suite command as a single argument for Bash to execute directly.
-    docker compose "${compose_args[@]}" run --rm "$runner_service" "$TEST_COMMAND"
+    docker compose "${compose_args[@]}" run --rm "${run_env[@]}" "$runner_service" "$run_command"
   )
 }
 

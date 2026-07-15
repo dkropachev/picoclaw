@@ -52,3 +52,5 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 - `Owns: CODE` maps production files to the feature spec that must change with
   those files.
 - `MUST` requirements require unit or integration evidence.
+- Feature-owned Go coverage and changed executable production lines cannot
+  regress in PRs.

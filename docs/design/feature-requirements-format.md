@@ -115,6 +115,16 @@ lines make the contract auditable by tooling. `Owns: CODE` maps production
 source files to the feature spec that must change when those files change, and
 it is also used to track per-feature Go test coverage deltas.
 
+## Coverage Delta Contract
+
+`make coverage-delta` compares the PR base and head with a scoped Go coverage
+plan derived from changed files and `Owns: CODE` mappings. The gate runs tests
+with `-coverpkg` for impacted feature-owned packages, includes Docker-backed
+integration suites when an impacted feature owns them, and fails when changed
+production Go lines are executable but uncovered. Coverage for impacted
+features must not lose percentage or covered statement count when their owned
+statement count does not shrink.
+
 ## Why This Format
 
 The format keeps the current requirement-table workflow but makes the table

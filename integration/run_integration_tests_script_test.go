@@ -118,6 +118,117 @@ esac
 	}
 }
 
+func TestRunIntegrationTestsScriptInjectsCoverageForGoTest(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+
+	repoRoot := repoRootFromTestFile(t)
+	suitesRoot := filepath.Join(repoRoot, "integration", "suites")
+	suiteDir, err := os.MkdirTemp(suitesRoot, "runner-coverage-")
+	if err != nil {
+		t.Fatalf("MkdirTemp() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(suiteDir)
+		_ = os.RemoveAll(filepath.Join(repoRoot, ".coverage", "runner-test"))
+	})
+
+	suiteName := filepath.Base(suiteDir)
+	err = os.WriteFile(
+		filepath.Join(suiteDir, "suite.env"),
+		[]byte("TEST_COMMAND='go test ./pkg/mcp -run TestIntegration -v'\n"),
+		0o644,
+	)
+	if err != nil {
+		t.Fatalf("WriteFile(suite.env) error = %v", err)
+	}
+	err = os.WriteFile(
+		filepath.Join(suiteDir, "docker-compose.yml"),
+		[]byte("services:\n  fake-dependency:\n    image: busybox\n"),
+		0o644,
+	)
+	if err != nil {
+		t.Fatalf("WriteFile(docker-compose.yml) error = %v", err)
+	}
+
+	stubDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "docker.log")
+	err = os.WriteFile(filepath.Join(stubDir, "docker"), []byte(`#!/bin/sh
+set -eu
+
+log_file="${DOCKER_LOG:?}"
+{
+  printf '%s\n' '---'
+  for arg in "$@"; do
+    printf '%s\n' "$arg"
+  done
+} >>"$log_file"
+
+subcommand=""
+for arg in "$@"; do
+  case "$arg" in
+    config|up|run|down)
+      subcommand="$arg"
+      ;;
+  esac
+done
+
+case "$subcommand" in
+  config)
+    printf '%s\n' integration-runner fake-dependency
+    ;;
+  up|down)
+    ;;
+  run)
+    printf '%s\n' runner-ok
+    ;;
+  *)
+    printf 'unexpected docker invocation: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+`), 0o755)
+	if err != nil {
+		t.Fatalf("WriteFile(docker stub) error = %v", err)
+	}
+
+	cmd := exec.Command(bashPath, filepath.Join(repoRoot, "scripts", "run-integration-tests.sh"), suiteName)
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(),
+		"PATH="+stubDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"DOCKER_LOG="+logPath,
+		"INTEGRATION_COVERPKG=github.com/sipeed/picoclaw/pkg/mcp",
+		"INTEGRATION_COVERPROFILE_DIR=/workspace/.coverage/runner-test",
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run-integration-tests.sh error = %v\noutput:\n%s", err, output)
+	}
+
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(logPath) error = %v", err)
+	}
+	runArgs := findLoggedDockerInvocation(t, string(logData), "run")
+	joinedArgs := strings.Join(runArgs, "\n")
+	for _, want := range []string{
+		"INTEGRATION_COVERPKG=github.com/sipeed/picoclaw/pkg/mcp",
+		"INTEGRATION_COVERPROFILE=/workspace/.coverage/runner-test/" + suiteName + ".cover.out",
+		"-coverprofile=\"$INTEGRATION_COVERPROFILE\"",
+		"go test ./pkg/mcp -run TestIntegration -v",
+	} {
+		if !strings.Contains(joinedArgs, want) {
+			t.Fatalf("docker run args missing %q:\n%s", want, joinedArgs)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(repoRoot, ".coverage", "runner-test")); err != nil {
+		t.Fatalf("coverage dir was not created: %v", err)
+	}
+}
+
 func repoRootFromTestFile(t *testing.T) string {
 	t.Helper()
 

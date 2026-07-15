@@ -39,6 +39,8 @@ GO_BUILD_TAGS?=goolm,stdjson
 GOFLAGS?=-v -tags $(GO_BUILD_TAGS)
 BASE_REF?=origin/main
 HEAD_REF?=HEAD
+COVERAGE_PACKAGES?=
+COVERAGE_INTEGRATION?=true
 GOCACHE?=$(CURDIR)/.cache/go-build
 GOMODCACHE?=$(CURDIR)/.cache/go-mod
 GOTOOLCHAIN?=local
@@ -407,7 +409,7 @@ feature-delta:
 
 ## coverage-delta: Require global and per-feature Go coverage to not decrease
 coverage-delta:
-	@$(GO) run -tags featuretools ./scripts/coverage_delta.go ./scripts/featuretools_lib.go --base "$(BASE_REF)" --head "$(HEAD_REF)"
+	@$(GO) run -tags featuretools ./scripts/coverage_delta.go ./scripts/featuretools_lib.go --base "$(BASE_REF)" --head "$(HEAD_REF)" --tags "$(GO_BUILD_TAGS)" --packages "$(COVERAGE_PACKAGES)" --integration=$(COVERAGE_INTEGRATION)
 
 ## lint: Run linters
 lint:
