@@ -210,6 +210,15 @@ func TestModelConfig_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "valid reasoning effort",
+			config: ModelConfig{
+				ModelName:       "test",
+				Model:           "openai/gpt-4o",
+				ReasoningEffort: "high",
+			},
+			wantErr: false,
+		},
+		{
 			name: "missing model_name",
 			config: ModelConfig{
 				Model: "openai/gpt-4o",
@@ -234,6 +243,24 @@ func TestModelConfig_Validate(t *testing.T) {
 				ModelName:           "test",
 				Model:               "openai/gpt-4o",
 				ToolSchemaTransform: "invalid",
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid reasoning effort",
+			config: ModelConfig{
+				ModelName:       "test",
+				Model:           "openai/gpt-4o",
+				ReasoningEffort: "adaptive",
+			},
+			wantErr: true,
+		},
+		{
+			name: "max reasoning effort is not OpenAI compatible",
+			config: ModelConfig{
+				ModelName:       "test",
+				Model:           "openai/gpt-4o",
+				ReasoningEffort: "max",
 			},
 			wantErr: true,
 		},

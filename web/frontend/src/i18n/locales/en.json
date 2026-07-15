@@ -319,6 +319,8 @@
       "rpmHint": "Maximum requests per minute. 0 = no limit.",
       "thinkingLevel": "Thinking Level",
       "thinkingLevelHint": "Leave blank to omit thinking_level and use the provider default. Values: off, low, medium, high, xhigh, adaptive.",
+      "reasoningEffort": "Reasoning Effort",
+      "reasoningEffortHint": "OpenAI-style reasoning effort. Use provider default unless the model supports this control. Values: none, minimal, low, medium, high, xhigh.",
       "providerDefault": "provider default",
       "maxTokensField": "Max Tokens Field",
       "maxTokensFieldHint": "Override the request field name for max tokens, e.g. max_completion_tokens.",

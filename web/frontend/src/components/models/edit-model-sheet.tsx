@@ -53,6 +53,7 @@ import {
   isProviderAuthMethodLocked,
   providerSupportsFetch,
 } from "./provider-registry"
+import { ReasoningEffortSelect } from "./reasoning-effort-select"
 import { TestModelDialog } from "./test-model-dialog"
 
 interface EditForm {
@@ -69,6 +70,7 @@ interface EditForm {
   maxTokensField: string
   requestTimeout: string
   thinkingLevel: string
+  reasoningEffort: string
   toolSchemaTransform: string
   streamingEnabled: boolean
   extraBody: string
@@ -98,6 +100,7 @@ function buildInitialEditForm(model: ModelInfo): EditForm {
     maxTokensField: model.max_tokens_field ?? "",
     requestTimeout: model.request_timeout ? String(model.request_timeout) : "",
     thinkingLevel: model.thinking_level ?? "",
+    reasoningEffort: model.reasoning_effort ?? "",
     toolSchemaTransform: model.tool_schema_transform ?? "",
     streamingEnabled: model.streaming?.enabled === true,
     extraBody: model.extra_body
@@ -131,6 +134,7 @@ export function EditModelSheet({
     maxTokensField: "",
     requestTimeout: "",
     thinkingLevel: "",
+    reasoningEffort: "",
     toolSchemaTransform: "",
     streamingEnabled: false,
     extraBody: "",
@@ -389,6 +393,7 @@ export function EditModelSheet({
           ? Number(form.requestTimeout)
           : undefined,
         thinking_level: form.thinkingLevel.trim() || undefined,
+        reasoning_effort: form.reasoningEffort.trim() || undefined,
         tool_schema_transform: form.toolSchemaTransform.trim() || undefined,
         streaming,
         extra_body: extraBody,
@@ -715,6 +720,20 @@ export function EditModelSheet({
                     value={form.thinkingLevel}
                     onChange={setField("thinkingLevel")}
                     placeholder={t("models.field.providerDefault")}
+                  />
+                </Field>
+
+                <Field
+                  label={t("models.field.reasoningEffort")}
+                  hint={t("models.field.reasoningEffortHint")}
+                >
+                  <ReasoningEffortSelect
+                    value={form.reasoningEffort}
+                    providerDefaultLabel={t("models.field.providerDefault")}
+                    onChange={(value) => {
+                      if (error) setError("")
+                      setForm((f) => ({ ...f, reasoningEffort: value }))
+                    }}
                   />
                 </Field>
 

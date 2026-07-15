@@ -105,6 +105,62 @@ func TestProviderChat_AzureRequestBodyContainsModel(t *testing.T) {
 	}
 }
 
+func TestProviderChat_AzureUsesReasoningEffort(t *testing.T) {
+	var requestBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&requestBody)
+		writeValidResponse(w)
+	}))
+	defer server.Close()
+
+	p := NewProvider("test-key", server.URL, "", "")
+	_, err := p.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hi"}},
+		nil,
+		"deployment",
+		map[string]any{"reasoning_effort": "high"},
+	)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+
+	reasoning, ok := requestBody["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("reasoning = %#v, want map", requestBody["reasoning"])
+	}
+	if got := reasoning["effort"]; got != "high" {
+		t.Fatalf("reasoning.effort = %#v, want high", got)
+	}
+}
+
+func TestProviderChat_AzureOmitsUnsupportedReasoningEffort(t *testing.T) {
+	var requestBody map[string]any
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&requestBody)
+		writeValidResponse(w)
+	}))
+	defer server.Close()
+
+	p := NewProvider("test-key", server.URL, "", "")
+	_, err := p.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "hi"}},
+		nil,
+		"deployment",
+		map[string]any{"reasoning_effort": "max"},
+	)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+
+	if _, ok := requestBody["reasoning"]; ok {
+		t.Fatalf("reasoning should be omitted for max, got %#v", requestBody["reasoning"])
+	}
+}
+
 func TestProviderChat_AzureUsesMaxOutputTokens(t *testing.T) {
 	var requestBody map[string]any
 

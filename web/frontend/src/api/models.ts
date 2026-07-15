@@ -20,6 +20,7 @@ export interface ModelInfo {
   max_tokens_field?: string
   request_timeout?: number
   thinking_level?: string
+  reasoning_effort?: string
   tool_schema_transform?: string
   streaming?: {
     enabled?: boolean

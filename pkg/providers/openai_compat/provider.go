@@ -209,6 +209,7 @@ func (p *Provider) buildRequestBody(
 	}
 
 	p.applyThinkingControl(requestBody, model, options)
+	p.applyReasoningEffortControl(requestBody, options)
 
 	// Merge extra body fields configured per-provider/model.
 	// These are injected last so they take precedence over defaults.
@@ -238,6 +239,18 @@ func (p *Provider) applyThinkingControl(requestBody map[string]any, model string
 	case "enable_thinking":
 		requestBody["enable_thinking"] = false
 	}
+}
+
+func (p *Provider) applyReasoningEffortControl(requestBody map[string]any, options map[string]any) {
+	if requestBody == nil {
+		return
+	}
+	raw, _ := options["reasoning_effort"].(string)
+	effort, err := common.NormalizeReasoningEffort(raw)
+	if err != nil || effort == "" {
+		return
+	}
+	requestBody["reasoning_effort"] = effort
 }
 
 func (p *Provider) applyDeepSeekThinkingControl(requestBody map[string]any, level string) {

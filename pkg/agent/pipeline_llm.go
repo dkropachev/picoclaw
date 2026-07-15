@@ -77,6 +77,7 @@ func (p *Pipeline) CallLLM(
 		exec.llmOpts["native_search"] = true
 	}
 	applyTurnThinkingOptions(exec, ts.agent, exec.activeProvider, true)
+	applyReasoningEffortOption(exec.llmOpts, exec.activeModelConfig)
 
 	exec.llmModel = exec.activeModel
 
@@ -107,6 +108,7 @@ func (p *Pipeline) CallLLM(
 				if strings.TrimSpace(exec.llmModel) != "" && exec.llmModel != prevModel {
 					p.applyBeforeLLMModelRewrite(ts, exec)
 					applyTurnThinkingOptions(exec, ts.agent, exec.activeProvider, true)
+					applyReasoningEffortOption(exec.llmOpts, exec.activeModelConfig)
 				}
 			}
 		case HookActionAbortTurn:
@@ -198,6 +200,7 @@ func (p *Pipeline) CallLLM(
 			)
 			candidateThinking := thinkingSettingsFromModelConfig(candidateCfg)
 			applyThinkingOption(callOpts, candidateProvider, candidateThinking, true, ts.agent.ID)
+			applyReasoningEffortOption(callOpts, candidateCfg)
 			exec.suppressReasoning = shouldSuppressReasoningFor(candidateThinking)
 			return candidateProvider.Chat(ctx, messagesForCall, toolDefsForCall, candidate.Model, callOpts)
 		}

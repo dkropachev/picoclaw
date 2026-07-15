@@ -17,6 +17,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	providercommon "github.com/sipeed/picoclaw/pkg/providers/common"
 )
 
 // registerModelRoutes binds model list management endpoints to the ServeMux.
@@ -52,6 +53,7 @@ type modelResponse struct {
 	MaxTokensField      string                      `json:"max_tokens_field,omitempty"`
 	RequestTimeout      int                         `json:"request_timeout,omitempty"`
 	ThinkingLevel       string                      `json:"thinking_level,omitempty"`
+	ReasoningEffort     string                      `json:"reasoning_effort,omitempty"`
 	ToolSchemaTransform string                      `json:"tool_schema_transform,omitempty"`
 	Streaming           config.ModelStreamingConfig `json:"streaming,omitempty"`
 	ExtraBody           map[string]any              `json:"extra_body,omitempty"`
@@ -90,6 +92,12 @@ func normalizeStoredModelConfig(mc *config.ModelConfig) bool {
 	if credentialID != mc.CredentialID {
 		mc.CredentialID = credentialID
 		changed = true
+	}
+	if effort, err := providercommon.NormalizeReasoningEffort(mc.ReasoningEffort); err == nil {
+		if effort != mc.ReasoningEffort {
+			mc.ReasoningEffort = effort
+			changed = true
+		}
 	}
 
 	if provider != "" {
@@ -142,6 +150,9 @@ func normalizeIncomingModelConfig(mc *config.ModelConfig) {
 	mc.Provider = strings.TrimSpace(mc.Provider)
 	mc.AuthMethod = strings.ToLower(strings.TrimSpace(mc.AuthMethod))
 	mc.CredentialID = strings.TrimSpace(mc.CredentialID)
+	if effort, err := providercommon.NormalizeReasoningEffort(mc.ReasoningEffort); err == nil {
+		mc.ReasoningEffort = effort
+	}
 	if mc.Provider == "" {
 		mc.Provider, mc.Model = providers.SplitModelProviderAndID(mc.Model, "openai")
 	} else {
@@ -299,6 +310,7 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 			MaxTokensField:      m.MaxTokensField,
 			RequestTimeout:      m.RequestTimeout,
 			ThinkingLevel:       m.ThinkingLevel,
+			ReasoningEffort:     m.ReasoningEffort,
 			ToolSchemaTransform: m.ToolSchemaTransform,
 			Streaming:           m.Streaming,
 			ExtraBody:           m.ExtraBody,

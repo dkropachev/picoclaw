@@ -318,6 +318,8 @@
       "rpmHint": "প্রতি মিনিটে সর্বাধিক অনুরোধ। 0 = কোনো সীমা নেই।",
       "thinkingLevel": "চিন্তার স্তর",
       "thinkingLevelHint": "thinking_level বাদ দিতে এবং প্রোভাইডার ডিফল্ট ব্যবহার করতে খালি রাখুন। মান: off, low, medium, high, xhigh, adaptive।",
+      "reasoningEffort": "রিজনিং এফোর্ট",
+      "reasoningEffortHint": "OpenAI-ধাঁচের reasoning_effort। মডেলটি এই নিয়ন্ত্রণ সমর্থন না করলে প্রোভাইডার ডিফল্ট ব্যবহার করুন। মান: none, minimal, low, medium, high, xhigh।",
       "providerDefault": "প্রোভাইডার ডিফল্ট",
       "maxTokensField": "ম্যাক্স টোকেন ফিল্ড",
       "maxTokensFieldHint": "ম্যাক্স টোকেনের জন্য অনুরোধ ক্ষেত্রের নাম ওভাররাইড করুন, যেমন max_completion_tokens।",

@@ -9,9 +9,11 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/providers/common"
 	orc "github.com/sipeed/picoclaw/pkg/providers/openai_responses_common"
 )
 
@@ -253,6 +255,14 @@ func buildCodexParams(
 
 	if len(tools) > 0 || enableWebSearch {
 		params.Tools = orc.TranslateTools(tools, enableWebSearch)
+	}
+
+	if rawEffort, ok := options["reasoning_effort"].(string); ok {
+		if effort, err := common.NormalizeReasoningEffort(rawEffort); err == nil && effort != "" {
+			params.Reasoning = shared.ReasoningParam{
+				Effort: shared.ReasoningEffort(effort),
+			}
+		}
 	}
 
 	return params

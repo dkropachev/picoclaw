@@ -317,6 +317,8 @@
       "rpmHint": "Maximální počet požadavků za minutu. 0 = bez omezení.",
       "thinkingLevel": "Úroveň uvažování",
       "thinkingLevelHint": "Rozšířený thinking budget: off, low, medium, high, xhigh, adaptive.",
+      "reasoningEffort": "Úsilí uvažování",
+      "reasoningEffortHint": "OpenAI-style reasoning_effort. Použijte výchozí hodnotu poskytovatele, pokud model tuto volbu nepodporuje. Hodnoty: none, minimal, low, medium, high, xhigh.",
       "providerDefault": "výchozí poskytovatele",
       "maxTokensField": "Pole Max Tokens",
       "maxTokensFieldHint": "Přepsat název pole požadavku pro max tokens, např. max_completion_tokens.",

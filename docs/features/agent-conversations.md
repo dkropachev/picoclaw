@@ -31,6 +31,7 @@ auxiliary to this capability.
 | `FR-AGENT-007` | MUST | Subturn and spawn tools run child work with bounded depth, concurrency, timeout, and token budget. | Background work must not exhaust the parent turn. |
 | `FR-AGENT-008` | SHOULD | Thinking or reasoning content is preserved for surfaces that display it and omitted from ordinary final replies unless configured. | Reasoning display is auxiliary, not the answer itself. |
 | `FR-AGENT-009` | MUST | CLI direct-agent commands use the same agent runtime path as gateway turns, with command-specific input/output wrapping only. | CLI must not fork behavior from gateway runtime. |
+| `FR-AGENT-010` | MUST | Per-model OpenAI-style `reasoning_effort` is normalized before provider calls; blank/default values are omitted, `off` maps to `none`, and unsupported values are rejected by config validation. | Provider requests must not forward invalid reasoning controls. |
 
 ## Data And State Model
 
@@ -88,6 +89,7 @@ Owns: EVENT agent.*
 | --- | --- | --- | --- |
 | CLI | `picoclaw agent`, `picoclaw model`, `picoclaw status`, `picoclaw version` | Direct agent use, model selection, status, and build metadata. | `FR-AGENT-003`, `FR-AGENT-009` |
 | Config | `agents.*`, `model_list.*` | Agent defaults, per-agent models, fallbacks, turn profile, retry, token, media, and tool iteration policy. | `FR-AGENT-002`, `FR-AGENT-003`, `FR-AGENT-004` |
+| Config | `model_list[].reasoning_effort` | Optional OpenAI-style reasoning effort forwarded only after shared normalization and validation. | `FR-AGENT-003`, `FR-AGENT-010` |
 | Tools | `spawn`, `spawn_status`, `subagent`, `delegate` | Child work delegation and status reporting. | `FR-AGENT-007` |
 | Events | `agent.*` | Turn, LLM, tool, steering, interrupt, subturn, and error telemetry. | `FR-AGENT-001`, `FR-AGENT-004`, `FR-AGENT-006` |
 
@@ -95,7 +97,7 @@ Owns: EVENT agent.*
 
 1. Build an `InboundContext` and resolve the route/session before prompt work.
 2. Resolve prompt contributors and turn profile decisions before provider calls.
-3. Select model candidates, then execute provider attempts with retry/fallback policy.
+3. Select model candidates, normalize optional provider controls such as `reasoning_effort`, then execute provider attempts with retry/fallback policy.
 4. For each tool-call response, validate tool availability and arguments, run hooks and registry execution, append tool results, and re-enter provider execution until done or capped.
 5. Write final messages and summaries after the assistant response is known.
 
@@ -123,6 +125,7 @@ Runtime events report each major step.
 | `FR-AGENT-004`, `FR-AGENT-005` | [pkg/agent/pipeline_execute_test.go](../../pkg/agent/pipeline_execute_test.go), [pkg/agent/error_format_test.go](../../pkg/agent/error_format_test.go), [pkg/tools/registry_test.go](../../pkg/tools/registry_test.go) |
 | `FR-AGENT-007` | [pkg/agent/subturn_test.go](../../pkg/agent/subturn_test.go), [pkg/tools/subagent_tool_test.go](../../pkg/tools/subagent_tool_test.go), [pkg/tools/spawn_status_test.go](../../pkg/tools/spawn_status_test.go) |
 | `FR-AGENT-009` | [cmd/picoclaw/internal/agent/command_test.go](../../cmd/picoclaw/internal/agent/command_test.go), [cmd/picoclaw/internal/model/command_test.go](../../cmd/picoclaw/internal/model/command_test.go) |
+| `FR-AGENT-010` | [pkg/agent/reasoning_effort_test.go](../../pkg/agent/reasoning_effort_test.go), [pkg/providers/common/reasoning_effort_test.go](../../pkg/providers/common/reasoning_effort_test.go), [pkg/providers/openai_compat/provider_test.go](../../pkg/providers/openai_compat/provider_test.go), [pkg/providers/azure/provider_test.go](../../pkg/providers/azure/provider_test.go), [pkg/providers/oauth/codex_provider_test.go](../../pkg/providers/oauth/codex_provider_test.go) |
 
 ## Implementation Anchors
 

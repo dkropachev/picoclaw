@@ -52,6 +52,7 @@ import {
   isProviderAuthMethodLocked,
   providerSupportsFetch,
 } from "./provider-registry"
+import { ReasoningEffortSelect } from "./reasoning-effort-select"
 import { TestModelDialog } from "./test-model-dialog"
 
 interface AddForm {
@@ -69,6 +70,7 @@ interface AddForm {
   maxTokensField: string
   requestTimeout: string
   thinkingLevel: string
+  reasoningEffort: string
   toolSchemaTransform: string
   streamingEnabled: boolean
   extraBody: string
@@ -90,6 +92,7 @@ const EMPTY_ADD_FORM: AddForm = {
   maxTokensField: "",
   requestTimeout: "",
   thinkingLevel: "",
+  reasoningEffort: "",
   toolSchemaTransform: "",
   streamingEnabled: false,
   extraBody: "",
@@ -405,6 +408,7 @@ export function AddModelSheet({
           ? Number(form.requestTimeout)
           : undefined,
         thinking_level: form.thinkingLevel.trim() || undefined,
+        reasoning_effort: form.reasoningEffort.trim() || undefined,
         tool_schema_transform: form.toolSchemaTransform.trim() || undefined,
         streaming: form.streamingEnabled ? { enabled: true } : undefined,
         extra_body: extraBody,
@@ -744,6 +748,19 @@ export function AddModelSheet({
                     value={form.thinkingLevel}
                     onChange={setField("thinkingLevel")}
                     placeholder={t("models.field.providerDefault")}
+                  />
+                </Field>
+
+                <Field
+                  label={t("models.field.reasoningEffort")}
+                  hint={t("models.field.reasoningEffortHint")}
+                >
+                  <ReasoningEffortSelect
+                    value={form.reasoningEffort}
+                    providerDefaultLabel={t("models.field.providerDefault")}
+                    onChange={(value) =>
+                      setForm((f) => ({ ...f, reasoningEffort: value }))
+                    }
                   />
                 </Field>
 

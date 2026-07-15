@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -108,5 +109,35 @@ func TestTrimHistoryToFitContextWindow_WithProtectedTurnTailKeepsActiveTurn(t *t
 	}
 	if messages[0].Content != current {
 		t.Fatalf("messages[0].Content = %q, want protected current turn", messages[0].Content)
+	}
+}
+
+func TestTurnStateLastFinishReasonAndUsage(t *testing.T) {
+	state := &turnState{}
+
+	state.SetLastFinishReason("tool_calls")
+	if got := state.GetLastFinishReason(); got != "tool_calls" {
+		t.Fatalf("GetLastFinishReason() = %q, want tool_calls", got)
+	}
+
+	usage := &providers.UsageInfo{PromptTokens: 10, CompletionTokens: 4, TotalTokens: 14}
+	state.SetLastUsage(usage)
+	if got := state.GetLastUsage(); got != usage {
+		t.Fatalf("GetLastUsage() = %#v, want original usage pointer", got)
+	}
+}
+
+func TestTurnStateContextHelpers(t *testing.T) {
+	state := &turnState{}
+	ctx := withTurnState(context.Background(), state)
+
+	if got := turnStateFromContext(ctx); got != state {
+		t.Fatalf("turnStateFromContext() = %#v, want state", got)
+	}
+	if got := TurnStateFromContext(ctx); got != state {
+		t.Fatalf("TurnStateFromContext() = %#v, want state", got)
+	}
+	if got := TurnStateFromContext(context.Background()); got != nil {
+		t.Fatalf("TurnStateFromContext(empty) = %#v, want nil", got)
 	}
 }

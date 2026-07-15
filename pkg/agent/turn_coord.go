@@ -475,9 +475,10 @@ func (al *AgentLoop) askSideQuestion(
 		settings := thinkingSettingsFromModelConfig(modelCfg)
 		sideSuppressReasoning = shouldSuppressReasoningFor(settings)
 		if _, exists := callOpts["thinking_level"]; !exists {
-			if settings.configured {
+			if settings.configured || hasReasoningEffortConfig(modelCfg) {
 				callOpts = shallowCloneLLMOptions(llmOpts)
 				applyThinkingOption(callOpts, provider, settings, false, agent.ID)
+				applyReasoningEffortOption(callOpts, modelCfg)
 			}
 		}
 		return provider.Chat(ctx, callMessages, nil, model, callOpts)
