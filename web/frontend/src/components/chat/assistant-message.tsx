@@ -7,7 +7,7 @@ import {
   IconFileText,
   IconTool,
 } from "@tabler/icons-react"
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import ReactMarkdown from "react-markdown"
 import rehypeHighlight from "rehype-highlight"
@@ -20,8 +20,10 @@ import {
   MessageCodeBlock,
 } from "@/components/chat/message-code-block"
 import { ThreadCardMessage } from "@/components/threads/thread-card-message"
+import { ThreadToolCallSearchCard } from "@/components/threads/thread-tool-call-search-card"
 import { Button } from "@/components/ui/button"
 import { parseThreadCardPayload } from "@/features/chat/thread-cards"
+import { parseThreadToolSearchRequest } from "@/features/chat/thread-tool-calls"
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard"
 import { formatMessageTime } from "@/hooks/use-pico-chat"
 import { cn } from "@/lib/utils"
@@ -73,6 +75,10 @@ export function AssistantMessage({
   const trimmedModelName = modelName?.trim() ?? ""
   const threadCardPayload =
     kind === "normal" ? parseThreadCardPayload(content) : null
+  const threadToolSearchRequest = useMemo(
+    () => (isToolCalls ? parseThreadToolSearchRequest(toolCalls) : null),
+    [isToolCalls, toolCalls],
+  )
 
   if (threadCardPayload) {
     return (
@@ -95,6 +101,31 @@ export function AssistantMessage({
           </div>
         </div>
         <ThreadCardMessage payload={threadCardPayload} />
+      </div>
+    )
+  }
+
+  if (threadToolSearchRequest) {
+    return (
+      <div className="group flex w-full flex-col gap-1.5">
+        <div className="text-muted-foreground/60 flex items-center justify-between gap-2 px-1 text-xs opacity-70">
+          <div className="flex items-center gap-2">
+            <span>PicoClaw</span>
+            {trimmedModelName && (
+              <>
+                <span className="opacity-50">•</span>
+                <span>{trimmedModelName}</span>
+              </>
+            )}
+            {formattedTimestamp && (
+              <>
+                <span className="opacity-50">•</span>
+                <span>{formattedTimestamp}</span>
+              </>
+            )}
+          </div>
+        </div>
+        <ThreadToolCallSearchCard request={threadToolSearchRequest} />
       </div>
     )
   }

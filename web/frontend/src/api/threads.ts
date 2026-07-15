@@ -34,12 +34,14 @@ export interface CreateThreadInput {
 export async function getThreads({
   query = "",
   type = "",
+  context,
   offset = 0,
   limit = 50,
   includeDropped = false,
 }: {
   query?: string
   type?: ThreadType | ""
+  context?: Record<string, string>
   offset?: number
   limit?: number
   includeDropped?: boolean
@@ -53,6 +55,16 @@ export async function getThreads({
   }
   if (type) {
     params.set("type", type)
+  }
+  const contextFilter = Object.entries(context ?? {})
+    .map(([key, value]) => [key.trim().toLowerCase(), value.trim()] as const)
+    .filter(([key, value]) => key && value)
+    .sort(([left], [right]) => left.localeCompare(right))
+  if (contextFilter.length > 0) {
+    params.set(
+      "context",
+      contextFilter.map(([key, value]) => `${key}:${value}`).join(","),
+    )
   }
   if (includeDropped) {
     params.set("include_dropped", "true")
