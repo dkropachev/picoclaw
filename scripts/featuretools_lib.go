@@ -3,8 +3,10 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -18,6 +20,21 @@ type featureSurface struct {
 	Kind   string
 	ID     string
 	Source string
+}
+
+type featureSpecMetadata struct {
+	Path       string
+	RelPath    string
+	FeatureID  string
+	Text       string
+	Ownerships []featureOwnership
+}
+
+type featureOwnership struct {
+	Kind        string
+	Pattern     string
+	SpecPath    string
+	SpecRelPath string
 }
 
 func repoRoot() (string, error) {
@@ -39,6 +56,213 @@ func repoRoot() (string, error) {
 		}
 		cur = parent
 	}
+}
+
+func defaultBaseRef() string {
+	if ref := strings.TrimSpace(os.Getenv("BASE_REF")); ref != "" {
+		return ref
+	}
+	if ref := strings.TrimSpace(os.Getenv("GITHUB_BASE_REF")); ref != "" {
+		return "origin/" + ref
+	}
+	return "origin/main"
+}
+
+func gitOutput(root string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return "", fmt.Errorf("%w: %s", err, msg)
+		}
+		return "", err
+	}
+	return string(out), nil
+}
+
+func changedFiles(root, base, head string) ([]string, error) {
+	out, err := gitOutput(root, "diff", "--name-only", "--diff-filter=ACMRTD", base+"..."+head)
+	if err != nil {
+		return nil, fmt.Errorf("git diff %s...%s: %w", base, head, err)
+	}
+	var files []string
+	for _, line := range strings.Split(out, "\n") {
+		line = normalizeRepoPath(line)
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+func loadFeatureSpecs(root string) ([]featureSpecMetadata, error) {
+	featuresDir := filepath.Join(root, "docs", "features")
+	entries, err := os.ReadDir(featuresDir)
+	if err != nil {
+		return nil, fmt.Errorf("read docs/features: %w", err)
+	}
+	var specs []featureSpecMetadata
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		switch entry.Name() {
+		case "README.md", "template.md":
+			continue
+		}
+		path := filepath.Join(featuresDir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", rel(root, path), err)
+		}
+		text := string(data)
+		relPath := rel(root, path)
+		specs = append(specs, featureSpecMetadata{
+			Path:       path,
+			RelPath:    relPath,
+			FeatureID:  featureIDFromText(text),
+			Text:       text,
+			Ownerships: parseFeatureOwnerships(relPath, text),
+		})
+	}
+	sort.Slice(specs, func(i, j int) bool {
+		return specs[i].RelPath < specs[j].RelPath
+	})
+	return specs, nil
+}
+
+func featureIDFromText(text string) string {
+	re := regexp.MustCompile(`FR-[A-Z0-9-]+`)
+	if id := re.FindString(text); id != "" {
+		return id
+	}
+	return ""
+}
+
+func parseFeatureOwnerships(specRelPath, text string) []featureOwnership {
+	re := regexp.MustCompile(`(?m)^Owns:\s+([A-Z][A-Z0-9_-]*)\s+(.+)$`)
+	var ownerships []featureOwnership
+	for _, match := range re.FindAllStringSubmatch(text, -1) {
+		kind := strings.TrimSpace(match[1])
+		pattern := strings.TrimSpace(match[2])
+		pattern = strings.Trim(pattern, "`")
+		if kind == "" || pattern == "" {
+			continue
+		}
+		ownerships = append(ownerships, featureOwnership{
+			Kind:        kind,
+			Pattern:     normalizeRepoPathPattern(pattern),
+			SpecRelPath: specRelPath,
+		})
+	}
+	return ownerships
+}
+
+func codeOwnersForPath(specs []featureSpecMetadata, path string) []featureOwnership {
+	path = normalizeRepoPath(path)
+	var owners []featureOwnership
+	for _, spec := range specs {
+		for _, owner := range spec.Ownerships {
+			if owner.Kind != "CODE" {
+				continue
+			}
+			if codePatternMatches(owner.Pattern, path) {
+				owner.SpecPath = spec.Path
+				owners = append(owners, owner)
+			}
+		}
+	}
+	sort.Slice(owners, func(i, j int) bool {
+		if owners[i].SpecRelPath != owners[j].SpecRelPath {
+			return owners[i].SpecRelPath < owners[j].SpecRelPath
+		}
+		return owners[i].Pattern < owners[j].Pattern
+	})
+	return owners
+}
+
+func codePatternMatches(pattern, path string) bool {
+	pattern = normalizeRepoPathPattern(pattern)
+	path = normalizeRepoPath(path)
+	if pattern == "" || path == "" {
+		return false
+	}
+	if strings.HasSuffix(pattern, "/**") {
+		prefix := strings.TrimSuffix(pattern, "/**")
+		return path == prefix || strings.HasPrefix(path, prefix+"/")
+	}
+	return globMatch(pattern, path)
+}
+
+func normalizeRepoPathPattern(pattern string) string {
+	pattern = strings.TrimSpace(strings.Trim(pattern, "`"))
+	pattern = strings.TrimPrefix(pattern, "./")
+	pattern = strings.TrimPrefix(pattern, "/")
+	return filepath.ToSlash(pattern)
+}
+
+func normalizeRepoPath(path string) string {
+	path = strings.TrimSpace(path)
+	path = strings.TrimPrefix(path, "./")
+	path = strings.TrimPrefix(path, "/")
+	return filepath.ToSlash(path)
+}
+
+func isIgnoredProductionPath(path string) bool {
+	if strings.Contains(path, "/testdata/") ||
+		strings.Contains(path, "/dist/") ||
+		strings.HasSuffix(path, ".gen.ts") ||
+		strings.HasSuffix(path, ".generated.go") ||
+		strings.HasSuffix(path, "_generated.go") {
+		return true
+	}
+	return false
+}
+
+func isProductionCodePath(path string) bool {
+	path = normalizeRepoPath(path)
+	if path == "" {
+		return false
+	}
+	if isIgnoredProductionPath(path) {
+		return false
+	}
+	if strings.HasPrefix(path, "cmd/") || strings.HasPrefix(path, "pkg/") || strings.HasPrefix(path, "web/backend/") {
+		return strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go")
+	}
+	if strings.HasPrefix(path, "web/frontend/src/") {
+		return isFrontendSourcePath(path)
+	}
+	if strings.HasPrefix(path, "integration/") {
+		return strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") ||
+			strings.HasSuffix(path, ".sh") ||
+			strings.HasSuffix(path, "suite.env")
+	}
+	return false
+}
+
+func isFrontendSourcePath(path string) bool {
+	switch filepath.Ext(path) {
+	case ".ts", ".tsx", ".js", ".jsx", ".css":
+		return !strings.Contains(path, ".test.") && !strings.Contains(path, ".spec.")
+	default:
+		return false
+	}
+}
+
+func globMatch(pattern, value string) bool {
+	quoted := regexp.QuoteMeta(pattern)
+	quoted = strings.ReplaceAll(quoted, `\*`, `.*`)
+	quoted = strings.ReplaceAll(quoted, `\?`, `.`)
+	re, err := regexp.Compile("^" + quoted + "$")
+	if err != nil {
+		return false
+	}
+	return re.MatchString(value)
 }
 
 func discoverFeatureSurfaces(root string) ([]featureSurface, error) {

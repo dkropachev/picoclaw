@@ -37,7 +37,8 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 1. Run `make feature-inventory` to inspect currently discovered surfaces.
 2. Update the relevant feature spec when changing behavior.
 3. Link unit or integration tests in `Acceptance Evidence`.
-4. Run `make lint-features`, `make test`, and affected integration suites.
+4. Run `make lint-features`, `make feature-delta`, `make coverage-delta`,
+   `make test`, and affected integration suites.
 
 ## Requirement Rules
 
@@ -48,3 +49,6 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
   enough for a coding agent to recreate similar code from the spec.
 - Auxiliary interfaces are implementation contracts, not standalone features.
 - An `Owns:` line maps discovered repo surfaces to a feature spec.
+- `Owns: CODE` maps production files to the feature spec that must change with
+  those files.
+- `MUST` requirements require unit or integration evidence.

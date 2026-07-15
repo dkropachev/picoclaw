@@ -37,6 +37,19 @@ keys, legacy aliases, summaries, and per-session append locks.
 
 ## Surface Ownership
 
+Owns: CODE pkg/agent/memory/**
+Owns: CODE pkg/agent/sessions/**
+Owns: CODE pkg/agent/state/**
+Owns: CODE pkg/identity/**
+Owns: CODE pkg/memory/**
+Owns: CODE pkg/seahorse/**
+Owns: CODE pkg/session/**
+Owns: CODE pkg/state/**
+Owns: CODE web/backend/api/session.go
+Owns: CODE web/frontend/src/api/sessions.ts
+Owns: CODE web/frontend/src/components/logs/**
+Owns: CODE web/frontend/src/hooks/use-session-history.ts
+Owns: CODE web/frontend/src/routes/logs.tsx
 Owns: CONFIG.session*
 Owns: HTTP * /api/sessions*
 Owns: TEST pkg/session/*

@@ -28,6 +28,7 @@ normalization rules, and ownership boundaries.
 
 ## Surface Ownership
 
+Owns: CODE pkg/example/**
 Owns: HTTP GET /example
 Owns: CLI cmd/example/*
 Owns: CONFIG.example*

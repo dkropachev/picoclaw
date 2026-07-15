@@ -89,6 +89,10 @@ Every requirement ID must appear in `Acceptance Evidence`. Evidence can be a
 test, source file, API handler, command implementation, or design document, but
 test evidence is preferred for externally observable behavior.
 
+Every `MUST` requirement must include unit test or integration suite evidence.
+Source, API, command, and design references can supplement that evidence but
+cannot replace it for required behavior.
+
 Known gaps must be explicit during drafting, but committed feature specs should
 not contain `Test gap:` entries unless the lint gate is intentionally bypassed.
 
@@ -98,6 +102,7 @@ not contain `Test gap:` entries unless the lint gate is intentionally bypassed.
 feature behavior. Use one `Owns:` line per surface pattern:
 
 ```text
+Owns: CODE pkg/example/**
 Owns: HTTP GET /api/example
 Owns: CLI cmd/picoclaw/internal/example/*
 Owns: CONFIG.example*
@@ -106,7 +111,9 @@ Owns: TEST pkg/example/*
 ```
 
 Auxiliary interfaces describe the contract in human-readable form. Ownership
-lines make the contract auditable by tooling.
+lines make the contract auditable by tooling. `Owns: CODE` maps production
+source files to the feature spec that must change when those files change, and
+it is also used to track per-feature Go test coverage deltas.
 
 ## Why This Format
 

@@ -37,6 +37,7 @@ classifier score, and selected model name.
 
 ## Surface Ownership
 
+Owns: CODE pkg/routing/**
 Owns: CONFIG.routing*
 Owns: TEST pkg/routing/*
 

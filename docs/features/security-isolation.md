@@ -46,6 +46,15 @@ paths, generated token IDs, and revocation metadata.
 
 ## Surface Ownership
 
+Owns: CODE pkg/auth/**
+Owns: CODE pkg/config/**
+Owns: CODE pkg/credential/**
+Owns: CODE pkg/fileutil/**
+Owns: CODE pkg/isolation/**
+Owns: CODE pkg/logger/**
+Owns: CODE pkg/netbind/**
+Owns: CODE pkg/pid/**
+Owns: CODE pkg/utils/**
 Owns: CONFIG.isolation*
 Owns: TEST pkg/auth/*
 Owns: TEST pkg/credential/*

@@ -37,6 +37,35 @@ catalog entries, startup settings, and update request status.
 
 ## Surface Ownership
 
+Owns: CODE cmd/picoclaw/internal/auth/**
+Owns: CODE cmd/picoclaw/internal/cliui/**
+Owns: CODE cmd/picoclaw/internal/config/**
+Owns: CODE cmd/picoclaw/internal/helpers.go
+Owns: CODE cmd/picoclaw/internal/migrate/**
+Owns: CODE cmd/picoclaw/internal/onboard/**
+Owns: CODE pkg/migrate/**
+Owns: CODE web/backend/**
+Owns: CODE web/frontend/src/api/launcher-auth.ts
+Owns: CODE web/frontend/src/api/models.ts
+Owns: CODE web/frontend/src/api/oauth.ts
+Owns: CODE web/frontend/src/api/system.ts
+Owns: CODE web/frontend/src/app-providers.tsx
+Owns: CODE web/frontend/src/components/app-*
+Owns: CODE web/frontend/src/components/config/**
+Owns: CODE web/frontend/src/components/credentials/**
+Owns: CODE web/frontend/src/components/models/**
+Owns: CODE web/frontend/src/components/tour/**
+Owns: CODE web/frontend/src/components/ui/**
+Owns: CODE web/frontend/src/hooks/use-credentials-page.ts
+Owns: CODE web/frontend/src/i18n/**
+Owns: CODE web/frontend/src/lib/**
+Owns: CODE web/frontend/src/main.tsx
+Owns: CODE web/frontend/src/routes/config*
+Owns: CODE web/frontend/src/routes/credentials.tsx
+Owns: CODE web/frontend/src/routes/index.tsx
+Owns: CODE web/frontend/src/routes/launcher-*
+Owns: CODE web/frontend/src/routes/models.tsx
+Owns: CODE web/frontend/src/store/**
 Owns: CLI cmd/picoclaw/internal/auth/*
 Owns: CLI cmd/picoclaw/internal/config/*
 Owns: CLI cmd/picoclaw/internal/migrate/*

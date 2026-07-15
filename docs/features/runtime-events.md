@@ -42,6 +42,10 @@ config; and known kind constants for each runtime domain.
 
 ## Surface Ownership
 
+Owns: CODE pkg/events/**
+Owns: CODE pkg/agent/event*
+Owns: CODE pkg/agent/events*
+Owns: CODE pkg/agent/runtime_event*
 Owns: CONFIG.events*
 Owns: TEST pkg/events/*
 Owns: TEST pkg/config/events*

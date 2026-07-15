@@ -36,6 +36,9 @@ and heartbeat interval/prompt state.
 
 ## Surface Ownership
 
+Owns: CODE cmd/picoclaw/internal/cron/**
+Owns: CODE pkg/cron/**
+Owns: CODE pkg/heartbeat/**
 Owns: CLI cmd/picoclaw/internal/cron/*
 Owns: CONFIG.tools.cron*
 Owns: CONFIG.heartbeat*
@@ -77,7 +80,7 @@ tool execution and security gates. Agent conversations process scheduled prompts
 | Requirement IDs | Evidence |
 | --- | --- |
 | `FR-SCHED-001`, `FR-SCHED-002`, `FR-SCHED-003`, `FR-SCHED-004` | [pkg/tools/cron_test.go](../../pkg/tools/cron_test.go), [docs/reference/cron.md](../reference/cron.md) |
-| `FR-SCHED-005` | [cmd/picoclaw/internal/cron](../../cmd/picoclaw/internal/cron) |
+| `FR-SCHED-005` | [cmd/picoclaw/internal/cron/add_test.go](../../cmd/picoclaw/internal/cron/add_test.go), [cmd/picoclaw/internal/cron/list_test.go](../../cmd/picoclaw/internal/cron/list_test.go), [cmd/picoclaw/internal/cron/enable_test.go](../../cmd/picoclaw/internal/cron/enable_test.go), [cmd/picoclaw/internal/cron/disable_test.go](../../cmd/picoclaw/internal/cron/disable_test.go), [cmd/picoclaw/internal/cron/remove_test.go](../../cmd/picoclaw/internal/cron/remove_test.go) |
 | `FR-SCHED-006` | [pkg/heartbeat/service_test.go](../../pkg/heartbeat/service_test.go) |
 
 ## Implementation Anchors

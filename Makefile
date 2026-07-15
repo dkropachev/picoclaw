@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean help test integration-test build-all lint-docs feature-inventory lint-features
+.PHONY: all build install uninstall clean help test integration-test build-all lint-docs feature-inventory lint-features feature-delta coverage-delta
 
 # Build variables
 BINARY_NAME=picoclaw
@@ -37,6 +37,8 @@ WEB_GO?=$(GO)
 CGO_ENABLED?=0
 GO_BUILD_TAGS?=goolm,stdjson
 GOFLAGS?=-v -tags $(GO_BUILD_TAGS)
+BASE_REF?=origin/main
+HEAD_REF?=HEAD
 GOCACHE?=$(CURDIR)/.cache/go-build
 GOMODCACHE?=$(CURDIR)/.cache/go-mod
 GOTOOLCHAIN?=local
@@ -398,6 +400,14 @@ feature-inventory:
 ## lint-features: Check feature requirements and surface ownership
 lint-features:
 	@$(GO) run -tags featuretools ./scripts/lint-features.go ./scripts/featuretools_lib.go
+
+## feature-delta: Require prod code changes to update owning feature specs
+feature-delta:
+	@$(GO) run -tags featuretools ./scripts/feature_delta_guard.go ./scripts/featuretools_lib.go --base "$(BASE_REF)" --head "$(HEAD_REF)"
+
+## coverage-delta: Require global and per-feature Go coverage to not decrease
+coverage-delta:
+	@$(GO) run -tags featuretools ./scripts/coverage_delta.go ./scripts/featuretools_lib.go --base "$(BASE_REF)" --head "$(HEAD_REF)"
 
 ## lint: Run linters
 lint:

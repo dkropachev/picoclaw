@@ -75,7 +75,11 @@ func lintFeatures(root string) error {
 		if strings.Contains(text, "Test gap:") && os.Getenv("ALLOW_FEATURE_TEST_GAPS") != "1" {
 			failures = append(failures, fmt.Sprintf("%s: contains forbidden Test gap entry", relPath))
 		}
+		if !hasCodeOwnership(relPath, text) {
+			failures = append(failures, fmt.Sprintf("%s: missing Owns: CODE production ownership", relPath))
+		}
 		specIDs := requirementIDs(text)
+		levels := requirementLevels(text)
 		if len(specIDs) == 0 {
 			failures = append(failures, fmt.Sprintf("%s: no requirement IDs found", relPath))
 		}
@@ -88,6 +92,9 @@ func lintFeatures(root string) error {
 			}
 			if !strings.Contains(evidence, id) {
 				failures = append(failures, fmt.Sprintf("%s: %s missing from Acceptance Evidence", relPath, id))
+			}
+			if levels[id] == "MUST" && !requirementHasTestEvidence(evidence, id) {
+				failures = append(failures, fmt.Sprintf("%s: %s is MUST but lacks test or integration evidence", relPath, id))
 			}
 		}
 		ownerPatterns = append(ownerPatterns, ownershipPatterns(text)...)
@@ -151,6 +158,39 @@ func requirementIDs(text string) []string {
 	return ids
 }
 
+func requirementLevels(text string) map[string]string {
+	requirements := section(text, "## Requirements")
+	levels := make(map[string]string)
+	for _, line := range strings.Split(requirements, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "|") {
+			continue
+		}
+		cells := strings.Split(line, "|")
+		if len(cells) < 4 {
+			continue
+		}
+		id := strings.Trim(strings.TrimSpace(cells[1]), "`")
+		level := strings.ToUpper(strings.Trim(strings.TrimSpace(cells[2]), "`"))
+		if regexp.MustCompile(`^FR-[A-Z0-9-]+-[0-9]{3}$`).MatchString(id) {
+			levels[id] = level
+		}
+	}
+	return levels
+}
+
+func requirementHasTestEvidence(evidence, id string) bool {
+	for _, line := range strings.Split(evidence, "\n") {
+		if !strings.Contains(line, id) {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "_test.go") || strings.Contains(lower, "integration/") || strings.Contains(lower, "integration suite") {
+			return true
+		}
+	}
+	return false
+}
+
 func section(text, heading string) string {
 	idx := strings.Index(text, heading)
 	if idx < 0 {
@@ -177,6 +217,15 @@ func ownershipPatterns(text string) []string {
 	return patterns
 }
 
+func hasCodeOwnership(relPath, text string) bool {
+	for _, owner := range parseFeatureOwnerships(relPath, text) {
+		if owner.Kind == "CODE" {
+			return true
+		}
+	}
+	return false
+}
+
 func surfaceOwned(surface string, patterns []string) bool {
 	for _, pattern := range patterns {
 		if pattern == surface || globMatch(pattern, surface) {
@@ -184,17 +233,6 @@ func surfaceOwned(surface string, patterns []string) bool {
 		}
 	}
 	return false
-}
-
-func globMatch(pattern, value string) bool {
-	quoted := regexp.QuoteMeta(pattern)
-	quoted = strings.ReplaceAll(quoted, `\*`, `.*`)
-	quoted = strings.ReplaceAll(quoted, `\?`, `.`)
-	re, err := regexp.Compile("^" + quoted + "$")
-	if err != nil {
-		return false
-	}
-	return re.MatchString(value)
 }
 
 func validateMarkdownLinks(root, spec, text string) []string {

@@ -43,9 +43,13 @@ memory benchmark inputs and metrics.
 
 ## Surface Ownership
 
+Owns: CODE cmd/membench/**
+Owns: CODE pkg/updater/**
+Owns: CODE scripts/copydir.go
 Owns: TEST pkg/updater/*
 Owns: TEST cmd/membench/*
 Owns: TEST integration/*
+Owns: TEST scripts/portability_requirements_test.go *
 
 ## Auxiliary Interfaces
 
@@ -87,7 +91,7 @@ credentialed release publishing.
 
 | Requirement IDs | Evidence |
 | --- | --- |
-| `FR-PORT-001`, `FR-PORT-002`, `FR-PORT-004` | [Makefile](../../Makefile), [web/Makefile](../../web/Makefile), [.github/workflows](../../.github/workflows) |
+| `FR-PORT-001`, `FR-PORT-002`, `FR-PORT-004` | [scripts/portability_requirements_test.go](../../scripts/portability_requirements_test.go), [Makefile](../../Makefile), [web/Makefile](../../web/Makefile), [.github/workflows](../../.github/workflows) |
 | `FR-PORT-003` | [pkg/updater/updater_test.go](../../pkg/updater/updater_test.go), [web/backend/api/update.go](../../web/backend/api/update.go) |
 | `FR-PORT-005` | [cmd/membench](../../cmd/membench) |
 

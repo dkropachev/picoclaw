@@ -36,6 +36,8 @@ backup copies for replaced workspace skills.
 
 ## Surface Ownership
 
+Owns: CODE pkg/agent/evolution_bridge*
+Owns: CODE pkg/evolution/**
 Owns: CONFIG.evolution*
 Owns: TEST pkg/evolution/*
 

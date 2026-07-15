@@ -39,6 +39,24 @@ message context, media references, and gateway log/status process state.
 
 ## Surface Ownership
 
+Owns: CODE cmd/picoclaw/internal/gateway/**
+Owns: CODE pkg/bus/**
+Owns: CODE pkg/channels/**
+Owns: CODE pkg/gateway/**
+Owns: CODE pkg/health/**
+Owns: CODE web/backend/api/channels.go
+Owns: CODE web/backend/api/gateway*
+Owns: CODE web/backend/api/pico.go
+Owns: CODE web/frontend/src/api/channels.ts
+Owns: CODE web/frontend/src/api/gateway.ts
+Owns: CODE web/frontend/src/api/pico.ts
+Owns: CODE web/frontend/src/components/channels/**
+Owns: CODE web/frontend/src/components/chat/**
+Owns: CODE web/frontend/src/features/chat/**
+Owns: CODE web/frontend/src/hooks/use-gateway*
+Owns: CODE web/frontend/src/hooks/use-pico-chat.ts
+Owns: CODE web/frontend/src/hooks/use-sidebar-channels.ts
+Owns: CODE web/frontend/src/routes/channels/**
 Owns: CHANNEL *
 Owns: CLI cmd/picoclaw/internal/gateway/*
 Owns: CONFIG.channel_list*

@@ -38,6 +38,14 @@ web provider config, and redaction caches for sensitive values.
 
 ## Surface Ownership
 
+Owns: CODE pkg/commands/**
+Owns: CODE pkg/media/**
+Owns: CODE pkg/tools/**
+Owns: CODE web/backend/api/tools.go
+Owns: CODE web/frontend/src/api/tools.ts
+Owns: CODE web/frontend/src/components/agent/tools/**
+Owns: CODE web/frontend/src/hooks/use-chat-models.ts
+Owns: CODE web/frontend/src/routes/agent/tools.tsx
 Owns: CONFIG.tools.allow_read_paths
 Owns: CONFIG.tools.allow_write_paths
 Owns: CONFIG.tools

@@ -37,6 +37,8 @@ state, JSON-RPC request IDs, and hook decisions.
 
 ## Surface Ownership
 
+Owns: CODE pkg/agent/hook*
+Owns: CODE pkg/agent/hooks.go
 Owns: CONFIG.hooks*
 Owns: TEST pkg/agent/hooks*
 Owns: TEST pkg/agent/hook*

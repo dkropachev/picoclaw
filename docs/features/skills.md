@@ -37,6 +37,15 @@ per-chat pending forced-skill command state.
 
 ## Surface Ownership
 
+Owns: CODE cmd/picoclaw/internal/skills/**
+Owns: CODE pkg/skills/**
+Owns: CODE pkg/tools/integration/skills/**
+Owns: CODE web/backend/api/skills.go
+Owns: CODE web/frontend/src/api/skills.ts
+Owns: CODE web/frontend/src/components/agent/hub/**
+Owns: CODE web/frontend/src/components/agent/skills/**
+Owns: CODE web/frontend/src/routes/agent/hub.tsx
+Owns: CODE web/frontend/src/routes/agent/skills.tsx
 Owns: CLI cmd/picoclaw/internal/skills/*
 Owns: CONFIG.tools.skills*
 Owns: CONFIG.tools.find_skills*

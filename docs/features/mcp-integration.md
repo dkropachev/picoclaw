@@ -37,6 +37,10 @@ runtime event metadata, and CLI-managed JSON config entries.
 
 ## Surface Ownership
 
+Owns: CODE cmd/picoclaw/internal/mcp/**
+Owns: CODE integration/**
+Owns: CODE pkg/mcp/**
+Owns: CODE pkg/tools/integration/mcp/**
 Owns: CLI cmd/picoclaw/internal/mcp/*
 Owns: CONFIG.tools.mcp*
 Owns: TEST cmd/picoclaw/internal/mcp/*

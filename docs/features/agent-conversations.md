@@ -41,6 +41,19 @@ assistant content, tool calls/results, optional reasoning, and runtime metadata.
 
 ## Surface Ownership
 
+Owns: CODE cmd/picoclaw/main.go
+Owns: CODE cmd/picoclaw/dns_noresolv.go
+Owns: CODE cmd/picoclaw/internal/agent/**
+Owns: CODE cmd/picoclaw/internal/model/**
+Owns: CODE cmd/picoclaw/internal/status/**
+Owns: CODE cmd/picoclaw/internal/version/**
+Owns: CODE pkg/agent/**
+Owns: CODE pkg/audio/**
+Owns: CODE pkg/devices/**
+Owns: CODE pkg/providers/**
+Owns: CODE pkg/tokenizer/**
+Owns: CODE web/frontend/src/components/agent/**
+Owns: CODE web/frontend/src/routes/agent/**
 Owns: CLI cmd/picoclaw/main.go *
 Owns: CLI cmd/picoclaw/internal/agent/*
 Owns: CLI cmd/picoclaw/internal/model/*
