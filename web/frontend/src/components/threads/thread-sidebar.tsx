@@ -1,4 +1,5 @@
 import { IconFilter, IconPlus, IconSearch } from "@tabler/icons-react"
+import { useNavigate } from "@tanstack/react-router"
 import { useAtom, useAtomValue } from "jotai"
 import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
@@ -7,6 +8,7 @@ import {
   type ThreadSummary,
   type ThreadType,
   createThread,
+  dropThread,
   getThreads,
 } from "@/api/threads"
 import { ThreadTile } from "@/components/threads/thread-tile"
@@ -38,10 +40,15 @@ const THREAD_TYPES: Array<ThreadType | "all"> = [
 
 interface ThreadSidebarProps {
   layout?: "page" | "pane"
+  selectedThreadId?: string
 }
 
-export function ThreadSidebar({ layout = "page" }: ThreadSidebarProps) {
+export function ThreadSidebar({
+  layout = "page",
+  selectedThreadId = "",
+}: ThreadSidebarProps) {
   const { t } = useTranslation()
+  const navigate = useNavigate()
   const inputRef = useRef<HTMLInputElement>(null)
   const isPane = layout === "pane"
   const [query, setQuery] = useAtom(threadSearchQueryAtom)
@@ -56,6 +63,13 @@ export function ThreadSidebar({ layout = "page" }: ThreadSidebarProps) {
     inputRef.current?.focus()
     inputRef.current?.select()
   }, [focusNonce])
+
+  useEffect(() => {
+    const normalizedID = selectedThreadId.trim()
+    if (normalizedID) {
+      void switchChatSession(normalizedID)
+    }
+  }, [selectedThreadId])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -79,6 +93,10 @@ export function ThreadSidebar({ layout = "page" }: ThreadSidebarProps) {
 
   const openThread = (threadId: string) => {
     void switchChatSession(threadId)
+    void navigate({
+      to: "/threads/$threadId",
+      params: { threadId },
+    })
   }
 
   const handleCreateThread = async () => {
@@ -92,9 +110,28 @@ export function ThreadSidebar({ layout = "page" }: ThreadSidebarProps) {
         thread,
         ...prev.filter((item) => item.id !== thread.id),
       ])
-      void switchChatSession(thread.ui_session_id || thread.id)
+      const threadSessionId = thread.ui_session_id || thread.id
+      void switchChatSession(threadSessionId)
+      void navigate({
+        to: "/threads/$threadId",
+        params: { threadId: threadSessionId },
+      })
     } catch (error) {
       console.error("Failed to create thread:", error)
+      setLoadError(true)
+    }
+  }
+
+  const handleDropThread = async (thread: ThreadSummary) => {
+    try {
+      await dropThread(thread.id)
+      const threadSessionId = thread.ui_session_id || thread.id
+      setThreads((prev) => prev.filter((item) => item.id !== thread.id))
+      if (threadSessionId === activeSessionId || thread.id === selectedThreadId) {
+        void navigate({ to: "/threads" })
+      }
+    } catch (error) {
+      console.error("Failed to drop thread:", error)
       setLoadError(true)
     }
   }
@@ -197,6 +234,8 @@ export function ThreadSidebar({ layout = "page" }: ThreadSidebarProps) {
               active={(thread.ui_session_id || thread.id) === activeSessionId}
               compact={isPane}
               onOpen={openThread}
+              onDrop={(item) => void handleDropThread(item)}
+              dropLabel={t("threads.dropThread")}
             />
           ))}
         </div>

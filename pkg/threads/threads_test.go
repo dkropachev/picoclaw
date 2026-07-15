@@ -94,6 +94,55 @@ func TestSearchRanksUpdatedThreadAndFiltersContext(t *testing.T) {
 	}
 }
 
+func TestDropThreadHidesFromDiscoveryButPreservesDirectLookup(t *testing.T) {
+	cfg := testConfig(t)
+	store := NewStoreFromWorkspace(cfg.Agents.Defaults.Workspace)
+
+	thread, err := store.CreatePicoThread(context.Background(), cfg, CreateRequest{
+		Type:        TypeGeneral,
+		Title:       "Japan travel",
+		SourceQuery: "find me a thread regarding japan",
+	})
+	if err != nil {
+		t.Fatalf("CreatePicoThread() error = %v", err)
+	}
+
+	dropped, ok, err := store.DropThread(thread.UISessionID)
+	if err != nil {
+		t.Fatalf("DropThread() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("DropThread() ok = false")
+	}
+	if dropped.Discoverable || dropped.DroppedAt == nil {
+		t.Fatalf("dropped thread = %#v, want non-discoverable with timestamp", dropped)
+	}
+
+	items, err := store.Search(SearchOptions{Query: "japan"})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("Search() = %#v, want no discoverable threads", items)
+	}
+
+	all, err := store.Search(SearchOptions{Query: "japan", IncludeDropped: true})
+	if err != nil {
+		t.Fatalf("Search(include dropped) error = %v", err)
+	}
+	if len(all) != 1 || all[0].ID != thread.ID || all[0].Discoverable {
+		t.Fatalf("Search(include dropped) = %#v, want dropped thread", all)
+	}
+
+	loaded, ok, err := store.Get(thread.UISessionID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if !ok || loaded.ID != thread.ID || loaded.Discoverable {
+		t.Fatalf("Get() = %#v, ok=%v; want dropped thread by session id", loaded, ok)
+	}
+}
+
 func TestListIncludesExistingPicoSessionMetadata(t *testing.T) {
 	cfg := testConfig(t)
 	dir := ResolveSessionsDir(cfg.Agents.Defaults.Workspace)

@@ -1,5 +1,6 @@
 import {
   IconCode,
+  IconEyeOff,
   IconGitPullRequest,
   IconSearch,
   IconTag,
@@ -37,30 +38,39 @@ export function ThreadTile({
   active = false,
   compact = false,
   onOpen,
+  onDrop,
+  dropLabel,
 }: {
   thread: ThreadSummary
   active?: boolean
   compact?: boolean
   onOpen: (threadId: string) => void
+  onDrop?: (thread: ThreadSummary) => void
+  dropLabel?: string
 }) {
   const Icon = TYPE_ICONS[thread.type] ?? IconTag
   const openSessionId = thread.ui_session_id || thread.id
+  const resolvedDropLabel = dropLabel ?? "Drop thread"
   const contextEntries = Object.entries(thread.context ?? {}).filter(
     ([key, value]) => key && value,
   )
 
   return (
-    <Button
-      type="button"
-      variant="ghost"
+    <div
       className={cn(
-        "border-border/50 bg-card/70 hover:bg-accent/70 h-auto w-full justify-start rounded-lg border p-3 text-left shadow-none",
+        "border-border/50 bg-card/70 hover:bg-accent/70 relative flex rounded-lg border text-left shadow-none transition-colors",
         active && "border-primary/35 bg-accent text-accent-foreground",
-        compact && "p-2.5",
       )}
-      onClick={() => onOpen(openSessionId)}
     >
-      <div className="flex min-w-0 flex-1 flex-col gap-2">
+      <button
+        type="button"
+        className={cn(
+          "flex min-w-0 flex-1 flex-col gap-2 p-3 text-left",
+          compact && "p-2.5",
+          onDrop && "pr-10",
+        )}
+        onClick={() => onOpen(openSessionId)}
+      >
         <div className="flex min-w-0 items-start justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
             <Icon className="text-muted-foreground size-4 shrink-0" />
@@ -100,7 +110,23 @@ export function ThreadTile({
           <span>-</span>
           <span>{dayjs(thread.updated).fromNow()}</span>
         </div>
-      </div>
-    </Button>
+      </button>
+      {onDrop ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="text-muted-foreground hover:text-destructive absolute top-1.5 right-1.5 size-8 opacity-80"
+          title={resolvedDropLabel}
+          aria-label={resolvedDropLabel}
+          onClick={(event) => {
+            event.stopPropagation()
+            onDrop(thread)
+          }}
+        >
+          <IconEyeOff className="size-4" />
+        </Button>
+      ) : null}
+    </div>
   )
 }

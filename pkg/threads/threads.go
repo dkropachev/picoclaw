@@ -68,15 +68,18 @@ type Thread struct {
 	Created           time.Time         `json:"created"`
 	Updated           time.Time         `json:"updated"`
 	SourceQuery       string            `json:"source_query,omitempty"`
+	Discoverable      bool              `json:"discoverable"`
+	DroppedAt         *time.Time        `json:"dropped_at,omitempty"`
 	Score             int               `json:"score,omitempty"`
 }
 
 type SearchOptions struct {
-	Query   string
-	Type    string
-	Context map[string]string
-	Offset  int
-	Limit   int
+	Query          string
+	Type           string
+	Context        map[string]string
+	Offset         int
+	Limit          int
+	IncludeDropped bool
 }
 
 type CreateRequest struct {
@@ -104,10 +107,11 @@ type AttachRequest struct {
 }
 
 type UpdateRequest struct {
-	Title       string
-	Type        string
-	Context     map[string]string
-	SourceQuery string
+	Title        string
+	Type         string
+	Context      map[string]string
+	SourceQuery  string
+	Discoverable *bool
 }
 
 type ThreadMeta struct {
@@ -123,6 +127,7 @@ type ThreadMeta struct {
 	SessionKeys       []string          `json:"session_keys"`
 	Aliases           []string          `json:"aliases,omitempty"`
 	Registration      string            `json:"registration"`
+	DroppedAt         *time.Time        `json:"dropped_at,omitempty"`
 	CreatedAt         time.Time         `json:"created_at"`
 	UpdatedAt         time.Time         `json:"updated_at"`
 }
@@ -185,7 +190,7 @@ func NewStoreFromWorkspace(workspace string) Store {
 }
 
 func (s Store) Search(opts SearchOptions) ([]Thread, error) {
-	items, err := s.List()
+	items, err := s.list(ListOptions{IncludeDropped: opts.IncludeDropped})
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +233,18 @@ func (s Store) Search(opts SearchOptions) ([]Thread, error) {
 }
 
 func (s Store) List() ([]Thread, error) {
+	return s.list(ListOptions{})
+}
+
+type ListOptions struct {
+	IncludeDropped bool
+}
+
+func (s Store) ListAll(opts ListOptions) ([]Thread, error) {
+	return s.list(opts)
+}
+
+func (s Store) list(opts ListOptions) ([]Thread, error) {
 	s = s.withDefaults()
 	metas, err := s.listThreadMetas()
 	if err != nil {
@@ -235,6 +252,9 @@ func (s Store) List() ([]Thread, error) {
 	}
 	items := make([]Thread, 0, len(metas))
 	for _, meta := range metas {
+		if !opts.IncludeDropped && meta.DroppedAt != nil {
+			continue
+		}
 		thread, ok := s.threadFromRegistryMeta(meta)
 		if !ok {
 			continue
@@ -323,16 +343,22 @@ func (s Store) Get(id string) (Thread, bool, error) {
 	if id == "" {
 		return Thread{}, false, nil
 	}
-	items, err := s.List()
+	metas, err := s.listThreadMetas()
 	if err != nil {
 		return Thread{}, false, err
 	}
-	for _, item := range items {
-		if item.ID == id ||
-			item.UISessionID == id ||
-			item.SessionKey == id ||
-			item.PrimarySessionKey == id {
-			return item, true, nil
+	for _, meta := range metas {
+		if meta.ID == id ||
+			meta.UISessionID == id ||
+			meta.PrimarySessionKey == id {
+			thread, ok := s.threadFromRegistryMeta(meta)
+			return thread, ok, nil
+		}
+		for _, key := range meta.SessionKeys {
+			if strings.TrimSpace(key) == id {
+				thread, ok := s.threadFromRegistryMeta(meta)
+				return thread, ok, nil
+			}
 		}
 	}
 	return Thread{}, false, nil

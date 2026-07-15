@@ -101,6 +101,63 @@ func TestHandleThreads_CreateListAndOpenSession(t *testing.T) {
 			threadBySessionRec.Body.String(),
 		)
 	}
+
+	dropRec := httptest.NewRecorder()
+	dropReq := httptest.NewRequest(http.MethodDelete, "/api/threads/"+created.UISessionID, nil)
+	mux.ServeHTTP(dropRec, dropReq)
+	if dropRec.Code != http.StatusOK {
+		t.Fatalf("drop status = %d, body=%s", dropRec.Code, dropRec.Body.String())
+	}
+	var dropped threadstore.Thread
+	if err := json.Unmarshal(dropRec.Body.Bytes(), &dropped); err != nil {
+		t.Fatalf("Unmarshal(drop) error = %v", err)
+	}
+	if dropped.Discoverable || dropped.DroppedAt == nil {
+		t.Fatalf("dropped = %#v, want non-discoverable thread", dropped)
+	}
+
+	listDroppedRec := httptest.NewRecorder()
+	listDroppedReq := httptest.NewRequest(
+		http.MethodGet,
+		"/api/threads?query=/extra/dkropachev/picoclaw&type=coding",
+		nil,
+	)
+	mux.ServeHTTP(listDroppedRec, listDroppedReq)
+	if listDroppedRec.Code != http.StatusOK {
+		t.Fatalf("list after drop status = %d, body=%s", listDroppedRec.Code, listDroppedRec.Body.String())
+	}
+	var visibleAfterDrop []threadstore.Thread
+	if err := json.Unmarshal(listDroppedRec.Body.Bytes(), &visibleAfterDrop); err != nil {
+		t.Fatalf("Unmarshal(list after drop) error = %v", err)
+	}
+	if len(visibleAfterDrop) != 0 {
+		t.Fatalf("visibleAfterDrop = %#v, want no discoverable threads", visibleAfterDrop)
+	}
+
+	listAllRec := httptest.NewRecorder()
+	listAllReq := httptest.NewRequest(
+		http.MethodGet,
+		"/api/threads?query=/extra/dkropachev/picoclaw&type=coding&include_dropped=true",
+		nil,
+	)
+	mux.ServeHTTP(listAllRec, listAllReq)
+	if listAllRec.Code != http.StatusOK {
+		t.Fatalf("list include dropped status = %d, body=%s", listAllRec.Code, listAllRec.Body.String())
+	}
+	var allAfterDrop []threadstore.Thread
+	if err := json.Unmarshal(listAllRec.Body.Bytes(), &allAfterDrop); err != nil {
+		t.Fatalf("Unmarshal(list include dropped) error = %v", err)
+	}
+	if len(allAfterDrop) != 1 || allAfterDrop[0].ID != created.ID || allAfterDrop[0].Discoverable {
+		t.Fatalf("allAfterDrop = %#v, want dropped thread", allAfterDrop)
+	}
+
+	threadAfterDropRec := httptest.NewRecorder()
+	threadAfterDropReq := httptest.NewRequest(http.MethodGet, "/api/threads/"+created.UISessionID, nil)
+	mux.ServeHTTP(threadAfterDropRec, threadAfterDropReq)
+	if threadAfterDropRec.Code != http.StatusOK {
+		t.Fatalf("thread after drop status = %d, body=%s", threadAfterDropRec.Code, threadAfterDropRec.Body.String())
+	}
 }
 
 func TestHandleThreads_SearchContextFilter(t *testing.T) {

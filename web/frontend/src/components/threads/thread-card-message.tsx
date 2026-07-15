@@ -1,7 +1,7 @@
 import { IconArrowRight, IconSearch } from "@tabler/icons-react"
 import { useNavigate } from "@tanstack/react-router"
 import { useSetAtom } from "jotai"
-import { useEffect, useRef } from "react"
+import { useCallback, useEffect, useRef } from "react"
 import { useTranslation } from "react-i18next"
 
 import type { ThreadSummary } from "@/api/threads"
@@ -19,6 +19,15 @@ export function ThreadCardMessage({ payload }: { payload: ThreadCardPayload }) {
   const setThreadSearchQuery = useSetAtom(threadSearchQueryAtom)
   const setFocusNonce = useSetAtom(threadSearchFocusNonceAtom)
   const autoSwitchedThreadIdRef = useRef<string | null>(null)
+  const navigateToThread = useCallback(
+    (threadId: string) => {
+      void navigate({
+        to: "/threads/$threadId",
+        params: { threadId },
+      })
+    },
+    [navigate],
+  )
 
   let searchQuery = ""
   let threads: ThreadSummary[] = []
@@ -54,7 +63,7 @@ export function ThreadCardMessage({ payload }: { payload: ThreadCardPayload }) {
       }
       autoSwitchedThreadIdRef.current = targetSessionId
       void switchChatSession(targetSessionId)
-      void navigate({ to: "/threads" })
+      navigateToThread(targetSessionId)
     }
     if (
       payload.type === "picoclaw.thread_return.v1" &&
@@ -66,7 +75,7 @@ export function ThreadCardMessage({ payload }: { payload: ThreadCardPayload }) {
       autoSwitchedThreadIdRef.current = payload.target_session_id
       void switchChatSession(payload.target_session_id)
     }
-  }, [navigate, payload])
+  }, [navigateToThread, payload])
 
   const openThreadSearch = () => {
     setThreadSearchQuery(searchQuery)
@@ -76,7 +85,7 @@ export function ThreadCardMessage({ payload }: { payload: ThreadCardPayload }) {
 
   const openThread = (threadId: string) => {
     void switchChatSession(threadId)
-    void navigate({ to: "/threads" })
+    navigateToThread(threadId)
   }
 
   return (

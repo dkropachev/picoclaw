@@ -31,6 +31,8 @@ var validThreadActions = []string{
 	"switch",
 	"return_to_origin",
 	"detach_current",
+	"drop",
+	"drop_thread",
 	"update_metadata",
 	"get_policy",
 	"set_policy",
@@ -84,7 +86,7 @@ func (t *ThreadsTool) Name() string {
 }
 
 func (t *ThreadsTool) Description() string {
-	return "Find, propose, register, attach, switch, return from, or update PicoClaw UI threads, and inspect or update the automatic thread routing policy. Use when a request belongs in a separate thread, when the user asks to find previous threads, or when context like repo/location/branch/pr identifies an existing thread."
+	return "Find, propose, register, attach, switch, return from, drop from discovery, or update PicoClaw UI threads, and inspect or update the automatic thread routing policy. Use when a request belongs in a separate thread, when the user asks to find previous threads, or when context like repo/location/branch/pr identifies an existing thread."
 }
 
 func (t *ThreadsTool) Parameters() map[string]any {
@@ -97,7 +99,7 @@ func (t *ThreadsTool) Parameters() map[string]any {
 				"enum": []string{
 					"find", "search", "propose_switch", "create", "register_current",
 					"attach_current", "switch", "return_to_origin", "detach_current",
-					"update_metadata", "get_policy", "set_policy",
+					"drop", "drop_thread", "update_metadata", "get_policy", "set_policy",
 				},
 			},
 			"query": map[string]any{
@@ -460,6 +462,23 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 			return ErrorResult("detaching current session: " + err.Error()).WithError(err)
 		}
 		return NewToolResult("Detached the current session from its active thread.")
+
+	case "drop", "drop_thread":
+		if threadID == "" {
+			return ErrorResult("dropping thread: id is required")
+		}
+		thread, ok, err := store.DropThread(threadID)
+		if err != nil {
+			return ErrorResult("dropping thread: " + err.Error()).WithError(err)
+		}
+		if !ok {
+			return ErrorResult("dropping thread: thread not found")
+		}
+		return NewToolResult(fmt.Sprintf(
+			"Dropped thread %s (%s) from discovery. The thread registry record and session data were preserved.",
+			thread.ID,
+			thread.Title,
+		))
 
 	case "update_metadata":
 		if threadID == "" {

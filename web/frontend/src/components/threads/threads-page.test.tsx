@@ -8,13 +8,20 @@ import { createThread, getThreads } from "@/api/threads"
 import { ThreadsPage } from "@/components/threads/threads-page"
 import { switchChatSession } from "@/features/chat/controller"
 
+const navigateMock = vi.hoisted(() => vi.fn())
+
 vi.mock("@/api/threads", () => ({
   getThreads: vi.fn(),
   createThread: vi.fn(),
+  dropThread: vi.fn(),
 }))
 
 vi.mock("@/features/chat/controller", () => ({
   switchChatSession: vi.fn(),
+}))
+
+vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => navigateMock,
 }))
 
 vi.mock("@/components/chat/chat-page", () => ({
@@ -35,6 +42,7 @@ const thread: ThreadSummary = {
   message_count: 2,
   created: "2026-07-14T12:00:00Z",
   updated: "2026-07-14T12:05:00Z",
+  discoverable: true,
 }
 
 describe("ThreadsPage", () => {
@@ -42,6 +50,7 @@ describe("ThreadsPage", () => {
     vi.mocked(getThreads).mockReset()
     vi.mocked(createThread).mockReset()
     vi.mocked(switchChatSession).mockReset()
+    navigateMock.mockReset()
     vi.mocked(getThreads).mockResolvedValue([thread])
     vi.mocked(createThread).mockResolvedValue(thread)
   })
@@ -65,6 +74,21 @@ describe("ThreadsPage", () => {
       }),
     )
 
+    expect(switchChatSession).toHaveBeenCalledWith("session-page")
+    expect(navigateMock).toHaveBeenCalledWith({
+      to: "/threads/$threadId",
+      params: { threadId: "session-page" },
+    })
+  })
+
+  it("switches to the route-selected thread session", async () => {
+    render(
+      <Provider>
+        <ThreadsPage threadId="session-page" />
+      </Provider>,
+    )
+
+    await screen.findByText("Implement thread workspace")
     expect(switchChatSession).toHaveBeenCalledWith("session-page")
   })
 })

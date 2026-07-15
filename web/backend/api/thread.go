@@ -13,11 +13,12 @@ import (
 )
 
 type threadCreateRequest struct {
-	ID          string            `json:"id,omitempty"`
-	Type        string            `json:"type,omitempty"`
-	Title       string            `json:"title,omitempty"`
-	Context     map[string]string `json:"context,omitempty"`
-	SourceQuery string            `json:"source_query,omitempty"`
+	ID           string            `json:"id,omitempty"`
+	Type         string            `json:"type,omitempty"`
+	Title        string            `json:"title,omitempty"`
+	Context      map[string]string `json:"context,omitempty"`
+	SourceQuery  string            `json:"source_query,omitempty"`
+	Discoverable *bool             `json:"discoverable,omitempty"`
 }
 
 type threadAttachRequest struct {
@@ -36,6 +37,7 @@ func (h *Handler) registerThreadRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/threads", h.handleCreateThread)
 	mux.HandleFunc("GET /api/threads/{id}", h.handleGetThread)
 	mux.HandleFunc("PATCH /api/threads/{id}", h.handleUpdateThread)
+	mux.HandleFunc("DELETE /api/threads/{id}", h.handleDropThread)
 	mux.HandleFunc("POST /api/threads/{id}/attach-current", h.handleAttachCurrentThread)
 	mux.HandleFunc("POST /api/threads/handoffs/{id}/return", h.handleReturnThreadHandoff)
 }
@@ -54,6 +56,7 @@ func (h *Handler) handleListThreads(w http.ResponseWriter, r *http.Request) {
 		Offset: threadstore.ParsePositiveInt(query.Get("offset"), 0),
 		Limit:  threadstore.ParsePositiveInt(query.Get("limit"), threadstore.DefaultLimit),
 	}
+	opts.IncludeDropped = parseThreadBoolQuery(query.Get("include_dropped"))
 	if contextFilter := parseThreadContextQuery(query.Get("context")); len(contextFilter) > 0 {
 		opts.Context = contextFilter
 	}
@@ -133,13 +136,34 @@ func (h *Handler) handleUpdateThread(w http.ResponseWriter, r *http.Request) {
 	}
 	store := threadstore.NewStoreFromWorkspace(cfg.Agents.Defaults.Workspace)
 	thread, ok, err := store.UpdateThread(r.PathValue("id"), threadstore.UpdateRequest{
-		Title:       req.Title,
-		Type:        req.Type,
-		Context:     req.Context,
-		SourceQuery: req.SourceQuery,
+		Title:        req.Title,
+		Type:         req.Type,
+		Context:      req.Context,
+		SourceQuery:  req.SourceQuery,
+		Discoverable: req.Discoverable,
 	})
 	if err != nil {
 		http.Error(w, "failed to update thread", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "thread not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(thread)
+}
+
+func (h *Handler) handleDropThread(w http.ResponseWriter, r *http.Request) {
+	cfg, err := config.LoadConfig(h.configPath)
+	if err != nil {
+		http.Error(w, "failed to load config", http.StatusInternalServerError)
+		return
+	}
+	store := threadstore.NewStoreFromWorkspace(cfg.Agents.Defaults.Workspace)
+	thread, ok, err := store.DropThread(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "failed to drop thread", http.StatusInternalServerError)
 		return
 	}
 	if !ok {
@@ -254,4 +278,13 @@ func parseThreadContextQuery(raw string) map[string]string {
 		return nil
 	}
 	return context
+}
+
+func parseThreadBoolQuery(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }

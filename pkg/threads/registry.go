@@ -219,6 +219,8 @@ func (s Store) threadFromRegistryMeta(meta ThreadMeta) (Thread, bool) {
 		Created:           created,
 		Updated:           updated,
 		SourceQuery:       strings.TrimSpace(meta.SourceQuery),
+		Discoverable:      meta.DroppedAt == nil,
+		DroppedAt:         meta.DroppedAt,
 	}, true
 }
 
@@ -291,12 +293,29 @@ func (s Store) UpdateThread(id string, req UpdateRequest) (Thread, bool, error) 
 	if strings.TrimSpace(req.SourceQuery) != "" {
 		meta.SourceQuery = strings.TrimSpace(req.SourceQuery)
 	}
+	if req.Discoverable != nil {
+		if *req.Discoverable {
+			meta.DroppedAt = nil
+		} else if meta.DroppedAt == nil {
+			now := time.Now()
+			meta.DroppedAt = &now
+		}
+	}
 	meta.UpdatedAt = time.Now()
 	if err := s.writeThreadMeta(meta); err != nil {
 		return Thread{}, false, err
 	}
 	thread, ok := s.threadFromRegistryMeta(meta)
 	return thread, ok, nil
+}
+
+func (s Store) DropThread(id string) (Thread, bool, error) {
+	thread, ok, err := s.Get(id)
+	if err != nil || !ok {
+		return Thread{}, ok, err
+	}
+	discoverable := false
+	return s.UpdateThread(thread.ID, UpdateRequest{Discoverable: &discoverable})
 }
 
 func (s Store) RegisterCurrent(ctx context.Context, cfg CreateRequest, scope *session.SessionScope) (Thread, error) {
@@ -575,6 +594,9 @@ func normalizeThreadMeta(meta ThreadMeta) ThreadMeta {
 	meta.Registration = normalizeRegistration(meta.Registration)
 	if meta.Registration == "" {
 		meta.Registration = RegistrationManual
+	}
+	if meta.DroppedAt != nil && meta.DroppedAt.IsZero() {
+		meta.DroppedAt = nil
 	}
 	if meta.CreatedAt.IsZero() {
 		meta.CreatedAt = time.Now()

@@ -4,17 +4,24 @@ import { Provider } from "jotai"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { ThreadSummary } from "@/api/threads"
-import { createThread, getThreads } from "@/api/threads"
+import { createThread, dropThread, getThreads } from "@/api/threads"
 import { ThreadSidebar } from "@/components/threads/thread-sidebar"
 import { switchChatSession } from "@/features/chat/controller"
+
+const navigateMock = vi.hoisted(() => vi.fn())
 
 vi.mock("@/api/threads", () => ({
   getThreads: vi.fn(),
   createThread: vi.fn(),
+  dropThread: vi.fn(),
 }))
 
 vi.mock("@/features/chat/controller", () => ({
   switchChatSession: vi.fn(),
+}))
+
+vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => navigateMock,
 }))
 
 const thread: ThreadSummary = {
@@ -29,15 +36,19 @@ const thread: ThreadSummary = {
   message_count: 5,
   created: "2026-07-14T12:00:00Z",
   updated: "2026-07-14T12:05:00Z",
+  discoverable: true,
 }
 
 describe("ThreadSidebar", () => {
   beforeEach(() => {
     vi.mocked(getThreads).mockReset()
     vi.mocked(createThread).mockReset()
+    vi.mocked(dropThread).mockReset()
     vi.mocked(switchChatSession).mockReset()
+    navigateMock.mockReset()
     vi.mocked(getThreads).mockResolvedValue([thread])
     vi.mocked(createThread).mockResolvedValue(thread)
+    vi.mocked(dropThread).mockResolvedValue({ ...thread, discoverable: false })
   })
 
   it("loads and searches threads with the sidebar query", async () => {
@@ -87,6 +98,10 @@ describe("ThreadSidebar", () => {
         }),
       )
       expect(switchChatSession).toHaveBeenCalledWith("session-sidebar")
+      expect(navigateMock).toHaveBeenCalledWith({
+        to: "/threads/$threadId",
+        params: { threadId: "session-sidebar" },
+      })
     })
   })
 
@@ -106,5 +121,32 @@ describe("ThreadSidebar", () => {
     )
 
     expect(switchChatSession).toHaveBeenCalledWith("session-sidebar")
+    expect(navigateMock).toHaveBeenCalledWith({
+      to: "/threads/$threadId",
+      params: { threadId: "session-sidebar" },
+    })
+  })
+
+  it("drops a thread from the sidebar without deleting the session", async () => {
+    const user = userEvent.setup()
+
+    render(
+      <Provider>
+        <ThreadSidebar />
+      </Provider>,
+    )
+
+    expect(
+      await screen.findByText("Investigate websocket routing"),
+    ).toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: "Drop thread" }))
+
+    await waitFor(() => {
+      expect(dropThread).toHaveBeenCalledWith("thread-sidebar")
+    })
+    expect(
+      screen.queryByText("Investigate websocket routing"),
+    ).not.toBeInTheDocument()
   })
 })

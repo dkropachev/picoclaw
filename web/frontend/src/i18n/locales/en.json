@@ -602,6 +602,7 @@
     "loading": "Loading threads...",
     "empty": "No threads yet",
     "emptySearch": "No matching threads",
+    "dropThread": "Drop thread",
     "chatEmptyTitle": "No messages in this thread yet",
     "chatEmptyDescription": "“{{title}}” is ready.",
     "searchResult": "Thread search",

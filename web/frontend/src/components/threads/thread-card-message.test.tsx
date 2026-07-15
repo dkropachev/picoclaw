@@ -23,6 +23,7 @@ vi.mock("@tanstack/react-router", () => ({
 
 const thread: ThreadSummary = {
   id: "session-coding",
+  ui_session_id: "session-coding",
   title: "Implement thread sidebar",
   preview: "Code in /extra/dkropachev/picoclaw",
   type: "coding",
@@ -33,6 +34,7 @@ const thread: ThreadSummary = {
   message_count: 3,
   created: "2026-07-14T12:00:00Z",
   updated: "2026-07-14T12:05:00Z",
+  discoverable: true,
 }
 
 describe("ThreadCardMessage", () => {
@@ -86,7 +88,10 @@ describe("ThreadCardMessage", () => {
     await user.click(screen.getByRole("button", { name: /implement thread/i }))
 
     expect(switchChatSession).toHaveBeenCalledWith("session-coding")
-    expect(navigateMock).toHaveBeenCalledWith({ to: "/threads" })
+    expect(navigateMock).toHaveBeenCalledWith({
+      to: "/threads/$threadId",
+      params: { threadId: "session-coding" },
+    })
   })
 
   it("auto-switches for switch cards", async () => {
@@ -107,7 +112,10 @@ describe("ThreadCardMessage", () => {
     await waitFor(() => {
       expect(switchChatSession).toHaveBeenCalledWith("session-coding")
     })
-    expect(navigateMock).toHaveBeenCalledWith({ to: "/threads" })
+    expect(navigateMock).toHaveBeenCalledWith({
+      to: "/threads/$threadId",
+      params: { threadId: "session-coding" },
+    })
 
     rerender(
       <Provider>
@@ -138,6 +146,9 @@ describe("ThreadCardMessage", () => {
     await waitFor(() => {
       expect(switchChatSession).toHaveBeenCalledWith("ui-session-target")
     })
-    expect(navigateMock).toHaveBeenCalledWith({ to: "/threads" })
+    expect(navigateMock).toHaveBeenCalledWith({
+      to: "/threads/$threadId",
+      params: { threadId: "ui-session-target" },
+    })
   })
 })

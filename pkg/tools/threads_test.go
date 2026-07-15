@@ -224,6 +224,61 @@ func TestThreadsToolLookupSwitchCreateIfMissingDoesNotCreate(t *testing.T) {
 	assertThreadCount(t, cfg, 0)
 }
 
+func TestThreadsToolDropHidesThreadFromSearch(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = filepath.Join(t.TempDir(), "workspace")
+	tool := NewThreadsTool(cfg)
+
+	createResult := tool.Execute(context.Background(), map[string]any{
+		"action": "create",
+		"query":  "japan travel",
+		"title":  "Japan travel",
+		"type":   "general",
+	})
+	if createResult.IsError {
+		t.Fatalf("create result error: %s", createResult.ForLLM)
+	}
+	var switchCard threadSwitchCard
+	if err := json.Unmarshal([]byte(createResult.ForUser), &switchCard); err != nil {
+		t.Fatalf("Unmarshal(create ForUser) error = %v", err)
+	}
+
+	dropResult := tool.Execute(context.Background(), map[string]any{
+		"action": "drop",
+		"id":     switchCard.Thread.UISessionID,
+	})
+	if dropResult.IsError {
+		t.Fatalf("drop result error: %s", dropResult.ForLLM)
+	}
+	if !strings.Contains(dropResult.ForLLM, "from discovery") {
+		t.Fatalf("drop result = %q, want discovery confirmation", dropResult.ForLLM)
+	}
+
+	searchResult := tool.Execute(context.Background(), map[string]any{
+		"action": "search",
+		"query":  "japan",
+	})
+	if searchResult.IsError {
+		t.Fatalf("search result error: %s", searchResult.ForLLM)
+	}
+	var searchCard threadSearchCard
+	if err := json.Unmarshal([]byte(searchResult.ForUser), &searchCard); err != nil {
+		t.Fatalf("Unmarshal(search ForUser) error = %v", err)
+	}
+	if searchCard.Total != 0 {
+		t.Fatalf("searchCard = %#v, want dropped thread hidden", searchCard)
+	}
+
+	store := threadstore.NewStoreFromWorkspace(cfg.Agents.Defaults.Workspace)
+	all, err := store.Search(threadstore.SearchOptions{Query: "japan", IncludeDropped: true})
+	if err != nil {
+		t.Fatalf("Search(include dropped) error = %v", err)
+	}
+	if len(all) != 1 || all[0].ID != switchCard.Thread.ID || all[0].Discoverable {
+		t.Fatalf("Search(include dropped) = %#v, want dropped thread", all)
+	}
+}
+
 func TestThreadsToolSetPolicyPersistsConfig(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()

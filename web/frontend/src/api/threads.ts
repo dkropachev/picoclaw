@@ -17,6 +17,8 @@ export interface ThreadSummary {
   created: string
   updated: string
   source_query?: string
+  discoverable?: boolean
+  dropped_at?: string
   score?: number
 }
 
@@ -26,6 +28,7 @@ export interface CreateThreadInput {
   title?: string
   context?: Record<string, string>
   source_query?: string
+  discoverable?: boolean
 }
 
 export async function getThreads({
@@ -33,11 +36,13 @@ export async function getThreads({
   type = "",
   offset = 0,
   limit = 50,
+  includeDropped = false,
 }: {
   query?: string
   type?: ThreadType | ""
   offset?: number
   limit?: number
+  includeDropped?: boolean
 } = {}): Promise<ThreadSummary[]> {
   const params = new URLSearchParams({
     offset: offset.toString(),
@@ -48,6 +53,9 @@ export async function getThreads({
   }
   if (type) {
     params.set("type", type)
+  }
+  if (includeDropped) {
+    params.set("include_dropped", "true")
   }
 
   const res = await launcherFetch(`/api/threads?${params.toString()}`)
@@ -87,6 +95,24 @@ export async function createThread(
   })
   if (!res.ok) {
     throw new Error(`Failed to create thread: ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function dropThread(id: string): Promise<ThreadSummary> {
+  const normalizedID = id.trim()
+  if (!normalizedID) {
+    throw new Error("Thread id is required")
+  }
+
+  const res = await launcherFetch(
+    `/api/threads/${encodeURIComponent(normalizedID)}`,
+    {
+      method: "DELETE",
+    },
+  )
+  if (!res.ok) {
+    throw new Error(`Failed to drop thread ${normalizedID}: ${res.status}`)
   }
   return res.json()
 }
