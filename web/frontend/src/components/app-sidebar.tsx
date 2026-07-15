@@ -13,6 +13,7 @@ import {
   IconTools,
 } from "@tabler/icons-react"
 import { Link, useRouterState } from "@tanstack/react-router"
+import { useAtomValue } from "jotai"
 import * as React from "react"
 import { useTranslation } from "react-i18next"
 
@@ -34,6 +35,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar"
 import { useSidebarChannels } from "@/hooks/use-sidebar-channels"
+import { chatAtom } from "@/store/chat"
 
 interface NavItem {
   title: string
@@ -53,13 +55,6 @@ const chatNavItem: NavItem = {
   title: "navigation.chat",
   url: "/",
   icon: IconMessageCircle,
-  translateTitle: true,
-}
-
-const threadsNavItem: NavItem = {
-  title: "navigation.threads",
-  url: "/threads",
-  icon: IconMessages,
   translateTitle: true,
 }
 
@@ -96,7 +91,16 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const routerState = useRouterState()
   const { i18n, t } = useTranslation()
   const { isMobile, setOpenMobile } = useSidebar()
+  const { activeSessionId } = useAtomValue(chatAtom)
   const currentPath = routerState.location.pathname
+  const openThreadPathMatch = /^\/threads\/open\/([^/]+)/.exec(currentPath)
+  const currentRouteThreadId = openThreadPathMatch?.[1]
+    ? decodeURIComponent(openThreadPathMatch[1])
+    : ""
+  const threadNavSessionId = currentRouteThreadId || activeSessionId
+  const threadOpenUrl = threadNavSessionId
+    ? `/threads/open/${encodeURIComponent(threadNavSessionId)}`
+    : "/threads/search"
   const {
     channelItems,
     hasMoreChannels,
@@ -178,6 +182,44 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     )
   }
 
+  const renderThreadsNavGroup = () => {
+    const threadSearchNavItem: NavItem = {
+      title: "navigation.thread_search",
+      url: "/threads/search",
+      icon: IconSearch,
+      translateTitle: true,
+    }
+    const threadOpenNavItem: NavItem = {
+      title: "navigation.thread_open",
+      url: threadOpenUrl,
+      icon: IconMessages,
+      translateTitle: true,
+    }
+
+    return (
+      <Collapsible
+        defaultOpen={currentPath.startsWith("/threads")}
+        className="group/threads-nav"
+      >
+        <CollapsibleTrigger className="text-muted-foreground hover:bg-muted/60 flex h-9 w-full cursor-pointer items-center justify-between rounded-md px-3 text-sm transition-colors">
+          <span className="flex min-w-0 items-center gap-2">
+            <IconMessages className="size-4 opacity-60" />
+            <span className="truncate opacity-80">
+              {t("navigation.threads")}
+            </span>
+          </span>
+          <IconChevronRight className="size-3.5 opacity-50 transition-transform duration-200 group-data-[state=open]/threads-nav:rotate-90" />
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <SidebarMenu className="border-border/40 ml-3 border-l pt-1 pl-2">
+            {renderNavItem(threadSearchNavItem)}
+            {renderNavItem(threadOpenNavItem)}
+          </SidebarMenu>
+        </CollapsibleContent>
+      </Collapsible>
+    )
+  }
+
   const renderServiceSection = (section: NavSection) => (
     <Collapsible
       key={section.label}
@@ -232,8 +274,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               <SidebarGroupContent className="pt-1">
                 <SidebarMenu>
                   {renderNavItem(chatNavItem)}
-                  {renderNavItem(threadsNavItem)}
                 </SidebarMenu>
+                {renderThreadsNavGroup()}
               </SidebarGroupContent>
             </CollapsibleContent>
           </SidebarGroup>

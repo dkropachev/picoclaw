@@ -22,7 +22,7 @@ export function ThreadCardMessage({ payload }: { payload: ThreadCardPayload }) {
   const navigateToThread = useCallback(
     (threadId: string) => {
       void navigate({
-        to: "/threads/$threadId",
+        to: "/threads/open/$threadId",
         params: { threadId },
       })
     },
@@ -80,7 +80,10 @@ export function ThreadCardMessage({ payload }: { payload: ThreadCardPayload }) {
   const openThreadSearch = () => {
     setThreadSearchQuery(searchQuery)
     setFocusNonce((prev) => prev + 1)
-    void navigate({ to: "/threads" })
+    void navigate({
+      to: "/threads/search",
+      search: searchQuery ? { query: searchQuery } : {},
+    })
   }
 
   const openThread = (threadId: string) => {

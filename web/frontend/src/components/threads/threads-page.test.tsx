@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { ThreadSummary } from "@/api/threads"
 import { createThread, getThreads } from "@/api/threads"
+import { ThreadOpenPage } from "@/components/threads/thread-open-page"
 import { ThreadsPage } from "@/components/threads/threads-page"
 import { switchChatSession } from "@/features/chat/controller"
 
@@ -65,7 +66,7 @@ describe("ThreadsPage", () => {
     )
 
     expect(screen.getByLabelText("chat pane")).toHaveTextContent(
-      "Chat pane: Threads",
+      "Chat pane: Thread",
     )
 
     await user.click(
@@ -76,19 +77,21 @@ describe("ThreadsPage", () => {
 
     expect(switchChatSession).toHaveBeenCalledWith("session-page")
     expect(navigateMock).toHaveBeenCalledWith({
-      to: "/threads/$threadId",
+      to: "/threads/open/$threadId",
       params: { threadId: "session-page" },
     })
   })
 
-  it("switches to the route-selected thread session", async () => {
+  it("opens a thread as a normal chat window", async () => {
     render(
       <Provider>
-        <ThreadsPage threadId="session-page" />
+        <ThreadOpenPage threadId="session-page" />
       </Provider>,
     )
 
-    await screen.findByText("Implement thread workspace")
+    expect(screen.getByLabelText("chat pane")).toHaveTextContent(
+      "Chat pane: Thread",
+    )
     expect(switchChatSession).toHaveBeenCalledWith("session-page")
   })
 })

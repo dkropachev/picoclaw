@@ -40,12 +40,18 @@ const THREAD_TYPES: Array<ThreadType | "all"> = [
 
 interface ThreadSidebarProps {
   layout?: "page" | "pane"
-  selectedThreadId?: string
+  title?: string
+  initialQuery?: string
+  initialType?: ThreadType | "all"
+  syncURL?: boolean
 }
 
 export function ThreadSidebar({
   layout = "page",
-  selectedThreadId = "",
+  title,
+  initialQuery = "",
+  initialType = "all",
+  syncURL = false,
 }: ThreadSidebarProps) {
   const { t } = useTranslation()
   const navigate = useNavigate()
@@ -58,6 +64,19 @@ export function ThreadSidebar({
   const [threads, setThreads] = useState<ThreadSummary[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [loadError, setLoadError] = useState(false)
+  const [hasAppliedInitialSearch, setHasAppliedInitialSearch] = useState(false)
+
+  useEffect(() => {
+    setHasAppliedInitialSearch(false)
+    setQuery(initialQuery)
+    setSelectedType(initialType)
+  }, [initialQuery, initialType, setQuery])
+
+  useEffect(() => {
+    if (query === initialQuery && selectedType === initialType) {
+      setHasAppliedInitialSearch(true)
+    }
+  }, [initialQuery, initialType, query, selectedType])
 
   useEffect(() => {
     inputRef.current?.focus()
@@ -65,11 +84,20 @@ export function ThreadSidebar({
   }, [focusNonce])
 
   useEffect(() => {
-    const normalizedID = selectedThreadId.trim()
-    if (normalizedID) {
-      void switchChatSession(normalizedID)
+    if (!syncURL || !hasAppliedInitialSearch) {
+      return
     }
-  }, [selectedThreadId])
+
+    const trimmedQuery = query.trim()
+    void navigate({
+      to: "/threads/search",
+      search: {
+        ...(trimmedQuery ? { query: trimmedQuery } : {}),
+        ...(selectedType === "all" ? {} : { type: selectedType }),
+      },
+      replace: true,
+    })
+  }, [hasAppliedInitialSearch, navigate, query, selectedType, syncURL])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -94,7 +122,7 @@ export function ThreadSidebar({
   const openThread = (threadId: string) => {
     void switchChatSession(threadId)
     void navigate({
-      to: "/threads/$threadId",
+      to: "/threads/open/$threadId",
       params: { threadId },
     })
   }
@@ -113,7 +141,7 @@ export function ThreadSidebar({
       const threadSessionId = thread.ui_session_id || thread.id
       void switchChatSession(threadSessionId)
       void navigate({
-        to: "/threads/$threadId",
+        to: "/threads/open/$threadId",
         params: { threadId: threadSessionId },
       })
     } catch (error) {
@@ -127,8 +155,8 @@ export function ThreadSidebar({
       await dropThread(thread.id)
       const threadSessionId = thread.ui_session_id || thread.id
       setThreads((prev) => prev.filter((item) => item.id !== thread.id))
-      if (threadSessionId === activeSessionId || thread.id === selectedThreadId) {
-        void navigate({ to: "/threads" })
+      if (threadSessionId === activeSessionId) {
+        void navigate({ to: "/threads/search" })
       }
     } catch (error) {
       console.error("Failed to drop thread:", error)
@@ -146,7 +174,9 @@ export function ThreadSidebar({
       >
         <div className="flex items-center gap-2">
           <IconSearch className="text-muted-foreground size-4" />
-          <h1 className="text-base font-semibold">{t("threads.title")}</h1>
+          <h1 className="text-base font-semibold">
+            {title ?? t("threads.title")}
+          </h1>
         </div>
         <Button
           type="button"

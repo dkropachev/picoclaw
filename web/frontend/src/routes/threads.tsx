@@ -1,10 +1,20 @@
-import { createFileRoute, useParams } from "@tanstack/react-router"
-
-import { ThreadsPage } from "@/components/threads/threads-page"
+import {
+  Navigate,
+  Outlet,
+  createFileRoute,
+  useRouterState,
+} from "@tanstack/react-router"
 
 function ThreadsRoutePage() {
-  const { threadId } = useParams({ strict: false }) as { threadId?: string }
-  return <ThreadsPage threadId={threadId} />
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  })
+
+  if (pathname === "/threads") {
+    return <Navigate to="/threads/search" />
+  }
+
+  return <Outlet />
 }
 
 export const Route = createFileRoute("/threads")({

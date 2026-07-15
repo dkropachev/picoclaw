@@ -2,6 +2,8 @@
   "navigation": {
     "chat": "Chat",
     "threads": "Threads",
+    "thread_search": "Search",
+    "thread_open": "Thread",
     "model_group": "Models",
     "models": "Models",
     "credentials": "Credentials",
@@ -596,6 +598,8 @@
   },
   "threads": {
     "title": "Threads",
+    "searchTitle": "Search",
+    "threadTitle": "Thread",
     "newThread": "New thread",
     "searchPlaceholder": "Search threads...",
     "loadFailed": "Failed to load threads",

@@ -65,7 +65,10 @@ describe("ThreadCardMessage", () => {
       "location:/extra/dkropachev/picoclaw",
     )
     expect(store.get(threadSearchFocusNonceAtom)).toBe(1)
-    expect(navigateMock).toHaveBeenCalledWith({ to: "/threads" })
+    expect(navigateMock).toHaveBeenCalledWith({
+      to: "/threads/search",
+      search: { query: "location:/extra/dkropachev/picoclaw" },
+    })
   })
 
   it("switches into the thread workspace when a thread tile is clicked", async () => {
@@ -89,7 +92,7 @@ describe("ThreadCardMessage", () => {
 
     expect(switchChatSession).toHaveBeenCalledWith("session-coding")
     expect(navigateMock).toHaveBeenCalledWith({
-      to: "/threads/$threadId",
+      to: "/threads/open/$threadId",
       params: { threadId: "session-coding" },
     })
   })
@@ -113,7 +116,7 @@ describe("ThreadCardMessage", () => {
       expect(switchChatSession).toHaveBeenCalledWith("session-coding")
     })
     expect(navigateMock).toHaveBeenCalledWith({
-      to: "/threads/$threadId",
+      to: "/threads/open/$threadId",
       params: { threadId: "session-coding" },
     })
 
@@ -147,7 +150,7 @@ describe("ThreadCardMessage", () => {
       expect(switchChatSession).toHaveBeenCalledWith("ui-session-target")
     })
     expect(navigateMock).toHaveBeenCalledWith({
-      to: "/threads/$threadId",
+      to: "/threads/open/$threadId",
       params: { threadId: "ui-session-target" },
     })
   })

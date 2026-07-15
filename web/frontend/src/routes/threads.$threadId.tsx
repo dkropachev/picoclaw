@@ -1,3 +1,16 @@
-import { createFileRoute } from "@tanstack/react-router"
+import { Navigate, createFileRoute } from "@tanstack/react-router"
 
-export const Route = createFileRoute("/threads/$threadId")({})
+function LegacyThreadRoutePage() {
+  const { threadId } = Route.useParams()
+  return (
+    <Navigate
+      to="/threads/open/$threadId"
+      params={{ threadId }}
+      replace
+    />
+  )
+}
+
+export const Route = createFileRoute("/threads/$threadId")({
+  component: LegacyThreadRoutePage,
+})

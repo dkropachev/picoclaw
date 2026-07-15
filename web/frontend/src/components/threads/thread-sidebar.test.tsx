@@ -99,7 +99,7 @@ describe("ThreadSidebar", () => {
       )
       expect(switchChatSession).toHaveBeenCalledWith("session-sidebar")
       expect(navigateMock).toHaveBeenCalledWith({
-        to: "/threads/$threadId",
+        to: "/threads/open/$threadId",
         params: { threadId: "session-sidebar" },
       })
     })
@@ -122,7 +122,7 @@ describe("ThreadSidebar", () => {
 
     expect(switchChatSession).toHaveBeenCalledWith("session-sidebar")
     expect(navigateMock).toHaveBeenCalledWith({
-      to: "/threads/$threadId",
+      to: "/threads/open/$threadId",
       params: { threadId: "session-sidebar" },
     })
   })
