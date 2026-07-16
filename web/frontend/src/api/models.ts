@@ -170,6 +170,8 @@ export interface FetchModelsRequest {
   provider: string
   api_key?: string
   api_base?: string
+  auth_method?: string
+  credential_id?: string
   model_index?: number
 }
 

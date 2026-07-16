@@ -28,12 +28,14 @@ startup behavior, update, and runtime version metadata.
 | `FR-LAUNCHER-005` | MUST | Gateway lifecycle endpoints report status/logs and start/stop/restart managed gateway processes without losing log diagnostics. | Desktop users need process control. |
 | `FR-LAUNCHER-006` | MUST | Startup, launcher config, update, and version endpoints report or mutate only their documented system settings. | System management must be narrow and auditable. |
 | `FR-LAUNCHER-007` | SHOULD | API errors return JSON responses with actionable messages and appropriate status codes. | Frontend UX needs consistent failures. |
+| `FR-LAUNCHER-008` | MUST | Model fetch distinguishes regular OpenAI API-key listings from OpenAI OAuth/token Codex subscription listings; credential-backed OpenAI fetches use the stored credential and account headers against the ChatGPT Codex models endpoint, while API-key fetches continue to use the OpenAI-compatible `/models` endpoint. | Subscription and API-key accounts have different upstream auth and must not fail or mix credentials. |
 
 ## Data And State Model
 
 Launcher state includes dashboard password/session storage, launcher-specific
 config, OAuth flow maps, config file path, gateway process state/logs, model
-catalog entries, startup settings, and update request status.
+catalog entries, model fetch auth method and credential IDs, startup settings,
+and update request status.
 
 ## Surface Ownership
 
@@ -119,10 +121,14 @@ Owns: TEST pkg/migrate/*
 3. For OAuth requests, create bounded flow state, redirect or poll provider
    login, exchange callback state for credentials, then persist or clear
    provider auth records.
-4. For gateway lifecycle requests, inspect current process state first, execute
+4. For model fetch requests, resolve stored model auth when a model index is
+   supplied, prefer explicit request credentials otherwise, route OpenAI
+   OAuth/token fetches to the ChatGPT Codex model list endpoint, and keep
+   regular API-key fetches on the OpenAI-compatible `/models` path.
+5. For gateway lifecycle requests, inspect current process state first, execute
    start/stop/restart transitions only when valid, and retain log buffers for
    status and diagnostics responses.
-5. Return JSON for success and error paths with status codes that match
+6. Return JSON for success and error paths with status codes that match
    validation, auth, not-found, conflict, or internal failure classes.
 
 ## Cross-Feature Behavior
@@ -140,6 +146,8 @@ shared authenticated dashboard layout and routing shell components.
 - OAuth flow IDs expire and unknown states fail.
 - Model update preserves existing secrets unless explicitly changed.
 - Model add/update rejects unsupported `reasoning_effort` values before saving.
+- OpenAI Codex model fetch fails with an actionable credential error when the
+  selected OAuth/token credential is missing or empty.
 - Public launcher access obeys configured host/CIDR policy.
 
 ## Acceptance Evidence
@@ -151,6 +159,7 @@ shared authenticated dashboard layout and routing shell components.
 | `FR-LAUNCHER-003` | [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [web/backend/api/model_status_test.go](../../web/backend/api/model_status_test.go), [web/backend/api/model_catalog_test.go](../../web/backend/api/model_catalog_test.go) |
 | `FR-LAUNCHER-004` | [web/backend/api/oauth_test.go](../../web/backend/api/oauth_test.go), [cmd/picoclaw/internal/auth](../../cmd/picoclaw/internal/auth) |
 | `FR-LAUNCHER-005`, `FR-LAUNCHER-006` | [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [web/backend/api/startup_test.go](../../web/backend/api/startup_test.go), [web/backend/api/version_test.go](../../web/backend/api/version_test.go) |
+| `FR-LAUNCHER-008` | [web/backend/api/models_test.go](../../web/backend/api/models_test.go) |
 
 ## Implementation Anchors
 

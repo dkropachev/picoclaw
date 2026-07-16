@@ -2738,6 +2738,163 @@ func TestHandleFetchModels_NearAIUsesPublicModelListEndpoint(t *testing.T) {
 	}
 }
 
+func TestHandleFetchModels_OpenAIOAuthStoredModelUsesCodexModelsEndpoint(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	var gotPath string
+	var gotClientVersion string
+	var gotAuth string
+	var gotAccountID string
+	var gotProductSKU string
+	var gotOriginator string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotClientVersion = r.URL.Query().Get("client_version")
+		gotAuth = r.Header.Get("Authorization")
+		gotAccountID = r.Header.Get("ChatGPT-Account-ID")
+		gotProductSKU = r.Header.Get("OAI-Product-Sku")
+		gotOriginator = r.Header.Get("originator")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"models":[`+
+			`{"slug":"gpt-5.4","display_name":"GPT-5.4","visibility":"list","supported_in_api":true},`+
+			`{"slug":"hidden-model","visibility":"hidden","supported_in_api":true},`+
+			`{"slug":""}]}`)
+	}))
+	defer srv.Close()
+
+	oldEndpoint := openAICodexModelsEndpoint
+	openAICodexModelsEndpoint = srv.URL + "/backend-api/codex/models"
+	t.Cleanup(func() { openAICodexModelsEndpoint = oldEndpoint })
+
+	if err := auth.SetCredential("openai:work", &auth.AuthCredential{
+		AccessToken: "chatgpt-token",
+		AccountID:   "acc-123",
+		Provider:    "openai",
+		AuthMethod:  "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName:    "openai-codex",
+			Provider:     "openai",
+			Model:        "gpt-5.4",
+			AuthMethod:   "oauth",
+			CredentialID: "openai:work",
+		},
+	}
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/models/fetch", bytes.NewBufferString(`{
+		"provider":"openai",
+		"api_base":"https://api.openai.com/v1",
+		"model_index":0
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if gotPath != "/backend-api/codex/models" {
+		t.Fatalf("path = %q, want Codex models endpoint", gotPath)
+	}
+	if gotClientVersion != config.Version {
+		t.Fatalf("client_version = %q, want %q", gotClientVersion, config.Version)
+	}
+	if gotAuth != "Bearer chatgpt-token" {
+		t.Fatalf("Authorization = %q, want ChatGPT bearer token", gotAuth)
+	}
+	if gotAccountID != "acc-123" {
+		t.Fatalf("ChatGPT-Account-ID = %q, want acc-123", gotAccountID)
+	}
+	if gotProductSKU != "codex" {
+		t.Fatalf("OAI-Product-Sku = %q, want codex", gotProductSKU)
+	}
+	if gotOriginator != "codex_cli_rs" {
+		t.Fatalf("originator = %q, want codex_cli_rs", gotOriginator)
+	}
+
+	var resp struct {
+		Models []upstreamModel `json:"models"`
+		Total  int             `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if resp.Total != 1 || len(resp.Models) != 1 {
+		t.Fatalf("response = %+v, want one visible Codex model", resp)
+	}
+	if resp.Models[0].ID != "gpt-5.4" || resp.Models[0].OwnedBy != "openai-codex" {
+		t.Fatalf("models[0] = %+v, want Codex model", resp.Models[0])
+	}
+}
+
+func TestHandleFetchModels_OpenAIOAuthRequestCredentialFetchesWithoutAPIKey(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer default-chatgpt-token" {
+			t.Errorf("Authorization = %q, want ChatGPT token", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"models":[{"slug":"gpt-5.4","visibility":"list"}]}`)
+	}))
+	defer srv.Close()
+
+	oldEndpoint := openAICodexModelsEndpoint
+	openAICodexModelsEndpoint = srv.URL + "/models"
+	t.Cleanup(func() { openAICodexModelsEndpoint = oldEndpoint })
+
+	if err := auth.SetCredential("openai", &auth.AuthCredential{
+		AccessToken: "default-chatgpt-token",
+		AccountID:   "acc-default",
+		Provider:    "openai",
+		AuthMethod:  "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/models/fetch", bytes.NewBufferString(`{
+		"provider":"openai",
+		"api_base":"https://api.openai.com/v1",
+		"auth_method":"oauth"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Models []upstreamModel `json:"models"`
+		Total  int             `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if resp.Total != 1 || resp.Models[0].ID != "gpt-5.4" {
+		t.Fatalf("response = %+v, want fetched Codex model", resp)
+	}
+}
+
 func TestHandleFetchModels_ModelIndexUsesStoredKey(t *testing.T) {
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

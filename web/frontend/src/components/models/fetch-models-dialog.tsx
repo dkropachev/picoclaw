@@ -30,6 +30,8 @@ interface FetchModelsDialogProps {
   provider: string
   apiKey: string
   apiBase: string
+  authMethod?: string
+  credentialID?: string
   modelIndex?: number
   backendOptions?: ModelProviderOption[]
 }
@@ -41,6 +43,8 @@ export function FetchModelsDialog({
   provider,
   apiKey,
   apiBase,
+  authMethod = "",
+  credentialID = "",
   modelIndex,
   backendOptions,
 }: FetchModelsDialogProps) {
@@ -54,7 +58,10 @@ export function FetchModelsDialog({
   const canonicalProvider = getCanonicalProviderKey(provider, backendOptions)
   const providerDef = getProviderCatalogMap(backendOptions).get(canonicalProvider)
   const needsKey = providerDef?.requiresApiKey !== false
-  const hasKey = !!apiKey || modelIndex !== undefined
+  const usesCredential = ["oauth", "token"].includes(
+    authMethod.trim().toLowerCase(),
+  )
+  const hasKey = !!apiKey || modelIndex !== undefined || usesCredential
 
   const handleFetch = useCallback(async () => {
     setFetching(true)
@@ -66,6 +73,8 @@ export function FetchModelsDialog({
         provider: canonicalProvider,
         api_key: apiKey,
         api_base: apiBase,
+        auth_method: authMethod || undefined,
+        credential_id: credentialID || undefined,
         model_index: modelIndex,
       })
       setModels(res.models)
@@ -76,7 +85,15 @@ export function FetchModelsDialog({
     } finally {
       setFetching(false)
     }
-  }, [canonicalProvider, apiKey, apiBase, modelIndex, t])
+  }, [
+    canonicalProvider,
+    apiKey,
+    apiBase,
+    authMethod,
+    credentialID,
+    modelIndex,
+    t,
+  ])
 
   // Auto-fetch when dialog opens (skip if provider requires API key but none is set)
   useEffect(() => {
