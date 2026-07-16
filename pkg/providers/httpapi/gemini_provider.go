@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/providers/common"
+	"github.com/sipeed/picoclaw/pkg/providers/promptir"
 )
 
 const (
@@ -235,72 +236,86 @@ func (p *GeminiProvider) buildRequestBody(
 	toolCallNames := make(map[string]string)
 	systemPrompts := make([]string, 0, 1)
 
-	for _, msg := range messages {
-		switch msg.Role {
-		case "system":
-			if strings.TrimSpace(msg.Content) != "" {
-				systemPrompts = append(systemPrompts, msg.Content)
-			}
-
-		case "user":
-			if msg.ToolCallID != "" {
-				toolName := common.ResolveToolResponseName(msg.ToolCallID, toolCallNames)
-				contents = append(contents, geminiContent{
-					Role: "user",
-					Parts: []geminiPart{{
-						FunctionResponse: buildGeminiFunctionResponse(toolName, msg.ToolCallID, msg.Content, msg.Media),
-					}},
-				})
+	prompt := promptir.FromMessagesWithTools(messages, tools)
+	for _, item := range prompt.Items {
+		switch item.Type {
+		case promptir.ItemTypeContext:
+			text := promptir.ReadableParts(item.Parts)
+			if strings.TrimSpace(text) == "" {
 				continue
 			}
-
-			parts := make([]geminiPart, 0, 1+len(msg.Media))
-			if strings.TrimSpace(msg.Content) != "" {
-				parts = append(parts, geminiPart{Text: msg.Content})
+			if promptir.IsStableInstruction(item) {
+				systemPrompts = append(systemPrompts, text)
+			} else {
+				contents = append(contents, geminiContent{
+					Role:  "user",
+					Parts: []geminiPart{{Text: "[" + promptir.ContextLabel(item) + "]\n" + text}},
+				})
 			}
-			parts = append(parts, buildInlineMediaParts(msg.Media)...)
-			if len(parts) > 0 {
+
+		case promptir.ItemTypeMessage:
+			parts := buildGeminiPartsFromPromptParts(item.Parts)
+			if len(parts) == 0 {
+				continue
+			}
+			if item.Role == promptir.RoleAssistant {
+				contents = append(contents, geminiContent{Role: "model", Parts: parts})
+			} else {
 				contents = append(contents, geminiContent{Role: "user", Parts: parts})
 			}
 
-		case "assistant":
-			content := geminiContent{Role: "model"}
-			if strings.TrimSpace(msg.Content) != "" {
-				content.Parts = append(content.Parts, geminiPart{Text: msg.Content})
+		case promptir.ItemTypeToolCall:
+			if item.ToolCallID == "" || item.ToolName == "" {
+				continue
 			}
-			for _, tc := range msg.ToolCalls {
-				toolName, toolArgs, thoughtSignature := common.NormalizeStoredToolCall(tc)
-				if toolName == "" {
-					continue
-				}
-				if tc.ID != "" {
-					toolCallNames[tc.ID] = toolName
-				}
-				part := geminiPart{
-					FunctionCall: &geminiFunctionCall{
-						Name: toolName,
-						Args: toolArgs,
-						ID:   tc.ID,
-					},
-				}
-				if thoughtSignature != "" {
-					part.ThoughtSignature = thoughtSignature
-					part.ThoughtSignatureSnake = thoughtSignature
-				}
-				content.Parts = append(content.Parts, part)
+			toolCallNames[item.ToolCallID] = item.ToolName
+			part := geminiPart{
+				FunctionCall: &geminiFunctionCall{
+					Name: item.ToolName,
+					Args: promptir.ToolArgumentsMap(item),
+					ID:   item.ToolCallID,
+				},
 			}
-			if len(content.Parts) > 0 {
-				contents = append(contents, content)
+			if item.ToolThoughtSignature != "" {
+				part.ThoughtSignature = item.ToolThoughtSignature
+				part.ThoughtSignatureSnake = item.ToolThoughtSignature
 			}
+			contents = append(contents, geminiContent{
+				Role:  "model",
+				Parts: []geminiPart{part},
+			})
 
-		case "tool":
-			toolName := common.ResolveToolResponseName(msg.ToolCallID, toolCallNames)
+		case promptir.ItemTypeToolResult:
+			toolName := common.ResolveToolResponseName(item.ToolCallID, toolCallNames)
+			output := promptir.TextFromParts(item.ToolOutput)
+			if output == "" {
+				output = promptir.TextFromParts(item.Parts)
+			}
+			if output == "" {
+				output = promptir.ReadableParts(item.ToolOutput)
+			}
+			if output == "" {
+				output = promptir.ReadableParts(item.Parts)
+			}
 			contents = append(contents, geminiContent{
 				Role: "user",
 				Parts: []geminiPart{{
-					FunctionResponse: buildGeminiFunctionResponse(toolName, msg.ToolCallID, msg.Content, msg.Media),
+					FunctionResponse: buildGeminiFunctionResponse(
+						toolName,
+						item.ToolCallID,
+						output,
+						mediaURIsFromParts(item.ToolOutput),
+					),
 				}},
 			})
+
+		case promptir.ItemTypeReasoning:
+			if text := promptir.ReadableParts(item.Parts); strings.TrimSpace(text) != "" {
+				contents = append(contents, geminiContent{
+					Role:  "user",
+					Parts: []geminiPart{{Text: "[reasoning]\n" + text}},
+				})
+			}
 		}
 	}
 
@@ -357,6 +372,42 @@ func (p *GeminiProvider) buildRequestBody(
 	}
 
 	return body
+}
+
+func buildGeminiPartsFromPromptParts(parts []promptir.Part) []geminiPart {
+	out := make([]geminiPart, 0, len(parts))
+	for _, part := range parts {
+		switch part.Type {
+		case string(promptir.PartTypeText), "":
+			if strings.TrimSpace(part.Text) != "" {
+				out = append(out, geminiPart{Text: part.Text})
+			}
+		case string(promptir.PartTypeImage), string(promptir.PartTypeAudio), string(promptir.PartTypeFile):
+			if inline := buildInlineMediaParts([]string{part.URI}); len(inline) > 0 {
+				out = append(out, inline...)
+			} else if text := promptir.ReadableParts([]promptir.Part{part}); text != "" {
+				out = append(out, geminiPart{Text: text})
+			}
+		default:
+			if text := promptir.ReadableParts([]promptir.Part{part}); text != "" {
+				out = append(out, geminiPart{Text: text})
+			}
+		}
+	}
+	return out
+}
+
+func mediaURIsFromParts(parts []promptir.Part) []string {
+	media := make([]string, 0, len(parts))
+	for _, part := range parts {
+		switch part.Type {
+		case string(promptir.PartTypeImage), string(promptir.PartTypeAudio), string(promptir.PartTypeFile):
+			if part.URI != "" {
+				media = append(media, part.URI)
+			}
+		}
+	}
+	return media
 }
 
 func normalizeGeminiModel(model string) string {

@@ -30,6 +30,32 @@ func TestTranslateMessages_SystemExtractedAsInstructions(t *testing.T) {
 	}
 }
 
+func TestTranslateMessages_SystemPartsScopeDynamicContextOutsideInstructions(t *testing.T) {
+	msgs := []protocoltypes.Message{
+		{
+			Role:    "system",
+			Content: "stable\nruntime\nsummary",
+			SystemParts: []protocoltypes.ContentBlock{
+				{Type: "text", Text: "stable", PromptSource: "runtime.kernel"},
+				{Type: "text", Text: "runtime", PromptSlot: "runtime", PromptSource: "runtime.context"},
+				{Type: "text", Text: "summary", PromptSlot: "summary", PromptSource: "context.summary"},
+			},
+		},
+		{Role: "user", Content: "Hi"},
+	}
+
+	input, instructions := TranslateMessages(msgs)
+	if instructions != "stable" {
+		t.Fatalf("instructions = %q, want stable only", instructions)
+	}
+	if strings.Contains(instructions, "runtime") || strings.Contains(instructions, "summary") {
+		t.Fatalf("dynamic context leaked into instructions: %q", instructions)
+	}
+	if len(input) != 3 {
+		t.Fatalf("input len = %d, want runtime context + summary context + user", len(input))
+	}
+}
+
 func TestTranslateMessages_UserTextMessage(t *testing.T) {
 	msgs := []protocoltypes.Message{
 		{Role: "user", Content: "Hello"},

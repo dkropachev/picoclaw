@@ -11,6 +11,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 
 	"github.com/sipeed/picoclaw/pkg/providers/common"
+	"github.com/sipeed/picoclaw/pkg/providers/promptir"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
@@ -22,6 +23,7 @@ type (
 	Message                = protocoltypes.Message
 	ToolDefinition         = protocoltypes.ToolDefinition
 	ToolFunctionDefinition = protocoltypes.ToolFunctionDefinition
+	PromptPart             = protocoltypes.PromptPart
 )
 
 const (
@@ -146,75 +148,96 @@ func buildParams(
 ) (anthropic.MessageNewParams, error) {
 	var system []anthropic.TextBlockParam
 	var anthropicMessages []anthropic.MessageParam
+	var pendingRole anthropic.MessageParamRole
+	var pendingBlocks []anthropic.ContentBlockParamUnion
 
-	for _, msg := range messages {
-		switch msg.Role {
-		case "system":
-			// Prefer structured SystemParts for per-block cache_control.
-			// This enables LLM-side KV cache reuse: the static block's prefix
-			// hash stays stable across requests while dynamic parts change freely.
-			if len(msg.SystemParts) > 0 {
-				for _, part := range msg.SystemParts {
-					block := anthropic.TextBlockParam{Text: part.Text}
-					if part.CacheControl != nil && part.CacheControl.Type == "ephemeral" {
-						block.CacheControl = anthropic.NewCacheControlEphemeralParam()
-					}
-					system = append(system, block)
-				}
-			} else {
-				system = append(system, anthropic.TextBlockParam{Text: msg.Content})
+	flush := func() {
+		if len(pendingBlocks) == 0 {
+			return
+		}
+		switch pendingRole {
+		case anthropic.MessageParamRoleAssistant:
+			anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(pendingBlocks...))
+		default:
+			anthropicMessages = append(anthropicMessages, anthropic.NewUserMessage(pendingBlocks...))
+		}
+		pendingRole = ""
+		pendingBlocks = nil
+	}
+
+	appendBlocks := func(role anthropic.MessageParamRole, blocks ...anthropic.ContentBlockParamUnion) {
+		if len(blocks) == 0 {
+			return
+		}
+		if pendingRole != "" && pendingRole != role {
+			flush()
+		}
+		pendingRole = role
+		pendingBlocks = append(pendingBlocks, blocks...)
+	}
+
+	prompt := promptir.FromMessagesWithTools(messages, tools)
+	for _, item := range prompt.Items {
+		switch item.Type {
+		case promptir.ItemTypeContext:
+			text := promptir.ReadableParts(item.Parts)
+			if text == "" {
+				continue
 			}
-		case "user":
-			if msg.ToolCallID != "" {
-				anthropicMessages = append(anthropicMessages,
-					anthropic.NewUserMessage(anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false)),
-				)
-			} else {
-				anthropicMessages = append(anthropicMessages,
-					anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)),
-				)
-			}
-		case "assistant":
-			if len(msg.ToolCalls) > 0 {
-				var blocks []anthropic.ContentBlockParamUnion
-				if msg.Content != "" {
-					blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
+			if promptir.IsStableInstruction(item) {
+				flush()
+				block := anthropic.TextBlockParam{Text: text}
+				if item.Cache == promptir.CacheEphemeral {
+					block.CacheControl = anthropic.NewCacheControlEphemeralParam()
 				}
-				for _, tc := range msg.ToolCalls {
-					// Resolve tool name: prefer tc.Name, fallback to tc.Function.Name
-					// (tc.Name/tc.Arguments are json:"-" and may be empty when
-					// history is reloaded from the session store)
-					toolName := tc.Name
-					if toolName == "" && tc.Function != nil {
-						toolName = tc.Function.Name
-					}
-					// Skip tool calls with empty names to avoid API errors
-					if toolName == "" {
-						continue
-					}
-					args := tc.Arguments
-					if args == nil && tc.Function != nil && tc.Function.Arguments != "" {
-						if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-							args = map[string]any{}
-						}
-					}
-					if args == nil {
-						args = map[string]any{}
-					}
-					blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, args, toolName))
-				}
-				anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(blocks...))
-			} else {
-				anthropicMessages = append(anthropicMessages,
-					anthropic.NewAssistantMessage(anthropic.NewTextBlock(msg.Content)),
-				)
+				system = append(system, block)
+				continue
 			}
-		case "tool":
-			anthropicMessages = append(anthropicMessages,
-				anthropic.NewUserMessage(anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false)),
+			appendBlocks(
+				anthropic.MessageParamRoleUser,
+				anthropic.NewTextBlock("["+promptir.ContextLabel(item)+"]\n"+text),
 			)
+
+		case promptir.ItemTypeMessage:
+			blocks := anthropicBlocksFromParts(item.Parts)
+			switch item.Role {
+			case promptir.RoleAssistant:
+				if len(blocks) == 0 {
+					flush()
+					anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage())
+				} else {
+					appendBlocks(anthropic.MessageParamRoleAssistant, blocks...)
+				}
+			default:
+				appendBlocks(anthropic.MessageParamRoleUser, blocks...)
+			}
+
+		case promptir.ItemTypeToolCall:
+			if item.ToolCallID == "" || item.ToolName == "" {
+				continue
+			}
+			appendBlocks(
+				anthropic.MessageParamRoleAssistant,
+				anthropic.NewToolUseBlock(item.ToolCallID, promptir.ToolArgumentsMap(item), item.ToolName),
+			)
+
+		case promptir.ItemTypeToolResult:
+			output := promptir.ReadableParts(item.ToolOutput)
+			if output == "" {
+				output = promptir.ReadableParts(item.Parts)
+			}
+			appendBlocks(
+				anthropic.MessageParamRoleUser,
+				anthropic.NewToolResultBlock(item.ToolCallID, output, false),
+			)
+
+		case promptir.ItemTypeReasoning:
+			if text := promptir.ReadableParts(item.Parts); text != "" {
+				appendBlocks(anthropic.MessageParamRoleAssistant, anthropic.NewTextBlock("[reasoning]\n"+text))
+			}
 		}
 	}
+	flush()
 
 	maxTokens := int64(4096)
 	if mt, ok := options["max_tokens"].(int); ok {
@@ -252,6 +275,22 @@ func buildParams(
 	}
 
 	return params, nil
+}
+
+func anthropicBlocksFromParts(parts []promptir.Part) []anthropic.ContentBlockParamUnion {
+	blocks := make([]anthropic.ContentBlockParamUnion, 0, len(parts))
+	for _, part := range parts {
+		if part.Type == string(promptir.PartTypeText) || part.Type == "" {
+			if part.Text != "" {
+				blocks = append(blocks, anthropic.NewTextBlock(part.Text))
+			}
+			continue
+		}
+		if text := promptir.ReadableParts([]promptir.Part{part}); text != "" {
+			blocks = append(blocks, anthropic.NewTextBlock(text))
+		}
+	}
+	return blocks
 }
 
 // applyThinkingConfig sets thinking parameters based on the level value.

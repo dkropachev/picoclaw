@@ -820,6 +820,9 @@ func cloneProviderMessages(messages []providers.Message) []providers.Message {
 		if len(msg.Media) > 0 {
 			cloned[i].Media = append([]string(nil), msg.Media...)
 		}
+		if len(msg.Parts) > 0 {
+			cloned[i].Parts = append([]providers.PromptPart(nil), msg.Parts...)
+		}
 		if len(msg.SystemParts) > 0 {
 			cloned[i].SystemParts = append([]providers.ContentBlock(nil), msg.SystemParts...)
 		}

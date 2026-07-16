@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/providers/promptir"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
@@ -34,6 +35,7 @@ type (
 	ExtraContent           = protocoltypes.ExtraContent
 	GoogleExtra            = protocoltypes.GoogleExtra
 	ReasoningDetail        = protocoltypes.ReasoningDetail
+	PromptPart             = protocoltypes.PromptPart
 )
 
 const DefaultRequestTimeout = 120 * time.Second
@@ -94,10 +96,18 @@ type openaiFunctionCall struct {
 //   - Converts messages with Media to multipart content format (text + image_url parts)
 //   - Preserves ToolCallID, ToolCalls, and ReasoningContent for all messages
 func SerializeMessages(messages []Message) []any {
-	out := make([]any, 0, len(messages))
-	for _, m := range messages {
+	return SerializePrompt(promptir.FromMessages(messages))
+}
+
+// SerializePrompt converts provider-neutral prompt IR to OpenAI-compatible chat
+// messages. It keeps flat legacy text messages on the same wire shape while
+// preserving ordered structured parts when present.
+func SerializePrompt(prompt promptir.Prompt) []any {
+	legacy := promptir.ToMessages(prompt)
+	out := make([]any, 0, len(legacy))
+	for _, m := range legacy {
 		toolCalls := serializeToolCalls(m.ToolCalls)
-		if len(m.Media) == 0 {
+		if len(m.Media) == 0 && len(m.Parts) == 0 {
 			out = append(out, openaiMessage{
 				Role:             m.Role,
 				Content:          m.Content,
@@ -108,35 +118,7 @@ func SerializeMessages(messages []Message) []any {
 			continue
 		}
 
-		// Multipart content format for messages with media
-		parts := make([]map[string]any, 0, 1+len(m.Media))
-		if m.Content != "" {
-			parts = append(parts, map[string]any{
-				"type": "text",
-				"text": m.Content,
-			})
-		}
-		for _, mediaURL := range m.Media {
-			if strings.HasPrefix(mediaURL, "data:image/") {
-				parts = append(parts, map[string]any{
-					"type": "image_url",
-					"image_url": map[string]any{
-						"url": mediaURL,
-					},
-				})
-				continue
-			}
-
-			if format, data, ok := ParseDataAudioURL(mediaURL); ok {
-				parts = append(parts, map[string]any{
-					"type": "input_audio",
-					"input_audio": map[string]any{
-						"data":   data,
-						"format": format,
-					},
-				})
-			}
-		}
+		parts := buildChatContentParts(promptir.ContentPartsForMessage(m))
 
 		msg := map[string]any{
 			"role":    m.Role,
@@ -154,6 +136,64 @@ func SerializeMessages(messages []Message) []any {
 		out = append(out, msg)
 	}
 	return out
+}
+
+func buildChatContentParts(parts []promptir.Part) []map[string]any {
+	out := make([]map[string]any, 0, len(parts))
+	for _, part := range parts {
+		switch part.Type {
+		case string(promptir.PartTypeText), "":
+			if part.Text != "" {
+				out = append(out, map[string]any{
+					"type": "text",
+					"text": part.Text,
+				})
+			}
+		case string(promptir.PartTypeImage):
+			if strings.HasPrefix(part.URI, "data:image/") {
+				out = append(out, map[string]any{
+					"type": "image_url",
+					"image_url": map[string]any{
+						"url": part.URI,
+					},
+				})
+			} else {
+				out = appendReadablePart(out, part)
+			}
+		case string(promptir.PartTypeAudio):
+			if format, data, ok := ParseDataAudioURL(part.URI); ok {
+				out = append(out, map[string]any{
+					"type": "input_audio",
+					"input_audio": map[string]any{
+						"data":   data,
+						"format": format,
+					},
+				})
+			} else {
+				out = appendReadablePart(out, part)
+			}
+		default:
+			out = appendReadablePart(out, part)
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, map[string]any{
+			"type": "text",
+			"text": "",
+		})
+	}
+	return out
+}
+
+func appendReadablePart(parts []map[string]any, part promptir.Part) []map[string]any {
+	text := promptir.ReadableParts([]promptir.Part{part})
+	if text == "" {
+		return parts
+	}
+	return append(parts, map[string]any{
+		"type": "text",
+		"text": text,
+	})
 }
 
 func serializeToolCalls(toolCalls []ToolCall) []openaiToolCall {

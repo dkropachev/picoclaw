@@ -5,64 +5,57 @@ import (
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/promptir"
 )
 
 // EstimateMessageTokens estimates the token count for a single message,
 // including Content, ReasoningContent, ToolCalls arguments, ToolCallID
 // metadata, and Media items. Uses a heuristic of 2.5 characters per token.
 func EstimateMessageTokens(msg providers.Message) int {
-	contentChars := utf8.RuneCountInString(msg.Content)
+	return EstimatePromptTokens(promptir.FromMessages([]providers.Message{msg}))
+}
 
-	// SystemParts are structured system blocks used for cache-aware adapters.
-	// They carry the same content as Content, but in multiple blocks.
-	// We estimate them as an alternative representation, not additive.
-	systemPartsChars := 0
-	if len(msg.SystemParts) > 0 {
-		for _, part := range msg.SystemParts {
-			systemPartsChars += utf8.RuneCountInString(part.Text)
-		}
-		// Per-part overhead for JSON structure (type, text, cache_control).
-		const perPartOverhead = 20
-		systemPartsChars += len(msg.SystemParts) * perPartOverhead
+// EstimatePromptTokens estimates the token count for a provider-neutral prompt.
+func EstimatePromptTokens(prompt promptir.Prompt) int {
+	total := 0
+	for _, item := range prompt.Items {
+		total += EstimatePromptItemTokens(item)
 	}
+	return total
+}
 
-	// Use the larger of the two representations to stay conservative.
-	chars := contentChars
-	if systemPartsChars > chars {
-		chars = systemPartsChars
-	}
-
-	chars += utf8.RuneCountInString(msg.ReasoningContent)
-
-	for _, tc := range msg.ToolCalls {
-		chars += len(tc.ID) + len(tc.Type)
-		if tc.Function != nil {
-			// Count function name + arguments (the wire format for most providers).
-			// tc.Name mirrors tc.Function.Name — count only once to avoid double-counting.
-			chars += len(tc.Function.Name) + len(tc.Function.Arguments)
-		} else {
-			// Fallback: some provider formats use top-level Name without Function.
-			chars += len(tc.Name)
+// EstimateStableInstructionTokens estimates the cacheable/stable instruction
+// portion of a prompt separately from runtime context and history.
+func EstimateStableInstructionTokens(prompt promptir.Prompt) int {
+	total := 0
+	for _, item := range prompt.Items {
+		if promptir.IsStableInstruction(item) {
+			total += EstimatePromptItemTokens(item)
 		}
 	}
+	return total
+}
 
-	if msg.ToolCallID != "" {
-		chars += len(msg.ToolCallID)
+// EstimatePromptItemTokens estimates one IR item. Text is counted with the
+// package's existing 2.5 characters/token heuristic; media and files use fixed
+// per-part estimates because provider pricing depends on native media handling.
+func EstimatePromptItemTokens(item promptir.Item) int {
+	chars := 0
+	chars += utf8.RuneCountInString(item.ToolCallID)
+	chars += utf8.RuneCountInString(item.ToolName)
+	chars += utf8.RuneCountInString(item.ToolArguments)
+	parts := item.Parts
+	if item.Type == promptir.ItemTypeToolResult && len(item.ToolOutput) > 0 {
+		parts = item.ToolOutput
 	}
+	chars += textChars(parts)
 
-	// Per-message overhead for role label, JSON structure, separators.
-	const messageOverhead = 12
-	chars += messageOverhead
+	// Per-item overhead for role labels, JSON/content-block structure, and separators.
+	const itemOverhead = 12
+	chars += itemOverhead
 
 	tokens := chars * 2 / 5
-
-	// Media items (images, files) are serialized by provider adapters into
-	// multipart or image_url payloads. Add a fixed per-item token estimate
-	// directly (not through the chars heuristic) since actual cost depends
-	// on resolution and provider-specific image tokenization.
-	const mediaTokensPerItem = 256
-	tokens += len(msg.Media) * mediaTokensPerItem
-
+	tokens += mediaTokens(parts)
 	return tokens
 }
 
@@ -88,4 +81,29 @@ func EstimateToolDefsTokens(defs []providers.ToolDefinition) int {
 	}
 
 	return totalChars * 2 / 5
+}
+
+func textChars(parts []promptir.Part) int {
+	total := 0
+	for _, part := range parts {
+		if part.Type == string(promptir.PartTypeText) || part.Type == "" {
+			total += utf8.RuneCountInString(part.Text)
+		}
+	}
+	return total
+}
+
+func mediaTokens(parts []promptir.Part) int {
+	total := 0
+	for _, part := range parts {
+		switch part.Type {
+		case string(promptir.PartTypeImage):
+			total += 256
+		case string(promptir.PartTypeAudio):
+			total += 128
+		case string(promptir.PartTypeFile):
+			total += 64
+		}
+	}
+	return total
 }

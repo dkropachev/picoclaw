@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/promptir"
 	"github.com/sipeed/picoclaw/pkg/tokenizer"
 )
 
@@ -143,12 +144,21 @@ func EstimateMessageTokens(msg Message) int {
 	// Convert MessageParts to ToolCalls / ToolCallID / Media
 	for _, part := range msg.Parts {
 		switch part.Type {
+		case "text":
+			pm.Parts = append(pm.Parts, promptir.Part{
+				Type: string(promptir.PartTypeText),
+				Text: part.Text,
+			})
 		case "tool_use":
+			name := part.Name
+			if name == "" {
+				continue
+			}
 			pm.ToolCalls = append(pm.ToolCalls, providers.ToolCall{
 				ID:   part.ToolCallID,
 				Type: "function",
 				Function: &providers.FunctionCall{
-					Name:      part.Name,
+					Name:      name,
 					Arguments: part.Arguments,
 				},
 			})
@@ -156,8 +166,24 @@ func EstimateMessageTokens(msg Message) int {
 			pm.ToolCallID = part.ToolCallID
 		case "media":
 			pm.Media = append(pm.Media, part.MediaURI)
+			pm.Parts = append(pm.Parts, promptir.Part{
+				Type:     promptIRPartTypeFromMime(part.MimeType),
+				URI:      part.MediaURI,
+				MIMEType: part.MimeType,
+			})
 		}
 	}
 
 	return tokenizer.EstimateMessageTokens(pm)
+}
+
+func promptIRPartTypeFromMime(mimeType string) string {
+	switch {
+	case len(mimeType) >= len("image/") && mimeType[:len("image/")] == "image/":
+		return string(promptir.PartTypeImage)
+	case len(mimeType) >= len("audio/") && mimeType[:len("audio/")] == "audio/":
+		return string(promptir.PartTypeAudio)
+	default:
+		return string(promptir.PartTypeFile)
+	}
 }

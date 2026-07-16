@@ -537,8 +537,9 @@ func (p *Pipeline) CallLLM(
 			al.publishPicoReasoning(turnCtx, reasoningContent, ts.chatID, ts.sessionKey, exec.llmModelName)
 		}
 	} else {
+		reasoningCtx := context.WithoutCancel(turnCtx)
 		go al.handleReasoning(
-			turnCtx,
+			reasoningCtx,
 			reasoningContent,
 			ts.channel,
 			al.targetReasoningChannelID(ts.channel),

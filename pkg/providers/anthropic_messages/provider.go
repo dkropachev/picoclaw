@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/providers/common"
+	"github.com/sipeed/picoclaw/pkg/providers/promptir"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
@@ -28,6 +29,7 @@ type (
 	Message                = protocoltypes.Message
 	ToolDefinition         = protocoltypes.ToolDefinition
 	ToolFunctionDefinition = protocoltypes.ToolFunctionDefinition
+	PromptPart             = protocoltypes.PromptPart
 )
 
 const (
@@ -179,125 +181,125 @@ func buildRequestBody(
 	}
 
 	// Process messages
-	var systemPrompt string
+	var systemParts []string
 	var apiMessages []any
+	var pendingRole string
+	var pendingBlocks []any
 
-	for _, msg := range messages {
-		switch msg.Role {
-		case "system":
-			// Accumulate system messages
-			if systemPrompt != "" {
-				systemPrompt += "\n\n" + msg.Content
-			} else {
-				systemPrompt = msg.Content
+	flush := func() {
+		if len(pendingBlocks) == 0 {
+			return
+		}
+		content := any(pendingBlocks)
+		if pendingRole == "user" {
+			if toolResultBlocks, ok := allToolResultBlocks(pendingBlocks); ok {
+				content = toolResultBlocks
 			}
+		}
+		apiMessages = append(apiMessages, map[string]any{
+			"role":    pendingRole,
+			"content": content,
+		})
+		pendingRole = ""
+		pendingBlocks = nil
+	}
 
-		case "user":
-			if msg.ToolCallID != "" {
-				// Tool result message — merge into previous user message if it contains tool_results
-				toolResultBlock := map[string]any{
-					"type":        "tool_result",
-					"tool_use_id": msg.ToolCallID,
-					"content":     msg.Content,
-				}
-				if len(apiMessages) > 0 {
-					if prev, ok := apiMessages[len(apiMessages)-1].(map[string]any); ok && prev["role"] == "user" {
-						if content, ok := prev["content"].([]map[string]any); ok {
-							prev["content"] = append(content, toolResultBlock)
-							continue
-						}
-					}
-				}
-				apiMessages = append(apiMessages, map[string]any{
-					"role":    "user",
-					"content": []map[string]any{toolResultBlock},
-				})
-			} else {
-				// Regular user message
-				apiMessages = append(apiMessages, map[string]any{
-					"role":    "user",
-					"content": msg.Content,
-				})
-			}
-
-		case "assistant":
-			content := []any{}
-
-			// Add text content if present
-			if msg.Content != "" {
-				content = append(content, map[string]any{
-					"type": "text",
-					"text": msg.Content,
-				})
-			}
-
-			// Add tool_use blocks
-			for _, tc := range msg.ToolCalls {
-				// Resolve tool name: prefer tc.Name, fallback to tc.Function.Name
-				// (tc.Name/tc.Arguments are json:"-" and may be empty when
-				// history is reloaded from the session store)
-				toolName := tc.Name
-				if toolName == "" && tc.Function != nil {
-					toolName = tc.Function.Name
-				}
-				if strings.TrimSpace(toolName) == "" {
-					continue
-				}
-
-				// Resolve arguments: prefer tc.Arguments, fallback to parsing
-				// tc.Function.Arguments
-				input := tc.Arguments
-				if input == nil && tc.Function != nil && tc.Function.Arguments != "" {
-					if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
-						input = map[string]any{}
-					}
-				}
-				// Handle nil Arguments (GLM-4 may return null input)
-				if input == nil {
-					input = map[string]any{}
-				}
-
-				toolUse := map[string]any{
-					"type":  "tool_use",
-					"id":    tc.ID,
-					"name":  toolName,
-					"input": input,
-				}
-				content = append(content, toolUse)
-			}
-
-			apiMessages = append(apiMessages, map[string]any{
-				"role":    "assistant",
-				"content": content,
-			})
-
-		case "tool":
-			// Tool result (alternative format) — merge into previous user message if it contains tool_results
-			toolResultBlock := map[string]any{
-				"type":        "tool_result",
-				"tool_use_id": msg.ToolCallID,
-				"content":     msg.Content,
-			}
-			if len(apiMessages) > 0 {
-				if prev, ok := apiMessages[len(apiMessages)-1].(map[string]any); ok && prev["role"] == "user" {
-					if content, ok := prev["content"].([]map[string]any); ok {
-						prev["content"] = append(content, toolResultBlock)
-						continue
-					}
-				}
-			}
-			apiMessages = append(apiMessages, map[string]any{
-				"role":    "user",
-				"content": []map[string]any{toolResultBlock},
-			})
+	appendBlocks := func(role string, blocks ...map[string]any) {
+		if len(blocks) == 0 {
+			return
+		}
+		if pendingRole != "" && pendingRole != role {
+			flush()
+		}
+		pendingRole = role
+		for _, block := range blocks {
+			pendingBlocks = append(pendingBlocks, block)
 		}
 	}
+
+	appendUserContent := func(parts []promptir.Part) {
+		if isSingleTextPart(parts) {
+			flush()
+			apiMessages = append(apiMessages, map[string]any{
+				"role":    "user",
+				"content": promptir.TextFromParts(parts),
+			})
+			return
+		}
+		appendBlocks("user", anthropicMessageBlocksFromParts(parts)...)
+	}
+
+	prompt := promptir.FromMessagesWithTools(messages, tools)
+	for _, item := range prompt.Items {
+		switch item.Type {
+		case promptir.ItemTypeContext:
+			text := promptir.ReadableParts(item.Parts)
+			if text == "" {
+				continue
+			}
+			if promptir.IsStableInstruction(item) {
+				systemParts = append(systemParts, text)
+			} else {
+				appendBlocks("user", map[string]any{
+					"type": "text",
+					"text": "[" + promptir.ContextLabel(item) + "]\n" + text,
+				})
+			}
+
+		case promptir.ItemTypeMessage:
+			if item.Role == promptir.RoleAssistant {
+				blocks := anthropicMessageBlocksFromParts(item.Parts)
+				if len(blocks) == 0 {
+					flush()
+					apiMessages = append(apiMessages, map[string]any{
+						"role":    "assistant",
+						"content": []any{},
+					})
+				} else {
+					appendBlocks("assistant", blocks...)
+				}
+			} else {
+				appendUserContent(item.Parts)
+			}
+
+		case promptir.ItemTypeToolCall:
+			if item.ToolCallID == "" || item.ToolName == "" {
+				continue
+			}
+			appendBlocks("assistant", map[string]any{
+				"type":  "tool_use",
+				"id":    item.ToolCallID,
+				"name":  item.ToolName,
+				"input": promptir.ToolArgumentsMap(item),
+			})
+
+		case promptir.ItemTypeToolResult:
+			output := promptir.ReadableParts(item.ToolOutput)
+			if output == "" {
+				output = promptir.ReadableParts(item.Parts)
+			}
+			appendBlocks("user", map[string]any{
+				"type":        "tool_result",
+				"tool_use_id": item.ToolCallID,
+				"content":     output,
+			})
+
+		case promptir.ItemTypeReasoning:
+			if text := promptir.ReadableParts(item.Parts); text != "" {
+				appendBlocks("assistant", map[string]any{
+					"type": "text",
+					"text": "[reasoning]\n" + text,
+				})
+			}
+		}
+	}
+	flush()
 
 	result["messages"] = apiMessages
 
 	// Set system prompt if present
-	if systemPrompt != "" {
-		result["system"] = systemPrompt
+	if len(systemParts) > 0 {
+		result["system"] = strings.Join(systemParts, "\n\n")
 	}
 
 	// Add tools if present
@@ -306,6 +308,49 @@ func buildRequestBody(
 	}
 
 	return result, nil
+}
+
+func allToolResultBlocks(blocks []any) ([]map[string]any, bool) {
+	if len(blocks) == 0 {
+		return nil, false
+	}
+	out := make([]map[string]any, 0, len(blocks))
+	for _, block := range blocks {
+		m, ok := block.(map[string]any)
+		if !ok || m["type"] != "tool_result" {
+			return nil, false
+		}
+		out = append(out, m)
+	}
+	return out, true
+}
+
+func isSingleTextPart(parts []promptir.Part) bool {
+	return len(parts) == 1 &&
+		(parts[0].Type == string(promptir.PartTypeText) || parts[0].Type == "") &&
+		parts[0].Text != ""
+}
+
+func anthropicMessageBlocksFromParts(parts []promptir.Part) []map[string]any {
+	blocks := make([]map[string]any, 0, len(parts))
+	for _, part := range parts {
+		if part.Type == string(promptir.PartTypeText) || part.Type == "" {
+			if part.Text != "" {
+				blocks = append(blocks, map[string]any{
+					"type": "text",
+					"text": part.Text,
+				})
+			}
+			continue
+		}
+		if text := promptir.ReadableParts([]promptir.Part{part}); text != "" {
+			blocks = append(blocks, map[string]any{
+				"type": "text",
+				"text": text,
+			})
+		}
+	}
+	return blocks
 }
 
 // buildTools converts tool definitions to Anthropic format.

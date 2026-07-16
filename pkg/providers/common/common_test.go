@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sipeed/picoclaw/pkg/providers/promptir"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
@@ -126,6 +127,41 @@ func TestSerializeMessages_WithAudioMedia(t *testing.T) {
 	}
 	if inputAudio["data"] != "abc123" {
 		t.Fatalf("audio data = %v, want abc123", inputAudio["data"])
+	}
+}
+
+func TestSerializeMessages_OrderedParts(t *testing.T) {
+	messages := []Message{
+		{
+			Role: "user",
+			Parts: []PromptPart{
+				{Type: string(promptir.PartTypeText), Text: "before"},
+				{Type: string(promptir.PartTypeImage), URI: "data:image/png;base64,abc"},
+				{Type: string(promptir.PartTypeText), Text: "after"},
+			},
+		},
+	}
+	result := SerializeMessages(messages)
+
+	data, _ := json.Marshal(result)
+	var msgs []map[string]any
+	json.Unmarshal(data, &msgs)
+
+	content, ok := msgs[0]["content"].([]any)
+	if !ok {
+		t.Fatalf("expected array content for structured parts, got %T", msgs[0]["content"])
+	}
+	if len(content) != 3 {
+		t.Fatalf("content parts len = %d, want 3", len(content))
+	}
+	if content[0].(map[string]any)["text"] != "before" {
+		t.Fatalf("first part = %#v, want text before", content[0])
+	}
+	if content[1].(map[string]any)["type"] != "image_url" {
+		t.Fatalf("second part = %#v, want image_url", content[1])
+	}
+	if content[2].(map[string]any)["text"] != "after" {
+		t.Fatalf("third part = %#v, want text after", content[2])
 	}
 }
 

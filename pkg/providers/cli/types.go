@@ -14,6 +14,7 @@ type (
 	Message                = protocoltypes.Message
 	ToolDefinition         = protocoltypes.ToolDefinition
 	ToolFunctionDefinition = protocoltypes.ToolFunctionDefinition
+	PromptPart             = protocoltypes.PromptPart
 )
 
 type LLMProvider interface {

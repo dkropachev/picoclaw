@@ -33,7 +33,8 @@ how legacy aliases are promoted, and how launcher history views expose records.
 
 Persistent state is session JSONL message files plus metadata containing scoped
 identity and aliases. Runtime state includes allocated scope fields, canonical
-keys, legacy aliases, summaries, and per-session append locks.
+keys, legacy aliases, summaries, structured message text/media parts, and
+per-session append locks.
 
 ## Surface Ownership
 
@@ -78,10 +79,10 @@ Owns: TEST web/backend/api/session*
 ## Cross-Feature Behavior
 
 Routing supplies the session policy. Agent conversations read and write session
-history. Chat channels provide normalized scope values. Launcher management
-exposes the history surface. Threads store discoverable thread records and
-handoff links on top of session metadata without deleting the underlying
-conversation history.
+history, including structured prompt parts when provider history supplies them.
+Chat channels provide normalized scope values. Launcher management exposes the
+history surface. Threads store discoverable thread records and handoff links on
+top of session metadata without deleting the underlying conversation history.
 
 ## Failure And Edge Cases
 

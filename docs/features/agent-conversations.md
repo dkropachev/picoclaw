@@ -32,6 +32,7 @@ auxiliary to this capability.
 | `FR-AGENT-008` | SHOULD | Thinking or reasoning content is preserved for surfaces that display it and omitted from ordinary final replies unless configured. | Reasoning display is auxiliary, not the answer itself. |
 | `FR-AGENT-009` | MUST | CLI direct-agent commands use the same agent runtime path as gateway turns, with command-specific input/output wrapping only. | CLI must not fork behavior from gateway runtime. |
 | `FR-AGENT-010` | MUST | Per-model OpenAI-style `reasoning_effort` is normalized before provider calls; blank/default values are omitted, `off` maps to `none`, and unsupported values are rejected by config validation. | Provider requests must not forward invalid reasoning controls. |
+| `FR-AGENT-011` | MUST | Provider prompt serialization preserves ordered text/media parts, scoped context, tool call/result identifiers, and token estimates through the provider-neutral prompt representation before mapping to provider-specific wire formats. | Multi-provider turns need one canonical prompt model so media, summaries, cache hints, and tool relationships are not silently lost or double-counted. |
 
 ## Data And State Model
 
@@ -76,6 +77,7 @@ Owns: TEST cmd/picoclaw/internal/status/*
 Owns: TEST cmd/picoclaw/internal/version/*
 Owns: TEST pkg/agent/*
 Owns: TEST pkg/providers/*
+Owns: TEST pkg/tokenizer/*
 Owns: TEST pkg/audio/*
 Owns: TOOL spawn
 Owns: TOOL spawn_status
@@ -128,6 +130,7 @@ thresholds are satisfied.
 | `FR-AGENT-007` | [pkg/agent/subturn_test.go](../../pkg/agent/subturn_test.go), [pkg/tools/subagent_tool_test.go](../../pkg/tools/subagent_tool_test.go), [pkg/tools/spawn_status_test.go](../../pkg/tools/spawn_status_test.go) |
 | `FR-AGENT-009` | [cmd/picoclaw/internal/agent/command_test.go](../../cmd/picoclaw/internal/agent/command_test.go), [cmd/picoclaw/internal/model/command_test.go](../../cmd/picoclaw/internal/model/command_test.go) |
 | `FR-AGENT-010` | [pkg/agent/reasoning_effort_test.go](../../pkg/agent/reasoning_effort_test.go), [pkg/providers/common/reasoning_effort_test.go](../../pkg/providers/common/reasoning_effort_test.go), [pkg/providers/openai_compat/provider_test.go](../../pkg/providers/openai_compat/provider_test.go), [pkg/providers/azure/provider_test.go](../../pkg/providers/azure/provider_test.go), [pkg/providers/oauth/codex_provider_test.go](../../pkg/providers/oauth/codex_provider_test.go) |
+| `FR-AGENT-011` | [pkg/providers/promptir/conversion_test.go](../../pkg/providers/promptir/conversion_test.go), [pkg/providers/common/common_test.go](../../pkg/providers/common/common_test.go), [pkg/providers/openai_responses_common/responses_common_test.go](../../pkg/providers/openai_responses_common/responses_common_test.go), [pkg/tokenizer/estimator_test.go](../../pkg/tokenizer/estimator_test.go) |
 
 ## Implementation Anchors
 

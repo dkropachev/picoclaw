@@ -85,6 +85,19 @@ type Attachment struct {
 	ContentType string `json:"content_type,omitempty"`
 }
 
+// PromptPart is the provider-neutral structured content part used by the
+// internal prompt IR. It is intentionally small so stored Message JSON can
+// preserve ordered text/media/file parts without binding history to a specific
+// provider wire format.
+type PromptPart struct {
+	Type     string `json:"type,omitempty"` // "text", "image", "audio", "file"
+	Text     string `json:"text,omitempty"`
+	URI      string `json:"uri,omitempty"`
+	MIMEType string `json:"mime_type,omitempty"`
+	Filename string `json:"filename,omitempty"`
+	Detail   string `json:"detail,omitempty"`
+}
+
 type Message struct {
 	Role             string         `json:"role"`
 	Content          string         `json:"content"`
@@ -92,6 +105,7 @@ type Message struct {
 	CreatedAt        *time.Time     `json:"created_at,omitempty"`
 	Media            []string       `json:"media,omitempty"`
 	Attachments      []Attachment   `json:"attachments,omitempty"`
+	Parts            []PromptPart   `json:"parts,omitempty"`
 	ReasoningContent string         `json:"reasoning_content,omitempty"`
 	SystemParts      []ContentBlock `json:"system_parts,omitempty"` // structured system blocks for cache-aware adapters
 	ToolCalls        []ToolCall     `json:"tool_calls,omitempty"`

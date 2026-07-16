@@ -93,28 +93,14 @@ func (p *CodexCliProvider) GetDefaultModel() string {
 // buildPrompt converts messages to a prompt string for the Codex CLI.
 // System messages are prepended as instructions since Codex CLI has no --system-prompt flag.
 func (p *CodexCliProvider) buildPrompt(messages []Message, tools []ToolDefinition) string {
-	var systemParts []string
-	var conversationParts []string
-
-	for _, msg := range messages {
-		switch msg.Role {
-		case "system":
-			systemParts = append(systemParts, msg.Content)
-		case "user":
-			conversationParts = append(conversationParts, msg.Content)
-		case "assistant":
-			conversationParts = append(conversationParts, "Assistant: "+msg.Content)
-		case "tool":
-			conversationParts = append(conversationParts,
-				fmt.Sprintf("[Tool Result for %s]: %s", msg.ToolCallID, msg.Content))
-		}
-	}
+	systemPrompt := cliSystemPrompt(messages, nil)
+	conversationParts := cliConversationParts(messages, false)
 
 	var sb strings.Builder
 
-	if len(systemParts) > 0 {
+	if systemPrompt != "" {
 		sb.WriteString("## System Instructions\n\n")
-		sb.WriteString(strings.Join(systemParts, "\n\n"))
+		sb.WriteString(systemPrompt)
 		sb.WriteString("\n\n## Task\n\n")
 	}
 
@@ -124,7 +110,7 @@ func (p *CodexCliProvider) buildPrompt(messages []Message, tools []ToolDefinitio
 	}
 
 	// Simplify single user message (no prefix)
-	if len(conversationParts) == 1 && len(systemParts) == 0 && len(tools) == 0 {
+	if len(conversationParts) == 1 && systemPrompt == "" && len(tools) == 0 {
 		return conversationParts[0]
 	}
 
