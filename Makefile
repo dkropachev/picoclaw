@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean help test integration-test build-all lint-docs feature-inventory lint-features feature-delta coverage-delta
+.PHONY: all build install uninstall clean help test integration-test build-all lint-docs lint-frontend feature-inventory lint-features feature-delta coverage-delta
 
 # Build variables
 BINARY_NAME=picoclaw
@@ -395,6 +395,11 @@ fmt:
 lint-docs:
 	@./scripts/lint-docs.sh
 
+## lint-frontend: Check launcher frontend code and UI rules
+lint-frontend:
+	@cd web/frontend && pnpm install --frozen-lockfile
+	@cd web/frontend && pnpm lint
+
 ## feature-inventory: Print discovered feature-relevant repo surfaces
 feature-inventory:
 	@$(GO) run -tags featuretools ./scripts/feature_inventory.go ./scripts/featuretools_lib.go
@@ -415,6 +420,7 @@ coverage-delta:
 lint:
 	@$(GOLANGCI_LINT) run --build-tags $(GO_BUILD_TAGS)
 	@./scripts/lint-docs.sh
+	@$(MAKE) lint-frontend
 	@$(GO) run -tags featuretools ./scripts/lint-features.go ./scripts/featuretools_lib.go
 
 ## fix: Fix linting issues

@@ -18,6 +18,14 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Enable Corepack
+        run: corepack prepare pnpm@10.33.0 --activate
+
       - name: Run go generate
         run: go generate ./...
 
@@ -29,6 +37,9 @@ jobs:
 
       - name: Feature requirements lint
         run: make lint-features
+
+      - name: Frontend lint
+        run: make lint-frontend
 
       - name: Fetch base ref
         run: git fetch origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"

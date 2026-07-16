@@ -16,6 +16,7 @@ export function AnsiLogLine({ line, wrapColumns }: AnsiLogLineProps) {
     <div className="break-normal whitespace-pre-wrap">
       {segments.map((segment, index) => (
         <Fragment key={`${index}-${segment.text.length}`}>
+          {/* ui-rule-allow dynamic-style: ANSI parser returns per-segment terminal colors. */}
           <span style={segment.style}>{segment.text}</span>
         </Fragment>
       ))}

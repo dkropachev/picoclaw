@@ -139,6 +139,7 @@ export function ContextUsageRing({
             </span>
           </div>
           <div className="bg-muted mt-1.5 h-1.5 w-full overflow-hidden rounded-full">
+            {/* ui-rule-allow dynamic-style: bar width reflects runtime context usage percent. */}
             <div
               className="h-full rounded-full bg-violet-500 transition-all"
               style={{ width: `${barPercent}%` }}

@@ -117,6 +117,7 @@ export function MessageCodeBlock({
       )}
     >
       <div className="flex items-center justify-between gap-2 border-b border-[#d0d7de] bg-black/[0.03] px-3 py-2 dark:border-[#30363d] dark:bg-white/[0.03]">
+        {/* ui-rule-allow dynamic-style: code label uses a fixed code font stack. */}
         <span
           className="text-[11px] font-medium text-zinc-600 dark:text-zinc-400"
           style={{ fontFamily: CODE_LABEL_FONT_FAMILY }}
@@ -186,6 +187,7 @@ export function MessageCodeBlock({
             )}
           >
             {codeLines.map((line, index) => (
+              // ui-rule-allow dynamic-style: line-number column width depends on rendered line count.
               <span
                 key={`${index}-${line.length}`}
                 className="grid grid-cols-[var(--code-line-number-width)_minmax(0,1fr)] items-start gap-x-3"

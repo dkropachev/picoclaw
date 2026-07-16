@@ -193,10 +193,10 @@ test:
 	cd $(BACKEND_DIR) && ${WEB_GO} test ./...
 	cd $(FRONTEND_DIR) && pnpm lint
 
-# Lint and format
+# Lint frontend and backend code
 lint:
 	cd $(BACKEND_DIR) && ${WEB_GO} vet ./...
-	cd $(FRONTEND_DIR) && pnpm check
+	cd $(FRONTEND_DIR) && pnpm lint
 
 # Clean build artifacts
 clean:

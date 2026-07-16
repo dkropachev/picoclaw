@@ -109,6 +109,7 @@ Owns: TEST pkg/migrate/*
 | HTTP | `/api/auth*`, `/api/config*`, `/api/models*`, `/api/oauth*`, `/api/system*`, `/api/update`, `/api/weixin*`, `/api/wecom*` | Authenticated launcher management endpoints. | `FR-LAUNCHER-001` through `FR-LAUNCHER-007` |
 | CLI | `picoclaw auth`, `picoclaw config`, `picoclaw onboard`, `picoclaw migrate` | Non-browser setup, auth, and migration helpers. | `FR-LAUNCHER-002`, `FR-LAUNCHER-004` |
 | Config | Launcher config file beside app config | Port/public/access options and dashboard auth migration. | `FR-LAUNCHER-001`, `FR-LAUNCHER-006` |
+| Frontend | `web/frontend/AGENTS.md`, `docs/design/frontend-guidelines.md`, `web/frontend/scripts/lint-ui-rules.mjs` | Agent-facing launcher UI guidance and static checks for API boundaries, color tokens, and dynamic style exceptions. Feature-specific UI behavior remains owned by the relevant product feature spec. | `FR-LAUNCHER-002`, `FR-LAUNCHER-007` |
 
 ## Algorithms And Ordering
 

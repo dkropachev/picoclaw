@@ -87,6 +87,7 @@ Owns: EVENT bus.*
 | HTTP | `/api/gateway/*`, `/api/channels/*`, `/api/pico/*`, `/pico/*` | Gateway lifecycle, channel catalog/config, Pico token/info/setup, websocket and media proxy. | `FR-CHANNEL-006` |
 | Config | `channel_list.*`, `gateway.*` | Channel enablement, settings, trigger, placeholder, typing, gateway host/port/log/hot reload. | `FR-CHANNEL-001`, `FR-CHANNEL-003`, `FR-CHANNEL-005` |
 | Events | `channel.*`, `gateway.*`, `bus.*` | Lifecycle, webhook, outbound, rate limit, gateway, and bus failure telemetry. | `FR-CHANNEL-001`, `FR-CHANNEL-008` |
+| Frontend | Chat, Pico, channel, message, code-block, and context-usage UI under `web/frontend/src/components/chat/**`, `web/frontend/src/features/chat/**`, and related channel routes | Browser chat surfaces expose channel delivery behavior and follow shared frontend API, token, and dynamic-style lint rules. | `FR-CHANNEL-005`, `FR-CHANNEL-006` |
 
 ## Algorithms And Ordering
 

@@ -3,6 +3,7 @@ import { useState } from "react"
 import type { ReactNode } from "react"
 import { useTranslation } from "react-i18next"
 
+import { launcherFetch } from "@/api/http"
 import {
   type CoreConfigForm,
   DM_SCOPE_OPTIONS,
@@ -885,7 +886,7 @@ export function ExecSection({ form, onFieldChange }: ExecSectionProps) {
 
     setIsLoading(true)
     try {
-      const res = await fetch("/api/config/test-command-patterns", {
+      const res = await launcherFetch("/api/config/test-command-patterns", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
