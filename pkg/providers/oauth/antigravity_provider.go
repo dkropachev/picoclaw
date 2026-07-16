@@ -15,6 +15,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers/common"
+	"github.com/sipeed/picoclaw/pkg/providers/promptir"
 )
 
 const (
@@ -214,80 +215,86 @@ func (p *AntigravityProvider) buildRequest(
 	toolCallNames := make(map[string]string)
 
 	// Build contents from messages
-	for _, msg := range messages {
-		switch msg.Role {
-		case "system":
-			req.SystemPrompt = &antigravitySystemPrompt{
-				Parts: []antigravityPart{{Text: msg.Content}},
+	prompt := promptir.FromMessagesWithTools(messages, tools)
+	for _, item := range prompt.Items {
+		switch item.Type {
+		case promptir.ItemTypeContext:
+			text := promptir.ReadableParts(item.Parts)
+			if strings.TrimSpace(text) == "" {
+				continue
 			}
-		case "user":
-			if msg.ToolCallID != "" {
-				toolName := common.ResolveToolResponseName(msg.ToolCallID, toolCallNames)
-				// Tool result
-				req.Contents = append(req.Contents, antigravityContent{
-					Role: "user",
-					Parts: []antigravityPart{{
-						FunctionResponse: &antigravityFunctionResponse{
-							Name: toolName,
-							Response: map[string]any{
-								"result": msg.Content,
-							},
-						},
-					}},
-				})
+			if promptir.IsStableInstruction(item) {
+				if req.SystemPrompt == nil {
+					req.SystemPrompt = &antigravitySystemPrompt{}
+				}
+				req.SystemPrompt.Parts = append(req.SystemPrompt.Parts, antigravityPart{Text: text})
 			} else {
 				req.Contents = append(req.Contents, antigravityContent{
 					Role:  "user",
-					Parts: []antigravityPart{{Text: msg.Content}},
+					Parts: []antigravityPart{{Text: "[" + promptir.ContextLabel(item) + "]\n" + text}},
 				})
 			}
-		case "assistant":
-			content := antigravityContent{
+
+		case promptir.ItemTypeMessage:
+			parts := antigravityPartsFromPromptParts(item.Parts)
+			if len(parts) == 0 {
+				continue
+			}
+			if item.Role == promptir.RoleAssistant {
+				req.Contents = append(req.Contents, antigravityContent{Role: "model", Parts: parts})
+			} else {
+				req.Contents = append(req.Contents, antigravityContent{Role: "user", Parts: parts})
+			}
+
+		case promptir.ItemTypeToolCall:
+			if item.ToolName == "" {
+				logger.WarnCF(
+					"provider.antigravity",
+					"Skipping tool call with empty name in history",
+					map[string]any{"tool_call_id": item.ToolCallID},
+				)
+				continue
+			}
+			if item.ToolCallID != "" {
+				toolCallNames[item.ToolCallID] = item.ToolName
+			}
+			req.Contents = append(req.Contents, antigravityContent{
 				Role: "model",
-			}
-			if msg.Content != "" {
-				content.Parts = append(content.Parts, antigravityPart{Text: msg.Content})
-			}
-			for _, tc := range msg.ToolCalls {
-				toolName, toolArgs, thoughtSignature := common.NormalizeStoredToolCall(tc)
-				if toolName == "" {
-					logger.WarnCF(
-						"provider.antigravity",
-						"Skipping tool call with empty name in history",
-						map[string]any{
-							"tool_call_id": tc.ID,
-						},
-					)
-					continue
-				}
-				if tc.ID != "" {
-					toolCallNames[tc.ID] = toolName
-				}
-				content.Parts = append(content.Parts, antigravityPart{
-					ThoughtSignature:      thoughtSignature,
-					ThoughtSignatureSnake: thoughtSignature,
+				Parts: []antigravityPart{{
+					ThoughtSignature:      item.ToolThoughtSignature,
+					ThoughtSignatureSnake: item.ToolThoughtSignature,
 					FunctionCall: &antigravityFunctionCall{
-						Name: toolName,
-						Args: toolArgs,
+						Name: item.ToolName,
+						Args: promptir.ToolArgumentsMap(item),
 					},
-				})
+				}},
+			})
+
+		case promptir.ItemTypeToolResult:
+			toolName := common.ResolveToolResponseName(item.ToolCallID, toolCallNames)
+			output := promptir.ReadableParts(item.ToolOutput)
+			if output == "" {
+				output = promptir.ReadableParts(item.Parts)
 			}
-			if len(content.Parts) > 0 {
-				req.Contents = append(req.Contents, content)
-			}
-		case "tool":
-			toolName := common.ResolveToolResponseName(msg.ToolCallID, toolCallNames)
 			req.Contents = append(req.Contents, antigravityContent{
 				Role: "user",
 				Parts: []antigravityPart{{
 					FunctionResponse: &antigravityFunctionResponse{
 						Name: toolName,
 						Response: map[string]any{
-							"result": msg.Content,
+							"result": output,
 						},
 					},
 				}},
 			})
+
+		case promptir.ItemTypeReasoning:
+			if text := promptir.ReadableParts(item.Parts); strings.TrimSpace(text) != "" {
+				req.Contents = append(req.Contents, antigravityContent{
+					Role:  "model",
+					Parts: []antigravityPart{{Text: "[reasoning]\n" + text}},
+				})
+			}
 		}
 	}
 
@@ -326,6 +333,22 @@ func (p *AntigravityProvider) buildRequest(
 	}
 
 	return req
+}
+
+func antigravityPartsFromPromptParts(parts []promptir.Part) []antigravityPart {
+	out := make([]antigravityPart, 0, len(parts))
+	for _, part := range parts {
+		if part.Type == string(promptir.PartTypeText) || part.Type == "" {
+			if part.Text != "" {
+				out = append(out, antigravityPart{Text: part.Text})
+			}
+			continue
+		}
+		if text := promptir.ReadableParts([]promptir.Part{part}); text != "" {
+			out = append(out, antigravityPart{Text: text})
+		}
+	}
+	return out
 }
 
 // --- Response parsing ---

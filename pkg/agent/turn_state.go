@@ -771,6 +771,9 @@ func normalizeMessageForComparison(msg providers.Message) providers.Message {
 	if len(msg.Attachments) == 0 {
 		msg.Attachments = nil
 	}
+	if len(msg.Parts) == 0 {
+		msg.Parts = nil
+	}
 	if len(msg.SystemParts) == 0 {
 		msg.SystemParts = nil
 	} else {

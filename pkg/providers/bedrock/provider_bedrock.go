@@ -27,6 +27,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 
 	"github.com/sipeed/picoclaw/pkg/providers/common"
+	"github.com/sipeed/picoclaw/pkg/providers/promptir"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
@@ -38,6 +39,7 @@ type (
 	Message                = protocoltypes.Message
 	ToolDefinition         = protocoltypes.ToolDefinition
 	ToolFunctionDefinition = protocoltypes.ToolFunctionDefinition
+	PromptPart             = protocoltypes.PromptPart
 )
 
 // Provider implements the LLM provider interface for AWS Bedrock.
@@ -158,7 +160,12 @@ func modelDeprecatesTemperature(model string) bool {
 	return strings.Contains(m, "claude-opus-4-8")
 }
 
-func buildConverseParams(messages []Message, tools []ToolDefinition, model string, options map[string]any) converseParams {
+func buildConverseParams(
+	messages []Message,
+	tools []ToolDefinition,
+	model string,
+	options map[string]any,
+) converseParams {
 	bedrockMessages, systemPrompts := convertMessages(messages)
 
 	var inferenceConfig *types.InferenceConfiguration
@@ -453,111 +460,135 @@ func (p *Provider) Region() string {
 // user message with multiple ToolResultBlock content blocks. This function merges
 // consecutive tool result messages accordingly.
 func convertMessages(messages []Message) ([]types.Message, []types.SystemContentBlock) {
+	return convertPrompt(promptir.FromMessages(messages))
+}
+
+func convertPrompt(prompt promptir.Prompt) ([]types.Message, []types.SystemContentBlock) {
 	var bedrockMessages []types.Message
 	var systemPrompts []types.SystemContentBlock
 
-	// Helper to check if a message is a tool result
-	isToolResult := func(msg Message) bool {
-		return (msg.Role == "tool" || (msg.Role == "user" && msg.ToolCallID != "")) && msg.ToolCallID != ""
-	}
-
-	// Helper to create a tool result content block
-	makeToolResultBlock := func(msg Message) types.ContentBlock {
-		return &types.ContentBlockMemberToolResult{
-			Value: types.ToolResultBlock{
-				ToolUseId: aws.String(msg.ToolCallID),
-				Content: []types.ToolResultContentBlock{
-					&types.ToolResultContentBlockMemberText{
-						Value: msg.Content,
-					},
-				},
-			},
+	appendMessage := func(role types.ConversationRole, content []types.ContentBlock, mergeWithPrevious bool) {
+		if len(content) == 0 {
+			content = []types.ContentBlock{&types.ContentBlockMemberText{Value: ""}}
 		}
+		last := len(bedrockMessages) - 1
+		if mergeWithPrevious && last >= 0 && bedrockMessages[last].Role == role {
+			bedrockMessages[last].Content = append(bedrockMessages[last].Content, content...)
+			return
+		}
+		bedrockMessages = append(bedrockMessages, types.Message{
+			Role:    role,
+			Content: content,
+		})
 	}
 
-	i := 0
-	for i < len(messages) {
-		msg := messages[i]
+	for i := 0; i < len(prompt.Items); i++ {
+		item := prompt.Items[i]
 
-		switch {
-		case msg.Role == "system":
-			// System messages go to the System field
+		switch item.Type {
+		case promptir.ItemTypeContext:
+			text := promptir.ReadableParts(item.Parts)
+			if strings.TrimSpace(text) == "" {
+				continue
+			}
+			if !promptir.IsStableInstruction(item) {
+				appendMessage(types.ConversationRoleUser, []types.ContentBlock{
+					&types.ContentBlockMemberText{Value: "[" + promptir.ContextLabel(item) + "]\n" + text},
+				}, false)
+				continue
+			}
 			systemPrompts = append(systemPrompts, &types.SystemContentBlockMemberText{
-				Value: msg.Content,
+				Value: text,
 			})
-			i++
 
-		case isToolResult(msg):
-			// Collect all consecutive tool results into a single user message
-			// Bedrock requires all tool results for a turn in one message
+		case promptir.ItemTypeToolResult:
 			var toolResultBlocks []types.ContentBlock
-			for i < len(messages) && isToolResult(messages[i]) {
-				toolResultBlocks = append(toolResultBlocks, makeToolResultBlock(messages[i]))
+			for i < len(prompt.Items) && prompt.Items[i].Type == promptir.ItemTypeToolResult {
+				toolResultBlocks = append(toolResultBlocks, makeToolResultBlock(prompt.Items[i]))
 				i++
 			}
-			bedrockMessages = append(bedrockMessages, types.Message{
-				Role:    types.ConversationRoleUser,
-				Content: toolResultBlocks,
-			})
+			i--
+			appendMessage(types.ConversationRoleUser, toolResultBlocks, false)
 
-		case msg.Role == "user":
-			// Regular user message (no ToolCallID)
-			content := buildUserContent(msg)
-			bedrockMessages = append(bedrockMessages, types.Message{
-				Role:    types.ConversationRoleUser,
-				Content: content,
-			})
-			i++
+		case promptir.ItemTypeMessage:
+			switch item.Role {
+			case promptir.RoleAssistant:
+				appendMessage(types.ConversationRoleAssistant, buildAssistantTextContent(item.Parts), true)
+			default:
+				appendMessage(types.ConversationRoleUser, buildUserContentFromParts(item.Parts), false)
+			}
 
-		case msg.Role == "assistant":
-			content := buildAssistantContent(msg)
-			bedrockMessages = append(bedrockMessages, types.Message{
-				Role:    types.ConversationRoleAssistant,
-				Content: content,
-			})
-			i++
+		case promptir.ItemTypeToolCall:
+			if strings.TrimSpace(item.ToolCallID) == "" {
+				log.Printf("bedrock: skipping tool call with empty ID (name: %q)", item.ToolName)
+				continue
+			}
+			if strings.TrimSpace(item.ToolName) == "" {
+				continue
+			}
+			appendMessage(types.ConversationRoleAssistant, []types.ContentBlock{buildToolUseBlock(item)}, true)
 
-		case msg.Role == "tool" && msg.ToolCallID == "":
-			// Tool message without ToolCallID - treat as regular user message
-			content := buildUserContent(msg)
-			bedrockMessages = append(bedrockMessages, types.Message{
-				Role:    types.ConversationRoleUser,
-				Content: content,
-			})
-			i++
-
-		default:
-			// Unknown role - skip
-			i++
+		case promptir.ItemTypeReasoning:
+			if text := promptir.ReadableParts(item.Parts); strings.TrimSpace(text) != "" {
+				appendMessage(types.ConversationRoleAssistant, []types.ContentBlock{
+					&types.ContentBlockMemberText{Value: "[reasoning]\n" + text},
+				}, true)
+			}
 		}
 	}
 
 	return bedrockMessages, systemPrompts
 }
 
+func makeToolResultBlock(item promptir.Item) types.ContentBlock {
+	output := promptir.ReadableParts(item.ToolOutput)
+	if output == "" {
+		output = promptir.ReadableParts(item.Parts)
+	}
+	return &types.ContentBlockMemberToolResult{
+		Value: types.ToolResultBlock{
+			ToolUseId: aws.String(item.ToolCallID),
+			Content: []types.ToolResultContentBlock{
+				&types.ToolResultContentBlockMemberText{
+					Value: output,
+				},
+			},
+		},
+	}
+}
+
 // buildUserContent builds Bedrock content blocks for a user message.
 func buildUserContent(msg Message) []types.ContentBlock {
+	return buildUserContentFromParts(promptir.ContentPartsForMessage(msg))
+}
+
+func buildUserContentFromParts(parts []promptir.Part) []types.ContentBlock {
 	var content []types.ContentBlock
 
-	// Add text content
-	if msg.Content != "" {
-		content = append(content, &types.ContentBlockMemberText{
-			Value: msg.Content,
-		})
-	}
-
-	// Add images from Media field
-	for _, mediaURL := range msg.Media {
-		if strings.HasPrefix(mediaURL, "data:image/") {
+	for _, part := range parts {
+		switch part.Type {
+		case string(promptir.PartTypeText), "":
+			if part.Text != "" {
+				content = append(content, &types.ContentBlockMemberText{
+					Value: part.Text,
+				})
+			}
+		case string(promptir.PartTypeImage):
+			if !strings.HasPrefix(part.URI, "data:image/") {
+				if text := promptir.ReadableParts([]promptir.Part{part}); text != "" {
+					content = append(content, &types.ContentBlockMemberText{Value: text})
+				}
+				continue
+			}
 			// Parse data URL: data:image/jpeg;base64,<data>
-			parts := strings.SplitN(mediaURL, ",", 2)
-			if len(parts) != 2 {
+			dataURLParts := strings.SplitN(part.URI, ",", 2)
+			if len(dataURLParts) != 2 {
 				continue
 			}
 
 			// Extract media type from "data:image/jpeg;base64"
 			mediaType := ""
-			header := parts[0]
+			header := dataURLParts[0]
 			if idx := strings.Index(header, "/"); idx != -1 {
 				end := strings.Index(header[idx:], ";")
 				if end == -1 {
@@ -589,14 +620,14 @@ func buildUserContent(msg Message) []types.ContentBlock {
 			// Check size before decoding to prevent excessive memory allocation
 			// Bedrock has a ~20MB request limit; cap decoded images at 10MB
 			const maxImageSize = 10 * 1024 * 1024
-			decodedLen := base64.StdEncoding.DecodedLen(len(parts[1]))
+			decodedLen := base64.StdEncoding.DecodedLen(len(dataURLParts[1]))
 			if decodedLen > maxImageSize {
 				log.Printf("bedrock: skipping image exceeding size limit (%d bytes > %d)", decodedLen, maxImageSize)
 				continue
 			}
 
 			// Decode base64 data
-			imageData, err := base64.StdEncoding.DecodeString(parts[1])
+			imageData, err := base64.StdEncoding.DecodeString(dataURLParts[1])
 			if err != nil {
 				log.Printf("bedrock: failed to decode base64 image data: %v", err)
 				continue
@@ -610,6 +641,10 @@ func buildUserContent(msg Message) []types.ContentBlock {
 					},
 				},
 			})
+		default:
+			if text := promptir.ReadableParts([]promptir.Part{part}); text != "" {
+				content = append(content, &types.ContentBlockMemberText{Value: text})
+			}
 		}
 	}
 
@@ -680,6 +715,32 @@ func buildAssistantContent(msg Message) []types.ContentBlock {
 	}
 
 	return content
+}
+
+func buildAssistantTextContent(parts []promptir.Part) []types.ContentBlock {
+	var content []types.ContentBlock
+	for _, part := range parts {
+		if part.Type == string(promptir.PartTypeText) || part.Type == "" {
+			if part.Text != "" {
+				content = append(content, &types.ContentBlockMemberText{Value: part.Text})
+			}
+			continue
+		}
+		if text := promptir.ReadableParts([]promptir.Part{part}); text != "" {
+			content = append(content, &types.ContentBlockMemberText{Value: text})
+		}
+	}
+	return content
+}
+
+func buildToolUseBlock(item promptir.Item) types.ContentBlock {
+	return &types.ContentBlockMemberToolUse{
+		Value: types.ToolUseBlock{
+			ToolUseId: aws.String(item.ToolCallID),
+			Name:      aws.String(item.ToolName),
+			Input:     document.NewLazyDocument(promptir.ToolArgumentsMap(item)),
+		},
+	}
 }
 
 // convertTools converts tool definitions to Bedrock format.

@@ -11,6 +11,7 @@ import (
 	"github.com/openai/openai-go/v3/responses"
 
 	"github.com/sipeed/picoclaw/pkg/providers/common"
+	"github.com/sipeed/picoclaw/pkg/providers/promptir"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
@@ -19,118 +20,200 @@ import (
 // user/assistant/tool messages become ResponseInputItemUnionParam entries.
 // Supports multipart media (images, audio).
 func TranslateMessages(messages []protocoltypes.Message) (input responses.ResponseInputParam, instructions string) {
-	input = make(responses.ResponseInputParam, 0, len(messages))
+	return TranslatePrompt(promptir.FromMessages(messages))
+}
 
-	for _, msg := range messages {
-		switch msg.Role {
-		case "system":
-			instructions = msg.Content
-		case "user":
-			if msg.ToolCallID != "" {
-				input = append(input, responses.ResponseInputItemUnionParam{
-					OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
-						CallID: msg.ToolCallID,
-						Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
-							OfString: openai.Opt(msg.Content),
-						},
-					},
-				})
-			} else if len(msg.Media) > 0 {
-				content := BuildMultipartContent(msg.Content, msg.Media)
-				input = append(input, responses.ResponseInputItemUnionParam{
-					OfInputMessage: &responses.ResponseInputItemMessageParam{
-						Role:    "user",
-						Content: content,
-					},
-				})
-			} else {
-				input = append(input, responses.ResponseInputItemUnionParam{
-					OfMessage: &responses.EasyInputMessageParam{
-						Role:    responses.EasyInputMessageRoleUser,
-						Content: responses.EasyInputMessageContentUnionParam{OfString: openai.Opt(msg.Content)},
-					},
-				})
+// TranslatePrompt converts Prompt IR to OpenAI Responses API input format.
+func TranslatePrompt(prompt promptir.Prompt) (input responses.ResponseInputParam, instructions string) {
+	input = make(responses.ResponseInputParam, 0, len(prompt.Items))
+	instructionParts := make([]string, 0)
+
+	for _, item := range prompt.Items {
+		if promptir.IsStableInstruction(item) {
+			if text := promptir.ReadableParts(item.Parts); text != "" {
+				instructionParts = append(instructionParts, text)
 			}
-		case "assistant":
-			if len(msg.ToolCalls) > 0 {
-				if msg.Content != "" {
+			continue
+		}
+
+		switch item.Type {
+		case promptir.ItemTypeContext:
+			text := promptir.ReadableParts(item.Parts)
+			if text == "" {
+				continue
+			}
+			input = appendEasyMessage(input, responses.EasyInputMessageRoleUser,
+				"["+promptir.ContextLabel(item)+"]\n"+text)
+
+		case promptir.ItemTypeMessage:
+			switch item.Role {
+			case promptir.RoleUser:
+				if hasNativeResponseParts(item.Parts) {
 					input = append(input, responses.ResponseInputItemUnionParam{
-						OfMessage: &responses.EasyInputMessageParam{
-							Role:    responses.EasyInputMessageRoleAssistant,
-							Content: responses.EasyInputMessageContentUnionParam{OfString: openai.Opt(msg.Content)},
+						OfInputMessage: &responses.ResponseInputItemMessageParam{
+							Role:    "user",
+							Content: BuildMultipartContentFromParts(item.Parts),
 						},
 					})
+				} else {
+					input = appendEasyMessage(
+						input,
+						responses.EasyInputMessageRoleUser,
+						promptir.ReadableParts(item.Parts),
+					)
 				}
-				for _, tc := range msg.ToolCalls {
-					name, args, ok := ResolveToolCall(tc)
-					if !ok {
-						continue
-					}
-					input = append(input, responses.ResponseInputItemUnionParam{
-						OfFunctionCall: &responses.ResponseFunctionToolCallParam{
-							CallID:    tc.ID,
-							Name:      name,
-							Arguments: args,
-						},
-					})
+			case promptir.RoleAssistant:
+				input = appendEasyMessage(
+					input,
+					responses.EasyInputMessageRoleAssistant,
+					promptir.ReadableParts(item.Parts),
+				)
+			default:
+				text := promptir.ReadableParts(item.Parts)
+				if text != "" {
+					input = appendEasyMessage(input, responses.EasyInputMessageRoleUser,
+						"["+string(item.Role)+"]\n"+text)
 				}
-			} else {
-				input = append(input, responses.ResponseInputItemUnionParam{
-					OfMessage: &responses.EasyInputMessageParam{
-						Role:    responses.EasyInputMessageRoleAssistant,
-						Content: responses.EasyInputMessageContentUnionParam{OfString: openai.Opt(msg.Content)},
-					},
-				})
 			}
-		case "tool":
+
+		case promptir.ItemTypeToolCall:
+			if item.ToolCallID == "" || item.ToolName == "" {
+				continue
+			}
+			args := item.ToolArguments
+			if strings.TrimSpace(args) == "" {
+				args = "{}"
+			}
+			input = append(input, responses.ResponseInputItemUnionParam{
+				OfFunctionCall: &responses.ResponseFunctionToolCallParam{
+					CallID:    item.ToolCallID,
+					Name:      item.ToolName,
+					Arguments: args,
+				},
+			})
+
+		case promptir.ItemTypeToolResult:
+			output := promptir.ReadableParts(item.ToolOutput)
+			if output == "" {
+				output = promptir.ReadableParts(item.Parts)
+			}
 			input = append(input, responses.ResponseInputItemUnionParam{
 				OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
-					CallID: msg.ToolCallID,
+					CallID: item.ToolCallID,
 					Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
-						OfString: openai.Opt(msg.Content),
+						OfString: openai.Opt(output),
 					},
 				},
 			})
+
+		case promptir.ItemTypeReasoning:
+			if text := promptir.ReadableParts(item.Parts); text != "" {
+				input = appendEasyMessage(input, responses.EasyInputMessageRoleAssistant, "[reasoning]\n"+text)
+			}
 		}
 	}
 
+	instructions = strings.Join(instructionParts, "\n\n")
 	return input, instructions
 }
 
 // BuildMultipartContent constructs a ResponseInputMessageContentListParam from
 // text content and media URLs (data:image/... and data:audio/... URIs).
 func BuildMultipartContent(text string, media []string) responses.ResponseInputMessageContentListParam {
-	parts := make(responses.ResponseInputMessageContentListParam, 0, 1+len(media))
-
+	parts := make([]promptir.Part, 0, 1+len(media))
 	if text != "" {
-		parts = append(parts, responses.ResponseInputContentUnionParam{
-			OfInputText: &responses.ResponseInputTextParam{
-				Text: text,
-			},
-		})
+		parts = append(parts, promptir.Part{Type: string(promptir.PartTypeText), Text: text})
 	}
-
 	for _, mediaURL := range media {
-		if strings.HasPrefix(mediaURL, "data:image/") {
-			parts = append(parts, responses.ResponseInputContentUnionParam{
+		parts = append(parts, promptir.PartFromURI(mediaURL, "", ""))
+	}
+	return BuildMultipartContentFromParts(parts)
+}
+
+func BuildMultipartContentFromParts(parts []promptir.Part) responses.ResponseInputMessageContentListParam {
+	content := make(responses.ResponseInputMessageContentListParam, 0, len(parts))
+
+	for _, part := range parts {
+		switch part.Type {
+		case string(promptir.PartTypeText), "":
+			if part.Text == "" {
+				continue
+			}
+			content = append(content, responses.ResponseInputContentUnionParam{
+				OfInputText: &responses.ResponseInputTextParam{
+					Text: part.Text,
+				},
+			})
+		case string(promptir.PartTypeImage):
+			if part.URI == "" {
+				continue
+			}
+			content = append(content, responses.ResponseInputContentUnionParam{
 				OfInputImage: &responses.ResponseInputImageParam{
-					ImageURL: openai.Opt(mediaURL),
+					ImageURL: openai.Opt(part.URI),
 					Detail:   responses.ResponseInputImageDetailAuto,
 				},
 			})
-		} else if strings.HasPrefix(mediaURL, "data:audio/") {
-			if format, data, ok := common.ParseDataAudioURL(mediaURL); ok {
-				parts = append(parts, responses.ResponseInputContentUnionParam{
+		case string(promptir.PartTypeAudio):
+			if format, data, ok := common.ParseDataAudioURL(part.URI); ok {
+				content = append(content, responses.ResponseInputContentUnionParam{
 					OfInputFile: &responses.ResponseInputFileParam{
 						FileData: openai.Opt(data),
 						Filename: openai.Opt("audio." + format),
 					},
 				})
+			} else if text := promptir.ReadableParts([]promptir.Part{part}); text != "" {
+				content = append(content, responses.ResponseInputContentUnionParam{
+					OfInputText: &responses.ResponseInputTextParam{Text: text},
+				})
 			}
+		default:
+			text := promptir.ReadableParts([]promptir.Part{part})
+			if text == "" {
+				continue
+			}
+			content = append(content, responses.ResponseInputContentUnionParam{
+				OfInputText: &responses.ResponseInputTextParam{Text: text},
+			})
 		}
 	}
 
-	return parts
+	if len(content) == 0 {
+		content = append(content, responses.ResponseInputContentUnionParam{
+			OfInputText: &responses.ResponseInputTextParam{
+				Text: "",
+			},
+		})
+	}
+
+	return content
+}
+
+func appendEasyMessage(
+	input responses.ResponseInputParam,
+	role responses.EasyInputMessageRole,
+	text string,
+) responses.ResponseInputParam {
+	return append(input, responses.ResponseInputItemUnionParam{
+		OfMessage: &responses.EasyInputMessageParam{
+			Role:    role,
+			Content: responses.EasyInputMessageContentUnionParam{OfString: openai.Opt(text)},
+		},
+	})
+}
+
+func hasNativeResponseParts(parts []promptir.Part) bool {
+	for _, part := range parts {
+		switch part.Type {
+		case string(promptir.PartTypeImage):
+			return true
+		case string(promptir.PartTypeAudio):
+			if _, _, ok := common.ParseDataAudioURL(part.URI); ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ResolveToolCall extracts the function name and JSON arguments string from a ToolCall.

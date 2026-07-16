@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/providers/promptir"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/seahorse"
 	"github.com/sipeed/picoclaw/pkg/session"
@@ -216,10 +218,23 @@ func providerToSeahorseMessage(msg protocoltypes.Message) seahorse.Message {
 
 	// Convert ToolCalls → MessageParts
 	for _, tc := range msg.ToolCalls {
+		name := tc.Name
+		args := "{}"
+		if tc.Function != nil {
+			if name == "" {
+				name = tc.Function.Name
+			}
+			if tc.Function.Arguments != "" {
+				args = tc.Function.Arguments
+			}
+		}
+		if name == "" {
+			continue
+		}
 		part := seahorse.MessagePart{
 			Type:       "tool_use",
-			Name:       tc.Function.Name,
-			Arguments:  tc.Function.Arguments,
+			Name:       name,
+			Arguments:  args,
 			ToolCallID: tc.ID,
 		}
 		result.Parts = append(result.Parts, part)
@@ -235,13 +250,35 @@ func providerToSeahorseMessage(msg protocoltypes.Message) seahorse.Message {
 		result.Parts = append(result.Parts, part)
 	}
 
-	// Convert media attachments
-	for _, mediaURI := range msg.Media {
-		part := seahorse.MessagePart{
-			Type:     "media",
-			MediaURI: mediaURI,
+	for _, part := range msg.Parts {
+		switch part.Type {
+		case string(promptir.PartTypeText), "":
+			if part.Text != "" {
+				result.Parts = append(result.Parts, seahorse.MessagePart{
+					Type: "text",
+					Text: part.Text,
+				})
+			}
+		case string(promptir.PartTypeImage), string(promptir.PartTypeAudio), string(promptir.PartTypeFile):
+			if part.URI != "" {
+				result.Parts = append(result.Parts, seahorse.MessagePart{
+					Type:     "media",
+					MediaURI: part.URI,
+					MimeType: part.MIMEType,
+				})
+			}
 		}
-		result.Parts = append(result.Parts, part)
+	}
+
+	// Convert media attachments
+	if len(msg.Parts) == 0 {
+		for _, mediaURI := range msg.Media {
+			part := seahorse.MessagePart{
+				Type:     "media",
+				MediaURI: mediaURI,
+			}
+			result.Parts = append(result.Parts, part)
+		}
 	}
 
 	return result
@@ -285,8 +322,19 @@ func seahorseToProviderMessages(result *seahorse.AssembleResult) []protocoltypes
 					pm.Content = part.Text
 				}
 			}
+			if part.Type == "text" && part.Text != "" {
+				pm.Parts = append(pm.Parts, promptir.Part{
+					Type: string(promptir.PartTypeText),
+					Text: part.Text,
+				})
+			}
 			if part.Type == "media" && part.MediaURI != "" {
 				pm.Media = append(pm.Media, part.MediaURI)
+				pm.Parts = append(pm.Parts, promptir.Part{
+					Type:     promptIRPartTypeFromMime(part.MimeType),
+					URI:      part.MediaURI,
+					MIMEType: part.MimeType,
+				})
 			}
 		}
 
@@ -294,6 +342,17 @@ func seahorseToProviderMessages(result *seahorse.AssembleResult) []protocoltypes
 	}
 
 	return messages
+}
+
+func promptIRPartTypeFromMime(mimeType string) string {
+	switch {
+	case strings.HasPrefix(mimeType, "image/"):
+		return string(promptir.PartTypeImage)
+	case strings.HasPrefix(mimeType, "audio/"):
+		return string(promptir.PartTypeAudio)
+	default:
+		return string(promptir.PartTypeFile)
+	}
 }
 
 func init() {

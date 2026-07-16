@@ -31,6 +31,7 @@ type (
 	ExtraContent           = protocoltypes.ExtraContent
 	GoogleExtra            = protocoltypes.GoogleExtra
 	ReasoningDetail        = protocoltypes.ReasoningDetail
+	PromptPart             = protocoltypes.PromptPart
 )
 
 type Provider struct {

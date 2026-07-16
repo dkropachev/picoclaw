@@ -21,6 +21,7 @@ type (
 	ContentBlock           = protocoltypes.ContentBlock
 	CacheControl           = protocoltypes.CacheControl
 	Attachment             = protocoltypes.Attachment
+	PromptPart             = protocoltypes.PromptPart
 )
 
 type LLMProvider interface {

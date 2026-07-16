@@ -78,20 +78,7 @@ func (p *ClaudeCliProvider) GetDefaultModel() string {
 
 // messagesToPrompt converts messages to a CLI-compatible prompt string.
 func (p *ClaudeCliProvider) messagesToPrompt(messages []Message) string {
-	var parts []string
-
-	for _, msg := range messages {
-		switch msg.Role {
-		case "system":
-			// handled via --system-prompt flag
-		case "user":
-			parts = append(parts, "User: "+msg.Content)
-		case "assistant":
-			parts = append(parts, "Assistant: "+msg.Content)
-		case "tool":
-			parts = append(parts, fmt.Sprintf("[Tool Result for %s]: %s", msg.ToolCallID, msg.Content))
-		}
-	}
+	parts := cliConversationParts(messages, true)
 
 	// Simplify single user message
 	if len(parts) == 1 && strings.HasPrefix(parts[0], "User: ") {
@@ -103,19 +90,7 @@ func (p *ClaudeCliProvider) messagesToPrompt(messages []Message) string {
 
 // buildSystemPrompt combines system messages and tool definitions.
 func (p *ClaudeCliProvider) buildSystemPrompt(messages []Message, tools []ToolDefinition) string {
-	var parts []string
-
-	for _, msg := range messages {
-		if msg.Role == "system" {
-			parts = append(parts, msg.Content)
-		}
-	}
-
-	if len(tools) > 0 {
-		parts = append(parts, buildCLIToolsPrompt(tools))
-	}
-
-	return strings.Join(parts, "\n\n")
+	return cliSystemPrompt(messages, tools)
 }
 
 // parseClaudeCliResponse parses the JSON output from the claude CLI.
