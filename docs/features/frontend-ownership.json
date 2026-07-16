@@ -1,0 +1,92 @@
+{
+  "forbiddenBroadCodeOwnershipPatterns": [
+    "web/frontend/**",
+    "web/frontend/src/**",
+    "web/frontend/src/*",
+    "web/frontend/src/components/**",
+    "web/frontend/src/routes/**"
+  ],
+  "rules": [
+    {
+      "spec": "docs/features/chat-channels.md",
+      "patterns": [
+        "web/frontend/src/api/channels.ts",
+        "web/frontend/src/api/gateway.ts",
+        "web/frontend/src/api/pico.ts",
+        "web/frontend/src/components/channels/**",
+        "web/frontend/src/components/chat/**",
+        "web/frontend/src/features/chat/**",
+        "web/frontend/src/hooks/use-gateway*",
+        "web/frontend/src/hooks/use-pico-chat.ts",
+        "web/frontend/src/hooks/use-sidebar-channels.ts",
+        "web/frontend/src/routes/channels/**",
+        "web/frontend/src/routes/index.tsx"
+      ]
+    },
+    {
+      "spec": "docs/features/session-memory.md",
+      "patterns": [
+        "web/frontend/src/api/sessions.ts",
+        "web/frontend/src/components/logs/**",
+        "web/frontend/src/hooks/use-session-history.ts",
+        "web/frontend/src/routes/logs.tsx"
+      ]
+    },
+    {
+      "spec": "docs/features/tool-execution.md",
+      "patterns": [
+        "web/frontend/src/api/tools.ts",
+        "web/frontend/src/components/agent/tools/**",
+        "web/frontend/src/hooks/use-chat-models.ts",
+        "web/frontend/src/routes/agent/tools.tsx"
+      ]
+    },
+    {
+      "spec": "docs/features/skills.md",
+      "patterns": [
+        "web/frontend/src/api/skills.ts",
+        "web/frontend/src/components/agent/hub/**",
+        "web/frontend/src/components/agent/skills/**",
+        "web/frontend/src/routes/agent/hub.tsx",
+        "web/frontend/src/routes/agent/skills.tsx"
+      ]
+    },
+    {
+      "spec": "docs/features/threads.md",
+      "patterns": [
+        "web/frontend/src/api/threads.ts",
+        "web/frontend/src/store/threads.ts",
+        "web/frontend/src/components/threads/**",
+        "web/frontend/src/components/agent/tools/thread-policy-tab.tsx",
+        "web/frontend/src/features/chat/thread-*",
+        "web/frontend/src/routes/threads*"
+      ]
+    },
+    {
+      "spec": "docs/features/launcher-management.md",
+      "patterns": [
+        "web/frontend/src/api/launcher-auth.ts",
+        "web/frontend/src/api/models.ts",
+        "web/frontend/src/api/oauth.ts",
+        "web/frontend/src/api/system.ts",
+        "web/frontend/src/app-providers.tsx",
+        "web/frontend/src/components/app-*",
+        "web/frontend/src/components/config/**",
+        "web/frontend/src/components/credentials/**",
+        "web/frontend/src/components/models/**",
+        "web/frontend/src/components/tour/**",
+        "web/frontend/src/components/ui/**",
+        "web/frontend/src/hooks/use-credentials-page.ts",
+        "web/frontend/src/i18n/**",
+        "web/frontend/src/lib/**",
+        "web/frontend/src/main.tsx",
+        "web/frontend/src/routes/agent.tsx",
+        "web/frontend/src/routes/config*",
+        "web/frontend/src/routes/credentials.tsx",
+        "web/frontend/src/routes/launcher-*",
+        "web/frontend/src/routes/models.tsx",
+        "web/frontend/src/store/**"
+      ]
+    }
+  ]
+}

@@ -85,6 +85,10 @@ Owns: TOOL threads
 | UI | `/threads/search`, `/threads/open`, `/threads/open/{thread-id}` | Search renders thread tiles; empty open renders the Thread workspace empty state; open by ID renders the chat window bound to a selected thread session, hides normal chat history, labels primary creation as New Thread, and exposes trash/drop for active or listed threads. | `FR-THREADS-004` |
 | UI | Thread cards in chat messages | Switch cards may move the active chat session and, for empty newly created threads, seed the original task into the opened thread; rendered thread tiles expose the same trash/drop affordance as the search UI. | `FR-THREADS-004`, `FR-THREADS-005` |
 
+Thread-specific frontend paths are mapped in
+[frontend-ownership.json](frontend-ownership.json), so thread UI changes must
+update this feature spec rather than a broad UI owner.
+
 ## Web UI Route Contract
 
 The left pane exposes a single non-collapsible `Threads` navigation item.

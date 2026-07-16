@@ -206,7 +206,7 @@ export function ModelCard({
             {model.api_key}
           </span>
         ) : (
-          <span className="text-muted-foreground/50 text-[11px]">
+          <span className="text-muted-foreground text-[11px]">
             {statusLabel}
           </span>
         )}

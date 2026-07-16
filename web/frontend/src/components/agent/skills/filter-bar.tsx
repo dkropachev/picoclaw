@@ -54,7 +54,10 @@ export function FilterBar({
       <div className="bg-border/60 hidden h-6 w-px sm:block" />
 
       <Select value={sourceFilter} onValueChange={onSourceFilterChange}>
-        <SelectTrigger className="hover:bg-background/50 focus:bg-background h-9 w-[140px] border-transparent bg-transparent shadow-none hover:ring-1 focus:ring-1">
+        <SelectTrigger
+          aria-label={t("pages.agent.skills.source_label")}
+          className="hover:bg-background/50 focus:bg-background h-9 w-[140px] border-transparent bg-transparent shadow-none hover:ring-1 focus:ring-1"
+        >
           <SelectValue placeholder={t("pages.agent.skills.source_label")} />
         </SelectTrigger>
         <SelectContent align="end">
@@ -75,7 +78,12 @@ export function FilterBar({
         value={sortOrder}
         onValueChange={(value) => onSortOrderChange(value as SkillSortOption)}
       >
-        <SelectTrigger className="hover:bg-background/50 focus:bg-background h-9 w-[160px] border-transparent bg-transparent shadow-none hover:ring-1 focus:ring-1">
+        <SelectTrigger
+          aria-label={t("pages.agent.skills.sort_label", {
+            defaultValue: "Sort by",
+          })}
+          className="hover:bg-background/50 focus:bg-background h-9 w-[160px] border-transparent bg-transparent shadow-none hover:ring-1 focus:ring-1"
+        >
           <div className="flex items-center gap-2">
             <span className="text-muted-foreground text-xs">
               {t("pages.agent.skills.sort_label", {
@@ -104,6 +112,9 @@ export function FilterBar({
       <div className="bg-background/50 ring-border/20 inline-flex items-center rounded-lg p-0.5 shadow-sm ring-1">
         <button
           type="button"
+          aria-label={t("pages.agent.skills.layout_grouped", {
+            defaultValue: "Grouped layout",
+          })}
           className={cn(
             "rounded-md px-2.5 py-1.5 text-xs font-medium transition-all",
             layoutMode === "grouped"
@@ -116,6 +127,9 @@ export function FilterBar({
         </button>
         <button
           type="button"
+          aria-label={t("pages.agent.skills.layout_grid", {
+            defaultValue: "Grid layout",
+          })}
           className={cn(
             "rounded-md px-2.5 py-1.5 text-xs font-medium transition-all",
             layoutMode === "grid"

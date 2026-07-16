@@ -48,7 +48,13 @@ export function WebSearchGeneralSettings({
               }))
             }
           >
-            <SelectTrigger className="bg-muted/40 hover:bg-muted/60 focus:ring-foreground/5 focus:border-border/80 w-full rounded-xl border-transparent shadow-none transition-all sm:w-64">
+            <SelectTrigger
+              aria-label={t(
+                "pages.agent.tools.web_search.provider",
+                "Primary Provider",
+              )}
+              className="bg-muted/40 hover:bg-muted/60 focus:ring-foreground/5 focus:border-border/80 w-full rounded-xl border-transparent shadow-none transition-all sm:w-64"
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent className="border-border/40 rounded-xl shadow-lg">
@@ -73,6 +79,10 @@ export function WebSearchGeneralSettings({
           )}
         >
           <Input
+            aria-label={t(
+              "pages.agent.tools.web_search.proxy",
+              "Proxy Configuration",
+            )}
             className="bg-muted/40 hover:bg-muted/60 focus-visible:bg-background focus-visible:border-border/80 focus-visible:ring-foreground/5 w-full rounded-xl border-transparent shadow-none transition-all duration-300 sm:w-64"
             value={draft.proxy ?? ""}
             onChange={(event) =>
@@ -97,6 +107,10 @@ export function WebSearchGeneralSettings({
         >
           <Switch
             checked={draft.prefer_native}
+            aria-label={t(
+              "pages.agent.tools.web_search.prefer_native",
+              "Prefer Native Search",
+            )}
             onCheckedChange={(checked) =>
               onUpdateDraft((current) => ({
                 ...current,

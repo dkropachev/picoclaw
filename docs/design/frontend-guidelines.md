@@ -8,9 +8,10 @@ build consistent, secure, and maintainable UI surfaces.
 
 The scoped guidance lives in `web/frontend/AGENTS.md`. Automated checks live in
 `web/frontend/scripts/lint-ui-rules.mjs`, `web/frontend/eslint.config.js`, and
-`web/frontend/tests/ui-smoke.spec.ts`; they run through `pnpm lint`,
-`pnpm format`, `pnpm test:ui`, `make lint-frontend`, and
-`make test-frontend-ui`.
+`web/frontend/tests/ui-smoke.spec.ts`. Frontend feature ownership lives in
+`docs/features/frontend-ownership.json`. These gates run through `pnpm lint`,
+`pnpm format`, `pnpm test:ui`, `make lint-frontend`,
+`make test-frontend-ui`, `make lint-features`, and `make feature-delta`.
 
 ## Product Ownership
 
@@ -24,11 +25,13 @@ behavior:
 | Session logs and transcript history pages | `docs/features/session-memory.md` |
 | Model, config, OAuth, auth, startup, update, and app shell management | `docs/features/launcher-management.md` |
 | Skill and hub pages | `docs/features/skills.md` |
+| Thread search, cards, policy, and open-thread pages | `docs/features/threads.md` |
 
 When a UI behavior changes, update the owning feature spec before or with the
-code change. A cross-cutting UI spec should be reserved for shared app shell,
-navigation, design-system, theme, loading, and error behavior, and it must not
-claim ownership of all frontend source.
+code change. `docs/features/frontend-ownership.json` is the enforced
+path-to-spec map for launcher frontend source. A cross-cutting UI spec should
+be reserved for shared app shell, navigation, design-system, theme, loading,
+and error behavior, and it must not claim ownership of all frontend source.
 
 ## Agent-Facing Rules
 
@@ -67,12 +70,14 @@ and are intentionally narrow:
 ## Visual Enforcement
 
 Static checks do not prove layout quality. `web/frontend/tests/ui-smoke.spec.ts`
-runs mocked API route checks at desktop and mobile widths for the main
-operational pages. Those tests verify:
+runs mocked API route and interaction checks at desktop and mobile widths for
+the main operational pages. Those tests verify:
 
 - the route renders without console errors;
 - primary controls are visible;
-- there is no body-level horizontal page overflow at mobile and desktop widths.
+- there is no body-level horizontal page overflow at mobile and desktop widths;
+- serious and critical axe accessibility violations are absent;
+- key dialogs, expandable settings, and the mobile sidebar fit in the viewport.
 
 For larger user-facing UI changes, reviewers should still inspect desktop and
 mobile widths directly, especially dialogs, sheets, popovers, and dense tables.

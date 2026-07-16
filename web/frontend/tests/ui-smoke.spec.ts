@@ -1,3 +1,4 @@
+import AxeBuilder from "@axe-core/playwright"
 import { type Page, type Route, expect, test } from "@playwright/test"
 
 const smokeRoutes = [
@@ -207,36 +208,164 @@ async function json(route: Route, body: unknown) {
   })
 }
 
+function collectPageErrors(page: Page) {
+  const errors: string[] = []
+  page.on("console", (message) => {
+    if (message.type() === "error") {
+      errors.push(message.text())
+    }
+  })
+  page.on("pageerror", (error) => {
+    errors.push(error.message)
+  })
+  return errors
+}
+
+async function expectNoHorizontalOverflow(page: Page) {
+  const hasHorizontalOverflow = await page.evaluate(() => {
+    const doc = document.documentElement
+    const body = document.body
+    const scrollWidth = Math.max(doc.scrollWidth, body.scrollWidth)
+    const clientWidth = Math.max(doc.clientWidth, window.innerWidth)
+    return scrollWidth > clientWidth + 1
+  })
+
+  expect(hasHorizontalOverflow).toBe(false)
+}
+
+async function expectElementFitsViewport(
+  page: Page,
+  selector: string,
+  label: string,
+) {
+  const fits = await page.locator(selector).evaluate((element) => {
+    const rect = element.getBoundingClientRect()
+    const tolerance = 1
+    return (
+      rect.left >= -tolerance &&
+      rect.top >= -tolerance &&
+      rect.right <= window.innerWidth + tolerance &&
+      rect.bottom <= window.innerHeight + tolerance
+    )
+  })
+
+  expect(fits, `${label} should fit in the viewport`).toBe(true)
+}
+
+async function expectNoSeriousA11yViolations(page: Page) {
+  const results = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+    .analyze()
+  const blocking = results.violations.filter(
+    (violation) =>
+      violation.impact === "serious" || violation.impact === "critical",
+  )
+
+  expect(
+    blocking.map((violation) => ({
+      id: violation.id,
+      impact: violation.impact,
+      targets: violation.nodes.map((node) => node.target.join(" ")),
+    })),
+  ).toEqual([])
+}
+
+async function gotoMockedRoute(page: Page, routePath: string) {
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "picoclaw-tour-state",
+      JSON.stringify({ currentStep: "completed", isActive: false }),
+    )
+  })
+  await mockLauncherApis(page)
+  await page.goto(routePath)
+  await expect(page.getByRole("banner")).toBeVisible()
+  await expect(page.locator("main")).toBeVisible()
+}
+
 for (const routePath of smokeRoutes) {
   test(`${routePath} renders without console errors or horizontal overflow`, async ({
     page,
   }) => {
-    const errors: string[] = []
-    page.on("console", (message) => {
-      if (message.type() === "error") {
-        errors.push(message.text())
-      }
-    })
-    page.on("pageerror", (error) => {
-      errors.push(error.message)
-    })
+    const errors = collectPageErrors(page)
 
-    await mockLauncherApis(page)
-    await page.goto(routePath)
-    await expect(page.getByRole("banner")).toBeVisible()
-    await expect(page.locator("main")).toBeVisible()
+    await gotoMockedRoute(page, routePath)
     await expect(page.getByRole("button").first()).toBeVisible()
     await page.waitForTimeout(500)
-
-    const hasHorizontalOverflow = await page.evaluate(() => {
-      const doc = document.documentElement
-      const body = document.body
-      const scrollWidth = Math.max(doc.scrollWidth, body.scrollWidth)
-      const clientWidth = Math.max(doc.clientWidth, window.innerWidth)
-      return scrollWidth > clientWidth + 1
-    })
-
-    expect(hasHorizontalOverflow).toBe(false)
+    await expectNoHorizontalOverflow(page)
+    await expectNoSeriousA11yViolations(page)
     expect(errors).toEqual([])
   })
 }
+
+test("model catalog dialog fits the viewport", async ({ page }) => {
+  const errors = collectPageErrors(page)
+
+  await gotoMockedRoute(page, "/models")
+  await page.getByRole("button", { name: "Saved Catalogs" }).click()
+
+  await expect(
+    page.getByRole("dialog", { name: "Saved Model Catalogs" }),
+  ).toBeVisible()
+  await expectElementFitsViewport(page, '[role="dialog"]', "model catalog")
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("skill import dialog fits the viewport", async ({ page }) => {
+  const errors = collectPageErrors(page)
+
+  await gotoMockedRoute(page, "/agent/skills")
+  await page.getByRole("button", { name: "Import Skill" }).click()
+
+  await expect(
+    page.getByRole("dialog", { name: "Import Into Workspace" }),
+  ).toBeVisible()
+  await expectElementFitsViewport(page, '[role="dialog"]', "skill import")
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("web-search provider settings expand without overflow", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+
+  await gotoMockedRoute(page, "/agent/tools")
+  await page.getByRole("button", { name: "Web Search" }).click()
+  await expect(page.getByRole("heading", { name: "Web Search" })).toBeVisible()
+
+  await page.getByRole("button", { name: /OpenAI/ }).click()
+  await expect(page.getByText("Max Results")).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("mobile sidebar opens, fits the viewport, and navigates", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile", "mobile-only interaction")
+  const errors = collectPageErrors(page)
+
+  await gotoMockedRoute(page, "/")
+  await page.getByRole("button", { name: "Toggle Sidebar" }).click()
+
+  const sidebar = page.getByRole("dialog", { name: "Sidebar" })
+  await expect(sidebar).toBeVisible()
+  await page.waitForTimeout(300)
+  await expectElementFitsViewport(
+    page,
+    '[data-sidebar="sidebar"][data-mobile="true"]',
+    "mobile sidebar",
+  )
+  await sidebar.getByRole("button", { name: "Services" }).click()
+  await sidebar.getByRole("link", { name: /Models/ }).click()
+  await expect(page).toHaveURL(/\/models$/)
+  await expect(sidebar).toBeHidden()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})

@@ -458,6 +458,7 @@ export function ChatPage({
           size="sm"
           onClick={handleNewChat}
           className="h-9 gap-2"
+          aria-label={t("chat.newChat")}
         >
           <IconPlus className="size-4" />
           <span className="hidden sm:inline">{resolvedNewChatLabel}</span>

@@ -86,7 +86,11 @@ export function LogLevelSelect() {
         onValueChange={handleLogLevelChange}
         disabled={savingLogLevel}
       >
-        <SelectTrigger size="sm" className="w-28">
+        <SelectTrigger
+          size="sm"
+          aria-label={t("pages.logs.log_level", "Log level")}
+          className="w-28"
+        >
           <SelectValue />
         </SelectTrigger>
         <SelectContent align="end">

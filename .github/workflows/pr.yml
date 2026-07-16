@@ -24,7 +24,20 @@ jobs:
           node-version: 24
 
       - name: Enable Corepack
-        run: corepack prepare pnpm@10.33.0 --activate
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.33.0 --activate
+
+      - name: Get pnpm store path
+        id: pnpm-store
+        run: echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('web/frontend/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
 
       - name: Run go generate
         run: go generate ./...
@@ -38,8 +51,17 @@ jobs:
       - name: Feature requirements lint
         run: make lint-features
 
+      - name: Feature tooling tests
+        run: make test-featuretools
+
       - name: Frontend lint
         run: make lint-frontend
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('web/frontend/pnpm-lock.yaml') }}
 
       - name: Install Playwright browsers
         run: cd web/frontend && pnpm exec playwright install --with-deps chromium

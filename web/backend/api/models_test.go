@@ -2752,9 +2752,9 @@ func TestHandleFetchModels_OpenAIOAuthStoredModelUsesCodexModelsEndpoint(t *test
 		gotPath = r.URL.Path
 		gotClientVersion = r.URL.Query().Get("client_version")
 		gotAuth = r.Header.Get("Authorization")
-		gotAccountID = r.Header.Get("ChatGPT-Account-ID")
-		gotProductSKU = r.Header.Get("OAI-Product-Sku")
-		gotOriginator = r.Header.Get("originator")
+		gotAccountID = r.Header.Get("Chatgpt-Account-Id")
+		gotProductSKU = r.Header.Get("Oai-Product-Sku")
+		gotOriginator = r.Header.Get("Originator")
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"models":[`+
 			`{"slug":"gpt-5.4","display_name":"GPT-5.4","visibility":"list","supported_in_api":true},`+
@@ -2816,13 +2816,13 @@ func TestHandleFetchModels_OpenAIOAuthStoredModelUsesCodexModelsEndpoint(t *test
 		t.Fatalf("Authorization = %q, want ChatGPT bearer token", gotAuth)
 	}
 	if gotAccountID != "acc-123" {
-		t.Fatalf("ChatGPT-Account-ID = %q, want acc-123", gotAccountID)
+		t.Fatalf("Chatgpt-Account-Id = %q, want acc-123", gotAccountID)
 	}
 	if gotProductSKU != "codex" {
-		t.Fatalf("OAI-Product-Sku = %q, want codex", gotProductSKU)
+		t.Fatalf("Oai-Product-Sku = %q, want codex", gotProductSKU)
 	}
 	if gotOriginator != "codex_cli_rs" {
-		t.Fatalf("originator = %q, want codex_cli_rs", gotOriginator)
+		t.Fatalf("Originator = %q, want codex_cli_rs", gotOriginator)
 	}
 
 	var resp struct {

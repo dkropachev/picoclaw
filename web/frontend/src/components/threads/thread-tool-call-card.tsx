@@ -2,7 +2,7 @@ import { IconSearch } from "@tabler/icons-react"
 import { useEffect, useState } from "react"
 import { useTranslation } from "react-i18next"
 
-import { getThread, getThreads, type ThreadSummary } from "@/api/threads"
+import { type ThreadSummary, getThread, getThreads } from "@/api/threads"
 import { ThreadCardMessage } from "@/components/threads/thread-card-message"
 import type { ThreadCardPayload } from "@/features/chat/thread-cards"
 import type { ThreadToolCardRequest } from "@/features/chat/thread-tool-calls"

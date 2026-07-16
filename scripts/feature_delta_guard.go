@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -28,6 +27,10 @@ func main() {
 
 func runFeatureDeltaGuard(root, base, head string) error {
 	specs, err := loadFeatureSpecs(root)
+	if err != nil {
+		return err
+	}
+	frontendOwnership, err := loadFrontendOwnershipConfig(root)
 	if err != nil {
 		return err
 	}
@@ -54,7 +57,7 @@ func runFeatureDeltaGuard(root, base, head string) error {
 			failures = append(failures, fmt.Sprintf("%s: production code changed but no docs/features spec declares Owns: CODE for it", path))
 			continue
 		}
-		if expectedSpecs := frontendExpectedSpecPaths(path); len(expectedSpecs) > 0 {
+		if expectedSpecs := frontendExpectedSpecPaths(frontendOwnership, path); len(expectedSpecs) > 0 {
 			if !expectedOwnerSpecChanged(expectedSpecs, owners, changedSpecs) {
 				failures = append(failures, fmt.Sprintf("%s: frontend code changed; update the expected owning feature spec: %s", path, strings.Join(expectedSpecs, ", ")))
 				continue
@@ -72,15 +75,6 @@ func runFeatureDeltaGuard(root, base, head string) error {
 		return fmt.Errorf("%d failure(s):\n%s", len(failures), strings.Join(failures, "\n"))
 	}
 	return nil
-}
-
-func isFeatureSpecPath(path string) bool {
-	path = normalizeRepoPath(path)
-	if !strings.HasPrefix(path, "docs/features/") || !strings.HasSuffix(path, ".md") {
-		return false
-	}
-	base := filepath.Base(path)
-	return base != "README.md" && base != "template.md"
 }
 
 func ownerSpecChanged(owners []featureOwnership, changedSpecs map[string]bool) bool {

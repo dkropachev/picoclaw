@@ -149,6 +149,10 @@ function ProviderCard({
         <div className="flex items-center gap-4">
           <Switch
             checked={settings.enabled}
+            aria-label={t("pages.agent.tools.web_search.provider_enabled", {
+              defaultValue: "Enable {{provider}}",
+              provider: providerLabel,
+            })}
             onCheckedChange={(checked) =>
               updateSettings((current) => ({
                 ...current,
@@ -175,6 +179,10 @@ function ProviderCard({
                 type="number"
                 min={1}
                 max={10}
+                aria-label={t(
+                  "pages.agent.tools.web_search.max_results",
+                  "Max Results",
+                )}
                 value={settings.max_results || 5}
                 onChange={(event) =>
                   updateSettings((current) => ({
@@ -191,6 +199,10 @@ function ProviderCard({
                 label={t("pages.agent.tools.web_search.base_url", "Base URL")}
               >
                 <Input
+                  aria-label={t(
+                    "pages.agent.tools.web_search.base_url",
+                    "Base URL",
+                  )}
                   value={settings.base_url ?? ""}
                   onChange={(event) =>
                     updateSettings((current) => ({
@@ -234,6 +246,7 @@ function ProviderCard({
                 label={t("pages.agent.tools.web_search.model", "Model")}
               >
                 <Input
+                  aria-label={t("pages.agent.tools.web_search.model", "Model")}
                   value={settings.model ?? ""}
                   onChange={(event) =>
                     updateSettings((current) => ({

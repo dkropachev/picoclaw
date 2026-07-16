@@ -4,10 +4,10 @@ import { useSetAtom } from "jotai"
 import { useTranslation } from "react-i18next"
 
 import {
-  createThread,
-  dropThread,
   type ThreadSummary,
   type ThreadType,
+  createThread,
+  dropThread,
 } from "@/api/threads"
 import { ChatPage } from "@/components/chat/chat-page"
 import { ThreadSidebar } from "@/components/threads/thread-sidebar"

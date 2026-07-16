@@ -224,7 +224,7 @@ export function AppHeader() {
                   data-tour="gateway-button"
                   className={`h-8 gap-2 px-3 ${
                     isStopped
-                      ? "bg-green-500 text-white hover:bg-green-600"
+                      ? "bg-emerald-700 text-white hover:bg-emerald-800"
                       : ""
                   } ${!canStart ? "pointer-events-none" : ""}`}
                   onClick={handleGatewayToggle}
@@ -272,7 +272,13 @@ export function AppHeader() {
           data-tour="docs-button"
           asChild
         >
-          <a href="https://docs.picoclaw.io" target="_blank" rel="noreferrer">
+          <a
+            href="https://docs.picoclaw.io"
+            target="_blank"
+            rel="noreferrer"
+            aria-label={t("header.docs", "Open documentation")}
+            title={t("header.docs", "Open documentation")}
+          >
             <IconBook className="size-4.5" />
           </a>
         </Button>
@@ -280,7 +286,13 @@ export function AppHeader() {
         {/* Language Switcher */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="size-8">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8"
+              aria-label={t("header.language", "Change language")}
+              title={t("header.language", "Change language")}
+            >
               <IconLanguage className="size-4.5" />
             </Button>
           </DropdownMenuTrigger>
@@ -309,6 +321,16 @@ export function AppHeader() {
           size="icon"
           className="size-8"
           onClick={toggleTheme}
+          aria-label={
+            theme === "dark"
+              ? t("header.theme.light", "Use light theme")
+              : t("header.theme.dark", "Use dark theme")
+          }
+          title={
+            theme === "dark"
+              ? t("header.theme.light", "Use light theme")
+              : t("header.theme.dark", "Use dark theme")
+          }
         >
           {theme === "dark" ? (
             <IconSun className="size-4.5" />

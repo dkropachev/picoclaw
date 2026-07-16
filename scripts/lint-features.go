@@ -44,6 +44,11 @@ func lintFeatures(root string) error {
 	if err != nil {
 		return fmt.Errorf("read docs/features/README.md: %w", err)
 	}
+	frontendOwnership, err := loadFrontendOwnershipConfig(root)
+	if err != nil {
+		return err
+	}
+	failures := validateFrontendOwnershipConfig(root, frontendOwnership)
 
 	specs, err := featureSpecFiles(featuresDir)
 	if err != nil {
@@ -53,7 +58,6 @@ func lintFeatures(root string) error {
 		return fmt.Errorf("no feature specs under docs/features")
 	}
 
-	var failures []string
 	ids := make(map[string]string)
 	var ownerPatterns []string
 	for _, spec := range specs {
@@ -79,7 +83,7 @@ func lintFeatures(root string) error {
 			failures = append(failures, fmt.Sprintf("%s: missing Owns: CODE production ownership", relPath))
 		}
 		for _, owner := range parseFeatureOwnerships(relPath, text) {
-			if owner.Kind == "CODE" && forbiddenFrontendCodeOwnershipPattern(owner.Pattern) {
+			if owner.Kind == "CODE" && forbiddenFrontendCodeOwnershipPattern(frontendOwnership, owner.Pattern) {
 				failures = append(failures, fmt.Sprintf("%s: forbidden broad frontend CODE ownership %q", relPath, owner.Pattern))
 			}
 		}

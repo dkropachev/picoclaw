@@ -1,8 +1,4 @@
-import {
-  Outlet,
-  createFileRoute,
-  useRouterState,
-} from "@tanstack/react-router"
+import { Outlet, createFileRoute, useRouterState } from "@tanstack/react-router"
 
 import { ThreadOpenPage } from "@/components/threads/thread-open-page"
 

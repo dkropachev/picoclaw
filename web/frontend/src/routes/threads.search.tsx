@@ -8,9 +8,17 @@ type ThreadSearchRouteSearch = {
   type?: ThreadType | "all"
 }
 
-const THREAD_TYPES = new Set(["all", "coding", "reviewing", "investigating", "general"])
+const THREAD_TYPES = new Set([
+  "all",
+  "coding",
+  "reviewing",
+  "investigating",
+  "general",
+])
 
-function normalizeSearch(raw: Record<string, unknown>): ThreadSearchRouteSearch {
+function normalizeSearch(
+  raw: Record<string, unknown>,
+): ThreadSearchRouteSearch {
   const query = typeof raw.query === "string" ? raw.query.trim() : ""
   const type = typeof raw.type === "string" ? raw.type.trim() : ""
 
