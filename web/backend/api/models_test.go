@@ -2902,13 +2902,22 @@ func TestOpenAICodexModelsClientVersionUsesCodexCompatibilityVersion(t *testing.
 	for _, version := range []string{"dev", "59065cd4", "", "v0.2.9"} {
 		config.Version = version
 		if got := openAICodexModelsClientVersion(); got != openAICodexModelsClientVersionDefault {
-			t.Fatalf("openAICodexModelsClientVersion(%q) = %q, want %q", version, got, openAICodexModelsClientVersionDefault)
+			t.Fatalf(
+				"openAICodexModelsClientVersion(%q) = %q, want %q",
+				version,
+				got,
+				openAICodexModelsClientVersionDefault,
+			)
 		}
 	}
 }
 
 func TestUpstreamStatusErrorIncludesResponseBody(t *testing.T) {
-	err := upstreamStatusError("codex upstream", http.StatusBadRequest, strings.NewReader(`{"detail":"Invalid client_version format"}`))
+	err := upstreamStatusError(
+		"codex upstream",
+		http.StatusBadRequest,
+		strings.NewReader(`{"detail":"Invalid client_version format"}`),
+	)
 	if err == nil {
 		t.Fatal("upstreamStatusError() returned nil")
 	}
