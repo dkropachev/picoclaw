@@ -54,6 +54,7 @@ Owns: CODE web/frontend/src/components/app-*
 Owns: CODE web/frontend/src/components/config/**
 Owns: CODE web/frontend/src/components/credentials/**
 Owns: CODE web/frontend/src/components/models/**
+Owns: CODE web/frontend/src/components/page-header.tsx
 Owns: CODE web/frontend/src/components/tour/**
 Owns: CODE web/frontend/src/components/ui/**
 Owns: CODE web/frontend/src/hooks/use-credentials-page.ts
@@ -66,6 +67,7 @@ Owns: CODE web/frontend/src/routes/index.tsx
 Owns: CODE web/frontend/src/routes/launcher-*
 Owns: CODE web/frontend/src/routes/models.tsx
 Owns: CODE web/frontend/src/store/**
+Owns: CODE web/frontend/src/test/**
 Owns: CLI cmd/picoclaw/internal/auth/*
 Owns: CLI cmd/picoclaw/internal/config/*
 Owns: CLI cmd/picoclaw/internal/migrate/*
@@ -127,7 +129,9 @@ Owns: TEST pkg/migrate/*
 
 Launcher surfaces expose other features but do not define them. Model management
 feeds agent conversations. Gateway endpoints control chat-channel runtime.
-Session endpoints are owned by session memory.
+Session endpoints are owned by session memory. Thread endpoints and
+thread-specific UI are owned by threads, while launcher management still owns
+shared authenticated dashboard layout and routing shell components.
 
 ## Failure And Edge Cases
 

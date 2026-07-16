@@ -24,6 +24,11 @@ const tabs: Array<{
     translationKey: "pages.agent.tools.web_search.title",
     defaultLabel: "Web Search",
   },
+  {
+    key: "thread-policy",
+    translationKey: "pages.agent.tools.thread_policy.title",
+    defaultLabel: "Thread Policy",
+  },
 ]
 
 export function ToolsTabs({ activeTab, onChange }: ToolsTabsProps) {

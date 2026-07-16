@@ -102,7 +102,9 @@ Owns: TEST pkg/config/version*
 
 Launcher, tool execution, MCP stdio transports, providers, and web search all
 depend on security behavior. Isolation can wrap command transports. Config
-migration must preserve security defaults.
+migration must preserve security defaults. Thread policy config shares the same
+normalization and persistence path, while thread-specific behavior is owned by
+the threads feature.
 
 ## Failure And Edge Cases
 

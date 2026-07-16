@@ -254,6 +254,79 @@ func TestHandleUpdateToolState(t *testing.T) {
 	}
 }
 
+func TestHandleThreadPolicyConfig(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/tools/thread-policy", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var initial config.ThreadPolicyConfig
+	if err := json.Unmarshal(rec.Body.Bytes(), &initial); err != nil {
+		t.Fatalf("Unmarshal(GET) error = %v", err)
+	}
+	if !initial.Enabled || initial.Mode != config.ThreadPolicyModeTool {
+		t.Fatalf("initial policy = %#v, want enabled tool", initial)
+	}
+	if len(initial.Rules) == 0 ||
+		initial.Rules[0].MinMessages != 12 ||
+		initial.Rules[0].MinTextChars != 6000 ||
+		initial.Rules[0].ThresholdLogic != config.ThreadPolicyThresholdAny {
+		t.Fatalf("initial policy rules = %#v, want threshold defaults", initial.Rules)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(
+		http.MethodPut,
+		"/api/tools/thread-policy",
+		bytes.NewBufferString(`{
+			"enabled": true,
+			"mode": "suggest",
+			"instructions": "Ask before moving deploy work.",
+			"rules": [
+				{
+					"type": "coding",
+					"description": "Move implementation requests into coding threads.",
+					"min_messages": 8,
+					"min_text_chars": 3000,
+					"threshold_logic": "all"
+				}
+			]
+		}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	updated, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig(updated) error = %v", err)
+	}
+	if updated.Tools.Threads.Policy.Mode != config.ThreadPolicyModeSuggest {
+		t.Fatalf("mode = %q, want suggest", updated.Tools.Threads.Policy.Mode)
+	}
+	if updated.Tools.Threads.Policy.Instructions != "Ask before moving deploy work." {
+		t.Fatalf("instructions = %q", updated.Tools.Threads.Policy.Instructions)
+	}
+	if len(updated.Tools.Threads.Policy.Rules) != 1 ||
+		updated.Tools.Threads.Policy.Rules[0].Type != "coding" ||
+		updated.Tools.Threads.Policy.Rules[0].MinMessages != 8 ||
+		updated.Tools.Threads.Policy.Rules[0].MinTextChars != 3000 ||
+		updated.Tools.Threads.Policy.Rules[0].ThresholdLogic != config.ThreadPolicyThresholdAll {
+		t.Fatalf("rules = %#v", updated.Tools.Threads.Policy.Rules)
+	}
+}
+
 func TestHandleListTools_ReportsWebSearchEnabledWhenToolIsOn(t *testing.T) {
 	tests := []struct {
 		name         string

@@ -118,6 +118,15 @@ func (b *JSONLBackend) GetSessionScope(sessionKey string) *SessionScope {
 	return CloneScope(&scope)
 }
 
+func (b *JSONLBackend) GetSessionMeta(ctx context.Context, sessionKey string) (memory.SessionMeta, error) {
+	metaStore, ok := b.store.(metaAwareStore)
+	if !ok {
+		return memory.SessionMeta{}, nil
+	}
+	sessionKey = b.resolveSessionKey(sessionKey)
+	return metaStore.GetSessionMeta(ctx, sessionKey)
+}
+
 func (b *JSONLBackend) AddMessage(sessionKey, role, content string) {
 	sessionKey = b.resolveSessionKey(sessionKey)
 	if err := b.store.AddMessage(context.Background(), sessionKey, role, content); err != nil {

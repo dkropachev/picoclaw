@@ -19,6 +19,8 @@ export interface PicoMessage {
   payload?: Record<string, unknown>
 }
 
+const serverTypingSessions = new Set<string>()
+
 function parseAttachments(
   payload: Record<string, unknown>,
 ): ChatAttachment[] | undefined {
@@ -136,7 +138,9 @@ export function handlePicoMessage(
         isTyping:
           !isPlaceholder &&
           (kind === "normal" || message.type === "media.create")
-            ? false
+            ? serverTypingSessions.has(expectedSessionId)
+              ? prev.isTyping
+              : false
             : prev.isTyping,
         ...(contextUsage ? { contextUsage } : {}),
       }))
@@ -216,10 +220,12 @@ export function handlePicoMessage(
     }
 
     case "typing.start":
+      serverTypingSessions.add(expectedSessionId)
       updateChatStore({ isTyping: true })
       break
 
     case "typing.stop":
+      serverTypingSessions.delete(expectedSessionId)
       updateChatStore({ isTyping: false })
       break
 
@@ -233,6 +239,7 @@ export function handlePicoMessage(
       if (errorMessage) {
         toast.error(errorMessage)
       }
+      serverTypingSessions.delete(expectedSessionId)
       updateChatStore((prev) => ({
         messages: requestId
           ? prev.messages.filter((msg) => msg.id !== requestId)

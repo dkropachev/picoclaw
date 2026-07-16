@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next"
 
 import { PageHeader } from "@/components/page-header"
 
+import { ThreadPolicyTab } from "./thread-policy-tab"
 import { ToolLibraryTab } from "./tool-library-tab"
 import { ToolsTabs } from "./tools-tabs"
 import { useToolsPage } from "./use-tools-page"
@@ -19,21 +20,28 @@ export function ToolsPage() {
     providerLabelMap,
     searchQuery,
     statusFilter,
+    threadPolicyDraft,
     tools,
     totalFilteredCount,
     webSearchDraft,
     hasToolsError,
+    hasThreadPolicyError,
     hasWebSearchError,
     isToolsLoading,
+    isThreadPolicyDirty,
+    isThreadPolicyLoading,
+    isThreadPolicySaving,
     isWebSearchLoading,
     isWebSearchSaving,
     isWebSearchDirty,
     setActiveTab,
     setSearchQuery,
     setStatusFilter,
+    saveThreadPolicy,
     saveWebSearchConfig,
     toggleExpandedProvider,
     toggleTool,
+    updateThreadPolicyDraft,
     updateWebSearchDraft,
   } = useToolsPage()
 
@@ -63,10 +71,11 @@ export function ToolsPage() {
               pendingToolName={pendingToolName}
               onSearchQueryChange={setSearchQuery}
               onStatusFilterChange={setStatusFilter}
+              onOpenThreadPolicySettings={() => setActiveTab("thread-policy")}
               onOpenWebSearchSettings={() => setActiveTab("web-search")}
               onToggleTool={toggleTool}
             />
-          ) : (
+          ) : activeTab === "web-search" ? (
             <WebSearchTab
               draft={webSearchDraft}
               providerLabelMap={providerLabelMap}
@@ -78,6 +87,16 @@ export function ToolsPage() {
               onSave={saveWebSearchConfig}
               onToggleProviderExpand={toggleExpandedProvider}
               onUpdateDraft={updateWebSearchDraft}
+            />
+          ) : (
+            <ThreadPolicyTab
+              draft={threadPolicyDraft}
+              isLoading={isThreadPolicyLoading}
+              hasError={hasThreadPolicyError}
+              isSaving={isThreadPolicySaving}
+              isDirty={isThreadPolicyDirty}
+              onSave={saveThreadPolicy}
+              onUpdateDraft={updateThreadPolicyDraft}
             />
           )}
         </div>

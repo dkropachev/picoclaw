@@ -486,6 +486,45 @@ func DefaultConfig() *Config {
 			Subagent: ToolConfig{
 				Enabled: true,
 			},
+			Threads: ThreadsToolConfig{
+				Enabled: true,
+				Policy: ThreadPolicyConfig{
+					Enabled: true,
+					Mode:    ThreadPolicyModeTool,
+					Rules: []ThreadPolicyRule{
+						{
+							Type:              "coding",
+							Description:       "Use a coding thread when the user asks to implement, modify, debug, run tests, inspect a repository, create a pull request, fix CI, or otherwise perform software engineering work.",
+							AttachStrategy:    ThreadAttachStrategySearchThenCreate,
+							MinMessages:       12,
+							MinTextChars:      6000,
+							ThresholdLogic:    ThreadPolicyThresholdAny,
+							MinAutoConfidence: 0.85,
+							ConfirmIfMultiple: true,
+						},
+						{
+							Type:              "reviewing",
+							Description:       "Use a reviewing thread when the user asks for code review, PR review, diff analysis, risk assessment, or release readiness checks.",
+							AttachStrategy:    ThreadAttachStrategySearchThenCreate,
+							MinMessages:       12,
+							MinTextChars:      6000,
+							ThresholdLogic:    ThreadPolicyThresholdAny,
+							MinAutoConfidence: 0.85,
+							ConfirmIfMultiple: true,
+						},
+						{
+							Type:              "investigating",
+							Description:       "Use an investigating thread when the user asks for multi-step research, diagnostics, log analysis, or root-cause investigation that should be isolated from the main chat.",
+							AttachStrategy:    ThreadAttachStrategySearchThenCreate,
+							MinMessages:       12,
+							MinTextChars:      6000,
+							ThresholdLogic:    ThreadPolicyThresholdAny,
+							MinAutoConfidence: 0.85,
+							ConfirmIfMultiple: true,
+						},
+					},
+				},
+			},
 			WebFetch: ToolConfig{
 				Enabled: true,
 			},

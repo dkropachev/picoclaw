@@ -201,7 +201,7 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	}
 
 	msgBus := bus.NewMessageBus()
-	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider)
+	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider, agent.WithConfigPath(configPath))
 	msgBus.SetEventPublisher(agentLoop.RuntimeEventBus())
 	publishGatewayEvent(agentLoop, runtimeevents.KindGatewayStart, startedAt, nil)
 
@@ -484,6 +484,25 @@ func setupAndStartServices(
 
 	runningServices.authToken = authToken
 	runningServices.HealthServer = health.NewServer(listenResult.ProbeHost, cfg.Gateway.Port, authToken)
+	runningServices.HealthServer.SetActiveTurnsFunc(func() []health.ActiveTurn {
+		activeTurns := agentLoop.GetActiveTurns()
+		result := make([]health.ActiveTurn, 0, len(activeTurns))
+		for _, turn := range activeTurns {
+			result = append(result, health.ActiveTurn{
+				TurnID:       turn.TurnID,
+				AgentID:      turn.AgentID,
+				SessionKey:   turn.SessionKey,
+				Channel:      turn.Channel,
+				ChatID:       turn.ChatID,
+				Phase:        string(turn.Phase),
+				StartedAt:    turn.StartedAt,
+				Depth:        turn.Depth,
+				ParentTurnID: turn.ParentTurnID,
+				ChildTurnIDs: append([]string(nil), turn.ChildTurnIDs...),
+			})
+		}
+		return result
+	})
 
 	var listenAddr string
 	if len(listenResult.Listeners) > 0 {

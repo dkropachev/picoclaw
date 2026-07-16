@@ -56,6 +56,7 @@ const (
 	PromptSourceAgentDiscovery PromptSourceID = "agent:discovery"
 	PromptSourceToolRegistry   PromptSourceID = "tool_registry:native"
 	PromptSourceToolDiscovery  PromptSourceID = "tool_registry:discovery"
+	PromptSourceThreadPolicy   PromptSourceID = "thread:policy"
 	PromptSourceOutputPolicy   PromptSourceID = "runtime.output"
 	PromptSourceSubTurnProfile PromptSourceID = "subturn.profile"
 	PromptSourceUserMessage    PromptSourceID = "turn:user_message"
@@ -189,6 +190,13 @@ func builtinPromptSources() []PromptSourceDescriptor {
 			Owner:           "tools",
 			Description:     "Native provider tool definitions",
 			Allowed:         []PromptPlacement{{Layer: PromptLayerCapability, Slot: PromptSlotTooling}},
+			StableByDefault: true,
+		},
+		{
+			ID:              PromptSourceThreadPolicy,
+			Owner:           "threads",
+			Description:     "Thread routing policy",
+			Allowed:         []PromptPlacement{{Layer: PromptLayerInstruction, Slot: PromptSlotWorkspace}},
 			StableByDefault: true,
 		},
 		{

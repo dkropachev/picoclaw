@@ -106,7 +106,9 @@ Owns: EVENT agent.*
 Routing selects the target agent before this feature builds candidates. Session
 memory supplies history and stores results. Tool execution, MCP, skills, hooks,
 and security policies can alter the visible tool set or execution outcome.
-Runtime events report each major step.
+Runtime events report each major step. Threads can contribute a policy prompt
+that lets the main chat become or join a thread only after configured routing
+thresholds are satisfied.
 
 ## Failure And Edge Cases
 

@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -113,6 +114,7 @@ func registerSharedTools(
 	provider providers.LLMProvider,
 ) {
 	allowReadPaths := buildAllowReadPatterns(cfg)
+	defaultAgent := registry.GetDefaultAgent()
 	var ttsProvider tts.TTSProvider
 	if cfg.Tools.IsToolEnabled("send_tts") {
 		ttsProvider = tts.DetectTTS(cfg)
@@ -158,6 +160,13 @@ func registerSharedTools(
 		}
 		if cfg.Tools.IsToolEnabled("serial") {
 			agent.Tools.Register(tools.NewSerialTool())
+		}
+
+		if cfg.Tools.IsToolEnabled("threads") && shouldRegisterThreadsTool(agent, defaultAgent) {
+			agent.Tools.Register(tools.NewThreadsTool(cfg, al.configPath))
+			if agent.Tools.HasRegistered(tools.ThreadsToolName) && agent.ContextBuilder != nil {
+				agent.ContextBuilder.WithThreadPolicy(cfg)
+			}
 		}
 
 		// Message tool
@@ -405,4 +414,33 @@ func registerSharedTools(
 
 		warnOnUnknownAgentToolDeclarations(agentID, agent.Workspace, agent.Definition, agent.Tools)
 	}
+}
+
+func shouldRegisterThreadsTool(agent, defaultAgent *AgentInstance) bool {
+	if agent == nil {
+		return false
+	}
+	if agent == defaultAgent {
+		return true
+	}
+	return agentExplicitlyDeclaresTool(agent, tools.ThreadsToolName)
+}
+
+func agentExplicitlyDeclaresTool(agent *AgentInstance, name string) bool {
+	if agent == nil ||
+		frontmatterParseFailed(agent.Definition) ||
+		agent.Definition.Agent == nil ||
+		!frontmatterDeclaresField(agent.Definition, "tools") {
+		return false
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return false
+	}
+	for _, raw := range agent.Definition.Agent.Frontmatter.Tools {
+		if strings.ToLower(strings.TrimSpace(raw)) == name {
+			return true
+		}
+	}
+	return false
 }

@@ -20,6 +20,7 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 | Agent conversations and turn execution | [agent-conversations.md](agent-conversations.md) |
 | Chat channels and gateway delivery | [chat-channels.md](chat-channels.md) |
 | Session memory and history | [session-memory.md](session-memory.md) |
+| Threads and handoffs | [threads.md](threads.md) |
 | Tool execution | [tool-execution.md](tool-execution.md) |
 | MCP integration and discovery | [mcp-integration.md](mcp-integration.md) |
 | Skills loading and installation | [skills.md](skills.md) |

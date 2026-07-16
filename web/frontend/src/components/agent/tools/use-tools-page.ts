@@ -4,10 +4,13 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import {
+  type ThreadPolicyConfig,
   type WebSearchConfigResponse,
+  getThreadPolicy,
   getTools,
   getWebSearchConfig,
   setToolEnabled,
+  updateThreadPolicy,
   updateWebSearchConfig,
 } from "@/api/tools"
 import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
@@ -26,6 +29,8 @@ export function useToolsPage() {
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null)
   const [webSearchDraftOverride, setWebSearchDraftOverride] =
     useState<WebSearchConfigResponse | null>(null)
+  const [threadPolicyDraftOverride, setThreadPolicyDraftOverride] =
+    useState<ThreadPolicyConfig | null>(null)
 
   const toolsQuery = useQuery({
     queryKey: ["tools"],
@@ -35,6 +40,10 @@ export function useToolsPage() {
     queryKey: ["tools", "web-search-config"],
     queryFn: getWebSearchConfig,
   })
+  const threadPolicyQuery = useQuery({
+    queryKey: ["tools", "thread-policy"],
+    queryFn: getThreadPolicy,
+  })
 
   const tools = useMemo(
     () => toolsQuery.data?.tools ?? [],
@@ -42,6 +51,8 @@ export function useToolsPage() {
   )
   const normalizedSearchQuery = deferredSearchQuery.trim().toLowerCase()
   const webSearchDraft = webSearchDraftOverride ?? webSearchQuery.data ?? null
+  const threadPolicyDraft =
+    threadPolicyDraftOverride ?? threadPolicyQuery.data ?? null
   const isWebSearchDirty = useMemo(() => {
     if (!webSearchDraft || !webSearchQuery.data) {
       return false
@@ -50,6 +61,15 @@ export function useToolsPage() {
       JSON.stringify(webSearchDraft) !== JSON.stringify(webSearchQuery.data)
     )
   }, [webSearchDraft, webSearchQuery.data])
+  const isThreadPolicyDirty = useMemo(() => {
+    if (!threadPolicyDraft || !threadPolicyQuery.data) {
+      return false
+    }
+    return (
+      JSON.stringify(threadPolicyDraft) !==
+      JSON.stringify(threadPolicyQuery.data)
+    )
+  }, [threadPolicyDraft, threadPolicyQuery.data])
 
   const toggleToolMutation = useMutation({
     mutationFn: async ({ name, enabled }: { name: string; enabled: boolean }) =>
@@ -110,6 +130,38 @@ export function useToolsPage() {
     },
   })
 
+  const saveThreadPolicyMutation = useMutation({
+    mutationFn: updateThreadPolicy,
+    onSuccess: async (updatedConfig) => {
+      queryClient.setQueryData(["tools", "thread-policy"], updatedConfig)
+      setThreadPolicyDraftOverride(null)
+      const gateway = await refreshGatewayState({ force: true })
+      showSaveSuccessOrRestartToast(
+        t,
+        t(
+          "pages.agent.tools.thread_policy.save_success",
+          "Thread policy saved successfully",
+        ),
+        t("pages.agent.tools.thread_policy.title", "Thread Policy"),
+        gateway?.restartRequired === true,
+      )
+      void queryClient.invalidateQueries({
+        queryKey: ["tools", "thread-policy"],
+      })
+      void queryClient.invalidateQueries({ queryKey: ["tools"] })
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t(
+              "pages.agent.tools.thread_policy.save_error",
+              "Failed to save thread policy",
+            ),
+      )
+    },
+  })
+
   const groupedTools = useMemo<{
     groupedTools: GroupedTools
     totalFilteredCount: number
@@ -165,6 +217,15 @@ export function useToolsPage() {
     })
   }
 
+  const updateThreadPolicyDraft = (
+    updater: (current: ThreadPolicyConfig) => ThreadPolicyConfig,
+  ) => {
+    setThreadPolicyDraftOverride((current) => {
+      const draft = current ?? threadPolicyQuery.data
+      return draft ? updater(draft) : current
+    })
+  }
+
   const toggleTool = (name: string, enabled: boolean) => {
     toggleToolMutation.mutate({ name, enabled })
   }
@@ -172,6 +233,12 @@ export function useToolsPage() {
   const saveWebSearchConfig = () => {
     if (webSearchDraft) {
       saveWebSearchMutation.mutate(webSearchDraft)
+    }
+  }
+
+  const saveThreadPolicy = () => {
+    if (threadPolicyDraft) {
+      saveThreadPolicyMutation.mutate(threadPolicyDraft)
     }
   }
 
@@ -191,19 +258,26 @@ export function useToolsPage() {
     statusFilter,
     tools,
     totalFilteredCount: groupedTools.totalFilteredCount,
+    threadPolicyDraft,
     webSearchDraft,
     hasToolsError: toolsQuery.error != null,
+    hasThreadPolicyError: threadPolicyQuery.error != null,
     hasWebSearchError: webSearchQuery.error != null,
     isToolsLoading: toolsQuery.isLoading,
+    isThreadPolicyLoading: threadPolicyQuery.isLoading,
+    isThreadPolicySaving: saveThreadPolicyMutation.isPending,
+    isThreadPolicyDirty,
     isWebSearchLoading: webSearchQuery.isLoading,
     isWebSearchSaving: saveWebSearchMutation.isPending,
     isWebSearchDirty,
     setActiveTab,
     setSearchQuery,
     setStatusFilter,
+    saveThreadPolicy,
     saveWebSearchConfig,
     toggleExpandedProvider,
     toggleTool,
+    updateThreadPolicyDraft,
     updateWebSearchDraft,
   }
 }

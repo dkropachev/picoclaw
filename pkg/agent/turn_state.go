@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -352,6 +353,23 @@ func (al *AgentLoop) GetActiveTurnBySession(sessionKey string) *ActiveTurnInfo {
 	}
 	info := ts.snapshot()
 	return &info
+}
+
+func (al *AgentLoop) GetActiveTurns() []ActiveTurnInfo {
+	var turns []ActiveTurnInfo
+	al.activeTurnStates.Range(func(_, value any) bool {
+		if ts, ok := value.(*turnState); ok {
+			turns = append(turns, ts.snapshot())
+		}
+		return true
+	})
+	sort.SliceStable(turns, func(i, j int) bool {
+		if turns[i].StartedAt.Equal(turns[j].StartedAt) {
+			return turns[i].SessionKey < turns[j].SessionKey
+		}
+		return turns[i].StartedAt.Before(turns[j].StartedAt)
+	})
+	return turns
 }
 
 // =============================================================================

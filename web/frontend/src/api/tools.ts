@@ -44,6 +44,43 @@ export interface WebSearchConfigResponse {
   settings: Record<string, WebSearchProviderConfig>
 }
 
+export type ThreadPolicyMode = "auto" | "tool" | "suggest" | "off"
+export type ThreadAttachStrategy =
+  | "search_then_create"
+  | "search_then_ask"
+  | "never"
+export type ThreadPolicyThresholdLogic = "any" | "all"
+export type ThreadPolicyRuleType =
+  | "general"
+  | "coding"
+  | "reviewing"
+  | "investigating"
+
+export interface ThreadPolicyRule {
+  type: ThreadPolicyRuleType
+  description: string
+  mode?: ThreadPolicyMode
+  attach_strategy?: ThreadAttachStrategy
+  min_messages?: number
+  min_text_chars?: number
+  threshold_logic?: ThreadPolicyThresholdLogic
+  min_auto_confidence?: number
+  confirm_if_multiple?: boolean
+}
+
+export interface ThreadAgentPolicy {
+  mode?: ThreadPolicyMode
+  attach_strategy?: ThreadAttachStrategy
+}
+
+export interface ThreadPolicyConfig {
+  enabled: boolean
+  mode: ThreadPolicyMode
+  instructions: string
+  rules: ThreadPolicyRule[]
+  agents?: Record<string, ThreadAgentPolicy>
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await launcherFetch(path, options)
   if (!res.ok) {
@@ -92,6 +129,20 @@ export async function updateWebSearchConfig(
   payload: WebSearchConfigResponse,
 ): Promise<WebSearchConfigResponse> {
   return request<WebSearchConfigResponse>("/api/tools/web-search-config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function getThreadPolicy(): Promise<ThreadPolicyConfig> {
+  return request<ThreadPolicyConfig>("/api/tools/thread-policy")
+}
+
+export async function updateThreadPolicy(
+  payload: ThreadPolicyConfig,
+): Promise<ThreadPolicyConfig> {
+  return request<ThreadPolicyConfig>("/api/tools/thread-policy", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

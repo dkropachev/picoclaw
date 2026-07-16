@@ -1,6 +1,7 @@
 {
   "navigation": {
     "chat": "চ্যাট",
+    "threads": "থ্রেড",
     "model_group": "মডেল",
     "models": "মডেল",
     "credentials": "ক্রেডেনশিয়াল",

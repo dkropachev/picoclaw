@@ -1049,6 +1049,41 @@ func TestGetActiveTurn_WithChildren(t *testing.T) {
 	}
 }
 
+func TestGetActiveTurns_ReturnsAllSessions(t *testing.T) {
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				ModelName: "gpt-4o-mini",
+				Provider:  "mock",
+			},
+		},
+	}
+	al := NewAgentLoop(cfg, nil, &simpleMockProviderAPI{response: "ok"})
+
+	first := &turnState{
+		turnID:     "turn-a",
+		sessionKey: "session-a",
+		startedAt:  time.Unix(10, 0),
+	}
+	second := &turnState{
+		turnID:     "turn-b",
+		sessionKey: "session-b",
+		startedAt:  time.Unix(20, 0),
+	}
+	al.activeTurnStates.Store(first.sessionKey, first)
+	al.activeTurnStates.Store(second.sessionKey, second)
+	defer al.activeTurnStates.Delete(first.sessionKey)
+	defer al.activeTurnStates.Delete(second.sessionKey)
+
+	turns := al.GetActiveTurns()
+	if len(turns) != 2 {
+		t.Fatalf("len(GetActiveTurns()) = %d, want 2", len(turns))
+	}
+	if turns[0].SessionKey != "session-a" || turns[1].SessionKey != "session-b" {
+		t.Fatalf("GetActiveTurns() = %#v, want sorted sessions", turns)
+	}
+}
+
 // TestTurnStateInfo_ThreadSafety verifies that Info() is thread-safe
 func TestTurnStateInfo_ThreadSafety(t *testing.T) {
 	rootCtx := context.Background()

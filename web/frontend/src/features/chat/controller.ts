@@ -21,6 +21,10 @@ import {
 import { type GatewayState, gatewayAtom } from "@/store/gateway"
 
 const store = getDefaultStore()
+const SEND_AFTER_SWITCH_TIMEOUT_MS = 5000
+const SEND_AFTER_SWITCH_POLL_MS = 50
+const sendAfterSwitchInFlight = new Set<string>()
+const sendAfterSwitchDelivered = new Set<string>()
 
 let wsRef: WebSocket | null = null
 let isConnecting = false
@@ -80,6 +84,21 @@ function needsActiveSessionHydration(): boolean {
 function setActiveSessionId(sessionId: string) {
   activeSessionIdRef = sessionId
   updateChatStore({ activeSessionId: sessionId })
+}
+
+function sendAfterSwitchKey(sessionId: string, content: string) {
+  return `${sessionId}\u0000${content}`
+}
+
+function hasUserMessageWithContent(content: string) {
+  const normalizedContent = content.trim()
+  if (!normalizedContent) {
+    return false
+  }
+  return getChatState().messages.some(
+    (message) =>
+      message.role === "user" && message.content.trim() === normalizedContent,
+  )
 }
 
 function disconnectChatInternal({
@@ -404,6 +423,88 @@ export async function switchChatSession(sessionId: string) {
   } catch (error) {
     console.error("Failed to load session history:", error)
     toast.error(i18n.t("chat.historyOpenFailed"))
+  }
+}
+
+function waitForSessionSocketOpen(sessionId: string) {
+  if (
+    activeSessionIdRef === sessionId &&
+    wsRef &&
+    wsRef.readyState === WebSocket.OPEN
+  ) {
+    return Promise.resolve(true)
+  }
+
+  return new Promise<boolean>((resolve) => {
+    const startedAt = Date.now()
+
+    const check = () => {
+      if (activeSessionIdRef !== sessionId) {
+        resolve(false)
+        return
+      }
+      if (wsRef && wsRef.readyState === WebSocket.OPEN) {
+        resolve(true)
+        return
+      }
+      if (Date.now() - startedAt >= SEND_AFTER_SWITCH_TIMEOUT_MS) {
+        resolve(false)
+        return
+      }
+      window.setTimeout(check, SEND_AFTER_SWITCH_POLL_MS)
+    }
+
+    check()
+  })
+}
+
+export async function switchChatSessionAndSend(
+  sessionId: string,
+  input: SendChatMessageInput,
+) {
+  const normalizedContent = input.content.trim()
+  const key = normalizedContent
+    ? sendAfterSwitchKey(sessionId, normalizedContent)
+    : ""
+
+  if (key && sendAfterSwitchInFlight.has(key)) {
+    await switchChatSession(sessionId)
+    return false
+  }
+
+  if (key && sendAfterSwitchDelivered.has(key)) {
+    await switchChatSession(sessionId)
+    return true
+  }
+
+  if (key) {
+    sendAfterSwitchInFlight.add(key)
+  }
+
+  try {
+    await switchChatSession(sessionId)
+    if (activeSessionIdRef !== sessionId) {
+      return false
+    }
+    if (key && hasUserMessageWithContent(normalizedContent)) {
+      sendAfterSwitchDelivered.add(key)
+      return true
+    }
+    if (!(await waitForSessionSocketOpen(sessionId))) {
+      return false
+    }
+    const sent = sendChatMessage({
+      ...input,
+      content: normalizedContent,
+    })
+    if (sent && key) {
+      sendAfterSwitchDelivered.add(key)
+    }
+    return sent
+  } finally {
+    if (key) {
+      sendAfterSwitchInFlight.delete(key)
+    }
   }
 }
 

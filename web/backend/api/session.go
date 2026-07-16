@@ -428,6 +428,9 @@ func buildSessionListItem(sessionID string, sess sessionFile, toolFeedbackMaxArg
 	preview = truncateRunes(preview, maxSessionTitleRunes)
 
 	if preview == "" {
+		preview = truncateRunes(sess.Summary, maxSessionTitleRunes)
+	}
+	if preview == "" {
 		preview = "(empty)"
 	}
 	title := preview

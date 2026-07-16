@@ -215,6 +215,52 @@ func TestReloadHandler_Error(t *testing.T) {
 	}
 }
 
+func TestActiveTurnsHandler_Success(t *testing.T) {
+	s := newTestServer()
+	startedAt := time.Now().UTC()
+	s.SetActiveTurnsFunc(func() []ActiveTurn {
+		return []ActiveTurn{
+			{
+				TurnID:     "turn-1",
+				AgentID:    "main",
+				SessionKey: "session-1",
+				Phase:      "running",
+				StartedAt:  startedAt,
+			},
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/runtime/active-turns", nil)
+	req.Header.Set("Authorization", "Bearer test")
+	w := httptest.NewRecorder()
+
+	s.activeTurnsHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("active turns status = %d, want %d", w.Code, http.StatusOK)
+	}
+	var resp ActiveTurnsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode active turns: %v", err)
+	}
+	if len(resp.ActiveTurns) != 1 || resp.ActiveTurns[0].SessionKey != "session-1" {
+		t.Fatalf("active turns = %#v, want session-1", resp.ActiveTurns)
+	}
+}
+
+func TestActiveTurnsHandler_RequiresAuth(t *testing.T) {
+	s := newTestServer()
+
+	req := httptest.NewRequest(http.MethodGet, "/runtime/active-turns", nil)
+	w := httptest.NewRecorder()
+
+	s.activeTurnsHandler(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("active turns unauthorized status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestSetReady_Toggle(t *testing.T) {
 	s := newTestServer()
 

@@ -30,6 +30,7 @@ interface ToolLibraryTabProps {
   pendingToolName: string | null
   onSearchQueryChange: (value: string) => void
   onStatusFilterChange: (value: ToolStatusFilter) => void
+  onOpenThreadPolicySettings: () => void
   onOpenWebSearchSettings: () => void
   onToggleTool: (name: string, enabled: boolean) => void
 }
@@ -45,6 +46,7 @@ export function ToolLibraryTab({
   pendingToolName,
   onSearchQueryChange,
   onStatusFilterChange,
+  onOpenThreadPolicySettings,
   onOpenWebSearchSettings,
   onToggleTool,
 }: ToolLibraryTabProps) {
@@ -134,6 +136,7 @@ export function ToolLibraryTab({
                     key={tool.name}
                     tool={tool}
                     isPending={pendingToolName === tool.name}
+                    onOpenThreadPolicySettings={onOpenThreadPolicySettings}
                     onOpenWebSearchSettings={onOpenWebSearchSettings}
                     onToggleTool={onToggleTool}
                   />
@@ -150,11 +153,13 @@ export function ToolLibraryTab({
 function ToolCard({
   tool,
   isPending,
+  onOpenThreadPolicySettings,
   onOpenWebSearchSettings,
   onToggleTool,
 }: {
   tool: ToolSupportItem
   isPending: boolean
+  onOpenThreadPolicySettings: () => void
   onOpenWebSearchSettings: () => void
   onToggleTool: (name: string, enabled: boolean) => void
 }) {
@@ -167,6 +172,7 @@ function ToolCard({
   const isDisabled = tool.status === "disabled"
   const isBlocked = tool.status === "blocked"
   const isWebSearchTool = tool.name === "web_search"
+  const isThreadsTool = tool.name === "threads"
 
   return (
     <Card
@@ -187,17 +193,28 @@ function ToolCard({
             <ToolStatusBadge status={tool.status} />
           </div>
           <div className="flex h-8 shrink-0 items-center gap-2">
-            {isWebSearchTool && (
+            {(isWebSearchTool || isThreadsTool) && (
               <Button
                 type="button"
                 variant="ghost"
                 size="icon"
-                onClick={onOpenWebSearchSettings}
+                onClick={
+                  isThreadsTool
+                    ? onOpenThreadPolicySettings
+                    : onOpenWebSearchSettings
+                }
                 className="text-muted-foreground hover:text-foreground hover:bg-muted/60 size-8 rounded-lg"
-                aria-label={t(
-                  "pages.agent.tools.web_search.open_settings",
-                  "Open Settings",
-                )}
+                aria-label={
+                  isThreadsTool
+                    ? t(
+                        "pages.agent.tools.thread_policy.open_settings",
+                        "Open Thread Policy",
+                      )
+                    : t(
+                        "pages.agent.tools.web_search.open_settings",
+                        "Open Settings",
+                      )
+                }
               >
                 <IconSettings className="size-4" />
               </Button>

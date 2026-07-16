@@ -1,6 +1,9 @@
 {
   "navigation": {
     "chat": "Chat",
+    "threads": "Threads",
+    "thread_search": "Search",
+    "thread_open": "Thread",
     "model_group": "Models",
     "models": "Models",
     "credentials": "Credentials",
@@ -593,6 +596,30 @@
       "secretEmpty": "Not configured"
     }
   },
+  "threads": {
+    "title": "Threads",
+    "searchTitle": "Search",
+    "threadTitle": "Thread",
+    "newThread": "New thread",
+    "searchPlaceholder": "Search threads...",
+    "loadFailed": "Failed to load threads",
+    "loading": "Loading threads...",
+    "empty": "No threads yet",
+    "emptySearch": "No matching threads",
+    "dropThread": "Drop thread",
+    "chatEmptyTitle": "No messages in this thread yet",
+    "chatEmptyDescription": "“{{title}}” is ready.",
+    "searchResult": "Thread search",
+    "switching": "Switching thread",
+    "allThreads": "All threads",
+    "types": {
+      "all": "All types",
+      "general": "General",
+      "coding": "Coding",
+      "reviewing": "Reviewing",
+      "investigating": "Investigating"
+    }
+  },
   "pages": {
     "agent": {
       "load_error": "Failed to load agent support information.",
@@ -721,6 +748,39 @@
           "api_key": "API Key / Token",
           "api_key_placeholder": "Enter API key, leave it blank to keep the original key",
           "none": "Unavailable"
+        },
+        "thread_policy": {
+          "title": "Thread Policy",
+          "description": "Configure when the main chat may become or join a PicoClaw thread.",
+          "load_error": "Failed to load thread policy.",
+          "save": "Save Changes",
+          "open_settings": "Open Thread Policy",
+          "save_success": "Thread policy saved successfully.",
+          "save_error": "Failed to save thread policy.",
+          "unsaved_prompt": "Save thread policy changes to update model routing behavior.",
+          "behavior": "Behavior",
+          "enabled": "Enable Policy",
+          "enabled_desc": "When enabled, the model sees the thread routing policy in the main chat prompt.",
+          "mode": "Mode",
+          "mode_desc": "Tool registers or attaches after rule thresholds; auto may create or switch after thresholds; suggest only surfaces the option.",
+          "modes": {
+            "auto": "Auto",
+            "tool": "Tool",
+            "suggest": "Suggest",
+            "off": "Off"
+          },
+          "rules": "Rules",
+          "add_rule": "Add Rule",
+          "remove_rule": "Remove rule",
+          "no_rules": "No routing rules configured.",
+          "rule_placeholder": "When should this thread type be used?",
+          "min_messages": "Min Messages",
+          "min_text_chars": "Min Text Chars",
+          "threshold_logic": "Threshold Logic",
+          "threshold_any": "Any Limit",
+          "threshold_all": "All Limits",
+          "instructions": "Instructions",
+          "instructions_placeholder": "Additional instructions for the model..."
         },
         "status": {
           "enabled": "Enabled",

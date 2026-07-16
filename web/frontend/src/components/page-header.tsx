@@ -24,11 +24,11 @@ export function PageHeader({
         className,
       )}
     >
-      <div className="flex items-center gap-4">
+      <div className="flex min-w-0 items-center gap-4">
         <SidebarTrigger className="border-border/60 bg-background text-muted-foreground hover:bg-accent hover:text-foreground hidden h-9 w-9 rounded-lg border sm:flex [&>svg]:size-5">
           <IconMenu2 />
         </SidebarTrigger>
-        <h2 className="text-foreground/90 text-xl font-medium tracking-tight">
+        <h2 className="text-foreground/90 min-w-0 truncate text-xl font-medium tracking-tight">
           {title}
         </h2>
         {titleExtra}

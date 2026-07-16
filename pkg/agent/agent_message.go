@@ -10,8 +10,10 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
+	threadstore "github.com/sipeed/picoclaw/pkg/threads"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -102,6 +104,34 @@ func (al *AgentLoop) ProcessHeartbeat(
 	})
 }
 
+type threadMetaReader interface {
+	GetSessionMeta(ctx context.Context, sessionKey string) (memory.SessionMeta, error)
+}
+
+func (al *AgentLoop) resolveAttachedThreadSession(
+	ctx context.Context,
+	agent *AgentInstance,
+	sessionKey string,
+) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" || agent == nil || agent.Sessions == nil {
+		return sessionKey
+	}
+	reader, ok := agent.Sessions.(threadMetaReader)
+	if !ok {
+		return sessionKey
+	}
+	meta, err := reader.GetSessionMeta(ctx, sessionKey)
+	if err != nil || strings.TrimSpace(meta.ThreadID) == "" {
+		return sessionKey
+	}
+	threadMeta, ok, err := threadstore.NewStoreFromWorkspace(agent.Workspace).GetMeta(meta.ThreadID)
+	if err != nil || !ok || strings.TrimSpace(threadMeta.PrimarySessionKey) == "" {
+		return sessionKey
+	}
+	return threadMeta.PrimarySessionKey
+}
+
 func (al *AgentLoop) prepareInboundMessageForAgent(
 	ctx context.Context,
 	msg bus.InboundMessage,
@@ -156,7 +186,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	// Resolve session key from the route allocation, while preserving explicit
 	// agent-scoped keys supplied by the caller.
 	scopeKey := resolveScopeKey(allocation.SessionKey, msg.SessionKey)
-	sessionKey := scopeKey
+	sessionKey := al.resolveAttachedThreadSession(ctx, agent, scopeKey)
 
 	// Reset message-tool state for this round so we don't skip publishing due to a previous round.
 	if tool, ok := agent.Tools.Get("message"); ok {
@@ -178,8 +208,11 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 
 	opts := processOptions{
 		Dispatch: DispatchRequest{
-			SessionKey:     sessionKey,
-			SessionAliases: buildSessionAliases(sessionKey, append(allocation.SessionAliases, msg.SessionKey)...),
+			SessionKey: sessionKey,
+			SessionAliases: buildSessionAliases(
+				sessionKey,
+				append(allocation.SessionAliases, msg.SessionKey, scopeKey)...,
+			),
 			InboundContext: cloneInboundContext(&msg.Context),
 			RouteResult:    cloneResolvedRoute(&route),
 			SessionScope:   session.CloneScope(&allocation.Scope),

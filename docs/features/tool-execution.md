@@ -22,7 +22,7 @@ with context, limits, filtering, and error normalization.
 
 | ID | Level | Requirement | Rationale |
 | --- | --- | --- | --- |
-| `FR-TOOL-001` | MUST | Tool registry registration, lookup, definition export, cloning, allowlist filtering, and execution are concurrency-safe. | Agent turns can execute tools while discovery changes visibility. |
+| `FR-TOOL-001` | MUST | Tool registry registration, unregistration, lookup, definition export, cloning, allowlist filtering, and execution are concurrency-safe. | Agent turns can execute tools while discovery changes visibility. |
 | `FR-TOOL-002` | MUST | Filesystem tools respect workspace restriction, allow path patterns, file size limits, and operation-specific semantics for read/write/edit/append/list/image/send. | Local file access is powerful and must be bounded. |
 | `FR-TOOL-003` | MUST | Exec runs commands with configured timeout and deny/allow patterns, supports managed sessions, and returns captured output or structured failure. | Shell access must be useful and controllable. |
 | `FR-TOOL-004` | MUST | Web search selects configured providers, honors result/range options, and web fetch observes fetch limits and private host controls. | Search and fetch must be deterministic from config. |
@@ -33,8 +33,9 @@ with context, limits, filtering, and error normalization.
 ## Data And State Model
 
 Tool state includes visible and hidden registry maps, allowlists, TTL metadata,
-tool context, media store references, exec background sessions, filesystem roots,
-web provider config, and redaction caches for sensitive values.
+tool context, media store references, removable tool entries, exec background
+sessions, filesystem roots, web provider config, and redaction caches for
+sensitive values.
 
 ## Surface Ownership
 
@@ -109,7 +110,9 @@ Owns: TOOL write_file
 
 Agent conversations execute tools. MCP and skills add tool-like behavior through
 separate features. Hooks can modify, deny, or short-circuit tool calls. Security
-policies control credentials, HTTP guards, and isolation.
+policies control credentials, HTTP guards, and isolation. Threads provide a
+thread-specific tool and policy surface while relying on the generic registry,
+schema export, execution, and settings UI mechanics defined here.
 
 ## Failure And Edge Cases
 

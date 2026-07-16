@@ -184,7 +184,11 @@ func requirementHasTestEvidence(evidence, id string) bool {
 			continue
 		}
 		lower := strings.ToLower(line)
-		if strings.Contains(lower, "_test.go") || strings.Contains(lower, "integration/") || strings.Contains(lower, "integration suite") {
+		if strings.Contains(lower, "_test.go") ||
+			strings.Contains(lower, ".test.") ||
+			strings.Contains(lower, ".spec.") ||
+			strings.Contains(lower, "integration/") ||
+			strings.Contains(lower, "integration suite") {
 			return true
 		}
 	}

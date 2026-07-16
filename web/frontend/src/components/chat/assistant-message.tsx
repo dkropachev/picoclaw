@@ -7,7 +7,7 @@ import {
   IconFileText,
   IconTool,
 } from "@tabler/icons-react"
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import ReactMarkdown from "react-markdown"
 import rehypeHighlight from "rehype-highlight"
@@ -16,12 +16,16 @@ import rehypeSanitize from "rehype-sanitize"
 import remarkGfm from "remark-gfm"
 
 import {
-  MessageCodeBlock,
   MarkdownCodeBlock,
+  MessageCodeBlock,
 } from "@/components/chat/message-code-block"
+import { ThreadCardMessage } from "@/components/threads/thread-card-message"
+import { ThreadToolCallCard } from "@/components/threads/thread-tool-call-card"
 import { Button } from "@/components/ui/button"
-import { formatMessageTime } from "@/hooks/use-pico-chat"
+import { parseThreadCardPayload } from "@/features/chat/thread-cards"
+import { parseThreadToolSearchRequest } from "@/features/chat/thread-tool-calls"
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard"
+import { formatMessageTime } from "@/hooks/use-pico-chat"
 import { cn } from "@/lib/utils"
 import {
   type AssistantMessageKind,
@@ -69,11 +73,67 @@ export function AssistantMessage({
     ? t("chat.copiedLabel")
     : t("chat.copyMessage")
   const trimmedModelName = modelName?.trim() ?? ""
+  const threadCardPayload =
+    kind === "normal" ? parseThreadCardPayload(content) : null
+  const threadToolSearchRequest = useMemo(
+    () => (isToolCalls ? parseThreadToolSearchRequest(toolCalls) : null),
+    [isToolCalls, toolCalls],
+  )
+
+  if (threadCardPayload) {
+    return (
+      <div className="group flex w-full flex-col gap-1.5">
+        <div className="text-muted-foreground/60 flex items-center justify-between gap-2 px-1 text-xs opacity-70">
+          <div className="flex items-center gap-2">
+            <span>PicoClaw</span>
+            {trimmedModelName && (
+              <>
+                <span className="opacity-50">•</span>
+                <span>{trimmedModelName}</span>
+              </>
+            )}
+            {formattedTimestamp && (
+              <>
+                <span className="opacity-50">•</span>
+                <span>{formattedTimestamp}</span>
+              </>
+            )}
+          </div>
+        </div>
+        <ThreadCardMessage payload={threadCardPayload} />
+      </div>
+    )
+  }
+
+  if (threadToolSearchRequest) {
+    return (
+      <div className="group flex w-full flex-col gap-1.5">
+        <div className="text-muted-foreground/60 flex items-center justify-between gap-2 px-1 text-xs opacity-70">
+          <div className="flex items-center gap-2">
+            <span>PicoClaw</span>
+            {trimmedModelName && (
+              <>
+                <span className="opacity-50">•</span>
+                <span>{trimmedModelName}</span>
+              </>
+            )}
+            {formattedTimestamp && (
+              <>
+                <span className="opacity-50">•</span>
+                <span>{formattedTimestamp}</span>
+              </>
+            )}
+          </div>
+        </div>
+        <ThreadToolCallCard request={threadToolSearchRequest} />
+      </div>
+    )
+  }
 
   return (
     <div className="group flex w-full flex-col gap-1.5">
       {!isCollapsedBlock && (
-          <div className="text-muted-foreground/60 flex items-center justify-between gap-2 px-1 text-xs opacity-70">
+        <div className="text-muted-foreground/60 flex items-center justify-between gap-2 px-1 text-xs opacity-70">
           <div className="flex items-center gap-2">
             <span>PicoClaw</span>
             {trimmedModelName && (
@@ -114,7 +174,9 @@ export function AssistantMessage({
                 )}
                 <span>{collapsedLabel}</span>
                 {trimmedModelName && (
-                  <span className="text-muted-foreground/45">{trimmedModelName}</span>
+                  <span className="text-muted-foreground/45">
+                    {trimmedModelName}
+                  </span>
                 )}
               </div>
               <div className="flex items-center gap-2">
@@ -194,7 +256,9 @@ export function AssistantMessage({
                             <MessageCodeBlock
                               code={toolArguments}
                               language="json"
-                              label={toolName || t("chat.toolCallArgumentsLabel")}
+                              label={
+                                toolName || t("chat.toolCallArgumentsLabel")
+                              }
                               className="my-0 shadow-none"
                               bodyClassName="px-3 py-2 text-[12px] leading-relaxed"
                             />
