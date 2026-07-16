@@ -2809,8 +2809,8 @@ func TestHandleFetchModels_OpenAIOAuthStoredModelUsesCodexModelsEndpoint(t *test
 	if gotPath != "/backend-api/codex/models" {
 		t.Fatalf("path = %q, want Codex models endpoint", gotPath)
 	}
-	if gotClientVersion != config.Version {
-		t.Fatalf("client_version = %q, want %q", gotClientVersion, config.Version)
+	if gotClientVersion != openAICodexModelsClientVersionDefault {
+		t.Fatalf("client_version = %q, want %q", gotClientVersion, openAICodexModelsClientVersionDefault)
 	}
 	if gotAuth != "Bearer chatgpt-token" {
 		t.Fatalf("Authorization = %q, want ChatGPT bearer token", gotAuth)
@@ -2892,6 +2892,28 @@ func TestHandleFetchModels_OpenAIOAuthRequestCredentialFetchesWithoutAPIKey(t *t
 	}
 	if resp.Total != 1 || resp.Models[0].ID != "gpt-5.4" {
 		t.Fatalf("response = %+v, want fetched Codex model", resp)
+	}
+}
+
+func TestOpenAICodexModelsClientVersionUsesCodexCompatibilityVersion(t *testing.T) {
+	oldVersion := config.Version
+	t.Cleanup(func() { config.Version = oldVersion })
+
+	for _, version := range []string{"dev", "59065cd4", "", "v0.2.9"} {
+		config.Version = version
+		if got := openAICodexModelsClientVersion(); got != openAICodexModelsClientVersionDefault {
+			t.Fatalf("openAICodexModelsClientVersion(%q) = %q, want %q", version, got, openAICodexModelsClientVersionDefault)
+		}
+	}
+}
+
+func TestUpstreamStatusErrorIncludesResponseBody(t *testing.T) {
+	err := upstreamStatusError("codex upstream", http.StatusBadRequest, strings.NewReader(`{"detail":"Invalid client_version format"}`))
+	if err == nil {
+		t.Fatal("upstreamStatusError() returned nil")
+	}
+	if !strings.Contains(err.Error(), "Invalid client_version format") {
+		t.Fatalf("error = %q, want response body detail", err.Error())
 	}
 }
 
