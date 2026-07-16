@@ -7,8 +7,10 @@ frontend also has cross-cutting implementation rules so agents and contributors
 build consistent, secure, and maintainable UI surfaces.
 
 The scoped guidance lives in `web/frontend/AGENTS.md`. Automated checks live in
-`web/frontend/scripts/lint-ui-rules.mjs` and run through `pnpm lint` and
-`make lint-frontend`.
+`web/frontend/scripts/lint-ui-rules.mjs`, `web/frontend/eslint.config.js`, and
+`web/frontend/tests/ui-smoke.spec.ts`; they run through `pnpm lint`,
+`pnpm format`, `pnpm test:ui`, `make lint-frontend`, and
+`make test-frontend-ui`.
 
 ## Product Ownership
 
@@ -45,7 +47,8 @@ files. The short version is:
 
 ## Static Enforcement
 
-`web/frontend/scripts/lint-ui-rules.mjs` enforces deterministic rules that are
+`web/frontend/scripts/lint-ui-rules.mjs` uses the TypeScript parser and
+`web/frontend/ui-rules.config.json` to enforce deterministic rules that are
 cheap enough for every pull request:
 
 | Rule | Reason |
@@ -54,7 +57,8 @@ cheap enough for every pull request:
 | No inline `style=` without nearby `ui-rule-allow dynamic-style`. | Prevents layout drift while allowing measured geometry and dynamic dimensions. |
 | No raw hex colors outside approved rendering exceptions. | Keeps UI color choices tied to tokens and avoids one-off palettes. |
 
-Approved hardcoded-color exceptions are intentionally narrow:
+Approved hardcoded-color exceptions live in `web/frontend/ui-rules.config.json`
+and are intentionally narrow:
 
 - `src/lib/ansi-log.ts` maps ANSI terminal color indexes.
 - `src/components/chat/message-code-block.tsx` mirrors a code-rendering color
@@ -62,29 +66,29 @@ Approved hardcoded-color exceptions are intentionally narrow:
 
 ## Visual Enforcement
 
-Static checks do not prove layout quality. For user-facing UI changes, reviewers
-should still inspect desktop and mobile widths. Browser smoke tests should be
-added when a route has stable mocked API fixtures. Those tests should verify:
+Static checks do not prove layout quality. `web/frontend/tests/ui-smoke.spec.ts`
+runs mocked API route checks at desktop and mobile widths for the main
+operational pages. Those tests verify:
 
 - the route renders without console errors;
-- primary controls are visible and clickable;
-- there is no horizontal page overflow at mobile and desktop widths;
-- dialogs, sheets, and popovers fit in the viewport;
-- screenshots are stable enough to catch obvious regressions.
+- primary controls are visible;
+- there is no body-level horizontal page overflow at mobile and desktop widths.
+
+For larger user-facing UI changes, reviewers should still inspect desktop and
+mobile widths directly, especially dialogs, sheets, popovers, and dense tables.
 
 ## Local Commands
 
 ```bash
 cd web/frontend
 pnpm lint
+pnpm format
+pnpm test:ui
 ```
 
 Repository-wide frontend lint:
 
 ```bash
 make lint-frontend
+make test-frontend-ui
 ```
-
-`pnpm format` remains available as a whole-tree formatting audit. It is not part
-of the pull-request gate until the existing frontend formatting baseline is
-clean.

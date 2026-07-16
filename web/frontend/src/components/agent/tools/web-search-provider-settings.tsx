@@ -146,10 +146,7 @@ function ProviderCard({
           </div>
         </button>
 
-        <div
-          className="flex items-center gap-4"
-          onClick={(event) => event.stopPropagation()}
-        >
+        <div className="flex items-center gap-4">
           <Switch
             checked={settings.enabled}
             onCheckedChange={(checked) =>

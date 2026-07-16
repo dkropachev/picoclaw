@@ -54,6 +54,13 @@ func runFeatureDeltaGuard(root, base, head string) error {
 			failures = append(failures, fmt.Sprintf("%s: production code changed but no docs/features spec declares Owns: CODE for it", path))
 			continue
 		}
+		if expectedSpecs := frontendExpectedSpecPaths(path); len(expectedSpecs) > 0 {
+			if !expectedOwnerSpecChanged(expectedSpecs, owners, changedSpecs) {
+				failures = append(failures, fmt.Sprintf("%s: frontend code changed; update the expected owning feature spec: %s", path, strings.Join(expectedSpecs, ", ")))
+				continue
+			}
+			continue
+		}
 		if ownerSpecChanged(owners, changedSpecs) {
 			continue
 		}
@@ -79,6 +86,19 @@ func isFeatureSpecPath(path string) bool {
 func ownerSpecChanged(owners []featureOwnership, changedSpecs map[string]bool) bool {
 	for _, owner := range owners {
 		if changedSpecs[owner.SpecRelPath] {
+			return true
+		}
+	}
+	return false
+}
+
+func expectedOwnerSpecChanged(expectedSpecs []string, owners []featureOwnership, changedSpecs map[string]bool) bool {
+	expected := make(map[string]bool)
+	for _, spec := range expectedSpecs {
+		expected[spec] = true
+	}
+	for _, owner := range owners {
+		if expected[owner.SpecRelPath] && changedSpecs[owner.SpecRelPath] {
 			return true
 		}
 	}

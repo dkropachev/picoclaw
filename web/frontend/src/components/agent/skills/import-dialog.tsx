@@ -18,9 +18,9 @@ interface ImportDialogProps {
   isDragActive: boolean
   onOpenChange: (open: boolean) => void
   onImportClick: () => void
-  onDragEnter: (event: DragEvent<HTMLDivElement>) => void
-  onDragLeave: (event: DragEvent<HTMLDivElement>) => void
-  onDrop: (event: DragEvent<HTMLDivElement>) => void
+  onDragEnter: (event: DragEvent<HTMLElement>) => void
+  onDragLeave: (event: DragEvent<HTMLElement>) => void
+  onDrop: (event: DragEvent<HTMLElement>) => void
 }
 
 export function ImportDialog({
@@ -94,22 +94,23 @@ function SkillImportPanel({
 }: {
   isDragActive: boolean
   isImportPending: boolean
-  onDragEnter: (event: DragEvent<HTMLDivElement>) => void
-  onDragLeave: (event: DragEvent<HTMLDivElement>) => void
-  onDrop: (event: DragEvent<HTMLDivElement>) => void
+  onDragEnter: (event: DragEvent<HTMLElement>) => void
+  onDragLeave: (event: DragEvent<HTMLElement>) => void
+  onDrop: (event: DragEvent<HTMLElement>) => void
   onImportClick: () => void
 }) {
   const { t } = useTranslation()
 
   return (
     <div className="space-y-4">
-      <div
+      <button
+        type="button"
+        disabled={isImportPending}
         className={cn(
-          "flex min-h-48 cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-4 py-6 text-center transition-all duration-300",
+          "flex min-h-48 w-full cursor-pointer appearance-none flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-4 py-6 text-center transition-all duration-300 disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50",
           isDragActive
             ? "border-primary bg-primary/10 scale-[1.02]"
             : "border-border/60 bg-muted/30 hover:bg-muted/50 hover:border-primary/50",
-          isImportPending && "pointer-events-none opacity-50",
         )}
         onClick={() => {
           if (!isImportPending) {
@@ -143,18 +144,16 @@ function SkillImportPanel({
               : t("pages.agent.skills.import_constraints")}
           </p>
         </div>
-        <Button
-          variant="secondary"
-          size="sm"
-          className="pointer-events-none mt-2 h-8 shadow-sm"
-          disabled={isImportPending}
+        <span
+          className="bg-secondary text-secondary-foreground pointer-events-none mt-2 inline-flex h-8 items-center justify-center gap-1.5 rounded-md px-3 text-sm font-medium shadow-sm"
+          aria-hidden="true"
         >
           {isImportPending ? (
             <IconLoader2 className="mr-1.5 size-3.5 animate-spin" />
           ) : null}
           {t("pages.agent.skills.import")}
-        </Button>
-      </div>
+        </span>
+      </button>
     </div>
   )
 }

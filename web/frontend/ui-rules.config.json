@@ -1,0 +1,17 @@
+{
+  "generatedFiles": ["src/routeTree.gen.ts"],
+  "apiBoundary": {
+    "directFetchAllowed": ["src/api/**"]
+  },
+  "dynamicStyle": {
+    "ignoredFiles": ["src/components/ui/**"],
+    "allowCommentToken": "ui-rule-allow dynamic-style",
+    "allowCommentLookbackLines": 8
+  },
+  "hardcodedColors": {
+    "allowedFiles": {
+      "src/components/chat/message-code-block.tsx": "Code block theme colors mirror rendered code content.",
+      "src/lib/ansi-log.ts": "ANSI terminal color palette maps protocol color indexes."
+    }
+  }
+}

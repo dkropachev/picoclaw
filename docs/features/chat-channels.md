@@ -57,6 +57,7 @@ Owns: CODE web/frontend/src/hooks/use-gateway*
 Owns: CODE web/frontend/src/hooks/use-pico-chat.ts
 Owns: CODE web/frontend/src/hooks/use-sidebar-channels.ts
 Owns: CODE web/frontend/src/routes/channels/**
+Owns: CODE web/frontend/src/routes/index.tsx
 Owns: CHANNEL *
 Owns: CLI cmd/picoclaw/internal/gateway/*
 Owns: CONFIG.channel_list*

@@ -205,8 +205,10 @@ export function CatalogDialog({
                   key={entry.id}
                   className="bg-card text-card-foreground rounded-lg border"
                 >
-                  <div
-                    className="hover:bg-accent/50 flex cursor-pointer items-center gap-3 px-3 py-2.5"
+                  <button
+                    type="button"
+                    className="hover:bg-accent/50 flex w-full cursor-pointer items-center gap-3 bg-transparent px-3 py-2.5 text-left"
+                    aria-expanded={isExpanded}
                     onClick={() => toggleExpand(entry.id)}
                   >
                     {isExpanded ? (
@@ -258,7 +260,7 @@ export function CatalogDialog({
                         <IconTrash className="size-3.5" />
                       </Button>
                     </div>
-                  </div>
+                  </button>
 
                   {isExpanded && (
                     <div className="border-t px-3 py-2">
@@ -301,8 +303,7 @@ export function CatalogDialog({
                       </div>
                       {entrySelected.size > 0 && (
                         <div className="mt-2 space-y-2">
-                          {providerDef?.requiresApiKey !==
-                            false && (
+                          {providerDef?.requiresApiKey !== false && (
                             <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-2 text-xs text-yellow-700 dark:text-yellow-400">
                               {t("models.catalog.needApiKey")}
                             </div>

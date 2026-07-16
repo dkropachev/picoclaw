@@ -28,8 +28,10 @@ Run these before handing off frontend UI changes:
 ```bash
 cd web/frontend
 pnpm lint
+pnpm format
+pnpm test:ui
 ```
 
 From the repository root, `make lint-frontend` installs locked dependencies and
-runs the same lint checks. `pnpm format` remains available as a whole-tree
-formatting audit.
+runs the lint and formatting checks. Use `make test-frontend-ui` for the mocked
+browser smoke suite.

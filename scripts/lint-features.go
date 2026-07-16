@@ -78,6 +78,11 @@ func lintFeatures(root string) error {
 		if !hasCodeOwnership(relPath, text) {
 			failures = append(failures, fmt.Sprintf("%s: missing Owns: CODE production ownership", relPath))
 		}
+		for _, owner := range parseFeatureOwnerships(relPath, text) {
+			if owner.Kind == "CODE" && forbiddenFrontendCodeOwnershipPattern(owner.Pattern) {
+				failures = append(failures, fmt.Sprintf("%s: forbidden broad frontend CODE ownership %q", relPath, owner.Pattern))
+			}
+		}
 		specIDs := requirementIDs(text)
 		levels := requirementLevels(text)
 		if len(specIDs) == 0 {

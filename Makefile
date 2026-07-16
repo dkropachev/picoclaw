@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean help test integration-test build-all lint-docs lint-frontend feature-inventory lint-features feature-delta coverage-delta
+.PHONY: all build install uninstall clean help test integration-test build-all lint-docs lint-frontend test-frontend-ui feature-inventory lint-features feature-delta coverage-delta
 
 # Build variables
 BINARY_NAME=picoclaw
@@ -399,6 +399,13 @@ lint-docs:
 lint-frontend:
 	@cd web/frontend && pnpm install --frozen-lockfile
 	@cd web/frontend && pnpm lint
+	@cd web/frontend && pnpm format
+
+## test-frontend-ui: Run launcher frontend browser smoke tests
+test-frontend-ui:
+	@cd web/frontend && pnpm install --frozen-lockfile
+	@cd web/frontend && pnpm exec playwright install chromium
+	@cd web/frontend && pnpm test:ui
 
 ## feature-inventory: Print discovered feature-relevant repo surfaces
 feature-inventory:

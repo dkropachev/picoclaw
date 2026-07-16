@@ -1,5 +1,5 @@
 .PHONY: dev dev-frontend dev-backend build build-frontend build-dev-picoclaw test lint clean \
-	build-android-arm64 build-android-bundle
+	build-android-arm64 build-android-bundle test-frontend-ui
 
 # Go variables
 GO?=go
@@ -192,11 +192,17 @@ endif
 test:
 	cd $(BACKEND_DIR) && ${WEB_GO} test ./...
 	cd $(FRONTEND_DIR) && pnpm lint
+	cd $(FRONTEND_DIR) && pnpm format
 
 # Lint frontend and backend code
 lint:
 	cd $(BACKEND_DIR) && ${WEB_GO} vet ./...
 	cd $(FRONTEND_DIR) && pnpm lint
+	cd $(FRONTEND_DIR) && pnpm format
+
+test-frontend-ui:
+	cd $(FRONTEND_DIR) && pnpm exec playwright install chromium
+	cd $(FRONTEND_DIR) && pnpm test:ui
 
 # Clean build artifacts
 clean:

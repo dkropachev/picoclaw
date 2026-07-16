@@ -162,8 +162,10 @@ export function AssistantMessage({
           )}
         >
           {isCollapsedBlock && (
-            <div
-              className="text-muted-foreground/60 hover:text-muted-foreground/80 flex cursor-pointer items-center justify-between px-3 py-2 text-[12px] font-medium transition-colors select-none"
+            <button
+              type="button"
+              className="text-muted-foreground/60 hover:text-muted-foreground/80 flex w-full cursor-pointer items-center justify-between bg-transparent px-3 py-2 text-left text-[12px] font-medium transition-colors select-none"
+              aria-expanded={isExpanded}
               onClick={() => setIsExpanded(!isExpanded)}
             >
               <div className="flex items-center gap-1.5">
@@ -190,7 +192,7 @@ export function AssistantMessage({
                   )}
                 />
               </div>
-            </div>
+            </button>
           )}
           {(!isCollapsedBlock || isExpanded) && isToolCalls && hasToolCalls && (
             <div className="space-y-3 px-3 pt-0 pb-3">

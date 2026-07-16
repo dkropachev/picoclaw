@@ -41,6 +41,12 @@ jobs:
       - name: Frontend lint
         run: make lint-frontend
 
+      - name: Install Playwright browsers
+        run: cd web/frontend && pnpm exec playwright install --with-deps chromium
+
+      - name: Frontend UI smoke tests
+        run: cd web/frontend && pnpm test:ui
+
       - name: Fetch base ref
         run: git fetch origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
 

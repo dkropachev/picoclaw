@@ -198,6 +198,111 @@ func codePatternMatches(pattern, path string) bool {
 	return globMatch(pattern, path)
 }
 
+func frontendExpectedSpecPaths(path string) []string {
+	path = normalizeRepoPath(path)
+	rules := []struct {
+		patterns []string
+		spec     string
+	}{
+		{
+			patterns: []string{
+				"web/frontend/src/api/channels.ts",
+				"web/frontend/src/api/gateway.ts",
+				"web/frontend/src/api/pico.ts",
+				"web/frontend/src/components/channels/**",
+				"web/frontend/src/components/chat/**",
+				"web/frontend/src/features/chat/**",
+				"web/frontend/src/hooks/use-gateway*",
+				"web/frontend/src/hooks/use-pico-chat.ts",
+				"web/frontend/src/hooks/use-sidebar-channels.ts",
+				"web/frontend/src/routes/channels/**",
+				"web/frontend/src/routes/index.tsx",
+			},
+			spec: "docs/features/chat-channels.md",
+		},
+		{
+			patterns: []string{
+				"web/frontend/src/api/sessions.ts",
+				"web/frontend/src/components/logs/**",
+				"web/frontend/src/hooks/use-session-history.ts",
+				"web/frontend/src/routes/logs.tsx",
+			},
+			spec: "docs/features/session-memory.md",
+		},
+		{
+			patterns: []string{
+				"web/frontend/src/api/tools.ts",
+				"web/frontend/src/components/agent/tools/**",
+				"web/frontend/src/hooks/use-chat-models.ts",
+				"web/frontend/src/routes/agent/tools.tsx",
+			},
+			spec: "docs/features/tool-execution.md",
+		},
+		{
+			patterns: []string{
+				"web/frontend/src/api/skills.ts",
+				"web/frontend/src/components/agent/hub/**",
+				"web/frontend/src/components/agent/skills/**",
+				"web/frontend/src/routes/agent/hub.tsx",
+				"web/frontend/src/routes/agent/skills.tsx",
+			},
+			spec: "docs/features/skills.md",
+		},
+		{
+			patterns: []string{
+				"web/frontend/src/api/launcher-auth.ts",
+				"web/frontend/src/api/models.ts",
+				"web/frontend/src/api/oauth.ts",
+				"web/frontend/src/api/system.ts",
+				"web/frontend/src/app-providers.tsx",
+				"web/frontend/src/components/app-*",
+				"web/frontend/src/components/config/**",
+				"web/frontend/src/components/credentials/**",
+				"web/frontend/src/components/models/**",
+				"web/frontend/src/components/tour/**",
+				"web/frontend/src/components/ui/**",
+				"web/frontend/src/hooks/use-credentials-page.ts",
+				"web/frontend/src/i18n/**",
+				"web/frontend/src/lib/**",
+				"web/frontend/src/main.tsx",
+				"web/frontend/src/routes/agent.tsx",
+				"web/frontend/src/routes/config*",
+				"web/frontend/src/routes/credentials.tsx",
+				"web/frontend/src/routes/launcher-*",
+				"web/frontend/src/routes/models.tsx",
+				"web/frontend/src/store/**",
+			},
+			spec: "docs/features/launcher-management.md",
+		},
+	}
+
+	var expected []string
+	for _, rule := range rules {
+		for _, pattern := range rule.patterns {
+			if codePatternMatches(pattern, path) {
+				expected = append(expected, rule.spec)
+				break
+			}
+		}
+	}
+	sort.Strings(expected)
+	return expected
+}
+
+func forbiddenFrontendCodeOwnershipPattern(pattern string) bool {
+	pattern = normalizeRepoPathPattern(pattern)
+	switch pattern {
+	case "web/frontend/**",
+		"web/frontend/src/**",
+		"web/frontend/src/*",
+		"web/frontend/src/components/**",
+		"web/frontend/src/routes/**":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeRepoPathPattern(pattern string) string {
 	pattern = strings.TrimSpace(strings.Trim(pattern, "`"))
 	pattern = strings.TrimPrefix(pattern, "./")

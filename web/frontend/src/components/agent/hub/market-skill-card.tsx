@@ -106,7 +106,6 @@ export function MarketSkillCard({
               <TooltipTrigger asChild>
                 <span
                   className={installDisabled ? "cursor-not-allowed" : undefined}
-                  tabIndex={installDisabled ? 0 : undefined}
                 >
                   <Button
                     size="sm"
