@@ -565,6 +565,20 @@ export function EditModelSheet({
                 </div>
               </Field>
 
+              <Field
+                label={t("models.field.reasoningEffort")}
+                hint={t("models.field.reasoningEffortHint")}
+              >
+                <ReasoningEffortSelect
+                  value={form.reasoningEffort}
+                  providerDefaultLabel={t("models.field.providerDefault")}
+                  onChange={(value) => {
+                    if (error) setError("")
+                    setForm((f) => ({ ...f, reasoningEffort: value }))
+                  }}
+                />
+              </Field>
+
               {!isOAuth && (
                 <Field
                   label={t("models.field.apiKey")}
@@ -720,20 +734,6 @@ export function EditModelSheet({
                     value={form.thinkingLevel}
                     onChange={setField("thinkingLevel")}
                     placeholder={t("models.field.providerDefault")}
-                  />
-                </Field>
-
-                <Field
-                  label={t("models.field.reasoningEffort")}
-                  hint={t("models.field.reasoningEffortHint")}
-                >
-                  <ReasoningEffortSelect
-                    value={form.reasoningEffort}
-                    providerDefaultLabel={t("models.field.providerDefault")}
-                    onChange={(value) => {
-                      if (error) setError("")
-                      setForm((f) => ({ ...f, reasoningEffort: value }))
-                    }}
                   />
                 </Field>
 
