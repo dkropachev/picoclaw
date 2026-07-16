@@ -805,6 +805,8 @@ const openAICodexModelsEndpointDefault = "https://chatgpt.com/backend-api/codex/
 
 var openAICodexModelsEndpoint = openAICodexModelsEndpointDefault
 
+const openAICodexModelsClientVersionDefault = "0.139.0"
+
 func isCredentialAuthMethod(authMethod string) bool {
 	switch strings.ToLower(strings.TrimSpace(authMethod)) {
 	case "oauth", "token":
@@ -856,7 +858,20 @@ func openAICodexModelsFetchURL() string {
 	if strings.Contains(fetchURL, "?") {
 		separator = "&"
 	}
-	return fetchURL + separator + "client_version=" + url.QueryEscape(config.Version)
+	return fetchURL + separator + "client_version=" + url.QueryEscape(openAICodexModelsClientVersion())
+}
+
+func openAICodexModelsClientVersion() string {
+	return openAICodexModelsClientVersionDefault
+}
+
+func upstreamStatusError(provider string, statusCode int, body io.Reader) error {
+	preview, _ := io.ReadAll(io.LimitReader(body, 512))
+	detail := strings.TrimSpace(string(preview))
+	if detail == "" {
+		return fmt.Errorf("%s returned status %d", provider, statusCode)
+	}
+	return fmt.Errorf("%s returned status %d: %s", provider, statusCode, detail)
 }
 
 func resolveOpenAICodexCredential(credentialID string) (*auth.AuthCredential, error) {
@@ -919,7 +934,7 @@ func fetchOpenAICodexModels(ctx context.Context, credentialID string) ([]upstrea
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("codex upstream returned status %d", resp.StatusCode)
+		return nil, upstreamStatusError("codex upstream", resp.StatusCode, resp.Body)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -975,7 +990,7 @@ func fetchNearAIModels(ctx context.Context, fetchURL, apiKey string) ([]upstream
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("nearai returned status %d", resp.StatusCode)
+		return nil, upstreamStatusError("nearai", resp.StatusCode, resp.Body)
 	}
 
 	var parsed struct {
@@ -1022,7 +1037,7 @@ func fetchOpenAICompatibleModels(ctx context.Context, fetchURL, apiKey string) (
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("upstream returned status %d", resp.StatusCode)
+		return nil, upstreamStatusError("upstream", resp.StatusCode, resp.Body)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -1087,7 +1102,7 @@ func fetchOllamaModels(ctx context.Context, fetchURL string) ([]upstreamModel, e
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama returned status %d", resp.StatusCode)
+		return nil, upstreamStatusError("ollama", resp.StatusCode, resp.Body)
 	}
 
 	var parsed struct {
