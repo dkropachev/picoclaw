@@ -23,7 +23,7 @@ startup behavior, update, and runtime version metadata.
 | --- | --- | --- | --- |
 | `FR-LAUNCHER-001` | MUST | Dashboard access requires password setup/login and an HttpOnly session cookie; local bootstrap auto-login is loopback-only. | Browser management must be gated. |
 | `FR-LAUNCHER-002` | MUST | Config GET/PUT/PATCH/reset preserves schema defaults, secure string semantics, and runtime log-level application. | Launcher config editing must not corrupt config. |
-| `FR-LAUNCHER-003` | MUST | Model management lists, adds, updates, deletes, tests, fetches, and sets default model entries without exposing stored secret values; advanced model controls such as `reasoning_effort` must use the same validation as runtime config. | Users need safe model administration. |
+| `FR-LAUNCHER-003` | MUST | Model management lists, adds, updates, deletes, tests, fetches, and sets default model entries without exposing stored secret values; model add/edit forms must expose `reasoning_effort` next to the model identifier and validate it with the same rules as runtime config. | Users need safe model administration. |
 | `FR-LAUNCHER-004` | MUST | OAuth login flow creates, polls, completes, and logs out provider credentials through bounded flow state. | OAuth-backed providers need browser setup. |
 | `FR-LAUNCHER-005` | MUST | Gateway lifecycle endpoints report status/logs and start/stop/restart managed gateway processes without losing log diagnostics. | Desktop users need process control. |
 | `FR-LAUNCHER-006` | MUST | Startup, launcher config, update, and version endpoints report or mutate only their documented system settings. | System management must be narrow and auditable. |

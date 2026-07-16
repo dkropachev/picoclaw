@@ -598,6 +598,19 @@ export function AddModelSheet({
                 </div>
               </Field>
 
+              <Field
+                label={t("models.field.reasoningEffort")}
+                hint={t("models.field.reasoningEffortHint")}
+              >
+                <ReasoningEffortSelect
+                  value={form.reasoningEffort}
+                  providerDefaultLabel={t("models.field.providerDefault")}
+                  onChange={(value) =>
+                    setForm((f) => ({ ...f, reasoningEffort: value }))
+                  }
+                />
+              </Field>
+
               {!isOAuth && (
                 <Field label={t("models.field.apiKey")}>
                   <KeyInput
@@ -748,19 +761,6 @@ export function AddModelSheet({
                     value={form.thinkingLevel}
                     onChange={setField("thinkingLevel")}
                     placeholder={t("models.field.providerDefault")}
-                  />
-                </Field>
-
-                <Field
-                  label={t("models.field.reasoningEffort")}
-                  hint={t("models.field.reasoningEffortHint")}
-                >
-                  <ReasoningEffortSelect
-                    value={form.reasoningEffort}
-                    providerDefaultLabel={t("models.field.providerDefault")}
-                    onChange={(value) =>
-                      setForm((f) => ({ ...f, reasoningEffort: value }))
-                    }
                   />
                 </Field>
 
