@@ -674,10 +674,12 @@ func (h *Handler) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var req struct {
-		Provider   string `json:"provider"`
-		APIKey     string `json:"api_key"`
-		APIBase    string `json:"api_base"`
-		ModelIndex *int   `json:"model_index,omitempty"`
+		Provider     string `json:"provider"`
+		APIKey       string `json:"api_key"`
+		APIBase      string `json:"api_base"`
+		AuthMethod   string `json:"auth_method,omitempty"`
+		CredentialID string `json:"credential_id,omitempty"`
+		ModelIndex   *int   `json:"model_index,omitempty"`
 	}
 	if err = json.Unmarshal(body, &req); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
@@ -696,10 +698,19 @@ func (h *Handler) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 
 	apiKey := strings.TrimSpace(req.APIKey)
 	apiBase := strings.TrimSpace(req.APIBase)
+	authMethod := strings.ToLower(strings.TrimSpace(req.AuthMethod))
+	credentialID := strings.TrimSpace(req.CredentialID)
 
-	if apiKey == "" && req.ModelIndex != nil {
-		if stored := h.lookupStoredAPIKey(*req.ModelIndex, req.Provider, apiBase); stored != "" {
-			apiKey = stored
+	if req.ModelIndex != nil {
+		stored := h.lookupStoredModelFetchAuth(*req.ModelIndex, req.Provider, apiBase)
+		if apiKey == "" && stored.APIKey != "" {
+			apiKey = stored.APIKey
+		}
+		if authMethod == "" && stored.AuthMethod != "" {
+			authMethod = stored.AuthMethod
+		}
+		if credentialID == "" && stored.CredentialID != "" {
+			credentialID = stored.CredentialID
 		}
 	}
 
@@ -714,7 +725,13 @@ func (h *Handler) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	models, err := fetchUpstreamModels(ctx, req.Provider, apiBase, apiKey)
+	models, err := fetchUpstreamModels(ctx, upstreamFetchOptions{
+		Provider:     req.Provider,
+		APIBase:      apiBase,
+		APIKey:       apiKey,
+		AuthMethod:   authMethod,
+		CredentialID: credentialID,
+	})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to fetch models: %v", err), http.StatusBadGateway)
 		return
@@ -737,15 +754,21 @@ func (h *Handler) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Handler) lookupStoredAPIKey(index int, reqProvider, reqAPIBase string) string {
+type storedModelFetchAuth struct {
+	APIKey       string
+	AuthMethod   string
+	CredentialID string
+}
+
+func (h *Handler) lookupStoredModelFetchAuth(index int, reqProvider, reqAPIBase string) storedModelFetchAuth {
 	cfg, err := config.LoadConfig(h.configPath)
 	if err != nil || index < 0 || index >= len(cfg.ModelList) {
-		return ""
+		return storedModelFetchAuth{}
 	}
 	stored := cfg.ModelList[index]
 	storedProvider, _ := providers.ExtractProtocol(stored)
 	if providers.NormalizeProvider(reqProvider) != providers.NormalizeProvider(storedProvider) {
-		return ""
+		return storedModelFetchAuth{}
 	}
 	effectiveReqBase := strings.TrimSpace(reqAPIBase)
 	if effectiveReqBase == "" {
@@ -756,9 +779,13 @@ func (h *Handler) lookupStoredAPIKey(index int, reqProvider, reqAPIBase string) 
 		effectiveStoredBase = providers.DefaultAPIBaseForProtocol(storedProvider)
 	}
 	if normalizeAPIBaseForCompare(effectiveReqBase) != normalizeAPIBaseForCompare(effectiveStoredBase) {
-		return ""
+		return storedModelFetchAuth{}
 	}
-	return stored.APIKey()
+	return storedModelFetchAuth{
+		APIKey:       stored.APIKey(),
+		AuthMethod:   strings.ToLower(strings.TrimSpace(stored.AuthMethod)),
+		CredentialID: strings.TrimSpace(stored.CredentialID),
+	}
 }
 
 type upstreamModel struct {
@@ -766,9 +793,32 @@ type upstreamModel struct {
 	OwnedBy string `json:"owned_by,omitempty"`
 }
 
-func fetchUpstreamModels(ctx context.Context, provider, apiBase, apiKey string) ([]upstreamModel, error) {
-	apiBase = strings.TrimRight(strings.TrimSpace(apiBase), "/")
-	provider = providers.NormalizeProvider(provider)
+type upstreamFetchOptions struct {
+	Provider     string
+	APIBase      string
+	APIKey       string
+	AuthMethod   string
+	CredentialID string
+}
+
+const openAICodexModelsEndpointDefault = "https://chatgpt.com/backend-api/codex/models"
+
+var openAICodexModelsEndpoint = openAICodexModelsEndpointDefault
+
+func isCredentialAuthMethod(authMethod string) bool {
+	switch strings.ToLower(strings.TrimSpace(authMethod)) {
+	case "oauth", "token":
+		return true
+	default:
+		return false
+	}
+}
+
+func fetchUpstreamModels(ctx context.Context, opts upstreamFetchOptions) ([]upstreamModel, error) {
+	apiBase := strings.TrimRight(strings.TrimSpace(opts.APIBase), "/")
+	apiKey := strings.TrimSpace(opts.APIKey)
+	provider := providers.NormalizeProvider(opts.Provider)
+	authMethod := strings.ToLower(strings.TrimSpace(opts.AuthMethod))
 
 	var fetchURL string
 	switch provider {
@@ -784,11 +834,129 @@ func fetchUpstreamModels(ctx context.Context, provider, apiBase, apiKey string) 
 	case "nearai":
 		fetchURL = apiBase + "/model/list"
 		return fetchNearAIModels(ctx, fetchURL, apiKey)
+	case "openai":
+		if isCredentialAuthMethod(authMethod) {
+			return fetchOpenAICodexModels(ctx, opts.CredentialID)
+		}
+		fetchURL = apiBase + "/models"
+		return fetchOpenAICompatibleModels(ctx, fetchURL, apiKey)
 	default:
 		// OpenAI-compatible: /v1/models
 		fetchURL = apiBase + "/models"
 		return fetchOpenAICompatibleModels(ctx, fetchURL, apiKey)
 	}
+}
+
+func openAICodexModelsFetchURL() string {
+	fetchURL := strings.TrimSpace(openAICodexModelsEndpoint)
+	if fetchURL == "" {
+		fetchURL = openAICodexModelsEndpointDefault
+	}
+	separator := "?"
+	if strings.Contains(fetchURL, "?") {
+		separator = "&"
+	}
+	return fetchURL + separator + "client_version=" + url.QueryEscape(config.Version)
+}
+
+func resolveOpenAICodexCredential(credentialID string) (*auth.AuthCredential, error) {
+	normalizedCredentialID, err := auth.NormalizeCredentialID("openai", credentialID)
+	if err != nil {
+		return nil, err
+	}
+	cred, err := auth.GetCredential(normalizedCredentialID)
+	if err != nil {
+		return nil, fmt.Errorf("loading auth credentials: %w", err)
+	}
+	if cred == nil {
+		return nil, fmt.Errorf(
+			"no credentials for %s. Run: picoclaw auth login --provider openai --credential-id %s",
+			normalizedCredentialID,
+			normalizedCredentialID,
+		)
+	}
+	if cred.AuthMethod == "oauth" && cred.NeedsRefresh() && cred.RefreshToken != "" {
+		refreshed, err := auth.RefreshAccessToken(cred, auth.OpenAIOAuthConfig())
+		if err != nil {
+			return nil, fmt.Errorf("refreshing token: %w", err)
+		}
+		if refreshed.AccountID == "" {
+			refreshed.AccountID = cred.AccountID
+		}
+		if err := auth.SetCredential(normalizedCredentialID, refreshed); err != nil {
+			return nil, fmt.Errorf("saving refreshed token: %w", err)
+		}
+		cred = refreshed
+	}
+	if strings.TrimSpace(cred.AccessToken) == "" {
+		return nil, fmt.Errorf("OpenAI Codex credential %s has no access token", normalizedCredentialID)
+	}
+	return cred, nil
+}
+
+func fetchOpenAICodexModels(ctx context.Context, credentialID string) ([]upstreamModel, error) {
+	cred, err := resolveOpenAICodexCredential(credentialID)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, openAICodexModelsFetchURL(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(cred.AccessToken))
+	if accountID := strings.TrimSpace(cred.AccountID); accountID != "" {
+		req.Header.Set("ChatGPT-Account-ID", accountID)
+	}
+	req.Header.Set("OAI-Product-Sku", "codex")
+	req.Header.Set("originator", "codex_cli_rs")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("codex upstream returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	return parseOpenAICodexModelsBody(body)
+}
+
+func parseOpenAICodexModelsBody(body []byte) ([]upstreamModel, error) {
+	var envelope struct {
+		Models []struct {
+			Slug           string `json:"slug"`
+			DisplayName    string `json:"display_name"`
+			Visibility     string `json:"visibility"`
+			SupportedInAPI *bool  `json:"supported_in_api"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &envelope); err == nil && envelope.Models != nil {
+		models := make([]upstreamModel, 0, len(envelope.Models))
+		for _, m := range envelope.Models {
+			id := strings.TrimSpace(m.Slug)
+			if id == "" {
+				id = strings.TrimSpace(m.DisplayName)
+			}
+			if id == "" {
+				continue
+			}
+			visibility := strings.ToLower(strings.TrimSpace(m.Visibility))
+			if visibility != "" && visibility != "list" {
+				continue
+			}
+			models = append(models, upstreamModel{ID: id, OwnedBy: "openai-codex"})
+		}
+		return models, nil
+	}
+	return parseOpenAICompatibleModelsBody(body)
 }
 
 func fetchNearAIModels(ctx context.Context, fetchURL, apiKey string) ([]upstreamModel, error) {
@@ -861,7 +1029,10 @@ func fetchOpenAICompatibleModels(ctx context.Context, fetchURL, apiKey string) (
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
+	return parseOpenAICompatibleModelsBody(body)
+}
 
+func parseOpenAICompatibleModelsBody(body []byte) ([]upstreamModel, error) {
 	type modelItem struct {
 		ID      string `json:"id"`
 		OwnedBy string `json:"owned_by"`

@@ -847,6 +847,8 @@ export function EditModelSheet({
         provider={canonicalProvider}
         apiKey={form.apiKey}
         apiBase={effectiveApiBase}
+        authMethod={effectiveAuthMethod}
+        credentialID={form.credentialID.trim()}
         modelIndex={model?.index}
         backendOptions={providerOptions}
       />
