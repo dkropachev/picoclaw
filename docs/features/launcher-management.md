@@ -28,7 +28,7 @@ startup behavior, update, and runtime version metadata.
 | `FR-LAUNCHER-005` | MUST | Gateway lifecycle endpoints report status/logs and start/stop/restart managed gateway processes without losing log diagnostics. | Desktop users need process control. |
 | `FR-LAUNCHER-006` | MUST | Startup, launcher config, update, and version endpoints report or mutate only their documented system settings. | System management must be narrow and auditable. |
 | `FR-LAUNCHER-007` | SHOULD | API errors return JSON responses with actionable messages and appropriate status codes. | Frontend UX needs consistent failures. |
-| `FR-LAUNCHER-008` | MUST | Model fetch distinguishes regular OpenAI API-key listings from OpenAI OAuth/token Codex subscription listings; credential-backed OpenAI fetches use the stored credential and account headers against the ChatGPT Codex models endpoint, while API-key fetches continue to use the OpenAI-compatible `/models` endpoint. | Subscription and API-key accounts have different upstream auth and must not fail or mix credentials. |
+| `FR-LAUNCHER-008` | MUST | Model fetch distinguishes regular OpenAI API-key listings from OpenAI OAuth/token Codex subscription listings; credential-backed OpenAI fetches use the stored credential, account headers, and a Codex-compatible client version against the ChatGPT Codex models endpoint, while API-key fetches continue to use the OpenAI-compatible `/models` endpoint. | Subscription and API-key accounts have different upstream auth and must not fail or mix credentials. |
 
 ## Data And State Model
 
@@ -123,8 +123,9 @@ Owns: TEST pkg/migrate/*
    provider auth records.
 4. For model fetch requests, resolve stored model auth when a model index is
    supplied, prefer explicit request credentials otherwise, route OpenAI
-   OAuth/token fetches to the ChatGPT Codex model list endpoint, and keep
-   regular API-key fetches on the OpenAI-compatible `/models` path.
+   OAuth/token fetches to the ChatGPT Codex model list endpoint with a
+   Codex-compatible `client_version`, and keep regular API-key fetches on the
+   OpenAI-compatible `/models` path.
 5. For gateway lifecycle requests, inspect current process state first, execute
    start/stop/restart transitions only when valid, and retain log buffers for
    status and diagnostics responses.
@@ -148,6 +149,8 @@ shared authenticated dashboard layout and routing shell components.
 - Model add/update rejects unsupported `reasoning_effort` values before saving.
 - OpenAI Codex model fetch fails with an actionable credential error when the
   selected OAuth/token credential is missing or empty.
+- OpenAI Codex model fetch reports a concise upstream response detail when the
+  model list endpoint rejects the request.
 - Public launcher access obeys configured host/CIDR policy.
 
 ## Acceptance Evidence
