@@ -41,7 +41,12 @@ export function SessionHistoryMenu({
   return (
     <DropdownMenu onOpenChange={onOpenChange}>
       <DropdownMenuTrigger asChild>
-        <Button variant="secondary" size="sm" className="h-9 gap-2">
+        <Button
+          variant="secondary"
+          size="sm"
+          className="h-9 gap-2"
+          aria-label={t("chat.history")}
+        >
           <IconHistory className="size-4" />
           <span className="hidden sm:inline">{t("chat.history")}</span>
         </Button>

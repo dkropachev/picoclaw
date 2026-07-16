@@ -90,7 +90,7 @@ export function LogsPanel({
             0
           </span>
           {logs.length === 0 ? (
-            <div className="text-zinc-500 italic">{t("pages.logs.empty")}</div>
+            <div className="text-zinc-400 italic">{t("pages.logs.empty")}</div>
           ) : (
             logs.map((log, index) => (
               <AnsiLogLine key={index} line={log} wrapColumns={wrapColumns} />

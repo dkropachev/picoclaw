@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean help test integration-test build-all lint-docs feature-inventory lint-features feature-delta coverage-delta
+.PHONY: all build install uninstall clean help test integration-test build-all lint-docs lint-frontend test-frontend-ui feature-inventory test-featuretools lint-features feature-delta coverage-delta
 
 # Build variables
 BINARY_NAME=picoclaw
@@ -395,9 +395,25 @@ fmt:
 lint-docs:
 	@./scripts/lint-docs.sh
 
+## lint-frontend: Check launcher frontend code and UI rules
+lint-frontend:
+	@cd web/frontend && pnpm install --frozen-lockfile
+	@cd web/frontend && pnpm lint
+	@cd web/frontend && pnpm format
+
+## test-frontend-ui: Run launcher frontend browser smoke tests
+test-frontend-ui:
+	@cd web/frontend && pnpm install --frozen-lockfile
+	@cd web/frontend && pnpm exec playwright install chromium
+	@cd web/frontend && pnpm test:ui
+
 ## feature-inventory: Print discovered feature-relevant repo surfaces
 feature-inventory:
 	@$(GO) run -tags featuretools ./scripts/feature_inventory.go ./scripts/featuretools_lib.go
+
+## test-featuretools: Run focused tests for feature governance helpers
+test-featuretools:
+	@$(GO) test -tags featuretools ./scripts/featuretools_lib.go ./scripts/feature_delta_guard.go ./scripts/featuretools_lib_test.go
 
 ## lint-features: Check feature requirements and surface ownership
 lint-features:
@@ -415,6 +431,7 @@ coverage-delta:
 lint:
 	@$(GOLANGCI_LINT) run --build-tags $(GO_BUILD_TAGS)
 	@./scripts/lint-docs.sh
+	@$(MAKE) lint-frontend
 	@$(GO) run -tags featuretools ./scripts/lint-features.go ./scripts/featuretools_lib.go
 
 ## fix: Fix linting issues

@@ -136,12 +136,9 @@ describe("ThreadSidebar", () => {
           source_query: "japan relocation",
         }),
       )
-      expect(switchChatSessionAndSend).toHaveBeenCalledWith(
-        "session-sidebar",
-        {
-          content: "japan relocation",
-        },
-      )
+      expect(switchChatSessionAndSend).toHaveBeenCalledWith("session-sidebar", {
+        content: "japan relocation",
+      })
     })
   })
 

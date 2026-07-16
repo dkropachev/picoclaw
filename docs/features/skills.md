@@ -67,6 +67,7 @@ Owns: TOOL install_skill
 | HTTP | `/api/skills*` | Launcher list, detail, search, install, import, and delete. | `FR-SKILLS-003`, `FR-SKILLS-004`, `FR-SKILLS-005` |
 | Tools | `find_skills`, `install_skill` | Agent-callable registry search and install. | `FR-SKILLS-003`, `FR-SKILLS-004` |
 | Config | `tools.skills.*` | Registries, cache, concurrency, and legacy GitHub fields. | `FR-SKILLS-003`, `FR-SKILLS-007` |
+| Frontend | Skill list, import, detail, and hub marketplace pages under `web/frontend/src/components/agent/skills/**` and `web/frontend/src/components/agent/hub/**` | Browser skill management and registry discovery surfaces follow shared frontend API, accessibility, formatting, and route smoke-test rules. | `FR-SKILLS-003`, `FR-SKILLS-004`, `FR-SKILLS-005` |
 
 ## Algorithms And Ordering
 

@@ -906,10 +906,10 @@ func fetchOpenAICodexModels(ctx context.Context, credentialID string) ([]upstrea
 	}
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(cred.AccessToken))
 	if accountID := strings.TrimSpace(cred.AccountID); accountID != "" {
-		req.Header.Set("ChatGPT-Account-ID", accountID)
+		req.Header.Set("Chatgpt-Account-Id", accountID)
 	}
-	req.Header.Set("OAI-Product-Sku", "codex")
-	req.Header.Set("originator", "codex_cli_rs")
+	req.Header.Set("Oai-Product-Sku", "codex")
+	req.Header.Set("Originator", "codex_cli_rs")
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)

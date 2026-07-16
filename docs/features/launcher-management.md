@@ -63,9 +63,9 @@ Owns: CODE web/frontend/src/hooks/use-credentials-page.ts
 Owns: CODE web/frontend/src/i18n/**
 Owns: CODE web/frontend/src/lib/**
 Owns: CODE web/frontend/src/main.tsx
+Owns: CODE web/frontend/src/routes/agent.tsx
 Owns: CODE web/frontend/src/routes/config*
 Owns: CODE web/frontend/src/routes/credentials.tsx
-Owns: CODE web/frontend/src/routes/index.tsx
 Owns: CODE web/frontend/src/routes/launcher-*
 Owns: CODE web/frontend/src/routes/models.tsx
 Owns: CODE web/frontend/src/store/**
@@ -89,6 +89,7 @@ Owns: TEST cmd/picoclaw/internal/config/*
 Owns: TEST cmd/picoclaw/internal/helpers_test.go *
 Owns: TEST cmd/picoclaw/internal/migrate/*
 Owns: TEST cmd/picoclaw/internal/onboard/*
+Owns: TEST scripts/featuretools_lib_test.go *
 Owns: TEST web/backend/*
 Owns: TEST web/backend/api/auth*
 Owns: TEST web/backend/api/config*
@@ -109,6 +110,7 @@ Owns: TEST pkg/migrate/*
 | HTTP | `/api/auth*`, `/api/config*`, `/api/models*`, `/api/oauth*`, `/api/system*`, `/api/update`, `/api/weixin*`, `/api/wecom*` | Authenticated launcher management endpoints. | `FR-LAUNCHER-001` through `FR-LAUNCHER-007` |
 | CLI | `picoclaw auth`, `picoclaw config`, `picoclaw onboard`, `picoclaw migrate` | Non-browser setup, auth, and migration helpers. | `FR-LAUNCHER-002`, `FR-LAUNCHER-004` |
 | Config | Launcher config file beside app config | Port/public/access options and dashboard auth migration. | `FR-LAUNCHER-001`, `FR-LAUNCHER-006` |
+| Frontend | `web/frontend/AGENTS.md`, `docs/design/frontend-guidelines.md`, `docs/features/frontend-ownership.json`, `web/frontend/scripts/lint-ui-rules.mjs`, and `web/frontend/tests/ui-smoke.spec.ts` | Agent-facing launcher UI guidance plus static, formatting, accessibility, ownership, and mocked-route browser checks. Feature-specific UI behavior remains owned by the relevant product feature spec. | `FR-LAUNCHER-002`, `FR-LAUNCHER-007` |
 
 ## Algorithms And Ordering
 

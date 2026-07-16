@@ -44,14 +44,20 @@ describe("handlePicoMessage typing state", () => {
   })
 
   it("keeps thinking visible while server typing is active", () => {
-    handlePicoMessage({ type: "typing.start", session_id: sessionId }, sessionId)
+    handlePicoMessage(
+      { type: "typing.start", session_id: sessionId },
+      sessionId,
+    )
     handlePicoMessage(assistantCreate(), sessionId)
 
     expect(store.get(chatAtom).isTyping).toBe(true)
   })
 
   it("stops thinking when server typing stops", () => {
-    handlePicoMessage({ type: "typing.start", session_id: sessionId }, sessionId)
+    handlePicoMessage(
+      { type: "typing.start", session_id: sessionId },
+      sessionId,
+    )
     handlePicoMessage(assistantCreate(), sessionId)
     handlePicoMessage({ type: "typing.stop", session_id: sessionId }, sessionId)
 

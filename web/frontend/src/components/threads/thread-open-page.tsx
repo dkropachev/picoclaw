@@ -5,25 +5,19 @@ import { useEffect } from "react"
 import { useTranslation } from "react-i18next"
 
 import {
+  type ThreadSummary,
   createThread,
   dropThread,
   getThread,
-  type ThreadSummary,
 } from "@/api/threads"
 import { ChatPage } from "@/components/chat/chat-page"
 import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
-import {
-  switchChatSession,
-} from "@/features/chat/controller"
+import { switchChatSession } from "@/features/chat/controller"
 import { buildThreadSourceQuery } from "@/features/chat/thread-seed"
 import { threadOpenSessionIdAtom } from "@/store/threads"
 
-function EmptyThreadPage({
-  onCreateThread,
-}: {
-  onCreateThread: () => void
-}) {
+function EmptyThreadPage({ onCreateThread }: { onCreateThread: () => void }) {
   const { t } = useTranslation()
 
   return (

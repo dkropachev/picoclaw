@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -35,6 +36,16 @@ type featureOwnership struct {
 	Pattern     string
 	SpecPath    string
 	SpecRelPath string
+}
+
+type frontendOwnershipConfig struct {
+	Rules                               []frontendOwnershipRule `json:"rules"`
+	ForbiddenBroadCodeOwnershipPatterns []string                `json:"forbiddenBroadCodeOwnershipPatterns"`
+}
+
+type frontendOwnershipRule struct {
+	Spec     string   `json:"spec"`
+	Patterns []string `json:"patterns"`
 }
 
 func repoRoot() (string, error) {
@@ -97,6 +108,15 @@ func changedFiles(root, base, head string) ([]string, error) {
 	}
 	sort.Strings(files)
 	return files, nil
+}
+
+func isFeatureSpecPath(path string) bool {
+	path = normalizeRepoPath(path)
+	if !strings.HasPrefix(path, "docs/features/") || !strings.HasSuffix(path, ".md") {
+		return false
+	}
+	base := filepath.Base(path)
+	return base != "README.md" && base != "template.md"
 }
 
 func loadFeatureSpecs(root string) ([]featureSpecMetadata, error) {
@@ -196,6 +216,94 @@ func codePatternMatches(pattern, path string) bool {
 		return path == prefix || strings.HasPrefix(path, prefix+"/")
 	}
 	return globMatch(pattern, path)
+}
+
+func loadFrontendOwnershipConfig(root string) (frontendOwnershipConfig, error) {
+	configPath := filepath.Join(root, "docs", "features", "frontend-ownership.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return frontendOwnershipConfig{}, fmt.Errorf("read %s: %w", rel(root, configPath), err)
+	}
+	var cfg frontendOwnershipConfig
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
+		return frontendOwnershipConfig{}, fmt.Errorf("parse %s: %w", rel(root, configPath), err)
+	}
+	normalizeFrontendOwnershipConfig(&cfg)
+	return cfg, nil
+}
+
+func normalizeFrontendOwnershipConfig(cfg *frontendOwnershipConfig) {
+	for i := range cfg.Rules {
+		cfg.Rules[i].Spec = normalizeRepoPath(cfg.Rules[i].Spec)
+		for j := range cfg.Rules[i].Patterns {
+			cfg.Rules[i].Patterns[j] = normalizeRepoPathPattern(cfg.Rules[i].Patterns[j])
+		}
+	}
+	for i := range cfg.ForbiddenBroadCodeOwnershipPatterns {
+		cfg.ForbiddenBroadCodeOwnershipPatterns[i] = normalizeRepoPathPattern(cfg.ForbiddenBroadCodeOwnershipPatterns[i])
+	}
+}
+
+func validateFrontendOwnershipConfig(root string, cfg frontendOwnershipConfig) []string {
+	var failures []string
+	if len(cfg.Rules) == 0 {
+		failures = append(failures, "docs/features/frontend-ownership.json: no ownership rules configured")
+	}
+	if len(cfg.ForbiddenBroadCodeOwnershipPatterns) == 0 {
+		failures = append(failures, "docs/features/frontend-ownership.json: no forbidden broad frontend ownership patterns configured")
+	}
+	for index, rule := range cfg.Rules {
+		if rule.Spec == "" {
+			failures = append(failures, fmt.Sprintf("docs/features/frontend-ownership.json: rule %d has empty spec", index))
+		} else if !isFeatureSpecPath(rule.Spec) {
+			failures = append(failures, fmt.Sprintf("docs/features/frontend-ownership.json: rule %d spec %q is not a feature spec path", index, rule.Spec))
+		} else if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rule.Spec))); err != nil {
+			failures = append(failures, fmt.Sprintf("docs/features/frontend-ownership.json: rule %d spec %q does not exist", index, rule.Spec))
+		}
+		if len(rule.Patterns) == 0 {
+			failures = append(failures, fmt.Sprintf("docs/features/frontend-ownership.json: rule %d for %q has no patterns", index, rule.Spec))
+		}
+		for _, pattern := range rule.Patterns {
+			if pattern == "" {
+				failures = append(failures, fmt.Sprintf("docs/features/frontend-ownership.json: rule %d for %q has an empty pattern", index, rule.Spec))
+			} else if !strings.HasPrefix(pattern, "web/frontend/src/") {
+				failures = append(failures, fmt.Sprintf("docs/features/frontend-ownership.json: rule %d pattern %q must stay under web/frontend/src/", index, pattern))
+			}
+		}
+	}
+	sort.Strings(failures)
+	return failures
+}
+
+func frontendExpectedSpecPaths(cfg frontendOwnershipConfig, path string) []string {
+	path = normalizeRepoPath(path)
+	seen := make(map[string]bool)
+	var expected []string
+	for _, rule := range cfg.Rules {
+		for _, pattern := range rule.Patterns {
+			if codePatternMatches(pattern, path) {
+				if !seen[rule.Spec] {
+					seen[rule.Spec] = true
+					expected = append(expected, rule.Spec)
+				}
+				break
+			}
+		}
+	}
+	sort.Strings(expected)
+	return expected
+}
+
+func forbiddenFrontendCodeOwnershipPattern(cfg frontendOwnershipConfig, pattern string) bool {
+	pattern = normalizeRepoPathPattern(pattern)
+	for _, forbidden := range cfg.ForbiddenBroadCodeOwnershipPatterns {
+		if pattern == forbidden {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeRepoPathPattern(pattern string) string {

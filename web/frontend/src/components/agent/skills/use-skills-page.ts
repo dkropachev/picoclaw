@@ -273,13 +273,13 @@ export function useSkillsPage() {
     setIsDragActive(false)
   }
 
-  const handleDropZoneDragEnter = (event: DragEvent<HTMLDivElement>) => {
+  const handleDropZoneDragEnter = (event: DragEvent<HTMLElement>) => {
     event.preventDefault()
     dragDepthRef.current += 1
     setIsDragActive(true)
   }
 
-  const handleDropZoneDragLeave = (event: DragEvent<HTMLDivElement>) => {
+  const handleDropZoneDragLeave = (event: DragEvent<HTMLElement>) => {
     event.preventDefault()
     dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
     if (dragDepthRef.current === 0) {
@@ -287,7 +287,7 @@ export function useSkillsPage() {
     }
   }
 
-  const handleDropZoneDrop = (event: DragEvent<HTMLDivElement>) => {
+  const handleDropZoneDrop = (event: DragEvent<HTMLElement>) => {
     event.preventDefault()
     const file = event.dataTransfer.files?.[0]
     resetDragState()

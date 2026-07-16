@@ -61,10 +61,7 @@ vi.mock("@/components/chat/chat-page", () => ({
       discoverable: true,
     }
     return (
-      <section
-        aria-label="chat pane"
-        data-history={String(showSessionHistory)}
-      >
+      <section aria-label="chat pane" data-history={String(showSessionHistory)}>
         Chat pane: {fallbackTitle}
         {newChatLabel && (
           <button type="button" onClick={onNewChat}>

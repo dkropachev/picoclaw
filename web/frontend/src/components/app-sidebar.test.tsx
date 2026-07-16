@@ -66,8 +66,12 @@ describe("AppSidebar", () => {
       "href",
       "/threads/search",
     )
-    expect(screen.queryByRole("link", { name: "Search" })).not.toBeInTheDocument()
-    expect(screen.queryByRole("link", { name: "Thread" })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole("link", { name: "Search" }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole("link", { name: "Thread" }),
+    ).not.toBeInTheDocument()
   })
 
   it("keeps Threads navigation on search when viewing a concrete thread", () => {

@@ -139,6 +139,7 @@ export function ContextUsageRing({
             </span>
           </div>
           <div className="bg-muted mt-1.5 h-1.5 w-full overflow-hidden rounded-full">
+            {/* ui-rule-allow dynamic-style: bar width reflects runtime context usage percent. */}
             <div
               className="h-full rounded-full bg-violet-500 transition-all"
               style={{ width: `${barPercent}%` }}
@@ -155,19 +156,24 @@ export function ContextUsageRing({
               </div>
             )}
             <div className="flex items-center justify-between text-[10px]">
-              <span className="text-muted-foreground">{t("chat.contextCompressAt")}</span>
+              <span className="text-muted-foreground">
+                {t("chat.contextCompressAt")}
+              </span>
               <span className="tabular-nums">
                 {formatTokens(usage.compress_at_tokens)}
               </span>
             </div>
-            {usage.summarize_at_tokens != null && usage.summarize_at_tokens > 0 && (
-              <div className="flex items-center justify-between text-[10px]">
-                <span className="text-muted-foreground">{t("chat.contextSummarizeAt")}</span>
-                <span className="tabular-nums">
-                  {formatTokens(usage.summarize_at_tokens)}
-                </span>
-              </div>
-            )}
+            {usage.summarize_at_tokens != null &&
+              usage.summarize_at_tokens > 0 && (
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className="text-muted-foreground">
+                    {t("chat.contextSummarizeAt")}
+                  </span>
+                  <span className="tabular-nums">
+                    {formatTokens(usage.summarize_at_tokens)}
+                  </span>
+                </div>
+              )}
           </div>
 
           <button

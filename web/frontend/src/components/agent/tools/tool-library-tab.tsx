@@ -88,7 +88,12 @@ export function ToolLibraryTab({
               onStatusFilterChange(value as ToolStatusFilter)
             }
           >
-            <SelectTrigger className="bg-muted/40 hover:bg-muted/60 focus:ring-foreground/5 focus:border-border/80 h-11 w-full rounded-xl border-transparent shadow-none transition-all duration-300 sm:w-36">
+            <SelectTrigger
+              aria-label={t("pages.agent.tools.filter.status", {
+                defaultValue: "Tool status",
+              })}
+              className="bg-muted/40 hover:bg-muted/60 focus:ring-foreground/5 focus:border-border/80 h-11 w-full rounded-xl border-transparent shadow-none transition-all duration-300 sm:w-36"
+            >
               <SelectValue
                 placeholder={t("pages.agent.tools.filter.all", "All Status")}
               />
@@ -222,6 +227,10 @@ function ToolCard({
             <Switch
               checked={isToggledOn}
               disabled={isPending}
+              aria-label={t("pages.agent.tools.toggle_tool", {
+                defaultValue: "Toggle {{name}}",
+                name: tool.name,
+              })}
               onCheckedChange={(checked) => onToggleTool(tool.name, checked)}
               className={cn(
                 "shrink-0",

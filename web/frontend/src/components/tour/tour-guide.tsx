@@ -159,6 +159,7 @@ export function TourGuide() {
   return (
     <>
       {targetElement ? (
+        /* ui-rule-allow dynamic-style: tour overlay follows measured target geometry. */
         <div
           className="pointer-events-none fixed z-[100] transition-all duration-300"
           style={{
@@ -176,6 +177,7 @@ export function TourGuide() {
       )}
 
       {targetElement && (
+        /* ui-rule-allow dynamic-style: tour focus ring follows measured target geometry. */
         <div
           className="ring-primary ring-offset-background pointer-events-none fixed z-[101] rounded-lg ring-2 ring-offset-2 transition-all duration-300"
           style={{
@@ -187,6 +189,7 @@ export function TourGuide() {
         />
       )}
 
+      {/* ui-rule-allow dynamic-style: tour popover position depends on the active target rect. */}
       <div
         className={cn(
           "bg-background fixed z-[102] w-80 rounded-xl border p-4 shadow-2xl",

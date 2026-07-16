@@ -97,6 +97,7 @@ Owns: TOOL write_file
 | Tools | `read_file`, `write_file`, `edit_file`, `append_file`, `list_dir`, `load_image`, `send_file`, `exec`, `web_search`, `web_fetch`, hardware and delivery tools | Built-in tool schemas and execution behavior. | `FR-TOOL-001` through `FR-TOOL-007` |
 | HTTP | `/api/tools`, `/api/tools/{name}/state`, `/api/tools/web-search-config` | Launcher tool state and web search configuration. | `FR-TOOL-004` |
 | Config | `tools.*` subtrees except MCP, skills, and cron ownership in their feature specs | Tool enablement, limits, providers, filtering, and policies. | `FR-TOOL-002` through `FR-TOOL-006` |
+| Frontend | Tool library and web-search configuration pages under `web/frontend/src/components/agent/tools/**` | Browser tool management follows shared frontend API, accessibility, formatting, and route smoke-test rules while preserving tool enablement semantics. | `FR-TOOL-001`, `FR-TOOL-004` |
 
 ## Algorithms And Ordering
 

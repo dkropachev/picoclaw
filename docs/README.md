@@ -16,6 +16,7 @@ If you are browsing docs rather than reorganizing them, start with these directo
 - [Operations](operations/README.md): debugging and troubleshooting material.
 - [Security](security/README.md): security-focused guides and controls.
 - [Architecture](architecture/README.md): implementation notes and internal design docs.
+- [Design](design/frontend-guidelines.md): design proposals and implementation guidelines.
 - [Migration](migration/README.md): upgrade and migration notes.
 
 For channel-specific setup, start with [Chat Apps Configuration](guides/chat-apps.md) and then drill into `docs/channels/<name>/README.md` as needed.

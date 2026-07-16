@@ -33,6 +33,7 @@ export function ModelSelector({
     <Select value={defaultModelName} onValueChange={onValueChange}>
       <SelectTrigger
         size="sm"
+        aria-label={t("chat.model", "Model")}
         className="text-muted-foreground hover:text-foreground focus-visible:border-input h-8 max-w-[160px] min-w-[80px] bg-transparent shadow-none focus-visible:ring-0 sm:max-w-[220px]"
       >
         <SelectValue placeholder={t("chat.noModel")} />
