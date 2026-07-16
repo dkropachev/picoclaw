@@ -20,6 +20,7 @@ export interface ThreadSummary {
   discoverable?: boolean
   dropped_at?: string
   score?: number
+  is_working?: boolean
 }
 
 export interface CreateThreadInput {

@@ -1,7 +1,7 @@
 import { IconFilter, IconPlus, IconSearch } from "@tabler/icons-react"
 import { useNavigate } from "@tanstack/react-router"
 import { useAtom, useAtomValue, useSetAtom } from "jotai"
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import {
@@ -108,9 +108,11 @@ export function ThreadSidebar({
     })
   }, [hasAppliedInitialSearch, navigate, query, selectedType, syncURL])
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setIsLoading(true)
+  const loadThreads = useCallback(
+    (showLoading: boolean) => {
+      if (showLoading) {
+        setIsLoading(true)
+      }
       setLoadError(false)
       void getThreads({
         query,
@@ -122,11 +124,30 @@ export function ThreadSidebar({
           console.error("Failed to load threads:", error)
           setLoadError(true)
         })
-        .finally(() => setIsLoading(false))
+        .finally(() => {
+          if (showLoading) {
+            setIsLoading(false)
+          }
+        })
+    },
+    [query, selectedType],
+  )
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      loadThreads(true)
     }, 160)
 
     return () => window.clearTimeout(timer)
-  }, [query, selectedType, activeSessionId])
+  }, [activeSessionId, loadThreads])
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      loadThreads(false)
+    }, 2500)
+
+    return () => window.clearInterval(interval)
+  }, [activeSessionId, loadThreads])
 
   const openThread = (threadId: string) => {
     setThreadOpenSessionId(threadId)

@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/memory"
+	ppid "github.com/sipeed/picoclaw/pkg/pid"
 	threadstore "github.com/sipeed/picoclaw/pkg/threads"
 )
 
@@ -30,6 +34,17 @@ type threadAttachRequest struct {
 type threadReturnResponse struct {
 	TargetSessionID string `json:"target_session_id"`
 	HandoffID       string `json:"handoff_id"`
+}
+
+type gatewayActiveTurnsResponse struct {
+	ActiveTurns []struct {
+		SessionKey string `json:"session_key"`
+	} `json:"active_turns"`
+}
+
+var gatewayActiveTurnsDo = func(req *http.Request, timeout time.Duration) (*http.Response, error) {
+	client := http.Client{Timeout: timeout}
+	return client.Do(req)
 }
 
 func (h *Handler) registerThreadRoutes(mux *http.ServeMux) {
@@ -67,6 +82,7 @@ func (h *Handler) handleListThreads(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to list threads", http.StatusInternalServerError)
 		return
 	}
+	items = h.annotateThreadsWorking(cfg, items)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(items)
@@ -119,6 +135,7 @@ func (h *Handler) handleGetThread(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "thread not found", http.StatusNotFound)
 		return
 	}
+	thread = h.annotateThreadWorking(cfg, thread)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(thread)
 }
@@ -150,6 +167,7 @@ func (h *Handler) handleUpdateThread(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "thread not found", http.StatusNotFound)
 		return
 	}
+	thread = h.annotateThreadWorking(cfg, thread)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(thread)
 }
@@ -170,6 +188,7 @@ func (h *Handler) handleDropThread(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "thread not found", http.StatusNotFound)
 		return
 	}
+	thread = h.annotateThreadWorking(cfg, thread)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(thread)
 }
@@ -208,7 +227,7 @@ func (h *Handler) handleAttachCurrentThread(w http.ResponseWriter, r *http.Reque
 	_ = json.NewEncoder(w).Encode(struct {
 		Thread  threadstore.Thread        `json:"thread"`
 		Handoff threadstore.ThreadHandoff `json:"handoff"`
-	}{Thread: thread, Handoff: handoff})
+	}{Thread: h.annotateThreadWorking(cfg, thread), Handoff: handoff})
 }
 
 func (h *Handler) handleReturnThreadHandoff(w http.ResponseWriter, r *http.Request) {
@@ -236,6 +255,117 @@ func (h *Handler) handleReturnThreadHandoff(w http.ResponseWriter, r *http.Reque
 		TargetSessionID: target,
 		HandoffID:       handoff.ID,
 	})
+}
+
+func (h *Handler) annotateThreadsWorking(
+	cfg *config.Config,
+	items []threadstore.Thread,
+) []threadstore.Thread {
+	activeSessions := h.gatewayActiveSessionKeys(cfg)
+	if len(activeSessions) == 0 {
+		return items
+	}
+	for i := range items {
+		items[i].IsWorking = threadHasActiveSession(items[i], activeSessions)
+	}
+	return items
+}
+
+func (h *Handler) annotateThreadWorking(
+	cfg *config.Config,
+	thread threadstore.Thread,
+) threadstore.Thread {
+	activeSessions := h.gatewayActiveSessionKeys(cfg)
+	if len(activeSessions) == 0 {
+		return thread
+	}
+	thread.IsWorking = threadHasActiveSession(thread, activeSessions)
+	return thread
+}
+
+func threadHasActiveSession(thread threadstore.Thread, activeSessions map[string]bool) bool {
+	candidates := []string{
+		thread.PrimarySessionKey,
+		thread.SessionKey,
+		thread.UISessionID,
+		thread.ID,
+	}
+	for _, candidate := range candidates {
+		if activeSessions[strings.TrimSpace(candidate)] {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) gatewayActiveSessionKeys(cfg *config.Config) map[string]bool {
+	pidData := h.activeTurnsGatewayPidData(cfg)
+	if pidData == nil || strings.TrimSpace(pidData.Token) == "" {
+		return nil
+	}
+
+	host := gatewayProbeHost(pidData.Host)
+	if host == "" {
+		host = gatewayProbeHost(h.effectiveGatewayBindHost(cfg))
+	}
+	port := pidData.Port
+	if port == 0 {
+		port = 18790
+		if cfg != nil && cfg.Gateway.Port != 0 {
+			port = cfg.Gateway.Port
+		}
+	}
+
+	req, err := http.NewRequest(
+		http.MethodGet,
+		"http://"+net.JoinHostPort(host, strconv.Itoa(port))+"/runtime/active-turns",
+		nil,
+	)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+pidData.Token)
+
+	resp, err := gatewayActiveTurnsDo(req, 800*time.Millisecond)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	var payload gatewayActiveTurnsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil
+	}
+	activeSessions := make(map[string]bool, len(payload.ActiveTurns))
+	for _, turn := range payload.ActiveTurns {
+		sessionKey := strings.TrimSpace(turn.SessionKey)
+		if sessionKey != "" {
+			activeSessions[sessionKey] = true
+		}
+	}
+	return activeSessions
+}
+
+func (h *Handler) activeTurnsGatewayPidData(cfg *config.Config) *ppid.PidFileData {
+	if pidData := h.sanitizeGatewayPidData(ppid.ReadPidFileWithCheck(globalConfigDir()), cfg); pidData != nil {
+		return pidData
+	}
+
+	gateway.mu.Lock()
+	defer gateway.mu.Unlock()
+	if gateway.pidData == nil {
+		return nil
+	}
+	return &ppid.PidFileData{
+		PID:     gateway.pidData.PID,
+		Token:   gateway.pidData.Token,
+		Version: gateway.pidData.Version,
+		Port:    gateway.pidData.Port,
+		Host:    gateway.pidData.Host,
+	}
 }
 
 func resolveThreadAPISessionKey(ctx context.Context, workspace, sessionID string) (string, error) {

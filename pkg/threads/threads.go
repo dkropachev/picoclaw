@@ -71,6 +71,7 @@ type Thread struct {
 	Discoverable      bool              `json:"discoverable"`
 	DroppedAt         *time.Time        `json:"dropped_at,omitempty"`
 	Score             int               `json:"score,omitempty"`
+	IsWorking         bool              `json:"is_working"`
 }
 
 type SearchOptions struct {

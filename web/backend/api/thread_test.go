@@ -3,12 +3,16 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	ppid "github.com/sipeed/picoclaw/pkg/pid"
 	threadstore "github.com/sipeed/picoclaw/pkg/threads"
 )
 
@@ -21,7 +25,7 @@ func TestHandleThreads_CreateListAndOpenSession(t *testing.T) {
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
 	cfg.Agents.Defaults.Workspace = filepath.Join(t.TempDir(), "workspace")
-	if err := config.SaveConfig(configPath, cfg); err != nil {
+	if err = config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
 	}
 
@@ -207,4 +211,82 @@ func TestHandleThreads_SearchContextFilter(t *testing.T) {
 	if len(items) != 1 || items[0].Context["pr"] != "42" {
 		t.Fatalf("items = %#v, want only PR 42", items)
 	}
+}
+
+func TestHandleThreads_MarksWorkingThreads(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.Agents.Defaults.Workspace = filepath.Join(t.TempDir(), "workspace")
+	if err = config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	store := threadstore.NewStoreFromWorkspace(cfg.Agents.Defaults.Workspace)
+	thread, err := store.CreatePicoThread(nil, cfg, threadstore.CreateRequest{
+		Type:  threadstore.TypeCoding,
+		Title: "Fix active thread state",
+	})
+	if err != nil {
+		t.Fatalf("CreatePicoThread() error = %v", err)
+	}
+
+	origDo := gatewayActiveTurnsDo
+	origPidData := gateway.pidData
+	t.Cleanup(func() {
+		gatewayActiveTurnsDo = origDo
+		gateway.pidData = origPidData
+	})
+	gateway.pidData = &ppid.PidFileData{
+		Token: "active-token",
+		Host:  "127.0.0.1",
+		Port:  18790,
+	}
+	gatewayActiveTurnsDo = func(req *http.Request, _ time.Duration) (*http.Response, error) {
+		if got := req.URL.Path; got != "/runtime/active-turns" {
+			t.Fatalf("active turns path = %q, want /runtime/active-turns", got)
+		}
+		if got := req.Header.Get("Authorization"); got != "Bearer active-token" {
+			t.Fatalf("active turns auth = %q, want bearer token", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(
+				`{"active_turns":[{"session_key":` + strconvQuote(thread.PrimarySessionKey) + `}]}`,
+			)),
+			Request: req,
+		}, nil
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/threads?type=coding", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var items []threadstore.Thread
+	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if len(items) != 1 || items[0].ID != thread.ID {
+		t.Fatalf("items = %#v, want created thread", items)
+	}
+	if !items[0].IsWorking {
+		t.Fatalf("IsWorking = false, want true for active primary session")
+	}
+}
+
+func strconvQuote(value string) string {
+	raw, _ := json.Marshal(value)
+	return string(raw)
 }

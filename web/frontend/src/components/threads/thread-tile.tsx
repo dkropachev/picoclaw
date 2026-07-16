@@ -1,6 +1,7 @@
 import {
   IconCode,
   IconGitPullRequest,
+  IconLoader2,
   IconSearch,
   IconTag,
   IconTrash,
@@ -78,12 +79,20 @@ export function ThreadTile({
               {thread.title}
             </span>
           </div>
-          <Badge
-            variant="secondary"
-            className="h-5 shrink-0 px-1.5 text-[10px]"
-          >
-            {threadTypeLabel(thread.type)}
-          </Badge>
+          <div className="flex shrink-0 flex-wrap justify-end gap-1">
+            {thread.is_working ? (
+              <Badge variant="default" className="h-5 gap-1 px-1.5 text-[10px]">
+                <IconLoader2 className="size-3 animate-spin" />
+                Working
+              </Badge>
+            ) : null}
+            <Badge
+              variant="secondary"
+              className="h-5 shrink-0 px-1.5 text-[10px]"
+            >
+              {threadTypeLabel(thread.type)}
+            </Badge>
+          </div>
         </div>
 
         {!compact && (

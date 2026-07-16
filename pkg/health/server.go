@@ -20,6 +20,7 @@ type Server struct {
 	checks     map[string]Check
 	startTime  time.Time
 	reloadFunc func() error
+	activeFunc func() []ActiveTurn
 	authToken  string // optional bearer token for protected endpoints
 }
 
@@ -37,6 +38,23 @@ type StatusResponse struct {
 	Checks map[string]Check `json:"checks,omitempty"`
 }
 
+type ActiveTurn struct {
+	TurnID       string    `json:"turn_id"`
+	AgentID      string    `json:"agent_id,omitempty"`
+	SessionKey   string    `json:"session_key"`
+	Channel      string    `json:"channel,omitempty"`
+	ChatID       string    `json:"chat_id,omitempty"`
+	Phase        string    `json:"phase,omitempty"`
+	StartedAt    time.Time `json:"started_at"`
+	Depth        int       `json:"depth,omitempty"`
+	ParentTurnID string    `json:"parent_turn_id,omitempty"`
+	ChildTurnIDs []string  `json:"child_turn_ids,omitempty"`
+}
+
+type ActiveTurnsResponse struct {
+	ActiveTurns []ActiveTurn `json:"active_turns"`
+}
+
 func NewServer(host string, port int, token string) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
@@ -49,6 +67,7 @@ func NewServer(host string, port int, token string) *Server {
 	mux.HandleFunc("/health", s.healthHandler)
 	mux.HandleFunc("/ready", s.readyHandler)
 	mux.HandleFunc("/reload", s.reloadHandler)
+	mux.HandleFunc("/runtime/active-turns", s.activeTurnsHandler)
 
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	s.server = &http.Server{
@@ -119,6 +138,30 @@ func (s *Server) SetReloadFunc(fn func() error) {
 	s.reloadFunc = fn
 }
 
+func (s *Server) SetActiveTurnsFunc(fn func() []ActiveTurn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activeFunc = fn
+}
+
+func (s *Server) authorizeProtectedRequest(w http.ResponseWriter, r *http.Request) bool {
+	s.mu.RLock()
+	requiredToken := s.authToken
+	s.mu.RUnlock()
+
+	if requiredToken == "" {
+		return true
+	}
+	given := extractBearerToken(r.Header.Get("Authorization"))
+	if given == "" || subtle.ConstantTimeCompare([]byte(given), []byte(requiredToken)) != 1 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+		return false
+	}
+	return true
+}
+
 func (s *Server) reloadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Content-Type", "application/json")
@@ -127,19 +170,8 @@ func (s *Server) reloadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Token check
-	s.mu.RLock()
-	requiredToken := s.authToken
-	s.mu.RUnlock()
-
-	if requiredToken != "" {
-		given := extractBearerToken(r.Header.Get("Authorization"))
-		if given == "" || subtle.ConstantTimeCompare([]byte(given), []byte(requiredToken)) != 1 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
-			return
-		}
+	if !s.authorizeProtectedRequest(w, r) {
+		return
 	}
 
 	s.mu.Lock()
@@ -163,6 +195,31 @@ func (s *Server) reloadHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "reload triggered"})
+}
+
+func (s *Server) activeTurnsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "method not allowed, use GET"})
+		return
+	}
+
+	if !s.authorizeProtectedRequest(w, r) {
+		return
+	}
+
+	s.mu.RLock()
+	activeFunc := s.activeFunc
+	s.mu.RUnlock()
+
+	turns := []ActiveTurn{}
+	if activeFunc != nil {
+		turns = activeFunc()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(ActiveTurnsResponse{ActiveTurns: turns})
 }
 
 func (s *Server) healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -231,6 +288,7 @@ func (s *Server) RegisterOnMux(mux HandlerMux) {
 	mux.HandleFunc("/health", s.healthHandler)
 	mux.HandleFunc("/ready", s.readyHandler)
 	mux.HandleFunc("/reload", s.reloadHandler)
+	mux.HandleFunc("/runtime/active-turns", s.activeTurnsHandler)
 }
 
 func statusString(ok bool) string {
