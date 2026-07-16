@@ -804,6 +804,7 @@ type ModelConfig struct {
 	MaxTokensField      string               `json:"max_tokens_field,omitempty"` // Field name for max tokens (e.g., "max_completion_tokens")
 	RequestTimeout      int                  `json:"request_timeout,omitempty"`
 	ThinkingLevel       string               `json:"thinking_level,omitempty"`        // Extended thinking: off|low|medium|high|xhigh|adaptive
+	ReasoningEffort     string               `json:"reasoning_effort,omitempty"`      // OpenAI-style reasoning effort: none|minimal|low|medium|high|xhigh
 	ToolSchemaTransform string               `json:"tool_schema_transform,omitempty"` // Optional tool schema compatibility transform (e.g. "simple")
 	Streaming           ModelStreamingConfig `json:"streaming,omitzero"`              // Opt-in for provider streaming on this model entry
 	ExtraBody           map[string]any       `json:"extra_body,omitempty"`            // Additional fields to inject into request body
@@ -845,6 +846,9 @@ func (c *ModelConfig) Validate() error {
 		return fmt.Errorf("model is required")
 	}
 	if _, err := providercommon.NormalizeToolSchemaTransform(c.ToolSchemaTransform); err != nil {
+		return err
+	}
+	if _, err := providercommon.NormalizeReasoningEffort(c.ReasoningEffort); err != nil {
 		return err
 	}
 
@@ -1815,6 +1819,7 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 				MaxTokensField:      m.MaxTokensField,
 				RequestTimeout:      m.RequestTimeout,
 				ThinkingLevel:       m.ThinkingLevel,
+				ReasoningEffort:     m.ReasoningEffort,
 				ToolSchemaTransform: m.ToolSchemaTransform,
 				Streaming:           m.Streaming,
 				ExtraBody:           m.ExtraBody,
@@ -1841,6 +1846,7 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 			MaxTokensField:      m.MaxTokensField,
 			RequestTimeout:      m.RequestTimeout,
 			ThinkingLevel:       m.ThinkingLevel,
+			ReasoningEffort:     m.ReasoningEffort,
 			ToolSchemaTransform: m.ToolSchemaTransform,
 			Streaming:           m.Streaming,
 			ExtraBody:           m.ExtraBody,

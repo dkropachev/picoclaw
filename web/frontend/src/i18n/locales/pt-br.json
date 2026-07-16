@@ -319,6 +319,8 @@
       "rpmHint": "Máximo de requisições por minuto. 0 = sem limite.",
       "thinkingLevel": "Nível de Pensamento",
       "thinkingLevelHint": "Deixe em branco para omitir thinking_level e usar o padrão do provider. Valores: off, low, medium, high, xhigh, adaptive.",
+      "reasoningEffort": "Esforço de Raciocínio",
+      "reasoningEffortHint": "Esforço de raciocínio no estilo OpenAI. Use o padrão do provider, a menos que o modelo suporte este controle. Valores: none, minimal, low, medium, high, xhigh.",
       "providerDefault": "padrão do provider",
       "maxTokensField": "Campo de Max Tokens",
       "maxTokensFieldHint": "Sobrescreve o nome do campo de max tokens na requisição, ex: max_completion_tokens.",

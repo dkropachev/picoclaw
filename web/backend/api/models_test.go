@@ -64,6 +64,21 @@ func addModelAndLoadLatest(t *testing.T, configPath string, body string) *config
 	return cfg.ModelList[len(cfg.ModelList)-1]
 }
 
+func TestNormalizeStoredModelConfigNormalizesReasoningEffort(t *testing.T) {
+	model := &config.ModelConfig{
+		ModelName:       "openai",
+		Model:           "openai/gpt-5.4",
+		ReasoningEffort: "HIGH",
+	}
+
+	if !normalizeStoredModelConfig(model) {
+		t.Fatal("normalizeStoredModelConfig() = false, want true")
+	}
+	if got := model.ReasoningEffort; got != "high" {
+		t.Fatalf("reasoning_effort = %q, want high", got)
+	}
+}
+
 func TestHandleListModels_AvailabilityUsesRuntimeProbesForLocalModels(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()
@@ -834,6 +849,32 @@ func TestHandleAddModel_RejectsUnsupportedProvider(t *testing.T) {
 	}
 }
 
+func TestHandleAddModel_RejectsUnsupportedReasoningEffort(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+		"model_name":"openai-max",
+		"provider":"openai",
+		"model":"gpt-5.4",
+		"reasoning_effort":"max"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `unsupported reasoning_effort "max"`) {
+		t.Fatalf("body = %q, want unsupported reasoning_effort error", rec.Body.String())
+	}
+}
+
 func TestHandleAddModel_AllowsBedrockProvider(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()
@@ -1579,6 +1620,45 @@ func TestHandleUpdateModel_PreservesLegacyModelPrefixWhenProviderOmitted(t *test
 	}
 	if got := updated.ModelList[0].Model; got != "openai/gpt-5.4" {
 		t.Fatalf("model = %q, want %q", got, "openai/gpt-5.4")
+	}
+}
+
+func TestHandleUpdateModel_RejectsUnsupportedReasoningEffort(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName: "openai",
+		Provider:  "openai",
+		Model:     "gpt-5.4",
+	}}
+	if err = config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+		"model_name":"openai",
+		"provider":"openai",
+		"model":"gpt-5.4",
+		"reasoning_effort":"max"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `unsupported reasoning_effort "max"`) {
+		t.Fatalf("body = %q, want unsupported reasoning_effort error", rec.Body.String())
 	}
 }
 

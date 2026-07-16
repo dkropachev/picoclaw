@@ -36,6 +36,7 @@ security behavior that other feature specs rely on.
 | `FR-SEC-005` | MUST | HTTP guard blocks private/internal targets unless explicitly allowed or proxy first-hop rules apply. | Web tools must not become SSRF primitives. |
 | `FR-SEC-006` | MUST | Isolation runtime starts supported commands with configured exposed paths and fails closed on unsupported/invalid setup. | Optional isolation must not silently weaken execution. |
 | `FR-SEC-007` | SHOULD | Key generation and token helpers produce unique, parseable, and revocable values for auth flows. | Auth flows need reliable primitives. |
+| `FR-SEC-008` | MUST | Model-list validation rejects unsupported provider-control values such as invalid `reasoning_effort` before those values are persisted or used. | Invalid config should fail early instead of producing unsafe or broken provider requests. |
 
 ## Data And State Model
 
@@ -69,6 +70,7 @@ Owns: TEST pkg/config/migration*
 Owns: TEST pkg/config/config*
 Owns: TEST pkg/config/gateway*
 Owns: TEST pkg/config/model*
+Owns: TEST pkg/config/mcp*
 Owns: TEST pkg/config/multikey*
 Owns: TEST pkg/config/register*
 Owns: TEST pkg/config/version*
@@ -77,14 +79,14 @@ Owns: TEST pkg/config/version*
 
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
-| Config | Secure strings, `isolation.*`, filtering fields | Secret preservation, isolation controls, and sensitive-data filtering. | `FR-SEC-001`, `FR-SEC-003`, `FR-SEC-006` |
+| Config | Secure strings, `isolation.*`, filtering fields, model-list validation | Secret preservation, isolation controls, sensitive-data filtering, and early rejection of unsupported provider-control values. | `FR-SEC-001`, `FR-SEC-003`, `FR-SEC-006`, `FR-SEC-008` |
 | Storage | Credential store | Provider credential CRUD and auth method metadata. | `FR-SEC-002`, `FR-SEC-007` |
 | Network | Safe HTTP client and net binding helpers | Private host controls and bind behavior. | `FR-SEC-005` |
 
 ## Algorithms And Ordering
 
 1. Normalize config and request inputs before comparing or persisting any secret
-   values.
+   values or optional model-list controls.
 2. Preserve existing secure-string values when updates contain masked values;
    replace, clear, or reject secrets only through explicit update semantics.
 3. Authenticate dashboard requests before protected handlers and require POST
@@ -117,6 +119,7 @@ migration must preserve security defaults.
 | `FR-SEC-002`, `FR-SEC-007` | [pkg/credential/store_test.go](../../pkg/credential/store_test.go), [pkg/auth/token_test.go](../../pkg/auth/token_test.go), [pkg/auth/pkce_test.go](../../pkg/auth/pkce_test.go) |
 | `FR-SEC-004` | [web/backend/api/auth_test.go](../../web/backend/api/auth_test.go), [web/backend/api/auth_csrf_test.go](../../web/backend/api/auth_csrf_test.go) |
 | `FR-SEC-005`, `FR-SEC-006` | [pkg/utils/http_guard.go](../../pkg/utils/http_guard.go), [pkg/isolation/runtime_test.go](../../pkg/isolation/runtime_test.go), [pkg/netbind/netbind_test.go](../../pkg/netbind/netbind_test.go) |
+| `FR-SEC-008` | [pkg/config/model_config_test.go](../../pkg/config/model_config_test.go), [pkg/providers/common/reasoning_effort_test.go](../../pkg/providers/common/reasoning_effort_test.go) |
 
 ## Implementation Anchors
 

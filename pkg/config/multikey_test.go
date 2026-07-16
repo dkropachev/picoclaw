@@ -196,6 +196,7 @@ func TestExpandMultiKeyModels_PreservesOtherFields(t *testing.T) {
 		MaxTokensField:      "max_completion_tokens",
 		RequestTimeout:      30,
 		ThinkingLevel:       "high",
+		ReasoningEffort:     "xhigh",
 		ToolSchemaTransform: "simple",
 		Streaming:           ModelStreamingConfig{Enabled: true},
 	}
@@ -227,6 +228,9 @@ func TestExpandMultiKeyModels_PreservesOtherFields(t *testing.T) {
 	if primary.ThinkingLevel != "high" {
 		t.Errorf("expected thinking_level preserved, got %q", primary.ThinkingLevel)
 	}
+	if primary.ReasoningEffort != "xhigh" {
+		t.Errorf("expected reasoning_effort preserved, got %q", primary.ReasoningEffort)
+	}
 	if primary.ToolSchemaTransform != "simple" {
 		t.Errorf("expected tool_schema_transform preserved, got %q", primary.ToolSchemaTransform)
 	}
@@ -244,6 +248,9 @@ func TestExpandMultiKeyModels_PreservesOtherFields(t *testing.T) {
 	}
 	if additional.RPM != 60 {
 		t.Errorf("expected additional rpm preserved, got %d", additional.RPM)
+	}
+	if additional.ReasoningEffort != "xhigh" {
+		t.Errorf("expected additional reasoning_effort preserved, got %q", additional.ReasoningEffort)
 	}
 	if additional.ToolSchemaTransform != "simple" {
 		t.Errorf("expected additional tool_schema_transform preserved, got %q", additional.ToolSchemaTransform)

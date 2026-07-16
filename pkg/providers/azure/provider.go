@@ -12,6 +12,7 @@ import (
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/sipeed/picoclaw/pkg/providers/common"
 	orc "github.com/sipeed/picoclaw/pkg/providers/openai_responses_common"
@@ -167,6 +168,14 @@ func (p *Provider) Chat(
 
 	if cacheKey, ok := options["prompt_cache_key"].(string); ok && cacheKey != "" {
 		requestBody.PromptCacheKey = openai.Opt(cacheKey)
+	}
+
+	if rawEffort, ok := options["reasoning_effort"].(string); ok {
+		if effort, effortErr := common.NormalizeReasoningEffort(rawEffort); effortErr == nil && effort != "" {
+			requestBody.Reasoning = shared.ReasoningParam{
+				Effort: shared.ReasoningEffort(effort),
+			}
+		}
 	}
 
 	jsonData, err := json.Marshal(requestBody)

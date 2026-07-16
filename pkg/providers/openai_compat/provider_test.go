@@ -100,6 +100,65 @@ func TestBuildRequestBody_DisablesModelDependentQwenThinkingWhenThinkingLevelOff
 	}
 }
 
+func TestBuildRequestBody_AppliesReasoningEffort(t *testing.T) {
+	p := NewProvider("key", "https://api.openai.com/v1", "")
+	p.SetProviderName("openai")
+
+	body := p.buildRequestBody(
+		[]Message{{Role: "user", Content: "hi"}},
+		nil,
+		"gpt-5.4",
+		map[string]any{"reasoning_effort": "xhigh"},
+	)
+
+	if got := body["reasoning_effort"]; got != "xhigh" {
+		t.Fatalf("reasoning_effort = %#v, want xhigh", got)
+	}
+}
+
+func TestBuildRequestBody_OmitsUnsupportedReasoningEffort(t *testing.T) {
+	p := NewProvider("key", "https://api.openai.com/v1", "")
+	p.SetProviderName("openai")
+
+	body := p.buildRequestBody(
+		[]Message{{Role: "user", Content: "hi"}},
+		nil,
+		"gpt-5.4",
+		map[string]any{"reasoning_effort": "max"},
+	)
+
+	if _, ok := body["reasoning_effort"]; ok {
+		t.Fatalf("reasoning_effort should be omitted for max, got %#v", body["reasoning_effort"])
+	}
+}
+
+func TestApplyReasoningEffortControlHandlesNilRequestBody(t *testing.T) {
+	p := NewProvider("key", "https://api.openai.com/v1", "")
+
+	p.applyReasoningEffortControl(nil, map[string]any{"reasoning_effort": "high"})
+}
+
+func TestBuildRequestBody_ExtraBodyOverridesReasoningEffort(t *testing.T) {
+	p := NewProvider(
+		"key",
+		"https://api.openai.com/v1",
+		"",
+		WithExtraBody(map[string]any{"reasoning_effort": "low"}),
+	)
+	p.SetProviderName("openai")
+
+	body := p.buildRequestBody(
+		[]Message{{Role: "user", Content: "hi"}},
+		nil,
+		"gpt-5.4",
+		map[string]any{"reasoning_effort": "high"},
+	)
+
+	if got := body["reasoning_effort"]; got != "low" {
+		t.Fatalf("reasoning_effort = %#v, want low from extra_body", got)
+	}
+}
+
 func TestBuildRequestBody_PreservesDoubaoRequestWhenThinkingLevelIsNotOff(t *testing.T) {
 	p := NewProvider("key", "https://ark.cn-beijing.volces.com/api/v3", "")
 	p.SetProviderName("openai")

@@ -2796,6 +2796,36 @@ func TestModelConfig_ExtraBodyRoundTrip(t *testing.T) {
 	}
 }
 
+func TestModelConfig_ReasoningEffortRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+
+	cfg := &Config{
+		Version: CurrentVersion,
+		ModelList: []*ModelConfig{
+			{
+				ModelName:       "test-model",
+				Model:           "openai/test",
+				APIKeys:         SimpleSecureStrings("sk-test"),
+				ReasoningEffort: "high",
+			},
+		},
+	}
+
+	if err := SaveConfig(cfgPath, cfg); err != nil {
+		t.Fatalf("SaveConfig error: %v", err)
+	}
+
+	loaded, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+
+	if got := loaded.ModelList[0].ReasoningEffort; got != "high" {
+		t.Fatalf("ReasoningEffort = %q, want high", got)
+	}
+}
+
 func TestModelConfig_CustomHeadersRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")

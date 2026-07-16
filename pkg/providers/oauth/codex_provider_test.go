@@ -36,6 +36,34 @@ func TestBuildCodexParams_BasicMessage(t *testing.T) {
 	}
 }
 
+func TestBuildCodexParams_ReasoningEffort(t *testing.T) {
+	params := buildCodexParams(
+		[]Message{{Role: "user", Content: "Hello"}},
+		nil,
+		"gpt-5.3-codex",
+		map[string]any{"reasoning_effort": "medium"},
+		false,
+	)
+
+	if got := string(params.Reasoning.Effort); got != "medium" {
+		t.Fatalf("Reasoning.Effort = %q, want medium", got)
+	}
+}
+
+func TestBuildCodexParams_OmitsUnsupportedReasoningEffort(t *testing.T) {
+	params := buildCodexParams(
+		[]Message{{Role: "user", Content: "Hello"}},
+		nil,
+		"gpt-5.3-codex",
+		map[string]any{"reasoning_effort": "max"},
+		false,
+	)
+
+	if got := string(params.Reasoning.Effort); got != "" {
+		t.Fatalf("Reasoning.Effort = %q, want empty", got)
+	}
+}
+
 func TestBuildCodexParams_SystemAsInstructions(t *testing.T) {
 	messages := []Message{
 		{Role: "system", Content: "You are helpful"},
