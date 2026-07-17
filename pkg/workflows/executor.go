@@ -63,20 +63,20 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		ctx, cancel = context.WithTimeout(ctx, e.DefaultTimeout)
 		defer cancel()
 	}
-	workflow, workflowRef, err := e.loadWorkflow(req)
-	if err != nil {
-		return nil, err
+	workflow, workflowRef, loadErr := e.loadWorkflow(req)
+	if loadErr != nil {
+		return nil, loadErr
 	}
-	if err := Validate(workflow); err != nil {
-		return nil, err
+	if validateErr := Validate(workflow); validateErr != nil {
+		return nil, validateErr
 	}
 	store := e.Store
 	if store == nil {
 		store = NewFileRunStore(e.WorkspaceDir)
 	}
 	if req.ParentRunID == "" {
-		if err := e.enforceConcurrency(ctx, store); err != nil {
-			return nil, err
+		if limitErr := e.enforceConcurrency(ctx, store); limitErr != nil {
+			return nil, limitErr
 		}
 	}
 	runID := newRunID()
@@ -98,53 +98,73 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	if err := store.CreateRun(ctx, run); err != nil {
-		return nil, err
+	if createErr := store.CreateRun(ctx, run); createErr != nil {
+		return nil, createErr
 	}
-	e.appendEvent(ctx, store, RunEvent{Kind: "workflow.run.start", RunID: run.ID, Payload: map[string]any{"workflow_ref": workflowRef}})
+	e.appendEvent(
+		ctx,
+		store,
+		RunEvent{Kind: "workflow.run.start", RunID: run.ID, Payload: map[string]any{"workflow_ref": workflowRef}},
+	)
 
-	outputs, err := e.executeWorkflow(ctx, store, run, workflow, req)
-	if err != nil {
-		now := time.Now().UTC()
-		if errors.Is(err, ErrRunCanceled) {
+	outputs, runErr := e.executeWorkflow(ctx, store, run, workflow, req)
+	if runErr != nil {
+		completedAt := time.Now().UTC()
+		if errors.Is(runErr, ErrRunCanceled) {
 			run.Status = RunStatusCanceled
 			if run.CancelRequestedAt == nil {
-				run.CancelRequestedAt = &now
+				run.CancelRequestedAt = &completedAt
 			}
 			if run.CancelReason == "" {
-				run.CancelReason = err.Error()
+				run.CancelReason = runErr.Error()
 			}
 		} else {
 			run.Status = RunStatusFailed
 		}
-		run.Error = err.Error()
+		run.Error = runErr.Error()
 		run.Outputs = outputs
-		run.CompletedAt = &now
+		run.CompletedAt = &completedAt
 		_ = store.UpdateRun(ctx, run)
 		if run.Status == RunStatusCanceled {
-			e.appendEvent(context.Background(), store, RunEvent{Kind: "workflow.run.canceled", RunID: run.ID, Message: err.Error()})
+			e.appendEvent(
+				context.Background(),
+				store,
+				RunEvent{Kind: "workflow.run.canceled", RunID: run.ID, Message: runErr.Error()},
+			)
 		} else {
-			e.appendEvent(context.Background(), store, RunEvent{Kind: "workflow.run.failed", RunID: run.ID, Message: err.Error()})
+			e.appendEvent(
+				context.Background(),
+				store,
+				RunEvent{Kind: "workflow.run.failed", RunID: run.ID, Message: runErr.Error()},
+			)
 		}
-		return &RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs, Error: run.Error}, err
+		return &RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs, Error: run.Error}, runErr
 	}
-	if err := checkRunCanceled(ctx, store, run); err != nil {
-		now := time.Now().UTC()
+	if cancelErr := checkRunCanceled(ctx, store, run); cancelErr != nil {
+		completedAt := time.Now().UTC()
 		run.Status = RunStatusCanceled
-		run.Error = err.Error()
-		run.CompletedAt = &now
+		run.Error = cancelErr.Error()
+		run.CompletedAt = &completedAt
 		_ = store.UpdateRun(context.Background(), run)
-		e.appendEvent(context.Background(), store, RunEvent{Kind: "workflow.run.canceled", RunID: run.ID, Message: err.Error()})
-		return &RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs, Error: run.Error}, err
+		e.appendEvent(
+			context.Background(),
+			store,
+			RunEvent{Kind: "workflow.run.canceled", RunID: run.ID, Message: cancelErr.Error()},
+		)
+		return &RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs, Error: run.Error}, cancelErr
 	}
 	run.Status = RunStatusSucceeded
 	run.Outputs = outputs
 	now = time.Now().UTC()
 	run.CompletedAt = &now
-	if err := store.UpdateRun(ctx, run); err != nil {
-		return nil, err
+	if updateErr := store.UpdateRun(ctx, run); updateErr != nil {
+		return nil, updateErr
 	}
-	e.appendEvent(ctx, store, RunEvent{Kind: "workflow.run.end", RunID: run.ID, Payload: map[string]any{"outputs": outputs}})
+	e.appendEvent(
+		ctx,
+		store,
+		RunEvent{Kind: "workflow.run.end", RunID: run.ID, Payload: map[string]any{"outputs": outputs}},
+	)
 	return &RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs}, nil
 }
 
@@ -203,8 +223,8 @@ func checkRunCanceled(ctx context.Context, store RunStore, run *Run) error {
 	if store == nil || run == nil || strings.TrimSpace(run.ID) == "" {
 		return nil
 	}
-	latest, err := store.GetRun(ctx, run.ID)
-	if err != nil {
+	latest, _ := store.GetRun(ctx, run.ID)
+	if latest == nil {
 		return nil
 	}
 	if latest.Status == RunStatusCanceled {
@@ -316,7 +336,11 @@ func (e *Executor) executeJob(
 		if depExec.Status != RunStatusSucceeded {
 			jobExec.Status = RunStatusSkipped
 			jobExec.Error = fmt.Sprintf("dependency %s did not succeed", dep)
-			e.appendEvent(ctx, store, RunEvent{Kind: "workflow.job.failed", RunID: run.ID, JobID: jobID, Message: jobExec.Error})
+			e.appendEvent(
+				ctx,
+				store,
+				RunEvent{Kind: "workflow.job.failed", RunID: run.ID, JobID: jobID, Message: jobExec.Error},
+			)
 			return jobExec, fmt.Errorf("%s", jobExec.Error)
 		}
 	}
@@ -339,17 +363,40 @@ func (e *Executor) executeJob(
 				jobExec.Status = RunStatusSucceeded
 				jobExec.Error = err.Error()
 				jobExec.Outputs = childOutputs
-				e.appendEvent(ctx, store, RunEvent{Kind: "workflow.job.end", RunID: run.ID, JobID: jobID, Message: "continued after error", Payload: map[string]any{"outputs": childOutputs, "error": err.Error()}})
+				e.appendEvent(
+					ctx,
+					store,
+					RunEvent{
+						Kind:    "workflow.job.end",
+						RunID:   run.ID,
+						JobID:   jobID,
+						Message: "continued after error",
+						Payload: map[string]any{"outputs": childOutputs, "error": err.Error()},
+					},
+				)
 				return jobExec, nil
 			}
 			jobExec.Status = RunStatusFailed
 			jobExec.Error = err.Error()
-			e.appendEvent(ctx, store, RunEvent{Kind: "workflow.job.failed", RunID: run.ID, JobID: jobID, Message: err.Error()})
+			e.appendEvent(
+				ctx,
+				store,
+				RunEvent{Kind: "workflow.job.failed", RunID: run.ID, JobID: jobID, Message: err.Error()},
+			)
 			return jobExec, err
 		}
 		jobExec.Outputs = childOutputs
 		jobExec.Status = RunStatusSucceeded
-		e.appendEvent(ctx, store, RunEvent{Kind: "workflow.job.end", RunID: run.ID, JobID: jobID, Payload: map[string]any{"outputs": childOutputs}})
+		e.appendEvent(
+			ctx,
+			store,
+			RunEvent{
+				Kind:    "workflow.job.end",
+				RunID:   run.ID,
+				JobID:   jobID,
+				Payload: map[string]any{"outputs": childOutputs},
+			},
+		)
 		return jobExec, nil
 	}
 	stepCtx := execCtx
@@ -378,7 +425,11 @@ func (e *Executor) executeJob(
 			}
 			jobExec.Status = RunStatusFailed
 			jobExec.Error = err.Error()
-			e.appendEvent(ctx, store, RunEvent{Kind: "workflow.job.failed", RunID: run.ID, JobID: jobID, Message: err.Error()})
+			e.appendEvent(
+				ctx,
+				store,
+				RunEvent{Kind: "workflow.job.failed", RunID: run.ID, JobID: jobID, Message: err.Error()},
+			)
 			return jobExec, err
 		}
 	}
@@ -390,7 +441,11 @@ func (e *Executor) executeJob(
 	}
 	jobExec.Outputs = outputs
 	jobExec.Status = RunStatusSucceeded
-	e.appendEvent(ctx, store, RunEvent{Kind: "workflow.job.end", RunID: run.ID, JobID: jobID, Payload: map[string]any{"outputs": outputs}})
+	e.appendEvent(
+		ctx,
+		store,
+		RunEvent{Kind: "workflow.job.end", RunID: run.ID, JobID: jobID, Payload: map[string]any{"outputs": outputs}},
+	)
 	return jobExec, nil
 }
 
@@ -456,7 +511,11 @@ func (e *Executor) executeStep(
 		return stepExec, err
 	} else if !ok {
 		stepExec.Status = RunStatusSkipped
-		e.appendEvent(ctx, store, RunEvent{Kind: "workflow.step.end", RunID: run.ID, JobID: jobID, StepID: stepID, Message: "skipped"})
+		e.appendEvent(
+			ctx,
+			store,
+			RunEvent{Kind: "workflow.step.end", RunID: run.ID, JobID: jobID, StepID: stepID, Message: "skipped"},
+		)
 		return stepExec, nil
 	}
 	with, err := renderMap(step.With, expressionCtxFrom(execCtx, jobs))
@@ -470,17 +529,42 @@ func (e *Executor) executeStep(
 		if step.ContinueOnError {
 			stepExec.Status = RunStatusSucceeded
 			stepExec.Error = err.Error()
-			e.appendEvent(ctx, store, RunEvent{Kind: "workflow.step.end", RunID: run.ID, JobID: jobID, StepID: stepID, Message: "continued after error", Payload: map[string]any{"error": err.Error()}})
+			e.appendEvent(
+				ctx,
+				store,
+				RunEvent{
+					Kind:    "workflow.step.end",
+					RunID:   run.ID,
+					JobID:   jobID,
+					StepID:  stepID,
+					Message: "continued after error",
+					Payload: map[string]any{"error": err.Error()},
+				},
+			)
 			return stepExec, err
 		}
 		stepExec.Status = RunStatusFailed
 		stepExec.Error = err.Error()
-		e.appendEvent(ctx, store, RunEvent{Kind: "workflow.step.failed", RunID: run.ID, JobID: jobID, StepID: stepID, Message: err.Error()})
+		e.appendEvent(
+			ctx,
+			store,
+			RunEvent{Kind: "workflow.step.failed", RunID: run.ID, JobID: jobID, StepID: stepID, Message: err.Error()},
+		)
 		return stepExec, err
 	}
 	stepExec.Outputs = outputs
 	stepExec.Status = RunStatusSucceeded
-	e.appendEvent(ctx, store, RunEvent{Kind: "workflow.step.end", RunID: run.ID, JobID: jobID, StepID: stepID, Payload: map[string]any{"outputs": outputs}})
+	e.appendEvent(
+		ctx,
+		store,
+		RunEvent{
+			Kind:    "workflow.step.end",
+			RunID:   run.ID,
+			JobID:   jobID,
+			StepID:  stepID,
+			Payload: map[string]any{"outputs": outputs},
+		},
+	)
 	return stepExec, nil
 }
 
@@ -509,7 +593,12 @@ func renderJobSecrets(raw any, execCtx ExecutionContext, jobs map[string]JobExec
 	return out, nil
 }
 
-func (e *Executor) runStepTarget(ctx context.Context, step Step, with map[string]any, execCtx ExecutionContext) (map[string]any, error) {
+func (e *Executor) runStepTarget(
+	ctx context.Context,
+	step Step,
+	with map[string]any,
+	execCtx ExecutionContext,
+) (map[string]any, error) {
 	uses := strings.TrimSpace(step.Uses)
 	switch {
 	case strings.HasPrefix(uses, "tool/"):
@@ -557,7 +646,11 @@ func (e *Executor) runStepTarget(ctx context.Context, step Step, with map[string
 	}
 }
 
-func applyWorkflowCallContract(call *WorkflowCall, provided map[string]any, secrets map[string]string) (map[string]any, error) {
+func applyWorkflowCallContract(
+	call *WorkflowCall,
+	provided map[string]any,
+	secrets map[string]string,
+) (map[string]any, error) {
 	out := cloneMap(provided)
 	if call == nil {
 		return out, nil
@@ -592,7 +685,11 @@ func applyWorkflowCallContract(call *WorkflowCall, provided map[string]any, secr
 	return out, nil
 }
 
-func renderJobOutputs(outputs map[string]string, execCtx ExecutionContext, jobs map[string]JobExecution) (map[string]any, error) {
+func renderJobOutputs(
+	outputs map[string]string,
+	execCtx ExecutionContext,
+	jobs map[string]JobExecution,
+) (map[string]any, error) {
 	out := make(map[string]any, len(outputs))
 	for name, expr := range outputs {
 		value, err := renderString(expr, expressionCtxFrom(execCtx, jobs))
@@ -604,7 +701,13 @@ func renderJobOutputs(outputs map[string]string, execCtx ExecutionContext, jobs 
 	return out, nil
 }
 
-func renderWorkflowOutputs(workflow *Workflow, inputs map[string]any, req RunRequest, execCtx ExecutionContext, jobs map[string]JobExecution) (map[string]any, error) {
+func renderWorkflowOutputs(
+	workflow *Workflow,
+	inputs map[string]any,
+	req RunRequest,
+	execCtx ExecutionContext,
+	jobs map[string]JobExecution,
+) (map[string]any, error) {
 	if workflow.On.WorkflowCall == nil || len(workflow.On.WorkflowCall.Outputs) == 0 {
 		return nil, nil
 	}

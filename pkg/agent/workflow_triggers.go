@@ -42,20 +42,32 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 			logger.WarnCF("workflow", "Failed to load workflow", map[string]any{"ref": def.Ref, "error": err.Error()})
 			continue
 		}
-		if err := workflows.Validate(workflow); err != nil {
-			logger.WarnCF("workflow", "Invalid workflow skipped", map[string]any{"ref": def.Ref, "error": err.Error()})
+		if validateErr := workflows.Validate(workflow); validateErr != nil {
+			logger.WarnCF(
+				"workflow",
+				"Invalid workflow skipped",
+				map[string]any{"ref": def.Ref, "error": validateErr.Error()},
+			)
 			continue
 		}
 		match, ok, err := workflows.MatchCommandMessage(workflow, def.Ref, event)
 		if err != nil {
-			logger.WarnCF("workflow", "Workflow command trigger evaluation failed", map[string]any{"ref": def.Ref, "error": err.Error()})
+			logger.WarnCF(
+				"workflow",
+				"Workflow command trigger evaluation failed",
+				map[string]any{"ref": def.Ref, "error": err.Error()},
+			)
 			continue
 		}
 		if !ok {
 			match, ok, err = workflows.MatchChannelMessage(workflow, def.Ref, event)
 		}
 		if err != nil {
-			logger.WarnCF("workflow", "Workflow trigger evaluation failed", map[string]any{"ref": def.Ref, "error": err.Error()})
+			logger.WarnCF(
+				"workflow",
+				"Workflow trigger evaluation failed",
+				map[string]any{"ref": def.Ref, "error": err.Error()},
+			)
 			continue
 		}
 		if !ok {
@@ -125,7 +137,11 @@ func workflowEventFromInbound(msg bus.InboundMessage) workflows.ChannelMessageEv
 	}
 }
 
-func (al *AgentLoop) publishWorkflowTriggered(ref string, msg bus.InboundMessage, match *workflows.ChannelMessageMatch) {
+func (al *AgentLoop) publishWorkflowTriggered(
+	ref string,
+	msg bus.InboundMessage,
+	match *workflows.ChannelMessageMatch,
+) {
 	msg = bus.NormalizeInboundMessage(msg)
 	sessionKey := ""
 	if match != nil {

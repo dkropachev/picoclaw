@@ -17,22 +17,20 @@ type Definition struct {
 
 func ListLocal(ctx context.Context, workspace string) ([]Definition, error) {
 	root := filepath.Join(workspace, "workflows")
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		if os.IsNotExist(err) {
+	if _, statErr := os.Stat(root); statErr != nil {
+		if os.IsNotExist(statErr) {
 			return nil, nil
 		}
-		return nil, err
+		return nil, statErr
 	}
-	_ = entries
 
 	var defs []Definition
-	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	walkErr := filepath.WalkDir(root, func(path string, entry os.DirEntry, entryErr error) error {
+		if entryErr != nil {
+			return entryErr
 		}
-		if err := ctx.Err(); err != nil {
-			return err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 		if entry.IsDir() {
 			return nil
@@ -41,22 +39,22 @@ func ListLocal(ctx context.Context, workspace string) ([]Definition, error) {
 		if ext != ".yml" && ext != ".yaml" {
 			return nil
 		}
-		rel, err := filepath.Rel(workspace, path)
-		if err != nil {
-			return err
+		rel, relErr := filepath.Rel(workspace, path)
+		if relErr != nil {
+			return relErr
 		}
 		ref := filepath.ToSlash(rel)
 		def := Definition{Ref: ref, Path: path}
-		if resolved, err := (Resolver{WorkspaceDir: workspace}).ResolveLocal(ref); err == nil {
+		if resolved, resolveErr := (Resolver{WorkspaceDir: workspace}).ResolveLocal(ref); resolveErr == nil {
 			def.Ref = resolved.Canonical
 			def.Path = resolved.Path
 		} else {
-			def.Error = err.Error()
+			def.Error = resolveErr.Error()
 		}
 		if def.Error == "" {
-			workflow, err := LoadLocal(ctx, workspace, def.Ref)
-			if err != nil {
-				def.Error = err.Error()
+			workflow, loadErr := LoadLocal(ctx, workspace, def.Ref)
+			if loadErr != nil {
+				def.Error = loadErr.Error()
 			} else {
 				def.Name = workflow.Name
 			}
@@ -64,8 +62,8 @@ func ListLocal(ctx context.Context, workspace string) ([]Definition, error) {
 		defs = append(defs, def)
 		return nil
 	})
-	if err != nil {
-		return nil, err
+	if walkErr != nil {
+		return nil, walkErr
 	}
 	sort.Slice(defs, func(i, j int) bool {
 		return defs[i].Ref < defs[j].Ref
