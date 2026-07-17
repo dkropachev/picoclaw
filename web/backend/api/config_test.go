@@ -216,6 +216,88 @@ func TestHandleUpdateConfig_DoesNotInheritDefaultModelFields(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateConfig_AppliesModelAPIKeysFromPayload(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewBufferString(`{
+		"version": 3,
+		"agents": {
+			"defaults": {
+				"workspace": "~/.picoclaw/workspace",
+				"model_name": "custom-default"
+			}
+		},
+		"model_list": [
+			{
+				"model_name": "custom-default",
+				"model": "openai/gpt-4o",
+				"api_keys": ["sk-updated"]
+			}
+		]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if got := cfg.ModelList[0].APIKey(); got != "sk-updated" {
+		t.Fatalf("model_list[0].APIKey() = %q, want %q", got, "sk-updated")
+	}
+}
+
+func TestHandleUpdateConfig_PreservesModelAPIKeyWhenModelNameChanges(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewBufferString(`{
+		"version": 3,
+		"agents": {
+			"defaults": {
+				"workspace": "~/.picoclaw/workspace",
+				"model_name": "renamed-default"
+			}
+		},
+		"model_list": [
+			{
+				"model_name": "renamed-default",
+				"provider": "openai",
+				"model": "gpt-4o"
+			}
+		]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if got := cfg.ModelList[0].APIKey(); got != "sk-default" {
+		t.Fatalf("model_list[0].APIKey() = %q, want %q", got, "sk-default")
+	}
+}
+
 func TestHandlePatchConfig_RejectsInvalidExecRegexPatterns(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()

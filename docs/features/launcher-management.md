@@ -22,8 +22,8 @@ startup behavior, update, and runtime version metadata.
 | ID | Level | Requirement | Rationale |
 | --- | --- | --- | --- |
 | `FR-LAUNCHER-001` | MUST | Dashboard access requires password setup/login and an HttpOnly session cookie; local bootstrap auto-login is loopback-only. | Browser management must be gated. |
-| `FR-LAUNCHER-002` | MUST | Config GET/PUT/PATCH/reset preserves schema defaults, secure string semantics, and runtime log-level application. | Launcher config editing must not corrupt config. |
-| `FR-LAUNCHER-003` | MUST | Model management lists, adds, updates, deletes, tests, fetches, and sets default model entries without exposing stored secret values; model add/edit forms must expose `reasoning_effort` next to the model identifier and validate it with the same rules as runtime config. | Users need safe model administration. |
+| `FR-LAUNCHER-002` | MUST | Config GET/PUT/PATCH/reset preserves schema defaults, secure string semantics, model API-key payloads, existing model secrets across equivalent model alias changes, and runtime log-level application. | Launcher config editing must not corrupt config or credentials. |
+| `FR-LAUNCHER-003` | MUST | Model management lists, adds, updates, deletes, tests, fetches, and sets default model entries without exposing stored secret values; model add/edit forms must expose `reasoning_effort` next to the model identifier and validate it with the same rules as runtime config; model updates must not create blank stored secret entries when no key exists. | Users need safe model administration. |
 | `FR-LAUNCHER-004` | MUST | OAuth login flow creates, polls, completes, and logs out provider credentials through bounded flow state. | OAuth-backed providers need browser setup. |
 | `FR-LAUNCHER-005` | MUST | Gateway lifecycle endpoints report status/logs and start/stop/restart managed gateway processes without losing log diagnostics. | Desktop users need process control. |
 | `FR-LAUNCHER-006` | MUST | Startup, launcher config, update, and version endpoints report or mutate only their documented system settings. | System management must be narrow and auditable. |
@@ -118,8 +118,10 @@ Owns: TEST pkg/migrate/*
    before handler-specific parsing.
 2. For config and model writes, decode JSON, normalize provider/model fields and
    optional model controls, validate schema-specific fields, preserve stored
-   secure strings when masked values are submitted, write the config atomically,
-   and apply runtime log-level changes.
+   secure strings when masked values are submitted, reapply explicit model
+   API-key payloads after security-file merges, retain existing model secrets
+   across equivalent alias/name changes, write the config atomically, and apply
+   runtime log-level changes.
 3. For OAuth requests, create bounded flow state, redirect or poll provider
    login, exchange callback state for credentials, then persist or clear
    provider auth records.
@@ -147,7 +149,10 @@ shared authenticated dashboard layout and routing shell components.
 - GET logout is rejected; logout requires POST JSON.
 - Login is rate-limited per client IP.
 - OAuth flow IDs expire and unknown states fail.
-- Model update preserves existing secrets unless explicitly changed.
+- Config update preserves model API-key payloads and keeps existing model
+  secrets when equivalent provider/model/API-base entries are renamed.
+- Model update preserves existing secrets unless explicitly changed and avoids
+  persisting blank secret placeholders for models with no key.
 - Model add/update rejects unsupported `reasoning_effort` values before saving.
 - OpenAI Codex model fetch fails with an actionable credential error when the
   selected OAuth/token credential is missing or empty.
@@ -161,7 +166,7 @@ shared authenticated dashboard layout and routing shell components.
 | --- | --- |
 | `FR-LAUNCHER-001` | [web/backend/api/auth_test.go](../../web/backend/api/auth_test.go), [web/backend/api/auth_csrf_test.go](../../web/backend/api/auth_csrf_test.go), [web/backend/middleware/access_control_test.go](../../web/backend/middleware/access_control_test.go) |
 | `FR-LAUNCHER-002`, `FR-LAUNCHER-007` | [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [pkg/config/config_test.go](../../pkg/config/config_test.go) |
-| `FR-LAUNCHER-003` | [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [web/backend/api/model_status_test.go](../../web/backend/api/model_status_test.go), [web/backend/api/model_catalog_test.go](../../web/backend/api/model_catalog_test.go) |
+| `FR-LAUNCHER-003` | [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [web/backend/api/model_status_test.go](../../web/backend/api/model_status_test.go), [web/backend/api/model_catalog_test.go](../../web/backend/api/model_catalog_test.go) |
 | `FR-LAUNCHER-004` | [web/backend/api/oauth_test.go](../../web/backend/api/oauth_test.go), [cmd/picoclaw/internal/auth](../../cmd/picoclaw/internal/auth) |
 | `FR-LAUNCHER-005`, `FR-LAUNCHER-006` | [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [web/backend/api/startup_test.go](../../web/backend/api/startup_test.go), [web/backend/api/version_test.go](../../web/backend/api/version_test.go) |
 | `FR-LAUNCHER-008` | [web/backend/api/models_test.go](../../web/backend/api/models_test.go) |
