@@ -45,6 +45,27 @@ const (
 	// KindAgentError is emitted when agent execution reports an error.
 	KindAgentError Kind = "agent.error"
 
+	// KindWorkflowRunStart is emitted when a workflow run starts.
+	KindWorkflowRunStart Kind = "workflow.run.start"
+	// KindWorkflowRunEnd is emitted when a workflow run succeeds.
+	KindWorkflowRunEnd Kind = "workflow.run.end"
+	// KindWorkflowRunFailed is emitted when a workflow run fails.
+	KindWorkflowRunFailed Kind = "workflow.run.failed"
+	// KindWorkflowJobStart is emitted when a workflow job starts.
+	KindWorkflowJobStart Kind = "workflow.job.start"
+	// KindWorkflowJobEnd is emitted when a workflow job succeeds or is skipped.
+	KindWorkflowJobEnd Kind = "workflow.job.end"
+	// KindWorkflowJobFailed is emitted when a workflow job fails.
+	KindWorkflowJobFailed Kind = "workflow.job.failed"
+	// KindWorkflowStepStart is emitted when a workflow step starts.
+	KindWorkflowStepStart Kind = "workflow.step.start"
+	// KindWorkflowStepEnd is emitted when a workflow step succeeds or is skipped.
+	KindWorkflowStepEnd Kind = "workflow.step.end"
+	// KindWorkflowStepFailed is emitted when a workflow step fails.
+	KindWorkflowStepFailed Kind = "workflow.step.failed"
+	// KindWorkflowTriggered is emitted when an inbound event matches a workflow trigger.
+	KindWorkflowTriggered Kind = "workflow.triggered"
+
 	// KindChannelLifecycleStarted is emitted when a channel starts.
 	KindChannelLifecycleStarted Kind = "channel.lifecycle.started"
 	// KindChannelLifecycleInitialized is emitted when a channel is initialized.
@@ -125,6 +146,16 @@ var knownKinds = []Kind{
 	KindAgentSubTurnResultDelivered,
 	KindAgentSubTurnOrphan,
 	KindAgentError,
+	KindWorkflowRunStart,
+	KindWorkflowRunEnd,
+	KindWorkflowRunFailed,
+	KindWorkflowJobStart,
+	KindWorkflowJobEnd,
+	KindWorkflowJobFailed,
+	KindWorkflowStepStart,
+	KindWorkflowStepEnd,
+	KindWorkflowStepFailed,
+	KindWorkflowTriggered,
 	KindChannelLifecycleStarted,
 	KindChannelLifecycleInitialized,
 	KindChannelLifecycleStartFailed,

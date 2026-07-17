@@ -69,9 +69,15 @@ func (p *Pipeline) CallLLM(
 	}
 
 	exec.llmOpts = map[string]any{
-		"max_tokens":       ts.agent.MaxTokens,
-		"temperature":      ts.agent.Temperature,
-		"prompt_cache_key": ts.agent.ID,
+		"max_tokens":  ts.agent.MaxTokens,
+		"temperature": ts.agent.Temperature,
+	}
+	if !ts.opts.DisablePromptCache {
+		cacheKey := strings.TrimSpace(ts.opts.PromptCacheKey)
+		if cacheKey == "" {
+			cacheKey = ts.agent.ID
+		}
+		exec.llmOpts["prompt_cache_key"] = cacheKey
 	}
 	if exec.useNativeSearch {
 		exec.llmOpts["native_search"] = true

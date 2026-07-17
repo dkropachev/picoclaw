@@ -6,6 +6,7 @@ const smokeRoutes = [
   "/models",
   "/logs",
   "/agent/tools",
+  "/agent/workflows",
   "/agent/skills",
   "/agent/hub",
 ] as const
@@ -101,6 +102,25 @@ const skillsResponse = {
   ],
 }
 
+const workflowRun = {
+  id: "wr_test",
+  workflow_ref: "workflows/summarize-text.yml",
+  status: "succeeded",
+  session: "workflow:demo",
+  inputs: { text: "hello" },
+  outputs: { summary: "hello" },
+  jobs: {
+    main: { id: "main", status: "succeeded" },
+  },
+  steps: {
+    "main/summarize": { id: "summarize", status: "succeeded" },
+  },
+  child_run_ids: [],
+  created_at: "2026-07-16T12:00:00Z",
+  updated_at: "2026-07-16T12:00:01Z",
+  completed_at: "2026-07-16T12:00:01Z",
+}
+
 const channelCatalogResponse = {
   channels: [
     {
@@ -161,6 +181,47 @@ async function mockLauncherApis(page: Page) {
           return json(route, [])
         case "/api/tools":
           return json(route, toolsResponse)
+        case "/api/workflows":
+          return json(route, {
+            workflows: [
+              {
+                ref: "workflows/summarize-text.yml",
+                name: "Summarize text",
+              },
+            ],
+          })
+        case "/api/workflows/runs":
+          return json(route, { runs: [workflowRun] })
+        case "/api/workflows/runs/wr_test":
+          return json(route, workflowRun)
+        case "/api/workflows/runs/wr_test/events":
+          return json(route, {
+            run_id: "wr_test",
+            events: [
+              {
+                time: "2026-07-16T12:00:00Z",
+                kind: "workflow.run.start",
+                run_id: "wr_test",
+              },
+              {
+                time: "2026-07-16T12:00:01Z",
+                kind: "workflow.run.end",
+                run_id: "wr_test",
+              },
+            ],
+          })
+        case "/api/workflows/runs/wr_test/graph":
+          return json(route, {
+            run_id: "wr_test",
+            nodes: [
+              {
+                id: "wr_test",
+                workflow_ref: "workflows/summarize-text.yml",
+                status: "succeeded",
+              },
+            ],
+            edges: [],
+          })
         case "/api/tools/web-search-config":
           return json(route, webSearchConfigResponse)
         case "/api/skills":
