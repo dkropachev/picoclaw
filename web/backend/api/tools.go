@@ -175,6 +175,12 @@ var toolCatalog = []toolCatalogEntry{
 		ConfigKey:   "threads",
 	},
 	{
+		Name:        "workflow",
+		Description: "List, validate, reload, run, cancel, retry, graph, and inspect reusable workspace workflows.",
+		Category:    "automation",
+		ConfigKey:   "workflow",
+	},
+	{
 		Name:        "i2c",
 		Description: "Interact with I2C hardware devices exposed on the host.",
 		Category:    "hardware",

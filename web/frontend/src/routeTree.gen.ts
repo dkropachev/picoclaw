@@ -24,6 +24,7 @@ import { Route as ThreadsOpenRouteImport } from './routes/threads.open'
 import { Route as ThreadsThreadIdRouteImport } from './routes/threads.$threadId'
 import { Route as ConfigRawRouteImport } from './routes/config.raw'
 import { Route as ChannelsNameRouteImport } from './routes/channels/$name'
+import { Route as AgentWorkflowsRouteImport } from './routes/agent/workflows'
 import { Route as AgentToolsRouteImport } from './routes/agent/tools'
 import { Route as AgentSkillsRouteImport } from './routes/agent/skills'
 import { Route as AgentHubRouteImport } from './routes/agent/hub'
@@ -104,6 +105,11 @@ const ChannelsNameRoute = ChannelsNameRouteImport.update({
   path: '/$name',
   getParentRoute: () => ChannelsRouteRoute,
 } as any)
+const AgentWorkflowsRoute = AgentWorkflowsRouteImport.update({
+  id: '/workflows',
+  path: '/workflows',
+  getParentRoute: () => AgentRoute,
+} as any)
 const AgentToolsRoute = AgentToolsRouteImport.update({
   id: '/tools',
   path: '/tools',
@@ -139,6 +145,7 @@ export interface FileRoutesByFullPath {
   '/agent/hub': typeof AgentHubRoute
   '/agent/skills': typeof AgentSkillsRoute
   '/agent/tools': typeof AgentToolsRoute
+  '/agent/workflows': typeof AgentWorkflowsRoute
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
@@ -160,6 +167,7 @@ export interface FileRoutesByTo {
   '/agent/hub': typeof AgentHubRoute
   '/agent/skills': typeof AgentSkillsRoute
   '/agent/tools': typeof AgentToolsRoute
+  '/agent/workflows': typeof AgentWorkflowsRoute
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
@@ -182,6 +190,7 @@ export interface FileRoutesById {
   '/agent/hub': typeof AgentHubRoute
   '/agent/skills': typeof AgentSkillsRoute
   '/agent/tools': typeof AgentToolsRoute
+  '/agent/workflows': typeof AgentWorkflowsRoute
   '/channels/$name': typeof ChannelsNameRoute
   '/config/raw': typeof ConfigRawRoute
   '/threads/$threadId': typeof ThreadsThreadIdRoute
@@ -205,6 +214,7 @@ export interface FileRouteTypes {
     | '/agent/hub'
     | '/agent/skills'
     | '/agent/tools'
+    | '/agent/workflows'
     | '/channels/$name'
     | '/config/raw'
     | '/threads/$threadId'
@@ -226,6 +236,7 @@ export interface FileRouteTypes {
     | '/agent/hub'
     | '/agent/skills'
     | '/agent/tools'
+    | '/agent/workflows'
     | '/channels/$name'
     | '/config/raw'
     | '/threads/$threadId'
@@ -247,6 +258,7 @@ export interface FileRouteTypes {
     | '/agent/hub'
     | '/agent/skills'
     | '/agent/tools'
+    | '/agent/workflows'
     | '/channels/$name'
     | '/config/raw'
     | '/threads/$threadId'
@@ -375,6 +387,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChannelsNameRouteImport
       parentRoute: typeof ChannelsRouteRoute
     }
+    '/agent/workflows': {
+      id: '/agent/workflows'
+      path: '/workflows'
+      fullPath: '/agent/workflows'
+      preLoaderRoute: typeof AgentWorkflowsRouteImport
+      parentRoute: typeof AgentRoute
+    }
     '/agent/tools': {
       id: '/agent/tools'
       path: '/tools'
@@ -422,12 +441,14 @@ interface AgentRouteChildren {
   AgentHubRoute: typeof AgentHubRoute
   AgentSkillsRoute: typeof AgentSkillsRoute
   AgentToolsRoute: typeof AgentToolsRoute
+  AgentWorkflowsRoute: typeof AgentWorkflowsRoute
 }
 
 const AgentRouteChildren: AgentRouteChildren = {
   AgentHubRoute: AgentHubRoute,
   AgentSkillsRoute: AgentSkillsRoute,
   AgentToolsRoute: AgentToolsRoute,
+  AgentWorkflowsRoute: AgentWorkflowsRoute,
 }
 
 const AgentRouteWithChildren = AgentRoute._addFileChildren(AgentRouteChildren)
