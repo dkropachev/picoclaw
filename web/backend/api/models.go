@@ -438,7 +438,9 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 	// Preserve the existing API key when the caller omits it (empty string).
 	// This lets the UI update api_base / proxy without clearing the stored secret.
 	if mc.APIKey == "" {
-		mc.ModelConfig.SetAPIKey(cfg.ModelList[idx].APIKey())
+		if existingKey := cfg.ModelList[idx].APIKey(); existingKey != "" {
+			mc.ModelConfig.SetAPIKey(existingKey)
+		}
 	} else {
 		mc.ModelConfig.SetAPIKey(mc.APIKey)
 	}

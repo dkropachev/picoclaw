@@ -11,6 +11,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 // registerConfigRoutes binds configuration management endpoints to the ServeMux.
@@ -84,12 +85,18 @@ func (h *Handler) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Load existing config and copy security credentials before validation,
 	// so that security-managed fields (e.g. pico token) are available.
+	existingCfg, err := config.LoadConfig(h.configPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to load existing config: %v", err), http.StatusInternalServerError)
+		return
+	}
 	err = cfg.SecurityCopyFrom(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to apply security config: %v", err), http.StatusInternalServerError)
 		return
 	}
 	applyConfigSecretsFromMap(&cfg, raw)
+	preserveModelSecretsFromExisting(&cfg, existingCfg, raw)
 
 	if errs := validateConfig(&cfg); len(errs) > 0 {
 		w.Header().Set("Content-Type", "application/json")
@@ -207,6 +214,7 @@ func (h *Handler) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	applyConfigSecretsFromMap(&newCfg, base)
+	preserveModelSecretsFromExisting(&newCfg, cfg, base)
 
 	if errs := validateConfig(&newCfg); len(errs) > 0 {
 		w.Header().Set("Content-Type", "application/json")
@@ -651,9 +659,189 @@ func getSecretString(m map[string]any, key string) (string, bool) {
 	return "", false
 }
 
+func applyModelSecretsFromMap(cfg *config.Config, raw map[string]any) {
+	if cfg == nil {
+		return
+	}
+
+	models, ok := raw["model_list"]
+	if !ok {
+		return
+	}
+	modelList, ok := models.([]any)
+	if !ok {
+		return
+	}
+
+	for i, rawModel := range modelList {
+		if i >= len(cfg.ModelList) {
+			break
+		}
+		modelMap, ok := rawModel.(map[string]any)
+		if !ok {
+			continue
+		}
+		keys, found := modelAPIKeysFromRaw(modelMap)
+		if !found {
+			continue
+		}
+		cfg.ModelList[i].APIKeys = config.SimpleSecureStrings(keys...)
+	}
+}
+
+func preserveModelSecretsFromExisting(cfg, existing *config.Config, raw map[string]any) {
+	if cfg == nil || existing == nil {
+		return
+	}
+	existingModels := nonVirtualModelConfigs(existing.ModelList)
+	existingByName := make(map[string]*config.ModelConfig, len(existingModels))
+	for _, model := range existingModels {
+		if model == nil || model.ModelName == "" || len(model.APIKeys.Values()) == 0 {
+			continue
+		}
+		existingByName[model.ModelName] = model
+	}
+
+	rawModels, _ := raw["model_list"].([]any)
+	for i, model := range cfg.ModelList {
+		if model == nil || len(model.APIKeys.Values()) > 0 {
+			continue
+		}
+		if rawModelHasAPIKey(rawModels, i) {
+			continue
+		}
+		if existingModel := existingByName[model.ModelName]; existingModel != nil {
+			model.APIKeys = config.SimpleSecureStrings(existingModel.APIKeys.Values()...)
+			continue
+		}
+		if i >= len(existingModels) {
+			continue
+		}
+		existingModel := existingModels[i]
+		if modelSecretFallbackAllowed(model, existingModel) {
+			model.APIKeys = config.SimpleSecureStrings(existingModel.APIKeys.Values()...)
+		}
+	}
+}
+
+func nonVirtualModelConfigs(models []*config.ModelConfig) []*config.ModelConfig {
+	out := make([]*config.ModelConfig, 0, len(models))
+	for _, model := range models {
+		if model == nil || model.IsVirtual() {
+			continue
+		}
+		out = append(out, model)
+	}
+	return out
+}
+
+func rawModelHasAPIKey(rawModels []any, index int) bool {
+	if index < 0 || index >= len(rawModels) {
+		return false
+	}
+	modelMap, ok := rawModels[index].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, found := modelAPIKeysFromRaw(modelMap)
+	return found
+}
+
+func modelAPIKeysFromRaw(modelMap map[string]any) ([]string, bool) {
+	if raw, exists := modelMap["api_keys"]; exists {
+		switch value := raw.(type) {
+		case []any:
+			keys := make([]string, 0, len(value))
+			hasPlaceholder := false
+			for _, item := range value {
+				key, ok := item.(string)
+				if !ok {
+					continue
+				}
+				key = strings.TrimSpace(key)
+				if key == "" {
+					continue
+				}
+				if isSecretPlaceholder(key) {
+					hasPlaceholder = true
+					continue
+				}
+				keys = append(keys, key)
+			}
+			if len(keys) == 0 && hasPlaceholder {
+				return nil, false
+			}
+			return keys, true
+		case []string:
+			keys := make([]string, 0, len(value))
+			hasPlaceholder := false
+			for _, key := range value {
+				key = strings.TrimSpace(key)
+				if key == "" {
+					continue
+				}
+				if isSecretPlaceholder(key) {
+					hasPlaceholder = true
+					continue
+				}
+				keys = append(keys, key)
+			}
+			if len(keys) == 0 && hasPlaceholder {
+				return nil, false
+			}
+			return keys, true
+		case string:
+			key := strings.TrimSpace(value)
+			if isSecretPlaceholder(key) {
+				return nil, false
+			}
+			if key == "" {
+				return nil, true
+			}
+			return []string{key}, true
+		default:
+			return nil, false
+		}
+	}
+	if raw, exists := modelMap["api_key"]; exists {
+		key, ok := raw.(string)
+		if !ok {
+			return nil, false
+		}
+		key = strings.TrimSpace(key)
+		if isSecretPlaceholder(key) {
+			return nil, false
+		}
+		if key == "" {
+			return nil, true
+		}
+		return []string{key}, true
+	}
+	return nil, false
+}
+
+func isSecretPlaceholder(value string) bool {
+	return value == "[NOT_HERE]" || strings.Contains(value, "****")
+}
+
+func modelSecretFallbackAllowed(model, existing *config.ModelConfig) bool {
+	if model == nil || existing == nil || len(existing.APIKeys.Values()) == 0 {
+		return false
+	}
+	modelProvider, modelID := providers.ExtractProtocol(model)
+	existingProvider, existingID := providers.ExtractProtocol(existing)
+	return modelProvider == existingProvider &&
+		modelID == existingID &&
+		strings.TrimRight(strings.TrimSpace(model.APIBase), "/") ==
+			strings.TrimRight(strings.TrimSpace(existing.APIBase), "/")
+}
+
 func applyConfigSecretsFromMap(cfg *config.Config, raw map[string]any) {
+	applyModelSecretsFromMap(cfg, raw)
+
 	channelsMap, hasChannels := asMapField(raw, "channel_list")
 	if !hasChannels {
+		applyToolSecretsFromMap(cfg, raw)
 		return
 	}
 
@@ -685,7 +873,10 @@ func applyConfigSecretsFromMap(cfg *config.Config, raw map[string]any) {
 		applySecureStringsToStruct(rv, settingsMap)
 	}
 
-	// Handle tools secrets
+	applyToolSecretsFromMap(cfg, raw)
+}
+
+func applyToolSecretsFromMap(cfg *config.Config, raw map[string]any) {
 	tools, hasTools := asMapField(raw, "tools")
 	if !hasTools {
 		return
