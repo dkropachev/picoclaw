@@ -169,6 +169,10 @@ func registerSharedTools(
 			}
 		}
 
+		if cfg.Workflows.Enabled && cfg.Tools.IsToolEnabled("workflow") {
+			agent.Tools.Register(newWorkflowTool(al, agentID, agent))
+		}
+
 		// Message tool
 		if cfg.Tools.IsToolEnabled("message") {
 			messageTool := tools.NewMessageTool()
@@ -186,6 +190,7 @@ func registerSharedTools(
 				mediaParts []bus.MediaPart,
 			) error {
 				outboundCtx := bus.NewOutboundContext(channel, chatID, replyToMessageID)
+				outboundCtx.TopicID = tools.ToolTopicID(ctx)
 				outboundAgentID, outboundSessionKey, outboundScope := outboundTurnMetadata(
 					tools.ToolAgentID(ctx),
 					tools.ToolSessionKey(ctx),

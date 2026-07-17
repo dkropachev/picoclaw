@@ -43,6 +43,7 @@ type Config struct {
 	ModelList SecureModelList `json:"model_list"          yaml:"model_list"` // New model-centric provider configuration
 	Gateway   GatewayConfig   `json:"gateway"             yaml:"-"`
 	Events    EventsConfig    `json:"events,omitempty"    yaml:"-"`
+	Workflows WorkflowsConfig `json:"workflows,omitempty" yaml:"-"`
 	Hooks     HooksConfig     `json:"hooks,omitempty"     yaml:"-"`
 	Tools     ToolsConfig     `json:"tools"               yaml:",inline"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"           yaml:"-"`
@@ -67,6 +68,43 @@ type EvolutionConfig struct {
 	MinCaseCount int `json:"min_case_count,omitempty"`
 	// Deprecated: use MinSuccessRatio.
 	MinSuccessRate float64 `json:"min_success_rate,omitempty"`
+}
+
+type WorkflowsConfig struct {
+	Enabled               bool   `json:"enabled"                 env:"PICOCLAW_WORKFLOWS_ENABLED"`
+	DefinitionsDir        string `json:"definitions_dir"         env:"PICOCLAW_WORKFLOWS_DEFINITIONS_DIR"`
+	MaxConcurrentRuns     int    `json:"max_concurrent_runs"     env:"PICOCLAW_WORKFLOWS_MAX_CONCURRENT_RUNS"`
+	DefaultTimeoutSeconds int    `json:"default_timeout_seconds" env:"PICOCLAW_WORKFLOWS_DEFAULT_TIMEOUT_SECONDS"`
+	MaxCallDepth          int    `json:"max_call_depth"          env:"PICOCLAW_WORKFLOWS_MAX_CALL_DEPTH"`
+	RetentionDays         int    `json:"retention_days"          env:"PICOCLAW_WORKFLOWS_RETENTION_DAYS"`
+}
+
+func (c WorkflowsConfig) EffectiveMaxCallDepth() int {
+	if c.MaxCallDepth > 0 {
+		return c.MaxCallDepth
+	}
+	return 4
+}
+
+func (c WorkflowsConfig) EffectiveMaxConcurrentRuns() int {
+	if c.MaxConcurrentRuns > 0 {
+		return c.MaxConcurrentRuns
+	}
+	return 4
+}
+
+func (c WorkflowsConfig) EffectiveDefaultTimeout() time.Duration {
+	if c.DefaultTimeoutSeconds <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(c.DefaultTimeoutSeconds) * time.Second
+}
+
+func (c WorkflowsConfig) EffectiveRetentionDays() int {
+	if c.RetentionDays > 0 {
+		return c.RetentionDays
+	}
+	return 30
 }
 
 func (c EvolutionConfig) MarshalJSON() ([]byte, error) {
@@ -1310,6 +1348,7 @@ type ToolsConfig struct {
 	Subagent        ToolConfig         `json:"subagent"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
 	Threads         ThreadsToolConfig  `json:"threads"           yaml:"-"`
 	WebFetch        ToolConfig         `json:"web_fetch"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
+	Workflow        ToolConfig         `json:"workflow"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WORKFLOW_"`
 	WriteFile       ToolConfig         `json:"write_file"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
 }
 
@@ -2077,6 +2116,8 @@ func (t *ToolsConfig) IsToolEnabled(name string) bool {
 		return t.Threads.Enabled
 	case "web_fetch":
 		return t.WebFetch.Enabled
+	case "workflow":
+		return t.Workflow.Enabled
 	case "send_file":
 		return t.SendFile.Enabled
 	case "send_tts":

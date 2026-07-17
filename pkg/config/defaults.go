@@ -314,6 +314,14 @@ func DefaultConfig() *Config {
 		Events: EventsConfig{
 			Logging: defaultEventLoggingConfig(),
 		},
+		Workflows: WorkflowsConfig{
+			Enabled:               true,
+			DefinitionsDir:        "workflows",
+			MaxConcurrentRuns:     4,
+			DefaultTimeoutSeconds: 300,
+			MaxCallDepth:          4,
+			RetentionDays:         30,
+		},
 		Tools: ToolsConfig{
 			FilterSensitiveData: true,
 			FilterMinLength:     8,
@@ -526,6 +534,9 @@ func DefaultConfig() *Config {
 				},
 			},
 			WebFetch: ToolConfig{
+				Enabled: true,
+			},
+			Workflow: ToolConfig{
 				Enabled: true,
 			},
 			WriteFile: ToolConfig{
