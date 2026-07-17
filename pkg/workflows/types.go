@@ -38,12 +38,12 @@ type ChannelMessageTrigger struct {
 }
 
 type CommandTrigger struct {
-	Name         string           `json:"name,omitempty"        yaml:"name,omitempty"`
-	Channels     StringList       `json:"channels,omitempty"    yaml:"channels,omitempty"`
-	Chats        StringList       `json:"chats,omitempty"       yaml:"chats,omitempty"`
-	Senders      StringList       `json:"senders,omitempty"     yaml:"senders,omitempty"`
-	Args         map[string]Input `json:"args,omitempty"        yaml:"args,omitempty"`
-	Passthrough  *bool            `json:"passthrough,omitempty" yaml:"passthrough,omitempty"`
+	Name         string           `json:"name,omitempty"         yaml:"name,omitempty"`
+	Channels     StringList       `json:"channels,omitempty"     yaml:"channels,omitempty"`
+	Chats        StringList       `json:"chats,omitempty"        yaml:"chats,omitempty"`
+	Senders      StringList       `json:"senders,omitempty"      yaml:"senders,omitempty"`
+	Args         map[string]Input `json:"args,omitempty"         yaml:"args,omitempty"`
+	Passthrough  *bool            `json:"passthrough,omitempty"  yaml:"passthrough,omitempty"`
 	Conversation ConversationSpec `json:"conversation,omitempty" yaml:"conversation,omitempty"`
 }
 
@@ -77,27 +77,27 @@ type Output struct {
 }
 
 type Job struct {
-	Name            string            `json:"name,omitempty"    yaml:"name,omitempty"`
-	RunsOn          string            `json:"runs-on,omitempty" yaml:"runs-on,omitempty"`
-	Needs           StringList        `json:"needs,omitempty"   yaml:"needs,omitempty"`
-	Uses            string            `json:"uses,omitempty"    yaml:"uses,omitempty"`
-	If              string            `json:"if,omitempty"      yaml:"if,omitempty"`
+	Name            string            `json:"name,omitempty"              yaml:"name,omitempty"`
+	RunsOn          string            `json:"runs-on,omitempty"           yaml:"runs-on,omitempty"`
+	Needs           StringList        `json:"needs,omitempty"             yaml:"needs,omitempty"`
+	Uses            string            `json:"uses,omitempty"              yaml:"uses,omitempty"`
+	If              string            `json:"if,omitempty"                yaml:"if,omitempty"`
 	ContinueOnError bool              `json:"continue_on_error,omitempty" yaml:"continue-on-error,omitempty"`
-	With            map[string]any    `json:"with,omitempty"    yaml:"with,omitempty"`
-	Secrets         any               `json:"secrets,omitempty" yaml:"secrets,omitempty"`
-	Outputs         map[string]string `json:"outputs,omitempty" yaml:"outputs,omitempty"`
-	Steps           []Step            `json:"steps,omitempty"   yaml:"steps,omitempty"`
-	Context         RunContext        `json:"context,omitempty" yaml:"context,omitempty"`
+	With            map[string]any    `json:"with,omitempty"              yaml:"with,omitempty"`
+	Secrets         any               `json:"secrets,omitempty"           yaml:"secrets,omitempty"`
+	Outputs         map[string]string `json:"outputs,omitempty"           yaml:"outputs,omitempty"`
+	Steps           []Step            `json:"steps,omitempty"             yaml:"steps,omitempty"`
+	Context         RunContext        `json:"context,omitempty"           yaml:"context,omitempty"`
 }
 
 type Step struct {
-	ID              string         `json:"id,omitempty"      yaml:"id,omitempty"`
-	Name            string         `json:"name,omitempty"    yaml:"name,omitempty"`
-	Uses            string         `json:"uses,omitempty"    yaml:"uses,omitempty"`
-	If              string         `json:"if,omitempty"      yaml:"if,omitempty"`
+	ID              string         `json:"id,omitempty"                yaml:"id,omitempty"`
+	Name            string         `json:"name,omitempty"              yaml:"name,omitempty"`
+	Uses            string         `json:"uses,omitempty"              yaml:"uses,omitempty"`
+	If              string         `json:"if,omitempty"                yaml:"if,omitempty"`
 	ContinueOnError bool           `json:"continue_on_error,omitempty" yaml:"continue-on-error,omitempty"`
-	With            map[string]any `json:"with,omitempty"    yaml:"with,omitempty"`
-	Context         RunContext     `json:"context,omitempty" yaml:"context,omitempty"`
+	With            map[string]any `json:"with,omitempty"              yaml:"with,omitempty"`
+	Context         RunContext     `json:"context,omitempty"           yaml:"context,omitempty"`
 }
 
 type ConversationSpec struct {

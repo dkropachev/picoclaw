@@ -95,7 +95,11 @@ func createWorkflowFile(t *testing.T, workspace, name string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, name), []byte("name: test\njobs:\n  noop:\n    runs-on: picoclaw\n    steps:\n      - uses: tool/message\n"), 0o644); err != nil {
+	if err := os.WriteFile(
+		filepath.Join(dir, name),
+		[]byte("name: test\njobs:\n  noop:\n    runs-on: picoclaw\n    steps:\n      - uses: tool/message\n"),
+		0o644,
+	); err != nil {
 		t.Fatal(err)
 	}
 }

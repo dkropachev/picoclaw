@@ -34,7 +34,11 @@ type ChannelMessageMatch struct {
 	Passthrough bool
 }
 
-func MatchChannelMessage(workflow *Workflow, ref string, event ChannelMessageEvent) (*ChannelMessageMatch, bool, error) {
+func MatchChannelMessage(
+	workflow *Workflow,
+	ref string,
+	event ChannelMessageEvent,
+) (*ChannelMessageMatch, bool, error) {
 	if workflow == nil || workflow.On.ChannelMessage == nil {
 		return nil, false, nil
 	}
@@ -72,7 +76,11 @@ func MatchChannelMessage(workflow *Workflow, ref string, event ChannelMessageEve
 	}, true, nil
 }
 
-func MatchCommandMessage(workflow *Workflow, ref string, event ChannelMessageEvent) (*ChannelMessageMatch, bool, error) {
+func MatchCommandMessage(
+	workflow *Workflow,
+	ref string,
+	event ChannelMessageEvent,
+) (*ChannelMessageMatch, bool, error) {
 	if workflow == nil || workflow.On.Command == nil {
 		return nil, false, nil
 	}

@@ -77,7 +77,11 @@ func (r *workflowToolRunner) RunTool(ctx context.Context, req workflows.ToolRequ
 	return outputs, nil
 }
 
-func (r *workflowToolRunner) deliverHandledMedia(ctx context.Context, req workflows.ToolRequest, result *tools.ToolResult) error {
+func (r *workflowToolRunner) deliverHandledMedia(
+	ctx context.Context,
+	req workflows.ToolRequest,
+	result *tools.ToolResult,
+) error {
 	if r == nil || r.loop == nil || result == nil || len(result.Media) == 0 || !result.ResponseHandled {
 		return nil
 	}

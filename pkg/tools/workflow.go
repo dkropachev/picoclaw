@@ -38,8 +38,18 @@ func (t *WorkflowTool) Parameters() map[string]any {
 			"action": map[string]any{
 				"type":        "string",
 				"description": "Workflow action to perform.",
-				"enum":        []string{"list", "validate", "reload", "run", "status", "events", "graph", "cancel", "retry"},
-				"default":     "list",
+				"enum": []string{
+					"list",
+					"validate",
+					"reload",
+					"run",
+					"status",
+					"events",
+					"graph",
+					"cancel",
+					"retry",
+				},
+				"default": "list",
 			},
 			"ref": map[string]any{
 				"type":        "string",

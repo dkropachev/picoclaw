@@ -89,7 +89,13 @@ func validateWorkflowCall(call *WorkflowCall) ValidationErrors {
 	}
 	for name, output := range call.Outputs {
 		if strings.TrimSpace(output.Value) == "" {
-			errs = append(errs, ValidationError{Path: "on.workflow_call.outputs." + name + ".value", Message: "output value is required"})
+			errs = append(
+				errs,
+				ValidationError{
+					Path:    "on.workflow_call.outputs." + name + ".value",
+					Message: "output value is required",
+				},
+			)
 		}
 	}
 	return errs
@@ -103,7 +109,10 @@ func validateChannelTrigger(path string, trigger *ChannelMessageTrigger) Validat
 	errs = append(errs, validateConversation(path+".conversation", trigger.Conversation)...)
 	if strings.TrimSpace(trigger.TextMatches) != "" {
 		if _, err := regexp.Compile(trigger.TextMatches); err != nil {
-			errs = append(errs, ValidationError{Path: path + ".text_matches", Message: fmt.Sprintf("invalid regex: %v", err)})
+			errs = append(
+				errs,
+				ValidationError{Path: path + ".text_matches", Message: fmt.Sprintf("invalid regex: %v", err)},
+			)
 		}
 	}
 	return errs
@@ -119,7 +128,10 @@ func validateCommandTrigger(path string, trigger *CommandTrigger) ValidationErro
 	}
 	for name, input := range trigger.Args {
 		if !validInputType(input.Type) {
-			errs = append(errs, ValidationError{Path: path + ".args." + name + ".type", Message: "unsupported input type"})
+			errs = append(
+				errs,
+				ValidationError{Path: path + ".args." + name + ".type", Message: "unsupported input type"},
+			)
 		}
 	}
 	errs = append(errs, validateConversation(path+".conversation", trigger.Conversation)...)
@@ -147,7 +159,10 @@ func validateJobs(jobs map[string]Job) ValidationErrors {
 		}
 		for _, dep := range job.Needs {
 			if _, ok := jobs[dep]; !ok {
-				errs = append(errs, ValidationError{Path: jobPath + ".needs", Message: fmt.Sprintf("unknown dependency %q", dep)})
+				errs = append(
+					errs,
+					ValidationError{Path: jobPath + ".needs", Message: fmt.Sprintf("unknown dependency %q", dep)},
+				)
 			}
 		}
 		if strings.TrimSpace(job.Uses) != "" {
@@ -155,12 +170,18 @@ func validateJobs(jobs map[string]Job) ValidationErrors {
 				errs = append(errs, ValidationError{Path: jobPath + ".uses", Message: err.Error()})
 			}
 			if len(job.Steps) > 0 {
-				errs = append(errs, ValidationError{Path: jobPath + ".steps", Message: "reusable workflow jobs cannot define steps"})
+				errs = append(
+					errs,
+					ValidationError{Path: jobPath + ".steps", Message: "reusable workflow jobs cannot define steps"},
+				)
 			}
 			continue
 		}
 		if strings.TrimSpace(job.RunsOn) == "" {
-			errs = append(errs, ValidationError{Path: jobPath + ".runs-on", Message: "runs-on is required for step jobs"})
+			errs = append(
+				errs,
+				ValidationError{Path: jobPath + ".runs-on", Message: "runs-on is required for step jobs"},
+			)
 		}
 		if len(job.Steps) == 0 {
 			errs = append(errs, ValidationError{Path: jobPath + ".steps", Message: "at least one step is required"})
@@ -189,7 +210,13 @@ func validateSteps(path string, steps []Step) ValidationErrors {
 			continue
 		}
 		if strings.HasPrefix(strings.TrimPrefix(uses, "./"), "workflows/") {
-			errs = append(errs, ValidationError{Path: stepPath + ".uses", Message: "reusable workflows are only supported at job level"})
+			errs = append(
+				errs,
+				ValidationError{
+					Path:    stepPath + ".uses",
+					Message: "reusable workflows are only supported at job level",
+				},
+			)
 			continue
 		}
 		if !validStepUses(uses) {

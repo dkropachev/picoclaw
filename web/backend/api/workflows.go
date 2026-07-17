@@ -280,7 +280,9 @@ func (h *Handler) workflowWorkspace() (string, error) {
 	return cfg.WorkspacePath(), nil
 }
 
-func (h *Handler) workflowRuntime(ctx context.Context) (*config.Config, *workflows.FileRunStore, *workflows.Executor, error) {
+func (h *Handler) workflowRuntime(
+	ctx context.Context,
+) (*config.Config, *workflows.FileRunStore, *workflows.Executor, error) {
 	cfg, err := config.LoadConfig(h.configPath)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("Failed to load config: %w", err)

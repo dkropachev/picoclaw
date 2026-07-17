@@ -56,15 +56,15 @@ type RunEvent struct {
 }
 
 type RunStore interface {
-	CreateRun(context.Context, *Run) error
-	UpdateRun(context.Context, *Run) error
-	CancelRun(context.Context, string, string) (*Run, error)
-	GetRun(context.Context, string) (*Run, error)
-	ListRuns(context.Context) ([]Run, error)
-	AppendEvent(context.Context, RunEvent) error
-	Events(context.Context, string) ([]RunEvent, error)
-	DeleteRun(context.Context, string) error
-	PruneTerminalRuns(context.Context, time.Time) (int, error)
+	CreateRun(ctx context.Context, run *Run) error
+	UpdateRun(ctx context.Context, run *Run) error
+	CancelRun(ctx context.Context, runID string, reason string) (*Run, error)
+	GetRun(ctx context.Context, runID string) (*Run, error)
+	ListRuns(ctx context.Context) ([]Run, error)
+	AppendEvent(ctx context.Context, event RunEvent) error
+	Events(ctx context.Context, runID string) ([]RunEvent, error)
+	DeleteRun(ctx context.Context, runID string) error
+	PruneTerminalRuns(ctx context.Context, olderThan time.Time) (int, error)
 }
 
 type FileRunStore struct {

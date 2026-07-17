@@ -46,9 +46,12 @@ func (r *fakeAgentRunner) RunAgent(_ context.Context, req AgentRequest) (map[str
 
 func TestExecutorRunsFunctionWorkflowWithIfAndOutputs(t *testing.T) {
 	registry := NewFunctionRegistry()
-	if err := registry.Register("echo", func(_ context.Context, args map[string]any, _ ExecutionContext) (map[string]any, error) {
-		return map[string]any{"text": args["text"]}, nil
-	}); err != nil {
+	if err := registry.Register(
+		"echo",
+		func(_ context.Context, args map[string]any, _ ExecutionContext) (map[string]any, error) {
+			return map[string]any{"text": args["text"]}, nil
+		},
+	); err != nil {
 		t.Fatal(err)
 	}
 	workflow := parseWorkflow(t, `
@@ -148,9 +151,12 @@ jobs:
       text: from-parent
 `)
 	registry := NewFunctionRegistry()
-	if err := registry.Register("prefix", func(_ context.Context, args map[string]any, _ ExecutionContext) (map[string]any, error) {
-		return map[string]any{"text": "child:" + args["text"].(string)}, nil
-	}); err != nil {
+	if err := registry.Register(
+		"prefix",
+		func(_ context.Context, args map[string]any, _ ExecutionContext) (map[string]any, error) {
+			return map[string]any{"text": "child:" + args["text"].(string)}, nil
+		},
+	); err != nil {
 		t.Fatal(err)
 	}
 	store := NewFileRunStore(workspace)
@@ -307,9 +313,12 @@ jobs:
       child_token: ${{ secrets.parent_token }}
 `)
 	registry := NewFunctionRegistry()
-	if err := registry.Register("echo-secret", func(_ context.Context, _ map[string]any, exec ExecutionContext) (map[string]any, error) {
-		return map[string]any{"text": exec.Secrets["child_token"]}, nil
-	}); err != nil {
+	if err := registry.Register(
+		"echo-secret",
+		func(_ context.Context, _ map[string]any, exec ExecutionContext) (map[string]any, error) {
+			return map[string]any{"text": exec.Secrets["child_token"]}, nil
+		},
+	); err != nil {
 		t.Fatal(err)
 	}
 	result, err := (&Executor{WorkspaceDir: workspace, Functions: registry}).Run(context.Background(), RunRequest{
@@ -374,22 +383,25 @@ func TestExecutorCancelRunBeforeNextStep(t *testing.T) {
 	registry := NewFunctionRegistry()
 	workspace := t.TempDir()
 	store := NewFileRunStore(workspace)
-	_ = registry.Register("cancel", func(ctx context.Context, _ map[string]any, exec ExecutionContext) (map[string]any, error) {
-		runs, err := store.ListRuns(ctx)
-		if err != nil {
-			return nil, err
-		}
-		for _, run := range runs {
-			if run.Status != RunStatusRunning {
-				continue
-			}
-			if _, err := store.CancelRun(ctx, run.ID, "test cancel"); err != nil {
+	_ = registry.Register(
+		"cancel",
+		func(ctx context.Context, _ map[string]any, exec ExecutionContext) (map[string]any, error) {
+			runs, err := store.ListRuns(ctx)
+			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"ok": true}, nil
-		}
-		return nil, errors.New("running run not found")
-	})
+			for _, run := range runs {
+				if run.Status != RunStatusRunning {
+					continue
+				}
+				if _, err := store.CancelRun(ctx, run.ID, "test cancel"); err != nil {
+					return nil, err
+				}
+				return map[string]any{"ok": true}, nil
+			}
+			return nil, errors.New("running run not found")
+		},
+	)
 	_ = registry.Register("after", func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
 		t.Fatal("after step should not run after cancellation")
 		return nil, nil
@@ -428,9 +440,12 @@ jobs:
 func TestExecutorRetryUsesPreviousRunInputsAndEvent(t *testing.T) {
 	workspace := t.TempDir()
 	registry := NewFunctionRegistry()
-	_ = registry.Register("echo", func(_ context.Context, args map[string]any, exec ExecutionContext) (map[string]any, error) {
-		return map[string]any{"text": args["text"], "event": exec.Event["kind"]}, nil
-	})
+	_ = registry.Register(
+		"echo",
+		func(_ context.Context, args map[string]any, exec ExecutionContext) (map[string]any, error) {
+			return map[string]any{"text": args["text"], "event": exec.Event["kind"]}, nil
+		},
+	)
 	writeWorkflowFile(t, workspace, "retry.yml", `
 name: Retry
 on:
@@ -510,14 +525,17 @@ jobs:
 
 func TestExecutorAppliesDefaultTimeout(t *testing.T) {
 	registry := NewFunctionRegistry()
-	_ = registry.Register("wait", func(ctx context.Context, _ map[string]any, _ ExecutionContext) (map[string]any, error) {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(time.Second):
-			return map[string]any{"ok": true}, nil
-		}
-	})
+	_ = registry.Register(
+		"wait",
+		func(ctx context.Context, _ map[string]any, _ ExecutionContext) (map[string]any, error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Second):
+				return map[string]any{"ok": true}, nil
+			}
+		},
+	)
 	workflow := parseWorkflow(t, `
 name: Timeout
 on:
