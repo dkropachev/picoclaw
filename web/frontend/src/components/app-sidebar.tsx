@@ -174,7 +174,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           isActive={isActive}
           onClick={handleNavItemClick}
           data-tour={item.tourId}
-          className={`h-9 px-3 ${isActive ? "bg-accent/80 text-foreground font-medium" : "text-muted-foreground hover:bg-muted/60"}`}
+          className={`h-9 px-3 ${isActive ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium dark:bg-white/10 dark:text-white" : "text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground dark:text-white/70 dark:hover:bg-white/10 dark:hover:text-white"}`}
         >
           <Link to={item.url}>{content}</Link>
         </SidebarMenuButton>
@@ -187,18 +187,18 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       key={section.label}
       className="group/service-section mb-1 last:mb-0"
     >
-      <CollapsibleTrigger className="text-sidebar-foreground/60 hover:bg-muted/60 flex h-8 w-full cursor-pointer items-center justify-between rounded-md px-3 text-xs font-medium transition-colors">
+      <CollapsibleTrigger className="text-sidebar-foreground/55 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex h-8 w-full cursor-pointer items-center justify-between rounded-lg px-3 text-xs font-medium transition-colors">
         <span>{t(section.label)}</span>
         <IconChevronRight className="size-3.5 opacity-50 transition-transform duration-200 group-data-[state=open]/service-section:rotate-90" />
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <SidebarMenu className="border-border/40 ml-3 border-l pt-1 pl-2">
+        <SidebarMenu className="border-sidebar-border/80 ml-3 border-l pt-1 pl-2">
           {section.items.map(renderNavItem)}
           {section.isChannelsSection && hasMoreChannels && (
             <SidebarMenuItem key="channels-more-toggle">
               <SidebarMenuButton
                 onClick={toggleShowAllChannels}
-                className="text-muted-foreground hover:bg-muted/60 h-9 px-3"
+                className="text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground h-9 px-3"
               >
                 {showAllChannels ? (
                   <IconChevronsUp className="size-4 opacity-60" />
@@ -221,13 +221,13 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   return (
     <Sidebar
       {...props}
-      className="bg-background border-r-border/20 border-r pt-3"
+      className="border-sidebar-border/60 bg-sidebar border-r pt-2"
     >
-      <SidebarContent className="bg-background">
+      <SidebarContent className="bg-sidebar px-1">
         <Collapsible defaultOpen className="group/chat-collapsible mb-1">
           <SidebarGroup className="px-2 py-0">
             <SidebarGroupLabel asChild>
-              <CollapsibleTrigger className="hover:bg-muted/60 flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 transition-colors">
+              <CollapsibleTrigger className="text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex w-full cursor-pointer items-center justify-between rounded-lg px-2 py-1.5 transition-colors">
                 <span>{t("navigation.chat")}</span>
                 <IconChevronRight className="size-3.5 opacity-50 transition-transform duration-200 group-data-[state=open]/chat-collapsible:rotate-90" />
               </CollapsibleTrigger>
@@ -246,7 +246,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         <Collapsible className="group/services-collapsible mb-1">
           <SidebarGroup className="px-2 py-0">
             <SidebarGroupLabel asChild>
-              <CollapsibleTrigger className="hover:bg-muted/60 flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 transition-colors">
+              <CollapsibleTrigger className="text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex w-full cursor-pointer items-center justify-between rounded-lg px-2 py-1.5 transition-colors">
                 <span>{t("navigation.services")}</span>
                 <IconChevronRight className="size-3.5 opacity-50 transition-transform duration-200 group-data-[state=open]/services-collapsible:rotate-90" />
               </CollapsibleTrigger>

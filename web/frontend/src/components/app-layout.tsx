@@ -10,7 +10,7 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 export function AppLayout({ children }: { children: ReactNode }) {
   return (
     <TooltipProvider>
-      <SidebarProvider className="flex h-dvh flex-col overflow-hidden">
+      <SidebarProvider className="bg-background flex h-dvh flex-col overflow-hidden">
         <AppHeader />
 
         <div className="flex flex-1 overflow-hidden">

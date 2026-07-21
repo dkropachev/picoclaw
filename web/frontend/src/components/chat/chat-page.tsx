@@ -120,7 +120,7 @@ function ThreadChatEmptyState({ thread }: { thread: ThreadSummary }) {
 
   return (
     <div className="mx-auto flex max-w-xl flex-col items-center justify-center py-20 text-center">
-      <div className="mb-6 flex h-14 w-14 items-center justify-center rounded-xl bg-sky-500/10 text-sky-600 dark:text-sky-400">
+      <div className="bg-muted text-muted-foreground mb-6 flex h-12 w-12 items-center justify-center rounded-xl">
         <IconMessages className="h-7 w-7" />
       </div>
       <h3 className="mb-2 text-lg font-medium">
@@ -134,7 +134,7 @@ function ThreadChatEmptyState({ thread }: { thread: ThreadSummary }) {
           {contextEntries.slice(0, 6).map(([key, value]) => (
             <span
               key={`${thread.id}-${key}`}
-              className="bg-muted text-muted-foreground max-w-full truncate rounded px-2 py-1 text-xs"
+              className="bg-muted text-muted-foreground max-w-full truncate rounded-lg px-2 py-1 text-xs"
             >
               {key}:{value}
             </span>
@@ -398,11 +398,11 @@ export function ChatPage({
     isGatewayRunning
 
   return (
-    <div className="bg-background/95 flex h-full flex-col">
+    <div className="bg-background flex h-full flex-col">
       <PageHeader
         title={title}
-        className={`transition-shadow ${
-          hasScrolled ? "shadow-xs" : "shadow-none"
+        className={`transition-colors ${
+          hasScrolled ? "border-border/70 bg-background/95 border-b" : ""
         }`}
         titleExtra={
           <>
@@ -423,7 +423,7 @@ export function ChatPage({
           </>
         }
       >
-        <div className="border-border/60 hidden items-center gap-2 rounded-lg border px-3 py-1.5 sm:flex">
+        <div className="bg-muted/70 hidden items-center gap-2 rounded-full px-3 py-1.5 sm:flex">
           <span className="text-muted-foreground text-sm">
             {t("chat.showAssistantDetails")}
           </span>
@@ -436,7 +436,7 @@ export function ChatPage({
             <SelectTrigger
               size="sm"
               aria-label={t("chat.showAssistantDetails")}
-              className="text-muted-foreground hover:text-foreground focus-visible:border-input h-8 min-w-[104px] bg-transparent shadow-none focus-visible:ring-0"
+              className="text-muted-foreground hover:text-foreground focus-visible:border-input h-8 min-w-[104px] border-transparent bg-transparent shadow-none focus-visible:ring-0"
             >
               <SelectValue />
             </SelectTrigger>
@@ -457,7 +457,7 @@ export function ChatPage({
           variant="secondary"
           size="sm"
           onClick={handleNewChat}
-          className="h-9 gap-2"
+          className="h-9 gap-2 rounded-full px-3"
           aria-label={t("chat.newChat")}
         >
           <IconPlus className="size-4" />
@@ -486,9 +486,9 @@ export function ChatPage({
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="min-h-0 flex-1 [scrollbar-gutter:stable] overflow-y-auto px-4 py-6 md:px-8 lg:px-24 xl:px-48"
+        className="min-h-0 flex-1 [scrollbar-gutter:stable] overflow-y-auto px-4 py-6 md:px-8 lg:px-16 xl:px-24"
       >
-        <div className="mx-auto flex w-full max-w-250 flex-col gap-8 pb-8">
+        <div className="mx-auto flex w-full max-w-3xl flex-col gap-7 pb-8">
           {messages.length === 0 && !isTyping && (
             <>
               {showThreadEmptyState && activeThread ? (

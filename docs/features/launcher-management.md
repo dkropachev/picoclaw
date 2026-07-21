@@ -19,16 +19,17 @@ startup behavior, update, and runtime version metadata.
 
 ## Requirements
 
-| ID | Level | Requirement | Rationale |
-| --- | --- | --- | --- |
-| `FR-LAUNCHER-001` | MUST | Dashboard access requires password setup/login and an HttpOnly session cookie; local bootstrap auto-login is loopback-only. | Browser management must be gated. |
-| `FR-LAUNCHER-002` | MUST | Config GET/PUT/PATCH/reset preserves schema defaults, secure string semantics, model API-key payloads, existing model secrets across equivalent model alias changes, and runtime log-level application. | Launcher config editing must not corrupt config or credentials. |
-| `FR-LAUNCHER-003` | MUST | Model management lists, adds, updates, deletes, tests, fetches, and sets default model entries without exposing stored secret values; model add/edit forms must expose `reasoning_effort` next to the model identifier and validate it with the same rules as runtime config; model updates must not create blank stored secret entries when no key exists. | Users need safe model administration. |
-| `FR-LAUNCHER-004` | MUST | OAuth login flow creates, polls, completes, and logs out provider credentials through bounded flow state. | OAuth-backed providers need browser setup. |
-| `FR-LAUNCHER-005` | MUST | Gateway lifecycle endpoints report status/logs and start/stop/restart managed gateway processes without losing log diagnostics. | Desktop users need process control. |
-| `FR-LAUNCHER-006` | MUST | Startup, launcher config, update, and version endpoints report or mutate only their documented system settings. | System management must be narrow and auditable. |
-| `FR-LAUNCHER-007` | SHOULD | API errors return JSON responses with actionable messages and appropriate status codes. | Frontend UX needs consistent failures. |
-| `FR-LAUNCHER-008` | MUST | Model fetch distinguishes regular OpenAI API-key listings from OpenAI OAuth/token Codex subscription listings; credential-backed OpenAI fetches use the stored credential, account headers, and a Codex-compatible client version against the ChatGPT Codex models endpoint, while API-key fetches continue to use the OpenAI-compatible `/models` endpoint. | Subscription and API-key accounts have different upstream auth and must not fail or mix credentials. |
+| ID                | Level  | Requirement                                                                                                                                                                                                                                                                                                                                                  | Rationale                                                                                            |
+| ----------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `FR-LAUNCHER-001` | MUST   | Dashboard access requires password setup/login and an HttpOnly session cookie; local bootstrap auto-login is loopback-only.                                                                                                                                                                                                                                  | Browser management must be gated.                                                                    |
+| `FR-LAUNCHER-002` | MUST   | Config GET/PUT/PATCH/reset preserves schema defaults, secure string semantics, model API-key payloads, existing model secrets across equivalent model alias changes, and runtime log-level application.                                                                                                                                                      | Launcher config editing must not corrupt config or credentials.                                      |
+| `FR-LAUNCHER-003` | MUST   | Model management lists, adds, updates, deletes, tests, fetches, and sets default model entries without exposing stored secret values; model add/edit forms must expose `reasoning_effort` next to the model identifier and validate it with the same rules as runtime config; model updates must not create blank stored secret entries when no key exists.  | Users need safe model administration.                                                                |
+| `FR-LAUNCHER-004` | MUST   | OAuth login flow creates, polls, completes, and logs out provider credentials through bounded flow state.                                                                                                                                                                                                                                                    | OAuth-backed providers need browser setup.                                                           |
+| `FR-LAUNCHER-005` | MUST   | Gateway lifecycle endpoints report status/logs and start/stop/restart managed gateway processes without losing log diagnostics.                                                                                                                                                                                                                              | Desktop users need process control.                                                                  |
+| `FR-LAUNCHER-006` | MUST   | Startup, launcher config, update, and version endpoints report or mutate only their documented system settings.                                                                                                                                                                                                                                              | System management must be narrow and auditable.                                                      |
+| `FR-LAUNCHER-007` | SHOULD | API errors return JSON responses with actionable messages and appropriate status codes.                                                                                                                                                                                                                                                                      | Frontend UX needs consistent failures.                                                               |
+| `FR-LAUNCHER-008` | MUST   | Model fetch distinguishes regular OpenAI API-key listings from OpenAI OAuth/token Codex subscription listings; credential-backed OpenAI fetches use the stored credential, account headers, and a Codex-compatible client version against the ChatGPT Codex models endpoint, while API-key fetches continue to use the OpenAI-compatible `/models` endpoint. | Subscription and API-key accounts have different upstream auth and must not fail or mix credentials. |
+| `FR-LAUNCHER-009` | SHOULD | Shared launcher layout, theme, and primitive controls remain responsive, token-driven, keyboard-accessible, and free of clipped controls across desktop and narrow mobile widths.                                                                                                                                                                            | Dashboard navigation and process controls must stay usable while visual styling evolves.             |
 
 ## Data And State Model
 
@@ -60,7 +61,9 @@ Owns: CODE web/frontend/src/components/page-header.tsx
 Owns: CODE web/frontend/src/components/tour/**
 Owns: CODE web/frontend/src/components/ui/**
 Owns: CODE web/frontend/src/hooks/use-credentials-page.ts
+Owns: CODE web/frontend/src/hooks/use-theme.ts
 Owns: CODE web/frontend/src/i18n/**
+Owns: CODE web/frontend/src/index.css
 Owns: CODE web/frontend/src/lib/**
 Owns: CODE web/frontend/src/main.tsx
 Owns: CODE web/frontend/src/routes/agent.tsx
@@ -105,12 +108,12 @@ Owns: TEST pkg/migrate/*
 
 ## Auxiliary Interfaces
 
-| Type | Surface | Contract | Requirement IDs |
-| --- | --- | --- | --- |
-| HTTP | `/api/auth*`, `/api/config*`, `/api/models*`, `/api/oauth*`, `/api/system*`, `/api/update`, `/api/weixin*`, `/api/wecom*` | Authenticated launcher management endpoints. | `FR-LAUNCHER-001` through `FR-LAUNCHER-007` |
-| CLI | `picoclaw auth`, `picoclaw config`, `picoclaw onboard`, `picoclaw migrate` | Non-browser setup, auth, and migration helpers. | `FR-LAUNCHER-002`, `FR-LAUNCHER-004` |
-| Config | Launcher config file beside app config | Port/public/access options and dashboard auth migration. | `FR-LAUNCHER-001`, `FR-LAUNCHER-006` |
-| Frontend | `web/frontend/AGENTS.md`, `docs/design/frontend-guidelines.md`, `docs/features/frontend-ownership.json`, `web/frontend/scripts/lint-ui-rules.mjs`, and `web/frontend/tests/ui-smoke.spec.ts` | Agent-facing launcher UI guidance plus static, formatting, accessibility, ownership, and mocked-route browser checks. Feature-specific UI behavior remains owned by the relevant product feature spec. | `FR-LAUNCHER-002`, `FR-LAUNCHER-007` |
+| Type     | Surface                                                                                                                                                                                      | Contract                                                                                                                                                                                               | Requirement IDs                                         |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
+| HTTP     | `/api/auth*`, `/api/config*`, `/api/models*`, `/api/oauth*`, `/api/system*`, `/api/update`, `/api/weixin*`, `/api/wecom*`                                                                    | Authenticated launcher management endpoints.                                                                                                                                                           | `FR-LAUNCHER-001` through `FR-LAUNCHER-007`             |
+| CLI      | `picoclaw auth`, `picoclaw config`, `picoclaw onboard`, `picoclaw migrate`                                                                                                                   | Non-browser setup, auth, and migration helpers.                                                                                                                                                        | `FR-LAUNCHER-002`, `FR-LAUNCHER-004`                    |
+| Config   | Launcher config file beside app config                                                                                                                                                       | Port/public/access options and dashboard auth migration.                                                                                                                                               | `FR-LAUNCHER-001`, `FR-LAUNCHER-006`                    |
+| Frontend | `web/frontend/AGENTS.md`, `docs/design/frontend-guidelines.md`, `docs/features/frontend-ownership.json`, `web/frontend/scripts/lint-ui-rules.mjs`, and `web/frontend/tests/ui-smoke.spec.ts` | Agent-facing launcher UI guidance plus static, formatting, accessibility, ownership, and mocked-route browser checks. Feature-specific UI behavior remains owned by the relevant product feature spec. | `FR-LAUNCHER-002`, `FR-LAUNCHER-007`, `FR-LAUNCHER-009` |
 
 ## Algorithms And Ordering
 
@@ -159,17 +162,21 @@ shared authenticated dashboard layout and routing shell components.
 - OpenAI Codex model fetch reports a concise upstream response detail when the
   model list endpoint rejects the request.
 - Public launcher access obeys configured host/CIDR policy.
+- Header controls collapse without clipping at extra-narrow mobile widths.
+- Global theme and CSS token changes preserve semantic colors instead of raw
+  ad hoc color values.
 
 ## Acceptance Evidence
 
-| Requirement IDs | Evidence |
-| --- | --- |
-| `FR-LAUNCHER-001` | [web/backend/api/auth_test.go](../../web/backend/api/auth_test.go), [web/backend/api/auth_csrf_test.go](../../web/backend/api/auth_csrf_test.go), [web/backend/middleware/access_control_test.go](../../web/backend/middleware/access_control_test.go) |
-| `FR-LAUNCHER-002`, `FR-LAUNCHER-007` | [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [pkg/config/config_test.go](../../pkg/config/config_test.go) |
-| `FR-LAUNCHER-003` | [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [web/backend/api/model_status_test.go](../../web/backend/api/model_status_test.go), [web/backend/api/model_catalog_test.go](../../web/backend/api/model_catalog_test.go) |
-| `FR-LAUNCHER-004` | [web/backend/api/oauth_test.go](../../web/backend/api/oauth_test.go), [cmd/picoclaw/internal/auth](../../cmd/picoclaw/internal/auth) |
-| `FR-LAUNCHER-005`, `FR-LAUNCHER-006` | [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [web/backend/api/startup_test.go](../../web/backend/api/startup_test.go), [web/backend/api/version_test.go](../../web/backend/api/version_test.go) |
-| `FR-LAUNCHER-008` | [web/backend/api/models_test.go](../../web/backend/api/models_test.go) |
+| Requirement IDs                      | Evidence                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `FR-LAUNCHER-001`                    | [web/backend/api/auth_test.go](../../web/backend/api/auth_test.go), [web/backend/api/auth_csrf_test.go](../../web/backend/api/auth_csrf_test.go), [web/backend/middleware/access_control_test.go](../../web/backend/middleware/access_control_test.go)                                                                   |
+| `FR-LAUNCHER-002`, `FR-LAUNCHER-007` | [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [pkg/config/config_test.go](../../pkg/config/config_test.go)                                                                                                                                                                                     |
+| `FR-LAUNCHER-003`                    | [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [web/backend/api/model_status_test.go](../../web/backend/api/model_status_test.go), [web/backend/api/model_catalog_test.go](../../web/backend/api/model_catalog_test.go) |
+| `FR-LAUNCHER-004`                    | [web/backend/api/oauth_test.go](../../web/backend/api/oauth_test.go), [cmd/picoclaw/internal/auth](../../cmd/picoclaw/internal/auth)                                                                                                                                                                                     |
+| `FR-LAUNCHER-005`, `FR-LAUNCHER-006` | [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [web/backend/api/startup_test.go](../../web/backend/api/startup_test.go), [web/backend/api/version_test.go](../../web/backend/api/version_test.go)                                                                                             |
+| `FR-LAUNCHER-008`                    | [web/backend/api/models_test.go](../../web/backend/api/models_test.go)                                                                                                                                                                                                                                                   |
+| `FR-LAUNCHER-009`                    | [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/scripts/lint-ui-rules.mjs](../../web/frontend/scripts/lint-ui-rules.mjs)                                                                                                                                                 |
 
 ## Implementation Anchors
 

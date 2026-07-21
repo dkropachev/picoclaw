@@ -24,8 +24,8 @@ export function ChatEmptyState({
 
   if (!hasAvailableModels) {
     return (
-      <div className="flex flex-col items-center justify-center py-20">
-        <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-500">
+      <div className="flex flex-col items-center justify-center py-20 opacity-80">
+        <div className="bg-muted text-muted-foreground mb-6 flex h-12 w-12 items-center justify-center rounded-xl">
           <IconRobotOff className="h-8 w-8" />
         </div>
         <h3 className="mb-2 text-xl font-medium">
@@ -43,8 +43,8 @@ export function ChatEmptyState({
 
   if (!defaultModelName) {
     return (
-      <div className="flex flex-col items-center justify-center py-20">
-        <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-500">
+      <div className="flex flex-col items-center justify-center py-20 opacity-80">
+        <div className="bg-muted text-muted-foreground mb-6 flex h-12 w-12 items-center justify-center rounded-xl">
           <IconStar className="h-8 w-8" />
         </div>
         <h3 className="mb-2 text-xl font-medium">
@@ -59,8 +59,8 @@ export function ChatEmptyState({
 
   if (!isConnected) {
     return (
-      <div className="flex flex-col items-center justify-center py-20">
-        <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-500">
+      <div className="flex flex-col items-center justify-center py-20 opacity-80">
+        <div className="bg-muted text-muted-foreground mb-6 flex h-12 w-12 items-center justify-center rounded-xl">
           <IconPlugConnectedX className="h-8 w-8" />
         </div>
         <h3 className="mb-2 text-xl font-medium">
@@ -74,8 +74,8 @@ export function ChatEmptyState({
   }
 
   return (
-    <div className="flex flex-col items-center justify-center py-20">
-      <div className="mb-6 flex h-16 w-16 items-center justify-center rounded-2xl bg-violet-500/10 text-violet-500">
+    <div className="flex flex-col items-center justify-center py-20 opacity-80">
+      <div className="bg-muted text-muted-foreground mb-6 flex h-12 w-12 items-center justify-center rounded-xl">
         <IconRobot className="h-8 w-8" />
       </div>
       <h3 className="mb-2 text-xl font-medium">{t("chat.welcome")}</h3>

@@ -158,7 +158,7 @@ export function AssistantMessage({
             "relative overflow-hidden rounded-xl border",
             isCollapsedBlock
               ? "border-border/30 bg-muted/20 text-muted-foreground dark:border-border/20 dark:bg-muted/10"
-              : "bg-card text-card-foreground border-border/60",
+              : "text-card-foreground border-transparent bg-transparent",
           )}
         >
           {isCollapsedBlock && (
@@ -279,7 +279,7 @@ export function AssistantMessage({
                 "prose dark:prose-invert prose-pre:my-2 prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:border prose-pre:bg-zinc-100 prose-pre:p-0 prose-pre:text-zinc-900 dark:prose-pre:bg-zinc-950 dark:prose-pre:text-zinc-100 max-w-none [overflow-wrap:anywhere] break-words",
                 isThought
                   ? "prose-p:my-1.5 prose-p:whitespace-pre-wrap px-3 pt-0 pb-3 text-[13px] leading-relaxed opacity-70"
-                  : "prose-p:my-2 prose-p:whitespace-pre-wrap p-4 text-[15px] leading-relaxed",
+                  : "prose-p:my-2 prose-p:whitespace-pre-wrap px-1 py-0 text-[15px] leading-relaxed",
               )}
             >
               <ReactMarkdown
@@ -299,7 +299,7 @@ export function AssistantMessage({
               variant="ghost"
               size="icon"
               className={cn(
-                "bg-background/50 hover:bg-background/80 absolute top-2 right-2 h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100",
+                "bg-background/75 hover:bg-muted absolute top-0 right-0 h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100",
               )}
               onClick={() => void copy(content)}
               aria-label={copyMessageLabel}
@@ -323,7 +323,7 @@ export function AssistantMessage({
               href={attachment.url}
               target="_blank"
               rel="noreferrer"
-              className="group/img border-border/50 bg-muted/30 hover:border-border/80 relative overflow-hidden rounded-xl border shadow-sm transition-colors"
+              className="group/img border-border/60 bg-muted/30 hover:border-border relative overflow-hidden rounded-xl border transition-colors"
             >
               <img
                 src={attachment.url}
@@ -343,13 +343,13 @@ export function AssistantMessage({
               key={`${attachment.url}-${index}`}
               href={attachment.url}
               download={attachment.filename}
-              className="group/file border-border/60 bg-card flex w-fit max-w-sm min-w-[220px] items-center gap-3.5 rounded-xl border px-4 py-3 transition-all duration-300 hover:-translate-y-0.5 hover:border-violet-500/30 hover:shadow-sm dark:hover:border-violet-500/40"
+              className="group/file border-border/60 bg-card hover:bg-muted/40 flex w-fit max-w-sm min-w-[220px] items-center gap-3.5 rounded-xl border px-4 py-3 transition-colors"
             >
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-violet-400 ring-1 ring-violet-500/10 dark:bg-violet-500/10 dark:text-violet-400 dark:ring-violet-500/30">
+              <div className="bg-muted text-muted-foreground ring-border flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ring-1">
                 <IconFileText className="h-5 w-5" />
               </div>
               <div className="flex min-w-0 flex-1 flex-col pr-1">
-                <span className="text-foreground/90 truncate text-[14px] leading-tight font-medium transition-colors group-hover/file:text-violet-600 dark:group-hover/file:text-violet-400">
+                <span className="text-foreground/90 truncate text-[14px] leading-tight font-medium">
                   {attachment.filename || "Download file"}
                 </span>
                 <span className="text-muted-foreground/70 mt-1 text-[12px] font-medium">
@@ -357,8 +357,8 @@ export function AssistantMessage({
                     "FILE"}
                 </span>
               </div>
-              <div className="bg-muted/60 text-muted-foreground/50 dark:bg-muted/20 flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-all duration-300 group-hover/file:bg-violet-400 group-hover/file:text-white group-hover/file:shadow-sm dark:group-hover/file:bg-violet-400">
-                <IconDownload className="h-4 w-4 transition-transform duration-300 group-hover/file:-translate-y-[1px]" />
+              <div className="bg-muted/60 text-muted-foreground group-hover/file:bg-primary group-hover/file:text-primary-foreground flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors">
+                <IconDownload className="h-4 w-4" />
               </div>
             </a>
           ))}
