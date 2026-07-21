@@ -141,7 +141,7 @@ export function ContextUsageRing({
           <div className="bg-muted mt-1.5 h-1.5 w-full overflow-hidden rounded-full">
             {/* ui-rule-allow dynamic-style: bar width reflects runtime context usage percent. */}
             <div
-              className="h-full rounded-full bg-violet-500 transition-all"
+              className="bg-foreground h-full rounded-full transition-all"
               style={{ width: `${barPercent}%` }}
             />
           </div>
@@ -180,7 +180,7 @@ export function ContextUsageRing({
             type="button"
             onClick={handleDetail}
             disabled={cooldown}
-            className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-violet-600 transition-opacity hover:opacity-70 disabled:opacity-40 dark:text-violet-400"
+            className="text-foreground mt-3 inline-flex items-center gap-1 text-xs font-medium transition-opacity hover:opacity-70 disabled:opacity-40"
           >
             {t("chat.contextDetail")}
             <IconArrowRight className="h-3 w-3" />

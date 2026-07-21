@@ -44,7 +44,7 @@ export function SessionHistoryMenu({
         <Button
           variant="secondary"
           size="sm"
-          className="h-9 gap-2"
+          className="h-9 gap-2 rounded-full px-3"
           aria-label={t("chat.history")}
         >
           <IconHistory className="size-4" />

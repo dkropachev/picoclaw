@@ -91,12 +91,13 @@ export function ChatComposer({
   }
 
   return (
-    <div className="before:bg-background pointer-events-none relative z-10 -mt-[24px] shrink-0 [scrollbar-gutter:stable] overflow-y-auto px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] before:pointer-events-none before:absolute before:inset-x-0 before:top-[24px] before:bottom-0 before:content-[''] md:px-8 md:pb-8 lg:px-24 xl:px-48">
-      <div className="pointer-events-auto mx-auto flex max-w-[1000px] flex-col items-end">
+    <div className="before:bg-background pointer-events-none relative z-10 -mt-6 shrink-0 [scrollbar-gutter:stable] overflow-y-auto px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] before:pointer-events-none before:absolute before:inset-x-0 before:top-6 before:bottom-0 before:content-[''] md:px-8 md:pb-7 lg:px-16 xl:px-24">
+      <div className="pointer-events-auto mx-auto flex max-w-3xl flex-col items-end">
         <div
+          data-chat-composer-surface
           className={cn(
-            "bg-card border-border/60 relative flex w-full flex-col rounded-2xl border p-3 shadow-sm transition-colors",
-            isDragActive && "border-violet-400/70 bg-violet-500/5",
+            "border-input bg-muted/90 dark:border-border dark:bg-muted relative flex w-full flex-col rounded-[1.6rem] border p-3 shadow-[0_8px_28px_rgba(0,0,0,0.08)] transition-colors dark:shadow-[0_8px_28px_rgba(0,0,0,0.28)]",
+            isDragActive && "border-ring bg-muted/40",
           )}
           onDragEnter={onDragEnter}
           onDragLeave={onDragLeave}
@@ -104,8 +105,8 @@ export function ChatComposer({
           onDrop={onDrop}
         >
           {isDragActive && (
-            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-violet-400/70 bg-violet-500/10">
-              <div className="bg-background/95 text-foreground rounded-full px-4 py-2 text-sm font-medium shadow-sm">
+            <div className="border-ring/60 bg-background/70 pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-[1.6rem] border-2 border-dashed backdrop-blur-sm">
+              <div className="bg-background text-foreground rounded-full border px-4 py-2 text-sm font-medium">
                 {t("chat.dropImagesActive")}
               </div>
             </div>
@@ -126,7 +127,7 @@ export function ChatComposer({
                   <button
                     type="button"
                     onClick={() => onRemoveAttachment(index)}
-                    className="bg-background/85 text-foreground absolute top-1 right-1 inline-flex h-6 w-6 items-center justify-center rounded-full border shadow-sm transition hover:bg-white"
+                    className="bg-background/85 text-foreground absolute top-1 right-1 inline-flex h-6 w-6 items-center justify-center rounded-full border transition hover:bg-white"
                     aria-label={t("chat.removeImage")}
                     title={t("chat.removeImage")}
                   >
@@ -149,10 +150,11 @@ export function ChatComposer({
             onPaste={onPaste}
             onKeyDown={handleKeyDown}
             placeholder={placeholder}
+            aria-label={t("chat.placeholder")}
             disabled={!canInput}
             title={disabledMessage || undefined}
             className={cn(
-              "placeholder:text-muted-foreground/50 max-h-[200px] min-h-[64px] resize-none border-0 bg-transparent px-2 py-1 text-[15px] shadow-none transition-colors focus-visible:ring-0 focus-visible:outline-none dark:bg-transparent",
+              "placeholder:text-muted-foreground/60 disabled:text-muted-foreground max-h-[200px] min-h-[64px] resize-none border-0 bg-transparent px-2 py-1 text-[15px] leading-relaxed shadow-none transition-colors focus-visible:ring-0 focus-visible:outline-none disabled:bg-transparent dark:bg-transparent",
               !canInput && "cursor-not-allowed",
             )}
             minRows={1}
@@ -187,7 +189,7 @@ export function ChatComposer({
                   <Button
                     type="button"
                     size="icon"
-                    className="size-8 rounded-full bg-violet-500 text-white transition-transform hover:bg-violet-600 active:scale-95"
+                    className="bg-primary text-primary-foreground hover:bg-primary/90 size-8 rounded-full transition-transform active:scale-95"
                     onClick={onSend}
                     disabled={!canSend}
                     aria-label={t("chat.sendMessage")}
@@ -203,7 +205,7 @@ export function ChatComposer({
         <div
           aria-hidden={!hasInput}
           className={cn(
-            "border-border/50 bg-muted/55 text-muted-foreground dark:bg-muted/45 mt-2 inline-flex items-center rounded-md border px-3 py-1 text-[11px] shadow-sm transition-all duration-200",
+            "border-border/50 bg-muted/55 text-muted-foreground dark:bg-muted/45 mt-2 inline-flex items-center rounded-full border px-3 py-1 text-[11px] transition-all duration-200",
             hasInput
               ? "translate-y-0 opacity-100"
               : "pointer-events-none -translate-y-1 opacity-0",

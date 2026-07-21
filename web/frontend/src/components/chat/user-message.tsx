@@ -34,7 +34,7 @@ export function UserMessage({
   return (
     <div className="group flex w-full flex-col items-end gap-1.5">
       {imageAttachments.length > 0 && (
-        <div className="flex max-w-[70%] flex-wrap justify-end gap-2">
+        <div className="flex max-w-[78%] flex-wrap justify-end gap-2 sm:max-w-[70%]">
           {imageAttachments.map((attachment, index) => (
             <img
               key={`${attachment.url}-${index}`}
@@ -47,18 +47,18 @@ export function UserMessage({
       )}
 
       {hasText && (
-        <div className="relative max-w-[70%]">
+        <div className="relative max-w-[78%] sm:max-w-[70%]">
           <div
             className={cn(
               "wrap-break-word whitespace-pre-wrap",
               isCommand
-                ? "rounded-xl border border-zinc-200 bg-transparent px-4 py-3 font-mono text-[14px] text-zinc-800 dark:border-zinc-800/60 dark:bg-zinc-950 dark:text-zinc-200 dark:shadow-sm"
-                : "rounded-2xl rounded-tr-sm bg-violet-500 px-5 py-3 text-[15px] leading-relaxed text-white shadow-sm",
+                ? "border-border bg-background text-foreground dark:bg-background rounded-xl border px-4 py-3 font-mono text-[14px]"
+                : "bg-secondary text-secondary-foreground dark:bg-muted dark:text-foreground rounded-[1.35rem] px-4 py-2.5 text-[15px] leading-relaxed",
             )}
           >
             {isCommand ? (
               <div className="flex items-start gap-2.5">
-                <span className="font-bold text-emerald-600 select-none dark:text-emerald-400">
+                <span className="text-muted-foreground font-bold select-none">
                   ❯
                 </span>
                 <span className="mt-[1px]">{content}</span>
@@ -72,10 +72,10 @@ export function UserMessage({
             variant="ghost"
             size="icon"
             className={cn(
-              "bg-background/75 hover:bg-background absolute top-2 right-2 h-7 w-7 opacity-0 shadow-xs transition-opacity group-hover:opacity-100",
+              "bg-background/80 hover:bg-muted absolute top-2 right-2 h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100",
               isCommand
                 ? "text-zinc-700 dark:text-zinc-200"
-                : "text-violet-700 dark:text-violet-100",
+                : "text-muted-foreground",
             )}
             onClick={() => void copy(content)}
             aria-label={copyMessageLabel}
