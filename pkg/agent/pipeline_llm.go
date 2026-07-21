@@ -69,15 +69,22 @@ func (p *Pipeline) CallLLM(
 	}
 
 	exec.llmOpts = map[string]any{
-		"max_tokens":       ts.agent.MaxTokens,
-		"temperature":      ts.agent.Temperature,
-		"prompt_cache_key": ts.agent.ID,
+		"max_tokens":  ts.agent.MaxTokens,
+		"temperature": ts.agent.Temperature,
+	}
+	if !ts.opts.DisablePromptCache {
+		cacheKey := strings.TrimSpace(ts.opts.PromptCacheKey)
+		if cacheKey == "" {
+			cacheKey = ts.agent.ID
+		}
+		exec.llmOpts["prompt_cache_key"] = cacheKey
 	}
 	if exec.useNativeSearch {
 		exec.llmOpts["native_search"] = true
 	}
 	applyTurnThinkingOptions(exec, ts.agent, exec.activeProvider, true)
 	applyReasoningEffortOption(exec.llmOpts, exec.activeModelConfig)
+	applyReasoningEffortOverride(exec.llmOpts, ts.opts.ReasoningEffortOverride)
 
 	exec.llmModel = exec.activeModel
 
@@ -201,6 +208,7 @@ func (p *Pipeline) CallLLM(
 			candidateThinking := thinkingSettingsFromModelConfig(candidateCfg)
 			applyThinkingOption(callOpts, candidateProvider, candidateThinking, true, ts.agent.ID)
 			applyReasoningEffortOption(callOpts, candidateCfg)
+			applyReasoningEffortOverride(callOpts, ts.opts.ReasoningEffortOverride)
 			exec.suppressReasoning = shouldSuppressReasoningFor(candidateThinking)
 			return candidateProvider.Chat(ctx, messagesForCall, toolDefsForCall, candidate.Model, callOpts)
 		}
@@ -707,7 +715,7 @@ func providerForFallbackCandidate(
 	model string,
 ) (providers.LLMProvider, error) {
 	if agent != nil {
-		if cp, ok := agent.CandidateProviders[providers.ModelKey(provider, model)]; ok && cp != nil {
+		if cp := agent.candidateProvider(providers.ModelKey(provider, model)); cp != nil {
 			return cp, nil
 		}
 	}

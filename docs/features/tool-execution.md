@@ -114,6 +114,9 @@ separate features. Hooks can modify, deny, or short-circuit tool calls. Security
 policies control credentials, HTTP guards, and isolation. Threads provide a
 thread-specific tool and policy surface while relying on the generic registry,
 schema export, execution, and settings UI mechanics defined here.
+Workflows add an agent-callable management tool and execute step-level tools
+through this same registry, including context injection, sensitive-data
+filtering, response-handled media delivery, and channel delivery tools.
 
 ## Failure And Edge Cases
 

@@ -1545,6 +1545,29 @@ func TestDefaultConfig_MessageMediaDisabled(t *testing.T) {
 	}
 }
 
+func TestDefaultConfig_WorkflowToolEnabled(t *testing.T) {
+	cfg := DefaultConfig()
+	if !cfg.Tools.Workflow.Enabled {
+		t.Fatal("DefaultConfig().Tools.Workflow.Enabled should be true")
+	}
+	if !cfg.Tools.IsToolEnabled("workflow") {
+		t.Fatal("DefaultConfig().Tools.IsToolEnabled(workflow) should be true")
+	}
+}
+
+func TestDefaultConfig_WorkflowsEnabled(t *testing.T) {
+	cfg := DefaultConfig()
+	if !cfg.Workflows.Enabled {
+		t.Fatal("DefaultConfig().Workflows.Enabled should be true")
+	}
+	if cfg.Workflows.DefinitionsDir != "workflows" {
+		t.Fatalf("DefinitionsDir = %q, want workflows", cfg.Workflows.DefinitionsDir)
+	}
+	if cfg.Workflows.EffectiveMaxCallDepth() != 4 {
+		t.Fatalf("EffectiveMaxCallDepth = %d, want 4", cfg.Workflows.EffectiveMaxCallDepth())
+	}
+}
+
 func TestToolsConfig_GetFilterMinLength(t *testing.T) {
 	tests := []struct {
 		name     string

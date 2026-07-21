@@ -27,6 +27,7 @@ type Handler struct {
 	weixinFlows                map[string]*weixinFlow
 	wecomMu                    sync.Mutex
 	wecomFlows                 map[string]*wecomFlow
+	workflowDevelopmentMu      sync.Mutex
 }
 
 // NewHandler creates an instance of the API handler.
@@ -100,6 +101,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Skills and tools support/actions
 	h.registerSkillRoutes(mux)
 	h.registerToolRoutes(mux)
+	h.registerWorkflowRoutes(mux)
 
 	// OS startup / launch-at-login
 	h.registerStartupRoutes(mux)

@@ -42,6 +42,17 @@ func TestPublishDeliversToMatchingSubscriber(t *testing.T) {
 	}
 }
 
+func TestKnownKindsIncludesWorkflowCanceled(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range KnownKinds() {
+		if kind == KindWorkflowRunCanceled {
+			return
+		}
+	}
+	t.Fatalf("KnownKinds() missing %q", KindWorkflowRunCanceled)
+}
+
 func TestDropNewestIncrementsStats(t *testing.T) {
 	t.Parallel()
 

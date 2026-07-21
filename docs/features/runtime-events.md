@@ -75,6 +75,9 @@ Owns: EVENT *
 
 All runtime features can publish events. Hooks may observe events. Gateway logs
 render filtered events for operators.
+Workflows publish `workflow.*` lifecycle events and can subscribe to runtime
+events as triggers without changing the event bus filtering and delivery
+semantics defined here.
 
 ## Failure And Edge Cases
 

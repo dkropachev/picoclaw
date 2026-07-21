@@ -488,6 +488,17 @@ func (f *fixedTranscriber) Transcribe(ctx context.Context, audioFilePath string)
 	return &asr.TranscriptionResponse{Text: f.text}, nil
 }
 
+func waitForPendingSteering(t *testing.T, al *AgentLoop, sessionKey string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for al.pendingSteeringCountForScope(sessionKey) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("timeout waiting for late message to enter scoped steering queue")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 type blockingDirectProvider struct {
 	mu           sync.Mutex
 	calls        int
@@ -796,6 +807,11 @@ func TestAgentLoop_Run_AutoContinuesLateSteeringMessage(t *testing.T) {
 	if err := msgBus.PublishInbound(pubCtx, late); err != nil {
 		t.Fatalf("publish late inbound: %v", err)
 	}
+	lateSessionKey, _, ok := al.resolveSteeringTarget(late)
+	if !ok {
+		t.Fatal("late message did not resolve to a steering target")
+	}
+	waitForPendingSteering(t, al, lateSessionKey)
 
 	close(provider.releaseFirstCall)
 
@@ -930,6 +946,11 @@ func TestAgentLoop_Run_QueuedVoiceMessageIsTranscribedBeforeSteering(t *testing.
 	if err := msgBus.PublishInbound(pubCtx, late); err != nil {
 		t.Fatalf("publish late voice inbound: %v", err)
 	}
+	lateSessionKey, _, ok := al.resolveSteeringTarget(late)
+	if !ok {
+		t.Fatal("late voice message did not resolve to a steering target")
+	}
+	waitForPendingSteering(t, al, lateSessionKey)
 
 	close(provider.releaseFirstCall)
 

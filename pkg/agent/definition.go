@@ -43,6 +43,7 @@ type AgentPromptDefinition struct {
 	Path           string           `json:"path"`
 	Raw            string           `json:"raw"`
 	Body           string           `json:"body"`
+	Tasks          []string         `json:"tasks,omitempty"`
 	RawFrontmatter string           `json:"raw_frontmatter,omitempty"`
 	Frontmatter    AgentFrontmatter `json:"frontmatter"`
 	FrontmatterErr string           `json:"frontmatter_error,omitempty"`
@@ -152,6 +153,7 @@ func parseAgentPromptDefinition(path, content string) AgentPromptDefinition {
 		Path:           path,
 		Raw:            content,
 		Body:           body,
+		Tasks:          extractAgentTasks(body),
 		RawFrontmatter: frontmatter,
 		Frontmatter:    parsedFrontmatter,
 		FrontmatterErr: errorString(err),
@@ -224,6 +226,76 @@ func splitAgentFrontmatter(content string) (frontmatter, body string) {
 	body = strings.Join(lines[end+1:], "\n")
 	body = strings.TrimLeft(body, "\n")
 	return frontmatter, body
+}
+
+func extractAgentTasks(body string) []string {
+	normalized := string(parser.NormalizeNewlines([]byte(body)))
+	lines := strings.Split(normalized, "\n")
+	inTasks := false
+	tasks := make([]string, 0)
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if isAgentTasksHeading(trimmed, lower) {
+			inTasks = true
+			continue
+		}
+		if !inTasks {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#") && !isAgentTasksHeading(trimmed, lower) {
+			break
+		}
+		if trimmed == "" {
+			if len(tasks) > 0 {
+				break
+			}
+			continue
+		}
+		task, ok := parseAgentTaskBullet(trimmed)
+		if !ok {
+			if len(tasks) > 0 {
+				break
+			}
+			continue
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks
+}
+
+func isAgentTasksHeading(trimmed, lower string) bool {
+	if lower == "tasks:" {
+		return true
+	}
+	if strings.TrimSpace(strings.TrimLeft(trimmed, "#")) == "Tasks" {
+		return true
+	}
+	return false
+}
+
+func parseAgentTaskBullet(line string) (string, bool) {
+	for _, prefix := range []string{"- ", "* "} {
+		if strings.HasPrefix(line, prefix) {
+			task := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+			return task, task != ""
+		}
+	}
+	dot := strings.Index(line, ". ")
+	if dot > 0 {
+		allDigits := true
+		for _, r := range line[:dot] {
+			if r < '0' || r > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits {
+			task := strings.TrimSpace(line[dot+2:])
+			return task, task != ""
+		}
+	}
+	return "", false
 }
 
 func relativeWorkspacePath(workspace, path string) string {

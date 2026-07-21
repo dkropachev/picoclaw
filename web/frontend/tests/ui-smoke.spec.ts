@@ -6,6 +6,7 @@ const smokeRoutes = [
   "/models",
   "/logs",
   "/agent/tools",
+  "/agent/workflows",
   "/agent/skills",
   "/agent/hub",
 ] as const
@@ -101,6 +102,264 @@ const skillsResponse = {
   ],
 }
 
+const workflowRun = {
+  id: "wr_test",
+  workflow_ref: "workflows/summarize-text.yml",
+  status: "succeeded",
+  session: "workflow:demo",
+  inputs: { text: "hello" },
+  outputs: { summary: "hello" },
+  jobs: {
+    main: { id: "main", status: "succeeded" },
+  },
+  steps: {
+    "main/summarize": { id: "summarize", status: "succeeded" },
+  },
+  child_run_ids: [],
+  created_at: "2026-07-16T12:00:00Z",
+  updated_at: "2026-07-16T12:00:01Z",
+  completed_at: "2026-07-16T12:00:01Z",
+}
+
+const retryWorkflowRun = {
+  ...workflowRun,
+  id: "wr_retry",
+  retry_of_run_id: "wr_test",
+  outputs: { summary: "retry summary" },
+  created_at: "2026-07-16T12:00:02Z",
+  updated_at: "2026-07-16T12:00:03Z",
+  completed_at: "2026-07-16T12:00:03Z",
+}
+
+const workflowDraftYAML = `name: Support Triage
+on:
+  manual: {}
+jobs:
+  triage:
+    runs-on: picoclaw
+    steps:
+      - id: summarize
+        uses: agent/main
+        with:
+          prompt: Summarize support tickets
+`
+
+const workflowDraftSession = {
+  id: "dev_test",
+  reason: "new",
+  status: "editing",
+  prompt: "Triage support tickets",
+  target_workflow_ref: "workflows/support-triage.yml",
+  target_picoclaw_version: "test",
+  target_git_commit: "test",
+  yaml: workflowDraftYAML,
+  validation: {
+    valid: true,
+    validated_at: "2026-07-16T12:00:00Z",
+  },
+  created_at: "2026-07-16T12:00:00Z",
+  updated_at: "2026-07-16T12:00:00Z",
+}
+
+const workflowDraftLastTest = {
+  draft_key: workflowDraftKey(
+    workflowDraftSession.target_workflow_ref,
+    workflowDraftYAML,
+  ),
+  target_workflow_ref: workflowDraftSession.target_workflow_ref,
+  run_id: "wr_draft",
+  status: "succeeded",
+  tested_at: "2026-07-16T12:01:01Z",
+}
+
+type MockWorkflowDevelopmentSession = typeof workflowDraftSession & {
+  source_workflow_ref?: string
+  last_test?: typeof workflowDraftLastTest
+}
+
+const draftWorkflowRun = {
+  id: "wr_draft",
+  workflow_ref: "draft:workflows/support-triage.yml",
+  status: "succeeded",
+  session: "workflow:draft",
+  delivery: {
+    channel: "telegram",
+    chat_id: "support",
+    topic_id: "draft-topic",
+  },
+  event: {
+    source: "draft_test",
+    request_id: "req_draft",
+  },
+  inputs: { ticket: "Printer is offline" },
+  outputs: { summary: "draft summary" },
+  jobs: {
+    triage: {
+      id: "triage",
+      status: "succeeded",
+      outputs: { summary: "draft summary" },
+    },
+  },
+  steps: {
+    "triage/summarize": {
+      id: "summarize",
+      status: "succeeded",
+      outputs: { text: "draft summary" },
+    },
+  },
+  child_run_ids: [],
+  created_at: "2026-07-16T12:01:00Z",
+  updated_at: "2026-07-16T12:01:01Z",
+  completed_at: "2026-07-16T12:01:01Z",
+}
+
+const manualWorkflowRun = {
+  id: "wr_manual",
+  workflow_ref: "workflows/support-triage.yml",
+  status: "succeeded",
+  session: "workflow:manual",
+  delivery: {
+    channel: "telegram",
+    chat_id: "support",
+    topic_id: "manual-topic",
+  },
+  event: {
+    source: "manual",
+    request_id: "req_manual",
+  },
+  inputs: { ticket: "Printer is offline" },
+  outputs: { summary: "manual summary" },
+  jobs: {
+    triage: {
+      id: "triage",
+      status: "succeeded",
+      outputs: { summary: "manual summary" },
+    },
+  },
+  steps: {
+    "triage/summarize": {
+      id: "summarize",
+      status: "succeeded",
+      outputs: { text: "manual summary" },
+    },
+  },
+  child_run_ids: [],
+  created_at: "2026-07-16T12:02:00Z",
+  updated_at: "2026-07-16T12:02:01Z",
+  completed_at: "2026-07-16T12:02:01Z",
+}
+
+const runningDraftWorkflowRun = {
+  ...draftWorkflowRun,
+  status: "running",
+  outputs: {},
+  jobs: {
+    triage: {
+      ...draftWorkflowRun.jobs.triage,
+      status: "running",
+      outputs: {},
+    },
+  },
+  steps: {
+    "triage/summarize": {
+      ...draftWorkflowRun.steps["triage/summarize"],
+      status: "running",
+      outputs: {},
+    },
+  },
+  completed_at: undefined,
+}
+
+const failedDraftWorkflowRun = {
+  ...draftWorkflowRun,
+  id: "wr_draft_failed",
+  status: "failed",
+  error: "agent step failed",
+  outputs: {},
+  jobs: {
+    triage: {
+      ...draftWorkflowRun.jobs.triage,
+      status: "failed",
+      error: "agent step failed",
+      outputs: {},
+    },
+  },
+  steps: {
+    "triage/summarize": {
+      ...draftWorkflowRun.steps["triage/summarize"],
+      status: "failed",
+      error: "agent step failed",
+      outputs: {},
+    },
+  },
+  updated_at: "2026-07-16T12:01:03Z",
+  completed_at: "2026-07-16T12:01:03Z",
+}
+
+const runningManualWorkflowRun = {
+  ...manualWorkflowRun,
+  status: "running",
+  outputs: {},
+  jobs: {
+    triage: {
+      ...manualWorkflowRun.jobs.triage,
+      status: "running",
+      outputs: {},
+    },
+  },
+  steps: {
+    "triage/summarize": {
+      ...manualWorkflowRun.steps["triage/summarize"],
+      status: "running",
+      outputs: {},
+    },
+  },
+  completed_at: undefined,
+}
+
+function workflowStamp(ref: string, status = "valid") {
+  const stamp: {
+    workflow_ref: string
+    workflow_hash: string
+    validated_against_picoclaw_version: string
+    validated_against_git_commit: string
+    workflow_engine_version: string
+    workflow_schema_version: string
+    validator_fingerprint: string
+    status: string
+    validated_at: string
+    warnings?: Array<{ message: string }>
+  } = {
+    workflow_ref: ref,
+    workflow_hash: `${ref}:hash`,
+    validated_against_picoclaw_version: "test",
+    validated_against_git_commit: "test",
+    workflow_engine_version: "1",
+    workflow_schema_version: "1",
+    validator_fingerprint: "test",
+    status,
+    validated_at: "2026-07-16T12:00:00Z",
+  }
+  if (status === "pending_revalidation") {
+    stamp.warnings = [
+      {
+        message:
+          "workflow must be revalidated after the current Picoclaw version change",
+      },
+    ]
+  }
+  return stamp
+}
+
+function workflowDraftKey(ref: string, yaml: string) {
+  return `${ref.trim()}\u0000${normalizeWorkflowDraftYAML(yaml)}`
+}
+
+function normalizeWorkflowDraftYAML(yaml: string) {
+  const trimmed = yaml.trimEnd()
+  return trimmed === "" ? "" : `${trimmed}\n`
+}
+
 const channelCatalogResponse = {
   channels: [
     {
@@ -116,7 +375,57 @@ const channelCatalogResponse = {
   ],
 }
 
-async function mockLauncherApis(page: Page) {
+async function mockLauncherApis(
+  page: Page,
+  options: { completeDraftViaPolling?: boolean } = {},
+) {
+  let activeDevelopmentSession: MockWorkflowDevelopmentSession | null = null
+  let workflowDefinitions = [
+    {
+      ref: "workflows/summarize-text.yml",
+      name: "Summarize text",
+    },
+  ]
+  let runs = [workflowRun]
+  let workflowsRevalidated = false
+  let completeDraftViaPolling = false
+
+  function compatibilityResponse() {
+    const stamps = workflowDefinitions.map((workflow) =>
+      workflowStamp(
+        workflow.ref,
+        workflowsRevalidated ? "valid" : "pending_revalidation",
+      ),
+    )
+    const pending = stamps.filter(
+      (stamp) => stamp.status === "pending_revalidation",
+    ).length
+    return {
+      current: {
+        picoclaw_version: "test",
+        git_commit: "test",
+        workflow_engine_version: "1",
+        workflow_schema_version: "1",
+        validator_fingerprint: "test",
+      },
+      workflows: stamps,
+      counts: workflowsRevalidated
+        ? { valid: workflowDefinitions.length }
+        : { pending_revalidation: pending },
+      version_changed: !workflowsRevalidated,
+      manifest_missing: false,
+      has_blocking: !workflowsRevalidated,
+    }
+  }
+
+  function runByID(id: string) {
+    return runs.find((run) => run.id === id) ?? workflowRun
+  }
+
+  function currentDraftKey(session: MockWorkflowDevelopmentSession) {
+    return workflowDraftKey(session.target_workflow_ref, session.yaml)
+  }
+
   await page.route(
     (url) => url.pathname.startsWith("/api/"),
     async (route) => {
@@ -124,6 +433,257 @@ async function mockLauncherApis(page: Page) {
       const url = new URL(request.url())
       const path = url.pathname
       const method = request.method()
+
+      if (method === "POST") {
+        switch (path) {
+          case "/api/workflows/development/start": {
+            const body = request.postDataJSON() as {
+              reason?: string
+              prompt?: string
+              ref?: string
+              target_ref?: string
+            }
+            if (body.reason === "version_revalidation") {
+              activeDevelopmentSession = {
+                ...workflowDraftSession,
+                reason: "version_revalidation",
+                prompt: body.prompt ?? "",
+                source_workflow_ref: body.ref,
+                target_workflow_ref:
+                  body.target_ref ??
+                  body.ref ??
+                  workflowDraftSession.target_workflow_ref,
+                yaml: workflowDraftYAML,
+              }
+            } else {
+              activeDevelopmentSession = {
+                ...workflowDraftSession,
+                prompt: body.prompt ?? workflowDraftSession.prompt,
+                target_workflow_ref:
+                  body.target_ref ?? workflowDraftSession.target_workflow_ref,
+              }
+            }
+            return json(route, { session: activeDevelopmentSession })
+          }
+          case "/api/workflows/development/ai-revise": {
+            const body = request.postDataJSON() as {
+              prompt?: string
+              target_ref?: string
+              yaml?: string
+            }
+            if (body.prompt?.includes("Last draft test failed")) {
+              expect(body.prompt).toContain("Run ID: wr_draft_failed")
+              expect(body.prompt).toContain("Error: agent step failed")
+              expect(body.prompt).toContain(
+                '"workflow_ref": "draft:workflows/support-triage.yml"',
+              )
+              expect(body.prompt).toContain('"triage/summarize"')
+              expect(body.prompt).toContain('"kind": "workflow.run.end"')
+              expect(body.prompt).toContain("draft failure event")
+            }
+            const previous = activeDevelopmentSession ?? workflowDraftSession
+            activeDevelopmentSession = {
+              ...previous,
+              prompt: body.prompt ?? previous.prompt,
+              target_workflow_ref:
+                body.target_ref ?? previous.target_workflow_ref,
+              yaml:
+                typeof body.yaml === "string"
+                  ? normalizeWorkflowDraftYAML(body.yaml)
+                  : previous.yaml,
+              validation: {
+                valid: true,
+                validated_at: "2026-07-16T12:00:02Z",
+              },
+              updated_at: "2026-07-16T12:00:02Z",
+            }
+            return json(route, { session: activeDevelopmentSession })
+          }
+          case "/api/workflows/development/revise": {
+            const body = request.postDataJSON() as {
+              prompt?: string
+              target_ref?: string
+              yaml?: string
+              regenerate?: boolean
+            }
+            const previous = activeDevelopmentSession ?? workflowDraftSession
+            const nextYAML =
+              typeof body.yaml === "string"
+                ? normalizeWorkflowDraftYAML(body.yaml)
+                : previous.yaml
+            const nextTargetRef =
+              typeof body.target_ref === "string" && body.target_ref !== ""
+                ? body.target_ref
+                : previous.target_workflow_ref
+            const draftChanged =
+              nextTargetRef !== previous.target_workflow_ref ||
+              normalizeWorkflowDraftYAML(nextYAML) !==
+                normalizeWorkflowDraftYAML(previous.yaml)
+            activeDevelopmentSession = {
+              ...previous,
+              prompt: body.prompt ?? previous.prompt,
+              target_workflow_ref: nextTargetRef,
+              yaml: nextYAML,
+              updated_at: "2026-07-16T12:01:02Z",
+            }
+            if (draftChanged) {
+              activeDevelopmentSession = {
+                ...activeDevelopmentSession,
+                status: "editing",
+              }
+              delete activeDevelopmentSession.last_test
+            }
+            return json(route, { session: activeDevelopmentSession })
+          }
+          case "/api/workflows/development/discard": {
+            const previous = activeDevelopmentSession
+            activeDevelopmentSession = null
+            return json(route, { session: previous })
+          }
+          case "/api/workflows/development/test": {
+            const testBody = request.postDataJSON() as {
+              async: boolean
+              inputs?: { ticket?: string }
+              session?: string
+              delivery?: Record<string, unknown>
+            }
+            expect(testBody).toMatchObject({
+              async: true,
+              session: "workflow:draft",
+              delivery: {
+                channel: "telegram",
+                chat_id: "support",
+              },
+            })
+            if (testBody.inputs?.ticket === "Trigger failure") {
+              activeDevelopmentSession = {
+                ...workflowDraftSession,
+                status: "editing",
+                last_test: {
+                  ...workflowDraftLastTest,
+                  run_id: failedDraftWorkflowRun.id,
+                  status: "failed",
+                  error: "agent step failed",
+                },
+              }
+              runs = [
+                failedDraftWorkflowRun,
+                ...runs.filter((run) => run.id !== "wr_draft_failed"),
+              ]
+              return json(route, {
+                session: activeDevelopmentSession,
+                result: {
+                  run_id: failedDraftWorkflowRun.id,
+                  status: "failed",
+                  error: "agent step failed",
+                },
+                error: "agent step failed",
+              })
+            }
+            expect(testBody).toMatchObject({
+              inputs: { ticket: "Printer is offline" },
+            })
+            activeDevelopmentSession = {
+              ...workflowDraftSession,
+              status: "testing",
+              last_test: {
+                ...workflowDraftLastTest,
+                status: "running",
+              },
+            }
+            runs = [
+              runningDraftWorkflowRun,
+              ...runs.filter((run) => run.id !== "wr_draft"),
+            ]
+            completeDraftViaPolling = options.completeDraftViaPolling === true
+            return json(route, {
+              session: activeDevelopmentSession,
+              result: {
+                run_id: draftWorkflowRun.id,
+                status: "running",
+              },
+            })
+          }
+          case "/api/workflows/development/publish":
+            if (
+              activeDevelopmentSession?.last_test?.status !== "succeeded" ||
+              activeDevelopmentSession.last_test.draft_key !==
+                currentDraftKey(activeDevelopmentSession)
+            ) {
+              return json(
+                route,
+                {
+                  error:
+                    "workflow draft must pass a current test run before publish",
+                },
+                409,
+              )
+            }
+            activeDevelopmentSession = null
+            if (
+              !workflowDefinitions.some(
+                (workflow) =>
+                  workflow.ref === workflowDraftSession.target_workflow_ref,
+              )
+            ) {
+              workflowDefinitions = [
+                ...workflowDefinitions,
+                {
+                  ref: workflowDraftSession.target_workflow_ref,
+                  name: "Support Triage",
+                },
+              ]
+            }
+            return json(route, {
+              workflow_ref: workflowDraftSession.target_workflow_ref,
+              session: workflowDraftSession,
+            })
+          case "/api/workflows/run":
+            expect(request.postDataJSON()).toMatchObject({
+              async: true,
+              ref: "workflows/support-triage.yml",
+              inputs: { ticket: "Printer is offline" },
+              session: "workflow:manual",
+              delivery: {
+                channel: "telegram",
+                chat_id: "support",
+              },
+            })
+            runs = [
+              runningManualWorkflowRun,
+              ...runs.filter((run) => run.id !== "wr_manual"),
+            ]
+            return json(route, {
+              run_id: manualWorkflowRun.id,
+              status: "running",
+            })
+          case "/api/workflows/runs/wr_test/retry":
+            expect(request.postDataJSON()).toMatchObject({
+              secrets: { token: "retry-token" },
+            })
+            runs = [
+              retryWorkflowRun,
+              ...runs.filter((run) => run.id !== "wr_retry"),
+            ]
+            return json(route, {
+              run_id: retryWorkflowRun.id,
+              status: retryWorkflowRun.status,
+            })
+          case "/api/workflows/revalidate":
+            workflowsRevalidated = true
+            return json(route, compatibilityResponse())
+          case "/api/workflows/compatibility":
+            return json(route, compatibilityResponse())
+          case "/api/workflows/reload":
+            return json(route, {
+              reloaded_at: "2026-07-16T12:00:00Z",
+              workflows: workflowDefinitions,
+              errors: [],
+            })
+          default:
+            return json(route, { status: "ok" })
+        }
+      }
 
       if (method !== "GET") {
         return json(route, { status: "ok" })
@@ -161,6 +721,226 @@ async function mockLauncherApis(page: Page) {
           return json(route, [])
         case "/api/tools":
           return json(route, toolsResponse)
+        case "/api/workflows":
+          return json(route, {
+            workflows: workflowDefinitions,
+            compatibility: compatibilityResponse(),
+          })
+        case "/api/workflows/compatibility":
+          return json(route, compatibilityResponse())
+        case "/api/workflows/development":
+          return json(route, { session: activeDevelopmentSession })
+        case "/api/workflows/runs":
+          if (completeDraftViaPolling) {
+            activeDevelopmentSession = {
+              ...workflowDraftSession,
+              status: "ready_to_publish",
+              last_test: workflowDraftLastTest,
+            }
+            runs = [
+              draftWorkflowRun,
+              ...runs.filter((run) => run.id !== "wr_draft"),
+            ]
+            completeDraftViaPolling = false
+          }
+          return json(route, { runs })
+        case "/api/workflows/runs/wr_test":
+          return json(route, workflowRun)
+        case "/api/workflows/runs/wr_retry":
+          return json(route, retryWorkflowRun)
+        case "/api/workflows/runs/wr_draft":
+          return json(route, draftWorkflowRun)
+        case "/api/workflows/runs/wr_draft_failed":
+          return json(route, failedDraftWorkflowRun)
+        case "/api/workflows/runs/wr_manual":
+          return json(route, manualWorkflowRun)
+        case "/api/workflows/runs/wr_test/events":
+          return json(route, {
+            run_id: "wr_test",
+            events: [
+              {
+                time: "2026-07-16T12:00:00Z",
+                kind: "workflow.run.start",
+                run_id: "wr_test",
+              },
+              {
+                time: "2026-07-16T12:00:01Z",
+                kind: "workflow.run.end",
+                run_id: "wr_test",
+              },
+            ],
+          })
+        case "/api/workflows/runs/wr_retry/events":
+          return json(route, {
+            run_id: "wr_retry",
+            events: [
+              {
+                time: "2026-07-16T12:00:02Z",
+                kind: "workflow.run.start",
+                run_id: "wr_retry",
+              },
+              {
+                time: "2026-07-16T12:00:03Z",
+                kind: "workflow.run.end",
+                run_id: "wr_retry",
+                payload: {
+                  result: "retry event",
+                },
+              },
+            ],
+          })
+        case "/api/workflows/runs/wr_draft/events":
+        case "/api/workflows/runs/wr_draft_failed/events":
+        case "/api/workflows/runs/wr_manual/events": {
+          const runID = path.split("/")[4]
+          const eventResult =
+            runID === "wr_manual"
+              ? "manual event"
+              : runID === "wr_draft_failed"
+                ? "draft failure event"
+                : "draft event"
+          return json(route, {
+            run_id: runID,
+            events: [
+              {
+                time: "2026-07-16T12:00:00Z",
+                kind: "workflow.run.start",
+                run_id: runID,
+                payload: {
+                  source: "dashboard",
+                },
+              },
+              {
+                time: "2026-07-16T12:00:01Z",
+                kind: "workflow.run.end",
+                run_id: runID,
+                job_id: "triage",
+                step_id: "summarize",
+                message: "Workflow completed",
+                payload: {
+                  result: eventResult,
+                },
+              },
+            ],
+          })
+        }
+        case "/api/workflows/runs/wr_test/events/stream":
+          return sse(route, [
+            {
+              time: "2026-07-16T12:00:02Z",
+              kind: "workflow.run.end",
+              run_id: "wr_test",
+              payload: {
+                streamed: "test stream",
+              },
+            },
+          ])
+        case "/api/workflows/runs/wr_retry/events/stream":
+          return sse(route, [
+            {
+              time: "2026-07-16T12:00:04Z",
+              kind: "workflow.run.end",
+              run_id: "wr_retry",
+              payload: {
+                streamed: "retry stream",
+              },
+            },
+          ])
+        case "/api/workflows/runs/wr_draft/events/stream":
+        case "/api/workflows/runs/wr_draft_failed/events/stream":
+        case "/api/workflows/runs/wr_manual/events/stream": {
+          const runID = path.split("/")[4]
+          const streamResult =
+            runID === "wr_manual"
+              ? "manual stream"
+              : runID === "wr_draft_failed"
+                ? "draft failure stream"
+                : "draft stream"
+          if (runID === "wr_draft") {
+            activeDevelopmentSession = {
+              ...workflowDraftSession,
+              status: "ready_to_publish",
+              last_test: workflowDraftLastTest,
+            }
+            runs = [
+              draftWorkflowRun,
+              ...runs.filter((run) => run.id !== "wr_draft"),
+            ]
+          } else if (runID === "wr_manual") {
+            runs = [
+              manualWorkflowRun,
+              ...runs.filter((run) => run.id !== "wr_manual"),
+            ]
+          }
+          return sse(route, [
+            {
+              time: "2026-07-16T12:00:02Z",
+              kind: "workflow.step.end",
+              run_id: runID,
+              job_id: "triage",
+              step_id: "summarize",
+              payload: {
+                streamed: streamResult,
+              },
+            },
+            {
+              time: "2026-07-16T12:00:03Z",
+              kind: "workflow.run.end",
+              run_id: runID,
+              payload: {
+                streamed: streamResult,
+              },
+            },
+          ])
+        }
+        case "/api/workflows/runs/wr_test/graph":
+          return json(route, {
+            run_id: "wr_test",
+            nodes: [
+              {
+                id: "wr_test",
+                workflow_ref: "workflows/summarize-text.yml",
+                status: "succeeded",
+              },
+            ],
+            edges: [],
+          })
+        case "/api/workflows/runs/wr_retry/graph":
+          return json(route, {
+            run_id: "wr_retry",
+            nodes: [
+              {
+                id: "wr_retry",
+                workflow_ref: retryWorkflowRun.workflow_ref,
+                status: retryWorkflowRun.status,
+                retry_of_run_id: "wr_test",
+              },
+            ],
+            edges: [
+              {
+                from: "wr_test",
+                to: "wr_retry",
+                kind: "retry",
+              },
+            ],
+          })
+        case "/api/workflows/runs/wr_draft/graph":
+        case "/api/workflows/runs/wr_draft_failed/graph":
+        case "/api/workflows/runs/wr_manual/graph": {
+          const runID = path.split("/")[4]
+          const run = runByID(runID)
+          return json(route, {
+            run_id: runID,
+            nodes: [
+              {
+                id: runID,
+                workflow_ref: run.workflow_ref,
+                status: run.status,
+              },
+            ],
+            edges: [],
+          })
+        }
         case "/api/tools/web-search-config":
           return json(route, webSearchConfigResponse)
         case "/api/skills":
@@ -200,11 +980,23 @@ async function mockLauncherApis(page: Page) {
   )
 }
 
-async function json(route: Route, body: unknown) {
+async function json(route: Route, body: unknown, status = 200) {
   await route.fulfill({
-    status: 200,
+    status,
     contentType: "application/json",
     body: JSON.stringify(body),
+  })
+}
+
+async function sse(route: Route, events: Array<Record<string, unknown>>) {
+  await route.fulfill({
+    status: 200,
+    contentType: "text/event-stream",
+    body: events
+      .map(
+        (event) => `event: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`,
+      )
+      .join(""),
   })
 }
 
@@ -341,6 +1133,215 @@ test("web-search provider settings expand without overflow", async ({
   await expect(page.getByText("Max Results")).toBeVisible()
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("workflow dashboard supports AI draft, publish, and manual run loop", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+
+  await gotoMockedRoute(page, "/agent/workflows")
+  await expect(
+    page
+      .locator(
+        '[title="workflow must be revalidated after the current Picoclaw version change"]',
+      )
+      .first(),
+  ).toBeAttached()
+  await expect(page.getByRole("button", { name: "AI Review" })).toBeVisible()
+  await page.getByRole("button", { name: "AI Review" }).click()
+  await expect(page.getByText("Workflow YAML")).toBeVisible()
+  await expect(page.getByRole("textbox", { name: "AI brief" })).toHaveValue(
+    /Review this workflow against the current PicoClaw runtime/,
+  )
+  await expect(page.getByText("version revalidation")).toBeVisible()
+  await page.getByRole("button", { name: "Discard" }).click()
+  await expect(page.getByText("New workflow")).toBeVisible()
+
+  await page.getByRole("button", { name: "Operate" }).click()
+  await expect(page.getByText("Manual run")).toBeVisible()
+  await expect(
+    page.getByText("Revalidate this workflow before running it."),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Run Workflow" }),
+  ).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Retry" })).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Retry" })).toHaveAttribute(
+    "title",
+    "Revalidate this workflow before retrying the run.",
+  )
+  await page.getByRole("button", { name: "Revalidate" }).click()
+  await expect(page.getByText("Ready to run.")).toBeVisible()
+  await expect(page.getByRole("button", { name: "Run Workflow" })).toBeEnabled()
+  const retrySecrets = page.getByRole("textbox", {
+    name: "Retry secrets JSON",
+  })
+  await expect(retrySecrets).toBeVisible()
+  await retrySecrets.fill("{")
+  await expect(page.getByText(/Retry secrets JSON is invalid/)).toBeVisible()
+  await expect(page.getByRole("button", { name: "Retry" })).toBeDisabled()
+  await retrySecrets.fill('{"token":"retry-token"}')
+  await expect(page.getByText("Ready to retry.")).toBeVisible()
+  await expect(page.getByRole("button", { name: "Retry" })).toBeEnabled()
+  await page.getByRole("button", { name: "Retry" }).click()
+  await expect(page.getByText("wr_retry").first()).toBeVisible()
+  await expect(page.getByText("retry summary").first()).toBeVisible()
+  await expect(page.getByText('"result": "retry event"')).toBeVisible()
+  await expect(page.getByText('"streamed": "retry stream"')).toBeVisible()
+  await page.getByRole("button", { name: "Develop" }).click()
+
+  await expect(
+    page.getByText("Describe the workflow outcome before starting."),
+  ).toBeVisible()
+  await page
+    .getByPlaceholder("Describe the workflow outcome")
+    .fill("Triage support tickets")
+  await expect(
+    page.getByText(
+      "Ready to start. One workflow draft can be active at a time.",
+    ),
+  ).toBeVisible()
+  await page.getByRole("button", { name: "Start with AI" }).click()
+
+  await expect(page.getByText("Workflow YAML")).toBeVisible()
+  await expect(page.getByText("Only active draft")).toBeVisible()
+  await expect(page.getByText("Publish readiness")).toBeVisible()
+  const yamlEditor = page.getByRole("textbox", { name: "Workflow YAML" })
+  const localDraftYAML = `${workflowDraftYAML}# local edit\n`
+  await yamlEditor.fill(localDraftYAML)
+  const developmentRefresh = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/api/workflows/development") &&
+      response.request().method() === "GET",
+  )
+  await page.getByRole("button", { name: "Refresh" }).click()
+  await developmentRefresh
+  await expect(yamlEditor).toHaveValue(localDraftYAML)
+  await yamlEditor.fill(workflowDraftYAML)
+  await expect(page.getByRole("button", { name: "Test Draft" })).toBeEnabled()
+  await page.locator("#workflow-test-inputs").fill("{")
+  await expect(page.getByText(/Inputs JSON is invalid/)).toBeVisible()
+  await expect(page.getByRole("button", { name: "Test Draft" })).toBeDisabled()
+  await expect(page.getByRole("button", { name: "Publish" })).toBeDisabled()
+  await expect(
+    page.getByText("Run a successful draft test before publishing."),
+  ).toBeVisible()
+
+  await page
+    .locator("#workflow-test-inputs")
+    .fill('{"ticket":"Trigger failure"}')
+  await page.locator("#workflow-test-session").fill("workflow:draft")
+  await page
+    .locator("#workflow-test-delivery")
+    .fill('{"channel":"telegram","chat_id":"support"}')
+  await page.getByRole("button", { name: "Test Draft" }).click()
+  await expect(page.getByText("wr_draft_failed")).toBeVisible()
+  await expect(page.getByText("agent step failed").first()).toBeVisible()
+  await expect(page.getByRole("button", { name: "Fix With AI" })).toBeVisible()
+  await page.getByRole("button", { name: "Fix With AI" }).click()
+  await expect(page.getByRole("textbox", { name: "AI brief" })).toHaveValue(
+    /Last draft test failed/,
+  )
+
+  await page
+    .locator("#workflow-test-inputs")
+    .fill('{"ticket":"Printer is offline"}')
+  await page.getByRole("button", { name: "Test Draft" }).click()
+  await expect(page.getByText("wr_draft", { exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Publish" })).toBeEnabled()
+  await expect(page.getByText("Ready to publish.")).toBeVisible()
+
+  await page.reload()
+  await expect(page.getByText("Workflow YAML")).toBeVisible()
+  await expect(page.getByText("wr_draft", { exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Publish" })).toBeEnabled()
+  await expect(page.getByText("Ready to publish.")).toBeVisible()
+
+  await page.getByRole("button", { name: "Open Run" }).click()
+  await expect(page.getByText("draft summary").first()).toBeVisible()
+  await expect(page.getByText('"request_id": "req_draft"')).toBeVisible()
+  await expect(page.getByText('"result": "draft event"')).toBeVisible()
+  await expect(
+    page.getByText('"streamed": "draft stream"').first(),
+  ).toBeVisible()
+
+  await page.getByRole("button", { name: "Develop" }).click()
+  await page.getByRole("button", { name: "Publish" }).click()
+
+  await expect(page.getByText("Manual run")).toBeVisible()
+  await expect(page.locator("#workflow-run-selected-ref")).toHaveText(
+    "workflows/support-triage.yml",
+  )
+  await page.getByPlaceholder("Inputs JSON").fill("{")
+  await expect(page.getByText(/Inputs JSON is invalid/)).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Run Workflow" }),
+  ).toBeDisabled()
+  await page
+    .getByPlaceholder("Inputs JSON")
+    .fill('{"ticket":"Printer is offline"}')
+  await expect(page.getByRole("button", { name: "Run Workflow" })).toBeEnabled()
+  await page.locator("#workflow-run-session").fill("workflow:manual")
+  await page
+    .locator("#workflow-run-delivery")
+    .fill('{"channel":"telegram","chat_id":"support"}')
+  await page.getByRole("button", { name: "Run Workflow" }).click()
+
+  await expect(page.getByText("wr_manual").first()).toBeVisible()
+  await expect(page.getByText("manual summary").first()).toBeVisible()
+  await expect(page.getByText('"request_id": "req_manual"')).toBeVisible()
+  await expect(page.getByText('"topic_id": "manual-topic"')).toBeVisible()
+  await expect(page.getByText('"result": "manual event"')).toBeVisible()
+  await expect(
+    page.getByText('"streamed": "manual stream"').first(),
+  ).toBeVisible()
+  await page
+    .locator("[data-sonner-toaster]")
+    .evaluateAll((toasters) => toasters.forEach((toast) => toast.remove()))
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("workflow dashboard refreshes async draft status from polling without SSE", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "picoclaw-tour-state",
+      JSON.stringify({ currentStep: "completed", isActive: false }),
+    )
+    Object.defineProperty(window, "EventSource", {
+      configurable: true,
+      value: undefined,
+    })
+  })
+  await mockLauncherApis(page, { completeDraftViaPolling: true })
+  await page.goto("/agent/workflows")
+  await expect(page.getByRole("banner")).toBeVisible()
+  await expect(page.locator("main")).toBeVisible()
+
+  await page
+    .getByPlaceholder("Describe the workflow outcome")
+    .fill("Triage support tickets")
+  await page.getByRole("button", { name: "Start with AI" }).click()
+  await expect(page.getByText("Workflow YAML")).toBeVisible()
+  await page
+    .locator("#workflow-test-inputs")
+    .fill('{"ticket":"Printer is offline"}')
+  await page.locator("#workflow-test-session").fill("workflow:draft")
+  await page
+    .locator("#workflow-test-delivery")
+    .fill('{"channel":"telegram","chat_id":"support"}')
+  await page.getByRole("button", { name: "Test Draft" }).click()
+
+  await expect(page.getByText("wr_draft", { exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Publish" })).toBeEnabled()
+  await expect(page.getByText("Ready to publish.")).toBeVisible()
   expect(errors).toEqual([])
 })
 

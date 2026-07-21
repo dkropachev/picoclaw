@@ -127,6 +127,44 @@ func TestLoadAgentDefinitionLoadsWorkspaceUserMarkdown(t *testing.T) {
 	}
 }
 
+func TestLoadAgentDefinitionExtractsTextualTasks(t *testing.T) {
+	tmpDir := setupWorkspace(t, map[string]string{
+		"AGENT.md": `---
+name: reviewer
+---
+# Reviewer
+
+Tasks:
+- Understand the requested review goal.
+- Inspect the provided scope carefully.
+- Return concise findings with evidence.
+
+## Notes
+
+This section is not part of the task list.
+`,
+	})
+	defer cleanupWorkspace(t, tmpDir)
+
+	definition := NewContextBuilder(tmpDir).LoadAgentDefinition()
+	if definition.Agent == nil {
+		t.Fatal("expected AGENT.md definition")
+	}
+	want := []string{
+		"Understand the requested review goal.",
+		"Inspect the provided scope carefully.",
+		"Return concise findings with evidence.",
+	}
+	if len(definition.Agent.Tasks) != len(want) {
+		t.Fatalf("tasks = %#v, want %#v", definition.Agent.Tasks, want)
+	}
+	for i := range want {
+		if definition.Agent.Tasks[i] != want[i] {
+			t.Fatalf("task %d = %q, want %q", i, definition.Agent.Tasks[i], want[i])
+		}
+	}
+}
+
 func TestLoadAgentDefinitionInvalidFrontmatterFallsBackToEmptyStructuredFields(t *testing.T) {
 	tmpDir := setupWorkspace(t, map[string]string{
 		"AGENT.md": `---

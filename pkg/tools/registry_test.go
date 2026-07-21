@@ -298,6 +298,7 @@ func TestToolRegistry_ExecuteWithContext_PreservesMessageContext(t *testing.T) {
 	r.Register(ct)
 
 	baseCtx := WithToolMessageContext(context.Background(), "msg-123", "msg-100")
+	baseCtx = WithToolTopicContext(baseCtx, "topic-42")
 	r.ExecuteWithContext(baseCtx, "ctx_tool", nil, "telegram", "chat-42", nil)
 
 	if ct.lastCtx == nil {
@@ -308,6 +309,9 @@ func TestToolRegistry_ExecuteWithContext_PreservesMessageContext(t *testing.T) {
 	}
 	if got := ToolChatID(ct.lastCtx); got != "chat-42" {
 		t.Errorf("expected chatID 'chat-42', got %q", got)
+	}
+	if got := ToolTopicID(ct.lastCtx); got != "topic-42" {
+		t.Errorf("expected topicID 'topic-42', got %q", got)
 	}
 	if got := ToolMessageID(ct.lastCtx); got != "msg-123" {
 		t.Errorf("expected messageID 'msg-123', got %q", got)

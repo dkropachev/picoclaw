@@ -32,6 +32,8 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 | Security, credentials, and isolation | [security-isolation.md](security-isolation.md) |
 | Runtime events and observability | [runtime-events.md](runtime-events.md) |
 | Portability, updates, and packaging | [portability-updates.md](portability-updates.md) |
+| Workflows and reusable automation | [workflows.md](workflows.md) |
+| Managed agent execution | [managed-agent-execution.md](managed-agent-execution.md) |
 
 ## Workflow
 

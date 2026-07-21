@@ -102,11 +102,16 @@ type processOptions struct {
 	Media                   []string               // media:// refs from inbound message
 	InitialSteeringMessages []providers.Message    // Steering messages from refactor/agent
 	DefaultResponse         string                 // Response when LLM returns empty
+	PromptCacheKey          string                 // Optional provider prompt cache key override
+	ModelNameOverride       string                 // Optional model alias/ref override for this isolated turn
+	ReasoningEffortOverride string                 // Optional reasoning_effort override for this isolated turn
 	EnableSummary           bool                   // Whether to trigger summarization
 	SendResponse            bool                   // Whether to send response via bus
 	AllowInterimPicoPublish bool                   // Whether pico tool-call interim text can be published when SendResponse is false
 	SuppressToolFeedback    bool                   // Whether to suppress inline tool feedback messages
 	NoHistory               bool                   // If true, don't load session history (for heartbeat)
+	DisableTools            bool                   // If true, no provider or runtime tools are callable this turn
+	DisablePromptCache      bool                   // If true, omit provider prompt cache key
 	SkipInitialSteeringPoll bool                   // If true, skip the steering poll at loop start (used by Continue)
 	InboundContext          *bus.InboundContext    // Normalized inbound facts for events/hooks
 	RouteResult             *routing.ResolvedRoute // Route decision snapshot for events/hooks
@@ -152,6 +157,8 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 	if err := al.ensureMCPInitialized(ctx); err != nil {
 		return err
 	}
+	stopWorkflowAutomations := al.startWorkflowAutomations(ctx)
+	defer stopWorkflowAutomations()
 
 	idleTicker := time.NewTicker(100 * time.Millisecond)
 	defer idleTicker.Stop()
@@ -167,6 +174,9 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 		case msg, ok := <-al.bus.InboundChan():
 			if !ok {
 				return nil
+			}
+			if al.handleWorkflowTriggers(ctx, msg) {
+				continue
 			}
 
 			// Resolve the session key for this message

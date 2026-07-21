@@ -43,6 +43,7 @@ type Config struct {
 	ModelList SecureModelList `json:"model_list"          yaml:"model_list"` // New model-centric provider configuration
 	Gateway   GatewayConfig   `json:"gateway"             yaml:"-"`
 	Events    EventsConfig    `json:"events,omitempty"    yaml:"-"`
+	Workflows WorkflowsConfig `json:"workflows,omitempty" yaml:"-"`
 	Hooks     HooksConfig     `json:"hooks,omitempty"     yaml:"-"`
 	Tools     ToolsConfig     `json:"tools"               yaml:",inline"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"           yaml:"-"`
@@ -67,6 +68,51 @@ type EvolutionConfig struct {
 	MinCaseCount int `json:"min_case_count,omitempty"`
 	// Deprecated: use MinSuccessRatio.
 	MinSuccessRate float64 `json:"min_success_rate,omitempty"`
+}
+
+type WorkflowsConfig struct {
+	Enabled               bool   `json:"enabled"                 env:"PICOCLAW_WORKFLOWS_ENABLED"`
+	DefinitionsDir        string `json:"definitions_dir"         env:"PICOCLAW_WORKFLOWS_DEFINITIONS_DIR"`
+	MaxConcurrentRuns     int    `json:"max_concurrent_runs"     env:"PICOCLAW_WORKFLOWS_MAX_CONCURRENT_RUNS"`
+	DefaultTimeoutSeconds int    `json:"default_timeout_seconds" env:"PICOCLAW_WORKFLOWS_DEFAULT_TIMEOUT_SECONDS"`
+	MaxCallDepth          int    `json:"max_call_depth"          env:"PICOCLAW_WORKFLOWS_MAX_CALL_DEPTH"`
+	RetentionDays         int    `json:"retention_days"          env:"PICOCLAW_WORKFLOWS_RETENTION_DAYS"`
+}
+
+func (c WorkflowsConfig) EffectiveMaxCallDepth() int {
+	if c.MaxCallDepth > 0 {
+		return c.MaxCallDepth
+	}
+	return 4
+}
+
+func (c WorkflowsConfig) EffectiveMaxConcurrentRuns() int {
+	if c.MaxConcurrentRuns > 0 {
+		return c.MaxConcurrentRuns
+	}
+	return 4
+}
+
+func (c WorkflowsConfig) EffectiveDefaultTimeout() time.Duration {
+	if c.DefaultTimeoutSeconds <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(c.DefaultTimeoutSeconds) * time.Second
+}
+
+func (c WorkflowsConfig) EffectiveDefinitionsDir() string {
+	dir := strings.TrimSpace(c.DefinitionsDir)
+	if dir == "" {
+		return "workflows"
+	}
+	return dir
+}
+
+func (c WorkflowsConfig) EffectiveRetentionDays() int {
+	if c.RetentionDays > 0 {
+		return c.RetentionDays
+	}
+	return 30
 }
 
 func (c EvolutionConfig) MarshalJSON() ([]byte, error) {
@@ -800,15 +846,19 @@ type ModelConfig struct {
 	Workspace    string `json:"workspace,omitempty"`     // Workspace path for CLI-based providers
 
 	// Optional optimizations
-	RPM                 int                  `json:"rpm,omitempty"`              // Requests per minute limit
-	MaxTokensField      string               `json:"max_tokens_field,omitempty"` // Field name for max tokens (e.g., "max_completion_tokens")
-	RequestTimeout      int                  `json:"request_timeout,omitempty"`
-	ThinkingLevel       string               `json:"thinking_level,omitempty"`        // Extended thinking: off|low|medium|high|xhigh|adaptive
-	ReasoningEffort     string               `json:"reasoning_effort,omitempty"`      // OpenAI-style reasoning effort: none|minimal|low|medium|high|xhigh
-	ToolSchemaTransform string               `json:"tool_schema_transform,omitempty"` // Optional tool schema compatibility transform (e.g. "simple")
-	Streaming           ModelStreamingConfig `json:"streaming,omitzero"`              // Opt-in for provider streaming on this model entry
-	ExtraBody           map[string]any       `json:"extra_body,omitempty"`            // Additional fields to inject into request body
-	CustomHeaders       map[string]string    `json:"custom_headers,omitempty"`        // Additional headers to inject into every HTTP request
+	RPM                         int                  `json:"rpm,omitempty"`              // Requests per minute limit
+	MaxTokensField              string               `json:"max_tokens_field,omitempty"` // Field name for max tokens (e.g., "max_completion_tokens")
+	RequestTimeout              int                  `json:"request_timeout,omitempty"`
+	ThinkingLevel               string               `json:"thinking_level,omitempty"`                // Extended thinking: off|low|medium|high|xhigh|adaptive
+	ReasoningEffort             string               `json:"reasoning_effort,omitempty"`              // OpenAI-style reasoning effort: none|minimal|low|medium|high|xhigh
+	InputPricePerMTok           float64              `json:"input_price_per_1m,omitempty"`            // Estimated input-token price in USD per 1M tokens
+	OutputPricePerMTok          float64              `json:"output_price_per_1m,omitempty"`           // Estimated output-token price in USD per 1M tokens
+	Subscription                bool                 `json:"subscription,omitempty"`                  // True when access is subscription-backed rather than direct metered API
+	SubscriptionEquivalentModel string               `json:"subscription_equivalent_model,omitempty"` // API-priced equivalent model for subscription cost estimates
+	ToolSchemaTransform         string               `json:"tool_schema_transform,omitempty"`         // Optional tool schema compatibility transform (e.g. "simple")
+	Streaming                   ModelStreamingConfig `json:"streaming,omitzero"`                      // Opt-in for provider streaming on this model entry
+	ExtraBody                   map[string]any       `json:"extra_body,omitempty"`                    // Additional fields to inject into request body
+	CustomHeaders               map[string]string    `json:"custom_headers,omitempty"`                // Additional headers to inject into every HTTP request
 
 	APIKeys SecureStrings `json:"api_keys,omitzero" yaml:"api_keys,omitempty"` // API authentication keys (multiple keys for failover)
 
@@ -1310,6 +1360,7 @@ type ToolsConfig struct {
 	Subagent        ToolConfig         `json:"subagent"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
 	Threads         ThreadsToolConfig  `json:"threads"           yaml:"-"`
 	WebFetch        ToolConfig         `json:"web_fetch"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
+	Workflow        ToolConfig         `json:"workflow"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WORKFLOW_"`
 	WriteFile       ToolConfig         `json:"write_file"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
 }
 
@@ -1970,27 +2021,31 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 
 			// Create a copy for the additional key
 			additionalEntry := &ModelConfig{
-				ModelName:           expandedName,
-				Provider:            m.Provider,
-				Model:               m.Model,
-				APIBase:             m.APIBase,
-				APIKeys:             SimpleSecureStrings(keys[i]),
-				Proxy:               m.Proxy,
-				AuthMethod:          m.AuthMethod,
-				CredentialID:        m.CredentialID,
-				ConnectMode:         m.ConnectMode,
-				Workspace:           m.Workspace,
-				RPM:                 m.RPM,
-				MaxTokensField:      m.MaxTokensField,
-				RequestTimeout:      m.RequestTimeout,
-				ThinkingLevel:       m.ThinkingLevel,
-				ReasoningEffort:     m.ReasoningEffort,
-				ToolSchemaTransform: m.ToolSchemaTransform,
-				Streaming:           m.Streaming,
-				ExtraBody:           m.ExtraBody,
-				CustomHeaders:       m.CustomHeaders,
-				UserAgent:           m.UserAgent,
-				isVirtual:           true,
+				ModelName:                   expandedName,
+				Provider:                    m.Provider,
+				Model:                       m.Model,
+				APIBase:                     m.APIBase,
+				APIKeys:                     SimpleSecureStrings(keys[i]),
+				Proxy:                       m.Proxy,
+				AuthMethod:                  m.AuthMethod,
+				CredentialID:                m.CredentialID,
+				ConnectMode:                 m.ConnectMode,
+				Workspace:                   m.Workspace,
+				RPM:                         m.RPM,
+				MaxTokensField:              m.MaxTokensField,
+				RequestTimeout:              m.RequestTimeout,
+				ThinkingLevel:               m.ThinkingLevel,
+				ReasoningEffort:             m.ReasoningEffort,
+				InputPricePerMTok:           m.InputPricePerMTok,
+				OutputPricePerMTok:          m.OutputPricePerMTok,
+				Subscription:                m.Subscription,
+				SubscriptionEquivalentModel: m.SubscriptionEquivalentModel,
+				ToolSchemaTransform:         m.ToolSchemaTransform,
+				Streaming:                   m.Streaming,
+				ExtraBody:                   m.ExtraBody,
+				CustomHeaders:               m.CustomHeaders,
+				UserAgent:                   m.UserAgent,
+				isVirtual:                   true,
 			}
 			expanded = append(expanded, additionalEntry)
 			fallbackNames = append(fallbackNames, expandedName)
@@ -1998,26 +2053,30 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 
 		// Create the primary entry with first key and fallbacks
 		primaryEntry := &ModelConfig{
-			ModelName:           originalName,
-			Provider:            m.Provider,
-			Model:               m.Model,
-			APIBase:             m.APIBase,
-			Proxy:               m.Proxy,
-			AuthMethod:          m.AuthMethod,
-			CredentialID:        m.CredentialID,
-			ConnectMode:         m.ConnectMode,
-			Workspace:           m.Workspace,
-			RPM:                 m.RPM,
-			MaxTokensField:      m.MaxTokensField,
-			RequestTimeout:      m.RequestTimeout,
-			ThinkingLevel:       m.ThinkingLevel,
-			ReasoningEffort:     m.ReasoningEffort,
-			ToolSchemaTransform: m.ToolSchemaTransform,
-			Streaming:           m.Streaming,
-			ExtraBody:           m.ExtraBody,
-			CustomHeaders:       m.CustomHeaders,
-			UserAgent:           m.UserAgent,
-			APIKeys:             SimpleSecureStrings(keys[0]),
+			ModelName:                   originalName,
+			Provider:                    m.Provider,
+			Model:                       m.Model,
+			APIBase:                     m.APIBase,
+			Proxy:                       m.Proxy,
+			AuthMethod:                  m.AuthMethod,
+			CredentialID:                m.CredentialID,
+			ConnectMode:                 m.ConnectMode,
+			Workspace:                   m.Workspace,
+			RPM:                         m.RPM,
+			MaxTokensField:              m.MaxTokensField,
+			RequestTimeout:              m.RequestTimeout,
+			ThinkingLevel:               m.ThinkingLevel,
+			ReasoningEffort:             m.ReasoningEffort,
+			InputPricePerMTok:           m.InputPricePerMTok,
+			OutputPricePerMTok:          m.OutputPricePerMTok,
+			Subscription:                m.Subscription,
+			SubscriptionEquivalentModel: m.SubscriptionEquivalentModel,
+			ToolSchemaTransform:         m.ToolSchemaTransform,
+			Streaming:                   m.Streaming,
+			ExtraBody:                   m.ExtraBody,
+			CustomHeaders:               m.CustomHeaders,
+			UserAgent:                   m.UserAgent,
+			APIKeys:                     SimpleSecureStrings(keys[0]),
 		}
 
 		// Prepend new fallbacks to existing ones
@@ -2077,6 +2136,8 @@ func (t *ToolsConfig) IsToolEnabled(name string) bool {
 		return t.Threads.Enabled
 	case "web_fetch":
 		return t.WebFetch.Enabled
+	case "workflow":
+		return t.Workflow.Enabled
 	case "send_file":
 		return t.SendFile.Enabled
 	case "send_tts":

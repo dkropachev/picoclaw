@@ -17,6 +17,18 @@ func applyReasoningEffortOption(opts map[string]any, modelCfg *config.ModelConfi
 	opts["reasoning_effort"] = effort
 }
 
+func applyReasoningEffortOverride(opts map[string]any, raw string) bool {
+	if opts == nil {
+		return false
+	}
+	effort, err := providercommon.NormalizeReasoningEffort(raw)
+	if err != nil || effort == "" {
+		return false
+	}
+	opts["reasoning_effort"] = effort
+	return true
+}
+
 func hasReasoningEffortConfig(modelCfg *config.ModelConfig) bool {
 	if modelCfg == nil {
 		return false
