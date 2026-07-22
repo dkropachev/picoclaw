@@ -1,11 +1,13 @@
 package workflows
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	osexec "os/exec"
@@ -489,16 +491,44 @@ func nativeGitInventoryOutputFiles(
 }
 
 func nativeGitBlobContent(ctx context.Context, repo, blobHash string, maxBytes int) (string, bool, error) {
-	content, err := nativeGit(ctx, repo, "cat-file", "-p", blobHash)
+	args := []string{"cat-file", "-p", blobHash}
+	cmd := osexec.CommandContext(ctx, "git", args...)
+	cmd.Dir = repo
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", false, err
 	}
-	truncated := false
-	if maxBytes > 0 && len([]byte(content)) > maxBytes {
-		content = string([]byte(content)[:maxBytes])
-		truncated = true
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return "", false, err
 	}
-	return strings.ToValidUTF8(content, ""), truncated, nil
+
+	readLimit := int64(maxBytes)
+	if readLimit > 0 {
+		readLimit++
+	}
+	var data []byte
+	if readLimit > 0 {
+		data, err = io.ReadAll(io.LimitReader(stdout, readLimit))
+	} else {
+		data, err = io.ReadAll(stdout)
+	}
+	truncated := maxBytes > 0 && len(data) > maxBytes
+	if truncated && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	waitErr := cmd.Wait()
+	if err != nil {
+		return "", false, err
+	}
+	if waitErr != nil && !truncated {
+		return "", false, nativeGitError{err: waitErr, output: strings.TrimSpace(stderr.String()), args: args}
+	}
+	if truncated {
+		data = data[:maxBytes]
+	}
+	return strings.ToValidUTF8(string(data), ""), truncated, nil
 }
 
 func nativeCategorizePath(filePath string) string {
