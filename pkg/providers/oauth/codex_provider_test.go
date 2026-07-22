@@ -667,7 +667,9 @@ func TestCodexProvider_ChatRoundTrip_TokenSourceFallbackAccountID(t *testing.T) 
 	}
 }
 
-func TestCodexProvider_ChatRoundTrip_ModelFallbackFromUnsupported(t *testing.T) {
+func TestCodexProvider_ChatRoundTrip_PreservesRequestedModel(t *testing.T) {
+	requestedModel := "custom/gpt-5.3-codex"
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/responses" {
 			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
@@ -679,8 +681,8 @@ func TestCodexProvider_ChatRoundTrip_ModelFallbackFromUnsupported(t *testing.T) 
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		if reqBody["model"] != codexDefaultModel {
-			http.Error(w, "unsupported model", http.StatusBadRequest)
+		if reqBody["model"] != requestedModel {
+			http.Error(w, "unexpected model", http.StatusBadRequest)
 			return
 		}
 		if reqBody["stream"] != true {
@@ -723,7 +725,7 @@ func TestCodexProvider_ChatRoundTrip_ModelFallbackFromUnsupported(t *testing.T) 
 	provider.client = createOpenAITestClient(server.URL, "test-token", "acc-123")
 
 	messages := []Message{{Role: "user", Content: "Hello"}}
-	resp, err := provider.Chat(t.Context(), messages, nil, "gpt-5.3-codex", nil)
+	resp, err := provider.Chat(t.Context(), messages, nil, requestedModel, nil)
 	if err != nil {
 		t.Fatalf("Chat() error: %v", err)
 	}
@@ -747,15 +749,12 @@ func TestResolveCodexModel(t *testing.T) {
 		wantFallback bool
 	}{
 		{name: "empty", input: "", wantModel: codexDefaultModel, wantFallback: true},
-		{
-			name:         "unsupported namespace",
-			input:        "anthropic/claude-3.5",
-			wantModel:    codexDefaultModel,
-			wantFallback: true,
-		},
-		{name: "non-openai prefixed", input: "glm-4.7", wantModel: codexDefaultModel, wantFallback: true},
-		{name: "openai prefix", input: "openai/gpt-5.3-codex", wantModel: "gpt-5.3-codex", wantFallback: false},
+		{name: "namespaced model", input: "custom/gpt-5.3-codex", wantModel: "custom/gpt-5.3-codex"},
+		{name: "non-openai family", input: "glm-4.7", wantModel: "glm-4.7"},
+		{name: "openai prefix preserved", input: "openai/gpt-5.3-codex", wantModel: "openai/gpt-5.3-codex"},
 		{name: "direct gpt", input: "gpt-4o", wantModel: "gpt-4o", wantFallback: false},
+		{name: "trims whitespace", input: "  gpt-5.3-codex  ", wantModel: "gpt-5.3-codex"},
+		{name: "preserves case", input: "GPT-5.3-CODEX", wantModel: "GPT-5.3-CODEX"},
 	}
 
 	for _, tt := range tests {

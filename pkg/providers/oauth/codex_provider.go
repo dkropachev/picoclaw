@@ -66,7 +66,7 @@ func (p *CodexProvider) Chat(
 	if fallbackReason != "" {
 		logger.WarnCF(
 			"provider.codex",
-			"Requested model is not compatible with Codex backend, using fallback",
+			"Requested model is empty, using Codex default",
 			map[string]any{
 				"requested_model": model,
 				"resolved_model":  resolvedModel,
@@ -185,45 +185,12 @@ func (p *CodexProvider) SupportsNativeSearch() bool {
 }
 
 func resolveCodexModel(model string) (string, string) {
-	m := strings.ToLower(strings.TrimSpace(model))
+	m := strings.TrimSpace(model)
 	if m == "" {
 		return codexDefaultModel, "empty model"
 	}
 
-	if after, ok := strings.CutPrefix(m, "openai/"); ok {
-		m = after
-	} else if strings.Contains(m, "/") {
-		return codexDefaultModel, "non-openai model namespace"
-	}
-
-	unsupportedPrefixes := []string{
-		"glm",
-		"claude",
-		"anthropic",
-		"gemini",
-		"google",
-		"moonshot",
-		"kimi",
-		"qwen",
-		"deepseek",
-		"llama",
-		"meta-llama",
-		"mistral",
-		"grok",
-		"xai",
-		"zhipu",
-	}
-	for _, prefix := range unsupportedPrefixes {
-		if strings.HasPrefix(m, prefix) {
-			return codexDefaultModel, "unsupported model prefix"
-		}
-	}
-
-	if strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "o3") || strings.HasPrefix(m, "o4") {
-		return m, ""
-	}
-
-	return codexDefaultModel, "unsupported model family"
+	return m, ""
 }
 
 func buildCodexParams(
