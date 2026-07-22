@@ -86,6 +86,7 @@ Owns: HTTP GET /oauth/callback
 Owns: HTTP * /api/system*
 Owns: HTTP * /api/wecom*
 Owns: HTTP * /api/weixin*
+Owns: HTTP * /api/workflows*
 Owns: TEST cmd/picoclaw/internal/auth/*
 Owns: TEST cmd/picoclaw/internal/cliui/*
 Owns: TEST cmd/picoclaw/internal/config/*

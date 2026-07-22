@@ -7,6 +7,75 @@ export interface WorkflowDefinition {
   error?: string
 }
 
+export interface WorkflowValidationIssue {
+  path?: string
+  message: string
+}
+
+export interface WorkflowValidationStamp {
+  workflow_ref: string
+  workflow_hash?: string
+  validated_against_picoclaw_version: string
+  validated_against_git_commit?: string
+  workflow_engine_version: string
+  workflow_schema_version: string
+  validator_fingerprint: string
+  status: string
+  errors?: WorkflowValidationIssue[]
+  warnings?: WorkflowValidationIssue[]
+  validated_at: string
+}
+
+export interface WorkflowRuntimeCompatibility {
+  picoclaw_version: string
+  git_commit?: string
+  workflow_engine_version: string
+  workflow_schema_version: string
+  validator_fingerprint: string
+}
+
+export interface WorkflowCompatibilitySummary {
+  current: WorkflowRuntimeCompatibility
+  manifest_runtime?: WorkflowRuntimeCompatibility
+  workflows: WorkflowValidationStamp[]
+  counts: Record<string, number>
+  version_changed: boolean
+  manifest_missing: boolean
+  has_blocking: boolean
+}
+
+export interface WorkflowDevelopmentValidation {
+  valid: boolean
+  errors?: WorkflowValidationIssue[]
+  warnings?: WorkflowValidationIssue[]
+  validated_at: string
+}
+
+export interface WorkflowDevelopmentTestSnapshot {
+  draft_key: string
+  target_workflow_ref: string
+  run_id?: string
+  status: string
+  error?: string
+  tested_at: string
+}
+
+export interface WorkflowDevelopmentSession {
+  id: string
+  reason: "new" | "edit" | "version_revalidation" | string
+  status: string
+  prompt?: string
+  source_workflow_ref?: string
+  target_workflow_ref: string
+  target_picoclaw_version?: string
+  target_git_commit?: string
+  yaml: string
+  validation?: WorkflowDevelopmentValidation
+  last_test?: WorkflowDevelopmentTestSnapshot
+  created_at: string
+  updated_at: string
+}
+
 export interface WorkflowRun {
   id: string
   workflow_ref: string
@@ -78,23 +147,232 @@ export interface WorkflowReloadResult {
   errors: Array<{ ref: string; error: string }>
 }
 
+export interface WorkflowRunResult {
+  run_id: string
+  status: string
+  outputs?: Record<string, unknown>
+  error?: string
+}
+
+export interface WorkflowDevelopmentTestResult {
+  session: WorkflowDevelopmentSession
+  result?: WorkflowRunResult
+  error?: string
+}
+
+export interface WorkflowRunLaunchResult {
+  result: WorkflowRunResult
+  error?: string
+}
+
+export type WorkflowDeliveryPayload = Record<string, unknown>
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await launcherFetch(path, options)
   if (!res.ok) {
     const text = await res.text()
-    throw new Error(text.trim() || `API error: ${res.status} ${res.statusText}`)
+    throw new Error(apiErrorMessage(text, res.status, res.statusText))
   }
   return res.json() as Promise<T>
 }
 
+function apiErrorMessage(text: string, status: number, statusText: string) {
+  let message = text.trim()
+  try {
+    const body = JSON.parse(text) as {
+      error?: string
+      errors?: string[]
+    }
+    if (typeof body.error === "string" && body.error.trim() !== "") {
+      message = body.error
+    } else if (Array.isArray(body.errors) && body.errors.length > 0) {
+      message = body.errors.join("; ")
+    }
+  } catch {
+    // Keep the plain-text response when the backend did not return JSON.
+  }
+  return message || `API error: ${status} ${statusText}`
+}
+
 export async function listWorkflows(): Promise<{
   workflows: WorkflowDefinition[]
+  compatibility?: WorkflowCompatibilitySummary
 }> {
   return request("/api/workflows")
 }
 
+export async function getWorkflowCompatibility(): Promise<WorkflowCompatibilitySummary> {
+  return request("/api/workflows/compatibility")
+}
+
+export async function revalidateWorkflows(): Promise<WorkflowCompatibilitySummary> {
+  return request("/api/workflows/revalidate", { method: "POST" })
+}
+
+export async function getWorkflowDevelopment(): Promise<{
+  session: WorkflowDevelopmentSession | null
+}> {
+  return request("/api/workflows/development")
+}
+
+export async function startWorkflowDevelopment(payload: {
+  reason?: "new" | "edit" | "version_revalidation" | string
+  prompt?: string
+  ref?: string
+  target_ref?: string
+}): Promise<{ session: WorkflowDevelopmentSession; conflict?: boolean }> {
+  const res = await launcherFetch("/api/workflows/development/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  const text = await res.text()
+  if (res.ok) {
+    return JSON.parse(text) as {
+      session: WorkflowDevelopmentSession
+    }
+  }
+  if (res.status === 409) {
+    try {
+      const body = JSON.parse(text) as {
+        session?: WorkflowDevelopmentSession
+      }
+      if (body.session != null) {
+        return { session: body.session, conflict: true }
+      }
+    } catch {
+      // Fall through to the normal error message path.
+    }
+  }
+  throw new Error(apiErrorMessage(text, res.status, res.statusText))
+}
+
+export async function reviseWorkflowDevelopment(payload: {
+  prompt?: string
+  target_ref?: string
+  yaml?: string
+  regenerate?: boolean
+}): Promise<{ session: WorkflowDevelopmentSession }> {
+  return request("/api/workflows/development/revise", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function aiReviseWorkflowDevelopment(payload: {
+  prompt?: string
+  target_ref?: string
+  yaml?: string
+}): Promise<{ session: WorkflowDevelopmentSession }> {
+  return request("/api/workflows/development/ai-revise", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function validateWorkflowDevelopment(): Promise<{
+  session: WorkflowDevelopmentSession
+}> {
+  return request("/api/workflows/development/validate", { method: "POST" })
+}
+
+export async function testWorkflowDevelopment(payload: {
+  prompt?: string
+  target_ref?: string
+  yaml?: string
+  inputs?: Record<string, unknown>
+  secrets?: Record<string, string>
+  session?: string
+  delivery?: WorkflowDeliveryPayload
+  async?: boolean
+}): Promise<WorkflowDevelopmentTestResult> {
+  const res = await launcherFetch("/api/workflows/development/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  const text = await res.text()
+  if (res.ok) {
+    return JSON.parse(text) as WorkflowDevelopmentTestResult
+  }
+  try {
+    const body = JSON.parse(text) as Partial<WorkflowDevelopmentTestResult>
+    if (body.session != null) {
+      return {
+        session: body.session,
+        result: body.result,
+        error:
+          typeof body.error === "string" && body.error.trim() !== ""
+            ? body.error
+            : apiErrorMessage(text, res.status, res.statusText),
+      }
+    }
+  } catch {
+    // Fall through to the normal error message path.
+  }
+  throw new Error(apiErrorMessage(text, res.status, res.statusText))
+}
+
+export async function publishWorkflowDevelopment(): Promise<{
+  workflow_ref: string
+  session: WorkflowDevelopmentSession
+}> {
+  return request("/api/workflows/development/publish", { method: "POST" })
+}
+
+export async function discardWorkflowDevelopment(): Promise<{
+  session: WorkflowDevelopmentSession
+}> {
+  return request("/api/workflows/development/discard", { method: "POST" })
+}
+
 export async function reloadWorkflows(): Promise<WorkflowReloadResult> {
   return request("/api/workflows/reload", { method: "POST" })
+}
+
+export async function runWorkflow(payload: {
+  ref: string
+  inputs?: Record<string, unknown>
+  secrets?: Record<string, string>
+  session?: string
+  delivery?: WorkflowDeliveryPayload
+  async?: boolean
+}): Promise<WorkflowRunLaunchResult> {
+  const res = await launcherFetch("/api/workflows/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  return workflowRunLaunchResultFromResponse(res)
+}
+
+async function workflowRunLaunchResultFromResponse(
+  res: Response,
+): Promise<WorkflowRunLaunchResult> {
+  const text = await res.text()
+  if (res.ok) {
+    return { result: JSON.parse(text) as WorkflowRunResult }
+  }
+  try {
+    const body = JSON.parse(text) as {
+      result?: WorkflowRunResult
+      error?: string
+    }
+    if (body.result != null) {
+      return {
+        result: body.result,
+        error:
+          typeof body.error === "string" && body.error.trim() !== ""
+            ? body.error
+            : apiErrorMessage(text, res.status, res.statusText),
+      }
+    }
+  } catch {
+    // Fall through to the normal error message path.
+  }
+  throw new Error(apiErrorMessage(text, res.status, res.statusText))
 }
 
 export async function listWorkflowRuns(): Promise<{ runs: WorkflowRun[] }> {
@@ -109,6 +387,10 @@ export async function getWorkflowRunEvents(
   runID: string,
 ): Promise<{ run_id: string; events: WorkflowRunEvent[] }> {
   return request(`/api/workflows/runs/${encodeURIComponent(runID)}/events`)
+}
+
+export function workflowRunEventsStreamURL(runID: string): string {
+  return `/api/workflows/runs/${encodeURIComponent(runID)}/events/stream`
 }
 
 export async function getWorkflowRunGraph(
@@ -128,12 +410,17 @@ export async function cancelWorkflowRun(
   })
 }
 
-export async function retryWorkflowRun(runID: string): Promise<{
-  run_id: string
-  status: string
-  outputs?: Record<string, unknown>
-}> {
-  return request(`/api/workflows/runs/${encodeURIComponent(runID)}/retry`, {
-    method: "POST",
-  })
+export async function retryWorkflowRun(
+  runID: string,
+  secrets?: Record<string, string>,
+): Promise<WorkflowRunLaunchResult> {
+  const res = await launcherFetch(
+    `/api/workflows/runs/${encodeURIComponent(runID)}/retry`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ secrets }),
+    },
+  )
+  return workflowRunLaunchResultFromResponse(res)
 }

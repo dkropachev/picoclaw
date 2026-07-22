@@ -27,6 +27,7 @@ type Handler struct {
 	weixinFlows                map[string]*weixinFlow
 	wecomMu                    sync.Mutex
 	wecomFlows                 map[string]*wecomFlow
+	workflowDevelopmentMu      sync.Mutex
 }
 
 // NewHandler creates an instance of the API handler.
