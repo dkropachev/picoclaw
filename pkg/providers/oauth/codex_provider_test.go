@@ -2,9 +2,11 @@ package oauthprovider
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/openai/openai-go/v3"
@@ -61,6 +63,20 @@ func TestBuildCodexParams_OmitsUnsupportedReasoningEffort(t *testing.T) {
 
 	if got := string(params.Reasoning.Effort); got != "" {
 		t.Fatalf("Reasoning.Effort = %q, want empty", got)
+	}
+}
+
+func TestBuildCodexParams_PromptCacheKey(t *testing.T) {
+	params := buildCodexParams(
+		[]Message{{Role: "user", Content: "Hello"}},
+		nil,
+		"gpt-5.3-codex",
+		map[string]any{"prompt_cache_key": "agent-session-1"},
+		false,
+	)
+
+	if got := params.PromptCacheKey.Or(""); got != "agent-session-1" {
+		t.Fatalf("PromptCacheKey = %q, want agent-session-1", got)
 	}
 }
 
@@ -667,7 +683,61 @@ func TestCodexProvider_ChatRoundTrip_TokenSourceFallbackAccountID(t *testing.T) 
 	}
 }
 
-func TestCodexProvider_ChatRoundTrip_ModelFallbackFromUnsupported(t *testing.T) {
+func TestCodexProvider_ChatRoundTrip_TokenSourceOverridesAccountID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer refreshed-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("Chatgpt-Account-Id") != "acc-override" {
+			http.Error(w, "missing override account id", http.StatusBadRequest)
+			return
+		}
+
+		resp := map[string]any{
+			"id":     "resp_test",
+			"object": "response",
+			"status": "completed",
+			"output": []map[string]any{
+				{
+					"id":     "msg_1",
+					"type":   "message",
+					"role":   "assistant",
+					"status": "completed",
+					"content": []map[string]any{
+						{"type": "output_text", "text": "Hi from Codex!"},
+					},
+				},
+			},
+		}
+		writeCompletedSSE(w, resp)
+	}))
+	defer server.Close()
+
+	provider := NewCodexProvider("stale-token", "acc-old")
+	provider.client = createOpenAITestClient(server.URL, "stale-token", "")
+	provider.tokenSource = func() (string, string, error) {
+		return "refreshed-token", "acc-override", nil
+	}
+
+	resp, err := provider.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "Hello"}},
+		nil,
+		"gpt-4o",
+		map[string]any{},
+	)
+	if err != nil {
+		t.Fatalf("Chat() error: %v", err)
+	}
+	if resp.Content != "Hi from Codex!" {
+		t.Errorf("Content = %q, want %q", resp.Content, "Hi from Codex!")
+	}
+}
+
+func TestCodexProvider_ChatRoundTrip_PreservesRequestedModel(t *testing.T) {
+	requestedModel := "custom/gpt-5.3-codex"
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/responses" {
 			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
@@ -679,8 +749,8 @@ func TestCodexProvider_ChatRoundTrip_ModelFallbackFromUnsupported(t *testing.T) 
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		if reqBody["model"] != codexDefaultModel {
-			http.Error(w, "unsupported model", http.StatusBadRequest)
+		if reqBody["model"] != requestedModel {
+			http.Error(w, "unexpected model", http.StatusBadRequest)
 			return
 		}
 		if reqBody["stream"] != true {
@@ -723,7 +793,7 @@ func TestCodexProvider_ChatRoundTrip_ModelFallbackFromUnsupported(t *testing.T) 
 	provider.client = createOpenAITestClient(server.URL, "test-token", "acc-123")
 
 	messages := []Message{{Role: "user", Content: "Hello"}}
-	resp, err := provider.Chat(t.Context(), messages, nil, "gpt-5.3-codex", nil)
+	resp, err := provider.Chat(t.Context(), messages, nil, requestedModel, nil)
 	if err != nil {
 		t.Fatalf("Chat() error: %v", err)
 	}
@@ -732,10 +802,144 @@ func TestCodexProvider_ChatRoundTrip_ModelFallbackFromUnsupported(t *testing.T) 
 	}
 }
 
+func TestCodexProvider_ChatRoundTrip_EmptyModelUsesDefault(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+
+		var reqBody map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if reqBody["model"] != codexDefaultModel {
+			http.Error(w, "unexpected model", http.StatusBadRequest)
+			return
+		}
+
+		resp := map[string]any{
+			"id":     "resp_test",
+			"object": "response",
+			"status": "completed",
+			"output": []map[string]any{
+				{
+					"id":     "msg_1",
+					"type":   "message",
+					"role":   "assistant",
+					"status": "completed",
+					"content": []map[string]any{
+						{"type": "output_text", "text": "Hi from Codex!"},
+					},
+				},
+			},
+		}
+		writeCompletedSSE(w, resp)
+	}))
+	defer server.Close()
+
+	provider := NewCodexProvider("test-token", "")
+	provider.client = createOpenAITestClient(server.URL, "test-token", "")
+
+	resp, err := provider.Chat(t.Context(), []Message{{Role: "user", Content: "Hello"}}, nil, "  ", map[string]any{})
+	if err != nil {
+		t.Fatalf("Chat() error: %v", err)
+	}
+	if resp.Content != "Hi from Codex!" {
+		t.Errorf("Content = %q, want %q", resp.Content, "Hi from Codex!")
+	}
+}
+
+func TestCodexProvider_ChatTokenSourceError(t *testing.T) {
+	provider := NewCodexProviderWithTokenSource("stale-token", "", func() (string, string, error) {
+		return "", "", errors.New("refresh failed")
+	})
+
+	_, err := provider.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "Hello"}},
+		nil,
+		"gpt-4o",
+		map[string]any{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "refreshing token") {
+		t.Fatalf("Chat() error = %v, want refreshing token error", err)
+	}
+}
+
+func TestCodexProvider_ChatAPIFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{
+			"error": {
+				"message": "bad model",
+				"type": "invalid_request_error",
+				"code": "model_not_found",
+				"param": "model"
+			}
+		}`)
+	}))
+	defer server.Close()
+
+	provider := NewCodexProvider("test-token", "acc-123")
+	provider.client = createOpenAITestClient(server.URL, "test-token", "acc-123")
+
+	_, err := provider.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "Hello"}},
+		nil,
+		"missing-model",
+		map[string]any{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "codex API call") {
+		t.Fatalf("Chat() error = %v, want codex API call error", err)
+	}
+}
+
+func TestCodexProvider_ChatStreamWithoutCompletedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	provider := NewCodexProvider("test-token", "acc-123")
+	provider.client = createOpenAITestClient(server.URL, "test-token", "acc-123")
+
+	_, err := provider.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "Hello"}},
+		nil,
+		"gpt-4o",
+		map[string]any{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "stream ended without completed response") {
+		t.Fatalf("Chat() error = %v, want missing completed response error", err)
+	}
+}
+
 func TestCodexProvider_GetDefaultModel(t *testing.T) {
 	p := NewCodexProvider("test-token", "")
 	if got := p.GetDefaultModel(); got != codexDefaultModel {
 		t.Errorf("GetDefaultModel() = %q, want %q", got, codexDefaultModel)
+	}
+}
+
+func TestCodexProvider_SupportsNativeSearch(t *testing.T) {
+	p := NewCodexProvider("test-token", "")
+	if !p.SupportsNativeSearch() {
+		t.Fatal("SupportsNativeSearch() = false, want true")
+	}
+}
+
+func TestCreateCodexTokenSourceConstructors(t *testing.T) {
+	if CreateCodexTokenSource() == nil {
+		t.Fatal("CreateCodexTokenSource() returned nil")
+	}
+	if CreateCodexTokenSourceForCredential("work") == nil {
+		t.Fatal("CreateCodexTokenSourceForCredential() returned nil")
 	}
 }
 
@@ -747,15 +951,12 @@ func TestResolveCodexModel(t *testing.T) {
 		wantFallback bool
 	}{
 		{name: "empty", input: "", wantModel: codexDefaultModel, wantFallback: true},
-		{
-			name:         "unsupported namespace",
-			input:        "anthropic/claude-3.5",
-			wantModel:    codexDefaultModel,
-			wantFallback: true,
-		},
-		{name: "non-openai prefixed", input: "glm-4.7", wantModel: codexDefaultModel, wantFallback: true},
-		{name: "openai prefix", input: "openai/gpt-5.3-codex", wantModel: "gpt-5.3-codex", wantFallback: false},
+		{name: "namespaced model", input: "custom/gpt-5.3-codex", wantModel: "custom/gpt-5.3-codex"},
+		{name: "non-openai family", input: "glm-4.7", wantModel: "glm-4.7"},
+		{name: "openai prefix preserved", input: "openai/gpt-5.3-codex", wantModel: "openai/gpt-5.3-codex"},
 		{name: "direct gpt", input: "gpt-4o", wantModel: "gpt-4o", wantFallback: false},
+		{name: "trims whitespace", input: "  gpt-5.3-codex  ", wantModel: "gpt-5.3-codex"},
+		{name: "preserves case", input: "GPT-5.3-CODEX", wantModel: "GPT-5.3-CODEX"},
 	}
 
 	for _, tt := range tests {
