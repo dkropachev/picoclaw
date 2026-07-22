@@ -72,12 +72,73 @@ type FileRunStore struct {
 	mu   sync.Mutex
 }
 
+var fileRunStoreLocks sync.Map
+
 func NewFileRunStore(workspace string) *FileRunStore {
 	return &FileRunStore{root: filepath.Join(workspace, "workflow_runs")}
 }
 
 func (s *FileRunStore) CreateRun(ctx context.Context, run *Run) error {
-	return s.UpdateRun(ctx, run)
+	_ = ctx
+	unlock, err := s.lockRoot()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return s.createRunLocked(run)
+}
+
+func (s *FileRunStore) CreateRunIfUnderLimit(ctx context.Context, run *Run, maxConcurrent int) error {
+	_ = ctx
+	unlock, err := s.lockRoot()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if maxConcurrent > 0 {
+		runs, err := s.listRunsLocked(ctx)
+		if err != nil {
+			return err
+		}
+		running := 0
+		for _, run := range runs {
+			if run.Status == RunStatusRunning && run.ParentRunID == "" {
+				running++
+			}
+		}
+		if running >= maxConcurrent {
+			return fmt.Errorf(
+				"workflow concurrency limit reached: %d running, max %d",
+				running,
+				maxConcurrent,
+			)
+		}
+	}
+	return s.createRunLocked(run)
+}
+
+func (s *FileRunStore) createRunLocked(run *Run) error {
+	if run == nil {
+		return fmt.Errorf("run is required")
+	}
+	if strings.TrimSpace(run.ID) == "" {
+		return fmt.Errorf("run id is required")
+	}
+	dir := filepath.Join(s.root, safeID(run.ID))
+	if _, err := os.Stat(filepath.Join(dir, "run.json")); err == nil {
+		return fmt.Errorf("workflow run %s already exists", run.ID)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	run.UpdatedAt = time.Now().UTC()
+	data, err := json.MarshalIndent(run, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "run.json"), data, 0o600)
 }
 
 func (s *FileRunStore) UpdateRun(ctx context.Context, run *Run) error {
@@ -88,18 +149,19 @@ func (s *FileRunStore) UpdateRun(ctx context.Context, run *Run) error {
 	if strings.TrimSpace(run.ID) == "" {
 		return fmt.Errorf("run id is required")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	dir := filepath.Join(s.root, safeID(run.ID))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	unlock, err := s.lockRoot()
+	if err != nil {
 		return err
 	}
-	if existing, err := readRunFile(filepath.Join(dir, "run.json")); err == nil &&
-		existing.Status == RunStatusCanceled && run.Status == RunStatusRunning {
-		run.Status = RunStatusCanceled
-		run.CancelReason = existing.CancelReason
-		run.CancelRequestedAt = existing.CancelRequestedAt
-		run.CompletedAt = existing.CompletedAt
+	defer unlock()
+	dir := filepath.Join(s.root, safeID(run.ID))
+	if mkdirErr := os.MkdirAll(dir, 0o755); mkdirErr != nil {
+		return mkdirErr
+	}
+	if existing, readErr := readRunFile(filepath.Join(dir, "run.json")); readErr == nil &&
+		isTerminalRunStatus(existing.Status) {
+		*run = *cloneRun(existing)
+		return nil
 	}
 	run.UpdatedAt = time.Now().UTC()
 	data, err := json.MarshalIndent(run, "", "  ")
@@ -122,9 +184,19 @@ func readRunFile(path string) (*Run, error) {
 }
 
 func (s *FileRunStore) CancelRun(ctx context.Context, runID, reason string) (*Run, error) {
-	run, err := s.GetRun(ctx, runID)
+	runPath := filepath.Join(s.root, safeID(runID), "run.json")
+	unlock, err := s.lockRoot()
 	if err != nil {
 		return nil, err
+	}
+	run, err := readRunFile(runPath)
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	if isTerminalRunStatus(run.Status) {
+		unlock()
+		return run, nil
 	}
 	now := time.Now().UTC()
 	run.Status = RunStatusCanceled
@@ -133,19 +205,50 @@ func (s *FileRunStore) CancelRun(ctx context.Context, runID, reason string) (*Ru
 	if run.CompletedAt == nil {
 		run.CompletedAt = &now
 	}
-	if err := s.UpdateRun(ctx, run); err != nil {
+	run.UpdatedAt = now
+	data, err := json.MarshalIndent(run, "", "  ")
+	if err != nil {
+		unlock()
 		return nil, err
 	}
+	if err := os.WriteFile(runPath, data, 0o600); err != nil {
+		unlock()
+		return nil, err
+	}
+	unlock()
 	_ = s.AppendEvent(ctx, RunEvent{
 		Kind:    "workflow.run.canceled",
 		RunID:   run.ID,
 		Message: run.CancelReason,
 	})
+	s.cancelChildRuns(ctx, run.ID, run.CancelReason)
 	return run, nil
+}
+
+func (s *FileRunStore) cancelChildRuns(ctx context.Context, parentRunID, reason string) {
+	parentRunID = strings.TrimSpace(parentRunID)
+	if parentRunID == "" {
+		return
+	}
+	runs, err := s.ListRuns(ctx)
+	if err != nil {
+		return
+	}
+	for _, child := range runs {
+		if child.ParentRunID != parentRunID || isTerminalRunStatus(child.Status) {
+			continue
+		}
+		_, _ = s.CancelRun(ctx, child.ID, reason)
+	}
 }
 
 func (s *FileRunStore) GetRun(ctx context.Context, runID string) (*Run, error) {
 	_ = ctx
+	unlock, err := s.lockRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	data, err := os.ReadFile(filepath.Join(s.root, safeID(runID), "run.json"))
 	if err != nil {
 		return nil, err
@@ -159,6 +262,16 @@ func (s *FileRunStore) GetRun(ctx context.Context, runID string) (*Run, error) {
 
 func (s *FileRunStore) ListRuns(ctx context.Context) ([]Run, error) {
 	_ = ctx
+	unlock, err := s.lockRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return s.listRunsLocked(ctx)
+}
+
+func (s *FileRunStore) listRunsLocked(ctx context.Context) ([]Run, error) {
+	_ = ctx
 	entries, err := os.ReadDir(s.root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -171,7 +284,7 @@ func (s *FileRunStore) ListRuns(ctx context.Context) ([]Run, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		run, err := s.GetRun(ctx, entry.Name())
+		run, err := readRunFile(filepath.Join(s.root, entry.Name(), "run.json"))
 		if err == nil {
 			runs = append(runs, *run)
 		}
@@ -187,11 +300,14 @@ func (s *FileRunStore) AppendEvent(ctx context.Context, event RunEvent) error {
 	if strings.TrimSpace(event.RunID) == "" {
 		return fmt.Errorf("event run id is required")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	dir := filepath.Join(s.root, safeID(event.RunID))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	unlock, err := s.lockRoot()
+	if err != nil {
 		return err
+	}
+	defer unlock()
+	dir := filepath.Join(s.root, safeID(event.RunID))
+	if mkdirErr := os.MkdirAll(dir, 0o755); mkdirErr != nil {
+		return mkdirErr
 	}
 	if event.Time.IsZero() {
 		event.Time = time.Now().UTC()
@@ -213,6 +329,11 @@ func (s *FileRunStore) AppendEvent(ctx context.Context, event RunEvent) error {
 
 func (s *FileRunStore) Events(ctx context.Context, runID string) ([]RunEvent, error) {
 	_ = ctx
+	unlock, err := s.lockRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	data, err := os.ReadFile(filepath.Join(s.root, safeID(runID), "events.jsonl"))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -240,7 +361,33 @@ func (s *FileRunStore) DeleteRun(ctx context.Context, runID string) error {
 	if runID == "" || runID == "unknown" {
 		return fmt.Errorf("run id is required")
 	}
+	unlock, err := s.lockRoot()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return os.RemoveAll(filepath.Join(s.root, runID))
+}
+
+func (s *FileRunStore) lockRoot() (func(), error) {
+	root := filepath.Clean(s.root)
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	actual, _ := fileRunStoreLocks.LoadOrStore(root, &sync.Mutex{})
+	rootMu := actual.(*sync.Mutex)
+	rootMu.Lock()
+	unlockFile, err := lockWorkflowRunStore(root)
+	if err != nil {
+		rootMu.Unlock()
+		return nil, err
+	}
+	s.mu.Lock()
+	return func() {
+		s.mu.Unlock()
+		unlockFile()
+		rootMu.Unlock()
+	}, nil
 }
 
 func (s *FileRunStore) PruneTerminalRuns(ctx context.Context, olderThan time.Time) (int, error) {

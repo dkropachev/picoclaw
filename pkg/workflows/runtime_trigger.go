@@ -18,6 +18,9 @@ func MatchRuntimeEvent(workflow *Workflow, ref string, evt runtimeevents.Event) 
 	if workflow == nil || workflow.On.RuntimeEvent == nil {
 		return nil, false, nil
 	}
+	if isWorkflowTriggerFeedbackEvent(ref, evt) {
+		return nil, false, nil
+	}
 	trigger := workflow.On.RuntimeEvent
 	if !stringListMatches(trigger.Kinds, evt.Kind.String(), true) {
 		return nil, false, nil
@@ -47,6 +50,33 @@ func MatchRuntimeEvent(workflow *Workflow, ref string, evt runtimeevents.Event) 
 		Session:  RuntimeEventSessionKey(ref, evt),
 		Delivery: RuntimeEventDelivery(evt),
 	}, true, nil
+}
+
+func isWorkflowTriggerFeedbackEvent(ref string, evt runtimeevents.Event) bool {
+	if !strings.EqualFold(strings.TrimSpace(evt.Source.Component), "workflow") {
+		return false
+	}
+	if evt.Kind == runtimeevents.KindWorkflowTriggered {
+		return true
+	}
+	if !workflowLifecycleEventKind(evt.Kind) {
+		return false
+	}
+	sourceName := strings.TrimSpace(evt.Source.Name)
+	if sourceName == "" {
+		if payload, ok := evt.Payload.(map[string]any); ok {
+			sourceName, _ = payload["workflow_ref"].(string)
+			sourceName = strings.TrimSpace(sourceName)
+		}
+	}
+	return sourceName != "" && strings.EqualFold(sourceName, strings.TrimSpace(ref))
+}
+
+func workflowLifecycleEventKind(kind runtimeevents.Kind) bool {
+	value := kind.String()
+	return strings.HasPrefix(value, "workflow.run.") ||
+		strings.HasPrefix(value, "workflow.job.") ||
+		strings.HasPrefix(value, "workflow.step.")
 }
 
 func RuntimeEventToMap(evt runtimeevents.Event) map[string]any {

@@ -27,13 +27,18 @@ type EventContext struct {
 }
 
 type ExecutionContext struct {
-	Inputs   map[string]any           `json:"inputs,omitempty"`
-	Secrets  map[string]string        `json:"-"`
-	Event    map[string]any           `json:"event,omitempty"`
-	Session  string                   `json:"session,omitempty"`
-	Delivery Delivery                 `json:"delivery,omitempty"`
-	Steps    map[string]StepExecution `json:"steps,omitempty"`
-	Needs    map[string]JobExecution  `json:"needs,omitempty"`
+	Inputs       map[string]any           `json:"inputs,omitempty"`
+	Secrets      map[string]string        `json:"-"`
+	Event        map[string]any           `json:"event,omitempty"`
+	Session      string                   `json:"session,omitempty"`
+	Delivery     Delivery                 `json:"delivery,omitempty"`
+	Steps        map[string]StepExecution `json:"steps,omitempty"`
+	Needs        map[string]JobExecution  `json:"needs,omitempty"`
+	WorkspaceDir string                   `json:"workspace_dir,omitempty"`
+	WorkflowRef  string                   `json:"workflow_ref,omitempty"`
+	RunID        string                   `json:"run_id,omitempty"`
+	JobID        string                   `json:"job_id,omitempty"`
+	StepID       string                   `json:"step_id,omitempty"`
 }
 
 type StepExecution struct {
@@ -78,6 +83,9 @@ type AgentRequest struct {
 	Delivery  Delivery
 	Inputs    map[string]any
 	MessageID string
+	Output    *AgentOutputContract
+	Managed   any
+	Scope     any
 }
 
 type FunctionRunner interface {

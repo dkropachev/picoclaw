@@ -15,8 +15,46 @@ type Definition struct {
 	Error string `json:"error,omitempty"`
 }
 
-func ListLocal(ctx context.Context, workspace string) ([]Definition, error) {
-	root := filepath.Join(workspace, "workflows")
+type LocalOption func(*localOptions)
+
+type localOptions struct {
+	DefinitionsDir string
+}
+
+func WithDefinitionsDir(dir string) LocalOption {
+	return func(opts *localOptions) {
+		opts.DefinitionsDir = dir
+	}
+}
+
+func collectLocalOptions(opts ...LocalOption) localOptions {
+	out := localOptions{DefinitionsDir: DefaultDefinitionsDir}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&out)
+		}
+	}
+	return out
+}
+
+func (opts localOptions) resolver(workspace string) Resolver {
+	return Resolver{WorkspaceDir: workspace, DefinitionsDir: opts.DefinitionsDir}
+}
+
+func (opts localOptions) definitionsRoot(workspace string) (string, error) {
+	dir, err := cleanDefinitionsDir(opts.DefinitionsDir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(workspace, dir), nil
+}
+
+func ListLocal(ctx context.Context, workspace string, opts ...LocalOption) ([]Definition, error) {
+	local := collectLocalOptions(opts...)
+	root, err := local.definitionsRoot(workspace)
+	if err != nil {
+		return nil, err
+	}
 	if _, statErr := os.Stat(root); statErr != nil {
 		if os.IsNotExist(statErr) {
 			return nil, nil
@@ -39,20 +77,20 @@ func ListLocal(ctx context.Context, workspace string) ([]Definition, error) {
 		if ext != ".yml" && ext != ".yaml" {
 			return nil
 		}
-		rel, relErr := filepath.Rel(workspace, path)
+		rel, relErr := filepath.Rel(root, path)
 		if relErr != nil {
 			return relErr
 		}
-		ref := filepath.ToSlash(rel)
+		ref := DefaultDefinitionsDir + "/" + filepath.ToSlash(rel)
 		def := Definition{Ref: ref, Path: path}
-		if resolved, resolveErr := (Resolver{WorkspaceDir: workspace}).ResolveLocal(ref); resolveErr == nil {
+		if resolved, resolveErr := local.resolver(workspace).ResolveLocal(ref); resolveErr == nil {
 			def.Ref = resolved.Canonical
 			def.Path = resolved.Path
 		} else {
 			def.Error = resolveErr.Error()
 		}
 		if def.Error == "" {
-			workflow, loadErr := LoadLocal(ctx, workspace, def.Ref)
+			workflow, loadErr := LoadLocal(ctx, workspace, def.Ref, opts...)
 			if loadErr != nil {
 				def.Error = loadErr.Error()
 			} else {
@@ -71,11 +109,12 @@ func ListLocal(ctx context.Context, workspace string) ([]Definition, error) {
 	return defs, nil
 }
 
-func LoadLocal(ctx context.Context, workspace, ref string) (*Workflow, error) {
+func LoadLocal(ctx context.Context, workspace, ref string, opts ...LocalOption) (*Workflow, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	resolved, err := (Resolver{WorkspaceDir: workspace}).ResolveLocal(ref)
+	local := collectLocalOptions(opts...)
+	resolved, err := local.resolver(workspace).ResolveLocal(ref)
 	if err != nil {
 		return nil, err
 	}

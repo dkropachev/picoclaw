@@ -48,6 +48,57 @@ jobs:
 	}
 }
 
+func TestListLoadAndRunUseConfiguredDefinitionsDir(t *testing.T) {
+	workspace := t.TempDir()
+	definitionsDir := "custom-definitions"
+	writeWorkflowFileUnder(t, workspace, definitionsDir, "native.yml", `
+name: Native
+on:
+  manual: {}
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - uses: function/workflow.state
+        with:
+          action: set
+          key: configured_dir
+          value: ok
+`)
+	writeWorkflowFile(t, workspace, "stale.yml", `
+name: Stale
+on:
+  manual: {}
+jobs:
+  noop:
+    runs-on: picoclaw
+    steps:
+      - uses: tool/message
+`)
+
+	opts := []LocalOption{WithDefinitionsDir(definitionsDir)}
+	defs, err := ListLocal(context.Background(), workspace, opts...)
+	if err != nil {
+		t.Fatalf("ListLocal failed: %v", err)
+	}
+	if len(defs) != 1 || defs[0].Ref != "workflows/native.yml" {
+		t.Fatalf("defs = %#v, want configured workflow only", defs)
+	}
+	if _, loadErr := LoadLocal(context.Background(), workspace, "workflows/native.yml", opts...); loadErr != nil {
+		t.Fatalf("LoadLocal with configured definitions dir failed: %v", loadErr)
+	}
+	result, err := (&Executor{
+		WorkspaceDir:   workspace,
+		DefinitionsDir: definitionsDir,
+	}).Run(context.Background(), RunRequest{Ref: "workflows/native.yml"})
+	if err != nil {
+		t.Fatalf("Executor.Run with configured definitions dir failed: %v", err)
+	}
+	if result.Status != RunStatusSucceeded {
+		t.Fatalf("run status = %q, want succeeded", result.Status)
+	}
+}
+
 func TestMatchChannelMessageBuildsSessionDeliveryAndEvent(t *testing.T) {
 	workflow := parseWorkflow(t, `
 name: Chat
@@ -162,6 +213,37 @@ jobs:
 	}
 }
 
+func TestMatchCommandMessageBindsPositionalArgsDeterministically(t *testing.T) {
+	workflow := parseWorkflow(t, `
+name: Command Positional
+on:
+  command:
+    name: deploy
+    args:
+      second:
+        type: string
+      first:
+        type: string
+jobs:
+  noop:
+    runs-on: picoclaw
+    steps:
+      - uses: tool/message
+`)
+	match, ok, err := MatchCommandMessage(workflow, "workflows/deploy.yml", ChannelMessageEvent{
+		Text: "/deploy alpha beta",
+	})
+	if err != nil {
+		t.Fatalf("MatchCommandMessage() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("command workflow did not match")
+	}
+	if match.Inputs["first"] != "alpha" || match.Inputs["second"] != "beta" {
+		t.Fatalf("inputs = %#v, want sorted positional binding", match.Inputs)
+	}
+}
+
 func TestMatchRuntimeEventBuildsInputsSessionAndDelivery(t *testing.T) {
 	workflow := parseWorkflow(t, `
 name: Runtime
@@ -211,5 +293,78 @@ jobs:
 	}
 	if match.Delivery.ReplyToMessageID != "root" || match.Delivery.TopicID != "42" {
 		t.Fatalf("delivery = %#v", match.Delivery)
+	}
+}
+
+func TestMatchRuntimeEventRejectsWorkflowTriggeredFeedbackEvent(t *testing.T) {
+	workflow := parseWorkflow(t, `
+name: Runtime
+on:
+  runtime_event:
+    kinds: workflow.triggered
+jobs:
+  noop:
+    runs-on: picoclaw
+    steps:
+      - uses: tool/message
+`)
+	match, ok, err := MatchRuntimeEvent(workflow, "workflows/runtime.yml", runtimeevents.Event{
+		Kind: runtimeevents.KindWorkflowTriggered,
+		Source: runtimeevents.Source{
+			Component: "workflow",
+			Name:      "workflows/runtime.yml",
+		},
+	})
+	if err != nil {
+		t.Fatalf("MatchRuntimeEvent() error = %v", err)
+	}
+	if ok || match != nil {
+		t.Fatalf("MatchRuntimeEvent() = %#v, %v, want no match for workflow feedback event", match, ok)
+	}
+}
+
+func TestMatchRuntimeEventRejectsOwnWorkflowLifecycleEvent(t *testing.T) {
+	workflow := parseWorkflow(t, `
+name: Runtime
+on:
+  runtime_event:
+    kinds: workflow.run.start
+jobs:
+  noop:
+    runs-on: picoclaw
+    steps:
+      - uses: tool/message
+`)
+	match, ok, err := MatchRuntimeEvent(workflow, "workflows/runtime.yml", runtimeevents.Event{
+		Kind:   runtimeevents.KindWorkflowRunStart,
+		Source: runtimeevents.Source{Component: "workflow", Name: "workflows/runtime.yml"},
+	})
+	if err != nil {
+		t.Fatalf("MatchRuntimeEvent() error = %v", err)
+	}
+	if ok || match != nil {
+		t.Fatalf("MatchRuntimeEvent() = %#v, %v, want no match for own workflow lifecycle event", match, ok)
+	}
+
+	match, ok, err = MatchRuntimeEvent(workflow, "workflows/runtime.yml", runtimeevents.Event{
+		Kind:   runtimeevents.KindWorkflowRunStart,
+		Source: runtimeevents.Source{Component: "workflow", Name: "workflows/producer.yml"},
+	})
+	if err != nil {
+		t.Fatalf("MatchRuntimeEvent() error = %v", err)
+	}
+	if !ok || match == nil {
+		t.Fatalf("MatchRuntimeEvent() = %#v, %v, want match for another workflow lifecycle event", match, ok)
+	}
+}
+
+func writeWorkflowFileUnder(t *testing.T, workspace, definitionsDir, name, content string) {
+	t.Helper()
+	dir := filepath.Join(workspace, definitionsDir, filepath.Dir(name))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, definitionsDir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

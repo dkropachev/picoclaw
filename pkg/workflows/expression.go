@@ -205,7 +205,7 @@ func lookupPath(path string, ctx expressionContext) (any, error) {
 		}
 		cur, ok = obj[part]
 		if !ok {
-			return nil, fmt.Errorf("expression path %q not found", path)
+			return nil, nil
 		}
 	}
 	return cur, nil

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/adhocore/gronx"
@@ -15,6 +16,11 @@ type ValidationError struct {
 }
 
 type ValidationErrors []ValidationError
+
+var (
+	expressionReferencePattern = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*`)
+	expressionPathPattern      = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$`)
+)
 
 func (e ValidationErrors) Error() string {
 	if len(e) == 0 {
@@ -40,7 +46,7 @@ func Validate(workflow *Workflow) error {
 		errs = append(errs, ValidationError{Path: "jobs", Message: "at least one job is required"})
 	}
 	errs = append(errs, validateScheduleTriggers(workflow.On.Schedule)...)
-	errs = append(errs, validateWorkflowCall(workflow.On.WorkflowCall)...)
+	errs = append(errs, validateWorkflowCall(workflow.On.WorkflowCall, workflow.Jobs)...)
 	errs = append(errs, validateChannelTrigger("on.channel_message", workflow.On.ChannelMessage)...)
 	errs = append(errs, validateCommandTrigger("on.command", workflow.On.Command)...)
 	errs = append(errs, validateRuntimeEventTrigger("on.runtime_event", workflow.On.RuntimeEvent)...)
@@ -73,7 +79,7 @@ func validateScheduleTriggers(schedules []ScheduleTrigger) ValidationErrors {
 	return errs
 }
 
-func validateWorkflowCall(call *WorkflowCall) ValidationErrors {
+func validateWorkflowCall(call *WorkflowCall, jobs map[string]Job) ValidationErrors {
 	if call == nil {
 		return nil
 	}
@@ -86,19 +92,203 @@ func validateWorkflowCall(call *WorkflowCall) ValidationErrors {
 		if !validInputType(input.Type) {
 			errs = append(errs, ValidationError{Path: path + ".type", Message: "unsupported input type"})
 		}
+		if input.Default != nil {
+			if err := validateWorkflowInputValue(name, input.Type, input.Default); err != nil {
+				errs = append(errs, ValidationError{Path: path + ".default", Message: err.Error()})
+			}
+		}
 	}
 	for name, output := range call.Outputs {
+		path := "on.workflow_call.outputs." + name + ".value"
 		if strings.TrimSpace(output.Value) == "" {
 			errs = append(
 				errs,
 				ValidationError{
-					Path:    "on.workflow_call.outputs." + name + ".value",
+					Path:    path,
 					Message: "output value is required",
 				},
 			)
+			continue
+		}
+		errs = append(errs, validateWorkflowOutputExpression(path, output.Value, jobs)...)
+	}
+	return errs
+}
+
+func validateWorkflowOutputExpression(path string, value string, jobs map[string]Job) ValidationErrors {
+	var errs ValidationErrors
+	for _, expr := range outputExpressionBodies(value) {
+		if err := validateExpressionSyntax(expr); err != nil {
+			errs = append(errs, ValidationError{Path: path, Message: err.Error()})
+			continue
+		}
+		for _, ref := range expressionReferenceTokens(expr) {
+			parts := strings.Split(ref, ".")
+			if len(parts) == 0 {
+				continue
+			}
+			switch parts[0] {
+			case "inputs", "secrets", "event", "delivery", "session":
+				continue
+			case "jobs":
+				if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+					errs = append(errs, ValidationError{Path: path, Message: "job id is required"})
+					continue
+				}
+				job, ok := jobs[parts[1]]
+				if !ok {
+					errs = append(
+						errs,
+						ValidationError{Path: path, Message: fmt.Sprintf("unknown job %q", parts[1])},
+					)
+					continue
+				}
+				if len(parts) < 3 {
+					continue
+				}
+				switch parts[2] {
+				case "outputs":
+					if len(parts) >= 4 && strings.TrimSpace(job.Uses) == "" {
+						if _, ok := job.Outputs[parts[3]]; !ok {
+							errs = append(
+								errs,
+								ValidationError{
+									Path:    path,
+									Message: fmt.Sprintf("unknown job output %q on job %q", parts[3], parts[1]),
+								},
+							)
+						}
+					}
+				case "status", "error":
+				default:
+					errs = append(
+						errs,
+						ValidationError{
+							Path:    path,
+							Message: fmt.Sprintf("unsupported job field %q", parts[2]),
+						},
+					)
+				}
+			case "steps", "needs":
+				errs = append(
+					errs,
+					ValidationError{
+						Path:    path,
+						Message: fmt.Sprintf("workflow outputs cannot reference %q", parts[0]),
+					},
+				)
+			default:
+				errs = append(
+					errs,
+					ValidationError{
+						Path:    path,
+						Message: fmt.Sprintf("unknown expression root %q", parts[0]),
+					},
+				)
+			}
 		}
 	}
 	return errs
+}
+
+func validateExpressionSyntax(expr string) error {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return fmt.Errorf("expression is empty")
+	}
+	for _, op := range []string{" == ", " != ", " >= ", " <= ", " > ", " < "} {
+		if idx := strings.Index(expr, op); idx >= 0 {
+			if err := validateExpressionSyntax(expr[:idx]); err != nil {
+				return err
+			}
+			return validateExpressionSyntax(expr[idx+len(op):])
+		}
+	}
+	if strings.HasPrefix(expr, "not ") {
+		return validateExpressionSyntax(strings.TrimSpace(strings.TrimPrefix(expr, "not ")))
+	}
+	if isQuotedExpressionLiteral(expr) {
+		return nil
+	}
+	switch expr {
+	case "true", "false", "null":
+		return nil
+	}
+	if _, err := strconv.ParseFloat(expr, 64); err == nil {
+		return nil
+	}
+	if expressionPathPattern.MatchString(expr) {
+		return nil
+	}
+	return fmt.Errorf("unsupported expression syntax %q", expr)
+}
+
+func isQuotedExpressionLiteral(expr string) bool {
+	if len(expr) < 2 {
+		return false
+	}
+	return (strings.HasPrefix(expr, "'") && strings.HasSuffix(expr, "'")) ||
+		(strings.HasPrefix(expr, `"`) && strings.HasSuffix(expr, `"`))
+}
+
+func outputExpressionBodies(value string) []string {
+	matches := expressionPattern.FindAllStringSubmatch(value, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) > 1 {
+			out = append(out, strings.TrimSpace(match[1]))
+		}
+	}
+	return out
+}
+
+func expressionReferenceTokens(expr string) []string {
+	expr = stripExpressionStringLiterals(expr)
+	matches := expressionReferencePattern.FindAllString(expr, -1)
+	out := make([]string, 0, len(matches))
+	for _, match := range matches {
+		switch match {
+		case "true", "false", "null", "not":
+			continue
+		}
+		out = append(out, match)
+	}
+	return out
+}
+
+func stripExpressionStringLiterals(expr string) string {
+	var b strings.Builder
+	var quote rune
+	escaped := false
+	for _, r := range expr {
+		if quote != 0 {
+			if escaped {
+				escaped = false
+				b.WriteRune(' ')
+				continue
+			}
+			if r == '\\' {
+				escaped = true
+				b.WriteRune(' ')
+				continue
+			}
+			if r == quote {
+				quote = 0
+			}
+			b.WriteRune(' ')
+			continue
+		}
+		if r == '\'' || r == '"' {
+			quote = r
+			b.WriteRune(' ')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func validateChannelTrigger(path string, trigger *ChannelMessageTrigger) ValidationErrors {
@@ -165,6 +355,7 @@ func validateJobs(jobs map[string]Job) ValidationErrors {
 				)
 			}
 		}
+		errs = append(errs, validateRunContext(jobPath+".context", job.Context)...)
 		if strings.TrimSpace(job.Uses) != "" {
 			if _, err := CanonicalLocalRef(job.Uses); err != nil {
 				errs = append(errs, ValidationError{Path: jobPath + ".uses", Message: err.Error()})
@@ -186,7 +377,6 @@ func validateJobs(jobs map[string]Job) ValidationErrors {
 		if len(job.Steps) == 0 {
 			errs = append(errs, ValidationError{Path: jobPath + ".steps", Message: "at least one step is required"})
 		}
-		errs = append(errs, validateRunContext(jobPath+".context", job.Context)...)
 		errs = append(errs, validateSteps(jobPath+".steps", job.Steps)...)
 	}
 	errs = append(errs, validateJobCycles(jobs)...)
@@ -198,12 +388,14 @@ func validateSteps(path string, steps []Step) ValidationErrors {
 	seenIDs := make(map[string]struct{})
 	for i, step := range steps {
 		stepPath := fmt.Sprintf("%s[%d]", path, i)
-		if strings.TrimSpace(step.ID) != "" {
-			if _, exists := seenIDs[step.ID]; exists {
-				errs = append(errs, ValidationError{Path: stepPath + ".id", Message: "duplicate step id"})
-			}
-			seenIDs[step.ID] = struct{}{}
+		stepID := strings.TrimSpace(step.ID)
+		if stepID == "" {
+			stepID = fmt.Sprintf("step_%d", i+1)
 		}
+		if _, exists := seenIDs[stepID]; exists {
+			errs = append(errs, ValidationError{Path: stepPath + ".id", Message: "duplicate step id"})
+		}
+		seenIDs[stepID] = struct{}{}
 		uses := strings.TrimSpace(step.Uses)
 		if uses == "" {
 			errs = append(errs, ValidationError{Path: stepPath + ".uses", Message: "uses is required"})

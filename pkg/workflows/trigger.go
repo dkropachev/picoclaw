@@ -3,6 +3,7 @@ package workflows
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -104,7 +105,13 @@ func MatchCommandMessage(
 		"args":    args.Raw,
 		"argv":    append([]string(nil), args.Argv...),
 	}
-	for name, input := range trigger.Args {
+	argNames := make([]string, 0, len(trigger.Args))
+	for name := range trigger.Args {
+		argNames = append(argNames, name)
+	}
+	sort.Strings(argNames)
+	for _, name := range argNames {
+		input := trigger.Args[name]
 		value, ok := args.Named[name]
 		if !ok && len(args.Positional) > 0 {
 			value = args.Positional[0]
