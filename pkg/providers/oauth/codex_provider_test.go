@@ -2,9 +2,11 @@ package oauthprovider
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/openai/openai-go/v3"
@@ -734,10 +736,106 @@ func TestCodexProvider_ChatRoundTrip_PreservesRequestedModel(t *testing.T) {
 	}
 }
 
+func TestCodexProvider_ChatRoundTrip_EmptyModelUsesDefault(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+
+		var reqBody map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		if reqBody["model"] != codexDefaultModel {
+			http.Error(w, "unexpected model", http.StatusBadRequest)
+			return
+		}
+
+		resp := map[string]any{
+			"id":     "resp_test",
+			"object": "response",
+			"status": "completed",
+			"output": []map[string]any{
+				{
+					"id":     "msg_1",
+					"type":   "message",
+					"role":   "assistant",
+					"status": "completed",
+					"content": []map[string]any{
+						{"type": "output_text", "text": "Hi from Codex!"},
+					},
+				},
+			},
+		}
+		writeCompletedSSE(w, resp)
+	}))
+	defer server.Close()
+
+	provider := NewCodexProvider("test-token", "")
+	provider.client = createOpenAITestClient(server.URL, "test-token", "")
+
+	resp, err := provider.Chat(t.Context(), []Message{{Role: "user", Content: "Hello"}}, nil, "  ", map[string]any{})
+	if err != nil {
+		t.Fatalf("Chat() error: %v", err)
+	}
+	if resp.Content != "Hi from Codex!" {
+		t.Errorf("Content = %q, want %q", resp.Content, "Hi from Codex!")
+	}
+}
+
+func TestCodexProvider_ChatTokenSourceError(t *testing.T) {
+	provider := NewCodexProviderWithTokenSource("stale-token", "", func() (string, string, error) {
+		return "", "", errors.New("refresh failed")
+	})
+
+	_, err := provider.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "Hello"}},
+		nil,
+		"gpt-4o",
+		map[string]any{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "refreshing token") {
+		t.Fatalf("Chat() error = %v, want refreshing token error", err)
+	}
+}
+
+func TestCodexProvider_ChatAPIFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":{"message":"bad model","type":"invalid_request_error","code":"model_not_found","param":"model"}}`)
+	}))
+	defer server.Close()
+
+	provider := NewCodexProvider("test-token", "acc-123")
+	provider.client = createOpenAITestClient(server.URL, "test-token", "acc-123")
+
+	_, err := provider.Chat(
+		t.Context(),
+		[]Message{{Role: "user", Content: "Hello"}},
+		nil,
+		"missing-model",
+		map[string]any{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "codex API call") {
+		t.Fatalf("Chat() error = %v, want codex API call error", err)
+	}
+}
+
 func TestCodexProvider_GetDefaultModel(t *testing.T) {
 	p := NewCodexProvider("test-token", "")
 	if got := p.GetDefaultModel(); got != codexDefaultModel {
 		t.Errorf("GetDefaultModel() = %q, want %q", got, codexDefaultModel)
+	}
+}
+
+func TestCodexProvider_SupportsNativeSearch(t *testing.T) {
+	p := NewCodexProvider("test-token", "")
+	if !p.SupportsNativeSearch() {
+		t.Fatal("SupportsNativeSearch() = false, want true")
 	}
 }
 
