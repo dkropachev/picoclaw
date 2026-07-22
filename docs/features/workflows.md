@@ -223,6 +223,9 @@ workflow trigger, run, job, and step lifecycle state.
   running run ID as soon as the persisted run record exists.
 - Dashboard manual runs and retries preserve failed HTTP run results and select
   the returned run ID so operators can inspect failed attempts.
+- Dashboard workflow list, run detail, event, graph, and reload views tolerate
+  persisted empty collections encoded as `null` by older run records or API
+  responses.
 - Publish requires the active draft to have a current successful draft-test
   result; backend publish still revalidates deterministically before writing
   the workflow file and compatibility stamp.

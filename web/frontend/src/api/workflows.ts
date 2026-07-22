@@ -198,15 +198,31 @@ export async function listWorkflows(): Promise<{
   workflows: WorkflowDefinition[]
   compatibility?: WorkflowCompatibilitySummary
 }> {
-  return request("/api/workflows")
+  const payload = await request<{
+    workflows?: WorkflowDefinition[] | null
+    compatibility?: WorkflowCompatibilitySummary | null
+  }>("/api/workflows")
+  return {
+    workflows: arrayOrEmpty(payload.workflows),
+    compatibility:
+      payload.compatibility == null
+        ? undefined
+        : normalizeWorkflowCompatibilitySummary(payload.compatibility),
+  }
 }
 
 export async function getWorkflowCompatibility(): Promise<WorkflowCompatibilitySummary> {
-  return request("/api/workflows/compatibility")
+  return normalizeWorkflowCompatibilitySummary(
+    await request<WorkflowCompatibilitySummary>("/api/workflows/compatibility"),
+  )
 }
 
 export async function revalidateWorkflows(): Promise<WorkflowCompatibilitySummary> {
-  return request("/api/workflows/revalidate", { method: "POST" })
+  return normalizeWorkflowCompatibilitySummary(
+    await request<WorkflowCompatibilitySummary>("/api/workflows/revalidate", {
+      method: "POST",
+    }),
+  )
 }
 
 export async function getWorkflowDevelopment(): Promise<{
@@ -329,7 +345,11 @@ export async function discardWorkflowDevelopment(): Promise<{
 }
 
 export async function reloadWorkflows(): Promise<WorkflowReloadResult> {
-  return request("/api/workflows/reload", { method: "POST" })
+  return normalizeWorkflowReloadResult(
+    await request<WorkflowReloadResult>("/api/workflows/reload", {
+      method: "POST",
+    }),
+  )
 }
 
 export async function runWorkflow(payload: {
@@ -376,17 +396,28 @@ async function workflowRunLaunchResultFromResponse(
 }
 
 export async function listWorkflowRuns(): Promise<{ runs: WorkflowRun[] }> {
-  return request("/api/workflows/runs")
+  const payload = await request<{ runs?: WorkflowRun[] | null }>(
+    "/api/workflows/runs",
+  )
+  return { runs: arrayOrEmpty(payload.runs).map(normalizeWorkflowRun) }
 }
 
 export async function getWorkflowRun(runID: string): Promise<WorkflowRun> {
-  return request(`/api/workflows/runs/${encodeURIComponent(runID)}`)
+  return normalizeWorkflowRun(
+    await request<WorkflowRun>(
+      `/api/workflows/runs/${encodeURIComponent(runID)}`,
+    ),
+  )
 }
 
 export async function getWorkflowRunEvents(
   runID: string,
 ): Promise<{ run_id: string; events: WorkflowRunEvent[] }> {
-  return request(`/api/workflows/runs/${encodeURIComponent(runID)}/events`)
+  const payload = await request<{
+    run_id: string
+    events?: WorkflowRunEvent[] | null
+  }>(`/api/workflows/runs/${encodeURIComponent(runID)}/events`)
+  return { ...payload, events: arrayOrEmpty(payload.events) }
 }
 
 export function workflowRunEventsStreamURL(runID: string): string {
@@ -396,7 +427,11 @@ export function workflowRunEventsStreamURL(runID: string): string {
 export async function getWorkflowRunGraph(
   runID: string,
 ): Promise<WorkflowRunGraph> {
-  return request(`/api/workflows/runs/${encodeURIComponent(runID)}/graph`)
+  return normalizeWorkflowRunGraph(
+    await request<WorkflowRunGraph>(
+      `/api/workflows/runs/${encodeURIComponent(runID)}/graph`,
+    ),
+  )
 }
 
 export async function cancelWorkflowRun(
@@ -423,4 +458,51 @@ export async function retryWorkflowRun(
     },
   )
   return workflowRunLaunchResultFromResponse(res)
+}
+
+function arrayOrEmpty<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : []
+}
+
+function recordOrEmpty<T>(
+  value: Record<string, T> | null | undefined,
+): Record<string, T> {
+  return value == null ? {} : value
+}
+
+function normalizeWorkflowCompatibilitySummary(
+  summary: WorkflowCompatibilitySummary,
+): WorkflowCompatibilitySummary {
+  return {
+    ...summary,
+    workflows: arrayOrEmpty(summary.workflows),
+    counts: recordOrEmpty(summary.counts),
+  }
+}
+
+function normalizeWorkflowReloadResult(
+  result: WorkflowReloadResult,
+): WorkflowReloadResult {
+  return {
+    ...result,
+    workflows: arrayOrEmpty(result.workflows),
+    errors: arrayOrEmpty(result.errors),
+  }
+}
+
+function normalizeWorkflowRun(run: WorkflowRun): WorkflowRun {
+  return {
+    ...run,
+    child_run_ids: arrayOrEmpty(run.child_run_ids),
+    jobs: recordOrEmpty(run.jobs),
+    steps: recordOrEmpty(run.steps),
+  }
+}
+
+function normalizeWorkflowRunGraph(graph: WorkflowRunGraph): WorkflowRunGraph {
+  return {
+    ...graph,
+    nodes: arrayOrEmpty(graph.nodes),
+    edges: arrayOrEmpty(graph.edges),
+  }
 }
