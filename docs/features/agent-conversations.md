@@ -111,6 +111,9 @@ and security policies can alter the visible tool set or execution outcome.
 Runtime events report each major step. Threads can contribute a policy prompt
 that lets the main chat become or join a thread only after configured routing
 thresholds are satisfied.
+Workflow agent steps reuse this same turn execution path, including session
+history modes, provider prompt cache keys, tool iteration limits, and final
+message persistence.
 
 ## Failure And Edge Cases
 

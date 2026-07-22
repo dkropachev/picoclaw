@@ -1959,13 +1959,14 @@ func TestRunAgentLoop_ResponseHandledToolPublishesForUserWhenSendResponseDisable
 				Channel:    "telegram",
 				Dimensions: []string{"chat"},
 				Values: map[string]string{
-					"chat": "direct:chat1",
+					"chat": "forum:chat1/42",
 				},
 			},
 			InboundContext: &bus.InboundContext{
 				Channel:  "telegram",
 				ChatID:   "chat1",
-				ChatType: "direct",
+				TopicID:  "42",
+				ChatType: "group",
 				SenderID: "user1",
 			},
 		},
@@ -1990,6 +1991,9 @@ func TestRunAgentLoop_ResponseHandledToolPublishesForUserWhenSendResponseDisable
 	if telegramChannel.sentMessages[0].Content != "Handled user output from tool." {
 		t.Fatalf("unexpected sent text message: %+v", telegramChannel.sentMessages[0])
 	}
+	if telegramChannel.sentMessages[0].Context.TopicID != "42" {
+		t.Fatalf("sent text topic_id = %q, want 42", telegramChannel.sentMessages[0].Context.TopicID)
+	}
 	if telegramChannel.sentMessages[0].AgentID != defaultAgent.ID {
 		t.Fatalf("sent text agent_id = %q, want %q", telegramChannel.sentMessages[0].AgentID, defaultAgent.ID)
 	}
@@ -1997,7 +2001,7 @@ func TestRunAgentLoop_ResponseHandledToolPublishesForUserWhenSendResponseDisable
 		t.Fatalf("sent text session_key = %q, want session-1", telegramChannel.sentMessages[0].SessionKey)
 	}
 	if telegramChannel.sentMessages[0].Scope == nil ||
-		telegramChannel.sentMessages[0].Scope.Values["chat"] != "direct:chat1" {
+		telegramChannel.sentMessages[0].Scope.Values["chat"] != "forum:chat1/42" {
 		t.Fatalf("unexpected sent text scope: %+v", telegramChannel.sentMessages[0].Scope)
 	}
 }

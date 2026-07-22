@@ -29,6 +29,7 @@ import (
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/skills"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/status"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/version"
+	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/workflow"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/updater"
 )
@@ -135,6 +136,7 @@ picoclaw --no-color status`,
 		gateway.NewGatewayCommand(),
 		status.NewStatusCommand(),
 		cron.NewCronCommand(),
+		workflow.NewWorkflowCommand(),
 		mcp.NewMCPCommand(),
 		migrate.NewMigrateCommand(),
 		skills.NewSkillsCommand(),

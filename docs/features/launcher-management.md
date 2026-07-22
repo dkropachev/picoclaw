@@ -146,6 +146,9 @@ feeds agent conversations. Gateway endpoints control chat-channel runtime.
 Session endpoints are owned by session memory. Thread endpoints and
 thread-specific UI are owned by threads, while launcher management still owns
 shared authenticated dashboard layout and routing shell components.
+Workflow HTTP endpoints and dashboard routes are exposed through the launcher
+router and shared shell, while workflow definition, run, graph, cancel, retry,
+and event semantics remain owned by the workflows feature.
 
 ## Failure And Edge Cases
 
