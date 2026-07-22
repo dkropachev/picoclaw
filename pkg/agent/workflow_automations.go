@@ -105,7 +105,8 @@ func (al *AgentLoop) loadScheduledWorkflowRuns(
 	now time.Time,
 	existing map[string]scheduledWorkflowRun,
 ) (map[string]scheduledWorkflowRun, error) {
-	defs, err := workflows.ListLocal(ctx, workspace)
+	localOpts := []workflows.LocalOption{workflows.WithDefinitionsDir(workflowDefinitionsDir(al))}
+	defs, err := workflows.ListLocal(ctx, workspace, localOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +115,21 @@ func (al *AgentLoop) loadScheduledWorkflowRuns(
 		if def.Error != "" {
 			continue
 		}
-		workflow, err := workflows.LoadLocal(ctx, workspace, def.Ref)
+		if err := workflows.EnsureWorkflowRunnable(
+			ctx,
+			workspace,
+			def.Ref,
+			workflowRuntimeCompatibility(),
+			localOpts...,
+		); err != nil {
+			logger.WarnCF(
+				"workflow",
+				"Scheduled workflow skipped until revalidated",
+				map[string]any{"ref": def.Ref, "error": err.Error()},
+			)
+			continue
+		}
+		workflow, err := workflows.LoadLocal(ctx, workspace, def.Ref, localOpts...)
 		if err != nil {
 			logger.WarnCF(
 				"workflow",
@@ -222,7 +237,8 @@ func (al *AgentLoop) handleWorkflowRuntimeEvent(ctx context.Context, evt runtime
 	if defaultAgent == nil {
 		return
 	}
-	defs, err := workflows.ListLocal(ctx, workspace)
+	localOpts := []workflows.LocalOption{workflows.WithDefinitionsDir(workflowDefinitionsDir(al))}
+	defs, err := workflows.ListLocal(ctx, workspace, localOpts...)
 	if err != nil {
 		logger.WarnCF("workflow", "Failed to list runtime-event workflows", map[string]any{"error": err.Error()})
 		return
@@ -231,7 +247,21 @@ func (al *AgentLoop) handleWorkflowRuntimeEvent(ctx context.Context, evt runtime
 		if def.Error != "" {
 			continue
 		}
-		workflow, err := workflows.LoadLocal(ctx, workspace, def.Ref)
+		if err := workflows.EnsureWorkflowRunnable(
+			ctx,
+			workspace,
+			def.Ref,
+			workflowRuntimeCompatibility(),
+			localOpts...,
+		); err != nil {
+			logger.WarnCF(
+				"workflow",
+				"Runtime-event workflow skipped until revalidated",
+				map[string]any{"ref": def.Ref, "error": err.Error()},
+			)
+			continue
+		}
+		workflow, err := workflows.LoadLocal(ctx, workspace, def.Ref, localOpts...)
 		if err != nil {
 			logger.WarnCF(
 				"workflow",

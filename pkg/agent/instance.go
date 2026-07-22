@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/isolation"
@@ -59,6 +60,41 @@ type AgentInstance struct {
 	// instances. This allows each fallback model to use its own api_base and api_key
 	// from model_list, instead of inheriting the primary model's provider config.
 	CandidateProviders map[string]providers.LLMProvider
+
+	managedCalibrationCache map[string]workflowManagedCalibrationCacheEntry
+}
+
+var (
+	agentCandidateProvidersMu      sync.RWMutex
+	agentManagedCalibrationCacheMu sync.Mutex
+)
+
+func (a *AgentInstance) candidateProvider(key string) providers.LLMProvider {
+	if a == nil || strings.TrimSpace(key) == "" {
+		return nil
+	}
+	agentCandidateProvidersMu.RLock()
+	defer agentCandidateProvidersMu.RUnlock()
+	if a.CandidateProviders == nil {
+		return nil
+	}
+	return a.CandidateProviders[key]
+}
+
+func (a *AgentInstance) setCandidateProviderIfAbsent(key string, provider providers.LLMProvider) bool {
+	if a == nil || strings.TrimSpace(key) == "" || provider == nil {
+		return false
+	}
+	agentCandidateProvidersMu.Lock()
+	defer agentCandidateProvidersMu.Unlock()
+	if a.CandidateProviders == nil {
+		a.CandidateProviders = make(map[string]providers.LLMProvider)
+	}
+	if a.CandidateProviders[key] != nil {
+		return false
+	}
+	a.CandidateProviders[key] = provider
+	return true
 }
 
 // NewAgentInstance creates an agent instance from config.
@@ -291,6 +327,7 @@ func NewAgentInstance(
 		LightCandidates:           lightCandidates,
 		LightProvider:             lightProvider,
 		CandidateProviders:        candidateProviders,
+		managedCalibrationCache:   make(map[string]workflowManagedCalibrationCacheEntry),
 	}
 }
 

@@ -84,6 +84,7 @@ func (p *Pipeline) CallLLM(
 	}
 	applyTurnThinkingOptions(exec, ts.agent, exec.activeProvider, true)
 	applyReasoningEffortOption(exec.llmOpts, exec.activeModelConfig)
+	applyReasoningEffortOverride(exec.llmOpts, ts.opts.ReasoningEffortOverride)
 
 	exec.llmModel = exec.activeModel
 
@@ -207,6 +208,7 @@ func (p *Pipeline) CallLLM(
 			candidateThinking := thinkingSettingsFromModelConfig(candidateCfg)
 			applyThinkingOption(callOpts, candidateProvider, candidateThinking, true, ts.agent.ID)
 			applyReasoningEffortOption(callOpts, candidateCfg)
+			applyReasoningEffortOverride(callOpts, ts.opts.ReasoningEffortOverride)
 			exec.suppressReasoning = shouldSuppressReasoningFor(candidateThinking)
 			return candidateProvider.Chat(ctx, messagesForCall, toolDefsForCall, candidate.Model, callOpts)
 		}
@@ -713,7 +715,7 @@ func providerForFallbackCandidate(
 	model string,
 ) (providers.LLMProvider, error) {
 	if agent != nil {
-		if cp, ok := agent.CandidateProviders[providers.ModelKey(provider, model)]; ok && cp != nil {
+		if cp := agent.candidateProvider(providers.ModelKey(provider, model)); cp != nil {
 			return cp, nil
 		}
 	}

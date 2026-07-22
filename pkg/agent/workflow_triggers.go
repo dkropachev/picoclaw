@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -19,7 +20,9 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 		return false
 	}
 	workspace := al.cfg.WorkspacePath()
-	defs, err := workflows.ListLocal(ctx, workspace)
+	definitionsDir := workflowDefinitionsDir(al)
+	localOpts := []workflows.LocalOption{workflows.WithDefinitionsDir(definitionsDir)}
+	defs, err := workflows.ListLocal(ctx, workspace, localOpts...)
 	if err != nil {
 		logger.WarnCF("workflow", "Failed to list workflows", map[string]any{"error": err.Error()})
 		return false
@@ -37,7 +40,21 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 		if def.Error != "" {
 			continue
 		}
-		workflow, err := workflows.LoadLocal(ctx, workspace, def.Ref)
+		if err := workflows.EnsureWorkflowRunnable(
+			ctx,
+			workspace,
+			def.Ref,
+			workflowRuntimeCompatibility(),
+			localOpts...,
+		); err != nil {
+			logger.WarnCF(
+				"workflow",
+				"Workflow skipped until revalidated",
+				map[string]any{"ref": def.Ref, "error": err.Error()},
+			)
+			continue
+		}
+		workflow, err := workflows.LoadLocal(ctx, workspace, def.Ref, localOpts...)
 		if err != nil {
 			logger.WarnCF("workflow", "Failed to load workflow", map[string]any{"ref": def.Ref, "error": err.Error()})
 			continue
@@ -93,11 +110,22 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 	return consume
 }
 
+func workflowRuntimeCompatibility() workflows.RuntimeCompatibility {
+	return workflows.NormalizeRuntimeCompatibility(workflows.RuntimeCompatibility{
+		PicoclawVersion: config.GetVersion(),
+		GitCommit:       config.GitCommit,
+	})
+}
+
 func (al *AgentLoop) newWorkflowExecutor(workspace string, defaultAgent *AgentInstance) *workflows.Executor {
+	definitionsDir := workflowDefinitionsDir(al)
 	executor := &workflows.Executor{
-		WorkspaceDir: workspace,
-		Store:        workflows.NewFileRunStore(workspace),
-		Agents:       &workflowAgentRunner{loop: al},
+		WorkspaceDir:         workspace,
+		DefinitionsDir:       definitionsDir,
+		Store:                workflows.NewFileRunStore(workspace),
+		Agents:               &workflowAgentRunner{loop: al},
+		RuntimeEvents:        al.runtimeEvents,
+		RuntimeCompatibility: workflowRuntimeCompatibility(),
 	}
 	if al != nil && al.cfg != nil {
 		executor.MaxCallDepth = al.cfg.Workflows.EffectiveMaxCallDepth()

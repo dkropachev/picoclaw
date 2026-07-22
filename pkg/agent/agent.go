@@ -103,11 +103,14 @@ type processOptions struct {
 	InitialSteeringMessages []providers.Message    // Steering messages from refactor/agent
 	DefaultResponse         string                 // Response when LLM returns empty
 	PromptCacheKey          string                 // Optional provider prompt cache key override
+	ModelNameOverride       string                 // Optional model alias/ref override for this isolated turn
+	ReasoningEffortOverride string                 // Optional reasoning_effort override for this isolated turn
 	EnableSummary           bool                   // Whether to trigger summarization
 	SendResponse            bool                   // Whether to send response via bus
 	AllowInterimPicoPublish bool                   // Whether pico tool-call interim text can be published when SendResponse is false
 	SuppressToolFeedback    bool                   // Whether to suppress inline tool feedback messages
 	NoHistory               bool                   // If true, don't load session history (for heartbeat)
+	DisableTools            bool                   // If true, no provider or runtime tools are callable this turn
 	DisablePromptCache      bool                   // If true, omit provider prompt cache key
 	SkipInitialSteeringPoll bool                   // If true, skip the steering poll at loop start (used by Continue)
 	InboundContext          *bus.InboundContext    // Normalized inbound facts for events/hooks

@@ -65,6 +65,7 @@ need helper scripts for durable planning and reporting.
 | `FR-WORKFLOW-018` | MUST | Workflow compatibility stamps record the PicoClaw version, git commit, workflow engine version, schema version, validator fingerprint, workflow hash, validation status, and issues; version or hash changes mark workflows pending revalidation and block automatic/manual execution until revalidated. | Releases can invalidate workflow semantics, so existing automation must fail closed until checked. |
 | `FR-WORKFLOW-019` | MUST | HTTP-triggered workflow runs and draft test runs execute `agent/*`, `tool/*`, and `mcp/*` steps through the configured PicoClaw agent/tool runtime and persist step outputs in normal run records. | AI-authored workflows must be testable from the dashboard before publish. |
 | `FR-WORKFLOW-020` | MUST | Native workflow functions expose workflow-scoped durable state, workflow run artifacts, and git commit inventory through `function/workflow.state`, `function/workflow.artifact`, and `function/git.inventory`. | AI-authored workflows need common state, artifact, and repository-inspection primitives without opaque helper scripts or domain-specific helpers in core. |
+| `FR-WORKFLOW-021` | MUST | Agent workflow steps integrate with the dedicated [Managed Agent Execution](managed-agent-execution.md) contract: `with.output` declares structured JSON output, `with.managed` enables generic hidden scope/task/hybrid splitting, and the visible workflow step persists the combined structured result plus managed diagnostics. | AI-driven workflow development needs generic, inspectable agent adaptation that preserves output quality while reducing token and model spend. |
 
 ## Data And State Model
 
@@ -107,6 +108,7 @@ stores the memory key used by agent steps.
 | CLI | `picoclaw workflow list/compatibility/revalidate/validate/reload/run/cancel/retry/status/events/graph` | Manage definitions, compatibility stamps, and runs through the same workflow runtime and file run store used by agent tools. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-018` |
 | HTTP | `/api/workflows*`, `/api/workflows/runs*`, `/api/workflows/development*`, `/api/workflows/compatibility`, `/api/workflows/revalidate` | List, validate, reload, run, cancel, retry, inspect, stream workflow events, read run graph data, manage the singleton development session, run configured-agent YAML revisions, test active drafts inline or asynchronously after a run record is persisted, reject draft-changing development mutations while the current draft test is still running, execute configured agent/tool/MCP workflow steps synchronously or asynchronously, publish drafts, and revalidate release compatibility. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-017`, `FR-WORKFLOW-018`, `FR-WORKFLOW-019` |
 | UI | `/agent/workflows` | Two-mode workflow console: Develop shows singleton start readiness, starts new briefs with AI by default, resumes the singleton AI brief/YAML development cycle, marks the one active draft, sends active drafts to the configured agent for YAML revision, offers deterministic scaffold fallback, validates and test-runs drafts asynchronously with inline JSON validation for inputs/secrets/session/delivery context through configured workflow runtime steps, preserves structured validation feedback from failed draft tests, can ask AI to repair the current draft with the latest failed draft-test status, run ID, compact run/job/step state, recent event payloads, and error context, restores the latest draft-test result when resuming the active session, treats a running draft test as the active development operation, gates publish on a current successful draft test, shows publish readiness with the next blocking reason, shows the active development operation while mutations run, opens the repair/review queue with compatibility issue summaries, can start AI review or AI repair directly from blocked compatibility entries, and after publish switches Operate to the published workflow; Operate shows definitions, compatibility status, compatibility-gated asynchronous manual run launch with inline JSON validation for inputs/secrets/session/delivery context, the selected workflow run-readiness reason, runs, selected run detail, persisted delivery and trigger event context, job and step outputs, live streamed event payloads with polling fallback, graph, cancel, compatibility-gated retry with retry-secret JSON validation, reload, and refresh. | `FR-WORKFLOW-015`, `FR-WORKFLOW-017`, `FR-WORKFLOW-018`, `FR-WORKFLOW-019` |
+| Managed agent step | `uses: agent/*` with `with.output`, `with.managed`, and optional `with.scope` | Workflow-owned output schemas are injected into the agent prompt, parsed from the response, repaired once by default, validated locally, and exposed as `structured`. Managed options choose split strategy, fixed or token-adaptive chunk sizes, calibration sample/match/cache policy, parallel child limit, model candidates with price metadata, and effort optimization. Child runs are hidden from chat history by default and publish one combined structured result plus `managed` diagnostics. | `FR-WORKFLOW-007`, `FR-WORKFLOW-009`, `FR-WORKFLOW-019`, `FR-WORKFLOW-021` |
 | Tool | `workflow` | Agent-callable list, compatibility, revalidate, validate, reload, run, cancel, retry, status, graph, events, `dev_status`, `dev_start`, `dev_revise`, `dev_validate`, `dev_test`, `dev_publish`, and `dev_discard` actions. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-017`, `FR-WORKFLOW-018` |
 | Native functions | `function/workflow.state`, `function/workflow.artifact`, `function/git.inventory` | Store/retrieve workflow-owned JSON state, write/read/list run artifacts, and inventory git files by commit and blob hash inside the workspace. `git.inventory` can include capped UTF-8 file content for selected files when `include_content`/`includeContent` is enabled, using `max_content_bytes`/`maxContentBytes` as the per-file cap. Domain workflows compose these primitives for planning, reports, and reuse decisions. | `FR-WORKFLOW-020` |
 | Events | `workflow.*` | Trigger, run, job, and step lifecycle events. | `FR-WORKFLOW-008`, `FR-WORKFLOW-009`, `FR-WORKFLOW-011`, `FR-WORKFLOW-015` |
@@ -130,16 +132,23 @@ stores the memory key used by agent steps.
    and expose child outputs through `needs.<job>.outputs`.
 7. Execute step-level tools, agents, MCP tools, and Go functions with existing
    PicoClaw policies, hooks, redaction, and channel delivery.
-8. Check cancellation between jobs/steps, enforce per-run timeout and top-level
+8. For managed agent steps, build child plans from declared scope items and
+   textual agent `Tasks:`, calibrate grouped-vs-split output equivalence with
+   a split-exercising sample, exact/similar trust cache, provisional borrowed
+   verification, and split-fit-aware cadence, execute child plans in bounded
+   parallel hidden runs, validate/repair structured child output, combine
+   structured data, and persist model, effort, token, cost, split, and
+   calibration metadata beside the visible step output.
+9. Check cancellation between jobs/steps, enforce per-run timeout and top-level
    concurrency, and persist terminal status with cancel/error metadata.
-9. Persist run and event state with embedded job and step snapshots before and
+10. Persist run and event state with embedded job and step snapshots before and
    after side effects.
-10. Native workflow functions resolve all state, artifact, and git paths inside
+11. Native workflow functions resolve all state, artifact, and git paths inside
     the workspace; git inventory uses commit blob hashes, can attach capped
     selected-file content for review workflows, and domain workflows compose
     inventory with workflow-owned state and artifacts for their own planning,
     reports, and reuse decisions.
-11. For development, create `workflow_dev/active.json` only when no active
+12. For development, create `workflow_dev/active.json` only when no active
     session exists, use the configured agent as the default first draft path,
     revise the active draft locally or through the configured agent with
     existing workflow refs plus registered agent/tool target context, extract
@@ -147,7 +156,7 @@ stores the memory key used by agent steps.
     inline with persisted run records, publish by atomically writing
     `workspace/workflows/<file>.yml`, revalidate the catalog, archive the
     session, and remove the active marker.
-12. For release revalidation, compare the current PicoClaw runtime identity and
+13. For release revalidation, compare the current PicoClaw runtime identity and
     workflow hash with `workflow_validations/manifest.json`, classify stale
     workflows as pending, run deterministic validation on demand, and block
     stale or invalid workflow execution.
@@ -225,6 +234,23 @@ workflow trigger, run, job, and step lifecycle state.
   require an embedding runtime with a Go `FunctionRunner`.
 - Native git functions reject repositories outside the workspace and require a
   local git repository.
+- Managed agent steps require a structured output contract before splitting;
+  without one they run as a single normal agent call so child results cannot be
+  combined ambiguously.
+- Managed split calibration falls back to a single full agent run when grouped
+  and split structured outputs do not match the required number of times.
+  Passing calibrations can be reused by an agent-local cache keyed by the model,
+  language, repository/scope identity, schema, prompt, tasks, strategy, and
+  chunking shape. Exact hits follow the stored cadence; similar hits create a
+  provisional new-key cache entry, reuse once, verify on the next matching use,
+  and either promote with inherited confidence or reset as fresh. Low split-fit
+  scores keep probes more aggressive even after success.
+- Managed task splitting uses textual `Tasks:` entries from the agent file as
+  semantic responsibilities; it does not treat them as workflow DAG steps.
+- Managed model optimization only replaces the model when configured candidate
+  price metadata or model config price metadata identifies a lower estimated
+  child-run cost. Subscription-backed models may point at an equivalent
+  API-priced model for estimates.
 - Workflows without a current compatible validation stamp do not run from the
   dashboard, CLI, workflow tool, retries, or automatic triggers.
 
@@ -234,12 +260,13 @@ workflow trigger, run, job, and step lifecycle state.
 | --- | --- |
 | `FR-WORKFLOW-001` | [pkg/workflows/resolver_test.go](../../pkg/workflows/resolver_test.go), [pkg/workflows/resolver.go](../../pkg/workflows/resolver.go) |
 | `FR-WORKFLOW-002`, `FR-WORKFLOW-003`, `FR-WORKFLOW-004`, `FR-WORKFLOW-005`, `FR-WORKFLOW-007`, `FR-WORKFLOW-014` | [pkg/workflows/validator_test.go](../../pkg/workflows/validator_test.go), [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/workflows/types.go](../../pkg/workflows/types.go), [pkg/workflows/validator.go](../../pkg/workflows/validator.go), [pkg/workflows/executor.go](../../pkg/workflows/executor.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go) |
-| `FR-WORKFLOW-006`, `FR-WORKFLOW-008`, `FR-WORKFLOW-011` | [pkg/workflows/catalog_trigger_test.go](../../pkg/workflows/catalog_trigger_test.go), [pkg/workflows/trigger.go](../../pkg/workflows/trigger.go), [pkg/workflows/runtime_trigger.go](../../pkg/workflows/runtime_trigger.go), [pkg/agent/workflow_triggers.go](../../pkg/agent/workflow_triggers.go), [pkg/agent/workflow_automations.go](../../pkg/agent/workflow_automations.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go) |
+| `FR-WORKFLOW-006`, `FR-WORKFLOW-008`, `FR-WORKFLOW-011` | [pkg/workflows/catalog_trigger_test.go](../../pkg/workflows/catalog_trigger_test.go), [pkg/workflows/trigger.go](../../pkg/workflows/trigger.go), [pkg/workflows/runtime_trigger.go](../../pkg/workflows/runtime_trigger.go), [pkg/agent/workflow_triggers.go](../../pkg/agent/workflow_triggers.go), [pkg/agent/workflow_automations.go](../../pkg/agent/workflow_automations.go), [pkg/agent/workflow_automations_test.go](../../pkg/agent/workflow_automations_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go) |
 | `FR-WORKFLOW-009`, `FR-WORKFLOW-012`, `FR-WORKFLOW-013` | [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go), [pkg/workflows/store.go](../../pkg/workflows/store.go), [pkg/workflows/executor.go](../../pkg/workflows/executor.go), [pkg/config/config_test.go](../../pkg/config/config_test.go) |
 | `FR-WORKFLOW-010`, `FR-WORKFLOW-015` | [cmd/picoclaw/internal/workflow](../../cmd/picoclaw/internal/workflow), [cmd/picoclaw/internal/workflow/command_test.go](../../cmd/picoclaw/internal/workflow/command_test.go), [web/backend/api/workflows.go](../../web/backend/api/workflows.go), [web/frontend/src/api/workflows.ts](../../web/frontend/src/api/workflows.ts), [web/frontend/src/components/workflows/workflows-page.tsx](../../web/frontend/src/components/workflows/workflows-page.tsx), [pkg/tools/workflow.go](../../pkg/tools/workflow.go), [pkg/tools/workflow_test.go](../../pkg/tools/workflow_test.go), [cmd/picoclaw/main_test.go](../../cmd/picoclaw/main_test.go) |
 | `FR-WORKFLOW-016` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/tools/fs/send_file_test.go](../../pkg/tools/fs/send_file_test.go) |
 | `FR-WORKFLOW-017`, `FR-WORKFLOW-018`, `FR-WORKFLOW-019` | [pkg/workflows/development.go](../../pkg/workflows/development.go), [pkg/workflows/compatibility.go](../../pkg/workflows/compatibility.go), [web/backend/api/workflows.go](../../web/backend/api/workflows.go), [web/backend/api/workflow_ai.go](../../web/backend/api/workflow_ai.go), [web/backend/api/workflow_runtime.go](../../web/backend/api/workflow_runtime.go), [web/backend/api/workflow_ai_test.go](../../web/backend/api/workflow_ai_test.go), [web/frontend/src/api/workflows.ts](../../web/frontend/src/api/workflows.ts), [web/frontend/src/components/workflows/workflows-page.tsx](../../web/frontend/src/components/workflows/workflows-page.tsx), [pkg/tools/workflow.go](../../pkg/tools/workflow.go), [pkg/tools/workflow_test.go](../../pkg/tools/workflow_test.go), [pkg/agent/workflow_triggers.go](../../pkg/agent/workflow_triggers.go) |
 | `FR-WORKFLOW-020` | [pkg/workflows/native_functions.go](../../pkg/workflows/native_functions.go), [pkg/workflows/native_functions_test.go](../../pkg/workflows/native_functions_test.go), [pkg/workflows/executor.go](../../pkg/workflows/executor.go), [web/backend/api/workflow_ai.go](../../web/backend/api/workflow_ai.go) |
+| `FR-WORKFLOW-021` | [docs/features/managed-agent-execution.md](managed-agent-execution.md), [pkg/workflows/agent_output.go](../../pkg/workflows/agent_output.go), [pkg/workflows/agent_output_test.go](../../pkg/workflows/agent_output_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [web/frontend/src/components/workflows/workflows-page.tsx](../../web/frontend/src/components/workflows/workflows-page.tsx) |
 
 ## Implementation Anchors
 
@@ -257,6 +284,7 @@ workflow trigger, run, job, and step lifecycle state.
 - [pkg/workflows/reload.go](../../pkg/workflows/reload.go)
 - [pkg/tools/workflow.go](../../pkg/tools/workflow.go)
 - [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go)
+- [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go)
 - [pkg/agent/workflow_triggers.go](../../pkg/agent/workflow_triggers.go)
 - [pkg/agent/workflow_automations.go](../../pkg/agent/workflow_automations.go)
 - [web/backend/api/workflow_ai.go](../../web/backend/api/workflow_ai.go)
