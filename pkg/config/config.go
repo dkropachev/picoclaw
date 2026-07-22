@@ -846,15 +846,19 @@ type ModelConfig struct {
 	Workspace    string `json:"workspace,omitempty"`     // Workspace path for CLI-based providers
 
 	// Optional optimizations
-	RPM                 int                  `json:"rpm,omitempty"`              // Requests per minute limit
-	MaxTokensField      string               `json:"max_tokens_field,omitempty"` // Field name for max tokens (e.g., "max_completion_tokens")
-	RequestTimeout      int                  `json:"request_timeout,omitempty"`
-	ThinkingLevel       string               `json:"thinking_level,omitempty"`        // Extended thinking: off|low|medium|high|xhigh|adaptive
-	ReasoningEffort     string               `json:"reasoning_effort,omitempty"`      // OpenAI-style reasoning effort: none|minimal|low|medium|high|xhigh
-	ToolSchemaTransform string               `json:"tool_schema_transform,omitempty"` // Optional tool schema compatibility transform (e.g. "simple")
-	Streaming           ModelStreamingConfig `json:"streaming,omitzero"`              // Opt-in for provider streaming on this model entry
-	ExtraBody           map[string]any       `json:"extra_body,omitempty"`            // Additional fields to inject into request body
-	CustomHeaders       map[string]string    `json:"custom_headers,omitempty"`        // Additional headers to inject into every HTTP request
+	RPM                         int                  `json:"rpm,omitempty"`              // Requests per minute limit
+	MaxTokensField              string               `json:"max_tokens_field,omitempty"` // Field name for max tokens (e.g., "max_completion_tokens")
+	RequestTimeout              int                  `json:"request_timeout,omitempty"`
+	ThinkingLevel               string               `json:"thinking_level,omitempty"`                // Extended thinking: off|low|medium|high|xhigh|adaptive
+	ReasoningEffort             string               `json:"reasoning_effort,omitempty"`              // OpenAI-style reasoning effort: none|minimal|low|medium|high|xhigh
+	InputPricePerMTok           float64              `json:"input_price_per_1m,omitempty"`            // Estimated input-token price in USD per 1M tokens
+	OutputPricePerMTok          float64              `json:"output_price_per_1m,omitempty"`           // Estimated output-token price in USD per 1M tokens
+	Subscription                bool                 `json:"subscription,omitempty"`                  // True when access is subscription-backed rather than direct metered API
+	SubscriptionEquivalentModel string               `json:"subscription_equivalent_model,omitempty"` // API-priced equivalent model for subscription cost estimates
+	ToolSchemaTransform         string               `json:"tool_schema_transform,omitempty"`         // Optional tool schema compatibility transform (e.g. "simple")
+	Streaming                   ModelStreamingConfig `json:"streaming,omitzero"`                      // Opt-in for provider streaming on this model entry
+	ExtraBody                   map[string]any       `json:"extra_body,omitempty"`                    // Additional fields to inject into request body
+	CustomHeaders               map[string]string    `json:"custom_headers,omitempty"`                // Additional headers to inject into every HTTP request
 
 	APIKeys SecureStrings `json:"api_keys,omitzero" yaml:"api_keys,omitempty"` // API authentication keys (multiple keys for failover)
 
@@ -2017,27 +2021,31 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 
 			// Create a copy for the additional key
 			additionalEntry := &ModelConfig{
-				ModelName:           expandedName,
-				Provider:            m.Provider,
-				Model:               m.Model,
-				APIBase:             m.APIBase,
-				APIKeys:             SimpleSecureStrings(keys[i]),
-				Proxy:               m.Proxy,
-				AuthMethod:          m.AuthMethod,
-				CredentialID:        m.CredentialID,
-				ConnectMode:         m.ConnectMode,
-				Workspace:           m.Workspace,
-				RPM:                 m.RPM,
-				MaxTokensField:      m.MaxTokensField,
-				RequestTimeout:      m.RequestTimeout,
-				ThinkingLevel:       m.ThinkingLevel,
-				ReasoningEffort:     m.ReasoningEffort,
-				ToolSchemaTransform: m.ToolSchemaTransform,
-				Streaming:           m.Streaming,
-				ExtraBody:           m.ExtraBody,
-				CustomHeaders:       m.CustomHeaders,
-				UserAgent:           m.UserAgent,
-				isVirtual:           true,
+				ModelName:                   expandedName,
+				Provider:                    m.Provider,
+				Model:                       m.Model,
+				APIBase:                     m.APIBase,
+				APIKeys:                     SimpleSecureStrings(keys[i]),
+				Proxy:                       m.Proxy,
+				AuthMethod:                  m.AuthMethod,
+				CredentialID:                m.CredentialID,
+				ConnectMode:                 m.ConnectMode,
+				Workspace:                   m.Workspace,
+				RPM:                         m.RPM,
+				MaxTokensField:              m.MaxTokensField,
+				RequestTimeout:              m.RequestTimeout,
+				ThinkingLevel:               m.ThinkingLevel,
+				ReasoningEffort:             m.ReasoningEffort,
+				InputPricePerMTok:           m.InputPricePerMTok,
+				OutputPricePerMTok:          m.OutputPricePerMTok,
+				Subscription:                m.Subscription,
+				SubscriptionEquivalentModel: m.SubscriptionEquivalentModel,
+				ToolSchemaTransform:         m.ToolSchemaTransform,
+				Streaming:                   m.Streaming,
+				ExtraBody:                   m.ExtraBody,
+				CustomHeaders:               m.CustomHeaders,
+				UserAgent:                   m.UserAgent,
+				isVirtual:                   true,
 			}
 			expanded = append(expanded, additionalEntry)
 			fallbackNames = append(fallbackNames, expandedName)
@@ -2045,26 +2053,30 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 
 		// Create the primary entry with first key and fallbacks
 		primaryEntry := &ModelConfig{
-			ModelName:           originalName,
-			Provider:            m.Provider,
-			Model:               m.Model,
-			APIBase:             m.APIBase,
-			Proxy:               m.Proxy,
-			AuthMethod:          m.AuthMethod,
-			CredentialID:        m.CredentialID,
-			ConnectMode:         m.ConnectMode,
-			Workspace:           m.Workspace,
-			RPM:                 m.RPM,
-			MaxTokensField:      m.MaxTokensField,
-			RequestTimeout:      m.RequestTimeout,
-			ThinkingLevel:       m.ThinkingLevel,
-			ReasoningEffort:     m.ReasoningEffort,
-			ToolSchemaTransform: m.ToolSchemaTransform,
-			Streaming:           m.Streaming,
-			ExtraBody:           m.ExtraBody,
-			CustomHeaders:       m.CustomHeaders,
-			UserAgent:           m.UserAgent,
-			APIKeys:             SimpleSecureStrings(keys[0]),
+			ModelName:                   originalName,
+			Provider:                    m.Provider,
+			Model:                       m.Model,
+			APIBase:                     m.APIBase,
+			Proxy:                       m.Proxy,
+			AuthMethod:                  m.AuthMethod,
+			CredentialID:                m.CredentialID,
+			ConnectMode:                 m.ConnectMode,
+			Workspace:                   m.Workspace,
+			RPM:                         m.RPM,
+			MaxTokensField:              m.MaxTokensField,
+			RequestTimeout:              m.RequestTimeout,
+			ThinkingLevel:               m.ThinkingLevel,
+			ReasoningEffort:             m.ReasoningEffort,
+			InputPricePerMTok:           m.InputPricePerMTok,
+			OutputPricePerMTok:          m.OutputPricePerMTok,
+			Subscription:                m.Subscription,
+			SubscriptionEquivalentModel: m.SubscriptionEquivalentModel,
+			ToolSchemaTransform:         m.ToolSchemaTransform,
+			Streaming:                   m.Streaming,
+			ExtraBody:                   m.ExtraBody,
+			CustomHeaders:               m.CustomHeaders,
+			UserAgent:                   m.UserAgent,
+			APIKeys:                     SimpleSecureStrings(keys[0]),
 		}
 
 		// Prepend new fallbacks to existing ones

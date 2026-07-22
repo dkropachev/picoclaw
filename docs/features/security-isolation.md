@@ -108,7 +108,9 @@ the threads feature.
 Workflow configuration, including definitions-directory defaulting and other
 effective-value helpers, workflow tools, and workflow steps reuse the same config
 validation, secret filtering, HTTP guard, and isolation policies instead of
-introducing separate security controls.
+introducing separate security controls. Model price and subscription metadata
+remain non-secret config values while model credentials continue to use secure
+string preservation.
 
 ## Failure And Edge Cases
 

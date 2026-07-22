@@ -6,6 +6,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -137,6 +138,11 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 		activeModelName = strings.TrimSpace(sideQuestionModelName(ts.agent, true))
 	}
 	activeModelName = resolvedCandidateModelName(activeCandidates, activeModelName)
+	if override := strings.TrimSpace(ts.opts.ModelNameOverride); override != "" {
+		activeCandidates, activeModel, activeModelName = workflowOverrideModelCandidates(p.Cfg, ts.agent, override)
+		activeProvider = workflowProviderForCandidates(ts.agent, activeProvider, activeCandidates)
+		usedLight = false
+	}
 
 	exec := newTurnExecution(
 		ts.agent,
@@ -160,4 +166,38 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	exec.usedLight = usedLight
 
 	return exec, nil
+}
+
+func workflowOverrideModelCandidates(
+	cfg *config.Config,
+	agent *AgentInstance,
+	modelName string,
+) ([]providers.FallbackCandidate, string, string) {
+	defaultProvider := "openai"
+	if cfg != nil {
+		defaultProvider = cfg.Agents.Defaults.Provider
+	}
+	candidates := resolveModelCandidates(cfg, defaultProvider, modelName, nil)
+	activeModel := resolvedCandidateModel(candidates, modelName)
+	displayName := resolvedCandidateModelName(candidates, modelName)
+	if strings.TrimSpace(displayName) == "" && agent != nil {
+		displayName = agent.Model
+	}
+	return candidates, activeModel, displayName
+}
+
+func workflowProviderForCandidates(
+	agent *AgentInstance,
+	fallback providers.LLMProvider,
+	candidates []providers.FallbackCandidate,
+) providers.LLMProvider {
+	if agent == nil || len(candidates) == 0 {
+		return fallback
+	}
+	candidate := candidates[0]
+	key := providers.ModelKey(candidate.Provider, candidate.Model)
+	if provider := agent.candidateProvider(key); provider != nil {
+		return provider
+	}
+	return fallback
 }

@@ -90,7 +90,7 @@ Owns: EVENT agent.*
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | CLI | `picoclaw agent`, `picoclaw model`, `picoclaw status`, `picoclaw version` | Direct agent use, model selection, status, and build metadata. | `FR-AGENT-003`, `FR-AGENT-009` |
-| Config | `agents.*`, `model_list.*` | Agent defaults, per-agent models, fallbacks, turn profile, retry, token, media, and tool iteration policy. | `FR-AGENT-002`, `FR-AGENT-003`, `FR-AGENT-004` |
+| Config | `agents.*`, `model_list.*` | Agent defaults, per-agent models, fallbacks, turn profile, retry, token, media, tool iteration policy, and optional model price metadata used by workflow-managed child selection. | `FR-AGENT-002`, `FR-AGENT-003`, `FR-AGENT-004` |
 | Config | `model_list[].reasoning_effort` | Optional OpenAI-style reasoning effort forwarded only after shared normalization and validation. | `FR-AGENT-003`, `FR-AGENT-010` |
 | Tools | `spawn`, `spawn_status`, `subagent`, `delegate` | Child work delegation and status reporting. | `FR-AGENT-007` |
 | Events | `agent.*` | Turn, LLM, tool, steering, interrupt, subturn, and error telemetry. | `FR-AGENT-001`, `FR-AGENT-004`, `FR-AGENT-006` |
@@ -113,7 +113,10 @@ that lets the main chat become or join a thread only after configured routing
 thresholds are satisfied.
 Workflow agent steps reuse this same turn execution path, including session
 history modes, provider prompt cache keys, tool iteration limits, and final
-message persistence.
+message persistence. Managed workflow agent steps can additionally run hidden
+no-history child turns with scoped prompts, per-child model and reasoning-effort
+overrides, and tool disabling while preserving the same provider resolution and
+turn-finalization path.
 
 ## Failure And Edge Cases
 

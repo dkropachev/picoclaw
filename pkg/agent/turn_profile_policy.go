@@ -9,6 +9,9 @@ import (
 
 func resolveTurnProfileOptions(cfg *config.Config, opts processOptions) (processOptions, error) {
 	if cfg == nil {
+		if opts.DisableTools {
+			opts.TurnProfile = turnProfileWithToolsOff(opts.TurnProfile)
+		}
 		return opts, nil
 	}
 	profile, ok, err := cfg.Agents.Defaults.ResolveTurnProfile()
@@ -16,6 +19,9 @@ func resolveTurnProfileOptions(cfg *config.Config, opts processOptions) (process
 		return opts, err
 	}
 	if !ok {
+		if opts.DisableTools {
+			opts.TurnProfile = turnProfileWithToolsOff(opts.TurnProfile)
+		}
 		return opts, nil
 	}
 	opts.TurnProfile = profile
@@ -23,7 +29,17 @@ func resolveTurnProfileOptions(cfg *config.Config, opts processOptions) (process
 		opts.NoHistory = true
 		opts.EnableSummary = false
 	}
+	if opts.DisableTools {
+		opts.TurnProfile = turnProfileWithToolsOff(opts.TurnProfile)
+	}
 	return opts, nil
+}
+
+func turnProfileWithToolsOff(profile config.EffectiveTurnProfile) config.EffectiveTurnProfile {
+	profile.Enabled = true
+	profile.ToolsMode = config.TurnProfileModeOff
+	profile.AllowedTools = nil
+	return profile
 }
 
 func turnProfileSystemPromptOff(profile config.EffectiveTurnProfile) bool {
