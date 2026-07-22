@@ -282,6 +282,105 @@ jobs:
 	}
 }
 
+func TestValidateRejectsInvalidWorkflowCallInputDefault(t *testing.T) {
+	workflow := parseWorkflow(t, `
+name: Bad Default
+on:
+  workflow_call:
+    inputs:
+      count:
+        type: number
+        default: not-a-number
+jobs:
+  noop:
+    runs-on: picoclaw
+    steps:
+      - uses: tool/message
+`)
+	err := Validate(workflow)
+	if err == nil || !strings.Contains(err.Error(), "must be a number") {
+		t.Fatalf("Validate error = %v, want default type error", err)
+	}
+}
+
+func TestValidateRejectsInvalidWorkflowCallOutputExpressions(t *testing.T) {
+	workflow := parseWorkflow(t, `
+name: Bad Outputs
+on:
+  workflow_call:
+    outputs:
+      missingJob:
+        value: ${{ jobs.missing.outputs.result }}
+      missingOutput:
+        value: ${{ jobs.main.outputs.missing }}
+      badRoot:
+        value: ${{ nope.value }}
+      badScope:
+        value: ${{ steps.step1.outputs.value }}
+      badSyntax:
+        value: ${{ jobs.main.outputs.result || 'fallback' }}
+jobs:
+  main:
+    runs-on: picoclaw
+    outputs:
+      result: ${{ steps.step1.outputs.value }}
+    steps:
+      - id: step1
+        uses: tool/message
+`)
+	err := Validate(workflow)
+	if err == nil {
+		t.Fatal("Validate succeeded, want output expression errors")
+	}
+	for _, want := range []string{
+		`unknown job "missing"`,
+		`unknown job output "missing"`,
+		`unknown expression root "nope"`,
+		`workflow outputs cannot reference "steps"`,
+		`unsupported expression syntax`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Validate error %q missing %q", err.Error(), want)
+		}
+	}
+}
+
+func TestValidateRejectsReusableWorkflowInvalidContext(t *testing.T) {
+	workflow := parseWorkflow(t, `
+name: Bad Reusable Context
+on:
+  manual: {}
+jobs:
+  call:
+    uses: workflows/child.yml
+    context:
+      session: nope
+`)
+	err := Validate(workflow)
+	if err == nil || !strings.Contains(err.Error(), "unsupported session context") {
+		t.Fatalf("Validate error = %v, want reusable context error", err)
+	}
+}
+
+func TestValidateRejectsImplicitStepIDCollision(t *testing.T) {
+	workflow := parseWorkflow(t, `
+name: Duplicate Effective Steps
+on:
+  manual: {}
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - uses: tool/message
+      - id: step_1
+        uses: tool/message
+`)
+	err := Validate(workflow)
+	if err == nil || !strings.Contains(err.Error(), "duplicate step id") {
+		t.Fatalf("Validate error = %v, want duplicate step id", err)
+	}
+}
+
 func TestParseRejectsInvalidWorkflowShapes(t *testing.T) {
 	if _, err := Parse([]byte("- not: mapping")); err == nil {
 		t.Fatal("Parse sequence succeeded, want workflow mapping error")

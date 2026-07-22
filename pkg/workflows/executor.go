@@ -10,22 +10,36 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 )
 
 const defaultMaxCallDepth = 4
 
 type Executor struct {
-	WorkspaceDir      string
-	Store             RunStore
-	Tools             ToolRunner
-	Agents            AgentRunner
-	Functions         FunctionRunner
-	MaxCallDepth      int
-	MaxConcurrentRuns int
-	DefaultTimeout    time.Duration
+	WorkspaceDir         string
+	DefinitionsDir       string
+	Store                RunStore
+	Tools                ToolRunner
+	Agents               AgentRunner
+	Functions            FunctionRunner
+	RuntimeEvents        RuntimeEventPublisher
+	RuntimeCompatibility RuntimeCompatibility
+	MaxCallDepth         int
+	MaxConcurrentRuns    int
+	DefaultTimeout       time.Duration
+}
+
+type RuntimeEventPublisher interface {
+	PublishNonBlocking(evt runtimeevents.Event) runtimeevents.PublishResult
+}
+
+type limitedRunCreator interface {
+	CreateRunIfUnderLimit(ctx context.Context, run *Run, maxConcurrent int) error
 }
 
 type RunRequest struct {
+	RunID        string
 	Ref          string
 	Inputs       map[string]any
 	Secrets      map[string]string
@@ -38,6 +52,7 @@ type RunRequest struct {
 	WorkflowRef  string
 	RetryOfRunID string
 	CallDepth    int
+	OnRunCreated func(*Run)
 }
 
 type RunResult struct {
@@ -74,12 +89,10 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 	if store == nil {
 		store = NewFileRunStore(e.WorkspaceDir)
 	}
-	if req.ParentRunID == "" {
-		if limitErr := e.enforceConcurrency(ctx, store); limitErr != nil {
-			return nil, limitErr
-		}
+	runID := strings.TrimSpace(req.RunID)
+	if runID == "" {
+		runID = NewRunID()
 	}
-	runID := newRunID()
 	now := time.Now().UTC()
 	run := &Run{
 		ID:           runID,
@@ -98,7 +111,7 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	if createErr := store.CreateRun(ctx, run); createErr != nil {
+	if createErr := e.createRun(ctx, store, run, req.ParentRunID == ""); createErr != nil {
 		return nil, createErr
 	}
 	e.appendEvent(
@@ -106,6 +119,9 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		store,
 		RunEvent{Kind: "workflow.run.start", RunID: run.ID, Payload: map[string]any{"workflow_ref": workflowRef}},
 	)
+	if req.OnRunCreated != nil {
+		req.OnRunCreated(cloneRun(run))
+	}
 
 	outputs, runErr := e.executeWorkflow(ctx, store, run, workflow, req)
 	if runErr != nil {
@@ -125,6 +141,14 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		run.Outputs = outputs
 		run.CompletedAt = &completedAt
 		_ = store.UpdateRun(ctx, run)
+		if run.Status != RunStatusFailed && run.Status != RunStatusCanceled {
+			return &RunResult{
+				RunID:   run.ID,
+				Status:  run.Status,
+				Outputs: run.Outputs,
+				Error:   run.Error,
+			}, nil
+		}
 		if run.Status == RunStatusCanceled {
 			e.appendEvent(
 				context.Background(),
@@ -160,12 +184,46 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 	if updateErr := store.UpdateRun(ctx, run); updateErr != nil {
 		return nil, updateErr
 	}
+	if run.Status == RunStatusCanceled {
+		reason := strings.TrimSpace(run.CancelReason)
+		if reason == "" {
+			reason = "cancel requested"
+		}
+		cancelErr := fmt.Errorf("%w: %s", ErrRunCanceled, reason)
+		e.publishCanceledRuntimeEvent(context.Background(), store, run, cancelErr.Error())
+		return &RunResult{
+			RunID:   run.ID,
+			Status:  run.Status,
+			Outputs: run.Outputs,
+			Error:   cancelErr.Error(),
+		}, cancelErr
+	}
+	if run.Status != RunStatusSucceeded {
+		return &RunResult{
+			RunID:   run.ID,
+			Status:  run.Status,
+			Outputs: run.Outputs,
+			Error:   run.Error,
+		}, nil
+	}
 	e.appendEvent(
 		ctx,
 		store,
 		RunEvent{Kind: "workflow.run.end", RunID: run.ID, Payload: map[string]any{"outputs": outputs}},
 	)
 	return &RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs}, nil
+}
+
+func (e *Executor) createRun(ctx context.Context, store RunStore, run *Run, topLevel bool) error {
+	if topLevel && e.MaxConcurrentRuns > 0 {
+		if limited, ok := store.(limitedRunCreator); ok {
+			return limited.CreateRunIfUnderLimit(ctx, run, e.MaxConcurrentRuns)
+		}
+		if limitErr := e.enforceConcurrency(ctx, store); limitErr != nil {
+			return limitErr
+		}
+	}
+	return store.CreateRun(ctx, run)
 }
 
 func (e *Executor) Retry(ctx context.Context, runID string, secrets map[string]string) (*RunResult, error) {
@@ -193,6 +251,25 @@ func (e *Executor) Retry(ctx context.Context, runID string, secrets map[string]s
 	})
 }
 
+func (e *Executor) CancelRun(ctx context.Context, runID, reason string) (*Run, error) {
+	if e == nil {
+		return nil, fmt.Errorf("workflow executor is nil")
+	}
+	store := e.Store
+	if store == nil {
+		store = NewFileRunStore(e.WorkspaceDir)
+	}
+	previous, _ := store.GetRun(ctx, runID)
+	run, err := store.CancelRun(ctx, runID, reason)
+	if err != nil {
+		return nil, err
+	}
+	if run != nil && run.Status == RunStatusCanceled && (previous == nil || !isTerminalRunStatus(previous.Status)) {
+		e.publishCanceledRuntimeEvent(ctx, store, run, run.CancelReason)
+	}
+	return run, nil
+}
+
 func (e *Executor) enforceConcurrency(ctx context.Context, store RunStore) error {
 	if e.MaxConcurrentRuns <= 0 || store == nil {
 		return nil
@@ -203,7 +280,7 @@ func (e *Executor) enforceConcurrency(ctx context.Context, store RunStore) error
 	}
 	running := 0
 	for _, run := range runs {
-		if run.Status == RunStatusRunning {
+		if run.Status == RunStatusRunning && run.ParentRunID == "" {
 			running++
 		}
 	}
@@ -237,6 +314,19 @@ func checkRunCanceled(ctx context.Context, store RunStore, run *Run) error {
 		run.CancelRequestedAt = latest.CancelRequestedAt
 		return fmt.Errorf("%w: %s", ErrRunCanceled, reason)
 	}
+	if strings.TrimSpace(latest.ParentRunID) != "" {
+		parent, _ := store.GetRun(ctx, latest.ParentRunID)
+		if parent != nil && parent.Status == RunStatusCanceled {
+			reason := strings.TrimSpace(parent.CancelReason)
+			if reason == "" {
+				reason = "parent run canceled"
+			}
+			run.Status = RunStatusCanceled
+			run.CancelReason = reason
+			run.CancelRequestedAt = parent.CancelRequestedAt
+			return fmt.Errorf("%w: parent run %s canceled: %s", ErrRunCanceled, parent.ID, reason)
+		}
+	}
 	return nil
 }
 
@@ -251,7 +341,7 @@ func (e *Executor) loadWorkflow(req RunRequest) (*Workflow, string, error) {
 		}
 		return req.Workflow, ref, nil
 	}
-	resolved, err := (Resolver{WorkspaceDir: e.WorkspaceDir}).ResolveLocal(req.Ref)
+	resolved, err := (Resolver{WorkspaceDir: e.WorkspaceDir, DefinitionsDir: e.DefinitionsDir}).ResolveLocal(req.Ref)
 	if err != nil {
 		return nil, "", err
 	}
@@ -278,13 +368,16 @@ func (e *Executor) executeWorkflow(
 		return nil, err
 	}
 	execCtx := ExecutionContext{
-		Inputs:   inputs,
-		Secrets:  cloneStringMap(req.Secrets),
-		Event:    cloneMap(req.Event),
-		Session:  strings.TrimSpace(req.Session),
-		Delivery: req.Delivery,
-		Steps:    make(map[string]StepExecution),
-		Needs:    make(map[string]JobExecution),
+		Inputs:       inputs,
+		Secrets:      cloneStringMap(req.Secrets),
+		Event:        cloneMap(req.Event),
+		Session:      strings.TrimSpace(req.Session),
+		Delivery:     req.Delivery,
+		Steps:        make(map[string]StepExecution),
+		Needs:        make(map[string]JobExecution),
+		WorkspaceDir: e.WorkspaceDir,
+		WorkflowRef:  run.WorkflowRef,
+		RunID:        run.ID,
 	}
 	order, err := topoJobs(workflow.Jobs)
 	if err != nil {
@@ -423,6 +516,27 @@ func (e *Executor) executeJob(
 			if step.ContinueOnError {
 				continue
 			}
+			if job.ContinueOnError {
+				jobExec.Status = RunStatusSucceeded
+				jobExec.Error = err.Error()
+				outputs, outputErr := renderJobOutputs(job.Outputs, stepCtx, jobs)
+				if outputErr != nil {
+					outputs = map[string]any{}
+				}
+				jobExec.Outputs = outputs
+				e.appendEvent(
+					ctx,
+					store,
+					RunEvent{
+						Kind:    "workflow.job.end",
+						RunID:   run.ID,
+						JobID:   jobID,
+						Message: "continued after error",
+						Payload: map[string]any{"outputs": outputs, "error": err.Error()},
+					},
+				)
+				return jobExec, nil
+			}
 			jobExec.Status = RunStatusFailed
 			jobExec.Error = err.Error()
 			e.appendEvent(
@@ -477,6 +591,9 @@ func (e *Executor) executeReusableJob(
 		return nil, "", err
 	}
 	childReq.Secrets = childSecrets
+	if runnableErr := e.ensureReusableWorkflowRunnable(ctx, childReq.Ref); runnableErr != nil {
+		return nil, "", runnableErr
+	}
 	result, err := e.Run(ctx, childReq)
 	if result == nil {
 		return nil, "", err
@@ -524,11 +641,18 @@ func (e *Executor) executeStep(
 		stepExec.Error = err.Error()
 		return stepExec, err
 	}
-	outputs, err := e.runStepTarget(ctx, step, with, execCtx)
+	stepTargetCtx := execCtx
+	stepTargetCtx.JobID = jobID
+	stepTargetCtx.StepID = stepID
+	outputs, err := e.runStepTarget(ctx, step, with, stepTargetCtx)
 	if err != nil {
 		if step.ContinueOnError {
+			if outputs == nil {
+				outputs = map[string]any{}
+			}
 			stepExec.Status = RunStatusSucceeded
 			stepExec.Error = err.Error()
+			stepExec.Outputs = outputs
 			e.appendEvent(
 				ctx,
 				store,
@@ -538,17 +662,28 @@ func (e *Executor) executeStep(
 					JobID:   jobID,
 					StepID:  stepID,
 					Message: "continued after error",
-					Payload: map[string]any{"error": err.Error()},
+					Payload: map[string]any{"outputs": outputs, "error": err.Error()},
 				},
 			)
 			return stepExec, err
 		}
 		stepExec.Status = RunStatusFailed
 		stepExec.Error = err.Error()
+		if outputs == nil {
+			outputs = map[string]any{}
+		}
+		stepExec.Outputs = outputs
 		e.appendEvent(
 			ctx,
 			store,
-			RunEvent{Kind: "workflow.step.failed", RunID: run.ID, JobID: jobID, StepID: stepID, Message: err.Error()},
+			RunEvent{
+				Kind:    "workflow.step.failed",
+				RunID:   run.ID,
+				JobID:   jobID,
+				StepID:  stepID,
+				Message: err.Error(),
+				Payload: map[string]any{"outputs": outputs},
+			},
 		)
 		return stepExec, err
 	}
@@ -568,6 +703,28 @@ func (e *Executor) executeStep(
 	return stepExec, nil
 }
 
+func (e *Executor) ensureReusableWorkflowRunnable(ctx context.Context, ref string) error {
+	if e == nil || !runtimeCompatibilityConfigured(e.RuntimeCompatibility) {
+		return nil
+	}
+	return EnsureWorkflowRunnable(ctx, e.WorkspaceDir, ref, e.RuntimeCompatibility, e.localOptions()...)
+}
+
+func (e *Executor) localOptions() []LocalOption {
+	if e == nil || strings.TrimSpace(e.DefinitionsDir) == "" {
+		return nil
+	}
+	return []LocalOption{WithDefinitionsDir(e.DefinitionsDir)}
+}
+
+func runtimeCompatibilityConfigured(runtime RuntimeCompatibility) bool {
+	return strings.TrimSpace(runtime.PicoclawVersion) != "" ||
+		strings.TrimSpace(runtime.GitCommit) != "" ||
+		strings.TrimSpace(runtime.WorkflowEngine) != "" ||
+		strings.TrimSpace(runtime.WorkflowSchema) != "" ||
+		strings.TrimSpace(runtime.ValidatorFingerprint) != ""
+}
+
 func renderJobSecrets(raw any, execCtx ExecutionContext, jobs map[string]JobExecution) (map[string]string, error) {
 	if raw == nil {
 		return nil, nil
@@ -582,15 +739,93 @@ func renderJobSecrets(raw any, execCtx ExecutionContext, jobs map[string]JobExec
 	if !ok {
 		return nil, fmt.Errorf("secrets must be inherit or a map")
 	}
-	rendered, err := renderMap(values, expressionCtxFrom(execCtx, jobs))
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]string, len(rendered))
-	for key, value := range rendered {
-		out[key] = fmt.Sprint(value)
+	exprCtx := expressionCtxFrom(execCtx, jobs)
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		rendered, err := renderSecretValue(key, value, exprCtx)
+		if err != nil {
+			return nil, err
+		}
+		out[key] = rendered
 	}
 	return out, nil
+}
+
+func renderSecretValue(name string, value any, ctx expressionContext) (string, error) {
+	if text, ok := value.(string); ok {
+		rendered, err := renderSecretString(name, text, ctx)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprint(rendered), nil
+	}
+	rendered, err := renderValue(value, ctx)
+	if err != nil {
+		return "", err
+	}
+	if secretValueMissing(rendered) {
+		return "", fmt.Errorf("mapped workflow secret %q is missing", name)
+	}
+	return fmt.Sprint(rendered), nil
+}
+
+func renderSecretString(name, input string, ctx expressionContext) (any, error) {
+	matches := expressionPattern.FindAllStringSubmatch(input, -1)
+	if len(matches) == 0 {
+		return input, nil
+	}
+	if len(matches) == 1 && strings.TrimSpace(matches[0][0]) == strings.TrimSpace(input) {
+		value, err := evalExpression(matches[0][1], ctx)
+		if err != nil {
+			return nil, err
+		}
+		if value == nil {
+			return nil, fmt.Errorf("mapped workflow secret %q is missing", name)
+		}
+		return value, nil
+	}
+	var firstErr error
+	out := expressionPattern.ReplaceAllStringFunc(input, func(match string) string {
+		if firstErr != nil {
+			return ""
+		}
+		sub := expressionPattern.FindStringSubmatch(match)
+		value, err := evalExpression(sub[1], ctx)
+		if err != nil {
+			firstErr = err
+			return ""
+		}
+		if value == nil {
+			firstErr = fmt.Errorf("mapped workflow secret %q is missing", name)
+			return ""
+		}
+		return fmt.Sprint(value)
+	})
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return out, nil
+}
+
+func secretValueMissing(value any) bool {
+	if value == nil {
+		return true
+	}
+	switch v := value.(type) {
+	case map[string]any:
+		for _, item := range v {
+			if secretValueMissing(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if secretValueMissing(item) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (e *Executor) runStepTarget(
@@ -625,6 +860,10 @@ func (e *Executor) runStepTarget(
 		if e.Agents == nil {
 			return nil, fmt.Errorf("agent runner not configured")
 		}
+		output, err := ParseAgentOutputContract(with["output"])
+		if err != nil {
+			return nil, err
+		}
 		return e.Agents.RunAgent(ctx, AgentRequest{
 			AgentID:  strings.TrimPrefix(uses, "agent/"),
 			Message:  stringFromMap(with, "message"),
@@ -635,12 +874,19 @@ func (e *Executor) runStepTarget(
 			Cache:    stringFromMap(with, "cache"),
 			Delivery: stepDelivery(step.Context, execCtx),
 			Inputs:   with,
+			Output:   output,
+			Managed:  with["managed"],
+			Scope:    with["scope"],
 		})
 	case strings.HasPrefix(uses, "function/"):
+		name := strings.TrimPrefix(uses, "function/")
+		if outputs, handled, err := RunNativeFunction(ctx, name, with, execCtx); handled {
+			return outputs, err
+		}
 		if e.Functions == nil {
 			return nil, fmt.Errorf("function runner not configured")
 		}
-		return e.Functions.RunFunction(ctx, strings.TrimPrefix(uses, "function/"), with, execCtx)
+		return e.Functions.RunFunction(ctx, name, with, execCtx)
 	default:
 		return nil, fmt.Errorf("unsupported uses target %q", uses)
 	}
@@ -869,6 +1115,38 @@ func cloneStringMap(values map[string]string) map[string]string {
 	return out
 }
 
+func cloneRun(run *Run) *Run {
+	if run == nil {
+		return nil
+	}
+	out := *run
+	out.ChildRunIDs = append([]string(nil), run.ChildRunIDs...)
+	out.Delivery = run.Delivery
+	out.Delivery.ReplyHandles = cloneStringMap(run.Delivery.ReplyHandles)
+	out.Event = cloneMap(run.Event)
+	out.Inputs = cloneMap(run.Inputs)
+	out.Outputs = cloneMap(run.Outputs)
+	out.Jobs = make(map[string]JobExecution, len(run.Jobs))
+	for key, job := range run.Jobs {
+		job.Outputs = cloneMap(job.Outputs)
+		out.Jobs[key] = job
+	}
+	out.Steps = make(map[string]StepExecution, len(run.Steps))
+	for key, step := range run.Steps {
+		step.Outputs = cloneMap(step.Outputs)
+		out.Steps[key] = step
+	}
+	if run.CompletedAt != nil {
+		completedAt := *run.CompletedAt
+		out.CompletedAt = &completedAt
+	}
+	if run.CancelRequestedAt != nil {
+		cancelRequestedAt := *run.CancelRequestedAt
+		out.CancelRequestedAt = &cancelRequestedAt
+	}
+	return &out
+}
+
 func (e *Executor) appendEvent(ctx context.Context, store RunStore, event RunEvent) {
 	if store == nil {
 		return
@@ -877,9 +1155,86 @@ func (e *Executor) appendEvent(ctx context.Context, store RunStore, event RunEve
 		event.Time = time.Now().UTC()
 	}
 	_ = store.AppendEvent(ctx, event)
+	e.publishRuntimeEvent(ctx, store, event)
 }
 
-func newRunID() string {
+func (e *Executor) publishRuntimeEvent(ctx context.Context, store RunStore, event RunEvent) {
+	if e == nil || e.RuntimeEvents == nil || strings.TrimSpace(event.Kind) == "" {
+		return
+	}
+	evt := runtimeevents.Event{
+		Kind:     runtimeevents.Kind(event.Kind),
+		Time:     event.Time,
+		Source:   runtimeevents.Source{Component: "workflow", Name: event.RunID},
+		Severity: workflowRuntimeSeverity(event.Kind),
+		Payload:  workflowRuntimePayload(event),
+	}
+	if store != nil && strings.TrimSpace(event.RunID) != "" {
+		if run, err := store.GetRun(ctx, event.RunID); err == nil && run != nil {
+			if strings.TrimSpace(run.WorkflowRef) != "" {
+				evt.Source.Name = run.WorkflowRef
+			}
+			evt.Scope = runtimeevents.Scope{
+				SessionKey: run.Session,
+				Channel:    run.Delivery.Channel,
+				ChatID:     run.Delivery.ChatID,
+				TopicID:    run.Delivery.TopicID,
+				MessageID:  run.Delivery.MessageID,
+			}
+		}
+	}
+	if evt.Source.Name == "" {
+		if workflowRef, _ := event.Payload["workflow_ref"].(string); strings.TrimSpace(workflowRef) != "" {
+			evt.Source.Name = strings.TrimSpace(workflowRef)
+		}
+	}
+	e.RuntimeEvents.PublishNonBlocking(evt)
+}
+
+func (e *Executor) publishCanceledRuntimeEvent(ctx context.Context, store RunStore, run *Run, message string) {
+	if run == nil || run.Status != RunStatusCanceled {
+		return
+	}
+	event := RunEvent{
+		Kind:    runtimeevents.KindWorkflowRunCanceled.String(),
+		RunID:   run.ID,
+		Message: strings.TrimSpace(message),
+	}
+	if event.Message == "" {
+		event.Message = strings.TrimSpace(run.CancelReason)
+	}
+	if run.CancelRequestedAt != nil {
+		event.Time = *run.CancelRequestedAt
+	}
+	e.publishRuntimeEvent(ctx, store, event)
+}
+
+func workflowRuntimePayload(event RunEvent) map[string]any {
+	payload := cloneMap(event.Payload)
+	payload["run_id"] = event.RunID
+	if event.JobID != "" {
+		payload["job_id"] = event.JobID
+	}
+	if event.StepID != "" {
+		payload["step_id"] = event.StepID
+	}
+	if event.Message != "" {
+		payload["message"] = event.Message
+	}
+	return payload
+}
+
+func workflowRuntimeSeverity(kind string) runtimeevents.Severity {
+	switch kind {
+	case runtimeevents.KindWorkflowRunFailed.String(), "workflow.run.canceled",
+		runtimeevents.KindWorkflowJobFailed.String(), runtimeevents.KindWorkflowStepFailed.String():
+		return runtimeevents.SeverityWarn
+	default:
+		return runtimeevents.SeverityInfo
+	}
+}
+
+func NewRunID() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err == nil {
 		return "wr_" + hex.EncodeToString(b[:])

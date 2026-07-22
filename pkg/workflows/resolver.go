@@ -9,13 +9,16 @@ import (
 )
 
 type Resolver struct {
-	WorkspaceDir string
+	WorkspaceDir   string
+	DefinitionsDir string
 }
 
 type ResolvedRef struct {
 	Canonical string
 	Path      string
 }
+
+const DefaultDefinitionsDir = "workflows"
 
 func (r Resolver) ResolveLocal(ref string) (ResolvedRef, error) {
 	canonical, err := CanonicalLocalRef(ref)
@@ -26,13 +29,37 @@ func (r Resolver) ResolveLocal(ref string) (ResolvedRef, error) {
 	if workspaceDir == "" {
 		workspaceDir = "."
 	}
-	root := filepath.Join(workspaceDir, "workflows")
-	rel := strings.TrimPrefix(canonical, "workflows/")
+	definitionsDir, err := cleanDefinitionsDir(r.DefinitionsDir)
+	if err != nil {
+		return ResolvedRef{}, err
+	}
+	root := filepath.Join(workspaceDir, definitionsDir)
+	rel := strings.TrimPrefix(canonical, DefaultDefinitionsDir+"/")
 	target := filepath.Join(root, filepath.FromSlash(rel))
 	if err := ensureInsideWorkflowRoot(root, target); err != nil {
 		return ResolvedRef{}, err
 	}
 	return ResolvedRef{Canonical: canonical, Path: target}, nil
+}
+
+func cleanDefinitionsDir(value string) (string, error) {
+	value = strings.TrimSpace(filepath.ToSlash(value))
+	if value == "" {
+		value = DefaultDefinitionsDir
+	}
+	if path.IsAbs(value) || filepath.IsAbs(value) {
+		return "", fmt.Errorf("workflow definitions dir %q must be relative", value)
+	}
+	clean := path.Clean(value)
+	if clean == "." {
+		return "", fmt.Errorf("workflow definitions dir %q is invalid", value)
+	}
+	for _, part := range strings.Split(clean, "/") {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("workflow definitions dir %q contains unsafe path component", value)
+		}
+	}
+	return filepath.FromSlash(clean), nil
 }
 
 func CanonicalLocalRef(ref string) (string, error) {
@@ -53,7 +80,7 @@ func CanonicalLocalRef(ref string) (string, error) {
 		}
 	}
 	clean := path.Clean(ref)
-	if !strings.HasPrefix(clean, "workflows/") {
+	if !strings.HasPrefix(clean, DefaultDefinitionsDir+"/") {
 		return "", fmt.Errorf("workflow ref %q must start with workflows/", ref)
 	}
 	ext := strings.ToLower(path.Ext(clean))
@@ -72,19 +99,19 @@ func ensureInsideWorkflowRoot(root, target string) error {
 	if err != nil {
 		return fmt.Errorf("resolve workflow path: %w", err)
 	}
-	if info, statErr := os.Lstat(targetAbs); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
-		evalRoot, rootErr := filepath.EvalSymlinks(rootAbs)
-		if rootErr != nil {
+	rootEval := rootAbs
+	if evalRoot, rootErr := evalWorkflowPathPrefix(rootAbs); rootErr != nil {
+		if !os.IsNotExist(rootErr) {
 			return fmt.Errorf("resolve workflow root symlink: %w", rootErr)
 		}
-		evalTarget, targetErr := filepath.EvalSymlinks(targetAbs)
-		if targetErr != nil {
-			return fmt.Errorf("resolve workflow symlink: %w", targetErr)
-		}
-		rootAbs = evalRoot
-		targetAbs = evalTarget
+	} else {
+		rootEval = evalRoot
 	}
-	rel, err := filepath.Rel(rootAbs, targetAbs)
+	targetEval, err := evalWorkflowPathPrefix(targetAbs)
+	if err != nil {
+		return fmt.Errorf("resolve workflow symlink: %w", err)
+	}
+	rel, err := filepath.Rel(rootEval, targetEval)
 	if err != nil {
 		return fmt.Errorf("compare workflow path: %w", err)
 	}
@@ -92,6 +119,33 @@ func ensureInsideWorkflowRoot(root, target string) error {
 		return fmt.Errorf("workflow path escapes workflow root")
 	}
 	return nil
+}
+
+func evalWorkflowPathPrefix(absPath string) (string, error) {
+	clean := filepath.Clean(absPath)
+	probe := clean
+	var suffix []string
+	for {
+		if _, statErr := os.Lstat(probe); statErr == nil {
+			eval, evalErr := filepath.EvalSymlinks(probe)
+			if evalErr != nil {
+				return "", evalErr
+			}
+			for i := len(suffix) - 1; i >= 0; i-- {
+				eval = filepath.Join(eval, suffix[i])
+			}
+			return filepath.Clean(eval), nil
+		} else if os.IsNotExist(statErr) {
+			parent := filepath.Dir(probe)
+			if parent == probe {
+				return clean, nil
+			}
+			suffix = append(suffix, filepath.Base(probe))
+			probe = parent
+		} else {
+			return "", statErr
+		}
+	}
 }
 
 func IsLocalWorkflowRef(ref string) bool {

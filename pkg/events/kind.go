@@ -51,6 +51,8 @@ const (
 	KindWorkflowRunEnd Kind = "workflow.run.end"
 	// KindWorkflowRunFailed is emitted when a workflow run fails.
 	KindWorkflowRunFailed Kind = "workflow.run.failed"
+	// KindWorkflowRunCanceled is emitted when a workflow run is canceled.
+	KindWorkflowRunCanceled Kind = "workflow.run.canceled"
 	// KindWorkflowJobStart is emitted when a workflow job starts.
 	KindWorkflowJobStart Kind = "workflow.job.start"
 	// KindWorkflowJobEnd is emitted when a workflow job succeeds or is skipped.
@@ -149,6 +151,7 @@ var knownKinds = []Kind{
 	KindWorkflowRunStart,
 	KindWorkflowRunEnd,
 	KindWorkflowRunFailed,
+	KindWorkflowRunCanceled,
 	KindWorkflowJobStart,
 	KindWorkflowJobEnd,
 	KindWorkflowJobFailed,

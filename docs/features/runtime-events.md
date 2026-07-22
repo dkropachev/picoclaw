@@ -30,7 +30,7 @@ without changing event publication.
 | `FR-EVENTS-001` | MUST | Published events carry kind, timestamp, severity, scope, and payload fields where available. | Consumers need stable event envelopes. |
 | `FR-EVENTS-002` | MUST | Subscribers can filter by kind prefix and receive buffered event channels with close semantics. | Hooks and diagnostics need reliable subscriptions. |
 | `FR-EVENTS-003` | MUST | Logging include/exclude/min-severity filters affect printed logs only, not event bus publication. | Observability should not mutate runtime behavior. |
-| `FR-EVENTS-004` | MUST | Known event names cover agent, channel, bus, gateway, and MCP domains. | Feature telemetry must be discoverable. |
+| `FR-EVENTS-004` | MUST | Known event names cover agent, workflow, channel, bus, gateway, and MCP domains. | Feature telemetry must be discoverable. |
 | `FR-EVENTS-005` | SHOULD | Event payloads avoid full sensitive args by default and include lengths/counts when safer. | Logs should be useful without leaking secrets. |
 
 ## Data And State Model
@@ -56,7 +56,7 @@ Owns: EVENT *
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Config | `events.logging.*` | Event logging enablement, filters, payload inclusion, and severity threshold. | `FR-EVENTS-003`, `FR-EVENTS-005` |
-| Events | `agent.*`, `channel.*`, `bus.*`, `gateway.*`, `mcp.*` | Published runtime event kinds. | `FR-EVENTS-001`, `FR-EVENTS-004` |
+| Events | `agent.*`, `workflow.*`, `channel.*`, `bus.*`, `gateway.*`, `mcp.*` | Published runtime event kinds. | `FR-EVENTS-001`, `FR-EVENTS-004` |
 
 ## Algorithms And Ordering
 

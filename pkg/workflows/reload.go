@@ -16,8 +16,8 @@ type ReloadError struct {
 	Error string `json:"error"`
 }
 
-func ReloadLocal(ctx context.Context, workspace string) (*ReloadResult, error) {
-	defs, err := ListLocal(ctx, workspace)
+func ReloadLocal(ctx context.Context, workspace string, opts ...LocalOption) (*ReloadResult, error) {
+	defs, err := ListLocal(ctx, workspace, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -27,7 +27,7 @@ func ReloadLocal(ctx context.Context, workspace string) (*ReloadResult, error) {
 		Errors:     make([]ReloadError, 0),
 	}
 	for _, def := range defs {
-		workflow, err := LoadLocal(ctx, workspace, def.Ref)
+		workflow, err := LoadLocal(ctx, workspace, def.Ref, opts...)
 		if err != nil {
 			result.Errors = append(result.Errors, ReloadError{Ref: def.Ref, Error: err.Error()})
 			continue

@@ -89,6 +89,33 @@ func TestResolverRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestResolverRejectsSymlinkedDirectoryEscape(t *testing.T) {
+	if testing.Short() {
+		t.Skip("symlink test skipped in short mode")
+	}
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "workflows"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(outside, "outside.yml"),
+		[]byte("name: outside\njobs: {}\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(workspace, "workflows", "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	_, err := (Resolver{WorkspaceDir: workspace}).ResolveLocal("workflows/link/outside.yml")
+	if err == nil || !strings.Contains(err.Error(), "escapes") {
+		t.Fatalf("ResolveLocal symlinked directory escape error = %v, want escape error", err)
+	}
+}
+
 func createWorkflowFile(t *testing.T, workspace, name string) {
 	t.Helper()
 	dir := filepath.Join(workspace, "workflows")
