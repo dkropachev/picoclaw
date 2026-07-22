@@ -14,11 +14,15 @@ func newReloadCommand() *cobra.Command {
 		Short: "Reload and validate workspace workflow definitions",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			workspace, err := workflowWorkspace()
+			cfg, err := workflowConfig()
 			if err != nil {
 				return err
 			}
-			result, err := workflows.ReloadLocal(commandContext(cmd), workspace)
+			result, err := workflows.ReloadLocal(
+				commandContext(cmd),
+				cfg.WorkspacePath(),
+				workflowLocalOptions(cfg)...,
+			)
 			if err != nil {
 				return err
 			}

@@ -16,9 +16,11 @@ import (
 
 func newWorkflowTool(al *AgentLoop, agentID string, agent *AgentInstance) tools.Tool {
 	store := workflows.NewFileRunStore(agent.Workspace)
+	definitionsDir := workflowDefinitionsDir(al)
 	executor := &workflows.Executor{
-		WorkspaceDir: agent.Workspace,
-		Store:        store,
+		WorkspaceDir:   agent.Workspace,
+		DefinitionsDir: definitionsDir,
+		Store:          store,
 		Tools: &workflowToolRunner{
 			agentID:  agentID,
 			registry: agent.Tools,
@@ -30,6 +32,56 @@ func newWorkflowTool(al *AgentLoop, agentID string, agent *AgentInstance) tools.
 		DefaultTimeout:    al.cfg.Workflows.EffectiveDefaultTimeout(),
 	}
 	return tools.NewWorkflowTool(executor, agent.Workspace)
+}
+
+func workflowDefinitionsDir(al *AgentLoop) string {
+	if al == nil || al.cfg == nil {
+		return workflows.DefaultDefinitionsDir
+	}
+	return al.cfg.Workflows.EffectiveDefinitionsDir()
+}
+
+// NewWorkflowAgentRunner exposes the agent-step workflow runner for HTTP and
+// other runtimes that own an AgentLoop but do not run inside the agent package.
+func NewWorkflowAgentRunner(al *AgentLoop) workflows.AgentRunner {
+	return &workflowAgentRunner{loop: al}
+}
+
+// NewWorkflowToolRunner exposes the tool-step workflow runner for HTTP and
+// other runtimes that own an AgentLoop but do not run inside the agent package.
+func NewWorkflowToolRunner(al *AgentLoop, agentID string) (workflows.ToolRunner, error) {
+	if al == nil {
+		return nil, fmt.Errorf("agent loop not configured")
+	}
+	registry := al.GetRegistry()
+	if registry == nil {
+		return nil, fmt.Errorf("agent registry not configured")
+	}
+	agentID = strings.TrimSpace(agentID)
+	var agent *AgentInstance
+	if agentID != "" {
+		var ok bool
+		agent, ok = registry.GetAgent(agentID)
+		if !ok {
+			return nil, fmt.Errorf("agent %q not found for workflow tool step", agentID)
+		}
+	} else {
+		agent = registry.GetDefaultAgent()
+	}
+	if agent == nil {
+		return nil, fmt.Errorf("no agent available for workflow tool step")
+	}
+	if agentID == "" {
+		agentID = agent.ID
+	}
+	if agent.Tools == nil {
+		return nil, fmt.Errorf("tool registry not configured")
+	}
+	return &workflowToolRunner{
+		agentID:  agentID,
+		registry: agent.Tools,
+		loop:     al,
+	}, nil
 }
 
 type workflowToolRunner struct {

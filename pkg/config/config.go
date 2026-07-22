@@ -100,6 +100,14 @@ func (c WorkflowsConfig) EffectiveDefaultTimeout() time.Duration {
 	return time.Duration(c.DefaultTimeoutSeconds) * time.Second
 }
 
+func (c WorkflowsConfig) EffectiveDefinitionsDir() string {
+	dir := strings.TrimSpace(c.DefinitionsDir)
+	if dir == "" {
+		return "workflows"
+	}
+	return dir
+}
+
 func (c WorkflowsConfig) EffectiveRetentionDays() int {
 	if c.RetentionDays > 0 {
 		return c.RetentionDays

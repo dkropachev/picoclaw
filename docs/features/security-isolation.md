@@ -105,9 +105,10 @@ depend on security behavior. Isolation can wrap command transports. Config
 migration must preserve security defaults. Thread policy config shares the same
 normalization and persistence path, while thread-specific behavior is owned by
 the threads feature.
-Workflow configuration, workflow tools, and workflow steps reuse the same
-config validation, secret filtering, HTTP guard, and isolation policies instead
-of introducing separate security controls.
+Workflow configuration, including definitions-directory defaulting and other
+effective-value helpers, workflow tools, and workflow steps reuse the same config
+validation, secret filtering, HTTP guard, and isolation policies instead of
+introducing separate security controls.
 
 ## Failure And Edge Cases
 
@@ -129,5 +130,6 @@ of introducing separate security controls.
 ## Implementation Anchors
 
 - [pkg/config/config_struct.go](../../pkg/config/config_struct.go)
+- [pkg/config/config.go](../../pkg/config/config.go)
 - [pkg/credential](../../pkg/credential)
 - [pkg/isolation](../../pkg/isolation)

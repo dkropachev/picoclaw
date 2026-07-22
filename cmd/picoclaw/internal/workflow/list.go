@@ -14,11 +14,15 @@ func newListCommand() *cobra.Command {
 		Short: "List workspace workflows",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			workspace, err := workflowWorkspace()
+			cfg, err := workflowConfig()
 			if err != nil {
 				return err
 			}
-			defs, err := workflows.ListLocal(commandContext(cmd), workspace)
+			defs, err := workflows.ListLocal(
+				commandContext(cmd),
+				cfg.WorkspacePath(),
+				workflowLocalOptions(cfg)...,
+			)
 			if err != nil {
 				return err
 			}
