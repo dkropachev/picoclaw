@@ -806,7 +806,14 @@ func TestCodexProvider_ChatAPIFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprint(w, `{"error":{"message":"bad model","type":"invalid_request_error","code":"model_not_found","param":"model"}}`)
+		fmt.Fprint(w, `{
+			"error": {
+				"message": "bad model",
+				"type": "invalid_request_error",
+				"code": "model_not_found",
+				"param": "model"
+			}
+		}`)
 	}))
 	defer server.Close()
 
