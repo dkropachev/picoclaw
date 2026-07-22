@@ -121,6 +121,14 @@ const workflowRun = {
   completed_at: "2026-07-16T12:00:01Z",
 }
 
+const nullableWorkflowRun = {
+  ...workflowRun,
+  id: "wr_nulls",
+  child_run_ids: null,
+  jobs: null,
+  steps: null,
+}
+
 const retryWorkflowRun = {
   ...workflowRun,
   id: "wr_retry",
@@ -377,7 +385,10 @@ const channelCatalogResponse = {
 
 async function mockLauncherApis(
   page: Page,
-  options: { completeDraftViaPolling?: boolean } = {},
+  options: {
+    completeDraftViaPolling?: boolean
+    nullableWorkflowPayloads?: boolean
+  } = {},
 ) {
   let activeDevelopmentSession: MockWorkflowDevelopmentSession | null = null
   let workflowDefinitions = [
@@ -386,7 +397,9 @@ async function mockLauncherApis(
       name: "Summarize text",
     },
   ]
-  let runs = [workflowRun]
+  let runs = options.nullableWorkflowPayloads
+    ? [nullableWorkflowRun]
+    : [workflowRun]
   let workflowsRevalidated = false
   let completeDraftViaPolling = false
 
@@ -723,11 +736,28 @@ async function mockLauncherApis(
           return json(route, toolsResponse)
         case "/api/workflows":
           return json(route, {
-            workflows: workflowDefinitions,
-            compatibility: compatibilityResponse(),
+            workflows: options.nullableWorkflowPayloads
+              ? null
+              : workflowDefinitions,
+            compatibility: options.nullableWorkflowPayloads
+              ? {
+                  ...compatibilityResponse(),
+                  workflows: null,
+                  counts: null,
+                }
+              : compatibilityResponse(),
           })
         case "/api/workflows/compatibility":
-          return json(route, compatibilityResponse())
+          return json(
+            route,
+            options.nullableWorkflowPayloads
+              ? {
+                  ...compatibilityResponse(),
+                  workflows: null,
+                  counts: null,
+                }
+              : compatibilityResponse(),
+          )
         case "/api/workflows/development":
           return json(route, { session: activeDevelopmentSession })
         case "/api/workflows/runs":
@@ -744,6 +774,8 @@ async function mockLauncherApis(
             completeDraftViaPolling = false
           }
           return json(route, { runs })
+        case "/api/workflows/runs/wr_nulls":
+          return json(route, nullableWorkflowRun)
         case "/api/workflows/runs/wr_test":
           return json(route, workflowRun)
         case "/api/workflows/runs/wr_retry":
@@ -769,6 +801,11 @@ async function mockLauncherApis(
                 run_id: "wr_test",
               },
             ],
+          })
+        case "/api/workflows/runs/wr_nulls/events":
+          return json(route, {
+            run_id: "wr_nulls",
+            events: null,
           })
         case "/api/workflows/runs/wr_retry/events":
           return json(route, {
@@ -835,6 +872,8 @@ async function mockLauncherApis(
               },
             },
           ])
+        case "/api/workflows/runs/wr_nulls/events/stream":
+          return sse(route, [])
         case "/api/workflows/runs/wr_retry/events/stream":
           return sse(route, [
             {
@@ -904,6 +943,12 @@ async function mockLauncherApis(
               },
             ],
             edges: [],
+          })
+        case "/api/workflows/runs/wr_nulls/graph":
+          return json(route, {
+            run_id: "wr_nulls",
+            nodes: null,
+            edges: null,
           })
         case "/api/workflows/runs/wr_retry/graph":
           return json(route, {
@@ -1131,6 +1176,31 @@ test("web-search provider settings expand without overflow", async ({
 
   await page.getByRole("button", { name: /OpenAI/ }).click()
   await expect(page.getByText("Max Results")).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("workflow dashboard tolerates null persisted collections", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "picoclaw-tour-state",
+      JSON.stringify({ currentStep: "completed", isActive: false }),
+    )
+  })
+  await mockLauncherApis(page, { nullableWorkflowPayloads: true })
+  await page.goto("/agent/workflows")
+
+  await expect(page.getByRole("banner")).toBeVisible()
+  await expect(page.locator("main")).toBeVisible()
+  await page.getByRole("button", { name: "Operate" }).click()
+  await expect(page.getByText("wr_nulls").first()).toBeVisible()
+  await expect(page.getByText("No events")).toBeVisible()
+  await expect(page.getByText("No graph")).toBeVisible()
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
