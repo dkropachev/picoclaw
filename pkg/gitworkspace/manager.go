@@ -231,8 +231,8 @@ func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) (WorkspaceInf
 		ws.LockedBy.HeartbeatAt = now
 		ws.UpdatedAt = now
 		m.addHistoryLocked(st, now, "heartbeat", repoID, ws.ID, sessionKey, req.AgentID, "")
-		if err := m.saveLocked(st); err != nil {
-			return WorkspaceInfo{}, err
+		if saveErr := m.saveLocked(st); saveErr != nil {
+			return WorkspaceInfo{}, saveErr
 		}
 		return m.workspaceInfo(ctx, ws)
 	}
@@ -291,7 +291,16 @@ func (m *Manager) ReleaseSession(ctx context.Context, req ReleaseRequest) ([]Wor
 		}
 		branch, changed, err := m.preserveWorkspaceLocked(ctx, ws, sessionKey, now)
 		if err != nil {
-			m.addHistoryLocked(st, now, "preserve_failed", ws.RepoID, ws.ID, sessionKey, req.AgentID, err.Error())
+			m.addHistoryLocked(
+				st,
+				now,
+				"preserve_failed",
+				ws.RepoID,
+				ws.ID,
+				sessionKey,
+				req.AgentID,
+				err.Error(),
+			)
 			_ = m.saveLocked(st)
 			return nil, err
 		}
@@ -372,19 +381,32 @@ func (m *Manager) CleanupIgnored(ctx context.Context, workspaceID string) (Clean
 		return CleanupResult{}, fmt.Errorf("git workspace %q not found", workspaceID)
 	}
 	if ws.LockedBy != nil {
-		return CleanupResult{}, fmt.Errorf("git workspace %q is locked by session %s", workspaceID, ws.LockedBy.SessionKey)
+		return CleanupResult{}, fmt.Errorf(
+			"git workspace %q is locked by session %s",
+			workspaceID,
+			ws.LockedBy.SessionKey,
+		)
 	}
 	before, _ := ignoredSize(ctx, ws.Path)
-	if err := cleanIgnored(ctx, ws.Path); err != nil {
-		return CleanupResult{}, err
+	if cleanErr := cleanIgnored(ctx, ws.Path); cleanErr != nil {
+		return CleanupResult{}, cleanErr
 	}
 	now := m.now().UTC()
 	ws.LastCleanedAt = now
 	ws.UpdatedAt = now
 	after, _ := ignoredSize(ctx, ws.Path)
-	m.addHistoryLocked(st, now, "cleaned_ignored", ws.RepoID, ws.ID, "", "", fmt.Sprintf("%d -> %d bytes", before, after))
-	if err := m.saveLocked(st); err != nil {
-		return CleanupResult{}, err
+	m.addHistoryLocked(
+		st,
+		now,
+		"cleaned_ignored",
+		ws.RepoID,
+		ws.ID,
+		"",
+		"",
+		fmt.Sprintf("%d -> %d bytes", before, after),
+	)
+	if saveErr := m.saveLocked(st); saveErr != nil {
+		return CleanupResult{}, saveErr
 	}
 	info, err := m.workspaceInfo(ctx, ws)
 	if err != nil {
@@ -419,7 +441,11 @@ func (m *Manager) Drop(ctx context.Context, workspaceID string) (WorkspaceInfo, 
 		return WorkspaceInfo{}, fmt.Errorf("git workspace %q not found", workspaceID)
 	}
 	if ws.LockedBy != nil {
-		return WorkspaceInfo{}, fmt.Errorf("git workspace %q is locked by session %s", workspaceID, ws.LockedBy.SessionKey)
+		return WorkspaceInfo{}, fmt.Errorf(
+			"git workspace %q is locked by session %s",
+			workspaceID,
+			ws.LockedBy.SessionKey,
+		)
 	}
 	if err := m.dropWorkspaceLocked(ctx, st, ws, "manual_drop"); err != nil {
 		return WorkspaceInfo{}, err
@@ -458,12 +484,21 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileResult, error) {
 		if m.opts.IgnoredCleanupDelay > 0 && now.Sub(ws.LastWorkAt) >= m.opts.IgnoredCleanupDelay {
 			before, _ := ignoredSize(ctx, ws.Path)
 			if before > 0 {
-				if err := cleanIgnored(ctx, ws.Path); err != nil {
-					return ReconcileResult{}, err
+				if cleanErr := cleanIgnored(ctx, ws.Path); cleanErr != nil {
+					return ReconcileResult{}, cleanErr
 				}
 				ws.LastCleanedAt = now
 				ws.UpdatedAt = now
-				m.addHistoryLocked(st, now, "auto_cleaned_ignored", ws.RepoID, ws.ID, "", "", fmt.Sprintf("%d bytes", before))
+				m.addHistoryLocked(
+					st,
+					now,
+					"auto_cleaned_ignored",
+					ws.RepoID,
+					ws.ID,
+					"",
+					"",
+					fmt.Sprintf("%d bytes", before),
+				)
 				cleaned = append(cleaned, ws)
 			}
 		}
@@ -474,8 +509,8 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileResult, error) {
 			continue
 		}
 		if m.opts.DropDelay > 0 && now.Sub(ws.LastWorkAt) >= m.opts.DropDelay {
-			if err := m.dropWorkspaceLocked(ctx, st, ws, "auto_drop_age"); err != nil {
-				return ReconcileResult{}, err
+			if dropErr := m.dropWorkspaceLocked(ctx, st, ws, "auto_drop_age"); dropErr != nil {
+				return ReconcileResult{}, dropErr
 			}
 			dropped = append(dropped, ws)
 		}
@@ -490,8 +525,8 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileResult, error) {
 			if ws == nil || ws.DroppedAt != nil || ws.LockedBy != nil {
 				continue
 			}
-			if err := m.dropWorkspaceLocked(ctx, st, ws, "auto_drop_size"); err != nil {
-				return ReconcileResult{}, err
+			if dropErr := m.dropWorkspaceLocked(ctx, st, ws, "auto_drop_size"); dropErr != nil {
+				return ReconcileResult{}, dropErr
 			}
 			dropped = append(dropped, ws)
 			stats, err = m.statsLocked(ctx, st)
@@ -504,8 +539,8 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileResult, error) {
 		}
 	}
 
-	if err := m.saveLocked(st); err != nil {
-		return ReconcileResult{}, err
+	if saveErr := m.saveLocked(st); saveErr != nil {
+		return ReconcileResult{}, saveErr
 	}
 	stats, err = m.statsLocked(ctx, st)
 	if err != nil {
@@ -591,7 +626,10 @@ func (m *Manager) saveLocked(st *storeState) error {
 	return fileutil.WriteFileAtomic(m.statePath(), data, 0o600)
 }
 
-func (m *Manager) findSessionWorkspaceLocked(st *storeState, repoID, sessionKey string) *WorkspaceRecord {
+func (m *Manager) findSessionWorkspaceLocked(
+	st *storeState,
+	repoID, sessionKey string,
+) *WorkspaceRecord {
 	for _, ws := range st.Workspaces {
 		if ws == nil || ws.RepoID != repoID || ws.DroppedAt != nil || ws.LockedBy == nil {
 			continue
@@ -663,7 +701,12 @@ func (m *Manager) createWorkspaceLocked(
 	return ws, nil
 }
 
-func (m *Manager) dropWorkspaceLocked(ctx context.Context, st *storeState, ws *WorkspaceRecord, action string) error {
+func (m *Manager) dropWorkspaceLocked(
+	ctx context.Context,
+	st *storeState,
+	ws *WorkspaceRecord,
+	action string,
+) error {
 	now := m.now().UTC()
 	branch, changed, err := m.preserveWorkspaceLocked(ctx, ws, "", now)
 	if err != nil {
@@ -684,7 +727,12 @@ func (m *Manager) dropWorkspaceLocked(ctx context.Context, st *storeState, ws *W
 	return nil
 }
 
-func (m *Manager) preserveWorkspaceLocked(ctx context.Context, ws *WorkspaceRecord, sessionKey string, now time.Time) (string, bool, error) {
+func (m *Manager) preserveWorkspaceLocked(
+	ctx context.Context,
+	ws *WorkspaceRecord,
+	sessionKey string,
+	now time.Time,
+) (string, bool, error) {
 	if ws == nil || ws.Path == "" {
 		return "", false, nil
 	}
@@ -830,9 +878,15 @@ func (m *Manager) workspaceInfo(ctx context.Context, ws *WorkspaceRecord) (Works
 	return info, nil
 }
 
-func (m *Manager) addHistoryLocked(st *storeState, now time.Time, action, repoID, workspaceID, sessionKey, agentID, detail string) {
+func (m *Manager) addHistoryLocked(
+	st *storeState,
+	now time.Time,
+	action, repoID, workspaceID, sessionKey, agentID, detail string,
+) {
 	entry := HistoryEntry{
-		ID:          shortID(fmt.Sprintf("%s:%s:%s:%s:%d", action, repoID, workspaceID, sessionKey, now.UnixNano())),
+		ID: shortID(
+			fmt.Sprintf("%s:%s:%s:%s:%d", action, repoID, workspaceID, sessionKey, now.UnixNano()),
+		),
 		Time:        now,
 		Action:      action,
 		RepoID:      repoID,
@@ -878,7 +932,15 @@ func ignoredSize(ctx context.Context, repoPath string) (int64, error) {
 	if _, err := os.Stat(filepath.Join(repoPath, ".git")); err != nil {
 		return 0, err
 	}
-	output, err := runGit(ctx, repoPath, "status", "--ignored", "--porcelain=v1", "-z", "--untracked-files=all")
+	output, err := runGit(
+		ctx,
+		repoPath,
+		"status",
+		"--ignored",
+		"--porcelain=v1",
+		"-z",
+		"--untracked-files=all",
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -965,7 +1027,8 @@ func normalizeRepository(repo string) (string, error) {
 	if repo == "" {
 		return "", errors.New("repository is required")
 	}
-	if strings.Contains(repo, "://") || strings.HasPrefix(repo, "git@") || strings.HasPrefix(repo, "ssh://") {
+	if strings.Contains(repo, "://") || strings.HasPrefix(repo, "git@") ||
+		strings.HasPrefix(repo, "ssh://") {
 		return repo, nil
 	}
 	if abs, err := filepath.Abs(repo); err == nil {
@@ -999,7 +1062,7 @@ func safeBranchSegment(value string) string {
 	return safeSegment(value, 48)
 }
 
-func safeSegment(value string, max int) string {
+func safeSegment(value string, maxLen int) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	var b strings.Builder
 	lastDash := false
@@ -1019,8 +1082,8 @@ func safeSegment(value string, max int) string {
 	if out == "" {
 		out = "repo"
 	}
-	if len(out) > max {
-		out = strings.Trim(out[:max], "-")
+	if len(out) > maxLen {
+		out = strings.Trim(out[:maxLen], "-")
 	}
 	if out == "" {
 		out = "repo"

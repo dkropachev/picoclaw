@@ -46,11 +46,11 @@ type Config struct {
 	Workflows WorkflowsConfig `json:"workflows,omitempty" yaml:"-"`
 	// GitWorkspaces controls the inventory of local git checkouts reused by agent sessions.
 	GitWorkspaces GitWorkspacesConfig `json:"git_workspaces,omitempty" yaml:"-"`
-	Hooks         HooksConfig         `json:"hooks,omitempty"     yaml:"-"`
-	Tools         ToolsConfig         `json:"tools"               yaml:",inline"`
-	Heartbeat     HeartbeatConfig     `json:"heartbeat"           yaml:"-"`
-	Devices       DevicesConfig       `json:"devices"             yaml:"-"`
-	Voice         VoiceConfig         `json:"voice"               yaml:"-"`
+	Hooks         HooksConfig         `json:"hooks,omitempty"          yaml:"-"`
+	Tools         ToolsConfig         `json:"tools"                    yaml:",inline"`
+	Heartbeat     HeartbeatConfig     `json:"heartbeat"                yaml:"-"`
+	Devices       DevicesConfig       `json:"devices"                  yaml:"-"`
+	Voice         VoiceConfig         `json:"voice"                    yaml:"-"`
 	// BuildInfo contains build-time version information
 	BuildInfo BuildInfo `json:"build_info,omitempty" yaml:"-"`
 
@@ -88,7 +88,7 @@ const (
 )
 
 type GitWorkspacesConfig struct {
-	RootDir                    string `json:"root_dir,omitempty"                       env:"PICOCLAW_GIT_WORKSPACES_ROOT_DIR"`
+	RootDir                    string `json:"root_dir,omitempty"                      env:"PICOCLAW_GIT_WORKSPACES_ROOT_DIR"`
 	MaxTotalSizeBytes          int64  `json:"max_total_size_bytes,omitempty"          env:"PICOCLAW_GIT_WORKSPACES_MAX_TOTAL_SIZE_BYTES"`
 	IgnoredCleanupDelaySeconds int    `json:"ignored_cleanup_delay_seconds,omitempty" env:"PICOCLAW_GIT_WORKSPACES_IGNORED_CLEANUP_DELAY_SECONDS"`
 	DropDelaySeconds           int    `json:"drop_delay_seconds,omitempty"            env:"PICOCLAW_GIT_WORKSPACES_DROP_DELAY_SECONDS"`
@@ -352,7 +352,8 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 		Alias: (*Alias)(c),
 	}
 
-	if len(c.Session.Dimensions) > 0 || len(c.Session.IdentityLinks) > 0 || c.Session.DmScope != "" {
+	if len(c.Session.Dimensions) > 0 || len(c.Session.IdentityLinks) > 0 ||
+		c.Session.DmScope != "" {
 		sessionCfg := c.Session
 		aux.Session = &sessionCfg
 	}
@@ -1581,7 +1582,11 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if e := json.Unmarshal(data, &versionInfo); e != nil {
 		e = wrapJSONError(data, e, "config.json")
-		logger.ErrorCF("config", formatDiagnosticLogMessage("Malformed config file", e), map[string]any{"path": path})
+		logger.ErrorCF(
+			"config",
+			formatDiagnosticLogMessage("Malformed config file", e),
+			map[string]any{"path": path},
+		)
 		return nil, e
 	}
 	if len(data) <= 10 {

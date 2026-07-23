@@ -27,14 +27,18 @@ func TestManagerAcquireReleasePreservesChangesAndCleansIgnored(t *testing.T) {
 		t.Fatalf("workspace lock = %+v, want session/main", acquired.LockedBy)
 	}
 
-	if err := os.WriteFile(filepath.Join(acquired.Path, "change.txt"), []byte("work\n"), 0o644); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(filepath.Join(acquired.Path, "change.txt"), []byte("work\n"), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
 	}
-	if err := os.MkdirAll(filepath.Join(acquired.Path, "ignored"), 0o755); err != nil {
-		t.Fatal(err)
+	if mkdirErr := os.MkdirAll(filepath.Join(acquired.Path, "ignored"), 0o755); mkdirErr != nil {
+		t.Fatal(mkdirErr)
 	}
-	if err := os.WriteFile(filepath.Join(acquired.Path, "ignored", "blob.bin"), []byte(strings.Repeat("x", 4096)), 0o644); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(
+		filepath.Join(acquired.Path, "ignored", "blob.bin"),
+		[]byte(strings.Repeat("x", 4096)),
+		0o644,
+	); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 
 	stats, err := manager.Stats(ctx)
@@ -74,7 +78,11 @@ func TestManagerAcquireReleasePreservesChangesAndCleansIgnored(t *testing.T) {
 		t.Fatalf("CleanupIgnored() error = %v", err)
 	}
 	if cleaned.Before == 0 || cleaned.After != 0 {
-		t.Fatalf("cleanup ignored bytes before/after = %d/%d, want >0/0", cleaned.Before, cleaned.After)
+		t.Fatalf(
+			"cleanup ignored bytes before/after = %d/%d, want >0/0",
+			cleaned.Before,
+			cleaned.After,
+		)
 	}
 	if _, err := os.Stat(filepath.Join(acquired.Path, "ignored", "blob.bin")); !os.IsNotExist(err) {
 		t.Fatalf("ignored file stat error = %v, want not exist", err)
@@ -110,8 +118,8 @@ func TestManagerReconcileDropsOldUnlockedWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Acquire() error = %v", err)
 	}
-	if _, err := manager.ReleaseSession(ctx, ReleaseRequest{SessionKey: "s1"}); err != nil {
-		t.Fatalf("ReleaseSession() error = %v", err)
+	if _, releaseErr := manager.ReleaseSession(ctx, ReleaseRequest{SessionKey: "s1"}); releaseErr != nil {
+		t.Fatalf("ReleaseSession() error = %v", releaseErr)
 	}
 	now = now.Add(49 * time.Hour)
 
@@ -142,7 +150,7 @@ func TestManagerCoordinatesInventoryAcrossInstances(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Acquire() error = %v", err)
 	}
-	if _, err := second.CleanupIgnored(ctx, acquired.ID); err == nil {
+	if _, cleanupErr := second.CleanupIgnored(ctx, acquired.ID); cleanupErr == nil {
 		t.Fatal("second CleanupIgnored() error = nil, want locked workspace error")
 	}
 	separate, err := second.Acquire(ctx, AcquireRequest{Repository: source, SessionKey: "s2"})

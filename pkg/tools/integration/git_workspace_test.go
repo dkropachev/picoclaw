@@ -35,8 +35,13 @@ func TestGitWorkspaceToolAcquireUsesSessionContext(t *testing.T) {
 	if manager.acquireReq.Ref != "feature" {
 		t.Fatalf("Acquire ref = %q", manager.acquireReq.Ref)
 	}
-	if manager.acquireReq.SessionKey != "session-123" || manager.acquireReq.AgentID != "main-agent" {
-		t.Fatalf("Acquire session/agent = %q/%q", manager.acquireReq.SessionKey, manager.acquireReq.AgentID)
+	if manager.acquireReq.SessionKey != "session-123" ||
+		manager.acquireReq.AgentID != "main-agent" {
+		t.Fatalf(
+			"Acquire session/agent = %q/%q",
+			manager.acquireReq.SessionKey,
+			manager.acquireReq.AgentID,
+		)
 	}
 	var payload struct {
 		Workspace gitworkspace.WorkspaceInfo `json:"workspace"`
@@ -62,8 +67,13 @@ func TestGitWorkspaceToolReleaseUsesSessionContext(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("Execute(release) returned error: %s", result.ForLLM)
 	}
-	if manager.releaseReq.SessionKey != "session-123" || manager.releaseReq.AgentID != "main-agent" {
-		t.Fatalf("Release session/agent = %q/%q", manager.releaseReq.SessionKey, manager.releaseReq.AgentID)
+	if manager.releaseReq.SessionKey != "session-123" ||
+		manager.releaseReq.AgentID != "main-agent" {
+		t.Fatalf(
+			"Release session/agent = %q/%q",
+			manager.releaseReq.SessionKey,
+			manager.releaseReq.AgentID,
+		)
 	}
 	var payload struct {
 		Released []gitworkspace.WorkspaceInfo `json:"released"`
@@ -112,12 +122,18 @@ type fakeGitWorkspaceManager struct {
 	stats       gitworkspace.Stats
 }
 
-func (f *fakeGitWorkspaceManager) Acquire(ctx context.Context, req gitworkspace.AcquireRequest) (gitworkspace.WorkspaceInfo, error) {
+func (f *fakeGitWorkspaceManager) Acquire(
+	ctx context.Context,
+	req gitworkspace.AcquireRequest,
+) (gitworkspace.WorkspaceInfo, error) {
 	f.acquireReq = req
 	return f.acquireInfo, nil
 }
 
-func (f *fakeGitWorkspaceManager) ReleaseSession(ctx context.Context, req gitworkspace.ReleaseRequest) ([]gitworkspace.WorkspaceInfo, error) {
+func (f *fakeGitWorkspaceManager) ReleaseSession(
+	ctx context.Context,
+	req gitworkspace.ReleaseRequest,
+) ([]gitworkspace.WorkspaceInfo, error) {
 	f.releaseReq = req
 	return f.released, nil
 }
@@ -126,14 +142,22 @@ func (f *fakeGitWorkspaceManager) Stats(ctx context.Context) (gitworkspace.Stats
 	return f.stats, nil
 }
 
-func (f *fakeGitWorkspaceManager) CleanupIgnored(ctx context.Context, workspaceID string) (gitworkspace.CleanupResult, error) {
+func (f *fakeGitWorkspaceManager) CleanupIgnored(
+	ctx context.Context,
+	workspaceID string,
+) (gitworkspace.CleanupResult, error) {
 	return gitworkspace.CleanupResult{}, nil
 }
 
-func (f *fakeGitWorkspaceManager) Drop(ctx context.Context, workspaceID string) (gitworkspace.WorkspaceInfo, error) {
+func (f *fakeGitWorkspaceManager) Drop(
+	ctx context.Context,
+	workspaceID string,
+) (gitworkspace.WorkspaceInfo, error) {
 	return gitworkspace.WorkspaceInfo{}, nil
 }
 
-func (f *fakeGitWorkspaceManager) Reconcile(ctx context.Context) (gitworkspace.ReconcileResult, error) {
+func (f *fakeGitWorkspaceManager) Reconcile(
+	ctx context.Context,
+) (gitworkspace.ReconcileResult, error) {
 	return gitworkspace.ReconcileResult{}, nil
 }

@@ -28,7 +28,11 @@ func (h *Handler) handleListGitWorkspaces(w http.ResponseWriter, r *http.Request
 	}
 	stats, err := manager.Stats(r.Context())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to list git workspaces: %v", err), http.StatusInternalServerError)
+		http.Error(
+			w,
+			fmt.Sprintf("Failed to list git workspaces: %v", err),
+			http.StatusInternalServerError,
+		)
 		return
 	}
 	writeJSON(w, stats)
@@ -42,7 +46,11 @@ func (h *Handler) handleReconcileGitWorkspaces(w http.ResponseWriter, r *http.Re
 	}
 	result, err := manager.Reconcile(r.Context())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to reconcile git workspaces: %v", err), http.StatusInternalServerError)
+		http.Error(
+			w,
+			fmt.Sprintf("Failed to reconcile git workspaces: %v", err),
+			http.StatusInternalServerError,
+		)
 		return
 	}
 	writeJSON(w, result)
@@ -55,8 +63,8 @@ func (h *Handler) handleCleanupGitWorkspace(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var req gitWorkspaceActionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+	if decodeErr := json.NewDecoder(r.Body).Decode(&req); decodeErr != nil {
+		http.Error(w, fmt.Sprintf("Invalid JSON: %v", decodeErr), http.StatusBadRequest)
 		return
 	}
 	result, err := manager.CleanupIgnored(r.Context(), req.WorkspaceID)
