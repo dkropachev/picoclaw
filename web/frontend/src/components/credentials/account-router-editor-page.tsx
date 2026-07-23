@@ -113,27 +113,19 @@ const DIAGRAM_VIEWBOX_HEIGHT = 620
 const SCALE_OPTIONS = [50, 75, 100, 125, 150, 200]
 const EMPTY_ROUTER: ModelRouterConfig = {
   enabled: true,
-  entry: "account-1",
+  entry: "",
   refresh_interval_seconds: 60,
-  blocks: [
-    {
-      id: "account-1",
-      type: "account",
-      account: "",
-    },
-  ],
+  blocks: [],
 }
 const NONE_VALUE = "__none"
 
 function cloneRouterConfig(config: ModelRouterConfig): ModelRouterConfig {
+  const blocks = config.blocks && config.blocks.length > 0 ? config.blocks : []
   return {
     enabled: config.enabled !== false,
-    entry: config.entry || config.blocks?.[0]?.id || "account-1",
+    entry: config.entry || blocks[0]?.id || "",
     refresh_interval_seconds: config.refresh_interval_seconds || 60,
-    blocks: (config.blocks && config.blocks.length > 0
-      ? config.blocks
-      : (EMPTY_ROUTER.blocks ?? [])
-    ).map((block) => ({
+    blocks: blocks.map((block) => ({
       ...block,
       accounts: block.accounts ? [...block.accounts] : undefined,
     })),
@@ -142,8 +134,9 @@ function cloneRouterConfig(config: ModelRouterConfig): ModelRouterConfig {
 
 function normalizeRouterConfig(config?: ModelRouterConfig): ModelRouterConfig {
   const router = cloneRouterConfig(config ?? EMPTY_ROUTER)
-  if (!router.blocks?.some((block) => block.id === router.entry)) {
-    router.entry = router.blocks?.[0]?.id || "account-1"
+  const blocks = router.blocks ?? []
+  if (!blocks.some((block) => block.id === router.entry)) {
+    router.entry = blocks[0]?.id || ""
   }
   return router
 }
@@ -449,8 +442,8 @@ function validateRouterConfig(
 ): string {
   if (!config.enabled) return t("models.router.errorRawDisabled")
   const blocks = config.blocks ?? []
+  if (blocks.length === 0) return t("models.router.errorNoBlocks")
   if (!config.entry?.trim()) return t("models.router.errorRawEntry")
-  if (blocks.length === 0) return t("models.router.errorRawBlocks")
   const ids = new Set<string>()
   for (const block of blocks) {
     const id = block.id.trim()
@@ -1253,7 +1246,7 @@ function RouterDiagram({
     return () => {
       svg.removeEventListener("wheel", handleNativeWheel)
     }
-  }, [])
+  }, [blocks.length])
 
   const viewportPoint = (clientX: number, clientY: number): Point => {
     const svg = svgRef.current
@@ -1326,7 +1319,7 @@ function RouterDiagram({
   if (blocks.length === 0) {
     return (
       <div className="text-muted-foreground p-6 text-sm">
-        {t("models.router.noBlocks")}
+        {t("models.router.noBlocksEmpty")}
       </div>
     )
   }
@@ -1595,7 +1588,7 @@ function BlockInspector({
   if (!block) {
     return (
       <div className="text-muted-foreground p-4 text-sm">
-        {t("models.router.noBlocks")}
+        {t("models.router.noBlocksEmpty")}
       </div>
     )
   }

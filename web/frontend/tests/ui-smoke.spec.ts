@@ -1284,7 +1284,12 @@ test("account router editor supports block fallback graph editing", async ({
   await expect(
     page.getByRole("heading", { name: "Create Account Router" }),
   ).toBeVisible()
+  await expect(
+    page.getByText("Add an account or load balancer block to start."),
+  ).toHaveCount(2)
+  await expect(page.getByText("No accounts connected.")).toBeVisible()
 
+  await page.getByRole("button", { name: "Add Account" }).click()
   await page.getByRole("combobox", { name: "Account" }).click()
   await page.getByRole("option", { name: "OpenAI: acct-primary" }).click()
 
@@ -1327,13 +1332,16 @@ test("account router editor supports block fallback graph editing", async ({
       )
       .not.toBe(beforeDragTransform)
 
-    await page.mouse.move(
-      canvasBox!.x + canvasBox!.width / 2,
-      canvasBox!.y + canvasBox!.height / 2,
-    )
-    await page.keyboard.down("Shift")
-    await page.mouse.wheel(0, -240)
-    await page.keyboard.up("Shift")
+    await canvas.evaluate((element) => {
+      element.dispatchEvent(
+        new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          deltaY: -240,
+          shiftKey: true,
+        }),
+      )
+    })
     await expect(page.getByRole("combobox", { name: "Scale" })).toContainText(
       "150%",
     )
