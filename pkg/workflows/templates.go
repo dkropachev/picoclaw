@@ -44,6 +44,12 @@ on:
         value: ${{ jobs.code_review.outputs.inventory }}
       inventoryJson:
         value: ${{ jobs.code_review.outputs.inventoryJson }}
+      filter:
+        value: ${{ jobs.code_review.outputs.filter }}
+      filterJson:
+        value: ${{ jobs.code_review.outputs.filterJson }}
+      filterSummary:
+        value: ${{ jobs.code_review.outputs.filterSummary }}
       reviewJson:
         value: ${{ jobs.code_review.outputs.reviewJson }}
       managed:
@@ -61,8 +67,11 @@ jobs:
     name: Inventory and optional review
     runs-on: picoclaw
     outputs:
-      inventory: ${{ steps.inventory.outputs }}
+      inventory: ${{ steps.selection.outputs }}
       inventoryJson: ${{ steps.store_inventory.outputs.relativePath }}
+      filter: ${{ steps.plan_filter.outputs.structured }}
+      filterJson: ${{ steps.store_filter.outputs.relativePath }}
+      filterSummary: ${{ steps.plan_filter.outputs.structured.rationale }}
       reviewJson: ${{ steps.store_review.outputs.relativePath }}
       managed: ${{ steps.review.outputs.managed }}
       reviewNeeded: ${{ inputs.action == 'review' }}
@@ -78,18 +87,28 @@ jobs:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.ref }}
       - id: inventory
-        name: Build git inventory
+        name: Build repository structure inventory
         uses: function/git.inventory
         with:
           working_directory: ${{ steps.checkout.outputs.workspace.path }}
+          target: all
+      - id: selection
+        name: Select requested inventory target
+        uses: function/git.filter
+        with:
+          working_directory: ${{ steps.checkout.outputs.workspace.path }}
+          files: ${{ steps.inventory.outputs.files }}
+          commit: ${{ steps.inventory.outputs.commit }}
+          inventory_hash: ${{ steps.inventory.outputs.inventoryHash }}
           target: ${{ inputs.target }}
+          filter: {}
       - id: save_inventory_state
         name: Save latest inventory state
         uses: function/workflow.state
         with:
           action: set
           key: code_review:last_inventory
-          value: ${{ steps.inventory.outputs }}
+          value: ${{ steps.selection.outputs }}
       - id: store_inventory
         name: Store inventory artifact
         uses: function/workflow.artifact
@@ -97,18 +116,103 @@ jobs:
           action: write
           format: json
           name: code-review/inventories/${{ steps.inventory.outputs.inventoryHash }}.json
-          value: ${{ steps.inventory.outputs }}
-      - id: review_inventory
-        name: Build review content inventory
-        if: ${{ inputs.action == 'review' }}
-        uses: function/git.inventory
+          value: ${{ steps.selection.outputs }}
+      - id: release_structure
+        name: Release structure workspace
+        uses: tool/git_workspace
         with:
-          working_directory: ${{ steps.checkout.outputs.workspace.path }}
+          action: release
+      - id: plan_filter
+        name: Ask AI to plan review filter
+        if: ${{ inputs.action == 'review' }}
+        uses: agent/main
+        with:
+          session: key:workflow-code-review-filter
+          history: none
+          cache: session
+          prompt: |
+            You are selecting files for a Codex-style code review.
+
+            The assigned scope contains repository-relative file metadata only: path, category, mode, hash, size, and deterministic selected flag. It does not contain file content.
+
+            Return a path filter as JSON:
+            - includeGlobs chooses candidate files for the requested review target.
+            - excludeGlobs removes generated files, examples, fixtures, snapshots, vendored code, build outputs, test data, mocks, and other low-signal files.
+            - rationale briefly explains the policy.
+
+            Rules:
+            - Use glob patterns over repository-relative paths.
+            - Prefer broad stable globs over enumerating every file.
+            - Use ** for recursive path segments.
+            - Do not use tools or inspect file content.
+            - Keep production runtime code and important runtime configuration.
+            - For target "code", exclude tests, test data, fixtures, mocks, examples, generated files, and documentation unless they are clearly part of runtime behavior.
+            - For target "tests", include tests and test helpers but exclude generated snapshots, huge fixtures, and build outputs.
+            - For target "all", include useful code and tests while excluding generated or low-signal files.
+          context: |
+            Repository: ${{ inputs.repository }}
+            Requested ref: ${{ inputs.ref }}
+            Base ref: ${{ inputs.base_ref }}
+            Requested target: ${{ inputs.target }}
+            Review focus: ${{ inputs.review_focus }}
+            Commit: ${{ steps.inventory.outputs.commit }}
+            Total files: ${{ steps.inventory.outputs.counts.totalFiles }}
+            Deterministic selected files: ${{ steps.selection.outputs.counts.totalSelectedFiles }}
+          scope: ${{ steps.inventory.outputs.files }}
+          output:
+            format: json
+            repair_attempts: 1
+            schema:
+              type: object
+              required: [includeGlobs, excludeGlobs, rationale]
+              properties:
+                includeGlobs:
+                  type: array
+                  items:
+                    type: string
+                excludeGlobs:
+                  type: array
+                  items:
+                    type: string
+                selectedPaths:
+                  type: array
+                  items:
+                    type: string
+                rationale:
+                  type: string
+      - id: store_filter
+        name: Store AI review filter
+        if: ${{ inputs.action == 'review' }}
+        uses: function/workflow.artifact
+        with:
+          action: write
+          format: json
+          name: code-review/filters/${{ steps.inventory.outputs.inventoryHash }}.json
+          value: ${{ steps.plan_filter.outputs.structured }}
+      - id: review_checkout
+        name: Acquire review content workspace
+        if: ${{ inputs.action == 'review' }}
+        uses: tool/git_workspace
+        with:
+          action: acquire
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+      - id: review_inventory
+        name: Apply AI filter and attach review content
+        if: ${{ inputs.action == 'review' }}
+        uses: function/git.filter
+        with:
+          working_directory: ${{ steps.review_checkout.outputs.workspace.path }}
+          files: ${{ steps.inventory.outputs.files }}
+          commit: ${{ steps.inventory.outputs.commit }}
+          inventory_hash: ${{ steps.inventory.outputs.inventoryHash }}
           target: ${{ inputs.target }}
+          filter: ${{ steps.plan_filter.outputs.structured }}
           include_content: true
           max_content_bytes: ${{ inputs.max_content_bytes }}
-      - id: release
-        name: Release git workspace
+      - id: release_review
+        name: Release review content workspace
+        if: ${{ inputs.action == 'review' }}
         uses: tool/git_workspace
         with:
           action: release
@@ -157,10 +261,11 @@ jobs:
             Base ref: ${{ inputs.base_ref }}
             Review focus: ${{ inputs.review_focus }}
           context: |
-            Workspace path: ${{ steps.checkout.outputs.workspace.path }}
+            Workspace path: ${{ steps.review_checkout.outputs.workspace.path }}
             Commit: ${{ steps.inventory.outputs.commit }}
-            Target: ${{ steps.inventory.outputs.target }}
+            Target: ${{ inputs.target }}
             Inventory hash: ${{ steps.inventory.outputs.inventoryHash }}
+            Filter rationale: ${{ steps.plan_filter.outputs.structured.rationale }}
             Selected files: ${{ steps.review_inventory.outputs.counts.totalSelectedFiles }}
           scope: ${{ steps.review_inventory.outputs.selectedFiles }}
           output:
@@ -222,7 +327,10 @@ jobs:
           action: set
           key: code_review:last_review
           value:
-            inventory: ${{ steps.inventory.outputs }}
+            inventory: ${{ steps.selection.outputs }}
+            structureInventory: ${{ steps.inventory.outputs }}
+            filterJson: ${{ steps.store_filter.outputs.relativePath }}
+            filter: ${{ steps.plan_filter.outputs.structured }}
             reviewJson: ${{ steps.store_review.outputs.relativePath }}
             structuredReview: ${{ steps.review.outputs.structured }}
             managed: ${{ steps.review.outputs.managed }}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -45,7 +46,15 @@ func TestCodeReviewWorkflowRunsWithGitWorkspaceTool(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(repo, "src", "fixtures"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "src", "test"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	writeTestFile(t, filepath.Join(repo, "src", "app.go"), "package app\n\nfunc Answer() int { return 42 }\n")
+	writeTestFile(t, filepath.Join(repo, "src", "fixtures", "fixture.go"), "package fixtures\n\nvar Fixture = 1\n")
+	writeTestFile(t, filepath.Join(repo, "src", "test", "app_test.go"), "package app\n\nfunc TestAnswer() {}\n")
 	gitCmd(t, repo, "init")
 	gitCmd(t, repo, "config", "user.email", "test@example.com")
 	gitCmd(t, repo, "config", "user.name", "Test User")
@@ -77,8 +86,8 @@ func TestCodeReviewWorkflowRunsWithGitWorkspaceTool(t *testing.T) {
 	if result.Status != RunStatusSucceeded {
 		t.Fatalf("status = %q, want succeeded", result.Status)
 	}
-	if !reflect.DeepEqual(toolRunner.actions, []string{"acquire", "release"}) {
-		t.Fatalf("git workspace actions = %v, want acquire then release", toolRunner.actions)
+	if !reflect.DeepEqual(toolRunner.actions, []string{"acquire", "release", "acquire", "release"}) {
+		t.Fatalf("git workspace actions = %v, want acquire/release around inventory and content", toolRunner.actions)
 	}
 	if !agentRunner.called {
 		t.Fatal("agent runner was not called")
@@ -137,15 +146,56 @@ type codeReviewTemplateAgentRunner struct {
 	repo       string
 	toolRunner *codeReviewTemplateToolRunner
 	called     bool
+	filtered   bool
 }
 
 func (r *codeReviewTemplateAgentRunner) RunAgent(_ context.Context, req AgentRequest) (map[string]any, error) {
-	r.called = true
-	if !reflect.DeepEqual(r.toolRunner.actions, []string{"acquire", "release"}) {
-		r.t.Fatalf("agent called after actions %v, want workspace released first", r.toolRunner.actions)
-	}
 	if req.AgentID != "main" || req.History != "none" || req.Cache != "session" {
 		r.t.Fatalf("agent request = %#v, want main/history none/cache session", req)
+	}
+	if strings.Contains(req.Prompt, "selecting files for a Codex-style code review") {
+		r.filtered = true
+		if !reflect.DeepEqual(r.toolRunner.actions, []string{"acquire", "release"}) {
+			r.t.Fatalf(
+				"filter agent called after actions %v, want structure workspace released first",
+				r.toolRunner.actions,
+			)
+		}
+		scope, ok := req.Scope.([]map[string]any)
+		if !ok {
+			r.t.Fatalf("filter scope = %#v, want file metadata list", req.Scope)
+		}
+		if len(scope) != 3 {
+			r.t.Fatalf("filter scope length = %d, want repository structure", len(scope))
+		}
+		for _, file := range scope {
+			if _, exists := file["content"]; exists {
+				r.t.Fatalf("filter scope unexpectedly includes content for %#v", file["path"])
+			}
+		}
+		structured := map[string]any{
+			"includeGlobs": []any{"src/**"},
+			"excludeGlobs": []any{"**/fixtures/**"},
+			"rationale":    "Review runtime source and skip fixtures.",
+		}
+		raw, err := json.Marshal(structured)
+		if err != nil {
+			r.t.Fatal(err)
+		}
+		return map[string]any{
+			"text":             string(raw),
+			"structured":       structured,
+			"structured_json":  string(raw),
+			"structured_valid": true,
+		}, nil
+	}
+
+	r.called = true
+	if !r.filtered {
+		r.t.Fatal("review agent called before filter agent")
+	}
+	if !reflect.DeepEqual(r.toolRunner.actions, []string{"acquire", "release", "acquire", "release"}) {
+		r.t.Fatalf("review agent called after actions %v, want review workspace released first", r.toolRunner.actions)
 	}
 	scope, ok := req.Scope.([]map[string]any)
 	if !ok {

@@ -264,6 +264,83 @@ func TestNativeGitInventoryCanIncludeSelectedFileContent(t *testing.T) {
 	}
 }
 
+func TestNativeGitFilterAppliesGlobPolicyAndIncludesContent(t *testing.T) {
+	requireGit(t)
+	workspace := t.TempDir()
+	repo := filepath.Join(workspace, "repo")
+	for _, dir := range []string{
+		filepath.Join(repo, "src", "main"),
+		filepath.Join(repo, "src", "fixtures"),
+		filepath.Join(repo, "src", "testdata"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCmd(t, repo, "init")
+	gitCmd(t, repo, "config", "user.email", "test@example.com")
+	gitCmd(t, repo, "config", "user.name", "Test User")
+	writeTestFile(t, filepath.Join(repo, "src", "main", "App.java"), "class App {}\n")
+	writeTestFile(t, filepath.Join(repo, "src", "fixtures", "Fixture.java"), "class Fixture {}\n")
+	writeTestFile(t, filepath.Join(repo, "src", "testdata", "payload.json"), "{}\n")
+	gitCmd(t, repo, "add", ".")
+	gitCmd(t, repo, "commit", "-m", "initial")
+
+	inventory, handled, err := RunNativeFunction(
+		context.Background(),
+		"git.inventory",
+		map[string]any{"working_directory": "repo", "target": "all"},
+		ExecutionContext{WorkspaceDir: workspace},
+	)
+	if err != nil {
+		t.Fatalf("git.inventory error = %v", err)
+	}
+	if !handled {
+		t.Fatal("git.inventory was not handled")
+	}
+	filtered, handled, err := RunNativeFunction(
+		context.Background(),
+		"git.filter",
+		map[string]any{
+			"working_directory": "repo",
+			"files":             inventory["files"],
+			"target":            "code",
+			"filter": map[string]any{
+				"includeGlobs": []any{"src/**"},
+				"excludeGlobs": []any{"**/fixtures/**", "**/testdata/**"},
+				"rationale":    "Skip fixtures and test data.",
+			},
+			"include_content":   true,
+			"max_content_bytes": 1024,
+		},
+		ExecutionContext{WorkspaceDir: workspace},
+	)
+	if err != nil {
+		t.Fatalf("git.filter error = %v", err)
+	}
+	if !handled {
+		t.Fatal("git.filter was not handled")
+	}
+	selected, ok := filtered["selectedFiles"].([]map[string]any)
+	if !ok {
+		t.Fatalf("selectedFiles = %#v, want []map[string]any", filtered["selectedFiles"])
+	}
+	if len(selected) != 1 {
+		t.Fatalf("selectedFiles = %#v, want one production file", selected)
+	}
+	if selected[0]["path"] != "src/main/App.java" {
+		t.Fatalf("selected path = %#v, want src/main/App.java", selected[0]["path"])
+	}
+	content, contentOK := selected[0]["content"].(string)
+	if !contentOK || !strings.Contains(content, "class App") {
+		t.Fatalf("selected content = %#v, want App.java content", selected[0]["content"])
+	}
+	counts, ok := filtered["counts"].(map[string]any)
+	if !ok || counts["totalSelectedFiles"] != 1 {
+		t.Fatalf("counts = %#v, want one selected file", filtered["counts"])
+	}
+}
+
 func TestNativeGitInventoryRejectsWorkspaceEscape(t *testing.T) {
 	requireGit(t)
 	workspace := t.TempDir()
