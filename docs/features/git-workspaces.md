@@ -31,7 +31,7 @@ launcher API, and frontend dashboard.
 | ID | Level | Trigger/Input | Required Output | State Mutation | Failure/Edge | Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
 | `FR-GITWS-001` | MUST | Config load with `git_workspaces` omitted or partially configured. | Effective root, max total size, ignored cleanup delay, and drop delay resolve to defaults. | No inventory mutation. | Empty root falls back under the configured workspace directory. | Operators need safe defaults without mandatory setup. |
-| `FR-GITWS-002` | MUST | Acquire request with repository, optional ref, and session key. | A checked-out workspace path and lock metadata are returned. | Repository and workspace records plus allocation history are persisted. | Missing repository/session returns an error; an already locked checkout for another session causes a separate checkout to be allocated. | Concurrent sessions must not overwrite each other. |
+| `FR-GITWS-002` | MUST | Acquire request with repository, optional ref, and session key. | A checked-out workspace path and lock metadata are returned. | Repository and workspace records plus allocation history are persisted using canonical SSH remote URLs when the input URL can be represented that way. | Missing repository/session returns an error; an already locked checkout for another session causes a separate checkout to be allocated. | Concurrent sessions must not overwrite each other. |
 | `FR-GITWS-003` | MUST | Repeated acquire for the same repository and session. | The same locked workspace is returned and heartbeat metadata is updated. | Lock heartbeat and history are persisted. | Dropped workspaces are ignored. | Tool retries should be idempotent for a turn. |
 | `FR-GITWS-004` | MUST | Release request for a session with dirty workspace contents. | Workspace unlocks and reports the preserved branch name. | Dirty contents are committed on a `picoclaw/session/...` branch before lock removal. | Preserve failure keeps the error visible and records failure history. | Agent work must survive turn cleanup. |
 | `FR-GITWS-005` | MUST | Stats or list request. | Totals include active workspace count, locked count, total bytes, ignored bytes, per-repo rollups, per-workspace status, and newest history. | No mutation. | Dropped workspaces remain in history/status but are excluded from active totals. | UI and cleanup policies require accurate inventory. |
@@ -88,7 +88,9 @@ Owns: TOOL git_workspace
 
 ## Algorithms And Ordering
 
-1. Normalize repository paths or remote URLs and require a non-empty session key
+1. Normalize repository paths or remote URLs, prefer SCP-style SSH remotes for
+   representable HTTP(S), `git://`, `ssh://`, and existing SCP-style remotes,
+   and require a non-empty session key
    for acquire/release.
 2. Load inventory under a manager mutex.
 3. Reuse an existing session lock, reuse an unlocked matching checkout, or clone
