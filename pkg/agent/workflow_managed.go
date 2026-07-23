@@ -197,7 +197,7 @@ func (r *workflowAgentRunner) runManagedSplit(
 	} else {
 		metadata["calibration"] = map[string]any{
 			"status": "not_run",
-			"reason": "disabled by managed execution options",
+			"reason": "disabled by agent execution optimization options",
 		}
 	}
 
@@ -1599,7 +1599,7 @@ func workflowManagedApplyTasks(req workflows.AgentRequest, tasks []string) workf
 
 func workflowManagedPlanMessage(req workflows.AgentRequest, plan workflowManagedChildPlan, total int) string {
 	return strings.Join([]string{
-		fmt.Sprintf("Managed execution child task %d of %d.", plan.index, total),
+		fmt.Sprintf("Agent execution optimization child task %d of %d.", plan.index, total),
 		"Work only on the assigned scope and textual task subset. Preserve the requested structured output contract.",
 		"Do not perform write actions from a hidden managed child run; produce proposed results only.",
 		workflowAgentMessage(req),

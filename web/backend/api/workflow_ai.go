@@ -177,7 +177,7 @@ func buildWorkflowAuthorPrompt(
 		"- Agent steps may declare with.scope as a list or {items: [...]} and with.managed for generic scope/task splitting, calibration, bounded parallel child runs, model optimization, and effort optimization.\n",
 	)
 	b.WriteString(
-		"- Managed execution requires structured output and is generic; do not encode domain-specific split or merge logic in workflow YAML unless the user asks for it.\n",
+		"- Agent execution optimization requires structured output and is generic; do not encode domain-specific split or merge logic in workflow YAML unless the user asks for it.\n",
 	)
 	b.WriteString("- Do not invent unsupported top-level keys.\n\n")
 	writeWorkflowAuthorCapabilities(&b, capabilities)
