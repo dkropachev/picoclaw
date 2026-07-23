@@ -1645,6 +1645,31 @@ func TestWorkflowToolRunnerDeliversHandledMedia(t *testing.T) {
 	}
 }
 
+func TestWorkflowToolResultOutputsExposesJSONFields(t *testing.T) {
+	outputs := workflowToolResultOutputs(tools.SilentResult(`{
+  "workspace": {
+    "id": "gw-test",
+    "path": "/tmp/repo"
+  },
+  "next": "inspect path"
+}`))
+
+	workspace, ok := outputs["workspace"].(map[string]any)
+	if !ok {
+		t.Fatalf("workspace output = %#v, want parsed object", outputs["workspace"])
+	}
+	if workspace["path"] != "/tmp/repo" {
+		t.Fatalf("workspace.path = %#v, want /tmp/repo", workspace["path"])
+	}
+	jsonOutput, ok := outputs["json"].(map[string]any)
+	if !ok || jsonOutput["next"] != "inspect path" {
+		t.Fatalf("json output = %#v, want parsed tool JSON", outputs["json"])
+	}
+	if outputs["text"] == "" {
+		t.Fatalf("text output should preserve original content: %#v", outputs)
+	}
+}
+
 type workflowHandledMediaTool struct {
 	ref string
 }

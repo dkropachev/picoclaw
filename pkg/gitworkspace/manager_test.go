@@ -140,8 +140,8 @@ func TestManagerAcquireCanonicalizesHTTPSGitHubRemoteToSSH(t *testing.T) {
 		t.Fatalf("RemoteURL = %q, want %q", acquired.RemoteURL, canonical)
 	}
 
-	if _, err := manager.ReleaseSession(ctx, ReleaseRequest{SessionKey: "s1"}); err != nil {
-		t.Fatalf("ReleaseSession() error = %v", err)
+	if _, releaseErr := manager.ReleaseSession(ctx, ReleaseRequest{SessionKey: "s1"}); releaseErr != nil {
+		t.Fatalf("ReleaseSession() error = %v", releaseErr)
 	}
 	reacquired, err := manager.Acquire(ctx, AcquireRequest{
 		Repository: canonical,
