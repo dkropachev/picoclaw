@@ -355,7 +355,7 @@ func TestWorkflowManagedSplitStrategyRequiresStructuredOutputAndSplittableDimens
 	}
 }
 
-func TestWorkflowManagedSplitStrategyUsesScopeTokenBudget(t *testing.T) {
+func TestWorkflowManagedScopeChunkingUsesInternalTokenTarget(t *testing.T) {
 	contract := workflowManagedTestOutputContract()
 	req := workflows.AgentRequest{
 		Prompt: "Review assigned scope.",
@@ -367,14 +367,19 @@ func TestWorkflowManagedSplitStrategyUsesScopeTokenBudget(t *testing.T) {
 		Output: contract,
 	}
 	singleItemTokens := workflowScopeChunkPromptTokens(req, workflowScopeItems(req.Scope)[:1])
-	req.Managed = map[string]any{
-		"mode":                       "auto",
-		"max_items_per_chunk":        8,
-		"target_child_prompt_tokens": singleItemTokens + 1,
-	}
+	options := workflowManagedOptions(map[string]any{
+		"mode":                "auto",
+		"max_items_per_chunk": 8,
+	})
+	options.targetChildPromptTokens = singleItemTokens + 1
 
-	if got := workflowManagedSplitStrategy(req, &AgentInstance{}); got != "scope_split" {
-		t.Fatalf("workflowManagedSplitStrategy() = %q, want scope_split", got)
+	chunks := workflowManagedScopeChunks(req, options)
+	counts := make([]int, 0, len(chunks))
+	for _, chunk := range chunks {
+		counts = append(counts, len(chunk))
+	}
+	if fmt.Sprint(counts) != "[1 1 1]" {
+		t.Fatalf("chunk counts = %#v, want [1 1 1]", counts)
 	}
 }
 
@@ -393,10 +398,10 @@ func TestWorkflowManagedAdaptiveScopeChunkingPacksLargerChunks(t *testing.T) {
 	scope := workflowScopeItems(req.Scope)
 	twoItemTokens := workflowScopeChunkPromptTokens(req, scope[:2])
 	options := workflowManagedOptions(map[string]any{
-		"mode":                       "auto",
-		"max_items_per_chunk":        8,
-		"target_child_prompt_tokens": twoItemTokens,
+		"mode":                "auto",
+		"max_items_per_chunk": 8,
 	})
+	options.targetChildPromptTokens = twoItemTokens
 
 	chunks := workflowManagedScopeChunks(req, options)
 	counts := make([]int, 0, len(chunks))
@@ -405,6 +410,30 @@ func TestWorkflowManagedAdaptiveScopeChunkingPacksLargerChunks(t *testing.T) {
 	}
 	if fmt.Sprint(counts) != "[2 2 1]" {
 		t.Fatalf("chunk counts = %#v, want [2 2 1]", counts)
+	}
+}
+
+func TestWorkflowManagedTargetChildPromptTokensIsInternal(t *testing.T) {
+	options := workflowManagedOptions(map[string]any{
+		"mode":                       "auto",
+		"target_child_prompt_tokens": 999,
+		"targetChildPromptTokens":    1000,
+	})
+	if options.targetChildPromptTokens != 0 {
+		t.Fatalf("targetChildPromptTokens = %d, want internal unset value", options.targetChildPromptTokens)
+	}
+
+	agent := &AgentInstance{ContextWindow: 64000, MaxTokens: 8000}
+	resolved := agent.workflowManagedResolveChildPromptTarget(
+		workflows.AgentRequest{},
+		options,
+		"scope_split",
+	)
+	if resolved.targetChildPromptTokens != 28000 {
+		t.Fatalf("resolved targetChildPromptTokens = %d, want 28000", resolved.targetChildPromptTokens)
+	}
+	if resolved.targetChildPromptSource != "context_window" {
+		t.Fatalf("targetChildPromptSource = %q, want context_window", resolved.targetChildPromptSource)
 	}
 }
 
@@ -861,6 +890,53 @@ func TestWorkflowManagedCalibrationCacheIntervalDependsOnSplitFit(t *testing.T) 
 	}
 	if got := workflowManagedCalibrationCacheInterval(5, 16, 0.30); got != 1 {
 		t.Fatalf("low-fit interval = %d, want 1", got)
+	}
+}
+
+func TestWorkflowManagedCalibrationCacheLearnsChildPromptTarget(t *testing.T) {
+	contract := workflowManagedTestOutputContract()
+	req := workflows.AgentRequest{
+		Prompt: "Analyze assigned scope.",
+		Managed: map[string]any{
+			"mode":                "auto",
+			"max_items_per_chunk": 1,
+		},
+		Scope: []any{
+			map[string]any{"id": "a", "path": "pkg/a.go", "content": strings.Repeat("a", 128)},
+			map[string]any{"id": "b", "path": "pkg/b.go", "content": strings.Repeat("b", 128)},
+		},
+		Output: contract,
+	}
+	agent := &AgentInstance{ID: "reviewer", Model: "mock-model", ContextWindow: 64000, MaxTokens: 8000}
+	options := agent.workflowManagedResolveChildPromptTarget(
+		req,
+		workflowManagedOptions(req.Managed),
+		"scope_split",
+	)
+	plans := workflowManagedChildPlans(req, agent, options, "scope_split")
+	key, identity := workflowManagedCalibrationCacheKey(req, agent, options, "scope_split", plans)
+
+	meta := agent.recordWorkflowManagedCalibrationCache(
+		key,
+		identity,
+		options,
+		map[string]any{"status": "passed", "match": true},
+	)
+	learned := intFromAny(meta["learned_target_child_prompt_tokens"])
+	if learned <= 0 {
+		t.Fatalf("learned target = %#v, want positive", meta["learned_target_child_prompt_tokens"])
+	}
+
+	next := agent.workflowManagedResolveChildPromptTarget(
+		req,
+		workflowManagedOptions(req.Managed),
+		"scope_split",
+	)
+	if next.targetChildPromptSource != "learned_cache" {
+		t.Fatalf("target source = %q, want learned_cache", next.targetChildPromptSource)
+	}
+	if next.targetChildPromptTokens != learned {
+		t.Fatalf("targetChildPromptTokens = %d, want learned %d", next.targetChildPromptTokens, learned)
 	}
 }
 
