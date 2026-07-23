@@ -13,6 +13,7 @@ import {
 } from "@/api/git-workspaces"
 import { GitWorkspacesPage } from "@/components/agent/git-workspaces/git-workspaces-page"
 import { SidebarProvider } from "@/components/ui/sidebar"
+import { copyText } from "@/lib/clipboard"
 
 vi.mock("@/api/git-workspaces", () => ({
   getGitWorkspaces: vi.fn(),
@@ -26,6 +27,10 @@ vi.mock("sonner", () => ({
     success: vi.fn(),
     error: vi.fn(),
   },
+}))
+
+vi.mock("@/lib/clipboard", () => ({
+  copyText: vi.fn(),
 }))
 
 const workspace: GitWorkspaceInfo = {
@@ -102,6 +107,8 @@ describe("GitWorkspacesPage", () => {
     vi.mocked(reconcileGitWorkspaces).mockReset()
     vi.mocked(cleanupGitWorkspace).mockReset()
     vi.mocked(dropGitWorkspace).mockReset()
+    vi.mocked(copyText).mockReset()
+    vi.mocked(copyText).mockResolvedValue(true)
     vi.mocked(getGitWorkspaces).mockResolvedValue(stats)
     vi.mocked(reconcileGitWorkspaces).mockResolvedValue({
       cleaned: [],
@@ -122,11 +129,134 @@ describe("GitWorkspacesPage", () => {
     expect(
       await screen.findByText("https://example.test/repo.git"),
     ).toBeInTheDocument()
-    expect(screen.getByText("/tmp/git-workspaces")).toBeInTheDocument()
+    expect(screen.getByText("checkouts/repo-gw-workspace")).toBeInTheDocument()
+    expect(
+      screen.queryByText("/tmp/git-workspaces/checkouts/repo-gw-workspace"),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText("/tmp/git-workspaces")).not.toBeInTheDocument()
     expect(screen.getByText("allocated")).toBeInTheDocument()
+    expect(
+      screen.getByRole("columnheader", { name: "Current branch" }),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole("columnheader", { name: "Branch" }),
+    ).not.toBeInTheDocument()
     expect(
       screen.getByRole("button", { name: /maintain/i }),
     ).toBeInTheDocument()
+  })
+
+  it("marks ssh repositories in the inventory", async () => {
+    vi.mocked(getGitWorkspaces).mockResolvedValue({
+      ...stats,
+      repositories: [
+        {
+          ...stats.repositories[0],
+          remote_url: "git@example.test:team/repo.git",
+        },
+      ],
+      workspaces: [
+        {
+          ...workspace,
+          remote_url: "git@example.test:team/repo.git",
+        },
+      ],
+    })
+
+    renderWithClient(<GitWorkspacesPage />)
+
+    expect(
+      await screen.findByText("git@example.test:team/repo.git"),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole("button", {
+        name: "Copy SSH remote: git@example.test:team/repo.git",
+      }),
+    ).toBeInTheDocument()
+  })
+
+  it("shows normalized ssh remotes for legacy https repository rows", async () => {
+    vi.mocked(getGitWorkspaces).mockResolvedValue({
+      ...stats,
+      repositories: [
+        {
+          ...stats.repositories[0],
+          remote_url: "https://github.com/scylladb/alternator-client-java.git",
+        },
+      ],
+      workspaces: [
+        {
+          ...workspace,
+          remote_url: "https://github.com/scylladb/alternator-client-java.git",
+        },
+      ],
+    })
+
+    renderWithClient(<GitWorkspacesPage />)
+
+    expect(
+      await screen.findByText(
+        "git@github.com:scylladb/alternator-client-java.git",
+      ),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText(
+        "https://github.com/scylladb/alternator-client-java.git",
+      ),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByRole("button", {
+        name: "Copy SSH remote: git@github.com:scylladb/alternator-client-java.git",
+      }),
+    ).toBeInTheDocument()
+  })
+
+  it("copies the normalized ssh remote from ssh markers", async () => {
+    const user = userEvent.setup()
+    vi.mocked(getGitWorkspaces).mockResolvedValue({
+      ...stats,
+      repositories: [
+        {
+          ...stats.repositories[0],
+          remote_url: "https://github.com/scylladb/alternator-client-java.git",
+        },
+      ],
+      workspaces: [
+        {
+          ...workspace,
+          remote_url: "https://github.com/scylladb/alternator-client-java.git",
+        },
+      ],
+    })
+
+    renderWithClient(<GitWorkspacesPage />)
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Copy SSH remote: git@github.com:scylladb/alternator-client-java.git",
+      }),
+    )
+
+    await waitFor(() => {
+      expect(copyText).toHaveBeenCalledWith(
+        "git@github.com:scylladb/alternator-client-java.git",
+      )
+    })
+  })
+
+  it("copies the absolute checkout path from compact checkout rows", async () => {
+    const user = userEvent.setup()
+    renderWithClient(<GitWorkspacesPage />)
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: `Copy checkout path: ${workspace.path}`,
+      }),
+    )
+
+    await waitFor(() => {
+      expect(copyText).toHaveBeenCalledWith(workspace.path)
+    })
   })
 
   it("runs cleanup and drop actions", async () => {

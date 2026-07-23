@@ -1,6 +1,9 @@
 import {
+  IconCheck,
   IconClearAll,
+  IconCopy,
   IconGitBranch,
+  IconKey,
   IconRefresh,
   IconRotateClockwise,
   IconTrash,
@@ -30,6 +33,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard"
 import { cn } from "@/lib/utils"
 
 export function GitWorkspacesPage() {
@@ -166,7 +170,6 @@ export function GitWorkspacesPage() {
               <Metric
                 label={t("pages.agent.git_workspaces.repos", "Repos")}
                 value={String(stats.repository_count)}
-                detail={stats.root_dir}
               />
               <Metric
                 label={t("pages.agent.git_workspaces.locked", "Locked")}
@@ -190,7 +193,10 @@ export function GitWorkspacesPage() {
                           {t("pages.agent.git_workspaces.repo", "Repository")}
                         </th>
                         <th className="px-3 py-2 font-medium">
-                          {t("pages.agent.git_workspaces.branch", "Branch")}
+                          {t(
+                            "pages.agent.git_workspaces.current_branch",
+                            "Current branch",
+                          )}
                         </th>
                         <th className="px-3 py-2 font-medium">
                           {t("pages.agent.git_workspaces.size", "Size")}
@@ -221,6 +227,7 @@ export function GitWorkspacesPage() {
                           <WorkspaceRow
                             key={workspace.id}
                             workspace={workspace}
+                            workspaceRoot={stats.root_dir}
                             pendingCleanup={
                               cleanupMutation.variables === workspace.id &&
                               cleanupMutation.isPending
@@ -317,7 +324,7 @@ function Metric({
 }: {
   label: string
   value: string
-  detail: string
+  detail?: string
 }) {
   return (
     <div className="min-w-0">
@@ -325,37 +332,94 @@ function Metric({
       <div className="text-foreground mt-1 truncate text-xl font-semibold">
         {value}
       </div>
-      <div className="text-muted-foreground mt-1 truncate text-xs">
-        {detail}
-      </div>
+      {detail ? (
+        <div className="text-muted-foreground mt-1 truncate text-xs">
+          {detail}
+        </div>
+      ) : null}
     </div>
   )
 }
 
 function WorkspaceRow({
   workspace,
+  workspaceRoot,
   pendingCleanup,
   pendingDrop,
   onClean,
   onDrop,
 }: {
   workspace: GitWorkspaceInfo
+  workspaceRoot: string
   pendingCleanup: boolean
   pendingDrop: boolean
   onClean: () => void
   onDrop: () => void
 }) {
   const { t } = useTranslation()
+  const checkoutClipboard = useCopyToClipboard()
+  const sshClipboard = useCopyToClipboard()
   const isLocked = workspace.status === "locked" || workspace.locked_by != null
+  const remoteDisplay = getRemoteDisplay(workspace.remote_url)
+  const sshRemote = remoteDisplay.sshRemote
+  const visibleRemote = sshRemote ?? workspace.remote_url.trim()
+  const visibleCheckoutPath = formatCheckoutPath(workspace.path, workspaceRoot)
+  const copyCheckoutPathLabel = `${t(
+    "pages.agent.git_workspaces.copy_checkout_path",
+    "Copy checkout path",
+  )}: ${workspace.path}`
+  const copySSHRemoteLabel = sshRemote
+    ? `${t("pages.agent.git_workspaces.copy_ssh_remote", "Copy SSH remote")}: ${sshRemote}`
+    : t("pages.agent.git_workspaces.copy_ssh_remote", "Copy SSH remote")
   return (
     <tr className="hover:bg-muted/30">
       <td className="px-3 py-3 align-top">
         <div className="max-w-[420px] space-y-1">
-          <div className="text-foreground font-medium break-all">
-            {workspace.remote_url}
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <div className="text-foreground min-w-0 font-medium break-all">
+              {visibleRemote}
+            </div>
+            {sshRemote && (
+              <Button
+                type="button"
+                variant="outline"
+                size="xs"
+                className="border-primary/30 bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary h-4 cursor-pointer gap-0.5 rounded-4xl px-1.5 font-mono text-[10px]"
+                onClick={() => void sshClipboard.copy(sshRemote)}
+                title={copySSHRemoteLabel}
+                aria-label={copySSHRemoteLabel}
+              >
+                {sshClipboard.isCopied ? (
+                  <IconCheck className="size-2.5 text-green-500" />
+                ) : (
+                  <IconKey className="size-2.5" />
+                )}
+                SSH
+              </Button>
+            )}
           </div>
-          <div className="text-muted-foreground font-mono text-xs break-all">
-            {workspace.path}
+          <div className="flex min-w-0 items-center gap-1.5">
+            <div
+              className="text-muted-foreground min-w-0 truncate font-mono text-xs"
+              title={workspace.path}
+            >
+              {visibleCheckoutPath}
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="text-muted-foreground h-5 w-5 shrink-0 cursor-pointer"
+              onClick={() => void checkoutClipboard.copy(workspace.path)}
+              aria-label={copyCheckoutPathLabel}
+              title={copyCheckoutPathLabel}
+            >
+              {checkoutClipboard.isCopied ? (
+                <IconCheck className="size-3 text-green-500" />
+              ) : (
+                <IconCopy className="size-3" />
+              )}
+            </Button>
           </div>
         </div>
       </td>
@@ -422,6 +486,114 @@ function WorkspaceRow({
       </td>
     </tr>
   )
+}
+
+function formatCheckoutPath(
+  checkoutPath: string,
+  workspaceRoot?: string,
+): string {
+  const normalizedPath = normalizeDisplayPath(checkoutPath)
+  if (!normalizedPath) {
+    return "-"
+  }
+
+  const normalizedRoot = normalizeDisplayPath(workspaceRoot ?? "")
+  if (normalizedRoot) {
+    if (normalizedPath === normalizedRoot) {
+      return basename(normalizedPath)
+    }
+    if (normalizedRoot === "/" && normalizedPath.startsWith("/")) {
+      return normalizedPath.slice(1)
+    }
+    if (normalizedPath.startsWith(`${normalizedRoot}/`)) {
+      return normalizedPath.slice(normalizedRoot.length + 1)
+    }
+  }
+
+  const checkoutsMarker = "/checkouts/"
+  const checkoutsIndex = normalizedPath.lastIndexOf(checkoutsMarker)
+  if (checkoutsIndex >= 0) {
+    return normalizedPath.slice(checkoutsIndex + 1)
+  }
+
+  return basename(normalizedPath) || normalizedPath
+}
+
+function normalizeDisplayPath(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return ""
+  }
+  const normalized = trimmed.replace(/\\/g, "/").replace(/\/+/g, "/")
+  return normalized === "/" ? normalized : normalized.replace(/\/+$/, "")
+}
+
+function basename(value: string): string {
+  const segments = value.split("/").filter(Boolean)
+  return segments.at(-1) ?? value
+}
+
+function getRemoteDisplay(remoteURL: string): {
+  kind: "ssh" | "other"
+  sshRemote?: string
+} {
+  const trimmed = remoteURL.trim()
+  if (trimmed.startsWith("ssh://") || /^[^@\s]+@[^:\s]+:.+/.test(trimmed)) {
+    return { kind: "ssh", sshRemote: trimmed }
+  }
+  const sshRemote = normalizeURLRemoteToSSH(trimmed)
+  if (sshRemote) {
+    return { kind: "ssh", sshRemote }
+  }
+  return { kind: "other" }
+}
+
+function normalizeURLRemoteToSSH(remoteURL: string): string | null {
+  let parsed: URL
+  try {
+    parsed = new URL(remoteURL)
+  } catch {
+    return null
+  }
+  const scheme = parsed.protocol.toLowerCase().replace(/:$/, "")
+  if (!["http", "https", "git"].includes(scheme)) {
+    return null
+  }
+  if (
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    (scheme === "http" && parsed.port && parsed.port !== "80") ||
+    (scheme === "https" && parsed.port && parsed.port !== "443") ||
+    (scheme === "git" && parsed.port)
+  ) {
+    return null
+  }
+  const host = parsed.hostname.trim().toLowerCase()
+  const segments = parsed.pathname
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+  if (!host || segments.length < 2 || segments.some(isUnsafeRemoteSegment)) {
+    return null
+  }
+  if (host === "github.com" && segments.length !== 2) {
+    return null
+  }
+  const remotePath = ensureGitSuffix(segments.join("/"))
+  return `git@${host}:${remotePath}`
+}
+
+function isUnsafeRemoteSegment(segment: string): boolean {
+  return segment === "." || segment === ".."
+}
+
+function ensureGitSuffix(remotePath: string): string {
+  if (remotePath.toLowerCase().endsWith(".git")) {
+    return `${remotePath.slice(0, -4)}.git`
+  }
+  return `${remotePath}.git`
 }
 
 function replaceWorkspace(current: unknown, workspace: GitWorkspaceInfo) {
