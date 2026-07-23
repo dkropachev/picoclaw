@@ -808,7 +808,7 @@ func workflowToolResultOutputs(result *tools.ToolResult) map[string]any {
 	if result == nil {
 		return map[string]any{}
 	}
-	return map[string]any{
+	out := map[string]any{
 		"text":             result.ContentForLLM(),
 		"for_llm":          result.ForLLM,
 		"for_user":         result.ForUser,
@@ -819,6 +819,29 @@ func workflowToolResultOutputs(result *tools.ToolResult) map[string]any {
 		"artifact_tags":    append([]string(nil), result.ArtifactTags...),
 		"response_handled": result.ResponseHandled,
 	}
+	if parsed, ok := workflowToolJSONOutput(result.ContentForLLM()); ok {
+		out["json"] = parsed
+		if object, ok := parsed.(map[string]any); ok {
+			for key, value := range object {
+				if _, exists := out[key]; !exists {
+					out[key] = value
+				}
+			}
+		}
+	}
+	return out
+}
+
+func workflowToolJSONOutput(text string) (any, bool) {
+	text = strings.TrimSpace(text)
+	if text == "" || (!strings.HasPrefix(text, "{") && !strings.HasPrefix(text, "[")) {
+		return nil, false
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+		return nil, false
+	}
+	return parsed, true
 }
 
 func cloneAnyMap(values map[string]any) map[string]any {
