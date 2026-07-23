@@ -36,9 +36,6 @@ on:
       review_focus:
         type: string
         default: "Review correctness, security, test coverage, and maintainability."
-      max_content_bytes:
-        type: number
-        default: 65536
     outputs:
       inventory:
         value: ${{ jobs.code_review.outputs.inventory }}
@@ -90,13 +87,13 @@ jobs:
         name: Build repository structure inventory
         uses: function/git.inventory
         with:
-          working_directory: ${{ steps.checkout.outputs.workspace.path }}
+          workspace: ${{ steps.checkout.outputs.workspace }}
           target: all
       - id: selection
         name: Select requested inventory target
         uses: function/git.filter
         with:
-          working_directory: ${{ steps.checkout.outputs.workspace.path }}
+          workspace: ${{ steps.checkout.outputs.workspace }}
           files: ${{ steps.inventory.outputs.files }}
           commit: ${{ steps.inventory.outputs.commit }}
           inventory_hash: ${{ steps.inventory.outputs.inventoryHash }}
@@ -133,7 +130,7 @@ jobs:
           prompt: |
             You are selecting files for a Codex-style code review.
 
-            The assigned scope contains repository-relative file metadata only: path, category, mode, hash, size, and deterministic selected flag. It does not contain file content.
+            The assigned scope contains repository-relative file metadata only: path, category, mode, hash, size, source reference, and deterministic selected flag. It does not contain file content.
 
             Return a path filter as JSON:
             - includeGlobs chooses candidate files for the requested review target.
@@ -190,7 +187,7 @@ jobs:
           name: code-review/filters/${{ steps.inventory.outputs.inventoryHash }}.json
           value: ${{ steps.plan_filter.outputs.structured }}
       - id: review_checkout
-        name: Acquire review content workspace
+        name: Acquire review workspace
         if: ${{ inputs.action == 'review' }}
         uses: tool/git_workspace
         with:
@@ -198,20 +195,18 @@ jobs:
           repository: ${{ inputs.repository }}
           ref: ${{ inputs.ref }}
       - id: review_inventory
-        name: Apply AI filter and attach review content
+        name: Apply AI filter and link review files
         if: ${{ inputs.action == 'review' }}
         uses: function/git.filter
         with:
-          working_directory: ${{ steps.review_checkout.outputs.workspace.path }}
+          workspace: ${{ steps.review_checkout.outputs.workspace }}
           files: ${{ steps.inventory.outputs.files }}
           commit: ${{ steps.inventory.outputs.commit }}
           inventory_hash: ${{ steps.inventory.outputs.inventoryHash }}
           target: ${{ inputs.target }}
           filter: ${{ steps.plan_filter.outputs.structured }}
-          include_content: true
-          max_content_bytes: ${{ inputs.max_content_bytes }}
       - id: release_review
-        name: Release review content workspace
+        name: Release review workspace
         if: ${{ inputs.action == 'review' }}
         uses: tool/git_workspace
         with:
@@ -245,9 +240,10 @@ jobs:
 
             Review contract:
             - Review only files from the assigned scope.
-            - Inspect the content field embedded in each assigned scope item.
-            - If contentTruncated is true, mention truncation as residual risk for that file.
-            - Use tools only for read-only inspection and validation.
+            - Inspect each file by reading its assigned source.path; path is the repository-relative reporting path.
+            - The assigned scope does not embed file content.
+            - Use tools only for read-only file inspection and validation.
+            - If a file source cannot be read, mention that as residual risk for that file.
             - Do not edit files and do not write review comments into source files.
             - Prioritize actionable bugs, security issues, reliability risks, data loss, concurrency problems, behavioral regressions, and missing tests.
             - Ignore pure style preferences and broad refactors unless they hide a concrete bug.
