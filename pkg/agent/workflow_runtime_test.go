@@ -628,7 +628,7 @@ func TestWorkflowManagedCalibrationCacheDecaysAfterEarlyRuns(t *testing.T) {
 	agent := &AgentInstance{ID: "reviewer", Model: "mock-model"}
 	baselineCalls := 0
 	runOnce := func(message string, _ bool, _ workflowAgentRunOptions) (string, error) {
-		if strings.Contains(message, "Managed execution split calibration.") &&
+		if strings.Contains(message, "Agent execution optimization split calibration.") &&
 			strings.Contains(message, "grouped baseline") {
 			baselineCalls++
 		}
@@ -694,7 +694,7 @@ func TestWorkflowManagedCalibrationCacheSoftReusesModelAndLanguageChanges(t *tes
 	agent := &AgentInstance{ID: "reviewer", Model: "model-a"}
 	baselineCalls := 0
 	runOnce := func(message string, _ bool, _ workflowAgentRunOptions) (string, error) {
-		if strings.Contains(message, "Managed execution split calibration.") &&
+		if strings.Contains(message, "Agent execution optimization split calibration.") &&
 			strings.Contains(message, "grouped baseline") {
 			baselineCalls++
 		}
@@ -791,7 +791,7 @@ func TestWorkflowManagedCalibrationCacheBorrowFailureResetsFresh(t *testing.T) {
 	baselineCalls := 0
 	forceMismatch := false
 	runOnce := func(message string, _ bool, _ workflowAgentRunOptions) (string, error) {
-		if strings.Contains(message, "Managed execution split calibration.") &&
+		if strings.Contains(message, "Agent execution optimization split calibration.") &&
 			strings.Contains(message, "grouped baseline") {
 			baselineCalls++
 			if forceMismatch {
@@ -1060,7 +1060,7 @@ func TestWorkflowManagedCalibrationMismatchFallsBackToSingleRun(t *testing.T) {
 	calls := 0
 	runOnce := func(message string, _ bool, _ workflowAgentRunOptions) (string, error) {
 		calls++
-		if strings.Contains(message, "Managed execution split calibration.") {
+		if strings.Contains(message, "Agent execution optimization split calibration.") {
 			if strings.Contains(message, "grouped baseline") {
 				return `{"summary":"baseline","findings":[{"scope_id":"baseline"}]}`, nil
 			}
@@ -1126,7 +1126,7 @@ func TestWorkflowManagedCalibrationSampleExpandsAndCatchesMismatch(t *testing.T)
 	}
 	baselineCalls := 0
 	runOnce := func(message string, _ bool, _ workflowAgentRunOptions) (string, error) {
-		if strings.Contains(message, "Managed execution split calibration.") {
+		if strings.Contains(message, "Agent execution optimization split calibration.") {
 			if strings.Contains(message, "grouped baseline") {
 				baselineCalls++
 				return `{"summary":"baseline","findings":[{"scope_id":"baseline-only"}]}`, nil

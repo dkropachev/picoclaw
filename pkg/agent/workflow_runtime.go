@@ -450,7 +450,7 @@ func workflowManagedMetadata(req workflows.AgentRequest, agent *AgentInstance) m
 		"split": map[string]any{
 			"status":      "not_split",
 			"child_count": 0,
-			"reason":      "initial managed execution layer uses one visible agent run",
+			"reason":      "initial agent execution optimization layer uses one visible agent run",
 		},
 		"calibration": map[string]any{
 			"status": "not_run",
@@ -658,7 +658,7 @@ func workflowChunkScope(scope []any, maxItems int) [][]any {
 
 func workflowManagedCalibrationMessage(req workflows.AgentRequest, label string) string {
 	return strings.Join([]string{
-		"Managed execution split calibration.",
+		"Agent execution optimization split calibration.",
 		"Calibration label: " + label + ".",
 		"Produce the same kind of structured output you would produce in the real run.",
 		workflowAgentMessage(req),
