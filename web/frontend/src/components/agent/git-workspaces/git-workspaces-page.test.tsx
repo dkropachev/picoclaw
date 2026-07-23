@@ -136,6 +136,12 @@ describe("GitWorkspacesPage", () => {
     expect(screen.queryByText("/tmp/git-workspaces")).not.toBeInTheDocument()
     expect(screen.getByText("allocated")).toBeInTheDocument()
     expect(
+      screen.getByRole("columnheader", { name: "Current branch" }),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole("columnheader", { name: "Branch" }),
+    ).not.toBeInTheDocument()
+    expect(
       screen.getByRole("button", { name: /maintain/i }),
     ).toBeInTheDocument()
   })

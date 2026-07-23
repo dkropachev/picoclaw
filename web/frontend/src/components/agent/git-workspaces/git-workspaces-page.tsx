@@ -193,7 +193,10 @@ export function GitWorkspacesPage() {
                           {t("pages.agent.git_workspaces.repo", "Repository")}
                         </th>
                         <th className="px-3 py-2 font-medium">
-                          {t("pages.agent.git_workspaces.branch", "Branch")}
+                          {t(
+                            "pages.agent.git_workspaces.current_branch",
+                            "Current branch",
+                          )}
                         </th>
                         <th className="px-3 py-2 font-medium">
                           {t("pages.agent.git_workspaces.size", "Size")}
