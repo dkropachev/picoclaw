@@ -50,6 +50,62 @@ describe("workflow API normalization", () => {
     })
   })
 
+  it("keeps workflow call contracts in workflow list payloads", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        workflows: [
+          {
+            ref: "workflows/review.yml",
+            workflow_call: {
+              inputs: {
+                action: {
+                  type: "string",
+                  required: true,
+                  default: "plan",
+                },
+                dry_run: {
+                  type: "boolean",
+                  default: true,
+                },
+              },
+              secrets: {
+                token: {
+                  required: true,
+                },
+              },
+            },
+          },
+        ],
+      }),
+    )
+
+    await expect(listWorkflows()).resolves.toMatchObject({
+      workflows: [
+        {
+          ref: "workflows/review.yml",
+          workflow_call: {
+            inputs: {
+              action: {
+                type: "string",
+                required: true,
+                default: "plan",
+              },
+              dry_run: {
+                type: "boolean",
+                default: true,
+              },
+            },
+            secrets: {
+              token: {
+                required: true,
+              },
+            },
+          },
+        },
+      ],
+    })
+  })
+
   it("normalizes nullable workflow run payloads", async () => {
     mockedLauncherFetch.mockResolvedValueOnce(jsonResponse({ runs: null }))
     await expect(listWorkflowRuns()).resolves.toEqual({ runs: [] })

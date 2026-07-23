@@ -5,6 +5,22 @@ export interface WorkflowDefinition {
   name?: string
   path?: string
   error?: string
+  workflow_call?: WorkflowCallDefinition
+}
+
+export interface WorkflowCallDefinition {
+  inputs?: Record<string, WorkflowInputDefinition>
+  secrets?: Record<string, WorkflowSecretDefinition>
+}
+
+export interface WorkflowInputDefinition {
+  type?: string
+  required?: boolean
+  default?: unknown
+}
+
+export interface WorkflowSecretDefinition {
+  required?: boolean
 }
 
 export interface WorkflowValidationIssue {

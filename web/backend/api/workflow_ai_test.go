@@ -454,6 +454,75 @@ func TestHandleCancelWorkflowRunClosesWorkflowRuntime(t *testing.T) {
 	}
 }
 
+func TestHandleListWorkflowsIncludesWorkflowCallContract(t *testing.T) {
+	workspace := t.TempDir()
+	workflowDir := filepath.Join(workspace, "workflows")
+	if err := os.MkdirAll(workflowDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workflowDir, "callable.yml"), []byte(`name: Callable
+on:
+  workflow_call:
+    inputs:
+      message:
+        type: string
+        required: true
+      dry_run:
+        type: boolean
+        default: true
+    secrets:
+      token:
+        required: true
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - id: echo
+        uses: tool/message
+        with:
+          text: ${{ inputs.message }}
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	h := NewHandler(writeWorkflowAITestConfig(t, workspace))
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows", nil)
+	h.handleListWorkflows(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Workflows []struct {
+			Ref          string `json:"ref"`
+			WorkflowCall *struct {
+				Inputs  map[string]workflows.Input  `json:"inputs"`
+				Secrets map[string]workflows.Secret `json:"secrets"`
+			} `json:"workflow_call"`
+		} `json:"workflows"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response JSON error = %v", err)
+	}
+	if len(got.Workflows) != 1 {
+		t.Fatalf("workflows = %#v, want one workflow", got.Workflows)
+	}
+	contract := got.Workflows[0].WorkflowCall
+	if got.Workflows[0].Ref != "workflows/callable.yml" || contract == nil {
+		t.Fatalf("workflow = %#v, want workflow_call contract", got.Workflows[0])
+	}
+	if contract.Inputs["message"].Type != "string" || !contract.Inputs["message"].Required {
+		t.Fatalf("message input = %#v, want required string", contract.Inputs["message"])
+	}
+	if contract.Inputs["dry_run"].Type != "boolean" || contract.Inputs["dry_run"].Default != true {
+		t.Fatalf("dry_run input = %#v, want boolean default true", contract.Inputs["dry_run"])
+	}
+	if !contract.Secrets["token"].Required {
+		t.Fatalf("token secret = %#v, want required", contract.Secrets["token"])
+	}
+}
+
 func TestHandleRunWorkflowStartsAsyncRun(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()

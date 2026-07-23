@@ -141,7 +141,11 @@ const retryWorkflowRun = {
 
 const workflowDraftYAML = `name: Support Triage
 on:
-  manual: {}
+  workflow_call:
+    inputs:
+      ticket:
+        type: string
+        required: true
 jobs:
   triage:
     runs-on: picoclaw
@@ -151,6 +155,19 @@ jobs:
         with:
           prompt: Summarize support tickets
 `
+
+const supportTriageWorkflowDefinition = {
+  ref: "workflows/support-triage.yml",
+  name: "Support Triage",
+  workflow_call: {
+    inputs: {
+      ticket: {
+        type: "string",
+        required: true,
+      },
+    },
+  },
+}
 
 const workflowDraftSession = {
   id: "dev_test",
@@ -641,10 +658,7 @@ async function mockLauncherApis(
             ) {
               workflowDefinitions = [
                 ...workflowDefinitions,
-                {
-                  ref: workflowDraftSession.target_workflow_ref,
-                  name: "Support Triage",
-                },
+                supportTriageWorkflowDefinition,
               ]
             }
             return json(route, {
@@ -1230,21 +1244,27 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
   await expect(page.getByText("New workflow")).toBeVisible()
 
   await page.getByRole("button", { name: "Operate" }).click()
-  await expect(page.getByText("Manual run")).toBeVisible()
+  await expect(page.getByText("Run workflow").first()).toBeVisible()
+  await page.getByRole("button", { name: "Run workflow" }).first().click()
   await expect(
     page.getByText("Revalidate this workflow before running it."),
   ).toBeVisible()
   await expect(
-    page.getByRole("button", { name: "Run Workflow" }),
+    page.getByRole("button", { name: "Run workflow" }).last(),
   ).toBeDisabled()
+  await page.keyboard.press("Escape")
   await expect(page.getByRole("button", { name: "Retry" })).toBeDisabled()
   await expect(page.getByRole("button", { name: "Retry" })).toHaveAttribute(
     "title",
     "Revalidate this workflow before retrying the run.",
   )
   await page.getByRole("button", { name: "Revalidate" }).click()
+  await page.getByRole("button", { name: "Run workflow" }).first().click()
   await expect(page.getByText("Ready to run.")).toBeVisible()
-  await expect(page.getByRole("button", { name: "Run Workflow" })).toBeEnabled()
+  await expect(
+    page.getByRole("button", { name: "Run workflow" }).last(),
+  ).toBeEnabled()
+  await page.keyboard.press("Escape")
   const retrySecrets = page.getByRole("textbox", {
     name: "Retry secrets JSON",
   })
@@ -1340,24 +1360,27 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
   await page.getByRole("button", { name: "Develop" }).click()
   await page.getByRole("button", { name: "Publish" }).click()
 
-  await expect(page.getByText("Manual run")).toBeVisible()
+  await expect(page.getByText("Run workflow").first()).toBeVisible()
   await expect(page.locator("#workflow-run-selected-ref")).toHaveText(
     "workflows/support-triage.yml",
   )
-  await page.getByPlaceholder("Inputs JSON").fill("{")
-  await expect(page.getByText(/Inputs JSON is invalid/)).toBeVisible()
+  await page.getByRole("button", { name: "Run workflow" }).first().click()
+  await expect(page.locator("#workflow-run-input-ticket")).toBeVisible()
+  await expect(page.getByText('Input "ticket" is required.')).toBeVisible()
   await expect(
-    page.getByRole("button", { name: "Run Workflow" }),
+    page.getByRole("button", { name: "Run workflow" }).last(),
   ).toBeDisabled()
-  await page
-    .getByPlaceholder("Inputs JSON")
-    .fill('{"ticket":"Printer is offline"}')
-  await expect(page.getByRole("button", { name: "Run Workflow" })).toBeEnabled()
+  await page.locator("#workflow-run-input-ticket").fill("Printer is offline")
+  await expect(
+    page.getByRole("button", { name: "Run workflow" }).last(),
+  ).toBeEnabled()
+  await page.getByRole("button", { name: "Advanced options" }).click()
   await page.locator("#workflow-run-session").fill("workflow:manual")
   await page
     .locator("#workflow-run-delivery")
     .fill('{"channel":"telegram","chat_id":"support"}')
-  await page.getByRole("button", { name: "Run Workflow" }).click()
+  await page.getByRole("button", { name: "Run workflow" }).last().focus()
+  await page.keyboard.press("Enter")
 
   await expect(page.getByText("wr_manual").first()).toBeVisible()
   await expect(page.getByText("manual summary").first()).toBeVisible()
