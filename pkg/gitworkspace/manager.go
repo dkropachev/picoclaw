@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -1027,14 +1029,148 @@ func normalizeRepository(repo string) (string, error) {
 	if repo == "" {
 		return "", errors.New("repository is required")
 	}
-	if strings.Contains(repo, "://") || strings.HasPrefix(repo, "git@") ||
-		strings.HasPrefix(repo, "ssh://") {
+	if normalized, ok := normalizeRemoteRepository(repo); ok {
+		return normalized, nil
+	}
+	if strings.Contains(repo, "://") || isSCPStyleRemote(repo) {
 		return repo, nil
 	}
 	if abs, err := filepath.Abs(repo); err == nil {
 		return filepath.Clean(abs), nil
 	}
 	return repo, nil
+}
+
+func normalizeRemoteRepository(repo string) (string, bool) {
+	if normalized, ok := normalizeSCPRemote(repo); ok {
+		return normalized, true
+	}
+	if !strings.Contains(repo, "://") {
+		return "", false
+	}
+	parsed, err := url.Parse(repo)
+	if err != nil {
+		return "", false
+	}
+	return normalizeURLRemote(parsed)
+}
+
+func normalizeSCPRemote(repo string) (string, bool) {
+	if !isSCPStyleRemote(repo) {
+		return "", false
+	}
+	parts := strings.SplitN(repo, ":", 2)
+	userHost := parts[0]
+	remotePath, ok := normalizeRemotePath("", parts[1])
+	if !ok {
+		return "", false
+	}
+	user, host, ok := strings.Cut(userHost, "@")
+	if !ok || strings.TrimSpace(user) == "" || strings.TrimSpace(host) == "" {
+		return "", false
+	}
+	return formatSCPRemote(user, host, remotePath), true
+}
+
+func normalizeURLRemote(repoURL *url.URL) (string, bool) {
+	scheme := strings.ToLower(repoURL.Scheme)
+	if scheme == "" || repoURL.RawQuery != "" || repoURL.Fragment != "" {
+		return "", false
+	}
+	host := repoURL.Hostname()
+	if strings.TrimSpace(host) == "" {
+		return "", false
+	}
+	port := repoURL.Port()
+	switch scheme {
+	case "http":
+		if repoURL.User != nil || (port != "" && port != "80") {
+			return "", false
+		}
+		remotePath, ok := normalizeRemotePath(host, repoURL.Path)
+		if !ok {
+			return "", false
+		}
+		return formatSCPRemote("git", host, remotePath), true
+	case "https":
+		if repoURL.User != nil || (port != "" && port != "443") {
+			return "", false
+		}
+		remotePath, ok := normalizeRemotePath(host, repoURL.Path)
+		if !ok {
+			return "", false
+		}
+		return formatSCPRemote("git", host, remotePath), true
+	case "git":
+		if repoURL.User != nil || port != "" {
+			return "", false
+		}
+		remotePath, ok := normalizeRemotePath(host, repoURL.Path)
+		if !ok {
+			return "", false
+		}
+		return formatSCPRemote("git", host, remotePath), true
+	case "ssh":
+		if port != "" && port != "22" {
+			return "", false
+		}
+		user := "git"
+		if repoURL.User != nil && repoURL.User.Username() != "" {
+			user = repoURL.User.Username()
+		}
+		remotePath, ok := normalizeRemotePath(host, repoURL.Path)
+		if !ok {
+			return "", false
+		}
+		return formatSCPRemote(user, host, remotePath), true
+	default:
+		return "", false
+	}
+}
+
+func normalizeRemotePath(host, rawPath string) (string, bool) {
+	remotePath := strings.TrimSpace(rawPath)
+	remotePath = strings.Trim(remotePath, "/")
+	if remotePath == "" {
+		return "", false
+	}
+	remotePath = strings.TrimPrefix(pathpkg.Clean("/"+remotePath), "/")
+	if remotePath == "." || remotePath == "" {
+		return "", false
+	}
+	segments := strings.Split(remotePath, "/")
+	if len(segments) < 2 {
+		return "", false
+	}
+	if strings.EqualFold(host, "github.com") && len(segments) != 2 {
+		return "", false
+	}
+	return ensureGitSuffix(remotePath), true
+}
+
+func ensureGitSuffix(remotePath string) string {
+	if strings.HasSuffix(strings.ToLower(remotePath), ".git") {
+		return remotePath[:len(remotePath)-len(".git")] + ".git"
+	}
+	return remotePath + ".git"
+}
+
+func formatSCPRemote(user, host, remotePath string) string {
+	return strings.TrimSpace(user) + "@" +
+		strings.ToLower(strings.TrimSpace(host)) + ":" + remotePath
+}
+
+func isSCPStyleRemote(repo string) bool {
+	colon := strings.Index(repo, ":")
+	if colon <= 0 {
+		return false
+	}
+	userHost := repo[:colon]
+	if !strings.Contains(userHost, "@") {
+		return false
+	}
+	firstSlash := strings.IndexAny(repo, `/\`)
+	return firstSlash == -1 || colon < firstSlash
 }
 
 func repoID(repo string) string {

@@ -108,6 +108,135 @@ func TestManagerAllocatesSeparateWorkspaceWhenRepoLocked(t *testing.T) {
 	}
 }
 
+func TestManagerAcquireCanonicalizesHTTPSGitHubRemoteToSSH(t *testing.T) {
+	ctx := context.Background()
+	source := initSourceRepo(t)
+	canonical := "git@github.com:scylladb/alternator-client-java.git"
+	configPath := filepath.Join(t.TempDir(), "gitconfig")
+	sourceURL := "file://" + filepath.ToSlash(source)
+	if _, err := runGit(
+		ctx,
+		"",
+		"config",
+		"--file",
+		configPath,
+		"url."+sourceURL+".insteadOf",
+		canonical,
+	); err != nil {
+		t.Fatalf("git config insteadOf error = %v", err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", configPath)
+
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	manager := newTestManager(t, &now)
+	acquired, err := manager.Acquire(ctx, AcquireRequest{
+		Repository: "https://github.com/scylladb/alternator-client-java.git",
+		SessionKey: "s1",
+	})
+	if err != nil {
+		t.Fatalf("Acquire() error = %v", err)
+	}
+	if acquired.RemoteURL != canonical {
+		t.Fatalf("RemoteURL = %q, want %q", acquired.RemoteURL, canonical)
+	}
+
+	if _, err := manager.ReleaseSession(ctx, ReleaseRequest{SessionKey: "s1"}); err != nil {
+		t.Fatalf("ReleaseSession() error = %v", err)
+	}
+	reacquired, err := manager.Acquire(ctx, AcquireRequest{
+		Repository: canonical,
+		SessionKey: "s2",
+	})
+	if err != nil {
+		t.Fatalf("reacquire with SSH remote error = %v", err)
+	}
+	if reacquired.ID != acquired.ID {
+		t.Fatalf("reacquired workspace ID = %q, want %q", reacquired.ID, acquired.ID)
+	}
+
+	stats, err := manager.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error = %v", err)
+	}
+	if stats.RepositoryCount != 1 {
+		t.Fatalf("RepositoryCount = %d, want 1", stats.RepositoryCount)
+	}
+	if got := stats.Repositories[0].RemoteURL; got != canonical {
+		t.Fatalf("registered remote URL = %q, want %q", got, canonical)
+	}
+}
+
+func TestNormalizeRepositoryPrefersSSHRemoteWhenSafe(t *testing.T) {
+	tests := []struct {
+		name string
+		repo string
+		want string
+	}{
+		{
+			name: "github https",
+			repo: "https://github.com/scylladb/alternator-client-java.git",
+			want: "git@github.com:scylladb/alternator-client-java.git",
+		},
+		{
+			name: "github https without suffix",
+			repo: "https://github.com/scylladb/alternator-client-java",
+			want: "git@github.com:scylladb/alternator-client-java.git",
+		},
+		{
+			name: "github git protocol",
+			repo: "git://github.com/scylladb/alternator-client-java.git",
+			want: "git@github.com:scylladb/alternator-client-java.git",
+		},
+		{
+			name: "github ssh url",
+			repo: "ssh://git@github.com/scylladb/alternator-client-java.git",
+			want: "git@github.com:scylladb/alternator-client-java.git",
+		},
+		{
+			name: "github ssh default port",
+			repo: "ssh://git@github.com:22/scylladb/alternator-client-java.git",
+			want: "git@github.com:scylladb/alternator-client-java.git",
+		},
+		{
+			name: "scp remote without suffix",
+			repo: "git@github.com:scylladb/alternator-client-java",
+			want: "git@github.com:scylladb/alternator-client-java.git",
+		},
+		{
+			name: "gitlab nested group",
+			repo: "https://gitlab.com/group/subgroup/repo.git",
+			want: "git@gitlab.com:group/subgroup/repo.git",
+		},
+		{
+			name: "web page path remains original",
+			repo: "https://github.com/scylladb/alternator-client-java/tree/main",
+			want: "https://github.com/scylladb/alternator-client-java/tree/main",
+		},
+		{
+			name: "credentials remain original",
+			repo: "https://token@github.com/scylladb/alternator-client-java.git",
+			want: "https://token@github.com/scylladb/alternator-client-java.git",
+		},
+		{
+			name: "custom port remains original",
+			repo: "https://github.com:8443/scylladb/alternator-client-java.git",
+			want: "https://github.com:8443/scylladb/alternator-client-java.git",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeRepository(tt.repo)
+			if err != nil {
+				t.Fatalf("normalizeRepository() error = %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("normalizeRepository() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestManagerReconcileDropsOldUnlockedWorkspace(t *testing.T) {
 	ctx := context.Background()
 	source := initSourceRepo(t)
