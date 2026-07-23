@@ -31,6 +31,7 @@ var nativeFunctionNames = map[string]struct{}{
 	"workflow.state":    {},
 	"workflow.artifact": {},
 	"git.inventory":     {},
+	"git.filter":        {},
 }
 
 var nativeCodeExtensions = map[string]struct{}{
@@ -112,6 +113,9 @@ func RunNativeFunction(
 		return out, true, err
 	case "git.inventory":
 		out, err := nativeGitInventory(ctx, args, exec)
+		return out, true, err
+	case "git.filter":
+		out, err := nativeGitFilter(ctx, args, exec)
 		return out, true, err
 	default:
 		return nil, true, fmt.Errorf("unsupported native function %q", name)
@@ -490,6 +494,111 @@ func nativeGitInventoryOutputFiles(
 	return files, nil
 }
 
+func nativeGitFilter(ctx context.Context, args map[string]any, exec ExecutionContext) (map[string]any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	repo, err := nativeResolveRepo(exec, nativeStringAny(args, "working_directory", "workingDirectory"))
+	if err != nil {
+		return nil, err
+	}
+	target := normalizeFileTarget(nativeStringDefault(args, "target", "code"))
+	files, err := nativeMapSlice(args["files"])
+	if err != nil {
+		return nil, fmt.Errorf("files: %w", err)
+	}
+	filter := nativeMapValue(args["filter"])
+	includeGlobs := nativeStringSliceAny(
+		filter,
+		"include_globs",
+		"includeGlobs",
+		"include",
+		"includes",
+	)
+	excludeGlobs := nativeStringSliceAny(
+		filter,
+		"exclude_globs",
+		"excludeGlobs",
+		"exclude",
+		"excludes",
+	)
+	selectedPaths := nativeStringSet(nativeStringSliceAny(
+		filter,
+		"selected_paths",
+		"selectedPaths",
+		"paths",
+	))
+	includeContent := nativeBoolAny(args, "include_content", "includeContent")
+	maxContentBytes := nativeInt(args, "max_content_bytes", 0)
+	if maxContentBytes <= 0 {
+		maxContentBytes = nativeInt(args, "maxContentBytes", 0)
+	}
+	if maxContentBytes <= 0 {
+		maxContentBytes = 64 * 1024
+	}
+
+	filtered := make([]map[string]any, 0, len(files))
+	selected := make([]map[string]any, 0, len(files))
+	for _, original := range files {
+		file := cloneMap(original)
+		filePath := strings.TrimSpace(nativeAnyString(file["path"]))
+		category := strings.TrimSpace(nativeAnyString(file["category"]))
+		if category == "" {
+			category = nativeCategorizePath(filePath)
+			file["category"] = category
+		}
+		baseSelected := nativeTargetSelects(target, category)
+		matchesInclude := len(includeGlobs) == 0 && len(selectedPaths) == 0
+		if !matchesInclude {
+			matchesInclude = selectedPaths[nativeNormalizeRepoPath(filePath)] ||
+				nativeAnyGlobMatches(includeGlobs, filePath)
+		}
+		matchesExclude := nativeAnyGlobMatches(excludeGlobs, filePath)
+		isSelected := baseSelected && matchesInclude && !matchesExclude
+		file["selected"] = isSelected
+		if includeContent && isSelected {
+			blobHash := strings.TrimSpace(nativeAnyString(file["fileHash"]))
+			if blobHash == "" {
+				blobHash = strings.TrimSpace(nativeAnyString(file["blobHash"]))
+			}
+			if blobHash == "" {
+				return nil, fmt.Errorf("file %q has no fileHash", filePath)
+			}
+			content, truncated, err := nativeGitBlobContent(ctx, repo, blobHash, maxContentBytes)
+			if err != nil {
+				return nil, err
+			}
+			file["content"] = content
+			file["contentBytes"] = len([]byte(content))
+			file["contentEncoding"] = "utf-8"
+			file["contentTruncated"] = truncated
+		}
+		filtered = append(filtered, file)
+		if isSelected {
+			selected = append(selected, file)
+		}
+	}
+	return map[string]any{
+		"workingDirectory": repo,
+		"commit":           nativeString(args, "commit"),
+		"target":           target,
+		"inventoryHash":    nativeStringAny(args, "inventory_hash", "inventoryHash"),
+		"filter": map[string]any{
+			"includeGlobs":  includeGlobs,
+			"excludeGlobs":  excludeGlobs,
+			"selectedPaths": nativeSortedSetValues(selectedPaths),
+			"rationale":     nativeAnyString(filter["rationale"]),
+		},
+		"files":         filtered,
+		"selectedFiles": selected,
+		"counts": map[string]any{
+			"totalFiles":         len(filtered),
+			"totalSelectedFiles": len(selected),
+			"filesExcluded":      len(filtered) - len(selected),
+		},
+	}, nil
+}
+
 func nativeGitBlobContent(ctx context.Context, repo, blobHash string, maxBytes int) (string, bool, error) {
 	args := []string{"cat-file", "-p", blobHash}
 	cmd := osexec.CommandContext(ctx, "git", args...)
@@ -582,6 +691,72 @@ func nativeTargetSelects(target, category string) bool {
 	default:
 		return false
 	}
+}
+
+func nativeAnyGlobMatches(patterns []string, filePath string) bool {
+	for _, pattern := range patterns {
+		if nativeGlobMatches(pattern, filePath) {
+			return true
+		}
+	}
+	return false
+}
+
+func nativeGlobMatches(pattern, filePath string) bool {
+	pattern = nativeNormalizeRepoPath(pattern)
+	filePath = nativeNormalizeRepoPath(filePath)
+	if pattern == "" || filePath == "" {
+		return false
+	}
+	if !strings.Contains(pattern, "/") {
+		base := path.Base(filePath)
+		if ok, _ := path.Match(pattern, base); ok {
+			return true
+		}
+		return filePath == pattern || strings.Contains(filePath, "/"+pattern+"/")
+	}
+	if strings.HasSuffix(pattern, "/") {
+		pattern += "**"
+	}
+	re, err := regexp.Compile(nativeGlobRegexp(pattern))
+	if err != nil {
+		return false
+	}
+	return re.MatchString(filePath)
+}
+
+func nativeGlobRegexp(pattern string) string {
+	var b strings.Builder
+	b.WriteString("^")
+	for i := 0; i < len(pattern); i++ {
+		ch := pattern[i]
+		switch ch {
+		case '*':
+			if i+1 < len(pattern) && pattern[i+1] == '*' {
+				i++
+				if i+1 < len(pattern) && pattern[i+1] == '/' {
+					i++
+					b.WriteString("(?:.*/)?")
+				} else {
+					b.WriteString(".*")
+				}
+				continue
+			}
+			b.WriteString("[^/]*")
+		case '?':
+			b.WriteString("[^/]")
+		default:
+			b.WriteString(regexp.QuoteMeta(string(ch)))
+		}
+	}
+	b.WriteString("$")
+	return b.String()
+}
+
+func nativeNormalizeRepoPath(value string) string {
+	value = strings.TrimSpace(filepath.ToSlash(value))
+	value = strings.TrimPrefix(value, "./")
+	return strings.ToLower(value)
 }
 
 func readNativeStateValue(exec ExecutionContext, namespace, key string) (any, bool, error) {
@@ -975,6 +1150,13 @@ func nativeString(args map[string]any, key string) string {
 	return fmt.Sprint(value)
 }
 
+func nativeAnyString(value any) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprint(value)
+}
+
 func nativeStringAny(args map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if value := strings.TrimSpace(nativeString(args, key)); value != "" {
@@ -990,6 +1172,122 @@ func nativeStringDefault(args map[string]any, key, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func nativeMapValue(value any) map[string]any {
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case map[string]any:
+		return v
+	case map[string]string:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			out[key] = item
+		}
+		return out
+	case string:
+		var out map[string]any
+		if err := json.Unmarshal([]byte(v), &out); err == nil {
+			return out
+		}
+	}
+	return nil
+}
+
+func nativeMapSlice(value any) ([]map[string]any, error) {
+	switch v := value.(type) {
+	case nil:
+		return nil, fmt.Errorf("required")
+	case []map[string]any:
+		return v, nil
+	case []any:
+		out := make([]map[string]any, 0, len(v))
+		for i, item := range v {
+			obj, ok := item.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("item %d must be an object", i)
+			}
+			out = append(out, obj)
+		}
+		return out, nil
+	case string:
+		var out []map[string]any
+		if err := json.Unmarshal([]byte(v), &out); err != nil {
+			return nil, err
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("must be an array of objects")
+	}
+}
+
+func nativeStringSliceAny(args map[string]any, keys ...string) []string {
+	for _, key := range keys {
+		values := nativeStringSlice(args[key])
+		if len(values) > 0 {
+			return values
+		}
+	}
+	return nil
+}
+
+func nativeStringSlice(value any) []string {
+	switch v := value.(type) {
+	case nil:
+		return nil
+	case []string:
+		return nativeCleanStringSlice(v)
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if text := strings.TrimSpace(nativeAnyString(item)); text != "" {
+				out = append(out, text)
+			}
+		}
+		return nativeCleanStringSlice(out)
+	case string:
+		text := strings.TrimSpace(v)
+		if text == "" {
+			return nil
+		}
+		var decoded []string
+		if err := json.Unmarshal([]byte(text), &decoded); err == nil {
+			return nativeCleanStringSlice(decoded)
+		}
+		return nativeCleanStringSlice(strings.Split(text, ","))
+	default:
+		return nil
+	}
+}
+
+func nativeCleanStringSlice(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func nativeStringSet(values []string) map[string]bool {
+	out := make(map[string]bool, len(values))
+	for _, value := range values {
+		if value = nativeNormalizeRepoPath(value); value != "" {
+			out[value] = true
+		}
+	}
+	return out
+}
+
+func nativeSortedSetValues(values map[string]bool) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func nativeBool(args map[string]any, key string) bool {

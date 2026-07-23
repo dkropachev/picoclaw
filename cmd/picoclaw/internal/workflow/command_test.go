@@ -19,10 +19,46 @@ func TestNewWorkflowCommandIncludesCompatibilityCommands(t *testing.T) {
 	for _, subcmd := range cmd.Commands() {
 		names = append(names, subcmd.Name())
 	}
-	for _, want := range []string{"compatibility", "revalidate"} {
+	for _, want := range []string{"install", "compatibility", "revalidate"} {
 		if !slices.Contains(names, want) {
 			t.Fatalf("workflow subcommands = %v, missing %q", names, want)
 		}
+	}
+}
+
+func TestInstallWorkflowCommandInstallsCodeReviewWorkflow(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	t.Setenv(config.EnvConfig, configPath)
+
+	cmd := NewWorkflowCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"install", "code-review"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("workflow install command failed: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), `"ref": "workflows/code-review.yml"`) {
+		t.Fatalf("install output = %s, want code-review ref", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "workflows", "code-review.yml")); err != nil {
+		t.Fatalf("installed code-review workflow stat error = %v", err)
+	}
+
+	validate := NewWorkflowCommand()
+	var validateOut bytes.Buffer
+	validate.SetOut(&validateOut)
+	validate.SetArgs([]string{"validate", "workflows/code-review.yml"})
+	if err := validate.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("workflow validate command failed: %v\n%s", err, validateOut.String())
+	}
+	if !strings.Contains(validateOut.String(), `"valid": true`) {
+		t.Fatalf("validate output = %s, want valid", validateOut.String())
 	}
 }
 
