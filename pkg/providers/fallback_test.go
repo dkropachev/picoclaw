@@ -436,7 +436,11 @@ func TestImageFallback_Success(t *testing.T) {
 	fc := NewFallbackChain(ct, nil)
 
 	candidates := []FallbackCandidate{makeCandidate("openai", "gpt-4o")}
-	result, err := fc.ExecuteImage(context.Background(), candidates, successRun("image result"))
+	result, err := fc.ExecuteImage(
+		context.Background(),
+		candidates,
+		successCandidateRun("image result"),
+	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -455,7 +459,7 @@ func TestImageFallback_DimensionError(t *testing.T) {
 	}
 
 	attempt := 0
-	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+	run := func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error) {
 		attempt++
 		return nil, errors.New("image dimensions exceed max 4096x4096")
 	}
@@ -479,7 +483,7 @@ func TestImageFallback_SizeError(t *testing.T) {
 	}
 
 	attempt := 0
-	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+	run := func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error) {
 		attempt++
 		return nil, errors.New("image exceeds 20 mb")
 	}
@@ -503,7 +507,7 @@ func TestImageFallback_RetryOnOtherErrors(t *testing.T) {
 	}
 
 	attempt := 0
-	run := func(ctx context.Context, provider, model string) (*LLMResponse, error) {
+	run := func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error) {
 		attempt++
 		if attempt == 1 {
 			return nil, errors.New("rate limit exceeded")
@@ -533,7 +537,13 @@ func TestImageFallback_LocalRateLimitSkipsToHealthyFallback(t *testing.T) {
 			candidates []FallbackCandidate,
 			run func(context.Context, string, string) (*LLMResponse, error),
 		) (*FallbackResult, error) {
-			return fc.ExecuteImage(ctx, candidates, run)
+			return fc.ExecuteImage(
+				ctx,
+				candidates,
+				func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error) {
+					return run(ctx, candidate.Provider, candidate.Model)
+				},
+			)
 		},
 		"image fallback ok",
 	)
@@ -543,9 +553,15 @@ func TestImageFallback_NoCandidates(t *testing.T) {
 	ct := NewCooldownTracker()
 	fc := NewFallbackChain(ct, nil)
 
-	_, err := fc.ExecuteImage(context.Background(), nil, successRun("ok"))
+	_, err := fc.ExecuteImage(context.Background(), nil, successCandidateRun("ok"))
 	if err == nil {
 		t.Error("expected error for empty candidates")
+	}
+}
+
+func successCandidateRun(content string) func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error) {
+	return func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error) {
+		return &LLMResponse{Content: content, FinishReason: "stop"}, nil
 	}
 }
 

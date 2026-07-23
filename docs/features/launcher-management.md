@@ -23,7 +23,7 @@ startup behavior, update, and runtime version metadata.
 | ----------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
 | `FR-LAUNCHER-001` | MUST   | Dashboard access requires password setup/login and an HttpOnly session cookie; local bootstrap auto-login is loopback-only.                                                                                                                                                                                                                                  | Browser management must be gated.                                                                    |
 | `FR-LAUNCHER-002` | MUST   | Config GET/PUT/PATCH/reset preserves schema defaults, secure string semantics, model API-key payloads, existing model secrets across equivalent model alias changes, and runtime log-level application.                                                                                                                                                      | Launcher config editing must not corrupt config or credentials.                                      |
-| `FR-LAUNCHER-003` | MUST   | Model management lists, adds, updates, deletes, tests, fetches, and sets default model entries without exposing stored secret values; model add/edit forms must expose `reasoning_effort` next to the model identifier and validate it with the same rules as runtime config; model updates must not create blank stored secret entries when no key exists; model-router entries can be created, edited, listed, deleted, and set as default through the models surface without storing API secrets on the router entry. | Users need safe model administration.                                                                |
+| `FR-LAUNCHER-003` | MUST   | Model management lists, adds, updates, deletes, tests, fetches, and sets default model entries without exposing stored secret values; model add/edit forms must expose `reasoning_effort` next to the model identifier and validate it with the same rules as runtime config; model updates must not create blank stored secret entries when no key exists; account-router entries can be created, edited, listed, deleted, and set as default through the Accounts surface without storing API secrets on the router entry, with a fullscreen UI graph editor that connects credential accounts and router blocks on a draggable, pannable, zoomable canvas plus a raw JSON graph editor. | Users need safe model and account administration.                                                                |
 | `FR-LAUNCHER-004` | MUST   | OAuth login flow creates, polls, completes, and logs out provider credentials through bounded flow state.                                                                                                                                                                                                                                                    | OAuth-backed providers need browser setup.                                                           |
 | `FR-LAUNCHER-005` | MUST   | Gateway lifecycle endpoints report status/logs and start/stop/restart managed gateway processes without losing log diagnostics.                                                                                                                                                                                                                              | Desktop users need process control.                                                                  |
 | `FR-LAUNCHER-006` | MUST   | Startup, launcher config, update, and version endpoints report or mutate only their documented system settings.                                                                                                                                                                                                                                              | System management must be narrow and auditable.                                                      |
@@ -68,6 +68,8 @@ Owns: CODE web/frontend/src/lib/**
 Owns: CODE web/frontend/src/main.tsx
 Owns: CODE web/frontend/src/routes/agent.tsx
 Owns: CODE web/frontend/src/routes/config*
+Owns: CODE web/frontend/src/routes/credentials.account-router.$index.tsx
+Owns: CODE web/frontend/src/routes/credentials.account-router.new.tsx
 Owns: CODE web/frontend/src/routes/credentials.tsx
 Owns: CODE web/frontend/src/routes/launcher-*
 Owns: CODE web/frontend/src/routes/models.tsx
@@ -125,8 +127,8 @@ Owns: TEST pkg/migrate/*
    secure strings when masked values are submitted, reapply explicit model
    API-key payloads after security-file merges, retain existing model secrets
    across equivalent alias/name changes, clear credential fields for
-   model-router entries, validate router account references against the final
-   model list before saving, write the config atomically, and apply runtime
+   account-router entries, validate router credential account refs and legacy
+   model-name refs before saving, write the config atomically, and apply runtime
    log-level changes.
 3. For OAuth requests, create bounded flow state, redirect or poll provider
    login, exchange callback state for credentials, then persist or clear
@@ -166,7 +168,7 @@ workspaces feature.
   secrets when equivalent provider/model/API-base entries are renamed.
 - Model update preserves existing secrets unless explicitly changed and avoids
   persisting blank secret placeholders for models with no key.
-- Model-router add/update rejects unknown, router, or ambiguous account
+- Account-router add/update rejects unknown, router, or ambiguous account
   references as validation failures and does not persist API keys on router
   entries.
 - Model add/update rejects unsupported `reasoning_effort` values before saving.

@@ -27,6 +27,7 @@ export function DeleteModelDialog({
 }: DeleteModelDialogProps) {
   const { t } = useTranslation()
   const [deleting, setDeleting] = useState(false)
+  const isRouter = model?.provider === "router" || Boolean(model?.router)
 
   const handleConfirm = async () => {
     if (!model) return
@@ -50,9 +51,17 @@ export function DeleteModelDialog({
     <AlertDialog open={model !== null} onOpenChange={(v) => !v && onClose()}>
       <AlertDialogContent size="sm">
         <AlertDialogHeader>
-          <AlertDialogTitle>{t("models.delete.title")}</AlertDialogTitle>
+          <AlertDialogTitle>
+            {isRouter
+              ? t("models.router.deleteTitle")
+              : t("models.delete.title")}
+          </AlertDialogTitle>
           <AlertDialogDescription>
-            {t("models.delete.description", { name: model?.model_name })}
+            {isRouter
+              ? t("models.router.deleteDescription", {
+                  name: model?.model_name,
+                })
+              : t("models.delete.description", { name: model?.model_name })}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

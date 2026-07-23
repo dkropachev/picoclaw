@@ -152,9 +152,7 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
 	if provider, err := providerForFallbackCandidate(
 		ts.agent,
 		ts.agent.Provider,
-		targetCandidates,
-		firstCandidate.Provider,
-		firstCandidate.Model,
+		firstCandidate,
 	); err != nil {
 		return err
 	} else if provider != nil {

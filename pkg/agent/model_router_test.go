@@ -89,3 +89,108 @@ func TestAgentLoopSelectCandidatesUsesBuiltModelRouter(t *testing.T) {
 		t.Fatal("account-a provider was not registered")
 	}
 }
+
+func TestBuildModelRouterUsesSharedRouterModelWithAccountIdentity(t *testing.T) {
+	cfg := &config.Config{
+		ModelList: []*config.ModelConfig{
+			{
+				ModelName: "account-a",
+				Provider:  "openai",
+				Model:     "gpt-4o",
+				APIKeys:   config.SimpleSecureStrings("sk-account-a"),
+			},
+			{
+				ModelName: "account-b",
+				Provider:  "openai",
+				Model:     "gpt-4o-mini",
+				APIKeys:   config.SimpleSecureStrings("sk-account-b"),
+			},
+			{
+				ModelName: "joint-account",
+				Provider:  config.ModelRouterProvider,
+				Model:     "gpt-5.4",
+				Router: &config.ModelRouterConfig{
+					Enabled: true,
+					Entry:   "pool",
+					Blocks: []config.ModelRouterBlock{{
+						ID:       "pool",
+						Type:     config.ModelRouterBlockTypeLoadBalance,
+						Accounts: []string{"account-a", "account-b"},
+						Strategy: config.ModelRouterStrategyTokensSpent,
+					}},
+				},
+			},
+		},
+	}
+	candidateProviders := map[string]providers.LLMProvider{}
+	router := buildModelRouter(cfg, "openai", "joint-account", t.TempDir(), candidateProviders)
+	if router == nil {
+		t.Fatal("buildModelRouter() = nil")
+	}
+
+	selection := router.Select("session-1", modelrouter.SelectReasonInitial)
+	if len(selection.Candidates) != 1 {
+		t.Fatalf("len(candidates) = %d, want 1", len(selection.Candidates))
+	}
+	candidate := selection.Candidates[0]
+	if candidate.Model != "gpt-5.4" {
+		t.Fatalf("candidate model = %q, want shared router model", candidate.Model)
+	}
+	if candidate.IdentityKey != "model_name:account-a" {
+		t.Fatalf("candidate identity = %q, want account identity", candidate.IdentityKey)
+	}
+	if candidateProviders["model_name:account-a"] == nil {
+		t.Fatal("account-a identity provider was not registered")
+	}
+	if candidateProviders["model_name:account-b"] == nil {
+		t.Fatal("account-b identity provider was not registered")
+	}
+	if candidateProviders["model_name:account-a"] == candidateProviders["model_name:account-b"] {
+		t.Fatal("account providers share one provider instance")
+	}
+}
+
+func TestBuildModelRouterUsesCredentialAccountRefs(t *testing.T) {
+	cfg := &config.Config{
+		ModelList: []*config.ModelConfig{
+			{
+				ModelName: "joint-account",
+				Provider:  config.ModelRouterProvider,
+				Model:     "gpt-5.4",
+				Router: &config.ModelRouterConfig{
+					Enabled: true,
+					Entry:   "primary",
+					Blocks: []config.ModelRouterBlock{{
+						ID:      "primary",
+						Type:    config.ModelRouterBlockTypeAccount,
+						Account: "credential:openai:work",
+					}},
+				},
+			},
+		},
+	}
+	if err := cfg.ValidateModelList(); err != nil {
+		t.Fatalf("ValidateModelList() error = %v", err)
+	}
+
+	candidateProviders := map[string]providers.LLMProvider{}
+	router := buildModelRouter(cfg, "openai", "joint-account", t.TempDir(), candidateProviders)
+	if router == nil {
+		t.Fatal("buildModelRouter() = nil")
+	}
+
+	selection := router.Select("session-1", modelrouter.SelectReasonInitial)
+	if len(selection.Candidates) != 1 {
+		t.Fatalf("len(candidates) = %d, want 1", len(selection.Candidates))
+	}
+	candidate := selection.Candidates[0]
+	if candidate.Provider != "openai" {
+		t.Fatalf("candidate provider = %q, want openai", candidate.Provider)
+	}
+	if candidate.Model != "gpt-5.4" {
+		t.Fatalf("candidate model = %q, want shared router model", candidate.Model)
+	}
+	if candidate.IdentityKey != "model_name:credential:openai:work" {
+		t.Fatalf("candidate identity = %q, want credential account identity", candidate.IdentityKey)
+	}
+}

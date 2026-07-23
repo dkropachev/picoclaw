@@ -190,9 +190,7 @@ func (p *Pipeline) CallLLM(
 			candidateProvider, err := providerForFallbackCandidate(
 				ts.agent,
 				exec.activeProvider,
-				exec.activeCandidates,
-				candidate.Provider,
-				candidate.Model,
+				candidate,
 			)
 			if err != nil {
 				return nil, err
@@ -223,14 +221,7 @@ func (p *Pipeline) CallLLM(
 				fbResult, fbErr = p.Fallback.ExecuteImage(
 					providerCtx,
 					exec.activeCandidates,
-					func(ctx context.Context, provider, model string) (*providers.LLMResponse, error) {
-						candidate := providers.FallbackCandidate{Provider: provider, Model: model}
-						for _, configured := range exec.activeCandidates {
-							if configured.Provider == provider && configured.Model == model {
-								candidate = configured
-								break
-							}
-						}
+					func(ctx context.Context, candidate providers.FallbackCandidate) (*providers.LLMResponse, error) {
 						return runCandidate(ctx, candidate)
 					},
 				)
@@ -770,17 +761,15 @@ func (p *Pipeline) reselectModelRouterAfterCompression(ts *turnState, exec *turn
 func providerForFallbackCandidate(
 	agent *AgentInstance,
 	activeProvider providers.LLMProvider,
-	activeCandidates []providers.FallbackCandidate,
-	provider string,
-	model string,
+	candidate providers.FallbackCandidate,
 ) (providers.LLMProvider, error) {
 	if agent != nil {
-		if cp := agent.candidateProvider(providers.ModelKey(provider, model)); cp != nil {
+		if cp := agent.candidateProviderForCandidate(candidate); cp != nil {
 			return cp, nil
 		}
 	}
 	if activeProvider == nil {
-		return nil, fmt.Errorf("fallback model %q has no active provider", model)
+		return nil, fmt.Errorf("fallback model %q has no active provider", candidate.Model)
 	}
 	return activeProvider, nil
 }

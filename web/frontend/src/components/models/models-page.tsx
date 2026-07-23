@@ -2,7 +2,6 @@ import {
   IconDatabase,
   IconLoader2,
   IconPlus,
-  IconRoute,
   IconStar,
 } from "@tabler/icons-react"
 import { useCallback, useEffect, useState } from "react"
@@ -24,7 +23,6 @@ import { AddModelSheet } from "./add-model-sheet"
 import { CatalogDialog } from "./catalog-dialog"
 import { DeleteModelDialog } from "./delete-model-dialog"
 import { EditModelSheet } from "./edit-model-sheet"
-import { ModelRouterSheet } from "./model-router-sheet"
 import {
   getCanonicalProviderKey,
   getProviderCatalogMap,
@@ -53,8 +51,6 @@ export function ModelsPage() {
   const [deletingModel, setDeletingModel] = useState<ModelInfo | null>(null)
   const [addOpen, setAddOpen] = useState(false)
   const [catalogOpen, setCatalogOpen] = useState(false)
-  const [routerOpen, setRouterOpen] = useState(false)
-  const [editingRouter, setEditingRouter] = useState<ModelInfo | null>(null)
   const [settingDefaultIndex, setSettingDefaultIndex] = useState<number | null>(
     null,
   )
@@ -107,17 +103,7 @@ export function ModelsPage() {
   }
 
   const handleEditModel = (model: ModelInfo) => {
-    if (model.provider === "router" || model.router != null) {
-      setEditingRouter(model)
-      setRouterOpen(true)
-      return
-    }
     setEditingModel(model)
-  }
-
-  const handleAddRouter = () => {
-    setEditingRouter(null)
-    setRouterOpen(true)
   }
 
   const grouped: Record<
@@ -130,7 +116,8 @@ export function ModelsPage() {
       models: ModelInfo[]
     }
   > = {}
-  for (const model of models) {
+  const displayModels = models.filter((model) => !isRouterModel(model))
+  for (const model of displayModels) {
     const providerKey = getCanonicalProviderKey(model.provider, providerOptions)
     const providerDef = providerKey ? providerMap.get(providerKey) : undefined
     if (!grouped[providerKey]) {
@@ -177,7 +164,7 @@ export function ModelsPage() {
       return a.provider.label.localeCompare(b.provider.label)
     })
 
-  const defaultModel = models.find((model) => model.is_default)
+  const hasDefaultModel = models.some((model) => model.is_default)
 
   return (
     <div className="flex h-full flex-col">
@@ -195,15 +182,6 @@ export function ModelsPage() {
           <Button
             size="sm"
             variant="outline"
-            onClick={handleAddRouter}
-            disabled={providerOptions.length === 0}
-          >
-            <IconRoute className="size-4" />
-            {t("models.router.button")}
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
             onClick={() => setAddOpen(true)}
             disabled={providerOptions.length === 0}
           >
@@ -215,7 +193,7 @@ export function ModelsPage() {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 sm:px-6">
         <div className="pt-2">
-          {!defaultModel && (
+          {!hasDefaultModel && (
             <div className="text-muted-foreground flex items-center gap-1.5 text-sm">
               <span>{t("models.noDefaultHintPrefix")}</span>
               <IconStar className="size-3.5 shrink-0" />
@@ -288,14 +266,6 @@ export function ModelsPage() {
         providerOptions={providerOptions}
       />
 
-      <ModelRouterSheet
-        open={routerOpen}
-        model={editingRouter}
-        models={models}
-        onClose={() => setRouterOpen(false)}
-        onSaved={fetchModels}
-      />
-
       <DeleteModelDialog
         model={deletingModel}
         onClose={() => setDeletingModel(null)}
@@ -310,4 +280,8 @@ export function ModelsPage() {
       />
     </div>
   )
+}
+
+function isRouterModel(model: ModelInfo): boolean {
+  return model.provider === "router" || model.router != null
 }

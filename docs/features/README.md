@@ -26,7 +26,7 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 | Skills loading and installation | [skills.md](skills.md) |
 | Scheduling and reminders | [scheduling.md](scheduling.md) |
 | Routing and multi-agent dispatch | [routing.md](routing.md) |
-| Model router | [model-router.md](model-router.md) |
+| Account router | [model-router.md](model-router.md) |
 | Hooks and interception | [hooks.md](hooks.md) |
 | Self-evolution | [self-evolution.md](self-evolution.md) |
 | Launcher management UX | [launcher-management.md](launcher-management.md) |

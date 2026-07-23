@@ -282,7 +282,7 @@ func (fc *FallbackChain) ExecuteCandidate(
 func (fc *FallbackChain) ExecuteImage(
 	ctx context.Context,
 	candidates []FallbackCandidate,
-	run func(ctx context.Context, provider, model string) (*LLMResponse, error),
+	run func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error),
 ) (*FallbackResult, error) {
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("image fallback: no candidates configured")
@@ -328,7 +328,7 @@ func (fc *FallbackChain) ExecuteImage(
 		}
 
 		start := time.Now()
-		resp, err := run(ctx, candidate.Provider, candidate.Model)
+		resp, err := run(ctx, candidate)
 		elapsed := time.Since(start)
 
 		if err == nil {
