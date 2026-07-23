@@ -316,6 +316,12 @@
       }
     }
   },
+  "git_workspaces": {
+    "root_dir": "",
+    "max_total_size_bytes": 21474836480,
+    "ignored_cleanup_delay_seconds": 86400,
+    "drop_delay_seconds": 2592000
+  },
   "tools": {
     "allow_read_paths": null,
     "allow_write_paths": null,
@@ -533,6 +539,9 @@
       "enabled": true
     },
     "web_fetch": {
+      "enabled": true
+    },
+    "git_workspace": {
       "enabled": true
     },
     "write_file": {

@@ -5,6 +5,7 @@ const smokeRoutes = [
   "/",
   "/models",
   "/logs",
+  "/agent/git-workspaces",
   "/agent/tools",
   "/agent/workflows",
   "/agent/skills",
@@ -64,6 +65,54 @@ const toolsResponse = {
       category: "skills",
       config_key: "tools.install_skill",
       status: "enabled",
+    },
+  ],
+}
+
+const gitWorkspaceResponse = {
+  root_dir: "/tmp/picoclaw-git-workspaces",
+  max_total_size_bytes: 21474836480,
+  ignored_cleanup_delay_seconds: 86400,
+  drop_delay_seconds: 2592000,
+  total_size_bytes: 4096,
+  ignored_bytes: 512,
+  repository_count: 1,
+  workspace_count: 1,
+  locked_workspace_count: 0,
+  repositories: [
+    {
+      id: "gw-repo",
+      remote_url: "https://example.test/repo.git",
+      first_seen_at: "2026-07-16T12:00:00Z",
+      last_seen_at: "2026-07-16T12:00:00Z",
+      workspace_count: 1,
+      locked_count: 0,
+      size_bytes: 4096,
+      ignored_bytes: 512,
+    },
+  ],
+  workspaces: [
+    {
+      id: "gw-workspace",
+      repo_id: "gw-repo",
+      remote_url: "https://example.test/repo.git",
+      path: "/tmp/picoclaw-git-workspaces/checkouts/repo-gw-workspace",
+      current_branch: "main",
+      dirty: false,
+      size_bytes: 4096,
+      ignored_bytes: 512,
+      created_at: "2026-07-16T12:00:00Z",
+      updated_at: "2026-07-16T12:00:00Z",
+      status: "available",
+    },
+  ],
+  history: [
+    {
+      id: "hist-1",
+      time: "2026-07-16T12:00:00Z",
+      action: "allocated",
+      repo_id: "gw-repo",
+      workspace_id: "gw-workspace",
     },
   ],
 }
@@ -748,6 +797,8 @@ async function mockLauncherApis(
           return json(route, [])
         case "/api/tools":
           return json(route, toolsResponse)
+        case "/api/git-workspaces":
+          return json(route, gitWorkspaceResponse)
         case "/api/workflows":
           return json(route, {
             workflows: options.nullableWorkflowPayloads

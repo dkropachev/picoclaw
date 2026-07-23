@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"gopkg.in/yaml.v3"
@@ -308,6 +309,31 @@ func TestDefaultConfig_EvolutionDefaults(t *testing.T) {
 	assert.Equal(t, 0.7, cfg.Evolution.EffectiveMinSuccessRatio())
 	assert.False(t, cfg.Evolution.RunsColdPathAutomatically())
 	assert.False(t, cfg.Evolution.AutoAppliesDrafts())
+}
+
+func TestDefaultConfig_GitWorkspaceDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+
+	assert.Equal(t, int64(DefaultGitWorkspaceMaxTotalSizeBytes), cfg.GitWorkspaces.EffectiveMaxTotalSizeBytes())
+	assert.Equal(t, time.Duration(DefaultGitWorkspaceIgnoredCleanupDelaySecs)*time.Second, cfg.GitWorkspaces.EffectiveIgnoredCleanupDelay())
+	assert.Equal(t, time.Duration(DefaultGitWorkspaceDropDelaySecs)*time.Second, cfg.GitWorkspaces.EffectiveDropDelay())
+	assert.Equal(t, filepath.Join(cfg.WorkspacePath(), ".git-workspaces"), cfg.GitWorkspaceRootPath())
+	assert.True(t, cfg.Tools.IsToolEnabled("git_workspace"))
+}
+
+func TestGitWorkspacesConfig_EffectiveValuesPreferConfigured(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.GitWorkspaces = GitWorkspacesConfig{
+		RootDir:                    "~/custom-git-workspaces",
+		MaxTotalSizeBytes:          1234,
+		IgnoredCleanupDelaySeconds: 90,
+		DropDelaySeconds:           180,
+	}
+
+	assert.Equal(t, expandHome("~/custom-git-workspaces"), cfg.GitWorkspaceRootPath())
+	assert.Equal(t, int64(1234), cfg.GitWorkspaces.EffectiveMaxTotalSizeBytes())
+	assert.Equal(t, 90*time.Second, cfg.GitWorkspaces.EffectiveIgnoredCleanupDelay())
+	assert.Equal(t, 180*time.Second, cfg.GitWorkspaces.EffectiveDropDelay())
 }
 
 func TestEvolutionConfig_EffectiveMode(t *testing.T) {

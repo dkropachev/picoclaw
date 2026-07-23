@@ -44,11 +44,13 @@ type Config struct {
 	Gateway   GatewayConfig   `json:"gateway"             yaml:"-"`
 	Events    EventsConfig    `json:"events,omitempty"    yaml:"-"`
 	Workflows WorkflowsConfig `json:"workflows,omitempty" yaml:"-"`
-	Hooks     HooksConfig     `json:"hooks,omitempty"     yaml:"-"`
-	Tools     ToolsConfig     `json:"tools"               yaml:",inline"`
-	Heartbeat HeartbeatConfig `json:"heartbeat"           yaml:"-"`
-	Devices   DevicesConfig   `json:"devices"             yaml:"-"`
-	Voice     VoiceConfig     `json:"voice"               yaml:"-"`
+	// GitWorkspaces controls the inventory of local git checkouts reused by agent sessions.
+	GitWorkspaces GitWorkspacesConfig `json:"git_workspaces,omitempty" yaml:"-"`
+	Hooks         HooksConfig         `json:"hooks,omitempty"     yaml:"-"`
+	Tools         ToolsConfig         `json:"tools"               yaml:",inline"`
+	Heartbeat     HeartbeatConfig     `json:"heartbeat"           yaml:"-"`
+	Devices       DevicesConfig       `json:"devices"             yaml:"-"`
+	Voice         VoiceConfig         `json:"voice"               yaml:"-"`
 	// BuildInfo contains build-time version information
 	BuildInfo BuildInfo `json:"build_info,omitempty" yaml:"-"`
 
@@ -77,6 +79,52 @@ type WorkflowsConfig struct {
 	DefaultTimeoutSeconds int    `json:"default_timeout_seconds" env:"PICOCLAW_WORKFLOWS_DEFAULT_TIMEOUT_SECONDS"`
 	MaxCallDepth          int    `json:"max_call_depth"          env:"PICOCLAW_WORKFLOWS_MAX_CALL_DEPTH"`
 	RetentionDays         int    `json:"retention_days"          env:"PICOCLAW_WORKFLOWS_RETENTION_DAYS"`
+}
+
+const (
+	DefaultGitWorkspaceMaxTotalSizeBytes       int64 = 20 * 1024 * 1024 * 1024
+	DefaultGitWorkspaceIgnoredCleanupDelaySecs       = 24 * 60 * 60
+	DefaultGitWorkspaceDropDelaySecs                 = 30 * 24 * 60 * 60
+)
+
+type GitWorkspacesConfig struct {
+	RootDir                    string `json:"root_dir,omitempty"                       env:"PICOCLAW_GIT_WORKSPACES_ROOT_DIR"`
+	MaxTotalSizeBytes          int64  `json:"max_total_size_bytes,omitempty"          env:"PICOCLAW_GIT_WORKSPACES_MAX_TOTAL_SIZE_BYTES"`
+	IgnoredCleanupDelaySeconds int    `json:"ignored_cleanup_delay_seconds,omitempty" env:"PICOCLAW_GIT_WORKSPACES_IGNORED_CLEANUP_DELAY_SECONDS"`
+	DropDelaySeconds           int    `json:"drop_delay_seconds,omitempty"            env:"PICOCLAW_GIT_WORKSPACES_DROP_DELAY_SECONDS"`
+}
+
+func (c GitWorkspacesConfig) EffectiveRootDir(defaultWorkspace string) string {
+	dir := strings.TrimSpace(c.RootDir)
+	if dir != "" {
+		return expandHome(dir)
+	}
+	defaultWorkspace = strings.TrimSpace(defaultWorkspace)
+	if defaultWorkspace == "" {
+		defaultWorkspace = filepath.Join(GetHome(), pkg.WorkspaceName)
+	}
+	return filepath.Join(expandHome(defaultWorkspace), ".git-workspaces")
+}
+
+func (c GitWorkspacesConfig) EffectiveMaxTotalSizeBytes() int64 {
+	if c.MaxTotalSizeBytes > 0 {
+		return c.MaxTotalSizeBytes
+	}
+	return DefaultGitWorkspaceMaxTotalSizeBytes
+}
+
+func (c GitWorkspacesConfig) EffectiveIgnoredCleanupDelay() time.Duration {
+	if c.IgnoredCleanupDelaySeconds > 0 {
+		return time.Duration(c.IgnoredCleanupDelaySeconds) * time.Second
+	}
+	return time.Duration(DefaultGitWorkspaceIgnoredCleanupDelaySecs) * time.Second
+}
+
+func (c GitWorkspacesConfig) EffectiveDropDelay() time.Duration {
+	if c.DropDelaySeconds > 0 {
+		return time.Duration(c.DropDelaySeconds) * time.Second
+	}
+	return time.Duration(DefaultGitWorkspaceDropDelaySecs) * time.Second
 }
 
 func (c WorkflowsConfig) EffectiveMaxCallDepth() int {
@@ -1360,6 +1408,7 @@ type ToolsConfig struct {
 	Subagent        ToolConfig         `json:"subagent"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
 	Threads         ThreadsToolConfig  `json:"threads"           yaml:"-"`
 	WebFetch        ToolConfig         `json:"web_fetch"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
+	GitWorkspace    ToolConfig         `json:"git_workspace"     yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_GIT_WORKSPACE_"`
 	Workflow        ToolConfig         `json:"workflow"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WORKFLOW_"`
 	WriteFile       ToolConfig         `json:"write_file"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
 }
@@ -1925,6 +1974,13 @@ func (c *Config) WorkspacePath() string {
 	return expandHome(c.Agents.Defaults.Workspace)
 }
 
+func (c *Config) GitWorkspaceRootPath() string {
+	if c == nil {
+		return filepath.Join(GetHome(), pkg.WorkspaceName, ".git-workspaces")
+	}
+	return c.GitWorkspaces.EffectiveRootDir(c.WorkspacePath())
+}
+
 func expandHome(path string) string {
 	if path == "" {
 		return path
@@ -2136,6 +2192,8 @@ func (t *ToolsConfig) IsToolEnabled(name string) bool {
 		return t.Threads.Enabled
 	case "web_fetch":
 		return t.WebFetch.Enabled
+	case "git_workspace":
+		return t.GitWorkspace.Enabled
 	case "workflow":
 		return t.Workflow.Enabled
 	case "send_file":
