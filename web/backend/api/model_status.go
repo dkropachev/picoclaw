@@ -87,6 +87,9 @@ func (s *modelProbeCacheState) resetForTest() {
 
 func hasModelConfiguration(m *config.ModelConfig) bool {
 	protocol := modelProtocol(m)
+	if protocol == config.ModelRouterProvider {
+		return m != nil && m.Router != nil && m.Router.Enabled
+	}
 	authMethod := strings.ToLower(strings.TrimSpace(m.AuthMethod))
 	apiKey := strings.TrimSpace(m.APIKey())
 

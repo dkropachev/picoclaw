@@ -1,7 +1,10 @@
 import {
+  IconArrowsShuffle,
   IconEdit,
+  IconGitBranch,
   IconKey,
   IconLoader2,
+  IconRoute,
   IconStar,
   IconStarFilled,
   IconTrash,
@@ -32,6 +35,7 @@ export function ModelCard({
   settingDefault,
 }: ModelCardProps) {
   const { t } = useTranslation()
+  const isRouter = model.provider === "router" || model.router != null
   const isOAuth = model.auth_method === "oauth"
   const status = model.status
   const statusLabel = t(`models.status.${status}`)
@@ -60,6 +64,49 @@ export function ModelCard({
     ? t("models.action.deleteDisabled.isDefault")
     : deleteLabel
   const deleteDisabled = model.is_default
+  const routerSummary = (() => {
+    if (!isRouter || !model.router) return null
+    const entry = model.router.blocks?.find(
+      (block) => block.id === model.router?.entry,
+    )
+    const fallbackBlock = entry?.fallback
+      ? model.router.blocks?.find((block) => block.id === entry.fallback)
+      : undefined
+    const fallbackAccount =
+      fallbackBlock?.type === "account" ? fallbackBlock.account : undefined
+
+    if (entry?.type === "load_balance") {
+      const strategy = entry.strategy || "blind"
+      return {
+        mode: "load_balance" as const,
+        primary: t("models.router.cardLoadBalance", {
+          count: entry.accounts?.length ?? 0,
+          strategy: t(`models.router.strategyName.${strategy}`),
+        }),
+        secondary: fallbackAccount
+          ? t("models.router.cardFallbackTarget", { account: fallbackAccount })
+          : t("models.router.cardNoFallback"),
+      }
+    }
+
+    if (entry?.type === "account") {
+      return {
+        mode: "fallback" as const,
+        primary: t("models.router.cardFallback", {
+          account: entry.account ?? t("models.router.cardUnconfigured"),
+        }),
+        secondary: fallbackAccount
+          ? t("models.router.cardFallbackTarget", { account: fallbackAccount })
+          : t("models.router.cardNoFallback"),
+      }
+    }
+
+    return {
+      mode: "fallback" as const,
+      primary: t("models.router.cardUnconfigured"),
+      secondary: statusLabel,
+    }
+  })()
 
   return (
     <div
@@ -96,6 +143,11 @@ export function ModelCard({
           {model.is_virtual && (
             <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-[10px] leading-none font-medium">
               {t("models.badge.virtual")}
+            </span>
+          )}
+          {isRouter && (
+            <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-[10px] leading-none font-medium">
+              {t("models.badge.router")}
             </span>
           )}
         </div>
@@ -191,17 +243,38 @@ export function ModelCard({
         </div>
       </div>
 
-      <p className="text-muted-foreground truncate font-mono text-xs leading-snug">
-        {model.model}
-      </p>
+      {isRouter ? (
+        <div className="space-y-1">
+          <p className="text-muted-foreground truncate text-xs leading-snug">
+            {routerSummary?.primary ?? t("models.router.cardUnconfigured")}
+          </p>
+          <p className="text-muted-foreground/80 flex min-w-0 items-center gap-1 text-[11px] leading-snug">
+            {routerSummary?.mode === "load_balance" ? (
+              <IconArrowsShuffle className="size-3 shrink-0" />
+            ) : (
+              <IconGitBranch className="size-3 shrink-0" />
+            )}
+            <span className="truncate">{routerSummary?.secondary}</span>
+          </p>
+        </div>
+      ) : (
+        <p className="text-muted-foreground truncate font-mono text-xs leading-snug">
+          {model.model}
+        </p>
+      )}
 
       <div className="flex items-center gap-2">
-        {isOAuth ? (
+        {isRouter ? (
+          <span className="text-muted-foreground flex items-center gap-1 text-[11px]">
+            <IconRoute className="size-3" />
+            {statusLabel}
+          </span>
+        ) : isOAuth ? (
           <span className="text-muted-foreground bg-muted rounded px-1.5 py-0.5 text-[10px] font-medium">
             OAuth
           </span>
         ) : status === "available" && model.api_key ? (
-          <span className="text-muted-foreground/70 flex items-center gap-1 font-mono text-[11px]">
+          <span className="text-muted-foreground flex items-center gap-1 font-mono text-[11px]">
             <IconKey className="size-3" />
             {model.api_key}
           </span>

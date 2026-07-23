@@ -13,6 +13,7 @@ export interface ModelInfo {
   proxy?: string
   auth_method?: string
   credential_id?: string
+  router?: ModelRouterConfig
   // Advanced fields
   connect_mode?: string
   workspace?: string
@@ -34,6 +35,23 @@ export interface ModelInfo {
   is_default: boolean
   is_virtual: boolean
   default_model_allowed?: boolean
+}
+
+export interface ModelRouterConfig {
+  enabled?: boolean
+  entry?: string
+  refresh_interval_seconds?: number
+  blocks?: ModelRouterBlock[]
+}
+
+export interface ModelRouterBlock {
+  id: string
+  type: "account" | "load_balance"
+  account?: string
+  accounts?: string[]
+  fallback?: string
+  strategy?: "blind" | "tokens_spent" | "closest_limit"
+  refresh_interval_seconds?: number
 }
 
 export interface ModelProviderOption {

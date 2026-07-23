@@ -40,6 +40,11 @@ func NewAgentLoop(
 		if agent, ok := registry.GetAgent(agentID); ok {
 			rl.RegisterCandidates(agent.Candidates)
 			rl.RegisterCandidates(agent.LightCandidates)
+			if agent.ModelRouter != nil {
+				for _, account := range agent.ModelRouter.Accounts {
+					rl.RegisterCandidates(account.Candidates)
+				}
+			}
 		}
 	}
 	fallbackChain := providers.NewFallbackChain(cooldown, rl)

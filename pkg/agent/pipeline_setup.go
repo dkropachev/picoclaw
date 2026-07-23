@@ -8,6 +8,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -17,6 +18,7 @@ import (
 func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution, error) {
 	cfg := p.Cfg
 	maxMediaSize := cfg.Agents.Defaults.GetMaxMediaSize()
+	routerSelectReason := modelrouter.SelectReasonInitial
 
 	var history []providers.Message
 	var summary string
@@ -52,6 +54,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 		if isOverContextBudget(ts.agent.ContextWindow, messages, toolDefs, ts.agent.MaxTokens) {
 			logger.WarnCF("agent", "Proactive compression: context budget exceeded before LLM call",
 				map[string]any{"session_key": ts.sessionKey})
+			routerSelectReason = modelrouter.SelectReasonCompression
 			if err := p.ContextManager.Compact(ctx, &CompactRequest{
 				SessionKey: ts.sessionKey,
 				Reason:     ContextCompressReasonProactive,
@@ -128,10 +131,18 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 		ts.ingestMessage(ctx, p.al, rootMsg)
 	}
 
-	activeCandidates, activeModel, usedLight := p.al.selectCandidates(ts.agent, ts.userMessage, messages)
+	activeCandidates, activeModel, usedLight, routerSelection := p.al.selectCandidates(
+		ts.agent,
+		ts.userMessage,
+		messages,
+		ts.sessionKey,
+		routerSelectReason,
+	)
 	activeProvider := ts.agent.Provider
 	if usedLight && ts.agent.LightProvider != nil {
 		activeProvider = ts.agent.LightProvider
+	} else {
+		activeProvider = workflowProviderForCandidates(ts.agent, activeProvider, activeCandidates)
 	}
 	activeModelName := strings.TrimSpace(ts.agent.Model)
 	if usedLight {
@@ -164,6 +175,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	exec.llmModelName = activeModelName
 	exec.activeProvider = activeProvider
 	exec.usedLight = usedLight
+	exec.routerSelection = routerSelection
 
 	return exec, nil
 }

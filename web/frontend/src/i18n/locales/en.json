@@ -253,7 +253,8 @@
     },
     "badge": {
       "default": "Default",
-      "virtual": "Virtual"
+      "virtual": "Virtual",
+      "router": "Router"
     },
     "action": {
       "edit": "Edit API key",
@@ -274,6 +275,51 @@
       "label": "Default Model",
       "description": "Automatically set this model as default after saving.",
       "unsupportedProvider": "This provider can be saved in the model list but cannot be used as the default chat model."
+    },
+    "router": {
+      "button": "Model Router",
+      "title": "Create Model Router",
+      "editTitle": "Configure {{name}}",
+      "description": "Route one model alias across existing account entries.",
+      "nameHint": "Alias used in chat like any other model.",
+      "modeFallback": "Fallback Chain",
+      "modeLoadBalance": "Load Balance",
+      "primaryAccount": "Primary Account",
+      "primaryHint": "First account tried for each session.",
+      "poolAccounts": "Balanced Accounts",
+      "poolHint": "Accounts eligible for one stable session route.",
+      "strategy": "Strategy",
+      "strategyHint": "Initial account choice for new sessions or refresh windows.",
+      "strategyBlind": "Blind rotation",
+      "strategyTokens": "Lowest tokens spent",
+      "strategyLimit": "Farthest from RPM limit",
+      "strategyName": {
+        "blind": "blind rotation",
+        "tokens_spent": "lowest tokens spent",
+        "closest_limit": "farthest from limit"
+      },
+      "fallbackAccount": "Fallback Account",
+      "fallbackHint": "Used when the selected route is not operational.",
+      "selectAccount": "Select account",
+      "noFallback": "No fallback",
+      "noAccounts": "No eligible account models found.",
+      "interval": "Refresh Interval (s)",
+      "intervalHint": "Applies to blind non-session routing and status refresh.",
+      "create": "Create Router",
+      "saveSuccess": "Model router saved.",
+      "addSuccess": "Model router added.",
+      "saveError": "Failed to save model router",
+      "errorNameRequired": "Router alias is required.",
+      "errorDuplicate": "Model alias already exists.",
+      "errorPrimaryRequired": "Choose a primary account.",
+      "errorPoolRequired": "Choose at least one balanced account.",
+      "errorDistinctFallback": "Fallback account must be outside the primary route.",
+      "errorInterval": "Refresh interval must be at least 1 second.",
+      "cardLoadBalance": "Routes across {{count}} accounts with {{strategy}}",
+      "cardFallback": "Primary account: {{account}}",
+      "cardFallbackTarget": "Fallback: {{account}}",
+      "cardNoFallback": "No fallback configured",
+      "cardUnconfigured": "Router incomplete"
     },
     "add": {
       "button": "Add Model",
