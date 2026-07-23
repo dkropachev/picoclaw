@@ -40,10 +40,6 @@ export function useCredentialsPage() {
   const [watchMode, setWatchMode] = useState<FlowWatchMode>("")
   const [pollIntervalMs, setPollIntervalMs] = useState(2000)
 
-  const [openAIToken, setOpenAIToken] = useState("")
-  const [openAICredentialID, setOpenAICredentialID] = useState("")
-  const [anthropicToken, setAnthropicToken] = useState("")
-
   const [logoutDialogOpen, setLogoutDialogOpen] = useState(false)
   const [logoutConfirmProvider, setLogoutConfirmProvider] = useState<
     OAuthProvider | ""
@@ -165,18 +161,6 @@ export function useCredentialsPage() {
     return () => window.removeEventListener("message", onMessage)
   }, [])
 
-  const providersMap = useMemo(() => {
-    const map = new Map<OAuthProvider, OAuthProviderStatus>()
-    for (const item of providers) {
-      map.set(item.provider, item)
-    }
-    return map
-  }, [providers])
-
-  const openaiStatus = providersMap.get("openai")
-  const anthropicStatus = providersMap.get("anthropic")
-  const antigravityStatus = providersMap.get("google-antigravity")
-
   const bumpActionToken = useCallback(() => {
     actionTokenRef.current += 1
     return actionTokenRef.current
@@ -187,7 +171,10 @@ export function useCredentialsPage() {
   }, [])
 
   const startBrowserOAuth = useCallback(
-    async (provider: OAuthProvider, credentialID?: string) => {
+    async (
+      provider: OAuthProvider,
+      credentialID?: string,
+    ): Promise<boolean> => {
       const actionToken = bumpActionToken()
       setActiveAction(`${provider}:browser`)
       setError("")
@@ -195,11 +182,11 @@ export function useCredentialsPage() {
       const authTab = window.open("", "_blank")
       if (!authTab) {
         if (!isActionTokenCurrent(actionToken)) {
-          return
+          return false
         }
         setActiveAction("")
         setError(t("credentials.errors.popupBlocked"))
-        return
+        return false
       }
 
       try {
@@ -210,7 +197,7 @@ export function useCredentialsPage() {
         })
         if (!isActionTokenCurrent(actionToken)) {
           authTab.close()
-          return
+          return false
         }
         if (!resp.auth_url || !resp.flow_id) {
           throw new Error(t("credentials.errors.invalidBrowserResponse"))
@@ -229,10 +216,11 @@ export function useCredentialsPage() {
         setWatchFlowID(resp.flow_id)
         setWatchMode("status")
         setPollIntervalMs(2000)
+        return true
       } catch (err) {
         if (!isActionTokenCurrent(actionToken)) {
           authTab.close()
-          return
+          return false
         }
         authTab.close()
         setActiveAction("")
@@ -241,13 +229,14 @@ export function useCredentialsPage() {
             ? err.message
             : t("credentials.errors.loginFailed"),
         )
+        return false
       }
     },
     [bumpActionToken, isActionTokenCurrent, t],
   )
 
   const startOpenAIDeviceCode = useCallback(
-    async (credentialID?: string) => {
+    async (credentialID?: string): Promise<boolean> => {
       const actionToken = bumpActionToken()
       setActiveAction("openai:device")
       setError("")
@@ -259,7 +248,7 @@ export function useCredentialsPage() {
           method: "device_code",
         })
         if (!isActionTokenCurrent(actionToken)) {
-          return
+          return false
         }
         if (!resp.flow_id || !resp.user_code || !resp.verify_url) {
           throw new Error(t("credentials.errors.invalidDeviceResponse"))
@@ -283,9 +272,10 @@ export function useCredentialsPage() {
         setWatchFlowID(resp.flow_id)
         setWatchMode("poll")
         setPollIntervalMs(Math.max(1000, (resp.interval ?? 5) * 1000))
+        return true
       } catch (err) {
         if (!isActionTokenCurrent(actionToken)) {
-          return
+          return false
         }
         setActiveAction("")
         setError(
@@ -293,13 +283,18 @@ export function useCredentialsPage() {
             ? err.message
             : t("credentials.errors.loginFailed"),
         )
+        return false
       }
     },
     [bumpActionToken, isActionTokenCurrent, t],
   )
 
   const saveToken = useCallback(
-    async (provider: OAuthProvider, token: string, credentialID?: string) => {
+    async (
+      provider: OAuthProvider,
+      token: string,
+      credentialID?: string,
+    ): Promise<boolean> => {
       const actionID = `${provider}:token`
       setActiveAction(actionID)
       setError("")
@@ -311,19 +306,15 @@ export function useCredentialsPage() {
           method: "token",
           token,
         })
-        if (provider === "openai") {
-          setOpenAIToken("")
-        }
-        if (provider === "anthropic") {
-          setAnthropicToken("")
-        }
         await loadProviders()
+        return true
       } catch (err) {
         setError(
           err instanceof Error
             ? err.message
             : t("credentials.errors.loginFailed"),
         )
+        return false
       } finally {
         setActiveAction("")
       }
@@ -440,25 +431,17 @@ export function useCredentialsPage() {
   }, [activeFlow, t])
 
   return {
+    providers,
     loading,
     error,
     activeAction,
     activeFlow,
     flowHint,
-    openAIToken,
-    openAICredentialID,
-    anthropicToken,
-    openaiStatus,
-    anthropicStatus,
-    antigravityStatus,
     logoutDialogOpen,
     logoutConfirmProvider,
     logoutProviderLabel,
     deviceSheetOpen,
     deviceFlow,
-    setOpenAIToken,
-    setOpenAICredentialID,
-    setAnthropicToken,
     startBrowserOAuth,
     startOpenAIDeviceCode,
     stopLoading,

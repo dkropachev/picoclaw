@@ -42,8 +42,8 @@ The current frontend exposes these major pages and flows:
 - `/models`
   - Add, edit, delete, and set the default model.
   - Supports API-key models, OAuth-backed models, and local/CLI-backed models.
-- `/credentials`
-  - Manage provider accounts, OAuth/token logins, and account routers.
+- `/accounts`
+  - Manage registered provider accounts, onboard named accounts, and configure account routers.
   - Current built-in flows: OpenAI, Anthropic, and Google Antigravity.
 - `/channels/*`
   - Configure supported channels from a shared catalog.

@@ -87,9 +87,9 @@ const modelNavItem: NavItem = {
   tourId: "models-nav",
 }
 
-const credentialsNavItem: NavItem = {
-  title: "navigation.credentials",
-  url: "/credentials",
+const accountsNavItem: NavItem = {
+  title: "navigation.accounts",
+  url: "/accounts",
   icon: IconKey,
   translateTitle: true,
 }
@@ -270,7 +270,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 <SidebarMenu className="mb-1">
                   {renderNavItem(configNavItem)}
                   {renderNavItem(modelNavItem)}
-                  {renderNavItem(credentialsNavItem)}
+                  {renderNavItem(accountsNavItem)}
                 </SidebarMenu>
                 {serviceSections.map(renderServiceSection)}
                 <SidebarMenu>{renderNavItem(logsNavItem)}</SidebarMenu>

@@ -174,3 +174,32 @@ func TestWriteFileAtomic_InvalidPath(t *testing.T) {
 		t.Error("expected error for invalid path, got nil")
 	}
 }
+
+func TestCopyFileCopiesContentAndPermissions(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.txt")
+	dst := filepath.Join(dir, "nested", "dest.txt")
+
+	if err := os.WriteFile(src, []byte("copied"), 0o600); err != nil {
+		t.Fatalf("WriteFile source failed: %v", err)
+	}
+	if err := CopyFile(src, dst, 0o640); err != nil {
+		t.Fatalf("CopyFile failed: %v", err)
+	}
+
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("ReadFile destination failed: %v", err)
+	}
+	if string(got) != "copied" {
+		t.Fatalf("destination content = %q, want copied", got)
+	}
+
+	info, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("Stat destination failed: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o640 {
+		t.Fatalf("destination permissions = %o, want %o", got, 0o640)
+	}
+}

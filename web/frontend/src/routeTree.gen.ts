@@ -14,9 +14,9 @@ import { Route as ModelsRouteImport } from './routes/models'
 import { Route as LogsRouteImport } from './routes/logs'
 import { Route as LauncherSetupRouteImport } from './routes/launcher-setup'
 import { Route as LauncherLoginRouteImport } from './routes/launcher-login'
-import { Route as CredentialsRouteImport } from './routes/credentials'
 import { Route as ConfigRouteImport } from './routes/config'
 import { Route as AgentRouteImport } from './routes/agent'
+import { Route as AccountsRouteImport } from './routes/accounts'
 import { Route as ChannelsRouteRouteImport } from './routes/channels/route'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ThreadsSearchRouteImport } from './routes/threads.search'
@@ -30,8 +30,8 @@ import { Route as AgentSkillsRouteImport } from './routes/agent/skills'
 import { Route as AgentHubRouteImport } from './routes/agent/hub'
 import { Route as AgentGitWorkspacesRouteImport } from './routes/agent/git-workspaces'
 import { Route as ThreadsOpenThreadIdRouteImport } from './routes/threads.open.$threadId'
-import { Route as CredentialsAccountRouterNewRouteImport } from './routes/credentials.account-router.new'
-import { Route as CredentialsAccountRouterIndexRouteImport } from './routes/credentials.account-router.$index'
+import { Route as AccountsAccountRouterNewRouteImport } from './routes/accounts.account-router.new'
+import { Route as AccountsAccountRouterIndexRouteImport } from './routes/accounts.account-router.$index'
 
 const ThreadsRoute = ThreadsRouteImport.update({
   id: '/threads',
@@ -58,11 +58,6 @@ const LauncherLoginRoute = LauncherLoginRouteImport.update({
   path: '/launcher-login',
   getParentRoute: () => rootRouteImport,
 } as any)
-const CredentialsRoute = CredentialsRouteImport.update({
-  id: '/credentials',
-  path: '/credentials',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const ConfigRoute = ConfigRouteImport.update({
   id: '/config',
   path: '/config',
@@ -71,6 +66,11 @@ const ConfigRoute = ConfigRouteImport.update({
 const AgentRoute = AgentRouteImport.update({
   id: '/agent',
   path: '/agent',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AccountsRoute = AccountsRouteImport.update({
+  id: '/accounts',
+  path: '/accounts',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ChannelsRouteRoute = ChannelsRouteRouteImport.update({
@@ -138,25 +138,25 @@ const ThreadsOpenThreadIdRoute = ThreadsOpenThreadIdRouteImport.update({
   path: '/$threadId',
   getParentRoute: () => ThreadsOpenRoute,
 } as any)
-const CredentialsAccountRouterNewRoute =
-  CredentialsAccountRouterNewRouteImport.update({
+const AccountsAccountRouterNewRoute =
+  AccountsAccountRouterNewRouteImport.update({
     id: '/account-router/new',
     path: '/account-router/new',
-    getParentRoute: () => CredentialsRoute,
+    getParentRoute: () => AccountsRoute,
   } as any)
-const CredentialsAccountRouterIndexRoute =
-  CredentialsAccountRouterIndexRouteImport.update({
+const AccountsAccountRouterIndexRoute =
+  AccountsAccountRouterIndexRouteImport.update({
     id: '/account-router/$index',
     path: '/account-router/$index',
-    getParentRoute: () => CredentialsRoute,
+    getParentRoute: () => AccountsRoute,
   } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/channels': typeof ChannelsRouteRouteWithChildren
+  '/accounts': typeof AccountsRouteWithChildren
   '/agent': typeof AgentRouteWithChildren
   '/config': typeof ConfigRouteWithChildren
-  '/credentials': typeof CredentialsRouteWithChildren
   '/launcher-login': typeof LauncherLoginRoute
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
@@ -172,16 +172,16 @@ export interface FileRoutesByFullPath {
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
-  '/credentials/account-router/$index': typeof CredentialsAccountRouterIndexRoute
-  '/credentials/account-router/new': typeof CredentialsAccountRouterNewRoute
+  '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
+  '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/channels': typeof ChannelsRouteRouteWithChildren
+  '/accounts': typeof AccountsRouteWithChildren
   '/agent': typeof AgentRouteWithChildren
   '/config': typeof ConfigRouteWithChildren
-  '/credentials': typeof CredentialsRouteWithChildren
   '/launcher-login': typeof LauncherLoginRoute
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
@@ -197,17 +197,17 @@ export interface FileRoutesByTo {
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
-  '/credentials/account-router/$index': typeof CredentialsAccountRouterIndexRoute
-  '/credentials/account-router/new': typeof CredentialsAccountRouterNewRoute
+  '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
+  '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/channels': typeof ChannelsRouteRouteWithChildren
+  '/accounts': typeof AccountsRouteWithChildren
   '/agent': typeof AgentRouteWithChildren
   '/config': typeof ConfigRouteWithChildren
-  '/credentials': typeof CredentialsRouteWithChildren
   '/launcher-login': typeof LauncherLoginRoute
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
@@ -223,8 +223,8 @@ export interface FileRoutesById {
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
-  '/credentials/account-router/$index': typeof CredentialsAccountRouterIndexRoute
-  '/credentials/account-router/new': typeof CredentialsAccountRouterNewRoute
+  '/accounts/account-router/$index': typeof AccountsAccountRouterIndexRoute
+  '/accounts/account-router/new': typeof AccountsAccountRouterNewRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRouteTypes {
@@ -232,9 +232,9 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/channels'
+    | '/accounts'
     | '/agent'
     | '/config'
-    | '/credentials'
     | '/launcher-login'
     | '/launcher-setup'
     | '/logs'
@@ -250,16 +250,16 @@ export interface FileRouteTypes {
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
-    | '/credentials/account-router/$index'
-    | '/credentials/account-router/new'
+    | '/accounts/account-router/$index'
+    | '/accounts/account-router/new'
     | '/threads/open/$threadId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/channels'
+    | '/accounts'
     | '/agent'
     | '/config'
-    | '/credentials'
     | '/launcher-login'
     | '/launcher-setup'
     | '/logs'
@@ -275,16 +275,16 @@ export interface FileRouteTypes {
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
-    | '/credentials/account-router/$index'
-    | '/credentials/account-router/new'
+    | '/accounts/account-router/$index'
+    | '/accounts/account-router/new'
     | '/threads/open/$threadId'
   id:
     | '__root__'
     | '/'
     | '/channels'
+    | '/accounts'
     | '/agent'
     | '/config'
-    | '/credentials'
     | '/launcher-login'
     | '/launcher-setup'
     | '/logs'
@@ -300,17 +300,17 @@ export interface FileRouteTypes {
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
-    | '/credentials/account-router/$index'
-    | '/credentials/account-router/new'
+    | '/accounts/account-router/$index'
+    | '/accounts/account-router/new'
     | '/threads/open/$threadId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ChannelsRouteRoute: typeof ChannelsRouteRouteWithChildren
+  AccountsRoute: typeof AccountsRouteWithChildren
   AgentRoute: typeof AgentRouteWithChildren
   ConfigRoute: typeof ConfigRouteWithChildren
-  CredentialsRoute: typeof CredentialsRouteWithChildren
   LauncherLoginRoute: typeof LauncherLoginRoute
   LauncherSetupRoute: typeof LauncherSetupRoute
   LogsRoute: typeof LogsRoute
@@ -355,13 +355,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LauncherLoginRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/credentials': {
-      id: '/credentials'
-      path: '/credentials'
-      fullPath: '/credentials'
-      preLoaderRoute: typeof CredentialsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/config': {
       id: '/config'
       path: '/config'
@@ -374,6 +367,13 @@ declare module '@tanstack/react-router' {
       path: '/agent'
       fullPath: '/agent'
       preLoaderRoute: typeof AgentRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/accounts': {
+      id: '/accounts'
+      path: '/accounts'
+      fullPath: '/accounts'
+      preLoaderRoute: typeof AccountsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/channels': {
@@ -467,19 +467,19 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ThreadsOpenThreadIdRouteImport
       parentRoute: typeof ThreadsOpenRoute
     }
-    '/credentials/account-router/new': {
-      id: '/credentials/account-router/new'
+    '/accounts/account-router/new': {
+      id: '/accounts/account-router/new'
       path: '/account-router/new'
-      fullPath: '/credentials/account-router/new'
-      preLoaderRoute: typeof CredentialsAccountRouterNewRouteImport
-      parentRoute: typeof CredentialsRoute
+      fullPath: '/accounts/account-router/new'
+      preLoaderRoute: typeof AccountsAccountRouterNewRouteImport
+      parentRoute: typeof AccountsRoute
     }
-    '/credentials/account-router/$index': {
-      id: '/credentials/account-router/$index'
+    '/accounts/account-router/$index': {
+      id: '/accounts/account-router/$index'
       path: '/account-router/$index'
-      fullPath: '/credentials/account-router/$index'
-      preLoaderRoute: typeof CredentialsAccountRouterIndexRouteImport
-      parentRoute: typeof CredentialsRoute
+      fullPath: '/accounts/account-router/$index'
+      preLoaderRoute: typeof AccountsAccountRouterIndexRouteImport
+      parentRoute: typeof AccountsRoute
     }
   }
 }
@@ -494,6 +494,20 @@ const ChannelsRouteRouteChildren: ChannelsRouteRouteChildren = {
 
 const ChannelsRouteRouteWithChildren = ChannelsRouteRoute._addFileChildren(
   ChannelsRouteRouteChildren,
+)
+
+interface AccountsRouteChildren {
+  AccountsAccountRouterIndexRoute: typeof AccountsAccountRouterIndexRoute
+  AccountsAccountRouterNewRoute: typeof AccountsAccountRouterNewRoute
+}
+
+const AccountsRouteChildren: AccountsRouteChildren = {
+  AccountsAccountRouterIndexRoute: AccountsAccountRouterIndexRoute,
+  AccountsAccountRouterNewRoute: AccountsAccountRouterNewRoute,
+}
+
+const AccountsRouteWithChildren = AccountsRoute._addFileChildren(
+  AccountsRouteChildren,
 )
 
 interface AgentRouteChildren {
@@ -525,20 +539,6 @@ const ConfigRouteChildren: ConfigRouteChildren = {
 const ConfigRouteWithChildren =
   ConfigRoute._addFileChildren(ConfigRouteChildren)
 
-interface CredentialsRouteChildren {
-  CredentialsAccountRouterIndexRoute: typeof CredentialsAccountRouterIndexRoute
-  CredentialsAccountRouterNewRoute: typeof CredentialsAccountRouterNewRoute
-}
-
-const CredentialsRouteChildren: CredentialsRouteChildren = {
-  CredentialsAccountRouterIndexRoute: CredentialsAccountRouterIndexRoute,
-  CredentialsAccountRouterNewRoute: CredentialsAccountRouterNewRoute,
-}
-
-const CredentialsRouteWithChildren = CredentialsRoute._addFileChildren(
-  CredentialsRouteChildren,
-)
-
 interface ThreadsOpenRouteChildren {
   ThreadsOpenThreadIdRoute: typeof ThreadsOpenThreadIdRoute
 }
@@ -569,9 +569,9 @@ const ThreadsRouteWithChildren =
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ChannelsRouteRoute: ChannelsRouteRouteWithChildren,
+  AccountsRoute: AccountsRouteWithChildren,
   AgentRoute: AgentRouteWithChildren,
   ConfigRoute: ConfigRouteWithChildren,
-  CredentialsRoute: CredentialsRouteWithChildren,
   LauncherLoginRoute: LauncherLoginRoute,
   LauncherSetupRoute: LauncherSetupRoute,
   LogsRoute: LogsRoute,

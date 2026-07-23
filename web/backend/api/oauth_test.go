@@ -155,6 +155,12 @@ func TestOAuthCallbackUnknownState(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "OAuth flow not found") {
 		t.Fatalf("unexpected body: %s", rec.Body.String())
 	}
+	if !strings.Contains(rec.Body.String(), "/accounts?oauth_flow_id=") {
+		t.Fatalf("callback fallback should target /accounts, body: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "/credentials?oauth_flow_id=") {
+		t.Fatalf("callback fallback should not target /credentials, body: %s", rec.Body.String())
+	}
 }
 
 func TestOAuthLogoutClearsCredentialAndConfig(t *testing.T) {

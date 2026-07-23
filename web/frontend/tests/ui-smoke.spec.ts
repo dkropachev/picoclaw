@@ -4,7 +4,7 @@ import { type Page, type Route, expect, test } from "@playwright/test"
 const smokeRoutes = [
   "/",
   "/models",
-  "/credentials",
+  "/accounts",
   "/logs",
   "/agent/git-workspaces",
   "/agent/tools",
@@ -463,12 +463,15 @@ const channelCatalogResponse = {
   ],
 }
 
+interface MockLauncherApiOptions {
+  completeDraftViaPolling?: boolean
+  nullableWorkflowPayloads?: boolean
+  oauthProviders?: unknown[]
+}
+
 async function mockLauncherApis(
   page: Page,
-  options: {
-    completeDraftViaPolling?: boolean
-    nullableWorkflowPayloads?: boolean
-  } = {},
+  options: MockLauncherApiOptions = {},
 ) {
   let activeDevelopmentSession: MockWorkflowDevelopmentSession | null = null
   let workflowDefinitions = [
@@ -814,42 +817,7 @@ async function mockLauncherApis(
         case "/api/models/catalog":
           return json(route, { entries: [], total: 0 })
         case "/api/oauth/providers":
-          return json(route, {
-            providers: [
-              {
-                provider: "openai",
-                credential_id: "openai",
-                display_name: "OpenAI",
-                methods: ["browser", "device_code", "token"],
-                logged_in: true,
-                status: "connected",
-                auth_method: "oauth",
-                account_id: "acct-primary",
-                credentials: [
-                  {
-                    provider: "openai",
-                    credential_id: "openai",
-                    display_name: "OpenAI",
-                    methods: ["browser", "device_code", "token"],
-                    logged_in: true,
-                    status: "connected",
-                    auth_method: "oauth",
-                    account_id: "acct-primary",
-                  },
-                  {
-                    provider: "openai",
-                    credential_id: "openai:backup",
-                    display_name: "OpenAI",
-                    methods: ["browser", "device_code", "token"],
-                    logged_in: true,
-                    status: "connected",
-                    auth_method: "oauth",
-                    account_id: "acct-backup",
-                  },
-                ],
-              },
-            ],
-          })
+          return json(route, { providers: options.oauthProviders ?? [] })
         case "/api/sessions":
           return json(route, [])
         case "/api/tools":
@@ -1229,14 +1197,18 @@ async function expectNoSeriousA11yViolations(page: Page) {
   ).toEqual([])
 }
 
-async function gotoMockedRoute(page: Page, routePath: string) {
+async function gotoMockedRoute(
+  page: Page,
+  routePath: string,
+  options?: MockLauncherApiOptions,
+) {
   await page.addInitScript(() => {
     window.localStorage.setItem(
       "picoclaw-tour-state",
       JSON.stringify({ currentStep: "completed", isActive: false }),
     )
   })
-  await mockLauncherApis(page)
+  await mockLauncherApis(page, options)
   await page.goto(routePath)
   await expect(page.getByRole("banner")).toBeVisible()
   await expect(page.locator("main")).toBeVisible()
@@ -1256,6 +1228,57 @@ for (const routePath of smokeRoutes) {
     expect(errors).toEqual([])
   })
 }
+
+test("accounts page lists registered accounts and opens onboarding", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+
+  await gotoMockedRoute(page, "/accounts", {
+    oauthProviders: [
+      {
+        provider: "openai",
+        credential_id: "openai",
+        display_name: "OpenAI",
+        methods: ["browser", "device_code", "token"],
+        logged_in: true,
+        status: "connected",
+        credentials: [
+          {
+            provider: "openai",
+            credential_id: "openai:work",
+            display_name: "OpenAI",
+            methods: ["browser", "device_code", "token"],
+            logged_in: true,
+            status: "connected",
+            auth_method: "oauth",
+            account_id: "acc_123",
+          },
+        ],
+      },
+      {
+        provider: "anthropic",
+        credential_id: "anthropic",
+        display_name: "Anthropic",
+        methods: ["token"],
+        logged_in: false,
+        status: "not_logged_in",
+        credentials: [],
+      },
+    ],
+  })
+
+  await expect(page.getByRole("heading", { name: "work" })).toBeVisible()
+  await expect(page.getByText("openai:work")).toBeVisible()
+  await expect(page.getByText("Anthropic")).not.toBeVisible()
+
+  await page.getByRole("button", { name: "Add Account" }).first().click()
+  await expect(
+    page.getByRole("dialog", { name: "Onboard Account" }),
+  ).toBeVisible()
+  await expect(page.getByPlaceholder("work")).toBeVisible()
+  expect(errors).toEqual([])
+})
 
 test("model catalog dialog fits the viewport", async ({ page }) => {
   const errors = collectPageErrors(page)
@@ -1277,10 +1300,45 @@ test("account router editor supports block fallback graph editing", async ({
 }) => {
   const errors = collectPageErrors(page)
 
-  await gotoMockedRoute(page, "/credentials")
+  await gotoMockedRoute(page, "/accounts", {
+    oauthProviders: [
+      {
+        provider: "openai",
+        credential_id: "openai",
+        display_name: "OpenAI",
+        methods: ["browser", "device_code", "token"],
+        logged_in: true,
+        status: "connected",
+        auth_method: "oauth",
+        account_id: "acct-primary",
+        credentials: [
+          {
+            provider: "openai",
+            credential_id: "openai",
+            display_name: "OpenAI",
+            methods: ["browser", "device_code", "token"],
+            logged_in: true,
+            status: "connected",
+            auth_method: "oauth",
+            account_id: "acct-primary",
+          },
+          {
+            provider: "openai",
+            credential_id: "openai:backup",
+            display_name: "OpenAI",
+            methods: ["browser", "device_code", "token"],
+            logged_in: true,
+            status: "connected",
+            auth_method: "oauth",
+            account_id: "acct-backup",
+          },
+        ],
+      },
+    ],
+  })
   await page.getByRole("button", { name: "Account Router" }).click()
 
-  await expect(page).toHaveURL(/\/credentials\/account-router\/new$/)
+  await expect(page).toHaveURL(/\/accounts\/account-router\/new$/)
   await expect(
     page.getByRole("heading", { name: "Create Account Router" }),
   ).toBeVisible()

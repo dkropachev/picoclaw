@@ -6,7 +6,8 @@
     "thread_open": "Thread",
     "model_group": "Models",
     "models": "Models",
-    "credentials": "Accounts",
+    "credentials": "Credentials",
+    "accounts": "Accounts",
     "agent_group": "Agent",
     "hub": "Hub",
     "skills": "Skills",
@@ -234,6 +235,42 @@
       "url": "Verification URL",
       "polling": "Polling login status...",
       "open": "Open Verification Page"
+    }
+  },
+  "accounts": {
+    "description": "Manage registered provider accounts and add named accounts for supported login methods.",
+    "loading": "Loading accounts...",
+    "defaultName": "Default",
+    "actions": {
+      "add": "Add Account",
+      "remove": "Remove"
+    },
+    "fields": {
+      "provider": "Provider",
+      "method": "Login Method",
+      "name": "Account Name",
+      "token": "Token",
+      "credentialID": "Credential ID"
+    },
+    "methods": {
+      "token": "Token"
+    },
+    "empty": {
+      "title": "No registered accounts",
+      "description": "Add a named account to make it available for provider-backed models."
+    },
+    "onboarding": {
+      "title": "Onboard Account",
+      "description": "Choose a provider, login method, and unique account name.",
+      "namePlaceholder": "work",
+      "nameHint": "Use letters, numbers, dots, dashes, or underscores. The provider prefix is added automatically.",
+      "nameRequired": "Account name is required.",
+      "nameReserved": "Use a name other than the provider key.",
+      "nameInvalid": "Use only letters, numbers, dots, dashes, or underscores.",
+      "nameExists": "This account name is already registered. Saving will replace its credentials.",
+      "tokenRequired": "Token is required.",
+      "start": "Start Login",
+      "save": "Save Account"
     }
   },
   "models": {
