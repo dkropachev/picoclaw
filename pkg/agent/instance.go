@@ -13,6 +13,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/memory"
+	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
@@ -60,6 +61,7 @@ type AgentInstance struct {
 	// instances. This allows each fallback model to use its own api_base and api_key
 	// from model_list, instead of inheriting the primary model's provider config.
 	CandidateProviders map[string]providers.LLMProvider
+	ModelRouter        *modelrouter.Router
 
 	managedCalibrationCache map[string]workflowManagedCalibrationCacheEntry
 }
@@ -254,6 +256,11 @@ func NewAgentInstance(
 
 	candidateProviders := make(map[string]providers.LLMProvider)
 	populateCandidateProvidersFromNames(cfg, workspace, fallbacks, candidateProviders)
+	modelRouter := buildModelRouter(cfg, defaults.Provider, model, workspace, candidateProviders)
+	if modelRouter != nil {
+		initialSelection := modelRouter.Select("", modelrouter.SelectReasonInitial)
+		candidates = initialSelection.Candidates
+	}
 	if strings.TrimSpace(defaults.ImageModel) != "" {
 		imageNames := append([]string{defaults.ImageModel}, defaults.ImageModelFallbacks...)
 		populateCandidateProvidersFromNames(cfg, workspace, imageNames, candidateProviders)
@@ -327,8 +334,69 @@ func NewAgentInstance(
 		LightCandidates:           lightCandidates,
 		LightProvider:             lightProvider,
 		CandidateProviders:        candidateProviders,
+		ModelRouter:               modelRouter,
 		managedCalibrationCache:   make(map[string]workflowManagedCalibrationCacheEntry),
 	}
+}
+
+func buildModelRouter(
+	cfg *config.Config,
+	defaultProvider string,
+	model string,
+	workspace string,
+	providersOut map[string]providers.LLMProvider,
+) *modelrouter.Router {
+	modelCfg := lookupModelConfigByRef(cfg, model, defaultProvider)
+	if modelCfg == nil || !modelCfg.IsModelRouter() || modelCfg.Router == nil {
+		return nil
+	}
+	accountNames := modelRouterAccountNames(modelCfg.Router)
+	accounts := make(map[string]modelrouter.Account, len(accountNames))
+	for _, accountName := range accountNames {
+		candidates := resolveModelCandidates(cfg, defaultProvider, accountName, nil)
+		if len(candidates) == 0 {
+			continue
+		}
+		rpm := 0
+		if accountCfg := lookupModelConfigByRef(cfg, accountName, defaultProvider); accountCfg != nil {
+			rpm = accountCfg.RPM
+		}
+		accounts[accountName] = modelrouter.Account{
+			Name:       accountName,
+			Candidates: candidates,
+			RPM:        rpm,
+		}
+	}
+	populateCandidateProvidersFromNames(cfg, workspace, accountNames, providersOut)
+	statePath := filepath.Join(workspace, "model_router_state.json")
+	return modelrouter.New(modelCfg.ModelName, modelCfg.Router, accounts, statePath)
+}
+
+func modelRouterAccountNames(routerCfg *config.ModelRouterConfig) []string {
+	if routerCfg == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0)
+	add := func(account string) {
+		account = strings.TrimSpace(account)
+		if account == "" || seen[account] {
+			return
+		}
+		seen[account] = true
+		out = append(out, account)
+	}
+	for _, block := range routerCfg.Blocks {
+		switch strings.TrimSpace(block.Type) {
+		case config.ModelRouterBlockTypeAccount:
+			add(block.Account)
+		case config.ModelRouterBlockTypeLoadBalance:
+			for _, account := range block.Accounts {
+				add(account)
+			}
+		}
+	}
+	return out
 }
 
 // populateCandidateProvidersFromNames resolves each model name (alias or
@@ -385,6 +453,9 @@ func resolvePrimaryProviderForAgent(
 
 	modelCfg := lookupModelConfigByRef(cfg, model)
 	if modelCfg == nil {
+		return fallback
+	}
+	if modelCfg.IsModelRouter() {
 		return fallback
 	}
 	clone := *modelCfg

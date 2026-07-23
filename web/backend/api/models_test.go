@@ -2384,6 +2384,221 @@ func TestHandleSetDefaultModel_RejectsElevenLabsASRProvider(t *testing.T) {
 	}
 }
 
+func TestHandleModels_ModelRouterRoundTripAndDefault(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetModelProbeHooks(t)
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.ModelList = []*config.ModelConfig{
+		{ModelName: "account-a", Provider: "openai", Model: "gpt-4o"},
+		{ModelName: "account-b", Provider: "openai", Model: "gpt-4o-mini"},
+	}
+	cfg.Agents.Defaults.ModelName = "account-a"
+	err = config.SaveConfig(configPath, cfg)
+	if err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	addBody := `{
+		"model_name": "router-main",
+		"provider": "router",
+		"api_key": "sk-should-not-persist",
+		"router": {
+			"enabled": true,
+			"entry": "entry",
+			"blocks": [
+				{"id": "entry", "type": "account", "account": "account-a", "fallback": "fallback"},
+				{"id": "fallback", "type": "account", "account": "account-b"}
+			]
+		}
+	}`
+	addRec := httptest.NewRecorder()
+	addReq := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(addBody))
+	addReq.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(addRec, addReq)
+	if addRec.Code != http.StatusOK {
+		t.Fatalf("add status = %d, want %d, body=%s", addRec.Code, http.StatusOK, addRec.Body.String())
+	}
+
+	var addResp struct {
+		Index int `json:"index"`
+	}
+	err = json.Unmarshal(addRec.Body.Bytes(), &addResp)
+	if err != nil {
+		t.Fatalf("add response unmarshal: %v", err)
+	}
+
+	updateBody := `{
+		"model_name": "router-main",
+		"provider": "router",
+		"model": "router-main",
+		"router": {
+			"enabled": true,
+			"entry": "pool",
+			"refresh_interval_seconds": 45,
+			"blocks": [
+				{
+					"id": "pool",
+					"type": "load_balance",
+					"accounts": ["account-a", "account-b"],
+					"strategy": "closest_limit",
+					"refresh_interval_seconds": 45
+				}
+			]
+		}
+	}`
+	updateRec := httptest.NewRecorder()
+	updateReq := httptest.NewRequest(
+		http.MethodPut,
+		fmt.Sprintf("/api/models/%d", addResp.Index),
+		bytes.NewBufferString(updateBody),
+	)
+	updateReq.SetPathValue("index", fmt.Sprint(addResp.Index))
+	updateReq.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(updateRec, updateReq)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, want %d, body=%s", updateRec.Code, http.StatusOK, updateRec.Body.String())
+	}
+
+	defaultRec := httptest.NewRecorder()
+	defaultReq := httptest.NewRequest(http.MethodPost, "/api/models/default", bytes.NewBufferString(`{
+		"model_name": "router-main"
+	}`))
+	defaultReq.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(defaultRec, defaultReq)
+	if defaultRec.Code != http.StatusOK {
+		t.Fatalf("default status = %d, want %d, body=%s", defaultRec.Code, http.StatusOK, defaultRec.Body.String())
+	}
+
+	listRec := httptest.NewRecorder()
+	listReq := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	mux.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want %d, body=%s", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+
+	var listResp struct {
+		Models          []modelResponse                 `json:"models"`
+		ProviderOptions []providers.ModelProviderOption `json:"provider_options"`
+	}
+	err = json.Unmarshal(listRec.Body.Bytes(), &listResp)
+	if err != nil {
+		t.Fatalf("list response unmarshal: %v", err)
+	}
+
+	var routerModel *modelResponse
+	for i := range listResp.Models {
+		if listResp.Models[i].ModelName == "router-main" {
+			routerModel = &listResp.Models[i]
+			break
+		}
+	}
+	if routerModel == nil {
+		t.Fatal("router-main missing from list response")
+	}
+	if routerModel.Provider != config.ModelRouterProvider {
+		t.Fatalf("router provider = %q, want %q", routerModel.Provider, config.ModelRouterProvider)
+	}
+	if routerModel.Router == nil || routerModel.Router.Entry != "pool" {
+		t.Fatalf("router config = %#v, want entry pool", routerModel.Router)
+	}
+	if !routerModel.Available || routerModel.Status != modelStatusAvailable {
+		t.Fatalf("router status = (%t, %q), want available", routerModel.Available, routerModel.Status)
+	}
+	if !routerModel.IsDefault || !routerModel.DefaultModelAllowed {
+		t.Fatalf(
+			"router default flags = is_default:%t allowed:%t, want true/true",
+			routerModel.IsDefault,
+			routerModel.DefaultModelAllowed,
+		)
+	}
+	if routerModel.APIKey != "" {
+		t.Fatalf("router api_key = %q, want empty", routerModel.APIKey)
+	}
+
+	optionsByID := make(map[string]providers.ModelProviderOption, len(listResp.ProviderOptions))
+	for _, option := range listResp.ProviderOptions {
+		optionsByID[option.ID] = option
+	}
+	if option, ok := optionsByID[config.ModelRouterProvider]; !ok {
+		t.Fatal("router provider option missing")
+	} else if option.CreateAllowed {
+		t.Fatal("router provider option should not be creatable through generic provider form")
+	} else if !option.DefaultModelAllowed {
+		t.Fatal("router provider option should be allowed as default model")
+	}
+
+	updated, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() after writes error = %v", err)
+	}
+	if got := updated.Agents.Defaults.ModelName; got != "router-main" {
+		t.Fatalf("default model = %q, want router-main", got)
+	}
+	if got := updated.ModelList[addResp.Index].APIKey(); got != "" {
+		t.Fatalf("persisted router API key = %q, want empty", got)
+	}
+}
+
+func TestHandleAddModel_RejectsRouterUnknownAccountAsBadRequest(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.ModelList = []*config.ModelConfig{
+		{ModelName: "account-a", Provider: "openai", Model: "gpt-4o"},
+	}
+	err = config.SaveConfig(configPath, cfg)
+	if err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+		"model_name": "router-main",
+		"provider": "router",
+		"model": "router-main",
+		"router": {
+			"enabled": true,
+			"entry": "entry",
+			"blocks": [
+				{"id": "entry", "type": "account", "account": "missing"}
+			]
+		}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "unknown account") {
+		t.Fatalf("body = %q, want unknown account validation", rec.Body.String())
+	}
+
+	updated, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() after rejected add error = %v", err)
+	}
+	if len(updated.ModelList) != 1 {
+		t.Fatalf("model_list len = %d, want 1", len(updated.ModelList))
+	}
+}
+
 func TestMaskAPIKey(t *testing.T) {
 	tests := []struct {
 		name string

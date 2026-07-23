@@ -13,6 +13,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/commands"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -303,12 +304,26 @@ func (al *AgentLoop) buildCommandsRuntime(
 				return "", err
 			}
 
-			nextProvider, _, err := providers.CreateProviderFromConfig(modelCfg)
-			if err != nil {
-				return "", fmt.Errorf("failed to initialize model %q: %w", value, err)
+			var nextProvider providers.LLMProvider
+			var nextCandidates []providers.FallbackCandidate
+			nextRouter := buildModelRouter(
+				cfg,
+				cfg.Agents.Defaults.Provider,
+				value,
+				agent.Workspace,
+				agent.CandidateProviders,
+			)
+			if nextRouter != nil {
+				selection := nextRouter.Select(optsSessionKey(opts), modelrouter.SelectReasonInitial)
+				nextCandidates = selection.Candidates
+				nextProvider = workflowProviderForCandidates(agent, agent.Provider, nextCandidates)
+			} else {
+				nextProvider, _, err = providers.CreateProviderFromConfig(modelCfg)
+				if err != nil {
+					return "", fmt.Errorf("failed to initialize model %q: %w", value, err)
+				}
+				nextCandidates = resolveModelCandidates(cfg, cfg.Agents.Defaults.Provider, value, agent.Fallbacks)
 			}
-
-			nextCandidates := resolveModelCandidates(cfg, cfg.Agents.Defaults.Provider, value, agent.Fallbacks)
 			if len(nextCandidates) == 0 {
 				return "", fmt.Errorf("model %q did not resolve to any provider candidates", value)
 			}
@@ -318,6 +333,7 @@ func (al *AgentLoop) buildCommandsRuntime(
 			agent.Model = value
 			agent.Provider = nextProvider
 			agent.Candidates = nextCandidates
+			agent.ModelRouter = nextRouter
 			agent.ThinkingLevel = parseThinkingLevel(modelCfg.ThinkingLevel)
 			agent.ThinkingLevelConfigured = isConfiguredThinkingLevel(modelCfg.ThinkingLevel)
 

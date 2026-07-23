@@ -13,6 +13,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/constants"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -241,7 +242,17 @@ func (p *Pipeline) CallLLM(
 				)
 			}
 			if fbErr != nil {
+				if ts.agent.ModelRouter != nil {
+					ts.agent.ModelRouter.RecordFallbackResult(
+						exec.routerSelection,
+						fallbackResultFromError(fbErr),
+						fbErr,
+					)
+				}
 				return nil, fbErr
+			}
+			if ts.agent.ModelRouter != nil {
+				ts.agent.ModelRouter.RecordFallbackResult(exec.routerSelection, fbResult, nil)
 			}
 			if fbResult.Provider != "" && len(fbResult.Attempts) > 0 {
 				logger.InfoCF(
@@ -263,7 +274,25 @@ func (p *Pipeline) CallLLM(
 			}
 			return fbResult.Response, nil
 		}
-		return exec.activeProvider.Chat(providerCtx, messagesForCall, toolDefsForCall, exec.llmModel, exec.llmOpts)
+		resp, err := exec.activeProvider.Chat(
+			providerCtx,
+			messagesForCall,
+			toolDefsForCall,
+			exec.llmModel,
+			exec.llmOpts,
+		)
+		if ts.agent.ModelRouter != nil {
+			candidate := providers.FallbackCandidate{}
+			if len(exec.activeCandidates) > 0 {
+				candidate = exec.activeCandidates[0]
+			}
+			ts.agent.ModelRouter.RecordFallbackResult(
+				exec.routerSelection,
+				fallbackResultFromSingleCandidate(candidate, resp),
+				err,
+			)
+		}
+		return resp, err
 	}
 
 	// Retry loop
@@ -457,6 +486,7 @@ func (p *Pipeline) CallLLM(
 				)
 				break
 			}
+			p.reselectModelRouterAfterCompression(ts, exec)
 			continue
 		}
 		break
@@ -705,6 +735,36 @@ func (p *Pipeline) applyBeforeLLMModelRewrite(ts *turnState, exec *turnExecution
 	exec.activeModel = resolvedCandidateModel(candidates, rawModel)
 	exec.llmModel = exec.activeModel
 	exec.activeModelConfig = resolveActiveModelConfig(p.Cfg, ts.agent.Workspace, candidates, rawModel, defaultProvider)
+}
+
+func (p *Pipeline) reselectModelRouterAfterCompression(ts *turnState, exec *turnExecution) {
+	if p == nil || ts == nil || ts.agent == nil || ts.agent.ModelRouter == nil || exec == nil {
+		return
+	}
+	selection := ts.agent.ModelRouter.Select(ts.sessionKey, modelrouter.SelectReasonCompression)
+	if len(selection.Candidates) == 0 {
+		return
+	}
+	exec.activeCandidates = selection.Candidates
+	exec.routerSelection = selection
+	exec.activeModel = resolvedCandidateModel(selection.Candidates, ts.agent.Model)
+	exec.llmModel = exec.activeModel
+	exec.llmModelName = resolvedCandidateModelName(selection.Candidates, ts.agent.Model)
+	exec.activeProvider = workflowProviderForCandidates(ts.agent, ts.agent.Provider, selection.Candidates)
+	exec.activeModelConfig = resolveActiveModelConfig(
+		p.Cfg,
+		ts.agent.Workspace,
+		selection.Candidates,
+		exec.activeModel,
+		p.Cfg.Agents.Defaults.Provider,
+	)
+	logger.InfoCF("agent", "Model router reselected after context compression",
+		map[string]any{
+			"agent_id":    ts.agent.ID,
+			"session_key": ts.sessionKey,
+			"router":      selection.RouterName,
+			"model":       exec.llmModelName,
+		})
 }
 
 func providerForFallbackCandidate(

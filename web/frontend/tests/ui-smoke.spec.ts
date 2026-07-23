@@ -27,8 +27,21 @@ const modelResponse = {
       is_virtual: false,
       default_model_allowed: true,
     },
+    {
+      index: 1,
+      model_name: "gpt-4o",
+      provider: "openai",
+      model: "gpt-4o",
+      api_key: "sk-****test",
+      enabled: true,
+      available: true,
+      status: "available",
+      is_default: false,
+      is_virtual: false,
+      default_model_allowed: true,
+    },
   ],
-  total: 1,
+  total: 2,
   default_model: "gpt-4o-mini",
   provider_options: [
     {
@@ -1210,6 +1223,25 @@ test("model catalog dialog fits the viewport", async ({ page }) => {
     page.getByRole("dialog", { name: "Saved Model Catalogs" }),
   ).toBeVisible()
   await expectElementFitsViewport(page, '[role="dialog"]', "model catalog")
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("model router sheet fits the viewport", async ({ page }) => {
+  const errors = collectPageErrors(page)
+
+  await gotoMockedRoute(page, "/models")
+  await page.getByRole("button", { name: "Model Router" }).click()
+
+  await expect(
+    page.getByRole("dialog", { name: "Create Model Router" }),
+  ).toBeVisible()
+  await page.getByRole("button", { name: "Load Balance" }).click()
+  await expect(
+    page.getByRole("button", { name: "gpt-4o", exact: true }),
+  ).toBeVisible()
+  await expectElementFitsViewport(page, '[role="dialog"]', "model router")
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])

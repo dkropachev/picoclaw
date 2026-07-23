@@ -11,6 +11,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -308,9 +309,22 @@ func (al *AgentLoop) selectCandidates(
 	agent *AgentInstance,
 	userMsg string,
 	history []providers.Message,
-) (candidates []providers.FallbackCandidate, model string, usedLight bool) {
+	sessionKey string,
+	reason modelrouter.SelectReason,
+) (candidates []providers.FallbackCandidate, model string, usedLight bool, routerSelection modelrouter.Selection) {
+	selectPrimary := func() ([]providers.FallbackCandidate, string, modelrouter.Selection) {
+		if agent.ModelRouter != nil {
+			selection := agent.ModelRouter.Select(sessionKey, reason)
+			if len(selection.Candidates) > 0 {
+				return selection.Candidates, resolvedCandidateModel(selection.Candidates, agent.Model), selection
+			}
+		}
+		return agent.Candidates, resolvedCandidateModel(agent.Candidates, agent.Model), modelrouter.Selection{}
+	}
+
 	if agent.Router == nil || len(agent.LightCandidates) == 0 {
-		return agent.Candidates, resolvedCandidateModel(agent.Candidates, agent.Model), false
+		candidates, model, routerSelection = selectPrimary()
+		return candidates, model, false, routerSelection
 	}
 
 	_, usedLight, score := agent.Router.SelectModel(userMsg, history, agent.Model)
@@ -321,7 +335,8 @@ func (al *AgentLoop) selectCandidates(
 				"score":     score,
 				"threshold": agent.Router.Threshold(),
 			})
-		return agent.Candidates, resolvedCandidateModel(agent.Candidates, agent.Model), false
+		candidates, model, routerSelection = selectPrimary()
+		return candidates, model, false, routerSelection
 	}
 
 	logger.InfoCF("agent", "Model routing: light model selected",
@@ -331,7 +346,10 @@ func (al *AgentLoop) selectCandidates(
 			"score":       score,
 			"threshold":   agent.Router.Threshold(),
 		})
-	return agent.LightCandidates, resolvedCandidateModel(agent.LightCandidates, agent.Router.LightModel()), true
+	return agent.LightCandidates, resolvedCandidateModel(
+		agent.LightCandidates,
+		agent.Router.LightModel(),
+	), true, routerSelection
 }
 
 func (al *AgentLoop) resolveContextManager() ContextManager {
@@ -438,7 +456,13 @@ func (al *AgentLoop) askSideQuestion(
 	}
 	messages = resolveMediaRefs(messages, al.mediaStore, maxMediaSize, currentTurnStart)
 
-	activeCandidates, activeModel, usedLight := al.selectCandidates(agent, question, messages)
+	activeCandidates, activeModel, usedLight, routerSelection := al.selectCandidates(
+		agent,
+		question,
+		messages,
+		optsSessionKey(opts),
+		modelrouter.SelectReasonInitial,
+	)
 	selectedModelName := sideQuestionModelName(agent, usedLight)
 
 	llmOpts := map[string]any{
@@ -546,7 +570,13 @@ func (al *AgentLoop) askSideQuestion(
 				},
 			)
 			if err != nil {
+				if agent.ModelRouter != nil {
+					agent.ModelRouter.RecordFallbackResult(routerSelection, fallbackResultFromError(err), err)
+				}
 				return nil, err
+			}
+			if agent.ModelRouter != nil {
+				agent.ModelRouter.RecordFallbackResult(routerSelection, fbResult, nil)
 			}
 			return fbResult.Response, nil
 		}
@@ -555,7 +585,15 @@ func (al *AgentLoop) askSideQuestion(
 		if len(activeCandidates) > 0 {
 			candidate = activeCandidates[0]
 		}
-		return callProvider(ctx, candidate, llmModel, hookModelChanged, callMessages)
+		resp, err := callProvider(ctx, candidate, llmModel, hookModelChanged, callMessages)
+		if agent.ModelRouter != nil {
+			agent.ModelRouter.RecordFallbackResult(
+				routerSelection,
+				fallbackResultFromSingleCandidate(candidate, resp),
+				err,
+			)
+		}
+		return resp, err
 	}
 
 	// Retry without media if vision is unsupported

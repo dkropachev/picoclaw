@@ -500,6 +500,44 @@ type RoutingConfig struct {
 	Threshold  float64 `json:"threshold"`   // complexity score in [0,1]; score >= threshold → primary model
 }
 
+const (
+	ModelRouterProvider                = "router"
+	ModelRouterBlockTypeAccount        = "account"
+	ModelRouterBlockTypeLoadBalance    = "load_balance"
+	ModelRouterStrategyBlind           = "blind"
+	ModelRouterStrategyTokensSpent     = "tokens_spent"
+	ModelRouterStrategyClosestLimit    = "closest_limit"
+	DefaultModelRouterRefreshInterval  = 60
+	defaultModelRouterMaxFallbackDepth = 64
+)
+
+// ModelRouterConfig describes a static model-router graph stored as a model_list
+// entry. Blocks are intentionally workflow-like: an entry block points to an
+// account or load-balancing block, and each block can fall back to another block.
+type ModelRouterConfig struct {
+	Enabled                bool               `json:"enabled,omitempty"`
+	Entry                  string             `json:"entry,omitempty"`
+	RefreshIntervalSeconds int                `json:"refresh_interval_seconds,omitempty"`
+	Blocks                 []ModelRouterBlock `json:"blocks,omitempty"`
+}
+
+type ModelRouterBlock struct {
+	ID                     string   `json:"id"`
+	Type                   string   `json:"type"`
+	Account                string   `json:"account,omitempty"`
+	Accounts               []string `json:"accounts,omitempty"`
+	Fallback               string   `json:"fallback,omitempty"`
+	Strategy               string   `json:"strategy,omitempty"`
+	RefreshIntervalSeconds int      `json:"refresh_interval_seconds,omitempty"`
+}
+
+func (r *ModelRouterConfig) EffectiveRefreshIntervalSeconds() int {
+	if r != nil && r.RefreshIntervalSeconds > 0 {
+		return r.RefreshIntervalSeconds
+	}
+	return DefaultModelRouterRefreshInterval
+}
+
 // SubTurnConfig configures the SubTurn execution system.
 type SubTurnConfig struct {
 	MaxDepth              int `json:"max_depth"               env:"PICOCLAW_AGENTS_DEFAULTS_SUBTURN_MAX_DEPTH"`
@@ -884,9 +922,10 @@ type ModelConfig struct {
 	Model     string `json:"model"`      // Model identifier, optionally provider-prefixed.
 
 	// HTTP-based providers
-	APIBase   string   `json:"api_base,omitempty"`  // API endpoint URL
-	Proxy     string   `json:"proxy,omitempty"`     // HTTP proxy URL
-	Fallbacks []string `json:"fallbacks,omitempty"` // Fallback model names for failover
+	APIBase   string             `json:"api_base,omitempty"`  // API endpoint URL
+	Proxy     string             `json:"proxy,omitempty"`     // HTTP proxy URL
+	Fallbacks []string           `json:"fallbacks,omitempty"` // Fallback model names for failover
+	Router    *ModelRouterConfig `json:"router,omitempty"`    // Static account router graph
 
 	// Special providers (CLI-based, OAuth, etc.)
 	AuthMethod   string `json:"auth_method,omitempty"`   // Authentication method: oauth, token
@@ -936,10 +975,33 @@ func (c *ModelConfig) IsVirtual() bool {
 	return c.isVirtual
 }
 
+func (c *ModelConfig) IsModelRouter() bool {
+	if c == nil {
+		return false
+	}
+	if c.Router != nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(c.Provider), ModelRouterProvider)
+}
+
 // Validate checks if the ModelConfig has all required fields.
 func (c *ModelConfig) Validate() error {
 	if c.ModelName == "" {
 		return fmt.Errorf("model_name is required")
+	}
+	if c.IsModelRouter() {
+		if c.Router == nil {
+			return fmt.Errorf("router config is required for provider %q", ModelRouterProvider)
+		}
+		if strings.TrimSpace(c.Provider) != "" &&
+			!strings.EqualFold(strings.TrimSpace(c.Provider), ModelRouterProvider) {
+			return fmt.Errorf("router config must use provider %q", ModelRouterProvider)
+		}
+		if c.Model == "" {
+			return fmt.Errorf("model is required")
+		}
+		return c.Router.Validate()
 	}
 	if c.Model == "" {
 		return fmt.Errorf("model is required")
@@ -966,6 +1028,121 @@ func (c *ModelConfig) Validate() error {
 		return fmt.Errorf("model identifier must not contain //")
 	}
 	return nil
+}
+
+func (r *ModelRouterConfig) Validate() error {
+	if r == nil {
+		return fmt.Errorf("router config is required")
+	}
+	if !r.Enabled {
+		return fmt.Errorf("router must be enabled")
+	}
+	entry := strings.TrimSpace(r.Entry)
+	if entry == "" {
+		return fmt.Errorf("router.entry is required")
+	}
+	if len(r.Blocks) == 0 {
+		return fmt.Errorf("router.blocks must contain at least one block")
+	}
+	seen := make(map[string]bool, len(r.Blocks))
+	for i, block := range r.Blocks {
+		id := strings.TrimSpace(block.ID)
+		if id == "" {
+			return fmt.Errorf("router.blocks[%d].id is required", i)
+		}
+		if seen[id] {
+			return fmt.Errorf("router.blocks[%d].id %q is duplicated", i, id)
+		}
+		seen[id] = true
+	}
+	if !seen[entry] {
+		return fmt.Errorf("router.entry %q does not reference a block", entry)
+	}
+	for i, block := range r.Blocks {
+		blockType := strings.TrimSpace(block.Type)
+		switch blockType {
+		case ModelRouterBlockTypeAccount:
+			if strings.TrimSpace(block.Account) == "" {
+				return fmt.Errorf("router.blocks[%d].account is required", i)
+			}
+		case ModelRouterBlockTypeLoadBalance:
+			accounts := nonEmptyStrings(block.Accounts)
+			if len(accounts) == 0 {
+				return fmt.Errorf("router.blocks[%d].accounts must contain at least one account", i)
+			}
+			if hasDuplicateString(accounts) {
+				return fmt.Errorf("router.blocks[%d].accounts contains duplicate accounts", i)
+			}
+			strategy := strings.TrimSpace(block.Strategy)
+			switch strategy {
+			case "", ModelRouterStrategyBlind, ModelRouterStrategyTokensSpent, ModelRouterStrategyClosestLimit:
+			default:
+				return fmt.Errorf("router.blocks[%d].strategy %q is unsupported", i, strategy)
+			}
+		default:
+			return fmt.Errorf("router.blocks[%d].type %q is unsupported", i, block.Type)
+		}
+		if fallback := strings.TrimSpace(block.Fallback); fallback != "" && !seen[fallback] {
+			return fmt.Errorf("router.blocks[%d].fallback %q does not reference a block", i, fallback)
+		}
+	}
+	return validateModelRouterFallbackAcyclic(entry, r.Blocks)
+}
+
+func nonEmptyStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func hasDuplicateString(values []string) bool {
+	seen := map[string]bool{}
+	for _, value := range values {
+		if seen[value] {
+			return true
+		}
+		seen[value] = true
+	}
+	return false
+}
+
+func validateModelRouterFallbackAcyclic(entry string, blocks []ModelRouterBlock) error {
+	byID := make(map[string]ModelRouterBlock, len(blocks))
+	for _, block := range blocks {
+		byID[strings.TrimSpace(block.ID)] = block
+	}
+	visiting := map[string]bool{}
+	visited := map[string]bool{}
+	var walk func(id string, depth int) error
+	walk = func(id string, depth int) error {
+		if depth > defaultModelRouterMaxFallbackDepth {
+			return fmt.Errorf("router fallback chain exceeds %d blocks", defaultModelRouterMaxFallbackDepth)
+		}
+		id = strings.TrimSpace(id)
+		if id == "" || visited[id] {
+			return nil
+		}
+		if visiting[id] {
+			return fmt.Errorf("router fallback cycle at block %q", id)
+		}
+		block, ok := byID[id]
+		if !ok {
+			return nil
+		}
+		visiting[id] = true
+		if err := walk(block.Fallback, depth+1); err != nil {
+			return err
+		}
+		visiting[id] = false
+		visited[id] = true
+		return nil
+	}
+	return walk(entry, 0)
 }
 
 func (c *ModelConfig) SetAPIKey(value string) {
@@ -2037,7 +2214,96 @@ func (c *Config) ValidateModelList() error {
 			return fmt.Errorf("model_list[%d]: %w", i, err)
 		}
 	}
+	if err := c.validateModelRouterReferences(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (c *Config) validateModelRouterReferences() error {
+	if c == nil {
+		return nil
+	}
+	accounts := make(map[string][]int)
+	routers := make(map[string]int)
+	for i, model := range c.ModelList {
+		if model == nil {
+			continue
+		}
+		name := strings.TrimSpace(model.ModelName)
+		if name == "" {
+			continue
+		}
+		if model.IsModelRouter() {
+			routers[name] = i
+			continue
+		}
+		accounts[name] = append(accounts[name], i)
+	}
+
+	for i, model := range c.ModelList {
+		if model == nil || !model.IsModelRouter() || model.Router == nil {
+			continue
+		}
+		for _, block := range model.Router.Blocks {
+			for _, account := range modelRouterBlockAccounts(block) {
+				account = strings.TrimSpace(account)
+				if account == "" {
+					continue
+				}
+				if routerIdx, ok := routers[account]; ok {
+					return fmt.Errorf(
+						"model_list[%d].router block %q references router model %q at model_list[%d]",
+						i,
+						block.ID,
+						account,
+						routerIdx,
+					)
+				}
+				matches := accounts[account]
+				if len(matches) == 0 {
+					return fmt.Errorf(
+						"model_list[%d].router block %q references unknown account %q",
+						i,
+						block.ID,
+						account,
+					)
+				}
+				if len(matches) > 1 {
+					return fmt.Errorf(
+						"model_list[%d].router block %q references ambiguous account %q",
+						i,
+						block.ID,
+						account,
+					)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func modelRouterBlockAccounts(block ModelRouterBlock) []string {
+	switch strings.TrimSpace(block.Type) {
+	case ModelRouterBlockTypeAccount:
+		return []string{block.Account}
+	case ModelRouterBlockTypeLoadBalance:
+		return block.Accounts
+	default:
+		return nil
+	}
+}
+
+func cloneModelRouterConfig(in *ModelRouterConfig) *ModelRouterConfig {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Blocks = append([]ModelRouterBlock(nil), in.Blocks...)
+	for i := range out.Blocks {
+		out.Blocks[i].Accounts = append([]string(nil), in.Blocks[i].Accounts...)
+	}
+	return &out
 }
 
 func (c *Config) SecurityCopyFrom(path string) error {
@@ -2089,6 +2355,7 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 				APIKeys:                     SimpleSecureStrings(keys[i]),
 				Proxy:                       m.Proxy,
 				AuthMethod:                  m.AuthMethod,
+				Router:                      cloneModelRouterConfig(m.Router),
 				CredentialID:                m.CredentialID,
 				ConnectMode:                 m.ConnectMode,
 				Workspace:                   m.Workspace,
@@ -2120,6 +2387,7 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 			APIBase:                     m.APIBase,
 			Proxy:                       m.Proxy,
 			AuthMethod:                  m.AuthMethod,
+			Router:                      cloneModelRouterConfig(m.Router),
 			CredentialID:                m.CredentialID,
 			ConnectMode:                 m.ConnectMode,
 			Workspace:                   m.Workspace,

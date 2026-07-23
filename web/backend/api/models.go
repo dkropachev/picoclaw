@@ -37,15 +37,16 @@ func (h *Handler) registerModelRoutes(mux *http.ServeMux) {
 // modelResponse is the JSON structure returned for each model in the list.
 // All ModelConfig fields are included so the frontend can display and edit them.
 type modelResponse struct {
-	Index        int    `json:"index"`
-	ModelName    string `json:"model_name"`
-	Provider     string `json:"provider,omitempty"`
-	Model        string `json:"model"`
-	APIBase      string `json:"api_base,omitempty"`
-	APIKey       string `json:"api_key"`
-	Proxy        string `json:"proxy,omitempty"`
-	AuthMethod   string `json:"auth_method,omitempty"`
-	CredentialID string `json:"credential_id,omitempty"`
+	Index        int                       `json:"index"`
+	ModelName    string                    `json:"model_name"`
+	Provider     string                    `json:"provider,omitempty"`
+	Model        string                    `json:"model"`
+	APIBase      string                    `json:"api_base,omitempty"`
+	APIKey       string                    `json:"api_key"`
+	Proxy        string                    `json:"proxy,omitempty"`
+	AuthMethod   string                    `json:"auth_method,omitempty"`
+	CredentialID string                    `json:"credential_id,omitempty"`
+	Router       *config.ModelRouterConfig `json:"router,omitempty"`
 	// Advanced fields
 	ConnectMode         string                      `json:"connect_mode,omitempty"`
 	Workspace           string                      `json:"workspace,omitempty"`
@@ -150,8 +151,24 @@ func normalizeIncomingModelConfig(mc *config.ModelConfig) {
 	mc.Provider = strings.TrimSpace(mc.Provider)
 	mc.AuthMethod = strings.ToLower(strings.TrimSpace(mc.AuthMethod))
 	mc.CredentialID = strings.TrimSpace(mc.CredentialID)
+	if mc.Router != nil || providers.NormalizeProvider(mc.Provider) == config.ModelRouterProvider {
+		mc.Provider = config.ModelRouterProvider
+		if strings.TrimSpace(mc.Model) == "" {
+			mc.Model = strings.TrimSpace(mc.ModelName)
+		}
+		mc.APIKeys = nil
+		mc.APIBase = ""
+		mc.Proxy = ""
+		mc.AuthMethod = ""
+		mc.CredentialID = ""
+		mc.ConnectMode = ""
+		mc.Workspace = ""
+	}
 	if effort, err := providercommon.NormalizeReasoningEffort(mc.ReasoningEffort); err == nil {
 		mc.ReasoningEffort = effort
+	}
+	if mc.Provider == config.ModelRouterProvider {
+		return
 	}
 	if mc.Provider == "" {
 		mc.Provider, mc.Model = providers.SplitModelProviderAndID(mc.Model, "openai")
@@ -230,6 +247,9 @@ func validateIncomingModelConfig(mc *config.ModelConfig, existing *config.ModelC
 	if !providers.IsSupportedModelProvider(mc.Provider) {
 		return fmt.Errorf("provider %q is not supported", mc.Provider)
 	}
+	if mc.Provider == config.ModelRouterProvider {
+		return nil
+	}
 	if strings.TrimSpace(mc.CredentialID) != "" {
 		if _, err := auth.NormalizeCredentialID(mc.Provider, mc.CredentialID); err != nil {
 			return err
@@ -304,6 +324,7 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 			Proxy:               m.Proxy,
 			AuthMethod:          m.AuthMethod,
 			CredentialID:        m.CredentialID,
+			Router:              m.Router,
 			ConnectMode:         m.ConnectMode,
 			Workspace:           m.Workspace,
 			RPM:                 m.RPM,
@@ -374,6 +395,10 @@ func (h *Handler) handleAddModel(w http.ResponseWriter, r *http.Request) {
 
 	cfg.ModelList = append(cfg.ModelList, &mc.ModelConfig)
 	normalizeStoredModelProviders(cfg)
+	if err := cfg.ValidateModelList(); err != nil {
+		http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
+		return
+	}
 
 	if err := config.SaveConfig(h.configPath, cfg); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
@@ -513,6 +538,10 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 
 	cfg.ModelList[idx] = &mc.ModelConfig
 	normalizeStoredModelProviders(cfg)
+	if err := cfg.ValidateModelList(); err != nil {
+		http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
+		return
+	}
 
 	logger.Debugf("update model config: %#v", mc.ModelConfig)
 

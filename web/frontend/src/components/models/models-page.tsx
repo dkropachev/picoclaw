@@ -2,6 +2,7 @@ import {
   IconDatabase,
   IconLoader2,
   IconPlus,
+  IconRoute,
   IconStar,
 } from "@tabler/icons-react"
 import { useCallback, useEffect, useState } from "react"
@@ -23,6 +24,7 @@ import { AddModelSheet } from "./add-model-sheet"
 import { CatalogDialog } from "./catalog-dialog"
 import { DeleteModelDialog } from "./delete-model-dialog"
 import { EditModelSheet } from "./edit-model-sheet"
+import { ModelRouterSheet } from "./model-router-sheet"
 import {
   getCanonicalProviderKey,
   getProviderCatalogMap,
@@ -51,6 +53,8 @@ export function ModelsPage() {
   const [deletingModel, setDeletingModel] = useState<ModelInfo | null>(null)
   const [addOpen, setAddOpen] = useState(false)
   const [catalogOpen, setCatalogOpen] = useState(false)
+  const [routerOpen, setRouterOpen] = useState(false)
+  const [editingRouter, setEditingRouter] = useState<ModelInfo | null>(null)
   const [settingDefaultIndex, setSettingDefaultIndex] = useState<number | null>(
     null,
   )
@@ -100,6 +104,20 @@ export function ModelsPage() {
     } finally {
       setSettingDefaultIndex(null)
     }
+  }
+
+  const handleEditModel = (model: ModelInfo) => {
+    if (model.provider === "router" || model.router != null) {
+      setEditingRouter(model)
+      setRouterOpen(true)
+      return
+    }
+    setEditingModel(model)
+  }
+
+  const handleAddRouter = () => {
+    setEditingRouter(null)
+    setRouterOpen(true)
   }
 
   const grouped: Record<
@@ -177,6 +195,15 @@ export function ModelsPage() {
           <Button
             size="sm"
             variant="outline"
+            onClick={handleAddRouter}
+            disabled={providerOptions.length === 0}
+          >
+            <IconRoute className="size-4" />
+            {t("models.router.button")}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
             onClick={() => setAddOpen(true)}
             disabled={providerOptions.length === 0}
           >
@@ -235,7 +262,7 @@ export function ModelsPage() {
                 key={providerGroup.key}
                 provider={providerGroup.provider}
                 models={providerGroup.models}
-                onEdit={setEditingModel}
+                onEdit={handleEditModel}
                 onSetDefault={handleSetDefault}
                 onDelete={setDeletingModel}
                 settingDefaultIndex={settingDefaultIndex}
@@ -259,6 +286,14 @@ export function ModelsPage() {
         onSaved={fetchModels}
         existingModelNames={models.map((model) => model.model_name)}
         providerOptions={providerOptions}
+      />
+
+      <ModelRouterSheet
+        open={routerOpen}
+        model={editingRouter}
+        models={models}
+        onClose={() => setRouterOpen(false)}
+        onSaved={fetchModels}
       />
 
       <DeleteModelDialog

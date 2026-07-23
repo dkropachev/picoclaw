@@ -56,7 +56,7 @@ export function ProviderSection({
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {models.map((model) => (
             <ModelCard
-              key={model.model_name}
+              key={model.index}
               model={model}
               onEdit={onEdit}
               onSetDefault={onSetDefault}

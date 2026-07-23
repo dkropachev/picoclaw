@@ -134,6 +134,8 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 	}
 
 	switch protocol {
+	case config.ModelRouterProvider:
+		return nil, "", fmt.Errorf("provider %q is a router config, not an upstream provider", protocol)
 	case "openai":
 		// OpenAI with OAuth/token auth (Codex-style)
 		if authMethod == "oauth" || authMethod == "token" {

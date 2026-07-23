@@ -7,6 +7,7 @@ package providers
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 )
@@ -28,6 +29,21 @@ func CreateProvider(cfg *config.Config) (LLMProvider, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("model %q not found in model_list: %w", model, err)
 	}
+	if modelCfg.IsModelRouter() {
+		accountName := firstRouterAccount(modelCfg.Router)
+		if accountName == "" {
+			return nil, "", fmt.Errorf("router model %q has no account blocks", model)
+		}
+		modelCfg, err = cfg.GetModelConfig(accountName)
+		if err != nil {
+			return nil, "", fmt.Errorf(
+				"router model %q account %q not found in model_list: %w",
+				model,
+				accountName,
+				err,
+			)
+		}
+	}
 
 	// Inject global workspace if not set in model config
 	if modelCfg.Workspace == "" {
@@ -41,4 +57,37 @@ func CreateProvider(cfg *config.Config) (LLMProvider, string, error) {
 	}
 
 	return provider, modelID, nil
+}
+
+func firstRouterAccount(routerCfg *config.ModelRouterConfig) string {
+	if routerCfg == nil {
+		return ""
+	}
+	blocks := make(map[string]config.ModelRouterBlock, len(routerCfg.Blocks))
+	for _, block := range routerCfg.Blocks {
+		blocks[strings.TrimSpace(block.ID)] = block
+	}
+	seen := map[string]bool{}
+	id := strings.TrimSpace(routerCfg.Entry)
+	for id != "" && !seen[id] {
+		seen[id] = true
+		block, ok := blocks[id]
+		if !ok {
+			return ""
+		}
+		switch strings.TrimSpace(block.Type) {
+		case config.ModelRouterBlockTypeAccount:
+			return strings.TrimSpace(block.Account)
+		case config.ModelRouterBlockTypeLoadBalance:
+			for _, account := range block.Accounts {
+				if account = strings.TrimSpace(account); account != "" {
+					return account
+				}
+			}
+			id = strings.TrimSpace(block.Fallback)
+		default:
+			return ""
+		}
+	}
+	return ""
 }

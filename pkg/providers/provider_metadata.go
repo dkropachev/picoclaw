@@ -25,6 +25,17 @@ type ModelProviderOption struct {
 }
 
 var modelProviderOptionsByName = map[string]ModelProviderOption{
+	"router": {
+		ID:                  "router",
+		DisplayName:         "Model Router",
+		IconSlug:            "router",
+		Domain:              "picoclaw.local",
+		EmptyAPIKeyAllowed:  true,
+		CreateAllowed:       false,
+		DefaultModelAllowed: true,
+		Priority:            110,
+		Aliases:             []string{"model-router", "model_router"},
+	},
 	"openai": {
 		ID:                  "openai",
 		DisplayName:         "OpenAI",
