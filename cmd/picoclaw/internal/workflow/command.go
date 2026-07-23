@@ -20,6 +20,7 @@ func NewWorkflowCommand() *cobra.Command {
 
 	cmd.AddCommand(
 		newListCommand(),
+		newInstallCommand(),
 		newCompatibilityCommand(),
 		newRevalidateCommand(),
 		newValidateCommand(),
