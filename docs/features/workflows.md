@@ -61,7 +61,7 @@ workflows do not need helper scripts for durable planning and reporting.
 | `FR-WORKFLOW-014` | MUST | Reusable workflow calls support `secrets: inherit`, explicit secret mapping expressions, and `continue-on-error` on jobs and steps. | Shared workflows need GitHub-like reuse and optional child failure handling. |
 | `FR-WORKFLOW-015` | MUST | HTTP exposes workflow run events as JSON and SSE, plus child/retry run graph data; the dashboard exposes workflow definitions, manual run launch, run list, run details, events, graph, reload, cancel, and retry. | Operators need live inspection and control without shell access. |
 | `FR-WORKFLOW-016` | MUST | Workflow tool steps that return handled media deliver attachments, generated audio, or files back to the same delivery target and preserve Telegram topics or Slack threads when present. | File and TTS workflows must reply in the same discussion as text workflows. |
-| `FR-WORKFLOW-017` | MUST | Workflow development uses a single persisted active session with start, revise, AI-revise, validate, test-run, publish, and discard operations; starting another development session while one is active or sending concurrent development mutations returns a conflict. HTTP and the agent-callable workflow tool expose this lifecycle so a user can ask AI to draft, test, and publish a workflow without scripts. AI revision receives existing workflow refs plus bounded runtime agent/tool capability context so drafts can target dashboard-runnable steps. The active session persists the latest draft-test snapshot, clears it when the executable draft YAML or target ref changes, preserves it across prompt-only or no-op saves, and publish requires a current successful draft test. | AI-assisted authoring is simpler and avoids divergent pending edits. |
+| `FR-WORKFLOW-017` | MUST | Workflow development uses a single persisted active session with start, revise, AI-revise, validate, test-run, publish, and discard operations; starting another development session while one is active or sending concurrent development mutations returns a conflict. HTTP and the agent-callable workflow tool expose this lifecycle so a user can ask AI to draft, test, and publish a workflow without scripts. AI revision receives existing workflow refs plus bounded runtime agent/tool capability context so drafts can target dashboard-runnable steps. Repository-wide review prompts produce an explicit draft workflow that inventories the requested commit and feeds selected files into a managed scope-split review step. The active session persists the latest draft-test snapshot, clears it when the executable draft YAML or target ref changes, preserves it across prompt-only or no-op saves, and publish requires a current successful draft test. | AI-assisted authoring is simpler and avoids divergent pending edits. |
 | `FR-WORKFLOW-018` | MUST | Workflow compatibility stamps record the PicoClaw version, git commit, workflow engine version, schema version, validator fingerprint, workflow hash, validation status, and issues; version or hash changes mark workflows pending revalidation and block automatic/manual execution until revalidated. | Releases can invalidate workflow semantics, so existing automation must fail closed until checked. |
 | `FR-WORKFLOW-019` | MUST | HTTP-triggered workflow runs and draft test runs execute `agent/*`, `tool/*`, and `mcp/*` steps through the configured PicoClaw agent/tool runtime and persist step outputs in normal run records. Tool and MCP step results that return a JSON object or array expose the parsed value as `outputs.json`; object results also promote non-conflicting top-level fields for downstream expressions. | AI-authored workflows must be testable from the dashboard before publish, and later workflow steps need structured tool data without parsing prose. |
 | `FR-WORKFLOW-020` | MUST | Native workflow functions expose workflow-scoped durable state, workflow run artifacts, git commit inventory, and path-policy filtering through `function/workflow.state`, `function/workflow.artifact`, `function/git.inventory`, and `function/git.filter`. | AI-authored workflows need common state, artifact, repository-inspection, and deterministic filter-application primitives without opaque helper scripts or domain-specific helpers in core. |
@@ -154,13 +154,14 @@ stores the memory key used by agent steps.
     workflow-owned state and artifacts for their own planning, reports, and
     reuse decisions.
 12. For development, create `workflow_dev/active.json` only when no active
-    session exists, use the configured agent as the default first draft path,
-    revise the active draft locally or through the configured agent with
-    existing workflow refs plus registered agent/tool target context, extract
-    returned workflow YAML, validate the YAML, optionally test-run the draft
-    inline with persisted run records, publish by atomically writing
-    `workspace/workflows/<file>.yml`, revalidate the catalog, archive the
-    session, and remove the active marker.
+    session exists, scaffold repository-wide review prompts as an inventory
+    step followed by a managed scope-split review step, use the configured
+    agent as the default first draft path, revise the active draft locally or
+    through the configured agent with existing workflow refs plus registered
+    agent/tool target context, extract returned workflow YAML, validate the
+    YAML, optionally test-run the draft inline with persisted run records,
+    publish by atomically writing `workspace/workflows/<file>.yml`, revalidate
+    the catalog, archive the session, and remove the active marker.
 13. For release revalidation, compare the current PicoClaw runtime identity and
     workflow hash with `workflow_validations/manifest.json`, classify stale
     workflows as pending, run deterministic validation on demand, and block
@@ -183,7 +184,8 @@ inventory/filter functions, and agent structured-output path; checkout
 allocation, locking, preservation, and retention remain owned by the git
 workspaces feature. The filter-planning agent receives repository structure
 metadata only, while `git.filter` enforces the returned globs before any file
-content is attached for review.
+content is attached for review. Workflow development preserves that visible
+inventory-and-review shape when it recognizes repository-wide review prompts.
 
 ## Failure And Edge Cases
 
