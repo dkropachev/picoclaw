@@ -17,8 +17,8 @@ workflow draft or repair session may exist at a time, a new brief starts with
 AI-authored workflow YAML by default, deterministic scaffold remains available
 as a fallback, and publish validates, writes, reloads, and stamps the workflow
 against the current PicoClaw runtime. Native workflow functions provide common
-state, artifact, and git inventory primitives so AI-authored workflows do not
-need helper scripts for durable planning and reporting.
+state, artifact, git inventory, and git filter primitives so AI-authored
+workflows do not need helper scripts for durable planning and reporting.
 
 ## Reconstruction Notes
 
@@ -64,9 +64,9 @@ need helper scripts for durable planning and reporting.
 | `FR-WORKFLOW-017` | MUST | Workflow development uses a single persisted active session with start, revise, AI-revise, validate, test-run, publish, and discard operations; starting another development session while one is active or sending concurrent development mutations returns a conflict. HTTP and the agent-callable workflow tool expose this lifecycle so a user can ask AI to draft, test, and publish a workflow without scripts. AI revision receives existing workflow refs plus bounded runtime agent/tool capability context so drafts can target dashboard-runnable steps. The active session persists the latest draft-test snapshot, clears it when the executable draft YAML or target ref changes, preserves it across prompt-only or no-op saves, and publish requires a current successful draft test. | AI-assisted authoring is simpler and avoids divergent pending edits. |
 | `FR-WORKFLOW-018` | MUST | Workflow compatibility stamps record the PicoClaw version, git commit, workflow engine version, schema version, validator fingerprint, workflow hash, validation status, and issues; version or hash changes mark workflows pending revalidation and block automatic/manual execution until revalidated. | Releases can invalidate workflow semantics, so existing automation must fail closed until checked. |
 | `FR-WORKFLOW-019` | MUST | HTTP-triggered workflow runs and draft test runs execute `agent/*`, `tool/*`, and `mcp/*` steps through the configured PicoClaw agent/tool runtime and persist step outputs in normal run records. Tool and MCP step results that return a JSON object or array expose the parsed value as `outputs.json`; object results also promote non-conflicting top-level fields for downstream expressions. | AI-authored workflows must be testable from the dashboard before publish, and later workflow steps need structured tool data without parsing prose. |
-| `FR-WORKFLOW-020` | MUST | Native workflow functions expose workflow-scoped durable state, workflow run artifacts, and git commit inventory through `function/workflow.state`, `function/workflow.artifact`, and `function/git.inventory`. | AI-authored workflows need common state, artifact, and repository-inspection primitives without opaque helper scripts or domain-specific helpers in core. |
+| `FR-WORKFLOW-020` | MUST | Native workflow functions expose workflow-scoped durable state, workflow run artifacts, git commit inventory, and path-policy filtering through `function/workflow.state`, `function/workflow.artifact`, `function/git.inventory`, and `function/git.filter`. | AI-authored workflows need common state, artifact, repository-inspection, and deterministic filter-application primitives without opaque helper scripts or domain-specific helpers in core. |
 | `FR-WORKFLOW-021` | MUST | Agent workflow steps integrate with the dedicated [Managed Agent Execution](managed-agent-execution.md) contract: `with.output` declares structured JSON output, `with.managed` enables generic hidden scope/task/hybrid splitting, and the visible workflow step persists the combined structured result plus managed diagnostics. | AI-driven workflow development needs generic, inspectable agent adaptation that preserves output quality while reducing token and model spend. |
-| `FR-WORKFLOW-022` | MUST | PicoClaw can install a local `workflows/code-review.yml` template that acquires a git workspace, inventories selected file content, releases the workspace before model review, and runs an agent step with structured JSON review output; workflow tool steps expose JSON object results as addressable step outputs for downstream workflow expressions. | Code review automation needs a local hosted workflow that composes the git workspace feature with deterministic inventory and inspectable review output. |
+| `FR-WORKFLOW-022` | MUST | PicoClaw can install a local `workflows/code-review.yml` template that acquires a git workspace, inventories repository structure, releases the workspace before asking an agent to propose include/exclude globs, reacquires only long enough to attach selected file content through `git.filter`, releases again before model review, and runs an agent step with structured JSON review output; workflow tool steps expose JSON object results as addressable step outputs for downstream workflow expressions. | Code review automation needs a local hosted workflow that composes the git workspace feature with AI-assisted path selection, deterministic filter enforcement, and inspectable review output. |
 
 ## Data And State Model
 
@@ -111,7 +111,7 @@ stores the memory key used by agent steps.
 | UI | `/agent/workflows` | Two-mode workflow console: Develop shows singleton start readiness, starts new briefs with AI by default, resumes the singleton AI brief/YAML development cycle, marks the one active draft, sends active drafts to the configured agent for YAML revision, offers deterministic scaffold fallback, validates and test-runs drafts asynchronously with inline JSON validation for inputs/secrets/session/delivery context through configured workflow runtime steps, preserves structured validation feedback from failed draft tests, can ask AI to repair the current draft with the latest failed draft-test status, run ID, compact run/job/step state, recent event payloads, and error context, restores the latest draft-test result when resuming the active session, treats a running draft test as the active development operation, gates publish on a current successful draft test, shows publish readiness with the next blocking reason, shows the active development operation while mutations run, opens the repair/review queue with compatibility issue summaries, can start AI review or AI repair directly from blocked compatibility entries, and after publish switches Operate to the published workflow; Operate shows definitions, compatibility status, a GitHub-style manual run popover generated from declared `workflow_call` inputs and secrets with advanced session/delivery/raw secret JSON controls, compatibility-gated asynchronous launch, inline payload validation, the selected workflow run-readiness reason, runs, selected run detail, persisted delivery and trigger event context, job and step outputs, live streamed event payloads with polling fallback, graph, cancel, compatibility-gated retry with retry-secret JSON validation, reload, and refresh. | `FR-WORKFLOW-015`, `FR-WORKFLOW-017`, `FR-WORKFLOW-018`, `FR-WORKFLOW-019` |
 | Managed agent step | `uses: agent/*` with `with.output`, `with.managed`, and optional `with.scope` | Workflow-owned output schemas are injected into the agent prompt, parsed from the response, repaired once by default, validated locally, and exposed as `structured`. Managed options choose split strategy, fixed or token-adaptive chunk sizes, calibration sample/match/cache policy, parallel child limit, model candidates with price metadata, and effort optimization. Child runs are hidden from chat history by default and publish one combined structured result plus `managed` diagnostics. | `FR-WORKFLOW-007`, `FR-WORKFLOW-009`, `FR-WORKFLOW-019`, `FR-WORKFLOW-021` |
 | Tool | `workflow` | Agent-callable list, compatibility, revalidate, validate, reload, run, cancel, retry, status, graph, events, `dev_status`, `dev_start`, `dev_revise`, `dev_validate`, `dev_test`, `dev_publish`, and `dev_discard` actions. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-017`, `FR-WORKFLOW-018` |
-| Native functions | `function/workflow.state`, `function/workflow.artifact`, `function/git.inventory` | Store/retrieve workflow-owned JSON state, write/read/list run artifacts, and inventory git files by commit and blob hash inside the workspace. `git.inventory` can include capped UTF-8 file content for selected files when `include_content`/`includeContent` is enabled, using `max_content_bytes`/`maxContentBytes` as the per-file cap. Domain workflows compose these primitives for planning, reports, and reuse decisions. | `FR-WORKFLOW-020` |
+| Native functions | `function/workflow.state`, `function/workflow.artifact`, `function/git.inventory`, `function/git.filter` | Store/retrieve workflow-owned JSON state, write/read/list run artifacts, inventory git files by commit and blob hash inside the workspace, and apply structured include/exclude path policies to inventory output. `git.inventory` can include capped UTF-8 file content for selected files when `include_content`/`includeContent` is enabled, using `max_content_bytes`/`maxContentBytes` as the per-file cap. `git.filter` accepts inventory files plus AI- or user-produced `includeGlobs`, `excludeGlobs`, and `selectedPaths`, supports recursive `**` globs, and can attach capped content only after deterministic policy enforcement. Domain workflows compose these primitives for planning, reports, and reuse decisions. | `FR-WORKFLOW-020` |
 | Events | `workflow.*` | Trigger, run, job, and step lifecycle events. | `FR-WORKFLOW-008`, `FR-WORKFLOW-009`, `FR-WORKFLOW-011`, `FR-WORKFLOW-015` |
 
 ## Algorithms And Ordering
@@ -147,10 +147,12 @@ stores the memory key used by agent steps.
 10. Persist run and event state with embedded job and step snapshots before and
    after side effects.
 11. Native workflow functions resolve all state, artifact, and git paths inside
-    the workspace; git inventory uses commit blob hashes, can attach capped
-    selected-file content for review workflows, and domain workflows compose
-    inventory with workflow-owned state and artifacts for their own planning,
-    reports, and reuse decisions.
+    the workspace; git inventory uses commit blob hashes, `git.filter` applies
+    include/exclude glob policies and exact selected paths to inventory output,
+    both inventory and filtering can attach capped selected-file content for
+    review workflows, and domain workflows compose these outputs with
+    workflow-owned state and artifacts for their own planning, reports, and
+    reuse decisions.
 12. For development, create `workflow_dev/active.json` only when no active
     session exists, use the configured agent as the default first draft path,
     revise the active draft locally or through the configured agent with
@@ -177,8 +179,11 @@ keys. Tool execution, MCP, skills, hooks, and security policies govern side
 effects exactly as they do in normal agent turns. Runtime events expose
 workflow trigger, run, job, and step lifecycle state.
 The code-review workflow template composes the git workspace tool, native git
-inventory function, and agent structured-output path; checkout allocation,
-locking, preservation, and retention remain owned by the git workspaces feature.
+inventory/filter functions, and agent structured-output path; checkout
+allocation, locking, preservation, and retention remain owned by the git
+workspaces feature. The filter-planning agent receives repository structure
+metadata only, while `git.filter` enforces the returned globs before any file
+content is attached for review.
 
 ## Failure And Edge Cases
 
@@ -268,6 +273,9 @@ locking, preservation, and retention remain owned by the git workspaces feature.
   dashboard, CLI, workflow tool, retries, or automatic triggers.
 - Installing the code-review workflow is idempotent when the target file already
   exists; overwrite requires an explicit force request.
+- A malformed code-review filter, unsupported file inventory shape, or filter
+  result that excludes every useful file fails or produces an empty review scope
+  through normal step outputs; the raw filter artifact remains inspectable.
 
 ## Acceptance Evidence
 
