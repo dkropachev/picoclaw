@@ -45,6 +45,16 @@ type workflowRetryRequest struct {
 	Secrets map[string]string `json:"secrets,omitempty"`
 }
 
+type workflowDefinitionResponse struct {
+	workflows.Definition
+	WorkflowCall *workflowCallContractResponse `json:"workflow_call,omitempty"`
+}
+
+type workflowCallContractResponse struct {
+	Inputs  map[string]workflows.Input  `json:"inputs,omitempty"`
+	Secrets map[string]workflows.Secret `json:"secrets,omitempty"`
+}
+
 func (h *Handler) registerWorkflowRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/workflows", h.handleListWorkflows)
 	mux.HandleFunc("GET /api/workflows/compatibility", h.handleGetWorkflowCompatibility)
@@ -82,6 +92,11 @@ func (h *Handler) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	responseDefs, err := workflowDefinitionResponses(r.Context(), workspace, defs, localOpts...)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	compatibility, compatErr := workflows.LoadCompatibilitySummary(
 		r.Context(),
 		workspace,
@@ -92,7 +107,33 @@ func (h *Handler) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, compatErr.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeWorkflowJSON(w, map[string]any{"workflows": defs, "compatibility": compatibility})
+	writeWorkflowJSON(w, map[string]any{"workflows": responseDefs, "compatibility": compatibility})
+}
+
+func workflowDefinitionResponses(
+	ctx context.Context,
+	workspace string,
+	defs []workflows.Definition,
+	opts ...workflows.LocalOption,
+) ([]workflowDefinitionResponse, error) {
+	out := make([]workflowDefinitionResponse, 0, len(defs))
+	for _, def := range defs {
+		response := workflowDefinitionResponse{Definition: def}
+		if def.Error == "" {
+			workflow, err := workflows.LoadLocal(ctx, workspace, def.Ref, opts...)
+			if err != nil {
+				return nil, err
+			}
+			if workflow.On.WorkflowCall != nil {
+				response.WorkflowCall = &workflowCallContractResponse{
+					Inputs:  workflow.On.WorkflowCall.Inputs,
+					Secrets: workflow.On.WorkflowCall.Secrets,
+				}
+			}
+		}
+		out = append(out, response)
+	}
+	return out, nil
 }
 
 func (h *Handler) handleGetWorkflowCompatibility(w http.ResponseWriter, r *http.Request) {

@@ -33,6 +33,7 @@ import {
   type WorkflowDeliveryPayload,
   type WorkflowDevelopmentSession,
   type WorkflowDevelopmentTestResult,
+  type WorkflowInputDefinition,
   type WorkflowRun,
   type WorkflowRunEvent,
   type WorkflowValidationIssue,
@@ -60,7 +61,26 @@ import {
 import { PageHeader } from "@/components/page-header"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 
@@ -117,6 +137,8 @@ type WorkflowRepairStart = {
   ref: string
   status?: string
 }
+type WorkflowRunInputValues = Record<string, string>
+type WorkflowRunSecretValues = Record<string, string>
 
 export function WorkflowsPage() {
   const { t } = useTranslation()
@@ -136,7 +158,11 @@ export function WorkflowsPage() {
   const [selectedWorkflowRef, setSelectedWorkflowRef] = useState<string | null>(
     null,
   )
-  const [runInputsJSON, setRunInputsJSON] = useState("{}")
+  const [runInputValues, setRunInputValues] = useState<WorkflowRunInputValues>(
+    {},
+  )
+  const [runSecretValues, setRunSecretValues] =
+    useState<WorkflowRunSecretValues>({})
   const [runSecretsJSON, setRunSecretsJSON] = useState("{}")
   const [runSession, setRunSession] = useState("")
   const [runDeliveryJSON, setRunDeliveryJSON] = useState("{}")
@@ -394,6 +420,18 @@ export function WorkflowsPage() {
     lastDraftTest != null && lastDraftTest.draftKey !== currentDraftKey
   const draftTestRunning = lastDraftTest?.status === "running"
   const publishTestReady = isPublishTestReady(lastDraftTest, lastDraftTestStale)
+  const selectedWorkflow = useMemo(
+    () => workflows.find((workflow) => workflow.ref === selectedWorkflowRef),
+    [selectedWorkflowRef, workflows],
+  )
+  const selectedWorkflowContractSignature = useMemo(
+    () => workflowRunContractSignature(selectedWorkflow ?? null),
+    [selectedWorkflow],
+  )
+  useEffect(() => {
+    setRunInputValues(workflowRunInitialInputValues(selectedWorkflow ?? null))
+    setRunSecretValues(workflowRunInitialSecretValues(selectedWorkflow ?? null))
+  }, [selectedWorkflow, selectedWorkflowContractSignature])
   const testPayloadError = firstMessage([
     jsonObjectValidationMessage(testInputsJSON, "Inputs"),
     jsonStringObjectValidationMessage(testSecretsJSON, "Secrets"),
@@ -406,9 +444,18 @@ export function WorkflowsPage() {
     payloadError: testPayloadError,
     runningTest: draftTestRunning,
   })
+  const runSecretsJSONError = jsonStringObjectValidationMessage(
+    runSecretsJSON,
+    "Secrets",
+  )
   const runPayloadError = firstMessage([
-    jsonObjectValidationMessage(runInputsJSON, "Inputs"),
-    jsonStringObjectValidationMessage(runSecretsJSON, "Secrets"),
+    workflowRunInputValidationMessage(selectedWorkflow ?? null, runInputValues),
+    runSecretsJSONError,
+    workflowRunSecretValidationMessage(
+      selectedWorkflow ?? null,
+      runSecretValues,
+      runSecretsJSON,
+    ),
     jsonObjectValidationMessage(runDeliveryJSON, "Delivery"),
   ])
   const retryPayloadError = jsonStringObjectValidationMessage(
@@ -423,10 +470,6 @@ export function WorkflowsPage() {
     testResult: lastDraftTest,
     testStale: lastDraftTestStale,
   })
-  const selectedWorkflow = useMemo(
-    () => workflows.find((workflow) => workflow.ref === selectedWorkflowRef),
-    [selectedWorkflowRef, workflows],
-  )
   const selectedWorkflowStamp =
     selectedWorkflowRef == null
       ? undefined
@@ -761,8 +804,15 @@ export function WorkflowsPage() {
       }
       return runWorkflow({
         ref: selectedWorkflowRef,
-        inputs: parseJSONObject(runInputsJSON, "Inputs"),
-        secrets: parseStringJSONObject(runSecretsJSON, "Secrets"),
+        inputs: workflowRunInputsPayload(
+          selectedWorkflow ?? null,
+          runInputValues,
+        ),
+        secrets: workflowRunSecretsPayload(
+          selectedWorkflow ?? null,
+          runSecretValues,
+          runSecretsJSON,
+        ),
         session: optionalString(runSession),
         delivery: parseDeliveryJSONObject(runDeliveryJSON, "Delivery"),
         async: true,
@@ -1006,7 +1056,8 @@ export function WorkflowsPage() {
             compatibilityByRef={compatibilityByRef}
             compatibility={compatibility}
             selectedWorkflowRef={selectedWorkflowRef}
-            runInputsJSON={runInputsJSON}
+            runInputValues={runInputValues}
+            runSecretValues={runSecretValues}
             runSecretsJSON={runSecretsJSON}
             runSession={runSession}
             runDeliveryJSON={runDeliveryJSON}
@@ -1025,7 +1076,12 @@ export function WorkflowsPage() {
             loadingGraph={graphQuery.isLoading}
             onQueryChange={setQuery}
             onSelectWorkflow={setSelectedWorkflowRef}
-            onRunInputsJSONChange={setRunInputsJSON}
+            onRunInputChange={(name, value) =>
+              setRunInputValues((current) => ({ ...current, [name]: value }))
+            }
+            onRunSecretChange={(name, value) =>
+              setRunSecretValues((current) => ({ ...current, [name]: value }))
+            }
             onRunSecretsJSONChange={setRunSecretsJSON}
             onRunSessionChange={setRunSession}
             onRunDeliveryJSONChange={setRunDeliveryJSON}
@@ -1692,7 +1748,8 @@ function OperateSurface({
   compatibilityByRef,
   compatibility,
   selectedWorkflowRef,
-  runInputsJSON,
+  runInputValues,
+  runSecretValues,
   runSecretsJSON,
   runSession,
   runDeliveryJSON,
@@ -1709,7 +1766,8 @@ function OperateSurface({
   loadingGraph,
   onQueryChange,
   onSelectWorkflow,
-  onRunInputsJSONChange,
+  onRunInputChange,
+  onRunSecretChange,
   onRunSecretsJSONChange,
   onRunSessionChange,
   onRunDeliveryJSONChange,
@@ -1734,7 +1792,8 @@ function OperateSurface({
   compatibilityByRef: Map<string, WorkflowValidationStamp>
   compatibility?: WorkflowCompatibilitySummary
   selectedWorkflowRef: string | null
-  runInputsJSON: string
+  runInputValues: WorkflowRunInputValues
+  runSecretValues: WorkflowRunSecretValues
   runSecretsJSON: string
   runSession: string
   runDeliveryJSON: string
@@ -1751,7 +1810,8 @@ function OperateSurface({
   loadingGraph: boolean
   onQueryChange: (value: string) => void
   onSelectWorkflow: (ref: string) => void
-  onRunInputsJSONChange: (value: string) => void
+  onRunInputChange: (name: string, value: string) => void
+  onRunSecretChange: (name: string, value: string) => void
   onRunSecretsJSONChange: (value: string) => void
   onRunSessionChange: (value: string) => void
   onRunDeliveryJSONChange: (value: string) => void
@@ -1805,15 +1865,20 @@ function OperateSurface({
             selectedWorkflowRef={selectedWorkflowRef}
             onSelectWorkflow={onSelectWorkflow}
           />
-          <ManualRunPanel
+          <WorkflowRunPanel
+            workflows={workflows}
             workflow={selectedWorkflow}
             stamp={selectedStamp}
             compatibility={compatibility}
-            inputsJSON={runInputsJSON}
+            selectedWorkflowRef={selectedWorkflowRef}
+            inputValues={runInputValues}
+            secretValues={runSecretValues}
             secretsJSON={runSecretsJSON}
             session={runSession}
             deliveryJSON={runDeliveryJSON}
-            onInputsJSONChange={onRunInputsJSONChange}
+            onSelectWorkflow={onSelectWorkflow}
+            onInputChange={onRunInputChange}
+            onSecretChange={onRunSecretChange}
             onSecretsJSONChange={onRunSecretsJSONChange}
             onSessionChange={onRunSessionChange}
             onDeliveryJSONChange={onRunDeliveryJSONChange}
@@ -1924,15 +1989,20 @@ function DefinitionStrip({
   )
 }
 
-function ManualRunPanel({
+function WorkflowRunPanel({
+  workflows,
   workflow,
   stamp,
   compatibility,
-  inputsJSON,
+  selectedWorkflowRef,
+  inputValues,
+  secretValues,
   secretsJSON,
   session,
   deliveryJSON,
-  onInputsJSONChange,
+  onSelectWorkflow,
+  onInputChange,
+  onSecretChange,
   onSecretsJSONChange,
   onSessionChange,
   onDeliveryJSONChange,
@@ -1941,14 +2011,19 @@ function ManualRunPanel({
   canRun,
   payloadError,
 }: {
+  workflows: WorkflowDefinition[]
   workflow: WorkflowDefinition | null
   stamp?: WorkflowValidationStamp
   compatibility?: WorkflowCompatibilitySummary
-  inputsJSON: string
+  selectedWorkflowRef: string | null
+  inputValues: WorkflowRunInputValues
+  secretValues: WorkflowRunSecretValues
   secretsJSON: string
   session: string
   deliveryJSON: string
-  onInputsJSONChange: (value: string) => void
+  onSelectWorkflow: (ref: string) => void
+  onInputChange: (name: string, value: string) => void
+  onSecretChange: (name: string, value: string) => void
   onSecretsJSONChange: (value: string) => void
   onSessionChange: (value: string) => void
   onDeliveryJSONChange: (value: string) => void
@@ -1957,14 +2032,26 @@ function ManualRunPanel({
   canRun: boolean
   payloadError: string | null
 }) {
+  const [open, setOpen] = useState(false)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
   const status = workflowRunStatus(workflow, stamp, compatibility)
   const readinessMessage =
     payloadError ?? workflowRunReadinessMessage(workflow, stamp, compatibility)
+  const inputs = workflowRunInputEntries(workflow)
+  const secrets = workflowRunSecretEntries(workflow)
+  const runnable = canRun && !running
+  const runNow = () => {
+    if (!runnable) {
+      return
+    }
+    setOpen(false)
+    onRun()
+  }
   return (
     <div className="border-border border-b p-3">
-      <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+      <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="text-sm font-medium">Manual run</h3>
+          <h3 className="text-sm font-medium">Run workflow</h3>
           <div
             id="workflow-run-selected-ref"
             className="text-muted-foreground mt-0.5 truncate font-mono text-xs"
@@ -1972,66 +2059,249 @@ function ManualRunPanel({
             {workflow?.ref ?? "No workflow selected"}
           </div>
         </div>
-        <ValidationStatusBadge status={status} />
-      </div>
-      <div className="grid gap-2">
-        <Textarea
-          id="workflow-run-inputs"
-          aria-label="Manual run inputs JSON"
-          value={inputsJSON}
-          onChange={(event) => onInputsJSONChange(event.target.value)}
-          spellCheck={false}
-          placeholder="Inputs JSON"
-          className="min-h-16 resize-none font-mono text-xs"
-        />
-        <Textarea
-          id="workflow-run-secrets"
-          aria-label="Manual run secrets JSON"
-          value={secretsJSON}
-          onChange={(event) => onSecretsJSONChange(event.target.value)}
-          spellCheck={false}
-          placeholder="Secrets JSON"
-          className="min-h-16 resize-none font-mono text-xs"
-        />
-        <Input
-          id="workflow-run-session"
-          aria-label="Manual run session"
-          value={session}
-          onChange={(event) => onSessionChange(event.target.value)}
-          placeholder="Session"
-          className="font-mono text-xs"
-        />
-        <Textarea
-          id="workflow-run-delivery"
-          aria-label="Manual run delivery JSON"
-          value={deliveryJSON}
-          onChange={(event) => onDeliveryJSONChange(event.target.value)}
-          spellCheck={false}
-          placeholder="Delivery JSON"
-          className="min-h-16 resize-none font-mono text-xs"
-        />
-        {workflow?.error ? (
-          <div className="text-destructive text-xs">{workflow.error}</div>
-        ) : null}
-        <div
-          className={cn(
-            "text-xs",
-            canRun ? "text-muted-foreground" : "text-destructive",
-          )}
-        >
-          {readinessMessage}
+        <div className="flex shrink-0 items-center gap-2">
+          <ValidationStatusBadge status={status} />
+          <Popover open={open} onOpenChange={setOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                size="sm"
+                disabled={workflow == null}
+                title={workflow == null ? readinessMessage : "Run workflow"}
+              >
+                <IconPlayerPlay className="size-4" />
+                Run workflow
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent
+              align="end"
+              className="w-[min(420px,calc(100vw-2rem))] p-0"
+            >
+              <div className="border-border flex items-center justify-between gap-3 border-b px-3 py-2.5">
+                <div className="min-w-0">
+                  <h3 className="text-sm font-medium">Run workflow</h3>
+                  <div className="text-muted-foreground mt-0.5 truncate font-mono text-xs">
+                    {workflow?.ref ?? "No workflow selected"}
+                  </div>
+                </div>
+                <ValidationStatusBadge status={status} />
+              </div>
+              <div className="grid gap-3 p-3">
+                <div className="grid gap-1.5">
+                  <Label htmlFor="workflow-run-ref">Workflow</Label>
+                  <Select
+                    value={selectedWorkflowRef ?? ""}
+                    onValueChange={onSelectWorkflow}
+                    disabled={workflows.length === 0 || running}
+                  >
+                    <SelectTrigger
+                      id="workflow-run-ref"
+                      className="w-full font-mono text-xs"
+                    >
+                      <SelectValue placeholder="Select workflow" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {workflows.map((candidate) => (
+                        <SelectItem key={candidate.ref} value={candidate.ref}>
+                          {candidate.ref}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {inputs.length > 0 ? (
+                  <div className="grid gap-3">
+                    {inputs.map(({ name, input }) => (
+                      <WorkflowRunInputField
+                        key={name}
+                        name={name}
+                        input={input}
+                        value={inputValues[name] ?? ""}
+                        disabled={running}
+                        onChange={(value) => onInputChange(name, value)}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-muted-foreground rounded-md border border-dashed px-3 py-2 text-xs">
+                    No declared inputs
+                  </div>
+                )}
+                {secrets.length > 0 ? (
+                  <div className="grid gap-3">
+                    {secrets.map(({ name, secret }) => (
+                      <div key={name} className="grid gap-1.5">
+                        <div className="flex items-center gap-2">
+                          <Label
+                            htmlFor={`workflow-run-secret-${fieldIDPart(name)}`}
+                          >
+                            {name}
+                          </Label>
+                          {secret.required ? (
+                            <Badge variant="outline">Required</Badge>
+                          ) : null}
+                        </div>
+                        <Input
+                          id={`workflow-run-secret-${fieldIDPart(name)}`}
+                          type="password"
+                          value={secretValues[name] ?? ""}
+                          onChange={(event) =>
+                            onSecretChange(name, event.target.value)
+                          }
+                          disabled={running}
+                          className="font-mono text-xs"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                <Collapsible
+                  open={advancedOpen}
+                  onOpenChange={setAdvancedOpen}
+                  className="grid gap-2"
+                >
+                  <CollapsibleTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="justify-self-start px-2"
+                    >
+                      Advanced options
+                    </Button>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="grid gap-2">
+                    <Textarea
+                      id="workflow-run-secrets"
+                      aria-label="Additional secrets JSON"
+                      value={secretsJSON}
+                      onChange={(event) =>
+                        onSecretsJSONChange(event.target.value)
+                      }
+                      spellCheck={false}
+                      placeholder="Additional secrets JSON"
+                      className="min-h-16 resize-none font-mono text-xs"
+                    />
+                    <Input
+                      id="workflow-run-session"
+                      aria-label="Manual run session"
+                      value={session}
+                      onChange={(event) => onSessionChange(event.target.value)}
+                      placeholder="Session"
+                      className="font-mono text-xs"
+                    />
+                    <Textarea
+                      id="workflow-run-delivery"
+                      aria-label="Manual run delivery JSON"
+                      value={deliveryJSON}
+                      onChange={(event) =>
+                        onDeliveryJSONChange(event.target.value)
+                      }
+                      spellCheck={false}
+                      placeholder="Delivery JSON"
+                      className="min-h-16 resize-none font-mono text-xs"
+                    />
+                  </CollapsibleContent>
+                </Collapsible>
+                {workflow?.error ? (
+                  <div className="text-destructive text-xs">
+                    {workflow.error}
+                  </div>
+                ) : null}
+                <div
+                  className={cn(
+                    "text-xs",
+                    canRun ? "text-muted-foreground" : "text-destructive",
+                  )}
+                >
+                  {readinessMessage}
+                </div>
+                <Button
+                  size="sm"
+                  onClick={runNow}
+                  disabled={!runnable}
+                  className="justify-self-start"
+                  title={!runnable ? readinessMessage : undefined}
+                >
+                  <IconPlayerPlay className="size-4" />
+                  {running ? "Running" : "Run workflow"}
+                </Button>
+              </div>
+            </PopoverContent>
+          </Popover>
         </div>
-        <Button
-          size="sm"
-          onClick={onRun}
-          disabled={!canRun || running}
-          className="justify-self-start"
-          title={!canRun ? readinessMessage : undefined}
-        >
-          <IconPlayerPlay className="size-4" />
-          {running ? "Running" : "Run Workflow"}
-        </Button>
       </div>
+    </div>
+  )
+}
+
+function WorkflowRunInputField({
+  name,
+  input,
+  value,
+  disabled,
+  onChange,
+}: {
+  name: string
+  input: WorkflowInputDefinition
+  value: string
+  disabled: boolean
+  onChange: (value: string) => void
+}) {
+  const id = `workflow-run-input-${fieldIDPart(name)}`
+  const type = workflowInputType(input)
+  const required = input.required === true
+  if (type === "boolean") {
+    return (
+      <div className="flex min-h-9 items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <Label htmlFor={id} className="min-w-0 truncate">
+            {name}
+          </Label>
+          {required ? <Badge variant="outline">Required</Badge> : null}
+        </div>
+        <Switch
+          id={id}
+          checked={value === "true"}
+          onCheckedChange={(checked) => onChange(checked ? "true" : "false")}
+          disabled={disabled}
+        />
+      </div>
+    )
+  }
+  if (type === "object" || type === "array") {
+    return (
+      <div className="grid gap-1.5">
+        <div className="flex items-center gap-2">
+          <Label htmlFor={id}>{name}</Label>
+          {required ? <Badge variant="outline">Required</Badge> : null}
+          <Badge variant="secondary">{type}</Badge>
+        </div>
+        <Textarea
+          id={id}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          disabled={disabled}
+          spellCheck={false}
+          className="min-h-20 resize-none font-mono text-xs"
+        />
+      </div>
+    )
+  }
+  return (
+    <div className="grid gap-1.5">
+      <div className="flex items-center gap-2">
+        <Label htmlFor={id}>{name}</Label>
+        {required ? <Badge variant="outline">Required</Badge> : null}
+        {type === "number" ? <Badge variant="secondary">number</Badge> : null}
+      </div>
+      <Input
+        id={id}
+        type={type === "number" ? "number" : "text"}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        disabled={disabled}
+        className={cn(type === "number" && "font-mono text-xs")}
+      />
     </div>
   )
 }
@@ -3187,6 +3457,180 @@ function formatIssueSummary(issue: WorkflowValidationIssue) {
 
 function firstMessage(messages: Array<string | null>) {
   return messages.find((message) => message != null) ?? null
+}
+
+function workflowRunInputEntries(workflow: WorkflowDefinition | null) {
+  return Object.entries(workflow?.workflow_call?.inputs ?? {})
+    .map(([name, input]) => ({ name, input }))
+    .sort((left, right) => left.name.localeCompare(right.name))
+}
+
+function workflowRunSecretEntries(workflow: WorkflowDefinition | null) {
+  return Object.entries(workflow?.workflow_call?.secrets ?? {})
+    .map(([name, secret]) => ({ name, secret }))
+    .sort((left, right) => left.name.localeCompare(right.name))
+}
+
+function workflowRunContractSignature(workflow: WorkflowDefinition | null) {
+  return JSON.stringify({
+    inputs: workflowRunInputEntries(workflow),
+    secrets: workflowRunSecretEntries(workflow),
+  })
+}
+
+function workflowRunInitialInputValues(workflow: WorkflowDefinition | null) {
+  const values: WorkflowRunInputValues = {}
+  for (const { name, input } of workflowRunInputEntries(workflow)) {
+    values[name] = workflowInputInitialValue(input)
+  }
+  return values
+}
+
+function workflowRunInitialSecretValues(workflow: WorkflowDefinition | null) {
+  const values: WorkflowRunSecretValues = {}
+  for (const { name } of workflowRunSecretEntries(workflow)) {
+    values[name] = ""
+  }
+  return values
+}
+
+function workflowInputInitialValue(input: WorkflowInputDefinition) {
+  const type = workflowInputType(input)
+  const defaultValue = input.default
+  if (defaultValue == null) {
+    return type === "boolean" && input.required ? "false" : ""
+  }
+  if (type === "object" || type === "array") {
+    return JSON.stringify(defaultValue, null, 2)
+  }
+  return String(defaultValue)
+}
+
+function workflowInputType(input: WorkflowInputDefinition) {
+  const type = input.type?.trim().toLowerCase()
+  switch (type) {
+    case "number":
+    case "boolean":
+    case "object":
+    case "array":
+      return type
+    default:
+      return "string"
+  }
+}
+
+function workflowRunInputValidationMessage(
+  workflow: WorkflowDefinition | null,
+  values: WorkflowRunInputValues,
+) {
+  for (const { name, input } of workflowRunInputEntries(workflow)) {
+    const type = workflowInputType(input)
+    const value = values[name] ?? ""
+    const trimmed = value.trim()
+    if (input.required && trimmed === "" && type !== "boolean") {
+      return `Input "${name}" is required.`
+    }
+    if (trimmed === "" && !input.required) {
+      continue
+    }
+    if (type === "number" && Number.isNaN(Number(trimmed))) {
+      return `Input "${name}" must be a number.`
+    }
+    if (type === "object" || type === "array") {
+      try {
+        const parsed = JSON.parse(trimmed) as unknown
+        if (type === "array" && !Array.isArray(parsed)) {
+          return `Input "${name}" must be a JSON array.`
+        }
+        if (
+          type === "object" &&
+          (parsed == null ||
+            Array.isArray(parsed) ||
+            typeof parsed !== "object")
+        ) {
+          return `Input "${name}" must be a JSON object.`
+        }
+      } catch (err) {
+        return `Input "${name}" JSON is invalid: ${jsonSyntaxMessage(err)}`
+      }
+    }
+  }
+  return null
+}
+
+function workflowRunSecretValidationMessage(
+  workflow: WorkflowDefinition | null,
+  values: WorkflowRunSecretValues,
+  secretsJSON: string,
+) {
+  const advancedSecrets = tryParseStringJSONObject(secretsJSON) ?? {}
+  for (const { name, secret } of workflowRunSecretEntries(workflow)) {
+    if (!secret.required) {
+      continue
+    }
+    const value = values[name] ?? advancedSecrets[name] ?? ""
+    if (value.trim() === "") {
+      return `Secret "${name}" is required.`
+    }
+  }
+  return null
+}
+
+function workflowRunInputsPayload(
+  workflow: WorkflowDefinition | null,
+  values: WorkflowRunInputValues,
+) {
+  const payload: Record<string, unknown> = {}
+  for (const { name, input } of workflowRunInputEntries(workflow)) {
+    const type = workflowInputType(input)
+    const value = values[name] ?? ""
+    const trimmed = value.trim()
+    if (trimmed === "" && !input.required) {
+      continue
+    }
+    payload[name] = workflowInputPayloadValue(type, value)
+  }
+  return payload
+}
+
+function workflowInputPayloadValue(type: string, value: string) {
+  if (type === "boolean") {
+    return value === "true"
+  }
+  if (type === "number") {
+    return Number(value.trim())
+  }
+  if (type === "object" || type === "array") {
+    return JSON.parse(value.trim()) as unknown
+  }
+  return value
+}
+
+function workflowRunSecretsPayload(
+  workflow: WorkflowDefinition | null,
+  values: WorkflowRunSecretValues,
+  secretsJSON: string,
+) {
+  const payload = parseStringJSONObject(secretsJSON, "Secrets") ?? {}
+  for (const { name } of workflowRunSecretEntries(workflow)) {
+    const value = values[name]
+    if (value != null && value.trim() !== "") {
+      payload[name] = value
+    }
+  }
+  return payload
+}
+
+function tryParseStringJSONObject(value: string) {
+  try {
+    return parseStringJSONObject(value, "Secrets")
+  } catch {
+    return {}
+  }
+}
+
+function fieldIDPart(value: string) {
+  return value.replace(/[^A-Za-z0-9_-]+/g, "-")
 }
 
 function jsonObjectValidationMessage(value: string, label: string) {
