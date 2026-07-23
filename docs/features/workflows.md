@@ -66,6 +66,7 @@ need helper scripts for durable planning and reporting.
 | `FR-WORKFLOW-019` | MUST | HTTP-triggered workflow runs and draft test runs execute `agent/*`, `tool/*`, and `mcp/*` steps through the configured PicoClaw agent/tool runtime and persist step outputs in normal run records. Tool and MCP step results that return a JSON object or array expose the parsed value as `outputs.json`; object results also promote non-conflicting top-level fields for downstream expressions. | AI-authored workflows must be testable from the dashboard before publish, and later workflow steps need structured tool data without parsing prose. |
 | `FR-WORKFLOW-020` | MUST | Native workflow functions expose workflow-scoped durable state, workflow run artifacts, and git commit inventory through `function/workflow.state`, `function/workflow.artifact`, and `function/git.inventory`. | AI-authored workflows need common state, artifact, and repository-inspection primitives without opaque helper scripts or domain-specific helpers in core. |
 | `FR-WORKFLOW-021` | MUST | Agent workflow steps integrate with the dedicated [Managed Agent Execution](managed-agent-execution.md) contract: `with.output` declares structured JSON output, `with.managed` enables generic hidden scope/task/hybrid splitting, and the visible workflow step persists the combined structured result plus managed diagnostics. | AI-driven workflow development needs generic, inspectable agent adaptation that preserves output quality while reducing token and model spend. |
+| `FR-WORKFLOW-022` | MUST | PicoClaw can install a local `workflows/code-review.yml` template that acquires a git workspace, inventories selected file content, releases the workspace before model review, and runs an agent step with structured JSON review output; workflow tool steps expose JSON object results as addressable step outputs for downstream workflow expressions. | Code review automation needs a local hosted workflow that composes the git workspace feature with deterministic inventory and inspectable review output. |
 
 ## Data And State Model
 
@@ -103,9 +104,9 @@ stores the memory key used by agent steps.
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | File | `workspace/workflows/*.yml`, `workspace/workflows/*.yaml` | GitHub-style workflow definitions with `on`, `jobs`, `needs`, `uses`, `with`, `if`, `outputs`, `schedule`, `runtime_event`, and `workflow_call`. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016` |
-| Go API | `pkg/workflows.Parse`, `Resolver.ResolveLocal`, `Validate`, `Executor.Run`, `Executor.Retry`, `FileRunStore`, `MatchChannelMessage`, `MatchCommandMessage`, `MatchRuntimeEvent`, `BuildRunGraph`, `ReloadLocal` | Parse GitHub-shaped YAML, normalize local reusable refs, reject unsafe refs, validate static workflow contracts, match triggers, run/retry/cancel workflows, build run graphs, reload definitions, and persist run state. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016` |
+| Go API | `pkg/workflows.Parse`, `Resolver.ResolveLocal`, `Validate`, `Executor.Run`, `Executor.Retry`, `FileRunStore`, `MatchChannelMessage`, `MatchCommandMessage`, `MatchRuntimeEvent`, `BuildRunGraph`, `ReloadLocal`, `InstallWorkflowTemplate` | Parse GitHub-shaped YAML, normalize local reusable refs, reject unsafe refs, validate static workflow contracts, install local workflow templates, match triggers, run/retry/cancel workflows, build run graphs, reload definitions, and persist run state. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016`, `FR-WORKFLOW-022` |
 | Config | `workflows.*`, `tools.workflow` | Global enablement, workflow tool enablement, max call depth, definitions directory, concurrency, timeout, and retention defaults. | `FR-WORKFLOW-009`, `FR-WORKFLOW-013` |
-| CLI | `picoclaw workflow list/compatibility/revalidate/validate/reload/run/cancel/retry/status/events/graph` | Manage definitions, compatibility stamps, and runs through the same workflow runtime and file run store used by agent tools. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-018` |
+| CLI | `picoclaw workflow install/list/compatibility/revalidate/validate/reload/run/cancel/retry/status/events/graph` | Install local workflow templates, manage definitions, compatibility stamps, and runs through the same workflow runtime and file run store used by agent tools. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-018`, `FR-WORKFLOW-022` |
 | HTTP | `/api/workflows*`, `/api/workflows/runs*`, `/api/workflows/development*`, `/api/workflows/compatibility`, `/api/workflows/revalidate` | List, validate, reload, run, cancel, retry, inspect, stream workflow events, read run graph data, manage the singleton development session, run configured-agent YAML revisions, test active drafts inline or asynchronously after a run record is persisted, reject draft-changing development mutations while the current draft test is still running, execute configured agent/tool/MCP workflow steps synchronously or asynchronously, publish drafts, and revalidate release compatibility. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-017`, `FR-WORKFLOW-018`, `FR-WORKFLOW-019` |
 | UI | `/agent/workflows` | Two-mode workflow console: Develop shows singleton start readiness, starts new briefs with AI by default, resumes the singleton AI brief/YAML development cycle, marks the one active draft, sends active drafts to the configured agent for YAML revision, offers deterministic scaffold fallback, validates and test-runs drafts asynchronously with inline JSON validation for inputs/secrets/session/delivery context through configured workflow runtime steps, preserves structured validation feedback from failed draft tests, can ask AI to repair the current draft with the latest failed draft-test status, run ID, compact run/job/step state, recent event payloads, and error context, restores the latest draft-test result when resuming the active session, treats a running draft test as the active development operation, gates publish on a current successful draft test, shows publish readiness with the next blocking reason, shows the active development operation while mutations run, opens the repair/review queue with compatibility issue summaries, can start AI review or AI repair directly from blocked compatibility entries, and after publish switches Operate to the published workflow; Operate shows definitions, compatibility status, a GitHub-style manual run popover generated from declared `workflow_call` inputs and secrets with advanced session/delivery/raw secret JSON controls, compatibility-gated asynchronous launch, inline payload validation, the selected workflow run-readiness reason, runs, selected run detail, persisted delivery and trigger event context, job and step outputs, live streamed event payloads with polling fallback, graph, cancel, compatibility-gated retry with retry-secret JSON validation, reload, and refresh. | `FR-WORKFLOW-015`, `FR-WORKFLOW-017`, `FR-WORKFLOW-018`, `FR-WORKFLOW-019` |
 | Managed agent step | `uses: agent/*` with `with.output`, `with.managed`, and optional `with.scope` | Workflow-owned output schemas are injected into the agent prompt, parsed from the response, repaired once by default, validated locally, and exposed as `structured`. Managed options choose split strategy, fixed or token-adaptive chunk sizes, calibration sample/match/cache policy, parallel child limit, model candidates with price metadata, and effort optimization. Child runs are hidden from chat history by default and publish one combined structured result plus `managed` diagnostics. | `FR-WORKFLOW-007`, `FR-WORKFLOW-009`, `FR-WORKFLOW-019`, `FR-WORKFLOW-021` |
@@ -131,7 +132,9 @@ stores the memory key used by agent steps.
 6. Execute jobs in dependency order; job-level reusable calls create child runs
    and expose child outputs through `needs.<job>.outputs`.
 7. Execute step-level tools, agents, MCP tools, and Go functions with existing
-   PicoClaw policies, hooks, redaction, and channel delivery.
+   PicoClaw policies, hooks, redaction, and channel delivery. Tool step results
+   that contain JSON objects are exposed both under `json` and as non-conflicting
+   top-level step outputs for later expressions.
 8. For managed agent steps, build child plans from declared scope items and
    textual agent `Tasks:`, calibrate grouped-vs-split output equivalence with
    a split-exercising sample, exact/similar trust cache, provisional borrowed
@@ -160,6 +163,10 @@ stores the memory key used by agent steps.
     workflow hash with `workflow_validations/manifest.json`, classify stale
     workflows as pending, run deterministic validation on demand, and block
     stale or invalid workflow execution.
+14. For local templates, install validated YAML into the configured workflow
+    definitions directory, leave existing files unchanged unless overwrite is
+    requested, and revalidate compatibility through the same catalog path used
+    by ordinary workflow definitions.
 
 ## Cross-Feature Behavior
 
@@ -169,6 +176,9 @@ conversations provide the agent step execution path and provider prompt cache
 keys. Tool execution, MCP, skills, hooks, and security policies govern side
 effects exactly as they do in normal agent turns. Runtime events expose
 workflow trigger, run, job, and step lifecycle state.
+The code-review workflow template composes the git workspace tool, native git
+inventory function, and agent structured-output path; checkout allocation,
+locking, preservation, and retention remain owned by the git workspaces feature.
 
 ## Failure And Edge Cases
 
@@ -256,6 +266,8 @@ workflow trigger, run, job, and step lifecycle state.
   API-priced model for estimates.
 - Workflows without a current compatible validation stamp do not run from the
   dashboard, CLI, workflow tool, retries, or automatic triggers.
+- Installing the code-review workflow is idempotent when the target file already
+  exists; overwrite requires an explicit force request.
 
 ## Acceptance Evidence
 
@@ -270,6 +282,7 @@ workflow trigger, run, job, and step lifecycle state.
 | `FR-WORKFLOW-017`, `FR-WORKFLOW-018`, `FR-WORKFLOW-019` | [pkg/workflows/development.go](../../pkg/workflows/development.go), [pkg/workflows/compatibility.go](../../pkg/workflows/compatibility.go), [web/backend/api/workflows.go](../../web/backend/api/workflows.go), [web/backend/api/workflow_ai.go](../../web/backend/api/workflow_ai.go), [web/backend/api/workflow_runtime.go](../../web/backend/api/workflow_runtime.go), [web/backend/api/workflow_ai_test.go](../../web/backend/api/workflow_ai_test.go), [web/frontend/src/api/workflows.ts](../../web/frontend/src/api/workflows.ts), [web/frontend/src/components/workflows/workflows-page.tsx](../../web/frontend/src/components/workflows/workflows-page.tsx), [pkg/tools/workflow.go](../../pkg/tools/workflow.go), [pkg/tools/workflow_test.go](../../pkg/tools/workflow_test.go), [pkg/agent/workflow_triggers.go](../../pkg/agent/workflow_triggers.go) |
 | `FR-WORKFLOW-020` | [pkg/workflows/native_functions.go](../../pkg/workflows/native_functions.go), [pkg/workflows/native_functions_test.go](../../pkg/workflows/native_functions_test.go), [pkg/workflows/executor.go](../../pkg/workflows/executor.go), [web/backend/api/workflow_ai.go](../../web/backend/api/workflow_ai.go) |
 | `FR-WORKFLOW-021` | [docs/features/managed-agent-execution.md](managed-agent-execution.md), [pkg/workflows/agent_output.go](../../pkg/workflows/agent_output.go), [pkg/workflows/agent_output_test.go](../../pkg/workflows/agent_output_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [web/frontend/src/components/workflows/workflows-page.tsx](../../web/frontend/src/components/workflows/workflows-page.tsx) |
+| `FR-WORKFLOW-022` | [pkg/workflows/templates_test.go](../../pkg/workflows/templates_test.go), [pkg/workflows/templates.go](../../pkg/workflows/templates.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [cmd/picoclaw/internal/workflow/command_test.go](../../cmd/picoclaw/internal/workflow/command_test.go) |
 
 ## Implementation Anchors
 
@@ -285,6 +298,7 @@ workflow trigger, run, job, and step lifecycle state.
 - [pkg/workflows/runtime_trigger.go](../../pkg/workflows/runtime_trigger.go)
 - [pkg/workflows/graph.go](../../pkg/workflows/graph.go)
 - [pkg/workflows/reload.go](../../pkg/workflows/reload.go)
+- [pkg/workflows/templates.go](../../pkg/workflows/templates.go)
 - [pkg/tools/workflow.go](../../pkg/tools/workflow.go)
 - [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go)
 - [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go)

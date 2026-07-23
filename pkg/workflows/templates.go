@@ -1,0 +1,305 @@
+package workflows
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const (
+	CodeReviewWorkflowName = "code-review"
+	CodeReviewWorkflowRef  = "workflows/code-review.yml"
+)
+
+const CodeReviewWorkflowYAML = `name: Code Review
+on:
+  manual: {}
+  workflow_call:
+    inputs:
+      action:
+        type: string
+        default: plan
+      repository:
+        type: string
+        required: true
+      ref:
+        type: string
+        default: ""
+      base_ref:
+        type: string
+        default: ""
+      target:
+        type: string
+        default: code
+      review_focus:
+        type: string
+        default: "Review correctness, security, test coverage, and maintainability."
+      max_content_bytes:
+        type: number
+        default: 65536
+    outputs:
+      inventory:
+        value: ${{ jobs.code_review.outputs.inventory }}
+      inventoryJson:
+        value: ${{ jobs.code_review.outputs.inventoryJson }}
+      reviewJson:
+        value: ${{ jobs.code_review.outputs.reviewJson }}
+      managed:
+        value: ${{ jobs.code_review.outputs.managed }}
+      reviewNeeded:
+        value: ${{ jobs.code_review.outputs.reviewNeeded }}
+      summary:
+        value: ${{ jobs.code_review.outputs.summary }}
+      workspacePath:
+        value: ${{ jobs.code_review.outputs.workspacePath }}
+      inventoryHash:
+        value: ${{ jobs.code_review.outputs.inventoryHash }}
+jobs:
+  code_review:
+    name: Inventory and optional review
+    runs-on: picoclaw
+    outputs:
+      inventory: ${{ steps.inventory.outputs }}
+      inventoryJson: ${{ steps.store_inventory.outputs.relativePath }}
+      reviewJson: ${{ steps.store_review.outputs.relativePath }}
+      managed: ${{ steps.review.outputs.managed }}
+      reviewNeeded: ${{ inputs.action == 'review' }}
+      summary: ${{ steps.review.outputs.structured.summary }}
+      workspacePath: ${{ steps.checkout.outputs.workspace.path }}
+      inventoryHash: ${{ steps.inventory.outputs.inventoryHash }}
+    steps:
+      - id: checkout
+        name: Acquire git workspace
+        uses: tool/git_workspace
+        with:
+          action: acquire
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+      - id: inventory
+        name: Build git inventory
+        uses: function/git.inventory
+        with:
+          working_directory: ${{ steps.checkout.outputs.workspace.path }}
+          target: ${{ inputs.target }}
+      - id: save_inventory_state
+        name: Save latest inventory state
+        uses: function/workflow.state
+        with:
+          action: set
+          key: code_review:last_inventory
+          value: ${{ steps.inventory.outputs }}
+      - id: store_inventory
+        name: Store inventory artifact
+        uses: function/workflow.artifact
+        with:
+          action: write
+          format: json
+          name: code-review/inventories/${{ steps.inventory.outputs.inventoryHash }}.json
+          value: ${{ steps.inventory.outputs }}
+      - id: review_inventory
+        name: Build review content inventory
+        if: ${{ inputs.action == 'review' }}
+        uses: function/git.inventory
+        with:
+          working_directory: ${{ steps.checkout.outputs.workspace.path }}
+          target: ${{ inputs.target }}
+          include_content: true
+          max_content_bytes: ${{ inputs.max_content_bytes }}
+      - id: release
+        name: Release git workspace
+        uses: tool/git_workspace
+        with:
+          action: release
+      - id: review
+        name: Review selected files
+        if: ${{ inputs.action == 'review' }}
+        uses: agent/main
+        with:
+          managed:
+            mode: auto
+            strategy: auto
+            max_items_per_chunk: 2
+            max_parallel_children: 2
+            estimated_output_tokens: 1200
+            calibration:
+              enabled: false
+              sample_size: 3
+              required_matches: 1
+              max_trials: 1
+            optimization:
+              model:
+                enabled: false
+              effort:
+                enabled: true
+          session: key:workflow-code-review
+          history: none
+          cache: session
+          prompt: |
+            You are executing a Codex-style code review workflow.
+
+            Review contract:
+            - Review only files from the assigned scope.
+            - Inspect the content field embedded in each assigned scope item.
+            - If contentTruncated is true, mention truncation as residual risk for that file.
+            - Use tools only for read-only inspection and validation.
+            - Do not edit files and do not write review comments into source files.
+            - Prioritize actionable bugs, security issues, reliability risks, data loss, concurrency problems, behavioral regressions, and missing tests.
+            - Ignore pure style preferences and broad refactors unless they hide a concrete bug.
+            - Findings must be concrete, reproducible, and tied to exact file paths and line numbers when possible.
+            - Return findings first in priority order by severity.
+            - If there are no actionable findings, return "findings": [] and explain residual risk in "residualRisks".
+
+            PicoClaw acquired the repository with the git_workspace tool and released the workspace before this model step.
+            Repository: ${{ inputs.repository }}
+            Requested ref: ${{ inputs.ref }}
+            Base ref: ${{ inputs.base_ref }}
+            Review focus: ${{ inputs.review_focus }}
+          context: |
+            Workspace path: ${{ steps.checkout.outputs.workspace.path }}
+            Commit: ${{ steps.inventory.outputs.commit }}
+            Target: ${{ steps.inventory.outputs.target }}
+            Inventory hash: ${{ steps.inventory.outputs.inventoryHash }}
+            Selected files: ${{ steps.review_inventory.outputs.counts.totalSelectedFiles }}
+          scope: ${{ steps.review_inventory.outputs.selectedFiles }}
+          output:
+            format: json
+            repair_attempts: 1
+            schema:
+              type: object
+              required: [summary, findings, tests, residualRisks]
+              properties:
+                summary:
+                  type: string
+                findings:
+                  type: array
+                  items:
+                    type: object
+                    required: [severity, title, file, evidence, impact, recommendation]
+                    properties:
+                      severity:
+                        type: string
+                        enum: [critical, high, medium, low]
+                      title:
+                        type: string
+                      file:
+                        type: string
+                      line:
+                        type: integer
+                      evidence:
+                        type: string
+                      impact:
+                        type: string
+                      message:
+                        type: string
+                      recommendation:
+                        type: string
+                      validation:
+                        type: string
+                tests:
+                  type: array
+                  items:
+                    type: string
+                residualRisks:
+                  type: array
+                  items:
+                    type: string
+      - id: store_review
+        name: Store structured review artifact
+        if: ${{ inputs.action == 'review' }}
+        uses: function/workflow.artifact
+        with:
+          action: write
+          format: json
+          name: code-review/reviews/${{ steps.inventory.outputs.inventoryHash }}.json
+          value: ${{ steps.review.outputs.structured }}
+      - id: save_review_state
+        name: Save latest review state
+        if: ${{ inputs.action == 'review' }}
+        uses: function/workflow.state
+        with:
+          action: set
+          key: code_review:last_review
+          value:
+            inventory: ${{ steps.inventory.outputs }}
+            reviewJson: ${{ steps.store_review.outputs.relativePath }}
+            structuredReview: ${{ steps.review.outputs.structured }}
+            managed: ${{ steps.review.outputs.managed }}
+            rawReview: ${{ steps.review.outputs.text }}
+`
+
+type InstalledWorkflowTemplate struct {
+	Name        string `json:"name"`
+	Ref         string `json:"ref"`
+	Path        string `json:"path"`
+	Installed   bool   `json:"installed"`
+	Overwritten bool   `json:"overwritten,omitempty"`
+}
+
+func InstallCodeReviewWorkflow(
+	ctx context.Context,
+	workspace string,
+	overwrite bool,
+	opts ...LocalOption,
+) (*InstalledWorkflowTemplate, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateWorkflowTemplate(CodeReviewWorkflowYAML); err != nil {
+		return nil, err
+	}
+	local := collectLocalOptions(opts...)
+	resolved, err := local.resolver(workspace).ResolveLocal(CodeReviewWorkflowRef)
+	if err != nil {
+		return nil, err
+	}
+	result := &InstalledWorkflowTemplate{
+		Name: CodeReviewWorkflowName,
+		Ref:  resolved.Canonical,
+		Path: resolved.Path,
+	}
+	if _, statErr := os.Stat(resolved.Path); statErr == nil && !overwrite {
+		return result, nil
+	} else if statErr != nil && !os.IsNotExist(statErr) {
+		return nil, statErr
+	} else if statErr == nil {
+		result.Overwritten = true
+	}
+	if err := os.MkdirAll(filepath.Dir(resolved.Path), 0o755); err != nil {
+		return nil, err
+	}
+	tmp := resolved.Path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(CodeReviewWorkflowYAML), 0o644); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(tmp, resolved.Path); err != nil {
+		_ = os.Remove(tmp)
+		return nil, err
+	}
+	result.Installed = true
+	return result, nil
+}
+
+func InstallWorkflowTemplate(
+	ctx context.Context,
+	workspace string,
+	name string,
+	overwrite bool,
+	opts ...LocalOption,
+) (*InstalledWorkflowTemplate, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", CodeReviewWorkflowName:
+		return InstallCodeReviewWorkflow(ctx, workspace, overwrite, opts...)
+	default:
+		return nil, fmt.Errorf("unknown workflow template %q", name)
+	}
+}
+
+func validateWorkflowTemplate(raw string) error {
+	workflow, err := Parse([]byte(raw))
+	if err != nil {
+		return err
+	}
+	return Validate(workflow)
+}
