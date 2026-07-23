@@ -133,7 +133,7 @@ describe("GitWorkspacesPage", () => {
     expect(
       screen.queryByText("/tmp/git-workspaces/checkouts/repo-gw-workspace"),
     ).not.toBeInTheDocument()
-    expect(screen.getByText("/tmp/git-workspaces")).toBeInTheDocument()
+    expect(screen.queryByText("/tmp/git-workspaces")).not.toBeInTheDocument()
     expect(screen.getByText("allocated")).toBeInTheDocument()
     expect(
       screen.getByRole("button", { name: /maintain/i }),

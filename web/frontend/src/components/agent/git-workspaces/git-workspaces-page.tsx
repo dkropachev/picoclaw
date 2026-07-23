@@ -170,7 +170,6 @@ export function GitWorkspacesPage() {
               <Metric
                 label={t("pages.agent.git_workspaces.repos", "Repos")}
                 value={String(stats.repository_count)}
-                detail={stats.root_dir}
               />
               <Metric
                 label={t("pages.agent.git_workspaces.locked", "Locked")}
@@ -322,7 +321,7 @@ function Metric({
 }: {
   label: string
   value: string
-  detail: string
+  detail?: string
 }) {
   return (
     <div className="min-w-0">
@@ -330,9 +329,11 @@ function Metric({
       <div className="text-foreground mt-1 truncate text-xl font-semibold">
         {value}
       </div>
-      <div className="text-muted-foreground mt-1 truncate text-xs">
-        {detail}
-      </div>
+      {detail ? (
+        <div className="text-muted-foreground mt-1 truncate text-xs">
+          {detail}
+        </div>
+      ) : null}
     </div>
   )
 }
