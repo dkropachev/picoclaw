@@ -117,6 +117,9 @@ message persistence. Managed workflow agent steps can additionally run hidden
 no-history child turns with scoped prompts, per-child model and reasoning-effort
 overrides, and tool disabling while preserving the same provider resolution and
 turn-finalization path.
+Git workspaces are allocated through the registered tool during a turn and are
+released or reconciled by the shared turn-finalization path, while checkout
+inventory and retention behavior are owned by the git workspaces feature.
 
 ## Failure And Edge Cases
 

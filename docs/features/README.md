@@ -33,6 +33,7 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 | Runtime events and observability | [runtime-events.md](runtime-events.md) |
 | Portability, updates, and packaging | [portability-updates.md](portability-updates.md) |
 | Workflows and reusable automation | [workflows.md](workflows.md) |
+| Git workspaces and checkout retention | [git-workspaces.md](git-workspaces.md) |
 | Managed agent execution | [managed-agent-execution.md](managed-agent-execution.md) |
 
 ## Workflow

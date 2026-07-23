@@ -124,9 +124,15 @@ dashboard behavior.
 | Requirement IDs | Evidence |
 | --- | --- |
 | `FR-GITWS-001` | [pkg/config/config_test.go](../../pkg/config/config_test.go) |
-| `FR-GITWS-002` through `FR-GITWS-008` | [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
+| `FR-GITWS-002` | [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
+| `FR-GITWS-003` | [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
+| `FR-GITWS-004` | [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
+| `FR-GITWS-005` | [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go), [web/backend/api/git_workspaces_test.go](../../web/backend/api/git_workspaces_test.go) |
+| `FR-GITWS-006` | [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go), [web/backend/api/git_workspaces_test.go](../../web/backend/api/git_workspaces_test.go) |
+| `FR-GITWS-007` | [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go), [web/backend/api/git_workspaces_test.go](../../web/backend/api/git_workspaces_test.go) |
+| `FR-GITWS-008` | [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
 | `FR-GITWS-009` | [pkg/tools/integration/git_workspace_test.go](../../pkg/tools/integration/git_workspace_test.go) |
-| `FR-GITWS-005` through `FR-GITWS-010` | [web/backend/api/git_workspaces_test.go](../../web/backend/api/git_workspaces_test.go), [web/frontend/src/api/git-workspaces.test.ts](../../web/frontend/src/api/git-workspaces.test.ts), [web/frontend/src/components/agent/git-workspaces/git-workspaces-page.test.tsx](../../web/frontend/src/components/agent/git-workspaces/git-workspaces-page.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
+| `FR-GITWS-010` | [web/backend/api/git_workspaces_test.go](../../web/backend/api/git_workspaces_test.go), [web/frontend/src/api/git-workspaces.test.ts](../../web/frontend/src/api/git-workspaces.test.ts), [web/frontend/src/components/agent/git-workspaces/git-workspaces-page.test.tsx](../../web/frontend/src/components/agent/git-workspaces/git-workspaces-page.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 
 ## Implementation Anchors
 
