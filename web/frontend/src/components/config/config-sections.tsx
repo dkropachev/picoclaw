@@ -368,6 +368,65 @@ export function AgentDefaultsSection({
   )
 }
 
+export function GitWorkspacesSection({
+  form,
+  onFieldChange,
+}: {
+  form: CoreConfigForm
+  onFieldChange: UpdateCoreField
+}) {
+  const { t } = useTranslation()
+  return (
+    <ConfigSectionCard
+      title={t("pages.config.sections.git_workspaces")}
+      description={t("pages.config.git_workspaces_section_hint")}
+    >
+      <Field
+        label={t("pages.config.git_workspaces_max_total_size")}
+        hint={t("pages.config.git_workspaces_max_total_size_hint")}
+        layout="setting-row"
+      >
+        <Input
+          type="number"
+          min={1}
+          value={form.gitWorkspaceMaxTotalSizeGB}
+          onChange={(e) =>
+            onFieldChange("gitWorkspaceMaxTotalSizeGB", e.target.value)
+          }
+        />
+      </Field>
+      <Field
+        label={t("pages.config.git_workspaces_ignored_cleanup_delay")}
+        hint={t("pages.config.git_workspaces_ignored_cleanup_delay_hint")}
+        layout="setting-row"
+      >
+        <Input
+          type="number"
+          min={1}
+          value={form.gitWorkspaceIgnoredCleanupHours}
+          onChange={(e) =>
+            onFieldChange("gitWorkspaceIgnoredCleanupHours", e.target.value)
+          }
+        />
+      </Field>
+      <Field
+        label={t("pages.config.git_workspaces_drop_delay")}
+        hint={t("pages.config.git_workspaces_drop_delay_hint")}
+        layout="setting-row"
+      >
+        <Input
+          type="number"
+          min={1}
+          value={form.gitWorkspaceDropDays}
+          onChange={(e) =>
+            onFieldChange("gitWorkspaceDropDays", e.target.value)
+          }
+        />
+      </Field>
+    </ConfigSectionCard>
+  )
+}
+
 interface ExecSectionProps {
   form: CoreConfigForm
   onFieldChange: UpdateCoreField

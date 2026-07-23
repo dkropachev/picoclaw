@@ -36,6 +36,8 @@ type (
 	WebSearchTool            = integrationtools.WebSearchTool
 	WebSearchToolOptions     = integrationtools.WebSearchToolOptions
 	WebFetchTool             = integrationtools.WebFetchTool
+	GitWorkspaceManager      = integrationtools.GitWorkspaceManager
+	GitWorkspaceTool         = integrationtools.GitWorkspaceTool
 )
 
 func NewMCPTool(manager MCPManager, serverName string, tool *mcp.Tool) *MCPTool {
@@ -104,4 +106,8 @@ func NewWebFetchToolWithConfig(
 	privateHostWhitelist []string,
 ) (*WebFetchTool, error) {
 	return integrationtools.NewWebFetchToolWithConfig(maxChars, proxy, format, fetchLimitBytes, privateHostWhitelist)
+}
+
+func NewGitWorkspaceTool(manager GitWorkspaceManager) *GitWorkspaceTool {
+	return integrationtools.NewGitWorkspaceTool(manager)
 }

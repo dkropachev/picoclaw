@@ -322,6 +322,11 @@ func DefaultConfig() *Config {
 			MaxCallDepth:          4,
 			RetentionDays:         30,
 		},
+		GitWorkspaces: GitWorkspacesConfig{
+			MaxTotalSizeBytes:          DefaultGitWorkspaceMaxTotalSizeBytes,
+			IgnoredCleanupDelaySeconds: DefaultGitWorkspaceIgnoredCleanupDelaySecs,
+			DropDelaySeconds:           DefaultGitWorkspaceDropDelaySecs,
+		},
 		Tools: ToolsConfig{
 			FilterSensitiveData: true,
 			FilterMinLength:     8,
@@ -534,6 +539,9 @@ func DefaultConfig() *Config {
 				},
 			},
 			WebFetch: ToolConfig{
+				Enabled: true,
+			},
+			GitWorkspace: ToolConfig{
 				Enabled: true,
 			},
 			Workflow: ToolConfig{

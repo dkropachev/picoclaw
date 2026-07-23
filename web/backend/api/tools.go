@@ -181,6 +181,12 @@ var toolCatalog = []toolCatalogEntry{
 		ConfigKey:   "workflow",
 	},
 	{
+		Name:        "git_workspace",
+		Description: "Allocate, lock, reuse, clean, and drop local git repository workspaces.",
+		Category:    "filesystem",
+		ConfigKey:   "git_workspace",
+	},
+	{
 		Name:        "i2c",
 		Description: "Interact with I2C hardware devices exposed on the host.",
 		Category:    "hardware",
@@ -376,6 +382,8 @@ func applyToolState(cfg *config.Config, toolName string, enabled bool) error {
 		cfg.Tools.Web.Enabled = enabled
 	case "web_fetch":
 		cfg.Tools.WebFetch.Enabled = enabled
+	case "git_workspace":
+		cfg.Tools.GitWorkspace.Enabled = enabled
 	case "message":
 		cfg.Tools.Message.Enabled = enabled
 	case "send_file":

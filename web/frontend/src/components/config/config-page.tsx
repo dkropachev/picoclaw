@@ -22,6 +22,7 @@ import {
   DevicesSection,
   EvolutionSection,
   ExecSection,
+  GitWorkspacesSection,
   LauncherSection,
   MCPSection,
   RuntimeSection,
@@ -378,6 +379,21 @@ export function ConfigPage() {
           "Evolution minimum success ratio",
           { min: 0.01, max: 1 },
         )
+        const gitWorkspaceMaxTotalSizeGB = parseIntField(
+          form.gitWorkspaceMaxTotalSizeGB,
+          "Git workspace max total size",
+          { min: 1 },
+        )
+        const gitWorkspaceIgnoredCleanupHours = parseIntField(
+          form.gitWorkspaceIgnoredCleanupHours,
+          "Git workspace ignored cleanup delay",
+          { min: 1 },
+        )
+        const gitWorkspaceDropDays = parseIntField(
+          form.gitWorkspaceDropDays,
+          "Git workspace drop delay",
+          { min: 1 },
+        )
         const mcpDiscoveryValidationEnabled =
           form.mcpEnabled && form.mcpDiscoveryEnabled
         const mcpDiscoveryPatch: Record<string, unknown> = {
@@ -612,6 +628,12 @@ export function ConfigPage() {
               form.evolutionColdPathTimesText,
             ),
           },
+          git_workspaces: {
+            max_total_size_bytes: gitWorkspaceMaxTotalSizeGB * 1024 ** 3,
+            ignored_cleanup_delay_seconds:
+              gitWorkspaceIgnoredCleanupHours * 60 * 60,
+            drop_delay_seconds: gitWorkspaceDropDays * 24 * 60 * 60,
+          },
           tools: {
             cron: {
               allow_command: form.allowCommand,
@@ -821,6 +843,8 @@ export function ConfigPage() {
               <RuntimeSection form={form} onFieldChange={updateField} />
 
               <EvolutionSection form={form} onFieldChange={updateField} />
+
+              <GitWorkspacesSection form={form} onFieldChange={updateField} />
 
               <MCPSection
                 form={form}

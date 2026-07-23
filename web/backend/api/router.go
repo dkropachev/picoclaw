@@ -101,6 +101,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Skills and tools support/actions
 	h.registerSkillRoutes(mux)
 	h.registerToolRoutes(mux)
+	h.registerGitWorkspaceRoutes(mux)
 	h.registerWorkflowRoutes(mux)
 
 	// OS startup / launch-at-login

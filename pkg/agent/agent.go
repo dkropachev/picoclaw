@@ -59,6 +59,7 @@ type AgentLoop struct {
 	evolution      *evolutionBridge
 	hookRuntime    hookRuntime
 	steering       *steeringQueue
+	gitWorkspaces  gitWorkspaceManager
 	pendingSkills  sync.Map
 	pendingStops   sync.Map
 	mu             sync.RWMutex

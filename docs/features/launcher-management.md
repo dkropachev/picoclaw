@@ -150,6 +150,10 @@ shared authenticated dashboard layout and routing shell components.
 Workflow HTTP endpoints and dashboard routes are exposed through the launcher
 router and shared shell, while workflow definition, run, graph, cancel, retry,
 and event semantics remain owned by the workflows feature.
+Git workspace config fields, API routes, sidebar navigation, and dashboard entry
+points are exposed through shared launcher surfaces, while workspace allocation,
+inventory, cleanup, drop, and retention semantics are owned by the git
+workspaces feature.
 
 ## Failure And Edge Cases
 

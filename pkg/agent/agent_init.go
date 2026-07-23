@@ -73,6 +73,7 @@ func NewAgentLoop(
 		cmdRegistry:       commands.NewRegistry(commands.BuiltinDefinitions()),
 		evolution:         bridge,
 		steering:          newSteeringQueue(parseSteeringMode(cfg.Agents.Defaults.SteeringMode)),
+		gitWorkspaces:     newGitWorkspaceManagerFromConfig(cfg),
 		workerSem:         make(chan struct{}, workerPoolSize),
 		ownsRuntimeEvents: true,
 	}
@@ -149,6 +150,9 @@ func registerSharedTools(
 			} else {
 				agent.Tools.Register(fetchTool)
 			}
+		}
+		if cfg.Tools.IsToolEnabled("git_workspace") && al.gitWorkspaces != nil {
+			agent.Tools.Register(tools.NewGitWorkspaceTool(al.gitWorkspaces))
 		}
 
 		// Hardware tools (I2C, SPI) - Linux only, returns error on other platforms

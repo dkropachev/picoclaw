@@ -28,6 +28,7 @@ import { Route as AgentWorkflowsRouteImport } from './routes/agent/workflows'
 import { Route as AgentToolsRouteImport } from './routes/agent/tools'
 import { Route as AgentSkillsRouteImport } from './routes/agent/skills'
 import { Route as AgentHubRouteImport } from './routes/agent/hub'
+import { Route as AgentGitWorkspacesRouteImport } from './routes/agent/git-workspaces'
 import { Route as ThreadsOpenThreadIdRouteImport } from './routes/threads.open.$threadId'
 
 const ThreadsRoute = ThreadsRouteImport.update({
@@ -125,6 +126,11 @@ const AgentHubRoute = AgentHubRouteImport.update({
   path: '/hub',
   getParentRoute: () => AgentRoute,
 } as any)
+const AgentGitWorkspacesRoute = AgentGitWorkspacesRouteImport.update({
+  id: '/git-workspaces',
+  path: '/git-workspaces',
+  getParentRoute: () => AgentRoute,
+} as any)
 const ThreadsOpenThreadIdRoute = ThreadsOpenThreadIdRouteImport.update({
   id: '/$threadId',
   path: '/$threadId',
@@ -142,6 +148,7 @@ export interface FileRoutesByFullPath {
   '/logs': typeof LogsRoute
   '/models': typeof ModelsRoute
   '/threads': typeof ThreadsRouteWithChildren
+  '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
   '/agent/hub': typeof AgentHubRoute
   '/agent/skills': typeof AgentSkillsRoute
   '/agent/tools': typeof AgentToolsRoute
@@ -164,6 +171,7 @@ export interface FileRoutesByTo {
   '/logs': typeof LogsRoute
   '/models': typeof ModelsRoute
   '/threads': typeof ThreadsRouteWithChildren
+  '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
   '/agent/hub': typeof AgentHubRoute
   '/agent/skills': typeof AgentSkillsRoute
   '/agent/tools': typeof AgentToolsRoute
@@ -187,6 +195,7 @@ export interface FileRoutesById {
   '/logs': typeof LogsRoute
   '/models': typeof ModelsRoute
   '/threads': typeof ThreadsRouteWithChildren
+  '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
   '/agent/hub': typeof AgentHubRoute
   '/agent/skills': typeof AgentSkillsRoute
   '/agent/tools': typeof AgentToolsRoute
@@ -211,6 +220,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/models'
     | '/threads'
+    | '/agent/git-workspaces'
     | '/agent/hub'
     | '/agent/skills'
     | '/agent/tools'
@@ -233,6 +243,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/models'
     | '/threads'
+    | '/agent/git-workspaces'
     | '/agent/hub'
     | '/agent/skills'
     | '/agent/tools'
@@ -255,6 +266,7 @@ export interface FileRouteTypes {
     | '/logs'
     | '/models'
     | '/threads'
+    | '/agent/git-workspaces'
     | '/agent/hub'
     | '/agent/skills'
     | '/agent/tools'
@@ -415,6 +427,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentHubRouteImport
       parentRoute: typeof AgentRoute
     }
+    '/agent/git-workspaces': {
+      id: '/agent/git-workspaces'
+      path: '/git-workspaces'
+      fullPath: '/agent/git-workspaces'
+      preLoaderRoute: typeof AgentGitWorkspacesRouteImport
+      parentRoute: typeof AgentRoute
+    }
     '/threads/open/$threadId': {
       id: '/threads/open/$threadId'
       path: '/$threadId'
@@ -438,6 +457,7 @@ const ChannelsRouteRouteWithChildren = ChannelsRouteRoute._addFileChildren(
 )
 
 interface AgentRouteChildren {
+  AgentGitWorkspacesRoute: typeof AgentGitWorkspacesRoute
   AgentHubRoute: typeof AgentHubRoute
   AgentSkillsRoute: typeof AgentSkillsRoute
   AgentToolsRoute: typeof AgentToolsRoute
@@ -445,6 +465,7 @@ interface AgentRouteChildren {
 }
 
 const AgentRouteChildren: AgentRouteChildren = {
+  AgentGitWorkspacesRoute: AgentGitWorkspacesRoute,
   AgentHubRoute: AgentHubRoute,
   AgentSkillsRoute: AgentSkillsRoute,
   AgentToolsRoute: AgentToolsRoute,

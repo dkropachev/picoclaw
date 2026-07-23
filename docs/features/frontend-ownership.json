@@ -63,6 +63,14 @@
       ]
     },
     {
+      "spec": "docs/features/git-workspaces.md",
+      "patterns": [
+        "web/frontend/src/api/git-workspaces.ts",
+        "web/frontend/src/components/agent/git-workspaces/**",
+        "web/frontend/src/routes/agent/git-workspaces.tsx"
+      ]
+    },
+    {
       "spec": "docs/features/launcher-management.md",
       "patterns": [
         "web/frontend/src/api/launcher-auth.ts",

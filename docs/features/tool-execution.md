@@ -117,6 +117,9 @@ schema export, execution, and settings UI mechanics defined here.
 Workflows add an agent-callable management tool and execute step-level tools
 through this same registry, including context injection, sensitive-data
 filtering, response-handled media delivery, and channel delivery tools.
+Git workspaces contribute a built-in agent tool registered through this generic
+registry, while acquire, release, cleanup, drop, and inventory semantics are
+owned by the git workspaces feature.
 
 ## Failure And Edge Cases
 

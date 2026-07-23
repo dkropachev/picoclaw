@@ -111,6 +111,10 @@ validation, secret filtering, HTTP guard, and isolation policies instead of
 introducing separate security controls. Model price and subscription metadata
 remain non-secret config values while model credentials continue to use secure
 string preservation.
+Git workspace configuration and tool enablement reuse the same config
+normalization and defaulting path, while checkout retention, dirty preservation,
+and workspace inventory security boundaries are owned by the git workspaces
+feature.
 
 ## Failure And Edge Cases
 
