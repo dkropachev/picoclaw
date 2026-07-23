@@ -502,6 +502,7 @@ type RoutingConfig struct {
 
 const (
 	ModelRouterProvider                = "router"
+	ModelRouterCredentialAccountPrefix = "credential:"
 	ModelRouterBlockTypeAccount        = "account"
 	ModelRouterBlockTypeLoadBalance    = "load_balance"
 	ModelRouterStrategyBlind           = "blind"
@@ -510,6 +511,39 @@ const (
 	DefaultModelRouterRefreshInterval  = 60
 	defaultModelRouterMaxFallbackDepth = 64
 )
+
+func ModelRouterCredentialAccountID(accountRef string) (string, bool) {
+	accountRef = strings.TrimSpace(accountRef)
+	if accountRef == "" {
+		return "", false
+	}
+	credentialID, ok := strings.CutPrefix(accountRef, ModelRouterCredentialAccountPrefix)
+	if !ok {
+		return "", false
+	}
+	credentialID = strings.ToLower(strings.TrimSpace(credentialID))
+	if credentialID == "" {
+		return "", false
+	}
+	return credentialID, true
+}
+
+func ModelRouterCredentialAccountProvider(accountRef string) (string, bool) {
+	credentialID, ok := ModelRouterCredentialAccountID(accountRef)
+	if !ok {
+		return "", false
+	}
+	provider := credentialID
+	if prefix, _, hasName := strings.Cut(credentialID, ":"); hasName {
+		provider = prefix
+	}
+	switch provider {
+	case "openai", "anthropic", "google-antigravity", "antigravity":
+		return provider, true
+	default:
+		return "", false
+	}
+}
 
 // ModelRouterConfig describes a static model-router graph stored as a model_list
 // entry. Blocks are intentionally workflow-like: an entry block points to an
@@ -2249,6 +2283,9 @@ func (c *Config) validateModelRouterReferences() error {
 			for _, account := range modelRouterBlockAccounts(block) {
 				account = strings.TrimSpace(account)
 				if account == "" {
+					continue
+				}
+				if _, ok := ModelRouterCredentialAccountProvider(account); ok {
 					continue
 				}
 				if routerIdx, ok := routers[account]; ok {

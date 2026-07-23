@@ -4,6 +4,7 @@ import { type Page, type Route, expect, test } from "@playwright/test"
 const smokeRoutes = [
   "/",
   "/models",
+  "/credentials",
   "/logs",
   "/agent/git-workspaces",
   "/agent/tools",
@@ -528,6 +529,14 @@ async function mockLauncherApis(
 
       if (method === "POST") {
         switch (path) {
+          case "/api/models/fetch":
+            return json(route, {
+              models: [
+                { id: "gpt-4o", owned_by: "openai" },
+                { id: "gpt-5.4", owned_by: "openai" },
+              ],
+              total: 2,
+            })
           case "/api/workflows/development/start": {
             const body = request.postDataJSON() as {
               reason?: string
@@ -805,7 +814,42 @@ async function mockLauncherApis(
         case "/api/models/catalog":
           return json(route, { entries: [], total: 0 })
         case "/api/oauth/providers":
-          return json(route, { providers: [] })
+          return json(route, {
+            providers: [
+              {
+                provider: "openai",
+                credential_id: "openai",
+                display_name: "OpenAI",
+                methods: ["browser", "device_code", "token"],
+                logged_in: true,
+                status: "connected",
+                auth_method: "oauth",
+                account_id: "acct-primary",
+                credentials: [
+                  {
+                    provider: "openai",
+                    credential_id: "openai",
+                    display_name: "OpenAI",
+                    methods: ["browser", "device_code", "token"],
+                    logged_in: true,
+                    status: "connected",
+                    auth_method: "oauth",
+                    account_id: "acct-primary",
+                  },
+                  {
+                    provider: "openai",
+                    credential_id: "openai:backup",
+                    display_name: "OpenAI",
+                    methods: ["browser", "device_code", "token"],
+                    logged_in: true,
+                    status: "connected",
+                    auth_method: "oauth",
+                    account_id: "acct-backup",
+                  },
+                ],
+              },
+            ],
+          })
         case "/api/sessions":
           return json(route, [])
         case "/api/tools":
@@ -1228,20 +1272,91 @@ test("model catalog dialog fits the viewport", async ({ page }) => {
   expect(errors).toEqual([])
 })
 
-test("model router sheet fits the viewport", async ({ page }) => {
+test("account router editor supports block fallback graph editing", async ({
+  page,
+}) => {
   const errors = collectPageErrors(page)
 
-  await gotoMockedRoute(page, "/models")
-  await page.getByRole("button", { name: "Model Router" }).click()
+  await gotoMockedRoute(page, "/credentials")
+  await page.getByRole("button", { name: "Account Router" }).click()
 
+  await expect(page).toHaveURL(/\/credentials\/account-router\/new$/)
   await expect(
-    page.getByRole("dialog", { name: "Create Model Router" }),
+    page.getByRole("heading", { name: "Create Account Router" }),
   ).toBeVisible()
-  await page.getByRole("button", { name: "Load Balance" }).click()
-  await expect(
-    page.getByRole("button", { name: "gpt-4o", exact: true }),
-  ).toBeVisible()
-  await expectElementFitsViewport(page, '[role="dialog"]', "model router")
+
+  await page.getByRole("combobox", { name: "Account" }).click()
+  await page.getByRole("option", { name: "OpenAI: acct-primary" }).click()
+
+  await page.getByRole("button", { name: "Add Load Balancer" }).click()
+  await page.getByRole("button", { name: "OpenAI: acct-backup" }).click()
+
+  await page.getByRole("button", { name: "account-1", exact: true }).click()
+  await page.getByRole("combobox", { name: "Fallback Connection" }).click()
+  await page.getByRole("option", { name: "load-balancer-1" }).click()
+
+  await expect(page.getByText("Fallback -> load-balancer-1")).toBeVisible()
+  await page.getByRole("button", { name: "Pile fallback chain" }).click()
+  await page.getByRole("combobox", { name: "Scale" }).click()
+  await page.getByRole("option", { name: "125%" }).click()
+  await expect(page.getByRole("combobox", { name: "Scale" })).toContainText(
+    "125%",
+  )
+
+  if ((page.viewportSize()?.width ?? 0) >= 700) {
+    const canvas = page.locator('svg[aria-label="Router Diagram"]')
+    const world = page.locator('svg[aria-label="Router Diagram"] > g')
+    const canvasBox = await canvas.boundingBox()
+    expect(canvasBox).not.toBeNull()
+
+    const loadBalancerNode = page.getByRole("button", {
+      name: "Edit block load-balancer-1",
+    })
+    const beforeDragTransform = await loadBalancerNode.evaluate((node) =>
+      node.getAttribute("transform"),
+    )
+    const loadBalancerBox = await loadBalancerNode.boundingBox()
+    expect(loadBalancerBox).not.toBeNull()
+    await page.mouse.move(loadBalancerBox!.x + 24, loadBalancerBox!.y + 24)
+    await page.mouse.down()
+    await page.mouse.move(loadBalancerBox!.x + 96, loadBalancerBox!.y + 72)
+    await page.mouse.up()
+    await expect
+      .poll(() =>
+        loadBalancerNode.evaluate((node) => node.getAttribute("transform")),
+      )
+      .not.toBe(beforeDragTransform)
+
+    await page.mouse.move(
+      canvasBox!.x + canvasBox!.width / 2,
+      canvasBox!.y + canvasBox!.height / 2,
+    )
+    await page.keyboard.down("Shift")
+    await page.mouse.wheel(0, -240)
+    await page.keyboard.up("Shift")
+    await expect(page.getByRole("combobox", { name: "Scale" })).toContainText(
+      "150%",
+    )
+
+    const beforePanTransform = await world.evaluate((node) =>
+      node.getAttribute("transform"),
+    )
+    await page.mouse.move(
+      canvasBox!.x + canvasBox!.width - 36,
+      canvasBox!.y + 36,
+    )
+    await page.mouse.down()
+    await page.mouse.move(
+      canvasBox!.x + canvasBox!.width - 116,
+      canvasBox!.y + 92,
+    )
+    await page.mouse.up()
+    await expect
+      .poll(() => world.evaluate((node) => node.getAttribute("transform")))
+      .not.toBe(beforePanTransform)
+  }
+
+  await expect(page.getByRole("button", { name: "Raw JSON" })).toBeVisible()
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])

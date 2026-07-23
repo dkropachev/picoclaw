@@ -58,8 +58,12 @@ export function ModelCard({
     return setDefaultLabel
   })()
 
-  const editLabel = t("models.action.edit")
-  const deleteLabel = t("models.action.delete")
+  const editLabel = isRouter
+    ? t("models.router.actionEdit")
+    : t("models.action.edit")
+  const deleteLabel = isRouter
+    ? t("models.router.actionDelete")
+    : t("models.action.delete")
   const deleteDisabledReason = model.is_default
     ? t("models.action.deleteDisabled.isDefault")
     : deleteLabel

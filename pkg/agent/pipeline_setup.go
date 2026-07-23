@@ -207,8 +207,7 @@ func workflowProviderForCandidates(
 		return fallback
 	}
 	candidate := candidates[0]
-	key := providers.ModelKey(candidate.Provider, candidate.Model)
-	if provider := agent.candidateProvider(key); provider != nil {
+	if provider := agent.candidateProviderForCandidate(candidate); provider != nil {
 		return provider
 	}
 	return fallback

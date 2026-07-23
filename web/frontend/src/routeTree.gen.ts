@@ -30,6 +30,8 @@ import { Route as AgentSkillsRouteImport } from './routes/agent/skills'
 import { Route as AgentHubRouteImport } from './routes/agent/hub'
 import { Route as AgentGitWorkspacesRouteImport } from './routes/agent/git-workspaces'
 import { Route as ThreadsOpenThreadIdRouteImport } from './routes/threads.open.$threadId'
+import { Route as CredentialsAccountRouterNewRouteImport } from './routes/credentials.account-router.new'
+import { Route as CredentialsAccountRouterIndexRouteImport } from './routes/credentials.account-router.$index'
 
 const ThreadsRoute = ThreadsRouteImport.update({
   id: '/threads',
@@ -136,13 +138,25 @@ const ThreadsOpenThreadIdRoute = ThreadsOpenThreadIdRouteImport.update({
   path: '/$threadId',
   getParentRoute: () => ThreadsOpenRoute,
 } as any)
+const CredentialsAccountRouterNewRoute =
+  CredentialsAccountRouterNewRouteImport.update({
+    id: '/account-router/new',
+    path: '/account-router/new',
+    getParentRoute: () => CredentialsRoute,
+  } as any)
+const CredentialsAccountRouterIndexRoute =
+  CredentialsAccountRouterIndexRouteImport.update({
+    id: '/account-router/$index',
+    path: '/account-router/$index',
+    getParentRoute: () => CredentialsRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/channels': typeof ChannelsRouteRouteWithChildren
   '/agent': typeof AgentRouteWithChildren
   '/config': typeof ConfigRouteWithChildren
-  '/credentials': typeof CredentialsRoute
+  '/credentials': typeof CredentialsRouteWithChildren
   '/launcher-login': typeof LauncherLoginRoute
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
@@ -158,6 +172,8 @@ export interface FileRoutesByFullPath {
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
+  '/credentials/account-router/$index': typeof CredentialsAccountRouterIndexRoute
+  '/credentials/account-router/new': typeof CredentialsAccountRouterNewRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRoutesByTo {
@@ -165,7 +181,7 @@ export interface FileRoutesByTo {
   '/channels': typeof ChannelsRouteRouteWithChildren
   '/agent': typeof AgentRouteWithChildren
   '/config': typeof ConfigRouteWithChildren
-  '/credentials': typeof CredentialsRoute
+  '/credentials': typeof CredentialsRouteWithChildren
   '/launcher-login': typeof LauncherLoginRoute
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
@@ -181,6 +197,8 @@ export interface FileRoutesByTo {
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
+  '/credentials/account-router/$index': typeof CredentialsAccountRouterIndexRoute
+  '/credentials/account-router/new': typeof CredentialsAccountRouterNewRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRoutesById {
@@ -189,7 +207,7 @@ export interface FileRoutesById {
   '/channels': typeof ChannelsRouteRouteWithChildren
   '/agent': typeof AgentRouteWithChildren
   '/config': typeof ConfigRouteWithChildren
-  '/credentials': typeof CredentialsRoute
+  '/credentials': typeof CredentialsRouteWithChildren
   '/launcher-login': typeof LauncherLoginRoute
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
@@ -205,6 +223,8 @@ export interface FileRoutesById {
   '/threads/$threadId': typeof ThreadsThreadIdRoute
   '/threads/open': typeof ThreadsOpenRouteWithChildren
   '/threads/search': typeof ThreadsSearchRoute
+  '/credentials/account-router/$index': typeof CredentialsAccountRouterIndexRoute
+  '/credentials/account-router/new': typeof CredentialsAccountRouterNewRoute
   '/threads/open/$threadId': typeof ThreadsOpenThreadIdRoute
 }
 export interface FileRouteTypes {
@@ -230,6 +250,8 @@ export interface FileRouteTypes {
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
+    | '/credentials/account-router/$index'
+    | '/credentials/account-router/new'
     | '/threads/open/$threadId'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -253,6 +275,8 @@ export interface FileRouteTypes {
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
+    | '/credentials/account-router/$index'
+    | '/credentials/account-router/new'
     | '/threads/open/$threadId'
   id:
     | '__root__'
@@ -276,6 +300,8 @@ export interface FileRouteTypes {
     | '/threads/$threadId'
     | '/threads/open'
     | '/threads/search'
+    | '/credentials/account-router/$index'
+    | '/credentials/account-router/new'
     | '/threads/open/$threadId'
   fileRoutesById: FileRoutesById
 }
@@ -284,7 +310,7 @@ export interface RootRouteChildren {
   ChannelsRouteRoute: typeof ChannelsRouteRouteWithChildren
   AgentRoute: typeof AgentRouteWithChildren
   ConfigRoute: typeof ConfigRouteWithChildren
-  CredentialsRoute: typeof CredentialsRoute
+  CredentialsRoute: typeof CredentialsRouteWithChildren
   LauncherLoginRoute: typeof LauncherLoginRoute
   LauncherSetupRoute: typeof LauncherSetupRoute
   LogsRoute: typeof LogsRoute
@@ -441,6 +467,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ThreadsOpenThreadIdRouteImport
       parentRoute: typeof ThreadsOpenRoute
     }
+    '/credentials/account-router/new': {
+      id: '/credentials/account-router/new'
+      path: '/account-router/new'
+      fullPath: '/credentials/account-router/new'
+      preLoaderRoute: typeof CredentialsAccountRouterNewRouteImport
+      parentRoute: typeof CredentialsRoute
+    }
+    '/credentials/account-router/$index': {
+      id: '/credentials/account-router/$index'
+      path: '/account-router/$index'
+      fullPath: '/credentials/account-router/$index'
+      preLoaderRoute: typeof CredentialsAccountRouterIndexRouteImport
+      parentRoute: typeof CredentialsRoute
+    }
   }
 }
 
@@ -485,6 +525,20 @@ const ConfigRouteChildren: ConfigRouteChildren = {
 const ConfigRouteWithChildren =
   ConfigRoute._addFileChildren(ConfigRouteChildren)
 
+interface CredentialsRouteChildren {
+  CredentialsAccountRouterIndexRoute: typeof CredentialsAccountRouterIndexRoute
+  CredentialsAccountRouterNewRoute: typeof CredentialsAccountRouterNewRoute
+}
+
+const CredentialsRouteChildren: CredentialsRouteChildren = {
+  CredentialsAccountRouterIndexRoute: CredentialsAccountRouterIndexRoute,
+  CredentialsAccountRouterNewRoute: CredentialsAccountRouterNewRoute,
+}
+
+const CredentialsRouteWithChildren = CredentialsRoute._addFileChildren(
+  CredentialsRouteChildren,
+)
+
 interface ThreadsOpenRouteChildren {
   ThreadsOpenThreadIdRoute: typeof ThreadsOpenThreadIdRoute
 }
@@ -517,7 +571,7 @@ const rootRouteChildren: RootRouteChildren = {
   ChannelsRouteRoute: ChannelsRouteRouteWithChildren,
   AgentRoute: AgentRouteWithChildren,
   ConfigRoute: ConfigRouteWithChildren,
-  CredentialsRoute: CredentialsRoute,
+  CredentialsRoute: CredentialsRouteWithChildren,
   LauncherLoginRoute: LauncherLoginRoute,
   LauncherSetupRoute: LauncherSetupRoute,
   LogsRoute: LogsRoute,

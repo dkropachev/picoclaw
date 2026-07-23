@@ -85,6 +85,69 @@ func TestAccountFallbackWhenSelectedAccountUnavailable(t *testing.T) {
 	}
 }
 
+func TestLoadBalancerFallbackToAccountFallbackToLoadBalancer(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	cfg := &config.ModelRouterConfig{
+		Enabled: true,
+		Entry:   "primary-pool",
+		Blocks: []config.ModelRouterBlock{
+			{
+				ID:       "primary-pool",
+				Type:     config.ModelRouterBlockTypeLoadBalance,
+				Accounts: []string{"missing-primary"},
+				Strategy: config.ModelRouterStrategyTokensSpent,
+				Fallback: "fallback-account",
+			},
+			{
+				ID:       "fallback-account",
+				Type:     config.ModelRouterBlockTypeAccount,
+				Account:  "account-b",
+				Fallback: "backup-pool",
+			},
+			{
+				ID:       "backup-pool",
+				Type:     config.ModelRouterBlockTypeLoadBalance,
+				Accounts: []string{"account-c"},
+				Strategy: config.ModelRouterStrategyBlind,
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	router := New("router-main", cfg, map[string]Account{
+		"account-b": {
+			Candidates: []providers.FallbackCandidate{candidate("account-b")},
+			RPM:        60,
+		},
+		"account-c": {
+			Candidates: []providers.FallbackCandidate{candidate("account-c")},
+			RPM:        60,
+		},
+	}, filepath.Join(t.TempDir(), "model_router_state.json"))
+	if router == nil {
+		t.Fatal("New() returned nil")
+	}
+	router.now = func() time.Time { return now }
+
+	selection := router.Select("session-1", SelectReasonInitial)
+	if len(selection.Candidates) != 2 {
+		t.Fatalf("len(candidates) = %d, want 2", len(selection.Candidates))
+	}
+	if got := selection.Candidates[0].StableKey(); got != "account:account-b" {
+		t.Fatalf("first candidate = %q, want account-b", got)
+	}
+	if got := selection.Candidates[1].StableKey(); got != "account:account-c" {
+		t.Fatalf("second candidate = %q, want account-c", got)
+	}
+	if got := selection.BlockAccountChoices["fallback-account"]; got != "account-b" {
+		t.Fatalf("fallback-account choice = %q, want account-b", got)
+	}
+	if got := selection.BlockAccountChoices["backup-pool"]; got != "account-c" {
+		t.Fatalf("backup-pool choice = %q, want account-c", got)
+	}
+}
+
 func TestClosestLimitUsesCurrentMinuteWindow(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	router := newTestRouter(t, &config.ModelRouterConfig{
