@@ -484,6 +484,7 @@ type workflowManagedExecutionOptions struct {
 	maxParallelChildren            int
 	adaptiveChunking               bool
 	targetChildPromptTokens        int
+	targetChildPromptSource        string
 	calibrationEnabled             bool
 	calibrationSampleSize          int
 	calibrationTaskSampleSize      int
@@ -506,7 +507,6 @@ func workflowManagedOptions(raw any) workflowManagedExecutionOptions {
 		maxTasksPerChunk:               2,
 		maxParallelChildren:            4,
 		adaptiveChunking:               true,
-		targetChildPromptTokens:        12000,
 		calibrationEnabled:             true,
 		calibrationSampleSize:          6,
 		calibrationTaskSampleSize:      3,
@@ -545,11 +545,6 @@ func workflowManagedOptions(raw any) workflowManagedExecutionOptions {
 	}
 	if enabled, exists := boolMapValue(values, "adaptive_chunking", "adaptiveChunking"); exists {
 		options.adaptiveChunking = enabled
-	}
-	if n := intFromAny(values["target_child_prompt_tokens"]); n > 0 {
-		options.targetChildPromptTokens = n
-	} else if n := intFromAny(values["targetChildPromptTokens"]); n > 0 {
-		options.targetChildPromptTokens = n
 	}
 	if n := intFromAny(values["estimated_output_tokens"]); n > 0 {
 		options.estimatedOutputTokens = n

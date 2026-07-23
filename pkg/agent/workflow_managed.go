@@ -51,34 +51,45 @@ type workflowManagedModelCandidate struct {
 }
 
 type workflowManagedCalibrationCacheEntry struct {
-	Key                   string
-	Uses                  int
-	SuccessStreak         int
-	NextCalibrationUse    int
-	LastMatch             bool
-	LastStatus            string
-	Strategy              string
-	Model                 string
-	OutputFormat          string
-	PromptHash            string
-	ContextHash           string
-	OutputSchemaHash      string
-	TaskHash              string
-	ChunkingHash          string
-	PlanShapeHash         string
-	Languages             []string
-	Repositories          []string
-	ScopeCount            int
-	TaskCount             int
-	ChildCount            int
-	ChildScopeCounts      []int
-	ChildTaskCounts       []int
-	SplitFitScore         float64
-	Provisional           bool
-	BorrowedFromKey       string
-	BorrowedSimilarity    float64
-	BorrowedSuccessStreak int
+	Key                            string
+	Uses                           int
+	SuccessStreak                  int
+	NextCalibrationUse             int
+	LastMatch                      bool
+	LastStatus                     string
+	Strategy                       string
+	Model                          string
+	OutputFormat                   string
+	PromptHash                     string
+	ContextHash                    string
+	OutputSchemaHash               string
+	TaskHash                       string
+	ChunkingHash                   string
+	PlanShapeHash                  string
+	Languages                      []string
+	Repositories                   []string
+	ScopeCount                     int
+	TaskCount                      int
+	ChildCount                     int
+	ChildScopeCounts               []int
+	ChildTaskCounts                []int
+	SplitFitScore                  float64
+	TargetChildPromptTokens        int
+	LearnedTargetChildPromptTokens int
+	TargetChildPromptSource        string
+	MaxChildPromptTokens           int
+	AverageChildPromptTokens       int
+	Provisional                    bool
+	BorrowedFromKey                string
+	BorrowedSimilarity             float64
+	BorrowedSuccessStreak          int
 }
+
+const (
+	workflowManagedFallbackTargetChildPromptTokens = 12000
+	workflowManagedMinimumTargetChildPromptTokens  = 1000
+	workflowManagedMaximumTargetChildPromptTokens  = 256000
+)
 
 type workflowManagedScopeCacheDescriptor struct {
 	Count        int
@@ -115,6 +126,7 @@ func (r *workflowAgentRunner) runManagedSplit(
 ) (map[string]any, error) {
 	options := workflowManagedOptions(req.Managed)
 	strategy = workflowNormalizeSplitStrategy(strategy)
+	options = agent.workflowManagedResolveChildPromptTarget(req, options, strategy)
 	plans := workflowManagedChildPlans(req, agent, options, strategy)
 	metadata := workflowManagedMetadata(req, agent)
 	metadata["strategy"] = strategy
@@ -416,6 +428,8 @@ func workflowManagedCalibrationCacheKey(
 		scopeCounts = append(scopeCounts, len(plan.scope))
 		taskCounts = append(taskCounts, len(plan.tasks))
 	}
+	childPromptTokens := workflowManagedChildPromptTokens(req, plans)
+	maxChildPromptTokens, averageChildPromptTokens := workflowManagedPromptTokenStats(childPromptTokens)
 	outputFormat := ""
 	var outputSchema any
 	if req.Output != nil {
@@ -427,10 +441,10 @@ func workflowManagedCalibrationCacheKey(
 	outputSchemaHash := workflowManagedHash(outputSchema)
 	taskHash := workflowManagedHash(tasks)
 	chunking := map[string]any{
-		"adaptive_chunking":          options.adaptiveChunking,
-		"max_items_per_chunk":        options.maxItemsPerChunk,
-		"max_tasks_per_chunk":        options.maxTasksPerChunk,
-		"target_child_prompt_tokens": options.targetChildPromptTokens,
+		"adaptive_chunking":                    options.adaptiveChunking,
+		"max_items_per_chunk":                  options.maxItemsPerChunk,
+		"max_tasks_per_chunk":                  options.maxTasksPerChunk,
+		"effective_target_child_prompt_tokens": options.targetChildPromptTokens,
 	}
 	planShape := map[string]any{
 		"child_count":        len(plans),
@@ -455,25 +469,164 @@ func workflowManagedCalibrationCacheKey(
 	}
 	key := workflowManagedHash(payload)
 	return key, map[string]any{
-		"key":                key,
-		"key_version":        1,
-		"strategy":           strategy,
+		"key":                                  key,
+		"key_version":                          1,
+		"strategy":                             strategy,
+		"model":                                model,
+		"output_format":                        outputFormat,
+		"scope_count":                          scope.Count,
+		"task_count":                           len(tasks),
+		"child_count":                          len(plans),
+		"child_scope_counts":                   append([]int(nil), scopeCounts...),
+		"child_task_counts":                    append([]int(nil), taskCounts...),
+		"languages":                            append([]string(nil), scope.Languages...),
+		"repositories":                         append([]string(nil), scope.Repositories...),
+		"prompt_hash":                          promptHash,
+		"context_hash":                         contextHash,
+		"output_schema_hash":                   outputSchemaHash,
+		"task_hash":                            taskHash,
+		"chunking_hash":                        chunkingHash,
+		"plan_shape_hash":                      planShapeHash,
+		"split_fit_score":                      splitFitScore,
+		"effective_target_child_prompt_tokens": options.targetChildPromptTokens,
+		"target_child_prompt_source":           options.targetChildPromptSource,
+		"max_child_prompt_tokens":              maxChildPromptTokens,
+		"average_child_prompt_tokens":          averageChildPromptTokens,
+	}
+}
+
+func (agent *AgentInstance) workflowManagedResolveChildPromptTarget(
+	req workflows.AgentRequest,
+	options workflowManagedExecutionOptions,
+	strategy string,
+) workflowManagedExecutionOptions {
+	if !options.adaptiveChunking {
+		options.targetChildPromptTokens = 0
+		options.targetChildPromptSource = "disabled"
+		return options
+	}
+	options.targetChildPromptTokens = workflowManagedInitialChildPromptTarget(agent)
+	options.targetChildPromptSource = workflowManagedInitialChildPromptTargetSource(agent)
+	if learned, found := agent.workflowManagedCachedChildPromptTarget(req, options, strategy); found {
+		options.targetChildPromptTokens = workflowManagedClampChildPromptTargetForAgent(learned, agent)
+		options.targetChildPromptSource = "learned_cache"
+	}
+	return options
+}
+
+func workflowManagedInitialChildPromptTarget(agent *AgentInstance) int {
+	if agent == nil {
+		return workflowManagedFallbackTargetChildPromptTokens
+	}
+	inputBudget := agent.ContextWindow - agent.MaxTokens
+	if inputBudget <= 0 {
+		return workflowManagedFallbackTargetChildPromptTokens
+	}
+	target := inputBudget / 2
+	if target <= 0 {
+		target = workflowManagedFallbackTargetChildPromptTokens
+	}
+	return workflowManagedClampChildPromptTargetForAgent(target, agent)
+}
+
+func workflowManagedInitialChildPromptTargetSource(agent *AgentInstance) string {
+	if agent != nil && agent.ContextWindow > 0 && agent.ContextWindow > agent.MaxTokens {
+		return "context_window"
+	}
+	return "default"
+}
+
+func workflowManagedClampChildPromptTargetForAgent(target int, agent *AgentInstance) int {
+	if target <= 0 {
+		target = workflowManagedFallbackTargetChildPromptTokens
+	}
+	upper := workflowManagedMaximumTargetChildPromptTokens
+	if agent != nil {
+		inputBudget := agent.ContextWindow - agent.MaxTokens
+		if inputBudget > 0 {
+			upper = inputBudget
+		}
+	}
+	if upper < workflowManagedMinimumTargetChildPromptTokens {
+		upper = workflowManagedMinimumTargetChildPromptTokens
+	}
+	if target < workflowManagedMinimumTargetChildPromptTokens {
+		target = workflowManagedMinimumTargetChildPromptTokens
+	}
+	if target > upper {
+		target = upper
+	}
+	return target
+}
+
+func (agent *AgentInstance) workflowManagedCachedChildPromptTarget(
+	req workflows.AgentRequest,
+	options workflowManagedExecutionOptions,
+	strategy string,
+) (int, bool) {
+	if agent == nil || !options.calibrationCacheEnabled {
+		return 0, false
+	}
+	strategy = workflowNormalizeSplitStrategy(strategy)
+	if strategy == "" {
+		strategy = "scope_split"
+	}
+	identity := workflowManagedCalibrationTargetIdentity(req, agent, strategy)
+	threshold := options.calibrationSimilarityThreshold
+	if threshold <= 0 {
+		threshold = 0.72
+	}
+	agentManagedCalibrationCacheMu.Lock()
+	defer agentManagedCalibrationCacheMu.Unlock()
+	var (
+		bestTarget int
+		bestScore  float64
+		found      bool
+	)
+	for _, entry := range agent.managedCalibrationCache {
+		if !entry.LastMatch || entry.Provisional || entry.LearnedTargetChildPromptTokens <= 0 {
+			continue
+		}
+		score := workflowManagedCalibrationSimilarityScore(entry, identity)
+		if score < threshold || score <= bestScore {
+			continue
+		}
+		bestTarget = entry.LearnedTargetChildPromptTokens
+		bestScore = score
+		found = true
+	}
+	return bestTarget, found
+}
+
+func workflowManagedCalibrationTargetIdentity(
+	req workflows.AgentRequest,
+	agent *AgentInstance,
+	strategy string,
+) map[string]any {
+	model := ""
+	if agent != nil {
+		model = strings.TrimSpace(agent.Model)
+	}
+	scope := workflowManagedScopeCacheDescriptorFor(req.Scope)
+	tasks := workflowAssignedOrAgentTasks(req, agent)
+	outputFormat := ""
+	var outputSchema any
+	if req.Output != nil {
+		outputFormat = req.Output.Format
+		outputSchema = req.Output.Schema
+	}
+	return map[string]any{
+		"strategy":           workflowNormalizeSplitStrategy(strategy),
 		"model":              model,
 		"output_format":      outputFormat,
 		"scope_count":        scope.Count,
 		"task_count":         len(tasks),
-		"child_count":        len(plans),
-		"child_scope_counts": append([]int(nil), scopeCounts...),
-		"child_task_counts":  append([]int(nil), taskCounts...),
 		"languages":          append([]string(nil), scope.Languages...),
 		"repositories":       append([]string(nil), scope.Repositories...),
-		"prompt_hash":        promptHash,
-		"context_hash":       contextHash,
-		"output_schema_hash": outputSchemaHash,
-		"task_hash":          taskHash,
-		"chunking_hash":      chunkingHash,
-		"plan_shape_hash":    planShapeHash,
-		"split_fit_score":    splitFitScore,
+		"prompt_hash":        workflowManagedHashString(req.Prompt),
+		"context_hash":       workflowManagedHashString(req.Context),
+		"output_schema_hash": workflowManagedHash(outputSchema),
+		"task_hash":          workflowManagedHash(tasks),
 	}
 }
 
@@ -577,6 +730,10 @@ func (agent *AgentInstance) recordWorkflowManagedCalibrationCache(
 		}
 		entry.Provisional = false
 		entry.SuccessStreak++
+		entry.LearnedTargetChildPromptTokens = workflowManagedClampChildPromptTargetForAgent(
+			workflowManagedNextChildPromptTarget(entry),
+			agent,
+		)
 		interval := workflowManagedCalibrationCacheInterval(
 			entry.SuccessStreak,
 			workflowManagedCalibrationCacheMaxInterval(options),
@@ -609,6 +766,28 @@ func workflowManagedCalibrationCacheBaseMeta(
 	return meta
 }
 
+func workflowManagedNextChildPromptTarget(entry workflowManagedCalibrationCacheEntry) int {
+	current := entry.TargetChildPromptTokens
+	if current <= 0 {
+		current = workflowManagedFallbackTargetChildPromptTokens
+	}
+	learned := current
+	if entry.MaxChildPromptTokens > 0 {
+		headroom := max(1000, entry.MaxChildPromptTokens/5)
+		observed := entry.MaxChildPromptTokens + headroom
+		switch {
+		case observed > learned:
+			learned = observed
+		case entry.SplitFitScore >= 0.85 && observed < learned:
+			learned = max(observed, learned/2)
+		}
+	}
+	if learned < workflowManagedMinimumTargetChildPromptTokens {
+		learned = workflowManagedMinimumTargetChildPromptTokens
+	}
+	return learned
+}
+
 func workflowManagedApplyCalibrationIdentity(
 	entry *workflowManagedCalibrationCacheEntry,
 	identity map[string]any,
@@ -633,6 +812,13 @@ func workflowManagedApplyCalibrationIdentity(
 	entry.ChildScopeCounts = intSliceMapValue(identity, "child_scope_counts")
 	entry.ChildTaskCounts = intSliceMapValue(identity, "child_task_counts")
 	entry.SplitFitScore = floatFromAny(identity["split_fit_score"])
+	entry.TargetChildPromptTokens = intFromAny(identity["effective_target_child_prompt_tokens"])
+	entry.TargetChildPromptSource = stringMapValue(identity, "target_child_prompt_source")
+	entry.MaxChildPromptTokens = intFromAny(identity["max_child_prompt_tokens"])
+	entry.AverageChildPromptTokens = intFromAny(identity["average_child_prompt_tokens"])
+	if entry.LearnedTargetChildPromptTokens <= 0 {
+		entry.LearnedTargetChildPromptTokens = entry.TargetChildPromptTokens
+	}
 }
 
 func workflowManagedCopyCalibrationEntryMeta(meta map[string]any, entry workflowManagedCalibrationCacheEntry) {
@@ -649,6 +835,11 @@ func workflowManagedCopyCalibrationEntryMeta(meta map[string]any, entry workflow
 	meta["task_count"] = entry.TaskCount
 	meta["child_count"] = entry.ChildCount
 	meta["split_fit_score"] = entry.SplitFitScore
+	meta["effective_target_child_prompt_tokens"] = entry.TargetChildPromptTokens
+	meta["learned_target_child_prompt_tokens"] = entry.LearnedTargetChildPromptTokens
+	meta["target_child_prompt_source"] = entry.TargetChildPromptSource
+	meta["max_child_prompt_tokens"] = entry.MaxChildPromptTokens
+	meta["average_child_prompt_tokens"] = entry.AverageChildPromptTokens
 	meta["provisional"] = entry.Provisional
 	if entry.BorrowedFromKey != "" {
 		meta["borrowed_from_key"] = entry.BorrowedFromKey
@@ -730,6 +921,9 @@ func workflowManagedBorrowedCalibrationCacheEntry(
 		BorrowedSimilarity: similarity,
 	}
 	workflowManagedApplyCalibrationIdentity(&entry, identity)
+	if source.LearnedTargetChildPromptTokens > 0 {
+		entry.LearnedTargetChildPromptTokens = source.LearnedTargetChildPromptTokens
+	}
 	entry.BorrowedSuccessStreak = workflowManagedBorrowedSuccessStreak(
 		source.SuccessStreak,
 		similarity,
@@ -1301,6 +1495,7 @@ func workflowManagedSplitStrategy(req workflows.AgentRequest, agent *AgentInstan
 	if requested == "none" {
 		return ""
 	}
+	options = agent.workflowManagedResolveChildPromptTarget(req, options, "scope_split")
 	tasks := workflowAssignedOrAgentTasks(req, agent)
 	scopeSplittable := len(workflowManagedScopeChunks(req, options)) > 1
 	taskSplittable := len(tasks) > options.maxTasksPerChunk && options.maxTasksPerChunk > 0
@@ -1435,6 +1630,7 @@ func workflowManagedSplitMetadata(
 			workflows.EstimateAgentPayloadTokens(workflowAgentMessage(req)),
 			childPromptTokens,
 			options.targetChildPromptTokens,
+			options.targetChildPromptSource,
 		),
 		"hidden_child_runs":    true,
 		"visible_result_count": 1,
@@ -1492,29 +1688,56 @@ func workflowScopeChunkPromptTokens(req workflows.AgentRequest, scope []any) int
 	return workflows.EstimateAgentPayloadTokens(workflowAgentMessage(childReq))
 }
 
+func workflowManagedChildPromptTokens(req workflows.AgentRequest, plans []workflowManagedChildPlan) []int {
+	childPromptTokens := make([]int, 0, len(plans))
+	for _, plan := range plans {
+		childReq := workflowManagedApplyPlan(req, plan)
+		childPromptTokens = append(
+			childPromptTokens,
+			workflows.EstimateAgentPayloadTokens(workflowAgentMessage(childReq)),
+		)
+	}
+	return childPromptTokens
+}
+
+func workflowManagedPromptTokenStats(tokens []int) (int, int) {
+	total, maxTokens := workflowManagedPromptTokenTotalAndMax(tokens)
+	if len(tokens) == 0 {
+		return maxTokens, 0
+	}
+	return maxTokens, total / len(tokens)
+}
+
+func workflowManagedPromptTokenTotalAndMax(tokens []int) (int, int) {
+	total := 0
+	maxTokens := 0
+	for _, tokenCount := range tokens {
+		total += tokenCount
+		if tokenCount > maxTokens {
+			maxTokens = tokenCount
+		}
+	}
+	return total, maxTokens
+}
+
 func workflowManagedTokenEfficiency(
 	unsplitPromptTokens int,
 	childPromptTokens []int,
 	targetChildPromptTokens int,
+	targetChildPromptSource string,
 ) map[string]any {
-	total := 0
-	maxTokens := 0
-	for _, tokens := range childPromptTokens {
-		total += tokens
-		if tokens > maxTokens {
-			maxTokens = tokens
-		}
-	}
+	total, maxTokens := workflowManagedPromptTokenTotalAndMax(childPromptTokens)
 	overhead := total - unsplitPromptTokens
 	out := map[string]any{
-		"unsplit_prompt_tokens":        unsplitPromptTokens,
-		"target_child_prompt_tokens":   targetChildPromptTokens,
-		"child_prompt_tokens":          append([]int(nil), childPromptTokens...),
-		"max_child_prompt_tokens":      maxTokens,
-		"total_child_prompt_tokens":    total,
-		"estimated_overhead_tokens":    overhead,
-		"estimated_over_split":         overhead > 0 && len(childPromptTokens) > 1,
-		"estimated_under_target_split": maxTokens <= targetChildPromptTokens,
+		"unsplit_prompt_tokens":                  unsplitPromptTokens,
+		"effective_target_child_prompt_tokens":   targetChildPromptTokens,
+		"target_child_prompt_source":             targetChildPromptSource,
+		"child_prompt_tokens":                    append([]int(nil), childPromptTokens...),
+		"max_child_prompt_tokens":                maxTokens,
+		"total_child_prompt_tokens":              total,
+		"estimated_overhead_tokens":              overhead,
+		"estimated_over_split":                   overhead > 0 && len(childPromptTokens) > 1,
+		"estimated_under_effective_target_split": targetChildPromptTokens > 0 && maxTokens <= targetChildPromptTokens,
 	}
 	if unsplitPromptTokens > 0 {
 		out["split_to_unsplit_ratio"] = float64(total) / float64(unsplitPromptTokens)
