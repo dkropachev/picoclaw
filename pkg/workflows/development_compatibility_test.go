@@ -77,6 +77,87 @@ func TestGenerateWorkflowDraftYAMLUsesMainAgent(t *testing.T) {
 	}
 }
 
+func TestGenerateWorkflowDraftYAMLRecognizesWholeRepoReview(t *testing.T) {
+	draft := GenerateWorkflowDraftYAML("review the whole repo on main for correctness issues")
+	workflow, err := Parse([]byte(draft))
+	if err != nil {
+		t.Fatalf("Parse(generated draft) error = %v\n%s", err, draft)
+	}
+	if validateErr := Validate(workflow); validateErr != nil {
+		t.Fatalf("Validate(generated draft) error = %v\n%s", validateErr, draft)
+	}
+	job, ok := workflow.Jobs["review"]
+	if !ok {
+		t.Fatalf("jobs = %#v, want review job", workflow.Jobs)
+	}
+	if len(job.Steps) != 2 {
+		t.Fatalf("steps = %#v, want inventory and review steps", job.Steps)
+	}
+	inventory := job.Steps[0]
+	if inventory.Uses != "function/git.inventory" {
+		t.Fatalf("inventory uses = %q, want function/git.inventory", inventory.Uses)
+	}
+	if got := inventory.With["working_directory"]; got != "." {
+		t.Fatalf("working_directory = %#v, want .", got)
+	}
+	if got := inventory.With["commit"]; got != "main" {
+		t.Fatalf("commit = %#v, want main", got)
+	}
+	if got := inventory.With["target"]; got != "all" {
+		t.Fatalf("target = %#v, want all", got)
+	}
+	if got := inventory.With["include_content"]; got != true {
+		t.Fatalf("include_content = %#v, want true", got)
+	}
+
+	review := job.Steps[1]
+	if review.Uses != "agent/main" {
+		t.Fatalf("review uses = %q, want agent/main", review.Uses)
+	}
+	managed, ok := review.With["managed"].(map[string]any)
+	if !ok {
+		t.Fatalf("managed = %#v, want map", review.With["managed"])
+	}
+	if managed["strategy"] != "scope_split" {
+		t.Fatalf("managed.strategy = %#v, want scope_split", managed["strategy"])
+	}
+	if got := review.With["scope"]; got != "${{ steps.inventory.outputs.selectedFiles }}" {
+		t.Fatalf("scope = %#v, want selectedFiles expression", got)
+	}
+	if _, ok := review.With["output"].(map[string]any); !ok {
+		t.Fatalf("output = %#v, want structured output contract", review.With["output"])
+	}
+}
+
+func TestGenerateWorkflowDraftYAMLRepoReviewCanTargetCurrentBranch(t *testing.T) {
+	draft := GenerateWorkflowDraftYAML("audit the entire repository on the current branch")
+	workflow, err := Parse([]byte(draft))
+	if err != nil {
+		t.Fatalf("Parse(generated draft) error = %v\n%s", err, draft)
+	}
+	job := workflow.Jobs["review"]
+	if len(job.Steps) == 0 {
+		t.Fatalf("steps = %#v, want inventory step", job.Steps)
+	}
+	if got := job.Steps[0].With["commit"]; got != "HEAD" {
+		t.Fatalf("commit = %#v, want HEAD", got)
+	}
+}
+
+func TestGenerateWorkflowDraftYAMLDoesNotTreatDiffReviewAsWholeRepo(t *testing.T) {
+	draft := GenerateWorkflowDraftYAML("review the repo diff for correctness issues")
+	workflow, err := Parse([]byte(draft))
+	if err != nil {
+		t.Fatalf("Parse(generated draft) error = %v\n%s", err, draft)
+	}
+	if _, ok := workflow.Jobs["review"]; ok {
+		t.Fatalf("jobs = %#v, want generic development draft", workflow.Jobs)
+	}
+	if !strings.Contains(draft, "id: run_agent") {
+		t.Fatalf("draft = %s, want generic agent step", draft)
+	}
+}
+
 func TestWorkflowDevelopmentPublishRequiresCurrentSuccessfulTest(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()
