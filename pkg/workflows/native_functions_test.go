@@ -6,6 +6,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -214,7 +215,7 @@ func TestNativeGitInventoryDefaultsToHead(t *testing.T) {
 	}
 }
 
-func TestNativeGitInventoryCanIncludeSelectedFileContent(t *testing.T) {
+func TestNativeGitInventoryLinksSelectedFilesWithoutEmbeddingContent(t *testing.T) {
 	requireGit(t)
 	workspace := t.TempDir()
 	repo := filepath.Join(workspace, "repo")
@@ -233,7 +234,10 @@ func TestNativeGitInventoryCanIncludeSelectedFileContent(t *testing.T) {
 		context.Background(),
 		"git.inventory",
 		map[string]any{
-			"working_directory": "repo",
+			"workspace": map[string]any{
+				"id":   "gw-inventory",
+				"path": repo,
+			},
 			"target":            "code",
 			"include_content":   true,
 			"max_content_bytes": 12,
@@ -253,18 +257,31 @@ func TestNativeGitInventoryCanIncludeSelectedFileContent(t *testing.T) {
 	if selected[0]["path"] != "main.go" {
 		t.Fatalf("selected path = %#v, want main.go", selected[0]["path"])
 	}
-	if selected[0]["content"] != "package main" {
-		t.Fatalf("content = %#v, want truncated file content", selected[0]["content"])
+	if _, exists := selected[0]["content"]; exists {
+		t.Fatalf("content unexpectedly embedded in %#v", selected[0])
 	}
-	if selected[0]["contentTruncated"] != true {
-		t.Fatalf("contentTruncated = %#v, want true", selected[0]["contentTruncated"])
+	if _, exists := selected[0]["contentTruncated"]; exists {
+		t.Fatalf("contentTruncated unexpectedly embedded in %#v", selected[0])
 	}
-	if _, exists := selected[0]["contentEncoding"]; !exists {
-		t.Fatalf("contentEncoding missing from %#v", selected[0])
+	source, ok := selected[0]["source"].(map[string]any)
+	if !ok {
+		t.Fatalf("source = %#v, want workspace file source", selected[0]["source"])
+	}
+	if source["workspaceId"] != "gw-inventory" {
+		t.Fatalf("source.workspaceId = %#v, want gw-inventory", source["workspaceId"])
+	}
+	if source["workspacePath"] != repo {
+		t.Fatalf("source.workspacePath = %#v, want %q", source["workspacePath"], repo)
+	}
+	if source["filePath"] != "main.go" {
+		t.Fatalf("source.filePath = %#v, want main.go", source["filePath"])
+	}
+	if source["path"] != filepath.Join(repo, "main.go") {
+		t.Fatalf("source.path = %#v, want linked file path", source["path"])
 	}
 }
 
-func TestNativeGitFilterAppliesGlobPolicyAndIncludesContent(t *testing.T) {
+func TestNativeGitFilterAppliesGlobPolicyAndLinksWorkspaceFiles(t *testing.T) {
 	requireGit(t)
 	workspace := t.TempDir()
 	repo := filepath.Join(workspace, "repo")
@@ -289,7 +306,13 @@ func TestNativeGitFilterAppliesGlobPolicyAndIncludesContent(t *testing.T) {
 	inventory, handled, err := RunNativeFunction(
 		context.Background(),
 		"git.inventory",
-		map[string]any{"working_directory": "repo", "target": "all"},
+		map[string]any{
+			"workspace": map[string]any{
+				"id":   "gw-filter",
+				"path": repo,
+			},
+			"target": "all",
+		},
 		ExecutionContext{WorkspaceDir: workspace},
 	)
 	if err != nil {
@@ -302,9 +325,12 @@ func TestNativeGitFilterAppliesGlobPolicyAndIncludesContent(t *testing.T) {
 		context.Background(),
 		"git.filter",
 		map[string]any{
-			"working_directory": "repo",
-			"files":             inventory["files"],
-			"target":            "code",
+			"workspace": map[string]any{
+				"id":   "gw-filter",
+				"path": repo,
+			},
+			"files":  inventory["files"],
+			"target": "code",
 			"filter": map[string]any{
 				"includeGlobs": []any{"src/**"},
 				"excludeGlobs": []any{"**/fixtures/**", "**/testdata/**"},
@@ -331,13 +357,368 @@ func TestNativeGitFilterAppliesGlobPolicyAndIncludesContent(t *testing.T) {
 	if selected[0]["path"] != "src/main/App.java" {
 		t.Fatalf("selected path = %#v, want src/main/App.java", selected[0]["path"])
 	}
-	content, contentOK := selected[0]["content"].(string)
-	if !contentOK || !strings.Contains(content, "class App") {
-		t.Fatalf("selected content = %#v, want App.java content", selected[0]["content"])
+	if _, exists := selected[0]["content"]; exists {
+		t.Fatalf("selected content unexpectedly embedded in %#v", selected[0])
+	}
+	source, ok := selected[0]["source"].(map[string]any)
+	if !ok {
+		t.Fatalf("source = %#v, want workspace file source", selected[0]["source"])
+	}
+	if source["workspaceId"] != "gw-filter" {
+		t.Fatalf("source.workspaceId = %#v, want gw-filter", source["workspaceId"])
+	}
+	if source["filePath"] != "src/main/App.java" {
+		t.Fatalf("source.filePath = %#v, want src/main/App.java", source["filePath"])
+	}
+	sourcePath, ok := source["path"].(string)
+	if !ok || sourcePath != filepath.Join(repo, "src", "main", "App.java") {
+		t.Fatalf("source.path = %#v, want linked App.java path", source["path"])
+	}
+	data, err := os.ReadFile(sourcePath)
+	if err != nil || !strings.Contains(string(data), "class App") {
+		t.Fatalf("linked source read = %q, %v; want App.java content", string(data), err)
 	}
 	counts, ok := filtered["counts"].(map[string]any)
 	if !ok || counts["totalSelectedFiles"] != 1 {
 		t.Fatalf("counts = %#v, want one selected file", filtered["counts"])
+	}
+}
+
+func TestNativeGitWorkspaceFileSourceHelpers(t *testing.T) {
+	empty := nativeGitWorkspaceRefFromMap(nil)
+	if empty != (nativeGitWorkspaceRef{}) {
+		t.Fatalf("nativeGitWorkspaceRefFromMap(nil) = %#v, want empty ref", empty)
+	}
+	if got := empty.Map(); len(got) != 0 {
+		t.Fatalf("empty workspace Map() = %#v, want empty map", got)
+	}
+
+	ref := nativeGitWorkspaceRefFromMap(map[string]any{
+		"id":         "gw-1",
+		"repo_id":    "repo-1",
+		"remote_url": "git@example.com:org/repo.git",
+		"ref":        "main",
+		"path":       "/tmp/repo",
+	})
+	mapped := ref.Map()
+	for key, want := range map[string]any{
+		"id":         "gw-1",
+		"repo_id":    "repo-1",
+		"remote_url": "git@example.com:org/repo.git",
+		"ref":        "main",
+		"path":       "/tmp/repo",
+	} {
+		if mapped[key] != want {
+			t.Fatalf("workspace Map()[%q] = %#v, want %#v", key, mapped[key], want)
+		}
+	}
+
+	source, err := nativeGitFileSource(ref, "./src/../main.go")
+	if err != nil {
+		t.Fatalf("nativeGitFileSource() error = %v", err)
+	}
+	if source["type"] != "workspace_file" || source["workspaceId"] != "gw-1" ||
+		source["workspacePath"] != "/tmp/repo" || source["filePath"] != "main.go" ||
+		source["path"] != filepath.Join("/tmp/repo", "main.go") {
+		t.Fatalf("source = %#v, want normalized workspace file source", source)
+	}
+
+	for _, badPath := range []string{"", ".", "../secret.go", "/tmp/secret.go"} {
+		if _, cleanErr := nativeCleanRepoFilePath(badPath); cleanErr == nil {
+			t.Fatalf("nativeCleanRepoFilePath(%q) error = nil, want rejection", badPath)
+		}
+	}
+
+	if _, outputErr := nativeGitInventoryOutputFiles(
+		nativeGitWorkspaceRef{},
+		[]nativeGitFile{{Path: "../escape.go", BlobHash: "abc"}},
+		"all",
+		false,
+	); outputErr == nil {
+		t.Fatal("nativeGitInventoryOutputFiles() error = nil, want escaped path rejection")
+	}
+
+	files, err := nativeGitInventoryOutputFiles(
+		nativeGitWorkspaceRef{Path: "/tmp/repo"},
+		[]nativeGitFile{{Path: "src/app.go", BlobHash: "abc", SizeBytes: 7}},
+		"all",
+		false,
+	)
+	if err != nil {
+		t.Fatalf("nativeGitInventoryOutputFiles() error = %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("files = %#v, want one file", files)
+	}
+	if _, exists := files[0]["mode"]; exists {
+		t.Fatalf("mode unexpectedly present when includeModes=false: %#v", files[0])
+	}
+	fileSource, ok := files[0]["source"].(map[string]any)
+	if !ok || fileSource["path"] != filepath.Join("/tmp/repo", "src", "app.go") {
+		t.Fatalf("file source = %#v, want linked app.go source", files[0]["source"])
+	}
+}
+
+func TestNativeResolveGitWorkspaceAcceptsStringAndRejectsMissingPath(t *testing.T) {
+	requireGit(t)
+	workspace := t.TempDir()
+	repo := filepath.Join(workspace, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo, "init")
+
+	resolved, ref, err := nativeResolveGitWorkspace(
+		ExecutionContext{WorkspaceDir: workspace},
+		map[string]any{"workspace": "repo"},
+	)
+	if err != nil {
+		t.Fatalf("nativeResolveGitWorkspace(string) error = %v", err)
+	}
+	if resolved != repo || ref.Path != repo {
+		t.Fatalf("resolved = %q, ref = %#v, want repo path %q", resolved, ref, repo)
+	}
+
+	_, _, err = nativeResolveGitWorkspace(
+		ExecutionContext{WorkspaceDir: workspace},
+		map[string]any{"workspace": map[string]any{"id": "gw-missing-path"}},
+	)
+	if err == nil || !strings.Contains(err.Error(), "workspace.path is required") {
+		t.Fatalf("nativeResolveGitWorkspace(missing path) error = %v, want path requirement", err)
+	}
+}
+
+func TestNativeGitFilterRejectsEscapedInventoryPath(t *testing.T) {
+	requireGit(t)
+	workspace := t.TempDir()
+	repo := filepath.Join(workspace, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo, "init")
+
+	_, _, err := RunNativeFunction(
+		context.Background(),
+		"git.filter",
+		map[string]any{
+			"workspace": map[string]any{"path": repo},
+			"files": []map[string]any{
+				{"path": "../escape.go", "category": "code", "fileHash": "abc"},
+			},
+			"target": "all",
+			"filter": map[string]any{},
+		},
+		ExecutionContext{WorkspaceDir: workspace},
+	)
+	if err == nil || !strings.Contains(err.Error(), "must stay inside repository") {
+		t.Fatalf("git.filter error = %v, want escaped path rejection", err)
+	}
+}
+
+func TestNativeFunctionInputParsingHelpers(t *testing.T) {
+	if got := nativeMapValue(map[string]string{"include": "src/**"}); got["include"] != "src/**" {
+		t.Fatalf("nativeMapValue(map[string]string) = %#v", got)
+	}
+	if got := nativeMapValue(`{"exclude":"vendor/**"}`); got["exclude"] != "vendor/**" {
+		t.Fatalf("nativeMapValue(JSON string) = %#v", got)
+	}
+	if got := nativeMapValue(`not-json`); got != nil {
+		t.Fatalf("nativeMapValue(invalid JSON) = %#v, want nil", got)
+	}
+
+	direct, err := nativeMapSlice([]map[string]any{{"path": "direct.go"}})
+	if err != nil || len(direct) != 1 || direct[0]["path"] != "direct.go" {
+		t.Fatalf("nativeMapSlice([]map) = %#v, %v", direct, err)
+	}
+	fromAny, err := nativeMapSlice([]any{map[string]any{"path": "any.go"}})
+	if err != nil || len(fromAny) != 1 || fromAny[0]["path"] != "any.go" {
+		t.Fatalf("nativeMapSlice([]any) = %#v, %v", fromAny, err)
+	}
+	fromJSON, err := nativeMapSlice(`[{"path":"json.go"}]`)
+	if err != nil || len(fromJSON) != 1 || fromJSON[0]["path"] != "json.go" {
+		t.Fatalf("nativeMapSlice(JSON string) = %#v, %v", fromJSON, err)
+	}
+	for _, value := range []any{nil, []any{"bad"}, `not-json`, 123} {
+		if _, err := nativeMapSlice(value); err == nil {
+			t.Fatalf("nativeMapSlice(%#v) error = nil, want rejection", value)
+		}
+	}
+
+	if got := nativeStringSlice([]string{" src/** ", "", "tests/**"}); !reflect.DeepEqual(
+		got,
+		[]string{"src/**", "tests/**"},
+	) {
+		t.Fatalf("nativeStringSlice([]string) = %#v", got)
+	}
+	if got := nativeStringSlice([]any{" src/** ", 42, ""}); !reflect.DeepEqual(
+		got,
+		[]string{"src/**", "42"},
+	) {
+		t.Fatalf("nativeStringSlice([]any) = %#v", got)
+	}
+	if got := nativeStringSlice(`["src/**"," tests/** "]`); !reflect.DeepEqual(
+		got,
+		[]string{"src/**", "tests/**"},
+	) {
+		t.Fatalf("nativeStringSlice(JSON string) = %#v", got)
+	}
+	if got := nativeStringSlice("src/**, tests/**"); !reflect.DeepEqual(got, []string{"src/**", "tests/**"}) {
+		t.Fatalf("nativeStringSlice(comma string) = %#v", got)
+	}
+	if got := nativeStringSlice(""); got != nil {
+		t.Fatalf("nativeStringSlice(empty) = %#v, want nil", got)
+	}
+	if got := nativeStringSlice(123); got != nil {
+		t.Fatalf("nativeStringSlice(number) = %#v, want nil", got)
+	}
+
+	boolArgs := map[string]any{
+		"enabled":  true,
+		"yes":      "yes",
+		"disabled": "off",
+		"other":    1,
+	}
+	if !nativeBool(boolArgs, "enabled") || !nativeBool(boolArgs, "yes") {
+		t.Fatalf("nativeBool true forms failed")
+	}
+	if nativeBool(boolArgs, "disabled") || nativeBool(boolArgs, "other") || nativeBool(nil, "enabled") {
+		t.Fatalf("nativeBool false forms failed")
+	}
+
+	intArgs := map[string]any{
+		"int":    7,
+		"int64":  int64(8),
+		"float":  9.9,
+		"string": "10",
+		"bad":    "nan",
+	}
+	for key, want := range map[string]int{"int": 7, "int64": 8, "float": 9, "string": 10} {
+		if got := nativeInt(intArgs, key, -1); got != want {
+			t.Fatalf("nativeInt(%q) = %d, want %d", key, got, want)
+		}
+	}
+	if got := nativeInt(intArgs, "bad", 11); got != 11 {
+		t.Fatalf("nativeInt(bad) = %d, want fallback", got)
+	}
+	if got := nativeInt(nil, "missing", 12); got != 12 {
+		t.Fatalf("nativeInt(nil) = %d, want fallback", got)
+	}
+}
+
+func TestNativeWorkflowStateDeleteAndArtifactReadList(t *testing.T) {
+	workspace := t.TempDir()
+	execCtx := ExecutionContext{
+		WorkspaceDir: workspace,
+		WorkflowRef:  "workflows/native.yml",
+		RunID:        "run-native",
+	}
+
+	_, handled, err := RunNativeFunction(
+		context.Background(),
+		"workflow.state",
+		map[string]any{
+			"action": "set",
+			"key":    "scratch",
+			"value":  map[string]any{"status": "stored"},
+		},
+		execCtx,
+	)
+	if err != nil || !handled {
+		t.Fatalf("workflow.state set handled=%v error=%v", handled, err)
+	}
+	deleted, handled, err := RunNativeFunction(
+		context.Background(),
+		"workflow.state",
+		map[string]any{
+			"action": "delete",
+			"key":    "scratch",
+		},
+		execCtx,
+	)
+	if err != nil || !handled {
+		t.Fatalf("workflow.state delete handled=%v error=%v", handled, err)
+	}
+	if deleted["deleted"] != true {
+		t.Fatalf("deleted = %#v, want true", deleted["deleted"])
+	}
+	deletedAgain, _, err := RunNativeFunction(
+		context.Background(),
+		"workflow.state",
+		map[string]any{
+			"action": "delete",
+			"key":    "scratch",
+		},
+		execCtx,
+	)
+	if err != nil {
+		t.Fatalf("workflow.state delete missing error = %v", err)
+	}
+	if deletedAgain["deleted"] != false {
+		t.Fatalf("deleted again = %#v, want false", deletedAgain["deleted"])
+	}
+
+	defaultArtifact, handled, err := RunNativeFunction(
+		context.Background(),
+		"workflow.artifact",
+		map[string]any{
+			"action": "write",
+			"format": "json",
+			"value":  map[string]any{"kind": "default-name"},
+		},
+		execCtx,
+	)
+	if err != nil || !handled {
+		t.Fatalf("workflow.artifact default write handled=%v error=%v", handled, err)
+	}
+	if name, _ := defaultArtifact["name"].(string); !strings.HasPrefix(name, "artifact-") ||
+		!strings.HasSuffix(name, ".json") {
+		t.Fatalf("default artifact name = %#v, want generated json artifact name", defaultArtifact["name"])
+	}
+
+	written, _, err := RunNativeFunction(
+		context.Background(),
+		"workflow.artifact",
+		map[string]any{
+			"action": "write",
+			"name":   "reports/result.json",
+			"value":  map[string]any{"status": "ok"},
+		},
+		execCtx,
+	)
+	if err != nil {
+		t.Fatalf("workflow.artifact write error = %v", err)
+	}
+	read, _, err := RunNativeFunction(
+		context.Background(),
+		"workflow.artifact",
+		map[string]any{
+			"action": "read",
+			"name":   "reports/result.json",
+		},
+		execCtx,
+	)
+	if err != nil {
+		t.Fatalf("workflow.artifact read error = %v", err)
+	}
+	if read["relativePath"] != written["relativePath"] {
+		t.Fatalf("read relativePath = %#v, want %#v", read["relativePath"], written["relativePath"])
+	}
+	value, ok := read["value"].(map[string]any)
+	if !ok || value["status"] != "ok" {
+		t.Fatalf("read value = %#v, want status ok", read["value"])
+	}
+	listed, _, err := RunNativeFunction(
+		context.Background(),
+		"workflow.artifact",
+		map[string]any{"action": "list"},
+		execCtx,
+	)
+	if err != nil {
+		t.Fatalf("workflow.artifact list error = %v", err)
+	}
+	artifacts, ok := listed["artifacts"].([]map[string]any)
+	if !ok || len(artifacts) != 2 {
+		t.Fatalf("listed artifacts = %#v, want two artifacts", listed["artifacts"])
 	}
 }
 

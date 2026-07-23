@@ -1,13 +1,11 @@
 package workflows
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	osexec "os/exec"
@@ -90,6 +88,14 @@ type nativeGitFile struct {
 	Mode      string `json:"mode"`
 	BlobHash  string `json:"blobHash"`
 	SizeBytes int64  `json:"sizeBytes"`
+}
+
+type nativeGitWorkspaceRef struct {
+	ID        string
+	RepoID    string
+	RemoteURL string
+	Ref       string
+	Path      string
 }
 
 // RunNativeFunction executes PicoClaw built-ins available to workflow
@@ -237,20 +243,12 @@ func nativeWorkflowArtifact(ctx context.Context, args map[string]any, exec Execu
 }
 
 func nativeGitInventory(ctx context.Context, args map[string]any, exec ExecutionContext) (map[string]any, error) {
-	repo, commit, inventory, inventoryHash, err := nativeGitInventoryData(ctx, args, exec)
+	repo, workspace, commit, inventory, inventoryHash, err := nativeGitInventoryData(ctx, args, exec)
 	if err != nil {
 		return nil, err
 	}
 	target := normalizeFileTarget(nativeStringDefault(args, "target", "all"))
-	includeContent := nativeBoolAny(args, "include_content", "includeContent")
-	maxContentBytes := nativeInt(args, "max_content_bytes", 0)
-	if maxContentBytes <= 0 {
-		maxContentBytes = nativeInt(args, "maxContentBytes", 0)
-	}
-	if maxContentBytes <= 0 {
-		maxContentBytes = 64 * 1024
-	}
-	files, err := nativeGitInventoryOutputFiles(ctx, repo, inventory, target, true, includeContent, maxContentBytes)
+	files, err := nativeGitInventoryOutputFiles(workspace, inventory, target, true)
 	if err != nil {
 		return nil, err
 	}
@@ -265,6 +263,7 @@ func nativeGitInventory(ctx context.Context, args map[string]any, exec Execution
 	}
 	return map[string]any{
 		"workingDirectory": repo,
+		"workspace":        workspace.Map(),
 		"commit":           commit,
 		"target":           target,
 		"inventoryHash":    inventoryHash,
@@ -282,24 +281,112 @@ func nativeGitInventoryData(
 	ctx context.Context,
 	args map[string]any,
 	exec ExecutionContext,
-) (string, string, []nativeGitFile, string, error) {
-	repo, err := nativeResolveRepo(exec, nativeStringAny(args, "working_directory", "workingDirectory"))
+) (string, nativeGitWorkspaceRef, string, []nativeGitFile, string, error) {
+	repo, workspace, err := nativeResolveGitWorkspace(exec, args)
 	if err != nil {
-		return "", "", nil, "", err
+		return "", nativeGitWorkspaceRef{}, "", nil, "", err
 	}
 	commit, err := nativeResolveCommit(ctx, repo, nativeString(args, "commit"))
 	if err != nil {
-		return "", "", nil, "", err
+		return "", nativeGitWorkspaceRef{}, "", nil, "", err
 	}
 	inventory, err := nativeCollectInventory(ctx, repo, commit)
 	if err != nil {
-		return "", "", nil, "", err
+		return "", nativeGitWorkspaceRef{}, "", nil, "", err
 	}
 	hash, err := nativeStableHash(inventory)
 	if err != nil {
-		return "", "", nil, "", err
+		return "", nativeGitWorkspaceRef{}, "", nil, "", err
 	}
-	return repo, commit, inventory, hash, nil
+	return repo, workspace, commit, inventory, hash, nil
+}
+
+func nativeResolveGitWorkspace(exec ExecutionContext, args map[string]any) (string, nativeGitWorkspaceRef, error) {
+	if workspaceValue, ok := args["workspace"]; ok && workspaceValue != nil {
+		workspaceMap := nativeMapValue(workspaceValue)
+		workspace := nativeGitWorkspaceRefFromMap(workspaceMap)
+		if workspace.Path == "" && workspaceMap == nil {
+			workspace.Path = strings.TrimSpace(nativeAnyString(workspaceValue))
+		}
+		if strings.TrimSpace(workspace.Path) == "" {
+			return "", nativeGitWorkspaceRef{}, fmt.Errorf("workspace.path is required")
+		}
+		repo, err := nativeResolveRepo(exec, workspace.Path)
+		if err != nil {
+			return "", nativeGitWorkspaceRef{}, err
+		}
+		workspace.Path = repo
+		return repo, workspace, nil
+	}
+	repo, err := nativeResolveRepo(exec, nativeStringAny(args, "working_directory", "workingDirectory"))
+	if err != nil {
+		return "", nativeGitWorkspaceRef{}, err
+	}
+	return repo, nativeGitWorkspaceRef{Path: repo}, nil
+}
+
+func nativeGitWorkspaceRefFromMap(value map[string]any) nativeGitWorkspaceRef {
+	if value == nil {
+		return nativeGitWorkspaceRef{}
+	}
+	return nativeGitWorkspaceRef{
+		ID:        strings.TrimSpace(nativeAnyString(value["id"])),
+		RepoID:    strings.TrimSpace(nativeAnyString(value["repo_id"])),
+		RemoteURL: strings.TrimSpace(nativeAnyString(value["remote_url"])),
+		Ref:       strings.TrimSpace(nativeAnyString(value["ref"])),
+		Path:      strings.TrimSpace(nativeAnyString(value["path"])),
+	}
+}
+
+func (w nativeGitWorkspaceRef) Map() map[string]any {
+	out := make(map[string]any)
+	if strings.TrimSpace(w.ID) != "" {
+		out["id"] = strings.TrimSpace(w.ID)
+	}
+	if strings.TrimSpace(w.RepoID) != "" {
+		out["repo_id"] = strings.TrimSpace(w.RepoID)
+	}
+	if strings.TrimSpace(w.RemoteURL) != "" {
+		out["remote_url"] = strings.TrimSpace(w.RemoteURL)
+	}
+	if strings.TrimSpace(w.Ref) != "" {
+		out["ref"] = strings.TrimSpace(w.Ref)
+	}
+	if strings.TrimSpace(w.Path) != "" {
+		out["path"] = strings.TrimSpace(w.Path)
+	}
+	return out
+}
+
+func nativeGitFileSource(workspace nativeGitWorkspaceRef, filePath string) (map[string]any, error) {
+	cleanPath, err := nativeCleanRepoFilePath(filePath)
+	if err != nil {
+		return nil, err
+	}
+	source := map[string]any{
+		"type":     "workspace_file",
+		"filePath": cleanPath,
+	}
+	if strings.TrimSpace(workspace.ID) != "" {
+		source["workspaceId"] = strings.TrimSpace(workspace.ID)
+	}
+	workspacePath := strings.TrimSpace(workspace.Path)
+	if workspacePath != "" {
+		source["workspacePath"] = workspacePath
+		source["path"] = filepath.Join(workspacePath, filepath.FromSlash(cleanPath))
+	}
+	return source, nil
+}
+
+func nativeCleanRepoFilePath(value string) (string, error) {
+	clean := path.Clean(strings.TrimSpace(filepath.ToSlash(value)))
+	if clean == "." || clean == "" {
+		return "", fmt.Errorf("file path is required")
+	}
+	if path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("file path %q must stay inside repository", value)
+	}
+	return clean, nil
 }
 
 func nativeResolveRepo(exec ExecutionContext, value string) (string, error) {
@@ -457,37 +544,29 @@ func (e nativeGitError) Error() string {
 }
 
 func nativeGitInventoryOutputFiles(
-	ctx context.Context,
-	repo string,
+	workspace nativeGitWorkspaceRef,
 	inventory []nativeGitFile,
 	target string,
 	includeModes bool,
-	includeContent bool,
-	maxContentBytes int,
 ) ([]map[string]any, error) {
 	files := make([]map[string]any, 0, len(inventory))
 	for _, entry := range inventory {
 		category := nativeCategorizePath(entry.Path)
 		selected := nativeTargetSelects(target, category)
+		source, err := nativeGitFileSource(workspace, entry.Path)
+		if err != nil {
+			return nil, err
+		}
 		file := map[string]any{
 			"path":      entry.Path,
 			"fileHash":  entry.BlobHash,
 			"category":  category,
 			"selected":  selected,
 			"sizeBytes": entry.SizeBytes,
+			"source":    source,
 		}
 		if includeModes {
 			file["mode"] = entry.Mode
-		}
-		if includeContent && selected {
-			content, truncated, err := nativeGitBlobContent(ctx, repo, entry.BlobHash, maxContentBytes)
-			if err != nil {
-				return nil, err
-			}
-			file["content"] = content
-			file["contentBytes"] = len([]byte(content))
-			file["contentEncoding"] = "utf-8"
-			file["contentTruncated"] = truncated
 		}
 		files = append(files, file)
 	}
@@ -498,7 +577,7 @@ func nativeGitFilter(ctx context.Context, args map[string]any, exec ExecutionCon
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	repo, err := nativeResolveRepo(exec, nativeStringAny(args, "working_directory", "workingDirectory"))
+	repo, workspace, err := nativeResolveGitWorkspace(exec, args)
 	if err != nil {
 		return nil, err
 	}
@@ -528,14 +607,6 @@ func nativeGitFilter(ctx context.Context, args map[string]any, exec ExecutionCon
 		"selectedPaths",
 		"paths",
 	))
-	includeContent := nativeBoolAny(args, "include_content", "includeContent")
-	maxContentBytes := nativeInt(args, "max_content_bytes", 0)
-	if maxContentBytes <= 0 {
-		maxContentBytes = nativeInt(args, "maxContentBytes", 0)
-	}
-	if maxContentBytes <= 0 {
-		maxContentBytes = 64 * 1024
-	}
 
 	filtered := make([]map[string]any, 0, len(files))
 	selected := make([]map[string]any, 0, len(files))
@@ -547,6 +618,12 @@ func nativeGitFilter(ctx context.Context, args map[string]any, exec ExecutionCon
 			category = nativeCategorizePath(filePath)
 			file["category"] = category
 		}
+		cleanPath, err := nativeCleanRepoFilePath(filePath)
+		if err != nil {
+			return nil, err
+		}
+		filePath = cleanPath
+		file["path"] = filePath
 		baseSelected := nativeTargetSelects(target, category)
 		matchesInclude := len(includeGlobs) == 0 && len(selectedPaths) == 0
 		if !matchesInclude {
@@ -556,23 +633,11 @@ func nativeGitFilter(ctx context.Context, args map[string]any, exec ExecutionCon
 		matchesExclude := nativeAnyGlobMatches(excludeGlobs, filePath)
 		isSelected := baseSelected && matchesInclude && !matchesExclude
 		file["selected"] = isSelected
-		if includeContent && isSelected {
-			blobHash := strings.TrimSpace(nativeAnyString(file["fileHash"]))
-			if blobHash == "" {
-				blobHash = strings.TrimSpace(nativeAnyString(file["blobHash"]))
-			}
-			if blobHash == "" {
-				return nil, fmt.Errorf("file %q has no fileHash", filePath)
-			}
-			content, truncated, err := nativeGitBlobContent(ctx, repo, blobHash, maxContentBytes)
-			if err != nil {
-				return nil, err
-			}
-			file["content"] = content
-			file["contentBytes"] = len([]byte(content))
-			file["contentEncoding"] = "utf-8"
-			file["contentTruncated"] = truncated
+		source, err := nativeGitFileSource(workspace, filePath)
+		if err != nil {
+			return nil, err
 		}
+		file["source"] = source
 		filtered = append(filtered, file)
 		if isSelected {
 			selected = append(selected, file)
@@ -580,6 +645,7 @@ func nativeGitFilter(ctx context.Context, args map[string]any, exec ExecutionCon
 	}
 	return map[string]any{
 		"workingDirectory": repo,
+		"workspace":        workspace.Map(),
 		"commit":           nativeString(args, "commit"),
 		"target":           target,
 		"inventoryHash":    nativeStringAny(args, "inventory_hash", "inventoryHash"),
@@ -597,48 +663,6 @@ func nativeGitFilter(ctx context.Context, args map[string]any, exec ExecutionCon
 			"filesExcluded":      len(filtered) - len(selected),
 		},
 	}, nil
-}
-
-func nativeGitBlobContent(ctx context.Context, repo, blobHash string, maxBytes int) (string, bool, error) {
-	args := []string{"cat-file", "-p", blobHash}
-	cmd := osexec.CommandContext(ctx, "git", args...)
-	cmd.Dir = repo
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", false, err
-	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	err = cmd.Start()
-	if err != nil {
-		return "", false, err
-	}
-
-	readLimit := int64(maxBytes)
-	if readLimit > 0 {
-		readLimit++
-	}
-	var data []byte
-	if readLimit > 0 {
-		data, err = io.ReadAll(io.LimitReader(stdout, readLimit))
-	} else {
-		data, err = io.ReadAll(stdout)
-	}
-	truncated := maxBytes > 0 && len(data) > maxBytes
-	if truncated && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-	}
-	waitErr := cmd.Wait()
-	if err != nil {
-		return "", false, err
-	}
-	if waitErr != nil && !truncated {
-		return "", false, nativeGitError{err: waitErr, output: strings.TrimSpace(stderr.String()), args: args}
-	}
-	if truncated {
-		data = data[:maxBytes]
-	}
-	return strings.ToValidUTF8(string(data), ""), truncated, nil
 }
 
 func nativeCategorizePath(filePath string) string {

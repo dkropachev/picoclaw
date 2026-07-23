@@ -87,7 +87,7 @@ func TestCodeReviewWorkflowRunsWithGitWorkspaceTool(t *testing.T) {
 		t.Fatalf("status = %q, want succeeded", result.Status)
 	}
 	if !reflect.DeepEqual(toolRunner.actions, []string{"acquire", "release", "acquire", "release"}) {
-		t.Fatalf("git workspace actions = %v, want acquire/release around inventory and content", toolRunner.actions)
+		t.Fatalf("git workspace actions = %v, want acquire/release around inventory and review", toolRunner.actions)
 	}
 	if !agentRunner.called {
 		t.Fatal("agent runner was not called")
@@ -172,6 +172,9 @@ func (r *codeReviewTemplateAgentRunner) RunAgent(_ context.Context, req AgentReq
 			if _, exists := file["content"]; exists {
 				r.t.Fatalf("filter scope unexpectedly includes content for %#v", file["path"])
 			}
+			if _, exists := file["source"]; !exists {
+				r.t.Fatalf("filter scope missing source link for %#v", file["path"])
+			}
 		}
 		structured := map[string]any{
 			"includeGlobs": []any{"src/**"},
@@ -207,8 +210,26 @@ func (r *codeReviewTemplateAgentRunner) RunAgent(_ context.Context, req AgentReq
 	if got := scope[0]["path"]; got != "src/app.go" {
 		r.t.Fatalf("scope[0].path = %#v, want src/app.go", got)
 	}
-	if content, ok := scope[0]["content"].(string); !ok || content == "" {
-		r.t.Fatalf("scope[0].content = %#v, want file content", scope[0]["content"])
+	if _, exists := scope[0]["content"]; exists {
+		r.t.Fatalf("scope[0].content unexpectedly embedded: %#v", scope[0]["content"])
+	}
+	source, ok := scope[0]["source"].(map[string]any)
+	if !ok {
+		r.t.Fatalf("scope[0].source = %#v, want workspace file source", scope[0]["source"])
+	}
+	if source["workspaceId"] != "gw-review" {
+		r.t.Fatalf("scope[0].source.workspaceId = %#v, want gw-review", source["workspaceId"])
+	}
+	if source["filePath"] != "src/app.go" {
+		r.t.Fatalf("scope[0].source.filePath = %#v, want src/app.go", source["filePath"])
+	}
+	sourcePath, ok := source["path"].(string)
+	if !ok || sourcePath != filepath.Join(r.repo, "src", "app.go") {
+		r.t.Fatalf("scope[0].source.path = %#v, want linked app.go path", source["path"])
+	}
+	data, err := os.ReadFile(sourcePath)
+	if err != nil || !strings.Contains(string(data), "func Answer") {
+		r.t.Fatalf("linked source read = %q, %v; want app.go content", string(data), err)
 	}
 	if req.Output == nil || !req.Output.Enabled() {
 		r.t.Fatal("agent output contract is not enabled")
