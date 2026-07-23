@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router"
 
 import { AccountRouterEditorPage } from "@/components/credentials/account-router-editor-page"
 
-export const Route = createFileRoute("/credentials/account-router/$index")({
+export const Route = createFileRoute("/accounts/account-router/$index")({
   component: AccountRouterEditRoute,
 })
 

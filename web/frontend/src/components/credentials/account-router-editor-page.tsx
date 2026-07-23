@@ -853,7 +853,7 @@ export function AccountRouterEditorPage({
         payload.model_name,
         gateway?.restartRequired === true,
       )
-      void navigate({ to: "/credentials" })
+      void navigate({ to: "/accounts" })
     } catch (err) {
       setError(
         err instanceof Error ? err.message : t("models.router.saveError"),
@@ -889,10 +889,10 @@ export function AccountRouterEditorPage({
         <Button
           variant="outline"
           size="sm"
-          onClick={() => void navigate({ to: "/credentials" })}
+          onClick={() => void navigate({ to: "/accounts" })}
         >
           <IconArrowLeft className="size-4" />
-          {t("navigation.credentials")}
+          {t("navigation.accounts")}
         </Button>
         <Button size="sm" onClick={() => void save()} disabled={saving}>
           {saving ? (
