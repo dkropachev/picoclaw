@@ -602,8 +602,29 @@ func parseTokenResponse(body []byte, provider string) (*AuthCredential, error) {
 	} else if id := extractAccountID(tokenResp.AccessToken); id != "" {
 		cred.AccountID = id
 	}
+	if email := extractEmail(tokenResp.IDToken); email != "" {
+		cred.Email = email
+	} else if email := extractEmail(tokenResp.AccessToken); email != "" {
+		cred.Email = email
+	}
 
 	return cred, nil
+}
+
+func extractEmail(token string) string {
+	claims, err := parseJWTClaims(token)
+	if err != nil {
+		return ""
+	}
+	if email, ok := claims["email"].(string); ok && strings.TrimSpace(email) != "" {
+		return strings.TrimSpace(email)
+	}
+	if profile, ok := claims["https://api.openai.com/profile"].(map[string]any); ok {
+		if email, ok := profile["email"].(string); ok && strings.TrimSpace(email) != "" {
+			return strings.TrimSpace(email)
+		}
+	}
+	return ""
 }
 
 func extractAccountID(token string) string {

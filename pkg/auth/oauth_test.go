@@ -139,6 +139,29 @@ func TestParseTokenResponseExtractsAccountIDFromIDToken(t *testing.T) {
 	}
 }
 
+func TestParseTokenResponseExtractsEmailFromIDToken(t *testing.T) {
+	idToken := makeJWTForClaims(t, map[string]any{
+		"https://api.openai.com/profile": map[string]any{
+			"email": "Dmitry.Kropachev.Do@example.com",
+		},
+	})
+	resp := map[string]any{
+		"access_token":  "opaque-access-token",
+		"refresh_token": "test-refresh-token",
+		"expires_in":    3600,
+		"id_token":      idToken,
+	}
+	body, _ := json.Marshal(resp)
+
+	cred, err := parseTokenResponse(body, "openai")
+	if err != nil {
+		t.Fatalf("parseTokenResponse() error = %v", err)
+	}
+	if cred.Email != "Dmitry.Kropachev.Do@example.com" {
+		t.Fatalf("Email = %q, want Dmitry.Kropachev.Do@example.com", cred.Email)
+	}
+}
+
 func TestExtractAccountIDFromOrganizationsFallback(t *testing.T) {
 	token := makeJWTForClaims(t, map[string]any{
 		"organizations": []any{

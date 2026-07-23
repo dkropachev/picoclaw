@@ -99,6 +99,100 @@ func TestOAuthBrowserFlowCreatedAndQueried(t *testing.T) {
 	}
 }
 
+func TestOAuthBrowserFlowInfersCredentialIDFromEmail(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	oauthGeneratePKCE = func() (auth.PKCECodes, error) {
+		return auth.PKCECodes{CodeVerifier: "verifier-1", CodeChallenge: "challenge-1"}, nil
+	}
+	oauthGenerateState = func() (string, error) { return "state-1", nil }
+	oauthBuildAuthorizeURL = func(cfg auth.OAuthProviderConfig, pkce auth.PKCECodes, state, redirectURI string) string {
+		return "https://example.com/authorize?state=" + state
+	}
+	oauthExchangeCodeForTokens = func(
+		cfg auth.OAuthProviderConfig,
+		code, codeVerifier, redirectURI string,
+	) (*auth.AuthCredential, error) {
+		return &auth.AuthCredential{
+			AccessToken: "oauth-access-token",
+			AccountID:   "acc-123",
+			Provider:    "openai",
+			AuthMethod:  "oauth",
+			Email:       "Dmitry.Kropachev.Do@example.com",
+		}, nil
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/oauth/login",
+		strings.NewReader(`{"provider":"openai","method":"browser"}`),
+	)
+	req.Host = "localhost:18800"
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/oauth/callback?state=state-1&code=abc", nil)
+	mux.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("callback status = %d, want %d, body=%s", rec2.Code, http.StatusOK, rec2.Body.String())
+	}
+
+	cred, err := auth.GetCredential("openai:dmitry.kropachev.do")
+	if err != nil {
+		t.Fatalf("GetCredential inferred error: %v", err)
+	}
+	if cred == nil || cred.AccessToken != "oauth-access-token" {
+		t.Fatalf("inferred credential = %#v, want saved OAuth token", cred)
+	}
+	defaultCred, err := auth.GetCredential("openai")
+	if err != nil {
+		t.Fatalf("GetCredential default error: %v", err)
+	}
+	if defaultCred != nil {
+		t.Fatalf("default credential should not be created, got %#v", defaultCred)
+	}
+
+	rec3 := httptest.NewRecorder()
+	req3 := httptest.NewRequest(http.MethodGet, "/api/oauth/flows/"+recFlowID(t, rec.Body.Bytes()), nil)
+	mux.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("flow status code = %d, want %d, body=%s", rec3.Code, http.StatusOK, rec3.Body.String())
+	}
+	var flowResp oauthFlowResponse
+	if unmarshalErr := json.Unmarshal(rec3.Body.Bytes(), &flowResp); unmarshalErr != nil {
+		t.Fatalf("unmarshal flow response: %v", unmarshalErr)
+	}
+	if flowResp.CredentialID != "openai:dmitry.kropachev.do" {
+		t.Fatalf("flow credential_id = %q, want openai:dmitry.kropachev.do", flowResp.CredentialID)
+	}
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+	var found bool
+	for _, model := range cfg.ModelList {
+		if model.CredentialID == "openai:dmitry.kropachev.do" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("inferred credential model entry not found: %#v", cfg.ModelList)
+	}
+}
+
 func TestOAuthFlowExpiresWhenQueried(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()
@@ -410,6 +504,18 @@ func TestOAuthLogoutNamedCredentialOnlyClearsMatchingModel(t *testing.T) {
 	if updated.ModelList[1].AuthMethod != "" {
 		t.Fatalf("named auth_method = %q, want empty", updated.ModelList[1].AuthMethod)
 	}
+}
+
+func recFlowID(t *testing.T, body []byte) string {
+	t.Helper()
+	var loginResp oauthFlowResponse
+	if err := json.Unmarshal(body, &loginResp); err != nil {
+		t.Fatalf("unmarshal login response: %v", err)
+	}
+	if loginResp.FlowID == "" {
+		t.Fatalf("login response missing flow_id: %s", body)
+	}
+	return loginResp.FlowID
 }
 
 func setupOAuthTestEnv(t *testing.T) (string, func()) {

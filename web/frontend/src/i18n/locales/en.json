@@ -212,6 +212,33 @@
       "email": "Email",
       "project": "Project"
     },
+    "codexLimits": {
+      "title": "Account Limits",
+      "description": "Usage for registered OpenAI accounts.",
+      "refresh": "Refresh limits",
+      "loading": "Loading account limits...",
+      "loadFailed": "Failed to load account limits",
+      "empty": "No account limits found.",
+      "default": "Default",
+      "plan": "Plan",
+      "accountID": "Account ID",
+      "credentialsMissing": "Credentials missing",
+      "limitsUnavailable": "Limits unavailable",
+      "used": "{{percent}}% used",
+      "refreshes": "refreshes {{time}}",
+      "status": {
+        "available": "available",
+        "unavailable": "unavailable"
+      },
+      "windows": {
+        "weekly": "Weekly"
+      },
+      "errors": {
+        "token_expired": "Token expired",
+        "unauthorized": "Unauthorized",
+        "unavailable": "Limits unavailable"
+      }
+    },
     "errors": {
       "loadFailed": "Failed to load accounts",
       "flowFailed": "Failed to check authentication flow",
@@ -261,9 +288,9 @@
     },
     "onboarding": {
       "title": "Onboard Account",
-      "description": "Choose a provider, login method, and unique account name.",
+      "description": "Choose a provider, login method, and optional account name.",
       "namePlaceholder": "work",
-      "nameHint": "Use letters, numbers, dots, dashes, or underscores. The provider prefix is added automatically.",
+      "nameHint": "Use letters, numbers, dots, dashes, or underscores. OAuth logins can infer this from the account email.",
       "nameRequired": "Account name is required.",
       "nameReserved": "Use a name other than the provider key.",
       "nameInvalid": "Use only letters, numbers, dots, dashes, or underscores.",

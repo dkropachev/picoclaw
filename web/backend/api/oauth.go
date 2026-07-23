@@ -170,6 +170,7 @@ func (s *oauthProviderStatus) applyCredential(provider, credentialID string, cre
 // registerOAuthRoutes binds OAuth login/logout endpoints to the ServeMux.
 func (h *Handler) registerOAuthRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/oauth/providers", h.handleListOAuthProviders)
+	mux.HandleFunc("GET /api/oauth/codex-account-limits", h.handleCodexAccountLimits)
 	mux.HandleFunc("POST /api/oauth/login", h.handleOAuthLogin)
 	mux.HandleFunc("GET /api/oauth/flows/{id}", h.handleGetOAuthFlow)
 	mux.HandleFunc("POST /api/oauth/flows/{id}/poll", h.handlePollOAuthFlow)
@@ -245,10 +246,14 @@ func (h *Handler) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	credentialID, err := auth.NormalizeCredentialID(provider, req.CredentialID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	credentialID := strings.TrimSpace(req.CredentialID)
+	if credentialID != "" {
+		var normalizeErr error
+		credentialID, normalizeErr = auth.NormalizeCredentialID(provider, credentialID)
+		if normalizeErr != nil {
+			http.Error(w, normalizeErr.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	method := strings.ToLower(strings.TrimSpace(req.Method))
@@ -274,7 +279,8 @@ func (h *Handler) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 			Provider:    provider,
 			AuthMethod:  oauthMethodToken,
 		}
-		if err := h.persistCredentialAndConfig(provider, credentialID, oauthMethodToken, cred); err != nil {
+		savedCredentialID, err := h.persistCredentialAndConfig(provider, credentialID, oauthMethodToken, cred)
+		if err != nil {
 			http.Error(w, fmt.Sprintf("token login failed: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -283,7 +289,7 @@ func (h *Handler) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status":        "ok",
 			"provider":      provider,
-			"credential_id": credentialID,
+			"credential_id": savedCredentialID,
 			"method":        method,
 		})
 		return
@@ -442,12 +448,13 @@ func (h *Handler) handlePollOAuthFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.persistCredentialAndConfig(
+	savedCredentialID, err := h.persistCredentialAndConfig(
 		flow.Provider,
 		flow.CredentialID,
 		oauthMethodTokenOrOAuth(flow.Method),
 		cred,
-	); err != nil {
+	)
+	if err != nil {
 		h.setOAuthFlowError(flowID, fmt.Sprintf("failed to save credential: %v", err))
 		updated, _ := h.getOAuthFlow(flowID)
 		w.Header().Set("Content-Type", "application/json")
@@ -455,7 +462,7 @@ func (h *Handler) handlePollOAuthFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.setOAuthFlowSuccess(flowID)
+	h.setOAuthFlowSuccess(flowID, savedCredentialID)
 	updated, _ := h.getOAuthFlow(flowID)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(flowToResponse(updated))
@@ -509,18 +516,19 @@ func (h *Handler) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.persistCredentialAndConfig(
+	savedCredentialID, err := h.persistCredentialAndConfig(
 		flow.Provider,
 		flow.CredentialID,
 		oauthMethodTokenOrOAuth(flow.Method),
 		cred,
-	); err != nil {
+	)
+	if err != nil {
 		h.setOAuthFlowError(flow.ID, fmt.Sprintf("failed to save credential: %v", err))
 		renderOAuthCallbackPage(w, flow.ID, oauthFlowError, "Failed to save credential", err.Error())
 		return
 	}
 
-	h.setOAuthFlowSuccess(flow.ID)
+	h.setOAuthFlowSuccess(flow.ID, savedCredentialID)
 	renderOAuthCallbackPage(w, flow.ID, oauthFlowSuccess, "Authentication successful", "")
 }
 
@@ -734,7 +742,7 @@ func (h *Handler) getOAuthFlowByState(state string) (*oauthFlow, bool) {
 	return &cp, true
 }
 
-func (h *Handler) setOAuthFlowSuccess(flowID string) {
+func (h *Handler) setOAuthFlowSuccess(flowID, credentialID string) {
 	now := oauthNow()
 	h.oauthMu.Lock()
 	defer h.oauthMu.Unlock()
@@ -744,6 +752,9 @@ func (h *Handler) setOAuthFlowSuccess(flowID string) {
 		return
 	}
 	flow.Status = oauthFlowSuccess
+	if credentialID != "" {
+		flow.CredentialID = credentialID
+	}
 	flow.Error = ""
 	flow.UpdatedAt = now
 	if flow.OAuthState != "" {
@@ -791,13 +802,9 @@ func (h *Handler) gcOAuthFlowsLocked(now time.Time) {
 func (h *Handler) persistCredentialAndConfig(
 	provider, credentialID, authMethod string,
 	cred *auth.AuthCredential,
-) error {
+) (string, error) {
 	if cred == nil {
-		return fmt.Errorf("empty credential")
-	}
-	normalizedCredentialID, err := auth.NormalizeCredentialID(provider, credentialID)
-	if err != nil {
-		return err
+		return "", fmt.Errorf("empty credential")
 	}
 
 	cp := *cred
@@ -825,13 +832,55 @@ func (h *Handler) persistCredentialAndConfig(
 		}
 	}
 
+	normalizedCredentialID, err := resolveCredentialIDForAccount(provider, credentialID, &cp)
+	if err != nil {
+		return "", err
+	}
 	if err := oauthSetCredential(normalizedCredentialID, &cp); err != nil {
-		return fmt.Errorf("saving credential: %w", err)
+		return "", fmt.Errorf("saving credential: %w", err)
 	}
 	if err := h.syncProviderAuthMethod(provider, normalizedCredentialID, authMethod); err != nil {
-		return fmt.Errorf("syncing provider auth config: %w", err)
+		return "", fmt.Errorf("syncing provider auth config: %w", err)
 	}
-	return nil
+	return normalizedCredentialID, nil
+}
+
+func resolveCredentialIDForAccount(
+	provider, credentialID string,
+	cred *auth.AuthCredential,
+) (string, error) {
+	if strings.TrimSpace(credentialID) != "" {
+		return auth.NormalizeCredentialID(provider, credentialID)
+	}
+	if provider == oauthProviderOpenAI {
+		if name := credentialNameFromEmail(cred.Email); name != "" {
+			return auth.NormalizeCredentialID(provider, name)
+		}
+	}
+	return auth.NormalizeCredentialID(provider, "")
+}
+
+func credentialNameFromEmail(email string) string {
+	local, _, ok := strings.Cut(strings.ToLower(strings.TrimSpace(email)), "@")
+	if !ok {
+		return ""
+	}
+
+	var b strings.Builder
+	lastDash := false
+	for _, r := range local {
+		allowed := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-'
+		if allowed {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), ".-_")
 }
 
 func (h *Handler) syncProviderAuthMethod(provider, credentialID, authMethod string) error {

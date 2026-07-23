@@ -103,9 +103,13 @@ export function AccountOnboardingSheet({
   )
   const actionBusy = activeAction !== ""
   const submitting = activeAction === actionKey(provider, method)
-  const normalizedCredentialID = `${provider}:${accountName.trim().toLowerCase()}`
+  const trimmedAccountName = accountName.trim()
+  const normalizedCredentialID = trimmedAccountName
+    ? `${provider}:${trimmedAccountName.toLowerCase()}`
+    : ""
   const accountAlreadyExists = registeredAccounts.some(
-    (item) => item.credential_id === normalizedCredentialID,
+    (item) =>
+      normalizedCredentialID && item.credential_id === normalizedCredentialID,
   )
   const methodLabel = (item: OAuthMethod) => {
     if (item === "browser") return t("credentials.actions.browser")
@@ -137,11 +141,11 @@ export function AccountOnboardingSheet({
     const nextErrors: Record<string, string> = {}
     const name = accountName.trim()
 
-    if (!name) {
+    if (!name && method === "token") {
       nextErrors.accountName = t("accounts.onboarding.nameRequired")
-    } else if (name.toLowerCase() === provider) {
+    } else if (name && name.toLowerCase() === provider) {
       nextErrors.accountName = t("accounts.onboarding.nameReserved")
-    } else if (!ACCOUNT_NAME_RE.test(name)) {
+    } else if (name && !ACCOUNT_NAME_RE.test(name)) {
       nextErrors.accountName = t("accounts.onboarding.nameInvalid")
     }
 
@@ -159,7 +163,7 @@ export function AccountOnboardingSheet({
       return
     }
 
-    const credentialID = accountName.trim()
+    const credentialID = trimmedAccountName || undefined
     const ok =
       method === "browser"
         ? await onStartBrowserOAuth(provider, credentialID)
@@ -230,7 +234,6 @@ export function AccountOnboardingSheet({
               label={t("accounts.fields.name")}
               hint={t("accounts.onboarding.nameHint")}
               error={errors.accountName}
-              required
             >
               <Input
                 value={accountName}
