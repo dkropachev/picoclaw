@@ -1,4 +1,5 @@
 import {
+  IconAlertTriangle,
   IconArrowLeft,
   IconArrowsShuffle,
   IconBraces,
@@ -74,6 +75,12 @@ interface RouterAccount {
   authMethod?: string
   credentialID: string
   status: OAuthProviderStatus["status"]
+}
+
+interface AccountModelFetchIssue {
+  accountID: string
+  label: string
+  message: string
 }
 
 interface AccountRouterEditorPageProps {
@@ -529,6 +536,9 @@ export function AccountRouterEditorPage({
   const [sharedModels, setSharedModels] = useState<string[]>([])
   const [sharedModelsLoading, setSharedModelsLoading] = useState(false)
   const [sharedModelsError, setSharedModelsError] = useState("")
+  const [sharedModelIssues, setSharedModelIssues] = useState<
+    AccountModelFetchIssue[]
+  >([])
   const [sharedModelsRefreshKey, setSharedModelsRefreshKey] = useState(0)
 
   const isEdit = mode === "edit"
@@ -598,6 +608,7 @@ export function AccountRouterEditorPage({
       setAutoArrange(true)
       setRawJson(formatRouterConfig(nextRouter))
       setSelectedBlockID(nextRouter.entry || nextRouter.blocks?.[0]?.id || "")
+      setSharedModelIssues([])
       setError("")
       setRawError("")
     } catch (err) {
@@ -637,29 +648,50 @@ export function AccountRouterEditorPage({
       setSharedModels([])
       setSharedModelsLoading(false)
       setSharedModelsError("")
+      setSharedModelIssues([])
       return
     }
 
     let cancelled = false
     setSharedModelsLoading(true)
     setSharedModelsError("")
-    Promise.all(
+    setSharedModelIssues([])
+    Promise.allSettled(
       activeAccounts.map((account) =>
         fetchAccountModels(account, providerOptions),
       ),
     )
-      .then((lists) => {
+      .then((results) => {
         if (cancelled) return
-        setSharedModels(intersectModelIDs(lists))
-      })
-      .catch((err) => {
-        if (cancelled) return
-        setSharedModels([])
-        setSharedModelsError(
-          err instanceof Error
-            ? err.message
-            : t("models.router.sharedModelsError"),
-        )
+
+        const availableModelLists: string[][] = []
+        const issues: AccountModelFetchIssue[] = []
+        results.forEach((result, index) => {
+          const account = activeAccounts[index]
+          if (result.status === "fulfilled") {
+            if (result.value.length > 0) {
+              availableModelLists.push(result.value)
+              return
+            }
+            issues.push({
+              accountID: account.id,
+              label: account.label,
+              message: t("models.router.noAccountModels"),
+            })
+            return
+          }
+          issues.push({
+            accountID: account.id,
+            label: account.label,
+            message:
+              result.reason instanceof Error
+                ? result.reason.message
+                : t("models.router.sharedModelsError"),
+          })
+        })
+
+        setSharedModels(intersectModelIDs(availableModelLists))
+        setSharedModelIssues(issues)
       })
       .finally(() => {
         if (!cancelled) setSharedModelsLoading(false)
@@ -938,6 +970,7 @@ export function AccountRouterEditorPage({
                 models={sharedModels}
                 loading={sharedModelsLoading}
                 error={sharedModelsError}
+                issues={sharedModelIssues}
                 disabled={
                   activeAccountNames.length === 0 || !activeAccountsResolved
                 }
@@ -1101,6 +1134,7 @@ function SharedModelField({
   models,
   loading,
   error,
+  issues,
   disabled,
   allowed,
   onChange,
@@ -1110,6 +1144,7 @@ function SharedModelField({
   models: string[]
   loading: boolean
   error: string
+  issues: AccountModelFetchIssue[]
   disabled: boolean
   allowed: boolean
   onChange: (value: string) => void
@@ -1184,6 +1219,29 @@ function SharedModelField({
         </p>
       )}
       {error && <p className="text-destructive text-xs">{error}</p>}
+      {issues.length > 0 && (
+        <div className="border-destructive/30 bg-destructive/5 text-destructive rounded-md border px-3 py-2 text-xs">
+          <p className="flex items-center gap-2 font-medium">
+            <IconAlertTriangle className="size-4 shrink-0" />
+            {t("models.router.accountFetchWarning")}
+          </p>
+          <ul className="mt-1 space-y-1">
+            {issues.map((issue) => (
+              <li key={issue.accountID}>
+                {t("models.router.accountFetchFailed", {
+                  account: issue.label,
+                  error: issue.message,
+                })}
+              </li>
+            ))}
+          </ul>
+          {models.length > 0 && (
+            <p className="text-muted-foreground mt-1">
+              {t("models.router.partialSharedModels")}
+            </p>
+          )}
+        </div>
+      )}
       {!allowed && (
         <p className="text-destructive text-xs">
           {t("models.router.errorModelNotShared")}
