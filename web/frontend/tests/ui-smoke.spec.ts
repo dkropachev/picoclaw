@@ -465,6 +465,8 @@ const channelCatalogResponse = {
 
 interface MockLauncherApiOptions {
   completeDraftViaPolling?: boolean
+  fetchModelEmptyCredentials?: string[]
+  fetchModelFailures?: Record<string, string>
   nullableWorkflowPayloads?: boolean
   oauthProviders?: unknown[]
 }
@@ -532,7 +534,29 @@ async function mockLauncherApis(
 
       if (method === "POST") {
         switch (path) {
-          case "/api/models/fetch":
+          case "/api/models/fetch": {
+            const body = request.postDataJSON() as {
+              credential_id?: string
+            }
+            const failure = body.credential_id
+              ? options.fetchModelFailures?.[body.credential_id]
+              : undefined
+            if (failure) {
+              return route.fulfill({
+                status: 502,
+                contentType: "text/plain",
+                body: failure,
+              })
+            }
+            if (
+              body.credential_id &&
+              options.fetchModelEmptyCredentials?.includes(body.credential_id)
+            ) {
+              return json(route, {
+                models: [],
+                total: 0,
+              })
+            }
             return json(route, {
               models: [
                 { id: "gpt-4o", owned_by: "openai" },
@@ -540,6 +564,7 @@ async function mockLauncherApis(
               ],
               total: 2,
             })
+          }
           case "/api/workflows/development/start": {
             const body = request.postDataJSON() as {
               reason?: string
@@ -1301,6 +1326,10 @@ test("account router editor supports block fallback graph editing", async ({
   const errors = collectPageErrors(page)
 
   await gotoMockedRoute(page, "/accounts", {
+    fetchModelEmptyCredentials: ["openai:empty"],
+    fetchModelFailures: {
+      "openai:backup": "Failed to fetch models: token invalidated",
+    },
     oauthProviders: [
       {
         provider: "openai",
@@ -1332,6 +1361,16 @@ test("account router editor supports block fallback graph editing", async ({
             auth_method: "oauth",
             account_id: "acct-backup",
           },
+          {
+            provider: "openai",
+            credential_id: "openai:empty",
+            display_name: "OpenAI",
+            methods: ["browser", "device_code", "token"],
+            logged_in: true,
+            status: "connected",
+            auth_method: "oauth",
+            account_id: "acct-empty",
+          },
         ],
       },
     ],
@@ -1353,6 +1392,20 @@ test("account router editor supports block fallback graph editing", async ({
 
   await page.getByRole("button", { name: "Add Load Balancer" }).click()
   await page.getByRole("button", { name: "OpenAI: acct-backup" }).click()
+  await page.getByRole("button", { name: "OpenAI: acct-empty" }).click()
+
+  await expect(
+    page.getByText("Some accounts did not return models."),
+  ).toBeVisible()
+  await expect(
+    page.getByText("OpenAI: acct-backup: Failed to fetch models"),
+  ).toBeVisible()
+  await expect(
+    page.getByText("OpenAI: acct-empty: No models returned."),
+  ).toBeVisible()
+  await page.getByRole("combobox", { name: "Shared Model" }).click()
+  await expect(page.getByRole("option", { name: "gpt-4o" })).toBeVisible()
+  await page.keyboard.press("Escape")
 
   await page.getByRole("button", { name: "account-1", exact: true }).click()
   await page.getByRole("combobox", { name: "Fallback Connection" }).click()
@@ -1425,7 +1478,14 @@ test("account router editor supports block fallback graph editing", async ({
   await expect(page.getByRole("button", { name: "Raw JSON" })).toBeVisible()
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
-  expect(errors).toEqual([])
+  expect(
+    errors.filter(
+      (message) =>
+        !message.includes(
+          "Failed to load resource: the server responded with a status of 502",
+        ),
+    ),
+  ).toEqual([])
 })
 
 test("skill import dialog fits the viewport", async ({ page }) => {
