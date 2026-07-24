@@ -465,6 +465,7 @@ const channelCatalogResponse = {
 
 interface MockLauncherApiOptions {
   completeDraftViaPolling?: boolean
+  codexAccountLimits?: unknown
   fetchModelEmptyCredentials?: string[]
   fetchModelFailures?: Record<string, string>
   nullableWorkflowPayloads?: boolean
@@ -843,6 +844,31 @@ async function mockLauncherApis(
           return json(route, { entries: [], total: 0 })
         case "/api/oauth/providers":
           return json(route, { providers: options.oauthProviders ?? [] })
+        case "/api/oauth/codex-account-limits":
+          return json(
+            route,
+            options.codexAccountLimits ?? {
+              accounts: [
+                {
+                  id: "openai",
+                  default: true,
+                  email: "primary@example.test",
+                  account_id: "acct-primary",
+                  plan: "pro",
+                  limits_status: "available",
+                  entries: [
+                    {
+                      name: "codex",
+                      status: "available",
+                      window: "weekly",
+                      used_percent: 64,
+                      refreshes_at: "2026-07-28 13:05:32 -04:00",
+                    },
+                  ],
+                },
+              ],
+            },
+          )
         case "/api/sessions":
           return json(route, [])
         case "/api/tools":
@@ -1291,10 +1317,62 @@ test("accounts page lists registered accounts and opens onboarding", async ({
         credentials: [],
       },
     ],
+    codexAccountLimits: {
+      accounts: [
+        {
+          id: "openai:work",
+          email: "work@example.test",
+          account_id: "acc_123",
+          plan: "pro",
+          limits_status: "available",
+          entries: [
+            {
+              name: "codex",
+              status: "available",
+              window: "5h",
+              used_percent: 8,
+            },
+            {
+              name: "codex",
+              status: "available",
+              window: "weekly",
+              used_percent: 64,
+            },
+            {
+              name: "GPT-5.3-Codex-Spark",
+              status: "available",
+              window: "weekly",
+              used_percent: 0,
+            },
+          ],
+        },
+        {
+          id: "personal",
+          email: "personal@example.test",
+          plan: "plus",
+          limits_status: "available",
+          entries: [
+            {
+              name: "codex",
+              status: "available",
+              window: "weekly",
+              used_percent: 12,
+            },
+          ],
+        },
+      ],
+    },
   })
 
   await expect(page.getByRole("heading", { name: "work" })).toBeVisible()
+  await expect(page.getByText("OpenAI oauth (pro)")).toBeVisible()
   await expect(page.getByText("openai:work")).toBeVisible()
+  await expect(page.getByText("Codex Account Limits")).not.toBeVisible()
+  await expect(page.getByText("codex 5h")).toBeVisible()
+  await expect(page.getByText("codex Weekly")).toBeVisible()
+  await expect(page.getByText("GPT-5.3-Codex-Spark Weekly")).toBeVisible()
+  await expect(page.getByText("64%")).toBeVisible()
+  await expect(page.getByText("personal@example.test")).not.toBeVisible()
   await expect(page.getByText("Anthropic")).not.toBeVisible()
 
   await page.getByRole("button", { name: "Add Account" }).first().click()
@@ -1302,6 +1380,7 @@ test("accounts page lists registered accounts and opens onboarding", async ({
     page.getByRole("dialog", { name: "Onboard Account" }),
   ).toBeVisible()
   await expect(page.getByPlaceholder("work")).toBeVisible()
+  await expect(page.getByText("OAuth logins can infer this")).toBeVisible()
   expect(errors).toEqual([])
 })
 

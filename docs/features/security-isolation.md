@@ -17,7 +17,7 @@ security behavior that other feature specs rely on.
   isolation with fail-closed setup.
 - Core types/functions: secure string config helpers, credential store,
   dashboard auth middleware, CSRF/logout handlers, HTTP guard, isolation runtime,
-  token and PKCE helpers.
+  token, OAuth response parsing, and PKCE helpers.
 - Runtime ordering: load security config, normalize protected values, validate
   access or target, execute guarded storage/network/process operation, redact
   sensitive output, and emit clear errors.
@@ -37,11 +37,13 @@ security behavior that other feature specs rely on.
 | `FR-SEC-006` | MUST | Isolation runtime starts supported commands with configured exposed paths and fails closed on unsupported/invalid setup. | Optional isolation must not silently weaken execution. |
 | `FR-SEC-007` | SHOULD | Key generation and token helpers produce unique, parseable, and revocable values for auth flows. | Auth flows need reliable primitives. |
 | `FR-SEC-008` | MUST | Model-list validation rejects unsupported provider-control values such as invalid `reasoning_effort` and invalid router account references before those values are persisted or used. | Invalid config should fail early instead of producing unsafe or broken provider requests. |
+| `FR-SEC-009` | MUST | OAuth token response parsing extracts non-secret account email claims from ID-token or access-token JWT payloads when present, preserves the email across refreshes, and leaves the email empty without failing when claims are absent or malformed. | Launcher account naming and credential metadata need stable non-secret account identity without weakening token validation or persistence. |
 
 ## Data And State Model
 
 Security state includes secure-string sentinels, credential records keyed by
-provider and auth method, dashboard password/session data, login attempt
+provider and auth method with optional non-secret account email metadata,
+dashboard password/session data, login attempt
 counters, configured secret filters, private-host allowlists, isolation exposed
 paths, generated token IDs, and revocation metadata.
 
@@ -80,7 +82,7 @@ Owns: TEST pkg/config/version*
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Config | Secure strings, `isolation.*`, filtering fields, model-list validation | Secret preservation, isolation controls, sensitive-data filtering, and early rejection of unsupported provider-control values. | `FR-SEC-001`, `FR-SEC-003`, `FR-SEC-006`, `FR-SEC-008` |
-| Storage | Credential store | Provider credential CRUD and auth method metadata. | `FR-SEC-002`, `FR-SEC-007` |
+| Storage | Credential store | Provider credential CRUD, auth method metadata, and optional non-secret account email metadata extracted from OAuth token responses. | `FR-SEC-002`, `FR-SEC-007`, `FR-SEC-009` |
 | Network | Safe HTTP client and net binding helpers | Private host controls and bind behavior. | `FR-SEC-005` |
 
 ## Algorithms And Ordering
@@ -89,12 +91,15 @@ Owns: TEST pkg/config/version*
    values or optional model-list controls.
 2. Preserve existing secure-string values when updates contain masked values;
    replace, clear, or reject secrets only through explicit update semantics.
-3. Authenticate dashboard requests before protected handlers and require POST
+3. Parse OAuth token responses into credential records, copy non-secret email
+   claims from JWT payloads when available, and retain an existing email when a
+   refresh response omits it.
+4. Authenticate dashboard requests before protected handlers and require POST
    semantics for logout so browser navigation cannot clear sessions.
-4. Resolve HTTP targets to concrete host/IP data, deny private or internal
+5. Resolve HTTP targets to concrete host/IP data, deny private or internal
    destinations unless allow rules apply, then execute the request through the
    guarded client.
-5. Build isolation command specs from supported runtime configuration, validate
+6. Build isolation command specs from supported runtime configuration, validate
    exposed paths, start only supported commands, and return errors rather than
    weakening to unisolated execution.
 
@@ -126,6 +131,7 @@ entries own secrets.
 - Invalid protected command patterns fail validation.
 - Unsupported isolation platform returns clear error.
 - Private host requests are denied unless whitelisted.
+- Missing or malformed OAuth JWT email claims do not fail token parsing.
 
 ## Acceptance Evidence
 
@@ -136,10 +142,12 @@ entries own secrets.
 | `FR-SEC-004` | [web/backend/api/auth_test.go](../../web/backend/api/auth_test.go), [web/backend/api/auth_csrf_test.go](../../web/backend/api/auth_csrf_test.go) |
 | `FR-SEC-005`, `FR-SEC-006` | [pkg/utils/http_guard.go](../../pkg/utils/http_guard.go), [pkg/isolation/runtime_test.go](../../pkg/isolation/runtime_test.go), [pkg/netbind/netbind_test.go](../../pkg/netbind/netbind_test.go) |
 | `FR-SEC-008` | [pkg/config/model_config_test.go](../../pkg/config/model_config_test.go), [pkg/config/model_router_test.go](../../pkg/config/model_router_test.go), [pkg/providers/common/reasoning_effort_test.go](../../pkg/providers/common/reasoning_effort_test.go) |
+| `FR-SEC-009` | [pkg/auth/oauth_test.go](../../pkg/auth/oauth_test.go), [web/backend/api/oauth_test.go](../../web/backend/api/oauth_test.go) |
 
 ## Implementation Anchors
 
 - [pkg/config/config_struct.go](../../pkg/config/config_struct.go)
 - [pkg/config/config.go](../../pkg/config/config.go)
+- [pkg/auth/oauth.go](../../pkg/auth/oauth.go)
 - [pkg/credential](../../pkg/credential)
 - [pkg/isolation](../../pkg/isolation)

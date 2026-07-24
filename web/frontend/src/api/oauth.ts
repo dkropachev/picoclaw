@@ -18,6 +18,31 @@ export interface OAuthProviderStatus {
   credentials?: OAuthProviderStatus[]
 }
 
+export interface CodexAccountLimitEntry {
+  name: string
+  status: string
+  window?: string
+  used_percent?: number
+  refreshes_at?: string
+}
+
+export interface CodexAccountLimitAccount {
+  id: string
+  default?: boolean
+  email?: string
+  account_id?: string
+  plan?: string
+  credential_status?: string
+  limits_status?: string
+  limits_error?: string
+  entries?: CodexAccountLimitEntry[]
+}
+
+export interface CodexAccountLimitsResponse {
+  accounts: CodexAccountLimitAccount[]
+  error?: string
+}
+
 export interface OAuthFlowState {
   flow_id: string
   provider: OAuthProvider
@@ -68,6 +93,10 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
 export async function getOAuthProviders(): Promise<OAuthProvidersResponse> {
   return request<OAuthProvidersResponse>("/api/oauth/providers")
+}
+
+export async function getCodexAccountLimits(): Promise<CodexAccountLimitsResponse> {
+  return request<CodexAccountLimitsResponse>("/api/oauth/codex-account-limits")
 }
 
 export async function loginOAuth(

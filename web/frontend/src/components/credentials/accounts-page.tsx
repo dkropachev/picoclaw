@@ -14,7 +14,13 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import { type ModelInfo, getModels, setDefaultModel } from "@/api/models"
-import type { OAuthProvider, OAuthProviderStatus } from "@/api/oauth"
+import {
+  type CodexAccountLimitAccount,
+  type CodexAccountLimitsResponse,
+  type OAuthProvider,
+  type OAuthProviderStatus,
+  getCodexAccountLimits,
+} from "@/api/oauth"
 import { DeleteModelDialog } from "@/components/models/delete-model-dialog"
 import { ModelCard } from "@/components/models/model-card"
 import { PageHeader } from "@/components/page-header"
@@ -24,6 +30,7 @@ import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { refreshGatewayState } from "@/store/gateway"
 
 import { AccountOnboardingSheet } from "./account-onboarding-sheet"
+import { CodexAccountLimitSummary } from "./codex-account-limits-panel"
 import { DeviceCodeSheet } from "./device-code-sheet"
 import { LogoutConfirmDialog } from "./logout-confirm-dialog"
 import { ProviderStatusLine } from "./provider-status-line"
@@ -44,6 +51,92 @@ function getAccountName(
   return defaultLabel
 }
 
+function getAccountProviderLabel(
+  account: OAuthProviderStatus,
+  codexLimit?: CodexAccountLimitAccount,
+): string {
+  const parts = [account.display_name]
+  if (account.auth_method) {
+    parts.push(account.auth_method)
+  }
+  const subscription = codexLimit?.plan?.trim()
+  if (account.provider === "openai" && subscription) {
+    return `${parts.join(" ")} (${subscription})`
+  }
+  return parts.join(" ")
+}
+
+function normalizeAccountMatchKey(value: string | undefined): string {
+  return value?.trim().toLowerCase() ?? ""
+}
+
+function appendMatchKey(keys: string[], value: string | undefined) {
+  const key = normalizeAccountMatchKey(value)
+  if (key && !keys.includes(key)) {
+    keys.push(key)
+  }
+}
+
+function stripProviderPrefix(provider: OAuthProvider, value: string): string {
+  const prefix = `${provider}:`
+  return value.startsWith(prefix) ? value.slice(prefix.length) : value
+}
+
+function getCodexLimitMatchKeys(account: CodexAccountLimitAccount): string[] {
+  const keys: string[] = []
+  appendMatchKey(keys, account.id)
+  if (account.id && !account.id.includes(":")) {
+    appendMatchKey(keys, `openai:${account.id}`)
+  }
+  appendMatchKey(keys, account.account_id)
+  appendMatchKey(keys, account.email)
+  if (account.default || account.id === "default" || account.id === "openai") {
+    appendMatchKey(keys, "openai")
+    appendMatchKey(keys, "openai:default")
+  }
+  return keys
+}
+
+function indexCodexLimits(
+  data: CodexAccountLimitsResponse | null,
+): Map<string, CodexAccountLimitAccount> {
+  const index = new Map<string, CodexAccountLimitAccount>()
+  for (const account of data?.accounts ?? []) {
+    for (const key of getCodexLimitMatchKeys(account)) {
+      if (!index.has(key)) {
+        index.set(key, account)
+      }
+    }
+  }
+  return index
+}
+
+function getRegisteredAccountMatchKeys(account: OAuthProviderStatus): string[] {
+  const keys: string[] = []
+  const credentialID = getAccountCredentialID(account)
+  appendMatchKey(keys, credentialID)
+  appendMatchKey(keys, stripProviderPrefix(account.provider, credentialID))
+  appendMatchKey(keys, account.account_id)
+  appendMatchKey(keys, account.email)
+  return keys
+}
+
+function getAccountCodexLimits(
+  account: OAuthProviderStatus,
+  limitsByKey: Map<string, CodexAccountLimitAccount>,
+): CodexAccountLimitAccount | undefined {
+  if (account.provider !== "openai") {
+    return undefined
+  }
+  for (const key of getRegisteredAccountMatchKeys(account)) {
+    const limits = limitsByKey.get(key)
+    if (limits) {
+      return limits
+    }
+  }
+  return undefined
+}
+
 function ProviderIcon({ provider }: { provider: OAuthProvider }) {
   if (provider === "openai") {
     return <IconBrandOpenai className="size-4" />
@@ -57,13 +150,28 @@ function ProviderIcon({ provider }: { provider: OAuthProvider }) {
 interface AccountCardProps {
   account: OAuthProviderStatus
   activeAction: string
+  codexLimit?: CodexAccountLimitAccount
+  codexLimitsLoading: boolean
+  codexLimitsError: string
+  codexLimitsApiError: string
+  onRefreshCodexLimits: () => void
   onAskLogout: (provider: OAuthProvider, credentialID?: string) => void
 }
 
-function AccountCard({ account, activeAction, onAskLogout }: AccountCardProps) {
+function AccountCard({
+  account,
+  activeAction,
+  codexLimit,
+  codexLimitsLoading,
+  codexLimitsError,
+  codexLimitsApiError,
+  onRefreshCodexLimits,
+  onAskLogout,
+}: AccountCardProps) {
   const { t } = useTranslation()
   const credentialID = getAccountCredentialID(account)
   const accountName = getAccountName(account, t("accounts.defaultName"))
+  const providerLabel = getAccountProviderLabel(account, codexLimit)
   const actionBusy = activeAction !== ""
   const logoutLoading = activeAction === `${account.provider}:logout`
 
@@ -78,16 +186,9 @@ function AccountCard({ account, activeAction, onAskLogout }: AccountCardProps) {
             <div className="min-w-0">
               <h3 className="truncate text-sm font-semibold">{accountName}</h3>
               <p className="text-muted-foreground truncate text-xs">
-                {account.display_name}
+                {providerLabel}
               </p>
             </div>
-          </div>
-
-          <div className="mt-4">
-            <ProviderStatusLine
-              status={account.status}
-              authMethod={account.auth_method}
-            />
           </div>
 
           <dl className="mt-4 grid gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
@@ -128,22 +229,35 @@ function AccountCard({ account, activeAction, onAskLogout }: AccountCardProps) {
               </div>
             )}
           </dl>
+
+          {account.provider === "openai" ? (
+            <CodexAccountLimitSummary
+              account={codexLimit}
+              loading={codexLimitsLoading}
+              error={codexLimitsError}
+              apiError={codexLimitsApiError}
+              onRefresh={onRefreshCodexLimits}
+            />
+          ) : null}
         </div>
 
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={actionBusy}
-          onClick={() => onAskLogout(account.provider, credentialID)}
-          className="text-destructive hover:bg-destructive/10 hover:text-destructive sm:shrink-0"
-        >
-          {logoutLoading ? (
-            <IconLoader2 className="size-4 animate-spin" />
-          ) : (
-            <IconTrash className="size-4" />
-          )}
-          {t("accounts.actions.remove")}
-        </Button>
+        <div className="flex items-center gap-2 sm:shrink-0">
+          <ProviderStatusLine status={account.status} />
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={actionBusy}
+            onClick={() => onAskLogout(account.provider, credentialID)}
+            className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+          >
+            {logoutLoading ? (
+              <IconLoader2 className="size-4 animate-spin" />
+            ) : (
+              <IconTrash className="size-4" />
+            )}
+            {t("accounts.actions.remove")}
+          </Button>
+        </div>
       </div>
     </article>
   )
@@ -168,6 +282,10 @@ function AccountsHomePage() {
   const [models, setModels] = useState<ModelInfo[]>([])
   const [modelsLoading, setModelsLoading] = useState(true)
   const [modelsError, setModelsError] = useState("")
+  const [codexLimits, setCodexLimits] =
+    useState<CodexAccountLimitsResponse | null>(null)
+  const [codexLimitsLoading, setCodexLimitsLoading] = useState(true)
+  const [codexLimitsError, setCodexLimitsError] = useState("")
   const [deletingRouter, setDeletingRouter] = useState<ModelInfo | null>(null)
   const [settingDefaultIndex, setSettingDefaultIndex] = useState<number | null>(
     null,
@@ -197,6 +315,11 @@ function AccountsHomePage() {
     return providers.flatMap((provider) => provider.credentials ?? [])
   }, [providers])
 
+  const codexLimitsByKey = useMemo(
+    () => indexCodexLimits(codexLimits),
+    [codexLimits],
+  )
+
   const fetchModels = useCallback(async () => {
     setModelsLoading(true)
     try {
@@ -210,9 +333,30 @@ function AccountsHomePage() {
     }
   }, [t])
 
+  const fetchCodexLimits = useCallback(async () => {
+    setCodexLimitsLoading(true)
+    try {
+      const data = await getCodexAccountLimits()
+      setCodexLimits(data)
+      setCodexLimitsError("")
+    } catch (err) {
+      setCodexLimitsError(
+        err instanceof Error
+          ? err.message
+          : t("credentials.codexLimits.loadFailed"),
+      )
+    } finally {
+      setCodexLimitsLoading(false)
+    }
+  }, [t])
+
   useEffect(() => {
     void fetchModels()
   }, [fetchModels])
+
+  useEffect(() => {
+    void fetchCodexLimits()
+  }, [fetchCodexLimits])
 
   const routers = models
     .filter((item) => item.provider === "router" || item.router != null)
@@ -293,6 +437,11 @@ function AccountsHomePage() {
                   key={getAccountCredentialID(account)}
                   account={account}
                   activeAction={activeAction}
+                  codexLimit={getAccountCodexLimits(account, codexLimitsByKey)}
+                  codexLimitsLoading={codexLimitsLoading}
+                  codexLimitsError={codexLimitsError}
+                  codexLimitsApiError={codexLimits?.error ?? ""}
+                  onRefreshCodexLimits={() => void fetchCodexLimits()}
                   onAskLogout={askLogout}
                 />
               ))}
