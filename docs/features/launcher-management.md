@@ -134,11 +134,11 @@ Owns: TEST pkg/migrate/*
 3. For OAuth requests, create bounded flow state, redirect or poll provider
    login, exchange callback state for credentials, then persist or clear
    provider auth records. The launcher accounts page renders stored credentials
-   as registered accounts and keeps new account onboarding behind an explicit
-   add-account surface. When an OpenAI OAuth account name is omitted, the saved
-   credential ID uses the email local-part as the provider-scoped suffix. OpenAI
-   usage-limit lookup uses Picoclaw credential records instead of Codex CLI
-   config.
+   and account-router aliases in one account card grid while keeping new account
+   onboarding behind an explicit add-account surface. When an OpenAI OAuth
+   account name is omitted, the saved credential ID uses the email local-part as
+   the provider-scoped suffix. OpenAI usage-limit lookup uses Picoclaw
+   credential records instead of Codex CLI config.
 4. For model fetch requests, resolve stored model auth when a model index is
    supplied, prefer explicit request credentials otherwise, route OpenAI
    OAuth/token fetches to the ChatGPT Codex model list endpoint with a
