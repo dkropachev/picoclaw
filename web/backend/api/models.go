@@ -837,7 +837,7 @@ const openAICodexModelsEndpointDefault = "https://chatgpt.com/backend-api/codex/
 
 var openAICodexModelsEndpoint = openAICodexModelsEndpointDefault
 
-const openAICodexModelsClientVersionDefault = "0.139.0"
+const openAICodexModelsClientVersionDefault = "0.144.0"
 
 var listGitHubCopilotModelsWithToken = cliprovider.ListGitHubCopilotModelsWithToken
 
