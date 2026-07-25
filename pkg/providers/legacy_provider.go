@@ -34,14 +34,18 @@ func CreateProvider(cfg *config.Config) (LLMProvider, string, error) {
 		if accountName == "" {
 			return nil, "", fmt.Errorf("router model %q has no account blocks", model)
 		}
-		modelCfg, err = cfg.GetModelConfig(accountName)
-		if err != nil {
-			return nil, "", fmt.Errorf(
-				"router model %q account %q not found in model_list: %w",
-				model,
-				accountName,
-				err,
-			)
+		if credentialCfg, ok := credentialAccountModelConfig(accountName, modelCfg.Model); ok {
+			modelCfg = credentialCfg
+		} else {
+			modelCfg, err = cfg.GetModelConfig(accountName)
+			if err != nil {
+				return nil, "", fmt.Errorf(
+					"router model %q account %q not found in model_list: %w",
+					model,
+					accountName,
+					err,
+				)
+			}
 		}
 	}
 
@@ -57,6 +61,48 @@ func CreateProvider(cfg *config.Config) (LLMProvider, string, error) {
 	}
 
 	return provider, modelID, nil
+}
+
+func credentialAccountModelConfig(accountName string, model string) (*config.ModelConfig, bool) {
+	credentialID, ok := config.AccountRouterCredentialAccountID(accountName)
+	if !ok {
+		return nil, false
+	}
+	provider, ok := config.AccountRouterCredentialAccountProvider(accountName)
+	if !ok {
+		return nil, true
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil, true
+	}
+	provider = credentialAccountRuntimeProvider(provider)
+	return &config.ModelConfig{
+		ModelName:    strings.TrimSpace(accountName),
+		Provider:     provider,
+		Model:        model,
+		AuthMethod:   credentialAccountRuntimeAuthMethod(provider),
+		CredentialID: credentialID,
+		Enabled:      true,
+	}, true
+}
+
+func credentialAccountRuntimeProvider(provider string) string {
+	switch strings.TrimSpace(provider) {
+	case "google-antigravity":
+		return "antigravity"
+	default:
+		return strings.TrimSpace(provider)
+	}
+}
+
+func credentialAccountRuntimeAuthMethod(provider string) string {
+	switch strings.TrimSpace(provider) {
+	case "openai", "antigravity":
+		return "oauth"
+	default:
+		return "token"
+	}
 }
 
 func firstRouterAccount(routerCfg *config.AccountRouterConfig) string {
