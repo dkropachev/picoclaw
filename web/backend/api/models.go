@@ -154,9 +154,7 @@ func normalizeIncomingModelConfig(mc *config.ModelConfig) {
 	mc.CredentialID = strings.TrimSpace(mc.CredentialID)
 	if mc.Router != nil || providers.NormalizeProvider(mc.Provider) == config.ModelRouterProvider {
 		mc.Provider = config.ModelRouterProvider
-		if strings.TrimSpace(mc.Model) == "" {
-			mc.Model = strings.TrimSpace(mc.ModelName)
-		}
+		mc.Model = ""
 		mc.APIKeys = nil
 		mc.APIBase = ""
 		mc.Proxy = ""

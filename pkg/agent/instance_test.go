@@ -100,6 +100,168 @@ func TestNewAgentInstance_DefaultsTemperatureWhenUnset(t *testing.T) {
 	}
 }
 
+func TestCandidateProviderHelpersCoverEmptyAndDuplicateBranches(t *testing.T) {
+	provider := &mockProvider{}
+	agent := &AgentInstance{}
+
+	if got := (*AgentInstance)(nil).candidateProvider("model_name:primary"); got != nil {
+		t.Fatalf("nil agent candidateProvider() = %#v, want nil", got)
+	}
+	if got := agent.candidateProvider(" "); got != nil {
+		t.Fatalf("blank candidateProvider() = %#v, want nil", got)
+	}
+	if agent.setCandidateProviderIfAbsent("", provider) {
+		t.Fatal("setCandidateProviderIfAbsent(blank key) = true, want false")
+	}
+	if agent.setCandidateProviderIfAbsent("model_name:primary", nil) {
+		t.Fatal("setCandidateProviderIfAbsent(nil provider) = true, want false")
+	}
+	if !agent.setCandidateProviderIfAbsent("model_name:primary", provider) {
+		t.Fatal("setCandidateProviderIfAbsent(first insert) = false, want true")
+	}
+	if agent.setCandidateProviderIfAbsent("model_name:primary", provider) {
+		t.Fatal("setCandidateProviderIfAbsent(duplicate) = true, want false")
+	}
+
+	candidate := providers.FallbackCandidate{
+		Provider:    "openai",
+		Model:       "gpt-4o",
+		IdentityKey: "model_name:primary",
+	}
+	if got := agent.candidateProviderForCandidate(candidate); got != provider {
+		t.Fatalf("candidateProviderForCandidate() = %#v, want inserted provider", got)
+	}
+	keys := candidateProviderKeys(providers.FallbackCandidate{
+		Provider:    "openai",
+		Model:       "gpt-4o",
+		IdentityKey: providers.ModelKey("openai", "gpt-4o"),
+	})
+	if len(keys) != 1 || keys[0] != providers.ModelKey("openai", "gpt-4o") {
+		t.Fatalf("candidateProviderKeys(deduped) = %#v, want single model key", keys)
+	}
+
+	out := map[string]providers.LLMProvider{"model_name:primary": provider}
+	if registerCandidateProvider(nil, candidate, provider) {
+		t.Fatal("registerCandidateProvider(nil map) = true, want false")
+	}
+	if registerCandidateProvider(out, candidate, nil) {
+		t.Fatal("registerCandidateProvider(nil provider) = true, want false")
+	}
+	if !registerCandidateProvider(out, candidate, provider) {
+		t.Fatal("registerCandidateProvider(model-key insert) = false, want true")
+	}
+	if out[providers.ModelKey("openai", "gpt-4o")] != provider {
+		t.Fatal("registerCandidateProvider did not add provider/model key")
+	}
+}
+
+func TestModelRouterAccountNamesTrimsDedupesAndSkipsUnsupportedBlocks(t *testing.T) {
+	if got := modelRouterAccountNames(nil); got != nil {
+		t.Fatalf("modelRouterAccountNames(nil) = %#v, want nil", got)
+	}
+
+	got := modelRouterAccountNames(&config.ModelRouterConfig{
+		Blocks: []config.ModelRouterBlock{
+			{Type: config.ModelRouterBlockTypeAccount, Account: " account-a "},
+			{Type: config.ModelRouterBlockTypeAccount, Account: "account-a"},
+			{Type: config.ModelRouterBlockTypeAccount, Account: " "},
+			{Type: config.ModelRouterBlockTypeLoadBalance, Accounts: []string{"account-b", "account-a", " account-c "}},
+			{Type: "unknown", Account: "ignored"},
+		},
+	})
+	want := []string{"account-a", "account-b", "account-c"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("modelRouterAccountNames() = %#v, want %#v", got, want)
+	}
+}
+
+func TestResolvePrimaryProviderForAgentFallsBackForEmptyMissingAndRouterModels(t *testing.T) {
+	fallback := &mockProvider{}
+	if got := resolvePrimaryProviderForAgent(nil, "/workspace", "main", "model", fallback); got != fallback {
+		t.Fatal("nil config did not return fallback provider")
+	}
+	if got := resolvePrimaryProviderForAgent(&config.Config{}, "/workspace", "main", " ", fallback); got != fallback {
+		t.Fatal("blank model did not return fallback provider")
+	}
+
+	cfg := &config.Config{
+		ModelList: []*config.ModelConfig{{
+			ModelName: "router-main",
+			Provider:  config.ModelRouterProvider,
+			Router: &config.ModelRouterConfig{
+				Enabled: true,
+				Entry:   "primary",
+				Blocks: []config.ModelRouterBlock{{
+					ID:      "primary",
+					Type:    config.ModelRouterBlockTypeAccount,
+					Account: "account-a",
+				}},
+			},
+		}},
+	}
+	if got := resolvePrimaryProviderForAgent(cfg, "/workspace", "main", "missing", fallback); got != fallback {
+		t.Fatal("missing model did not return fallback provider")
+	}
+	if got := resolvePrimaryProviderForAgent(cfg, "/workspace", "main", "router-main", fallback); got != fallback {
+		t.Fatal("router model did not return fallback provider")
+	}
+}
+
+func TestInstanceUtilityHelpersCoverFallbackBranches(t *testing.T) {
+	patterns := compilePatterns([]string{"[", "^/tmp/workspace$"})
+	if len(patterns) != 1 {
+		t.Fatalf("compilePatterns() len = %d, want 1 valid pattern", len(patterns))
+	}
+	if !patterns[0].MatchString("/tmp/workspace") {
+		t.Fatal("compiled pattern does not match expected path")
+	}
+
+	mediaPattern := mediaTempDirPattern()
+	allowRead := buildAllowReadPatterns(&config.Config{
+		Tools: config.ToolsConfig{
+			AllowReadPaths: []string{mediaPattern},
+		},
+	})
+	if len(allowRead) != 1 {
+		t.Fatalf("buildAllowReadPatterns(existing media pattern) len = %d, want 1", len(allowRead))
+	}
+	defaultAllowRead := buildAllowReadPatterns(nil)
+	if len(defaultAllowRead) != 1 {
+		t.Fatalf("buildAllowReadPatterns(nil) len = %d, want 1", len(defaultAllowRead))
+	}
+
+	if err := (&AgentInstance{}).Close(); err != nil {
+		t.Fatalf("Close() error = %v, want nil", err)
+	}
+	if !(*AgentInstance)(nil).AllowsMCPServer("github") {
+		t.Fatal("nil agent AllowsMCPServer() = false, want true")
+	}
+	agent := &AgentInstance{MCPServerAllowlist: map[string]struct{}{"github": {}}}
+	if !agent.AllowsMCPServer(" GitHub ") {
+		t.Fatal("allowlisted MCP server was denied")
+	}
+	if agent.AllowsMCPServer("slack") {
+		t.Fatal("non-allowlisted MCP server was allowed")
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir() error = %v", err)
+	}
+	if got := expandHome(""); got != "" {
+		t.Fatalf("expandHome(empty) = %q, want empty", got)
+	}
+	if got := expandHome("~"); got != home {
+		t.Fatalf("expandHome(~) = %q, want %q", got, home)
+	}
+	if got := expandHome("~/workspace"); got != filepath.Join(home, "workspace") {
+		t.Fatalf("expandHome(~/workspace) = %q, want %q", got, filepath.Join(home, "workspace"))
+	}
+	if got := expandHome("/tmp/workspace"); got != "/tmp/workspace" {
+		t.Fatalf("expandHome(abs) = %q, want /tmp/workspace", got)
+	}
+}
+
 func TestNewAgentInstance_ResolveCandidatesFromModelListAlias(t *testing.T) {
 	tests := []struct {
 		name         string

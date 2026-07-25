@@ -1404,7 +1404,7 @@ test("accounts page shows account routers beside registered accounts", async ({
           index: 2,
           model_name: "router-main",
           provider: "router",
-          model: "gpt-4o",
+          model: "",
           api_key: "",
           enabled: true,
           available: true,
@@ -1428,8 +1428,50 @@ test("accounts page shows account routers beside registered accounts", async ({
             ],
           },
         },
+        {
+          index: 3,
+          model_name: "router-missing",
+          provider: "router",
+          model: "",
+          api_key: "",
+          enabled: true,
+          available: true,
+          status: "available",
+          is_default: false,
+          is_virtual: false,
+          default_model_allowed: true,
+          router: {
+            enabled: true,
+            entry: "primary",
+            blocks: [
+              {
+                id: "primary",
+                type: "account",
+                account: "credential:openai:gone",
+              },
+            ],
+          },
+        },
+        {
+          index: 4,
+          model_name: "router-empty",
+          provider: "router",
+          model: "",
+          api_key: "",
+          enabled: true,
+          available: true,
+          status: "available",
+          is_default: false,
+          is_virtual: false,
+          default_model_allowed: true,
+          router: {
+            enabled: true,
+            entry: "",
+            blocks: [],
+          },
+        },
       ],
-      total: 3,
+      total: 5,
     },
     oauthProviders: [
       {
@@ -1463,11 +1505,33 @@ test("accounts page shows account routers beside registered accounts", async ({
     ],
   })
 
+  const mainRouterCard = page.locator("article").filter({
+    has: page.getByRole("heading", { name: "router-main" }),
+  })
+  const missingRouterCard = page.locator("article").filter({
+    has: page.getByRole("heading", { name: "router-missing" }),
+  })
+  const emptyRouterCard = page.locator("article").filter({
+    has: page.getByRole("heading", { name: "router-empty" }),
+  })
+
   await expect(page.getByRole("heading", { name: "router-main" })).toBeVisible()
-  await expect(page.getByText("Account Router - gpt-4o")).toBeVisible()
-  await expect(page.getByText("Routes across 2 accounts")).toBeVisible()
+  await expect(mainRouterCard.getByText("Account Router")).toBeVisible()
+  await expect(page.getByText("Shared Model")).toHaveCount(0)
+  await expect(page.getByText("Connected Accounts")).toHaveCount(0)
+  await expect(page.getByText(/Primary account:/)).toHaveCount(0)
+  await expect(page.getByText("No fallback configured")).toHaveCount(0)
+  await expect(page.getByText("Available")).toHaveCount(0)
+  await expect(mainRouterCard.getByText("Needs attention")).toBeVisible()
+  await expect(
+    missingRouterCard.getByText("No accounts referenced"),
+  ).toBeVisible()
+  await expect(emptyRouterCard.getByText("No accounts referenced")).toHaveCount(
+    2,
+  )
   await expect(page.getByText("work: Connected")).toBeVisible()
   await expect(page.getByText("backup: Needs refresh")).toBeVisible()
+  await expect(page.getByText("openai:gone: missing")).toBeVisible()
   await expect(
     page.getByRole("heading", { name: "Account Routers" }),
   ).toHaveCount(0)
@@ -1580,9 +1644,11 @@ test("account router editor supports block fallback graph editing", async ({
   await expect(
     page.getByText("OpenAI: acct-empty: No models returned."),
   ).toBeVisible()
-  await page.getByRole("combobox", { name: "Shared Model" }).click()
-  await expect(page.getByRole("option", { name: "gpt-4o" })).toBeVisible()
-  await page.keyboard.press("Escape")
+  await expect(page.getByText("Shared models")).toBeVisible()
+  await expect(page.getByText("gpt-4o")).toBeVisible()
+  await expect(
+    page.getByRole("combobox", { name: "Shared Model" }),
+  ).toHaveCount(0)
 
   await page.getByRole("button", { name: "account-1", exact: true }).click()
   await page.getByRole("combobox", { name: "Fallback Connection" }).click()

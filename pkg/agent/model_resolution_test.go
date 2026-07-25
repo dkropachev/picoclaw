@@ -13,6 +13,54 @@ func TestModelNameFromIdentityKey_LegacyProviderModel(t *testing.T) {
 	}
 }
 
+func TestModelResolutionHelpersCoverFallbackBranches(t *testing.T) {
+	if got := ensureProtocolModel(""); got != "" {
+		t.Fatalf("ensureProtocolModel(empty) = %q, want empty", got)
+	}
+	if got := ensureProtocolModel("anthropic/claude"); got != "anthropic/claude" {
+		t.Fatalf("ensureProtocolModel(protocol) = %q, want anthropic/claude", got)
+	}
+	if got := ensureProtocolModel("gpt-4o"); got != "openai/gpt-4o" {
+		t.Fatalf("ensureProtocolModel(model) = %q, want openai/gpt-4o", got)
+	}
+
+	if got := modelConfigIdentityKey(nil); got != "" {
+		t.Fatalf("modelConfigIdentityKey(nil) = %q, want empty", got)
+	}
+	if got := modelConfigIdentityKey(&config.ModelConfig{}); got != "" {
+		t.Fatalf("modelConfigIdentityKey(empty) = %q, want empty", got)
+	}
+
+	provider, modelID := modelProviderAndIDForResolution("openai", nil)
+	if provider != "" || modelID != "" {
+		t.Fatalf("modelProviderAndIDForResolution(nil) = %q/%q, want empty", provider, modelID)
+	}
+
+	if candidate, ok := candidateFromModelConfig("openai", nil); ok {
+		t.Fatalf("candidateFromModelConfig(nil) = %#v, true; want false", candidate)
+	}
+	if candidate, ok := candidateFromModelConfig("openai", &config.ModelConfig{
+		ModelName: "empty",
+		Provider:  "openai",
+	}); ok {
+		t.Fatalf("candidateFromModelConfig(empty model) = %#v, true; want false", candidate)
+	}
+
+	if got := resolvedCandidateProvider(nil, "fallback-provider"); got != "fallback-provider" {
+		t.Fatalf("resolvedCandidateProvider(nil) = %q, want fallback-provider", got)
+	}
+	if got := resolvedCandidateProvider(
+		[]providers.FallbackCandidate{{Provider: "anthropic"}},
+		"openai",
+	); got != "anthropic" {
+		t.Fatalf("resolvedCandidateProvider(candidate) = %q, want anthropic", got)
+	}
+
+	if got, err := resolvedModelConfig(nil, "model", "/workspace"); err == nil || got != nil {
+		t.Fatalf("resolvedModelConfig(nil) = %#v, %v; want nil config and error", got, err)
+	}
+}
+
 func TestModelNameFromIdentityKey_PreservesNonLegacyIdentity(t *testing.T) {
 	if got := modelNameFromIdentityKey("model_name:primary"); got != "model_name:primary" {
 		t.Fatalf("modelNameFromIdentityKey() = %q, want %q", got, "model_name:primary")
@@ -161,5 +209,88 @@ func TestResolveActiveModelConfig_DoesNotFallbackToOpenAIForDefaultProviderCandi
 
 	if got != nil {
 		t.Fatalf("resolveActiveModelConfig() = %#v, want nil for non-active provider config", got)
+	}
+}
+
+func TestLookupModelConfigByRefReturnsEmptyModelRouterByName(t *testing.T) {
+	cfg := &config.Config{
+		ModelList: []*config.ModelConfig{
+			{
+				ModelName: "empty-router",
+				Provider:  config.ModelRouterProvider,
+				Router: &config.ModelRouterConfig{
+					Enabled: true,
+					Entry:   "primary",
+					Blocks: []config.ModelRouterBlock{{
+						ID:      "primary",
+						Type:    config.ModelRouterBlockTypeAccount,
+						Account: "account-a",
+					}},
+				},
+			},
+			{
+				ModelName: "empty-regular",
+				Provider:  "openai",
+			},
+			{
+				ModelName: "account-a",
+				Provider:  "openai",
+				Model:     "gpt-4o",
+			},
+		},
+	}
+
+	got := lookupModelConfigByRef(cfg, "empty-router", "openai")
+	if got == nil {
+		t.Fatal("lookupModelConfigByRef(router) = nil, want router config")
+	}
+	if got.ModelName != "empty-router" {
+		t.Fatalf("router model_name = %q, want empty-router", got.ModelName)
+	}
+	if !got.IsModelRouter() {
+		t.Fatal("lookupModelConfigByRef(router) returned non-router config")
+	}
+
+	if got := lookupModelConfigByRef(cfg, "empty-regular", "openai"); got != nil {
+		t.Fatalf("lookupModelConfigByRef(empty regular) = %#v, want nil", got)
+	}
+}
+
+func TestResolveModelCandidateRejectsEmptyModelRouterAlias(t *testing.T) {
+	cfg := &config.Config{
+		ModelList: []*config.ModelConfig{
+			{
+				ModelName: "router-main",
+				Provider:  config.ModelRouterProvider,
+				Router: &config.ModelRouterConfig{
+					Enabled: true,
+					Entry:   "primary",
+					Blocks: []config.ModelRouterBlock{{
+						ID:      "primary",
+						Type:    config.ModelRouterBlockTypeAccount,
+						Account: "account-a",
+					}},
+				},
+			},
+			{
+				ModelName: "account-a",
+				Provider:  "openai",
+				Model:     "gpt-4o",
+			},
+		},
+	}
+
+	if candidate, ok := resolveModelCandidate(cfg, "openai", "router-main"); ok {
+		t.Fatalf("resolveModelCandidate(router) = %#v, true; want false", candidate)
+	}
+	candidate, ok := resolveModelCandidate(cfg, "openai", "account-a")
+	if !ok {
+		t.Fatal("resolveModelCandidate(account) ok = false, want true")
+	}
+	if candidate.IdentityKey != "model_name:account-a" {
+		t.Fatalf("account identity = %q, want model_name:account-a", candidate.IdentityKey)
+	}
+	if candidate.Model != "gpt-4o" {
+		t.Fatalf("account model = %q, want gpt-4o", candidate.Model)
 	}
 }

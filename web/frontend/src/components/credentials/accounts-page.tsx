@@ -1,10 +1,8 @@
 import {
-  IconArrowsShuffle,
   IconBrandGithubCopilot,
   IconBrandGoogle,
   IconBrandOpenai,
   IconEdit,
-  IconGitBranch,
   IconKey,
   IconLoader2,
   IconPlus,
@@ -297,60 +295,33 @@ function getRouterAccountStatusDot(status: RouterAccountStatus): string {
   return "bg-muted-foreground/40"
 }
 
-function getRouterSummary(
-  model: ModelInfo,
-  statusLabel: string,
+function getRouterCardStatus(
+  accounts: RouterAccountDetail[],
   t: TFunction,
 ): {
-  mode: "fallback" | "load_balance"
-  primary: string
-  secondary: string
+  label: string
+  className: string
 } {
-  const entry = model.router?.blocks?.find(
-    (block) => block.id === model.router?.entry,
-  )
-  const fallbackBlock = entry?.fallback
-    ? model.router?.blocks?.find((block) => block.id === entry.fallback)
-    : undefined
-  const fallbackAccount =
-    fallbackBlock?.type === "account" ? fallbackBlock.account : undefined
-
-  if (entry?.type === "load_balance") {
-    const strategy = entry.strategy || "blind"
+  if (
+    accounts.length === 0 ||
+    accounts.every((account) => account.status === "missing")
+  ) {
     return {
-      mode: "load_balance",
-      primary: t("models.router.cardLoadBalance", {
-        count: entry.accounts?.length ?? 0,
-        strategy: t(`models.router.strategyName.${strategy}`),
-      }),
-      secondary: fallbackAccount
-        ? t("models.router.cardFallbackTarget", {
-            account: formatRouterAccountRef(fallbackAccount),
-          })
-        : t("models.router.cardNoFallback"),
+      label: t("models.router.cardNoAccounts"),
+      className: "bg-destructive/10 text-destructive",
     }
   }
 
-  if (entry?.type === "account") {
+  if (accounts.every((account) => account.status === "connected")) {
     return {
-      mode: "fallback",
-      primary: t("models.router.cardFallback", {
-        account: entry.account
-          ? formatRouterAccountRef(entry.account)
-          : t("models.router.cardUnconfigured"),
-      }),
-      secondary: fallbackAccount
-        ? t("models.router.cardFallbackTarget", {
-            account: formatRouterAccountRef(fallbackAccount),
-          })
-        : t("models.router.cardNoFallback"),
+      label: t("credentials.status.connected"),
+      className: "bg-green-500/10 text-green-700 dark:text-green-300",
     }
   }
 
   return {
-    mode: "fallback",
-    primary: t("models.router.cardUnconfigured"),
-    secondary: statusLabel,
+    label: t("models.router.cardNeedsAttention"),
+    className: "bg-amber-500/10 text-amber-700 dark:text-amber-300",
   }
 }
 
@@ -502,9 +473,8 @@ function AccountRouterCard({
   settingDefault,
 }: AccountRouterCardProps) {
   const { t } = useTranslation()
-  const statusLabel = t(`models.status.${model.status}`)
-  const routerSummary = getRouterSummary(model, statusLabel, t)
   const accountDetails = getRouterAccountDetails(model, accountIndex, t)
+  const routerStatus = getRouterCardStatus(accountDetails, t)
   const canSetDefault =
     model.available &&
     !model.is_default &&
@@ -553,46 +523,12 @@ function AccountRouterCard({
                 )}
               </div>
               <p className="text-muted-foreground truncate text-xs">
-                {t("models.badge.router")} - {model.model}
+                {t("models.badge.router")}
               </p>
             </div>
           </div>
 
-          <dl className="mt-4 grid gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
-            <div className="min-w-0">
-              <dt className="text-muted-foreground">
-                {t("models.router.sharedModel")}
-              </dt>
-              <dd className="text-foreground truncate font-mono">
-                {model.model}
-              </dd>
-            </div>
-            <div className="min-w-0">
-              <dt className="text-muted-foreground">
-                {t("models.router.connectedAccounts")}
-              </dt>
-              <dd className="text-foreground truncate">
-                {accountDetails.length > 0
-                  ? accountDetails.length
-                  : t("models.router.cardNoAccounts")}
-              </dd>
-            </div>
-          </dl>
-
           <div className="mt-4 space-y-2">
-            <div className="space-y-1">
-              <p className="text-muted-foreground truncate text-xs leading-snug">
-                {routerSummary.primary}
-              </p>
-              <p className="text-muted-foreground/80 flex min-w-0 items-center gap-1 text-[11px] leading-snug">
-                {routerSummary.mode === "load_balance" ? (
-                  <IconArrowsShuffle className="size-3 shrink-0" />
-                ) : (
-                  <IconGitBranch className="size-3 shrink-0" />
-                )}
-                <span className="truncate">{routerSummary.secondary}</span>
-              </p>
-            </div>
             <div className="flex min-w-0 flex-wrap gap-1.5">
               {accountDetails.length > 0 ? (
                 accountDetails.map((account) => {
@@ -631,8 +567,13 @@ function AccountRouterCard({
         </div>
 
         <div className="flex items-center gap-2 sm:shrink-0">
-          <span className="bg-muted text-muted-foreground rounded px-2 py-1 text-xs font-medium">
-            {statusLabel}
+          <span
+            className={[
+              "rounded px-2 py-1 text-xs font-medium",
+              routerStatus.className,
+            ].join(" ")}
+          >
+            {routerStatus.label}
           </span>
 
           {model.is_default ? (
