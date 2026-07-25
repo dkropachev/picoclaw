@@ -178,6 +178,9 @@
       },
       "antigravity": {
         "description": "Používá browser OAuth pro Google Cloud Code Assist."
+      },
+      "githubCopilot": {
+        "description": "Používá GitHub token přihlášení pro přístup k Copilot subscription."
       }
     },
     "status": {
@@ -199,7 +202,8 @@
     },
     "fields": {
       "openaiToken": "OpenAI token",
-      "anthropicToken": "Anthropic token"
+      "anthropicToken": "Anthropic token",
+      "githubCopilotToken": "gho_, ghu_ nebo github_pat_ token"
     },
     "labels": {
       "account": "Účet",

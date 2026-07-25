@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	copilot "github.com/github/copilot-sdk/go"
 
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -135,10 +138,9 @@ func TestHandleListModels_AvailabilityUsesRuntimeProbesForLocalModels(t *testing
 			APIKeys:   config.SimpleSecureStrings("remote-key"),
 		},
 		{
-			ModelName:  "copilot-gpt-5.4",
-			Model:      "github-copilot/gpt-5.4",
-			APIBase:    "http://127.0.0.1:4321",
-			AuthMethod: "oauth",
+			ModelName: "copilot-gpt-5.4",
+			Model:     "github-copilot/gpt-5.4",
+			APIBase:   "http://127.0.0.1:4321",
 		},
 	}
 	cfg.Agents.Defaults.ModelName = "openai-oauth"
@@ -268,6 +270,81 @@ func TestHandleListModels_AvailabilityForOAuthModelWithCredential(t *testing.T) 
 	}
 	if !resp.Models[0].Available {
 		t.Fatalf("oauth model available = false, want true with stored credential")
+	}
+}
+
+func TestHandleListModels_GitHubCopilotTokenCredentialDoesNotProbeLocalBridge(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+	resetModelProbeHooks(t)
+
+	var mu sync.Mutex
+	var tcpProbes []string
+	probeTCPServiceFunc = func(apiBase string) bool {
+		mu.Lock()
+		tcpProbes = append(tcpProbes, apiBase)
+		mu.Unlock()
+		return false
+	}
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName:    "copilot-work",
+		Provider:     "github-copilot",
+		Model:        "auto",
+		AuthMethod:   "token",
+		CredentialID: "github-copilot:work",
+	}}
+	err = config.SaveConfig(configPath, cfg)
+	if err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	if err := auth.SetCredential("github-copilot:work", &auth.AuthCredential{
+		AccessToken: "gho_copilot-token",
+		Provider:    "github-copilot",
+		AuthMethod:  "token",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Models []modelResponse `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if len(resp.Models) != 1 {
+		t.Fatalf("len(models) = %d, want 1", len(resp.Models))
+	}
+	if !resp.Models[0].Available || resp.Models[0].Status != modelStatusAvailable {
+		t.Fatalf(
+			"copilot status = available:%v status:%q, want available",
+			resp.Models[0].Available,
+			resp.Models[0].Status,
+		)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(tcpProbes) != 0 {
+		t.Fatalf("tcp probes = %#v, want none for token-backed Copilot", tcpProbes)
 	}
 }
 
@@ -2003,6 +2080,12 @@ func TestHandleListModels_ReturnsProviderOptionsWithoutPersistingLegacyMigration
 		t.Fatalf("github-copilot default_api_base = %q, want %q", option.DefaultAPIBase, "localhost:4321")
 	} else if !option.Local {
 		t.Fatal("github-copilot should be marked local")
+	} else if option.DefaultAuthMethod != "token" {
+		t.Fatalf("github-copilot default_auth_method = %q, want token", option.DefaultAuthMethod)
+	} else if !option.SupportsFetch {
+		t.Fatal("github-copilot provider option should report supports_fetch")
+	} else if len(option.CommonModels) == 0 {
+		t.Fatal("github-copilot common_models should not be empty")
 	}
 	if option, ok := optionsByID["elevenlabs"]; !ok {
 		t.Fatal("elevenlabs provider option missing")
@@ -2599,6 +2682,129 @@ func TestHandleAddModel_RejectsRouterUnknownAccountAsBadRequest(t *testing.T) {
 	}
 }
 
+func TestHandleAddModel_AcceptsGitHubCopilotCredentialAccountRouterRef(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	if err := auth.SetCredential("github-copilot:gh-copilot", &auth.AuthCredential{
+		AccessToken: "gho_test-token",
+		Provider:    "github-copilot",
+		AuthMethod:  "token",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+		"model_name": "copilot-router",
+		"provider": "router",
+		"model": "gpt-5",
+		"router": {
+			"enabled": true,
+			"entry": "account-1",
+			"blocks": [
+				{
+					"id": "account-1",
+					"type": "account",
+					"account": "credential:github-copilot:gh-copilot"
+				}
+			]
+		}
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	updated, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() after add error = %v", err)
+	}
+	router := updated.ModelList[len(updated.ModelList)-1]
+	if router.Router == nil || len(router.Router.Blocks) != 1 {
+		t.Fatalf("router config = %#v, want one block", router.Router)
+	}
+	if got := router.Router.Blocks[0].Account; got != "credential:github-copilot:gh-copilot" {
+		t.Fatalf("router account = %q, want credential:github-copilot:gh-copilot", got)
+	}
+}
+
+func TestHandleAddModel_AcceptsGitHubCopilotCredentialLoadBalanceRouterRefs(t *testing.T) {
+	for _, strategy := range []string{
+		config.ModelRouterStrategyBlind,
+		config.ModelRouterStrategyTokensSpent,
+		config.ModelRouterStrategyClosestLimit,
+	} {
+		t.Run(strategy, func(t *testing.T) {
+			configPath, cleanup := setupOAuthTestEnv(t)
+			defer cleanup()
+
+			for _, credentialID := range []string{"github-copilot:gh-copilot", "github-copilot:backup"} {
+				if err := auth.SetCredential(credentialID, &auth.AuthCredential{
+					AccessToken: "gho_test-token",
+					Provider:    "github-copilot",
+					AuthMethod:  "token",
+				}); err != nil {
+					t.Fatalf("SetCredential(%q) error = %v", credentialID, err)
+				}
+			}
+
+			h := NewHandler(configPath)
+			mux := http.NewServeMux()
+			h.RegisterRoutes(mux)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(fmt.Sprintf(`{
+				"model_name": "copilot-router",
+				"provider": "router",
+				"model": "gpt-5",
+				"router": {
+					"enabled": true,
+					"entry": "pool",
+					"blocks": [
+						{
+							"id": "pool",
+							"type": "load_balance",
+							"accounts": ["credential:github-copilot:gh-copilot", "credential:github-copilot:backup"],
+							"strategy": %q
+						}
+					]
+				}
+			}`, strategy)))
+			req.Header.Set("Content-Type", "application/json")
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+
+			updated, err := config.LoadConfig(configPath)
+			if err != nil {
+				t.Fatalf("LoadConfig() after add error = %v", err)
+			}
+			router := updated.ModelList[len(updated.ModelList)-1]
+			if router.Router == nil || len(router.Router.Blocks) != 1 {
+				t.Fatalf("router config = %#v, want one block", router.Router)
+			}
+			block := router.Router.Blocks[0]
+			if block.Type != config.ModelRouterBlockTypeLoadBalance {
+				t.Fatalf("router block type = %q, want load_balance", block.Type)
+			}
+			if block.Strategy != strategy {
+				t.Fatalf("router strategy = %q, want %q", block.Strategy, strategy)
+			}
+			wantAccounts := []string{"credential:github-copilot:gh-copilot", "credential:github-copilot:backup"}
+			if fmt.Sprint(block.Accounts) != fmt.Sprint(wantAccounts) {
+				t.Fatalf("router accounts = %v, want %v", block.Accounts, wantAccounts)
+			}
+		})
+	}
+}
+
 func TestMaskAPIKey(t *testing.T) {
 	tests := []struct {
 		name string
@@ -2950,6 +3156,106 @@ func TestHandleFetchModels_NearAIUsesPublicModelListEndpoint(t *testing.T) {
 	}
 	if resp.Models[1].ID != "openai/gpt-oss-120b" || resp.Models[1].OwnedBy != "nearai" {
 		t.Fatalf("models[1] = %+v, want GPT OSS model owned by nearai", resp.Models[1])
+	}
+}
+
+func TestFetchUpstreamModels_GitHubCopilotReturnsStaticModelsWithoutCredential(t *testing.T) {
+	var mu sync.Mutex
+	hitServer := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hitServer = true
+		mu.Unlock()
+		http.Error(w, "unexpected request", http.StatusTeapot)
+	}))
+	defer srv.Close()
+
+	models, err := fetchUpstreamModels(t.Context(), upstreamFetchOptions{
+		Provider: "github-copilot",
+		APIBase:  srv.URL,
+		APIKey:   "ignored",
+	})
+	if err != nil {
+		t.Fatalf("fetchUpstreamModels() error = %v", err)
+	}
+	if len(models) == 0 {
+		t.Fatal("fetchUpstreamModels() returned no models")
+	}
+	if models[0].ID != "auto" || models[0].OwnedBy != "github-copilot" {
+		t.Fatalf("models[0] = %+v, want auto owned by github-copilot", models[0])
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if hitServer {
+		t.Fatal("github-copilot fetch should not call the OpenAI-compatible /models endpoint")
+	}
+}
+
+func TestHandleFetchModels_GitHubCopilotCredentialUsesDirectModelList(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	oldList := listGitHubCopilotModelsWithToken
+	t.Cleanup(func() { listGitHubCopilotModelsWithToken = oldList })
+
+	var gotToken string
+	listGitHubCopilotModelsWithToken = func(
+		_ context.Context,
+		token string,
+	) ([]copilot.ModelInfo, error) {
+		gotToken = token
+		return []copilot.ModelInfo{
+			{ID: "gpt-5", Name: "GPT-5"},
+			{ID: "claude-sonnet-4.5", Name: "Claude Sonnet 4.5"},
+			{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro"},
+			{ID: "gpt-5", Name: "duplicate"},
+			{ID: ""},
+		}, nil
+	}
+
+	if err := auth.SetCredential("github-copilot:gh-copilot", &auth.AuthCredential{
+		AccessToken: "gho_dynamic-model-token",
+		Provider:    "github-copilot",
+		AuthMethod:  "token",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/models/fetch", bytes.NewBufferString(`{
+		"provider":"github-copilot",
+		"auth_method":"token",
+		"credential_id":"github-copilot:gh-copilot"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if gotToken != "gho_dynamic-model-token" {
+		t.Fatalf("Copilot token = %q, want stored credential token", gotToken)
+	}
+
+	var resp struct {
+		Models []upstreamModel `json:"models"`
+		Total  int             `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if resp.Total != 3 || len(resp.Models) != 3 {
+		t.Fatalf("response = %+v, want three unique direct Copilot models", resp)
+	}
+	if resp.Models[0].ID != "gpt-5" ||
+		resp.Models[1].ID != "claude-sonnet-4.5" ||
+		resp.Models[2].ID != "gemini-2.5-pro" {
+		t.Fatalf("models = %+v, want direct Copilot model IDs in order", resp.Models)
 	}
 }
 

@@ -43,6 +43,68 @@ func TestModelRouterConfigValidateAcceptsFallbackAndLoadBalance(t *testing.T) {
 	}
 }
 
+func TestModelRouterConfigValidateAcceptsGitHubCopilotCredentialAccountRef(t *testing.T) {
+	cfg := &Config{
+		ModelList: []*ModelConfig{
+			{
+				ModelName: "copilot-router",
+				Provider:  ModelRouterProvider,
+				Model:     "gpt-5",
+				Router: &ModelRouterConfig{
+					Enabled: true,
+					Entry:   "account-1",
+					Blocks: []ModelRouterBlock{{
+						ID:      "account-1",
+						Type:    ModelRouterBlockTypeAccount,
+						Account: "credential:github-copilot:gh-copilot",
+					}},
+				},
+			},
+		},
+	}
+
+	if err := cfg.ValidateModelList(); err != nil {
+		t.Fatalf("ValidateModelList() error = %v", err)
+	}
+}
+
+func TestModelRouterConfigValidateAcceptsGitHubCopilotCredentialLoadBalanceRefs(t *testing.T) {
+	for _, strategy := range []string{
+		ModelRouterStrategyBlind,
+		ModelRouterStrategyTokensSpent,
+		ModelRouterStrategyClosestLimit,
+	} {
+		t.Run(strategy, func(t *testing.T) {
+			cfg := &Config{
+				ModelList: []*ModelConfig{
+					{
+						ModelName: "copilot-router",
+						Provider:  ModelRouterProvider,
+						Model:     "gpt-5",
+						Router: &ModelRouterConfig{
+							Enabled: true,
+							Entry:   "pool",
+							Blocks: []ModelRouterBlock{{
+								ID:   "pool",
+								Type: ModelRouterBlockTypeLoadBalance,
+								Accounts: []string{
+									"credential:github-copilot:gh-copilot",
+									"credential:github-copilot:backup",
+								},
+								Strategy: strategy,
+							}},
+						},
+					},
+				},
+			}
+
+			if err := cfg.ValidateModelList(); err != nil {
+				t.Fatalf("ValidateModelList() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestModelRouterConfigValidateRejectsInvalidGraphs(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -1,5 +1,6 @@
 import {
   IconArrowsShuffle,
+  IconBrandGithubCopilot,
   IconBrandGoogle,
   IconBrandOpenai,
   IconEdit,
@@ -70,7 +71,10 @@ function getAccountProviderLabel(
     parts.push(account.auth_method)
   }
   const subscription = codexLimit?.plan?.trim()
-  if (account.provider === "openai" && subscription) {
+  if (
+    (account.provider === "openai" || account.provider === "github-copilot") &&
+    subscription
+  ) {
     return `${parts.join(" ")} (${subscription})`
   }
   return parts.join(" ")
@@ -115,15 +119,16 @@ function formatRouterAccountRef(value: string): string {
 
 function getCodexLimitMatchKeys(account: CodexAccountLimitAccount): string[] {
   const keys: string[] = []
+  const provider = account.provider || "openai"
   appendMatchKey(keys, account.id)
   if (account.id && !account.id.includes(":")) {
-    appendMatchKey(keys, `openai:${account.id}`)
+    appendMatchKey(keys, `${provider}:${account.id}`)
   }
   appendMatchKey(keys, account.account_id)
   appendMatchKey(keys, account.email)
-  if (account.default || account.id === "default" || account.id === "openai") {
-    appendMatchKey(keys, "openai")
-    appendMatchKey(keys, "openai:default")
+  if (account.default || account.id === "default" || account.id === provider) {
+    appendMatchKey(keys, provider)
+    appendMatchKey(keys, `${provider}:default`)
   }
   return keys
 }
@@ -152,11 +157,11 @@ function getRegisteredAccountMatchKeys(account: OAuthProviderStatus): string[] {
   return keys
 }
 
-function getAccountCodexLimits(
+function getAccountLimits(
   account: OAuthProviderStatus,
   limitsByKey: Map<string, CodexAccountLimitAccount>,
 ): CodexAccountLimitAccount | undefined {
-  if (account.provider !== "openai") {
+  if (account.provider !== "openai" && account.provider !== "github-copilot") {
     return undefined
   }
   for (const key of getRegisteredAccountMatchKeys(account)) {
@@ -356,6 +361,9 @@ function ProviderIcon({ provider }: { provider: OAuthProvider }) {
   if (provider === "google-antigravity") {
     return <IconBrandGoogle className="size-4" />
   }
+  if (provider === "github-copilot") {
+    return <IconBrandGithubCopilot className="size-4" />
+  }
   return <IconSparkles className="size-4" />
 }
 
@@ -442,7 +450,8 @@ function AccountCard({
             )}
           </dl>
 
-          {account.provider === "openai" ? (
+          {account.provider === "openai" ||
+          account.provider === "github-copilot" ? (
             <CodexAccountLimitSummary
               account={codexLimit}
               loading={codexLimitsLoading}
@@ -893,7 +902,7 @@ function AccountsHomePage() {
                   key={getAccountCredentialID(account)}
                   account={account}
                   activeAction={activeAction}
-                  codexLimit={getAccountCodexLimits(account, codexLimitsByKey)}
+                  codexLimit={getAccountLimits(account, codexLimitsByKey)}
                   codexLimitsLoading={codexLimitsLoading}
                   codexLimitsError={codexLimitsError}
                   codexLimitsApiError={codexLimits?.error ?? ""}

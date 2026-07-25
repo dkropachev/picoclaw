@@ -194,3 +194,76 @@ func TestBuildModelRouterUsesCredentialAccountRefs(t *testing.T) {
 		t.Fatalf("candidate identity = %q, want credential account identity", candidate.IdentityKey)
 	}
 }
+
+func TestModelRouterCredentialAccountConfigSupportsGitHubCopilotNamedRefs(t *testing.T) {
+	modelCfg, ok := modelRouterCredentialAccountConfig(
+		"credential:github-copilot:gh-copilot",
+		"claude-sonnet-4.5",
+	)
+	if !ok {
+		t.Fatal("modelRouterCredentialAccountConfig() ok = false, want true")
+	}
+	if modelCfg == nil {
+		t.Fatal("modelRouterCredentialAccountConfig() = nil, want config")
+	}
+	if modelCfg.Provider != "github-copilot" {
+		t.Fatalf("Provider = %q, want github-copilot", modelCfg.Provider)
+	}
+	if modelCfg.AuthMethod != "token" {
+		t.Fatalf("AuthMethod = %q, want token", modelCfg.AuthMethod)
+	}
+	if modelCfg.CredentialID != "github-copilot:gh-copilot" {
+		t.Fatalf("CredentialID = %q, want github-copilot:gh-copilot", modelCfg.CredentialID)
+	}
+	if modelCfg.Model != "claude-sonnet-4.5" {
+		t.Fatalf("Model = %q, want shared model", modelCfg.Model)
+	}
+}
+
+func TestBuildModelRouterSupportsGitHubCopilotCredentialLoadBalanceRefs(t *testing.T) {
+	cfg := &config.Config{
+		ModelList: []*config.ModelConfig{
+			{
+				ModelName: "copilot-router",
+				Provider:  config.ModelRouterProvider,
+				Model:     "gpt-5",
+				Router: &config.ModelRouterConfig{
+					Enabled: true,
+					Entry:   "pool",
+					Blocks: []config.ModelRouterBlock{{
+						ID:       "pool",
+						Type:     config.ModelRouterBlockTypeLoadBalance,
+						Accounts: []string{"credential:github-copilot:gh-copilot", "credential:github-copilot:backup"},
+						Strategy: config.ModelRouterStrategyTokensSpent,
+					}},
+				},
+			},
+		},
+	}
+	if err := cfg.ValidateModelList(); err != nil {
+		t.Fatalf("ValidateModelList() error = %v", err)
+	}
+
+	router := buildModelRouter(cfg, "openai", "copilot-router", t.TempDir(), map[string]providers.LLMProvider{})
+	if router == nil {
+		t.Fatal("buildModelRouter() = nil")
+	}
+
+	selection := router.Select("session-1", modelrouter.SelectReasonInitial)
+	if len(selection.Candidates) != 1 {
+		t.Fatalf("len(candidates) = %d, want 1", len(selection.Candidates))
+	}
+	candidate := selection.Candidates[0]
+	if candidate.Provider != "github-copilot" {
+		t.Fatalf("candidate provider = %q, want github-copilot", candidate.Provider)
+	}
+	if candidate.Model != "gpt-5" {
+		t.Fatalf("candidate model = %q, want shared router model", candidate.Model)
+	}
+	if candidate.IdentityKey != "model_name:credential:github-copilot:gh-copilot" {
+		t.Fatalf("candidate identity = %q, want full credential identity", candidate.IdentityKey)
+	}
+	if got := selection.BlockAccountChoices["pool"]; got != "credential:github-copilot:gh-copilot" {
+		t.Fatalf("pool choice = %q, want full credential account ref", got)
+	}
+}

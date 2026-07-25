@@ -51,6 +51,14 @@ const DEFAULT_PROVIDERS: OAuthProviderStatus[] = [
     logged_in: false,
     status: "not_logged_in",
   },
+  {
+    provider: "github-copilot",
+    credential_id: "github-copilot",
+    display_name: "GitHub Copilot",
+    methods: ["token"],
+    logged_in: false,
+    status: "not_logged_in",
+  },
 ]
 
 const ACCOUNT_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
@@ -269,7 +277,9 @@ export function AccountOnboardingSheet({
                   placeholder={
                     provider === "anthropic"
                       ? t("credentials.fields.anthropicToken")
-                      : t("credentials.fields.openaiToken")
+                      : provider === "github-copilot"
+                        ? t("credentials.fields.githubCopilotToken")
+                        : t("credentials.fields.openaiToken")
                   }
                 />
               </Field>

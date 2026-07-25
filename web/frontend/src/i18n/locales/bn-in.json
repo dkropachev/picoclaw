@@ -179,6 +179,9 @@
       },
       "antigravity": {
         "description": "Google Cloud Code Assist-এর জন্য ব্রাউজার OAuth ব্যবহার করে।"
+      },
+      "githubCopilot": {
+        "description": "Copilot সাবস্ক্রিপশন অ্যাক্সেসের জন্য GitHub টোকেন লগইন ব্যবহার করে।"
       }
     },
     "status": {
@@ -200,7 +203,8 @@
     },
     "fields": {
       "openaiToken": "OpenAI টোকেন",
-      "anthropicToken": "Anthropic টোকেন"
+      "anthropicToken": "Anthropic টোকেন",
+      "githubCopilotToken": "gho_, ghu_, বা github_pat_ টোকেন"
     },
     "labels": {
       "account": "অ্যাকাউন্ট",

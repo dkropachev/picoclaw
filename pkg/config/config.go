@@ -538,7 +538,12 @@ func ModelRouterCredentialAccountProvider(accountRef string) (string, bool) {
 		provider = prefix
 	}
 	switch provider {
-	case "openai", "anthropic", "google-antigravity", "antigravity":
+	case "openai",
+		"anthropic",
+		"google-antigravity",
+		"antigravity",
+		"github-copilot",
+		"copilot":
 		return provider, true
 	default:
 		return "", false

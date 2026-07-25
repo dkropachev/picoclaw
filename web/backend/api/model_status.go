@@ -176,7 +176,9 @@ func requiresRuntimeProbe(m *config.ModelConfig) bool {
 	protocol := modelProtocol(m)
 
 	switch protocol {
-	case "claude-cli", "codex-cli", "github-copilot":
+	case "github-copilot":
+		return !isCredentialAuthMethod(authMethod)
+	case "claude-cli", "codex-cli":
 		return true
 	}
 
@@ -490,6 +492,8 @@ func oauthProviderForModel(m *config.ModelConfig) (string, bool) {
 		return oauthProviderAnthropic, true
 	case "antigravity":
 		return oauthProviderGoogleAntigravity, true
+	case "github-copilot":
+		return oauthProviderGitHubCopilot, true
 	default:
 		return "", false
 	}

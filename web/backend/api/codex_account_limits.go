@@ -20,16 +20,19 @@ import (
 )
 
 const (
-	codexAccountLimitsDefaultBaseURL  = "https://chatgpt.com"
-	codexAccountLimitsOAuthTokenURL   = "https://auth.openai.com/oauth/token"
-	codexAccountLimitsOpenAIClientID  = "app_EMoamEEZ73f0CkXaXp7hrann"
-	codexAccountLimitsMaxErrorBodyLen = 1 << 20
+	codexAccountLimitsDefaultBaseURL         = "https://chatgpt.com"
+	codexAccountLimitsOAuthTokenURL          = "https://auth.openai.com/oauth/token"
+	codexAccountLimitsOpenAIClientID         = "app_EMoamEEZ73f0CkXaXp7hrann"
+	codexAccountLimitsMaxErrorBodyLen        = 1 << 20
+	githubCopilotAccountLimitsDefaultUserURL = "https://api.github.com/copilot_internal/user"
 )
 
 var (
-	codexAccountLimitsBaseURL    = func() string { return "" }
-	codexAccountLimitsHTTPClient = http.DefaultClient
-	codexAccountLimitsTokenURL   = codexAccountLimitsOAuthTokenURL
+	codexAccountLimitsBaseURL         = func() string { return "" }
+	codexAccountLimitsHTTPClient      = http.DefaultClient
+	codexAccountLimitsTokenURL        = codexAccountLimitsOAuthTokenURL
+	githubCopilotAccountLimitsUserURL = githubCopilotAccountLimitsDefaultUserURL
+	githubCopilotAccountLimitsClient  = http.DefaultClient
 )
 
 type codexAccountLimitsResponse struct {
@@ -39,6 +42,7 @@ type codexAccountLimitsResponse struct {
 
 type codexAccountLimitAccount struct {
 	ID               string                   `json:"id"`
+	Provider         string                   `json:"provider,omitempty"`
 	Default          bool                     `json:"default,omitempty"`
 	Email            string                   `json:"email,omitempty"`
 	AccountID        string                   `json:"account_id,omitempty"`
@@ -178,6 +182,7 @@ func loadCodexAccountLimits(ctx context.Context) (codexAccountLimitsResponse, er
 	for _, candidate := range candidates {
 		account := codexAccountLimitAccount{
 			ID:        candidate.credentialID,
+			Provider:  oauthProviderOpenAI,
 			Default:   candidate.credentialID == oauthProviderOpenAI,
 			Email:     candidate.credential.Email,
 			AccountID: candidate.credential.AccountID,
@@ -199,7 +204,39 @@ func loadCodexAccountLimits(ctx context.Context) (codexAccountLimitsResponse, er
 	}
 
 	fetchCodexAccountUsages(ctx, usageURL, resp.Accounts, fetches)
+	appendGitHubCopilotAccountLimits(ctx, store, &resp)
 	return resp, nil
+}
+
+func appendGitHubCopilotAccountLimits(
+	ctx context.Context,
+	store *auth.AuthStore,
+	resp *codexAccountLimitsResponse,
+) {
+	candidates := githubCopilotAccountCredentialCandidates(store)
+	fetches := []codexAccountUsageFetch{}
+	for _, candidate := range candidates {
+		account := codexAccountLimitAccount{
+			ID:        candidate.credentialID,
+			Provider:  oauthProviderGitHubCopilot,
+			Default:   candidate.credentialID == oauthProviderGitHubCopilot,
+			Email:     candidate.credential.Email,
+			AccountID: candidate.credential.AccountID,
+		}
+		tokens, status := githubCopilotAccountTokensFromCredential(candidate.credential)
+		account.CredentialStatus = status
+		if status != "available" {
+			account.LimitsStatus = "unavailable"
+			resp.Accounts = append(resp.Accounts, account)
+			continue
+		}
+		resp.Accounts = append(resp.Accounts, account)
+		fetches = append(fetches, codexAccountUsageFetch{
+			index:  len(resp.Accounts) - 1,
+			tokens: tokens,
+		})
+	}
+	fetchGitHubCopilotAccountUsages(ctx, resp.Accounts, fetches)
 }
 
 func fetchCodexAccountUsages(
@@ -251,13 +288,21 @@ type codexAccountCredentialCandidate struct {
 }
 
 func codexAccountCredentialCandidates(store *auth.AuthStore) []codexAccountCredentialCandidate {
+	return accountCredentialCandidates(store, oauthProviderOpenAI)
+}
+
+func githubCopilotAccountCredentialCandidates(store *auth.AuthStore) []codexAccountCredentialCandidate {
+	return accountCredentialCandidates(store, oauthProviderGitHubCopilot)
+}
+
+func accountCredentialCandidates(store *auth.AuthStore, provider string) []codexAccountCredentialCandidate {
 	if store == nil || len(store.Credentials) == 0 {
 		return nil
 	}
 
 	credentialIDs := make([]string, 0, len(store.Credentials))
 	for credentialID, credential := range store.Credentials {
-		if credential == nil || !credentialIDBelongsToProvider(oauthProviderOpenAI, credentialID) {
+		if credential == nil || !credentialIDBelongsToProvider(provider, credentialID) {
 			continue
 		}
 		credentialIDs = append(credentialIDs, credentialID)
@@ -283,6 +328,80 @@ func codexAccountTokensFromCredential(credential *auth.AuthCredential) (codexAut
 		RefreshToken: strings.TrimSpace(credential.RefreshToken),
 		AccountID:    strings.TrimSpace(credential.AccountID),
 	}, "available"
+}
+
+func githubCopilotAccountTokensFromCredential(credential *auth.AuthCredential) (codexAuthTokens, string) {
+	if credential == nil || strings.TrimSpace(credential.AccessToken) == "" {
+		return codexAuthTokens{}, "invalid"
+	}
+	if err := auth.ValidateGitHubCopilotToken(strings.TrimSpace(credential.AccessToken)); err != nil {
+		return codexAuthTokens{}, "invalid"
+	}
+	return codexAuthTokens{
+		AccessToken: strings.TrimSpace(credential.AccessToken),
+		AccountID:   strings.TrimSpace(credential.AccountID),
+	}, "available"
+}
+
+func fetchGitHubCopilotAccountUsages(
+	ctx context.Context,
+	accounts []codexAccountLimitAccount,
+	fetches []codexAccountUsageFetch,
+) {
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, fetch := range fetches {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			payload, err := fetchGitHubCopilotAccountUsage(ctx, fetch.tokens.AccessToken)
+			mu.Lock()
+			defer mu.Unlock()
+			account := &accounts[fetch.index]
+			if err != nil {
+				account.LimitsStatus = "error"
+				account.LimitsError = codexLimitsErrorCode(err)
+				return
+			}
+			account.Plan = githubCopilotPayloadString(payload, "copilot_plan", "access_type_sku", "sku")
+			if account.Plan == "" {
+				account.Plan = "copilot"
+			}
+			account.Entries = githubCopilotUsageEntries(payload)
+			account.LimitsStatus = "available"
+		}()
+	}
+	wg.Wait()
+}
+
+func fetchGitHubCopilotAccountUsage(ctx context.Context, token string) (map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubCopilotAccountLimitsUserURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "token "+strings.TrimSpace(token))
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "GitHubCopilotChat/0.26.7")
+	req.Header.Set("Editor-Version", "vscode/1.104.3")
+	req.Header.Set("Editor-Plugin-Version", "copilot-chat/0.26.7")
+	req.Header.Set("Copilot-Integration-Id", "vscode-chat")
+	req.Header.Set("X-Github-Api-Version", "2025-04-01")
+
+	resp, err := githubCopilotAccountLimitsClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, codexUpstreamUsageError(resp)
+	}
+
+	payload := map[string]any{}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
 }
 
 func fetchCodexAccountUsage(
@@ -467,6 +586,242 @@ func codexUsageEntries(payload codexUsagePayload) []codexAccountLimitEntry {
 		entries = append(entries, codexAccountLimitEntry{Name: "codex", Status: "available"})
 	}
 	return entries
+}
+
+func githubCopilotUsageEntries(payload map[string]any) []codexAccountLimitEntry {
+	reset := githubCopilotPayloadString(payload, "quota_reset_date", "quota_reset_at", "reset_at")
+	entries := []codexAccountLimitEntry{}
+	addEntry := func(name string, value any) {
+		if entry, ok := githubCopilotUsageEntry(name, value, reset); ok {
+			entries = append(entries, entry)
+		}
+	}
+
+	for _, key := range []string{"premium_interactions", "chat", "completions"} {
+		addEntry(githubCopilotLimitDisplayName(key), payload[key])
+	}
+	for _, containerKey := range []string{"quota_snapshots", "limited_user_quotas"} {
+		container, ok := payload[containerKey].(map[string]any)
+		if !ok {
+			continue
+		}
+		keys := make([]string, 0, len(container))
+		for key := range container {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			addEntry(githubCopilotLimitDisplayName(key), container[key])
+		}
+	}
+
+	entries = dedupeLimitEntries(entries)
+	if len(entries) == 0 {
+		entries = append(entries, codexAccountLimitEntry{Name: "Copilot", Status: "available"})
+	}
+	return entries
+}
+
+func githubCopilotUsageEntry(
+	name string,
+	value any,
+	defaultReset string,
+) (codexAccountLimitEntry, bool) {
+	quota, ok := value.(map[string]any)
+	if !ok {
+		return codexAccountLimitEntry{}, false
+	}
+	entry := codexAccountLimitEntry{
+		Name:   name,
+		Status: "available",
+		Window: "monthly",
+		RefreshesAt: firstNonEmpty(
+			githubCopilotQuotaReset(quota),
+			formatGitHubCopilotReset(defaultReset),
+		),
+	}
+
+	if percentRemaining, ok := numberFromMap(quota, "percent_remaining", "remaining_percent"); ok {
+		usedPercent := int(100 - percentRemaining + 0.5)
+		if usedPercent < 0 {
+			usedPercent = 0
+		}
+		if usedPercent > 100 {
+			usedPercent = 100
+		}
+		entry.UsedPercent = &usedPercent
+	}
+	if entry.UsedPercent == nil {
+		if used, usedOK := numberFromMap(quota, "used", "usage", "current_value", "currentValue"); usedOK {
+			entitlement, limitOK := numberFromMap(
+				quota,
+				"entitlement",
+				"limit",
+				"quota",
+				"quota_value",
+			)
+			if limitOK && entitlement > 0 {
+				usedPercent := int((used/entitlement)*100 + 0.5)
+				if usedPercent < 0 {
+					usedPercent = 0
+				}
+				if usedPercent > 100 {
+					usedPercent = 100
+				}
+				entry.UsedPercent = &usedPercent
+			}
+		}
+	}
+
+	overagePermitted, _ := boolFromMap(quota, "overage_permitted", "overagePermitted")
+	remaining, remainingOK := numberFromMap(quota, "remaining", "remaining_count")
+	if remainingOK && remaining <= 0 && !overagePermitted {
+		entry.Status = "unavailable"
+	}
+	exhausted, exhaustedOK := boolFromMap(quota, "exhausted", "limit_reached", "is_exhausted")
+	if exhaustedOK && exhausted && !overagePermitted {
+		entry.Status = "unavailable"
+	}
+	return entry, true
+}
+
+func dedupeLimitEntries(entries []codexAccountLimitEntry) []codexAccountLimitEntry {
+	if len(entries) < 2 {
+		return entries
+	}
+	out := make([]codexAccountLimitEntry, 0, len(entries))
+	seen := map[string]struct{}{}
+	for _, entry := range entries {
+		key := strings.ToLower(entry.Name + "|" + entry.Window)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func githubCopilotLimitDisplayName(key string) string {
+	key = strings.TrimSpace(key)
+	switch strings.ToLower(key) {
+	case "premium_interactions", "premium":
+		return "Premium"
+	case "limited_user_quotas":
+		return "Limited"
+	default:
+		key = strings.ReplaceAll(key, "_", " ")
+		key = strings.ReplaceAll(key, "-", " ")
+		parts := strings.Fields(key)
+		for i, part := range parts {
+			if len(part) == 0 {
+				continue
+			}
+			parts[i] = strings.ToUpper(part[:1]) + part[1:]
+		}
+		return strings.Join(parts, " ")
+	}
+}
+
+func githubCopilotQuotaReset(quota map[string]any) string {
+	for _, key := range []string{"reset_at", "resetAt", "resets_at", "resetsAt", "quota_reset_date"} {
+		if value, ok := quota[key]; ok {
+			if formatted := formatGitHubCopilotReset(value); formatted != "" {
+				return formatted
+			}
+		}
+	}
+	return ""
+}
+
+func githubCopilotPayloadString(payload map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value, ok := payload[key]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case string:
+			if strings.TrimSpace(typed) != "" {
+				return strings.TrimSpace(typed)
+			}
+		case fmt.Stringer:
+			if strings.TrimSpace(typed.String()) != "" {
+				return strings.TrimSpace(typed.String())
+			}
+		}
+	}
+	return ""
+}
+
+func formatGitHubCopilotReset(value any) string {
+	switch typed := value.(type) {
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return ""
+		}
+		if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
+			return parsed.Local().Format("2006-01-02 15:04:05 MST")
+		}
+		return trimmed
+	case float64:
+		return codexFormatResetTime(int64(typed))
+	case int64:
+		return codexFormatResetTime(typed)
+	case int:
+		return codexFormatResetTime(int64(typed))
+	case json.Number:
+		if n, err := typed.Int64(); err == nil {
+			return codexFormatResetTime(n)
+		}
+	}
+	return ""
+}
+
+func numberFromMap(values map[string]any, keys ...string) (float64, bool) {
+	for _, key := range keys {
+		value, ok := values[key]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case float64:
+			return typed, true
+		case int:
+			return float64(typed), true
+		case int64:
+			return float64(typed), true
+		case json.Number:
+			n, err := typed.Float64()
+			return n, err == nil
+		case string:
+			n, err := strconv.ParseFloat(strings.TrimSpace(typed), 64)
+			if err == nil {
+				return n, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func boolFromMap(values map[string]any, keys ...string) (bool, bool) {
+	for _, key := range keys {
+		value, ok := values[key]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case bool:
+			return typed, true
+		case string:
+			parsed, err := strconv.ParseBool(strings.TrimSpace(typed))
+			if err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return false, false
 }
 
 func codexEntriesForRateLimit(name string, rateLimit *codexRateLimitDetails) []codexAccountLimitEntry {

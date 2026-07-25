@@ -181,6 +181,7 @@ function defaultCredentialAuthMethod(
 ): string {
   switch (provider) {
     case "anthropic":
+    case "github-copilot":
       return "token"
     case "google-antigravity":
       return "oauth"
