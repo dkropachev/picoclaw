@@ -873,11 +873,26 @@ func fetchUpstreamModels(ctx context.Context, opts upstreamFetchOptions) ([]upst
 		}
 		fetchURL = apiBase + "/models"
 		return fetchOpenAICompatibleModels(ctx, fetchURL, apiKey)
+	case "github-copilot":
+		return fetchGitHubCopilotModels(), nil
 	default:
 		// OpenAI-compatible: /v1/models
 		fetchURL = apiBase + "/models"
 		return fetchOpenAICompatibleModels(ctx, fetchURL, apiKey)
 	}
+}
+
+func fetchGitHubCopilotModels() []upstreamModel {
+	modelIDs := providers.CommonModelsForProvider("github-copilot")
+	models := make([]upstreamModel, 0, len(modelIDs))
+	for _, id := range modelIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		models = append(models, upstreamModel{ID: id, OwnedBy: "github-copilot"})
+	}
+	return models
 }
 
 func openAICodexModelsFetchURL() string {
@@ -1335,6 +1350,9 @@ func probeModelConnectivity(m *config.ModelConfig) bool {
 	case "vllm", "lmstudio", "gpt4free":
 		return probeOpenAICompatibleModel(apiBase, modelID, m.APIKey())
 	case "github-copilot":
+		if isCredentialAuthMethod(m.AuthMethod) {
+			return hasModelConfiguration(m)
+		}
 		return probeTCPService(apiBase)
 	case "claude-cli":
 		return probeCommandAvailable("claude")

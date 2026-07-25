@@ -180,6 +180,9 @@
       },
       "antigravity": {
         "description": "Usa OAuth via navegador para o Google Cloud Code Assist."
+      },
+      "githubCopilot": {
+        "description": "Usa login por token do GitHub para acesso à assinatura do Copilot."
       }
     },
     "status": {
@@ -201,7 +204,8 @@
     },
     "fields": {
       "openaiToken": "Token OpenAI",
-      "anthropicToken": "Token Anthropic"
+      "anthropicToken": "Token Anthropic",
+      "githubCopilotToken": "Token gho_, ghu_ ou github_pat_"
     },
     "labels": {
       "account": "Conta",

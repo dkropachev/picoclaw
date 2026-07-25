@@ -1,6 +1,10 @@
 import { launcherFetch } from "@/api/http"
 
-export type OAuthProvider = "openai" | "anthropic" | "google-antigravity"
+export type OAuthProvider =
+  | "openai"
+  | "anthropic"
+  | "google-antigravity"
+  | "github-copilot"
 export type OAuthMethod = "browser" | "device_code" | "token"
 
 export interface OAuthProviderStatus {
