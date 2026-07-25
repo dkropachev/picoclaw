@@ -147,6 +147,112 @@ func TestHandleCodexAccountLimitsUsesUsageAPI(t *testing.T) {
 	}
 }
 
+func TestHandleCodexAccountLimitsIncludesGitHubCopilotUsage(t *testing.T) {
+	withPicoclawAuthHome(t)
+	if err := auth.SetCredential("github-copilot:work", &auth.AuthCredential{
+		AccessToken: "gho_copilot-token",
+		Provider:    "github-copilot",
+		AuthMethod:  "token",
+	}); err != nil {
+		t.Fatalf("SetCredential(github-copilot) error: %v", err)
+	}
+
+	var gotAuth string
+	var gotIntegrationID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/copilot_internal/user" {
+			t.Errorf("path = %q, want /copilot_internal/user", r.URL.Path)
+		}
+		gotAuth = r.Header.Get("Authorization")
+		gotIntegrationID = r.Header.Get("Copilot-Integration-Id")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"copilot_plan":     "individual_pro",
+			"quota_reset_date": "2026-08-01T00:00:00Z",
+			"quota_snapshots": map[string]any{
+				"premium_interactions": map[string]any{
+					"entitlement":       1500,
+					"percent_remaining": 72,
+					"overage_permitted": false,
+					"quota_reset_date":  "2026-08-01T00:00:00Z",
+					"remaining":         1080,
+					"overage_count":     0,
+				},
+				"chat": map[string]any{
+					"entitlement":       1000,
+					"percent_remaining": 95,
+				},
+			},
+		})
+	}))
+	defer server.Close()
+	withGitHubCopilotAccountLimitsUserURL(t, server.URL+"/copilot_internal/user")
+
+	h := NewHandler("")
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/oauth/codex-account-limits", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if gotAuth != "token gho_copilot-token" {
+		t.Fatalf("Authorization = %q, want stored GitHub token", gotAuth)
+	}
+	if gotIntegrationID != "vscode-chat" {
+		t.Fatalf("Copilot-Integration-Id = %q, want vscode-chat", gotIntegrationID)
+	}
+
+	var resp codexAccountLimitsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	account := findCodexLimitAccount(resp.Accounts, "github-copilot:work")
+	if account == nil {
+		t.Fatalf("copilot account missing: %#v", resp.Accounts)
+	}
+	if account.Provider != "github-copilot" || account.Plan != "individual_pro" {
+		t.Fatalf("copilot account metadata = %#v", account)
+	}
+	if len(account.Entries) != 2 {
+		t.Fatalf("copilot entries = %#v, want premium and chat", account.Entries)
+	}
+	if account.Entries[0].Name != "Chat" {
+		t.Fatalf("first entry sorted by snapshot key = %#v", account.Entries[0])
+	}
+	if account.Entries[1].Name != "Premium" ||
+		account.Entries[1].UsedPercent == nil ||
+		*account.Entries[1].UsedPercent != 28 {
+		t.Fatalf("premium entry = %#v, want 28%% used", account.Entries[1])
+	}
+}
+
+func TestGitHubCopilotAccountLimitsInvalidTokenIsUnavailable(t *testing.T) {
+	withPicoclawAuthHome(t)
+	if err := auth.SetCredential("github-copilot:bad", &auth.AuthCredential{
+		AccessToken: "ghp_unsupported",
+		Provider:    "github-copilot",
+		AuthMethod:  "token",
+	}); err != nil {
+		t.Fatalf("SetCredential(github-copilot) error: %v", err)
+	}
+
+	resp, err := loadCodexAccountLimits(t.Context())
+	if err != nil {
+		t.Fatalf("loadCodexAccountLimits() error = %v", err)
+	}
+	account := findCodexLimitAccount(resp.Accounts, "github-copilot:bad")
+	if account == nil {
+		t.Fatalf("copilot account missing: %#v", resp.Accounts)
+	}
+	if account.CredentialStatus != "invalid" || account.LimitsStatus != "unavailable" {
+		t.Fatalf("account = %#v, want invalid/unavailable", account)
+	}
+}
+
 func TestCodexAccountLimitsRefreshesExpiredToken(t *testing.T) {
 	withPicoclawAuthHome(t)
 	setOpenAIAuthCredential(
@@ -295,6 +401,18 @@ func withCodexTokenURL(t *testing.T, tokenURL string) {
 	orig := codexAccountLimitsTokenURL
 	codexAccountLimitsTokenURL = tokenURL
 	t.Cleanup(func() { codexAccountLimitsTokenURL = orig })
+}
+
+func withGitHubCopilotAccountLimitsUserURL(t *testing.T, userURL string) {
+	t.Helper()
+	origURL := githubCopilotAccountLimitsUserURL
+	origClient := githubCopilotAccountLimitsClient
+	githubCopilotAccountLimitsUserURL = userURL
+	githubCopilotAccountLimitsClient = http.DefaultClient
+	t.Cleanup(func() {
+		githubCopilotAccountLimitsUserURL = origURL
+		githubCopilotAccountLimitsClient = origClient
+	})
 }
 
 func setOpenAIAuthCredential(

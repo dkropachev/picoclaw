@@ -148,6 +148,54 @@ func TestLoadBalancerFallbackToAccountFallbackToLoadBalancer(t *testing.T) {
 	}
 }
 
+func TestLoadBalanceStrategiesKeepGitHubCopilotCredentialIdentities(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	for _, strategy := range []string{
+		config.ModelRouterStrategyBlind,
+		config.ModelRouterStrategyTokensSpent,
+		config.ModelRouterStrategyClosestLimit,
+	} {
+		t.Run(strategy, func(t *testing.T) {
+			router := newCredentialTestRouter(t, &config.ModelRouterConfig{
+				Enabled: true,
+				Entry:   "pool",
+				Blocks: []config.ModelRouterBlock{{
+					ID:       "pool",
+					Type:     config.ModelRouterBlockTypeLoadBalance,
+					Accounts: []string{"credential:github-copilot:gh-copilot", "credential:github-copilot:backup"},
+					Strategy: strategy,
+				}},
+			}, now)
+
+			selection := router.Select("session-1", SelectReasonInitial)
+			selected := selectedAccount(t, selection)
+			switch selected {
+			case "credential:github-copilot:gh-copilot", "credential:github-copilot:backup":
+			default:
+				t.Fatalf("selected account = %q, want full Copilot credential ref", selected)
+			}
+			if got := selection.BlockAccountChoices["pool"]; got != selected {
+				t.Fatalf("pool choice = %q, want selected Copilot account %q", got, selected)
+			}
+
+			router.RecordFallbackResult(selection, &providers.FallbackResult{
+				Response:    &providers.LLMResponse{Content: "ok", Usage: &providers.UsageInfo{TotalTokens: 25}},
+				Provider:    "github-copilot",
+				Model:       "gpt-5",
+				IdentityKey: "account:" + selected,
+			}, nil)
+
+			state := router.store.st.Routers["router-main"].Accounts[selected]
+			if state == nil {
+				t.Fatal("state for full Copilot credential account missing")
+			}
+			if state.TotalTokens != 25 {
+				t.Fatalf("TotalTokens = %d, want 25", state.TotalTokens)
+			}
+		})
+	}
+}
+
 func TestClosestLimitUsesCurrentMinuteWindow(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	router := newTestRouter(t, &config.ModelRouterConfig{
@@ -312,10 +360,38 @@ func newTestRouter(t *testing.T, cfg *config.ModelRouterConfig, now time.Time) *
 	return router
 }
 
+func newCredentialTestRouter(t *testing.T, cfg *config.ModelRouterConfig, now time.Time) *Router {
+	t.Helper()
+	router := New("router-main", cfg, map[string]Account{
+		"credential:github-copilot:gh-copilot": {
+			Candidates: []providers.FallbackCandidate{credentialCandidate("credential:github-copilot:gh-copilot")},
+			RPM:        60,
+		},
+		"credential:github-copilot:backup": {
+			Candidates: []providers.FallbackCandidate{credentialCandidate("credential:github-copilot:backup")},
+			RPM:        60,
+		},
+	}, filepath.Join(t.TempDir(), "model_router_state.json"))
+	if router == nil {
+		t.Fatal("New() returned nil")
+	}
+	router.now = func() time.Time { return now }
+	return router
+}
+
 func candidate(account string) providers.FallbackCandidate {
 	return providers.FallbackCandidate{
 		Provider:    "openai",
 		Model:       "gpt-4o",
+		DisplayName: account,
+		IdentityKey: "account:" + account,
+	}
+}
+
+func credentialCandidate(account string) providers.FallbackCandidate {
+	return providers.FallbackCandidate{
+		Provider:    "github-copilot",
+		Model:       "gpt-5",
 		DisplayName: account,
 		IdentityKey: "account:" + account,
 	}

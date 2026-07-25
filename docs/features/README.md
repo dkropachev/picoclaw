@@ -15,27 +15,28 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 
 ## Canonical Specs
 
-| Feature | Spec |
-| --- | --- |
-| Agent conversations and turn execution | [agent-conversations.md](agent-conversations.md) |
-| Chat channels and gateway delivery | [chat-channels.md](chat-channels.md) |
-| Session memory and history | [session-memory.md](session-memory.md) |
-| Threads and handoffs | [threads.md](threads.md) |
-| Tool execution | [tool-execution.md](tool-execution.md) |
-| MCP integration and discovery | [mcp-integration.md](mcp-integration.md) |
-| Skills loading and installation | [skills.md](skills.md) |
-| Scheduling and reminders | [scheduling.md](scheduling.md) |
-| Routing and multi-agent dispatch | [routing.md](routing.md) |
-| Account router | [model-router.md](model-router.md) |
-| Hooks and interception | [hooks.md](hooks.md) |
-| Self-evolution | [self-evolution.md](self-evolution.md) |
-| Launcher management UX | [launcher-management.md](launcher-management.md) |
-| Security, credentials, and isolation | [security-isolation.md](security-isolation.md) |
-| Runtime events and observability | [runtime-events.md](runtime-events.md) |
-| Portability, updates, and packaging | [portability-updates.md](portability-updates.md) |
-| Workflows and reusable automation | [workflows.md](workflows.md) |
-| Git workspaces and checkout retention | [git-workspaces.md](git-workspaces.md) |
-| Agent execution optimization | [agent-execution-optimization.md](agent-execution-optimization.md) |
+| Feature                                | Spec                                                               |
+| -------------------------------------- | ------------------------------------------------------------------ |
+| Agent conversations and turn execution | [agent-conversations.md](agent-conversations.md)                   |
+| Chat channels and gateway delivery     | [chat-channels.md](chat-channels.md)                               |
+| Session memory and history             | [session-memory.md](session-memory.md)                             |
+| Threads and handoffs                   | [threads.md](threads.md)                                           |
+| Tool execution                         | [tool-execution.md](tool-execution.md)                             |
+| MCP integration and discovery          | [mcp-integration.md](mcp-integration.md)                           |
+| Skills loading and installation        | [skills.md](skills.md)                                             |
+| Scheduling and reminders               | [scheduling.md](scheduling.md)                                     |
+| Routing and multi-agent dispatch       | [routing.md](routing.md)                                           |
+| Account router                         | [model-router.md](model-router.md)                                 |
+| GitHub Copilot subscription accounts   | [github-copilot-subscription.md](github-copilot-subscription.md)   |
+| Hooks and interception                 | [hooks.md](hooks.md)                                               |
+| Self-evolution                         | [self-evolution.md](self-evolution.md)                             |
+| Launcher management UX                 | [launcher-management.md](launcher-management.md)                   |
+| Security, credentials, and isolation   | [security-isolation.md](security-isolation.md)                     |
+| Runtime events and observability       | [runtime-events.md](runtime-events.md)                             |
+| Portability, updates, and packaging    | [portability-updates.md](portability-updates.md)                   |
+| Workflows and reusable automation      | [workflows.md](workflows.md)                                       |
+| Git workspaces and checkout retention  | [git-workspaces.md](git-workspaces.md)                             |
+| Agent execution optimization           | [agent-execution-optimization.md](agent-execution-optimization.md) |
 
 ## Workflow
 

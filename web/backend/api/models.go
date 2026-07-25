@@ -17,6 +17,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	cliprovider "github.com/sipeed/picoclaw/pkg/providers/cli"
 	providercommon "github.com/sipeed/picoclaw/pkg/providers/common"
 )
 
@@ -838,6 +839,8 @@ var openAICodexModelsEndpoint = openAICodexModelsEndpointDefault
 
 const openAICodexModelsClientVersionDefault = "0.139.0"
 
+var listGitHubCopilotModelsWithToken = cliprovider.ListGitHubCopilotModelsWithToken
+
 func isCredentialAuthMethod(authMethod string) bool {
 	switch strings.ToLower(strings.TrimSpace(authMethod)) {
 	case "oauth", "token":
@@ -873,11 +876,59 @@ func fetchUpstreamModels(ctx context.Context, opts upstreamFetchOptions) ([]upst
 		}
 		fetchURL = apiBase + "/models"
 		return fetchOpenAICompatibleModels(ctx, fetchURL, apiKey)
+	case "github-copilot":
+		return fetchGitHubCopilotModels(ctx, authMethod, opts.CredentialID)
 	default:
 		// OpenAI-compatible: /v1/models
 		fetchURL = apiBase + "/models"
 		return fetchOpenAICompatibleModels(ctx, fetchURL, apiKey)
 	}
+}
+
+func fetchStaticGitHubCopilotModels() []upstreamModel {
+	modelIDs := providers.CommonModelsForProvider("github-copilot")
+	models := make([]upstreamModel, 0, len(modelIDs))
+	for _, id := range modelIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		models = append(models, upstreamModel{ID: id, OwnedBy: "github-copilot"})
+	}
+	return models
+}
+
+func fetchGitHubCopilotModels(
+	ctx context.Context,
+	authMethod string,
+	credentialID string,
+) ([]upstreamModel, error) {
+	if !isCredentialAuthMethod(authMethod) && strings.TrimSpace(credentialID) == "" {
+		return fetchStaticGitHubCopilotModels(), nil
+	}
+	cred, err := resolveGitHubCopilotCredential(credentialID)
+	if err != nil {
+		return nil, err
+	}
+	models, err := listGitHubCopilotModelsWithToken(ctx, cred.AccessToken)
+	if err != nil {
+		return nil, fmt.Errorf("listing GitHub Copilot models: %w", err)
+	}
+	out := make([]upstreamModel, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, upstreamModel{ID: id, OwnedBy: "github-copilot"})
+	}
+	return out, nil
 }
 
 func openAICodexModelsFetchURL() string {
@@ -936,6 +987,28 @@ func resolveOpenAICodexCredential(credentialID string) (*auth.AuthCredential, er
 	}
 	if strings.TrimSpace(cred.AccessToken) == "" {
 		return nil, fmt.Errorf("OpenAI Codex credential %s has no access token", normalizedCredentialID)
+	}
+	return cred, nil
+}
+
+func resolveGitHubCopilotCredential(credentialID string) (*auth.AuthCredential, error) {
+	normalizedCredentialID, err := auth.NormalizeCredentialID("github-copilot", credentialID)
+	if err != nil {
+		return nil, err
+	}
+	cred, err := auth.GetCredential(normalizedCredentialID)
+	if err != nil {
+		return nil, fmt.Errorf("loading GitHub Copilot credential %s: %w", normalizedCredentialID, err)
+	}
+	if strings.TrimSpace(cred.AccessToken) == "" {
+		return nil, fmt.Errorf("GitHub Copilot credential %s has no access token", normalizedCredentialID)
+	}
+	if provider := providers.NormalizeProvider(cred.Provider); provider != "" && provider != "github-copilot" {
+		return nil, fmt.Errorf(
+			"credential %s belongs to provider %q, not github-copilot",
+			normalizedCredentialID,
+			cred.Provider,
+		)
 	}
 	return cred, nil
 }
@@ -1335,6 +1408,9 @@ func probeModelConnectivity(m *config.ModelConfig) bool {
 	case "vllm", "lmstudio", "gpt4free":
 		return probeOpenAICompatibleModel(apiBase, modelID, m.APIKey())
 	case "github-copilot":
+		if isCredentialAuthMethod(m.AuthMethod) {
+			return hasModelConfiguration(m)
+		}
 		return probeTCPService(apiBase)
 	case "claude-cli":
 		return probeCommandAvailable("claude")

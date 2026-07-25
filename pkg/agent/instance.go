@@ -533,6 +533,8 @@ func credentialRuntimeProvider(provider string) string {
 	switch strings.TrimSpace(provider) {
 	case "google-antigravity":
 		return "antigravity"
+	case "copilot":
+		return "github-copilot"
 	default:
 		return strings.TrimSpace(provider)
 	}
@@ -540,7 +542,7 @@ func credentialRuntimeProvider(provider string) string {
 
 func credentialRuntimeAuthMethod(provider string) string {
 	switch strings.TrimSpace(provider) {
-	case "anthropic":
+	case "anthropic", "github-copilot":
 		return "token"
 	default:
 		return "oauth"

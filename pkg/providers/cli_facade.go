@@ -27,6 +27,10 @@ func NewGitHubCopilotProvider(uri string, connectMode string, model string) (*Gi
 	return cliprovider.NewGitHubCopilotProvider(uri, connectMode, model)
 }
 
+func NewGitHubCopilotProviderWithToken(token string, model string) (*GitHubCopilotProvider, error) {
+	return cliprovider.NewGitHubCopilotProviderWithToken(token, model)
+}
+
 func ReadCodexCliCredentials() (accessToken, accountID string, expiresAt time.Time, err error) {
 	return cliprovider.ReadCodexCliCredentials()
 }

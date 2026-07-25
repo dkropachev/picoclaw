@@ -18,6 +18,7 @@ function getProviderLabel(provider: OAuthProvider | ""): string {
   if (provider === "openai") return "OpenAI"
   if (provider === "anthropic") return "Anthropic"
   if (provider === "google-antigravity") return "Google Antigravity"
+  if (provider === "github-copilot") return "GitHub Copilot"
   return ""
 }
 

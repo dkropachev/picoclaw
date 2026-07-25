@@ -30,7 +30,7 @@ security behavior that other feature specs rely on.
 | ID | Level | Requirement | Rationale |
 | --- | --- | --- | --- |
 | `FR-SEC-001` | MUST | Secure string config fields avoid plaintext exposure in launcher read paths and preserve secret values on partial updates; router model entries must not persist provider API keys, and router graph account refs are limited to non-secret credential account identifiers such as `credential:openai:work`. | Credentials must not leak through management surfaces. |
-| `FR-SEC-002` | MUST | Credential store operations save, load, list, and delete provider credentials with provider/auth-method identity; storage writes use same-directory, collision-resistant temp files before atomic rename so concurrent saves do not fail on temp-name reuse. | Auth-backed providers require durable credentials. |
+| `FR-SEC-002` | MUST | Credential store operations save, load, list, and delete provider credentials with provider/auth-method identity; provider aliases such as `copilot` are canonicalized before credential lookup or persistence; provider-specific token validators reject unsupported token forms before storage; storage writes use same-directory, collision-resistant temp files before atomic rename so concurrent saves do not fail on temp-name reuse. | Auth-backed providers require durable credentials. |
 | `FR-SEC-003` | MUST | Sensitive-data filtering redacts configured secrets from model-visible tool output when enabled. | Tool results can contain credentials. |
 | `FR-SEC-004` | MUST | Dashboard auth rejects unauthenticated access, uses CSRF-safe logout, and rate-limits login attempts. | Web management is sensitive. |
 | `FR-SEC-005` | MUST | HTTP guard blocks private/internal targets unless explicitly allowed or proxy first-hop rules apply. | Web tools must not become SSRF primitives. |
@@ -91,15 +91,18 @@ Owns: TEST pkg/config/version*
    values or optional model-list controls.
 2. Preserve existing secure-string values when updates contain masked values;
    replace, clear, or reject secrets only through explicit update semantics.
-3. Parse OAuth token responses into credential records, copy non-secret email
+3. Canonicalize provider-scoped credential aliases before lookup or persistence
+   and run provider-specific token validators before saving token-backed
+   credentials.
+4. Parse OAuth token responses into credential records, copy non-secret email
    claims from JWT payloads when available, and retain an existing email when a
    refresh response omits it.
-4. Authenticate dashboard requests before protected handlers and require POST
+5. Authenticate dashboard requests before protected handlers and require POST
    semantics for logout so browser navigation cannot clear sessions.
-5. Resolve HTTP targets to concrete host/IP data, deny private or internal
+6. Resolve HTTP targets to concrete host/IP data, deny private or internal
    destinations unless allow rules apply, then execute the request through the
    guarded client.
-6. Build isolation command specs from supported runtime configuration, validate
+7. Build isolation command specs from supported runtime configuration, validate
    exposed paths, start only supported commands, and return errors rather than
    weakening to unisolated execution.
 
@@ -128,6 +131,8 @@ entries own secrets.
 
 - Partial secret updates preserve old value unless an explicit clear is requested.
 - Concurrent atomic writes do not fail due to temporary filename collisions.
+- Unsupported provider token families, such as classic GitHub PATs for
+  Copilot-backed accounts, are rejected before persistence.
 - Invalid protected command patterns fail validation.
 - Unsupported isolation platform returns clear error.
 - Private host requests are denied unless whitelisted.
