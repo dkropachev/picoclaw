@@ -963,26 +963,11 @@ func TestDefaultConfig_WorkspacePath(t *testing.T) {
 	}
 }
 
-// TestDefaultConfig_AnthropicModelsUseClaudeAPIIDs verifies that first-party
-// Anthropic defaults use Claude API model IDs, not dotted display names or
-// Bedrock-style provider prefixes. See:
-// https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions
-func TestDefaultConfig_AnthropicModelsUseClaudeAPIIDs(t *testing.T) {
+func TestDefaultConfig_DoesNotSeedRunnableModelAliases(t *testing.T) {
 	cfg := DefaultConfig()
 
-	checked := 0
-	for _, model := range cfg.ModelList {
-		if model.Provider != "anthropic" {
-			continue
-		}
-		checked++
-		if strings.Contains(model.Model, ".") {
-			t.Fatalf("Anthropic default model %q uses dotted ID %q", model.ModelName, model.Model)
-		}
-	}
-
-	if checked == 0 {
-		t.Fatal("DefaultConfig() missing Anthropic models")
+	if len(cfg.ModelList) != 0 {
+		t.Fatalf("DefaultConfig() model_list length = %d, want 0", len(cfg.ModelList))
 	}
 }
 
@@ -2995,27 +2980,6 @@ func TestModelConfig_ToolSchemaTransformRoundTrip(t *testing.T) {
 
 	if got := loaded.ModelList[0].ToolSchemaTransform; got != "simple" {
 		t.Fatalf("ToolSchemaTransform = %q, want %q", got, "simple")
-	}
-}
-
-func TestDefaultConfig_MinimaxExtraBody(t *testing.T) {
-	cfg := DefaultConfig()
-
-	var minimaxCfg *ModelConfig
-	for i := range cfg.ModelList {
-		if cfg.ModelList[i].Provider == "minimax" && cfg.ModelList[i].Model == "MiniMax-M2.5" {
-			minimaxCfg = cfg.ModelList[i]
-			break
-		}
-	}
-	if minimaxCfg == nil {
-		t.Fatal("Minimax model not found in ModelList")
-	}
-	if minimaxCfg.ExtraBody == nil {
-		t.Fatal("Minimax ExtraBody should not be nil")
-	}
-	if got, ok := minimaxCfg.ExtraBody["reasoning_split"]; !ok || got != true {
-		t.Fatalf("Minimax ExtraBody[reasoning_split] = %v, want true", got)
 	}
 }
 

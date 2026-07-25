@@ -199,6 +199,16 @@ func newGatewayStartTestHandler(t *testing.T) *Handler {
 	return h
 }
 
+func addGatewayTestModel(cfg *config.Config) *config.ModelConfig {
+	model := &config.ModelConfig{
+		ModelName: "test-model",
+		Model:     "openai/gpt-4.1",
+		Provider:  "openai",
+	}
+	cfg.ModelList = append(cfg.ModelList, model)
+	return model
+}
+
 func startGatewayAndCaptureEnv(t *testing.T, h *Handler) gatewayStartEnvSnapshot {
 	t.Helper()
 
@@ -519,8 +529,9 @@ func TestGatewayStartReady_InvalidDefaultModel(t *testing.T) {
 func TestGatewayStartReady_ValidDefaultModel(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = cfg.ModelList[0].ModelName
-	cfg.ModelList[0].SetAPIKey("test-key")
+	model := addGatewayTestModel(cfg)
+	cfg.Agents.Defaults.ModelName = model.ModelName
+	model.SetAPIKey("test-key")
 	err := config.SaveConfig(configPath, cfg)
 	if err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
@@ -539,9 +550,10 @@ func TestGatewayStartReady_ValidDefaultModel(t *testing.T) {
 func TestGatewayStartReady_DefaultModelWithoutCredential(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = cfg.ModelList[0].ModelName
-	cfg.ModelList[0].SetAPIKey("")
-	cfg.ModelList[0].AuthMethod = ""
+	model := addGatewayTestModel(cfg)
+	cfg.Agents.Defaults.ModelName = model.ModelName
+	model.SetAPIKey("")
+	model.AuthMethod = ""
 	err := config.SaveConfig(configPath, cfg)
 	if err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
@@ -1061,8 +1073,9 @@ func TestGatewayStatusRequiresRestartAfterDefaultModelChange(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = cfg.ModelList[0].ModelName
-	cfg.ModelList[0].SetAPIKey("test-key")
+	model := addGatewayTestModel(cfg)
+	cfg.Agents.Defaults.ModelName = model.ModelName
+	model.SetAPIKey("test-key")
 	cfg.ModelList = append(cfg.ModelList, &config.ModelConfig{
 		ModelName: "second-model",
 		Model:     "openai/gpt-4.1",
@@ -1093,7 +1106,7 @@ func TestGatewayStatusRequiresRestartAfterDefaultModelChange(t *testing.T) {
 	bootSignature := computeConfigSignature(cfg)
 	gateway.mu.Lock()
 	gateway.cmd = cmd
-	gateway.bootDefaultModel = cfg.ModelList[0].ModelName
+	gateway.bootDefaultModel = model.ModelName
 	gateway.bootConfigSignature = bootSignature
 	setGatewayRuntimeStatusLocked("running")
 	gateway.mu.Unlock()
@@ -1127,8 +1140,8 @@ func TestGatewayStatusRequiresRestartAfterDefaultModelChange(t *testing.T) {
 	if got := body["gateway_status"]; got != "running" {
 		t.Fatalf("gateway_status = %#v, want %q", got, "running")
 	}
-	if got := body["boot_default_model"]; got != cfg.ModelList[0].ModelName {
-		t.Fatalf("boot_default_model = %#v, want %q", got, cfg.ModelList[0].ModelName)
+	if got := body["boot_default_model"]; got != model.ModelName {
+		t.Fatalf("boot_default_model = %#v, want %q", got, model.ModelName)
 	}
 	if got := body["config_default_model"]; got != "second-model" {
 		t.Fatalf("config_default_model = %#v, want %q", got, "second-model")
@@ -1143,8 +1156,9 @@ func TestGatewayStatusRequiresRestartAfterToolChange(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = cfg.ModelList[0].ModelName
-	cfg.ModelList[0].SetAPIKey("test-key")
+	model := addGatewayTestModel(cfg)
+	cfg.Agents.Defaults.ModelName = model.ModelName
+	model.SetAPIKey("test-key")
 	cfg.Tools.WriteFile.Enabled = true
 	if err := config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
@@ -1162,7 +1176,7 @@ func TestGatewayStatusRequiresRestartAfterToolChange(t *testing.T) {
 	bootSignature := computeConfigSignature(cfg)
 	gateway.mu.Lock()
 	gateway.cmd = &exec.Cmd{Process: process}
-	gateway.bootDefaultModel = cfg.ModelList[0].ModelName
+	gateway.bootDefaultModel = model.ModelName
 	gateway.bootConfigSignature = bootSignature
 	setGatewayRuntimeStatusLocked("running")
 	gateway.mu.Unlock()
@@ -1206,8 +1220,9 @@ func TestGatewayStatusRequiresRestartAfterChannelChange(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = cfg.ModelList[0].ModelName
-	cfg.ModelList[0].SetAPIKey("test-key")
+	model := addGatewayTestModel(cfg)
+	cfg.Agents.Defaults.ModelName = model.ModelName
+	model.SetAPIKey("test-key")
 	if err := config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
 	}
@@ -1224,7 +1239,7 @@ func TestGatewayStatusRequiresRestartAfterChannelChange(t *testing.T) {
 	bootSignature := computeConfigSignature(cfg)
 	gateway.mu.Lock()
 	gateway.cmd = &exec.Cmd{Process: process}
-	gateway.bootDefaultModel = cfg.ModelList[0].ModelName
+	gateway.bootDefaultModel = model.ModelName
 	gateway.bootConfigSignature = bootSignature
 	setGatewayRuntimeStatusLocked("running")
 	gateway.mu.Unlock()
@@ -1272,9 +1287,10 @@ func TestGatewayStatusRequiresRestartAfterDefaultModelStreamingChange(t *testing
 
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = cfg.ModelList[0].ModelName
-	cfg.ModelList[0].SetAPIKey("test-key")
-	cfg.ModelList[0].Streaming = config.ModelStreamingConfig{Enabled: false}
+	model := addGatewayTestModel(cfg)
+	cfg.Agents.Defaults.ModelName = model.ModelName
+	model.SetAPIKey("test-key")
+	model.Streaming = config.ModelStreamingConfig{Enabled: false}
 	if err := config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
 	}
@@ -1291,7 +1307,7 @@ func TestGatewayStatusRequiresRestartAfterDefaultModelStreamingChange(t *testing
 	bootSignature := computeConfigSignature(cfg)
 	gateway.mu.Lock()
 	gateway.cmd = &exec.Cmd{Process: process}
-	gateway.bootDefaultModel = cfg.ModelList[0].ModelName
+	gateway.bootDefaultModel = model.ModelName
 	gateway.bootConfigSignature = bootSignature
 	setGatewayRuntimeStatusLocked("running")
 	gateway.mu.Unlock()
@@ -1332,15 +1348,16 @@ func TestGatewayStatusRequiresRestartAfterDefaultModelStreamingChange(t *testing
 
 func TestConfigSignatureIncludesModelStreamingForDefaultModelRef(t *testing.T) {
 	cfg := config.DefaultConfig()
-	cfg.ModelList[0].ModelName = "friendly-alias"
-	cfg.ModelList[0].Provider = ""
-	cfg.ModelList[0].Model = "openai/gpt-4o-ref"
+	model := addGatewayTestModel(cfg)
+	model.ModelName = "friendly-alias"
+	model.Provider = ""
+	model.Model = "openai/gpt-4o-ref"
 	cfg.Agents.Defaults.ModelName = "openai/gpt-4o-ref"
-	cfg.ModelList[0].Streaming = config.ModelStreamingConfig{Enabled: false}
+	model.Streaming = config.ModelStreamingConfig{Enabled: false}
 
 	before := computeConfigSignature(cfg)
 
-	cfg.ModelList[0].Streaming = config.ModelStreamingConfig{Enabled: true}
+	model.Streaming = config.ModelStreamingConfig{Enabled: true}
 	after := computeConfigSignature(cfg)
 
 	if before == after {
@@ -1794,8 +1811,9 @@ func TestGatewayStatusRequiresRestartAfterWebSearchConfigChange(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = cfg.ModelList[0].ModelName
-	cfg.ModelList[0].SetAPIKey("test-key")
+	model := addGatewayTestModel(cfg)
+	cfg.Agents.Defaults.ModelName = model.ModelName
+	model.SetAPIKey("test-key")
 	cfg.Tools.Web.Enabled = true
 	cfg.Tools.Web.Provider = "sogou"
 	if err := config.SaveConfig(configPath, cfg); err != nil {
@@ -1814,7 +1832,7 @@ func TestGatewayStatusRequiresRestartAfterWebSearchConfigChange(t *testing.T) {
 	bootSignature := computeConfigSignature(cfg)
 	gateway.mu.Lock()
 	gateway.cmd = &exec.Cmd{Process: process}
-	gateway.bootDefaultModel = cfg.ModelList[0].ModelName
+	gateway.bootDefaultModel = model.ModelName
 	gateway.bootConfigSignature = bootSignature
 	setGatewayRuntimeStatusLocked("running")
 	gateway.mu.Unlock()
@@ -1858,8 +1876,9 @@ func TestGatewayStatusNoRestartRequiredForNonSensitiveChanges(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = cfg.ModelList[0].ModelName
-	cfg.ModelList[0].SetAPIKey("test-key")
+	model := addGatewayTestModel(cfg)
+	cfg.Agents.Defaults.ModelName = model.ModelName
+	model.SetAPIKey("test-key")
 	cfg.Agents.Defaults.MaxTokens = 1000
 	if err := config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
@@ -1877,7 +1896,7 @@ func TestGatewayStatusNoRestartRequiredForNonSensitiveChanges(t *testing.T) {
 	bootSignature := computeConfigSignature(cfg)
 	gateway.mu.Lock()
 	gateway.cmd = &exec.Cmd{Process: process}
-	gateway.bootDefaultModel = cfg.ModelList[0].ModelName
+	gateway.bootDefaultModel = model.ModelName
 	gateway.bootConfigSignature = bootSignature
 	setGatewayRuntimeStatusLocked("running")
 	gateway.mu.Unlock()
@@ -1921,8 +1940,9 @@ func TestGatewayStatusNoRestartRequiredWhenNotRunning(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = cfg.ModelList[0].ModelName
-	cfg.ModelList[0].SetAPIKey("test-key")
+	model := addGatewayTestModel(cfg)
+	cfg.Agents.Defaults.ModelName = model.ModelName
+	model.SetAPIKey("test-key")
 	if err := config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
 	}
@@ -2055,9 +2075,10 @@ func TestGatewayStatusReturnsRestartingDuringRestartGap(t *testing.T) {
 func TestGatewayRestartKeepsRunningProcessWhenPreconditionsFail(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = cfg.ModelList[0].ModelName
-	cfg.ModelList[0].SetAPIKey("")
-	cfg.ModelList[0].AuthMethod = ""
+	model := addGatewayTestModel(cfg)
+	cfg.Agents.Defaults.ModelName = model.ModelName
+	model.SetAPIKey("")
+	model.AuthMethod = ""
 	if err := config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
 	}
@@ -2108,8 +2129,9 @@ func TestGatewayRestartKeepsOldProcessWhenItDoesNotExitInTime(t *testing.T) {
 
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = cfg.ModelList[0].ModelName
-	cfg.ModelList[0].SetAPIKey("test-key")
+	model := addGatewayTestModel(cfg)
+	cfg.Agents.Defaults.ModelName = model.ModelName
+	model.SetAPIKey("test-key")
 	if err := config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
 	}
@@ -2174,8 +2196,9 @@ func TestGatewayRestartReturnsErrorStatusWhenReplacementFailsToStart(t *testing.
 
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = cfg.ModelList[0].ModelName
-	cfg.ModelList[0].SetAPIKey("test-key")
+	model := addGatewayTestModel(cfg)
+	cfg.Agents.Defaults.ModelName = model.ModelName
+	model.SetAPIKey("test-key")
 	if err := config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
 	}

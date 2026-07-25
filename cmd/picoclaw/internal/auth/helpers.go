@@ -139,44 +139,8 @@ func authLoginGoogleAntigravity(noBrowser bool, credentialID string) error {
 		return fmt.Errorf("failed to save credentials: %w", err)
 	}
 
-	appCfg, err := internal.LoadConfig()
-	if err == nil {
-		// Update or add antigravity in ModelList
-		foundAntigravity := false
-		for i := range appCfg.ModelList {
-			if isAntigravityModel(appCfg.ModelList[i]) &&
-				modelCredentialID("google-antigravity", appCfg.ModelList[i]) == storeKey {
-				appCfg.ModelList[i].AuthMethod = "oauth"
-				appCfg.ModelList[i].CredentialID = credentialIDForConfig("google-antigravity", storeKey)
-				foundAntigravity = true
-				break
-			}
-		}
-
-		// If no antigravity in ModelList, add it
-		if !foundAntigravity {
-			appCfg.ModelList = append(appCfg.ModelList, &config.ModelConfig{
-				ModelName:    modelNameForCredential("gemini-flash", "google-antigravity", storeKey),
-				Model:        "antigravity/gemini-3-flash",
-				AuthMethod:   "oauth",
-				CredentialID: credentialIDForConfig("google-antigravity", storeKey),
-			})
-		}
-
-		if storeKey == "google-antigravity" || appCfg.Agents.Defaults.GetModelName() == "" {
-			appCfg.Agents.Defaults.ModelName = modelNameForCredential("gemini-flash", "google-antigravity", storeKey)
-		}
-
-		if err := config.SaveConfig(internal.GetConfigPath(), appCfg); err != nil {
-			fmt.Printf("Warning: could not update config: %v\n", err)
-		}
-	}
-
 	fmt.Println("\n✓ Google Antigravity login successful!")
 	fmt.Printf("Credential ID: %s\n", storeKey)
-	if storeKey == "google-antigravity" {
-		fmt.Println("Default model set to: gemini-flash")
-	}
 	fmt.Println("Try it: picoclaw agent -m \"Hello world\"")
 
 	return nil
