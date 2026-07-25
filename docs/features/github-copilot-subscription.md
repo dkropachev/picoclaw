@@ -153,7 +153,7 @@ requested.
 | Auth Store | `auth.AuthCredential`                                  | Store provider-scoped Copilot access tokens under normalized credential IDs with no plaintext exposure through read APIs.           | `FR-GITHUB-COPILOT-002`, `FR-GITHUB-COPILOT-003`, `FR-GITHUB-COPILOT-009`        |
 | HTTP       | `/api/oauth*`, `/api/models*`                          | List/login/logout Copilot credentials, expose provider metadata, save model/router entries, fetch direct Copilot API model IDs for selected credentials, fetch sanitized account limits when available, and test model availability. | `FR-GITHUB-COPILOT-001` through `FR-GITHUB-COPILOT-012`                          |
 | Provider   | `providers.CreateProviderFromConfig` and `LLMProvider` | Select the subscription client or local bridge, list models, create sessions, send prompts, close resources, and return normal responses/errors. | `FR-GITHUB-COPILOT-004` through `FR-GITHUB-COPILOT-009`                          |
-| Frontend   | Accounts and model setup UI                            | Render Copilot as an account/provider option, submit token credentials, route selected credential refs, display account-limit summaries when returned, and fetch shared router models through launcher-authenticated API helpers. | `FR-GITHUB-COPILOT-001`, `FR-GITHUB-COPILOT-002`, `FR-GITHUB-COPILOT-008`, `FR-GITHUB-COPILOT-011`, `FR-GITHUB-COPILOT-012` |
+| Frontend   | Accounts and model setup UI                            | Render Copilot as an account/provider option, submit token credentials, route selected credential refs, display account-limit summaries when returned, and fetch shared models as read-only router availability through launcher-authenticated API helpers. | `FR-GITHUB-COPILOT-001`, `FR-GITHUB-COPILOT-002`, `FR-GITHUB-COPILOT-008`, `FR-GITHUB-COPILOT-011`, `FR-GITHUB-COPILOT-012` |
 
 ## Algorithms And Ordering
 
@@ -221,7 +221,7 @@ accounts without special routing behavior.
 - Local bridge failures mention the local endpoint or CLI transport; account
   client failures mention GitHub Copilot credential setup and never mention a
   missing local `copilot` executable.
-- Direct model-list failures during router shared-model discovery are surfaced
+- Direct model-list failures during router shared models discovery are surfaced
   as per-account warnings without hiding models returned by other selected
   accounts.
 - Account-limit failures for one Copilot credential do not suppress limit

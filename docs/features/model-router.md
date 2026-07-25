@@ -8,10 +8,9 @@
 
 Account routers are `model_list` entries that behave like normal chat model
 aliases while selecting one or more credential accounts through a static block
-graph. A router defines the shared model for the joint account; every connected
-account sends that same model through its own credentials. The launcher Accounts
-surface exposes both a UI editor for connecting primitive blocks/accounts and a
-raw JSON graph editor.
+graph. The launcher Accounts surface exposes both a UI editor for connecting
+primitive blocks/accounts, a read-only list of models available across selected
+accounts, and a raw JSON graph editor.
 
 ## Reconstruction Notes
 
@@ -22,7 +21,7 @@ raw JSON graph editor.
   `modelrouter.Router`, persistent router state store, agent candidate
   selection, fallback result recording, and launcher model handlers.
 - Runtime ordering: validate router graph and account references, build account
-  candidates from credential account refs, select an entry block for the
+  candidates from referenced model-list accounts, select an entry block for the
   session, execute normal provider fallback, record success/failure/usage, and
   persist updated route state atomically.
 - Non-obvious constraints: legacy model-name account refs remain supported for
@@ -30,19 +29,19 @@ raw JSON graph editor.
   names are ambiguous, load balance does not reshuffle an active session unless
   context compression occurs or the chosen account becomes unavailable, and
   failed attempts must be attributed by stable account identity even when two
-  accounts use the same provider/shared-model pair.
+  accounts use the same provider/model pair.
 
 ## Requirements
 
 | ID                    | Level | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Rationale                                                                                                                                                                       |
 | --------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `FR-MODEL-ROUTER-001` | MUST  | An account router is a `model_list` entry with provider `router`, a normal `model_name` alias, a shared `model`, and an enabled `router` graph containing an `entry` block and typed blocks.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Users should select a router anywhere they select a model while managing it as an account capability.                                                                           |
+| `FR-MODEL-ROUTER-001` | MUST  | An account router is a `model_list` entry with provider `router`, a normal `model_name` alias, no router-level model setting, and an enabled `router` graph containing an `entry` block and typed blocks.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Users should select a router anywhere they select a model while managing it as an account capability.                                                                           |
 | `FR-MODEL-ROUTER-002` | MUST  | Account blocks reference exactly one credential account ref such as `credential:openai:work`; account and load-balance blocks may fall back to any other block, including chains such as load-balancer -> account -> load-balancer. Fallback traversal rejects unknown legacy refs, cycles, router refs, and ambiguous duplicate legacy account names.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Static routing must fail at config time instead of during a turn.                                                                                                               |
 | `FR-MODEL-ROUTER-003` | MUST  | Load-balance blocks choose among account refs by `tokens_spent`, `closest_limit`, or `blind`; blind non-session choice refreshes every configured interval, defaulting to 60 seconds.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | Operators need simple deterministic distribution before automatic job routing exists.                                                                                           |
 | `FR-MODEL-ROUTER-004` | MUST  | A session keeps its selected load-balance account until context compression or until that account is unavailable due to auth, billing, rate-limit, network, timeout, overload, or other classified provider failure.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Long conversations should not drift across accounts unless continuity or availability requires it.                                                                              |
 | `FR-MODEL-ROUTER-005` | MUST  | Router state persists per workspace with config hash, account health, token/request usage, block cursors, and session affinities; writes are atomic, stale sessions are pruned, removed accounts are pruned, cooldowns are reason-aware, and corrupt state files are preserved with a `.corrupt.<timestamp>` suffix before recovery.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Account health must survive restarts without pinning bad or stale state forever.                                                                                                |
 | `FR-MODEL-ROUTER-006` | MUST  | Agent execution treats router aliases as regular model candidates: initial selection supplies provider candidates, context compression can reselect, fallback results update router state, `/use` can switch to a router, and all account candidates are registered for rate limiting.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Router behavior must compose with existing turns, fallbacks, and model switching.                                                                                               |
-| `FR-MODEL-ROUTER-007` | MUST  | Launcher Accounts management can add, edit, list, delete, and set an account router as default without storing API secrets on the router entry; invalid router account references return validation errors. The Accounts page lists routers in the same card grid as registered accounts, marks them with a route icon, and shows a concise list of referenced accounts with current credential status. The fullscreen create UI starts with no router block selected, prompts the user to add an account or load-balancer block, and never auto-creates the first account block. The fullscreen UI editor can create account/load-balancer blocks, connect fallback edges between blocks, show the full diagram as a draggable canvas, automatically stack the entry-to-fallback chain from top to bottom, pan the canvas, zoom by Shift+scroll or scale controls, and offer shared models that are available in every reachable selected account while showing per-account model-fetch failures for selected accounts that are down. The raw JSON editor exposes the same router graph. | Browser setup must expose routers safely as joint accounts without silently wiring a new router to an unintended block or hiding usable model choices when one account is down. |
+| `FR-MODEL-ROUTER-007` | MUST  | Launcher Accounts management can add, edit, list, delete, and set an account router as default without storing API secrets or a router-level model on the router entry; invalid router account references return validation errors. The Accounts page lists routers in the same card grid as registered accounts, marks them with a route icon, derives the card badge from referenced account health (`Connected` only when all referenced accounts are connected, attention state for mixed/problem states, and no-account state for empty or all-missing refs), and shows referenced accounts with current credential status without extra shared-model, connected-account count, primary-account, or fallback summary rows. The fullscreen create UI starts with no router block selected, prompts the user to add an account or load-balancer block, and never auto-creates the first account block. The fullscreen UI editor can create account/load-balancer blocks, connect fallback edges between blocks, show the full diagram as a draggable canvas, automatically stack the entry-to-fallback chain from top to bottom, pan the canvas, zoom by Shift+scroll or scale controls, and display shared models that are available in every reachable selected account while showing per-account model-fetch failures for selected accounts that are down. The raw JSON editor exposes the same router graph. | Browser setup must expose routers safely as joint accounts without silently wiring a new router to an unintended block or hiding usable model choices when one account is down. |
 
 ## Data And State Model
 
@@ -52,7 +51,6 @@ Router config lives in `model_list[]`:
 {
   "model_name": "router-main",
   "provider": "router",
-  "model": "gpt-5.4",
   "router": {
     "enabled": true,
     "entry": "pool",
@@ -86,16 +84,14 @@ usage, session block affinities, block cursors, and timestamps.
 
 ## Algorithms And Ordering
 
-1. Normalize incoming router model entries to provider `router`, default blank
-   model ID to the alias, preserve an explicit shared model ID, and clear
-   provider credential fields.
+1. Normalize incoming router model entries to provider `router`, clear the
+   router-level model and provider credential fields.
 2. Validate block IDs, entry references, block types, load-balance strategy,
    duplicate load-balance account refs, fallback refs, fallback cycles, and
    account references across the final model list.
-3. Build router accounts by resolving each `credential:` account ref into a
-   runtime provider config using that credential and the router's shared model.
-   Legacy model-name refs still resolve through existing model candidate
-   resolution; router entries are skipped as upstream accounts.
+3. Build router accounts by resolving each model-list account ref through
+   existing model candidate resolution; router entries and unresolved
+   credential-only refs are skipped as upstream accounts.
 4. For account blocks, use the account if operational; otherwise use fallback
    candidates when a fallback exists.
 5. For load-balance blocks, filter to operational accounts, reuse session
@@ -127,9 +123,6 @@ semantics; router entries intentionally do not store API keys.
   unavailable longer than rate-limit or transient network failures.
 - Same provider/model accounts remain distinguishable by stable identity during
   failure attribution.
-- Same provider/shared-model accounts remain distinguishable by stable identity
-  during provider selection so each request uses the chosen account's
-  credentials.
 - Corrupt state is renamed aside and a fresh state file is written.
 
 ## Acceptance Evidence

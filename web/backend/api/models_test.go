@@ -2522,7 +2522,6 @@ func TestHandleModels_ModelRouterRoundTripAndDefault(t *testing.T) {
 	updateBody := `{
 		"model_name": "router-main",
 		"provider": "router",
-		"model": "router-main",
 		"router": {
 			"enabled": true,
 			"entry": "pool",
@@ -2629,6 +2628,9 @@ func TestHandleModels_ModelRouterRoundTripAndDefault(t *testing.T) {
 	if got := updated.ModelList[addResp.Index].APIKey(); got != "" {
 		t.Fatalf("persisted router API key = %q, want empty", got)
 	}
+	if got := updated.ModelList[addResp.Index].Model; got != "" {
+		t.Fatalf("persisted router model = %q, want empty", got)
+	}
 }
 
 func TestHandleAddModel_RejectsRouterUnknownAccountAsBadRequest(t *testing.T) {
@@ -2655,7 +2657,6 @@ func TestHandleAddModel_RejectsRouterUnknownAccountAsBadRequest(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
 		"model_name": "router-main",
 		"provider": "router",
-		"model": "router-main",
 		"router": {
 			"enabled": true,
 			"entry": "entry",
@@ -2702,7 +2703,6 @@ func TestHandleAddModel_AcceptsGitHubCopilotCredentialAccountRouterRef(t *testin
 	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
 		"model_name": "copilot-router",
 		"provider": "router",
-		"model": "gpt-5",
 		"router": {
 			"enabled": true,
 			"entry": "account-1",
@@ -2731,6 +2731,9 @@ func TestHandleAddModel_AcceptsGitHubCopilotCredentialAccountRouterRef(t *testin
 	}
 	if got := router.Router.Blocks[0].Account; got != "credential:github-copilot:gh-copilot" {
 		t.Fatalf("router account = %q, want credential:github-copilot:gh-copilot", got)
+	}
+	if got := router.Model; got != "" {
+		t.Fatalf("router model = %q, want empty", got)
 	}
 }
 
@@ -2762,7 +2765,6 @@ func TestHandleAddModel_AcceptsGitHubCopilotCredentialLoadBalanceRouterRefs(t *t
 			req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(fmt.Sprintf(`{
 				"model_name": "copilot-router",
 				"provider": "router",
-				"model": "gpt-5",
 				"router": {
 					"enabled": true,
 					"entry": "pool",
@@ -2800,6 +2802,9 @@ func TestHandleAddModel_AcceptsGitHubCopilotCredentialLoadBalanceRouterRefs(t *t
 			wantAccounts := []string{"credential:github-copilot:gh-copilot", "credential:github-copilot:backup"}
 			if fmt.Sprint(block.Accounts) != fmt.Sprint(wantAccounts) {
 				t.Fatalf("router accounts = %v, want %v", block.Accounts, wantAccounts)
+			}
+			if got := router.Model; got != "" {
+				t.Fatalf("router model = %q, want empty", got)
 			}
 		})
 	}

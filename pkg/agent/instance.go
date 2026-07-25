@@ -60,7 +60,7 @@ type AgentInstance struct {
 	// CandidateProviders maps stable candidate identity keys and provider/model
 	// keys to per-candidate LLMProvider instances. Stable identities let account
 	// routers keep separate credentials even when accounts use the same provider
-	// and shared model.
+	// and model.
 	CandidateProviders map[string]providers.LLMProvider
 	ModelRouter        *modelrouter.Router
 
@@ -404,7 +404,6 @@ func buildModelRouter(
 		return nil
 	}
 	accountNames := modelRouterAccountNames(modelCfg.Router)
-	sharedModel := modelRouterSharedModel(modelCfg)
 	accounts := make(map[string]modelrouter.Account, len(accountNames))
 	for _, accountName := range accountNames {
 		candidates := modelRouterAccountCandidates(
@@ -412,7 +411,6 @@ func buildModelRouter(
 			defaultProvider,
 			workspace,
 			accountName,
-			sharedModel,
 			providersOut,
 		)
 		if len(candidates) == 0 {
@@ -428,22 +426,9 @@ func buildModelRouter(
 			RPM:        rpm,
 		}
 	}
-	if sharedModel == "" {
-		populateCandidateProvidersFromNames(cfg, workspace, accountNames, providersOut)
-	}
+	populateCandidateProvidersFromNames(cfg, workspace, accountNames, providersOut)
 	statePath := filepath.Join(workspace, "model_router_state.json")
 	return modelrouter.New(modelCfg.ModelName, modelCfg.Router, accounts, statePath)
-}
-
-func modelRouterSharedModel(modelCfg *config.ModelConfig) string {
-	if modelCfg == nil {
-		return ""
-	}
-	model := strings.TrimSpace(modelCfg.Model)
-	if model == "" || model == strings.TrimSpace(modelCfg.ModelName) {
-		return ""
-	}
-	return model
 }
 
 func modelRouterAccountCandidates(
@@ -451,102 +436,12 @@ func modelRouterAccountCandidates(
 	defaultProvider string,
 	workspace string,
 	accountName string,
-	sharedModel string,
 	providersOut map[string]providers.LLMProvider,
 ) []providers.FallbackCandidate {
-	if credentialCfg, ok := modelRouterCredentialAccountConfig(accountName, sharedModel); ok {
-		if credentialCfg == nil {
-			return nil
-		}
-		candidate, ok := candidateFromModelConfig(defaultProvider, credentialCfg)
-		if !ok {
-			return nil
-		}
-		provider, _, err := providers.CreateProviderFromConfig(credentialCfg)
-		if err != nil {
-			logger.WarnCF("agent", "account router: failed to create credential account provider",
-				map[string]any{
-					"account": accountName,
-					"model":   sharedModel,
-					"error":   err.Error(),
-				})
-			return []providers.FallbackCandidate{candidate}
-		}
-		if !registerCandidateProvider(providersOut, candidate, provider) {
-			closeProviderIfStateful(provider)
-		}
-		return []providers.FallbackCandidate{candidate}
-	}
-	if strings.TrimSpace(sharedModel) == "" {
-		return resolveModelCandidates(cfg, defaultProvider, accountName, nil)
-	}
-	accountCfg := lookupModelConfigByRef(cfg, accountName, defaultProvider)
-	if accountCfg == nil || accountCfg.IsModelRouter() {
+	if _, ok := config.ModelRouterCredentialAccountID(accountName); ok {
 		return nil
 	}
-	clone := cloneModelConfigForResolution(defaultProvider, accountCfg, workspace)
-	clone.Model = sharedModel
-	candidate, ok := candidateFromModelConfig(defaultProvider, clone)
-	if !ok {
-		return nil
-	}
-	provider, _, err := providers.CreateProviderFromConfig(clone)
-	if err != nil {
-		logger.WarnCF("agent", "account router: failed to create provider",
-			map[string]any{
-				"account": accountName,
-				"model":   sharedModel,
-				"error":   err.Error(),
-			})
-		return []providers.FallbackCandidate{candidate}
-	}
-	if !registerCandidateProvider(providersOut, candidate, provider) {
-		closeProviderIfStateful(provider)
-	}
-	return []providers.FallbackCandidate{candidate}
-}
-
-func modelRouterCredentialAccountConfig(accountName string, sharedModel string) (*config.ModelConfig, bool) {
-	credentialID, ok := config.ModelRouterCredentialAccountID(accountName)
-	if !ok {
-		return nil, false
-	}
-	if strings.TrimSpace(sharedModel) == "" {
-		return nil, true
-	}
-	provider, ok := config.ModelRouterCredentialAccountProvider(accountName)
-	if !ok {
-		return nil, true
-	}
-	provider = credentialRuntimeProvider(provider)
-	return &config.ModelConfig{
-		ModelName:    strings.TrimSpace(accountName),
-		Provider:     provider,
-		Model:        strings.TrimSpace(sharedModel),
-		AuthMethod:   credentialRuntimeAuthMethod(provider),
-		CredentialID: credentialID,
-		Enabled:      true,
-	}, true
-}
-
-func credentialRuntimeProvider(provider string) string {
-	switch strings.TrimSpace(provider) {
-	case "google-antigravity":
-		return "antigravity"
-	case "copilot":
-		return "github-copilot"
-	default:
-		return strings.TrimSpace(provider)
-	}
-}
-
-func credentialRuntimeAuthMethod(provider string) string {
-	switch strings.TrimSpace(provider) {
-	case "anthropic", "github-copilot":
-		return "token"
-	default:
-		return "oauth"
-	}
+	return resolveModelCandidates(cfg, defaultProvider, accountName, nil)
 }
 
 func modelRouterAccountNames(routerCfg *config.ModelRouterConfig) []string {

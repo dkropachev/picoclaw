@@ -1037,9 +1037,6 @@ func (c *ModelConfig) Validate() error {
 			!strings.EqualFold(strings.TrimSpace(c.Provider), ModelRouterProvider) {
 			return fmt.Errorf("router config must use provider %q", ModelRouterProvider)
 		}
-		if c.Model == "" {
-			return fmt.Errorf("model is required")
-		}
 		return c.Router.Validate()
 	}
 	if c.Model == "" {

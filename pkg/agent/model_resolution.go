@@ -87,8 +87,10 @@ func lookupModelConfigByRef(cfg *config.Config, raw string, defaultProvider ...s
 		return nil
 	}
 
-	if mc, err := cfg.GetModelConfig(raw); err == nil && mc != nil && strings.TrimSpace(mc.Model) != "" {
-		return mc
+	if mc, err := cfg.GetModelConfig(raw); err == nil && mc != nil {
+		if mc.IsModelRouter() || strings.TrimSpace(mc.Model) != "" {
+			return mc
+		}
 	}
 
 	rawRef := providers.ParseModelRef(raw, "")
