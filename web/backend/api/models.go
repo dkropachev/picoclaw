@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -385,6 +386,7 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 			DefaultModelAllowed: defaultModelAllowedForModelConfig(m),
 		})
 	}
+	models = appendCredentialAccountModelResponses(models, defaultModel)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
@@ -393,6 +395,126 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 		"default_model":    defaultModel,
 		"provider_options": modelProviderOptionsForResponse(),
 	})
+}
+
+func appendCredentialAccountModelResponses(models []modelResponse, defaultModel string) []modelResponse {
+	store, err := oauthLoadStore()
+	if err != nil || store == nil {
+		return models
+	}
+
+	representedCredentials := make(map[string]bool, len(models))
+	for _, model := range models {
+		if credentialID := representedModelCredentialID(model); credentialID != "" {
+			representedCredentials[credentialID] = true
+		}
+	}
+
+	credentialIDs := make([]string, 0, len(store.Credentials))
+	for credentialID, cred := range store.Credentials {
+		if cred == nil {
+			continue
+		}
+		credentialID = strings.ToLower(strings.TrimSpace(credentialID))
+		if representedCredentials[credentialID] {
+			continue
+		}
+		provider := providers.NormalizeProvider(cred.Provider)
+		if provider == "" {
+			if prefix, _, ok := strings.Cut(credentialID, ":"); ok {
+				provider = providers.NormalizeProvider(prefix)
+			}
+		}
+		if provider == "" || !providers.IsDefaultModelProvider(provider) {
+			continue
+		}
+		credentialIDs = append(credentialIDs, credentialID)
+	}
+	sort.Strings(credentialIDs)
+
+	nextIndex := len(models)
+	for _, credentialID := range credentialIDs {
+		cred := store.Credentials[credentialID]
+		provider := providers.NormalizeProvider(cred.Provider)
+		if provider == "" {
+			if prefix, _, ok := strings.Cut(credentialID, ":"); ok {
+				provider = providers.NormalizeProvider(prefix)
+			}
+		}
+		modelName := config.AccountRouterCredentialAccountPrefix + strings.ToLower(strings.TrimSpace(credentialID))
+		modelID := defaultCredentialAccountModel(provider)
+		authMethod := strings.ToLower(strings.TrimSpace(cred.AuthMethod))
+		if authMethod == "" {
+			authMethod = defaultCredentialAccountAuthMethod(provider)
+		}
+		available := strings.TrimSpace(cred.AccessToken) != "" && !cred.IsExpired()
+		status := "available"
+		if !available {
+			status = "unconfigured"
+		}
+		models = append(models, modelResponse{
+			Index:               nextIndex,
+			ModelName:           modelName,
+			Provider:            provider,
+			Model:               modelID,
+			APIKey:              "",
+			AuthMethod:          authMethod,
+			CredentialID:        credentialID,
+			Enabled:             true,
+			Available:           available,
+			Status:              status,
+			IsDefault:           modelName == defaultModel,
+			IsVirtual:           true,
+			DefaultModelAllowed: true,
+		})
+		nextIndex++
+	}
+	return models
+}
+
+func representedModelCredentialID(model modelResponse) string {
+	provider := providers.NormalizeProvider(model.Provider)
+	if provider == "" {
+		return ""
+	}
+	authMethod := strings.ToLower(strings.TrimSpace(model.AuthMethod))
+	if authMethod == "" && provider == "antigravity" {
+		authMethod = "oauth"
+	}
+	if !isCredentialAuthMethod(authMethod) {
+		return ""
+	}
+	credentialID, err := auth.NormalizeCredentialID(authProviderForCredentialModel(provider), model.CredentialID)
+	if err != nil {
+		return ""
+	}
+	return credentialID
+}
+
+func authProviderForCredentialModel(provider string) string {
+	switch providers.NormalizeProvider(provider) {
+	case "antigravity":
+		return oauthProviderGoogleAntigravity
+	default:
+		return providers.NormalizeProvider(provider)
+	}
+}
+
+func defaultCredentialAccountModel(provider string) string {
+	commonModels := providers.CommonModelsForProvider(provider)
+	if len(commonModels) > 0 {
+		return commonModels[0]
+	}
+	return "auto"
+}
+
+func defaultCredentialAccountAuthMethod(provider string) string {
+	switch providers.NormalizeProvider(provider) {
+	case "openai", "antigravity":
+		return "oauth"
+	default:
+		return "token"
+	}
 }
 
 // handleAddModel appends a new model configuration entry.
@@ -765,8 +887,10 @@ func (h *Handler) handleSetDefaultModel(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	if !found {
-		http.Error(w, fmt.Sprintf("Model %q not found in model_list", req.ModelName), http.StatusNotFound)
-		return
+		if !credentialAccountDefaultModelAllowed(req.ModelName) {
+			http.Error(w, fmt.Sprintf("Model %q not found in model_list", req.ModelName), http.StatusNotFound)
+			return
+		}
 	}
 	if isDisallowedVirtual {
 		http.Error(w, fmt.Sprintf("Cannot set virtual model %q as default", req.ModelName), http.StatusBadRequest)
@@ -798,6 +922,23 @@ func (h *Handler) handleSetDefaultModel(w http.ResponseWriter, r *http.Request) 
 		"status":        "ok",
 		"default_model": req.ModelName,
 	})
+}
+
+func credentialAccountDefaultModelAllowed(modelName string) bool {
+	credentialID, ok := config.AccountRouterCredentialAccountID(modelName)
+	if !ok {
+		return false
+	}
+	provider, ok := config.AccountRouterCredentialAccountProvider(modelName)
+	if !ok || !providers.IsDefaultModelProvider(provider) {
+		return false
+	}
+	store, err := oauthLoadStore()
+	if err != nil || store == nil {
+		return false
+	}
+	cred := store.Credentials[credentialID]
+	return cred != nil && strings.TrimSpace(cred.AccessToken) != "" && !cred.IsExpired()
 }
 
 // maskAPIKey returns a masked version of an API key for safe display.

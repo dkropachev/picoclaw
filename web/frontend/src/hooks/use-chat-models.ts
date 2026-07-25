@@ -25,6 +25,10 @@ function isAccountRouterModel(model: ModelInfo): boolean {
   return model.provider === "router" || model.router != null
 }
 
+function isCredentialAccountModel(model: ModelInfo): boolean {
+  return model.model_name.startsWith("credential:")
+}
+
 export function useChatModels({ isConnected }: UseChatModelsOptions) {
   const { t } = useTranslation()
   const [modelList, setModelList] = useState<ModelInfo[]>([])
@@ -94,7 +98,9 @@ export function useChatModels({ isConnected }: UseChatModelsOptions) {
       modelList.filter(
         (m) =>
           m.default_model_allowed !== false &&
-          (m.is_virtual !== true || isAccountRouterModel(m)),
+          (m.is_virtual !== true ||
+            isAccountRouterModel(m) ||
+            isCredentialAccountModel(m)),
       ),
     [modelList],
   )

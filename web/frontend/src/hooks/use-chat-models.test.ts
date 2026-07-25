@@ -68,6 +68,22 @@ describe("useChatModels", () => {
           available: false,
           status: "unconfigured",
         }),
+        model({
+          index: 3,
+          model_name: "credential:openai:work",
+          provider: "openai",
+          auth_method: "oauth",
+          credential_id: "openai:work",
+          is_virtual: true,
+        }),
+        model({
+          index: 4,
+          model_name: "credential:github-copilot:gh-copilot",
+          provider: "github-copilot",
+          auth_method: "token",
+          credential_id: "github-copilot:gh-copilot",
+          is_virtual: true,
+        }),
       ],
       total: 3,
       default_model: "router-1",
@@ -85,6 +101,10 @@ describe("useChatModels", () => {
     )
     expect(result.current.apiKeyModels.map((m) => m.model_name)).toEqual([
       "gpt-api",
+      "credential:github-copilot:gh-copilot",
+    ])
+    expect(result.current.oauthModels.map((m) => m.model_name)).toEqual([
+      "credential:openai:work",
     ])
   })
 })

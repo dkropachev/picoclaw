@@ -822,6 +822,142 @@ func TestHandleListModels_NormalizesWildcardLocalAPIBaseForProbe(t *testing.T) {
 	}
 }
 
+func TestHandleListModelsIncludesCredentialAccountsAsVirtualDefaults(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.ModelList = nil
+	cfg.Agents.Defaults.ModelName = "credential:openai:work"
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	if err := auth.SetCredential("openai:work", &auth.AuthCredential{
+		Provider:    "openai",
+		AuthMethod:  "oauth",
+		AccessToken: "oauth-token",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+	if err := auth.SetCredential("github-copilot:gh-copilot", &auth.AuthCredential{
+		Provider:    "github-copilot",
+		AuthMethod:  "token",
+		AccessToken: "gho_token",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Models       []modelResponse `json:"models"`
+		DefaultModel string          `json:"default_model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	modelsByName := make(map[string]modelResponse, len(resp.Models))
+	for _, model := range resp.Models {
+		modelsByName[model.ModelName] = model
+	}
+
+	openAIAccount, ok := modelsByName["credential:openai:work"]
+	if !ok {
+		t.Fatalf("credential:openai:work missing from models: %#v", modelsByName)
+	}
+	if !openAIAccount.IsVirtual {
+		t.Fatal("credential account IsVirtual = false, want true")
+	}
+	if !openAIAccount.IsDefault {
+		t.Fatal("credential account IsDefault = false, want true")
+	}
+	if openAIAccount.Provider != "openai" || openAIAccount.AuthMethod != "oauth" {
+		t.Fatalf(
+			"openai account provider/auth = %q/%q, want openai/oauth",
+			openAIAccount.Provider,
+			openAIAccount.AuthMethod,
+		)
+	}
+
+	copilotAccount, ok := modelsByName["credential:github-copilot:gh-copilot"]
+	if !ok {
+		t.Fatalf("credential:github-copilot:gh-copilot missing from models: %#v", modelsByName)
+	}
+	if !copilotAccount.Available || copilotAccount.Model != "auto" {
+		t.Fatalf(
+			"copilot account available/model = %v/%q, want true/auto",
+			copilotAccount.Available,
+			copilotAccount.Model,
+		)
+	}
+	if resp.DefaultModel != "credential:openai:work" {
+		t.Fatalf("default_model = %q, want credential:openai:work", resp.DefaultModel)
+	}
+}
+
+func TestHandleSetDefaultModelAcceptsCredentialAccountRef(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.ModelList = nil
+	cfg.Agents.Defaults.ModelName = ""
+	err = config.SaveConfig(configPath, cfg)
+	if err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	err = auth.SetCredential("openai:work", &auth.AuthCredential{
+		Provider:    "openai",
+		AuthMethod:  "oauth",
+		AccessToken: "oauth-token",
+	})
+	if err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/accounts/models/default",
+		strings.NewReader(`{"model_name":"credential:openai:work"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	updated, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if got := updated.Agents.Defaults.ModelName; got != "credential:openai:work" {
+		t.Fatalf("default model = %q, want credential:openai:work", got)
+	}
+}
+
 func TestHandleListModels_StatusMarksUnreachableLocalModel(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()

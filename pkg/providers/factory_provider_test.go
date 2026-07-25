@@ -1809,3 +1809,36 @@ func TestCreateProviderSupportsAccountRouterCredentialRefsWithoutModelListAccoun
 		t.Fatalf("constructor model = %q, want gpt-5.5", gotModel)
 	}
 }
+
+func TestCreateProviderSupportsCredentialRefDefaultWithoutModelList(t *testing.T) {
+	origGetCredential := getCredential
+	t.Cleanup(func() {
+		getCredential = origGetCredential
+	})
+
+	getCredential = func(provider string) (*auth.AuthCredential, error) {
+		if provider != "openai:work" {
+			t.Fatalf("provider = %q, want openai:work", provider)
+		}
+		return &auth.AuthCredential{
+			AccessToken: "oauth-token",
+			Provider:    "openai",
+			AuthMethod:  "oauth",
+		}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.ModelList = nil
+	cfg.Agents.Defaults.ModelName = "credential:openai:work"
+
+	provider, modelID, err := CreateProvider(cfg)
+	if err != nil {
+		t.Fatalf("CreateProvider() error = %v", err)
+	}
+	if provider == nil {
+		t.Fatal("CreateProvider() returned nil provider")
+	}
+	if modelID != "gpt-5.4" {
+		t.Fatalf("modelID = %q, want gpt-5.4", modelID)
+	}
+}

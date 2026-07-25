@@ -29,7 +29,7 @@ with context, limits, filtering, and error normalization.
 | `FR-TOOL-005` | MUST | Sensitive-data filtering redacts configured secrets from tool results before model exposure when enabled. | Models must not see credentials through tool output. |
 | `FR-TOOL-006` | SHOULD | Media, reaction, message, TTS, and hardware tools return handled responses when user-visible delivery is completed outside normal assistant text. | The agent should not duplicate already-delivered output. |
 | `FR-TOOL-007` | MUST | Tool schema transformations preserve provider compatibility for OpenAI, Anthropic, Gemini, and compatibility adapters. | Provider-specific schemas must not change tool behavior. |
-| `FR-TOOL-008` | MUST | Chat model selection excludes internal virtual model entries but keeps virtual account-router entries selectable as default chat models. | Account routers are materialized from `account_routers[]` and must remain usable from Chat without exposing unrelated generated rows. |
+| `FR-TOOL-008` | MUST | Chat model selection excludes internal virtual model entries but keeps virtual account-router entries and virtual credential-account entries selectable as default chat targets. | Account routers are materialized from `account_routers[]`, and stored credentials are exposed as generated account choices; both must remain usable from Chat without exposing unrelated generated rows. |
 
 ## Data And State Model
 
