@@ -30,6 +30,8 @@ type AuthStore struct {
 const (
 	providerGoogleAntigravity = "google-antigravity"
 	providerAntigravityAlias  = "antigravity"
+	providerGitHubCopilot     = "github-copilot"
+	providerCopilotAlias      = "copilot"
 )
 
 func (c *AuthCredential) IsExpired() bool {
@@ -55,6 +57,8 @@ func canonicalProvider(provider string) string {
 	switch normalized {
 	case providerAntigravityAlias:
 		return providerGoogleAntigravity
+	case providerCopilotAlias:
+		return providerGitHubCopilot
 	default:
 		return normalized
 	}

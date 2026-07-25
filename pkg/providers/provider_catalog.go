@@ -31,6 +31,18 @@ func IsModelProviderFetchable(provider string) bool {
 	return ok && option.SupportsFetch
 }
 
+// CommonModelsForProvider returns a defensive copy of the curated model IDs for
+// a provider. Unknown providers return nil.
+func CommonModelsForProvider(provider string) []string {
+	option, ok := modelProviderOptionForName(provider)
+	if !ok || len(option.CommonModels) == 0 {
+		return nil
+	}
+	models := make([]string, len(option.CommonModels))
+	copy(models, option.CommonModels)
+	return models
+}
+
 // IsCreatableModelProvider reports whether provider can be selected for a new
 // model entry from the Web UI.
 func IsCreatableModelProvider(provider string) bool {

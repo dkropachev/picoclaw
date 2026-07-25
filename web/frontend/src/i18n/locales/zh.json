@@ -180,6 +180,9 @@
       },
       "antigravity": {
         "description": "使用浏览器 OAuth 登录 Google Cloud Code Assist。"
+      },
+      "githubCopilot": {
+        "description": "使用 GitHub Token 登录 Copilot 订阅。"
       }
     },
     "status": {
@@ -201,7 +204,8 @@
     },
     "fields": {
       "openaiToken": "OpenAI Token",
-      "anthropicToken": "Anthropic Token"
+      "anthropicToken": "Anthropic Token",
+      "githubCopilotToken": "gho_、ghu_ 或 github_pat_ Token"
     },
     "labels": {
       "account": "账号",

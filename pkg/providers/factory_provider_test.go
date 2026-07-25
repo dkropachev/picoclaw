@@ -6,6 +6,7 @@
 package providers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,22 @@ import (
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
 )
+
+type factoryStubProvider struct{}
+
+func (p *factoryStubProvider) Chat(
+	context.Context,
+	[]Message,
+	[]ToolDefinition,
+	string,
+	map[string]any,
+) (*LLMResponse, error) {
+	return &LLMResponse{Content: ""}, nil
+}
+
+func (p *factoryStubProvider) GetDefaultModel() string {
+	return "auto"
+}
 
 func TestExtractProtocol(t *testing.T) {
 	tests := []struct {
@@ -785,6 +802,97 @@ func TestCreateProviderFromConfig_OpenAIOAuthUsesCredentialID(t *testing.T) {
 	}
 }
 
+func TestCreateProviderFromConfig_GitHubCopilotTokenUsesCredentialID(t *testing.T) {
+	origGetCredential := getCredential
+	origNewCopilotProvider := newGitHubCopilotProviderWithToken
+	t.Cleanup(func() {
+		getCredential = origGetCredential
+		newGitHubCopilotProviderWithToken = origNewCopilotProvider
+	})
+
+	getCredential = func(provider string) (*auth.AuthCredential, error) {
+		if provider != "github-copilot:work" {
+			t.Fatalf("provider = %q, want github-copilot:work", provider)
+		}
+		return &auth.AuthCredential{
+			AccessToken: "gho_test-token",
+			Provider:    "github-copilot",
+			AuthMethod:  "token",
+		}, nil
+	}
+
+	var gotToken, gotModel string
+	newGitHubCopilotProviderWithToken = func(token string, model string) (LLMProvider, error) {
+		gotToken = token
+		gotModel = model
+		return &factoryStubProvider{}, nil
+	}
+
+	cfg := &config.ModelConfig{
+		ModelName:    "test-copilot-work",
+		Provider:     "github-copilot",
+		Model:        "gpt-4.1",
+		AuthMethod:   "token",
+		CredentialID: "work",
+	}
+
+	provider, modelID, err := CreateProviderFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("CreateProviderFromConfig() error = %v", err)
+	}
+	if provider == nil {
+		t.Fatal("CreateProviderFromConfig() returned nil provider")
+	}
+	if modelID != "gpt-4.1" {
+		t.Fatalf("modelID = %q, want gpt-4.1", modelID)
+	}
+	if gotToken != "gho_test-token" {
+		t.Fatalf("constructor token = %q, want stored token", gotToken)
+	}
+	if gotModel != "gpt-4.1" {
+		t.Fatalf("constructor model = %q, want gpt-4.1", gotModel)
+	}
+}
+
+func TestCreateProviderFromConfig_GitHubCopilotRejectsInvalidCredentialToken(t *testing.T) {
+	origGetCredential := getCredential
+	origNewCopilotProvider := newGitHubCopilotProviderWithToken
+	t.Cleanup(func() {
+		getCredential = origGetCredential
+		newGitHubCopilotProviderWithToken = origNewCopilotProvider
+	})
+
+	getCredential = func(provider string) (*auth.AuthCredential, error) {
+		if provider != "github-copilot" {
+			t.Fatalf("provider = %q, want github-copilot", provider)
+		}
+		return &auth.AuthCredential{
+			AccessToken: "ghp_classic",
+			Provider:    "github-copilot",
+			AuthMethod:  "token",
+		}, nil
+	}
+	newGitHubCopilotProviderWithToken = func(token string, model string) (LLMProvider, error) {
+		t.Fatalf("constructor should not be called for invalid token: token=%q model=%q", token, model)
+		return nil, nil
+	}
+
+	cfg := &config.ModelConfig{
+		ModelName:  "test-copilot",
+		Provider:   "github-copilot",
+		Model:      "auto",
+		AuthMethod: "token",
+	}
+
+	_, _, err := CreateProviderFromConfig(cfg)
+	if err == nil {
+		t.Fatal("CreateProviderFromConfig() error = nil, want invalid token error")
+	}
+	if !strings.Contains(err.Error(), "invalid GitHub Copilot credential github-copilot") {
+		t.Fatalf("error = %q, want credential context", err.Error())
+	}
+}
+
 func TestCreateProviderFromConfig_MissingAPIKey(t *testing.T) {
 	cfg := &config.ModelConfig{
 		ModelName: "test-no-key",
@@ -1217,6 +1325,12 @@ func TestModelProviderOptions(t *testing.T) {
 		t.Fatalf("github-copilot default_api_base = %q, want %q", option.DefaultAPIBase, "localhost:4321")
 	} else if !option.Local {
 		t.Fatal("github-copilot should be marked local")
+	} else if option.DefaultAuthMethod != "token" {
+		t.Fatalf("github-copilot default_auth_method = %q, want token", option.DefaultAuthMethod)
+	} else if !option.SupportsFetch {
+		t.Fatal("github-copilot should support static model fetches")
+	} else if len(option.CommonModels) == 0 {
+		t.Fatal("github-copilot common_models should not be empty")
 	}
 	if option, ok := seen["qwen-portal"]; !ok {
 		t.Fatal("qwen-portal option missing")
@@ -1228,7 +1342,7 @@ func TestModelProviderOptions(t *testing.T) {
 		if len(option.CommonModels) > 6 {
 			t.Fatalf("provider %q exposes %d common_models, want at most 6", option.ID, len(option.CommonModels))
 		}
-		if option.Local && len(option.CommonModels) > 0 {
+		if option.Local && option.ID != "github-copilot" && len(option.CommonModels) > 0 {
 			t.Fatalf("local provider %q should not expose common_models", option.ID)
 		}
 		seenModels := make(map[string]struct{}, len(option.CommonModels))

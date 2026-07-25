@@ -22,6 +22,7 @@ const (
 	oauthProviderOpenAI            = "openai"
 	oauthProviderAnthropic         = "anthropic"
 	oauthProviderGoogleAntigravity = "google-antigravity"
+	oauthProviderGitHubCopilot     = "github-copilot"
 
 	oauthMethodBrowser    = "browser"
 	oauthMethodDeviceCode = "device_code"
@@ -43,18 +44,21 @@ var oauthProviderOrder = []string{
 	oauthProviderOpenAI,
 	oauthProviderAnthropic,
 	oauthProviderGoogleAntigravity,
+	oauthProviderGitHubCopilot,
 }
 
 var oauthProviderMethods = map[string][]string{
 	oauthProviderOpenAI:            {oauthMethodBrowser, oauthMethodDeviceCode, oauthMethodToken},
 	oauthProviderAnthropic:         {oauthMethodToken},
 	oauthProviderGoogleAntigravity: {oauthMethodBrowser},
+	oauthProviderGitHubCopilot:     {oauthMethodToken},
 }
 
 var oauthProviderLabels = map[string]string{
 	oauthProviderOpenAI:            "OpenAI",
 	oauthProviderAnthropic:         "Anthropic",
 	oauthProviderGoogleAntigravity: "Google Antigravity",
+	oauthProviderGitHubCopilot:     "GitHub Copilot",
 }
 
 var (
@@ -267,6 +271,12 @@ func (h *Handler) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 		if token == "" {
 			http.Error(w, "token is required", http.StatusBadRequest)
 			return
+		}
+		if provider == oauthProviderGitHubCopilot {
+			if err := auth.ValidateGitHubCopilotToken(token); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 
 		cred := &auth.AuthCredential{
@@ -606,7 +616,9 @@ func normalizeOAuthProvider(raw string) (string, error) {
 	switch provider {
 	case "antigravity":
 		return oauthProviderGoogleAntigravity, nil
-	case oauthProviderOpenAI, oauthProviderAnthropic, oauthProviderGoogleAntigravity:
+	case "copilot":
+		return oauthProviderGitHubCopilot, nil
+	case oauthProviderOpenAI, oauthProviderAnthropic, oauthProviderGoogleAntigravity, oauthProviderGitHubCopilot:
 		return provider, nil
 	default:
 		return "", fmt.Errorf("unsupported provider %q", raw)
@@ -889,6 +901,8 @@ func modelBelongsToProvider(provider string, modelCfg *config.ModelConfig) bool 
 		return protocol == "anthropic"
 	case oauthProviderGoogleAntigravity:
 		return protocol == "antigravity"
+	case oauthProviderGitHubCopilot:
+		return protocol == "github-copilot"
 	default:
 		return false
 	}
@@ -924,6 +938,14 @@ func defaultModelConfigForProvider(provider, credentialID, authMethod string) *c
 			ModelName:    "gemini-flash" + modelNameSuffix,
 			Provider:     "antigravity",
 			Model:        "gemini-3-flash",
+			AuthMethod:   authMethod,
+			CredentialID: credentialIDForConfig(provider, credentialID),
+		}
+	case oauthProviderGitHubCopilot:
+		return &config.ModelConfig{
+			ModelName:    "copilot" + modelNameSuffix,
+			Provider:     "github-copilot",
+			Model:        "auto",
 			AuthMethod:   authMethod,
 			CredentialID: credentialIDForConfig(provider, credentialID),
 		}
