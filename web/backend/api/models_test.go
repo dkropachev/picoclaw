@@ -16,6 +16,7 @@ import (
 
 	copilot "github.com/github/copilot-sdk/go"
 
+	"github.com/sipeed/picoclaw/pkg/audio/asr"
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -79,6 +80,144 @@ func TestNormalizeStoredModelConfigNormalizesReasoningEffort(t *testing.T) {
 	}
 	if got := model.ReasoningEffort; got != "high" {
 		t.Fatalf("reasoning_effort = %q, want high", got)
+	}
+}
+
+func TestNormalizeStoredModelConfigTrimsAndDerivesProvider(t *testing.T) {
+	if normalizeStoredModelConfig(nil) {
+		t.Fatal("normalizeStoredModelConfig(nil) = true, want false")
+	}
+
+	model := &config.ModelConfig{
+		ModelName:    "stored",
+		Model:        " anthropic/claude-sonnet-4.5 ",
+		Provider:     " ",
+		AuthMethod:   " TOKEN ",
+		CredentialID: " work ",
+	}
+
+	if !normalizeStoredModelConfig(model) {
+		t.Fatal("normalizeStoredModelConfig() = false, want true")
+	}
+	if model.Provider != "anthropic" {
+		t.Fatalf("provider = %q, want anthropic", model.Provider)
+	}
+	if model.Model != "claude-sonnet-4.5" {
+		t.Fatalf("model = %q, want claude-sonnet-4.5", model.Model)
+	}
+	if model.AuthMethod != "token" {
+		t.Fatalf("auth_method = %q, want token", model.AuthMethod)
+	}
+	if model.CredentialID != "work" {
+		t.Fatalf("credential_id = %q, want work", model.CredentialID)
+	}
+}
+
+func TestNormalizeStoredModelConfigElevenLabsCanonicalModel(t *testing.T) {
+	model := &config.ModelConfig{
+		ModelName: "voice",
+		Model:     " elevenlabs/other-model ",
+		Provider:  " ElevenLabs ",
+	}
+
+	if !normalizeStoredModelConfig(model) {
+		t.Fatal("normalizeStoredModelConfig() = false, want true")
+	}
+	if model.Provider != "elevenlabs" {
+		t.Fatalf("provider = %q, want elevenlabs", model.Provider)
+	}
+	if model.Model != asr.ElevenLabsSupportedModelID() {
+		t.Fatalf("model = %q, want %q", model.Model, asr.ElevenLabsSupportedModelID())
+	}
+}
+
+func TestNormalizeIncomingModelConfigClearsRouterTransportFields(t *testing.T) {
+	model := &config.ModelConfig{
+		ModelName:    "router-main",
+		Model:        " legacy-shared-model ",
+		Provider:     " router ",
+		APIKeys:      config.SimpleSecureStrings("sk-router"),
+		APIBase:      "https://example.com/v1",
+		Proxy:        "http://proxy.example.com",
+		AuthMethod:   " TOKEN ",
+		CredentialID: " github-copilot:work ",
+		ConnectMode:  "local",
+		Workspace:    "/tmp/work",
+		Router: &config.ModelRouterConfig{
+			Enabled: true,
+			Entry:   "primary",
+			Blocks: []config.ModelRouterBlock{{
+				ID:      "primary",
+				Type:    config.ModelRouterBlockTypeAccount,
+				Account: "credential:github-copilot:work",
+			}},
+		},
+	}
+
+	normalizeIncomingModelConfig(model)
+
+	if model.Provider != config.ModelRouterProvider {
+		t.Fatalf("provider = %q, want router", model.Provider)
+	}
+	if model.Model != "" {
+		t.Fatalf("model = %q, want empty", model.Model)
+	}
+	if len(model.APIKeys) != 0 || model.APIBase != "" || model.Proxy != "" ||
+		model.AuthMethod != "" || model.CredentialID != "" ||
+		model.ConnectMode != "" || model.Workspace != "" {
+		t.Fatalf("router transport fields were not cleared: %#v", model)
+	}
+}
+
+func TestNormalizeIncomingModelConfigNormalizesNonRouterFields(t *testing.T) {
+	model := &config.ModelConfig{
+		ModelName:       "voice",
+		Model:           " elevenlabs/other-model ",
+		Provider:        " ElevenLabs ",
+		AuthMethod:      " TOKEN ",
+		CredentialID:    " account-id ",
+		ReasoningEffort: "OFF",
+	}
+
+	normalizeIncomingModelConfig(model)
+
+	if model.Provider != "elevenlabs" {
+		t.Fatalf("provider = %q, want elevenlabs", model.Provider)
+	}
+	if model.Model != "other-model" {
+		t.Fatalf("model = %q, want other-model", model.Model)
+	}
+	if model.AuthMethod != "token" {
+		t.Fatalf("auth_method = %q, want token", model.AuthMethod)
+	}
+	if model.CredentialID != "elevenlabs:account-id" {
+		t.Fatalf("credential_id = %q, want elevenlabs:account-id", model.CredentialID)
+	}
+	if model.ReasoningEffort != "none" {
+		t.Fatalf("reasoning_effort = %q, want none", model.ReasoningEffort)
+	}
+}
+
+func TestValidateIncomingModelConfigAcceptsEmptyRouterModel(t *testing.T) {
+	model := &config.ModelConfig{
+		ModelName: "router-main",
+		Provider:  config.ModelRouterProvider,
+		Router: &config.ModelRouterConfig{
+			Enabled: true,
+			Entry:   "primary",
+			Blocks: []config.ModelRouterBlock{{
+				ID:      "primary",
+				Type:    config.ModelRouterBlockTypeAccount,
+				Account: "credential:github-copilot:work",
+			}},
+		},
+	}
+
+	if err := validateIncomingModelConfig(nil, nil); err == nil {
+		t.Fatal("validateIncomingModelConfig(nil) error = nil, want error")
+	}
+	if err := validateIncomingModelConfig(model, nil); err != nil {
+		t.Fatalf("validateIncomingModelConfig(router) error = %v", err)
 	}
 }
 
