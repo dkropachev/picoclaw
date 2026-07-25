@@ -212,22 +212,9 @@ func TestResolveActiveModelConfig_DoesNotFallbackToOpenAIForDefaultProviderCandi
 	}
 }
 
-func TestLookupModelConfigByRefReturnsEmptyModelRouterByName(t *testing.T) {
+func TestLookupModelConfigByRefReturnsAccountRouterByName(t *testing.T) {
 	cfg := &config.Config{
 		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "empty-router",
-				Provider:  config.ModelRouterProvider,
-				Router: &config.ModelRouterConfig{
-					Enabled: true,
-					Entry:   "primary",
-					Blocks: []config.ModelRouterBlock{{
-						ID:      "primary",
-						Type:    config.ModelRouterBlockTypeAccount,
-						Account: "account-a",
-					}},
-				},
-			},
 			{
 				ModelName: "empty-regular",
 				Provider:  "openai",
@@ -238,7 +225,21 @@ func TestLookupModelConfigByRefReturnsEmptyModelRouterByName(t *testing.T) {
 				Model:     "gpt-4o",
 			},
 		},
+		AccountRouters: []config.AccountRouterConfig{
+			{
+				Name:    "empty-router",
+				Model:   "gpt-4o",
+				Enabled: true,
+				Entry:   "primary",
+				Blocks: []config.AccountRouterBlock{{
+					ID:      "primary",
+					Type:    config.AccountRouterBlockTypeAccount,
+					Account: "account-a",
+				}},
+			},
+		},
 	}
+	cfg.MaterializeAccountRouterModels()
 
 	got := lookupModelConfigByRef(cfg, "empty-router", "openai")
 	if got == nil {
@@ -247,7 +248,7 @@ func TestLookupModelConfigByRefReturnsEmptyModelRouterByName(t *testing.T) {
 	if got.ModelName != "empty-router" {
 		t.Fatalf("router model_name = %q, want empty-router", got.ModelName)
 	}
-	if !got.IsModelRouter() {
+	if !got.IsAccountRouter() {
 		t.Fatal("lookupModelConfigByRef(router) returned non-router config")
 	}
 
@@ -256,29 +257,30 @@ func TestLookupModelConfigByRefReturnsEmptyModelRouterByName(t *testing.T) {
 	}
 }
 
-func TestResolveModelCandidateRejectsEmptyModelRouterAlias(t *testing.T) {
+func TestResolveModelCandidateRejectsAccountRouterAlias(t *testing.T) {
 	cfg := &config.Config{
 		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "router-main",
-				Provider:  config.ModelRouterProvider,
-				Router: &config.ModelRouterConfig{
-					Enabled: true,
-					Entry:   "primary",
-					Blocks: []config.ModelRouterBlock{{
-						ID:      "primary",
-						Type:    config.ModelRouterBlockTypeAccount,
-						Account: "account-a",
-					}},
-				},
-			},
 			{
 				ModelName: "account-a",
 				Provider:  "openai",
 				Model:     "gpt-4o",
 			},
 		},
+		AccountRouters: []config.AccountRouterConfig{
+			{
+				Name:    "router-main",
+				Model:   "gpt-4o",
+				Enabled: true,
+				Entry:   "primary",
+				Blocks: []config.AccountRouterBlock{{
+					ID:      "primary",
+					Type:    config.AccountRouterBlockTypeAccount,
+					Account: "account-a",
+				}},
+			},
+		},
 	}
+	cfg.MaterializeAccountRouterModels()
 
 	if candidate, ok := resolveModelCandidate(cfg, "openai", "router-main"); ok {
 		t.Fatalf("resolveModelCandidate(router) = %#v, true; want false", candidate)

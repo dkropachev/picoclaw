@@ -55,7 +55,7 @@
       "websocketConnecting": "Connecting to chat service... Please wait.",
       "websocketDisconnected": "Unable to chat: WebSocket connection is disconnected. Check network and gateway status, then refresh the page or restart Launcher.",
       "websocketError": "Unable to chat: WebSocket connection failed. Check network and gateway status, then retry.",
-      "noDefaultModel": "Unable to chat: No default model is selected. Set a default model on the Models page."
+      "noDefaultModel": "Unable to chat: No default model is selected. Set a default model on the Accounts page."
     },
     "newChat": "New Chat",
     "notConnected": "Gateway is not running. Start it to chat.",
@@ -96,7 +96,7 @@
     "noModel": "Select model",
     "inputDisabled": {
       "notConnected": "Gateway is not running. Start it to chat.",
-      "noModel": "No default model configured. Go to Models page to set one."
+      "noModel": "No default model configured. Go to Accounts page to set one."
     },
     "sendMessage": "Send message",
     "composeHint": "Press Enter to send, Shift + Enter for a new line",
@@ -114,13 +114,14 @@
     "empty": {
       "noConfiguredModel": "No Model Configured",
       "noConfiguredModelDescription": "You need to configure at least one AI model with an API key before you can start chatting.",
-      "goToModels": "Go to Models",
+      "goToModels": "Go to Accounts",
       "noSelectedModel": "No Model Selected",
       "noSelectedModelDescription": "You have configured models, but none is set as default. Select a model before starting chat.",
       "notRunning": "Gateway Not Running",
       "notRunningDescription": "Start the gateway service to begin chatting. Use the Start Gateway button in the top bar."
     },
     "modelGroup": {
+      "accountRouter": "Account Routers",
       "apikey": "API Key",
       "oauth": "OAuth",
       "local": "Local"
@@ -352,6 +353,9 @@
       "description": "Build a joint account from existing accounts.",
       "routerName": "Joint Account Name",
       "nameHint": "Name for this joint account in chat.",
+      "sharedModel": "Shared Model",
+      "sharedModelHint": "Select the model this account router will run through the chosen accounts.",
+      "selectSharedModel": "Select shared model",
       "sharedModels": "Shared models",
       "selectAccountsFirst": "Select accounts first",
       "sharedModelsLoading": "Loading shared models...",
@@ -403,7 +407,7 @@
       "primaryAccount": "Primary Account",
       "primaryHint": "First account tried for each session.",
       "poolAccounts": "Balanced Accounts",
-      "poolHint": "Accounts eligible for one stable session route.",
+      "poolHint": "Accounts eligible for one stable session model choice.",
       "strategy": "Strategy",
       "strategyHint": "Initial account choice for new sessions or refresh windows.",
       "strategyBlind": "Blind rotation",
@@ -448,7 +452,7 @@
       "errorRawEntry": "Router JSON entry must reference an existing block.",
       "errorRawBlocks": "Router JSON must contain valid blocks.",
       "errorRawFallback": "Router JSON fallback must reference an existing block.",
-      "cardLoadBalance": "Routes across {{count}} accounts with {{strategy}}",
+      "cardLoadBalance": "Models across {{count}} accounts with {{strategy}}",
       "cardFallback": "Primary account: {{account}}",
       "cardFallbackTarget": "Fallback: {{account}}",
       "cardNoFallback": "No fallback configured",

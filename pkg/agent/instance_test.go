@@ -155,23 +155,26 @@ func TestCandidateProviderHelpersCoverEmptyAndDuplicateBranches(t *testing.T) {
 	}
 }
 
-func TestModelRouterAccountNamesTrimsDedupesAndSkipsUnsupportedBlocks(t *testing.T) {
-	if got := modelRouterAccountNames(nil); got != nil {
-		t.Fatalf("modelRouterAccountNames(nil) = %#v, want nil", got)
+func TestAccountRouterAccountNamesTrimsDedupesAndSkipsUnsupportedBlocks(t *testing.T) {
+	if got := accountRouterAccountNames(nil); got != nil {
+		t.Fatalf("accountRouterAccountNames(nil) = %#v, want nil", got)
 	}
 
-	got := modelRouterAccountNames(&config.ModelRouterConfig{
-		Blocks: []config.ModelRouterBlock{
-			{Type: config.ModelRouterBlockTypeAccount, Account: " account-a "},
-			{Type: config.ModelRouterBlockTypeAccount, Account: "account-a"},
-			{Type: config.ModelRouterBlockTypeAccount, Account: " "},
-			{Type: config.ModelRouterBlockTypeLoadBalance, Accounts: []string{"account-b", "account-a", " account-c "}},
+	got := accountRouterAccountNames(&config.AccountRouterConfig{
+		Blocks: []config.AccountRouterBlock{
+			{Type: config.AccountRouterBlockTypeAccount, Account: " account-a "},
+			{Type: config.AccountRouterBlockTypeAccount, Account: "account-a"},
+			{Type: config.AccountRouterBlockTypeAccount, Account: " "},
+			{
+				Type:     config.AccountRouterBlockTypeLoadBalance,
+				Accounts: []string{"account-b", "account-a", " account-c "},
+			},
 			{Type: "unknown", Account: "ignored"},
 		},
 	})
 	want := []string{"account-a", "account-b", "account-c"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("modelRouterAccountNames() = %#v, want %#v", got, want)
+		t.Fatalf("accountRouterAccountNames() = %#v, want %#v", got, want)
 	}
 }
 
@@ -185,20 +188,21 @@ func TestResolvePrimaryProviderForAgentFallsBackForEmptyMissingAndRouterModels(t
 	}
 
 	cfg := &config.Config{
-		ModelList: []*config.ModelConfig{{
-			ModelName: "router-main",
-			Provider:  config.ModelRouterProvider,
-			Router: &config.ModelRouterConfig{
+		AccountRouters: []config.AccountRouterConfig{
+			{
+				Name:    "router-main",
+				Model:   "gpt-4o",
 				Enabled: true,
 				Entry:   "primary",
-				Blocks: []config.ModelRouterBlock{{
+				Blocks: []config.AccountRouterBlock{{
 					ID:      "primary",
-					Type:    config.ModelRouterBlockTypeAccount,
+					Type:    config.AccountRouterBlockTypeAccount,
 					Account: "account-a",
 				}},
 			},
-		}},
+		},
 	}
+	cfg.MaterializeAccountRouterModels()
 	if got := resolvePrimaryProviderForAgent(cfg, "/workspace", "main", "missing", fallback); got != fallback {
 		t.Fatal("missing model did not return fallback provider")
 	}

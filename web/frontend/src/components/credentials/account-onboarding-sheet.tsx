@@ -2,6 +2,7 @@ import { IconLoader2, IconPlus } from "@tabler/icons-react"
 import { type FormEvent, useEffect, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
+import type { ModelProviderOption } from "@/api/models"
 import type {
   OAuthMethod,
   OAuthProvider,
@@ -66,6 +67,7 @@ const ACCOUNT_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
 interface AccountOnboardingSheetProps {
   open: boolean
   providers: OAuthProviderStatus[]
+  providerOptions: ModelProviderOption[]
   registeredAccounts: OAuthProviderStatus[]
   activeAction: string
   onOpenChange: (open: boolean) => void
@@ -89,6 +91,7 @@ function actionKey(provider: OAuthProvider, method: OAuthMethod): string {
 export function AccountOnboardingSheet({
   open,
   providers,
+  providerOptions: backendProviderOptions,
   registeredAccounts,
   activeAction,
   onOpenChange,
@@ -97,7 +100,39 @@ export function AccountOnboardingSheet({
   onSaveToken,
 }: AccountOnboardingSheetProps) {
   const { t } = useTranslation()
-  const providerOptions = providers.length > 0 ? providers : DEFAULT_PROVIDERS
+  const providerOptions = useMemo(() => {
+    const merged = new Map<string, OAuthProviderStatus>()
+    const add = (item: OAuthProviderStatus) => {
+      if (!item.provider || item.provider === "router") {
+        return
+      }
+      merged.set(item.provider, item)
+    }
+
+    for (const item of providers.length > 0 ? providers : DEFAULT_PROVIDERS) {
+      add(item)
+    }
+    for (const option of backendProviderOptions) {
+      if (!option.create_allowed || option.id === "router") {
+        continue
+      }
+      if (merged.has(option.id)) {
+        continue
+      }
+      add({
+        provider: option.id,
+        credential_id: option.id,
+        display_name: option.display_name || option.id,
+        methods: [option.default_auth_method === "oauth" ? "browser" : "token"],
+        logged_in: false,
+        status: "not_logged_in",
+      })
+    }
+
+    return [...merged.values()].sort((a, b) =>
+      a.display_name.localeCompare(b.display_name),
+    )
+  }, [backendProviderOptions, providers])
   const [provider, setProvider] = useState<OAuthProvider>("openai")
   const [method, setMethod] = useState<OAuthMethod>("browser")
   const [accountName, setAccountName] = useState("")

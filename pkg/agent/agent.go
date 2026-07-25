@@ -455,8 +455,8 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 		if agent, ok := registry.GetAgent(agentID); ok {
 			newRL.RegisterCandidates(agent.Candidates)
 			newRL.RegisterCandidates(agent.LightCandidates)
-			if agent.ModelRouter != nil {
-				for _, account := range agent.ModelRouter.Accounts {
+			if agent.AccountRouter != nil {
+				for _, account := range agent.AccountRouter.Accounts {
 					newRL.RegisterCandidates(account.Candidates)
 				}
 			}

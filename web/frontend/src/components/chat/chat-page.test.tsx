@@ -95,6 +95,7 @@ describe("ChatPage thread context", () => {
     vi.mocked(useChatModels).mockReturnValue({
       defaultModelName: "gpt-test",
       hasAvailableModels: true,
+      accountRouterModels: [],
       apiKeyModels: [modelInfo],
       oauthModels: [],
       localModels: [],

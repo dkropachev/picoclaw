@@ -88,7 +88,7 @@ func lookupModelConfigByRef(cfg *config.Config, raw string, defaultProvider ...s
 	}
 
 	if mc, err := cfg.GetModelConfig(raw); err == nil && mc != nil {
-		if mc.IsModelRouter() || strings.TrimSpace(mc.Model) != "" {
+		if mc.IsAccountRouter() || strings.TrimSpace(mc.Model) != "" {
 			return mc
 		}
 	}
@@ -141,7 +141,7 @@ func resolveModelCandidate(
 	defaultProvider = effectiveDefaultProvider(defaultProvider)
 
 	if mc := lookupModelConfigByRef(cfg, raw, defaultProvider); mc != nil {
-		if mc.IsModelRouter() {
+		if mc.IsAccountRouter() {
 			return providers.FallbackCandidate{}, false
 		}
 		return candidateFromModelConfig(defaultProvider, mc)

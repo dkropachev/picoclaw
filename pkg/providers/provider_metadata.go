@@ -34,7 +34,7 @@ var modelProviderOptionsByName = map[string]ModelProviderOption{
 		CreateAllowed:       false,
 		DefaultModelAllowed: true,
 		Priority:            110,
-		Aliases:             []string{"account-router", "account_router", "model-router", "model_router"},
+		Aliases:             []string{"account-router", "account_router"},
 	},
 	"openai": {
 		ID:                  "openai",

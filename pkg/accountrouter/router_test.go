@@ -1,4 +1,4 @@
-package modelrouter
+package accountrouter
 
 import (
 	"errors"
@@ -13,14 +13,14 @@ import (
 
 func TestLoadBalanceKeepsSessionStickyUntilCompression(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
-	router := newTestRouter(t, &config.ModelRouterConfig{
+	router := newTestRouter(t, &config.AccountRouterConfig{
 		Enabled: true,
 		Entry:   "pool",
-		Blocks: []config.ModelRouterBlock{{
+		Blocks: []config.AccountRouterBlock{{
 			ID:       "pool",
-			Type:     config.ModelRouterBlockTypeLoadBalance,
+			Type:     config.AccountRouterBlockTypeLoadBalance,
 			Accounts: []string{"account-a", "account-b"},
-			Strategy: config.ModelRouterStrategyTokensSpent,
+			Strategy: config.AccountRouterStrategyTokensSpent,
 		}},
 	}, now)
 
@@ -43,19 +43,19 @@ func TestLoadBalanceKeepsSessionStickyUntilCompression(t *testing.T) {
 
 func TestAccountFallbackWhenSelectedAccountUnavailable(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
-	router := newTestRouter(t, &config.ModelRouterConfig{
+	router := newTestRouter(t, &config.AccountRouterConfig{
 		Enabled: true,
 		Entry:   "entry",
-		Blocks: []config.ModelRouterBlock{
+		Blocks: []config.AccountRouterBlock{
 			{
 				ID:       "entry",
-				Type:     config.ModelRouterBlockTypeAccount,
+				Type:     config.AccountRouterBlockTypeAccount,
 				Account:  "account-a",
 				Fallback: "fallback",
 			},
 			{
 				ID:      "fallback",
-				Type:    config.ModelRouterBlockTypeAccount,
+				Type:    config.AccountRouterBlockTypeAccount,
 				Account: "account-b",
 			},
 		},
@@ -87,28 +87,28 @@ func TestAccountFallbackWhenSelectedAccountUnavailable(t *testing.T) {
 
 func TestLoadBalancerFallbackToAccountFallbackToLoadBalancer(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
-	cfg := &config.ModelRouterConfig{
+	cfg := &config.AccountRouterConfig{
 		Enabled: true,
 		Entry:   "primary-pool",
-		Blocks: []config.ModelRouterBlock{
+		Blocks: []config.AccountRouterBlock{
 			{
 				ID:       "primary-pool",
-				Type:     config.ModelRouterBlockTypeLoadBalance,
+				Type:     config.AccountRouterBlockTypeLoadBalance,
 				Accounts: []string{"missing-primary"},
-				Strategy: config.ModelRouterStrategyTokensSpent,
+				Strategy: config.AccountRouterStrategyTokensSpent,
 				Fallback: "fallback-account",
 			},
 			{
 				ID:       "fallback-account",
-				Type:     config.ModelRouterBlockTypeAccount,
+				Type:     config.AccountRouterBlockTypeAccount,
 				Account:  "account-b",
 				Fallback: "backup-pool",
 			},
 			{
 				ID:       "backup-pool",
-				Type:     config.ModelRouterBlockTypeLoadBalance,
+				Type:     config.AccountRouterBlockTypeLoadBalance,
 				Accounts: []string{"account-c"},
-				Strategy: config.ModelRouterStrategyBlind,
+				Strategy: config.AccountRouterStrategyBlind,
 			},
 		},
 	}
@@ -124,7 +124,7 @@ func TestLoadBalancerFallbackToAccountFallbackToLoadBalancer(t *testing.T) {
 			Candidates: []providers.FallbackCandidate{candidate("account-c")},
 			RPM:        60,
 		},
-	}, filepath.Join(t.TempDir(), "model_router_state.json"))
+	}, filepath.Join(t.TempDir(), "account_router_state.json"))
 	if router == nil {
 		t.Fatal("New() returned nil")
 	}
@@ -151,17 +151,17 @@ func TestLoadBalancerFallbackToAccountFallbackToLoadBalancer(t *testing.T) {
 func TestLoadBalanceStrategiesKeepGitHubCopilotCredentialIdentities(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	for _, strategy := range []string{
-		config.ModelRouterStrategyBlind,
-		config.ModelRouterStrategyTokensSpent,
-		config.ModelRouterStrategyClosestLimit,
+		config.AccountRouterStrategyBlind,
+		config.AccountRouterStrategyTokensSpent,
+		config.AccountRouterStrategyClosestLimit,
 	} {
 		t.Run(strategy, func(t *testing.T) {
-			router := newCredentialTestRouter(t, &config.ModelRouterConfig{
+			router := newCredentialTestRouter(t, &config.AccountRouterConfig{
 				Enabled: true,
 				Entry:   "pool",
-				Blocks: []config.ModelRouterBlock{{
+				Blocks: []config.AccountRouterBlock{{
 					ID:       "pool",
-					Type:     config.ModelRouterBlockTypeLoadBalance,
+					Type:     config.AccountRouterBlockTypeLoadBalance,
 					Accounts: []string{"credential:github-copilot:gh-copilot", "credential:github-copilot:backup"},
 					Strategy: strategy,
 				}},
@@ -198,14 +198,14 @@ func TestLoadBalanceStrategiesKeepGitHubCopilotCredentialIdentities(t *testing.T
 
 func TestClosestLimitUsesCurrentMinuteWindow(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
-	router := newTestRouter(t, &config.ModelRouterConfig{
+	router := newTestRouter(t, &config.AccountRouterConfig{
 		Enabled: true,
 		Entry:   "pool",
-		Blocks: []config.ModelRouterBlock{{
+		Blocks: []config.AccountRouterBlock{{
 			ID:       "pool",
-			Type:     config.ModelRouterBlockTypeLoadBalance,
+			Type:     config.AccountRouterBlockTypeLoadBalance,
 			Accounts: []string{"account-a", "account-b"},
-			Strategy: config.ModelRouterStrategyClosestLimit,
+			Strategy: config.AccountRouterStrategyClosestLimit,
 		}},
 	}, now)
 	currentNow := now
@@ -231,15 +231,15 @@ func TestClosestLimitUsesCurrentMinuteWindow(t *testing.T) {
 
 func TestBlindNonSessionChoiceRotatesByInterval(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
-	router := newTestRouter(t, &config.ModelRouterConfig{
+	router := newTestRouter(t, &config.AccountRouterConfig{
 		Enabled:                true,
 		Entry:                  "pool",
 		RefreshIntervalSeconds: 60,
-		Blocks: []config.ModelRouterBlock{{
+		Blocks: []config.AccountRouterBlock{{
 			ID:       "pool",
-			Type:     config.ModelRouterBlockTypeLoadBalance,
+			Type:     config.AccountRouterBlockTypeLoadBalance,
 			Accounts: []string{"account-a", "account-b"},
-			Strategy: config.ModelRouterStrategyBlind,
+			Strategy: config.AccountRouterStrategyBlind,
 		}},
 	}, now)
 	currentNow := now
@@ -262,19 +262,19 @@ func TestBlindNonSessionChoiceRotatesByInterval(t *testing.T) {
 
 func TestFallbackAttemptIdentityKeepsSameProviderModelAccountsSeparate(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
-	router := newTestRouter(t, &config.ModelRouterConfig{
+	router := newTestRouter(t, &config.AccountRouterConfig{
 		Enabled: true,
 		Entry:   "entry",
-		Blocks: []config.ModelRouterBlock{
+		Blocks: []config.AccountRouterBlock{
 			{
 				ID:       "entry",
-				Type:     config.ModelRouterBlockTypeAccount,
+				Type:     config.AccountRouterBlockTypeAccount,
 				Account:  "account-a",
 				Fallback: "fallback",
 			},
 			{
 				ID:      "fallback",
-				Type:    config.ModelRouterBlockTypeAccount,
+				Type:    config.AccountRouterBlockTypeAccount,
 				Account: "account-b",
 			},
 		},
@@ -302,17 +302,17 @@ func TestFallbackAttemptIdentityKeepsSameProviderModelAccountsSeparate(t *testin
 }
 
 func TestStoreRenamesCorruptStateAndContinues(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "model_router_state.json")
+	statePath := filepath.Join(t.TempDir(), "account_router_state.json")
 	if err := os.WriteFile(statePath, []byte("{not-json"), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	router := New("router-main", &config.ModelRouterConfig{
+	router := New("router-main", &config.AccountRouterConfig{
 		Enabled: true,
 		Entry:   "entry",
-		Blocks: []config.ModelRouterBlock{{
+		Blocks: []config.AccountRouterBlock{{
 			ID:      "entry",
-			Type:    config.ModelRouterBlockTypeAccount,
+			Type:    config.AccountRouterBlockTypeAccount,
 			Account: "account-a",
 		}},
 	}, map[string]Account{
@@ -341,7 +341,7 @@ func TestStoreRenamesCorruptStateAndContinues(t *testing.T) {
 	}
 }
 
-func newTestRouter(t *testing.T, cfg *config.ModelRouterConfig, now time.Time) *Router {
+func newTestRouter(t *testing.T, cfg *config.AccountRouterConfig, now time.Time) *Router {
 	t.Helper()
 	router := New("router-main", cfg, map[string]Account{
 		"account-a": {
@@ -352,7 +352,7 @@ func newTestRouter(t *testing.T, cfg *config.ModelRouterConfig, now time.Time) *
 			Candidates: []providers.FallbackCandidate{candidate("account-b")},
 			RPM:        60,
 		},
-	}, filepath.Join(t.TempDir(), "model_router_state.json"))
+	}, filepath.Join(t.TempDir(), "account_router_state.json"))
 	if router == nil {
 		t.Fatal("New() returned nil")
 	}
@@ -360,7 +360,7 @@ func newTestRouter(t *testing.T, cfg *config.ModelRouterConfig, now time.Time) *
 	return router
 }
 
-func newCredentialTestRouter(t *testing.T, cfg *config.ModelRouterConfig, now time.Time) *Router {
+func newCredentialTestRouter(t *testing.T, cfg *config.AccountRouterConfig, now time.Time) *Router {
 	t.Helper()
 	router := New("router-main", cfg, map[string]Account{
 		"credential:github-copilot:gh-copilot": {
@@ -371,7 +371,7 @@ func newCredentialTestRouter(t *testing.T, cfg *config.ModelRouterConfig, now ti
 			Candidates: []providers.FallbackCandidate{credentialCandidate("credential:github-copilot:backup")},
 			RPM:        60,
 		},
-	}, filepath.Join(t.TempDir(), "model_router_state.json"))
+	}, filepath.Join(t.TempDir(), "account_router_state.json"))
 	if router == nil {
 		t.Fatal("New() returned nil")
 	}

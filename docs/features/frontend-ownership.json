@@ -95,7 +95,6 @@
         "web/frontend/src/routes/accounts.tsx",
         "web/frontend/src/routes/credentials.tsx",
         "web/frontend/src/routes/launcher-*",
-        "web/frontend/src/routes/models.tsx",
         "web/frontend/src/store/**"
       ]
     },

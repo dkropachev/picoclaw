@@ -14,6 +14,7 @@ import {
 
 interface ModelSelectorProps {
   defaultModelName: string
+  accountRouterModels: ModelInfo[]
   apiKeyModels: ModelInfo[]
   oauthModels: ModelInfo[]
   localModels: ModelInfo[]
@@ -22,6 +23,7 @@ interface ModelSelectorProps {
 
 export function ModelSelector({
   defaultModelName,
+  accountRouterModels,
   apiKeyModels,
   oauthModels,
   localModels,
@@ -39,6 +41,21 @@ export function ModelSelector({
         <SelectValue placeholder={t("chat.noModel")} />
       </SelectTrigger>
       <SelectContent position="popper" align="start">
+        {accountRouterModels.length > 0 && (
+          <SelectGroup>
+            <SelectLabel>{t("chat.modelGroup.accountRouter")}</SelectLabel>
+            {accountRouterModels.map((model) => (
+              <SelectItem key={model.index} value={model.model_name}>
+                {model.model_name}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        )}
+        {accountRouterModels.length > 0 &&
+          (apiKeyModels.length > 0 ||
+            oauthModels.length > 0 ||
+            localModels.length > 0) && <SelectSeparator />}
+
         {apiKeyModels.length > 0 && (
           <SelectGroup>
             <SelectLabel>{t("chat.modelGroup.apikey")}</SelectLabel>

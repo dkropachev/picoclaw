@@ -119,7 +119,7 @@ func SaveCatalog(provider, apiBase, apiKey string, models []CatalogModel) error 
 
 // handleListCatalogs returns all saved model catalogs.
 //
-//	GET /api/models/catalog
+//	GET /api/accounts/models/catalog
 func (h *Handler) handleListCatalogs(w http.ResponseWriter, r *http.Request) {
 	store, err := loadCatalogs()
 	if err != nil {
@@ -141,7 +141,7 @@ func (h *Handler) handleListCatalogs(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteCatalog deletes a saved model catalog by ID.
 //
-//	DELETE /api/models/catalog/{id}
+//	DELETE /api/accounts/models/catalog/{id}
 func (h *Handler) handleDeleteCatalog(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {

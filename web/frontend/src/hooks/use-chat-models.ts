@@ -21,6 +21,10 @@ function isLocalModel(model: ModelInfo): boolean {
   )
 }
 
+function isAccountRouterModel(model: ModelInfo): boolean {
+  return model.provider === "router" || model.router != null
+}
+
 export function useChatModels({ isConnected }: UseChatModelsOptions) {
   const { t } = useTranslation()
   const [modelList, setModelList] = useState<ModelInfo[]>([])
@@ -88,40 +92,54 @@ export function useChatModels({ isConnected }: UseChatModelsOptions) {
   const defaultSelectableModels = useMemo(
     () =>
       modelList.filter(
-        (m) => m.default_model_allowed !== false && m.is_virtual !== true,
+        (m) =>
+          m.default_model_allowed !== false &&
+          (m.is_virtual !== true || isAccountRouterModel(m)),
       ),
     [modelList],
   )
 
   const hasAvailableModels = useMemo(
-    () => defaultSelectableModels.some((m) => m.available),
+    () => defaultSelectableModels.length > 0,
     [defaultSelectableModels],
   )
 
   const oauthModels = useMemo(
     () =>
       defaultSelectableModels.filter(
-        (m) => m.available && m.auth_method === "oauth",
+        (m) => m.auth_method === "oauth" && !isAccountRouterModel(m),
       ),
     [defaultSelectableModels],
   )
 
   const localModels = useMemo(
-    () => defaultSelectableModels.filter((m) => m.available && isLocalModel(m)),
+    () =>
+      defaultSelectableModels.filter(
+        (m) => isLocalModel(m) && !isAccountRouterModel(m),
+      ),
     [defaultSelectableModels],
   )
 
   const apiKeyModels = useMemo(
     () =>
       defaultSelectableModels.filter(
-        (m) => m.available && m.auth_method !== "oauth" && !isLocalModel(m),
+        (m) =>
+          m.auth_method !== "oauth" &&
+          !isLocalModel(m) &&
+          !isAccountRouterModel(m),
       ),
+    [defaultSelectableModels],
+  )
+
+  const accountRouterModels = useMemo(
+    () => defaultSelectableModels.filter(isAccountRouterModel),
     [defaultSelectableModels],
   )
 
   return {
     defaultModelName,
     hasAvailableModels,
+    accountRouterModels,
     apiKeyModels,
     oauthModels,
     localModels,

@@ -133,8 +133,8 @@ func newOAuthProviderCredentialStatus(
 	s := oauthProviderStatus{}
 	s.Provider = provider
 	s.CredentialID = credentialID
-	s.DisplayName = oauthProviderLabels[provider]
-	s.Methods = oauthProviderMethods[provider]
+	s.DisplayName = oauthProviderLabel(provider)
+	s.Methods = oauthProviderMethodsForProvider(provider)
 	s.Status = "not_logged_in"
 	s.applyCredential(provider, credentialID, cred)
 	return s
@@ -144,10 +144,10 @@ func (s *oauthProviderStatus) applyCredential(provider, credentialID string, cre
 	s.Provider = provider
 	s.CredentialID = credentialID
 	if s.DisplayName == "" {
-		s.DisplayName = oauthProviderLabels[provider]
+		s.DisplayName = oauthProviderLabel(provider)
 	}
 	if s.Methods == nil {
-		s.Methods = oauthProviderMethods[provider]
+		s.Methods = oauthProviderMethodsForProvider(provider)
 	}
 	s.Status = "not_logged_in"
 	if cred == nil {
@@ -189,14 +189,15 @@ func (h *Handler) handleListOAuthProviders(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	providersResp := make([]oauthProviderStatus, 0, len(oauthProviderOrder))
+	providerIDs := accountProviderIDs()
+	providersResp := make([]oauthProviderStatus, 0, len(providerIDs))
 
-	for _, provider := range oauthProviderOrder {
+	for _, provider := range providerIDs {
 		item := oauthProviderStatus{
 			Provider:     provider,
 			CredentialID: provider,
-			DisplayName:  oauthProviderLabels[provider],
-			Methods:      oauthProviderMethods[provider],
+			DisplayName:  oauthProviderLabel(provider),
+			Methods:      oauthProviderMethodsForProvider(provider),
 			Status:       "not_logged_in",
 		}
 		if cred := store.Credentials[provider]; cred != nil {
@@ -574,7 +575,7 @@ func (h *Handler) handleOAuthLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("failed to delete credential: %v", err), http.StatusInternalServerError)
 		return
 	}
-	if err := h.syncProviderAuthMethod(provider, credentialID, ""); err != nil {
+	if err := h.clearProviderAuthMethod(provider, credentialID); err != nil {
 		http.Error(w, fmt.Sprintf("failed to update config: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -619,6 +620,62 @@ func renderOAuthCallbackPage(w http.ResponseWriter, flowID, status, title, errMs
 	)
 }
 
+func accountProviderIDs() []string {
+	seen := make(map[string]bool)
+	ids := make([]string, 0, len(oauthProviderOrder)+len(providers.ModelProviderOptions()))
+	for _, provider := range oauthProviderOrder {
+		normalized, err := normalizeOAuthProvider(provider)
+		if err != nil || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		ids = append(ids, normalized)
+	}
+	options := providers.ModelProviderOptions()
+	sort.SliceStable(options, func(i, j int) bool {
+		if options[i].Priority == options[j].Priority {
+			return options[i].ID < options[j].ID
+		}
+		return options[i].Priority > options[j].Priority
+	})
+	for _, option := range options {
+		if !option.CreateAllowed || option.ID == config.AccountRouterProvider {
+			continue
+		}
+		normalized, err := normalizeOAuthProvider(option.ID)
+		if err != nil || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		ids = append(ids, normalized)
+	}
+	return ids
+}
+
+func oauthProviderLabel(provider string) string {
+	if label := strings.TrimSpace(oauthProviderLabels[provider]); label != "" {
+		return label
+	}
+	for _, option := range providers.ModelProviderOptions() {
+		normalized, err := normalizeOAuthProvider(option.ID)
+		if err != nil || normalized != provider {
+			continue
+		}
+		if label := strings.TrimSpace(option.DisplayName); label != "" {
+			return label
+		}
+		break
+	}
+	return provider
+}
+
+func oauthProviderMethodsForProvider(provider string) []string {
+	if methods := oauthProviderMethods[provider]; len(methods) > 0 {
+		return append([]string(nil), methods...)
+	}
+	return []string{oauthMethodToken}
+}
+
 func normalizeOAuthProvider(raw string) (string, error) {
 	provider := strings.ToLower(strings.TrimSpace(raw))
 	switch provider {
@@ -629,6 +686,10 @@ func normalizeOAuthProvider(raw string) (string, error) {
 	case oauthProviderOpenAI, oauthProviderAnthropic, oauthProviderGoogleAntigravity, oauthProviderGitHubCopilot:
 		return provider, nil
 	default:
+		normalized := providers.NormalizeProvider(provider)
+		if normalized != "" && providers.IsCreatableModelProvider(normalized) {
+			return normalized, nil
+		}
 		return "", fmt.Errorf("unsupported provider %q", raw)
 	}
 }
@@ -643,7 +704,7 @@ func credentialIDBelongsToProvider(provider, credentialID string) bool {
 }
 
 func isOAuthMethodSupported(provider, method string) bool {
-	methods := oauthProviderMethods[provider]
+	methods := oauthProviderMethodsForProvider(provider)
 	for _, m := range methods {
 		if m == method {
 			return true
@@ -851,9 +912,6 @@ func (h *Handler) persistCredentialAndConfig(
 	if err := oauthSetCredential(normalizedCredentialID, &cp); err != nil {
 		return "", fmt.Errorf("saving credential: %w", err)
 	}
-	if err := h.syncProviderAuthMethod(provider, normalizedCredentialID, authMethod); err != nil {
-		return "", fmt.Errorf("syncing provider auth config: %w", err)
-	}
 	return normalizedCredentialID, nil
 }
 
@@ -895,7 +953,7 @@ func credentialNameFromEmail(email string) string {
 	return strings.Trim(b.String(), ".-_")
 }
 
-func (h *Handler) syncProviderAuthMethod(provider, credentialID, authMethod string) error {
+func (h *Handler) clearProviderAuthMethod(provider, credentialID string) error {
 	cfg, err := oauthLoadConfig(h.configPath)
 	if err != nil {
 		return err
@@ -905,7 +963,6 @@ func (h *Handler) syncProviderAuthMethod(provider, credentialID, authMethod stri
 		return err
 	}
 
-	found := false
 	for i := range cfg.ModelList {
 		if !modelBelongsToProvider(provider, cfg.ModelList[i]) {
 			continue
@@ -913,18 +970,7 @@ func (h *Handler) syncProviderAuthMethod(provider, credentialID, authMethod stri
 		if modelCredentialID(provider, cfg.ModelList[i]) != normalizedCredentialID {
 			continue
 		}
-		cfg.ModelList[i].AuthMethod = authMethod
-		if authMethod != "" && normalizedCredentialID != provider {
-			cfg.ModelList[i].CredentialID = normalizedCredentialID
-		}
-		found = true
-	}
-
-	if !found && authMethod != "" {
-		cfg.ModelList = append(
-			cfg.ModelList,
-			defaultModelConfigForProvider(provider, normalizedCredentialID, authMethod),
-		)
+		cfg.ModelList[i].AuthMethod = ""
 	}
 
 	return oauthSaveConfig(h.configPath, cfg)
@@ -955,59 +1001,6 @@ func modelBelongsToProvider(provider string, modelCfg *config.ModelConfig) bool 
 	default:
 		return false
 	}
-}
-
-func defaultModelConfigForProvider(provider, credentialID, authMethod string) *config.ModelConfig {
-	modelNameSuffix := ""
-	if credentialID != provider {
-		_, suffix, _ := strings.Cut(credentialID, ":")
-		if suffix != "" {
-			modelNameSuffix = "-" + suffix
-		}
-	}
-	switch provider {
-	case oauthProviderOpenAI:
-		return &config.ModelConfig{
-			ModelName:    "gpt-5.4" + modelNameSuffix,
-			Provider:     "openai",
-			Model:        "gpt-5.4",
-			AuthMethod:   authMethod,
-			CredentialID: credentialIDForConfig(provider, credentialID),
-		}
-	case oauthProviderAnthropic:
-		return &config.ModelConfig{
-			ModelName:    "claude-sonnet-4.6" + modelNameSuffix,
-			Provider:     "anthropic",
-			Model:        "claude-sonnet-4.6",
-			AuthMethod:   authMethod,
-			CredentialID: credentialIDForConfig(provider, credentialID),
-		}
-	case oauthProviderGoogleAntigravity:
-		return &config.ModelConfig{
-			ModelName:    "gemini-flash" + modelNameSuffix,
-			Provider:     "antigravity",
-			Model:        "gemini-3-flash",
-			AuthMethod:   authMethod,
-			CredentialID: credentialIDForConfig(provider, credentialID),
-		}
-	case oauthProviderGitHubCopilot:
-		return &config.ModelConfig{
-			ModelName:    "copilot" + modelNameSuffix,
-			Provider:     "github-copilot",
-			Model:        "auto",
-			AuthMethod:   authMethod,
-			CredentialID: credentialIDForConfig(provider, credentialID),
-		}
-	default:
-		return &config.ModelConfig{}
-	}
-}
-
-func credentialIDForConfig(provider, credentialID string) string {
-	if credentialID == provider {
-		return ""
-	}
-	return credentialID
 }
 
 func fetchGoogleUserEmail(accessToken string) (string, error) {

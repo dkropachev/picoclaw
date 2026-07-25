@@ -29,7 +29,7 @@ func CreateProvider(cfg *config.Config) (LLMProvider, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("model %q not found in model_list: %w", model, err)
 	}
-	if modelCfg.IsModelRouter() {
+	if modelCfg.IsAccountRouter() {
 		accountName := firstRouterAccount(modelCfg.Router)
 		if accountName == "" {
 			return nil, "", fmt.Errorf("router model %q has no account blocks", model)
@@ -59,11 +59,11 @@ func CreateProvider(cfg *config.Config) (LLMProvider, string, error) {
 	return provider, modelID, nil
 }
 
-func firstRouterAccount(routerCfg *config.ModelRouterConfig) string {
+func firstRouterAccount(routerCfg *config.AccountRouterConfig) string {
 	if routerCfg == nil {
 		return ""
 	}
-	blocks := make(map[string]config.ModelRouterBlock, len(routerCfg.Blocks))
+	blocks := make(map[string]config.AccountRouterBlock, len(routerCfg.Blocks))
 	for _, block := range routerCfg.Blocks {
 		blocks[strings.TrimSpace(block.ID)] = block
 	}
@@ -76,9 +76,9 @@ func firstRouterAccount(routerCfg *config.ModelRouterConfig) string {
 			return ""
 		}
 		switch strings.TrimSpace(block.Type) {
-		case config.ModelRouterBlockTypeAccount:
+		case config.AccountRouterBlockTypeAccount:
 			return strings.TrimSpace(block.Account)
-		case config.ModelRouterBlockTypeLoadBalance:
+		case config.AccountRouterBlockTypeLoadBalance:
 			for _, account := range block.Accounts {
 				if account = strings.TrimSpace(account); account != "" {
 					return account

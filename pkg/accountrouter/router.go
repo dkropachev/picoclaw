@@ -1,4 +1,4 @@
-package modelrouter
+package accountrouter
 
 import (
 	"crypto/sha256"
@@ -39,7 +39,7 @@ type Account struct {
 
 type Router struct {
 	Name       string
-	Config     config.ModelRouterConfig
+	Config     config.AccountRouterConfig
 	Accounts   map[string]Account
 	StatePath  string
 	ConfigHash string
@@ -112,12 +112,12 @@ type Store struct {
 
 var stores sync.Map
 
-func New(name string, routerConfig *config.ModelRouterConfig, accounts map[string]Account, statePath string) *Router {
+func New(name string, routerConfig *config.AccountRouterConfig, accounts map[string]Account, statePath string) *Router {
 	if routerConfig == nil || strings.TrimSpace(name) == "" || strings.TrimSpace(statePath) == "" {
 		return nil
 	}
 	cfg := *routerConfig
-	cfg.Blocks = append([]config.ModelRouterBlock(nil), routerConfig.Blocks...)
+	cfg.Blocks = append([]config.AccountRouterBlock(nil), routerConfig.Blocks...)
 	for i := range cfg.Blocks {
 		cfg.Blocks[i].Accounts = append([]string(nil), routerConfig.Blocks[i].Accounts...)
 	}
@@ -268,7 +268,7 @@ func (r *Router) expandBlock(
 
 	var candidates []providers.FallbackCandidate
 	switch strings.TrimSpace(block.Type) {
-	case config.ModelRouterBlockTypeAccount:
+	case config.AccountRouterBlockTypeAccount:
 		account := strings.TrimSpace(block.Account)
 		accountCandidates := r.accountCandidates(rs, account)
 		fallbackCandidates := r.expandBlock(rs, session, block.Fallback, sessionKey, reason, seen, selection)
@@ -281,7 +281,7 @@ func (r *Router) expandBlock(
 		selection.BlockAccountChoices[blockID] = account
 		candidates = append(candidates, r.tagCandidates(accountCandidates, account, selection)...)
 		candidates = append(candidates, fallbackCandidates...)
-	case config.ModelRouterBlockTypeLoadBalance:
+	case config.AccountRouterBlockTypeLoadBalance:
 		account := r.selectLoadBalancedAccount(rs, session, block, sessionKey, reason)
 		accountCandidates := r.accountCandidates(rs, account)
 		fallbackCandidates := r.expandBlock(rs, session, block.Fallback, sessionKey, reason, seen, selection)
@@ -298,7 +298,7 @@ func (r *Router) expandBlock(
 func (r *Router) selectLoadBalancedAccount(
 	rs *RouterState,
 	session *SessionState,
-	block config.ModelRouterBlock,
+	block config.AccountRouterBlock,
 	sessionKey string,
 	reason SelectReason,
 ) string {
@@ -343,17 +343,17 @@ func (r *Router) selectLoadBalancedAccount(
 
 func (r *Router) chooseAccountByStrategy(
 	rs *RouterState,
-	block config.ModelRouterBlock,
+	block config.AccountRouterBlock,
 	accounts []string,
 	sessionKey string,
 ) string {
 	switch strings.TrimSpace(block.Strategy) {
-	case config.ModelRouterStrategyTokensSpent:
+	case config.AccountRouterStrategyTokensSpent:
 		sort.SliceStable(accounts, func(i, j int) bool {
 			return accountTokens(rs, accounts[i]) < accountTokens(rs, accounts[j])
 		})
 		return accounts[0]
-	case config.ModelRouterStrategyClosestLimit:
+	case config.AccountRouterStrategyClosestLimit:
 		now := r.now()
 		sort.SliceStable(accounts, func(i, j int) bool {
 			return r.accountLimitPressure(rs, accounts[i], now) < r.accountLimitPressure(rs, accounts[j], now)
@@ -368,7 +368,7 @@ func (r *Router) chooseAccountByStrategy(
 	}
 }
 
-func (r *Router) nextBlindAccount(rs *RouterState, block config.ModelRouterBlock, accounts []string) string {
+func (r *Router) nextBlindAccount(rs *RouterState, block config.AccountRouterBlock, accounts []string) string {
 	if len(accounts) == 0 {
 		return ""
 	}
@@ -412,13 +412,13 @@ func (r *Router) accountLimitPressure(rs *RouterState, account string, now time.
 	return float64(state.RateWindowReqs) / float64(meta.RPM)
 }
 
-func (r *Router) block(id string) (config.ModelRouterBlock, bool) {
+func (r *Router) block(id string) (config.AccountRouterBlock, bool) {
 	for _, block := range r.Config.Blocks {
 		if strings.TrimSpace(block.ID) == id {
 			return block, true
 		}
 	}
-	return config.ModelRouterBlock{}, false
+	return config.AccountRouterBlock{}, false
 }
 
 func (r *Router) accountCandidates(rs *RouterState, account string) []providers.FallbackCandidate {
@@ -709,7 +709,7 @@ func stableIndex(seed string, modulo int) int {
 	return int(h.Sum64() % uint64(modulo))
 }
 
-func hashRouterConfig(cfg config.ModelRouterConfig) string {
+func hashRouterConfig(cfg config.AccountRouterConfig) string {
 	data, _ := json.Marshal(cfg)
 	sum := sha256.Sum256(data)
 	return fmt.Sprintf("%x", sum[:8])
