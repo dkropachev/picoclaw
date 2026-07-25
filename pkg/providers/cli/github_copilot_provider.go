@@ -4,17 +4,60 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	copilot "github.com/github/copilot-sdk/go"
+
+	"github.com/sipeed/picoclaw/pkg/auth"
 )
+
+const (
+	githubCopilotDefaultModel = "auto"
+	githubCopilotClientName   = "picoclaw"
+)
+
+type copilotClient interface {
+	Start(context.Context) error
+	Stop()
+	CreateSession(context.Context, *copilot.SessionConfig) (copilotSession, error)
+}
+
+type copilotSession interface {
+	SendAndWait(context.Context, copilot.MessageOptions) (*copilot.SessionEvent, error)
+}
+
+type sdkCopilotClient struct {
+	client *copilot.Client
+}
+
+func newSDKCopilotClient(opts *copilot.ClientOptions) copilotClient {
+	return &sdkCopilotClient{client: copilot.NewClient(opts)}
+}
+
+func (c *sdkCopilotClient) Start(ctx context.Context) error {
+	return c.client.Start(ctx)
+}
+
+func (c *sdkCopilotClient) Stop() {
+	c.client.Stop()
+}
+
+func (c *sdkCopilotClient) CreateSession(
+	ctx context.Context,
+	cfg *copilot.SessionConfig,
+) (copilotSession, error) {
+	return c.client.CreateSession(ctx, cfg)
+}
+
+var newCopilotClient = newSDKCopilotClient
 
 type GitHubCopilotProvider struct {
 	uri         string
 	connectMode string // "stdio" or "grpc"
 
-	client  *copilot.Client
-	session *copilot.Session
+	client  copilotClient
+	session copilotSession
 
 	mu sync.Mutex
 }
@@ -30,35 +73,63 @@ func NewGitHubCopilotProvider(uri string, connectMode string, model string) (*Gi
 		// See https://github.com/github/copilot-sdk/blob/main/docs/getting-started.md for details
 		return nil, fmt.Errorf("stdio mode not implemented for GitHub Copilot provider; please use 'grpc' mode instead")
 	case "grpc":
-		client := copilot.NewClient(&copilot.ClientOptions{
+		return newGitHubCopilotProvider(uri, connectMode, model, &copilot.ClientOptions{
 			CLIUrl: uri,
 		})
-		if err := client.Start(context.Background()); err != nil {
-			return nil, fmt.Errorf(
-				"can't connect to Github Copilot: %w; `https://github.com/github/copilot-sdk/blob/main/docs/getting-started.md#connecting-to-an-external-cli-server` for details",
-				err,
-			)
-		}
-
-		session, err := client.CreateSession(context.Background(), &copilot.SessionConfig{
-			Model:               model,
-			OnPermissionRequest: copilot.PermissionHandler.ApproveAll,
-			Hooks:               &copilot.SessionHooks{},
-		})
-		if err != nil {
-			client.Stop()
-			return nil, fmt.Errorf("create session failed: %w", err)
-		}
-
-		return &GitHubCopilotProvider{
-			uri:         uri,
-			connectMode: connectMode,
-			client:      client,
-			session:     session,
-		}, nil
 	default:
 		return nil, fmt.Errorf("unknown connect mode: %s", connectMode)
 	}
+}
+
+func NewGitHubCopilotProviderWithToken(token string, model string) (*GitHubCopilotProvider, error) {
+	token = strings.TrimSpace(token)
+	if err := auth.ValidateGitHubCopilotToken(token); err != nil {
+		return nil, err
+	}
+	return newGitHubCopilotProvider("", "token", model, &copilot.ClientOptions{
+		GitHubToken:     token,
+		UseLoggedInUser: copilot.Bool(false),
+	})
+}
+
+func newGitHubCopilotProvider(
+	uri string,
+	connectMode string,
+	model string,
+	clientOptions *copilot.ClientOptions,
+) (*GitHubCopilotProvider, error) {
+	client := newCopilotClient(clientOptions)
+	if err := client.Start(context.Background()); err != nil {
+		return nil, fmt.Errorf(
+			"can't connect to GitHub Copilot: %w; see https://github.com/github/copilot-sdk/blob/main/docs/getting-started.md for setup details",
+			err,
+		)
+	}
+
+	session, err := client.CreateSession(context.Background(), &copilot.SessionConfig{
+		ClientName:          githubCopilotClientName,
+		Model:               githubCopilotModelOrDefault(model),
+		OnPermissionRequest: copilot.PermissionHandler.ApproveAll,
+		Hooks:               &copilot.SessionHooks{},
+	})
+	if err != nil {
+		client.Stop()
+		return nil, fmt.Errorf("create session failed: %w", err)
+	}
+
+	return &GitHubCopilotProvider{
+		uri:         uri,
+		connectMode: connectMode,
+		client:      client,
+		session:     session,
+	}, nil
+}
+
+func githubCopilotModelOrDefault(model string) string {
+	if model = strings.TrimSpace(model); model != "" {
+		return model
+	}
+	return githubCopilotDefaultModel
 }
 
 func (p *GitHubCopilotProvider) Close() {
@@ -124,5 +195,5 @@ func (p *GitHubCopilotProvider) Chat(
 }
 
 func (p *GitHubCopilotProvider) GetDefaultModel() string {
-	return "gpt-4.1"
+	return githubCopilotDefaultModel
 }

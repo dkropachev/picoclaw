@@ -63,6 +63,31 @@ func createCodexAuthProvider(cfg *config.ModelConfig) (LLMProvider, error) {
 	), nil
 }
 
+// createGitHubCopilotAuthProvider creates a GitHub Copilot provider using a
+// named GitHub token from the auth store.
+func createGitHubCopilotAuthProvider(cfg *config.ModelConfig, modelID string) (LLMProvider, error) {
+	credentialID, err := credentialIDForModel(cfg, "github-copilot")
+	if err != nil {
+		return nil, err
+	}
+	cred, err := getCredential(credentialID)
+	if err != nil {
+		return nil, fmt.Errorf("loading auth credentials: %w", err)
+	}
+	if cred == nil {
+		return nil, fmt.Errorf(
+			"no credentials for %s. Run: picoclaw auth login --provider github-copilot --credential-id %s",
+			credentialID,
+			credentialID,
+		)
+	}
+	token := strings.TrimSpace(cred.AccessToken)
+	if err := auth.ValidateGitHubCopilotToken(token); err != nil {
+		return nil, fmt.Errorf("invalid GitHub Copilot credential %s: %w", credentialID, err)
+	}
+	return newGitHubCopilotProviderWithToken(token, modelID)
+}
+
 func credentialIDForModel(cfg *config.ModelConfig, provider string) (string, error) {
 	if cfg == nil {
 		return auth.NormalizeCredentialID(provider, "")
@@ -379,6 +404,14 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		return finalizeProviderFromConfig(NewCodexCliProvider(workspace), modelID, cfg)
 
 	case "github-copilot":
+		if authMethod == "oauth" || authMethod == "token" {
+			provider, err := createGitHubCopilotAuthProvider(cfg, modelID)
+			if err != nil {
+				return nil, "", err
+			}
+			return finalizeProviderFromConfig(provider, modelID, cfg)
+		}
+
 		apiBase := cfg.APIBase
 		if apiBase == "" {
 			apiBase = "localhost:4321"

@@ -420,6 +420,141 @@ func TestOAuthTokenLoginPersistsNamedCredentialAndModel(t *testing.T) {
 	}
 }
 
+func TestOAuthProvidersIncludesGitHubCopilotTokenLogin(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/oauth/providers", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Providers []oauthProviderStatus `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal providers: %v", err)
+	}
+	for _, p := range resp.Providers {
+		if p.Provider != oauthProviderGitHubCopilot {
+			continue
+		}
+		if p.DisplayName != "GitHub Copilot" {
+			t.Fatalf("display_name = %q, want GitHub Copilot", p.DisplayName)
+		}
+		if len(p.Methods) != 1 || p.Methods[0] != oauthMethodToken {
+			t.Fatalf("methods = %#v, want token only", p.Methods)
+		}
+		return
+	}
+	t.Fatal("github-copilot provider missing")
+}
+
+func TestOAuthGitHubCopilotTokenLoginRejectsClassicPAT(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/oauth/login",
+		bytes.NewBufferString(`{"provider":"copilot","credential_id":"work","method":"token","token":"ghp_unsupported"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "ghp_") {
+		t.Fatalf("error should mention ghp_ token family, body=%s", rec.Body.String())
+	}
+	cred, err := auth.GetCredential("github-copilot:work")
+	if err != nil {
+		t.Fatalf("GetCredential error: %v", err)
+	}
+	if cred != nil {
+		t.Fatalf("credential should not be saved, got %#v", cred)
+	}
+}
+
+func TestOAuthGitHubCopilotTokenLoginPersistsNamedCredentialAndModel(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/oauth/login",
+		bytes.NewBufferString(`{"provider":"copilot","credential_id":"work","method":"token","token":"gho_named-token"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	cred, err := auth.GetCredential("github-copilot:work")
+	if err != nil {
+		t.Fatalf("GetCredential named error: %v", err)
+	}
+	if cred == nil {
+		t.Fatal("named credential missing")
+	}
+	if cred.AccessToken != "gho_named-token" {
+		t.Fatalf("AccessToken = %q, want saved token", cred.AccessToken)
+	}
+	if cred.Provider != "github-copilot" {
+		t.Fatalf("Provider = %q, want github-copilot", cred.Provider)
+	}
+	if cred.AuthMethod != "token" {
+		t.Fatalf("AuthMethod = %q, want token", cred.AuthMethod)
+	}
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+	for _, m := range cfg.ModelList {
+		if m.ModelName != "copilot-work" {
+			continue
+		}
+		if m.Provider != "github-copilot" {
+			t.Fatalf("Provider = %q, want github-copilot", m.Provider)
+		}
+		if m.Model != "auto" {
+			t.Fatalf("Model = %q, want auto", m.Model)
+		}
+		if m.AuthMethod != "token" {
+			t.Fatalf("AuthMethod = %q, want token", m.AuthMethod)
+		}
+		if m.CredentialID != "github-copilot:work" {
+			t.Fatalf("CredentialID = %q, want github-copilot:work", m.CredentialID)
+		}
+		return
+	}
+	t.Fatalf("copilot named model entry not found in %#v", cfg.ModelList)
+}
+
 func TestOAuthLogoutNamedCredentialOnlyClearsMatchingModel(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()

@@ -1,4 +1,5 @@
 import {
+  IconBrandGithubCopilot,
   IconBrandGoogle,
   IconBrandOpenai,
   IconKey,
@@ -143,6 +144,9 @@ function ProviderIcon({ provider }: { provider: OAuthProvider }) {
   }
   if (provider === "google-antigravity") {
     return <IconBrandGoogle className="size-4" />
+  }
+  if (provider === "github-copilot") {
+    return <IconBrandGithubCopilot className="size-4" />
   }
   return <IconSparkles className="size-4" />
 }
