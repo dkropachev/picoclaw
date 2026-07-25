@@ -98,6 +98,21 @@
         "web/frontend/src/routes/models.tsx",
         "web/frontend/src/store/**"
       ]
+    },
+    {
+      "spec": "docs/features/github-copilot-subscription.md",
+      "patterns": [
+        "web/frontend/src/api/oauth.ts",
+        "web/frontend/src/components/credentials/account-router-editor-page.tsx",
+        "web/frontend/src/components/credentials/account-onboarding-sheet.tsx",
+        "web/frontend/src/components/credentials/accounts-page.tsx",
+        "web/frontend/src/hooks/use-credentials-page.ts",
+        "web/frontend/src/i18n/locales/bn-in.json",
+        "web/frontend/src/i18n/locales/cs.json",
+        "web/frontend/src/i18n/locales/en.json",
+        "web/frontend/src/i18n/locales/pt-br.json",
+        "web/frontend/src/i18n/locales/zh.json"
+      ]
     }
   ]
 }

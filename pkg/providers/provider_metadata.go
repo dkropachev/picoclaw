@@ -292,8 +292,11 @@ var modelProviderOptionsByName = map[string]ModelProviderOption{
 		EmptyAPIKeyAllowed:  true,
 		CreateAllowed:       true,
 		DefaultModelAllowed: true,
+		SupportsFetch:       true,
+		DefaultAuthMethod:   "token",
 		Local:               true,
 		Priority:            55,
+		CommonModels:        []string{"auto", "gpt-5.4", "gpt-4.1"},
 		Aliases:             []string{"copilot"},
 	},
 	"antigravity": {

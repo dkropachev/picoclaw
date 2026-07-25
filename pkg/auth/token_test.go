@@ -5,57 +5,52 @@ import (
 	"testing"
 )
 
-func TestLoginSetupToken(t *testing.T) {
-	// A valid token: correct prefix + at least 80 chars
-	validToken := "sk-ant-oat01-" + strings.Repeat("a", 80)
-
+func TestValidateGitHubCopilotToken(t *testing.T) {
 	tests := []struct {
 		name    string
-		input   string
+		token   string
 		wantErr string
 	}{
-		{"valid token", validToken, ""},
-		{"empty input", "", "expected prefix sk-ant-oat01-"},
-		{"wrong prefix", "sk-ant-api-" + strings.Repeat("a", 80), "expected prefix sk-ant-oat01-"},
-		{"too short", "sk-ant-oat01-short", "too short"},
-		{"whitespace only", "   ", "expected prefix sk-ant-oat01-"},
+		{name: "oauth user token", token: "gho_token"},
+		{name: "oauth user-to-server token", token: "ghu_token"},
+		{name: "fine-grained pat", token: "github_pat_token"},
+		{name: "classic pat", token: "ghp_token", wantErr: "ghp_"},
+		{name: "unsupported prefix", token: "sk-token", wantErr: "expected gho_"},
+		{name: "empty", token: " ", wantErr: "empty"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := strings.NewReader(tt.input + "\n")
-			cred, err := LoginSetupToken(r)
-
-			if tt.wantErr != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
-				}
-				if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("expected error containing %q, got %q", tt.wantErr, err.Error())
+			err := ValidateGitHubCopilotToken(tt.token)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateGitHubCopilotToken() error = %v", err)
 				}
 				return
 			}
-
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			if err == nil {
+				t.Fatalf("ValidateGitHubCopilotToken() error = nil, want %q", tt.wantErr)
 			}
-			if cred.AccessToken != validToken {
-				t.Errorf("AccessToken = %q, want %q", cred.AccessToken, validToken)
-			}
-			if cred.Provider != "anthropic" {
-				t.Errorf("Provider = %q, want %q", cred.Provider, "anthropic")
-			}
-			if cred.AuthMethod != "oauth" {
-				t.Errorf("AuthMethod = %q, want %q", cred.AuthMethod, "oauth")
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %q, want to contain %q", err.Error(), tt.wantErr)
 			}
 		})
 	}
 }
 
-func TestLoginSetupToken_EmptyReader(t *testing.T) {
-	r := strings.NewReader("")
-	_, err := LoginSetupToken(r)
-	if err == nil {
-		t.Fatal("expected error for empty reader, got nil")
+func TestLoginPasteTokenGitHubCopilotValidatesPrefix(t *testing.T) {
+	if _, err := LoginPasteToken("github-copilot", strings.NewReader("ghp_unsupported\n")); err == nil {
+		t.Fatal("LoginPasteToken() error = nil, want unsupported token error")
+	}
+
+	cred, err := LoginPasteToken("github-copilot", strings.NewReader("gho_supported\n"))
+	if err != nil {
+		t.Fatalf("LoginPasteToken() error = %v", err)
+	}
+	if cred.Provider != "github-copilot" {
+		t.Fatalf("Provider = %q, want github-copilot", cred.Provider)
+	}
+	if cred.AccessToken != "gho_supported" {
+		t.Fatalf("AccessToken = %q, want trimmed token", cred.AccessToken)
 	}
 }
