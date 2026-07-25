@@ -1,14 +1,20 @@
 import {
+  IconArrowsShuffle,
   IconBrandGoogle,
   IconBrandOpenai,
+  IconEdit,
+  IconGitBranch,
   IconKey,
   IconLoader2,
   IconPlus,
   IconRoute,
   IconSparkles,
+  IconStar,
+  IconStarFilled,
   IconTrash,
 } from "@tabler/icons-react"
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router"
+import type { TFunction } from "i18next"
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
@@ -22,9 +28,13 @@ import {
   getCodexAccountLimits,
 } from "@/api/oauth"
 import { DeleteModelDialog } from "@/components/models/delete-model-dialog"
-import { ModelCard } from "@/components/models/model-card"
 import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import { useCredentialsPage } from "@/hooks/use-credentials-page"
 import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { refreshGatewayState } from "@/store/gateway"
@@ -77,9 +87,30 @@ function appendMatchKey(keys: string[], value: string | undefined) {
   }
 }
 
+function appendAccountIndexKey(
+  index: Map<string, OAuthProviderStatus>,
+  account: OAuthProviderStatus,
+  value: string | undefined,
+) {
+  const key = normalizeAccountMatchKey(value)
+  if (key && !index.has(key)) {
+    index.set(key, account)
+  }
+}
+
 function stripProviderPrefix(provider: OAuthProvider, value: string): string {
   const prefix = `${provider}:`
   return value.startsWith(prefix) ? value.slice(prefix.length) : value
+}
+
+function stripCredentialRef(value: string): string {
+  const prefix = "credential:"
+  return value.startsWith(prefix) ? value.slice(prefix.length) : value
+}
+
+function formatRouterAccountRef(value: string): string {
+  const stripped = stripCredentialRef(value.trim())
+  return stripped || value
 }
 
 function getCodexLimitMatchKeys(account: CodexAccountLimitAccount): string[] {
@@ -135,6 +166,187 @@ function getAccountCodexLimits(
     }
   }
   return undefined
+}
+
+function indexRegisteredAccounts(
+  accounts: OAuthProviderStatus[],
+): Map<string, OAuthProviderStatus> {
+  const index = new Map<string, OAuthProviderStatus>()
+  for (const account of accounts) {
+    const credentialID = getAccountCredentialID(account)
+    const providerScopedName = stripProviderPrefix(
+      account.provider,
+      credentialID,
+    )
+    appendAccountIndexKey(index, account, credentialID)
+    appendAccountIndexKey(index, account, providerScopedName)
+    appendAccountIndexKey(index, account, `credential:${credentialID}`)
+    appendAccountIndexKey(index, account, `credential:${providerScopedName}`)
+    appendAccountIndexKey(index, account, account.account_id)
+    appendAccountIndexKey(index, account, account.email)
+  }
+  return index
+}
+
+function getRouterAccountRefs(model: ModelInfo): string[] {
+  const refs: string[] = []
+  const appendRef = (value: string | undefined) => {
+    const trimmed = value?.trim()
+    if (trimmed && !refs.includes(trimmed)) {
+      refs.push(trimmed)
+    }
+  }
+
+  for (const block of model.router?.blocks ?? []) {
+    appendRef(block.account)
+    for (const account of block.accounts ?? []) {
+      appendRef(account)
+    }
+  }
+
+  return refs
+}
+
+type RouterAccountStatus = OAuthProviderStatus["status"] | "missing"
+
+interface RouterAccountDetail {
+  ref: string
+  label: string
+  status: RouterAccountStatus
+}
+
+function getRouterAccountLabel(
+  account: OAuthProviderStatus | undefined,
+  ref: string,
+  t: TFunction,
+): string {
+  if (!account) {
+    return formatRouterAccountRef(ref)
+  }
+
+  const defaultName = t("accounts.defaultName")
+  const accountName = getAccountName(account, defaultName)
+  return accountName === defaultName ? account.display_name : accountName
+}
+
+function getRouterAccountDetails(
+  model: ModelInfo,
+  accountIndex: Map<string, OAuthProviderStatus>,
+  t: TFunction,
+): RouterAccountDetail[] {
+  return getRouterAccountRefs(model).map((ref) => {
+    const account =
+      accountIndex.get(normalizeAccountMatchKey(ref)) ??
+      accountIndex.get(normalizeAccountMatchKey(stripCredentialRef(ref)))
+
+    return {
+      ref,
+      label: getRouterAccountLabel(account, ref, t),
+      status: account?.status ?? "missing",
+    }
+  })
+}
+
+function getRouterAccountStatusLabel(
+  status: RouterAccountStatus,
+  t: TFunction,
+): string {
+  if (status === "missing") {
+    return t("models.router.accountMissing")
+  }
+  if (status === "connected") {
+    return t("credentials.status.connected")
+  }
+  if (status === "needs_refresh") {
+    return t("credentials.status.needsRefresh")
+  }
+  if (status === "expired") {
+    return t("credentials.status.expired")
+  }
+  return t("credentials.status.notLoggedIn")
+}
+
+function getRouterAccountStatusStyle(status: RouterAccountStatus): string {
+  if (status === "connected") {
+    return "bg-green-500/10 text-green-700 dark:text-green-300"
+  }
+  if (status === "needs_refresh") {
+    return "bg-amber-500/10 text-amber-700 dark:text-amber-300"
+  }
+  if (status === "expired" || status === "missing") {
+    return "bg-destructive/10 text-destructive"
+  }
+  return "bg-muted text-muted-foreground"
+}
+
+function getRouterAccountStatusDot(status: RouterAccountStatus): string {
+  if (status === "connected") {
+    return "bg-green-500"
+  }
+  if (status === "needs_refresh") {
+    return "bg-amber-500"
+  }
+  if (status === "expired" || status === "missing") {
+    return "bg-destructive"
+  }
+  return "bg-muted-foreground/40"
+}
+
+function getRouterSummary(
+  model: ModelInfo,
+  statusLabel: string,
+  t: TFunction,
+): {
+  mode: "fallback" | "load_balance"
+  primary: string
+  secondary: string
+} {
+  const entry = model.router?.blocks?.find(
+    (block) => block.id === model.router?.entry,
+  )
+  const fallbackBlock = entry?.fallback
+    ? model.router?.blocks?.find((block) => block.id === entry.fallback)
+    : undefined
+  const fallbackAccount =
+    fallbackBlock?.type === "account" ? fallbackBlock.account : undefined
+
+  if (entry?.type === "load_balance") {
+    const strategy = entry.strategy || "blind"
+    return {
+      mode: "load_balance",
+      primary: t("models.router.cardLoadBalance", {
+        count: entry.accounts?.length ?? 0,
+        strategy: t(`models.router.strategyName.${strategy}`),
+      }),
+      secondary: fallbackAccount
+        ? t("models.router.cardFallbackTarget", {
+            account: formatRouterAccountRef(fallbackAccount),
+          })
+        : t("models.router.cardNoFallback"),
+    }
+  }
+
+  if (entry?.type === "account") {
+    return {
+      mode: "fallback",
+      primary: t("models.router.cardFallback", {
+        account: entry.account
+          ? formatRouterAccountRef(entry.account)
+          : t("models.router.cardUnconfigured"),
+      }),
+      secondary: fallbackAccount
+        ? t("models.router.cardFallbackTarget", {
+            account: formatRouterAccountRef(fallbackAccount),
+          })
+        : t("models.router.cardNoFallback"),
+    }
+  }
+
+  return {
+    mode: "fallback",
+    primary: t("models.router.cardUnconfigured"),
+    secondary: statusLabel,
+  }
 }
 
 function ProviderIcon({ provider }: { provider: OAuthProvider }) {
@@ -263,6 +475,250 @@ function AccountCard({
   )
 }
 
+interface AccountRouterCardProps {
+  model: ModelInfo
+  accountIndex: Map<string, OAuthProviderStatus>
+  onEdit: (model: ModelInfo) => void
+  onSetDefault: (model: ModelInfo) => void
+  onDelete: (model: ModelInfo) => void
+  settingDefault: boolean
+}
+
+function AccountRouterCard({
+  model,
+  accountIndex,
+  onEdit,
+  onSetDefault,
+  onDelete,
+  settingDefault,
+}: AccountRouterCardProps) {
+  const { t } = useTranslation()
+  const statusLabel = t(`models.status.${model.status}`)
+  const routerSummary = getRouterSummary(model, statusLabel, t)
+  const accountDetails = getRouterAccountDetails(model, accountIndex, t)
+  const canSetDefault =
+    model.available &&
+    !model.is_default &&
+    !model.is_virtual &&
+    model.default_model_allowed !== false
+  const setDefaultLabel = t("models.action.setDefault")
+  const setDefaultDisabledReason = (() => {
+    if (settingDefault) return t("models.action.setDefaultDisabled.setting")
+    if (!model.available)
+      return t("models.action.setDefaultDisabled.unavailable")
+    if (model.is_default) return t("models.action.setDefaultDisabled.isDefault")
+    if (model.is_virtual) return t("models.action.setDefaultDisabled.isVirtual")
+    if (model.default_model_allowed === false) {
+      return t("models.action.setDefaultDisabled.unsupportedProvider")
+    }
+    return setDefaultLabel
+  })()
+  const deleteDisabled = model.is_default
+  const deleteLabel = t("models.router.actionDelete")
+  const deleteDisabledReason = model.is_default
+    ? t("models.action.deleteDisabled.isDefault")
+    : deleteLabel
+
+  return (
+    <article
+      className={[
+        "bg-card rounded-lg border p-4",
+        model.available ? "border-border" : "border-border/70 bg-card/60",
+      ].join(" ")}
+    >
+      <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="border-primary/30 bg-primary/10 text-primary inline-flex size-8 shrink-0 items-center justify-center rounded-lg border">
+              <IconRoute className="size-4" />
+            </span>
+            <div className="min-w-0">
+              <div className="flex min-w-0 items-center gap-2">
+                <h3 className="truncate text-sm font-semibold">
+                  {model.model_name}
+                </h3>
+                {model.is_default && (
+                  <span className="bg-primary/10 text-primary shrink-0 rounded px-1.5 py-0.5 text-[10px] leading-none font-medium">
+                    {t("models.badge.default")}
+                  </span>
+                )}
+              </div>
+              <p className="text-muted-foreground truncate text-xs">
+                {t("models.badge.router")} - {model.model}
+              </p>
+            </div>
+          </div>
+
+          <dl className="mt-4 grid gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
+            <div className="min-w-0">
+              <dt className="text-muted-foreground">
+                {t("models.router.sharedModel")}
+              </dt>
+              <dd className="text-foreground truncate font-mono">
+                {model.model}
+              </dd>
+            </div>
+            <div className="min-w-0">
+              <dt className="text-muted-foreground">
+                {t("models.router.connectedAccounts")}
+              </dt>
+              <dd className="text-foreground truncate">
+                {accountDetails.length > 0
+                  ? accountDetails.length
+                  : t("models.router.cardNoAccounts")}
+              </dd>
+            </div>
+          </dl>
+
+          <div className="mt-4 space-y-2">
+            <div className="space-y-1">
+              <p className="text-muted-foreground truncate text-xs leading-snug">
+                {routerSummary.primary}
+              </p>
+              <p className="text-muted-foreground/80 flex min-w-0 items-center gap-1 text-[11px] leading-snug">
+                {routerSummary.mode === "load_balance" ? (
+                  <IconArrowsShuffle className="size-3 shrink-0" />
+                ) : (
+                  <IconGitBranch className="size-3 shrink-0" />
+                )}
+                <span className="truncate">{routerSummary.secondary}</span>
+              </p>
+            </div>
+            <div className="flex min-w-0 flex-wrap gap-1.5">
+              {accountDetails.length > 0 ? (
+                accountDetails.map((account) => {
+                  const accountStatusLabel = getRouterAccountStatusLabel(
+                    account.status,
+                    t,
+                  )
+                  return (
+                    <span
+                      key={account.ref}
+                      className={[
+                        "inline-flex max-w-full items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium",
+                        getRouterAccountStatusStyle(account.status),
+                      ].join(" ")}
+                      title={`${account.label}: ${accountStatusLabel}`}
+                    >
+                      <span
+                        className={[
+                          "size-1.5 shrink-0 rounded-full",
+                          getRouterAccountStatusDot(account.status),
+                        ].join(" ")}
+                      />
+                      <span className="truncate">
+                        {account.label}: {accountStatusLabel}
+                      </span>
+                    </span>
+                  )
+                })
+              ) : (
+                <span className="text-muted-foreground text-[11px]">
+                  {t("models.router.cardNoAccounts")}
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 sm:shrink-0">
+          <span className="bg-muted text-muted-foreground rounded px-2 py-1 text-xs font-medium">
+            {statusLabel}
+          </span>
+
+          {model.is_default ? (
+            <span
+              className="text-primary p-1"
+              title={t("models.badge.default")}
+            >
+              <IconStarFilled className="size-3.5" />
+            </span>
+          ) : (
+            <Tooltip delayDuration={!canSetDefault || settingDefault ? 0 : 700}>
+              <TooltipTrigger asChild>
+                <span
+                  className={
+                    !canSetDefault || settingDefault
+                      ? "cursor-not-allowed"
+                      : undefined
+                  }
+                  tabIndex={!canSetDefault || settingDefault ? 0 : undefined}
+                  role={!canSetDefault || settingDefault ? "button" : undefined}
+                  aria-disabled={
+                    !canSetDefault || settingDefault ? true : undefined
+                  }
+                  aria-label={
+                    !canSetDefault || settingDefault
+                      ? setDefaultLabel
+                      : undefined
+                  }
+                  title={
+                    !canSetDefault || settingDefault
+                      ? setDefaultLabel
+                      : undefined
+                  }
+                >
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={() => onSetDefault(model)}
+                    disabled={settingDefault || !canSetDefault}
+                    aria-label={setDefaultLabel}
+                    title={setDefaultLabel}
+                  >
+                    {settingDefault ? (
+                      <IconLoader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <IconStar className="size-3.5" />
+                    )}
+                  </Button>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>{setDefaultDisabledReason}</TooltipContent>
+            </Tooltip>
+          )}
+
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => onEdit(model)}
+            aria-label={t("models.router.actionEdit")}
+            title={t("models.router.actionEdit")}
+          >
+            <IconEdit className="size-3.5" />
+          </Button>
+
+          <Tooltip delayDuration={deleteDisabled ? 0 : 700}>
+            <TooltipTrigger asChild>
+              <span
+                className={deleteDisabled ? "cursor-not-allowed" : undefined}
+                tabIndex={deleteDisabled ? 0 : undefined}
+                role={deleteDisabled ? "button" : undefined}
+                aria-disabled={deleteDisabled ? true : undefined}
+                aria-label={deleteDisabled ? deleteLabel : undefined}
+                title={deleteDisabled ? deleteLabel : undefined}
+              >
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => onDelete(model)}
+                  disabled={deleteDisabled}
+                  aria-label={deleteLabel}
+                  title={deleteLabel}
+                  className="text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                >
+                  <IconTrash className="size-3.5" />
+                </Button>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{deleteDisabledReason}</TooltipContent>
+          </Tooltip>
+        </div>
+      </div>
+    </article>
+  )
+}
+
 export function AccountsPage() {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
@@ -319,6 +775,10 @@ function AccountsHomePage() {
     () => indexCodexLimits(codexLimits),
     [codexLimits],
   )
+  const registeredAccountsByKey = useMemo(
+    () => indexRegisteredAccounts(registeredAccounts),
+    [registeredAccounts],
+  )
 
   const fetchModels = useCallback(async () => {
     setModelsLoading(true)
@@ -366,6 +826,8 @@ function AccountsHomePage() {
       return a.model_name.localeCompare(b.model_name)
     })
 
+  const hasAccountCards = registeredAccounts.length > 0 || routers.length > 0
+
   const handleAddRouter = () => {
     void navigate({ to: "/accounts/account-router/new" })
   }
@@ -405,12 +867,6 @@ function AccountsHomePage() {
       </PageHeader>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 sm:px-6">
-        <div className="pt-2">
-          <p className="text-muted-foreground text-sm">
-            {t("accounts.description")}
-          </p>
-        </div>
-
         {error && (
           <div className="text-destructive bg-destructive/10 mt-4 rounded-lg px-4 py-3 text-sm">
             {error}
@@ -430,7 +886,7 @@ function AccountsHomePage() {
               <IconLoader2 className="size-4 animate-spin" />
               {t("accounts.loading")}
             </div>
-          ) : registeredAccounts.length > 0 ? (
+          ) : hasAccountCards || modelsLoading || modelsError ? (
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
               {registeredAccounts.map((account) => (
                 <AccountCard
@@ -445,6 +901,46 @@ function AccountsHomePage() {
                   onAskLogout={askLogout}
                 />
               ))}
+
+              {modelsLoading && (
+                <article className="bg-card text-muted-foreground flex min-h-32 items-center gap-2 rounded-lg border p-4 text-sm">
+                  <IconLoader2 className="size-4 animate-spin" />
+                  {t("models.router.loading")}
+                </article>
+              )}
+
+              {modelsError && (
+                <article className="bg-destructive/10 rounded-lg border p-4 text-sm xl:col-span-2">
+                  <p className="text-destructive">{modelsError}</p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="mt-3"
+                    onClick={() => void fetchModels()}
+                  >
+                    {t("models.retry")}
+                  </Button>
+                </article>
+              )}
+
+              {!modelsLoading &&
+                !modelsError &&
+                routers.map((router) => (
+                  <AccountRouterCard
+                    key={router.index}
+                    model={router}
+                    accountIndex={registeredAccountsByKey}
+                    onEdit={(item) => {
+                      void navigate({
+                        to: "/accounts/account-router/$index",
+                        params: { index: String(item.index) },
+                      })
+                    }}
+                    onSetDefault={(item) => void handleSetDefault(item)}
+                    onDelete={setDeletingRouter}
+                    settingDefault={settingDefaultIndex === router.index}
+                  />
+                ))}
             </div>
           ) : (
             <div className="flex min-h-64 items-center justify-center">
@@ -467,62 +963,6 @@ function AccountsHomePage() {
                   {t("accounts.actions.add")}
                 </Button>
               </div>
-            </div>
-          )}
-        </section>
-
-        <section className="border-border/70 border-t py-5">
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-semibold">
-                {t("models.router.sectionTitle")}
-              </h3>
-              <p className="text-muted-foreground mt-1 text-xs">
-                {t("models.router.sectionDescription")}
-              </p>
-            </div>
-            {modelsLoading && (
-              <IconLoader2 className="text-muted-foreground size-4 animate-spin" />
-            )}
-          </div>
-
-          {modelsError && (
-            <div className="bg-destructive/10 rounded-lg px-4 py-3 text-sm">
-              <p className="text-destructive">{modelsError}</p>
-              <Button
-                size="sm"
-                variant="outline"
-                className="mt-3"
-                onClick={() => void fetchModels()}
-              >
-                {t("models.retry")}
-              </Button>
-            </div>
-          )}
-
-          {!modelsLoading && !modelsError && routers.length === 0 && (
-            <p className="text-muted-foreground text-sm">
-              {t("models.router.empty")}
-            </p>
-          )}
-
-          {!modelsLoading && !modelsError && routers.length > 0 && (
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-              {routers.map((router) => (
-                <ModelCard
-                  key={router.index}
-                  model={router}
-                  onEdit={(item) => {
-                    void navigate({
-                      to: "/accounts/account-router/$index",
-                      params: { index: String(item.index) },
-                    })
-                  }}
-                  onSetDefault={(item) => void handleSetDefault(item)}
-                  onDelete={setDeletingRouter}
-                  settingDefault={settingDefaultIndex === router.index}
-                />
-              ))}
             </div>
           )}
         </section>

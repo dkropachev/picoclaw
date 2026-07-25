@@ -468,6 +468,7 @@ interface MockLauncherApiOptions {
   codexAccountLimits?: unknown
   fetchModelEmptyCredentials?: string[]
   fetchModelFailures?: Record<string, string>
+  modelResponse?: unknown
   nullableWorkflowPayloads?: boolean
   oauthProviders?: unknown[]
 }
@@ -839,7 +840,7 @@ async function mockLauncherApis(
             },
           })
         case "/api/models":
-          return json(route, modelResponse)
+          return json(route, options.modelResponse ?? modelResponse)
         case "/api/models/catalog":
           return json(route, { entries: [], total: 0 })
         case "/api/oauth/providers":
@@ -1365,6 +1366,11 @@ test("accounts page lists registered accounts and opens onboarding", async ({
   })
 
   await expect(page.getByRole("heading", { name: "work" })).toBeVisible()
+  await expect(
+    page.getByText(
+      "Manage registered provider accounts and add named accounts for supported login methods.",
+    ),
+  ).toHaveCount(0)
   await expect(page.getByText("OpenAI oauth (pro)")).toBeVisible()
   await expect(page.getByText("openai:work")).toBeVisible()
   await expect(page.getByText("Codex Account Limits")).not.toBeVisible()
@@ -1381,6 +1387,98 @@ test("accounts page lists registered accounts and opens onboarding", async ({
   ).toBeVisible()
   await expect(page.getByPlaceholder("work")).toBeVisible()
   await expect(page.getByText("OAuth logins can infer this")).toBeVisible()
+  expect(errors).toEqual([])
+})
+
+test("accounts page shows account routers beside registered accounts", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+
+  await gotoMockedRoute(page, "/accounts", {
+    modelResponse: {
+      ...modelResponse,
+      models: [
+        ...modelResponse.models,
+        {
+          index: 2,
+          model_name: "router-main",
+          provider: "router",
+          model: "gpt-4o",
+          api_key: "",
+          enabled: true,
+          available: true,
+          status: "available",
+          is_default: false,
+          is_virtual: false,
+          default_model_allowed: true,
+          router: {
+            enabled: true,
+            entry: "pool",
+            blocks: [
+              {
+                id: "pool",
+                type: "load_balance",
+                accounts: [
+                  "credential:openai:work",
+                  "credential:openai:backup",
+                ],
+                strategy: "blind",
+              },
+            ],
+          },
+        },
+      ],
+      total: 3,
+    },
+    oauthProviders: [
+      {
+        provider: "openai",
+        credential_id: "openai",
+        display_name: "OpenAI",
+        methods: ["browser", "device_code", "token"],
+        logged_in: true,
+        status: "connected",
+        credentials: [
+          {
+            provider: "openai",
+            credential_id: "openai:work",
+            display_name: "OpenAI",
+            methods: ["browser", "device_code", "token"],
+            logged_in: true,
+            status: "connected",
+            auth_method: "oauth",
+          },
+          {
+            provider: "openai",
+            credential_id: "openai:backup",
+            display_name: "OpenAI",
+            methods: ["browser", "device_code", "token"],
+            logged_in: true,
+            status: "needs_refresh",
+            auth_method: "oauth",
+          },
+        ],
+      },
+    ],
+  })
+
+  await expect(page.getByRole("heading", { name: "router-main" })).toBeVisible()
+  await expect(page.getByText("Account Router - gpt-4o")).toBeVisible()
+  await expect(page.getByText("Routes across 2 accounts")).toBeVisible()
+  await expect(page.getByText("work: Connected")).toBeVisible()
+  await expect(page.getByText("backup: Needs refresh")).toBeVisible()
+  await expect(
+    page.getByRole("heading", { name: "Account Routers" }),
+  ).toHaveCount(0)
+  await expect(
+    page.getByText(
+      "Joint accounts that route requests through connected accounts.",
+    ),
+  ).toHaveCount(0)
+  await expect(page.getByText("No account routers configured.")).toHaveCount(0)
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
 })
 

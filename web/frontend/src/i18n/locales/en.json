@@ -265,7 +265,6 @@
     }
   },
   "accounts": {
-    "description": "Manage registered provider accounts and add named accounts for supported login methods.",
     "loading": "Loading accounts...",
     "defaultName": "Default",
     "actions": {
@@ -342,13 +341,11 @@
     },
     "router": {
       "button": "Account Router",
+      "loading": "Loading account routers...",
       "title": "Create Account Router",
       "editPageTitle": "Edit {{name}}",
       "editTitle": "Configure {{name}}",
       "description": "Build a joint account from existing accounts and one model they all support.",
-      "sectionTitle": "Account Routers",
-      "sectionDescription": "Joint accounts that route requests through connected accounts.",
-      "empty": "No account routers configured.",
       "routerName": "Joint Account Name",
       "nameHint": "Name for this joint account in chat.",
       "sharedModel": "Shared Model",
@@ -454,6 +451,7 @@
       "cardFallback": "Primary account: {{account}}",
       "cardFallbackTarget": "Fallback: {{account}}",
       "cardNoFallback": "No fallback configured",
+      "cardNoAccounts": "No accounts referenced",
       "cardUnconfigured": "Account router incomplete"
     },
     "add": {
