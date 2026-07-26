@@ -510,9 +510,21 @@ const (
 	AccountRouterCredentialAccountPrefix = "credential:"
 	AccountRouterBlockTypeAccount        = "account"
 	AccountRouterBlockTypeLoadBalance    = "load_balance"
+	AccountRouterBlockTypeBranch         = "branch"
 	AccountRouterStrategyBlind           = "blind"
 	AccountRouterStrategyTokensSpent     = "tokens_spent"
 	AccountRouterStrategyClosestLimit    = "closest_limit"
+	AccountRouterBranchOpGT              = "gt"
+	AccountRouterBranchOpGTE             = "gte"
+	AccountRouterBranchOpLT              = "lt"
+	AccountRouterBranchOpLTE             = "lte"
+	AccountRouterBranchOpEQ              = "eq"
+	AccountRouterBranchOpNEQ             = "neq"
+	AccountRouterMathAdd                 = "add"
+	AccountRouterMathSubtract            = "subtract"
+	AccountRouterMathMultiply            = "multiply"
+	AccountRouterMathDivide              = "divide"
+	AccountRouterMathModulo              = "modulo"
 	DefaultAccountRouterRefreshInterval  = 60
 	defaultAccountRouterMaxFallbackDepth = 64
 )
@@ -570,13 +582,31 @@ type AccountRouterConfig struct {
 }
 
 type AccountRouterBlock struct {
-	ID                     string   `json:"id"                                 yaml:"id"`
-	Type                   string   `json:"type"                               yaml:"type"`
-	Account                string   `json:"account,omitempty"                  yaml:"account,omitempty"`
-	Accounts               []string `json:"accounts,omitempty"                 yaml:"accounts,omitempty"`
-	Fallback               string   `json:"fallback,omitempty"                 yaml:"fallback,omitempty"`
-	Strategy               string   `json:"strategy,omitempty"                 yaml:"strategy,omitempty"`
-	RefreshIntervalSeconds int      `json:"refresh_interval_seconds,omitempty" yaml:"refresh_interval_seconds,omitempty"`
+	ID                     string                  `json:"id"                                 yaml:"id"`
+	Type                   string                  `json:"type"                               yaml:"type"`
+	Account                string                  `json:"account,omitempty"                  yaml:"account,omitempty"`
+	Accounts               []string                `json:"accounts,omitempty"                 yaml:"accounts,omitempty"`
+	Fallback               string                  `json:"fallback,omitempty"                 yaml:"fallback,omitempty"`
+	Strategy               string                  `json:"strategy,omitempty"                 yaml:"strategy,omitempty"`
+	RefreshIntervalSeconds int                     `json:"refresh_interval_seconds,omitempty" yaml:"refresh_interval_seconds,omitempty"`
+	Condition              *AccountRouterCondition `json:"condition,omitempty"                yaml:"condition,omitempty"`
+	Then                   string                  `json:"then,omitempty"                     yaml:"then,omitempty"`
+	Else                   string                  `json:"else,omitempty"                     yaml:"else,omitempty"`
+}
+
+type AccountRouterCondition struct {
+	Left     AccountRouterExpression `json:"left"`
+	Operator string                  `json:"operator"`
+	Right    AccountRouterExpression `json:"right"`
+}
+
+type AccountRouterExpression struct {
+	Account string                   `json:"account,omitempty"`
+	Metric  string                   `json:"metric,omitempty"`
+	Value   *float64                 `json:"value,omitempty"`
+	Op      string                   `json:"op,omitempty"`
+	Left    *AccountRouterExpression `json:"left,omitempty"`
+	Right   *AccountRouterExpression `json:"right,omitempty"`
 }
 
 func (r *AccountRouterConfig) EffectiveRefreshIntervalSeconds() int {
@@ -1125,6 +1155,11 @@ func (r *AccountRouterConfig) validate(requireName bool) error {
 	if requireName && strings.TrimSpace(r.Model) == "" {
 		return fmt.Errorf("router.model is required")
 	}
+	if strings.TrimSpace(r.Name) != "" &&
+		strings.TrimSpace(r.Model) != "" &&
+		strings.TrimSpace(r.Name) == strings.TrimSpace(r.Model) {
+		return fmt.Errorf("router.model must reference an underlying model, not the router itself")
+	}
 	if !r.Enabled {
 		return fmt.Errorf("router must be enabled")
 	}
@@ -1173,18 +1208,75 @@ func (r *AccountRouterConfig) validate(requireName bool) error {
 			default:
 				return fmt.Errorf("router.blocks[%d].strategy %q is unsupported", i, strategy)
 			}
+		case AccountRouterBlockTypeBranch:
+			if block.Condition == nil {
+				return fmt.Errorf("router.blocks[%d].condition is required", i)
+			}
+			if err := validateAccountRouterCondition(block.Condition); err != nil {
+				return fmt.Errorf("router.blocks[%d].condition: %w", i, err)
+			}
+			if strings.TrimSpace(block.Then) == "" {
+				return fmt.Errorf("router.blocks[%d].then is required", i)
+			}
+			if strings.TrimSpace(block.Else) == "" {
+				return fmt.Errorf("router.blocks[%d].else is required", i)
+			}
 		default:
 			return fmt.Errorf("router.blocks[%d].type %q is unsupported", i, block.Type)
 		}
-		if fallback := strings.TrimSpace(block.Fallback); fallback != "" && !seen[fallback] {
-			return fmt.Errorf(
-				"router.blocks[%d].fallback %q does not reference a block",
-				i,
-				fallback,
-			)
+		for label, next := range accountRouterBlockNextRefs(block) {
+			if next != "" && !seen[next] {
+				return fmt.Errorf("router.blocks[%d].%s %q does not reference a block", i, label, next)
+			}
 		}
 	}
 	return validateAccountRouterFallbackAcyclic(entry, r.Blocks)
+}
+
+func validateAccountRouterCondition(condition *AccountRouterCondition) error {
+	switch strings.TrimSpace(condition.Operator) {
+	case AccountRouterBranchOpGT, AccountRouterBranchOpGTE, AccountRouterBranchOpLT,
+		AccountRouterBranchOpLTE, AccountRouterBranchOpEQ, AccountRouterBranchOpNEQ:
+	default:
+		return fmt.Errorf("operator %q is unsupported", condition.Operator)
+	}
+	if err := validateAccountRouterExpression(condition.Left); err != nil {
+		return fmt.Errorf("left: %w", err)
+	}
+	if err := validateAccountRouterExpression(condition.Right); err != nil {
+		return fmt.Errorf("right: %w", err)
+	}
+	return nil
+}
+
+func validateAccountRouterExpression(expr AccountRouterExpression) error {
+	if strings.TrimSpace(expr.Op) != "" {
+		switch strings.TrimSpace(expr.Op) {
+		case AccountRouterMathAdd, AccountRouterMathSubtract, AccountRouterMathMultiply,
+			AccountRouterMathDivide, AccountRouterMathModulo:
+		default:
+			return fmt.Errorf("math op %q is unsupported", expr.Op)
+		}
+		if expr.Left == nil || expr.Right == nil {
+			return fmt.Errorf("math expression requires left and right")
+		}
+		if err := validateAccountRouterExpression(*expr.Left); err != nil {
+			return fmt.Errorf("left: %w", err)
+		}
+		if err := validateAccountRouterExpression(*expr.Right); err != nil {
+			return fmt.Errorf("right: %w", err)
+		}
+		return nil
+	}
+	hasValue := expr.Value != nil
+	hasMetric := strings.TrimSpace(expr.Metric) != ""
+	if hasValue == hasMetric {
+		return fmt.Errorf("expression must define exactly one of value or metric")
+	}
+	if hasMetric && strings.TrimSpace(expr.Account) == "" {
+		return fmt.Errorf("metric expression requires account")
+	}
+	return nil
 }
 
 func nonEmptyStrings(values []string) []string {
@@ -1236,8 +1328,10 @@ func validateAccountRouterFallbackAcyclic(entry string, blocks []AccountRouterBl
 			return nil
 		}
 		visiting[id] = true
-		if err := walk(block.Fallback, depth+1); err != nil {
-			return err
+		for _, next := range accountRouterBlockNextRefs(block) {
+			if err := walk(next, depth+1); err != nil {
+				return err
+			}
 		}
 		visiting[id] = false
 		visited[id] = true
@@ -2497,9 +2591,42 @@ func accountRouterBlockAccounts(block AccountRouterBlock) []string {
 		return []string{block.Account}
 	case AccountRouterBlockTypeLoadBalance:
 		return block.Accounts
+	case AccountRouterBlockTypeBranch:
+		var accounts []string
+		if block.Condition != nil {
+			accounts = append(accounts, accountRouterExpressionAccounts(block.Condition.Left)...)
+			accounts = append(accounts, accountRouterExpressionAccounts(block.Condition.Right)...)
+		}
+		return accounts
 	default:
 		return nil
 	}
+}
+
+func accountRouterExpressionAccounts(expr AccountRouterExpression) []string {
+	var accounts []string
+	if account := strings.TrimSpace(expr.Account); account != "" {
+		accounts = append(accounts, account)
+	}
+	if expr.Left != nil {
+		accounts = append(accounts, accountRouterExpressionAccounts(*expr.Left)...)
+	}
+	if expr.Right != nil {
+		accounts = append(accounts, accountRouterExpressionAccounts(*expr.Right)...)
+	}
+	return accounts
+}
+
+func accountRouterBlockNextRefs(block AccountRouterBlock) map[string]string {
+	refs := map[string]string{}
+	if fallback := strings.TrimSpace(block.Fallback); fallback != "" {
+		refs["fallback"] = fallback
+	}
+	if strings.TrimSpace(block.Type) == AccountRouterBlockTypeBranch {
+		refs["then"] = strings.TrimSpace(block.Then)
+		refs["else"] = strings.TrimSpace(block.Else)
+	}
+	return refs
 }
 
 func cloneAccountRouterConfig(in *AccountRouterConfig) *AccountRouterConfig {
