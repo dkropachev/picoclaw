@@ -225,10 +225,8 @@ export function ChatPage({
   const {
     defaultModelName,
     hasAvailableModels,
+    accountModels,
     accountRouterModels,
-    apiKeyModels,
-    oauthModels,
-    localModels,
     handleSetDefault,
   } = useChatModels({ isConnected: isGatewayRunning })
   const hasDefaultModel = Boolean(defaultModelName)
@@ -415,10 +413,8 @@ export function ChatPage({
             {hasAvailableModels && (
               <ModelSelector
                 defaultModelName={defaultModelName}
+                accountModels={accountModels}
                 accountRouterModels={accountRouterModels}
-                apiKeyModels={apiKeyModels}
-                oauthModels={oauthModels}
-                localModels={localModels}
                 onValueChange={handleSetDefault}
               />
             )}

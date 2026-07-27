@@ -14,19 +14,15 @@ import {
 
 interface ModelSelectorProps {
   defaultModelName: string
+  accountModels: ModelInfo[]
   accountRouterModels: ModelInfo[]
-  apiKeyModels: ModelInfo[]
-  oauthModels: ModelInfo[]
-  localModels: ModelInfo[]
   onValueChange: (modelName: string) => void
 }
 
 export function ModelSelector({
   defaultModelName,
+  accountModels,
   accountRouterModels,
-  apiKeyModels,
-  oauthModels,
-  localModels,
   onValueChange,
 }: ModelSelectorProps) {
   const { t } = useTranslation()
@@ -41,55 +37,24 @@ export function ModelSelector({
         <SelectValue placeholder={t("chat.noModel")} />
       </SelectTrigger>
       <SelectContent position="popper" align="start">
+        {accountModels.length > 0 && (
+          <SelectGroup>
+            <SelectLabel>{t("chat.modelGroup.accounts")}</SelectLabel>
+            {accountModels.map((model) => (
+              <SelectItem key={model.index} value={model.model_name}>
+                {model.model_name}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        )}
+        {accountModels.length > 0 && accountRouterModels.length > 0 && (
+          <SelectSeparator />
+        )}
+
         {accountRouterModels.length > 0 && (
           <SelectGroup>
-            <SelectLabel>{t("chat.modelGroup.accountRouter")}</SelectLabel>
+            <SelectLabel>{t("chat.modelGroup.accountRouters")}</SelectLabel>
             {accountRouterModels.map((model) => (
-              <SelectItem key={model.index} value={model.model_name}>
-                {model.model_name}
-              </SelectItem>
-            ))}
-          </SelectGroup>
-        )}
-        {accountRouterModels.length > 0 &&
-          (apiKeyModels.length > 0 ||
-            oauthModels.length > 0 ||
-            localModels.length > 0) && <SelectSeparator />}
-
-        {apiKeyModels.length > 0 && (
-          <SelectGroup>
-            <SelectLabel>{t("chat.modelGroup.apikey")}</SelectLabel>
-            {apiKeyModels.map((model) => (
-              <SelectItem key={model.index} value={model.model_name}>
-                {model.model_name}
-              </SelectItem>
-            ))}
-          </SelectGroup>
-        )}
-        {apiKeyModels.length > 0 &&
-          (oauthModels.length > 0 || localModels.length > 0) && (
-            <SelectSeparator />
-          )}
-
-        {oauthModels.length > 0 && (
-          <SelectGroup>
-            <SelectLabel>{t("chat.modelGroup.oauth")}</SelectLabel>
-            {oauthModels.map((model) => (
-              <SelectItem key={model.index} value={model.model_name}>
-                {model.model_name}
-              </SelectItem>
-            ))}
-          </SelectGroup>
-        )}
-        {oauthModels.length > 0 &&
-          (localModels.length > 0 || apiKeyModels.length > 0) && (
-            <SelectSeparator />
-          )}
-
-        {localModels.length > 0 && (
-          <SelectGroup>
-            <SelectLabel>{t("chat.modelGroup.local")}</SelectLabel>
-            {localModels.map((model) => (
               <SelectItem key={model.index} value={model.model_name}>
                 {model.model_name}
               </SelectItem>

@@ -121,10 +121,8 @@
       "notRunningDescription": "Start the gateway service to begin chatting. Use the Start Gateway button in the top bar."
     },
     "modelGroup": {
-      "accountRouter": "Account Routers",
-      "apikey": "API Key",
-      "oauth": "OAuth",
-      "local": "Local"
+      "accounts": "Accounts",
+      "accountRouters": "Account Routers"
     }
   },
   "header": {

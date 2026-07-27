@@ -117,6 +117,8 @@ views without changing the channel delivery contract.
 - Platform media delivery falls back to text when supported by the channel.
 - Disabled or disconnected chat composer states expose actionable text without
   relying on placeholder-only or title-only labels.
+- The chat model selector exposes only account-backed models and account-router
+  aliases, grouped as Accounts and Account Routers.
 - Chat messages, code blocks, model selectors, history buttons, and context
   controls do not create horizontal overflow on narrow mobile screens.
 
