@@ -1301,8 +1301,27 @@ test("accounts page lists registered accounts and opens onboarding", async ({
   page,
 }) => {
   const errors = collectPageErrors(page)
-
+  const accountModel = {
+    index: 2,
+    model_name: "gpt-4o-work",
+    provider: "openai",
+    model: "gpt-4o",
+    api_key: "",
+    enabled: true,
+    available: true,
+    status: "available",
+    is_default: false,
+    is_virtual: false,
+    default_model_allowed: true,
+    auth_method: "oauth",
+    credential_id: "openai:work",
+  }
   await gotoMockedRoute(page, "/accounts", {
+    modelResponse: {
+      ...modelResponse,
+      models: [...modelResponse.models, accountModel],
+      total: modelResponse.total + 1,
+    },
     oauthProviders: [
       {
         provider: "openai",
@@ -1397,7 +1416,11 @@ test("accounts page lists registered accounts and opens onboarding", async ({
   await expect(page.getByText("personal@example.test")).not.toBeVisible()
   await expect(page.getByText("Anthropic")).not.toBeVisible()
   await expect(page.getByText("gpt-4o-mini")).toHaveCount(0)
-  await expect(page.getByText("gpt-4o")).toHaveCount(0)
+
+  const accountCard = page.locator("article").filter({
+    has: page.getByRole("heading", { name: "work" }),
+  })
+  await expect(accountCard.getByRole("combobox")).toHaveCount(0)
 
   await page.getByRole("button", { name: "Add Account" }).first().click()
   await expect(

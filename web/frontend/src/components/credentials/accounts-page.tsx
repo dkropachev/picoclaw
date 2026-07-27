@@ -786,6 +786,7 @@ function AccountsHomePage() {
     if (!a.is_default && b.is_default) return 1
     return a.model_name.localeCompare(b.model_name)
   })
+
   const hasAccountCards = registeredAccounts.length > 0 || routers.length > 0
 
   const handleAddRouter = () => {

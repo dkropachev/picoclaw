@@ -29,6 +29,14 @@ function isCredentialAccountModel(model: ModelInfo): boolean {
   return model.model_name.startsWith("credential:")
 }
 
+function isAccountModel(model: ModelInfo): boolean {
+  return (
+    !isAccountRouterModel(model) &&
+    Boolean(model.auth_method) &&
+    !isLocalModel(model)
+  )
+}
+
 export function useChatModels({ isConnected }: UseChatModelsOptions) {
   const { t } = useTranslation()
   const [modelList, setModelList] = useState<ModelInfo[]>([])
@@ -105,35 +113,8 @@ export function useChatModels({ isConnected }: UseChatModelsOptions) {
     [modelList],
   )
 
-  const hasAvailableModels = useMemo(
-    () => defaultSelectableModels.length > 0,
-    [defaultSelectableModels],
-  )
-
-  const oauthModels = useMemo(
-    () =>
-      defaultSelectableModels.filter(
-        (m) => m.auth_method === "oauth" && !isAccountRouterModel(m),
-      ),
-    [defaultSelectableModels],
-  )
-
-  const localModels = useMemo(
-    () =>
-      defaultSelectableModels.filter(
-        (m) => isLocalModel(m) && !isAccountRouterModel(m),
-      ),
-    [defaultSelectableModels],
-  )
-
-  const apiKeyModels = useMemo(
-    () =>
-      defaultSelectableModels.filter(
-        (m) =>
-          m.auth_method !== "oauth" &&
-          !isLocalModel(m) &&
-          !isAccountRouterModel(m),
-      ),
+  const accountModels = useMemo(
+    () => defaultSelectableModels.filter(isAccountModel),
     [defaultSelectableModels],
   )
 
@@ -142,13 +123,14 @@ export function useChatModels({ isConnected }: UseChatModelsOptions) {
     [defaultSelectableModels],
   )
 
+  const hasAvailableModels =
+    accountModels.length > 0 || accountRouterModels.length > 0
+
   return {
     defaultModelName,
     hasAvailableModels,
+    accountModels,
     accountRouterModels,
-    apiKeyModels,
-    oauthModels,
-    localModels,
     handleSetDefault,
   }
 }

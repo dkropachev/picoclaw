@@ -96,15 +96,40 @@ describe("useChatModels", () => {
       expect(result.current.defaultModelName).toBe("router-1")
     })
 
+    expect(result.current.accountModels.map((m) => m.model_name)).toEqual([
+      "credential:openai:work",
+      "credential:github-copilot:gh-copilot",
+    ])
     expect(result.current.accountRouterModels.map((m) => m.model_name)).toEqual(
       ["router-1"],
     )
-    expect(result.current.apiKeyModels.map((m) => m.model_name)).toEqual([
-      "gpt-api",
-      "credential:github-copilot:gh-copilot",
-    ])
-    expect(result.current.oauthModels.map((m) => m.model_name)).toEqual([
-      "credential:openai:work",
-    ])
+    expect(result.current.hasAvailableModels).toBe(true)
+  })
+
+  it("does not expose API-key or local models in chat selector groups", async () => {
+    vi.mocked(getModels).mockResolvedValue({
+      models: [
+        model({ index: 0, model_name: "gpt-api", provider: "openai" }),
+        model({
+          index: 1,
+          model_name: "local-model",
+          auth_method: "local",
+          api_base: "http://localhost:11434",
+        }),
+      ],
+      total: 2,
+      default_model: "gpt-api",
+      provider_options: [],
+    })
+
+    const { result } = renderHook(() => useChatModels({ isConnected: true }))
+
+    await waitFor(() => {
+      expect(result.current.defaultModelName).toBe("gpt-api")
+    })
+
+    expect(result.current.accountModels).toEqual([])
+    expect(result.current.accountRouterModels).toEqual([])
+    expect(result.current.hasAvailableModels).toBe(false)
   })
 })
