@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as ThreadsRouteImport } from './routes/threads'
+import { Route as ModelsRouteImport } from './routes/models'
 import { Route as LogsRouteImport } from './routes/logs'
 import { Route as LauncherSetupRouteImport } from './routes/launcher-setup'
 import { Route as LauncherLoginRouteImport } from './routes/launcher-login'
@@ -35,6 +36,11 @@ import { Route as AccountsAccountRouterIndexRouteImport } from './routes/account
 const ThreadsRoute = ThreadsRouteImport.update({
   id: '/threads',
   path: '/threads',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ModelsRoute = ModelsRouteImport.update({
+  id: '/models',
+  path: '/models',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LogsRoute = LogsRouteImport.update({
@@ -154,6 +160,7 @@ export interface FileRoutesByFullPath {
   '/launcher-login': typeof LauncherLoginRoute
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
+  '/models': typeof ModelsRoute
   '/threads': typeof ThreadsRouteWithChildren
   '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
   '/agent/hub': typeof AgentHubRoute
@@ -178,6 +185,7 @@ export interface FileRoutesByTo {
   '/launcher-login': typeof LauncherLoginRoute
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
+  '/models': typeof ModelsRoute
   '/threads': typeof ThreadsRouteWithChildren
   '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
   '/agent/hub': typeof AgentHubRoute
@@ -203,6 +211,7 @@ export interface FileRoutesById {
   '/launcher-login': typeof LauncherLoginRoute
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
+  '/models': typeof ModelsRoute
   '/threads': typeof ThreadsRouteWithChildren
   '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
   '/agent/hub': typeof AgentHubRoute
@@ -229,6 +238,7 @@ export interface FileRouteTypes {
     | '/launcher-login'
     | '/launcher-setup'
     | '/logs'
+    | '/models'
     | '/threads'
     | '/agent/git-workspaces'
     | '/agent/hub'
@@ -253,6 +263,7 @@ export interface FileRouteTypes {
     | '/launcher-login'
     | '/launcher-setup'
     | '/logs'
+    | '/models'
     | '/threads'
     | '/agent/git-workspaces'
     | '/agent/hub'
@@ -277,6 +288,7 @@ export interface FileRouteTypes {
     | '/launcher-login'
     | '/launcher-setup'
     | '/logs'
+    | '/models'
     | '/threads'
     | '/agent/git-workspaces'
     | '/agent/hub'
@@ -302,6 +314,7 @@ export interface RootRouteChildren {
   LauncherLoginRoute: typeof LauncherLoginRoute
   LauncherSetupRoute: typeof LauncherSetupRoute
   LogsRoute: typeof LogsRoute
+  ModelsRoute: typeof ModelsRoute
   ThreadsRoute: typeof ThreadsRouteWithChildren
 }
 
@@ -312,6 +325,13 @@ declare module '@tanstack/react-router' {
       path: '/threads'
       fullPath: '/threads'
       preLoaderRoute: typeof ThreadsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/models': {
+      id: '/models'
+      path: '/models'
+      fullPath: '/models'
+      preLoaderRoute: typeof ModelsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/logs': {
@@ -555,6 +575,7 @@ const rootRouteChildren: RootRouteChildren = {
   LauncherLoginRoute: LauncherLoginRoute,
   LauncherSetupRoute: LauncherSetupRoute,
   LogsRoute: LogsRoute,
+  ModelsRoute: ModelsRoute,
   ThreadsRoute: ThreadsRouteWithChildren,
 }
 export const routeTree = rootRouteImport

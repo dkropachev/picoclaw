@@ -131,7 +131,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 		ts.ingestMessage(ctx, p.al, rootMsg)
 	}
 
-	activeCandidates, activeModel, usedLight, routerSelection := p.al.selectCandidates(
+	activeCandidates, activeModel, usedLight, activeAccountRouter, routerSelection := p.al.selectCandidates(
 		ts.agent,
 		ts.userMessage,
 		messages,
@@ -150,7 +150,13 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	}
 	activeModelName = resolvedCandidateModelName(activeCandidates, activeModelName)
 	if override := strings.TrimSpace(ts.opts.ModelNameOverride); override != "" {
-		activeCandidates, activeModel, activeModelName = workflowOverrideModelCandidates(p.Cfg, ts.agent, override)
+		activeCandidates, activeModel, activeModelName, activeAccountRouter, routerSelection = p.al.selectOverrideCandidates(
+			ts.agent,
+			override,
+			ts.opts.ModelIDOverride,
+			ts.sessionKey,
+			routerSelectReason,
+		)
 		activeProvider = workflowProviderForCandidates(ts.agent, activeProvider, activeCandidates)
 		usedLight = false
 	}
@@ -175,6 +181,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	exec.llmModelName = activeModelName
 	exec.activeProvider = activeProvider
 	exec.usedLight = usedLight
+	exec.accountRouter = activeAccountRouter
 	exec.routerSelection = routerSelection
 
 	return exec, nil

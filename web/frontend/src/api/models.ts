@@ -14,6 +14,7 @@ export interface ModelInfo {
   auth_method?: string
   credential_id?: string
   router?: AccountRouterConfig
+  model_router?: ModelRouterConfig
   // Advanced fields
   connect_mode?: string
   workspace?: string
@@ -54,6 +55,27 @@ export interface AccountRouterBlock {
   fallback?: string
   strategy?: "blind" | "tokens_spent" | "closest_limit"
   refresh_interval_seconds?: number
+}
+
+export interface ModelRouterConfig {
+  name?: string
+  enabled?: boolean
+  entry?: string
+  blocks?: ModelRouterBlock[]
+}
+
+export interface ModelRouterBlock {
+  id: string
+  type: "model" | "rules"
+  model?: string
+  rules?: ModelRouterRule[]
+  fallback?: string
+}
+
+export interface ModelRouterRule {
+  match: "contains" | "regex" | "has_code" | "has_media"
+  value?: string
+  target: string
 }
 
 export interface ModelProviderOption {

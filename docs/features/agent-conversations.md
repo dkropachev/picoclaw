@@ -24,7 +24,7 @@ auxiliary to this capability.
 | --- | --- | --- | --- |
 | `FR-AGENT-001` | MUST | A turn starts from normalized input and creates a scoped runtime context containing agent, session, channel, chat, sender, turn ID, and media metadata when available. | Downstream tools, events, and persistence need stable context. |
 | `FR-AGENT-002` | MUST | Prompt construction includes configured identity, workspace instructions, memory, session history, skills, and tool definitions unless the turn profile disables a block. | Current behavior depends on composable prompt contributors. |
-| `FR-AGENT-003` | MUST | Model resolution uses configured agent model candidates first, then defaults, then model list fallbacks, preserving provider/model identity for retries; router aliases expand credential-account blocks and load-balanced blocks to selected account candidates before provider execution and record fallback outcomes by stable account identity; Codex OAuth and GitHub Copilot credential-backed requests preserve any non-empty requested model name and only substitute the provider default for an empty model; GitHub Copilot credential-backed entries resolve the selected stored credential into a direct HTTPS API client while non-credential entries keep the local bridge path. | Multi-provider behavior must be reproducible and provider-side model rollout names must not be rewritten locally. |
+| `FR-AGENT-003` | MUST | Model resolution uses configured agent model candidates first, then defaults, then model list fallbacks, preserving provider/model identity for retries; model-router aliases evaluate the current turn and select a configured model or account-router target before provider execution; router aliases expand credential-account blocks and load-balanced blocks to selected account candidates before provider execution and record fallback outcomes by stable account identity; Pico chat may provide a per-turn selected account and upstream model ID, which override only that turn's candidate selection; Codex OAuth and GitHub Copilot credential-backed requests preserve any non-empty requested model name and only substitute the provider default for an empty model; GitHub Copilot credential-backed entries resolve the selected stored credential into a direct HTTPS API client while non-credential entries keep the local bridge path. | Multi-provider behavior must be reproducible and provider-side model rollout names must not be rewritten locally. |
 | `FR-AGENT-004` | MUST | LLM responses with tool calls execute registered tools until the configured maximum tool iterations is reached or no tool calls remain. | Prevents unbounded loops while preserving agent tool use. |
 | `FR-AGENT-005` | MUST | Tool execution errors are returned to the model or user in normalized error text without panicking the turn loop. | Tool failures are normal runtime outcomes. |
 | `FR-AGENT-006` | MUST | Streaming output emits deltas when supported and still produces a final assistant message for session storage. | Streaming and durable history must stay consistent. |
@@ -126,6 +126,10 @@ context compression, and records fallback outcomes without changing provider
 prompt serialization. Credential-backed GitHub Copilot entries use the same
 account identity and fallback accounting as other provider accounts while
 non-credential GitHub Copilot entries continue to represent the local bridge.
+Model-router aliases plug into the same step before light/heavy routing and can
+target either a concrete model alias or an account-router alias. Pico chat
+account/model overrides are turn-scoped and do not rewrite persisted
+`model_list[]`, `account_routers[]`, or `model_routers[]` entries.
 
 ## Failure And Edge Cases
 

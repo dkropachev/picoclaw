@@ -337,11 +337,15 @@ export async function hydrateActiveSession() {
 interface SendChatMessageInput {
   content: string
   attachments?: ChatAttachment[]
+  modelName?: string
+  model?: string
 }
 
 export function sendChatMessage({
   content,
   attachments = [],
+  modelName,
+  model,
 }: SendChatMessageInput) {
   if (!wsRef || wsRef.readyState !== WebSocket.OPEN) {
     console.warn("WebSocket not connected")
@@ -379,6 +383,14 @@ export function sendChatMessage({
     const payload: Record<string, unknown> = {
       content: normalizedContent,
       media: normalizedAttachments.map((attachment) => attachment.url),
+    }
+    const selectedModelName = modelName?.trim()
+    const selectedModel = model?.trim()
+    if (selectedModelName) {
+      payload.model_name = selectedModelName
+    }
+    if (selectedModel) {
+      payload.model = selectedModel
     }
 
     socket.send(

@@ -226,6 +226,10 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		SendResponse:            false,
 		AllowInterimPicoPublish: true,
 	}
+	if msg.Context.Raw != nil {
+		opts.ModelNameOverride = strings.TrimSpace(msg.Context.Raw["model_name"])
+		opts.ModelIDOverride = strings.TrimSpace(msg.Context.Raw["model"])
+	}
 	var err error
 	opts, err = resolveTurnProfileOptions(al.GetConfig(), opts)
 	if err != nil {

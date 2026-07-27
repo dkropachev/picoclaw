@@ -52,7 +52,9 @@ func TestHandleMessageSend_ForwardsMessageMetadata(t *testing.T) {
 		ID:        "msg-1",
 		SessionID: "sess-1",
 		Payload: map[string]any{
-			PayloadKeyContent: "hello",
+			PayloadKeyContent:   "hello",
+			PayloadKeyModelName: "credential:openai:work",
+			"model":             "gpt-5.6",
 		},
 	})
 
@@ -63,6 +65,12 @@ func TestHandleMessageSend_ForwardsMessageMetadata(t *testing.T) {
 		}
 		if got := inbound.Context.Raw["session_id"]; got != "sess-1" {
 			t.Fatalf("session_id raw = %q, want sess-1", got)
+		}
+		if got := inbound.Context.Raw[PayloadKeyModelName]; got != "credential:openai:work" {
+			t.Fatalf("model_name raw = %q, want credential:openai:work", got)
+		}
+		if got := inbound.Context.Raw["model"]; got != "gpt-5.6" {
+			t.Fatalf("model raw = %q, want gpt-5.6", got)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected inbound pico message")

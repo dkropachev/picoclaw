@@ -93,6 +93,8 @@
     "loadingMore": "Loading more...",
     "deleteSession": "Delete session",
     "messagesCount": "{{count}} messages",
+    "account": "Account",
+    "noAccount": "Select account",
     "noModel": "Select model",
     "inputDisabled": {
       "notConnected": "Gateway is not running. Start it to chat.",
@@ -122,7 +124,8 @@
     },
     "modelGroup": {
       "accounts": "Accounts",
-      "accountRouters": "Account Routers"
+      "accountRouters": "Account Routers",
+      "modelRouters": "Model Routers"
     }
   },
   "header": {
@@ -320,7 +323,8 @@
     "badge": {
       "default": "Default",
       "virtual": "Virtual",
-      "router": "Account Router"
+      "router": "Account Router",
+      "modelRouter": "Model Router"
     },
     "action": {
       "edit": "Edit API key",
@@ -457,6 +461,36 @@
       "cardNoAccounts": "No accounts referenced",
       "cardNeedsAttention": "Needs attention",
       "cardUnconfigured": "Account router incomplete"
+    },
+    "modelRouter": {
+      "button": "Model Router",
+      "title": "Create Model Router",
+      "editTitle": "Configure {{name}}",
+      "description": "Route chat turns to a configured model or account router from the current input.",
+      "routerName": "Router Alias",
+      "routerNamePlaceholder": "e.g. task-router",
+      "defaultTarget": "Default Target",
+      "mediaTarget": "Media Target",
+      "codeTarget": "Code Target",
+      "containsText": "Contains Text",
+      "containsTarget": "Contains Target",
+      "regexText": "Regex Pattern",
+      "regexTarget": "Regex Target",
+      "containsPlaceholder": "e.g. translate",
+      "regexPlaceholder": "e.g. (?i)review|debug",
+      "selectTarget": "Select target",
+      "noRule": "No rule",
+      "create": "Create Router",
+      "saveSuccess": "Model router saved.",
+      "saveError": "Failed to save model router",
+      "actionEdit": "Edit model router",
+      "actionDelete": "Delete model router",
+      "errorNameRequired": "Router alias is required.",
+      "errorDuplicate": "Router alias already exists.",
+      "errorDefaultTarget": "Choose a default target.",
+      "errorContainsTarget": "Choose a target for the contains rule.",
+      "errorRegexTarget": "Choose a target for the regex rule.",
+      "errorRegexInvalid": "Regex pattern is invalid."
     },
     "add": {
       "button": "Add Model",

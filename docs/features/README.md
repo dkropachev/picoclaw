@@ -27,6 +27,7 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 | Scheduling and reminders               | [scheduling.md](scheduling.md)                                     |
 | Routing and multi-agent dispatch       | [routing.md](routing.md)                                           |
 | Account router                         | [account-router.md](account-router.md)                             |
+| Model router                           | [model-router.md](model-router.md)                                 |
 | GitHub Copilot subscription accounts   | [github-copilot-subscription.md](github-copilot-subscription.md)   |
 | Hooks and interception                 | [hooks.md](hooks.md)                                               |
 | Self-evolution                         | [self-evolution.md](self-evolution.md)                             |

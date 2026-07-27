@@ -2,7 +2,6 @@ import { render, screen, waitFor } from "@testing-library/react"
 import { Provider } from "jotai"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { ModelInfo } from "@/api/models"
 import { getThread } from "@/api/threads"
 import { ChatPage } from "@/components/chat/chat-page"
 import { useChatModels } from "@/hooks/use-chat-models"
@@ -56,18 +55,6 @@ vi.mock("@/hooks/use-session-history", () => ({
   useSessionHistory: vi.fn(),
 }))
 
-const modelInfo: ModelInfo = {
-  index: 0,
-  model_name: "gpt-test",
-  model: "gpt-test",
-  api_key: "",
-  enabled: true,
-  available: true,
-  status: "available",
-  is_default: true,
-  is_virtual: false,
-}
-
 describe("ChatPage thread context", () => {
   beforeEach(() => {
     vi.mocked(getThread).mockReset()
@@ -94,10 +81,24 @@ describe("ChatPage thread context", () => {
     })
     vi.mocked(useChatModels).mockReturnValue({
       defaultModelName: "gpt-test",
+      selectedAccountName: "credential:openai:work",
+      selectedModelID: "gpt-test",
       hasAvailableModels: true,
-      accountModels: [modelInfo],
+      accountModels: [
+        {
+          accountName: "credential:openai:work",
+          label: "openai:work",
+          provider: "openai",
+          authMethod: "oauth",
+          credentialID: "openai:work",
+          modelID: "gpt-test",
+        },
+      ],
       accountRouterModels: [],
-      handleSetDefault: vi.fn(),
+      modelOptions: [{ id: "gpt-test" }],
+      isLoadingModelOptions: false,
+      handleSetAccount: vi.fn(),
+      handleSetModel: vi.fn(),
     })
     vi.mocked(useSessionHistory).mockReturnValue({
       sessions: [],

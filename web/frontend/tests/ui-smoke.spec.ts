@@ -3,6 +3,7 @@ import { type Page, type Route, expect, test } from "@playwright/test"
 
 const smokeRoutes = [
   "/",
+  "/models",
   "/accounts",
   "/logs",
   "/agent/git-workspaces",
@@ -40,8 +41,44 @@ const modelResponse = {
       is_virtual: false,
       default_model_allowed: true,
     },
+    {
+      index: 2,
+      model_name: "task-router",
+      provider: "model-router",
+      model: "task-router",
+      api_key: "",
+      enabled: true,
+      available: true,
+      status: "available",
+      is_default: false,
+      is_virtual: true,
+      default_model_allowed: true,
+      model_router: {
+        name: "task-router",
+        enabled: true,
+        entry: "entry",
+        blocks: [
+          {
+            id: "entry",
+            type: "rules",
+            fallback: "default-gpt-4o-mini",
+            rules: [{ match: "has_code", target: "code-gpt-4o" }],
+          },
+          {
+            id: "code-gpt-4o",
+            type: "model",
+            model: "gpt-4o",
+          },
+          {
+            id: "default-gpt-4o-mini",
+            type: "model",
+            model: "gpt-4o-mini",
+          },
+        ],
+      },
+    },
   ],
-  total: 2,
+  total: 3,
   default_model: "gpt-4o-mini",
   provider_options: [
     {

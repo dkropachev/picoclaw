@@ -31,6 +31,7 @@ transports.
 | `FR-CHANNEL-007` | MUST   | Channel-specific command UX forwards generic commands to the central command executor except documented platform-local discovery behavior.                                | Slash command behavior must stay consistent across channels.                       |
 | `FR-CHANNEL-008` | MUST   | Send failures, rate limits, and closed buses produce structured errors/events instead of silently dropping messages.                                                      | Operators need diagnoseable delivery failure.                                      |
 | `FR-CHANNEL-009` | SHOULD | Browser chat UI preserves readable message layout, accessible composer labeling, responsive controls, and non-overlapping code/message surfaces in light and dark themes. | Chat delivery remains user-facing even when the gateway is stopped or unavailable. |
+| `FR-CHANNEL-010` | MUST | Pico browser chat sends the selected account alias and selected upstream model ID on user messages when those controls are set, and the channel copies them into normalized inbound metadata for the agent turn. | Chat-window account/model selection must affect the next turn without relying on a hidden config rewrite. |
 
 ## Data And State Model
 
@@ -90,7 +91,7 @@ Owns: EVENT bus.*
 | HTTP     | `/api/gateway/*`, `/api/channels/*`, `/api/pico/*`, `/pico/*`                                                                                                               | Gateway lifecycle, channel catalog/config, Pico token/info/setup, websocket and media proxy.                                                                  | `FR-CHANNEL-006`                                     |
 | Config   | `channel_list.*`, `gateway.*`                                                                                                                                               | Channel enablement, settings, trigger, placeholder, typing, gateway host/port/log/hot reload.                                                                 | `FR-CHANNEL-001`, `FR-CHANNEL-003`, `FR-CHANNEL-005` |
 | Events   | `channel.*`, `gateway.*`, `bus.*`                                                                                                                                           | Lifecycle, webhook, outbound, rate limit, gateway, and bus failure telemetry.                                                                                 | `FR-CHANNEL-001`, `FR-CHANNEL-008`                   |
-| Frontend | Chat, Pico, channel, message, code-block, and context-usage UI under `web/frontend/src/components/chat/**`, `web/frontend/src/features/chat/**`, and related channel routes | Browser chat surfaces expose channel delivery behavior and follow shared frontend API, token, responsive layout, accessibility, and dynamic-style lint rules. | `FR-CHANNEL-005`, `FR-CHANNEL-006`, `FR-CHANNEL-009` |
+| Frontend | Chat, Pico, channel, message, code-block, account/model selection, and context-usage UI under `web/frontend/src/components/chat/**`, `web/frontend/src/features/chat/**`, and related channel routes | Browser chat surfaces expose channel delivery behavior and follow shared frontend API, token, responsive layout, accessibility, and dynamic-style lint rules. | `FR-CHANNEL-005`, `FR-CHANNEL-006`, `FR-CHANNEL-009`, `FR-CHANNEL-010` |
 
 ## Algorithms And Ordering
 
@@ -118,7 +119,8 @@ views without changing the channel delivery contract.
 - Disabled or disconnected chat composer states expose actionable text without
   relying on placeholder-only or title-only labels.
 - The chat model selector exposes only account-backed models and account-router
-  aliases, grouped as Accounts and Account Routers.
+  aliases in the account control, grouped as Accounts and Account Routers, and
+  exposes fetched upstream model IDs in a separate model control.
 - Chat messages, code blocks, model selectors, history buttons, and context
   controls do not create horizontal overflow on narrow mobile screens.
 
@@ -130,6 +132,7 @@ views without changing the channel delivery contract.
 | `FR-CHANNEL-002`, `FR-CHANNEL-003`, `FR-CHANNEL-004`, `FR-CHANNEL-005`, `FR-CHANNEL-007` | [pkg/channels](../../pkg/channels), [pkg/channels/telegram/telegram_dispatch_test.go](../../pkg/channels/telegram/telegram_dispatch_test.go), [pkg/channels/tool_feedback_animator_test.go](../../pkg/channels/tool_feedback_animator_test.go) |
 | `FR-CHANNEL-006`                                                                         | [web/backend/api/pico_test.go](../../web/backend/api/pico_test.go), [web/backend/api/channels_test.go](../../web/backend/api/channels_test.go)                                                                                                 |
 | `FR-CHANNEL-009`                                                                         | [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/scripts/lint-ui-rules.mjs](../../web/frontend/scripts/lint-ui-rules.mjs)                                                                       |
+| `FR-CHANNEL-010`                                                                         | [pkg/channels/pico/pico_test.go](../../pkg/channels/pico/pico_test.go), [web/frontend/src/hooks/use-chat-models.test.ts](../../web/frontend/src/hooks/use-chat-models.test.ts)                                                                 |
 
 ## Implementation Anchors
 

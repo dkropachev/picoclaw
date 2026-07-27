@@ -40,12 +40,15 @@ type Config struct {
 	Session   SessionConfig   `json:"session,omitempty"   yaml:"-"`
 	Evolution EvolutionConfig `json:"evolution,omitempty" yaml:"-"`
 	Channels  ChannelsConfig  `json:"channel_list"        yaml:"channel_list"`
-	ModelList SecureModelList `json:"model_list"          yaml:"model_list"` // New model-centric provider configuration
+	// ModelList stores runnable provider configurations.
+	ModelList SecureModelList `json:"model_list" yaml:"model_list"`
 	// AccountRouters route a runnable model through one or more credential accounts.
-	AccountRouters AccountRouterList `json:"account_routers"     yaml:"account_routers"`
-	Gateway        GatewayConfig     `json:"gateway"             yaml:"-"`
-	Events         EventsConfig      `json:"events,omitempty"    yaml:"-"`
-	Workflows      WorkflowsConfig   `json:"workflows,omitempty" yaml:"-"`
+	AccountRouters AccountRouterList `json:"account_routers" yaml:"account_routers"`
+	// ModelRouters route a chat model alias to one of several configured model aliases.
+	ModelRouters ModelRouterList `json:"model_routers"       yaml:"model_routers"`
+	Gateway      GatewayConfig   `json:"gateway"             yaml:"-"`
+	Events       EventsConfig    `json:"events,omitempty"    yaml:"-"`
+	Workflows    WorkflowsConfig `json:"workflows,omitempty" yaml:"-"`
 	// GitWorkspaces controls the inventory of local git checkouts reused by agent sessions.
 	GitWorkspaces GitWorkspacesConfig `json:"git_workspaces,omitempty" yaml:"-"`
 	Hooks         HooksConfig         `json:"hooks,omitempty"          yaml:"-"`
@@ -967,10 +970,11 @@ type ModelConfig struct {
 	Model     string `json:"model"`      // Model identifier, optionally provider-prefixed.
 
 	// HTTP-based providers
-	APIBase   string               `json:"api_base,omitempty"`  // API endpoint URL
-	Proxy     string               `json:"proxy,omitempty"`     // HTTP proxy URL
-	Fallbacks []string             `json:"fallbacks,omitempty"` // Fallback model names for failover
-	Router    *AccountRouterConfig `json:"router,omitempty"`    // Static account router graph
+	APIBase     string               `json:"api_base,omitempty"`     // API endpoint URL
+	Proxy       string               `json:"proxy,omitempty"`        // HTTP proxy URL
+	Fallbacks   []string             `json:"fallbacks,omitempty"`    // Fallback model names for failover
+	Router      *AccountRouterConfig `json:"router,omitempty"`       // Static account router graph
+	ModelRouter *ModelRouterConfig   `json:"model_router,omitempty"` // Dynamic model router graph
 
 	// Special providers (CLI-based, OAuth, etc.)
 	AuthMethod   string `json:"auth_method,omitempty"`   // Authentication method: oauth, token
@@ -1024,16 +1028,45 @@ func (c *ModelConfig) IsAccountRouter() bool {
 	if c == nil {
 		return false
 	}
-	if c.Router != nil {
+	if c.Router != nil && c.ModelRouter == nil {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(c.Provider), AccountRouterProvider)
+}
+
+func (c *ModelConfig) IsModelRouter() bool {
+	if c == nil {
+		return false
+	}
+	if c.ModelRouter != nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(c.Provider), ModelRouterProvider)
 }
 
 // Validate checks if the ModelConfig has all required fields.
 func (c *ModelConfig) Validate() error {
 	if c.ModelName == "" {
 		return fmt.Errorf("model_name is required")
+	}
+	if c.IsModelRouter() {
+		if !c.isVirtual {
+			return fmt.Errorf("model routers must be configured in model_routers")
+		}
+		if c.ModelRouter == nil {
+			return fmt.Errorf(
+				"model_router config is required for provider %q",
+				ModelRouterProvider,
+			)
+		}
+		if strings.TrimSpace(c.Provider) != "" &&
+			!strings.EqualFold(strings.TrimSpace(c.Provider), ModelRouterProvider) {
+			return fmt.Errorf("model_router config must use provider %q", ModelRouterProvider)
+		}
+		if c.Model == "" {
+			return fmt.Errorf("model is required")
+		}
+		return c.ModelRouter.validate(false)
 	}
 	if c.IsAccountRouter() {
 		if !c.isVirtual {
@@ -2054,6 +2087,7 @@ func LoadConfig(path string) (*Config, error) {
 	// Expand multi-key configs into separate entries for key-level failover
 	cfg.ModelList = expandMultiKeyModels(cfg.ModelList)
 	cfg.MaterializeAccountRouterModels()
+	cfg.MaterializeModelRouterModels()
 
 	// Validate model_list for uniqueness and required fields
 	if err = cfg.ValidateModelList(); err != nil {
@@ -2282,6 +2316,12 @@ func (c *Config) ValidateModelList() error {
 		if c.ModelList[i] == nil {
 			return fmt.Errorf("model_list[%d]: model config is required", i)
 		}
+		if c.ModelList[i].IsModelRouter() && !c.ModelList[i].IsVirtual() {
+			return fmt.Errorf(
+				"model_list[%d]: model routers must be configured in model_routers",
+				i,
+			)
+		}
 		if c.ModelList[i].IsAccountRouter() && !c.ModelList[i].IsVirtual() {
 			return fmt.Errorf(
 				"model_list[%d]: account routers must be configured in account_routers",
@@ -2296,6 +2336,12 @@ func (c *Config) ValidateModelList() error {
 		return err
 	}
 	if err := c.validateAccountRouterReferences(); err != nil {
+		return err
+	}
+	if err := c.ValidateModelRouters(); err != nil {
+		return err
+	}
+	if err := c.validateModelRouterReferences(); err != nil {
 		return err
 	}
 	return nil
@@ -2356,7 +2402,7 @@ func (c *Config) validateAccountRouterReferences() error {
 	accounts := make(map[string][]int)
 	routers := make(map[string]int)
 	for i, model := range c.ModelList {
-		if model == nil {
+		if model == nil || model.IsModelRouter() {
 			continue
 		}
 		name := strings.TrimSpace(model.ModelName)
@@ -2518,6 +2564,7 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 				Proxy:                       m.Proxy,
 				AuthMethod:                  m.AuthMethod,
 				Router:                      cloneAccountRouterConfig(m.Router),
+				ModelRouter:                 cloneModelRouterConfig(m.ModelRouter),
 				CredentialID:                m.CredentialID,
 				ConnectMode:                 m.ConnectMode,
 				Workspace:                   m.Workspace,
@@ -2550,6 +2597,7 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 			Proxy:                       m.Proxy,
 			AuthMethod:                  m.AuthMethod,
 			Router:                      cloneAccountRouterConfig(m.Router),
+			ModelRouter:                 cloneModelRouterConfig(m.ModelRouter),
 			CredentialID:                m.CredentialID,
 			ConnectMode:                 m.ConnectMode,
 			Workspace:                   m.Workspace,

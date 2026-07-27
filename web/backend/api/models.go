@@ -49,6 +49,7 @@ type modelResponse struct {
 	AuthMethod   string                      `json:"auth_method,omitempty"`
 	CredentialID string                      `json:"credential_id,omitempty"`
 	Router       *config.AccountRouterConfig `json:"router,omitempty"`
+	ModelRouter  *config.ModelRouterConfig   `json:"model_router,omitempty"`
 	// Advanced fields
 	ConnectMode         string                      `json:"connect_mode,omitempty"`
 	Workspace           string                      `json:"workspace,omitempty"`
@@ -105,7 +106,8 @@ func normalizeStoredModelConfig(mc *config.ModelConfig) bool {
 
 	if provider != "" {
 		normalizedProvider := providers.NormalizeProvider(provider)
-		if providers.IsSupportedModelProvider(normalizedProvider) && normalizedProvider != provider {
+		if providers.IsSupportedModelProvider(normalizedProvider) &&
+			normalizedProvider != provider {
 			mc.Provider = normalizedProvider
 			changed = true
 		}
@@ -153,7 +155,22 @@ func normalizeIncomingModelConfig(mc *config.ModelConfig) {
 	mc.Provider = strings.TrimSpace(mc.Provider)
 	mc.AuthMethod = strings.ToLower(strings.TrimSpace(mc.AuthMethod))
 	mc.CredentialID = strings.TrimSpace(mc.CredentialID)
-	if mc.Router != nil || providers.NormalizeProvider(mc.Provider) == config.AccountRouterProvider {
+	if mc.ModelRouter != nil ||
+		strings.EqualFold(strings.TrimSpace(mc.Provider), config.ModelRouterProvider) {
+		mc.Provider = config.ModelRouterProvider
+		if strings.TrimSpace(mc.Model) == "" {
+			mc.Model = strings.TrimSpace(mc.ModelName)
+		}
+		mc.APIKeys = nil
+		mc.APIBase = ""
+		mc.Proxy = ""
+		mc.AuthMethod = ""
+		mc.CredentialID = ""
+		mc.ConnectMode = ""
+		mc.Workspace = ""
+	}
+	if mc.Router != nil ||
+		providers.NormalizeProvider(mc.Provider) == config.AccountRouterProvider {
 		mc.Provider = config.AccountRouterProvider
 		if strings.TrimSpace(mc.Model) == "" {
 			mc.Model = strings.TrimSpace(mc.ModelName)
@@ -169,7 +186,7 @@ func normalizeIncomingModelConfig(mc *config.ModelConfig) {
 	if effort, err := providercommon.NormalizeReasoningEffort(mc.ReasoningEffort); err == nil {
 		mc.ReasoningEffort = effort
 	}
-	if mc.Provider == config.AccountRouterProvider {
+	if mc.Provider == config.AccountRouterProvider || mc.Provider == config.ModelRouterProvider {
 		return
 	}
 	if mc.Provider == "" {
@@ -232,8 +249,35 @@ func modelProviderOptionsForResponse() []providers.ModelProviderOption {
 }
 
 func defaultModelAllowedForModelConfig(mc *config.ModelConfig) bool {
+	if mc != nil && mc.IsModelRouter() {
+		return true
+	}
 	provider, _ := providers.ExtractProtocol(mc)
 	return providers.IsDefaultModelProvider(provider)
+}
+
+func modelRouterFromModelConfig(mc *config.ModelConfig) (*config.ModelRouterConfig, error) {
+	if mc == nil || mc.ModelRouter == nil {
+		return nil, fmt.Errorf("model_router config is required")
+	}
+	router := *mc.ModelRouter
+	router.Blocks = append([]config.ModelRouterBlock(nil), mc.ModelRouter.Blocks...)
+	for i := range router.Blocks {
+		router.Blocks[i].Rules = append(
+			[]config.ModelRouterRule(nil),
+			mc.ModelRouter.Blocks[i].Rules...)
+	}
+	router.Name = strings.TrimSpace(mc.ModelName)
+	if router.Name == "" {
+		return nil, fmt.Errorf("model_name is required")
+	}
+	if !router.Enabled {
+		router.Enabled = mc.Enabled
+	}
+	if err := router.Validate(); err != nil {
+		return nil, err
+	}
+	return &router, nil
 }
 
 func accountRouterFromModelConfig(mc *config.ModelConfig) (*config.AccountRouterConfig, error) {
@@ -275,9 +319,26 @@ func findAccountRouterIndex(cfg *config.Config, name string) int {
 	return -1
 }
 
+func findModelRouterIndex(cfg *config.Config, name string) int {
+	name = strings.TrimSpace(name)
+	if cfg == nil || name == "" {
+		return -1
+	}
+	for i := range cfg.ModelRouters {
+		if strings.TrimSpace(cfg.ModelRouters[i].Name) == name {
+			return i
+		}
+	}
+	return -1
+}
+
 func validateIncomingModelConfig(mc *config.ModelConfig, existing *config.ModelConfig) error {
 	if mc == nil {
 		return fmt.Errorf("model config is required")
+	}
+	if mc.IsModelRouter() {
+		_, err := modelRouterFromModelConfig(mc)
+		return err
 	}
 	if mc.IsAccountRouter() {
 		_, err := accountRouterFromModelConfig(mc)
@@ -297,8 +358,13 @@ func validateIncomingModelConfig(mc *config.ModelConfig, existing *config.ModelC
 			return err
 		}
 	}
-	if mc.Provider == "elevenlabs" && strings.TrimSpace(mc.Model) != asr.ElevenLabsSupportedModelID() {
-		return fmt.Errorf("provider %q only supports model %q", mc.Provider, asr.ElevenLabsSupportedModelID())
+	if mc.Provider == "elevenlabs" &&
+		strings.TrimSpace(mc.Model) != asr.ElevenLabsSupportedModelID() {
+		return fmt.Errorf(
+			"provider %q only supports model %q",
+			mc.Provider,
+			asr.ElevenLabsSupportedModelID(),
+		)
 	}
 	if !createAllowedForProvider(mc.Provider) {
 		if existing == nil {
@@ -367,6 +433,7 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 			AuthMethod:          m.AuthMethod,
 			CredentialID:        m.CredentialID,
 			Router:              m.Router,
+			ModelRouter:         m.ModelRouter,
 			ConnectMode:         m.ConnectMode,
 			Workspace:           m.Workspace,
 			RPM:                 m.RPM,
@@ -397,7 +464,10 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func appendCredentialAccountModelResponses(models []modelResponse, defaultModel string) []modelResponse {
+func appendCredentialAccountModelResponses(
+	models []modelResponse,
+	defaultModel string,
+) []modelResponse {
 	store, err := oauthLoadStore()
 	if err != nil || store == nil {
 		return models
@@ -441,7 +511,9 @@ func appendCredentialAccountModelResponses(models []modelResponse, defaultModel 
 				provider = providers.NormalizeProvider(prefix)
 			}
 		}
-		modelName := config.AccountRouterCredentialAccountPrefix + strings.ToLower(strings.TrimSpace(credentialID))
+		modelName := config.AccountRouterCredentialAccountPrefix + strings.ToLower(
+			strings.TrimSpace(credentialID),
+		)
 		modelID := defaultCredentialAccountModel(provider)
 		authMethod := strings.ToLower(strings.TrimSpace(cred.AuthMethod))
 		if authMethod == "" {
@@ -484,7 +556,10 @@ func representedModelCredentialID(model modelResponse) string {
 	if !isCredentialAuthMethod(authMethod) {
 		return ""
 	}
-	credentialID, err := auth.NormalizeCredentialID(authProviderForCredentialModel(provider), model.CredentialID)
+	credentialID, err := auth.NormalizeCredentialID(
+		authProviderForCredentialModel(provider),
+		model.CredentialID,
+	)
 	if err != nil {
 		return ""
 	}
@@ -563,25 +638,33 @@ func (h *Handler) handleAddModel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if findAccountRouterIndex(cfg, router.Name) >= 0 {
-			http.Error(w, fmt.Sprintf("Account router %q already exists", router.Name), http.StatusBadRequest)
+			http.Error(
+				w,
+				fmt.Sprintf("Account router %q already exists", router.Name),
+				http.StatusBadRequest,
+			)
 			return
 		}
 		cfg.AccountRouters = append(cfg.AccountRouters, *router)
-		cfg.MaterializeAccountRouterModels()
-		if err := cfg.ValidateModelList(); err != nil {
+		h.saveAddedRouterModel(w, cfg)
+		return
+	}
+	if mc.ModelConfig.IsModelRouter() {
+		router, err := modelRouterFromModelConfig(&mc.ModelConfig)
+		if err != nil {
 			http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
 			return
 		}
-		if err := config.SaveConfig(h.configPath, cfg); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+		if findModelRouterIndex(cfg, router.Name) >= 0 {
+			http.Error(
+				w,
+				fmt.Sprintf("Model router %q already exists", router.Name),
+				http.StatusBadRequest,
+			)
 			return
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"status": "ok",
-			"index":  len(cfg.ModelList) - 1,
-		})
+		cfg.ModelRouters = append(cfg.ModelRouters, *router)
+		h.saveAddedRouterModel(w, cfg)
 		return
 	}
 
@@ -592,6 +675,25 @@ func (h *Handler) handleAddModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := config.SaveConfig(h.configPath, cfg); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"status": "ok",
+		"index":  len(cfg.ModelList) - 1,
+	})
+}
+
+func (h *Handler) saveAddedRouterModel(w http.ResponseWriter, cfg *config.Config) {
+	cfg.MaterializeAccountRouterModels()
+	cfg.MaterializeModelRouterModels()
+	if err := cfg.ValidateModelList(); err != nil {
+		http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
+		return
+	}
 	if err := config.SaveConfig(h.configPath, cfg); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
 		return
@@ -648,16 +750,72 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if idx < 0 || idx >= len(cfg.ModelList) {
-		http.Error(w, fmt.Sprintf("Index %d out of range (0-%d)", idx, len(cfg.ModelList)-1), http.StatusNotFound)
+		http.Error(
+			w,
+			fmt.Sprintf("Index %d out of range (0-%d)", idx, len(cfg.ModelList)-1),
+			http.StatusNotFound,
+		)
 		return
 	}
 	existing := cfg.ModelList[idx]
 	incomingIsRouter := mc.ModelConfig.IsAccountRouter()
 	existingIsRouter := existing.IsAccountRouter()
-	if incomingIsRouter || existingIsRouter {
-		if !incomingIsRouter || !existingIsRouter {
-			msg := "Cannot change a model into an account router or an account router into a model"
+	incomingIsModelRouter := mc.ModelConfig.IsModelRouter()
+	existingIsModelRouter := existing.IsModelRouter()
+	if incomingIsRouter || existingIsRouter || incomingIsModelRouter || existingIsModelRouter {
+		if incomingIsRouter != existingIsRouter || incomingIsModelRouter != existingIsModelRouter {
+			msg := "Cannot change a model, account router, or model router into another entry type"
 			http.Error(w, msg, http.StatusBadRequest)
+			return
+		}
+		if incomingIsModelRouter {
+			router, routerErr := modelRouterFromModelConfig(&mc.ModelConfig)
+			if routerErr != nil {
+				http.Error(w, fmt.Sprintf("Validation error: %v", routerErr), http.StatusBadRequest)
+				return
+			}
+			routerIndex := findModelRouterIndex(cfg, existing.ModelName)
+			if routerIndex < 0 {
+				http.Error(
+					w,
+					fmt.Sprintf("Model router %q not found", existing.ModelName),
+					http.StatusNotFound,
+				)
+				return
+			}
+			if duplicateIndex := findModelRouterIndex(cfg, router.Name); duplicateIndex >= 0 &&
+				duplicateIndex != routerIndex {
+				http.Error(
+					w,
+					fmt.Sprintf("Model router %q already exists", router.Name),
+					http.StatusBadRequest,
+				)
+				return
+			}
+			if cfg.Agents.Defaults.ModelName == existing.ModelName {
+				cfg.Agents.Defaults.ModelName = router.Name
+			}
+			cfg.ModelRouters[routerIndex] = *router
+			cfg.MaterializeAccountRouterModels()
+			cfg.MaterializeModelRouterModels()
+			if validateErr := cfg.ValidateModelList(); validateErr != nil {
+				http.Error(
+					w,
+					fmt.Sprintf("Validation error: %v", validateErr),
+					http.StatusBadRequest,
+				)
+				return
+			}
+			if saveErr := config.SaveConfig(h.configPath, cfg); saveErr != nil {
+				http.Error(
+					w,
+					fmt.Sprintf("Failed to save config: %v", saveErr),
+					http.StatusInternalServerError,
+				)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 			return
 		}
 		router, routerErr := accountRouterFromModelConfig(&mc.ModelConfig)
@@ -667,12 +825,20 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 		}
 		routerIndex := findAccountRouterIndex(cfg, existing.ModelName)
 		if routerIndex < 0 {
-			http.Error(w, fmt.Sprintf("Account router %q not found", existing.ModelName), http.StatusNotFound)
+			http.Error(
+				w,
+				fmt.Sprintf("Account router %q not found", existing.ModelName),
+				http.StatusNotFound,
+			)
 			return
 		}
 		if duplicateIndex := findAccountRouterIndex(cfg, router.Name); duplicateIndex >= 0 &&
 			duplicateIndex != routerIndex {
-			http.Error(w, fmt.Sprintf("Account router %q already exists", router.Name), http.StatusBadRequest)
+			http.Error(
+				w,
+				fmt.Sprintf("Account router %q already exists", router.Name),
+				http.StatusBadRequest,
+			)
 			return
 		}
 		if cfg.Agents.Defaults.ModelName == existing.ModelName {
@@ -680,12 +846,17 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg.AccountRouters[routerIndex] = *router
 		cfg.MaterializeAccountRouterModels()
+		cfg.MaterializeModelRouterModels()
 		if validateErr := cfg.ValidateModelList(); validateErr != nil {
 			http.Error(w, fmt.Sprintf("Validation error: %v", validateErr), http.StatusBadRequest)
 			return
 		}
 		if saveErr := config.SaveConfig(h.configPath, cfg); saveErr != nil {
-			http.Error(w, fmt.Sprintf("Failed to save config: %v", saveErr), http.StatusInternalServerError)
+			http.Error(
+				w,
+				fmt.Sprintf("Failed to save config: %v", saveErr),
+				http.StatusInternalServerError,
+			)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -741,7 +912,8 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 			existingRawModel := strings.TrimSpace(cfg.ModelList[idx].Model)
 			incomingModel := strings.TrimSpace(mc.Model)
 			existingProtocol, existingModelID := providers.ExtractProtocol(cfg.ModelList[idx])
-			if existingRawModel != "" && existingRawModel != existingModelID && incomingModel != "" {
+			if existingRawModel != "" && existingRawModel != existingModelID &&
+				incomingModel != "" {
 				if incomingModel == existingModelID {
 					mc.Model = existingRawModel
 				} else if strings.Contains(incomingModel, "/") && !strings.Contains(existingModelID, "/") {
@@ -804,7 +976,11 @@ func (h *Handler) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if idx < 0 || idx >= len(cfg.ModelList) {
-		http.Error(w, fmt.Sprintf("Index %d out of range (0-%d)", idx, len(cfg.ModelList)-1), http.StatusNotFound)
+		http.Error(
+			w,
+			fmt.Sprintf("Index %d out of range (0-%d)", idx, len(cfg.ModelList)-1),
+			http.StatusNotFound,
+		)
 		return
 	}
 
@@ -813,16 +989,57 @@ func (h *Handler) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 	if cfg.ModelList[idx].IsAccountRouter() {
 		routerIndex := findAccountRouterIndex(cfg, deletedModelName)
 		if routerIndex < 0 {
-			http.Error(w, fmt.Sprintf("Account router %q not found", deletedModelName), http.StatusNotFound)
+			http.Error(
+				w,
+				fmt.Sprintf("Account router %q not found", deletedModelName),
+				http.StatusNotFound,
+			)
 			return
 		}
-		cfg.AccountRouters = append(cfg.AccountRouters[:routerIndex], cfg.AccountRouters[routerIndex+1:]...)
+		cfg.AccountRouters = append(
+			cfg.AccountRouters[:routerIndex],
+			cfg.AccountRouters[routerIndex+1:]...)
 		cfg.MaterializeAccountRouterModels()
+		cfg.MaterializeModelRouterModels()
 		if cfg.Agents.Defaults.ModelName == deletedModelName {
 			cfg.Agents.Defaults.ModelName = ""
 		}
 		if err := config.SaveConfig(h.configPath, cfg); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+			http.Error(
+				w,
+				fmt.Sprintf("Failed to save config: %v", err),
+				http.StatusInternalServerError,
+			)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		return
+	}
+	if cfg.ModelList[idx].IsModelRouter() {
+		routerIndex := findModelRouterIndex(cfg, deletedModelName)
+		if routerIndex < 0 {
+			http.Error(
+				w,
+				fmt.Sprintf("Model router %q not found", deletedModelName),
+				http.StatusNotFound,
+			)
+			return
+		}
+		cfg.ModelRouters = append(
+			cfg.ModelRouters[:routerIndex],
+			cfg.ModelRouters[routerIndex+1:]...)
+		cfg.MaterializeAccountRouterModels()
+		cfg.MaterializeModelRouterModels()
+		if cfg.Agents.Defaults.ModelName == deletedModelName {
+			cfg.Agents.Defaults.ModelName = ""
+		}
+		if err := config.SaveConfig(h.configPath, cfg); err != nil {
+			http.Error(
+				w,
+				fmt.Sprintf("Failed to save config: %v", err),
+				http.StatusInternalServerError,
+			)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -882,18 +1099,26 @@ func (h *Handler) handleSetDefaultModel(w http.ResponseWriter, r *http.Request) 
 	for _, m := range cfg.ModelList {
 		if m.ModelName == req.ModelName {
 			found = true
-			isDisallowedVirtual = m.IsVirtual() && !m.IsAccountRouter()
+			isDisallowedVirtual = m.IsVirtual() && !m.IsAccountRouter() && !m.IsModelRouter()
 			break
 		}
 	}
 	if !found {
 		if !credentialAccountDefaultModelAllowed(req.ModelName) {
-			http.Error(w, fmt.Sprintf("Model %q not found in model_list", req.ModelName), http.StatusNotFound)
+			http.Error(
+				w,
+				fmt.Sprintf("Model %q not found in model_list", req.ModelName),
+				http.StatusNotFound,
+			)
 			return
 		}
 	}
 	if isDisallowedVirtual {
-		http.Error(w, fmt.Sprintf("Cannot set virtual model %q as default", req.ModelName), http.StatusBadRequest)
+		http.Error(
+			w,
+			fmt.Sprintf("Cannot set virtual model %q as default", req.ModelName),
+			http.StatusBadRequest,
+		)
 		return
 	}
 	for _, m := range cfg.ModelList {
@@ -995,7 +1220,11 @@ func (h *Handler) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !providers.IsModelProviderFetchable(req.Provider) {
-		http.Error(w, fmt.Sprintf("provider %q does not support model listing", req.Provider), http.StatusBadRequest)
+		http.Error(
+			w,
+			fmt.Sprintf("provider %q does not support model listing", req.Provider),
+			http.StatusBadRequest,
+		)
 		return
 	}
 
@@ -1021,7 +1250,11 @@ func (h *Handler) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 		apiBase = providers.DefaultAPIBaseForProtocol(req.Provider)
 	}
 	if apiBase == "" {
-		http.Error(w, fmt.Sprintf("No default API base for provider %q", req.Provider), http.StatusBadRequest)
+		http.Error(
+			w,
+			fmt.Sprintf("No default API base for provider %q", req.Provider),
+			http.StatusBadRequest,
+		)
 		return
 	}
 
@@ -1063,7 +1296,10 @@ type storedModelFetchAuth struct {
 	CredentialID string
 }
 
-func (h *Handler) lookupStoredModelFetchAuth(index int, reqProvider, reqAPIBase string) storedModelFetchAuth {
+func (h *Handler) lookupStoredModelFetchAuth(
+	index int,
+	reqProvider, reqAPIBase string,
+) storedModelFetchAuth {
 	cfg, err := config.LoadConfig(h.configPath)
 	if err != nil || index < 0 || index >= len(cfg.ModelList) {
 		return storedModelFetchAuth{}
@@ -1081,7 +1317,11 @@ func (h *Handler) lookupStoredModelFetchAuth(index int, reqProvider, reqAPIBase 
 	if effectiveStoredBase == "" {
 		effectiveStoredBase = providers.DefaultAPIBaseForProtocol(storedProvider)
 	}
-	if normalizeAPIBaseForCompare(effectiveReqBase) != normalizeAPIBaseForCompare(effectiveStoredBase) {
+	if normalizeAPIBaseForCompare(
+		effectiveReqBase,
+	) != normalizeAPIBaseForCompare(
+		effectiveStoredBase,
+	) {
 		return storedModelFetchAuth{}
 	}
 	return storedModelFetchAuth{
@@ -1211,7 +1451,9 @@ func openAICodexModelsFetchURL() string {
 	if strings.Contains(fetchURL, "?") {
 		separator = "&"
 	}
-	return fetchURL + separator + "client_version=" + url.QueryEscape(openAICodexModelsClientVersion())
+	return fetchURL + separator + "client_version=" + url.QueryEscape(
+		openAICodexModelsClientVersion(),
+	)
 }
 
 func openAICodexModelsClientVersion() string {
@@ -1257,7 +1499,10 @@ func resolveOpenAICodexCredential(credentialID string) (*auth.AuthCredential, er
 		cred = refreshed
 	}
 	if strings.TrimSpace(cred.AccessToken) == "" {
-		return nil, fmt.Errorf("OpenAI Codex credential %s has no access token", normalizedCredentialID)
+		return nil, fmt.Errorf(
+			"OpenAI Codex credential %s has no access token",
+			normalizedCredentialID,
+		)
 	}
 	return cred, nil
 }
@@ -1269,12 +1514,20 @@ func resolveGitHubCopilotCredential(credentialID string) (*auth.AuthCredential, 
 	}
 	cred, err := auth.GetCredential(normalizedCredentialID)
 	if err != nil {
-		return nil, fmt.Errorf("loading GitHub Copilot credential %s: %w", normalizedCredentialID, err)
+		return nil, fmt.Errorf(
+			"loading GitHub Copilot credential %s: %w",
+			normalizedCredentialID,
+			err,
+		)
 	}
 	if strings.TrimSpace(cred.AccessToken) == "" {
-		return nil, fmt.Errorf("GitHub Copilot credential %s has no access token", normalizedCredentialID)
+		return nil, fmt.Errorf(
+			"GitHub Copilot credential %s has no access token",
+			normalizedCredentialID,
+		)
 	}
-	if provider := providers.NormalizeProvider(cred.Provider); provider != "" && provider != "github-copilot" {
+	if provider := providers.NormalizeProvider(cred.Provider); provider != "" &&
+		provider != "github-copilot" {
 		return nil, fmt.Errorf(
 			"credential %s belongs to provider %q, not github-copilot",
 			normalizedCredentialID,
@@ -1396,7 +1649,10 @@ func fetchNearAIModels(ctx context.Context, fetchURL, apiKey string) ([]upstream
 	return models, nil
 }
 
-func fetchOpenAICompatibleModels(ctx context.Context, fetchURL, apiKey string) ([]upstreamModel, error) {
+func fetchOpenAICompatibleModels(
+	ctx context.Context,
+	fetchURL, apiKey string,
+) ([]upstreamModel, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fetchURL, nil)
 	if err != nil {
 		return nil, err
@@ -1461,7 +1717,10 @@ func parseOpenAICompatibleModelsBody(body []byte) ([]upstreamModel, error) {
 	if len(preview) > 256 {
 		preview = preview[:256]
 	}
-	return nil, fmt.Errorf("decode response: unrecognized shape: %s", strings.TrimSpace(string(preview)))
+	return nil, fmt.Errorf(
+		"decode response: unrecognized shape: %s",
+		strings.TrimSpace(string(preview)),
+	)
 }
 
 func fetchOllamaModels(ctx context.Context, fetchURL string) ([]upstreamModel, error) {
@@ -1521,7 +1780,14 @@ func normalizeAPIBaseForCompare(raw string) string {
 			return strings.ToLower(raw)
 		}
 	}
-	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + strings.TrimRight(u.Path, "/")
+	return strings.ToLower(
+		u.Scheme,
+	) + "://" + strings.ToLower(
+		u.Host,
+	) + strings.TrimRight(
+		u.Path,
+		"/",
+	)
 }
 
 // handleTestModel tests connectivity to a model endpoint.
@@ -1541,7 +1807,11 @@ func (h *Handler) handleTestModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if idx < 0 || idx >= len(cfg.ModelList) {
-		http.Error(w, fmt.Sprintf("Index %d out of range (0-%d)", idx, len(cfg.ModelList)-1), http.StatusNotFound)
+		http.Error(
+			w,
+			fmt.Sprintf("Index %d out of range (0-%d)", idx, len(cfg.ModelList)-1),
+			http.StatusNotFound,
+		)
 		return
 	}
 
@@ -1613,7 +1883,8 @@ func (h *Handler) handleTestInlineModel(w http.ResponseWriter, r *http.Request) 
 			stored := cfg.ModelList[*req.ModelIndex]
 			storedProvider, _ := providers.ExtractProtocol(stored)
 			reqProvider := providers.NormalizeProvider(m.Provider)
-			providerMatch := reqProvider == "" || reqProvider == providers.NormalizeProvider(storedProvider)
+			providerMatch := reqProvider == "" ||
+				reqProvider == providers.NormalizeProvider(storedProvider)
 
 			effectiveReqBase := strings.TrimSpace(m.APIBase)
 			if effectiveReqBase == "" {
@@ -1623,7 +1894,11 @@ func (h *Handler) handleTestInlineModel(w http.ResponseWriter, r *http.Request) 
 			if effectiveStoredBase == "" {
 				effectiveStoredBase = providers.DefaultAPIBaseForProtocol(storedProvider)
 			}
-			baseMatch := normalizeAPIBaseForCompare(effectiveReqBase) == normalizeAPIBaseForCompare(effectiveStoredBase)
+			baseMatch := normalizeAPIBaseForCompare(
+				effectiveReqBase,
+			) == normalizeAPIBaseForCompare(
+				effectiveStoredBase,
+			)
 
 			if providerMatch && baseMatch {
 				if stored.APIKey() != "" {
