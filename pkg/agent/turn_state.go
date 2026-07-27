@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -134,7 +134,7 @@ type turnExecution struct {
 	activeModelConfig *config.ModelConfig
 	activeProvider    providers.LLMProvider
 	usedLight         bool
-	routerSelection   modelrouter.Selection
+	routerSelection   accountrouter.Selection
 
 	// LLM call per-iteration state
 	response            *providers.LLMResponse

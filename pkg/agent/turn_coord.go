@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -310,16 +310,16 @@ func (al *AgentLoop) selectCandidates(
 	userMsg string,
 	history []providers.Message,
 	sessionKey string,
-	reason modelrouter.SelectReason,
-) (candidates []providers.FallbackCandidate, model string, usedLight bool, routerSelection modelrouter.Selection) {
-	selectPrimary := func() ([]providers.FallbackCandidate, string, modelrouter.Selection) {
-		if agent.ModelRouter != nil {
-			selection := agent.ModelRouter.Select(sessionKey, reason)
+	reason accountrouter.SelectReason,
+) (candidates []providers.FallbackCandidate, model string, usedLight bool, routerSelection accountrouter.Selection) {
+	selectPrimary := func() ([]providers.FallbackCandidate, string, accountrouter.Selection) {
+		if agent.AccountRouter != nil {
+			selection := agent.AccountRouter.Select(sessionKey, reason)
 			if len(selection.Candidates) > 0 {
 				return selection.Candidates, resolvedCandidateModel(selection.Candidates, agent.Model), selection
 			}
 		}
-		return agent.Candidates, resolvedCandidateModel(agent.Candidates, agent.Model), modelrouter.Selection{}
+		return agent.Candidates, resolvedCandidateModel(agent.Candidates, agent.Model), accountrouter.Selection{}
 	}
 
 	if agent.Router == nil || len(agent.LightCandidates) == 0 {
@@ -461,7 +461,7 @@ func (al *AgentLoop) askSideQuestion(
 		question,
 		messages,
 		optsSessionKey(opts),
-		modelrouter.SelectReasonInitial,
+		accountrouter.SelectReasonInitial,
 	)
 	selectedModelName := sideQuestionModelName(agent, usedLight)
 
@@ -570,13 +570,13 @@ func (al *AgentLoop) askSideQuestion(
 				},
 			)
 			if err != nil {
-				if agent.ModelRouter != nil {
-					agent.ModelRouter.RecordFallbackResult(routerSelection, fallbackResultFromError(err), err)
+				if agent.AccountRouter != nil {
+					agent.AccountRouter.RecordFallbackResult(routerSelection, fallbackResultFromError(err), err)
 				}
 				return nil, err
 			}
-			if agent.ModelRouter != nil {
-				agent.ModelRouter.RecordFallbackResult(routerSelection, fbResult, nil)
+			if agent.AccountRouter != nil {
+				agent.AccountRouter.RecordFallbackResult(routerSelection, fbResult, nil)
 			}
 			return fbResult.Response, nil
 		}
@@ -586,8 +586,8 @@ func (al *AgentLoop) askSideQuestion(
 			candidate = activeCandidates[0]
 		}
 		resp, err := callProvider(ctx, candidate, llmModel, hookModelChanged, callMessages)
-		if agent.ModelRouter != nil {
-			agent.ModelRouter.RecordFallbackResult(
+		if agent.AccountRouter != nil {
+			agent.AccountRouter.RecordFallbackResult(
 				routerSelection,
 				fallbackResultFromSingleCandidate(candidate, resp),
 				err,

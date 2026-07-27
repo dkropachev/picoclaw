@@ -159,7 +159,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 	}
 
 	switch protocol {
-	case config.ModelRouterProvider:
+	case config.AccountRouterProvider:
 		return nil, "", fmt.Errorf("provider %q is a router config, not an upstream provider", protocol)
 	case "openai":
 		// OpenAI with OAuth/token auth (Codex-style)
@@ -260,7 +260,11 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		"vivgrid", "volcengine", "vllm", "qwen-portal", "qwen-intl", "qwen-us", "mistral",
 		"avian", "longcat", "modelscope", "novita", "alibaba-coding", "zai", "mimo":
 		// All other OpenAI-compatible HTTP providers
-		if cfg.APIKey() == "" && cfg.APIBase == "" && !isEmptyAPIKeyAllowed(protocol) {
+		apiKey, err := apiKeyFromConfigOrCredential(cfg, protocol)
+		if err != nil {
+			return nil, "", err
+		}
+		if apiKey == "" && cfg.APIBase == "" && !isEmptyAPIKeyAllowed(protocol) {
 			return nil, "", fmt.Errorf("api_key or api_base is required for HTTP-based protocol %q", protocol)
 		}
 		apiBase := cfg.APIBase
@@ -268,7 +272,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			apiBase = getDefaultAPIBase(protocol)
 		}
 		provider := NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(
-			cfg.APIKey(),
+			apiKey,
 			apiBase,
 			cfg.Proxy,
 			cfg.MaxTokensField,
@@ -281,7 +285,11 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		return finalizeProviderFromConfig(provider, modelID, cfg)
 
 	case "gemini":
-		if cfg.APIKey() == "" && cfg.APIBase == "" {
+		apiKey, err := apiKeyFromConfigOrCredential(cfg, protocol)
+		if err != nil {
+			return nil, "", err
+		}
+		if apiKey == "" && cfg.APIBase == "" {
 			return nil, "", fmt.Errorf("api_key or api_base is required for gemini protocol (model: %s)", cfg.Model)
 		}
 		apiBase := cfg.APIBase
@@ -289,7 +297,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			apiBase = getDefaultAPIBase(protocol)
 		}
 		return finalizeProviderFromConfig(NewGeminiProvider(
-			cfg.APIKey(),
+			apiKey,
 			apiBase,
 			cfg.Proxy,
 			userAgent,
@@ -300,7 +308,11 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 
 	case "minimax":
 		// Minimax requires reasoning_split: true in the request body
-		if cfg.APIKey() == "" && cfg.APIBase == "" {
+		apiKey, err := apiKeyFromConfigOrCredential(cfg, protocol)
+		if err != nil {
+			return nil, "", err
+		}
+		if apiKey == "" && cfg.APIBase == "" {
 			return nil, "", fmt.Errorf("api_key or api_base is required for HTTP-based protocol %q", protocol)
 		}
 		apiBase := cfg.APIBase
@@ -315,7 +327,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			extraBody["reasoning_split"] = true
 		}
 		provider := NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(
-			cfg.APIKey(),
+			apiKey,
 			apiBase,
 			cfg.Proxy,
 			cfg.MaxTokensField,
@@ -441,6 +453,34 @@ func finalizeProviderFromConfig(
 		return nil, "", err
 	}
 	return wrapped, modelID, nil
+}
+
+func apiKeyFromConfigOrCredential(cfg *config.ModelConfig, provider string) (string, error) {
+	apiKey := strings.TrimSpace(cfg.APIKey())
+	if apiKey != "" {
+		return apiKey, nil
+	}
+	authMethod := strings.ToLower(strings.TrimSpace(cfg.AuthMethod))
+	if authMethod != "token" {
+		return "", nil
+	}
+	credentialID, err := credentialIDForModel(cfg, provider)
+	if err != nil {
+		return "", err
+	}
+	cred, err := getCredential(credentialID)
+	if err != nil {
+		return "", fmt.Errorf("loading auth credentials: %w", err)
+	}
+	if cred == nil {
+		return "", fmt.Errorf(
+			"no credentials for %s. Run: picoclaw auth login --provider %s --credential-id %s",
+			credentialID,
+			provider,
+			credentialID,
+		)
+	}
+	return strings.TrimSpace(cred.AccessToken), nil
 }
 
 func isEmptyAPIKeyAllowed(protocol string) bool {

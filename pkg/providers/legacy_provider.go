@@ -19,6 +19,17 @@ import (
 func CreateProvider(cfg *config.Config) (LLMProvider, string, error) {
 	model := cfg.Agents.Defaults.GetModelName()
 
+	if credentialCfg, ok := credentialAccountModelConfig(model, ""); ok {
+		if credentialCfg == nil {
+			return nil, "", fmt.Errorf("credential account %q cannot be used as the default model", model)
+		}
+		provider, modelID, err := CreateProviderFromConfig(credentialCfg)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to create provider for model %q: %w", model, err)
+		}
+		return provider, modelID, nil
+	}
+
 	// Must have model_list at this point
 	if len(cfg.ModelList) == 0 {
 		return nil, "", fmt.Errorf("no providers configured. Please add entries to model_list in your config")
@@ -29,19 +40,23 @@ func CreateProvider(cfg *config.Config) (LLMProvider, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("model %q not found in model_list: %w", model, err)
 	}
-	if modelCfg.IsModelRouter() {
+	if modelCfg.IsAccountRouter() {
 		accountName := firstRouterAccount(modelCfg.Router)
 		if accountName == "" {
 			return nil, "", fmt.Errorf("router model %q has no account blocks", model)
 		}
-		modelCfg, err = cfg.GetModelConfig(accountName)
-		if err != nil {
-			return nil, "", fmt.Errorf(
-				"router model %q account %q not found in model_list: %w",
-				model,
-				accountName,
-				err,
-			)
+		if credentialCfg, ok := credentialAccountModelConfig(accountName, modelCfg.Model); ok {
+			modelCfg = credentialCfg
+		} else {
+			modelCfg, err = cfg.GetModelConfig(accountName)
+			if err != nil {
+				return nil, "", fmt.Errorf(
+					"router model %q account %q not found in model_list: %w",
+					model,
+					accountName,
+					err,
+				)
+			}
 		}
 	}
 
@@ -59,11 +74,64 @@ func CreateProvider(cfg *config.Config) (LLMProvider, string, error) {
 	return provider, modelID, nil
 }
 
-func firstRouterAccount(routerCfg *config.ModelRouterConfig) string {
+func credentialAccountModelConfig(accountName string, model string) (*config.ModelConfig, bool) {
+	credentialID, ok := config.AccountRouterCredentialAccountID(accountName)
+	if !ok {
+		return nil, false
+	}
+	provider, ok := config.AccountRouterCredentialAccountProvider(accountName)
+	if !ok {
+		return nil, true
+	}
+	provider = credentialAccountRuntimeProvider(provider)
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = credentialAccountDefaultModel(provider)
+	}
+	if model == "" {
+		return nil, true
+	}
+	return &config.ModelConfig{
+		ModelName:    strings.TrimSpace(accountName),
+		Provider:     provider,
+		Model:        model,
+		AuthMethod:   credentialAccountRuntimeAuthMethod(provider),
+		CredentialID: credentialID,
+		Enabled:      true,
+	}, true
+}
+
+func credentialAccountDefaultModel(provider string) string {
+	commonModels := CommonModelsForProvider(provider)
+	if len(commonModels) > 0 {
+		return commonModels[0]
+	}
+	return ""
+}
+
+func credentialAccountRuntimeProvider(provider string) string {
+	switch strings.TrimSpace(provider) {
+	case "google-antigravity":
+		return "antigravity"
+	default:
+		return strings.TrimSpace(provider)
+	}
+}
+
+func credentialAccountRuntimeAuthMethod(provider string) string {
+	switch strings.TrimSpace(provider) {
+	case "openai", "antigravity":
+		return "oauth"
+	default:
+		return "token"
+	}
+}
+
+func firstRouterAccount(routerCfg *config.AccountRouterConfig) string {
 	if routerCfg == nil {
 		return ""
 	}
-	blocks := make(map[string]config.ModelRouterBlock, len(routerCfg.Blocks))
+	blocks := make(map[string]config.AccountRouterBlock, len(routerCfg.Blocks))
 	for _, block := range routerCfg.Blocks {
 		blocks[strings.TrimSpace(block.ID)] = block
 	}
@@ -76,9 +144,9 @@ func firstRouterAccount(routerCfg *config.ModelRouterConfig) string {
 			return ""
 		}
 		switch strings.TrimSpace(block.Type) {
-		case config.ModelRouterBlockTypeAccount:
+		case config.AccountRouterBlockTypeAccount:
 			return strings.TrimSpace(block.Account)
-		case config.ModelRouterBlockTypeLoadBalance:
+		case config.AccountRouterBlockTypeLoadBalance:
 			for _, account := range block.Accounts {
 				if account = strings.TrimSpace(account); account != "" {
 					return account

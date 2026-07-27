@@ -181,15 +181,10 @@ func TestOAuthBrowserFlowInfersCredentialIDFromEmail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig error: %v", err)
 	}
-	var found bool
 	for _, model := range cfg.ModelList {
 		if model.CredentialID == "openai:dmitry.kropachev.do" {
-			found = true
-			break
+			t.Fatalf("oauth login should not create a model entry, got %#v", model)
 		}
-	}
-	if !found {
-		t.Fatalf("inferred credential model entry not found: %#v", cfg.ModelList)
 	}
 }
 
@@ -362,7 +357,7 @@ func TestOAuthLogoutClearsAuthMethodForExplicitProviderField(t *testing.T) {
 	}
 }
 
-func TestOAuthTokenLoginPersistsNamedCredentialAndModel(t *testing.T) {
+func TestOAuthTokenLoginPersistsNamedCredentialWithoutModel(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()
 	resetOAuthHooks(t)
@@ -403,20 +398,10 @@ func TestOAuthTokenLoginPersistsNamedCredentialAndModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig error: %v", err)
 	}
-	var found bool
 	for _, m := range cfg.ModelList {
-		if m.ModelName == "gpt-5.4-work" {
-			found = true
-			if m.CredentialID != "openai:work" {
-				t.Fatalf("CredentialID = %q, want openai:work", m.CredentialID)
-			}
-			if m.AuthMethod != "token" {
-				t.Fatalf("AuthMethod = %q, want token", m.AuthMethod)
-			}
+		if m.CredentialID == "openai:work" || m.ModelName == "gpt-5.4-work" {
+			t.Fatalf("oauth login should not create a model entry, got %#v", m)
 		}
-	}
-	if !found {
-		t.Fatalf("named model entry not found in %#v", cfg.ModelList)
 	}
 }
 
@@ -458,6 +443,92 @@ func TestOAuthProvidersIncludesGitHubCopilotTokenLogin(t *testing.T) {
 	t.Fatal("github-copilot provider missing")
 }
 
+func TestOAuthProvidersIncludesCreatableModelProviders(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/oauth/providers", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Providers []oauthProviderStatus `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal providers: %v", err)
+	}
+	providersByID := make(map[string]oauthProviderStatus, len(resp.Providers))
+	for _, p := range resp.Providers {
+		providersByID[p.Provider] = p
+	}
+
+	for _, provider := range []string{"deepseek", "gemini"} {
+		status, ok := providersByID[provider]
+		if !ok {
+			t.Fatalf("%s provider missing from account provider list", provider)
+		}
+		if len(status.Methods) != 1 || status.Methods[0] != oauthMethodToken {
+			t.Fatalf("%s methods = %#v, want token", provider, status.Methods)
+		}
+	}
+}
+
+func TestOAuthTokenLoginPersistsCatalogProviderCredentialWithoutModel(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/oauth/login",
+		bytes.NewBufferString(`{"provider":"deepseek","credential_id":"work","method":"token","token":"ds-token"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	cred, err := auth.GetCredential("deepseek:work")
+	if err != nil {
+		t.Fatalf("GetCredential error: %v", err)
+	}
+	if cred == nil {
+		t.Fatal("deepseek credential missing")
+	}
+	if cred.AccessToken != "ds-token" {
+		t.Fatalf("AccessToken = %q, want saved token", cred.AccessToken)
+	}
+	if cred.Provider != "deepseek" {
+		t.Fatalf("Provider = %q, want deepseek", cred.Provider)
+	}
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig error: %v", err)
+	}
+	for _, m := range cfg.ModelList {
+		if m.CredentialID == "deepseek:work" {
+			t.Fatalf("token login should not create a model entry, got %#v", m)
+		}
+	}
+}
+
 func TestOAuthGitHubCopilotTokenLoginRejectsClassicPAT(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()
@@ -493,7 +564,7 @@ func TestOAuthGitHubCopilotTokenLoginRejectsClassicPAT(t *testing.T) {
 	}
 }
 
-func TestOAuthGitHubCopilotTokenLoginPersistsNamedCredentialAndModel(t *testing.T) {
+func TestOAuthGitHubCopilotTokenLoginPersistsNamedCredentialWithoutModel(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()
 	resetOAuthHooks(t)
@@ -539,24 +610,10 @@ func TestOAuthGitHubCopilotTokenLoginPersistsNamedCredentialAndModel(t *testing.
 		t.Fatalf("LoadConfig error: %v", err)
 	}
 	for _, m := range cfg.ModelList {
-		if m.ModelName != "copilot-work" {
-			continue
+		if m.CredentialID == "github-copilot:work" || m.ModelName == "copilot-work" {
+			t.Fatalf("oauth login should not create a model entry, got %#v", m)
 		}
-		if m.Provider != "github-copilot" {
-			t.Fatalf("Provider = %q, want github-copilot", m.Provider)
-		}
-		if m.Model != "auto" {
-			t.Fatalf("Model = %q, want auto", m.Model)
-		}
-		if m.AuthMethod != "token" {
-			t.Fatalf("AuthMethod = %q, want token", m.AuthMethod)
-		}
-		if m.CredentialID != "github-copilot:work" {
-			t.Fatalf("CredentialID = %q, want github-copilot:work", m.CredentialID)
-		}
-		return
 	}
-	t.Fatalf("copilot named model entry not found in %#v", cfg.ModelList)
 }
 
 func TestOAuthLogoutNamedCredentialOnlyClearsMatchingModel(t *testing.T) {

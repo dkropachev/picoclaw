@@ -8,7 +8,7 @@ It is not just a frontend: it is a small launcher service that bundles a React d
 ## What This Directory Provides
 
 - A browser-based chat UI backed by the Pico channel WebSocket proxy.
-- A dashboard for models, accounts, channels, agent tools, skills, logs, and runtime settings.
+- A dashboard for accounts, model configs, channels, agent tools, skills, logs, and runtime settings.
 - A launcher process that can auto-open the browser, show a system tray menu, and persist launcher-specific settings.
 - A controlled way to start, stop, restart, and inspect the `picoclaw gateway` subprocess.
 - A single-binary deployment target where the frontend is embedded into the Go backend.
@@ -39,11 +39,9 @@ The current frontend exposes these major pages and flows:
 
 - `/`
   - Chat UI with session history, default model selection, and Pico channel messaging.
-- `/models`
-  - Add, edit, delete, and set the default model.
-  - Supports API-key models, OAuth-backed models, and local/CLI-backed models.
 - `/accounts`
-  - Manage registered provider accounts, onboard named accounts, and configure account routers.
+  - Manage registered provider accounts, runnable model configs, and account routers.
+  - Add, edit, delete, test, fetch, and set the default model from the Accounts surface.
   - Current built-in flows: OpenAI, Anthropic, and Google Antigravity.
 - `/channels/*`
   - Configure supported channels from a shared catalog.

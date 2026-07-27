@@ -29,6 +29,7 @@ with context, limits, filtering, and error normalization.
 | `FR-TOOL-005` | MUST | Sensitive-data filtering redacts configured secrets from tool results before model exposure when enabled. | Models must not see credentials through tool output. |
 | `FR-TOOL-006` | SHOULD | Media, reaction, message, TTS, and hardware tools return handled responses when user-visible delivery is completed outside normal assistant text. | The agent should not duplicate already-delivered output. |
 | `FR-TOOL-007` | MUST | Tool schema transformations preserve provider compatibility for OpenAI, Anthropic, Gemini, and compatibility adapters. | Provider-specific schemas must not change tool behavior. |
+| `FR-TOOL-008` | MUST | Chat model selection excludes internal virtual model entries but keeps virtual account-router entries and virtual credential-account entries selectable as default chat targets. | Account routers are materialized from `account_routers[]`, and stored credentials are exposed as generated account choices; both must remain usable from Chat without exposing unrelated generated rows. |
 
 ## Data And State Model
 
@@ -94,7 +95,7 @@ Owns: TOOL write_file
 
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
-| Tools | `read_file`, `write_file`, `edit_file`, `append_file`, `list_dir`, `load_image`, `send_file`, `exec`, `web_search`, `web_fetch`, hardware and delivery tools | Built-in tool schemas and execution behavior. | `FR-TOOL-001` through `FR-TOOL-007` |
+| Tools | `read_file`, `write_file`, `edit_file`, `append_file`, `list_dir`, `load_image`, `send_file`, `exec`, `web_search`, `web_fetch`, hardware and delivery tools | Built-in tool schemas and execution behavior. | `FR-TOOL-001` through `FR-TOOL-008` |
 | HTTP | `/api/tools`, `/api/tools/{name}/state`, `/api/tools/web-search-config` | Launcher tool state and web search configuration. | `FR-TOOL-004` |
 | Config | `tools.*` subtrees except MCP, skills, and cron ownership in their feature specs | Tool enablement, limits, providers, filtering, and policies. | `FR-TOOL-002` through `FR-TOOL-006` |
 | Frontend | Tool library and web-search configuration pages under `web/frontend/src/components/agent/tools/**` | Browser tool management follows shared frontend API, accessibility, formatting, and route smoke-test rules while preserving tool enablement semantics. | `FR-TOOL-001`, `FR-TOOL-004` |
@@ -138,6 +139,7 @@ owned by the git workspaces feature.
 | `FR-TOOL-003`, `FR-TOOL-005` | [pkg/tools/shell_test.go](../../pkg/tools/shell_test.go), [pkg/config/security_test.go](../../pkg/config/security_test.go), [docs/security/sensitive_data_filtering.md](../security/sensitive_data_filtering.md) |
 | `FR-TOOL-004` | [pkg/tools/integration/web_test.go](../../pkg/tools/integration/web_test.go), [web/backend/api/tools_test.go](../../web/backend/api/tools_test.go) |
 | `FR-TOOL-006` | [pkg/tools/result_test.go](../../pkg/tools/result_test.go), [pkg/tools/integration](../../pkg/tools/integration), [pkg/tools/hardware](../../pkg/tools/hardware) |
+| `FR-TOOL-008` | [web/frontend/src/hooks/use-chat-models.test.ts](../../web/frontend/src/hooks/use-chat-models.test.ts) |
 
 ## Implementation Anchors
 

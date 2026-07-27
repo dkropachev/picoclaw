@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,33 +22,33 @@ import (
 	providercommon "github.com/sipeed/picoclaw/pkg/providers/common"
 )
 
-// registerModelRoutes binds model list management endpoints to the ServeMux.
+// registerModelRoutes binds account-owned model management endpoints to the ServeMux.
 func (h *Handler) registerModelRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/models", h.handleListModels)
-	mux.HandleFunc("POST /api/models/fetch", h.handleFetchModels)
-	mux.HandleFunc("GET /api/models/catalog", h.handleListCatalogs)
-	mux.HandleFunc("DELETE /api/models/catalog/{id}", h.handleDeleteCatalog)
-	mux.HandleFunc("POST /api/models", h.handleAddModel)
-	mux.HandleFunc("POST /api/models/default", h.handleSetDefaultModel)
-	mux.HandleFunc("PUT /api/models/{index}", h.handleUpdateModel)
-	mux.HandleFunc("DELETE /api/models/{index}", h.handleDeleteModel)
-	mux.HandleFunc("POST /api/models/{index}/test", h.handleTestModel)
-	mux.HandleFunc("POST /api/models/test-inline", h.handleTestInlineModel)
+	mux.HandleFunc("GET /api/accounts/models", h.handleListModels)
+	mux.HandleFunc("POST /api/accounts/models/fetch", h.handleFetchModels)
+	mux.HandleFunc("GET /api/accounts/models/catalog", h.handleListCatalogs)
+	mux.HandleFunc("DELETE /api/accounts/models/catalog/{id}", h.handleDeleteCatalog)
+	mux.HandleFunc("POST /api/accounts/models", h.handleAddModel)
+	mux.HandleFunc("POST /api/accounts/models/default", h.handleSetDefaultModel)
+	mux.HandleFunc("PUT /api/accounts/models/{index}", h.handleUpdateModel)
+	mux.HandleFunc("DELETE /api/accounts/models/{index}", h.handleDeleteModel)
+	mux.HandleFunc("POST /api/accounts/models/{index}/test", h.handleTestModel)
+	mux.HandleFunc("POST /api/accounts/models/test-inline", h.handleTestInlineModel)
 }
 
 // modelResponse is the JSON structure returned for each model in the list.
 // All ModelConfig fields are included so the frontend can display and edit them.
 type modelResponse struct {
-	Index        int                       `json:"index"`
-	ModelName    string                    `json:"model_name"`
-	Provider     string                    `json:"provider,omitempty"`
-	Model        string                    `json:"model"`
-	APIBase      string                    `json:"api_base,omitempty"`
-	APIKey       string                    `json:"api_key"`
-	Proxy        string                    `json:"proxy,omitempty"`
-	AuthMethod   string                    `json:"auth_method,omitempty"`
-	CredentialID string                    `json:"credential_id,omitempty"`
-	Router       *config.ModelRouterConfig `json:"router,omitempty"`
+	Index        int                         `json:"index"`
+	ModelName    string                      `json:"model_name"`
+	Provider     string                      `json:"provider,omitempty"`
+	Model        string                      `json:"model"`
+	APIBase      string                      `json:"api_base,omitempty"`
+	APIKey       string                      `json:"api_key"`
+	Proxy        string                      `json:"proxy,omitempty"`
+	AuthMethod   string                      `json:"auth_method,omitempty"`
+	CredentialID string                      `json:"credential_id,omitempty"`
+	Router       *config.AccountRouterConfig `json:"router,omitempty"`
 	// Advanced fields
 	ConnectMode         string                      `json:"connect_mode,omitempty"`
 	Workspace           string                      `json:"workspace,omitempty"`
@@ -152,9 +153,11 @@ func normalizeIncomingModelConfig(mc *config.ModelConfig) {
 	mc.Provider = strings.TrimSpace(mc.Provider)
 	mc.AuthMethod = strings.ToLower(strings.TrimSpace(mc.AuthMethod))
 	mc.CredentialID = strings.TrimSpace(mc.CredentialID)
-	if mc.Router != nil || providers.NormalizeProvider(mc.Provider) == config.ModelRouterProvider {
-		mc.Provider = config.ModelRouterProvider
-		mc.Model = ""
+	if mc.Router != nil || providers.NormalizeProvider(mc.Provider) == config.AccountRouterProvider {
+		mc.Provider = config.AccountRouterProvider
+		if strings.TrimSpace(mc.Model) == "" {
+			mc.Model = strings.TrimSpace(mc.ModelName)
+		}
 		mc.APIKeys = nil
 		mc.APIBase = ""
 		mc.Proxy = ""
@@ -166,7 +169,7 @@ func normalizeIncomingModelConfig(mc *config.ModelConfig) {
 	if effort, err := providercommon.NormalizeReasoningEffort(mc.ReasoningEffort); err == nil {
 		mc.ReasoningEffort = effort
 	}
-	if mc.Provider == config.ModelRouterProvider {
+	if mc.Provider == config.AccountRouterProvider {
 		return
 	}
 	if mc.Provider == "" {
@@ -233,9 +236,52 @@ func defaultModelAllowedForModelConfig(mc *config.ModelConfig) bool {
 	return providers.IsDefaultModelProvider(provider)
 }
 
+func accountRouterFromModelConfig(mc *config.ModelConfig) (*config.AccountRouterConfig, error) {
+	if mc == nil || mc.Router == nil {
+		return nil, fmt.Errorf("router config is required")
+	}
+	router := *mc.Router
+	router.Blocks = append([]config.AccountRouterBlock(nil), mc.Router.Blocks...)
+	for i := range router.Blocks {
+		router.Blocks[i].Accounts = append([]string(nil), mc.Router.Blocks[i].Accounts...)
+	}
+	router.Name = strings.TrimSpace(mc.ModelName)
+	router.Model = strings.TrimSpace(mc.Model)
+	if router.Name == "" {
+		return nil, fmt.Errorf("model_name is required")
+	}
+	if router.Model == "" {
+		return nil, fmt.Errorf("model is required")
+	}
+	if !router.Enabled {
+		router.Enabled = mc.Enabled
+	}
+	if err := router.Validate(); err != nil {
+		return nil, err
+	}
+	return &router, nil
+}
+
+func findAccountRouterIndex(cfg *config.Config, name string) int {
+	name = strings.TrimSpace(name)
+	if cfg == nil || name == "" {
+		return -1
+	}
+	for i := range cfg.AccountRouters {
+		if strings.TrimSpace(cfg.AccountRouters[i].Name) == name {
+			return i
+		}
+	}
+	return -1
+}
+
 func validateIncomingModelConfig(mc *config.ModelConfig, existing *config.ModelConfig) error {
 	if mc == nil {
 		return fmt.Errorf("model config is required")
+	}
+	if mc.IsAccountRouter() {
+		_, err := accountRouterFromModelConfig(mc)
+		return err
 	}
 	if err := mc.Validate(); err != nil {
 		return err
@@ -245,9 +291,6 @@ func validateIncomingModelConfig(mc *config.ModelConfig, existing *config.ModelC
 	}
 	if !providers.IsSupportedModelProvider(mc.Provider) {
 		return fmt.Errorf("provider %q is not supported", mc.Provider)
-	}
-	if mc.Provider == config.ModelRouterProvider {
-		return nil
 	}
 	if strings.TrimSpace(mc.CredentialID) != "" {
 		if _, err := auth.NormalizeCredentialID(mc.Provider, mc.CredentialID); err != nil {
@@ -285,7 +328,7 @@ func normalizeStoredModelProviders(cfg *config.Config) bool {
 
 // handleListModels returns all model_list entries with masked API keys.
 //
-//	GET /api/models
+//	GET /api/accounts/models
 func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 	cfg, err := config.LoadConfig(h.configPath)
 	if err != nil {
@@ -343,6 +386,7 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 			DefaultModelAllowed: defaultModelAllowedForModelConfig(m),
 		})
 	}
+	models = appendCredentialAccountModelResponses(models, defaultModel)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
@@ -353,9 +397,129 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func appendCredentialAccountModelResponses(models []modelResponse, defaultModel string) []modelResponse {
+	store, err := oauthLoadStore()
+	if err != nil || store == nil {
+		return models
+	}
+
+	representedCredentials := make(map[string]bool, len(models))
+	for _, model := range models {
+		if credentialID := representedModelCredentialID(model); credentialID != "" {
+			representedCredentials[credentialID] = true
+		}
+	}
+
+	credentialIDs := make([]string, 0, len(store.Credentials))
+	for credentialID, cred := range store.Credentials {
+		if cred == nil {
+			continue
+		}
+		credentialID = strings.ToLower(strings.TrimSpace(credentialID))
+		if representedCredentials[credentialID] {
+			continue
+		}
+		provider := providers.NormalizeProvider(cred.Provider)
+		if provider == "" {
+			if prefix, _, ok := strings.Cut(credentialID, ":"); ok {
+				provider = providers.NormalizeProvider(prefix)
+			}
+		}
+		if provider == "" || !providers.IsDefaultModelProvider(provider) {
+			continue
+		}
+		credentialIDs = append(credentialIDs, credentialID)
+	}
+	sort.Strings(credentialIDs)
+
+	nextIndex := len(models)
+	for _, credentialID := range credentialIDs {
+		cred := store.Credentials[credentialID]
+		provider := providers.NormalizeProvider(cred.Provider)
+		if provider == "" {
+			if prefix, _, ok := strings.Cut(credentialID, ":"); ok {
+				provider = providers.NormalizeProvider(prefix)
+			}
+		}
+		modelName := config.AccountRouterCredentialAccountPrefix + strings.ToLower(strings.TrimSpace(credentialID))
+		modelID := defaultCredentialAccountModel(provider)
+		authMethod := strings.ToLower(strings.TrimSpace(cred.AuthMethod))
+		if authMethod == "" {
+			authMethod = defaultCredentialAccountAuthMethod(provider)
+		}
+		available := strings.TrimSpace(cred.AccessToken) != "" && !cred.IsExpired()
+		status := "available"
+		if !available {
+			status = "unconfigured"
+		}
+		models = append(models, modelResponse{
+			Index:               nextIndex,
+			ModelName:           modelName,
+			Provider:            provider,
+			Model:               modelID,
+			APIKey:              "",
+			AuthMethod:          authMethod,
+			CredentialID:        credentialID,
+			Enabled:             true,
+			Available:           available,
+			Status:              status,
+			IsDefault:           modelName == defaultModel,
+			IsVirtual:           true,
+			DefaultModelAllowed: true,
+		})
+		nextIndex++
+	}
+	return models
+}
+
+func representedModelCredentialID(model modelResponse) string {
+	provider := providers.NormalizeProvider(model.Provider)
+	if provider == "" {
+		return ""
+	}
+	authMethod := strings.ToLower(strings.TrimSpace(model.AuthMethod))
+	if authMethod == "" && provider == "antigravity" {
+		authMethod = "oauth"
+	}
+	if !isCredentialAuthMethod(authMethod) {
+		return ""
+	}
+	credentialID, err := auth.NormalizeCredentialID(authProviderForCredentialModel(provider), model.CredentialID)
+	if err != nil {
+		return ""
+	}
+	return credentialID
+}
+
+func authProviderForCredentialModel(provider string) string {
+	switch providers.NormalizeProvider(provider) {
+	case "antigravity":
+		return oauthProviderGoogleAntigravity
+	default:
+		return providers.NormalizeProvider(provider)
+	}
+}
+
+func defaultCredentialAccountModel(provider string) string {
+	commonModels := providers.CommonModelsForProvider(provider)
+	if len(commonModels) > 0 {
+		return commonModels[0]
+	}
+	return "auto"
+}
+
+func defaultCredentialAccountAuthMethod(provider string) string {
+	switch providers.NormalizeProvider(provider) {
+	case "openai", "antigravity":
+		return "oauth"
+	default:
+		return "token"
+	}
+}
+
 // handleAddModel appends a new model configuration entry.
 //
-//	POST /api/models
+//	POST /api/accounts/models
 func (h *Handler) handleAddModel(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
@@ -392,6 +556,35 @@ func (h *Handler) handleAddModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if mc.ModelConfig.IsAccountRouter() {
+		router, err := accountRouterFromModelConfig(&mc.ModelConfig)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
+			return
+		}
+		if findAccountRouterIndex(cfg, router.Name) >= 0 {
+			http.Error(w, fmt.Sprintf("Account router %q already exists", router.Name), http.StatusBadRequest)
+			return
+		}
+		cfg.AccountRouters = append(cfg.AccountRouters, *router)
+		cfg.MaterializeAccountRouterModels()
+		if err := cfg.ValidateModelList(); err != nil {
+			http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
+			return
+		}
+		if err := config.SaveConfig(h.configPath, cfg); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok",
+			"index":  len(cfg.ModelList) - 1,
+		})
+		return
+	}
+
 	cfg.ModelList = append(cfg.ModelList, &mc.ModelConfig)
 	normalizeStoredModelProviders(cfg)
 	if err := cfg.ValidateModelList(); err != nil {
@@ -416,7 +609,7 @@ func (h *Handler) handleAddModel(w http.ResponseWriter, r *http.Request) {
 // stored key is preserved so callers can update only api_base / proxy without
 // exposing or clearing the secret.
 //
-//	PUT /api/models/{index}
+//	PUT /api/accounts/models/{index}
 func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 	idx, err := strconv.Atoi(r.PathValue("index"))
 	if err != nil {
@@ -456,6 +649,47 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 
 	if idx < 0 || idx >= len(cfg.ModelList) {
 		http.Error(w, fmt.Sprintf("Index %d out of range (0-%d)", idx, len(cfg.ModelList)-1), http.StatusNotFound)
+		return
+	}
+	existing := cfg.ModelList[idx]
+	incomingIsRouter := mc.ModelConfig.IsAccountRouter()
+	existingIsRouter := existing.IsAccountRouter()
+	if incomingIsRouter || existingIsRouter {
+		if !incomingIsRouter || !existingIsRouter {
+			msg := "Cannot change a model into an account router or an account router into a model"
+			http.Error(w, msg, http.StatusBadRequest)
+			return
+		}
+		router, routerErr := accountRouterFromModelConfig(&mc.ModelConfig)
+		if routerErr != nil {
+			http.Error(w, fmt.Sprintf("Validation error: %v", routerErr), http.StatusBadRequest)
+			return
+		}
+		routerIndex := findAccountRouterIndex(cfg, existing.ModelName)
+		if routerIndex < 0 {
+			http.Error(w, fmt.Sprintf("Account router %q not found", existing.ModelName), http.StatusNotFound)
+			return
+		}
+		if duplicateIndex := findAccountRouterIndex(cfg, router.Name); duplicateIndex >= 0 &&
+			duplicateIndex != routerIndex {
+			http.Error(w, fmt.Sprintf("Account router %q already exists", router.Name), http.StatusBadRequest)
+			return
+		}
+		if cfg.Agents.Defaults.ModelName == existing.ModelName {
+			cfg.Agents.Defaults.ModelName = router.Name
+		}
+		cfg.AccountRouters[routerIndex] = *router
+		cfg.MaterializeAccountRouterModels()
+		if validateErr := cfg.ValidateModelList(); validateErr != nil {
+			http.Error(w, fmt.Sprintf("Validation error: %v", validateErr), http.StatusBadRequest)
+			return
+		}
+		if saveErr := config.SaveConfig(h.configPath, cfg); saveErr != nil {
+			http.Error(w, fmt.Sprintf("Failed to save config: %v", saveErr), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		return
 	}
 
@@ -555,7 +789,7 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteModel removes a model configuration entry at the given index.
 //
-//	DELETE /api/models/{index}
+//	DELETE /api/accounts/models/{index}
 func (h *Handler) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 	idx, err := strconv.Atoi(r.PathValue("index"))
 	if err != nil {
@@ -576,6 +810,26 @@ func (h *Handler) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 
 	deletedModelName := cfg.ModelList[idx].ModelName
 
+	if cfg.ModelList[idx].IsAccountRouter() {
+		routerIndex := findAccountRouterIndex(cfg, deletedModelName)
+		if routerIndex < 0 {
+			http.Error(w, fmt.Sprintf("Account router %q not found", deletedModelName), http.StatusNotFound)
+			return
+		}
+		cfg.AccountRouters = append(cfg.AccountRouters[:routerIndex], cfg.AccountRouters[routerIndex+1:]...)
+		cfg.MaterializeAccountRouterModels()
+		if cfg.Agents.Defaults.ModelName == deletedModelName {
+			cfg.Agents.Defaults.ModelName = ""
+		}
+		if err := config.SaveConfig(h.configPath, cfg); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		return
+	}
+
 	cfg.ModelList = append(cfg.ModelList[:idx], cfg.ModelList[idx+1:]...)
 
 	// If the deleted model was the default, clear it.
@@ -594,7 +848,7 @@ func (h *Handler) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 
 // handleSetDefaultModel sets the default model for all agents.
 //
-//	POST /api/models/default
+//	POST /api/accounts/models/default
 func (h *Handler) handleSetDefaultModel(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
@@ -624,19 +878,21 @@ func (h *Handler) handleSetDefaultModel(w http.ResponseWriter, r *http.Request) 
 
 	// Verify the model_name exists in model_list and is not a virtual model
 	found := false
-	isVirtual := false
+	isDisallowedVirtual := false
 	for _, m := range cfg.ModelList {
 		if m.ModelName == req.ModelName {
 			found = true
-			isVirtual = m.IsVirtual()
+			isDisallowedVirtual = m.IsVirtual() && !m.IsAccountRouter()
 			break
 		}
 	}
 	if !found {
-		http.Error(w, fmt.Sprintf("Model %q not found in model_list", req.ModelName), http.StatusNotFound)
-		return
+		if !credentialAccountDefaultModelAllowed(req.ModelName) {
+			http.Error(w, fmt.Sprintf("Model %q not found in model_list", req.ModelName), http.StatusNotFound)
+			return
+		}
 	}
-	if isVirtual {
+	if isDisallowedVirtual {
 		http.Error(w, fmt.Sprintf("Cannot set virtual model %q as default", req.ModelName), http.StatusBadRequest)
 		return
 	}
@@ -668,6 +924,23 @@ func (h *Handler) handleSetDefaultModel(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func credentialAccountDefaultModelAllowed(modelName string) bool {
+	credentialID, ok := config.AccountRouterCredentialAccountID(modelName)
+	if !ok {
+		return false
+	}
+	provider, ok := config.AccountRouterCredentialAccountProvider(modelName)
+	if !ok || !providers.IsDefaultModelProvider(provider) {
+		return false
+	}
+	store, err := oauthLoadStore()
+	if err != nil || store == nil {
+		return false
+	}
+	cred := store.Credentials[credentialID]
+	return cred != nil && strings.TrimSpace(cred.AccessToken) != "" && !cred.IsExpired()
+}
+
 // maskAPIKey returns a masked version of an API key for safe display.
 // Keys longer than 12 chars show prefix + last 4 chars: "sk-****abcd".
 // Keys 9-12 chars show prefix + last 2 chars: "sk-****cd".
@@ -694,7 +967,7 @@ func maskAPIKey(key string) string {
 
 // handleFetchModels fetches available models from an upstream provider.
 //
-//	POST /api/models/fetch
+//	POST /api/accounts/models/fetch
 func (h *Handler) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
@@ -1253,7 +1526,7 @@ func normalizeAPIBaseForCompare(raw string) string {
 
 // handleTestModel tests connectivity to a model endpoint.
 //
-//	POST /api/models/{index}/test
+//	POST /api/accounts/models/{index}/test
 func (h *Handler) handleTestModel(w http.ResponseWriter, r *http.Request) {
 	idx, err := strconv.Atoi(r.PathValue("index"))
 	if err != nil {
@@ -1299,7 +1572,7 @@ func (h *Handler) handleTestModel(w http.ResponseWriter, r *http.Request) {
 // Unlike handleTestModel which only checks saved config, this endpoint performs
 // a real network probe (e.g. GET /models) to verify the endpoint is reachable.
 //
-//	POST /api/models/test-inline
+//	POST /api/accounts/models/test-inline
 func (h *Handler) handleTestInlineModel(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {

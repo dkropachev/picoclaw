@@ -1749,3 +1749,96 @@ func TestCreateProviderFromConfig_InvalidToolSchemaTransform(t *testing.T) {
 		t.Fatalf("error = %v, want mention tool_schema_transform", err)
 	}
 }
+
+func TestCreateProviderSupportsAccountRouterCredentialRefsWithoutModelListAccounts(t *testing.T) {
+	origGetCredential := getCredential
+	origNewCopilotProvider := newGitHubCopilotProviderWithToken
+	t.Cleanup(func() {
+		getCredential = origGetCredential
+		newGitHubCopilotProviderWithToken = origNewCopilotProvider
+	})
+
+	getCredential = func(provider string) (*auth.AuthCredential, error) {
+		if provider != "github-copilot:gh-copilot" {
+			t.Fatalf("provider = %q, want github-copilot:gh-copilot", provider)
+		}
+		return &auth.AuthCredential{
+			AccessToken: "gho_test-token",
+			Provider:    "github-copilot",
+			AuthMethod:  "token",
+		}, nil
+	}
+
+	var gotModel string
+	newGitHubCopilotProviderWithToken = func(token string, model string) (LLMProvider, error) {
+		if token != "gho_test-token" {
+			t.Fatalf("constructor token = %q, want stored token", token)
+		}
+		gotModel = model
+		return &factoryStubProvider{}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.ModelName = "router-1"
+	cfg.AccountRouters = []config.AccountRouterConfig{
+		{
+			Name:    "router-1",
+			Model:   "gpt-5.5",
+			Enabled: true,
+			Entry:   "account-1",
+			Blocks: []config.AccountRouterBlock{{
+				ID:      "account-1",
+				Type:    config.AccountRouterBlockTypeAccount,
+				Account: "credential:github-copilot:gh-copilot",
+			}},
+		},
+	}
+	cfg.MaterializeAccountRouterModels()
+
+	provider, modelID, err := CreateProvider(cfg)
+	if err != nil {
+		t.Fatalf("CreateProvider() error = %v", err)
+	}
+	if provider == nil {
+		t.Fatal("CreateProvider() returned nil provider")
+	}
+	if modelID != "gpt-5.5" {
+		t.Fatalf("modelID = %q, want gpt-5.5", modelID)
+	}
+	if gotModel != "gpt-5.5" {
+		t.Fatalf("constructor model = %q, want gpt-5.5", gotModel)
+	}
+}
+
+func TestCreateProviderSupportsCredentialRefDefaultWithoutModelList(t *testing.T) {
+	origGetCredential := getCredential
+	t.Cleanup(func() {
+		getCredential = origGetCredential
+	})
+
+	getCredential = func(provider string) (*auth.AuthCredential, error) {
+		if provider != "openai:work" {
+			t.Fatalf("provider = %q, want openai:work", provider)
+		}
+		return &auth.AuthCredential{
+			AccessToken: "oauth-token",
+			Provider:    "openai",
+			AuthMethod:  "oauth",
+		}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.ModelList = nil
+	cfg.Agents.Defaults.ModelName = "credential:openai:work"
+
+	provider, modelID, err := CreateProvider(cfg)
+	if err != nil {
+		t.Fatalf("CreateProvider() error = %v", err)
+	}
+	if provider == nil {
+		t.Fatal("CreateProvider() returned nil provider")
+	}
+	if modelID != "gpt-5.4" {
+		t.Fatalf("modelID = %q, want gpt-5.4", modelID)
+	}
+}

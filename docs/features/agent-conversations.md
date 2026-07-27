@@ -24,7 +24,7 @@ auxiliary to this capability.
 | --- | --- | --- | --- |
 | `FR-AGENT-001` | MUST | A turn starts from normalized input and creates a scoped runtime context containing agent, session, channel, chat, sender, turn ID, and media metadata when available. | Downstream tools, events, and persistence need stable context. |
 | `FR-AGENT-002` | MUST | Prompt construction includes configured identity, workspace instructions, memory, session history, skills, and tool definitions unless the turn profile disables a block. | Current behavior depends on composable prompt contributors. |
-| `FR-AGENT-003` | MUST | Model resolution uses configured agent model candidates first, then defaults, then model list fallbacks, preserving provider/model identity for retries; router aliases resolve by model-list entry name and expand credential-account blocks and load-balanced blocks to selected account candidates before provider execution, even though router entries do not carry a shared model value; router fallback accounting records outcomes by stable account identity; Codex OAuth and GitHub Copilot credential-backed requests preserve any non-empty requested model name and only substitute the provider default for an empty model; GitHub Copilot credential-backed entries resolve the selected stored credential into a direct HTTPS API client while non-credential entries keep the local bridge path. | Multi-provider behavior must be reproducible and provider-side model rollout names must not be rewritten locally. |
+| `FR-AGENT-003` | MUST | Model resolution uses configured agent model candidates first, then defaults, then model list fallbacks, preserving provider/model identity for retries; router aliases expand credential-account blocks and load-balanced blocks to selected account candidates before provider execution and record fallback outcomes by stable account identity; Codex OAuth and GitHub Copilot credential-backed requests preserve any non-empty requested model name and only substitute the provider default for an empty model; GitHub Copilot credential-backed entries resolve the selected stored credential into a direct HTTPS API client while non-credential entries keep the local bridge path. | Multi-provider behavior must be reproducible and provider-side model rollout names must not be rewritten locally. |
 | `FR-AGENT-004` | MUST | LLM responses with tool calls execute registered tools until the configured maximum tool iterations is reached or no tool calls remain. | Prevents unbounded loops while preserving agent tool use. |
 | `FR-AGENT-005` | MUST | Tool execution errors are returned to the model or user in normalized error text without panicking the turn loop. | Tool failures are normal runtime outcomes. |
 | `FR-AGENT-006` | MUST | Streaming output emits deltas when supported and still produces a final assistant message for session storage. | Streaming and durable history must stay consistent. |
@@ -120,15 +120,12 @@ turn-finalization path.
 Git workspaces are allocated through the registered tool during a turn and are
 released or reconciled by the shared turn-finalization path, while checkout
 inventory and retention behavior are owned by the git workspaces feature.
-Model router aliases plug into this same candidate-selection step: the turn
-loop looks up the router by configured entry name, expands the router to
-concrete account candidates, can reselect after context compression, and
-records fallback outcomes without changing provider prompt serialization.
-Routers have no legacy shared model field; model availability for accounts is
-account metadata only and is not part of provider candidate identity.
-Credential-backed GitHub Copilot entries use the same account identity and
-fallback accounting as other provider accounts while non-credential GitHub
-Copilot entries continue to represent the local bridge.
+Account router aliases plug into this same candidate-selection step: the turn
+loop expands the router to concrete account candidates, can reselect after
+context compression, and records fallback outcomes without changing provider
+prompt serialization. Credential-backed GitHub Copilot entries use the same
+account identity and fallback accounting as other provider accounts while
+non-credential GitHub Copilot entries continue to represent the local bridge.
 
 ## Failure And Edge Cases
 
@@ -145,7 +142,7 @@ Copilot entries continue to represent the local bridge.
 | Requirement IDs | Evidence |
 | --- | --- |
 | `FR-AGENT-001`, `FR-AGENT-002`, `FR-AGENT-006`, `FR-AGENT-008` | [pkg/agent/context_test.go](../../pkg/agent/context_test.go), [pkg/agent/pipeline_streaming_test.go](../../pkg/agent/pipeline_streaming_test.go), [pkg/agent/thinking_test.go](../../pkg/agent/thinking_test.go) |
-| `FR-AGENT-003` | [pkg/agent/model_resolution_test.go](../../pkg/agent/model_resolution_test.go), [pkg/agent/model_router_test.go](../../pkg/agent/model_router_test.go), [pkg/providers/factory_test.go](../../pkg/providers/factory_test.go), [pkg/providers/fallback_test.go](../../pkg/providers/fallback_test.go), [pkg/providers/oauth/codex_provider_test.go](../../pkg/providers/oauth/codex_provider_test.go) |
+| `FR-AGENT-003` | [pkg/agent/model_resolution_test.go](../../pkg/agent/model_resolution_test.go), [pkg/agent/account_router_test.go](../../pkg/agent/account_router_test.go), [pkg/providers/factory_test.go](../../pkg/providers/factory_test.go), [pkg/providers/fallback_test.go](../../pkg/providers/fallback_test.go), [pkg/providers/oauth/codex_provider_test.go](../../pkg/providers/oauth/codex_provider_test.go) |
 | `FR-AGENT-004`, `FR-AGENT-005` | [pkg/agent/pipeline_execute_test.go](../../pkg/agent/pipeline_execute_test.go), [pkg/agent/error_format_test.go](../../pkg/agent/error_format_test.go), [pkg/tools/registry_test.go](../../pkg/tools/registry_test.go) |
 | `FR-AGENT-007` | [pkg/agent/subturn_test.go](../../pkg/agent/subturn_test.go), [pkg/tools/subagent_tool_test.go](../../pkg/tools/subagent_tool_test.go), [pkg/tools/spawn_status_test.go](../../pkg/tools/spawn_status_test.go) |
 | `FR-AGENT-009` | [cmd/picoclaw/internal/agent/command_test.go](../../cmd/picoclaw/internal/agent/command_test.go), [cmd/picoclaw/internal/model/command_test.go](../../cmd/picoclaw/internal/model/command_test.go) |

@@ -225,6 +225,7 @@ export function ChatPage({
   const {
     defaultModelName,
     hasAvailableModels,
+    accountRouterModels,
     apiKeyModels,
     oauthModels,
     localModels,
@@ -414,6 +415,7 @@ export function ChatPage({
             {hasAvailableModels && (
               <ModelSelector
                 defaultModelName={defaultModelName}
+                accountRouterModels={accountRouterModels}
                 apiKeyModels={apiKeyModels}
                 oauthModels={oauthModels}
                 localModels={localModels}

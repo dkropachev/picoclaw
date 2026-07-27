@@ -35,7 +35,7 @@ export function ChatEmptyState({
           {t("chat.empty.noConfiguredModelDescription")}
         </p>
         <Button asChild variant="outline" size="sm" className="px-4">
-          <Link to="/models">{t("chat.empty.goToModels")}</Link>
+          <Link to="/accounts">{t("chat.empty.goToModels")}</Link>
         </Button>
       </div>
     )

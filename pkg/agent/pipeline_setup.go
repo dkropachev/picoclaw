@@ -6,9 +6,9 @@ import (
 	"context"
 	"strings"
 
+	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -18,7 +18,7 @@ import (
 func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution, error) {
 	cfg := p.Cfg
 	maxMediaSize := cfg.Agents.Defaults.GetMaxMediaSize()
-	routerSelectReason := modelrouter.SelectReasonInitial
+	routerSelectReason := accountrouter.SelectReasonInitial
 
 	var history []providers.Message
 	var summary string
@@ -54,7 +54,7 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 		if isOverContextBudget(ts.agent.ContextWindow, messages, toolDefs, ts.agent.MaxTokens) {
 			logger.WarnCF("agent", "Proactive compression: context budget exceeded before LLM call",
 				map[string]any{"session_key": ts.sessionKey})
-			routerSelectReason = modelrouter.SelectReasonCompression
+			routerSelectReason = accountrouter.SelectReasonCompression
 			if err := p.ContextManager.Compact(ctx, &CompactRequest{
 				SessionKey: ts.sessionKey,
 				Reason:     ContextCompressReasonProactive,

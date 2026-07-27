@@ -245,7 +245,7 @@ Important behavior:
 
 ## What Affects The Complexity Score
 
-The current model router looks at structural signals such as:
+The current account router looks at structural signals such as:
 
 - message length
 - fenced code blocks

@@ -9,11 +9,11 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/commands"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -306,7 +306,7 @@ func (al *AgentLoop) buildCommandsRuntime(
 
 			var nextProvider providers.LLMProvider
 			var nextCandidates []providers.FallbackCandidate
-			nextRouter := buildModelRouter(
+			nextRouter := buildAccountRouter(
 				cfg,
 				cfg.Agents.Defaults.Provider,
 				value,
@@ -314,7 +314,7 @@ func (al *AgentLoop) buildCommandsRuntime(
 				agent.CandidateProviders,
 			)
 			if nextRouter != nil {
-				selection := nextRouter.Select(optsSessionKey(opts), modelrouter.SelectReasonInitial)
+				selection := nextRouter.Select(optsSessionKey(opts), accountrouter.SelectReasonInitial)
 				nextCandidates = selection.Candidates
 				nextProvider = workflowProviderForCandidates(agent, agent.Provider, nextCandidates)
 			} else {
@@ -333,7 +333,7 @@ func (al *AgentLoop) buildCommandsRuntime(
 			agent.Model = value
 			agent.Provider = nextProvider
 			agent.Candidates = nextCandidates
-			agent.ModelRouter = nextRouter
+			agent.AccountRouter = nextRouter
 			agent.ThinkingLevel = parseThinkingLevel(modelCfg.ThinkingLevel)
 			agent.ThinkingLevelConfigured = isConfiguredThinkingLevel(modelCfg.ThinkingLevel)
 

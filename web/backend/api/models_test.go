@@ -49,7 +49,7 @@ func addModelAndLoadLatest(t *testing.T, configPath string, body string) *config
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	mux.ServeHTTP(rec, req)
 
@@ -143,12 +143,12 @@ func TestNormalizeIncomingModelConfigClearsRouterTransportFields(t *testing.T) {
 		CredentialID: " github-copilot:work ",
 		ConnectMode:  "local",
 		Workspace:    "/tmp/work",
-		Router: &config.ModelRouterConfig{
+		Router: &config.AccountRouterConfig{
 			Enabled: true,
 			Entry:   "primary",
-			Blocks: []config.ModelRouterBlock{{
+			Blocks: []config.AccountRouterBlock{{
 				ID:      "primary",
-				Type:    config.ModelRouterBlockTypeAccount,
+				Type:    config.AccountRouterBlockTypeAccount,
 				Account: "credential:github-copilot:work",
 			}},
 		},
@@ -156,11 +156,11 @@ func TestNormalizeIncomingModelConfigClearsRouterTransportFields(t *testing.T) {
 
 	normalizeIncomingModelConfig(model)
 
-	if model.Provider != config.ModelRouterProvider {
+	if model.Provider != config.AccountRouterProvider {
 		t.Fatalf("provider = %q, want router", model.Provider)
 	}
-	if model.Model != "" {
-		t.Fatalf("model = %q, want empty", model.Model)
+	if model.Model != "legacy-shared-model" {
+		t.Fatalf("model = %q, want legacy-shared-model", model.Model)
 	}
 	if len(model.APIKeys) != 0 || model.APIBase != "" || model.Proxy != "" ||
 		model.AuthMethod != "" || model.CredentialID != "" ||
@@ -198,16 +198,16 @@ func TestNormalizeIncomingModelConfigNormalizesNonRouterFields(t *testing.T) {
 	}
 }
 
-func TestValidateIncomingModelConfigAcceptsEmptyRouterModel(t *testing.T) {
+func TestValidateIncomingModelConfigRejectsEmptyRouterModel(t *testing.T) {
 	model := &config.ModelConfig{
 		ModelName: "router-main",
-		Provider:  config.ModelRouterProvider,
-		Router: &config.ModelRouterConfig{
+		Provider:  config.AccountRouterProvider,
+		Router: &config.AccountRouterConfig{
 			Enabled: true,
 			Entry:   "primary",
-			Blocks: []config.ModelRouterBlock{{
+			Blocks: []config.AccountRouterBlock{{
 				ID:      "primary",
-				Type:    config.ModelRouterBlockTypeAccount,
+				Type:    config.AccountRouterBlockTypeAccount,
 				Account: "credential:github-copilot:work",
 			}},
 		},
@@ -216,8 +216,8 @@ func TestValidateIncomingModelConfigAcceptsEmptyRouterModel(t *testing.T) {
 	if err := validateIncomingModelConfig(nil, nil); err == nil {
 		t.Fatal("validateIncomingModelConfig(nil) error = nil, want error")
 	}
-	if err := validateIncomingModelConfig(model, nil); err != nil {
-		t.Fatalf("validateIncomingModelConfig(router) error = %v", err)
+	if err := validateIncomingModelConfig(model, nil); err == nil {
+		t.Fatal("validateIncomingModelConfig(router) error = nil, want error")
 	}
 }
 
@@ -293,7 +293,7 @@ func TestHandleListModels_AvailabilityUsesRuntimeProbesForLocalModels(t *testing
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -390,7 +390,7 @@ func TestHandleListModels_AvailabilityForOAuthModelWithCredential(t *testing.T) 
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -456,7 +456,7 @@ func TestHandleListModels_GitHubCopilotTokenCredentialDoesNotProbeLocalBridge(t 
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -541,7 +541,7 @@ func TestHandleListModels_AntigravityImplicitOAuthAvailability(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -586,7 +586,7 @@ func TestHandleListModels_BedrockUsesAmbientCredentialStatus(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -652,7 +652,7 @@ func TestHandleListModels_CLIProvidersRequireInstalledCommands(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -748,7 +748,7 @@ func TestHandleListModels_ProbesLocalModelsConcurrently(t *testing.T) {
 	recCh := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 		mux.ServeHTTP(rec, req)
 		recCh <- rec
 	}()
@@ -798,7 +798,7 @@ func TestHandleListModels_NormalizesWildcardLocalAPIBaseForProbe(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -819,6 +819,142 @@ func TestHandleListModels_NormalizesWildcardLocalAPIBaseForProbe(t *testing.T) {
 	}
 	if gotProbe != "http://127.0.0.1:8000/v1|custom-model|" {
 		t.Fatalf("probe api base = %q, want %q", gotProbe, "http://127.0.0.1:8000/v1|custom-model|")
+	}
+}
+
+func TestHandleListModelsIncludesCredentialAccountsAsVirtualDefaults(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.ModelList = nil
+	cfg.Agents.Defaults.ModelName = "credential:openai:work"
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	if err := auth.SetCredential("openai:work", &auth.AuthCredential{
+		Provider:    "openai",
+		AuthMethod:  "oauth",
+		AccessToken: "oauth-token",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+	if err := auth.SetCredential("github-copilot:gh-copilot", &auth.AuthCredential{
+		Provider:    "github-copilot",
+		AuthMethod:  "token",
+		AccessToken: "gho_token",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Models       []modelResponse `json:"models"`
+		DefaultModel string          `json:"default_model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	modelsByName := make(map[string]modelResponse, len(resp.Models))
+	for _, model := range resp.Models {
+		modelsByName[model.ModelName] = model
+	}
+
+	openAIAccount, ok := modelsByName["credential:openai:work"]
+	if !ok {
+		t.Fatalf("credential:openai:work missing from models: %#v", modelsByName)
+	}
+	if !openAIAccount.IsVirtual {
+		t.Fatal("credential account IsVirtual = false, want true")
+	}
+	if !openAIAccount.IsDefault {
+		t.Fatal("credential account IsDefault = false, want true")
+	}
+	if openAIAccount.Provider != "openai" || openAIAccount.AuthMethod != "oauth" {
+		t.Fatalf(
+			"openai account provider/auth = %q/%q, want openai/oauth",
+			openAIAccount.Provider,
+			openAIAccount.AuthMethod,
+		)
+	}
+
+	copilotAccount, ok := modelsByName["credential:github-copilot:gh-copilot"]
+	if !ok {
+		t.Fatalf("credential:github-copilot:gh-copilot missing from models: %#v", modelsByName)
+	}
+	if !copilotAccount.Available || copilotAccount.Model != "auto" {
+		t.Fatalf(
+			"copilot account available/model = %v/%q, want true/auto",
+			copilotAccount.Available,
+			copilotAccount.Model,
+		)
+	}
+	if resp.DefaultModel != "credential:openai:work" {
+		t.Fatalf("default_model = %q, want credential:openai:work", resp.DefaultModel)
+	}
+}
+
+func TestHandleSetDefaultModelAcceptsCredentialAccountRef(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.ModelList = nil
+	cfg.Agents.Defaults.ModelName = ""
+	err = config.SaveConfig(configPath, cfg)
+	if err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	err = auth.SetCredential("openai:work", &auth.AuthCredential{
+		Provider:    "openai",
+		AuthMethod:  "oauth",
+		AccessToken: "oauth-token",
+	})
+	if err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/accounts/models/default",
+		strings.NewReader(`{"model_name":"credential:openai:work"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	updated, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if got := updated.Agents.Defaults.ModelName; got != "credential:openai:work" {
+		t.Fatalf("default model = %q, want credential:openai:work", got)
 	}
 }
 
@@ -851,7 +987,7 @@ func TestHandleListModels_StatusMarksUnreachableLocalModel(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -910,7 +1046,7 @@ func TestHandleListModels_RuntimeProbeUsesExplicitProviderField(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -931,7 +1067,7 @@ func TestHandleAddModel_PersistsAPIKey(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name":"new-model",
 		"model":"openai/gpt-4o-mini",
 		"api_key":"sk-new-model-key"
@@ -969,7 +1105,7 @@ func TestHandleAddModel_PersistsProvider(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name":"nvidia-glm",
 		"provider":"nvidia",
 		"model":"z-ai/glm-5.1",
@@ -1019,7 +1155,7 @@ func TestHandleListModels_ReturnsStreamingConfig(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -1049,7 +1185,7 @@ func TestHandleAddModel_RejectsUnsupportedProvider(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name":"bad-provider",
 		"provider":"not-supported",
 		"model":"gpt-4o-mini"
@@ -1074,7 +1210,7 @@ func TestHandleAddModel_RejectsUnsupportedReasoningEffort(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name":"openai-max",
 		"provider":"openai",
 		"model":"gpt-5.4",
@@ -1100,7 +1236,7 @@ func TestHandleAddModel_AllowsBedrockProvider(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name":"bedrock-claude",
 		"provider":"bedrock",
 		"model":"us.anthropic.claude-sonnet-4-20250514-v1:0"
@@ -1147,7 +1283,7 @@ func TestHandleAddModel_NormalizesLegacyElevenLabsASRConfig(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name":"new-model",
 		"provider":"openai",
 		"model":"gpt-4o-mini",
@@ -1198,7 +1334,7 @@ func TestHandleAddModel_NormalizesExplicitElevenLabsUnsupportedModelID(t *testin
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name":"new-model",
 		"provider":"openai",
 		"model":"gpt-4o-mini",
@@ -1238,7 +1374,7 @@ func TestHandleAddModel_RejectsMissingCLIProviderCommand(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name":"claude-cli-model",
 		"provider":"claude-cli",
 		"model":"claude-cli"
@@ -1292,7 +1428,7 @@ func TestHandleAddModel_PreservesExplicitProviderPrefixedModel(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name":"openai-gpt",
 		"provider":"openai",
 		"model":"openai/gpt-4o-mini",
@@ -1327,7 +1463,7 @@ func TestHandleAddModel_PersistsCustomHeaders(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name":"new-model-headers",
 		"model":"openai/gpt-4o-mini",
 		"custom_headers":{"X-Source":"coding-plan","X-Agent":"openclaw"}
@@ -1368,7 +1504,7 @@ func TestHandleAddModel_PersistsToolSchemaTransform(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name":"new-model-transform",
 		"model":"openai/gpt-4o-mini",
 		"tool_schema_transform":"simple"
@@ -1415,7 +1551,7 @@ func TestHandleUpdateModel_CustomHeadersPreserveAndClear(t *testing.T) {
 
 	// Omitted custom_headers should preserve existing value.
 	recPreserve := httptest.NewRecorder()
-	reqPreserve := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+	reqPreserve := httptest.NewRequest(http.MethodPut, "/api/accounts/models/0", bytes.NewBufferString(`{
 		"model_name":"editable",
 		"model":"openai/gpt-4o-mini"
 	}`))
@@ -1435,7 +1571,7 @@ func TestHandleUpdateModel_CustomHeadersPreserveAndClear(t *testing.T) {
 
 	// Empty object should clear custom_headers.
 	recClear := httptest.NewRecorder()
-	reqClear := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+	reqClear := httptest.NewRequest(http.MethodPut, "/api/accounts/models/0", bytes.NewBufferString(`{
 		"model_name":"editable",
 		"model":"openai/gpt-4o-mini",
 		"custom_headers":{}
@@ -1479,7 +1615,7 @@ func TestHandleUpdateModel_ToolSchemaTransformPreserveAndClear(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	recPreserve := httptest.NewRecorder()
-	reqPreserve := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+	reqPreserve := httptest.NewRequest(http.MethodPut, "/api/accounts/models/0", bytes.NewBufferString(`{
 		"model_name":"editable",
 		"model":"openai/gpt-4o-mini"
 	}`))
@@ -1498,7 +1634,7 @@ func TestHandleUpdateModel_ToolSchemaTransformPreserveAndClear(t *testing.T) {
 	}
 
 	recClear := httptest.NewRecorder()
-	reqClear := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+	reqClear := httptest.NewRequest(http.MethodPut, "/api/accounts/models/0", bytes.NewBufferString(`{
 		"model_name":"editable",
 		"model":"openai/gpt-4o-mini",
 		"tool_schema_transform":""
@@ -1542,7 +1678,7 @@ func TestHandleUpdateModel_StreamingPreserveAndChange(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	recPreserve := httptest.NewRecorder()
-	reqPreserve := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+	reqPreserve := httptest.NewRequest(http.MethodPut, "/api/accounts/models/0", bytes.NewBufferString(`{
 		"model_name":"editable",
 		"provider":"openai",
 		"model":"gpt-4o-mini"
@@ -1562,7 +1698,7 @@ func TestHandleUpdateModel_StreamingPreserveAndChange(t *testing.T) {
 	}
 
 	recChange := httptest.NewRecorder()
-	reqChange := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+	reqChange := httptest.NewRequest(http.MethodPut, "/api/accounts/models/0", bytes.NewBufferString(`{
 		"model_name":"editable",
 		"provider":"openai",
 		"model":"gpt-4o-mini",
@@ -1605,7 +1741,7 @@ func TestHandleUpdateModel_PersistsProvider(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPut, "/api/accounts/models/0", bytes.NewBufferString(`{
 		"model_name":"editable",
 		"provider":"openrouter",
 		"model":"openai/gpt-4o"
@@ -1648,7 +1784,7 @@ func TestHandleUpdateModel_PreservesExplicitProviderPrefixedModel(t *testing.T) 
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPut, "/api/accounts/models/0", bytes.NewBufferString(`{
 		"model_name":"editable",
 		"provider":"openai",
 		"model":"openai/gpt-5.4"
@@ -1695,7 +1831,7 @@ func TestHandleListModels_PreservesExplicitProviderPrefixedModel(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -1742,7 +1878,7 @@ func TestHandleListModels_ExposesElevenLabsASRProvider(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -1789,10 +1925,11 @@ func TestHandleUpdateModel_PreservesLegacyModelPrefixWhenProviderOmitted(t *test
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
-	// Simulate an older client: it reads GET /api/models, ignores the new
-	// provider field, then PUTs the visible model string back unchanged.
+	// Simulate a provider-omitted update: the client reads the Accounts model
+	// API, ignores the provider field, then PUTs the visible model string back
+	// unchanged.
 	recList := httptest.NewRecorder()
-	reqList := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	reqList := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(recList, reqList)
 
 	if recList.Code != http.StatusOK {
@@ -1816,7 +1953,7 @@ func TestHandleUpdateModel_PreservesLegacyModelPrefixWhenProviderOmitted(t *test
 	}
 
 	recUpdate := httptest.NewRecorder()
-	reqUpdate := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+	reqUpdate := httptest.NewRequest(http.MethodPut, "/api/accounts/models/0", bytes.NewBufferString(`{
 		"model_name":"legacy-openrouter",
 		"model":"openai/gpt-5.4"
 	}`))
@@ -1861,7 +1998,7 @@ func TestHandleUpdateModel_RejectsUnsupportedReasoningEffort(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPut, "/api/accounts/models/0", bytes.NewBufferString(`{
 		"model_name":"openai",
 		"provider":"openai",
 		"model":"gpt-5.4",
@@ -1900,7 +2037,7 @@ func TestHandleUpdateModel_MigratesLegacyElevenLabsASRWhenProviderOmitted(t *tes
 	h.RegisterRoutes(mux)
 
 	recList := httptest.NewRecorder()
-	reqList := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	reqList := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(recList, reqList)
 
 	if recList.Code != http.StatusOK {
@@ -1924,7 +2061,7 @@ func TestHandleUpdateModel_MigratesLegacyElevenLabsASRWhenProviderOmitted(t *tes
 	}
 
 	recUpdate := httptest.NewRecorder()
-	reqUpdate := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+	reqUpdate := httptest.NewRequest(http.MethodPut, "/api/accounts/models/0", bytes.NewBufferString(`{
 		"model_name":"elevenlabs-asr",
 		"model":"scribe_v1",
 		"api_base":"https://api.elevenlabs.io"
@@ -1974,7 +2111,7 @@ func TestHandleUpdateModel_RoundTripsExplicitLegacyElevenLabsModelID(t *testing.
 	h.RegisterRoutes(mux)
 
 	recList := httptest.NewRecorder()
-	reqList := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	reqList := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(recList, reqList)
 
 	if recList.Code != http.StatusOK {
@@ -1998,7 +2135,7 @@ func TestHandleUpdateModel_RoundTripsExplicitLegacyElevenLabsModelID(t *testing.
 	}
 
 	recUpdate := httptest.NewRecorder()
-	reqUpdate := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+	reqUpdate := httptest.NewRequest(http.MethodPut, "/api/accounts/models/0", bytes.NewBufferString(`{
 		"model_name":"elevenlabs-asr",
 		"provider":"elevenlabs",
 		"model":"scribe_v1",
@@ -2050,7 +2187,7 @@ func TestHandleUpdateModel_ClearsDefaultWhenSavingASROnlyModel(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPut, "/api/accounts/models/0", bytes.NewBufferString(`{
 		"model_name":"elevenlabs-asr",
 		"provider":"elevenlabs",
 		"model":"scribe_v1",
@@ -2081,7 +2218,7 @@ func TestHandleAddModel_RejectsUnsupportedElevenLabsModelID(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name":"elevenlabs-asr",
 		"provider":"elevenlabs",
 		"model":"scribe_v2"
@@ -2118,7 +2255,7 @@ func TestHandleUpdateModel_PreservesLegacyModelPrefixWhenProviderOmittedAndModel
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPut, "/api/accounts/models/0", bytes.NewBufferString(`{
 		"model_name":"legacy-openrouter",
 		"model":"openai/gpt-5.5"
 	}`))
@@ -2163,7 +2300,7 @@ func TestHandleListModels_ReturnsProviderOptionsWithoutPersistingLegacyMigration
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -2326,7 +2463,7 @@ func TestHandleListModels_ReturnsProviderField(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -2368,7 +2505,7 @@ func TestHandleListModels_PreservesKnownProviderInCatalog(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -2428,7 +2565,7 @@ func TestHandleUpdateModel_AllowsExistingBedrockProvider(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPut, "/api/models/0", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPut, "/api/accounts/models/0", bytes.NewBufferString(`{
 		"model_name":"bedrock-claude",
 		"provider":"bedrock",
 		"model":"us.anthropic.claude-3-7-sonnet-20250219-v1:0",
@@ -2489,7 +2626,7 @@ func TestHandleListModels_ReturnsEffectiveProviderField(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -2552,7 +2689,7 @@ func TestHandleSetDefaultModel_RejectsNonexistentModel(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models/default", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models/default", bytes.NewBufferString(`{
 		"model_name": "gpt-4__key_1"
 	}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -2592,7 +2729,7 @@ func TestHandleSetDefaultModel_RejectsElevenLabsASRProvider(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models/default", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models/default", bytes.NewBufferString(`{
 		"model_name": "elevenlabs-asr"
 	}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -2606,7 +2743,7 @@ func TestHandleSetDefaultModel_RejectsElevenLabsASRProvider(t *testing.T) {
 	}
 }
 
-func TestHandleModels_ModelRouterRoundTripAndDefault(t *testing.T) {
+func TestHandleModels_AccountRouterRoundTripAndDefault(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()
 	resetModelProbeHooks(t)
@@ -2631,6 +2768,7 @@ func TestHandleModels_ModelRouterRoundTripAndDefault(t *testing.T) {
 
 	addBody := `{
 		"model_name": "router-main",
+		"model": "gpt-5.4",
 		"provider": "router",
 		"api_key": "sk-should-not-persist",
 		"router": {
@@ -2643,7 +2781,7 @@ func TestHandleModels_ModelRouterRoundTripAndDefault(t *testing.T) {
 		}
 	}`
 	addRec := httptest.NewRecorder()
-	addReq := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(addBody))
+	addReq := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(addBody))
 	addReq.Header.Set("Content-Type", "application/json")
 	mux.ServeHTTP(addRec, addReq)
 	if addRec.Code != http.StatusOK {
@@ -2660,6 +2798,7 @@ func TestHandleModels_ModelRouterRoundTripAndDefault(t *testing.T) {
 
 	updateBody := `{
 		"model_name": "router-main",
+		"model": "gpt-5.4",
 		"provider": "router",
 		"router": {
 			"enabled": true,
@@ -2679,7 +2818,7 @@ func TestHandleModels_ModelRouterRoundTripAndDefault(t *testing.T) {
 	updateRec := httptest.NewRecorder()
 	updateReq := httptest.NewRequest(
 		http.MethodPut,
-		fmt.Sprintf("/api/models/%d", addResp.Index),
+		fmt.Sprintf("/api/accounts/models/%d", addResp.Index),
 		bytes.NewBufferString(updateBody),
 	)
 	updateReq.SetPathValue("index", fmt.Sprint(addResp.Index))
@@ -2690,7 +2829,7 @@ func TestHandleModels_ModelRouterRoundTripAndDefault(t *testing.T) {
 	}
 
 	defaultRec := httptest.NewRecorder()
-	defaultReq := httptest.NewRequest(http.MethodPost, "/api/models/default", bytes.NewBufferString(`{
+	defaultReq := httptest.NewRequest(http.MethodPost, "/api/accounts/models/default", bytes.NewBufferString(`{
 		"model_name": "router-main"
 	}`))
 	defaultReq.Header.Set("Content-Type", "application/json")
@@ -2700,7 +2839,7 @@ func TestHandleModels_ModelRouterRoundTripAndDefault(t *testing.T) {
 	}
 
 	listRec := httptest.NewRecorder()
-	listReq := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	listReq := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
 	mux.ServeHTTP(listRec, listReq)
 	if listRec.Code != http.StatusOK {
 		t.Fatalf("list status = %d, want %d, body=%s", listRec.Code, http.StatusOK, listRec.Body.String())
@@ -2725,8 +2864,8 @@ func TestHandleModels_ModelRouterRoundTripAndDefault(t *testing.T) {
 	if routerModel == nil {
 		t.Fatal("router-main missing from list response")
 	}
-	if routerModel.Provider != config.ModelRouterProvider {
-		t.Fatalf("router provider = %q, want %q", routerModel.Provider, config.ModelRouterProvider)
+	if routerModel.Provider != config.AccountRouterProvider {
+		t.Fatalf("router provider = %q, want %q", routerModel.Provider, config.AccountRouterProvider)
 	}
 	if routerModel.Router == nil || routerModel.Router.Entry != "pool" {
 		t.Fatalf("router config = %#v, want entry pool", routerModel.Router)
@@ -2749,7 +2888,7 @@ func TestHandleModels_ModelRouterRoundTripAndDefault(t *testing.T) {
 	for _, option := range listResp.ProviderOptions {
 		optionsByID[option.ID] = option
 	}
-	if option, ok := optionsByID[config.ModelRouterProvider]; !ok {
+	if option, ok := optionsByID[config.AccountRouterProvider]; !ok {
 		t.Fatal("router provider option missing")
 	} else if option.CreateAllowed {
 		t.Fatal("router provider option should not be creatable through generic provider form")
@@ -2764,11 +2903,63 @@ func TestHandleModels_ModelRouterRoundTripAndDefault(t *testing.T) {
 	if got := updated.Agents.Defaults.ModelName; got != "router-main" {
 		t.Fatalf("default model = %q, want router-main", got)
 	}
-	if got := updated.ModelList[addResp.Index].APIKey(); got != "" {
-		t.Fatalf("persisted router API key = %q, want empty", got)
+	if len(updated.AccountRouters) != 1 {
+		t.Fatalf("len(account_routers) = %d, want 1", len(updated.AccountRouters))
 	}
-	if got := updated.ModelList[addResp.Index].Model; got != "" {
-		t.Fatalf("persisted router model = %q, want empty", got)
+	if got := updated.AccountRouters[0].Name; got != "router-main" {
+		t.Fatalf("account router name = %q, want router-main", got)
+	}
+	rawConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile(config) error = %v", err)
+	}
+	var persisted struct {
+		ModelList []struct {
+			ModelName string                     `json:"model_name"`
+			Router    map[string]any             `json:"router"`
+			APIKeys   []string                   `json:"api_keys"`
+			Extra     map[string]json.RawMessage `json:"-"`
+		} `json:"model_list"`
+		AccountRouters []config.AccountRouterConfig `json:"account_routers"`
+	}
+	if err = json.Unmarshal(rawConfig, &persisted); err != nil {
+		t.Fatalf("Unmarshal persisted config error = %v", err)
+	}
+	if len(persisted.AccountRouters) != 1 {
+		t.Fatalf("persisted account_routers = %d, want 1", len(persisted.AccountRouters))
+	}
+	for _, model := range persisted.ModelList {
+		if model.ModelName == "router-main" {
+			t.Fatalf("router-main persisted in model_list: %#v", model)
+		}
+	}
+}
+
+func TestLegacyModelRoutesAreNotRegistered(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/api/models"},
+		{method: http.MethodPost, path: "/api/models"},
+		{method: http.MethodPost, path: "/api/models/fetch"},
+		{method: http.MethodGet, path: "/api/models/catalog"},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+			}
+		})
 	}
 }
 
@@ -2793,7 +2984,7 @@ func TestHandleAddModel_RejectsRouterUnknownAccountAsBadRequest(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name": "router-main",
 		"provider": "router",
 		"router": {
@@ -2839,8 +3030,9 @@ func TestHandleAddModel_AcceptsGitHubCopilotCredentialAccountRouterRef(t *testin
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name": "copilot-router",
+		"model": "copilot-router",
 		"provider": "router",
 		"router": {
 			"enabled": true,
@@ -2871,16 +3063,16 @@ func TestHandleAddModel_AcceptsGitHubCopilotCredentialAccountRouterRef(t *testin
 	if got := router.Router.Blocks[0].Account; got != "credential:github-copilot:gh-copilot" {
 		t.Fatalf("router account = %q, want credential:github-copilot:gh-copilot", got)
 	}
-	if got := router.Model; got != "" {
-		t.Fatalf("router model = %q, want empty", got)
+	if got := router.Model; got != "copilot-router" {
+		t.Fatalf("router model = %q, want copilot-router", got)
 	}
 }
 
 func TestHandleAddModel_AcceptsGitHubCopilotCredentialLoadBalanceRouterRefs(t *testing.T) {
 	for _, strategy := range []string{
-		config.ModelRouterStrategyBlind,
-		config.ModelRouterStrategyTokensSpent,
-		config.ModelRouterStrategyClosestLimit,
+		config.AccountRouterStrategyBlind,
+		config.AccountRouterStrategyTokensSpent,
+		config.AccountRouterStrategyClosestLimit,
 	} {
 		t.Run(strategy, func(t *testing.T) {
 			configPath, cleanup := setupOAuthTestEnv(t)
@@ -2901,8 +3093,9 @@ func TestHandleAddModel_AcceptsGitHubCopilotCredentialLoadBalanceRouterRefs(t *t
 			h.RegisterRoutes(mux)
 
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewBufferString(fmt.Sprintf(`{
+			req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(fmt.Sprintf(`{
 				"model_name": "copilot-router",
+				"model": "copilot-router",
 				"provider": "router",
 				"router": {
 					"enabled": true,
@@ -2932,7 +3125,7 @@ func TestHandleAddModel_AcceptsGitHubCopilotCredentialLoadBalanceRouterRefs(t *t
 				t.Fatalf("router config = %#v, want one block", router.Router)
 			}
 			block := router.Router.Blocks[0]
-			if block.Type != config.ModelRouterBlockTypeLoadBalance {
+			if block.Type != config.AccountRouterBlockTypeLoadBalance {
 				t.Fatalf("router block type = %q, want load_balance", block.Type)
 			}
 			if block.Strategy != strategy {
@@ -2942,8 +3135,8 @@ func TestHandleAddModel_AcceptsGitHubCopilotCredentialLoadBalanceRouterRefs(t *t
 			if fmt.Sprint(block.Accounts) != fmt.Sprint(wantAccounts) {
 				t.Fatalf("router accounts = %v, want %v", block.Accounts, wantAccounts)
 			}
-			if got := router.Model; got != "" {
-				t.Fatalf("router model = %q, want empty", got)
+			if got := router.Model; got != "copilot-router" {
+				t.Fatalf("router model = %q, want copilot-router", got)
 			}
 		})
 	}
@@ -3210,7 +3403,7 @@ func TestHandleFetchModels_SiliconFlowUsesOpenAICompatibleEndpoint(t *testing.T)
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models/fetch", bytes.NewBufferString(fmt.Sprintf(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models/fetch", bytes.NewBufferString(fmt.Sprintf(`{
 		"provider":"siliconflow",
 		"api_key":"sk-siliconflow",
 		"api_base":"%s"
@@ -3266,7 +3459,7 @@ func TestHandleFetchModels_NearAIUsesPublicModelListEndpoint(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models/fetch", bytes.NewBufferString(fmt.Sprintf(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models/fetch", bytes.NewBufferString(fmt.Sprintf(`{
 		"provider":"nearai",
 		"api_key":"nearai-key",
 		"api_base":"%s"
@@ -3371,7 +3564,7 @@ func TestHandleFetchModels_GitHubCopilotCredentialUsesDirectModelList(t *testing
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models/fetch", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models/fetch", bytes.NewBufferString(`{
 		"provider":"github-copilot",
 		"auth_method":"token",
 		"credential_id":"github-copilot:gh-copilot"
@@ -3460,7 +3653,7 @@ func TestHandleFetchModels_OpenAIOAuthStoredModelUsesCodexModelsEndpoint(t *test
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models/fetch", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models/fetch", bytes.NewBufferString(`{
 		"provider":"openai",
 		"api_base":"https://api.openai.com/v1",
 		"model_index":0
@@ -3536,7 +3729,7 @@ func TestHandleFetchModels_OpenAIOAuthRequestCredentialFetchesWithoutAPIKey(t *t
 	h.RegisterRoutes(mux)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models/fetch", bytes.NewBufferString(`{
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models/fetch", bytes.NewBufferString(`{
 		"provider":"openai",
 		"api_base":"https://api.openai.com/v1",
 		"auth_method":"oauth"
@@ -3633,7 +3826,7 @@ func TestHandleFetchModels_ModelIndexUsesStoredKey(t *testing.T) {
 	idx := 0
 	body := fmt.Sprintf(`{"provider":"openai","api_base":"%s","model_index":%d}`, srv.URL, idx)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models/fetch", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models/fetch", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	mux.ServeHTTP(rec, req)
 
@@ -3689,7 +3882,7 @@ func TestHandleFetchModels_ModelIndexProviderMismatchRejectsKey(t *testing.T) {
 
 	body := fmt.Sprintf(`{"provider":"siliconflow","api_base":"%s","model_index":0}`, srv.URL)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/models/fetch", bytes.NewBufferString(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models/fetch", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	mux.ServeHTTP(rec, req)
 }

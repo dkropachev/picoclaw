@@ -53,6 +53,7 @@ Owns: CODE web/frontend/src/api/gateway.ts
 Owns: CODE web/frontend/src/api/pico.ts
 Owns: CODE web/frontend/src/components/channels/**
 Owns: CODE web/frontend/src/components/chat/**
+Owns: CODE web/frontend/src/components/chat/chat-empty-state.tsx
 Owns: CODE web/frontend/src/features/chat/**
 Owns: CODE web/frontend/src/hooks/use-gateway*
 Owns: CODE web/frontend/src/hooks/use-pico-chat.ts

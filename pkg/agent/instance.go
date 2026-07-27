@@ -8,12 +8,12 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/memory"
-	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
@@ -60,9 +60,9 @@ type AgentInstance struct {
 	// CandidateProviders maps stable candidate identity keys and provider/model
 	// keys to per-candidate LLMProvider instances. Stable identities let account
 	// routers keep separate credentials even when accounts use the same provider
-	// and model.
+	// and shared model.
 	CandidateProviders map[string]providers.LLMProvider
-	ModelRouter        *modelrouter.Router
+	AccountRouter      *accountrouter.Router
 
 	managedCalibrationCache map[string]workflowManagedCalibrationCacheEntry
 }
@@ -309,9 +309,9 @@ func NewAgentInstance(
 
 	candidateProviders := make(map[string]providers.LLMProvider)
 	populateCandidateProvidersFromNames(cfg, workspace, fallbacks, candidateProviders)
-	modelRouter := buildModelRouter(cfg, defaults.Provider, model, workspace, candidateProviders)
-	if modelRouter != nil {
-		initialSelection := modelRouter.Select("", modelrouter.SelectReasonInitial)
+	accountRouter := buildAccountRouter(cfg, defaults.Provider, model, workspace, candidateProviders)
+	if accountRouter != nil {
+		initialSelection := accountRouter.Select("", accountrouter.SelectReasonInitial)
 		candidates = initialSelection.Candidates
 	}
 	if strings.TrimSpace(defaults.ImageModel) != "" {
@@ -387,30 +387,32 @@ func NewAgentInstance(
 		LightCandidates:           lightCandidates,
 		LightProvider:             lightProvider,
 		CandidateProviders:        candidateProviders,
-		ModelRouter:               modelRouter,
+		AccountRouter:             accountRouter,
 		managedCalibrationCache:   make(map[string]workflowManagedCalibrationCacheEntry),
 	}
 }
 
-func buildModelRouter(
+func buildAccountRouter(
 	cfg *config.Config,
 	defaultProvider string,
 	model string,
 	workspace string,
 	providersOut map[string]providers.LLMProvider,
-) *modelrouter.Router {
+) *accountrouter.Router {
 	modelCfg := lookupModelConfigByRef(cfg, model, defaultProvider)
-	if modelCfg == nil || !modelCfg.IsModelRouter() || modelCfg.Router == nil {
+	if modelCfg == nil || !modelCfg.IsAccountRouter() || modelCfg.Router == nil {
 		return nil
 	}
-	accountNames := modelRouterAccountNames(modelCfg.Router)
-	accounts := make(map[string]modelrouter.Account, len(accountNames))
+	accountNames := accountRouterAccountNames(modelCfg.Router)
+	sharedModel := accountRouterSharedModel(modelCfg)
+	accounts := make(map[string]accountrouter.Account, len(accountNames))
 	for _, accountName := range accountNames {
-		candidates := modelRouterAccountCandidates(
+		candidates := accountRouterAccountCandidates(
 			cfg,
 			defaultProvider,
 			workspace,
 			accountName,
+			sharedModel,
 			providersOut,
 		)
 		if len(candidates) == 0 {
@@ -420,31 +422,136 @@ func buildModelRouter(
 		if accountCfg := lookupModelConfigByRef(cfg, accountName, defaultProvider); accountCfg != nil {
 			rpm = accountCfg.RPM
 		}
-		accounts[accountName] = modelrouter.Account{
+		accounts[accountName] = accountrouter.Account{
 			Name:       accountName,
 			Candidates: candidates,
 			RPM:        rpm,
 		}
 	}
-	populateCandidateProvidersFromNames(cfg, workspace, accountNames, providersOut)
-	statePath := filepath.Join(workspace, "model_router_state.json")
-	return modelrouter.New(modelCfg.ModelName, modelCfg.Router, accounts, statePath)
+	if sharedModel == "" {
+		populateCandidateProvidersFromNames(cfg, workspace, accountNames, providersOut)
+	}
+	statePath := filepath.Join(workspace, "account_router_state.json")
+	return accountrouter.New(modelCfg.ModelName, modelCfg.Router, accounts, statePath)
 }
 
-func modelRouterAccountCandidates(
+func accountRouterSharedModel(modelCfg *config.ModelConfig) string {
+	if modelCfg == nil {
+		return ""
+	}
+	model := strings.TrimSpace(modelCfg.Model)
+	if model == "" || model == strings.TrimSpace(modelCfg.ModelName) {
+		return ""
+	}
+	return model
+}
+
+func accountRouterAccountCandidates(
 	cfg *config.Config,
 	defaultProvider string,
 	workspace string,
 	accountName string,
+	sharedModel string,
 	providersOut map[string]providers.LLMProvider,
 ) []providers.FallbackCandidate {
-	if _, ok := config.ModelRouterCredentialAccountID(accountName); ok {
+	if credentialCfg, ok := accountRouterCredentialAccountConfig(accountName, sharedModel); ok {
+		if credentialCfg == nil {
+			return nil
+		}
+		candidate, ok := candidateFromModelConfig(defaultProvider, credentialCfg)
+		if !ok {
+			return nil
+		}
+		provider, _, err := providers.CreateProviderFromConfig(credentialCfg)
+		if err != nil {
+			logger.WarnCF("agent", "account router: failed to create credential account provider",
+				map[string]any{
+					"account": accountName,
+					"model":   sharedModel,
+					"error":   err.Error(),
+				})
+			return []providers.FallbackCandidate{candidate}
+		}
+		if !registerCandidateProvider(providersOut, candidate, provider) {
+			closeProviderIfStateful(provider)
+		}
+		return []providers.FallbackCandidate{candidate}
+	}
+	if strings.TrimSpace(sharedModel) == "" {
+		return resolveModelCandidates(cfg, defaultProvider, accountName, nil)
+	}
+	accountCfg := lookupModelConfigByRef(cfg, accountName, defaultProvider)
+	if accountCfg == nil || accountCfg.IsAccountRouter() {
 		return nil
 	}
-	return resolveModelCandidates(cfg, defaultProvider, accountName, nil)
+	clone := cloneModelConfigForResolution(defaultProvider, accountCfg, workspace)
+	clone.Model = sharedModel
+	candidate, ok := candidateFromModelConfig(defaultProvider, clone)
+	if !ok {
+		return nil
+	}
+	provider, _, err := providers.CreateProviderFromConfig(clone)
+	if err != nil {
+		logger.WarnCF("agent", "account router: failed to create provider",
+			map[string]any{
+				"account": accountName,
+				"model":   sharedModel,
+				"error":   err.Error(),
+			})
+		return []providers.FallbackCandidate{candidate}
+	}
+	if !registerCandidateProvider(providersOut, candidate, provider) {
+		closeProviderIfStateful(provider)
+	}
+	return []providers.FallbackCandidate{candidate}
 }
 
-func modelRouterAccountNames(routerCfg *config.ModelRouterConfig) []string {
+func accountRouterCredentialAccountConfig(accountName string, sharedModel string) (*config.ModelConfig, bool) {
+	credentialID, ok := config.AccountRouterCredentialAccountID(accountName)
+	if !ok {
+		return nil, false
+	}
+	if strings.TrimSpace(sharedModel) == "" {
+		return nil, true
+	}
+	provider, ok := config.AccountRouterCredentialAccountProvider(accountName)
+	if !ok {
+		return nil, true
+	}
+	provider = credentialRuntimeProvider(provider)
+	return &config.ModelConfig{
+		ModelName:    strings.TrimSpace(accountName),
+		Provider:     provider,
+		Model:        strings.TrimSpace(sharedModel),
+		AuthMethod:   credentialRuntimeAuthMethod(provider),
+		CredentialID: credentialID,
+		Enabled:      true,
+	}, true
+}
+
+func credentialRuntimeProvider(provider string) string {
+	switch strings.TrimSpace(provider) {
+	case "google-antigravity":
+		return "antigravity"
+	case "copilot":
+		return "github-copilot"
+	default:
+		return strings.TrimSpace(provider)
+	}
+}
+
+func credentialRuntimeAuthMethod(provider string) string {
+	switch strings.TrimSpace(provider) {
+	case "openai":
+		return "oauth"
+	case "anthropic", "github-copilot":
+		return "token"
+	default:
+		return "token"
+	}
+}
+
+func accountRouterAccountNames(routerCfg *config.AccountRouterConfig) []string {
 	if routerCfg == nil {
 		return nil
 	}
@@ -460,9 +567,9 @@ func modelRouterAccountNames(routerCfg *config.ModelRouterConfig) []string {
 	}
 	for _, block := range routerCfg.Blocks {
 		switch strings.TrimSpace(block.Type) {
-		case config.ModelRouterBlockTypeAccount:
+		case config.AccountRouterBlockTypeAccount:
 			add(block.Account)
-		case config.ModelRouterBlockTypeLoadBalance:
+		case config.AccountRouterBlockTypeLoadBalance:
 			for _, account := range block.Accounts {
 				add(account)
 			}
@@ -531,7 +638,7 @@ func resolvePrimaryProviderForAgent(
 	if modelCfg == nil {
 		return fallback
 	}
-	if modelCfg.IsModelRouter() {
+	if modelCfg.IsAccountRouter() {
 		return fallback
 	}
 	clone := *modelCfg

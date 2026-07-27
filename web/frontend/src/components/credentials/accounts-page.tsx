@@ -18,7 +18,12 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
-import { type ModelInfo, getModels, setDefaultModel } from "@/api/models"
+import {
+  type ModelInfo,
+  type ModelProviderOption,
+  getModels,
+  setDefaultModel,
+} from "@/api/models"
 import {
   type CodexAccountLimitAccount,
   type CodexAccountLimitsResponse,
@@ -43,6 +48,10 @@ import { CodexAccountLimitSummary } from "./codex-account-limits-panel"
 import { DeviceCodeSheet } from "./device-code-sheet"
 import { LogoutConfirmDialog } from "./logout-confirm-dialog"
 import { ProviderStatusLine } from "./provider-status-line"
+
+function isAccountRouterModel(model: ModelInfo): boolean {
+  return model.provider === "router" || model.router != null
+}
 
 function getAccountCredentialID(account: OAuthProviderStatus): string {
   return account.credential_id || account.provider
@@ -686,13 +695,16 @@ function AccountsHomePage() {
   const navigate = useNavigate()
   const [onboardingOpen, setOnboardingOpen] = useState(false)
   const [models, setModels] = useState<ModelInfo[]>([])
+  const [providerOptions, setProviderOptions] = useState<ModelProviderOption[]>(
+    [],
+  )
   const [modelsLoading, setModelsLoading] = useState(true)
   const [modelsError, setModelsError] = useState("")
   const [codexLimits, setCodexLimits] =
     useState<CodexAccountLimitsResponse | null>(null)
   const [codexLimitsLoading, setCodexLimitsLoading] = useState(true)
   const [codexLimitsError, setCodexLimitsError] = useState("")
-  const [deletingRouter, setDeletingRouter] = useState<ModelInfo | null>(null)
+  const [deletingModel, setDeletingModel] = useState<ModelInfo | null>(null)
   const [settingDefaultIndex, setSettingDefaultIndex] = useState<number | null>(
     null,
   )
@@ -735,6 +747,7 @@ function AccountsHomePage() {
     try {
       const data = await getModels()
       setModels(data.models)
+      setProviderOptions(data.provider_options || [])
       setModelsError("")
     } catch (err) {
       setModelsError(err instanceof Error ? err.message : t("models.loadError"))
@@ -768,14 +781,11 @@ function AccountsHomePage() {
     void fetchCodexLimits()
   }, [fetchCodexLimits])
 
-  const routers = models
-    .filter((item) => item.provider === "router" || item.router != null)
-    .sort((a, b) => {
-      if (a.is_default && !b.is_default) return -1
-      if (!a.is_default && b.is_default) return 1
-      return a.model_name.localeCompare(b.model_name)
-    })
-
+  const routers = models.filter(isAccountRouterModel).sort((a, b) => {
+    if (a.is_default && !b.is_default) return -1
+    if (!a.is_default && b.is_default) return 1
+    return a.model_name.localeCompare(b.model_name)
+  })
   const hasAccountCards = registeredAccounts.length > 0 || routers.length > 0
 
   const handleAddRouter = () => {
@@ -887,7 +897,7 @@ function AccountsHomePage() {
                       })
                     }}
                     onSetDefault={(item) => void handleSetDefault(item)}
-                    onDelete={setDeletingRouter}
+                    onDelete={setDeletingModel}
                     settingDefault={settingDefaultIndex === router.index}
                   />
                 ))}
@@ -919,14 +929,15 @@ function AccountsHomePage() {
       </div>
 
       <DeleteModelDialog
-        model={deletingRouter}
-        onClose={() => setDeletingRouter(null)}
+        model={deletingModel}
+        onClose={() => setDeletingModel(null)}
         onDeleted={fetchModels}
       />
 
       <AccountOnboardingSheet
         open={onboardingOpen}
         providers={providers}
+        providerOptions={providerOptions}
         registeredAccounts={registeredAccounts}
         activeAction={activeAction}
         onOpenChange={setOnboardingOpen}

@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
-	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -233,8 +233,8 @@ func (p *Pipeline) CallLLM(
 				)
 			}
 			if fbErr != nil {
-				if ts.agent.ModelRouter != nil {
-					ts.agent.ModelRouter.RecordFallbackResult(
+				if ts.agent.AccountRouter != nil {
+					ts.agent.AccountRouter.RecordFallbackResult(
 						exec.routerSelection,
 						fallbackResultFromError(fbErr),
 						fbErr,
@@ -242,8 +242,8 @@ func (p *Pipeline) CallLLM(
 				}
 				return nil, fbErr
 			}
-			if ts.agent.ModelRouter != nil {
-				ts.agent.ModelRouter.RecordFallbackResult(exec.routerSelection, fbResult, nil)
+			if ts.agent.AccountRouter != nil {
+				ts.agent.AccountRouter.RecordFallbackResult(exec.routerSelection, fbResult, nil)
 			}
 			if fbResult.Provider != "" && len(fbResult.Attempts) > 0 {
 				logger.InfoCF(
@@ -272,12 +272,12 @@ func (p *Pipeline) CallLLM(
 			exec.llmModel,
 			exec.llmOpts,
 		)
-		if ts.agent.ModelRouter != nil {
+		if ts.agent.AccountRouter != nil {
 			candidate := providers.FallbackCandidate{}
 			if len(exec.activeCandidates) > 0 {
 				candidate = exec.activeCandidates[0]
 			}
-			ts.agent.ModelRouter.RecordFallbackResult(
+			ts.agent.AccountRouter.RecordFallbackResult(
 				exec.routerSelection,
 				fallbackResultFromSingleCandidate(candidate, resp),
 				err,
@@ -477,7 +477,7 @@ func (p *Pipeline) CallLLM(
 				)
 				break
 			}
-			p.reselectModelRouterAfterCompression(ts, exec)
+			p.reselectAccountRouterAfterCompression(ts, exec)
 			continue
 		}
 		break
@@ -728,11 +728,11 @@ func (p *Pipeline) applyBeforeLLMModelRewrite(ts *turnState, exec *turnExecution
 	exec.activeModelConfig = resolveActiveModelConfig(p.Cfg, ts.agent.Workspace, candidates, rawModel, defaultProvider)
 }
 
-func (p *Pipeline) reselectModelRouterAfterCompression(ts *turnState, exec *turnExecution) {
-	if p == nil || ts == nil || ts.agent == nil || ts.agent.ModelRouter == nil || exec == nil {
+func (p *Pipeline) reselectAccountRouterAfterCompression(ts *turnState, exec *turnExecution) {
+	if p == nil || ts == nil || ts.agent == nil || ts.agent.AccountRouter == nil || exec == nil {
 		return
 	}
-	selection := ts.agent.ModelRouter.Select(ts.sessionKey, modelrouter.SelectReasonCompression)
+	selection := ts.agent.AccountRouter.Select(ts.sessionKey, accountrouter.SelectReasonCompression)
 	if len(selection.Candidates) == 0 {
 		return
 	}
@@ -749,7 +749,7 @@ func (p *Pipeline) reselectModelRouterAfterCompression(ts *turnState, exec *turn
 		exec.activeModel,
 		p.Cfg.Agents.Defaults.Provider,
 	)
-	logger.InfoCF("agent", "Model router reselected after context compression",
+	logger.InfoCF("agent", "Account router reselected after context compression",
 		map[string]any{
 			"agent_id":    ts.agent.ID,
 			"session_key": ts.sessionKey,

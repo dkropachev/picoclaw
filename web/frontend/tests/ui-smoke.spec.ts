@@ -3,7 +3,6 @@ import { type Page, type Route, expect, test } from "@playwright/test"
 
 const smokeRoutes = [
   "/",
-  "/models",
   "/accounts",
   "/logs",
   "/agent/git-workspaces",
@@ -49,6 +48,23 @@ const modelResponse = {
       id: "openai",
       display_name: "OpenAI",
       default_api_base: "https://api.openai.com/v1",
+      empty_api_key_allowed: false,
+      create_allowed: true,
+      default_model_allowed: true,
+      supports_fetch: true,
+    },
+    {
+      id: "gemini",
+      display_name: "Google Gemini",
+      default_api_base: "https://generativelanguage.googleapis.com/v1beta",
+      empty_api_key_allowed: false,
+      create_allowed: true,
+      default_model_allowed: true,
+    },
+    {
+      id: "deepseek",
+      display_name: "DeepSeek",
+      default_api_base: "https://api.deepseek.com/v1",
       empty_api_key_allowed: false,
       create_allowed: true,
       default_model_allowed: true,
@@ -536,7 +552,7 @@ async function mockLauncherApis(
 
       if (method === "POST") {
         switch (path) {
-          case "/api/models/fetch": {
+          case "/api/accounts/models/fetch": {
             const body = request.postDataJSON() as {
               credential_id?: string
             }
@@ -839,9 +855,9 @@ async function mockLauncherApis(
               discord: { enabled: false },
             },
           })
-        case "/api/models":
+        case "/api/accounts/models":
           return json(route, options.modelResponse ?? modelResponse)
-        case "/api/models/catalog":
+        case "/api/accounts/models/catalog":
           return json(route, { entries: [], total: 0 })
         case "/api/oauth/providers":
           return json(route, { providers: options.oauthProviders ?? [] })
@@ -1380,11 +1396,19 @@ test("accounts page lists registered accounts and opens onboarding", async ({
   await expect(page.getByText("64%")).toBeVisible()
   await expect(page.getByText("personal@example.test")).not.toBeVisible()
   await expect(page.getByText("Anthropic")).not.toBeVisible()
+  await expect(page.getByText("gpt-4o-mini")).toHaveCount(0)
+  await expect(page.getByText("gpt-4o")).toHaveCount(0)
 
   await page.getByRole("button", { name: "Add Account" }).first().click()
   await expect(
     page.getByRole("dialog", { name: "Onboard Account" }),
   ).toBeVisible()
+  await page.getByRole("combobox").first().click()
+  await expect(page.getByRole("option", { name: "DeepSeek" })).toBeVisible()
+  await expect(
+    page.getByRole("option", { name: "Google Gemini" }),
+  ).toBeVisible()
+  await page.keyboard.press("Escape")
   await expect(page.getByPlaceholder("work")).toBeVisible()
   await expect(page.getByText("OAuth logins can infer this")).toBeVisible()
   expect(errors).toEqual([])
@@ -1404,7 +1428,7 @@ test("accounts page shows account routers beside registered accounts", async ({
           index: 2,
           model_name: "router-main",
           provider: "router",
-          model: "",
+          model: "gpt-4o",
           api_key: "",
           enabled: true,
           available: true,
@@ -1428,50 +1452,8 @@ test("accounts page shows account routers beside registered accounts", async ({
             ],
           },
         },
-        {
-          index: 3,
-          model_name: "router-missing",
-          provider: "router",
-          model: "",
-          api_key: "",
-          enabled: true,
-          available: true,
-          status: "available",
-          is_default: false,
-          is_virtual: false,
-          default_model_allowed: true,
-          router: {
-            enabled: true,
-            entry: "primary",
-            blocks: [
-              {
-                id: "primary",
-                type: "account",
-                account: "credential:openai:gone",
-              },
-            ],
-          },
-        },
-        {
-          index: 4,
-          model_name: "router-empty",
-          provider: "router",
-          model: "",
-          api_key: "",
-          enabled: true,
-          available: true,
-          status: "available",
-          is_default: false,
-          is_virtual: false,
-          default_model_allowed: true,
-          router: {
-            enabled: true,
-            entry: "",
-            blocks: [],
-          },
-        },
       ],
-      total: 5,
+      total: 3,
     },
     oauthProviders: [
       {
@@ -1508,30 +1490,12 @@ test("accounts page shows account routers beside registered accounts", async ({
   const mainRouterCard = page.locator("article").filter({
     has: page.getByRole("heading", { name: "router-main" }),
   })
-  const missingRouterCard = page.locator("article").filter({
-    has: page.getByRole("heading", { name: "router-missing" }),
-  })
-  const emptyRouterCard = page.locator("article").filter({
-    has: page.getByRole("heading", { name: "router-empty" }),
-  })
 
   await expect(page.getByRole("heading", { name: "router-main" })).toBeVisible()
   await expect(mainRouterCard.getByText("Account Router")).toBeVisible()
-  await expect(page.getByText("Shared Model")).toHaveCount(0)
-  await expect(page.getByText("Connected Accounts")).toHaveCount(0)
-  await expect(page.getByText(/Primary account:/)).toHaveCount(0)
-  await expect(page.getByText("No fallback configured")).toHaveCount(0)
-  await expect(page.getByText("Available")).toHaveCount(0)
   await expect(mainRouterCard.getByText("Needs attention")).toBeVisible()
-  await expect(
-    missingRouterCard.getByText("No accounts referenced"),
-  ).toBeVisible()
-  await expect(emptyRouterCard.getByText("No accounts referenced")).toHaveCount(
-    2,
-  )
   await expect(page.getByText("work: Connected")).toBeVisible()
   await expect(page.getByText("backup: Needs refresh")).toBeVisible()
-  await expect(page.getByText("openai:gone: missing")).toBeVisible()
   await expect(
     page.getByRole("heading", { name: "Account Routers" }),
   ).toHaveCount(0)
@@ -1546,16 +1510,23 @@ test("accounts page shows account routers beside registered accounts", async ({
   expect(errors).toEqual([])
 })
 
-test("model catalog dialog fits the viewport", async ({ page }) => {
+test("accounts page creates accounts through account actions only", async ({
+  page,
+}) => {
   const errors = collectPageErrors(page)
 
-  await gotoMockedRoute(page, "/models")
-  await page.getByRole("button", { name: "Saved Catalogs" }).click()
+  await gotoMockedRoute(page, "/accounts")
 
   await expect(
-    page.getByRole("dialog", { name: "Saved Model Catalogs" }),
+    page.getByRole("button", { name: "Add Account" }).first(),
   ).toBeVisible()
-  await expectElementFitsViewport(page, '[role="dialog"]', "model catalog")
+  await expect(
+    page.getByRole("button", { name: "Account Router" }),
+  ).toBeVisible()
+  await expect(page.getByRole("button", { name: "Add Model" })).toHaveCount(0)
+  await expect(
+    page.getByRole("button", { name: "Saved Catalogs" }),
+  ).toHaveCount(0)
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
@@ -1644,11 +1615,9 @@ test("account router editor supports block fallback graph editing", async ({
   await expect(
     page.getByText("OpenAI: acct-empty: No models returned."),
   ).toBeVisible()
-  await expect(page.getByText("Shared models")).toBeVisible()
-  await expect(page.getByText("gpt-4o")).toBeVisible()
-  await expect(
-    page.getByRole("combobox", { name: "Shared Model" }),
-  ).toHaveCount(0)
+  await page.getByRole("combobox", { name: "Shared Model" }).click()
+  await expect(page.getByRole("option", { name: "gpt-4o" })).toBeVisible()
+  await page.keyboard.press("Escape")
 
   await page.getByRole("button", { name: "account-1", exact: true }).click()
   await page.getByRole("combobox", { name: "Fallback Connection" }).click()
@@ -2023,8 +1992,8 @@ test("mobile sidebar opens, fits the viewport, and navigates", async ({
     "mobile sidebar",
   )
   await sidebar.getByRole("button", { name: "Services" }).click()
-  await sidebar.getByRole("link", { name: /Models/ }).click()
-  await expect(page).toHaveURL(/\/models$/)
+  await sidebar.getByRole("link", { name: /Accounts/ }).click()
+  await expect(page).toHaveURL(/\/accounts$/)
   await expect(sidebar).toBeHidden()
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
