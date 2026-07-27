@@ -134,6 +134,7 @@ type turnExecution struct {
 	activeModelConfig *config.ModelConfig
 	activeProvider    providers.LLMProvider
 	usedLight         bool
+	accountRouter     *accountrouter.Router
 	routerSelection   accountrouter.Selection
 
 	// LLM call per-iteration state

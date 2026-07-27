@@ -1,7 +1,12 @@
 import { renderHook, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-import { type ModelInfo, getModels, setDefaultModel } from "@/api/models"
+import {
+  type ModelInfo,
+  fetchUpstreamModels,
+  getModels,
+  setDefaultModel,
+} from "@/api/models"
 import { useChatModels } from "@/hooks/use-chat-models"
 
 vi.mock("react-i18next", () => ({
@@ -13,6 +18,7 @@ vi.mock("sonner", () => ({
 }))
 
 vi.mock("@/api/models", () => ({
+  fetchUpstreamModels: vi.fn(),
   getModels: vi.fn(),
   setDefaultModel: vi.fn(),
 }))
@@ -43,10 +49,15 @@ function model(overrides: Partial<ModelInfo>): ModelInfo {
 describe("useChatModels", () => {
   beforeEach(() => {
     vi.mocked(getModels).mockReset()
+    vi.mocked(fetchUpstreamModels).mockReset()
     vi.mocked(setDefaultModel).mockReset()
+    vi.mocked(fetchUpstreamModels).mockResolvedValue({
+      models: [{ id: "gpt-5.5" }],
+      total: 1,
+    })
   })
 
-  it("keeps virtual account routers selectable and excludes other virtual models", async () => {
+  it("keeps accounts and account routers selectable and excludes model routers", async () => {
     vi.mocked(getModels).mockResolvedValue({
       models: [
         model({
@@ -84,6 +95,24 @@ describe("useChatModels", () => {
           credential_id: "github-copilot:gh-copilot",
           is_virtual: true,
         }),
+        model({
+          index: 5,
+          model_name: "task-router",
+          provider: "model-router",
+          model_router: {
+            name: "task-router",
+            enabled: true,
+            entry: "entry",
+            blocks: [
+              {
+                id: "entry",
+                type: "model",
+                model: "credential:openai:work",
+              },
+            ],
+          },
+          is_virtual: true,
+        }),
       ],
       total: 3,
       default_model: "router-1",
@@ -96,14 +125,16 @@ describe("useChatModels", () => {
       expect(result.current.defaultModelName).toBe("router-1")
     })
 
-    expect(result.current.accountModels.map((m) => m.model_name)).toEqual([
-      "credential:openai:work",
+    expect(result.current.accountModels.map((m) => m.accountName)).toEqual([
       "credential:github-copilot:gh-copilot",
+      "credential:openai:work",
     ])
     expect(result.current.accountRouterModels.map((m) => m.model_name)).toEqual(
       ["router-1"],
     )
     expect(result.current.hasAvailableModels).toBe(true)
+    expect(result.current.selectedAccountName).toBe("router-1")
+    expect(result.current.selectedModelID).toBe("gpt-5.5")
   })
 
   it("does not expose API-key or local models in chat selector groups", async () => {

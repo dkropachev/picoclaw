@@ -12,10 +12,15 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipeline) (turnResult, error) {
+func (al *AgentLoop) runTurn(
+	ctx context.Context,
+	ts *turnState,
+	pipeline *Pipeline,
+) (turnResult, error) {
 	turnCtx, turnCancel := context.WithCancel(ctx)
 	defer turnCancel()
 	ts.setTurnCancel(turnCancel)
@@ -122,18 +127,26 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 		// Check if parent turn has ended (SubTurn support from HEAD)
 		if ts.parentTurnState != nil && ts.IsParentEnded() {
 			if !ts.critical {
-				logger.InfoCF("agent", "Parent turn ended, non-critical SubTurn exiting gracefully", map[string]any{
+				logger.InfoCF(
+					"agent",
+					"Parent turn ended, non-critical SubTurn exiting gracefully",
+					map[string]any{
+						"agent_id":  ts.agentID,
+						"iteration": iteration,
+						"turn_id":   ts.turnID,
+					},
+				)
+				break
+			}
+			logger.InfoCF(
+				"agent",
+				"Parent turn ended, critical SubTurn continues running",
+				map[string]any{
 					"agent_id":  ts.agentID,
 					"iteration": iteration,
 					"turn_id":   ts.turnID,
-				})
-				break
-			}
-			logger.InfoCF("agent", "Parent turn ended, critical SubTurn continues running", map[string]any{
-				"agent_id":  ts.agentID,
-				"iteration": iteration,
-				"turn_id":   ts.turnID,
-			})
+				},
+			)
 		}
 
 		// Poll for pending SubTurn results (from HEAD)
@@ -221,7 +234,14 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 			if finalContent == "" {
 				finalContent = ts.opts.DefaultResponse
 			}
-			result, finalizeErr := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+			result, finalizeErr := pipeline.Finalize(
+				ctx,
+				turnCtx,
+				ts,
+				exec,
+				turnStatus,
+				finalContent,
+			)
 			if finalizeErr != nil {
 				turnStatus = TurnEndStatusError
 			}
@@ -252,7 +272,14 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState, pipeline *Pipel
 				if exec.allResponsesHandled {
 					finalContent = ""
 				}
-				result, finalizeErr := pipeline.Finalize(ctx, turnCtx, ts, exec, turnStatus, finalContent)
+				result, finalizeErr := pipeline.Finalize(
+					ctx,
+					turnCtx,
+					ts,
+					exec,
+					turnStatus,
+					finalContent,
+				)
 				if finalizeErr != nil {
 					turnStatus = TurnEndStatusError
 				}
@@ -311,20 +338,78 @@ func (al *AgentLoop) selectCandidates(
 	history []providers.Message,
 	sessionKey string,
 	reason accountrouter.SelectReason,
-) (candidates []providers.FallbackCandidate, model string, usedLight bool, routerSelection accountrouter.Selection) {
-	selectPrimary := func() ([]providers.FallbackCandidate, string, accountrouter.Selection) {
+) (candidates []providers.FallbackCandidate, model string, usedLight bool, activeRouter *accountrouter.Router, routerSelection accountrouter.Selection) {
+	selectTarget := func(target string) ([]providers.FallbackCandidate, string, *accountrouter.Router, accountrouter.Selection) {
+		if router := buildAccountRouter(
+			al.GetConfig(),
+			al.cfg.Agents.Defaults.Provider,
+			target,
+			agent.Workspace,
+			agent.CandidateProviders,
+		); router != nil {
+			selection := router.Select(sessionKey, reason)
+			if len(selection.Candidates) > 0 {
+				return selection.Candidates, resolvedCandidateModel(
+					selection.Candidates,
+					target,
+				), router, selection
+			}
+		}
+		populateCandidateProvidersFromNames(
+			al.GetConfig(),
+			agent.Workspace,
+			[]string{target},
+			agent.CandidateProviders,
+		)
+		targetCandidates := resolveModelCandidates(
+			al.GetConfig(),
+			al.cfg.Agents.Defaults.Provider,
+			target,
+			nil,
+		)
+		return targetCandidates, resolvedCandidateModel(
+			targetCandidates,
+			target,
+		), nil, accountrouter.Selection{}
+	}
+	selectPrimary := func() ([]providers.FallbackCandidate, string, *accountrouter.Router, accountrouter.Selection) {
 		if agent.AccountRouter != nil {
 			selection := agent.AccountRouter.Select(sessionKey, reason)
 			if len(selection.Candidates) > 0 {
-				return selection.Candidates, resolvedCandidateModel(selection.Candidates, agent.Model), selection
+				return selection.Candidates, resolvedCandidateModel(
+					selection.Candidates,
+					agent.Model,
+				), agent.AccountRouter, selection
 			}
 		}
-		return agent.Candidates, resolvedCandidateModel(agent.Candidates, agent.Model), accountrouter.Selection{}
+		return agent.Candidates, resolvedCandidateModel(
+			agent.Candidates,
+			agent.Model,
+		), nil, accountrouter.Selection{}
+	}
+
+	if agent.ModelRouter != nil {
+		selection := agent.ModelRouter.Select(modelrouter.Input{
+			UserMessage: userMsg,
+			Messages:    history,
+			HasMedia:    messagesHaveMedia(history),
+		})
+		if strings.TrimSpace(selection.Target) != "" {
+			logger.InfoCF("agent", "Model router selected target",
+				map[string]any{
+					"agent_id": agent.ID,
+					"router":   selection.RouterName,
+					"target":   selection.Target,
+					"block":    selection.BlockID,
+				})
+			candidates, model, activeRouter, routerSelection = selectTarget(selection.Target)
+			return candidates, model, false, activeRouter, routerSelection
+		}
 	}
 
 	if agent.Router == nil || len(agent.LightCandidates) == 0 {
-		candidates, model, routerSelection = selectPrimary()
-		return candidates, model, false, routerSelection
+		candidates, model, activeRouter, routerSelection = selectPrimary()
+		return candidates, model, false, activeRouter, routerSelection
 	}
 
 	_, usedLight, score := agent.Router.SelectModel(userMsg, history, agent.Model)
@@ -335,8 +420,8 @@ func (al *AgentLoop) selectCandidates(
 				"score":     score,
 				"threshold": agent.Router.Threshold(),
 			})
-		candidates, model, routerSelection = selectPrimary()
-		return candidates, model, false, routerSelection
+		candidates, model, activeRouter, routerSelection = selectPrimary()
+		return candidates, model, false, activeRouter, routerSelection
 	}
 
 	logger.InfoCF("agent", "Model routing: light model selected",
@@ -349,7 +434,77 @@ func (al *AgentLoop) selectCandidates(
 	return agent.LightCandidates, resolvedCandidateModel(
 		agent.LightCandidates,
 		agent.Router.LightModel(),
-	), true, routerSelection
+	), true, nil, routerSelection
+}
+
+func (al *AgentLoop) selectOverrideCandidates(
+	agent *AgentInstance,
+	target string,
+	modelID string,
+	sessionKey string,
+	reason accountrouter.SelectReason,
+) (candidates []providers.FallbackCandidate, model string, displayName string, activeRouter *accountrouter.Router, routerSelection accountrouter.Selection) {
+	target = strings.TrimSpace(target)
+	modelID = strings.TrimSpace(modelID)
+	if agent == nil || target == "" {
+		return nil, "", target, nil, accountrouter.Selection{}
+	}
+
+	if router := buildAccountRouterWithSharedModel(
+		al.GetConfig(),
+		al.cfg.Agents.Defaults.Provider,
+		target,
+		modelID,
+		agent.Workspace,
+		agent.CandidateProviders,
+	); router != nil {
+		selection := router.Select(sessionKey, reason)
+		if len(selection.Candidates) > 0 {
+			model = resolvedCandidateModel(selection.Candidates, target)
+			return selection.Candidates, model, target, router, selection
+		}
+	}
+
+	if modelID != "" {
+		if credentialCfg, ok := accountRouterCredentialAccountConfig(target, modelID); ok &&
+			credentialCfg != nil {
+			candidate, ok := candidateFromModelConfig(
+				al.cfg.Agents.Defaults.Provider,
+				credentialCfg,
+			)
+			if ok {
+				provider, _, err := providers.CreateProviderFromConfig(credentialCfg)
+				if err != nil {
+					logger.WarnCF(
+						"agent",
+						"chat model override: failed to create credential account provider",
+						map[string]any{
+							"account": target,
+							"model":   modelID,
+							"error":   err.Error(),
+						},
+					)
+				} else if !registerCandidateProvider(agent.CandidateProviders, candidate, provider) {
+					closeProviderIfStateful(provider)
+				}
+				return []providers.FallbackCandidate{
+					candidate,
+				}, modelID, target, nil, accountrouter.Selection{}
+			}
+		}
+	}
+
+	candidates, model, displayName = workflowOverrideModelCandidates(al.GetConfig(), agent, target)
+	return candidates, model, displayName, nil, accountrouter.Selection{}
+}
+
+func messagesHaveMedia(messages []providers.Message) bool {
+	for _, msg := range messages {
+		if len(msg.Media) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (al *AgentLoop) resolveContextManager() ContextManager {
@@ -366,10 +521,14 @@ func (al *AgentLoop) resolveContextManager() ContextManager {
 	}
 	cm, err := factory(al.cfg.Agents.Defaults.ContextManagerConfig, al)
 	if err != nil {
-		logger.WarnCF("agent", "Failed to create context manager, falling back to legacy", map[string]any{
-			"name":  name,
-			"error": err.Error(),
-		})
+		logger.WarnCF(
+			"agent",
+			"Failed to create context manager, falling back to legacy",
+			map[string]any{
+				"name":  name,
+				"error": err.Error(),
+			},
+		)
 		return &legacyContextManager{al: al}
 	}
 	return cm
@@ -456,7 +615,7 @@ func (al *AgentLoop) askSideQuestion(
 	}
 	messages = resolveMediaRefs(messages, al.mediaStore, maxMediaSize, currentTurnStart)
 
-	activeCandidates, activeModel, usedLight, routerSelection := al.selectCandidates(
+	activeCandidates, activeModel, usedLight, activeAccountRouter, routerSelection := al.selectCandidates(
 		agent,
 		question,
 		messages,
@@ -511,7 +670,11 @@ func (al *AgentLoop) askSideQuestion(
 
 	turnCtx := newTurnContext(nil, nil, nil)
 	if opts != nil {
-		turnCtx = newTurnContext(opts.Dispatch.InboundContext, opts.Dispatch.RouteResult, opts.Dispatch.SessionScope)
+		turnCtx = newTurnContext(
+			opts.Dispatch.InboundContext,
+			opts.Dispatch.RouteResult,
+			opts.Dispatch.SessionScope,
+		)
 	}
 	llmModel := activeModel
 	if al.hooks != nil {
@@ -570,13 +733,17 @@ func (al *AgentLoop) askSideQuestion(
 				},
 			)
 			if err != nil {
-				if agent.AccountRouter != nil {
-					agent.AccountRouter.RecordFallbackResult(routerSelection, fallbackResultFromError(err), err)
+				if activeAccountRouter != nil {
+					activeAccountRouter.RecordFallbackResult(
+						routerSelection,
+						fallbackResultFromError(err),
+						err,
+					)
 				}
 				return nil, err
 			}
-			if agent.AccountRouter != nil {
-				agent.AccountRouter.RecordFallbackResult(routerSelection, fbResult, nil)
+			if activeAccountRouter != nil {
+				activeAccountRouter.RecordFallbackResult(routerSelection, fbResult, nil)
 			}
 			return fbResult.Response, nil
 		}
@@ -586,8 +753,8 @@ func (al *AgentLoop) askSideQuestion(
 			candidate = activeCandidates[0]
 		}
 		resp, err := callProvider(ctx, candidate, llmModel, hookModelChanged, callMessages)
-		if agent.AccountRouter != nil {
-			agent.AccountRouter.RecordFallbackResult(
+		if activeAccountRouter != nil {
+			activeAccountRouter.RecordFallbackResult(
 				routerSelection,
 				fallbackResultFromSingleCandidate(candidate, resp),
 				err,
@@ -668,7 +835,9 @@ func (al *AgentLoop) isolatedSideQuestionProvider(
 	candidate providers.FallbackCandidate,
 ) (providers.LLMProvider, string, *config.ModelConfig, func(), error) {
 	if agent == nil {
-		return nil, "", nil, func() {}, fmt.Errorf("isolatedSideQuestionProvider: no agent available for /btw")
+		return nil, "", nil, func() {}, fmt.Errorf(
+			"isolatedSideQuestionProvider: no agent available for /btw",
+		)
 	}
 
 	modelCfg, err := al.sideQuestionModelConfig(agent, baseModelName, candidate)

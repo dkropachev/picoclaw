@@ -64,7 +64,7 @@ func TestAgentLoopSelectCandidatesUsesBuiltAccountRouter(t *testing.T) {
 		AccountRouter: router,
 	}
 
-	candidates, model, usedLight, selection := loop.selectCandidates(
+	candidates, model, usedLight, activeRouter, selection := loop.selectCandidates(
 		agent,
 		"hello",
 		nil,
@@ -73,6 +73,9 @@ func TestAgentLoopSelectCandidatesUsesBuiltAccountRouter(t *testing.T) {
 	)
 	if usedLight {
 		t.Fatal("usedLight = true, want false")
+	}
+	if activeRouter == nil {
+		t.Fatal("activeRouter = nil, want account router")
 	}
 	if selection.RouterName != "router-main" || selection.SessionKey != "session-1" {
 		t.Fatalf("router selection = %#v, want router-main/session-1", selection)

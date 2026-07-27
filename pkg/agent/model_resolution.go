@@ -141,7 +141,7 @@ func resolveModelCandidate(
 	defaultProvider = effectiveDefaultProvider(defaultProvider)
 
 	if mc := lookupModelConfigByRef(cfg, raw, defaultProvider); mc != nil {
-		if mc.IsAccountRouter() {
+		if mc.IsAccountRouter() || mc.IsModelRouter() {
 			return providers.FallbackCandidate{}, false
 		}
 		return candidateFromModelConfig(defaultProvider, mc)

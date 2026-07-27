@@ -224,12 +224,17 @@ export function ChatPage({
 
   const {
     defaultModelName,
+    selectedAccountName,
+    selectedModelID,
     hasAvailableModels,
     accountModels,
     accountRouterModels,
-    handleSetDefault,
+    modelOptions,
+    isLoadingModelOptions,
+    handleSetAccount,
+    handleSetModel,
   } = useChatModels({ isConnected: isGatewayRunning })
-  const hasDefaultModel = Boolean(defaultModelName)
+  const hasDefaultModel = Boolean(defaultModelName || selectedAccountName)
   const inputDisabledReason = resolveChatInputDisabledReason({
     hasDefaultModel,
     connectionState,
@@ -275,6 +280,8 @@ export function ChatPage({
       sendMessage({
         content: input,
         attachments,
+        modelName: selectedAccountName,
+        model: selectedModelID,
       })
     ) {
       setInput("")
@@ -412,10 +419,14 @@ export function ChatPage({
             )}
             {hasAvailableModels && (
               <ModelSelector
-                defaultModelName={defaultModelName}
+                selectedAccountName={selectedAccountName}
+                selectedModelID={selectedModelID}
                 accountModels={accountModels}
                 accountRouterModels={accountRouterModels}
-                onValueChange={handleSetDefault}
+                modelOptions={modelOptions}
+                isLoadingModelOptions={isLoadingModelOptions}
+                onAccountChange={handleSetAccount}
+                onModelChange={handleSetModel}
               />
             )}
           </>
@@ -494,7 +505,7 @@ export function ChatPage({
               ) : (
                 <ChatEmptyState
                   hasAvailableModels={hasAvailableModels}
-                  defaultModelName={defaultModelName}
+                  defaultModelName={defaultModelName || selectedAccountName}
                   isConnected={isGatewayRunning}
                 />
               )}
@@ -556,7 +567,14 @@ export function ChatPage({
         onRemoveAttachment={handleRemoveAttachment}
         onSend={handleSend}
         onContextDetail={() => {
-          if (sendMessage({ content: "/context", attachments: [] })) {
+          if (
+            sendMessage({
+              content: "/context",
+              attachments: [],
+              modelName: selectedAccountName,
+              model: selectedModelID,
+            })
+          ) {
             setInput("")
           }
         }}

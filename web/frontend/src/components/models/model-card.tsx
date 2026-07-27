@@ -1,5 +1,6 @@
 import {
   IconEdit,
+  IconGitBranch,
   IconKey,
   IconLoader2,
   IconRoute,
@@ -34,13 +35,15 @@ export function ModelCard({
 }: ModelCardProps) {
   const { t } = useTranslation()
   const isRouter = model.provider === "router" || model.router != null
+  const isModelRouter =
+    model.provider === "model-router" || model.model_router != null
   const isOAuth = model.auth_method === "oauth"
   const status = model.status
   const statusLabel = t(`models.status.${status}`)
   const canSetDefault =
     model.available &&
     !model.is_default &&
-    !model.is_virtual &&
+    (model.is_virtual !== true || isModelRouter) &&
     model.default_model_allowed !== false
 
   const setDefaultLabel = t("models.action.setDefault")
@@ -49,19 +52,24 @@ export function ModelCard({
     if (!model.available)
       return t("models.action.setDefaultDisabled.unavailable")
     if (model.is_default) return t("models.action.setDefaultDisabled.isDefault")
-    if (model.is_virtual) return t("models.action.setDefaultDisabled.isVirtual")
+    if (model.is_virtual && !isModelRouter)
+      return t("models.action.setDefaultDisabled.isVirtual")
     if (model.default_model_allowed === false) {
       return t("models.action.setDefaultDisabled.unsupportedProvider")
     }
     return setDefaultLabel
   })()
 
-  const editLabel = isRouter
-    ? t("models.router.actionEdit")
-    : t("models.action.edit")
-  const deleteLabel = isRouter
-    ? t("models.router.actionDelete")
-    : t("models.action.delete")
+  const editLabel = isModelRouter
+    ? t("models.modelRouter.actionEdit")
+    : isRouter
+      ? t("models.router.actionEdit")
+      : t("models.action.edit")
+  const deleteLabel = isModelRouter
+    ? t("models.modelRouter.actionDelete")
+    : isRouter
+      ? t("models.router.actionDelete")
+      : t("models.action.delete")
   const deleteDisabledReason = model.is_default
     ? t("models.action.deleteDisabled.isDefault")
     : deleteLabel
@@ -106,6 +114,11 @@ export function ModelCard({
           {isRouter && (
             <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-[10px] leading-none font-medium">
               {t("models.badge.router")}
+            </span>
+          )}
+          {isModelRouter && (
+            <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-[10px] leading-none font-medium">
+              {t("models.badge.modelRouter")}
             </span>
           )}
         </div>
@@ -201,14 +214,19 @@ export function ModelCard({
         </div>
       </div>
 
-      {!isRouter && (
+      {!isRouter && !isModelRouter && (
         <p className="text-muted-foreground truncate font-mono text-xs leading-snug">
           {model.model}
         </p>
       )}
 
       <div className="flex items-center gap-2">
-        {isRouter ? (
+        {isModelRouter ? (
+          <span className="text-muted-foreground flex items-center gap-1 text-[11px]">
+            <IconGitBranch className="size-3" />
+            {statusLabel}
+          </span>
+        ) : isRouter ? (
           <span className="text-muted-foreground flex items-center gap-1 text-[11px]">
             <IconRoute className="size-3" />
             {statusLabel}

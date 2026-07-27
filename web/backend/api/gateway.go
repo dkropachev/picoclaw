@@ -400,7 +400,29 @@ func (h *Handler) gatewayStartReady() (bool, string, error) {
 func lookupModelConfig(cfg *config.Config, modelName string) *config.ModelConfig {
 	modelCfg, err := cfg.GetModelConfig(modelName)
 	if err != nil {
-		return nil
+		credentialID, ok := config.AccountRouterCredentialAccountID(modelName)
+		if !ok || !credentialAccountDefaultModelAllowed(modelName) {
+			return nil
+		}
+		provider, ok := config.AccountRouterCredentialAccountProvider(modelName)
+		if !ok {
+			return nil
+		}
+		provider = providers.NormalizeProvider(provider)
+		switch provider {
+		case "google-antigravity":
+			provider = "antigravity"
+		case "copilot":
+			provider = "github-copilot"
+		}
+		return &config.ModelConfig{
+			ModelName:    strings.TrimSpace(modelName),
+			Provider:     provider,
+			Model:        defaultCredentialAccountModel(provider),
+			AuthMethod:   defaultCredentialAccountAuthMethod(provider),
+			CredentialID: credentialID,
+			Enabled:      true,
+		}
 	}
 	return modelCfg
 }

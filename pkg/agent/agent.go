@@ -105,6 +105,7 @@ type processOptions struct {
 	DefaultResponse         string                 // Response when LLM returns empty
 	PromptCacheKey          string                 // Optional provider prompt cache key override
 	ModelNameOverride       string                 // Optional model alias/ref override for this isolated turn
+	ModelIDOverride         string                 // Optional provider model ID for ModelNameOverride
 	ReasoningEffortOverride string                 // Optional reasoning_effort override for this isolated turn
 	EnableSummary           bool                   // Whether to trigger summarization
 	SendResponse            bool                   // Whether to send response via bus

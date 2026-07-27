@@ -14,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/memory"
+	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
@@ -63,6 +64,7 @@ type AgentInstance struct {
 	// and shared model.
 	CandidateProviders map[string]providers.LLMProvider
 	AccountRouter      *accountrouter.Router
+	ModelRouter        *modelrouter.Router
 
 	managedCalibrationCache map[string]workflowManagedCalibrationCacheEntry
 }
@@ -310,6 +312,7 @@ func NewAgentInstance(
 	candidateProviders := make(map[string]providers.LLMProvider)
 	populateCandidateProvidersFromNames(cfg, workspace, fallbacks, candidateProviders)
 	accountRouter := buildAccountRouter(cfg, defaults.Provider, model, workspace, candidateProviders)
+	modelRouter := buildModelRouter(cfg, defaults.Provider, model)
 	if accountRouter != nil {
 		initialSelection := accountRouter.Select("", accountrouter.SelectReasonInitial)
 		candidates = initialSelection.Candidates
@@ -388,8 +391,17 @@ func NewAgentInstance(
 		LightProvider:             lightProvider,
 		CandidateProviders:        candidateProviders,
 		AccountRouter:             accountRouter,
+		ModelRouter:               modelRouter,
 		managedCalibrationCache:   make(map[string]workflowManagedCalibrationCacheEntry),
 	}
+}
+
+func buildModelRouter(cfg *config.Config, defaultProvider string, model string) *modelrouter.Router {
+	modelCfg := lookupModelConfigByRef(cfg, model, defaultProvider)
+	if modelCfg == nil || !modelCfg.IsModelRouter() || modelCfg.ModelRouter == nil {
+		return nil
+	}
+	return modelrouter.New(modelCfg.ModelName, modelCfg.ModelRouter)
 }
 
 func buildAccountRouter(
@@ -399,12 +411,33 @@ func buildAccountRouter(
 	workspace string,
 	providersOut map[string]providers.LLMProvider,
 ) *accountrouter.Router {
+	return buildAccountRouterWithSharedModel(
+		cfg,
+		defaultProvider,
+		model,
+		"",
+		workspace,
+		providersOut,
+	)
+}
+
+func buildAccountRouterWithSharedModel(
+	cfg *config.Config,
+	defaultProvider string,
+	model string,
+	sharedModelOverride string,
+	workspace string,
+	providersOut map[string]providers.LLMProvider,
+) *accountrouter.Router {
 	modelCfg := lookupModelConfigByRef(cfg, model, defaultProvider)
 	if modelCfg == nil || !modelCfg.IsAccountRouter() || modelCfg.Router == nil {
 		return nil
 	}
 	accountNames := accountRouterAccountNames(modelCfg.Router)
 	sharedModel := accountRouterSharedModel(modelCfg)
+	if override := strings.TrimSpace(sharedModelOverride); override != "" {
+		sharedModel = override
+	}
 	accounts := make(map[string]accountrouter.Account, len(accountNames))
 	for _, accountName := range accountNames {
 		candidates := accountRouterAccountCandidates(
@@ -638,7 +671,7 @@ func resolvePrimaryProviderForAgent(
 	if modelCfg == nil {
 		return fallback
 	}
-	if modelCfg.IsAccountRouter() {
+	if modelCfg.IsAccountRouter() || modelCfg.IsModelRouter() {
 		return fallback
 	}
 	clone := *modelCfg

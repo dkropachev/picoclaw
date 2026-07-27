@@ -233,8 +233,8 @@ func (p *Pipeline) CallLLM(
 				)
 			}
 			if fbErr != nil {
-				if ts.agent.AccountRouter != nil {
-					ts.agent.AccountRouter.RecordFallbackResult(
+				if exec.accountRouter != nil {
+					exec.accountRouter.RecordFallbackResult(
 						exec.routerSelection,
 						fallbackResultFromError(fbErr),
 						fbErr,
@@ -242,8 +242,8 @@ func (p *Pipeline) CallLLM(
 				}
 				return nil, fbErr
 			}
-			if ts.agent.AccountRouter != nil {
-				ts.agent.AccountRouter.RecordFallbackResult(exec.routerSelection, fbResult, nil)
+			if exec.accountRouter != nil {
+				exec.accountRouter.RecordFallbackResult(exec.routerSelection, fbResult, nil)
 			}
 			if fbResult.Provider != "" && len(fbResult.Attempts) > 0 {
 				logger.InfoCF(
@@ -272,12 +272,12 @@ func (p *Pipeline) CallLLM(
 			exec.llmModel,
 			exec.llmOpts,
 		)
-		if ts.agent.AccountRouter != nil {
+		if exec.accountRouter != nil {
 			candidate := providers.FallbackCandidate{}
 			if len(exec.activeCandidates) > 0 {
 				candidate = exec.activeCandidates[0]
 			}
-			ts.agent.AccountRouter.RecordFallbackResult(
+			exec.accountRouter.RecordFallbackResult(
 				exec.routerSelection,
 				fallbackResultFromSingleCandidate(candidate, resp),
 				err,
@@ -729,10 +729,10 @@ func (p *Pipeline) applyBeforeLLMModelRewrite(ts *turnState, exec *turnExecution
 }
 
 func (p *Pipeline) reselectAccountRouterAfterCompression(ts *turnState, exec *turnExecution) {
-	if p == nil || ts == nil || ts.agent == nil || ts.agent.AccountRouter == nil || exec == nil {
+	if p == nil || ts == nil || ts.agent == nil || exec == nil || exec.accountRouter == nil {
 		return
 	}
-	selection := ts.agent.AccountRouter.Select(ts.sessionKey, accountrouter.SelectReasonCompression)
+	selection := exec.accountRouter.Select(ts.sessionKey, accountrouter.SelectReasonCompression)
 	if len(selection.Candidates) == 0 {
 		return
 	}
