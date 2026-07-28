@@ -2,7 +2,9 @@ package cliprovider
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +18,12 @@ type fakeCopilotClient struct {
 	stopped     bool
 	session     *fakeCopilotSession
 	config      *copilot.SessionConfig
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func (f *fakeCopilotClient) Start(context.Context) error {
@@ -181,6 +189,55 @@ func TestGitHubCopilotTokenProviderRejectsUnsupportedToken(t *testing.T) {
 	}
 }
 
+func TestGitHubCopilotTokenProviderDoesNotFallbackChatOnExchange403(t *testing.T) {
+	origHTTPClient := githubCopilotHTTPClient
+	origTokenEndpoint := githubCopilotTokenEndpoint
+	origAPIBase := githubCopilotAPIBaseEndpoint
+	t.Cleanup(func() {
+		githubCopilotHTTPClient = origHTTPClient
+		githubCopilotTokenEndpoint = origTokenEndpoint
+		githubCopilotAPIBaseEndpoint = origAPIBase
+	})
+
+	var chatRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/copilot_internal/v2/token":
+			http.Error(w, "exchange forbidden", http.StatusForbidden)
+		case "/chat/completions":
+			chatRequests++
+			http.Error(w, "must not be called", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	githubCopilotHTTPClient = srv.Client()
+	githubCopilotTokenEndpoint = srv.URL + "/copilot_internal/v2/token"
+	githubCopilotAPIBaseEndpoint = srv.URL
+
+	provider, err := NewGitHubCopilotProviderWithToken("gho_test-token", "gpt-4.1")
+	if err != nil {
+		t.Fatalf("NewGitHubCopilotProviderWithToken() error = %v", err)
+	}
+	_, err = provider.Chat(
+		context.Background(),
+		[]Message{{Role: "user", Content: "hello"}},
+		nil,
+		"gpt-4.1",
+		nil,
+	)
+	if err == nil {
+		t.Fatal("Chat() error = nil, want exchange error")
+	}
+	if chatRequests != 0 {
+		t.Fatalf("chat requests = %d, want 0", chatRequests)
+	}
+	if !strings.Contains(err.Error(), "GitHub returned status 403") {
+		t.Fatalf("error = %q, want exchange status 403", err)
+	}
+}
+
 func TestListGitHubCopilotModelsWithTokenUsesExplicitToken(t *testing.T) {
 	origNewClient := newCopilotClient
 	origHTTPClient := githubCopilotHTTPClient
@@ -279,5 +336,195 @@ func TestListGitHubCopilotModelsWithTokenFallsBackToRawTokenOnExchange404(t *tes
 	}
 	if len(models) != 1 || models[0].ID != "gpt-5.5" {
 		t.Fatalf("models = %+v, want fallback model", models)
+	}
+}
+
+func TestListGitHubCopilotModelsWithTokenFallsBackToRawTokenOnExchange403(t *testing.T) {
+	origHTTPClient := githubCopilotHTTPClient
+	origTokenEndpoint := githubCopilotTokenEndpoint
+	origAPIBase := githubCopilotAPIBaseEndpoint
+	t.Cleanup(func() {
+		githubCopilotHTTPClient = origHTTPClient
+		githubCopilotTokenEndpoint = origTokenEndpoint
+		githubCopilotAPIBaseEndpoint = origAPIBase
+	})
+
+	var modelsRequests int
+	var gotModelsAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/copilot_internal/v2/token":
+			http.Error(w, "exchange forbidden", http.StatusForbidden)
+		case "/models":
+			modelsRequests++
+			gotModelsAuth = r.Header.Get("Authorization")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"models":[{"id":"gpt-5.5","name":"GPT-5.5"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	githubCopilotHTTPClient = srv.Client()
+	githubCopilotTokenEndpoint = srv.URL + "/copilot_internal/v2/token"
+	githubCopilotAPIBaseEndpoint = srv.URL
+
+	models, err := ListGitHubCopilotModelsWithToken(context.Background(), "gho_test-token")
+	if err != nil {
+		t.Fatalf("ListGitHubCopilotModelsWithToken() error = %v", err)
+	}
+	if modelsRequests != 1 {
+		t.Fatalf("models requests = %d, want 1", modelsRequests)
+	}
+	if gotModelsAuth != "Bearer gho_test-token" {
+		t.Fatalf("models Authorization = %q, want raw GitHub bearer fallback", gotModelsAuth)
+	}
+	if len(models) != 1 || models[0].ID != "gpt-5.5" {
+		t.Fatalf("models = %+v, want fallback model", models)
+	}
+}
+
+func TestListGitHubCopilotModelsWithTokenReturnsBothErrorsWhen403FallbackFails(t *testing.T) {
+	origHTTPClient := githubCopilotHTTPClient
+	origTokenEndpoint := githubCopilotTokenEndpoint
+	origAPIBase := githubCopilotAPIBaseEndpoint
+	t.Cleanup(func() {
+		githubCopilotHTTPClient = origHTTPClient
+		githubCopilotTokenEndpoint = origTokenEndpoint
+		githubCopilotAPIBaseEndpoint = origAPIBase
+	})
+
+	var modelsRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/copilot_internal/v2/token":
+			http.Error(w, "exchange forbidden for gho_test-token", http.StatusForbidden)
+		case "/models":
+			modelsRequests++
+			http.Error(w, "models forbidden for gho_test-token", http.StatusForbidden)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	githubCopilotHTTPClient = srv.Client()
+	githubCopilotTokenEndpoint = srv.URL + "/copilot_internal/v2/token"
+	githubCopilotAPIBaseEndpoint = srv.URL
+
+	_, err := ListGitHubCopilotModelsWithToken(context.Background(), "gho_test-token")
+	if err == nil {
+		t.Fatal("ListGitHubCopilotModelsWithToken() error = nil, want fallback error")
+	}
+	if modelsRequests != 1 {
+		t.Fatalf("models requests = %d, want 1", modelsRequests)
+	}
+	for _, want := range []string{
+		"exchanging GitHub token for Copilot API token: GitHub returned status 403",
+		"raw-token model fallback failed: GitHub Copilot models returned status 403",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "gho_test-token") {
+		t.Fatalf("error leaked GitHub token: %q", err)
+	}
+}
+
+func TestListGitHubCopilotModelsWithTokenPreserves403FallbackCancellation(t *testing.T) {
+	origHTTPClient := githubCopilotHTTPClient
+	origTokenEndpoint := githubCopilotTokenEndpoint
+	origAPIBase := githubCopilotAPIBaseEndpoint
+	t.Cleanup(func() {
+		githubCopilotHTTPClient = origHTTPClient
+		githubCopilotTokenEndpoint = origTokenEndpoint
+		githubCopilotAPIBaseEndpoint = origAPIBase
+	})
+
+	var modelsRequests int
+	githubCopilotHTTPClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.Path {
+			case "/copilot_internal/v2/token":
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Body:       io.NopCloser(strings.NewReader("exchange forbidden")),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			case "/models":
+				modelsRequests++
+				return nil, context.Canceled
+			default:
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       http.NoBody,
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			}
+		}),
+	}
+	githubCopilotTokenEndpoint = "https://api.github.test/copilot_internal/v2/token"
+	githubCopilotAPIBaseEndpoint = "https://api.githubcopilot.test"
+
+	_, err := ListGitHubCopilotModelsWithToken(context.Background(), "gho_test-token")
+	if err == nil {
+		t.Fatal("ListGitHubCopilotModelsWithToken() error = nil, want cancellation")
+	}
+	if modelsRequests != 1 {
+		t.Fatalf("models requests = %d, want 1", modelsRequests)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want errors.Is(context.Canceled)", err)
+	}
+	if !strings.Contains(err.Error(), "GitHub returned status 403") {
+		t.Fatalf("error = %q, want original exchange status 403", err)
+	}
+}
+
+func TestListGitHubCopilotModelsWithTokenDoesNotFallbackForOtherExchangeErrors(t *testing.T) {
+	for _, statusCode := range []int{http.StatusUnauthorized, http.StatusTooManyRequests, http.StatusInternalServerError} {
+		t.Run(fmt.Sprintf("status_%d", statusCode), func(t *testing.T) {
+			origHTTPClient := githubCopilotHTTPClient
+			origTokenEndpoint := githubCopilotTokenEndpoint
+			origAPIBase := githubCopilotAPIBaseEndpoint
+			t.Cleanup(func() {
+				githubCopilotHTTPClient = origHTTPClient
+				githubCopilotTokenEndpoint = origTokenEndpoint
+				githubCopilotAPIBaseEndpoint = origAPIBase
+			})
+
+			var modelsRequests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/copilot_internal/v2/token":
+					http.Error(w, "exchange rejected", statusCode)
+				case "/models":
+					modelsRequests++
+					http.Error(w, "must not be called", http.StatusInternalServerError)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			githubCopilotHTTPClient = srv.Client()
+			githubCopilotTokenEndpoint = srv.URL + "/copilot_internal/v2/token"
+			githubCopilotAPIBaseEndpoint = srv.URL
+
+			_, err := ListGitHubCopilotModelsWithToken(context.Background(), "gho_test-token")
+			if err == nil {
+				t.Fatalf("ListGitHubCopilotModelsWithToken() error = nil, want status %d", statusCode)
+			}
+			if modelsRequests != 0 {
+				t.Fatalf("models requests = %d, want 0", modelsRequests)
+			}
+			if !strings.Contains(err.Error(), fmt.Sprintf("GitHub returned status %d", statusCode)) {
+				t.Fatalf("error = %q, want status %d", err, statusCode)
+			}
+			if strings.Contains(err.Error(), "gho_test-token") {
+				t.Fatalf("error leaked GitHub token: %q", err)
+			}
+		})
 	}
 }
