@@ -47,11 +47,11 @@ durable inputs that survive restart.
 
 | ID | Level | Trigger/Input | Required Output | State Mutation | Failure/Edge | Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
-| `FR-EVENT-AUTOMATION-001` | MUST | Configuration is omitted, explicitly disabled, or resolved for an enabled agent workspace. | Omitted ingress is disabled; effective config defaults its database to `<workspace>/eventing/events.db`, retention to 30 days, payload size to 1 MiB, and redaction to the mandatory sensitive-field set. | Resolution returns an independent effective config and does not open or create storage. | Non-positive limits receive defaults; relative paths resolve under the workspace, absolute paths are preserved, and `~` is expanded. | Existing installations must remain unchanged until durable ingress is deliberately enabled. |
-| `FR-EVENT-AUTOMATION-002` | MUST | A caller submits an external envelope with source, connector, deduplication key, event type, and JSON-object payload, optionally including actor, subject, occurrence time, attributes, and receipt time. | Normalization returns an immutable deep copy, assigns a stable opaque `ev_` ID and missing receipt time, and canonicalizes timestamps to UTC. | A successful store insert commits the normalized inbox data and pending routing state together. | Missing/oversized/non-UTF-8 identity or entity fields, excessive/invalid attributes, non-object/trailing/invalid JSON, out-of-range timestamps, invalid caller-supplied event/replay IDs, or self-referential replay lineage fail before mutation; caller-owned payloads, maps, pointers, actors, and subjects cannot mutate stored or returned state. | All connectors need one safe, bounded, source-neutral contract. |
-| `FR-EVENT-AUTOMATION-003` | MUST | An envelope is prepared for persistence with a payload byte limit, configured sensitive field names, and optional exact secret values. | Sensitive keys and embedded secret strings are recursively replaced with `[REDACTED]` while unrelated JSON types and structure are preserved; actor, subject, and envelope attribute strings receive the same protection. | Only the redacted deep copy is eligible for durable insertion. | Oversized or invalid JSON is rejected; key matching ignores case and punctuation/underscore/camel-case differences, recognizes sensitive suffixes, descends through nested objects/arrays, and never rewrites the caller's input. | Durable automation must not turn provider secrets or credentials into an unbounded local archive. |
+| `FR-EVENT-AUTOMATION-001` | MUST | Configuration is omitted, explicitly disabled, or resolved for an enabled agent workspace. | Omitted ingress is disabled; effective config defaults its database to `<workspace>/eventing/events.db`, retention to 30 days, payload size to 1 MiB, and redaction to the mandatory sensitive-field set. | Resolution returns an independent effective config and does not open or create storage. | Non-positive limits receive defaults; relative paths resolve under the workspace, absolute paths are preserved, and exactly `~`, `~/`, or `~\` home prefixes are expanded without treating `~name` as home. | Existing installations must remain unchanged until durable ingress is deliberately enabled. |
+| `FR-EVENT-AUTOMATION-002` | MUST | A caller submits an external envelope with source, connector, deduplication key, event type, and JSON-object payload, optionally including actor, subject, occurrence time, attributes, and receipt time. | Normalization returns an immutable deep copy, assigns a stable opaque `ev_` ID and missing receipt time, and canonicalizes timestamps to UTC. | A successful store insert commits the normalized inbox data and pending routing state together. | Missing/oversized/non-UTF-8 identity, entity, attribute, or payload data, excessive/invalid attributes, non-object/trailing/invalid JSON, out-of-range timestamps, invalid caller-supplied event/replay IDs, or self-referential replay lineage fail before mutation; caller-owned payloads, maps, pointers, actors, and subjects cannot mutate stored or returned state. | All connectors need one safe, bounded, source-neutral contract. |
+| `FR-EVENT-AUTOMATION-003` | MUST | An envelope is prepared for persistence with a payload byte limit, configured sensitive field names, and optional exact secret values. | Sensitive values and embedded secret strings are recursively replaced with `[REDACTED]` while unrelated JSON types and structure are preserved; actor, subject, and envelope attribute strings receive the same protection, and repeated redaction is idempotent. | Only the redacted deep copy is eligible for durable insertion. | Oversized or invalid JSON is rejected; key matching ignores case and punctuation/underscore/camel-case differences, recognizes sensitive suffixes and explicitly configured punctuation-only keys, and descends through nested objects/arrays. An exact configured secret in a JSON or attribute-map key fails closed rather than leaking or causing a redacted-key collision. The caller's input is never rewritten. | Durable automation must not turn provider secrets or credentials into an unbounded local archive. |
 | `FR-EVENT-AUTOMATION-004` | MUST | One or more workers concurrently ingest deliveries with the same non-empty `(source, connector, dedupe_key)`. | Every caller receives the same original event and an observable duplicate indication after exactly one insert. | The first envelope remains authoritative; later duplicates add no inbox/routing state and never overwrite its payload or metadata. | Database contention may wait within the configured SQLite busy timeout, but must not surface as two durable events. | Provider retries and concurrent receivers must be safe. |
-| `FR-EVENT-AUTOMATION-005` | MUST | A supported build opens an enabled ingress database for the first time or after restart. | The current schema is available with WAL journaling, foreign keys, and connection-local busy handling; an existing current database reopens without losing records. | Schema versions advance transactionally and the database file is restricted to owner access. | A newer unknown schema fails closed; failed migration rolls back; unsupported targets return `ErrUnsupportedPlatform` and do not create a database. | The inbox must be durable without reducing PicoClaw's existing portability. |
+| `FR-EVENT-AUTOMATION-005` | MUST | A supported build opens an enabled ingress database for the first time or after restart. | The validated current schema is available with WAL journaling, foreign keys, and connection-local busy handling; an existing current database reopens without losing records. | Schema versions advance transactionally and the database file is restricted to owner access. | A newer unknown version or current-version database missing required tables, columns, or indexes fails closed; failed migration rolls back its version and partial objects; unsupported targets return `ErrUnsupportedPlatform` and do not create a database. | The inbox must be durable without reducing PicoClaw's existing portability. |
 | `FR-EVENT-AUTOMATION-006` | MUST | A worker claims routable events with a non-empty worker label, bounded limit, and positive lease duration. | It receives only available pending or expired-lease events, each with a store-generated fresh opaque lease token and deadline. | Claims transition routing state atomically to `claimed`, store the generated token, and increment the attempt count once. | Concurrent claimers cannot own the same live lease; future `available_at` work is skipped; an empty label or invalid claim request mutates nothing. | At-least-once routing needs bounded, restart-recoverable, independently fenced work ownership. |
 | `FR-EVENT-AUTOMATION-007` | MUST | A worker transitions routing using the event ID and fresh lease token returned by its claim. | A current token can acknowledge success, nack to pending at an explicit retry time with redacted/bounded error detail, or mark the event dead; stale or foreign tokens receive a typed conflict. | Routing status, availability, cleared lease, sanitized error detail, and update timestamp change atomically without changing the envelope. | A zero/past nack time retries immediately; transition after lease replacement/expiry and duplicate terminal completion cannot clobber newer state. | Per-claim lease fencing prevents slow workers from corrupting recovered work. |
 | `FR-EVENT-AUTOMATION-008` | MUST | Routing selects a workflow reference for a durable event and calls `CreateDispatch`. | The store derives stable `dsp_` and `wr_` IDs from the event/workflow pair and returns exactly one pending dispatch before execution. | A pending dispatch is persisted independently of event routing state. | Repeating the same pair returns the existing dispatch; selecting different workflows creates distinct dispatches; a missing event fails; no workflow code is invoked. | Retries must not create duplicate workflow runs or couple routing completion to execution. |
@@ -108,7 +108,12 @@ physical table; callers depend on behavior, not table layout. Payload byte
 limits and redaction happen before the insert transaction.
 Redaction traverses JSON objects and arrays, normalizes sensitive key spelling,
 recognizes sensitive suffixes, replaces exact configured secret substrings,
-and also scrubs actor, subject, and envelope attributes. Worker labels seed a
+and also scrubs actor, subject, and envelope attributes. Existing
+`[REDACTED]` markers remain stable when stored events pass through redaction
+again during replay. Configured punctuation-only field names retain exact-key
+matching; an exact configured secret found in a JSON or attribute-map key is
+rejected because changing structural keys could collide or alter event
+semantics. Worker labels seed a
 diagnostic token prefix only; each claim adds fresh cryptographic randomness
 and transitions compare the complete opaque lease token. Store clocks are
 injectable and
@@ -165,10 +170,13 @@ Owns: TEST pkg/config/events*
    a five-second default busy timeout, enable WAL with normal synchronization,
    constrain the single-node store to one authoritative connection, read the
    schema version, reject newer schemas, and apply each missing migration
-   transactionally.
+   transactionally. Before completing `Open`, validate that the current version
+   has every required table, column, and index; roll back the version and all
+   objects created by a failed migration.
 4. Before ingestion, copy and validate identity fields and timestamps, verify
-   payload JSON and byte size, recursively redact configured object fields, and
-   canonicalize the detached payload.
+   UTF-8 payload JSON and byte size, recursively redact configured object
+   fields, reject exact secrets in structural keys, and canonicalize the
+   detached payload without changing an existing redaction marker.
 5. Atomically insert one inbox row containing the immutable envelope and its
    initial pending routing columns. Resolve a uniqueness conflict by reading and
    returning the original row with a duplicate indication; never update it from
@@ -253,6 +261,9 @@ listener credentials and grants no mutation authority.
   and events with pending/claimed/running dispatches.
 - A database created by a newer schema version fails closed rather than being
   downgraded.
+- A database declaring the current version still fails closed when required
+  tables, columns, constraints, foreign keys, or indexes do not match; failed
+  migration and validation roll back their version and partial objects.
 - On unsupported build targets, opening durable ingress returns
   `ErrUnsupportedPlatform`. With ingress disabled, normal PicoClaw behavior
   remains available.
@@ -265,8 +276,8 @@ listener credentials and grants no mutation authority.
 | --- | --- |
 | `FR-EVENT-AUTOMATION-001`, `FR-EVENT-AUTOMATION-012` | [pkg/config/events_test.go](../../pkg/config/events_test.go), [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go) |
 | `FR-EVENT-AUTOMATION-002`, `FR-EVENT-AUTOMATION-004` | [pkg/eventing/envelope_test.go](../../pkg/eventing/envelope_test.go), [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go) |
-| `FR-EVENT-AUTOMATION-003` | [pkg/eventing/redaction_test.go](../../pkg/eventing/redaction_test.go) |
-| `FR-EVENT-AUTOMATION-005` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go) |
+| `FR-EVENT-AUTOMATION-003` | [pkg/eventing/redaction_test.go](../../pkg/eventing/redaction_test.go), [pkg/eventing/store_replay_redaction_test.go](../../pkg/eventing/store_replay_redaction_test.go) |
+| `FR-EVENT-AUTOMATION-005` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go), [pkg/eventing/store_schema_test.go](../../pkg/eventing/store_schema_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go) |
 | `FR-EVENT-AUTOMATION-006`, `FR-EVENT-AUTOMATION-007` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go) |
 | `FR-EVENT-AUTOMATION-008`, `FR-EVENT-AUTOMATION-009` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go) |
 | `FR-EVENT-AUTOMATION-010`, `FR-EVENT-AUTOMATION-011` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go) |

@@ -122,15 +122,15 @@ func EffectiveEventIngressConfig(cfg *Config, workspace string) EventIngressConf
 
 	workspace = strings.TrimSpace(workspace)
 	if workspace != "" {
-		workspace = expandHome(workspace)
+		workspace = expandEventIngressHome(workspace)
 	}
 
 	databasePath := strings.TrimSpace(out.DatabasePath)
 	switch {
 	case databasePath == "":
 		out.DatabasePath = filepath.Join(workspace, "eventing", "events.db")
-	case strings.HasPrefix(databasePath, "~"):
-		out.DatabasePath = filepath.Clean(expandHome(databasePath))
+	case isEventIngressHomePath(databasePath):
+		out.DatabasePath = filepath.Clean(expandEventIngressHome(databasePath))
 	case filepath.IsAbs(databasePath):
 		out.DatabasePath = filepath.Clean(databasePath)
 	default:
@@ -146,6 +146,28 @@ func EffectiveEventIngressConfig(cfg *Config, workspace string) EventIngressConf
 	out.RedactFields = effectiveEventIngressRedactFields(out.RedactFields)
 
 	return out
+}
+
+func isEventIngressHomePath(path string) bool {
+	return path == "~" ||
+		strings.HasPrefix(path, "~/") ||
+		strings.HasPrefix(path, `~\`)
+}
+
+func expandEventIngressHome(path string) string {
+	if !isEventIngressHomePath(path) {
+		return path
+	}
+	home := expandHome("~")
+	if home == "" {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	remainder := strings.TrimLeft(path[2:], `/\`)
+	remainder = filepath.FromSlash(strings.ReplaceAll(remainder, `\`, "/"))
+	return filepath.Join(home, remainder)
 }
 
 func effectiveEventIngressRedactFields(configured []string) []string {

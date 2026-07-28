@@ -28,6 +28,9 @@ var (
 	ErrInvalidTransition = errors.New("invalid eventing state transition")
 	// ErrSchemaTooNew reports a database created by newer code.
 	ErrSchemaTooNew = errors.New("eventing database schema is newer than supported")
+	// ErrSchemaInvalid reports a database whose declared schema version does not
+	// match the required tables, columns, constraints, or indexes.
+	ErrSchemaInvalid = errors.New("eventing database schema is invalid")
 	// ErrRunIDMismatch prevents linking a dispatch to an unexpected workflow
 	// run, preserving deterministic start idempotency.
 	ErrRunIDMismatch = errors.New("workflow run ID does not match dispatch")

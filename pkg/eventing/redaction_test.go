@@ -2,6 +2,7 @@ package eventing
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -77,11 +78,172 @@ func TestRedactorHonorsShortSecretsWithoutRescanningMarkers(t *testing.T) {
 	t.Parallel()
 
 	redactor := NewRedactor(nil, []string{"x", "REDA"})
+	once := redactor.RedactText("x REDA")
 	assert.Equal(
 		t,
 		"[REDACTED] [REDACTED]",
-		redactor.RedactText("x REDA"),
+		once,
 	)
+	assert.Equal(t, once, redactor.RedactText(once))
+}
+
+func TestRedactorReplacesSecretsThatOverlapMarker(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		secret string
+		value  string
+		want   string
+	}{
+		{
+			name:   "contains marker",
+			secret: "before[REDACTED]after",
+			value:  "before[REDACTED]after",
+			want:   RedactedValue,
+		},
+		{
+			name:   "starts inside marker",
+			secret: "REDACTED]after",
+			value:  "[REDACTED]after",
+			want:   RedactedValue,
+		},
+		{
+			name:   "ends inside marker",
+			secret: "before[REDACTED",
+			value:  "before[REDACTED]",
+			want:   RedactedValue,
+		},
+		{
+			name:   "contained by marker",
+			secret: "REDA",
+			value:  RedactedValue,
+			want:   RedactedValue,
+		},
+		{
+			name:   "overlapping secrets",
+			secret: "aba",
+			value:  "ababa",
+			want:   RedactedValue,
+		},
+		{
+			name:   "adjacent markers canonicalize stably",
+			secret: "REDA",
+			value:  RedactedValue + RedactedValue,
+			want:   RedactedValue,
+		},
+		{
+			name:   "replacement synthesizes left boundary match",
+			secret: "a[",
+			value:  "aa[",
+			want:   RedactedValue,
+		},
+		{
+			name:   "replacement synthesizes right boundary match",
+			secret: "]a",
+			value:  "]aa",
+			want:   RedactedValue,
+		},
+		{
+			name:   "pathological boundary cascade fails closed",
+			secret: "a[",
+			value:  "aaaaaaaaaaaaaaaa[",
+			want:   RedactedValue,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			redactor := NewRedactor(nil, []string{test.secret})
+			once := redactor.RedactText(test.value)
+			assert.Equal(t, test.want, once)
+			assert.Equal(t, once, redactor.RedactText(once))
+			if !strings.Contains(RedactedValue, test.secret) {
+				assert.NotContains(t, once, test.secret)
+			}
+		})
+	}
+}
+
+func TestRedactorRejectsConfiguredSecretsInKeys(t *testing.T) {
+	t.Parallel()
+
+	redactor := NewRedactor(nil, []string{"known-secret"})
+	_, err := redactor.RedactJSON(json.RawMessage(
+		`{"nested":{"prefix-known-secret-suffix":"value"}}`,
+	))
+	assert.ErrorIs(t, err, ErrInvalidEnvelope)
+
+	event := Envelope{
+		Payload:    json.RawMessage(`{}`),
+		Attributes: map[string]string{"known-secret": "value"},
+	}
+	_, err = redactor.RedactEnvelope(event)
+	assert.ErrorIs(t, err, ErrInvalidEnvelope)
+}
+
+func TestRedactorHonorsPunctuationOnlyConfiguredKeys(t *testing.T) {
+	t.Parallel()
+
+	redactor := NewRedactor([]string{"***", "🔒"}, nil)
+	got, err := redactor.RedactJSON(json.RawMessage(
+		`{"***":"first","🔒":"second","safe":"value"}`,
+	))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"***":"[REDACTED]",
+		"🔒":"[REDACTED]",
+		"safe":"value"
+	}`, string(got))
+}
+
+func TestRedactorExactSecretOutputIsFixedPoint(t *testing.T) {
+	t.Parallel()
+
+	values := redactionTestStrings([]byte{'a', '[', ']', 'R'}, 4)
+	secrets := redactionTestStrings([]byte{'a', '[', ']', 'R'}, 3)[1:]
+	for _, secret := range secrets {
+		redactor := NewRedactor(nil, []string{secret})
+		for _, value := range values {
+			once := redactor.RedactText(value)
+			if twice := redactor.RedactText(once); twice != once {
+				t.Fatalf(
+					"redaction is not idempotent: secret=%q value=%q once=%q twice=%q",
+					secret,
+					value,
+					once,
+					twice,
+				)
+			}
+			if secretOutsideRedactionMarker(once, secret) {
+				t.Fatalf(
+					"redaction left secret outside marker: secret=%q value=%q output=%q",
+					secret,
+					value,
+					once,
+				)
+			}
+		}
+	}
+}
+
+func TestRedactorMultiSecretBoundarySynthesisIsFixedPoint(t *testing.T) {
+	t.Parallel()
+
+	redactor := NewRedactor(nil, []string{"seed", "prefix" + RedactedValue})
+	once := redactor.RedactText("prefixseed")
+	assert.Equal(t, RedactedValue, once)
+	assert.Equal(t, once, redactor.RedactText(once))
+}
+
+func TestRedactorManyDisjointMatchesFailClosed(t *testing.T) {
+	t.Parallel()
+
+	redactor := NewRedactor(nil, []string{"a"})
+	value := strings.Repeat("ab", maxRedactionIntervals+1)
+	assert.Equal(t, RedactedValue, redactor.RedactText(value))
 }
 
 func TestRedactorZeroValueStillEnforcesMandatoryKeys(t *testing.T) {
@@ -91,6 +253,58 @@ func TestRedactorZeroValueStillEnforcesMandatoryKeys(t *testing.T) {
 	got, err := redactor.RedactJSON(json.RawMessage(`{"password":"secret","safe":"value"}`))
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"password":"[REDACTED]","safe":"value"}`, string(got))
+}
+
+func redactionTestStrings(alphabet []byte, maxLength int) []string {
+	capacity := 1
+	width := 1
+	for range maxLength {
+		width *= len(alphabet)
+		capacity += width
+	}
+	values := make([]string, 1, capacity)
+	values[0] = ""
+	frontier := []string{""}
+	for range maxLength {
+		next := make([]string, 0, len(frontier)*len(alphabet))
+		for _, prefix := range frontier {
+			for _, char := range alphabet {
+				next = append(next, prefix+string(char))
+			}
+		}
+		values = append(values, next...)
+		frontier = next
+	}
+	return values
+}
+
+func secretOutsideRedactionMarker(value, secret string) bool {
+	for offset := 0; offset < len(value); {
+		index := strings.Index(value[offset:], secret)
+		if index < 0 {
+			return false
+		}
+		start := offset + index
+		end := start + len(secret)
+		covered := false
+		for markerOffset := 0; markerOffset < len(value); {
+			markerIndex := strings.Index(value[markerOffset:], RedactedValue)
+			if markerIndex < 0 {
+				break
+			}
+			markerStart := markerOffset + markerIndex
+			if start >= markerStart && end <= markerStart+len(RedactedValue) {
+				covered = true
+				break
+			}
+			markerOffset = markerStart + 1
+		}
+		if !covered {
+			return true
+		}
+		offset = start + 1
+	}
+	return false
 }
 
 func stringValueFromJSON(t *testing.T, payload []byte, key string) string {

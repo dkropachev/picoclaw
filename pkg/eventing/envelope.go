@@ -204,6 +204,9 @@ func validateJSONObject(payload json.RawMessage) error {
 	if len(bytes.TrimSpace(payload)) == 0 {
 		return fmt.Errorf("%w: payload is required", ErrInvalidEnvelope)
 	}
+	if !utf8.Valid(payload) {
+		return fmt.Errorf("%w: payload is not valid UTF-8", ErrInvalidEnvelope)
+	}
 
 	var object map[string]json.RawMessage
 	decoder := json.NewDecoder(bytes.NewReader(payload))

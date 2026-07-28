@@ -93,6 +93,9 @@ func TestNormalizeEnvelopeValidation(t *testing.T) {
 		{"scalar payload", func(event *Envelope) { event.Payload = json.RawMessage(`1`) }},
 		{"trailing payload", func(event *Envelope) { event.Payload = json.RawMessage(`{} garbage`) }},
 		{"multiple payloads", func(event *Envelope) { event.Payload = json.RawMessage(`{} {}`) }},
+		{"non-UTF-8 payload", func(event *Envelope) {
+			event.Payload = json.RawMessage{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'}
+		}},
 		{"oversized source", func(event *Envelope) { event.Source = strings.Repeat("s", maxSourceLength+1) }},
 		{"too many attributes", func(event *Envelope) {
 			event.Attributes = make(map[string]string, maxAttributeCount+1)

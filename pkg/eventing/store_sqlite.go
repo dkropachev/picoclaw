@@ -250,14 +250,17 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 			return fmt.Errorf("record eventing schema v1: %w", err)
 		}
 	}
+	if err = validateSchemaV1(ctx, conn); err != nil {
+		return fmt.Errorf("validate eventing schema v1: %w", err)
+	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit eventing migration: %w", err)
 	}
 	return nil
 }
 
-const schemaV1 = `
-CREATE TABLE IF NOT EXISTS event_inbox (
+const (
+	schemaV1EventInboxTable = `CREATE TABLE IF NOT EXISTS event_inbox (
 	id TEXT PRIMARY KEY,
 	source TEXT NOT NULL,
 	connector TEXT NOT NULL,
@@ -278,16 +281,15 @@ CREATE TABLE IF NOT EXISTS event_inbox (
 	routing_last_error TEXT NOT NULL DEFAULT '',
 	routing_updated_at INTEGER NOT NULL,
 	CHECK (replay_of IS NULL OR replay_of <> id)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS event_inbox_dedupe
+);`
+	schemaV1EventInboxDedupeIndex = `CREATE UNIQUE INDEX IF NOT EXISTS event_inbox_dedupe
 	ON event_inbox(source, connector, dedupe_key)
-	WHERE dedupe_key <> '';
-CREATE INDEX IF NOT EXISTS event_inbox_routing_claim
-	ON event_inbox(routing_status, routing_available_at, routing_lease_until, received_at, id);
-CREATE INDEX IF NOT EXISTS event_inbox_list
-	ON event_inbox(received_at DESC, id DESC);
-
-CREATE TABLE IF NOT EXISTS event_dispatches (
+	WHERE dedupe_key <> '';`
+	schemaV1EventInboxRoutingClaimIndex = `CREATE INDEX IF NOT EXISTS event_inbox_routing_claim
+	ON event_inbox(routing_status, routing_available_at, routing_lease_until, received_at, id);`
+	schemaV1EventInboxListIndex = `CREATE INDEX IF NOT EXISTS event_inbox_list
+	ON event_inbox(received_at DESC, id DESC);`
+	schemaV1EventDispatchesTable = `CREATE TABLE IF NOT EXISTS event_dispatches (
 	id TEXT PRIMARY KEY,
 	event_id TEXT NOT NULL REFERENCES event_inbox(id) ON DELETE CASCADE,
 	workflow_ref TEXT NOT NULL,
@@ -303,12 +305,601 @@ CREATE TABLE IF NOT EXISTS event_dispatches (
 	linked_at INTEGER,
 	finished_at INTEGER,
 	UNIQUE(event_id, workflow_ref)
-);
-CREATE INDEX IF NOT EXISTS event_dispatches_claim
-	ON event_dispatches(status, available_at, lease_until, created_at, id);
-CREATE INDEX IF NOT EXISTS event_dispatches_list
-	ON event_dispatches(created_at DESC, id DESC);
-`
+);`
+	schemaV1EventDispatchesClaimIndex = `CREATE INDEX IF NOT EXISTS event_dispatches_claim
+	ON event_dispatches(status, available_at, lease_until, created_at, id);`
+	schemaV1EventDispatchesListIndex = `CREATE INDEX IF NOT EXISTS event_dispatches_list
+	ON event_dispatches(created_at DESC, id DESC);`
+	schemaV1 = schemaV1EventInboxTable + "\n" +
+		schemaV1EventInboxDedupeIndex + "\n" +
+		schemaV1EventInboxRoutingClaimIndex + "\n" +
+		schemaV1EventInboxListIndex + "\n" +
+		schemaV1EventDispatchesTable + "\n" +
+		schemaV1EventDispatchesClaimIndex + "\n" +
+		schemaV1EventDispatchesListIndex
+)
+
+type schemaValidationError struct {
+	object  string
+	problem string
+}
+
+func (e *schemaValidationError) Error() string {
+	return fmt.Sprintf("eventing schema object %q is invalid: %s", e.object, e.problem)
+}
+
+func (e *schemaValidationError) Unwrap() error {
+	return ErrSchemaInvalid
+}
+
+type schemaTableSpec struct {
+	name          string
+	createSQL     string
+	uniqueIndexes []schemaUniqueIndexSpec
+}
+
+type schemaIndexColumn struct {
+	name      string
+	desc      bool
+	collation string
+}
+
+type schemaUniqueIndexSpec struct {
+	name    string
+	origin  string
+	partial bool
+	columns []schemaIndexColumn
+}
+
+type schemaIndexSpec struct {
+	name      string
+	createSQL string
+}
+
+type schemaIndexMetadata struct {
+	name    string
+	unique  bool
+	partial bool
+	origin  string
+}
+
+func validateSchemaV1(ctx context.Context, conn *sql.Conn) error {
+	for _, table := range schemaV1TableSpecs() {
+		if err := validateSchemaTable(ctx, conn, table); err != nil {
+			return err
+		}
+	}
+	for _, index := range schemaV1IndexSpecs() {
+		if err := validateSchemaIndex(ctx, conn, index); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSchemaTable(ctx context.Context, conn *sql.Conn, spec schemaTableSpec) error {
+	if err := validateSchemaTableColumns(ctx, conn, spec.name); err != nil {
+		return err
+	}
+
+	tableSQL, err := readSchemaSQL(ctx, conn, "table", spec.name)
+	if err != nil {
+		return err
+	}
+	if err = validateSchemaDefinition(spec.name, tableSQL, spec.createSQL); err != nil {
+		return err
+	}
+
+	indexes, err := readSchemaIndexes(ctx, conn, spec.name)
+	if err != nil {
+		return err
+	}
+	if err = validateSchemaUniqueIndexes(
+		ctx,
+		conn,
+		spec.name,
+		indexes,
+		spec.uniqueIndexes,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateSchemaTableColumns(
+	ctx context.Context,
+	conn *sql.Conn,
+	table string,
+) error {
+	rows, err := conn.QueryContext(
+		ctx,
+		"PRAGMA table_xinfo("+quoteSQLiteStringLiteral(table)+")",
+	)
+	if err != nil {
+		return fmt.Errorf("inspect eventing table %s columns: %w", table, err)
+	}
+	defer rows.Close()
+
+	found := false
+	for rows.Next() {
+		var (
+			position     int
+			name         string
+			dataType     string
+			notNull      int
+			defaultValue sql.NullString
+			primaryKey   int
+			hidden       int
+		)
+		if err := rows.Scan(
+			&position,
+			&name,
+			&dataType,
+			&notNull,
+			&defaultValue,
+			&primaryKey,
+			&hidden,
+		); err != nil {
+			return fmt.Errorf("scan eventing table %s columns: %w", table, err)
+		}
+		found = true
+		if hidden != 0 {
+			return schemaErrorf(
+				table,
+				"column %q is hidden or generated (table_xinfo hidden=%d)",
+				name,
+				hidden,
+			)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate eventing table %s columns: %w", table, err)
+	}
+	if !found {
+		return schemaErrorf(table, "required table is missing")
+	}
+	return nil
+}
+
+func validateSchemaIndex(ctx context.Context, conn *sql.Conn, spec schemaIndexSpec) error {
+	indexSQL, err := readSchemaSQL(ctx, conn, "index", spec.name)
+	if err != nil {
+		return err
+	}
+	if err = validateSchemaDefinition(spec.name, indexSQL, spec.createSQL); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateSchemaUniqueIndexes(
+	ctx context.Context,
+	conn *sql.Conn,
+	table string,
+	indexes []schemaIndexMetadata,
+	expected []schemaUniqueIndexSpec,
+) error {
+	matched := make([]bool, len(expected))
+	for _, index := range indexes {
+		if !index.unique {
+			continue
+		}
+		columns, err := readSchemaIndexColumns(ctx, conn, index.name)
+		if err != nil {
+			return err
+		}
+		match := -1
+		for expectedIndex, candidate := range expected {
+			if matched[expectedIndex] ||
+				(candidate.name != "" && candidate.name != index.name) ||
+				candidate.origin != index.origin ||
+				candidate.partial != index.partial ||
+				!equalSchemaIndexColumns(candidate.columns, columns) {
+				continue
+			}
+			match = expectedIndex
+			break
+		}
+		if match < 0 {
+			return schemaErrorf(
+				index.name,
+				"unexpected unique index on table %q with origin=%q partial=%t columns=%#v",
+				table,
+				index.origin,
+				index.partial,
+				columns,
+			)
+		}
+		matched[match] = true
+	}
+	for expectedIndex, candidate := range expected {
+		if matched[expectedIndex] {
+			continue
+		}
+		object := candidate.name
+		if object == "" {
+			object = table
+		}
+		return schemaErrorf(
+			object,
+			"missing required unique index on table %q with origin=%q partial=%t columns=%#v",
+			table,
+			candidate.origin,
+			candidate.partial,
+			candidate.columns,
+		)
+	}
+	return nil
+}
+
+func readSchemaIndexes(
+	ctx context.Context,
+	conn *sql.Conn,
+	table string,
+) ([]schemaIndexMetadata, error) {
+	rows, err := conn.QueryContext(
+		ctx,
+		"PRAGMA index_list("+quoteSQLiteStringLiteral(table)+")",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("inspect eventing table %s indexes: %w", table, err)
+	}
+	defer rows.Close()
+
+	var indexes []schemaIndexMetadata
+	for rows.Next() {
+		var (
+			sequence int
+			unique   int
+			partial  int
+			index    schemaIndexMetadata
+		)
+		if err := rows.Scan(&sequence, &index.name, &unique, &index.origin, &partial); err != nil {
+			return nil, fmt.Errorf("scan eventing table %s indexes: %w", table, err)
+		}
+		index.unique = unique == 1
+		index.partial = partial == 1
+		indexes = append(indexes, index)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate eventing table %s indexes: %w", table, err)
+	}
+	return indexes, nil
+}
+
+func readSchemaIndexColumns(
+	ctx context.Context,
+	conn *sql.Conn,
+	index string,
+) ([]schemaIndexColumn, error) {
+	rows, err := conn.QueryContext(
+		ctx,
+		"PRAGMA index_xinfo("+quoteSQLiteStringLiteral(index)+")",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("inspect eventing index %s columns: %w", index, err)
+	}
+	defer rows.Close()
+
+	var columns []schemaIndexColumn
+	for rows.Next() {
+		var (
+			sequence   int
+			columnID   int
+			descending int
+			keyColumn  int
+			name       sql.NullString
+			collation  sql.NullString
+		)
+		if err := rows.Scan(
+			&sequence,
+			&columnID,
+			&name,
+			&descending,
+			&collation,
+			&keyColumn,
+		); err != nil {
+			return nil, fmt.Errorf("scan eventing index %s columns: %w", index, err)
+		}
+		if keyColumn == 0 {
+			continue
+		}
+		if !name.Valid || columnID < 0 {
+			return nil, schemaErrorf(index, "contains an unsupported expression column")
+		}
+		if sequence != len(columns) {
+			return nil, schemaErrorf(
+				index,
+				"column %q has position %d, want %d",
+				name.String,
+				sequence,
+				len(columns),
+			)
+		}
+		columns = append(columns, schemaIndexColumn{
+			name:      name.String,
+			desc:      descending == 1,
+			collation: collation.String,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate eventing index %s columns: %w", index, err)
+	}
+	return columns, nil
+}
+
+func readSchemaSQL(ctx context.Context, conn *sql.Conn, objectType, name string) (string, error) {
+	var statement sql.NullString
+	err := conn.QueryRowContext(ctx, `
+		SELECT sql FROM sqlite_schema WHERE type = ? AND name = ?`,
+		objectType,
+		name,
+	).Scan(&statement)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", schemaErrorf(name, "required %s is missing", objectType)
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect eventing schema object %s: %w", name, err)
+	}
+	if !statement.Valid || strings.TrimSpace(statement.String) == "" {
+		return "", schemaErrorf(name, "has no defining SQL")
+	}
+	return statement.String, nil
+}
+
+func equalSchemaIndexColumns(left, right []schemaIndexColumn) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func quoteSQLiteStringLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+func validateSchemaDefinition(object, actual, expected string) error {
+	canonicalActual, err := canonicalSchemaSQL(actual)
+	if err != nil {
+		return schemaErrorf(object, "cannot canonicalize defining SQL: %v", err)
+	}
+	canonicalExpected, err := canonicalSchemaSQL(expected)
+	if err != nil {
+		return fmt.Errorf("canonicalize required eventing schema object %s: %w", object, err)
+	}
+	if canonicalActual != canonicalExpected {
+		return schemaErrorf(object, "definition differs from the required schema")
+	}
+	return nil
+}
+
+func canonicalSchemaSQL(statement string) (string, error) {
+	if !utf8.ValidString(statement) {
+		return "", fmt.Errorf("SQL is not valid UTF-8")
+	}
+
+	tokens := make([]string, 0, len(statement)/4)
+	for offset := 0; offset < len(statement); {
+		char, size := utf8.DecodeRuneInString(statement[offset:])
+		if isSchemaSQLWhitespace(char) {
+			offset += size
+			continue
+		}
+		if strings.HasPrefix(statement[offset:], "--") {
+			newline := strings.IndexByte(statement[offset+2:], '\n')
+			if newline < 0 {
+				offset = len(statement)
+			} else {
+				offset += 2 + newline
+			}
+			continue
+		}
+		if strings.HasPrefix(statement[offset:], "/*") {
+			end := strings.Index(statement[offset+2:], "*/")
+			if end < 0 {
+				return "", fmt.Errorf("unterminated block comment")
+			}
+			offset += 2 + end + 2
+			continue
+		}
+
+		if strings.ContainsRune("'\"`[", char) {
+			token, next, err := readSchemaSQLQuotedToken(statement, offset)
+			if err != nil {
+				return "", err
+			}
+			tokens = append(tokens, token)
+			offset = next
+			continue
+		}
+		if isSchemaSQLWordRune(char) {
+			var token strings.Builder
+			for offset < len(statement) {
+				char, size = utf8.DecodeRuneInString(statement[offset:])
+				if !isSchemaSQLWordRune(char) {
+					break
+				}
+				token.WriteRune(lowerSchemaSQLRune(char))
+				offset += size
+			}
+			tokens = append(tokens, token.String())
+			continue
+		}
+
+		operator := ""
+		for _, candidate := range []string{
+			"->>",
+			"||", "->", "<=", ">=", "!=", "==", "<>", "<<", ">>",
+		} {
+			if strings.HasPrefix(statement[offset:], candidate) {
+				operator = candidate
+				break
+			}
+		}
+		if operator == "" {
+			operator = statement[offset : offset+size]
+		}
+		tokens = append(tokens, operator)
+		offset += len(operator)
+	}
+
+	for len(tokens) > 0 && tokens[len(tokens)-1] == ";" {
+		tokens = tokens[:len(tokens)-1]
+	}
+	if len(tokens) >= 5 &&
+		tokens[0] == "create" &&
+		(tokens[1] == "table" || tokens[1] == "index") &&
+		tokens[2] == "if" &&
+		tokens[3] == "not" &&
+		tokens[4] == "exists" {
+		tokens = append(tokens[:2], tokens[5:]...)
+	} else if len(tokens) >= 6 &&
+		tokens[0] == "create" &&
+		tokens[1] == "unique" &&
+		tokens[2] == "index" &&
+		tokens[3] == "if" &&
+		tokens[4] == "not" &&
+		tokens[5] == "exists" {
+		tokens = append(tokens[:3], tokens[6:]...)
+	}
+
+	var canonical strings.Builder
+	for _, token := range tokens {
+		canonical.WriteString(strconv.Itoa(len(token)))
+		canonical.WriteByte(':')
+		canonical.WriteString(token)
+	}
+	return canonical.String(), nil
+}
+
+func readSchemaSQLQuotedToken(statement string, offset int) (string, int, error) {
+	start := offset
+	delimiter := statement[offset]
+	if delimiter == '[' {
+		delimiter = ']'
+	}
+	offset++
+	for offset < len(statement) {
+		if statement[offset] != delimiter {
+			offset++
+			continue
+		}
+		offset++
+		if offset < len(statement) && statement[offset] == delimiter {
+			offset++
+			continue
+		}
+		return statement[start:offset], offset, nil
+	}
+	return "", 0, fmt.Errorf("unterminated %q quoted token", string(statement[start]))
+}
+
+func isSchemaSQLWordRune(char rune) bool {
+	return char == '_' ||
+		char == '$' ||
+		char >= utf8.RuneSelf ||
+		char >= 'a' && char <= 'z' ||
+		char >= 'A' && char <= 'Z' ||
+		char >= '0' && char <= '9'
+}
+
+func isSchemaSQLWhitespace(char rune) bool {
+	return char == ' ' ||
+		char == '\t' ||
+		char == '\n' ||
+		char == '\f' ||
+		char == '\r'
+}
+
+func lowerSchemaSQLRune(char rune) rune {
+	if char >= 'A' && char <= 'Z' {
+		return char + ('a' - 'A')
+	}
+	return char
+}
+
+func schemaErrorf(object, format string, args ...any) *schemaValidationError {
+	return &schemaValidationError{
+		object:  object,
+		problem: fmt.Sprintf(format, args...),
+	}
+}
+
+func schemaV1TableSpecs() []schemaTableSpec {
+	return []schemaTableSpec{
+		{
+			name:      "event_inbox",
+			createSQL: schemaV1EventInboxTable,
+			uniqueIndexes: []schemaUniqueIndexSpec{
+				{
+					origin:  "pk",
+					columns: []schemaIndexColumn{{name: "id", collation: "BINARY"}},
+				},
+				{
+					name:    "event_inbox_dedupe",
+					origin:  "c",
+					partial: true,
+					columns: []schemaIndexColumn{
+						{name: "source", collation: "BINARY"},
+						{name: "connector", collation: "BINARY"},
+						{name: "dedupe_key", collation: "BINARY"},
+					},
+				},
+			},
+		},
+		{
+			name:      "event_dispatches",
+			createSQL: schemaV1EventDispatchesTable,
+			uniqueIndexes: []schemaUniqueIndexSpec{
+				{
+					origin:  "pk",
+					columns: []schemaIndexColumn{{name: "id", collation: "BINARY"}},
+				},
+				{
+					origin:  "u",
+					columns: []schemaIndexColumn{{name: "run_id", collation: "BINARY"}},
+				},
+				{
+					origin: "u",
+					columns: []schemaIndexColumn{
+						{name: "event_id", collation: "BINARY"},
+						{name: "workflow_ref", collation: "BINARY"},
+					},
+				},
+			},
+		},
+	}
+}
+
+func schemaV1IndexSpecs() []schemaIndexSpec {
+	return []schemaIndexSpec{
+		{
+			name:      "event_inbox_dedupe",
+			createSQL: schemaV1EventInboxDedupeIndex,
+		},
+		{
+			name:      "event_inbox_routing_claim",
+			createSQL: schemaV1EventInboxRoutingClaimIndex,
+		},
+		{
+			name:      "event_inbox_list",
+			createSQL: schemaV1EventInboxListIndex,
+		},
+		{
+			name:      "event_dispatches_claim",
+			createSQL: schemaV1EventDispatchesClaimIndex,
+		},
+		{
+			name:      "event_dispatches_list",
+			createSQL: schemaV1EventDispatchesListIndex,
+		},
+	}
+}
 
 // Close releases the database. It is safe and idempotent.
 func (s *Store) Close() error {

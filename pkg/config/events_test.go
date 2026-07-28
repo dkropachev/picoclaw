@@ -194,8 +194,26 @@ func TestEffectiveEventIngressConfigPaths(t *testing.T) {
 			wantPath:     filepath.Join(home, "eventing.db"),
 		},
 		{
+			name:         "Windows-style home override",
+			workspace:    workspace,
+			databasePath: `~\eventing.db`,
+			wantPath:     filepath.Join(home, "eventing.db"),
+		},
+		{
+			name:         "tilde-prefixed relative override",
+			workspace:    workspace,
+			databasePath: "~backup/events.db",
+			wantPath:     filepath.Join(workspace, "~backup", "events.db"),
+		},
+		{
 			name:         "home workspace",
 			workspace:    filepath.Join("~", "workspace"),
+			databasePath: "",
+			wantPath:     filepath.Join(home, "workspace", "eventing", "events.db"),
+		},
+		{
+			name:         "Windows-style home workspace",
+			workspace:    `~\workspace`,
 			databasePath: "",
 			wantPath:     filepath.Join(home, "workspace", "eventing", "events.db"),
 		},
