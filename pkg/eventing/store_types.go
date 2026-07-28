@@ -143,27 +143,72 @@ type DispatchPage struct {
 	Next       *DispatchCursor `json:"next,omitempty"`
 }
 
+// EventStore owns durable envelope ingestion and retrieval.
+type EventStore interface {
+	Close() error
+	Insert(ctx context.Context, event Envelope) (InsertResult, error)
+	Get(ctx context.Context, id string) (StoredEvent, error)
+	List(ctx context.Context, filter EventFilter) (EventPage, error)
+}
+
+// RoutingQueue owns the independently leased event-routing lifecycle.
+type RoutingQueue interface {
+	ClaimRouting(
+		ctx context.Context,
+		workerLabel string,
+		limit int,
+		lease time.Duration,
+	) ([]StoredEvent, error)
+	AckRouting(ctx context.Context, id, leaseToken string) error
+	NackRouting(
+		ctx context.Context,
+		id, leaseToken string,
+		availableAt time.Time,
+		detail string,
+	) error
+	DeadRouting(ctx context.Context, id, leaseToken, detail string) error
+}
+
+// DispatchQueue owns durable per-workflow delivery state.
+type DispatchQueue interface {
+	CreateDispatch(ctx context.Context, eventID, workflowRef string) (Dispatch, bool, error)
+	GetDispatch(ctx context.Context, id string) (Dispatch, error)
+	ClaimDispatches(
+		ctx context.Context,
+		workerLabel string,
+		limit int,
+		lease time.Duration,
+	) ([]Dispatch, error)
+	LinkDispatchRun(ctx context.Context, id, leaseToken, runID string) error
+	FinishDispatch(
+		ctx context.Context,
+		id, leaseToken string,
+		status DispatchStatus,
+		detail string,
+	) error
+	NackDispatch(
+		ctx context.Context,
+		id, leaseToken string,
+		availableAt time.Time,
+		detail string,
+	) error
+	ListDispatches(ctx context.Context, filter DispatchFilter) (DispatchPage, error)
+}
+
+// EventMaintenance owns additive replay and bounded retention.
+type EventMaintenance interface {
+	Replay(ctx context.Context, id string) (InsertResult, error)
+	Prune(ctx context.Context, before time.Time, limit int) (int64, error)
+}
+
 // Inbox is the durable boundary consumed by ingress, routing, workflow, and
 // operations layers. The concrete SQLite Store satisfies it on supported
 // platforms; the portable stub returns ErrUnsupportedPlatform.
 type Inbox interface {
-	Close() error
-	Insert(context.Context, Envelope) (InsertResult, error)
-	Get(context.Context, string) (StoredEvent, error)
-	List(context.Context, EventFilter) (EventPage, error)
-	ClaimRouting(context.Context, string, int, time.Duration) ([]StoredEvent, error)
-	AckRouting(context.Context, string, string) error
-	NackRouting(context.Context, string, string, time.Time, string) error
-	DeadRouting(context.Context, string, string, string) error
-	CreateDispatch(context.Context, string, string) (Dispatch, bool, error)
-	GetDispatch(context.Context, string) (Dispatch, error)
-	ClaimDispatches(context.Context, string, int, time.Duration) ([]Dispatch, error)
-	LinkDispatchRun(context.Context, string, string, string) error
-	FinishDispatch(context.Context, string, string, DispatchStatus, string) error
-	NackDispatch(context.Context, string, string, time.Time, string) error
-	ListDispatches(context.Context, DispatchFilter) (DispatchPage, error)
-	Replay(context.Context, string) (InsertResult, error)
-	Prune(context.Context, time.Time, int) (int64, error)
+	EventStore
+	RoutingQueue
+	DispatchQueue
+	EventMaintenance
 }
 
 type storeOptions struct {

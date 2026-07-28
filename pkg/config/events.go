@@ -18,11 +18,11 @@ type EventsConfig struct {
 // RedactFields receive their stable defaults through EffectiveEventIngressConfig
 // so the zero value remains disabled and can be omitted from saved v3 configs.
 type EventIngressConfig struct {
-	Enabled         bool     `json:"enabled"                   env:"ENABLED"`
-	DatabasePath    string   `json:"database_path,omitempty"   env:"DATABASE_PATH"`
-	RetentionDays   int      `json:"retention_days,omitempty"  env:"RETENTION_DAYS"`
+	Enabled         bool     `json:"enabled"                     env:"ENABLED"`
+	DatabasePath    string   `json:"database_path,omitempty"     env:"DATABASE_PATH"`
+	RetentionDays   int      `json:"retention_days,omitempty"    env:"RETENTION_DAYS"`
 	MaxPayloadBytes int      `json:"max_payload_bytes,omitempty" env:"MAX_PAYLOAD_BYTES"`
-	RedactFields    []string `json:"redact_fields,omitempty"   env:"REDACT_FIELDS"`
+	RedactFields    []string `json:"redact_fields,omitempty"     env:"REDACT_FIELDS"`
 }
 
 // IsZero reports whether durable event ingress has no explicit configuration.

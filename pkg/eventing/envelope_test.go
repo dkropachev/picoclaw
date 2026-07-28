@@ -105,6 +105,7 @@ func TestNormalizeEnvelopeValidation(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			event := valid.Clone()
 			test.mutate(&event)
 			_, err := NormalizeEnvelope(event, time.Now())

@@ -68,7 +68,8 @@ func testEnvelope(dedupeKey string) Envelope {
 func openTestStore(t *testing.T, clock *mutableClock, options ...Option) (*Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "eventing", "events.db")
-	allOptions := []Option{WithClock(clock.Now)}
+	allOptions := make([]Option, 1, 1+len(options))
+	allOptions[0] = WithClock(clock.Now)
 	allOptions = append(allOptions, options...)
 	store, err := Open(context.Background(), path, allOptions...)
 	require.NoError(t, err)
@@ -219,6 +220,7 @@ func TestSQLiteFileURLPortableEncoding(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			databaseURL, err := sqliteFileURL(test.path, test.volume)
 			require.NoError(t, err)
 			assert.Equal(t, test.wantPrefix, databaseURL.String())
@@ -593,10 +595,10 @@ func TestStoreListFiltersAndKeysetPagination(t *testing.T) {
 	assert.Equal(t, "pull_request.opened", filtered.Events[0].Envelope.Type)
 
 	for i, eventID := range wantNewest[:3] {
-		_, _, err := store.CreateDispatch(
+		_, _, createErr := store.CreateDispatch(
 			context.Background(), eventID, fmt.Sprintf("workflow-%d", i),
 		)
-		require.NoError(t, err)
+		require.NoError(t, createErr)
 		clock.Advance(time.Second)
 	}
 	firstPage, err := store.ListDispatches(context.Background(), DispatchFilter{Limit: 2})
@@ -778,7 +780,7 @@ func TestStoreCancellationCloseAndNotFound(t *testing.T) {
 	store, _ := openTestStore(t, clock)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := store.Insert(ctx, testEnvelope("cancelled"))
+	_, err := store.Insert(ctx, testEnvelope("canceled"))
 	assert.ErrorIs(t, err, context.Canceled)
 	_, err = store.Get(context.Background(), "ev_00000000000000000000000000000000")
 	assert.ErrorIs(t, err, ErrNotFound)

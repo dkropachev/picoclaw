@@ -118,7 +118,11 @@ func NormalizeEnvelope(input Envelope, now time.Time) (Envelope, error) {
 		}
 		event.ID = id
 	} else if !validEventID(event.ID) {
-		return Envelope{}, fmt.Errorf("%w: id must be %q followed by 32 lowercase hexadecimal characters", ErrInvalidEnvelope, eventIDPrefix)
+		return Envelope{}, fmt.Errorf(
+			"%w: id must be %q followed by 32 lowercase hexadecimal characters",
+			ErrInvalidEnvelope,
+			eventIDPrefix,
+		)
 	}
 	if event.ReplayOf != "" && !validEventID(event.ReplayOf) {
 		return Envelope{}, fmt.Errorf("%w: replay_of is not a valid event ID", ErrInvalidEnvelope)

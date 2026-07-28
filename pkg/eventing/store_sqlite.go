@@ -366,31 +366,35 @@ func (s *Store) Insert(ctx context.Context, input Envelope) (InsertResult, error
 		return InsertResult{}, fmt.Errorf("%w: got %d bytes, maximum %d",
 			ErrPayloadTooLarge, len(input.Payload), s.maxPayloadBytes)
 	}
-	now, err := s.currentTime()
-	if err != nil {
-		return InsertResult{}, err
+	now, clockErr := s.currentTime()
+	if clockErr != nil {
+		return InsertResult{}, clockErr
 	}
-	event, err := NormalizeEnvelope(input, now)
-	if err != nil {
-		return InsertResult{}, err
+	event, normalizeErr := NormalizeEnvelope(input, now)
+	if normalizeErr != nil {
+		return InsertResult{}, normalizeErr
 	}
-	event, err = s.redactor.RedactEnvelope(event)
-	if err != nil {
-		return InsertResult{}, fmt.Errorf("%w: redact payload: %v", ErrInvalidEnvelope, err)
+	event, redactErr := s.redactor.RedactEnvelope(event)
+	if redactErr != nil {
+		return InsertResult{}, fmt.Errorf(
+			"%w: redact payload: %v",
+			ErrInvalidEnvelope,
+			redactErr,
+		)
 	}
 	if len(event.Payload) > s.maxPayloadBytes {
 		return InsertResult{}, fmt.Errorf("%w after redaction: got %d bytes, maximum %d",
 			ErrPayloadTooLarge, len(event.Payload), s.maxPayloadBytes)
 	}
-	if err := event.Validate(); err != nil {
-		return InsertResult{}, err
+	if validationErr := event.Validate(); validationErr != nil {
+		return InsertResult{}, validationErr
 	}
 
-	actorJSON, subjectJSON, attributesJSON, err := marshalEnvelopeParts(event)
-	if err != nil {
-		return InsertResult{}, err
+	actorJSON, subjectJSON, attributesJSON, marshalErr := marshalEnvelopeParts(event)
+	if marshalErr != nil {
+		return InsertResult{}, marshalErr
 	}
-	result, err := s.db.ExecContext(ctx, `
+	result, execErr := s.db.ExecContext(ctx, `
 		INSERT INTO event_inbox (
 			id, source, connector, event_type, dedupe_key, actor_json,
 			subject_json, occurred_at, received_at, payload_json,
@@ -403,23 +407,23 @@ func (s *Store) Insert(ctx context.Context, input Envelope) (InsertResult, error
 		[]byte(event.Payload), attributesJSON, nullableString(event.ReplayOf),
 		RoutingPending, toDBTime(now), toDBTime(now),
 	)
-	if err != nil {
-		return InsertResult{}, fmt.Errorf("insert event: %w", s.dbError(err))
+	if execErr != nil {
+		return InsertResult{}, fmt.Errorf("insert event: %w", s.dbError(execErr))
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return InsertResult{}, fmt.Errorf("read insert result: %w", err)
+	affected, rowsErr := result.RowsAffected()
+	if rowsErr != nil {
+		return InsertResult{}, fmt.Errorf("read insert result: %w", rowsErr)
 	}
 	if affected == 0 {
-		stored, err := s.getByDedupe(ctx, event.Source, event.Connector, event.DedupeKey)
-		if err != nil {
-			return InsertResult{}, err
+		stored, getErr := s.getByDedupe(ctx, event.Source, event.Connector, event.DedupeKey)
+		if getErr != nil {
+			return InsertResult{}, getErr
 		}
 		return InsertResult{Event: stored, Inserted: false}, nil
 	}
-	stored, err := s.Get(ctx, event.ID)
-	if err != nil {
-		return InsertResult{}, err
+	stored, getErr := s.Get(ctx, event.ID)
+	if getErr != nil {
+		return InsertResult{}, getErr
 	}
 	return InsertResult{Event: stored, Inserted: true}, nil
 }
@@ -448,7 +452,7 @@ const eventColumns = `
 	routing_available_at, routing_last_error, routing_updated_at`
 
 type rowQueryer interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 func (s *Store) getWith(ctx context.Context, queryer rowQueryer, query string, args ...any) (StoredEvent, error) {
@@ -549,17 +553,20 @@ func (s *Store) ClaimRouting(
 	if limit > maxListLimit {
 		limit = maxListLimit
 	}
-	now, err := s.currentTime()
-	if err != nil {
-		return nil, err
+	now, clockErr := s.currentTime()
+	if clockErr != nil {
+		return nil, clockErr
 	}
 	leaseUntil := now.Add(lease)
-	if err := validateDBTimestamp("routing lease deadline", leaseUntil); err != nil {
-		return nil, err
+	if timestampErr := validateDBTimestamp(
+		"routing lease deadline",
+		leaseUntil,
+	); timestampErr != nil {
+		return nil, timestampErr
 	}
 	claimed := make([]StoredEvent, 0, limit)
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
-		rows, err := conn.QueryContext(ctx, `
+	claimErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
+		ids, queryErr := queryIDs(ctx, conn, `
 			SELECT id FROM event_inbox
 			WHERE (routing_status = ? AND routing_available_at <= ?)
 			   OR (routing_status = ? AND routing_lease_until <= ?)
@@ -567,46 +574,34 @@ func (s *Store) ClaimRouting(
 			LIMIT ?`,
 			RoutingPending, toDBTime(now), RoutingClaimed, toDBTime(now), limit,
 		)
-		if err != nil {
-			return err
-		}
-		var ids []string
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			ids = append(ids, id)
-		}
-		if err := rows.Close(); err != nil {
-			return err
+		if queryErr != nil {
+			return queryErr
 		}
 		for _, id := range ids {
-			leaseToken, err := newLeaseToken(workerLabel)
-			if err != nil {
-				return err
+			leaseToken, leaseErr := newLeaseToken(workerLabel)
+			if leaseErr != nil {
+				return leaseErr
 			}
-			if _, err := conn.ExecContext(ctx, `
+			if _, updateErr := conn.ExecContext(ctx, `
 				UPDATE event_inbox
 				SET routing_status = ?, routing_owner = ?, routing_lease_until = ?,
 				    routing_attempts = routing_attempts + 1, routing_updated_at = ?
 				WHERE id = ?`,
 				RoutingClaimed, leaseToken, toDBTime(leaseUntil), toDBTime(now), id,
-			); err != nil {
-				return err
+			); updateErr != nil {
+				return updateErr
 			}
-			event, err := s.getWith(ctx, conn,
+			event, getErr := s.getWith(ctx, conn,
 				`SELECT `+eventColumns+` FROM event_inbox WHERE id = ?`, id)
-			if err != nil {
-				return err
+			if getErr != nil {
+				return getErr
 			}
 			claimed = append(claimed, event)
 		}
 		return nil
 	})
-	if err != nil {
-		return nil, fmt.Errorf("claim routing work: %w", s.dbError(err))
+	if claimErr != nil {
+		return nil, fmt.Errorf("claim routing work: %w", s.dbError(claimErr))
 	}
 	return claimed, nil
 }
@@ -650,8 +645,11 @@ func (s *Store) finishRouting(
 		availableAt = now
 	}
 	availableAt = availableAt.UTC()
-	if err := validateDBTimestamp("routing availability", availableAt); err != nil {
-		return err
+	if timestampErr := validateDBTimestamp(
+		"routing availability",
+		availableAt,
+	); timestampErr != nil {
+		return timestampErr
 	}
 	detail = s.sanitizeDetail(detail)
 	result, err := s.db.ExecContext(ctx, `
@@ -767,17 +765,20 @@ func (s *Store) ClaimDispatches(
 	if limit > maxListLimit {
 		limit = maxListLimit
 	}
-	now, err := s.currentTime()
-	if err != nil {
-		return nil, err
+	now, clockErr := s.currentTime()
+	if clockErr != nil {
+		return nil, clockErr
 	}
 	leaseUntil := now.Add(lease)
-	if err := validateDBTimestamp("dispatch lease deadline", leaseUntil); err != nil {
-		return nil, err
+	if timestampErr := validateDBTimestamp(
+		"dispatch lease deadline",
+		leaseUntil,
+	); timestampErr != nil {
+		return nil, timestampErr
 	}
 	claimed := make([]Dispatch, 0, limit)
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
-		rows, err := conn.QueryContext(ctx, `
+	claimErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
+		ids, queryErr := queryIDs(ctx, conn, `
 			SELECT id FROM event_dispatches
 			WHERE (status = ? AND available_at <= ?)
 			   OR (status IN (?, ?) AND lease_until <= ?)
@@ -786,46 +787,34 @@ func (s *Store) ClaimDispatches(
 			DispatchPending, toDBTime(now), DispatchClaimed, DispatchRunning,
 			toDBTime(now), limit,
 		)
-		if err != nil {
-			return err
-		}
-		var ids []string
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			ids = append(ids, id)
-		}
-		if err := rows.Close(); err != nil {
-			return err
+		if queryErr != nil {
+			return queryErr
 		}
 		for _, id := range ids {
-			leaseToken, err := newLeaseToken(workerLabel)
-			if err != nil {
-				return err
+			leaseToken, leaseErr := newLeaseToken(workerLabel)
+			if leaseErr != nil {
+				return leaseErr
 			}
-			if _, err := conn.ExecContext(ctx, `
+			if _, updateErr := conn.ExecContext(ctx, `
 				UPDATE event_dispatches
 				SET status = ?, owner = ?, lease_until = ?,
 				    attempts = attempts + 1, updated_at = ?
 				WHERE id = ?`,
 				DispatchClaimed, leaseToken, toDBTime(leaseUntil), toDBTime(now), id,
-			); err != nil {
-				return err
+			); updateErr != nil {
+				return updateErr
 			}
-			dispatch, err := scanDispatch(conn.QueryRowContext(ctx,
+			dispatch, scanErr := scanDispatch(conn.QueryRowContext(ctx,
 				`SELECT `+dispatchColumns+` FROM event_dispatches WHERE id = ?`, id))
-			if err != nil {
-				return err
+			if scanErr != nil {
+				return scanErr
 			}
 			claimed = append(claimed, dispatch)
 		}
 		return nil
 	})
-	if err != nil {
-		return nil, fmt.Errorf("claim dispatches: %w", s.dbError(err))
+	if claimErr != nil {
+		return nil, fmt.Errorf("claim dispatches: %w", s.dbError(claimErr))
 	}
 	return claimed, nil
 }
@@ -910,8 +899,11 @@ func (s *Store) NackDispatch(
 		availableAt = now
 	}
 	availableAt = availableAt.UTC()
-	if err := validateDBTimestamp("dispatch availability", availableAt); err != nil {
-		return err
+	if timestampErr := validateDBTimestamp(
+		"dispatch availability",
+		availableAt,
+	); timestampErr != nil {
+		return timestampErr
 	}
 	detail = s.sanitizeDetail(detail)
 	result, err := s.db.ExecContext(ctx, `
@@ -1097,6 +1089,32 @@ func (s *Store) sanitizeDetail(detail string) string {
 	return detail
 }
 
+func queryIDs(
+	ctx context.Context,
+	conn *sql.Conn,
+	query string,
+	args ...any,
+) ([]string, error) {
+	rows, err := conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			return nil, scanErr
+		}
+		ids = append(ids, id)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, rowsErr
+	}
+	return ids, nil
+}
+
 func (s *Store) withImmediate(ctx context.Context, operation func(*sql.Conn) error) (err error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
@@ -1135,7 +1153,7 @@ func marshalEnvelopeParts(event Envelope) ([]byte, []byte, []byte, error) {
 }
 
 type rowScanner interface {
-	Scan(...any) error
+	Scan(dest ...any) error
 }
 
 func scanStoredEvent(scanner rowScanner) (StoredEvent, error) {

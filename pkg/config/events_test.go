@@ -328,8 +328,8 @@ func TestSaveLoadConfigEventIngress(t *testing.T) {
 	var raw struct {
 		Events map[string]json.RawMessage `json:"events"`
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		t.Fatalf("unmarshal default config: %v", err)
+	if unmarshalErr := json.Unmarshal(data, &raw); unmarshalErr != nil {
+		t.Fatalf("unmarshal default config: %v", unmarshalErr)
 	}
 	if _, exists := raw.Events["ingress"]; exists {
 		t.Fatalf("zero ingress should be omitted from saved v3 config:\n%s", data)
@@ -342,8 +342,8 @@ func TestSaveLoadConfigEventIngress(t *testing.T) {
 		MaxPayloadBytes: 4096,
 		RedactFields:    []string{"tenant_secret"},
 	}
-	if err := SaveConfig(path, cfg); err != nil {
-		t.Fatalf("SaveConfig(configured) error: %v", err)
+	if saveErr := SaveConfig(path, cfg); saveErr != nil {
+		t.Fatalf("SaveConfig(configured) error: %v", saveErr)
 	}
 
 	loaded, err := LoadConfig(path)
