@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 type ToolAdaptationDecision struct {
@@ -46,6 +47,7 @@ func ResolveToolAdaptation(
 	modelName string,
 ) ToolAdaptationDecision {
 	normalized := cfg.Normalized()
+	normalized = adaptationConfigForProfile(normalized, providerName, modelName)
 	if !normalized.Enabled {
 		return ToolAdaptationDecision{
 			Enabled:             false,
@@ -95,6 +97,33 @@ func ResolveToolAdaptation(
 		decision.RuntimeDowngrade = true
 	}
 	return decision
+}
+
+func adaptationConfigForProfile(
+	cfg config.ToolAdaptationConfig,
+	providerName string,
+	modelName string,
+) config.ToolAdaptationConfig {
+	providerName = providers.NormalizeProvider(providerName)
+	var matched *config.ToolAdaptationProfileOverride
+	for i := range cfg.ProfileOverrides {
+		override := &cfg.ProfileOverrides[i]
+		if providers.NormalizeProvider(override.Provider) != providerName ||
+			!strings.EqualFold(strings.TrimSpace(override.Model), strings.TrimSpace(modelName)) {
+			continue
+		}
+		matched = override
+	}
+	if matched == nil {
+		return cfg
+	}
+	if matched.VisibleToolSurface != "" {
+		cfg.VisibleToolSurface = matched.VisibleToolSurface
+	}
+	if matched.CacheSensitiveAPIs != "" {
+		cfg.CacheSensitiveAPIs = matched.CacheSensitiveAPIs
+	}
+	return cfg
 }
 
 func resolveAutoToolSurface(

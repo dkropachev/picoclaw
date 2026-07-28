@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"runtime"
 	"strings"
@@ -81,19 +82,20 @@ type threadPolicyRequest struct {
 }
 
 type toolAdaptationConfigRequest struct {
-	Enabled                bool                                  `json:"enabled"`
-	VisibleToolSurface     string                                `json:"visible_tool_surface"`
-	LearnFromToolCalls     bool                                  `json:"learn_from_tool_calls"`
-	RunModelProbes         bool                                  `json:"run_model_probes"`
-	AllowRuntimeDowngrade  string                                `json:"allow_runtime_downgrade"`
-	AllowRuntimePromotion  string                                `json:"allow_runtime_promotion"`
-	ApplyVisibleChanges    string                                `json:"apply_visible_changes"`
-	CacheSensitiveAPIs     string                                `json:"cache_sensitive_apis"`
-	CacheBreakingDowngrade bool                                  `json:"cache_breaking_downgrade"`
-	Resolved               *toolAdaptationResolvedState          `json:"resolved,omitempty"`
-	Observation            *picotools.ToolAdaptationObservation  `json:"observation,omitempty"`
-	Outcomes               []picotools.ToolAdaptationToolOutcome `json:"outcomes,omitempty"`
-	Profiles               []toolAdaptationProfileState          `json:"profiles,omitempty"`
+	Enabled                bool                                    `json:"enabled"`
+	VisibleToolSurface     string                                  `json:"visible_tool_surface"`
+	LearnFromToolCalls     bool                                    `json:"learn_from_tool_calls"`
+	RunModelProbes         bool                                    `json:"run_model_probes"`
+	AllowRuntimeDowngrade  string                                  `json:"allow_runtime_downgrade"`
+	AllowRuntimePromotion  string                                  `json:"allow_runtime_promotion"`
+	ApplyVisibleChanges    string                                  `json:"apply_visible_changes"`
+	CacheSensitiveAPIs     string                                  `json:"cache_sensitive_apis"`
+	CacheBreakingDowngrade bool                                    `json:"cache_breaking_downgrade"`
+	ProfileOverrides       *[]config.ToolAdaptationProfileOverride `json:"profile_overrides,omitempty"`
+	Resolved               *toolAdaptationResolvedState            `json:"resolved,omitempty"`
+	Observation            *picotools.ToolAdaptationObservation    `json:"observation,omitempty"`
+	Outcomes               []picotools.ToolAdaptationToolOutcome   `json:"outcomes,omitempty"`
+	Profiles               []toolAdaptationProfileState            `json:"profiles,omitempty"`
 }
 
 type toolAdaptationResolvedState struct {
@@ -111,13 +113,20 @@ type toolAdaptationResolvedState struct {
 }
 
 type toolAdaptationProfileState struct {
-	ID          string                                `json:"id"`
-	Label       string                                `json:"label"`
-	Source      string                                `json:"source"`
-	IsDefault   bool                                  `json:"is_default"`
-	Resolved    toolAdaptationResolvedState           `json:"resolved"`
-	Observation *picotools.ToolAdaptationObservation  `json:"observation,omitempty"`
-	Outcomes    []picotools.ToolAdaptationToolOutcome `json:"outcomes,omitempty"`
+	ID             string                                `json:"id"`
+	Label          string                                `json:"label"`
+	Source         string                                `json:"source"`
+	IsDefault      bool                                  `json:"is_default"`
+	IsOverride     bool                                  `json:"is_override"`
+	ProbeAvailable bool                                  `json:"probe_available"`
+	Resolved       toolAdaptationResolvedState           `json:"resolved"`
+	Observation    *picotools.ToolAdaptationObservation  `json:"observation,omitempty"`
+	Outcomes       []picotools.ToolAdaptationToolOutcome `json:"outcomes,omitempty"`
+}
+
+type toolAdaptationProbeRequest struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
 }
 
 var toolCatalog = []toolCatalogEntry{
@@ -339,6 +348,14 @@ func (h *Handler) handleUpdateToolAdaptation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	profileOverrides := cfg.Tools.Adaptation.ProfileOverrides
+	if req.ProfileOverrides != nil {
+		if err := validateToolAdaptationProfileOverrides(*req.ProfileOverrides); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		profileOverrides = canonicalToolAdaptationProfileOverrides(*req.ProfileOverrides)
+	}
 	cfg.Tools.Adaptation = config.ToolAdaptationConfig{
 		Enabled:                req.Enabled,
 		VisibleToolSurface:     req.VisibleToolSurface,
@@ -349,6 +366,7 @@ func (h *Handler) handleUpdateToolAdaptation(w http.ResponseWriter, r *http.Requ
 		ApplyVisibleChanges:    req.ApplyVisibleChanges,
 		CacheSensitiveAPIs:     req.CacheSensitiveAPIs,
 		CacheBreakingDowngrade: req.CacheBreakingDowngrade,
+		ProfileOverrides:       profileOverrides,
 	}.Normalized()
 
 	if err := config.SaveConfig(h.configPath, cfg); err != nil {
@@ -379,20 +397,50 @@ func (h *Handler) handleRunToolAdaptationProbe(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	providerName, model := resolveToolAdaptationProfileForConfig(cfg)
+	var req toolAdaptationProbeRequest
+	if decodeErr := json.NewDecoder(r.Body).Decode(&req); decodeErr != nil && decodeErr != io.EOF {
+		http.Error(w, fmt.Sprintf("invalid probe request: %v", decodeErr), http.StatusBadRequest)
+		return
+	}
+	providerName := strings.TrimSpace(req.Provider)
+	model := strings.TrimSpace(req.Model)
+	if (providerName == "") != (model == "") {
+		http.Error(w, "probe provider and model must be provided together", http.StatusBadRequest)
+		return
+	}
+	if providerName == "" {
+		providerName, model = resolveToolAdaptationProfileForConfig(cfg)
+	}
+	providerName = providers.NormalizeProvider(providerName)
 	if strings.TrimSpace(model) == "" {
 		http.Error(w, "default model is not configured", http.StatusBadRequest)
 		return
 	}
 
-	modelCfg := probeModelConfigForConfig(cfg, providerName, model)
+	modelCfg, err := probeModelConfigForProfile(cfg, providerName, model)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to resolve probe profile: %v", err), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(modelCfg.Workspace) == "" {
+		modelCfg.Workspace = cfg.WorkspacePath()
+	}
 	llmProvider, modelID, err := providers.CreateProviderFromConfig(modelCfg)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to create probe provider: %v", err), http.StatusBadRequest)
 		return
 	}
+	if stateful, ok := llmProvider.(providers.StatefulProvider); ok {
+		defer stateful.Close()
+	}
+	effectiveProvider, effectiveModel := providers.ExtractProtocol(modelCfg)
+	if strings.TrimSpace(effectiveProvider) != "" {
+		providerName = providers.NormalizeProvider(effectiveProvider)
+	}
 	if strings.TrimSpace(modelID) != "" {
 		model = modelID
+	} else if strings.TrimSpace(effectiveModel) != "" {
+		model = strings.TrimSpace(effectiveModel)
 	}
 
 	decision := picotools.ResolveToolAdaptation(adaptation, providerName, model)
@@ -420,6 +468,7 @@ func buildToolAdaptationResponse(cfg *config.Config) toolAdaptationConfigRequest
 	if cfg != nil {
 		adaptation = cfg.Tools.Adaptation.Normalized()
 	}
+	profileOverrides := canonicalToolAdaptationProfileOverrides(adaptation.ProfileOverrides)
 	resp := toolAdaptationConfigRequest{
 		Enabled:                adaptation.Enabled,
 		VisibleToolSurface:     adaptation.VisibleToolSurface,
@@ -430,6 +479,7 @@ func buildToolAdaptationResponse(cfg *config.Config) toolAdaptationConfigRequest
 		ApplyVisibleChanges:    adaptation.ApplyVisibleChanges,
 		CacheSensitiveAPIs:     adaptation.CacheSensitiveAPIs,
 		CacheBreakingDowngrade: adaptation.CacheBreakingDowngrade,
+		ProfileOverrides:       &profileOverrides,
 	}
 	if cfg != nil {
 		provider, model := resolveToolAdaptationProfileForConfig(cfg)
@@ -447,6 +497,8 @@ func buildToolAdaptationResolvedState(
 	provider string,
 	model string,
 ) *toolAdaptationResolvedState {
+	provider = providers.NormalizeProvider(provider)
+	model = strings.TrimSpace(model)
 	decision := picotools.ResolveToolAdaptation(adaptation, provider, model)
 	return &toolAdaptationResolvedState{
 		Provider:            provider,
@@ -477,14 +529,20 @@ func (s *toolAdaptationResolvedState) cacheObservation() *picotools.ToolAdaptati
 	return &observation
 }
 
-func resolveToolAdaptationProfileForConfig(cfg *config.Config) (string, string) {
-	provider := strings.TrimSpace(cfg.Agents.Defaults.Provider)
-	model := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
+func resolveToolAdaptationProfileForConfig(
+	cfg *config.Config,
+) (provider string, model string) {
+	provider = strings.TrimSpace(cfg.Agents.Defaults.Provider)
+	model = strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
+	defer func() {
+		provider = providers.NormalizeProvider(provider)
+		model = strings.TrimSpace(model)
+	}()
 	if model == "" {
 		return provider, ""
 	}
 	for _, mc := range cfg.ModelList {
-		if mc == nil {
+		if mc == nil || !mc.Enabled {
 			continue
 		}
 		if !strings.EqualFold(strings.TrimSpace(mc.ModelName), model) {
@@ -529,7 +587,7 @@ func firstModelRouterProfileForAdaptation(
 	cfg *config.Config,
 	router *config.ModelRouterConfig,
 ) (string, string, bool) {
-	if router == nil {
+	if router == nil || !router.Enabled {
 		return "", "", false
 	}
 	for _, modelRef := range modelRouterModelRefsForAdaptation(router) {
@@ -541,6 +599,9 @@ func firstModelRouterProfileForAdaptation(
 			continue
 		}
 		for _, mc := range matches {
+			if mc == nil || !mc.Enabled {
+				continue
+			}
 			switch {
 			case mc.IsAccountRouter():
 				accountRouter := mc.Router
@@ -554,7 +615,7 @@ func firstModelRouterProfileForAdaptation(
 				continue
 			default:
 				provider, model := providers.ExtractProtocol(mc)
-				provider = strings.TrimSpace(provider)
+				provider = providers.NormalizeProvider(provider)
 				model = strings.TrimSpace(model)
 				if provider != "" && model != "" {
 					return provider, model, true
@@ -569,19 +630,22 @@ func firstAccountRouterProfileForAdaptation(
 	cfg *config.Config,
 	router *config.AccountRouterConfig,
 ) (string, string, bool) {
-	if router == nil {
+	if router == nil || !router.Enabled {
 		return "", "", false
 	}
 	routerModel := strings.TrimSpace(router.Model)
 	for _, account := range accountRouterAccountsForAdaptation(router) {
 		if provider, ok := config.AccountRouterCredentialAccountProvider(account); ok {
-			provider = strings.TrimSpace(provider)
+			provider = providers.NormalizeProvider(provider)
 			if provider != "" && routerModel != "" {
 				return provider, routerModel, true
 			}
 			continue
 		}
 		for _, mc := range modelConfigsByNameForAdaptation(cfg, account) {
+			if mc == nil || !mc.Enabled {
+				continue
+			}
 			if mc.IsAccountRouter() {
 				nestedRouter := mc.Router
 				if nestedRouter == nil {
@@ -603,7 +667,7 @@ func firstAccountRouterProfileForAdaptation(
 				continue
 			}
 			provider, model := providers.ExtractProtocol(mc)
-			provider = strings.TrimSpace(provider)
+			provider = providers.NormalizeProvider(provider)
 			model = strings.TrimSpace(model)
 			if routerModel != "" {
 				model = routerModel
@@ -623,7 +687,7 @@ func providerModelFromRefForAdaptation(ref string) (string, string, bool) {
 	if !ok || provider == "" || model == "" {
 		return "", "", false
 	}
-	return provider, model, true
+	return providers.NormalizeProvider(provider), model, true
 }
 
 func buildToolAdaptationProfiles(
@@ -639,11 +703,20 @@ func buildToolAdaptationProfiles(
 		adaptation:   adaptation,
 		activeKeys:   map[string]struct{}{},
 		accountRefs:  accountRouterAccountRefsForAdaptation(cfg),
+		overrideKeys: toolAdaptationOverrideKeys(adaptation.ProfileOverrides),
 		seenProfiles: map[string]struct{}{},
 	}
 	builder.addActiveProfile(defaultProfile.Provider, defaultProfile.Model)
 	for _, mc := range cfg.ModelList {
 		builder.addModelConfig(mc, "model alias")
+	}
+	for _, override := range adaptation.ProfileOverrides {
+		builder.addProfile(
+			override.Provider,
+			override.Model,
+			"manual override",
+			strings.TrimSpace(override.Provider)+" / "+strings.TrimSpace(override.Model),
+		)
 	}
 	return builder.profiles
 }
@@ -653,19 +726,21 @@ type toolAdaptationProfileBuilder struct {
 	adaptation   config.ToolAdaptationConfig
 	activeKeys   map[string]struct{}
 	accountRefs  map[string]struct{}
+	overrideKeys map[string]struct{}
 	seenProfiles map[string]struct{}
 	profiles     []toolAdaptationProfileState
 }
 
 func (b *toolAdaptationProfileBuilder) addActiveProfile(provider string, model string) {
-	provider = strings.TrimSpace(provider)
+	provider = providers.NormalizeProvider(provider)
 	model = strings.TrimSpace(model)
 	if model == "" {
 		b.addProfile(provider, model, "active configuration", "active")
 		return
 	}
 	for _, mc := range b.cfg.ModelList {
-		if mc == nil || !strings.EqualFold(strings.TrimSpace(mc.ModelName), model) {
+		if mc == nil || !mc.Enabled ||
+			!strings.EqualFold(strings.TrimSpace(mc.ModelName), model) {
 			continue
 		}
 		switch {
@@ -699,7 +774,7 @@ func (b *toolAdaptationProfileBuilder) addActiveProfile(provider string, model s
 }
 
 func (b *toolAdaptationProfileBuilder) addModelConfig(mc *config.ModelConfig, source string) {
-	if mc == nil {
+	if mc == nil || !mc.Enabled {
 		return
 	}
 	modelName := strings.TrimSpace(mc.ModelName)
@@ -730,7 +805,7 @@ func (b *toolAdaptationProfileBuilder) addModelRouter(
 	source string,
 	active bool,
 ) {
-	if router == nil {
+	if router == nil || !router.Enabled {
 		return
 	}
 	for _, modelRef := range modelRouterModelRefsForAdaptation(router) {
@@ -742,7 +817,7 @@ func (b *toolAdaptationProfileBuilder) addModelRouter(
 			continue
 		}
 		for _, mc := range matches {
-			if mc == nil {
+			if mc == nil || !mc.Enabled {
 				continue
 			}
 			switch {
@@ -771,7 +846,7 @@ func (b *toolAdaptationProfileBuilder) addAccountRouter(
 	source string,
 	active bool,
 ) {
-	if router == nil {
+	if router == nil || !router.Enabled {
 		return
 	}
 	routerModel := strings.TrimSpace(router.Model)
@@ -782,7 +857,7 @@ func (b *toolAdaptationProfileBuilder) addAccountRouter(
 		}
 		matches := modelConfigsByNameForAdaptation(b.cfg, account)
 		for _, mc := range matches {
-			if mc == nil {
+			if mc == nil || !mc.Enabled {
 				continue
 			}
 			if mc.IsAccountRouter() {
@@ -821,7 +896,7 @@ func (b *toolAdaptationProfileBuilder) addProfileWithActive(
 	label string,
 	active bool,
 ) {
-	provider = strings.TrimSpace(provider)
+	provider = providers.NormalizeProvider(provider)
 	model = strings.TrimSpace(model)
 	if provider == "" || model == "" {
 		return
@@ -850,14 +925,18 @@ func (b *toolAdaptationProfileBuilder) addProfileWithActive(
 	if displayLabel == "" {
 		displayLabel = strings.TrimSpace(strings.Join([]string{provider, model}, " / "))
 	}
+	probeConfig, probeErr := probeModelConfigForProfile(b.cfg, provider, model)
+	probeAvailable := probeErr == nil && probeModelConfigReady(probeConfig)
 	b.profiles = append(b.profiles, toolAdaptationProfileState{
-		ID:          key,
-		Label:       displayLabel,
-		Source:      strings.TrimSpace(source),
-		IsDefault:   active || b.isActiveKey(key),
-		Resolved:    *resolved,
-		Observation: observation,
-		Outcomes:    outcomes,
+		ID:             key,
+		Label:          displayLabel,
+		Source:         strings.TrimSpace(source),
+		IsDefault:      active || b.isActiveKey(key),
+		IsOverride:     b.isOverrideKey(key),
+		ProbeAvailable: probeAvailable,
+		Resolved:       *resolved,
+		Observation:    observation,
+		Outcomes:       outcomes,
 	})
 }
 
@@ -866,8 +945,78 @@ func (b *toolAdaptationProfileBuilder) isActiveKey(key string) bool {
 	return ok
 }
 
+func (b *toolAdaptationProfileBuilder) isOverrideKey(key string) bool {
+	_, ok := b.overrideKeys[key]
+	return ok
+}
+
+func toolAdaptationOverrideKeys(
+	overrides []config.ToolAdaptationProfileOverride,
+) map[string]struct{} {
+	keys := make(map[string]struct{}, len(overrides))
+	for _, override := range overrides {
+		provider := strings.TrimSpace(override.Provider)
+		model := strings.TrimSpace(override.Model)
+		if provider == "" || model == "" {
+			continue
+		}
+		keys[toolAdaptationProfileKeyForAPI(provider, model)] = struct{}{}
+	}
+	return keys
+}
+
 func toolAdaptationProfileKeyForAPI(provider string, model string) string {
-	return strings.ToLower(strings.TrimSpace(provider)) + "/" + strings.ToLower(strings.TrimSpace(model))
+	return providers.ModelKey(provider, model)
+}
+
+func canonicalToolAdaptationProfileOverrides(
+	overrides []config.ToolAdaptationProfileOverride,
+) []config.ToolAdaptationProfileOverride {
+	canonical := make([]config.ToolAdaptationProfileOverride, 0, len(overrides))
+	indexByKey := make(map[string]int, len(overrides))
+	for _, override := range overrides {
+		override.Provider = providers.NormalizeProvider(override.Provider)
+		override.Model = strings.TrimSpace(override.Model)
+		key := providers.ModelKey(override.Provider, override.Model)
+		if index, exists := indexByKey[key]; exists {
+			canonical[index] = override
+			continue
+		}
+		indexByKey[key] = len(canonical)
+		canonical = append(canonical, override)
+	}
+	return canonical
+}
+
+func validateToolAdaptationProfileOverrides(
+	overrides []config.ToolAdaptationProfileOverride,
+) error {
+	for i, override := range overrides {
+		if strings.TrimSpace(override.Provider) == "" || strings.TrimSpace(override.Model) == "" {
+			return fmt.Errorf("profile_overrides[%d] requires provider and model", i)
+		}
+		switch strings.ToLower(strings.TrimSpace(override.VisibleToolSurface)) {
+		case "", config.ToolSurfaceAuto, config.ToolSurfaceCodex,
+			config.ToolSurfacePicoClaw, config.ToolSurfaceSimple:
+		default:
+			return fmt.Errorf(
+				"profile_overrides[%d] has invalid visible_tool_surface %q",
+				i,
+				override.VisibleToolSurface,
+			)
+		}
+		switch strings.ToLower(strings.TrimSpace(override.CacheSensitiveAPIs)) {
+		case "", config.ToolCacheSensitivityAuto, config.ToolCacheSensitivityNever,
+			config.ToolCacheSensitivityAlways:
+		default:
+			return fmt.Errorf(
+				"profile_overrides[%d] has invalid cache_sensitive_apis %q",
+				i,
+				override.CacheSensitiveAPIs,
+			)
+		}
+	}
+	return nil
 }
 
 func findAccountRouterForAdaptation(cfg *config.Config, name string) *config.AccountRouterConfig {
@@ -894,7 +1043,7 @@ func modelConfigsByNameForAdaptation(cfg *config.Config, name string) []*config.
 	name = strings.TrimSpace(name)
 	var matches []*config.ModelConfig
 	for _, mc := range cfg.ModelList {
-		if mc == nil {
+		if mc == nil || !mc.Enabled {
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(mc.ModelName), name) {
@@ -957,6 +1106,9 @@ func accountRouterAccountRefsForAdaptation(cfg *config.Config) map[string]struct
 		return refs
 	}
 	for i := range cfg.AccountRouters {
+		if !cfg.AccountRouters[i].Enabled {
+			continue
+		}
 		for _, account := range accountRouterAccountsForAdaptation(&cfg.AccountRouters[i]) {
 			account = strings.TrimSpace(account)
 			if account == "" {
@@ -1000,17 +1152,225 @@ func accountRouterExpressionAccountsForAdaptation(expr config.AccountRouterExpre
 	return accounts
 }
 
-func probeModelConfigForConfig(cfg *config.Config, providerName string, model string) *config.ModelConfig {
-	modelName := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
-	if modelName != "" {
-		if mc, err := cfg.GetModelConfig(modelName); err == nil && mc != nil {
-			clone := *mc
-			return &clone
+func probeModelConfigForProfile(
+	cfg *config.Config,
+	providerName string,
+	model string,
+) (*config.ModelConfig, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is nil")
+	}
+	providerName = providers.NormalizeProvider(providerName)
+	model = strings.TrimSpace(model)
+	if providerName == "" || model == "" {
+		return nil, fmt.Errorf("provider and model are required")
+	}
+
+	candidates := probeModelConfigCandidates(cfg)
+	var firstExact *config.ModelConfig
+	for _, candidate := range candidates {
+		if probeModelConfigMatches(candidate, providerName, model) {
+			clone := *candidate
+			if firstExact == nil {
+				firstExact = &clone
+			}
+			if probeModelConfigReady(&clone) {
+				return &clone, nil
+			}
 		}
 	}
-	return &config.ModelConfig{
-		Provider: strings.TrimSpace(providerName),
-		Model:    strings.TrimSpace(model),
+	if firstExact != nil {
+		// Keep the first exact match so the provider factory can return its
+		// specific missing-credential or invalid-configuration error.
+		return firstExact, nil
+	}
+	return nil, fmt.Errorf(
+		"no configured upstream model matches profile %s/%s",
+		providerName,
+		model,
+	)
+}
+
+func probeModelConfigCandidates(cfg *config.Config) []*config.ModelConfig {
+	var candidates []*config.ModelConfig
+	for _, modelCfg := range cfg.ModelList {
+		if modelCfg == nil || !modelCfg.Enabled ||
+			modelCfg.IsAccountRouter() || modelCfg.IsModelRouter() {
+			continue
+		}
+		clone := *modelCfg
+		candidates = append(candidates, &clone)
+	}
+	for i := range cfg.AccountRouters {
+		router := &cfg.AccountRouters[i]
+		if !router.Enabled {
+			continue
+		}
+		for _, account := range accountRouterAccountsForAdaptation(router) {
+			candidates = append(
+				candidates,
+				probeModelConfigsForAccount(cfg, account, router.Model, map[string]struct{}{})...,
+			)
+		}
+	}
+	return candidates
+}
+
+func probeModelConfigsForAccount(
+	cfg *config.Config,
+	account string,
+	sharedModel string,
+	visited map[string]struct{},
+) []*config.ModelConfig {
+	account = strings.TrimSpace(account)
+	if account == "" {
+		return nil
+	}
+	visitKey := strings.ToLower(account)
+	if _, exists := visited[visitKey]; exists {
+		return nil
+	}
+	visited[visitKey] = struct{}{}
+
+	if credentialID, ok := config.AccountRouterCredentialAccountID(account); ok {
+		provider, providerOK := config.AccountRouterCredentialAccountProvider(account)
+		if !providerOK || strings.TrimSpace(sharedModel) == "" {
+			return nil
+		}
+		provider = probeCredentialRuntimeProvider(provider)
+		return []*config.ModelConfig{{
+			ModelName:    account,
+			Provider:     provider,
+			Model:        strings.TrimSpace(sharedModel),
+			AuthMethod:   probeCredentialRuntimeAuthMethod(provider),
+			CredentialID: credentialID,
+			Enabled:      true,
+		}}
+	}
+
+	var candidates []*config.ModelConfig
+	for _, modelCfg := range modelConfigsByNameForAdaptation(cfg, account) {
+		if modelCfg == nil || !modelCfg.Enabled {
+			continue
+		}
+		switch {
+		case modelCfg.IsAccountRouter():
+			router := modelCfg.Router
+			if router == nil {
+				router = findAccountRouterForAdaptation(cfg, modelCfg.ModelName)
+			}
+			if router == nil || !router.Enabled {
+				continue
+			}
+			for _, nestedAccount := range accountRouterAccountsForAdaptation(router) {
+				candidates = append(
+					candidates,
+					probeModelConfigsForAccount(cfg, nestedAccount, router.Model, visited)...,
+				)
+			}
+		case modelCfg.IsModelRouter():
+			continue
+		default:
+			clone := *modelCfg
+			if strings.TrimSpace(sharedModel) != "" {
+				clone.Model = strings.TrimSpace(sharedModel)
+			}
+			candidates = append(candidates, &clone)
+		}
+	}
+	return candidates
+}
+
+func probeCredentialRuntimeProvider(provider string) string {
+	switch providers.NormalizeProvider(provider) {
+	case "google-antigravity":
+		return "antigravity"
+	case "copilot":
+		return "github-copilot"
+	default:
+		return providers.NormalizeProvider(provider)
+	}
+}
+
+func probeCredentialRuntimeAuthMethod(provider string) string {
+	switch providers.NormalizeProvider(provider) {
+	case "openai", "antigravity":
+		return "oauth"
+	default:
+		return "token"
+	}
+}
+
+func probeModelConfigMatches(
+	modelCfg *config.ModelConfig,
+	providerName string,
+	model string,
+) bool {
+	if modelCfg == nil {
+		return false
+	}
+	provider, modelID := providers.ExtractProtocol(modelCfg)
+	return providers.NormalizeProvider(provider) == providers.NormalizeProvider(providerName) &&
+		strings.EqualFold(strings.TrimSpace(modelID), strings.TrimSpace(model))
+}
+
+// probeModelConfigReady mirrors the provider factory's non-network
+// prerequisites. It deliberately does not contact the provider; the probe
+// request itself is responsible for reporting reachability and model support.
+func probeModelConfigReady(modelCfg *config.ModelConfig) bool {
+	if modelCfg == nil || !modelCfg.Enabled {
+		return false
+	}
+	protocol, model := providers.ExtractProtocol(modelCfg)
+	protocol = providers.NormalizeProvider(protocol)
+	if protocol == "" || strings.TrimSpace(model) == "" ||
+		protocol == config.AccountRouterProvider ||
+		protocol == config.ModelRouterProvider ||
+		!providers.IsSupportedModelProvider(protocol) {
+		return false
+	}
+
+	authMethod := strings.ToLower(strings.TrimSpace(modelCfg.AuthMethod))
+	apiKey := strings.TrimSpace(modelCfg.APIKey())
+	apiBase := strings.TrimSpace(modelCfg.APIBase)
+	switch protocol {
+	case "openai":
+		if authMethod == "oauth" || authMethod == "token" {
+			return hasModelConfiguration(modelCfg)
+		}
+		return apiKey != "" || apiBase != ""
+	case "azure":
+		// Azure accepts either an explicit key or ambient Entra credentials,
+		// but always requires the resource endpoint.
+		return apiBase != ""
+	case "anthropic":
+		if authMethod == "oauth" || authMethod == "token" {
+			return hasModelConfiguration(modelCfg)
+		}
+		return apiKey != ""
+	case "anthropic-messages", "alibaba-coding-anthropic":
+		return apiKey != ""
+	case "gemini", "minimax":
+		if authMethod == "token" && apiKey == "" {
+			return hasModelConfiguration(modelCfg)
+		}
+		return apiKey != "" || apiBase != ""
+	case "antigravity":
+		return hasModelConfiguration(modelCfg)
+	case "bedrock", "claude-cli", "codex-cli":
+		return true
+	case "github-copilot":
+		if authMethod == "oauth" || authMethod == "token" {
+			return hasModelConfiguration(modelCfg)
+		}
+		// The local bridge is validated by the actual probe.
+		connectMode := strings.ToLower(strings.TrimSpace(modelCfg.ConnectMode))
+		return connectMode == "" || connectMode == "grpc"
+	default:
+		if authMethod == "token" && apiKey == "" {
+			return hasModelConfiguration(modelCfg)
+		}
+		return hasModelConfiguration(modelCfg) || apiBase != ""
 	}
 }
 

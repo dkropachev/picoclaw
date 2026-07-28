@@ -6,6 +6,7 @@ import { toast } from "sonner"
 import {
   type ThreadPolicyConfig,
   type ToolAdaptationConfig,
+  type ToolAdaptationProbeTarget,
   type WebSearchConfigResponse,
   getThreadPolicy,
   getToolAdaptation,
@@ -345,8 +346,8 @@ export function useToolsPage({
     }
   }
 
-  const runToolAdaptationProbeAction = () => {
-    runToolAdaptationProbeMutation.mutate()
+  const runToolAdaptationProbeAction = (profile: ToolAdaptationProbeTarget) => {
+    runToolAdaptationProbeMutation.mutate(profile)
   }
 
   const toggleExpandedProvider = (providerId: string) => {
@@ -379,6 +380,8 @@ export function useToolsPage({
     isToolAdaptationLoading: toolAdaptationQuery.isLoading,
     isToolAdaptationSaving: saveToolAdaptationMutation.isPending,
     isToolAdaptationProbing: runToolAdaptationProbeMutation.isPending,
+    probingToolAdaptationProfile:
+      runToolAdaptationProbeMutation.variables ?? null,
     isToolAdaptationDirty,
     isWebSearchLoading: webSearchQuery.isLoading,
     isWebSearchSaving: saveWebSearchMutation.isPending,

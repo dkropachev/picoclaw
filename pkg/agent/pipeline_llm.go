@@ -40,10 +40,10 @@ func (p *Pipeline) CallLLM(
 
 	// PreLLM: graceful terminal handling
 	exec.gracefulTerminal, _ = ts.gracefulInterruptRequested()
-	exec.providerToolDefs = ts.agent.Tools.ToProviderDefs()
-	exec.providerToolDefs = filterToolsByTurnProfile(exec.providerToolDefs, ts.profile)
+	baseProviderToolDefs := ts.agent.Tools.ToProviderDefs()
+	baseProviderToolDefs = filterToolsByTurnProfile(baseProviderToolDefs, ts.profile)
 	exec.visibleToolSurface = effectiveToolAdaptationSurfaceForTurn(p.Cfg, ts, exec)
-	exec.providerToolDefs = applyToolAdaptationSurface(exec.visibleToolSurface, exec.providerToolDefs)
+	exec.providerToolDefs = applyToolAdaptationSurface(exec.visibleToolSurface, baseProviderToolDefs)
 
 	// Native web search support
 	webSearchEnabled := al.cfg.Tools.IsToolEnabled("web") && turnProfileToolAllowed(ts.profile, "web_search")
@@ -55,23 +55,35 @@ func (p *Pipeline) CallLLM(
 			return false
 		}()
 	if exec.useNativeSearch {
-		filtered := make([]providers.ToolDefinition, 0, len(exec.providerToolDefs))
-		for _, td := range exec.providerToolDefs {
+		filtered := make([]providers.ToolDefinition, 0, len(baseProviderToolDefs))
+		for _, td := range baseProviderToolDefs {
 			if td.Function.Name != "web_search" {
 				filtered = append(filtered, td)
 			}
 		}
-		exec.providerToolDefs = filtered
+		baseProviderToolDefs = filtered
+		exec.providerToolDefs = applyToolAdaptationSurface(
+			exec.visibleToolSurface,
+			baseProviderToolDefs,
+		)
 	}
 
 	exec.callMessages = exec.messages
 	if exec.gracefulTerminal {
 		exec.callMessages = append(append([]providers.Message(nil), exec.messages...), ts.interruptHintMessage())
+		baseProviderToolDefs = nil
 		exec.providerToolDefs = nil
 		ts.markGracefulTerminalUsed()
 	}
 	if err := p.routeMediaTurn(ts, exec); err != nil {
 		return ControlBreak, err
+	}
+	if !exec.gracefulTerminal {
+		exec.visibleToolSurface = effectiveToolAdaptationSurfaceForTurn(p.Cfg, ts, exec)
+		exec.providerToolDefs = applyToolAdaptationSurface(
+			exec.visibleToolSurface,
+			baseProviderToolDefs,
+		)
 	}
 
 	exec.llmOpts = map[string]any{
@@ -96,6 +108,7 @@ func (p *Pipeline) CallLLM(
 
 	// BeforeLLM hook
 	if p.Hooks != nil {
+		hookInputToolDefs := exec.providerToolDefs
 		llmReq, decision := p.Hooks.BeforeLLM(turnCtx, &LLMHookRequest{
 			Meta:             ts.eventMeta("runTurn", "turn.llm.request"),
 			Context:          cloneTurnContext(ts.turnCtx),
@@ -111,9 +124,11 @@ func (p *Pipeline) CallLLM(
 				prevModel := exec.llmModel
 				exec.llmModel = llmReq.Model
 				exec.callMessages = llmReq.Messages
-				exec.providerToolDefs = filterToolsByTurnProfile(llmReq.Tools, ts.profile)
-				exec.visibleToolSurface = effectiveToolAdaptationSurfaceForTurn(p.Cfg, ts, exec)
-				exec.providerToolDefs = applyToolAdaptationSurface(exec.visibleToolSurface, exec.providerToolDefs)
+				baseProviderToolDefs = mergeHookToolDefinitionChanges(
+					baseProviderToolDefs,
+					hookInputToolDefs,
+					filterToolsByTurnProfile(llmReq.Tools, ts.profile),
+				)
 				exec.llmOpts = llmReq.Options
 				nativeSearchAllowed := exec.useNativeSearch &&
 					turnProfileToolAllowed(ts.profile, "web_search")
@@ -125,6 +140,11 @@ func (p *Pipeline) CallLLM(
 					applyTurnThinkingOptions(exec, ts.agent, exec.activeProvider, true)
 					applyReasoningEffortOption(exec.llmOpts, exec.activeModelConfig)
 				}
+				exec.visibleToolSurface = effectiveToolAdaptationSurfaceForTurn(p.Cfg, ts, exec)
+				exec.providerToolDefs = applyToolAdaptationSurface(
+					exec.visibleToolSurface,
+					baseProviderToolDefs,
+				)
 			}
 		case HookActionAbortTurn:
 			cancelConfiguredStreamingLLM(turnCtx, exec)
@@ -215,8 +235,27 @@ func (p *Pipeline) CallLLM(
 			applyThinkingOption(callOpts, candidateProvider, candidateThinking, true, ts.agent.ID)
 			applyReasoningEffortOption(callOpts, candidateCfg)
 			applyReasoningEffortOverride(callOpts, ts.opts.ReasoningEffortOverride)
-			exec.suppressReasoning = shouldSuppressReasoningFor(candidateThinking)
-			return candidateProvider.Chat(ctx, messagesForCall, toolDefsForCall, candidate.Model, callOpts)
+			candidateSurface, candidateToolDefs := toolAdaptationForCandidate(
+				p.Cfg,
+				ts,
+				exec,
+				candidate,
+				candidateCfg,
+				baseProviderToolDefs,
+			)
+			response, err := candidateProvider.Chat(
+				ctx,
+				messagesForCall,
+				candidateToolDefs,
+				candidate.Model,
+				callOpts,
+			)
+			if err == nil {
+				exec.visibleToolSurface = candidateSurface
+				exec.providerToolDefs = candidateToolDefs
+				exec.suppressReasoning = shouldSuppressReasoningFor(candidateThinking)
+			}
+			return response, err
 		}
 
 		if len(exec.activeCandidates) > 1 && p.Fallback != nil {
@@ -910,19 +949,31 @@ func toolAdaptationProfileForTurn(cfg *config.Config, exec *turnExecution) picot
 		return picotools.ToolAdaptationProfile{}
 	}
 	providerName := ""
+	modelName := ""
+	if len(exec.activeCandidates) > 0 {
+		providerName = exec.activeCandidates[0].Provider
+		modelName = exec.activeCandidates[0].Model
+	}
 	if exec.activeModelConfig != nil {
-		providerName = exec.activeModelConfig.Provider
+		if strings.TrimSpace(providerName) == "" {
+			providerName = exec.activeModelConfig.Provider
+		}
+		if strings.TrimSpace(modelName) == "" {
+			_, modelName = providers.ExtractProtocol(exec.activeModelConfig)
+		}
 	}
 	if strings.TrimSpace(providerName) == "" && cfg != nil {
 		providerName = cfg.Agents.Defaults.Provider
 	}
-	modelName := strings.TrimSpace(exec.llmModel)
-	if modelName == "" {
-		modelName = strings.TrimSpace(exec.activeModel)
+	if strings.TrimSpace(modelName) == "" {
+		modelName = strings.TrimSpace(exec.llmModel)
+		if modelName == "" {
+			modelName = strings.TrimSpace(exec.activeModel)
+		}
 	}
 	return picotools.ToolAdaptationProfile{
-		Provider: providerName,
-		Model:    modelName,
+		Provider: providers.NormalizeProvider(providerName),
+		Model:    strings.TrimSpace(modelName),
 	}
 }
 
@@ -934,6 +985,38 @@ func effectiveToolAdaptationSurfaceForTurn(
 	if ts == nil || ts.agent == nil || !ts.agent.ToolAdaptation.Enabled {
 		return config.ToolSurfacePicoClaw
 	}
+	profile := toolAdaptationProfileForTurn(cfg, exec)
+	latest := ts.agent.ToolAdaptation
+	hasProfileSurfaceOverride := false
+	hasConcreteProfileSurfaceOverride := false
+	if cfg != nil {
+		latest = picotools.ResolveToolAdaptation(
+			cfg.Tools.Adaptation,
+			profile.Provider,
+			profile.Model,
+		)
+		profileSurfaceOverride, hasOverride := toolAdaptationProfileSurfaceOverride(
+			cfg.Tools.Adaptation,
+			profile,
+		)
+		hasProfileSurfaceOverride = hasOverride
+		hasConcreteProfileSurfaceOverride = hasOverride &&
+			profileSurfaceOverride != config.ToolSurfaceAuto
+	}
+
+	// A routed or fallback model may have a different explicit profile than the
+	// model selected at agent startup. Apply that profile for this turn even
+	// when learned surface changes are otherwise pinned until the next session.
+	if hasConcreteProfileSurfaceOverride {
+		candidate := config.NormalizeToolSurface(latest.PinnedToolSurface)
+		if candidate == config.ToolSurfaceAuto {
+			candidate = config.NormalizeToolSurface(latest.VisibleToolSurface)
+		}
+		if candidate != config.ToolSurfaceAuto {
+			return candidate
+		}
+	}
+
 	pinned := config.NormalizeToolSurface(ts.agent.ToolAdaptation.PinnedToolSurface)
 	if pinned == config.ToolSurfaceAuto {
 		pinned = config.NormalizeToolSurface(ts.agent.ToolAdaptation.VisibleToolSurface)
@@ -942,31 +1025,166 @@ func effectiveToolAdaptationSurfaceForTurn(
 		pinned = config.ToolSurfacePicoClaw
 	}
 
-	switch ts.agent.ToolAdaptation.ApplyVisibleChanges {
+	switch latest.ApplyVisibleChanges {
 	case config.ToolVisibleChangeImmediate, config.ToolVisibleChangeContextBoundary:
 	default:
 		return pinned
 	}
-	if cfg == nil || config.NormalizeToolSurface(cfg.Tools.Adaptation.VisibleToolSurface) != config.ToolSurfaceAuto {
+	if cfg == nil ||
+		(!hasProfileSurfaceOverride &&
+			config.NormalizeToolSurface(cfg.Tools.Adaptation.VisibleToolSurface) != config.ToolSurfaceAuto) {
 		return pinned
 	}
 
-	profile := toolAdaptationProfileForTurn(cfg, exec)
-	latest := picotools.ResolveToolAdaptation(cfg.Tools.Adaptation, profile.Provider, profile.Model)
 	candidate := config.NormalizeToolSurface(latest.VisibleToolSurface)
 	if candidate == config.ToolSurfaceAuto || candidate == pinned {
 		return pinned
 	}
 	if isToolSurfacePromotion(pinned, candidate) {
-		if ts.agent.ToolAdaptation.RuntimePromotion {
+		if latest.RuntimePromotion {
 			return candidate
 		}
 		return pinned
 	}
-	if ts.agent.ToolAdaptation.RuntimeDowngrade {
+	if latest.RuntimeDowngrade {
 		return candidate
 	}
 	return pinned
+}
+
+func toolAdaptationProfileSurfaceOverride(
+	cfg config.ToolAdaptationConfig,
+	profile picotools.ToolAdaptationProfile,
+) (string, bool) {
+	profileKey := providers.ModelKey(profile.Provider, profile.Model)
+	if profileKey == "/" {
+		return "", false
+	}
+	var matched *config.ToolAdaptationProfileOverride
+	normalized := cfg.Normalized()
+	for i := range normalized.ProfileOverrides {
+		override := &normalized.ProfileOverrides[i]
+		if providers.ModelKey(override.Provider, override.Model) == profileKey {
+			matched = override
+		}
+	}
+	if matched == nil || strings.TrimSpace(matched.VisibleToolSurface) == "" {
+		return "", false
+	}
+	return config.NormalizeToolSurface(matched.VisibleToolSurface), true
+}
+
+func toolAdaptationForCandidate(
+	cfg *config.Config,
+	ts *turnState,
+	exec *turnExecution,
+	candidate providers.FallbackCandidate,
+	candidateCfg *config.ModelConfig,
+	baseToolDefs []providers.ToolDefinition,
+) (string, []providers.ToolDefinition) {
+	if exec == nil {
+		return config.ToolSurfacePicoClaw, applyToolAdaptationSurface(
+			config.ToolSurfacePicoClaw,
+			baseToolDefs,
+		)
+	}
+	candidateExec := *exec
+	candidateExec.activeCandidates = []providers.FallbackCandidate{candidate}
+	candidateExec.activeModel = candidate.Model
+	candidateExec.llmModel = candidate.Model
+	candidateExec.activeModelConfig = candidateCfg
+	surface := effectiveToolAdaptationSurfaceForTurn(cfg, ts, &candidateExec)
+	return surface, applyToolAdaptationSurface(surface, baseToolDefs)
+}
+
+func mergeHookToolDefinitionChanges(
+	base []providers.ToolDefinition,
+	before []providers.ToolDefinition,
+	after []providers.ToolDefinition,
+) []providers.ToolDefinition {
+	if llmHookToolDefinitionsUnchanged(before, after) {
+		return base
+	}
+	if len(after) == 0 {
+		return nil
+	}
+
+	beforeByName := make(map[string]providers.ToolDefinition, len(before))
+	afterByName := make(map[string]providers.ToolDefinition, len(after))
+	for _, def := range before {
+		beforeByName[def.Function.Name] = def
+	}
+	for _, def := range after {
+		afterByName[def.Function.Name] = def
+	}
+
+	removed := make(map[string]struct{})
+	for name := range beforeByName {
+		if _, ok := afterByName[name]; !ok {
+			removed[name] = struct{}{}
+		}
+	}
+	expandAdaptationEquivalentToolRemovals(removed)
+	replacements := make(map[string]providers.ToolDefinition)
+	for name, def := range afterByName {
+		previous, existed := beforeByName[name]
+		if !existed || !llmHookToolDefinitionsUnchanged(
+			[]providers.ToolDefinition{previous},
+			[]providers.ToolDefinition{def},
+		) {
+			replacements[name] = def
+		}
+	}
+
+	merged := make([]providers.ToolDefinition, 0, len(base)+len(replacements))
+	applied := make(map[string]struct{}, len(replacements))
+	for _, def := range base {
+		name := def.Function.Name
+		if _, drop := removed[name]; drop {
+			continue
+		}
+		if replacement, ok := replacements[name]; ok {
+			merged = append(merged, replacement)
+			applied[name] = struct{}{}
+			continue
+		}
+		merged = append(merged, def)
+	}
+	for _, def := range after {
+		name := def.Function.Name
+		if _, exists := beforeByName[name]; exists {
+			continue
+		}
+		if _, exists := applied[name]; exists {
+			continue
+		}
+		merged = append(merged, def)
+		applied[name] = struct{}{}
+	}
+	return merged
+}
+
+func expandAdaptationEquivalentToolRemovals(removed map[string]struct{}) {
+	equivalentGroups := [][]string{
+		{"exec", "exec_command", "write_stdin"},
+		{"write_file", "edit_file", "append_file", "apply_patch"},
+		{"load_image", "view_image"},
+	}
+	for _, group := range equivalentGroups {
+		removeGroup := false
+		for _, name := range group {
+			if _, ok := removed[name]; ok {
+				removeGroup = true
+				break
+			}
+		}
+		if !removeGroup {
+			continue
+		}
+		for _, name := range group {
+			removed[name] = struct{}{}
+		}
+	}
 }
 
 func isToolSurfacePromotion(from string, to string) bool {

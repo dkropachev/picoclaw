@@ -1381,15 +1381,26 @@ const (
 )
 
 type ToolAdaptationConfig struct {
-	Enabled                bool   `json:"enabled"                  yaml:"-" env:"ENABLED"`
-	VisibleToolSurface     string `json:"visible_tool_surface"     yaml:"-" env:"VISIBLE_TOOL_SURFACE"`
-	LearnFromToolCalls     bool   `json:"learn_from_tool_calls"    yaml:"-" env:"LEARN_FROM_TOOL_CALLS"`
-	RunModelProbes         bool   `json:"run_model_probes"         yaml:"-" env:"RUN_MODEL_PROBES"`
-	AllowRuntimeDowngrade  string `json:"allow_runtime_downgrade"  yaml:"-" env:"ALLOW_RUNTIME_DOWNGRADE"`
-	AllowRuntimePromotion  string `json:"allow_runtime_promotion"  yaml:"-" env:"ALLOW_RUNTIME_PROMOTION"`
-	ApplyVisibleChanges    string `json:"apply_visible_changes"    yaml:"-" env:"APPLY_VISIBLE_CHANGES"`
-	CacheSensitiveAPIs     string `json:"cache_sensitive_apis"     yaml:"-" env:"CACHE_SENSITIVE_APIS"`
-	CacheBreakingDowngrade bool   `json:"cache_breaking_downgrade" yaml:"-" env:"CACHE_BREAKING_DOWNGRADE"`
+	Enabled                bool                            `json:"enabled"                     yaml:"-" env:"ENABLED"`
+	VisibleToolSurface     string                          `json:"visible_tool_surface"        yaml:"-" env:"VISIBLE_TOOL_SURFACE"`
+	LearnFromToolCalls     bool                            `json:"learn_from_tool_calls"       yaml:"-" env:"LEARN_FROM_TOOL_CALLS"`
+	RunModelProbes         bool                            `json:"run_model_probes"            yaml:"-" env:"RUN_MODEL_PROBES"`
+	AllowRuntimeDowngrade  string                          `json:"allow_runtime_downgrade"     yaml:"-" env:"ALLOW_RUNTIME_DOWNGRADE"`
+	AllowRuntimePromotion  string                          `json:"allow_runtime_promotion"     yaml:"-" env:"ALLOW_RUNTIME_PROMOTION"`
+	ApplyVisibleChanges    string                          `json:"apply_visible_changes"       yaml:"-" env:"APPLY_VISIBLE_CHANGES"`
+	CacheSensitiveAPIs     string                          `json:"cache_sensitive_apis"        yaml:"-" env:"CACHE_SENSITIVE_APIS"`
+	CacheBreakingDowngrade bool                            `json:"cache_breaking_downgrade"    yaml:"-" env:"CACHE_BREAKING_DOWNGRADE"`
+	ProfileOverrides       []ToolAdaptationProfileOverride `json:"profile_overrides,omitempty" yaml:"-"`
+}
+
+// ToolAdaptationProfileOverride applies profile-specific policy while keeping
+// provider credentials and model routing in the normal model configuration.
+// Empty policy fields inherit the corresponding global adaptation setting.
+type ToolAdaptationProfileOverride struct {
+	Provider           string `json:"provider"`
+	Model              string `json:"model"`
+	VisibleToolSurface string `json:"visible_tool_surface,omitempty"`
+	CacheSensitiveAPIs string `json:"cache_sensitive_apis,omitempty"`
 }
 
 func DefaultToolAdaptationConfig() ToolAdaptationConfig {
@@ -1485,7 +1496,36 @@ func (c ToolAdaptationConfig) Normalized() ToolAdaptationConfig {
 	c.AllowRuntimePromotion = NormalizeToolRuntimeAdaptation(c.AllowRuntimePromotion)
 	c.ApplyVisibleChanges = NormalizeToolVisibleChangePolicy(c.ApplyVisibleChanges)
 	c.CacheSensitiveAPIs = NormalizeToolCacheSensitivity(c.CacheSensitiveAPIs)
+	c.ProfileOverrides = normalizeToolAdaptationProfileOverrides(c.ProfileOverrides)
 	return c
+}
+
+func normalizeToolAdaptationProfileOverrides(
+	overrides []ToolAdaptationProfileOverride,
+) []ToolAdaptationProfileOverride {
+	normalized := make([]ToolAdaptationProfileOverride, 0, len(overrides))
+	indexByKey := make(map[string]int, len(overrides))
+	for _, override := range overrides {
+		override.Provider = strings.TrimSpace(override.Provider)
+		override.Model = strings.TrimSpace(override.Model)
+		if override.Provider == "" || override.Model == "" {
+			continue
+		}
+		if strings.TrimSpace(override.VisibleToolSurface) != "" {
+			override.VisibleToolSurface = NormalizeToolSurface(override.VisibleToolSurface)
+		}
+		if strings.TrimSpace(override.CacheSensitiveAPIs) != "" {
+			override.CacheSensitiveAPIs = NormalizeToolCacheSensitivity(override.CacheSensitiveAPIs)
+		}
+		key := strings.ToLower(override.Provider) + "/" + strings.ToLower(override.Model)
+		if index, exists := indexByKey[key]; exists {
+			normalized[index] = override
+			continue
+		}
+		indexByKey[key] = len(normalized)
+		normalized = append(normalized, override)
+	}
+	return normalized
 }
 
 type MessageToolsConfig struct {

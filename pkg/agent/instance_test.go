@@ -950,6 +950,99 @@ func TestNewAgentInstance_ResolvesToolAdaptationFromModelListAlias(t *testing.T)
 	}
 }
 
+func TestNewAgentInstance_ResolvesToolAdaptationFromAccountRouterOverride(t *testing.T) {
+	workspace := t.TempDir()
+	adaptation := config.DefaultToolAdaptationConfig()
+	adaptation.ProfileOverrides = []config.ToolAdaptationProfileOverride{{
+		Provider:           "openai",
+		Model:              "gpt-5.4",
+		VisibleToolSurface: config.ToolSurfaceSimple,
+	}}
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace: workspace,
+				ModelName: "router-1",
+			},
+		},
+		AccountRouters: []config.AccountRouterConfig{{
+			Name:    "router-1",
+			Model:   "gpt-5.4",
+			Enabled: true,
+			Entry:   "account",
+			Blocks: []config.AccountRouterBlock{{
+				ID:      "account",
+				Type:    config.AccountRouterBlockTypeAccount,
+				Account: "credential:openai:work",
+			}},
+		}},
+		Tools: config.ToolsConfig{
+			Adaptation: adaptation,
+			EditFile:   config.ToolConfig{Enabled: true},
+			Exec: config.ExecConfig{
+				ToolConfig:         config.ToolConfig{Enabled: true},
+				EnableDenyPatterns: true,
+				AllowRemote:        true,
+			},
+		},
+	}
+	cfg.MaterializeAccountRouterModels()
+
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	if agent.ToolAdaptation.VisibleToolSurface != config.ToolSurfaceSimple {
+		t.Fatalf(
+			"VisibleToolSurface = %q, want router profile override %q",
+			agent.ToolAdaptation.VisibleToolSurface,
+			config.ToolSurfaceSimple,
+		)
+	}
+	if _, ok := agent.Tools.Get("exec_command"); ok {
+		t.Fatalf("exec_command registered for simple router override; tools=%v", agent.Tools.List())
+	}
+}
+
+func TestNewAgentInstance_RegistersCodexCompatToolsForAlternateProfileOverride(t *testing.T) {
+	workspace := t.TempDir()
+	adaptation := config.DefaultToolAdaptationConfig()
+	adaptation.ProfileOverrides = []config.ToolAdaptationProfileOverride{{
+		Provider:           "gpt",
+		Model:              "gpt-5",
+		VisibleToolSurface: config.ToolSurfaceCodex,
+	}}
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace: workspace,
+				ModelName: "claude-sonnet",
+				Provider:  "anthropic",
+			},
+		},
+		Tools: config.ToolsConfig{
+			Adaptation: adaptation,
+			EditFile:   config.ToolConfig{Enabled: true},
+			Exec: config.ExecConfig{
+				ToolConfig:         config.ToolConfig{Enabled: true},
+				EnableDenyPatterns: true,
+				AllowRemote:        true,
+			},
+		},
+	}
+
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	if agent.ToolAdaptation.VisibleToolSurface != config.ToolSurfaceSimple {
+		t.Fatalf(
+			"initial VisibleToolSurface = %q, want %q",
+			agent.ToolAdaptation.VisibleToolSurface,
+			config.ToolSurfaceSimple,
+		)
+	}
+	for _, name := range []string{"apply_patch", "exec_command", "write_stdin", "update_plan"} {
+		if _, ok := agent.Tools.Get(name); !ok {
+			t.Fatalf("expected %q for alternate Codex profile; tools=%v", name, agent.Tools.List())
+		}
+	}
+}
+
 func TestNewAgentInstance_CodexApplyPatchPreservesFileToolPermissions(t *testing.T) {
 	workspace := t.TempDir()
 

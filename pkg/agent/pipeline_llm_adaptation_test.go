@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -56,6 +57,33 @@ func TestApplyToolAdaptationSurfaceCodexHidesNativeReplacedTools(t *testing.T) {
 	}
 }
 
+func TestMergeHookToolDefinitionChangesRemovesAdaptationEquivalents(t *testing.T) {
+	base := toolDefsForAdaptationTest(
+		"exec",
+		"exec_command",
+		"write_stdin",
+		"write_file",
+		"edit_file",
+		"append_file",
+		"apply_patch",
+		"read_file",
+	)
+	before := filterToolDefinitionsForAdaptationSurface(config.ToolSurfacePicoClaw, base)
+	after := make([]providers.ToolDefinition, 0, len(before))
+	for _, def := range before {
+		if def.Function.Name != "exec" {
+			after = append(after, def)
+		}
+	}
+
+	got := mergeHookToolDefinitionChanges(base, before, after)
+	gotNames := toolDefNamesForAdaptationTest(got)
+	want := []string{"write_file", "edit_file", "append_file", "apply_patch", "read_file"}
+	if fmt.Sprint(gotNames) != fmt.Sprint(want) {
+		t.Fatalf("tool names = %v, want %v", gotNames, want)
+	}
+}
+
 func TestEffectiveToolAdaptationSurfaceUsesImmediateLearnedChange(t *testing.T) {
 	t.Setenv("PICOCLAW_HOME", t.TempDir())
 	cfg := config.DefaultConfig()
@@ -98,6 +126,268 @@ func TestEffectiveToolAdaptationSurfaceUsesImmediateLearnedChange(t *testing.T) 
 	got := effectiveToolAdaptationSurfaceForTurn(cfg, ts, exec)
 	if got != config.ToolSurfaceSimple {
 		t.Fatalf("effective surface = %q, want %q", got, config.ToolSurfaceSimple)
+	}
+}
+
+func TestEffectiveToolAdaptationSurfaceUsesRoutedProfileOverride(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Adaptation = config.DefaultToolAdaptationConfig()
+	cfg.Tools.Adaptation.ProfileOverrides = []config.ToolAdaptationProfileOverride{{
+		Provider:           "anthropic",
+		Model:              "claude-sonnet",
+		VisibleToolSurface: config.ToolSurfaceSimple,
+	}}
+
+	ts := &turnState{
+		agent: &AgentInstance{
+			ToolAdaptation: picotools.ToolAdaptationDecision{
+				Enabled:             true,
+				PinnedToolSurface:   config.ToolSurfaceCodex,
+				VisibleToolSurface:  config.ToolSurfaceCodex,
+				ApplyVisibleChanges: config.ToolVisibleChangeNextSession,
+			},
+		},
+	}
+	exec := &turnExecution{
+		activeCandidates: []providers.FallbackCandidate{{
+			Provider: "claude",
+			Model:    "claude-sonnet",
+		}},
+		activeModelConfig: &config.ModelConfig{
+			Provider: config.AccountRouterProvider,
+			Model:    "claude-sonnet",
+		},
+	}
+
+	got := effectiveToolAdaptationSurfaceForTurn(cfg, ts, exec)
+	if got != config.ToolSurfaceSimple {
+		t.Fatalf("effective surface = %q, want routed profile override %q", got, config.ToolSurfaceSimple)
+	}
+	profile := toolAdaptationProfileForTurn(cfg, exec)
+	if profile.Provider != "anthropic" {
+		t.Fatalf("profile provider = %q, want canonical provider %q", profile.Provider, "anthropic")
+	}
+}
+
+func TestEffectiveToolAdaptationSurfaceDoesNotTreatCacheOnlyOverrideAsSurfaceChange(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Adaptation = config.DefaultToolAdaptationConfig()
+	cfg.Tools.Adaptation.ProfileOverrides = []config.ToolAdaptationProfileOverride{{
+		Provider:           "anthropic",
+		Model:              "claude-sonnet",
+		CacheSensitiveAPIs: config.ToolCacheSensitivityNever,
+	}}
+
+	ts := &turnState{
+		agent: &AgentInstance{
+			ToolAdaptation: picotools.ToolAdaptationDecision{
+				Enabled:             true,
+				PinnedToolSurface:   config.ToolSurfaceCodex,
+				VisibleToolSurface:  config.ToolSurfaceCodex,
+				ApplyVisibleChanges: config.ToolVisibleChangeNextSession,
+			},
+		},
+	}
+	exec := &turnExecution{
+		activeCandidates: []providers.FallbackCandidate{{
+			Provider: "anthropic",
+			Model:    "claude-sonnet",
+		}},
+	}
+
+	got := effectiveToolAdaptationSurfaceForTurn(cfg, ts, exec)
+	if got != config.ToolSurfaceCodex {
+		t.Fatalf("effective surface = %q, want startup pin %q", got, config.ToolSurfaceCodex)
+	}
+}
+
+func TestEffectiveToolAdaptationSurfaceAutoOverrideObeysRuntimePolicy(t *testing.T) {
+	t.Setenv("PICOCLAW_HOME", t.TempDir())
+	model := fmt.Sprintf("claude-auto-%d", time.Now().UnixNano())
+	cfg := config.DefaultConfig()
+	cfg.Tools.Adaptation = config.DefaultToolAdaptationConfig()
+	cfg.Tools.Adaptation.VisibleToolSurface = config.ToolSurfaceCodex
+	cfg.Tools.Adaptation.CacheSensitiveAPIs = config.ToolCacheSensitivityNever
+	cfg.Tools.Adaptation.ProfileOverrides = []config.ToolAdaptationProfileOverride{{
+		Provider:           "anthropic",
+		Model:              model,
+		VisibleToolSurface: config.ToolSurfaceAuto,
+	}}
+
+	ts := &turnState{
+		agent: &AgentInstance{
+			ToolAdaptation: picotools.ToolAdaptationDecision{
+				Enabled:             true,
+				PinnedToolSurface:   config.ToolSurfaceCodex,
+				VisibleToolSurface:  config.ToolSurfaceCodex,
+				RuntimePromotion:    true,
+				RuntimeDowngrade:    true,
+				ApplyVisibleChanges: config.ToolVisibleChangeNextSession,
+			},
+		},
+	}
+	exec := &turnExecution{
+		activeCandidates: []providers.FallbackCandidate{{
+			Provider: "anthropic",
+			Model:    model,
+		}},
+	}
+
+	got := effectiveToolAdaptationSurfaceForTurn(cfg, ts, exec)
+	if got != config.ToolSurfaceCodex {
+		t.Fatalf("next-session surface = %q, want startup pin %q", got, config.ToolSurfaceCodex)
+	}
+
+	cfg.Tools.Adaptation.ApplyVisibleChanges = config.ToolVisibleChangeImmediate
+	got = effectiveToolAdaptationSurfaceForTurn(cfg, ts, exec)
+	if got != config.ToolSurfaceSimple {
+		t.Fatalf("immediate surface = %q, want auto heuristic %q", got, config.ToolSurfaceSimple)
+	}
+}
+
+func TestEffectiveToolAdaptationSurfaceAliasDuplicateUsesLastWholeOverride(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Adaptation = config.DefaultToolAdaptationConfig()
+	cfg.Tools.Adaptation.VisibleToolSurface = config.ToolSurfaceSimple
+	cfg.Tools.Adaptation.ProfileOverrides = []config.ToolAdaptationProfileOverride{
+		{
+			Provider:           "copilot",
+			Model:              "gpt-5",
+			VisibleToolSurface: config.ToolSurfaceSimple,
+		},
+		{
+			Provider:           "github-copilot",
+			Model:              "gpt-5",
+			CacheSensitiveAPIs: config.ToolCacheSensitivityNever,
+		},
+	}
+
+	ts := &turnState{
+		agent: &AgentInstance{
+			ToolAdaptation: picotools.ToolAdaptationDecision{
+				Enabled:             true,
+				PinnedToolSurface:   config.ToolSurfaceCodex,
+				VisibleToolSurface:  config.ToolSurfaceCodex,
+				ApplyVisibleChanges: config.ToolVisibleChangeNextSession,
+			},
+		},
+	}
+	exec := &turnExecution{
+		activeCandidates: []providers.FallbackCandidate{{
+			Provider: "github-copilot",
+			Model:    "gpt-5",
+		}},
+	}
+
+	got := effectiveToolAdaptationSurfaceForTurn(cfg, ts, exec)
+	if got != config.ToolSurfaceCodex {
+		t.Fatalf("effective surface = %q, want startup pin after cache-only last override", got)
+	}
+}
+
+type adaptationFallbackCaptureProvider struct {
+	toolNames [][]string
+	models    []string
+}
+
+func (p *adaptationFallbackCaptureProvider) Chat(
+	_ context.Context,
+	_ []providers.Message,
+	defs []providers.ToolDefinition,
+	model string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	p.models = append(p.models, model)
+	p.toolNames = append(p.toolNames, toolDefNamesForAdaptationTest(defs))
+	if len(p.models) == 1 {
+		return nil, fmt.Errorf("status: 429 - rate limit exceeded")
+	}
+	return &providers.LLMResponse{
+		Content:      "fallback answer",
+		FinishReason: "stop",
+	}, nil
+}
+
+func (p *adaptationFallbackCaptureProvider) GetDefaultModel() string {
+	return "adaptation-primary"
+}
+
+type adaptationNamedTool string
+
+func (t adaptationNamedTool) Name() string {
+	return string(t)
+}
+
+func (t adaptationNamedTool) Description() string {
+	return "adaptation test tool"
+}
+
+func (t adaptationNamedTool) Parameters() map[string]any {
+	return map[string]any{"type": "object"}
+}
+
+func (t adaptationNamedTool) Execute(
+	_ context.Context,
+	_ map[string]any,
+) *picotools.ToolResult {
+	return &picotools.ToolResult{ForLLM: "ok"}
+}
+
+func TestPipelineCallLLMUsesFallbackProfileToolSurface(t *testing.T) {
+	provider := &adaptationFallbackCaptureProvider{}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+	defer cleanup()
+
+	fallbackModel := fmt.Sprintf("fallback-codex-%d", time.Now().UnixNano())
+	al.cfg.Tools.Adaptation = config.DefaultToolAdaptationConfig()
+	al.cfg.Tools.Adaptation.VisibleToolSurface = config.ToolSurfaceSimple
+	al.cfg.Tools.Adaptation.ProfileOverrides = []config.ToolAdaptationProfileOverride{{
+		Provider:           "openai",
+		Model:              fallbackModel,
+		VisibleToolSurface: config.ToolSurfaceCodex,
+	}}
+	agent.ToolAdaptation = picotools.ResolveToolAdaptation(
+		al.cfg.Tools.Adaptation,
+		"anthropic",
+		"primary-simple",
+	)
+	agent.Tools = picotools.NewToolRegistry()
+	agent.Tools.Register(adaptationNamedTool("exec"))
+	agent.Tools.Register(adaptationNamedTool("exec_command"))
+	agent.Candidates = []providers.FallbackCandidate{
+		{Provider: "anthropic", Model: "primary-simple"},
+		{Provider: "openai", Model: fallbackModel},
+	}
+	al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), nil)
+
+	pipeline := NewPipeline(al)
+	ts := newTurnState(agent, makeTestProcessOpts("adaptation-fallback"), turnEventScope{
+		turnID:  "turn-adaptation-fallback",
+		context: newTurnContext(nil, nil, nil),
+	})
+	exec, err := pipeline.SetupTurn(context.Background(), ts)
+	if err != nil {
+		t.Fatalf("SetupTurn() error = %v", err)
+	}
+	if _, err := pipeline.CallLLM(context.Background(), context.Background(), ts, exec, 1); err != nil {
+		t.Fatalf("CallLLM() error = %v", err)
+	}
+
+	if len(provider.toolNames) != 2 {
+		t.Fatalf("provider calls = %d, want 2", len(provider.toolNames))
+	}
+	if got, want := fmt.Sprint(provider.toolNames[0]), fmt.Sprint([]string{"exec"}); got != want {
+		t.Fatalf("primary tools = %s, want %s", got, want)
+	}
+	if got, want := fmt.Sprint(provider.toolNames[1]), fmt.Sprint([]string{"exec_command"}); got != want {
+		t.Fatalf("fallback tools = %s, want %s", got, want)
+	}
+	if exec.visibleToolSurface != config.ToolSurfaceCodex {
+		t.Fatalf("successful surface = %q, want %q", exec.visibleToolSurface, config.ToolSurfaceCodex)
+	}
+	if got, want := fmt.Sprint(toolDefNamesForAdaptationTest(exec.providerToolDefs)),
+		fmt.Sprint([]string{"exec_command"}); got != want {
+		t.Fatalf("successful exec tools = %s, want %s", got, want)
 	}
 }
 
@@ -274,6 +564,27 @@ func TestProviderForFallbackCandidateRequiresProvider(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("providerForFallbackCandidate() err = nil, want error")
+	}
+}
+
+func TestToolAdaptationProfilePrefersRouterCandidate(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Provider = config.AccountRouterProvider
+	exec := &turnExecution{
+		activeCandidates: []providers.FallbackCandidate{{
+			Provider: "github-copilot",
+			Model:    "gpt-5.4",
+		}},
+		activeModelConfig: &config.ModelConfig{
+			Provider: config.AccountRouterProvider,
+			Model:    "gpt-5.4",
+		},
+		llmModel: "gpt-5.4",
+	}
+
+	profile := toolAdaptationProfileForTurn(cfg, exec)
+	if profile.Provider != "github-copilot" || profile.Model != "gpt-5.4" {
+		t.Fatalf("profile = %#v, want concrete router candidate", profile)
 	}
 }
 

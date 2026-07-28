@@ -100,10 +100,18 @@ export interface ToolAdaptationConfig {
   apply_visible_changes: VisibleChangePolicy
   cache_sensitive_apis: CacheSensitivityPolicy
   cache_breaking_downgrade: boolean
+  profile_overrides?: ToolAdaptationProfileOverride[]
   resolved?: ToolAdaptationResolvedState
   observation?: ToolAdaptationObservation
   outcomes?: ToolAdaptationToolOutcome[]
   profiles?: ToolAdaptationProfileState[]
+}
+
+export interface ToolAdaptationProfileOverride {
+  provider: string
+  model: string
+  visible_tool_surface?: VisibleToolSurface
+  cache_sensitive_apis?: CacheSensitivityPolicy
 }
 
 export interface ToolAdaptationResolvedState {
@@ -125,6 +133,8 @@ export interface ToolAdaptationProfileState {
   label: string
   source: string
   is_default: boolean
+  is_override: boolean
+  probe_available: boolean
   resolved: ToolAdaptationResolvedState
   observation?: ToolAdaptationObservation
   outcomes?: ToolAdaptationToolOutcome[]
@@ -172,22 +182,30 @@ export interface ToolAdaptationProbeResult {
   ran_at: string
 }
 
+export interface ToolAdaptationProbeTarget {
+  provider: string
+  model: string
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await launcherFetch(path, options)
   if (!res.ok) {
     let message = `API error: ${res.status} ${res.statusText}`
-    try {
-      const body = (await res.json()) as {
-        error?: string
-        errors?: string[]
+    const responseText = await res.text()
+    if (responseText.trim() !== "") {
+      try {
+        const body = JSON.parse(responseText) as {
+          error?: string
+          errors?: string[]
+        }
+        if (Array.isArray(body.errors) && body.errors.length > 0) {
+          message = body.errors.join("; ")
+        } else if (typeof body.error === "string" && body.error.trim() !== "") {
+          message = body.error
+        }
+      } catch {
+        message = responseText.trim()
       }
-      if (Array.isArray(body.errors) && body.errors.length > 0) {
-        message = body.errors.join("; ")
-      } else if (typeof body.error === "string" && body.error.trim() !== "") {
-        message = body.error
-      }
-    } catch {
-      // ignore invalid body
     }
     throw new Error(message)
   }
@@ -254,8 +272,16 @@ export async function updateToolAdaptation(
   })
 }
 
-export async function runToolAdaptationProbe(): Promise<ToolAdaptationProbeResult> {
+export async function runToolAdaptationProbe(
+  profile?: ToolAdaptationProbeTarget,
+): Promise<ToolAdaptationProbeResult> {
   return request<ToolAdaptationProbeResult>("/api/tools/adaptation/probe", {
     method: "POST",
+    ...(profile
+      ? {
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(profile),
+        }
+      : {}),
   })
 }

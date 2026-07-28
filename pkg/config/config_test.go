@@ -72,6 +72,37 @@ func TestToolAdaptationConfig_Normalized(t *testing.T) {
 	}
 }
 
+func TestToolAdaptationConfig_NormalizesProfileOverrides(t *testing.T) {
+	cfg := ToolAdaptationConfig{
+		ProfileOverrides: []ToolAdaptationProfileOverride{
+			{
+				Provider:           " OpenAI ",
+				Model:              " GPT-5 ",
+				VisibleToolSurface: ToolSurfaceSimple,
+			},
+			{
+				Provider:           "openai",
+				Model:              "gpt-5",
+				CacheSensitiveAPIs: ToolCacheSensitivityNever,
+			},
+			{Provider: "", Model: "missing-provider"},
+		},
+	}
+
+	got := cfg.Normalized()
+	if len(got.ProfileOverrides) != 1 {
+		t.Fatalf("ProfileOverrides = %#v, want one deduplicated override", got.ProfileOverrides)
+	}
+	override := got.ProfileOverrides[0]
+	if override.Provider != "openai" || override.Model != "gpt-5" {
+		t.Fatalf("profile identity = %s/%s, want openai/gpt-5", override.Provider, override.Model)
+	}
+	if override.VisibleToolSurface != "" ||
+		override.CacheSensitiveAPIs != ToolCacheSensitivityNever {
+		t.Fatalf("profile policy = %#v, want last override to win", override)
+	}
+}
+
 func TestToolAdaptationConfig_EnvOverridesUseAdaptationPrefix(t *testing.T) {
 	mustSetupSSHKey(t)
 	dir := t.TempDir()
