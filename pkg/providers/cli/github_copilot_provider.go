@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -114,7 +115,23 @@ func ListGitHubCopilotModelsWithToken(ctx context.Context, token string) ([]copi
 	}
 	authInfo, err := resolveGitHubCopilotAPIAuth(ctx, token)
 	if err != nil {
-		return nil, err
+		var exchangeErr *githubCopilotTokenExchangeError
+		if !errors.As(err, &exchangeErr) || exchangeErr.statusCode != http.StatusForbidden {
+			return nil, err
+		}
+
+		models, fallbackErr := listGitHubCopilotModels(ctx, &githubCopilotAPIAuth{
+			token:   token,
+			apiBase: githubCopilotAPIBaseEndpoint,
+		})
+		if fallbackErr != nil {
+			return nil, fmt.Errorf(
+				"%w; raw-token model fallback failed: %w",
+				err,
+				fallbackErr,
+			)
+		}
+		return models, nil
 	}
 	return listGitHubCopilotModels(ctx, authInfo)
 }
@@ -242,6 +259,19 @@ type githubCopilotTokenResponse struct {
 	} `json:"endpoints"`
 }
 
+type githubCopilotTokenExchangeError struct {
+	statusCode int
+	err        error
+}
+
+func (e *githubCopilotTokenExchangeError) Error() string {
+	return fmt.Sprintf("exchanging GitHub token for Copilot API token: %v", e.err)
+}
+
+func (e *githubCopilotTokenExchangeError) Unwrap() error {
+	return e.err
+}
+
 func resolveGitHubCopilotAPIAuth(ctx context.Context, githubToken string) (*githubCopilotAPIAuth, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubCopilotTokenEndpoint, nil)
 	if err != nil {
@@ -263,10 +293,15 @@ func resolveGitHubCopilotAPIAuth(ctx context.Context, githubToken string) (*gith
 		}, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf(
-			"exchanging GitHub token for Copilot API token: %w",
-			githubCopilotStatusError("GitHub", resp.StatusCode, resp.Body),
-		)
+		return nil, &githubCopilotTokenExchangeError{
+			statusCode: resp.StatusCode,
+			err: githubCopilotStatusError(
+				"GitHub",
+				resp.StatusCode,
+				resp.Body,
+				githubToken,
+			),
+		}
 	}
 
 	var body githubCopilotTokenResponse
@@ -332,7 +367,12 @@ func listGitHubCopilotModels(
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, githubCopilotStatusError("GitHub Copilot models", resp.StatusCode, resp.Body)
+		return nil, githubCopilotStatusError(
+			"GitHub Copilot models",
+			resp.StatusCode,
+			resp.Body,
+			authInfo.token,
+		)
 	}
 
 	var body githubCopilotModelsResponse
@@ -390,7 +430,12 @@ func (p *GitHubCopilotProvider) chatWithToken(
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, githubCopilotStatusError("GitHub Copilot chat", resp.StatusCode, resp.Body)
+		return nil, githubCopilotStatusError(
+			"GitHub Copilot chat",
+			resp.StatusCode,
+			resp.Body,
+			authInfo.token,
+		)
 	}
 
 	var chatResp struct {
@@ -433,9 +478,19 @@ func githubCopilotChatMessages(messages []Message) []map[string]string {
 	return out
 }
 
-func githubCopilotStatusError(provider string, statusCode int, body io.Reader) error {
+func githubCopilotStatusError(
+	provider string,
+	statusCode int,
+	body io.Reader,
+	secrets ...string,
+) error {
 	preview, _ := io.ReadAll(io.LimitReader(body, 512))
 	detail := strings.TrimSpace(string(preview))
+	for _, secret := range secrets {
+		if secret = strings.TrimSpace(secret); secret != "" {
+			detail = strings.ReplaceAll(detail, secret, "[REDACTED]")
+		}
+	}
 	if detail == "" {
 		return fmt.Errorf("%s returned status %d", provider, statusCode)
 	}
