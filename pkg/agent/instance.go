@@ -177,6 +177,10 @@ func NewAgentInstance(
 	fallbacks := resolveAgentFallbacks(agentCfg, defaults)
 	toolProvider, toolModel := resolveToolAdaptationProfileForAgent(cfg, defaults.Provider, model)
 	toolAdaptation := tools.ResolveToolAdaptation(cfg.Tools.Adaptation, toolProvider, toolModel)
+	mayUseCodexCompatibleTools := toolAdaptationMayUseCodexCompatibleTools(
+		cfg.Tools.Adaptation,
+		toolAdaptation,
+	)
 	logger.DebugCF("agent", "Resolved tool adaptation profile", map[string]any{
 		"model":                 toolModel,
 		"provider":              toolProvider,
@@ -229,7 +233,7 @@ func NewAgentInstance(
 		writeTool.SetAlternativeTools(altTools)
 		toolsRegistry.Register(writeTool)
 	}
-	if toolAdaptation.MayUseCodexCompatibleTools() &&
+	if mayUseCodexCompatibleTools &&
 		(cfg.Tools.IsToolEnabled("edit_file") || cfg.Tools.IsToolEnabled("write_file")) {
 		toolsRegistry.Register(tools.NewApplyPatchToolWithPermissions(
 			workspace,
@@ -249,13 +253,13 @@ func NewAgentInstance(
 				map[string]any{"error": err.Error()})
 		} else {
 			toolsRegistry.Register(execTool)
-			if toolAdaptation.MayUseCodexCompatibleTools() {
+			if mayUseCodexCompatibleTools {
 				toolsRegistry.Register(tools.NewCodexExecCommandTool(execTool))
 				toolsRegistry.Register(tools.NewCodexWriteStdinTool(execTool))
 			}
 		}
 	}
-	if toolAdaptation.MayUseCodexCompatibleTools() {
+	if mayUseCodexCompatibleTools {
 		toolsRegistry.Register(tools.NewUpdatePlanTool())
 	}
 
@@ -737,18 +741,131 @@ func resolveToolAdaptationProfileForAgent(
 		return provider, model
 	}
 
-	if modelCfg := lookupModelConfigByRef(cfg, model, provider); modelCfg != nil &&
-		!modelCfg.IsAccountRouter() && !modelCfg.IsModelRouter() {
-		resolvedProvider, resolvedModel := providers.ExtractProtocol(modelCfg)
-		if strings.TrimSpace(resolvedProvider) != "" {
-			provider = strings.TrimSpace(resolvedProvider)
-		}
-		if strings.TrimSpace(resolvedModel) != "" {
-			model = strings.TrimSpace(resolvedModel)
+	if modelCfg := lookupModelConfigByRef(cfg, model, provider); modelCfg != nil {
+		if resolvedProvider, resolvedModel, ok := firstToolAdaptationProfileForModelConfig(
+			cfg,
+			provider,
+			modelCfg,
+			map[string]struct{}{},
+		); ok {
+			return providers.NormalizeProvider(resolvedProvider), strings.TrimSpace(resolvedModel)
 		}
 	}
 
-	return provider, model
+	return providers.NormalizeProvider(provider), model
+}
+
+func firstToolAdaptationProfileForModelConfig(
+	cfg *config.Config,
+	defaultProvider string,
+	modelCfg *config.ModelConfig,
+	visited map[string]struct{},
+) (string, string, bool) {
+	if modelCfg == nil {
+		return "", "", false
+	}
+	visitKey := strings.ToLower(strings.TrimSpace(modelCfg.ModelName))
+	if visitKey != "" {
+		if _, exists := visited[visitKey]; exists {
+			return "", "", false
+		}
+		visited[visitKey] = struct{}{}
+	}
+
+	switch {
+	case modelCfg.IsAccountRouter():
+		router := modelCfg.Router
+		if router == nil {
+			return "", "", false
+		}
+		sharedModel := accountRouterSharedModel(modelCfg)
+		for _, accountName := range accountRouterAccountNames(router) {
+			if credentialCfg, ok := accountRouterCredentialAccountConfig(accountName, sharedModel); ok {
+				if credentialCfg == nil {
+					continue
+				}
+				provider, model := providers.ExtractProtocol(credentialCfg)
+				if strings.TrimSpace(provider) != "" && strings.TrimSpace(model) != "" {
+					return providers.NormalizeProvider(provider), strings.TrimSpace(model), true
+				}
+				continue
+			}
+			accountCfg := lookupModelConfigByRef(cfg, accountName, defaultProvider)
+			if accountCfg == nil {
+				continue
+			}
+			if accountCfg.IsAccountRouter() || accountCfg.IsModelRouter() {
+				if provider, model, ok := firstToolAdaptationProfileForModelConfig(
+					cfg,
+					defaultProvider,
+					accountCfg,
+					visited,
+				); ok {
+					return provider, model, true
+				}
+				continue
+			}
+			clone := *accountCfg
+			if sharedModel != "" {
+				clone.Model = sharedModel
+			}
+			provider, model := providers.ExtractProtocol(&clone)
+			if strings.TrimSpace(provider) != "" && strings.TrimSpace(model) != "" {
+				return providers.NormalizeProvider(provider), strings.TrimSpace(model), true
+			}
+		}
+		return "", "", false
+	case modelCfg.IsModelRouter():
+		router := modelCfg.ModelRouter
+		if router == nil {
+			return "", "", false
+		}
+		for _, block := range router.Blocks {
+			if strings.TrimSpace(block.Type) != config.ModelRouterBlockTypeModel {
+				continue
+			}
+			modelRef := strings.TrimSpace(block.Model)
+			if candidateCfg := lookupModelConfigByRef(cfg, modelRef, defaultProvider); candidateCfg != nil {
+				if provider, model, ok := firstToolAdaptationProfileForModelConfig(
+					cfg,
+					defaultProvider,
+					candidateCfg,
+					visited,
+				); ok {
+					return provider, model, true
+				}
+				continue
+			}
+			if ref := providers.ParseModelRef(modelRef, defaultProvider); ref != nil &&
+				strings.TrimSpace(ref.Provider) != "" && strings.TrimSpace(ref.Model) != "" {
+				return providers.NormalizeProvider(ref.Provider), strings.TrimSpace(ref.Model), true
+			}
+		}
+		return "", "", false
+	default:
+		provider, model := providers.ExtractProtocol(modelCfg)
+		if strings.TrimSpace(provider) == "" || strings.TrimSpace(model) == "" {
+			return "", "", false
+		}
+		return providers.NormalizeProvider(provider), strings.TrimSpace(model), true
+	}
+}
+
+func toolAdaptationMayUseCodexCompatibleTools(
+	cfg config.ToolAdaptationConfig,
+	initial tools.ToolAdaptationDecision,
+) bool {
+	if initial.MayUseCodexCompatibleTools() {
+		return true
+	}
+	for _, override := range cfg.Normalized().ProfileOverrides {
+		provider := providers.NormalizeProvider(override.Provider)
+		decision := tools.ResolveToolAdaptation(cfg, provider, override.Model)
+		if decision.MayUseCodexCompatibleTools() {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveAgentWorkspace determines the workspace directory for an agent.

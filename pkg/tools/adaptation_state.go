@@ -296,17 +296,52 @@ func (s *toolAdaptationStateStore) loadLocked() {
 	if state.Outcomes == nil {
 		state.Outcomes = map[string]ToolAdaptationToolOutcome{}
 	}
-	for _, observation := range state.Observations {
+	observationKeys := make([]string, 0, len(state.Observations))
+	for key := range state.Observations {
+		observationKeys = append(observationKeys, key)
+	}
+	sort.Strings(observationKeys)
+	for _, sourceKey := range observationKeys {
+		observation := state.Observations[sourceKey]
 		observation.Profile = normalizeToolAdaptationProfile(observation.Profile)
 		if observation.Profile.Provider != "" || observation.Profile.Model != "" {
-			s.observations[observation.Profile.key()] = observation
+			key := observation.Profile.key()
+			current, exists := s.observations[key]
+			// Persisted aliases can collapse onto one canonical profile. Sorted
+			// source keys make equal timestamps deterministic: the first key wins.
+			if !exists || observation.ObservedAt.After(current.ObservedAt) {
+				s.observations[key] = observation
+			}
 		}
 	}
-	for _, outcome := range state.Outcomes {
+	outcomeKeys := make([]string, 0, len(state.Outcomes))
+	for key := range state.Outcomes {
+		outcomeKeys = append(outcomeKeys, key)
+	}
+	sort.Strings(outcomeKeys)
+	for _, sourceKey := range outcomeKeys {
+		outcome := state.Outcomes[sourceKey]
 		outcome.Profile = normalizeToolAdaptationProfile(outcome.Profile)
+		outcome.VisibleToolSurface = strings.TrimSpace(outcome.VisibleToolSurface)
 		outcome.ToolName = strings.TrimSpace(outcome.ToolName)
 		if (outcome.Profile.Provider != "" || outcome.Profile.Model != "") && outcome.ToolName != "" {
-			s.outcomes[toolOutcomeKey(outcome.Profile, outcome.VisibleToolSurface, outcome.ToolName)] = outcome
+			key := toolOutcomeKey(outcome.Profile, outcome.VisibleToolSurface, outcome.ToolName)
+			current, exists := s.outcomes[key]
+			if !exists {
+				s.outcomes[key] = outcome
+				continue
+			}
+
+			successes := current.Successes + outcome.Successes
+			failures := current.Failures + outcome.Failures
+			// Keep metadata from the newest entry. As above, sorted source keys
+			// make an UpdatedAt tie deterministic by retaining the first key.
+			if outcome.UpdatedAt.After(current.UpdatedAt) {
+				current = outcome
+			}
+			current.Successes = successes
+			current.Failures = failures
+			s.outcomes[key] = current
 		}
 	}
 }
@@ -339,7 +374,7 @@ func (s *toolAdaptationStateStore) statePathLocked() string {
 
 func normalizeToolAdaptationProfile(profile ToolAdaptationProfile) ToolAdaptationProfile {
 	return ToolAdaptationProfile{
-		Provider: strings.ToLower(strings.TrimSpace(profile.Provider)),
+		Provider: providers.NormalizeProvider(profile.Provider),
 		Model:    strings.ToLower(strings.TrimSpace(profile.Model)),
 	}
 }

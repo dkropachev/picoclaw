@@ -169,6 +169,11 @@ func TestHandleToolAdaptationRoundTrip(t *testing.T) {
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
+	overrides := []config.ToolAdaptationProfileOverride{{
+		Provider:           " OpenAI ",
+		Model:              "gpt-test",
+		VisibleToolSurface: "simple",
+	}}
 	payload := toolAdaptationConfigRequest{
 		Enabled:                true,
 		VisibleToolSurface:     "codex",
@@ -179,6 +184,7 @@ func TestHandleToolAdaptationRoundTrip(t *testing.T) {
 		ApplyVisibleChanges:    "context_boundary",
 		CacheSensitiveAPIs:     "auto",
 		CacheBreakingDowngrade: true,
+		ProfileOverrides:       &overrides,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -199,6 +205,10 @@ func TestHandleToolAdaptationRoundTrip(t *testing.T) {
 	if putResp.VisibleToolSurface != "codex" || putResp.ApplyVisibleChanges != "context_boundary" {
 		t.Fatalf("PUT response = %#v, want codex/context_boundary", putResp)
 	}
+	if putResp.ProfileOverrides == nil || len(*putResp.ProfileOverrides) != 1 ||
+		(*putResp.ProfileOverrides)[0].Provider != "openai" {
+		t.Fatalf("PUT profile overrides = %#v, want canonical saved override", putResp.ProfileOverrides)
+	}
 
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/api/tools/adaptation", nil)
@@ -217,11 +227,66 @@ func TestHandleToolAdaptationRoundTrip(t *testing.T) {
 		getResp.CacheBreakingDowngrade != putResp.CacheBreakingDowngrade {
 		t.Fatalf("GET response = %#v, want saved fields from %#v", getResp, putResp)
 	}
+	if getResp.ProfileOverrides == nil || len(*getResp.ProfileOverrides) != 1 {
+		t.Fatalf("GET profile overrides = %#v, want saved override", getResp.ProfileOverrides)
+	}
 	if getResp.Resolved == nil {
 		t.Fatal("GET response Resolved = nil, want resolved state")
 	}
 	if getResp.Resolved.PinnedToolSurface != "codex" {
 		t.Fatalf("resolved pinned surface = %q, want codex", getResp.Resolved.PinnedToolSurface)
+	}
+}
+
+func TestHandleToolAdaptationLegacyPutPreservesProfileOverrides(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.Tools.Adaptation = config.DefaultToolAdaptationConfig()
+	cfg.Tools.Adaptation.ProfileOverrides = []config.ToolAdaptationProfileOverride{{
+		Provider:           "openai",
+		Model:              "gpt-test",
+		VisibleToolSurface: "simple",
+	}}
+	if saveErr := config.SaveConfig(configPath, cfg); saveErr != nil {
+		t.Fatalf("SaveConfig() error = %v", saveErr)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	body := `{
+		"enabled": true,
+		"visible_tool_surface": "auto",
+		"learn_from_tool_calls": true,
+		"run_model_probes": true,
+		"allow_runtime_downgrade": "auto",
+		"allow_runtime_promotion": "auto",
+		"apply_visible_changes": "next_session",
+		"cache_sensitive_apis": "auto",
+		"cache_breaking_downgrade": false
+	}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/tools/adaptation", strings.NewReader(body))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	updated, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() after PUT error = %v", err)
+	}
+	if len(updated.Tools.Adaptation.ProfileOverrides) != 1 {
+		t.Fatalf(
+			"ProfileOverrides = %#v, want legacy PUT to preserve override",
+			updated.Tools.Adaptation.ProfileOverrides,
+		)
 	}
 }
 
@@ -252,7 +317,211 @@ func TestHandleToolAdaptationProbeRequiresProbeEnabled(t *testing.T) {
 	}
 }
 
-func TestProbeModelConfigForConfigUsesConfiguredModelEntry(t *testing.T) {
+func TestHandleToolAdaptationProbeTargetsRequestedProfile(t *testing.T) {
+	var requestedModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode upstream request: %v", err)
+		}
+		requestedModel = body.Model
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices":[{
+				"message":{
+					"role":"assistant",
+					"tool_calls":[{
+						"id":"probe-call",
+						"type":"function",
+						"function":{
+							"name":"adaptation_probe_echo",
+							"arguments":"{\"value\":\"probe-ok\"}"
+						}
+					}]
+				}
+			}]
+		}`))
+	}))
+	defer upstream.Close()
+
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.Agents.Defaults.ModelName = "default"
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "default",
+			Provider:  "openai",
+			Model:     "gpt-default",
+			APIBase:   upstream.URL + "/v1",
+			APIKeys:   config.SimpleSecureStrings("sk-default"),
+			Enabled:   true,
+		},
+		{
+			ModelName: "target",
+			Provider:  "openai",
+			Model:     "gpt-target",
+			APIBase:   upstream.URL + "/v1",
+			APIKeys:   config.SimpleSecureStrings("sk-target"),
+			Enabled:   true,
+		},
+	}
+	cfg.Tools.Adaptation = config.DefaultToolAdaptationConfig()
+	cfg.Tools.Adaptation.VisibleToolSurface = config.ToolSurfacePicoClaw
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/tools/adaptation/probe",
+		strings.NewReader(`{"provider":"openai","model":"gpt-target"}`),
+	)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if requestedModel != "gpt-target" {
+		t.Fatalf("upstream model = %q, want targeted model gpt-target", requestedModel)
+	}
+
+	var result struct {
+		Success bool `json:"success"`
+		Profile struct {
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+		} `json:"profile"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("Unmarshal probe response error = %v", err)
+	}
+	if !result.Success || result.Profile.Provider != "openai" ||
+		result.Profile.Model != "gpt-target" {
+		t.Fatalf("probe result = %#v, want successful targeted profile", result)
+	}
+}
+
+func TestHandleToolAdaptationProbeEmptyBodyResolvesVirtualAccountRouter(t *testing.T) {
+	var requestedModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode upstream request: %v", err)
+		}
+		requestedModel = body.Model
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices":[{
+				"message":{
+					"role":"assistant",
+					"tool_calls":[{
+						"id":"probe-call",
+						"type":"function",
+						"function":{
+							"name":"adaptation_probe_echo",
+							"arguments":"{\"value\":\"probe-ok\"}"
+						}
+					}]
+				}
+			}]
+		}`))
+	}))
+	defer upstream.Close()
+
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.Agents.Defaults.Provider = config.AccountRouterProvider
+	cfg.Agents.Defaults.ModelName = "router-1"
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName: "account-a",
+		Provider:  "openai",
+		Model:     "old-model",
+		APIBase:   upstream.URL + "/v1",
+		APIKeys:   config.SimpleSecureStrings("sk-router"),
+		Enabled:   true,
+	}}
+	cfg.AccountRouters = []config.AccountRouterConfig{{
+		Name:    "router-1",
+		Model:   "gpt-router",
+		Enabled: true,
+		Entry:   "account",
+		Blocks: []config.AccountRouterBlock{{
+			ID:      "account",
+			Type:    config.AccountRouterBlockTypeAccount,
+			Account: "account-a",
+		}},
+	}}
+	cfg.Tools.Adaptation = config.DefaultToolAdaptationConfig()
+	cfg.Tools.Adaptation.VisibleToolSurface = config.ToolSurfacePicoClaw
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/tools/adaptation/probe", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if requestedModel != "gpt-router" {
+		t.Fatalf("upstream model = %q, want router shared model gpt-router", requestedModel)
+	}
+
+	var result struct {
+		Success bool `json:"success"`
+		Profile struct {
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+		} `json:"profile"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("Unmarshal probe response error = %v", err)
+	}
+	if !result.Success || result.Profile.Provider != "openai" ||
+		result.Profile.Model != "gpt-router" {
+		t.Fatalf("probe result = %#v, want concrete router profile", result)
+	}
+}
+
+func TestHandleToolAdaptationProbeRejectsPartialProfile(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/tools/adaptation/probe",
+		strings.NewReader(`{"provider":"openai"}`),
+	)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest ||
+		!strings.Contains(rec.Body.String(), "provider and model") {
+		t.Fatalf("POST status/body = %d/%q, want partial-profile error", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProbeModelConfigForProfileUsesConfiguredModelEntry(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.ModelName = "alias"
 	cfg.ModelList = []*config.ModelConfig{{
@@ -260,11 +529,238 @@ func TestProbeModelConfigForConfigUsesConfiguredModelEntry(t *testing.T) {
 		Provider:  "openai",
 		Model:     "gpt-test",
 		APIBase:   "http://127.0.0.1:1/v1",
+		Enabled:   true,
 	}}
 
-	got := probeModelConfigForConfig(cfg, "fallback", "fallback-model")
+	got, err := probeModelConfigForProfile(cfg, "openai", "gpt-test")
+	if err != nil {
+		t.Fatalf("probeModelConfigForProfile() error = %v", err)
+	}
 	if got.Provider != "openai" || got.Model != "gpt-test" || got.APIBase == "" {
 		t.Fatalf("probe model config = %#v, want configured model entry", got)
+	}
+}
+
+func TestProbeModelConfigForProfilePrefersUsableExactCandidate(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "missing-key",
+			Provider:  "openai",
+			Model:     "gpt-test",
+			Enabled:   true,
+		},
+		{
+			ModelName: "configured",
+			Provider:  "openai",
+			Model:     "gpt-test",
+			APIKeys:   config.SimpleSecureStrings("sk-configured"),
+			Enabled:   true,
+		},
+	}
+
+	got, err := probeModelConfigForProfile(cfg, "gpt", "gpt-test")
+	if err != nil {
+		t.Fatalf("probeModelConfigForProfile() error = %v", err)
+	}
+	if got.ModelName != "configured" || got.APIKey() != "sk-configured" {
+		t.Fatalf("probe model config = %#v, want second usable exact candidate", got)
+	}
+}
+
+func TestProbeModelConfigForProfileIgnoresDisabledCandidates(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName: "disabled",
+		Provider:  "openai",
+		Model:     "gpt-test",
+		APIKeys:   config.SimpleSecureStrings("sk-disabled"),
+		Enabled:   false,
+	}}
+
+	_, err := probeModelConfigForProfile(cfg, "openai", "gpt-test")
+	if err == nil || !strings.Contains(err.Error(), "no configured upstream model") {
+		t.Fatalf("error = %v, want disabled candidate ignored", err)
+	}
+}
+
+func TestProbeModelConfigForProfileIgnoresDisabledRouterAndAccount(t *testing.T) {
+	tests := []struct {
+		name           string
+		routerEnabled  bool
+		accountEnabled bool
+	}{
+		{name: "disabled router", routerEnabled: false, accountEnabled: true},
+		{name: "disabled account", routerEnabled: true, accountEnabled: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.ModelList = []*config.ModelConfig{{
+				ModelName: "account-a",
+				Provider:  "openai",
+				Model:     "old-model",
+				APIKeys:   config.SimpleSecureStrings("sk-test"),
+				Enabled:   tt.accountEnabled,
+			}}
+			cfg.AccountRouters = []config.AccountRouterConfig{{
+				Name:    "router-1",
+				Model:   "shared-model",
+				Enabled: tt.routerEnabled,
+				Entry:   "account",
+				Blocks: []config.AccountRouterBlock{{
+					ID:      "account",
+					Type:    config.AccountRouterBlockTypeAccount,
+					Account: "account-a",
+				}},
+			}}
+			cfg.MaterializeAccountRouterModels()
+
+			_, err := probeModelConfigForProfile(cfg, "openai", "shared-model")
+			if err == nil || !strings.Contains(err.Error(), "no configured upstream model") {
+				t.Fatalf("error = %v, want disabled router/account ignored", err)
+			}
+		})
+	}
+}
+
+func TestProbeModelConfigReadyMatchesProviderFactoryKeyRequirements(t *testing.T) {
+	anthropic := &config.ModelConfig{
+		Provider: "anthropic",
+		Model:    "claude-test",
+		APIBase:  "http://127.0.0.1:1/v1",
+		Enabled:  true,
+	}
+	if probeModelConfigReady(anthropic) {
+		t.Fatal("Anthropic config with api_base but no key reported probe-ready")
+	}
+
+	openAI := &config.ModelConfig{
+		Provider: "openai",
+		Model:    "gpt-test",
+		APIBase:  "http://127.0.0.1:1/v1",
+		Enabled:  true,
+	}
+	if !probeModelConfigReady(openAI) {
+		t.Fatal("OpenAI-compatible config with api_base reported unavailable")
+	}
+}
+
+func TestProbeModelConfigForProfileUsesUsableAccountForSharedProfile(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "account-missing-key",
+			Provider:  "openai",
+			Model:     "old-model",
+			Enabled:   true,
+		},
+		{
+			ModelName: "account-configured",
+			Provider:  "openai",
+			Model:     "old-model",
+			APIKeys:   config.SimpleSecureStrings("sk-configured"),
+			Enabled:   true,
+		},
+	}
+	cfg.AccountRouters = []config.AccountRouterConfig{{
+		Name:    "router-1",
+		Model:   "shared-model",
+		Enabled: true,
+		Entry:   "pool",
+		Blocks: []config.AccountRouterBlock{{
+			ID:       "pool",
+			Type:     config.AccountRouterBlockTypeLoadBalance,
+			Accounts: []string{"account-missing-key", "account-configured"},
+		}},
+	}}
+	cfg.MaterializeAccountRouterModels()
+
+	got, err := probeModelConfigForProfile(cfg, "openai", "shared-model")
+	if err != nil {
+		t.Fatalf("probeModelConfigForProfile() error = %v", err)
+	}
+	if got.ModelName != "account-configured" || got.APIKey() != "sk-configured" {
+		t.Fatalf("probe model config = %#v, want usable account for shared profile", got)
+	}
+}
+
+func TestProbeModelConfigForProfileResolvesCredentialAccountRouter(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.ModelName = "router-1"
+	cfg.AccountRouters = []config.AccountRouterConfig{{
+		Name:    "router-1",
+		Model:   "gpt-5.4",
+		Enabled: true,
+		Entry:   "account",
+		Blocks: []config.AccountRouterBlock{{
+			ID:      "account",
+			Type:    config.AccountRouterBlockTypeAccount,
+			Account: "credential:github-copilot:work",
+		}},
+	}}
+	cfg.MaterializeAccountRouterModels()
+
+	got, err := probeModelConfigForProfile(cfg, "github-copilot", "gpt-5.4")
+	if err != nil {
+		t.Fatalf("probeModelConfigForProfile() error = %v", err)
+	}
+	if got.Provider != "github-copilot" || got.Model != "gpt-5.4" ||
+		got.AuthMethod != "token" || got.CredentialID != "github-copilot:work" {
+		t.Fatalf("probe model config = %#v, want concrete GitHub Copilot credential config", got)
+	}
+	if got.IsAccountRouter() {
+		t.Fatalf("probe model config remains router: %#v", got)
+	}
+}
+
+func TestProbeModelConfigForProfileUsesRouterSharedModel(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "account-a",
+			Provider:  "openrouter",
+			Model:     "old-model",
+			APIKeys:   config.SimpleSecureStrings("key-a"),
+			Enabled:   true,
+		},
+		{
+			ModelName: "account-b",
+			Provider:  "anthropic",
+			Model:     "old-model",
+			APIKeys:   config.SimpleSecureStrings("key-b"),
+			Enabled:   true,
+		},
+	}
+	cfg.AccountRouters = []config.AccountRouterConfig{{
+		Name:    "router-1",
+		Model:   "shared-model",
+		Enabled: true,
+		Entry:   "pool",
+		Blocks: []config.AccountRouterBlock{{
+			ID:       "pool",
+			Type:     config.AccountRouterBlockTypeLoadBalance,
+			Accounts: []string{"account-a", "account-b"},
+		}},
+	}}
+	cfg.MaterializeAccountRouterModels()
+
+	got, err := probeModelConfigForProfile(cfg, "anthropic", "shared-model")
+	if err != nil {
+		t.Fatalf("probeModelConfigForProfile() error = %v", err)
+	}
+	if got.Provider != "anthropic" || got.Model != "shared-model" ||
+		got.APIKey() != "key-b" {
+		t.Fatalf("probe model config = %#v, want account-b with shared model", got)
+	}
+}
+
+func TestProbeModelConfigForProfileRejectsUnconfiguredProfile(t *testing.T) {
+	cfg := config.DefaultConfig()
+
+	_, err := probeModelConfigForProfile(cfg, "openai", "unconfigured")
+	if err == nil || !strings.Contains(err.Error(), "no configured upstream model") {
+		t.Fatalf("error = %v, want unconfigured profile error", err)
 	}
 }
 
@@ -275,11 +771,35 @@ func TestResolveToolAdaptationProfileForConfigSplitsPrefixedAlias(t *testing.T) 
 	cfg.ModelList = []*config.ModelConfig{{
 		ModelName: "alias",
 		Model:     "anthropic/claude-sonnet",
+		Enabled:   true,
 	}}
 
 	provider, model := resolveToolAdaptationProfileForConfig(cfg)
 	if provider != "anthropic" || model != "claude-sonnet" {
 		t.Fatalf("profile = %s/%s, want anthropic/claude-sonnet", provider, model)
+	}
+}
+
+func TestResolveToolAdaptationProfileForConfigCanonicalizesCredentialProvider(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Provider = config.AccountRouterProvider
+	cfg.Agents.Defaults.ModelName = "router-1"
+	cfg.AccountRouters = []config.AccountRouterConfig{{
+		Name:    "router-1",
+		Model:   "gpt-5.4",
+		Enabled: true,
+		Entry:   "account",
+		Blocks: []config.AccountRouterBlock{{
+			ID:      "account",
+			Type:    config.AccountRouterBlockTypeAccount,
+			Account: "credential:copilot:work",
+		}},
+	}}
+	cfg.MaterializeAccountRouterModels()
+
+	provider, model := resolveToolAdaptationProfileForConfig(cfg)
+	if provider != "github-copilot" || model != "gpt-5.4" {
+		t.Fatalf("profile = %s/%s, want github-copilot/gpt-5.4", provider, model)
 	}
 }
 
@@ -352,6 +872,48 @@ func TestBuildToolAdaptationResponseListsAccountRouterProfiles(t *testing.T) {
 		if !got[want] {
 			t.Fatalf("profiles missing %q: %#v", want, resp.Profiles)
 		}
+	}
+}
+
+func TestBuildToolAdaptationResponseMarksProfileOverride(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.ModelName = "primary"
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName: "primary",
+		Provider:  "openai",
+		Model:     "gpt-test",
+		APIKeys:   config.SimpleSecureStrings("sk-test"),
+		Enabled:   true,
+	}}
+	cfg.Tools.Adaptation = config.DefaultToolAdaptationConfig()
+	cfg.Tools.Adaptation.ProfileOverrides = []config.ToolAdaptationProfileOverride{{
+		Provider:           "gpt",
+		Model:              "gpt-test",
+		VisibleToolSurface: config.ToolSurfaceCodex,
+	}, {
+		Provider:           "openai",
+		Model:              "gpt-test",
+		VisibleToolSurface: config.ToolSurfaceSimple,
+	}}
+
+	resp := buildToolAdaptationResponse(cfg)
+	if resp.ProfileOverrides == nil || len(*resp.ProfileOverrides) != 1 ||
+		(*resp.ProfileOverrides)[0].Provider != "openai" {
+		t.Fatalf("profile overrides = %#v, want canonical openai identity", resp.ProfileOverrides)
+	}
+	if len(resp.Profiles) != 1 {
+		t.Fatalf("profiles = %#v, want one deduplicated profile", resp.Profiles)
+	}
+	profile := resp.Profiles[0]
+	if !profile.IsOverride || !profile.ProbeAvailable {
+		t.Fatalf("profile = %#v, want override and probe available", profile)
+	}
+	if profile.Resolved.PinnedToolSurface != config.ToolSurfaceSimple {
+		t.Fatalf(
+			"PinnedToolSurface = %q, want profile override %q",
+			profile.Resolved.PinnedToolSurface,
+			config.ToolSurfaceSimple,
+		)
 	}
 }
 

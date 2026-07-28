@@ -206,6 +206,74 @@ const webSearchConfigResponse = {
   },
 }
 
+const toolAdaptationResponse = {
+  enabled: true,
+  visible_tool_surface: "auto",
+  learn_from_tool_calls: true,
+  run_model_probes: true,
+  allow_runtime_downgrade: "auto",
+  allow_runtime_promotion: "auto",
+  apply_visible_changes: "next_session",
+  cache_sensitive_apis: "auto",
+  cache_breaking_downgrade: false,
+  profile_overrides: [
+    {
+      provider: "openai",
+      model:
+        "very-long-model-name-with-reasoning-context-and-tool-capabilities",
+      visible_tool_surface: "simple",
+      cache_sensitive_apis: "never",
+    },
+  ],
+  profiles: [
+    {
+      id: "openai/gpt-4o-mini",
+      label: "gpt-4o-mini",
+      source: "model alias",
+      is_default: true,
+      is_override: false,
+      probe_available: true,
+      resolved: {
+        provider: "openai",
+        model: "gpt-4o-mini",
+        state_path: "/tmp/tool-adaptation-state.json",
+        visible_tool_surface: "codex",
+        pinned_tool_surface: "codex",
+        surface_evidence: "heuristic",
+        runtime_downgrade: false,
+        runtime_promotion: false,
+        apply_visible_changes: "next_session",
+        cache_sensitive: true,
+        cache_evidence: "heuristic",
+      },
+    },
+    {
+      id: "openai/very-long-model-name-with-reasoning-context-and-tool-capabilities",
+      label:
+        "very-long-model-name-with-reasoning-context-and-tool-capabilities",
+      source:
+        "manual override for a configured provider profile with a long label",
+      is_default: false,
+      is_override: true,
+      probe_available: false,
+      resolved: {
+        provider: "openai",
+        model:
+          "very-long-model-name-with-reasoning-context-and-tool-capabilities",
+        state_path: "/tmp/tool-adaptation-state.json",
+        visible_tool_surface: "simple",
+        pinned_tool_surface: "simple",
+        surface_evidence: "config",
+        runtime_downgrade: true,
+        runtime_promotion: true,
+        apply_visible_changes: "next_session",
+        cache_sensitive: false,
+        cache_evidence: "config",
+      },
+    },
+  ],
+}
+
 const skillsResponse = {
   skills: [
     {
@@ -1183,6 +1251,8 @@ async function mockLauncherApis(
         }
         case "/api/tools/web-search-config":
           return json(route, webSearchConfigResponse)
+        case "/api/tools/adaptation":
+          return json(route, toolAdaptationResponse)
         case "/api/skills":
           return json(route, skillsResponse)
         case "/api/skills/search":
@@ -1918,6 +1988,59 @@ test("web-search provider settings expand without overflow", async ({
 
   await page.getByRole("button", { name: /OpenAI/ }).click()
   await expect(page.getByText("Max Results")).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("tool adaptation profile override dialog fits the viewport", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+
+  await gotoMockedRoute(page, "/agent/tools?tab=adaptation")
+  await expect(page.getByRole("heading", { name: "Adaptation" })).toBeVisible()
+  await page
+    .getByRole("button", { name: "Add override for openai / gpt-4o-mini" })
+    .click()
+
+  await expect(
+    page.getByRole("dialog", { name: "Add profile override" }),
+  ).toBeVisible()
+  await expectElementFitsViewport(page, '[role="dialog"]', "profile override")
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("tool adaptation worst-state row fits a narrow mobile viewport", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile", "mobile-only layout regression")
+  await page.setViewportSize({ width: 320, height: 720 })
+  const errors = collectPageErrors(page)
+
+  await gotoMockedRoute(page, "/agent/tools?tab=adaptation")
+  const unavailableProbe = page.getByRole("button", {
+    name: /^Probe unavailable for /,
+  })
+  await expect(unavailableProbe).toBeVisible()
+  await expect(unavailableProbe).toHaveAttribute("aria-describedby", /.+/)
+  await expect(
+    page.getByText(
+      "No configured credentials or endpoint are available for this profile.",
+    ),
+  ).toBeVisible()
+
+  const mobileMetrics = page.getByTestId(
+    "adaptation-profile-mobile-metrics-openai/very-long-model-name-with-reasoning-context-and-tool-capabilities",
+  )
+  await expect(mobileMetrics).toBeVisible()
+  await expect(mobileMetrics.getByText("Surface")).toBeVisible()
+  await expect(mobileMetrics.getByText("simple")).toBeVisible()
+  await expect(mobileMetrics.getByText("Cache")).toBeVisible()
+  await expect(mobileMetrics.getByText("Flexible")).toBeVisible()
+
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])

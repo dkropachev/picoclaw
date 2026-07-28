@@ -44,6 +44,7 @@ export function ToolsPage({
     isToolAdaptationLoading,
     isToolAdaptationSaving,
     isToolAdaptationProbing,
+    probingToolAdaptationProfile,
     isWebSearchLoading,
     isWebSearchSaving,
     isWebSearchDirty,
@@ -120,6 +121,7 @@ export function ToolsPage({
               hasError={hasToolAdaptationError}
               isSaving={isToolAdaptationSaving}
               isProbing={isToolAdaptationProbing}
+              probingProfile={probingToolAdaptationProfile}
               isDirty={isToolAdaptationDirty}
               onSave={saveToolAdaptation}
               onRunProbe={runToolAdaptationProbe}

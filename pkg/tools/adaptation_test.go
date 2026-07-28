@@ -3,6 +3,7 @@ package tools
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -56,6 +57,87 @@ func TestResolveToolAdaptationPinnedSurface(t *testing.T) {
 	}
 	if decision.PinnedToolSurface != config.ToolSurfaceSimple {
 		t.Fatalf("PinnedToolSurface = %q, want %q", decision.PinnedToolSurface, config.ToolSurfaceSimple)
+	}
+}
+
+func TestResolveToolAdaptationAppliesProfileOverride(t *testing.T) {
+	cfg := config.DefaultToolAdaptationConfig()
+	cfg.VisibleToolSurface = config.ToolSurfaceCodex
+	cfg.CacheSensitiveAPIs = config.ToolCacheSensitivityAlways
+	cfg.ProfileOverrides = []config.ToolAdaptationProfileOverride{{
+		Provider:           "copilot",
+		Model:              " GPT-5.4 ",
+		VisibleToolSurface: config.ToolSurfaceSimple,
+		CacheSensitiveAPIs: config.ToolCacheSensitivityNever,
+	}}
+
+	decision := ResolveToolAdaptation(cfg, "github-copilot", "gpt-5.4")
+	if decision.VisibleToolSurface != config.ToolSurfaceSimple {
+		t.Fatalf(
+			"VisibleToolSurface = %q, want profile override %q",
+			decision.VisibleToolSurface,
+			config.ToolSurfaceSimple,
+		)
+	}
+	if decision.CacheSensitive {
+		t.Fatal("CacheSensitive = true, want profile override false")
+	}
+
+	unmatched := ResolveToolAdaptation(cfg, "openai", "gpt-5.4")
+	if unmatched.VisibleToolSurface != config.ToolSurfaceCodex || !unmatched.CacheSensitive {
+		t.Fatalf("unmatched decision = %#v, want global policy", unmatched)
+	}
+}
+
+func TestResolveToolAdaptationProfileOverrideInheritsEmptyFields(t *testing.T) {
+	cfg := config.DefaultToolAdaptationConfig()
+	cfg.VisibleToolSurface = config.ToolSurfaceSimple
+	cfg.CacheSensitiveAPIs = config.ToolCacheSensitivityNever
+	cfg.ProfileOverrides = []config.ToolAdaptationProfileOverride{{
+		Provider: "openai",
+		Model:    "gpt-5",
+	}}
+
+	decision := ResolveToolAdaptation(cfg, "openai", "gpt-5")
+	if decision.VisibleToolSurface != config.ToolSurfaceSimple || decision.CacheSensitive {
+		t.Fatalf("decision = %#v, want inherited simple/cache-insensitive policy", decision)
+	}
+}
+
+func TestResolveToolAdaptationCanonicalAliasDuplicateUsesLastOverride(t *testing.T) {
+	cfg := config.DefaultToolAdaptationConfig()
+	cfg.VisibleToolSurface = config.ToolSurfaceSimple
+	cfg.CacheSensitiveAPIs = config.ToolCacheSensitivityAlways
+	cfg.ProfileOverrides = []config.ToolAdaptationProfileOverride{
+		{
+			Provider:           "copilot",
+			Model:              "gpt-5",
+			VisibleToolSurface: config.ToolSurfaceCodex,
+		},
+		{
+			Provider:           "github-copilot",
+			Model:              "gpt-5",
+			CacheSensitiveAPIs: config.ToolCacheSensitivityNever,
+		},
+	}
+
+	decision := ResolveToolAdaptation(cfg, "github-copilot", "gpt-5")
+	if decision.VisibleToolSurface != config.ToolSurfaceSimple || decision.CacheSensitive {
+		t.Fatalf("decision = %#v, want last alias override with inherited simple surface", decision)
+	}
+}
+
+func TestNormalizeToolAdaptationProfileCanonicalizesProviderAliases(t *testing.T) {
+	got := normalizeToolAdaptationProfile(ToolAdaptationProfile{
+		Provider: " CoPiLoT ",
+		Model:    " GPT-5 ",
+	})
+	want := (ToolAdaptationProfile{
+		Provider: "github-copilot",
+		Model:    "gpt-5",
+	})
+	if got != want {
+		t.Fatalf("normalizeToolAdaptationProfile() = %#v, want %#v", got, want)
 	}
 }
 
@@ -194,6 +276,87 @@ func TestToolAdaptationToolOutcomesAccumulateAndPersist(t *testing.T) {
 	}
 	if loaded[0].Successes != 1 || loaded[0].Failures != 1 || loaded[0].LastError != "bad args" {
 		t.Fatalf("loaded outcome = %#v, want persisted counts and last error", loaded[0])
+	}
+}
+
+func TestToolAdaptationStateMergesPersistedProviderAliases(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	resetToolAdaptationStateForTest(t, statePath)
+
+	older := time.Date(2026, time.July, 27, 10, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Hour)
+	persisted := &toolAdaptationStateStore{
+		observations: map[string]ToolAdaptationObservation{
+			"copilot/gpt-5.4": {
+				Profile:            ToolAdaptationProfile{Provider: "copilot", Model: "gpt-5.4"},
+				VisibleToolSurface: config.ToolSurfaceSimple,
+				PromptTokens:       800,
+				CachedTokens:       100,
+				ObservedAt:         older,
+			},
+			"github-copilot/gpt-5.4": {
+				Profile:            ToolAdaptationProfile{Provider: "github-copilot", Model: "gpt-5.4"},
+				VisibleToolSurface: config.ToolSurfaceCodex,
+				PromptTokens:       1200,
+				CachedTokens:       600,
+				ObservedAt:         newer,
+			},
+		},
+		outcomes: map[string]ToolAdaptationToolOutcome{
+			"copilot/gpt-5.4/codex/exec_command": {
+				Profile:            ToolAdaptationProfile{Provider: "copilot", Model: "gpt-5.4"},
+				VisibleToolSurface: config.ToolSurfaceCodex,
+				ToolName:           "exec_command",
+				Successes:          2,
+				Failures:           1,
+				LastError:          "old error",
+				LastDurationMS:     100,
+				UpdatedAt:          older,
+			},
+			"github-copilot/gpt-5.4/codex/exec_command": {
+				Profile:            ToolAdaptationProfile{Provider: "github-copilot", Model: "gpt-5.4"},
+				VisibleToolSurface: config.ToolSurfaceCodex,
+				ToolName:           "exec_command",
+				Successes:          3,
+				Failures:           4,
+				LastError:          "new error",
+				LastDurationMS:     250,
+				UpdatedAt:          newer,
+			},
+		},
+		pathOverride: statePath,
+	}
+	if err := persisted.saveLocked(); err != nil {
+		t.Fatalf("saveLocked() error = %v", err)
+	}
+
+	observation, ok := LatestToolAdaptationObservation(
+		ToolAdaptationProfile{Provider: "github-copilot", Model: "gpt-5.4"},
+	)
+	if !ok {
+		t.Fatal("LatestToolAdaptationObservation() ok = false, want true")
+	}
+	if observation.Profile.Provider != "github-copilot" ||
+		observation.VisibleToolSurface != config.ToolSurfaceCodex ||
+		observation.CachedTokens != 600 ||
+		!observation.ObservedAt.Equal(newer) {
+		t.Fatalf("loaded observation = %#v, want newest canonical observation", observation)
+	}
+
+	outcomes := LatestToolAdaptationToolOutcomes(
+		ToolAdaptationProfile{Provider: "copilot", Model: "gpt-5.4"},
+	)
+	if len(outcomes) != 1 {
+		t.Fatalf("len(loaded outcomes) = %d, want 1 merged outcome", len(outcomes))
+	}
+	outcome := outcomes[0]
+	if outcome.Profile.Provider != "github-copilot" ||
+		outcome.Successes != 5 ||
+		outcome.Failures != 5 ||
+		outcome.LastError != "new error" ||
+		outcome.LastDurationMS != 250 ||
+		!outcome.UpdatedAt.Equal(newer) {
+		t.Fatalf("loaded outcome = %#v, want merged counters and newest metadata", outcome)
 	}
 }
 

@@ -258,7 +258,8 @@
       "allow_runtime_promotion": "auto",
       "apply_visible_changes": "next_session",
       "cache_sensitive_apis": "auto",
-      "cache_breaking_downgrade": false
+      "cache_breaking_downgrade": false,
+      "profile_overrides": []
     },
     "web": {
       "enabled": true,

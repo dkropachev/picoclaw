@@ -286,7 +286,10 @@ func registerSharedTools(
 				allowReadPaths,
 			)
 			agent.Tools.Register(loadImageTool)
-			if agent.ToolAdaptation.MayUseCodexCompatibleTools() {
+			if toolAdaptationMayUseCodexCompatibleTools(
+				cfg.Tools.Adaptation,
+				agent.ToolAdaptation,
+			) {
 				agent.Tools.Register(tools.NewCodexViewImageTool(loadImageTool))
 			}
 		}
