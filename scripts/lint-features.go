@@ -84,7 +84,10 @@ func lintFeatures(root string) error {
 		}
 		for _, owner := range parseFeatureOwnerships(relPath, text) {
 			if owner.Kind == "CODE" && forbiddenFrontendCodeOwnershipPattern(frontendOwnership, owner.Pattern) {
-				failures = append(failures, fmt.Sprintf("%s: forbidden broad frontend CODE ownership %q", relPath, owner.Pattern))
+				failures = append(
+					failures,
+					fmt.Sprintf("%s: forbidden broad frontend CODE ownership %q", relPath, owner.Pattern),
+				)
 			}
 		}
 		specIDs := requirementIDs(text)
@@ -95,7 +98,10 @@ func lintFeatures(root string) error {
 		evidence := section(text, "## Acceptance Evidence")
 		for _, id := range specIDs {
 			if previous, ok := ids[id]; ok {
-				failures = append(failures, fmt.Sprintf("%s: duplicate requirement ID %s, first seen in %s", relPath, id, previous))
+				failures = append(
+					failures,
+					fmt.Sprintf("%s: duplicate requirement ID %s, first seen in %s", relPath, id, previous),
+				)
 			} else {
 				ids[id] = relPath
 			}
@@ -103,7 +109,10 @@ func lintFeatures(root string) error {
 				failures = append(failures, fmt.Sprintf("%s: %s missing from Acceptance Evidence", relPath, id))
 			}
 			if levels[id] == "MUST" && !requirementHasTestEvidence(evidence, id) {
-				failures = append(failures, fmt.Sprintf("%s: %s is MUST but lacks test or integration evidence", relPath, id))
+				failures = append(
+					failures,
+					fmt.Sprintf("%s: %s is MUST but lacks test or integration evidence", relPath, id),
+				)
 			}
 		}
 		ownerPatterns = append(ownerPatterns, ownershipPatterns(text)...)
@@ -253,7 +262,9 @@ func validateMarkdownLinks(root, spec, text string) []string {
 	var failures []string
 	for _, match := range re.FindAllStringSubmatch(text, -1) {
 		target := strings.TrimSpace(match[1])
-		if target == "" || strings.HasPrefix(target, "#") || strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") || strings.HasPrefix(target, "mailto:") {
+		if target == "" || strings.HasPrefix(target, "#") || strings.HasPrefix(target, "http://") ||
+			strings.HasPrefix(target, "https://") ||
+			strings.HasPrefix(target, "mailto:") {
 			continue
 		}
 		if strings.Contains(target, " ") {
@@ -266,7 +277,11 @@ func validateMarkdownLinks(root, spec, text string) []string {
 			continue
 		}
 		resolved := filepath.Clean(filepath.Join(filepath.Dir(spec), filepath.FromSlash(target)))
-		if relPath, err := filepath.Rel(root, resolved); err != nil || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) || relPath == ".." {
+		if relPath, err := filepath.Rel(
+			root,
+			resolved,
+		); err != nil || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) ||
+			relPath == ".." {
 			failures = append(failures, fmt.Sprintf("%s: link escapes repository: %s", rel(root, spec), target))
 			continue
 		}

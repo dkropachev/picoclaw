@@ -54,6 +54,12 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -1542,21 +1548,77 @@ function SharedModelField({
             ))}
           </SelectContent>
         </Select>
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          onClick={onRefresh}
-          disabled={disabled || loading}
-          aria-label={t("models.router.refreshSharedModels")}
-          title={t("models.router.refreshSharedModels")}
-        >
-          {loading ? (
-            <IconLoader2 className="size-4 animate-spin" />
-          ) : (
-            <IconRefresh className="size-4" />
-          )}
-        </Button>
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button
+              type="button"
+              variant="outline"
+              className="shrink-0 gap-2"
+              disabled={disabled || loading}
+              aria-label={t("models.router.availableModels")}
+              title={t("models.router.availableModels")}
+            >
+              {loading ? (
+                <IconLoader2 className="size-4 animate-spin" />
+              ) : (
+                <IconLayoutList className="size-4" />
+              )}
+              <span>
+                {t("models.router.availableModelsCount", {
+                  count: models.length,
+                })}
+              </span>
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-80 p-0">
+            <div className="border-b p-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-medium">
+                  {t("models.router.availableModels")}
+                </p>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={onRefresh}
+                  aria-label={t("models.router.refreshSharedModels")}
+                  title={t("models.router.refreshSharedModels")}
+                >
+                  <IconRefresh className="size-4" />
+                </Button>
+              </div>
+            </div>
+            <ScrollArea className="max-h-72">
+              <div className="space-y-1 p-2">
+                {models.length === 0 ? (
+                  <p className="text-muted-foreground px-2 py-3 text-sm">
+                    {t("models.router.noSharedModels")}
+                  </p>
+                ) : (
+                  models.map((modelID) => (
+                    <button
+                      key={modelID}
+                      type="button"
+                      className={cn(
+                        "hover:bg-accent hover:text-accent-foreground flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm",
+                        normalizeModelID(value) === normalizeModelID(modelID)
+                          ? "bg-accent text-accent-foreground"
+                          : "",
+                      )}
+                      onClick={() => onChange(modelID)}
+                    >
+                      <span className="min-w-0 truncate">{modelID}</span>
+                      {normalizeModelID(value) ===
+                        normalizeModelID(modelID) && (
+                        <IconCheck className="size-4 shrink-0" />
+                      )}
+                    </button>
+                  ))
+                )}
+              </div>
+            </ScrollArea>
+          </PopoverContent>
+        </Popover>
       </div>
       {!disabled && !loading && models.length === 0 && !error && (
         <p className="text-muted-foreground text-xs">

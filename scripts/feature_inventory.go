@@ -22,7 +22,9 @@ func main() {
 
 	fmt.Println("# Feature Surface Inventory")
 	fmt.Println()
-	fmt.Println("Generated from current repository code. Use this as audit input; `docs/features/` remains the source of truth.")
+	fmt.Println(
+		"Generated from current repository code. Use this as audit input; `docs/features/` remains the source of truth.",
+	)
 
 	currentKind := ""
 	for _, surface := range surfaces {

@@ -322,7 +322,11 @@ func TestBuildToolAdaptationResponseListsAccountRouterProfiles(t *testing.T) {
 
 	resp := buildToolAdaptationResponse(cfg)
 	if resp.Resolved.Provider != "openrouter" || resp.Resolved.Model != "gpt-5.4" {
-		t.Fatalf("resolved profile = %s/%s, want first effective provider/model", resp.Resolved.Provider, resp.Resolved.Model)
+		t.Fatalf(
+			"resolved profile = %s/%s, want first effective provider/model",
+			resp.Resolved.Provider,
+			resp.Resolved.Model,
+		)
 	}
 	if len(resp.Profiles) != 2 {
 		t.Fatalf("profiles length = %d, want provider/model profiles only", len(resp.Profiles))

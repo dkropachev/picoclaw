@@ -1381,15 +1381,15 @@ const (
 )
 
 type ToolAdaptationConfig struct {
-	Enabled                bool   `json:"enabled"                    yaml:"-" env:"ENABLED"`
-	VisibleToolSurface     string `json:"visible_tool_surface"       yaml:"-" env:"VISIBLE_TOOL_SURFACE"`
-	LearnFromToolCalls     bool   `json:"learn_from_tool_calls"      yaml:"-" env:"LEARN_FROM_TOOL_CALLS"`
-	RunModelProbes         bool   `json:"run_model_probes"           yaml:"-" env:"RUN_MODEL_PROBES"`
-	AllowRuntimeDowngrade  string `json:"allow_runtime_downgrade"    yaml:"-" env:"ALLOW_RUNTIME_DOWNGRADE"`
-	AllowRuntimePromotion  string `json:"allow_runtime_promotion"    yaml:"-" env:"ALLOW_RUNTIME_PROMOTION"`
-	ApplyVisibleChanges    string `json:"apply_visible_changes"      yaml:"-" env:"APPLY_VISIBLE_CHANGES"`
-	CacheSensitiveAPIs     string `json:"cache_sensitive_apis"       yaml:"-" env:"CACHE_SENSITIVE_APIS"`
-	CacheBreakingDowngrade bool   `json:"cache_breaking_downgrade"   yaml:"-" env:"CACHE_BREAKING_DOWNGRADE"`
+	Enabled                bool   `json:"enabled"                  yaml:"-" env:"ENABLED"`
+	VisibleToolSurface     string `json:"visible_tool_surface"     yaml:"-" env:"VISIBLE_TOOL_SURFACE"`
+	LearnFromToolCalls     bool   `json:"learn_from_tool_calls"    yaml:"-" env:"LEARN_FROM_TOOL_CALLS"`
+	RunModelProbes         bool   `json:"run_model_probes"         yaml:"-" env:"RUN_MODEL_PROBES"`
+	AllowRuntimeDowngrade  string `json:"allow_runtime_downgrade"  yaml:"-" env:"ALLOW_RUNTIME_DOWNGRADE"`
+	AllowRuntimePromotion  string `json:"allow_runtime_promotion"  yaml:"-" env:"ALLOW_RUNTIME_PROMOTION"`
+	ApplyVisibleChanges    string `json:"apply_visible_changes"    yaml:"-" env:"APPLY_VISIBLE_CHANGES"`
+	CacheSensitiveAPIs     string `json:"cache_sensitive_apis"     yaml:"-" env:"CACHE_SENSITIVE_APIS"`
+	CacheBreakingDowngrade bool   `json:"cache_breaking_downgrade" yaml:"-" env:"CACHE_BREAKING_DOWNGRADE"`
 }
 
 func DefaultToolAdaptationConfig() ToolAdaptationConfig {
@@ -1877,7 +1877,7 @@ func (c ReadFileToolConfig) EffectiveMode() string {
 type ToolsConfig struct {
 	AllowReadPaths  []string             `json:"allow_read_paths"  yaml:"-" env:"PICOCLAW_TOOLS_ALLOW_READ_PATHS"`
 	AllowWritePaths []string             `json:"allow_write_paths" yaml:"-" env:"PICOCLAW_TOOLS_ALLOW_WRITE_PATHS"`
-	Adaptation      ToolAdaptationConfig `json:"adaptation" yaml:"-" envPrefix:"PICOCLAW_TOOLS_ADAPTATION_"`
+	Adaptation      ToolAdaptationConfig `json:"adaptation"        yaml:"-"                                        envPrefix:"PICOCLAW_TOOLS_ADAPTATION_"`
 	// FilterSensitiveData controls whether to filter sensitive values (API keys,
 	// tokens, secrets) from tool results before sending to the LLM.
 	// Default: true (enabled)

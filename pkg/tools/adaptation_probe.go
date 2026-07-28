@@ -128,8 +128,11 @@ func probeToolDefinition(surface string) (providers.ToolDefinition, map[string]s
 								"items": map[string]any{
 									"type": "object",
 									"properties": map[string]any{
-										"step":   map[string]any{"type": "string"},
-										"status": map[string]any{"type": "string", "enum": []string{"pending", "in_progress", "completed"}},
+										"step": map[string]any{"type": "string"},
+										"status": map[string]any{
+											"type": "string",
+											"enum": []string{"pending", "in_progress", "completed"},
+										},
 									},
 									"required": []string{"step", "status"},
 								},
