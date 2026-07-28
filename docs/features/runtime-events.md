@@ -8,7 +8,8 @@
 
 Runtime events provide observable envelopes for agent, channel, gateway, bus,
 and MCP behavior. Event logging filters decide which published events are printed
-without changing event publication.
+without changing event publication. They are process-local observability signals,
+not the durable external-event inbox used for restart-safe automation.
 
 ## Reconstruction Notes
 
@@ -46,7 +47,7 @@ Owns: CODE pkg/events/**
 Owns: CODE pkg/agent/event*
 Owns: CODE pkg/agent/events*
 Owns: CODE pkg/agent/runtime_event*
-Owns: CONFIG.events*
+Owns: CONFIG.events.logging*
 Owns: TEST pkg/events/*
 Owns: TEST pkg/config/events*
 Owns: EVENT *
@@ -74,7 +75,12 @@ Owns: EVENT *
 ## Cross-Feature Behavior
 
 All runtime features can publish events. Hooks may observe events. Gateway logs
-render filtered events for operators.
+render filtered events for operators. Durable external event automation may
+publish lifecycle telemetry to this bus, but it separately owns normalized
+provider deliveries, persistence, deduplication, routing/dispatch leases,
+retention, and replay. Runtime-event publication is never a substitute for
+durable ingest, and logging filters cannot accept, reject, or mutate durable
+events.
 Workflows publish `workflow.*` lifecycle events and can subscribe to runtime
 events as triggers without changing the event bus filtering and delivery
 semantics defined here.

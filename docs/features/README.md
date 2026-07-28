@@ -34,6 +34,7 @@ The canonical spec format is the Reconstruction Contract Matrix, defined in
 | Launcher management UX                 | [launcher-management.md](launcher-management.md)                   |
 | Security, credentials, and isolation   | [security-isolation.md](security-isolation.md)                     |
 | Runtime events and observability       | [runtime-events.md](runtime-events.md)                             |
+| Durable external event automation      | [event-automation.md](event-automation.md)                         |
 | Portability, updates, and packaging    | [portability-updates.md](portability-updates.md)                   |
 | Workflows and reusable automation      | [workflows.md](workflows.md)                                       |
 | Git workspaces and checkout retention  | [git-workspaces.md](git-workspaces.md)                             |
