@@ -72,6 +72,11 @@ func DefaultConfig() *Config {
 		},
 		Events: EventsConfig{
 			Logging: defaultEventLoggingConfig(),
+			// Durable ingress is opt-in. Its operational defaults are applied only
+			// when a caller asks for EffectiveEventIngressConfig.
+			Ingress: EventIngressConfig{
+				Enabled: false,
+			},
 		},
 		Workflows: WorkflowsConfig{
 			Enabled:               true,
