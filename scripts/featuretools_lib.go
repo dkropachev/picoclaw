@@ -242,7 +242,9 @@ func normalizeFrontendOwnershipConfig(cfg *frontendOwnershipConfig) {
 		}
 	}
 	for i := range cfg.ForbiddenBroadCodeOwnershipPatterns {
-		cfg.ForbiddenBroadCodeOwnershipPatterns[i] = normalizeRepoPathPattern(cfg.ForbiddenBroadCodeOwnershipPatterns[i])
+		cfg.ForbiddenBroadCodeOwnershipPatterns[i] = normalizeRepoPathPattern(
+			cfg.ForbiddenBroadCodeOwnershipPatterns[i],
+		)
 	}
 }
 
@@ -252,24 +254,57 @@ func validateFrontendOwnershipConfig(root string, cfg frontendOwnershipConfig) [
 		failures = append(failures, "docs/features/frontend-ownership.json: no ownership rules configured")
 	}
 	if len(cfg.ForbiddenBroadCodeOwnershipPatterns) == 0 {
-		failures = append(failures, "docs/features/frontend-ownership.json: no forbidden broad frontend ownership patterns configured")
+		failures = append(
+			failures,
+			"docs/features/frontend-ownership.json: no forbidden broad frontend ownership patterns configured",
+		)
 	}
 	for index, rule := range cfg.Rules {
 		if rule.Spec == "" {
-			failures = append(failures, fmt.Sprintf("docs/features/frontend-ownership.json: rule %d has empty spec", index))
+			failures = append(
+				failures,
+				fmt.Sprintf("docs/features/frontend-ownership.json: rule %d has empty spec", index),
+			)
 		} else if !isFeatureSpecPath(rule.Spec) {
-			failures = append(failures, fmt.Sprintf("docs/features/frontend-ownership.json: rule %d spec %q is not a feature spec path", index, rule.Spec))
+			failures = append(
+				failures,
+				fmt.Sprintf(
+					"docs/features/frontend-ownership.json: rule %d spec %q is not a feature spec path",
+					index,
+					rule.Spec,
+				),
+			)
 		} else if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rule.Spec))); err != nil {
-			failures = append(failures, fmt.Sprintf("docs/features/frontend-ownership.json: rule %d spec %q does not exist", index, rule.Spec))
+			failures = append(
+				failures,
+				fmt.Sprintf("docs/features/frontend-ownership.json: rule %d spec %q does not exist", index, rule.Spec),
+			)
 		}
 		if len(rule.Patterns) == 0 {
-			failures = append(failures, fmt.Sprintf("docs/features/frontend-ownership.json: rule %d for %q has no patterns", index, rule.Spec))
+			failures = append(
+				failures,
+				fmt.Sprintf("docs/features/frontend-ownership.json: rule %d for %q has no patterns", index, rule.Spec),
+			)
 		}
 		for _, pattern := range rule.Patterns {
 			if pattern == "" {
-				failures = append(failures, fmt.Sprintf("docs/features/frontend-ownership.json: rule %d for %q has an empty pattern", index, rule.Spec))
+				failures = append(
+					failures,
+					fmt.Sprintf(
+						"docs/features/frontend-ownership.json: rule %d for %q has an empty pattern",
+						index,
+						rule.Spec,
+					),
+				)
 			} else if !strings.HasPrefix(pattern, "web/frontend/src/") {
-				failures = append(failures, fmt.Sprintf("docs/features/frontend-ownership.json: rule %d pattern %q must stay under web/frontend/src/", index, pattern))
+				failures = append(
+					failures,
+					fmt.Sprintf(
+						"docs/features/frontend-ownership.json: rule %d pattern %q must stay under web/frontend/src/",
+						index,
+						pattern,
+					),
+				)
 			}
 		}
 	}
@@ -458,7 +493,12 @@ func discoverConfigFields(add func(kind, id, source string)) {
 	collectConfigType(reflect.TypeOf(config.Config{}), "CONFIG", add, visited)
 }
 
-func collectConfigType(t reflect.Type, prefix string, add func(kind, id, source string), visited map[reflect.Type]bool) {
+func collectConfigType(
+	t reflect.Type,
+	prefix string,
+	add func(kind, id, source string),
+	visited map[reflect.Type]bool,
+) {
 	t = derefType(t)
 	if t.Kind() != reflect.Struct || visited[t] {
 		return
@@ -481,7 +521,12 @@ func collectConfigType(t reflect.Type, prefix string, add func(kind, id, source 
 	}
 }
 
-func collectNestedConfig(t reflect.Type, prefix string, add func(kind, id, source string), visited map[reflect.Type]bool) {
+func collectNestedConfig(
+	t reflect.Type,
+	prefix string,
+	add func(kind, id, source string),
+	visited map[reflect.Type]bool,
+) {
 	t = derefType(t)
 	switch t.Kind() {
 	case reflect.Struct:

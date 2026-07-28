@@ -18,8 +18,10 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-const minCacheSniffPromptTokens = 256
-const toolAdaptationStateFilename = "tool_adaptation_state.json"
+const (
+	minCacheSniffPromptTokens   = 256
+	toolAdaptationStateFilename = "tool_adaptation_state.json"
+)
 
 // ToolAdaptationProfile identifies the model/API pair whose tool behavior is
 // being learned. Provider/model aliases are normalized so UI and runtime calls

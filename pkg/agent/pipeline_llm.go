@@ -761,7 +761,12 @@ func (p *Pipeline) applySuccessfulFallbackCandidate(
 		[]providers.FallbackCandidate{selected},
 		exec.llmModelName,
 	)
-	if provider, err := providerForFallbackCandidate(ts.agent, exec.activeProvider, selected); err == nil && provider != nil {
+	if provider, err := providerForFallbackCandidate(
+		ts.agent,
+		exec.activeProvider,
+		selected,
+	); err == nil &&
+		provider != nil {
 		exec.activeProvider = provider
 	}
 

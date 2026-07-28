@@ -60,7 +60,11 @@ func main() {
 	head := flag.String("head", "HEAD", "head git ref to compare")
 	tags := flag.String("tags", "goolm,stdjson", "Go build tags for coverage runs")
 	packages := flag.String("packages", "", "optional space-separated Go package patterns to force as test packages")
-	integration := flag.Bool("integration", true, "include Docker-backed integration coverage when impacted features own integration suites")
+	integration := flag.Bool(
+		"integration",
+		true,
+		"include Docker-backed integration coverage when impacted features own integration suites",
+	)
 	flag.Parse()
 
 	root, err := repoRoot()
@@ -115,7 +119,11 @@ func runCoverageDelta(root, base, head, tags string, forcedPackages []string, in
 	return nil
 }
 
-func buildCoveragePlan(root, base, head string, specs []featureSpecMetadata, forcedPackages []string) (coveragePlan, error) {
+func buildCoveragePlan(
+	root, base, head string,
+	specs []featureSpecMetadata,
+	forcedPackages []string,
+) (coveragePlan, error) {
 	changed, err := changedFiles(root, base, head)
 	if err != nil {
 		return coveragePlan{}, err
@@ -258,7 +266,8 @@ func evidenceTestPackageDirs(root string, spec featureSpecMetadata) []string {
 	evidence := markdownSection(spec.Text, "## Acceptance Evidence")
 	for _, match := range re.FindAllStringSubmatch(evidence, -1) {
 		target := strings.TrimSpace(match[1])
-		if target == "" || strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") || strings.HasPrefix(target, "#") {
+		if target == "" || strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") ||
+			strings.HasPrefix(target, "#") {
 			continue
 		}
 		if hash := strings.IndexByte(target, '#'); hash >= 0 {
@@ -360,7 +369,11 @@ func allGoFiles(root string) []string {
 	return files
 }
 
-func coverageForRef(root, tmpDir, label, ref, tags string, plan coveragePlan, includeIntegration bool) (coverageProfile, error) {
+func coverageForRef(
+	root, tmpDir, label, ref, tags string,
+	plan coveragePlan,
+	includeIntegration bool,
+) (coverageProfile, error) {
 	sha, err := resolveGitRef(root, ref)
 	if err != nil {
 		return coverageProfile{}, err
@@ -397,7 +410,14 @@ func coverageForRef(root, tmpDir, label, ref, tags string, plan coveragePlan, in
 	}
 
 	if includeIntegration && len(plan.IntegrationSuites) > 0 && len(coverImports) > 0 {
-		integrationProfile, err := runIntegrationCoverage(worktree, label, ref, tags, coverImports, plan.IntegrationSuites)
+		integrationProfile, err := runIntegrationCoverage(
+			worktree,
+			label,
+			ref,
+			tags,
+			coverImports,
+			plan.IntegrationSuites,
+		)
 		if err != nil {
 			return coverageProfile{}, err
 		}
@@ -407,7 +427,10 @@ func coverageForRef(root, tmpDir, label, ref, tags string, plan coveragePlan, in
 	return profile, nil
 }
 
-func runGoCoverage(worktree, label, ref, tags, profilePath string, coverImports, testImports []string) (coverageProfile, error) {
+func runGoCoverage(
+	worktree, label, ref, tags, profilePath string,
+	coverImports, testImports []string,
+) (coverageProfile, error) {
 	args := []string{"test", "-buildvcs=false"}
 	if tags != "" {
 		args = append(args, "-tags", tags)
@@ -455,7 +478,13 @@ func runIntegrationCoverage(worktree, label, ref, tags string, coverImports, sui
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return coverageProfile{}, fmt.Errorf("integration coverage for %s (%s): %w\n%s", label, ref, err, trimCommandOutput(out))
+		return coverageProfile{}, fmt.Errorf(
+			"integration coverage for %s (%s): %w\n%s",
+			label,
+			ref,
+			err,
+			trimCommandOutput(out),
+		)
 	}
 
 	modulePath, err := modulePath(worktree)
@@ -735,7 +764,11 @@ func summarizeCoverageBlocks(profile coverageProfile) coverageProfile {
 	return profile
 }
 
-func compareCoverage(specs []featureSpecMetadata, plan coveragePlan, baseProfile, headProfile coverageProfile) []string {
+func compareCoverage(
+	specs []featureSpecMetadata,
+	plan coveragePlan,
+	baseProfile, headProfile coverageProfile,
+) []string {
 	var failures []string
 	if summaryRegressed(baseProfile.Global, headProfile.Global) {
 		failures = append(failures, fmt.Sprintf(

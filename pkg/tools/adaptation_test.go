@@ -85,7 +85,11 @@ func TestResolveToolAdaptationUsesPositiveSniffedCacheEvidence(t *testing.T) {
 		t.Fatalf("CacheEvidence = %q, want sniffed", decision.CacheEvidence)
 	}
 	if decision.RuntimeDowngrade || decision.RuntimePromotion {
-		t.Fatalf("runtime auto = downgrade:%v promotion:%v, want both false", decision.RuntimeDowngrade, decision.RuntimePromotion)
+		t.Fatalf(
+			"runtime auto = downgrade:%v promotion:%v, want both false",
+			decision.RuntimeDowngrade,
+			decision.RuntimePromotion,
+		)
 	}
 }
 
