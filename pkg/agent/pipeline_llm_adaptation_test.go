@@ -160,6 +160,74 @@ func TestApplySuccessfulFallbackCandidateUpdatesAdaptationProfile(t *testing.T) 
 	}
 }
 
+func TestApplySuccessfulFallbackCandidateUsesFallbackResultWhenCandidateMissing(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Provider = "openai"
+	agent := &AgentInstance{
+		Workspace: t.TempDir(),
+		Provider:  &simpleConvProvider{},
+	}
+	exec := &turnExecution{
+		activeCandidates: []providers.FallbackCandidate{{
+			Provider:    "openai",
+			Model:       "gpt-5",
+			DisplayName: "primary",
+		}},
+		activeModel:       "gpt-5",
+		activeModelConfig: &config.ModelConfig{Provider: "openai", Model: "gpt-5"},
+		activeProvider:    &simpleConvProvider{},
+		llmModel:          "gpt-5",
+		llmModelName:      "primary",
+	}
+	pipeline := &Pipeline{Cfg: cfg}
+
+	pipeline.applySuccessfulFallbackCandidate(
+		&turnState{agent: agent},
+		exec,
+		&providers.FallbackResult{
+			Provider:    "anthropic",
+			Model:       "claude-sonnet",
+			IdentityKey: "provider:anthropic:model:claude-sonnet",
+		},
+	)
+
+	if exec.activeModel != "claude-sonnet" || exec.llmModel != "claude-sonnet" {
+		t.Fatalf("active model = %q/%q, want fallback model", exec.activeModel, exec.llmModel)
+	}
+	if len(exec.activeCandidates) != 1 {
+		t.Fatalf("len(activeCandidates) = %d, want 1", len(exec.activeCandidates))
+	}
+	selected := exec.activeCandidates[0]
+	if selected.Provider != "anthropic" || selected.Model != "claude-sonnet" {
+		t.Fatalf("selected candidate = %#v, want fallback result candidate", selected)
+	}
+	if exec.activeProvider == nil {
+		t.Fatal("activeProvider = nil, want existing provider fallback")
+	}
+}
+
+func TestApplySuccessfulFallbackCandidateIgnoresEmptyResultModel(t *testing.T) {
+	exec := &turnExecution{
+		activeCandidates: []providers.FallbackCandidate{{
+			Provider: "openai",
+			Model:    "gpt-5",
+		}},
+		activeModel: "gpt-5",
+		llmModel:    "gpt-5",
+	}
+	pipeline := &Pipeline{Cfg: config.DefaultConfig()}
+
+	pipeline.applySuccessfulFallbackCandidate(
+		&turnState{agent: &AgentInstance{Workspace: t.TempDir()}},
+		exec,
+		&providers.FallbackResult{IdentityKey: "missing"},
+	)
+
+	if exec.activeModel != "gpt-5" || exec.llmModel != "gpt-5" {
+		t.Fatalf("active model changed to %q/%q, want unchanged", exec.activeModel, exec.llmModel)
+	}
+}
+
 func toolDefsForAdaptationTest(names ...string) []providers.ToolDefinition {
 	defs := make([]providers.ToolDefinition, 0, len(names))
 	for _, name := range names {
