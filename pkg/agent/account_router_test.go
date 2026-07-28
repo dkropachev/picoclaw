@@ -198,12 +198,12 @@ func TestBuildAccountRouterUsesCredentialAccountRefs(t *testing.T) {
 	}
 }
 
-func TestBuildAccountRouterDoesNotCreateCredentialAccountCandidatesWithoutSharedModel(t *testing.T) {
+func TestBuildAccountRouterCreatesCredentialAccountCandidatesWithUnlistedSharedModel(t *testing.T) {
 	cfg := &config.Config{
 		AccountRouters: []config.AccountRouterConfig{
 			{
 				Name:    "joint-account",
-				Model:   "joint-account",
+				Model:   "missing-model",
 				Enabled: true,
 				Entry:   "primary",
 				Blocks: []config.AccountRouterBlock{{
@@ -226,8 +226,15 @@ func TestBuildAccountRouterDoesNotCreateCredentialAccountCandidatesWithoutShared
 	}
 
 	selection := router.Select("session-1", accountrouter.SelectReasonInitial)
-	if len(selection.Candidates) != 0 {
-		t.Fatalf("len(candidates) = %d, want 0", len(selection.Candidates))
+	if len(selection.Candidates) != 1 {
+		t.Fatalf("len(candidates) = %d, want 1", len(selection.Candidates))
+	}
+	candidate := selection.Candidates[0]
+	if candidate.Model != "missing-model" {
+		t.Fatalf("candidate model = %q, want missing-model", candidate.Model)
+	}
+	if candidate.IdentityKey != "model_name:credential:openai:work" {
+		t.Fatalf("candidate identity = %q, want credential account identity", candidate.IdentityKey)
 	}
 }
 

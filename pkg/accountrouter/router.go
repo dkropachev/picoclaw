@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -291,8 +292,139 @@ func (r *Router) expandBlock(
 		selection.BlockAccountChoices[blockID] = account
 		candidates = append(candidates, r.tagCandidates(accountCandidates, account, selection)...)
 		candidates = append(candidates, fallbackCandidates...)
+	case config.AccountRouterBlockTypeBranch:
+		next := block.Else
+		if r.evaluateCondition(rs, block.Condition) {
+			next = block.Then
+		}
+		candidates = append(
+			candidates,
+			r.expandBlock(rs, session, next, sessionKey, reason, seen, selection)...,
+		)
+		candidates = append(
+			candidates,
+			r.expandBlock(rs, session, block.Fallback, sessionKey, reason, seen, selection)...,
+		)
 	}
 	return candidates
+}
+
+func (r *Router) evaluateCondition(rs *RouterState, condition *config.AccountRouterCondition) bool {
+	if condition == nil {
+		return false
+	}
+	left, ok := r.evaluateExpression(rs, condition.Left)
+	if !ok {
+		return false
+	}
+	right, ok := r.evaluateExpression(rs, condition.Right)
+	if !ok {
+		return false
+	}
+	switch strings.TrimSpace(condition.Operator) {
+	case config.AccountRouterBranchOpGT:
+		return left > right
+	case config.AccountRouterBranchOpGTE:
+		return left >= right
+	case config.AccountRouterBranchOpLT:
+		return left < right
+	case config.AccountRouterBranchOpLTE:
+		return left <= right
+	case config.AccountRouterBranchOpEQ:
+		return math.Abs(left-right) < 1e-9
+	case config.AccountRouterBranchOpNEQ:
+		return math.Abs(left-right) >= 1e-9
+	default:
+		return false
+	}
+}
+
+func (r *Router) evaluateExpression(rs *RouterState, expr config.AccountRouterExpression) (float64, bool) {
+	switch strings.TrimSpace(expr.Op) {
+	case config.AccountRouterMathAdd, config.AccountRouterMathSubtract, config.AccountRouterMathMultiply,
+		config.AccountRouterMathDivide, config.AccountRouterMathModulo:
+		if expr.Left == nil || expr.Right == nil {
+			return 0, false
+		}
+		left, ok := r.evaluateExpression(rs, *expr.Left)
+		if !ok {
+			return 0, false
+		}
+		right, ok := r.evaluateExpression(rs, *expr.Right)
+		if !ok {
+			return 0, false
+		}
+		switch strings.TrimSpace(expr.Op) {
+		case config.AccountRouterMathAdd:
+			return left + right, true
+		case config.AccountRouterMathSubtract:
+			return left - right, true
+		case config.AccountRouterMathMultiply:
+			return left * right, true
+		case config.AccountRouterMathDivide:
+			if right == 0 {
+				return 0, false
+			}
+			return left / right, true
+		case config.AccountRouterMathModulo:
+			if right == 0 {
+				return 0, false
+			}
+			return math.Mod(left, right), true
+		}
+	case "":
+		if expr.Value != nil {
+			return *expr.Value, true
+		}
+		return r.accountMetric(rs, expr.Account, expr.Metric)
+	}
+	return 0, false
+}
+
+func (r *Router) accountMetric(rs *RouterState, account string, metric string) (float64, bool) {
+	account = strings.TrimSpace(account)
+	metric = strings.TrimSpace(metric)
+	if account == "" || metric == "" {
+		return 0, false
+	}
+	meta, ok := r.Accounts[account]
+	if !ok {
+		return 0, false
+	}
+	state := rs.Accounts[account]
+	switch metric {
+	case "rpm":
+		return float64(meta.RPM), true
+	case "requests":
+		if state == nil {
+			return 0, true
+		}
+		return float64(state.Requests), true
+	case "rate_window_reqs":
+		if state == nil {
+			return 0, true
+		}
+		if state.RateWindowStart.IsZero() || r.now().Sub(state.RateWindowStart) >= time.Minute {
+			return 0, true
+		}
+		return float64(state.RateWindowReqs), true
+	case "prompt_tokens":
+		if state == nil {
+			return 0, true
+		}
+		return float64(state.PromptTokens), true
+	case "completion_tokens":
+		if state == nil {
+			return 0, true
+		}
+		return float64(state.CompletionTokens), true
+	case "total_tokens", "tokens_spent":
+		return float64(accountTokens(rs, account)), true
+	case "limit_pressure":
+		return r.accountLimitPressure(rs, account, r.now()), true
+	default:
+		return 0, false
+	}
 }
 
 func (r *Router) selectLoadBalancedAccount(

@@ -2986,6 +2986,7 @@ func TestHandleAddModel_RejectsRouterUnknownAccountAsBadRequest(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name": "router-main",
+		"model": "gpt-4o",
 		"provider": "router",
 		"router": {
 			"enabled": true,
@@ -3013,6 +3014,49 @@ func TestHandleAddModel_RejectsRouterUnknownAccountAsBadRequest(t *testing.T) {
 	}
 }
 
+func TestHandleAddModelRejectsAccountRouterSelfModel(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.ModelList = []*config.ModelConfig{
+		{ModelName: "account-a", Provider: "openai", Model: "gpt-4o"},
+	}
+	if err = config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	addBody := `{
+		"model_name": "router-main",
+		"model": "router-main",
+		"provider": "router",
+		"router": {
+			"enabled": true,
+			"entry": "entry",
+			"blocks": [
+				{"id": "entry", "type": "account", "account": "account-a"}
+			]
+		}
+	}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(addBody))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("add status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not the router itself") {
+		t.Fatalf("body = %q, want self-reference rejection", rec.Body.String())
+	}
+}
+
 func TestHandleAddModel_AcceptsGitHubCopilotCredentialAccountRouterRef(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()
@@ -3032,7 +3076,7 @@ func TestHandleAddModel_AcceptsGitHubCopilotCredentialAccountRouterRef(t *testin
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(`{
 		"model_name": "copilot-router",
-		"model": "copilot-router",
+		"model": "gpt-4o",
 		"provider": "router",
 		"router": {
 			"enabled": true,
@@ -3063,8 +3107,8 @@ func TestHandleAddModel_AcceptsGitHubCopilotCredentialAccountRouterRef(t *testin
 	if got := router.Router.Blocks[0].Account; got != "credential:github-copilot:gh-copilot" {
 		t.Fatalf("router account = %q, want credential:github-copilot:gh-copilot", got)
 	}
-	if got := router.Model; got != "copilot-router" {
-		t.Fatalf("router model = %q, want copilot-router", got)
+	if got := router.Model; got != "gpt-4o" {
+		t.Fatalf("router model = %q, want gpt-4o", got)
 	}
 }
 
@@ -3095,7 +3139,7 @@ func TestHandleAddModel_AcceptsGitHubCopilotCredentialLoadBalanceRouterRefs(t *t
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(fmt.Sprintf(`{
 				"model_name": "copilot-router",
-				"model": "copilot-router",
+				"model": "gpt-4o",
 				"provider": "router",
 				"router": {
 					"enabled": true,
@@ -3135,8 +3179,8 @@ func TestHandleAddModel_AcceptsGitHubCopilotCredentialLoadBalanceRouterRefs(t *t
 			if fmt.Sprint(block.Accounts) != fmt.Sprint(wantAccounts) {
 				t.Fatalf("router accounts = %v, want %v", block.Accounts, wantAccounts)
 			}
-			if got := router.Model; got != "copilot-router" {
-				t.Fatalf("router model = %q, want copilot-router", got)
+			if got := router.Model; got != "gpt-4o" {
+				t.Fatalf("router model = %q, want gpt-4o", got)
 			}
 		})
 	}

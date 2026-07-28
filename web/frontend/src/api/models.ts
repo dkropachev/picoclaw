@@ -49,12 +49,30 @@ export interface AccountRouterConfig {
 
 export interface AccountRouterBlock {
   id: string
-  type: "account" | "load_balance"
+  type: "account" | "load_balance" | "branch"
   account?: string
   accounts?: string[]
   fallback?: string
   strategy?: "blind" | "tokens_spent" | "closest_limit"
   refresh_interval_seconds?: number
+  condition?: AccountRouterCondition
+  then?: string
+  else?: string
+}
+
+export interface AccountRouterCondition {
+  left: AccountRouterExpression
+  operator: "gt" | "gte" | "lt" | "lte" | "eq" | "neq"
+  right: AccountRouterExpression
+}
+
+export interface AccountRouterExpression {
+  account?: string
+  metric?: string
+  value?: number
+  op?: "add" | "subtract" | "multiply" | "divide" | "modulo"
+  left?: AccountRouterExpression
+  right?: AccountRouterExpression
 }
 
 export interface ModelRouterConfig {

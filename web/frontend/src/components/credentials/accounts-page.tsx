@@ -638,13 +638,14 @@ function AccountRouterCard({
           )}
 
           <Button
-            variant="ghost"
-            size="icon-sm"
+            variant="outline"
+            size="sm"
             onClick={() => onEdit(model)}
             aria-label={t("models.router.actionEdit")}
             title={t("models.router.actionEdit")}
           >
-            <IconEdit className="size-3.5" />
+            <IconEdit className="size-4" />
+            {t("models.router.actionDecisionGraph")}
           </Button>
 
           <Tooltip delayDuration={deleteDisabled ? 0 : 700}>
@@ -787,7 +788,7 @@ function AccountsHomePage() {
     return a.model_name.localeCompare(b.model_name)
   })
 
-  const hasAccountCards = registeredAccounts.length > 0 || routers.length > 0
+  const hasAccountCards = registeredAccounts.length > 0
 
   const handleAddRouter = () => {
     void navigate({ to: "/accounts/account-router/new" })
@@ -847,7 +848,7 @@ function AccountsHomePage() {
               <IconLoader2 className="size-4 animate-spin" />
               {t("accounts.loading")}
             </div>
-          ) : hasAccountCards || modelsLoading || modelsError ? (
+          ) : hasAccountCards ? (
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
               {registeredAccounts.map((account) => (
                 <AccountCard
@@ -862,46 +863,6 @@ function AccountsHomePage() {
                   onAskLogout={askLogout}
                 />
               ))}
-
-              {modelsLoading && (
-                <article className="bg-card text-muted-foreground flex min-h-32 items-center gap-2 rounded-lg border p-4 text-sm">
-                  <IconLoader2 className="size-4 animate-spin" />
-                  {t("models.router.loading")}
-                </article>
-              )}
-
-              {modelsError && (
-                <article className="bg-destructive/10 rounded-lg border p-4 text-sm xl:col-span-2">
-                  <p className="text-destructive">{modelsError}</p>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="mt-3"
-                    onClick={() => void fetchModels()}
-                  >
-                    {t("models.retry")}
-                  </Button>
-                </article>
-              )}
-
-              {!modelsLoading &&
-                !modelsError &&
-                routers.map((router) => (
-                  <AccountRouterCard
-                    key={router.index}
-                    model={router}
-                    accountIndex={registeredAccountsByKey}
-                    onEdit={(item) => {
-                      void navigate({
-                        to: "/accounts/account-router/$index",
-                        params: { index: String(item.index) },
-                      })
-                    }}
-                    onSetDefault={(item) => void handleSetDefault(item)}
-                    onDelete={setDeletingModel}
-                    settingDefault={settingDefaultIndex === router.index}
-                  />
-                ))}
             </div>
           ) : (
             <div className="flex min-h-64 items-center justify-center">
@@ -924,6 +885,77 @@ function AccountsHomePage() {
                   {t("accounts.actions.add")}
                 </Button>
               </div>
+            </div>
+          )}
+        </section>
+
+        <section className="border-border/70 border-t py-5">
+          <div className="mb-4 flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <h2 className="text-sm font-semibold">
+                {t("models.router.sectionTitle")}
+              </h2>
+              <p className="text-muted-foreground mt-1 text-sm">
+                {t("models.router.sectionDescription")}
+              </p>
+            </div>
+            <Button size="sm" variant="outline" onClick={handleAddRouter}>
+              <IconRoute className="size-4" />
+              {t("models.router.button")}
+            </Button>
+          </div>
+
+          {modelsLoading ? (
+            <div className="text-muted-foreground flex items-center gap-2 py-8 text-sm">
+              <IconLoader2 className="size-4 animate-spin" />
+              {t("models.router.loading")}
+            </div>
+          ) : modelsError ? (
+            <div className="bg-destructive/10 rounded-lg border p-4 text-sm">
+              <p className="text-destructive">{modelsError}</p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-3"
+                onClick={() => void fetchModels()}
+              >
+                {t("models.retry")}
+              </Button>
+            </div>
+          ) : routers.length > 0 ? (
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+              {routers.map((router) => (
+                <AccountRouterCard
+                  key={router.index}
+                  model={router}
+                  accountIndex={registeredAccountsByKey}
+                  onEdit={(item) => {
+                    void navigate({
+                      to: "/accounts/account-router/$index",
+                      params: { index: String(item.index) },
+                    })
+                  }}
+                  onSetDefault={(item) => void handleSetDefault(item)}
+                  onDelete={setDeletingModel}
+                  settingDefault={settingDefaultIndex === router.index}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="border-border/70 bg-card rounded-lg border p-6 text-sm">
+              <p className="font-medium">{t("models.router.emptyTitle")}</p>
+              <p className="text-muted-foreground mt-1">
+                {t("models.router.emptyDescription")}
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-4"
+                onClick={handleAddRouter}
+              >
+                <IconRoute className="size-4" />
+                {t("models.router.button")}
+              </Button>
             </div>
           )}
         </section>

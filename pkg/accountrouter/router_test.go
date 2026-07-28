@@ -229,6 +229,91 @@ func TestClosestLimitUsesCurrentMinuteWindow(t *testing.T) {
 	}
 }
 
+func TestBranchBlockSelectsByAccountLimitMath(t *testing.T) {
+	tests := []struct {
+		name      string
+		operator  string
+		right     float64
+		want      string
+		leftValue config.AccountRouterExpression
+	}{
+		{
+			name:     "greater than",
+			operator: config.AccountRouterBranchOpGT,
+			right:    50,
+			want:     "account-a",
+		},
+		{
+			name:     "less than",
+			operator: config.AccountRouterBranchOpLT,
+			right:    50,
+			want:     "account-b",
+		},
+		{
+			name:     "equal",
+			operator: config.AccountRouterBranchOpEQ,
+			right:    60,
+			want:     "account-a",
+		},
+		{
+			name:     "math add",
+			operator: config.AccountRouterBranchOpGT,
+			right:    65,
+			want:     "account-a",
+			leftValue: config.AccountRouterExpression{
+				Op: config.AccountRouterMathAdd,
+				Left: &config.AccountRouterExpression{
+					Account: "account-a",
+					Metric:  "rpm",
+				},
+				Right: &config.AccountRouterExpression{Value: float64Ptr(10)},
+			},
+		},
+	}
+
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			left := tt.leftValue
+			if left == (config.AccountRouterExpression{}) {
+				left = config.AccountRouterExpression{Account: "account-a", Metric: "rpm"}
+			}
+			router := newTestRouter(t, &config.AccountRouterConfig{
+				Enabled: true,
+				Entry:   "limit-branch",
+				Blocks: []config.AccountRouterBlock{
+					{
+						ID:   "limit-branch",
+						Type: config.AccountRouterBlockTypeBranch,
+						Condition: &config.AccountRouterCondition{
+							Left:     left,
+							Operator: tt.operator,
+							Right:    config.AccountRouterExpression{Value: float64Ptr(tt.right)},
+						},
+						Then: "more-limit",
+						Else: "less-limit",
+					},
+					{
+						ID:      "more-limit",
+						Type:    config.AccountRouterBlockTypeAccount,
+						Account: "account-a",
+					},
+					{
+						ID:      "less-limit",
+						Type:    config.AccountRouterBlockTypeAccount,
+						Account: "account-b",
+					},
+				},
+			}, now)
+
+			selection := router.Select("session-1", SelectReasonInitial)
+			if got := selectedAccount(t, selection); got != tt.want {
+				t.Fatalf("selected account = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBlindNonSessionChoiceRotatesByInterval(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	router := newTestRouter(t, &config.AccountRouterConfig{
@@ -420,4 +505,8 @@ func successResult(selection Selection, totalTokens int) *providers.FallbackResu
 		Model:       candidate.Model,
 		IdentityKey: candidate.StableKey(),
 	}
+}
+
+func float64Ptr(value float64) *float64 {
+	return &value
 }

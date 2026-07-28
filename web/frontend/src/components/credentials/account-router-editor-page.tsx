@@ -5,6 +5,7 @@ import {
   IconBraces,
   IconCheck,
   IconGitBranch,
+  IconGitCompare,
   IconHandMove,
   IconLayoutList,
   IconLoader2,
@@ -30,6 +31,7 @@ import { useTranslation } from "react-i18next"
 import {
   type AccountRouterBlock,
   type AccountRouterConfig,
+  type AccountRouterExpression,
   type ModelInfo,
   type ModelProviderOption,
   addModel,
@@ -43,6 +45,13 @@ import { PageHeader } from "@/components/page-header"
 import { Field } from "@/components/shared-form"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import {
   Select,
@@ -64,11 +73,19 @@ import {
 } from "../models/provider-registry"
 
 type EditorMode = "visual" | "json"
-type BlockType = "account" | "load_balance"
+type BlockType = "account" | "load_balance" | "branch"
 type RouterStrategy = "blind" | "tokens_spent" | "closest_limit"
+type BranchOperator = "gt" | "gte" | "lt" | "lte" | "eq" | "neq"
+type MathOperator = "add" | "subtract" | "multiply" | "divide" | "modulo"
+type BranchConditionSuggestionGroup =
+  | "examples"
+  | "metrics"
+  | "comparisons"
+  | "math"
 
 interface RouterAccount {
   id: string
+  conditionRef: string
   label: string
   detail: string
   provider: OAuthProviderStatus["provider"]
@@ -111,6 +128,7 @@ type CanvasDragState =
     }
 
 const CREDENTIAL_ACCOUNT_PREFIX = "credential:"
+const CONDITION_ACCOUNT_PREFIX = "accounts:"
 const DIAGRAM_NODE_WIDTH = 280
 const DIAGRAM_NODE_HEIGHT = 120
 const DIAGRAM_LANE_GAP = 160
@@ -118,6 +136,31 @@ const DIAGRAM_ROW_GAP = 72
 const DIAGRAM_VIEWBOX_WIDTH = 1120
 const DIAGRAM_VIEWBOX_HEIGHT = 620
 const SCALE_OPTIONS = [50, 75, 100, 125, 150, 200]
+const BRANCH_METRICS = [
+  "rpm",
+  "requests",
+  "rate_window_reqs",
+  "prompt_tokens",
+  "completion_tokens",
+  "total_tokens",
+  "tokens_spent",
+  "limit_pressure",
+]
+const BRANCH_OPERATORS: BranchOperator[] = [
+  "gt",
+  "gte",
+  "lt",
+  "lte",
+  "eq",
+  "neq",
+]
+const MATH_OPERATORS: MathOperator[] = [
+  "add",
+  "subtract",
+  "multiply",
+  "divide",
+  "modulo",
+]
 const EMPTY_ROUTER: AccountRouterConfig = {
   enabled: true,
   entry: "",
@@ -178,6 +221,21 @@ function accountRefForCredential(credentialID: string): string {
   return `${CREDENTIAL_ACCOUNT_PREFIX}${credentialID}`
 }
 
+function conditionAccountName(status: OAuthProviderStatus): string {
+  if (status.account_id) return status.account_id
+  const credentialID = credentialDisplayID(status)
+  const providerPrefix = `${status.provider}:`
+  if (credentialID.startsWith(providerPrefix)) {
+    return credentialID.slice(providerPrefix.length)
+  }
+  if (credentialID === status.provider) return "default"
+  return credentialID
+}
+
+function accountConditionRef(status: OAuthProviderStatus): string {
+  return `${CONDITION_ACCOUNT_PREFIX}${status.provider}:${conditionAccountName(status)}`
+}
+
 function defaultCredentialAuthMethod(
   provider: OAuthProviderStatus["provider"],
 ): string {
@@ -232,6 +290,7 @@ function flattenCredentialAccounts(
       seen.add(id)
       accounts.push({
         id,
+        conditionRef: accountConditionRef(credential),
         label: credentialLabel(credential),
         detail: credentialDetail(credential),
         provider: credential.provider,
@@ -265,9 +324,25 @@ function routerAccountNames(config: AccountRouterConfig | null): string[] {
       add(block.account)
     } else if (block.type === "load_balance") {
       for (const account of block.accounts ?? []) add(account)
+    } else if (block.type === "branch") {
+      for (const account of expressionAccounts(block.condition?.left)) {
+        add(account)
+      }
+      for (const account of expressionAccounts(block.condition?.right)) {
+        add(account)
+      }
     }
   }
   return names
+}
+
+function expressionAccounts(expr?: AccountRouterExpression): string[] {
+  if (!expr) return []
+  return [
+    expr.account,
+    ...expressionAccounts(expr.left),
+    ...expressionAccounts(expr.right),
+  ].filter((value): value is string => Boolean(value?.trim()))
 }
 
 function normalizeModelID(modelID: string): string {
@@ -317,7 +392,12 @@ async function fetchAccountModels(
 }
 
 function nextBlockID(blocks: AccountRouterBlock[], type: BlockType): string {
-  const prefix = type === "load_balance" ? "load-balancer" : "account"
+  const prefix =
+    type === "load_balance"
+      ? "load-balancer"
+      : type === "branch"
+        ? "branch"
+        : "account"
   const seen = new Set(blocks.map((block) => block.id))
   for (let i = 1; i < 1000; i++) {
     const id = `${prefix}-${i}`
@@ -329,6 +409,7 @@ function nextBlockID(blocks: AccountRouterBlock[], type: BlockType): string {
 function newBlock(
   type: BlockType,
   blocks: AccountRouterBlock[],
+  defaultAccount = "",
 ): AccountRouterBlock {
   const id = nextBlockID(blocks, type)
   if (type === "load_balance") {
@@ -337,6 +418,19 @@ function newBlock(
       type: "load_balance",
       accounts: [],
       strategy: "blind",
+    }
+  }
+  if (type === "branch") {
+    return {
+      id,
+      type: "branch",
+      condition: {
+        left: { account: defaultAccount, metric: "rpm" },
+        operator: "gt",
+        right: { value: 0 },
+      },
+      then: "",
+      else: "",
     }
   }
   return {
@@ -429,7 +523,9 @@ function trimDiagramText(value: string, max = 26): string {
 }
 
 function blockTitle(block: AccountRouterBlock): string {
-  return block.type === "load_balance" ? "Load Balancer" : "Account"
+  if (block.type === "load_balance") return "Load Balancer"
+  if (block.type === "branch") return "Branch"
+  return "Account"
 }
 
 function blockAccountSummary(
@@ -439,11 +535,195 @@ function blockAccountSummary(
   if (block.type === "account") {
     return accountsByID.get(block.account ?? "")?.label ?? block.account ?? ""
   }
+  if (block.type === "branch") {
+    const condition = block.condition
+    if (!condition) return ""
+    return `${formatExpression(condition.left, accountsByID)} ${condition.operator} ${formatExpression(condition.right, accountsByID)}`
+  }
   const accounts = block.accounts ?? []
   if (accounts.length === 0) return ""
   return accounts
     .map((account) => accountsByID.get(account)?.label ?? account)
     .join(", ")
+}
+
+function formatExpression(
+  expr: AccountRouterExpression | undefined,
+  accountsByID: Map<string, RouterAccount>,
+): string {
+  if (!expr) return ""
+  if (typeof expr.value === "number") return String(expr.value)
+  if (expr.op && expr.left && expr.right) {
+    return `${formatExpression(expr.left, accountsByID)} ${expr.op} ${formatExpression(expr.right, accountsByID)}`
+  }
+  const account =
+    accountsByID.get(expr.account ?? "")?.label ?? expr.account ?? ""
+  return [account, expr.metric].filter(Boolean).join(".")
+}
+
+function formatExpressionText(
+  expr: AccountRouterExpression | undefined,
+  accountsByID?: Map<string, RouterAccount>,
+): string {
+  if (!expr) return ""
+  if (typeof expr.value === "number") return String(expr.value)
+  if (expr.op && expr.left && expr.right) {
+    return `${expr.op}(${formatExpressionText(expr.left, accountsByID)}, ${formatExpressionText(expr.right, accountsByID)})`
+  }
+  const account =
+    accountsByID?.get(expr.account ?? "")?.conditionRef ?? expr.account
+  return [account, expr.metric].filter(Boolean).join(".")
+}
+
+function formatConditionText(
+  condition: NonNullable<AccountRouterBlock["condition"]>,
+  accountsByID?: Map<string, RouterAccount>,
+): string {
+  return `${formatExpressionText(condition.left, accountsByID)} ${operatorSymbol(condition.operator)} ${formatExpressionText(condition.right, accountsByID)}`
+}
+
+function operatorSymbol(operator: BranchOperator): string {
+  switch (operator) {
+    case "gt":
+      return ">"
+    case "gte":
+      return ">="
+    case "lt":
+      return "<"
+    case "lte":
+      return "<="
+    case "eq":
+      return "=="
+    case "neq":
+      return "!="
+  }
+}
+
+function parseBranchOperator(raw: string): BranchOperator | null {
+  switch (raw.trim().toLowerCase()) {
+    case ">":
+    case "gt":
+      return "gt"
+    case ">=":
+    case "gte":
+      return "gte"
+    case "<":
+    case "lt":
+      return "lt"
+    case "<=":
+    case "lte":
+      return "lte"
+    case "==":
+    case "=":
+    case "eq":
+      return "eq"
+    case "!=":
+    case "<>":
+    case "neq":
+      return "neq"
+    default:
+      return null
+  }
+}
+
+function parseConditionText(
+  raw: string,
+  accounts: RouterAccount[] = [],
+): NonNullable<AccountRouterBlock["condition"]> | null {
+  const match = raw
+    .trim()
+    .match(
+      /^(.+?)\s*(>=|<=|==|!=|<>|=|>|<|\b(?:gte|lte|gt|lt|eq|neq)\b)\s*(.+)$/i,
+    )
+  if (!match) return null
+  const operator = parseBranchOperator(match[2])
+  const left = parseExpressionText(match[1], accounts)
+  const right = parseExpressionText(match[3], accounts)
+  if (!operator || !left || !right) return null
+  return { left, operator, right }
+}
+
+function parseExpressionText(
+  raw: string,
+  accounts: RouterAccount[] = [],
+): AccountRouterExpression | null {
+  const text = trimOuterParens(raw.trim())
+  if (!text) return null
+  const value = Number(text)
+  if (
+    Number.isFinite(value) &&
+    /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(text)
+  ) {
+    return { value }
+  }
+
+  const functionMatch = text.match(/^([a-z_]+)\((.*)\)$/i)
+  if (functionMatch) {
+    const op = functionMatch[1].toLowerCase() as MathOperator
+    if (!MATH_OPERATORS.includes(op)) return null
+    const args = splitFunctionArgs(functionMatch[2])
+    if (args.length !== 2) return null
+    const left = parseExpressionText(args[0], accounts)
+    const right = parseExpressionText(args[1], accounts)
+    if (!left || !right) return null
+    return { op, left, right }
+  }
+
+  const dotIndex = text.lastIndexOf(".")
+  if (dotIndex <= 0 || dotIndex === text.length - 1) return null
+  const account = text.slice(0, dotIndex).trim()
+  const metric = text.slice(dotIndex + 1).trim()
+  if (!account || !BRANCH_METRICS.includes(metric)) return null
+  const resolvedAccount = resolveConditionAccountRef(account, accounts)
+  if (!resolvedAccount) return null
+  return { account: resolvedAccount, metric }
+}
+
+function resolveConditionAccountRef(
+  accountRef: string,
+  accounts: RouterAccount[],
+): string {
+  if (!accountRef.startsWith(CONDITION_ACCOUNT_PREFIX)) return accountRef
+  return (
+    accounts.find((account) => account.conditionRef === accountRef)?.id ?? ""
+  )
+}
+
+function trimOuterParens(value: string): string {
+  let text = value
+  while (text.startsWith("(") && text.endsWith(")")) {
+    let depth = 0
+    let wraps = true
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i]
+      if (char === "(") depth++
+      if (char === ")") depth--
+      if (depth === 0 && i < text.length - 1) {
+        wraps = false
+        break
+      }
+    }
+    if (!wraps) break
+    text = text.slice(1, -1).trim()
+  }
+  return text
+}
+
+function splitFunctionArgs(raw: string): string[] {
+  const args: string[] = []
+  let depth = 0
+  let start = 0
+  for (let i = 0; i < raw.length; i++) {
+    const char = raw[i]
+    if (char === "(") depth++
+    if (char === ")") depth--
+    if (char === "," && depth === 0) {
+      args.push(raw.slice(start, i).trim())
+      start = i + 1
+    }
+  }
+  args.push(raw.slice(start).trim())
+  return args.filter(Boolean)
 }
 
 function validateRouterConfig(
@@ -477,6 +757,24 @@ function validateRouterConfig(
       if (!["blind", "tokens_spent", "closest_limit"].includes(strategy)) {
         return t("models.router.errorStrategy")
       }
+    } else if (block.type === "branch") {
+      if (!validateExpression(block.condition?.left)) {
+        return t("models.router.errorBranchExpression")
+      }
+      if (
+        !BRANCH_OPERATORS.includes(block.condition?.operator as BranchOperator)
+      ) {
+        return t("models.router.errorBranchOperator")
+      }
+      if (!validateExpression(block.condition?.right)) {
+        return t("models.router.errorBranchExpression")
+      }
+      if (!block.then || !ids.has(block.then)) {
+        return t("models.router.errorBranchTarget")
+      }
+      if (!block.else || !ids.has(block.else)) {
+        return t("models.router.errorBranchTarget")
+      }
     } else {
       return t("models.router.errorRawBlocks")
     }
@@ -485,6 +783,19 @@ function validateRouterConfig(
     }
   }
   return validateFallbackAcyclic(config, t)
+}
+
+function validateExpression(expr?: AccountRouterExpression): boolean {
+  if (!expr) return false
+  if (expr.op) {
+    return (
+      MATH_OPERATORS.includes(expr.op) &&
+      validateExpression(expr.left) &&
+      validateExpression(expr.right)
+    )
+  }
+  if (typeof expr.value === "number") return Number.isFinite(expr.value)
+  return Boolean(expr.account?.trim() && expr.metric?.trim())
 }
 
 function validateFallbackAcyclic(
@@ -500,7 +811,12 @@ function validateFallbackAcyclic(
     const block = byID.get(id)
     if (!block) return true
     visiting.add(id)
-    const ok = walk(block.fallback ?? "")
+    const nextIDs = [
+      block.fallback ?? "",
+      block.type === "branch" ? (block.then ?? "") : "",
+      block.type === "branch" ? (block.else ?? "") : "",
+    ]
+    const ok = nextIDs.every((nextID) => walk(nextID))
     visiting.delete(id)
     visited.add(id)
     return ok
@@ -550,9 +866,9 @@ export function AccountRouterEditorPage({
     [modelIndex, models],
   )
   const accountsByID = useMemo(() => accountByID(accounts), [accounts])
-  const selectedBlock =
-    routerConfig.blocks?.find((block) => block.id === selectedBlockID) ??
-    routerConfig.blocks?.[0]
+  const selectedBlock = selectedBlockID
+    ? routerConfig.blocks?.find((block) => block.id === selectedBlockID)
+    : undefined
   const activeAccountNames = useMemo(
     () => routerAccountNames(routerConfig),
     [routerConfig],
@@ -610,7 +926,7 @@ export function AccountRouterEditorPage({
       setBlockPositions(createFallbackPileLayout(nextRouter))
       setAutoArrange(true)
       setRawJson(formatRouterConfig(nextRouter))
-      setSelectedBlockID(nextRouter.entry || nextRouter.blocks?.[0]?.id || "")
+      setSelectedBlockID("")
       setSharedModelIssues([])
       setError("")
       setRawError("")
@@ -733,13 +1049,17 @@ export function AccountRouterEditorPage({
     setRouterConfig(parsed)
     setBlockPositions(createFallbackPileLayout(parsed))
     setAutoArrange(true)
-    setSelectedBlockID(parsed.entry || parsed.blocks?.[0]?.id || "")
+    setSelectedBlockID("")
     setRawError("")
     setEditorMode("visual")
   }
 
   const addBlock = (type: BlockType) => {
-    const block = newBlock(type, routerConfig.blocks ?? [])
+    const block = newBlock(
+      type,
+      routerConfig.blocks ?? [],
+      activeAccountNames[0] ?? accounts[0]?.id ?? "",
+    )
     updateRouter({
       ...routerConfig,
       entry: routerConfig.entry || block.id,
@@ -778,6 +1098,8 @@ export function AccountRouterEditorPage({
         ...block,
         id: block.id === oldID ? nextID : block.id,
         fallback: block.fallback === oldID ? nextID : block.fallback,
+        then: block.then === oldID ? nextID : block.then,
+        else: block.else === oldID ? nextID : block.else,
       })),
     })
     setSelectedBlockID(nextID)
@@ -803,6 +1125,8 @@ export function AccountRouterEditorPage({
     const cleanedBlocks = nextBlocks.map((block) => ({
       ...block,
       fallback: block.fallback === blockID ? undefined : block.fallback,
+      then: block.then === blockID ? undefined : block.then,
+      else: block.else === blockID ? undefined : block.else,
     }))
     const nextEntry =
       routerConfig.entry === blockID
@@ -834,6 +1158,9 @@ export function AccountRouterEditorPage({
     if (!trimmedName) return t("models.router.errorNameRequired")
     if (existingNames.has(trimmedName)) return t("models.router.errorDuplicate")
     if (!sharedModel.trim()) return t("models.router.errorModelRequired")
+    if (normalizeModelID(sharedModel) === normalizeModelID(trimmedName)) {
+      return t("models.router.errorModelSelfReference")
+    }
     const routerValidation = validateRouterConfig(routerConfig, t)
     if (routerValidation) return routerValidation
     if (activeAccountNames.length === 0) return t("models.router.noAccounts")
@@ -988,7 +1315,7 @@ export function AccountRouterEditorPage({
             <EditorModeTabs mode={editorMode} onChange={switchEditorMode} />
 
             {editorMode === "visual" ? (
-              <div className="grid min-h-[620px] grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
+              <div className="min-h-[620px]">
                 <section className="border-border/80 bg-background min-h-0 rounded-lg border">
                   <div className="border-border/70 flex flex-wrap items-center justify-between gap-2 border-b p-3">
                     <div className="min-w-0">
@@ -1018,6 +1345,15 @@ export function AccountRouterEditorPage({
                         <IconPlus className="size-4" />
                         {t("models.router.addLoadBalanceBlock")}
                       </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => addBlock("branch")}
+                      >
+                        <IconPlus className="size-4" />
+                        {t("models.router.addBranchBlock")}
+                      </Button>
                     </div>
                   </div>
                   <RouterDiagram
@@ -1025,43 +1361,49 @@ export function AccountRouterEditorPage({
                     accountsByID={accountsByID}
                     positions={blockPositions}
                     selectedBlockID={selectedBlockID}
-                    onSelect={setSelectedBlockID}
+                    onSelect={(blockID) => setSelectedBlockID(blockID)}
                     onMoveBlock={handleMoveBlock}
                     onAutoLayout={handleAutoLayout}
                   />
                 </section>
-
-                <aside className="border-border/80 bg-background rounded-lg border">
-                  <div className="border-border/70 border-b p-3">
-                    <Field
-                      label={t("models.router.entryBlock")}
-                      hint={t("models.router.entryHint")}
-                    >
-                      <BlockSelect
-                        value={routerConfig.entry ?? ""}
-                        blocks={routerConfig.blocks ?? []}
-                        placeholder={t("models.router.selectBlock")}
-                        ariaLabel={t("models.router.entryBlock")}
-                        onChange={(value) =>
-                          updateRouter({ ...routerConfig, entry: value })
-                        }
-                      />
-                    </Field>
-                  </div>
-                  <BlockInspector
-                    block={selectedBlock}
-                    blocks={routerConfig.blocks ?? []}
-                    accounts={accounts}
-                    accountsByID={accountsByID}
-                    onSelect={setSelectedBlockID}
-                    onUpdateID={updateBlockID}
-                    onUpdate={(blockID, updater) =>
-                      updateBlock(blockID, updater)
-                    }
-                    onRemove={removeBlock}
-                    onToggleAccount={toggleLoadBalanceAccount}
-                  />
-                </aside>
+                <Dialog
+                  open={Boolean(selectedBlock)}
+                  onOpenChange={(open) => {
+                    if (!open) setSelectedBlockID("")
+                  }}
+                >
+                  <DialogContent
+                    className={cn(
+                      "flex max-h-[calc(100vh-2rem)] max-w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[calc(100vw-2rem)]",
+                      selectedBlock?.type === "account"
+                        ? "w-[min(42rem,calc(100vw-2rem))]"
+                        : "w-[min(72rem,calc(100vw-2rem))]",
+                    )}
+                  >
+                    <DialogHeader className="border-border/70 border-b px-5 py-4">
+                      <DialogTitle>{selectedBlock?.id}</DialogTitle>
+                      <DialogDescription>
+                        {selectedBlock
+                          ? blockTitle(selectedBlock)
+                          : t("models.router.noBlocksEmpty")}
+                      </DialogDescription>
+                    </DialogHeader>
+                    <BlockInspector
+                      block={selectedBlock}
+                      blocks={routerConfig.blocks ?? []}
+                      accounts={accounts}
+                      accountsByID={accountsByID}
+                      onSelect={setSelectedBlockID}
+                      onUpdateID={updateBlockID}
+                      onUpdate={(blockID, updater) =>
+                        updateBlock(blockID, updater)
+                      }
+                      onRemove={removeBlock}
+                      onToggleAccount={toggleLoadBalanceAccount}
+                      onClose={() => setSelectedBlockID("")}
+                    />
+                  </DialogContent>
+                </Dialog>
               </div>
             ) : (
               <RawRouterEditor
@@ -1273,6 +1615,7 @@ function RouterDiagram({
 }) {
   const { t } = useTranslation()
   const svgRef = useRef<SVGSVGElement | null>(null)
+  const draggedBlockIDRef = useRef<string | null>(null)
   const [scalePercent, setScalePercent] = useState(100)
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 })
   const [drag, setDrag] = useState<CanvasDragState | null>(null)
@@ -1283,11 +1626,18 @@ function RouterDiagram({
     [positions, routerConfig],
   )
   const edges = blocks
-    .map((block) => {
-      const from = resolvedPositions[block.id]
-      const to = block.fallback ? resolvedPositions[block.fallback] : undefined
-      if (!from || !to) return null
-      return { from, to, key: `${block.id}-${block.fallback}` }
+    .flatMap((block) => {
+      const refs = [
+        { id: block.fallback, label: "fallback" },
+        { id: block.type === "branch" ? block.then : undefined, label: "then" },
+        { id: block.type === "branch" ? block.else : undefined, label: "else" },
+      ]
+      return refs.map((ref) => {
+        const from = resolvedPositions[block.id]
+        const to = ref.id ? resolvedPositions[ref.id] : undefined
+        if (!from || !to) return null
+        return { from, to, key: `${block.id}-${ref.label}-${ref.id}` }
+      })
     })
     .filter((edge): edge is NonNullable<typeof edge> => edge != null)
 
@@ -1336,7 +1686,7 @@ function RouterDiagram({
   ) => {
     if (event.button !== 0) return
     event.stopPropagation()
-    onSelect(blockID)
+    draggedBlockIDRef.current = null
     setDrag({
       type: "node",
       pointerID: event.pointerId,
@@ -1358,6 +1708,12 @@ function RouterDiagram({
       return
     }
 
+    if (
+      Math.abs(current.x - drag.startPointer.x) > 3 ||
+      Math.abs(current.y - drag.startPointer.y) > 3
+    ) {
+      draggedBlockIDRef.current = drag.blockID
+    }
     onMoveBlock(drag.blockID, {
       x: drag.startPosition.x + (current.x - drag.startPointer.x) / scale,
       y: drag.startPosition.y + (current.y - drag.startPointer.y) / scale,
@@ -1368,6 +1724,9 @@ function RouterDiagram({
     if (!drag || drag.pointerID !== event.pointerId) return
     if (svgRef.current?.hasPointerCapture(event.pointerId)) {
       svgRef.current.releasePointerCapture(event.pointerId)
+    }
+    if (drag.type === "node" && draggedBlockIDRef.current !== drag.blockID) {
+      onSelect(drag.blockID)
     }
     setDrag(null)
   }
@@ -1535,7 +1894,11 @@ function RouterDiagram({
                   onPointerDown={(event) =>
                     handleNodePointerDown(event, block.id)
                   }
-                  onClick={() => onSelect(block.id)}
+                  onClick={() => {
+                    if (draggedBlockIDRef.current === block.id) {
+                      draggedBlockIDRef.current = null
+                    }
+                  }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault()
@@ -1631,6 +1994,7 @@ function BlockInspector({
   onUpdate,
   onRemove,
   onToggleAccount,
+  onClose,
 }: {
   block?: AccountRouterBlock
   blocks: AccountRouterBlock[]
@@ -1644,6 +2008,7 @@ function BlockInspector({
   ) => void
   onRemove: (blockID: string) => void
   onToggleAccount: (blockID: string, accountID: string) => void
+  onClose: () => void
 }) {
   const { t } = useTranslation()
   if (!block) {
@@ -1654,12 +2019,8 @@ function BlockInspector({
     )
   }
   return (
-    <div className="space-y-4 p-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <h3 className="truncate text-sm font-semibold">{block.id}</h3>
-          <p className="text-muted-foreground text-xs">{blockTitle(block)}</p>
-        </div>
+    <div className="space-y-4 overflow-auto p-5">
+      <div className="flex items-center justify-end gap-3">
         <Button
           type="button"
           size="icon"
@@ -1700,6 +2061,23 @@ function BlockInspector({
                   fallback: current.fallback,
                 }
               }
+              if (nextType === "branch") {
+                return {
+                  id: current.id,
+                  type: "branch",
+                  condition:
+                    current.type === "branch"
+                      ? current.condition
+                      : {
+                          left: { account: "", metric: "rpm" },
+                          operator: "gt",
+                          right: { value: 0 },
+                        },
+                  then: current.type === "branch" ? current.then : "",
+                  else: current.type === "branch" ? current.else : "",
+                  fallback: current.fallback,
+                }
+              }
               return {
                 id: current.id,
                 type: "account",
@@ -1721,6 +2099,9 @@ function BlockInspector({
             </SelectItem>
             <SelectItem value="load_balance">
               {t("models.router.loadBalanceBlock")}
+            </SelectItem>
+            <SelectItem value="branch">
+              {t("models.router.branchBlock")}
             </SelectItem>
           </SelectContent>
         </Select>
@@ -1745,7 +2126,7 @@ function BlockInspector({
             }
           />
         </Field>
-      ) : (
+      ) : block.type === "load_balance" ? (
         <>
           <Field
             label={t("models.router.poolAccounts")}
@@ -1816,7 +2197,14 @@ function BlockInspector({
             </Select>
           </Field>
         </>
-      )}
+      ) : block.type === "branch" ? (
+        <BranchBlockFields
+          block={block}
+          blocks={blocks}
+          accounts={accounts}
+          onUpdate={(updater) => onUpdate(block.id, updater)}
+        />
+      ) : null}
 
       <Field
         label={t("models.router.fallbackConnection")}
@@ -1871,6 +2259,8 @@ function BlockInspector({
           >
             {candidate.type === "load_balance" ? (
               <IconArrowsShuffle className="size-4" />
+            ) : candidate.type === "branch" ? (
+              <IconGitCompare className="size-4" />
             ) : (
               <IconGitBranch className="size-4" />
             )}
@@ -1878,8 +2268,340 @@ function BlockInspector({
           </Button>
         ))}
       </div>
+
+      <div className="border-border/70 bg-popover sticky bottom-0 -mx-5 -mb-5 flex justify-end border-t px-5 py-4">
+        <Button type="button" onClick={onClose}>
+          {t("common.close")}
+        </Button>
+      </div>
     </div>
   )
+}
+
+function BranchBlockFields({
+  block,
+  blocks,
+  accounts,
+  onUpdate,
+}: {
+  block: AccountRouterBlock
+  blocks: AccountRouterBlock[]
+  accounts: RouterAccount[]
+  onUpdate: (updater: (block: AccountRouterBlock) => AccountRouterBlock) => void
+}) {
+  const { t } = useTranslation()
+  const condition = block.condition ?? {
+    left: { account: "", metric: "rpm" },
+    operator: "gt" as BranchOperator,
+    right: { value: 0 },
+  }
+  const selectableBlocks = blocks.filter(
+    (candidate) => candidate.id !== block.id,
+  )
+  const updateCondition = (
+    updater: (
+      condition: NonNullable<AccountRouterBlock["condition"]>,
+    ) => NonNullable<AccountRouterBlock["condition"]>,
+  ) => {
+    onUpdate((current) => ({
+      ...current,
+      condition: updater(condition),
+    }))
+  }
+  return (
+    <div className="space-y-4">
+      <BranchConditionTextEditor
+        blockID={block.id}
+        condition={condition}
+        accounts={accounts}
+        onChange={(nextCondition) => updateCondition(() => nextCondition)}
+      />
+      <Field label={t("models.router.branchThen")}>
+        <BlockSelect
+          value={block.then ?? ""}
+          blocks={selectableBlocks}
+          placeholder={t("models.router.selectBlock")}
+          ariaLabel={t("models.router.branchThen")}
+          onChange={(value) =>
+            onUpdate((current) => ({
+              ...current,
+              then: value,
+            }))
+          }
+        />
+      </Field>
+      <Field label={t("models.router.branchElse")}>
+        <BlockSelect
+          value={block.else ?? ""}
+          blocks={selectableBlocks}
+          placeholder={t("models.router.selectBlock")}
+          ariaLabel={t("models.router.branchElse")}
+          onChange={(value) =>
+            onUpdate((current) => ({
+              ...current,
+              else: value,
+            }))
+          }
+        />
+      </Field>
+    </div>
+  )
+}
+
+function BranchConditionTextEditor({
+  blockID,
+  condition,
+  accounts,
+  onChange,
+}: {
+  blockID: string
+  condition: NonNullable<AccountRouterBlock["condition"]>
+  accounts: RouterAccount[]
+  onChange: (condition: NonNullable<AccountRouterBlock["condition"]>) => void
+}) {
+  const { t } = useTranslation()
+  const accountsByID = useMemo(() => accountByID(accounts), [accounts])
+  const [text, setText] = useState(() =>
+    formatConditionText(condition, accountsByID),
+  )
+  const [parseError, setParseError] = useState("")
+  const [focused, setFocused] = useState(false)
+  const [cursorPosition, setCursorPosition] = useState(text.length)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const metricSuggestions = useMemo(
+    () =>
+      accounts.flatMap((account) =>
+        BRANCH_METRICS.map((metric) => `${account.conditionRef}.${metric}`),
+      ),
+    [accounts],
+  )
+  const exampleMetric =
+    metricSuggestions[0] ?? "accounts:openai:work.limit_pressure"
+  const numberMetric =
+    metricSuggestions.find((item) => item.endsWith(".tokens_spent")) ??
+    exampleMetric
+  const suggestionGroups = useMemo(
+    () => ({
+      examples: [
+        {
+          value: `${exampleMetric} >= 0.8`,
+          label: `${exampleMetric} >= 0.8`,
+          kind: t("models.router.branchSuggestionExample"),
+        },
+        {
+          value: `${exampleMetric} < 1`,
+          label: `${exampleMetric} < 1`,
+          kind: t("models.router.branchSuggestionExample"),
+        },
+        {
+          value: `multiply(${exampleMetric}, 100) > 75`,
+          label: `multiply(${exampleMetric}, 100) > 75`,
+          kind: t("models.router.branchSuggestionExample"),
+        },
+        {
+          value: `add(${numberMetric}, 1000) >= 50000`,
+          label: `add(${numberMetric}, 1000) >= 50000`,
+          kind: t("models.router.branchSuggestionExample"),
+        },
+      ],
+      metrics: metricSuggestions.map((metric) => ({
+        value: metric,
+        label: metric,
+        kind: t("models.router.branchSuggestionMetric"),
+      })),
+      comparisons: [">", ">=", "<", "<=", "==", "!="].map((operator) => ({
+        value: `${operator} `,
+        label: operator,
+        kind: t("models.router.branchSuggestionComparison"),
+      })),
+      math: MATH_OPERATORS.map((op) => ({
+        value: `${op}(${exampleMetric}, 0)`,
+        label: `${op}(...)`,
+        kind: t("models.router.branchSuggestionMath"),
+      })),
+    }),
+    [exampleMetric, metricSuggestions, numberMetric, t],
+  )
+  const autocompleteState = getConditionAutocompleteState(
+    text,
+    cursorPosition,
+    accounts,
+  )
+  const visibleSuggestions = autocompleteState.groups
+    .flatMap((group) => suggestionGroups[group])
+    .filter((suggestion) => {
+      if (!autocompleteState.query) return true
+      return suggestion.label
+        .toLowerCase()
+        .includes(autocompleteState.query.toLowerCase())
+    })
+    .slice(0, 8)
+
+  useEffect(() => {
+    const formatted = formatConditionText(condition, accountsByID)
+    if (!focused) setText(formatted)
+    setParseError("")
+  }, [accountsByID, condition, focused])
+
+  const applyText = (nextText: string) => {
+    setText(nextText)
+    setCursorPosition(nextText.length)
+    const parsed = parseConditionText(nextText, accounts)
+    if (!parsed) {
+      setParseError(t("models.router.branchConditionParseError"))
+      return
+    }
+    setParseError("")
+    onChange(parsed)
+  }
+
+  const updateCursorPosition = (target: HTMLInputElement) => {
+    setCursorPosition(target.selectionStart ?? target.value.length)
+  }
+
+  const applySuggestion = (value: string) => {
+    const input = inputRef.current
+    const selectionStart = input?.selectionStart ?? text.length
+    const selectionEnd = input?.selectionEnd ?? selectionStart
+    const nextText = insertConditionSuggestion(
+      text,
+      value,
+      selectionStart,
+      selectionEnd,
+      accounts,
+    )
+    applyText(nextText)
+    window.requestAnimationFrame(() => {
+      inputRef.current?.focus()
+      const cursor = nextText.length
+      inputRef.current?.setSelectionRange(cursor, cursor)
+    })
+  }
+
+  return (
+    <Field
+      label={t("models.router.branchCondition")}
+      hint={t("models.router.branchConditionTextHint")}
+      error={parseError}
+    >
+      <div className="relative">
+        <Input
+          ref={inputRef}
+          value={text}
+          spellCheck={false}
+          className="font-mono"
+          placeholder={t("models.router.branchConditionPlaceholder")}
+          aria-label={t("models.router.branchCondition")}
+          aria-autocomplete="list"
+          aria-expanded={focused && visibleSuggestions.length > 0}
+          aria-controls={`branch-condition-suggestions-${blockID}`}
+          role="combobox"
+          onChange={(event) => {
+            updateCursorPosition(event.target)
+            applyText(event.target.value)
+          }}
+          onFocus={() => setFocused(true)}
+          onClick={(event) => updateCursorPosition(event.currentTarget)}
+          onKeyUp={(event) => updateCursorPosition(event.currentTarget)}
+          onSelect={(event) => updateCursorPosition(event.currentTarget)}
+          onBlur={() => window.setTimeout(() => setFocused(false), 120)}
+        />
+        {focused && visibleSuggestions.length > 0 && (
+          <div
+            id={`branch-condition-suggestions-${blockID}`}
+            role="listbox"
+            aria-label={t("models.router.branchConditionSuggestions")}
+            className="bg-popover text-popover-foreground border-border absolute z-20 mt-1 max-h-64 w-full overflow-auto rounded-md border p-1 shadow-md"
+          >
+            {visibleSuggestions.map((suggestion) => (
+              <button
+                key={`${suggestion.kind}:${suggestion.label}`}
+                type="button"
+                role="option"
+                aria-selected="false"
+                className="hover:bg-muted focus:bg-muted flex w-full items-center justify-between gap-3 rounded-sm px-2 py-1.5 text-left text-xs outline-none"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => applySuggestion(suggestion.value)}
+              >
+                <span className="min-w-0 truncate font-mono">
+                  {suggestion.label}
+                </span>
+                <span className="text-muted-foreground shrink-0">
+                  {suggestion.kind}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="text-muted-foreground space-y-1 text-xs leading-relaxed">
+        <p>{t("models.router.branchConditionAutocompleteHint")}</p>
+        <p>
+          {t("models.router.branchConditionMetrics", {
+            metrics: BRANCH_METRICS.join(", "),
+          })}
+        </p>
+        <p>
+          {t("models.router.branchConditionOperators", {
+            operators: [">", ">=", "<", "<=", "==", "!="].join(", "),
+            functions: MATH_OPERATORS.join(", "),
+          })}
+        </p>
+      </div>
+    </Field>
+  )
+}
+
+function getConditionAutocompleteState(
+  text: string,
+  cursor: number,
+  accounts: RouterAccount[],
+): {
+  query: string
+  groups: BranchConditionSuggestionGroup[]
+} {
+  const beforeCursor = text.slice(0, cursor)
+  const trimmedBeforeCursor = beforeCursor.trim()
+  if (!trimmedBeforeCursor) {
+    return { query: "", groups: ["examples", "metrics", "math"] }
+  }
+
+  if (
+    /\s$/.test(beforeCursor) &&
+    parseExpressionText(trimmedBeforeCursor, accounts)
+  ) {
+    return { query: "", groups: ["comparisons"] }
+  }
+
+  if (parseConditionText(beforeCursor, accounts)) {
+    return { query: "", groups: [] }
+  }
+
+  return {
+    query: getConditionAutocompleteQuery(text, cursor),
+    groups: ["metrics", "math"],
+  }
+}
+
+function getConditionAutocompleteQuery(text: string, cursor: number): string {
+  const beforeCursor = text.slice(0, cursor)
+  const match = beforeCursor.match(/[^\s(),<>!=]*$/)
+  return match?.[0] ?? ""
+}
+
+function insertConditionSuggestion(
+  text: string,
+  suggestion: string,
+  selectionStart: number,
+  selectionEnd: number,
+  accounts: RouterAccount[],
+): string {
+  if (parseConditionText(suggestion, accounts)) return suggestion
+  const prefix = text.slice(0, selectionStart)
+  const suffix = text.slice(selectionEnd)
+  const tokenStart = prefix.search(/[^\s(),<>!=]*$/)
+  const beforeToken = tokenStart >= 0 ? prefix.slice(0, tokenStart) : prefix
+  return `${beforeToken}${suggestion}${suffix}`
 }
 
 function RawRouterEditor({

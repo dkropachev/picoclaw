@@ -1558,12 +1558,16 @@ test("accounts page shows account routers beside registered accounts", async ({
   await expect(page.getByText("backup: Needs refresh")).toBeVisible()
   await expect(
     page.getByRole("heading", { name: "Account Routers" }),
-  ).toHaveCount(0)
+  ).toBeVisible()
   await expect(
     page.getByText(
       "Joint accounts that route requests through connected accounts.",
     ),
-  ).toHaveCount(0)
+  ).toBeVisible()
+  await expect(
+    mainRouterCard.getByRole("button", { name: "Edit account router" }),
+  ).toBeVisible()
+  await expect(mainRouterCard.getByText("Decision Graph")).toBeVisible()
   await expect(page.getByText("No account routers configured.")).toHaveCount(0)
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
@@ -1581,7 +1585,13 @@ test("accounts page creates accounts through account actions only", async ({
     page.getByRole("button", { name: "Add Account" }).first(),
   ).toBeVisible()
   await expect(
-    page.getByRole("button", { name: "Account Router" }),
+    page
+      .locator("section")
+      .filter({
+        has: page.getByRole("heading", { name: "Account Routers" }),
+      })
+      .getByRole("button", { name: "Account Router" })
+      .first(),
   ).toBeVisible()
   await expect(page.getByRole("button", { name: "Add Model" })).toHaveCount(0)
   await expect(
@@ -1647,7 +1657,14 @@ test("account router editor supports block fallback graph editing", async ({
       },
     ],
   })
-  await page.getByRole("button", { name: "Account Router" }).click()
+  await page
+    .locator("section")
+    .filter({
+      has: page.getByRole("heading", { name: "Account Routers" }),
+    })
+    .getByRole("button", { name: "Account Router" })
+    .first()
+    .click()
 
   await expect(page).toHaveURL(/\/accounts\/account-router\/new$/)
   await expect(
@@ -1655,16 +1672,124 @@ test("account router editor supports block fallback graph editing", async ({
   ).toBeVisible()
   await expect(
     page.getByText("Add an account or load balancer block to start."),
-  ).toHaveCount(2)
+  ).toHaveCount(1)
   await expect(page.getByText("No accounts connected.")).toBeVisible()
+  await expect(page.getByText("Entry Block")).toHaveCount(0)
 
   await page.getByRole("button", { name: "Add Account" }).click()
+  const accountDialog = page.getByRole("dialog", { name: "account-1" })
+  await expect(accountDialog).toBeVisible()
+  if ((page.viewportSize()?.width ?? 0) >= 700) {
+    const dialogBox = await accountDialog.boundingBox()
+    const viewport = page.viewportSize()
+    expect(dialogBox).not.toBeNull()
+    expect(viewport).not.toBeNull()
+    expect(dialogBox!.height).toBeLessThan(viewport!.height * 0.85)
+    expect(dialogBox!.width).toBeLessThan(viewport!.width * 0.8)
+  }
   await page.getByRole("combobox", { name: "Account" }).click()
   await page.getByRole("option", { name: "OpenAI: acct-primary" }).click()
+  await accountDialog.getByRole("button", { name: "Close" }).last().click()
+  await expect(accountDialog).toBeHidden()
 
   await page.getByRole("button", { name: "Add Load Balancer" }).click()
+  const loadBalancerDialog = page.getByRole("dialog", {
+    name: "load-balancer-1",
+  })
+  await expect(loadBalancerDialog).toBeVisible()
   await page.getByRole("button", { name: "OpenAI: acct-backup" }).click()
   await page.getByRole("button", { name: "OpenAI: acct-empty" }).click()
+  await loadBalancerDialog.getByRole("button", { name: "Close" }).last().click()
+  await expect(loadBalancerDialog).toBeHidden()
+  await page.getByRole("button", { name: "Add Branch" }).click()
+  const branchDialog = page.getByRole("dialog", { name: "branch-1" })
+  await expect(branchDialog).toBeVisible()
+  await expect(page.getByText("Branch Condition")).toBeVisible()
+  await expect(
+    page.getByText("Type one condition. Use accounts:provider:name.metric"),
+  ).toBeVisible()
+  await expect(
+    page.getByText("Start typing to autocomplete account metrics"),
+  ).toBeVisible()
+  await expect(
+    page.getByText("Math functions: add, subtract, multiply"),
+  ).toBeVisible()
+  const branchCondition = page.getByRole("combobox", {
+    name: "Branch Condition",
+  })
+  await expect(branchCondition).toHaveValue(
+    "accounts:openai:acct-primary.rpm > 0",
+  )
+  await branchCondition.fill("accounts:openai:acct-primary.")
+  await expect(
+    page.getByText("Use syntax like accounts:openai:work.limit_pressure >= 80"),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("listbox", { name: "Branch Condition Suggestions" }),
+  ).toBeVisible()
+  const limitPressureMetric = "accounts:openai:acct-primary.limit_pressure"
+  await expect(
+    page.getByRole("option", {
+      name: /accounts:openai:acct-primary\.rpm metric/,
+    }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("option", { name: />= 0\.8 example/ }),
+  ).toHaveCount(0)
+  await page
+    .getByRole("option", {
+      name: new RegExp(`${limitPressureMetric.replaceAll(".", "\\.")}.*metric`),
+    })
+    .click()
+  await expect(branchCondition).toHaveValue(limitPressureMetric)
+  await branchCondition.press("End")
+  await branchCondition.press("Space")
+  await expect(page.getByRole("option", { name: /> comparison/ })).toBeVisible()
+  await expect(
+    page.getByRole("option", { name: /limit_pressure metric/ }),
+  ).toHaveCount(0)
+  await page.getByRole("option", { name: /> comparison/ }).click()
+  await expect(branchCondition).toHaveValue(`${limitPressureMetric} > `)
+  const textCondition = `multiply(${limitPressureMetric}, 100) >= 75`
+  await branchCondition.press("Control+A")
+  await branchCondition.press("Backspace")
+  await branchCondition.fill(textCondition)
+  await expect(branchCondition).toHaveValue(textCondition)
+  await expect(
+    page.getByText("Use syntax like accounts:openai:work.limit_pressure >= 80"),
+  ).toHaveCount(0)
+  await expect(page.getByText("Left Value")).toHaveCount(0)
+  await expect(page.getByText("Right Value")).toHaveCount(0)
+  await expect(page.getByText("Operand", { exact: true })).toHaveCount(0)
+  await expect(page.getByText("Threshold", { exact: true })).toHaveCount(0)
+  await expect(page.getByText("When True")).toBeVisible()
+  await expect(page.getByText("When False")).toBeVisible()
+  await branchDialog.getByRole("button", { name: "Close" }).last().click()
+  await expect(branchDialog).toBeHidden()
+  await page.getByRole("button", { name: "Raw JSON" }).click()
+  const rawRouterConfig = JSON.parse(
+    await page.getByRole("textbox", { name: "Raw JSON" }).inputValue(),
+  )
+  const rawBranch = rawRouterConfig.blocks.find(
+    (block: { id: string }) => block.id === "branch-1",
+  )
+  expect(rawBranch.condition).toMatchObject({
+    operator: "gte",
+    left: {
+      op: "multiply",
+      left: {
+        account: "credential:openai",
+        metric: "limit_pressure",
+      },
+      right: {
+        value: 100,
+      },
+    },
+    right: {
+      value: 75,
+    },
+  })
+  await page.getByRole("button", { name: "UI Editor" }).click()
 
   await expect(
     page.getByText("Some accounts did not return models."),
@@ -1679,9 +1804,16 @@ test("account router editor supports block fallback graph editing", async ({
   await expect(page.getByRole("option", { name: "gpt-4o" })).toBeVisible()
   await page.keyboard.press("Escape")
 
-  await page.getByRole("button", { name: "account-1", exact: true }).click()
+  await page.getByRole("button", { name: "Edit block account-1" }).click()
+  const reopenedAccountDialog = page.getByRole("dialog", { name: "account-1" })
+  await expect(reopenedAccountDialog).toBeVisible()
   await page.getByRole("combobox", { name: "Fallback Connection" }).click()
   await page.getByRole("option", { name: "load-balancer-1" }).click()
+  await reopenedAccountDialog
+    .getByRole("button", { name: "Close" })
+    .last()
+    .click()
+  await expect(reopenedAccountDialog).toBeHidden()
 
   await expect(page.getByText("Fallback -> load-balancer-1")).toBeVisible()
   await page.getByRole("button", { name: "Pile fallback chain" }).click()

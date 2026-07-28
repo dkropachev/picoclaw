@@ -125,7 +125,9 @@ and workspace inventory security boundaries are owned by the git workspaces
 feature.
 Account router entries use first-class `account_routers[]` validation and
 launcher normalization, and intentionally clear credential-bearing fields
-because underlying account entries own secrets.
+because underlying account entries own secrets. Branch condition expressions are
+validated as numeric account metrics and math constants, so routing decisions do
+not require storing new secret material on router entries.
 
 ## Failure And Edge Cases
 

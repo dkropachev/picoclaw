@@ -98,6 +98,45 @@ func TestAccountRouterConfigValidateAcceptsGitHubCopilotCredentialLoadBalanceRef
 	}
 }
 
+func TestAccountRouterConfigValidateAcceptsBranchCondition(t *testing.T) {
+	cfg := validRouterConfigForTest()
+	cfg.AccountRouters[0].Entry = "limit-branch"
+	cfg.AccountRouters[0].Blocks = []AccountRouterBlock{
+		{
+			ID:   "limit-branch",
+			Type: AccountRouterBlockTypeBranch,
+			Condition: &AccountRouterCondition{
+				Left: AccountRouterExpression{
+					Op: AccountRouterMathAdd,
+					Left: &AccountRouterExpression{
+						Account: "primary",
+						Metric:  "rpm",
+					},
+					Right: &AccountRouterExpression{Value: float64Ptr(10)},
+				},
+				Operator: AccountRouterBranchOpGT,
+				Right:    AccountRouterExpression{Value: float64Ptr(60)},
+			},
+			Then: "primary-account",
+			Else: "backup-account",
+		},
+		{
+			ID:      "primary-account",
+			Type:    AccountRouterBlockTypeAccount,
+			Account: "primary",
+		},
+		{
+			ID:      "backup-account",
+			Type:    AccountRouterBlockTypeAccount,
+			Account: "backup",
+		},
+	}
+
+	if err := cfg.ValidateModelList(); err != nil {
+		t.Fatalf("ValidateModelList() error = %v", err)
+	}
+}
+
 func TestAccountRouterConfigValidateRejectsInvalidGraphs(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -130,6 +169,13 @@ func TestAccountRouterConfigValidateRejectsInvalidGraphs(t *testing.T) {
 			want: "references router",
 		},
 		{
+			name: "router self model",
+			mutate: func(cfg *Config) {
+				cfg.AccountRouters[0].Model = "router-main"
+			},
+			want: "not the router itself",
+		},
+		{
 			name: "fallback cycle",
 			mutate: func(cfg *Config) {
 				cfg.AccountRouters[0].Blocks[1].Fallback = "entry"
@@ -149,6 +195,42 @@ func TestAccountRouterConfigValidateRejectsInvalidGraphs(t *testing.T) {
 			},
 			want: "duplicate accounts",
 		},
+		{
+			name: "branch missing target",
+			mutate: func(cfg *Config) {
+				cfg.AccountRouters[0].Entry = "entry"
+				cfg.AccountRouters[0].Blocks[0] = AccountRouterBlock{
+					ID:   "entry",
+					Type: AccountRouterBlockTypeBranch,
+					Condition: &AccountRouterCondition{
+						Left:     AccountRouterExpression{Account: "primary", Metric: "rpm"},
+						Operator: AccountRouterBranchOpGT,
+						Right:    AccountRouterExpression{Value: float64Ptr(10)},
+					},
+					Then: "missing",
+					Else: "fallback",
+				}
+			},
+			want: "then",
+		},
+		{
+			name: "branch invalid math",
+			mutate: func(cfg *Config) {
+				cfg.AccountRouters[0].Entry = "entry"
+				cfg.AccountRouters[0].Blocks[0] = AccountRouterBlock{
+					ID:   "entry",
+					Type: AccountRouterBlockTypeBranch,
+					Condition: &AccountRouterCondition{
+						Left:     AccountRouterExpression{Op: "pow"},
+						Operator: AccountRouterBranchOpGT,
+						Right:    AccountRouterExpression{Value: float64Ptr(10)},
+					},
+					Then: "fallback",
+					Else: "fallback",
+				}
+			},
+			want: "math op",
+		},
 	}
 
 	for _, tt := range tests {
@@ -165,6 +247,10 @@ func TestAccountRouterConfigValidateRejectsInvalidGraphs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func float64Ptr(value float64) *float64 {
+	return &value
 }
 
 func validRouterConfigForTest() *Config {
