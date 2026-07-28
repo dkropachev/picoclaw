@@ -197,6 +197,102 @@ func TestToolAdaptationToolOutcomesAccumulateAndPersist(t *testing.T) {
 	}
 }
 
+func TestToolAdaptationStateHelpers(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(config.EnvHome, home)
+
+	if got := ToolAdaptationStatePath(); got != filepath.Join(home, "tool_adaptation_state.json") {
+		t.Fatalf("ToolAdaptationStatePath() = %q, want path under configured home", got)
+	}
+	if got := ToolSchemaHash(nil); got != "" {
+		t.Fatalf("ToolSchemaHash(nil) = %q, want empty hash", got)
+	}
+
+	leftFirst := []providers.ToolDefinition{
+		{Function: providers.ToolFunctionDefinition{Name: "write_file", Parameters: map[string]any{"type": "object"}}},
+		{Function: providers.ToolFunctionDefinition{Name: "read_file", Parameters: map[string]any{"type": "object"}}},
+	}
+	rightFirst := []providers.ToolDefinition{
+		{Function: providers.ToolFunctionDefinition{Name: "read_file", Parameters: map[string]any{"type": "object"}}},
+		{Function: providers.ToolFunctionDefinition{Name: "write_file", Parameters: map[string]any{"type": "object"}}},
+	}
+	if leftHash, rightHash := ToolSchemaHash(leftFirst), ToolSchemaHash(rightFirst); leftHash == "" ||
+		leftHash != rightHash {
+		t.Fatalf("ToolSchemaHash order stability = %q vs %q, want same non-empty hash", leftHash, rightHash)
+	}
+}
+
+func TestToolAdaptationStateRejectsInvalidInputs(t *testing.T) {
+	resetToolAdaptationStateForTest(t, filepath.Join(t.TempDir(), "state.json"))
+
+	if _, ok := ObserveToolAdaptationCache(
+		ToolAdaptationProfile{},
+		config.ToolSurfacePicoClaw,
+		nil,
+		&providers.UsageInfo{PromptTokens: 1000},
+	); ok {
+		t.Fatal("ObserveToolAdaptationCache(empty profile) ok = true, want false")
+	}
+	profile := ToolAdaptationProfile{Provider: "reject-provider", Model: "reject-model"}
+	if _, ok := ObserveToolAdaptationCache(profile, config.ToolSurfacePicoClaw, nil, nil); ok {
+		t.Fatal("ObserveToolAdaptationCache(nil usage) ok = true, want false")
+	}
+	if _, ok := ObserveToolAdaptationCache(
+		profile,
+		config.ToolSurfacePicoClaw,
+		nil,
+		&providers.UsageInfo{PromptTokens: 10},
+	); ok {
+		t.Fatal("ObserveToolAdaptationCache(low prompt tokens) ok = true, want false")
+	}
+	if _, ok := LatestToolAdaptationObservation(ToolAdaptationProfile{}); ok {
+		t.Fatal("LatestToolAdaptationObservation(empty profile) ok = true, want false")
+	}
+	if _, ok := ObserveToolAdaptationToolOutcome(profile, config.ToolSurfaceCodex, " ", true, "", 0); ok {
+		t.Fatal("ObserveToolAdaptationToolOutcome(empty tool) ok = true, want false")
+	}
+	if outcomes := LatestToolAdaptationToolOutcomes(ToolAdaptationProfile{}); outcomes != nil {
+		t.Fatalf("LatestToolAdaptationToolOutcomes(empty profile) = %#v, want nil", outcomes)
+	}
+}
+
+func TestToolAdaptationToolOutcomesSortBySurfaceThenTool(t *testing.T) {
+	resetToolAdaptationStateForTest(t, filepath.Join(t.TempDir(), "state.json"))
+	profile := ToolAdaptationProfile{Provider: "sort-provider", Model: "sort-model"}
+
+	for _, item := range []struct {
+		surface string
+		tool    string
+	}{
+		{surface: config.ToolSurfaceSimple, tool: "write_file"},
+		{surface: config.ToolSurfaceCodex, tool: "exec_command"},
+		{surface: config.ToolSurfaceCodex, tool: "apply_patch"},
+	} {
+		if _, ok := ObserveToolAdaptationToolOutcome(profile, item.surface, item.tool, true, "", 0); !ok {
+			t.Fatalf("ObserveToolAdaptationToolOutcome(%s/%s) ok = false, want true", item.surface, item.tool)
+		}
+	}
+
+	outcomes := LatestToolAdaptationToolOutcomes(profile)
+	got := make([]string, 0, len(outcomes))
+	for _, outcome := range outcomes {
+		got = append(got, outcome.VisibleToolSurface+"/"+outcome.ToolName)
+	}
+	want := []string{
+		config.ToolSurfaceCodex + "/apply_patch",
+		config.ToolSurfaceCodex + "/exec_command",
+		config.ToolSurfaceSimple + "/write_file",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("sorted outcomes = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sorted outcomes = %#v, want %#v", got, want)
+		}
+	}
+}
+
 func TestResolveToolAdaptationAutoUsesLearnedSuccessfulSurface(t *testing.T) {
 	resetToolAdaptationStateForTest(t, filepath.Join(t.TempDir(), "state.json"))
 	profile := ToolAdaptationProfile{Provider: "unknown-provider", Model: "unknown-model"}
