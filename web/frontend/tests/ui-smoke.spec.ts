@@ -1448,6 +1448,26 @@ test("accounts page lists registered accounts and opens onboarding", async ({
             auth_method: "oauth",
             account_id: "acc_123",
           },
+          {
+            provider: "openai",
+            credential_id: "openai:zero",
+            display_name: "OpenAI",
+            methods: ["browser", "device_code", "token"],
+            logged_in: true,
+            status: "connected",
+            auth_method: "oauth",
+            account_id: "acc_zero",
+          },
+          {
+            provider: "openai",
+            credential_id: "openai:unsupported",
+            display_name: "OpenAI",
+            methods: ["browser", "device_code", "token"],
+            logged_in: true,
+            status: "connected",
+            auth_method: "oauth",
+            account_id: "acc_unsupported",
+          },
         ],
       },
       {
@@ -1468,6 +1488,10 @@ test("accounts page lists registered accounts and opens onboarding", async ({
           account_id: "acc_123",
           plan: "pro",
           limits_status: "available",
+          rate_limit_reset_credits: {
+            available_count: 2,
+            auto_reset: true,
+          },
           entries: [
             {
               name: "codex",
@@ -1486,6 +1510,40 @@ test("accounts page lists registered accounts and opens onboarding", async ({
               status: "available",
               window: "weekly",
               used_percent: 0,
+            },
+          ],
+        },
+        {
+          id: "openai:zero",
+          email: "zero@example.test",
+          account_id: "acc_zero",
+          plan: "plus",
+          limits_status: "available",
+          rate_limit_reset_credits: {
+            available_count: 0,
+            auto_reset: true,
+          },
+          entries: [
+            {
+              name: "codex",
+              status: "available",
+              window: "weekly",
+              used_percent: 12,
+            },
+          ],
+        },
+        {
+          id: "openai:unsupported",
+          email: "unsupported@example.test",
+          account_id: "acc_unsupported",
+          plan: "plus",
+          limits_status: "available",
+          entries: [
+            {
+              name: "codex",
+              status: "available",
+              window: "weekly",
+              used_percent: 18,
             },
           ],
         },
@@ -1516,10 +1574,6 @@ test("accounts page lists registered accounts and opens onboarding", async ({
   await expect(page.getByText("OpenAI oauth (pro)")).toBeVisible()
   await expect(page.getByText("openai:work")).toBeVisible()
   await expect(page.getByText("Codex Account Limits")).not.toBeVisible()
-  await expect(page.getByText("codex 5h")).toBeVisible()
-  await expect(page.getByText("codex Weekly")).toBeVisible()
-  await expect(page.getByText("GPT-5.3-Codex-Spark Weekly")).toBeVisible()
-  await expect(page.getByText("64%")).toBeVisible()
   await expect(page.getByText("personal@example.test")).not.toBeVisible()
   await expect(page.getByText("Anthropic")).not.toBeVisible()
   await expect(page.getByText("gpt-4o-mini")).toHaveCount(0)
@@ -1527,7 +1581,31 @@ test("accounts page lists registered accounts and opens onboarding", async ({
   const accountCard = page.locator("article").filter({
     has: page.getByRole("heading", { name: "work" }),
   })
+  await expect(accountCard.getByText("codex 5h")).toBeVisible()
+  await expect(accountCard.getByText("codex Weekly")).toBeVisible()
+  await expect(
+    accountCard.getByText("GPT-5.3-Codex-Spark Weekly"),
+  ).toBeVisible()
+  await expect(accountCard.getByText("64%")).toBeVisible()
+  await expect(accountCard.getByText("Usage limit resets: 2")).toBeVisible()
+  await expect(accountCard.getByText("Auto-use when available")).toBeVisible()
+  await expect(
+    accountCard.getByRole("button", {
+      name: "When Codex reaches an eligible usage limit and a reset is available, PicoClaw uses one automatically and retries once.",
+    }),
+  ).toBeVisible()
   await expect(accountCard.getByRole("combobox")).toHaveCount(0)
+
+  const zeroCard = page.locator("article").filter({
+    has: page.getByRole("heading", { name: "zero" }),
+  })
+  await expect(zeroCard.getByText("Usage limit resets: 0")).toBeVisible()
+  await expect(zeroCard.getByText("Auto-use when available")).toBeVisible()
+
+  const unsupportedCard = page.locator("article").filter({
+    has: page.getByRole("heading", { name: "unsupported" }),
+  })
+  await expect(unsupportedCard.getByText(/Usage limit resets:/)).toHaveCount(0)
 
   await page.getByRole("button", { name: "Add Account" }).first().click()
   await expect(

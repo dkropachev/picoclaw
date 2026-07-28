@@ -212,6 +212,11 @@
       "email": "Email",
       "project": "Projeto"
     },
+    "codexLimits": {
+      "resetCredits": "Redefinições do limite de uso: {{count}}",
+      "autoReset": "Uso automático quando disponível",
+      "autoResetDescription": "Quando o Codex atingir um limite de uso qualificado e houver uma redefinição disponível, o PicoClaw a usará automaticamente e tentará novamente uma vez."
+    },
     "errors": {
       "loadFailed": "Falha ao carregar credenciais",
       "flowFailed": "Falha ao verificar fluxo de autenticação",

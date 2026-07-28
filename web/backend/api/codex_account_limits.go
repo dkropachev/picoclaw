@@ -41,16 +41,17 @@ type codexAccountLimitsResponse struct {
 }
 
 type codexAccountLimitAccount struct {
-	ID               string                   `json:"id"`
-	Provider         string                   `json:"provider,omitempty"`
-	Default          bool                     `json:"default,omitempty"`
-	Email            string                   `json:"email,omitempty"`
-	AccountID        string                   `json:"account_id,omitempty"`
-	Plan             string                   `json:"plan,omitempty"`
-	CredentialStatus string                   `json:"credential_status,omitempty"`
-	LimitsStatus     string                   `json:"limits_status,omitempty"`
-	LimitsError      string                   `json:"limits_error,omitempty"`
-	Entries          []codexAccountLimitEntry `json:"entries,omitempty"`
+	ID                    string                             `json:"id"`
+	Provider              string                             `json:"provider,omitempty"`
+	Default               bool                               `json:"default,omitempty"`
+	Email                 string                             `json:"email,omitempty"`
+	AccountID             string                             `json:"account_id,omitempty"`
+	Plan                  string                             `json:"plan,omitempty"`
+	CredentialStatus      string                             `json:"credential_status,omitempty"`
+	LimitsStatus          string                             `json:"limits_status,omitempty"`
+	LimitsError           string                             `json:"limits_error,omitempty"`
+	Entries               []codexAccountLimitEntry           `json:"entries,omitempty"`
+	RateLimitResetCredits *codexAccountRateLimitResetCredits `json:"rate_limit_reset_credits,omitempty"`
 }
 
 type codexAccountLimitEntry struct {
@@ -59,6 +60,11 @@ type codexAccountLimitEntry struct {
 	Window      string `json:"window,omitempty"`
 	UsedPercent *int   `json:"used_percent,omitempty"`
 	RefreshesAt string `json:"refreshes_at,omitempty"`
+}
+
+type codexAccountRateLimitResetCredits struct {
+	AvailableCount int  `json:"available_count"`
+	AutoReset      bool `json:"auto_reset"`
 }
 
 type codexAccountUsageFetch struct {
@@ -133,7 +139,7 @@ type codexRateLimitReachedDetails struct {
 }
 
 type codexRateLimitResetCredits struct {
-	AvailableCount int `json:"available_count"`
+	AvailableCount *int `json:"available_count"`
 }
 
 type codexUsageError struct {
@@ -276,6 +282,13 @@ func fetchCodexAccountUsages(
 				account.Plan = payload.PlanType
 			}
 			account.Entries = codexUsageEntries(payload)
+			if payload.RateLimitResetCredits != nil &&
+				payload.RateLimitResetCredits.AvailableCount != nil {
+				account.RateLimitResetCredits = &codexAccountRateLimitResetCredits{
+					AvailableCount: max(0, *payload.RateLimitResetCredits.AvailableCount),
+					AutoReset:      account.AccountID != "",
+				}
+			}
 			account.LimitsStatus = "available"
 		}()
 	}

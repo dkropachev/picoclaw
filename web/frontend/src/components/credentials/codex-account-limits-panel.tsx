@@ -1,4 +1,9 @@
-import { IconAlertCircle, IconLoader2, IconRefresh } from "@tabler/icons-react"
+import {
+  IconAlertCircle,
+  IconInfoCircle,
+  IconLoader2,
+  IconRefresh,
+} from "@tabler/icons-react"
 import type { TFunction } from "i18next"
 import { useTranslation } from "react-i18next"
 
@@ -7,6 +12,11 @@ import type {
   CodexAccountLimitEntry,
 } from "@/api/oauth"
 import { Button } from "@/components/ui/button"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 
 interface CodexAccountLimitSummaryProps {
   account?: CodexAccountLimitAccount
@@ -38,6 +48,13 @@ export function CodexAccountLimitSummary({
         <LimitEntryChip key={`${entry.name}-${entry.window}`} entry={entry} />
       ))}
 
+      {account?.rate_limit_reset_credits ? (
+        <ResetCreditsSummary
+          availableCount={account.rate_limit_reset_credits.available_count}
+          autoReset={account.rate_limit_reset_credits.auto_reset}
+        />
+      ) : null}
+
       {loading && entries.length === 0 ? (
         <span className="text-muted-foreground inline-flex items-center gap-1 text-[11px] leading-none">
           <IconLoader2 className="size-3 animate-spin" />
@@ -68,6 +85,43 @@ export function CodexAccountLimitSummary({
         )}
       </Button>
     </div>
+  )
+}
+
+function ResetCreditsSummary({
+  availableCount,
+  autoReset,
+}: {
+  availableCount: number
+  autoReset: boolean
+}) {
+  const { t } = useTranslation()
+  const count = Math.max(0, Math.floor(availableCount))
+  const autoResetLabel = t("credentials.codexLimits.autoReset")
+  const autoResetDescription = t("credentials.codexLimits.autoResetDescription")
+
+  return (
+    <span className="text-muted-foreground inline-flex max-w-full flex-wrap items-center gap-1 text-[11px] leading-none">
+      <IconRefresh aria-hidden="true" className="size-3 shrink-0" />
+      <span className="font-medium tabular-nums">
+        {t("credentials.codexLimits.resetCredits", { count })}
+      </span>
+      {autoReset ? <span>· {autoResetLabel}</span> : null}
+      {autoReset ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              className="focus-visible:ring-ring inline-flex size-6 shrink-0 items-center justify-center rounded-sm focus-visible:ring-2 focus-visible:outline-none"
+              aria-label={autoResetDescription}
+            >
+              <IconInfoCircle aria-hidden="true" className="size-3" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>{autoResetDescription}</TooltipContent>
+        </Tooltip>
+      ) : null}
+    </span>
   )
 }
 

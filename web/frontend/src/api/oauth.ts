@@ -26,6 +26,11 @@ export interface CodexAccountLimitEntry {
   refreshes_at?: string
 }
 
+export interface CodexAccountRateLimitResetCredits {
+  available_count: number
+  auto_reset: boolean
+}
+
 export interface CodexAccountLimitAccount {
   id: string
   provider?: OAuthProvider
@@ -37,6 +42,7 @@ export interface CodexAccountLimitAccount {
   limits_status?: string
   limits_error?: string
   entries?: CodexAccountLimitEntry[]
+  rate_limit_reset_credits?: CodexAccountRateLimitResetCredits
 }
 
 export interface CodexAccountLimitsResponse {
