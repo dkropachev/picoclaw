@@ -134,14 +134,7 @@ func TestStoreInsertRedactsDeduplicatesAndPersists(t *testing.T) {
 	var version int
 	require.NoError(t, reopened.db.QueryRow("PRAGMA user_version").Scan(&version))
 	assert.Equal(t, schemaVersion, version)
-	var journalMode string
-	require.NoError(t, reopened.db.QueryRow("PRAGMA journal_mode").Scan(&journalMode))
-	assert.Equal(t, "wal", strings.ToLower(journalMode))
-	var foreignKeys, busyTimeout int
-	require.NoError(t, reopened.db.QueryRow("PRAGMA foreign_keys").Scan(&foreignKeys))
-	require.NoError(t, reopened.db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout))
-	assert.Equal(t, 1, foreignKeys)
-	assert.Positive(t, busyTimeout)
+	assertConnectionPragmas(t, reopened, 5*time.Second)
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
@@ -156,6 +149,59 @@ func TestStoreInsertRedactsDeduplicatesAndPersists(t *testing.T) {
 			assert.True(t, os.IsNotExist(statErr), statErr)
 		}
 	}
+}
+
+func TestStoreConnectionReplacementPreservesPragmas(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "literal?database.db")
+	store, err := Open(
+		context.Background(),
+		path,
+		WithBusyTimeout(137*time.Millisecond),
+	)
+	require.NoError(t, err)
+	defer store.Close()
+	_, err = store.Insert(context.Background(), testEnvelope("replacement"))
+	require.NoError(t, err)
+	assertConnectionPragmas(t, store, 137*time.Millisecond)
+
+	// Reducing the idle limit closes the sole idle connection. The next query
+	// must open a replacement and receive the DSN-backed connection PRAGMAs.
+	store.db.SetMaxIdleConns(0)
+	store.db.SetMaxIdleConns(1)
+	assertConnectionPragmas(t, store, 137*time.Millisecond)
+
+	_, err = os.Stat(path)
+	require.NoError(t, err, "query characters must remain part of the filesystem path")
+}
+
+func TestStoreRejectsSQLiteURIPath(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{
+		"file:/tmp/events.db",
+		"file::memory:?cache=shared",
+		"FILE:events.db",
+	} {
+		_, err := Open(context.Background(), path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "filesystem path")
+	}
+}
+
+func assertConnectionPragmas(t *testing.T, store *Store, busyTimeout time.Duration) {
+	t.Helper()
+	var journalMode string
+	require.NoError(t, store.db.QueryRow("PRAGMA journal_mode").Scan(&journalMode))
+	assert.Equal(t, "wal", strings.ToLower(journalMode))
+	var foreignKeys, gotBusyTimeout, synchronous int
+	require.NoError(t, store.db.QueryRow("PRAGMA foreign_keys").Scan(&foreignKeys))
+	require.NoError(t, store.db.QueryRow("PRAGMA busy_timeout").Scan(&gotBusyTimeout))
+	require.NoError(t, store.db.QueryRow("PRAGMA synchronous").Scan(&synchronous))
+	assert.Equal(t, 1, foreignKeys)
+	assert.Equal(t, int(busyTimeout.Milliseconds()), gotBusyTimeout)
+	assert.Equal(t, 1, synchronous)
 }
 
 func TestStoreCrossInstanceDeduplicationAndClaims(t *testing.T) {

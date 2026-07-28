@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -51,9 +52,15 @@ func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("eventing database path is required")
 	}
+	if len(path) >= len("file:") && strings.EqualFold(path[:len("file:")], "file:") {
+		return nil, fmt.Errorf("eventing database path must be a filesystem path, not a SQLite URI")
+	}
+	if strings.ContainsRune(path, '\x00') {
+		return nil, fmt.Errorf("eventing database path contains a NUL byte")
+	}
 
 	resolved := optionsFrom(options)
-	fileBacked := path != ":memory:" && !strings.HasPrefix(path, "file::memory:")
+	fileBacked := path != ":memory:"
 	if fileBacked {
 		parent := filepath.Dir(path)
 		if err := os.MkdirAll(parent, 0o700); err != nil {
@@ -72,7 +79,11 @@ func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 		}
 	}
 
-	db, err := sql.Open("sqlite", path)
+	dsn, err := sqliteDSN(path, resolved)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open eventing database: %w", err)
 	}
@@ -87,7 +98,7 @@ func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
 		redactor:        NewRedactor(resolved.additionalKeys, resolved.secretValues),
 		maxPayloadBytes: resolved.maxPayloadBytes,
 	}
-	if err := store.configure(ctx, resolved.busyTimeout); err != nil {
+	if err := store.configure(ctx, resolved.busyTimeout, !fileBacked); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -115,17 +126,72 @@ func OpenStore(ctx context.Context, path string, options ...Option) (*Store, err
 	return Open(ctx, path, options...)
 }
 
-func (s *Store) configure(ctx context.Context, busyTimeout time.Duration) error {
-	pragmas := []string{
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA foreign_keys = ON",
-		"PRAGMA busy_timeout = " + strconv.FormatInt(busyTimeout.Milliseconds(), 10),
-		"PRAGMA synchronous = NORMAL",
+func sqliteDSN(path string, options storeOptions) (string, error) {
+	if path == ":memory:" {
+		// A replacement connection would also lose the in-memory schema, so the
+		// file-backed reconnect guarantee does not apply to this test-only mode.
+		return path, nil
 	}
-	for _, pragma := range pragmas {
-		if _, err := s.db.ExecContext(ctx, pragma); err != nil {
-			return fmt.Errorf("configure eventing database (%s): %w", pragma, err)
+
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve eventing database path: %w", err)
+	}
+	query := url.Values{}
+	query.Add("_pragma", "foreign_keys(1)")
+	query.Add("_pragma", "busy_timeout("+strconv.FormatInt(options.busyTimeout.Milliseconds(), 10)+")")
+	query.Add("_pragma", "synchronous(NORMAL)")
+	dsn := (&url.URL{
+		Scheme:   "file",
+		Path:     filepath.ToSlash(absolutePath),
+		RawQuery: query.Encode(),
+	}).String()
+	return dsn, nil
+}
+
+func (s *Store) configure(ctx context.Context, busyTimeout time.Duration, memory bool) error {
+	var journalMode string
+	if err := s.db.QueryRowContext(ctx, "PRAGMA journal_mode = WAL").Scan(&journalMode); err != nil {
+		return fmt.Errorf("enable eventing WAL: %w", err)
+	}
+	if !memory && !strings.EqualFold(journalMode, "wal") {
+		return fmt.Errorf("enable eventing WAL: SQLite selected %q", journalMode)
+	}
+
+	var foreignKeys, configuredBusyTimeout, synchronous int
+	if err := s.db.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+		return fmt.Errorf("verify eventing foreign keys: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&configuredBusyTimeout); err != nil {
+		return fmt.Errorf("verify eventing busy timeout: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&synchronous); err != nil {
+		return fmt.Errorf("verify eventing synchronous mode: %w", err)
+	}
+	if memory {
+		// The non-URI :memory: path cannot carry per-connection options.
+		if _, err := s.db.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+			return fmt.Errorf("configure in-memory eventing foreign keys: %w", err)
 		}
+		if _, err := s.db.ExecContext(ctx, "PRAGMA busy_timeout = "+
+			strconv.FormatInt(busyTimeout.Milliseconds(), 10)); err != nil {
+			return fmt.Errorf("configure in-memory eventing busy timeout: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, "PRAGMA synchronous = NORMAL"); err != nil {
+			return fmt.Errorf("configure in-memory eventing synchronous mode: %w", err)
+		}
+		return nil
+	}
+	if foreignKeys != 1 {
+		return fmt.Errorf("verify eventing foreign keys: got %d, want 1", foreignKeys)
+	}
+	if configuredBusyTimeout != int(busyTimeout.Milliseconds()) {
+		return fmt.Errorf("verify eventing busy timeout: got %d, want %d",
+			configuredBusyTimeout, busyTimeout.Milliseconds())
+	}
+	// SQLite represents NORMAL as 1.
+	if synchronous != 1 {
+		return fmt.Errorf("verify eventing synchronous mode: got %d, want 1", synchronous)
 	}
 	return nil
 }

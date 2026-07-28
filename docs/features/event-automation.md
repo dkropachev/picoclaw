@@ -169,8 +169,9 @@ Owns: TEST pkg/config/events*
    the retried envelope.
 6. Claim routing work in deterministic order. Atomically select only pending
    work whose `available_at` is due or expired claimed work, generate a new
-   opaque lease token per record, write the caller's worker label, token, and
-   deadline, increment the attempt, and return detached event/claim values.
+   opaque lease token per record whose diagnostic prefix is derived from the
+   caller's worker label, write the token and deadline, increment the attempt,
+   and return detached event/claim values.
 7. Accept routing transitions only when event ID, fresh lease token, current
    claimed state, and unexpired lease still match. Ack success, dead-letter
    terminal failure, or nack to pending with an explicit future availability
