@@ -1756,10 +1756,6 @@ test("account router editor supports block fallback graph editing", async ({
   const errors = collectPageErrors(page)
 
   await gotoMockedRoute(page, "/accounts", {
-    fetchModelEmptyCredentials: ["openai:empty"],
-    fetchModelFailures: {
-      "openai:backup": "Failed to fetch models: token invalidated",
-    },
     oauthProviders: [
       {
         provider: "openai",
@@ -1939,19 +1935,6 @@ test("account router editor supports block fallback graph editing", async ({
   })
   await page.getByRole("button", { name: "UI Editor" }).click()
 
-  await expect(
-    page.getByText("Some accounts did not return models."),
-  ).toBeVisible()
-  await expect(
-    page.getByText("OpenAI: acct-backup: Failed to fetch models"),
-  ).toBeVisible()
-  await expect(
-    page.getByText("OpenAI: acct-empty: No models returned."),
-  ).toBeVisible()
-  await page.getByRole("combobox", { name: "Shared Model" }).click()
-  await expect(page.getByRole("option", { name: "gpt-4o" })).toBeVisible()
-  await page.keyboard.press("Escape")
-
   await page.getByRole("button", { name: "Edit block account-1" }).click()
   const reopenedAccountDialog = page.getByRole("dialog", { name: "account-1" })
   await expect(reopenedAccountDialog).toBeVisible()
@@ -2030,14 +2013,7 @@ test("account router editor supports block fallback graph editing", async ({
   await expect(page.getByRole("button", { name: "Raw JSON" })).toBeVisible()
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
-  expect(
-    errors.filter(
-      (message) =>
-        !message.includes(
-          "Failed to load resource: the server responded with a status of 502",
-        ),
-    ),
-  ).toEqual([])
+  expect(errors).toEqual([])
 })
 
 test("skill import dialog fits the viewport", async ({ page }) => {

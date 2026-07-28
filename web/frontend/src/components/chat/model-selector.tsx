@@ -1,6 +1,8 @@
+import { IconRefresh } from "@tabler/icons-react"
 import { useTranslation } from "react-i18next"
 
 import type { ModelInfo, UpstreamModel } from "@/api/models"
+import { Button } from "@/components/ui/button"
 import {
   Select,
   SelectContent,
@@ -20,8 +22,10 @@ interface ModelSelectorProps {
   accountRouterModels: ModelInfo[]
   modelOptions: UpstreamModel[]
   isLoadingModelOptions: boolean
+  modelDiscoveryError: string | null
   onAccountChange: (modelName: string) => void
   onModelChange: (modelID: string) => void
+  onRetryModelDiscovery: () => void
 }
 
 export function ModelSelector({
@@ -31,8 +35,10 @@ export function ModelSelector({
   accountRouterModels,
   modelOptions,
   isLoadingModelOptions,
+  modelDiscoveryError,
   onAccountChange,
   onModelChange,
+  onRetryModelDiscovery,
 }: ModelSelectorProps) {
   const { t } = useTranslation()
 
@@ -103,6 +109,23 @@ export function ModelSelector({
           </SelectGroup>
         </SelectContent>
       </Select>
+
+      {modelDiscoveryError && (
+        <Button
+          type="button"
+          variant="destructive"
+          size="sm"
+          onClick={onRetryModelDiscovery}
+          aria-label={t("chat.retryModelDiscovery")}
+          title={`${t("chat.retryModelDiscovery")}: ${modelDiscoveryError}`}
+          className="h-8 rounded-full"
+        >
+          <IconRefresh className="size-4" />
+          <span className="hidden lg:inline">
+            {t("chat.retryModelDiscovery")}
+          </span>
+        </Button>
+      )}
     </div>
   )
 }

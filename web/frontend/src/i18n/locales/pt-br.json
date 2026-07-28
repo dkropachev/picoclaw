@@ -51,8 +51,14 @@
       "websocketConnecting": "Conectando ao serviço de chat... Aguarde.",
       "websocketDisconnected": "Não é possível conversar: a conexão WebSocket está desconectada. Verifique a rede e o status do gateway, atualize a página ou reinicie o Launcher.",
       "websocketError": "Não é possível conversar: a conexão WebSocket falhou. Verifique a rede e o status do gateway e tente novamente.",
-      "noDefaultModel": "Não é possível conversar: nenhum modelo padrão está selecionado. Defina um modelo padrão na página de Modelos."
+      "noDefaultModel": "Não é possível conversar: nenhum modelo padrão está selecionado. Defina um modelo padrão na página de Modelos.",
+      "modelDiscoveryLoading": "Não é possível conversar: carregando modelos para a conta selecionada.",
+      "modelDiscoveryFailed": "Não é possível conversar: a descoberta de modelos falhou. Tente novamente no botão acima.",
+      "noAvailableModel": "Não é possível conversar: nenhum modelo está disponível para a conta selecionada."
     },
+    "modelDiscoveryWarning": "Não foi possível listar os modelos de algumas contas.",
+    "modelDiscoveryError": "Falha ao carregar modelos para a conta selecionada.",
+    "retryModelDiscovery": "Tentar descoberta de modelos novamente",
     "newChat": "Novo Chat",
     "notConnected": "O Gateway não está rodando. Inicie-o para conversar.",
     "thinking": {

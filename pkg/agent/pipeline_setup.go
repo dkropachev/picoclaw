@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/accountrouter"
@@ -157,8 +158,18 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 			ts.sessionKey,
 			routerSelectReason,
 		)
+		if _, isCredentialOverride := config.AccountRouterCredentialAccountID(override); (activeAccountRouter != nil ||
+			isCredentialOverride) && !candidateSelectionHasProvider(ts.agent, activeCandidates) {
+			return nil, fmt.Errorf("model override %q has no runnable account provider", override)
+		}
 		activeProvider = workflowProviderForCandidates(ts.agent, activeProvider, activeCandidates)
 		usedLight = false
+	} else if activeAccountRouter != nil &&
+		!candidateSelectionHasProvider(ts.agent, activeCandidates) {
+		return nil, fmt.Errorf(
+			"account router %q has no runnable account provider",
+			activeAccountRouter.Name,
+		)
 	}
 
 	exec := newTurnExecution(
@@ -185,6 +196,21 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	exec.routerSelection = routerSelection
 
 	return exec, nil
+}
+
+func candidateSelectionHasProvider(
+	agent *AgentInstance,
+	candidates []providers.FallbackCandidate,
+) bool {
+	if agent == nil || len(candidates) == 0 {
+		return false
+	}
+	for _, candidate := range candidates {
+		if agent.candidateProviderForCandidate(candidate) == nil {
+			return false
+		}
+	}
+	return true
 }
 
 func workflowOverrideModelCandidates(

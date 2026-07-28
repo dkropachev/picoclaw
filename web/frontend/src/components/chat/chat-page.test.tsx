@@ -58,6 +58,17 @@ vi.mock("@/hooks/use-session-history", () => ({
 describe("ChatPage thread context", () => {
   beforeEach(() => {
     vi.mocked(getThread).mockReset()
+    vi.mocked(getThread).mockResolvedValue({
+      id: "thread-session",
+      ui_session_id: "thread-session",
+      title: "Model discovery",
+      preview: "",
+      type: "general",
+      context: {},
+      message_count: 0,
+      created: "2026-07-28T00:00:00Z",
+      updated: "2026-07-28T00:00:00Z",
+    })
     vi.mocked(usePicoChat).mockReturnValue({
       messages: [],
       connectionState: "connected",
@@ -97,8 +108,10 @@ describe("ChatPage thread context", () => {
       accountRouterModels: [],
       modelOptions: [{ id: "gpt-test" }],
       isLoadingModelOptions: false,
+      modelDiscoveryError: null,
       handleSetAccount: vi.fn(),
       handleSetModel: vi.fn(),
+      retryModelDiscovery: vi.fn(),
     })
     vi.mocked(useSessionHistory).mockReturnValue({
       sessions: [],
@@ -150,5 +163,107 @@ describe("ChatPage thread context", () => {
     expect(
       screen.queryByText("What can I help you with?"),
     ).not.toBeInTheDocument()
+  })
+
+  it("disables chat while the selected account has no resolved model", () => {
+    vi.mocked(getThread).mockResolvedValue({
+      id: "thread-session",
+      ui_session_id: "thread-session",
+      title: "Model discovery",
+      preview: "",
+      type: "general",
+      context: {},
+      message_count: 0,
+      created: "2026-07-28T00:00:00Z",
+      updated: "2026-07-28T00:00:00Z",
+    })
+    vi.mocked(useChatModels).mockReturnValue({
+      defaultModelName: "router-1",
+      selectedAccountName: "router-1",
+      selectedModelID: "",
+      hasAvailableModels: true,
+      accountModels: [],
+      accountRouterModels: [],
+      modelOptions: [],
+      isLoadingModelOptions: true,
+      modelDiscoveryError: null,
+      handleSetAccount: vi.fn(),
+      handleSetModel: vi.fn(),
+      retryModelDiscovery: vi.fn(),
+    })
+
+    render(
+      <Provider>
+        <ChatPage />
+      </Provider>,
+    )
+
+    expect(screen.getByRole("textbox")).toBeDisabled()
+    expect(screen.getByRole("textbox")).toHaveAttribute(
+      "placeholder",
+      "Unable to chat: Loading models for the selected account.",
+    )
+  })
+
+  it("shows a failed-discovery reason when no configured fallback remains", () => {
+    vi.mocked(useChatModels).mockReturnValue({
+      defaultModelName: "router-1",
+      selectedAccountName: "router-1",
+      selectedModelID: "",
+      hasAvailableModels: true,
+      accountModels: [],
+      accountRouterModels: [],
+      modelOptions: [],
+      isLoadingModelOptions: false,
+      modelDiscoveryError: "model discovery failed",
+      handleSetAccount: vi.fn(),
+      handleSetModel: vi.fn(),
+      retryModelDiscovery: vi.fn(),
+    })
+
+    render(
+      <Provider>
+        <ChatPage />
+      </Provider>,
+    )
+
+    expect(screen.getByRole("textbox")).toBeDisabled()
+    expect(screen.getByRole("textbox")).toHaveAttribute(
+      "placeholder",
+      "Unable to chat: Model discovery failed. Retry model discovery above.",
+    )
+  })
+
+  it("keeps chat enabled after discovery fails when a configured fallback remains", () => {
+    vi.mocked(useChatModels).mockReturnValue({
+      defaultModelName: "claude-work",
+      selectedAccountName: "credential:anthropic:work",
+      selectedModelID: "claude-sonnet-4.6",
+      hasAvailableModels: true,
+      accountModels: [
+        {
+          accountName: "credential:anthropic:work",
+          label: "anthropic:work",
+          provider: "anthropic",
+          credentialID: "anthropic:work",
+          modelID: "claude-sonnet-4.6",
+        },
+      ],
+      accountRouterModels: [],
+      modelOptions: [{ id: "claude-sonnet-4.6" }],
+      isLoadingModelOptions: false,
+      modelDiscoveryError: "model discovery failed",
+      handleSetAccount: vi.fn(),
+      handleSetModel: vi.fn(),
+      retryModelDiscovery: vi.fn(),
+    })
+
+    render(
+      <Provider>
+        <ChatPage />
+      </Provider>,
+    )
+
+    expect(screen.getByRole("textbox")).toBeEnabled()
   })
 })

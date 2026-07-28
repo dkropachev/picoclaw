@@ -40,7 +40,6 @@ export interface ModelInfo {
 
 export interface AccountRouterConfig {
   name?: string
-  model?: string
   enabled?: boolean
   entry?: string
   refresh_interval_seconds?: number
@@ -108,6 +107,7 @@ export interface ModelProviderOption {
   supports_fetch?: boolean
   default_auth_method?: string
   auth_method_locked?: boolean
+  default_model?: string
   local?: boolean
   priority?: number
   common_models?: string[]
@@ -229,8 +229,9 @@ export interface UpstreamModel {
   extra?: Record<string, unknown>
 }
 
-export interface FetchModelsRequest {
+interface FetchModelsByProviderRequest {
   provider: string
+  account_ref?: never
   api_key?: string
   api_base?: string
   auth_method?: string
@@ -238,9 +239,27 @@ export interface FetchModelsRequest {
   model_index?: number
 }
 
+interface FetchModelsByAccountRequest {
+  account_ref: string
+  provider?: never
+  api_key?: never
+  api_base?: never
+  auth_method?: never
+  credential_id?: never
+  model_index?: never
+}
+
+export type FetchModelsRequest =
+  | FetchModelsByProviderRequest
+  | FetchModelsByAccountRequest
+
 export interface FetchModelsResponse {
   models: UpstreamModel[]
   total: number
+  issues?: Array<{
+    account_ref: string
+    error: string
+  }>
 }
 
 export async function fetchUpstreamModels(

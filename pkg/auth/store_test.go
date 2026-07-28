@@ -2,9 +2,11 @@ package auth
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -186,6 +188,60 @@ func TestStoreMultipleCredentialsForSameProvider(t *testing.T) {
 	}
 	if workCred.Provider != "openai" {
 		t.Fatalf("work provider = %q, want openai", workCred.Provider)
+	}
+}
+
+func TestSetCredentialConcurrentUpdatesPreserveAllCredentials(t *testing.T) {
+	setTestAuthHome(t)
+
+	const credentialCount = 32
+	start := make(chan struct{})
+	errs := make(chan error, credentialCount)
+
+	var wg sync.WaitGroup
+	wg.Add(credentialCount)
+	for i := range credentialCount {
+		go func() {
+			defer wg.Done()
+			<-start
+
+			credentialID := fmt.Sprintf("openai:work-%02d", i)
+			errs <- SetCredential(credentialID, &AuthCredential{
+				AccessToken: fmt.Sprintf("token-%02d", i),
+				Provider:    "openai",
+				AuthMethod:  "oauth",
+			})
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("SetCredential() error: %v", err)
+		}
+	}
+
+	store, err := LoadStore()
+	if err != nil {
+		t.Fatalf("LoadStore() error: %v", err)
+	}
+	if len(store.Credentials) != credentialCount {
+		t.Fatalf("credential count = %d, want %d", len(store.Credentials), credentialCount)
+	}
+	for i := range credentialCount {
+		credentialID := fmt.Sprintf("openai:work-%02d", i)
+		cred := store.Credentials[credentialID]
+		if cred == nil {
+			t.Errorf("credential %q is missing", credentialID)
+			continue
+		}
+		wantToken := fmt.Sprintf("token-%02d", i)
+		if cred.AccessToken != wantToken {
+			t.Errorf("credential %q token = %q, want %q", credentialID, cred.AccessToken, wantToken)
+		}
 	}
 }
 

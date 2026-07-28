@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,8 +37,14 @@ type AntigravityProvider struct {
 
 // NewAntigravityProvider creates a new Antigravity provider using stored auth credentials.
 func NewAntigravityProvider() *AntigravityProvider {
+	return NewAntigravityProviderForCredential("")
+}
+
+// NewAntigravityProviderForCredential creates a new Antigravity provider using
+// the selected credential from the auth store.
+func NewAntigravityProviderForCredential(credentialID string) *AntigravityProvider {
 	return &AntigravityProvider{
-		tokenSource: createAntigravityTokenSource(),
+		tokenSource: CreateAntigravityTokenSourceForCredential(credentialID),
 		httpClient: &http.Client{
 			Timeout: 120 * time.Second,
 		},
@@ -470,30 +477,72 @@ func extractPartThoughtSignature(thoughtSignature string, thoughtSignatureSnake 
 
 // --- Token source ---
 
-func createAntigravityTokenSource() func() (string, string, error) {
+type antigravityTokenSourceDependencies struct {
+	getCredential  func(string) (*auth.AuthCredential, error)
+	setCredential  func(string, *auth.AuthCredential) error
+	refreshToken   func(*auth.AuthCredential, auth.OAuthProviderConfig) (*auth.AuthCredential, error)
+	fetchProjectID func(string) (string, error)
+}
+
+// CreateAntigravityTokenSourceForCredential creates a token source bound to a
+// single credential. The canonical credential ID is retained for refresh and
+// project-ID persistence, so named accounts never fall back to the default.
+func CreateAntigravityTokenSourceForCredential(credentialID string) func() (string, string, error) {
+	normalizedCredentialID, err := auth.NormalizeCredentialID("google-antigravity", credentialID)
+	if err != nil {
+		return func() (string, string, error) {
+			return "", "", fmt.Errorf("invalid antigravity credential ID: %w", err)
+		}
+	}
+	return createAntigravityTokenSourceForCredential(
+		normalizedCredentialID,
+		antigravityTokenSourceDependencies{
+			getCredential:  auth.GetCredential,
+			setCredential:  auth.SetCredential,
+			refreshToken:   auth.RefreshAccessToken,
+			fetchProjectID: FetchAntigravityProjectID,
+		},
+	)
+}
+
+func createAntigravityTokenSourceForCredential(
+	credentialID string,
+	deps antigravityTokenSourceDependencies,
+) func() (string, string, error) {
 	return func() (string, string, error) {
-		cred, err := auth.GetCredential("google-antigravity")
+		cred, err := deps.getCredential(credentialID)
 		if err != nil {
 			return "", "", fmt.Errorf("loading auth credentials: %w", err)
 		}
 		if cred == nil {
 			return "", "", fmt.Errorf(
-				"no credentials for google-antigravity. Run: picoclaw auth login --provider google-antigravity",
+				"no credentials for %s. Run: picoclaw auth login --provider google-antigravity --credential-id %s",
+				credentialID,
+				credentialID,
 			)
+		}
+		if err := validateAntigravityCredential(credentialID, cred); err != nil {
+			return "", "", err
 		}
 
 		// Refresh if needed
 		if cred.NeedsRefresh() && cred.RefreshToken != "" {
 			oauthCfg := auth.GoogleAntigravityOAuthConfig()
-			refreshed, err := auth.RefreshAccessToken(cred, oauthCfg)
+			refreshed, err := deps.refreshToken(cred, oauthCfg)
 			if err != nil {
 				return "", "", fmt.Errorf("refreshing token: %w", err)
+			}
+			if refreshed == nil {
+				return "", "", fmt.Errorf("refreshing token: no credential returned")
 			}
 			refreshed.Email = cred.Email
 			if refreshed.ProjectID == "" {
 				refreshed.ProjectID = cred.ProjectID
 			}
-			if err := auth.SetCredential("google-antigravity", refreshed); err != nil {
+			if err := validateAntigravityCredential(credentialID, refreshed); err != nil {
+				return "", "", fmt.Errorf("refreshed token: %w", err)
+			}
+			if err := deps.setCredential(credentialID, refreshed); err != nil {
 				return "", "", fmt.Errorf("saving refreshed token: %w", err)
 			}
 			cred = refreshed
@@ -508,7 +557,7 @@ func createAntigravityTokenSource() func() (string, string, error) {
 		projectID := cred.ProjectID
 		if projectID == "" {
 			// Try to fetch project ID from API
-			fetchedID, err := FetchAntigravityProjectID(cred.AccessToken)
+			fetchedID, err := deps.fetchProjectID(cred.AccessToken)
 			if err != nil {
 				logger.WarnCF("provider.antigravity", "Could not fetch project ID, using fallback", map[string]any{
 					"error": err.Error(),
@@ -517,12 +566,28 @@ func createAntigravityTokenSource() func() (string, string, error) {
 			} else {
 				projectID = fetchedID
 				cred.ProjectID = projectID
-				_ = auth.SetCredential("google-antigravity", cred)
+				_ = deps.setCredential(credentialID, cred)
 			}
 		}
 
 		return cred.AccessToken, projectID, nil
 	}
+}
+
+func validateAntigravityCredential(credentialID string, cred *auth.AuthCredential) error {
+	if cred == nil {
+		return fmt.Errorf("credential %s is missing", credentialID)
+	}
+	provider, err := auth.NormalizeCredentialID(cred.Provider, "")
+	if err != nil || provider != "google-antigravity" {
+		return fmt.Errorf(
+			"credential %s belongs to provider %q, want %q",
+			credentialID,
+			cred.Provider,
+			"google-antigravity",
+		)
+	}
+	return nil
 }
 
 // FetchAntigravityProjectID retrieves the Google Cloud project ID from the loadCodeAssist endpoint.
@@ -575,11 +640,25 @@ func FetchAntigravityProjectID(accessToken string) (string, error) {
 
 // FetchAntigravityModels fetches available models from the Cloud Code Assist API.
 func FetchAntigravityModels(accessToken, projectID string) ([]AntigravityModelInfo, error) {
+	return FetchAntigravityModelsContext(context.Background(), accessToken, projectID)
+}
+
+// FetchAntigravityModelsContext fetches available models while honoring caller
+// cancellation and deadlines.
+func FetchAntigravityModelsContext(
+	ctx context.Context,
+	accessToken, projectID string,
+) ([]AntigravityModelInfo, error) {
 	reqBody, _ := json.Marshal(map[string]any{
 		"project": projectID,
 	})
 
-	req, err := http.NewRequest("POST", antigravityBaseURL+"/v1internal:fetchAvailableModels", bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(
+		ctx,
+		"POST",
+		antigravityBaseURL+"/v1internal:fetchAvailableModels",
+		bytes.NewReader(reqBody),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -653,8 +732,25 @@ func FetchAntigravityModels(accessToken, projectID string) ([]AntigravityModelIn
 			DisplayName: "Gemini 3 Flash",
 		})
 	}
+	sortAntigravityModels(models)
 
 	return models, nil
+}
+
+func sortAntigravityModels(models []AntigravityModelInfo) {
+	sort.Slice(models, func(i, j int) bool {
+		leftDefault := models[i].ID == antigravityDefaultModel
+		rightDefault := models[j].ID == antigravityDefaultModel
+		if leftDefault != rightDefault {
+			return leftDefault
+		}
+		leftID := strings.ToLower(models[i].ID)
+		rightID := strings.ToLower(models[j].ID)
+		if leftID == rightID {
+			return models[i].ID < models[j].ID
+		}
+		return leftID < rightID
+	})
 }
 
 type AntigravityModelInfo struct {

@@ -250,13 +250,25 @@ func resolveActiveModelConfig(
 		candidate := candidates[0]
 		identityKey := strings.TrimSpace(candidate.IdentityKey)
 		if identityKey != "" {
+			var identityMatches []*config.ModelConfig
 			for _, mc := range cfg.ModelList {
 				if mc == nil || modelConfigIdentityKey(mc) != identityKey {
 					continue
 				}
+				identityMatches = append(identityMatches, mc)
 				protocol, modelID := modelProviderAndIDForResolution(defaultProvider, mc)
 				if providers.ModelKey(protocol, modelID) == providers.ModelKey(candidate.Provider, candidate.Model) {
 					return cloneModelConfigForResolution(defaultProvider, mc, workspace)
+				}
+			}
+			if len(identityMatches) == 1 {
+				mc := identityMatches[0]
+				protocol, _ := modelProviderAndIDForResolution(defaultProvider, mc)
+				if providers.NormalizeProvider(protocol) == providers.NormalizeProvider(candidate.Provider) {
+					clone := cloneModelConfigForResolution(defaultProvider, mc, workspace)
+					clone.Provider = protocol
+					clone.Model = strings.TrimSpace(candidate.Model)
+					return clone
 				}
 			}
 		}

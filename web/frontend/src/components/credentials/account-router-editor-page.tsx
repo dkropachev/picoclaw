@@ -1,5 +1,4 @@
 import {
-  IconAlertTriangle,
   IconArrowLeft,
   IconArrowsShuffle,
   IconBraces,
@@ -10,7 +9,6 @@ import {
   IconLayoutList,
   IconLoader2,
   IconPlus,
-  IconRefresh,
   IconRoute,
   IconTrash,
   IconZoomIn,
@@ -33,9 +31,7 @@ import {
   type AccountRouterConfig,
   type AccountRouterExpression,
   type ModelInfo,
-  type ModelProviderOption,
   addModel,
-  fetchUpstreamModels,
   getModels,
   updateModel,
 } from "@/api/models"
@@ -54,12 +50,6 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover"
-import { ScrollArea } from "@/components/ui/scroll-area"
-import {
   Select,
   SelectContent,
   SelectItem,
@@ -70,13 +60,6 @@ import { Textarea } from "@/components/ui/textarea"
 import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { cn } from "@/lib/utils"
 import { refreshGatewayState } from "@/store/gateway"
-
-import { getEffectiveAPIBase } from "../models/model-provider-form-shared"
-import {
-  getCanonicalProviderKey,
-  getProviderCatalogEntry,
-  providerSupportsFetch,
-} from "../models/provider-registry"
 
 type EditorMode = "visual" | "json"
 type BlockType = "account" | "load_balance" | "branch"
@@ -98,12 +81,6 @@ interface RouterAccount {
   authMethod?: string
   credentialID: string
   status: OAuthProviderStatus["status"]
-}
-
-interface AccountModelFetchIssue {
-  accountID: string
-  label: string
-  message: string
 }
 
 interface AccountRouterEditorPageProps {
@@ -366,35 +343,6 @@ function uniqueModelIDs(modelIDs: string[]): string[] {
     out.push(trimmed)
   }
   return out
-}
-
-function intersectModelIDs(lists: string[][]): string[] {
-  if (lists.length === 0) return []
-  const normalizedSets = lists.map(
-    (list) => new Set(list.map((modelID) => normalizeModelID(modelID))),
-  )
-  return uniqueModelIDs(lists[0]).filter((modelID) =>
-    normalizedSets.every((set) => set.has(normalizeModelID(modelID))),
-  )
-}
-
-async function fetchAccountModels(
-  account: RouterAccount,
-  providerOptions?: ModelProviderOption[],
-): Promise<string[]> {
-  const provider = getCanonicalProviderKey(account.provider, providerOptions)
-  const catalogEntry = getProviderCatalogEntry(provider, providerOptions)
-  if (!provider || !providerSupportsFetch(provider, providerOptions)) {
-    return uniqueModelIDs(catalogEntry?.commonModels ?? [])
-  }
-  const apiBase = getEffectiveAPIBase(provider, "", providerOptions)
-  const response = await fetchUpstreamModels({
-    provider,
-    api_base: apiBase,
-    auth_method: account.authMethod || undefined,
-    credential_id: account.credentialID,
-  })
-  return uniqueModelIDs(response.models.map((item) => item.id))
 }
 
 function nextBlockID(blocks: AccountRouterBlock[], type: BlockType): string {
@@ -841,12 +789,8 @@ export function AccountRouterEditorPage({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState("")
   const [models, setModels] = useState<ModelInfo[]>([])
-  const [providerOptions, setProviderOptions] = useState<ModelProviderOption[]>(
-    [],
-  )
   const [accounts, setAccounts] = useState<RouterAccount[]>([])
   const [modelName, setModelName] = useState("")
-  const [sharedModel, setSharedModel] = useState("")
   const [routerConfig, setRouterConfig] = useState<AccountRouterConfig>(
     normalizeRouterConfig(),
   )
@@ -858,13 +802,6 @@ export function AccountRouterEditorPage({
     createFallbackPileLayout(EMPTY_ROUTER),
   )
   const [autoArrange, setAutoArrange] = useState(true)
-  const [sharedModels, setSharedModels] = useState<string[]>([])
-  const [sharedModelsLoading, setSharedModelsLoading] = useState(false)
-  const [sharedModelsError, setSharedModelsError] = useState("")
-  const [sharedModelIssues, setSharedModelIssues] = useState<
-    AccountModelFetchIssue[]
-  >([])
-  const [sharedModelsRefreshKey, setSharedModelsRefreshKey] = useState(0)
 
   const isEdit = mode === "edit"
   const editingModel = useMemo(
@@ -882,12 +819,6 @@ export function AccountRouterEditorPage({
   const activeAccountsResolved =
     activeAccountNames.length > 0 &&
     activeAccountNames.every((name) => accountsByID.has(name))
-  const activeAccountKey = activeAccountNames.join("\u0000")
-  const sharedModelAllowed =
-    !sharedModel ||
-    sharedModels.some(
-      (modelID) => normalizeModelID(modelID) === normalizeModelID(sharedModel),
-    )
   const existingNames = useMemo(
     () =>
       new Set(
@@ -907,7 +838,6 @@ export function AccountRouterEditorPage({
         getOAuthProviders(),
       ])
       setModels(modelsData.models)
-      setProviderOptions(modelsData.provider_options || [])
       const nextAccounts = flattenCredentialAccounts(oauthData.providers)
       setAccounts(nextAccounts)
 
@@ -923,17 +853,11 @@ export function AccountRouterEditorPage({
 
       const nextRouter = normalizeRouterConfig(nextModel?.router)
       setModelName(nextModel?.model_name ?? "")
-      setSharedModel(
-        nextModel?.model && nextModel.model !== nextModel.model_name
-          ? nextModel.model
-          : "",
-      )
       setRouterConfig(nextRouter)
       setBlockPositions(createFallbackPileLayout(nextRouter))
       setAutoArrange(true)
       setRawJson(formatRouterConfig(nextRouter))
       setSelectedBlockID("")
-      setSharedModelIssues([])
       setError("")
       setRawError("")
     } catch (err) {
@@ -960,79 +884,6 @@ export function AccountRouterEditorPage({
         : reconcileBlockPositions(routerConfig, current),
     )
   }, [autoArrange, routerConfig])
-
-  useEffect(() => {
-    const activeAccounts = activeAccountNames
-      .map((name) => accountsByID.get(name))
-      .filter((account): account is RouterAccount => account != null)
-
-    if (
-      activeAccounts.length === 0 ||
-      activeAccounts.length !== activeAccountNames.length
-    ) {
-      setSharedModels([])
-      setSharedModelsLoading(false)
-      setSharedModelsError("")
-      setSharedModelIssues([])
-      return
-    }
-
-    let cancelled = false
-    setSharedModelsLoading(true)
-    setSharedModelsError("")
-    setSharedModelIssues([])
-    Promise.allSettled(
-      activeAccounts.map((account) =>
-        fetchAccountModels(account, providerOptions),
-      ),
-    )
-      .then((results) => {
-        if (cancelled) return
-
-        const availableModelLists: string[][] = []
-        const issues: AccountModelFetchIssue[] = []
-        results.forEach((result, index) => {
-          const account = activeAccounts[index]
-          if (result.status === "fulfilled") {
-            if (result.value.length > 0) {
-              availableModelLists.push(result.value)
-              return
-            }
-            issues.push({
-              accountID: account.id,
-              label: account.label,
-              message: t("models.router.noAccountModels"),
-            })
-            return
-          }
-          issues.push({
-            accountID: account.id,
-            label: account.label,
-            message:
-              result.reason instanceof Error
-                ? result.reason.message
-                : t("models.router.sharedModelsError"),
-          })
-        })
-
-        setSharedModels(intersectModelIDs(availableModelLists))
-        setSharedModelIssues(issues)
-      })
-      .finally(() => {
-        if (!cancelled) setSharedModelsLoading(false)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [
-    activeAccountKey,
-    activeAccountNames,
-    accountsByID,
-    providerOptions,
-    sharedModelsRefreshKey,
-    t,
-  ])
 
   const updateRouter = (next: AccountRouterConfig) => {
     setRouterConfig(normalizeRouterConfig(next))
@@ -1163,21 +1014,11 @@ export function AccountRouterEditorPage({
     const trimmedName = modelName.trim()
     if (!trimmedName) return t("models.router.errorNameRequired")
     if (existingNames.has(trimmedName)) return t("models.router.errorDuplicate")
-    if (!sharedModel.trim()) return t("models.router.errorModelRequired")
-    if (normalizeModelID(sharedModel) === normalizeModelID(trimmedName)) {
-      return t("models.router.errorModelSelfReference")
-    }
     const routerValidation = validateRouterConfig(routerConfig, t)
     if (routerValidation) return routerValidation
     if (activeAccountNames.length === 0) return t("models.router.noAccounts")
     if (editorMode === "visual" && !activeAccountsResolved) {
       return t("models.router.errorMissingAccounts")
-    }
-    if (activeAccountsResolved) {
-      if (sharedModelsLoading) return t("models.router.sharedModelsLoading")
-      if (sharedModelsError) return sharedModelsError
-      if (sharedModels.length === 0) return t("models.router.noSharedModels")
-      if (!sharedModelAllowed) return t("models.router.errorModelNotShared")
     }
     return ""
   }
@@ -1203,7 +1044,6 @@ export function AccountRouterEditorPage({
       const payload = {
         model_name: modelName.trim(),
         provider: "router",
-        model: sharedModel.trim(),
         router:
           editorMode === "json"
             ? (safeParseRouterConfig(rawJson) ?? routerConfig)
@@ -1287,7 +1127,7 @@ export function AccountRouterEditorPage({
           </div>
         ) : (
           <div className="space-y-5">
-            <div className="grid grid-cols-1 gap-4 pt-2 lg:grid-cols-[minmax(0,1fr)_320px]">
+            <div className="pt-2">
               <Field
                 label={t("models.router.routerName")}
                 hint={t("models.router.nameHint")}
@@ -1301,21 +1141,6 @@ export function AccountRouterEditorPage({
                   aria-label={t("models.router.routerName")}
                 />
               </Field>
-              <SharedModelField
-                value={sharedModel}
-                models={sharedModels}
-                loading={sharedModelsLoading}
-                error={sharedModelsError}
-                issues={sharedModelIssues}
-                disabled={
-                  activeAccountNames.length === 0 || !activeAccountsResolved
-                }
-                allowed={sharedModelAllowed}
-                onChange={(value) => setSharedModel(value)}
-                onRefresh={() =>
-                  setSharedModelsRefreshKey((current) => current + 1)
-                }
-              />
             </div>
 
             <EditorModeTabs mode={editorMode} onChange={switchEditorMode} />
@@ -1477,184 +1302,6 @@ function EditorModeTabs({
         </button>
       ))}
     </div>
-  )
-}
-
-function SharedModelField({
-  value,
-  models,
-  loading,
-  error,
-  issues,
-  disabled,
-  allowed,
-  onChange,
-  onRefresh,
-}: {
-  value: string
-  models: string[]
-  loading: boolean
-  error: string
-  issues: AccountModelFetchIssue[]
-  disabled: boolean
-  allowed: boolean
-  onChange: (value: string) => void
-  onRefresh: () => void
-}) {
-  const { t } = useTranslation()
-  return (
-    <Field
-      label={t("models.router.sharedModel")}
-      hint={t("models.router.sharedModelHint")}
-      required
-    >
-      <div className="flex gap-2">
-        <Select
-          value={value || NONE_VALUE}
-          onValueChange={(nextValue) => {
-            if (nextValue !== NONE_VALUE) onChange(nextValue)
-          }}
-          disabled={disabled || loading || models.length === 0}
-        >
-          <SelectTrigger
-            className={cn(
-              "min-w-0 flex-1",
-              !allowed ? "border-destructive" : "",
-            )}
-            aria-label={t("models.router.sharedModel")}
-          >
-            <SelectValue
-              placeholder={
-                disabled
-                  ? t("models.router.selectAccountsFirst")
-                  : loading
-                    ? t("models.router.sharedModelsLoading")
-                    : t("models.router.selectSharedModel")
-              }
-            />
-          </SelectTrigger>
-          <SelectContent>
-            {!value && (
-              <SelectItem value={NONE_VALUE} disabled>
-                {disabled
-                  ? t("models.router.selectAccountsFirst")
-                  : t("models.router.selectSharedModel")}
-              </SelectItem>
-            )}
-            {models.map((modelID) => (
-              <SelectItem key={modelID} value={modelID}>
-                {modelID}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Popover>
-          <PopoverTrigger asChild>
-            <Button
-              type="button"
-              variant="outline"
-              className="shrink-0 gap-2"
-              disabled={disabled || loading}
-              aria-label={t("models.router.availableModels")}
-              title={t("models.router.availableModels")}
-            >
-              {loading ? (
-                <IconLoader2 className="size-4 animate-spin" />
-              ) : (
-                <IconLayoutList className="size-4" />
-              )}
-              <span>
-                {t("models.router.availableModelsCount", {
-                  count: models.length,
-                })}
-              </span>
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent align="end" className="w-80 p-0">
-            <div className="border-b p-3">
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-sm font-medium">
-                  {t("models.router.availableModels")}
-                </p>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  onClick={onRefresh}
-                  aria-label={t("models.router.refreshSharedModels")}
-                  title={t("models.router.refreshSharedModels")}
-                >
-                  <IconRefresh className="size-4" />
-                </Button>
-              </div>
-            </div>
-            <ScrollArea className="max-h-72">
-              <div className="space-y-1 p-2">
-                {models.length === 0 ? (
-                  <p className="text-muted-foreground px-2 py-3 text-sm">
-                    {t("models.router.noSharedModels")}
-                  </p>
-                ) : (
-                  models.map((modelID) => (
-                    <button
-                      key={modelID}
-                      type="button"
-                      className={cn(
-                        "hover:bg-accent hover:text-accent-foreground flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-sm",
-                        normalizeModelID(value) === normalizeModelID(modelID)
-                          ? "bg-accent text-accent-foreground"
-                          : "",
-                      )}
-                      onClick={() => onChange(modelID)}
-                    >
-                      <span className="min-w-0 truncate">{modelID}</span>
-                      {normalizeModelID(value) ===
-                        normalizeModelID(modelID) && (
-                        <IconCheck className="size-4 shrink-0" />
-                      )}
-                    </button>
-                  ))
-                )}
-              </div>
-            </ScrollArea>
-          </PopoverContent>
-        </Popover>
-      </div>
-      {!disabled && !loading && models.length === 0 && !error && (
-        <p className="text-muted-foreground text-xs">
-          {t("models.router.noSharedModels")}
-        </p>
-      )}
-      {error && <p className="text-destructive text-xs">{error}</p>}
-      {issues.length > 0 && (
-        <div className="border-destructive/30 bg-destructive/5 text-destructive rounded-md border px-3 py-2 text-xs">
-          <p className="flex items-center gap-2 font-medium">
-            <IconAlertTriangle className="size-4 shrink-0" />
-            {t("models.router.accountFetchWarning")}
-          </p>
-          <ul className="mt-1 space-y-1">
-            {issues.map((issue) => (
-              <li key={issue.accountID}>
-                {t("models.router.accountFetchFailed", {
-                  account: issue.label,
-                  error: issue.message,
-                })}
-              </li>
-            ))}
-          </ul>
-          {models.length > 0 && (
-            <p className="text-muted-foreground mt-1">
-              {t("models.router.partialSharedModels")}
-            </p>
-          )}
-        </div>
-      )}
-      {!allowed && (
-        <p className="text-destructive text-xs">
-          {t("models.router.errorModelNotShared")}
-        </p>
-      )}
-    </Field>
   )
 }
 

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -8,13 +9,12 @@ import (
 func TestAccountRouterConfigValidateAcceptsFallbackAndLoadBalance(t *testing.T) {
 	cfg := &Config{
 		ModelList: []*ModelConfig{
-			{ModelName: "primary", Provider: "openai", Model: "gpt-4o"},
-			{ModelName: "backup", Provider: "anthropic", Model: "claude-sonnet-4"},
+			{ModelName: "primary", Provider: "openai", Model: "gpt-4o", Enabled: true},
+			{ModelName: "backup", Provider: "anthropic", Model: "claude-sonnet-4", Enabled: true},
 		},
 		AccountRouters: []AccountRouterConfig{
 			{
 				Name:                   "router-main",
-				Model:                  "gpt-4o",
 				Enabled:                true,
 				Entry:                  "pool",
 				RefreshIntervalSeconds: 60,
@@ -47,7 +47,6 @@ func TestAccountRouterConfigValidateAcceptsGitHubCopilotCredentialAccountRef(t *
 		AccountRouters: []AccountRouterConfig{
 			{
 				Name:    "copilot-router",
-				Model:   "gpt-5",
 				Enabled: true,
 				Entry:   "account-1",
 				Blocks: []AccountRouterBlock{{
@@ -75,7 +74,6 @@ func TestAccountRouterConfigValidateAcceptsGitHubCopilotCredentialLoadBalanceRef
 				AccountRouters: []AccountRouterConfig{
 					{
 						Name:    "copilot-router",
-						Model:   "gpt-5",
 						Enabled: true,
 						Entry:   "pool",
 						Blocks: []AccountRouterBlock{{
@@ -95,6 +93,87 @@ func TestAccountRouterConfigValidateAcceptsGitHubCopilotCredentialLoadBalanceRef
 				t.Fatalf("ValidateModelList() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestAccountRouterMaterializesVirtualModelWithoutModel(t *testing.T) {
+	cfg := &Config{
+		AccountRouters: []AccountRouterConfig{{
+			Name:    "router-main",
+			Enabled: true,
+			Entry:   "account",
+			Blocks: []AccountRouterBlock{{
+				ID:      "account",
+				Type:    AccountRouterBlockTypeAccount,
+				Account: "credential:openai:work",
+			}},
+		}},
+	}
+
+	cfg.MaterializeAccountRouterModels()
+
+	model, err := cfg.GetModelConfig("router-main")
+	if err != nil {
+		t.Fatalf("GetModelConfig(router-main): %v", err)
+	}
+	if !model.IsVirtual() || !model.IsAccountRouter() {
+		t.Fatalf(
+			"router model virtual/account-router = %v/%v, want true/true",
+			model.IsVirtual(),
+			model.IsAccountRouter(),
+		)
+	}
+	if model.Model != "" {
+		t.Fatalf("router model ID = %q, want empty", model.Model)
+	}
+	if model.Router == nil || model.Router.Name != "router-main" {
+		t.Fatalf("router config = %#v, want router-main", model.Router)
+	}
+	if err := cfg.ValidateModelList(); err != nil {
+		t.Fatalf("ValidateModelList() error = %v", err)
+	}
+}
+
+func TestAccountRouterLegacyModelFieldIsIgnoredAndOmitted(t *testing.T) {
+	var router AccountRouterConfig
+	input := []byte(`{
+		"name": "router-main",
+		"model": "gpt-5",
+		"enabled": true,
+		"entry": "account",
+		"blocks": [{
+			"id": "account",
+			"type": "account",
+			"account": "credential:openai:work"
+		}]
+	}`)
+	if err := json.Unmarshal(input, &router); err != nil {
+		t.Fatalf("Unmarshal legacy account router: %v", err)
+	}
+	var wrapper struct {
+		AccountRouters []AccountRouterConfig `json:"account_routers"`
+	}
+	wrappedInput := append(
+		[]byte(`{"account_routers":[`),
+		append(input, []byte(`]}`)...)...,
+	)
+	if err := decodeJSONWithDiagnostics(wrappedInput, &wrapper, "config.json"); err != nil {
+		t.Fatalf("diagnostic decode legacy account router: %v", err)
+	}
+	if err := router.Validate(); err != nil {
+		t.Fatalf("Validate() legacy account router error = %v", err)
+	}
+
+	data, err := json.Marshal(router)
+	if err != nil {
+		t.Fatalf("Marshal account router: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("Unmarshal marshaled account router: %v", err)
+	}
+	if _, ok := fields["model"]; ok {
+		t.Fatalf("marshaled account router contains legacy model field: %s", data)
 	}
 }
 
@@ -157,9 +236,17 @@ func TestAccountRouterConfigValidateRejectsInvalidGraphs(t *testing.T) {
 					ModelName: "primary",
 					Provider:  "openai",
 					Model:     "gpt-4o-mini",
+					Enabled:   true,
 				})
 			},
 			want: "ambiguous account",
+		},
+		{
+			name: "disabled account",
+			mutate: func(cfg *Config) {
+				cfg.ModelList[0].Enabled = false
+			},
+			want: "disabled account",
 		},
 		{
 			name: "router account",
@@ -167,13 +254,6 @@ func TestAccountRouterConfigValidateRejectsInvalidGraphs(t *testing.T) {
 				cfg.AccountRouters[0].Blocks[0].Account = "router-main"
 			},
 			want: "references router",
-		},
-		{
-			name: "router self model",
-			mutate: func(cfg *Config) {
-				cfg.AccountRouters[0].Model = "router-main"
-			},
-			want: "not the router itself",
 		},
 		{
 			name: "fallback cycle",
@@ -256,13 +336,12 @@ func float64Ptr(value float64) *float64 {
 func validRouterConfigForTest() *Config {
 	return &Config{
 		ModelList: []*ModelConfig{
-			{ModelName: "primary", Provider: "openai", Model: "gpt-4o"},
-			{ModelName: "backup", Provider: "anthropic", Model: "claude-sonnet-4"},
+			{ModelName: "primary", Provider: "openai", Model: "gpt-4o", Enabled: true},
+			{ModelName: "backup", Provider: "anthropic", Model: "claude-sonnet-4", Enabled: true},
 		},
 		AccountRouters: []AccountRouterConfig{
 			{
 				Name:    "router-main",
-				Model:   "gpt-4o",
 				Enabled: true,
 				Entry:   "entry",
 				Blocks: []AccountRouterBlock{

@@ -42,7 +42,7 @@ type Config struct {
 	Channels  ChannelsConfig  `json:"channel_list"        yaml:"channel_list"`
 	// ModelList stores runnable provider configurations.
 	ModelList SecureModelList `json:"model_list" yaml:"model_list"`
-	// AccountRouters route a runnable model through one or more credential accounts.
+	// AccountRouters select one or more accounts through a static graph.
 	AccountRouters AccountRouterList `json:"account_routers" yaml:"account_routers"`
 	// ModelRouters route a chat model alias to one of several configured model aliases.
 	ModelRouters ModelRouterList `json:"model_routers"       yaml:"model_routers"`
@@ -574,7 +574,6 @@ type AccountRouterList []AccountRouterConfig
 // load-balancing block, and each block can fall back to another block.
 type AccountRouterConfig struct {
 	Name                   string               `json:"name,omitempty"                     yaml:"name,omitempty"`
-	Model                  string               `json:"model,omitempty"                    yaml:"model,omitempty"`
 	Enabled                bool                 `json:"enabled,omitempty"                  yaml:"enabled,omitempty"`
 	Entry                  string               `json:"entry,omitempty"                    yaml:"entry,omitempty"`
 	RefreshIntervalSeconds int                  `json:"refresh_interval_seconds,omitempty" yaml:"refresh_interval_seconds,omitempty"`
@@ -1109,9 +1108,6 @@ func (c *ModelConfig) Validate() error {
 			!strings.EqualFold(strings.TrimSpace(c.Provider), AccountRouterProvider) {
 			return fmt.Errorf("router config must use provider %q", AccountRouterProvider)
 		}
-		if c.Model == "" {
-			return fmt.Errorf("model is required")
-		}
 		return c.Router.validate(false)
 	}
 	if c.Model == "" {
@@ -1151,14 +1147,6 @@ func (r *AccountRouterConfig) validate(requireName bool) error {
 	}
 	if requireName && strings.TrimSpace(r.Name) == "" {
 		return fmt.Errorf("router.name is required")
-	}
-	if requireName && strings.TrimSpace(r.Model) == "" {
-		return fmt.Errorf("router.model is required")
-	}
-	if strings.TrimSpace(r.Name) != "" &&
-		strings.TrimSpace(r.Model) != "" &&
-		strings.TrimSpace(r.Name) == strings.TrimSpace(r.Model) {
-		return fmt.Errorf("router.model must reference an underlying model, not the router itself")
 	}
 	if !r.Enabled {
 		return fmt.Errorf("router must be enabled")
@@ -2633,9 +2621,6 @@ func (c *Config) ValidateAccountRouters() error {
 		if name == "" {
 			return fmt.Errorf("account_routers[%d].name is required", i)
 		}
-		if strings.TrimSpace(router.Model) == "" {
-			return fmt.Errorf("account_routers[%d].model is required", i)
-		}
 		if err := router.Validate(); err != nil {
 			return fmt.Errorf("account_routers[%d]: %w", i, err)
 		}
@@ -2664,6 +2649,7 @@ func (c *Config) validateAccountRouterReferences() error {
 		return nil
 	}
 	accounts := make(map[string][]int)
+	disabledAccounts := make(map[string][]int)
 	routers := make(map[string]int)
 	for i, model := range c.ModelList {
 		if model == nil || model.IsModelRouter() {
@@ -2671,6 +2657,10 @@ func (c *Config) validateAccountRouterReferences() error {
 		}
 		name := strings.TrimSpace(model.ModelName)
 		if name == "" {
+			continue
+		}
+		if !model.Enabled {
+			disabledAccounts[name] = append(disabledAccounts[name], i)
 			continue
 		}
 		accounts[name] = append(accounts[name], i)
@@ -2704,6 +2694,14 @@ func (c *Config) validateAccountRouterReferences() error {
 				}
 				matches := accounts[account]
 				if len(matches) == 0 {
+					if len(disabledAccounts[account]) > 0 {
+						return fmt.Errorf(
+							"account_routers[%d] block %q references disabled account %q",
+							i,
+							block.ID,
+							account,
+						)
+					}
 					return fmt.Errorf(
 						"account_routers[%d] block %q references unknown account %q",
 						i,
@@ -2740,14 +2738,12 @@ func (c *Config) MaterializeAccountRouterModels() {
 	for i := range c.AccountRouters {
 		router := cloneAccountRouterConfig(&c.AccountRouters[i])
 		name := strings.TrimSpace(router.Name)
-		model := strings.TrimSpace(router.Model)
-		if name == "" || model == "" {
+		if name == "" {
 			continue
 		}
 		c.ModelList = append(c.ModelList, &ModelConfig{
 			ModelName: name,
 			Provider:  AccountRouterProvider,
-			Model:     model,
 			Router:    router,
 			Enabled:   router.Enabled,
 			isVirtual: true,
@@ -2879,6 +2875,7 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 				ExtraBody:                   m.ExtraBody,
 				CustomHeaders:               m.CustomHeaders,
 				UserAgent:                   m.UserAgent,
+				Enabled:                     m.Enabled,
 				isVirtual:                   true,
 			}
 			expanded = append(expanded, additionalEntry)
@@ -2912,6 +2909,7 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 			ExtraBody:                   m.ExtraBody,
 			CustomHeaders:               m.CustomHeaders,
 			UserAgent:                   m.UserAgent,
+			Enabled:                     m.Enabled,
 			APIKeys:                     SimpleSecureStrings(keys[0]),
 		}
 

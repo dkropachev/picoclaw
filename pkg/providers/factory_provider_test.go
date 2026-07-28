@@ -622,6 +622,21 @@ func TestCreateProviderFromConfig_Anthropic(t *testing.T) {
 }
 
 func TestCreateProviderFromConfig_Antigravity(t *testing.T) {
+	origGetCredential := getCredential
+	t.Cleanup(func() {
+		getCredential = origGetCredential
+	})
+	getCredential = func(credentialID string) (*auth.AuthCredential, error) {
+		if credentialID != "google-antigravity" {
+			t.Fatalf("credential ID = %q, want google-antigravity", credentialID)
+		}
+		return &auth.AuthCredential{
+			AccessToken: "test-token",
+			Provider:    "google-antigravity",
+			AuthMethod:  "oauth",
+		}, nil
+	}
+
 	cfg := &config.ModelConfig{
 		ModelName: "test-antigravity",
 		Model:     "antigravity/gemini-2.0-flash",
@@ -799,6 +814,144 @@ func TestCreateProviderFromConfig_OpenAIOAuthUsesCredentialID(t *testing.T) {
 	}
 	if modelID != "gpt-5.4" {
 		t.Errorf("modelID = %q, want %q", modelID, "gpt-5.4")
+	}
+}
+
+func TestCreateProviderFromConfig_AntigravityOAuthUsesNamedCredentialID(t *testing.T) {
+	origGetCredential := getCredential
+	origNewAntigravityProvider := newAntigravityProviderForCredential
+	t.Cleanup(func() {
+		getCredential = origGetCredential
+		newAntigravityProviderForCredential = origNewAntigravityProvider
+	})
+
+	getCredential = func(credentialID string) (*auth.AuthCredential, error) {
+		if credentialID != "google-antigravity:work" {
+			t.Fatalf("credential ID = %q, want google-antigravity:work", credentialID)
+		}
+		return &auth.AuthCredential{
+			AccessToken: "work-token",
+			Provider:    "antigravity",
+			AuthMethod:  "oauth",
+		}, nil
+	}
+
+	var constructedCredentialID string
+	newAntigravityProviderForCredential = func(credentialID string) LLMProvider {
+		constructedCredentialID = credentialID
+		return &factoryStubProvider{}
+	}
+
+	cfg := &config.ModelConfig{
+		ModelName:    "test-antigravity-work",
+		Provider:     "antigravity",
+		Model:        "gemini-3-flash",
+		AuthMethod:   "oauth",
+		CredentialID: "google-antigravity:work",
+	}
+
+	provider, modelID, err := CreateProviderFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("CreateProviderFromConfig() error = %v", err)
+	}
+	if provider == nil {
+		t.Fatal("CreateProviderFromConfig() returned nil provider")
+	}
+	if modelID != "gemini-3-flash" {
+		t.Fatalf("modelID = %q, want gemini-3-flash", modelID)
+	}
+	if constructedCredentialID != "google-antigravity:work" {
+		t.Fatalf(
+			"constructor credential ID = %q, want google-antigravity:work",
+			constructedCredentialID,
+		)
+	}
+}
+
+func TestCreateProviderFromConfigRejectsMismatchedCredentialProviders(t *testing.T) {
+	tests := []struct {
+		name               string
+		cfg                *config.ModelConfig
+		wantCredentialID   string
+		credentialProvider string
+	}{
+		{
+			name: "anthropic oauth",
+			cfg: &config.ModelConfig{
+				Provider:   "anthropic",
+				Model:      "claude-sonnet-4.6",
+				AuthMethod: "oauth",
+			},
+			wantCredentialID:   "anthropic",
+			credentialProvider: "openai",
+		},
+		{
+			name: "openai oauth",
+			cfg: &config.ModelConfig{
+				Provider:   "openai",
+				Model:      "gpt-5.4",
+				AuthMethod: "oauth",
+			},
+			wantCredentialID:   "openai",
+			credentialProvider: "anthropic",
+		},
+		{
+			name: "github copilot token",
+			cfg: &config.ModelConfig{
+				Provider:   "github-copilot",
+				Model:      "gpt-4.1",
+				AuthMethod: "token",
+			},
+			wantCredentialID:   "github-copilot",
+			credentialProvider: "openai",
+		},
+		{
+			name: "antigravity oauth",
+			cfg: &config.ModelConfig{
+				Provider:   "antigravity",
+				Model:      "gemini-3-flash",
+				AuthMethod: "oauth",
+			},
+			wantCredentialID:   "google-antigravity",
+			credentialProvider: "anthropic",
+		},
+		{
+			name: "http token credential",
+			cfg: &config.ModelConfig{
+				Provider:   "openrouter",
+				Model:      "openai/gpt-4.1",
+				AuthMethod: "token",
+			},
+			wantCredentialID:   "openrouter",
+			credentialProvider: "anthropic",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origGetCredential := getCredential
+			t.Cleanup(func() {
+				getCredential = origGetCredential
+			})
+			getCredential = func(credentialID string) (*auth.AuthCredential, error) {
+				if credentialID != tt.wantCredentialID {
+					t.Fatalf("credential ID = %q, want %q", credentialID, tt.wantCredentialID)
+				}
+				return &auth.AuthCredential{
+					AccessToken: "must-not-be-used",
+					Provider:    tt.credentialProvider,
+					AuthMethod:  "oauth",
+				}, nil
+			}
+
+			_, _, err := CreateProviderFromConfig(tt.cfg)
+			if err == nil {
+				t.Fatal("CreateProviderFromConfig() error = nil, want provider mismatch")
+			}
+			if !strings.Contains(err.Error(), "belongs to provider") {
+				t.Fatalf("error = %v, want provider mismatch", err)
+			}
+		})
 	}
 }
 
@@ -1358,6 +1511,25 @@ func TestModelProviderOptions(t *testing.T) {
 	}
 }
 
+func TestDefaultModelForProviderUsesRuntimeDefaults(t *testing.T) {
+	tests := map[string]string{
+		"openai":             "gpt-5.3-codex",
+		"anthropic":          "claude-sonnet-4.6",
+		"github-copilot":     "auto",
+		"copilot":            "auto",
+		"antigravity":        "gemini-3-flash",
+		"google-antigravity": "gemini-3-flash",
+	}
+	for provider, want := range tests {
+		if got := DefaultModelForProvider(provider); got != want {
+			t.Errorf("DefaultModelForProvider(%q) = %q, want %q", provider, got, want)
+		}
+	}
+	if got := DefaultModelForProvider("unknown-provider"); got != "" {
+		t.Fatalf("unknown provider default = %q, want empty", got)
+	}
+}
+
 func TestBuildModelProviderAliasMap(t *testing.T) {
 	aliases := buildModelProviderAliasMap()
 	if len(aliases) == 0 {
@@ -1750,7 +1922,7 @@ func TestCreateProviderFromConfig_InvalidToolSchemaTransform(t *testing.T) {
 	}
 }
 
-func TestCreateProviderSupportsAccountRouterCredentialRefsWithoutModelListAccounts(t *testing.T) {
+func TestCreateProviderUsesCredentialProviderDefaultForModelAgnosticAccountRouter(t *testing.T) {
 	origGetCredential := getCredential
 	origNewCopilotProvider := newGitHubCopilotProviderWithToken
 	t.Cleanup(func() {
@@ -1783,7 +1955,6 @@ func TestCreateProviderSupportsAccountRouterCredentialRefsWithoutModelListAccoun
 	cfg.AccountRouters = []config.AccountRouterConfig{
 		{
 			Name:    "router-1",
-			Model:   "gpt-5.5",
 			Enabled: true,
 			Entry:   "account-1",
 			Blocks: []config.AccountRouterBlock{{
@@ -1802,11 +1973,11 @@ func TestCreateProviderSupportsAccountRouterCredentialRefsWithoutModelListAccoun
 	if provider == nil {
 		t.Fatal("CreateProvider() returned nil provider")
 	}
-	if modelID != "gpt-5.5" {
-		t.Fatalf("modelID = %q, want gpt-5.5", modelID)
+	if modelID != "router-1" {
+		t.Fatalf("model selector = %q, want account router alias router-1", modelID)
 	}
-	if gotModel != "gpt-5.5" {
-		t.Fatalf("constructor model = %q, want gpt-5.5", gotModel)
+	if gotModel != "auto" {
+		t.Fatalf("constructor model = %q, want GitHub Copilot default auto", gotModel)
 	}
 }
 
@@ -1838,7 +2009,7 @@ func TestCreateProviderSupportsCredentialRefDefaultWithoutModelList(t *testing.T
 	if provider == nil {
 		t.Fatal("CreateProvider() returned nil provider")
 	}
-	if modelID != "gpt-5.4" {
-		t.Fatalf("modelID = %q, want gpt-5.4", modelID)
+	if modelID != "gpt-5.3-codex" {
+		t.Fatalf("modelID = %q, want OpenAI Codex default gpt-5.3-codex", modelID)
 	}
 }

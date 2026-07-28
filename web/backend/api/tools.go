@@ -556,10 +556,7 @@ func resolveToolAdaptationProfileForConfig(
 			if routerProvider, routerModel, ok := firstAccountRouterProfileForAdaptation(cfg, router); ok {
 				return routerProvider, routerModel
 			}
-			if router != nil {
-				return "", strings.TrimSpace(router.Model)
-			}
-			return "", model
+			return "", ""
 		}
 		if mc.IsModelRouter() {
 			router := mc.ModelRouter
@@ -633,13 +630,11 @@ func firstAccountRouterProfileForAdaptation(
 	if router == nil || !router.Enabled {
 		return "", "", false
 	}
-	routerModel := strings.TrimSpace(router.Model)
 	for _, account := range accountRouterAccountsForAdaptation(router) {
-		if provider, ok := config.AccountRouterCredentialAccountProvider(account); ok {
-			provider = providers.NormalizeProvider(provider)
-			if provider != "" && routerModel != "" {
-				return provider, routerModel, true
-			}
+		if provider, model, ok := accountRouterCredentialProfileForAdaptation(account); ok {
+			return provider, model, true
+		}
+		if _, ok := config.AccountRouterCredentialAccountID(account); ok {
 			continue
 		}
 		for _, mc := range modelConfigsByNameForAdaptation(cfg, account) {
@@ -669,15 +664,27 @@ func firstAccountRouterProfileForAdaptation(
 			provider, model := providers.ExtractProtocol(mc)
 			provider = providers.NormalizeProvider(provider)
 			model = strings.TrimSpace(model)
-			if routerModel != "" {
-				model = routerModel
-			}
 			if provider != "" && model != "" {
 				return provider, model, true
 			}
 		}
 	}
 	return "", "", false
+}
+
+func accountRouterCredentialProfileForAdaptation(
+	account string,
+) (string, string, bool) {
+	provider, ok := config.AccountRouterCredentialAccountProvider(account)
+	if !ok {
+		return "", "", false
+	}
+	provider = probeCredentialRuntimeProvider(provider)
+	model := providers.DefaultModelForProvider(provider)
+	if provider == "" || model == "" {
+		return "", "", false
+	}
+	return provider, model, true
 }
 
 func providerModelFromRefForAdaptation(ref string) (string, string, bool) {
@@ -849,10 +856,12 @@ func (b *toolAdaptationProfileBuilder) addAccountRouter(
 	if router == nil || !router.Enabled {
 		return
 	}
-	routerModel := strings.TrimSpace(router.Model)
 	for _, account := range accountRouterAccountsForAdaptation(router) {
-		if provider, ok := config.AccountRouterCredentialAccountProvider(account); ok {
-			b.addProfileWithActive(provider, routerModel, source, provider, active)
+		if provider, model, ok := accountRouterCredentialProfileForAdaptation(account); ok {
+			b.addProfileWithActive(provider, model, source, provider, active)
+			continue
+		}
+		if _, ok := config.AccountRouterCredentialAccountID(account); ok {
 			continue
 		}
 		matches := modelConfigsByNameForAdaptation(b.cfg, account)
@@ -877,9 +886,6 @@ func (b *toolAdaptationProfileBuilder) addAccountRouter(
 				continue
 			}
 			provider, model := providers.ExtractProtocol(mc)
-			if routerModel != "" {
-				model = routerModel
-			}
 			b.addProfileWithActive(provider, model, source, provider, active)
 		}
 	}
@@ -1166,7 +1172,7 @@ func probeModelConfigForProfile(
 		return nil, fmt.Errorf("provider and model are required")
 	}
 
-	candidates := probeModelConfigCandidates(cfg)
+	candidates := probeModelConfigCandidates(cfg, providerName, model)
 	var firstExact *config.ModelConfig
 	for _, candidate := range candidates {
 		if probeModelConfigMatches(candidate, providerName, model) {
@@ -1191,7 +1197,11 @@ func probeModelConfigForProfile(
 	)
 }
 
-func probeModelConfigCandidates(cfg *config.Config) []*config.ModelConfig {
+func probeModelConfigCandidates(
+	cfg *config.Config,
+	providerName string,
+	model string,
+) []*config.ModelConfig {
 	var candidates []*config.ModelConfig
 	for _, modelCfg := range cfg.ModelList {
 		if modelCfg == nil || !modelCfg.Enabled ||
@@ -1209,7 +1219,13 @@ func probeModelConfigCandidates(cfg *config.Config) []*config.ModelConfig {
 		for _, account := range accountRouterAccountsForAdaptation(router) {
 			candidates = append(
 				candidates,
-				probeModelConfigsForAccount(cfg, account, router.Model, map[string]struct{}{})...,
+				probeModelConfigsForAccount(
+					cfg,
+					account,
+					providerName,
+					model,
+					map[string]struct{}{},
+				)...,
 			)
 		}
 	}
@@ -1219,7 +1235,8 @@ func probeModelConfigCandidates(cfg *config.Config) []*config.ModelConfig {
 func probeModelConfigsForAccount(
 	cfg *config.Config,
 	account string,
-	sharedModel string,
+	providerName string,
+	model string,
 	visited map[string]struct{},
 ) []*config.ModelConfig {
 	account = strings.TrimSpace(account)
@@ -1234,14 +1251,17 @@ func probeModelConfigsForAccount(
 
 	if credentialID, ok := config.AccountRouterCredentialAccountID(account); ok {
 		provider, providerOK := config.AccountRouterCredentialAccountProvider(account)
-		if !providerOK || strings.TrimSpace(sharedModel) == "" {
+		if !providerOK {
 			return nil
 		}
 		provider = probeCredentialRuntimeProvider(provider)
+		if providers.NormalizeProvider(provider) != providers.NormalizeProvider(providerName) {
+			return nil
+		}
 		return []*config.ModelConfig{{
 			ModelName:    account,
 			Provider:     provider,
-			Model:        strings.TrimSpace(sharedModel),
+			Model:        strings.TrimSpace(model),
 			AuthMethod:   probeCredentialRuntimeAuthMethod(provider),
 			CredentialID: credentialID,
 			Enabled:      true,
@@ -1265,15 +1285,23 @@ func probeModelConfigsForAccount(
 			for _, nestedAccount := range accountRouterAccountsForAdaptation(router) {
 				candidates = append(
 					candidates,
-					probeModelConfigsForAccount(cfg, nestedAccount, router.Model, visited)...,
+					probeModelConfigsForAccount(
+						cfg,
+						nestedAccount,
+						providerName,
+						model,
+						visited,
+					)...,
 				)
 			}
 		case modelCfg.IsModelRouter():
 			continue
 		default:
 			clone := *modelCfg
-			if strings.TrimSpace(sharedModel) != "" {
-				clone.Model = strings.TrimSpace(sharedModel)
+			candidateProvider, _ := providers.ExtractProtocol(modelCfg)
+			if providers.NormalizeProvider(candidateProvider) == providers.NormalizeProvider(providerName) {
+				clone.Provider = candidateProvider
+				clone.Model = strings.TrimSpace(model)
 			}
 			candidates = append(candidates, &clone)
 		}

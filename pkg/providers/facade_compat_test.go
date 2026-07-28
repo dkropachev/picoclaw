@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"context"
 	"testing"
 
 	cliprovider "github.com/sipeed/picoclaw/pkg/providers/cli"
@@ -40,5 +41,6 @@ func TestNormalizeToolCallFacadeMatchesCLIProvider(t *testing.T) {
 func TestAntigravityFacadeSignaturesRemainAvailable(t *testing.T) {
 	var _ func(string) (string, error) = FetchAntigravityProjectID
 	var _ func(string, string) ([]AntigravityModelInfo, error) = FetchAntigravityModels
+	var _ func(context.Context, string, string) ([]AntigravityModelInfo, error) = FetchAntigravityModelsContext
 	var _ AntigravityModelInfo = oauthprovider.AntigravityModelInfo{}
 }

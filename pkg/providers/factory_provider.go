@@ -36,6 +36,9 @@ func createClaudeAuthProvider(cfg *config.ModelConfig) (LLMProvider, error) {
 			credentialID,
 		)
 	}
+	if err := validateCredentialProvider(credentialID, "anthropic", cred); err != nil {
+		return nil, err
+	}
 	return NewClaudeProviderWithTokenSource(cred.AccessToken, createClaudeTokenSourceForCredential(credentialID)), nil
 }
 
@@ -56,11 +59,38 @@ func createCodexAuthProvider(cfg *config.ModelConfig) (LLMProvider, error) {
 			credentialID,
 		)
 	}
+	if err := validateCredentialProvider(credentialID, "openai", cred); err != nil {
+		return nil, err
+	}
 	return NewCodexProviderWithTokenSource(
 		cred.AccessToken,
 		cred.AccountID,
 		createCodexTokenSourceForCredential(credentialID),
 	), nil
+}
+
+// createAntigravityAuthProvider creates an Antigravity provider using a named
+// Google Antigravity OAuth credential from the auth store.
+func createAntigravityAuthProvider(cfg *config.ModelConfig) (LLMProvider, error) {
+	credentialID, err := credentialIDForModel(cfg, "google-antigravity")
+	if err != nil {
+		return nil, err
+	}
+	cred, err := getCredential(credentialID)
+	if err != nil {
+		return nil, fmt.Errorf("loading auth credentials: %w", err)
+	}
+	if cred == nil {
+		return nil, fmt.Errorf(
+			"no credentials for %s. Run: picoclaw auth login --provider google-antigravity --credential-id %s",
+			credentialID,
+			credentialID,
+		)
+	}
+	if err := validateCredentialProvider(credentialID, "google-antigravity", cred); err != nil {
+		return nil, err
+	}
+	return newAntigravityProviderForCredential(credentialID), nil
 }
 
 // createGitHubCopilotAuthProvider creates a GitHub Copilot provider using a
@@ -81,6 +111,9 @@ func createGitHubCopilotAuthProvider(cfg *config.ModelConfig, modelID string) (L
 			credentialID,
 		)
 	}
+	if err := validateCredentialProvider(credentialID, "github-copilot", cred); err != nil {
+		return nil, err
+	}
 	token := strings.TrimSpace(cred.AccessToken)
 	if err := auth.ValidateGitHubCopilotToken(token); err != nil {
 		return nil, fmt.Errorf("invalid GitHub Copilot credential %s: %w", credentialID, err)
@@ -93,6 +126,30 @@ func credentialIDForModel(cfg *config.ModelConfig, provider string) (string, err
 		return auth.NormalizeCredentialID(provider, "")
 	}
 	return auth.NormalizeCredentialID(provider, cfg.CredentialID)
+}
+
+func validateCredentialProvider(
+	credentialID string,
+	requestedProvider string,
+	cred *auth.AuthCredential,
+) error {
+	if cred == nil {
+		return fmt.Errorf("credential %s is missing", credentialID)
+	}
+	expectedProvider, err := auth.NormalizeCredentialID(requestedProvider, "")
+	if err != nil {
+		return fmt.Errorf("normalizing provider %q: %w", requestedProvider, err)
+	}
+	actualProvider, err := auth.NormalizeCredentialID(cred.Provider, "")
+	if err != nil || actualProvider != expectedProvider {
+		return fmt.Errorf(
+			"credential %s belongs to provider %q, want %q",
+			credentialID,
+			cred.Provider,
+			expectedProvider,
+		)
+	}
+	return nil
 }
 
 // ExtractProtocol extracts the effective protocol and model identifier from a
@@ -399,7 +456,11 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		), modelID, cfg)
 
 	case "antigravity":
-		return finalizeProviderFromConfig(NewAntigravityProvider(), modelID, cfg)
+		provider, err := createAntigravityAuthProvider(cfg)
+		if err != nil {
+			return nil, "", err
+		}
+		return finalizeProviderFromConfig(provider, modelID, cfg)
 
 	case "claude-cli":
 		workspace := cfg.Workspace
@@ -479,6 +540,9 @@ func apiKeyFromConfigOrCredential(cfg *config.ModelConfig, provider string) (str
 			provider,
 			credentialID,
 		)
+	}
+	if err := validateCredentialProvider(credentialID, provider, cred); err != nil {
+		return "", err
 	}
 	return strings.TrimSpace(cred.AccessToken), nil
 }

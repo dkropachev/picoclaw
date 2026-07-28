@@ -134,7 +134,7 @@ func TestNormalizeStoredModelConfigElevenLabsCanonicalModel(t *testing.T) {
 func TestNormalizeIncomingModelConfigClearsRouterTransportFields(t *testing.T) {
 	model := &config.ModelConfig{
 		ModelName:    "router-main",
-		Model:        " legacy-shared-model ",
+		Model:        " legacy-router-model ",
 		Provider:     " router ",
 		APIKeys:      config.SimpleSecureStrings("sk-router"),
 		APIBase:      "https://example.com/v1",
@@ -159,8 +159,8 @@ func TestNormalizeIncomingModelConfigClearsRouterTransportFields(t *testing.T) {
 	if model.Provider != config.AccountRouterProvider {
 		t.Fatalf("provider = %q, want router", model.Provider)
 	}
-	if model.Model != "legacy-shared-model" {
-		t.Fatalf("model = %q, want legacy-shared-model", model.Model)
+	if model.Model != "" {
+		t.Fatalf("model = %q, want empty for account router", model.Model)
 	}
 	if len(model.APIKeys) != 0 || model.APIBase != "" || model.Proxy != "" ||
 		model.AuthMethod != "" || model.CredentialID != "" ||
@@ -198,7 +198,7 @@ func TestNormalizeIncomingModelConfigNormalizesNonRouterFields(t *testing.T) {
 	}
 }
 
-func TestValidateIncomingModelConfigRejectsEmptyRouterModel(t *testing.T) {
+func TestValidateIncomingModelConfigAcceptsEmptyRouterModel(t *testing.T) {
 	model := &config.ModelConfig{
 		ModelName: "router-main",
 		Provider:  config.AccountRouterProvider,
@@ -216,8 +216,8 @@ func TestValidateIncomingModelConfigRejectsEmptyRouterModel(t *testing.T) {
 	if err := validateIncomingModelConfig(nil, nil); err == nil {
 		t.Fatal("validateIncomingModelConfig(nil) error = nil, want error")
 	}
-	if err := validateIncomingModelConfig(model, nil); err == nil {
-		t.Fatal("validateIncomingModelConfig(router) error = nil, want error")
+	if err := validateIncomingModelConfig(model, nil); err != nil {
+		t.Fatalf("validateIncomingModelConfig(router) error = %v, want nil", err)
 	}
 }
 
@@ -892,6 +892,12 @@ func TestHandleListModelsIncludesCredentialAccountsAsVirtualDefaults(t *testing.
 			openAIAccount.AuthMethod,
 		)
 	}
+	if openAIAccount.Model != "gpt-5.3-codex" {
+		t.Fatalf(
+			"openai account model = %q, want OpenAI Codex default gpt-5.3-codex",
+			openAIAccount.Model,
+		)
+	}
 
 	copilotAccount, ok := modelsByName["credential:github-copilot:gh-copilot"]
 	if !ok {
@@ -906,6 +912,42 @@ func TestHandleListModelsIncludesCredentialAccountsAsVirtualDefaults(t *testing.
 	}
 	if resp.DefaultModel != "credential:openai:work" {
 		t.Fatalf("default_model = %q, want credential:openai:work", resp.DefaultModel)
+	}
+}
+
+func TestHandleListModelsSkipsCredentialWithMismatchedProvider(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	if err := auth.SetCredential("openai:cross-wired", &auth.AuthCredential{
+		Provider:    "anthropic",
+		AuthMethod:  "token",
+		AccessToken: "must-not-be-exposed-as-openai",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp struct {
+		Models []modelResponse `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	for _, model := range resp.Models {
+		if model.ModelName == "credential:openai:cross-wired" {
+			t.Fatalf("mismatched credential was exposed in model list: %#v", model)
+		}
 	}
 }
 
@@ -2753,8 +2795,8 @@ func TestHandleModels_AccountRouterRoundTripAndDefault(t *testing.T) {
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
 	cfg.ModelList = []*config.ModelConfig{
-		{ModelName: "account-a", Provider: "openai", Model: "gpt-4o"},
-		{ModelName: "account-b", Provider: "openai", Model: "gpt-4o-mini"},
+		{ModelName: "account-a", Provider: "openai", Model: "gpt-4o", Enabled: true},
+		{ModelName: "account-b", Provider: "openai", Model: "gpt-4o-mini", Enabled: true},
 	}
 	cfg.Agents.Defaults.ModelName = "account-a"
 	err = config.SaveConfig(configPath, cfg)
@@ -3014,7 +3056,7 @@ func TestHandleAddModel_RejectsRouterUnknownAccountAsBadRequest(t *testing.T) {
 	}
 }
 
-func TestHandleAddModelRejectsAccountRouterSelfModel(t *testing.T) {
+func TestHandleAddModelIgnoresLegacyAccountRouterModel(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()
 
@@ -3023,7 +3065,7 @@ func TestHandleAddModelRejectsAccountRouterSelfModel(t *testing.T) {
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
 	cfg.ModelList = []*config.ModelConfig{
-		{ModelName: "account-a", Provider: "openai", Model: "gpt-4o"},
+		{ModelName: "account-a", Provider: "openai", Model: "gpt-4o", Enabled: true},
 	}
 	if err = config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
@@ -3049,11 +3091,16 @@ func TestHandleAddModelRejectsAccountRouterSelfModel(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models", bytes.NewBufferString(addBody))
 	req.Header.Set("Content-Type", "application/json")
 	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("add status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("add status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "not the router itself") {
-		t.Fatalf("body = %q, want self-reference rejection", rec.Body.String())
+	updated, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() after add error = %v", err)
+	}
+	router := updated.ModelList[len(updated.ModelList)-1]
+	if router.Model != "" {
+		t.Fatalf("router model = %q, want legacy input discarded", router.Model)
 	}
 }
 
@@ -3107,8 +3154,8 @@ func TestHandleAddModel_AcceptsGitHubCopilotCredentialAccountRouterRef(t *testin
 	if got := router.Router.Blocks[0].Account; got != "credential:github-copilot:gh-copilot" {
 		t.Fatalf("router account = %q, want credential:github-copilot:gh-copilot", got)
 	}
-	if got := router.Model; got != "gpt-4o" {
-		t.Fatalf("router model = %q, want gpt-4o", got)
+	if got := router.Model; got != "" {
+		t.Fatalf("router model = %q, want empty", got)
 	}
 }
 
@@ -3179,8 +3226,8 @@ func TestHandleAddModel_AcceptsGitHubCopilotCredentialLoadBalanceRouterRefs(t *t
 			if fmt.Sprint(block.Accounts) != fmt.Sprint(wantAccounts) {
 				t.Fatalf("router accounts = %v, want %v", block.Accounts, wantAccounts)
 			}
-			if got := router.Model; got != "gpt-4o" {
-				t.Fatalf("router model = %q, want gpt-4o", got)
+			if got := router.Model; got != "" {
+				t.Fatalf("router model = %q, want empty", got)
 			}
 		})
 	}
@@ -3929,4 +3976,747 @@ func TestHandleFetchModels_ModelIndexProviderMismatchRejectsKey(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/accounts/models/fetch", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	mux.ServeHTTP(rec, req)
+}
+
+func TestHandleFetchModels_AccountRefCredential(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	oldList := listGitHubCopilotModelsWithToken
+	t.Cleanup(func() { listGitHubCopilotModelsWithToken = oldList })
+
+	var gotToken string
+	listGitHubCopilotModelsWithToken = func(
+		_ context.Context,
+		token string,
+	) ([]copilot.ModelInfo, error) {
+		gotToken = token
+		return []copilot.ModelInfo{
+			{ID: "gpt-5.4"},
+			{ID: "claude-sonnet-4.6"},
+		}, nil
+	}
+	if err := auth.SetCredential(
+		"github-copilot:work",
+		&auth.AuthCredential{
+			AccessToken: "gho-work-token",
+			Provider:    "github-copilot",
+			AuthMethod:  "token",
+		},
+	); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/accounts/models/fetch",
+		strings.NewReader(`{"account_ref":"credential:github-copilot:work"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if gotToken != "gho-work-token" {
+		t.Fatalf("token = %q, want stored credential token", gotToken)
+	}
+	var resp fetchModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if resp.Total != 2 || len(resp.Models) != 2 {
+		t.Fatalf("response = %+v, want two credential models", resp)
+	}
+	if resp.Models[0].ID != "gpt-5.4" || resp.Models[1].ID != "claude-sonnet-4.6" {
+		t.Fatalf("models = %+v, want fetched credential models", resp.Models)
+	}
+	if len(resp.Issues) != 0 {
+		t.Fatalf("issues = %+v, want none", resp.Issues)
+	}
+}
+
+func TestHandleFetchModels_AntigravityCredentialUsesLiveModelList(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	oldFetch := fetchAntigravityModels
+	t.Cleanup(func() { fetchAntigravityModels = oldFetch })
+
+	var gotToken string
+	var gotProjectID string
+	fetchAntigravityModels = func(
+		_ context.Context,
+		accessToken string,
+		projectID string,
+	) ([]providers.AntigravityModelInfo, error) {
+		gotToken = accessToken
+		gotProjectID = projectID
+		return []providers.AntigravityModelInfo{
+			{ID: " gemini-3-pro "},
+			{ID: "GEMINI-3-PRO"},
+			{ID: "gemini-3-flash"},
+			{ID: "gemini-3-exhausted", IsExhausted: true},
+			{},
+		}, nil
+	}
+	if err := auth.SetCredential(
+		"google-antigravity:work",
+		&auth.AuthCredential{
+			AccessToken: "google-work-token",
+			Provider:    "google-antigravity",
+			AuthMethod:  "oauth",
+			ProjectID:   "cloud-code-project",
+		},
+	); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/accounts/models/fetch",
+		strings.NewReader(`{"account_ref":"credential:antigravity:work"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if gotToken != "google-work-token" {
+		t.Fatalf("token = %q, want stored credential token", gotToken)
+	}
+	if gotProjectID != "cloud-code-project" {
+		t.Fatalf("project ID = %q, want stored project ID", gotProjectID)
+	}
+	var resp fetchModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if resp.Total != 2 || len(resp.Models) != 2 {
+		t.Fatalf("response = %+v, want two unique live models", resp)
+	}
+	if resp.Models[0] != (upstreamModel{ID: "gemini-3-pro", OwnedBy: "antigravity"}) ||
+		resp.Models[1] != (upstreamModel{ID: "gemini-3-flash", OwnedBy: "antigravity"}) {
+		t.Fatalf("models = %+v, want normalized live Antigravity models", resp.Models)
+	}
+	if len(resp.Issues) != 0 {
+		t.Fatalf("issues = %+v, want none", resp.Issues)
+	}
+}
+
+func TestHandleFetchModels_AntigravityCredentialRefreshesBeforeLiveModelList(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	oldFetch := fetchAntigravityModels
+	oldRefresh := refreshAntigravityCredential
+	t.Cleanup(func() {
+		fetchAntigravityModels = oldFetch
+		refreshAntigravityCredential = oldRefresh
+	})
+
+	var gotToken string
+	var gotProjectID string
+	fetchAntigravityModels = func(
+		_ context.Context,
+		accessToken string,
+		projectID string,
+	) ([]providers.AntigravityModelInfo, error) {
+		gotToken = accessToken
+		gotProjectID = projectID
+		return []providers.AntigravityModelInfo{{ID: "gemini-3-pro"}}, nil
+	}
+	refreshAntigravityCredential = func(
+		credential *auth.AuthCredential,
+		cfg auth.OAuthProviderConfig,
+	) (*auth.AuthCredential, error) {
+		if credential.AccessToken != "expired-token" ||
+			credential.RefreshToken != "refresh-token" {
+			t.Fatalf("refresh credential = %+v, want stored expired credential", credential)
+		}
+		if cfg.TokenURL == "" {
+			t.Fatal("refresh config is not the Antigravity OAuth config")
+		}
+		return &auth.AuthCredential{
+			AccessToken:  "refreshed-token",
+			RefreshToken: "refresh-token",
+			ExpiresAt:    time.Now().Add(time.Hour),
+			Provider:     "google-antigravity",
+			AuthMethod:   "oauth",
+		}, nil
+	}
+
+	if err := auth.SetCredential(
+		"google-antigravity:work",
+		&auth.AuthCredential{
+			AccessToken:  "expired-token",
+			RefreshToken: "refresh-token",
+			ExpiresAt:    time.Now().Add(-time.Hour),
+			Provider:     "google-antigravity",
+			AuthMethod:   "oauth",
+			Email:        "work@example.com",
+			ProjectID:    "cloud-code-project",
+		},
+	); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/accounts/models/fetch",
+		strings.NewReader(`{"account_ref":"credential:antigravity:work"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if gotToken != "refreshed-token" || gotProjectID != "cloud-code-project" {
+		t.Fatalf(
+			"live fetch auth = (%q, %q), want refreshed token and preserved project",
+			gotToken,
+			gotProjectID,
+		)
+	}
+	stored, err := auth.GetCredential("google-antigravity:work")
+	if err != nil {
+		t.Fatalf("GetCredential() error = %v", err)
+	}
+	if stored == nil ||
+		stored.AccessToken != "refreshed-token" ||
+		stored.Email != "work@example.com" ||
+		stored.ProjectID != "cloud-code-project" {
+		t.Fatalf("stored refreshed credential = %+v", stored)
+	}
+}
+
+func TestFetchModelsForAccountConfig_AntigravityExhaustedModelsDoNotFallback(t *testing.T) {
+	_, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	oldFetch := fetchAntigravityModels
+	t.Cleanup(func() { fetchAntigravityModels = oldFetch })
+	fetchAntigravityModels = func(
+		context.Context,
+		string,
+		string,
+	) ([]providers.AntigravityModelInfo, error) {
+		return []providers.AntigravityModelInfo{{
+			ID:          "gemini-3-flash",
+			IsExhausted: true,
+		}}, nil
+	}
+	if err := auth.SetCredential(
+		"google-antigravity:work",
+		&auth.AuthCredential{
+			AccessToken: "google-work-token",
+			Provider:    "google-antigravity",
+			AuthMethod:  "oauth",
+			ProjectID:   "cloud-code-project",
+		},
+	); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	models, err := fetchModelsForAccountConfig(t.Context(), &config.ModelConfig{
+		ModelName:    "antigravity-work",
+		Provider:     "antigravity",
+		Model:        "gemini-3-flash",
+		AuthMethod:   "oauth",
+		CredentialID: "google-antigravity:work",
+		Enabled:      true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "no available models") {
+		t.Fatalf("fetchModelsForAccountConfig() error = %v, want no available models", err)
+	}
+	if len(models) != 0 {
+		t.Fatalf("models = %+v, want no exhausted or static fallback models", models)
+	}
+}
+
+func TestFetchModelsForAccountConfig_AntigravityCredentialValidationUsesFallback(t *testing.T) {
+	tests := []struct {
+		name       string
+		credential *auth.AuthCredential
+		wantError  string
+	}{
+		{
+			name: "provider mismatch",
+			credential: &auth.AuthCredential{
+				AccessToken: "wrong-provider-token",
+				Provider:    "openai",
+				AuthMethod:  "oauth",
+				ProjectID:   "cloud-code-project",
+			},
+			wantError: "not antigravity",
+		},
+		{
+			name: "missing access token",
+			credential: &auth.AuthCredential{
+				Provider:   "google-antigravity",
+				AuthMethod: "oauth",
+				ProjectID:  "cloud-code-project",
+			},
+			wantError: "has no access token",
+		},
+		{
+			name: "missing project ID",
+			credential: &auth.AuthCredential{
+				AccessToken: "google-work-token",
+				Provider:    "google-antigravity",
+				AuthMethod:  "oauth",
+			},
+			wantError: "has no project ID",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, cleanup := setupOAuthTestEnv(t)
+			defer cleanup()
+
+			oldFetch := fetchAntigravityModels
+			t.Cleanup(func() { fetchAntigravityModels = oldFetch })
+			fetchCalled := false
+			fetchAntigravityModels = func(
+				context.Context,
+				string,
+				string,
+			) ([]providers.AntigravityModelInfo, error) {
+				fetchCalled = true
+				return nil, nil
+			}
+			if err := auth.SetCredential(
+				"google-antigravity:work",
+				tt.credential,
+			); err != nil {
+				t.Fatalf("SetCredential() error = %v", err)
+			}
+
+			models, err := fetchModelsForAccountConfig(t.Context(), &config.ModelConfig{
+				ModelName:    "antigravity-work",
+				Provider:     "antigravity",
+				Model:        "gemini-3-flash",
+				AuthMethod:   "oauth",
+				CredentialID: "google-antigravity:work",
+				Enabled:      true,
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("fetchModelsForAccountConfig() error = %v, want %q", err, tt.wantError)
+			}
+			if len(models) != 1 ||
+				models[0] != (upstreamModel{ID: "gemini-3-flash", OwnedBy: "antigravity"}) {
+				t.Fatalf("models = %+v, want static Antigravity fallback", models)
+			}
+			if fetchCalled {
+				t.Fatal("live Antigravity fetch called with invalid credential")
+			}
+		})
+	}
+}
+
+func TestHandleFetchModels_AntigravityLiveFailureReturnsFallbackIssue(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	oldFetch := fetchAntigravityModels
+	t.Cleanup(func() { fetchAntigravityModels = oldFetch })
+	fetchAntigravityModels = func(
+		context.Context,
+		string,
+		string,
+	) ([]providers.AntigravityModelInfo, error) {
+		return nil, fmt.Errorf("quota service unavailable")
+	}
+	if err := auth.SetCredential(
+		"google-antigravity:work",
+		&auth.AuthCredential{
+			AccessToken: "google-work-token",
+			Provider:    "google-antigravity",
+			AuthMethod:  "oauth",
+			ProjectID:   "cloud-code-project",
+		},
+	); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName:    "antigravity-work",
+		Provider:     "antigravity",
+		Model:        "gemini-3-flash",
+		AuthMethod:   "oauth",
+		CredentialID: "google-antigravity:work",
+		Enabled:      true,
+	}}
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/accounts/models/fetch",
+		strings.NewReader(`{"account_ref":"antigravity-work"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp fetchModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if resp.Total != 1 ||
+		len(resp.Models) != 1 ||
+		resp.Models[0] != (upstreamModel{ID: "gemini-3-flash", OwnedBy: "antigravity"}) {
+		t.Fatalf("models = %+v, want static Antigravity fallback", resp.Models)
+	}
+	if len(resp.Issues) != 1 ||
+		resp.Issues[0].AccountRef != "antigravity-work" ||
+		!strings.Contains(resp.Issues[0].Error, "quota service unavailable") {
+		t.Fatalf("issues = %+v, want live fetch failure", resp.Issues)
+	}
+}
+
+func TestResolveAccountModelConfigNormalizesNamedCredentialAliases(t *testing.T) {
+	_, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	for credentialID, credential := range map[string]*auth.AuthCredential{
+		"github-copilot:work": {
+			AccessToken: "gho-work-token",
+			Provider:    "github-copilot",
+			AuthMethod:  "token",
+		},
+		"google-antigravity:work": {
+			AccessToken: "google-work-token",
+			Provider:    "google-antigravity",
+			AuthMethod:  "oauth",
+		},
+	} {
+		if err := auth.SetCredential(credentialID, credential); err != nil {
+			t.Fatalf("SetCredential(%q) error = %v", credentialID, err)
+		}
+	}
+
+	tests := []struct {
+		accountRef       string
+		wantProvider     string
+		wantCredentialID string
+		wantModel        string
+	}{
+		{
+			accountRef:       "credential:copilot:work",
+			wantProvider:     "github-copilot",
+			wantCredentialID: "github-copilot:work",
+			wantModel:        "auto",
+		},
+		{
+			accountRef:       "credential:antigravity:work",
+			wantProvider:     "antigravity",
+			wantCredentialID: "google-antigravity:work",
+			wantModel:        "gemini-3-flash",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.accountRef, func(t *testing.T) {
+			if !credentialAccountDefaultModelAllowed(tt.accountRef) {
+				t.Fatal("credentialAccountDefaultModelAllowed() = false, want true")
+			}
+			got, err := resolveAccountModelConfig(config.DefaultConfig(), tt.accountRef)
+			if err != nil {
+				t.Fatalf("resolveAccountModelConfig() error = %v", err)
+			}
+			if got.Provider != tt.wantProvider ||
+				got.CredentialID != tt.wantCredentialID ||
+				got.Model != tt.wantModel {
+				t.Fatalf(
+					"model config = %#v, want provider=%q credential=%q model=%q",
+					got,
+					tt.wantProvider,
+					tt.wantCredentialID,
+					tt.wantModel,
+				)
+			}
+		})
+	}
+}
+
+func TestResolveAccountModelConfigRejectsCredentialProviderMismatch(t *testing.T) {
+	_, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	if err := auth.SetCredential("openai:work", &auth.AuthCredential{
+		AccessToken: "anthropic-token",
+		Provider:    "anthropic",
+		AuthMethod:  "token",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	accountRef := "credential:openai:work"
+	if credentialAccountDefaultModelAllowed(accountRef) {
+		t.Fatal("credentialAccountDefaultModelAllowed() = true for mismatched provider")
+	}
+	if _, err := resolveAccountModelConfig(config.DefaultConfig(), accountRef); err == nil ||
+		!strings.Contains(err.Error(), `belongs to provider "anthropic"`) {
+		t.Fatalf("resolveAccountModelConfig() error = %v, want provider mismatch", err)
+	}
+	if _, err := resolveOpenAICodexCredential("openai:work"); err == nil ||
+		!strings.Contains(err.Error(), "not openai") {
+		t.Fatalf("resolveOpenAICodexCredential() error = %v, want provider mismatch", err)
+	}
+}
+
+func TestResolveAccountModelConfigRejectsDisabledAlias(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName: "disabled-account",
+		Provider:  "openai",
+		Model:     "gpt-5.4",
+		APIKeys:   config.SimpleSecureStrings("sk-disabled"),
+		Enabled:   false,
+	}}
+
+	if _, err := resolveAccountModelConfig(cfg, "disabled-account"); err == nil ||
+		!strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("resolveAccountModelConfig() error = %v, want disabled account", err)
+	}
+}
+
+func TestHandleFetchModels_AccountRouterIntersectsReachableAliases(t *testing.T) {
+	var mu sync.Mutex
+	requests := map[string]int{}
+	authHeaders := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests[r.URL.Path]++
+		authHeaders[r.URL.Path] = r.Header.Get("Authorization")
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/a/models":
+			fmt.Fprint(w, `{"data":[{"id":" Shared "},{"id":"alpha"},{"id":"shared"}]}`)
+		case "/b/models":
+			fmt.Fprint(w, `{"data":[{"id":"SHARED"},{"id":"beta"}]}`)
+		case "/failed/models":
+			http.Error(w, "account unavailable", http.StatusServiceUnavailable)
+		case "/metrics/models", "/orphan/models":
+			fmt.Fprint(w, `{"data":[{"id":"not-shared"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	t.Setenv("PICOCLAW_HOME", filepath.Join(tmp, ".picoclaw"))
+	threshold := 0.0
+	cfg := config.DefaultConfig()
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "account-a",
+			Provider:  "openai",
+			Model:     "shared",
+			APIBase:   srv.URL + "/a",
+			APIKeys:   config.SimpleSecureStrings("sk-a"),
+			Enabled:   true,
+		},
+		{
+			ModelName: "account-b",
+			Provider:  "openai",
+			Model:     "shared",
+			APIBase:   srv.URL + "/b",
+			APIKeys:   config.SimpleSecureStrings("sk-b"),
+			Enabled:   true,
+		},
+		{
+			ModelName: "account-fallback",
+			Provider:  "openai",
+			Model:     "shared",
+			APIBase:   srv.URL + "/failed",
+			APIKeys:   config.SimpleSecureStrings("sk-failed"),
+			Enabled:   true,
+		},
+		{
+			ModelName: "metrics-only",
+			Provider:  "openai",
+			Model:     "not-shared",
+			APIBase:   srv.URL + "/metrics",
+			APIKeys:   config.SimpleSecureStrings("sk-metrics"),
+			Enabled:   true,
+		},
+		{
+			ModelName: "orphan",
+			Provider:  "openai",
+			Model:     "not-shared",
+			APIBase:   srv.URL + "/orphan",
+			APIKeys:   config.SimpleSecureStrings("sk-orphan"),
+			Enabled:   true,
+		},
+	}
+	cfg.AccountRouters = []config.AccountRouterConfig{{
+		Name:    "router-main",
+		Enabled: true,
+		Entry:   "branch",
+		Blocks: []config.AccountRouterBlock{
+			{
+				ID:   "branch",
+				Type: config.AccountRouterBlockTypeBranch,
+				Condition: &config.AccountRouterCondition{
+					Left: config.AccountRouterExpression{
+						Account: "metrics-only",
+						Metric:  "rpm",
+					},
+					Operator: config.AccountRouterBranchOpGT,
+					Right:    config.AccountRouterExpression{Value: &threshold},
+				},
+				Then:     "account-a",
+				Else:     "account-b",
+				Fallback: "account-fallback",
+			},
+			{
+				ID:      "account-a",
+				Type:    config.AccountRouterBlockTypeAccount,
+				Account: "account-a",
+			},
+			{
+				ID:      "account-b",
+				Type:    config.AccountRouterBlockTypeAccount,
+				Account: "account-b",
+			},
+			{
+				ID:      "account-fallback",
+				Type:    config.AccountRouterBlockTypeAccount,
+				Account: "account-fallback",
+			},
+			{
+				ID:      "orphan",
+				Type:    config.AccountRouterBlockTypeAccount,
+				Account: "orphan",
+			},
+		},
+	}}
+	configPath := filepath.Join(tmp, "config.json")
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/accounts/models/fetch",
+		strings.NewReader(`{"account_ref":"router-main"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp fetchModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if resp.Total != 1 || len(resp.Models) != 1 || resp.Models[0].ID != "Shared" {
+		t.Fatalf("models = %+v, want case-insensitive intersection [Shared]", resp.Models)
+	}
+	if len(resp.Issues) != 1 ||
+		resp.Issues[0].AccountRef != "account-fallback" ||
+		!strings.Contains(resp.Issues[0].Error, "503") {
+		t.Fatalf("issues = %+v, want partial account-fallback failure", resp.Issues)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for path, wantAuth := range map[string]string{
+		"/a/models":      "Bearer sk-a",
+		"/b/models":      "Bearer sk-b",
+		"/failed/models": "Bearer sk-failed",
+	} {
+		if requests[path] != 1 {
+			t.Errorf("requests[%q] = %d, want 1", path, requests[path])
+		}
+		if authHeaders[path] != wantAuth {
+			t.Errorf("Authorization for %q = %q, want %q", path, authHeaders[path], wantAuth)
+		}
+	}
+	if requests["/metrics/models"] != 0 {
+		t.Errorf("metric-only account fetched %d times, want 0", requests["/metrics/models"])
+	}
+	if requests["/orphan/models"] != 0 {
+		t.Errorf("orphan account fetched %d times, want 0", requests["/orphan/models"])
+	}
+}
+
+func TestHandleFetchModels_AccountRefUsesConfiguredStaticFallback(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PICOCLAW_HOME", filepath.Join(tmp, ".picoclaw"))
+	cfg := config.DefaultConfig()
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName: "bedrock-work",
+		Provider:  "bedrock",
+		Model:     "anthropic.claude-sonnet-4-6",
+		Enabled:   true,
+	}}
+	configPath := filepath.Join(tmp, "config.json")
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/accounts/models/fetch",
+		strings.NewReader(`{"account_ref":"bedrock-work"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp fetchModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if resp.Total != 1 ||
+		len(resp.Models) != 1 ||
+		resp.Models[0].ID != "anthropic.claude-sonnet-4-6" {
+		t.Fatalf("response = %+v, want configured static model", resp)
+	}
+	if len(resp.Issues) != 0 {
+		t.Fatalf("issues = %+v, want none", resp.Issues)
+	}
 }

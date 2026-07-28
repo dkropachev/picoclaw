@@ -16,6 +16,7 @@ type ModelProviderOption struct {
 	SupportsFetch       bool     `json:"supports_fetch,omitempty"`
 	DefaultAuthMethod   string   `json:"default_auth_method,omitempty"`
 	AuthMethodLocked    bool     `json:"auth_method_locked,omitempty"`
+	DefaultModel        string   `json:"default_model,omitempty"`
 	Local               bool     `json:"local,omitempty"`
 	Priority            float64  `json:"priority,omitempty"`
 	CommonModels        []string `json:"common_models,omitempty"`
@@ -45,6 +46,7 @@ var modelProviderOptionsByName = map[string]ModelProviderOption{
 		CreateAllowed:       true,
 		DefaultModelAllowed: true,
 		SupportsFetch:       true,
+		DefaultModel:        "gpt-5.3-codex",
 		Priority:            100,
 		CommonModels:        []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.5"},
 		Aliases:             []string{"gpt"},
@@ -58,6 +60,7 @@ var modelProviderOptionsByName = map[string]ModelProviderOption{
 		DefaultAPIBase:      "https://api.anthropic.com/v1",
 		CreateAllowed:       true,
 		DefaultModelAllowed: true,
+		DefaultModel:        "claude-sonnet-4.6",
 		Priority:            95,
 		CommonModels:        []string{"claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"},
 		Aliases:             []string{"claude"},
@@ -294,6 +297,7 @@ var modelProviderOptionsByName = map[string]ModelProviderOption{
 		DefaultModelAllowed: true,
 		SupportsFetch:       true,
 		DefaultAuthMethod:   "token",
+		DefaultModel:        "auto",
 		Local:               true,
 		Priority:            55,
 		CommonModels:        []string{"auto", "gpt-5.4", "gpt-4.1"},
@@ -308,7 +312,9 @@ var modelProviderOptionsByName = map[string]ModelProviderOption{
 		DefaultModelAllowed: true,
 		DefaultAuthMethod:   "oauth",
 		AuthMethodLocked:    true,
+		DefaultModel:        "gemini-3-flash",
 		Priority:            54,
+		CommonModels:        []string{"gemini-3-flash"},
 		Aliases:             []string{"google-antigravity"},
 	},
 	"claude-cli": {

@@ -80,6 +80,7 @@ func TestCreateProviderReturnsClaudeProviderForAnthropicOAuth(t *testing.T) {
 		}
 		return &auth.AuthCredential{
 			AccessToken: "anthropic-token",
+			Provider:    "anthropic",
 		}, nil
 	}
 
