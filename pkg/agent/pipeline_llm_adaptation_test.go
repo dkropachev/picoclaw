@@ -228,6 +228,55 @@ func TestApplySuccessfulFallbackCandidateIgnoresEmptyResultModel(t *testing.T) {
 	}
 }
 
+func TestProviderForFallbackCandidatePrefersCandidateProvider(t *testing.T) {
+	candidate := providers.FallbackCandidate{
+		Provider: "anthropic",
+		Model:    "claude-sonnet",
+	}
+	candidateProvider := &simpleConvProvider{}
+	activeProvider := &simpleConvProvider{}
+	agent := &AgentInstance{
+		CandidateProviders: map[string]providers.LLMProvider{
+			providers.ModelKey(candidate.Provider, candidate.Model): candidateProvider,
+		},
+	}
+
+	got, err := providerForFallbackCandidate(agent, activeProvider, candidate)
+	if err != nil {
+		t.Fatalf("providerForFallbackCandidate() err = %v, want nil", err)
+	}
+	if got != candidateProvider {
+		t.Fatalf("providerForFallbackCandidate() = %#v, want candidate provider", got)
+	}
+}
+
+func TestProviderForFallbackCandidateFallsBackToActiveProvider(t *testing.T) {
+	activeProvider := &simpleConvProvider{}
+
+	got, err := providerForFallbackCandidate(
+		&AgentInstance{},
+		activeProvider,
+		providers.FallbackCandidate{Provider: "anthropic", Model: "claude-sonnet"},
+	)
+	if err != nil {
+		t.Fatalf("providerForFallbackCandidate() err = %v, want nil", err)
+	}
+	if got != activeProvider {
+		t.Fatalf("providerForFallbackCandidate() = %#v, want active provider", got)
+	}
+}
+
+func TestProviderForFallbackCandidateRequiresProvider(t *testing.T) {
+	_, err := providerForFallbackCandidate(
+		nil,
+		nil,
+		providers.FallbackCandidate{Provider: "anthropic", Model: "claude-sonnet"},
+	)
+	if err == nil {
+		t.Fatal("providerForFallbackCandidate() err = nil, want error")
+	}
+}
+
 func toolDefsForAdaptationTest(names ...string) []providers.ToolDefinition {
 	defs := make([]providers.ToolDefinition, 0, len(names))
 	for _, name := range names {
