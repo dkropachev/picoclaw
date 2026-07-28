@@ -48,7 +48,7 @@ durable inputs that survive restart.
 | ID | Level | Trigger/Input | Required Output | State Mutation | Failure/Edge | Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
 | `FR-EVENT-AUTOMATION-001` | MUST | Configuration is omitted, explicitly disabled, or resolved for an enabled agent workspace. | Omitted ingress is disabled; effective config defaults its database to `<workspace>/eventing/events.db`, retention to 30 days, payload size to 1 MiB, and redaction to the mandatory sensitive-field set. | Resolution returns an independent effective config and does not open or create storage. | Non-positive limits receive defaults; relative paths resolve under the workspace, absolute paths are preserved, and `~` is expanded. | Existing installations must remain unchanged until durable ingress is deliberately enabled. |
-| `FR-EVENT-AUTOMATION-002` | MUST | A caller submits an external envelope with source, connector, deduplication key, event type, and JSON-object payload, optionally including actor, subject, occurrence time, attributes, and receipt time. | Normalization returns an immutable deep copy, assigns a stable opaque `ev_` ID and missing receipt time, and canonicalizes timestamps to UTC. | A successful store insert commits the normalized inbox data and pending routing state together. | Missing/oversized/non-UTF-8 identity or entity fields, excessive/invalid attributes, non-object/trailing/invalid JSON, or an invalid caller-supplied event/replay ID fail before mutation; caller-owned payloads, maps, pointers, actors, and subjects cannot mutate stored or returned state. | All connectors need one safe, bounded, source-neutral contract. |
+| `FR-EVENT-AUTOMATION-002` | MUST | A caller submits an external envelope with source, connector, deduplication key, event type, and JSON-object payload, optionally including actor, subject, occurrence time, attributes, and receipt time. | Normalization returns an immutable deep copy, assigns a stable opaque `ev_` ID and missing receipt time, and canonicalizes timestamps to UTC. | A successful store insert commits the normalized inbox data and pending routing state together. | Missing/oversized/non-UTF-8 identity or entity fields, excessive/invalid attributes, non-object/trailing/invalid JSON, out-of-range timestamps, invalid caller-supplied event/replay IDs, or self-referential replay lineage fail before mutation; caller-owned payloads, maps, pointers, actors, and subjects cannot mutate stored or returned state. | All connectors need one safe, bounded, source-neutral contract. |
 | `FR-EVENT-AUTOMATION-003` | MUST | An envelope is prepared for persistence with a payload byte limit, configured sensitive field names, and optional exact secret values. | Sensitive keys and embedded secret strings are recursively replaced with `[REDACTED]` while unrelated JSON types and structure are preserved; actor, subject, and envelope attribute strings receive the same protection. | Only the redacted deep copy is eligible for durable insertion. | Oversized or invalid JSON is rejected; key matching ignores case and punctuation/underscore/camel-case differences, recognizes sensitive suffixes, descends through nested objects/arrays, and never rewrites the caller's input. | Durable automation must not turn provider secrets or credentials into an unbounded local archive. |
 | `FR-EVENT-AUTOMATION-004` | MUST | One or more workers concurrently ingest deliveries with the same non-empty `(source, connector, dedupe_key)`. | Every caller receives the same original event and an observable duplicate indication after exactly one insert. | The first envelope remains authoritative; later duplicates add no inbox/routing state and never overwrite its payload or metadata. | Database contention may wait within the configured SQLite busy timeout, but must not surface as two durable events. | Provider retries and concurrent receivers must be safe. |
 | `FR-EVENT-AUTOMATION-005` | MUST | A supported build opens an enabled ingress database for the first time or after restart. | The current schema is available with WAL journaling, foreign keys, and connection-local busy handling; an existing current database reopens without losing records. | Schema versions advance transactionally and the database file is restricted to owner access. | A newer unknown schema fails closed; failed migration rolls back; unsupported targets return `ErrUnsupportedPlatform` and do not create a database. | The inbox must be durable without reducing PicoClaw's existing portability. |
@@ -76,7 +76,10 @@ connector and event type are each at most 256; the deduplication key is at most
 1,024; actor/subject scalar fields are each at most 2,048. Envelope, actor, and
 subject attribute maps each hold at most 128 entries, with keys at most 256
 bytes, values at most 8,192 bytes, and no blank key. Event IDs and replay links
-are exactly `ev_` plus 32 lowercase hexadecimal characters.
+are exactly `ev_` plus 32 lowercase hexadecimal characters, and an event cannot
+name itself as its replay parent. Persisted event, lease, retry, cursor, and
+retention times must round-trip through a signed Unix-nanosecond value (roughly
+September 1677 through April 2262) instead of silently wrapping.
 
 Workflow references are valid UTF-8 and at most 1,024 bytes. Routing and
 dispatch error details are passed through exact-secret redaction and truncated
@@ -115,13 +118,16 @@ mutation cannot change durable or concurrently returned state.
 
 `events.ingress.enabled` defaults to `false`.
 `events.ingress.database_path` may override the workspace-relative default.
-`events.ingress.retention_days` bounds terminal history,
+`events.ingress.retention_days` declares the cutoff policy that a later runtime
+stage passes to the explicit `Prune` operation; this foundation does not
+schedule retention by itself.
 `events.ingress.max_payload_bytes` rejects oversized inputs, and
 `events.ingress.redact_fields` adds recursively scrubbed JSON field names to the
 mandatory defaults; it cannot remove the built-in sensitive-field set.
 That set is `authorization`, `proxy_authorization`, `cookie`, `set_cookie`,
 `password`, `passwd`, `secret`, `token`, `access_token`, `refresh_token`,
 `api_key`, `client_secret`, `private_key`, `webhook_secret`, and `signature`.
+GitHub's `x_hub_signature` and `x_hub_signature_256` headers are also mandatory.
 Configuration owns policy; `pkg/eventing` owns normalized data and persistence.
 
 ## Surface Ownership
@@ -224,6 +230,9 @@ listener credentials and grants no mutation authority.
 
 - Empty source, connector, deduplication key, or event type is rejected before
   a transaction starts.
+- Timestamps outside the signed Unix-nanosecond storage range and
+  self-referential replay lineage are rejected instead of wrapping or creating
+  an undeletable replay cycle.
 - Invalid or oversized JSON is never partially stored. Redaction cannot be
   disabled by malformed nesting or case variation in a configured field name.
 - A provider retry with different payload data still returns the first durable

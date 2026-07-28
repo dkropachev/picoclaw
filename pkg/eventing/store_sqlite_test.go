@@ -190,6 +190,42 @@ func TestStoreRejectsSQLiteURIPath(t *testing.T) {
 	}
 }
 
+func TestSQLiteFileURLPortableEncoding(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		path       string
+		volume     string
+		wantPrefix string
+	}{
+		{
+			name:       "posix",
+			path:       "/tmp/literal?name/events.db",
+			wantPrefix: "file:///tmp/literal%3Fname/events.db",
+		},
+		{
+			name:       "windows drive",
+			path:       "C:/Users/Test User/events.db",
+			volume:     "C:",
+			wantPrefix: "file:///C:/Users/Test%20User/events.db",
+		},
+		{
+			name:       "windows UNC",
+			path:       "//server/share/event data/events.db",
+			volume:     "//server/share",
+			wantPrefix: "file:////server/share/event%20data/events.db",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			databaseURL, err := sqliteFileURL(test.path, test.volume)
+			require.NoError(t, err)
+			assert.Equal(t, test.wantPrefix, databaseURL.String())
+		})
+	}
+}
+
 func assertConnectionPragmas(t *testing.T, store *Store, busyTimeout time.Duration) {
 	t.Helper()
 	var journalMode string
@@ -675,6 +711,64 @@ func TestStoreRejectsOversizedPayloadAndFutureSchema(t *testing.T) {
 	require.NoError(t, db.Close())
 	_, err = Open(context.Background(), path)
 	assert.ErrorIs(t, err, ErrSchemaTooNew)
+}
+
+func TestStoreRejectsTimestampsThatWouldWrap(t *testing.T) {
+	t.Parallel()
+
+	clock := newMutableClock(time.Date(2026, 7, 28, 16, 0, 0, 0, time.UTC))
+	store, _ := openTestStore(t, clock)
+	inserted, err := store.Insert(context.Background(), testEnvelope("timestamp-range"))
+	require.NoError(t, err)
+
+	_, err = store.ClaimRouting(
+		context.Background(),
+		"router",
+		1,
+		time.Duration(1<<63-1),
+	)
+	assert.ErrorIs(t, err, ErrTimestampOutOfRange)
+
+	claimed, err := store.ClaimRouting(context.Background(), "router", 1, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	outOfRange := time.Date(2500, 1, 1, 0, 0, 0, 0, time.UTC)
+	err = store.NackRouting(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+		claimed[0].Routing.LeaseToken,
+		outOfRange,
+		"retry",
+	)
+	assert.ErrorIs(t, err, ErrTimestampOutOfRange)
+
+	_, err = store.List(context.Background(), EventFilter{
+		After: &EventCursor{
+			ReceivedAt: outOfRange,
+			ID:         inserted.Event.Envelope.ID,
+		},
+	})
+	assert.ErrorIs(t, err, ErrTimestampOutOfRange)
+	_, err = store.Prune(context.Background(), outOfRange, 1)
+	assert.ErrorIs(t, err, ErrTimestampOutOfRange)
+
+	clock.Set(outOfRange)
+	_, err = store.Insert(context.Background(), testEnvelope("invalid-clock"))
+	assert.ErrorIs(t, err, ErrTimestampOutOfRange)
+}
+
+func TestStoreZeroValueReturnsTypedErrors(t *testing.T) {
+	t.Parallel()
+
+	var store Store
+	_, err := store.Get(context.Background(), "ev_00000000000000000000000000000000")
+	assert.ErrorIs(t, err, ErrClosed)
+	_, err = store.Insert(context.Background(), testEnvelope("zero-store"))
+	assert.ErrorIs(t, err, ErrClosed)
+	assert.ErrorIs(t, store.Close(), ErrClosed)
+
+	var nilStore *Store
+	assert.NoError(t, nilStore.Close())
 }
 
 func TestStoreCancellationCloseAndNotFound(t *testing.T) {

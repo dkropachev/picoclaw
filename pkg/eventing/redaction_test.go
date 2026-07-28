@@ -19,6 +19,10 @@ func TestRedactorRecursesAndNormalizesSensitiveKeys(t *testing.T) {
 			"accessToken":"value",
 			"custom_service_secret":"value",
 			"Tenant_Credential":"value",
+			"github_signature":"value",
+			"db-passwd":"value",
+			"session-cookie":"value",
+			"x-hub-signature-256":"value",
 			"key":"safe",
 			"message":"prefix known-secret suffix"
 		}]
@@ -32,6 +36,10 @@ func TestRedactorRecursesAndNormalizesSensitiveKeys(t *testing.T) {
 			"accessToken":"[REDACTED]",
 			"custom_service_secret":"[REDACTED]",
 			"Tenant_Credential":"[REDACTED]",
+			"github_signature":"[REDACTED]",
+			"db-passwd":"[REDACTED]",
+			"session-cookie":"[REDACTED]",
+			"x-hub-signature-256":"[REDACTED]",
 			"key":"safe",
 			"message":"prefix [REDACTED] suffix"
 		}]
@@ -63,6 +71,26 @@ func TestRedactorEnvelopeAndNilSafety(t *testing.T) {
 	assert.Equal(t, RedactedValue, got.Actor.Attributes["refreshToken"])
 	assert.Equal(t, "https://example.test/[REDACTED]", got.Subject.URL)
 	assert.Equal(t, "top-secret", stringValueFromJSON(t, event.Payload, "safe"))
+}
+
+func TestRedactorHonorsShortSecretsWithoutRescanningMarkers(t *testing.T) {
+	t.Parallel()
+
+	redactor := NewRedactor(nil, []string{"x", "REDA"})
+	assert.Equal(
+		t,
+		"[REDACTED] [REDACTED]",
+		redactor.RedactText("x REDA"),
+	)
+}
+
+func TestRedactorZeroValueStillEnforcesMandatoryKeys(t *testing.T) {
+	t.Parallel()
+
+	var redactor Redactor
+	got, err := redactor.RedactJSON(json.RawMessage(`{"password":"secret","safe":"value"}`))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"password":"[REDACTED]","safe":"value"}`, string(got))
 }
 
 func stringValueFromJSON(t *testing.T, payload []byte, key string) string {

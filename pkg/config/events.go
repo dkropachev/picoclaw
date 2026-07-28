@@ -58,6 +58,8 @@ var defaultEventIngressRedactFields = [...]string{
 	"private_key",
 	"webhook_secret",
 	"signature",
+	"x_hub_signature",
+	"x_hub_signature_256",
 }
 
 // DefaultEventIngressRedactFields returns an independent copy of the mandatory,

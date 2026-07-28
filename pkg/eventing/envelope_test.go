@@ -83,6 +83,10 @@ func TestNormalizeEnvelopeValidation(t *testing.T) {
 		{"invalid ID prefix", func(event *Envelope) { event.ID = "event_deadbeef" }},
 		{"invalid ID shape", func(event *Envelope) { event.ID = "ev_deadbeef" }},
 		{"invalid replay ID", func(event *Envelope) { event.ReplayOf = "ev_bad" }},
+		{"self-referential replay", func(event *Envelope) {
+			event.ID = "ev_11111111111111111111111111111111"
+			event.ReplayOf = event.ID
+		}},
 		{"empty payload", func(event *Envelope) { event.Payload = nil }},
 		{"null payload", func(event *Envelope) { event.Payload = json.RawMessage(`null`) }},
 		{"array payload", func(event *Envelope) { event.Payload = json.RawMessage(`[]`) }},
@@ -126,4 +130,41 @@ func TestEnvelopeValidateRequiresPreassignedID(t *testing.T) {
 	require.NoError(t, err)
 	assert.NoError(t, normalized.Validate())
 	assert.False(t, errors.Is(normalized.Validate(), ErrInvalidEnvelope))
+}
+
+func TestNormalizeEnvelopeRejectsUnrepresentableTimestamps(t *testing.T) {
+	t.Parallel()
+
+	for _, mutate := range []func(*Envelope){
+		func(event *Envelope) {
+			event.ReceivedAt = time.Date(2500, 1, 1, 0, 0, 0, 0, time.UTC)
+		},
+		func(event *Envelope) {
+			occurredAt := time.Date(1500, 1, 1, 0, 0, 0, 0, time.UTC)
+			event.OccurredAt = &occurredAt
+		},
+	} {
+		event := validEnvelopeForTest()
+		mutate(&event)
+		_, err := NormalizeEnvelope(event, time.Now())
+		assert.ErrorIs(t, err, ErrInvalidEnvelope)
+		assert.ErrorIs(t, err, ErrTimestampOutOfRange)
+	}
+
+	event := validEnvelopeForTest()
+	zero := time.Time{}
+	event.OccurredAt = &zero
+	normalized, err := NormalizeEnvelope(event, time.Now())
+	require.NoError(t, err)
+	assert.Nil(t, normalized.OccurredAt)
+}
+
+func validEnvelopeForTest() Envelope {
+	return Envelope{
+		Source:    "github",
+		Connector: "default",
+		Type:      "issue.opened",
+		DedupeKey: "delivery",
+		Payload:   json.RawMessage(`{}`),
+	}
 }

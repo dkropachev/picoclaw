@@ -141,12 +141,35 @@ func sqliteDSN(path string, options storeOptions) (string, error) {
 	query.Add("_pragma", "foreign_keys(1)")
 	query.Add("_pragma", "busy_timeout("+strconv.FormatInt(options.busyTimeout.Milliseconds(), 10)+")")
 	query.Add("_pragma", "synchronous(NORMAL)")
-	dsn := (&url.URL{
-		Scheme:   "file",
-		Path:     filepath.ToSlash(absolutePath),
-		RawQuery: query.Encode(),
-	}).String()
-	return dsn, nil
+	databaseURL, err := sqliteFileURL(
+		filepath.ToSlash(absolutePath),
+		filepath.ToSlash(filepath.VolumeName(absolutePath)),
+	)
+	if err != nil {
+		return "", err
+	}
+	databaseURL.RawQuery = query.Encode()
+	return databaseURL.String(), nil
+}
+
+func sqliteFileURL(slashPath, slashVolume string) (*url.URL, error) {
+	if strings.HasPrefix(slashVolume, "//") {
+		authorityAndShare := strings.TrimPrefix(slashVolume, "//")
+		server, share, ok := strings.Cut(authorityAndShare, "/")
+		if !ok || server == "" || share == "" || !strings.HasPrefix(slashPath, slashVolume) {
+			return nil, fmt.Errorf("resolve eventing UNC database path %q", slashPath)
+		}
+		// Keep the URI authority empty. SQLite rejects remote authorities unless
+		// compiled with SQLITE_ALLOW_URI_AUTHORITY; file:////server/share keeps
+		// the UNC server and share in the path for the Windows VFS.
+		return &url.URL{Scheme: "file", Path: slashPath}, nil
+	}
+	if slashVolume != "" && !strings.HasPrefix(slashPath, "/") {
+		// A Windows drive path must be emitted as file:///C:/..., not with the
+		// drive parsed as a URI authority.
+		slashPath = "/" + slashPath
+	}
+	return &url.URL{Scheme: "file", Path: slashPath}, nil
 }
 
 func (s *Store) configure(ctx context.Context, busyTimeout time.Duration, memory bool) error {
@@ -253,7 +276,8 @@ CREATE TABLE IF NOT EXISTS event_inbox (
 	routing_available_at INTEGER NOT NULL,
 	routing_attempts INTEGER NOT NULL DEFAULT 0 CHECK (routing_attempts >= 0),
 	routing_last_error TEXT NOT NULL DEFAULT '',
-	routing_updated_at INTEGER NOT NULL
+	routing_updated_at INTEGER NOT NULL,
+	CHECK (replay_of IS NULL OR replay_of <> id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS event_inbox_dedupe
 	ON event_inbox(source, connector, dedupe_key)
@@ -293,6 +317,10 @@ func (s *Store) Close() error {
 	}
 	s.close.Do(func() {
 		s.closed.Store(true)
+		if s.db == nil {
+			s.closeErr = ErrClosed
+			return
+		}
 		s.closeErr = s.db.Close()
 	})
 	return s.closeErr
@@ -302,10 +330,18 @@ func (s *Store) ready(ctx context.Context) error {
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
-	if s == nil || s.closed.Load() {
+	if s == nil || s.db == nil || s.closed.Load() {
 		return ErrClosed
 	}
 	return nil
+}
+
+func (s *Store) currentTime() (time.Time, error) {
+	now := s.now().UTC()
+	if err := validateDBTimestamp("store clock", now); err != nil {
+		return time.Time{}, err
+	}
+	return now, nil
 }
 
 func (s *Store) dbError(err error) error {
@@ -330,7 +366,11 @@ func (s *Store) Insert(ctx context.Context, input Envelope) (InsertResult, error
 		return InsertResult{}, fmt.Errorf("%w: got %d bytes, maximum %d",
 			ErrPayloadTooLarge, len(input.Payload), s.maxPayloadBytes)
 	}
-	event, err := NormalizeEnvelope(input, s.now())
+	now, err := s.currentTime()
+	if err != nil {
+		return InsertResult{}, err
+	}
+	event, err := NormalizeEnvelope(input, now)
 	if err != nil {
 		return InsertResult{}, err
 	}
@@ -350,7 +390,6 @@ func (s *Store) Insert(ctx context.Context, input Envelope) (InsertResult, error
 	if err != nil {
 		return InsertResult{}, err
 	}
-	now := s.now().UTC()
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO event_inbox (
 			id, source, connector, event_type, dedupe_key, actor_json,
@@ -427,6 +466,11 @@ func (s *Store) List(ctx context.Context, filter EventFilter) (EventPage, error)
 	}
 	if filter.RoutingStatus != "" && !validRoutingStatus(filter.RoutingStatus) {
 		return EventPage{}, fmt.Errorf("%w: unknown routing status %q", ErrInvalidTransition, filter.RoutingStatus)
+	}
+	if filter.After != nil {
+		if err := validateDBTimestamp("event cursor received_at", filter.After.ReceivedAt); err != nil {
+			return EventPage{}, err
+		}
 	}
 	limit := normalizedLimit(filter.Limit)
 	query := `SELECT ` + eventColumns + ` FROM event_inbox WHERE 1 = 1`
@@ -505,10 +549,16 @@ func (s *Store) ClaimRouting(
 	if limit > maxListLimit {
 		limit = maxListLimit
 	}
-	now := s.now().UTC()
+	now, err := s.currentTime()
+	if err != nil {
+		return nil, err
+	}
 	leaseUntil := now.Add(lease)
+	if err := validateDBTimestamp("routing lease deadline", leaseUntil); err != nil {
+		return nil, err
+	}
 	claimed := make([]StoredEvent, 0, limit)
-	err := s.withImmediate(ctx, func(conn *sql.Conn) error {
+	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
 		rows, err := conn.QueryContext(ctx, `
 			SELECT id FROM event_inbox
 			WHERE (routing_status = ? AND routing_available_at <= ?)
@@ -592,11 +642,17 @@ func (s *Store) finishRouting(
 	if err := s.ready(ctx); err != nil {
 		return err
 	}
-	now := s.now().UTC()
+	now, err := s.currentTime()
+	if err != nil {
+		return err
+	}
 	if availableAt.IsZero() || availableAt.Before(now) {
 		availableAt = now
 	}
 	availableAt = availableAt.UTC()
+	if err := validateDBTimestamp("routing availability", availableAt); err != nil {
+		return err
+	}
 	detail = s.sanitizeDetail(detail)
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE event_inbox
@@ -635,7 +691,10 @@ func (s *Store) CreateDispatch(
 		return Dispatch{}, false, err
 	}
 	dispatchID, runID := deterministicDispatchIDs(eventID, workflowRef)
-	now := s.now().UTC()
+	now, err := s.currentTime()
+	if err != nil {
+		return Dispatch{}, false, err
+	}
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO event_dispatches (
 			id, event_id, workflow_ref, run_id, status, available_at, created_at, updated_at
@@ -708,10 +767,16 @@ func (s *Store) ClaimDispatches(
 	if limit > maxListLimit {
 		limit = maxListLimit
 	}
-	now := s.now().UTC()
+	now, err := s.currentTime()
+	if err != nil {
+		return nil, err
+	}
 	leaseUntil := now.Add(lease)
+	if err := validateDBTimestamp("dispatch lease deadline", leaseUntil); err != nil {
+		return nil, err
+	}
 	claimed := make([]Dispatch, 0, limit)
-	err := s.withImmediate(ctx, func(conn *sql.Conn) error {
+	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
 		rows, err := conn.QueryContext(ctx, `
 			SELECT id FROM event_dispatches
 			WHERE (status = ? AND available_at <= ?)
@@ -777,7 +842,10 @@ func (s *Store) LinkDispatchRun(ctx context.Context, id, leaseToken, runID strin
 	if dispatch.RunID != runID {
 		return fmt.Errorf("%w: expected %q", ErrRunIDMismatch, dispatch.RunID)
 	}
-	now := s.now().UTC()
+	now, err := s.currentTime()
+	if err != nil {
+		return err
+	}
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE event_dispatches
 		SET status = ?, linked_at = COALESCE(linked_at, ?), updated_at = ?
@@ -804,7 +872,10 @@ func (s *Store) FinishDispatch(
 	if !terminalDispatchStatus(status) {
 		return fmt.Errorf("%w: dispatch finish status %q is not terminal", ErrInvalidTransition, status)
 	}
-	now := s.now().UTC()
+	now, err := s.currentTime()
+	if err != nil {
+		return err
+	}
 	detail = s.sanitizeDetail(detail)
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE event_dispatches
@@ -831,11 +902,17 @@ func (s *Store) NackDispatch(
 	if err := s.ready(ctx); err != nil {
 		return err
 	}
-	now := s.now().UTC()
+	now, err := s.currentTime()
+	if err != nil {
+		return err
+	}
 	if availableAt.IsZero() || availableAt.Before(now) {
 		availableAt = now
 	}
 	availableAt = availableAt.UTC()
+	if err := validateDBTimestamp("dispatch availability", availableAt); err != nil {
+		return err
+	}
 	detail = s.sanitizeDetail(detail)
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE event_dispatches
@@ -858,6 +935,11 @@ func (s *Store) ListDispatches(ctx context.Context, filter DispatchFilter) (Disp
 	}
 	if filter.Status != "" && !validDispatchStatus(filter.Status) {
 		return DispatchPage{}, fmt.Errorf("%w: unknown dispatch status %q", ErrInvalidTransition, filter.Status)
+	}
+	if filter.After != nil {
+		if err := validateDBTimestamp("dispatch cursor created_at", filter.After.CreatedAt); err != nil {
+			return DispatchPage{}, err
+		}
 	}
 	limit := normalizedLimit(filter.Limit)
 	query := `SELECT ` + dispatchColumns + ` FROM event_dispatches WHERE 1 = 1`
@@ -938,6 +1020,10 @@ func (s *Store) Prune(ctx context.Context, before time.Time, limit int) (int64, 
 	}
 	if before.IsZero() || limit <= 0 {
 		return 0, fmt.Errorf("non-zero cutoff and positive limit are required")
+	}
+	before = before.UTC()
+	if err := validateDBTimestamp("retention cutoff", before); err != nil {
+		return 0, err
 	}
 	if limit > maxListLimit {
 		limit = maxListLimit

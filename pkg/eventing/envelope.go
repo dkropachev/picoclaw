@@ -34,6 +34,9 @@ var (
 	// ErrIDGeneration reports failure to obtain cryptographically secure
 	// randomness for an automatically assigned event ID.
 	ErrIDGeneration = errors.New("generate event ID")
+	// ErrTimestampOutOfRange reports a time that cannot be represented by the
+	// signed nanosecond values used by the durable schema.
+	ErrTimestampOutOfRange = errors.New("eventing timestamp is outside the durable nanosecond range")
 )
 
 // Actor identifies the person, service, or automation that caused an event.
@@ -120,6 +123,9 @@ func NormalizeEnvelope(input Envelope, now time.Time) (Envelope, error) {
 	if event.ReplayOf != "" && !validEventID(event.ReplayOf) {
 		return Envelope{}, fmt.Errorf("%w: replay_of is not a valid event ID", ErrInvalidEnvelope)
 	}
+	if event.ReplayOf != "" && event.ReplayOf == event.ID {
+		return Envelope{}, fmt.Errorf("%w: replay_of cannot reference the event itself", ErrInvalidEnvelope)
+	}
 
 	if now.IsZero() {
 		now = time.Now()
@@ -128,9 +134,19 @@ func NormalizeEnvelope(input Envelope, now time.Time) (Envelope, error) {
 		event.ReceivedAt = now
 	}
 	event.ReceivedAt = event.ReceivedAt.UTC()
+	if err := validateDBTimestamp("received_at", event.ReceivedAt); err != nil {
+		return Envelope{}, fmt.Errorf("%w: %w", ErrInvalidEnvelope, err)
+	}
 	if event.OccurredAt != nil {
-		occurredAt := event.OccurredAt.UTC()
-		event.OccurredAt = &occurredAt
+		if event.OccurredAt.IsZero() {
+			event.OccurredAt = nil
+		} else {
+			occurredAt := event.OccurredAt.UTC()
+			if err := validateDBTimestamp("occurred_at", occurredAt); err != nil {
+				return Envelope{}, fmt.Errorf("%w: %w", ErrInvalidEnvelope, err)
+			}
+			event.OccurredAt = &occurredAt
+		}
 	}
 
 	if err := validateJSONObject(event.Payload); err != nil {
@@ -272,6 +288,14 @@ func validateBoundedString(field, value string, maximum int) error {
 	}
 	if len(value) > maximum {
 		return fmt.Errorf("%w: %s exceeds %d bytes", ErrInvalidEnvelope, field, maximum)
+	}
+	return nil
+}
+
+func validateDBTimestamp(field string, value time.Time) error {
+	encoded := value.UnixNano()
+	if value.IsZero() || !value.Equal(time.Unix(0, encoded)) {
+		return fmt.Errorf("%w: %s", ErrTimestampOutOfRange, field)
 	}
 	return nil
 }

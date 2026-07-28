@@ -10,38 +10,45 @@ import (
 
 const RedactedValue = "[REDACTED]"
 
-var builtInSensitiveKeys = []string{
-	"authorization",
-	"proxy_authorization",
-	"cookie",
-	"set_cookie",
-	"password",
-	"passwd",
-	"secret",
-	"token",
-	"access_token",
-	"refresh_token",
-	"api_key",
-	"client_secret",
-	"private_key",
-	"webhook_secret",
-	"signature",
+var builtInSensitiveKeys = map[string]struct{}{
+	"authorization":      {},
+	"proxyauthorization": {},
+	"cookie":             {},
+	"setcookie":          {},
+	"password":           {},
+	"passwd":             {},
+	"secret":             {},
+	"token":              {},
+	"accesstoken":        {},
+	"refreshtoken":       {},
+	"apikey":             {},
+	"clientsecret":       {},
+	"privatekey":         {},
+	"webhooksecret":      {},
+	"signature":          {},
+	"xhubsignature":      {},
+	"xhubsignature256":   {},
 }
 
 // Redactor recursively removes sensitive values before an event reaches disk.
 // Key matching ignores case and camelCase, hyphen, underscore, whitespace, and
 // punctuation differences.
 type Redactor struct {
-	keys    map[string]struct{}
-	secrets []string
+	keys     map[string]struct{}
+	replacer *strings.Replacer
 }
 
 // NewRedactor returns a redactor with mandatory built-in keys plus additional
 // installation-specific keys and exact secret values. Empty secret values are
-// ignored. Longer values are replaced first to avoid partial overlap leaks.
+// ignored. All other values, including short secrets, are honored. Longer
+// values are matched first, and replacements are made in one pass so inserted
+// redaction markers are never scanned again.
 func NewRedactor(additionalKeys, secretValues []string) *Redactor {
 	keys := make(map[string]struct{}, len(builtInSensitiveKeys)+len(additionalKeys))
-	for _, key := range append(append([]string(nil), builtInSensitiveKeys...), additionalKeys...) {
+	for key := range builtInSensitiveKeys {
+		keys[key] = struct{}{}
+	}
+	for _, key := range additionalKeys {
 		if normalized := normalizeSensitiveKey(key); normalized != "" {
 			keys[normalized] = struct{}{}
 		}
@@ -50,7 +57,7 @@ func NewRedactor(additionalKeys, secretValues []string) *Redactor {
 	seenSecrets := make(map[string]struct{}, len(secretValues))
 	secrets := make([]string, 0, len(secretValues))
 	for _, secret := range secretValues {
-		if len(secret) < 4 {
+		if secret == "" {
 			continue
 		}
 		if _, exists := seenSecrets[secret]; exists {
@@ -63,7 +70,16 @@ func NewRedactor(additionalKeys, secretValues []string) *Redactor {
 		return len(secrets[i]) > len(secrets[j])
 	})
 
-	return &Redactor{keys: keys, secrets: secrets}
+	var replacer *strings.Replacer
+	if len(secrets) > 0 {
+		replacements := make([]string, 0, len(secrets)*2)
+		for _, secret := range secrets {
+			replacements = append(replacements, secret, RedactedValue)
+		}
+		replacer = strings.NewReplacer(replacements...)
+	}
+
+	return &Redactor{keys: keys, replacer: replacer}
 }
 
 // RedactEnvelope returns a deep-copy of event with sensitive payload and
@@ -158,13 +174,10 @@ func (r *Redactor) redactStringMap(values map[string]string) map[string]string {
 }
 
 func (r *Redactor) redactString(value string) string {
-	if r == nil {
+	if r == nil || r.replacer == nil {
 		return value
 	}
-	for _, secret := range r.secrets {
-		value = strings.ReplaceAll(value, secret, RedactedValue)
-	}
-	return value
+	return r.replacer.Replace(value)
 }
 
 // RedactText replaces configured secret values in non-JSON operational text
@@ -175,10 +188,25 @@ func (r *Redactor) RedactText(value string) string {
 
 func (r *Redactor) sensitiveKey(key string) bool {
 	normalized := normalizeSensitiveKey(key)
-	if _, exists := r.keys[normalized]; exists {
+	if _, exists := builtInSensitiveKeys[normalized]; exists {
 		return true
 	}
-	for _, suffix := range []string{"token", "secret", "password", "apikey", "privatekey"} {
+	if r != nil {
+		if _, exists := r.keys[normalized]; exists {
+			return true
+		}
+	}
+	for _, suffix := range []string{
+		"authorization",
+		"cookie",
+		"password",
+		"passwd",
+		"secret",
+		"token",
+		"apikey",
+		"privatekey",
+		"signature",
+	} {
 		if strings.HasSuffix(normalized, suffix) {
 			return true
 		}
