@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -287,6 +288,120 @@ func TestCronService_ExecutionFlow(t *testing.T) {
 	status := cs.Status()
 	if status["jobs"].(int) != 0 {
 		t.Errorf("Job should be deleted after run, got count: %v", status["jobs"])
+	}
+}
+
+func TestCronService_StopBeforeRuntimeAdmissionPreservesDueJob(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "cron", "jobs.json")
+	handlerCalled := make(chan struct{}, 1)
+	admissionEntered := make(chan struct{})
+	admissionReturned := make(chan struct{})
+	var admissionOnce sync.Once
+	cs := NewCronService(storePath, func(*CronJob) (string, error) {
+		handlerCalled <- struct{}{}
+		return "unexpected", nil
+	})
+	cs.SetJobAdmission(func(
+		ctx context.Context,
+		_ *CronJob,
+	) (context.Context, func(), error) {
+		admissionOnce.Do(func() { close(admissionEntered) })
+		<-ctx.Done()
+		close(admissionReturned)
+		return ctx, func() {}, ctx.Err()
+	})
+	at := time.Now().Add(20 * time.Millisecond).UnixMilli()
+	job, err := cs.AddJob(
+		"reload-fenced",
+		CronSchedule{Kind: "at", AtMS: &at},
+		"must remain pending",
+		"cli",
+		"direct",
+	)
+	if err != nil {
+		t.Fatalf("AddJob() error = %v", err)
+	}
+	if err := cs.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	select {
+	case <-admissionEntered:
+	case <-time.After(2 * time.Second):
+		cs.Stop()
+		t.Fatal("due job did not reach runtime admission")
+	}
+
+	cs.Stop()
+	select {
+	case <-admissionReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime admission did not return after Stop")
+	}
+	select {
+	case <-handlerCalled:
+		t.Fatal("job handler ran after the service stopped before admission")
+	default:
+	}
+	persisted, ok := cs.GetJob(job.ID)
+	if !ok {
+		t.Fatal("due one-shot job was deleted before runtime admission")
+	}
+	if persisted.State.NextRunAtMS == nil {
+		t.Fatal("due one-shot job lost NextRunAtMS before runtime admission")
+	}
+	if persisted.State.LastRunAtMS != nil {
+		t.Fatalf("due job LastRunAtMS = %v, want nil", persisted.State.LastRunAtMS)
+	}
+
+	reopened := NewCronService(storePath, nil)
+	durable, ok := reopened.GetJob(job.ID)
+	if !ok || durable.State.NextRunAtMS == nil {
+		t.Fatalf("durable due job after stopped admission = %#v, want pending job", durable)
+	}
+}
+
+func TestCronService_RestartExecutesOverdueDurableOneShot(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "cron", "jobs.json")
+	cs := NewCronService(storePath, nil)
+	at := time.Now().Add(20 * time.Millisecond).UnixMilli()
+	job, err := cs.AddJob(
+		"overdue after restart",
+		CronSchedule{Kind: "at", AtMS: &at},
+		"run after restart",
+		"cli",
+		"direct",
+	)
+	if err != nil {
+		t.Fatalf("AddJob() error = %v", err)
+	}
+	time.Sleep(30 * time.Millisecond)
+
+	executed := make(chan string, 1)
+	restarted := NewCronService(storePath, func(job *CronJob) (string, error) {
+		executed <- job.ID
+		return "ok", nil
+	})
+	if err := restarted.Start(); err != nil {
+		t.Fatalf("restarted.Start() error = %v", err)
+	}
+	defer restarted.Stop()
+	select {
+	case gotID := <-executed:
+		if gotID != job.ID {
+			t.Fatalf("executed job ID = %q, want %q", gotID, job.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("overdue durable one-shot was not executed after restart")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, ok := restarted.GetJob(job.ID); !ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("executed overdue one-shot was not deleted")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

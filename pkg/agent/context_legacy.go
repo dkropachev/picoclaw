@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -77,7 +78,11 @@ func (m *legacyContextManager) Clear(_ context.Context, sessionKey string) error
 // maybeSummarize triggers summarization if the session history exceeds thresholds.
 // It runs asynchronously in a goroutine.
 func (m *legacyContextManager) maybeSummarize(sessionKey string) {
-	agent := m.al.registry.GetDefaultAgent()
+	registry := m.al.GetRegistry()
+	if registry == nil {
+		return
+	}
+	agent := registry.GetDefaultAgent()
 	if agent == nil {
 		return
 	}
@@ -89,7 +94,12 @@ func (m *legacyContextManager) maybeSummarize(sessionKey string) {
 	if len(newHistory) > agent.SummarizeMessageThreshold || tokenEstimate > threshold {
 		summarizeKey := agent.ID + ":" + sessionKey
 		if _, loading := m.summarizing.LoadOrStore(summarizeKey, true); !loading {
-			go func() {
+			generation := m.al.GetConfig()
+			go func(
+				agentID string,
+				generation *config.Config,
+				generationRegistry *AgentRegistry,
+			) {
 				defer m.summarizing.Delete(summarizeKey)
 				defer func() {
 					if r := recover(); r != nil {
@@ -99,9 +109,25 @@ func (m *legacyContextManager) maybeSummarize(sessionKey string) {
 						})
 					}
 				}()
+				_, releaseRuntime, err := m.al.AcquireRuntimeGeneration(
+					context.Background(),
+					generation,
+				)
+				if err != nil {
+					return
+				}
+				defer releaseRuntime()
+				currentRegistry := m.al.GetRegistry()
+				if currentRegistry == nil || currentRegistry != generationRegistry {
+					return
+				}
+				currentAgent, ok := currentRegistry.GetAgent(agentID)
+				if !ok || currentAgent == nil {
+					return
+				}
 				logger.Debug("Memory threshold reached. Optimizing conversation history...")
-				m.summarizeSession(agent, sessionKey)
-			}()
+				m.summarizeSession(currentAgent, sessionKey)
+			}(agent.ID, generation, registry)
 		}
 	}
 }

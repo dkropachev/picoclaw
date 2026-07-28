@@ -98,6 +98,13 @@ func NewAgentLoop(
 				"error": err.Error(),
 			})
 		}
+		if !al.deferEvolutionActivation {
+			if err := al.ActivateEvolution(); err != nil {
+				logger.WarnCF("agent", "Failed to activate evolution bridge", map[string]any{
+					"error": err.Error(),
+				})
+			}
+		}
 	}
 	al.activeReqCond = sync.NewCond(&al.activeReqMu)
 	al.refreshRuntimeEventLogger(cfg)

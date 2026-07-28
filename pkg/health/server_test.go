@@ -265,6 +265,9 @@ func TestSetReady_Toggle(t *testing.T) {
 	s := newTestServer()
 
 	s.SetReady(true)
+	if !s.IsReady() {
+		t.Fatal("IsReady() = false after SetReady(true)")
+	}
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 	w := httptest.NewRecorder()
 	s.readyHandler(w, req)
@@ -273,6 +276,9 @@ func TestSetReady_Toggle(t *testing.T) {
 	}
 
 	s.SetReady(false)
+	if s.IsReady() {
+		t.Fatal("IsReady() = true after SetReady(false)")
+	}
 	w = httptest.NewRecorder()
 	s.readyHandler(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
 	if w.Code != http.StatusServiceUnavailable {

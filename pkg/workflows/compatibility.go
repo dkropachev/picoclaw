@@ -19,9 +19,9 @@ const (
 	WorkflowValidationStatusPendingRevalidation = "pending_revalidation"
 	WorkflowValidationStatusNeedsReview         = "needs_review"
 
-	WorkflowEngineVersion    = "4"
-	WorkflowSchemaVersion    = "1"
-	ValidatorFingerprint     = "picoclaw-workflow-validator-v1"
+	WorkflowEngineVersion    = "5"
+	WorkflowSchemaVersion    = "2"
+	ValidatorFingerprint     = "picoclaw-workflow-validator-v2"
 	compatibilityManifestDir = "workflow_validations"
 	compatibilityManifest    = "manifest.json"
 )
@@ -252,16 +252,68 @@ func EnsureWorkflowRunnable(
 	if err != nil {
 		return err
 	}
+	hash, err := workflowHash(ctx, workspace, canonical, opts...)
+	if err != nil {
+		return err
+	}
+	return ensureWorkflowHashRunnable(workspace, canonical, runtime, hash)
+}
+
+// LoadRunnableLocalSnapshot reads, compatibility-checks, parses, and validates
+// one exact workflow byte snapshot. The compatibility decision therefore
+// cannot be separated from execution by a second file read.
+func LoadRunnableLocalSnapshot(
+	ctx context.Context,
+	workspace string,
+	ref string,
+	runtime RuntimeCompatibility,
+	opts ...LocalOption,
+) (*Workflow, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	runtime = NormalizeRuntimeCompatibility(runtime)
+	local := collectLocalOptions(opts...)
+	resolved, err := local.resolver(workspace).ResolveLocal(ref)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(resolved.Path)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(data)
+	hash := "sha256:" + hex.EncodeToString(sum[:])
+	if compatibilityErr := ensureWorkflowHashRunnable(
+		workspace,
+		resolved.Canonical,
+		runtime,
+		hash,
+	); compatibilityErr != nil {
+		return nil, compatibilityErr
+	}
+	workflow, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := Validate(workflow); err != nil {
+		return nil, err
+	}
+	return workflow, nil
+}
+
+func ensureWorkflowHashRunnable(
+	workspace string,
+	canonical string,
+	runtime RuntimeCompatibility,
+	hash string,
+) error {
 	manifest, missing, err := readCompatibilityManifest(workspace)
 	if err != nil {
 		return err
 	}
 	if missing || manifest == nil {
 		return fmt.Errorf("workflow %s must be revalidated before it can run", canonical)
-	}
-	hash, err := workflowHash(ctx, workspace, canonical, opts...)
-	if err != nil {
-		return err
 	}
 	stamp, ok := manifest.Workflows[canonical]
 	if !ok {

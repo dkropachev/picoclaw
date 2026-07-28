@@ -15,6 +15,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/cron"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 )
 
@@ -93,6 +94,76 @@ func TestRun_StartupFailuresReturnErrorAndEmitStructuredLog(t *testing.T) {
 				t.Fatalf("gateway.log missing expected failure detail %q:\n%s", tt.wantLogSub, logText)
 			}
 		})
+	}
+}
+
+func TestStartupRuntimeBarrierPreservesOverdueCronUntilReadiness(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Tools.Cron.Enabled = false
+	msgBus := bus.NewMessageBus()
+	agentLoop := agent.NewAgentLoop(
+		cfg,
+		msgBus,
+		&startupBlockedProvider{reason: "not used"},
+		agent.WithRuntimeStartupBarrier(),
+	)
+	defer func() {
+		agentLoop.Stop()
+		msgBus.Close()
+		agentLoop.Close()
+	}()
+
+	cronService, err := setupCronTool(
+		agentLoop,
+		msgBus,
+		cfg.WorkspacePath(),
+		cfg.Agents.Defaults.RestrictToWorkspace,
+		time.Minute,
+		cfg,
+	)
+	if err != nil {
+		t.Fatalf("setupCronTool() error = %v", err)
+	}
+	defer cronService.Stop()
+
+	jobRan := make(chan struct{}, 1)
+	cronService.SetOnJobContext(func(context.Context, *cron.CronJob) (string, error) {
+		jobRan <- struct{}{}
+		return "ok", nil
+	})
+	runAt := time.Now().Add(25 * time.Millisecond).UnixMilli()
+	job, err := cronService.AddJob(
+		"startup-overdue",
+		cron.CronSchedule{Kind: "at", AtMS: &runAt},
+		"run only after ready",
+		"cli",
+		"direct",
+	)
+	if err != nil {
+		t.Fatalf("AddJob() error = %v", err)
+	}
+	if err = cronService.Start(); err != nil {
+		t.Fatalf("CronService.Start() error = %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-jobRan:
+		t.Fatal("overdue cron ran before startup readiness released the runtime")
+	default:
+	}
+	pending, ok := cronService.GetJob(job.ID)
+	if !ok || pending.State.NextRunAtMS == nil {
+		t.Fatalf("overdue cron was consumed before readiness: %#v", pending)
+	}
+
+	// Models the gateway's SetReady/publish-ready boundary.
+	agentLoop.ReleaseRuntimeStartupBarrier()
+	select {
+	case <-jobRan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("overdue cron did not run after startup readiness")
 	}
 }
 

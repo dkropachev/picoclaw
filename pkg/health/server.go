@@ -118,6 +118,13 @@ func (s *Server) SetReady(ready bool) {
 	s.mu.Unlock()
 }
 
+// IsReady reports the readiness state exposed by the server.
+func (s *Server) IsReady() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ready
+}
+
 func (s *Server) RegisterCheck(name string, checkFn func() (bool, string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

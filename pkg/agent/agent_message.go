@@ -46,6 +46,13 @@ func (al *AgentLoop) ProcessDirectWithChannel(
 	ctx context.Context,
 	content, sessionKey, channel, chatID string,
 ) (string, error) {
+	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer releaseRuntime()
+	ctx = leaseCtx
+
 	if err := al.ensureHooksInitialized(ctx); err != nil {
 		return "", err
 	}
@@ -71,6 +78,13 @@ func (al *AgentLoop) ProcessHeartbeat(
 	ctx context.Context,
 	content, channel, chatID string,
 ) (string, error) {
+	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer releaseRuntime()
+	ctx = leaseCtx
+
 	if err := al.ensureHooksInitialized(ctx); err != nil {
 		return "", err
 	}
@@ -151,6 +165,13 @@ func (al *AgentLoop) prepareInboundMessageForAgent(
 }
 
 func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage) (string, error) {
+	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer releaseRuntime()
+	ctx = leaseCtx
+
 	msg = al.prepareInboundMessageForAgent(ctx, msg)
 
 	// Add message preview to log (show full content for error messages)
@@ -230,7 +251,6 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		opts.ModelNameOverride = strings.TrimSpace(msg.Context.Raw["model_name"])
 		opts.ModelIDOverride = strings.TrimSpace(msg.Context.Raw["model"])
 	}
-	var err error
 	opts, err = resolveTurnProfileOptions(al.GetConfig(), opts)
 	if err != nil {
 		return "", err

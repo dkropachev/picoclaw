@@ -80,6 +80,30 @@ type AgentLoop struct {
 	activeReqCond  *sync.Cond
 	activeReqCount int
 
+	// runtimeGate pauses new root runtime users and drains current users before
+	// a registry/provider generation is replaced. This covers the full interval
+	// from agent selection through turn/tool completion, not only LLM calls.
+	runtimeGateMu           sync.Mutex
+	runtimeGateChanged      chan struct{}
+	runtimeGatePaused       bool
+	runtimeGateStopped      bool
+	runtimeStartupBarrier   bool
+	runtimeGatePauses       int
+	runtimeGateActive       int
+	runtimeGateTransitionMu sync.Mutex
+	reloadMu                sync.Mutex
+
+	deferEvolutionActivation bool
+
+	runLifecycleMu   sync.Mutex
+	runCancel        context.CancelFunc
+	runDone          chan struct{}
+	runStopRequested bool
+
+	workflowAutomationMu    sync.RWMutex
+	workflowAutomationReset chan workflowAutomationResetRequest
+	workflowAutomationDone  chan struct{}
+
 	reloadFunc func() error
 
 	providerFactory func(*config.ModelConfig) (providers.LLMProvider, string, error)
@@ -151,6 +175,38 @@ const (
 // registerSharedTools registers tools that are shared across all agents (web, message, spawn).
 
 func (al *AgentLoop) Run(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runCtx, runCancel := context.WithCancel(ctx)
+	runDone := make(chan struct{})
+	al.runLifecycleMu.Lock()
+	if al.runDone != nil {
+		al.runLifecycleMu.Unlock()
+		runCancel()
+		return fmt.Errorf("agent loop is already running")
+	}
+	if al.runStopRequested {
+		al.runLifecycleMu.Unlock()
+		runCancel()
+		return nil
+	}
+	al.runCancel = runCancel
+	al.runDone = runDone
+	al.runLifecycleMu.Unlock()
+	defer func() {
+		runCancel()
+		al.running.Store(false)
+		close(runDone)
+		al.runLifecycleMu.Lock()
+		if al.runDone == runDone {
+			al.runCancel = nil
+			al.runDone = nil
+		}
+		al.runLifecycleMu.Unlock()
+	}()
+	ctx = runCtx
+
 	al.running.Store(true)
 
 	if err := al.ensureHooksInitialized(ctx); err != nil {
@@ -177,7 +233,20 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			if al.handleWorkflowTriggers(ctx, msg) {
+			inboundCtx, releaseInbound, err := al.acquireRuntimeUse(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
+				logger.WarnCF(
+					"agent",
+					"Failed to acquire inbound message runtime",
+					map[string]any{"error": err.Error()},
+				)
+				continue
+			}
+			if al.handleWorkflowTriggers(inboundCtx, msg) {
+				releaseInbound()
 				continue
 			}
 
@@ -187,7 +256,8 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				// Non-routable message (e.g., system) — process immediately.
 				// Note: system messages are processed in the main goroutine,
 				// so they block the receive loop but guarantee session serialization.
-				al.processMessageSync(ctx, msg)
+				al.processMessageSync(inboundCtx, msg)
+				releaseInbound()
 				continue
 			}
 
@@ -202,39 +272,65 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				phase:  TurnPhaseSetup,
 			}
 			if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
-				if al.tryHandleStopCommand(ctx, msg, sessionKey) {
+				if al.tryHandleStopCommand(inboundCtx, msg, sessionKey) {
+					releaseInbound()
 					continue
 				}
 
-				msg = al.prepareInboundMessageForAgent(ctx, msg)
+				msg = al.prepareInboundMessageForAgent(inboundCtx, msg)
 
 				// Another turn is already active (or reserved) for this session — enqueue
-				if err := al.enqueueSteeringMessage(sessionKey, agentID, providers.Message{
+				if enqueueErr := al.enqueueSteeringMessage(sessionKey, agentID, providers.Message{
 					Role:    "user",
 					Content: msg.Content,
 					Media:   append([]string(nil), msg.Media...),
-				}); err != nil {
+				}); enqueueErr != nil {
 					logger.WarnCF("agent", "Failed to enqueue steering message",
 						map[string]any{
-							"error":       err.Error(),
+							"error":       enqueueErr.Error(),
 							"channel":     msg.Channel,
 							"chat_id":     msg.ChatID,
 							"session_key": sessionKey,
 						})
 				}
+				releaseInbound()
+				continue
+			}
+
+			workerCtx, releaseWorker, err := al.retainRuntimeUse(inboundCtx)
+			if err != nil {
+				al.releaseSessionTurnState(sessionKey, placeholder)
+				releaseInbound()
+				logger.WarnCF(
+					"agent",
+					"Failed to retain inbound message runtime",
+					map[string]any{
+						"error":       err.Error(),
+						"channel":     msg.Channel,
+						"chat_id":     msg.ChatID,
+						"session_key": sessionKey,
+					},
+				)
 				continue
 			}
 
 			// Session claimed — spawn a worker goroutine that acquires a semaphore
 			// slot. The goroutine is spawned immediately so the main loop keeps
 			// draining the inbound channel. The goroutine blocks on the semaphore.
-			go func(m bus.InboundMessage, ph *turnState) {
+			go func(
+				workerCtx context.Context,
+				releaseWorker func(),
+				sessionKey string,
+				m bus.InboundMessage,
+				ph *turnState,
+			) {
+				defer releaseWorker()
 				var releaseSession bool
 				// Acquire semaphore slot (blocks if at capacity)
 				select {
 				case al.workerSem <- struct{}{}:
 					// Got slot, start worker
-				case <-ctx.Done():
+				case <-workerCtx.Done():
 					// Context canceled while waiting for a slot — clean up the
 					// placeholder to prevent session-level deadlock.
 					al.releaseSessionTurnState(sessionKey, nil)
@@ -291,19 +387,32 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 						Channel:    m.Channel,
 						ChatID:     m.ChatID,
 					}
-					continued, continueErr := al.drainQueuedSteeringContinuations(ctx, target)
+					continued, continueErr := al.drainQueuedSteeringContinuations(workerCtx, target)
 					if continueErr != nil {
-						al.maybePublishError(ctx, m.Channel, m.ChatID, sessionKey, continueErr)
+						al.maybePublishError(
+							workerCtx,
+							m.Channel,
+							m.ChatID,
+							sessionKey,
+							continueErr,
+						)
 						return
 					}
 					if continued != "" {
-						al.PublishResponseIfNeeded(ctx, target.Channel, target.ChatID, target.SessionKey, continued)
+						al.PublishResponseIfNeeded(
+							workerCtx,
+							target.Channel,
+							target.ChatID,
+							target.SessionKey,
+							continued,
+						)
 					}
 					return
 				}
 
-				al.runTurnWithSteering(ctx, m)
-			}(msg, placeholder)
+				al.runTurnWithSteering(workerCtx, m)
+			}(workerCtx, releaseWorker, sessionKey, msg, placeholder)
+			releaseInbound()
 
 			// TODO: Re-enable media cleanup after inbound media is properly consumed by the agent.
 			// Currently disabled because files are deleted before the LLM can access their content.
@@ -333,6 +442,36 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 
 func (al *AgentLoop) Stop() {
 	al.running.Store(false)
+	al.runtimeGateMu.Lock()
+	al.runtimeGateStopped = true
+	al.signalRuntimeGateChangedLocked()
+	al.runtimeGateMu.Unlock()
+	al.runLifecycleMu.Lock()
+	al.runStopRequested = true
+	cancel := al.runCancel
+	al.runLifecycleMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// WaitStopped waits for Run and its owned automation controller to return.
+func (al *AgentLoop) WaitStopped(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	al.runLifecycleMu.Lock()
+	done := al.runDone
+	al.runLifecycleMu.Unlock()
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Close releases resources held by agent session stores. Call after Stop.
@@ -391,12 +530,58 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	provider providers.LLMProvider,
 	cfg *config.Config,
 ) error {
+	_, err := al.reloadProviderAndConfig(ctx, provider, cfg, true)
+	return err
+}
+
+// ReloadProviderAndConfigRetainingPrevious atomically swaps the provider and
+// config but leaves the previous provider open so a multi-service owner can
+// either commit the reload or roll it back.
+func (al *AgentLoop) ReloadProviderAndConfigRetainingPrevious(
+	ctx context.Context,
+	provider providers.LLMProvider,
+	cfg *config.Config,
+) (providers.LLMProvider, error) {
+	return al.reloadProviderAndConfig(ctx, provider, cfg, false)
+}
+
+// CloseRetainedProvider drains active requests before closing a stateful
+// provider retained by ReloadProviderAndConfigRetainingPrevious.
+func (al *AgentLoop) CloseRetainedProvider(
+	ctx context.Context,
+	provider providers.LLMProvider,
+) {
+	if stateful, ok := provider.(providers.StatefulProvider); ok {
+		al.closeReloadedProvider(ctx, stateful)
+	}
+}
+
+// PauseRuntimeForReload blocks admission of new root turns and waits for
+// current runtime users to drain. The returned function must be called to
+// resume admission. Nested pauses are supported so a multi-service owner can
+// hold the boundary across an AgentLoop swap and service commit or rollback.
+func (al *AgentLoop) PauseRuntimeForReload(ctx context.Context) (func(), error) {
+	return al.pauseRuntimeUses(ctx)
+}
+
+func (al *AgentLoop) reloadProviderAndConfig(
+	ctx context.Context,
+	provider providers.LLMProvider,
+	cfg *config.Config,
+	closePrevious bool,
+) (providers.LLMProvider, error) {
+	if runtimeLeaseOwner(ctx) == al {
+		return nil, fmt.Errorf("cannot reload provider from an active agent runtime lease")
+	}
+	al.reloadMu.Lock()
+	defer al.reloadMu.Unlock()
+
 	// Validate inputs
 	if provider == nil {
-		return fmt.Errorf("provider cannot be nil")
+		return nil, fmt.Errorf("provider cannot be nil")
 	}
 	if cfg == nil {
-		return fmt.Errorf("config cannot be nil")
+		return nil, fmt.Errorf("config cannot be nil")
 	}
 
 	var registry *AgentRegistry
@@ -413,14 +598,14 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	}()
 	if registry == nil {
 		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("context canceled during registry creation: %w", err)
+			return nil, fmt.Errorf("context canceled during registry creation: %w", err)
 		}
-		return fmt.Errorf("registry creation failed")
+		return nil, fmt.Errorf("registry creation failed")
 	}
 
 	// Check context again before proceeding
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("context canceled after registry creation: %w", err)
+		return nil, fmt.Errorf("context canceled after registry creation: %w", err)
 	}
 
 	// Ensure shared tools are re-registered on the new registry
@@ -438,6 +623,16 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 				map[string]any{"error": err.Error()})
 		}
 	}
+
+	resumeRuntime, err := al.pauseRuntimeUses(ctx)
+	if err != nil {
+		registry.Close()
+		if newEvolution != nil {
+			_ = newEvolution.Close()
+		}
+		return nil, fmt.Errorf("drain active agent runtime before reload: %w", err)
+	}
+	defer resumeRuntime()
 
 	// Atomically swap the config and registry under write lock
 	// This ensures readers see a consistent pair
@@ -466,6 +661,12 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), newRL)
 
 	al.mu.Unlock()
+	if newEvolution != nil {
+		if err := newEvolution.activate(al); err != nil {
+			logger.WarnCF("agent", "Failed to activate reloaded evolution bridge",
+				map[string]any{"error": err.Error()})
+		}
+	}
 	al.refreshRuntimeEventLogger(cfg)
 
 	oldMCPManager := al.mcp.reset()
@@ -491,10 +692,10 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 		logger.WarnCF("agent", "MCP failed to reinitialize after reload",
 			map[string]any{"error": err.Error()})
 	}
-
 	// Close old provider after releasing the lock
 	// This prevents blocking readers while closing
-	if oldProvider, ok := extractProvider(oldRegistry); ok {
+	oldProvider, hasOldProvider := extractProvider(oldRegistry)
+	if closePrevious && hasOldProvider {
 		if stateful, ok := oldProvider.(providers.StatefulProvider); ok {
 			al.closeReloadedProvider(ctx, stateful)
 		}
@@ -505,7 +706,10 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 			"model": cfg.Agents.Defaults.GetModelName(),
 		})
 
-	return nil
+	if !hasOldProvider {
+		return nil, nil
+	}
+	return oldProvider, nil
 }
 
 // GetRegistry returns the current registry (thread-safe)
@@ -548,8 +752,21 @@ func (al *AgentLoop) runAgentLoop(
 	agent *AgentInstance,
 	opts processOptions,
 ) (string, error) {
+	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer releaseRuntime()
+	ctx = leaseCtx
+	if agent == nil {
+		return "", fmt.Errorf("agent is required")
+	}
+	agent, err = al.resolveCurrentRuntimeAgent(agent)
+	if err != nil {
+		return "", err
+	}
+
 	opts = normalizeProcessOptions(opts)
-	var err error
 	opts, err = resolveTurnProfileOptions(al.GetConfig(), opts)
 	if err != nil {
 		return "", err
@@ -642,6 +859,29 @@ func (al *AgentLoop) runAgentLoop(
 	}
 
 	return result.finalContent, nil
+}
+
+func (al *AgentLoop) resolveCurrentRuntimeAgent(
+	captured *AgentInstance,
+) (*AgentInstance, error) {
+	registry := al.GetRegistry()
+	if registry == nil {
+		return nil, fmt.Errorf("agent registry not configured")
+	}
+	if captured != nil && captured.ID != "" {
+		current, ok := registry.GetAgent(captured.ID)
+		if !ok || current == nil {
+			return nil, fmt.Errorf("agent %q is not present in the current runtime", captured.ID)
+		}
+		return current, nil
+	}
+	for _, agentID := range registry.ListAgentIDs() {
+		current, ok := registry.GetAgent(agentID)
+		if ok && current == captured {
+			return current, nil
+		}
+	}
+	return nil, fmt.Errorf("captured agent is not present in the current runtime")
 }
 
 // selectCandidates returns the model candidates and resolved model name to use

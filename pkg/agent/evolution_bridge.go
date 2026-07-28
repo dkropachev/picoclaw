@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,10 +16,15 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
+type evolutionRuntime interface {
+	FinalizeTurn(ctx context.Context, input evolution.TurnCaseInput) error
+	RunColdPathOnce(ctx context.Context, workspace string) error
+}
+
 type evolutionBridge struct {
 	cfg            config.EvolutionConfig
 	registry       *AgentRegistry
-	runtime        *evolution.Runtime
+	runtime        evolutionRuntime
 	coldPathRunner *evolution.ColdPathRunner
 	runtimeSub     runtimeevents.Subscription
 	bgCtx          context.Context
@@ -27,6 +33,13 @@ type evolutionBridge struct {
 	closed         bool
 	wg             sync.WaitGroup
 	isCurrent      func(*evolutionBridge) bool
+	agentLoop      *AgentLoop
+	generation     *config.Config
+	activated      bool
+	scheduleActive bool
+
+	scheduleWorkspace string
+	scheduleTimes     []string
 
 	scheduledMu         sync.Mutex
 	scheduledWorkspaces map[string]struct{}
@@ -69,21 +82,24 @@ func newEvolutionBridge(
 	bgCtx, cancel := context.WithCancel(context.Background())
 
 	bridge := &evolutionBridge{
-		cfg:      cfg.Evolution,
-		registry: registry,
-		runtime:  runtime,
-		bgCtx:    bgCtx,
-		cancel:   cancel,
+		cfg:               cfg.Evolution,
+		registry:          registry,
+		runtime:           runtime,
+		bgCtx:             bgCtx,
+		cancel:            cancel,
+		generation:        cfg,
+		scheduleWorkspace: cfg.Agents.Defaults.Workspace,
+		scheduleTimes:     cfg.Evolution.EffectiveColdPathTimes(),
 	}
 	if cfg.Evolution.RunsColdPathAutomatically() {
-		bridge.coldPathRunner = evolution.NewColdPathRunnerWithErrorHandler(runtime, func(err error) {
+		bridge.coldPathRunner = evolution.NewColdPathRunnerWithErrorHandler(bridge, func(err error) {
 			logger.WarnCF("agent", "Cold path run failed", map[string]any{
 				"error": err.Error(),
 			})
 		})
 	}
 	if cfg.Evolution.RunsColdPathScheduled() {
-		bridge.startScheduledColdPath(cfg.Agents.Defaults.Workspace, cfg.Evolution.EffectiveColdPathTimes())
+		bridge.rememberScheduledColdPathWorkspace(cfg.Agents.Defaults.Workspace)
 		bridge.rememberScheduledColdPathWorkspaces(registryWorkspaces(registry))
 	}
 
@@ -100,6 +116,100 @@ func resolvedEvolutionModelID(cfg *config.Config, provider providers.LLMProvider
 		return provider.GetDefaultModel()
 	}
 	return ""
+}
+
+// activate attaches a constructed bridge to its installed AgentLoop generation.
+// Construction intentionally has no scheduled side effects so reload candidates
+// cannot run before their config and registry have been atomically installed.
+func (b *evolutionBridge) activate(al *AgentLoop) error {
+	if b == nil {
+		return nil
+	}
+	if al == nil {
+		return fmt.Errorf("agent loop is required to activate evolution bridge")
+	}
+
+	al.mu.RLock()
+	installed := al.evolution == b && al.cfg == b.generation
+	if !installed {
+		al.mu.RUnlock()
+		return fmt.Errorf("evolution bridge is not the installed runtime generation")
+	}
+
+	b.closeMu.Lock()
+	if b.closed {
+		b.closeMu.Unlock()
+		al.mu.RUnlock()
+		return fmt.Errorf("evolution bridge is closed")
+	}
+	if b.activated {
+		sameLoop := b.agentLoop == al
+		b.closeMu.Unlock()
+		al.mu.RUnlock()
+		if !sameLoop {
+			return fmt.Errorf("evolution bridge is already attached to another agent loop")
+		}
+		return nil
+	}
+	b.agentLoop = al
+	b.activated = true
+	workspace := b.scheduleWorkspace
+	times := append([]string(nil), b.scheduleTimes...)
+	b.closeMu.Unlock()
+	al.mu.RUnlock()
+
+	if b.cfg.RunsColdPathScheduled() {
+		b.startScheduledColdPath(workspace, times)
+	}
+	return nil
+}
+
+// ActivateEvolution activates the installed evolution bridge. It is
+// idempotent and is exposed so gateway startup can activate only after its
+// construction-time runtime barrier is already held.
+func (al *AgentLoop) ActivateEvolution() error {
+	if al == nil {
+		return fmt.Errorf("agent loop is required to activate evolution bridge")
+	}
+	bridge := al.currentEvolutionBridge()
+	if bridge == nil {
+		return nil
+	}
+	return bridge.activate(al)
+}
+
+// RunColdPathOnce is the admission boundary used by ColdPathRunner. Attached
+// bridges must own the exact active AgentLoop config generation for the entire
+// cold-path run. Unattached bridges retain their direct behavior for focused
+// standalone use.
+func (b *evolutionBridge) RunColdPathOnce(ctx context.Context, workspace string) error {
+	if b == nil || b.runtime == nil {
+		return nil
+	}
+
+	b.closeMu.Lock()
+	closed := b.closed
+	al := b.agentLoop
+	generation := b.generation
+	isCurrent := b.isCurrent
+	runtime := b.runtime
+	b.closeMu.Unlock()
+	if closed {
+		return context.Canceled
+	}
+	if al == nil {
+		return runtime.RunColdPathOnce(ctx, workspace)
+	}
+
+	leaseCtx, releaseRuntime, err := al.AcquireRuntimeGeneration(ctx, generation)
+	if err != nil {
+		return fmt.Errorf("admit evolution cold path: %w", err)
+	}
+	defer releaseRuntime()
+	if isCurrent != nil && !isCurrent(b) {
+		return fmt.Errorf("evolution bridge generation changed")
+	}
+	return runtime.RunColdPathOnce(leaseCtx, workspace)
 }
 
 func (b *evolutionBridge) Close() error {
@@ -280,7 +390,14 @@ func (b *evolutionBridge) startScheduledColdPath(workspace string, times []strin
 		return
 	}
 
+	b.closeMu.Lock()
+	if b.closed || b.scheduleActive {
+		b.closeMu.Unlock()
+		return
+	}
+	b.scheduleActive = true
 	b.wg.Add(1)
+	b.closeMu.Unlock()
 	go func() {
 		defer b.wg.Done()
 		for {

@@ -2,14 +2,388 @@ package workflows
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	osexec "os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestFileRunStoreUpdatesRemainReadableDuringAtomicReplacement(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	store := NewFileRunStore(workspace)
+	run := &Run{
+		ID:          "wr_atomic_updates",
+		WorkflowRef: "workflows/test.yml",
+		Status:      RunStatusRunning,
+		CreatedAt:   time.Now().UTC(),
+		Outputs: map[string]any{
+			"payload": strings.Repeat("a", 256*1024),
+		},
+	}
+	if err := store.CreateRun(ctx, run); err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+
+	runPath := filepath.Join(workspace, "workflow_runs", run.ID, "run.json")
+	stopReaders := make(chan struct{})
+	readerErr := make(chan error, 1)
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stopReaders:
+					return
+				default:
+					data, err := os.ReadFile(runPath)
+					if err != nil {
+						select {
+						case readerErr <- fmt.Errorf("read run during update: %w", err):
+						default:
+						}
+						return
+					}
+					var observed Run
+					if err := json.Unmarshal(data, &observed); err != nil {
+						select {
+						case readerErr <- fmt.Errorf("decode run during update: %w", err):
+						default:
+						}
+						return
+					}
+					if observed.ID != run.ID {
+						select {
+						case readerErr <- fmt.Errorf("observed run id %q, want %q", observed.ID, run.ID):
+						default:
+						}
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	for i := range 96 {
+		run.Outputs = map[string]any{
+			"iteration": i,
+			"payload":   strings.Repeat(string(rune('a'+i%26)), 256*1024),
+		}
+		if err := store.UpdateRun(ctx, run); err != nil {
+			close(stopReaders)
+			readers.Wait()
+			t.Fatalf("UpdateRun(%d) error = %v", i, err)
+		}
+	}
+	close(stopReaders)
+	readers.Wait()
+	select {
+	case err := <-readerErr:
+		t.Fatal(err)
+	default:
+	}
+
+	persisted, err := store.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if got := persisted.Outputs["iteration"]; got != float64(95) {
+		t.Fatalf("final iteration = %#v, want 95", got)
+	}
+}
+
+func TestFileRunStorePreservesJSONNumbersAcrossReadsAndUpdates(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := NewFileRunStore(t.TempDir())
+	const exact = "9007199254740993"
+	event := map[string]any{
+		"id":        "ev_0123456789abcdef0123456789abcdef",
+		"source":    "webhook",
+		"connector": "primary",
+		"type":      "test.number",
+		"payload":   map[string]any{"count": json.Number(exact)},
+	}
+	run := &Run{
+		ID:          "wr_exact_number",
+		WorkflowRef: "workflows/test.yml",
+		Status:      RunStatusRunning,
+		Event:       event,
+		Inputs: map[string]any{
+			"event_id":       event["id"],
+			"dispatch_id":    "dsp_0123456789abcdef0123456789abcdef",
+			"event":          event,
+			"ordinary_count": float64(7),
+		},
+		Session:   EventWorkflowSession("workflows/test.yml", event["id"].(string)),
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := store.CreateRun(ctx, run); err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+	assertExact := func(label string, value any) {
+		t.Helper()
+		number, ok := value.(json.Number)
+		if !ok || number.String() != exact {
+			t.Fatalf("%s = %#v (%T), want json.Number(%s)", label, value, value, exact)
+		}
+	}
+	got, err := store.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	assertExact("GetRun event count", got.Event["payload"].(map[string]any)["count"])
+	assertExact(
+		"GetRun input event count",
+		got.Inputs["event"].(map[string]any)["payload"].(map[string]any)["count"],
+	)
+	if ordinary, ok := got.Inputs["ordinary_count"].(float64); !ok || ordinary != 7 {
+		t.Fatalf(
+			"GetRun ordinary_count = %#v (%T), want existing float64 behavior",
+			got.Inputs["ordinary_count"],
+			got.Inputs["ordinary_count"],
+		)
+	}
+
+	runs, err := store.ListRuns(ctx)
+	if err != nil {
+		t.Fatalf("ListRuns() error = %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("ListRuns() length = %d, want 1", len(runs))
+	}
+	assertExact("ListRuns event count", runs[0].Event["payload"].(map[string]any)["count"])
+
+	if _, cancelErr := store.CancelRun(ctx, run.ID, "test"); cancelErr != nil {
+		t.Fatalf("CancelRun() error = %v", cancelErr)
+	}
+	canceled, err := store.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("GetRun(canceled) error = %v", err)
+	}
+	assertExact("canceled event count", canceled.Event["payload"].(map[string]any)["count"])
+	assertExact(
+		"canceled input event count",
+		canceled.Inputs["event"].(map[string]any)["payload"].(map[string]any)["count"],
+	)
+}
+
+func TestFileRunStoreDoesNotPromoteManualEventShapedNumbers(t *testing.T) {
+	t.Parallel()
+
+	store := NewFileRunStore(t.TempDir())
+	run := &Run{
+		ID:          "wr_manual_event_shape",
+		WorkflowRef: "workflows/manual.yml",
+		Status:      RunStatusRunning,
+		Event: map[string]any{
+			"id":        "ev_0123456789abcdef0123456789abcdef",
+			"source":    "manual",
+			"connector": "user",
+			"type":      "manual.lookalike",
+			"payload":   map[string]any{"count": json.Number("9007199254740993")},
+		},
+		Inputs: map[string]any{
+			"event": map[string]any{
+				"id":        "ev_0123456789abcdef0123456789abcdef",
+				"source":    "manual",
+				"connector": "user",
+				"type":      "manual.lookalike",
+				"payload":   map[string]any{"count": json.Number("9007199254740993")},
+			},
+		},
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := store.CreateRun(context.Background(), run); err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+	got, err := store.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	eventCount := got.Event["payload"].(map[string]any)["count"]
+	if _, promoted := eventCount.(json.Number); promoted {
+		t.Fatalf("manual event count = %#v, unexpectedly promoted to json.Number", eventCount)
+	}
+	inputCount := got.Inputs["event"].(map[string]any)["payload"].(map[string]any)["count"]
+	if _, promoted := inputCount.(json.Number); promoted {
+		t.Fatalf("manual input event count = %#v, unexpectedly promoted to json.Number", inputCount)
+	}
+}
+
+func TestFileRunStoreCreateRunReturnsTypedDuplicateError(t *testing.T) {
+	ctx := context.Background()
+	store := NewFileRunStore(t.TempDir())
+	run := &Run{
+		ID:          "wr_duplicate",
+		WorkflowRef: "workflows/test.yml",
+		Status:      RunStatusSucceeded,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := store.CreateRun(ctx, run); err != nil {
+		t.Fatalf("first CreateRun() error = %v", err)
+	}
+
+	err := store.CreateRun(ctx, run)
+	if !errors.Is(err, ErrRunAlreadyExists) {
+		t.Fatalf("second CreateRun() error = %v, want ErrRunAlreadyExists", err)
+	}
+	if !strings.Contains(err.Error(), run.ID) {
+		t.Fatalf("second CreateRun() error = %q, want run ID %q", err, run.ID)
+	}
+}
+
+func TestFileRunStoreCreateRunIsAtomicWithoutAdvisoryLock(t *testing.T) {
+	const contenders = 32
+
+	ctx := context.Background()
+	workspace := t.TempDir()
+	start := make(chan struct{})
+	errs := make([]error, contenders)
+	refs := make([]string, contenders)
+	var wg sync.WaitGroup
+	for i := range contenders {
+		refs[i] = "workflows/contender-" + string(rune('a'+i)) + ".yml"
+		store := NewFileRunStore(workspace)
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			// Calling the locked helper directly models platforms where the
+			// process-wide advisory file lock is unavailable. The filesystem
+			// create boundary must still select exactly one winner.
+			errs[index] = store.createRunLocked(&Run{
+				ID:          "wr_atomic",
+				WorkflowRef: refs[index],
+				Status:      RunStatusRunning,
+				CreatedAt:   time.Now().UTC(),
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	successes := 0
+	winnerRef := ""
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			successes++
+			winnerRef = refs[i]
+		case errors.Is(err, ErrRunAlreadyExists):
+		default:
+			t.Fatalf("createRunLocked() contender %d error = %v", i, err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful creates = %d, want 1", successes)
+	}
+
+	persisted, err := NewFileRunStore(workspace).GetRun(ctx, "wr_atomic")
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if persisted.WorkflowRef != winnerRef {
+		t.Fatalf("persisted workflow ref = %q, want winner %q", persisted.WorkflowRef, winnerRef)
+	}
+}
+
+func TestFileRunStoreCreateRunDoesNotClobberExistingFile(t *testing.T) {
+	workspace := t.TempDir()
+	store := NewFileRunStore(workspace)
+	runPath := filepath.Join(workspace, "workflow_runs", "wr_existing", "run.json")
+	if err := os.MkdirAll(filepath.Dir(runPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	original := []byte("existing bytes must survive")
+	if err := os.WriteFile(runPath, original, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	err := store.CreateRun(context.Background(), &Run{
+		ID:          "wr_existing",
+		WorkflowRef: "workflows/replacement.yml",
+		Status:      RunStatusRunning,
+		CreatedAt:   time.Now().UTC(),
+	})
+	if !errors.Is(err, ErrRunAlreadyExists) {
+		t.Fatalf("CreateRun() error = %v, want ErrRunAlreadyExists", err)
+	}
+	got, err := os.ReadFile(runPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("run file = %q, want original %q", got, original)
+	}
+}
+
+func TestFileRunStoreCreateRunMarshalFailureLeavesNoPartialFile(t *testing.T) {
+	workspace := t.TempDir()
+	store := NewFileRunStore(workspace)
+	run := &Run{
+		ID:          "wr_bad_json",
+		WorkflowRef: "workflows/bad.yml",
+		Status:      RunStatusRunning,
+		Event:       map[string]any{"unsupported": make(chan struct{})},
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := store.CreateRun(context.Background(), run); err == nil {
+		t.Fatal("CreateRun() error = nil, want JSON marshal error")
+	}
+	runPath := filepath.Join(workspace, "workflow_runs", "wr_bad_json", "run.json")
+	if _, err := os.Stat(runPath); !os.IsNotExist(err) {
+		t.Fatalf("Stat(run file) error = %v, want not exist", err)
+	}
+
+	run.Event = nil
+	if err := store.CreateRun(context.Background(), run); err != nil {
+		t.Fatalf("CreateRun() retry error = %v", err)
+	}
+	info, err := os.Stat(runPath)
+	if err != nil {
+		t.Fatalf("Stat(run file) error = %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("run file permissions = %#o, want 0600", got)
+	}
+}
+
+func TestFileRunStoreCreateRunIfUnderLimitReturnsTypedLimitError(t *testing.T) {
+	ctx := context.Background()
+	store := NewFileRunStore(t.TempDir())
+	if err := store.CreateRun(ctx, &Run{
+		ID:          "wr_running",
+		WorkflowRef: "workflows/test.yml",
+		Status:      RunStatusRunning,
+		CreatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+
+	err := store.CreateRunIfUnderLimit(ctx, &Run{
+		ID:          "wr_blocked",
+		WorkflowRef: "workflows/test.yml",
+		Status:      RunStatusRunning,
+		CreatedAt:   time.Now().UTC(),
+	}, 1)
+	if !errors.Is(err, ErrRunConcurrencyLimit) {
+		t.Fatalf("CreateRunIfUnderLimit() error = %v, want ErrRunConcurrencyLimit", err)
+	}
+	if !strings.Contains(err.Error(), "1 running, max 1") {
+		t.Fatalf("CreateRunIfUnderLimit() error = %q, want running/max detail", err)
+	}
+}
 
 func TestFileRunStoreCancelRunPreservesTerminalStatus(t *testing.T) {
 	ctx := context.Background()

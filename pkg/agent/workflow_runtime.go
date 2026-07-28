@@ -26,6 +26,7 @@ func newWorkflowTool(al *AgentLoop, agentID string, agent *AgentInstance) tools.
 			agentID:  agentID,
 			registry: agent.Tools,
 			loop:     al,
+			dynamic:  true,
 		},
 		Agents:               &workflowAgentRunner{loop: al},
 		RuntimeEvents:        al.runtimeEvents,
@@ -84,6 +85,7 @@ func NewWorkflowToolRunner(al *AgentLoop, agentID string) (workflows.ToolRunner,
 		agentID:  agentID,
 		registry: agent.Tools,
 		loop:     al,
+		dynamic:  true,
 	}, nil
 }
 
@@ -91,11 +93,30 @@ type workflowToolRunner struct {
 	agentID  string
 	registry *tools.ToolRegistry
 	loop     *AgentLoop
+	dynamic  bool
 }
 
 func (r *workflowToolRunner) RunTool(ctx context.Context, req workflows.ToolRequest) (map[string]any, error) {
 	if r == nil || r.registry == nil {
 		return nil, fmt.Errorf("tool registry not configured")
+	}
+	registry := r.registry
+	if r.loop != nil && r.dynamic {
+		leaseCtx, releaseRuntime, err := r.loop.acquireRuntimeUse(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer releaseRuntime()
+		ctx = leaseCtx
+		currentRegistry := r.loop.GetRegistry()
+		if currentRegistry == nil {
+			return nil, fmt.Errorf("agent registry not configured")
+		}
+		currentAgent, ok := currentRegistry.GetAgent(r.agentID)
+		if !ok || currentAgent == nil || currentAgent.Tools == nil {
+			return nil, fmt.Errorf("agent %q not found for workflow tool step", r.agentID)
+		}
+		registry = currentAgent.Tools
 	}
 	args := cloneAnyMap(req.Args)
 	delivery := req.Delivery
@@ -121,7 +142,7 @@ func (r *workflowToolRunner) RunTool(ctx context.Context, req workflows.ToolRequ
 		req.Session,
 		workflowSessionScope(r.agentID, req.Session, delivery),
 	)
-	result := r.registry.ExecuteWithContext(execCtx, req.Name, args, delivery.Channel, delivery.ChatID, nil)
+	result := registry.ExecuteWithContext(execCtx, req.Name, args, delivery.Channel, delivery.ChatID, nil)
 	if err := r.deliverHandledMedia(ctx, req, result); err != nil {
 		return workflowToolResultOutputs(result), err
 	}
@@ -201,11 +222,18 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	if r == nil || r.loop == nil {
 		return nil, fmt.Errorf("agent loop not configured")
 	}
-	if err := r.loop.ensureHooksInitialized(ctx); err != nil {
+	leaseCtx, releaseRuntime, err := r.loop.acquireRuntimeUse(ctx)
+	if err != nil {
 		return nil, err
 	}
-	if err := r.loop.ensureMCPInitialized(ctx); err != nil {
-		return nil, err
+	defer releaseRuntime()
+	ctx = leaseCtx
+
+	if hooksErr := r.loop.ensureHooksInitialized(ctx); hooksErr != nil {
+		return nil, hooksErr
+	}
+	if mcpErr := r.loop.ensureMCPInitialized(ctx); mcpErr != nil {
+		return nil, mcpErr
 	}
 	agentID := strings.TrimSpace(req.AgentID)
 	registry := r.loop.GetRegistry()
@@ -266,10 +294,10 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		})
 	}
 	if strategy := workflowManagedSplitStrategy(req, agent); strategy != "" {
-		if err := r.ensureWorkflowManagedProviders(agent, req.Managed); err != nil {
+		if managedErr := r.ensureWorkflowManagedProviders(agent, req.Managed); managedErr != nil {
 			logger.WarnCF("workflow", "Failed to initialize managed model provider", map[string]any{
 				"agent_id": agentID,
-				"error":    err.Error(),
+				"error":    managedErr.Error(),
 			})
 		}
 		return r.runManagedSplit(

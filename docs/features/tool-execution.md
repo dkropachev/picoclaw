@@ -32,6 +32,7 @@ with context, limits, filtering, and error normalization.
 | `FR-TOOL-008` | MUST | Chat account selection excludes internal virtual model entries and model-router rows but keeps virtual account-router entries and virtual credential-account entries selectable as chat account targets; the account selector groups choices into Accounts and Account Routers only, while a separate model selector displays upstream model IDs fetched for the selected account where available. | Account routers are materialized from `account_routers[]`, and stored credentials are exposed as generated account choices; both must remain usable from Chat without exposing unrelated generated rows or mixing routers into API-key account choices. |
 | `FR-TOOL-009` | SHOULD | Tool adaptation config chooses and pins a visible tool surface per model/API profile, supports provider/model-specific surface and cache-policy overrides, records provider-reported cache-token observations and per-tool success/failure outcomes when available, treats runtime visible tool changes as cache-aware decisions, supports explicit harmless targeted tool-call probes, persists learned cache/probe state in a stable local state file, exposes searchable resolved/learned/probe state for router-expanded profiles in the UI, and exposes Codex-compatible wrappers for shell, stdin, patch, image, and plan capabilities when the Codex surface is selected. | PicoClaw runs many providers; equivalent capabilities should be exposed in the shape each model uses best without breaking prompt/tool cache unnecessarily. |
 | `FR-TOOL-010` | SHOULD | The `/agent/tools` page stores the selected Tool Library, Web Search, Thread Policy, or Adaptation tab in the route search params so tab views can be linked, refreshed, and restored through browser history. | Tool configuration work often spans multiple views, and URL-addressable tabs make navigation predictable. |
+| `FR-TOOL-011` | MUST | Before `spawn` launches background subturn work, an AgentLoop-backed spawner synchronously retains the caller's runtime generation and transfers that ownership to the goroutine through completion and callback delivery. Failure to retain returns a tool error without launching work. | A parent turn may finish immediately after spawn acknowledgement; reload must still see and drain the admitted child before closing its provider. |
 
 ## Data And State Model
 
@@ -112,6 +113,7 @@ Owns: TOOL write_file
 | HTTP | `/api/tools`, `/api/tools/{name}/state`, `/api/tools/web-search-config`, `/api/tools/adaptation`, `/api/tools/adaptation/probe` | Launcher tool state, web search configuration, and model-aware tool surface policy/probing. | `FR-TOOL-004`, `FR-TOOL-009` |
 | Config | `tools.*` subtrees except MCP, skills, and cron ownership in their feature specs | Tool enablement, limits, providers, filtering, and policies. | `FR-TOOL-002` through `FR-TOOL-006` |
 | Frontend | Tool library, adaptation, and web-search configuration pages under `web/frontend/src/components/agent/tools/**` | Browser tool management follows shared frontend API, accessibility, formatting, and route smoke-test rules while preserving tool enablement and adaptation semantics. | `FR-TOOL-001`, `FR-TOOL-004`, `FR-TOOL-009` |
+| Tool | `spawn` with optional asynchronous context preparation | Retain AgentLoop runtime ownership synchronously before background goroutine launch, then release after subturn and callback completion. | `FR-TOOL-011` |
 
 ## Algorithms And Ordering
 
@@ -126,6 +128,9 @@ Owns: TOOL write_file
 9. After tool execution, record per-tool success/failure counters keyed by provider, model, pinned visible surface, and tool name when adaptation learning is enabled. These counters are persisted and exposed through the adaptation API for future tool-by-tool tuning.
 10. When explicitly triggered and `run_model_probes` is enabled, run a bounded no-side-effect LLM call against the requested provider/model profile. `POST /api/tools/adaptation/probe` accepts optional `{provider, model}` JSON; an empty body preserves active-profile behavior. The server resolves only configured concrete upstream model/account credentials, never credentials supplied by the request. The probe validates whether the model emits the expected tool call and records the result as a learned tool outcome without executing the requested probe tool.
 11. The adaptation API returns the active resolved provider/model profile plus a deduplicated list of effective provider/model profiles expanded from enabled model-list entries, enabled account routers, enabled model routers, and saved manual overrides. Account routers are expansion sources only: they are not returned as adaptation providers, do not create per-account rows, and do not expose router/account labels in the profile list. Each row reports whether a configured upstream target makes probing available. The Adaptation UI supports local search, per-row probes, and add/edit/remove of overrides for configured provider/model rows; account credentials remain hidden and account-collapsed.
+12. For background spawn, ask an AgentLoop-backed spawner to retain runtime
+    ownership before starting the goroutine. Run the subturn and callback with
+    that retained context and release it exactly once on every completion path.
 
 ## Cross-Feature Behavior
 
@@ -148,6 +153,9 @@ owned by the git workspaces feature.
 - Nil tool results are normalized.
 - Denied commands and path violations never execute the requested side effect.
 - Web providers fail over only according to configured provider behavior.
+- Spawn admission failure returns synchronously and launches no goroutine;
+  successful admission remains visible to provider reload even after the
+  parent turn returns.
 
 ## Acceptance Evidence
 
@@ -161,9 +169,11 @@ owned by the git workspaces feature.
 | `FR-TOOL-008` | [web/frontend/src/hooks/use-chat-models.test.ts](../../web/frontend/src/hooks/use-chat-models.test.ts) |
 | `FR-TOOL-009` | [pkg/tools/adaptation.go](../../pkg/tools/adaptation.go), [pkg/tools/adaptation_state.go](../../pkg/tools/adaptation_state.go), [pkg/tools/adaptation_probe.go](../../pkg/tools/adaptation_probe.go), [pkg/tools/codex_compat.go](../../pkg/tools/codex_compat.go), [pkg/tools/apply_patch.go](../../pkg/tools/apply_patch.go), [pkg/agent/pipeline_llm.go](../../pkg/agent/pipeline_llm.go), [web/backend/api/tools.go](../../web/backend/api/tools.go), [web/frontend/src/components/agent/tools/tool-adaptation-tab.tsx](../../web/frontend/src/components/agent/tools/tool-adaptation-tab.tsx) |
 | `FR-TOOL-010` | [web/frontend/src/routes/agent/tools.tsx](../../web/frontend/src/routes/agent/tools.tsx), [web/frontend/src/components/agent/tools/tools-page.tsx](../../web/frontend/src/components/agent/tools/tools-page.tsx), [web/frontend/src/components/agent/tools/use-tools-page.ts](../../web/frontend/src/components/agent/tools/use-tools-page.ts) |
+| `FR-TOOL-011` | [pkg/agent/runtime_gate_test.go](../../pkg/agent/runtime_gate_test.go), [pkg/tools/spawn.go](../../pkg/tools/spawn.go) |
 
 ## Implementation Anchors
 
 - [pkg/tools/registry.go](../../pkg/tools/registry.go)
 - [pkg/tools/fs](../../pkg/tools/fs)
 - [pkg/tools/integration/web.go](../../pkg/tools/integration/web.go)
+- [pkg/tools/spawn.go](../../pkg/tools/spawn.go)

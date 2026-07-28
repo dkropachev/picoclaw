@@ -11,6 +11,7 @@ import (
 type Store struct{}
 
 var _ Inbox = (*Store)(nil)
+var _ DispatchLeaseRenewer = (*Store)(nil)
 
 func Open(context.Context, string, ...Option) (*Store, error) {
 	return nil, ErrUnsupportedPlatform
@@ -54,6 +55,19 @@ func (*Store) DeadRouting(context.Context, string, string, string) error {
 	return ErrUnsupportedPlatform
 }
 
+func (*Store) CreateDispatchForRoutingClaim(
+	context.Context,
+	string,
+	string,
+	string,
+) (Dispatch, bool, error) {
+	return Dispatch{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) RenewRoutingLease(context.Context, string, string, time.Duration) error {
+	return ErrUnsupportedPlatform
+}
+
 func (*Store) CreateDispatch(context.Context, string, string) (Dispatch, bool, error) {
 	return Dispatch{}, false, ErrUnsupportedPlatform
 }
@@ -67,6 +81,10 @@ func (*Store) ClaimDispatches(context.Context, string, int, time.Duration) ([]Di
 }
 
 func (*Store) LinkDispatchRun(context.Context, string, string, string) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Store) RenewDispatchLease(context.Context, string, string, time.Duration) error {
 	return ErrUnsupportedPlatform
 }
 

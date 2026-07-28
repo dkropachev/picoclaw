@@ -32,6 +32,8 @@ transports.
 | `FR-CHANNEL-008` | MUST   | Send failures, rate limits, and closed buses produce structured errors/events instead of silently dropping messages.                                                      | Operators need diagnoseable delivery failure.                                      |
 | `FR-CHANNEL-009` | SHOULD | Browser chat UI preserves readable message layout, accessible composer labeling, responsive controls, and non-overlapping code/message surfaces in light and dark themes. | Chat delivery remains user-facing even when the gateway is stopped or unavailable. |
 | `FR-CHANNEL-010` | MUST | Pico browser chat sends the selected account alias and selected upstream model ID on user messages when those controls are set, and the channel copies them into normalized inbound metadata for the agent turn. | Chat-window account/model selection must affect the next turn without relying on a hidden config rewrite. |
+| `FR-CHANNEL-011` | MUST | Gateway config reload marks readiness false, preflights replacement storage and event runtime dependencies, pauses new agent runtime admission, drains active turns and reload-owned services, retains the prior provider/config through replacement startup, and resumes turns only after commit or successful rollback. An inbound message holds one generation across workflow-trigger evaluation, route/session reservation, worker-queue wait, and turn completion. Replacement event/heartbeat workers and scheduled jobs are fenced to their exact config generation, the runtime-event workflow subscription is absent throughout the outer transaction, and cron starts only after other fallible replacement initialization. Terminal shutdown remembers Stop before a delayed AgentLoop start, quiesces producers, drains the permanent runtime boundary, then stops outbound channel/media dependencies and closes providers. Cleanup, rollback, or shutdown-drain failure leaves readiness/resources fail-safe and never closes a provider or dependency still reachable by active work. | Channels remain live during reload, so readiness alone cannot prevent a turn, queued lifecycle event, or background service from observing provisional or closed runtime state. |
+| `FR-CHANNEL-012` | MUST | Channel reload detaches and retires an old adapter identity before replacement construction, drains its admitted sends, joins its workers, and stops it before starting a same-name candidate. The candidate remains absent from lookup, synchronous send, outbound dispatch, and HTTP routing until `Start` succeeds. Failed or timed-out retirement remains manager-owned and blocks duplicate construction until cleanup succeeds. Shutdown joins dispatchers, retires/cancels workers to release full-queue senders, drains admitted direct sends, joins workers, then stops each adapter; errors are returned and successful stops are not repeated on retry. | A replacement must never overlap the old adapter or receive traffic before it is ready, and shutdown must neither panic on raced queue access nor deadlock behind a full retired queue. |
 
 ## Data And State Model
 
@@ -92,6 +94,7 @@ Owns: EVENT bus.*
 | Config   | `channel_list.*`, `gateway.*`                                                                                                                                               | Channel enablement, settings, trigger, placeholder, typing, gateway host/port/log/hot reload.                                                                 | `FR-CHANNEL-001`, `FR-CHANNEL-003`, `FR-CHANNEL-005` |
 | Events   | `channel.*`, `gateway.*`, `bus.*`                                                                                                                                           | Lifecycle, webhook, outbound, rate limit, gateway, and bus failure telemetry.                                                                                 | `FR-CHANNEL-001`, `FR-CHANNEL-008`                   |
 | Frontend | Chat, Pico, channel, message, code-block, account/model selection, and context-usage UI under `web/frontend/src/components/chat/**`, `web/frontend/src/features/chat/**`, and related channel routes | Browser chat surfaces expose channel delivery behavior and follow shared frontend API, token, responsive layout, accessibility, and dynamic-style lint rules. | `FR-CHANNEL-005`, `FR-CHANNEL-006`, `FR-CHANNEL-009`, `FR-CHANNEL-010` |
+| Runtime  | Gateway reload service transaction and `AgentLoop.PauseRuntimeForReload` | Hold channel turns outside the provisional provider/config window and resume them only after replacement services commit or old services recover. | `FR-CHANNEL-011` |
 
 ## Algorithms And Ordering
 
@@ -100,6 +103,20 @@ Owns: EVENT bus.*
 3. HTTP callback channels register routes before gateway reports ready; socket/polling channels start their own workers.
 4. Inbound messages are normalized, filtered by access/trigger rules, and published to the bus.
 5. Outbound messages are queued per channel, rate-limited, sent, and reported through runtime events.
+6. On reload, mark unready, preflight replacement state, pause and drain agent
+   runtime users, stop reload-owned services, swap provider/config while
+   retaining the prior generation, and start replacements. Commit or roll back
+   services before resuming channel turns; remain unready if recovery fails.
+7. On shutdown, stop cron/heartbeat/device/voice/event producers, cancel and
+   join the AgentLoop, and drain its terminal generation boundary before
+   stopping channel outbound workers or media cleanup and closing the provider.
+8. For a channel replacement, synchronously remove the old lookup/HTTP/worker
+   identity, mark its never-closed queues retired, drain admitted sends, join
+   both workers, and stop the adapter. Keep a candidate private through
+   `Start`; publish its adapter, worker, config hash, and HTTP routes together
+   only after success. Shutdown joins dispatchers, retires workers before
+   draining send leases so full queues wake, then joins workers and stops
+   adapters. Retain failed cleanup for a serialized retry.
 
 ## Cross-Feature Behavior
 
@@ -123,6 +140,20 @@ views without changing the channel delivery contract.
   exposes fetched upstream model IDs in a separate model control.
 - Chat messages, code blocks, model selectors, history buttons, and context
   controls do not create horizontal overflow on narrow mobile screens.
+- Inbound channel work admitted before reload retains the same generation while
+  it evaluates workflow triggers, resolves a route, owns a session placeholder,
+  waits for a worker slot, and completes. Later inbound work waits at the
+  runtime boundary; neither can capture the provisional provider between swap
+  and service commit or rollback.
+- A turn that reaches admission after the provisional swap remains blocked
+  through rollback and resolves only against the restored generation.
+- Runtime lifecycle events emitted by provisional services are dropped while
+  the generation-owned workflow subscription is suspended; they are not
+  evaluated against restored workflows.
+- A blocked or failed replacement cannot receive direct, queued, streaming, or
+  HTTP traffic. A cleanup failure keeps that exact adapter identity pending, so
+  retry cannot construct a second same-name client or overlap provider
+  sessions.
 
 ## Acceptance Evidence
 
@@ -133,6 +164,8 @@ views without changing the channel delivery contract.
 | `FR-CHANNEL-006`                                                                         | [web/backend/api/pico_test.go](../../web/backend/api/pico_test.go), [web/backend/api/channels_test.go](../../web/backend/api/channels_test.go)                                                                                                 |
 | `FR-CHANNEL-009`                                                                         | [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/scripts/lint-ui-rules.mjs](../../web/frontend/scripts/lint-ui-rules.mjs)                                                                       |
 | `FR-CHANNEL-010`                                                                         | [pkg/channels/pico/pico_test.go](../../pkg/channels/pico/pico_test.go), [web/frontend/src/hooks/use-chat-models.test.ts](../../web/frontend/src/hooks/use-chat-models.test.ts)                                                                 |
+| `FR-CHANNEL-011`                                                                         | [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go), [pkg/agent/runtime_gate_test.go](../../pkg/agent/runtime_gate_test.go), [pkg/health/server_test.go](../../pkg/health/server_test.go)                         |
+| `FR-CHANNEL-012`                                                                         | [pkg/channels/manager_test.go](../../pkg/channels/manager_test.go)                                                                                                                                                                               |
 
 ## Implementation Anchors
 

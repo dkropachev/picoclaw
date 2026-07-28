@@ -82,6 +82,16 @@ type channelWorker struct {
 	done       chan struct{}
 	mediaDone  chan struct{}
 	limiter    *rate.Limiter
+	cancel     context.CancelFunc
+	retired    chan struct{}
+	retireOnce sync.Once
+}
+
+type channelRetirement struct {
+	name        string
+	channelType string
+	channel     Channel
+	worker      *channelWorker
 }
 
 type Manager struct {
@@ -92,10 +102,19 @@ type Manager struct {
 	config                    *config.Config
 	mediaStore                media.MediaStore
 	dispatchTask              *asyncTask
+	workerCtx                 context.Context
+	workerCancel              context.CancelFunc
 	mux                       *dynamicServeMux
 	httpServer                *http.Server
 	httpListeners             []net.Listener
 	mu                        sync.RWMutex
+	stopMu                    sync.Mutex
+	stopping                  bool
+	stoppedChannels           map[string]struct{}
+	pendingRetirements        map[string]*channelRetirement
+	activeSends               int
+	activeSendsByChannel      map[string]int
+	activeSendsChanged        chan struct{}
 	placeholders              sync.Map          // "channel:chatID" → placeholderID (string)
 	typingStops               sync.Map          // "channel:chatID" → func()
 	reactionUndos             sync.Map          // "channel:chatID" → reactionEntry
@@ -153,6 +172,8 @@ type toolFeedbackMessageContentPreparer interface {
 
 type asyncTask struct {
 	cancel context.CancelFunc
+	ctx    context.Context
+	done   chan struct{}
 }
 
 func outboundMessageChannel(msg bus.OutboundMessage) string {
@@ -299,10 +320,24 @@ func prepareToolFeedbackMessageContent(ch Channel, content string) string {
 }
 
 func (m *Manager) toolFeedbackSeparateMessagesEnabled() bool {
-	if m == nil || m.config == nil {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.config == nil {
 		return false
 	}
 	return m.config.Agents.Defaults.IsToolFeedbackSeparateMessagesEnabled()
+}
+
+func (m *Manager) splitOnMarkerEnabled() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config != nil && m.config.Agents.Defaults.SplitOnMarker
 }
 
 // RecordPlaceholder registers a placeholder message for later editing.
@@ -555,12 +590,13 @@ func NewManager(
 	opts ...ManagerOption,
 ) (*Manager, error) {
 	m := &Manager{
-		channels:      make(map[string]Channel),
-		workers:       make(map[string]*channelWorker),
-		bus:           messageBus,
-		config:        cfg,
-		mediaStore:    store,
-		channelHashes: make(map[string]string),
+		channels:           make(map[string]Channel),
+		workers:            make(map[string]*channelWorker),
+		bus:                messageBus,
+		config:             cfg,
+		mediaStore:         store,
+		channelHashes:      make(map[string]string),
+		pendingRetirements: make(map[string]*channelRetirement),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -663,7 +699,7 @@ func (m *Manager) GetStreamer(ctx context.Context, channelName, chatID, sessionK
 		m.streamAuxiliaryTombstones.Store(streamKey, time.Now())
 	}
 
-	if m.config != nil && m.config.Agents.Defaults.SplitOnMarker {
+	if m.splitOnMarkerEnabled() {
 		return &splitMarkerStreamer{
 			current:     streamer,
 			reasoning:   reasoningStreamerFrom(streamer),
@@ -1212,8 +1248,18 @@ func (m *Manager) unregisterChannelHTTPHandler(name string, ch Channel) {
 }
 
 func (m *Manager) StartAll(ctx context.Context) error {
+	m.stopMu.Lock()
+	defer m.stopMu.Unlock()
+	if err := m.finishPendingRetirements(ctx); err != nil {
+		return fmt.Errorf("finish pending channel retirement: %w", err)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.activeSends != 0 {
+		return fmt.Errorf("cannot start channels while %d synchronous sends are active", m.activeSends)
+	}
+	m.stopping = false
+	m.stoppedChannels = make(map[string]struct{})
 
 	if len(m.channels) == 0 {
 		logger.WarnC("channels", "No channels enabled")
@@ -1221,8 +1267,13 @@ func (m *Manager) StartAll(ctx context.Context) error {
 
 	logger.InfoC("channels", "Starting all channels")
 
-	dispatchCtx, cancel := context.WithCancel(ctx)
-	m.dispatchTask = &asyncTask{cancel: cancel}
+	dispatchCtx, cancel := context.WithCancel(context.Background())
+	m.dispatchTask = &asyncTask{
+		cancel: cancel,
+		ctx:    dispatchCtx,
+		done:   make(chan struct{}),
+	}
+	m.workerCtx, m.workerCancel = context.WithCancel(context.Background())
 	failedStarts := make([]error, 0, len(m.channels))
 	failedNames := make([]string, 0, len(m.channels))
 
@@ -1254,9 +1305,11 @@ func (m *Manager) StartAll(ctx context.Context) error {
 			}
 		}
 		w := newChannelWorker(name, channel, channelType)
+		workerCtx, workerCancel := context.WithCancel(m.workerCtx)
+		w.cancel = workerCancel
 		m.workers[name] = w
-		go m.runWorker(dispatchCtx, name, w)
-		go m.runMediaWorker(dispatchCtx, name, w)
+		go m.runWorker(workerCtx, name, w)
+		go m.runMediaWorker(workerCtx, name, w)
 		m.publishChannelEvent(
 			runtimeevents.KindChannelLifecycleStarted,
 			name,
@@ -1269,7 +1322,13 @@ func (m *Manager) StartAll(ctx context.Context) error {
 	if len(m.channels) > 0 && len(m.workers) == 0 {
 		if m.dispatchTask != nil {
 			m.dispatchTask.cancel()
+			close(m.dispatchTask.done)
 			m.dispatchTask = nil
+		}
+		if m.workerCancel != nil {
+			m.workerCancel()
+			m.workerCtx = nil
+			m.workerCancel = nil
 		}
 
 		sort.Strings(failedNames)
@@ -1296,15 +1355,13 @@ func (m *Manager) StartAll(ctx context.Context) error {
 		})
 	}
 
-	// Start the dispatcher that reads from the bus and routes to workers
-	go m.dispatchOutbound(dispatchCtx)
-	go m.dispatchOutboundMedia(dispatchCtx)
-
-	// Start the TTL janitor that cleans up stale typing/placeholder entries
-	go m.runTTLJanitor(dispatchCtx)
+	// Start the dispatchers and janitor as one joined lifecycle task. StopAll
+	// cancels and joins these producers before retiring worker queues.
+	m.startDispatchTaskLocked(m.dispatchTask)
 
 	// Start shared HTTP server if configured
-	if m.httpServer != nil {
+	httpServer := m.httpServer
+	if httpServer != nil {
 		if len(m.httpListeners) > 0 {
 			for _, listener := range m.httpListeners {
 				ln := listener
@@ -1322,7 +1379,7 @@ func (m *Manager) StartAll(ctx context.Context) error {
 					logger.InfoCF("channels", "Shared HTTP server listening", map[string]any{
 						"addr": ln.Addr().String(),
 					})
-					if err := m.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
+					if err := httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 						logger.FatalCF("channels", "Shared HTTP server error", map[string]any{
 							"addr":  ln.Addr().String(),
 							"error": err.Error(),
@@ -1336,16 +1393,16 @@ func (m *Manager) StartAll(ctx context.Context) error {
 					if r := recover(); r != nil {
 						logger.ErrorCF("channels", "HTTP server goroutine panic recovered",
 							map[string]any{
-								"addr":  m.httpServer.Addr,
+								"addr":  httpServer.Addr,
 								"panic": fmt.Sprintf("%v", r),
 								"stack": string(debug.Stack()),
 							})
 					}
 				}()
 				logger.InfoCF("channels", "Shared HTTP server listening", map[string]any{
-					"addr": m.httpServer.Addr,
+					"addr": httpServer.Addr,
 				})
-				if err := m.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 					logger.FatalCF("channels", "Shared HTTP server error", map[string]any{
 						"error": err.Error(),
 					})
@@ -1362,56 +1419,142 @@ func (m *Manager) StartAll(ctx context.Context) error {
 	return nil
 }
 
+func (m *Manager) startDispatchTaskLocked(task *asyncTask) {
+	if task == nil {
+		return
+	}
+	var wg sync.WaitGroup
+	start := func(run func(context.Context)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			run(task.ctx)
+		}()
+	}
+	start(m.dispatchOutbound)
+	start(m.dispatchOutboundMedia)
+	start(m.runTTLJanitor)
+	go func() {
+		wg.Wait()
+		close(task.done)
+	}()
+}
+
 func (m *Manager) StopAll(ctx context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.stopMu.Lock()
+	defer m.stopMu.Unlock()
 
 	logger.InfoC("channels", "Stopping all channels")
 
-	// Shutdown shared HTTP server first
-	if m.httpServer != nil {
+	m.mu.Lock()
+	m.stopping = true
+	m.mu.Unlock()
+	var pendingErr error
+	if err := m.finishPendingRetirements(ctx); err != nil {
+		pendingErr = fmt.Errorf("finish pending channel retirement: %w", err)
+	}
+
+	m.mu.Lock()
+	httpServer := m.httpServer
+	dispatchTask := m.dispatchTask
+	workerCancel := m.workerCancel
+	workers := make(map[string]*channelWorker, len(m.workers))
+	for name, worker := range m.workers {
+		workers[name] = worker
+	}
+	channelNames := make([]string, 0, len(m.channels))
+	channelsByName := make(map[string]Channel, len(m.channels))
+	for name, channel := range m.channels {
+		if _, stopped := m.stoppedChannels[name]; stopped {
+			continue
+		}
+		channelNames = append(channelNames, name)
+		channelsByName[name] = channel
+	}
+	if dispatchTask != nil {
+		dispatchTask.cancel()
+	}
+	m.mu.Unlock()
+
+	stopErr := pendingErr
+	if httpServer != nil {
 		shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		if err := m.httpServer.Shutdown(shutdownCtx); err != nil {
+		err := httpServer.Shutdown(shutdownCtx)
+		cancel()
+		if err != nil {
 			logger.ErrorCF("channels", "Shared HTTP server shutdown error", map[string]any{
 				"error": err.Error(),
 			})
-		}
-		m.httpServer = nil
-		m.httpListeners = nil
-	}
-
-	// Cancel dispatcher
-	if m.dispatchTask != nil {
-		m.dispatchTask.cancel()
-		m.dispatchTask = nil
-	}
-
-	// Close all worker queues and wait for them to drain
-	for _, w := range m.workers {
-		if w != nil {
-			close(w.queue)
-		}
-	}
-	for _, w := range m.workers {
-		if w != nil {
-			<-w.done
-		}
-	}
-	// Close all media worker queues and wait for them to drain
-	for _, w := range m.workers {
-		if w != nil {
-			close(w.mediaQueue)
-		}
-	}
-	for _, w := range m.workers {
-		if w != nil {
-			<-w.mediaDone
+			stopErr = errors.Join(stopErr, fmt.Errorf("shutdown shared HTTP server: %w", err))
+		} else {
+			m.mu.Lock()
+			if m.httpServer == httpServer {
+				m.httpServer = nil
+				m.httpListeners = nil
+			}
+			m.mu.Unlock()
 		}
 	}
 
-	// Stop all channels
-	for name, channel := range m.channels {
+	// Join dispatchers before retiring workers so no dispatcher can enqueue
+	// after worker shutdown begins.
+	if dispatchTask != nil {
+		if err := waitForChannelTask(ctx, dispatchTask.done); err != nil {
+			return errors.Join(stopErr, fmt.Errorf("stop channel dispatchers: %w", err))
+		}
+		m.mu.Lock()
+		if m.dispatchTask == dispatchTask {
+			m.dispatchTask = nil
+		}
+		m.mu.Unlock()
+	}
+
+	// Worker queues are never closed. A dispatcher may have captured a worker
+	// just before removal, and leaving the retired queue to be collected turns
+	// that race into a harmless rejected/dropped enqueue instead of a panic.
+	// Retire workers before draining admitted sends so a SendToChannel blocked
+	// on a full queue is released through its retired/done cases. Direct sends
+	// may continue using the channel; Channel.Stop remains after their drain.
+	if workerCancel != nil {
+		workerCancel()
+	}
+	for _, worker := range workers {
+		worker.stop()
+	}
+
+	// Calls admitted before stopping may still be sending directly. Let them
+	// finish before joining workers or stopping the underlying channels.
+	if err := m.waitForActiveSends(ctx); err != nil {
+		return errors.Join(stopErr, fmt.Errorf("drain synchronous channel sends: %w", err))
+	}
+
+	for name, worker := range workers {
+		if worker == nil {
+			continue
+		}
+		if err := waitForChannelTask(ctx, worker.done); err != nil {
+			return errors.Join(stopErr, fmt.Errorf("stop channel %s message worker: %w", name, err))
+		}
+		if err := waitForChannelTask(ctx, worker.mediaDone); err != nil {
+			return errors.Join(stopErr, fmt.Errorf("stop channel %s media worker: %w", name, err))
+		}
+	}
+	m.mu.Lock()
+	for name, worker := range workers {
+		if m.workers[name] == worker {
+			delete(m.workers, name)
+		}
+	}
+	m.workerCtx = nil
+	m.workerCancel = nil
+	m.mu.Unlock()
+
+	sort.Strings(channelNames)
+	for _, name := range channelNames {
+		channel := channelsByName[name]
 		logger.InfoCF("channels", "Stopping channel", map[string]any{
 			"channel": name,
 		})
@@ -1420,8 +1563,15 @@ func (m *Manager) StopAll(ctx context.Context) error {
 				"channel": name,
 				"error":   err.Error(),
 			})
+			stopErr = errors.Join(stopErr, fmt.Errorf("stop channel %s: %w", name, err))
 			continue
 		}
+		m.mu.Lock()
+		if m.stoppedChannels == nil {
+			m.stoppedChannels = make(map[string]struct{})
+		}
+		m.stoppedChannels[name] = struct{}{}
+		m.mu.Unlock()
 		m.publishChannelEvent(
 			runtimeevents.KindChannelLifecycleStopped,
 			name,
@@ -1431,8 +1581,163 @@ func (m *Manager) StopAll(ctx context.Context) error {
 		)
 	}
 
+	if stopErr != nil {
+		return stopErr
+	}
 	logger.InfoC("channels", "All channels stopped")
 	return nil
+}
+
+func waitForChannelTask(ctx context.Context, done <-chan struct{}) error {
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (m *Manager) waitForActiveSends(ctx context.Context, channels ...string) error {
+	for {
+		m.mu.Lock()
+		active := m.activeSends
+		if len(channels) > 0 {
+			active = 0
+			for _, channel := range channels {
+				active += m.activeSendsByChannel[channel]
+			}
+		}
+		if active == 0 {
+			m.mu.Unlock()
+			return nil
+		}
+		m.ensureActiveSendsChangedLocked()
+		changed := m.activeSendsChanged
+		m.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// finishPendingRetirements owns detached channel identities until their
+// workers are joined and Channel.Stop succeeds. A timeout/error leaves the
+// entry in the manager so a later reload or shutdown resumes cleanup instead
+// of constructing a duplicate adapter.
+func (m *Manager) finishPendingRetirements(ctx context.Context) error {
+	m.mu.Lock()
+	names := make([]string, 0, len(m.pendingRetirements))
+	retirements := make(map[string]*channelRetirement, len(m.pendingRetirements))
+	for name, retirement := range m.pendingRetirements {
+		names = append(names, name)
+		retirements[name] = retirement
+	}
+	m.mu.Unlock()
+	if len(names) == 0 {
+		return nil
+	}
+	sort.Strings(names)
+
+	if err := m.waitForActiveSends(ctx, names...); err != nil {
+		return fmt.Errorf("drain channel sends: %w", err)
+	}
+
+	var retirementErr error
+	for _, name := range names {
+		retirement := retirements[name]
+		if retirement == nil {
+			continue
+		}
+		if retirement.worker != nil {
+			retirement.worker.stop()
+			if err := waitForChannelTask(ctx, retirement.worker.done); err != nil {
+				return errors.Join(
+					retirementErr,
+					fmt.Errorf("stop channel %s message worker: %w", name, err),
+				)
+			}
+			if err := waitForChannelTask(ctx, retirement.worker.mediaDone); err != nil {
+				return errors.Join(
+					retirementErr,
+					fmt.Errorf("stop channel %s media worker: %w", name, err),
+				)
+			}
+		}
+
+		logger.InfoCF("channels", "Stopping channel", map[string]any{
+			"channel": name,
+		})
+		if err := retirement.channel.Stop(ctx); err != nil {
+			logger.ErrorCF("channels", "Error stopping channel", map[string]any{
+				"channel": name,
+				"error":   err.Error(),
+			})
+			retirementErr = errors.Join(
+				retirementErr,
+				fmt.Errorf("stop channel %s: %w", name, err),
+			)
+			continue
+		}
+
+		m.mu.Lock()
+		if m.pendingRetirements[name] == retirement {
+			delete(m.pendingRetirements, name)
+		}
+		m.mu.Unlock()
+		m.publishChannelEvent(
+			runtimeevents.KindChannelLifecycleStopped,
+			name,
+			runtimeevents.Scope{Channel: name},
+			runtimeevents.SeverityInfo,
+			ChannelLifecyclePayload{Type: retirement.channelType},
+		)
+	}
+	return retirementErr
+}
+
+func (m *Manager) acquireSynchronousSendLocked(channel string) func() {
+	m.ensureActiveSendsChangedLocked()
+	m.activeSends++
+	if m.activeSendsByChannel == nil {
+		m.activeSendsByChannel = make(map[string]int)
+	}
+	m.activeSendsByChannel[channel]++
+	m.signalActiveSendsChangedLocked()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			if m.activeSends > 0 {
+				m.activeSends--
+			}
+			if m.activeSendsByChannel[channel] > 1 {
+				m.activeSendsByChannel[channel]--
+			} else {
+				delete(m.activeSendsByChannel, channel)
+			}
+			m.signalActiveSendsChangedLocked()
+			m.mu.Unlock()
+		})
+	}
+}
+
+func (m *Manager) ensureActiveSendsChangedLocked() {
+	if m.activeSendsChanged == nil {
+		m.activeSendsChanged = make(chan struct{})
+	}
+}
+
+func (m *Manager) signalActiveSendsChangedLocked() {
+	m.ensureActiveSendsChangedLocked()
+	close(m.activeSendsChanged)
+	m.activeSendsChanged = make(chan struct{})
 }
 
 // newChannelWorker creates a channelWorker with a rate limiter configured
@@ -1450,7 +1755,27 @@ func newChannelWorker(name string, ch Channel, channelType string) *channelWorke
 		mediaQueue: make(chan bus.OutboundMediaMessage, defaultChannelQueueSize),
 		done:       make(chan struct{}),
 		mediaDone:  make(chan struct{}),
+		retired:    make(chan struct{}),
 		limiter:    rate.NewLimiter(rate.Limit(rateVal), burst),
+	}
+}
+
+func (w *channelWorker) markRetired() {
+	if w == nil {
+		return
+	}
+	w.retireOnce.Do(func() {
+		close(w.retired)
+	})
+}
+
+func (w *channelWorker) stop() {
+	if w == nil {
+		return
+	}
+	w.markRetired()
+	if w.cancel != nil {
+		w.cancel()
 	}
 }
 
@@ -1480,7 +1805,7 @@ func (m *Manager) runWorker(ctx context.Context, name string, w *channelWorker) 
 			// consume the whole final message before any marker chunk leaks.
 			if m.finalizedStreamActiveForMessage(name, msg) {
 				chunks = []string{msg.Content}
-			} else if m.config != nil && m.config.Agents.Defaults.SplitOnMarker && !outboundMessageIsToolFeedback(msg) {
+			} else if m.splitOnMarkerEnabled() && !outboundMessageIsToolFeedback(msg) {
 				if markerChunks := SplitByMarker(msg.Content); len(markerChunks) > 1 {
 					for _, chunk := range markerChunks {
 						chunkMsg := msg
@@ -1684,6 +2009,8 @@ func (m *Manager) dispatchOutbound(ctx context.Context) {
 			case w.queue <- msg:
 				m.publishOutboundQueued(outboundMessageChannel(msg), msg)
 				return true
+			case <-w.retired:
+				return true
 			case <-ctx.Done():
 				return false
 			}
@@ -1704,6 +2031,8 @@ func (m *Manager) dispatchOutboundMedia(ctx context.Context) {
 			select {
 			case w.mediaQueue <- msg:
 				m.publishOutboundMediaQueued(outboundMediaChannel(msg), msg)
+				return true
+			case <-w.retired:
 				return true
 			case <-ctx.Done():
 				return false
@@ -1903,57 +2232,112 @@ func (m *Manager) GetEnabledChannels() []string {
 // Reload updates the config reference without restarting channels.
 // This is used when channel config hasn't changed but other parts of the config have.
 func (m *Manager) Reload(ctx context.Context, cfg *config.Config) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if cfg == nil {
+		return fmt.Errorf("channel reload config is required")
+	}
+	m.stopMu.Lock()
+	defer m.stopMu.Unlock()
+
+	if err := m.finishPendingRetirements(ctx); err != nil {
+		return fmt.Errorf("finish previous channel retirement: %w", err)
+	}
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Save old config so we can revert on error.
-	oldConfig := m.config
-
-	// Update config early: initChannel uses m.config via factory(m.config, m.bus).
-	m.config = cfg
+	if m.stopping {
+		m.mu.Unlock()
+		return ErrNotRunning
+	}
+	if m.workerCtx == nil {
+		m.workerCtx, m.workerCancel = context.WithCancel(context.Background())
+	}
+	workerBaseCtx := m.workerCtx
 
 	list := toChannelHashes(cfg)
 	added, removed := compareChannels(m.channelHashes, list)
+	sort.Strings(added)
+	sort.Strings(removed)
+	addedConfig, err := toChannelConfig(cfg, added)
+	if err != nil {
+		m.mu.Unlock()
+		return err
+	}
 
-	deferFuncs := make([]func(), 0, len(removed)+len(added))
+	detached := false
 	for _, name := range removed {
-		// Stop all channels
-		channel := m.channels[name]
-		logger.InfoCF("channels", "Stopping channel", map[string]any{
-			"channel": name,
-		})
-		if err := channel.Stop(ctx); err != nil {
-			logger.ErrorCF("channels", "Error stopping channel", map[string]any{
-				"channel": name,
-				"error":   err.Error(),
-			})
+		channel, exists := m.channels[name]
+		if !exists || channel == nil {
+			delete(m.channelHashes, name)
+			continue
 		}
-		deferFuncs = append(deferFuncs, func() {
-			m.UnregisterChannel(name)
-		})
+		if m.mux != nil {
+			m.unregisterChannelHTTPHandler(name, channel)
+		}
+		worker := m.workers[name]
+		delete(m.workers, name)
+		delete(m.channels, name)
+		delete(m.stoppedChannels, name)
+		delete(m.channelHashes, name)
+		if worker != nil {
+			worker.markRetired()
+		}
+		if m.pendingRetirements == nil {
+			m.pendingRetirements = make(map[string]*channelRetirement)
+		}
+		m.pendingRetirements[name] = &channelRetirement{
+			name:        name,
+			channelType: channelTypeForEvent(m, name),
+			channel:     channel,
+			worker:      worker,
+		}
+		detached = true
 	}
-	dispatchCtx, cancel := context.WithCancel(ctx)
-	m.dispatchTask = &asyncTask{cancel: cancel}
-	cc, err := toChannelConfig(cfg, added)
-	if err != nil {
-		logger.ErrorC("channels", fmt.Sprintf("toChannelConfig error: %v", err))
-		m.config = oldConfig
-		cancel()
+	// Candidate factories read m.config, but the old channel identities have
+	// already been detached so a same-name replacement cannot be removed later
+	// by a name-only asynchronous cleanup.
+	m.config = cfg
+	m.mu.Unlock()
+
+	var reloadErr error
+	if detached {
+		if err = m.finishPendingRetirements(ctx); err != nil {
+			return fmt.Errorf("retire replaced channels: %w", err)
+		}
+	}
+
+	m.mu.Lock()
+	if err = m.initChannels(addedConfig); err != nil {
+		m.mu.Unlock()
 		return err
 	}
-	err = m.initChannels(cc)
-	if err != nil {
-		logger.ErrorC("channels", fmt.Sprintf("initChannels error: %v", err))
-		m.config = oldConfig
-		cancel()
-		return err
-	}
+	candidates := make(map[string]Channel, len(added))
 	for _, name := range added {
-		channel := m.channels[name]
+		if channel := m.channels[name]; channel != nil {
+			candidates[name] = channel
+			delete(m.channels, name)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, name := range added {
+		channel := candidates[name]
+		if channel == nil {
+			reloadErr = errors.Join(
+				reloadErr,
+				fmt.Errorf("initialize channel %s: no channel was created", name),
+			)
+			continue
+		}
+		channelType := name
+		if bc := cfg.Channels.Get(name); bc != nil && bc.Type != "" {
+			channelType = bc.Type
+		}
 		logger.InfoCF("channels", "Starting channel", map[string]any{
 			"channel": name,
 		})
-		if err := channel.Start(ctx); err != nil {
+		if err = channel.Start(ctx); err != nil {
 			logger.ErrorCF("channels", "Failed to start channel", map[string]any{
 				"channel": name,
 				"error":   err.Error(),
@@ -1965,19 +2349,41 @@ func (m *Manager) Reload(ctx context.Context, cfg *config.Config) error {
 				runtimeevents.SeverityError,
 				ChannelLifecyclePayload{Type: channelTypeForEvent(m, name), Error: err.Error()},
 			)
+			if stopErr := channel.Stop(ctx); stopErr != nil {
+				err = errors.Join(err, fmt.Errorf("cleanup channel %s: %w", name, stopErr))
+				m.mu.Lock()
+				if m.pendingRetirements == nil {
+					m.pendingRetirements = make(map[string]*channelRetirement)
+				}
+				m.pendingRetirements[name] = &channelRetirement{
+					name:        name,
+					channelType: channelType,
+					channel:     channel,
+				}
+				m.mu.Unlock()
+			}
+			m.mu.Lock()
+			delete(m.channels, name)
+			delete(m.channelHashes, name)
+			m.mu.Unlock()
+			reloadErr = errors.Join(reloadErr, fmt.Errorf("start channel %s: %w", name, err))
 			continue
 		}
-		// Lazily create worker only after channel starts successfully
-		channelType := name
-		if m.config != nil {
-			if bc := m.config.Channels.Get(name); bc != nil && bc.Type != "" {
-				channelType = bc.Type
-			}
-		}
+
 		w := newChannelWorker(name, channel, channelType)
+		workerCtx, workerCancel := context.WithCancel(workerBaseCtx)
+		w.cancel = workerCancel
+		m.mu.Lock()
+		m.channels[name] = channel
 		m.workers[name] = w
-		go m.runWorker(dispatchCtx, name, w)
-		go m.runMediaWorker(dispatchCtx, name, w)
+		delete(m.stoppedChannels, name)
+		m.channelHashes[name] = list[name]
+		if m.mux != nil {
+			m.registerChannelHTTPHandler(name, channel)
+		}
+		m.mu.Unlock()
+		go m.runWorker(workerCtx, name, w)
+		go m.runMediaWorker(workerCtx, name, w)
 		m.publishChannelEvent(
 			runtimeevents.KindChannelLifecycleStarted,
 			name,
@@ -1985,53 +2391,65 @@ func (m *Manager) Reload(ctx context.Context, cfg *config.Config) error {
 			runtimeevents.SeverityInfo,
 			ChannelLifecyclePayload{Type: channelType},
 		)
-		deferFuncs = append(deferFuncs, func() {
-			m.RegisterChannel(name, channel)
-		})
 	}
 
-	// Commit hashes only on full success.
-	m.channelHashes = list
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.ErrorCF("channels", "channel registration goroutine panic recovered",
-					map[string]any{
-						"panic": fmt.Sprintf("%v", r),
-						"stack": string(debug.Stack()),
-					})
-			}
-		}()
-		for _, f := range deferFuncs {
-			f()
+	if reloadErr != nil {
+		return reloadErr
+	}
+
+	m.mu.Lock()
+	if m.dispatchTask == nil {
+		dispatchCtx, cancel := context.WithCancel(context.Background())
+		task := &asyncTask{
+			cancel: cancel,
+			ctx:    dispatchCtx,
+			done:   make(chan struct{}),
 		}
-	}()
+		m.dispatchTask = task
+		m.startDispatchTaskLocked(task)
+	}
+	m.channelHashes = list
+	m.mu.Unlock()
 	return nil
 }
 
 func (m *Manager) RegisterChannel(name string, channel Channel) {
+	m.stopMu.Lock()
+	defer m.stopMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.channels[name] = channel
+	delete(m.stoppedChannels, name)
 	if m.mux != nil {
 		m.registerChannelHTTPHandler(name, channel)
 	}
 }
 
 func (m *Manager) UnregisterChannel(name string) {
+	m.stopMu.Lock()
+	defer m.stopMu.Unlock()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if ch, ok := m.channels[name]; ok && m.mux != nil {
 		m.unregisterChannelHTTPHandler(name, ch)
 	}
-	if w, ok := m.workers[name]; ok && w != nil {
-		close(w.queue)
-		<-w.done
-		close(w.mediaQueue)
-		<-w.mediaDone
-	}
+	worker := m.workers[name]
 	delete(m.workers, name)
 	delete(m.channels, name)
+	delete(m.stoppedChannels, name)
+	if worker != nil {
+		worker.markRetired()
+	}
+	m.mu.Unlock()
+
+	// Queues remain open so a dispatcher that captured the old worker before
+	// deletion cannot panic. Cancellation joins both consumers; the unreachable
+	// queues and any final raced enqueue are then collected together.
+	if worker != nil {
+		_ = m.waitForActiveSends(context.Background(), name)
+		worker.stop()
+		<-worker.done
+		<-worker.mediaDone
+	}
 }
 
 // SendMessage sends an outbound message synchronously through the channel
@@ -2042,17 +2460,24 @@ func (m *Manager) SendMessage(ctx context.Context, msg bus.OutboundMessage) erro
 	msg = bus.NormalizeOutboundMessage(msg)
 	channelName := outboundMessageChannel(msg)
 
-	m.mu.RLock()
+	m.mu.Lock()
 	_, exists := m.channels[channelName]
 	w, wExists := m.workers[channelName]
-	m.mu.RUnlock()
-
+	if m.stopping {
+		m.mu.Unlock()
+		return ErrNotRunning
+	}
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("channel %s not found", channelName)
 	}
 	if !wExists || w == nil {
+		m.mu.Unlock()
 		return fmt.Errorf("channel %s has no active worker", channelName)
 	}
+	releaseSend := m.acquireSynchronousSendLocked(channelName)
+	m.mu.Unlock()
+	defer releaseSend()
 
 	maxLen := 0
 	if mlp, ok := w.ch.(MessageLengthProvider); ok {
@@ -2081,50 +2506,74 @@ func (m *Manager) SendMedia(ctx context.Context, msg bus.OutboundMediaMessage) e
 	msg = bus.NormalizeOutboundMediaMessage(msg)
 	channelName := outboundMediaChannel(msg)
 
-	m.mu.RLock()
+	m.mu.Lock()
 	_, exists := m.channels[channelName]
 	w, wExists := m.workers[channelName]
-	m.mu.RUnlock()
-
+	if m.stopping {
+		m.mu.Unlock()
+		return ErrNotRunning
+	}
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("channel %s not found", channelName)
 	}
 	if !wExists || w == nil {
+		m.mu.Unlock()
 		return fmt.Errorf("channel %s has no active worker", channelName)
 	}
+	releaseSend := m.acquireSynchronousSendLocked(channelName)
+	m.mu.Unlock()
+	defer releaseSend()
 
 	_, err := m.sendMediaWithRetry(ctx, channelName, w, msg)
 	return err
 }
 
 func (m *Manager) SendToChannel(ctx context.Context, channelName, chatID, content string) error {
-	m.mu.RLock()
-	_, exists := m.channels[channelName]
+	m.mu.Lock()
+	channel, exists := m.channels[channelName]
 	w, wExists := m.workers[channelName]
-	m.mu.RUnlock()
-
+	if m.stopping {
+		m.mu.Unlock()
+		return ErrNotRunning
+	}
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("channel %s not found", channelName)
 	}
-
-	msg := bus.OutboundMessage{
-		Context: bus.NewOutboundContext(channelName, chatID, ""),
-		Content: content,
-	}
-	msg = bus.NormalizeOutboundMessage(msg)
+	releaseSend := m.acquireSynchronousSendLocked(channelName)
+	m.mu.Unlock()
+	defer releaseSend()
 
 	if wExists && w != nil {
+		msg := bus.NormalizeOutboundMessage(bus.OutboundMessage{
+			Context: bus.NewOutboundContext(channelName, chatID, ""),
+			Content: content,
+		})
+		select {
+		case <-w.retired:
+			return ErrNotRunning
+		default:
+		}
 		select {
 		case w.queue <- msg:
 			m.publishOutboundQueued(channelName, msg)
 			return nil
+		case <-w.retired:
+			return ErrNotRunning
+		case <-w.done:
+			return ErrNotRunning
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
 
-	// Fallback: direct send (should not happen)
-	channel, _ := m.channels[channelName]
+	// Fallback direct sends participate in the same shutdown drain as the
+	// synchronous SendMessage and SendMedia APIs.
+	msg := bus.NormalizeOutboundMessage(bus.OutboundMessage{
+		Context: bus.NewOutboundContext(channelName, chatID, ""),
+		Content: content,
+	})
 	_, err := channel.Send(ctx, msg)
 	return err
 }

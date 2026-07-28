@@ -3,6 +3,7 @@ package workflows
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
 const (
@@ -20,7 +23,11 @@ const (
 	RunStatusSkipped   = "skipped"
 )
 
-var ErrRunCanceled = fmt.Errorf("workflow run canceled")
+var (
+	ErrRunCanceled         = errors.New("workflow run canceled")
+	ErrRunAlreadyExists    = errors.New("workflow run already exists")
+	ErrRunConcurrencyLimit = errors.New("workflow concurrency limit reached")
+)
 
 type Run struct {
 	ID                string                   `json:"id"`
@@ -108,7 +115,8 @@ func (s *FileRunStore) CreateRunIfUnderLimit(ctx context.Context, run *Run, maxC
 		}
 		if running >= maxConcurrent {
 			return fmt.Errorf(
-				"workflow concurrency limit reached: %d running, max %d",
+				"%w: %d running, max %d",
+				ErrRunConcurrencyLimit,
 				running,
 				maxConcurrent,
 			)
@@ -125,11 +133,6 @@ func (s *FileRunStore) createRunLocked(run *Run) error {
 		return fmt.Errorf("run id is required")
 	}
 	dir := filepath.Join(s.root, safeID(run.ID))
-	if _, err := os.Stat(filepath.Join(dir, "run.json")); err == nil {
-		return fmt.Errorf("workflow run %s already exists", run.ID)
-	} else if !os.IsNotExist(err) {
-		return err
-	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -138,7 +141,73 @@ func (s *FileRunStore) createRunLocked(run *Run) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "run.json"), data, 0o600)
+	runPath := filepath.Join(dir, "run.json")
+	if err := writeNewRunFile(runPath, data); err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("%w: %s", ErrRunAlreadyExists, run.ID)
+		}
+		// Some platforms report an existing directory or another unusual
+		// filesystem entry with an error other than fs.ErrExist. Preserve the
+		// store's existing duplicate semantics without using this check as the
+		// creation boundary.
+		if _, statErr := os.Lstat(runPath); statErr == nil {
+			return fmt.Errorf("%w: %s", ErrRunAlreadyExists, run.ID)
+		}
+		return err
+	}
+	return nil
+}
+
+// writeNewRunFile publishes a run with a filesystem-enforced create-only
+// boundary. O_EXCL is required even while the store lock is held: the advisory
+// lock is intentionally a no-op on some platforms and cannot coordinate
+// separate processes there.
+func writeNewRunFile(path string, data []byte) (err error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			if closeErr := file.Close(); err == nil && closeErr != nil {
+				err = closeErr
+			}
+		}
+		if err == nil {
+			return
+		}
+		// Close first so cleanup also works on Windows. A failed create must
+		// not leave an empty or partial run that makes every retry a duplicate.
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			err = errors.Join(err, fmt.Errorf("remove incomplete workflow run: %w", removeErr))
+		}
+		if syncErr := syncWorkflowRunDirectory(filepath.Dir(path)); syncErr != nil {
+			err = errors.Join(err, fmt.Errorf("sync workflow run cleanup: %w", syncErr))
+		}
+	}()
+	if _, err = file.Write(data); err != nil {
+		return err
+	}
+	if err = file.Sync(); err != nil {
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	closed = true
+
+	// The dispatcher persists its linked run ID immediately after CreateRun
+	// succeeds. Make every directory entry needed to find that run durable
+	// before returning: run.json, the run directory, and a newly created store
+	// root beneath the workspace.
+	runDir := filepath.Dir(path)
+	for _, dir := range []string{runDir, filepath.Dir(runDir), filepath.Dir(filepath.Dir(runDir))} {
+		if err = syncWorkflowRunDirectory(dir); err != nil {
+			return fmt.Errorf("sync workflow run directory %s: %w", dir, err)
+		}
+	}
+	return nil
 }
 
 func (s *FileRunStore) UpdateRun(ctx context.Context, run *Run) error {
@@ -168,7 +237,7 @@ func (s *FileRunStore) UpdateRun(ctx context.Context, run *Run) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "run.json"), data, 0o600)
+	return fileutil.WriteFileAtomic(filepath.Join(dir, "run.json"), data, 0o600)
 }
 
 func readRunFile(path string) (*Run, error) {
@@ -180,7 +249,102 @@ func readRunFile(path string) (*Run, error) {
 	if err := json.Unmarshal(data, &run); err != nil {
 		return nil, err
 	}
+	if err := restoreExternalEventJSONNumbers(data, &run); err != nil {
+		return nil, err
+	}
 	return &run, nil
+}
+
+func restoreExternalEventJSONNumbers(data []byte, run *Run) error {
+	if run == nil {
+		return nil
+	}
+	var raw struct {
+		Event  json.RawMessage            `json:"event"`
+		Inputs map[string]json.RawMessage `json:"inputs"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if !isExternalEventRun(run) {
+		return nil
+	}
+	if len(raw.Event) > 0 {
+		var event map[string]any
+		if err := decodeJSONWithNumbers(raw.Event, &event); err != nil {
+			return err
+		}
+		run.Event = event
+	}
+	inputEvent, ok := run.Inputs["event"].(map[string]any)
+	rawInputEvent, hasRawInputEvent := raw.Inputs["event"]
+	if !ok || !hasRawInputEvent || !isExternalEventContext(inputEvent) {
+		return nil
+	}
+	var exactInputEvent map[string]any
+	if err := decodeJSONWithNumbers(rawInputEvent, &exactInputEvent); err != nil {
+		return err
+	}
+	run.Inputs["event"] = exactInputEvent
+	return nil
+}
+
+func decodeJSONWithNumbers(data []byte, value any) error {
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.UseNumber()
+	return decoder.Decode(value)
+}
+
+func isExternalEventRun(run *Run) bool {
+	if run == nil || !isExternalEventContext(run.Event) {
+		return false
+	}
+	eventID, _ := run.Event["id"].(string)
+	inputEventID, eventIDOK := run.Inputs["event_id"].(string)
+	dispatchID, dispatchIDOK := run.Inputs["dispatch_id"].(string)
+	return eventIDOK &&
+		inputEventID == eventID &&
+		dispatchIDOK &&
+		isExternalDispatchID(dispatchID) &&
+		run.Session == EventWorkflowSession(run.WorkflowRef, eventID)
+}
+
+func isExternalEventContext(event map[string]any) bool {
+	if len(event) == 0 {
+		return false
+	}
+	id, idOK := event["id"].(string)
+	source, sourceOK := event["source"].(string)
+	connector, connectorOK := event["connector"].(string)
+	eventType, typeOK := event["type"].(string)
+	return idOK && isExternalEventID(id) &&
+		sourceOK && strings.TrimSpace(source) != "" &&
+		connectorOK && strings.TrimSpace(connector) != "" &&
+		typeOK && strings.TrimSpace(eventType) != ""
+}
+
+func isExternalEventID(id string) bool {
+	if len(id) != len("ev_")+32 || !strings.HasPrefix(id, "ev_") {
+		return false
+	}
+	for _, char := range id[len("ev_"):] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func isExternalDispatchID(id string) bool {
+	if len(id) != len("dsp_")+32 || !strings.HasPrefix(id, "dsp_") {
+		return false
+	}
+	for _, char := range id[len("dsp_"):] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *FileRunStore) CancelRun(ctx context.Context, runID, reason string) (*Run, error) {
@@ -211,7 +375,7 @@ func (s *FileRunStore) CancelRun(ctx context.Context, runID, reason string) (*Ru
 		unlock()
 		return nil, err
 	}
-	if err := os.WriteFile(runPath, data, 0o600); err != nil {
+	if err := fileutil.WriteFileAtomic(runPath, data, 0o600); err != nil {
 		unlock()
 		return nil, err
 	}
@@ -249,15 +413,7 @@ func (s *FileRunStore) GetRun(ctx context.Context, runID string) (*Run, error) {
 		return nil, err
 	}
 	defer unlock()
-	data, err := os.ReadFile(filepath.Join(s.root, safeID(runID), "run.json"))
-	if err != nil {
-		return nil, err
-	}
-	var run Run
-	if err := json.Unmarshal(data, &run); err != nil {
-		return nil, err
-	}
-	return &run, nil
+	return readRunFile(filepath.Join(s.root, safeID(runID), "run.json"))
 }
 
 func (s *FileRunStore) ListRuns(ctx context.Context) ([]Run, error) {
