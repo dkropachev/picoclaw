@@ -146,6 +146,7 @@ type turnExecution struct {
 	suppressReasoning   bool
 	callMessages        []providers.Message
 	providerToolDefs    []providers.ToolDefinition
+	visibleToolSurface  string
 	llmModel            string
 	llmModelName        string
 	llmOpts             map[string]any

@@ -47,6 +47,7 @@ type AgentInstance struct {
 	MCPServerAllowlist        map[string]struct{}
 	Candidates                []providers.FallbackCandidate
 	ImageCandidates           []providers.FallbackCandidate
+	ToolAdaptation            tools.ToolAdaptationDecision
 
 	// Router is non-nil when model routing is configured and the light model
 	// was successfully resolved. It scores each incoming message and decides
@@ -174,6 +175,18 @@ func NewAgentInstance(
 
 	model := resolveAgentModel(agentCfg, defaults, definition)
 	fallbacks := resolveAgentFallbacks(agentCfg, defaults)
+	toolProvider, toolModel := resolveToolAdaptationProfileForAgent(cfg, defaults.Provider, model)
+	toolAdaptation := tools.ResolveToolAdaptation(cfg.Tools.Adaptation, toolProvider, toolModel)
+	logger.DebugCF("agent", "Resolved tool adaptation profile", map[string]any{
+		"model":                 toolModel,
+		"provider":              toolProvider,
+		"enabled":               toolAdaptation.Enabled,
+		"visible_tool_surface":  toolAdaptation.VisibleToolSurface,
+		"runtime_downgrade":     toolAdaptation.RuntimeDowngrade,
+		"runtime_promotion":     toolAdaptation.RuntimePromotion,
+		"cache_sensitive":       toolAdaptation.CacheSensitive,
+		"apply_visible_changes": toolAdaptation.ApplyVisibleChanges,
+	})
 
 	restrict := defaults.RestrictToWorkspace
 	readRestrict := restrict && !defaults.AllowReadOutsideWorkspace
@@ -216,6 +229,16 @@ func NewAgentInstance(
 		writeTool.SetAlternativeTools(altTools)
 		toolsRegistry.Register(writeTool)
 	}
+	if toolAdaptation.MayUseCodexCompatibleTools() &&
+		(cfg.Tools.IsToolEnabled("edit_file") || cfg.Tools.IsToolEnabled("write_file")) {
+		toolsRegistry.Register(tools.NewApplyPatchToolWithPermissions(
+			workspace,
+			restrict,
+			cfg.Tools.IsToolEnabled("write_file"),
+			cfg.Tools.IsToolEnabled("edit_file"),
+			allowWritePaths,
+		))
+	}
 	if cfg.Tools.IsToolEnabled("list_dir") {
 		toolsRegistry.Register(tools.NewListDirTool(workspace, readRestrict, allowReadPaths))
 	}
@@ -226,7 +249,14 @@ func NewAgentInstance(
 				map[string]any{"error": err.Error()})
 		} else {
 			toolsRegistry.Register(execTool)
+			if toolAdaptation.MayUseCodexCompatibleTools() {
+				toolsRegistry.Register(tools.NewCodexExecCommandTool(execTool))
+				toolsRegistry.Register(tools.NewCodexWriteStdinTool(execTool))
+			}
 		}
+	}
+	if toolAdaptation.MayUseCodexCompatibleTools() {
+		toolsRegistry.Register(tools.NewUpdatePlanTool())
 	}
 
 	sessionsDir := filepath.Join(workspace, "sessions")
@@ -367,6 +397,7 @@ func NewAgentInstance(
 		Name:                      agentName,
 		Model:                     model,
 		Fallbacks:                 fallbacks,
+		ToolAdaptation:            toolAdaptation,
 		Workspace:                 workspace,
 		MaxIterations:             maxIter,
 		MaxTokens:                 maxTokens,
@@ -693,6 +724,31 @@ func resolvePrimaryProviderForAgent(
 		return fallback
 	}
 	return resolvedProvider
+}
+
+func resolveToolAdaptationProfileForAgent(
+	cfg *config.Config,
+	defaultProvider string,
+	model string,
+) (string, string) {
+	provider := effectiveDefaultProvider(defaultProvider)
+	model = strings.TrimSpace(model)
+	if model == "" || cfg == nil {
+		return provider, model
+	}
+
+	if modelCfg := lookupModelConfigByRef(cfg, model, provider); modelCfg != nil &&
+		!modelCfg.IsAccountRouter() && !modelCfg.IsModelRouter() {
+		resolvedProvider, resolvedModel := providers.ExtractProtocol(modelCfg)
+		if strings.TrimSpace(resolvedProvider) != "" {
+			provider = strings.TrimSpace(resolvedProvider)
+		}
+		if strings.TrimSpace(resolvedModel) != "" {
+			model = strings.TrimSpace(resolvedModel)
+		}
+	}
+
+	return provider, model
 }
 
 // resolveAgentWorkspace determines the workspace directory for an agent.

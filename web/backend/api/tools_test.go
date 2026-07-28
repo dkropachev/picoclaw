@@ -160,6 +160,128 @@ func TestHandleListTools(t *testing.T) {
 	}
 }
 
+func TestHandleToolAdaptationRoundTrip(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	payload := toolAdaptationConfigRequest{
+		Enabled:                true,
+		VisibleToolSurface:     "codex",
+		LearnFromToolCalls:     true,
+		RunModelProbes:         false,
+		AllowRuntimeDowngrade:  "auto",
+		AllowRuntimePromotion:  "never",
+		ApplyVisibleChanges:    "context_boundary",
+		CacheSensitiveAPIs:     "auto",
+		CacheBreakingDowngrade: true,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/tools/adaptation", bytes.NewReader(body))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var putResp toolAdaptationConfigRequest
+	if err := json.Unmarshal(rec.Body.Bytes(), &putResp); err != nil {
+		t.Fatalf("Unmarshal PUT response error = %v", err)
+	}
+	if putResp.VisibleToolSurface != "codex" || putResp.ApplyVisibleChanges != "context_boundary" {
+		t.Fatalf("PUT response = %#v, want codex/context_boundary", putResp)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/tools/adaptation", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var getResp toolAdaptationConfigRequest
+	if err := json.Unmarshal(rec.Body.Bytes(), &getResp); err != nil {
+		t.Fatalf("Unmarshal GET response error = %v", err)
+	}
+	if getResp.VisibleToolSurface != putResp.VisibleToolSurface ||
+		getResp.ApplyVisibleChanges != putResp.ApplyVisibleChanges ||
+		getResp.AllowRuntimePromotion != putResp.AllowRuntimePromotion ||
+		getResp.CacheBreakingDowngrade != putResp.CacheBreakingDowngrade {
+		t.Fatalf("GET response = %#v, want saved fields from %#v", getResp, putResp)
+	}
+	if getResp.Resolved == nil {
+		t.Fatal("GET response Resolved = nil, want resolved state")
+	}
+	if getResp.Resolved.PinnedToolSurface != "codex" {
+		t.Fatalf("resolved pinned surface = %q, want codex", getResp.Resolved.PinnedToolSurface)
+	}
+}
+
+func TestHandleToolAdaptationProbeRequiresProbeEnabled(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.Tools.Adaptation = config.DefaultToolAdaptationConfig()
+	cfg.Tools.Adaptation.Enabled = true
+	cfg.Tools.Adaptation.RunModelProbes = false
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/tools/adaptation/probe", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("POST status = %d, want %d, body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+}
+
+func TestProbeModelConfigForConfigUsesConfiguredModelEntry(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.ModelName = "alias"
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName: "alias",
+		Provider:  "openai",
+		Model:     "gpt-test",
+		APIBase:   "http://127.0.0.1:1/v1",
+	}}
+
+	got := probeModelConfigForConfig(cfg, "fallback", "fallback-model")
+	if got.Provider != "openai" || got.Model != "gpt-test" || got.APIBase == "" {
+		t.Fatalf("probe model config = %#v, want configured model entry", got)
+	}
+}
+
+func TestResolveToolAdaptationProfileForConfigSplitsPrefixedAlias(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Provider = "openai"
+	cfg.Agents.Defaults.ModelName = "alias"
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName: "alias",
+		Model:     "anthropic/claude-sonnet",
+	}}
+
+	provider, model := resolveToolAdaptationProfileForConfig(cfg)
+	if provider != "anthropic" || model != "claude-sonnet" {
+		t.Fatalf("profile = %s/%s, want anthropic/claude-sonnet", provider, model)
+	}
+}
+
 func TestHandleUpdateToolState(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()

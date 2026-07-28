@@ -29,6 +29,11 @@ const tabs: Array<{
     translationKey: "pages.agent.tools.thread_policy.title",
     defaultLabel: "Thread Policy",
   },
+  {
+    key: "adaptation",
+    translationKey: "pages.agent.tools.adaptation.title",
+    defaultLabel: "Adaptation",
+  },
 ]
 
 export function ToolsTabs({ activeTab, onChange }: ToolsTabsProps) {

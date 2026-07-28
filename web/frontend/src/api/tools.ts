@@ -81,6 +81,86 @@ export interface ThreadPolicyConfig {
   agents?: Record<string, ThreadAgentPolicy>
 }
 
+export type VisibleToolSurface = "auto" | "codex" | "picoclaw" | "simple"
+export type RuntimeAdaptationPolicy = "auto" | "never" | "allow"
+export type CacheSensitivityPolicy = "auto" | "never" | "always"
+export type VisibleChangePolicy =
+  | "never"
+  | "next_session"
+  | "context_boundary"
+  | "immediate"
+
+export interface ToolAdaptationConfig {
+  enabled: boolean
+  visible_tool_surface: VisibleToolSurface
+  learn_from_tool_calls: boolean
+  run_model_probes: boolean
+  allow_runtime_downgrade: RuntimeAdaptationPolicy
+  allow_runtime_promotion: RuntimeAdaptationPolicy
+  apply_visible_changes: VisibleChangePolicy
+  cache_sensitive_apis: CacheSensitivityPolicy
+  cache_breaking_downgrade: boolean
+  resolved?: ToolAdaptationResolvedState
+  observation?: ToolAdaptationObservation
+  outcomes?: ToolAdaptationToolOutcome[]
+}
+
+export interface ToolAdaptationResolvedState {
+  provider: string
+  model: string
+  state_path: string
+  visible_tool_surface: VisibleToolSurface
+  pinned_tool_surface: VisibleToolSurface
+  surface_evidence: "disabled" | "config" | "heuristic" | "learned" | string
+  runtime_downgrade: boolean
+  runtime_promotion: boolean
+  apply_visible_changes: VisibleChangePolicy
+  cache_sensitive: boolean
+  cache_evidence: "disabled" | "config" | "heuristic" | "sniffed" | string
+}
+
+export interface ToolAdaptationObservation {
+  profile: {
+    provider: string
+    model: string
+  }
+  visible_tool_surface: string
+  tool_schema_hash: string
+  prompt_tokens: number
+  cached_tokens: number
+  cache_hit_ratio: number
+  cache_sensitive: boolean
+  sniffed: boolean
+  observed_at: string
+}
+
+export interface ToolAdaptationToolOutcome {
+  profile: {
+    provider: string
+    model: string
+  }
+  visible_tool_surface: string
+  tool_name: string
+  successes: number
+  failures: number
+  last_error?: string
+  last_duration_ms: number
+  updated_at: string
+}
+
+export interface ToolAdaptationProbeResult {
+  profile: {
+    provider: string
+    model: string
+  }
+  visible_tool_surface: string
+  tool_name: string
+  success: boolean
+  error?: string
+  duration_ms: number
+  ran_at: string
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await launcherFetch(path, options)
   if (!res.ok) {
@@ -146,5 +226,25 @@ export async function updateThreadPolicy(
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+  })
+}
+
+export async function getToolAdaptation(): Promise<ToolAdaptationConfig> {
+  return request<ToolAdaptationConfig>("/api/tools/adaptation")
+}
+
+export async function updateToolAdaptation(
+  payload: ToolAdaptationConfig,
+): Promise<ToolAdaptationConfig> {
+  return request<ToolAdaptationConfig>("/api/tools/adaptation", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function runToolAdaptationProbe(): Promise<ToolAdaptationProbeResult> {
+  return request<ToolAdaptationProbeResult>("/api/tools/adaptation/probe", {
+    method: "POST",
   })
 }

@@ -716,6 +716,7 @@ toolLoop:
 			toolErrorSummary(toolResult),
 			inferSkillNamesFromToolCall(ts, toolName, toolArgs),
 		)
+		observeToolAdaptationOutcome(al.cfg, ts, exec, toolName, toolResult, toolDuration)
 		messages = append(messages, toolResultMsg)
 		if !ts.opts.NoHistory {
 			ts.agent.Sessions.AddFullMessage(ts.sessionKey, toolResultMsg)

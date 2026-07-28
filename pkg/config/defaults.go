@@ -87,6 +87,7 @@ func DefaultConfig() *Config {
 			DropDelaySeconds:           DefaultGitWorkspaceDropDelaySecs,
 		},
 		Tools: ToolsConfig{
+			Adaptation:          DefaultToolAdaptationConfig(),
 			FilterSensitiveData: true,
 			FilterMinLength:     8,
 			MediaCleanup: MediaCleanupConfig{

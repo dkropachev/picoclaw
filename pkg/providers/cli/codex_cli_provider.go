@@ -178,6 +178,7 @@ func (p *CodexCliProvider) parseJSONLEvents(output string) (*LLMResponse, error)
 					PromptTokens:     promptTokens,
 					CompletionTokens: event.Usage.OutputTokens,
 					TotalTokens:      promptTokens + event.Usage.OutputTokens,
+					CachedTokens:     event.Usage.CachedInputTokens,
 				}
 			}
 		case "error":

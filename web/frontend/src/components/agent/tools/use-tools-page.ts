@@ -5,12 +5,16 @@ import { toast } from "sonner"
 
 import {
   type ThreadPolicyConfig,
+  type ToolAdaptationConfig,
   type WebSearchConfigResponse,
   getThreadPolicy,
+  getToolAdaptation,
   getTools,
   getWebSearchConfig,
+  runToolAdaptationProbe,
   setToolEnabled,
   updateThreadPolicy,
+  updateToolAdaptation,
   updateWebSearchConfig,
 } from "@/api/tools"
 import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
@@ -31,6 +35,8 @@ export function useToolsPage() {
     useState<WebSearchConfigResponse | null>(null)
   const [threadPolicyDraftOverride, setThreadPolicyDraftOverride] =
     useState<ThreadPolicyConfig | null>(null)
+  const [toolAdaptationDraftOverride, setToolAdaptationDraftOverride] =
+    useState<ToolAdaptationConfig | null>(null)
 
   const toolsQuery = useQuery({
     queryKey: ["tools"],
@@ -44,6 +50,10 @@ export function useToolsPage() {
     queryKey: ["tools", "thread-policy"],
     queryFn: getThreadPolicy,
   })
+  const toolAdaptationQuery = useQuery({
+    queryKey: ["tools", "adaptation"],
+    queryFn: getToolAdaptation,
+  })
 
   const tools = useMemo(
     () => toolsQuery.data?.tools ?? [],
@@ -53,6 +63,8 @@ export function useToolsPage() {
   const webSearchDraft = webSearchDraftOverride ?? webSearchQuery.data ?? null
   const threadPolicyDraft =
     threadPolicyDraftOverride ?? threadPolicyQuery.data ?? null
+  const toolAdaptationDraft =
+    toolAdaptationDraftOverride ?? toolAdaptationQuery.data ?? null
   const isWebSearchDirty = useMemo(() => {
     if (!webSearchDraft || !webSearchQuery.data) {
       return false
@@ -70,6 +82,15 @@ export function useToolsPage() {
       JSON.stringify(threadPolicyQuery.data)
     )
   }, [threadPolicyDraft, threadPolicyQuery.data])
+  const isToolAdaptationDirty = useMemo(() => {
+    if (!toolAdaptationDraft || !toolAdaptationQuery.data) {
+      return false
+    }
+    return (
+      JSON.stringify(toolAdaptationDraft) !==
+      JSON.stringify(toolAdaptationQuery.data)
+    )
+  }, [toolAdaptationDraft, toolAdaptationQuery.data])
 
   const toggleToolMutation = useMutation({
     mutationFn: async ({ name, enabled }: { name: string; enabled: boolean }) =>
@@ -162,6 +183,68 @@ export function useToolsPage() {
     },
   })
 
+  const saveToolAdaptationMutation = useMutation({
+    mutationFn: updateToolAdaptation,
+    onSuccess: async (updatedConfig) => {
+      queryClient.setQueryData(["tools", "adaptation"], updatedConfig)
+      setToolAdaptationDraftOverride(null)
+      const gateway = await refreshGatewayState({ force: true })
+      showSaveSuccessOrRestartToast(
+        t,
+        t(
+          "pages.agent.tools.adaptation.save_success",
+          "Tool adaptation saved successfully",
+        ),
+        t("pages.agent.tools.adaptation.title", "Adaptation"),
+        gateway?.restartRequired === true,
+      )
+      void queryClient.invalidateQueries({
+        queryKey: ["tools", "adaptation"],
+      })
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t(
+              "pages.agent.tools.adaptation.save_error",
+              "Failed to save tool adaptation",
+            ),
+      )
+    },
+  })
+
+  const runToolAdaptationProbeMutation = useMutation({
+    mutationFn: runToolAdaptationProbe,
+    onSuccess: (result) => {
+      toast.success(
+        t(
+          "pages.agent.tools.adaptation.probe_success",
+          "Tool adaptation probe completed",
+        ),
+        {
+          description: `${result.tool_name} on ${result.visible_tool_surface}`,
+        },
+      )
+      void queryClient.invalidateQueries({
+        queryKey: ["tools", "adaptation"],
+      })
+    },
+    onError: (error) => {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : t(
+              "pages.agent.tools.adaptation.probe_error",
+              "Tool adaptation probe failed",
+            ),
+      )
+      void queryClient.invalidateQueries({
+        queryKey: ["tools", "adaptation"],
+      })
+    },
+  })
+
   const groupedTools = useMemo<{
     groupedTools: GroupedTools
     totalFilteredCount: number
@@ -226,6 +309,15 @@ export function useToolsPage() {
     })
   }
 
+  const updateToolAdaptationDraft = (
+    updater: (current: ToolAdaptationConfig) => ToolAdaptationConfig,
+  ) => {
+    setToolAdaptationDraftOverride((current) => {
+      const draft = current ?? toolAdaptationQuery.data
+      return draft ? updater(draft) : current
+    })
+  }
+
   const toggleTool = (name: string, enabled: boolean) => {
     toggleToolMutation.mutate({ name, enabled })
   }
@@ -240,6 +332,16 @@ export function useToolsPage() {
     if (threadPolicyDraft) {
       saveThreadPolicyMutation.mutate(threadPolicyDraft)
     }
+  }
+
+  const saveToolAdaptation = () => {
+    if (toolAdaptationDraft) {
+      saveToolAdaptationMutation.mutate(toolAdaptationDraft)
+    }
+  }
+
+  const runToolAdaptationProbeAction = () => {
+    runToolAdaptationProbeMutation.mutate()
   }
 
   const toggleExpandedProvider = (providerId: string) => {
@@ -259,14 +361,20 @@ export function useToolsPage() {
     tools,
     totalFilteredCount: groupedTools.totalFilteredCount,
     threadPolicyDraft,
+    toolAdaptationDraft,
     webSearchDraft,
     hasToolsError: toolsQuery.error != null,
     hasThreadPolicyError: threadPolicyQuery.error != null,
+    hasToolAdaptationError: toolAdaptationQuery.error != null,
     hasWebSearchError: webSearchQuery.error != null,
     isToolsLoading: toolsQuery.isLoading,
     isThreadPolicyLoading: threadPolicyQuery.isLoading,
     isThreadPolicySaving: saveThreadPolicyMutation.isPending,
     isThreadPolicyDirty,
+    isToolAdaptationLoading: toolAdaptationQuery.isLoading,
+    isToolAdaptationSaving: saveToolAdaptationMutation.isPending,
+    isToolAdaptationProbing: runToolAdaptationProbeMutation.isPending,
+    isToolAdaptationDirty,
     isWebSearchLoading: webSearchQuery.isLoading,
     isWebSearchSaving: saveWebSearchMutation.isPending,
     isWebSearchDirty,
@@ -274,10 +382,13 @@ export function useToolsPage() {
     setSearchQuery,
     setStatusFilter,
     saveThreadPolicy,
+    saveToolAdaptation,
+    runToolAdaptationProbe: runToolAdaptationProbeAction,
     saveWebSearchConfig,
     toggleExpandedProvider,
     toggleTool,
     updateThreadPolicyDraft,
+    updateToolAdaptationDraft,
     updateWebSearchDraft,
   }
 }

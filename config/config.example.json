@@ -249,6 +249,17 @@
   "tools": {
     "allow_read_paths": null,
     "allow_write_paths": null,
+    "adaptation": {
+      "enabled": true,
+      "visible_tool_surface": "auto",
+      "learn_from_tool_calls": true,
+      "run_model_probes": true,
+      "allow_runtime_downgrade": "auto",
+      "allow_runtime_promotion": "auto",
+      "apply_visible_changes": "next_session",
+      "cache_sensitive_apis": "auto",
+      "cache_breaking_downgrade": false
+    },
     "web": {
       "enabled": true,
       "prefer_native": true,

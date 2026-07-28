@@ -1360,6 +1360,134 @@ type ToolConfig struct {
 	Enabled bool `json:"enabled" yaml:"-" env:"ENABLED"`
 }
 
+const (
+	ToolSurfaceAuto     = "auto"
+	ToolSurfaceCodex    = "codex"
+	ToolSurfacePicoClaw = "picoclaw"
+	ToolSurfaceSimple   = "simple"
+
+	ToolRuntimeAdaptationAuto  = "auto"
+	ToolRuntimeAdaptationNever = "never"
+	ToolRuntimeAdaptationAllow = "allow"
+
+	ToolCacheSensitivityAuto   = "auto"
+	ToolCacheSensitivityNever  = "never"
+	ToolCacheSensitivityAlways = "always"
+
+	ToolVisibleChangeNever           = "never"
+	ToolVisibleChangeNextSession     = "next_session"
+	ToolVisibleChangeContextBoundary = "context_boundary"
+	ToolVisibleChangeImmediate       = "immediate"
+)
+
+type ToolAdaptationConfig struct {
+	Enabled                bool   `json:"enabled"                    yaml:"-" env:"ENABLED"`
+	VisibleToolSurface     string `json:"visible_tool_surface"       yaml:"-" env:"VISIBLE_TOOL_SURFACE"`
+	LearnFromToolCalls     bool   `json:"learn_from_tool_calls"      yaml:"-" env:"LEARN_FROM_TOOL_CALLS"`
+	RunModelProbes         bool   `json:"run_model_probes"           yaml:"-" env:"RUN_MODEL_PROBES"`
+	AllowRuntimeDowngrade  string `json:"allow_runtime_downgrade"    yaml:"-" env:"ALLOW_RUNTIME_DOWNGRADE"`
+	AllowRuntimePromotion  string `json:"allow_runtime_promotion"    yaml:"-" env:"ALLOW_RUNTIME_PROMOTION"`
+	ApplyVisibleChanges    string `json:"apply_visible_changes"      yaml:"-" env:"APPLY_VISIBLE_CHANGES"`
+	CacheSensitiveAPIs     string `json:"cache_sensitive_apis"       yaml:"-" env:"CACHE_SENSITIVE_APIS"`
+	CacheBreakingDowngrade bool   `json:"cache_breaking_downgrade"   yaml:"-" env:"CACHE_BREAKING_DOWNGRADE"`
+}
+
+func DefaultToolAdaptationConfig() ToolAdaptationConfig {
+	return ToolAdaptationConfig{
+		Enabled:                true,
+		VisibleToolSurface:     ToolSurfaceAuto,
+		LearnFromToolCalls:     true,
+		RunModelProbes:         true,
+		AllowRuntimeDowngrade:  ToolRuntimeAdaptationAuto,
+		AllowRuntimePromotion:  ToolRuntimeAdaptationAuto,
+		ApplyVisibleChanges:    ToolVisibleChangeNextSession,
+		CacheSensitiveAPIs:     ToolCacheSensitivityAuto,
+		CacheBreakingDowngrade: false,
+	}
+}
+
+func NormalizeToolSurface(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case ToolSurfaceCodex:
+		return ToolSurfaceCodex
+	case ToolSurfacePicoClaw:
+		return ToolSurfacePicoClaw
+	case ToolSurfaceSimple:
+		return ToolSurfaceSimple
+	case "", ToolSurfaceAuto:
+		return ToolSurfaceAuto
+	default:
+		return ToolSurfaceAuto
+	}
+}
+
+func NormalizeToolRuntimeAdaptation(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case ToolRuntimeAdaptationNever:
+		return ToolRuntimeAdaptationNever
+	case ToolRuntimeAdaptationAllow:
+		return ToolRuntimeAdaptationAllow
+	case "", ToolRuntimeAdaptationAuto:
+		return ToolRuntimeAdaptationAuto
+	default:
+		return ToolRuntimeAdaptationAuto
+	}
+}
+
+func NormalizeToolCacheSensitivity(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case ToolCacheSensitivityNever:
+		return ToolCacheSensitivityNever
+	case ToolCacheSensitivityAlways:
+		return ToolCacheSensitivityAlways
+	case "", ToolCacheSensitivityAuto:
+		return ToolCacheSensitivityAuto
+	default:
+		return ToolCacheSensitivityAuto
+	}
+}
+
+func NormalizeToolVisibleChangePolicy(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case ToolVisibleChangeNever:
+		return ToolVisibleChangeNever
+	case ToolVisibleChangeContextBoundary:
+		return ToolVisibleChangeContextBoundary
+	case ToolVisibleChangeImmediate:
+		return ToolVisibleChangeImmediate
+	case "", ToolVisibleChangeNextSession:
+		return ToolVisibleChangeNextSession
+	default:
+		return ToolVisibleChangeNextSession
+	}
+}
+
+func (c ToolAdaptationConfig) Normalized() ToolAdaptationConfig {
+	defaults := DefaultToolAdaptationConfig()
+	if strings.TrimSpace(c.VisibleToolSurface) == "" {
+		c.VisibleToolSurface = defaults.VisibleToolSurface
+	}
+	if strings.TrimSpace(c.AllowRuntimeDowngrade) == "" {
+		c.AllowRuntimeDowngrade = defaults.AllowRuntimeDowngrade
+	}
+	if strings.TrimSpace(c.AllowRuntimePromotion) == "" {
+		c.AllowRuntimePromotion = defaults.AllowRuntimePromotion
+	}
+	if strings.TrimSpace(c.ApplyVisibleChanges) == "" {
+		c.ApplyVisibleChanges = defaults.ApplyVisibleChanges
+	}
+	if strings.TrimSpace(c.CacheSensitiveAPIs) == "" {
+		c.CacheSensitiveAPIs = defaults.CacheSensitiveAPIs
+	}
+
+	c.VisibleToolSurface = NormalizeToolSurface(c.VisibleToolSurface)
+	c.AllowRuntimeDowngrade = NormalizeToolRuntimeAdaptation(c.AllowRuntimeDowngrade)
+	c.AllowRuntimePromotion = NormalizeToolRuntimeAdaptation(c.AllowRuntimePromotion)
+	c.ApplyVisibleChanges = NormalizeToolVisibleChangePolicy(c.ApplyVisibleChanges)
+	c.CacheSensitiveAPIs = NormalizeToolCacheSensitivity(c.CacheSensitiveAPIs)
+	return c
+}
+
 type MessageToolsConfig struct {
 	ToolConfig `yaml:"-" envPrefix:"PICOCLAW_TOOLS_MESSAGE_"`
 
@@ -1747,8 +1875,9 @@ func (c ReadFileToolConfig) EffectiveMode() string {
 }
 
 type ToolsConfig struct {
-	AllowReadPaths  []string `json:"allow_read_paths"  yaml:"-" env:"PICOCLAW_TOOLS_ALLOW_READ_PATHS"`
-	AllowWritePaths []string `json:"allow_write_paths" yaml:"-" env:"PICOCLAW_TOOLS_ALLOW_WRITE_PATHS"`
+	AllowReadPaths  []string             `json:"allow_read_paths"  yaml:"-" env:"PICOCLAW_TOOLS_ALLOW_READ_PATHS"`
+	AllowWritePaths []string             `json:"allow_write_paths" yaml:"-" env:"PICOCLAW_TOOLS_ALLOW_WRITE_PATHS"`
+	Adaptation      ToolAdaptationConfig `json:"adaptation" yaml:"-" envPrefix:"PICOCLAW_TOOLS_ADAPTATION_"`
 	// FilterSensitiveData controls whether to filter sensitive values (API keys,
 	// tokens, secrets) from tool results before sending to the LLM.
 	// Default: true (enabled)
@@ -2173,6 +2302,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err = cfg.ValidateTurnProfile(); err != nil {
 		return nil, err
 	}
+	cfg.Tools.Adaptation = cfg.Tools.Adaptation.Normalized()
 	cfg.Gateway.Host, err = resolveGatewayHostFromEnv(gatewayHostBeforeEnv)
 	if err != nil {
 		return nil, fmt.Errorf("invalid gateway host: %w", err)

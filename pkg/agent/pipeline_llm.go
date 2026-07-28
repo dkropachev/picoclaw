@@ -11,10 +11,13 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/accountrouter"
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	providercommon "github.com/sipeed/picoclaw/pkg/providers/common"
+	picotools "github.com/sipeed/picoclaw/pkg/tools"
 )
 
 // CallLLM performs an LLM call with fallback support, hook invocation, and retry logic.
@@ -39,6 +42,8 @@ func (p *Pipeline) CallLLM(
 	exec.gracefulTerminal, _ = ts.gracefulInterruptRequested()
 	exec.providerToolDefs = ts.agent.Tools.ToProviderDefs()
 	exec.providerToolDefs = filterToolsByTurnProfile(exec.providerToolDefs, ts.profile)
+	exec.visibleToolSurface = effectiveToolAdaptationSurfaceForTurn(p.Cfg, ts, exec)
+	exec.providerToolDefs = applyToolAdaptationSurface(exec.visibleToolSurface, exec.providerToolDefs)
 
 	// Native web search support
 	webSearchEnabled := al.cfg.Tools.IsToolEnabled("web") && turnProfileToolAllowed(ts.profile, "web_search")
@@ -107,6 +112,8 @@ func (p *Pipeline) CallLLM(
 				exec.llmModel = llmReq.Model
 				exec.callMessages = llmReq.Messages
 				exec.providerToolDefs = filterToolsByTurnProfile(llmReq.Tools, ts.profile)
+				exec.visibleToolSurface = effectiveToolAdaptationSurfaceForTurn(p.Cfg, ts, exec)
+				exec.providerToolDefs = applyToolAdaptationSurface(exec.visibleToolSurface, exec.providerToolDefs)
 				exec.llmOpts = llmReq.Options
 				nativeSearchAllowed := exec.useNativeSearch &&
 					turnProfileToolAllowed(ts.profile, "web_search")
@@ -253,16 +260,7 @@ func (p *Pipeline) CallLLM(
 					map[string]any{"agent_id": ts.agent.ID, "iteration": iteration},
 				)
 			}
-			for _, candidate := range exec.activeCandidates {
-				if candidate.StableKey() != fbResult.IdentityKey {
-					continue
-				}
-				exec.llmModelName = resolvedCandidateModelName(
-					[]providers.FallbackCandidate{candidate},
-					exec.llmModelName,
-				)
-				break
-			}
+			p.applySuccessfulFallbackCandidate(ts, exec, fbResult)
 			return fbResult.Response, nil
 		}
 		resp, err := exec.activeProvider.Chat(
@@ -537,6 +535,7 @@ func (p *Pipeline) CallLLM(
 		ts.SetLastFinishReason(exec.response.FinishReason)
 		if exec.response.Usage != nil {
 			ts.SetLastUsage(exec.response.Usage)
+			observeToolAdaptationCache(p.Cfg, ts, exec)
 		}
 	}
 
@@ -728,6 +727,57 @@ func (p *Pipeline) applyBeforeLLMModelRewrite(ts *turnState, exec *turnExecution
 	exec.activeModelConfig = resolveActiveModelConfig(p.Cfg, ts.agent.Workspace, candidates, rawModel, defaultProvider)
 }
 
+func (p *Pipeline) applySuccessfulFallbackCandidate(
+	ts *turnState,
+	exec *turnExecution,
+	fbResult *providers.FallbackResult,
+) {
+	if p == nil || ts == nil || ts.agent == nil || exec == nil || fbResult == nil {
+		return
+	}
+
+	var selected providers.FallbackCandidate
+	for _, candidate := range exec.activeCandidates {
+		if candidate.StableKey() == fbResult.IdentityKey {
+			selected = candidate
+			break
+		}
+	}
+	if selected.Model == "" {
+		selected = providers.FallbackCandidate{
+			Provider:    fbResult.Provider,
+			Model:       fbResult.Model,
+			IdentityKey: fbResult.IdentityKey,
+		}
+	}
+	if selected.Model == "" {
+		return
+	}
+
+	exec.activeCandidates = []providers.FallbackCandidate{selected}
+	exec.activeModel = selected.Model
+	exec.llmModel = selected.Model
+	exec.llmModelName = resolvedCandidateModelName(
+		[]providers.FallbackCandidate{selected},
+		exec.llmModelName,
+	)
+	if provider, err := providerForFallbackCandidate(ts.agent, exec.activeProvider, selected); err == nil && provider != nil {
+		exec.activeProvider = provider
+	}
+
+	defaultProvider := "openai"
+	if p.Cfg != nil {
+		defaultProvider = p.Cfg.Agents.Defaults.Provider
+	}
+	exec.activeModelConfig = resolveActiveModelConfig(
+		p.Cfg,
+		ts.agent.Workspace,
+		[]providers.FallbackCandidate{selected},
+		selected.Model,
+		defaultProvider,
+	)
+}
+
 func (p *Pipeline) reselectAccountRouterAfterCompression(ts *turnState, exec *turnExecution) {
 	if p == nil || ts == nil || ts.agent == nil || exec == nil || exec.accountRouter == nil {
 		return
@@ -772,6 +822,222 @@ func providerForFallbackCandidate(
 		return nil, fmt.Errorf("fallback model %q has no active provider", candidate.Model)
 	}
 	return activeProvider, nil
+}
+
+func observeToolAdaptationCache(cfg *config.Config, ts *turnState, exec *turnExecution) {
+	if ts == nil || ts.agent == nil || exec == nil || exec.response == nil {
+		return
+	}
+	if !ts.agent.ToolAdaptation.Enabled || !ts.agent.ToolAdaptation.LearnFromToolCalls {
+		return
+	}
+
+	profile := toolAdaptationProfileForTurn(cfg, exec)
+
+	observation, ok := picotools.ObserveToolAdaptationCache(
+		profile,
+		toolAdaptationSurfaceForObservation(ts, exec),
+		exec.providerToolDefs,
+		exec.response.Usage,
+	)
+	if ok {
+		logger.DebugCF("agent", "Observed tool adaptation cache behavior", map[string]any{
+			"provider":             observation.Profile.Provider,
+			"model":                observation.Profile.Model,
+			"visible_tool_surface": observation.VisibleToolSurface,
+			"tool_schema_hash":     observation.ToolSchemaHash,
+			"prompt_tokens":        observation.PromptTokens,
+			"cached_tokens":        observation.CachedTokens,
+			"cache_hit_ratio":      observation.CacheHitRatio,
+			"cache_sensitive":      observation.CacheSensitive,
+		})
+	}
+}
+
+func observeToolAdaptationOutcome(
+	cfg *config.Config,
+	ts *turnState,
+	exec *turnExecution,
+	toolName string,
+	result *picotools.ToolResult,
+	duration time.Duration,
+) {
+	if ts == nil || ts.agent == nil || exec == nil || result == nil {
+		return
+	}
+	if !ts.agent.ToolAdaptation.Enabled || !ts.agent.ToolAdaptation.LearnFromToolCalls {
+		return
+	}
+
+	outcome, ok := picotools.ObserveToolAdaptationToolOutcome(
+		toolAdaptationProfileForTurn(cfg, exec),
+		toolAdaptationSurfaceForObservation(ts, exec),
+		toolName,
+		!result.IsError,
+		toolErrorSummary(result),
+		duration,
+	)
+	if ok {
+		logger.DebugCF("agent", "Observed tool adaptation outcome", map[string]any{
+			"provider":             outcome.Profile.Provider,
+			"model":                outcome.Profile.Model,
+			"visible_tool_surface": outcome.VisibleToolSurface,
+			"tool":                 outcome.ToolName,
+			"successes":            outcome.Successes,
+			"failures":             outcome.Failures,
+			"last_duration_ms":     outcome.LastDurationMS,
+		})
+	}
+}
+
+func toolAdaptationSurfaceForObservation(ts *turnState, exec *turnExecution) string {
+	if exec != nil && strings.TrimSpace(exec.visibleToolSurface) != "" {
+		return exec.visibleToolSurface
+	}
+	if ts != nil && ts.agent != nil {
+		return ts.agent.ToolAdaptation.PinnedToolSurface
+	}
+	return ""
+}
+
+func toolAdaptationProfileForTurn(cfg *config.Config, exec *turnExecution) picotools.ToolAdaptationProfile {
+	if exec == nil {
+		return picotools.ToolAdaptationProfile{}
+	}
+	providerName := ""
+	if exec.activeModelConfig != nil {
+		providerName = exec.activeModelConfig.Provider
+	}
+	if strings.TrimSpace(providerName) == "" && cfg != nil {
+		providerName = cfg.Agents.Defaults.Provider
+	}
+	modelName := strings.TrimSpace(exec.llmModel)
+	if modelName == "" {
+		modelName = strings.TrimSpace(exec.activeModel)
+	}
+	return picotools.ToolAdaptationProfile{
+		Provider: providerName,
+		Model:    modelName,
+	}
+}
+
+func effectiveToolAdaptationSurfaceForTurn(
+	cfg *config.Config,
+	ts *turnState,
+	exec *turnExecution,
+) string {
+	if ts == nil || ts.agent == nil || !ts.agent.ToolAdaptation.Enabled {
+		return config.ToolSurfacePicoClaw
+	}
+	pinned := config.NormalizeToolSurface(ts.agent.ToolAdaptation.PinnedToolSurface)
+	if pinned == config.ToolSurfaceAuto {
+		pinned = config.NormalizeToolSurface(ts.agent.ToolAdaptation.VisibleToolSurface)
+	}
+	if pinned == config.ToolSurfaceAuto {
+		pinned = config.ToolSurfacePicoClaw
+	}
+
+	switch ts.agent.ToolAdaptation.ApplyVisibleChanges {
+	case config.ToolVisibleChangeImmediate, config.ToolVisibleChangeContextBoundary:
+	default:
+		return pinned
+	}
+	if cfg == nil || config.NormalizeToolSurface(cfg.Tools.Adaptation.VisibleToolSurface) != config.ToolSurfaceAuto {
+		return pinned
+	}
+
+	profile := toolAdaptationProfileForTurn(cfg, exec)
+	latest := picotools.ResolveToolAdaptation(cfg.Tools.Adaptation, profile.Provider, profile.Model)
+	candidate := config.NormalizeToolSurface(latest.VisibleToolSurface)
+	if candidate == config.ToolSurfaceAuto || candidate == pinned {
+		return pinned
+	}
+	if isToolSurfacePromotion(pinned, candidate) {
+		if ts.agent.ToolAdaptation.RuntimePromotion {
+			return candidate
+		}
+		return pinned
+	}
+	if ts.agent.ToolAdaptation.RuntimeDowngrade {
+		return candidate
+	}
+	return pinned
+}
+
+func isToolSurfacePromotion(from string, to string) bool {
+	return toolSurfaceRank(to) > toolSurfaceRank(from)
+}
+
+func toolSurfaceRank(surface string) int {
+	switch config.NormalizeToolSurface(surface) {
+	case config.ToolSurfacePicoClaw:
+		return 1
+	case config.ToolSurfaceSimple:
+		return 2
+	case config.ToolSurfaceCodex:
+		return 3
+	default:
+		return 0
+	}
+}
+
+func applyToolAdaptationSurface(
+	surface string,
+	defs []providers.ToolDefinition,
+) []providers.ToolDefinition {
+	if len(defs) == 0 {
+		return defs
+	}
+	defs = filterToolDefinitionsForAdaptationSurface(surface, defs)
+	if config.NormalizeToolSurface(surface) != config.ToolSurfaceSimple {
+		return defs
+	}
+	transformed, err := providercommon.TransformToolDefinitions(defs, providercommon.ToolSchemaTransformSimple)
+	if err != nil {
+		logger.WarnCF("agent", "Failed to apply simple tool surface", map[string]any{
+			"error": err.Error(),
+		})
+		return defs
+	}
+	return transformed
+}
+
+func filterToolDefinitionsForAdaptationSurface(
+	surface string,
+	defs []providers.ToolDefinition,
+) []providers.ToolDefinition {
+	surface = config.NormalizeToolSurface(surface)
+	filtered := make([]providers.ToolDefinition, 0, len(defs))
+	for _, def := range defs {
+		name := def.Function.Name
+		if surface == config.ToolSurfaceCodex {
+			if nativeToolReplacedByCodexSurface(name) {
+				continue
+			}
+		} else if codexCompatibleToolName(name) {
+			continue
+		}
+		filtered = append(filtered, def)
+	}
+	return filtered
+}
+
+func codexCompatibleToolName(name string) bool {
+	switch name {
+	case "apply_patch", "exec_command", "write_stdin", "update_plan", "view_image":
+		return true
+	default:
+		return false
+	}
+}
+
+func nativeToolReplacedByCodexSurface(name string) bool {
+	switch name {
+	case "exec", "write_file", "edit_file", "append_file", "load_image":
+		return true
+	default:
+		return false
+	}
 }
 
 func transientLLMRetryReason(err error) (string, bool) {

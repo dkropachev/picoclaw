@@ -1,13 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/providers"
 	picotools "github.com/sipeed/picoclaw/pkg/tools"
 )
 
@@ -75,6 +78,35 @@ type threadPolicyRequest struct {
 	Instructions string                              `json:"instructions"`
 	Rules        []config.ThreadPolicyRule           `json:"rules"`
 	Agents       map[string]config.ThreadAgentPolicy `json:"agents,omitempty"`
+}
+
+type toolAdaptationConfigRequest struct {
+	Enabled                bool                                  `json:"enabled"`
+	VisibleToolSurface     string                                `json:"visible_tool_surface"`
+	LearnFromToolCalls     bool                                  `json:"learn_from_tool_calls"`
+	RunModelProbes         bool                                  `json:"run_model_probes"`
+	AllowRuntimeDowngrade  string                                `json:"allow_runtime_downgrade"`
+	AllowRuntimePromotion  string                                `json:"allow_runtime_promotion"`
+	ApplyVisibleChanges    string                                `json:"apply_visible_changes"`
+	CacheSensitiveAPIs     string                                `json:"cache_sensitive_apis"`
+	CacheBreakingDowngrade bool                                  `json:"cache_breaking_downgrade"`
+	Resolved               *toolAdaptationResolvedState          `json:"resolved,omitempty"`
+	Observation            *picotools.ToolAdaptationObservation  `json:"observation,omitempty"`
+	Outcomes               []picotools.ToolAdaptationToolOutcome `json:"outcomes,omitempty"`
+}
+
+type toolAdaptationResolvedState struct {
+	Provider            string `json:"provider"`
+	Model               string `json:"model"`
+	StatePath           string `json:"state_path"`
+	VisibleToolSurface  string `json:"visible_tool_surface"`
+	PinnedToolSurface   string `json:"pinned_tool_surface"`
+	SurfaceEvidence     string `json:"surface_evidence"`
+	RuntimeDowngrade    bool   `json:"runtime_downgrade"`
+	RuntimePromotion    bool   `json:"runtime_promotion"`
+	ApplyVisibleChanges string `json:"apply_visible_changes"`
+	CacheSensitive      bool   `json:"cache_sensitive"`
+	CacheEvidence       string `json:"cache_evidence"`
 }
 
 var toolCatalog = []toolCatalogEntry{
@@ -225,6 +257,9 @@ func (h *Handler) registerToolRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/tools/web-search-config", h.handleUpdateWebSearchConfig)
 	mux.HandleFunc("GET /api/tools/thread-policy", h.handleGetThreadPolicy)
 	mux.HandleFunc("PUT /api/tools/thread-policy", h.handleUpdateThreadPolicy)
+	mux.HandleFunc("GET /api/tools/adaptation", h.handleGetToolAdaptation)
+	mux.HandleFunc("PUT /api/tools/adaptation", h.handleUpdateToolAdaptation)
+	mux.HandleFunc("POST /api/tools/adaptation/probe", h.handleRunToolAdaptationProbe)
 }
 
 func (h *Handler) handleListTools(w http.ResponseWriter, r *http.Request) {
@@ -265,6 +300,186 @@ func (h *Handler) handleUpdateToolState(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (h *Handler) handleGetToolAdaptation(w http.ResponseWriter, r *http.Request) {
+	cfg, err := config.LoadConfig(h.configPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(buildToolAdaptationResponse(cfg)); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+func (h *Handler) handleUpdateToolAdaptation(w http.ResponseWriter, r *http.Request) {
+	cfg, err := config.LoadConfig(h.configPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	var req toolAdaptationConfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	cfg.Tools.Adaptation = config.ToolAdaptationConfig{
+		Enabled:                req.Enabled,
+		VisibleToolSurface:     req.VisibleToolSurface,
+		LearnFromToolCalls:     req.LearnFromToolCalls,
+		RunModelProbes:         req.RunModelProbes,
+		AllowRuntimeDowngrade:  req.AllowRuntimeDowngrade,
+		AllowRuntimePromotion:  req.AllowRuntimePromotion,
+		ApplyVisibleChanges:    req.ApplyVisibleChanges,
+		CacheSensitiveAPIs:     req.CacheSensitiveAPIs,
+		CacheBreakingDowngrade: req.CacheBreakingDowngrade,
+	}.Normalized()
+
+	if err := config.SaveConfig(h.configPath, cfg); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(buildToolAdaptationResponse(cfg)); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+func (h *Handler) handleRunToolAdaptationProbe(w http.ResponseWriter, r *http.Request) {
+	cfg, err := config.LoadConfig(h.configPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	adaptation := cfg.Tools.Adaptation.Normalized()
+	if !adaptation.Enabled {
+		http.Error(w, "tool adaptation is disabled", http.StatusConflict)
+		return
+	}
+	if !adaptation.RunModelProbes {
+		http.Error(w, "tool adaptation probes are disabled", http.StatusConflict)
+		return
+	}
+
+	providerName, model := resolveToolAdaptationProfileForConfig(cfg)
+	if strings.TrimSpace(model) == "" {
+		http.Error(w, "default model is not configured", http.StatusBadRequest)
+		return
+	}
+
+	modelCfg := probeModelConfigForConfig(cfg, providerName, model)
+	llmProvider, modelID, err := providers.CreateProviderFromConfig(modelCfg)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to create probe provider: %v", err), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(modelID) != "" {
+		model = modelID
+	}
+
+	decision := picotools.ResolveToolAdaptation(adaptation, providerName, model)
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	result := picotools.RunToolAdaptationProbe(
+		ctx,
+		llmProvider,
+		picotools.ToolAdaptationProfile{Provider: providerName, Model: model},
+		decision.PinnedToolSurface,
+		model,
+	)
+
+	w.Header().Set("Content-Type", "application/json")
+	if !result.Success {
+		w.WriteHeader(http.StatusBadGateway)
+	}
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+func buildToolAdaptationResponse(cfg *config.Config) toolAdaptationConfigRequest {
+	adaptation := config.DefaultToolAdaptationConfig()
+	if cfg != nil {
+		adaptation = cfg.Tools.Adaptation.Normalized()
+	}
+	resp := toolAdaptationConfigRequest{
+		Enabled:                adaptation.Enabled,
+		VisibleToolSurface:     adaptation.VisibleToolSurface,
+		LearnFromToolCalls:     adaptation.LearnFromToolCalls,
+		RunModelProbes:         adaptation.RunModelProbes,
+		AllowRuntimeDowngrade:  adaptation.AllowRuntimeDowngrade,
+		AllowRuntimePromotion:  adaptation.AllowRuntimePromotion,
+		ApplyVisibleChanges:    adaptation.ApplyVisibleChanges,
+		CacheSensitiveAPIs:     adaptation.CacheSensitiveAPIs,
+		CacheBreakingDowngrade: adaptation.CacheBreakingDowngrade,
+	}
+	if cfg != nil {
+		provider, model := resolveToolAdaptationProfileForConfig(cfg)
+		decision := picotools.ResolveToolAdaptation(adaptation, provider, model)
+		profile := picotools.ToolAdaptationProfile{Provider: provider, Model: model}
+		resp.Resolved = &toolAdaptationResolvedState{
+			Provider:            provider,
+			Model:               model,
+			StatePath:           picotools.ToolAdaptationStatePath(),
+			VisibleToolSurface:  decision.VisibleToolSurface,
+			PinnedToolSurface:   decision.PinnedToolSurface,
+			SurfaceEvidence:     decision.SurfaceEvidence,
+			RuntimeDowngrade:    decision.RuntimeDowngrade,
+			RuntimePromotion:    decision.RuntimePromotion,
+			ApplyVisibleChanges: decision.ApplyVisibleChanges,
+			CacheSensitive:      decision.CacheSensitive,
+			CacheEvidence:       decision.CacheEvidence,
+		}
+		resp.Observation = decision.CacheObservation
+		resp.Outcomes = picotools.LatestToolAdaptationToolOutcomes(profile)
+	}
+	return resp
+}
+
+func resolveToolAdaptationProfileForConfig(cfg *config.Config) (string, string) {
+	provider := strings.TrimSpace(cfg.Agents.Defaults.Provider)
+	model := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
+	if model == "" {
+		return provider, ""
+	}
+	for _, mc := range cfg.ModelList {
+		if mc == nil {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(mc.ModelName), model) {
+			continue
+		}
+		resolvedProvider, resolvedModel := providers.ExtractProtocol(mc)
+		if strings.TrimSpace(resolvedProvider) != "" {
+			provider = strings.TrimSpace(resolvedProvider)
+		}
+		if strings.TrimSpace(resolvedModel) != "" {
+			model = strings.TrimSpace(resolvedModel)
+		}
+		break
+	}
+	return provider, model
+}
+
+func probeModelConfigForConfig(cfg *config.Config, providerName string, model string) *config.ModelConfig {
+	modelName := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
+	if modelName != "" {
+		if mc, err := cfg.GetModelConfig(modelName); err == nil && mc != nil {
+			clone := *mc
+			return &clone
+		}
+	}
+	return &config.ModelConfig{
+		Provider: strings.TrimSpace(providerName),
+		Model:    strings.TrimSpace(model),
+	}
 }
 
 func buildToolSupport(cfg *config.Config) []toolSupportItem {

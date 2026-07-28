@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next"
 import { PageHeader } from "@/components/page-header"
 
 import { ThreadPolicyTab } from "./thread-policy-tab"
+import { ToolAdaptationTab } from "./tool-adaptation-tab"
 import { ToolLibraryTab } from "./tool-library-tab"
 import { ToolsTabs } from "./tools-tabs"
 import { useToolsPage } from "./use-tools-page"
@@ -21,16 +22,22 @@ export function ToolsPage() {
     searchQuery,
     statusFilter,
     threadPolicyDraft,
+    toolAdaptationDraft,
     tools,
     totalFilteredCount,
     webSearchDraft,
     hasToolsError,
     hasThreadPolicyError,
+    hasToolAdaptationError,
     hasWebSearchError,
     isToolsLoading,
     isThreadPolicyDirty,
     isThreadPolicyLoading,
     isThreadPolicySaving,
+    isToolAdaptationDirty,
+    isToolAdaptationLoading,
+    isToolAdaptationSaving,
+    isToolAdaptationProbing,
     isWebSearchLoading,
     isWebSearchSaving,
     isWebSearchDirty,
@@ -38,10 +45,13 @@ export function ToolsPage() {
     setSearchQuery,
     setStatusFilter,
     saveThreadPolicy,
+    saveToolAdaptation,
+    runToolAdaptationProbe,
     saveWebSearchConfig,
     toggleExpandedProvider,
     toggleTool,
     updateThreadPolicyDraft,
+    updateToolAdaptationDraft,
     updateWebSearchDraft,
   } = useToolsPage()
 
@@ -88,7 +98,7 @@ export function ToolsPage() {
               onToggleProviderExpand={toggleExpandedProvider}
               onUpdateDraft={updateWebSearchDraft}
             />
-          ) : (
+          ) : activeTab === "thread-policy" ? (
             <ThreadPolicyTab
               draft={threadPolicyDraft}
               isLoading={isThreadPolicyLoading}
@@ -97,6 +107,18 @@ export function ToolsPage() {
               isDirty={isThreadPolicyDirty}
               onSave={saveThreadPolicy}
               onUpdateDraft={updateThreadPolicyDraft}
+            />
+          ) : (
+            <ToolAdaptationTab
+              draft={toolAdaptationDraft}
+              isLoading={isToolAdaptationLoading}
+              hasError={hasToolAdaptationError}
+              isSaving={isToolAdaptationSaving}
+              isProbing={isToolAdaptationProbing}
+              isDirty={isToolAdaptationDirty}
+              onSave={saveToolAdaptation}
+              onRunProbe={runToolAdaptationProbe}
+              onUpdateDraft={updateToolAdaptationDraft}
             />
           )}
         </div>

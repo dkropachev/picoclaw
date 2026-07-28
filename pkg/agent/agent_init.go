@@ -286,6 +286,9 @@ func registerSharedTools(
 				allowReadPaths,
 			)
 			agent.Tools.Register(loadImageTool)
+			if agent.ToolAdaptation.MayUseCodexCompatibleTools() {
+				agent.Tools.Register(tools.NewCodexViewImageTool(loadImageTool))
+			}
 		}
 
 		// Skill discovery and installation tools

@@ -880,6 +880,190 @@ func TestNewAgentInstance_InvalidExecConfigDoesNotExit(t *testing.T) {
 	}
 }
 
+func TestNewAgentInstance_RegistersCodexCompatToolsForCodexSurface(t *testing.T) {
+	workspace := t.TempDir()
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace: workspace,
+				ModelName: "gpt-5",
+				Provider:  "openai",
+			},
+		},
+		Tools: config.ToolsConfig{
+			Adaptation: config.DefaultToolAdaptationConfig(),
+			EditFile:   config.ToolConfig{Enabled: true},
+			Exec: config.ExecConfig{
+				ToolConfig:         config.ToolConfig{Enabled: true},
+				EnableDenyPatterns: true,
+				AllowRemote:        true,
+			},
+		},
+	}
+
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+
+	for _, name := range []string{"apply_patch", "exec", "exec_command", "write_stdin", "update_plan"} {
+		if _, ok := agent.Tools.Get(name); !ok {
+			t.Fatalf("expected %q to be registered; tools=%v", name, agent.Tools.List())
+		}
+	}
+}
+
+func TestNewAgentInstance_ResolvesToolAdaptationFromModelListAlias(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := &config.Config{
+		ModelList: []*config.ModelConfig{{
+			ModelName: "claude-alias",
+			Provider:  "anthropic",
+			Model:     "claude-3-5-sonnet",
+		}},
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace: workspace,
+				ModelName: "claude-alias",
+				Provider:  "openai",
+			},
+		},
+		Tools: config.ToolsConfig{
+			Adaptation: config.DefaultToolAdaptationConfig(),
+			EditFile:   config.ToolConfig{Enabled: true},
+			Exec: config.ExecConfig{
+				ToolConfig:         config.ToolConfig{Enabled: true},
+				EnableDenyPatterns: true,
+				AllowRemote:        true,
+			},
+		},
+	}
+
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	if agent.ToolAdaptation.VisibleToolSurface != config.ToolSurfaceSimple {
+		t.Fatalf(
+			"VisibleToolSurface = %q, want %q",
+			agent.ToolAdaptation.VisibleToolSurface,
+			config.ToolSurfaceSimple,
+		)
+	}
+	if _, ok := agent.Tools.Get("exec_command"); ok {
+		t.Fatalf("exec_command registered for Anthropic alias; tools=%v", agent.Tools.List())
+	}
+}
+
+func TestNewAgentInstance_CodexApplyPatchPreservesFileToolPermissions(t *testing.T) {
+	workspace := t.TempDir()
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace: workspace,
+				ModelName: "gpt-5",
+				Provider:  "openai",
+			},
+		},
+		Tools: config.ToolsConfig{
+			Adaptation: config.DefaultToolAdaptationConfig(),
+			EditFile:   config.ToolConfig{Enabled: true},
+		},
+	}
+
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	patchTool, ok := agent.Tools.Get("apply_patch")
+	if !ok {
+		t.Fatalf("expected apply_patch to be registered; tools=%v", agent.Tools.List())
+	}
+
+	result := patchTool.Execute(context.Background(), map[string]any{
+		"patch": "*** Begin Patch\n*** Add File: note.txt\n+nope\n*** End Patch",
+	})
+	if !result.IsError {
+		t.Fatal("apply_patch add succeeded even though write_file is disabled")
+	}
+	if !strings.Contains(result.ForLLM, "write_file is disabled") {
+		t.Fatalf("error = %q, want write_file disabled", result.ForLLM)
+	}
+}
+
+func TestNewAgentInstance_DoesNotRegisterCodexCompatToolsForPicoClawSurface(t *testing.T) {
+	workspace := t.TempDir()
+	adaptation := config.DefaultToolAdaptationConfig()
+	adaptation.VisibleToolSurface = config.ToolSurfacePicoClaw
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace: workspace,
+				ModelName: "gpt-5",
+				Provider:  "openai",
+			},
+		},
+		Tools: config.ToolsConfig{
+			Adaptation: adaptation,
+			EditFile:   config.ToolConfig{Enabled: true},
+			Exec: config.ExecConfig{
+				ToolConfig:         config.ToolConfig{Enabled: true},
+				EnableDenyPatterns: true,
+				AllowRemote:        true,
+			},
+		},
+	}
+
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+
+	if _, ok := agent.Tools.Get("exec"); !ok {
+		t.Fatal("expected native exec to be registered")
+	}
+	for _, name := range []string{"apply_patch", "exec_command", "write_stdin", "update_plan"} {
+		if _, ok := agent.Tools.Get(name); ok {
+			t.Fatalf("did not expect %q to be registered; tools=%v", name, agent.Tools.List())
+		}
+	}
+}
+
+func TestNewAgentInstance_RegistersCodexCompatToolsForRuntimePromotion(t *testing.T) {
+	workspace := t.TempDir()
+	adaptation := config.DefaultToolAdaptationConfig()
+	adaptation.CacheSensitiveAPIs = config.ToolCacheSensitivityNever
+	adaptation.ApplyVisibleChanges = config.ToolVisibleChangeImmediate
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace: workspace,
+				ModelName: "unknown-local-model",
+				Provider:  "local",
+			},
+		},
+		Tools: config.ToolsConfig{
+			Adaptation: adaptation,
+			EditFile:   config.ToolConfig{Enabled: true},
+			Exec: config.ExecConfig{
+				ToolConfig:         config.ToolConfig{Enabled: true},
+				EnableDenyPatterns: true,
+				AllowRemote:        true,
+			},
+		},
+	}
+
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	if agent.ToolAdaptation.VisibleToolSurface != config.ToolSurfacePicoClaw {
+		t.Fatalf(
+			"VisibleToolSurface = %q, want %q",
+			agent.ToolAdaptation.VisibleToolSurface,
+			config.ToolSurfacePicoClaw,
+		)
+	}
+	if !agent.ToolAdaptation.RuntimePromotion {
+		t.Fatal("RuntimePromotion = false, want true")
+	}
+
+	for _, name := range []string{"apply_patch", "exec_command", "write_stdin", "update_plan"} {
+		if _, ok := agent.Tools.Get(name); !ok {
+			t.Fatalf("expected %q to be registered for runtime promotion; tools=%v", name, agent.Tools.List())
+		}
+	}
+}
+
 func TestNewAgentInstance_UsesFrontmatterModelAndSkills(t *testing.T) {
 	workspace := setupWorkspace(t, map[string]string{
 		"AGENT.md": `---

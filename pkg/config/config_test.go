@@ -40,6 +40,74 @@ func TestAgentModelConfig_UnmarshalString(t *testing.T) {
 	}
 }
 
+func TestToolAdaptationConfig_Normalized(t *testing.T) {
+	cfg := ToolAdaptationConfig{
+		Enabled:                true,
+		VisibleToolSurface:     "bad",
+		AllowRuntimeDowngrade:  "allow",
+		AllowRuntimePromotion:  "bad",
+		ApplyVisibleChanges:    "context_boundary",
+		CacheSensitiveAPIs:     "always",
+		CacheBreakingDowngrade: true,
+	}
+
+	got := cfg.Normalized()
+	if got.VisibleToolSurface != ToolSurfaceAuto {
+		t.Fatalf("VisibleToolSurface = %q, want %q", got.VisibleToolSurface, ToolSurfaceAuto)
+	}
+	if got.AllowRuntimeDowngrade != ToolRuntimeAdaptationAllow {
+		t.Fatalf("AllowRuntimeDowngrade = %q, want %q", got.AllowRuntimeDowngrade, ToolRuntimeAdaptationAllow)
+	}
+	if got.AllowRuntimePromotion != ToolRuntimeAdaptationAuto {
+		t.Fatalf("AllowRuntimePromotion = %q, want %q", got.AllowRuntimePromotion, ToolRuntimeAdaptationAuto)
+	}
+	if got.ApplyVisibleChanges != ToolVisibleChangeContextBoundary {
+		t.Fatalf("ApplyVisibleChanges = %q, want %q", got.ApplyVisibleChanges, ToolVisibleChangeContextBoundary)
+	}
+	if got.CacheSensitiveAPIs != ToolCacheSensitivityAlways {
+		t.Fatalf("CacheSensitiveAPIs = %q, want %q", got.CacheSensitiveAPIs, ToolCacheSensitivityAlways)
+	}
+	if !got.CacheBreakingDowngrade {
+		t.Fatal("CacheBreakingDowngrade = false, want true")
+	}
+}
+
+func TestToolAdaptationConfig_EnvOverridesUseAdaptationPrefix(t *testing.T) {
+	mustSetupSSHKey(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	cfg := DefaultConfig()
+	if err := SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	t.Setenv("PICOCLAW_TOOLS_ADAPTATION_ENABLED", "false")
+	t.Setenv("PICOCLAW_TOOLS_ADAPTATION_VISIBLE_TOOL_SURFACE", "simple")
+	t.Setenv("PICOCLAW_TOOLS_ADAPTATION_ALLOW_RUNTIME_PROMOTION", "never")
+
+	loaded, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if loaded.Tools.Adaptation.Enabled {
+		t.Fatal("Tools.Adaptation.Enabled = true, want env override false")
+	}
+	if loaded.Tools.Adaptation.VisibleToolSurface != ToolSurfaceSimple {
+		t.Fatalf(
+			"VisibleToolSurface = %q, want %q",
+			loaded.Tools.Adaptation.VisibleToolSurface,
+			ToolSurfaceSimple,
+		)
+	}
+	if loaded.Tools.Adaptation.AllowRuntimePromotion != ToolRuntimeAdaptationNever {
+		t.Fatalf(
+			"AllowRuntimePromotion = %q, want %q",
+			loaded.Tools.Adaptation.AllowRuntimePromotion,
+			ToolRuntimeAdaptationNever,
+		)
+	}
+}
+
 func TestAgentModelConfig_UnmarshalObject(t *testing.T) {
 	var m AgentModelConfig
 	data := `{"primary": "claude-opus", "fallbacks": ["gpt-4o-mini", "haiku"]}`
