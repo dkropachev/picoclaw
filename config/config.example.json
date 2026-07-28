@@ -511,6 +511,13 @@
       "exclude": [],
       "min_severity": "info",
       "include_payload": false
+    },
+    "ingress": {
+      "enabled": false,
+      "database_path": "",
+      "retention_days": 30,
+      "max_payload_bytes": 1048576,
+      "redact_fields": []
     }
   },
   "gateway": {
