@@ -7,14 +7,20 @@ import { ThreadPolicyTab } from "./thread-policy-tab"
 import { ToolAdaptationTab } from "./tool-adaptation-tab"
 import { ToolLibraryTab } from "./tool-library-tab"
 import { ToolsTabs } from "./tools-tabs"
+import type { ToolsPageTab } from "./types"
 import { useToolsPage } from "./use-tools-page"
 import { WebSearchTab } from "./web-search-tab"
 
-export function ToolsPage() {
+export function ToolsPage({
+  activeTab,
+  onTabChange,
+}: {
+  activeTab: ToolsPageTab
+  onTabChange: (tab: ToolsPageTab) => void
+}) {
   const { t } = useTranslation()
   const scrollContainerRef = useRef<HTMLDivElement | null>(null)
   const {
-    activeTab,
     expandedProvider,
     groupedTools,
     pendingToolName,
@@ -41,7 +47,6 @@ export function ToolsPage() {
     isWebSearchLoading,
     isWebSearchSaving,
     isWebSearchDirty,
-    setActiveTab,
     setSearchQuery,
     setStatusFilter,
     saveThreadPolicy,
@@ -53,7 +58,7 @@ export function ToolsPage() {
     updateThreadPolicyDraft,
     updateToolAdaptationDraft,
     updateWebSearchDraft,
-  } = useToolsPage()
+  } = useToolsPage({ activeTab, onTabChange })
 
   useLayoutEffect(() => {
     scrollContainerRef.current?.scrollTo({ top: 0 })
@@ -62,7 +67,7 @@ export function ToolsPage() {
   return (
     <div className="bg-background flex h-full flex-col">
       <PageHeader title={t("navigation.tools", "Tools")} />
-      <ToolsTabs activeTab={activeTab} onChange={setActiveTab} />
+      <ToolsTabs activeTab={activeTab} onChange={onTabChange} />
 
       <div
         ref={scrollContainerRef}
@@ -81,8 +86,8 @@ export function ToolsPage() {
               pendingToolName={pendingToolName}
               onSearchQueryChange={setSearchQuery}
               onStatusFilterChange={setStatusFilter}
-              onOpenThreadPolicySettings={() => setActiveTab("thread-policy")}
-              onOpenWebSearchSettings={() => setActiveTab("web-search")}
+              onOpenThreadPolicySettings={() => onTabChange("thread-policy")}
+              onOpenWebSearchSettings={() => onTabChange("web-search")}
               onToggleTool={toggleTool}
             />
           ) : activeTab === "web-search" ? (

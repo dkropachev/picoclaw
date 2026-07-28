@@ -22,11 +22,16 @@ import { refreshGatewayState } from "@/store/gateway"
 
 import type { GroupedTools, ToolStatusFilter, ToolsPageTab } from "./types"
 
-export function useToolsPage() {
+export function useToolsPage({
+  activeTab,
+  onTabChange,
+}: {
+  activeTab: ToolsPageTab
+  onTabChange: (tab: ToolsPageTab) => void
+}) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
 
-  const [activeTab, setActiveTab] = useState<ToolsPageTab>("library")
   const [searchQuery, setSearchQuery] = useState("")
   const deferredSearchQuery = useDeferredValue(searchQuery)
   const [statusFilter, setStatusFilter] = useState<ToolStatusFilter>("all")
@@ -378,7 +383,7 @@ export function useToolsPage() {
     isWebSearchLoading: webSearchQuery.isLoading,
     isWebSearchSaving: saveWebSearchMutation.isPending,
     isWebSearchDirty,
-    setActiveTab,
+    setActiveTab: onTabChange,
     setSearchQuery,
     setStatusFilter,
     saveThreadPolicy,

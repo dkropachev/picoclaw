@@ -103,6 +103,7 @@ export interface ToolAdaptationConfig {
   resolved?: ToolAdaptationResolvedState
   observation?: ToolAdaptationObservation
   outcomes?: ToolAdaptationToolOutcome[]
+  profiles?: ToolAdaptationProfileState[]
 }
 
 export interface ToolAdaptationResolvedState {
@@ -117,6 +118,16 @@ export interface ToolAdaptationResolvedState {
   apply_visible_changes: VisibleChangePolicy
   cache_sensitive: boolean
   cache_evidence: "disabled" | "config" | "heuristic" | "sniffed" | string
+}
+
+export interface ToolAdaptationProfileState {
+  id: string
+  label: string
+  source: string
+  is_default: boolean
+  resolved: ToolAdaptationResolvedState
+  observation?: ToolAdaptationObservation
+  outcomes?: ToolAdaptationToolOutcome[]
 }
 
 export interface ToolAdaptationObservation {

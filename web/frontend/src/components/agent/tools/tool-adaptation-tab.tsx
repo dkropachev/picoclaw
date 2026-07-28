@@ -1,15 +1,23 @@
-import type { ReactNode } from "react"
+import {
+  IconChevronDown,
+  IconChevronRight,
+  IconSearch,
+} from "@tabler/icons-react"
+import { type ReactNode, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import type {
   CacheSensitivityPolicy,
   RuntimeAdaptationPolicy,
   ToolAdaptationConfig,
+  ToolAdaptationProfileState,
+  ToolAdaptationToolOutcome,
   VisibleChangePolicy,
   VisibleToolSurface,
 } from "@/api/tools"
 import { ConfigChangeNotice } from "@/components/config-change-notice"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import {
   Select,
   SelectContent,
@@ -148,7 +156,7 @@ export function ToolAdaptationTab({
             />
           )}
 
-          {draft.resolved && <ResolvedStatePanel draft={draft} />}
+          <AdaptationProfilesPanel draft={draft} />
 
           <section className="space-y-4">
             <h3 className="text-foreground/80 text-[13px] font-bold tracking-widest uppercase">
@@ -387,115 +395,252 @@ export function ToolAdaptationTab({
   )
 }
 
-function ResolvedStatePanel({ draft }: { draft: ToolAdaptationConfig }) {
+function AdaptationProfilesPanel({ draft }: { draft: ToolAdaptationConfig }) {
   const { t } = useTranslation()
-  const resolved = draft.resolved
-  if (!resolved) {
+  const [searchQuery, setSearchQuery] = useState("")
+  const profiles = useMemo(() => adaptationProfilesForDraft(draft), [draft])
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase()
+  const filteredProfiles = useMemo(() => {
+    if (normalizedSearchQuery === "") {
+      return profiles
+    }
+    return profiles.filter((profile) =>
+      [
+        profile.label,
+        profile.source,
+        profile.resolved.provider,
+        profile.resolved.model,
+        profile.resolved.visible_tool_surface,
+        profile.resolved.surface_evidence,
+        profile.resolved.cache_evidence,
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(normalizedSearchQuery),
+    )
+  }, [normalizedSearchQuery, profiles])
+
+  if (profiles.length === 0) {
     return null
   }
 
+  return (
+    <section className="space-y-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <h3 className="text-foreground/80 text-[13px] font-bold tracking-widest uppercase">
+          {t("pages.agent.tools.adaptation.profiles", "Profiles")}
+        </h3>
+        <div className="group relative w-full sm:w-80">
+          <IconSearch className="text-muted-foreground/60 group-focus-within:text-foreground/80 absolute top-1/2 left-3.5 size-4 -translate-y-1/2 transition-colors" />
+          <Input
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder={t(
+              "pages.agent.tools.adaptation.search_profiles",
+              "Search profiles...",
+            )}
+            className="bg-muted/40 focus:bg-background h-10 rounded-lg border-transparent pr-3 pl-10 shadow-none transition-all"
+          />
+        </div>
+      </div>
+      <div className="bg-card border-border/40 overflow-hidden rounded-lg border shadow-sm">
+        {filteredProfiles.length > 0 ? (
+          <div className="divide-border/40 divide-y">
+            {filteredProfiles.map((profile) => (
+              <AdaptationProfileRow key={profile.id} profile={profile} />
+            ))}
+          </div>
+        ) : (
+          <div className="text-muted-foreground p-6 text-center text-[13px]">
+            {t("pages.agent.tools.adaptation.no_profiles", "No profiles found")}
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function adaptationProfilesForDraft(
+  draft: ToolAdaptationConfig,
+): ToolAdaptationProfileState[] {
+  if (draft.profiles && draft.profiles.length > 0) {
+    return draft.profiles
+  }
+  if (!draft.resolved) {
+    return []
+  }
+  const id = [draft.resolved.provider, draft.resolved.model]
+    .join("/")
+    .toLowerCase()
+  return [
+    {
+      id,
+      label: "default",
+      source: "active configuration",
+      is_default: true,
+      resolved: draft.resolved,
+      observation: draft.observation,
+      outcomes: draft.outcomes,
+    },
+  ]
+}
+
+function AdaptationProfileRow({
+  profile,
+}: {
+  profile: ToolAdaptationProfileState
+}) {
+  const { t } = useTranslation()
+  const [isExpanded, setIsExpanded] = useState(false)
+  const resolved = profile.resolved
+  const outcomes = profile.outcomes ?? []
+  const hasDetails = Boolean(profile.observation) || outcomes.length > 0
   const modelLabel = [resolved.provider, resolved.model]
     .filter((part) => part.trim() !== "")
     .join(" / ")
 
   return (
-    <section className="space-y-4">
-      <h3 className="text-foreground/80 text-[13px] font-bold tracking-widest uppercase">
-        {t("pages.agent.tools.adaptation.resolved", "Resolved State")}
-      </h3>
-      <div className="bg-card border-border/40 grid gap-0 overflow-hidden rounded-lg border shadow-sm md:grid-cols-3">
-        <ResolvedMetric
-          label={t("pages.agent.tools.adaptation.profile", "Profile")}
-          value={
-            modelLabel ||
-            t("pages.agent.tools.adaptation.profile_unknown", "Unconfigured")
+    <div>
+      <button
+        type="button"
+        disabled={!hasDetails}
+        onClick={() => {
+          if (hasDetails) {
+            setIsExpanded((current) => !current)
           }
-        />
-        <ResolvedMetric
-          label={t("pages.agent.tools.adaptation.state_file", "State File")}
-          value={resolved.state_path || "memory"}
-        />
-        <ResolvedMetric
-          label={t(
-            "pages.agent.tools.adaptation.pinned_surface",
-            "Pinned Surface",
-          )}
-          value={`${resolved.pinned_tool_surface} (${resolved.surface_evidence})`}
-        />
-        <ResolvedMetric
-          label={t(
-            "pages.agent.tools.adaptation.cache_evidence",
-            "Cache Evidence",
-          )}
-          value={
-            resolved.cache_sensitive
-              ? `${resolved.cache_evidence}: sensitive`
-              : `${resolved.cache_evidence}: flexible`
-          }
-        />
-        <ResolvedMetric
-          label={t(
-            "pages.agent.tools.adaptation.runtime_downgrade_resolved",
-            "Downgrade",
-          )}
-          value={resolved.runtime_downgrade ? "allowed" : "blocked"}
-        />
-        <ResolvedMetric
-          label={t(
-            "pages.agent.tools.adaptation.runtime_promotion_resolved",
-            "Promotion",
-          )}
-          value={resolved.runtime_promotion ? "allowed" : "blocked"}
-        />
-        <ResolvedMetric
-          label={t("pages.agent.tools.adaptation.latest_sniff", "Latest Sniff")}
-          value={
-            draft.observation
-              ? `${draft.observation.cached_tokens}/${draft.observation.prompt_tokens} cached`
-              : t("pages.agent.tools.adaptation.latest_sniff_none", "None")
-          }
-        />
-      </div>
-      {draft.outcomes && draft.outcomes.length > 0 && (
-        <div className="bg-card border-border/40 overflow-hidden rounded-lg border shadow-sm">
-          <div className="divide-border/40 divide-y">
-            {draft.outcomes.slice(0, 8).map((outcome) => {
-              const total = outcome.successes + outcome.failures
-              const successRate =
-                total > 0 ? Math.round((outcome.successes / total) * 100) : 0
-              return (
-                <div
-                  key={`${outcome.visible_tool_surface}:${outcome.tool_name}`}
-                  className="grid gap-3 p-4 sm:grid-cols-[minmax(0,1fr)_auto_auto]"
-                >
-                  <div className="min-w-0">
-                    <div className="text-foreground/90 truncate text-[14px] font-semibold">
-                      {outcome.tool_name}
-                    </div>
-                    <div className="text-muted-foreground/80 mt-1 truncate text-[12px]">
-                      {outcome.visible_tool_surface}
-                      {outcome.last_error ? ` - ${outcome.last_error}` : ""}
-                    </div>
-                  </div>
-                  <div className="text-muted-foreground text-[13px]">
-                    {outcome.successes}/{total} ok
-                  </div>
-                  <div className="text-muted-foreground text-[13px]">
-                    {successRate}%
-                  </div>
-                </div>
-              )
-            })}
+        }}
+        className="hover:bg-muted/10 flex w-full items-center gap-4 p-4 text-left transition-colors disabled:cursor-default disabled:hover:bg-transparent"
+      >
+        <span className="flex size-6 shrink-0 items-center justify-center">
+          {hasDetails ? (
+            isExpanded ? (
+              <IconChevronDown className="text-muted-foreground size-4" />
+            ) : (
+              <IconChevronRight className="text-muted-foreground size-4" />
+            )
+          ) : null}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="text-foreground/90 min-w-0 truncate text-[14px] font-semibold">
+              {modelLabel ||
+                t(
+                  "pages.agent.tools.adaptation.profile_unknown",
+                  "Unconfigured",
+                )}
+            </span>
+            {profile.is_default && (
+              <span className="bg-primary/10 text-primary rounded-md px-2 py-0.5 text-[11px] font-semibold">
+                {t("pages.agent.tools.adaptation.active", "Active")}
+              </span>
+            )}
+          </span>
+          <span className="text-muted-foreground/80 mt-1 block truncate text-[12px]">
+            {profile.source || profile.label}
+          </span>
+        </span>
+        <span className="hidden min-w-0 text-right sm:block">
+          <span className="text-foreground/80 block text-[13px] font-medium">
+            {resolved.pinned_tool_surface}
+          </span>
+          <span className="text-muted-foreground/80 block text-[12px]">
+            {resolved.surface_evidence}
+          </span>
+        </span>
+        <span className="hidden min-w-0 text-right md:block">
+          <span className="text-foreground/80 block text-[13px] font-medium">
+            {resolved.cache_sensitive
+              ? t(
+                  "pages.agent.tools.adaptation.cache_sensitive_short",
+                  "Sensitive",
+                )
+              : t(
+                  "pages.agent.tools.adaptation.cache_flexible_short",
+                  "Flexible",
+                )}
+          </span>
+          <span className="text-muted-foreground/80 block text-[12px]">
+            {resolved.cache_evidence}
+          </span>
+        </span>
+      </button>
+      {hasDetails && isExpanded && (
+        <div className="border-border/40 bg-muted/10 border-t px-4 py-4">
+          <div className="grid gap-3 md:grid-cols-3">
+            <ResolvedMetric
+              label={t("pages.agent.tools.adaptation.state_file", "State File")}
+              value={resolved.state_path || "memory"}
+            />
+            <ResolvedMetric
+              label={t(
+                "pages.agent.tools.adaptation.runtime_downgrade_resolved",
+                "Downgrade",
+              )}
+              value={resolved.runtime_downgrade ? "allowed" : "blocked"}
+            />
+            <ResolvedMetric
+              label={t(
+                "pages.agent.tools.adaptation.runtime_promotion_resolved",
+                "Promotion",
+              )}
+              value={resolved.runtime_promotion ? "allowed" : "blocked"}
+            />
+            <ResolvedMetric
+              label={t(
+                "pages.agent.tools.adaptation.latest_sniff",
+                "Latest Sniff",
+              )}
+              value={
+                profile.observation
+                  ? `${profile.observation.cached_tokens}/${profile.observation.prompt_tokens} cached`
+                  : t("pages.agent.tools.adaptation.latest_sniff_none", "None")
+              }
+            />
           </div>
+          {outcomes.length > 0 && (
+            <div className="border-border/40 mt-4 overflow-hidden rounded-lg border">
+              <div className="divide-border/40 divide-y">
+                {outcomes.slice(0, 8).map((outcome) => (
+                  <ToolOutcomeRow
+                    key={`${outcome.visible_tool_surface}:${outcome.tool_name}`}
+                    outcome={outcome}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
-    </section>
+    </div>
+  )
+}
+
+function ToolOutcomeRow({ outcome }: { outcome: ToolAdaptationToolOutcome }) {
+  const total = outcome.successes + outcome.failures
+  const successRate =
+    total > 0 ? Math.round((outcome.successes / total) * 100) : 0
+  return (
+    <div className="grid gap-3 p-4 sm:grid-cols-[minmax(0,1fr)_auto_auto]">
+      <div className="min-w-0">
+        <div className="text-foreground/90 truncate text-[14px] font-semibold">
+          {outcome.tool_name}
+        </div>
+        <div className="text-muted-foreground/80 mt-1 truncate text-[12px]">
+          {outcome.visible_tool_surface}
+          {outcome.last_error ? ` - ${outcome.last_error}` : ""}
+        </div>
+      </div>
+      <div className="text-muted-foreground text-[13px]">
+        {outcome.successes}/{total} ok
+      </div>
+      <div className="text-muted-foreground text-[13px]">{successRate}%</div>
+    </div>
   )
 }
 
 function ResolvedMetric({ label, value }: { label: string; value: string }) {
   return (
-    <div className="border-border/40 min-w-0 border-b p-5 md:border-r">
+    <div className="border-border/40 bg-card min-w-0 rounded-lg border p-4">
       <div className="text-muted-foreground/80 text-[12px] font-medium tracking-wide uppercase">
         {label}
       </div>

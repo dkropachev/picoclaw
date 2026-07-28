@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -279,6 +280,74 @@ func TestResolveToolAdaptationProfileForConfigSplitsPrefixedAlias(t *testing.T) 
 	provider, model := resolveToolAdaptationProfileForConfig(cfg)
 	if provider != "anthropic" || model != "claude-sonnet" {
 		t.Fatalf("profile = %s/%s, want anthropic/claude-sonnet", provider, model)
+	}
+}
+
+func TestBuildToolAdaptationResponseListsAccountRouterProfiles(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Provider = config.AccountRouterProvider
+	cfg.Agents.Defaults.ModelName = "router-1"
+	cfg.Tools.Adaptation = config.DefaultToolAdaptationConfig()
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "account-a",
+			Provider:  "openrouter",
+			Model:     "old-account-model",
+			Enabled:   true,
+		},
+		{
+			ModelName: "account-a-2",
+			Provider:  "openrouter",
+			Model:     "another-account-model",
+			Enabled:   true,
+		},
+		{
+			ModelName: "account-b",
+			Model:     "anthropic/claude-sonnet",
+			Enabled:   true,
+		},
+	}
+	cfg.AccountRouters = []config.AccountRouterConfig{{
+		Name:    "router-1",
+		Model:   "gpt-5.4",
+		Enabled: true,
+		Entry:   "pool",
+		Blocks: []config.AccountRouterBlock{{
+			ID:       "pool",
+			Type:     config.AccountRouterBlockTypeLoadBalance,
+			Accounts: []string{"account-a", "account-a-2", "account-b"},
+		}},
+	}}
+	cfg.MaterializeAccountRouterModels()
+
+	resp := buildToolAdaptationResponse(cfg)
+	if resp.Resolved.Provider != "openrouter" || resp.Resolved.Model != "gpt-5.4" {
+		t.Fatalf("resolved profile = %s/%s, want first effective provider/model", resp.Resolved.Provider, resp.Resolved.Model)
+	}
+	if len(resp.Profiles) != 2 {
+		t.Fatalf("profiles length = %d, want provider/model profiles only", len(resp.Profiles))
+	}
+
+	got := map[string]bool{}
+	for _, profile := range resp.Profiles {
+		got[profile.Resolved.Provider+"/"+profile.Resolved.Model] = true
+		if profile.Resolved.Provider == config.AccountRouterProvider {
+			t.Fatalf("profile exposes account router as provider: %#v", profile)
+		}
+		if strings.Contains(profile.Label, "account-") || strings.Contains(profile.Source, "account-") {
+			t.Fatalf("profile exposes account identity: %#v", profile)
+		}
+		if strings.Contains(profile.Source, "account router") {
+			t.Fatalf("provider-collapsed profile exposes router mechanism: %#v", profile)
+		}
+	}
+	for _, want := range []string{
+		"openrouter/gpt-5.4",
+		"anthropic/gpt-5.4",
+	} {
+		if !got[want] {
+			t.Fatalf("profiles missing %q: %#v", want, resp.Profiles)
+		}
 	}
 }
 

@@ -93,6 +93,7 @@ type toolAdaptationConfigRequest struct {
 	Resolved               *toolAdaptationResolvedState          `json:"resolved,omitempty"`
 	Observation            *picotools.ToolAdaptationObservation  `json:"observation,omitempty"`
 	Outcomes               []picotools.ToolAdaptationToolOutcome `json:"outcomes,omitempty"`
+	Profiles               []toolAdaptationProfileState          `json:"profiles,omitempty"`
 }
 
 type toolAdaptationResolvedState struct {
@@ -107,6 +108,16 @@ type toolAdaptationResolvedState struct {
 	ApplyVisibleChanges string `json:"apply_visible_changes"`
 	CacheSensitive      bool   `json:"cache_sensitive"`
 	CacheEvidence       string `json:"cache_evidence"`
+}
+
+type toolAdaptationProfileState struct {
+	ID          string                                `json:"id"`
+	Label       string                                `json:"label"`
+	Source      string                                `json:"source"`
+	IsDefault   bool                                  `json:"is_default"`
+	Resolved    toolAdaptationResolvedState           `json:"resolved"`
+	Observation *picotools.ToolAdaptationObservation  `json:"observation,omitempty"`
+	Outcomes    []picotools.ToolAdaptationToolOutcome `json:"outcomes,omitempty"`
 }
 
 var toolCatalog = []toolCatalogEntry{
@@ -422,25 +433,48 @@ func buildToolAdaptationResponse(cfg *config.Config) toolAdaptationConfigRequest
 	}
 	if cfg != nil {
 		provider, model := resolveToolAdaptationProfileForConfig(cfg)
-		decision := picotools.ResolveToolAdaptation(adaptation, provider, model)
 		profile := picotools.ToolAdaptationProfile{Provider: provider, Model: model}
-		resp.Resolved = &toolAdaptationResolvedState{
-			Provider:            provider,
-			Model:               model,
-			StatePath:           picotools.ToolAdaptationStatePath(),
-			VisibleToolSurface:  decision.VisibleToolSurface,
-			PinnedToolSurface:   decision.PinnedToolSurface,
-			SurfaceEvidence:     decision.SurfaceEvidence,
-			RuntimeDowngrade:    decision.RuntimeDowngrade,
-			RuntimePromotion:    decision.RuntimePromotion,
-			ApplyVisibleChanges: decision.ApplyVisibleChanges,
-			CacheSensitive:      decision.CacheSensitive,
-			CacheEvidence:       decision.CacheEvidence,
-		}
-		resp.Observation = decision.CacheObservation
+		resp.Resolved = buildToolAdaptationResolvedState(adaptation, provider, model)
+		resp.Observation = resp.Resolved.cacheObservation()
 		resp.Outcomes = picotools.LatestToolAdaptationToolOutcomes(profile)
+		resp.Profiles = buildToolAdaptationProfiles(cfg, adaptation, profile)
 	}
 	return resp
+}
+
+func buildToolAdaptationResolvedState(
+	adaptation config.ToolAdaptationConfig,
+	provider string,
+	model string,
+) *toolAdaptationResolvedState {
+	decision := picotools.ResolveToolAdaptation(adaptation, provider, model)
+	return &toolAdaptationResolvedState{
+		Provider:            provider,
+		Model:               model,
+		StatePath:           picotools.ToolAdaptationStatePath(),
+		VisibleToolSurface:  decision.VisibleToolSurface,
+		PinnedToolSurface:   decision.PinnedToolSurface,
+		SurfaceEvidence:     decision.SurfaceEvidence,
+		RuntimeDowngrade:    decision.RuntimeDowngrade,
+		RuntimePromotion:    decision.RuntimePromotion,
+		ApplyVisibleChanges: decision.ApplyVisibleChanges,
+		CacheSensitive:      decision.CacheSensitive,
+		CacheEvidence:       decision.CacheEvidence,
+	}
+}
+
+func (s *toolAdaptationResolvedState) cacheObservation() *picotools.ToolAdaptationObservation {
+	if s == nil {
+		return nil
+	}
+	observation, ok := picotools.LatestToolAdaptationObservation(picotools.ToolAdaptationProfile{
+		Provider: s.Provider,
+		Model:    s.Model,
+	})
+	if !ok {
+		return nil
+	}
+	return &observation
 }
 
 func resolveToolAdaptationProfileForConfig(cfg *config.Config) (string, string) {
@@ -456,6 +490,29 @@ func resolveToolAdaptationProfileForConfig(cfg *config.Config) (string, string) 
 		if !strings.EqualFold(strings.TrimSpace(mc.ModelName), model) {
 			continue
 		}
+		if mc.IsAccountRouter() {
+			router := mc.Router
+			if router == nil {
+				router = findAccountRouterForAdaptation(cfg, model)
+			}
+			if routerProvider, routerModel, ok := firstAccountRouterProfileForAdaptation(cfg, router); ok {
+				return routerProvider, routerModel
+			}
+			if router != nil {
+				return "", strings.TrimSpace(router.Model)
+			}
+			return "", model
+		}
+		if mc.IsModelRouter() {
+			router := mc.ModelRouter
+			if router == nil {
+				router = findModelRouterForAdaptation(cfg, model)
+			}
+			if routerProvider, routerModel, ok := firstModelRouterProfileForAdaptation(cfg, router); ok {
+				return routerProvider, routerModel
+			}
+			return "", model
+		}
 		resolvedProvider, resolvedModel := providers.ExtractProtocol(mc)
 		if strings.TrimSpace(resolvedProvider) != "" {
 			provider = strings.TrimSpace(resolvedProvider)
@@ -466,6 +523,481 @@ func resolveToolAdaptationProfileForConfig(cfg *config.Config) (string, string) 
 		break
 	}
 	return provider, model
+}
+
+func firstModelRouterProfileForAdaptation(
+	cfg *config.Config,
+	router *config.ModelRouterConfig,
+) (string, string, bool) {
+	if router == nil {
+		return "", "", false
+	}
+	for _, modelRef := range modelRouterModelRefsForAdaptation(router) {
+		matches := modelConfigsByNameForAdaptation(cfg, modelRef)
+		if len(matches) == 0 {
+			if provider, model, ok := providerModelFromRefForAdaptation(modelRef); ok {
+				return provider, model, true
+			}
+			continue
+		}
+		for _, mc := range matches {
+			switch {
+			case mc.IsAccountRouter():
+				accountRouter := mc.Router
+				if accountRouter == nil {
+					accountRouter = findAccountRouterForAdaptation(cfg, strings.TrimSpace(mc.ModelName))
+				}
+				if provider, model, ok := firstAccountRouterProfileForAdaptation(cfg, accountRouter); ok {
+					return provider, model, true
+				}
+			case mc.IsModelRouter():
+				continue
+			default:
+				provider, model := providers.ExtractProtocol(mc)
+				provider = strings.TrimSpace(provider)
+				model = strings.TrimSpace(model)
+				if provider != "" && model != "" {
+					return provider, model, true
+				}
+			}
+		}
+	}
+	return "", "", false
+}
+
+func firstAccountRouterProfileForAdaptation(
+	cfg *config.Config,
+	router *config.AccountRouterConfig,
+) (string, string, bool) {
+	if router == nil {
+		return "", "", false
+	}
+	routerModel := strings.TrimSpace(router.Model)
+	for _, account := range accountRouterAccountsForAdaptation(router) {
+		if provider, ok := config.AccountRouterCredentialAccountProvider(account); ok {
+			provider = strings.TrimSpace(provider)
+			if provider != "" && routerModel != "" {
+				return provider, routerModel, true
+			}
+			continue
+		}
+		for _, mc := range modelConfigsByNameForAdaptation(cfg, account) {
+			if mc.IsAccountRouter() {
+				nestedRouter := mc.Router
+				if nestedRouter == nil {
+					nestedRouter = findAccountRouterForAdaptation(cfg, strings.TrimSpace(mc.ModelName))
+				}
+				if provider, model, ok := firstAccountRouterProfileForAdaptation(cfg, nestedRouter); ok {
+					return provider, model, true
+				}
+				continue
+			}
+			if mc.IsModelRouter() {
+				modelRouter := mc.ModelRouter
+				if modelRouter == nil {
+					modelRouter = findModelRouterForAdaptation(cfg, strings.TrimSpace(mc.ModelName))
+				}
+				if provider, model, ok := firstModelRouterProfileForAdaptation(cfg, modelRouter); ok {
+					return provider, model, true
+				}
+				continue
+			}
+			provider, model := providers.ExtractProtocol(mc)
+			provider = strings.TrimSpace(provider)
+			model = strings.TrimSpace(model)
+			if routerModel != "" {
+				model = routerModel
+			}
+			if provider != "" && model != "" {
+				return provider, model, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+func providerModelFromRefForAdaptation(ref string) (string, string, bool) {
+	provider, model, ok := strings.Cut(strings.TrimSpace(ref), "/")
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if !ok || provider == "" || model == "" {
+		return "", "", false
+	}
+	return provider, model, true
+}
+
+func buildToolAdaptationProfiles(
+	cfg *config.Config,
+	adaptation config.ToolAdaptationConfig,
+	defaultProfile picotools.ToolAdaptationProfile,
+) []toolAdaptationProfileState {
+	if cfg == nil {
+		return nil
+	}
+	builder := toolAdaptationProfileBuilder{
+		cfg:          cfg,
+		adaptation:   adaptation,
+		activeKeys:   map[string]struct{}{},
+		accountRefs:  accountRouterAccountRefsForAdaptation(cfg),
+		seenProfiles: map[string]struct{}{},
+	}
+	builder.addActiveProfile(defaultProfile.Provider, defaultProfile.Model)
+	for _, mc := range cfg.ModelList {
+		builder.addModelConfig(mc, "model alias")
+	}
+	return builder.profiles
+}
+
+type toolAdaptationProfileBuilder struct {
+	cfg          *config.Config
+	adaptation   config.ToolAdaptationConfig
+	activeKeys   map[string]struct{}
+	accountRefs  map[string]struct{}
+	seenProfiles map[string]struct{}
+	profiles     []toolAdaptationProfileState
+}
+
+func (b *toolAdaptationProfileBuilder) addActiveProfile(provider string, model string) {
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if model == "" {
+		b.addProfile(provider, model, "active configuration", "active")
+		return
+	}
+	for _, mc := range b.cfg.ModelList {
+		if mc == nil || !strings.EqualFold(strings.TrimSpace(mc.ModelName), model) {
+			continue
+		}
+		switch {
+		case mc.IsAccountRouter():
+			router := mc.Router
+			if router == nil {
+				router = findAccountRouterForAdaptation(b.cfg, model)
+			}
+			b.addAccountRouter(router, "provider profile", true)
+			return
+		case mc.IsModelRouter():
+			router := mc.ModelRouter
+			if router == nil {
+				router = findModelRouterForAdaptation(b.cfg, model)
+			}
+			b.addModelRouter(router, "model router", true)
+			return
+		default:
+			resolvedProvider, resolvedModel := providers.ExtractProtocol(mc)
+			if strings.TrimSpace(resolvedProvider) != "" {
+				provider = strings.TrimSpace(resolvedProvider)
+			}
+			if strings.TrimSpace(resolvedModel) != "" {
+				model = strings.TrimSpace(resolvedModel)
+			}
+			b.addProfile(provider, model, "active configuration", "active")
+			return
+		}
+	}
+	b.addProfile(provider, model, "active configuration", "active")
+}
+
+func (b *toolAdaptationProfileBuilder) addModelConfig(mc *config.ModelConfig, source string) {
+	if mc == nil {
+		return
+	}
+	modelName := strings.TrimSpace(mc.ModelName)
+	if _, ok := b.accountRefs[strings.ToLower(modelName)]; ok {
+		return
+	}
+	switch {
+	case mc.IsModelRouter():
+		router := mc.ModelRouter
+		if router == nil {
+			router = findModelRouterForAdaptation(b.cfg, modelName)
+		}
+		b.addModelRouter(router, "model router", false)
+	case mc.IsAccountRouter():
+		router := mc.Router
+		if router == nil {
+			router = findAccountRouterForAdaptation(b.cfg, modelName)
+		}
+		b.addAccountRouter(router, "provider profile", false)
+	default:
+		provider, model := providers.ExtractProtocol(mc)
+		b.addProfile(provider, model, source, modelName)
+	}
+}
+
+func (b *toolAdaptationProfileBuilder) addModelRouter(
+	router *config.ModelRouterConfig,
+	source string,
+	active bool,
+) {
+	if router == nil {
+		return
+	}
+	for _, modelRef := range modelRouterModelRefsForAdaptation(router) {
+		matches := modelConfigsByNameForAdaptation(b.cfg, modelRef)
+		if len(matches) == 0 {
+			if provider, model, ok := providerModelFromRefForAdaptation(modelRef); ok {
+				b.addProfileWithActive(provider, model, source, modelRef, active)
+			}
+			continue
+		}
+		for _, mc := range matches {
+			if mc == nil {
+				continue
+			}
+			switch {
+			case mc.IsAccountRouter():
+				router := mc.Router
+				if router == nil {
+					router = findAccountRouterForAdaptation(b.cfg, strings.TrimSpace(mc.ModelName))
+				}
+				b.addAccountRouter(router, "provider profile", active)
+			case mc.IsModelRouter():
+				router := mc.ModelRouter
+				if router == nil {
+					router = findModelRouterForAdaptation(b.cfg, strings.TrimSpace(mc.ModelName))
+				}
+				b.addModelRouter(router, source, active)
+			default:
+				provider, model := providers.ExtractProtocol(mc)
+				b.addProfileWithActive(provider, model, source, strings.TrimSpace(mc.ModelName), active)
+			}
+		}
+	}
+}
+
+func (b *toolAdaptationProfileBuilder) addAccountRouter(
+	router *config.AccountRouterConfig,
+	source string,
+	active bool,
+) {
+	if router == nil {
+		return
+	}
+	routerModel := strings.TrimSpace(router.Model)
+	for _, account := range accountRouterAccountsForAdaptation(router) {
+		if provider, ok := config.AccountRouterCredentialAccountProvider(account); ok {
+			b.addProfileWithActive(provider, routerModel, source, provider, active)
+			continue
+		}
+		matches := modelConfigsByNameForAdaptation(b.cfg, account)
+		for _, mc := range matches {
+			if mc == nil {
+				continue
+			}
+			if mc.IsAccountRouter() {
+				nestedRouter := mc.Router
+				if nestedRouter == nil {
+					nestedRouter = findAccountRouterForAdaptation(b.cfg, strings.TrimSpace(mc.ModelName))
+				}
+				b.addAccountRouter(nestedRouter, source, active)
+				continue
+			}
+			if mc.IsModelRouter() {
+				modelRouter := mc.ModelRouter
+				if modelRouter == nil {
+					modelRouter = findModelRouterForAdaptation(b.cfg, strings.TrimSpace(mc.ModelName))
+				}
+				b.addModelRouter(modelRouter, source, active)
+				continue
+			}
+			provider, model := providers.ExtractProtocol(mc)
+			if routerModel != "" {
+				model = routerModel
+			}
+			b.addProfileWithActive(provider, model, source, provider, active)
+		}
+	}
+}
+
+func (b *toolAdaptationProfileBuilder) addProfile(provider string, model string, source string, label string) {
+	b.addProfileWithActive(provider, model, source, label, false)
+}
+
+func (b *toolAdaptationProfileBuilder) addProfileWithActive(
+	provider string,
+	model string,
+	source string,
+	label string,
+	active bool,
+) {
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if provider == "" || model == "" {
+		return
+	}
+	profile := picotools.ToolAdaptationProfile{Provider: provider, Model: model}
+	key := toolAdaptationProfileKeyForAPI(provider, model)
+	if active {
+		b.activeKeys[key] = struct{}{}
+	}
+	if _, ok := b.seenProfiles[key]; ok {
+		if active {
+			for i := range b.profiles {
+				if b.profiles[i].ID == key {
+					b.profiles[i].IsDefault = true
+					break
+				}
+			}
+		}
+		return
+	}
+	b.seenProfiles[key] = struct{}{}
+	resolved := buildToolAdaptationResolvedState(b.adaptation, provider, model)
+	observation := resolved.cacheObservation()
+	outcomes := picotools.LatestToolAdaptationToolOutcomes(profile)
+	displayLabel := strings.TrimSpace(label)
+	if displayLabel == "" {
+		displayLabel = strings.TrimSpace(strings.Join([]string{provider, model}, " / "))
+	}
+	b.profiles = append(b.profiles, toolAdaptationProfileState{
+		ID:          key,
+		Label:       displayLabel,
+		Source:      strings.TrimSpace(source),
+		IsDefault:   active || b.isActiveKey(key),
+		Resolved:    *resolved,
+		Observation: observation,
+		Outcomes:    outcomes,
+	})
+}
+
+func (b *toolAdaptationProfileBuilder) isActiveKey(key string) bool {
+	_, ok := b.activeKeys[key]
+	return ok
+}
+
+func toolAdaptationProfileKeyForAPI(provider string, model string) string {
+	return strings.ToLower(strings.TrimSpace(provider)) + "/" + strings.ToLower(strings.TrimSpace(model))
+}
+
+func findAccountRouterForAdaptation(cfg *config.Config, name string) *config.AccountRouterConfig {
+	name = strings.TrimSpace(name)
+	for i := range cfg.AccountRouters {
+		if strings.EqualFold(strings.TrimSpace(cfg.AccountRouters[i].Name), name) {
+			return &cfg.AccountRouters[i]
+		}
+	}
+	return nil
+}
+
+func findModelRouterForAdaptation(cfg *config.Config, name string) *config.ModelRouterConfig {
+	name = strings.TrimSpace(name)
+	for i := range cfg.ModelRouters {
+		if strings.EqualFold(strings.TrimSpace(cfg.ModelRouters[i].Name), name) {
+			return &cfg.ModelRouters[i]
+		}
+	}
+	return nil
+}
+
+func modelConfigsByNameForAdaptation(cfg *config.Config, name string) []*config.ModelConfig {
+	name = strings.TrimSpace(name)
+	var matches []*config.ModelConfig
+	for _, mc := range cfg.ModelList {
+		if mc == nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(mc.ModelName), name) {
+			matches = append(matches, mc)
+		}
+	}
+	return matches
+}
+
+func modelRouterModelRefsForAdaptation(router *config.ModelRouterConfig) []string {
+	if router == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var refs []string
+	for _, block := range router.Blocks {
+		if strings.TrimSpace(block.Type) != config.ModelRouterBlockTypeModel {
+			continue
+		}
+		ref := strings.TrimSpace(block.Model)
+		if ref == "" {
+			continue
+		}
+		key := strings.ToLower(ref)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
+func accountRouterAccountsForAdaptation(router *config.AccountRouterConfig) []string {
+	if router == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var accounts []string
+	for _, block := range router.Blocks {
+		for _, account := range accountRouterBlockAccountsForAdaptation(block) {
+			account = strings.TrimSpace(account)
+			if account == "" {
+				continue
+			}
+			key := strings.ToLower(account)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			accounts = append(accounts, account)
+		}
+	}
+	return accounts
+}
+
+func accountRouterAccountRefsForAdaptation(cfg *config.Config) map[string]struct{} {
+	refs := map[string]struct{}{}
+	if cfg == nil {
+		return refs
+	}
+	for i := range cfg.AccountRouters {
+		for _, account := range accountRouterAccountsForAdaptation(&cfg.AccountRouters[i]) {
+			account = strings.TrimSpace(account)
+			if account == "" {
+				continue
+			}
+			refs[strings.ToLower(account)] = struct{}{}
+		}
+	}
+	return refs
+}
+
+func accountRouterBlockAccountsForAdaptation(block config.AccountRouterBlock) []string {
+	switch strings.TrimSpace(block.Type) {
+	case config.AccountRouterBlockTypeAccount:
+		return []string{block.Account}
+	case config.AccountRouterBlockTypeLoadBalance:
+		return block.Accounts
+	case config.AccountRouterBlockTypeBranch:
+		var accounts []string
+		if block.Condition != nil {
+			accounts = append(accounts, accountRouterExpressionAccountsForAdaptation(block.Condition.Left)...)
+			accounts = append(accounts, accountRouterExpressionAccountsForAdaptation(block.Condition.Right)...)
+		}
+		return accounts
+	default:
+		return nil
+	}
+}
+
+func accountRouterExpressionAccountsForAdaptation(expr config.AccountRouterExpression) []string {
+	var accounts []string
+	if account := strings.TrimSpace(expr.Account); account != "" {
+		accounts = append(accounts, account)
+	}
+	if expr.Left != nil {
+		accounts = append(accounts, accountRouterExpressionAccountsForAdaptation(*expr.Left)...)
+	}
+	if expr.Right != nil {
+		accounts = append(accounts, accountRouterExpressionAccountsForAdaptation(*expr.Right)...)
+	}
+	return accounts
 }
 
 func probeModelConfigForConfig(cfg *config.Config, providerName string, model string) *config.ModelConfig {
