@@ -35,6 +35,7 @@ auxiliary to this capability.
 | `FR-AGENT-011` | MUST | Provider prompt serialization preserves ordered text/media parts, scoped context, tool call/result identifiers, and token estimates through the provider-neutral prompt representation before mapping to provider-specific wire formats. | Multi-provider turns need one canonical prompt model so media, summaries, cache hints, and tool relationships are not silently lost or double-counted. |
 | `FR-AGENT-012` | MUST | Each primary or fallback provider attempt derives tool adaptation from the concrete provider/model profile after router resolution, applies that profile's visible surface to a candidate-specific base schema, and retains the successful candidate's surface and schema for tool execution and observations; explicit profile overrides still obey configured runtime visible-change policy. | Routed and fallback turns must not probe or expose tools using a virtual router identity or another candidate's schema. |
 | `FR-AGENT-013` | MUST | Provider/config reload pauses admission of new root runtime users, drains the current registry generation before replacement, and never closes a retained provider while a turn, workflow, summarizer, child turn, or gateway-owned background action can still use it. One inbound lease covers workflow-trigger matching, route/session placeholder selection, and a synchronously retained queued worker so semaphore backlog cannot split an ingress decision across generations. Other asynchronous work retains its generation before goroutine launch; independently cancelable subturn contexts preserve that lease marker; stale captured agent pointers are resolved by ID against the current registry before a root turn starts; and independently launched summarizers/background consumers require the exact config and registry generation that created them. The first reload pause synchronously removes the generation-owned runtime-event workflow subscription and the final nested resume recreates it for only the committed/restored config before opening admission. Terminal Stop is remembered even before `Run` registers; shutdown first quiesces producers, then cancels/joins AgentLoop-owned automation and permanently pauses/drains runtime users, then closes channel/media dependencies and the provider. | Reload, rollback, and shutdown must not create use-after-close provider calls, admit provisional runtime state/events, execute stale cross-workspace work, leak queued session placeholders, or deadlock nested work behind their own drain. |
+| `FR-AGENT-014` | MUST | When a credential-backed Codex OAuth request fails with the structured `usage_limit_reached` error, the provider rechecks the authoritative main Codex rate-limit state and automatically consumes one earned reset only when that main limit is eligible and exhausted; reset attempts are serialized, reuse an idempotency key across redemption retries, and reconcile through a post-consume usage read. A confirmed redemption or concurrent reset retries the original provider request at most once, while a redemption that is not verified to recover the same exhaustion episode suppresses further automatic consumption for that episode. Generic `429` responses, workspace credit or spend-control limits, additional-model-only limits, unsupported reset state, and accounts with no resets must not consume one. | Automatic recovery must restore an exhausted eligible account without double-spending finite resets or masking other quota and billing failures. |
 
 ## Data And State Model
 
@@ -102,7 +103,14 @@ Owns: EVENT agent.*
 
 1. Build an `InboundContext` and resolve the route/session before prompt work.
 2. Resolve prompt contributors and turn profile decisions before provider calls.
-3. Select model candidates, normalize optional provider controls such as `reasoning_effort`, then execute provider attempts with retry/fallback policy.
+3. Select model candidates, normalize optional provider controls such as
+   `reasoning_effort`, then execute provider attempts with retry/fallback
+   policy. A credential-backed Codex attempt that returns the structured usage
+   exhaustion error serializes by account, rechecks the authoritative main
+   limit and reset count, consumes at most one eligible reset, reconciles the
+   same window, and retries the same provider request once after a confirmed
+   redemption before fallback observes the error. Failed verification
+   suppresses another automatic reset for that exhaustion episode.
 4. For each tool-call response, validate tool availability and arguments, run hooks and registry execution, append tool results, and re-enter provider execution until done or capped.
 5. Write final messages and summaries after the assistant response is known.
 6. Before replacing provider/config state, pause new runtime admission and wait
@@ -153,6 +161,11 @@ account/model overrides are turn-scoped and do not rewrite persisted
 - Missing or disabled providers fail the turn with a clear model/provider error.
 - Missing GitHub Copilot credentials fail before provider execution, while
   local bridge Copilot entries continue to report local transport failures.
+- Codex reset lookup or redemption failure preserves the original
+  fallback-eligible usage-limit error, except that caller cancellation and
+  deadline errors remain caller-visible. Generic rate limits, workspace spend
+  controls, additional-model-only limits, and zero-credit accounts never spend
+  a reset.
 - Tool lookup misses produce a tool-skipped result instead of a panic.
 - Iteration limits stop repeated tool-call loops.
 - Media too large for configured limits is rejected before provider execution.
@@ -185,6 +198,7 @@ account/model overrides are turn-scoped and do not rewrite persisted
 | `FR-AGENT-011` | [pkg/providers/promptir/conversion_test.go](../../pkg/providers/promptir/conversion_test.go), [pkg/providers/common/common_test.go](../../pkg/providers/common/common_test.go), [pkg/providers/openai_responses_common/responses_common_test.go](../../pkg/providers/openai_responses_common/responses_common_test.go), [pkg/tokenizer/estimator_test.go](../../pkg/tokenizer/estimator_test.go) |
 | `FR-AGENT-012` | [pkg/agent/pipeline_llm_adaptation_test.go](../../pkg/agent/pipeline_llm_adaptation_test.go), [pkg/agent/instance_test.go](../../pkg/agent/instance_test.go) |
 | `FR-AGENT-013` | [pkg/agent/runtime_gate_test.go](../../pkg/agent/runtime_gate_test.go), [pkg/agent/runtime_event_logger_test.go](../../pkg/agent/runtime_event_logger_test.go), [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go) |
+| `FR-AGENT-014` | [pkg/providers/oauth/codex_rate_limit_reset_test.go](../../pkg/providers/oauth/codex_rate_limit_reset_test.go) |
 
 ## Implementation Anchors
 

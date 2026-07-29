@@ -212,6 +212,11 @@
       "email": "邮箱",
       "project": "项目"
     },
+    "codexLimits": {
+      "resetCredits": "使用限额重置次数：{{count}}",
+      "autoReset": "有可用次数时自动使用",
+      "autoResetDescription": "Codex 达到可重置的使用限额且有可用重置次数时，PicoClaw 会自动使用一次并重试一次。"
+    },
     "errors": {
       "loadFailed": "加载凭据失败",
       "flowFailed": "查询授权流程失败",

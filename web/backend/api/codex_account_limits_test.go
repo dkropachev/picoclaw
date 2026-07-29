@@ -89,6 +89,9 @@ func TestHandleCodexAccountLimitsUsesUsageAPI(t *testing.T) {
 					},
 				},
 			},
+			"rate_limit_reset_credits": map[string]any{
+				"available_count": 2,
+			},
 		})
 	}))
 	defer server.Close()
@@ -136,6 +139,14 @@ func TestHandleCodexAccountLimitsUsesUsageAPI(t *testing.T) {
 	if work.Entries[2].Name != "GPT-5.3-Codex-Spark" ||
 		work.Entries[2].UsedPercent == nil || *work.Entries[2].UsedPercent != 0 {
 		t.Fatalf("additional usage entry = %#v", work.Entries[2])
+	}
+	if work.RateLimitResetCredits == nil ||
+		work.RateLimitResetCredits.AvailableCount != 2 ||
+		!work.RateLimitResetCredits.AutoReset {
+		t.Fatalf(
+			"reset credits = %#v, want 2 available with auto-reset",
+			work.RateLimitResetCredits,
+		)
 	}
 	missing := findCodexLimitAccount(resp.Accounts, "missing")
 	if missing != nil {
@@ -217,6 +228,12 @@ func TestHandleCodexAccountLimitsIncludesGitHubCopilotUsage(t *testing.T) {
 	if account.Provider != "github-copilot" || account.Plan != "individual_pro" {
 		t.Fatalf("copilot account metadata = %#v", account)
 	}
+	if account.RateLimitResetCredits != nil {
+		t.Fatalf(
+			"copilot reset credits = %#v, want omitted",
+			account.RateLimitResetCredits,
+		)
+	}
 	if len(account.Entries) != 2 {
 		t.Fatalf("copilot entries = %#v, want premium and chat", account.Entries)
 	}
@@ -227,6 +244,83 @@ func TestHandleCodexAccountLimitsIncludesGitHubCopilotUsage(t *testing.T) {
 		account.Entries[1].UsedPercent == nil ||
 		*account.Entries[1].UsedPercent != 28 {
 		t.Fatalf("premium entry = %#v, want 28%% used", account.Entries[1])
+	}
+}
+
+func TestCodexAccountLimitsPreservesSupportedZeroResetCredits(t *testing.T) {
+	withPicoclawAuthHome(t)
+	setOpenAIAuthCredential(
+		t,
+		"openai",
+		"default-token",
+		"",
+		"acc-default",
+		"default@example.com",
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"plan_type": "pro",
+			"rate_limit_reset_credits": map[string]any{
+				"available_count": 0,
+			},
+		})
+	}))
+	defer server.Close()
+	withCodexAccountLimitsBaseURL(t, server.URL)
+
+	resp, err := loadCodexAccountLimits(t.Context())
+	if err != nil {
+		t.Fatalf("loadCodexAccountLimits() error = %v", err)
+	}
+	if len(resp.Accounts) != 1 {
+		t.Fatalf("accounts = %#v", resp.Accounts)
+	}
+	resetCredits := resp.Accounts[0].RateLimitResetCredits
+	if resetCredits == nil || resetCredits.AvailableCount != 0 || !resetCredits.AutoReset {
+		t.Fatalf("reset credits = %#v, want supported zero with auto-reset", resetCredits)
+	}
+}
+
+func TestCodexAccountLimitsHidesResetCreditsWithoutExplicitCount(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		summary map[string]any
+	}{
+		{name: "missing count", summary: map[string]any{}},
+		{name: "null count", summary: map[string]any{"available_count": nil}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			withPicoclawAuthHome(t)
+			setOpenAIAuthCredential(
+				t,
+				"openai",
+				"default-token",
+				"",
+				"acc-default",
+				"default@example.com",
+			)
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"plan_type":                "pro",
+					"rate_limit_reset_credits": tt.summary,
+				})
+			}))
+			defer server.Close()
+			withCodexAccountLimitsBaseURL(t, server.URL)
+
+			resp, err := loadCodexAccountLimits(t.Context())
+			if err != nil {
+				t.Fatalf("loadCodexAccountLimits() error = %v", err)
+			}
+			if len(resp.Accounts) != 1 {
+				t.Fatalf("accounts = %#v", resp.Accounts)
+			}
+			if resetCredits := resp.Accounts[0].RateLimitResetCredits; resetCredits != nil {
+				t.Fatalf("reset credits = %#v, want unsupported state hidden", resetCredits)
+			}
+		})
 	}
 }
 

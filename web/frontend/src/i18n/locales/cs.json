@@ -210,6 +210,11 @@
       "email": "E-mail",
       "project": "Projekt"
     },
+    "codexLimits": {
+      "resetCredits": "Obnovení limitu využití: {{count}}",
+      "autoReset": "Automaticky použít, je-li dostupné",
+      "autoResetDescription": "Když Codex dosáhne příslušného limitu využití a obnovení je dostupné, PicoClaw ho automaticky použije a požadavek jednou zopakuje."
+    },
     "errors": {
       "loadFailed": "Načtení přihlašovacích údajů selhalo",
       "flowFailed": "Ověření auth flow selhalo",
