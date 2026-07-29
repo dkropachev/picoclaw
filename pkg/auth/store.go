@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -33,6 +34,8 @@ const (
 	providerGitHubCopilot     = "github-copilot"
 	providerCopilotAlias      = "copilot"
 )
+
+var authStoreWriteMu sync.Mutex
 
 func (c *AuthCredential) IsExpired() bool {
 	if c.ExpiresAt.IsZero() {
@@ -244,6 +247,13 @@ func LoadStore() (*AuthStore, error) {
 }
 
 func SaveStore(store *AuthStore) error {
+	authStoreWriteMu.Lock()
+	defer authStoreWriteMu.Unlock()
+
+	return saveStore(store)
+}
+
+func saveStore(store *AuthStore) error {
 	path := authFilePath()
 	data, err := json.MarshalIndent(store, "", "  ")
 	if err != nil {
@@ -267,6 +277,9 @@ func GetCredential(provider string) (*AuthCredential, error) {
 }
 
 func SetCredential(provider string, cred *AuthCredential) error {
+	authStoreWriteMu.Lock()
+	defer authStoreWriteMu.Unlock()
+
 	store, err := LoadStore()
 	if err != nil {
 		return err
@@ -282,19 +295,25 @@ func SetCredential(provider string, cred *AuthCredential) error {
 	}
 
 	store.Credentials[canonical] = normalized
-	return SaveStore(store)
+	return saveStore(store)
 }
 
 func DeleteCredential(provider string) error {
+	authStoreWriteMu.Lock()
+	defer authStoreWriteMu.Unlock()
+
 	store, err := LoadStore()
 	if err != nil {
 		return err
 	}
 	delete(store.Credentials, canonicalProvider(provider))
-	return SaveStore(store)
+	return saveStore(store)
 }
 
 func DeleteAllCredentials() error {
+	authStoreWriteMu.Lock()
+	defer authStoreWriteMu.Unlock()
+
 	path := authFilePath()
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err

@@ -72,7 +72,6 @@ func TestModelRouterRejectsAccountRouterReferenceToModelRouter(t *testing.T) {
 	cfg := &Config{
 		AccountRouters: []AccountRouterConfig{{
 			Name:    "account-router",
-			Model:   "gpt-5",
 			Enabled: true,
 			Entry:   "entry",
 			Blocks: []AccountRouterBlock{{

@@ -51,8 +51,14 @@
       "websocketConnecting": "Připojování ke chat službě... Čekejte prosím.",
       "websocketDisconnected": "Chat nedostupný: WebSocket spojení bylo přerušeno. Zkontrolujte síť a stav gateway, obnovte stránku nebo restartujte Launcher.",
       "websocketError": "Chat nedostupný: WebSocket spojení selhalo. Zkontrolujte síť a stav gateway a zkuste to znovu.",
-      "noDefaultModel": "Chat nedostupný: žádný výchozí model není vybrán. Nastavte výchozí model na stránce Modely."
+      "noDefaultModel": "Chat nedostupný: žádný výchozí model není vybrán. Nastavte výchozí model na stránce Modely.",
+      "modelDiscoveryLoading": "Chat nedostupný: načítají se modely pro vybraný účet.",
+      "modelDiscoveryFailed": "Chat nedostupný: načtení modelů selhalo. Použijte tlačítko opakování výše.",
+      "noAvailableModel": "Chat nedostupný: pro vybraný účet není k dispozici žádný model."
     },
+    "modelDiscoveryWarning": "U některých účtů se nepodařilo načíst seznam modelů.",
+    "modelDiscoveryError": "Nepodařilo se načíst modely pro vybraný účet.",
+    "retryModelDiscovery": "Znovu načíst modely",
     "newChat": "Nový chat",
     "notConnected": "Gateway není spuštěna. Spusťte ji pro zahájení chatu.",
     "thinking": {

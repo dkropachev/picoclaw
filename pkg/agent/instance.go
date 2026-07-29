@@ -62,7 +62,7 @@ type AgentInstance struct {
 	// CandidateProviders maps stable candidate identity keys and provider/model
 	// keys to per-candidate LLMProvider instances. Stable identities let account
 	// routers keep separate credentials even when accounts use the same provider
-	// and shared model.
+	// and model.
 	CandidateProviders map[string]providers.LLMProvider
 	AccountRouter      *accountrouter.Router
 	ModelRouter        *modelrouter.Router
@@ -113,13 +113,17 @@ func (a *AgentInstance) setCandidateProviderIfAbsent(key string, provider provid
 }
 
 func candidateProviderKeys(candidate providers.FallbackCandidate) []string {
-	keys := make([]string, 0, 2)
-	if stableKey := strings.TrimSpace(candidate.IdentityKey); stableKey != "" {
-		keys = append(keys, stableKey)
-	}
+	keys := make([]string, 0, 3)
+	stableKey := strings.TrimSpace(candidate.IdentityKey)
 	modelKey := ""
 	if strings.TrimSpace(candidate.Provider) != "" && strings.TrimSpace(candidate.Model) != "" {
 		modelKey = providers.ModelKey(candidate.Provider, candidate.Model)
+	}
+	if stableKey != "" && modelKey != "" && stableKey != modelKey {
+		keys = append(keys, stableKey+"\x00"+modelKey)
+	}
+	if stableKey != "" {
+		keys = append(keys, stableKey)
 	}
 	if modelKey != "" && !containsProviderKey(keys, modelKey) {
 		keys = append(keys, modelKey)
@@ -144,6 +148,9 @@ func registerCandidateProvider(
 	if out == nil || provider == nil {
 		return false
 	}
+	agentCandidateProvidersMu.Lock()
+	defer agentCandidateProvidersMu.Unlock()
+
 	inserted := false
 	for _, key := range candidateProviderKeys(candidate) {
 		if key == "" || out[key] != nil {
@@ -446,7 +453,7 @@ func buildAccountRouter(
 	workspace string,
 	providersOut map[string]providers.LLMProvider,
 ) *accountrouter.Router {
-	return buildAccountRouterWithSharedModel(
+	return buildAccountRouterWithModel(
 		cfg,
 		defaultProvider,
 		model,
@@ -456,11 +463,11 @@ func buildAccountRouter(
 	)
 }
 
-func buildAccountRouterWithSharedModel(
+func buildAccountRouterWithModel(
 	cfg *config.Config,
 	defaultProvider string,
 	model string,
-	sharedModelOverride string,
+	modelIDOverride string,
 	workspace string,
 	providersOut map[string]providers.LLMProvider,
 ) *accountrouter.Router {
@@ -469,10 +476,7 @@ func buildAccountRouterWithSharedModel(
 		return nil
 	}
 	accountNames := accountRouterAccountNames(modelCfg.Router)
-	sharedModel := accountRouterSharedModel(modelCfg)
-	if override := strings.TrimSpace(sharedModelOverride); override != "" {
-		sharedModel = override
-	}
+	modelIDOverride = strings.TrimSpace(modelIDOverride)
 	accounts := make(map[string]accountrouter.Account, len(accountNames))
 	for _, accountName := range accountNames {
 		candidates := accountRouterAccountCandidates(
@@ -480,7 +484,7 @@ func buildAccountRouterWithSharedModel(
 			defaultProvider,
 			workspace,
 			accountName,
-			sharedModel,
+			modelIDOverride,
 			providersOut,
 		)
 		if len(candidates) == 0 {
@@ -496,22 +500,8 @@ func buildAccountRouterWithSharedModel(
 			RPM:        rpm,
 		}
 	}
-	if sharedModel == "" {
-		populateCandidateProvidersFromNames(cfg, workspace, accountNames, providersOut)
-	}
 	statePath := filepath.Join(workspace, "account_router_state.json")
 	return accountrouter.New(modelCfg.ModelName, modelCfg.Router, accounts, statePath)
-}
-
-func accountRouterSharedModel(modelCfg *config.ModelConfig) string {
-	if modelCfg == nil {
-		return ""
-	}
-	model := strings.TrimSpace(modelCfg.Model)
-	if model == "" || model == strings.TrimSpace(modelCfg.ModelName) {
-		return ""
-	}
-	return model
 }
 
 func accountRouterAccountCandidates(
@@ -519,10 +509,10 @@ func accountRouterAccountCandidates(
 	defaultProvider string,
 	workspace string,
 	accountName string,
-	sharedModel string,
+	modelID string,
 	providersOut map[string]providers.LLMProvider,
 ) []providers.FallbackCandidate {
-	if credentialCfg, ok := accountRouterCredentialAccountConfig(accountName, sharedModel); ok {
+	if credentialCfg, ok := accountRouterCredentialAccountConfig(accountName, modelID); ok {
 		if credentialCfg == nil {
 			return nil
 		}
@@ -535,25 +525,27 @@ func accountRouterAccountCandidates(
 			logger.WarnCF("agent", "account router: failed to create credential account provider",
 				map[string]any{
 					"account": accountName,
-					"model":   sharedModel,
+					"model":   credentialCfg.Model,
 					"error":   err.Error(),
 				})
-			return []providers.FallbackCandidate{candidate}
+			return nil
 		}
 		if !registerCandidateProvider(providersOut, candidate, provider) {
 			closeProviderIfStateful(provider)
 		}
 		return []providers.FallbackCandidate{candidate}
 	}
-	if strings.TrimSpace(sharedModel) == "" {
-		return resolveModelCandidates(cfg, defaultProvider, accountName, nil)
-	}
+	modelID = strings.TrimSpace(modelID)
 	accountCfg := lookupModelConfigByRef(cfg, accountName, defaultProvider)
 	if accountCfg == nil || accountCfg.IsAccountRouter() {
 		return nil
 	}
 	clone := cloneModelConfigForResolution(defaultProvider, accountCfg, workspace)
-	clone.Model = sharedModel
+	if modelID != "" {
+		accountProvider, _ := providers.ExtractProtocol(accountCfg)
+		clone.Provider = accountProvider
+		clone.Model = modelID
+	}
 	candidate, ok := candidateFromModelConfig(defaultProvider, clone)
 	if !ok {
 		return nil
@@ -563,10 +555,10 @@ func accountRouterAccountCandidates(
 		logger.WarnCF("agent", "account router: failed to create provider",
 			map[string]any{
 				"account": accountName,
-				"model":   sharedModel,
+				"model":   clone.Model,
 				"error":   err.Error(),
 			})
-		return []providers.FallbackCandidate{candidate}
+		return nil
 	}
 	if !registerCandidateProvider(providersOut, candidate, provider) {
 		closeProviderIfStateful(provider)
@@ -574,23 +566,27 @@ func accountRouterAccountCandidates(
 	return []providers.FallbackCandidate{candidate}
 }
 
-func accountRouterCredentialAccountConfig(accountName string, sharedModel string) (*config.ModelConfig, bool) {
+func accountRouterCredentialAccountConfig(accountName string, modelID string) (*config.ModelConfig, bool) {
 	credentialID, ok := config.AccountRouterCredentialAccountID(accountName)
 	if !ok {
 		return nil, false
-	}
-	if strings.TrimSpace(sharedModel) == "" {
-		return nil, true
 	}
 	provider, ok := config.AccountRouterCredentialAccountProvider(accountName)
 	if !ok {
 		return nil, true
 	}
 	provider = credentialRuntimeProvider(provider)
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		modelID = providers.DefaultModelForProvider(provider)
+	}
+	if modelID == "" {
+		return nil, true
+	}
 	return &config.ModelConfig{
 		ModelName:    strings.TrimSpace(accountName),
 		Provider:     provider,
-		Model:        strings.TrimSpace(sharedModel),
+		Model:        modelID,
 		AuthMethod:   credentialRuntimeAuthMethod(provider),
 		CredentialID: credentialID,
 		Enabled:      true,
@@ -610,7 +606,7 @@ func credentialRuntimeProvider(provider string) string {
 
 func credentialRuntimeAuthMethod(provider string) string {
 	switch strings.TrimSpace(provider) {
-	case "openai":
+	case "openai", "antigravity":
 		return "oauth"
 	case "anthropic", "github-copilot":
 		return "token"
@@ -671,7 +667,10 @@ func populateCandidateProvidersFromNames(
 		if !ok {
 			continue
 		}
-		if out[candidate.StableKey()] != nil {
+		agentCandidateProvidersMu.RLock()
+		existingProvider := out[candidate.StableKey()]
+		agentCandidateProvidersMu.RUnlock()
+		if existingProvider != nil {
 			continue
 		}
 		p, _, err := providers.CreateProviderFromConfig(mc)
@@ -778,9 +777,8 @@ func firstToolAdaptationProfileForModelConfig(
 		if router == nil {
 			return "", "", false
 		}
-		sharedModel := accountRouterSharedModel(modelCfg)
 		for _, accountName := range accountRouterAccountNames(router) {
-			if credentialCfg, ok := accountRouterCredentialAccountConfig(accountName, sharedModel); ok {
+			if credentialCfg, ok := accountRouterCredentialAccountConfig(accountName, ""); ok {
 				if credentialCfg == nil {
 					continue
 				}
@@ -805,11 +803,7 @@ func firstToolAdaptationProfileForModelConfig(
 				}
 				continue
 			}
-			clone := *accountCfg
-			if sharedModel != "" {
-				clone.Model = sharedModel
-			}
-			provider, model := providers.ExtractProtocol(&clone)
+			provider, model := providers.ExtractProtocol(accountCfg)
 			if strings.TrimSpace(provider) != "" && strings.TrimSpace(model) != "" {
 				return providers.NormalizeProvider(provider), strings.TrimSpace(model), true
 			}

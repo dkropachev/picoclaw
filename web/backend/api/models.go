@@ -172,9 +172,7 @@ func normalizeIncomingModelConfig(mc *config.ModelConfig) {
 	if mc.Router != nil ||
 		providers.NormalizeProvider(mc.Provider) == config.AccountRouterProvider {
 		mc.Provider = config.AccountRouterProvider
-		if strings.TrimSpace(mc.Model) == "" {
-			mc.Model = strings.TrimSpace(mc.ModelName)
-		}
+		mc.Model = ""
 		mc.APIKeys = nil
 		mc.APIBase = ""
 		mc.Proxy = ""
@@ -290,12 +288,8 @@ func accountRouterFromModelConfig(mc *config.ModelConfig) (*config.AccountRouter
 		router.Blocks[i].Accounts = append([]string(nil), mc.Router.Blocks[i].Accounts...)
 	}
 	router.Name = strings.TrimSpace(mc.ModelName)
-	router.Model = strings.TrimSpace(mc.Model)
 	if router.Name == "" {
 		return nil, fmt.Errorf("model_name is required")
-	}
-	if router.Model == "" {
-		return nil, fmt.Errorf("model is required")
 	}
 	if !router.Enabled {
 		router.Enabled = mc.Enabled
@@ -489,13 +483,10 @@ func appendCredentialAccountModelResponses(
 		if representedCredentials[credentialID] {
 			continue
 		}
-		provider := providers.NormalizeProvider(cred.Provider)
-		if provider == "" {
-			if prefix, _, ok := strings.Cut(credentialID, ":"); ok {
-				provider = providers.NormalizeProvider(prefix)
-			}
-		}
-		if provider == "" || !providers.IsDefaultModelProvider(provider) {
+		provider := credentialIDProvider(credentialID)
+		if provider == "" ||
+			!credentialProviderMatches(cred, provider) ||
+			!providers.IsDefaultModelProvider(provider) {
 			continue
 		}
 		credentialIDs = append(credentialIDs, credentialID)
@@ -505,12 +496,7 @@ func appendCredentialAccountModelResponses(
 	nextIndex := len(models)
 	for _, credentialID := range credentialIDs {
 		cred := store.Credentials[credentialID]
-		provider := providers.NormalizeProvider(cred.Provider)
-		if provider == "" {
-			if prefix, _, ok := strings.Cut(credentialID, ":"); ok {
-				provider = providers.NormalizeProvider(prefix)
-			}
-		}
+		provider := credentialIDProvider(credentialID)
 		modelName := config.AccountRouterCredentialAccountPrefix + strings.ToLower(
 			strings.TrimSpace(credentialID),
 		)
@@ -542,6 +528,11 @@ func appendCredentialAccountModelResponses(
 		nextIndex++
 	}
 	return models
+}
+
+func credentialIDProvider(credentialID string) string {
+	provider, _, _ := strings.Cut(strings.ToLower(strings.TrimSpace(credentialID)), ":")
+	return providers.NormalizeProvider(provider)
 }
 
 func representedModelCredentialID(model modelResponse) string {
@@ -576,9 +567,8 @@ func authProviderForCredentialModel(provider string) string {
 }
 
 func defaultCredentialAccountModel(provider string) string {
-	commonModels := providers.CommonModelsForProvider(provider)
-	if len(commonModels) > 0 {
-		return commonModels[0]
+	if model := providers.DefaultModelForProvider(provider); model != "" {
+		return model
 	}
 	return "auto"
 }
@@ -1158,12 +1148,34 @@ func credentialAccountDefaultModelAllowed(modelName string) bool {
 	if !ok || !providers.IsDefaultModelProvider(provider) {
 		return false
 	}
+	credentialID, err := auth.NormalizeCredentialID(
+		authProviderForCredentialModel(provider),
+		credentialID,
+	)
+	if err != nil {
+		return false
+	}
 	store, err := oauthLoadStore()
 	if err != nil || store == nil {
 		return false
 	}
 	cred := store.Credentials[credentialID]
-	return cred != nil && strings.TrimSpace(cred.AccessToken) != "" && !cred.IsExpired()
+	return cred != nil &&
+		credentialProviderMatches(cred, provider) &&
+		strings.TrimSpace(cred.AccessToken) != "" &&
+		!cred.IsExpired()
+}
+
+func credentialProviderMatches(credential *auth.AuthCredential, provider string) bool {
+	if credential == nil {
+		return false
+	}
+	expected, err := auth.NormalizeCredentialID(authProviderForCredentialModel(provider), "")
+	if err != nil {
+		return false
+	}
+	actual, err := auth.NormalizeCredentialID(credential.Provider, "")
+	return err == nil && actual == expected
 }
 
 // maskAPIKey returns a masked version of an API key for safe display.
@@ -1190,7 +1202,8 @@ func maskAPIKey(key string) string {
 	return key[:3] + "****" + key[len(key)-4:]
 }
 
-// handleFetchModels fetches available models from an upstream provider.
+// handleFetchModels fetches available models from an account reference or an
+// upstream provider.
 //
 //	POST /api/accounts/models/fetch
 func (h *Handler) handleFetchModels(w http.ResponseWriter, r *http.Request) {
@@ -1202,6 +1215,7 @@ func (h *Handler) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var req struct {
+		AccountRef   string `json:"account_ref,omitempty"`
 		Provider     string `json:"provider"`
 		APIKey       string `json:"api_key"`
 		APIBase      string `json:"api_base"`
@@ -1211,6 +1225,24 @@ func (h *Handler) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 	}
 	if err = json.Unmarshal(body, &req); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	accountRef := strings.TrimSpace(req.AccountRef)
+	if accountRef != "" {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+
+		models, issues, fetchErr := h.fetchModelsForAccountRef(ctx, accountRef)
+		if fetchErr != nil {
+			http.Error(
+				w,
+				fmt.Sprintf("Failed to fetch models: %v", fetchErr),
+				http.StatusBadGateway,
+			)
+			return
+		}
+		writeFetchModelsResponse(w, models, issues)
 		return
 	}
 
@@ -1283,11 +1315,382 @@ func (h *Handler) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 		logger.Warnf("Failed to save model catalog: %v", saveErr)
 	}
 
+	writeFetchModelsResponse(w, models, nil)
+}
+
+type accountModelFetchIssue struct {
+	AccountRef string `json:"account_ref"`
+	Error      string `json:"error"`
+}
+
+type fetchModelsResponse struct {
+	Models []upstreamModel          `json:"models"`
+	Total  int                      `json:"total"`
+	Issues []accountModelFetchIssue `json:"issues,omitempty"`
+}
+
+func writeFetchModelsResponse(
+	w http.ResponseWriter,
+	models []upstreamModel,
+	issues []accountModelFetchIssue,
+) {
+	if models == nil {
+		models = []upstreamModel{}
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
-		"models": models,
-		"total":  len(models),
+	_ = json.NewEncoder(w).Encode(fetchModelsResponse{
+		Models: models,
+		Total:  len(models),
+		Issues: issues,
 	})
+}
+
+func (h *Handler) fetchModelsForAccountRef(
+	ctx context.Context,
+	accountRef string,
+) ([]upstreamModel, []accountModelFetchIssue, error) {
+	cfg, err := config.LoadConfig(h.configPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading config: %w", err)
+	}
+
+	accountRef = strings.TrimSpace(accountRef)
+	if accountRef == "" {
+		return nil, nil, fmt.Errorf("account_ref is required")
+	}
+	if routerIndex := findAccountRouterIndex(cfg, accountRef); routerIndex >= 0 {
+		return fetchModelsForAccountRouter(ctx, cfg, &cfg.AccountRouters[routerIndex])
+	}
+
+	modelConfig, err := resolveAccountModelConfig(cfg, accountRef)
+	if err != nil {
+		return nil, nil, err
+	}
+	models, fetchErr := fetchModelsForAccountConfig(ctx, modelConfig)
+	if fetchErr != nil && len(models) == 0 {
+		return nil, nil, fetchErr
+	}
+	var issues []accountModelFetchIssue
+	if fetchErr != nil {
+		issues = append(issues, accountModelFetchIssue{
+			AccountRef: accountRef,
+			Error:      fetchErr.Error(),
+		})
+	}
+	return models, issues, nil
+}
+
+func fetchModelsForAccountRouter(
+	ctx context.Context,
+	cfg *config.Config,
+	router *config.AccountRouterConfig,
+) ([]upstreamModel, []accountModelFetchIssue, error) {
+	accountRefs := reachableAccountRouterRefs(router)
+	if len(accountRefs) == 0 {
+		return nil, nil, fmt.Errorf("account router has no reachable accounts")
+	}
+
+	type fetchResult struct {
+		models []upstreamModel
+		err    error
+	}
+	results := make([]fetchResult, len(accountRefs))
+	var wg sync.WaitGroup
+	wg.Add(len(accountRefs))
+	for i, accountRef := range accountRefs {
+		go func() {
+			defer wg.Done()
+			modelConfig, err := resolveAccountModelConfig(cfg, accountRef)
+			if err != nil {
+				results[i].err = err
+				return
+			}
+			results[i].models, results[i].err = fetchModelsForAccountConfig(ctx, modelConfig)
+		}()
+	}
+	wg.Wait()
+
+	modelLists := make([][]upstreamModel, 0, len(results))
+	issues := make([]accountModelFetchIssue, 0)
+	for i, result := range results {
+		if len(result.models) > 0 {
+			modelLists = append(modelLists, result.models)
+		}
+		if result.err != nil {
+			issues = append(issues, accountModelFetchIssue{
+				AccountRef: accountRefs[i],
+				Error:      result.err.Error(),
+			})
+		}
+	}
+	return intersectUpstreamModelLists(modelLists), issues, nil
+}
+
+func reachableAccountRouterRefs(router *config.AccountRouterConfig) []string {
+	if router == nil {
+		return nil
+	}
+	blocksByID := make(map[string]config.AccountRouterBlock, len(router.Blocks))
+	for _, block := range router.Blocks {
+		id := strings.TrimSpace(block.ID)
+		if id != "" {
+			blocksByID[id] = block
+		}
+	}
+
+	seenBlocks := make(map[string]bool, len(blocksByID))
+	seenAccounts := make(map[string]bool)
+	accountRefs := make([]string, 0)
+	addAccount := func(accountRef string) {
+		accountRef = strings.TrimSpace(accountRef)
+		if accountRef == "" || seenAccounts[accountRef] {
+			return
+		}
+		seenAccounts[accountRef] = true
+		accountRefs = append(accountRefs, accountRef)
+	}
+
+	var walk func(string)
+	walk = func(blockID string) {
+		blockID = strings.TrimSpace(blockID)
+		if blockID == "" || seenBlocks[blockID] {
+			return
+		}
+		block, ok := blocksByID[blockID]
+		if !ok {
+			return
+		}
+		seenBlocks[blockID] = true
+
+		switch strings.TrimSpace(block.Type) {
+		case config.AccountRouterBlockTypeAccount:
+			addAccount(block.Account)
+		case config.AccountRouterBlockTypeLoadBalance:
+			for _, accountRef := range block.Accounts {
+				addAccount(accountRef)
+			}
+		}
+
+		if strings.TrimSpace(block.Type) == config.AccountRouterBlockTypeBranch {
+			walk(block.Then)
+			walk(block.Else)
+		}
+		walk(block.Fallback)
+	}
+	walk(router.Entry)
+	return accountRefs
+}
+
+func resolveAccountModelConfig(
+	cfg *config.Config,
+	accountRef string,
+) (*config.ModelConfig, error) {
+	accountRef = strings.TrimSpace(accountRef)
+	if cfg == nil || accountRef == "" {
+		return nil, fmt.Errorf("account_ref is required")
+	}
+
+	if credentialID, ok := config.AccountRouterCredentialAccountID(accountRef); ok {
+		provider, providerOK := config.AccountRouterCredentialAccountProvider(accountRef)
+		if !providerOK {
+			return nil, fmt.Errorf("credential account %q has an unsupported provider", accountRef)
+		}
+		normalizedCredentialID, err := auth.NormalizeCredentialID(
+			authProviderForCredentialModel(provider),
+			credentialID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("normalizing credential account %q: %w", accountRef, err)
+		}
+		credential, err := oauthGetCredential(normalizedCredentialID)
+		if err != nil {
+			return nil, fmt.Errorf("loading credential account %q: %w", accountRef, err)
+		}
+		if credential == nil ||
+			strings.TrimSpace(credential.AccessToken) == "" &&
+				strings.TrimSpace(credential.RefreshToken) == "" {
+			return nil, fmt.Errorf("credential account %q is unavailable", accountRef)
+		}
+		if !credentialProviderMatches(credential, provider) {
+			return nil, fmt.Errorf(
+				"credential account %q belongs to provider %q",
+				accountRef,
+				credential.Provider,
+			)
+		}
+		provider = providers.NormalizeProvider(provider)
+		return &config.ModelConfig{
+			ModelName:    accountRef,
+			Provider:     provider,
+			Model:        defaultCredentialAccountModel(provider),
+			AuthMethod:   defaultCredentialAccountAuthMethod(provider),
+			CredentialID: normalizedCredentialID,
+			Enabled:      true,
+		}, nil
+	}
+
+	var matches []*config.ModelConfig
+	disabled := false
+	for _, modelConfig := range cfg.ModelList {
+		if modelConfig == nil || strings.TrimSpace(modelConfig.ModelName) != accountRef {
+			continue
+		}
+		if modelConfig.IsAccountRouter() {
+			return nil, fmt.Errorf("account router %q cannot be nested as an account", accountRef)
+		}
+		if modelConfig.IsModelRouter() {
+			return nil, fmt.Errorf("model router %q cannot be used as an account", accountRef)
+		}
+		if !modelConfig.Enabled {
+			disabled = true
+			continue
+		}
+		matches = append(matches, modelConfig)
+	}
+	switch len(matches) {
+	case 0:
+		if disabled {
+			return nil, fmt.Errorf("account %q is disabled", accountRef)
+		}
+		return nil, fmt.Errorf("account %q not found", accountRef)
+	case 1:
+		return matches[0], nil
+	default:
+		return nil, fmt.Errorf("account %q is ambiguous", accountRef)
+	}
+}
+
+func fetchModelsForAccountConfig(
+	ctx context.Context,
+	modelConfig *config.ModelConfig,
+) ([]upstreamModel, error) {
+	if modelConfig == nil {
+		return nil, fmt.Errorf("account config is required")
+	}
+	provider, _ := providers.ExtractProtocol(modelConfig)
+	provider = providers.NormalizeProvider(provider)
+	fallbackModels := staticAccountModels(modelConfig, provider)
+	if provider == "antigravity" {
+		models, listed, err := fetchAntigravityCredentialModels(ctx, modelConfig)
+		models = normalizeUpstreamModels(models)
+		if err == nil && len(models) > 0 {
+			return models, nil
+		}
+		if err == nil {
+			err = fmt.Errorf("provider %q returned no available models", provider)
+		}
+		if listed {
+			return nil, err
+		}
+		if len(fallbackModels) > 0 {
+			return fallbackModels, err
+		}
+		return nil, err
+	}
+	if !providers.IsModelProviderFetchable(provider) {
+		if len(fallbackModels) == 0 {
+			return nil, fmt.Errorf(
+				"provider %q does not support model listing and has no configured fallback",
+				provider,
+			)
+		}
+		return fallbackModels, nil
+	}
+
+	apiBase := providers.ResolveAPIBase(modelConfig)
+	if apiBase == "" {
+		if len(fallbackModels) > 0 {
+			return fallbackModels, fmt.Errorf("no default API base for provider %q", provider)
+		}
+		return nil, fmt.Errorf("no default API base for provider %q", provider)
+	}
+	models, err := fetchUpstreamModels(ctx, upstreamFetchOptions{
+		Provider:     provider,
+		APIBase:      apiBase,
+		APIKey:       modelConfig.APIKey(),
+		AuthMethod:   strings.ToLower(strings.TrimSpace(modelConfig.AuthMethod)),
+		CredentialID: strings.TrimSpace(modelConfig.CredentialID),
+	})
+	models = normalizeUpstreamModels(models)
+	if err == nil && len(models) > 0 {
+		return models, nil
+	}
+	if err == nil {
+		err = fmt.Errorf("provider %q returned no models", provider)
+	}
+	if len(fallbackModels) > 0 {
+		return fallbackModels, err
+	}
+	return nil, err
+}
+
+func staticAccountModels(
+	modelConfig *config.ModelConfig,
+	provider string,
+) []upstreamModel {
+	models := make([]upstreamModel, 0)
+	if modelConfig != nil {
+		_, modelID := providers.ExtractProtocol(modelConfig)
+		if modelID = strings.TrimSpace(modelID); modelID != "" {
+			models = append(models, upstreamModel{ID: modelID, OwnedBy: provider})
+		}
+	}
+	for _, modelID := range providers.CommonModelsForProvider(provider) {
+		models = append(models, upstreamModel{ID: modelID, OwnedBy: provider})
+	}
+	return normalizeUpstreamModels(models)
+}
+
+func normalizeUpstreamModels(models []upstreamModel) []upstreamModel {
+	normalized := make([]upstreamModel, 0, len(models))
+	seen := make(map[string]bool, len(models))
+	for _, model := range models {
+		model.ID = strings.TrimSpace(model.ID)
+		if model.ID == "" {
+			continue
+		}
+		key := strings.ToLower(model.ID)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		model.OwnedBy = strings.TrimSpace(model.OwnedBy)
+		normalized = append(normalized, model)
+	}
+	return normalized
+}
+
+func intersectUpstreamModelLists(modelLists [][]upstreamModel) []upstreamModel {
+	if len(modelLists) == 0 {
+		return []upstreamModel{}
+	}
+	first := normalizeUpstreamModels(modelLists[0])
+	if len(first) == 0 {
+		return []upstreamModel{}
+	}
+	sets := make([]map[string]bool, 0, len(modelLists)-1)
+	for _, models := range modelLists[1:] {
+		set := make(map[string]bool)
+		for _, model := range normalizeUpstreamModels(models) {
+			set[strings.ToLower(model.ID)] = true
+		}
+		sets = append(sets, set)
+	}
+	intersection := make([]upstreamModel, 0, len(first))
+	for _, model := range first {
+		key := strings.ToLower(model.ID)
+		present := true
+		for _, set := range sets {
+			if !set[key] {
+				present = false
+				break
+			}
+		}
+		if present {
+			intersection = append(intersection, model)
+		}
+	}
+	return intersection
 }
 
 type storedModelFetchAuth struct {
@@ -1352,6 +1755,11 @@ const openAICodexModelsClientVersionDefault = "0.144.0"
 
 var listGitHubCopilotModelsWithToken = cliprovider.ListGitHubCopilotModelsWithToken
 
+var (
+	fetchAntigravityModels       = providers.FetchAntigravityModelsContext
+	refreshAntigravityCredential = auth.RefreshAccessToken
+)
+
 func isCredentialAuthMethod(authMethod string) bool {
 	switch strings.ToLower(strings.TrimSpace(authMethod)) {
 	case "oauth", "token":
@@ -1359,6 +1767,101 @@ func isCredentialAuthMethod(authMethod string) bool {
 	default:
 		return false
 	}
+}
+
+func fetchAntigravityCredentialModels(
+	ctx context.Context,
+	modelConfig *config.ModelConfig,
+) ([]upstreamModel, bool, error) {
+	credentialID, err := auth.NormalizeCredentialID(
+		authProviderForCredentialModel("antigravity"),
+		strings.TrimSpace(modelConfig.CredentialID),
+	)
+	if err != nil {
+		return nil, false, fmt.Errorf("normalizing Antigravity credential: %w", err)
+	}
+	credential, err := oauthGetCredential(credentialID)
+	if err != nil {
+		return nil, false, fmt.Errorf("loading Antigravity credential %s: %w", credentialID, err)
+	}
+	if credential == nil {
+		return nil, false, fmt.Errorf("no Antigravity credential for %s", credentialID)
+	}
+	if !credentialProviderMatches(credential, "antigravity") {
+		return nil, false, fmt.Errorf(
+			"credential %s belongs to provider %q, not antigravity",
+			credentialID,
+			credential.Provider,
+		)
+	}
+	if credential.NeedsRefresh() && strings.TrimSpace(credential.RefreshToken) != "" {
+		refreshed, refreshErr := refreshAntigravityCredential(
+			credential,
+			auth.GoogleAntigravityOAuthConfig(),
+		)
+		if refreshErr != nil {
+			return nil, false, fmt.Errorf(
+				"refreshing Antigravity credential %s: %w",
+				credentialID,
+				refreshErr,
+			)
+		}
+		if refreshed == nil {
+			return nil, false, fmt.Errorf(
+				"refreshing Antigravity credential %s: no credential returned",
+				credentialID,
+			)
+		}
+		refreshed.Email = credential.Email
+		if refreshed.ProjectID == "" {
+			refreshed.ProjectID = credential.ProjectID
+		}
+		if !credentialProviderMatches(refreshed, "antigravity") {
+			return nil, false, fmt.Errorf(
+				"refreshed credential %s belongs to provider %q, not antigravity",
+				credentialID,
+				refreshed.Provider,
+			)
+		}
+		if setErr := oauthSetCredential(credentialID, refreshed); setErr != nil {
+			return nil, false, fmt.Errorf(
+				"saving refreshed Antigravity credential %s: %w",
+				credentialID,
+				setErr,
+			)
+		}
+		credential = refreshed
+	}
+	if credential.IsExpired() {
+		return nil, false, fmt.Errorf(
+			"Antigravity credential %s is expired",
+			credentialID,
+		)
+	}
+	accessToken := strings.TrimSpace(credential.AccessToken)
+	if accessToken == "" {
+		return nil, false, fmt.Errorf("Antigravity credential %s has no access token", credentialID)
+	}
+	projectID := strings.TrimSpace(credential.ProjectID)
+	if projectID == "" {
+		return nil, false, fmt.Errorf("Antigravity credential %s has no project ID", credentialID)
+	}
+
+	models, err := fetchAntigravityModels(ctx, accessToken, projectID)
+	if err != nil {
+		return nil, false, fmt.Errorf("listing Antigravity models: %w", err)
+	}
+	out := make([]upstreamModel, 0, len(models))
+	for _, model := range models {
+		if model.IsExhausted {
+			continue
+		}
+		out = append(out, upstreamModel{
+			ID:      model.ID,
+			OwnedBy: "antigravity",
+		})
+	}
+	return out, true, nil
 }
 
 func fetchUpstreamModels(ctx context.Context, opts upstreamFetchOptions) ([]upstreamModel, error) {
@@ -1485,6 +1988,13 @@ func resolveOpenAICodexCredential(credentialID string) (*auth.AuthCredential, er
 			normalizedCredentialID,
 		)
 	}
+	if !credentialProviderMatches(cred, "openai") {
+		return nil, fmt.Errorf(
+			"credential %s belongs to provider %q, not openai",
+			normalizedCredentialID,
+			cred.Provider,
+		)
+	}
 	if cred.AuthMethod == "oauth" && cred.NeedsRefresh() && cred.RefreshToken != "" {
 		refreshed, err := auth.RefreshAccessToken(cred, auth.OpenAIOAuthConfig())
 		if err != nil {
@@ -1518,6 +2028,13 @@ func resolveGitHubCopilotCredential(credentialID string) (*auth.AuthCredential, 
 			"loading GitHub Copilot credential %s: %w",
 			normalizedCredentialID,
 			err,
+		)
+	}
+	if cred == nil {
+		return nil, fmt.Errorf(
+			"no credentials for %s. Run: picoclaw auth login --provider github-copilot --credential-id %s",
+			normalizedCredentialID,
+			normalizedCredentialID,
 		)
 	}
 	if strings.TrimSpace(cred.AccessToken) == "" {

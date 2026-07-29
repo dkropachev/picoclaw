@@ -354,6 +354,7 @@ func (al *AgentLoop) selectCandidates(
 					target,
 				), router, selection
 			}
+			return nil, "", router, selection
 		}
 		populateCandidateProvidersFromNames(
 			al.GetConfig(),
@@ -381,6 +382,7 @@ func (al *AgentLoop) selectCandidates(
 					agent.Model,
 				), agent.AccountRouter, selection
 			}
+			return nil, "", agent.AccountRouter, selection
 		}
 		return agent.Candidates, resolvedCandidateModel(
 			agent.Candidates,
@@ -450,7 +452,7 @@ func (al *AgentLoop) selectOverrideCandidates(
 		return nil, "", target, nil, accountrouter.Selection{}
 	}
 
-	if router := buildAccountRouterWithSharedModel(
+	if router := buildAccountRouterWithModel(
 		al.GetConfig(),
 		al.cfg.Agents.Defaults.Provider,
 		target,
@@ -463,34 +465,40 @@ func (al *AgentLoop) selectOverrideCandidates(
 			model = resolvedCandidateModel(selection.Candidates, target)
 			return selection.Candidates, model, target, router, selection
 		}
+		return nil, "", target, router, selection
 	}
 
 	if modelID != "" {
-		if credentialCfg, ok := accountRouterCredentialAccountConfig(target, modelID); ok &&
-			credentialCfg != nil {
+		if credentialCfg, ok := accountRouterCredentialAccountConfig(target, modelID); ok {
+			if credentialCfg == nil {
+				return nil, "", target, nil, accountrouter.Selection{}
+			}
 			candidate, ok := candidateFromModelConfig(
 				al.cfg.Agents.Defaults.Provider,
 				credentialCfg,
 			)
-			if ok {
-				provider, _, err := providers.CreateProviderFromConfig(credentialCfg)
-				if err != nil {
-					logger.WarnCF(
-						"agent",
-						"chat model override: failed to create credential account provider",
-						map[string]any{
-							"account": target,
-							"model":   modelID,
-							"error":   err.Error(),
-						},
-					)
-				} else if !registerCandidateProvider(agent.CandidateProviders, candidate, provider) {
-					closeProviderIfStateful(provider)
-				}
-				return []providers.FallbackCandidate{
-					candidate,
-				}, modelID, target, nil, accountrouter.Selection{}
+			if !ok {
+				return nil, "", target, nil, accountrouter.Selection{}
 			}
+			provider, _, err := providers.CreateProviderFromConfig(credentialCfg)
+			if err != nil {
+				logger.WarnCF(
+					"agent",
+					"chat model override: failed to create credential account provider",
+					map[string]any{
+						"account": target,
+						"model":   modelID,
+						"error":   err.Error(),
+					},
+				)
+				return nil, "", target, nil, accountrouter.Selection{}
+			}
+			if !registerCandidateProvider(agent.CandidateProviders, candidate, provider) {
+				closeProviderIfStateful(provider)
+			}
+			return []providers.FallbackCandidate{
+				candidate,
+			}, modelID, target, nil, accountrouter.Selection{}
 		}
 	}
 
@@ -623,6 +631,31 @@ func (al *AgentLoop) askSideQuestion(
 		accountrouter.SelectReasonInitial,
 	)
 	selectedModelName := sideQuestionModelName(agent, usedLight)
+	if opts != nil {
+		if override := strings.TrimSpace(opts.ModelNameOverride); override != "" {
+			activeCandidates, activeModel, selectedModelName, activeAccountRouter, routerSelection = al.selectOverrideCandidates(
+				agent,
+				override,
+				opts.ModelIDOverride,
+				opts.SessionKey,
+				accountrouter.SelectReasonInitial,
+			)
+			_, isCredentialOverride := config.AccountRouterCredentialAccountID(override)
+			if (activeAccountRouter != nil || isCredentialOverride) &&
+				!candidateSelectionHasProvider(agent, activeCandidates) {
+				return "", fmt.Errorf(
+					"model override %q has no runnable account provider",
+					override,
+				)
+			}
+		} else if activeAccountRouter != nil &&
+			!candidateSelectionHasProvider(agent, activeCandidates) {
+			return "", fmt.Errorf(
+				"account router %q has no runnable account provider",
+				activeAccountRouter.Name,
+			)
+		}
+	}
 
 	llmOpts := map[string]any{
 		"max_tokens":       agent.MaxTokens,
@@ -870,6 +903,33 @@ func (al *AgentLoop) sideQuestionModelConfig(
 	}
 
 	if name := modelAliasFromCandidateIdentityKey(candidate.IdentityKey); name != "" {
+		if credentialCfg, isCredential := accountRouterCredentialAccountConfig(
+			name,
+			candidate.Model,
+		); isCredential {
+			if credentialCfg == nil {
+				return nil, fmt.Errorf(
+					"credential account %q has no runnable provider",
+					name,
+				)
+			}
+			credentialCfg.Workspace = agent.Workspace
+			return credentialCfg, nil
+		}
+		cfg := al.GetConfig()
+		defaultProvider := "openai"
+		if cfg != nil {
+			defaultProvider = cfg.Agents.Defaults.Provider
+		}
+		if modelCfg := resolveActiveModelConfig(
+			cfg,
+			agent.Workspace,
+			[]providers.FallbackCandidate{candidate},
+			candidate.Model,
+			defaultProvider,
+		); modelCfg != nil {
+			return modelCfg, nil
+		}
 		modelCfg, err := resolvedModelConfig(al.GetConfig(), name, agent.Workspace)
 		if err == nil {
 			return modelCfg, nil
@@ -921,5 +981,11 @@ func (al *AgentLoop) sideQuestionModelConfig(
 
 	// If candidate specifies a different provider/model, override
 	clone := *modelCfg
+	if strings.TrimSpace(candidate.Model) != "" {
+		clone.Model = strings.TrimSpace(candidate.Model)
+	}
+	if strings.TrimSpace(candidate.Provider) != "" {
+		clone.Provider = providers.NormalizeProvider(candidate.Provider)
+	}
 	return &clone, nil
 }

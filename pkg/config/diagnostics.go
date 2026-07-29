@@ -356,6 +356,9 @@ func collectUnknownJSONFields(raw any, targetType reflect.Type, path string) []s
 			fieldType, exists := fieldMap[key]
 			fieldPath := appendJSONPath(path, key)
 			if !exists {
+				if isDeprecatedJSONField(targetType, key) {
+					continue
+				}
 				issues = append(issues, fieldPath)
 				continue
 			}
@@ -389,6 +392,10 @@ func collectUnknownJSONFields(raw any, targetType reflect.Type, path string) []s
 	default:
 		return nil
 	}
+}
+
+func isDeprecatedJSONField(targetType reflect.Type, field string) bool {
+	return targetType == reflect.TypeOf(AccountRouterConfig{}) && field == "model"
 }
 
 func jsonFieldTypeMap(t reflect.Type) map[string]reflect.Type {

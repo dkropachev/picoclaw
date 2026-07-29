@@ -145,6 +145,49 @@ func TestResolveActiveModelConfig_PrefersCandidateIdentityKey(t *testing.T) {
 	}
 }
 
+func TestResolveActiveModelConfigRetainsIdentitySettingsForModelOverride(t *testing.T) {
+	cfg := &config.Config{
+		ModelList: []*config.ModelConfig{
+			{
+				ModelName:       "account-a",
+				Provider:        "openai",
+				Model:           "native-a",
+				ReasoningEffort: "high",
+				Streaming:       config.ModelStreamingConfig{Enabled: true},
+			},
+			{
+				ModelName:       "account-b",
+				Provider:        "openai",
+				Model:           "requested-model",
+				ReasoningEffort: "low",
+			},
+		},
+	}
+
+	got := resolveActiveModelConfig(
+		cfg,
+		"/workspace",
+		[]providers.FallbackCandidate{{
+			Provider:    "openai",
+			Model:       "requested-model",
+			IdentityKey: "model_name:account-a",
+		}},
+		"requested-model",
+		"openai",
+	)
+	if got == nil {
+		t.Fatal("resolveActiveModelConfig() = nil, want account-a override config")
+	}
+	if got.ModelName != "account-a" ||
+		got.Provider != "openai" ||
+		got.Model != "requested-model" {
+		t.Fatalf("model config = %#v, want overridden account-a config", got)
+	}
+	if got.ReasoningEffort != "high" || !got.Streaming.Enabled {
+		t.Fatalf("account-a settings were not retained: %#v", got)
+	}
+}
+
 func TestResolveActiveModelConfig_LoadBalancedAliasUsesSelectedCandidate(t *testing.T) {
 	cfg := &config.Config{
 		ModelList: []*config.ModelConfig{
@@ -228,7 +271,6 @@ func TestLookupModelConfigByRefReturnsAccountRouterByName(t *testing.T) {
 		AccountRouters: []config.AccountRouterConfig{
 			{
 				Name:    "empty-router",
-				Model:   "gpt-4o",
 				Enabled: true,
 				Entry:   "primary",
 				Blocks: []config.AccountRouterBlock{{
@@ -269,7 +311,6 @@ func TestResolveModelCandidateRejectsAccountRouterAlias(t *testing.T) {
 		AccountRouters: []config.AccountRouterConfig{
 			{
 				Name:    "router-main",
-				Model:   "gpt-4o",
 				Enabled: true,
 				Entry:   "primary",
 				Blocks: []config.AccountRouterBlock{{

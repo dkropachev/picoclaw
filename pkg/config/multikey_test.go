@@ -39,6 +39,7 @@ func TestExpandMultiKeyModels_APIKeysOnly(t *testing.T) {
 			Model:     "zhipu/glm-4.7",
 			APIBase:   "https://api.example.com",
 			APIKeys:   SimpleSecureStrings("key1", "key2", "key3"),
+			Enabled:   true,
 		},
 	}
 
@@ -56,6 +57,9 @@ func TestExpandMultiKeyModels_APIKeysOnly(t *testing.T) {
 	}
 	if primary.APIKey() != "key1" {
 		t.Errorf("expected primary api_key 'key1', got %q", primary.APIKey())
+	}
+	if !primary.Enabled {
+		t.Error("expected primary model to preserve enabled state")
 	}
 	if len(primary.Fallbacks) != 2 {
 		t.Errorf("expected 2 fallbacks, got %d", len(primary.Fallbacks))
@@ -75,6 +79,9 @@ func TestExpandMultiKeyModels_APIKeysOnly(t *testing.T) {
 	if second.APIKey() != "key2" {
 		t.Errorf("expected second api_key 'key2', got %q", second.APIKey())
 	}
+	if !second.Enabled {
+		t.Error("expected second model to preserve enabled state")
+	}
 
 	// Third entry should be key3
 	third := result[1]
@@ -83,6 +90,9 @@ func TestExpandMultiKeyModels_APIKeysOnly(t *testing.T) {
 	}
 	if third.APIKey() != "key3" {
 		t.Errorf("expected third api_key 'key3', got %q", third.APIKey())
+	}
+	if !third.Enabled {
+		t.Error("expected third model to preserve enabled state")
 	}
 }
 

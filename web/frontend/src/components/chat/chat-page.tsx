@@ -62,10 +62,16 @@ interface ChatPageProps {
 
 function resolveChatInputDisabledReason({
   hasDefaultModel,
+  hasSelectedModel,
+  isLoadingModelOptions,
+  hasModelDiscoveryError,
   connectionState,
   gatewayState,
 }: {
   hasDefaultModel: boolean
+  hasSelectedModel: boolean
+  isLoadingModelOptions: boolean
+  hasModelDiscoveryError: boolean
   connectionState: ConnectionState
   gatewayState: GatewayState
 }): ChatInputDisabledReason | null {
@@ -107,6 +113,15 @@ function resolveChatInputDisabledReason({
 
   if (!hasDefaultModel) {
     return "noDefaultModel"
+  }
+  if (isLoadingModelOptions) {
+    return "modelDiscoveryLoading"
+  }
+  if (hasModelDiscoveryError) {
+    return "modelDiscoveryFailed"
+  }
+  if (!hasSelectedModel) {
+    return "noAvailableModel"
   }
 
   return null
@@ -231,12 +246,17 @@ export function ChatPage({
     accountRouterModels,
     modelOptions,
     isLoadingModelOptions,
+    modelDiscoveryError,
     handleSetAccount,
     handleSetModel,
+    retryModelDiscovery,
   } = useChatModels({ isConnected: isGatewayRunning })
   const hasDefaultModel = Boolean(defaultModelName || selectedAccountName)
   const inputDisabledReason = resolveChatInputDisabledReason({
     hasDefaultModel,
+    hasSelectedModel: Boolean(selectedModelID),
+    isLoadingModelOptions,
+    hasModelDiscoveryError: Boolean(modelDiscoveryError && !selectedModelID),
     connectionState,
     gatewayState: gwState,
   })
@@ -402,6 +422,8 @@ export function ChatPage({
     hasAvailableModels &&
     Boolean(defaultModelName) &&
     isGatewayRunning
+  const hasAccountChoices =
+    accountModels.length > 0 || accountRouterModels.length > 0
 
   return (
     <div className="bg-background flex h-full flex-col">
@@ -417,7 +439,7 @@ export function ChatPage({
                 {t(`threads.types.${activeThread.type}`)}
               </Badge>
             )}
-            {hasAvailableModels && (
+            {hasAccountChoices && (
               <ModelSelector
                 selectedAccountName={selectedAccountName}
                 selectedModelID={selectedModelID}
@@ -425,8 +447,10 @@ export function ChatPage({
                 accountRouterModels={accountRouterModels}
                 modelOptions={modelOptions}
                 isLoadingModelOptions={isLoadingModelOptions}
+                modelDiscoveryError={modelDiscoveryError}
                 onAccountChange={handleSetAccount}
                 onModelChange={handleSetModel}
+                onRetryModelDiscovery={retryModelDiscovery}
               />
             )}
           </>

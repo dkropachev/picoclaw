@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 func TestHandleListTools(t *testing.T) {
@@ -457,7 +458,6 @@ func TestHandleToolAdaptationProbeEmptyBodyResolvesVirtualAccountRouter(t *testi
 	}}
 	cfg.AccountRouters = []config.AccountRouterConfig{{
 		Name:    "router-1",
-		Model:   "gpt-router",
 		Enabled: true,
 		Entry:   "account",
 		Blocks: []config.AccountRouterBlock{{
@@ -481,8 +481,8 @@ func TestHandleToolAdaptationProbeEmptyBodyResolvesVirtualAccountRouter(t *testi
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if requestedModel != "gpt-router" {
-		t.Fatalf("upstream model = %q, want router shared model gpt-router", requestedModel)
+	if requestedModel != "old-model" {
+		t.Fatalf("upstream model = %q, want account model old-model", requestedModel)
 	}
 
 	var result struct {
@@ -496,7 +496,7 @@ func TestHandleToolAdaptationProbeEmptyBodyResolvesVirtualAccountRouter(t *testi
 		t.Fatalf("Unmarshal probe response error = %v", err)
 	}
 	if !result.Success || result.Profile.Provider != "openai" ||
-		result.Profile.Model != "gpt-router" {
+		result.Profile.Model != "old-model" {
 		t.Fatalf("probe result = %#v, want concrete router profile", result)
 	}
 }
@@ -605,7 +605,6 @@ func TestProbeModelConfigForProfileIgnoresDisabledRouterAndAccount(t *testing.T)
 			}}
 			cfg.AccountRouters = []config.AccountRouterConfig{{
 				Name:    "router-1",
-				Model:   "shared-model",
 				Enabled: tt.routerEnabled,
 				Entry:   "account",
 				Blocks: []config.AccountRouterBlock{{
@@ -616,7 +615,7 @@ func TestProbeModelConfigForProfileIgnoresDisabledRouterAndAccount(t *testing.T)
 			}}
 			cfg.MaterializeAccountRouterModels()
 
-			_, err := probeModelConfigForProfile(cfg, "openai", "shared-model")
+			_, err := probeModelConfigForProfile(cfg, "openai", "requested-model")
 			if err == nil || !strings.Contains(err.Error(), "no configured upstream model") {
 				t.Fatalf("error = %v, want disabled router/account ignored", err)
 			}
@@ -646,7 +645,7 @@ func TestProbeModelConfigReadyMatchesProviderFactoryKeyRequirements(t *testing.T
 	}
 }
 
-func TestProbeModelConfigForProfileUsesUsableAccountForSharedProfile(t *testing.T) {
+func TestProbeModelConfigForProfileUsesUsableAccountForRequestedProfile(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ModelList = []*config.ModelConfig{
 		{
@@ -665,7 +664,6 @@ func TestProbeModelConfigForProfileUsesUsableAccountForSharedProfile(t *testing.
 	}
 	cfg.AccountRouters = []config.AccountRouterConfig{{
 		Name:    "router-1",
-		Model:   "shared-model",
 		Enabled: true,
 		Entry:   "pool",
 		Blocks: []config.AccountRouterBlock{{
@@ -676,12 +674,12 @@ func TestProbeModelConfigForProfileUsesUsableAccountForSharedProfile(t *testing.
 	}}
 	cfg.MaterializeAccountRouterModels()
 
-	got, err := probeModelConfigForProfile(cfg, "openai", "shared-model")
+	got, err := probeModelConfigForProfile(cfg, "openai", "requested-model")
 	if err != nil {
 		t.Fatalf("probeModelConfigForProfile() error = %v", err)
 	}
 	if got.ModelName != "account-configured" || got.APIKey() != "sk-configured" {
-		t.Fatalf("probe model config = %#v, want usable account for shared profile", got)
+		t.Fatalf("probe model config = %#v, want usable account for requested profile", got)
 	}
 }
 
@@ -690,7 +688,6 @@ func TestProbeModelConfigForProfileResolvesCredentialAccountRouter(t *testing.T)
 	cfg.Agents.Defaults.ModelName = "router-1"
 	cfg.AccountRouters = []config.AccountRouterConfig{{
 		Name:    "router-1",
-		Model:   "gpt-5.4",
 		Enabled: true,
 		Entry:   "account",
 		Blocks: []config.AccountRouterBlock{{
@@ -714,7 +711,7 @@ func TestProbeModelConfigForProfileResolvesCredentialAccountRouter(t *testing.T)
 	}
 }
 
-func TestProbeModelConfigForProfileUsesRouterSharedModel(t *testing.T) {
+func TestProbeModelConfigForProfileAppliesRequestedModelToRouterAccount(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ModelList = []*config.ModelConfig{
 		{
@@ -734,7 +731,6 @@ func TestProbeModelConfigForProfileUsesRouterSharedModel(t *testing.T) {
 	}
 	cfg.AccountRouters = []config.AccountRouterConfig{{
 		Name:    "router-1",
-		Model:   "shared-model",
 		Enabled: true,
 		Entry:   "pool",
 		Blocks: []config.AccountRouterBlock{{
@@ -745,13 +741,13 @@ func TestProbeModelConfigForProfileUsesRouterSharedModel(t *testing.T) {
 	}}
 	cfg.MaterializeAccountRouterModels()
 
-	got, err := probeModelConfigForProfile(cfg, "anthropic", "shared-model")
+	got, err := probeModelConfigForProfile(cfg, "anthropic", "requested-model")
 	if err != nil {
 		t.Fatalf("probeModelConfigForProfile() error = %v", err)
 	}
-	if got.Provider != "anthropic" || got.Model != "shared-model" ||
+	if got.Provider != "anthropic" || got.Model != "requested-model" ||
 		got.APIKey() != "key-b" {
-		t.Fatalf("probe model config = %#v, want account-b with shared model", got)
+		t.Fatalf("probe model config = %#v, want account-b with requested model", got)
 	}
 }
 
@@ -786,7 +782,6 @@ func TestResolveToolAdaptationProfileForConfigCanonicalizesCredentialProvider(t 
 	cfg.Agents.Defaults.ModelName = "router-1"
 	cfg.AccountRouters = []config.AccountRouterConfig{{
 		Name:    "router-1",
-		Model:   "gpt-5.4",
 		Enabled: true,
 		Entry:   "account",
 		Blocks: []config.AccountRouterBlock{{
@@ -798,8 +793,9 @@ func TestResolveToolAdaptationProfileForConfigCanonicalizesCredentialProvider(t 
 	cfg.MaterializeAccountRouterModels()
 
 	provider, model := resolveToolAdaptationProfileForConfig(cfg)
-	if provider != "github-copilot" || model != "gpt-5.4" {
-		t.Fatalf("profile = %s/%s, want github-copilot/gpt-5.4", provider, model)
+	defaultModel := providers.DefaultModelForProvider("github-copilot")
+	if provider != "github-copilot" || model != defaultModel {
+		t.Fatalf("profile = %s/%s, want github-copilot/%s", provider, model, defaultModel)
 	}
 }
 
@@ -829,7 +825,6 @@ func TestBuildToolAdaptationResponseListsAccountRouterProfiles(t *testing.T) {
 	}
 	cfg.AccountRouters = []config.AccountRouterConfig{{
 		Name:    "router-1",
-		Model:   "gpt-5.4",
 		Enabled: true,
 		Entry:   "pool",
 		Blocks: []config.AccountRouterBlock{{
@@ -841,14 +836,14 @@ func TestBuildToolAdaptationResponseListsAccountRouterProfiles(t *testing.T) {
 	cfg.MaterializeAccountRouterModels()
 
 	resp := buildToolAdaptationResponse(cfg)
-	if resp.Resolved.Provider != "openrouter" || resp.Resolved.Model != "gpt-5.4" {
+	if resp.Resolved.Provider != "openrouter" || resp.Resolved.Model != "old-account-model" {
 		t.Fatalf(
 			"resolved profile = %s/%s, want first effective provider/model",
 			resp.Resolved.Provider,
 			resp.Resolved.Model,
 		)
 	}
-	if len(resp.Profiles) != 2 {
+	if len(resp.Profiles) != 3 {
 		t.Fatalf("profiles length = %d, want provider/model profiles only", len(resp.Profiles))
 	}
 
@@ -866,8 +861,9 @@ func TestBuildToolAdaptationResponseListsAccountRouterProfiles(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"openrouter/gpt-5.4",
-		"anthropic/gpt-5.4",
+		"openrouter/old-account-model",
+		"openrouter/another-account-model",
+		"anthropic/claude-sonnet",
 	} {
 		if !got[want] {
 			t.Fatalf("profiles missing %q: %#v", want, resp.Profiles)

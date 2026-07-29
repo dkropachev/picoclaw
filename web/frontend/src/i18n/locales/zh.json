@@ -51,8 +51,14 @@
       "websocketConnecting": "正在连接聊天服务，请稍候。",
       "websocketDisconnected": "无法对话：WebSocket 连接已断开。请检查网络与服务状态，然后刷新页面或重启 Launcher。",
       "websocketError": "无法对话：WebSocket 连接失败。请检查网络与服务状态后重试。",
-      "noDefaultModel": "无法对话：尚未设置默认模型。请前往模型页面设置默认模型。"
+      "noDefaultModel": "无法对话：尚未设置默认模型。请前往模型页面设置默认模型。",
+      "modelDiscoveryLoading": "无法对话：正在加载所选账户的模型。",
+      "modelDiscoveryFailed": "无法对话：模型发现失败。请使用上方按钮重试。",
+      "noAvailableModel": "无法对话：所选账户没有可用模型。"
     },
+    "modelDiscoveryWarning": "部分账户无法列出模型。",
+    "modelDiscoveryError": "无法加载所选账户的模型。",
+    "retryModelDiscovery": "重试模型发现",
     "newChat": "新建对话",
     "notConnected": "服务未运行，请先启动以进行对话。",
     "thinking": {

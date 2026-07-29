@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import {
+  type FetchModelsRequest,
   type ModelInfo,
   type UpstreamModel,
   fetchUpstreamModels,
@@ -62,12 +63,18 @@ function modelOption(id: string): UpstreamModel | null {
 
 export function useChatModels({ isConnected }: UseChatModelsOptions) {
   const { t } = useTranslation()
+  const modelDiscoveryWarning = t("chat.modelDiscoveryWarning")
+  const modelDiscoveryErrorTitle = t("chat.modelDiscoveryError")
   const [modelList, setModelList] = useState<ModelInfo[]>([])
   const [defaultModelName, setDefaultModelName] = useState("")
   const [selectedAccountName, setSelectedAccountName] = useState("")
   const [selectedModelID, setSelectedModelID] = useState("")
   const [modelOptions, setModelOptions] = useState<UpstreamModel[]>([])
   const [isLoadingModelOptions, setIsLoadingModelOptions] = useState(false)
+  const [modelDiscoveryError, setModelDiscoveryError] = useState<string | null>(
+    null,
+  )
+  const [modelDiscoveryAttempt, setModelDiscoveryAttempt] = useState(0)
   const setDefaultRequestIdRef = useRef(0)
 
   const syncDefaultModelName = useCallback(
@@ -217,77 +224,124 @@ export function useChatModels({ isConnected }: UseChatModelsOptions) {
 
     setSelectedModelID((current) => {
       if (current) return current
-      return defaultModel?.router?.model ?? defaultModel?.model ?? ""
+      return defaultModel && !isAccountRouterModel(defaultModel)
+        ? defaultModel.model
+        : ""
     })
   }, [accountModels, accountRouterModels, defaultModelName, modelList])
 
   useEffect(() => {
     let cancelled = false
+    const defaultModel = modelList.find(
+      (model) => model.model_name === defaultModelName,
+    )
+    const configuredFallbackOption =
+      selectedAccount &&
+      defaultModel &&
+      credentialAccountName(defaultModel) === selectedAccount.accountName
+        ? modelOption(defaultModel.model)
+        : null
     const fallbackOption =
-      modelOption(
-        selectedAccountRouter?.router?.model ??
-          selectedAccountRouter?.model ??
-          selectedAccount?.modelID ??
-          "",
-      ) ?? null
+      configuredFallbackOption ??
+      modelOption(selectedAccount?.modelID ?? "") ??
+      null
 
     if (!selectedAccountName) {
       setModelOptions([])
-      setSelectedModelID("")
+      setSelectedModelID(
+        defaultModel && !isAccountRouterModel(defaultModel)
+          ? defaultModel.model
+          : "",
+      )
+      setIsLoadingModelOptions(false)
+      setModelDiscoveryError(null)
       return () => {
         cancelled = true
       }
     }
 
+    let fetchRequest: FetchModelsRequest | null = null
     if (selectedAccountRouter) {
+      fetchRequest = { account_ref: selectedAccountRouter.model_name }
+    } else if (selectedAccount) {
+      fetchRequest = { account_ref: selectedAccount.accountName }
+    }
+
+    if (!fetchRequest) {
       const options = fallbackOption ? [fallbackOption] : []
       setModelOptions(options)
       setSelectedModelID((current) => current || options[0]?.id || "")
+      setIsLoadingModelOptions(false)
+      setModelDiscoveryError(null)
       return () => {
         cancelled = true
       }
     }
 
-    if (!selectedAccount?.provider) {
-      const options = fallbackOption ? [fallbackOption] : []
-      setModelOptions(options)
-      setSelectedModelID((current) => current || options[0]?.id || "")
-      return () => {
-        cancelled = true
-      }
-    }
-
+    setModelOptions([])
     setIsLoadingModelOptions(true)
-    void fetchUpstreamModels({
-      provider: selectedAccount.provider,
-      auth_method: selectedAccount.authMethod,
-      credential_id: selectedAccount.credentialID,
-      model_index: selectedAccount.modelIndex,
-    })
+    setModelDiscoveryError(null)
+    void fetchUpstreamModels(fetchRequest)
       .then((response) => {
         if (cancelled) return
+        const issueDescription = response.issues
+          ?.map(
+            (issue) =>
+              `${displayAccountLabel(issue.account_ref)}: ${issue.error}`,
+          )
+          .join("\n")
         const seen = new Set<string>()
         const options = response.models.filter((model) => {
           const id = model.id.trim()
-          if (!id || seen.has(id)) return false
-          seen.add(id)
+          const normalizedID = id.toLowerCase()
+          if (!id || seen.has(normalizedID)) return false
+          seen.add(normalizedID)
           return true
         })
+        if (
+          options.length === 0 &&
+          (selectedAccountRouter != null || Boolean(issueDescription))
+        ) {
+          const errorMessage = issueDescription || modelDiscoveryErrorTitle
+          setModelOptions(fallbackOption ? [fallbackOption] : [])
+          setSelectedModelID(fallbackOption?.id || "")
+          setModelDiscoveryError(errorMessage)
+          toast.error(modelDiscoveryErrorTitle, {
+            description: errorMessage,
+          })
+          return
+        }
+        if (issueDescription) {
+          toast.warning(modelDiscoveryWarning, {
+            description: issueDescription,
+          })
+        }
         const resolvedOptions =
           options.length > 0 ? options : fallbackOption ? [fallbackOption] : []
         setModelOptions(resolvedOptions)
         setSelectedModelID((current) => {
-          if (resolvedOptions.some((model) => model.id === current)) {
-            return current
+          const selected = resolvedOptions.find(
+            (model) =>
+              model.id.trim().toLowerCase() === current.trim().toLowerCase(),
+          )
+          if (selected) {
+            return selected.id
           }
-          return fallbackOption?.id || resolvedOptions[0]?.id || ""
+          return resolvedOptions[0]?.id || ""
         })
+        setModelDiscoveryError(null)
       })
       .catch((err) => {
         if (cancelled) return
         console.error("Failed to fetch account models:", err)
+        const errorMessage =
+          err instanceof Error ? err.message : modelDiscoveryErrorTitle
         setModelOptions(fallbackOption ? [fallbackOption] : [])
-        setSelectedModelID((current) => current || fallbackOption?.id || "")
+        setSelectedModelID(fallbackOption?.id || "")
+        setModelDiscoveryError(errorMessage)
+        toast.error(modelDiscoveryErrorTitle, {
+          description: errorMessage,
+        })
       })
       .finally(() => {
         if (!cancelled) setIsLoadingModelOptions(false)
@@ -296,12 +350,22 @@ export function useChatModels({ isConnected }: UseChatModelsOptions) {
     return () => {
       cancelled = true
     }
-  }, [selectedAccount, selectedAccountName, selectedAccountRouter])
+  }, [
+    defaultModelName,
+    modelDiscoveryAttempt,
+    modelDiscoveryErrorTitle,
+    modelDiscoveryWarning,
+    modelList,
+    selectedAccount,
+    selectedAccountName,
+    selectedAccountRouter,
+  ])
 
   const handleSetAccount = useCallback(
     (accountName: string) => {
       setSelectedAccountName(accountName)
       setSelectedModelID("")
+      setModelDiscoveryError(null)
       void handleSetDefault(accountName)
     },
     [handleSetDefault],
@@ -311,8 +375,11 @@ export function useChatModels({ isConnected }: UseChatModelsOptions) {
     setSelectedModelID(modelID)
   }, [])
 
-  const hasAvailableModels =
-    accountModels.length > 0 || accountRouterModels.length > 0
+  const retryModelDiscovery = useCallback(() => {
+    setModelDiscoveryAttempt((attempt) => attempt + 1)
+  }, [])
+
+  const hasAvailableModels = defaultSelectableModels.length > 0
 
   return {
     defaultModelName,
@@ -323,7 +390,9 @@ export function useChatModels({ isConnected }: UseChatModelsOptions) {
     accountRouterModels,
     modelOptions,
     isLoadingModelOptions,
+    modelDiscoveryError,
     handleSetAccount,
     handleSetModel,
+    retryModelDiscovery,
   }
 }

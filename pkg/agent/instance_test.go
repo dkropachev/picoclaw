@@ -5,8 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -155,6 +158,126 @@ func TestCandidateProviderHelpersCoverEmptyAndDuplicateBranches(t *testing.T) {
 	}
 }
 
+func TestCandidateProviderUsesAccountAndModelSpecificInstance(t *testing.T) {
+	nativeProvider := &mockProvider{}
+	overrideProvider := &mockProvider{}
+	nativeCandidate := providers.FallbackCandidate{
+		Provider:    "github-copilot",
+		Model:       "auto",
+		IdentityKey: "model_name:copilot-account",
+	}
+	overrideCandidate := nativeCandidate
+	overrideCandidate.Model = "gpt-5.4"
+
+	registered := map[string]providers.LLMProvider{}
+	if !registerCandidateProvider(registered, nativeCandidate, nativeProvider) {
+		t.Fatal("register native provider = false, want true")
+	}
+	if !registerCandidateProvider(registered, overrideCandidate, overrideProvider) {
+		t.Fatal("register override provider = false, want true")
+	}
+	agent := &AgentInstance{CandidateProviders: registered}
+	if got := agent.candidateProviderForCandidate(nativeCandidate); got != nativeProvider {
+		t.Fatalf("native provider = %#v, want native instance", got)
+	}
+	if got := agent.candidateProviderForCandidate(overrideCandidate); got != overrideProvider {
+		t.Fatalf("override provider = %#v, want model-specific instance", got)
+	}
+}
+
+func TestRegisterCandidateProviderIsAtomicWithConcurrentReaders(t *testing.T) {
+	candidate := providers.FallbackCandidate{
+		Provider:    "openai",
+		Model:       "gpt-5.4",
+		IdentityKey: "model_name:concurrent-account",
+	}
+	keys := candidateProviderKeys(candidate)
+	registered := map[string]providers.LLMProvider{}
+
+	const writerCount = 32
+	start := make(chan struct{})
+	stopReaders := make(chan struct{})
+	var (
+		writers         sync.WaitGroup
+		readers         sync.WaitGroup
+		insertions      atomic.Int32
+		partialObserved atomic.Bool
+	)
+
+	for range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			<-start
+			for {
+				select {
+				case <-stopReaders:
+					return
+				default:
+				}
+
+				agentCandidateProvidersMu.RLock()
+				var (
+					found    int
+					selected providers.LLMProvider
+				)
+				for _, key := range keys {
+					provider := registered[key]
+					if provider == nil {
+						continue
+					}
+					found++
+					if selected == nil {
+						selected = provider
+					} else if selected != provider {
+						partialObserved.Store(true)
+					}
+				}
+				if found != 0 && found != len(keys) {
+					partialObserved.Store(true)
+				}
+				agentCandidateProvidersMu.RUnlock()
+			}
+		}()
+	}
+
+	for i := range writerCount {
+		writers.Add(1)
+		go func(index int) {
+			defer writers.Done()
+			<-start
+			provider := &sequenceProvider{callCount: index}
+			if registerCandidateProvider(registered, candidate, provider) {
+				insertions.Add(1)
+			}
+		}(i)
+	}
+
+	close(start)
+	writers.Wait()
+	close(stopReaders)
+	readers.Wait()
+
+	if got := insertions.Load(); got != 1 {
+		t.Fatalf("successful registrations = %d, want 1", got)
+	}
+	if partialObserved.Load() {
+		t.Fatal("concurrent reader observed a partial or inconsistent provider key set")
+	}
+
+	agentCandidateProvidersMu.RLock()
+	defer agentCandidateProvidersMu.RUnlock()
+	selected := registered[keys[0]]
+	if selected == nil {
+		t.Fatal("registered provider = nil")
+	}
+	for _, key := range keys[1:] {
+		if registered[key] != selected {
+			t.Fatalf("provider key %q does not reference the atomically registered provider", key)
+		}
+	}
+}
+
 func TestAccountRouterAccountNamesTrimsDedupesAndSkipsUnsupportedBlocks(t *testing.T) {
 	if got := accountRouterAccountNames(nil); got != nil {
 		t.Fatalf("accountRouterAccountNames(nil) = %#v, want nil", got)
@@ -191,7 +314,6 @@ func TestResolvePrimaryProviderForAgentFallsBackForEmptyMissingAndRouterModels(t
 		AccountRouters: []config.AccountRouterConfig{
 			{
 				Name:    "router-main",
-				Model:   "gpt-4o",
 				Enabled: true,
 				Entry:   "primary",
 				Blocks: []config.AccountRouterBlock{{
@@ -951,11 +1073,19 @@ func TestNewAgentInstance_ResolvesToolAdaptationFromModelListAlias(t *testing.T)
 }
 
 func TestNewAgentInstance_ResolvesToolAdaptationFromAccountRouterOverride(t *testing.T) {
+	t.Setenv(config.EnvHome, t.TempDir())
+	if err := auth.SetCredential("openai:work", &auth.AuthCredential{
+		AccessToken: "work-token",
+		Provider:    "openai",
+		AuthMethod:  "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
 	workspace := t.TempDir()
 	adaptation := config.DefaultToolAdaptationConfig()
 	adaptation.ProfileOverrides = []config.ToolAdaptationProfileOverride{{
 		Provider:           "openai",
-		Model:              "gpt-5.4",
+		Model:              providers.DefaultModelForProvider("openai"),
 		VisibleToolSurface: config.ToolSurfaceSimple,
 	}}
 	cfg := &config.Config{
@@ -967,7 +1097,6 @@ func TestNewAgentInstance_ResolvesToolAdaptationFromAccountRouterOverride(t *tes
 		},
 		AccountRouters: []config.AccountRouterConfig{{
 			Name:    "router-1",
-			Model:   "gpt-5.4",
 			Enabled: true,
 			Entry:   "account",
 			Blocks: []config.AccountRouterBlock{{

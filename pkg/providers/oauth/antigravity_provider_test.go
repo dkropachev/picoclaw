@@ -1,8 +1,164 @@
 package oauthprovider
 
 import (
+	"context"
+	"errors"
+	"slices"
 	"testing"
+	"time"
+
+	"github.com/sipeed/picoclaw/pkg/auth"
+	"github.com/sipeed/picoclaw/pkg/config"
 )
+
+func TestFetchAntigravityModelsContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := FetchAntigravityModelsContext(ctx, "token", "project")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("FetchAntigravityModelsContext() error = %v, want context canceled", err)
+	}
+}
+
+func TestAntigravityModelOrderingUsesDefaultThenID(t *testing.T) {
+	models := []AntigravityModelInfo{
+		{ID: "zeta"},
+		{ID: "gemini-3-flash"},
+		{ID: "Alpha"},
+		{ID: "beta"},
+	}
+	sortAntigravityModels(models)
+
+	got := []string{models[0].ID, models[1].ID, models[2].ID, models[3].ID}
+	want := []string{"gemini-3-flash", "Alpha", "beta", "zeta"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("model order = %v, want %v", got, want)
+	}
+}
+
+func TestCreateAntigravityTokenSourceForCredentialUsesNamedCredential(t *testing.T) {
+	t.Setenv(config.EnvHome, t.TempDir())
+
+	if err := auth.SetCredential("google-antigravity", &auth.AuthCredential{
+		AccessToken: "default-token",
+		ProjectID:   "default-project",
+		Provider:    "google-antigravity",
+		AuthMethod:  "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential(default) error = %v", err)
+	}
+	if err := auth.SetCredential("google-antigravity:work", &auth.AuthCredential{
+		AccessToken: "work-token",
+		ProjectID:   "work-project",
+		Provider:    "antigravity",
+		AuthMethod:  "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential(work) error = %v", err)
+	}
+
+	token, projectID, err := CreateAntigravityTokenSourceForCredential("google-antigravity:work")()
+	if err != nil {
+		t.Fatalf("token source error = %v", err)
+	}
+	if token != "work-token" {
+		t.Fatalf("token = %q, want named credential token", token)
+	}
+	if projectID != "work-project" {
+		t.Fatalf("projectID = %q, want named credential project", projectID)
+	}
+}
+
+func TestCreateAntigravityTokenSourceForCredentialRejectsProviderMismatch(t *testing.T) {
+	t.Setenv(config.EnvHome, t.TempDir())
+
+	if err := auth.SetCredential("google-antigravity:work", &auth.AuthCredential{
+		AccessToken: "anthropic-secret",
+		ProjectID:   "wrong-project",
+		Provider:    "anthropic",
+		AuthMethod:  "oauth",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	_, _, err := CreateAntigravityTokenSourceForCredential("google-antigravity:work")()
+	if err == nil {
+		t.Fatal("token source error = nil, want provider mismatch")
+	}
+}
+
+func TestAntigravityNamedCredentialRefreshPersistsToNamedCredential(t *testing.T) {
+	expired := &auth.AuthCredential{
+		AccessToken:  "expired-token",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    time.Now().Add(-time.Hour),
+		Provider:     "google-antigravity",
+		AuthMethod:   "oauth",
+		Email:        "work@example.com",
+		ProjectID:    "work-project",
+	}
+
+	var savedCredentialID string
+	var savedCredential *auth.AuthCredential
+	source := createAntigravityTokenSourceForCredential(
+		"google-antigravity:work",
+		antigravityTokenSourceDependencies{
+			getCredential: func(credentialID string) (*auth.AuthCredential, error) {
+				if credentialID != "google-antigravity:work" {
+					t.Fatalf("get credential ID = %q, want named credential", credentialID)
+				}
+				return expired, nil
+			},
+			setCredential: func(credentialID string, credential *auth.AuthCredential) error {
+				savedCredentialID = credentialID
+				savedCredential = credential
+				return nil
+			},
+			refreshToken: func(
+				credential *auth.AuthCredential,
+				_ auth.OAuthProviderConfig,
+			) (*auth.AuthCredential, error) {
+				if credential != expired {
+					t.Fatal("refresh received an unexpected credential")
+				}
+				return &auth.AuthCredential{
+					AccessToken:  "refreshed-token",
+					RefreshToken: "refresh-token",
+					ExpiresAt:    time.Now().Add(time.Hour),
+					Provider:     "antigravity",
+					AuthMethod:   "oauth",
+				}, nil
+			},
+			fetchProjectID: func(string) (string, error) {
+				t.Fatal("project ID fetch should not run when refresh preserves the project")
+				return "", nil
+			},
+		},
+	)
+
+	token, projectID, err := source()
+	if err != nil {
+		t.Fatalf("token source error = %v", err)
+	}
+	if token != "refreshed-token" {
+		t.Fatalf("token = %q, want refreshed token", token)
+	}
+	if projectID != "work-project" {
+		t.Fatalf("projectID = %q, want preserved project", projectID)
+	}
+	if savedCredentialID != "google-antigravity:work" {
+		t.Fatalf("saved credential ID = %q, want named credential", savedCredentialID)
+	}
+	if savedCredential == nil {
+		t.Fatal("refreshed credential was not saved")
+	}
+	if savedCredential.Email != "work@example.com" {
+		t.Fatalf("saved email = %q, want preserved email", savedCredential.Email)
+	}
+	if savedCredential.ProjectID != "work-project" {
+		t.Fatalf("saved project = %q, want preserved project", savedCredential.ProjectID)
+	}
+}
 
 func TestBuildRequestUsesFunctionFieldsWhenToolCallNameMissing(t *testing.T) {
 	p := &AntigravityProvider{}

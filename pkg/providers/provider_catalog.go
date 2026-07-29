@@ -43,6 +43,17 @@ func CommonModelsForProvider(provider string) []string {
 	return models
 }
 
+// DefaultModelForProvider returns the provider's actual runtime default model.
+// It is intentionally separate from CommonModelsForProvider, whose ordering is
+// curated for discovery rather than execution.
+func DefaultModelForProvider(provider string) string {
+	option, ok := modelProviderOptionForName(provider)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(option.DefaultModel)
+}
+
 // IsCreatableModelProvider reports whether provider can be selected for a new
 // model entry from the Web UI.
 func IsCreatableModelProvider(provider string) bool {

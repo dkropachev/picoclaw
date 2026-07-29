@@ -1,6 +1,8 @@
 package providers
 
 import (
+	"context"
+
 	oauthprovider "github.com/sipeed/picoclaw/pkg/providers/oauth"
 )
 
@@ -13,6 +15,10 @@ type (
 
 func NewAntigravityProvider() *AntigravityProvider {
 	return oauthprovider.NewAntigravityProvider()
+}
+
+func NewAntigravityProviderForCredential(credentialID string) *AntigravityProvider {
+	return oauthprovider.NewAntigravityProviderForCredential(credentialID)
 }
 
 func NewClaudeProvider(token string) *ClaudeProvider {
@@ -49,6 +55,13 @@ func FetchAntigravityProjectID(accessToken string) (string, error) {
 
 func FetchAntigravityModels(accessToken, projectID string) ([]AntigravityModelInfo, error) {
 	return oauthprovider.FetchAntigravityModels(accessToken, projectID)
+}
+
+func FetchAntigravityModelsContext(
+	ctx context.Context,
+	accessToken, projectID string,
+) ([]AntigravityModelInfo, error) {
+	return oauthprovider.FetchAntigravityModelsContext(ctx, accessToken, projectID)
 }
 
 func createClaudeTokenSourceForCredential(credentialID string) func() (string, error) {
