@@ -83,6 +83,187 @@ func TestHandleGetChannelConfig_ReturnsSecretPresenceWithoutLeakingSecrets(t *te
 	}
 }
 
+func TestHandleListChannelCatalog_IncludesDeltaChat(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/channels/catalog", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf(
+			"GET /api/channels/catalog status = %d, want %d, body=%s",
+			rec.Code,
+			http.StatusOK,
+			rec.Body.String(),
+		)
+	}
+
+	var resp struct {
+		Channels []channelCatalogItem `json:"channels"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	for _, channel := range resp.Channels {
+		if channel.Name != config.ChannelDeltaChat {
+			continue
+		}
+		if channel.ConfigKey != config.ChannelDeltaChat {
+			t.Fatalf("deltachat config_key = %q, want %q", channel.ConfigKey, config.ChannelDeltaChat)
+		}
+		if channel.DisplayName != "Delta Chat" {
+			t.Fatalf("deltachat display_name = %q, want %q", channel.DisplayName, "Delta Chat")
+		}
+		return
+	}
+	t.Fatal("catalog does not include deltachat")
+}
+
+func TestHandleGetChannelConfig_DeltaChatRequiresEmailAndMasksPassword(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	channel := cfg.Channels.Get(config.ChannelDeltaChat)
+	if channel == nil {
+		t.Fatal("config is missing the default deltachat channel")
+	}
+	channel.Enabled = true
+	decoded, err := channel.GetDecoded()
+	if err != nil {
+		t.Fatalf("GetDecoded() error = %v", err)
+	}
+	settings, ok := decoded.(*config.DeltaChatSettings)
+	if !ok {
+		t.Fatalf("GetDecoded() type = %T, want *config.DeltaChatSettings", decoded)
+	}
+	settings.Email = "operator@example.org"
+	settings.Password = *config.NewSecureString("legacy-mailbox-password")
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/channels/deltachat/config", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf(
+			"GET /api/channels/deltachat/config status = %d, want %d, body=%s",
+			rec.Code,
+			http.StatusOK,
+			rec.Body.String(),
+		)
+	}
+	if strings.Contains(rec.Body.String(), "legacy-mailbox-password") {
+		t.Fatalf("response leaked Delta Chat password: %s", rec.Body.String())
+	}
+
+	var resp struct {
+		Config            map[string]any `json:"config"`
+		ConfiguredSecrets []string       `json:"configured_secrets"`
+		ConfigKey         string         `json:"config_key"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if resp.ConfigKey != config.ChannelDeltaChat {
+		t.Fatalf("config_key = %q, want %q", resp.ConfigKey, config.ChannelDeltaChat)
+	}
+	if got := resp.Config["email"]; got != "operator@example.org" {
+		t.Fatalf("config.email = %#v, want %q", got, "operator@example.org")
+	}
+	if got := resp.Config["enabled"]; got != true {
+		t.Fatalf("config.enabled = %#v, want true", got)
+	}
+	if _, exists := resp.Config["password"]; exists {
+		t.Fatalf("config should omit password, got %#v", resp.Config["password"])
+	}
+	if len(resp.ConfiguredSecrets) != 1 || resp.ConfiguredSecrets[0] != "password" {
+		t.Fatalf("configured_secrets = %#v, want [\"password\"]", resp.ConfiguredSecrets)
+	}
+}
+
+func TestHandleGetChannelConfig_DeltaChatPreservesDisabledCommonControls(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	channel := cfg.Channels.Get(config.ChannelDeltaChat)
+	if channel == nil {
+		t.Fatal("config is missing the default deltachat channel")
+	}
+	channel.GroupTrigger.MentionOnly = false
+	channel.GroupTrigger.Prefixes = nil
+	channel.Typing.Enabled = false
+	channel.Placeholder.Enabled = false
+	channel.Placeholder.Text = nil
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/channels/deltachat/config", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf(
+			"GET /api/channels/deltachat/config status = %d, want %d, body=%s",
+			rec.Code,
+			http.StatusOK,
+			rec.Body.String(),
+		)
+	}
+
+	var resp struct {
+		Config map[string]any `json:"config"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	for field, booleanKey := range map[string]string{
+		"group_trigger": "mention_only",
+		"typing":        "enabled",
+		"placeholder":   "enabled",
+	} {
+		projected, ok := resp.Config[field].(map[string]any)
+		if !ok {
+			t.Fatalf("config.%s = %#v, want object", field, resp.Config[field])
+		}
+		value, exists := projected[booleanKey]
+		if !exists || value != false {
+			t.Fatalf(
+				"config.%s.%s = %#v (exists=%v), want explicit false",
+				field,
+				booleanKey,
+				value,
+				exists,
+			)
+		}
+	}
+}
+
 func TestHandleGetChannelConfig_ReturnsNotFoundForUnknownChannel(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()

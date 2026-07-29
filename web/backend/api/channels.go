@@ -9,9 +9,10 @@ import (
 )
 
 type channelCatalogItem struct {
-	Name      string `json:"name"`
-	ConfigKey string `json:"config_key"`
-	Variant   string `json:"variant,omitempty"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name,omitempty"`
+	ConfigKey   string `json:"config_key"`
+	Variant     string `json:"variant,omitempty"`
 }
 
 var channelCatalog = []channelCatalogItem{
@@ -30,6 +31,7 @@ var channelCatalog = []channelCatalogItem{
 	{Name: "pico", ConfigKey: "pico"},
 	{Name: "maixcam", ConfigKey: "maixcam"},
 	{Name: "matrix", ConfigKey: "matrix"},
+	{Name: "deltachat", DisplayName: "Delta Chat", ConfigKey: "deltachat"},
 	{Name: "irc", ConfigKey: "irc"},
 	{Name: "mqtt", ConfigKey: "mqtt"},
 }
@@ -104,6 +106,7 @@ var channelSecretFieldMap = map[string][]string{
 	"wecom":           {"secret"},
 	"pico":            {"token"},
 	"matrix":          {"access_token"},
+	"deltachat":       {"password"},
 	"irc":             {"password", "nickserv_password", "sasl_password"},
 	"whatsapp":        {},
 	"whatsapp_native": {},
@@ -144,7 +147,7 @@ func buildChannelConfigResponse(cfg *config.Config, item channelCatalogItem) cha
 	for _, key := range secrets {
 		delete(settings, key)
 	}
-	addChannelCommonConfig(settings, bc)
+	addChannelCommonConfig(settings, bc, item.ConfigKey)
 	resp.Config = settings
 
 	return resp
@@ -154,7 +157,11 @@ func defaultChannelConfig(configKey string) *config.Channel {
 	return config.DefaultConfig().Channels.Get(configKey)
 }
 
-func addChannelCommonConfig(settings map[string]any, bc *config.Channel) {
+func addChannelCommonConfig(
+	settings map[string]any,
+	bc *config.Channel,
+	configKey string,
+) {
 	settings["enabled"] = bc.Enabled
 	if len(bc.AllowFrom) > 0 {
 		settings["allow_from"] = []string(bc.AllowFrom)
@@ -162,14 +169,43 @@ func addChannelCommonConfig(settings map[string]any, bc *config.Channel) {
 	if bc.ReasoningChannelID != "" {
 		settings["reasoning_channel_id"] = bc.ReasoningChannelID
 	}
-	if bc.GroupTrigger.MentionOnly || len(bc.GroupTrigger.Prefixes) > 0 {
-		settings["group_trigger"] = bc.GroupTrigger
-	}
-	if bc.Typing.Enabled {
-		settings["typing"] = bc.Typing
-	}
-	if bc.Placeholder.Enabled || len(bc.Placeholder.Text) > 0 {
-		settings["placeholder"] = bc.Placeholder
+
+	// Delta Chat's editor intentionally seeds mention_only=true only when the
+	// API omits group_trigger. Always returning its common control objects,
+	// including explicit false values, prevents a safe GET followed by an
+	// unrelated save from changing persisted routing behavior.
+	if configKey == config.ChannelDeltaChat {
+		groupTrigger := map[string]any{
+			"mention_only": bc.GroupTrigger.MentionOnly,
+		}
+		if len(bc.GroupTrigger.Prefixes) > 0 {
+			groupTrigger["prefixes"] = append([]string(nil), bc.GroupTrigger.Prefixes...)
+		} else {
+			groupTrigger["prefixes"] = []string{}
+		}
+		settings["group_trigger"] = groupTrigger
+		settings["typing"] = map[string]any{
+			"enabled": bc.Typing.Enabled,
+		}
+		placeholder := map[string]any{
+			"enabled": bc.Placeholder.Enabled,
+		}
+		if len(bc.Placeholder.Text) > 0 {
+			placeholder["text"] = []string(bc.Placeholder.Text)
+		} else {
+			placeholder["text"] = []string{}
+		}
+		settings["placeholder"] = placeholder
+	} else {
+		if bc.GroupTrigger.MentionOnly || len(bc.GroupTrigger.Prefixes) > 0 {
+			settings["group_trigger"] = bc.GroupTrigger
+		}
+		if bc.Typing.Enabled {
+			settings["typing"] = bc.Typing
+		}
+		if bc.Placeholder.Enabled || len(bc.Placeholder.Text) > 0 {
+			settings["placeholder"] = bc.Placeholder
+		}
 	}
 	if _, exists := settings["streaming"]; !exists {
 		if streaming, ok := channelStreamingConfig(bc); ok {

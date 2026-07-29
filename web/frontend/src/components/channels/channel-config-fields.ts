@@ -33,8 +33,76 @@ const CHANNEL_SECRET_FIELDS: Record<string, string[]> = {
   wecom: ["secret"],
   pico: ["token"],
   matrix: ["access_token"],
+  deltachat: ["password"],
   irc: ["password", "nickserv_password", "sasl_password"],
   mqtt: ["username", "password"],
+}
+
+const CHANNEL_DEFAULT_FIELDS: Record<string, ChannelConfig> = {
+  deltachat: {
+    allow_from: [],
+    group_trigger: {
+      mention_only: true,
+      prefixes: [],
+    },
+    typing: {
+      enabled: false,
+    },
+    placeholder: {
+      enabled: false,
+      text: [],
+    },
+    email: "",
+    display_name: "",
+    avatar_image: "",
+    data_dir: "",
+    rpc_server_path: "",
+    invite_link: "",
+    allow_crosspost: false,
+    imap_server: "",
+    imap_port: 0,
+    smtp_server: "",
+    smtp_port: 0,
+  },
+}
+
+export function getRequiredFieldKeys(channelName: string): string[] {
+  switch (channelName) {
+    case "telegram":
+      return ["token"]
+    case "discord":
+      return ["token"]
+    case "slack":
+      return ["bot_token"]
+    case "feishu":
+      return ["app_id", "app_secret"]
+    case "dingtalk":
+      return ["client_id", "client_secret"]
+    case "line":
+      return ["channel_secret", "channel_access_token"]
+    case "qq":
+      return ["app_id", "app_secret"]
+    case "onebot":
+      return ["ws_url"]
+    case "wecom":
+      return []
+    case "whatsapp":
+      return ["bridge_url"]
+    case "pico":
+      return ["token"]
+    case "maixcam":
+      return ["host"]
+    case "matrix":
+      return ["homeserver", "user_id", "access_token"]
+    case "deltachat":
+      return ["email"]
+    case "irc":
+      return ["server"]
+    case "mqtt":
+      return ["broker", "agent_id"]
+    default:
+      return []
+  }
 }
 
 const SECRET_FIELD_SET = new Set(Object.keys(SECRET_FIELD_MAP))
@@ -51,7 +119,10 @@ export function buildEditConfig(
   channelName: string,
   config: ChannelConfig,
 ): ChannelConfig {
-  const edit: ChannelConfig = { ...config }
+  const edit: ChannelConfig = {
+    ...(CHANNEL_DEFAULT_FIELDS[channelName] ?? {}),
+    ...config,
+  }
 
   for (const key of CHANNEL_SECRET_FIELDS[channelName] ?? []) {
     if (!(key in edit)) {

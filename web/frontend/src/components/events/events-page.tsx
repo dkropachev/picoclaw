@@ -1,9 +1,10 @@
-import { IconRefresh } from "@tabler/icons-react"
+import { IconRefresh, IconSettings } from "@tabler/icons-react"
 import {
   useInfiniteQuery,
   useMutation,
   useQueryClient,
 } from "@tanstack/react-query"
+import { Link } from "@tanstack/react-router"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -180,6 +181,12 @@ export function EventsPage({
           </Badge>
         }
       >
+        <Button type="button" variant="outline" asChild>
+          <Link to="/event-sources">
+            <IconSettings className="size-4" />
+            {t("pages.events.event_sources", "Event sources")}
+          </Link>
+        </Button>
         <Button
           type="button"
           variant="outline"

@@ -35,9 +35,26 @@ func (h *Handler) applyRuntimeLogLevel() {
 //
 //	GET /api/config
 func (h *Handler) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.LoadConfig(h.configPath)
+	// Management reads must remain available when an active event webhook has
+	// an unavailable file:// or enc:// secret reference. The update-safe loader
+	// preserves that reference without resolving it, while SecureString's JSON
+	// marshaler still returns only the presence marker.
+	cfg, err := config.LoadConfigForUpdate(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if err = cfg.Events.Ingress.ValidatePublicIdentities(
+		cfg.SensitiveDataValues()...,
+	); err != nil {
+		// Public identities are emitted verbatim by JSON. Refuse the projection
+		// without returning the validation error, which could itself become a
+		// credential oracle for a corrupt or manually edited configuration.
+		http.Error(
+			w,
+			"Failed to project config safely",
+			http.StatusInternalServerError,
+		)
 		return
 	}
 
@@ -350,7 +367,11 @@ func validateConfig(cfg *config.Config) []string {
 		errs = append(errs, err.Error())
 	}
 
-	if err := cfg.Events.Ingress.Validate(); err != nil {
+	if err := cfg.Events.Ingress.ValidateWebhookPublicIdentities(
+		cfg.SensitiveDataValues()...,
+	); err != nil {
+		errs = append(errs, fmt.Sprintf("events.ingress: %v", err))
+	} else if err := cfg.Events.Ingress.Validate(); err != nil {
 		errs = append(errs, fmt.Sprintf("events.ingress: %v", err))
 	}
 	if err := cfg.Events.Ingress.ValidateEventChannelAdapters(

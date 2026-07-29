@@ -18,6 +18,16 @@ import (
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
+const (
+	eventRetentionMaintenanceInterval = 6 * time.Hour
+	eventRetentionPruneBatchSize      = 500
+	eventRetentionMaxBatchesPerCycle  = 20
+	// Signed Unix nanoseconds span 213,503 complete UTC days. A longer
+	// retention period cannot expire any timestamp representable by the event
+	// store and must be handled before time.AddDate can overflow internally.
+	eventRetentionMaxDurableDays = 213_503
+)
+
 type eventAutomationService struct {
 	store           *eventing.Store
 	operatorBackend *eventoperator.Backend
@@ -32,6 +42,10 @@ type eventAutomationService struct {
 }
 
 type eventAutomationRuntimeAcquire func(context.Context) (context.Context, func(), error)
+
+type eventRetentionPruner interface {
+	Prune(ctx context.Context, before time.Time, limit int) (int64, error)
+}
 
 func setupEventAutomationService(
 	ctx context.Context,
@@ -54,7 +68,7 @@ func setupEventAutomationService(
 		}
 	}
 	var acquireRuntime eventAutomationRuntimeAcquire
-	if cfg.Workflows.Enabled {
+	if agentLoop != nil {
 		acquireRuntime = func(workerCtx context.Context) (context.Context, func(), error) {
 			return agentLoop.AcquireRuntimeGeneration(workerCtx, cfg)
 		}
@@ -107,50 +121,61 @@ func newEventAutomationService(
 		channelBackend:  channelBackend,
 		done:            make(chan struct{}),
 	}
-	if !cfg.Workflows.Enabled {
-		close(service.done)
-		return service, nil
-	}
 
-	runStore := executor.Store
-	if runStore == nil {
-		runStore = workflows.NewFileRunStore(workspace)
-		executor.Store = runStore
-	}
 	workerCtx, cancel := context.WithCancel(context.Background())
 	service.cancel = cancel
-	router := &workflows.EventWorkflowRouter{
-		Inbox:                store,
-		WorkspaceDir:         workspace,
-		DefinitionsDir:       executor.DefinitionsDir,
-		RuntimeCompatibility: executor.RuntimeCompatibility,
-		RuntimeEvents:        runtimeEvents,
-		WorkerLabel:          "gateway-workflow-router",
-	}
-	dispatcher := &workflows.EventWorkflowDispatcher{
-		Inbox:                store,
-		Executor:             executor,
-		RunStore:             runStore,
-		WorkspaceDir:         workspace,
-		DefinitionsDir:       executor.DefinitionsDir,
-		RuntimeCompatibility: executor.RuntimeCompatibility,
-		WorkerLabel:          "gateway-workflow-dispatcher",
-	}
+	ingress := config.EffectiveEventIngressConfig(cfg, workspace)
 
 	var workers sync.WaitGroup
-	workers.Add(2)
-	go runEventAutomationWorker(
+	workers.Add(1)
+	go runEventRetentionWorker(
 		workerCtx,
 		&workers,
-		"router",
-		withEventAutomationRuntime(acquireRuntime, router.ProcessOne),
+		store,
+		acquireRuntime,
+		ingress.RetentionDays,
+		eventRetentionMaintenanceInterval,
+		time.Now,
 	)
-	go runEventAutomationWorker(
-		workerCtx,
-		&workers,
-		"dispatcher",
-		withEventAutomationRuntime(acquireRuntime, dispatcher.ProcessOne),
-	)
+
+	if cfg.Workflows.Enabled {
+		runStore := executor.Store
+		if runStore == nil {
+			runStore = workflows.NewFileRunStore(workspace)
+			executor.Store = runStore
+		}
+		router := &workflows.EventWorkflowRouter{
+			Inbox:                store,
+			WorkspaceDir:         workspace,
+			DefinitionsDir:       executor.DefinitionsDir,
+			RuntimeCompatibility: executor.RuntimeCompatibility,
+			RuntimeEvents:        runtimeEvents,
+			WorkerLabel:          "gateway-workflow-router",
+		}
+		dispatcher := &workflows.EventWorkflowDispatcher{
+			Inbox:                store,
+			Executor:             executor,
+			RunStore:             runStore,
+			WorkspaceDir:         workspace,
+			DefinitionsDir:       executor.DefinitionsDir,
+			RuntimeCompatibility: executor.RuntimeCompatibility,
+			WorkerLabel:          "gateway-workflow-dispatcher",
+		}
+
+		workers.Add(2)
+		go runEventAutomationWorker(
+			workerCtx,
+			&workers,
+			"router",
+			withEventAutomationRuntime(acquireRuntime, router.ProcessOne),
+		)
+		go runEventAutomationWorker(
+			workerCtx,
+			&workers,
+			"dispatcher",
+			withEventAutomationRuntime(acquireRuntime, dispatcher.ProcessOne),
+		)
+	}
 	go func() {
 		workers.Wait()
 		close(service.done)
@@ -309,6 +334,154 @@ func validateEventAutomationStorage(ctx context.Context, cfg *config.Config) err
 		return fmt.Errorf("close validated durable event inbox: %w", err)
 	}
 	return nil
+}
+
+func runEventRetentionWorker(
+	ctx context.Context,
+	workers *sync.WaitGroup,
+	pruner eventRetentionPruner,
+	acquireRuntime eventAutomationRuntimeAcquire,
+	retentionDays int,
+	interval time.Duration,
+	now func() time.Time,
+) {
+	defer workers.Done()
+	if interval <= 0 {
+		interval = eventRetentionMaintenanceInterval
+	}
+	if now == nil {
+		now = time.Now
+	}
+
+	runMaintenance := func() {
+		maintenanceCtx := ctx
+		releaseRuntime := func() {}
+		var err error
+		if acquireRuntime != nil {
+			maintenanceCtx, releaseRuntime, err = acquireRuntime(ctx)
+			if err != nil {
+				if ctx.Err() == nil {
+					logger.WarnCF("eventing", "Event retention maintenance failed", map[string]any{
+						"error": err.Error(),
+					})
+				}
+				return
+			}
+		}
+		defer releaseRuntime()
+
+		pruned, err := pruneExpiredEvents(
+			maintenanceCtx,
+			pruner,
+			retentionDays,
+			now,
+		)
+		if err != nil {
+			if ctx.Err() == nil {
+				logger.WarnCF("eventing", "Event retention maintenance failed", map[string]any{
+					"error": err.Error(),
+				})
+			}
+			return
+		}
+		if pruned > 0 {
+			logger.DebugCF("eventing", "Pruned expired durable events", map[string]any{
+				"count": pruned,
+			})
+		}
+	}
+
+	// Run once immediately so expiration does not depend on process uptime or
+	// the time of day at which the gateway happened to start.
+	runMaintenance()
+	if ctx.Err() != nil {
+		return
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runMaintenance()
+		}
+	}
+}
+
+func pruneExpiredEvents(
+	ctx context.Context,
+	pruner eventRetentionPruner,
+	retentionDays int,
+	now func() time.Time,
+) (int64, error) {
+	if pruner == nil {
+		return 0, fmt.Errorf("event retention store is required")
+	}
+	if retentionDays <= 0 {
+		return 0, fmt.Errorf("positive event retention days are required")
+	}
+	if now == nil {
+		now = time.Now
+	}
+
+	cutoff, applicable, err := durableEventRetentionCutoff(
+		now().UTC(),
+		retentionDays,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if !applicable {
+		// Nothing stored in a signed Unix-nanosecond column can be old enough
+		// to expire. Treat this as a safe no-op rather than allowing calendar
+		// arithmetic to wrap into a destructive future cutoff.
+		return 0, nil
+	}
+
+	var total int64
+	for range eventRetentionMaxBatchesPerCycle {
+		count, err := pruner.Prune(ctx, cutoff, eventRetentionPruneBatchSize)
+		total += count
+		if err != nil {
+			return total, err
+		}
+		if count < eventRetentionPruneBatchSize {
+			return total, nil
+		}
+	}
+	return total, nil
+}
+
+func durableEventRetentionCutoff(
+	now time.Time,
+	retentionDays int,
+) (time.Time, bool, error) {
+	if retentionDays <= 0 {
+		return time.Time{}, false, fmt.Errorf(
+			"positive event retention days are required",
+		)
+	}
+	if !isDurableEventTimestamp(now) {
+		return time.Time{}, false, fmt.Errorf(
+			"event retention clock is outside the durable nanosecond range",
+		)
+	}
+	if retentionDays > eventRetentionMaxDurableDays {
+		return time.Time{}, false, nil
+	}
+
+	cutoff := now.AddDate(0, 0, -retentionDays)
+	if cutoff.After(now) || !isDurableEventTimestamp(cutoff) {
+		return time.Time{}, false, nil
+	}
+	return cutoff, true, nil
+}
+
+func isDurableEventTimestamp(value time.Time) bool {
+	encoded := value.UnixNano()
+	return !value.IsZero() && value.Equal(time.Unix(0, encoded))
 }
 
 func runEventAutomationWorker(

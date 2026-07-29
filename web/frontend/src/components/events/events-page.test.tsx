@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import type { ReactNode } from "react"
+import type { AnchorHTMLAttributes, ReactNode } from "react"
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { EventView } from "@/api/events"
@@ -24,6 +24,21 @@ vi.mock("@/api/events", () => ({
   listEventDispatches: vi.fn(),
   listEvents: vi.fn(),
   replayEvent: vi.fn(),
+}))
+
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({
+    children,
+    to,
+    ...props
+  }: {
+    children: ReactNode
+    to: string
+  } & AnchorHTMLAttributes<HTMLAnchorElement>) => (
+    <a {...props} href={to}>
+      {children}
+    </a>
+  ),
 }))
 
 const eventA: EventView = {

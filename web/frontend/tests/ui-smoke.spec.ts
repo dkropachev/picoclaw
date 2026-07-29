@@ -6,6 +6,7 @@ const smokeRoutes = [
   "/models",
   "/accounts",
   "/events",
+  "/event-sources",
   "/logs",
   "/agent/git-workspaces",
   "/agent/tools",
@@ -1027,6 +1028,38 @@ async function mockLauncherApis(
             channels: {
               telegram: { enabled: true },
               discord: { enabled: false },
+            },
+            channel_list: {
+              telegram: { enabled: true, type: "telegram", settings: {} },
+              discord: { enabled: false, type: "discord", settings: {} },
+              deltachat: {
+                enabled: true,
+                type: "deltachat",
+                settings: { email: "events@example.test" },
+              },
+            },
+            gateway: { host: "127.0.0.1", port: 18789 },
+            events: {
+              ingress: {
+                enabled: true,
+                retention_days: 30,
+                max_payload_bytes: 1048576,
+                redact_fields: ["authorization"],
+                webhooks: {
+                  github: {
+                    enabled: true,
+                    format: "github",
+                    secret: "[NOT_HERE]",
+                  },
+                },
+                channels: {
+                  deltachat: {
+                    enabled: true,
+                    source: "email",
+                    mode: "mirror",
+                  },
+                },
+              },
             },
           })
         case "/api/accounts/models":

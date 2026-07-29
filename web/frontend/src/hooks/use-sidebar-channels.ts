@@ -10,6 +10,7 @@ import {
   IconBrandWechat,
   IconBrandWhatsapp,
   IconCamera,
+  IconMail,
   IconMessages,
   IconPlug,
   IconRobot,
@@ -36,6 +37,7 @@ const CHANNEL_IMPORTANCE_TAIL = [
   "qq",
   "onebot",
   "matrix",
+  "deltachat",
   "pico",
   "maixcam",
   "irc",
@@ -79,6 +81,7 @@ const CHANNEL_ICON_MAP: Record<
   whatsapp: IconBrandWhatsapp,
   whatsapp_native: IconBrandWhatsapp,
   matrix: IconBrandMatrix,
+  deltachat: IconMail,
   maixcam: IconCamera,
   onebot: IconRobot,
   pico: IconBrandChrome,
@@ -102,21 +105,28 @@ function isChannelEnabled(
   }
 
   // whatsapp / whatsapp_native share one config block and are split by use_native.
+  const channelSettings = asRecord(channelConfig.settings)
+  const nestedUseNative = channelSettings.use_native
+  const useNative =
+    typeof nestedUseNative === "boolean"
+      ? nestedUseNative
+      : channelConfig.use_native === true
   if (channel.name === "whatsapp_native") {
-    return channelConfig.use_native === true
+    return useNative
   }
   if (channel.name === "whatsapp") {
-    return channelConfig.use_native !== true
+    return !useNative
   }
 
   return true
 }
 
-function buildChannelEnabledMap(
+export function buildChannelEnabledMap(
   channels: SupportedChannel[],
   appConfig: AppConfig,
 ): Record<string, boolean> {
-  const channelsConfig = asRecord(asRecord(appConfig).channels)
+  const config = asRecord(appConfig)
+  const channelsConfig = asRecord(config.channel_list ?? config.channels)
   const result: Record<string, boolean> = {}
   for (const channel of channels) {
     result[channel.name] = isChannelEnabled(channel, channelsConfig)
