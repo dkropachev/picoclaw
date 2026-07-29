@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -21,7 +22,10 @@ import (
 
 const mcpProbeTimeout = 15 * time.Second
 
-var mcpProbeServer = defaultMCPProbeServer
+var (
+	mcpProbeServer          = defaultMCPProbeServer
+	mcpSaveConfigIfRevision = config.SaveConfigIfRevision
+)
 
 type mcpConfigResponse struct {
 	Enabled   bool                       `json:"enabled"`
@@ -178,18 +182,18 @@ func (h *Handler) handleUpdateMCPSettings(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	h.mcpMu.Lock()
-	defer h.mcpMu.Unlock()
+	unlock := h.lockMCPConfigMutation()
+	defer unlock()
 
-	cfg, err := config.LoadConfigForUpdate(h.configPath)
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
 	}
 	cfg.Tools.MCP.Enabled = request.Enabled
 	cfg.Tools.MCP.Discovery = request.Discovery
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+	if _, err := mcpSaveConfigIfRevision(h.configPath, cfg, revision); err != nil {
+		writeMCPConfigSaveError(w, err)
 		return
 	}
 	writeMCPConfigResponse(w, cfg)
@@ -202,10 +206,10 @@ func (h *Handler) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.mcpMu.Lock()
-	defer h.mcpMu.Unlock()
+	unlock := h.lockMCPConfigMutation()
+	defer unlock()
 
-	cfg, err := config.LoadConfigForUpdate(h.configPath)
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
@@ -232,8 +236,8 @@ func (h *Handler) handleAddMCPServer(w http.ResponseWriter, r *http.Request) {
 	if firstServer {
 		cfg.Tools.MCP.Enabled = true
 	}
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+	if _, err := mcpSaveConfigIfRevision(h.configPath, cfg, revision); err != nil {
+		writeMCPConfigSaveError(w, err)
 		return
 	}
 	writeMCPConfigResponse(w, cfg)
@@ -246,10 +250,10 @@ func (h *Handler) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	h.mcpMu.Lock()
-	defer h.mcpMu.Unlock()
+	unlock := h.lockMCPConfigMutation()
+	defer unlock()
 
-	cfg, err := config.LoadConfigForUpdate(h.configPath)
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
@@ -299,8 +303,8 @@ func (h *Handler) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) 
 
 	delete(cfg.Tools.MCP.Servers, actualOldName)
 	cfg.Tools.MCP.Servers[newName] = server
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+	if _, err := mcpSaveConfigIfRevision(h.configPath, cfg, revision); err != nil {
+		writeMCPConfigSaveError(w, err)
 		return
 	}
 	currentCredentialID := ""
@@ -315,10 +319,10 @@ func (h *Handler) handleUpdateMCPServer(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *Handler) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
-	h.mcpMu.Lock()
-	defer h.mcpMu.Unlock()
+	unlock := h.lockMCPConfigMutation()
+	defer unlock()
 
-	cfg, err := config.LoadConfigForUpdate(h.configPath)
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
@@ -334,8 +338,8 @@ func (h *Handler) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) 
 	if len(cfg.Tools.MCP.Servers) == 0 {
 		cfg.Tools.MCP.Enabled = false
 	}
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+	if _, err := mcpSaveConfigIfRevision(h.configPath, cfg, revision); err != nil {
+		writeMCPConfigSaveError(w, err)
 		return
 	}
 	if server.Auth != nil && credentialID != "" && !mcpCredentialReferenced(cfg.Tools.MCP.Servers, credentialID) {
@@ -413,10 +417,10 @@ func (h *Handler) handleSetMCPServerCredential(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	h.mcpMu.Lock()
-	defer h.mcpMu.Unlock()
+	unlock := h.lockMCPConfigMutation()
+	defer unlock()
 
-	cfg, err := config.LoadConfigForUpdate(h.configPath)
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
@@ -459,30 +463,30 @@ func (h *Handler) handleSetMCPServerCredential(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	revision := nextMCPAuthRevision(server.Auth)
+	authRevision := nextMCPAuthRevision(server.Auth)
 	server.Auth = &config.MCPServerAuthConfig{
 		Type:         "bearer",
 		CredentialID: credentialID,
-		Revision:     revision,
+		Revision:     authRevision,
 	}
 	cfg.Tools.MCP.Servers[name] = server
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
+	if _, err := mcpSaveConfigIfRevision(h.configPath, cfg, revision); err != nil {
 		if oldCredential == nil {
 			_ = picoauth.DeleteCredential(credentialID)
 		} else {
 			_ = picoauth.SetCredential(credentialID, oldCredential)
 		}
-		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+		writeMCPConfigSaveError(w, err)
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) handleDeleteMCPServerCredential(w http.ResponseWriter, r *http.Request) {
-	h.mcpMu.Lock()
-	defer h.mcpMu.Unlock()
+	unlock := h.lockMCPConfigMutation()
+	defer unlock()
 
-	cfg, err := config.LoadConfigForUpdate(h.configPath)
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
@@ -500,8 +504,8 @@ func (h *Handler) handleDeleteMCPServerCredential(w http.ResponseWriter, r *http
 	credentialID, _ := picomcp.CredentialID(name, server.Auth)
 	server.Auth = nil
 	cfg.Tools.MCP.Servers[name] = server
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+	if _, err := mcpSaveConfigIfRevision(h.configPath, cfg, revision); err != nil {
+		writeMCPConfigSaveError(w, err)
 		return
 	}
 	if credentialID != "" && !mcpCredentialReferenced(cfg.Tools.MCP.Servers, credentialID) {
@@ -515,6 +519,26 @@ func (h *Handler) handleDeleteMCPServerCredential(w http.ResponseWriter, r *http
 		}
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// lockMCPConfigMutation keeps the broad config lock first in the lock order.
+// MCP config/credential transactions then retain mcpMu's serialization, while
+// OAuth persistence may safely take mcpOAuthMu last.
+func (h *Handler) lockMCPConfigMutation() func() {
+	h.configMutationMu.Lock()
+	h.mcpMu.Lock()
+	return func() {
+		h.mcpMu.Unlock()
+		h.configMutationMu.Unlock()
+	}
+}
+
+func writeMCPConfigSaveError(w http.ResponseWriter, err error) {
+	if errors.Is(err, config.ErrConfigRevisionMismatch) {
+		http.Error(w, "Configuration changed; reload and try again", http.StatusConflict)
+		return
+	}
+	http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
 }
 
 func buildMCPConfigResponse(cfg *config.Config) (mcpConfigResponse, error) {
