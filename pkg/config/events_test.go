@@ -1,12 +1,18 @@
 package config
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/sipeed/picoclaw/pkg/credential"
 )
 
 func TestDefaultEventLoggingConfig(t *testing.T) {
@@ -383,4 +389,883 @@ func TestSaveLoadConfigEventIngress(t *testing.T) {
 	if !strings.Contains(string(data), `"ingress"`) {
 		t.Fatalf("configured ingress missing from saved config:\n%s", data)
 	}
+}
+
+func TestEffectiveEventIngressConfigDeepCopiesWebhooks(t *testing.T) {
+	secret := eventWebhookTestSecret("deep-copy")
+	cfg := &Config{
+		Events: EventsConfig{
+			Ingress: EventIngressConfig{
+				Webhooks: map[string]GenericWebhookConfig{
+					"build": {
+						Enabled: true,
+						Secret:  *NewSecureString(secret),
+					},
+				},
+			},
+		},
+	}
+
+	got := EffectiveEventIngressConfig(cfg, t.TempDir())
+	webhook := got.Webhooks["build"]
+	webhook.Enabled = false
+	webhook.Secret.Set(eventWebhookTestSecret("changed"))
+	got.Webhooks["build"] = webhook
+	delete(got.Webhooks, "build")
+
+	original, exists := cfg.Events.Ingress.Webhooks["build"]
+	if !exists {
+		t.Fatal("mutating effective webhooks deleted the source connector")
+	}
+	if !original.Enabled {
+		t.Fatal("mutating effective webhooks changed the source connector")
+	}
+	if original.Secret.String() != secret {
+		t.Fatal("mutating effective webhook secret changed the source secret")
+	}
+}
+
+func TestEventIngressConfigValidateWebhooks(t *testing.T) {
+	validSecret := eventWebhookTestSecret("valid")
+	shortSecret := genericWebhookSecretPrefix +
+		base64.StdEncoding.EncodeToString([]byte("too short"))
+	nonCanonicalSecret := validSecret[:len(validSecret)-1] + "\n" +
+		validSecret[len(validSecret)-1:]
+	longName := "a" + strings.Repeat("b", genericWebhookMaxConnectorBytes)
+
+	tests := []struct {
+		name    string
+		cfg     EventIngressConfig
+		wantErr bool
+	}{
+		{
+			name: "master disabled is inert",
+			cfg: EventIngressConfig{
+				Webhooks: map[string]GenericWebhookConfig{
+					"not/a/name": {
+						Enabled: true,
+						Secret:  *NewSecureString("not-a-secret"),
+					},
+				},
+			},
+		},
+		{
+			name: "no generic connectors",
+			cfg:  EventIngressConfig{Enabled: true},
+		},
+		{
+			name: "valid connector",
+			cfg: EventIngressConfig{
+				Enabled: true,
+				Webhooks: map[string]GenericWebhookConfig{
+					"Build_hook-2": {
+						Enabled: true,
+						Secret:  *NewSecureString(validSecret),
+					},
+				},
+			},
+		},
+		{
+			name: "disabled connector does not require secret",
+			cfg: EventIngressConfig{
+				Enabled: true,
+				Webhooks: map[string]GenericWebhookConfig{
+					"disabled": {Enabled: false},
+				},
+			},
+		},
+		{
+			name: "empty connector name",
+			cfg: EventIngressConfig{
+				Enabled: true,
+				Webhooks: map[string]GenericWebhookConfig{
+					"": {Enabled: false},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "unsafe connector name",
+			cfg: EventIngressConfig{
+				Enabled: true,
+				Webhooks: map[string]GenericWebhookConfig{
+					"build/hook": {Enabled: false},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "connector name too long",
+			cfg: EventIngressConfig{
+				Enabled: true,
+				Webhooks: map[string]GenericWebhookConfig{
+					longName: {Enabled: false},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "case collision",
+			cfg: EventIngressConfig{
+				Enabled: true,
+				Webhooks: map[string]GenericWebhookConfig{
+					"Build": {Enabled: false},
+					"build": {Enabled: false},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "enabled connector missing secret",
+			cfg: EventIngressConfig{
+				Enabled: true,
+				Webhooks: map[string]GenericWebhookConfig{
+					"build": {Enabled: true},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "wrong secret prefix",
+			cfg: EventIngressConfig{
+				Enabled: true,
+				Webhooks: map[string]GenericWebhookConfig{
+					"build": {
+						Enabled: true,
+						Secret:  *NewSecureString(strings.TrimPrefix(validSecret, genericWebhookSecretPrefix)),
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "weak secret",
+			cfg: EventIngressConfig{
+				Enabled: true,
+				Webhooks: map[string]GenericWebhookConfig{
+					"build": {
+						Enabled: true,
+						Secret:  *NewSecureString(shortSecret),
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "noncanonical base64",
+			cfg: EventIngressConfig{
+				Enabled: true,
+				Webhooks: map[string]GenericWebhookConfig{
+					"build": {
+						Enabled: true,
+						Secret:  *NewSecureString(nonCanonicalSecret),
+					},
+				},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatal("Validate() error = nil, want error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestSaveLoadConfigGenericWebhookSeparatesSecrets(t *testing.T) {
+	mustSetupSSHKey(t)
+	t.Setenv(credential.PassphraseEnvVar, "")
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	secret := eventWebhookTestSecret("round-trip")
+	cfg := DefaultConfig()
+	cfg.Events.Ingress = EventIngressConfig{
+		Enabled:         true,
+		DatabasePath:    "state/events.db",
+		RetentionDays:   17,
+		MaxPayloadBytes: 8192,
+		RedactFields:    []string{"tenant_key"},
+		Webhooks: map[string]GenericWebhookConfig{
+			"deploy": {
+				Enabled: true,
+				Secret:  *NewSecureString(secret),
+			},
+		},
+	}
+
+	if err := SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig() error: %v", err)
+	}
+
+	configData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config.json: %v", err)
+	}
+	if strings.Contains(string(configData), secret) {
+		t.Fatal("config.json contains the webhook secret")
+	}
+	if !strings.Contains(string(configData), `"[NOT_HERE]"`) {
+		t.Fatalf("config.json does not contain the masked webhook secret:\n%s", configData)
+	}
+
+	var savedJSON struct {
+		Events struct {
+			Ingress struct {
+				Webhooks map[string]struct {
+					Enabled bool   `json:"enabled"`
+					Secret  string `json:"secret"`
+				} `json:"webhooks"`
+			} `json:"ingress"`
+		} `json:"events"`
+	}
+	if err = json.Unmarshal(configData, &savedJSON); err != nil {
+		t.Fatalf("decode config.json: %v", err)
+	}
+	deployJSON := savedJSON.Events.Ingress.Webhooks["deploy"]
+	if !deployJSON.Enabled || deployJSON.Secret != "[NOT_HERE]" {
+		t.Fatalf("saved webhook JSON = %#v, want enabled with masked secret", deployJSON)
+	}
+
+	securityData, err := os.ReadFile(securityPath(path))
+	if err != nil {
+		t.Fatalf("read .security.yml: %v", err)
+	}
+	var savedSecurity struct {
+		Events struct {
+			Ingress struct {
+				Webhooks map[string]map[string]any `yaml:"webhooks"`
+			} `yaml:"ingress"`
+		} `yaml:"events"`
+	}
+	if err = yaml.Unmarshal(securityData, &savedSecurity); err != nil {
+		t.Fatalf("decode .security.yml: %v", err)
+	}
+	deploySecurity := savedSecurity.Events.Ingress.Webhooks["deploy"]
+	if len(deploySecurity) != 1 || deploySecurity["secret"] != secret {
+		t.Fatalf("saved webhook security data = %#v, want only secret", deploySecurity)
+	}
+
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	deploy := loaded.Events.Ingress.Webhooks["deploy"]
+	if !deploy.Enabled || deploy.Secret.String() != secret {
+		t.Fatalf("loaded webhook = %#v, want enabled with resolved secret", deploy)
+	}
+	if loaded.Events.Ingress.DatabasePath != "state/events.db" ||
+		loaded.Events.Ingress.RetentionDays != 17 ||
+		loaded.Events.Ingress.MaxPayloadBytes != 8192 ||
+		!reflect.DeepEqual(loaded.Events.Ingress.RedactFields, []string{"tenant_key"}) {
+		t.Fatalf("non-secret ingress config changed after round trip: %#v", loaded.Events.Ingress)
+	}
+}
+
+func TestLoadGenericWebhookSecurityOverlayIsNarrow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	secret := eventWebhookTestSecret("kept")
+	configData := []byte(`{
+		"version": 3,
+		"events": {
+			"ingress": {
+				"enabled": true,
+				"database_path": "wanted/events.db",
+				"retention_days": 11,
+				"webhooks": {
+					"kept": {
+						"enabled": true,
+						"secret": "[NOT_HERE]"
+					}
+				}
+			}
+		}
+	}`)
+	if err := os.WriteFile(path, configData, 0o600); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+	securityData := []byte(`events:
+  logging:
+    enabled: false
+  ingress:
+    enabled: false
+    database_path: replaced/events.db
+    retention_days: 1
+    webhooks:
+      kept:
+        enabled: false
+        secret: ` + secret + `
+      ghost:
+        enabled: true
+        secret: file://deleted-connector-secret.txt
+`)
+	if err := os.WriteFile(securityPath(path), securityData, 0o600); err != nil {
+		t.Fatalf("write .security.yml: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if !cfg.Events.Ingress.Enabled {
+		t.Fatal("security overlay changed the master enabled flag")
+	}
+	if cfg.Events.Ingress.DatabasePath != "wanted/events.db" ||
+		cfg.Events.Ingress.RetentionDays != 11 {
+		t.Fatalf("security overlay changed non-secret ingress fields: %#v", cfg.Events.Ingress)
+	}
+	if _, exists := cfg.Events.Ingress.Webhooks["ghost"]; exists {
+		t.Fatal("security-only connector was added to runtime configuration")
+	}
+	kept := cfg.Events.Ingress.Webhooks["kept"]
+	if !kept.Enabled {
+		t.Fatal("security overlay changed connector enabled flag")
+	}
+	if kept.Secret.String() != secret {
+		t.Fatalf("resolved secret = %q, want configured kept secret", kept.Secret.String())
+	}
+}
+
+func TestGenericWebhookSecurityReferencesRoundTrip(t *testing.T) {
+	mustSetupSSHKey(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	const passphrase = "webhook-test-passphrase"
+	originalPassphraseProvider := credential.PassphraseProvider
+	credential.PassphraseProvider = func() string { return passphrase }
+	t.Cleanup(func() { credential.PassphraseProvider = originalPassphraseProvider })
+
+	encryptedSecretValue := eventWebhookTestSecret("encrypted")
+	encryptedSecret, err := credential.Encrypt(passphrase, "", encryptedSecretValue)
+	if err != nil {
+		t.Fatalf("encrypt webhook secret: %v", err)
+	}
+	fileSecret := eventWebhookTestSecret("file")
+	if err = os.WriteFile(filepath.Join(dir, "webhook-secret.txt"), []byte(fileSecret+"\n"), 0o600); err != nil {
+		t.Fatalf("write webhook secret file: %v", err)
+	}
+
+	configData := []byte(`{
+		"version": 3,
+		"events": {
+			"ingress": {
+				"enabled": true,
+				"webhooks": {
+					"encrypted": {"enabled": true, "secret": "[NOT_HERE]"},
+					"from-file": {"enabled": true, "secret": "[NOT_HERE]"}
+				}
+			}
+		}
+	}`)
+	if err = os.WriteFile(path, configData, 0o600); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+	securityData := []byte(`events:
+  ingress:
+    webhooks:
+      encrypted:
+        secret: ` + encryptedSecret + `
+      from-file:
+        secret: file://webhook-secret.txt
+`)
+	if err = os.WriteFile(securityPath(path), securityData, 0o600); err != nil {
+		t.Fatalf("write .security.yml: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	encryptedWebhook := cfg.Events.Ingress.Webhooks["encrypted"]
+	if got := encryptedWebhook.Secret.String(); got != encryptedSecretValue {
+		t.Fatalf("resolved enc:// secret = %q, want original secret", got)
+	}
+	fileWebhook := cfg.Events.Ingress.Webhooks["from-file"]
+	if got := fileWebhook.Secret.String(); got != fileSecret {
+		t.Fatalf("resolved file:// secret = %q, want file content", got)
+	}
+
+	if err = SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig() error: %v", err)
+	}
+	savedSecurity, err := os.ReadFile(securityPath(path))
+	if err != nil {
+		t.Fatalf("read saved .security.yml: %v", err)
+	}
+	if !strings.Contains(string(savedSecurity), encryptedSecret) {
+		t.Fatal("SaveConfig did not preserve the enc:// webhook secret reference")
+	}
+	if !strings.Contains(string(savedSecurity), "file://webhook-secret.txt") {
+		t.Fatal("SaveConfig did not preserve the file:// webhook secret reference")
+	}
+	if strings.Contains(string(savedSecurity), encryptedSecretValue) ||
+		strings.Contains(string(savedSecurity), fileSecret) {
+		t.Fatal("saved .security.yml expanded a secure webhook reference")
+	}
+}
+
+func TestDisabledGenericWebhookPreservesUnresolvedSecurityReference(t *testing.T) {
+	mustSetupSSHKey(t)
+	t.Setenv(credential.PassphraseEnvVar, "")
+
+	tests := []struct {
+		name             string
+		ingressEnabled   bool
+		connectorEnabled bool
+	}{
+		{
+			name:             "master disabled",
+			ingressEnabled:   false,
+			connectorEnabled: true,
+		},
+		{
+			name:             "connector disabled",
+			ingressEnabled:   true,
+			connectorEnabled: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			configData := fmt.Sprintf(`{
+				"version": 3,
+				"events": {
+					"ingress": {
+						"enabled": %t,
+						"webhooks": {
+							"deploy": {
+								"enabled": %t,
+								"secret": "[NOT_HERE]"
+							}
+						}
+					}
+				}
+			}`, test.ingressEnabled, test.connectorEnabled)
+			if err := os.WriteFile(path, []byte(configData), 0o600); err != nil {
+				t.Fatalf("write config.json: %v", err)
+			}
+			const missingReference = "file://missing-webhook-secret.txt"
+			securityData := []byte(`events:
+  ingress:
+    webhooks:
+      deploy:
+        secret: ` + missingReference + `
+`)
+			if err := os.WriteFile(
+				securityPath(path),
+				securityData,
+				0o600,
+			); err != nil {
+				t.Fatalf("write .security.yml: %v", err)
+			}
+
+			cfg, err := LoadConfig(path)
+			if err != nil {
+				t.Fatalf("LoadConfig(disabled reference) error = %v", err)
+			}
+			webhook := cfg.Events.Ingress.Webhooks["deploy"]
+			if got := webhook.Secret.String(); got != missingReference {
+				t.Fatalf("preserved unresolved secret = %q, want %q", got, missingReference)
+			}
+			if saveErr := SaveConfig(path, cfg); saveErr != nil {
+				t.Fatalf("SaveConfig(disabled reference) error = %v", saveErr)
+			}
+			savedSecurity, err := os.ReadFile(securityPath(path))
+			if err != nil {
+				t.Fatalf("read saved .security.yml: %v", err)
+			}
+			if !strings.Contains(string(savedSecurity), missingReference) {
+				t.Fatalf(
+					"saved disabled security config lost reference:\n%s",
+					savedSecurity,
+				)
+			}
+		})
+	}
+}
+
+func TestResolveWebhookSecretsErrorDoesNotExposeConnectorName(t *testing.T) {
+	exposedSecret := genericWebhookSecretPrefix +
+		base64.StdEncoding.EncodeToString(make([]byte, genericWebhookMinSecretBytes+1))
+	updateResolver(t.TempDir())
+
+	cfg := EventIngressConfig{
+		Enabled: true,
+		Webhooks: map[string]GenericWebhookConfig{
+			"safe": {
+				Enabled: true,
+				Secret:  unresolvedEventWebhookSecret(exposedSecret),
+			},
+			exposedSecret: {
+				Enabled: true,
+				Secret: unresolvedEventWebhookSecret(
+					"file://" + exposedSecret,
+				),
+			},
+		},
+	}
+
+	err := cfg.resolveWebhookSecrets()
+	if err == nil {
+		t.Fatal("resolveWebhookSecrets() error = nil, want missing file error")
+	}
+	if strings.Contains(err.Error(), exposedSecret) {
+		t.Fatalf("resolveWebhookSecrets() error exposed connector name: %v", err)
+	}
+	if err.Error() != "resolve event webhook signing secret" {
+		t.Fatalf("resolveWebhookSecrets() error = %q, want static opaque error", err)
+	}
+}
+
+func TestLoadWebhookSecurityShapeErrorDoesNotExposeConnectorName(t *testing.T) {
+	exposedSecret := genericWebhookSecretPrefix +
+		base64.StdEncoding.EncodeToString(make([]byte, genericWebhookMinSecretBytes+1))
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "connector entry is not a mapping",
+			body: "        not-a-mapping",
+		},
+		{
+			name: "secret is not a scalar",
+			body: "        secret:\n          - invalid",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			configData := fmt.Sprintf(`{
+				"version": 3,
+				"events": {
+					"ingress": {
+						"enabled": true,
+						"webhooks": {
+							"owner": {
+								"enabled": true,
+								"secret": %q
+							},
+							%s: {
+								"enabled": false,
+								"secret": "[NOT_HERE]"
+							}
+						}
+					}
+				}
+			}`, exposedSecret, fmt.Sprintf("%q", exposedSecret))
+			if err := os.WriteFile(path, []byte(configData), 0o600); err != nil {
+				t.Fatalf("write config.json: %v", err)
+			}
+			securityData := fmt.Sprintf(
+				"events:\n  ingress:\n    webhooks:\n      %s:\n%s\n",
+				exposedSecret,
+				test.body,
+			)
+			if err := os.WriteFile(
+				securityPath(path),
+				[]byte(securityData),
+				0o600,
+			); err != nil {
+				t.Fatalf("write .security.yml: %v", err)
+			}
+
+			_, err := LoadConfig(path)
+			if err == nil {
+				t.Fatal("LoadConfig() error = nil, want malformed security error")
+			}
+			if strings.Contains(err.Error(), exposedSecret) {
+				t.Fatalf("LoadConfig() error exposed connector name: %v", err)
+			}
+			if !strings.Contains(err.Error(), "event webhook secret") {
+				t.Fatalf("LoadConfig() error = %v, want opaque secret context", err)
+			}
+		})
+	}
+}
+
+func TestLoadGenericWebhookSecurityUsesMasterEnvOverride(t *testing.T) {
+	mustSetupSSHKey(t)
+	t.Setenv(credential.PassphraseEnvVar, "")
+
+	tests := []struct {
+		name              string
+		jsonEnabled       bool
+		envEnabled        string
+		securityOverlay   bool
+		writeSecretFile   bool
+		wantEnabled       bool
+		wantResolvedValue bool
+	}{
+		{
+			name:              "environment enables JSON-disabled security reference",
+			jsonEnabled:       false,
+			envEnabled:        "true",
+			securityOverlay:   true,
+			writeSecretFile:   true,
+			wantEnabled:       true,
+			wantResolvedValue: true,
+		},
+		{
+			name:            "environment disables JSON-enabled security reference",
+			jsonEnabled:     true,
+			envEnabled:      "false",
+			securityOverlay: true,
+			wantEnabled:     false,
+		},
+		{
+			name:              "environment enables JSON-disabled direct reference",
+			jsonEnabled:       false,
+			envEnabled:        "true",
+			writeSecretFile:   true,
+			wantEnabled:       true,
+			wantResolvedValue: true,
+		},
+		{
+			name:        "environment disables JSON-enabled direct reference",
+			jsonEnabled: true,
+			envEnabled:  "false",
+			wantEnabled: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("PICOCLAW_EVENTS_INGRESS_ENABLED", test.envEnabled)
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			const reference = "file://webhook-secret.txt"
+			jsonSecret := reference
+			if test.securityOverlay {
+				jsonSecret = "[NOT_HERE]"
+			}
+			configData := fmt.Sprintf(`{
+				"version": 3,
+				"events": {
+					"ingress": {
+						"enabled": %t,
+						"webhooks": {
+							"deploy": {
+								"enabled": true,
+								"secret": %q
+							}
+						}
+					}
+				}
+			}`, test.jsonEnabled, jsonSecret)
+			if err := os.WriteFile(path, []byte(configData), 0o600); err != nil {
+				t.Fatalf("write config.json: %v", err)
+			}
+
+			resolvedSecret := eventWebhookTestSecret("env-override")
+			if test.writeSecretFile {
+				if err := os.WriteFile(
+					filepath.Join(dir, "webhook-secret.txt"),
+					[]byte(resolvedSecret+"\n"),
+					0o600,
+				); err != nil {
+					t.Fatalf("write webhook secret: %v", err)
+				}
+			}
+			if test.securityOverlay {
+				securityData := []byte(`events:
+  ingress:
+    webhooks:
+      deploy:
+        secret: ` + reference + `
+`)
+				if err := os.WriteFile(securityPath(path), securityData, 0o600); err != nil {
+					t.Fatalf("write .security.yml: %v", err)
+				}
+			}
+
+			cfg, err := LoadConfig(path)
+			if err != nil {
+				t.Fatalf("LoadConfig() error = %v", err)
+			}
+			if cfg.Events.Ingress.Enabled != test.wantEnabled {
+				t.Fatalf(
+					"effective ingress enabled = %t, want %t",
+					cfg.Events.Ingress.Enabled,
+					test.wantEnabled,
+				)
+			}
+			webhook := cfg.Events.Ingress.Webhooks["deploy"]
+			wantSecret := reference
+			if test.wantResolvedValue {
+				wantSecret = resolvedSecret
+			}
+			if got := webhook.Secret.String(); got != wantSecret {
+				t.Fatalf("loaded webhook secret = %q, want %q", got, wantSecret)
+			}
+		})
+	}
+}
+
+func TestSecurityCopyFromUsesCandidateWebhookMasterEnablement(t *testing.T) {
+	tests := []struct {
+		name             string
+		candidateEnabled bool
+		envEnabled       string
+		writeSecretFile  bool
+		wantResolved     bool
+	}{
+		{
+			name:             "enabled candidate resolves despite disabled process env",
+			candidateEnabled: true,
+			envEnabled:       "false",
+			writeSecretFile:  true,
+			wantResolved:     true,
+		},
+		{
+			name:             "disabled candidate stays unresolved despite enabled process env",
+			candidateEnabled: false,
+			envEnabled:       "true",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("PICOCLAW_EVENTS_INGRESS_ENABLED", test.envEnabled)
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			updateResolver(dir)
+
+			const reference = "file://webhook-secret.txt"
+			resolvedSecret := eventWebhookTestSecret("security-copy")
+			if test.writeSecretFile {
+				if err := os.WriteFile(
+					filepath.Join(dir, "webhook-secret.txt"),
+					[]byte(resolvedSecret+"\n"),
+					0o600,
+				); err != nil {
+					t.Fatalf("write webhook secret: %v", err)
+				}
+			}
+			securityData := []byte(`events:
+  ingress:
+    webhooks:
+      deploy:
+        secret: ` + reference + `
+`)
+			if err := os.WriteFile(securityPath(path), securityData, 0o600); err != nil {
+				t.Fatalf("write .security.yml: %v", err)
+			}
+
+			cfg := &Config{
+				Events: EventsConfig{
+					Ingress: EventIngressConfig{
+						Enabled: test.candidateEnabled,
+						Webhooks: map[string]GenericWebhookConfig{
+							"deploy": {Enabled: true},
+						},
+					},
+				},
+			}
+			if err := cfg.SecurityCopyFrom(path); err != nil {
+				t.Fatalf("SecurityCopyFrom() error = %v", err)
+			}
+
+			wantSecret := reference
+			if test.wantResolved {
+				wantSecret = resolvedSecret
+			}
+			webhook := cfg.Events.Ingress.Webhooks["deploy"]
+			if got := webhook.Secret.String(); got != wantSecret {
+				t.Fatalf("copied webhook secret = %q, want %q", got, wantSecret)
+			}
+		})
+	}
+}
+
+func TestLoadGenericWebhookConnectorEnablementIsJSONOnly(t *testing.T) {
+	mustSetupSSHKey(t)
+	t.Setenv(credential.PassphraseEnvVar, "")
+	t.Setenv("PICOCLAW_EVENTS_INGRESS_ENABLED", "true")
+	// Webhooks are a named map with no env mapping. This lookalike variable is
+	// intentionally unsupported and must not activate a JSON-disabled connector.
+	t.Setenv("PICOCLAW_EVENTS_INGRESS_WEBHOOKS_DEPLOY_ENABLED", "true")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	configData := []byte(`{
+		"version": 3,
+		"events": {
+			"ingress": {
+				"enabled": true,
+				"webhooks": {
+					"deploy": {
+						"enabled": false,
+						"secret": "[NOT_HERE]"
+					}
+				}
+			}
+		}
+	}`)
+	if err := os.WriteFile(path, configData, 0o600); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+	const missingReference = "file://missing-webhook-secret.txt"
+	securityData := []byte(`events:
+  ingress:
+    webhooks:
+      deploy:
+        secret: ` + missingReference + `
+`)
+	if err := os.WriteFile(securityPath(path), securityData, 0o600); err != nil {
+		t.Fatalf("write .security.yml: %v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	webhook := cfg.Events.Ingress.Webhooks["deploy"]
+	if webhook.Enabled {
+		t.Fatal("unsupported connector env variable activated the connector")
+	}
+	if got := webhook.Secret.String(); got != missingReference {
+		t.Fatalf("disabled connector secret = %q, want unresolved reference", got)
+	}
+}
+
+func TestLoadConfigRejectsInvalidEnabledWebhook(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	configData := []byte(`{
+		"version": 3,
+		"events": {
+			"ingress": {
+				"enabled": true,
+				"webhooks": {
+					"deploy": {
+						"enabled": true,
+						"secret": "not-standard-webhooks"
+					}
+				}
+			}
+		}
+	}`)
+	if err := os.WriteFile(path, configData, 0o600); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("LoadConfig() error = nil, want invalid webhook secret error")
+	}
+}
+
+func eventWebhookTestSecret(seed string) string {
+	material := []byte(strings.Repeat(seed+"-", 8))
+	if len(material) < genericWebhookMinSecretBytes {
+		material = append(material, make([]byte, genericWebhookMinSecretBytes-len(material))...)
+	}
+	return genericWebhookSecretPrefix + base64.StdEncoding.EncodeToString(material)
 }

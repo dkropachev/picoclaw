@@ -1,10 +1,13 @@
 package channels
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestDynamicServeMuxExactMatch(t *testing.T) {
@@ -159,4 +162,225 @@ func TestDynamicServeMuxHandleUsesHandler(t *testing.T) {
 	if !called {
 		t.Fatal("handler was not called")
 	}
+}
+
+func TestDynamicServeMuxRegisterOwnedRejectsInvalidAndConflictingRoutes(t *testing.T) {
+	dm := newDynamicServeMux()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	for _, pattern := range []string{"", "relative", "/events?source=test", "/events#fragment"} {
+		if release, err := dm.registerOwned(pattern, handler); err == nil || release != nil {
+			t.Fatalf("registerOwned(%q) = (%p, %v), want nil release and error", pattern, release, err)
+		}
+	}
+	if release, err := dm.registerOwned("/nil", nil); err == nil || release != nil {
+		t.Fatalf("registerOwned(nil handler) = (%p, %v), want nil release and error", release, err)
+	}
+
+	dm.Handle("/health", handler)
+	if release, err := dm.registerOwned("/health", handler); !errors.Is(err, ErrHTTPRouteConflict) ||
+		release != nil {
+		t.Fatalf(
+			"duplicate registerOwned() = (%p, %v), want ErrHTTPRouteConflict",
+			release,
+			err,
+		)
+	}
+
+	dm.Handle("/webhooks/", handler)
+	for _, pattern := range []string{"/webhooks/events", "/webhooks/events/"} {
+		if release, err := dm.registerOwned(pattern, handler); !errors.Is(err, ErrHTTPRouteConflict) ||
+			release != nil {
+			t.Fatalf(
+				"overlapping registerOwned(%q) = (%p, %v), want ErrHTTPRouteConflict",
+				pattern,
+				release,
+				err,
+			)
+		}
+	}
+
+	exactFirst := newDynamicServeMux()
+	exactFirst.Handle("/reserved/exact", handler)
+	if release, err := exactFirst.registerOwned(
+		"/reserved/",
+		handler,
+	); !errors.Is(err, ErrHTTPRouteConflict) || release != nil {
+		t.Fatalf(
+			"prefix over exact registration = (%p, %v), want ErrHTTPRouteConflict",
+			release,
+			err,
+		)
+	}
+
+	// The exact path /api and the subtree /api/ match disjoint requests.
+	dm.Handle("/api/", handler)
+	release, err := dm.registerOwned("/api", handler)
+	if err != nil {
+		t.Fatalf("registerOwned(disjoint exact route) error = %v", err)
+	}
+	release()
+}
+
+func TestDynamicServeMuxOwnedReleaseIsIdentitySafeAndIdempotent(t *testing.T) {
+	dm := newDynamicServeMux()
+	first := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	})
+	second := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	})
+
+	releaseFirst, err := dm.registerOwned("/events", first)
+	if err != nil {
+		t.Fatalf("register first route: %v", err)
+	}
+	releaseFirst()
+
+	releaseSecond, err := dm.registerOwned("/events", second)
+	if err != nil {
+		t.Fatalf("register replacement route: %v", err)
+	}
+	defer releaseSecond()
+
+	// A stale, repeated release from the first owner must not remove the second.
+	releaseFirst()
+	rec := httptest.NewRecorder()
+	dm.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/events", nil))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status after stale release = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+}
+
+func TestDynamicServeMuxLegacyRoutesCannotShadowOrRemoveOwnedRoute(t *testing.T) {
+	dm := newDynamicServeMux()
+	owned := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	})
+	legacy := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})
+	release, err := dm.registerOwned("/webhooks/events/", owned)
+	if err != nil {
+		t.Fatalf("registerOwned() error = %v", err)
+	}
+
+	for _, pattern := range []string{
+		"/webhooks/events/",
+		"/webhooks/events/build-system",
+		"/webhooks/",
+	} {
+		dm.Handle(pattern, legacy)
+	}
+	dm.Unhandle("/webhooks/events/")
+
+	response := httptest.NewRecorder()
+	dm.ServeHTTP(
+		response,
+		httptest.NewRequest(http.MethodPost, "/webhooks/events/build-system", nil),
+	)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf(
+			"owned route after legacy collision = %d, want %d",
+			response.Code,
+			http.StatusAccepted,
+		)
+	}
+
+	release()
+	response = httptest.NewRecorder()
+	dm.ServeHTTP(
+		response,
+		httptest.NewRequest(http.MethodPost, "/webhooks/events/build-system", nil),
+	)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("released owned route = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestDynamicServeMuxServeDoesNotHoldRouteLockDuringHandler(t *testing.T) {
+	dm := newDynamicServeMux()
+	started := make(chan struct{})
+	unblock := make(chan struct{})
+	release, err := dm.registerOwned("/blocking", http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			close(started)
+			<-unblock
+			w.WriteHeader(http.StatusOK)
+		},
+	))
+	if err != nil {
+		t.Fatalf("register blocking route: %v", err)
+	}
+
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		rec := httptest.NewRecorder()
+		dm.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/blocking", nil))
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		close(unblock)
+		t.Fatal("downstream handler did not start")
+	}
+
+	released := make(chan struct{})
+	go func() {
+		release()
+		close(released)
+	}()
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		close(unblock)
+		t.Fatal("route release blocked behind downstream handler")
+	}
+
+	close(unblock)
+	select {
+	case <-served:
+	case <-time.After(time.Second):
+		t.Fatal("downstream handler did not finish")
+	}
+
+	rec := httptest.NewRecorder()
+	dm.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/blocking", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status after release = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestDynamicServeMuxConcurrentOwnedRegistrationAndServing(t *testing.T) {
+	dm := newDynamicServeMux()
+	const goroutines = 50
+
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			pattern := fmt.Sprintf("/owned/%d", index)
+			release, err := dm.registerOwned(pattern, http.HandlerFunc(
+				func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				},
+			))
+			if err != nil {
+				t.Errorf("registerOwned(%q) error = %v", pattern, err)
+				return
+			}
+			rec := httptest.NewRecorder()
+			dm.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, pattern, nil))
+			if rec.Code != http.StatusOK {
+				t.Errorf("ServeHTTP(%q) status = %d, want %d", pattern, rec.Code, http.StatusOK)
+			}
+			release()
+			release()
+		}(i)
+	}
+	wg.Wait()
 }

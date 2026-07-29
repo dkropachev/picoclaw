@@ -14,13 +14,13 @@ filters, persists one deterministic dispatch per event/workflow pair, and
 reconciles workflow runs after process failure without repeating an interrupted
 run.
 
-The current stage opens the opt-in inbox and runs routing/dispatch workers with
-the gateway lifecycle, but it does not yet register an inbound HTTP or channel
-transport, expose operator API/CLI endpoints, or render event UI. Those
-surfaces are added by later stages. Durable inputs remain separate from the
-process-local [`pkg/events`](../../pkg/events) observability bus: runtime events
-are best-effort in-process signals, while external automation events and
-dispatch state survive restart.
+The current stage opens the opt-in inbox, runs routing/dispatch workers with the
+gateway lifecycle, and accepts authenticated generic webhook deliveries on the
+existing shared gateway listener. GitHub-specific and channel/email adapters,
+operator API/CLI endpoints, and event UI remain later stages. Durable inputs
+remain separate from the process-local [`pkg/events`](../../pkg/events)
+observability bus: runtime events are best-effort in-process signals, while
+external automation events and dispatch state survive restart.
 
 ## Reconstruction Notes
 
@@ -77,6 +77,9 @@ dispatch state survive restart.
 | `FR-EVENT-AUTOMATION-019` | MUST | The gateway starts, reloads, or shuts down with event ingress enabled or disabled. | Disabled ingress returns before creating the database, directories, or workers. Enabled ingress opens and validates the inbox and initializes event workflow hooks/MCP synchronously before workers. Reload makes readiness false, drains old workers, swaps while retaining the previous provider/config, preflights the candidate event runtime before starting any candidate service, and restores the previous runtime/service on failure. Candidate router/dispatcher iterations require the exact config generation and therefore cannot route or execute while the outer transaction is paused. Shutdown quiesces event and other runtime producers before AgentLoop drain, stops channel/media dependencies afterward, and only then closes provider state. | The service owns exactly one store and router/dispatcher pair per active gateway configuration, and readiness reflects failed recovery. | Store-open/schema/platform/runtime-init failures fail enabled startup instead of falling back to memory. Drain or post-swap restart failure retries cleanup and rolls back when safe; a canceled or stale candidate worker exits without durable routing or workflow effects; if recovery itself fails, readiness remains false and providers/dependencies are not closed out from under active workers. | Existing installations remain inert by default and reload cannot expose a half-committed runtime or workers using stale/closed providers. |
 | `FR-EVENT-AUTOMATION-020` | MUST | A newly created dispatch is published to the process-local runtime event bus. | A best-effort `workflow.triggered` event identifies trigger kind, event/dispatch IDs, normalized source/connector/type, workflow ref, and deterministic session without including the external payload or secrets. | Runtime telemetry has no effect on durable routing or dispatch completion and is emitted only for a newly inserted dispatch. | A closed, full, or absent runtime bus cannot fail durable routing; duplicate routing does not republish the same dispatch trigger. | Observability is useful but must not become a second delivery or secret-retention path. |
 | `FR-EVENT-AUTOMATION-021` | MUST | A release adds `on.event` parsing/validation semantics that older binaries ignored. | Workflow engine/schema/fingerprint compatibility changes make earlier validation stamps stale and require explicit revalidation before automatic execution. | Revalidation writes the normal compatibility manifest with the current workflow hash and validation result. | Existing channel, command, schedule, runtime-event, manual, and workflow-call trigger parsing and execution remain unchanged. | Previously stamped YAML must not silently activate newly understood automation after upgrade. |
+| `FR-EVENT-AUTOMATION-022` | MUST | Master ingress and at least one named `events.ingress.webhooks` connector are enabled with a valid Standard Webhooks signing secret. | The gateway collision-safely registers `POST /webhooks/events/{connector}` on its existing shared listener and verifies exactly one `Webhook-Id`, `Webhook-Timestamp`, and `Webhook-Signature` header against the connector's HMAC-SHA256 secret. | Route registration is additive and identity-owned; no second listener or transport runtime is created. Connector names containing a configured canonical signing secret are rejected opaquely before config persistence or backend construction, including inactive names that would otherwise expose the credential as a JSON map key. | Disabled or unknown connectors and non-canonical percent-encoded path aliases return `404`; missing, duplicated, stale, future, or invalid signature headers return the same `401`; wrong methods return `405` with `Allow: POST`; route collisions fail startup/reload rather than replacing an existing handler. | Generic producers need an interoperable authenticated ingress without disturbing existing gateway and channel routes. |
+| `FR-EVENT-AUTOMATION-023` | MUST | An authenticated connector submits one bounded JSON object containing `type`, optional `occurred_at`, actor, subject, attributes, and object payload. | The adapter preserves the exact signed bytes until authentication, strictly rejects unknown/server-owned fields and trailing data, derives deduplication from `Webhook-Id`, assigns source `webhook` and the path connector, and acknowledges only after synchronous durable insertion. New events return `202` and duplicates return `200`, both with the original event ID and `inserted` flag. | The normal inbox insert atomically stores the redacted normalized envelope or returns its first durable duplicate; provider retries never replace content or create another routing record. Client-controlled identity fields containing any configured signing secret are rejected before insertion because routing and deduplication identities cannot be safely rewritten. | Unsupported media/content encodings return `415`, oversized input returns `413`, malformed or secret-bearing identity input returns `400`, and storage failure returns retryable `503`; responses never echo payload, signature, secret, connector identity, or raw storage errors. | A transport acknowledgement must mean durable ownership, not workflow completion or volatile acceptance. |
+| `FR-EVENT-AUTOMATION-024` | MUST | Gateway startup, reload, rollback, or shutdown changes the active event store, connector set, or signing secret. | Admission remains inactive until startup commit, becomes `503` before reload drain, waits for admitted inserts before store close, activates only the committed generation immediately before readiness, and restores only a fully restarted old generation after rollback. Secrets persist through secure-string storage and participate in exact-value redaction. | A stable generation-fenced controller swaps connector/store backends and stale cleanup cannot deactivate or unregister a replacement. | A timed-out drain remains retryable with its store open; candidate backends never acknowledge requests; failed recovery stays unready; disabling ingress removes the event route after commit. Public exposure requires TLS termination at a trusted reverse proxy. | Reload must not strand acknowledged events in a candidate database or close state still used by an in-flight request. |
 
 ## Data And State Model
 
@@ -153,6 +156,38 @@ That set is `authorization`, `proxy_authorization`, `cookie`, `set_cookie`,
 GitHub's `x_hub_signature` and `x_hub_signature_256` headers are also mandatory.
 Configuration owns policy; `pkg/eventing` owns normalized data and persistence.
 
+`events.ingress.webhooks` maps conservative, case-distinct connector names to
+an `enabled` flag and a Standard Webhooks `whsec_` signing secret with at least
+32 decoded bytes. JSON serialization emits only `[NOT_HERE]`; the normal
+`.security.yml`, `enc://`, and `file://` secure-string paths own the actual
+value. Security-only entries cannot create or resurrect connectors removed
+from JSON. Secure references are resolved only after the supported master
+environment override is applied. Management edits first overlay secrets from
+connectors present in the persisted JSON, then apply explicit replacements and
+quietly resolve the final active candidate; this permits repair of a broken old
+reference without probing it first. The master ingress switch is authoritative:
+inactive references remain unresolved and load/save-stable. No configured
+connector map key may contain a canonical signing secret, even while inactive.
+
+The signed request body has this transport-owned schema:
+
+```json
+{
+  "type": "deploy.completed",
+  "occurred_at": "2026-07-28T12:00:00Z",
+  "actor": {"id": "ci", "type": "service"},
+  "subject": {"id": "release-42", "type": "deployment"},
+  "attributes": {"environment": "production"},
+  "payload": {"build": 9007199254740993}
+}
+```
+
+`Webhook-Id` becomes the connector-scoped deduplication key. The server owns
+event ID, source, connector, receipt time, and replay lineage. Authentication
+uses the exact bounded request bytes, so JSON numbers—including integers
+outside JavaScript's exact range and exponent spellings—reach the durable
+payload unchanged before store redaction and normalization.
+
 Workflow event filters are declared under `on.event`. `sources`, `connectors`,
 and `types` accept a string or string list. Optional `actor` and `subject`
 filters accept `ids`, `types`, and string-list `attributes`; top-level
@@ -189,19 +224,26 @@ the external system.
 ## Surface Ownership
 
 Owns: CODE pkg/eventing/**
+Owns: CODE pkg/eventing/webhook/**
 Owns: CODE pkg/config/events.go
 Owns: CODE pkg/config/defaults.go
 Owns: CODE pkg/workflows/event_trigger.go
 Owns: CODE pkg/workflows/event_dispatcher.go
 Owns: CODE pkg/agent/workflow_eventing.go
 Owns: CODE pkg/gateway/event_automation.go
+Owns: CODE pkg/gateway/event_webhook*
+Owns: CODE web/backend/api/config.go
 Owns: CONFIG.events
 Owns: CONFIG.events.ingress*
+Owns: CONFIG.events.ingress.webhooks*
+Owns: HTTP POST /webhooks/events/*
 Owns: TEST pkg/eventing/*
+Owns: TEST pkg/eventing/webhook/*
 Owns: TEST pkg/config/events*
 Owns: TEST pkg/workflows/event_trigger_test.go
 Owns: TEST pkg/workflows/event_dispatcher_test.go
 Owns: TEST pkg/gateway/event_automation_test.go
+Owns: TEST pkg/gateway/event_webhook_test.go
 
 ## Auxiliary Interfaces
 
@@ -209,20 +251,25 @@ Owns: TEST pkg/gateway/event_automation_test.go
 | --- | --- | --- | --- |
 | Config | `events.ingress.enabled` | Opt-in master switch; omitted and explicit `false` preserve the pre-feature runtime and create no database. | `FR-EVENT-AUTOMATION-001`, `FR-EVENT-AUTOMATION-012` |
 | Config | `events.ingress.database_path`, `retention_days`, `max_payload_bytes`, `redact_fields` | Resolve a safe workspace database default while preserving explicit policy values used by store construction and ingest/retention calls. | `FR-EVENT-AUTOMATION-001`, `FR-EVENT-AUTOMATION-003`, `FR-EVENT-AUTOMATION-011` |
+| Config | `events.ingress.webhooks.<connector>` | Opt-in connector name, enablement, and securely persisted Standard Webhooks secret; enabled values are validated before storage or route construction and passed to durable exact-secret redaction. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-024` |
+| HTTP | `PUT /api/config`, `PATCH /api/config` | Omitted or `[NOT_HERE]` webhook secrets preserve the current secure value; an explicit valid secret rotates it, while an explicit empty value can clear only a disabled connector because enabled connector validation rejects it. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-024` |
+| HTTP | `POST /webhooks/events/{connector}` | Strict, bounded Standard Webhooks authentication and envelope normalization with durable `202`/duplicate `200` acknowledgement and retry-safe error statuses. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-023` |
 | Go API | `pkg/eventing.Envelope` | Source-neutral immutable external-event input and stored representation with connector-scoped deduplication and optional replay lineage. | `FR-EVENT-AUTOMATION-002`, `FR-EVENT-AUTOMATION-004`, `FR-EVENT-AUTOMATION-010` |
 | Go API | `pkg/eventing.Inbox` / `Store` | `Inbox` defines `Insert`, `Get`, newest-first filtered keyset list, routing claim/ack/nack/dead transitions, dispatch create/get/claim/link/nack/finish/keyset-list, `Replay`, bounded `Prune`, and `Close`; `Store` is its SQLite implementation. The contract provides atomic deduplication and fresh-token fenced leases. | `FR-EVENT-AUTOMATION-002`, `FR-EVENT-AUTOMATION-004`, `FR-EVENT-AUTOMATION-006` through `FR-EVENT-AUTOMATION-011` |
 | Storage | `pkg/eventing.Open` / `OpenStore`, `WithMaxPayloadBytes`, `WithClock`, `WithBusyTimeout`, `WithRedaction` | Open the embedded store with transactional `PRAGMA user_version` migration, WAL, foreign keys, busy handling, one authoritative SQLite connection, restrictive permissions, restart persistence, a one-MiB default payload limit, mandatory/custom redaction, optional exact-secret replacement, and deterministic test clocks on supported targets. | `FR-EVENT-AUTOMATION-003`, `FR-EVENT-AUTOMATION-005` through `FR-EVENT-AUTOMATION-011` |
 | Go API | `pkg/eventing.RoutingDispatchCreator`, `RoutingLeaseRenewer`, `DispatchLeaseRenewer` | Additive capabilities that create a dispatch only through the current routing claim and renew current live leases without expanding the compatibility-critical `Inbox` interface. Routing renewal remains optional; `EventDispatchInbox` requires dispatch renewal because interrupted-run cancellation cannot otherwise be fenced across stores. | `FR-EVENT-AUTOMATION-014`, `FR-EVENT-AUTOMATION-018` |
 | Workflow YAML | `on.event` | Typed source/connector/type/entity/attribute filters with scalar/list syntax, explicit non-empty validation, anchored globs, and deterministic case rules. | `FR-EVENT-AUTOMATION-013`, `FR-EVENT-AUTOMATION-021` |
 | Go API | `EventWorkflowRouter`, `EventWorkflowDispatcher`, `RunRequest.OnRunPersisted`, `LoadRunnableLocalSnapshot`, `EventContextFromEnvelope` | Claim one item, compatibility-check the exact loaded workflow bytes, durably fan out deterministic dispatches, reconcile deterministic runs, link a newly persisted run before effects, renew long leases, and build the detached redacted workflow context. | `FR-EVENT-AUTOMATION-014` through `FR-EVENT-AUTOMATION-018`, `FR-EVENT-AUTOMATION-020`, `FR-EVENT-AUTOMATION-021` |
-| Runtime | gateway event automation service | Open enabled storage before readiness, initialize workflow runtime dependencies before workers, and transactionally drain, replace, roll back, and close services/providers in gateway shutdown and reload ordering. | `FR-EVENT-AUTOMATION-019` |
+| Runtime | gateway event automation service and webhook controller | Open enabled storage before readiness, initialize workflow runtime dependencies before workers, and generation-fence HTTP admission while transactionally draining, replacing, rolling back, and closing services/providers. | `FR-EVENT-AUTOMATION-019`, `FR-EVENT-AUTOMATION-024` |
 | Build | `pkg/eventing` unsupported-platform implementation | Preserves the same construction surface and returns `ErrUnsupportedPlatform` without pulling SQLite into excluded targets. | `FR-EVENT-AUTOMATION-005`, `FR-EVENT-AUTOMATION-012` |
 
 ## Algorithms And Ordering
 
 1. Resolve `EventIngressConfig` without side effects. If disabled, stop before
-   creating directories, opening SQLite, registering listeners, or starting
-   goroutines.
+   validating inert webhook entries, creating directories, opening SQLite,
+   registering routes, or starting goroutines. Otherwise validate connector
+   names, case collisions, enabled signing secrets, and shared-route ownership
+   before opening the store.
 2. For enabled configuration, resolve an explicit database path or derive
    `<workspace>/eventing/events.db`, validate positive resource policy, create
    positive defaults for non-positive limits, append configured redaction fields
@@ -272,9 +319,11 @@ Owns: TEST pkg/gateway/event_automation_test.go
 12. List events and dispatches newest first with stable timestamp-plus-ID keyset
     cursors. Use 50 rows when a list limit is omitted and cap list, claim, and
     prune batches at 500 rows.
-13. When gateway ingress is enabled, open and validate the store synchronously.
-    If workflows are disabled, keep it open for connector/operations ownership
-    but start no routing or dispatch goroutine.
+13. When gateway ingress is enabled, open and validate the store synchronously,
+    include every enabled webhook secret in exact-value redaction, and build an
+    inactive candidate webhook backend. If workflows are disabled, keep the
+    store open for connector/operations ownership but start no routing or
+    dispatch goroutine.
 14. A router claims one event, renews its routing lease while reading the current
     local catalog, requires current compatibility, parses and validates each
     candidate, evaluates deterministic `on.event` filters, and atomically fences
@@ -300,20 +349,34 @@ Owns: TEST pkg/gateway/event_automation_test.go
 17. During execution, renew a capable store's dispatch lease every one-third of
     its duration. Cancel the execution context immediately on renewal failure;
     never let a stale worker finish or nack work owned by a replacement token.
-18. On reload, mark readiness false, preflight new event storage and provider
-    construction, pause new agent turns and drain old runtime users and
-    services, then swap runtime state while retaining the prior provider/config.
-    Synchronously initialize the candidate event hooks/MCP before any candidate
-    service starts. Fence each replacement router/dispatcher iteration to that
-    exact config generation and start cron only after all other fallible
-    replacement initialization. Commit by restoring readiness, resuming turn
-    admission, and closing the retained provider only after active work drains;
-    otherwise cancel/drain partial workers, restore the old runtime and
-    services, and reject candidate scheduled work before resuming. Keep
-    readiness false if recovery cannot complete. On shutdown, first quiesce
-    workers and other runtime producers, drain AgentLoop generation users, then
-    stop outbound channel/media dependencies before closing inbox/provider
-    state.
+18. On reload, mark readiness false and deactivate webhook admission before
+    pausing long-lived runtime users. Wait for every request admitted by the old
+    webhook generation before closing its store, then swap runtime state while
+    retaining the prior provider/config. Build but do not activate the
+    candidate backend; fence each replacement router/dispatcher iteration to
+    that exact config generation and start cron only after all other fallible
+    replacement initialization. Commit by activating the candidate immediately
+    before readiness and only then close the retained provider after active
+    work drains. Otherwise cancel/drain partial workers, fully restart the old
+    runtime, activate its backend, and reject candidate scheduled work before
+    resuming. Keep the route retryable with `503` and readiness false if
+    recovery cannot complete. Shutdown follows the same admission-drain
+    boundary before worker/store close, then drains AgentLoop generation users,
+    channel/media dependencies, and provider state.
+19. For HTTP admission, require the escaped path to equal the literal decoded
+    ASCII route before selecting its named connector. Reject percent-encoded
+    aliases, unsupported method/media/content encoding, cap the raw body, and
+    require exactly one of each Standard Webhooks header. Verify timestamp
+    tolerance and HMAC over the exact raw body with only that connector's
+    precompiled secret before decoding any envelope field.
+20. Decode exactly one strict object, reject transport/server-owned or unknown
+    fields, require an object payload, and map `Webhook-Id` to `dedupe_key`,
+    source to `webhook`, and connector to the route name. Reject configured
+    signing-secret substrings in connector, type, or deduplication identities
+    instead of persisting or rewriting them. Insert synchronously; return `202`
+    for a new row or `200` with the original ID for a duplicate. Workflow
+    routing and execution remain asynchronous after that durable transport
+    acknowledgement.
 
 ## Cross-Feature Behavior
 
@@ -328,17 +391,18 @@ owns the input, routing work, dispatch intent, deterministic run identity, and
 lease/recovery state consumed by those workers. Creating a dispatch is still a
 separate durable step before execution.
 
-[Chat channels](chat-channels.md) and later GitHub, Delta Chat email, and generic
-webhook connectors normalize their provider-specific deliveries into this
-envelope. They own authentication, signature verification, acknowledgements,
+[Generic webhooks](../../pkg/eventing/webhook) normalize their strict signed
+body directly into this envelope on the channel manager's shared HTTP mux.
+[Chat channels](chat-channels.md), later GitHub-specific delivery, and Delta
+Chat email adapters own their provider-specific authentication, normalization,
 and transport lifecycles. Later operator API/CLI and dashboard stages consume
 the store but do not redefine its deduplication, leasing, redaction, replay, or
 retention semantics.
 
-[Security and isolation](security-isolation.md) continues to own connector
-credentials and workflow side-effect policy. This stage stores no listener
-credentials and grants no new tool authority: deterministic or AI-driven
-decisions execute through existing workflow agent/tool policy.
+[Security and isolation](security-isolation.md) owns secure persistence of each
+webhook signing secret and workflow side-effect policy. Signing adds no new
+tool authority: deterministic or AI-driven decisions still execute through
+existing workflow agent/tool policy.
 
 ## Failure And Edge Cases
 
@@ -405,10 +469,25 @@ decisions execute through existing workflow agent/tool policy.
   provisional. Storage, runtime initialization, service restart, or rollback
   failure cannot close a provider still owned by active work or report a
   half-restored gateway as ready.
+- Invalid connector names, case collisions, missing/weak signing secrets, and
+  route collisions fail before webhook admission or storage startup. Disabled
+  master ingress treats retained connector entries as inert, but cannot persist
+  a canonical signing secret in a connector map key.
+- Authentication failures disclose no distinction between a missing, duplicate,
+  stale, future, or mismatched signing header. Unsupported methods, media types,
+  encodings, non-canonical encoded route aliases, malformed bodies,
+  secret-bearing identity fields, and body limits mutate no durable state.
+- A successful response always names a durable event. Concurrent retries with
+  the same `Webhook-Id` return the original ID and first payload; workflow
+  failure occurs after acknowledgement and is visible through durable dispatch
+  state instead of changing the HTTP result.
+- Reload and shutdown reject new webhook requests with retryable `503` before
+  draining admitted inserts. A drain timeout leaves the store open for a later
+  retry; a provisional candidate never acknowledges into its database.
 - The compatibility version bump makes pre-`on.event` stamps stale, so newly
   understood event YAML cannot activate until explicitly revalidated.
-- This stage intentionally has no inbound HTTP/channel connector, event
-  operator CLI/API endpoint, or frontend route.
+- This stage intentionally has no GitHub-specific or channel/email event
+  adapter, event operator CLI/API endpoint, or frontend route.
 
 ## Acceptance Evidence
 
@@ -425,6 +504,8 @@ decisions execute through existing workflow agent/tool policy.
 | `FR-EVENT-AUTOMATION-014`, `FR-EVENT-AUTOMATION-015`, `FR-EVENT-AUTOMATION-016`, `FR-EVENT-AUTOMATION-017`, `FR-EVENT-AUTOMATION-020` | [pkg/workflows/event_dispatcher_test.go](../../pkg/workflows/event_dispatcher_test.go), [pkg/workflows/store_test.go](../../pkg/workflows/store_test.go), [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go) |
 | `FR-EVENT-AUTOMATION-018` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go), [pkg/eventing/store_unsupported_test.go](../../pkg/eventing/store_unsupported_test.go), [pkg/workflows/event_dispatcher_test.go](../../pkg/workflows/event_dispatcher_test.go) |
 | `FR-EVENT-AUTOMATION-019` | [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go), [pkg/gateway/gateway_test.go](../../pkg/gateway/gateway_test.go) |
+| `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-023` | [pkg/eventing/webhook/controller_test.go](../../pkg/eventing/webhook/controller_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [pkg/channels/dynamic_mux_test.go](../../pkg/channels/dynamic_mux_test.go), [pkg/config/events_test.go](../../pkg/config/events_test.go), [pkg/config/events_secret_identity_test.go](../../pkg/config/events_secret_identity_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/config_event_webhook_deferred_test.go](../../web/backend/api/config_event_webhook_deferred_test.go) |
+| `FR-EVENT-AUTOMATION-024` | [pkg/eventing/webhook/controller_test.go](../../pkg/eventing/webhook/controller_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [pkg/config/events_test.go](../../pkg/config/events_test.go) |
 
 ## Implementation Anchors
 
@@ -438,3 +519,6 @@ decisions execute through existing workflow agent/tool policy.
 - [pkg/workflows/event_dispatcher.go](../../pkg/workflows/event_dispatcher.go)
 - [pkg/agent/workflow_eventing.go](../../pkg/agent/workflow_eventing.go)
 - [pkg/gateway/event_automation.go](../../pkg/gateway/event_automation.go)
+- [pkg/gateway/event_webhook.go](../../pkg/gateway/event_webhook.go)
+- [pkg/eventing/webhook](../../pkg/eventing/webhook)
+- [web/backend/api/config.go](../../web/backend/api/config.go)

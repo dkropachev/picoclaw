@@ -517,7 +517,13 @@
       "database_path": "",
       "retention_days": 30,
       "max_payload_bytes": 1048576,
-      "redact_fields": []
+      "redact_fields": [],
+      "webhooks": {
+        "example": {
+          "enabled": false,
+          "secret": "[NOT_HERE]"
+        }
+      }
     }
   },
   "gateway": {

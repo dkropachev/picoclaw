@@ -2,6 +2,8 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -965,6 +967,262 @@ func TestHandlePatchConfig_SucceedsWhenPicoTokenInSecurityOnly(t *testing.T) {
 	}
 }
 
+func TestConfigAPIEventWebhookSecretPreservation(t *testing.T) {
+	for _, method := range []string{http.MethodPut, http.MethodPatch} {
+		t.Run(method, func(t *testing.T) {
+			configPath, cleanup, originalSecret := setupEventWebhookAPIConfig(t)
+			defer cleanup()
+
+			body := eventWebhookAPIUpdateBody(t, configPath, method, map[string]map[string]any{
+				"deploy": {"secret": "[NOT_HERE]"},
+			})
+			response := performConfigAPIRequest(t, configPath, method, body)
+			if response.Code != http.StatusOK {
+				t.Fatalf(
+					"%s /api/config status = %d, want %d, body=%s",
+					method,
+					response.Code,
+					http.StatusOK,
+					response.Body.String(),
+				)
+			}
+
+			updated, err := config.LoadConfig(configPath)
+			if err != nil {
+				t.Fatalf("LoadConfig(updated) error = %v", err)
+			}
+			if got := configuredEventWebhookSecret(updated, "deploy"); got != originalSecret {
+				t.Fatalf("preserved webhook secret = %q, want original value", got)
+			}
+		})
+	}
+}
+
+func TestConfigAPIEventWebhookSecretRotationAndAddition(t *testing.T) {
+	for _, method := range []string{http.MethodPut, http.MethodPatch} {
+		t.Run(method, func(t *testing.T) {
+			configPath, cleanup, originalSecret := setupEventWebhookAPIConfig(t)
+			defer cleanup()
+
+			rotatedSecret := eventWebhookAPISecret(0x32)
+			addedSecret := eventWebhookAPISecret(0x33)
+			body := eventWebhookAPIUpdateBody(t, configPath, method, map[string]map[string]any{
+				"deploy": {"secret": rotatedSecret},
+				"audit": {
+					"enabled": true,
+					"secret":  addedSecret,
+				},
+			})
+			response := performConfigAPIRequest(t, configPath, method, body)
+			if response.Code != http.StatusOK {
+				t.Fatalf(
+					"%s /api/config status = %d, want %d, body=%s",
+					method,
+					response.Code,
+					http.StatusOK,
+					response.Body.String(),
+				)
+			}
+
+			updated, err := config.LoadConfig(configPath)
+			if err != nil {
+				t.Fatalf("LoadConfig(updated) error = %v", err)
+			}
+			if got := configuredEventWebhookSecret(updated, "deploy"); got != rotatedSecret {
+				t.Fatalf("rotated webhook secret = %q, want new value", got)
+			}
+			if got := configuredEventWebhookSecret(updated, "audit"); got != addedSecret {
+				t.Fatalf("added webhook secret = %q, want new connector value", got)
+			}
+
+			configJSON, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatalf("ReadFile(config.json) error = %v", err)
+			}
+			for _, secret := range []string{originalSecret, rotatedSecret, addedSecret} {
+				if bytes.Contains(configJSON, []byte(secret)) {
+					t.Fatal("config.json exposed an event webhook signing secret")
+				}
+			}
+		})
+	}
+}
+
+func TestConfigAPIRejectsInvalidEventWebhookSecret(t *testing.T) {
+	for _, method := range []string{http.MethodPut, http.MethodPatch} {
+		t.Run(method, func(t *testing.T) {
+			configPath, cleanup, originalSecret := setupEventWebhookAPIConfig(t)
+			defer cleanup()
+
+			body := eventWebhookAPIUpdateBody(t, configPath, method, map[string]map[string]any{
+				"deploy": {"secret": "not-a-standard-webhooks-secret"},
+			})
+			response := performConfigAPIRequest(t, configPath, method, body)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf(
+					"%s /api/config status = %d, want %d, body=%s",
+					method,
+					response.Code,
+					http.StatusBadRequest,
+					response.Body.String(),
+				)
+			}
+			if !strings.Contains(response.Body.String(), "events.ingress") {
+				t.Fatalf("validation response omitted event ingress error: %s", response.Body.String())
+			}
+
+			unchanged, err := config.LoadConfig(configPath)
+			if err != nil {
+				t.Fatalf("LoadConfig(after rejected update) error = %v", err)
+			}
+			if got := configuredEventWebhookSecret(unchanged, "deploy"); got != originalSecret {
+				t.Fatalf("rejected update changed webhook secret to %q", got)
+			}
+		})
+	}
+}
+
+func TestConfigAPIRejectsSecretBearingEventWebhookConnectorIdentity(t *testing.T) {
+	firstSecret := eventWebhookAPIConnectorNameSafeSecret(0x41)
+	secondSecret := eventWebhookAPIConnectorNameSafeSecret(0x42)
+	credentialBearingName := "prefix-" + firstSecret + "-suffix"
+	identityCases := []struct {
+		name           string
+		masterDisabled bool
+		changes        map[string]map[string]any
+	}{
+		{
+			name: "enabled name equals own secret",
+			changes: map[string]map[string]any{
+				firstSecret: {
+					"enabled": true,
+					"secret":  firstSecret,
+				},
+			},
+		},
+		{
+			name: "enabled name contains other enabled secret",
+			changes: map[string]map[string]any{
+				"owner": {
+					"enabled": true,
+					"secret":  firstSecret,
+				},
+				credentialBearingName: {
+					"enabled": true,
+					"secret":  secondSecret,
+				},
+			},
+		},
+		{
+			name: "disabled name contains enabled secret",
+			changes: map[string]map[string]any{
+				"owner": {
+					"enabled": true,
+					"secret":  firstSecret,
+				},
+				credentialBearingName: {
+					"enabled": false,
+				},
+			},
+		},
+		{
+			name: "disabled owner canonical secret",
+			changes: map[string]map[string]any{
+				"owner": {
+					"enabled": false,
+					"secret":  firstSecret,
+				},
+				credentialBearingName: {
+					"enabled": false,
+				},
+			},
+		},
+		{
+			name:           "master disabled canonical secret",
+			masterDisabled: true,
+			changes: map[string]map[string]any{
+				"owner": {
+					"enabled": false,
+					"secret":  firstSecret,
+				},
+				credentialBearingName: {
+					"enabled": false,
+				},
+			},
+		},
+	}
+
+	for _, method := range []string{http.MethodPut, http.MethodPatch} {
+		for _, identityCase := range identityCases {
+			t.Run(method+"/"+identityCase.name, func(t *testing.T) {
+				configPath, cleanup, _ := setupEventWebhookAPIConfig(t)
+				defer cleanup()
+				securityPath := filepath.Join(filepath.Dir(configPath), config.SecurityConfigFile)
+				configBefore, err := os.ReadFile(configPath)
+				if err != nil {
+					t.Fatalf("ReadFile(config.json before update) error = %v", err)
+				}
+				securityBefore, err := os.ReadFile(securityPath)
+				if err != nil {
+					t.Fatalf("ReadFile(.security.yml before update) error = %v", err)
+				}
+
+				body := eventWebhookAPIUpdateBody(
+					t,
+					configPath,
+					method,
+					identityCase.changes,
+				)
+				if identityCase.masterDisabled {
+					body = eventWebhookAPISetIngressEnabled(t, body, false)
+				}
+				response := performConfigAPIRequest(t, configPath, method, body)
+				if response.Code != http.StatusBadRequest {
+					t.Fatalf(
+						"%s /api/config status = %d, want %d",
+						method,
+						response.Code,
+						http.StatusBadRequest,
+					)
+				}
+				const opaqueConflictResponse = `{"errors":["events.ingress: ` +
+					`webhook connector identity conflicts with a signing secret"],` +
+					`"status":"validation_error"}` + "\n"
+				if response.Body.String() != opaqueConflictResponse {
+					t.Fatal("validation response was not the expected opaque identity conflict")
+				}
+				for _, sensitive := range []string{
+					firstSecret,
+					secondSecret,
+					credentialBearingName,
+				} {
+					if strings.Contains(response.Body.String(), sensitive) {
+						t.Fatal("validation response exposed a webhook signing credential")
+					}
+				}
+
+				configAfter, err := os.ReadFile(configPath)
+				if err != nil {
+					t.Fatalf("ReadFile(config.json after update) error = %v", err)
+				}
+				securityAfter, err := os.ReadFile(securityPath)
+				if err != nil {
+					t.Fatalf("ReadFile(.security.yml after update) error = %v", err)
+				}
+				if !bytes.Equal(configAfter, configBefore) {
+					t.Fatal("rejected update changed config.json")
+				}
+				if !bytes.Equal(securityAfter, securityBefore) {
+					t.Fatal("rejected update changed .security.yml")
+				}
+				if bytes.Contains(configAfter, []byte(firstSecret)) {
+					t.Fatal("rejected update persisted a webhook signing credential in config.json")
+				}
+			})
+		}
+	}
+}
+
 func TestHandleUpdateConfig_AppliesGatewayLogLevel(t *testing.T) {
 	assertGatewayLogLevelApplied(t, http.MethodPut, `{
 		"version": 1,
@@ -1368,7 +1626,9 @@ func TestApplyConfigSecretsFromMap_TelegramToken(t *testing.T) {
 		},
 	}
 
-	applyConfigSecretsFromMap(cfg, raw)
+	if applyErr := applyConfigSecretsFromMap(cfg, raw); applyErr != nil {
+		t.Fatalf("applyConfigSecretsFromMap() error = %v", applyErr)
+	}
 
 	if got := tgCfg.Token.String(); got != "secret-from-api" {
 		t.Fatalf("telegram token = %q, want %q", got, "secret-from-api")
@@ -1409,7 +1669,9 @@ func TestApplyConfigSecretsFromMap_TeamsWebhook(t *testing.T) {
 		},
 	}
 
-	applyConfigSecretsFromMap(cfg, raw)
+	if applyErr := applyConfigSecretsFromMap(cfg, raw); applyErr != nil {
+		t.Fatalf("applyConfigSecretsFromMap() error = %v", applyErr)
+	}
 
 	// Verify the decoded struct has the updated SecureString value
 	decoded, err := bc.GetDecoded()
@@ -1469,7 +1731,9 @@ func TestApplyConfigSecretsFromMap_MultipleChannels(t *testing.T) {
 		},
 	}
 
-	applyConfigSecretsFromMap(cfg, raw)
+	if applyErr := applyConfigSecretsFromMap(cfg, raw); applyErr != nil {
+		t.Fatalf("applyConfigSecretsFromMap() error = %v", applyErr)
+	}
 
 	if got := tgCfg.Token.String(); got != "new-telegram-token" {
 		t.Fatalf("telegram token = %q, want %q", got, "new-telegram-token")
@@ -1499,7 +1763,9 @@ func TestApplyConfigSecretsFromMap_SkipsNonStringValues(t *testing.T) {
 		},
 	}
 
-	applyConfigSecretsFromMap(cfg, raw)
+	if applyErr := applyConfigSecretsFromMap(cfg, raw); applyErr != nil {
+		t.Fatalf("applyConfigSecretsFromMap() error = %v", applyErr)
+	}
 
 	if got := tgCfg.Token.String(); got != "original-token" {
 		t.Fatalf("telegram token = %q, want %q", got, "original-token")
@@ -1522,7 +1788,9 @@ func TestApplyConfigSecretsFromMap_ChannelNotDecodedYet(t *testing.T) {
 		},
 	}
 
-	applyConfigSecretsFromMap(cfg, raw)
+	if applyErr := applyConfigSecretsFromMap(cfg, raw); applyErr != nil {
+		t.Fatalf("applyConfigSecretsFromMap() error = %v", applyErr)
+	}
 
 	decoded, err := bc.GetDecoded()
 	if err != nil {
@@ -1532,4 +1800,147 @@ func TestApplyConfigSecretsFromMap_ChannelNotDecodedYet(t *testing.T) {
 	if got := tgCfg.Token.String(); got != "lazy-decoded-token" {
 		t.Fatalf("telegram token = %q, want %q", got, "lazy-decoded-token")
 	}
+}
+
+func setupEventWebhookAPIConfig(t *testing.T) (string, func(), string) {
+	t.Helper()
+	configPath, cleanup := setupOAuthTestEnv(t)
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		cleanup()
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	secret := eventWebhookAPISecret(0x31)
+	cfg.Events.Ingress = config.EventIngressConfig{
+		Enabled: true,
+		Webhooks: map[string]config.GenericWebhookConfig{
+			"deploy": {
+				Enabled: true,
+				Secret:  *config.NewSecureString(secret),
+			},
+		},
+	}
+	if err = config.SaveConfig(configPath, cfg); err != nil {
+		cleanup()
+		t.Fatalf("SaveConfig(event webhook) error = %v", err)
+	}
+	return configPath, cleanup, secret
+}
+
+func eventWebhookAPISecret(fill byte) string {
+	return "whsec_" + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{fill}, 32))
+}
+
+func eventWebhookAPIConnectorNameSafeSecret(fill byte) string {
+	return "whsec_" + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{fill}, 33))
+}
+
+func configuredEventWebhookSecret(cfg *config.Config, name string) string {
+	webhook := cfg.Events.Ingress.Webhooks[name]
+	return webhook.Secret.String()
+}
+
+func eventWebhookAPIUpdateBody(
+	t *testing.T,
+	configPath string,
+	method string,
+	changes map[string]map[string]any,
+) []byte {
+	t.Helper()
+
+	var raw map[string]any
+	if method == http.MethodPut {
+		cfg, err := config.LoadConfigForUpdate(configPath)
+		if err != nil {
+			t.Fatalf("LoadConfigForUpdate(for PUT body) error = %v", err)
+		}
+		encoded, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatalf("Marshal(config for PUT) error = %v", err)
+		}
+		if err = json.Unmarshal(encoded, &raw); err != nil {
+			t.Fatalf("Unmarshal(config map for PUT) error = %v", err)
+		}
+	} else {
+		raw = map[string]any{
+			"events": map[string]any{
+				"ingress": map[string]any{
+					"webhooks": map[string]any{},
+				},
+			},
+		}
+	}
+
+	events, ok := raw["events"].(map[string]any)
+	if !ok {
+		t.Fatal("request config has no events object")
+	}
+	ingress, ok := events["ingress"].(map[string]any)
+	if !ok {
+		t.Fatal("request config has no events.ingress object")
+	}
+	webhooks, ok := ingress["webhooks"].(map[string]any)
+	if !ok {
+		t.Fatal("request config has no events.ingress.webhooks object")
+	}
+	for name, fields := range changes {
+		webhook, _ := webhooks[name].(map[string]any)
+		if webhook == nil {
+			webhook = make(map[string]any)
+			webhooks[name] = webhook
+		}
+		for field, value := range fields {
+			webhook[field] = value
+		}
+	}
+
+	body, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("Marshal(config API request) error = %v", err)
+	}
+	return body
+}
+
+func eventWebhookAPISetIngressEnabled(
+	t *testing.T,
+	body []byte,
+	enabled bool,
+) []byte {
+	t.Helper()
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("Unmarshal(config API request) error = %v", err)
+	}
+	events, ok := raw["events"].(map[string]any)
+	if !ok {
+		t.Fatal("request config has no events object")
+	}
+	ingress, ok := events["ingress"].(map[string]any)
+	if !ok {
+		t.Fatal("request config has no events.ingress object")
+	}
+	ingress["enabled"] = enabled
+	updated, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatalf("Marshal(config API request) error = %v", err)
+	}
+	return updated
+}
+
+func performConfigAPIRequest(
+	t *testing.T,
+	configPath string,
+	method string,
+	body []byte,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	handler := NewHandler(configPath)
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	request := httptest.NewRequest(method, "/api/config", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	return response
 }

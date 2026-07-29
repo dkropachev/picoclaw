@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -9,15 +10,17 @@ import (
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/eventing"
+	eventwebhook "github.com/sipeed/picoclaw/pkg/eventing/webhook"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 type eventAutomationService struct {
-	store  *eventing.Store
-	cancel context.CancelFunc
-	done   chan struct{}
+	store          *eventing.Store
+	webhookBackend *eventwebhook.Backend
+	cancel         context.CancelFunc
+	done           chan struct{}
 
 	stopOnce  sync.Once
 	closeOnce sync.Once
@@ -78,7 +81,16 @@ func newEventAutomationService(
 		return nil, err
 	}
 
-	service := &eventAutomationService{store: store, done: make(chan struct{})}
+	webhookBackend, err := newEventWebhookBackend(cfg, store)
+	if err != nil {
+		return nil, errors.Join(err, store.Close())
+	}
+
+	service := &eventAutomationService{
+		store:          store,
+		webhookBackend: webhookBackend,
+		done:           make(chan struct{}),
+	}
 	if !cfg.Workflows.Enabled {
 		close(service.done)
 		return service, nil
@@ -165,6 +177,9 @@ func openEventAutomationStore(ctx context.Context, cfg *config.Config) (*eventin
 	if cfg == nil || !cfg.Events.Ingress.Enabled {
 		return nil, nil
 	}
+	if err := cfg.Events.Ingress.Validate(); err != nil {
+		return nil, fmt.Errorf("validate event ingress: %w", err)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -174,12 +189,57 @@ func openEventAutomationStore(ctx context.Context, cfg *config.Config) (*eventin
 		ctx,
 		ingress.DatabasePath,
 		eventing.WithMaxPayloadBytes(ingress.MaxPayloadBytes),
-		eventing.WithRedaction(ingress.RedactFields, nil),
+		eventing.WithRedaction(
+			ingress.RedactFields,
+			eventWebhookSecretValues(ingress),
+		),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("open durable event inbox: %w", err)
 	}
 	return store, nil
+}
+
+func newEventWebhookBackend(
+	cfg *config.Config,
+	store eventwebhook.Inserter,
+) (*eventwebhook.Backend, error) {
+	if cfg == nil || !cfg.Events.Ingress.Enabled || store == nil {
+		return nil, nil
+	}
+	ingress := config.EffectiveEventIngressConfig(cfg, cfg.WorkspacePath())
+	secrets := make(map[string]string)
+	for name, connector := range ingress.Webhooks {
+		if !connector.Enabled {
+			continue
+		}
+		secrets[name] = connector.Secret.String()
+	}
+	if len(secrets) == 0 {
+		return nil, nil
+	}
+	backend, err := eventwebhook.NewBackend(eventwebhook.BackendConfig{
+		Store:            store,
+		ConnectorSecrets: secrets,
+		MaxPayloadBytes:  ingress.MaxPayloadBytes,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("prepare generic event webhook ingress: %w", err)
+	}
+	return backend, nil
+}
+
+func eventWebhookSecretValues(ingress config.EventIngressConfig) []string {
+	secrets := make([]string, 0, len(ingress.Webhooks))
+	for _, connector := range ingress.Webhooks {
+		if !connector.Enabled {
+			continue
+		}
+		if secret := connector.Secret.String(); secret != "" {
+			secrets = append(secrets, secret)
+		}
+	}
+	return secrets
 }
 
 // validateEventAutomationStorage proves the prospective durable inbox can be

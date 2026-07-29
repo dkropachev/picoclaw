@@ -85,17 +85,21 @@ func (h *Handler) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Load existing config and copy security credentials before validation,
 	// so that security-managed fields (e.g. pico token) are available.
-	existingCfg, err := config.LoadConfig(h.configPath)
+	existingCfg, err := config.LoadConfigForUpdate(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load existing config: %v", err), http.StatusInternalServerError)
 		return
 	}
-	err = cfg.SecurityCopyFrom(h.configPath)
+	err = cfg.SecurityCopyFromForUpdate(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to apply security config: %v", err), http.StatusInternalServerError)
 		return
 	}
-	applyConfigSecretsFromMap(&cfg, raw)
+	cfg.Events.Ingress.CopyWebhookSecretsFrom(existingCfg.Events.Ingress)
+	if err = applyConfigSecretsFromMap(&cfg, raw); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	preserveModelSecretsFromExisting(&cfg, existingCfg, raw)
 
 	if errs := validateConfig(&cfg); len(errs) > 0 {
@@ -154,7 +158,7 @@ func (h *Handler) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Load existing config and marshal to a map for merging
-	cfg, err := config.LoadConfig(h.configPath)
+	cfg, err := config.LoadConfigForUpdate(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
@@ -209,11 +213,15 @@ func (h *Handler) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Restore security fields (tokens/keys) from the loaded config before validation,
 	// because private fields are lost during JSON round-trip.
-	if err = newCfg.SecurityCopyFrom(h.configPath); err != nil {
+	if err = newCfg.SecurityCopyFromForUpdate(h.configPath); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to apply security config: %v", err), http.StatusInternalServerError)
 		return
 	}
-	applyConfigSecretsFromMap(&newCfg, base)
+	newCfg.Events.Ingress.CopyWebhookSecretsFrom(cfg.Events.Ingress)
+	if err = applyConfigSecretsFromMap(&newCfg, base); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	preserveModelSecretsFromExisting(&newCfg, cfg, base)
 
 	if errs := validateConfig(&newCfg); len(errs) > 0 {
@@ -340,6 +348,10 @@ func validateConfig(cfg *config.Config) []string {
 
 	if err := cfg.ValidateTurnProfile(); err != nil {
 		errs = append(errs, err.Error())
+	}
+
+	if err := cfg.Events.Ingress.Validate(); err != nil {
+		errs = append(errs, fmt.Sprintf("events.ingress: %v", err))
 	}
 
 	// Gateway port range
@@ -836,13 +848,16 @@ func modelSecretFallbackAllowed(model, existing *config.ModelConfig) bool {
 			strings.TrimRight(strings.TrimSpace(existing.APIBase), "/")
 }
 
-func applyConfigSecretsFromMap(cfg *config.Config, raw map[string]any) {
+func applyConfigSecretsFromMap(cfg *config.Config, raw map[string]any) error {
 	applyModelSecretsFromMap(cfg, raw)
+	if err := applyEventWebhookSecretsFromMap(cfg, raw); err != nil {
+		return err
+	}
 
 	channelsMap, hasChannels := asMapField(raw, "channel_list")
 	if !hasChannels {
 		applyToolSecretsFromMap(cfg, raw)
-		return
+		return nil
 	}
 
 	for chName, chData := range channelsMap {
@@ -874,6 +889,46 @@ func applyConfigSecretsFromMap(cfg *config.Config, raw map[string]any) {
 	}
 
 	applyToolSecretsFromMap(cfg, raw)
+	return nil
+}
+
+// applyEventWebhookSecretsFromMap reapplies only explicit event-webhook secret
+// values from an API request. SecurityCopyFrom has already restored existing
+// values, so masked placeholders and omitted fields deliberately leave them
+// unchanged while a concrete string replaces or clears the saved value.
+func applyEventWebhookSecretsFromMap(cfg *config.Config, raw map[string]any) error {
+	if cfg == nil {
+		return nil
+	}
+	explicit := make(map[string]string)
+	events, hasEvents := asMapField(raw, "events")
+	if !hasEvents {
+		return cfg.Events.Ingress.ApplyWebhookSecrets(explicit)
+	}
+	ingress, hasIngress := asMapField(events, "ingress")
+	if !hasIngress {
+		return cfg.Events.Ingress.ApplyWebhookSecrets(explicit)
+	}
+	webhooks, hasWebhooks := asMapField(ingress, "webhooks")
+	if !hasWebhooks {
+		return cfg.Events.Ingress.ApplyWebhookSecrets(explicit)
+	}
+
+	for name, rawWebhook := range webhooks {
+		webhookMap, ok := rawWebhook.(map[string]any)
+		if !ok {
+			continue
+		}
+		secret, present := getSecretString(webhookMap, "secret")
+		if !present || isSecretPlaceholder(secret) {
+			continue
+		}
+		if _, exists := cfg.Events.Ingress.Webhooks[name]; !exists {
+			continue
+		}
+		explicit[name] = secret
+	}
+	return cfg.Events.Ingress.ApplyWebhookSecrets(explicit)
 }
 
 func applyToolSecretsFromMap(cfg *config.Config, raw map[string]any) {
