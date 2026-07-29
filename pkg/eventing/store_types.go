@@ -202,11 +202,16 @@ type DispatchMetadataPage struct {
 // DispatchOperatorReader exposes dispatch inspection without worker
 // ownership credentials. It is additive to DispatchQueue.
 type DispatchOperatorReader interface {
-	GetDispatchMetadata(ctx context.Context, id string) (DispatchMetadata, error)
 	ListDispatchMetadata(
 		ctx context.Context,
 		filter DispatchFilter,
 	) (DispatchMetadataPage, error)
+}
+
+// DispatchOperatorGetter exposes exact dispatch inspection without widening
+// the established list-reader contract.
+type DispatchOperatorGetter interface {
+	GetDispatchMetadata(ctx context.Context, id string) (DispatchMetadata, error)
 }
 
 // EventStore owns durable envelope ingestion and retrieval.

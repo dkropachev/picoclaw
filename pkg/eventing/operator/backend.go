@@ -41,6 +41,7 @@ var (
 type Store interface {
 	eventing.EventOperatorReader
 	eventing.DispatchOperatorReader
+	eventing.DispatchOperatorGetter
 	Replay(ctx context.Context, id string) (eventing.InsertResult, error)
 }
 

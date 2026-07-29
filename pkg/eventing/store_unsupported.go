@@ -13,6 +13,7 @@ type Store struct{}
 var _ Inbox = (*Store)(nil)
 var _ EventOperatorReader = (*Store)(nil)
 var _ DispatchOperatorReader = (*Store)(nil)
+var _ DispatchOperatorGetter = (*Store)(nil)
 var _ RevisionRoutingDispatchCreator = (*Store)(nil)
 var _ DispatchLeaseRenewer = (*Store)(nil)
 

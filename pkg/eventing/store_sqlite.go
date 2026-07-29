@@ -45,6 +45,7 @@ var (
 	_ Inbox                          = (*Store)(nil)
 	_ EventOperatorReader            = (*Store)(nil)
 	_ DispatchOperatorReader         = (*Store)(nil)
+	_ DispatchOperatorGetter         = (*Store)(nil)
 	_ RoutingDispatchCreator         = (*Store)(nil)
 	_ RevisionRoutingDispatchCreator = (*Store)(nil)
 	_ RoutingLeaseRenewer            = (*Store)(nil)
