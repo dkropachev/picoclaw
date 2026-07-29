@@ -288,14 +288,21 @@ func activateEventAdmissions(runningServices *services) error {
 		channelAdmission.abort()
 		return err
 	}
+	operator, err := stageEventOperator(runningServices)
+	if err != nil {
+		webhookAdmission.abort()
+		channelAdmission.abort()
+		return err
+	}
 
-	// Both reservations have completed every fallible route, bus-seam, and
+	// All reservations have completed every fallible route, bus-seam, and
 	// controller invariant check while remaining non-accepting. Reaching this
 	// point is the irreversible aggregate commit decision: the serialized
 	// lifecycle cannot return another activation error. Publication is
 	// sequential, so concurrent traffic may transiently observe the webhook
 	// generation before the channel generation while readiness remains false;
-	// both use the same committed store and neither commit can fail.
+	// all use the same committed store and no commit can fail.
+	operator.commit(runningServices)
 	webhookAdmission.commit(runningServices)
 	channelAdmission.commit(runningServices)
 	return nil

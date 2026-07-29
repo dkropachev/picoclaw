@@ -947,6 +947,198 @@ func TestStoreListFiltersAndKeysetPagination(t *testing.T) {
 	require.Len(t, secondPage.Dispatches, 1)
 }
 
+func TestStoreDispatchMetadataExcludesOwnerAndPreservesPublicPage(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 7, 28, 16, 0, 0, 0, time.UTC)
+	clock := newMutableClock(base)
+	store, _ := openTestStore(t, clock)
+	event, err := store.Insert(
+		context.Background(),
+		testEnvelope("dispatch-metadata"),
+	)
+	require.NoError(t, err)
+
+	created := make([]Dispatch, 0, 3)
+	for index := 0; index < 3; index++ {
+		dispatch, inserted, createErr := store.CreateDispatch(
+			context.Background(),
+			event.Event.Envelope.ID,
+			fmt.Sprintf("workflows/metadata-%d.yaml", index),
+		)
+		require.NoError(t, createErr)
+		require.True(t, inserted)
+		created = append(created, dispatch)
+		clock.Advance(time.Second)
+	}
+	claimed, err := store.ClaimDispatches(
+		context.Background(),
+		"operator-metadata-worker",
+		len(created),
+		time.Minute,
+	)
+	require.NoError(t, err)
+	require.Len(t, claimed, len(created))
+
+	ownerSecrets := make([]string, len(created))
+	for index, dispatch := range created {
+		ownerSecrets[index] = fmt.Sprintf("owner-secret-%d", index)
+		_, err = store.db.ExecContext(
+			context.Background(),
+			`UPDATE event_dispatches SET owner = ? WHERE id = ?`,
+			ownerSecrets[index],
+			dispatch.ID,
+		)
+		require.NoError(t, err)
+	}
+	full, err := store.GetDispatch(context.Background(), created[2].ID)
+	require.NoError(t, err)
+	assert.Equal(t, ownerSecrets[2], full.LeaseToken)
+
+	first, err := store.ListDispatchMetadata(
+		context.Background(),
+		DispatchFilter{
+			EventID: event.Event.Envelope.ID,
+			Status:  DispatchClaimed,
+			Limit:   2,
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, first.Dispatches, 2)
+	require.NotNil(t, first.Next)
+	assert.Equal(t, created[2].ID, first.Dispatches[0].ID)
+	assert.Equal(t, created[1].ID, first.Dispatches[1].ID)
+	assert.Equal(
+		t,
+		&DispatchCursor{
+			CreatedAt: first.Dispatches[1].CreatedAt,
+			ID:        first.Dispatches[1].ID,
+		},
+		first.Next,
+	)
+
+	second, err := store.ListDispatchMetadata(
+		context.Background(),
+		DispatchFilter{
+			EventID: event.Event.Envelope.ID,
+			Status:  DispatchClaimed,
+			Limit:   2,
+			After:   first.Next,
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, second.Dispatches, 1)
+	assert.Nil(t, second.Next)
+	assert.Equal(t, created[0].ID, second.Dispatches[0].ID)
+
+	assert.Equal(t, DispatchMetadata{
+		ID:          full.ID,
+		EventID:     full.EventID,
+		WorkflowRef: full.WorkflowRef,
+		RunID:       full.RunID,
+		Status:      full.Status,
+		LeaseUntil:  full.LeaseUntil,
+		AvailableAt: full.AvailableAt,
+		Attempts:    full.Attempts,
+		LastError:   full.LastError,
+		CreatedAt:   full.CreatedAt,
+		UpdatedAt:   full.UpdatedAt,
+		LinkedAt:    full.LinkedAt,
+		FinishedAt:  full.FinishedAt,
+	}, first.Dispatches[0])
+
+	filtered, err := store.ListDispatchMetadata(
+		context.Background(),
+		DispatchFilter{WorkflowRef: created[1].WorkflowRef},
+	)
+	require.NoError(t, err)
+	require.Len(t, filtered.Dispatches, 1)
+	assert.Equal(t, created[1].ID, filtered.Dispatches[0].ID)
+
+	encoded, err := json.Marshal([]DispatchMetadataPage{first, second, filtered})
+	require.NoError(t, err)
+	forbiddenValues := append([]string(nil), ownerSecrets...)
+	forbiddenValues = append(forbiddenValues, `"owner"`, `"lease_token"`)
+	for _, forbidden := range forbiddenValues {
+		assert.NotContains(t, string(encoded), forbidden)
+	}
+
+	_, err = store.ListDispatchMetadata(
+		context.Background(),
+		DispatchFilter{Status: "unknown"},
+	)
+	assert.EqualError(
+		t,
+		err,
+		`invalid eventing state transition: unknown dispatch status "unknown"`,
+	)
+}
+
+func TestStoreOperatorMetadataReadsDoNotMaterializeLargePayload(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 28, 16, 0, 0, 0, time.UTC)
+	clock := newMutableClock(now)
+	payload := json.RawMessage(
+		`{"data":"` + strings.Repeat("x", 2<<20) + `"}`,
+	)
+	store, _ := openTestStore(
+		t,
+		clock,
+		WithMaxPayloadBytes(len(payload)),
+	)
+	input := testEnvelope("metadata-only-large-payload")
+	input.Payload = payload
+	inserted, err := store.Insert(context.Background(), input)
+	require.NoError(t, err)
+
+	claimed, err := store.ClaimRouting(
+		context.Background(),
+		"metadata-test-worker",
+		1,
+		time.Minute,
+	)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	require.NotEmpty(t, claimed[0].Routing.LeaseToken)
+
+	metadata, err := store.GetEventMetadata(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, len(inserted.Event.Envelope.Payload), metadata.PayloadBytes)
+	assert.Nil(t, metadata.Envelope.Payload)
+	assert.Empty(t, metadata.Envelope.DedupeKey)
+	assert.Empty(t, metadata.Routing.LeaseToken)
+	assert.Equal(t, RoutingClaimed, metadata.Routing.Status)
+
+	page, err := store.ListEventMetadata(
+		context.Background(),
+		EventFilter{Source: "github", Limit: 1},
+	)
+	require.NoError(t, err)
+	require.Len(t, page.Events, 1)
+	assert.Equal(t, metadata.PayloadBytes, page.Events[0].PayloadBytes)
+	assert.Nil(t, page.Events[0].Envelope.Payload)
+	assert.Empty(t, page.Events[0].Envelope.DedupeKey)
+	assert.Empty(t, page.Events[0].Routing.LeaseToken)
+
+	exact, err := store.GetEventPayload(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []byte(inserted.Event.Envelope.Payload), exact)
+	exact[0] = '['
+	again, err := store.GetEventPayload(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []byte(inserted.Event.Envelope.Payload), again)
+}
+
 func TestStoreReplayAndPrunePreserveLineage(t *testing.T) {
 	t.Parallel()
 

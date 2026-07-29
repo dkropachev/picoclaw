@@ -125,6 +125,31 @@ type EventPage struct {
 	Next   *EventCursor  `json:"next,omitempty"`
 }
 
+// StoredEventMetadata is the payload-free durable event projection used by
+// operator inspection. Dedupe and lease-owner credentials are also omitted;
+// PayloadBytes is obtained with SQLite length(payload_json), without reading
+// the payload blob.
+type StoredEventMetadata struct {
+	Envelope     Envelope     `json:"envelope"`
+	Routing      RoutingState `json:"routing"`
+	PayloadBytes int          `json:"payload_bytes"`
+}
+
+// EventMetadataPage is a newest-first payload-free event page.
+type EventMetadataPage struct {
+	Events []StoredEventMetadata `json:"events"`
+	Next   *EventCursor          `json:"next,omitempty"`
+}
+
+// EventOperatorReader exposes payload-free inspection separately from the
+// explicit exact-payload read. It is deliberately additive to EventStore so
+// existing inbox implementations retain their original contract.
+type EventOperatorReader interface {
+	GetEventMetadata(ctx context.Context, id string) (StoredEventMetadata, error)
+	ListEventMetadata(ctx context.Context, filter EventFilter) (EventMetadataPage, error)
+	GetEventPayload(ctx context.Context, id string) ([]byte, error)
+}
+
 // DispatchCursor is the stable keyset position for dispatch listings.
 type DispatchCursor struct {
 	CreatedAt time.Time `json:"created_at"`
@@ -144,6 +169,40 @@ type DispatchFilter struct {
 type DispatchPage struct {
 	Dispatches []Dispatch      `json:"dispatches"`
 	Next       *DispatchCursor `json:"next,omitempty"`
+}
+
+// DispatchMetadata is the operator-safe durable dispatch projection.
+// LeaseUntil remains observable, while the worker owner/lease token is
+// structurally omitted.
+type DispatchMetadata struct {
+	ID          string         `json:"id"`
+	EventID     string         `json:"event_id"`
+	WorkflowRef string         `json:"workflow_ref"`
+	RunID       string         `json:"run_id"`
+	Status      DispatchStatus `json:"status"`
+	LeaseUntil  *time.Time     `json:"lease_until,omitempty"`
+	AvailableAt time.Time      `json:"available_at"`
+	Attempts    int            `json:"attempts"`
+	LastError   string         `json:"last_error,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	LinkedAt    *time.Time     `json:"linked_at,omitempty"`
+	FinishedAt  *time.Time     `json:"finished_at,omitempty"`
+}
+
+// DispatchMetadataPage is a newest-first operator-safe dispatch page.
+type DispatchMetadataPage struct {
+	Dispatches []DispatchMetadata `json:"dispatches"`
+	Next       *DispatchCursor    `json:"next,omitempty"`
+}
+
+// DispatchOperatorReader exposes dispatch inspection without worker
+// ownership credentials. It is additive to DispatchQueue.
+type DispatchOperatorReader interface {
+	ListDispatchMetadata(
+		ctx context.Context,
+		filter DispatchFilter,
+	) (DispatchMetadataPage, error)
 }
 
 // EventStore owns durable envelope ingestion and retrieval.

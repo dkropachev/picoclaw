@@ -11,6 +11,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/eventing"
 	eventchannel "github.com/sipeed/picoclaw/pkg/eventing/channelmessage"
+	eventoperator "github.com/sipeed/picoclaw/pkg/eventing/operator"
 	eventwebhook "github.com/sipeed/picoclaw/pkg/eventing/webhook"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -18,11 +19,12 @@ import (
 )
 
 type eventAutomationService struct {
-	store          *eventing.Store
-	webhookBackend *eventwebhook.Backend
-	channelBackend *eventchannel.Backend
-	cancel         context.CancelFunc
-	done           chan struct{}
+	store           *eventing.Store
+	operatorBackend *eventoperator.Backend
+	webhookBackend  *eventwebhook.Backend
+	channelBackend  *eventchannel.Backend
+	cancel          context.CancelFunc
+	done            chan struct{}
 
 	stopOnce  sync.Once
 	closeOnce sync.Once
@@ -83,6 +85,12 @@ func newEventAutomationService(
 		return nil, err
 	}
 
+	operatorBackend, err := eventoperator.NewBackend(eventoperator.BackendConfig{
+		Store: store,
+	})
+	if err != nil {
+		return nil, errors.Join(err, store.Close())
+	}
 	webhookBackend, err := newEventWebhookBackend(cfg, store)
 	if err != nil {
 		return nil, errors.Join(err, store.Close())
@@ -93,10 +101,11 @@ func newEventAutomationService(
 	}
 
 	service := &eventAutomationService{
-		store:          store,
-		webhookBackend: webhookBackend,
-		channelBackend: channelBackend,
-		done:           make(chan struct{}),
+		store:           store,
+		operatorBackend: operatorBackend,
+		webhookBackend:  webhookBackend,
+		channelBackend:  channelBackend,
+		done:            make(chan struct{}),
 	}
 	if !cfg.Workflows.Enabled {
 		close(service.done)

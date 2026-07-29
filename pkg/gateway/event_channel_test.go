@@ -1121,6 +1121,7 @@ func TestSuccessfulReloadRotatesEventChannelModeAndStoreGeneration(t *testing.T)
 		eventChannelInstalled:  true,
 		eventChannelRelease:    eventChannelRelease,
 	}
+	installTestEventOperatorGeneration(t, runningServices)
 	t.Cleanup(func() {
 		_ = stopRuntimeProducers(runningServices, 5*time.Second)
 		_ = closeEventChannelAdmission(context.Background(), runningServices)
@@ -1295,6 +1296,7 @@ func TestFailedCandidateReloadRestoresPreparedEventChannelGeneration(t *testing.
 		eventChannelInstalled:  true,
 		eventChannelRelease:    eventChannelRelease,
 	}
+	installTestEventOperatorGeneration(t, runningServices)
 	t.Cleanup(func() {
 		_ = stopRuntimeProducers(runningServices, 5*time.Second)
 		_ = closeEventChannelAdmission(context.Background(), runningServices)

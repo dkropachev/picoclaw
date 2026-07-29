@@ -261,6 +261,89 @@ func TestActiveTurnsHandler_RequiresAuth(t *testing.T) {
 	}
 }
 
+func TestProtectRequiresBearerToken(t *testing.T) {
+	s := newTestServer()
+	called := false
+	handler := s.Protect(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/runtime/example", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("Protect() status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+	if called {
+		t.Fatal("Protect() called downstream handler without authorization")
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/runtime/example", nil)
+	req.Header.Set("Authorization", "Bearer test")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("authorized Protect() status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+	if !called {
+		t.Fatal("authorized Protect() did not call downstream handler")
+	}
+}
+
+func TestProtectNilHandlerReturnsNotFound(t *testing.T) {
+	s := newTestServer()
+	handler := s.Protect(nil)
+	req := httptest.NewRequest(http.MethodGet, "/runtime/example", nil)
+	req.Header.Set("Authorization", "Bearer test")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("Protect(nil) status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+func TestProtectFailsClosedWithoutConfiguredToken(t *testing.T) {
+	s := NewServer("127.0.0.1", 0, "")
+	called := false
+	handler := s.Protect(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/runtime/example", nil)
+	req.Header.Set("Authorization", "Bearer supplied-but-not-configured")
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Protect() status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	if called {
+		t.Fatal("Protect() called downstream handler without configured auth")
+	}
+	if w.Header().Get("Retry-After") != "1" {
+		t.Fatalf("Protect() Retry-After = %q, want 1", w.Header().Get("Retry-After"))
+	}
+}
+
+func TestUsesBearerToken(t *testing.T) {
+	s := newTestServer()
+	if !s.UsesBearerToken("test") {
+		t.Fatal("UsesBearerToken() rejected configured token")
+	}
+	for _, token := range []string{"", "wrong", "test "} {
+		if s.UsesBearerToken(token) {
+			t.Fatalf("UsesBearerToken(%q) = true, want false", token)
+		}
+	}
+	if NewServer("127.0.0.1", 0, "").UsesBearerToken("anything") {
+		t.Fatal("UsesBearerToken() accepted a token when auth is disabled")
+	}
+}
+
 func TestSetReady_Toggle(t *testing.T) {
 	s := newTestServer()
 

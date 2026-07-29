@@ -117,6 +117,12 @@ func (staged *stagedEventWebhookAdmission) commit(
 	}
 }
 
+func (staged *stagedEventWebhookAdmission) abort() {
+	if staged != nil && staged.reservation != nil {
+		staged.reservation.Abort()
+	}
+}
+
 // activateEventWebhook commits the backend currently owned by EventAutomation.
 // A configuration with no enabled generic connector removes the stable route
 // only after the previous generation has been deactivated and drained.
