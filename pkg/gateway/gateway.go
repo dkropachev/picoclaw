@@ -44,6 +44,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/cron"
 	"github.com/sipeed/picoclaw/pkg/devices"
 	eventchannel "github.com/sipeed/picoclaw/pkg/eventing/channelmessage"
+	eventoperator "github.com/sipeed/picoclaw/pkg/eventing/operator"
 	eventwebhook "github.com/sipeed/picoclaw/pkg/eventing/webhook"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/health"
@@ -68,25 +69,28 @@ const (
 )
 
 type services struct {
-	CronService            *cron.CronService
-	HeartbeatService       *heartbeat.HeartbeatService
-	MediaStore             media.MediaStore
-	ChannelManager         *channels.Manager
-	DeviceService          *devices.Service
-	EventAutomation        *eventAutomationService
-	HealthServer           *health.Server
-	eventChannelBus        *bus.MessageBus
-	eventChannelController *eventchannel.Controller
-	eventChannelGeneration eventchannel.Generation
-	eventChannelInstalled  bool
-	eventChannelRelease    func()
-	eventWebhookController *eventwebhook.Controller
-	eventWebhookGeneration eventwebhook.Generation
-	eventWebhookRelease    func()
-	VoiceAgentCancel       context.CancelFunc
-	manualReloadChan       chan struct{}
-	reloading              atomic.Bool
-	authToken              string
+	CronService             *cron.CronService
+	HeartbeatService        *heartbeat.HeartbeatService
+	MediaStore              media.MediaStore
+	ChannelManager          *channels.Manager
+	DeviceService           *devices.Service
+	EventAutomation         *eventAutomationService
+	HealthServer            *health.Server
+	eventChannelBus         *bus.MessageBus
+	eventChannelController  *eventchannel.Controller
+	eventChannelGeneration  eventchannel.Generation
+	eventChannelInstalled   bool
+	eventChannelRelease     func()
+	eventWebhookController  *eventwebhook.Controller
+	eventWebhookGeneration  eventwebhook.Generation
+	eventWebhookRelease     func()
+	eventOperatorController *eventoperator.Controller
+	eventOperatorGeneration eventoperator.Generation
+	eventOperatorRelease    func()
+	VoiceAgentCancel        context.CancelFunc
+	manualReloadChan        chan struct{}
+	reloading               atomic.Bool
+	authToken               string
 }
 
 type startupBlockedProvider struct {
@@ -572,7 +576,7 @@ func setupAndStartServices(
 		listenAddr,
 		runningServices.HealthServer,
 	)
-	if err = prepareEventWebhookRouteForConfig(runningServices, cfg); err != nil {
+	if err = prepareEventHTTPRoutesForConfig(runningServices, cfg); err != nil {
 		return runningServices, err
 	}
 	if err = validateEventAutomationStorage(context.Background(), cfg); err != nil {
@@ -672,6 +676,10 @@ func stopRuntimeProducers(
 		cleanupErr = errors.Join(cleanupErr, err)
 		admissionDrained = false
 	}
+	if err := deactivateEventOperator(shutdownCtx, runningServices); err != nil {
+		cleanupErr = errors.Join(cleanupErr, err)
+		admissionDrained = false
+	}
 	if err := deactivateEventWebhook(shutdownCtx, runningServices); err != nil {
 		cleanupErr = errors.Join(cleanupErr, err)
 		admissionDrained = false
@@ -720,10 +728,10 @@ func stopRuntimeDependencies(
 		if err := runningServices.ChannelManager.StopAll(shutdownCtx); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("stop channels: %w", err))
 		} else {
-			releaseEventWebhookRoute(runningServices)
+			releaseEventHTTPRoutes(runningServices)
 		}
 	} else if stopChannels {
-		releaseEventWebhookRoute(runningServices)
+		releaseEventHTTPRoutes(runningServices)
 	}
 	if runningServices.MediaStore != nil {
 		if fms, ok := runningServices.MediaStore.(*media.FileMediaStore); ok {
@@ -859,26 +867,45 @@ func handleConfigReloadWithServiceOps(
 	newModel := newCfg.Agents.Defaults.ModelName
 	hadEventWebhookRoute := runningServices != nil &&
 		runningServices.eventWebhookRelease != nil
-	if err := prepareEventWebhookRouteForConfig(runningServices, newCfg); err != nil {
-		return fmt.Errorf("prepare event webhook route before reload: %w", err)
-	}
+	hadEventOperatorRoute := runningServices != nil &&
+		runningServices.eventOperatorRelease != nil
+	prepareEventRoutesErr := prepareEventHTTPRoutesForConfig(runningServices, newCfg)
 	var provisionalEventWebhookRelease func()
 	if !hadEventWebhookRoute &&
 		runningServices != nil &&
 		runningServices.eventWebhookRelease != nil {
 		provisionalEventWebhookRelease = runningServices.eventWebhookRelease
 	}
-	retainProvisionalEventWebhookRoute := false
+	var provisionalEventOperatorRelease func()
+	if !hadEventOperatorRoute &&
+		runningServices != nil &&
+		runningServices.eventOperatorRelease != nil {
+		provisionalEventOperatorRelease = runningServices.eventOperatorRelease
+	}
+	retainProvisionalEventHTTPRoutes := false
 	defer func() {
-		if provisionalEventWebhookRelease == nil ||
-			retainProvisionalEventWebhookRoute {
+		if retainProvisionalEventHTTPRoutes {
 			return
 		}
-		provisionalEventWebhookRelease()
-		if runningServices != nil {
+		if provisionalEventOperatorRelease != nil {
+			provisionalEventOperatorRelease()
+		}
+		if provisionalEventWebhookRelease != nil {
+			provisionalEventWebhookRelease()
+		}
+		if runningServices != nil && provisionalEventOperatorRelease != nil {
+			runningServices.eventOperatorRelease = nil
+		}
+		if runningServices != nil && provisionalEventWebhookRelease != nil {
 			runningServices.eventWebhookRelease = nil
 		}
 	}()
+	if prepareEventRoutesErr != nil {
+		return fmt.Errorf(
+			"prepare event HTTP routes before reload: %w",
+			prepareEventRoutesErr,
+		)
+	}
 	if err := validateEventAutomationStorage(ctx, newCfg); err != nil {
 		return fmt.Errorf("validate event automation before reload: %w", err)
 	}
@@ -903,24 +930,26 @@ func handleConfigReloadWithServiceOps(
 	if runningServices != nil && runningServices.HealthServer != nil {
 		runningServices.HealthServer.SetReady(false)
 	}
-	// From this point, a newly prepared route remains mounted as retryable 503
+	// From this point, newly prepared routes remain mounted as retryable 503
 	// if recovery itself fails. Successful rollback to a disabled old config
-	// explicitly releases it through activateEventWebhook.
-	retainProvisionalEventWebhookRoute = true
-	webhookDrainCtx, webhookDrainCancel := context.WithTimeout(
+	// explicitly releases them through aggregate event admission activation.
+	retainProvisionalEventHTTPRoutes = true
+	httpDrainCtx, httpDrainCancel := context.WithTimeout(
 		ctx,
 		providerReloadTimeout,
 	)
-	webhookDrainErr := deactivateEventWebhook(webhookDrainCtx, runningServices)
-	webhookDrainCancel()
-	if webhookDrainErr != nil {
+	operatorDrainErr := deactivateEventOperator(httpDrainCtx, runningServices)
+	webhookDrainErr := deactivateEventWebhook(httpDrainCtx, runningServices)
+	httpDrainCancel()
+	httpDrainErr := errors.Join(operatorDrainErr, webhookDrainErr)
+	if httpDrainErr != nil {
 		if stateful, ok := newProvider.(providers.StatefulProvider); ok {
 			stateful.Close()
 		}
 		return errors.Join(
 			fmt.Errorf(
-				"deactivate event webhook admission for reload: %w",
-				webhookDrainErr,
+				"deactivate event HTTP admission for reload: %w",
+				httpDrainErr,
 			),
 			cancelEventChannelPreparation(runningServices),
 		)
@@ -933,9 +962,9 @@ func handleConfigReloadWithServiceOps(
 			stateful.Close()
 		}
 		restoreChannelErr := cancelEventChannelPreparation(runningServices)
-		reactivateWebhookErr := activateEventWebhook(runningServices)
+		reactivateHTTPErr := activateEventHTTPAdmissions(runningServices)
 		if restoreChannelErr == nil &&
-			reactivateWebhookErr == nil &&
+			reactivateHTTPErr == nil &&
 			runningServices != nil &&
 			runningServices.HealthServer != nil {
 			runningServices.HealthServer.SetReady(true)
@@ -943,7 +972,7 @@ func handleConfigReloadWithServiceOps(
 		return errors.Join(
 			fmt.Errorf("pause agent runtime for reload: %w", pauseErr),
 			restoreChannelErr,
-			reactivateWebhookErr,
+			reactivateHTTPErr,
 		)
 	}
 	defer resumeRuntime()
@@ -1184,7 +1213,7 @@ func restartServices(
 
 	al.SetChannelManager(runningServices.ChannelManager)
 
-	if err = prepareEventWebhookRouteForConfig(runningServices, cfg); err != nil {
+	if err = prepareEventHTTPRoutesForConfig(runningServices, cfg); err != nil {
 		return err
 	}
 	if err = runningServices.ChannelManager.Reload(context.Background(), cfg); err != nil {

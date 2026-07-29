@@ -1463,6 +1463,7 @@ func TestSuccessfulReloadRotatesWebhookSecretAndStoreGeneration(t *testing.T) {
 		eventWebhookGeneration: oldGeneration,
 		eventWebhookRelease:    func() {},
 	}
+	installTestEventOperatorGeneration(t, runningServices)
 	t.Cleanup(func() {
 		_ = stopRuntimeProducers(runningServices, 5*time.Second)
 		messageBus.Close()
@@ -1635,6 +1636,7 @@ func TestFailedCandidateReloadNeverActivatesWebhookAndRestoresOldGeneration(t *t
 		eventWebhookGeneration: oldGeneration,
 		eventWebhookRelease:    func() {},
 	}
+	installTestEventOperatorGeneration(t, runningServices)
 	t.Cleanup(func() {
 		_ = stopRuntimeProducers(runningServices, 5*time.Second)
 		messageBus.Close()

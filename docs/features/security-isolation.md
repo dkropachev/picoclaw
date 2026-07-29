@@ -45,6 +45,8 @@ approved side effect as a separately declared workflow action.
 | `FR-SEC-012` | MUST | Native GitHub webhook admission verifies `X-Hub-Signature-256` against the exact bounded raw body with the connector's secret before JSON parsing, but never represents `X-GitHub-Event` or `X-GitHub-Delivery` as signature-authenticated. The normalized envelope records the body/header distinction, public deployment requires trusted TLS termination, and no unsigned timestamp or retained delivery ID is presented as cryptographic replay prevention. | GitHub's HMAC protects payload integrity but not transport headers or freshness; workflows and operators need the actual trust boundary rather than implied authority. |
 | `FR-SEC-013` | MUST | An event-derived classifier may declare `tools: none`, which removes tool definitions and model-authored tool execution from its initial request, structured-output repair, managed fallbacks, and child work. The GitHub issue-triage workflow treats signed issue/repository content as untrusted, permits model influence only through validated category and priority enums plus a comment boolean, and performs any approved effect only through a separately declared `mcp/github/add_issue_comment` step whose repository/issue identity comes from the signed body and whose text is fixed. Installation and GitHub MCP enablement are explicit, the MCP write credential remains separate from the webhook signing secret, and no classifier failure gains fallback action authority. | Payload integrity does not make user-authored issue text safe instructions, and a classifier does not need authority-bearing tools to produce a bounded decision. |
 
+| `FR-SEC-014` | MUST | Event operator runtime routes require the gateway's process-local PID bearer using constant-time comparison. The authenticated launcher injects that credential server-side without forwarding browser cookies or authorization, maps internal authorization/stale-process failures to unavailable rather than a new login challenge, and applies same-origin checks to replay. The local CLI obtains the credential only from the owner-readable live PID file. Public event/dispatch projections have no deduplication or lease-token fields, ordinary detail omits payload, the explicit exact-payload response is non-cacheable, and all clients bound response size and error text; CLI payload output validates an object but emits its original bytes without normalization. | Durable operator data contains worker fencing credentials and potentially sensitive redacted-at-rest content; management access must not expose internal authority, become a CSRF primitive, or silently weaken during reload. |
+
 ## Data And State Model
 
 Security state includes secure-string sentinels, credential records keyed by
@@ -55,7 +57,10 @@ revocation metadata, per-connector event webhook formats/signing secrets, and
 explicit normalized webhook body/header trust metadata. Workflow agent requests
 also carry an explicit inherited-or-none tool policy; declared MCP actions use
 their ordinary independently configured credentials rather than ingress signing
-secrets.
+secrets. The gateway PID bearer remains process-local management authority;
+launcher sessions and owner-readable local CLI access can use it only through
+the bounded event proxy/client, and event DTO types make lease and
+deduplication credentials unrepresentable.
 
 ## Surface Ownership
 
@@ -95,6 +100,7 @@ Owns: TEST pkg/config/version*
 | Config | `events.ingress.webhooks.*.{format,secret}` | JSON-owned `standard`/`github` format plus masked JSON and secure-YAML merge/preservation for the corresponding per-connector secret, without security-only connector resurrection. | `FR-SEC-010`, `FR-SEC-012` |
 | HTTP | `GET /api/config`, `PUT /api/config`, `PATCH /api/config` | Management reads expose `[NOT_HERE]`; omitted or masked webhook secrets preserve the current value, and a concrete replacement rotates it through the same secure persistence path. | `FR-SEC-010` |
 | HTTP | `POST /webhooks/events/{connector}` with `format: github` | Exact-body HMAC-SHA256 authentication, bounded parsing, explicit unauthenticated-header metadata, and durable delivery-ID deduplication behind trusted TLS. | `FR-SEC-012` |
+| HTTP / CLI | protected `/runtime/eventing/*`, launcher `/api/events*`, `picoclaw events *` | Translate authenticated launcher or owner-local PID authority into bounded live-gateway operator calls without exposing PID credentials, lease tokens, deduplication keys, or automatically fetched payloads. | `FR-SEC-014` |
 | Workflow / MCP | `agent/*` with `with.tools: none`; `mcp/github/add_issue_comment` | Remove tools from every classifier model path, then permit a GitHub mutation only as a declared conditional MCP step with signed-body identity and fixed output text. The GitHub MCP server and its write credential are configured explicitly and independently from ingress authentication. | `FR-SEC-013` |
 | Storage | Credential store | Provider credential CRUD, auth method metadata, and optional non-secret account email metadata extracted from OAuth token responses. | `FR-SEC-002`, `FR-SEC-007`, `FR-SEC-009` |
 | Network | Safe HTTP client and net binding helpers | Private host controls and bind behavior. | `FR-SEC-005` |
@@ -143,6 +149,17 @@ Owns: TEST pkg/config/version*
     Treat the signed GitHub body projection as untrusted data, validate the
     required enum/enum/boolean result locally, and only then evaluate the
     separately declared MCP action using signed-body identity and fixed text.
+12. Wrap the live event operator controller in the gateway's existing
+    constant-time PID bearer check. The launcher validates its dashboard
+    session and affirmative same-origin replay metadata, allow-lists the path
+    and query, overwrites client credentials with the PID token, bypasses
+    environment HTTP proxies, bounds upstream responses, and maps stale
+    internal authority to unavailable. Project rows
+    into types without lease/deduplication fields and return payload only from
+    the explicit no-store exact-text endpoint. The CLI uses the owner-readable
+    PID file, validates bounded payload output without trimming or re-encoding
+    it, requires deliberate replay confirmation, and never retries a replay
+    POST.
 
 ## Cross-Feature Behavior
 
@@ -174,6 +191,9 @@ The opt-in GitHub issue-triage workflow composes that authenticated body with
 workflow-owned `tools: none` isolation and an ordinary declared MCP action. The
 signing secret establishes ingress integrity only; it neither sanitizes issue
 text nor supplies the MCP server's write credential.
+Event operator access composes launcher authentication or local PID-file
+authority with the gateway's protected runtime route. It does not add a second
+database opener, listener credential, or browser-visible bearer.
 
 ## Failure And Edge Cases
 
@@ -206,6 +226,13 @@ text nor supplies the MCP server's write credential.
 - Resolved channel and provider credentials are detached only at the trusted
   event-store construction boundary; they are never added to event identity,
   payload, config JSON, or logs.
+- Missing/wrong PID bearer credentials never reach the event store. The
+  launcher does not pass browser cookies or authorization upstream, and an
+  internal `401` becomes operator unavailability rather than a dashboard login
+  response. Cross-site or malformed replay requests create no event.
+- Event and dispatch responses cannot include live lease tokens or
+  deduplication keys through accidental struct serialization. Payload responses
+  are opt-in, exact, and non-cacheable; clients render them only as text.
 - Unverified email is skipped by default; an explicit opt-in marks it
   unverified. Private Delta Chat blob paths and copy errors do not enter durable
   events or attachment diagnostics, and oversized files are not materialized.
@@ -224,6 +251,7 @@ text nor supplies the MCP server's write credential.
 | `FR-SEC-011` | [pkg/config/events_channels_test.go](../../pkg/config/events_channels_test.go), [pkg/eventing/channelmessage/backend_test.go](../../pkg/eventing/channelmessage/backend_test.go), [pkg/channels/deltachat/deltachat_test.go](../../pkg/channels/deltachat/deltachat_test.go), [pkg/gateway/event_channel_test.go](../../pkg/gateway/event_channel_test.go) |
 | `FR-SEC-012` | [pkg/config/events_webhook_format_test.go](../../pkg/config/events_webhook_format_test.go), [pkg/eventing/webhook/github_test.go](../../pkg/eventing/webhook/github_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go) |
 | `FR-SEC-013` | [pkg/workflows/validator_test.go](../../pkg/workflows/validator_test.go), [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go), [pkg/workflows/agent_output_test.go](../../pkg/workflows/agent_output_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/workflows/templates_test.go](../../pkg/workflows/templates_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go) |
+| `FR-SEC-014` | [pkg/health/server_test.go](../../pkg/health/server_test.go), [pkg/eventing/operator](../../pkg/eventing/operator), [pkg/gateway/event_operator_test.go](../../pkg/gateway/event_operator_test.go), [web/backend/api/events_test.go](../../web/backend/api/events_test.go), [cmd/picoclaw/internal/events](../../cmd/picoclaw/internal/events) |
 
 ## Implementation Anchors
 

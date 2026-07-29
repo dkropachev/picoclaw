@@ -214,6 +214,10 @@ func TestHandleConfigReloadRejectsCorruptEventStoreBeforeCommit(t *testing.T) {
 	newCfg := eventAutomationTestConfig(newWorkspace, corruptPath, true, false)
 	providerRef := providers.LLMProvider(provider)
 	runningServices := &services{EventAutomation: oldService}
+	installTestEventOperatorGeneration(t, runningServices)
+	defer func() {
+		_ = deactivateEventOperator(context.Background(), runningServices)
+	}()
 
 	err = handleConfigReload(
 		context.Background(),
@@ -266,7 +270,9 @@ func TestHandleConfigReloadRollsBackPostSwapWorkflowRuntimeFailure(t *testing.T)
 		EventAutomation: oldService,
 		HealthServer:    healthServer,
 	}
+	installTestEventOperatorGeneration(t, runningServices)
 	defer func() {
+		_ = deactivateEventOperator(context.Background(), runningServices)
 		_ = closeEventAutomationService(context.Background(), &runningServices.EventAutomation)
 		msgBus.Close()
 		agentLoop.Close()
@@ -634,7 +640,9 @@ func TestHandleConfigReloadRecoversServicesAfterInitialDrainFailure(t *testing.T
 		EventAutomation: oldService,
 		HealthServer:    healthServer,
 	}
+	installTestEventOperatorGeneration(t, runningServices)
 	defer func() {
+		_ = deactivateEventOperator(context.Background(), runningServices)
 		_ = closeEventAutomationService(context.Background(), &runningServices.EventAutomation)
 		msgBus.Close()
 		agentLoop.Close()

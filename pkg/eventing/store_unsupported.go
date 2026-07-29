@@ -11,6 +11,8 @@ import (
 type Store struct{}
 
 var _ Inbox = (*Store)(nil)
+var _ EventOperatorReader = (*Store)(nil)
+var _ DispatchOperatorReader = (*Store)(nil)
 var _ DispatchLeaseRenewer = (*Store)(nil)
 
 func Open(context.Context, string, ...Option) (*Store, error) {
@@ -37,6 +39,18 @@ func (*Store) List(context.Context, EventFilter) (EventPage, error) {
 
 func (s *Store) ListEvents(ctx context.Context, filter EventFilter) (EventPage, error) {
 	return s.List(ctx, filter)
+}
+
+func (*Store) GetEventMetadata(context.Context, string) (StoredEventMetadata, error) {
+	return StoredEventMetadata{}, ErrUnsupportedPlatform
+}
+
+func (*Store) ListEventMetadata(context.Context, EventFilter) (EventMetadataPage, error) {
+	return EventMetadataPage{}, ErrUnsupportedPlatform
+}
+
+func (*Store) GetEventPayload(context.Context, string) ([]byte, error) {
+	return nil, ErrUnsupportedPlatform
 }
 
 func (*Store) ClaimRouting(context.Context, string, int, time.Duration) ([]StoredEvent, error) {
@@ -98,6 +112,13 @@ func (*Store) NackDispatch(context.Context, string, string, time.Time, string) e
 
 func (*Store) ListDispatches(context.Context, DispatchFilter) (DispatchPage, error) {
 	return DispatchPage{}, ErrUnsupportedPlatform
+}
+
+func (*Store) ListDispatchMetadata(
+	context.Context,
+	DispatchFilter,
+) (DispatchMetadataPage, error) {
+	return DispatchMetadataPage{}, ErrUnsupportedPlatform
 }
 
 func (*Store) Replay(context.Context, string) (InsertResult, error) {

@@ -43,6 +43,8 @@ type Store struct {
 
 var (
 	_ Inbox                  = (*Store)(nil)
+	_ EventOperatorReader    = (*Store)(nil)
+	_ DispatchOperatorReader = (*Store)(nil)
 	_ RoutingDispatchCreator = (*Store)(nil)
 	_ RoutingLeaseRenewer    = (*Store)(nil)
 	_ DispatchLeaseRenewer   = (*Store)(nil)
@@ -1047,6 +1049,12 @@ const eventColumns = `
 	routing_status, routing_owner, routing_lease_until, routing_attempts,
 	routing_available_at, routing_last_error, routing_updated_at`
 
+const eventMetadataColumns = `
+	id, source, connector, event_type, actor_json, subject_json,
+	occurred_at, received_at, length(payload_json), attributes_json, replay_of,
+	routing_status, routing_lease_until, routing_attempts,
+	routing_available_at, routing_last_error, routing_updated_at`
+
 type rowQueryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
@@ -1064,70 +1072,229 @@ func (s *Store) List(ctx context.Context, filter EventFilter) (EventPage, error)
 	if err := s.ready(ctx); err != nil {
 		return EventPage{}, err
 	}
-	if filter.RoutingStatus != "" && !validRoutingStatus(filter.RoutingStatus) {
-		return EventPage{}, fmt.Errorf("%w: unknown routing status %q", ErrInvalidTransition, filter.RoutingStatus)
-	}
-	if filter.After != nil {
-		if err := validateDBTimestamp("event cursor received_at", filter.After.ReceivedAt); err != nil {
-			return EventPage{}, err
-		}
-	}
-	limit := normalizedLimit(filter.Limit)
-	query := `SELECT ` + eventColumns + ` FROM event_inbox WHERE 1 = 1`
-	args := make([]any, 0, 10)
-	if filter.Source != "" {
-		query += ` AND source = ?`
-		args = append(args, filter.Source)
-	}
-	if filter.Connector != "" {
-		query += ` AND connector = ?`
-		args = append(args, filter.Connector)
-	}
-	if filter.Type != "" {
-		query += ` AND event_type = ?`
-		args = append(args, filter.Type)
-	}
-	if filter.RoutingStatus != "" {
-		query += ` AND routing_status = ?`
-		args = append(args, filter.RoutingStatus)
-	}
-	if filter.After != nil {
-		query += ` AND (received_at < ? OR (received_at = ? AND id < ?))`
-		position := toDBTime(filter.After.ReceivedAt)
-		args = append(args, position, position, filter.After.ID)
-	}
-	query += ` ORDER BY received_at DESC, id DESC LIMIT ?`
-	args = append(args, limit+1)
-
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	plan, err := buildEventListPlan(eventColumns, filter)
 	if err != nil {
-		return EventPage{}, fmt.Errorf("list events: %w", s.dbError(err))
+		return EventPage{}, err
 	}
-	defer rows.Close()
-
-	events := make([]StoredEvent, 0, limit+1)
-	for rows.Next() {
-		event, scanErr := scanStoredEvent(rows)
-		if scanErr != nil {
-			return EventPage{}, fmt.Errorf("scan event list: %w", scanErr)
-		}
-		events = append(events, event)
+	events, next, err := collectListPage(
+		ctx,
+		s,
+		plan,
+		scanStoredEvent,
+		func(event StoredEvent) EventCursor {
+			return EventCursor{
+				ReceivedAt: event.Envelope.ReceivedAt,
+				ID:         event.Envelope.ID,
+			}
+		},
+		listErrorContext{
+			query:   "list events",
+			scan:    "scan event list",
+			iterate: "iterate event list",
+		},
+	)
+	if err != nil {
+		return EventPage{}, err
 	}
-	if err := rows.Err(); err != nil {
-		return EventPage{}, fmt.Errorf("iterate event list: %w", s.dbError(err))
-	}
-	page := EventPage{Events: events}
-	if len(events) > limit {
-		page.Events = events[:limit]
-		last := page.Events[len(page.Events)-1].Envelope
-		page.Next = &EventCursor{ReceivedAt: last.ReceivedAt, ID: last.ID}
-	}
-	return page, nil
+	return EventPage{Events: events, Next: next}, nil
 }
 
 // ListEvents is an explicit alias for List.
 func (s *Store) ListEvents(ctx context.Context, filter EventFilter) (EventPage, error) {
 	return s.List(ctx, filter)
+}
+
+// GetEventMetadata retrieves one event without selecting its payload,
+// deduplication key, routing owner, or routing lease token.
+func (s *Store) GetEventMetadata(
+	ctx context.Context,
+	id string,
+) (StoredEventMetadata, error) {
+	if err := s.ready(ctx); err != nil {
+		return StoredEventMetadata{}, err
+	}
+	event, err := scanStoredEventMetadata(s.db.QueryRowContext(ctx, `
+		SELECT `+eventMetadataColumns+` FROM event_inbox WHERE id = ?`,
+		strings.TrimSpace(id),
+	))
+	if err != nil {
+		return StoredEventMetadata{}, s.dbError(err)
+	}
+	return event, nil
+}
+
+// GetEventPayload retrieves an independent copy of the exact stored,
+// already-redacted JSON payload.
+func (s *Store) GetEventPayload(ctx context.Context, id string) ([]byte, error) {
+	if err := s.ready(ctx); err != nil {
+		return nil, err
+	}
+	var payload []byte
+	if err := s.db.QueryRowContext(
+		ctx,
+		`SELECT payload_json FROM event_inbox WHERE id = ?`,
+		strings.TrimSpace(id),
+	).Scan(&payload); err != nil {
+		return nil, s.dbError(err)
+	}
+	return cloneBytes(payload), nil
+}
+
+// ListEventMetadata returns a newest-first page without selecting payload
+// blobs or worker fencing credentials.
+func (s *Store) ListEventMetadata(
+	ctx context.Context,
+	filter EventFilter,
+) (EventMetadataPage, error) {
+	if err := s.ready(ctx); err != nil {
+		return EventMetadataPage{}, err
+	}
+	plan, err := buildEventListPlan(eventMetadataColumns, filter)
+	if err != nil {
+		return EventMetadataPage{}, err
+	}
+	events, next, err := collectListPage(
+		ctx,
+		s,
+		plan,
+		scanStoredEventMetadata,
+		func(event StoredEventMetadata) EventCursor {
+			return EventCursor{
+				ReceivedAt: event.Envelope.ReceivedAt,
+				ID:         event.Envelope.ID,
+			}
+		},
+		listErrorContext{
+			query:   "list event metadata",
+			scan:    "scan event metadata list",
+			iterate: "iterate event metadata list",
+		},
+	)
+	if err != nil {
+		return EventMetadataPage{}, err
+	}
+	return EventMetadataPage{Events: events, Next: next}, nil
+}
+
+type listPlan struct {
+	query string
+	args  []any
+	limit int
+}
+
+type listFilter struct {
+	column  string
+	value   any
+	enabled bool
+}
+
+type listPosition struct {
+	at time.Time
+	id string
+}
+
+func buildEventListPlan(columns string, filter EventFilter) (listPlan, error) {
+	if filter.RoutingStatus != "" && !validRoutingStatus(filter.RoutingStatus) {
+		return listPlan{}, fmt.Errorf(
+			"%w: unknown routing status %q",
+			ErrInvalidTransition,
+			filter.RoutingStatus,
+		)
+	}
+	if filter.After != nil {
+		if err := validateDBTimestamp(
+			"event cursor received_at",
+			filter.After.ReceivedAt,
+		); err != nil {
+			return listPlan{}, err
+		}
+	}
+	var after *listPosition
+	if filter.After != nil {
+		after = &listPosition{at: filter.After.ReceivedAt, id: filter.After.ID}
+	}
+	return buildListPlan(
+		columns,
+		"event_inbox",
+		"received_at",
+		[]listFilter{
+			{column: "source", value: filter.Source, enabled: filter.Source != ""},
+			{column: "connector", value: filter.Connector, enabled: filter.Connector != ""},
+			{column: "event_type", value: filter.Type, enabled: filter.Type != ""},
+			{
+				column:  "routing_status",
+				value:   filter.RoutingStatus,
+				enabled: filter.RoutingStatus != "",
+			},
+		},
+		after,
+		filter.Limit,
+	), nil
+}
+
+func buildListPlan(
+	columns, table, positionColumn string,
+	filters []listFilter,
+	after *listPosition,
+	requestedLimit int,
+) listPlan {
+	limit := normalizedLimit(requestedLimit)
+	query := `SELECT ` + columns + ` FROM ` + table + ` WHERE 1 = 1`
+	args := make([]any, 0, len(filters)+4)
+	for _, filter := range filters {
+		if !filter.enabled {
+			continue
+		}
+		query += ` AND ` + filter.column + ` = ?`
+		args = append(args, filter.value)
+	}
+	if after != nil {
+		query += ` AND (` + positionColumn +
+			` < ? OR (` + positionColumn + ` = ? AND id < ?))`
+		position := toDBTime(after.at)
+		args = append(args, position, position, after.id)
+	}
+	query += ` ORDER BY ` + positionColumn + ` DESC, id DESC LIMIT ?`
+	args = append(args, limit+1)
+	return listPlan{query: query, args: args, limit: limit}
+}
+
+type listErrorContext struct {
+	query   string
+	scan    string
+	iterate string
+}
+
+func collectListPage[T, C any](
+	ctx context.Context,
+	store *Store,
+	plan listPlan,
+	scan func(rowScanner) (T, error),
+	cursor func(T) C,
+	errContext listErrorContext,
+) ([]T, *C, error) {
+	rows, err := store.db.QueryContext(ctx, plan.query, plan.args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", errContext.query, store.dbError(err))
+	}
+	defer rows.Close()
+
+	events := make([]T, 0, plan.limit+1)
+	for rows.Next() {
+		event, scanErr := scan(rows)
+		if scanErr != nil {
+			return nil, nil, fmt.Errorf("%s: %w", errContext.scan, scanErr)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", errContext.iterate, store.dbError(err))
+	}
+	if len(events) > plan.limit {
+		next := cursor(events[plan.limit-1])
+		return events[:plan.limit], &next, nil
+	}
+	return events, nil, nil
 }
 
 // ClaimRouting claims the oldest available or expired inbox work. workerLabel
@@ -1477,6 +1644,10 @@ const dispatchColumns = `
 	id, event_id, workflow_ref, run_id, status, owner, lease_until,
 	available_at, attempts, last_error, created_at, updated_at, linked_at, finished_at`
 
+const dispatchMetadataColumns = `
+	id, event_id, workflow_ref, run_id, status, lease_until,
+	available_at, attempts, last_error, created_at, updated_at, linked_at, finished_at`
+
 // ClaimDispatches claims the oldest available or expired workflow deliveries.
 // workerLabel is diagnostic only; transitions require each returned fresh
 // LeaseToken.
@@ -1696,60 +1867,99 @@ func (s *Store) ListDispatches(ctx context.Context, filter DispatchFilter) (Disp
 	if err := s.ready(ctx); err != nil {
 		return DispatchPage{}, err
 	}
-	if filter.Status != "" && !validDispatchStatus(filter.Status) {
-		return DispatchPage{}, fmt.Errorf("%w: unknown dispatch status %q", ErrInvalidTransition, filter.Status)
-	}
-	if filter.After != nil {
-		if err := validateDBTimestamp("dispatch cursor created_at", filter.After.CreatedAt); err != nil {
-			return DispatchPage{}, err
-		}
-	}
-	limit := normalizedLimit(filter.Limit)
-	query := `SELECT ` + dispatchColumns + ` FROM event_dispatches WHERE 1 = 1`
-	args := make([]any, 0, 8)
-	if filter.EventID != "" {
-		query += ` AND event_id = ?`
-		args = append(args, filter.EventID)
-	}
-	if filter.WorkflowRef != "" {
-		query += ` AND workflow_ref = ?`
-		args = append(args, filter.WorkflowRef)
-	}
-	if filter.Status != "" {
-		query += ` AND status = ?`
-		args = append(args, filter.Status)
-	}
-	if filter.After != nil {
-		query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
-		position := toDBTime(filter.After.CreatedAt)
-		args = append(args, position, position, filter.After.ID)
-	}
-	query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
-	args = append(args, limit+1)
-
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	plan, err := buildDispatchListPlan(dispatchColumns, filter)
 	if err != nil {
-		return DispatchPage{}, fmt.Errorf("list dispatches: %w", s.dbError(err))
+		return DispatchPage{}, err
 	}
-	defer rows.Close()
-	dispatches := make([]Dispatch, 0, limit+1)
-	for rows.Next() {
-		dispatch, scanErr := scanDispatch(rows)
-		if scanErr != nil {
-			return DispatchPage{}, fmt.Errorf("scan dispatch list: %w", scanErr)
+	dispatches, next, err := collectListPage(
+		ctx,
+		s,
+		plan,
+		scanDispatch,
+		func(dispatch Dispatch) DispatchCursor {
+			return DispatchCursor{CreatedAt: dispatch.CreatedAt, ID: dispatch.ID}
+		},
+		listErrorContext{
+			query:   "list dispatches",
+			scan:    "scan dispatch list",
+			iterate: "iterate dispatch list",
+		},
+	)
+	if err != nil {
+		return DispatchPage{}, err
+	}
+	return DispatchPage{Dispatches: dispatches, Next: next}, nil
+}
+
+// ListDispatchMetadata returns a newest-first page without selecting worker
+// owner/lease-token credentials.
+func (s *Store) ListDispatchMetadata(
+	ctx context.Context,
+	filter DispatchFilter,
+) (DispatchMetadataPage, error) {
+	if err := s.ready(ctx); err != nil {
+		return DispatchMetadataPage{}, err
+	}
+	plan, err := buildDispatchListPlan(dispatchMetadataColumns, filter)
+	if err != nil {
+		return DispatchMetadataPage{}, err
+	}
+	dispatches, next, err := collectListPage(
+		ctx,
+		s,
+		plan,
+		scanDispatchMetadata,
+		func(dispatch DispatchMetadata) DispatchCursor {
+			return DispatchCursor{CreatedAt: dispatch.CreatedAt, ID: dispatch.ID}
+		},
+		listErrorContext{
+			query:   "list dispatches",
+			scan:    "scan dispatch list",
+			iterate: "iterate dispatch list",
+		},
+	)
+	if err != nil {
+		return DispatchMetadataPage{}, err
+	}
+	return DispatchMetadataPage{Dispatches: dispatches, Next: next}, nil
+}
+
+func buildDispatchListPlan(columns string, filter DispatchFilter) (listPlan, error) {
+	if filter.Status != "" && !validDispatchStatus(filter.Status) {
+		return listPlan{}, fmt.Errorf(
+			"%w: unknown dispatch status %q",
+			ErrInvalidTransition,
+			filter.Status,
+		)
+	}
+	if filter.After != nil {
+		if err := validateDBTimestamp(
+			"dispatch cursor created_at",
+			filter.After.CreatedAt,
+		); err != nil {
+			return listPlan{}, err
 		}
-		dispatches = append(dispatches, dispatch)
 	}
-	if err := rows.Err(); err != nil {
-		return DispatchPage{}, fmt.Errorf("iterate dispatch list: %w", s.dbError(err))
+	var after *listPosition
+	if filter.After != nil {
+		after = &listPosition{at: filter.After.CreatedAt, id: filter.After.ID}
 	}
-	page := DispatchPage{Dispatches: dispatches}
-	if len(dispatches) > limit {
-		page.Dispatches = dispatches[:limit]
-		last := page.Dispatches[len(page.Dispatches)-1]
-		page.Next = &DispatchCursor{CreatedAt: last.CreatedAt, ID: last.ID}
-	}
-	return page, nil
+	return buildListPlan(
+		columns,
+		"event_dispatches",
+		"created_at",
+		[]listFilter{
+			{column: "event_id", value: filter.EventID, enabled: filter.EventID != ""},
+			{
+				column:  "workflow_ref",
+				value:   filter.WorkflowRef,
+				enabled: filter.WorkflowRef != "",
+			},
+			{column: "status", value: filter.Status, enabled: filter.Status != ""},
+		},
+		after,
+		filter.Limit,
+	), nil
 }
 
 // Replay creates a fresh inbox item linked to an existing event. The replay
@@ -1988,6 +2198,71 @@ func scanStoredEvent(scanner rowScanner) (StoredEvent, error) {
 	return event, nil
 }
 
+func scanStoredEventMetadata(scanner rowScanner) (StoredEventMetadata, error) {
+	var (
+		event                   StoredEventMetadata
+		actorJSON, subjectJSON  []byte
+		attributesJSON          []byte
+		occurredAt, leaseUntil  sql.NullInt64
+		replayOf                sql.NullString
+		payloadBytes            int64
+		receivedAt, availableAt int64
+		updatedAt               int64
+	)
+	err := scanner.Scan(
+		&event.Envelope.ID,
+		&event.Envelope.Source,
+		&event.Envelope.Connector,
+		&event.Envelope.Type,
+		&actorJSON,
+		&subjectJSON,
+		&occurredAt,
+		&receivedAt,
+		&payloadBytes,
+		&attributesJSON,
+		&replayOf,
+		&event.Routing.Status,
+		&leaseUntil,
+		&event.Routing.Attempts,
+		&availableAt,
+		&event.Routing.LastError,
+		&updatedAt,
+	)
+	if err != nil {
+		return StoredEventMetadata{}, err
+	}
+	if payloadBytes < 0 || payloadBytes > int64(^uint(0)>>1) {
+		return StoredEventMetadata{}, fmt.Errorf(
+			"stored event payload length is invalid",
+		)
+	}
+	if string(actorJSON) != "null" {
+		if err := json.Unmarshal(actorJSON, &event.Envelope.Actor); err != nil {
+			return StoredEventMetadata{}, err
+		}
+	}
+	if string(subjectJSON) != "null" {
+		if err := json.Unmarshal(subjectJSON, &event.Envelope.Subject); err != nil {
+			return StoredEventMetadata{}, err
+		}
+	}
+	if string(attributesJSON) != "null" {
+		if err := json.Unmarshal(attributesJSON, &event.Envelope.Attributes); err != nil {
+			return StoredEventMetadata{}, err
+		}
+	}
+	event.PayloadBytes = int(payloadBytes)
+	event.Envelope.OccurredAt = fromNullableTime(occurredAt)
+	event.Envelope.ReceivedAt = fromDBTime(receivedAt)
+	if replayOf.Valid {
+		event.Envelope.ReplayOf = replayOf.String
+	}
+	event.Routing.LeaseUntil = fromNullableTime(leaseUntil)
+	event.Routing.AvailableAt = fromDBTime(availableAt)
+	event.Routing.UpdatedAt = fromDBTime(updatedAt)
+	return event, nil
+}
+
 func scanDispatch(scanner rowScanner) (Dispatch, error) {
 	var (
 		dispatch                          Dispatch
@@ -2012,6 +2287,39 @@ func scanDispatch(scanner rowScanner) (Dispatch, error) {
 	)
 	if err != nil {
 		return Dispatch{}, err
+	}
+	dispatch.LeaseUntil = fromNullableTime(leaseUntil)
+	dispatch.AvailableAt = fromDBTime(availableAt)
+	dispatch.CreatedAt = fromDBTime(createdAt)
+	dispatch.UpdatedAt = fromDBTime(updatedAt)
+	dispatch.LinkedAt = fromNullableTime(linkedAt)
+	dispatch.FinishedAt = fromNullableTime(finishedAt)
+	return dispatch, nil
+}
+
+func scanDispatchMetadata(scanner rowScanner) (DispatchMetadata, error) {
+	var (
+		dispatch                          DispatchMetadata
+		leaseUntil, linkedAt, finishedAt  sql.NullInt64
+		availableAt, createdAt, updatedAt int64
+	)
+	err := scanner.Scan(
+		&dispatch.ID,
+		&dispatch.EventID,
+		&dispatch.WorkflowRef,
+		&dispatch.RunID,
+		&dispatch.Status,
+		&leaseUntil,
+		&availableAt,
+		&dispatch.Attempts,
+		&dispatch.LastError,
+		&createdAt,
+		&updatedAt,
+		&linkedAt,
+		&finishedAt,
+	)
+	if err != nil {
+		return DispatchMetadata{}, err
 	}
 	dispatch.LeaseUntil = fromNullableTime(leaseUntil)
 	dispatch.AvailableAt = fromDBTime(availableAt)

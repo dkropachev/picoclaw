@@ -169,6 +169,49 @@ func (s *Server) authorizeProtectedRequest(w http.ResponseWriter, r *http.Reques
 	return true
 }
 
+// UsesBearerToken reports whether token is the non-empty credential configured
+// for protected runtime endpoints without exposing the configured value.
+func (s *Server) UsesBearerToken(token string) bool {
+	if s == nil || token == "" {
+		return false
+	}
+	s.mu.RLock()
+	requiredToken := s.authToken
+	s.mu.RUnlock()
+	return requiredToken != "" &&
+		subtle.ConstantTimeCompare([]byte(token), []byte(requiredToken)) == 1
+}
+
+// Protect wraps a handler with the same bearer-token check used by the
+// gateway's built-in protected runtime endpoints. Unlike optional built-in
+// endpoints, an additive protected route fails closed when no token is
+// configured.
+func (s *Server) Protect(next http.Handler) http.Handler {
+	if next == nil {
+		next = http.NotFoundHandler()
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		s.mu.RLock()
+		authConfigured := s.authToken != ""
+		s.mu.RUnlock()
+		if !authConfigured {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": "protected runtime unavailable",
+			})
+			return
+		}
+		if !s.authorizeProtectedRequest(w, r) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) reloadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Content-Type", "application/json")
