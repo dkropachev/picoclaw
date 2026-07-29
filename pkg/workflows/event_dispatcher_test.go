@@ -184,8 +184,22 @@ func TestEventWorkflowRunContextFromEnvelopeSharesProductionAndPreviewShape(t *t
 	if production.Inputs["dispatch_id"] != dispatchID {
 		t.Fatalf("production dispatch_id = %#v", production.Inputs["dispatch_id"])
 	}
+	if production.Origin == nil ||
+		production.Origin.Kind != RunOriginExternalEvent ||
+		production.Origin.EventID != envelope.ID ||
+		production.Origin.DispatchID != dispatchID ||
+		production.Origin.RootRunID != "" {
+		t.Fatalf("production origin = %#v", production.Origin)
+	}
 	if _, present := preview.Inputs["dispatch_id"]; present {
 		t.Fatalf("preview invented dispatch_id: %#v", preview.Inputs)
+	}
+	if preview.Origin == nil ||
+		preview.Origin.Kind != RunOriginExternalEventDraftTest ||
+		preview.Origin.EventID != envelope.ID ||
+		preview.Origin.DispatchID != "" ||
+		preview.Origin.RootRunID != "" {
+		t.Fatalf("preview origin = %#v", preview.Origin)
 	}
 	for _, context := range []EventWorkflowRunContext{production, preview} {
 		if context.Inputs["event_id"] != envelope.ID ||
@@ -593,6 +607,12 @@ func TestEventWorkflowDispatcherRunsDeterministicRequestAndSucceeds(t *testing.T
 	if request.Event["id"] != fixture.event.Envelope.ID ||
 		request.Event["payload"].(map[string]any)["action"] != "opened" {
 		t.Fatalf("request event = %#v", request.Event)
+	}
+	if request.Origin == nil ||
+		request.Origin.Kind != RunOriginExternalEvent ||
+		request.Origin.EventID != fixture.event.Envelope.ID ||
+		request.Origin.DispatchID != fixture.dispatch.ID {
+		t.Fatalf("request origin = %#v", request.Origin)
 	}
 	if request.Workflow == nil || request.Workflow.On.Event == nil {
 		t.Fatalf("request workflow = %#v", request.Workflow)

@@ -545,6 +545,8 @@ jobs:
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	h := NewHandler(writeWorkflowAITestConfig(t, workspace))
+	restoreDependencies := stubWorkflowDependencyRuntime(t, nil)
+	t.Cleanup(restoreDependencies)
 	if _, err := workflows.RevalidateLocal(ctx, workspace, h.workflowCompatibilityRuntime(ctx)); err != nil {
 		t.Fatalf("RevalidateLocal() error = %v", err)
 	}

@@ -1294,6 +1294,13 @@ func assertSafeEventDraftRunProjection(t *testing.T, run *workflows.Run) {
 		run.Error != workflows.EventBackedDraftRunErrorDiagnostic {
 		t.Fatalf("run projection = %#v", run)
 	}
+	if run.Origin == nil ||
+		run.Origin.Kind != workflows.RunOriginExternalEventDraftTest ||
+		run.Origin.EventID != testEventID ||
+		run.Origin.DispatchID != "" ||
+		run.Origin.RootRunID != run.ID {
+		t.Fatalf("run origin = %#v, run id = %q", run.Origin, run.ID)
+	}
 	if len(run.Jobs) == 0 || len(run.Steps) == 0 {
 		t.Fatalf("run projection omitted executions: %#v", run)
 	}

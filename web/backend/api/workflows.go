@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -18,12 +19,13 @@ type workflowValidateRequest struct {
 }
 
 type workflowRunRequest struct {
-	Ref      string             `json:"ref"`
-	Inputs   map[string]any     `json:"inputs,omitempty"`
-	Secrets  map[string]string  `json:"secrets,omitempty"`
-	Session  string             `json:"session,omitempty"`
-	Delivery workflows.Delivery `json:"delivery,omitempty"`
-	Async    bool               `json:"async,omitempty"`
+	Ref                        string             `json:"ref"`
+	Inputs                     map[string]any     `json:"inputs,omitempty"`
+	Secrets                    map[string]string  `json:"secrets,omitempty"`
+	Session                    string             `json:"session,omitempty"`
+	Delivery                   workflows.Delivery `json:"delivery,omitempty"`
+	Async                      bool               `json:"async,omitempty"`
+	ExpectedDependencyRevision string             `json:"expected_dependency_revision,omitempty"`
 }
 
 type workflowDevelopmentTestRequest struct {
@@ -41,11 +43,29 @@ type workflowDevelopmentTestRequest struct {
 const workflowDevelopmentTestRequestMaxBytes = 1 << 20
 
 type workflowCancelRequest struct {
-	Reason string `json:"reason,omitempty"`
+	Reason optionalWorkflowCancelReason `json:"reason,omitempty"`
 }
 
+type optionalWorkflowCancelReason struct {
+	Value   string
+	Present bool
+}
+
+func (r *optionalWorkflowCancelReason) UnmarshalJSON(data []byte) error {
+	r.Present = true
+	if strings.TrimSpace(string(data)) == "null" {
+		return errors.New("workflow cancellation reason must be a string")
+	}
+	return json.Unmarshal(data, &r.Value)
+}
+
+const (
+	workflowCancelRequestMaxBytes = 16 << 10
+)
+
 type workflowRetryRequest struct {
-	Secrets map[string]string `json:"secrets,omitempty"`
+	Secrets                    map[string]string `json:"secrets,omitempty"`
+	ExpectedDependencyRevision string            `json:"expected_dependency_revision,omitempty"`
 }
 
 type workflowDefinitionResponse struct {
@@ -259,7 +279,7 @@ func (h *Handler) handleReloadWorkflows(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 	var req workflowRunRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeStrictWorkflowJSON(r, &req, false); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -278,10 +298,19 @@ func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "workflows are disabled", http.StatusBadRequest)
 		return
 	}
+	dependencies, err := h.requirePublishedWorkflowDependenciesReady(
+		r.Context(),
+		req.Ref,
+		req.ExpectedDependencyRevision,
+	)
+	if err != nil {
+		writeWorkflowRunDependencyError(w, err)
+		return
+	}
 	if err := workflows.EnsureWorkflowRunnable(
 		r.Context(),
 		cfg.WorkspacePath(),
-		req.Ref,
+		dependencies.RootRef,
 		h.workflowCompatibilityRuntime(r.Context()),
 		workflowLocalOptionsFromConfig(cfg)...,
 	); err != nil {
@@ -289,7 +318,7 @@ func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runReq := workflows.RunRequest{
-		Ref:      req.Ref,
+		Ref:      dependencies.RootRef,
 		Inputs:   req.Inputs,
 		Secrets:  req.Secrets,
 		Session:  req.Session,
@@ -331,9 +360,35 @@ func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) handleCancelWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	var req workflowCancelRequest
-	if err := decodeOptionalWorkflowJSON(r, &req); err != nil {
-		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+	if err := decodeWorkflowCancelRequest(w, r, &req); err != nil {
+		var maximum *http.MaxBytesError
+		if errors.As(err, &maximum) {
+			writeWorkflowJSONStatus(
+				w,
+				http.StatusRequestEntityTooLarge,
+				map[string]any{"error": "cancel_request_too_large"},
+			)
+			return
+		}
+		writeWorkflowJSONStatus(
+			w,
+			http.StatusBadRequest,
+			map[string]any{"error": "invalid_cancel_request"},
+		)
 		return
+	}
+	reason := ""
+	if req.Reason.Present {
+		var err error
+		reason, err = workflows.NormalizeWorkflowCancelReason(req.Reason.Value)
+		if err != nil || reason == "" {
+			writeWorkflowJSONStatus(
+				w,
+				http.StatusBadRequest,
+				map[string]any{"error": "invalid_cancel_reason"},
+			)
+			return
+		}
 	}
 	_, store, executor, err := h.workflowRuntime(r.Context())
 	if err != nil {
@@ -341,7 +396,7 @@ func (h *Handler) handleCancelWorkflowRun(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer closeWorkflowRuntime(executor)
-	run, err := executor.CancelRun(r.Context(), r.PathValue("run_id"), req.Reason)
+	run, err := executor.CancelRun(r.Context(), r.PathValue("run_id"), reason)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -358,7 +413,7 @@ func (h *Handler) handleCancelWorkflowRun(w http.ResponseWriter, r *http.Request
 
 func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	var req workflowRetryRequest
-	if err := decodeOptionalWorkflowJSON(r, &req); err != nil {
+	if err := decodeStrictWorkflowJSON(r, &req, true); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -383,6 +438,14 @@ func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request)
 			"event-backed draft run retries are unavailable; run the draft test again",
 			http.StatusConflict,
 		)
+		return
+	}
+	if _, err := h.requirePublishedWorkflowDependenciesReady(
+		r.Context(),
+		previousRun.WorkflowRef,
+		req.ExpectedDependencyRevision,
+	); err != nil {
+		writeWorkflowRunDependencyError(w, err)
 		return
 	}
 	if err := workflows.EnsureWorkflowRunnable(
@@ -777,6 +840,7 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 		runReq.Inputs = eventContext.Inputs
 		runReq.Secrets = nil
 		runReq.Event = eventContext.Event
+		runReq.Origin = eventContext.Origin
 		runReq.Session = eventContext.Session
 		runReq.Delivery = eventContext.Delivery
 	}
@@ -1032,6 +1096,61 @@ func decodeOptionalWorkflowJSON(r *http.Request, dest any) error {
 		return nil
 	}
 	return err
+}
+
+func decodeStrictWorkflowJSON(r *http.Request, dest any, optional bool) error {
+	if r.Body == nil {
+		if optional {
+			return nil
+		}
+		return io.EOF
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dest); err != nil {
+		if optional && errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("workflow request contains multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func decodeWorkflowCancelRequest(
+	w http.ResponseWriter,
+	r *http.Request,
+	dest *workflowCancelRequest,
+) error {
+	if r.Body == nil {
+		return nil
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(
+		w,
+		r.Body,
+		workflowCancelRequestMaxBytes,
+	))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dest); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("workflow cancel request contains multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 func decodeWorkflowDevelopmentTestRequest(

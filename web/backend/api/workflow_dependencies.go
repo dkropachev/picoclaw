@@ -25,6 +25,8 @@ var (
 	errWorkflowDependencyNotFound       = errors.New("workflow dependency root not found")
 	errWorkflowDependencyInvalid        = errors.New("workflow dependency root is invalid")
 	errWorkflowDependencyUnavailable    = errors.New("workflow dependency check unavailable")
+	errWorkflowDependencyRevisionStale  = errors.New("workflow dependency revision mismatch")
+	errWorkflowDependenciesNotReady     = errors.New("workflow dependencies are not ready")
 )
 
 type workflowDependencyDraftRequest struct {
@@ -150,6 +152,76 @@ func (h *Handler) evaluateCurrentWorkflowDependencies(
 		return nil, errWorkflowDependencyUnavailable
 	}
 	return h.evaluateWorkflowDependencies(ctx, cfg, revision, rootRef, raw)
+}
+
+// evaluatePublishedWorkflowDependencies evaluates the current bytes for one
+// published workflow against the same stable config snapshot used to resolve
+// its reusable closure and runtime dependencies.
+func (h *Handler) evaluatePublishedWorkflowDependencies(
+	ctx context.Context,
+	ref string,
+) (*workflowDependencyCheckResponse, error) {
+	cfg, revision, err := loadStableWorkflowDependencyConfig(h.configPath)
+	if err != nil {
+		return nil, errWorkflowDependencyUnavailable
+	}
+	rootRef, raw, err := workflowDependencyRequestRoot(
+		ctx,
+		cfg,
+		workflowDependencyCheckRequest{Ref: ref},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return h.evaluateWorkflowDependencies(ctx, cfg, revision, rootRef, raw)
+}
+
+func (h *Handler) requirePublishedWorkflowDependenciesReady(
+	ctx context.Context,
+	ref string,
+	expectedRevision string,
+) (*workflowDependencyCheckResponse, error) {
+	evaluation, err := h.evaluatePublishedWorkflowDependencies(ctx, ref)
+	if err != nil {
+		switch {
+		case errors.Is(err, errWorkflowDependencyInvalidRequest),
+			errors.Is(err, errWorkflowDependencyNotFound),
+			errors.Is(err, errWorkflowDependencyInvalid):
+			return nil, errWorkflowDependenciesNotReady
+		default:
+			return nil, errWorkflowDependencyUnavailable
+		}
+	}
+	if expectedRevision != "" && expectedRevision != evaluation.Revision {
+		return nil, errWorkflowDependencyRevisionStale
+	}
+	if !evaluation.Ready {
+		return nil, errWorkflowDependenciesNotReady
+	}
+	return evaluation, nil
+}
+
+func writeWorkflowRunDependencyError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errWorkflowDependencyRevisionStale):
+		writeWorkflowDependencyError(
+			w,
+			http.StatusConflict,
+			"dependency_revision_mismatch",
+		)
+	case errors.Is(err, errWorkflowDependenciesNotReady):
+		writeWorkflowDependencyError(
+			w,
+			http.StatusConflict,
+			"workflow_dependencies_not_ready",
+		)
+	default:
+		writeWorkflowDependencyError(
+			w,
+			http.StatusServiceUnavailable,
+			"dependency_check_unavailable",
+		)
+	}
 }
 
 func (h *Handler) evaluateWorkflowDependencies(

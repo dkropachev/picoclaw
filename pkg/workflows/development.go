@@ -497,7 +497,14 @@ func SanitizeEventBackedDraftTestOutcome(
 // IsEventBackedDraftRun identifies the narrow browser projection boundary:
 // draft workflow identity plus a persisted structured event context.
 func IsEventBackedDraftRun(run *Run) bool {
-	if run == nil || !strings.HasPrefix(strings.TrimSpace(run.WorkflowRef), "draft:") {
+	if run == nil {
+		return false
+	}
+	if origin, trusted := trustedRunOrigin(run); trusted &&
+		origin.Kind == RunOriginExternalEventDraftTest {
+		return true
+	}
+	if !strings.HasPrefix(strings.TrimSpace(run.WorkflowRef), "draft:") {
 		return false
 	}
 	return len(run.Event) != 0
@@ -554,6 +561,11 @@ func ProjectWorkflowRunForBrowser(run *Run, eventBackedDraft bool) *Run {
 		return nil
 	}
 	projected := cloneRun(run)
+	if origin, trusted := trustedRunOrigin(run); trusted {
+		projected.Origin = origin
+	} else {
+		projected.Origin = nil
+	}
 	if !eventBackedDraft {
 		return projected
 	}

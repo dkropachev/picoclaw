@@ -45,6 +45,7 @@ type RunRequest struct {
 	Inputs       map[string]any
 	Secrets      map[string]string
 	Event        map[string]any
+	Origin       *RunOrigin
 	Session      string
 	Delivery     Delivery
 	ParentRunID  string
@@ -98,11 +99,24 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 	if runID == "" {
 		runID = NewRunID()
 	}
+	origin, originErr := normalizeRunOrigin(
+		req.Origin,
+		runID,
+		req.ParentRunID,
+		req.RetryOfRunID,
+		req.Event,
+		req.Inputs,
+	)
+	if originErr != nil {
+		return nil, originErr
+	}
+	req.Origin = origin
 	now := time.Now().UTC()
 	run := &Run{
 		ID:           runID,
 		WorkflowRef:  workflowRef,
 		Status:       RunStatusRunning,
+		Origin:       cloneRunOrigin(origin),
 		ParentRunID:  req.ParentRunID,
 		CallerJobID:  req.CallerJobID,
 		RetryOfRunID: req.RetryOfRunID,
@@ -268,6 +282,7 @@ func (e *Executor) Retry(ctx context.Context, runID string, secrets map[string]s
 		Inputs:       cloneMap(run.Inputs),
 		Secrets:      cloneStringMap(secrets),
 		Event:        cloneMap(run.Event),
+		Origin:       cloneRunOrigin(run.Origin),
 		Session:      run.Session,
 		Delivery:     run.Delivery,
 		ParentRunID:  run.ParentRunID,
@@ -630,6 +645,7 @@ func (e *Executor) executeReusableJob(
 		Ref:         job.Uses,
 		Inputs:      with,
 		Event:       execCtx.Event,
+		Origin:      cloneRunOrigin(req.Origin),
 		Session:     inheritedContextValue(job.Context.Session, execCtx.Session),
 		Delivery:    inheritedDelivery(job.Context.Delivery, execCtx.Delivery),
 		ParentRunID: parentRunID,
@@ -1202,6 +1218,7 @@ func cloneRun(run *Run) *Run {
 		return nil
 	}
 	out := *run
+	out.Origin = cloneRunOrigin(run.Origin)
 	out.ChildRunIDs = append([]string(nil), run.ChildRunIDs...)
 	out.Delivery = run.Delivery
 	out.Delivery.ReplyHandles = cloneStringMap(run.Delivery.ReplyHandles)
