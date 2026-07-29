@@ -7,15 +7,15 @@
 ## Behavior Summary
 
 The web launcher provides authenticated browser management for configuration,
-models, OAuth credentials, tools, skills, sessions, gateway process lifecycle,
-startup behavior, update, and runtime version metadata.
+models, OAuth credentials, tools, skills, MCP servers, sessions, gateway
+process lifecycle, startup behavior, update, and runtime version metadata.
 
 ## Reconstruction Notes
 
 - Similarity target: recreate authenticated launcher APIs for dashboard auth, config/model/OAuth/tool/skill/session/gateway/system management, and JSON error behavior.
-- Core types/functions: API handler/router, dashboard auth middleware/store, launcher config, model handlers, OAuth flow state, gateway process manager, startup/update/version handlers.
+- Core types/functions: API handler/router, dashboard auth middleware/store, launcher config, model handlers, provider and MCP OAuth flow state, gateway process manager, startup/update/version handlers.
 - Runtime ordering: authenticate dashboard requests, load config, validate request body, mutate specific subsystem, save atomically where applicable, apply runtime side effects, return JSON.
-- Non-obvious constraints: secrets are preserved/redacted, logout is POST-only, login is rate-limited, OAuth flow state expires, and gateway logs remain inspectable after failures.
+- Non-obvious constraints: secrets are preserved/redacted, logout is POST-only, login is rate-limited, OAuth flow state expires, feature-specific management stays outside the generic config form, and gateway logs remain inspectable after failures.
 
 ## Requirements
 
@@ -30,13 +30,14 @@ startup behavior, update, and runtime version metadata.
 | `FR-LAUNCHER-007` | SHOULD | API errors return JSON responses with actionable messages and appropriate status codes.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Frontend UX needs consistent failures.                                                                                                                         |
 | `FR-LAUNCHER-008` | MUST   | Model fetch distinguishes regular OpenAI API-key listings from OpenAI OAuth/token Codex subscription listings; credential-backed OpenAI fetches use the stored credential, account headers, and the current minimum Codex-compatible client version required for GPT-5.6 model visibility against the ChatGPT Codex models endpoint, while API-key fetches continue to use the OpenAI-compatible `/models` endpoint; GitHub Copilot model fetch exposes static metadata/common models without a credential, uses direct Copilot model listing with the stored token for credential-backed fetches, and credential-backed status checks validate stored credentials instead of probing the local bridge.                                                                                                                                                                                                                                                             | Subscription and API-key accounts have different upstream auth and must not fail or mix credentials.                                                           |
 | `FR-LAUNCHER-009` | SHOULD | Shared launcher layout, theme, and primitive controls remain responsive, token-driven, keyboard-accessible, and free of clipped controls across desktop and narrow mobile widths.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Dashboard navigation and process controls must stay usable while visual styling evolves.                                                                       |
+| `FR-LAUNCHER-010` | MUST   | The authenticated launcher composition registers the feature-owned MCP management and OAuth callback routes, exposes a dedicated Agent → MCP navigation entry, and removes MCP editing from the generic config form. Gateway restart detection includes enabled MCP discovery, server transport, custom-header, and nonsecret auth-revision changes. Shared forms announce validation errors and provide keyboard-accessible, labeled secret visibility controls.                                                                                                                                                                                                                                                                                                                                                                                                                                                        | MCP management must be easy to find, must not conflict with generic config saves, and must clearly apply runtime-relevant changes without weakening shared form accessibility. |
 
 ## Data And State Model
 
 Launcher state includes dashboard password/session storage, launcher-specific
-config, OAuth flow maps, config file path, gateway process state/logs, model
-catalog entries, model fetch auth method and credential IDs, startup settings,
-and update request status.
+config, provider and feature-owned OAuth flow maps, config file path, gateway
+process state/logs and restart signature, model catalog entries, model fetch
+auth method and credential IDs, startup settings, and update request status.
 
 ## Surface Ownership
 
@@ -58,6 +59,7 @@ Owns: CODE web/frontend/src/components/config/**
 Owns: CODE web/frontend/src/components/credentials/**
 Owns: CODE web/frontend/src/components/models/**
 Owns: CODE web/frontend/src/components/page-header.tsx
+Owns: CODE web/frontend/src/components/shared-form.tsx
 Owns: CODE web/frontend/src/components/tour/**
 Owns: CODE web/frontend/src/components/ui/**
 Owns: CODE web/frontend/src/hooks/use-credentials-page.ts
@@ -117,6 +119,7 @@ Owns: TEST web/backend/api/weixin*
 | Type     | Surface                                                                                                                                                                                      | Contract                                                                                                                                                                                               | Requirement IDs                                         |
 | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
 | HTTP     | `/api/auth*`, `/api/config*`, `/api/accounts/models*`, `/api/oauth*`, `/api/system*`, `/api/update`, `/api/weixin*`, `/api/wecom*`                                                           | Authenticated launcher management endpoints.                                                                                                                                                           | `FR-LAUNCHER-001` through `FR-LAUNCHER-007`             |
+| HTTP     | Feature-owned `/api/mcp*` and `/mcp/oauth/callback` routes                                                                                                                                | Register MCP management behind launcher authentication, retain the bounded callback exception, and cancel outstanding flows during handler shutdown.                                                  | `FR-LAUNCHER-010`                                       |
 | CLI      | `picoclaw auth`, `picoclaw config`, `picoclaw onboard`, `picoclaw migrate`                                                                                                                   | Non-browser setup, auth, and migration helpers.                                                                                                                                                        | `FR-LAUNCHER-002`, `FR-LAUNCHER-004`                    |
 | Config   | Launcher config file beside app config                                                                                                                                                       | Port/public/access options and dashboard auth migration.                                                                                                                                               | `FR-LAUNCHER-001`, `FR-LAUNCHER-006`                    |
 | Frontend | `web/frontend/AGENTS.md`, `docs/design/frontend-guidelines.md`, `docs/features/frontend-ownership.json`, `web/frontend/scripts/lint-ui-rules.mjs`, and `web/frontend/tests/ui-smoke.spec.ts` | Agent-facing launcher UI guidance plus static, formatting, accessibility, ownership, and mocked-route browser checks. Feature-specific UI behavior remains owned by the relevant product feature spec. | `FR-LAUNCHER-002`, `FR-LAUNCHER-007`, `FR-LAUNCHER-009` |
@@ -154,8 +157,15 @@ Owns: TEST web/backend/api/weixin*
    and keep regular API-key fetches on the OpenAI-compatible `/models` path.
 5. For gateway lifecycle requests, inspect current process state first, execute
    start/stop/restart transitions only when valid, and retain log buffers for
-   status and diagnostics responses.
-6. Return JSON for success and error paths with status codes that match
+   status and diagnostics responses. Include the complete enabled MCP config,
+   including custom-header values, in the internal restart signature while
+   representing external bearer/OAuth token changes only through their
+   nonsecret revision so token bytes never enter the signature.
+6. Register feature-specific MCP handlers through the authenticated launcher
+   router, expose their dedicated route in the shared navigation shell, remove
+   their fields from the generic config editor, and cancel unfinished browser
+   login flows when the handler shuts down.
+7. Return JSON for success and error paths with status codes that match
    validation, auth, not-found, conflict, or internal failure classes.
 
 ## Cross-Feature Behavior
@@ -177,6 +187,10 @@ Git workspace config fields, API routes, sidebar navigation, and dashboard entry
 points are exposed through shared launcher surfaces, while workspace allocation,
 inventory, cleanup, drop, and retention semantics are owned by the git
 workspaces feature.
+MCP API registration, sidebar navigation, gateway restart signaling, and shared
+form accessibility compose through launcher-owned surfaces. Server lifecycle,
+tool discovery, credentials, probes, and OAuth protocol behavior remain owned by
+the MCP integration and security-isolation features.
 
 ## Failure And Edge Cases
 
@@ -211,6 +225,14 @@ workspaces feature.
 - Header controls collapse without clipping at extra-narrow mobile widths.
 - Global theme and CSS token changes preserve semantic colors instead of raw
   ad hoc color values.
+- Generic config saves do not overwrite MCP settings or credentials managed on
+  the dedicated page.
+- An MCP server, discovery, custom-header, or credential-revision change reports
+  a required gateway restart. Custom-header config participates in the internal
+  hash, while external bearer/OAuth token bytes do not and neither value is
+  returned by the signature comparison.
+- Shared validation messages are announced to assistive technology, and secret
+  reveal controls remain keyboard reachable with an explicit accessible name.
 
 ## Acceptance Evidence
 
@@ -223,9 +245,13 @@ workspaces feature.
 | `FR-LAUNCHER-005`, `FR-LAUNCHER-006` | [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [web/backend/api/startup_test.go](../../web/backend/api/startup_test.go), [web/backend/api/version_test.go](../../web/backend/api/version_test.go)                                                                                                                                                                                                                                                                                                       |
 | `FR-LAUNCHER-008`                    | [web/backend/api/models_test.go](../../web/backend/api/models_test.go)                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `FR-LAUNCHER-009`                    | [web/frontend/src/components/app-sidebar.test.tsx](../../web/frontend/src/components/app-sidebar.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/scripts/lint-ui-rules.mjs](../../web/frontend/scripts/lint-ui-rules.mjs)                                                                                                                                                                                                                                                     |
+| `FR-LAUNCHER-010`                    | [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [web/backend/api/mcp_test.go](../../web/backend/api/mcp_test.go), [web/frontend/src/components/app-sidebar.test.tsx](../../web/frontend/src/components/app-sidebar.test.tsx), [web/frontend/src/components/agent/mcp/mcp-server-card.test.tsx](../../web/frontend/src/components/agent/mcp/mcp-server-card.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 
 ## Implementation Anchors
 
 - [web/backend/api/router.go](../../web/backend/api/router.go)
+- [web/backend/api/gateway.go](../../web/backend/api/gateway.go)
 - [web/backend/middleware](../../web/backend/middleware)
 - [web/backend/launcherconfig](../../web/backend/launcherconfig)
+- [web/frontend/src/components/app-sidebar.tsx](../../web/frontend/src/components/app-sidebar.tsx)
+- [web/frontend/src/components/shared-form.tsx](../../web/frontend/src/components/shared-form.tsx)

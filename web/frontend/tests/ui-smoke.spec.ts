@@ -1,6 +1,12 @@
 import AxeBuilder from "@axe-core/playwright"
 import { type Page, type Route, expect, test } from "@playwright/test"
 
+import type {
+  MCPConfigResponse,
+  MCPServer,
+  MCPServerInput,
+} from "../src/api/mcp"
+
 const smokeRoutes = [
   "/",
   "/models",
@@ -9,6 +15,7 @@ const smokeRoutes = [
   "/event-sources",
   "/logs",
   "/agent/git-workspaces",
+  "/agent/mcp",
   "/agent/tools",
   "/agent/workflows",
   "/agent/skills",
@@ -134,6 +141,53 @@ const toolsResponse = {
       category: "skills",
       config_key: "tools.install_skill",
       status: "enabled",
+    },
+  ],
+}
+
+const mcpResponse: MCPConfigResponse = {
+  enabled: true,
+  discovery: {
+    enabled: false,
+    ttl: 5,
+    max_search_results: 5,
+    use_bm25: true,
+    use_regex: false,
+  },
+  servers: [
+    {
+      name: "github",
+      enabled: true,
+      deferred: null,
+      type: "http",
+      url: "https://mcp.example.test/github",
+      command: "",
+      args: [],
+      env_file: "",
+      env_keys: [],
+      header_keys: [],
+      auth: {
+        type: "oauth",
+        configured: true,
+        expired: false,
+      },
+    },
+    {
+      name: "local-files",
+      enabled: false,
+      deferred: true,
+      type: "stdio",
+      url: "",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
+      env_file: "",
+      env_keys: ["FILESYSTEM_TOKEN"],
+      header_keys: [],
+      auth: {
+        type: "none",
+        configured: false,
+        expired: false,
+      },
     },
   ],
 }
@@ -673,6 +727,12 @@ interface MockLauncherApiOptions {
   modelResponse?: unknown
   nullableWorkflowPayloads?: boolean
   oauthProviders?: unknown[]
+  statefulMCP?: boolean
+  mcpRequests?: Array<{
+    method: string
+    path: string
+    body: unknown
+  }>
 }
 
 async function mockLauncherApis(
@@ -691,6 +751,37 @@ async function mockLauncherApis(
     : [workflowRun]
   let workflowsRevalidated = false
   let completeDraftViaPolling = false
+  let currentMCPResponse = structuredClone(mcpResponse)
+
+  function mcpServerFromInput(
+    input: MCPServerInput,
+    existing?: MCPServer,
+  ): MCPServer {
+    const envKeys = input.env_keys ?? Object.keys(input.env ?? {})
+    const headerKeys = input.header_keys ?? Object.keys(input.headers ?? {})
+    const authMode = input.auth_mode ?? existing?.auth.type ?? "none"
+    let auth = existing?.auth ?? { type: "none", configured: false }
+    if (authMode === "none") {
+      auth = { type: "none", configured: false }
+    } else if (authMode === "custom") {
+      auth = { type: "custom", configured: headerKeys.length > 0 }
+    } else if (authMode !== auth.type) {
+      auth = { type: authMode, configured: false }
+    }
+    return {
+      name: input.name,
+      enabled: input.enabled,
+      deferred: input.deferred,
+      type: input.type,
+      url: input.url ?? "",
+      command: input.command ?? "",
+      args: input.args ?? [],
+      env_file: input.env_file ?? "",
+      env_keys: envKeys,
+      header_keys: headerKeys,
+      auth,
+    }
+  }
 
   function compatibilityResponse() {
     const stamps = workflowDefinitions.map((workflow) =>
@@ -739,6 +830,78 @@ async function mockLauncherApis(
       const url = new URL(request.url())
       const path = url.pathname
       const method = request.method()
+
+      if (options.statefulMCP && path.startsWith("/api/mcp")) {
+        const rawBody = request.postData()
+        const body = rawBody ? (request.postDataJSON() as unknown) : undefined
+        if (method !== "GET") {
+          options.mcpRequests?.push({ method, path, body })
+        }
+
+        if (method === "PATCH" && path === "/api/mcp/settings") {
+          const settings = body as Pick<
+            MCPConfigResponse,
+            "enabled" | "discovery"
+          >
+          currentMCPResponse = {
+            ...currentMCPResponse,
+            enabled: settings.enabled,
+            discovery: settings.discovery,
+          }
+          return json(route, currentMCPResponse)
+        }
+        if (method === "POST" && path === "/api/mcp/servers") {
+          const input = body as MCPServerInput
+          currentMCPResponse.servers.push(mcpServerFromInput(input))
+          return json(route, currentMCPResponse)
+        }
+        if (method === "POST" && path === "/api/mcp/servers/test") {
+          return json(route, {
+            ok: true,
+            tool_count: 2,
+            tools: ["issues_list", "issue_create"],
+          })
+        }
+
+        const credentialMatch = path.match(
+          /^\/api\/mcp\/servers\/([^/]+)\/credential$/,
+        )
+        if (credentialMatch) {
+          const name = decodeURIComponent(credentialMatch[1])
+          const server = currentMCPResponse.servers.find(
+            (candidate) => candidate.name === name,
+          )
+          if (server && method === "PUT") {
+            server.auth = { type: "bearer", configured: true }
+          } else if (
+            server &&
+            method === "DELETE" &&
+            server.auth.type !== "custom"
+          ) {
+            server.auth = { type: "none", configured: false }
+          }
+          return json(route, { status: "ok" })
+        }
+
+        const serverMatch = path.match(/^\/api\/mcp\/servers\/([^/]+)$/)
+        if (serverMatch) {
+          const currentName = decodeURIComponent(serverMatch[1])
+          const index = currentMCPResponse.servers.findIndex(
+            (candidate) => candidate.name === currentName,
+          )
+          if (method === "PUT" && index >= 0) {
+            currentMCPResponse.servers[index] = mcpServerFromInput(
+              body as MCPServerInput,
+              currentMCPResponse.servers[index],
+            )
+            return json(route, currentMCPResponse)
+          }
+          if (method === "DELETE" && index >= 0) {
+            currentMCPResponse.servers.splice(index, 1)
+            return json(route, { status: "ok" })
+          }
+        }
+      }
 
       if (method === "POST") {
         switch (path) {
@@ -1247,6 +1410,11 @@ async function mockLauncherApis(
           return json(route, [])
         case "/api/tools":
           return json(route, toolsResponse)
+        case "/api/mcp":
+          return json(
+            route,
+            options.statefulMCP ? currentMCPResponse : mcpResponse,
+          )
         case "/api/git-workspaces":
           return json(route, gitWorkspaceResponse)
         case "/api/events":
@@ -1614,18 +1782,22 @@ async function expectElementFitsViewport(
   selector: string,
   label: string,
 ) {
-  const fits = await page.locator(selector).evaluate((element) => {
-    const rect = element.getBoundingClientRect()
-    const tolerance = 1
-    return (
-      rect.left >= -tolerance &&
-      rect.top >= -tolerance &&
-      rect.right <= window.innerWidth + tolerance &&
-      rect.bottom <= window.innerHeight + tolerance
+  await expect
+    .poll(
+      () =>
+        page.locator(selector).evaluate((element) => {
+          const rect = element.getBoundingClientRect()
+          const tolerance = 1
+          return (
+            rect.left >= -tolerance &&
+            rect.top >= -tolerance &&
+            rect.right <= window.innerWidth + tolerance &&
+            rect.bottom <= window.innerHeight + tolerance
+          )
+        }),
+      { message: `${label} should fit in the viewport` },
     )
-  })
-
-  expect(fits, `${label} should fit in the viewport`).toBe(true)
+    .toBe(true)
 }
 
 async function expectNoSeriousA11yViolations(page: Page) {
@@ -1728,6 +1900,140 @@ test("events payload stays opt-in and replay remains deliberate", async ({
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
+})
+
+test("MCP page exposes accessible server, OAuth, and settings flows", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 320, height: 720 })
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(page, "/agent/mcp")
+
+  await expect(page.getByText("github", { exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Reconnect" })).toBeVisible()
+  await expect(page.getByText("local-files", { exact: true })).toBeVisible()
+
+  await page.getByRole("button", { name: "Add server" }).first().click()
+  const sheet = page.getByRole("dialog", { name: "Add MCP server" })
+  await expect(sheet).toBeVisible()
+  await expectElementFitsViewport(
+    page,
+    '[data-slot="sheet-content"]',
+    "MCP add sheet",
+  )
+  await sheet.getByRole("combobox", { name: "Authentication" }).first().click()
+  await page.getByRole("option", { name: "OAuth login" }).click()
+  await expect(
+    sheet.getByRole("button", { name: "Save & log in" }),
+  ).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+
+  await sheet.getByRole("button", { name: "Close" }).click()
+  await page.getByRole("button", { name: "Settings" }).first().click()
+  const settings = page.getByRole("dialog", { name: "MCP settings" })
+  await expect(settings).toBeVisible()
+  await settings.getByRole("switch", { name: "Deferred discovery" }).click()
+  await expect(
+    settings.getByRole("spinbutton", { name: "Tool-use TTL" }),
+  ).toBeVisible()
+  await expectElementFitsViewport(
+    page,
+    '[data-slot="sheet-content"]',
+    "MCP settings sheet",
+  )
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("MCP server add, bearer, update, custom-header, test, and delete flow", async ({
+  page,
+}) => {
+  const requests: NonNullable<MockLauncherApiOptions["mcpRequests"]> = []
+  await gotoMockedRoute(page, "/agent/mcp", {
+    statefulMCP: true,
+    mcpRequests: requests,
+  })
+
+  await page.getByRole("button", { name: "Add server" }).first().click()
+  let sheet = page.getByRole("dialog", { name: "Add MCP server" })
+  await sheet.getByRole("textbox", { name: "Name" }).fill("linear")
+  await sheet
+    .getByRole("textbox", { name: "Server URL" })
+    .fill("https://mcp.linear.example/api")
+  await sheet.getByRole("combobox", { name: "Authentication" }).click()
+  await page.getByRole("option", { name: "Bearer token" }).click()
+  await sheet.getByLabel("Set token").fill("linear-secret")
+  await sheet.getByRole("button", { name: "Save & test" }).click()
+
+  await expect(page.getByText("linear", { exact: true })).toBeVisible()
+  expect(
+    requests.some(
+      (request) =>
+        request.method === "POST" &&
+        request.path === "/api/mcp/servers" &&
+        (request.body as MCPServerInput).auth_mode === "bearer",
+    ),
+  ).toBe(true)
+  expect(
+    requests.some(
+      (request) =>
+        request.method === "PUT" &&
+        request.path === "/api/mcp/servers/linear/credential" &&
+        (request.body as { token?: string }).token === "linear-secret",
+    ),
+  ).toBe(true)
+  expect(
+    requests.some(
+      (request) =>
+        request.method === "POST" && request.path === "/api/mcp/servers/test",
+    ),
+  ).toBe(true)
+
+  await page.getByRole("button", { name: "Edit linear" }).click()
+  sheet = page.getByRole("dialog", { name: "Edit MCP server" })
+  await sheet.getByRole("textbox", { name: "Name" }).fill("linear-team")
+  await sheet.getByRole("combobox", { name: "Authentication" }).click()
+  await page.getByRole("option", { name: "Custom headers" }).click()
+  await sheet.getByRole("button", { name: "Add entry" }).click()
+  await sheet.getByRole("textbox", { name: "Key" }).fill("X-Linear-Key")
+  await sheet
+    .getByRole("textbox", { name: "Value", exact: true })
+    .fill("header-secret")
+  await sheet.getByRole("button", { name: "Save", exact: true }).click()
+
+  await expect(page.getByText("linear-team", { exact: true })).toBeVisible()
+  expect(
+    requests.some((request) => {
+      if (
+        request.method !== "PUT" ||
+        request.path !== "/api/mcp/servers/linear"
+      ) {
+        return false
+      }
+      const body = request.body as MCPServerInput
+      return (
+        body.name === "linear-team" &&
+        body.auth_mode === "custom" &&
+        body.headers?.["X-Linear-Key"] === "header-secret"
+      )
+    }),
+  ).toBe(true)
+
+  await page.getByRole("button", { name: "Delete linear-team" }).click()
+  const confirm = page.getByRole("alertdialog", {
+    name: "Delete MCP server?",
+  })
+  await confirm.getByRole("button", { name: "Delete server" }).click()
+  await expect(page.getByText("linear-team", { exact: true })).toHaveCount(0)
+  expect(
+    requests.some(
+      (request) =>
+        request.method === "DELETE" &&
+        request.path === "/api/mcp/servers/linear-team",
+    ),
+  ).toBe(true)
 })
 
 test("accounts page lists registered accounts and opens onboarding", async ({

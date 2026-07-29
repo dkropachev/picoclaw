@@ -55,7 +55,10 @@ export function Field({
           {children}
         </div>
         {error && (
-          <FieldDescription className="text-destructive text-xs leading-normal md:col-start-2 md:justify-self-end">
+          <FieldDescription
+            role="alert"
+            className="text-destructive text-xs leading-normal md:col-start-2 md:justify-self-end"
+          >
             {error}
           </FieldDescription>
         )}
@@ -78,7 +81,10 @@ export function Field({
       </div>
       {children}
       {error && (
-        <FieldDescription className="text-destructive text-xs leading-normal">
+        <FieldDescription
+          role="alert"
+          className="text-destructive text-xs leading-normal"
+        >
           {error}
         </FieldDescription>
       )}
@@ -90,6 +96,8 @@ interface KeyInputProps {
   value: string
   onChange: (v: string) => void
   placeholder?: string
+  ariaLabel?: string
+  ariaRequired?: boolean
   className?: string
 }
 
@@ -97,6 +105,8 @@ export function KeyInput({
   value,
   onChange,
   placeholder,
+  ariaLabel,
+  ariaRequired,
   className,
 }: KeyInputProps) {
   const [show, setShow] = useState(false)
@@ -108,12 +118,14 @@ export function KeyInput({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
+        aria-label={ariaLabel}
+        aria-required={ariaRequired}
         className={cn("pr-10", className)}
       />
       <button
         type="button"
         onClick={() => setShow((v) => !v)}
-        tabIndex={-1}
+        aria-label={show ? "Hide value" : "Show value"}
         className="text-muted-foreground hover:text-foreground absolute top-1/2 right-3 -translate-y-1/2 transition-colors"
       >
         {show ? (

@@ -222,7 +222,7 @@ Em vez de carregar todas as ferramentas, o LLM recebe uma ferramenta de pesquisa
 
 | Config      | Tipo   | Padrão | Descrição                                    |
 |-------------|--------|--------|----------------------------------------------|
-| `enabled`   | bool   | false  | Habilitar integração MCP globalmente         |
+| `enabled`   | bool   | true   | Habilitar integração MCP globalmente         |
 | `discovery` | object | `{}`   | Configuração de descoberta de ferramentas (veja abaixo) |
 | `servers`   | object | `{}`   | Mapa de nome do servidor para configuração do servidor |
 

@@ -111,4 +111,16 @@ describe("AppSidebar", () => {
       .closest('[data-sidebar="menu-button"]')
     expect(activeItem).toHaveAttribute("data-active", "true")
   })
+
+  it("shows the MCP link when the dedicated MCP route is active", () => {
+    pathname = "/agent/mcp"
+
+    renderSidebar()
+
+    expect(screen.getByRole("link", { name: "MCP Servers" })).toHaveAttribute(
+      "href",
+      "/agent/mcp",
+    )
+    expect(screen.getByRole("link", { name: "MCP Servers" })).toBeVisible()
+  })
 })

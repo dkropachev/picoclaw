@@ -27,6 +27,11 @@ type Handler struct {
 	weixinFlows                map[string]*weixinFlow
 	wecomMu                    sync.Mutex
 	wecomFlows                 map[string]*wecomFlow
+	mcpMu                      sync.Mutex
+	mcpOAuthMu                 sync.Mutex
+	mcpOAuthFlows              map[string]*mcpOAuthFlow
+	mcpOAuthState              map[string]string
+	mcpOAuthLatestByServer     map[string]string
 	workflowDevelopmentMu      sync.Mutex
 }
 
@@ -40,6 +45,9 @@ func NewHandler(configPath string) *Handler {
 		oauthState:                 make(map[string]string),
 		weixinFlows:                make(map[string]*weixinFlow),
 		wecomFlows:                 make(map[string]*wecomFlow),
+		mcpOAuthFlows:              make(map[string]*mcpOAuthFlow),
+		mcpOAuthState:              make(map[string]string),
+		mcpOAuthLatestByServer:     make(map[string]string),
 	}
 }
 
@@ -101,6 +109,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Skills and tools support/actions
 	h.registerSkillRoutes(mux)
 	h.registerToolRoutes(mux)
+	h.registerMCPRoutes(mux)
 	h.registerGitWorkspaceRoutes(mux)
 	h.registerWorkflowRoutes(mux)
 	h.registerEventRoutes(mux)
@@ -126,5 +135,6 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 // Shutdown gracefully shuts down the handler, stopping the gateway if it was started by this handler.
 func (h *Handler) Shutdown() {
+	h.cancelMCPOAuthFlows()
 	h.StopGateway()
 }

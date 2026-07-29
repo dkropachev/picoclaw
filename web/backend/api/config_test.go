@@ -15,6 +15,103 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
+func TestValidateConfigRejectsInvalidCommonChannelSettings(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ModelList = append(cfg.ModelList, nil)
+	cfg.Gateway.Port = -1
+
+	pico := cfg.Channels[config.ChannelPico]
+	pico.Enabled = true
+	decodedPico, err := pico.GetDecoded()
+	if err != nil {
+		t.Fatalf("GetDecoded() pico error = %v", err)
+	}
+	picoSettings := decodedPico.(*config.PicoSettings)
+	picoSettings.Token = *config.NewSecureString("")
+	picoSettings.Streaming.MinGrowthChars = -1
+
+	telegram := cfg.Channels[config.ChannelTelegram]
+	telegram.Enabled = true
+	decodedTelegram, err := telegram.GetDecoded()
+	if err != nil {
+		t.Fatalf("GetDecoded() telegram error = %v", err)
+	}
+	decodedTelegram.(*config.TelegramSettings).Token = *config.NewSecureString("")
+
+	discord := cfg.Channels[config.ChannelDiscord]
+	discord.Enabled = true
+	decodedDiscord, err := discord.GetDecoded()
+	if err != nil {
+		t.Fatalf("GetDecoded() discord error = %v", err)
+	}
+	decodedDiscord.(*config.DiscordSettings).Token = *config.NewSecureString("")
+
+	errs := validateConfig(cfg)
+	for _, want := range []string{
+		"model_list[0]: model config is required",
+		"gateway.port -1 is out of valid range",
+		"streaming.min_growth_chars must be >= 0",
+		"channels.pico.token is required",
+		"channels.telegram.token is required",
+		"channels.discord.token is required",
+	} {
+		found := false
+		for _, got := range errs {
+			if strings.Contains(got, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("validateConfig() errors = %#v, want error containing %q", errs, want)
+		}
+	}
+}
+
+func TestMergeMapDeletesNullValues(t *testing.T) {
+	dst := map[string]any{
+		"keep":   "value",
+		"remove": "value",
+	}
+
+	mergeMap(dst, map[string]any{"remove": nil})
+
+	if _, exists := dst["remove"]; exists {
+		t.Fatalf("mergeMap() result = %#v, want remove key deleted", dst)
+	}
+	if got := dst["keep"]; got != "value" {
+		t.Fatalf("mergeMap() keep = %#v, want value", got)
+	}
+}
+
+func TestNormalizeChannelArrayFieldsIgnoresNonApplicableEntries(t *testing.T) {
+	channels := map[string]any{
+		"scalar": "leave-me-alone",
+		"without-settings": map[string]any{
+			"type": config.ChannelTelegram,
+		},
+		"unknown": map[string]any{
+			"type": "unknown-transport",
+			"settings": map[string]any{
+				"unchanged": "value",
+			},
+		},
+	}
+	raw := map[string]any{"channel_list": channels}
+
+	if err := normalizeChannelArrayFields(raw); err != nil {
+		t.Fatalf("normalizeChannelArrayFields() error = %v", err)
+	}
+	if got := channels["scalar"]; got != "leave-me-alone" {
+		t.Fatalf("scalar channel = %#v, want unchanged value", got)
+	}
+	unknown := channels["unknown"].(map[string]any)
+	settings := unknown["settings"].(map[string]any)
+	if got := settings["unchanged"]; got != "value" {
+		t.Fatalf("unknown channel settings = %#v, want unchanged value", got)
+	}
+}
+
 func TestHandleGetConfigMasksUnresolvableEventWebhookSecret(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")

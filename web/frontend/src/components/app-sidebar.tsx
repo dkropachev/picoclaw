@@ -9,6 +9,7 @@ import {
   IconListDetails,
   IconMessageCircle,
   IconMessages,
+  IconPlugConnected,
   IconRoute,
   IconSearch,
   IconSettings,
@@ -156,6 +157,12 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             translateTitle: true,
           },
           {
+            title: "navigation.mcp",
+            url: "/agent/mcp",
+            icon: IconPlugConnected,
+            translateTitle: true,
+          },
+          {
             title: "navigation.workflows",
             url: "/agent/workflows",
             icon: IconRoute,
@@ -206,6 +213,11 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const renderServiceSection = (section: NavSection) => (
     <Collapsible
       key={section.label}
+      defaultOpen={section.items.some(
+        (item) =>
+          currentPath === item.url ||
+          (item.url !== "/" && currentPath.startsWith(`${item.url}/`)),
+      )}
       className="group/service-section mb-1 last:mb-0"
     >
       <CollapsibleTrigger className="text-sidebar-foreground/55 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex h-8 w-full cursor-pointer items-center justify-between rounded-lg px-3 text-xs font-medium transition-colors">
@@ -264,7 +276,10 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           </SidebarGroup>
         </Collapsible>
 
-        <Collapsible className="group/services-collapsible mb-1">
+        <Collapsible
+          defaultOpen={currentPath.startsWith("/agent/")}
+          className="group/services-collapsible mb-1"
+        >
           <SidebarGroup className="px-2 py-0">
             <SidebarGroupLabel asChild>
               <CollapsibleTrigger className="text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex w-full cursor-pointer items-center justify-between rounded-lg px-2 py-1.5 transition-colors">

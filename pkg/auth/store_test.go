@@ -68,12 +68,17 @@ func TestStoreRoundtrip(t *testing.T) {
 	setTestAuthHome(t)
 
 	cred := &AuthCredential{
-		AccessToken:  "test-access-token",
-		RefreshToken: "test-refresh-token",
-		AccountID:    "acct-123",
-		ExpiresAt:    time.Now().Add(time.Hour).Truncate(time.Second),
-		Provider:     "openai",
-		AuthMethod:   "oauth",
+		AccessToken:       "test-access-token",
+		RefreshToken:      "test-refresh-token",
+		TokenType:         "Bearer",
+		OAuthTokenURL:     "https://auth.example.test/token",
+		OAuthClientID:     "client-id",
+		OAuthClientSecret: "client-secret",
+		OAuthAuthStyle:    "header",
+		AccountID:         "acct-123",
+		ExpiresAt:         time.Now().Add(time.Hour).Truncate(time.Second),
+		Provider:          "openai",
+		AuthMethod:        "oauth",
 	}
 
 	if err := SetCredential("openai", cred); err != nil {
@@ -92,6 +97,13 @@ func TestStoreRoundtrip(t *testing.T) {
 	}
 	if loaded.RefreshToken != cred.RefreshToken {
 		t.Errorf("RefreshToken = %q, want %q", loaded.RefreshToken, cred.RefreshToken)
+	}
+	if loaded.TokenType != cred.TokenType ||
+		loaded.OAuthTokenURL != cred.OAuthTokenURL ||
+		loaded.OAuthClientID != cred.OAuthClientID ||
+		loaded.OAuthClientSecret != cred.OAuthClientSecret ||
+		loaded.OAuthAuthStyle != cred.OAuthAuthStyle {
+		t.Errorf("OAuth refresh metadata was not preserved: %#v", loaded)
 	}
 	if loaded.Provider != cred.Provider {
 		t.Errorf("Provider = %q, want %q", loaded.Provider, cred.Provider)

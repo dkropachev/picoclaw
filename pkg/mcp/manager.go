@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,7 +14,9 @@ import (
 	"sync"
 	"sync/atomic"
 
+	mcpauth "github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/oauth2"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
@@ -22,8 +25,11 @@ import (
 
 // headerTransport is an http.RoundTripper that adds custom headers to requests
 type headerTransport struct {
-	base    http.RoundTripper
-	headers map[string]string
+	base         http.RoundTripper
+	headers      map[string]string
+	tokenSource  oauth2.TokenSource
+	originScheme string
+	originHost   string
 }
 
 func expandHomeCommandPath(command string) string {
@@ -48,9 +54,31 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Clone the request to avoid modifying the original
 	req = req.Clone(req.Context())
 
-	// Add custom headers
-	for key, value := range t.headers {
-		req.Header.Set(key, value)
+	// Bind credentials and custom headers to the configured MCP origin. The
+	// transport is invoked again after redirects, so unconditional injection
+	// here would defeat net/http's cross-origin credential stripping.
+	if strings.EqualFold(req.URL.Scheme, t.originScheme) &&
+		strings.EqualFold(req.URL.Host, t.originHost) {
+		for key, value := range t.headers {
+			if isReservedMCPTransportHeader(key) {
+				continue
+			}
+			req.Header.Set(key, value)
+		}
+		if t.tokenSource != nil {
+			token, err := t.tokenSource.Token()
+			if err != nil {
+				return nil, fmt.Errorf("resolve MCP OAuth access token: %w", err)
+			}
+			req.Header.Set("Authorization", "Bearer "+token.AccessToken)
+		}
+	} else {
+		for key := range t.headers {
+			req.Header.Del(key)
+		}
+		if t.tokenSource != nil {
+			req.Header.Del("Authorization")
+		}
 	}
 
 	// Use the base transport
@@ -59,6 +87,20 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		base = http.DefaultTransport
 	}
 	return base.RoundTrip(req)
+}
+
+func isReservedMCPTransportHeader(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "accept",
+		"content-length",
+		"content-type",
+		"host",
+		"mcp-protocol-version",
+		"mcp-session-id":
+		return true
+	default:
+		return false
+	}
 }
 
 // loadEnvFile loads environment variables from a file in .env format
@@ -326,6 +368,29 @@ func connectServer(
 	name string,
 	cfg config.MCPServerConfig,
 ) (*ServerConnection, error) {
+	return connectServerWithOAuth(ctx, name, cfg, nil, nil)
+}
+
+// ConnectServerWithOAuth connects one remote MCP server with an interactive
+// OAuth handler. It is intended for short-lived management/login probes; the
+// normal runtime path uses credentials already stored by the launcher.
+func ConnectServerWithOAuth(
+	ctx context.Context,
+	name string,
+	cfg config.MCPServerConfig,
+	oauthHandler mcpauth.OAuthHandler,
+	httpClient *http.Client,
+) (*ServerConnection, error) {
+	return connectServerWithOAuth(ctx, name, cfg, oauthHandler, httpClient)
+}
+
+func connectServerWithOAuth(
+	ctx context.Context,
+	name string,
+	cfg config.MCPServerConfig,
+	oauthHandler mcpauth.OAuthHandler,
+	httpClient *http.Client,
+) (*ServerConnection, error) {
 	logger.InfoCF("mcp", "Connecting to MCP server",
 		map[string]any{
 			"server":     name,
@@ -352,6 +417,37 @@ func connectServer(
 		if cfg.URL == "" {
 			return nil, fmt.Errorf("URL is required for SSE/HTTP transport")
 		}
+		parsedURL, err := url.Parse(cfg.URL)
+		if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+			return nil, fmt.Errorf("invalid MCP server URL %q", cfg.URL)
+		}
+		if !strings.EqualFold(parsedURL.Scheme, "http") &&
+			!strings.EqualFold(parsedURL.Scheme, "https") {
+			return nil, fmt.Errorf("MCP server URL must use HTTP or HTTPS")
+		}
+		if parsedURL.User != nil {
+			return nil, fmt.Errorf("MCP server URL must not contain embedded credentials")
+		}
+
+		headers := cloneStringMap(cfg.Headers)
+		if len(headers) > 0 && !isHTTPSOrLoopbackHTTP(cfg.URL) {
+			return nil, fmt.Errorf(
+				"MCP custom headers require HTTPS, except for loopback development servers",
+			)
+		}
+		var storedTokenSource oauth2.TokenSource
+		if oauthHandler == nil {
+			headers, storedTokenSource, err = serverHTTPAuth(name, cfg)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			for key := range headers {
+				if strings.EqualFold(key, "Authorization") {
+					delete(headers, key)
+				}
+			}
+		}
 
 		// Configure DisableStandaloneSSE based on transport type.
 		// - "http": Streamable HTTP request-response mode. Disable the standalone
@@ -372,26 +468,37 @@ func connectServer(
 		sseTransport := &mcp.StreamableClientTransport{
 			Endpoint:             cfg.URL,
 			DisableStandaloneSSE: disableStandaloneSSE,
+			OAuthHandler:         oauthHandler,
+			HTTPClient:           newMCPRemoteHTTPClient(parsedURL, httpClient),
 		}
 
-		// Add custom headers if provided
-		if len(cfg.Headers) > 0 {
-			// Create a custom HTTP client with header-injecting transport
-			sseTransport.HTTPClient = &http.Client{
-				Transport: &headerTransport{
-					base:    http.DefaultTransport,
-					headers: cfg.Headers,
-				},
+		// Add custom headers if provided.
+		if len(headers) > 0 || storedTokenSource != nil {
+			client := *sseTransport.HTTPClient
+			client.Transport = &headerTransport{
+				base:         client.Transport,
+				headers:      headers,
+				tokenSource:  storedTokenSource,
+				originScheme: parsedURL.Scheme,
+				originHost:   parsedURL.Host,
 			}
+			sseTransport.HTTPClient = &client
 			logger.DebugCF("mcp", "Added custom HTTP headers",
 				map[string]any{
 					"server":       name,
-					"header_count": len(cfg.Headers),
+					"header_count": len(headers),
 				})
 		}
 
 		transport = sseTransport
 	case "stdio":
+		if cfg.Auth != nil {
+			switch strings.ToLower(strings.TrimSpace(cfg.Auth.Type)) {
+			case "", "none":
+			default:
+				return nil, fmt.Errorf("MCP auth is only supported for remote HTTP or SSE servers")
+			}
+		}
 		if cfg.Command == "" {
 			return nil, fmt.Errorf("command is required for stdio transport")
 		}

@@ -222,7 +222,7 @@ Thay vì tải tất cả các công cụ, LLM được cung cấp một công c
 
 | Cấu hình    | Kiểu   | Mặc định | Mô tả                                        |
 |-------------|--------|----------|-----------------------------------------------|
-| `enabled`   | bool   | false    | Bật tích hợp MCP toàn cục                    |
+| `enabled`   | bool   | true     | Bật tích hợp MCP toàn cục                    |
 | `discovery` | object | `{}`     | Cấu hình khám phá công cụ (xem bên dưới)    |
 | `servers`   | object | `{}`     | Ánh xạ tên máy chủ đến cấu hình máy chủ     |
 
