@@ -627,6 +627,11 @@ func TestStoreRevisionedDispatchCreationBindsFirstSelectionAtomically(t *testing
 	require.NoError(t, err)
 	require.Len(t, listed.Dispatches, 1)
 	assert.Equal(t, firstRevision, listed.Dispatches[0].WorkflowRevision)
+
+	exact, err := store.GetDispatchMetadata(context.Background(), dispatch.ID)
+	require.NoError(t, err)
+	assert.Equal(t, dispatch.ID, exact.ID)
+	assert.Equal(t, firstRevision, exact.WorkflowRevision)
 }
 
 func TestStoreDispatchLifecycleAndUniqueness(t *testing.T) {
@@ -1037,6 +1042,29 @@ func TestStoreDispatchMetadataExcludesOwnerAndPreservesPublicPage(t *testing.T) 
 	full, err := store.GetDispatch(context.Background(), created[2].ID)
 	require.NoError(t, err)
 	assert.Equal(t, ownerSecrets[2], full.LeaseToken)
+	exact, err := store.GetDispatchMetadata(context.Background(), created[2].ID)
+	require.NoError(t, err)
+	assert.Equal(t, DispatchMetadata{
+		ID:               full.ID,
+		EventID:          full.EventID,
+		WorkflowRef:      full.WorkflowRef,
+		WorkflowRevision: full.WorkflowRevision,
+		RunID:            full.RunID,
+		Status:           full.Status,
+		LeaseUntil:       full.LeaseUntil,
+		AvailableAt:      full.AvailableAt,
+		Attempts:         full.Attempts,
+		LastError:        full.LastError,
+		CreatedAt:        full.CreatedAt,
+		UpdatedAt:        full.UpdatedAt,
+		LinkedAt:         full.LinkedAt,
+		FinishedAt:       full.FinishedAt,
+	}, exact)
+	encodedExact, err := json.Marshal(exact)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encodedExact), ownerSecrets[2])
+	assert.NotContains(t, string(encodedExact), `"owner"`)
+	assert.NotContains(t, string(encodedExact), `"lease_token"`)
 
 	first, err := store.ListDispatchMetadata(
 		context.Background(),
@@ -1115,6 +1143,17 @@ func TestStoreDispatchMetadataExcludesOwnerAndPreservesPublicPage(t *testing.T) 
 		err,
 		`invalid eventing state transition: unknown dispatch status "unknown"`,
 	)
+
+	_, err = store.GetDispatchMetadata(
+		context.Background(),
+		"dsp_ffffffffffffffffffffffffffffffff",
+	)
+	assert.ErrorIs(t, err, ErrNotFound)
+	_, err = store.GetDispatchMetadata(
+		context.Background(),
+		" "+created[2].ID,
+	)
+	assert.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestStoreOperatorMetadataReadsDoNotMaterializeLargePayload(t *testing.T) {

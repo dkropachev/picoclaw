@@ -1713,6 +1713,26 @@ func (s *Store) GetDispatch(ctx context.Context, id string) (Dispatch, error) {
 	return dispatch, nil
 }
 
+// GetDispatchMetadata retrieves one dispatch without selecting worker
+// owner/lease-token credentials.
+func (s *Store) GetDispatchMetadata(
+	ctx context.Context,
+	id string,
+) (DispatchMetadata, error) {
+	if err := s.ready(ctx); err != nil {
+		return DispatchMetadata{}, err
+	}
+	dispatch, err := scanDispatchMetadata(s.db.QueryRowContext(
+		ctx,
+		`SELECT `+dispatchMetadataColumns+` FROM event_dispatches WHERE id = ?`,
+		id,
+	))
+	if err != nil {
+		return DispatchMetadata{}, s.dbError(err)
+	}
+	return dispatch, nil
+}
+
 func (s *Store) getDispatchByPair(ctx context.Context, eventID, workflowRef string) (Dispatch, error) {
 	dispatch, err := scanDispatch(s.db.QueryRowContext(ctx, `
 		SELECT `+dispatchColumns+` FROM event_dispatches

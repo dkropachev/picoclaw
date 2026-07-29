@@ -24,6 +24,22 @@ func TestStoreRenewDispatchLeaseUnsupported(t *testing.T) {
 	}
 }
 
+func TestStoreGetDispatchMetadataUnsupported(t *testing.T) {
+	t.Parallel()
+
+	var store Store
+	if _, err := store.GetDispatchMetadata(
+		context.Background(),
+		"dsp_00000000000000000000000000000000",
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf(
+			"GetDispatchMetadata() error = %v, want %v",
+			err,
+			ErrUnsupportedPlatform,
+		)
+	}
+}
+
 func TestStoreRoutingDispatchCapabilitiesUnsupported(t *testing.T) {
 	t.Parallel()
 

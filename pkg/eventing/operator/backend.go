@@ -384,6 +384,31 @@ func (backend *Backend) ListDispatches(
 	return page, nil
 }
 
+// GetDispatch returns one sanitized dispatch without worker ownership
+// credentials.
+func (backend *Backend) GetDispatch(
+	ctx context.Context,
+	id string,
+) (DispatchView, error) {
+	if backend == nil || backend.store == nil {
+		return DispatchView{}, ErrUnavailable
+	}
+	if !validDispatchID(id) {
+		return DispatchView{}, fmt.Errorf("%w: dispatch ID is invalid", ErrInvalidRequest)
+	}
+	stored, err := backend.store.GetDispatchMetadata(ctx, id)
+	if err != nil {
+		return DispatchView{}, err
+	}
+	if stored.ID != id {
+		return DispatchView{}, fmt.Errorf(
+			"%w: dispatch metadata identity changed",
+			ErrUnavailable,
+		)
+	}
+	return projectDispatch(stored), nil
+}
+
 // Replay creates exactly one additive replay through the live store.
 func (backend *Backend) Replay(ctx context.Context, id string) (ReplayResult, error) {
 	if backend == nil || backend.store == nil {

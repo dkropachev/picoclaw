@@ -202,6 +202,7 @@ type DispatchMetadataPage struct {
 // DispatchOperatorReader exposes dispatch inspection without worker
 // ownership credentials. It is additive to DispatchQueue.
 type DispatchOperatorReader interface {
+	GetDispatchMetadata(ctx context.Context, id string) (DispatchMetadata, error)
 	ListDispatchMetadata(
 		ctx context.Context,
 		filter DispatchFilter,

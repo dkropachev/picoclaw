@@ -101,6 +101,10 @@ func (*Store) GetDispatch(context.Context, string) (Dispatch, error) {
 	return Dispatch{}, ErrUnsupportedPlatform
 }
 
+func (*Store) GetDispatchMetadata(context.Context, string) (DispatchMetadata, error) {
+	return DispatchMetadata{}, ErrUnsupportedPlatform
+}
+
 func (*Store) ClaimDispatches(context.Context, string, int, time.Duration) ([]Dispatch, error) {
 	return nil, ErrUnsupportedPlatform
 }
