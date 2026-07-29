@@ -305,7 +305,7 @@ func readyWorkflowDevelopmentSession(
 	raw string,
 ) *workflows.WorkflowDevelopmentSession {
 	t.Helper()
-	session, err := workflows.StartWorkflowDevelopment(
+	_, err := workflows.StartWorkflowDevelopment(
 		context.Background(),
 		workspace,
 		workflows.RuntimeCompatibility{PicoclawVersion: "test"},
@@ -318,7 +318,7 @@ func readyWorkflowDevelopmentSession(
 	if err != nil {
 		t.Fatalf("StartWorkflowDevelopment() error = %v", err)
 	}
-	session, err = workflows.ReviseWorkflowDevelopment(
+	_, err = workflows.ReviseWorkflowDevelopment(
 		workspace,
 		workflows.WorkflowDevelopmentReviseRequest{YAML: &raw},
 		workflows.WithDefinitionsDir(definitionsDir),
@@ -326,7 +326,7 @@ func readyWorkflowDevelopmentSession(
 	if err != nil {
 		t.Fatalf("ReviseWorkflowDevelopment() error = %v", err)
 	}
-	session, err = workflows.ValidateWorkflowDevelopment(
+	session, err := workflows.ValidateWorkflowDevelopment(
 		workspace,
 		workflows.WithDefinitionsDir(definitionsDir),
 	)

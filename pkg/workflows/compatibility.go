@@ -115,16 +115,16 @@ func LoadCompatibilitySummary(
 	runtime RuntimeCompatibility,
 	opts ...LocalOption,
 ) (*WorkflowCompatibilitySummary, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
 	}
 	unlock, err := lockWorkflowMutation(workspace)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
 	}
 	runtime = NormalizeRuntimeCompatibility(runtime)
 	manifest, missing, err := readCompatibilityManifest(workspace)
@@ -351,16 +351,16 @@ func EnsureWorkflowRunnable(
 	runtime RuntimeCompatibility,
 	opts ...LocalOption,
 ) error {
-	if err := ctx.Err(); err != nil {
-		return err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return contextErr
 	}
 	unlock, err := lockWorkflowMutation(workspace)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	if err := ctx.Err(); err != nil {
-		return err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return contextErr
 	}
 	runtime = NormalizeRuntimeCompatibility(runtime)
 	canonical, err := CanonicalLocalRef(ref)
@@ -407,16 +407,16 @@ func LoadRunnableLocalSnapshotWithRevision(
 	runtime RuntimeCompatibility,
 	opts ...LocalOption,
 ) (*LocalWorkflowSnapshot, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
 	}
 	unlock, err := lockWorkflowMutation(workspace)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
 	}
 	runtime = NormalizeRuntimeCompatibility(runtime)
 	local := collectLocalOptions(opts...)
@@ -459,16 +459,16 @@ func LoadValidatedLocalSnapshot(
 	ref string,
 	opts ...LocalOption,
 ) (*LocalWorkflowSnapshot, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
 	}
 	unlock, err := lockWorkflowMutation(workspace)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
 	}
 	local := collectLocalOptions(opts...)
 	resolved, err := local.resolver(workspace).ResolveLocal(ref)
@@ -589,8 +589,8 @@ func writeCompatibilityManifest(workspace string, manifest *WorkflowCompatibilit
 	if err != nil {
 		return err
 	}
-	if err := fileutil.MkdirAllDurable(filepath.Dir(path), 0o755); err != nil {
-		return err
+	if mkdirErr := fileutil.MkdirAllDurable(filepath.Dir(path), 0o755); mkdirErr != nil {
+		return mkdirErr
 	}
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {

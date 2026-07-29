@@ -81,8 +81,8 @@ func TestWorkflowSettingsGetAndPatchPreserveUnrelatedConfigAndSecrets(t *testing
 		t.Fatalf("PATCH status = %d, body=%s", patchRecorder.Code, patchRecorder.Body.String())
 	}
 	var patchResponse workflowSettingsResponse
-	if err := json.Unmarshal(patchRecorder.Body.Bytes(), &patchResponse); err != nil {
-		t.Fatalf("PATCH response JSON error = %v", err)
+	if decodeErr := json.Unmarshal(patchRecorder.Body.Bytes(), &patchResponse); decodeErr != nil {
+		t.Fatalf("PATCH response JSON error = %v", decodeErr)
 	}
 	if !patchResponse.Configured.Enabled ||
 		patchResponse.Configured.MaxConcurrentRuns != 7 ||

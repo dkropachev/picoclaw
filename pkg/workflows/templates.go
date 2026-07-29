@@ -531,8 +531,8 @@ func installWorkflowTemplateLocked(
 	if active != nil {
 		return nil, ErrActiveDevelopmentExists
 	}
-	if err := validateWorkflowTemplate(raw); err != nil {
-		return nil, err
+	if validationErr := validateWorkflowTemplate(raw); validationErr != nil {
+		return nil, validationErr
 	}
 	local := collectLocalOptions(opts...)
 	resolved, err := local.resolver(workspace).ResolveLocal(ref)

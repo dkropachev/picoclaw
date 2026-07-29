@@ -99,7 +99,7 @@ func (h *Handler) handlePatchWorkflowSettings(w http.ResponseWriter, r *http.Req
 	previous := cfg.Workflows
 	next := previous
 	applyWorkflowSettingsPatch(&next, request)
-	if err := validateWorkflowSettings(cfg.WorkspacePath(), next); err != nil {
+	if validationErr := validateWorkflowSettings(cfg.WorkspacePath(), next); validationErr != nil {
 		writeWorkflowJSONStatus(w, http.StatusUnprocessableEntity, map[string]any{
 			"error": "invalid_workflow_settings",
 		})

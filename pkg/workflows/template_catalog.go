@@ -286,11 +286,11 @@ func installWorkflowTemplateTransaction(
 	if hooks != nil && hooks.writeJournal != nil {
 		writeJournal = hooks.writeJournal
 	}
-	if err := writeJournal(workspace, journal); err != nil {
+	if journalErr := writeJournal(workspace, journal); journalErr != nil {
 		if recoveryErr := recoverWorkflowTemplateInstallTransaction(workspace); recoveryErr != nil {
 			return nil, errors.Join(
 				ErrWorkflowTemplateInstallFailed,
-				err,
+				journalErr,
 				recoveryErr,
 			)
 		}
@@ -310,21 +310,21 @@ func installWorkflowTemplateTransaction(
 		return installErr
 	}
 	checkBoundary := func(boundary workflowTemplateInstallBoundary) error {
-		if err := ctx.Err(); err != nil {
-			return err
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
 		}
 		if hooks != nil && hooks.afterBoundary != nil {
 			return hooks.afterBoundary(boundary)
 		}
 		return nil
 	}
-	if err := checkBoundary(workflowTemplateInstallBoundaryPrepared); err != nil {
-		return nil, fail(err)
+	if boundaryErr := checkBoundary(workflowTemplateInstallBoundaryPrepared); boundaryErr != nil {
+		return nil, fail(boundaryErr)
 	}
 
 	journal.Stage = workflowTemplateInstallStageTargetWriteStarted
-	if err := writeJournal(workspace, journal); err != nil {
-		return nil, fail(err)
+	if journalErr := writeJournal(workspace, journal); journalErr != nil {
+		return nil, fail(journalErr)
 	}
 	installed, err := installWorkflowTemplateLocked(
 		ctx,
@@ -478,19 +478,6 @@ func captureWorkflowTemplateFile(path string) (workflowTemplateFileSnapshot, err
 	snapshot.data = data
 	snapshot.mode = info.Mode().Perm()
 	return snapshot, nil
-}
-
-func rollbackWorkflowTemplateFiles(snapshots ...workflowTemplateFileSnapshot) error {
-	var rollbackFailed bool
-	for _, snapshot := range snapshots {
-		if err := restoreWorkflowTemplateFile(snapshot); err != nil {
-			rollbackFailed = true
-		}
-	}
-	if rollbackFailed {
-		return ErrWorkflowTemplateRollbackFailed
-	}
-	return nil
 }
 
 func restoreWorkflowTemplateFile(snapshot workflowTemplateFileSnapshot) error {

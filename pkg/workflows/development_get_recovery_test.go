@@ -77,8 +77,8 @@ func TestGetWorkflowDevelopmentSessionBlocksOnPublishRecoveryConflict(t *testing
 		t.Fatalf("publish error = %v, want interruption", err)
 	}
 	const operatorEdit = "operator edit outside transaction\n"
-	if err := os.WriteFile(fixture.targetPath, []byte(operatorEdit), 0o640); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(fixture.targetPath, []byte(operatorEdit), 0o640); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 
 	session, err := GetWorkflowDevelopmentSession(fixture.workspace)

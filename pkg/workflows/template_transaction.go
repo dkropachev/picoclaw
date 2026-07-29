@@ -252,8 +252,8 @@ func recoverWorkflowTemplateInstallTransaction(workspace string) error {
 		return nil
 	}
 	if journal.Phase == workflowTemplateInstallPhaseCommitted {
-		if err := removeWorkflowTemplateInstallJournal(workspace); err != nil {
-			return errors.Join(ErrWorkflowTemplateRecoveryFailed, err)
+		if removeErr := removeWorkflowTemplateInstallJournal(workspace); removeErr != nil {
+			return errors.Join(ErrWorkflowTemplateRecoveryFailed, removeErr)
 		}
 		return nil
 	}
@@ -315,12 +315,4 @@ func checkedWorkflowTemplateInstallJournalPath(workspace string) (string, error)
 		workflowMutationStateDir,
 		workflowTemplateInstallJournalFile,
 	)
-}
-
-func workflowTemplateInstallJournalIsCommitted(workspace string) (bool, error) {
-	journal, missing, err := readWorkflowTemplateInstallJournal(workspace)
-	if err != nil || missing {
-		return false, err
-	}
-	return journal.Phase == workflowTemplateInstallPhaseCommitted, nil
 }

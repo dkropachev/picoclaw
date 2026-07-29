@@ -170,7 +170,7 @@ func (h *Handler) evaluateWorkflowDependencies(
 	if err != nil {
 		return nil, errWorkflowDependencyInvalid
 	}
-	if err := workflows.Validate(workflow); err != nil {
+	if validationErr := workflows.Validate(workflow); validationErr != nil {
 		return nil, errWorkflowDependencyInvalid
 	}
 
@@ -270,7 +270,7 @@ func workflowDependencyRequestRoot(
 	if err != nil {
 		return "", "", errWorkflowDependencyInvalidRequest
 	}
-	if err := ctx.Err(); err != nil {
+	if contextErr := ctx.Err(); contextErr != nil {
 		return "", "", errWorkflowDependencyUnavailable
 	}
 	resolved, err := (workflows.Resolver{

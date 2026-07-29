@@ -43,8 +43,8 @@ func TestReviseWorkflowDevelopmentAPIPreservesExactTrailingYAMLBytes(t *testing.
 	var response struct {
 		Session *workflows.WorkflowDevelopmentSession `json:"session"`
 	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode response: %v", err)
+	if decodeErr := json.Unmarshal(recorder.Body.Bytes(), &response); decodeErr != nil {
+		t.Fatalf("decode response: %v", decodeErr)
 	}
 	if response.Session == nil {
 		t.Fatal("session = nil")

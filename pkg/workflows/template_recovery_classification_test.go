@@ -65,12 +65,12 @@ func TestTemplateCatalogOperationsPreservePublishRecoveryConflict(t *testing.T) 
 			if !errors.Is(err, interrupted) {
 				t.Fatalf("publish error = %v, want interruption", err)
 			}
-			if err := os.WriteFile(
+			if writeErr := os.WriteFile(
 				fixture.targetPath,
 				[]byte("operator edit outside transaction\n"),
 				0o640,
-			); err != nil {
-				t.Fatal(err)
+			); writeErr != nil {
+				t.Fatal(writeErr)
 			}
 
 			err = operation.run(context.Background(), fixture)

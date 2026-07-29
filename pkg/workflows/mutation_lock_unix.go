@@ -7,8 +7,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"golang.org/x/sys/unix"
+
+	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
 func lockWorkflowMutationFile(path string) (func(), error) {

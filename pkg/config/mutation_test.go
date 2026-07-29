@@ -23,17 +23,17 @@ func TestSaveConfigIfRevisionRejectsStaleWriter(t *testing.T) {
 
 	winner := DefaultConfig()
 	winner.Workflows.RetentionDays = 20
-	if err := SaveConfig(path, winner); err != nil {
-		t.Fatalf("SaveConfig(winner) error = %v", err)
+	if saveErr := SaveConfig(path, winner); saveErr != nil {
+		t.Fatalf("SaveConfig(winner) error = %v", saveErr)
 	}
 	stale := DefaultConfig()
 	stale.Workflows.RetentionDays = 30
-	if _, err := SaveConfigIfRevision(
+	if _, saveErr := SaveConfigIfRevision(
 		path,
 		stale,
 		shownRevision,
-	); !errors.Is(err, ErrConfigRevisionMismatch) {
-		t.Fatalf("SaveConfigIfRevision(stale) error = %v", err)
+	); !errors.Is(saveErr, ErrConfigRevisionMismatch) {
+		t.Fatalf("SaveConfigIfRevision(stale) error = %v", saveErr)
 	}
 
 	got, err := LoadConfigForUpdate(path)
@@ -85,8 +85,8 @@ func TestSaveConfigIfRevisionFencesSecuritySidecarChanges(t *testing.T) {
 	}
 
 	winner := mutationTestConfigWithKey("sk-winning-security-key")
-	if err := SaveConfig(path, winner); err != nil {
-		t.Fatalf("SaveConfig(winner) error = %v", err)
+	if saveErr := SaveConfig(path, winner); saveErr != nil {
+		t.Fatalf("SaveConfig(winner) error = %v", saveErr)
 	}
 	publicAfter, err := os.ReadFile(path)
 	if err != nil {
@@ -96,12 +96,12 @@ func TestSaveConfigIfRevisionFencesSecuritySidecarChanges(t *testing.T) {
 		t.Fatal("test requires a security-only update with identical public bytes")
 	}
 	stale := mutationTestConfigWithKey("sk-stale-security-key")
-	if _, err := SaveConfigIfRevision(
+	if _, saveErr := SaveConfigIfRevision(
 		path,
 		stale,
 		shownRevision,
-	); !errors.Is(err, ErrConfigRevisionMismatch) {
-		t.Fatalf("SaveConfigIfRevision(stale security) error = %v", err)
+	); !errors.Is(saveErr, ErrConfigRevisionMismatch) {
+		t.Fatalf("SaveConfigIfRevision(stale security) error = %v", saveErr)
 	}
 	got, err := LoadConfigForUpdate(path)
 	if err != nil {

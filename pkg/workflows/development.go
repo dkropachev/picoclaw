@@ -13,8 +13,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"gopkg.in/yaml.v3"
+
+	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
 var (
@@ -797,8 +798,8 @@ func DiscardWorkflowDevelopment(workspace string) (*WorkflowDevelopmentSession, 
 	if err != nil {
 		return nil, err
 	}
-	if err := archiveDevelopmentSession(workspace, session, "discarded"); err != nil {
-		return nil, err
+	if archiveErr := archiveDevelopmentSession(workspace, session, "discarded"); archiveErr != nil {
+		return nil, archiveErr
 	}
 	activePath, err := checkedActiveDevelopmentPath(workspace)
 	if err != nil {
@@ -1113,11 +1114,11 @@ func writeNewActiveDevelopment(workspace string, session *WorkflowDevelopmentSes
 	if err != nil {
 		return err
 	}
-	if err := fileutil.MkdirAllDurable(filepath.Dir(path), 0o755); err != nil {
-		return err
+	if mkdirErr := fileutil.MkdirAllDurable(filepath.Dir(path), 0o755); mkdirErr != nil {
+		return mkdirErr
 	}
-	if err := refreshWorkflowDevelopmentRevisions(session); err != nil {
-		return err
+	if revisionErr := refreshWorkflowDevelopmentRevisions(session); revisionErr != nil {
+		return revisionErr
 	}
 	data, err := json.MarshalIndent(session, "", "  ")
 	if err != nil {
@@ -1162,11 +1163,11 @@ func writeActiveDevelopment(workspace string, session *WorkflowDevelopmentSessio
 	if err != nil {
 		return err
 	}
-	if err := fileutil.MkdirAllDurable(filepath.Dir(path), 0o755); err != nil {
-		return err
+	if mkdirErr := fileutil.MkdirAllDurable(filepath.Dir(path), 0o755); mkdirErr != nil {
+		return mkdirErr
 	}
-	if err := refreshWorkflowDevelopmentRevisions(session); err != nil {
-		return err
+	if revisionErr := refreshWorkflowDevelopmentRevisions(session); revisionErr != nil {
+		return revisionErr
 	}
 	data, err := json.MarshalIndent(session, "", "  ")
 	if err != nil {
@@ -1180,8 +1181,8 @@ func archiveDevelopmentSession(workspace string, session *WorkflowDevelopmentSes
 	if err != nil {
 		return err
 	}
-	if err := fileutil.MkdirAllDurable(filepath.Dir(archivePath), 0o755); err != nil {
-		return err
+	if mkdirErr := fileutil.MkdirAllDurable(filepath.Dir(archivePath), 0o755); mkdirErr != nil {
+		return mkdirErr
 	}
 	data, err := marshalWorkflowDevelopmentArchive(session, state)
 	if err != nil {

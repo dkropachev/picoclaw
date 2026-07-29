@@ -122,7 +122,9 @@ func configRevisionFile(path string) ([]byte, bool, error) {
 }
 
 func writeConfigRevisionPart(
-	digest interface{ Write([]byte) (int, error) },
+	digest interface {
+		Write(data []byte) (int, error)
+	},
 	name string,
 	data []byte,
 	missing bool,
@@ -191,7 +193,8 @@ func configSnapshotRequiresMigration(path string) (bool, error) {
 	var version struct {
 		Version int `json:"version"`
 	}
-	if err := json.Unmarshal(data, &version); err != nil {
+	versionEnvelopeValid := json.Unmarshal(data, &version) == nil
+	if !versionEnvelopeValid {
 		// The normal loader returns its bounded diagnostic for malformed JSON.
 		return false, nil
 	}

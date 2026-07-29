@@ -150,7 +150,7 @@ func TestReviseWorkflowDevelopmentPreservesTrailingYAMLBytesAndStalesTest(
 	t *testing.T,
 ) {
 	workspace := t.TempDir()
-	session, err := StartWorkflowDevelopment(
+	_, err := StartWorkflowDevelopment(
 		context.Background(),
 		workspace,
 		RuntimeCompatibility{PicoclawVersion: "v1.0.0"},
@@ -162,7 +162,7 @@ func TestReviseWorkflowDevelopmentPreservesTrailingYAMLBytesAndStalesTest(
 	if err != nil {
 		t.Fatalf("StartWorkflowDevelopment() error = %v", err)
 	}
-	session, err = RecordWorkflowDevelopmentTest(
+	session, err := RecordWorkflowDevelopmentTest(
 		workspace,
 		&RunResult{RunID: "wr_exact_yaml", Status: RunStatusSucceeded},
 		nil,

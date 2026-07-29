@@ -1611,7 +1611,7 @@ func (s *Store) createDispatchForRoutingClaim(
 			return err
 		}
 		if workflowRevision != "" {
-			if _, err := conn.ExecContext(ctx, `
+			if _, revisionErr := conn.ExecContext(ctx, `
 				INSERT INTO event_dispatch_workflow_revisions (
 					dispatch_id, workflow_revision
 				)
@@ -1619,8 +1619,8 @@ func (s *Store) createDispatchForRoutingClaim(
 				ON CONFLICT(dispatch_id) DO NOTHING`,
 				dispatchID,
 				workflowRevision,
-			); err != nil {
-				return err
+			); revisionErr != nil {
+				return revisionErr
 			}
 		}
 		affected, err := result.RowsAffected()
