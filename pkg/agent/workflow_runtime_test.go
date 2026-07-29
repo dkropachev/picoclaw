@@ -1771,6 +1771,16 @@ func (m *workflowMediaChannelManager) GetChannel(string) (channels.Channel, bool
 func (m *workflowMediaChannelManager) GetEnabledChannels() []string { return nil }
 
 func (m *workflowMediaChannelManager) InvokeTypingStop(string, string) {}
+func (m *workflowMediaChannelManager) InvokeTypingStopForMessage(string, string, string) {
+}
+
+func (m *workflowMediaChannelManager) CleanupTurnUXForMessage(
+	context.Context, string, string, string,
+) {
+}
+
+func (m *workflowMediaChannelManager) RebindTurnUXForMessage(string, string, string, string) {
+}
 
 func (m *workflowMediaChannelManager) SendMessage(context.Context, bus.OutboundMessage) error {
 	return nil
@@ -1782,6 +1792,15 @@ func (m *workflowMediaChannelManager) SendMedia(_ context.Context, msg bus.Outbo
 }
 
 func (m *workflowMediaChannelManager) SendPlaceholder(context.Context, string, string) bool {
+	return false
+}
+
+func (m *workflowMediaChannelManager) SendPlaceholderForMessage(
+	context.Context,
+	string,
+	string,
+	string,
+) bool {
 	return false
 }
 

@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +24,28 @@ var (
 	uniqueIDCounter uint64
 	uniqueIDPrefix  string
 )
+
+const turnUXRollbackTimeout = 5 * time.Second
+
+func turnUXRollback(
+	parent context.Context,
+	rollback func(context.Context),
+) func() {
+	if rollback == nil {
+		return nil
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	return func() {
+		rollbackCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(parent),
+			turnUXRollbackTimeout,
+		)
+		defer cancel()
+		rollback(rollbackCtx)
+	}
+}
 
 func init() {
 	// One-time read from crypto/rand for a unique prefix (single syscall).
@@ -94,6 +118,80 @@ type BaseChannel struct {
 	placeholderRecorder PlaceholderRecorder
 	owner               Channel // the concrete channel that embeds this BaseChannel
 	reasoningChannelID  string
+	typingGenerations   typingGenerationSet
+	reactionGenerations typingGenerationSet
+}
+
+type typingGenerationSet struct {
+	mu      sync.Mutex
+	current map[string]*TypingGeneration
+}
+
+// TypingGeneration pins a provider typing lifecycle to the exact StartTyping
+// call that created it. End returns true only for the newest generation of the
+// chat, so an older delayed cleanup can stop its own keepalive without sending
+// a chat-global "typing stopped" signal over a newer turn.
+type TypingGeneration struct {
+	set     *typingGenerationSet
+	chatID  string
+	current bool
+}
+
+// BeginTypingGeneration supersedes the previous process-local typing
+// generation for chatID.
+func (c *BaseChannel) BeginTypingGeneration(chatID string) *TypingGeneration {
+	if c == nil {
+		return nil
+	}
+	return beginTypingGeneration(&c.typingGenerations, chatID)
+}
+
+// BeginReactionGeneration supersedes the previous process-local owner of one
+// provider reaction resource (typically channel/message/emoji).
+func (c *BaseChannel) BeginReactionGeneration(resource string) *TypingGeneration {
+	if c == nil {
+		return nil
+	}
+	return beginTypingGeneration(&c.reactionGenerations, resource)
+}
+
+func beginTypingGeneration(
+	set *typingGenerationSet,
+	chatID string,
+) *TypingGeneration {
+	generation := &TypingGeneration{
+		set:     set,
+		chatID:  chatID,
+		current: true,
+	}
+	set.mu.Lock()
+	if set.current == nil {
+		set.current = make(map[string]*TypingGeneration)
+	}
+	if previous := set.current[chatID]; previous != nil {
+		previous.current = false
+	}
+	set.current[chatID] = generation
+	set.mu.Unlock()
+	return generation
+}
+
+// End retires this generation and reports whether it still owns the
+// chat-global provider indicator.
+func (generation *TypingGeneration) End() bool {
+	if generation == nil || generation.set == nil {
+		return false
+	}
+	set := generation.set
+	set.mu.Lock()
+	defer set.mu.Unlock()
+	if !generation.current || set.current[generation.chatID] != generation {
+		generation.current = false
+		return false
+	}
+	generation.current = false
+	delete(set.current, generation.chatID)
+	return true
 }
 
 func NewBaseChannel(
@@ -267,6 +365,9 @@ func (c *BaseChannel) HandleMessageWithContext(
 	inboundCtx bus.InboundContext,
 	senderOpts ...bus.SenderInfo,
 ) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Use SenderInfo-based allow check when available, else fall back to string
 	var sender bus.SenderInfo
 	if len(senderOpts) > 0 {
@@ -300,51 +401,152 @@ func (c *BaseChannel) HandleMessageWithContext(
 	if inboundCtx.SenderID == "" {
 		inboundCtx.SenderID = resolvedSenderID
 	}
+	if inboundCtx.TurnUXID == "" {
+		inboundCtx.TurnUXID = uniqueID()
+	}
 
 	scope := BuildMediaScope(c.name, deliveryChatID, inboundCtx.MessageID)
 
 	msg := bus.InboundMessage{
-		Context:    inboundCtx,
-		Sender:     sender,
-		Content:    content,
-		Media:      media,
-		MediaScope: scope,
+		Context:       inboundCtx,
+		Sender:        sender,
+		Content:       content,
+		Media:         media,
+		MediaScope:    scope,
+		ChannelOrigin: true,
 	}
 	msg = bus.NormalizeInboundMessage(msg)
 
-	// Auto-trigger typing indicator, message reaction, and placeholder before publishing.
-	// Each capability is independent — all three may fire for the same message.
-	// Note: even when streaming is available, we still show typing + placeholder on inbound.
-	// If streaming actually activates, preSend will skip the placeholder edit (streamActive map)
-	// and the typing stop will still be called. This avoids the problem of compile-time interface
-	// checks incorrectly skipping indicators when streaming may not work at runtime.
-	if c.owner != nil && c.placeholderRecorder != nil {
-		// Typing
-		if tc, ok := c.owner.(TypingCapable); ok {
-			if stop, err := tc.StartTyping(ctx, deliveryChatID); err == nil {
-				c.placeholderRecorder.RecordTypingStop(c.name, deliveryChatID, stop)
-			}
+	prepareTurnUX := func() func() {
+		// Each capability is independent — all three may fire for the same
+		// message. Admission runs first so an event-only message never leaves
+		// behind agent-turn UX that no response will consume.
+		if c.owner == nil || c.placeholderRecorder == nil {
+			return nil
 		}
-		// Reaction
-		if rc, ok := c.owner.(ReactionCapable); ok && msg.MessageID != "" {
-			if undo, err := rc.ReactToMessage(ctx, deliveryChatID, msg.MessageID); err == nil {
-				c.placeholderRecorder.RecordReactionUndo(c.name, deliveryChatID, undo)
+		buildRegistration := func() TurnUXRegistration {
+			registration := TurnUXRegistration{
+				Identity: msg.Context.TurnUXID,
+				Owner:    c.owner,
 			}
-		}
-		// Placeholder — independent pipeline.
-		// Skip when the message contains audio: the agent will send the
-		// placeholder after transcription completes, so the user sees
-		// "Thinking…" only once the voice has been processed.
-		if !audioAnnotationRe.MatchString(content) {
-			if pc, ok := c.owner.(PlaceholderCapable); ok {
-				if phID, err := pc.SendPlaceholder(ctx, deliveryChatID); err == nil && phID != "" {
-					c.placeholderRecorder.RecordPlaceholder(c.name, deliveryChatID, phID)
+			// Even when streaming is available, show typing + placeholder. If
+			// streaming activates, preSend skips the placeholder edit while the
+			// typing stop remains available.
+			if tc, ok := c.owner.(TypingCapable); ok {
+				if stop, err := tc.StartTyping(ctx, deliveryChatID); err == nil {
+					registration.TypingStop = stop
 				}
 			}
+			if rc, ok := c.owner.(ReactionCapable); ok && msg.MessageID != "" {
+				if undo, err := rc.ReactToMessage(ctx, deliveryChatID, msg.MessageID); err == nil {
+					registration.ReactionUndo = undo
+				}
+			}
+			// Audio sends the placeholder after transcription so the user sees it
+			// only once the voice has been processed.
+			if !audioAnnotationRe.MatchString(content) {
+				if pc, ok := c.owner.(PlaceholderCapable); ok {
+					if phID, err := pc.SendPlaceholder(ctx, deliveryChatID); err == nil && phID != "" {
+						registration.Placeholder = phID
+					}
+				}
+			}
+			return registration
+		}
+
+		if recorder, ok := c.placeholderRecorder.(TurnUXTransitionRecorder); ok {
+			return turnUXRollback(
+				ctx,
+				recorder.ReplaceTurnUX(
+					ctx,
+					c.name,
+					deliveryChatID,
+					buildRegistration,
+				),
+			)
+		}
+
+		registration := buildRegistration()
+		if recorder, ok := c.placeholderRecorder.(TransactionalPlaceholderRecorder); ok {
+			return turnUXRollback(
+				ctx,
+				recorder.RecordTurnUX(
+					ctx,
+					c.name,
+					deliveryChatID,
+					registration,
+				),
+			)
+		}
+
+		if registration.TypingStop != nil {
+			c.placeholderRecorder.RecordTypingStop(
+				c.name,
+				deliveryChatID,
+				registration.TypingStop,
+			)
+		}
+		if registration.ReactionUndo != nil {
+			c.placeholderRecorder.RecordReactionUndo(
+				c.name,
+				deliveryChatID,
+				registration.ReactionUndo,
+			)
+		}
+		if registration.Placeholder != "" {
+			c.placeholderRecorder.RecordPlaceholder(
+				c.name,
+				deliveryChatID,
+				registration.Placeholder,
+			)
+		}
+		return func() {
+			if registration.TypingStop != nil {
+				runBoundedTurnUXCallback(
+					ctx,
+					c.name,
+					deliveryChatID,
+					"typing",
+					registration.TypingStop,
+				)
+			}
+			if registration.ReactionUndo != nil {
+				runBoundedTurnUXCallback(
+					ctx,
+					c.name,
+					deliveryChatID,
+					"reaction",
+					registration.ReactionUndo,
+				)
+			}
+			if registration.Placeholder == "" {
+				return
+			}
+			runBoundedTurnUXPlaceholderCleanup(
+				ctx,
+				c.owner,
+				c.name,
+				deliveryChatID,
+				registration.Placeholder,
+			)
 		}
 	}
 
-	if err := c.bus.PublishInbound(ctx, msg); err != nil {
+	forwarded, err := c.bus.PublishInboundWithTransactionalPreparationResult(
+		ctx,
+		msg,
+		prepareTurnUX,
+	)
+	if !forwarded && c.mediaStore != nil {
+		if releaseErr := c.mediaStore.ReleaseAll(scope); releaseErr != nil {
+			logger.WarnCF("channels", "Failed to release unforwarded inbound media", map[string]any{
+				"channel": c.name,
+				"chat_id": deliveryChatID,
+				"error":   releaseErr.Error(),
+			})
+		}
+	}
+	if err != nil {
 		logger.ErrorCF("channels", "Failed to publish inbound message", map[string]any{
 			"channel": c.name,
 			"chat_id": deliveryChatID,
@@ -353,6 +555,37 @@ func (c *BaseChannel) HandleMessageWithContext(
 		return err
 	}
 	return nil
+}
+
+func removeTurnUXPlaceholder(
+	ctx context.Context,
+	channel Channel,
+	chatID, placeholderID string,
+) error {
+	if channel == nil || placeholderID == "" {
+		return errors.New("turn placeholder owner is unavailable")
+	}
+	var deleteErr error
+	if deleter, ok := channel.(MessageDeleter); ok {
+		if err := deleter.DeleteMessage(ctx, chatID, placeholderID); err == nil {
+			return nil
+		} else {
+			deleteErr = err
+		}
+	}
+	if editor, ok := channel.(MessageEditor); ok {
+		if err := editor.EditMessage(ctx, chatID, placeholderID, ""); err == nil {
+			return nil
+		} else if deleteErr != nil {
+			return errors.Join(deleteErr, err)
+		} else {
+			return err
+		}
+	}
+	if deleteErr != nil {
+		return deleteErr
+	}
+	return errors.New("turn placeholder owner cannot delete or edit messages")
 }
 
 // HandleInboundContext publishes a normalized inbound message using only the

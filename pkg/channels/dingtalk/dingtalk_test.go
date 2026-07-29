@@ -87,13 +87,16 @@ func TestOnChatBotMessageReceived_DirectFallbackSenderIDUsesConversationID(t *te
 	ch, msgBus := newTestDingTalkChannel(t, config.DingTalkSettings{}, nil)
 
 	_, err := ch.onChatBotMessageReceived(context.Background(), &chatbot.BotCallbackDataModel{
-		Text:             chatbot.BotCallbackDataTextModel{Content: "ping"},
-		SenderStaffId:    "",
-		SenderId:         "openid-user-42",
-		SenderNick:       "Bob",
-		ConversationType: "1",
-		ConversationId:   "conv-direct-42",
-		SessionWebhook:   "https://example.com/webhook-direct",
+		Text:              chatbot.BotCallbackDataTextModel{Content: "ping"},
+		MsgId:             "message-42",
+		CreateAt:          1_700_000_000_123,
+		SenderStaffId:     "",
+		SenderId:          "openid-user-42",
+		SenderNick:        "Bob",
+		ConversationType:  "1",
+		ConversationId:    "conv-direct-42",
+		ConversationTitle: "Direct with Bob",
+		SessionWebhook:    "https://example.com/webhook-direct",
 	})
 	if err != nil {
 		t.Fatalf("handler returned error: %v", err)
@@ -111,6 +114,16 @@ func TestOnChatBotMessageReceived_DirectFallbackSenderIDUsesConversationID(t *te
 	}
 	if inbound.Sender.CanonicalID != "dingtalk:openid-user-42" {
 		t.Fatalf("sender canonical_id=%q", inbound.Sender.CanonicalID)
+	}
+	if inbound.MessageID != "message-42" {
+		t.Fatalf("message_id=%q", inbound.MessageID)
+	}
+	if inbound.ConversationName != "Direct with Bob" {
+		t.Fatalf("conversation_name=%q", inbound.ConversationName)
+	}
+	if inbound.OccurredAt == nil ||
+		!inbound.OccurredAt.Equal(time.UnixMilli(1_700_000_000_123).UTC()) {
+		t.Fatalf("occurred_at=%v", inbound.OccurredAt)
 	}
 
 	if _, ok := ch.sessionWebhooks.Load("conv-direct-42"); !ok {

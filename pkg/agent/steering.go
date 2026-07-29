@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -28,6 +29,11 @@ const (
 	// manualSteeringScope is the legacy fallback queue used when no active
 	// turn/session scope is available.
 	manualSteeringScope = "__manual__"
+)
+
+var (
+	errNoActiveSteeringOwner   = errors.New("no active steering owner")
+	errSessionTurnAlreadyOwned = errors.New("session turn is already owned")
 )
 
 // parseSteeringMode normalizes a config string into a SteeringMode.
@@ -186,13 +192,20 @@ func (sq *steeringQueue) getMode() SteeringMode {
 // agent loop. The message will be picked up after the current tool finishes
 // executing, causing any remaining tool calls in the batch to be skipped.
 func (al *AgentLoop) Steer(msg providers.Message) error {
-	scope := ""
-	agentID := ""
-	if ts := al.getAnyActiveTurnState(); ts != nil {
-		scope = ts.sessionKey
-		agentID = ts.agentID
+	for {
+		ts := al.getAnyActiveTurnState()
+		if ts == nil {
+			return al.enqueueSteeringMessage("", "", msg)
+		}
+		err := al.enqueueSteeringMessage(ts.sessionKey, ts.agentID, msg)
+		if errors.Is(err, errNoActiveSteeringOwner) {
+			// The sampled owner completed before the handoff lock was
+			// acquired. Retry so a replacement owner is selected, or use the
+			// historical manual fallback when the agent is now idle.
+			continue
+		}
+		return err
 	}
-	return al.enqueueSteeringMessage(scope, agentID, msg)
 }
 
 func (al *AgentLoop) enqueueSteeringMessage(scope, agentID string, msg providers.Message) error {
@@ -200,17 +213,55 @@ func (al *AgentLoop) enqueueSteeringMessage(scope, agentID string, msg providers
 		return fmt.Errorf("steering queue is not initialized")
 	}
 
+	normalizedScope := normalizeSteeringScope(scope)
+	unlock := al.lockSessionTurn(normalizedScope)
+	if normalizedScope != manualSteeringScope {
+		if _, active := al.activeTurnStates.Load(normalizedScope); !active {
+			unlock()
+			return fmt.Errorf(
+				"%w for scope %q",
+				errNoActiveSteeringOwner,
+				normalizedScope,
+			)
+		}
+	}
+	msg, queueDepth, err := al.pushSteeringMessage(scope, msg)
+	unlock()
+	al.reportSteeringEnqueue(scope, agentID, msg, queueDepth, err)
+	return err
+}
+
+// pushSteeringMessage mutates only the queue. Callers coordinating an active
+// turn handoff must hold the matching session-turn lock until any associated
+// transient-UX rebind is complete.
+func (al *AgentLoop) pushSteeringMessage(
+	scope string,
+	msg providers.Message,
+) (providers.Message, int, error) {
 	msg = steeringPromptMessage(msg)
 	if err := al.steering.pushScope(scope, msg); err != nil {
+		return msg, al.steering.lenScope(scope), err
+	}
+	return msg, al.steering.lenScope(scope), nil
+}
+
+// reportSteeringEnqueue performs logging and event delivery after the
+// session-turn handoff lock has been released.
+func (al *AgentLoop) reportSteeringEnqueue(
+	scope, agentID string,
+	msg providers.Message,
+	queueDepth int,
+	err error,
+) {
+	if err != nil {
 		logger.WarnCF("agent", "Failed to enqueue steering message", map[string]any{
 			"error": err.Error(),
 			"role":  msg.Role,
 			"scope": normalizeSteeringScope(scope),
 		})
-		return err
+		return
 	}
 
-	queueDepth := al.steering.lenScope(scope)
 	logger.DebugCF("agent", "Steering message enqueued", map[string]any{
 		"role":        msg.Role,
 		"content_len": len(msg.Content),
@@ -252,8 +303,6 @@ func (al *AgentLoop) enqueueSteeringMessage(scope, agentID string, msg providers
 			QueueDepth: queueDepth,
 		},
 	)
-
-	return nil
 }
 
 // SteeringMode returns the current steering mode.
@@ -278,6 +327,8 @@ func (al *AgentLoop) dequeueSteeringMessages() []providers.Message {
 	if al.steering == nil {
 		return nil
 	}
+	unlock := al.lockSessionTurn(manualSteeringScope)
+	defer unlock()
 	return al.steering.dequeue()
 }
 
@@ -285,6 +336,8 @@ func (al *AgentLoop) dequeueSteeringMessagesForScope(scope string) []providers.M
 	if al.steering == nil {
 		return nil
 	}
+	unlock := al.lockSessionTurn(normalizeSteeringScope(scope))
+	defer unlock()
 	return al.steering.dequeueScope(scope)
 }
 
@@ -292,6 +345,8 @@ func (al *AgentLoop) dequeueSteeringMessagesForScopeWithFallback(scope string) [
 	if al.steering == nil {
 		return nil
 	}
+	unlock := al.lockSessionTurn(normalizeSteeringScope(scope))
+	defer unlock()
 	return al.steering.dequeueScopeWithFallback(scope)
 }
 
@@ -299,6 +354,8 @@ func (al *AgentLoop) pendingSteeringCountForScope(scope string) int {
 	if al.steering == nil {
 		return 0
 	}
+	unlock := al.lockSessionTurn(normalizeSteeringScope(scope))
+	defer unlock()
 	return al.steering.lenScope(scope)
 }
 
@@ -306,6 +363,8 @@ func (al *AgentLoop) clearSteeringMessagesForScope(scope string) int {
 	if al.steering == nil {
 		return 0
 	}
+	unlock := al.lockSessionTurn(normalizeSteeringScope(scope))
+	defer unlock()
 	return al.steering.clearScope(scope)
 }
 
@@ -314,17 +373,29 @@ func (al *AgentLoop) continueWithSteeringMessages(
 	agent *AgentInstance,
 	sessionKey, channel, chatID string,
 	scope *session.SessionScope,
+	inboundContext *bus.InboundContext,
+	reservation *turnState,
 	steeringMsgs []providers.Message,
 ) (string, error) {
 	dispatch := DispatchRequest{
 		SessionKey:   sessionKey,
 		SessionScope: session.CloneScope(scope),
 	}
-	if channel != "" || chatID != "" {
+	if inboundContext != nil {
+		dispatch.InboundContext = cloneInboundContext(inboundContext)
+	}
+	if dispatch.InboundContext == nil && (channel != "" || chatID != "") {
 		dispatch.InboundContext = &bus.InboundContext{
 			Channel:  channel,
 			ChatID:   chatID,
 			ChatType: inferChatTypeFromSessionScope(scope),
+		}
+	} else if dispatch.InboundContext != nil {
+		if channel != "" {
+			dispatch.InboundContext.Channel = channel
+		}
+		if chatID != "" {
+			dispatch.InboundContext.ChatID = chatID
 		}
 	}
 	return al.runAgentLoop(ctx, agent, processOptions{
@@ -334,6 +405,7 @@ func (al *AgentLoop) continueWithSteeringMessages(
 		SendResponse:            false,
 		InitialSteeringMessages: steeringMsgs,
 		SkipInitialSteeringPoll: true,
+		turnReservation:         reservation,
 	})
 }
 
@@ -368,7 +440,18 @@ func (al *AgentLoop) agentForSession(sessionKey string) *AgentInstance {
 // user has since enqueued steering messages.
 //
 // If no steering messages are pending, it returns an empty string.
-func (al *AgentLoop) Continue(ctx context.Context, sessionKey, channel, chatID string) (string, error) {
+func (al *AgentLoop) Continue(
+	ctx context.Context,
+	sessionKey, channel, chatID string,
+) (string, error) {
+	return al.continueWithInboundContext(ctx, sessionKey, channel, chatID, nil)
+}
+
+func (al *AgentLoop) continueWithInboundContext(
+	ctx context.Context,
+	sessionKey, channel, chatID string,
+	inboundContext *bus.InboundContext,
+) (string, error) {
 	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
 	if err != nil {
 		return "", err
@@ -376,47 +459,18 @@ func (al *AgentLoop) Continue(ctx context.Context, sessionKey, channel, chatID s
 	defer releaseRuntime()
 	ctx = leaseCtx
 
-	// Claim the session with a unique placeholder to prevent a TOCTOU race where two
-	// concurrent Continue calls for the same session both pass the active-turn
-	// check and create parallel turns. The placeholder is replaced by the real
-	// turnState inside continueWithSteeringMessages → runAgentLoop → registerActiveTurn.
-	placeholder := &turnState{
-		turnID: "pending-continue-" + sessionKey + "-" + fmt.Sprintf("%d", al.turnSeq.Add(1)),
-		phase:  TurnPhaseSetup,
-	}
-	if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
-		if active := al.GetActiveTurnBySession(sessionKey); active != nil {
-			return "", fmt.Errorf("turn %s is still active for session %q", active.TurnID, sessionKey)
-		}
-		// Another Continue just claimed the slot; let it handle the steering.
-		return "", nil
-	}
-
+	// Complete fallible setup before publishing a placeholder that inbound
+	// messages may otherwise treat as a live steering owner.
 	if err := al.ensureHooksInitialized(ctx); err != nil {
-		al.activeTurnStates.Delete(sessionKey)
 		return "", err
 	}
 	if err := al.ensureMCPInitialized(ctx); err != nil {
-		al.activeTurnStates.Delete(sessionKey)
 		return "", err
-	}
-
-	steeringMsgs := al.dequeueSteeringMessagesForScopeWithFallback(sessionKey)
-	if len(steeringMsgs) == 0 {
-		al.activeTurnStates.Delete(sessionKey)
-		return "", nil
 	}
 
 	agent := al.agentForSession(sessionKey)
 	if agent == nil {
-		al.activeTurnStates.Delete(sessionKey)
 		return "", fmt.Errorf("no agent available for session %q", sessionKey)
-	}
-
-	if tool, ok := agent.Tools.Get("message"); ok {
-		if resetter, ok := tool.(interface{ ResetSentInRound(sessionKey string) }); ok {
-			resetter.ResetSentInRound(sessionKey)
-		}
 	}
 
 	var scope *session.SessionScope
@@ -424,7 +478,69 @@ func (al *AgentLoop) Continue(ctx context.Context, sessionKey, channel, chatID s
 		scope = metaStore.GetSessionScope(sessionKey)
 	}
 
-	return al.continueWithSteeringMessages(ctx, agent, sessionKey, channel, chatID, scope, steeringMsgs)
+	// Claim the session with a unique placeholder to prevent a TOCTOU race where two
+	// concurrent Continue calls for the same session both pass the active-turn
+	// check and create parallel turns. The placeholder is replaced by the real
+	// turnState inside continueWithSteeringMessages → runAgentLoop → registerActiveTurn.
+	placeholder := &turnState{
+		turnID:     "pending-continue-" + sessionKey + "-" + fmt.Sprintf("%d", al.turnSeq.Add(1)),
+		agentID:    agent.ID,
+		sessionKey: sessionKey,
+		channel:    channel,
+		chatID:     chatID,
+		turnUXID: func() string {
+			if inboundContext == nil {
+				return ""
+			}
+			return inboundContext.TurnUXID
+		}(),
+		handoffContext: cloneInboundContext(inboundContext),
+		phase:          TurnPhaseSetup,
+	}
+	unlockSessionTurn := al.lockSessionTurn(sessionKey)
+	if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
+		unlockSessionTurn()
+		if active := al.GetActiveTurnBySession(sessionKey); active != nil {
+			return "", fmt.Errorf(
+				"%w: turn %s is still active for session %q",
+				errSessionTurnAlreadyOwned,
+				active.TurnID,
+				sessionKey,
+			)
+		}
+		// Another Continue just claimed the slot; let it handle the steering.
+		return "", nil
+	}
+
+	// Claim, dequeue, and the empty-queue conditional delete are one handoff.
+	// An inbound producer therefore either queues behind this owner before the
+	// dequeue, or observes no owner and claims the session itself afterward.
+	steeringMsgs := al.steering.dequeueScopeWithFallback(sessionKey)
+	if len(steeringMsgs) == 0 {
+		al.activeTurnStates.CompareAndDelete(sessionKey, placeholder)
+		unlockSessionTurn()
+		return "", nil
+	}
+	unlockSessionTurn()
+	defer al.abandonSessionTurnState(ctx, sessionKey, placeholder)
+
+	if tool, ok := agent.Tools.Get("message"); ok {
+		if resetter, ok := tool.(interface{ ResetSentInRound(sessionKey string) }); ok {
+			resetter.ResetSentInRound(sessionKey)
+		}
+	}
+
+	return al.continueWithSteeringMessages(
+		ctx,
+		agent,
+		sessionKey,
+		channel,
+		chatID,
+		scope,
+		inboundContext,
+		placeholder,
+		steeringMsgs,
+	)
 }
 
 func (al *AgentLoop) InterruptGraceful(hint string) error {

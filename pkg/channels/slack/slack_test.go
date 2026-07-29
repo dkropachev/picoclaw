@@ -2,6 +2,8 @@ package slack
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -190,6 +192,70 @@ func TestSlackChannelIsAllowed(t *testing.T) {
 			t.Error("non-allowed user should be blocked")
 		}
 	})
+}
+
+func TestReactionUndoDoesNotRemoveNewerReaction(t *testing.T) {
+	var addCalls, removeCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/reactions.add":
+			addCalls++
+			if addCalls > 1 {
+				_, _ = w.Write([]byte(`{"ok":false,"error":"already_reacted"}`))
+				return
+			}
+		case "/reactions.remove":
+			removeCalls++
+		default:
+			http.Error(w, "unexpected Slack API method", http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	ch := &SlackChannel{
+		BaseChannel: channels.NewBaseChannel("slack", nil, nil, nil),
+		api: slacksdk.New(
+			"test-token",
+			slacksdk.OptionAPIURL(server.URL+"/"),
+		),
+	}
+
+	olderUndo, err := ch.ReactToMessage(
+		context.Background(),
+		"C123",
+		"1234.5678",
+	)
+	if err != nil {
+		t.Fatalf("first ReactToMessage() error = %v", err)
+	}
+	newerUndo, err := ch.ReactToMessage(
+		context.Background(),
+		"C123",
+		"1234.5678",
+	)
+	if err != nil {
+		t.Fatalf("second ReactToMessage() error = %v", err)
+	}
+	if addCalls != 2 {
+		t.Fatalf("reaction add calls = %d, want 2", addCalls)
+	}
+
+	olderUndo()
+	if removeCalls != 0 {
+		t.Fatalf("stale reaction undo removed provider reaction %d time(s)", removeCalls)
+	}
+
+	newerUndo()
+	if removeCalls != 1 {
+		t.Fatalf("current reaction undo calls = %d, want 1", removeCalls)
+	}
+	newerUndo()
+	if removeCalls != 1 {
+		t.Fatalf("current reaction undo was not idempotent: calls = %d", removeCalls)
+	}
 }
 
 func TestSendMedia_SendsCaptionFallbackAfterUploads(t *testing.T) {

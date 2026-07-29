@@ -4,27 +4,73 @@ package agent
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 func (al *AgentLoop) processMessageSync(ctx context.Context, msg bus.InboundMessage) {
-	if al.channelManager != nil {
-		defer al.channelManager.InvokeTypingStop(msg.Channel, msg.ChatID)
-	}
-
+	msg = bus.NormalizeInboundMessage(msg)
 	response, err := al.processMessage(ctx, msg)
-	al.publishResponseOrError(ctx, msg.Channel, msg.ChatID, msg.SessionKey, response, err)
+	outboundEnqueued := al.publishResponseOrError(
+		ctx,
+		msg.Channel,
+		msg.ChatID,
+		msg.SessionKey,
+		response,
+		err,
+		&msg.Context,
+	)
+	if al.channelManager == nil {
+		return
+	}
+	if outboundEnqueued {
+		// Buffered delivery still owns the reaction and placeholder.
+		invokeTypingStopForMessage(
+			al.channelManager,
+			msg.Channel,
+			msg.ChatID,
+			msg.Context.TurnUXID,
+		)
+		return
+	}
+	cleanupTurnUXForMessage(
+		ctx,
+		al.channelManager,
+		msg.Channel,
+		msg.ChatID,
+		msg.Context.TurnUXID,
+	)
 }
 
-func (al *AgentLoop) runTurnWithSteering(ctx context.Context, initialMsg bus.InboundMessage) {
+func (al *AgentLoop) runTurnWithSteering(
+	ctx context.Context,
+	initialMsg bus.InboundMessage,
+	prepared bool,
+) bool {
+	outboundEnqueued := false
+
 	// Process the initial message
-	response, err := al.processMessage(ctx, initialMsg)
+	var response string
+	var err error
+	if prepared {
+		response, err = al.processPreparedMessage(ctx, initialMsg)
+	} else {
+		response, err = al.processMessage(ctx, initialMsg)
+	}
 	if err != nil {
-		if !al.maybePublishError(ctx, initialMsg.Channel, initialMsg.ChatID, initialMsg.SessionKey, err) {
-			return // context canceled
+		if errors.Is(err, context.Canceled) {
+			return false // context canceled
 		}
+		outboundEnqueued = al.maybePublishError(
+			ctx,
+			initialMsg.Channel,
+			initialMsg.ChatID,
+			initialMsg.SessionKey,
+			err,
+			&initialMsg.Context,
+		)
 		response = ""
 	}
 	finalResponse := response
@@ -37,11 +83,11 @@ func (al *AgentLoop) runTurnWithSteering(ctx context.Context, initialMsg bus.Inb
 				"channel": initialMsg.Channel,
 				"error":   targetErr.Error(),
 			})
-		return
+		return outboundEnqueued
 	}
 	if target == nil {
 		// System message or non-routable, response already published
-		return
+		return outboundEnqueued
 	}
 
 	continued, continueErr := al.drainQueuedSteeringContinuations(ctx, target)
@@ -58,8 +104,19 @@ func (al *AgentLoop) runTurnWithSteering(ctx context.Context, initialMsg bus.Inb
 
 	// Publish final response
 	if finalResponse != "" {
-		al.PublishResponseIfNeeded(ctx, target.Channel, target.ChatID, target.SessionKey, finalResponse)
+		outboundEnqueued = al.publishResponseIfNeeded(
+			ctx,
+			target.Channel,
+			target.ChatID,
+			target.SessionKey,
+			finalResponse,
+			target.InboundContext,
+		) || outboundEnqueued
 	}
+	if al.messageToolSentTo(target.SessionKey, target.Channel, target.ChatID) {
+		outboundEnqueued = true
+	}
+	return outboundEnqueued
 }
 
 func (al *AgentLoop) drainQueuedSteeringContinuations(
@@ -84,7 +141,13 @@ func (al *AgentLoop) drainQueuedSteeringContinuations(
 				"queue_depth": al.pendingSteeringCountForScope(target.SessionKey),
 			})
 
-		continued, continueErr := al.Continue(ctx, target.SessionKey, target.Channel, target.ChatID)
+		continued, continueErr := al.continueWithInboundContext(
+			ctx,
+			target.SessionKey,
+			target.Channel,
+			target.ChatID,
+			target.InboundContext,
+		)
 		if continueErr != nil {
 			return finalResponse, continueErr
 		}

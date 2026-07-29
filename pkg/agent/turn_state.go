@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"sort"
 	"strings"
@@ -202,11 +203,13 @@ type turnState struct {
 	toolExecutions    []ToolExecutionRecord
 	turnCtx           *TurnContext
 
-	channel     string
-	chatID      string
-	workspace   string
-	userMessage string
-	media       []string
+	channel        string
+	chatID         string
+	turnUXID       string
+	handoffContext *bus.InboundContext
+	workspace      string
+	userMessage    string
+	media          []string
 
 	phase        TurnPhase
 	iteration    int
@@ -258,6 +261,60 @@ type turnState struct {
 // turnState constructors and active turn management
 // =============================================================================
 
+type sessionTurnLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+type turnReservationContextKey struct{}
+
+func withTurnReservation(ctx context.Context, reservation *turnState) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if reservation == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, turnReservationContextKey{}, reservation)
+}
+
+func turnReservationFromContext(ctx context.Context) *turnState {
+	if ctx == nil {
+		return nil
+	}
+	reservation, _ := ctx.Value(turnReservationContextKey{}).(*turnState)
+	return reservation
+}
+
+// lockSessionTurn serializes the short ownership handoff between the active
+// turn registry and the scoped steering queue. Without this boundary, an
+// inbound message can observe a turn that is just about to unregister, enqueue
+// behind it, and be left with no worker responsible for draining the queue.
+func (al *AgentLoop) lockSessionTurn(sessionKey string) func() {
+	al.sessionTurnLocksMu.Lock()
+	if al.sessionTurnLocks == nil {
+		al.sessionTurnLocks = make(map[string]*sessionTurnLock)
+	}
+	keyLock := al.sessionTurnLocks[sessionKey]
+	if keyLock == nil {
+		keyLock = &sessionTurnLock{}
+		al.sessionTurnLocks[sessionKey] = keyLock
+	}
+	keyLock.refs++
+	al.sessionTurnLocksMu.Unlock()
+
+	keyLock.mu.Lock()
+	return func() {
+		keyLock.mu.Unlock()
+		al.sessionTurnLocksMu.Lock()
+		keyLock.refs--
+		if keyLock.refs == 0 {
+			delete(al.sessionTurnLocks, sessionKey)
+		}
+		al.sessionTurnLocksMu.Unlock()
+	}
+}
+
 func newTurnState(agent *AgentInstance, opts processOptions, scope turnEventScope) *turnState {
 	ts := &turnState{
 		agent:        agent,
@@ -271,6 +328,7 @@ func newTurnState(agent *AgentInstance, opts processOptions, scope turnEventScop
 		turnCtx:      cloneTurnContext(scope.context),
 		channel:      opts.Dispatch.Channel(),
 		chatID:       opts.Dispatch.ChatID(),
+		turnUXID:     opts.Dispatch.TurnUXID(),
 		workspace:    agent.Workspace,
 		userMessage:  opts.Dispatch.UserMessage,
 		media:        append([]string(nil), opts.Dispatch.Media...),
@@ -290,8 +348,27 @@ func newTurnState(agent *AgentInstance, opts processOptions, scope turnEventScop
 	return ts
 }
 
-func (al *AgentLoop) registerActiveTurn(ts *turnState) {
-	al.activeTurnStates.Store(ts.sessionKey, ts)
+func (al *AgentLoop) registerActiveTurn(ts *turnState) bool {
+	unlock := al.lockSessionTurn(ts.sessionKey)
+	defer unlock()
+
+	actual, loaded := al.activeTurnStates.Load(ts.sessionKey)
+	reservation := ts.opts.turnReservation
+	if reservation != nil && reservation.sessionKey == ts.sessionKey {
+		if !loaded || actual != reservation {
+			return false
+		}
+		al.activeTurnStates.Store(ts.sessionKey, ts)
+		return true
+	}
+	if !loaded {
+		al.activeTurnStates.Store(ts.sessionKey, ts)
+		return true
+	}
+	if actual == ts {
+		return true
+	}
+	return false
 }
 
 func (al *AgentLoop) clearActiveTurn(ts *turnState) {
@@ -299,13 +376,355 @@ func (al *AgentLoop) clearActiveTurn(ts *turnState) {
 }
 
 func (al *AgentLoop) releaseSessionTurnState(sessionKey string, expected *turnState) {
+	unlock := al.lockSessionTurn(sessionKey)
+	defer unlock()
 	if expected == nil {
-		al.activeTurnStates.Delete(sessionKey)
 		return
 	}
 	if actual, ok := al.activeTurnStates.Load(sessionKey); ok && actual == expected {
 		al.activeTurnStates.Delete(sessionKey)
 	}
+}
+
+// abandonSessionTurnState releases an unstarted reservation. If another
+// inbound message already committed to its steering queue, a live runtime
+// schedules a continuation so that message does not remain stranded behind
+// the failed placeholder. During shutdown the orphaned queue is cleared.
+func (al *AgentLoop) abandonSessionTurnState(
+	ctx context.Context,
+	sessionKey string,
+	expected *turnState,
+) bool {
+	if expected == nil {
+		return false
+	}
+
+	unlock := al.lockSessionTurn(sessionKey)
+	actual, loaded := al.activeTurnStates.Load(sessionKey)
+	if !loaded || actual != expected {
+		unlock()
+		return false
+	}
+
+	al.activeTurnStates.Delete(sessionKey)
+	unlock()
+
+	return al.rescueOrClearOrphanedSteering(
+		ctx,
+		sessionKey,
+		expected.channel,
+		expected.chatID,
+		expected.handoffContext,
+	)
+}
+
+type steeringRescueRequest struct {
+	parentContext    context.Context
+	channel          string
+	chatID           string
+	inboundContext   *bus.InboundContext
+	outboundEnqueued bool
+}
+
+// steeringRescueState is guarded by the matching session-turn lock. Keeping
+// the pending ownership records beside the marker prevents a finishing rescue
+// from overlooking a later abandonment that observed the marker.
+type steeringRescueState struct {
+	pending []steeringRescueRequest
+}
+
+func (al *AgentLoop) rescueOrClearOrphanedSteering(
+	ctx context.Context,
+	sessionKey, channel, chatID string,
+	inboundContext *bus.InboundContext,
+	bufferedOutbound ...bool,
+) bool {
+	if al.steering == nil {
+		return false
+	}
+
+	unlock := al.lockSessionTurn(sessionKey)
+	if _, active := al.activeTurnStates.Load(sessionKey); active {
+		unlock()
+		return false
+	}
+	queueDepth := al.steering.lenScope(sessionKey)
+	if queueDepth == 0 {
+		unlock()
+		return false
+	}
+	canResume := al.running.Load() && (ctx == nil || ctx.Err() == nil)
+	if !canResume {
+		al.steering.clearScope(sessionKey)
+		unlock()
+		return false
+	}
+
+	request := steeringRescueRequest{
+		parentContext:  ctx,
+		channel:        channel,
+		chatID:         chatID,
+		inboundContext: cloneInboundContext(inboundContext),
+		outboundEnqueued: len(bufferedOutbound) > 0 &&
+			bufferedOutbound[0],
+	}
+	if current, loaded := al.steeringRescues.Load(sessionKey); loaded {
+		state, ok := current.(*steeringRescueState)
+		if !ok || state == nil {
+			// Heal an unexpected legacy/corrupt marker while ownership is
+			// serialized. No running supervisor can safely own this request.
+			al.steeringRescues.Delete(sessionKey)
+		} else {
+			state.pending = append(state.pending, request)
+			unlock()
+			// The existing supervisor now explicitly owns both this queue
+			// handoff and its exact abandoned UX context.
+			return true
+		}
+	}
+
+	state := &steeringRescueState{}
+	al.steeringRescues.Store(sessionKey, state)
+	unlock()
+	go al.runSteeringRescue(
+		sessionKey,
+		state,
+		request,
+		request.outboundEnqueued,
+	)
+	return true
+}
+
+func (al *AgentLoop) runSteeringRescue(
+	sessionKey string,
+	state *steeringRescueState,
+	request steeringRescueRequest,
+	inheritedOutbound bool,
+) {
+	outboundEnqueued := inheritedOutbound
+	retryRemainingQueue := true
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			retryRemainingQueue = false
+			logger.RecoverPanicNoExit(recovered)
+			logger.ErrorCF(
+				"agent",
+				"Steering rescue panicked",
+				map[string]any{
+					"session_key": sessionKey,
+					"channel":     request.channel,
+					"chat_id":     request.chatID,
+				},
+			)
+		}
+		al.finishSteeringRescue(
+			sessionKey,
+			state,
+			request,
+			outboundEnqueued,
+			retryRemainingQueue,
+		)
+	}()
+
+	resumeCtx := context.Background()
+	if request.parentContext != nil {
+		resumeCtx = context.WithoutCancel(request.parentContext)
+	}
+	resumeCtx, cancel := context.WithTimeout(resumeCtx, 30*time.Second)
+	defer cancel()
+
+	response, err := al.continueWithInboundContext(
+		resumeCtx,
+		sessionKey,
+		request.channel,
+		request.chatID,
+		request.inboundContext,
+	)
+	if errors.Is(err, errSessionTurnAlreadyOwned) {
+		// Another live owner won the session claim and therefore owns the
+		// committed queue. This is a handoff, not a user-facing processing
+		// failure.
+		return
+	}
+	if err != nil {
+		outboundEnqueued = al.maybePublishError(
+			resumeCtx,
+			request.channel,
+			request.chatID,
+			sessionKey,
+			err,
+			request.inboundContext,
+		)
+		// Continue either failed before dequeue or consumed the attempted
+		// steering and failed while processing it. In both cases the error
+		// response is terminal for this abandoned ownership request; retrying
+		// an untouched queue here would otherwise create an unbounded loop.
+		retryRemainingQueue = false
+		return
+	}
+
+	target := &continuationTarget{
+		SessionKey:     sessionKey,
+		Channel:        request.channel,
+		ChatID:         request.chatID,
+		InboundContext: cloneInboundContext(request.inboundContext),
+	}
+	continued, continueErr := al.drainQueuedSteeringContinuations(
+		resumeCtx,
+		target,
+	)
+	if continued != "" {
+		response = continued
+	}
+	if errors.Is(continueErr, errSessionTurnAlreadyOwned) {
+		// A later inbound claimed the idle session between continuations. It
+		// owns the remaining queue; preserve any response already completed by
+		// this rescue without publishing the ownership race as an error.
+		continueErr = nil
+	}
+	if continueErr != nil {
+		retryRemainingQueue = false
+		if resumeCtx.Err() == nil {
+			outboundEnqueued = al.maybePublishError(
+				resumeCtx,
+				request.channel,
+				request.chatID,
+				sessionKey,
+				continueErr,
+				request.inboundContext,
+			) || outboundEnqueued
+			logger.WarnCF(
+				"agent",
+				"Failed to resume steering after reservation abandonment",
+				map[string]any{
+					"error":       continueErr.Error(),
+					"session_key": sessionKey,
+					"queue_depth": al.pendingSteeringCountForScope(sessionKey),
+				},
+			)
+		}
+	}
+
+	if response != "" {
+		outboundEnqueued = al.publishResponseIfNeeded(
+			resumeCtx,
+			request.channel,
+			request.chatID,
+			sessionKey,
+			response,
+			request.inboundContext,
+		) || outboundEnqueued
+	}
+	if al.messageToolSentTo(
+		sessionKey,
+		request.channel,
+		request.chatID,
+	) {
+		outboundEnqueued = true
+	}
+}
+
+func (al *AgentLoop) finishSteeringRescue(
+	sessionKey string,
+	state *steeringRescueState,
+	request steeringRescueRequest,
+	outboundEnqueued bool,
+	retryRemainingQueue bool,
+) {
+	var (
+		nextRequest      *steeringRescueRequest
+		carryOutbound    bool
+		cleanupCurrent   = true
+		pendingToCleanup []steeringRescueRequest
+	)
+
+	unlock := al.lockSessionTurn(sessionKey)
+	current, loaded := al.steeringRescues.Load(sessionKey)
+	if !loaded || current != state {
+		unlock()
+		al.cleanupSteeringRescueUX(request, outboundEnqueued)
+		return
+	}
+
+	_, active := al.activeTurnStates.Load(sessionKey)
+	queueDepth := al.steering.lenScope(sessionKey)
+	canResume := al.running.Load()
+	switch {
+	case active:
+		// The live owner owns every remaining queue entry. No abandoned UX
+		// record can be addressed by that owner's exact outbound identity.
+		pendingToCleanup = append(pendingToCleanup, state.pending...)
+		state.pending = nil
+		al.steeringRescues.Delete(sessionKey)
+	case queueDepth == 0:
+		// Any request appended after this rescue's last dequeue was consumed by
+		// the same continuation before its abandonment reached the supervisor.
+		pendingToCleanup = append(pendingToCleanup, state.pending...)
+		state.pending = nil
+		al.steeringRescues.Delete(sessionKey)
+	case !canResume || !retryRemainingQueue:
+		al.steering.clearScope(sessionKey)
+		pendingToCleanup = append(pendingToCleanup, state.pending...)
+		state.pending = nil
+		al.steeringRescues.Delete(sessionKey)
+	case len(state.pending) > 0:
+		next := state.pending[0]
+		state.pending = state.pending[1:]
+		nextRequest = &next
+		carryOutbound = next.outboundEnqueued
+	default:
+		// Steering committed to this rescue after its final dequeue but before
+		// marker retirement. Keep the same exact UX owner and remember whether
+		// an earlier buffered response already owns its delivery artifacts.
+		next := request
+		nextRequest = &next
+		carryOutbound = outboundEnqueued
+		cleanupCurrent = false
+	}
+	unlock()
+
+	if cleanupCurrent {
+		al.cleanupSteeringRescueUX(request, outboundEnqueued)
+	}
+	for _, pending := range pendingToCleanup {
+		al.cleanupSteeringRescueUX(
+			pending,
+			pending.outboundEnqueued,
+		)
+	}
+	if nextRequest != nil {
+		go al.runSteeringRescue(
+			sessionKey,
+			state,
+			*nextRequest,
+			carryOutbound,
+		)
+	}
+}
+
+func (al *AgentLoop) cleanupSteeringRescueUX(
+	request steeringRescueRequest,
+	outboundEnqueued bool,
+) {
+	if al.channelManager == nil || request.inboundContext == nil {
+		return
+	}
+	if outboundEnqueued {
+		invokeTypingStopForMessage(
+			al.channelManager,
+			request.channel,
+			request.chatID,
+			request.inboundContext.TurnUXID,
+		)
+		return
+	}
+	cleanupTurnUXForMessage(
+		context.Background(),
+		al.channelManager,
+		request.channel,
+		request.chatID,
+		request.inboundContext.TurnUXID,
+	)
 }
 
 func (al *AgentLoop) getActiveTurnState(sessionKey string) *turnState {

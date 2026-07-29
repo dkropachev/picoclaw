@@ -310,6 +310,117 @@ func TestAgentLoop_Continue_NoMessages(t *testing.T) {
 	}
 }
 
+func TestAgentLoop_Continue_EmptyQueueDeleteIsAtomicWithInboundClaim(t *testing.T) {
+	al, cfg, msgBus, provider, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+	_ = cfg
+	_ = msgBus
+	_ = provider
+
+	sessionKey := "test-session-atomic-empty-continue"
+	al.steering.mu.Lock()
+	queueLocked := true
+	defer func() {
+		if queueLocked {
+			al.steering.mu.Unlock()
+		}
+	}()
+
+	type continueResult struct {
+		response string
+		err      error
+	}
+	continueCtx, cancelContinue := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelContinue()
+	continueDone := make(chan continueResult, 1)
+	go func() {
+		response, err := al.Continue(continueCtx, sessionKey, "test", "chat1")
+		continueDone <- continueResult{response: response, err: err}
+	}()
+
+	// Continue publishes its reservation before trying to dequeue. Holding the
+	// queue mutex stops it at that exact point while it still owns the session
+	// handoff lock.
+	deadline := time.Now().Add(2 * time.Second)
+	var continuePlaceholder *turnState
+	for time.Now().Before(deadline) {
+		if actual, ok := al.activeTurnStates.Load(sessionKey); ok {
+			if ts, ok := actual.(*turnState); ok &&
+				strings.HasPrefix(ts.turnID, "pending-continue-") {
+				continuePlaceholder = ts
+				break
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if continuePlaceholder == nil {
+		t.Fatal("timeout waiting for Continue reservation")
+	}
+
+	inboundPlaceholder := &turnState{
+		turnID:     makePendingTurnID(sessionKey, al.turnSeq.Add(1)),
+		sessionKey: sessionKey,
+		phase:      TurnPhaseSetup,
+	}
+	inboundClaimedExisting := make(chan bool, 1)
+	go func() {
+		unlock := al.lockSessionTurn(sessionKey)
+		_, loaded := al.activeTurnStates.LoadOrStore(sessionKey, inboundPlaceholder)
+		unlock()
+		inboundClaimedExisting <- loaded
+	}()
+
+	// refs==2 proves the inbound contender reached the same handoff boundary
+	// and is waiting behind Continue rather than observing its placeholder.
+	deadline = time.Now().Add(2 * time.Second)
+	contenderWaiting := false
+	for !contenderWaiting && time.Now().Before(deadline) {
+		al.sessionTurnLocksMu.Lock()
+		keyLock := al.sessionTurnLocks[sessionKey]
+		contenderWaiting = keyLock != nil && keyLock.refs == 2
+		al.sessionTurnLocksMu.Unlock()
+		if !contenderWaiting {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if !contenderWaiting {
+		t.Fatal("inbound contender did not wait on Continue's session handoff")
+	}
+
+	al.steering.mu.Unlock()
+	queueLocked = false
+
+	select {
+	case result := <-continueDone:
+		if result.err != nil {
+			t.Fatalf("Continue returned error: %v", result.err)
+		}
+		if result.response != "" {
+			t.Fatalf("Continue response = %q, want empty", result.response)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for Continue to finish")
+	}
+
+	select {
+	case loaded := <-inboundClaimedExisting:
+		if loaded {
+			t.Fatal("inbound contender observed Continue's empty-queue placeholder")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for inbound ownership claim")
+	}
+
+	actual, ok := al.activeTurnStates.Load(sessionKey)
+	if !ok || actual != inboundPlaceholder {
+		t.Fatalf("active owner = %#v, want inbound placeholder %#v", actual, inboundPlaceholder)
+	}
+	if got := al.pendingSteeringCountForScope(sessionKey); got != 0 {
+		t.Fatalf("steering queue depth = %d, want 0", got)
+	}
+	al.releaseSessionTurnState(sessionKey, inboundPlaceholder)
+}
+
 func TestAgentLoop_Continue_WithMessages(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "agent-test-*")
 	if err != nil {
@@ -486,6 +597,28 @@ func (f *fixedTranscriber) Name() string { return "fixed" }
 
 func (f *fixedTranscriber) Transcribe(ctx context.Context, audioFilePath string) (*asr.TranscriptionResponse, error) {
 	return &asr.TranscriptionResponse{Text: f.text}, nil
+}
+
+type blockingTranscriber struct {
+	text    string
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingTranscriber) Name() string { return "blocking" }
+
+func (b *blockingTranscriber) Transcribe(
+	ctx context.Context,
+	audioFilePath string,
+) (*asr.TranscriptionResponse, error) {
+	b.once.Do(func() { close(b.started) })
+	select {
+	case <-b.release:
+		return &asr.TranscriptionResponse{Text: b.text}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func waitForPendingSteering(t *testing.T, al *AgentLoop, sessionKey string) {
@@ -985,6 +1118,183 @@ func TestAgentLoop_Run_QueuedVoiceMessageIsTranscribedBeforeSteering(t *testing.
 	}
 	if !foundTranscribedVoice {
 		t.Fatalf("expected queued voice message to be transcribed before steering injection, got %#v", secondMessages)
+	}
+}
+
+func TestAgentLoop_Run_OwnerExitDuringVoicePreparationDoesNotStrandMessage(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &lateSteeringProvider{
+		firstCallStarted: make(chan struct{}),
+		releaseFirstCall: make(chan struct{}),
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	store := media.NewFileMediaStore()
+	audioPath := filepath.Join(tmpDir, "handoff-voice.ogg")
+	if err := os.WriteFile(audioPath, []byte("fake audio"), 0o644); err != nil {
+		t.Fatalf("write audio fixture: %v", err)
+	}
+	ref, err := store.Store(audioPath, media.MediaMeta{
+		Filename:      "handoff-voice.ogg",
+		ContentType:   "audio/ogg",
+		CleanupPolicy: media.CleanupPolicyForgetOnly,
+	}, "scope-handoff-voice")
+	if err != nil {
+		t.Fatalf("store audio fixture: %v", err)
+	}
+	al.SetMediaStore(store)
+	transcriber := &blockingTranscriber{
+		text:    "late voice handoff",
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	al.SetTranscriber(transcriber)
+
+	closeIfOpen := func(ch chan struct{}) {
+		select {
+		case <-ch:
+		default:
+			close(ch)
+		}
+	}
+	defer closeIfOpen(provider.releaseFirstCall)
+	defer closeIfOpen(transcriber.release)
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- al.Run(runCtx)
+	}()
+
+	first := bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:  "test",
+			ChatID:   "chat1",
+			ChatType: "direct",
+			SenderID: "user1",
+			TurnUXID: "turn-ux-a",
+		},
+		Content: "first meal",
+	}
+	late := bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:  "test",
+			ChatID:   "chat1",
+			ChatType: "direct",
+			SenderID: "user1",
+			TurnUXID: "turn-ux-b",
+		},
+		Content: "[voice]",
+		Media:   []string{ref},
+	}
+
+	sessionKey, _, ok := al.resolveSteeringTarget(late)
+	if !ok {
+		t.Fatal("late voice message did not resolve to a steering target")
+	}
+
+	pubCtx, pubCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer pubCancel()
+	if err := msgBus.PublishInbound(pubCtx, first); err != nil {
+		t.Fatalf("publish first inbound: %v", err)
+	}
+	select {
+	case <-provider.firstCallStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for first provider call to start")
+	}
+
+	if err := msgBus.PublishInbound(pubCtx, late); err != nil {
+		t.Fatalf("publish late voice inbound: %v", err)
+	}
+	select {
+	case <-transcriber.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for late voice preparation to block")
+	}
+
+	// The late message has observed the first owner, but it has not committed
+	// to that owner yet. Let the owner exit while preparation remains blocked.
+	closeIfOpen(provider.releaseFirstCall)
+	var firstOutbound bus.OutboundMessage
+	select {
+	case firstOutbound = <-msgBus.OutboundChan():
+	case <-time.After(5 * time.Second):
+		t.Fatal("first owner could not finish while late voice preparation was blocked")
+	}
+	if firstOutbound.Content != "first response" {
+		t.Fatalf("first outbound content = %q, want %q", firstOutbound.Content, "first response")
+	}
+	if active := al.GetActiveTurnBySession(sessionKey); active != nil {
+		t.Fatalf("first owner remained active after its outbound: %#v", active)
+	}
+	if got := al.pendingSteeringCountForScope(sessionKey); got != 0 {
+		t.Fatalf("late message entered steering queue before preparation completed: depth=%d", got)
+	}
+
+	// Finishing preparation must recheck ownership, claim a fresh placeholder,
+	// and start a worker instead of enqueueing behind the now-dead owner.
+	closeIfOpen(transcriber.release)
+	var secondOutbound bus.OutboundMessage
+	select {
+	case secondOutbound = <-msgBus.OutboundChan():
+	case <-time.After(5 * time.Second):
+		t.Fatal("prepared late voice message was stranded after the first owner exited")
+	}
+	if secondOutbound.Content != "continued response" {
+		t.Fatalf("second outbound content = %q, want %q", secondOutbound.Content, "continued response")
+	}
+	if secondOutbound.Context.TurnUXID != late.Context.TurnUXID {
+		t.Fatalf(
+			"second outbound TurnUXID = %q, want %q",
+			secondOutbound.Context.TurnUXID,
+			late.Context.TurnUXID,
+		)
+	}
+	if got := al.pendingSteeringCountForScope(sessionKey); got != 0 {
+		t.Fatalf("steering queue depth after handoff = %d, want 0", got)
+	}
+
+	provider.mu.Lock()
+	callCount := provider.calls
+	secondMessages := append([]providers.Message(nil), provider.secondCallMessages...)
+	provider.mu.Unlock()
+	if callCount != 2 {
+		t.Fatalf("provider calls = %d, want 2", callCount)
+	}
+	foundTranscribedVoice := false
+	for _, providerMsg := range secondMessages {
+		if providerMsg.Role == "user" &&
+			strings.Contains(providerMsg.Content, "[voice: late voice handoff]") {
+			foundTranscribedVoice = true
+			break
+		}
+	}
+	if !foundTranscribedVoice {
+		t.Fatalf("second turn did not receive transcribed late voice: %#v", secondMessages)
+	}
+
+	cancelRun()
+	select {
+	case err := <-runErrCh:
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for Run to stop")
 	}
 }
 

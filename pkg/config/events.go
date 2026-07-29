@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -35,8 +36,28 @@ type EventIngressConfig struct {
 	RetentionDays   int      `json:"retention_days,omitempty"    env:"RETENTION_DAYS"`
 	MaxPayloadBytes int      `json:"max_payload_bytes,omitempty" env:"MAX_PAYLOAD_BYTES"`
 	RedactFields    []string `json:"redact_fields,omitempty"     env:"REDACT_FIELDS"`
-	// Per-connector enablement remains JSON-owned; the named map has no env mapping.
-	Webhooks map[string]GenericWebhookConfig `json:"webhooks,omitempty"`
+	// Per-connector enablement remains JSON-owned; the named maps have no env mapping.
+	Webhooks map[string]GenericWebhookConfig      `json:"webhooks,omitempty"`
+	Channels map[string]ChannelEventIngressConfig `json:"channels,omitempty"`
+}
+
+// ChannelEventIngressConfig controls durable event ingestion for one existing
+// channel instance. Empty Source and Mode values receive stable defaults from
+// EffectiveEventChannelAdapters.
+type ChannelEventIngressConfig struct {
+	Enabled              bool   `json:"enabled"`
+	Source               string `json:"source,omitempty"`
+	Mode                 string `json:"mode,omitempty"`
+	AllowUnverifiedEmail bool   `json:"allow_unverified_email,omitempty"`
+}
+
+// EffectiveEventChannelAdapterConfig is the resolved runtime configuration for
+// an enabled channel event adapter.
+type EffectiveEventChannelAdapterConfig struct {
+	Source               string
+	Mode                 string
+	ChannelType          string
+	AllowUnverifiedEmail bool
 }
 
 // GenericWebhookConfig controls one named, Standard Webhooks-compatible event
@@ -101,7 +122,8 @@ func (c EventIngressConfig) IsZero() bool {
 		c.RetentionDays == 0 &&
 		c.MaxPayloadBytes == 0 &&
 		len(c.RedactFields) == 0 &&
-		len(c.Webhooks) == 0
+		len(c.Webhooks) == 0 &&
+		len(c.Channels) == 0
 }
 
 const (
@@ -110,11 +132,29 @@ const (
 	genericWebhookMaxConnectorBytes              = 64
 	genericWebhookConnectorSecretConflictMessage = "webhook connector identity conflicts with a signing secret"
 	genericWebhookSecretResolutionMessage        = "resolve event webhook signing secret"
+	eventChannelSecretConflictMessage            = "event channel identity conflicts with a configured secret"
+
+	// EventChannelSourceChat normalizes channel messages as chat events.
+	EventChannelSourceChat = "chat"
+	// EventChannelSourceEmail normalizes Delta Chat messages as email events.
+	EventChannelSourceEmail = "email"
+	// EventChannelModeMirror preserves the existing chat path and also emits a
+	// durable event.
+	EventChannelModeMirror = "mirror"
+	// EventChannelModeEventOnly emits a durable event without forwarding the
+	// message through the existing chat path.
+	EventChannelModeEventOnly = "event_only"
+
+	eventChannelMaxNameBytes = 256
 )
 
 var genericWebhookConnectorNamePattern = regexp.MustCompile(
 	`^[A-Za-z][A-Za-z0-9_-]{0,63}$`,
 )
+
+var eventChannelSupportedTypes = map[string]struct{}{
+	ChannelDeltaChat: {},
+}
 
 // Validate checks the generic webhook portion of durable-ingress
 // configuration. The master Enabled flag is an inert kill switch: when it is
@@ -201,6 +241,190 @@ func validateGenericWebhookSecret(secret string) error {
 		)
 	}
 	return nil
+}
+
+// ValidateEventChannelAdapters validates channel event adapters against the
+// initialized channel list. The master ingress switch leaves structural bodies
+// inert, but credential-bearing names are always rejected because map keys are
+// persisted independently of runtime activation.
+func (c EventIngressConfig) ValidateEventChannelAdapters(
+	channels ChannelsConfig,
+	sensitiveValues ...string,
+) error {
+	for name := range c.Channels {
+		for _, secret := range sensitiveValues {
+			if len(secret) > 3 && strings.Contains(name, secret) {
+				// Connector identities persist as unredacted JSON map keys even
+				// while master ingress is disabled. Never echo either side of
+				// this conflict.
+				return errors.New(eventChannelSecretConflictMessage)
+			}
+		}
+	}
+	if !c.Enabled {
+		return nil
+	}
+
+	names := make([]string, 0, len(c.Channels))
+	for name := range c.Channels {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for index, name := range names {
+		if name == "" ||
+			name != strings.TrimSpace(name) ||
+			!utf8.ValidString(name) ||
+			len(name) > eventChannelMaxNameBytes {
+			return fmt.Errorf(
+				"event channel name %q must be non-empty, valid UTF-8, exactly trimmed, and at most %d bytes",
+				name,
+				eventChannelMaxNameBytes,
+			)
+		}
+		for _, previous := range names[:index] {
+			if strings.EqualFold(previous, name) {
+				return fmt.Errorf(
+					"event channel names %q and %q differ only by case",
+					previous,
+					name,
+				)
+			}
+		}
+
+		adapter := c.Channels[name]
+		if !adapter.Enabled {
+			continue
+		}
+
+		channel, exists := channels[name]
+		if !exists || channel == nil {
+			return fmt.Errorf("event channel %q does not reference an existing channel", name)
+		}
+		if !channel.Enabled {
+			return fmt.Errorf("event channel %q references a disabled channel", name)
+		}
+
+		channelType := effectiveEventChannelType(name, channel)
+		if _, supported := eventChannelSupportedTypes[channelType]; !supported {
+			return fmt.Errorf(
+				"event channel %q uses unsupported channel type %q",
+				name,
+				channelType,
+			)
+		}
+		effective := effectiveEventChannelAdapterConfig(adapter, channelType)
+		if channelType == ChannelDeltaChat &&
+			effective.Source != EventChannelSourceEmail {
+			return fmt.Errorf(
+				"event channel %q type %q requires source %q",
+				name,
+				ChannelDeltaChat,
+				EventChannelSourceEmail,
+			)
+		}
+		switch effective.Source {
+		case EventChannelSourceChat:
+		case EventChannelSourceEmail:
+			if channelType != ChannelDeltaChat {
+				return fmt.Errorf(
+					"event channel %q source %q requires channel type %q",
+					name,
+					EventChannelSourceEmail,
+					ChannelDeltaChat,
+				)
+			}
+		default:
+			return fmt.Errorf(
+				"event channel %q has unsupported source %q",
+				name,
+				effective.Source,
+			)
+		}
+
+		switch effective.Mode {
+		case EventChannelModeMirror, EventChannelModeEventOnly:
+		default:
+			return fmt.Errorf(
+				"event channel %q has unsupported mode %q",
+				name,
+				effective.Mode,
+			)
+		}
+		if adapter.AllowUnverifiedEmail &&
+			effective.Source != EventChannelSourceEmail {
+			return fmt.Errorf(
+				"event channel %q allows unverified email but source is %q",
+				name,
+				effective.Source,
+			)
+		}
+	}
+	return nil
+}
+
+// EffectiveEventChannelAdapters returns independent, fully resolved runtime
+// adapter configuration for enabled entries. A disabled master ingress switch
+// produces no adapters, preserving existing channel behavior.
+func EffectiveEventChannelAdapters(
+	cfg *Config,
+) map[string]EffectiveEventChannelAdapterConfig {
+	if cfg == nil || !cfg.Events.Ingress.Enabled {
+		return nil
+	}
+
+	var out map[string]EffectiveEventChannelAdapterConfig
+	for name, adapter := range cfg.Events.Ingress.Channels {
+		if !adapter.Enabled {
+			continue
+		}
+		channel := cfg.Channels[name]
+		if channel == nil || !channel.Enabled {
+			// Validation reports the configuration error. Keeping this helper
+			// defensive prevents callers from constructing a partial adapter
+			// against an invalid or not-yet-initialized candidate.
+			continue
+		}
+		if out == nil {
+			out = make(map[string]EffectiveEventChannelAdapterConfig)
+		}
+		channelType := effectiveEventChannelType(name, channel)
+		out[name] = effectiveEventChannelAdapterConfig(adapter, channelType)
+	}
+	return out
+}
+
+func effectiveEventChannelAdapterConfig(
+	adapter ChannelEventIngressConfig,
+	channelType string,
+) EffectiveEventChannelAdapterConfig {
+	source := adapter.Source
+	if source == "" {
+		source = EventChannelSourceChat
+		if channelType == ChannelDeltaChat {
+			source = EventChannelSourceEmail
+		}
+	}
+	mode := adapter.Mode
+	if mode == "" {
+		mode = EventChannelModeMirror
+	}
+	return EffectiveEventChannelAdapterConfig{
+		Source:               source,
+		Mode:                 mode,
+		ChannelType:          channelType,
+		AllowUnverifiedEmail: adapter.AllowUnverifiedEmail,
+	}
+}
+
+func effectiveEventChannelType(name string, channel *Channel) string {
+	if channel == nil {
+		return ""
+	}
+	if channel.Type == "" {
+		return name
+	}
+	return channel.Type
 }
 
 type genericWebhookYAML struct {
@@ -459,6 +683,12 @@ func EffectiveEventIngressConfig(cfg *Config, workspace string) EventIngressConf
 		out.Webhooks = make(map[string]GenericWebhookConfig, len(out.Webhooks))
 		for name, webhook := range cfg.Events.Ingress.Webhooks {
 			out.Webhooks[name] = webhook
+		}
+	}
+	if len(out.Channels) > 0 {
+		out.Channels = make(map[string]ChannelEventIngressConfig, len(out.Channels))
+		for name, adapter := range cfg.Events.Ingress.Channels {
+			out.Channels[name] = adapter
 		}
 	}
 

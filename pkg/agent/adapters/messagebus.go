@@ -31,8 +31,24 @@ func (a *messageBusAdapter) PublishOutboundMedia(ctx context.Context, msg bus.Ou
 	return a.inner.PublishOutboundMedia(ctx, msg)
 }
 
-func (a *messageBusAdapter) GetStreamer(ctx context.Context, channel, chatID, sessionKey string) (bus.Streamer, bool) {
+func (a *messageBusAdapter) GetStreamer(
+	ctx context.Context,
+	channel, chatID, sessionKey string,
+) (bus.Streamer, bool) {
 	return a.inner.GetStreamer(ctx, channel, chatID, sessionKey)
+}
+
+func (a *messageBusAdapter) GetStreamerForTurn(
+	ctx context.Context,
+	channel, chatID, sessionKey, turnUXID string,
+) (bus.Streamer, bool) {
+	return a.inner.GetStreamerForTurn(
+		ctx,
+		channel,
+		chatID,
+		sessionKey,
+		turnUXID,
+	)
 }
 
 func (a *messageBusAdapter) InboundChan() <-chan bus.InboundMessage {

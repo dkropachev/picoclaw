@@ -2,6 +2,7 @@ package matrix
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +19,104 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/media"
 )
+
+func TestTypingLoopStoppedBeforeStartDoesNotSendTyping(t *testing.T) {
+	requests := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests <- struct{}{}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	client, err := mautrix.NewClient(
+		server.URL,
+		id.UserID("@picoclaw:matrix.test"),
+		"",
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	ch := &MatrixChannel{client: client}
+	session, typingCtx := newTypingSession(context.Background())
+	session.stop()
+
+	ch.typingLoop(typingCtx, id.RoomID("!room:matrix.test"), session)
+
+	select {
+	case <-requests:
+		t.Fatal("stopped typing session sent a provider typing request")
+	default:
+	}
+}
+
+func TestStartTypingStaleStopDoesNotStopNewerSession(t *testing.T) {
+	requests := make(chan bool, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Typing bool `json:"typing"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode typing request: %v", err)
+		}
+		requests <- body.Typing
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	client, err := mautrix.NewClient(
+		server.URL,
+		id.UserID("@picoclaw:matrix.test"),
+		"",
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	ch := &MatrixChannel{
+		BaseChannel:    channels.NewBaseChannel("matrix", nil, nil, nil),
+		client:         client,
+		typingSessions: make(map[string]*typingSession),
+	}
+	ch.SetRunning(true)
+
+	olderStop, err := ch.StartTyping(
+		context.Background(),
+		"!room:matrix.test",
+	)
+	if err != nil {
+		t.Fatalf("first StartTyping() error = %v", err)
+	}
+	if got := <-requests; !got {
+		t.Fatal("first typing request stopped instead of starting")
+	}
+
+	newerStop, err := ch.StartTyping(
+		context.Background(),
+		"!room:matrix.test",
+	)
+	if err != nil {
+		t.Fatalf("second StartTyping() error = %v", err)
+	}
+	if got := <-requests; !got {
+		t.Fatal("second typing request stopped instead of starting")
+	}
+
+	olderStop()
+	select {
+	case got := <-requests:
+		t.Fatalf("stale stop emitted provider typing=%t", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	newerStop()
+	select {
+	case got := <-requests:
+		if got {
+			t.Fatal("current stop emitted typing=true")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("current stop did not emit typing=false")
+	}
+}
 
 func TestMatrixLocalpartMentionRegexp(t *testing.T) {
 	re := localpartMentionRegexp("picoclaw")

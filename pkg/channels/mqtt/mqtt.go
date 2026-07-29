@@ -21,7 +21,8 @@ import (
 
 // mqttPayload is the JSON payload for both inbound and outbound messages.
 type mqttPayload struct {
-	Text string `json:"text"`
+	Text      string `json:"text"`
+	MessageID string `json:"message_id,omitempty"`
 }
 
 // MQTTChannel implements the Channel interface for MQTT-based communication.
@@ -199,13 +200,20 @@ func (c *MQTTChannel) handleInbound(msg pahomqtt.Message) {
 	}
 
 	inboundCtx := bus.InboundContext{
-		Channel:  "mqtt",
-		ChatID:   chatID,
-		ChatType: "direct",
-		SenderID: clientID,
+		Channel:   "mqtt",
+		ChatID:    chatID,
+		ChatType:  "direct",
+		SenderID:  clientID,
+		MessageID: strings.TrimSpace(payload.MessageID),
 	}
 
-	c.HandleInboundContext(context.Background(), chatID, payload.Text, nil, inboundCtx)
+	c.HandleInboundContext(
+		context.Background(),
+		chatID,
+		payload.Text,
+		nil,
+		inboundCtx,
+	)
 }
 
 // Stop disconnects from the MQTT broker.

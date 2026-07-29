@@ -32,6 +32,30 @@ func (a *channelManagerAdapter) InvokeTypingStop(channel, chatID string) {
 	a.inner.InvokeTypingStop(channel, chatID)
 }
 
+func (a *channelManagerAdapter) InvokeTypingStopForMessage(
+	channel, chatID, turnUXID string,
+) {
+	a.inner.InvokeTypingStopForMessage(channel, chatID, turnUXID)
+}
+
+func (a *channelManagerAdapter) CleanupTurnUXForMessage(
+	ctx context.Context,
+	channel, chatID, turnUXID string,
+) {
+	a.inner.CleanupTurnUXForMessage(ctx, channel, chatID, turnUXID)
+}
+
+func (a *channelManagerAdapter) RebindTurnUXForMessage(
+	channel, chatID, fromTurnUXID, toTurnUXID string,
+) {
+	a.inner.RebindTurnUXForMessage(
+		channel,
+		chatID,
+		fromTurnUXID,
+		toTurnUXID,
+	)
+}
+
 func (a *channelManagerAdapter) SendMessage(ctx context.Context, msg bus.OutboundMessage) error {
 	return a.inner.SendMessage(ctx, msg)
 }
@@ -42,6 +66,13 @@ func (a *channelManagerAdapter) SendMedia(ctx context.Context, msg bus.OutboundM
 
 func (a *channelManagerAdapter) SendPlaceholder(ctx context.Context, channel, chatID string) bool {
 	return a.inner.SendPlaceholder(ctx, channel, chatID)
+}
+
+func (a *channelManagerAdapter) SendPlaceholderForMessage(
+	ctx context.Context,
+	channel, chatID, turnUXID string,
+) bool {
+	return a.inner.SendPlaceholderForMessage(ctx, channel, chatID, turnUXID)
 }
 
 func (a *channelManagerAdapter) DismissToolFeedback(

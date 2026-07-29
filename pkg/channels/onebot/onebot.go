@@ -37,6 +37,8 @@ type OneBotChannel struct {
 	selfID        int64
 	pending       map[string]chan json.RawMessage
 	pendingMu     sync.Mutex
+	reactionOpsMu sync.Mutex
+	reactionTail  <-chan struct{}
 	lastMessageID sync.Map
 }
 
@@ -118,19 +120,47 @@ func NewOneBotChannel(
 	}, nil
 }
 
-func (c *OneBotChannel) setMsgEmojiLike(messageID string, emojiID int, set bool) {
-	go func() {
-		_, err := c.sendAPIRequest("set_msg_emoji_like", map[string]any{
+func (c *OneBotChannel) setMsgEmojiLike(
+	messageID string,
+	emojiID int,
+	set bool,
+) error {
+	_, err := c.sendAPIRequest("set_msg_emoji_like", map[string]any{
+		"message_id": messageID,
+		"emoji_id":   emojiID,
+		"set":        set,
+	}, 5*time.Second)
+	if err != nil {
+		logger.DebugCF("onebot", "Failed to set emoji like", map[string]any{
 			"message_id": messageID,
-			"emoji_id":   emojiID,
-			"set":        set,
-		}, 5*time.Second)
-		if err != nil {
-			logger.DebugCF("onebot", "Failed to set emoji like", map[string]any{
-				"message_id": messageID,
-				"error":      err.Error(),
-			})
+			"error":      err.Error(),
+		})
+	}
+	return err
+}
+
+// enqueueReactionOperation keeps reaction mutations ordered without blocking
+// the websocket read loop that must receive sendAPIRequest responses.
+func (c *OneBotChannel) enqueueReactionOperation(operation func()) {
+	done := make(chan struct{})
+	c.reactionOpsMu.Lock()
+	previous := c.reactionTail
+	c.reactionTail = done
+	c.reactionOpsMu.Unlock()
+
+	go func() {
+		if previous != nil {
+			<-previous
 		}
+		defer close(done)
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				logger.DebugCF("onebot", "Reaction operation panicked", map[string]any{
+					"panic": fmt.Sprint(recovered),
+				})
+			}
+		}()
+		operation()
 	}()
 }
 
@@ -143,10 +173,20 @@ func (c *OneBotChannel) ReactToMessage(ctx context.Context, chatID, messageID st
 		return func() {}, nil
 	}
 
-	c.setMsgEmojiLike(messageID, 289, true)
+	const emojiID = 289
+	generation := c.BeginReactionGeneration(
+		chatID + "\x00" + messageID + "\x00" + strconv.Itoa(emojiID),
+	)
+	c.enqueueReactionOperation(func() {
+		_ = c.setMsgEmojiLike(messageID, emojiID, true)
+	})
 
 	return func() {
-		c.setMsgEmojiLike(messageID, 289, false)
+		if generation.End() {
+			c.enqueueReactionOperation(func() {
+				_ = c.setMsgEmojiLike(messageID, emojiID, false)
+			})
+		}
 	}, nil
 }
 

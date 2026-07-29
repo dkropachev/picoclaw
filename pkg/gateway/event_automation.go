@@ -10,6 +10,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/eventing"
+	eventchannel "github.com/sipeed/picoclaw/pkg/eventing/channelmessage"
 	eventwebhook "github.com/sipeed/picoclaw/pkg/eventing/webhook"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -19,6 +20,7 @@ import (
 type eventAutomationService struct {
 	store          *eventing.Store
 	webhookBackend *eventwebhook.Backend
+	channelBackend *eventchannel.Backend
 	cancel         context.CancelFunc
 	done           chan struct{}
 
@@ -85,10 +87,15 @@ func newEventAutomationService(
 	if err != nil {
 		return nil, errors.Join(err, store.Close())
 	}
+	channelBackend, err := newEventChannelBackend(cfg, store)
+	if err != nil {
+		return nil, errors.Join(err, store.Close())
+	}
 
 	service := &eventAutomationService{
 		store:          store,
 		webhookBackend: webhookBackend,
+		channelBackend: channelBackend,
 		done:           make(chan struct{}),
 	}
 	if !cfg.Workflows.Enabled {
@@ -180,6 +187,12 @@ func openEventAutomationStore(ctx context.Context, cfg *config.Config) (*eventin
 	if err := cfg.Events.Ingress.Validate(); err != nil {
 		return nil, fmt.Errorf("validate event ingress: %w", err)
 	}
+	if err := cfg.Events.Ingress.ValidateEventChannelAdapters(
+		cfg.Channels,
+		cfg.SensitiveDataValues()...,
+	); err != nil {
+		return nil, fmt.Errorf("validate event channel adapters: %w", err)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -191,7 +204,7 @@ func openEventAutomationStore(ctx context.Context, cfg *config.Config) (*eventin
 		eventing.WithMaxPayloadBytes(ingress.MaxPayloadBytes),
 		eventing.WithRedaction(
 			ingress.RedactFields,
-			eventWebhookSecretValues(ingress),
+			eventRedactionSecretValues(cfg, ingress),
 		),
 	)
 	if err != nil {
@@ -238,6 +251,34 @@ func eventWebhookSecretValues(ingress config.EventIngressConfig) []string {
 		if secret := connector.Secret.String(); secret != "" {
 			secrets = append(secrets, secret)
 		}
+	}
+	return secrets
+}
+
+func eventRedactionSecretValues(
+	cfg *config.Config,
+	ingress config.EventIngressConfig,
+) []string {
+	secrets := eventWebhookSecretValues(ingress)
+	seen := make(map[string]struct{}, len(secrets))
+	for _, secret := range secrets {
+		seen[secret] = struct{}{}
+	}
+	if cfg == nil {
+		return secrets
+	}
+	for _, secret := range cfg.SensitiveDataValues() {
+		// Very short credentials would redact common characters throughout
+		// otherwise-safe message text. Match the existing LLM-boundary policy:
+		// keys and tokens longer than three characters are exact-value secrets.
+		if len(secret) <= 3 {
+			continue
+		}
+		if _, exists := seen[secret]; exists {
+			continue
+		}
+		seen[secret] = struct{}{}
+		secrets = append(secrets, secret)
 	}
 	return secrets
 }

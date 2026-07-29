@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +28,7 @@ type MaixCamChannel struct {
 }
 
 type MaixCamMessage struct {
+	MessageID string         `json:"message_id,omitempty"`
 	Type      string         `json:"type"`
 	Tips      string         `json:"tips"`
 	Timestamp float64        `json:"timestamp"`
@@ -201,11 +204,20 @@ func (c *MaixCamChannel) handlePersonDetection(msg MaixCamMessage) {
 	}
 
 	inboundCtx := bus.InboundContext{
-		Channel:  "maixcam",
-		ChatID:   chatID,
-		ChatType: "channel",
-		SenderID: senderID,
-		Raw:      metadata,
+		Channel:   "maixcam",
+		ChatID:    chatID,
+		ChatType:  "channel",
+		SenderID:  senderID,
+		MessageID: strings.TrimSpace(msg.MessageID),
+		Raw:       metadata,
+	}
+	if msg.Timestamp > 0 &&
+		msg.Timestamp <= 253402300799 &&
+		!math.IsNaN(msg.Timestamp) &&
+		!math.IsInf(msg.Timestamp, 0) {
+		seconds, fraction := math.Modf(msg.Timestamp)
+		occurredAt := time.Unix(int64(seconds), int64(fraction*float64(time.Second))).UTC()
+		inboundCtx.OccurredAt = &occurredAt
 	}
 
 	c.HandleInboundContext(c.ctx, chatID, content, nil, inboundCtx, sender)

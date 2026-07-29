@@ -2,9 +2,11 @@ package slack
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
@@ -18,6 +20,8 @@ import (
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
+
+const reactionCleanupTimeout = 5 * time.Second
 
 type SlackChannel struct {
 	*channels.BaseChannel
@@ -256,17 +260,36 @@ func (c *SlackChannel) ReactToMessage(ctx context.Context, chatID, messageID str
 		return func() {}, nil
 	}
 
-	c.api.AddReaction("eyes", slack.ItemRef{
+	generation := c.BeginReactionGeneration(
+		channelID + "\x00" + messageID + "\x00eyes",
+	)
+	if err := c.api.AddReactionContext(ctx, "eyes", slack.ItemRef{
 		Channel:   channelID,
 		Timestamp: messageID,
-	})
+	}); err != nil && !slackReactionAlreadyPresent(err) {
+		generation.End()
+		return func() {}, fmt.Errorf("slack add reaction: %w", err)
+	}
 
 	return func() {
-		c.api.RemoveReaction("eyes", slack.ItemRef{
+		if !generation.End() {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(
+			context.Background(),
+			reactionCleanupTimeout,
+		)
+		defer cancel()
+		_ = c.api.RemoveReactionContext(cleanupCtx, "eyes", slack.ItemRef{
 			Channel:   channelID,
 			Timestamp: messageID,
 		})
 	}, nil
+}
+
+func slackReactionAlreadyPresent(err error) bool {
+	var response slack.SlackErrorResponse
+	return errors.As(err, &response) && response.Err == "already_reacted"
 }
 
 func (c *SlackChannel) eventLoop() {

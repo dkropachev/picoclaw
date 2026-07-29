@@ -47,6 +47,14 @@ func cloneInboundContext(ctx *bus.InboundContext) *bus.InboundContext {
 	cloned := *ctx
 	cloned.ReplyHandles = cloneStringMap(ctx.ReplyHandles)
 	cloned.Raw = cloneStringMap(ctx.Raw)
+	if ctx.OccurredAt != nil {
+		occurredAt := *ctx.OccurredAt
+		cloned.OccurredAt = &occurredAt
+	}
+	cloned.Attachments = append(
+		[]bus.InboundAttachment(nil),
+		ctx.Attachments...,
+	)
 	return &cloned
 }
 

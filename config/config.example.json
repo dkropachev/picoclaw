@@ -518,6 +518,14 @@
       "retention_days": 30,
       "max_payload_bytes": 1048576,
       "redact_fields": [],
+      "channels": {
+        "deltachat": {
+          "enabled": false,
+          "source": "email",
+          "mode": "event_only",
+          "allow_unverified_email": false
+        }
+      },
       "webhooks": {
         "example": {
           "enabled": false,

@@ -742,6 +742,75 @@ func (store *blockingInserter) Insert(
 	}, nil
 }
 
+func TestControllerStageIsNonAcceptingUntilCommit(t *testing.T) {
+	t.Parallel()
+	store := newMemoryInserter()
+	backend, err := NewBackend(BackendConfig{
+		Store:            store,
+		ConnectorSecrets: map[string]string{testConnector: testSecret},
+		MaxPayloadBytes:  1024,
+	})
+	require.NoError(t, err)
+	controller := NewController()
+	staged, err := controller.Stage(backend)
+	require.NoError(t, err)
+	generation := staged.Generation()
+	assert.False(t, controller.IsActive(generation))
+	_, err = controller.Stage(backend)
+	require.ErrorIs(t, err, ErrActivationStaged)
+	require.ErrorIs(
+		t,
+		controller.Deactivate(context.Background(), Generation{}),
+		ErrActivationStaged,
+	)
+
+	beforeCommit := performRequest(
+		controller,
+		signedRequest(
+			t,
+			testSecret,
+			"delivery-before-commit",
+			`{"type":"staged","payload":{}}`,
+		),
+	)
+	assert.Equal(t, http.StatusServiceUnavailable, beforeCommit.Code)
+	assert.Empty(t, store.recordedInputs())
+
+	staged.Commit()
+	assert.True(t, controller.IsActive(generation))
+	afterCommit := performRequest(
+		controller,
+		signedRequest(
+			t,
+			testSecret,
+			"delivery-after-commit",
+			`{"type":"committed","payload":{}}`,
+		),
+	)
+	assert.Equal(t, http.StatusAccepted, afterCommit.Code)
+	assert.Len(t, store.recordedInputs(), 1)
+
+	// A stale abort cannot affect the committed generation.
+	staged.Abort()
+	assert.True(t, controller.IsActive(generation))
+	require.NoError(t, controller.Deactivate(context.Background(), generation))
+
+	disabled, err := controller.Stage(nil)
+	require.NoError(t, err)
+	assert.Equal(t, Generation{}, disabled.Generation())
+	disabled.Commit()
+	retryable := performRequest(
+		controller,
+		signedRequest(
+			t,
+			testSecret,
+			"delivery-disabled",
+			`{"type":"disabled","payload":{}}`,
+		),
+	)
+	assert.Equal(t, http.StatusServiceUnavailable, retryable.Code)
+}
+
 func TestControllerGenerationDrainAndStaleCleanup(t *testing.T) {
 	t.Parallel()
 	store := &blockingInserter{

@@ -8,9 +8,44 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/media"
 )
+
+func TestEnqueueReactionOperationPreservesOrder(t *testing.T) {
+	ch := &OneBotChannel{}
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondDone := make(chan struct{})
+	order := make([]int, 0, 2)
+
+	ch.enqueueReactionOperation(func() {
+		close(firstStarted)
+		<-releaseFirst
+		order = append(order, 1)
+	})
+	<-firstStarted
+	ch.enqueueReactionOperation(func() {
+		order = append(order, 2)
+		close(secondDone)
+	})
+
+	select {
+	case <-secondDone:
+		t.Fatal("second reaction operation overtook the first")
+	default:
+	}
+	close(releaseFirst)
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("ordered reaction operations did not finish")
+	}
+	if len(order) != 2 || order[0] != 1 || order[1] != 2 {
+		t.Fatalf("reaction operation order = %v, want [1 2]", order)
+	}
+}
 
 func TestParseMessageSegments_BlocksLoopbackInboundMediaURL(t *testing.T) {
 	ch := &OneBotChannel{}

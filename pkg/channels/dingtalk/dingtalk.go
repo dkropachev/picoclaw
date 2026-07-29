@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/open-dingtalk/dingtalk-stream-sdk-go/chatbot"
 	"github.com/open-dingtalk/dingtalk-stream-sdk-go/client"
@@ -232,12 +233,18 @@ func (c *DingTalkChannel) onChatBotMessageReceived(
 	}
 
 	inboundCtx := bus.InboundContext{
-		Channel:   "dingtalk",
-		ChatID:    chatID,
-		ChatType:  chatType,
-		SenderID:  resolvedSenderID,
-		Mentioned: isMentioned,
-		Raw:       metadata,
+		Channel:          "dingtalk",
+		ChatID:           chatID,
+		ChatType:         chatType,
+		SenderID:         resolvedSenderID,
+		MessageID:        strings.TrimSpace(data.MsgId),
+		Mentioned:        isMentioned,
+		ConversationName: strings.TrimSpace(data.ConversationTitle),
+		Raw:              metadata,
+	}
+	if data.CreateAt > 0 {
+		occurredAt := time.UnixMilli(data.CreateAt).UTC()
+		inboundCtx.OccurredAt = &occurredAt
 	}
 	if data.SessionWebhook != "" {
 		inboundCtx.ReplyHandles = map[string]string{

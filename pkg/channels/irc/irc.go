@@ -177,11 +177,24 @@ func (c *IRCChannel) StartTyping(ctx context.Context, chatID string) (func(), er
 		return noop, nil
 	}
 
-	c.conn.SendWithTags(map[string]string{"+typing": "active"}, "TAGMSG", chatID)
+	conn := c.conn
+	generation := c.BeginTypingGeneration(chatID)
+	if err := conn.SendWithTags(
+		map[string]string{"+typing": "active"},
+		"TAGMSG",
+		chatID,
+	); err != nil {
+		generation.End()
+		return noop, fmt.Errorf("irc start typing: %w", err)
+	}
 
 	return func() {
-		if c.IsRunning() && c.conn != nil {
-			c.conn.SendWithTags(map[string]string{"+typing": "done"}, "TAGMSG", chatID)
+		if generation.End() && c.IsRunning() && c.conn == conn {
+			_ = conn.SendWithTags(
+				map[string]string{"+typing": "done"},
+				"TAGMSG",
+				chatID,
+			)
 		}
 	}, nil
 }

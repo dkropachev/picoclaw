@@ -36,6 +36,45 @@ func newTestPicoChannel(t *testing.T) *PicoChannel {
 	return ch
 }
 
+func TestStartTypingStaleStopDoesNotStopNewerGeneration(t *testing.T) {
+	ch := &PicoChannel{
+		BaseChannel: channels.NewBaseChannel("pico", nil, nil, nil),
+	}
+	var sent []PicoMessage
+	ch.broadcastFn = func(_ string, msg PicoMessage) error {
+		sent = append(sent, msg)
+		return nil
+	}
+
+	olderStop, err := ch.StartTyping(context.Background(), "pico:session-1")
+	if err != nil {
+		t.Fatalf("first StartTyping() error = %v", err)
+	}
+	newerStop, err := ch.StartTyping(context.Background(), "pico:session-1")
+	if err != nil {
+		t.Fatalf("second StartTyping() error = %v", err)
+	}
+	if len(sent) != 2 ||
+		sent[0].Type != TypeTypingStart ||
+		sent[1].Type != TypeTypingStart {
+		t.Fatalf("typing messages after starts = %#v, want two starts", sent)
+	}
+
+	olderStop()
+	if len(sent) != 2 {
+		t.Fatalf("stale stop emitted a provider message: %#v", sent)
+	}
+
+	newerStop()
+	if len(sent) != 3 || sent[2].Type != TypeTypingStop {
+		t.Fatalf("typing messages after current stop = %#v, want one stop", sent)
+	}
+	newerStop()
+	if len(sent) != 3 {
+		t.Fatalf("current stop was not idempotent: %#v", sent)
+	}
+}
+
 func TestHandleMessageSend_ForwardsMessageMetadata(t *testing.T) {
 	msgBus := bus.NewMessageBus()
 	bc := &config.Channel{Type: config.ChannelPico, Enabled: true}

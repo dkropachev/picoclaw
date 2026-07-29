@@ -1054,11 +1054,15 @@ func (c *WeixinChannel) StartTyping(ctx context.Context, chatID string) (func(),
 		return func() {}, nil
 	}
 
+	generation := c.BeginTypingGeneration(chatID)
 	typingCtx, cancel := context.WithCancel(ctx)
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
 			cancel()
+			if !generation.End() {
+				return
+			}
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer stopCancel()
 			if err := c.sendTypingStatus(stopCtx, chatID, ticket, TypingStatusCancel); err != nil {

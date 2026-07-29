@@ -33,6 +33,7 @@ with context, limits, filtering, and error normalization.
 | `FR-TOOL-009` | SHOULD | Tool adaptation config chooses and pins a visible tool surface per model/API profile, supports provider/model-specific surface and cache-policy overrides, records provider-reported cache-token observations and per-tool success/failure outcomes when available, treats runtime visible tool changes as cache-aware decisions, supports explicit harmless targeted tool-call probes, persists learned cache/probe state in a stable local state file, exposes searchable resolved/learned/probe state for router-expanded profiles in the UI, and exposes Codex-compatible wrappers for shell, stdin, patch, image, and plan capabilities when the Codex surface is selected. | PicoClaw runs many providers; equivalent capabilities should be exposed in the shape each model uses best without breaking prompt/tool cache unnecessarily. |
 | `FR-TOOL-010` | SHOULD | The `/agent/tools` page stores the selected Tool Library, Web Search, Thread Policy, or Adaptation tab in the route search params so tab views can be linked, refreshed, and restored through browser history. | Tool configuration work often spans multiple views, and URL-addressable tabs make navigation predictable. |
 | `FR-TOOL-011` | MUST | Before `spawn` launches background subturn work, an AgentLoop-backed spawner synchronously retains the caller's runtime generation and transfers that ownership to the goroutine through completion and callback delivery. Failure to retain returns a tool error without launching work. | A parent turn may finish immediately after spawn acknowledgement; reload must still see and drain the admitted child before closing its provider. |
+| `FR-TOOL-012` | MUST | Tool execution context carries the active turn's opaque transient-UX identity. A cloned subturn retains that identity, and `message` propagates it only to a delivery targeting the same channel and chat as the tool context. Same-turn tool and stream output uses the additive turn-scoped delivery interfaces when available, with source-compatible legacy fallback, so stale output cannot consume a newer turn's typing, reaction, placeholder, or stream-finalization state. | Tool and subturn output can overlap later turns in the same chat; exact ownership prevents delayed cleanup from corrupting newer user-visible UX without leaking a chat-local identity to another destination. |
 
 ## Data And State Model
 
@@ -41,7 +42,9 @@ tool context, media store references, removable tool entries, exec background
 sessions, filesystem roots, web provider config, redaction caches for sensitive
 values, profile-specific tool adaptation overrides in `tools.adaptation.profile_overrides`,
 and the runtime-learned tool adaptation state file at
-`$PICOCLAW_HOME/tool_adaptation_state.json`.
+`$PICOCLAW_HOME/tool_adaptation_state.json`. Per-execution context may also
+carry an opaque process-local turn UX identity used only to bind same-chat
+delivery and cleanup to its originating turn.
 
 ## Surface Ownership
 
@@ -114,6 +117,7 @@ Owns: TOOL write_file
 | Config | `tools.*` subtrees except MCP, skills, and cron ownership in their feature specs | Tool enablement, limits, providers, filtering, and policies. | `FR-TOOL-002` through `FR-TOOL-006` |
 | Frontend | Tool library, adaptation, and web-search configuration pages under `web/frontend/src/components/agent/tools/**` | Browser tool management follows shared frontend API, accessibility, formatting, and route smoke-test rules while preserving tool enablement and adaptation semantics. | `FR-TOOL-001`, `FR-TOOL-004`, `FR-TOOL-009` |
 | Tool | `spawn` with optional asynchronous context preparation | Retain AgentLoop runtime ownership synchronously before background goroutine launch, then release after subturn and callback completion. | `FR-TOOL-011` |
+| Go context | `WithToolTurnUXContext`, `ToolTurnUXID`, `message` delivery callback | Preserve the active turn identity through tool and cloned-subturn execution, but copy it to outbound delivery only for the exact originating channel/chat. | `FR-TOOL-012` |
 
 ## Algorithms And Ordering
 
@@ -131,6 +135,11 @@ Owns: TOOL write_file
 12. For background spawn, ask an AgentLoop-backed spawner to retain runtime
     ownership before starting the goroutine. Run the subturn and callback with
     that retained context and release it exactly once on every completion path.
+13. Inject the active transient-UX identity into every tool execution. A child
+    turn cloned from that inbound context retains the identity; a `message`
+    send copies it only when its destination matches the originating
+    channel/chat, and stream lookup prefers the turn-scoped capability before
+    falling back to the legacy interface.
 
 ## Cross-Feature Behavior
 
@@ -145,6 +154,9 @@ filtering, response-handled media delivery, and channel delivery tools.
 Git workspaces contribute a built-in agent tool registered through this generic
 registry, while acquire, release, cleanup, drop, and inventory semantics are
 owned by the git workspaces feature.
+Channel delivery owns typing, reaction, placeholder, and stream-marker storage;
+tool execution supplies only the opaque turn identity needed for exact
+same-chat consumption.
 
 ## Failure And Edge Cases
 
@@ -156,6 +168,8 @@ owned by the git workspaces feature.
 - Spawn admission failure returns synchronously and launches no goroutine;
   successful admission remains visible to provider reload even after the
   parent turn returns.
+- Cross-chat `message` sends omit the originating turn UX identity, and legacy
+  channel-manager or stream implementations retain their pre-scoped behavior.
 
 ## Acceptance Evidence
 
@@ -170,10 +184,13 @@ owned by the git workspaces feature.
 | `FR-TOOL-009` | [pkg/tools/adaptation.go](../../pkg/tools/adaptation.go), [pkg/tools/adaptation_state.go](../../pkg/tools/adaptation_state.go), [pkg/tools/adaptation_probe.go](../../pkg/tools/adaptation_probe.go), [pkg/tools/codex_compat.go](../../pkg/tools/codex_compat.go), [pkg/tools/apply_patch.go](../../pkg/tools/apply_patch.go), [pkg/agent/pipeline_llm.go](../../pkg/agent/pipeline_llm.go), [web/backend/api/tools.go](../../web/backend/api/tools.go), [web/frontend/src/components/agent/tools/tool-adaptation-tab.tsx](../../web/frontend/src/components/agent/tools/tool-adaptation-tab.tsx) |
 | `FR-TOOL-010` | [web/frontend/src/routes/agent/tools.tsx](../../web/frontend/src/routes/agent/tools.tsx), [web/frontend/src/components/agent/tools/tools-page.tsx](../../web/frontend/src/components/agent/tools/tools-page.tsx), [web/frontend/src/components/agent/tools/use-tools-page.ts](../../web/frontend/src/components/agent/tools/use-tools-page.ts) |
 | `FR-TOOL-011` | [pkg/agent/runtime_gate_test.go](../../pkg/agent/runtime_gate_test.go), [pkg/tools/spawn.go](../../pkg/tools/spawn.go) |
+| `FR-TOOL-012` | [pkg/tools/integration/message_test.go](../../pkg/tools/integration/message_test.go), [pkg/agent/agent_test.go](../../pkg/agent/agent_test.go), [pkg/agent/agent_turn_ux_test.go](../../pkg/agent/agent_turn_ux_test.go), [pkg/channels/manager_test.go](../../pkg/channels/manager_test.go) |
 
 ## Implementation Anchors
 
 - [pkg/tools/registry.go](../../pkg/tools/registry.go)
 - [pkg/tools/fs](../../pkg/tools/fs)
 - [pkg/tools/integration/web.go](../../pkg/tools/integration/web.go)
+- [pkg/tools/shared/base.go](../../pkg/tools/shared/base.go)
+- [pkg/tools/integration/message.go](../../pkg/tools/integration/message.go)
 - [pkg/tools/spawn.go](../../pkg/tools/spawn.go)

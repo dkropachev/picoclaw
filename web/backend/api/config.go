@@ -353,6 +353,12 @@ func validateConfig(cfg *config.Config) []string {
 	if err := cfg.Events.Ingress.Validate(); err != nil {
 		errs = append(errs, fmt.Sprintf("events.ingress: %v", err))
 	}
+	if err := cfg.Events.Ingress.ValidateEventChannelAdapters(
+		cfg.Channels,
+		cfg.SensitiveDataValues()...,
+	); err != nil {
+		errs = append(errs, fmt.Sprintf("events.ingress.channels: %v", err))
+	}
 
 	// Gateway port range
 	if cfg.Gateway.Port != 0 && (cfg.Gateway.Port < 1 || cfg.Gateway.Port > 65535) {

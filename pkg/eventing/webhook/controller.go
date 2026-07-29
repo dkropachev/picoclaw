@@ -38,6 +38,9 @@ var (
 	ErrGenerationDraining = errors.New("webhook admission generation is still draining")
 	// ErrGenerationNotOwned reports a generation passed to another controller.
 	ErrGenerationNotOwned = errors.New("webhook admission generation is not owned by this controller")
+	// ErrActivationStaged reports a lifecycle mutation attempted while an
+	// exclusively owned, non-accepting activation reservation is outstanding.
+	ErrActivationStaged = errors.New("webhook admission activation is staged")
 )
 
 // Inserter is the durable write boundary required by generic webhook ingress.
@@ -175,6 +178,7 @@ type Controller struct {
 	mu       sync.Mutex
 	active   *generationState
 	retiring *generationState
+	staged   *stagedGenerationState
 }
 
 // Generation is an opaque identity returned by Activate. It fences delayed
@@ -182,6 +186,20 @@ type Controller struct {
 type Generation struct {
 	controller *Controller
 	state      *generationState
+}
+
+// StagedGeneration exclusively owns a validated, non-accepting backend
+// reservation. Once Stage succeeds, gateway lifecycle serialization makes
+// Commit an operationally infallible publication step. Abort is idempotent and
+// cannot affect another reservation.
+type StagedGeneration struct {
+	controller *Controller
+	state      *stagedGenerationState
+	once       sync.Once
+}
+
+type stagedGenerationState struct {
+	generation *generationState
 }
 
 type generationState struct {
@@ -197,38 +215,111 @@ func NewController() *Controller {
 	return &Controller{}
 }
 
-// Activate publishes a prepared backend. The previous generation must have
-// drained completely first.
+// Stage validates and reserves a backend without making it reachable to HTTP
+// requests. A nil backend reserves a disabled commit. The previous generation
+// must have drained completely first.
+func (c *Controller) Stage(backend *Backend) (*StagedGeneration, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active != nil {
+		return nil, ErrActiveGeneration
+	}
+	if c.retiring != nil {
+		return nil, ErrGenerationDraining
+	}
+	if c.staged != nil {
+		return nil, ErrActivationStaged
+	}
+	var generation *generationState
+	if backend != nil {
+		generation = &generationState{
+			backend: backend,
+			drained: make(chan struct{}),
+		}
+	}
+	state := &stagedGenerationState{generation: generation}
+	c.staged = state
+	return &StagedGeneration{controller: c, state: state}, nil
+}
+
+// Generation returns the opaque identity that Commit will publish. A staged
+// disabled configuration has the zero generation.
+func (staged *StagedGeneration) Generation() Generation {
+	if staged == nil ||
+		staged.controller == nil ||
+		staged.state == nil ||
+		staged.state.generation == nil {
+		return Generation{}
+	}
+	return Generation{
+		controller: staged.controller,
+		state:      staged.state.generation,
+	}
+}
+
+// Commit makes the reserved backend accepting. It has no operational failure
+// after a successful Stage while gateway lifecycle mutations remain serialized.
+func (staged *StagedGeneration) Commit() {
+	if staged == nil {
+		return
+	}
+	staged.once.Do(func() {
+		staged.controller.commitStaged(staged.state)
+	})
+}
+
+// Abort abandons this reservation without publishing its backend.
+func (staged *StagedGeneration) Abort() {
+	if staged == nil {
+		return
+	}
+	staged.once.Do(func() {
+		staged.controller.abortStaged(staged.state)
+	})
+}
+
+func (c *Controller) commitStaged(state *stagedGenerationState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.staged != state {
+		return
+	}
+	c.staged = nil
+	if state.generation != nil {
+		state.generation.accepting = true
+		c.active = state.generation
+	}
+}
+
+func (c *Controller) abortStaged(state *stagedGenerationState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.staged == state {
+		c.staged = nil
+	}
+}
+
+// Activate is the single-controller convenience form of Stage followed by
+// Commit.
 func (c *Controller) Activate(backend *Backend) (Generation, error) {
 	if backend == nil {
 		return Generation{}, errors.New("webhook admission backend is required")
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.active != nil {
-		return Generation{}, ErrActiveGeneration
+	staged, err := c.Stage(backend)
+	if err != nil {
+		return Generation{}, err
 	}
-	if c.retiring != nil {
-		return Generation{}, ErrGenerationDraining
-	}
-	state := &generationState{
-		backend:   backend,
-		accepting: true,
-		drained:   make(chan struct{}),
-	}
-	c.active = state
-	return Generation{controller: c, state: state}, nil
+	generation := staged.Generation()
+	staged.Commit()
+	return generation, nil
 }
 
 // Deactivate atomically rejects new requests for generation and waits for all
 // requests already admitted to leave the insert boundary. A repeated or
 // delayed call for a drained generation is safe and cannot affect a newer one.
 func (c *Controller) Deactivate(ctx context.Context, generation Generation) error {
-	if generation == (Generation{}) {
-		return nil
-	}
-	if generation.controller != c || generation.state == nil {
+	if generation != (Generation{}) &&
+		(generation.controller != c || generation.state == nil) {
 		return ErrGenerationNotOwned
 	}
 	if ctx == nil {
@@ -236,6 +327,14 @@ func (c *Controller) Deactivate(ctx context.Context, generation Generation) erro
 	}
 
 	c.mu.Lock()
+	if c.staged != nil {
+		c.mu.Unlock()
+		return ErrActivationStaged
+	}
+	if generation == (Generation{}) {
+		c.mu.Unlock()
+		return nil
+	}
 	switch {
 	case c.active == generation.state:
 		c.active = nil

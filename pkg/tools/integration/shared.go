@@ -21,6 +21,10 @@ func WithToolTopicContext(ctx context.Context, topicID string) context.Context {
 	return toolshared.WithToolTopicContext(ctx, topicID)
 }
 
+func WithToolTurnUXContext(ctx context.Context, turnUXID string) context.Context {
+	return toolshared.WithToolTurnUXContext(ctx, turnUXID)
+}
+
 func WithToolInboundContext(
 	ctx context.Context,
 	channel, chatID, messageID, replyToMessageID string,
@@ -50,6 +54,10 @@ func ToolTopicID(ctx context.Context) string {
 
 func ToolMessageID(ctx context.Context) string {
 	return toolshared.ToolMessageID(ctx)
+}
+
+func ToolTurnUXID(ctx context.Context) string {
+	return toolshared.ToolTurnUXID(ctx)
 }
 
 func ToolAgentID(ctx context.Context) string {

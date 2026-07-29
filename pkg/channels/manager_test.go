@@ -122,6 +122,33 @@ func (m *mockDeletingMediaChannel) DismissToolFeedbackMessage(_ context.Context,
 	m.dismissedChatID = chatID
 }
 
+type turnUXDeadlineDelete struct {
+	chatID    string
+	messageID string
+}
+
+type turnUXDeadlineChannel struct {
+	mockChannel
+	deleted chan turnUXDeadlineDelete
+}
+
+func newTurnUXDeadlineChannel() *turnUXDeadlineChannel {
+	return &turnUXDeadlineChannel{
+		deleted: make(chan turnUXDeadlineDelete, 4),
+	}
+}
+
+func (channel *turnUXDeadlineChannel) DeleteMessage(
+	_ context.Context,
+	chatID, messageID string,
+) error {
+	channel.deleted <- turnUXDeadlineDelete{
+		chatID:    chatID,
+		messageID: messageID,
+	}
+	return nil
+}
+
 type mockStreamer struct {
 	finalizeFn            func(context.Context, string) error
 	finalizeWithContextFn func(context.Context, string, *bus.ContextUsage) error
@@ -234,6 +261,46 @@ func newTestManager() *Manager {
 		channels: make(map[string]Channel),
 		workers:  make(map[string]*channelWorker),
 		bus:      bus.NewMessageBus(),
+	}
+}
+
+func TestManagerInitChannelUsesConfiguredInstanceName(t *testing.T) {
+	const (
+		channelType  = "test-instance-name-type"
+		instanceName = "notifications-primary"
+	)
+	RegisterFactory(
+		channelType,
+		func(
+			_ string,
+			_ string,
+			_ *config.Config,
+			messageBus *bus.MessageBus,
+		) (Channel, error) {
+			return &mockChannel{
+				BaseChannel: *NewBaseChannel(channelType, nil, messageBus, nil),
+			}, nil
+		},
+	)
+
+	manager := newTestManager()
+	defer manager.bus.Close()
+	manager.config = &config.Config{
+		Channels: config.ChannelsConfig{
+			instanceName: {
+				Enabled: true,
+				Type:    channelType,
+			},
+		},
+	}
+	manager.initChannel(channelType, instanceName)
+
+	channel, ok := manager.channels[instanceName]
+	if !ok {
+		t.Fatal("configured channel instance was not initialized")
+	}
+	if channel.Name() != instanceName {
+		t.Fatalf("channel.Name() = %q, want %q", channel.Name(), instanceName)
 	}
 }
 
@@ -2932,7 +2999,7 @@ func TestGetStreamer_FinalizeDismissesTrackedToolFeedback(t *testing.T) {
 	}
 	m.channels["test"] = ch
 
-	streamer, ok := m.GetStreamer(context.Background(), "test", "123", "")
+	streamer, ok := m.GetStreamerForTurn(context.Background(), "test", "123", "", "")
 	if !ok {
 		t.Fatal("expected streamer to be available")
 	}
@@ -2967,7 +3034,7 @@ func TestGetStreamer_FinalizeCleansPlaceholderImmediately(t *testing.T) {
 	}
 	m.channels["test"] = ch
 
-	streamer, ok := m.GetStreamer(context.Background(), "test", "123", "")
+	streamer, ok := m.GetStreamerForTurn(context.Background(), "test", "123", "", "")
 	if !ok {
 		t.Fatal("expected streamer to be available")
 	}
@@ -3036,6 +3103,198 @@ func TestGetStreamer_FinalizeCleansPlaceholderImmediately(t *testing.T) {
 	}
 }
 
+func TestGetStreamerOlderMessagePreservesNewerPlaceholder(t *testing.T) {
+	m := newTestManager()
+	var edits int
+	ch := &mockStreamingChannel{
+		mockMessageEditor: mockMessageEditor{
+			editFn: func(_ context.Context, _, messageID, _ string) error {
+				if messageID != "new-placeholder" {
+					t.Fatalf("edited placeholder %q, want new-placeholder", messageID)
+				}
+				edits++
+				return nil
+			},
+		},
+		streamer: &mockStreamer{},
+	}
+	m.channels["test"] = ch
+	m.RecordTurnUX(
+		context.Background(),
+		"test",
+		"123",
+		TurnUXRegistration{
+			Identity:    "new-turn",
+			Placeholder: "new-placeholder",
+			Owner:       ch,
+		},
+	)
+
+	oldStreamer, ok := m.GetStreamerForTurn(
+		context.Background(),
+		"test",
+		"123",
+		"old-session",
+		"old-turn",
+	)
+	if !ok {
+		t.Fatal("expected old turn streamer to be available")
+	}
+	if err := oldStreamer.Finalize(context.Background(), "old reply"); err != nil {
+		t.Fatalf("old Finalize() error = %v", err)
+	}
+	if edits != 0 {
+		t.Fatalf("old stream edited newer placeholder %d times", edits)
+	}
+	if _, loaded := m.placeholders.Load("test:123"); !loaded {
+		t.Fatal("old stream consumed newer placeholder")
+	}
+
+	newStreamer, ok := m.GetStreamerForTurn(
+		context.Background(),
+		"test",
+		"123",
+		"new-session",
+		"new-turn",
+	)
+	if !ok {
+		t.Fatal("expected new turn streamer to be available")
+	}
+	if err := newStreamer.Finalize(context.Background(), "new reply"); err != nil {
+		t.Fatalf("new Finalize() error = %v", err)
+	}
+	if edits != 1 {
+		t.Fatalf("matching stream edited placeholder %d times, want 1", edits)
+	}
+	if _, loaded := m.placeholders.Load("test:123"); loaded {
+		t.Fatal("matching stream left placeholder registered")
+	}
+}
+
+func TestGetStreamerSameSessionFinalMarkersAreTurnScoped(t *testing.T) {
+	m := newTestManager()
+	ch := &mockStreamingChannel{streamer: &mockStreamer{}}
+	m.channels["test"] = ch
+
+	const (
+		sessionKey = "session-1"
+		oldTurnID  = "turn-old"
+		newTurnID  = "turn-new"
+	)
+	oldStreamer, ok := m.GetStreamerForTurn(
+		context.Background(),
+		"test",
+		"123",
+		sessionKey,
+		oldTurnID,
+	)
+	if !ok {
+		t.Fatal("expected old turn streamer to be available")
+	}
+	newStreamer, ok := m.GetStreamerForTurn(
+		context.Background(),
+		"test",
+		"123",
+		sessionKey,
+		newTurnID,
+	)
+	if !ok {
+		t.Fatal("expected new turn streamer to be available")
+	}
+
+	if err := oldStreamer.Finalize(context.Background(), "old reply"); err != nil {
+		t.Fatalf("old Finalize() error = %v", err)
+	}
+	oldKey := streamSuppressionKey("test", "123", sessionKey, oldTurnID)
+	newKey := streamSuppressionKey("test", "123", sessionKey, newTurnID)
+	if oldKey == newKey {
+		t.Fatalf("distinct turn stream keys collapsed to %q", oldKey)
+	}
+	if _, loaded := m.streamActive.Load(oldKey); !loaded {
+		t.Fatal("old turn stream marker was not recorded")
+	}
+
+	// The old turn's finalized marker and auxiliary tombstone must not classify
+	// the next turn's thought as stale.
+	newThought := testOutboundMessage(bus.OutboundMessage{
+		Channel:    "test",
+		ChatID:     "123",
+		SessionKey: sessionKey,
+		Content:    "new turn thought",
+		Context: bus.InboundContext{
+			Channel:  "test",
+			ChatID:   "123",
+			TurnUXID: newTurnID,
+			Raw: map[string]string{
+				"message_kind": "thought",
+			},
+		},
+	})
+	if _, handled := m.preSend(
+		context.Background(),
+		"test",
+		newThought,
+		ch,
+	); handled {
+		t.Fatal("old turn stream state suppressed the new turn's auxiliary output")
+	}
+
+	// Simulate turn B finalizing before the rate-limited final outbound for
+	// turn A reaches preSend. Both generation markers must coexist.
+	if err := newStreamer.Finalize(context.Background(), "new reply"); err != nil {
+		t.Fatalf("new Finalize() error = %v", err)
+	}
+	if _, loaded := m.streamActive.Load(oldKey); !loaded {
+		t.Fatal("new turn finalize replaced the old turn marker")
+	}
+	if _, loaded := m.streamActive.Load(newKey); !loaded {
+		t.Fatal("new turn stream marker was not recorded")
+	}
+
+	finalMessage := func(turnUXID, content string) bus.OutboundMessage {
+		return testOutboundMessage(bus.OutboundMessage{
+			Channel:    "test",
+			ChatID:     "123",
+			SessionKey: sessionKey,
+			Content:    content,
+			Context: bus.InboundContext{
+				Channel:  "test",
+				ChatID:   "123",
+				TurnUXID: turnUXID,
+				Raw: map[string]string{
+					"outbound_kind": "final",
+				},
+			},
+		})
+	}
+	if _, handled := m.preSend(
+		context.Background(),
+		"test",
+		finalMessage(oldTurnID, "old reply"),
+		ch,
+	); !handled {
+		t.Fatal("old turn final outbound did not consume its stream marker")
+	}
+	if _, loaded := m.streamActive.Load(oldKey); loaded {
+		t.Fatal("old turn stream marker remained after its final outbound")
+	}
+	if _, loaded := m.streamActive.Load(newKey); !loaded {
+		t.Fatal("old turn final outbound consumed the new turn marker")
+	}
+
+	if _, handled := m.preSend(
+		context.Background(),
+		"test",
+		finalMessage(newTurnID, "new reply"),
+		ch,
+	); !handled {
+		t.Fatal("new turn final outbound would be delivered a second time")
+	}
+	if _, loaded := m.streamActive.Load(newKey); loaded {
+		t.Fatal("new turn stream marker remained after its final outbound")
+	}
+}
+
 func TestGetStreamer_FinalizeCleansPlaceholderWithSessionKey(t *testing.T) {
 	m := newTestManager()
 	m.RecordPlaceholder("test", "123", "placeholder-1")
@@ -3052,7 +3311,7 @@ func TestGetStreamer_FinalizeCleansPlaceholderWithSessionKey(t *testing.T) {
 	}
 	m.channels["test"] = ch
 
-	streamer, ok := m.GetStreamer(context.Background(), "test", "123", "session-1")
+	streamer, ok := m.GetStreamerForTurn(context.Background(), "test", "123", "session-1", "")
 	if !ok {
 		t.Fatal("expected streamer to be available")
 	}
@@ -3083,7 +3342,7 @@ func TestGetStreamer_PreservesContextUsageStreamer(t *testing.T) {
 	}
 	m.channels["test"] = ch
 
-	streamer, ok := m.GetStreamer(context.Background(), "test", "123", "")
+	streamer, ok := m.GetStreamerForTurn(context.Background(), "test", "123", "", "")
 	if !ok {
 		t.Fatal("expected streamer to be available")
 	}
@@ -3111,7 +3370,7 @@ func TestGetStreamer_PreservesReasoningStreamer(t *testing.T) {
 	}
 	m.channels["test"] = ch
 
-	streamer, ok := m.GetStreamer(context.Background(), "test", "123", "")
+	streamer, ok := m.GetStreamerForTurn(context.Background(), "test", "123", "", "")
 	if !ok {
 		t.Fatal("expected streamer to be available")
 	}
@@ -3141,7 +3400,7 @@ func TestGetStreamer_PreservesModelNameSetter(t *testing.T) {
 	}
 	m.channels["test"] = ch
 
-	streamer, ok := m.GetStreamer(context.Background(), "test", "123", "")
+	streamer, ok := m.GetStreamerForTurn(context.Background(), "test", "123", "", "")
 	if !ok {
 		t.Fatal("expected streamer to be available")
 	}
@@ -3189,7 +3448,7 @@ func TestGetStreamer_SplitOnMarkerStreamsSeparateSegments(t *testing.T) {
 	}
 	m.channels["test"] = ch
 
-	streamer, ok := m.GetStreamer(context.Background(), "test", "123", "session-1")
+	streamer, ok := m.GetStreamerForTurn(context.Background(), "test", "123", "session-1", "")
 	if !ok {
 		t.Fatal("expected streamer to be available")
 	}
@@ -3263,7 +3522,7 @@ func TestGetStreamer_SplitOnMarkerKeepsReasoningOnInitialStreamer(t *testing.T) 
 	}
 	m.channels["test"] = ch
 
-	streamer, ok := m.GetStreamer(context.Background(), "test", "123", "")
+	streamer, ok := m.GetStreamerForTurn(context.Background(), "test", "123", "", "")
 	if !ok {
 		t.Fatal("expected streamer to be available")
 	}
@@ -3313,7 +3572,7 @@ func TestGetStreamer_SplitOnMarkerPreservesModelNameSetter(t *testing.T) {
 	}
 	m.channels["test"] = ch
 
-	streamer, ok := m.GetStreamer(context.Background(), "test", "123", "")
+	streamer, ok := m.GetStreamerForTurn(context.Background(), "test", "123", "", "")
 	if !ok {
 		t.Fatal("expected streamer to be available")
 	}
@@ -3366,7 +3625,7 @@ func TestGetStreamer_FinalizeSeparateMessagesClearsTrackedToolFeedback(t *testin
 	}
 	m.channels["test"] = ch
 
-	streamer, ok := m.GetStreamer(context.Background(), "test", "123", "")
+	streamer, ok := m.GetStreamerForTurn(context.Background(), "test", "123", "", "")
 	if !ok {
 		t.Fatal("expected streamer to be available")
 	}
@@ -3408,7 +3667,7 @@ func TestGetStreamer_FinalizeDismissesResolvedTrackedToolFeedback(t *testing.T) 
 	}
 	m.channels["test"] = ch
 
-	streamer, ok := m.GetStreamer(context.Background(), "test", "-100123/42", "")
+	streamer, ok := m.GetStreamerForTurn(context.Background(), "test", "-100123/42", "", "")
 	if !ok {
 		t.Fatal("expected streamer to be available")
 	}
@@ -3477,7 +3736,7 @@ func TestGetStreamer_FinalizeFailureDoesNotDismissTrackedToolFeedback(t *testing
 	}
 	m.channels["test"] = ch
 
-	streamer, ok := m.GetStreamer(context.Background(), "test", "123", "")
+	streamer, ok := m.GetStreamerForTurn(context.Background(), "test", "123", "", "")
 	if !ok {
 		t.Fatal("expected streamer to be available")
 	}
@@ -3589,7 +3848,7 @@ func TestRunWorker_FinalizedStreamSuppressesMarkerSplitBeforeSending(t *testing.
 	defer cancel()
 	go m.runWorker(ctx, "test", w)
 
-	streamKey := streamSuppressionKey("test", "123", "session-1")
+	streamKey := streamSuppressionKey("test", "123", "session-1", "")
 	m.streamActive.Store(streamKey, true)
 	w.queue <- testOutboundMessage(bus.OutboundMessage{
 		Channel:    "test",
@@ -3675,6 +3934,36 @@ func TestInvokeTypingStop_Idempotent(t *testing.T) {
 
 	if callCount != 1 {
 		t.Fatalf("expected stop to be called once, got %d", callCount)
+	}
+}
+
+func TestInvokeTypingStopForMessagePreservesNewerRegistration(t *testing.T) {
+	m := newTestManager()
+	var calls int
+	m.RecordTurnUX(
+		context.Background(),
+		"telegram",
+		"chat123",
+		TurnUXRegistration{
+			Identity:   "new-turn",
+			TypingStop: func() { calls++ },
+		},
+	)
+
+	m.InvokeTypingStopForMessage("telegram", "chat123", "old-turn")
+	if calls != 0 {
+		t.Fatalf("mismatched message stopped newer typing %d times", calls)
+	}
+	if _, loaded := m.typingStops.Load("telegram:chat123"); !loaded {
+		t.Fatal("mismatched message consumed newer typing registration")
+	}
+
+	m.InvokeTypingStopForMessage("telegram", "chat123", "new-turn")
+	if calls != 1 {
+		t.Fatalf("matching message stopped typing %d times, want 1", calls)
+	}
+	if _, loaded := m.typingStops.Load("telegram:chat123"); loaded {
+		t.Fatal("matching message left typing registration active")
 	}
 }
 
@@ -3766,6 +4055,878 @@ func TestRecordPlaceholder_ConcurrentSafe(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+}
+
+func TestRecordTurnUXRollbackIsScopedToExactRegistration(t *testing.T) {
+	manager := newTestManager()
+	channel := &mockDeletingMediaChannel{}
+	manager.channels["test"] = channel
+
+	var oldStops, oldUndos, newStops, newUndos int
+	oldRollback := manager.RecordTurnUX(
+		context.Background(),
+		"test",
+		"chat",
+		TurnUXRegistration{
+			TypingStop:   func() { oldStops++ },
+			ReactionUndo: func() { oldUndos++ },
+			Placeholder:  "old-placeholder",
+			Owner:        channel,
+		},
+	)
+	newRollback := manager.RecordTurnUX(
+		context.Background(),
+		"test",
+		"chat",
+		TurnUXRegistration{
+			TypingStop:   func() { newStops++ },
+			ReactionUndo: func() { newUndos++ },
+			Placeholder:  "new-placeholder",
+			Owner:        channel,
+		},
+	)
+
+	if oldStops != 1 || oldUndos != 1 || channel.deleteCalls != 1 {
+		t.Fatalf(
+			"replaced UX cleanup = stops:%d undos:%d deletes:%d, want 1/1/1",
+			oldStops,
+			oldUndos,
+			channel.deleteCalls,
+		)
+	}
+	oldRollback(context.Background())
+	if _, ok := manager.typingStops.Load("test:chat"); !ok {
+		t.Fatal("old rollback removed newer typing registration")
+	}
+	if _, ok := manager.reactionUndos.Load("test:chat"); !ok {
+		t.Fatal("old rollback removed newer reaction registration")
+	}
+	if _, ok := manager.placeholders.Load("test:chat"); !ok {
+		t.Fatal("old rollback removed newer placeholder registration")
+	}
+
+	newRollback(context.Background())
+	if newStops != 1 || newUndos != 1 || channel.deleteCalls != 2 {
+		t.Fatalf(
+			"new UX cleanup = stops:%d undos:%d deletes:%d, want 1/1/2",
+			newStops,
+			newUndos,
+			channel.deleteCalls,
+		)
+	}
+	if _, ok := manager.typingStops.Load("test:chat"); ok {
+		t.Fatal("new rollback left typing registration")
+	}
+	if _, ok := manager.reactionUndos.Load("test:chat"); ok {
+		t.Fatal("new rollback left reaction registration")
+	}
+	if _, ok := manager.placeholders.Load("test:chat"); ok {
+		t.Fatal("new rollback left placeholder registration")
+	}
+}
+
+func TestRecordTurnUXPartialRegistrationReplacesEveryArtifactSlot(t *testing.T) {
+	manager := newTestManager()
+	channel := &mockDeletingMediaChannel{}
+	manager.channels["test"] = channel
+
+	var oldStops, oldUndos, newStops int
+	manager.RecordTurnUX(
+		context.Background(),
+		"test",
+		"chat",
+		TurnUXRegistration{
+			Identity:     "old-turn",
+			TypingStop:   func() { oldStops++ },
+			ReactionUndo: func() { oldUndos++ },
+			Placeholder:  "old-placeholder",
+			Owner:        channel,
+		},
+	)
+	rollback := manager.RecordTurnUX(
+		context.Background(),
+		"test",
+		"chat",
+		TurnUXRegistration{
+			Identity:   "new-turn",
+			TypingStop: func() { newStops++ },
+			Owner:      channel,
+		},
+	)
+
+	if oldStops != 1 || oldUndos != 1 || channel.deleteCalls != 1 {
+		t.Fatalf(
+			"partial replacement cleanup = stops:%d undos:%d deletes:%d, want 1/1/1",
+			oldStops,
+			oldUndos,
+			channel.deleteCalls,
+		)
+	}
+	if _, ok := manager.reactionUndos.Load("test:chat"); ok {
+		t.Fatal("partial replacement retained the older reaction")
+	}
+	if _, ok := manager.placeholders.Load("test:chat"); ok {
+		t.Fatal("partial replacement retained the older placeholder")
+	}
+	typingValue, ok := manager.typingStops.Load("test:chat")
+	if !ok {
+		t.Fatal("partial replacement did not store the new typing entry")
+	}
+	typing := asTypingEntry(typingValue)
+	if typing == nil || typing.currentTurnUXID() != "new-turn" {
+		t.Fatalf("stored typing entry = %#v, want new-turn", typing)
+	}
+
+	rollback(context.Background())
+	if newStops != 1 {
+		t.Fatalf("new typing stop calls = %d, want 1", newStops)
+	}
+	if _, ok := manager.typingStops.Load("test:chat"); ok {
+		t.Fatal("new rollback left typing registration")
+	}
+}
+
+func TestCleanupTurnUXForMessageRemovesOnlyExactRegistration(t *testing.T) {
+	manager := newTestManager()
+	channel := &mockDeletingMediaChannel{}
+	manager.channels["test"] = channel
+
+	var stops, undos int
+	manager.RecordTurnUX(
+		context.Background(),
+		"test",
+		"chat",
+		TurnUXRegistration{
+			Identity:     "current-turn",
+			TypingStop:   func() { stops++ },
+			ReactionUndo: func() { undos++ },
+			Placeholder:  "current-placeholder",
+			Owner:        channel,
+		},
+	)
+
+	manager.CleanupTurnUXForMessage(
+		context.Background(),
+		"test",
+		"chat",
+		"older-turn",
+	)
+	if stops != 0 || undos != 0 || channel.deleteCalls != 0 {
+		t.Fatalf(
+			"older cleanup touched current UX: stops=%d undos=%d deletes=%d",
+			stops,
+			undos,
+			channel.deleteCalls,
+		)
+	}
+	for name, entries := range map[string]*sync.Map{
+		"typing":      &manager.typingStops,
+		"reaction":    &manager.reactionUndos,
+		"placeholder": &manager.placeholders,
+	} {
+		if _, ok := entries.Load("test:chat"); !ok {
+			t.Fatalf("older cleanup removed current %s registration", name)
+		}
+	}
+
+	manager.CleanupTurnUXForMessage(
+		context.Background(),
+		"test",
+		"chat",
+		"current-turn",
+	)
+	if stops != 1 || undos != 1 || channel.deleteCalls != 1 {
+		t.Fatalf(
+			"exact cleanup = stops:%d undos:%d deletes:%d, want 1/1/1",
+			stops,
+			undos,
+			channel.deleteCalls,
+		)
+	}
+	for name, entries := range map[string]*sync.Map{
+		"typing":      &manager.typingStops,
+		"reaction":    &manager.reactionUndos,
+		"placeholder": &manager.placeholders,
+	} {
+		if _, ok := entries.Load("test:chat"); ok {
+			t.Fatalf("exact cleanup left %s registration", name)
+		}
+	}
+}
+
+func TestRecordTurnUXConcurrentRegistrationsCannotMixArtifacts(t *testing.T) {
+	manager := newTestManager()
+	channel := &mockDeletingMediaChannel{}
+	manager.channels["test"] = channel
+
+	oldCleanupStarted := make(chan struct{})
+	releaseOldCleanup := make(chan struct{})
+	manager.RecordTurnUX(
+		context.Background(),
+		"test",
+		"chat",
+		TurnUXRegistration{
+			Identity: "old-turn",
+			TypingStop: func() {
+				close(oldCleanupStarted)
+				<-releaseOldCleanup
+			},
+		},
+	)
+
+	aDone := make(chan struct{})
+	go func() {
+		defer close(aDone)
+		manager.RecordTurnUX(
+			context.Background(),
+			"test",
+			"chat",
+			TurnUXRegistration{
+				Identity:     "turn-a",
+				TypingStop:   func() {},
+				ReactionUndo: func() {},
+				Placeholder:  "placeholder-a",
+				Owner:        channel,
+			},
+		)
+	}()
+	<-oldCleanupStarted
+
+	bStarted := make(chan struct{})
+	bDone := make(chan struct{})
+	go func() {
+		defer close(bDone)
+		close(bStarted)
+		manager.RecordTurnUX(
+			context.Background(),
+			"test",
+			"chat",
+			TurnUXRegistration{
+				Identity:     "turn-b",
+				TypingStop:   func() {},
+				ReactionUndo: func() {},
+				Placeholder:  "placeholder-b",
+				Owner:        channel,
+			},
+		)
+	}()
+	<-bStarted
+	select {
+	case <-bDone:
+		close(releaseOldCleanup)
+		t.Fatal("new registration bypassed the active provider transition")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseOldCleanup)
+	<-aDone
+	<-bDone
+
+	typingValue, typingOK := manager.typingStops.Load("test:chat")
+	reactionValue, reactionOK := manager.reactionUndos.Load("test:chat")
+	placeholderValue, placeholderOK := manager.placeholders.Load("test:chat")
+	if !typingOK || !reactionOK || !placeholderOK {
+		t.Fatalf(
+			"final registration incomplete: typing=%v reaction=%v placeholder=%v",
+			typingOK,
+			reactionOK,
+			placeholderOK,
+		)
+	}
+	typing := asTypingEntry(typingValue)
+	reaction := asReactionEntry(reactionValue)
+	placeholder := asPlaceholderEntry(placeholderValue)
+	if typing == nil || reaction == nil || placeholder == nil {
+		t.Fatal("final registration contains invalid entry types")
+	}
+	if got := typing.currentTurnUXID(); got != "turn-b" {
+		t.Fatalf("typing identity = %q, want turn-b", got)
+	}
+	if got := reaction.currentTurnUXID(); got != "turn-b" {
+		t.Fatalf("reaction identity = %q, want turn-b", got)
+	}
+	if got := placeholder.currentTurnUXID(); got != "turn-b" {
+		t.Fatalf("placeholder identity = %q, want turn-b", got)
+	}
+	if placeholder.id != "placeholder-b" {
+		t.Fatalf("placeholder id = %q, want placeholder-b", placeholder.id)
+	}
+}
+
+func TestReplaceTurnUXCleansPriorGenerationBeforeBuildingNext(t *testing.T) {
+	manager := newTestManager()
+	cleanupStarted := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	manager.RecordTurnUX(
+		context.Background(),
+		"test",
+		"chat",
+		TurnUXRegistration{
+			Identity: "old-turn",
+			TypingStop: func() {
+				close(cleanupStarted)
+				<-releaseCleanup
+			},
+		},
+	)
+
+	buildStarted := make(chan struct{})
+	replaceDone := make(chan struct{})
+	go func() {
+		defer close(replaceDone)
+		manager.ReplaceTurnUX(
+			context.Background(),
+			"test",
+			"chat",
+			func() TurnUXRegistration {
+				close(buildStarted)
+				return TurnUXRegistration{
+					Identity:   "new-turn",
+					TypingStop: func() {},
+				}
+			},
+		)
+	}()
+
+	<-cleanupStarted
+	select {
+	case <-buildStarted:
+		close(releaseCleanup)
+		t.Fatal("next provider generation started before prior cleanup returned")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseCleanup)
+	<-replaceDone
+	<-buildStarted
+
+	value, loaded := manager.typingStops.Load("test:chat")
+	if !loaded {
+		t.Fatal("new typing generation was not recorded")
+	}
+	entry := asTypingEntry(value)
+	if entry == nil || entry.currentTurnUXID() != "new-turn" {
+		t.Fatalf("stored typing entry = %#v, want new-turn", entry)
+	}
+}
+
+func holdTurnUXTransitionForDeadlineTest(
+	t *testing.T,
+	manager *Manager,
+	channel, chatID string,
+) (release func(), done <-chan struct{}) {
+	t.Helper()
+
+	cleanupStarted := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	var releaseOnce sync.Once
+	release = func() {
+		releaseOnce.Do(func() {
+			close(releaseCleanup)
+		})
+	}
+	t.Cleanup(release)
+
+	manager.RecordTurnUX(
+		context.Background(),
+		channel,
+		chatID,
+		TurnUXRegistration{
+			Identity: "deadline-blocker",
+			TypingStop: func() {
+				close(cleanupStarted)
+				<-releaseCleanup
+			},
+		},
+	)
+
+	replaceDone := make(chan struct{})
+	go func() {
+		defer close(replaceDone)
+		manager.ReplaceTurnUX(
+			context.Background(),
+			channel,
+			chatID,
+			func() TurnUXRegistration {
+				return TurnUXRegistration{Identity: "deadline-holder"}
+			},
+		)
+	}()
+	select {
+	case <-cleanupStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider transition did not reach its blocking cleanup")
+	}
+	return release, replaceDone
+}
+
+func TestReplaceTurnUXFollowerHonorsAcquisitionDeadline(t *testing.T) {
+	manager := newTestManager()
+	release, holderDone := holdTurnUXTransitionForDeadlineTest(
+		t,
+		manager,
+		"test",
+		"deadline-chat",
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	buildCalled := make(chan struct{}, 1)
+	started := time.Now()
+	rollback := manager.ReplaceTurnUX(
+		ctx,
+		"test",
+		"deadline-chat",
+		func() TurnUXRegistration {
+			buildCalled <- struct{}{}
+			return TurnUXRegistration{Identity: "must-not-build"}
+		},
+	)
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("deadline-aware transition acquisition took %v", elapsed)
+	}
+	if rollback != nil {
+		t.Fatal("canceled replacement returned a rollback")
+	}
+	select {
+	case <-buildCalled:
+		t.Fatal("canceled replacement invoked its provider build")
+	default:
+	}
+
+	release()
+	select {
+	case <-holderDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocking provider transition did not finish")
+	}
+}
+
+func TestRecordTurnUXDeadlineCleansUnrecordedArtifacts(t *testing.T) {
+	manager := newTestManager()
+	owner := newTurnUXDeadlineChannel()
+	manager.channels["test"] = owner
+	release, holderDone := holdTurnUXTransitionForDeadlineTest(
+		t,
+		manager,
+		"test",
+		"record-deadline-chat",
+	)
+
+	typingCleaned := make(chan struct{}, 1)
+	reactionCleaned := make(chan struct{}, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	rollback := manager.RecordTurnUX(
+		ctx,
+		"test",
+		"record-deadline-chat",
+		TurnUXRegistration{
+			Identity:     "unrecorded-turn",
+			TypingStop:   func() { typingCleaned <- struct{}{} },
+			ReactionUndo: func() { reactionCleaned <- struct{}{} },
+			Placeholder:  "unrecorded-placeholder",
+			Owner:        owner,
+		},
+	)
+	if rollback != nil {
+		t.Fatal("canceled registration returned a rollback")
+	}
+
+	for name, cleaned := range map[string]<-chan struct{}{
+		"typing":   typingCleaned,
+		"reaction": reactionCleaned,
+	} {
+		select {
+		case <-cleaned:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("unrecorded %s artifact was not cleaned", name)
+		}
+	}
+	select {
+	case deleted := <-owner.deleted:
+		if deleted.chatID != "record-deadline-chat" ||
+			deleted.messageID != "unrecorded-placeholder" {
+			t.Fatalf("deleted placeholder = %#v", deleted)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("unrecorded placeholder was not deleted")
+	}
+	for name, entries := range map[string]*sync.Map{
+		"typing":      &manager.typingStops,
+		"reaction":    &manager.reactionUndos,
+		"placeholder": &manager.placeholders,
+	} {
+		if _, loaded := entries.Load("test:record-deadline-chat"); loaded {
+			t.Fatalf("canceled registration left %s state", name)
+		}
+	}
+
+	release()
+	select {
+	case <-holderDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocking provider transition did not finish")
+	}
+}
+
+func TestSendPlaceholderDeadlineDeletesUnrecordedMessage(t *testing.T) {
+	manager := newTestManager()
+	owner := newTurnUXDeadlineChannel()
+	manager.channels["test"] = owner
+	key := "test:placeholder-deadline-chat"
+	unlockTransition, acquired := manager.lockTurnUXTransition(
+		context.Background(),
+		key,
+	)
+	if !acquired {
+		t.Fatal("failed to acquire blocking provider transition")
+	}
+	defer unlockTransition()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if recorded := manager.SendPlaceholderForMessage(
+		ctx,
+		"test",
+		"placeholder-deadline-chat",
+		"placeholder-deadline-turn",
+	); recorded {
+		t.Fatal("deadline-expired placeholder reported successful recording")
+	}
+	select {
+	case deleted := <-owner.deleted:
+		if deleted.chatID != "placeholder-deadline-chat" ||
+			deleted.messageID != "mock-ph-123" {
+			t.Fatalf("deleted placeholder = %#v", deleted)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("unrecorded provider placeholder was not deleted")
+	}
+	if _, loaded := manager.placeholders.Load(key); loaded {
+		t.Fatal("deadline-expired placeholder remained recorded")
+	}
+}
+
+func TestExactTurnUXCleanupDeadlineDetachesBeforeAsyncCleanup(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		invoke func(
+			*Manager,
+			func(context.Context),
+			context.Context,
+		)
+	}{
+		{
+			name: "cleanup",
+			invoke: func(
+				manager *Manager,
+				_ func(context.Context),
+				ctx context.Context,
+			) {
+				manager.CleanupTurnUXForMessage(
+					ctx,
+					"test",
+					"exact-deadline-chat",
+					"exact-deadline-turn",
+				)
+			},
+		},
+		{
+			name: "rollback",
+			invoke: func(
+				_ *Manager,
+				rollback func(context.Context),
+				ctx context.Context,
+			) {
+				rollback(ctx)
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			manager := newTestManager()
+			owner := newTurnUXDeadlineChannel()
+			manager.channels["test"] = owner
+			typingCleaned := make(chan struct{}, 1)
+			reactionCleaned := make(chan struct{}, 1)
+			rollback := manager.RecordTurnUX(
+				context.Background(),
+				"test",
+				"exact-deadline-chat",
+				TurnUXRegistration{
+					Identity: "exact-deadline-turn",
+					TypingStop: func() {
+						typingCleaned <- struct{}{}
+					},
+					ReactionUndo: func() {
+						reactionCleaned <- struct{}{}
+					},
+					Placeholder: "exact-deadline-placeholder",
+					Owner:       owner,
+				},
+			)
+			if rollback == nil {
+				t.Fatal("registration did not return a rollback")
+			}
+
+			key := "test:exact-deadline-chat"
+			unlockTransition, acquired := manager.lockTurnUXTransition(
+				context.Background(),
+				key,
+			)
+			if !acquired {
+				t.Fatal("failed to acquire blocking provider transition")
+			}
+			defer unlockTransition()
+
+			ctx, cancel := context.WithTimeout(
+				context.Background(),
+				30*time.Millisecond,
+			)
+			defer cancel()
+			testCase.invoke(manager, rollback, ctx)
+
+			for name, cleaned := range map[string]<-chan struct{}{
+				"typing":   typingCleaned,
+				"reaction": reactionCleaned,
+			} {
+				select {
+				case <-cleaned:
+				case <-time.After(2 * time.Second):
+					t.Fatalf("detached %s artifact was not cleaned", name)
+				}
+			}
+			select {
+			case deleted := <-owner.deleted:
+				if deleted.chatID != "exact-deadline-chat" ||
+					deleted.messageID != "exact-deadline-placeholder" {
+					t.Fatalf("deleted placeholder = %#v", deleted)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("detached placeholder was not deleted")
+			}
+			for name, entries := range map[string]*sync.Map{
+				"typing":      &manager.typingStops,
+				"reaction":    &manager.reactionUndos,
+				"placeholder": &manager.placeholders,
+			} {
+				if _, loaded := entries.Load(key); loaded {
+					t.Fatalf("deadline fallback left %s state", name)
+				}
+			}
+		})
+	}
+}
+
+func TestRecordTypingStopReplacementSerializesProviderTransition(t *testing.T) {
+	manager := newTestManager()
+	cleanupStarted := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	manager.RecordTypingStop("test", "chat", func() {
+		close(cleanupStarted)
+		<-releaseCleanup
+	})
+
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		manager.RecordTypingStop("test", "chat", func() {})
+	}()
+	<-cleanupStarted
+
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		manager.RecordTypingStop("test", "chat", func() {})
+	}()
+	select {
+	case <-secondDone:
+		close(releaseCleanup)
+		t.Fatal("new typing generation bypassed the active provider transition")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseCleanup)
+	<-firstDone
+	<-secondDone
+}
+
+func TestPreSendOlderMessagePreservesNewerTurnUX(t *testing.T) {
+	manager := newTestManager()
+	var stops, undos, edits int
+	channel := &mockMessageEditor{
+		editFn: func(_ context.Context, _, messageID, _ string) error {
+			if messageID != "new-placeholder" {
+				t.Fatalf("edited placeholder %q, want new-placeholder", messageID)
+			}
+			edits++
+			return nil
+		},
+	}
+	manager.channels["test"] = channel
+	manager.RecordTurnUX(
+		context.Background(),
+		"test",
+		"chat",
+		TurnUXRegistration{
+			Identity:     "new-turn",
+			TypingStop:   func() { stops++ },
+			ReactionUndo: func() { undos++ },
+			Placeholder:  "new-placeholder",
+			Owner:        channel,
+		},
+	)
+
+	oldOutbound := testOutboundMessage(bus.OutboundMessage{
+		Channel: "test",
+		ChatID:  "chat",
+		Content: "old response",
+		Context: bus.InboundContext{
+			Channel:  "test",
+			ChatID:   "chat",
+			TurnUXID: "old-turn",
+		},
+	})
+	if _, handled := manager.preSend(
+		context.Background(),
+		"test",
+		oldOutbound,
+		channel,
+	); handled {
+		t.Fatal("old outbound unexpectedly edited newer placeholder")
+	}
+	if stops != 0 || undos != 0 || edits != 0 {
+		t.Fatalf(
+			"old outbound cleaned newer UX: stops=%d undos=%d edits=%d",
+			stops,
+			undos,
+			edits,
+		)
+	}
+	if _, ok := manager.typingStops.Load("test:chat"); !ok {
+		t.Fatal("old outbound removed newer typing registration")
+	}
+	if _, ok := manager.reactionUndos.Load("test:chat"); !ok {
+		t.Fatal("old outbound removed newer reaction registration")
+	}
+	if _, ok := manager.placeholders.Load("test:chat"); !ok {
+		t.Fatal("old outbound removed newer placeholder registration")
+	}
+
+	newOutbound := oldOutbound
+	newOutbound.Content = "new response"
+	newOutbound.Context.TurnUXID = "new-turn"
+	if _, handled := manager.preSend(
+		context.Background(),
+		"test",
+		newOutbound,
+		channel,
+	); !handled {
+		t.Fatal("matching outbound did not edit its placeholder")
+	}
+	if stops != 1 || undos != 1 || edits != 1 {
+		t.Fatalf(
+			"matching outbound cleanup = stops:%d undos:%d edits:%d, want 1/1/1",
+			stops,
+			undos,
+			edits,
+		)
+	}
+}
+
+func TestRebindTurnUXForMessageUpdatesWholeRegistration(t *testing.T) {
+	manager := newTestManager()
+	var stops, undos, edits int
+	channel := &mockMessageEditor{
+		editFn: func(_ context.Context, _, _, _ string) error {
+			edits++
+			return nil
+		},
+	}
+	manager.RecordTurnUX(
+		context.Background(),
+		"test",
+		"chat",
+		TurnUXRegistration{
+			Identity:     "steering-turn",
+			TypingStop:   func() { stops++ },
+			ReactionUndo: func() { undos++ },
+			Placeholder:  "steering-placeholder",
+			Owner:        channel,
+		},
+	)
+
+	manager.RebindTurnUXForMessage(
+		"test",
+		"chat",
+		"steering-turn",
+		"active-turn",
+	)
+	outbound := testOutboundMessage(bus.OutboundMessage{
+		Channel: "test",
+		ChatID:  "chat",
+		Content: "combined response",
+		Context: bus.InboundContext{
+			Channel:  "test",
+			ChatID:   "chat",
+			TurnUXID: "active-turn",
+		},
+	})
+	if _, handled := manager.preSend(
+		context.Background(),
+		"test",
+		outbound,
+		channel,
+	); !handled {
+		t.Fatal("active turn did not consume rebound placeholder")
+	}
+	if stops != 1 || undos != 1 || edits != 1 {
+		t.Fatalf(
+			"rebound cleanup = stops:%d undos:%d edits:%d, want 1/1/1",
+			stops,
+			undos,
+			edits,
+		)
+	}
+}
+
+func TestRecordTurnUXRollbackUsesCreatingOwnerAcrossReload(t *testing.T) {
+	manager := newTestManager()
+	creatingOwner := &mockDeletingMediaChannel{}
+	replacementOwner := &mockDeletingMediaChannel{}
+	manager.channels["test"] = replacementOwner
+
+	rollback := manager.RecordTurnUX(
+		context.Background(),
+		"test",
+		"chat",
+		TurnUXRegistration{
+			Placeholder: "placeholder-from-old-generation",
+			Owner:       creatingOwner,
+		},
+	)
+	rollback(context.Background())
+
+	if creatingOwner.deleteCalls != 1 {
+		t.Fatalf("creating owner delete calls = %d, want 1", creatingOwner.deleteCalls)
+	}
+	if replacementOwner.deleteCalls != 0 {
+		t.Fatalf("replacement owner delete calls = %d, want 0", replacementOwner.deleteCalls)
+	}
+}
+
+func TestDeleteTurnUXEntryIfCurrentPreservesReplacement(t *testing.T) {
+	var entries sync.Map
+	key := "test:chat"
+	stale := &typingEntry{createdAt: time.Now().Add(-typingStopTTL)}
+	replacement := &typingEntry{createdAt: time.Now()}
+	entries.Store(key, stale)
+	entries.Store(key, replacement)
+
+	if deleteTurnUXEntryIfCurrent(&entries, key, stale) {
+		t.Fatal("stale cleanup deleted a replacement entry")
+	}
+	got, ok := entries.Load(key)
+	if !ok || got != replacement {
+		t.Fatalf("stored entry = %#v, want replacement pointer", got)
+	}
 }
 
 func TestRecordTypingStop_ConcurrentSafe(t *testing.T) {
@@ -3906,12 +5067,82 @@ func TestDispatcherMediaExitsOnCancel(t *testing.T) {
 
 // --- TTL Janitor tests (Step 2) ---
 
+func TestRunBoundedTurnUXCallbackReturnsAtDeadline(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	runBoundedTurnUXCallback(ctx, "test", "chat", "typing", func() {
+		close(started)
+		<-release
+	})
+	elapsed := time.Since(start)
+
+	select {
+	case <-started:
+	default:
+		t.Fatal("cleanup callback did not start")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("bounded callback returned after %v, want under 1s", elapsed)
+	}
+	close(release)
+}
+
+func TestEvictExpiredTurnUXContainsPanicsAndDeletesPlaceholder(t *testing.T) {
+	m := newTestManager()
+	channel := &mockDeletingMediaChannel{}
+	var undoCalled atomic.Bool
+	expiredAt := time.Now().Add(-20 * time.Minute)
+
+	m.typingStops.Store("test:chat", &typingEntry{
+		stop:      func() { panic("provider panic") },
+		createdAt: expiredAt,
+	})
+	m.reactionUndos.Store("test:chat", &reactionEntry{
+		undo:      func() { undoCalled.Store(true) },
+		createdAt: expiredAt,
+	})
+	m.placeholders.Store("test:chat", &placeholderEntry{
+		id:        "old-placeholder",
+		createdAt: expiredAt,
+		owner:     channel,
+	})
+
+	m.evictExpiredTurnUX(time.Now())
+
+	if !undoCalled.Load() {
+		t.Fatal("reaction cleanup did not run after a panicking typing callback")
+	}
+	if channel.deleteCalls != 1 ||
+		channel.lastDeleted.chatID != "chat" ||
+		channel.lastDeleted.messageID != "old-placeholder" {
+		t.Fatalf(
+			"placeholder cleanup = calls:%d chat:%q message:%q, want 1/chat/old-placeholder",
+			channel.deleteCalls,
+			channel.lastDeleted.chatID,
+			channel.lastDeleted.messageID,
+		)
+	}
+	for name, entries := range map[string]*sync.Map{
+		"typing":      &m.typingStops,
+		"reaction":    &m.reactionUndos,
+		"placeholder": &m.placeholders,
+	} {
+		if _, loaded := entries.Load("test:chat"); loaded {
+			t.Fatalf("expired %s entry was not deleted", name)
+		}
+	}
+}
+
 func TestTypingStopJanitorEviction(t *testing.T) {
 	m := newTestManager()
 
 	var stopCalled atomic.Bool
 	// Store a typing entry with a creation time far in the past
-	m.typingStops.Store("test:123", typingEntry{
+	m.typingStops.Store("test:123", &typingEntry{
 		stop:      func() { stopCalled.Store(true) },
 		createdAt: time.Now().Add(-10 * time.Minute), // well past typingStopTTL
 	})
@@ -3924,9 +5155,9 @@ func TestTypingStopJanitorEviction(t *testing.T) {
 		// Override janitor to run immediately
 		now := time.Now()
 		m.typingStops.Range(func(key, value any) bool {
-			if entry, ok := value.(typingEntry); ok {
+			if entry, ok := value.(*typingEntry); ok {
 				if now.Sub(entry.createdAt) > typingStopTTL {
-					if _, loaded := m.typingStops.LoadAndDelete(key); loaded {
+					if m.typingStops.CompareAndDelete(key, value) {
 						entry.stop()
 					}
 				}
@@ -3952,7 +5183,7 @@ func TestPlaceholderJanitorEviction(t *testing.T) {
 	m := newTestManager()
 
 	// Store a placeholder entry with a creation time far in the past
-	m.placeholders.Store("test:456", placeholderEntry{
+	m.placeholders.Store("test:456", &placeholderEntry{
 		id:        "msg_old",
 		createdAt: time.Now().Add(-20 * time.Minute), // well past placeholderTTL
 	})
@@ -3960,9 +5191,9 @@ func TestPlaceholderJanitorEviction(t *testing.T) {
 	// Simulate janitor logic
 	now := time.Now()
 	m.placeholders.Range(func(key, value any) bool {
-		if entry, ok := value.(placeholderEntry); ok {
+		if entry, ok := value.(*placeholderEntry); ok {
 			if now.Sub(entry.createdAt) > placeholderTTL {
-				m.placeholders.Delete(key)
+				m.placeholders.CompareAndDelete(key, value)
 			}
 		}
 		return true

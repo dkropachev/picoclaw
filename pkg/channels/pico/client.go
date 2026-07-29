@@ -324,20 +324,25 @@ func (c *PicoClientChannel) StartTyping(ctx context.Context, chatID string) (fun
 		return func() {}, nil
 	}
 
+	generation := c.BeginTypingGeneration(chatID)
 	startMsg := newMessage(TypeTypingStart, nil)
 	startMsg.SessionID = strings.TrimPrefix(chatID, "pico_client:")
 	if err := pc.writeJSON(startMsg); err != nil {
+		generation.End()
 		return func() {}, err
 	}
 	return func() {
+		if !generation.End() {
+			return
+		}
 		c.mu.Lock()
 		currentPC := c.conn
 		c.mu.Unlock()
-		if currentPC == nil {
+		if currentPC == nil || currentPC != pc {
 			return
 		}
 		stopMsg := newMessage(TypeTypingStop, nil)
 		stopMsg.SessionID = strings.TrimPrefix(chatID, "pico_client:")
-		currentPC.writeJSON(stopMsg)
+		_ = currentPC.writeJSON(stopMsg)
 	}, nil
 }

@@ -223,14 +223,18 @@ toolLoop:
 					shouldSendForUser := !hookResult.Silent && hookResult.ForUser != "" &&
 						(ts.opts.SendResponse || hookResult.ResponseHandled)
 					if shouldSendForUser {
+						outboundCtx := outboundContextFromInbound(
+							ts.opts.Dispatch.InboundContext,
+							ts.channel,
+							ts.chatID,
+							ts.opts.Dispatch.ReplyToMessageID(),
+						)
+						if outboundCtx.Raw == nil {
+							outboundCtx.Raw = make(map[string]string, 1)
+						}
+						outboundCtx.Raw["is_tool_call"] = "true"
 						al.bus.PublishOutbound(ctx, bus.OutboundMessage{
-							Context: bus.InboundContext{
-								Channel: ts.channel,
-								ChatID:  ts.chatID,
-								Raw: map[string]string{
-									"is_tool_call": "true",
-								},
-							},
+							Context: outboundCtx,
 							Content: hookResult.ForUser,
 						})
 					}
@@ -561,6 +565,7 @@ toolLoop:
 			ts.opts.Dispatch.MessageID(),
 			ts.opts.Dispatch.ReplyToMessageID(),
 		)
+		execCtx = tools.WithToolTurnUXContext(execCtx, ts.turnUXID)
 		if ts.opts.Dispatch.InboundContext != nil {
 			execCtx = tools.WithToolTopicContext(execCtx, ts.opts.Dispatch.InboundContext.TopicID)
 		}

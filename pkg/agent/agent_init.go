@@ -206,6 +206,10 @@ func registerSharedTools(
 				mediaParts []bus.MediaPart,
 			) error {
 				outboundCtx := bus.NewOutboundContext(channel, chatID, replyToMessageID)
+				if tools.ToolChannel(ctx) == channel &&
+					tools.ToolChatID(ctx) == chatID {
+					outboundCtx.TurnUXID = tools.ToolTurnUXID(ctx)
+				}
 				outboundCtx.TopicID = tools.ToolTopicID(ctx)
 				outboundAgentID, outboundSessionKey, outboundScope := outboundTurnMetadata(
 					tools.ToolAgentID(ctx),
