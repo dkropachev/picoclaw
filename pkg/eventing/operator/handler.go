@@ -19,6 +19,9 @@ const (
 	// RoutePrefix is the operator subtree registered on the gateway's shared
 	// HTTP listener.
 	RoutePrefix = "/runtime/eventing/"
+	// WorkflowEventPayloadBytesHeader carries the exact stored payload length
+	// across the protected workflow-context hop.
+	WorkflowEventPayloadBytesHeader = "X-Picoclaw-Event-Payload-Bytes"
 
 	maxQueryBytes      = 8 << 10
 	maxReplayBodyBytes = 1 << 10
@@ -33,6 +36,7 @@ const (
 	routeEvents
 	routeEvent
 	routeEventPayload
+	routeEventWorkflowContext
 	routeDispatches
 	routeReplay
 )
@@ -83,6 +87,17 @@ func (backend *Backend) serveHTTP(
 			return
 		}
 		writePayload(w, payload)
+	case routeEventWorkflowContext:
+		if request.URL.RawQuery != "" {
+			writeOperatorError(w, ErrInvalidRequest)
+			return
+		}
+		event, err := backend.GetWorkflowEvent(request.Context(), route.eventID)
+		if err != nil {
+			writeOperatorError(w, err)
+			return
+		}
+		writeWorkflowEventJSON(w, http.StatusOK, event)
 	case routeDispatches:
 		selection, err := dispatchListRequestFromQuery(request.URL.RawQuery)
 		if err != nil {
@@ -146,6 +161,12 @@ func routeFromRequest(request *http.Request) operatorRoute {
 	case len(segments) == 2 && segments[1] == "payload":
 		return operatorRoute{
 			kind:    routeEventPayload,
+			eventID: segments[0],
+			method:  http.MethodGet,
+		}
+	case len(segments) == 2 && segments[1] == "workflow-context":
+		return operatorRoute{
+			kind:    routeEventWorkflowContext,
 			eventID: segments[0],
 			method:  http.MethodGet,
 		}
@@ -354,6 +375,18 @@ func writeOperatorJSON(w http.ResponseWriter, status int, value any) {
 	setOperatorResponseHeaders(w)
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeWorkflowEventJSON(w http.ResponseWriter, status int, value WorkflowEventView) {
+	setOperatorResponseHeaders(w)
+	w.Header().Set(WorkflowEventPayloadBytesHeader, strconv.Itoa(len(value.Payload)))
+	w.WriteHeader(status)
+	encoder := json.NewEncoder(w)
+	// Payload is an already-redacted RawMessage. Disabling HTML escaping keeps
+	// its encoded size within the configured ingress maximum and preserves
+	// literal <, >, and & bytes through the protected internal hop.
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(value)
 }
 
 func writePayload(w http.ResponseWriter, payload []byte) {

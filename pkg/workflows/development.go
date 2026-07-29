@@ -35,6 +35,15 @@ const (
 
 	workflowDevelopmentDir    = "workflow_dev"
 	workflowDevelopmentActive = "active.json"
+
+	EventBackedDraftTestFailureDiagnostic  = "event-backed draft test failed; diagnostic details withheld"
+	EventBackedDraftTestCanceledDiagnostic = "event-backed draft test canceled; diagnostic details withheld"
+	EventBackedDraftRunErrorDiagnostic     = "event-backed draft run failed; diagnostic details withheld"
+	EventBackedDraftCancelReasonDiagnostic = "event-backed draft run canceled; diagnostic details withheld"
+	EventBackedDraftJobErrorDiagnostic     = "event-backed draft job failed; diagnostic details withheld"
+	EventBackedDraftStepErrorDiagnostic    = "event-backed draft step failed; diagnostic details withheld"
+	EventBackedDraftEventMessageDiagnostic = "event-backed draft lifecycle message withheld"
+	EventBackedDraftEventPayloadDiagnostic = "event-backed draft lifecycle payload withheld"
 )
 
 type WorkflowDevelopmentSession struct {
@@ -63,6 +72,7 @@ type WorkflowDevelopmentValidation struct {
 type WorkflowDevelopmentTest struct {
 	DraftKey          string    `json:"draft_key"`
 	TargetWorkflowRef string    `json:"target_workflow_ref"`
+	EventID           string    `json:"event_id,omitempty"`
 	RunID             string    `json:"run_id,omitempty"`
 	Status            string    `json:"status"`
 	Error             string    `json:"error,omitempty"`
@@ -288,7 +298,27 @@ func RecordWorkflowDevelopmentTest(
 	if err != nil {
 		return nil, err
 	}
-	recordWorkflowDevelopmentTest(session, result, testErr)
+	recordWorkflowDevelopmentTest(session, "", result, testErr)
+	if err := writeActiveDevelopment(workspace, session); err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+
+// RecordWorkflowDevelopmentEventTest persists a draft-test result together
+// with the durable event selected for its server-owned preview context.
+func RecordWorkflowDevelopmentEventTest(
+	workspace string,
+	eventID string,
+	result *RunResult,
+	testErr error,
+) (*WorkflowDevelopmentSession, error) {
+	session, err := requireActiveDevelopment(workspace)
+	if err != nil {
+		return nil, err
+	}
+	result, testErr = SanitizeEventBackedDraftTestOutcome(result, testErr)
+	recordWorkflowDevelopmentTest(session, eventID, result, testErr)
 	if err := writeActiveDevelopment(workspace, session); err != nil {
 		return nil, err
 	}
@@ -310,15 +340,272 @@ func RecordWorkflowDevelopmentTestIfCurrent(
 		WorkflowDevelopmentDraftKey(session.TargetWorkflowRef, session.YAML) != draftKey {
 		return session, false, nil
 	}
-	recordWorkflowDevelopmentTest(session, result, testErr)
+	recordWorkflowDevelopmentTest(session, "", result, testErr)
 	if err := writeActiveDevelopment(workspace, session); err != nil {
 		return nil, false, err
 	}
 	return session, true, nil
 }
 
+// RecordWorkflowDevelopmentEventTestIfCurrent applies async completion only
+// to the exact active draft and retains the event identity that launched it.
+func RecordWorkflowDevelopmentEventTestIfCurrent(
+	workspace string,
+	sessionID string,
+	draftKey string,
+	eventID string,
+	result *RunResult,
+	testErr error,
+) (*WorkflowDevelopmentSession, bool, error) {
+	session, err := requireActiveDevelopment(workspace)
+	if err != nil {
+		return nil, false, err
+	}
+	if session.ID != sessionID ||
+		WorkflowDevelopmentDraftKey(session.TargetWorkflowRef, session.YAML) != draftKey {
+		return session, false, nil
+	}
+	trimmedEventID := strings.TrimSpace(eventID)
+	if current := session.LastTest; current != nil && current.DraftKey == draftKey {
+		if current.EventID != trimmedEventID {
+			return session, false, nil
+		}
+		if result != nil &&
+			current.RunID != "" &&
+			result.RunID != "" &&
+			current.RunID != result.RunID {
+			return session, false, nil
+		}
+	}
+	result, testErr = SanitizeEventBackedDraftTestOutcome(result, testErr)
+	recordWorkflowDevelopmentTest(session, trimmedEventID, result, testErr)
+	if err := writeActiveDevelopment(workspace, session); err != nil {
+		return nil, false, err
+	}
+	return session, true, nil
+}
+
+// SanitizeEventBackedDraftTestOutcome returns the browser-safe snapshot used
+// by event-backed draft-test responses and development-session persistence.
+// Workflow outputs remain available, but provider/tool error text never does.
+func SanitizeEventBackedDraftTestOutcome(
+	result *RunResult,
+	testErr error,
+) (*RunResult, error) {
+	diagnostic := EventBackedDraftTestFailureDiagnostic
+	if result != nil && result.Status == RunStatusCanceled {
+		diagnostic = EventBackedDraftTestCanceledDiagnostic
+	}
+	var projected *RunResult
+	if result != nil {
+		cloned := *result
+		cloned.Outputs = cloneMap(result.Outputs)
+		if cloned.Error != "" ||
+			cloned.Status == RunStatusFailed ||
+			cloned.Status == RunStatusCanceled {
+			cloned.Error = diagnostic
+		}
+		projected = &cloned
+	}
+	if testErr != nil {
+		return projected, errors.New(diagnostic)
+	}
+	return projected, nil
+}
+
+// IsEventBackedDraftRun identifies the narrow browser projection boundary:
+// draft workflow identity plus a persisted structured event context.
+func IsEventBackedDraftRun(run *Run) bool {
+	if run == nil || !strings.HasPrefix(strings.TrimSpace(run.WorkflowRef), "draft:") {
+		return false
+	}
+	return len(run.Event) != 0
+}
+
+const eventBackedDraftAncestryMaximumDepth = 64
+
+// IsEventBackedDraftRunFamily resolves reusable children back to their root.
+// Missing/cyclic/depth-exhausted ancestry fails closed to masking when the run
+// carries inherited event context.
+func IsEventBackedDraftRunFamily(
+	ctx context.Context,
+	store RunStore,
+	run *Run,
+) bool {
+	if run == nil {
+		return false
+	}
+	current := run
+	carriesEvent := len(run.Event) != 0
+	seen := make(map[string]struct{}, eventBackedDraftAncestryMaximumDepth)
+	for depth := 0; depth < eventBackedDraftAncestryMaximumDepth; depth++ {
+		carriesEvent = carriesEvent || len(current.Event) != 0
+		if IsEventBackedDraftRun(current) {
+			return true
+		}
+		parentID := strings.TrimSpace(current.ParentRunID)
+		if parentID == "" {
+			return false
+		}
+		if _, exists := seen[parentID]; exists || store == nil {
+			return carriesEvent
+		}
+		seen[parentID] = struct{}{}
+		parent, err := store.GetRun(ctx, parentID)
+		if err != nil || parent == nil {
+			return carriesEvent
+		}
+		current = parent
+	}
+	return carriesEvent
+}
+
+// ProjectEventBackedDraftRunForBrowser masks diagnostic fields without
+// changing status, identifiers, structured redacted event context, or outputs.
+func ProjectEventBackedDraftRunForBrowser(run *Run) *Run {
+	return ProjectWorkflowRunForBrowser(run, IsEventBackedDraftRun(run))
+}
+
+// ProjectWorkflowRunForBrowser applies an ancestry decision already resolved
+// by the API or a batched run listing.
+func ProjectWorkflowRunForBrowser(run *Run, eventBackedDraft bool) *Run {
+	if run == nil {
+		return nil
+	}
+	projected := cloneRun(run)
+	if !eventBackedDraft {
+		return projected
+	}
+	if projected.Error != "" {
+		projected.Error = EventBackedDraftRunErrorDiagnostic
+	}
+	if projected.CancelReason != "" {
+		projected.CancelReason = EventBackedDraftCancelReasonDiagnostic
+	}
+	for key, job := range projected.Jobs {
+		if job.Error != "" {
+			job.Error = EventBackedDraftJobErrorDiagnostic
+			projected.Jobs[key] = job
+		}
+	}
+	for key, step := range projected.Steps {
+		if step.Error != "" {
+			step.Error = EventBackedDraftStepErrorDiagnostic
+			projected.Steps[key] = step
+		}
+	}
+	return projected
+}
+
+// ProjectEventBackedDraftRunsForBrowser applies the same projection to a run
+// listing while leaving production and manual run diagnostics unchanged.
+func ProjectEventBackedDraftRunsForBrowser(runs []Run) []Run {
+	byID := make(map[string]*Run, len(runs))
+	for index := range runs {
+		byID[runs[index].ID] = &runs[index]
+	}
+	memo := make(map[string]bool, len(runs))
+	projected := make([]Run, len(runs))
+	for index := range runs {
+		masked := eventBackedDraftRunFamilyInMap(&runs[index], byID, memo)
+		projected[index] = *ProjectWorkflowRunForBrowser(&runs[index], masked)
+	}
+	return projected
+}
+
+func eventBackedDraftRunFamilyInMap(
+	run *Run,
+	byID map[string]*Run,
+	memo map[string]bool,
+) bool {
+	if run == nil {
+		return false
+	}
+	current := run
+	path := make([]string, 0, eventBackedDraftAncestryMaximumDepth)
+	seen := make(map[string]struct{}, eventBackedDraftAncestryMaximumDepth)
+	masked := false
+	resolved := false
+	carriesEvent := len(run.Event) != 0
+	for depth := 0; depth < eventBackedDraftAncestryMaximumDepth; depth++ {
+		carriesEvent = carriesEvent || len(current.Event) != 0
+		// Only a positive classification is safe to memoize. A false result
+		// can come from an event-free path whose parent was absent from this
+		// listing; an event-bearing child that reaches that same path must
+		// still fail closed rather than inherit the earlier false result.
+		if value := memo[current.ID]; value {
+			masked = true
+			resolved = true
+			break
+		}
+		if IsEventBackedDraftRun(current) {
+			masked = true
+			resolved = true
+			break
+		}
+		if _, exists := seen[current.ID]; exists {
+			break
+		}
+		seen[current.ID] = struct{}{}
+		path = append(path, current.ID)
+		parentID := strings.TrimSpace(current.ParentRunID)
+		if parentID == "" {
+			resolved = true
+			break
+		}
+		parent, exists := byID[parentID]
+		if !exists || parent == nil {
+			break
+		}
+		current = parent
+	}
+	if !resolved {
+		masked = carriesEvent
+	}
+	if masked {
+		for _, runID := range path {
+			memo[runID] = true
+		}
+	}
+	return masked
+}
+
+// ProjectEventBackedDraftEventsForBrowser masks both free-form lifecycle
+// messages and payloads. Kind, time, run/job/step IDs remain visible.
+func ProjectEventBackedDraftEventsForBrowser(
+	run *Run,
+	events []RunEvent,
+) []RunEvent {
+	return ProjectWorkflowRunEventsForBrowser(events, IsEventBackedDraftRun(run))
+}
+
+// ProjectWorkflowRunEventsForBrowser applies a resolved ancestry decision to
+// lifecycle events.
+func ProjectWorkflowRunEventsForBrowser(
+	events []RunEvent,
+	eventBackedDraft bool,
+) []RunEvent {
+	projected := make([]RunEvent, len(events))
+	for index, event := range events {
+		event.Payload = cloneMap(event.Payload)
+		if eventBackedDraft {
+			if event.Message != "" {
+				event.Message = EventBackedDraftEventMessageDiagnostic
+			}
+			if len(event.Payload) != 0 {
+				event.Payload = map[string]any{
+					"diagnostic": EventBackedDraftEventPayloadDiagnostic,
+				}
+			}
+		}
+		projected[index] = event
+	}
+	return projected
+}
+
 func recordWorkflowDevelopmentTest(
 	session *WorkflowDevelopmentSession,
+	eventID string,
 	result *RunResult,
 	testErr error,
 ) {
@@ -347,6 +634,7 @@ func recordWorkflowDevelopmentTest(
 	session.LastTest = &WorkflowDevelopmentTest{
 		DraftKey:          WorkflowDevelopmentDraftKey(session.TargetWorkflowRef, session.YAML),
 		TargetWorkflowRef: session.TargetWorkflowRef,
+		EventID:           strings.TrimSpace(eventID),
 		RunID:             runID,
 		Status:            status,
 		Error:             errorMessage,

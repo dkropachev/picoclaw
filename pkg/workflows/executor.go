@@ -1136,9 +1136,25 @@ func cloneMap(values map[string]any) map[string]any {
 	}
 	out := make(map[string]any, len(values))
 	for key, value := range values {
-		out[key] = value
+		out[key] = cloneJSONValue(value)
 	}
 	return out
+}
+
+func cloneJSONValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneMap(typed)
+	case []any:
+		out := make([]any, len(typed))
+		for index, item := range typed {
+			out[index] = cloneJSONValue(item)
+		}
+		return out
+	default:
+		// JSON scalar values, including json.Number, are immutable.
+		return value
+	}
 }
 
 func cloneStringMap(values map[string]string) map[string]string {

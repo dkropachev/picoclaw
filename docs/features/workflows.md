@@ -16,10 +16,14 @@ parent run.
 The workflow dashboard also owns the end-to-end development cycle: one active
 workflow draft or repair session may exist at a time, a new brief starts with
 AI-authored workflow YAML by default, deterministic scaffold remains available
-as a fallback, and publish validates, writes, reloads, and stamps the workflow
-against the current PicoClaw runtime. Native workflow functions provide common
-state, artifact, git inventory, and git filter primitives so AI-authored
-workflows do not need helper scripts for durable planning and reporting.
+as a fallback, external-event filters have a server-parsed structured editor
+and side-effect-free captured-event match preview, and publish validates,
+writes, reloads, and stamps the workflow against the current PicoClaw runtime.
+Event-parity draft tests resolve a selected durable event on the server and use
+the same redacted context construction as automatic dispatch. Native workflow
+functions provide common state, artifact, git inventory, and git filter
+primitives so AI-authored workflows do not need helper scripts for durable
+planning and reporting.
 An explicitly installed GitHub issue-triage template composes deterministic
 `issues.opened` routing, a no-tool structured classifier, and one separately
 declared GitHub MCP comment action.
@@ -60,7 +64,7 @@ declared GitHub MCP comment action.
 | `FR-WORKFLOW-006` | MUST | Channel-message and standalone command triggers can filter by channel, chat, sender, mention, command, regex, declared command args, and passthrough behavior, and can bind `conversation.session` and `conversation.delivery` modes. | Chat workflows need precise activation and duplicate-reply control. |
 | `FR-WORKFLOW-007` | MUST | Conversation pipelines support agent step modes `history: read_write`, `history: read_only`, `history: none`, `session: inherit`, explicit `key:` sessions, and cache modes `session`, `agent`, `none`, or explicit `key:`. | Chat pipelines need classifier/enrichment steps that can follow context without polluting durable chat history. |
 | `FR-WORKFLOW-008` | MUST | A channel-triggered run stores normalized event context and delivery metadata so `tool/message` can default to the same Telegram topic or Slack thread. | Delivery should be automatic while remaining separate from session memory. |
-| `FR-WORKFLOW-009` | MUST | Runtime execution exclusively creates each run file without replacing an existing run identity, syncs the new file and its run/store/workspace directory entries before reporting creation, and atomically replaces later run updates and cancellation state with a synced temp file and rename. It persists parent and child run records, job/step status, input/output snapshots, session key, delivery context, and event JSONL under `workspace/workflow_runs/`. Durable external-event snapshots preserve exact JSON number tokens on read and update without changing legacy numeric decoding for ordinary workflow inputs/outputs. | Runs need a cross-process no-clobber and power-loss durability boundary, restart-safe inspection, full-fidelity event context, and auditable parent/child links. |
+| `FR-WORKFLOW-009` | MUST | Runtime execution exclusively creates each run file without replacing an existing run identity, syncs the new file and its run/store/workspace directory entries before reporting creation, and atomically replaces later run updates and cancellation state with a synced temp file and rename. It persists parent and child run records, job/step status, input/output snapshots, session key, delivery context, and event JSONL under `workspace/workflow_runs/`. Durable external-event snapshots preserve exact JSON number tokens on read and update. Numbers propagated into dynamic run or lifecycle outputs remain readable even outside the float64 range, while representable ordinary workflow values retain their legacy float64 decoding. | Runs need a cross-process no-clobber and power-loss durability boundary, restart-safe inspection, full-fidelity event context, and auditable parent/child links. |
 | `FR-WORKFLOW-010` | MUST | CLI, HTTP, and agent-tool surfaces expose list, validate, run, cancel, retry, status, graph, reload, and event inspection operations through the shared workflow parser, validator, executor, and file run store. | Operators, UI, and agents should not fork workflow behavior. |
 | `FR-WORKFLOW-011` | MUST | `on.schedule` cron triggers and `on.runtime_event` filters run while the agent loop is active and use the same executor, depth, timeout, concurrency, session, and delivery rules as channel-triggered workflows. Schedule cache entries and asynchronous launches are fenced to their exact config generation. The runtime-event subscription exists only while workflows are enabled, captures that generation, is synchronously removed for the outer reload transaction, and is recreated for the final committed or restored generation before turn admission resumes. | Workflows need autonomous automation beyond inbound chat messages without carrying cached schedules or provisional lifecycle events across config generations. |
 | `FR-WORKFLOW-012` | MUST | Runs can be canceled and retried; cancellation marks the persisted run canceled and stops before later jobs or steps, while retry creates a new run linked to the original run and reuses the original ref, inputs, event, session, and delivery. | Operators need safe intervention without losing audit history. |
@@ -77,6 +81,7 @@ declared GitHub MCP comment action.
 | `FR-WORKFLOW-023` | MUST | `on.event` accepts explicit non-empty source, connector, event-type, actor, subject, and attribute string-or-list filters with anchored `*`/`?` globs. Durable routing uses OR within lists and AND across fields, case-insensitive normalized types/connector identity and case-sensitive IDs/attribute values; a matched dispatch runs under its deterministic run ID with the full redacted envelope, event/dispatch inputs, an isolated `workflow:<ref>:event:<event-id>` session, and empty delivery. The executor exclusively creates that run and invokes `OnRunPersisted` to link its dispatch before any step; crash reconciliation never repeats an existing running, terminal, or previously linked-but-pruned run. | GitHub, chat, email, and webhook automation need one deterministic trigger contract and one safe bridge into existing AI/tool workflow execution. |
 | `FR-WORKFLOW-024` | MUST | An `agent/*` workflow step may declare `with.tools: none`; the initial model request, structured-output repair requests, managed fallbacks, and child work then expose no tool definitions and cannot execute a model-authored tool call. Omitted `tools` or explicit `inherit` preserves existing behavior. Unsupported or non-string modes fail workflow validation, and the workflow compatibility identity changes so a binary that ignored `tools: none` cannot run a newly stamped classifier workflow. | Classifying attacker-controlled event content must not silently grant the model the default agent's tools. |
 | `FR-WORKFLOW-025` | MUST | `picoclaw workflow install github-issue-triage` idempotently installs a valid, opt-in `workflows/github-issue-triage.yml`. It deterministically matches native GitHub `issues.opened` events whose body-authenticated attribute is true, gives only signed repository/issue fields to an isolated no-tool `agent/main` step, requires enum category/priority plus a boolean comment decision, and conditionally calls the separately declared `mcp/github/add_issue_comment` step with owner, repository, and issue number from the signed body. The posted text is a fixed template containing only validated enum values and an event marker, never model prose or issue text. | A useful AI-driven action should be reviewable as ordinary workflow YAML and keep classification separate from authority-bearing effects. |
+| `FR-WORKFLOW-026` | MUST | The authenticated workflow dashboard can inspect and edit a draft's typed `on.event` trigger while retaining raw YAML as the authoritative advanced surface. Projection and replacement use the server's workflow parser and YAML node tree, carry an exact source revision, preserve unrelated triggers/jobs/comments, and make unsupported alias/merge shapes or projected scalars containing line breaks raw-only rather than flattening or splitting them. A captured-event preview evaluates payload-free metadata through the same deterministic matcher used by routing and returns field-level checks without creating a replay, dispatch, or run. An event-parity draft test submits only an event ID; the server loads one already-redacted durable envelope through the live protected gateway generation, requires the draft trigger to match, derives the production event context, fixed inputs, isolated target-workflow session, and empty delivery, then creates only the ordinary auditable `draft:<target>` run and records the selected event ID in the current test snapshot. Event mode rejects manual input, secret, session, or delivery overrides. The workflow-author model runs with no history and no tools, is taught that deterministic filtering precedes AI steps, and receives no captured payload values through authoring or repair context. | Users need to build and safely test deterministic or AI-driven event workflows from the UI without duplicating matcher semantics, rewriting advanced YAML, granting classifier authority, or copying untrusted payloads through the browser and authoring model. |
 
 ## Data And State Model
 
@@ -128,12 +133,12 @@ native GitHub connectors unless the operator adds an explicit
 
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
-| File | `workspace/workflows/*.yml`, `workspace/workflows/*.yaml` | GitHub-style workflow definitions with `on`, `jobs`, `needs`, `uses`, `with`, `if`, `outputs`, `schedule`, `runtime_event`, `event`, and `workflow_call`. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016`, `FR-WORKFLOW-023` through `FR-WORKFLOW-025` |
-| Go API | `pkg/workflows.Parse`, `Resolver.ResolveLocal`, `Validate`, `LoadRunnableLocalSnapshot`, `Executor.Run`, `Executor.Retry`, `FileRunStore`, `MatchChannelMessage`, `MatchCommandMessage`, `MatchRuntimeEvent`, `MatchEventTrigger`, `EventWorkflowRouter`, `EventWorkflowDispatcher`, `BuildRunGraph`, `ReloadLocal`, `InstallWorkflowTemplate` | Parse GitHub-shaped YAML, normalize local reusable refs, reject unsafe refs, validate an exact compatibility-stamped byte snapshot, install local workflow templates, match process-local and durable triggers, durably route/reconcile external-event runs, run/retry/cancel workflows, build run graphs, reload definitions, and persist run state. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016`, `FR-WORKFLOW-018`, `FR-WORKFLOW-022` through `FR-WORKFLOW-025` |
+| File | `workspace/workflows/*.yml`, `workspace/workflows/*.yaml` | GitHub-style workflow definitions with `on`, `jobs`, `needs`, `uses`, `with`, `if`, `outputs`, `schedule`, `runtime_event`, `event`, and `workflow_call`. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016`, `FR-WORKFLOW-023` through `FR-WORKFLOW-026` |
+| Go API | `pkg/workflows.Parse`, `Resolver.ResolveLocal`, `Validate`, `LoadRunnableLocalSnapshot`, `Executor.Run`, `Executor.Retry`, `FileRunStore`, `MatchChannelMessage`, `MatchCommandMessage`, `MatchRuntimeEvent`, `EvaluateEventTrigger`, `MatchEventTrigger`, `EventWorkflowRouter`, `EventWorkflowDispatcher`, `BuildRunGraph`, `ReloadLocal`, `InstallWorkflowTemplate` | Parse GitHub-shaped YAML, normalize local reusable refs, reject unsafe refs, validate an exact compatibility-stamped byte snapshot, install local workflow templates, project and revise typed event triggers without replacing unrelated YAML, evaluate process-local and durable triggers, durably route/reconcile external-event runs, run/retry/cancel workflows, build run graphs, reload definitions, and persist run state. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016`, `FR-WORKFLOW-018`, `FR-WORKFLOW-022` through `FR-WORKFLOW-026` |
 | Config | `workflows.*`, `tools.workflow` | Global enablement, workflow tool enablement, max call depth, definitions directory, concurrency, timeout, and retention defaults. | `FR-WORKFLOW-009`, `FR-WORKFLOW-013` |
 | CLI | `picoclaw workflow install/list/compatibility/revalidate/validate/reload/run/cancel/retry/status/events/graph` | Install local workflow templates, including `code-review` and `github-issue-triage`, then manage definitions, compatibility stamps, and runs through the same workflow runtime and file run store used by agent tools. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-018`, `FR-WORKFLOW-022`, `FR-WORKFLOW-025` |
-| HTTP | `/api/workflows*`, `/api/workflows/runs*`, `/api/workflows/development*`, `/api/workflows/compatibility`, `/api/workflows/revalidate` | List, validate, reload, run, cancel, retry, inspect, stream workflow events, read run graph data, manage the singleton development session, run configured-agent YAML revisions, test active drafts inline or asynchronously after a run record is persisted, reject draft-changing development mutations while the current draft test is still running, execute configured agent/tool/MCP workflow steps synchronously or asynchronously, publish drafts, and revalidate release compatibility. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-017`, `FR-WORKFLOW-018`, `FR-WORKFLOW-019` |
-| UI | `/agent/workflows` | Two-mode workflow console: Develop shows singleton start readiness, starts new briefs with AI by default, resumes the singleton AI brief/YAML development cycle, marks the one active draft, sends active drafts to the configured agent for YAML revision, offers deterministic scaffold fallback, validates and test-runs drafts asynchronously with inline JSON validation for inputs/secrets/session/delivery context through configured workflow runtime steps, preserves structured validation feedback from failed draft tests, can ask AI to repair the current draft with the latest failed draft-test status, run ID, compact run/job/step state, recent event payloads, and error context, restores the latest draft-test result when resuming the active session, treats a running draft test as the active development operation, gates publish on a current successful draft test, shows publish readiness with the next blocking reason, shows the active development operation while mutations run, opens the repair/review queue with compatibility issue summaries, can start AI review or AI repair directly from blocked compatibility entries, and after publish switches Operate to the published workflow; Operate shows definitions, compatibility status, a GitHub-style manual run popover generated from declared `workflow_call` inputs and secrets with advanced session/delivery/raw secret JSON controls, compatibility-gated asynchronous launch, inline payload validation, the selected workflow run-readiness reason, runs, selected run detail, persisted delivery and trigger event context, job and step outputs, live streamed event payloads with polling fallback, graph, cancel, compatibility-gated retry with retry-secret JSON validation, reload, and refresh. | `FR-WORKFLOW-015`, `FR-WORKFLOW-017`, `FR-WORKFLOW-018`, `FR-WORKFLOW-019` |
+| HTTP | `/api/workflows*`, `/api/workflows/runs*`, `/api/workflows/development*`, `/api/workflows/compatibility`, `/api/workflows/revalidate` | List, validate, reload, run, cancel, retry, inspect, stream workflow events, read run graph data, manage the singleton development session, project and revision-fence typed event-trigger edits, preview a captured event through the runtime matcher, run configured-agent YAML revisions, test active drafts manually or with a server-resolved durable event after a run record is persisted, reject draft-changing development mutations while the current draft test is still running, execute configured agent/tool/MCP workflow steps synchronously or asynchronously, publish drafts, and revalidate release compatibility. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-017`, `FR-WORKFLOW-018`, `FR-WORKFLOW-019`, `FR-WORKFLOW-026` |
+| UI | `/agent/workflows` | Two-mode workflow console: Develop shows singleton start readiness, starts new briefs with AI by default, resumes the singleton AI brief/YAML development cycle, marks the one active draft, sends active drafts to the configured no-tool workflow-author agent for YAML revision, offers deterministic scaffold fallback, and retains raw YAML beside a server-parsed event-trigger builder. The builder explains exact OR/AND, anchored-glob, and case semantics, preserves unsupported advanced YAML as raw-only, selects recent payload-free event metadata, previews field-level deterministic matches, and can explicitly reveal payload through the existing ephemeral no-cache inspector. Draft tests can use inline manual JSON context or event-parity mode; event mode sends only the selected ID and is gated by a successful server match. Failed-test AI repair receives bounded status and structural metadata rather than captured payload values. Develop restores the latest draft-test result, treats a running test as the active operation, gates publish on a current successful test, shows the next blocking reason, and exposes compatibility repair/review. Operate shows definitions, compatibility status, a GitHub-style manual run popover generated from declared `workflow_call` inputs and secrets with advanced session/delivery/raw secret JSON controls, compatibility-gated asynchronous launch, inline payload validation, the selected workflow run-readiness reason, runs, selected run detail, persisted delivery and trigger event context, job and step outputs, live streamed event payloads with polling fallback, graph, cancel, compatibility-gated retry with retry-secret JSON validation, reload, and refresh. | `FR-WORKFLOW-015`, `FR-WORKFLOW-017`, `FR-WORKFLOW-018`, `FR-WORKFLOW-019`, `FR-WORKFLOW-026` |
 | Managed agent step | `uses: agent/*` with `with.output`, `with.managed`, and optional `with.scope` | Workflow-owned output schemas are injected into the agent prompt, parsed from the response, repaired once by default, validated locally, and exposed as `structured`. Managed options choose split strategy, fixed or token-adaptive chunk sizes, calibration sample/match/cache policy, parallel child limit, model candidates with price metadata, and effort optimization. Child runs are hidden from chat history by default and publish one combined structured result plus `managed` diagnostics. | `FR-WORKFLOW-007`, `FR-WORKFLOW-009`, `FR-WORKFLOW-019`, `FR-WORKFLOW-021` |
 | Agent step policy | `uses: agent/*` with `with.tools` | Omitted/`inherit` retains the selected agent's registered tools; `none` disables tools for every model request made by that step. | `FR-WORKFLOW-024` |
 | Local template | `workflows/github-issue-triage.yml` | Explicitly installed authenticated GitHub issue classifier plus a conditional declared MCP comment effect. | `FR-WORKFLOW-025` |
@@ -183,12 +188,18 @@ native GitHub connectors unless the operator adds an explicit
 12. For development, create `workflow_dev/active.json` only when no active
     session exists, scaffold repository-wide review prompts as an inventory
     step followed by a managed scope-split review step, use the configured
-    agent as the default first draft path, revise the active draft locally or
-    through the configured agent with existing workflow refs plus registered
-    agent/tool target context, extract returned workflow YAML, validate the
-    YAML, optionally test-run the draft inline with persisted run records,
-    publish by atomically writing `workspace/workflows/<file>.yml`, revalidate
-    the catalog, archive the session, and remove the active marker.
+    no-tool/no-history agent as the default first draft path, revise the active
+    draft locally or through that agent with existing workflow refs plus
+    registered agent/tool target context, extract returned workflow YAML, and
+    validate it. Structured event-trigger edits first project an exact source
+    revision and then replace only the `on.event` node; captured-event preview
+    loads payload-free metadata and calls the runtime evaluator. Event-parity
+    draft testing sends one event ID, atomically loads the already-redacted
+    envelope from the protected live generation, verifies the draft match,
+    derives normal event context/input/session values, and persists a normal
+    draft run without creating a dispatch. Publish atomically writes
+    `workspace/workflows/<file>.yml`, revalidates the catalog, archives the
+    session, and removes the active marker.
 13. For release revalidation, compare the current PicoClaw runtime identity and
     workflow hash with `workflow_validations/manifest.json`, classify stale
     workflows as pending, run deterministic validation on demand, and block
@@ -278,8 +289,25 @@ inventory-and-review shape when it recognizes repository-wide review prompts.
   successful draft test sets ready_to_publish.
 - AI revision requires an active workflow development session and writes only
   back into that session; it never creates or publishes a second pending draft.
+- Workflow authoring runs without durable chat history or model tools. Its
+  prompt describes event fields but never includes a selected event payload;
+  failed-test repair projects bounded run/event structure and omits event
+  payload values and lifecycle message/payload text.
 - Draft test runs use `draft:<target_ref>` refs and persist normal run records
   for inspection without writing the draft into `workspace/workflows/`.
+- Event-parity draft tests accept only a durable event ID. A malformed or
+  missing event, unavailable/replaced gateway generation, invalid or
+  non-matching trigger, or any manual input/secret/session/delivery override
+  fails before run creation. No preview or draft test creates a dispatch or
+  changes event routing state.
+- Event-trigger projection and replacement are stateless. A stale revision,
+  unsupported alias/merge shape, or projected scalar containing a line break
+  cannot overwrite newer YAML; the raw editor remains available for advanced
+  definitions.
+- Match preview evaluates only payload-free event metadata. Exact payload is
+  loaded server-side only for an event-parity test or after the user's explicit
+  inspector action, is never submitted back by the browser, and is discarded
+  when event selection changes.
 - The active development session stores the latest draft-test run ID, status,
   error, timestamp, and draft key so dashboard refreshes can resume publish
   readiness; changing the executable draft YAML or target ref clears that
@@ -381,6 +409,7 @@ inventory-and-review shape when it recognizes repository-wide review prompts.
 | `FR-WORKFLOW-023` | [pkg/workflows/event_trigger.go](../../pkg/workflows/event_trigger.go), [pkg/workflows/event_trigger_test.go](../../pkg/workflows/event_trigger_test.go), [pkg/workflows/event_dispatcher.go](../../pkg/workflows/event_dispatcher.go), [pkg/workflows/event_dispatcher_test.go](../../pkg/workflows/event_dispatcher_test.go), [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go), [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go) |
 | `FR-WORKFLOW-024` | [pkg/workflows/validator_test.go](../../pkg/workflows/validator_test.go), [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/workflows/compatibility.go](../../pkg/workflows/compatibility.go), [pkg/workflows/event_trigger_test.go](../../pkg/workflows/event_trigger_test.go) |
 | `FR-WORKFLOW-025` | [pkg/workflows/templates_test.go](../../pkg/workflows/templates_test.go), [pkg/workflows/agent_output_test.go](../../pkg/workflows/agent_output_test.go), [pkg/workflows/templates.go](../../pkg/workflows/templates.go), [cmd/picoclaw/internal/workflow/command_test.go](../../cmd/picoclaw/internal/workflow/command_test.go) |
+| `FR-WORKFLOW-026` | [pkg/workflows/editor_test.go](../../pkg/workflows/editor_test.go), [pkg/workflows/event_trigger_test.go](../../pkg/workflows/event_trigger_test.go), [pkg/workflows/event_dispatcher_test.go](../../pkg/workflows/event_dispatcher_test.go), [pkg/eventing/operator/handler_test.go](../../pkg/eventing/operator/handler_test.go), [web/backend/api/workflow_editor_test.go](../../web/backend/api/workflow_editor_test.go), [web/backend/api/workflow_ai_test.go](../../web/backend/api/workflow_ai_test.go), [web/frontend/src/api/workflows.test.ts](../../web/frontend/src/api/workflows.test.ts), [web/frontend/src/components/workflows](../../web/frontend/src/components/workflows), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 
 ## Implementation Anchors
 
@@ -396,6 +425,7 @@ inventory-and-review shape when it recognizes repository-wide review prompts.
 - [pkg/workflows/runtime_trigger.go](../../pkg/workflows/runtime_trigger.go)
 - [pkg/workflows/event_trigger.go](../../pkg/workflows/event_trigger.go)
 - [pkg/workflows/event_dispatcher.go](../../pkg/workflows/event_dispatcher.go)
+- [pkg/workflows/editor.go](../../pkg/workflows/editor.go)
 - [pkg/workflows/graph.go](../../pkg/workflows/graph.go)
 - [pkg/workflows/reload.go](../../pkg/workflows/reload.go)
 - [pkg/workflows/templates.go](../../pkg/workflows/templates.go)
@@ -406,6 +436,7 @@ inventory-and-review shape when it recognizes repository-wide review prompts.
 - [pkg/agent/workflow_automations.go](../../pkg/agent/workflow_automations.go)
 - [pkg/agent/workflow_eventing.go](../../pkg/agent/workflow_eventing.go)
 - [web/backend/api/workflow_ai.go](../../web/backend/api/workflow_ai.go)
+- [web/backend/api/workflow_editor.go](../../web/backend/api/workflow_editor.go)
 - [web/backend/api/workflow_runtime.go](../../web/backend/api/workflow_runtime.go)
 - [web/frontend/src/components/workflows/workflows-page.tsx](../../web/frontend/src/components/workflows/workflows-page.tsx)
 - [web/frontend/src/api/workflows.ts](../../web/frontend/src/api/workflows.ts)
@@ -420,6 +451,8 @@ Owns: CODE pkg/tools/workflow.go
 Owns: CODE cmd/picoclaw/internal/workflow/**
 Owns: CODE web/backend/api/workflows.go
 Owns: CODE web/backend/api/workflow_ai.go
+Owns: CODE web/backend/api/workflow_editor.go
+Owns: CODE web/backend/api/workflow_event_context.go
 Owns: CODE web/backend/api/workflow_runtime.go
 Owns: CODE web/frontend/src/api/workflows.ts
 Owns: CODE web/frontend/src/components/workflows/**

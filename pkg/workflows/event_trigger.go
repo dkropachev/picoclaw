@@ -2,6 +2,7 @@ package workflows
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -376,59 +377,175 @@ func WorkflowMatchesEvent(workflow *Workflow, event eventing.Envelope) bool {
 // the trigger or event. Lists use OR semantics, while populated fields use AND
 // semantics. Glob patterns are fully anchored and support only '*' and '?'.
 func MatchEventTrigger(trigger *EventTrigger, event eventing.Envelope) bool {
-	if trigger == nil || len(validateEventTrigger("on.event", trigger)) != 0 {
+	result, err := EvaluateEventTrigger(trigger, event)
+	if err != nil {
 		return false
 	}
-	if !eventPatternListMatches(trigger.Sources, event.Source, true) ||
-		!eventPatternListMatches(trigger.Connectors, event.Connector, true) ||
-		!eventPatternListMatches(trigger.Types, event.Type, true) ||
-		!eventAttributeFiltersMatch(trigger.Attributes, event.Attributes) {
-		return false
+	return result.Matched
+}
+
+// EventTriggerMatchCheck explains one populated event-trigger field. Checks
+// are emitted in a stable path order so operator previews and tests do not
+// duplicate or guess at runtime matching behavior.
+type EventTriggerMatchCheck struct {
+	Path    string `json:"path"`
+	Present bool   `json:"present"`
+	Value   string `json:"value,omitempty"`
+	Matched bool   `json:"matched"`
+}
+
+// EventTriggerMatchResult is the side-effect-free diagnostic form of event
+// trigger matching.
+type EventTriggerMatchResult struct {
+	Matched bool                     `json:"matched"`
+	Checks  []EventTriggerMatchCheck `json:"checks"`
+}
+
+// EvaluateEventTrigger validates and evaluates trigger against event. It is
+// the authoritative matcher used by both durable routing and UI previews.
+func EvaluateEventTrigger(
+	trigger *EventTrigger,
+	event eventing.Envelope,
+) (EventTriggerMatchResult, error) {
+	if trigger == nil {
+		return EventTriggerMatchResult{}, ValidationErrors{{
+			Path:    "on.event",
+			Message: "event trigger is required",
+		}}
 	}
-	if trigger.Actor != nil {
-		if event.Actor == nil ||
-			!eventEntityMatches(
-				trigger.Actor,
-				event.Actor.ID,
-				event.Actor.Type,
-				event.Actor.Attributes,
-			) {
-			return false
+	if errs := validateEventTrigger("on.event", trigger); len(errs) != 0 {
+		return EventTriggerMatchResult{}, errs
+	}
+
+	result := EventTriggerMatchResult{
+		Matched: true,
+		Checks:  make([]EventTriggerMatchCheck, 0, eventTriggerCheckCapacity(trigger)),
+	}
+	appendPatternCheck := func(path string, patterns StringList, value string, present bool, fold bool) {
+		if patterns == nil {
+			return
 		}
+		matched := present && eventPatternListMatches(patterns, value, fold)
+		result.Checks = append(result.Checks, EventTriggerMatchCheck{
+			Path:    path,
+			Present: present,
+			Value:   value,
+			Matched: matched,
+		})
+		result.Matched = result.Matched && matched
+	}
+
+	appendPatternCheck("on.event.sources", trigger.Sources, event.Source, true, true)
+	appendPatternCheck("on.event.connectors", trigger.Connectors, event.Connector, true, true)
+	appendPatternCheck("on.event.types", trigger.Types, event.Type, true, true)
+	appendAttributeMatchChecks(
+		&result,
+		"on.event.attributes",
+		trigger.Attributes,
+		event.Attributes,
+		true,
+	)
+
+	if trigger.Actor != nil {
+		var id, entityType string
+		var attributes map[string]string
+		present := event.Actor != nil
+		if present {
+			id = event.Actor.ID
+			entityType = event.Actor.Type
+			attributes = event.Actor.Attributes
+		}
+		appendPatternCheck("on.event.actor.ids", trigger.Actor.IDs, id, present, false)
+		appendPatternCheck("on.event.actor.types", trigger.Actor.Types, entityType, present, true)
+		appendAttributeMatchChecks(
+			&result,
+			"on.event.actor.attributes",
+			trigger.Actor.Attributes,
+			attributes,
+			present,
+		)
 	}
 	if trigger.Subject != nil {
-		if event.Subject == nil ||
-			!eventEntityMatches(
-				trigger.Subject,
-				event.Subject.ID,
-				event.Subject.Type,
-				event.Subject.Attributes,
-			) {
-			return false
+		var id, entityType string
+		var attributes map[string]string
+		present := event.Subject != nil
+		if present {
+			id = event.Subject.ID
+			entityType = event.Subject.Type
+			attributes = event.Subject.Attributes
 		}
+		appendPatternCheck("on.event.subject.ids", trigger.Subject.IDs, id, present, false)
+		appendPatternCheck("on.event.subject.types", trigger.Subject.Types, entityType, present, true)
+		appendAttributeMatchChecks(
+			&result,
+			"on.event.subject.attributes",
+			trigger.Subject.Attributes,
+			attributes,
+			present,
+		)
 	}
-	return true
+	sort.Slice(result.Checks, func(i, j int) bool {
+		return result.Checks[i].Path < result.Checks[j].Path
+	})
+	return result, nil
 }
 
-func eventEntityMatches(
-	trigger *EventEntityTrigger,
-	id string,
-	entityType string,
+func appendAttributeMatchChecks(
+	result *EventTriggerMatchResult,
+	path string,
+	filters map[string]StringList,
 	attributes map[string]string,
-) bool {
-	return eventPatternListMatches(trigger.IDs, id, false) &&
-		eventPatternListMatches(trigger.Types, entityType, true) &&
-		eventAttributeFiltersMatch(trigger.Attributes, attributes)
+	entityPresent bool,
+) {
+	if filters == nil {
+		return
+	}
+	keys := make([]string, 0, len(filters))
+	for key := range filters {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value, present := attributes[key]
+		present = entityPresent && present
+		matched := present && eventPatternListMatches(filters[key], value, false)
+		result.Checks = append(result.Checks, EventTriggerMatchCheck{
+			Path:    path + "." + key,
+			Present: present,
+			Value:   value,
+			Matched: matched,
+		})
+		result.Matched = result.Matched && matched
+	}
 }
 
-func eventAttributeFiltersMatch(filters map[string]StringList, attributes map[string]string) bool {
-	for key, patterns := range filters {
-		value, ok := attributes[key]
-		if !ok || !eventPatternListMatches(patterns, value, false) {
-			return false
+func eventTriggerCheckCapacity(trigger *EventTrigger) int {
+	if trigger == nil {
+		return 0
+	}
+	count := len(trigger.Attributes)
+	for _, patterns := range []StringList{
+		trigger.Sources,
+		trigger.Connectors,
+		trigger.Types,
+	} {
+		if patterns != nil {
+			count++
 		}
 	}
-	return true
+	for _, entity := range []*EventEntityTrigger{trigger.Actor, trigger.Subject} {
+		if entity == nil {
+			continue
+		}
+		if entity.IDs != nil {
+			count++
+		}
+		if entity.Types != nil {
+			count++
+		}
+		count += len(entity.Attributes)
+	}
+	return count
 }
 
 func eventPatternListMatches(patterns StringList, value string, fold bool) bool {

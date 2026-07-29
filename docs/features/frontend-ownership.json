@@ -81,6 +81,14 @@
       ]
     },
     {
+      "spec": "docs/features/workflows.md",
+      "patterns": [
+        "web/frontend/src/api/workflows.ts",
+        "web/frontend/src/components/workflows/**",
+        "web/frontend/src/routes/agent/workflows.tsx"
+      ]
+    },
+    {
       "spec": "docs/features/launcher-management.md",
       "patterns": [
         "web/frontend/src/api/launcher-auth.ts",

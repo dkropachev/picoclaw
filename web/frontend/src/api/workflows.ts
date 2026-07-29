@@ -6,6 +6,7 @@ export interface WorkflowDefinition {
   path?: string
   error?: string
   workflow_call?: WorkflowCallDefinition
+  event_trigger?: WorkflowEventTrigger | null
 }
 
 export interface WorkflowCallDefinition {
@@ -71,6 +72,7 @@ export interface WorkflowDevelopmentTestSnapshot {
   draft_key: string
   target_workflow_ref: string
   run_id?: string
+  event_id?: string
   status: string
   error?: string
   tested_at: string
@@ -90,6 +92,47 @@ export interface WorkflowDevelopmentSession {
   last_test?: WorkflowDevelopmentTestSnapshot
   created_at: string
   updated_at: string
+}
+
+export interface WorkflowEventEntityTrigger {
+  ids?: string[]
+  types?: string[]
+  attributes?: Record<string, string[]>
+}
+
+export interface WorkflowEventTrigger {
+  sources?: string[]
+  connectors?: string[]
+  types?: string[]
+  actor?: WorkflowEventEntityTrigger
+  subject?: WorkflowEventEntityTrigger
+  attributes?: Record<string, string[]>
+}
+
+export interface WorkflowEventTriggerInspection {
+  revision: string
+  editable: boolean
+  reason?: string
+  event_trigger?: WorkflowEventTrigger | null
+  validation?: WorkflowDevelopmentValidation
+}
+
+export interface WorkflowEventTriggerRenderResult extends WorkflowEventTriggerInspection {
+  yaml: string
+}
+
+export interface WorkflowEventTriggerMatchCheck {
+  path: string
+  present: boolean
+  value?: unknown
+  matched: boolean
+}
+
+export interface WorkflowEventTriggerMatchResult {
+  event_id: string
+  matched: boolean
+  checks: WorkflowEventTriggerMatchCheck[]
+  validation?: WorkflowDevelopmentValidation
 }
 
 export interface WorkflowRun {
@@ -292,6 +335,45 @@ export async function reviseWorkflowDevelopment(payload: {
   })
 }
 
+export async function inspectWorkflowEventTrigger(
+  yaml: string,
+  signal?: AbortSignal,
+): Promise<WorkflowEventTriggerInspection> {
+  return request("/api/workflows/development/event-trigger/inspect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ yaml }),
+    signal,
+  })
+}
+
+export async function renderWorkflowEventTrigger(payload: {
+  yaml: string
+  revision: string
+  event_trigger: WorkflowEventTrigger | null
+}): Promise<WorkflowEventTriggerRenderResult> {
+  return request("/api/workflows/development/event-trigger/render", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function matchWorkflowEventTrigger(
+  payload: {
+    yaml: string
+    event_id: string
+  },
+  signal?: AbortSignal,
+): Promise<WorkflowEventTriggerMatchResult> {
+  return request("/api/workflows/development/event-trigger/match", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  })
+}
+
 export async function aiReviseWorkflowDevelopment(payload: {
   prompt?: string
   target_ref?: string
@@ -318,6 +400,7 @@ export async function testWorkflowDevelopment(payload: {
   secrets?: Record<string, string>
   session?: string
   delivery?: WorkflowDeliveryPayload
+  event_id?: string
   async?: boolean
 }): Promise<WorkflowDevelopmentTestResult> {
   const res = await launcherFetch("/api/workflows/development/test", {

@@ -84,6 +84,20 @@ import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 
+import {
+  type WorkflowEditorMode,
+  WorkflowEditorTabs,
+} from "./workflow-editor-tabs"
+import {
+  WorkflowEventTestContext,
+  type WorkflowEventTestMatchState,
+} from "./workflow-event-test-context"
+import {
+  WorkflowEventTriggerEditor,
+  type WorkflowEventTriggerInspectionState,
+} from "./workflow-event-trigger-editor"
+import { workflowDraftTestRepairPrompt } from "./workflow-repair-context"
+
 const terminalStatuses = new Set(["succeeded", "failed", "canceled", "skipped"])
 const workflowEventStreamKinds = [
   "workflow.run.start",
@@ -104,6 +118,7 @@ const workflowTerminalEventKinds = new Set([
 ])
 
 type PageMode = "develop" | "operate"
+type DraftEditorMode = WorkflowEditorMode
 type DevelopmentPendingAction =
   | "start-ai"
   | "start"
@@ -123,6 +138,7 @@ type DraftTestSnapshot = {
   sessionID: string
   draftKey: string
   runID?: string
+  eventID?: string
   status: string
   error?: string
   testedAt: string
@@ -140,6 +156,18 @@ type WorkflowRepairStart = {
 type WorkflowRunInputValues = Record<string, string>
 type WorkflowRunSecretValues = Record<string, string>
 
+const initialEventTriggerInspection: WorkflowEventTriggerInspectionState = {
+  yaml: "",
+  status: "loading",
+  triggerPresent: false,
+  editable: false,
+}
+
+const initialEventTestMatch: WorkflowEventTestMatchState = {
+  status: "idle",
+  message: "Select a recent event to check this trigger.",
+}
+
 export function WorkflowsPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -151,6 +179,12 @@ export function WorkflowsPage() {
   const [draftPrompt, setDraftPrompt] = useState("")
   const [draftTargetRef, setDraftTargetRef] = useState("")
   const [draftYAML, setDraftYAML] = useState("")
+  const [draftEditorMode, setDraftEditorMode] =
+    useState<DraftEditorMode>("yaml")
+  const [eventTriggerInspection, setEventTriggerInspection] =
+    useState<WorkflowEventTriggerInspectionState>(initialEventTriggerInspection)
+  const [eventTestMatch, setEventTestMatch] =
+    useState<WorkflowEventTestMatchState>(initialEventTestMatch)
   const [testInputsJSON, setTestInputsJSON] = useState("{}")
   const [testSecretsJSON, setTestSecretsJSON] = useState("{}")
   const [testSession, setTestSession] = useState("")
@@ -387,6 +421,21 @@ export function WorkflowsPage() {
     setLastDraftTest(draftTestSnapshotFromSession(session))
   }, [session])
 
+  useEffect(() => {
+    if (
+      eventTriggerInspection.yaml !== draftYAML ||
+      eventTriggerInspection.status !== "ready" ||
+      !eventTriggerInspection.triggerPresent
+    ) {
+      setEventTestMatch(initialEventTestMatch)
+    }
+  }, [
+    draftYAML,
+    eventTriggerInspection.status,
+    eventTriggerInspection.triggerPresent,
+    eventTriggerInspection.yaml,
+  ])
+
   const filteredRuns = useMemo(() => {
     const needle = query.trim().toLowerCase()
     if (needle === "") {
@@ -432,10 +481,32 @@ export function WorkflowsPage() {
     setRunInputValues(workflowRunInitialInputValues(selectedWorkflow ?? null))
     setRunSecretValues(workflowRunInitialSecretValues(selectedWorkflow ?? null))
   }, [selectedWorkflow, selectedWorkflowContractSignature])
+  const eventTriggerInspectionCurrent =
+    eventTriggerInspection.yaml === draftYAML &&
+    eventTriggerInspection.status === "ready"
+  const eventTriggerPresent =
+    eventTriggerInspectionCurrent && eventTriggerInspection.triggerPresent
+  const eventContextReadinessError =
+    eventTriggerInspection.yaml !== draftYAML ||
+    eventTriggerInspection.status === "loading"
+      ? "Wait for the current YAML to be inspected before testing."
+      : eventTriggerInspection.status === "error"
+        ? `Event trigger inspection failed: ${eventTriggerInspection.reason ?? "unknown error"}`
+        : eventTriggerPresent &&
+            (eventTestMatch.status !== "matched" || !eventTestMatch.eventID)
+          ? eventTestMatch.message
+          : null
   const testPayloadError = firstMessage([
-    jsonObjectValidationMessage(testInputsJSON, "Inputs"),
-    jsonStringObjectValidationMessage(testSecretsJSON, "Secrets"),
-    jsonObjectValidationMessage(testDeliveryJSON, "Delivery"),
+    eventContextReadinessError,
+    eventTriggerPresent
+      ? null
+      : jsonObjectValidationMessage(testInputsJSON, "Inputs"),
+    eventTriggerPresent
+      ? null
+      : jsonStringObjectValidationMessage(testSecretsJSON, "Secrets"),
+    eventTriggerPresent
+      ? null
+      : jsonObjectValidationMessage(testDeliveryJSON, "Delivery"),
   ])
   const testReadinessMessage = workflowTestReadinessMessage({
     session,
@@ -654,10 +725,20 @@ export function WorkflowsPage() {
           // Event context is helpful for repair, but the failed test itself is enough to proceed.
         }
       }
+      const repairResult =
+        lastDraftTest == null
+          ? null
+          : {
+              ...lastDraftTest,
+              eventID:
+                typeof repairRun?.event?.id === "string"
+                  ? repairRun.event.id
+                  : lastDraftTest.eventID,
+            }
       return aiReviseWorkflowDevelopment({
         prompt: workflowDraftTestRepairPrompt(
           draftPrompt,
-          lastDraftTest,
+          repairResult,
           lastDraftTestStale,
           repairRun,
           repairEvents,
@@ -705,10 +786,17 @@ export function WorkflowsPage() {
         prompt: draftPrompt,
         target_ref: draftTargetRef,
         yaml: draftYAML,
-        inputs: parseJSONObject(testInputsJSON, "Inputs"),
-        secrets: parseStringJSONObject(testSecretsJSON, "Secrets"),
-        session: optionalString(testSession),
-        delivery: parseDeliveryJSONObject(testDeliveryJSON, "Delivery"),
+        inputs: eventTriggerPresent
+          ? undefined
+          : parseJSONObject(testInputsJSON, "Inputs"),
+        secrets: eventTriggerPresent
+          ? undefined
+          : parseStringJSONObject(testSecretsJSON, "Secrets"),
+        session: eventTriggerPresent ? undefined : optionalString(testSession),
+        delivery: eventTriggerPresent
+          ? undefined
+          : parseDeliveryJSONObject(testDeliveryJSON, "Delivery"),
+        event_id: eventTriggerPresent ? eventTestMatch.eventID : undefined,
         async: true,
       }),
     onSuccess: ({ session: nextSession, result, error }) => {
@@ -717,6 +805,7 @@ export function WorkflowsPage() {
         sessionID: nextSession.id,
         draftKey: draftKey(nextSession.target_workflow_ref, nextSession.yaml),
         runID: result?.run_id,
+        eventID: eventTriggerPresent ? eventTestMatch.eventID : undefined,
         status: result?.status ?? "validation_failed",
         error: error ?? result?.error,
         testedAt: new Date().toISOString(),
@@ -940,6 +1029,9 @@ export function WorkflowsPage() {
 
   const refresh = () => {
     void invalidateWorkflowQueries(queryClient)
+    void queryClient.invalidateQueries({
+      queryKey: ["events", "workflow-draft-context"],
+    })
   }
 
   return (
@@ -997,6 +1089,14 @@ export function WorkflowsPage() {
             draftPrompt={draftPrompt}
             draftTargetRef={draftTargetRef}
             draftYAML={draftYAML}
+            draftEditorMode={draftEditorMode}
+            eventTriggerInspection={eventTriggerInspection}
+            eventTriggerPresent={eventTriggerPresent}
+            testEventID={
+              lastDraftTest?.draftKey === currentDraftKey
+                ? lastDraftTest.eventID
+                : undefined
+            }
             testInputsJSON={testInputsJSON}
             testSecretsJSON={testSecretsJSON}
             testSession={testSession}
@@ -1006,6 +1106,9 @@ export function WorkflowsPage() {
             onDraftPromptChange={setDraftPrompt}
             onDraftTargetRefChange={setDraftTargetRef}
             onDraftYAMLChange={setDraftYAML}
+            onDraftEditorModeChange={setDraftEditorMode}
+            onEventTriggerInspectionChange={setEventTriggerInspection}
+            onEventTestMatchChange={setEventTestMatch}
             onTestInputsJSONChange={setTestInputsJSON}
             onTestSecretsJSONChange={setTestSecretsJSON}
             onTestSessionChange={setTestSession}
@@ -1174,6 +1277,10 @@ function DevelopSurface({
   draftPrompt,
   draftTargetRef,
   draftYAML,
+  draftEditorMode,
+  eventTriggerInspection,
+  eventTriggerPresent,
+  testEventID,
   testInputsJSON,
   testSecretsJSON,
   testSession,
@@ -1183,6 +1290,9 @@ function DevelopSurface({
   onDraftPromptChange,
   onDraftTargetRefChange,
   onDraftYAMLChange,
+  onDraftEditorModeChange,
+  onEventTriggerInspectionChange,
+  onEventTestMatchChange,
   onTestInputsJSONChange,
   onTestSecretsJSONChange,
   onTestSessionChange,
@@ -1222,6 +1332,10 @@ function DevelopSurface({
   draftPrompt: string
   draftTargetRef: string
   draftYAML: string
+  draftEditorMode: DraftEditorMode
+  eventTriggerInspection: WorkflowEventTriggerInspectionState
+  eventTriggerPresent: boolean
+  testEventID?: string
   testInputsJSON: string
   testSecretsJSON: string
   testSession: string
@@ -1231,6 +1345,11 @@ function DevelopSurface({
   onDraftPromptChange: (value: string) => void
   onDraftTargetRefChange: (value: string) => void
   onDraftYAMLChange: (value: string) => void
+  onDraftEditorModeChange: (value: DraftEditorMode) => void
+  onEventTriggerInspectionChange: (
+    value: WorkflowEventTriggerInspectionState,
+  ) => void
+  onEventTestMatchChange: (value: WorkflowEventTestMatchState) => void
   onTestInputsJSONChange: (value: string) => void
   onTestSecretsJSONChange: (value: string) => void
   onTestSessionChange: (value: string) => void
@@ -1384,8 +1503,8 @@ function DevelopSurface({
   }
 
   return (
-    <div className="grid min-h-0 flex-1 gap-4 overflow-hidden xl:grid-cols-[minmax(360px,0.75fr)_minmax(0,1.25fr)]">
-      <section className="border-border bg-card/40 flex min-h-0 flex-col rounded-lg border">
+    <div className="grid min-h-0 flex-1 gap-4 overflow-auto xl:grid-cols-[minmax(360px,0.75fr)_minmax(0,1.25fr)] xl:overflow-hidden">
+      <section className="border-border bg-card/40 flex min-h-[36rem] flex-col rounded-lg border xl:min-h-0">
         <DevelopmentHeader session={session} />
         {busyLabel ? <DevelopmentBusyBar label={busyLabel} /> : null}
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4">
@@ -1420,72 +1539,103 @@ function DevelopSurface({
           <ValidationPanel validation={session.validation} />
           <Panel title="Test run">
             <div className="grid gap-3">
-              <div className="grid gap-2">
-                <label
-                  className="text-muted-foreground text-xs"
-                  htmlFor="workflow-test-inputs"
+              {eventTriggerInspection.yaml !== draftYAML ||
+              eventTriggerInspection.status === "loading" ? (
+                <div
+                  role="status"
+                  className="text-muted-foreground rounded-md border border-dashed px-3 py-4 text-center text-xs"
                 >
-                  Inputs JSON
-                </label>
-                <Textarea
-                  id="workflow-test-inputs"
-                  value={testInputsJSON}
-                  onChange={(event) =>
-                    onTestInputsJSONChange(event.target.value)
-                  }
-                  spellCheck={false}
-                  className="min-h-20 resize-none font-mono text-xs"
-                />
-              </div>
-              <div className="grid gap-2">
-                <label
-                  className="text-muted-foreground text-xs"
-                  htmlFor="workflow-test-secrets"
+                  Inspecting the current YAML for an event trigger…
+                </div>
+              ) : eventTriggerInspection.status === "error" ? (
+                <div
+                  role="alert"
+                  className="border-destructive/40 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-xs break-words"
                 >
-                  Secrets JSON
-                </label>
-                <Textarea
-                  id="workflow-test-secrets"
-                  value={testSecretsJSON}
-                  onChange={(event) =>
-                    onTestSecretsJSONChange(event.target.value)
-                  }
-                  spellCheck={false}
-                  className="min-h-20 resize-none font-mono text-xs"
+                  Event trigger inspection failed:{" "}
+                  {eventTriggerInspection.reason ?? "unknown error"}
+                </div>
+              ) : eventTriggerPresent ? (
+                <WorkflowEventTestContext
+                  yaml={draftYAML}
+                  disabled={busy}
+                  initialEventID={testEventID}
+                  onMatchStateChange={onEventTestMatchChange}
                 />
-              </div>
-              <div className="grid gap-2">
-                <label
-                  className="text-muted-foreground text-xs"
-                  htmlFor="workflow-test-session"
-                >
-                  Session
-                </label>
-                <Input
-                  id="workflow-test-session"
-                  value={testSession}
-                  onChange={(event) => onTestSessionChange(event.target.value)}
-                  placeholder="workflow:test"
-                  className="font-mono text-xs"
-                />
-              </div>
-              <div className="grid gap-2">
-                <label
-                  className="text-muted-foreground text-xs"
-                  htmlFor="workflow-test-delivery"
-                >
-                  Delivery JSON
-                </label>
-                <Textarea
-                  id="workflow-test-delivery"
-                  value={testDeliveryJSON}
-                  onChange={(event) =>
-                    onTestDeliveryJSONChange(event.target.value)
-                  }
-                  spellCheck={false}
-                  className="min-h-20 resize-none font-mono text-xs"
-                />
-              </div>
+              ) : (
+                <>
+                  <div className="grid gap-2">
+                    <label
+                      className="text-muted-foreground text-xs"
+                      htmlFor="workflow-test-inputs"
+                    >
+                      Inputs JSON
+                    </label>
+                    <Textarea
+                      id="workflow-test-inputs"
+                      value={testInputsJSON}
+                      onChange={(event) =>
+                        onTestInputsJSONChange(event.target.value)
+                      }
+                      spellCheck={false}
+                      className="min-h-20 resize-none font-mono text-xs"
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <label
+                      className="text-muted-foreground text-xs"
+                      htmlFor="workflow-test-session"
+                    >
+                      Session
+                    </label>
+                    <Input
+                      id="workflow-test-session"
+                      value={testSession}
+                      onChange={(event) =>
+                        onTestSessionChange(event.target.value)
+                      }
+                      placeholder="workflow:test"
+                      className="font-mono text-xs"
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <label
+                      className="text-muted-foreground text-xs"
+                      htmlFor="workflow-test-delivery"
+                    >
+                      Delivery JSON
+                    </label>
+                    <Textarea
+                      id="workflow-test-delivery"
+                      value={testDeliveryJSON}
+                      onChange={(event) =>
+                        onTestDeliveryJSONChange(event.target.value)
+                      }
+                      spellCheck={false}
+                      className="min-h-20 resize-none font-mono text-xs"
+                    />
+                  </div>
+                </>
+              )}
+              {!eventTriggerPresent ? (
+                <div className="grid gap-2">
+                  <label
+                    className="text-muted-foreground text-xs"
+                    htmlFor="workflow-test-secrets"
+                  >
+                    Secrets JSON
+                  </label>
+                  <Textarea
+                    id="workflow-test-secrets"
+                    value={testSecretsJSON}
+                    onChange={(event) =>
+                      onTestSecretsJSONChange(event.target.value)
+                    }
+                    spellCheck={false}
+                    className="min-h-20 resize-none font-mono text-xs"
+                  />
+                </div>
+              ) : null}
               <DraftTestResultPanel
                 result={lastDraftTest}
                 stale={lastDraftTestStale}
@@ -1574,21 +1724,52 @@ function DevelopSurface({
         </div>
       </section>
 
-      <section className="border-border bg-card/40 flex min-h-0 flex-col overflow-hidden rounded-lg border">
-        <div className="border-border flex items-center justify-between gap-3 border-b px-4 py-3">
-          <div className="flex items-center gap-2">
+      <section className="border-border bg-card/40 flex min-h-[36rem] flex-col overflow-hidden rounded-lg border xl:min-h-0">
+        <div className="border-border flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
+          <div className="flex min-w-0 items-center gap-2">
             <IconCode className="text-muted-foreground size-4" />
-            <h2 className="text-sm font-medium">Workflow YAML</h2>
+            <h2 className="truncate text-sm font-medium">
+              {draftEditorMode === "builder"
+                ? "Event trigger builder"
+                : "Workflow YAML"}
+            </h2>
           </div>
+          <WorkflowEditorTabs
+            mode={draftEditorMode}
+            onModeChange={onDraftEditorModeChange}
+          />
           <StatusBadge status={session.status} />
         </div>
-        <Textarea
-          aria-label="Workflow YAML"
-          value={draftYAML}
-          onChange={(event) => onDraftYAMLChange(event.target.value)}
-          spellCheck={false}
-          className="min-h-0 flex-1 resize-none rounded-none border-0 p-4 font-mono text-xs shadow-none focus-visible:ring-0"
-        />
+        <div
+          id="workflow-builder-panel"
+          role="tabpanel"
+          aria-labelledby="workflow-builder-tab"
+          hidden={draftEditorMode !== "builder"}
+          className="min-h-0 flex-1"
+        >
+          <WorkflowEventTriggerEditor
+            yaml={draftYAML}
+            disabled={busy}
+            onYAMLChange={onDraftYAMLChange}
+            onInspectionChange={onEventTriggerInspectionChange}
+            onOpenYAML={() => onDraftEditorModeChange("yaml")}
+          />
+        </div>
+        <div
+          id="workflow-yaml-panel"
+          role="tabpanel"
+          aria-labelledby="workflow-yaml-tab"
+          hidden={draftEditorMode !== "yaml"}
+          className="min-h-0 flex-1"
+        >
+          <Textarea
+            aria-label="Workflow YAML"
+            value={draftYAML}
+            onChange={(event) => onDraftYAMLChange(event.target.value)}
+            spellCheck={false}
+            className="size-full min-h-0 resize-none rounded-none border-0 p-4 font-mono text-xs shadow-none focus-visible:ring-0"
+          />
+        </div>
       </section>
     </div>
   )
@@ -3038,128 +3219,6 @@ function canFixDraftTestWithAI(result: DraftTestSnapshot, stale: boolean) {
   )
 }
 
-function workflowDraftTestRepairPrompt(
-  prompt: string,
-  result: DraftTestSnapshot | null,
-  stale: boolean,
-  run?: WorkflowRun,
-  events?: WorkflowRunEvent[],
-) {
-  const base = prompt.trim()
-  const lines = [
-    base === "" ? "Fix the workflow draft so its draft test passes." : base,
-  ]
-  if (result != null && canFixDraftTestWithAI(result, stale)) {
-    lines.push("")
-    lines.push(
-      "Last draft test failed. Update the workflow YAML so the next draft test passes.",
-    )
-    lines.push(`Test status: ${result.status}`)
-    if (result.runID) {
-      lines.push(`Run ID: ${result.runID}`)
-    }
-    if (result.error) {
-      lines.push(`Error: ${result.error}`)
-    }
-    appendWorkflowPromptJSONBlock(
-      lines,
-      "Failed run context",
-      workflowDraftTestRunContext(run, result),
-    )
-    appendWorkflowPromptJSONBlock(
-      lines,
-      "Recent failed run events",
-      workflowDraftTestEventContext(events, result),
-    )
-  }
-  return lines.join("\n")
-}
-
-const workflowRepairPromptBlockLimit = 4000
-
-function workflowDraftTestRunContext(
-  run: WorkflowRun | undefined,
-  result: DraftTestSnapshot | null,
-) {
-  if (run == null || result?.runID == null || run.id !== result.runID) {
-    return null
-  }
-  return {
-    run_id: run.id,
-    workflow_ref: run.workflow_ref,
-    status: run.status,
-    error: run.error,
-    inputs: run.inputs,
-    trigger_event: run.event,
-    outputs: run.outputs,
-    jobs: compactWorkflowExecutions(run.jobs),
-    steps: compactWorkflowExecutions(run.steps),
-  }
-}
-
-function workflowDraftTestEventContext(
-  events: WorkflowRunEvent[] | undefined,
-  result: DraftTestSnapshot | null,
-) {
-  if (result?.runID == null) {
-    return []
-  }
-  return (events ?? [])
-    .filter((event) => event.run_id === result.runID)
-    .slice(-8)
-    .map((event) => ({
-      time: event.time,
-      kind: event.kind,
-      job_id: event.job_id,
-      step_id: event.step_id,
-      message: event.message,
-      payload: event.payload,
-    }))
-}
-
-function compactWorkflowExecutions(
-  executions?: Record<
-    string,
-    {
-      status: string
-      error?: string
-      outputs?: Record<string, unknown>
-    }
-  >,
-) {
-  if (executions == null) {
-    return undefined
-  }
-  return Object.fromEntries(
-    Object.entries(executions).map(([id, execution]) => [
-      id,
-      {
-        status: execution.status,
-        error: execution.error,
-        outputs: execution.outputs,
-      },
-    ]),
-  )
-}
-
-function appendWorkflowPromptJSONBlock(
-  lines: string[],
-  label: string,
-  value: unknown,
-) {
-  const text = JSON.stringify(value, null, 2)
-  if (!text || text === "{}" || text === "[]" || text === "null") {
-    return
-  }
-  lines.push("")
-  lines.push(`${label}:`)
-  lines.push(
-    text.length > workflowRepairPromptBlockLimit
-      ? `${text.slice(0, workflowRepairPromptBlockLimit)}\n... truncated`
-      : text,
-  )
-}
-
 function IssueRow({
   issue,
 }: {
@@ -3812,6 +3871,7 @@ function draftTestSnapshotFromSession(
     sessionID: session.id,
     draftKey: session.last_test.draft_key,
     runID: session.last_test.run_id,
+    eventID: session.last_test.event_id,
     status: session.last_test.status,
     error: session.last_test.error,
     testedAt: session.last_test.tested_at,
