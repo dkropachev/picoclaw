@@ -191,6 +191,95 @@ jobs:
 	assertWorkflowRunCount(t, workspace, 0)
 }
 
+func TestHandleRunAndRetryFreshGateDisabledWorkflows(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	configPath := writeWorkflowDependencyTestConfig(t, workspace, false)
+	writeWorkflowDependencyDefinition(
+		t,
+		workspace,
+		"automation",
+		"workflows/disabled.yml",
+		workflowRunReadinessDefinition,
+	)
+	handler := NewHandler(configPath)
+	restore := stubWorkflowDependencyRuntime(t, nil)
+	defer restore()
+	current := checkPublishedWorkflowDependencies(
+		t,
+		handler,
+		"workflows/disabled.yml",
+	)
+	if current.Ready || current.WorkflowEnabled {
+		t.Fatalf("disabled dependency response = %#v", current)
+	}
+
+	now := time.Now().UTC()
+	previous := &workflows.Run{
+		ID:          "wr_disabled_previous",
+		WorkflowRef: "workflows/disabled.yml",
+		Status:      workflows.RunStatusFailed,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		CompletedAt: &now,
+	}
+	if err := workflows.NewFileRunStore(workspace).CreateRun(ctx, previous); err != nil {
+		t.Fatalf("CreateRun(previous) error = %v", err)
+	}
+
+	runNotReady := postWorkflowRun(
+		t,
+		handler,
+		map[string]any{"ref": "workflows/disabled.yml"},
+	)
+	assertWorkflowAdmissionError(
+		t,
+		runNotReady,
+		http.StatusConflict,
+		"workflow_dependencies_not_ready",
+	)
+	runMismatch := postWorkflowRun(
+		t,
+		handler,
+		map[string]any{
+			"ref":                          "workflows/disabled.yml",
+			"expected_dependency_revision": "sha256:stale",
+		},
+	)
+	assertWorkflowAdmissionError(
+		t,
+		runMismatch,
+		http.StatusConflict,
+		"dependency_revision_mismatch",
+	)
+
+	retryNotReady := postWorkflowRetry(
+		t,
+		handler,
+		previous.ID,
+		map[string]any{},
+	)
+	assertWorkflowAdmissionError(
+		t,
+		retryNotReady,
+		http.StatusConflict,
+		"workflow_dependencies_not_ready",
+	)
+	retryMismatch := postWorkflowRetry(
+		t,
+		handler,
+		previous.ID,
+		map[string]any{"expected_dependency_revision": "sha256:stale"},
+	)
+	assertWorkflowAdmissionError(
+		t,
+		retryMismatch,
+		http.StatusConflict,
+		"dependency_revision_mismatch",
+	)
+	assertWorkflowRunCount(t, workspace, 1)
+}
+
 func TestHandleRetryWorkflowRunGatesPreviousWorkflowRef(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()
@@ -351,6 +440,28 @@ func postWorkflowRun(
 			strings.NewReader(string(encoded)),
 		),
 	)
+	return recorder
+}
+
+func postWorkflowRetry(
+	t *testing.T,
+	handler *Handler,
+	runID string,
+	body map[string]any,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("json.Marshal(retry) error = %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/workflows/runs/"+runID+"/retry",
+		strings.NewReader(string(encoded)),
+	)
+	request.SetPathValue("run_id", runID)
+	handler.handleRetryWorkflowRun(recorder, request)
 	return recorder
 }
 

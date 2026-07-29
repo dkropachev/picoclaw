@@ -283,6 +283,15 @@ func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 		return
 	}
+	dependencies, err := h.requirePublishedWorkflowDependenciesReady(
+		r.Context(),
+		req.Ref,
+		req.ExpectedDependencyRevision,
+	)
+	if err != nil {
+		writeWorkflowRunDependencyError(w, err)
+		return
+	}
 	cfg, _, executor, err := h.workflowRuntime(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -295,16 +304,7 @@ func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	if !cfg.Workflows.Enabled {
-		http.Error(w, "workflows are disabled", http.StatusBadRequest)
-		return
-	}
-	dependencies, err := h.requirePublishedWorkflowDependenciesReady(
-		r.Context(),
-		req.Ref,
-		req.ExpectedDependencyRevision,
-	)
-	if err != nil {
-		writeWorkflowRunDependencyError(w, err)
+		writeWorkflowRunDependencyError(w, errWorkflowDependenciesNotReady)
 		return
 	}
 	if err := workflows.EnsureWorkflowRunnable(
@@ -417,14 +417,9 @@ func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request)
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 		return
 	}
-	cfg, store, executor, err := h.workflowRuntime(r.Context())
+	store, err := h.workflowRunStore(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer closeWorkflowRuntime(executor)
-	if !cfg.Workflows.Enabled {
-		http.Error(w, "workflows are disabled", http.StatusBadRequest)
 		return
 	}
 	previousRun, err := store.GetRun(r.Context(), r.PathValue("run_id"))
@@ -440,12 +435,22 @@ func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request)
 		)
 		return
 	}
-	if _, err := h.requirePublishedWorkflowDependenciesReady(
+	if _, dependencyErr := h.requirePublishedWorkflowDependenciesReady(
 		r.Context(),
 		previousRun.WorkflowRef,
 		req.ExpectedDependencyRevision,
-	); err != nil {
-		writeWorkflowRunDependencyError(w, err)
+	); dependencyErr != nil {
+		writeWorkflowRunDependencyError(w, dependencyErr)
+		return
+	}
+	cfg, _, executor, err := h.workflowRuntime(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer closeWorkflowRuntime(executor)
+	if !cfg.Workflows.Enabled {
+		writeWorkflowRunDependencyError(w, errWorkflowDependenciesNotReady)
 		return
 	}
 	if err := workflows.EnsureWorkflowRunnable(
