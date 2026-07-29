@@ -49,7 +49,9 @@ type workflowRetryRequest struct {
 }
 
 type workflowDefinitionResponse struct {
-	workflows.Definition
+	Ref          string                        `json:"ref"`
+	Name         string                        `json:"name,omitempty"`
+	Error        string                        `json:"error,omitempty"`
 	WorkflowCall *workflowCallContractResponse `json:"workflow_call,omitempty"`
 	EventTrigger *workflows.EventTrigger       `json:"event_trigger,omitempty"`
 }
@@ -62,6 +64,17 @@ type workflowCallContractResponse struct {
 func (h *Handler) registerWorkflowRoutes(mux *http.ServeMux) {
 	h.registerWorkflowEditorRoutes(mux)
 	mux.HandleFunc("GET /api/workflows", h.handleListWorkflows)
+	mux.HandleFunc("GET /api/workflows/settings", h.handleGetWorkflowSettings)
+	mux.HandleFunc("PATCH /api/workflows/settings", h.handlePatchWorkflowSettings)
+	mux.HandleFunc("GET /api/workflows/templates", h.handleListWorkflowTemplates)
+	mux.HandleFunc(
+		"POST /api/workflows/templates/{name}/install",
+		h.handleInstallWorkflowTemplate,
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/dependencies/check",
+		h.handleCheckWorkflowDependencies,
+	)
 	mux.HandleFunc("GET /api/workflows/compatibility", h.handleGetWorkflowCompatibility)
 	mux.HandleFunc("POST /api/workflows/revalidate", h.handleRevalidateWorkflows)
 	mux.HandleFunc("POST /api/workflows/validate", h.handleValidateWorkflow)
@@ -123,7 +136,11 @@ func workflowDefinitionResponses(
 ) ([]workflowDefinitionResponse, error) {
 	out := make([]workflowDefinitionResponse, 0, len(defs))
 	for _, def := range defs {
-		response := workflowDefinitionResponse{Definition: def}
+		response := workflowDefinitionResponse{
+			Ref:   def.Ref,
+			Name:  def.Name,
+			Error: def.Error,
+		}
 		if def.Error == "" {
 			workflow, err := workflows.LoadLocal(ctx, workspace, def.Ref, opts...)
 			if err != nil {
@@ -585,12 +602,17 @@ func (h *Handler) handleReviseWorkflowDevelopment(w http.ResponseWriter, r *http
 		return
 	}
 	defer unlock()
-	workspace, err := h.workflowWorkspace()
+	cfg, err := h.workflowConfig()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	session, err := workflows.ReviseWorkflowDevelopment(workspace, req)
+	workspace := cfg.WorkspacePath()
+	session, err := workflows.ReviseWorkflowDevelopment(
+		workspace,
+		req,
+		workflowLocalOptionsFromConfig(cfg)...,
+	)
 	if err != nil {
 		writeWorkflowDevelopmentError(w, err)
 		return
@@ -604,12 +626,16 @@ func (h *Handler) handleValidateWorkflowDevelopment(w http.ResponseWriter, r *ht
 		return
 	}
 	defer unlock()
-	workspace, err := h.workflowWorkspace()
+	cfg, err := h.workflowConfig()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	session, err := workflows.ValidateWorkflowDevelopment(workspace)
+	workspace := cfg.WorkspacePath()
+	session, err := workflows.ValidateWorkflowDevelopment(
+		workspace,
+		workflowLocalOptionsFromConfig(cfg)...,
+	)
 	if err != nil {
 		writeWorkflowDevelopmentError(w, err)
 		return
@@ -643,20 +669,22 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 		return
 	}
 	defer unlock()
-	workspace, err := h.workflowWorkspace()
+	cfg, err := h.workflowConfig()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	workspace := cfg.WorkspacePath()
+	localOpts := workflowLocalOptionsFromConfig(cfg)
 	if _, reviseErr := workflows.ReviseWorkflowDevelopment(workspace, workflows.WorkflowDevelopmentReviseRequest{
 		Prompt:    req.Prompt,
 		TargetRef: req.TargetRef,
 		YAML:      req.YAML,
-	}); reviseErr != nil {
+	}, localOpts...); reviseErr != nil {
 		writeWorkflowDevelopmentError(w, reviseErr)
 		return
 	}
-	session, err := workflows.ValidateWorkflowDevelopment(workspace)
+	session, err := workflows.ValidateWorkflowDevelopment(workspace, localOpts...)
 	if err != nil {
 		writeWorkflowDevelopmentError(w, err)
 		return
@@ -887,31 +915,6 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 		return
 	}
 	writeWorkflowJSON(w, map[string]any{"session": recorded, "result": result})
-}
-
-func (h *Handler) handlePublishWorkflowDevelopment(w http.ResponseWriter, r *http.Request) {
-	unlock := h.tryLockWorkflowDevelopment(w)
-	if unlock == nil {
-		return
-	}
-	defer unlock()
-	cfg, err := h.workflowConfig()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	workspace := cfg.WorkspacePath()
-	result, err := workflows.PublishWorkflowDevelopment(
-		r.Context(),
-		workspace,
-		h.workflowCompatibilityRuntime(r.Context()),
-		workflowLocalOptionsFromConfig(cfg)...,
-	)
-	if err != nil {
-		writeWorkflowDevelopmentError(w, err)
-		return
-	}
-	writeWorkflowJSON(w, result)
 }
 
 func (h *Handler) handleDiscardWorkflowDevelopment(w http.ResponseWriter, r *http.Request) {

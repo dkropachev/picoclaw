@@ -16,6 +16,7 @@ type WorkflowTool struct {
 	workspace      string
 	runtime        workflows.RuntimeCompatibility
 	definitionsDir string
+	publishGate    *WorkflowDevelopmentPublishGateConfig
 }
 
 func NewWorkflowTool(
@@ -361,7 +362,7 @@ func (t *WorkflowTool) devRevise(args map[string]any) *ToolResult {
 		YAML:       workflowOptionalStringArg(args, "yaml"),
 		Regenerate: workflowBoolArg(args, "regenerate"),
 	}
-	session, err := workflows.ReviseWorkflowDevelopment(t.workspace, req)
+	session, err := workflows.ReviseWorkflowDevelopment(t.workspace, req, t.localOptions()...)
 	if err != nil {
 		return ErrorResult(err.Error()).WithError(err)
 	}
@@ -369,7 +370,7 @@ func (t *WorkflowTool) devRevise(args map[string]any) *ToolResult {
 }
 
 func (t *WorkflowTool) devValidate() *ToolResult {
-	session, err := workflows.ValidateWorkflowDevelopment(t.workspace)
+	session, err := workflows.ValidateWorkflowDevelopment(t.workspace, t.localOptions()...)
 	if err != nil {
 		return ErrorResult(err.Error()).WithError(err)
 	}
@@ -384,11 +385,15 @@ func (t *WorkflowTool) devTest(ctx context.Context, args map[string]any) *ToolRe
 		Regenerate: workflowBoolArg(args, "regenerate"),
 	}
 	if req.Prompt != "" || req.TargetRef != "" || req.YAML != nil || req.Regenerate {
-		if _, err := workflows.ReviseWorkflowDevelopment(t.workspace, req); err != nil {
+		if _, err := workflows.ReviseWorkflowDevelopment(
+			t.workspace,
+			req,
+			t.localOptions()...,
+		); err != nil {
 			return ErrorResult(err.Error()).WithError(err)
 		}
 	}
-	session, err := workflows.ValidateWorkflowDevelopment(t.workspace)
+	session, err := workflows.ValidateWorkflowDevelopment(t.workspace, t.localOptions()...)
 	if err != nil {
 		return ErrorResult(err.Error()).WithError(err)
 	}
@@ -440,7 +445,62 @@ func (t *WorkflowTool) devTest(ctx context.Context, args map[string]any) *ToolRe
 }
 
 func (t *WorkflowTool) devPublish(ctx context.Context) *ToolResult {
-	result, err := workflows.PublishWorkflowDevelopment(ctx, t.workspace, t.runtime, t.localOptions()...)
+	gate, err := t.workflowDevelopmentPublishGate()
+	if err != nil {
+		return ErrorResult(err.Error()).WithError(err)
+	}
+	session, err := workflows.GetWorkflowDevelopmentSession(t.workspace)
+	if err != nil {
+		return ErrorResult(err.Error()).WithError(err)
+	}
+	if session == nil {
+		return ErrorResult(workflows.ErrNoActiveDevelopment.Error()).
+			WithError(workflows.ErrNoActiveDevelopment)
+	}
+	workflow, err := workflows.Parse([]byte(session.YAML))
+	if err != nil {
+		err = fmt.Errorf(
+			"%w: parse exact workflow draft: %v",
+			workflows.ErrWorkflowDevelopmentDraftNotReady,
+			err,
+		)
+		return ErrorResult(err.Error()).WithError(err)
+	}
+	if validateErr := workflows.Validate(workflow); validateErr != nil {
+		err = fmt.Errorf(
+			"%w: validate exact workflow draft: %v",
+			workflows.ErrWorkflowDevelopmentDraftNotReady,
+			validateErr,
+		)
+		return ErrorResult(err.Error()).WithError(err)
+	}
+	gateResult, err := gate(ctx, workflows.WorkflowDevelopmentPublishGateInput{
+		WorkflowRef:   session.TargetWorkflowRef,
+		DraftRevision: session.DraftRevision,
+		YAML:          session.YAML,
+		Workflow:      workflow,
+	})
+	if err != nil {
+		return ErrorResult(err.Error()).WithError(err)
+	}
+	if strings.TrimSpace(gateResult.Revision) == "" {
+		err = workflows.ErrWorkflowDevelopmentPublishGateRequired
+		return ErrorResult(err.Error()).WithError(err)
+	}
+	result, err := workflows.PublishWorkflowDevelopmentFenced(
+		ctx,
+		t.workspace,
+		workflows.WorkflowDevelopmentPublishRequest{
+			SessionID:                  session.ID,
+			ExpectedSessionRevision:    session.SessionRevision,
+			ExpectedDraftRevision:      session.DraftRevision,
+			ExpectedBaseTargetRevision: session.BaseTargetRevision,
+			ExpectedDependencyRevision: gateResult.Revision,
+		},
+		t.runtime,
+		gate,
+		t.localOptions()...,
+	)
 	if err != nil {
 		return ErrorResult(err.Error()).WithError(err)
 	}

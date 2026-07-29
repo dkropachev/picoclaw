@@ -10,6 +10,7 @@ import (
 	"time"
 
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
 )
 
 type fakeToolRunner struct {
@@ -690,6 +691,75 @@ jobs:
 	}
 	if got := agentRunner.requests[0].Session; got != "workflow:discussion" {
 		t.Fatalf("agent session = %q, want workflow:discussion", got)
+	}
+}
+
+func TestExecutorUsesCanonicalMCPToolNameAndMarksRequest(t *testing.T) {
+	toolRunner := &fakeToolRunner{}
+	executor := &Executor{Tools: toolRunner}
+	uses := "mcp/GitHub Server/issues.list"
+
+	if _, err := executor.runStepTarget(
+		context.Background(),
+		Step{Uses: uses},
+		map[string]any{"state": "open"},
+		ExecutionContext{Session: "workflow:test"},
+	); err != nil {
+		t.Fatalf("runStepTarget() error = %v", err)
+	}
+	if len(toolRunner.requests) != 1 {
+		t.Fatalf("tool requests = %d, want 1", len(toolRunner.requests))
+	}
+	request := toolRunner.requests[0]
+	if got, want := request.Name, picomcp.CanonicalToolName("GitHub Server", "issues.list"); got != want {
+		t.Fatalf("tool request name = %q, want %q", got, want)
+	}
+	if !request.MCP {
+		t.Fatal("tool request MCP = false, want true")
+	}
+	if request.MCPServer != "GitHub Server" || request.MCPTool != "issues.list" {
+		t.Fatalf(
+			"tool request MCP identity = %q/%q, want GitHub Server/issues.list",
+			request.MCPServer,
+			request.MCPTool,
+		)
+	}
+	if request.Session != "workflow:test" {
+		t.Fatalf("tool request session = %q, want workflow:test", request.Session)
+	}
+}
+
+func TestExecutorPreservesSimpleMCPToolName(t *testing.T) {
+	toolRunner := &fakeToolRunner{}
+	executor := &Executor{Tools: toolRunner}
+
+	if _, err := executor.runStepTarget(
+		context.Background(),
+		Step{Uses: "mcp/github/create_issue"},
+		nil,
+		ExecutionContext{},
+	); err != nil {
+		t.Fatalf("runStepTarget() error = %v", err)
+	}
+	if got := toolRunner.requests[0].Name; got != "mcp_github_create_issue" {
+		t.Fatalf("tool request name = %q, want mcp_github_create_issue", got)
+	}
+}
+
+func TestExecutorRejectsIncompleteMCPUsesTarget(t *testing.T) {
+	toolRunner := &fakeToolRunner{}
+	executor := &Executor{Tools: toolRunner}
+
+	if _, err := executor.runStepTarget(
+		context.Background(),
+		Step{Uses: "mcp/github"},
+		nil,
+		ExecutionContext{},
+	); err == nil || !strings.Contains(err.Error(), "expected mcp/<server>/<tool>") {
+		t.Fatalf("runStepTarget() error = %v, want MCP target shape error", err)
+	}
+	if len(toolRunner.requests) != 0 {
+		t.Fatalf("tool requests = %d, want 0", len(toolRunner.requests))
 	}
 }
 

@@ -518,6 +518,9 @@ func computeConfigSignature(cfg *config.Config) string {
 	if len(toolSignatures) > 0 {
 		parts = append(parts, "tools:"+strings.Join(toolSignatures, ","))
 	}
+	if workflowSignature := computeWorkflowRuntimeSignature(cfg); workflowSignature != "" {
+		parts = append(parts, "workflow_runtime:"+workflowSignature)
+	}
 	channelSignatures := computeChannelSignatures(cfg.Channels)
 	if len(channelSignatures) > 0 {
 		parts = append(parts, "channels:"+strings.Join(channelSignatures, ","))
@@ -526,6 +529,38 @@ func computeConfigSignature(cfg *config.Config) string {
 		parts = append(parts, "event_ingress:"+eventIngressSignature)
 	}
 	return strings.Join(parts, ";")
+}
+
+func computeWorkflowRuntimeSignature(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	payload := struct {
+		Enabled           bool          `json:"enabled"`
+		ToolEnabled       bool          `json:"tool_enabled,omitempty"`
+		Workspace         string        `json:"workspace,omitempty"`
+		DefinitionsDir    string        `json:"definitions_dir,omitempty"`
+		MaxConcurrentRuns int           `json:"max_concurrent_runs,omitempty"`
+		DefaultTimeout    time.Duration `json:"default_timeout,omitempty"`
+		MaxCallDepth      int           `json:"max_call_depth,omitempty"`
+		RetentionDays     int           `json:"retention_days,omitempty"`
+	}{
+		Enabled: cfg.Workflows.Enabled,
+	}
+	if cfg.Workflows.Enabled {
+		payload.ToolEnabled = cfg.Tools.Workflow.Enabled
+		payload.Workspace = cfg.WorkspacePath()
+		payload.DefinitionsDir = cfg.Workflows.EffectiveDefinitionsDir()
+		payload.MaxConcurrentRuns = cfg.Workflows.EffectiveMaxConcurrentRuns()
+		payload.DefaultTimeout = cfg.Workflows.EffectiveDefaultTimeout()
+		payload.MaxCallDepth = cfg.Workflows.EffectiveMaxCallDepth()
+		payload.RetentionDays = cfg.Workflows.EffectiveRetentionDays()
+	}
+	encoded, err := json.Marshal(canonicalizeSignatureValue(reflect.ValueOf(payload)))
+	if err != nil {
+		return "<invalid>"
+	}
+	return string(encoded)
 }
 
 func computeEventIngressSignature(cfg *config.Config) string {

@@ -42,14 +42,34 @@ func (opts localOptions) resolver(workspace string) Resolver {
 }
 
 func (opts localOptions) definitionsRoot(workspace string) (string, error) {
-	dir, err := cleanDefinitionsDir(opts.DefinitionsDir)
+	resolved, err := opts.resolver(workspace).ResolveLocal(
+		"workflows/.definitions-root-check.yml",
+	)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(workspace, dir), nil
+	return filepath.Dir(resolved.Path), nil
 }
 
 func ListLocal(ctx context.Context, workspace string, opts ...LocalOption) ([]Definition, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	unlock, err := lockWorkflowMutation(workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return listLocalLocked(ctx, workspace, opts...)
+}
+
+// listLocalLocked reads one catalog snapshot while the caller owns the
+// workspace mutation lock.
+func listLocalLocked(
+	ctx context.Context,
+	workspace string,
+	opts ...LocalOption,
+) ([]Definition, error) {
 	local := collectLocalOptions(opts...)
 	root, err := local.definitionsRoot(workspace)
 	if err != nil {
@@ -90,7 +110,7 @@ func ListLocal(ctx context.Context, workspace string, opts ...LocalOption) ([]De
 			def.Error = resolveErr.Error()
 		}
 		if def.Error == "" {
-			workflow, loadErr := LoadLocal(ctx, workspace, def.Ref, opts...)
+			workflow, loadErr := loadLocalLocked(ctx, workspace, def.Ref, opts...)
 			if loadErr != nil {
 				def.Error = loadErr.Error()
 			} else {
@@ -110,6 +130,25 @@ func ListLocal(ctx context.Context, workspace string, opts ...LocalOption) ([]De
 }
 
 func LoadLocal(ctx context.Context, workspace, ref string, opts ...LocalOption) (*Workflow, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	unlock, err := lockWorkflowMutation(workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return loadLocalLocked(ctx, workspace, ref, opts...)
+}
+
+// loadLocalLocked reads one definition while the caller owns the workspace
+// mutation lock.
+func loadLocalLocked(
+	ctx context.Context,
+	workspace string,
+	ref string,
+	opts ...LocalOption,
+) (*Workflow, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

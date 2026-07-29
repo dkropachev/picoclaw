@@ -70,6 +70,7 @@ export interface WorkflowDevelopmentValidation {
 
 export interface WorkflowDevelopmentTestSnapshot {
   draft_key: string
+  draft_revision?: string
   target_workflow_ref: string
   run_id?: string
   event_id?: string
@@ -80,6 +81,9 @@ export interface WorkflowDevelopmentTestSnapshot {
 
 export interface WorkflowDevelopmentSession {
   id: string
+  session_revision: string
+  draft_revision: string
+  base_target_revision: string
   reason: "new" | "edit" | "version_revalidation" | string
   status: string
   prompt?: string
@@ -224,6 +228,146 @@ export interface WorkflowRunLaunchResult {
   error?: string
 }
 
+export type WorkflowTemplateState =
+  | "available"
+  | "installed"
+  | "modified"
+  | "blocked"
+
+export interface WorkflowTemplateCatalogEntry {
+  name: string
+  ref: string
+  state: WorkflowTemplateState
+  blocked_reason?:
+    | "configuration_invalid"
+    | "target_not_regular"
+    | "target_unavailable"
+    | string
+}
+
+export interface WorkflowTemplateInstallResult {
+  name: string
+  ref: string
+  state: WorkflowTemplateState
+  installed: boolean
+  overwritten?: boolean
+  revalidated: boolean
+}
+
+export interface WorkflowTemplateCatalog {
+  templates: WorkflowTemplateCatalogEntry[]
+}
+
+export interface WorkflowSettingsValues {
+  enabled: boolean
+  definitions_dir: string
+  max_concurrent_runs: number
+  default_timeout_seconds: number
+  max_call_depth: number
+  retention_days: number
+}
+
+export interface WorkflowSettingsEffects {
+  launcher_effect: string
+  catalog_effect: string
+  gateway_effect: string
+}
+
+export interface WorkflowSettingsResponse {
+  configured: WorkflowSettingsValues
+  effective: WorkflowSettingsValues
+  config_revision: string
+  effects: WorkflowSettingsEffects
+}
+
+export interface WorkflowSettingsPatch extends Partial<WorkflowSettingsValues> {
+  expected_config_revision: string
+}
+
+export type WorkflowDependencyKind =
+  | "agent"
+  | "tool"
+  | "mcp"
+  | "function"
+  | "reusable"
+
+export interface WorkflowDependencyOccurrence {
+  kind: WorkflowDependencyKind
+  name: string
+  workflow_ref: string
+  path: string
+}
+
+export type WorkflowDependencyIssueCode =
+  | "invalid_reusable_ref"
+  | "reusable_unavailable"
+  | "reusable_invalid"
+  | "reusable_cycle"
+  | "call_depth_exceeded"
+  | "missing_required_input"
+  | "input_type_mismatch"
+  | "invalid_secrets"
+  | "missing_required_secret"
+  | "analysis_limit_exceeded"
+
+export interface WorkflowDependencyIssue {
+  code: WorkflowDependencyIssueCode
+  workflow_ref: string
+  path: string
+  dependency_kind?: WorkflowDependencyKind
+  dependency_name?: string
+}
+
+export type WorkflowDependencyReadinessCode =
+  | "ready"
+  | "unchecked"
+  | "not_configured"
+  | "disabled"
+  | "not_allowed"
+  | "not_connected"
+  | "not_found"
+  | "invalid_configuration"
+  | "name_collision"
+  | "unavailable"
+
+export interface WorkflowDependencyReadiness {
+  dependency: WorkflowDependencyOccurrence
+  code: WorkflowDependencyReadinessCode
+  ready: boolean
+}
+
+export interface WorkflowDependencyCheckResponse {
+  root_ref: string
+  revision: string
+  ready: boolean
+  workflow_enabled: boolean
+  structural_ready: boolean
+  runtime_ready: boolean
+  dependencies: WorkflowDependencyReadiness[]
+  structural_issues: WorkflowDependencyIssue[]
+}
+
+export type WorkflowDependencyCheckRequest =
+  | {
+      draft: {
+        target_ref: string
+        yaml: string
+      }
+      ref?: never
+    }
+  | {
+      ref: string
+      draft?: never
+    }
+
+export interface WorkflowDevelopmentPublishRequest {
+  session_id: string
+  expected_session_revision: string
+  expected_draft_revision: string
+  expected_base_target_revision: string
+  expected_dependency_revision: string
+}
+
 export type WorkflowDeliveryPayload = Record<string, unknown>
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -282,6 +426,82 @@ export async function revalidateWorkflows(): Promise<WorkflowCompatibilitySummar
       method: "POST",
     }),
   )
+}
+
+export async function listWorkflowTemplates(): Promise<WorkflowTemplateCatalog> {
+  const payload = await requestWorkflowControl<{
+    templates?: WorkflowTemplateCatalogEntry[] | null
+  }>(
+    "/api/workflows/templates",
+    undefined,
+    "Built-in workflow templates are unavailable.",
+  )
+  return { templates: arrayOrEmpty(payload.templates) }
+}
+
+export async function installWorkflowTemplate(
+  name: string,
+  overwrite: boolean,
+): Promise<{
+  result: WorkflowTemplateInstallResult
+  templates: WorkflowTemplateCatalogEntry[]
+}> {
+  const payload = await requestWorkflowControl<{
+    result: WorkflowTemplateInstallResult
+    templates?: WorkflowTemplateCatalogEntry[] | null
+  }>(
+    `/api/workflows/templates/${encodeURIComponent(name)}/install`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ overwrite }),
+    },
+    "The workflow template could not be installed.",
+  )
+  return { ...payload, templates: arrayOrEmpty(payload.templates) }
+}
+
+export async function getWorkflowSettings(): Promise<WorkflowSettingsResponse> {
+  return requestWorkflowControl(
+    "/api/workflows/settings",
+    undefined,
+    "Workflow settings are unavailable.",
+  )
+}
+
+export async function patchWorkflowSettings(
+  payload: WorkflowSettingsPatch,
+): Promise<WorkflowSettingsResponse> {
+  return requestWorkflowControl(
+    "/api/workflows/settings",
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    "Workflow settings could not be saved.",
+  )
+}
+
+export async function checkWorkflowDependencies(
+  payload: WorkflowDependencyCheckRequest,
+  signal?: AbortSignal,
+): Promise<WorkflowDependencyCheckResponse> {
+  const result = await requestWorkflowControl<WorkflowDependencyCheckResponse>(
+    "/api/workflows/dependencies/check",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal,
+    },
+    "Workflow dependency readiness is unavailable.",
+  )
+  return {
+    ...result,
+    dependencies: arrayOrEmpty(result.dependencies),
+    structural_issues: arrayOrEmpty(result.structural_issues),
+  }
 }
 
 export async function getWorkflowDevelopment(): Promise<{
@@ -430,11 +650,21 @@ export async function testWorkflowDevelopment(payload: {
   throw new Error(apiErrorMessage(text, res.status, res.statusText))
 }
 
-export async function publishWorkflowDevelopment(): Promise<{
+export async function publishWorkflowDevelopment(
+  payload: WorkflowDevelopmentPublishRequest,
+): Promise<{
   workflow_ref: string
   session: WorkflowDevelopmentSession
 }> {
-  return request("/api/workflows/development/publish", { method: "POST" })
+  return requestWorkflowControl(
+    "/api/workflows/development/publish",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+    "The workflow could not be published.",
+  )
 }
 
 export async function discardWorkflowDevelopment(): Promise<{
@@ -557,6 +787,96 @@ export async function retryWorkflowRun(
     },
   )
   return workflowRunLaunchResultFromResponse(res)
+}
+
+async function requestWorkflowControl<T>(
+  path: string,
+  options: RequestInit | undefined,
+  fallbackMessage: string,
+): Promise<T> {
+  const res = await launcherFetch(path, options)
+  const text = await res.text()
+  if (!res.ok) {
+    throw new Error(workflowControlErrorMessage(text, fallbackMessage))
+  }
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new Error(fallbackMessage)
+  }
+}
+
+function workflowControlErrorMessage(text: string, fallbackMessage: string) {
+  let code = ""
+  try {
+    const body = JSON.parse(text) as { error?: unknown }
+    if (typeof body.error === "string") {
+      code = body.error
+    }
+  } catch {
+    // Raw backend text is intentionally not exposed by workflow controls.
+  }
+  switch (code) {
+    case "template_not_found":
+      return "That built-in workflow template is no longer available."
+    case "template_overwrite_required":
+      return "This workflow has local changes. Confirm Restore built-in to replace them."
+    case "template_target_blocked":
+      return "The template target is blocked and must be resolved manually."
+    case "template_catalog_unavailable":
+      return "Built-in workflow templates are unavailable."
+    case "template_revalidation_failed":
+      return "The template was not installed because workflow revalidation failed."
+    case "template_rollback_failed":
+      return "Template recovery needs operator attention. No further changes were attempted."
+    case "template_recovery_failed":
+      return "Template recovery needs operator attention. No further changes were attempted."
+    case "workflow_development_active":
+      return "Finish or discard the active workflow draft before changing workflow definitions or templates."
+    case "config_revision_mismatch":
+      return "Workflow settings changed elsewhere. Reload them and try again."
+    case "invalid_workflow_settings":
+      return "Workflow settings are invalid. Check the directory and numeric values."
+    case "dependency_request_too_large":
+      return "This workflow draft is too large to check for dependencies."
+    case "invalid_dependency_request":
+      return "Set a valid local workflow target before checking dependencies."
+    case "workflow_not_found":
+      return "The workflow dependency root is no longer available."
+    case "workflow_invalid":
+      return "Fix workflow validation errors before checking dependencies."
+    case "dependency_check_unavailable":
+      return "Workflow dependency readiness is temporarily unavailable."
+    case "publish_request_too_large":
+    case "invalid_publish_request":
+      return "The publish request is invalid. Reload the draft and try again."
+    case "workflow_development_not_found":
+      return "The active workflow draft is no longer available."
+    case "workflow_development_busy":
+      return "Another workflow change is in progress. Wait and try again."
+    case "session_revision_mismatch":
+    case "draft_revision_mismatch":
+    case "target_revision_mismatch":
+      return "The workflow draft changed elsewhere. Reload it, test it, and check dependencies again."
+    case "dependency_revision_mismatch":
+      return "Workflow dependencies changed. Wait for a fresh readiness check and try again."
+    case "workflow_dependencies_not_ready":
+    case "workflow_publish_not_ready":
+      return "Resolve workflow publish blockers and run a fresh test before publishing."
+    case "workflow_publish_unavailable":
+      return "Workflow publishing is temporarily unavailable."
+    case "workflow_publish_recovery_failed":
+    case "workflow_publish_rollback_failed":
+      return "Workflow publish recovery needs operator attention. No further changes were attempted."
+    case "workflow_transaction_recovery_conflict":
+      return "Workflow recovery found files changed outside the interrupted transaction. Operator reconciliation is required; no files were changed."
+    case "workflow_publish_gate_required":
+      return "Workflow publishing is unavailable until dependency enforcement is restored."
+    case "workflow_publish_failed":
+      return "The workflow could not be published. Reload the draft and try again."
+    default:
+      return fallbackMessage
+  }
 }
 
 function arrayOrEmpty<T>(value: T[] | null | undefined): T[] {

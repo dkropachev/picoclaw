@@ -356,6 +356,9 @@ func TestEventWorkflowRouterFansOutAndDeduplicatesExistingDispatch(t *testing.T)
 	byRef := make(map[string]eventing.Dispatch, len(page.Dispatches))
 	for _, dispatch := range page.Dispatches {
 		byRef[dispatch.WorkflowRef] = dispatch
+		if !strings.HasPrefix(dispatch.WorkflowRevision, "sha256:") {
+			t.Fatalf("dispatch %s revision = %q, want persisted content hash", dispatch.ID, dispatch.WorkflowRevision)
+		}
 	}
 	if byRef["workflows/a.yml"].ID != existing.ID ||
 		byRef["workflows/a.yml"].RunID != existing.RunID {
@@ -611,6 +614,98 @@ func TestEventWorkflowDispatcherRunsDeterministicRequestAndSucceeds(t *testing.T
 		duplicate.ID != fixture.dispatch.ID ||
 		duplicate.RunID != fixture.dispatch.RunID {
 		t.Fatalf("deterministic duplicate = %#v, %v, %v", duplicate, created, err)
+	}
+}
+
+func TestEventWorkflowDispatcherRejectsDefinitionDriftAfterRouting(t *testing.T) {
+	clock := newEventTestClock()
+	store := openEventTestStore(t, clock)
+	workspace := t.TempDir()
+	ref := writeEventTestWorkflow(t, workspace, "drift.yml", "*")
+	inserted := insertEventTestEnvelope(t, store, "dispatcher-definition-drift")
+	router := newEventTestRouter(store, workspace, clock)
+	processed, err := router.ProcessOne(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("router ProcessOne() = %v, %v", processed, err)
+	}
+	page, err := store.ListDispatches(
+		context.Background(),
+		eventing.DispatchFilter{EventID: inserted.Envelope.ID},
+	)
+	if err != nil || len(page.Dispatches) != 1 {
+		t.Fatalf("ListDispatches() = %#v, %v", page, err)
+	}
+	selected := page.Dispatches[0]
+	if !strings.HasPrefix(selected.WorkflowRevision, "sha256:") {
+		t.Fatalf("selected revision = %q, want content hash", selected.WorkflowRevision)
+	}
+
+	// Version B still matches, so trigger re-evaluation alone cannot authorize
+	// it under version A's durable selection.
+	writeEventTestWorkflow(t, workspace, "drift.yml", "pull_request.*")
+	executor := &recordingEventExecutor{
+		run: func(context.Context, RunRequest) (*RunResult, error) {
+			t.Fatal("executor called after selected workflow revision drifted")
+			return nil, nil
+		},
+	}
+	dispatcher := &EventWorkflowDispatcher{
+		Inbox:         store,
+		Executor:      executor,
+		RunStore:      NewFileRunStore(workspace),
+		WorkspaceDir:  workspace,
+		LeaseDuration: time.Minute,
+		MaxAttempts:   1,
+		RetryBase:     time.Second,
+		RetryMax:      time.Second,
+		Now:           clock.Now,
+	}
+	processed, err = dispatcher.ProcessOne(context.Background())
+	if !processed || err == nil || !strings.Contains(err.Error(), "revision changed") {
+		t.Fatalf("dispatcher ProcessOne() = %v, %v, want revision-drift failure", processed, err)
+	}
+	if len(executor.Requests()) != 0 {
+		t.Fatalf("executor requests = %#v, want none", executor.Requests())
+	}
+	finished, err := store.GetDispatch(context.Background(), selected.ID)
+	if err != nil {
+		t.Fatalf("GetDispatch() error = %v", err)
+	}
+	if finished.Status != eventing.DispatchDead ||
+		!strings.Contains(finished.LastError, "revision changed") {
+		t.Fatalf("drifted dispatch = %#v, want dead fail-closed state", finished)
+	}
+	if finished.WorkflowRef != ref {
+		t.Fatalf("workflow ref = %q, want %q", finished.WorkflowRef, ref)
+	}
+}
+
+func TestEventWorkflowDispatcherLegacyDispatchReevaluatesCurrentTrigger(t *testing.T) {
+	fixture := newEventDispatchFixture(t, "dispatcher-legacy-trigger-drift")
+	if fixture.dispatch.WorkflowRevision != "" {
+		t.Fatalf("legacy dispatch revision = %q, want empty", fixture.dispatch.WorkflowRevision)
+	}
+	writeEventTestWorkflow(t, fixture.workspace, "dispatch.yml", "issues.*")
+	executor := &recordingEventExecutor{
+		run: func(context.Context, RunRequest) (*RunResult, error) {
+			t.Fatal("executor called for legacy dispatch whose current trigger does not match")
+			return nil, nil
+		},
+	}
+	dispatcher := fixture.dispatcher(executor)
+	dispatcher.MaxAttempts = 1
+
+	processed, err := dispatcher.ProcessOne(context.Background())
+	if !processed || err == nil || !strings.Contains(err.Error(), "no longer matches") {
+		t.Fatalf("ProcessOne() = %v, %v, want trigger re-evaluation failure", processed, err)
+	}
+	if len(executor.Requests()) != 0 {
+		t.Fatalf("executor requests = %#v, want none", executor.Requests())
+	}
+	finished := fixture.getDispatch(t)
+	if finished.Status != eventing.DispatchDead ||
+		!strings.Contains(finished.LastError, "no longer matches") {
+		t.Fatalf("legacy dispatch = %#v, want dead fail-closed state", finished)
 	}
 }
 
@@ -1497,9 +1592,9 @@ type createFailureEventInbox struct {
 	alwaysFail bool
 }
 
-func (i *createFailureEventInbox) CreateDispatchForRoutingClaim(
+func (i *createFailureEventInbox) CreateRevisionedDispatchForRoutingClaim(
 	ctx context.Context,
-	eventID, leaseToken, workflowRef string,
+	eventID, leaseToken, workflowRef, workflowRevision string,
 ) (eventing.Dispatch, bool, error) {
 	i.mu.Lock()
 	i.callCount++
@@ -1509,7 +1604,13 @@ func (i *createFailureEventInbox) CreateDispatchForRoutingClaim(
 	if fail {
 		return eventing.Dispatch{}, false, errEventTestCreateDispatch
 	}
-	return i.Store.CreateDispatchForRoutingClaim(ctx, eventID, leaseToken, workflowRef)
+	return i.Store.CreateRevisionedDispatchForRoutingClaim(
+		ctx,
+		eventID,
+		leaseToken,
+		workflowRef,
+		workflowRevision,
+	)
 }
 
 type routingRenewFailureEventInbox struct {

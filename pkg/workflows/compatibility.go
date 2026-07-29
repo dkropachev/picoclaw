@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
 const (
@@ -19,7 +21,7 @@ const (
 	WorkflowValidationStatusPendingRevalidation = "pending_revalidation"
 	WorkflowValidationStatusNeedsReview         = "needs_review"
 
-	WorkflowEngineVersion    = "6"
+	WorkflowEngineVersion    = "7"
 	WorkflowSchemaVersion    = "2"
 	ValidatorFingerprint     = "picoclaw-workflow-validator-v3"
 	compatibilityManifestDir = "workflow_validations"
@@ -73,6 +75,19 @@ type WorkflowCompatibilitySummary struct {
 	HasBlocking     bool                      `json:"has_blocking"`
 }
 
+// LocalWorkflowSnapshot binds one parsed and validated workflow to the exact
+// content revision that produced it. Revision is opaque to callers.
+type LocalWorkflowSnapshot struct {
+	Ref      string
+	Revision string
+	Workflow *Workflow
+}
+
+type workflowCompatibilityOverlay struct {
+	ref  string
+	data []byte
+}
+
 func NormalizeRuntimeCompatibility(runtime RuntimeCompatibility) RuntimeCompatibility {
 	runtime.PicoclawVersion = strings.TrimSpace(runtime.PicoclawVersion)
 	if runtime.PicoclawVersion == "" {
@@ -100,12 +115,23 @@ func LoadCompatibilitySummary(
 	runtime RuntimeCompatibility,
 	opts ...LocalOption,
 ) (*WorkflowCompatibilitySummary, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	unlock, err := lockWorkflowMutation(workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	runtime = NormalizeRuntimeCompatibility(runtime)
 	manifest, missing, err := readCompatibilityManifest(workspace)
 	if err != nil {
 		return nil, err
 	}
-	defs, err := ListLocal(ctx, workspace, opts...)
+	defs, err := listLocalLocked(ctx, workspace, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -190,10 +216,71 @@ func RevalidateLocal(
 	runtime RuntimeCompatibility,
 	opts ...LocalOption,
 ) (*WorkflowCompatibilityManifest, error) {
-	runtime = NormalizeRuntimeCompatibility(runtime)
-	defs, err := ListLocal(ctx, workspace, opts...)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	unlock, err := lockWorkflowMutation(workspace)
 	if err != nil {
 		return nil, err
+	}
+	defer unlock()
+	return revalidateLocalLocked(ctx, workspace, runtime, opts...)
+}
+
+// revalidateLocalLocked rebuilds the compatibility manifest while the caller
+// holds the workspace mutation lock.
+func revalidateLocalLocked(
+	ctx context.Context,
+	workspace string,
+	runtime RuntimeCompatibility,
+	opts ...LocalOption,
+) (*WorkflowCompatibilityManifest, error) {
+	manifest, err := buildCompatibilityManifestLocked(
+		ctx,
+		workspace,
+		runtime,
+		nil,
+		opts...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeCompatibilityManifest(workspace, manifest); err != nil {
+		return nil, err
+	}
+	return manifest, nil
+}
+
+// buildCompatibilityManifestLocked builds a complete manifest without
+// activating it. When overlay is non-nil, its exact bytes replace (or add) the
+// selected definition in memory so publish can prepare the manifest before it
+// changes the target file.
+func buildCompatibilityManifestLocked(
+	ctx context.Context,
+	workspace string,
+	runtime RuntimeCompatibility,
+	overlay *workflowCompatibilityOverlay,
+	opts ...LocalOption,
+) (*WorkflowCompatibilityManifest, error) {
+	runtime = NormalizeRuntimeCompatibility(runtime)
+	defs, err := listLocalLocked(ctx, workspace, opts...)
+	if err != nil {
+		return nil, err
+	}
+	if overlay != nil {
+		found := false
+		for _, def := range defs {
+			if def.Ref == overlay.ref {
+				found = true
+				break
+			}
+		}
+		if !found {
+			defs = append(defs, Definition{Ref: overlay.ref})
+			sort.Slice(defs, func(i, j int) bool {
+				return defs[i].Ref < defs[j].Ref
+			})
+		}
 	}
 	now := time.Now().UTC()
 	manifest := &WorkflowCompatibilityManifest{
@@ -216,26 +303,43 @@ func RevalidateLocal(
 			Status:               WorkflowValidationStatusValid,
 			ValidatedAt:          now,
 		}
-		if hash, hashErr := workflowHash(ctx, workspace, def.Ref, opts...); hashErr == nil {
+		if overlay != nil && def.Ref == overlay.ref {
+			stamp.WorkflowHash = workflowHashBytes(overlay.data)
+			workflow, parseErr := Parse(overlay.data)
+			if parseErr != nil {
+				stamp.Status = WorkflowValidationStatusInvalid
+				stamp.Errors = ValidationIssues(parseErr)
+			} else if validateErr := Validate(workflow); validateErr != nil {
+				stamp.Status = WorkflowValidationStatusInvalid
+				stamp.Errors = ValidationIssues(validateErr)
+			}
+		} else if hash, hashErr := workflowHash(ctx, workspace, def.Ref, opts...); hashErr == nil {
 			stamp.WorkflowHash = hash
 		} else {
 			stamp.Status = WorkflowValidationStatusInvalid
 			stamp.Errors = []WorkflowValidationIssue{{Message: hashErr.Error()}}
+			if def.Error != "" {
+				stamp.Errors = []WorkflowValidationIssue{{Message: def.Error}}
+			}
 		}
-		if def.Error != "" {
-			stamp.Status = WorkflowValidationStatusInvalid
-			stamp.Errors = []WorkflowValidationIssue{{Message: def.Error}}
-		} else if workflow, loadErr := LoadLocal(ctx, workspace, def.Ref, opts...); loadErr != nil {
-			stamp.Status = WorkflowValidationStatusInvalid
-			stamp.Errors = []WorkflowValidationIssue{{Message: loadErr.Error()}}
-		} else if validateErr := Validate(workflow); validateErr != nil {
-			stamp.Status = WorkflowValidationStatusInvalid
-			stamp.Errors = ValidationIssues(validateErr)
+		if overlay == nil || def.Ref != overlay.ref {
+			if def.Error != "" {
+				stamp.Status = WorkflowValidationStatusInvalid
+				stamp.Errors = []WorkflowValidationIssue{{Message: def.Error}}
+			} else if workflow, loadErr := loadLocalLocked(
+				ctx,
+				workspace,
+				def.Ref,
+				opts...,
+			); loadErr != nil {
+				stamp.Status = WorkflowValidationStatusInvalid
+				stamp.Errors = []WorkflowValidationIssue{{Message: loadErr.Error()}}
+			} else if validateErr := Validate(workflow); validateErr != nil {
+				stamp.Status = WorkflowValidationStatusInvalid
+				stamp.Errors = ValidationIssues(validateErr)
+			}
 		}
 		manifest.Workflows[def.Ref] = stamp
-	}
-	if err := writeCompatibilityManifest(workspace, manifest); err != nil {
-		return nil, err
 	}
 	return manifest, nil
 }
@@ -247,6 +351,17 @@ func EnsureWorkflowRunnable(
 	runtime RuntimeCompatibility,
 	opts ...LocalOption,
 ) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	unlock, err := lockWorkflowMutation(workspace)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	runtime = NormalizeRuntimeCompatibility(runtime)
 	canonical, err := CanonicalLocalRef(ref)
 	if err != nil {
@@ -269,6 +384,37 @@ func LoadRunnableLocalSnapshot(
 	runtime RuntimeCompatibility,
 	opts ...LocalOption,
 ) (*Workflow, error) {
+	snapshot, err := LoadRunnableLocalSnapshotWithRevision(
+		ctx,
+		workspace,
+		ref,
+		runtime,
+		opts...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.Workflow, nil
+}
+
+// LoadRunnableLocalSnapshotWithRevision reads, compatibility-checks, parses,
+// and validates one exact workflow byte snapshot and returns its opaque
+// content revision.
+func LoadRunnableLocalSnapshotWithRevision(
+	ctx context.Context,
+	workspace string,
+	ref string,
+	runtime RuntimeCompatibility,
+	opts ...LocalOption,
+) (*LocalWorkflowSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	unlock, err := lockWorkflowMutation(workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -282,8 +428,7 @@ func LoadRunnableLocalSnapshot(
 	if err != nil {
 		return nil, err
 	}
-	sum := sha256.Sum256(data)
-	hash := "sha256:" + hex.EncodeToString(sum[:])
+	hash := workflowHashBytes(data)
 	if compatibilityErr := ensureWorkflowHashRunnable(
 		workspace,
 		resolved.Canonical,
@@ -299,7 +444,53 @@ func LoadRunnableLocalSnapshot(
 	if err := Validate(workflow); err != nil {
 		return nil, err
 	}
-	return workflow, nil
+	return &LocalWorkflowSnapshot{
+		Ref:      resolved.Canonical,
+		Revision: hash,
+		Workflow: workflow,
+	}, nil
+}
+
+// LoadValidatedLocalSnapshot reads, parses, and validates one exact local
+// workflow byte snapshot without requiring a runtime compatibility manifest.
+func LoadValidatedLocalSnapshot(
+	ctx context.Context,
+	workspace string,
+	ref string,
+	opts ...LocalOption,
+) (*LocalWorkflowSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	unlock, err := lockWorkflowMutation(workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	local := collectLocalOptions(opts...)
+	resolved, err := local.resolver(workspace).ResolveLocal(ref)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(resolved.Path)
+	if err != nil {
+		return nil, err
+	}
+	workflow, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := Validate(workflow); err != nil {
+		return nil, err
+	}
+	return &LocalWorkflowSnapshot{
+		Ref:      resolved.Canonical,
+		Revision: workflowHashBytes(data),
+		Workflow: workflow,
+	}, nil
 }
 
 func ensureWorkflowHashRunnable(
@@ -369,7 +560,11 @@ func stampMatchesRuntime(stamp WorkflowValidationStamp, runtime RuntimeCompatibi
 }
 
 func readCompatibilityManifest(workspace string) (*WorkflowCompatibilityManifest, bool, error) {
-	data, err := os.ReadFile(compatibilityManifestPath(workspace))
+	path, err := checkedCompatibilityManifestPath(workspace)
+	if err != nil {
+		return nil, false, err
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, true, nil
@@ -390,23 +585,30 @@ func writeCompatibilityManifest(workspace string, manifest *WorkflowCompatibilit
 	if manifest == nil {
 		return fmt.Errorf("compatibility manifest is required")
 	}
-	path := compatibilityManifestPath(workspace)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	path, err := checkedCompatibilityManifestPath(workspace)
+	if err != nil {
+		return err
+	}
+	if err := fileutil.MkdirAllDurable(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return writeWorkflowTemplateAtomic(path, data, 0o600)
 }
 
 func compatibilityManifestPath(workspace string) string {
 	return filepath.Join(workspace, compatibilityManifestDir, compatibilityManifest)
+}
+
+func checkedCompatibilityManifestPath(workspace string) (string, error) {
+	return resolveWorkflowInternalPath(
+		workspace,
+		compatibilityManifestDir,
+		compatibilityManifest,
+	)
 }
 
 func workflowHash(ctx context.Context, workspace, ref string, opts ...LocalOption) (string, error) {
@@ -422,6 +624,10 @@ func workflowHash(ctx context.Context, workspace, ref string, opts ...LocalOptio
 	if err != nil {
 		return "", err
 	}
+	return workflowHashBytes(data), nil
+}
+
+func workflowHashBytes(data []byte) string {
 	sum := sha256.Sum256(data)
-	return "sha256:" + hex.EncodeToString(sum[:]), nil
+	return "sha256:" + hex.EncodeToString(sum[:])
 }

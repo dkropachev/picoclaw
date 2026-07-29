@@ -12,6 +12,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
 	"github.com/sipeed/picoclaw/pkg/media"
 	toolshared "github.com/sipeed/picoclaw/pkg/tools/shared"
 )
@@ -104,6 +105,40 @@ func TestMCPTool_Name(t *testing.T) {
 				t.Errorf("Expected name '%s', got '%s'", tt.expected, result)
 			}
 		})
+	}
+}
+
+func TestMCPToolNameUsesSharedCanonicalAlgorithm(t *testing.T) {
+	tests := []struct {
+		server string
+		tool   string
+	}{
+		{server: "GitHub", tool: "Create_Issue"},
+		{server: "GitHub Server", tool: "issues.list"},
+		{server: strings.Repeat("server", 20), tool: strings.Repeat("tool", 30)},
+	}
+	for _, test := range tests {
+		wrapped := NewMCPTool(&MockMCPManager{}, test.server, &mcp.Tool{Name: test.tool})
+		if got, want := wrapped.Name(), picomcp.CanonicalToolName(test.server, test.tool); got != want {
+			t.Fatalf("MCPTool.Name() = %q, want shared canonical name %q", got, want)
+		}
+	}
+}
+
+func TestMCPToolIdentityReturnsExactNames(t *testing.T) {
+	wrapped := NewMCPTool(
+		&MockMCPManager{},
+		"GitHub Server",
+		&mcp.Tool{Name: "issues.list"},
+	)
+
+	serverName, toolName := wrapped.MCPIdentity()
+	if serverName != "GitHub Server" || toolName != "issues.list" {
+		t.Fatalf(
+			"MCPIdentity() = %q/%q, want GitHub Server/issues.list",
+			serverName,
+			toolName,
+		)
 	}
 }
 

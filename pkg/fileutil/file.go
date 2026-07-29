@@ -21,11 +21,10 @@ import (
 //
 // The function:
 // 1. Creates a temp file in the same directory (original untouched)
-// 2. Writes data to temp file
-// 3. Syncs data to disk (critical for SD cards/flash storage)
-// 4. Sets file permissions
+// 2. Writes data and sets the file permissions
+// 3. Syncs data and metadata to disk (critical for SD cards/flash storage)
+// 4. Atomically renames the temp file to the target path
 // 5. Syncs directory metadata (ensures rename is durable)
-// 6. Atomically renames temp file to target path
 //
 // Safety guarantees:
 // - Original file is NEVER modified until successful rename
@@ -49,8 +48,24 @@ import (
 //	// Public readable file
 //	err := utils.WriteFileAtomic("public.txt", data, 0o644)
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	return writeFileAtomicWithHooks(
+		path,
+		data,
+		perm,
+		replaceFile,
+		syncDirectory,
+	)
+}
+
+func writeFileAtomicWithHooks(
+	path string,
+	data []byte,
+	perm os.FileMode,
+	replace func(string, string) error,
+	syncDir func(string) error,
+) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := MkdirAllDurable(dir, 0o755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -77,16 +92,16 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 
-	// CRITICAL: Force sync to storage medium before any other operations.
-	// This ensures data is physically written to disk, not just cached.
-	// Essential for SD cards, eMMC, and other flash storage on edge devices.
-	if err := tmpFile.Sync(); err != nil {
-		return fmt.Errorf("failed to sync temp file: %w", err)
-	}
-
-	// Set file permissions before closing
+	// Set file permissions before the final sync so both the data and mode
+	// metadata reach stable storage before the file becomes visible.
 	if err := tmpFile.Chmod(perm); err != nil {
 		return fmt.Errorf("failed to set permissions: %w", err)
+	}
+
+	// CRITICAL: Force data and metadata to the storage medium before rename.
+	// This is essential for SD cards, eMMC, and other flash storage.
+	if err := tmpFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync temp file: %w", err)
 	}
 
 	// Close file before rename (required on Windows)
@@ -94,22 +109,22 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
 
-	// Atomic rename: temp file becomes the target
-	// On POSIX: rename() is atomic
-	// On Windows: Rename() is atomic for files
-	if err := os.Rename(tmpPath, path); err != nil {
+	// Atomic replacement: temp file becomes the target. POSIX uses rename;
+	// Windows uses MoveFileEx with replace-existing and write-through flags.
+	if err := replace(tmpPath, path); err != nil {
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
+	// The source name no longer belongs to this operation after replacement.
+	// Stop deferred cleanup before any later failure so it cannot remove a new
+	// file another process creates at the old temporary pathname.
+	cleanup = false
 
-	// Sync directory to ensure rename is durable
-	// This prevents the renamed file from disappearing after a crash
-	if dirFile, err := os.Open(dir); err == nil {
-		_ = dirFile.Sync()
-		_ = dirFile.Close()
+	// Sync directory to ensure rename is durable on POSIX. Windows uses a
+	// write-through replacement in replaceFile.
+	if err := syncDir(dir); err != nil {
+		return fmt.Errorf("failed to sync target directory: %w", err)
 	}
 
-	// Success: skip cleanup (file was renamed, no temp to remove)
-	cleanup = false
 	return nil
 }
 

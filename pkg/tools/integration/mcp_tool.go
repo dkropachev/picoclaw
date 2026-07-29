@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +14,7 @@ import (
 
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
 	"github.com/sipeed/picoclaw/pkg/media"
 	toolshared "github.com/sipeed/picoclaw/pkg/tools/shared"
 )
@@ -80,92 +80,27 @@ func (t *MCPTool) SetEventPublisher(eventBus runtimeevents.Bus) {
 
 const maxMCPInlineTextRunes = 16 * 1024
 
-// sanitizeIdentifierComponent normalizes a string so it can be safely used
-// as part of a tool/function identifier for downstream providers.
-// It:
-//   - lowercases the string
-//   - replaces any character not in [a-z0-9_-] with '_'
-//   - collapses multiple consecutive '_' into a single '_'
-//   - trims leading/trailing '_'
-//   - falls back to "unnamed" if the result is empty
-//   - truncates overly long components to a reasonable length
-func sanitizeIdentifierComponent(s string) string {
-	const maxLen = 64
-
-	s = strings.ToLower(s)
-	var b strings.Builder
-	b.Grow(len(s))
-
-	prevUnderscore := false
-	for _, r := range s {
-		isAllowed := (r >= 'a' && r <= 'z') ||
-			(r >= '0' && r <= '9') ||
-			r == '_' || r == '-'
-
-		if !isAllowed {
-			// Normalize any disallowed character to '_'
-			if !prevUnderscore {
-				b.WriteRune('_')
-				prevUnderscore = true
-			}
-			continue
-		}
-
-		if r == '_' {
-			if prevUnderscore {
-				continue
-			}
-			prevUnderscore = true
-		} else {
-			prevUnderscore = false
-		}
-
-		b.WriteRune(r)
-	}
-
-	result := strings.Trim(b.String(), "_")
-	if result == "" {
-		result = "unnamed"
-	}
-
-	if len(result) > maxLen {
-		result = result[:maxLen]
-	}
-
-	return result
-}
-
 // Name returns the tool name, prefixed with the server name.
 // The total length is capped at 64 characters (OpenAI-compatible API limit).
 // A short hash of the original (unsanitized) server and tool names is appended
-// whenever sanitization is lossy or the name is truncated, ensuring that two
-// names which differ only in disallowed characters remain distinct after sanitization.
+// whenever sanitization is lossy or the name is truncated. MCP initialization
+// rejects any remaining canonical-name collision before registration.
 func (t *MCPTool) Name() string {
-	// Prefix with server name to avoid conflicts, and sanitize components
-	sanitizedServer := sanitizeIdentifierComponent(t.serverName)
-	sanitizedTool := sanitizeIdentifierComponent(t.tool.Name)
-	full := fmt.Sprintf("mcp_%s_%s", sanitizedServer, sanitizedTool)
+	return picomcp.CanonicalToolName(t.serverName, t.tool.Name)
+}
 
-	// Check if sanitization was lossless (only lowercasing, no char replacement/truncation)
-	lossless := strings.ToLower(t.serverName) == sanitizedServer &&
-		strings.ToLower(t.tool.Name) == sanitizedTool
-
-	const maxTotal = 64
-	if lossless && len(full) <= maxTotal {
-		return full
+// MCPIdentity returns the exact MCP server and tool names represented by this
+// wrapper. It deliberately exposes immutable strings rather than the mutable
+// SDK tool descriptor.
+func (t *MCPTool) MCPIdentity() (serverName, toolName string) {
+	if t == nil {
+		return "", ""
 	}
-
-	// Sanitization was lossy or name too long: append hash of the ORIGINAL names
-	// (not the sanitized names) so different originals always yield different hashes.
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(t.serverName + "\x00" + t.tool.Name))
-	suffix := fmt.Sprintf("%08x", h.Sum32()) // 8 chars
-
-	base := full
-	if len(base) > maxTotal-9 {
-		base = strings.TrimRight(full[:maxTotal-9], "_")
+	serverName = t.serverName
+	if t.tool != nil {
+		toolName = t.tool.Name
 	}
-	return base + "_" + suffix
+	return serverName, toolName
 }
 
 // Description returns the tool description
@@ -182,7 +117,7 @@ func (t *MCPTool) PromptMetadata() toolshared.PromptMetadata {
 	return toolshared.PromptMetadata{
 		Layer:  toolshared.ToolPromptLayerCapability,
 		Slot:   toolshared.ToolPromptSlotMCP,
-		Source: "mcp:" + sanitizeIdentifierComponent(t.serverName),
+		Source: "mcp:" + picomcp.CanonicalToolNameComponent(t.serverName),
 	}
 }
 
@@ -453,8 +388,8 @@ func (t *MCPTool) persistLargeTextArtifact(text string) *ToolResult {
 
 	pattern := fmt.Sprintf(
 		"%s_%s_*.txt",
-		sanitizeIdentifierComponent(t.serverName),
-		sanitizeIdentifierComponent(t.tool.Name),
+		picomcp.CanonicalToolNameComponent(t.serverName),
+		picomcp.CanonicalToolNameComponent(t.tool.Name),
 	)
 	tmpFile, err := os.CreateTemp(dir, pattern)
 	if err != nil {
@@ -579,15 +514,15 @@ func (t *MCPTool) storeBinaryContent(
 
 	scope := fmt.Sprintf(
 		"tool:mcp:%s:%s:%s:%d",
-		sanitizeIdentifierComponent(t.serverName),
+		picomcp.CanonicalToolNameComponent(t.serverName),
 		channel,
 		chatID,
 		time.Now().UnixNano(),
 	)
 	filename := fmt.Sprintf(
 		"%s_%s%s",
-		sanitizeIdentifierComponent(t.serverName),
-		sanitizeIdentifierComponent(t.tool.Name),
+		picomcp.CanonicalToolNameComponent(t.serverName),
+		picomcp.CanonicalToolNameComponent(t.tool.Name),
 		ext,
 	)
 
@@ -596,8 +531,8 @@ func (t *MCPTool) storeBinaryContent(
 		ContentType: mimeType,
 		Source: fmt.Sprintf(
 			"tool:mcp:%s:%s",
-			sanitizeIdentifierComponent(t.serverName),
-			sanitizeIdentifierComponent(t.tool.Name),
+			picomcp.CanonicalToolNameComponent(t.serverName),
+			picomcp.CanonicalToolNameComponent(t.tool.Name),
 		),
 	}, scope)
 	if err != nil {

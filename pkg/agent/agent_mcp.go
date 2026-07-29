@@ -9,6 +9,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -73,6 +74,15 @@ func (r *mcpRuntime) getManager() *mcp.Manager {
 	return r.manager
 }
 
+// EnsureMCPInitialized exposes the shared lazy MCP initialization path to
+// runtimes that execute workflow tool steps without starting AgentLoop.Run.
+func (al *AgentLoop) EnsureMCPInitialized(ctx context.Context) error {
+	if al == nil {
+		return fmt.Errorf("agent loop not configured")
+	}
+	return al.ensureMCPInitialized(ctx)
+}
+
 // ensureMCPInitialized loads MCP servers/tools once so both Run() and direct
 // agent mode share the same initialization path.
 func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
@@ -132,6 +142,24 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 
 		// Register MCP tools for all agents
 		servers := mcpManager.GetServers()
+		if collisionErr := validateMCPToolRegistrations(
+			servers,
+			mcpCfg,
+			al.registry,
+		); collisionErr != nil {
+			al.mcp.setInitErr(fmt.Errorf("ambiguous MCP tool registration: %w", collisionErr))
+			logger.ErrorCF("agent", "Refusing ambiguous MCP tool registration",
+				map[string]any{
+					"error": collisionErr.Error(),
+				})
+			if closeErr := mcpManager.Close(); closeErr != nil {
+				logger.ErrorCF("agent", "Failed to close MCP manager",
+					map[string]any{
+						"error": closeErr.Error(),
+					})
+			}
+			return
+		}
 		uniqueTools := 0
 		totalRegistrations := 0
 		agentIDs := al.registry.ListAgentIDs()
@@ -267,6 +295,111 @@ func (al *AgentLoop) ensureMCPInitialized(ctx context.Context) error {
 	})
 
 	return al.mcp.getInitErr()
+}
+
+func validateCanonicalMCPToolNames(servers map[string]*mcp.ServerConnection) error {
+	identities := make([]mcp.ToolIdentity, 0)
+	for serverName, connection := range servers {
+		if connection == nil {
+			continue
+		}
+		for _, tool := range connection.Tools {
+			if tool == nil {
+				continue
+			}
+			identities = append(identities, mcp.ToolIdentity{
+				Server: serverName,
+				Tool:   tool.Name,
+			})
+		}
+	}
+	return mcp.DetectCanonicalToolNameCollision(identities)
+}
+
+// validateMCPToolRegistrations preflights every MCP wrapper that would be
+// admitted to an agent registry. It must run before the first registration so
+// one conflicting built-in, local, or plugin tool cannot leave a partially
+// exposed MCP surface.
+func validateMCPToolRegistrations(
+	servers map[string]*mcp.ServerConnection,
+	mcpCfg config.MCPConfig,
+	registry *AgentRegistry,
+) error {
+	if err := validateCanonicalMCPToolNames(servers); err != nil {
+		return err
+	}
+	if registry == nil {
+		return nil
+	}
+
+	agentIDs := registry.ListAgentIDs()
+	sort.Strings(agentIDs)
+	serverNames := make([]string, 0, len(servers))
+	for serverName := range servers {
+		serverNames = append(serverNames, serverName)
+	}
+	sort.Strings(serverNames)
+
+	for _, agentID := range agentIDs {
+		agent, ok := registry.GetAgent(agentID)
+		if !ok || agent == nil || agent.Tools == nil {
+			continue
+		}
+		for _, serverName := range serverNames {
+			connection := servers[serverName]
+			if connection == nil || !agent.AllowsMCPServer(serverName) {
+				continue
+			}
+			if serverCfg, configured := mcpCfg.Servers[serverName]; configured &&
+				!serverCfg.Enabled {
+				continue
+			}
+			for _, tool := range connection.Tools {
+				if tool == nil {
+					continue
+				}
+				name := mcp.CanonicalToolName(serverName, tool.Name)
+				if !agent.Tools.AllowsRegistration(name) {
+					continue
+				}
+				existing, occupied := agent.Tools.GetRegistered(name)
+				if !occupied {
+					continue
+				}
+				existingMCP, isMCPWrapper := existing.(*tools.MCPTool)
+				if !isMCPWrapper {
+					return fmt.Errorf(
+						"%w %q for %q/%q conflicts with an existing tool in agent %q",
+						mcp.ErrCanonicalToolNameCollision,
+						name,
+						serverName,
+						tool.Name,
+						agentID,
+					)
+				}
+				existingServer, existingTool := existingMCP.MCPIdentity()
+				if existingServer == serverName && existingTool == tool.Name {
+					continue
+				}
+				return fmt.Errorf(
+					"agent %q: %w",
+					agentID,
+					&mcp.CanonicalToolNameCollisionError{
+						Name: name,
+						First: mcp.ToolIdentity{
+							Server: existingServer,
+							Tool:   existingTool,
+						},
+						Second: mcp.ToolIdentity{
+							Server: serverName,
+							Tool:   tool.Name,
+						},
+					},
+				)
+			}
+		}
+	}
+	return nil
 }
 
 func registerMCPServerPromptContributor(

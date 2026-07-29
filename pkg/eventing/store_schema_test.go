@@ -81,6 +81,78 @@ func TestStoreMigrationValidationFailureRollsBackVersion(t *testing.T) {
 	assert.Zero(t, version, "validation failure must roll back the version advance")
 }
 
+func TestStoreMigratesV1DispatchesWithoutInventingWorkflowRevision(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "migration-v1-revision.db")
+	db := openSchemaTestDB(t, path)
+	_, err := db.Exec(schemaV1)
+	require.NoError(t, err)
+	const (
+		eventID    = "ev_00000000000000000000000000000001"
+		dispatchID = "dsp_00000000000000000000000000000001"
+		runID      = "wr_00000000000000000000000000000001"
+	)
+	_, err = db.Exec(`
+		INSERT INTO event_inbox (
+			id, source, connector, event_type, dedupe_key, received_at,
+			payload_json, attributes_json, routing_status,
+			routing_available_at, routing_updated_at
+		) VALUES (?, 'github', 'primary', 'issues.opened', '', 1,
+			'{}', '{}', 'succeeded', 1, 1
+		)`,
+		eventID,
+	)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+		INSERT INTO event_dispatches (
+			id, event_id, workflow_ref, run_id, status,
+			available_at, created_at, updated_at
+		) VALUES (?, ?, 'workflows/legacy.yml', ?, 'pending', 1, 1, 1)`,
+		dispatchID,
+		eventID,
+		runID,
+	)
+	require.NoError(t, err)
+	setSchemaTestVersion(t, db, 1)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.NoError(t, err)
+	defer store.Close()
+	legacy, err := store.GetDispatch(context.Background(), dispatchID)
+	require.NoError(t, err)
+	assert.Empty(t, legacy.WorkflowRevision)
+
+	var version int
+	require.NoError(t, store.db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, schemaVersion, version)
+	assert.True(
+		t,
+		schemaObjectExists(t, store.db, "table", "event_dispatch_workflow_revisions"),
+	)
+}
+
+func TestStoreRejectsCurrentSchemaMissingDispatchRevisionBindings(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "missing-revision-bindings.db")
+	db := openSchemaTestDB(t, path)
+	_, err := db.Exec(schemaV1)
+	require.NoError(t, err)
+	setSchemaTestVersion(t, db, schemaVersion)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorIs(t, err, ErrSchemaInvalid)
+	assert.Contains(t, err.Error(), "validate eventing schema v2")
+	var validationErr *schemaValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, "event_dispatch_workflow_revisions", validationErr.object)
+}
+
 func TestStoreRejectsInvalidCurrentSchema(t *testing.T) {
 	t.Parallel()
 
@@ -453,7 +525,11 @@ func openSchemaTestDB(t *testing.T, path string) *sql.DB {
 func installSchemaV1ForTest(t *testing.T, db *sql.DB) {
 	t.Helper()
 
-	installSchemaTextForTest(t, db, schemaV1)
+	_, err := db.Exec(schemaV1)
+	require.NoError(t, err)
+	_, err = db.Exec(schemaV2)
+	require.NoError(t, err)
+	setSchemaTestVersion(t, db, schemaVersion)
 }
 
 func installSchemaTextForTest(t *testing.T, db *sql.DB, schema string) {

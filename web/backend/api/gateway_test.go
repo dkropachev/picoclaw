@@ -1414,6 +1414,42 @@ func TestConfigSignatureCanonicalizesEventRedactFieldsLikeRedactor(t *testing.T)
 	}
 }
 
+func TestConfigSignatureTracksWorkflowRuntimeWithoutEventIngress(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Events.Ingress.Enabled = false
+	cfg.Workflows.Enabled = true
+
+	before := computeConfigSignature(cfg)
+	cfg.Workflows.DefinitionsDir = "automation/workflows"
+	afterDefinitions := computeConfigSignature(cfg)
+	if afterDefinitions == before {
+		t.Fatal("workflow definitions change should require restart without event ingress")
+	}
+
+	cfg.Workflows.MaxConcurrentRuns = cfg.Workflows.EffectiveMaxConcurrentRuns() + 1
+	afterLimit := computeConfigSignature(cfg)
+	if afterLimit == afterDefinitions {
+		t.Fatal("workflow executor limit should require restart without event ingress")
+	}
+
+	cfg.Tools.Workflow.Enabled = !cfg.Tools.Workflow.Enabled
+	afterTool := computeConfigSignature(cfg)
+	if afterTool == afterLimit {
+		t.Fatal("workflow tool toggle should require restart without event ingress")
+	}
+
+	cfg.Workflows.Enabled = false
+	disabled := computeConfigSignature(cfg)
+	if disabled == afterTool {
+		t.Fatal("disabling workflows should require restart without event ingress")
+	}
+	cfg.Workflows.MaxConcurrentRuns++
+	if got := computeConfigSignature(cfg); got != disabled {
+		t.Fatal("executor limit should be inert while workflows are disabled")
+	}
+}
+
 func TestConfigSignatureTracksEventWorkflowDispatchToggleBothDirections(t *testing.T) {
 	tests := []struct {
 		name   string

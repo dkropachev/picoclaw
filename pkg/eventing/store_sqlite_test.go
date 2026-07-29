@@ -586,6 +586,49 @@ func TestStoreClaimedDispatchCreationFencesStaleRouter(t *testing.T) {
 	}(), ErrStaleLease)
 }
 
+func TestStoreRevisionedDispatchCreationBindsFirstSelectionAtomically(t *testing.T) {
+	t.Parallel()
+
+	clock := newMutableClock(time.Date(2026, 7, 28, 16, 0, 0, 0, time.UTC))
+	store, _ := openTestStore(t, clock)
+	inserted, err := store.Insert(context.Background(), testEnvelope("revisioned-routing"))
+	require.NoError(t, err)
+	claimed, err := store.ClaimRouting(context.Background(), "router", 1, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+
+	const firstRevision = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	dispatch, created, err := store.CreateRevisionedDispatchForRoutingClaim(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+		claimed[0].Routing.LeaseToken,
+		"workflows/revisioned.yaml",
+		firstRevision,
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	assert.Equal(t, firstRevision, dispatch.WorkflowRevision)
+
+	duplicate, created, err := store.CreateRevisionedDispatchForRoutingClaim(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+		claimed[0].Routing.LeaseToken,
+		"workflows/revisioned.yaml",
+		"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	)
+	require.NoError(t, err)
+	assert.False(t, created)
+	assert.Equal(t, firstRevision, duplicate.WorkflowRevision)
+
+	listed, err := store.ListDispatchMetadata(
+		context.Background(),
+		DispatchFilter{EventID: inserted.Event.Envelope.ID},
+	)
+	require.NoError(t, err)
+	require.Len(t, listed.Dispatches, 1)
+	assert.Equal(t, firstRevision, listed.Dispatches[0].WorkflowRevision)
+}
+
 func TestStoreDispatchLifecycleAndUniqueness(t *testing.T) {
 	t.Parallel()
 

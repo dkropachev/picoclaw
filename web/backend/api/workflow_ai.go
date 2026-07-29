@@ -53,17 +53,22 @@ func (h *Handler) handleAIReviseWorkflowDevelopment(w http.ResponseWriter, r *ht
 		return
 	}
 	workspace := cfg.WorkspacePath()
+	localOpts := workflowLocalOptionsFromConfig(cfg)
 
 	reviseReq := workflows.WorkflowDevelopmentReviseRequest{
 		Prompt:    req.Prompt,
 		TargetRef: req.TargetRef,
 		YAML:      req.YAML,
 	}
-	if _, reviseErr := workflows.ReviseWorkflowDevelopment(workspace, reviseReq); reviseErr != nil {
+	if _, reviseErr := workflows.ReviseWorkflowDevelopment(
+		workspace,
+		reviseReq,
+		localOpts...,
+	); reviseErr != nil {
 		writeWorkflowDevelopmentError(w, reviseErr)
 		return
 	}
-	session, err := workflows.ValidateWorkflowDevelopment(workspace)
+	session, err := workflows.ValidateWorkflowDevelopment(workspace, localOpts...)
 	if err != nil {
 		writeWorkflowDevelopmentError(w, err)
 		return
@@ -85,12 +90,12 @@ func (h *Handler) handleAIReviseWorkflowDevelopment(w http.ResponseWriter, r *ht
 	}
 	_, err = workflows.ReviseWorkflowDevelopment(workspace, workflows.WorkflowDevelopmentReviseRequest{
 		YAML: &nextYAML,
-	})
+	}, localOpts...)
 	if err != nil {
 		writeWorkflowDevelopmentError(w, err)
 		return
 	}
-	session, err = workflows.ValidateWorkflowDevelopment(workspace)
+	session, err = workflows.ValidateWorkflowDevelopment(workspace, localOpts...)
 	if err != nil {
 		writeWorkflowDevelopmentError(w, err)
 		return

@@ -483,6 +483,9 @@ const supportTriageWorkflowDefinition = {
 
 const workflowDraftSession = {
   id: "dev_test",
+  session_revision: "opaque-session-revision",
+  draft_revision: "opaque-draft-revision",
+  base_target_revision: "opaque-base-target-revision",
   reason: "new",
   status: "editing",
   prompt: "Triage support tickets",
@@ -503,6 +506,7 @@ const workflowDraftLastTest = {
     workflowDraftSession.target_workflow_ref,
     workflowDraftYAML,
   ),
+  draft_revision: workflowDraftSession.draft_revision,
   target_workflow_ref: workflowDraftSession.target_workflow_ref,
   run_id: "wr_draft",
   status: "succeeded",
@@ -751,6 +755,7 @@ async function mockLauncherApis(
     : [workflowRun]
   let workflowsRevalidated = false
   let completeDraftViaPolling = false
+  let reviseRequestCount = 0
   let currentMCPResponse = structuredClone(mcpResponse)
 
   function mcpServerFromInput(
@@ -1078,6 +1083,7 @@ async function mockLauncherApis(
             return json(route, { session: activeDevelopmentSession })
           }
           case "/api/workflows/development/revise": {
+            reviseRequestCount += 1
             const body = request.postDataJSON() as {
               prompt?: string
               target_ref?: string
@@ -1112,6 +1118,44 @@ async function mockLauncherApis(
               delete activeDevelopmentSession.last_test
             }
             return json(route, { session: activeDevelopmentSession })
+          }
+          case "/api/workflows/dependencies/check": {
+            const body = request.postDataJSON() as {
+              ref?: string
+              draft?: {
+                target_ref: string
+                yaml: string
+              }
+            }
+            const workflowRef = body.ref ?? body.draft?.target_ref
+            expect(workflowRef).toBeTruthy()
+            if (body.draft != null) {
+              expect(body.draft.target_ref).toBe(body.draft.target_ref.trim())
+              expect(body.draft.yaml.trim()).not.toBe("")
+            } else {
+              expect(body).toEqual({ ref: workflowRef })
+            }
+            return json(route, {
+              root_ref: workflowRef,
+              revision: "opaque-dependency-revision",
+              ready: true,
+              workflow_enabled: true,
+              structural_ready: true,
+              runtime_ready: true,
+              dependencies: [
+                {
+                  dependency: {
+                    kind: "agent",
+                    name: "main",
+                    workflow_ref: workflowRef,
+                    path: "jobs.triage.steps[0].uses",
+                  },
+                  code: "ready",
+                  ready: true,
+                },
+              ],
+              structural_issues: [],
+            })
           }
           case "/api/workflows/development/discard": {
             const previous = activeDevelopmentSession
@@ -1202,6 +1246,7 @@ async function mockLauncherApis(
             })
             activeDevelopmentSession = {
               ...workflowDraftSession,
+              session_revision: "opaque-session-testing",
               status: "testing",
               last_test: {
                 ...workflowDraftLastTest,
@@ -1221,11 +1266,23 @@ async function mockLauncherApis(
               },
             })
           }
-          case "/api/workflows/development/publish":
+          case "/api/workflows/development/publish": {
+            const publishSession = activeDevelopmentSession
+            expect(reviseRequestCount).toBe(0)
+            expect(request.postDataJSON()).toEqual({
+              session_id: publishSession?.id,
+              expected_session_revision: publishSession?.session_revision,
+              expected_draft_revision: publishSession?.draft_revision,
+              expected_base_target_revision:
+                publishSession?.base_target_revision,
+              expected_dependency_revision: "opaque-dependency-revision",
+            })
             if (
-              activeDevelopmentSession?.last_test?.status !== "succeeded" ||
-              activeDevelopmentSession.last_test.draft_key !==
-                currentDraftKey(activeDevelopmentSession)
+              publishSession?.last_test?.status !== "succeeded" ||
+              publishSession.last_test.draft_key !==
+                currentDraftKey(publishSession) ||
+              publishSession.last_test.draft_revision !==
+                publishSession.draft_revision
             ) {
               return json(
                 route,
@@ -1250,8 +1307,9 @@ async function mockLauncherApis(
             }
             return json(route, {
               workflow_ref: workflowDraftSession.target_workflow_ref,
-              session: workflowDraftSession,
+              session: publishSession,
             })
+          }
           case "/api/workflows/run":
             expect(request.postDataJSON()).toMatchObject({
               async: true,
@@ -1455,10 +1513,26 @@ async function mockLauncherApis(
           )
         case "/api/workflows/development":
           return json(route, { session: activeDevelopmentSession })
+        case "/api/workflows/templates":
+          return json(route, {
+            templates: [
+              {
+                name: "code-review",
+                ref: "workflows/code-review.yml",
+                state: "available",
+              },
+              {
+                name: "github-issue-triage",
+                ref: "workflows/github-issue-triage.yml",
+                state: "modified",
+              },
+            ],
+          })
         case "/api/workflows/runs":
           if (completeDraftViaPolling) {
             activeDevelopmentSession = {
               ...workflowDraftSession,
+              session_revision: "opaque-session-tested",
               status: "ready_to_publish",
               last_test: workflowDraftLastTest,
             }
@@ -1595,6 +1669,7 @@ async function mockLauncherApis(
               activeDevelopmentSession?.last_test?.event_id != null
                 ? {
                     ...activeDevelopmentSession,
+                    session_revision: "opaque-session-event-tested",
                     status: "ready_to_publish",
                     last_test: {
                       ...activeDevelopmentSession.last_test,
@@ -1603,6 +1678,7 @@ async function mockLauncherApis(
                   }
                 : {
                     ...workflowDraftSession,
+                    session_revision: "opaque-session-tested",
                     status: "ready_to_publish",
                     last_test: workflowDraftLastTest,
                   }
@@ -2822,6 +2898,12 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
       )
       .first(),
   ).toBeAttached()
+  await expect(
+    page.getByRole("heading", { name: "Built-in templates" }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("article", { name: "Code review template" }),
+  ).toBeVisible()
   await expect(page.getByRole("button", { name: "AI Review" })).toBeVisible()
   await page.getByRole("button", { name: "AI Review" }).click()
   await expect(
@@ -2830,11 +2912,30 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
   await expect(page.getByRole("textbox", { name: "AI brief" })).toHaveValue(
     /Review this workflow against the current PicoClaw runtime/,
   )
+  await expect(
+    page.getByText(
+      "Finish or discard the active workflow draft before installing or restoring templates.",
+    ),
+  ).toBeVisible()
+  await expect(page.getByRole("button", { name: "Install" })).toBeDisabled()
+  await expect(
+    page.getByRole("button", { name: "Restore built-in" }),
+  ).toBeDisabled()
   await expect(page.getByText("version revalidation")).toBeVisible()
   await page.getByRole("button", { name: "Discard" }).click()
   await expect(page.getByText("New workflow")).toBeVisible()
 
   await page.getByRole("button", { name: "Operate" }).click()
+  await page
+    .getByRole("button", { name: "Inspect workflow dependencies" })
+    .click()
+  const publishedReadiness = page.getByRole("region", {
+    name: "Published workflow dependency readiness",
+  })
+  await expect(publishedReadiness).toContainText("workflows/summarize-text.yml")
+  await expect(publishedReadiness).toContainText("Runtime dependencies (1)")
+  await expect(publishedReadiness).toContainText("agent/main")
+  await page.keyboard.press("Escape")
   await expect(page.getByText("Run workflow").first()).toBeVisible()
   await page.getByRole("button", { name: "Run workflow" }).first().click()
   await expect(
@@ -2935,6 +3036,36 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
   await expect(page.getByText("wr_draft", { exact: true })).toBeVisible()
   await expect(page.getByRole("button", { name: "Publish" })).toBeEnabled()
   await expect(page.getByText("Ready to publish.")).toBeVisible()
+
+  const whitespaceOnlyDraft = `${workflowDraftYAML}\n`
+  const whitespaceDependencyRequest = page.waitForRequest((request) => {
+    if (
+      !request.url().endsWith("/api/workflows/dependencies/check") ||
+      request.method() !== "POST"
+    ) {
+      return false
+    }
+    const body = request.postDataJSON() as {
+      draft?: { yaml?: string }
+    }
+    return body.draft?.yaml === whitespaceOnlyDraft
+  })
+  await yamlEditor.fill(whitespaceOnlyDraft)
+  await whitespaceDependencyRequest
+  await expect(page.getByRole("button", { name: "Publish" })).toBeDisabled()
+  await expect(
+    page.getByText("Validate the draft again after the latest edits."),
+  ).toBeVisible()
+  await yamlEditor.fill(workflowDraftYAML)
+  await expect(page.getByRole("button", { name: "Publish" })).toBeEnabled()
+
+  await yamlEditor.fill(`${workflowDraftYAML}# readiness is stale\n`)
+  await expect(page.getByRole("button", { name: "Publish" })).toBeDisabled()
+  await expect(
+    page.getByText("Validate the draft again after the latest edits."),
+  ).toBeVisible()
+  await yamlEditor.fill(workflowDraftYAML)
+  await expect(page.getByRole("button", { name: "Publish" })).toBeEnabled()
 
   await page.reload()
   await expect(

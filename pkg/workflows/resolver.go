@@ -36,7 +36,7 @@ func (r Resolver) ResolveLocal(ref string) (ResolvedRef, error) {
 	root := filepath.Join(workspaceDir, definitionsDir)
 	rel := strings.TrimPrefix(canonical, DefaultDefinitionsDir+"/")
 	target := filepath.Join(root, filepath.FromSlash(rel))
-	if err := ensureInsideWorkflowRoot(root, target); err != nil {
+	if err := ensureInsideWorkflowRoot(workspaceDir, root, target); err != nil {
 		return ResolvedRef{}, err
 	}
 	return ResolvedRef{Canonical: canonical, Path: target}, nil
@@ -90,7 +90,11 @@ func CanonicalLocalRef(ref string) (string, error) {
 	return clean, nil
 }
 
-func ensureInsideWorkflowRoot(root, target string) error {
+func ensureInsideWorkflowRoot(workspace, root, target string) error {
+	workspaceAbs, err := filepath.Abs(workspace)
+	if err != nil {
+		return fmt.Errorf("resolve workflow workspace: %w", err)
+	}
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
 		return fmt.Errorf("resolve workflow root: %w", err)
@@ -99,26 +103,36 @@ func ensureInsideWorkflowRoot(root, target string) error {
 	if err != nil {
 		return fmt.Errorf("resolve workflow path: %w", err)
 	}
-	rootEval := rootAbs
-	if evalRoot, rootErr := evalWorkflowPathPrefix(rootAbs); rootErr != nil {
-		if !os.IsNotExist(rootErr) {
-			return fmt.Errorf("resolve workflow root symlink: %w", rootErr)
-		}
-	} else {
-		rootEval = evalRoot
+	workspaceEval, err := evalWorkflowPathPrefix(workspaceAbs)
+	if err != nil {
+		return fmt.Errorf("resolve workflow workspace symlink: %w", err)
+	}
+	rootEval, err := evalWorkflowPathPrefix(rootAbs)
+	if err != nil {
+		return fmt.Errorf("resolve workflow root symlink: %w", err)
+	}
+	if !workflowPathStrictlyInside(workspaceEval, rootEval) {
+		return fmt.Errorf("workflow definitions root escapes workspace")
 	}
 	targetEval, err := evalWorkflowPathPrefix(targetAbs)
 	if err != nil {
 		return fmt.Errorf("resolve workflow symlink: %w", err)
 	}
-	rel, err := filepath.Rel(rootEval, targetEval)
-	if err != nil {
-		return fmt.Errorf("compare workflow path: %w", err)
-	}
-	if rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." || filepath.IsAbs(rel) {
+	if !workflowPathStrictlyInside(rootEval, targetEval) {
 		return fmt.Errorf("workflow path escapes workflow root")
 	}
 	return nil
+}
+
+func workflowPathStrictlyInside(root, target string) bool {
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return false
+	}
+	return rel != "." &&
+		rel != ".." &&
+		!strings.HasPrefix(rel, ".."+string(filepath.Separator)) &&
+		!filepath.IsAbs(rel)
 }
 
 func evalWorkflowPathPrefix(absPath string) (string, error) {

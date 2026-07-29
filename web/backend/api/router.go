@@ -32,6 +32,7 @@ type Handler struct {
 	mcpOAuthFlows              map[string]*mcpOAuthFlow
 	mcpOAuthState              map[string]string
 	mcpOAuthLatestByServer     map[string]string
+	configMutationMu           sync.Mutex
 	workflowDevelopmentMu      sync.Mutex
 }
 

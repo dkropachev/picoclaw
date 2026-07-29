@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -48,6 +49,9 @@ const (
 
 type WorkflowDevelopmentSession struct {
 	ID                    string                         `json:"id"`
+	SessionRevision       string                         `json:"session_revision"`
+	DraftRevision         string                         `json:"draft_revision"`
+	BaseTargetRevision    string                         `json:"base_target_revision"`
 	Reason                string                         `json:"reason"`
 	Status                string                         `json:"status"`
 	Prompt                string                         `json:"prompt,omitempty"`
@@ -71,6 +75,7 @@ type WorkflowDevelopmentValidation struct {
 
 type WorkflowDevelopmentTest struct {
 	DraftKey          string    `json:"draft_key"`
+	DraftRevision     string    `json:"draft_revision,omitempty"`
 	TargetWorkflowRef string    `json:"target_workflow_ref"`
 	EventID           string    `json:"event_id,omitempty"`
 	RunID             string    `json:"run_id,omitempty"`
@@ -99,7 +104,27 @@ type WorkflowDevelopmentPublishResult struct {
 }
 
 func GetWorkflowDevelopmentSession(workspace string) (*WorkflowDevelopmentSession, error) {
-	data, err := os.ReadFile(activeDevelopmentPath(workspace))
+	unlock, err := lockWorkflowMutation(workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return getWorkflowDevelopmentSessionLocked(workspace)
+}
+
+// getWorkflowDevelopmentSessionLocked reads the active development snapshot
+// after the caller has acquired the workspace mutation lock. Keeping the
+// unlocked read private ensures public status requests first finish or reject
+// any prepared template/publish transaction without making already-locked
+// mutation paths recursively acquire the non-reentrant lock.
+func getWorkflowDevelopmentSessionLocked(
+	workspace string,
+) (*WorkflowDevelopmentSession, error) {
+	activePath, err := checkedActiveDevelopmentPath(workspace)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(activePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -109,6 +134,14 @@ func GetWorkflowDevelopmentSession(workspace string) (*WorkflowDevelopmentSessio
 	var session WorkflowDevelopmentSession
 	if err := json.Unmarshal(data, &session); err != nil {
 		return nil, err
+	}
+	if session.BaseTargetRevision == "" {
+		session.BaseTargetRevision = WorkflowTargetRevisionUnknown
+	}
+	if session.DraftRevision == "" || session.SessionRevision == "" {
+		if err := refreshWorkflowDevelopmentRevisions(&session); err != nil {
+			return nil, err
+		}
 	}
 	return &session, nil
 }
@@ -123,6 +156,11 @@ func StartWorkflowDevelopment(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	unlock, lockErr := lockWorkflowMutation(workspace)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
 	runtime = NormalizeRuntimeCompatibility(runtime)
 	reason := normalizeDevelopmentReason(req.Reason)
 	prompt := strings.TrimSpace(req.Prompt)
@@ -161,6 +199,14 @@ func StartWorkflowDevelopment(
 	if err != nil {
 		return nil, err
 	}
+	baseTargetRevision, err := captureWorkflowDevelopmentTargetRevision(
+		workspace,
+		canonicalTarget,
+		opts...,
+	)
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	session := &WorkflowDevelopmentSession{
 		ID:                    fmt.Sprintf("dev_%d", now.UnixNano()),
@@ -172,6 +218,7 @@ func StartWorkflowDevelopment(
 		TargetPicoclawVersion: runtime.PicoclawVersion,
 		TargetGitCommit:       runtime.GitCommit,
 		YAML:                  draftYAML,
+		BaseTargetRevision:    baseTargetRevision,
 		CreatedAt:             now,
 		UpdatedAt:             now,
 	}
@@ -185,10 +232,16 @@ func StartWorkflowDevelopment(
 func ReviseWorkflowDevelopment(
 	workspace string,
 	req WorkflowDevelopmentReviseRequest,
+	opts ...LocalOption,
 ) (*WorkflowDevelopmentSession, error) {
-	session, err := requireActiveDevelopment(workspace)
-	if err != nil {
-		return nil, err
+	unlock, lockErr := lockWorkflowMutation(workspace)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
+	session, sessionErr := requireActiveDevelopment(workspace)
+	if sessionErr != nil {
+		return nil, sessionErr
 	}
 	if err := ensureNoCurrentRunningDevelopmentTest(session); err != nil {
 		return nil, err
@@ -199,19 +252,32 @@ func ReviseWorkflowDevelopment(
 		session.Prompt = strings.TrimSpace(req.Prompt)
 	}
 	if strings.TrimSpace(req.TargetRef) != "" {
-		targetRef, err := CanonicalLocalRef(req.TargetRef)
-		if err != nil {
-			return nil, err
+		targetRef, canonicalErr := CanonicalLocalRef(req.TargetRef)
+		if canonicalErr != nil {
+			return nil, canonicalErr
 		}
 		session.TargetWorkflowRef = targetRef
+	}
+	if session.TargetWorkflowRef != previousTargetRef ||
+		session.BaseTargetRevision == "" ||
+		session.BaseTargetRevision == WorkflowTargetRevisionUnknown {
+		baseTargetRevision, revisionErr := captureWorkflowDevelopmentTargetRevision(
+			workspace,
+			session.TargetWorkflowRef,
+			opts...,
+		)
+		if revisionErr != nil {
+			return nil, revisionErr
+		}
+		session.BaseTargetRevision = baseTargetRevision
 	}
 	if req.Regenerate {
 		session.YAML = GenerateWorkflowDraftYAML(session.Prompt)
 	} else if req.YAML != nil {
-		session.YAML = strings.TrimRight(*req.YAML, " \t\r\n") + "\n"
+		session.YAML = *req.YAML
 	}
 	draftChanged := session.TargetWorkflowRef != previousTargetRef ||
-		normalizeDevelopmentYAMLForKey(session.YAML) != normalizeDevelopmentYAMLForKey(previousYAML)
+		session.YAML != previousYAML
 	if draftChanged {
 		session.Status = WorkflowDevelopmentStatusEditing
 		session.Validation = nil
@@ -224,13 +290,33 @@ func ReviseWorkflowDevelopment(
 	return session, nil
 }
 
-func ValidateWorkflowDevelopment(workspace string) (*WorkflowDevelopmentSession, error) {
-	session, err := requireActiveDevelopment(workspace)
-	if err != nil {
-		return nil, err
+func ValidateWorkflowDevelopment(
+	workspace string,
+	opts ...LocalOption,
+) (*WorkflowDevelopmentSession, error) {
+	unlock, lockErr := lockWorkflowMutation(workspace)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
+	session, sessionErr := requireActiveDevelopment(workspace)
+	if sessionErr != nil {
+		return nil, sessionErr
 	}
 	if err := ensureNoCurrentRunningDevelopmentTest(session); err != nil {
 		return nil, err
+	}
+	if session.BaseTargetRevision == "" ||
+		session.BaseTargetRevision == WorkflowTargetRevisionUnknown {
+		baseTargetRevision, revisionErr := captureWorkflowDevelopmentTargetRevision(
+			workspace,
+			session.TargetWorkflowRef,
+			opts...,
+		)
+		if revisionErr != nil {
+			return nil, revisionErr
+		}
+		session.BaseTargetRevision = baseTargetRevision
 	}
 	session.Status = WorkflowDevelopmentStatusValidating
 	session.Validation = validateDevelopmentYAML(session.YAML)
@@ -252,41 +338,15 @@ func PublishWorkflowDevelopment(
 	runtime RuntimeCompatibility,
 	opts ...LocalOption,
 ) (*WorkflowDevelopmentPublishResult, error) {
-	session, err := ValidateWorkflowDevelopment(workspace)
-	if err != nil {
-		return nil, err
-	}
-	if session.Validation == nil || !session.Validation.Valid {
-		return nil, fmt.Errorf("workflow draft is not valid")
-	}
-	if testErr := requireCurrentSuccessfulDevelopmentTest(session); testErr != nil {
-		return nil, testErr
-	}
-	local := collectLocalOptions(opts...)
-	resolved, err := local.resolver(workspace).ResolveLocal(session.TargetWorkflowRef)
-	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepath.Dir(resolved.Path), 0o755); err != nil {
-		return nil, err
-	}
-	tmp := resolved.Path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(session.YAML), 0o644); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(tmp, resolved.Path); err != nil {
-		return nil, err
-	}
-	if _, err := RevalidateLocal(ctx, workspace, runtime, opts...); err != nil {
-		return nil, err
-	}
-	if err := archiveDevelopmentSession(workspace, session, "published"); err != nil {
-		return nil, err
-	}
-	if err := os.Remove(activeDevelopmentPath(workspace)); err != nil && !os.IsNotExist(err) {
-		return nil, err
-	}
-	return &WorkflowDevelopmentPublishResult{WorkflowRef: session.TargetWorkflowRef, Session: session}, nil
+	return publishWorkflowDevelopmentTransaction(
+		ctx,
+		workspace,
+		nil,
+		runtime,
+		nil,
+		nil,
+		opts...,
+	)
 }
 
 func RecordWorkflowDevelopmentTest(
@@ -294,6 +354,11 @@ func RecordWorkflowDevelopmentTest(
 	result *RunResult,
 	testErr error,
 ) (*WorkflowDevelopmentSession, error) {
+	unlock, lockErr := lockWorkflowMutation(workspace)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
 	session, err := requireActiveDevelopment(workspace)
 	if err != nil {
 		return nil, err
@@ -313,6 +378,11 @@ func RecordWorkflowDevelopmentEventTest(
 	result *RunResult,
 	testErr error,
 ) (*WorkflowDevelopmentSession, error) {
+	unlock, lockErr := lockWorkflowMutation(workspace)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
 	session, err := requireActiveDevelopment(workspace)
 	if err != nil {
 		return nil, err
@@ -332,6 +402,11 @@ func RecordWorkflowDevelopmentTestIfCurrent(
 	result *RunResult,
 	testErr error,
 ) (*WorkflowDevelopmentSession, bool, error) {
+	unlock, lockErr := lockWorkflowMutation(workspace)
+	if lockErr != nil {
+		return nil, false, lockErr
+	}
+	defer unlock()
 	session, err := requireActiveDevelopment(workspace)
 	if err != nil {
 		return nil, false, err
@@ -357,6 +432,11 @@ func RecordWorkflowDevelopmentEventTestIfCurrent(
 	result *RunResult,
 	testErr error,
 ) (*WorkflowDevelopmentSession, bool, error) {
+	unlock, lockErr := lockWorkflowMutation(workspace)
+	if lockErr != nil {
+		return nil, false, lockErr
+	}
+	defer unlock()
 	session, err := requireActiveDevelopment(workspace)
 	if err != nil {
 		return nil, false, err
@@ -633,6 +713,7 @@ func recordWorkflowDevelopmentTest(
 	now := time.Now().UTC()
 	session.LastTest = &WorkflowDevelopmentTest{
 		DraftKey:          WorkflowDevelopmentDraftKey(session.TargetWorkflowRef, session.YAML),
+		DraftRevision:     session.DraftRevision,
 		TargetWorkflowRef: session.TargetWorkflowRef,
 		EventID:           strings.TrimSpace(eventID),
 		RunID:             runID,
@@ -666,7 +747,7 @@ func requireCurrentSuccessfulDevelopmentTest(session *WorkflowDevelopmentSession
 	if session.LastTest == nil {
 		return fmt.Errorf("workflow draft must pass a current test run before publish")
 	}
-	if session.LastTest.DraftKey != WorkflowDevelopmentDraftKey(session.TargetWorkflowRef, session.YAML) {
+	if !workflowDevelopmentTestMatchesDraft(session) {
 		return fmt.Errorf("workflow draft test is stale; run the draft again before publish")
 	}
 	if session.LastTest.Status != RunStatusSucceeded {
@@ -682,7 +763,7 @@ func ensureNoCurrentRunningDevelopmentTest(session *WorkflowDevelopmentSession) 
 	if session.LastTest.Status != RunStatusRunning {
 		return nil
 	}
-	if session.LastTest.DraftKey != WorkflowDevelopmentDraftKey(session.TargetWorkflowRef, session.YAML) {
+	if !workflowDevelopmentTestMatchesDraft(session) {
 		return nil
 	}
 	return ErrDevelopmentBusy
@@ -692,10 +773,26 @@ func hasCurrentSuccessfulDevelopmentTest(session *WorkflowDevelopmentSession) bo
 	return session != nil &&
 		session.LastTest != nil &&
 		session.LastTest.Status == RunStatusSucceeded &&
-		session.LastTest.DraftKey == WorkflowDevelopmentDraftKey(session.TargetWorkflowRef, session.YAML)
+		workflowDevelopmentTestMatchesDraft(session)
+}
+
+func workflowDevelopmentTestMatchesDraft(session *WorkflowDevelopmentSession) bool {
+	if session == nil || session.LastTest == nil {
+		return false
+	}
+	if session.LastTest.DraftRevision != "" {
+		return session.LastTest.DraftRevision == session.DraftRevision
+	}
+	return session.LastTest.DraftKey ==
+		WorkflowDevelopmentDraftKey(session.TargetWorkflowRef, session.YAML)
 }
 
 func DiscardWorkflowDevelopment(workspace string) (*WorkflowDevelopmentSession, error) {
+	unlock, lockErr := lockWorkflowMutation(workspace)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
 	session, err := requireActiveDevelopment(workspace)
 	if err != nil {
 		return nil, err
@@ -703,7 +800,11 @@ func DiscardWorkflowDevelopment(workspace string) (*WorkflowDevelopmentSession, 
 	if err := archiveDevelopmentSession(workspace, session, "discarded"); err != nil {
 		return nil, err
 	}
-	if err := os.Remove(activeDevelopmentPath(workspace)); err != nil && !os.IsNotExist(err) {
+	activePath, err := checkedActiveDevelopmentPath(workspace)
+	if err != nil {
+		return nil, err
+	}
+	if err := fileutil.RemoveDurable(activePath); err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
 	return session, nil
@@ -997,7 +1098,7 @@ func normalizeDevelopmentYAMLForKey(value string) string {
 }
 
 func requireActiveDevelopment(workspace string) (*WorkflowDevelopmentSession, error) {
-	session, err := GetWorkflowDevelopmentSession(workspace)
+	session, err := getWorkflowDevelopmentSessionLocked(workspace)
 	if err != nil {
 		return nil, err
 	}
@@ -1008,57 +1109,109 @@ func requireActiveDevelopment(workspace string) (*WorkflowDevelopmentSession, er
 }
 
 func writeNewActiveDevelopment(workspace string, session *WorkflowDevelopmentSession) error {
-	if err := os.MkdirAll(filepath.Dir(activeDevelopmentPath(workspace)), 0o755); err != nil {
+	path, err := checkedActiveDevelopmentPath(workspace)
+	if err != nil {
+		return err
+	}
+	if err := fileutil.MkdirAllDurable(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if err := refreshWorkflowDevelopmentRevisions(session); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(session, "", "  ")
 	if err != nil {
 		return err
 	}
-	file, err := os.OpenFile(activeDevelopmentPath(workspace), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if os.IsExist(err) {
 			return ErrActiveDevelopmentExists
 		}
 		return err
 	}
-	defer file.Close()
-	_, err = file.Write(data)
-	return err
+	closed := false
+	defer func() {
+		if !closed {
+			_ = file.Close()
+		}
+	}()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		closed = true
+		_ = fileutil.RemoveDurable(path)
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		closed = true
+		_ = fileutil.RemoveDurable(path)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		closed = true
+		_ = fileutil.RemoveDurable(path)
+		return err
+	}
+	closed = true
+	return syncWorkflowRunDirectory(filepath.Dir(path))
 }
 
 func writeActiveDevelopment(workspace string, session *WorkflowDevelopmentSession) error {
-	if err := os.MkdirAll(filepath.Dir(activeDevelopmentPath(workspace)), 0o755); err != nil {
+	path, err := checkedActiveDevelopmentPath(workspace)
+	if err != nil {
+		return err
+	}
+	if err := fileutil.MkdirAllDurable(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if err := refreshWorkflowDevelopmentRevisions(session); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(session, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := activeDevelopmentPath(workspace) + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, activeDevelopmentPath(workspace))
+	return writeWorkflowTemplateAtomic(path, data, 0o600)
 }
 
 func archiveDevelopmentSession(workspace string, session *WorkflowDevelopmentSession, state string) error {
-	archiveDir := filepath.Join(workspace, workflowDevelopmentDir, "archive")
-	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
-		return err
-	}
-	copySession := *session
-	copySession.Status = strings.TrimSpace(state)
-	copySession.UpdatedAt = time.Now().UTC()
-	data, err := json.MarshalIndent(copySession, "", "  ")
+	archivePath, err := checkedWorkflowDevelopmentArchivePath(workspace, session.ID)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(archiveDir, safeID(session.ID)+".json"), data, 0o600)
+	if err := fileutil.MkdirAllDurable(filepath.Dir(archivePath), 0o755); err != nil {
+		return err
+	}
+	data, err := marshalWorkflowDevelopmentArchive(session, state)
+	if err != nil {
+		return err
+	}
+	return writeWorkflowTemplateAtomic(archivePath, data, 0o600)
 }
 
 func activeDevelopmentPath(workspace string) string {
 	return filepath.Join(workspace, workflowDevelopmentDir, workflowDevelopmentActive)
+}
+
+func checkedActiveDevelopmentPath(workspace string) (string, error) {
+	return resolveWorkflowInternalPath(
+		workspace,
+		workflowDevelopmentDir,
+		workflowDevelopmentActive,
+	)
+}
+
+func checkedWorkflowDevelopmentArchivePath(
+	workspace string,
+	sessionID string,
+) (string, error) {
+	return resolveWorkflowInternalPath(
+		workspace,
+		workflowDevelopmentDir,
+		"archive",
+		safeID(sessionID)+".json",
+	)
 }
 
 var slugTokenPattern = regexp.MustCompile(`[^a-z0-9]+`)

@@ -152,19 +152,20 @@ type EventPage struct {
 
 // DispatchView excludes the live dispatch lease token.
 type DispatchView struct {
-	ID          string                  `json:"id"`
-	EventID     string                  `json:"event_id"`
-	WorkflowRef string                  `json:"workflow_ref"`
-	RunID       string                  `json:"run_id"`
-	Status      eventing.DispatchStatus `json:"status"`
-	LeaseUntil  *time.Time              `json:"lease_until,omitempty"`
-	AvailableAt time.Time               `json:"available_at"`
-	Attempts    int                     `json:"attempts"`
-	LastError   string                  `json:"last_error,omitempty"`
-	CreatedAt   time.Time               `json:"created_at"`
-	UpdatedAt   time.Time               `json:"updated_at"`
-	LinkedAt    *time.Time              `json:"linked_at,omitempty"`
-	FinishedAt  *time.Time              `json:"finished_at,omitempty"`
+	ID               string                  `json:"id"`
+	EventID          string                  `json:"event_id"`
+	WorkflowRef      string                  `json:"workflow_ref"`
+	WorkflowRevision string                  `json:"workflow_revision,omitempty"`
+	RunID            string                  `json:"run_id"`
+	Status           eventing.DispatchStatus `json:"status"`
+	LeaseUntil       *time.Time              `json:"lease_until,omitempty"`
+	AvailableAt      time.Time               `json:"available_at"`
+	Attempts         int                     `json:"attempts"`
+	LastError        string                  `json:"last_error,omitempty"`
+	CreatedAt        time.Time               `json:"created_at"`
+	UpdatedAt        time.Time               `json:"updated_at"`
+	LinkedAt         *time.Time              `json:"linked_at,omitempty"`
+	FinishedAt       *time.Time              `json:"finished_at,omitempty"`
 }
 
 // DispatchPage is a sanitized dispatch page.
@@ -468,19 +469,20 @@ func projectSubject(subject *eventing.Subject) *SubjectView {
 
 func projectDispatch(dispatch eventing.DispatchMetadata) DispatchView {
 	return DispatchView{
-		ID:          dispatch.ID,
-		EventID:     dispatch.EventID,
-		WorkflowRef: dispatch.WorkflowRef,
-		RunID:       dispatch.RunID,
-		Status:      dispatch.Status,
-		LeaseUntil:  cloneTime(dispatch.LeaseUntil),
-		AvailableAt: dispatch.AvailableAt,
-		Attempts:    dispatch.Attempts,
-		LastError:   dispatch.LastError,
-		CreatedAt:   dispatch.CreatedAt,
-		UpdatedAt:   dispatch.UpdatedAt,
-		LinkedAt:    cloneTime(dispatch.LinkedAt),
-		FinishedAt:  cloneTime(dispatch.FinishedAt),
+		ID:               dispatch.ID,
+		EventID:          dispatch.EventID,
+		WorkflowRef:      dispatch.WorkflowRef,
+		WorkflowRevision: dispatch.WorkflowRevision,
+		RunID:            dispatch.RunID,
+		Status:           dispatch.Status,
+		LeaseUntil:       cloneTime(dispatch.LeaseUntil),
+		AvailableAt:      dispatch.AvailableAt,
+		Attempts:         dispatch.Attempts,
+		LastError:        dispatch.LastError,
+		CreatedAt:        dispatch.CreatedAt,
+		UpdatedAt:        dispatch.UpdatedAt,
+		LinkedAt:         cloneTime(dispatch.LinkedAt),
+		FinishedAt:       cloneTime(dispatch.FinishedAt),
 	}
 }
 

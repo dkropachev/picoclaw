@@ -26,6 +26,7 @@ type scheduledWorkflowRun struct {
 	cron       string
 	next       time.Time
 	generation *config.Config
+	workflow   *workflows.Workflow
 }
 
 type workflowAutomationResetRequest struct {
@@ -272,33 +273,17 @@ func (al *AgentLoop) loadScheduledWorkflowRuns(
 		if def.Error != "" {
 			continue
 		}
-		if err := workflows.EnsureWorkflowRunnable(
+		workflow, err := workflows.LoadRunnableLocalSnapshot(
 			ctx,
 			workspace,
 			def.Ref,
 			workflowRuntimeCompatibility(),
 			localOpts...,
-		); err != nil {
-			logger.WarnCF(
-				"workflow",
-				"Scheduled workflow skipped until revalidated",
-				map[string]any{"ref": def.Ref, "error": err.Error()},
-			)
-			continue
-		}
-		workflow, err := workflows.LoadLocal(ctx, workspace, def.Ref, localOpts...)
+		)
 		if err != nil {
 			logger.WarnCF(
 				"workflow",
-				"Failed to load scheduled workflow",
-				map[string]any{"ref": def.Ref, "error": err.Error()},
-			)
-			continue
-		}
-		if err := workflows.Validate(workflow); err != nil {
-			logger.WarnCF(
-				"workflow",
-				"Invalid scheduled workflow skipped",
+				"Scheduled workflow skipped until revalidated",
 				map[string]any{"ref": def.Ref, "error": err.Error()},
 			)
 			continue
@@ -308,7 +293,12 @@ func (al *AgentLoop) loadScheduledWorkflowRuns(
 				continue
 			}
 			key := workflowScheduleKey(def.Ref, index)
-			item := scheduledWorkflowRun{ref: def.Ref, index: index, cron: schedule.Cron}
+			item := scheduledWorkflowRun{
+				ref:      def.Ref,
+				index:    index,
+				cron:     schedule.Cron,
+				workflow: workflow,
+			}
 			if prev, ok := existing[key]; ok && prev.cron == schedule.Cron && prev.next.After(now) {
 				item.next = prev.next
 			} else {
@@ -353,6 +343,14 @@ func (al *AgentLoop) runScheduledWorkflow(
 	if defaultAgent == nil {
 		return
 	}
+	if schedule.workflow == nil {
+		logger.WarnCF(
+			"workflow",
+			"Scheduled workflow has no bound definition snapshot",
+			map[string]any{"ref": schedule.ref},
+		)
+		return
+	}
 	executor := al.newWorkflowExecutor(cfg.WorkspacePath(), defaultAgent)
 	event := map[string]any{
 		"trigger":      "schedule",
@@ -375,7 +373,9 @@ func (al *AgentLoop) runScheduledWorkflow(
 		},
 	)
 	if _, err := executor.Run(leaseCtx, workflows.RunRequest{
-		Ref: schedule.ref,
+		Ref:         schedule.ref,
+		Workflow:    schedule.workflow,
+		WorkflowRef: schedule.ref,
 		Inputs: map[string]any{
 			"cron":         schedule.cron,
 			"scheduled_at": scheduledAt.Format(time.RFC3339),
@@ -471,34 +471,18 @@ func (al *AgentLoop) handleWorkflowRuntimeEventForGeneration(
 		if def.Error != "" {
 			continue
 		}
-		if err := workflows.EnsureWorkflowRunnable(
+		workflow, err := workflows.LoadRunnableLocalSnapshot(
 			ctx,
 			workspace,
 			def.Ref,
 			workflowRuntimeCompatibility(),
 			localOpts...,
-		); err != nil {
+		)
+		if err != nil {
 			logger.WarnCF(
 				"workflow",
 				"Runtime-event workflow skipped until revalidated",
 				map[string]any{"ref": def.Ref, "error": err.Error()},
-			)
-			continue
-		}
-		workflow, err := workflows.LoadLocal(ctx, workspace, def.Ref, localOpts...)
-		if err != nil {
-			logger.WarnCF(
-				"workflow",
-				"Failed to load runtime-event workflow",
-				map[string]any{"ref": def.Ref, "error": err.Error()},
-			)
-			continue
-		}
-		if validateErr := workflows.Validate(workflow); validateErr != nil {
-			logger.WarnCF(
-				"workflow",
-				"Invalid runtime-event workflow skipped",
-				map[string]any{"ref": def.Ref, "error": validateErr.Error()},
 			)
 			continue
 		}
@@ -532,15 +516,18 @@ func (al *AgentLoop) handleWorkflowRuntimeEventForGeneration(
 			runCtx context.Context,
 			release func(),
 			ref string,
+			workflow *workflows.Workflow,
 			m *workflows.RuntimeEventMatch,
 		) {
 			defer release()
 			if _, err := executor.Run(runCtx, workflows.RunRequest{
-				Ref:      ref,
-				Inputs:   m.Inputs,
-				Event:    m.Event,
-				Session:  m.Session,
-				Delivery: m.Delivery,
+				Ref:         ref,
+				Workflow:    workflow,
+				WorkflowRef: ref,
+				Inputs:      m.Inputs,
+				Event:       m.Event,
+				Session:     m.Session,
+				Delivery:    m.Delivery,
 			}); err != nil {
 				logger.WarnCF(
 					"workflow",
@@ -548,7 +535,7 @@ func (al *AgentLoop) handleWorkflowRuntimeEventForGeneration(
 					map[string]any{"ref": ref, "error": err.Error()},
 				)
 			}
-		}(workflowCtx, releaseWorkflow, def.Ref, match)
+		}(workflowCtx, releaseWorkflow, def.Ref, workflow, match)
 	}
 }
 

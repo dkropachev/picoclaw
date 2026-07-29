@@ -35,7 +35,16 @@ func newWorkflowTool(al *AgentLoop, agentID string, agent *AgentInstance) tools.
 		MaxConcurrentRuns:    al.cfg.Workflows.EffectiveMaxConcurrentRuns(),
 		DefaultTimeout:       al.cfg.Workflows.EffectiveDefaultTimeout(),
 	}
-	return tools.NewWorkflowTool(executor, agent.Workspace, workflowRuntimeCompatibility())
+	return tools.NewWorkflowTool(
+		executor,
+		agent.Workspace,
+		workflowRuntimeCompatibility(),
+	).ConfigureDevelopmentPublishGate(tools.WorkflowDevelopmentPublishGateConfig{
+		WorkflowsEnabled: al.cfg.Workflows.Enabled,
+		DefinitionsDir:   definitionsDir,
+		MaxCallDepth:     al.cfg.Workflows.EffectiveMaxCallDepth(),
+		Resolver:         al,
+	})
 }
 
 func workflowDefinitionsDir(al *AgentLoop) string {
@@ -118,6 +127,24 @@ func (r *workflowToolRunner) RunTool(ctx context.Context, req workflows.ToolRequ
 		}
 		registry = currentAgent.Tools
 	}
+	if req.MCP {
+		registeredTool, ok := registry.Get(req.Name)
+		if !ok {
+			return nil, fmt.Errorf(
+				"MCP tool %q/%q is not available",
+				req.MCPServer,
+				req.MCPTool,
+			)
+		}
+		if !workflowMCPToolMatches(registeredTool, req.MCPServer, req.MCPTool) {
+			return nil, fmt.Errorf(
+				"MCP tool %q/%q does not match the registered wrapper for %q",
+				req.MCPServer,
+				req.MCPTool,
+				req.Name,
+			)
+		}
+	}
 	args := cloneAnyMap(req.Args)
 	delivery := req.Delivery
 	if strings.EqualFold(req.Name, tools.WorkflowToolName) {
@@ -151,6 +178,15 @@ func (r *workflowToolRunner) RunTool(ctx context.Context, req workflows.ToolRequ
 		return outputs, fmt.Errorf("%s", result.ContentForLLM())
 	}
 	return outputs, nil
+}
+
+func workflowMCPToolMatches(tool tools.Tool, serverName, toolName string) bool {
+	wrapped, ok := tool.(*tools.MCPTool)
+	if !ok || wrapped == nil {
+		return false
+	}
+	registeredServer, registeredTool := wrapped.MCPIdentity()
+	return registeredServer == serverName && registeredTool == toolName
 }
 
 func (r *workflowToolRunner) deliverHandledMedia(
