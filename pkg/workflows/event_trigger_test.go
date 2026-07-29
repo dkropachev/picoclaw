@@ -879,27 +879,27 @@ jobs:
 	}
 }
 
-func TestEventTriggerBumpsWorkflowCompatibility(t *testing.T) {
-	if WorkflowEngineVersion != "5" {
-		t.Fatalf("WorkflowEngineVersion = %q, want 5", WorkflowEngineVersion)
+func TestAgentToolsModeBumpsWorkflowCompatibility(t *testing.T) {
+	if WorkflowEngineVersion != "6" {
+		t.Fatalf("WorkflowEngineVersion = %q, want 6", WorkflowEngineVersion)
 	}
 	if WorkflowSchemaVersion != "2" {
 		t.Fatalf("WorkflowSchemaVersion = %q, want 2", WorkflowSchemaVersion)
 	}
-	if ValidatorFingerprint != "picoclaw-workflow-validator-v2" {
-		t.Fatalf("ValidatorFingerprint = %q, want v2", ValidatorFingerprint)
+	if ValidatorFingerprint != "picoclaw-workflow-validator-v3" {
+		t.Fatalf("ValidatorFingerprint = %q, want v3", ValidatorFingerprint)
 	}
 
 	current := NormalizeRuntimeCompatibility(RuntimeCompatibility{PicoclawVersion: "v1.0.0"})
 	oldStamp := WorkflowValidationStamp{
 		WorkflowHash:         "same-hash",
 		PicoclawVersion:      current.PicoclawVersion,
-		WorkflowEngine:       "4",
-		WorkflowSchema:       "1",
-		ValidatorFingerprint: "picoclaw-workflow-validator-v1",
+		WorkflowEngine:       "5",
+		WorkflowSchema:       "2",
+		ValidatorFingerprint: "picoclaw-workflow-validator-v2",
 	}
 	if stampMatchesRuntime(oldStamp, current, "same-hash") {
-		t.Fatal("pre-event compatibility stamp matched current runtime")
+		t.Fatal("pre-agent-tools compatibility stamp matched current runtime")
 	}
 }
 

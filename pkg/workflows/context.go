@@ -72,6 +72,11 @@ type AgentRunner interface {
 	RunAgent(ctx context.Context, req AgentRequest) (map[string]any, error)
 }
 
+const (
+	AgentToolsInherit = "inherit"
+	AgentToolsNone    = "none"
+)
+
 type AgentRequest struct {
 	AgentID   string
 	Message   string
@@ -80,6 +85,7 @@ type AgentRequest struct {
 	Session   string
 	History   string
 	Cache     string
+	Tools     string
 	Delivery  Delivery
 	Inputs    map[string]any
 	MessageID string

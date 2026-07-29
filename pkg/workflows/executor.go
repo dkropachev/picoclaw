@@ -901,6 +901,7 @@ func (e *Executor) runStepTarget(
 			Session:  stepSession(step.Context, with, execCtx),
 			History:  stringFromMap(with, "history"),
 			Cache:    stringFromMap(with, "cache"),
+			Tools:    agentToolsMode(with),
 			Delivery: stepDelivery(step.Context, execCtx),
 			Inputs:   with,
 			Output:   output,
@@ -919,6 +920,13 @@ func (e *Executor) runStepTarget(
 	default:
 		return nil, fmt.Errorf("unsupported uses target %q", uses)
 	}
+}
+
+func agentToolsMode(with map[string]any) string {
+	if strings.TrimSpace(stringFromMap(with, "tools")) == AgentToolsNone {
+		return AgentToolsNone
+	}
+	return AgentToolsInherit
 }
 
 func applyWorkflowCallContract(

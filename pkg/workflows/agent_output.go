@@ -409,6 +409,9 @@ func validateJSONSchemaValue(value any, schema map[string]any, path string) erro
 			}
 		}
 		props := schemaProperties(schema)
+		if err := validateJSONSchemaAdditionalProperties(obj, props, schema, path); err != nil {
+			return err
+		}
 		for key, child := range props {
 			if item, ok := obj[key]; ok {
 				if err := validateJSONSchemaValue(item, child, path+"."+key); err != nil {
@@ -427,6 +430,50 @@ func validateJSONSchemaValue(value any, schema map[string]any, path string) erro
 					return err
 				}
 			}
+		}
+	}
+	return nil
+}
+
+func validateJSONSchemaAdditionalProperties(
+	value map[string]any,
+	properties map[string]map[string]any,
+	schema map[string]any,
+	path string,
+) error {
+	raw, constrained := schema["additionalProperties"]
+	if !constrained || raw == true {
+		return nil
+	}
+
+	keys := make([]string, 0, len(value))
+	for key := range value {
+		if _, declared := properties[key]; !declared {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		return nil
+	}
+	if raw == false {
+		return fmt.Errorf("%s.%s is not allowed", path, keys[0])
+	}
+
+	additionalSchema, err := normalizeSchemaMap(raw)
+	if err != nil {
+		return fmt.Errorf("%s additionalProperties schema is invalid: %w", path, err)
+	}
+	if len(additionalSchema) == 0 {
+		return nil
+	}
+	for _, key := range keys {
+		if err := validateJSONSchemaValue(
+			value[key],
+			additionalSchema,
+			path+"."+key,
+		); err != nil {
+			return err
 		}
 	}
 	return nil

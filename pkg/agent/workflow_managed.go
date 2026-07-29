@@ -138,7 +138,7 @@ func (r *workflowAgentRunner) runManagedSplit(
 			workflowAgentMessage(fallbackReq),
 			req.Output,
 			runOnce,
-			workflowAgentRunOptions{},
+			workflowAgentRunOptions{NoTools: workflowAgentToolsDisabled(req.Tools)},
 		)
 		outputs := workflowStructuredAgentOutputs(
 			text,
@@ -150,6 +150,7 @@ func (r *workflowAgentRunner) runManagedSplit(
 			cacheMode,
 			promptCacheKey,
 			req.MessageID,
+			req.Tools,
 		)
 		outputs["managed"] = metadata
 		return outputs, err
@@ -181,7 +182,7 @@ func (r *workflowAgentRunner) runManagedSplit(
 					workflowAgentMessage(fallbackReq),
 					req.Output,
 					runOnce,
-					workflowAgentRunOptions{},
+					workflowAgentRunOptions{NoTools: workflowAgentToolsDisabled(req.Tools)},
 				)
 				outputs := workflowStructuredAgentOutputs(
 					text,
@@ -193,6 +194,7 @@ func (r *workflowAgentRunner) runManagedSplit(
 					cacheMode,
 					promptCacheKey,
 					req.MessageID,
+					req.Tools,
 				)
 				outputs["managed"] = metadata
 				return outputs, err
@@ -249,6 +251,7 @@ func (r *workflowAgentRunner) runManagedSplit(
 			cacheMode,
 			promptCacheKey,
 			req.MessageID,
+			req.Tools,
 		)
 		outputs["managed"] = metadata
 		outputs["managed_children"] = childOutputs
@@ -266,6 +269,7 @@ func (r *workflowAgentRunner) runManagedSplit(
 		cacheMode,
 		promptCacheKey,
 		req.MessageID,
+		req.Tools,
 	)
 	outputs["managed"] = metadata
 	outputs["managed_children"] = childOutputs
@@ -1444,8 +1448,18 @@ func workflowStructuredAgentOutputs(
 	cacheMode string,
 	promptCacheKey string,
 	messageID string,
+	toolsMode string,
 ) map[string]any {
-	outputs := workflowAgentBaseOutputs(text, agentID, sessionKey, historyMode, cacheMode, promptCacheKey, messageID)
+	outputs := workflowAgentBaseOutputs(
+		text,
+		agentID,
+		sessionKey,
+		historyMode,
+		cacheMode,
+		promptCacheKey,
+		messageID,
+		toolsMode,
+	)
 	outputs["structured_valid"] = structured.Valid
 	outputs["structured_repairs"] = repairs
 	if structured.RawJSON != "" {
@@ -1473,6 +1487,7 @@ func workflowManagedChildOutput(result workflowManagedChildResult) map[string]an
 		"model":          result.choice.modelMeta,
 		"effort":         result.choice.effortMeta,
 		"estimated_cost": result.choice.costMeta,
+		"tools":          workflows.AgentToolsNone,
 	}
 	if result.structured.Structured != nil {
 		out["structured"] = result.structured.Structured

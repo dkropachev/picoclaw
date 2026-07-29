@@ -2,6 +2,8 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 )
@@ -88,6 +90,44 @@ func TestValidateToolArgs(t *testing.T) {
 			args:   map[string]any{"name": "carol", "age": float64(42)},
 		},
 		{
+			name:   "integer accepts lossless JSON number",
+			schema: baseSchema,
+			args:   map[string]any{"name": "carol", "age": json.Number("9007199254740993")},
+		},
+		{
+			name:   "integer accepts integral JSON decimal",
+			schema: baseSchema,
+			args:   map[string]any{"name": "carol", "age": json.Number("42.000")},
+		},
+		{
+			name:   "integer accepts huge positive JSON exponent without expansion",
+			schema: baseSchema,
+			args:   map[string]any{"name": "carol", "age": json.Number("1e999999999")},
+		},
+		{
+			name:   "integer accepts zero with huge negative JSON exponent",
+			schema: baseSchema,
+			args:   map[string]any{"name": "carol", "age": json.Number("0e-999999999")},
+		},
+		{
+			name:    "integer rejects huge negative JSON exponent without expansion",
+			schema:  baseSchema,
+			args:    map[string]any{"name": "carol", "age": json.Number("1e-999999999")},
+			wantErr: "expected integer",
+		},
+		{
+			name:    "integer rejects fractional JSON number",
+			schema:  baseSchema,
+			args:    map[string]any{"name": "carol", "age": json.Number("42.5")},
+			wantErr: "expected integer",
+		},
+		{
+			name:    "integer rejects invalid JSON number",
+			schema:  baseSchema,
+			args:    map[string]any{"name": "carol", "age": json.Number("NaN")},
+			wantErr: "expected integer",
+		},
+		{
 			name:    "actual float for integer field",
 			schema:  baseSchema,
 			args:    map[string]any{"name": "dave", "age": float64(42.5)},
@@ -112,6 +152,38 @@ func TestValidateToolArgs(t *testing.T) {
 				},
 			},
 			args: map[string]any{"score": float64(10)},
+		},
+		{
+			name: "number accepts lossless JSON number",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"score": map[string]any{"type": "number"},
+				},
+			},
+			args: map[string]any{"score": json.Number("1e-10000")},
+		},
+		{
+			name: "number rejects invalid JSON number",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"score": map[string]any{"type": "number"},
+				},
+			},
+			args:    map[string]any{"score": json.Number("Infinity")},
+			wantErr: "expected finite number",
+		},
+		{
+			name: "number rejects non-finite float",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"score": map[string]any{"type": "number"},
+				},
+			},
+			args:    map[string]any{"score": math.Inf(1)},
+			wantErr: "expected finite number",
 		},
 		{
 			name: "boolean type valid",
