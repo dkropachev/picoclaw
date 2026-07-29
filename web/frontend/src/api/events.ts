@@ -114,8 +114,10 @@ const MALFORMED_RESPONSE_MESSAGE =
   "The event service returned a malformed response."
 const EVENT_ID_PATTERN = /^ev_[0-9a-f]{32}$/
 const DISPATCH_ID_PATTERN = /^dsp_[0-9a-f]{32}$/
+const WORKFLOW_RUN_ID_PATTERN = /^wr_[A-Za-z0-9_-]+$/
 const MAX_WORKFLOW_REF_BYTES = 1024
 const MAX_WORKFLOW_REVISION_BYTES = 256
+const MAX_WORKFLOW_RUN_ID_LENGTH = 256
 
 function setOptionalParam(
   params: URLSearchParams,
@@ -180,6 +182,15 @@ function isEventID(value: unknown): value is string {
 
 function isDispatchID(value: unknown): value is string {
   return typeof value === "string" && DISPATCH_ID_PATTERN.test(value)
+}
+
+function isDispatchRunID(value: unknown): value is string {
+  return (
+    value === "" ||
+    (typeof value === "string" &&
+      value.length <= MAX_WORKFLOW_RUN_ID_LENGTH &&
+      WORKFLOW_RUN_ID_PATTERN.test(value))
+  )
 }
 
 function isBoundedTrimmedString(
@@ -276,7 +287,7 @@ function isDispatchView(value: unknown): value is DispatchView {
         value.workflow_revision,
         MAX_WORKFLOW_REVISION_BYTES,
       )) &&
-    typeof value.run_id === "string" &&
+    isDispatchRunID(value.run_id) &&
     isDispatchStatus(value.status) &&
     isOptionalString(value.lease_until) &&
     typeof value.available_at === "string" &&

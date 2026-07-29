@@ -213,6 +213,9 @@ describe("events API", () => {
         jsonResponse({ ...dispatch, workflow_ref: " workflows/triage.yml" }),
       )
       .mockResolvedValueOnce(
+        jsonResponse({ ...dispatch, run_id: "run/not-navigable" }),
+      )
+      .mockResolvedValueOnce(
         jsonResponse({
           ...dispatch,
           id: "dsp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -253,6 +256,10 @@ describe("events API", () => {
       message: "The event service returned a malformed response.",
       status: 502,
     })
+    await expect(getEventDispatch(dispatch.id)).rejects.toMatchObject({
+      message: "The event service returned a malformed response.",
+      status: 502,
+    })
   })
 
   it("rejects oversized dispatch workflow fields", async () => {
@@ -269,7 +276,16 @@ describe("events API", () => {
           workflow_revision: "r".repeat(257),
         }),
       )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...dispatch,
+          run_id: `wr_${"r".repeat(254)}`,
+        }),
+      )
 
+    await expect(getEventDispatch(dispatch.id)).rejects.toMatchObject({
+      status: 502,
+    })
     await expect(getEventDispatch(dispatch.id)).rejects.toMatchObject({
       status: 502,
     })
