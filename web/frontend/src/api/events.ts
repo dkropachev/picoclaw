@@ -117,7 +117,7 @@ const DISPATCH_ID_PATTERN = /^dsp_[0-9a-f]{32}$/
 const WORKFLOW_RUN_ID_PATTERN = /^wr_[A-Za-z0-9_-]+$/
 const MAX_WORKFLOW_REF_BYTES = 1024
 const MAX_WORKFLOW_REVISION_BYTES = 256
-const MAX_WORKFLOW_RUN_ID_LENGTH = 256
+const MAX_WORKFLOW_RUN_ID_BYTES = 1024
 
 function setOptionalParam(
   params: URLSearchParams,
@@ -188,7 +188,7 @@ function isDispatchRunID(value: unknown): value is string {
   return (
     value === "" ||
     (typeof value === "string" &&
-      value.length <= MAX_WORKFLOW_RUN_ID_LENGTH &&
+      new TextEncoder().encode(value).byteLength <= MAX_WORKFLOW_RUN_ID_BYTES &&
       WORKFLOW_RUN_ID_PATTERN.test(value))
   )
 }

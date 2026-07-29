@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,9 +9,13 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
@@ -51,10 +56,17 @@ type optionalWorkflowCancelReason struct {
 	Present bool
 }
 
+var errInvalidWorkflowCancelReasonEncoding = errors.New(
+	"workflow cancellation reason must contain valid UTF-8",
+)
+
 func (r *optionalWorkflowCancelReason) UnmarshalJSON(data []byte) error {
 	r.Present = true
 	if strings.TrimSpace(string(data)) == "null" {
 		return errors.New("workflow cancellation reason must be a string")
+	}
+	if !utf8.Valid(data) {
+		return errInvalidWorkflowCancelReasonEncoding
 	}
 	return json.Unmarshal(data, &r.Value)
 }
@@ -283,7 +295,11 @@ func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 		return
 	}
-	dependencies, err := h.requirePublishedWorkflowDependenciesReady(
+	h.configMutationMu.Lock()
+	releaseAdmission := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseAdmission()
+
+	admission, err := h.requirePublishedWorkflowDependenciesReady(
 		r.Context(),
 		req.Ref,
 		req.ExpectedDependencyRevision,
@@ -292,7 +308,10 @@ func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowRunDependencyError(w, err)
 		return
 	}
-	cfg, _, executor, err := h.workflowRuntime(r.Context())
+	cfg, _, executor, err := h.workflowRuntimeFromConfig(
+		r.Context(),
+		admission.Config,
+	)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -307,18 +326,56 @@ func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeWorkflowRunDependencyError(w, errWorkflowDependenciesNotReady)
 		return
 	}
-	if err := workflows.EnsureWorkflowRunnable(
-		r.Context(),
-		cfg.WorkspacePath(),
-		dependencies.RootRef,
-		h.workflowCompatibilityRuntime(r.Context()),
-		workflowLocalOptionsFromConfig(cfg)...,
-	); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
+	executor.WorkflowSnapshots = admission.Snapshots
+	executor.AdmittedRunCreate = func(
+		ctx context.Context,
+		candidate *workflows.Run,
+		create func() error,
+	) error {
+		err := workflows.WithGuardedFencedRunnableWorkflowSnapshots(
+			ctx,
+			cfg.WorkspacePath(),
+			admission.orderedSnapshots(),
+			executor.RuntimeCompatibility,
+			func() error {
+				if candidate == nil ||
+					candidate.WorkflowRef != admission.Response.RootRef {
+					return errWorkflowDependencyRevisionStale
+				}
+				if err := h.fenceWorkflowDependencyAdmission(
+					ctx,
+					admission,
+					req.ExpectedDependencyRevision,
+				); err != nil {
+					return err
+				}
+				return nil
+			},
+			func(guarded func() error) error {
+				return h.guardWorkflowDependencyAdmissionConfig(
+					admission,
+					guarded,
+				)
+			},
+			func() error {
+				if err := create(); err != nil {
+					return err
+				}
+				releaseAdmission()
+				return nil
+			},
+		)
+		switch {
+		case errors.Is(err, workflows.ErrWorkflowSnapshotAdmissionUnavailable):
+			return fmt.Errorf("%w: %v", errWorkflowDependencyUnavailable, err)
+		case errors.Is(err, workflows.ErrWorkflowSnapshotsNotRunnable):
+			return fmt.Errorf("%w: %v", errWorkflowDependenciesNotReady, err)
+		default:
+			return err
+		}
 	}
 	runReq := workflows.RunRequest{
-		Ref:      dependencies.RootRef,
+		Ref:      admission.Response.RootRef,
 		Inputs:   req.Inputs,
 		Secrets:  req.Secrets,
 		Session:  req.Session,
@@ -336,6 +393,10 @@ func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if started.Err != nil {
+			if isWorkflowRunDependencyError(started.Err) {
+				writeWorkflowRunDependencyError(w, started.Err)
+				return
+			}
 			if started.Result != nil {
 				writeWorkflowJSONStatus(
 					w,
@@ -352,6 +413,10 @@ func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	result, runErr := executor.Run(r.Context(), runReq)
 	if runErr != nil {
+		if isWorkflowRunDependencyError(runErr) {
+			writeWorkflowRunDependencyError(w, runErr)
+			return
+		}
 		writeWorkflowJSONStatus(w, http.StatusBadRequest, map[string]any{"result": result, "error": runErr.Error()})
 		return
 	}
@@ -361,6 +426,14 @@ func (h *Handler) handleRunWorkflow(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleCancelWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	var req workflowCancelRequest
 	if err := decodeWorkflowCancelRequest(w, r, &req); err != nil {
+		if errors.Is(err, errInvalidWorkflowCancelReasonEncoding) {
+			writeWorkflowJSONStatus(
+				w,
+				http.StatusBadRequest,
+				map[string]any{"error": "invalid_cancel_reason"},
+			)
+			return
+		}
 		var maximum *http.MaxBytesError
 		if errors.As(err, &maximum) {
 			writeWorkflowJSONStatus(
@@ -404,7 +477,9 @@ func (h *Handler) handleCancelWorkflowRun(w http.ResponseWriter, r *http.Request
 	h.recordCanceledWorkflowDevelopmentRun(r.Context(), run)
 	writeWorkflowJSON(
 		w,
-		workflows.ProjectWorkflowRunForBrowser(
+		workflows.ProjectWorkflowRunForBrowserWithStore(
+			r.Context(),
+			store,
 			run,
 			workflows.IsEventBackedDraftRunFamily(r.Context(), store, run),
 		),
@@ -417,9 +492,24 @@ func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request)
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 		return
 	}
-	store, err := h.workflowRunStore(r.Context())
+	h.configMutationMu.Lock()
+	releaseAdmission := sync.OnceFunc(h.configMutationMu.Unlock)
+	defer releaseAdmission()
+
+	admissionConfig, admissionConfigRevision, err := loadStableWorkflowDependencyConfig(
+		h.configPath,
+	)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	store := workflows.NewFileRunStore(admissionConfig.WorkspacePath())
+	if pruneErr := pruneWorkflowRunStore(
+		r.Context(),
+		admissionConfig,
+		store,
+	); pruneErr != nil {
+		http.Error(w, pruneErr.Error(), http.StatusInternalServerError)
 		return
 	}
 	previousRun, err := store.GetRun(r.Context(), r.PathValue("run_id"))
@@ -435,15 +525,21 @@ func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request)
 		)
 		return
 	}
-	if _, dependencyErr := h.requirePublishedWorkflowDependenciesReady(
+	admission, dependencyErr := h.requirePublishedWorkflowDependenciesReadyFromConfig(
 		r.Context(),
+		admissionConfig,
+		admissionConfigRevision,
 		previousRun.WorkflowRef,
 		req.ExpectedDependencyRevision,
-	); dependencyErr != nil {
+	)
+	if dependencyErr != nil {
 		writeWorkflowRunDependencyError(w, dependencyErr)
 		return
 	}
-	cfg, _, executor, err := h.workflowRuntime(r.Context())
+	cfg, _, executor, err := h.workflowRuntimeFromConfig(
+		r.Context(),
+		admission.Config,
+	)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -453,18 +549,61 @@ func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request)
 		writeWorkflowRunDependencyError(w, errWorkflowDependenciesNotReady)
 		return
 	}
-	if err := workflows.EnsureWorkflowRunnable(
-		r.Context(),
-		cfg.WorkspacePath(),
-		previousRun.WorkflowRef,
-		h.workflowCompatibilityRuntime(r.Context()),
-		workflowLocalOptionsFromConfig(cfg)...,
-	); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
+	executor.WorkflowSnapshots = admission.Snapshots
+	executor.AdmittedRunCreate = func(
+		ctx context.Context,
+		candidate *workflows.Run,
+		create func() error,
+	) error {
+		err := workflows.WithGuardedFencedRunnableWorkflowSnapshots(
+			ctx,
+			cfg.WorkspacePath(),
+			admission.orderedSnapshots(),
+			executor.RuntimeCompatibility,
+			func() error {
+				if candidate == nil ||
+					candidate.WorkflowRef != admission.Response.RootRef ||
+					candidate.RetryOfRunID != previousRun.ID {
+					return errWorkflowDependencyRevisionStale
+				}
+				if err := h.fenceWorkflowDependencyAdmission(
+					ctx,
+					admission,
+					req.ExpectedDependencyRevision,
+				); err != nil {
+					return err
+				}
+				return nil
+			},
+			func(guarded func() error) error {
+				return h.guardWorkflowDependencyAdmissionConfig(
+					admission,
+					guarded,
+				)
+			},
+			func() error {
+				if err := create(); err != nil {
+					return err
+				}
+				releaseAdmission()
+				return nil
+			},
+		)
+		switch {
+		case errors.Is(err, workflows.ErrWorkflowSnapshotAdmissionUnavailable):
+			return fmt.Errorf("%w: %v", errWorkflowDependencyUnavailable, err)
+		case errors.Is(err, workflows.ErrWorkflowSnapshotsNotRunnable):
+			return fmt.Errorf("%w: %v", errWorkflowDependenciesNotReady, err)
+		default:
+			return err
+		}
 	}
-	result, runErr := executor.Retry(r.Context(), r.PathValue("run_id"), req.Secrets)
+	result, runErr := executor.RetryCaptured(r.Context(), previousRun, req.Secrets)
 	if runErr != nil {
+		if isWorkflowRunDependencyError(runErr) {
+			writeWorkflowRunDependencyError(w, runErr)
+			return
+		}
 		writeWorkflowJSONStatus(w, http.StatusBadRequest, map[string]any{"result": result, "error": runErr.Error()})
 		return
 	}
@@ -484,7 +623,13 @@ func (h *Handler) handleListWorkflowRuns(w http.ResponseWriter, r *http.Request)
 	}
 	writeWorkflowJSON(
 		w,
-		map[string]any{"runs": workflows.ProjectEventBackedDraftRunsForBrowser(runs)},
+		map[string]any{
+			"runs": workflows.ProjectEventBackedDraftRunsForBrowserWithStore(
+				r.Context(),
+				store,
+				runs,
+			),
+		},
 	)
 }
 
@@ -501,7 +646,9 @@ func (h *Handler) handleGetWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	}
 	writeWorkflowJSON(
 		w,
-		workflows.ProjectWorkflowRunForBrowser(
+		workflows.ProjectWorkflowRunForBrowserWithStore(
+			r.Context(),
+			store,
 			run,
 			workflows.IsEventBackedDraftRunFamily(r.Context(), store, run),
 		),
@@ -612,7 +759,21 @@ func (h *Handler) handleGetWorkflowDevelopment(w http.ResponseWriter, r *http.Re
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeWorkflowJSON(w, map[string]any{"session": session})
+	payload := map[string]any{"session": session}
+	if session != nil &&
+		session.LastTest != nil &&
+		session.LastTest.Status == workflows.RunStatusRunning {
+		reconciledSession, reconciliation := h.reconcileRunningWorkflowDevelopmentTest(
+			r.Context(),
+			workspace,
+			session,
+		)
+		payload["session"] = reconciledSession
+		if reconciliation != nil {
+			payload["reconciliation"] = reconciliation
+		}
+	}
+	writeWorkflowJSON(w, payload)
 }
 
 func (h *Handler) handleStartWorkflowDevelopment(w http.ResponseWriter, r *http.Request) {
@@ -876,19 +1037,22 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 		backgroundOwnsRuntime = true
 		asyncSessionID := session.ID
 		asyncDraftKey := workflows.WorkflowDevelopmentDraftKey(session.TargetWorkflowRef, session.YAML)
+		asyncRunID := workflows.NewRunID()
+		runReq.RunID = asyncRunID
+		var initialStateRecorded atomic.Bool
 		started := startWorkflowRunBackground(
 			executor,
 			runReq,
 			func(result *workflows.RunResult, runErr error) {
-				h.workflowDevelopmentMu.Lock()
-				defer h.workflowDevelopmentMu.Unlock()
-				_, _, _ = recordWorkflowDevelopmentTestIfCurrentForEvent(
+				h.reconcileWorkflowDevelopmentTestCompletion(
 					workspace,
 					asyncSessionID,
 					asyncDraftKey,
 					eventID,
+					asyncRunID,
 					result,
 					runErr,
+					initialStateRecorded.Load(),
 				)
 			},
 		)
@@ -897,21 +1061,21 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 				RunID:  started.Run.ID,
 				Status: workflows.RunStatusRunning,
 			}
-			recorded, recordErr := recordWorkflowDevelopmentTestForEvent(
-				workspace,
-				eventID,
-				runningResult,
-				nil,
-			)
-			started.Release()
-			if recordErr != nil {
-				writeWorkflowDevelopmentError(w, recordErr)
-				return
-			}
-			writeWorkflowJSONStatus(
+			writeAcceptedWorkflowDevelopmentTestRun(
 				w,
-				http.StatusAccepted,
-				map[string]any{"session": recorded, "result": runningResult},
+				started,
+				session,
+				runningResult,
+				&initialStateRecorded,
+				func() (*workflows.WorkflowDevelopmentSession, bool, error) {
+					recorded, recordErr := recordWorkflowDevelopmentTestForEvent(
+						workspace,
+						eventID,
+						runningResult,
+						nil,
+					)
+					return recorded, recordErr == nil, recordErr
+				},
 			)
 			return
 		}
@@ -1043,12 +1207,37 @@ func (h *Handler) workflowRuntime(
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("Failed to load config: %w", err)
 	}
+	return h.workflowRuntimeWithRunners(
+		ctx,
+		cfg,
+		newWorkflowRuntimeRunners(h.configPath),
+	)
+}
+
+func (h *Handler) workflowRuntimeFromConfig(
+	ctx context.Context,
+	cfg *config.Config,
+) (*config.Config, *workflows.FileRunStore, *workflows.Executor, error) {
+	return h.workflowRuntimeWithRunners(
+		ctx,
+		cfg,
+		workflowRuntimeRunnersForConfig(h.configPath, cfg),
+	)
+}
+
+func (h *Handler) workflowRuntimeWithRunners(
+	ctx context.Context,
+	cfg *config.Config,
+	runners workflowRuntimeRunners,
+) (*config.Config, *workflows.FileRunStore, *workflows.Executor, error) {
+	if cfg == nil {
+		return nil, nil, nil, fmt.Errorf("workflow config is required")
+	}
 	workspace := cfg.WorkspacePath()
 	store := workflows.NewFileRunStore(workspace)
 	if err := pruneWorkflowRunStore(ctx, cfg, store); err != nil {
 		return nil, nil, nil, err
 	}
-	runners := newWorkflowRuntimeRunners(h.configPath)
 	executor := &workflows.Executor{
 		WorkspaceDir:         workspace,
 		DefinitionsDir:       cfg.Workflows.EffectiveDefinitionsDir(),
@@ -1136,16 +1325,29 @@ func decodeWorkflowCancelRequest(
 	if r.Body == nil {
 		return nil
 	}
-	decoder := json.NewDecoder(http.MaxBytesReader(
+	data, err := io.ReadAll(http.MaxBytesReader(
 		w,
 		r.Body,
 		workflowCancelRequestMaxBytes,
 	))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(dest); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var raw json.RawMessage
+	if err := decoder.Decode(&raw); err != nil {
+		return err
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed[0] != '{' {
+		return errors.New("workflow cancel request must be a JSON object")
+	}
+	requestDecoder := json.NewDecoder(bytes.NewReader(raw))
+	requestDecoder.DisallowUnknownFields()
+	if err := requestDecoder.Decode(dest); err != nil {
 		return err
 	}
 	var trailing any
@@ -1218,6 +1420,87 @@ type backgroundWorkflowStart struct {
 	Release func()
 }
 
+var workflowBackgroundStartTimeout = 5 * time.Second
+
+const (
+	workflowDevelopmentTestRecordAttempts   = 3
+	workflowDevelopmentTestRecordRetryDelay = 10 * time.Millisecond
+)
+
+type workflowDevelopmentTestRecordOperation func() (
+	*workflows.WorkflowDevelopmentSession,
+	bool,
+	error,
+)
+
+type workflowDevelopmentTestReconciliation struct {
+	State   string `json:"state"`
+	Reason  string `json:"reason"`
+	RunID   string `json:"run_id"`
+	Message string `json:"message"`
+}
+
+func retryWorkflowDevelopmentTestRecord(
+	operation workflowDevelopmentTestRecordOperation,
+) (*workflows.WorkflowDevelopmentSession, bool, error) {
+	var (
+		session  *workflows.WorkflowDevelopmentSession
+		recorded bool
+		err      error
+	)
+	for attempt := 0; attempt < workflowDevelopmentTestRecordAttempts; attempt++ {
+		session, recorded, err = operation()
+		if err == nil {
+			return session, recorded, nil
+		}
+		if attempt+1 < workflowDevelopmentTestRecordAttempts {
+			time.Sleep(workflowDevelopmentTestRecordRetryDelay)
+		}
+	}
+	return session, recorded, err
+}
+
+func writeAcceptedWorkflowDevelopmentTestRun(
+	w http.ResponseWriter,
+	started backgroundWorkflowStart,
+	fallbackSession *workflows.WorkflowDevelopmentSession,
+	runningResult *workflows.RunResult,
+	initialStateRecorded *atomic.Bool,
+	record workflowDevelopmentTestRecordOperation,
+) {
+	recordedSession, _, recordErr := retryWorkflowDevelopmentTestRecord(record)
+	initialStateRecorded.Store(recordErr == nil)
+	started.Release()
+
+	payload := map[string]any{
+		"session": fallbackSession,
+		"result":  runningResult,
+	}
+	if recordErr == nil {
+		payload["session"] = recordedSession
+	} else {
+		runID := ""
+		if runningResult != nil {
+			runID = runningResult.RunID
+		}
+		payload["reconciliation"] = workflowDevelopmentTestReconciliation{
+			State:   "degraded",
+			Reason:  "draft_test_snapshot_not_recorded",
+			RunID:   runID,
+			Message: "the workflow run was created, but its development snapshot could not be recorded; inspect the durable run and run a current draft test before publishing",
+		}
+		logger.ErrorCF(
+			"workflows",
+			"failed to record accepted workflow development test",
+			map[string]any{
+				"run_id": runID,
+				"error":  recordErr.Error(),
+			},
+		)
+	}
+	writeWorkflowJSONStatus(w, http.StatusAccepted, payload)
+}
+
 func startWorkflowRunBackground(
 	executor *workflows.Executor,
 	req workflows.RunRequest,
@@ -1226,6 +1509,7 @@ func startWorkflowRunBackground(
 	created := make(chan *workflows.Run, 1)
 	completed := make(chan backgroundWorkflowStart, 1)
 	release := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
 	if req.RunID == "" {
 		req.RunID = workflows.NewRunID()
 	}
@@ -1233,36 +1517,93 @@ func startWorkflowRunBackground(
 		created <- run
 		<-release
 	}
+	runCtx, cancelRun := context.WithCancel(context.Background())
 	go func() {
-		defer closeWorkflowRuntime(executor)
-		result, err := executor.Run(context.Background(), req)
-		if onComplete != nil {
-			onComplete(result, err)
-		}
+		result, err := executor.Run(runCtx, req)
+		closeWorkflowRuntime(executor)
+		cancelRun()
+		// Publish executor completion independently of caller callbacks. A
+		// callback may need a mutex still held by the accepting HTTP handler.
 		completed <- backgroundWorkflowStart{Result: result, Err: err, Release: func() {}}
 	}()
 
+	accepted := func(
+		run *workflows.Run,
+		finished backgroundWorkflowStart,
+		completionKnown bool,
+	) backgroundWorkflowStart {
+		callbackRelease := make(chan struct{})
+		releaseAccepted := sync.OnceFunc(func() {
+			releaseOnce()
+			close(callbackRelease)
+		})
+		if onComplete != nil {
+			go func() {
+				if !completionKnown {
+					finished = <-completed
+				}
+				// Accepted callers record the running state before Release.
+				<-callbackRelease
+				onComplete(finished.Result, finished.Err)
+			}()
+		}
+		return backgroundWorkflowStart{
+			Run:     run,
+			Release: releaseAccepted,
+		}
+	}
+	acceptedFromFinished := func(
+		finished backgroundWorkflowStart,
+	) (backgroundWorkflowStart, bool) {
+		if finished.Result == nil ||
+			strings.TrimSpace(finished.Result.RunID) == "" {
+			return backgroundWorkflowStart{}, false
+		}
+		return accepted(
+			&workflows.Run{
+				ID:     finished.Result.RunID,
+				Status: finished.Result.Status,
+			},
+			finished,
+			true,
+		), true
+	}
+
+	timer := time.NewTimer(workflowBackgroundStartTimeout)
+	defer timer.Stop()
 	select {
 	case run := <-created:
-		released := false
-		return backgroundWorkflowStart{
-			Run: run,
-			Release: func() {
-				if released {
-					return
-				}
-				released = true
-				close(release)
-			},
-		}
+		return accepted(run, backgroundWorkflowStart{}, false)
 	case finished := <-completed:
-		close(release)
+		if started, durable := acceptedFromFinished(finished); durable {
+			return started
+		}
+		releaseOnce()
 		return finished
-	case <-time.After(5 * time.Second):
-		close(release)
-		return backgroundWorkflowStart{
-			Err:     fmt.Errorf("workflow run did not start within 5 seconds"),
-			Release: func() {},
+	case <-timer.C:
+		// Do not let a timed-out starter create a durable run after the HTTP
+		// response. Cancellation is checked at the executor's create closure,
+		// and joining completed proves the background starter has stopped.
+		cancelRun()
+		releaseOnce()
+		select {
+		case run := <-created:
+			return accepted(run, backgroundWorkflowStart{}, false)
+		case finished := <-completed:
+			select {
+			case run := <-created:
+				// Some terminal persistence errors have no RunResult. The
+				// create callback is still authoritative durable proof.
+				return accepted(run, finished, true)
+			default:
+			}
+			if started, durable := acceptedFromFinished(finished); durable {
+				return started
+			}
+			return backgroundWorkflowStart{
+				Err:     fmt.Errorf("workflow run did not start within 5 seconds"),
+				Release: func() {},
+			}
 		}
 	}
 }
@@ -1336,6 +1677,7 @@ func recordWorkflowDevelopmentTestIfCurrentForEvent(
 	sessionID string,
 	draftKey string,
 	eventID string,
+	expectedRunID string,
 	result *workflows.RunResult,
 	testErr error,
 ) (*workflows.WorkflowDevelopmentSession, bool, error) {
@@ -1344,6 +1686,7 @@ func recordWorkflowDevelopmentTestIfCurrentForEvent(
 			workspace,
 			sessionID,
 			draftKey,
+			expectedRunID,
 			result,
 			testErr,
 		)
@@ -1353,9 +1696,199 @@ func recordWorkflowDevelopmentTestIfCurrentForEvent(
 		sessionID,
 		draftKey,
 		eventID,
+		expectedRunID,
 		result,
 		testErr,
 	)
+}
+
+func (h *Handler) reconcileWorkflowDevelopmentTestCompletion(
+	workspace string,
+	sessionID string,
+	draftKey string,
+	eventID string,
+	expectedRunID string,
+	result *workflows.RunResult,
+	runErr error,
+	initialStateRecorded bool,
+) {
+	result, runErr = terminalWorkflowDevelopmentTestOutcome(
+		expectedRunID,
+		result,
+		runErr,
+	)
+	h.workflowDevelopmentMu.Lock()
+	_, recorded, recordErr := retryWorkflowDevelopmentTestRecord(
+		func() (*workflows.WorkflowDevelopmentSession, bool, error) {
+			return recordWorkflowDevelopmentTestIfCurrentForEvent(
+				workspace,
+				sessionID,
+				draftKey,
+				eventID,
+				expectedRunID,
+				result,
+				runErr,
+			)
+		},
+	)
+	h.workflowDevelopmentMu.Unlock()
+	if recordErr != nil {
+		logger.ErrorCF(
+			"workflows",
+			"failed to reconcile terminal workflow development test",
+			map[string]any{
+				"run_id": expectedRunID,
+				"error":  recordErr.Error(),
+			},
+		)
+		return
+	}
+	if !recorded && !initialStateRecorded {
+		logger.ErrorCF(
+			"workflows",
+			"terminal workflow development test could not claim an unrecorded initial snapshot",
+			map[string]any{"run_id": expectedRunID},
+		)
+	}
+}
+
+func terminalWorkflowDevelopmentTestOutcome(
+	expectedRunID string,
+	result *workflows.RunResult,
+	runErr error,
+) (*workflows.RunResult, error) {
+	if result == nil {
+		result = &workflows.RunResult{
+			RunID:  expectedRunID,
+			Status: workflows.RunStatusFailed,
+		}
+		if runErr == nil {
+			runErr = errors.New("workflow draft test ended without a terminal result")
+		}
+		return result, runErr
+	}
+	cloned := *result
+	cloned.Outputs = cloneWorkflowMap(result.Outputs)
+	result = &cloned
+	if strings.TrimSpace(result.RunID) == "" {
+		result.RunID = expectedRunID
+	}
+	if result.Status == "" || result.Status == workflows.RunStatusRunning {
+		result.Status = workflows.RunStatusFailed
+		if runErr == nil {
+			runErr = errors.New("workflow draft test ended without a terminal status")
+		}
+	}
+	return result, runErr
+}
+
+func (h *Handler) reconcileRunningWorkflowDevelopmentTest(
+	ctx context.Context,
+	workspace string,
+	session *workflows.WorkflowDevelopmentSession,
+) (*workflows.WorkflowDevelopmentSession, *workflowDevelopmentTestReconciliation) {
+	if session == nil ||
+		session.LastTest == nil ||
+		session.LastTest.Status != workflows.RunStatusRunning ||
+		strings.TrimSpace(session.LastTest.RunID) == "" {
+		return session, nil
+	}
+	runID := session.LastTest.RunID
+	run, runErr := workflows.NewFileRunStore(workspace).GetRun(ctx, runID)
+	if runErr != nil {
+		return session, &workflowDevelopmentTestReconciliation{
+			State:   "degraded",
+			Reason:  "draft_test_run_unavailable",
+			RunID:   runID,
+			Message: "the running development snapshot could not be reconciled with its durable workflow run",
+		}
+	}
+	if run.Status == workflows.RunStatusRunning {
+		return session, nil
+	}
+	result := &workflows.RunResult{
+		RunID:   run.ID,
+		Status:  run.Status,
+		Outputs: cloneWorkflowMap(run.Outputs),
+		Error:   run.Error,
+	}
+	var terminalErr error
+	if strings.TrimSpace(run.Error) != "" {
+		terminalErr = errors.New(run.Error)
+	} else if run.Status == workflows.RunStatusCanceled {
+		reason := strings.TrimSpace(run.CancelReason)
+		if reason == "" {
+			reason = "workflow draft test was canceled"
+		}
+		result.Error = reason
+		terminalErr = errors.New(reason)
+	}
+
+	h.workflowDevelopmentMu.Lock()
+	reconciled, _, recordErr := retryWorkflowDevelopmentTestRecord(
+		func() (*workflows.WorkflowDevelopmentSession, bool, error) {
+			return recordWorkflowDevelopmentTestIfCurrentForEvent(
+				workspace,
+				session.ID,
+				session.LastTest.DraftKey,
+				session.LastTest.EventID,
+				runID,
+				result,
+				terminalErr,
+			)
+		},
+	)
+	h.workflowDevelopmentMu.Unlock()
+	if recordErr == nil {
+		return reconciled, nil
+	}
+
+	logger.ErrorCF(
+		"workflows",
+		"failed to reconcile polled terminal workflow development test",
+		map[string]any{
+			"run_id": runID,
+			"error":  recordErr.Error(),
+		},
+	)
+	return projectWorkflowDevelopmentReconciliationFailure(session, runID),
+		&workflowDevelopmentTestReconciliation{
+			State:   "degraded",
+			Reason:  "draft_test_terminal_snapshot_not_recorded",
+			RunID:   runID,
+			Message: "the workflow run is terminal, but its development snapshot could not be recorded; refresh will retry reconciliation",
+		}
+}
+
+func projectWorkflowDevelopmentReconciliationFailure(
+	session *workflows.WorkflowDevelopmentSession,
+	runID string,
+) *workflows.WorkflowDevelopmentSession {
+	if session == nil {
+		return nil
+	}
+	projected := *session
+	if session.LastTest != nil {
+		lastTest := *session.LastTest
+		lastTest.RunID = runID
+		lastTest.Status = "reconciliation_failed"
+		lastTest.Error = "terminal workflow run state could not be saved to the development session"
+		lastTest.TestedAt = time.Now().UTC()
+		projected.LastTest = &lastTest
+	}
+	projected.Status = workflows.WorkflowDevelopmentStatusEditing
+	return &projected
+}
+
+func cloneWorkflowMap(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(value))
+	for key, item := range value {
+		cloned[key] = item
+	}
+	return cloned
 }
 
 func (h *Handler) recordCanceledWorkflowDevelopmentRun(ctx context.Context, run *workflows.Run) {
@@ -1380,15 +1913,29 @@ func (h *Handler) recordCanceledWorkflowDevelopmentRun(ctx context.Context, run 
 		Status: workflows.RunStatusCanceled,
 		Error:  run.CancelReason,
 	}
-	_, _, recordErr := recordWorkflowDevelopmentTestIfCurrentForEvent(
-		workspace,
-		session.ID,
-		session.LastTest.DraftKey,
-		session.LastTest.EventID,
-		result,
-		nil,
+	_, _, recordErr := retryWorkflowDevelopmentTestRecord(
+		func() (*workflows.WorkflowDevelopmentSession, bool, error) {
+			return recordWorkflowDevelopmentTestIfCurrentForEvent(
+				workspace,
+				session.ID,
+				session.LastTest.DraftKey,
+				session.LastTest.EventID,
+				run.ID,
+				result,
+				nil,
+			)
+		},
 	)
-	_ = recordErr
+	if recordErr != nil {
+		logger.ErrorCF(
+			"workflows",
+			"failed to reconcile canceled workflow development test",
+			map[string]any{
+				"run_id": run.ID,
+				"error":  recordErr.Error(),
+			},
+		)
+	}
 }
 
 func (h *Handler) tryLockWorkflowDevelopment(w http.ResponseWriter) func() {

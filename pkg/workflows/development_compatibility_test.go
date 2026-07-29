@@ -365,6 +365,7 @@ func TestWorkflowDevelopmentAsyncCompletionDoesNotRecordStaleDraft(t *testing.T)
 		workspace,
 		session.ID,
 		draftKey,
+		"wr_running",
 		&RunResult{RunID: "wr_running", Status: RunStatusSucceeded},
 		nil,
 	)
@@ -376,6 +377,69 @@ func TestWorkflowDevelopmentAsyncCompletionDoesNotRecordStaleDraft(t *testing.T)
 	}
 	if active == nil || active.LastTest != nil {
 		t.Fatalf("active last test = %#v, want stale completion ignored", active)
+	}
+}
+
+func TestWorkflowDevelopmentManualCompletionDoesNotOverwriteNewerRun(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	runtime := RuntimeCompatibility{PicoclawVersion: "v1.0.0", GitCommit: "abc123"}
+
+	session, err := StartWorkflowDevelopment(ctx, workspace, runtime, WorkflowDevelopmentStartRequest{
+		Prompt: "summarize incoming support requests",
+	})
+	if err != nil {
+		t.Fatalf("StartWorkflowDevelopment() error = %v", err)
+	}
+	draftKey := WorkflowDevelopmentDraftKey(session.TargetWorkflowRef, session.YAML)
+	if _, recordErr := RecordWorkflowDevelopmentTest(
+		workspace,
+		&RunResult{RunID: "wr_manual_a", Status: RunStatusRunning},
+		nil,
+	); recordErr != nil {
+		t.Fatalf("RecordWorkflowDevelopmentTest(run A) error = %v", recordErr)
+	}
+	if _, recorded, recordErr := RecordWorkflowDevelopmentTestIfCurrent(
+		workspace,
+		session.ID,
+		draftKey,
+		"wr_manual_a",
+		&RunResult{RunID: "wr_manual_a", Status: RunStatusCanceled},
+		nil,
+	); recordErr != nil || !recorded {
+		t.Fatalf(
+			"RecordWorkflowDevelopmentTestIfCurrent(cancel A) recorded=%v error=%v",
+			recorded,
+			recordErr,
+		)
+	}
+	if _, recordErr := RecordWorkflowDevelopmentTest(
+		workspace,
+		&RunResult{RunID: "wr_manual_b", Status: RunStatusRunning},
+		nil,
+	); recordErr != nil {
+		t.Fatalf("RecordWorkflowDevelopmentTest(run B) error = %v", recordErr)
+	}
+
+	active, recorded, err := RecordWorkflowDevelopmentTestIfCurrent(
+		workspace,
+		session.ID,
+		draftKey,
+		"wr_manual_a",
+		&RunResult{RunID: "wr_manual_a", Status: RunStatusSucceeded},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("RecordWorkflowDevelopmentTestIfCurrent(late A) error = %v", err)
+	}
+	if recorded {
+		t.Fatal("late run A completion recorded over run B")
+	}
+	if active == nil ||
+		active.LastTest == nil ||
+		active.LastTest.RunID != "wr_manual_b" ||
+		active.LastTest.Status != RunStatusRunning {
+		t.Fatalf("active last test = %#v, want running run B", active)
 	}
 }
 
@@ -413,6 +477,7 @@ func TestWorkflowDevelopmentEventTestRetainsEventIdentityThroughAsyncCompletion(
 		session.ID,
 		draftKey,
 		eventID,
+		"wr_event",
 		&RunResult{RunID: "wr_event", Status: RunStatusSucceeded},
 		nil,
 	)
@@ -459,6 +524,7 @@ func TestWorkflowDevelopmentEventTestFencesStaleAsyncEventCompletion(t *testing.
 		session.ID,
 		draftKey,
 		staleEventID,
+		"wr_stale",
 		&RunResult{RunID: "wr_stale", Status: RunStatusSucceeded},
 		nil,
 	)
@@ -480,6 +546,7 @@ func TestWorkflowDevelopmentEventTestFencesStaleAsyncEventCompletion(t *testing.
 		session.ID,
 		draftKey,
 		currentEventID,
+		"wr_stale",
 		&RunResult{RunID: "wr_stale", Status: RunStatusSucceeded},
 		nil,
 	)

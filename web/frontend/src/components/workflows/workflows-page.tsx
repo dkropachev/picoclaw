@@ -37,6 +37,7 @@ import {
   type WorkflowDeliveryPayload,
   type WorkflowDependencyCheckResponse,
   type WorkflowDevelopmentSession,
+  type WorkflowDevelopmentTestReconciliation,
   type WorkflowDevelopmentTestResult,
   type WorkflowInputDefinition,
   type WorkflowRun,
@@ -1127,7 +1128,7 @@ export function WorkflowsPage({
         event_id: eventTriggerPresent ? eventTestMatch.eventID : undefined,
         async: true,
       }),
-    onSuccess: ({ session: nextSession, result, error }) => {
+    onSuccess: ({ session: nextSession, result, reconciliation, error }) => {
       applySessionDraft(nextSession)
       setLastDraftTest({
         sessionID: nextSession.id,
@@ -1144,6 +1145,8 @@ export function WorkflowsPage({
         setSelectedRunID(result.run_id)
         if (error) {
           toast.error(`Draft test ${result.status}: ${error}`)
+        } else if (reconciliation != null) {
+          toast.warning(reconciliation.message)
         } else {
           toast.success(`Draft test ${result.status}`)
         }
@@ -1464,6 +1467,13 @@ export function WorkflowsPage({
     !startMutation.isPending &&
     !startWithAIMutation.isPending &&
     !startRepairWithAIMutation.isPending
+  const acceptedTestReconciliation =
+    testDraftMutation.data != null &&
+    testDraftMutation.data.session.id === session?.id
+      ? testDraftMutation.data.reconciliation
+      : undefined
+  const currentDevelopmentReconciliation =
+    developmentQuery.data?.reconciliation ?? acceptedTestReconciliation
   const canTestDraft =
     session != null &&
     draftTargetRef.trim() !== "" &&
@@ -1610,6 +1620,7 @@ export function WorkflowsPage({
         {mode === "develop" ? (
           <DevelopSurface
             session={session}
+            reconciliation={currentDevelopmentReconciliation}
             workflows={workflows}
             templates={templatesQuery.data?.templates ?? []}
             templatesLoading={templatesQuery.isLoading}
@@ -1872,6 +1883,7 @@ function CompatibilityBanner({
 
 function DevelopSurface({
   session,
+  reconciliation,
   workflows,
   templates,
   templatesLoading,
@@ -1935,6 +1947,7 @@ function DevelopSurface({
   busy,
 }: {
   session: WorkflowDevelopmentSession | null
+  reconciliation?: WorkflowDevelopmentTestReconciliation
   workflows: WorkflowDefinition[]
   templates: WorkflowTemplateCatalogEntry[]
   templatesLoading: boolean
@@ -2135,6 +2148,12 @@ function DevelopSurface({
       <section className="border-border bg-card/40 flex min-h-[36rem] flex-col rounded-lg border xl:min-h-0">
         <DevelopmentHeader session={session} />
         {busyLabel ? <DevelopmentBusyBar label={busyLabel} /> : null}
+        {reconciliation != null ? (
+          <DevelopmentReconciliationWarning
+            reconciliation={reconciliation}
+            onOpenRun={onOpenTestRun}
+          />
+        ) : null}
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4">
           <div className="grid gap-2">
             <label
@@ -2451,6 +2470,48 @@ function DevelopmentBusyBar({ label }: { label: string }) {
     >
       <IconActivity className="size-4 shrink-0" />
       <span className="min-w-0 truncate">{label}</span>
+    </div>
+  )
+}
+
+function DevelopmentReconciliationWarning({
+  reconciliation,
+  onOpenRun,
+}: {
+  reconciliation: WorkflowDevelopmentTestReconciliation
+  onOpenRun: (runID: string) => void
+}) {
+  const canOpenRun = isWorkflowRunID(reconciliation.run_id)
+  return (
+    <div
+      role="alert"
+      className="text-foreground flex min-w-0 items-start gap-3 border-b border-amber-500/40 bg-amber-500/10 px-4 py-3 text-xs"
+    >
+      <IconAlertTriangle
+        className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400"
+        aria-hidden="true"
+      />
+      <div className="min-w-0 flex-1">
+        <div className="font-medium">Draft test reconciliation degraded</div>
+        <div className="mt-1 break-words">{reconciliation.message}</div>
+        {reconciliation.run_id ? (
+          <div className="mt-1 font-mono break-all">
+            {reconciliation.run_id}
+          </div>
+        ) : null}
+      </div>
+      {canOpenRun ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => onOpenRun(reconciliation.run_id)}
+          aria-label={`Open reconciled run ${reconciliation.run_id}`}
+        >
+          <IconExternalLink className="size-4" aria-hidden="true" />
+          Open Run
+        </Button>
+      ) : null}
     </div>
   )
 }

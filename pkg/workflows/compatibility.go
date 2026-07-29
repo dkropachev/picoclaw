@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -82,6 +83,19 @@ type LocalWorkflowSnapshot struct {
 	Revision string
 	Workflow *Workflow
 }
+
+var (
+	// ErrWorkflowSnapshotAdmissionUnavailable identifies infrastructure or
+	// persisted-state failures that prevent a snapshot admission decision.
+	ErrWorkflowSnapshotAdmissionUnavailable = errors.New(
+		"workflow snapshot admission unavailable",
+	)
+	// ErrWorkflowSnapshotsNotRunnable identifies a completed compatibility
+	// decision that rejected one or more admitted snapshots.
+	ErrWorkflowSnapshotsNotRunnable = errors.New(
+		"workflow snapshots are not runnable",
+	)
+)
 
 type workflowCompatibilityOverlay struct {
 	ref  string
@@ -493,6 +507,179 @@ func LoadValidatedLocalSnapshot(
 	}, nil
 }
 
+// EnsureWorkflowSnapshotsRunnable checks compatibility for exact, already
+// parsed workflow snapshots. Callers can then execute those same snapshots
+// without a second definition read opening a compatibility TOCTOU window.
+func EnsureWorkflowSnapshotsRunnable(
+	ctx context.Context,
+	workspace string,
+	snapshots []*LocalWorkflowSnapshot,
+	runtime RuntimeCompatibility,
+) error {
+	return WithRunnableWorkflowSnapshots(
+		ctx,
+		workspace,
+		snapshots,
+		runtime,
+		func() error { return nil },
+	)
+}
+
+// WithRunnableWorkflowSnapshots holds the workflow mutation lock while it
+// validates the exact admitted snapshots and runs operation. Durable run
+// creation can be supplied as operation so compatibility revalidation and
+// definition publication cannot race the final check/create boundary.
+func WithRunnableWorkflowSnapshots(
+	ctx context.Context,
+	workspace string,
+	snapshots []*LocalWorkflowSnapshot,
+	runtime RuntimeCompatibility,
+	operation func() error,
+) error {
+	return WithFencedRunnableWorkflowSnapshots(
+		ctx,
+		workspace,
+		snapshots,
+		runtime,
+		func() error { return nil },
+		operation,
+	)
+}
+
+// WithFencedRunnableWorkflowSnapshots holds the workflow mutation lock while
+// fence rechecks current admission state, the exact admitted snapshots are
+// compatibility-checked, and operation crosses its durable boundary. The
+// ordering lets callers report definition drift before an obsolete snapshot's
+// compatibility stamp is considered.
+func WithFencedRunnableWorkflowSnapshots(
+	ctx context.Context,
+	workspace string,
+	snapshots []*LocalWorkflowSnapshot,
+	runtime RuntimeCompatibility,
+	fence func() error,
+	operation func() error,
+) error {
+	return WithGuardedFencedRunnableWorkflowSnapshots(
+		ctx,
+		workspace,
+		snapshots,
+		runtime,
+		fence,
+		func(guarded func() error) error { return guarded() },
+		operation,
+	)
+}
+
+// WithGuardedFencedRunnableWorkflowSnapshots holds the workflow mutation lock,
+// runs fence, then enters guard while compatibility-checking the exact admitted
+// snapshots and crossing operation's durable boundary. A caller can use guard
+// to retain another canonical mutation lock through compatibility and create
+// without changing the global workflow-before-dependent-lock ordering.
+func WithGuardedFencedRunnableWorkflowSnapshots(
+	ctx context.Context,
+	workspace string,
+	snapshots []*LocalWorkflowSnapshot,
+	runtime RuntimeCompatibility,
+	fence func() error,
+	guard func(func() error) error,
+	operation func() error,
+) error {
+	if fence == nil {
+		return fmt.Errorf("workflow snapshot fence is required")
+	}
+	if guard == nil {
+		return fmt.Errorf("workflow snapshot guard is required")
+	}
+	if operation == nil {
+		return fmt.Errorf("workflow snapshot operation is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	unlock, err := lockWorkflowMutation(workspace)
+	if err != nil {
+		return fmt.Errorf(
+			"%w: %v",
+			ErrWorkflowSnapshotAdmissionUnavailable,
+			err,
+		)
+	}
+	defer unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := fence(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return guard(func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		runtime = NormalizeRuntimeCompatibility(runtime)
+		if err := ensureWorkflowSnapshotsRunnableLocked(
+			workspace,
+			snapshots,
+			runtime,
+		); err != nil {
+			if errors.Is(err, ErrWorkflowSnapshotAdmissionUnavailable) {
+				return err
+			}
+			return fmt.Errorf("%w: %v", ErrWorkflowSnapshotsNotRunnable, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return operation()
+	})
+}
+
+func ensureWorkflowSnapshotsRunnableLocked(
+	workspace string,
+	snapshots []*LocalWorkflowSnapshot,
+	runtime RuntimeCompatibility,
+) error {
+	ordered := append([]*LocalWorkflowSnapshot(nil), snapshots...)
+	if len(ordered) == 0 {
+		return fmt.Errorf("at least one workflow snapshot is required")
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i] == nil {
+			return ordered[j] != nil
+		}
+		if ordered[j] == nil {
+			return false
+		}
+		return ordered[i].Ref < ordered[j].Ref
+	})
+	for _, snapshot := range ordered {
+		if snapshot == nil || snapshot.Workflow == nil {
+			return fmt.Errorf("workflow snapshot is required")
+		}
+		canonical, canonicalErr := CanonicalLocalRef(snapshot.Ref)
+		if canonicalErr != nil {
+			return canonicalErr
+		}
+		if canonical != snapshot.Ref || strings.TrimSpace(snapshot.Revision) == "" {
+			return fmt.Errorf("workflow snapshot %s is invalid", snapshot.Ref)
+		}
+		if validationErr := Validate(snapshot.Workflow); validationErr != nil {
+			return validationErr
+		}
+		if compatibilityErr := ensureWorkflowHashRunnable(
+			workspace,
+			canonical,
+			runtime,
+			snapshot.Revision,
+		); compatibilityErr != nil {
+			return compatibilityErr
+		}
+	}
+	return nil
+}
+
 func ensureWorkflowHashRunnable(
 	workspace string,
 	canonical string,
@@ -501,7 +688,11 @@ func ensureWorkflowHashRunnable(
 ) error {
 	manifest, missing, err := readCompatibilityManifest(workspace)
 	if err != nil {
-		return err
+		return fmt.Errorf(
+			"%w: %v",
+			ErrWorkflowSnapshotAdmissionUnavailable,
+			err,
+		)
 	}
 	if missing || manifest == nil {
 		return fmt.Errorf("workflow %s must be revalidated before it can run", canonical)

@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -38,8 +41,50 @@ func TestHandleCancelWorkflowRunValidatesReasonBeforeMutation(t *testing.T) {
 			wantCode:   "invalid_cancel_request",
 		},
 		{
+			name:       "top-level null",
+			body:       `null`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_cancel_request",
+		},
+		{
+			name:       "top-level array",
+			body:       `[]`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_cancel_request",
+		},
+		{
+			name:       "top-level string",
+			body:       `"stop"`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_cancel_request",
+		},
+		{
+			name:       "top-level boolean",
+			body:       `true`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_cancel_request",
+		},
+		{
+			name:       "top-level number",
+			body:       `1`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_cancel_request",
+		},
+		{
+			name:       "whitespace only",
+			body:       " \n\t ",
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_cancel_request",
+		},
+		{
 			name:       "over UTF-8 byte limit",
 			body:       `{"reason":"` + strings.Repeat("é", workflows.MaxWorkflowCancelReasonBytes/2+1) + `"}`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_cancel_reason",
+		},
+		{
+			name:       "invalid UTF-8",
+			body:       `{"reason":"` + string([]byte{0xff}) + `"}`,
 			wantStatus: http.StatusBadRequest,
 			wantCode:   "invalid_cancel_reason",
 		},
@@ -167,6 +212,264 @@ func TestHandleCancelWorkflowRunPreservesEmptyReasonWhenMissing(
 				)
 			}
 		})
+	}
+}
+
+func TestWorkflowRunHTTPProjectionDropsUntrustedOriginLineage(t *testing.T) {
+	const (
+		eventID    = "ev_0123456789abcdef0123456789abcdef"
+		dispatchID = "dsp_0123456789abcdef0123456789abcdef"
+	)
+	origin := func(rootRunID string) *workflows.RunOrigin {
+		return &workflows.RunOrigin{
+			Kind:       workflows.RunOriginExternalEvent,
+			EventID:    eventID,
+			DispatchID: dispatchID,
+			RootRunID:  rootRunID,
+		}
+	}
+	event := func() map[string]any {
+		return map[string]any{
+			"id":        eventID,
+			"source":    "github",
+			"connector": "primary",
+			"type":      "issues.opened",
+		}
+	}
+	inputs := func() map[string]any {
+		return map[string]any{
+			"event_id":    eventID,
+			"dispatch_id": dispatchID,
+		}
+	}
+	tests := []struct {
+		name       string
+		runs       []*workflows.Run
+		id         string
+		wantOrigin *workflows.RunOrigin
+	}{
+		{
+			name:       "missing retry source",
+			id:         "wr_missing_retry",
+			wantOrigin: origin("wr_missing_root"),
+			runs: []*workflows.Run{
+				{
+					ID:           "wr_missing_retry",
+					WorkflowRef:  "workflows/missing.yml",
+					Status:       workflows.RunStatusRunning,
+					RetryOfRunID: "wr_missing_root",
+					Event:        event(),
+					Inputs:       inputs(),
+					Origin:       origin("wr_missing_root"),
+				},
+			},
+		},
+		{
+			name: "cyclic parent lineage",
+			id:   "wr_cycle_a",
+			runs: []*workflows.Run{
+				{
+					ID:          "wr_cycle_a",
+					WorkflowRef: "workflows/cycle.yml",
+					Status:      workflows.RunStatusRunning,
+					ParentRunID: "wr_cycle_b",
+					Event:       event(),
+					Origin:      origin("wr_cycle_root"),
+				},
+				{
+					ID:          "wr_cycle_b",
+					WorkflowRef: "workflows/cycle.yml",
+					Status:      workflows.RunStatusRunning,
+					ParentRunID: "wr_cycle_a",
+					Event:       event(),
+					Origin:      origin("wr_cycle_root"),
+				},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			handler := NewHandler(writeWorkflowAITestConfig(t, workspace))
+			store := workflows.NewFileRunStore(workspace)
+			now := time.Now().UTC()
+			for _, run := range test.runs {
+				run.CreatedAt = now
+				run.UpdatedAt = now
+				if err := store.CreateRun(context.Background(), run); err != nil {
+					t.Fatalf("CreateRun(%s) error = %v", run.ID, err)
+				}
+			}
+
+			detail := httptest.NewRecorder()
+			detailRequest := httptest.NewRequest(
+				http.MethodGet,
+				"/api/workflows/runs/"+test.id,
+				nil,
+			)
+			detailRequest.SetPathValue("run_id", test.id)
+			handler.handleGetWorkflowRun(detail, detailRequest)
+			assertWorkflowRunResponseOrigin(t, detail, test.wantOrigin)
+
+			canceled := cancelWorkflowRunRequest(t, handler, test.id, `{}`)
+			assertWorkflowRunResponseOrigin(t, canceled, test.wantOrigin)
+		})
+	}
+}
+
+func TestWorkflowRunListHTTPProjectionDistinguishesPrunedAndUnreadableAncestor(
+	t *testing.T,
+) {
+	const (
+		eventID           = "ev_0123456789abcdef0123456789abcdef"
+		dispatchID        = "dsp_0123456789abcdef0123456789abcdef"
+		rootID            = "wr_list_origin_root"
+		childID           = "wr_list_origin_child"
+		privateDiagnostic = "retained private production diagnostic"
+	)
+	origin := &workflows.RunOrigin{
+		Kind:       workflows.RunOriginExternalEvent,
+		EventID:    eventID,
+		DispatchID: dispatchID,
+		RootRunID:  rootID,
+	}
+	event := map[string]any{
+		"id":        eventID,
+		"source":    "github",
+		"connector": "primary",
+		"type":      "issues.opened",
+	}
+	for _, test := range []struct {
+		name       string
+		corrupt    bool
+		wantOrigin *workflows.RunOrigin
+		wantError  string
+	}{
+		{
+			name:       "missing ancestor is a retention boundary",
+			wantOrigin: origin,
+			wantError:  privateDiagnostic,
+		},
+		{
+			name:      "unreadable retained ancestor is untrusted",
+			corrupt:   true,
+			wantError: workflows.EventBackedDraftRunErrorDiagnostic,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			workspace := t.TempDir()
+			handler := NewHandler(writeWorkflowAITestConfig(t, workspace))
+			store := workflows.NewFileRunStore(workspace)
+			now := time.Now().UTC()
+			if test.corrupt {
+				if err := store.CreateRun(ctx, &workflows.Run{
+					ID:          rootID,
+					WorkflowRef: "workflows/root.yml",
+					Status:      workflows.RunStatusSucceeded,
+					Event:       event,
+					Inputs: map[string]any{
+						"event_id":    eventID,
+						"dispatch_id": dispatchID,
+					},
+					Origin:    origin,
+					CreatedAt: now,
+					UpdatedAt: now,
+				}); err != nil {
+					t.Fatalf("CreateRun(root) error = %v", err)
+				}
+			}
+			if err := store.CreateRun(ctx, &workflows.Run{
+				ID:          childID,
+				WorkflowRef: "workflows/child.yml",
+				Status:      workflows.RunStatusSucceeded,
+				ParentRunID: rootID,
+				Event:       event,
+				Origin:      origin,
+				Error:       privateDiagnostic,
+				CreatedAt:   now.Add(time.Second),
+				UpdatedAt:   now.Add(time.Second),
+			}); err != nil {
+				t.Fatalf("CreateRun(child) error = %v", err)
+			}
+			if test.corrupt {
+				if err := os.WriteFile(
+					filepath.Join(
+						workspace,
+						"workflow_runs",
+						rootID,
+						"run.json",
+					),
+					[]byte(`{"id":`),
+					0o600,
+				); err != nil {
+					t.Fatalf("corrupt ancestor run: %v", err)
+				}
+			}
+
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(
+				http.MethodGet,
+				"/api/workflows/runs",
+				nil,
+			)
+			handler.handleListWorkflowRuns(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"workflow run list status = %d, body=%s",
+					recorder.Code,
+					recorder.Body.String(),
+				)
+			}
+			var response struct {
+				Runs []workflows.Run `json:"runs"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("workflow run list JSON error = %v", err)
+			}
+			var listedChild *workflows.Run
+			for index := range response.Runs {
+				if response.Runs[index].ID == childID {
+					listedChild = &response.Runs[index]
+					break
+				}
+			}
+			if listedChild == nil {
+				t.Fatalf("workflow run list = %#v, want child", response.Runs)
+			}
+			if !reflect.DeepEqual(listedChild.Origin, test.wantOrigin) {
+				t.Fatalf(
+					"listed child origin = %#v, want %#v",
+					listedChild.Origin,
+					test.wantOrigin,
+				)
+			}
+			if listedChild.Error != test.wantError {
+				t.Fatalf(
+					"listed child error = %q, want %q",
+					listedChild.Error,
+					test.wantError,
+				)
+			}
+		})
+	}
+}
+
+func assertWorkflowRunResponseOrigin(
+	t *testing.T,
+	recorder *httptest.ResponseRecorder,
+	want *workflows.RunOrigin,
+) {
+	t.Helper()
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("workflow run status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	var run workflows.Run
+	if err := json.Unmarshal(recorder.Body.Bytes(), &run); err != nil {
+		t.Fatalf("workflow run response JSON error = %v", err)
+	}
+	if !reflect.DeepEqual(run.Origin, want) {
+		t.Fatalf("projected origin = %#v, want %#v", run.Origin, want)
 	}
 }
 

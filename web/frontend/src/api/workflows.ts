@@ -98,6 +98,21 @@ export interface WorkflowDevelopmentSession {
   updated_at: string
 }
 
+export interface WorkflowDevelopmentTestReconciliation {
+  state: "degraded"
+  reason:
+    | "draft_test_snapshot_not_recorded"
+    | "draft_test_run_unavailable"
+    | "draft_test_terminal_snapshot_not_recorded"
+  run_id: string
+  message: string
+}
+
+export interface WorkflowDevelopmentResult {
+  session: WorkflowDevelopmentSession | null
+  reconciliation?: WorkflowDevelopmentTestReconciliation
+}
+
 export interface WorkflowEventEntityTrigger {
   ids?: string[]
   types?: string[]
@@ -228,6 +243,7 @@ export interface WorkflowRunResult {
 export interface WorkflowDevelopmentTestResult {
   session: WorkflowDevelopmentSession
   result?: WorkflowRunResult
+  reconciliation?: WorkflowDevelopmentTestReconciliation
   error?: string
 }
 
@@ -391,11 +407,11 @@ export class WorkflowAPIError extends Error {
 export const WORKFLOW_CANCEL_REASON_MAX_BYTES = 1024
 
 const workflowRunIDPattern = /^wr_[A-Za-z0-9_-]+$/
-const maximumWorkflowRunIDLength = 256
+const maximumWorkflowRunIDBytes = 1024
 
 function validWorkflowRunID(value: string): boolean {
   return (
-    value.length <= maximumWorkflowRunIDLength &&
+    new TextEncoder().encode(value).byteLength <= maximumWorkflowRunIDBytes &&
     workflowRunIDPattern.test(value)
   )
 }
@@ -537,9 +553,7 @@ export async function checkWorkflowDependencies(
   }
 }
 
-export async function getWorkflowDevelopment(): Promise<{
-  session: WorkflowDevelopmentSession | null
-}> {
+export async function getWorkflowDevelopment(): Promise<WorkflowDevelopmentResult> {
   return request("/api/workflows/development")
 }
 
@@ -671,6 +685,7 @@ export async function testWorkflowDevelopment(payload: {
       return {
         session: body.session,
         result: body.result,
+        reconciliation: body.reconciliation,
         error:
           typeof body.error === "string" && body.error.trim() !== ""
             ? body.error

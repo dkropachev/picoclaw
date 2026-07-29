@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -13,6 +14,88 @@ import (
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
+
+func TestWorkflowRuntimeRunnersForConfigUseCapturedConfigAfterDiskMutation(
+	t *testing.T,
+) {
+	workspace := t.TempDir()
+	newConfig := func(agentID string) *config.Config {
+		cfg := config.DefaultConfig()
+		cfg.Agents.Defaults.Workspace = workspace
+		cfg.Agents.Defaults.ModelName = "gpt-4.1"
+		cfg.Agents.List = []config.AgentConfig{{
+			ID:        agentID,
+			Default:   true,
+			Workspace: workspace,
+		}}
+		cfg.ModelList = []*config.ModelConfig{{
+			ModelName: "gpt-4.1",
+			Provider:  "openai",
+			Model:     "gpt-4.1",
+			APIBase:   "http://127.0.0.1:1/v1",
+			Enabled:   true,
+		}}
+		return cfg
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	captured := newConfig("captured-agent")
+	if err := config.SaveConfig(configPath, captured); err != nil {
+		t.Fatalf("SaveConfig(captured) error = %v", err)
+	}
+	runners := workflowRuntimeRunnersForConfig(configPath, captured)
+	runner, ok := runners.Agents.(*webWorkflowRuntimeRunner)
+	if !ok {
+		t.Fatalf("captured agent runner type = %T", runners.Agents)
+	}
+	t.Cleanup(func() {
+		if err := runner.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
+
+	current := newConfig("current-agent")
+	if err := config.SaveConfig(configPath, current); err != nil {
+		t.Fatalf("SaveConfig(current) error = %v", err)
+	}
+	reloaded, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig(current) error = %v", err)
+	}
+	if len(reloaded.Agents.List) != 1 ||
+		reloaded.Agents.List[0].ID != "current-agent" {
+		t.Fatalf("disk agents = %#v, want current-agent", reloaded.Agents.List)
+	}
+
+	capturedReadiness := runner.ResolveWorkflowDependency(
+		context.Background(),
+		workflows.WorkflowDependencyOccurrence{
+			Kind: workflows.WorkflowDependencyKindAgent,
+			Name: "captured-agent",
+		},
+	)
+	if capturedReadiness != workflows.WorkflowDependencyReadinessReady {
+		t.Fatalf(
+			"captured agent readiness = %q, want %q",
+			capturedReadiness,
+			workflows.WorkflowDependencyReadinessReady,
+		)
+	}
+	currentReadiness := runner.ResolveWorkflowDependency(
+		context.Background(),
+		workflows.WorkflowDependencyOccurrence{
+			Kind: workflows.WorkflowDependencyKindAgent,
+			Name: "current-agent",
+		},
+	)
+	if currentReadiness != workflows.WorkflowDependencyReadinessNotFound {
+		t.Fatalf(
+			"current disk agent readiness = %q, want %q",
+			currentReadiness,
+			workflows.WorkflowDependencyReadinessNotFound,
+		)
+	}
+}
 
 type workflowRuntimeTestProvider struct{}
 

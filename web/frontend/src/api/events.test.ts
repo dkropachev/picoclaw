@@ -138,6 +138,17 @@ describe("events API", () => {
     )
   })
 
+  it("accepts a 1024-byte ASCII workflow run identifier", async () => {
+    const maximumRunID = `wr_${"r".repeat(1021)}`
+    mockedLauncherFetch.mockResolvedValue(
+      jsonResponse({ ...dispatch, run_id: maximumRunID }),
+    )
+
+    await expect(getEventDispatch(dispatch.id)).resolves.toMatchObject({
+      run_id: maximumRunID,
+    })
+  })
+
   it("returns payload text without parsing or re-encoding it", async () => {
     const payload =
       ' \n{"large":9007199254740993,"tiny":1e-1000,"order":["a","b"]}\t '
@@ -279,7 +290,7 @@ describe("events API", () => {
       .mockResolvedValueOnce(
         jsonResponse({
           ...dispatch,
-          run_id: `wr_${"r".repeat(254)}`,
+          run_id: `wr_${"r".repeat(1022)}`,
         }),
       )
 
