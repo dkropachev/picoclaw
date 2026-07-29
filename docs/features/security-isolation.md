@@ -38,6 +38,7 @@ security behavior that other feature specs rely on.
 | `FR-SEC-007` | SHOULD | Key generation and token helpers produce unique, parseable, and revocable values for auth flows. | Auth flows need reliable primitives. |
 | `FR-SEC-008` | MUST | Model-list and tool-adaptation config validation rejects unsupported provider-control values such as invalid `reasoning_effort`, invalid account-router account references, invalid model-router target references, and invalid tool-adaptation policy values before those values are persisted or used; profile-specific tool-adaptation overrides normalize provider/model identity and replace earlier duplicate identities as whole entries; account routers and model routers are stored in top-level router lists rather than as secret-bearing `model_list[]` entries. | Invalid config should fail early instead of producing unsafe or broken provider requests. |
 | `FR-SEC-009` | MUST | OAuth token response parsing extracts non-secret account email claims from ID-token or access-token JWT payloads when present, preserves the email across refreshes, and leaves the email empty without failing when claims are absent or malformed. | Launcher account naming and credential metadata need stable non-secret account identity without weakening token validation or persistence. |
+| `FR-SEC-010` | MUST | Generic event webhook secrets use the existing secure-string persistence path: JSON exposes only `[NOT_HERE]`, `.security.yml` stores plaintext/encrypted/file references, masked updates preserve a current value, and security-only connector entries cannot create or resurrect JSON configuration. Reference resolution follows final master enablement without touching inactive credential files, and an explicit management replacement can repair an active broken reference without resolving the old value first. Connector map keys and client-controlled durable identity fields cannot contain a configured signing secret; those conflicts fail opaquely before persistence. Enabled secrets are validated and used for exact-value durable content redaction as well as Standard Webhooks HMAC verification. | A listener credential must neither leak through config, error, identity, or event-storage surfaces nor survive as stale active configuration after its connector is removed. |
 
 ## Data And State Model
 
@@ -45,7 +46,8 @@ Security state includes secure-string sentinels, credential records keyed by
 provider and auth method with optional non-secret account email metadata,
 dashboard password/session data, login attempt
 counters, configured secret filters, private-host allowlists, isolation exposed
-paths, generated token IDs, and revocation metadata.
+paths, generated token IDs, revocation metadata, and per-connector event
+webhook signing secrets.
 
 ## Surface Ownership
 
@@ -82,6 +84,8 @@ Owns: TEST pkg/config/version*
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Config | Secure strings, `isolation.*`, filtering fields, model-list validation | Secret preservation, isolation controls, sensitive-data filtering, and early rejection of unsupported provider-control values. | `FR-SEC-001`, `FR-SEC-003`, `FR-SEC-006`, `FR-SEC-008` |
+| Config | `events.ingress.webhooks.*.secret` | Masked JSON plus secure-YAML merge/preservation for per-connector Standard Webhooks secrets, without security-only connector resurrection. | `FR-SEC-010` |
+| HTTP | `GET /api/config`, `PUT /api/config`, `PATCH /api/config` | Management reads expose `[NOT_HERE]`; omitted or masked webhook secrets preserve the current value, and a concrete replacement rotates it through the same secure persistence path. | `FR-SEC-010` |
 | Storage | Credential store | Provider credential CRUD, auth method metadata, and optional non-secret account email metadata extracted from OAuth token responses. | `FR-SEC-002`, `FR-SEC-007`, `FR-SEC-009` |
 | Network | Safe HTTP client and net binding helpers | Private host controls and bind behavior. | `FR-SEC-005` |
 
@@ -105,6 +109,13 @@ Owns: TEST pkg/config/version*
 7. Build isolation command specs from supported runtime configuration, validate
    exposed paths, start only supported commands, and return errors rather than
    weakening to unisolated execution.
+8. Merge webhook secrets only into connector names already loaded from JSON,
+   defer event-secret reference resolution until final master enablement is
+   known, reject signing-secret substrings in connector and client-controlled
+   durable identity fields with opaque errors, validate enabled values before
+   listener/storage construction, compare signatures without disclosing
+   mismatch details, and pass the same secret values into recursive durable
+   content redaction.
 
 ## Cross-Feature Behavior
 
@@ -128,6 +139,9 @@ launcher normalization, and intentionally clear credential-bearing fields
 because underlying account entries own secrets. Branch condition expressions are
 validated as numeric account metrics and math constants, so routing decisions do
 not require storing new secret material on router entries.
+Generic durable event webhooks reuse secure-string persistence and redaction;
+their transport lifecycle and request contract are owned by
+[Durable External Event Automation](event-automation.md).
 
 ## Failure And Edge Cases
 
@@ -139,6 +153,11 @@ not require storing new secret material on router entries.
 - Unsupported isolation platform returns clear error.
 - Private host requests are denied unless whitelisted.
 - Missing or malformed OAuth JWT email claims do not fail token parsing.
+- Security YAML cannot enable, add, or resurrect a removed event webhook
+  connector; malformed enabled secrets fail before the shared route is active.
+- Inactive file/encrypted webhook references are preserved without resolution;
+  credential-bearing connector/type/deduplication identities fail before config
+  or event persistence and error responses omit the conflicting values.
 
 ## Acceptance Evidence
 
@@ -150,11 +169,14 @@ not require storing new secret material on router entries.
 | `FR-SEC-005`, `FR-SEC-006` | [pkg/utils/http_guard.go](../../pkg/utils/http_guard.go), [pkg/isolation/runtime_test.go](../../pkg/isolation/runtime_test.go), [pkg/netbind/netbind_test.go](../../pkg/netbind/netbind_test.go) |
 | `FR-SEC-008` | [pkg/config/model_config_test.go](../../pkg/config/model_config_test.go), [pkg/config/account_router_test.go](../../pkg/config/account_router_test.go), [pkg/config/config_test.go](../../pkg/config/config_test.go), [pkg/providers/common/reasoning_effort_test.go](../../pkg/providers/common/reasoning_effort_test.go) |
 | `FR-SEC-009` | [pkg/auth/oauth_test.go](../../pkg/auth/oauth_test.go), [web/backend/api/oauth_test.go](../../web/backend/api/oauth_test.go) |
+| `FR-SEC-010` | [pkg/config/events_test.go](../../pkg/config/events_test.go), [pkg/config/events_secret_identity_test.go](../../pkg/config/events_secret_identity_test.go), [pkg/eventing/webhook/controller_test.go](../../pkg/eventing/webhook/controller_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/config_event_webhook_deferred_test.go](../../web/backend/api/config_event_webhook_deferred_test.go) |
 
 ## Implementation Anchors
 
 - [pkg/config/config_struct.go](../../pkg/config/config_struct.go)
 - [pkg/config/config.go](../../pkg/config/config.go)
+- [pkg/config/events.go](../../pkg/config/events.go)
+- [web/backend/api/config.go](../../web/backend/api/config.go)
 - [pkg/auth/oauth.go](../../pkg/auth/oauth.go)
 - [pkg/credential](../../pkg/credential)
 - [pkg/isolation](../../pkg/isolation)

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +17,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	"github.com/sipeed/picoclaw/pkg/health"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
@@ -29,6 +32,22 @@ type mockChannel struct {
 	placeholdersSent  int
 	editedMessages    int
 	lastPlaceholderID string
+}
+
+type mockWebhookRouteChannel struct {
+	mockChannel
+	path string
+}
+
+func (m *mockWebhookRouteChannel) WebhookPath() string {
+	return m.path
+}
+
+func (m *mockWebhookRouteChannel) ServeHTTP(
+	w http.ResponseWriter,
+	_ *http.Request,
+) {
+	w.WriteHeader(http.StatusTeapot)
 }
 
 func (m *mockChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]string, error) {
@@ -215,6 +234,169 @@ func newTestManager() *Manager {
 		channels: make(map[string]Channel),
 		workers:  make(map[string]*channelWorker),
 		bus:      bus.NewMessageBus(),
+	}
+}
+
+func TestManagerRegisterHTTPRouteLifecycle(t *testing.T) {
+	var nilManager *Manager
+	if release, err := nilManager.RegisterHTTPRoute(
+		"/events",
+		http.NotFoundHandler(),
+	); !errors.Is(err, ErrHTTPRouteUnavailable) || release != nil {
+		t.Fatalf(
+			"nil manager registration = (%p, %v), want ErrHTTPRouteUnavailable",
+			release,
+			err,
+		)
+	}
+
+	m := newTestManager()
+	if release, err := m.RegisterHTTPRoute(
+		"/events",
+		http.NotFoundHandler(),
+	); !errors.Is(err, ErrHTTPRouteUnavailable) || release != nil {
+		t.Fatalf(
+			"registration before setup = (%p, %v), want ErrHTTPRouteUnavailable",
+			release,
+			err,
+		)
+	}
+
+	m.SetupHTTPServer("127.0.0.1:0", nil)
+	release, err := m.RegisterHTTPRoute("/events", http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+		},
+	))
+	if err != nil {
+		t.Fatalf("RegisterHTTPRoute() error = %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	m.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/events", nil))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("registered route status = %d, want %d", rec.Code, http.StatusCreated)
+	}
+
+	if duplicateRelease, duplicateErr := m.RegisterHTTPRoute(
+		"/events",
+		http.NotFoundHandler(),
+	); !errors.Is(duplicateErr, ErrHTTPRouteConflict) || duplicateRelease != nil {
+		t.Fatalf(
+			"duplicate registration = (%p, %v), want ErrHTTPRouteConflict",
+			duplicateRelease,
+			duplicateErr,
+		)
+	}
+
+	release()
+	release()
+	rec = httptest.NewRecorder()
+	m.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/events", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("released route status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestManagerRegisterHTTPRouteDoesNotReplaceHealthRoute(t *testing.T) {
+	m := newTestManager()
+	healthServer := health.NewServer("127.0.0.1", 0, "")
+	m.SetupHTTPServer("127.0.0.1:0", healthServer)
+
+	release, err := m.RegisterHTTPRoute("/health", http.NotFoundHandler())
+	if !errors.Is(err, ErrHTTPRouteConflict) || release != nil {
+		t.Fatalf(
+			"health route registration = (%p, %v), want ErrHTTPRouteConflict",
+			release,
+			err,
+		)
+	}
+
+	rec := httptest.NewRecorder()
+	m.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("health route status after conflict = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestManagerReloadRejectsChannelOverlapWithOwnedRoute(t *testing.T) {
+	for _, collisionPath := range []string{
+		"/webhooks/events/",
+		"/webhooks/events/build-system",
+	} {
+		t.Run(collisionPath, func(t *testing.T) {
+			channelType := "owned-route-collision-" +
+				strings.NewReplacer("/", "-", "_", "-").Replace(collisionPath)
+			installTestChannelFactory(
+				t,
+				channelType,
+				func(
+					_, _ string,
+					_ *config.Config,
+					_ *bus.MessageBus,
+				) (Channel, error) {
+					return &mockWebhookRouteChannel{path: collisionPath}, nil
+				},
+			)
+
+			initial := config.DefaultConfig()
+			messageBus := bus.NewMessageBus()
+			manager, err := NewManager(initial, messageBus, nil)
+			if err != nil {
+				t.Fatalf("NewManager() error = %v", err)
+			}
+			manager.SetupHTTPServer("127.0.0.1:0", nil)
+			if startErr := manager.StartAll(context.Background()); startErr != nil {
+				t.Fatalf("StartAll() error = %v", startErr)
+			}
+			t.Cleanup(func() {
+				stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = manager.StopAll(stopCtx)
+				messageBus.Close()
+			})
+
+			release, err := manager.RegisterHTTPRoute(
+				"/webhooks/events/",
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusAccepted)
+				}),
+			)
+			if err != nil {
+				t.Fatalf("RegisterHTTPRoute() error = %v", err)
+			}
+			t.Cleanup(release)
+
+			replacement := config.DefaultConfig()
+			replacement.Channels["collision"] = &config.Channel{
+				Enabled: true,
+				Type:    channelType,
+			}
+			err = manager.Reload(context.Background(), replacement)
+			if !errors.Is(err, ErrHTTPRouteConflict) {
+				t.Fatalf("Reload() error = %v, want ErrHTTPRouteConflict", err)
+			}
+			if _, exists := manager.GetChannel("collision"); exists {
+				t.Fatal("route-colliding candidate was published")
+			}
+
+			response := httptest.NewRecorder()
+			manager.mux.ServeHTTP(
+				response,
+				httptest.NewRequest(
+					http.MethodPost,
+					"/webhooks/events/build-system",
+					nil,
+				),
+			)
+			if response.Code != http.StatusAccepted {
+				t.Fatalf(
+					"owned route after reload collision = %d, want %d",
+					response.Code,
+					http.StatusAccepted,
+				)
+			}
+		})
 	}
 }
 

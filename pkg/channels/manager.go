@@ -46,6 +46,15 @@ const (
 	streamAuxiliaryTombstoneTTL = 30 * time.Second
 )
 
+var (
+	// ErrHTTPRouteConflict reports an additive shared-gateway route that would
+	// shadow, or be shadowed by, an existing exact or subtree route.
+	ErrHTTPRouteConflict = errors.New("HTTP route conflicts with an existing registration")
+	// ErrHTTPRouteUnavailable reports registration before the shared gateway
+	// HTTP server is configured or after it has stopped.
+	ErrHTTPRouteUnavailable = errors.New("shared HTTP routing is unavailable")
+)
+
 // typingEntry wraps a typing stop function with a creation timestamp for TTL eviction.
 type typingEntry struct {
 	stop      func()
@@ -1167,6 +1176,9 @@ func (m *Manager) SetupHTTPServer(addr string, healthServer *health.Server) {
 // SetupHTTPServerListeners creates a shared HTTP server on pre-opened listeners.
 // When listeners is empty it falls back to Addr-based ListenAndServe behavior.
 func (m *Manager) SetupHTTPServerListeners(listeners []net.Listener, addr string, healthServer *health.Server) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.mux = newDynamicServeMux()
 
 	// Register health endpoints
@@ -1184,6 +1196,33 @@ func (m *Manager) SetupHTTPServerListeners(listeners []net.Listener, addr string
 		WriteTimeout: 30 * time.Second,
 	}
 	m.httpListeners = append([]net.Listener(nil), listeners...)
+}
+
+// RegisterHTTPRoute adds an independently owned route to the shared gateway
+// HTTP server. The route may be exact or a subtree prefix ending in "/".
+// Registration fails rather than replacing or overlapping an existing route.
+//
+// The returned release function is idempotent and removes only this
+// registration, even if it is called after another route has replaced it.
+func (m *Manager) RegisterHTTPRoute(
+	pattern string,
+	handler http.Handler,
+) (release func(), err error) {
+	if m == nil {
+		return nil, fmt.Errorf("%w: channel manager is nil", ErrHTTPRouteUnavailable)
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.mux == nil || m.httpServer == nil {
+		return nil, ErrHTTPRouteUnavailable
+	}
+
+	release, err = m.mux.registerOwned(pattern, handler)
+	if err != nil {
+		return nil, fmt.Errorf("register shared HTTP route %q: %w", pattern, err)
+	}
+	return release, nil
 }
 
 // registerHTTPHandlersLocked registers webhook and health-check handlers for
@@ -1219,6 +1258,29 @@ func (m *Manager) registerChannelHTTPHandler(name string, ch Channel) {
 			"path":    hc.HealthPath(),
 		})
 	}
+}
+
+// validateChannelHTTPHandler checks candidate channel routes immediately
+// before publication. Manager reload holds m.mu across this check and legacy
+// registration, so an additive feature route cannot race into the gap.
+func (m *Manager) validateChannelHTTPHandler(name string, ch Channel) error {
+	if m.mux == nil {
+		return nil
+	}
+	patterns := make([]string, 0, 2)
+	if webhook, ok := ch.(WebhookHandler); ok {
+		patterns = append(patterns, webhook.WebhookPath())
+	}
+	if checker, ok := ch.(HealthChecker); ok {
+		patterns = append(patterns, checker.HealthPath())
+	}
+	if len(patterns) == 0 {
+		return nil
+	}
+	if err := m.mux.validateAvailable(patterns...); err != nil {
+		return fmt.Errorf("channel %s HTTP route: %w", name, err)
+	}
+	return nil
 }
 
 // unregisterChannelHTTPHandler removes the webhook/health handlers for a
@@ -2370,10 +2432,31 @@ func (m *Manager) Reload(ctx context.Context, cfg *config.Config) error {
 			continue
 		}
 
+		m.mu.Lock()
+		if routeErr := m.validateChannelHTTPHandler(name, channel); routeErr != nil {
+			m.mu.Unlock()
+			if stopErr := channel.Stop(ctx); stopErr != nil {
+				routeErr = errors.Join(
+					routeErr,
+					fmt.Errorf("cleanup channel %s: %w", name, stopErr),
+				)
+				m.mu.Lock()
+				if m.pendingRetirements == nil {
+					m.pendingRetirements = make(map[string]*channelRetirement)
+				}
+				m.pendingRetirements[name] = &channelRetirement{
+					name:        name,
+					channelType: channelType,
+					channel:     channel,
+				}
+				m.mu.Unlock()
+			}
+			reloadErr = errors.Join(reloadErr, routeErr)
+			continue
+		}
 		w := newChannelWorker(name, channel, channelType)
 		workerCtx, workerCancel := context.WithCancel(workerBaseCtx)
 		w.cancel = workerCancel
-		m.mu.Lock()
 		m.channels[name] = channel
 		m.workers[name] = w
 		delete(m.stoppedChannels, name)

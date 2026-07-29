@@ -299,6 +299,14 @@ func updateResolver(path string) {
 }
 
 func resolveKey(v string) (string, error) {
+	resolved, err := resolveKeyQuiet(v)
+	if err != nil {
+		logger.Errorf("Resolve error: %v", err)
+	}
+	return resolved, err
+}
+
+func resolveKeyQuiet(v string) (string, error) {
 	secResolverMu.RLock()
 	resolver := secResolver
 	secResolverMu.RUnlock()
@@ -306,12 +314,7 @@ func resolveKey(v string) (string, error) {
 		resolver = credential.NewResolver("")
 	}
 	if strings.HasPrefix(v, "enc://") || strings.HasPrefix(v, "file://") {
-		decrypted, err := resolver.Resolve(v)
-		if err != nil {
-			logger.Errorf("Resolve error: %v", err)
-			return "", err
-		}
-		return decrypted, nil
+		return resolver.Resolve(v)
 	}
 	return v, nil
 }

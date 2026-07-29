@@ -47,7 +47,7 @@ type Config struct {
 	// ModelRouters route a chat model alias to one of several configured model aliases.
 	ModelRouters ModelRouterList `json:"model_routers"       yaml:"model_routers"`
 	Gateway      GatewayConfig   `json:"gateway"             yaml:"-"`
-	Events       EventsConfig    `json:"events,omitempty"    yaml:"-"`
+	Events       EventsConfig    `json:"events,omitempty"    yaml:"events,omitempty"`
 	Workflows    WorkflowsConfig `json:"workflows,omitempty" yaml:"-"`
 	// GitWorkspaces controls the inventory of local git checkouts reused by agent sessions.
 	GitWorkspaces GitWorkspacesConfig `json:"git_workspaces,omitempty" yaml:"-"`
@@ -2102,7 +2102,20 @@ func (c *MCPConfig) GetMaxInlineTextChars() int {
 	return DefaultMCPMaxInlineTextChars
 }
 
+// LoadConfig loads and fully validates the runtime configuration.
 func LoadConfig(path string) (*Config, error) {
+	return loadConfigWithOptions(path, true)
+}
+
+// LoadConfigForUpdate loads configuration for a management transaction while
+// deferring event-webhook secret resolution and ingress validation. This lets a
+// request replace or disable a broken reference before the final candidate is
+// resolved and validated.
+func LoadConfigForUpdate(path string) (*Config, error) {
+	return loadConfigWithOptions(path, false)
+}
+
+func loadConfigWithOptions(path string, resolveEventWebhooks bool) (*Config, error) {
 	updateResolver(filepath.Dir(path))
 
 	data, err := os.ReadFile(path)
@@ -2334,7 +2347,17 @@ func LoadConfig(path string) (*Config, error) {
 	if err = env.Parse(cfg); err != nil {
 		return nil, err
 	}
+	if resolveEventWebhooks {
+		if err = cfg.Events.Ingress.resolveWebhookSecrets(); err != nil {
+			return nil, fmt.Errorf("resolve event ingress secrets: %w", err)
+		}
+	}
 	applySkillsRegistryEnvCompat(cfg)
+	if resolveEventWebhooks {
+		if err = cfg.Events.Ingress.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid event ingress config: %w", err)
+		}
+	}
 
 	if err = InitChannelList(cfg.Channels); err != nil {
 		return nil, err
@@ -2812,7 +2835,25 @@ func cloneAccountRouterConfig(in *AccountRouterConfig) *AccountRouterConfig {
 }
 
 func (c *Config) SecurityCopyFrom(path string) error {
-	return loadSecurityConfig(c, securityPath(path))
+	return c.securityCopyFrom(path, true)
+}
+
+// SecurityCopyFromForUpdate overlays security-managed values while deferring
+// event-webhook resolution until explicit request values have been reapplied.
+func (c *Config) SecurityCopyFromForUpdate(path string) error {
+	return c.securityCopyFrom(path, false)
+}
+
+func (c *Config) securityCopyFrom(path string, resolveEventWebhooks bool) error {
+	if err := loadSecurityConfig(c, securityPath(path)); err != nil {
+		return err
+	}
+	if resolveEventWebhooks {
+		if err := c.Events.Ingress.resolveWebhookSecrets(); err != nil {
+			return fmt.Errorf("resolve event ingress secrets: %w", err)
+		}
+	}
+	return nil
 }
 
 // ResetToDefaults backs up the current config, creates a default config,
