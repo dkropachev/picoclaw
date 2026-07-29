@@ -58,6 +58,7 @@ export interface DispatchView {
   id: string
   event_id: string
   workflow_ref: string
+  workflow_revision?: string
   run_id: string
   status: DispatchStatus
   lease_until?: string
@@ -112,6 +113,9 @@ export const REPLAY_OUTCOME_UNKNOWN_MESSAGE =
 const MALFORMED_RESPONSE_MESSAGE =
   "The event service returned a malformed response."
 const EVENT_ID_PATTERN = /^ev_[0-9a-f]{32}$/
+const DISPATCH_ID_PATTERN = /^dsp_[0-9a-f]{32}$/
+const MAX_WORKFLOW_REF_BYTES = 1024
+const MAX_WORKFLOW_REVISION_BYTES = 256
 
 function setOptionalParam(
   params: URLSearchParams,
@@ -172,6 +176,22 @@ function isNonNegativeInteger(value: unknown): value is number {
 
 function isEventID(value: unknown): value is string {
   return typeof value === "string" && EVENT_ID_PATTERN.test(value)
+}
+
+function isDispatchID(value: unknown): value is string {
+  return typeof value === "string" && DISPATCH_ID_PATTERN.test(value)
+}
+
+function isBoundedTrimmedString(
+  value: unknown,
+  maximumBytes: number,
+): value is string {
+  return (
+    typeof value === "string" &&
+    value !== "" &&
+    value === value.trim() &&
+    new TextEncoder().encode(value).byteLength <= maximumBytes
+  )
 }
 
 function isEventRoutingStatus(value: unknown): value is EventRoutingStatus {
@@ -248,9 +268,14 @@ function isEventView(value: unknown): value is EventView {
 function isDispatchView(value: unknown): value is DispatchView {
   return (
     isRecord(value) &&
-    typeof value.id === "string" &&
+    isDispatchID(value.id) &&
     isEventID(value.event_id) &&
-    typeof value.workflow_ref === "string" &&
+    isBoundedTrimmedString(value.workflow_ref, MAX_WORKFLOW_REF_BYTES) &&
+    (value.workflow_revision === undefined ||
+      isBoundedTrimmedString(
+        value.workflow_revision,
+        MAX_WORKFLOW_REVISION_BYTES,
+      )) &&
     typeof value.run_id === "string" &&
     isDispatchStatus(value.status) &&
     isOptionalString(value.lease_until) &&
@@ -262,6 +287,13 @@ function isDispatchView(value: unknown): value is DispatchView {
     isOptionalString(value.linked_at) &&
     isOptionalString(value.finished_at)
   )
+}
+
+function parseDispatchView(value: unknown): DispatchView {
+  if (!isDispatchView(value)) {
+    throw malformedResponse()
+  }
+  return value
 }
 
 function parseEventView(value: unknown): EventView {
@@ -379,6 +411,21 @@ export async function listEventDispatches(
   return requestJSON(
     withQuery("/api/events/dispatches", params),
     parseDispatchPage,
+  )
+}
+
+export async function getEventDispatch(
+  dispatchID: string,
+): Promise<DispatchView> {
+  return requestJSON(
+    `/api/events/dispatches/${encodeURIComponent(dispatchID)}`,
+    (value) => {
+      const dispatch = parseDispatchView(value)
+      if (dispatch.id !== dispatchID) {
+        throw malformedResponse()
+      }
+      return dispatch
+    },
   )
 }
 

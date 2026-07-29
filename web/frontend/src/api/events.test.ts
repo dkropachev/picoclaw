@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import {
   EventAPIError,
   getEvent,
+  getEventDispatch,
   getEventPayload,
   listEventDispatches,
   listEvents,
@@ -35,6 +36,22 @@ const replayedEvent = {
   ...event,
   id: "ev_fedcba9876543210fedcba9876543210",
   replay_of: event.id,
+} as const
+
+const dispatch = {
+  id: "dsp_0123456789abcdef0123456789abcdef",
+  event_id: event.id,
+  workflow_ref: "workflows/triage.yml",
+  workflow_revision:
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  run_id: "wr_dispatch",
+  status: "succeeded",
+  available_at: "2026-07-29T13:00:01Z",
+  attempts: 1,
+  created_at: "2026-07-29T13:00:02Z",
+  updated_at: "2026-07-29T13:00:03Z",
+  linked_at: "2026-07-29T13:00:02Z",
+  finished_at: "2026-07-29T13:00:03Z",
 } as const
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -110,6 +127,17 @@ describe("events API", () => {
     )
   })
 
+  it("gets an exact dispatch by identifier", async () => {
+    mockedLauncherFetch.mockResolvedValue(jsonResponse(dispatch))
+
+    await expect(getEventDispatch(dispatch.id)).resolves.toEqual(dispatch)
+
+    expect(mockedLauncherFetch).toHaveBeenCalledWith(
+      `/api/events/dispatches/${dispatch.id}`,
+      undefined,
+    )
+  })
+
   it("returns payload text without parsing or re-encoding it", async () => {
     const payload =
       ' \n{"large":9007199254740993,"tiny":1e-1000,"order":["a","b"]}\t '
@@ -172,6 +200,24 @@ describe("events API", () => {
       .mockResolvedValueOnce(jsonResponse({ ...event, routing: {} }))
       .mockResolvedValueOnce(jsonResponse({ ...event, id: "not-an-event-id" }))
       .mockResolvedValueOnce(jsonResponse({ dispatches: [{}] }))
+      .mockResolvedValueOnce(
+        jsonResponse({ ...dispatch, id: "not-a-dispatch-id" }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...dispatch,
+          event_id: "ev_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ ...dispatch, workflow_ref: " workflows/triage.yml" }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...dispatch,
+          id: "dsp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        }),
+      )
 
     await expect(listEvents()).rejects.toMatchObject({
       message: "The event service returned a malformed response.",
@@ -189,6 +235,45 @@ describe("events API", () => {
       listEventDispatches({ eventID: event.id }),
     ).rejects.toMatchObject({
       message: "The event service returned a malformed response.",
+      status: 502,
+    })
+    await expect(getEventDispatch(dispatch.id)).rejects.toMatchObject({
+      message: "The event service returned a malformed response.",
+      status: 502,
+    })
+    await expect(getEventDispatch(dispatch.id)).rejects.toMatchObject({
+      message: "The event service returned a malformed response.",
+      status: 502,
+    })
+    await expect(getEventDispatch(dispatch.id)).rejects.toMatchObject({
+      message: "The event service returned a malformed response.",
+      status: 502,
+    })
+    await expect(getEventDispatch(dispatch.id)).rejects.toMatchObject({
+      message: "The event service returned a malformed response.",
+      status: 502,
+    })
+  })
+
+  it("rejects oversized dispatch workflow fields", async () => {
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...dispatch,
+          workflow_ref: `workflows/${"é".repeat(508)}.yml`,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...dispatch,
+          workflow_revision: "r".repeat(257),
+        }),
+      )
+
+    await expect(getEventDispatch(dispatch.id)).rejects.toMatchObject({
+      status: 502,
+    })
+    await expect(getEventDispatch(dispatch.id)).rejects.toMatchObject({
       status: 502,
     })
   })
