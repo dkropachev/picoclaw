@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router"
+import { createFileRoute, useLocation } from "@tanstack/react-router"
 import { useCallback, useEffect, useMemo } from "react"
 
 import {
@@ -14,17 +14,19 @@ export const Route = createFileRoute("/agent/workflows")({
 })
 
 function WorkflowsRoute() {
-  const rawSearch = Route.useSearch()
+  const locationSearch = useLocation({
+    select: (location) => location.search,
+  })
   const navigate = Route.useNavigate()
   const search = useMemo(
-    () => normalizeWorkflowsSearch({ ...rawSearch }),
-    [rawSearch],
+    () => normalizeWorkflowsSearch({ ...locationSearch }),
+    [locationSearch],
   )
   useEffect(() => {
-    if (!workflowsSearchIsCanonical({ ...rawSearch }, search)) {
+    if (!workflowsSearchIsCanonical({ ...locationSearch }, search)) {
       void navigate({ search, replace: true })
     }
-  }, [navigate, rawSearch, search])
+  }, [locationSearch, navigate, search])
   const changeSearch = useCallback(
     (next: WorkflowsRouteSearch, replace = false) => {
       void navigate({ search: next, replace })

@@ -109,6 +109,15 @@ describe("workflow route navigation", () => {
     expect(router.state.location.search).toEqual({})
   })
 
+  it("removes the default develop mode from the canonical URL", async () => {
+    const router = renderWorkflowRoute("/agent/workflows?mode=develop")
+
+    await waitFor(() => {
+      expect(router.state.location.search).toEqual({})
+    })
+    expect(screen.getByTestId("workflow-search")).toHaveTextContent("{}")
+  })
+
   it("pushes explicit selection and replaces live filter edits", async () => {
     const router = renderWorkflowRoute("/agent/workflows")
     const user = userEvent.setup()

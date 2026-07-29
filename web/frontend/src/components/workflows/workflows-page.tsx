@@ -31,6 +31,7 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import {
+  WorkflowAPIError,
   type WorkflowCompatibilitySummary,
   type WorkflowDefinition,
   type WorkflowDeliveryPayload,
@@ -325,7 +326,10 @@ export function WorkflowsPage({
     queryKey: ["workflows", "runs", selectedRunID],
     queryFn: () => getWorkflowRun(selectedRunID ?? ""),
     enabled: selectedRunID != null,
-    refetchInterval: selectedRunID == null ? false : 3000,
+    refetchInterval: (query) => {
+      const run = query.state.data
+      return run != null && !terminalStatuses.has(run.status) ? 3000 : false
+    },
     retry: false,
   })
   const eventsQuery = useQuery({
@@ -4290,15 +4294,7 @@ function jsonSyntaxMessage(err: unknown) {
 }
 
 function workflowRunWasNotFound(err: unknown) {
-  if (!(err instanceof Error)) {
-    return false
-  }
-  const message = err.message.toLowerCase()
-  return (
-    message.includes("not found") ||
-    message.includes("no such file") ||
-    message.includes("cannot find the file")
-  )
+  return err instanceof WorkflowAPIError && err.status === 404
 }
 
 function errorMessage(err: unknown) {

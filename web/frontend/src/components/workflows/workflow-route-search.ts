@@ -16,8 +16,7 @@ const maximumQueryCharacters = 256
 export function normalizeWorkflowsSearch(
   raw: Record<string, unknown>,
 ): WorkflowsRouteSearch {
-  const mode =
-    raw.mode === "develop" || raw.mode === "operate" ? raw.mode : undefined
+  const mode = raw.mode === "operate" ? "operate" : undefined
   const workflow = optionalByteText(raw.workflow, maximumWorkflowRefBytes)
   const run = isWorkflowRunID(raw.run) ? raw.run : undefined
   const q = optionalCharacterText(raw.q, maximumQueryCharacters)

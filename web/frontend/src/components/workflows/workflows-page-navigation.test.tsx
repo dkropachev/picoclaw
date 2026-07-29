@@ -4,7 +4,11 @@ import userEvent from "@testing-library/user-event"
 import type { ReactNode } from "react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { WorkflowDefinition, WorkflowRun } from "@/api/workflows"
+import {
+  WorkflowAPIError,
+  type WorkflowDefinition,
+  type WorkflowRun,
+} from "@/api/workflows"
 import type { WorkflowsRouteSearch } from "@/components/workflows/workflow-route-search"
 import { WorkflowsPage } from "@/components/workflows/workflows-page"
 
@@ -153,7 +157,7 @@ describe("WorkflowsPage navigation", () => {
       runs: [workflowRun(otherRunID)],
     })
     workflowMocks.getWorkflowRun.mockRejectedValue(
-      new Error("workflow run not found"),
+      new WorkflowAPIError("workflow run not found", 404),
     )
     const onSearchChange = vi.fn()
     const user = userEvent.setup()
@@ -199,7 +203,7 @@ describe("WorkflowsPage navigation", () => {
 
     loadingView.unmount()
     workflowMocks.getWorkflowRun.mockRejectedValue(
-      new Error("workflow service unavailable"),
+      new WorkflowAPIError("workflow service unavailable", 503),
     )
     renderWorkflowsPage({ mode: "operate", run: requestedRunID })
 
@@ -207,6 +211,19 @@ describe("WorkflowsPage navigation", () => {
       await screen.findByText("Workflow run unavailable"),
     ).toBeInTheDocument()
     expect(screen.getAllByText(requestedRunID).length).toBeGreaterThan(0)
+  })
+
+  it("does not infer not-found from an unavailable response message", async () => {
+    workflowMocks.getWorkflowRun.mockRejectedValue(
+      new WorkflowAPIError("workflow run not found in unavailable store", 503),
+    )
+
+    renderWorkflowsPage({ mode: "operate", run: requestedRunID })
+
+    expect(
+      await screen.findByText("Workflow run unavailable"),
+    ).toBeInTheDocument()
+    expect(screen.queryByText("Workflow run not found")).not.toBeInTheDocument()
   })
 
   it("pushes mode, workflow, and run choices but replaces live query edits", async () => {

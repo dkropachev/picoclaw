@@ -36,9 +36,7 @@ describe("normalizeWorkflowsSearch", () => {
         error: "never-route-this",
       }),
     ).toEqual({})
-    expect(normalizeWorkflowsSearch({ mode: "develop" })).toEqual({
-      mode: "develop",
-    })
+    expect(normalizeWorkflowsSearch({ mode: "develop" })).toEqual({})
     expect(
       workflowsSearchIsCanonical(
         { mode: "invalid", payload: "never-route-this" },

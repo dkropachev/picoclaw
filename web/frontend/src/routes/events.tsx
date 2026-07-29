@@ -1,5 +1,5 @@
-import { createFileRoute } from "@tanstack/react-router"
-import { useCallback } from "react"
+import { createFileRoute, useLocation } from "@tanstack/react-router"
+import { useCallback, useEffect, useMemo } from "react"
 
 import type { DispatchStatus, EventRoutingStatus } from "@/api/events"
 import {
@@ -30,9 +30,9 @@ export function normalizeEventsSearch(
   raw: Record<string, unknown>,
 ): EventsRouteSearch {
   const view = raw.view === "dispatches" ? "dispatches" : undefined
-  const source = optionalText(raw.source, 128)
-  const connector = optionalText(raw.connector, 256)
-  const type = optionalText(raw.type, 256)
+  const source = optionalByteText(raw.source, 128)
+  const connector = optionalByteText(raw.connector, 256)
+  const type = optionalByteText(raw.type, 256)
   const routingStatus =
     typeof raw.routing_status === "string" &&
     routingStatuses.has(raw.routing_status as EventRoutingStatus)
@@ -72,9 +72,34 @@ export function normalizeEventsSearch(
   }
 }
 
+export function eventsSearchIsCanonical(
+  raw: Record<string, unknown>,
+  normalized: EventsRouteSearch,
+): boolean {
+  const rawKeys = Object.keys(raw)
+  const normalizedKeys = Object.keys(normalized) as Array<
+    keyof EventsRouteSearch
+  >
+  return (
+    rawKeys.length === normalizedKeys.length &&
+    normalizedKeys.every((key) => raw[key] === normalized[key])
+  )
+}
+
 function EventsRoutePage() {
-  const search = Route.useSearch()
+  const locationSearch = useLocation({
+    select: (location) => location.search,
+  })
   const navigate = Route.useNavigate()
+  const search = useMemo(
+    () => normalizeEventsSearch({ ...locationSearch }),
+    [locationSearch],
+  )
+  useEffect(() => {
+    if (!eventsSearchIsCanonical({ ...locationSearch }, search)) {
+      void navigate({ search, replace: true })
+    }
+  }, [locationSearch, navigate, search])
   const changeSearch = useCallback(
     (next: EventsRouteSearch, replace = false) => {
       void navigate({ search: next, replace })
@@ -89,19 +114,6 @@ export const Route = createFileRoute("/events")({
   validateSearch: normalizeEventsSearch,
   component: EventsRoutePage,
 })
-
-function optionalText(
-  value: unknown,
-  maximumLength: number,
-): string | undefined {
-  if (typeof value !== "string") {
-    return undefined
-  }
-  const normalized = value.trim()
-  return normalized !== "" && normalized.length <= maximumLength
-    ? normalized
-    : undefined
-}
 
 function optionalByteText(
   value: unknown,

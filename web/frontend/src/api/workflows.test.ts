@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { launcherFetch } from "@/api/http"
 import {
+  WorkflowAPIError,
   checkWorkflowDependencies,
   getWorkflowRun,
   getWorkflowRunEvents,
@@ -146,6 +147,41 @@ describe("workflow API normalization", () => {
       jobs: {},
       steps: {},
     })
+  })
+
+  it("keeps exact run lookup status and identity authoritative", async () => {
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({ error: "workflow run not found" }, 404),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "wr_other",
+          workflow_ref: "workflows/other.yml",
+          status: "succeeded",
+          created_at: "2026-07-16T12:00:00Z",
+          updated_at: "2026-07-16T12:00:01Z",
+        }),
+      )
+
+    await expect(getWorkflowRun("wr_exact")).rejects.toEqual(
+      expect.objectContaining<Partial<WorkflowAPIError>>({
+        name: "WorkflowAPIError",
+        message: "workflow run not found",
+        status: 404,
+      }),
+    )
+    await expect(getWorkflowRun("wr_exact")).rejects.toEqual(
+      expect.objectContaining<Partial<WorkflowAPIError>>({
+        name: "WorkflowAPIError",
+        message: "The workflow service returned a mismatched run.",
+        status: 502,
+      }),
+    )
+    await expect(getWorkflowRun("not-a-run")).rejects.toMatchObject({
+      status: 400,
+    })
+    expect(mockedLauncherFetch).toHaveBeenCalledTimes(2)
   })
 
   it("normalizes nullable workflow detail arrays", async () => {
@@ -635,9 +671,9 @@ describe("workflow API normalization", () => {
   })
 })
 
-function jsonResponse(body: unknown) {
+function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
-    status: 200,
+    status,
     headers: { "Content-Type": "application/json" },
   })
 }

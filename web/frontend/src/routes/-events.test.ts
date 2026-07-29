@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { normalizeEventsSearch } from "@/routes/events"
+import { eventsSearchIsCanonical, normalizeEventsSearch } from "@/routes/events"
 
 const eventID = "ev_0123456789abcdef0123456789abcdef"
 const dispatchID = "dsp_fedcba9876543210fedcba9876543210"
@@ -59,6 +59,27 @@ describe("events route search", () => {
     expect(normalizeEventsSearch({ workflow: `${exact}a` })).toEqual({})
   })
 
+  it("bounds event text filters by UTF-8 bytes", () => {
+    expect(
+      normalizeEventsSearch({
+        source: "é".repeat(64),
+        connector: "é".repeat(128),
+        type: "é".repeat(128),
+      }),
+    ).toEqual({
+      source: "é".repeat(64),
+      connector: "é".repeat(128),
+      type: "é".repeat(128),
+    })
+    expect(
+      normalizeEventsSearch({
+        source: "é".repeat(65),
+        connector: "é".repeat(129),
+        type: "é".repeat(129),
+      }),
+    ).toEqual({})
+  })
+
   it("does not coerce repeated query values", () => {
     expect(
       normalizeEventsSearch({
@@ -68,5 +89,24 @@ describe("events route search", () => {
         workflow: ["workflows/a.yml"],
       }),
     ).toEqual({})
+  })
+
+  it("detects raw sensitive and cursor fields that need canonical replacement", () => {
+    expect(
+      eventsSearchIsCanonical(
+        {
+          source: " github ",
+          cursor: "opaque",
+          payload: "never-route-this",
+        },
+        { source: "github" },
+      ),
+    ).toBe(false)
+    expect(
+      eventsSearchIsCanonical(
+        { view: "dispatches", source: "github" },
+        { view: "dispatches", source: "github" },
+      ),
+    ).toBe(true)
   })
 })
