@@ -35,6 +35,8 @@ with context, limits, filtering, and error normalization.
 | `FR-TOOL-011` | MUST | Before `spawn` launches background subturn work, an AgentLoop-backed spawner synchronously retains the caller's runtime generation and transfers that ownership to the goroutine through completion and callback delivery. Failure to retain returns a tool error without launching work. | A parent turn may finish immediately after spawn acknowledgement; reload must still see and drain the admitted child before closing its provider. |
 | `FR-TOOL-012` | MUST | Tool execution context carries the active turn's opaque transient-UX identity. A cloned subturn retains that identity, and `message` propagates it only to a delivery targeting the same channel and chat as the tool context. Same-turn tool and stream output uses the additive turn-scoped delivery interfaces when available, with source-compatible legacy fallback, so stale output cannot consume a newer turn's typing, reaction, placeholder, or stream-finalization state. | Tool and subturn output can overlap later turns in the same chat; exact ownership prevents delayed cleanup from corrupting newer user-visible UX without leaking a chat-local identity to another destination. |
 | `FR-TOOL-013` | MUST | Tool argument validation accepts finite lossless `json.Number` values for JSON Schema `number` fields and accepts them for `integer` fields only when their exact decimal value is integral. Exponent handling is bounded by the input length and never allocates or computes an exponent-sized value. | Durable event payloads preserve JSON numbers without `float64` precision loss, while untrusted numeric text must not cause precision drift or resource amplification during workflow tool calls. |
+| `FR-TOOL-014` | MUST | Tool registry inspection applies the same allowlist decision used by registration and can return an existing occupant even when it is a hidden tool with expired TTL. MCP initialization uses this concurrency-safe inspection to validate every admitted canonical name before registering any wrapper, rejects collisions with built-in or differently identified MCP tools, and permits replacement only for the exact same original MCP server/tool identity. | Flattened MCP names can collide with existing or differently partitioned identities; preflight must fail without partially exposing the new MCP surface or overwriting the current occupant. |
+| `FR-TOOL-015` | MUST | Agent-callable workflow `dev_publish` fails closed unless its runtime injects effective workflow enablement, definitions directory, call-depth policy, and a live dependency resolver. The gate parses and validates the exact active draft, walks reusable dependencies within fixed workflow analysis budgets, resolves production readiness, and returns an opaque revision bound to the exact draft, sorted reachable dependency bytes or absence, effective gate values, and readiness report. Publish submits the active session, draft, target pre-image, and dependency revisions to the fenced workflow publisher, which rejects a missing, blocked, stale, or changed gate result. | Agent-side publishing must enforce the same exact dependency and optimistic-concurrency fences as dashboard publishing rather than bypassing production readiness. |
 
 ## Data And State Model
 
@@ -47,7 +49,10 @@ and the runtime-learned tool adaptation state file at
 carry an opaque process-local turn UX identity used only to bind same-chat
 delivery and cleanup to its originating turn. Arguments decoded from durable
 JSON may retain numeric values as `json.Number` through schema validation and
-tool execution.
+tool execution. Workflow-tool dependency gate snapshots are transient and bind
+exact active-draft bytes to sorted reachable definition snapshots and the
+effective readiness report; the resulting opaque revision is used only by the
+in-process publish request and repeated transaction checks.
 
 ## Surface Ownership
 
@@ -122,6 +127,8 @@ Owns: TOOL write_file
 | Tool | `spawn` with optional asynchronous context preparation | Retain AgentLoop runtime ownership synchronously before background goroutine launch, then release after subturn and callback completion. | `FR-TOOL-011` |
 | Go context | `WithToolTurnUXContext`, `ToolTurnUXID`, `message` delivery callback | Preserve the active turn identity through tool and cloned-subturn execution, but copy it to outbound delivery only for the exact originating channel/chat. | `FR-TOOL-012` |
 | Tool validation | JSON Schema `number` and `integer` arguments | Validate finite `float64` values and lossless `json.Number` values, including exact integrality without exponent expansion. | `FR-TOOL-013` |
+| Go API | `ToolRegistry.AllowsRegistration`, `ToolRegistry.GetRegistered` | Inspect effective allowlist admission and the exact registered occupant, including dormant hidden tools, before MCP registration mutates a registry. | `FR-TOOL-014` |
+| Tool | `workflow` action `dev_publish` | Evaluate exact structural and production dependency readiness, derive an opaque dependency revision, and invoke revision-fenced transactional workflow publishing. | `FR-TOOL-015` |
 
 ## Algorithms And Ordering
 
@@ -147,6 +154,17 @@ Owns: TOOL write_file
     send copies it only when its destination matches the originating
     channel/chat, and stream lookup prefers the turn-scoped capability before
     falling back to the legacy interface.
+14. Before adding MCP wrappers, inspect every allowed canonical name and its
+    current registered occupant, including hidden expired entries. Reject the
+    complete MCP registration set on any non-MCP or different-identity
+    collision before exposing its first tool; an exact identity may replace a
+    stale wrapper with the currently configured eager or deferred visibility.
+15. For workflow `dev_publish`, load, parse, and validate the exact persisted
+    active draft; snapshot the complete reusable closure within fixed budgets;
+    resolve live dependencies; hash length-delimited draft, sorted dependency,
+    and effective readiness values; then pass that revision with all active
+    development fences to the workflow publisher for repeated gate checks and
+    transactional commit.
 
 ## Cross-Feature Behavior
 
@@ -157,7 +175,9 @@ thread-specific tool and policy surface while relying on the generic registry,
 schema export, execution, and settings UI mechanics defined here.
 Workflows add an agent-callable management tool and execute step-level tools
 through this same registry, including context injection, sensitive-data
-filtering, response-handled media delivery, and channel delivery tools.
+filtering, response-handled media delivery, and channel delivery tools. Its
+agent-callable publish action additionally reuses the production dependency
+gate and fenced workflow transaction instead of trusting model-visible state.
 Git workspaces contribute a built-in agent tool registered through this generic
 registry, while acquire, release, cleanup, drop, and inventory semantics are
 owned by the git workspaces feature.
@@ -180,6 +200,11 @@ same-chat consumption.
 - Invalid, fractional integer, and non-finite numeric arguments fail before
   tool execution. Extremely large positive or negative decimal exponents are
   classified without constructing exponent-sized integers or powers of ten.
+- A canonical MCP name collision aborts initialization before any tool from
+  the candidate MCP registration set is exposed and preserves the incumbent.
+- Workflow `dev_publish` fails without an injected live resolver, when
+  workflows or any dependency are not ready, or when reachable definition
+  content changes between dependency evaluation and fenced publication.
 
 ## Acceptance Evidence
 
@@ -196,6 +221,8 @@ same-chat consumption.
 | `FR-TOOL-011` | [pkg/agent/runtime_gate_test.go](../../pkg/agent/runtime_gate_test.go), [pkg/tools/spawn.go](../../pkg/tools/spawn.go) |
 | `FR-TOOL-012` | [pkg/tools/integration/message_test.go](../../pkg/tools/integration/message_test.go), [pkg/agent/agent_test.go](../../pkg/agent/agent_test.go), [pkg/agent/agent_turn_ux_test.go](../../pkg/agent/agent_turn_ux_test.go), [pkg/channels/manager_test.go](../../pkg/channels/manager_test.go) |
 | `FR-TOOL-013` | [pkg/tools/validate.go](../../pkg/tools/validate.go), [pkg/tools/validate_test.go](../../pkg/tools/validate_test.go), [pkg/workflows/store_test.go](../../pkg/workflows/store_test.go) |
+| `FR-TOOL-014` | [pkg/tools/registry.go](../../pkg/tools/registry.go), [pkg/agent/agent_mcp_test.go](../../pkg/agent/agent_mcp_test.go) |
+| `FR-TOOL-015` | [pkg/tools/workflow_publish.go](../../pkg/tools/workflow_publish.go), [pkg/tools/workflow_publish_test.go](../../pkg/tools/workflow_publish_test.go), [pkg/workflows/development_publish_test.go](../../pkg/workflows/development_publish_test.go) |
 
 ## Implementation Anchors
 
@@ -206,3 +233,4 @@ same-chat consumption.
 - [pkg/tools/validate.go](../../pkg/tools/validate.go)
 - [pkg/tools/integration/message.go](../../pkg/tools/integration/message.go)
 - [pkg/tools/spawn.go](../../pkg/tools/spawn.go)
+- [pkg/tools/workflow_publish.go](../../pkg/tools/workflow_publish.go)
