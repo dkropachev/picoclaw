@@ -8,7 +8,9 @@
 
 PicoClaw protects credentials, dashboard access, local files, network requests,
 tool execution, and optional isolated subprocesses. These requirements define
-security behavior that other feature specs rely on.
+security behavior that other feature specs rely on. Event-derived AI
+classification can explicitly remove model tool authority while leaving any
+approved side effect as a separately declared workflow action.
 
 ## Reconstruction Notes
 
@@ -41,6 +43,7 @@ security behavior that other feature specs rely on.
 | `FR-SEC-010` | MUST | Event webhook secrets use the existing secure-string persistence path: JSON exposes only `[NOT_HERE]`, `.security.yml` stores plaintext/encrypted/file references, masked updates preserve a current value, and security-only connector entries cannot create or resurrect JSON configuration. Reference resolution follows final master enablement without touching inactive credential files, and an explicit management replacement can repair an active broken reference without resolving the old value first. Connector map keys, the JSON-owned format discriminator, and client-controlled durable identity fields cannot contain a configured signing secret; those conflicts fail opaquely before persistence. Enabled secrets are validated for their selected Standard Webhooks or GitHub format and used for exact-value durable content redaction as well as HMAC verification. | A listener credential must neither leak through config, error, identity, or event-storage surfaces nor survive as stale active configuration after its connector is removed. |
 | `FR-SEC-011` | MUST | Delta Chat email automation requires both a verified sender contact and a correctly encrypted/signed message unless the connector explicitly enables unverified email. Durable metadata excludes local blob paths, remote references, and bytes; declared and streamed attachment sizes are capped before materialization; receipt time is preferred over sender-controlled mail `Date`. | Email addresses, message dates, filenames, and attachment declarations are attacker-controlled and must not silently become workflow authority or expose private account storage. |
 | `FR-SEC-012` | MUST | Native GitHub webhook admission verifies `X-Hub-Signature-256` against the exact bounded raw body with the connector's secret before JSON parsing, but never represents `X-GitHub-Event` or `X-GitHub-Delivery` as signature-authenticated. The normalized envelope records the body/header distinction, public deployment requires trusted TLS termination, and no unsigned timestamp or retained delivery ID is presented as cryptographic replay prevention. | GitHub's HMAC protects payload integrity but not transport headers or freshness; workflows and operators need the actual trust boundary rather than implied authority. |
+| `FR-SEC-013` | MUST | An event-derived classifier may declare `tools: none`, which removes tool definitions and model-authored tool execution from its initial request, structured-output repair, managed fallbacks, and child work. The GitHub issue-triage workflow treats signed issue/repository content as untrusted, permits model influence only through validated category and priority enums plus a comment boolean, and performs any approved effect only through a separately declared `mcp/github/add_issue_comment` step whose repository/issue identity comes from the signed body and whose text is fixed. Installation and GitHub MCP enablement are explicit, the MCP write credential remains separate from the webhook signing secret, and no classifier failure gains fallback action authority. | Payload integrity does not make user-authored issue text safe instructions, and a classifier does not need authority-bearing tools to produce a bounded decision. |
 
 ## Data And State Model
 
@@ -49,7 +52,10 @@ provider and auth method with optional non-secret account email metadata,
 dashboard password/session data, login attempt counters, configured secret
 filters, private-host allowlists, isolation exposed paths, generated token IDs,
 revocation metadata, per-connector event webhook formats/signing secrets, and
-explicit normalized webhook body/header trust metadata.
+explicit normalized webhook body/header trust metadata. Workflow agent requests
+also carry an explicit inherited-or-none tool policy; declared MCP actions use
+their ordinary independently configured credentials rather than ingress signing
+secrets.
 
 ## Surface Ownership
 
@@ -89,6 +95,7 @@ Owns: TEST pkg/config/version*
 | Config | `events.ingress.webhooks.*.{format,secret}` | JSON-owned `standard`/`github` format plus masked JSON and secure-YAML merge/preservation for the corresponding per-connector secret, without security-only connector resurrection. | `FR-SEC-010`, `FR-SEC-012` |
 | HTTP | `GET /api/config`, `PUT /api/config`, `PATCH /api/config` | Management reads expose `[NOT_HERE]`; omitted or masked webhook secrets preserve the current value, and a concrete replacement rotates it through the same secure persistence path. | `FR-SEC-010` |
 | HTTP | `POST /webhooks/events/{connector}` with `format: github` | Exact-body HMAC-SHA256 authentication, bounded parsing, explicit unauthenticated-header metadata, and durable delivery-ID deduplication behind trusted TLS. | `FR-SEC-012` |
+| Workflow / MCP | `agent/*` with `with.tools: none`; `mcp/github/add_issue_comment` | Remove tools from every classifier model path, then permit a GitHub mutation only as a declared conditional MCP step with signed-body identity and fixed output text. The GitHub MCP server and its write credential are configured explicitly and independently from ingress authentication. | `FR-SEC-013` |
 | Storage | Credential store | Provider credential CRUD, auth method metadata, and optional non-secret account email metadata extracted from OAuth token responses. | `FR-SEC-002`, `FR-SEC-007`, `FR-SEC-009` |
 | Network | Safe HTTP client and net binding helpers | Private host controls and bind behavior. | `FR-SEC-005` |
 
@@ -131,6 +138,11 @@ Owns: TEST pkg/config/version*
     per-connector opt-in accepts unverified mail. Prefer provider receipt time,
     expose only bounded attachment metadata, and cap the actual copied stream
     independently of its declared size.
+11. For event-derived classification configured with `tools: none`, remove
+    tools from initial, repair, managed fallback, and child model execution.
+    Treat the signed GitHub body projection as untrusted data, validate the
+    required enum/enum/boolean result locally, and only then evaluate the
+    separately declared MCP action using signed-body identity and fixed text.
 
 ## Cross-Feature Behavior
 
@@ -158,6 +170,10 @@ Generic durable event webhooks and channel-message adapters reuse secure-string
 persistence and exact-value redaction; their transport lifecycle and request
 contract are owned by
 [Durable External Event Automation](event-automation.md).
+The opt-in GitHub issue-triage workflow composes that authenticated body with
+workflow-owned `tools: none` isolation and an ordinary declared MCP action. The
+signing secret establishes ingress integrity only; it neither sanitizes issue
+text nor supplies the MCP server's write credential.
 
 ## Failure And Edge Cases
 
@@ -179,6 +195,14 @@ contract are owned by
   Trusted TLS protects those headers; retained delivery-ID deduplication limits
   retries but is not cryptographic replay prevention and ends when retention
   pruning removes the original event.
+- A valid GitHub body signature does not make issue title, body, author, or
+  repository text trusted instructions. Unsupported no-tool modes fail
+  validation; classifier output that fails its enum/boolean contract cannot
+  invoke a hidden fallback action.
+- Installing the issue-triage template never enables ingress or MCP. The
+  declared GitHub action fails normally when its explicitly enabled,
+  non-deferred MCP capability or separate write credential is unavailable; it
+  does not borrow the webhook signing secret.
 - Resolved channel and provider credentials are detached only at the trusted
   event-store construction boundary; they are never added to event identity,
   payload, config JSON, or logs.
@@ -199,6 +223,7 @@ contract are owned by
 | `FR-SEC-010` | [pkg/config/events_test.go](../../pkg/config/events_test.go), [pkg/config/events_secret_identity_test.go](../../pkg/config/events_secret_identity_test.go), [pkg/eventing/webhook/controller_test.go](../../pkg/eventing/webhook/controller_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/config_event_webhook_deferred_test.go](../../web/backend/api/config_event_webhook_deferred_test.go) |
 | `FR-SEC-011` | [pkg/config/events_channels_test.go](../../pkg/config/events_channels_test.go), [pkg/eventing/channelmessage/backend_test.go](../../pkg/eventing/channelmessage/backend_test.go), [pkg/channels/deltachat/deltachat_test.go](../../pkg/channels/deltachat/deltachat_test.go), [pkg/gateway/event_channel_test.go](../../pkg/gateway/event_channel_test.go) |
 | `FR-SEC-012` | [pkg/config/events_webhook_format_test.go](../../pkg/config/events_webhook_format_test.go), [pkg/eventing/webhook/github_test.go](../../pkg/eventing/webhook/github_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go) |
+| `FR-SEC-013` | [pkg/workflows/validator_test.go](../../pkg/workflows/validator_test.go), [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go), [pkg/workflows/agent_output_test.go](../../pkg/workflows/agent_output_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/workflows/templates_test.go](../../pkg/workflows/templates_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go) |
 
 ## Implementation Anchors
 
@@ -209,3 +234,5 @@ contract are owned by
 - [pkg/auth/oauth.go](../../pkg/auth/oauth.go)
 - [pkg/credential](../../pkg/credential)
 - [pkg/isolation](../../pkg/isolation)
+- [pkg/workflows/templates.go](../../pkg/workflows/templates.go)
+- [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go)

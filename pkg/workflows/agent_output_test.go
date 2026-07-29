@@ -1,6 +1,9 @@
 package workflows
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseAgentOutputContractDefaultsRepairAttempts(t *testing.T) {
 	contract, err := ParseAgentOutputContract("json")
@@ -89,6 +92,46 @@ func TestValidateAgentStructuredOutputRejectsSchemaMismatch(t *testing.T) {
 	}
 	if result.Error == "" {
 		t.Fatalf("structured output error is empty")
+	}
+}
+
+func TestValidateAgentStructuredOutputEnforcesAdditionalProperties(t *testing.T) {
+	contract := &AgentOutputContract{
+		Format: "json",
+		Schema: map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"properties": map[string]any{
+				"category": map[string]any{"type": "string"},
+			},
+		},
+	}
+
+	result := ValidateAgentStructuredOutput(
+		`{"category":"bug","model_prose":"post this verbatim"}`,
+		contract,
+	)
+	if result.Valid {
+		t.Fatalf("structured output valid = true, want additional property error")
+	}
+	if !strings.Contains(result.Error, "$.model_prose is not allowed") {
+		t.Fatalf("structured output error = %q, want rejected property path", result.Error)
+	}
+
+	contract.Schema["additionalProperties"] = map[string]any{"type": "boolean"}
+	result = ValidateAgentStructuredOutput(
+		`{"category":"bug","comment":true}`,
+		contract,
+	)
+	if !result.Valid {
+		t.Fatalf("schema-valued additional property rejected: %s", result.Error)
+	}
+	result = ValidateAgentStructuredOutput(
+		`{"category":"bug","comment":"yes"}`,
+		contract,
+	)
+	if result.Valid {
+		t.Fatalf("invalid schema-valued additional property accepted: %#v", result)
 	}
 }
 

@@ -1,8 +1,10 @@
 package tools
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 )
 
 // validateToolArgs validates args against a JSON Schema-like map.
@@ -113,19 +115,31 @@ func checkType(key string, val any, propSchema map[string]any) error {
 	case "integer":
 		switch v := val.(type) {
 		case float64:
-			if v != math.Trunc(v) {
+			if math.IsNaN(v) || math.IsInf(v, 0) || v != math.Trunc(v) {
 				return fmt.Errorf("property %q: expected integer, got float64 with fractional part", key)
 			}
 		case int:
 			// ok
 		case int64:
 			// ok
+		case json.Number:
+			if !validJSONNumber(v) || !jsonNumberIsInteger(v) {
+				return fmt.Errorf("property %q: expected integer, got json.Number with fractional part", key)
+			}
 		default:
 			return fmt.Errorf("property %q: expected integer, got %T", key, val)
 		}
 	case "number":
-		switch val.(type) {
-		case float64, int, int64:
+		switch v := val.(type) {
+		case float64:
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return fmt.Errorf("property %q: expected finite number, got %T", key, val)
+			}
+		case json.Number:
+			if !validJSONNumber(v) {
+				return fmt.Errorf("property %q: expected finite number, got invalid json.Number", key)
+			}
+		case int, int64:
 			// ok
 		default:
 			return fmt.Errorf("property %q: expected number, got %T", key, val)
@@ -176,6 +190,85 @@ func checkArrayItems(key string, arr []any, propSchema map[string]any) error {
 		}
 	}
 	return nil
+}
+
+func validJSONNumber(value json.Number) bool {
+	_, err := json.Marshal(value)
+	return err == nil
+}
+
+func jsonNumberIsInteger(value json.Number) bool {
+	raw := value.String()
+	mantissa := raw
+	exponent := ""
+	if index := strings.IndexAny(raw, "eE"); index >= 0 {
+		mantissa = raw[:index]
+		exponent = raw[index+1:]
+	}
+	mantissa = strings.TrimPrefix(mantissa, "-")
+
+	fractionDigits := 0
+	if point := strings.IndexByte(mantissa, '.'); point >= 0 {
+		fractionDigits = len(mantissa) - point - 1
+	}
+
+	trailingZeros := 0
+	allZero := true
+	for index := len(mantissa) - 1; index >= 0; index-- {
+		digit := mantissa[index]
+		if digit == '.' {
+			continue
+		}
+		if digit != '0' {
+			allZero = false
+			break
+		}
+		trailingZeros++
+	}
+	if allZero {
+		return true
+	}
+
+	// The number is an integer exactly when:
+	//
+	//	significand * 10^(exponent-fractionDigits)
+	//
+	// has enough trailing zeroes to cancel a negative decimal scale. Compare
+	// the exponent against that threshold with saturation bounded by the input
+	// length; parsing an attacker-controlled exponent must never construct
+	// 10^exponent or another exponent-sized value.
+	threshold := fractionDigits - trailingZeros
+	return jsonExponentAtLeast(exponent, threshold, len(raw)+1)
+}
+
+func jsonExponentAtLeast(raw string, threshold, bound int) bool {
+	if raw == "" {
+		return 0 >= threshold
+	}
+
+	sign := 1
+	switch raw[0] {
+	case '-':
+		sign = -1
+		raw = raw[1:]
+	case '+':
+		raw = raw[1:]
+	}
+
+	magnitude := 0
+	for index := 0; index < len(raw); index++ {
+		digit := int(raw[index] - '0')
+		if magnitude > (bound-digit)/10 {
+			magnitude = bound
+			break
+		}
+		magnitude = magnitude*10 + digit
+		if magnitude >= bound {
+			magnitude = bound
+			break
+		}
+	}
+	return sign*magnitude >= threshold
 }
 
 // checkEnum validates that val is one of the allowed enum values in propSchema.

@@ -17,7 +17,9 @@ run.
 The current stage opens the opt-in inbox, runs routing/dispatch workers with the
 gateway lifecycle, accepts authenticated Standard Webhooks and native GitHub
 deliveries on the existing shared gateway listener, and can opt existing Delta
-Chat email channel instances into durable `message.received` admission.
+Chat email channel instances into durable `message.received` admission. It also
+offers an explicitly installed GitHub issue-triage workflow that keeps its AI
+classifier separate from the declared GitHub comment action.
 Operator API/CLI endpoints and event UI remain later stages. Durable inputs
 remain separate from the process-local
 [`pkg/events`](../../pkg/events) observability bus: runtime events are
@@ -91,6 +93,7 @@ state survive restart.
 | `FR-EVENT-AUTOMATION-028` | MUST | Delta Chat starts or emits `IncomingMsg`, message-specific `MsgsChanged`, pending-download `MsgsChanged`, or `EventChannelOverflow`. | Provider events are notification-only: startup, every `IncomingMsg`, every message-specific `MsgsChanged`, pending-download generic `MsgsChanged`, and overflow wake an ascending `get_next_msgs` drain; overflow is handled before account filtering because it reports `contextId=0`. Authorized complete content uses only the provider-local Delta message ID as deduplication input, prefers locally observed receipt time over sender-controlled mail `Date`, and runs `markseen_msgs` only after successful durable admission or ordinary forwarding. There is no listener acknowledged-ID ring. | Successful, deliberately filtered, own, device, empty, or undecipherable messages advance the provider cursor in strict ascending order. Retryable download/fetch/admission/ack failure at a lower accepted ID blocks all later IDs. An incomplete message's RFC724 Message-ID is retained only in process for replacement correlation, never deduplication or durable payload. | A full download is driven by provider notifications rather than bounded polling. If the original remains in the ordered queue it must complete; if absent, it retires only after candidates through the last RFC-correlated replacement are processed. An unrelated complete batch cannot retire it, and without a visible correlated replacement the pending original conservatively blocks the queue. Shutdown cancels retry loops. Raw account blob paths never cross admission or enter agent text; unavailable media yields only a safe filename annotation. | Email ingestion must not lose MIME parts, duplicate mirror turns from stale provider notifications, retire pending work on unrelated traffic, acknowledge before durable ownership, let a forged mail date steer time-based routing, or skip retryable work through high-water advancement. |
 | `FR-EVENT-AUTOMATION-029` | MUST | Startup, reload, rollback, shutdown, or a timed-out insert drain changes channel adapter/store generations. | A process-stable admission controller fences the exact prepared connector set before channels publish and collision-safely, identity-owned registers on the existing bus seam. Gateway commit first stages both channel and webhook backends as validated non-accepting reservations, aborts earlier reservations if any later staging check fails, records their generation identities, and only then reaches an irreversible aggregate commit point and publishes both sequentially through no-fail commits under its serialized lifecycle. It waits for admitted inserts before store close, restores a freshly prepared old backend on rollback, and closes only after pending publishers and active inserts resolve. | Generation identities fence delayed cleanup; active, retiring, staged, prepared, pending, and closed connector state move atomically. Sequential publication may transiently make one transport observable before the other after the irreversible commit point; both backends share the committed store and readiness remains false until both are published. | Candidate-only configured messages wait while unrelated/internal messages pass. Mismatched preparation, a pre-existing admission owner, or either controller's staging invariant fails closed before either candidate accepts traffic; no aggregate activation that returns an error exposes or acknowledges either candidate. Stale abort/cleanup cannot affect a replacement, a drain timeout leaves the old store open for retry, and failed recovery remains unready. | Hot reload must not insert an acknowledged channel event into a provisional/closed database, leave a failed half-commit, let a newly configured connector bypass durable admission, or displace another bus admission owner. |
 | `FR-EVENT-AUTOMATION-030` | MUST | An enabled `events.ingress.webhooks.<connector>` selects `format: github` and GitHub sends one bounded JSON-object delivery with exactly one `X-Hub-Signature-256`, `X-GitHub-Delivery`, and `X-GitHub-Event` header. | The adapter verifies the `sha256=` HMAC over the exact raw body before decoding, passes the complete authenticated object to the ordinary payload redaction and normalization path, assigns source `github`, the path connector, type `<event>` or `<event>.<action>`, and the delivery ID as deduplication key, and promotes only bounded sender/repository metadata. Envelope attributes explicitly record `body_authenticated=true`, `headers_authenticated=false`, and `signature_algorithm=hmac-sha256`. | The ordinary redacting inbox atomically owns a new delivery before `202`, or returns the retained first event with `200` and `inserted: false`; it uses the same generation-fenced shared route and lifecycle as Standard Webhooks. | Missing, duplicated, malformed, or oversized authentication headers fail uniformly with `401`; malformed JSON, an invalid signed action, or a secret-bearing identity fails before mutation with `400`. GitHub signs the body but not its event/delivery headers and supplies no signed timestamp, so public ingress requires trusted TLS termination. The local default body limit is 1 MiB even though GitHub permits payloads up to 25 MiB. Deduplication protects a delivery only while its durable event remains retained; a redelivery after eligible pruning is a new event. | Native mapping makes GitHub automation useful without a second listener or a parallel durability, redaction, workflow, or reload system, while preserving the provider protocol's real trust boundary. |
+| `FR-EVENT-AUTOMATION-031` | MUST | An operator explicitly installs `github-issue-triage` while native GitHub ingress, workflows, and a non-deferred GitHub MCP server are configured. | The installed workflow deterministically matches source `github`, type `issues.opened`, and `body_authenticated=true`; a no-tool classifier receives a narrow repository/issue projection from the signed body and returns only enum category/priority plus a boolean comment decision. A separate conditional `mcp/github/add_issue_comment` step uses signed-body owner/repository/issue identity and posts fixed bounded text containing the enums and event marker. | Installation writes one local workflow definition and revalidates the local catalog without changing gateway, ingress, model, MCP, or credential configuration. A matched run uses the existing durable dispatch/run state and records classifier/action steps normally. | GitHub's event header remains transport-authenticated only by trusted TLS. Issue text remains untrusted despite the body signature. Invalid model output, disabled/no-tool policy failure, absent MCP capability, or GitHub action failure produces no hidden fallback action. Explicit workflow retry, event replay, or provider redelivery after retention pruning can duplicate the comment because the marker is not a provider idempotency key. | AI classification becomes useful without model-held action authority, a new GitHub client, or changes to existing installations. |
 
 ## Data And State Model
 
@@ -308,6 +311,18 @@ and workflow-context cost. A delivery ID deduplicates while its first event is
 retained; after terminal retention pruning removes that event, a later GitHub
 redelivery with the same ID is admitted as a new event.
 
+GitHub issue triage is an optional local workflow, not ingress configuration.
+The operator installs it explicitly with
+`picoclaw workflow install github-issue-triage` after configuring native GitHub
+ingress, workflows, and an enabled non-deferred MCP server named `github` that
+exposes `add_issue_comment`. The install writes
+`workflows/github-issue-triage.yml` and revalidates the local workflow catalog;
+it does not enable or modify any of those dependencies. The webhook signing
+secret authenticates ingress only and is independent from the MCP server's
+GitHub write credential. The installed trigger matches every configured native
+GitHub connector by default. In a multi-connector deployment, add the intended
+connector name under `on.event.connectors` and revalidate the edited workflow.
+
 GitHub and Standard Webhooks share the same transport status policy:
 
 | Status | Meaning |
@@ -403,6 +418,7 @@ Owns: TEST web/backend/api/config_event_channel_test.go
 | Storage | `pkg/eventing.Open` / `OpenStore`, `WithMaxPayloadBytes`, `WithClock`, `WithBusyTimeout`, `WithRedaction` | Open the embedded store with transactional `PRAGMA user_version` migration, WAL, foreign keys, busy handling, one authoritative SQLite connection, restrictive permissions, restart persistence, a one-MiB default payload limit, mandatory/custom redaction, optional exact-secret replacement, and deterministic test clocks on supported targets. | `FR-EVENT-AUTOMATION-003`, `FR-EVENT-AUTOMATION-005` through `FR-EVENT-AUTOMATION-011` |
 | Go API | `pkg/eventing.RoutingDispatchCreator`, `RoutingLeaseRenewer`, `DispatchLeaseRenewer` | Additive capabilities that create a dispatch only through the current routing claim and renew current live leases without expanding the compatibility-critical `Inbox` interface. Routing renewal remains optional; `EventDispatchInbox` requires dispatch renewal because interrupted-run cancellation cannot otherwise be fenced across stores. | `FR-EVENT-AUTOMATION-014`, `FR-EVENT-AUTOMATION-018` |
 | Workflow YAML | `on.event` | Typed source/connector/type/entity/attribute filters with scalar/list syntax, explicit non-empty validation, anchored globs, and deterministic case rules. | `FR-EVENT-AUTOMATION-013`, `FR-EVENT-AUTOMATION-021` |
+| CLI / Workflow YAML | `picoclaw workflow install github-issue-triage` / `workflows/github-issue-triage.yml` | Explicitly install the deterministic native GitHub issue trigger, isolated structured classifier, and declared conditional GitHub comment action without changing existing configuration. | `FR-EVENT-AUTOMATION-031` |
 | Go API | `EventWorkflowRouter`, `EventWorkflowDispatcher`, `RunRequest.OnRunPersisted`, `LoadRunnableLocalSnapshot`, `EventContextFromEnvelope` | Claim one item, compatibility-check the exact loaded workflow bytes, durably fan out deterministic dispatches, reconcile deterministic runs, link a newly persisted run before effects, renew long leases, and build the detached redacted workflow context. | `FR-EVENT-AUTOMATION-014` through `FR-EVENT-AUTOMATION-018`, `FR-EVENT-AUTOMATION-020`, `FR-EVENT-AUTOMATION-021` |
 | Runtime | gateway event automation service, webhook controller, and channel admission controller | Open enabled storage before readiness, initialize workflow runtime dependencies before workers, and generation-fence HTTP and channel admission while transactionally draining, replacing, rolling back, and closing services/providers. | `FR-EVENT-AUTOMATION-019`, `FR-EVENT-AUTOMATION-024`, `FR-EVENT-AUTOMATION-029` |
 | Build | `pkg/eventing` unsupported-platform implementation | Preserves the same construction surface and returns `ErrUnsupportedPlatform` without pulling SQLite into excluded targets. | `FR-EVENT-AUTOMATION-005`, `FR-EVENT-AUTOMATION-012` |
@@ -563,6 +579,14 @@ Owns: TEST web/backend/api/config_event_channel_test.go
     replacement before retiring it. An unrelated complete batch cannot retire
     the pending original, and no visible correlation conservatively blocks the
     ordered queue.
+24. Installing GitHub issue triage validates and writes one local workflow,
+    then revalidates the local catalog without enabling ingress, workflows,
+    models, MCP, or credentials. A matched body-authenticated
+    `github`/`issues.opened` dispatch passes only signed body repository/issue
+    fields to the no-tool structured classifier. After its enum/enum/boolean
+    result validates, evaluate the declared conditional
+    `mcp/github/add_issue_comment` step with signed body identity and fixed
+    bounded comment text; no model prose or issue text reaches the action.
 
 ## Cross-Feature Behavior
 
@@ -575,7 +599,9 @@ mechanism, and event logging filters never change durable ingestion.
 execution, compatibility checks, and persisted workflow runs. Durable eventing
 owns the input, routing work, dispatch intent, deterministic run identity, and
 lease/recovery state consumed by those workers. Creating a dispatch is still a
-separate durable step before execution.
+separate durable step before execution. The explicitly installed issue-triage
+template owns only composition: deterministic routing and structured
+classification precede a separately declared GitHub MCP action.
 
 [Webhook ingress](../../pkg/eventing/webhook) normalizes Standard Webhooks or
 native GitHub deliveries directly into this envelope on the channel manager's
@@ -705,9 +731,12 @@ existing workflow agent/tool policy.
   and shutdown cancels the retry loop.
 - The compatibility version bump makes pre-`on.event` stamps stale, so newly
   understood event YAML cannot activate until explicitly revalidated.
-- This stage intentionally adds GitHub delivery ingestion only; GitHub
-  side-effect actions, event operator CLI/API endpoints, and frontend routes
-  remain separate later stages.
+- The GitHub issue-triage template is inert until explicit installation and
+  separate dependency configuration. Its event marker aids audit/search but is
+  not a GitHub idempotency key, so an explicit workflow retry, event replay, or
+  provider redelivery after retention pruning can duplicate a comment. Other
+  GitHub actions, event operator CLI/API endpoints, and frontend routes remain
+  separate later stages.
 
 GitHub protocol references: [validating webhook
 deliveries](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries),
@@ -738,6 +767,7 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 | `FR-EVENT-AUTOMATION-028` | [pkg/channels/deltachat/deltachat_test.go](../../pkg/channels/deltachat/deltachat_test.go) |
 | `FR-EVENT-AUTOMATION-029` | [pkg/eventing/channelmessage/controller_test.go](../../pkg/eventing/channelmessage/controller_test.go), [pkg/gateway/event_channel_test.go](../../pkg/gateway/event_channel_test.go) |
 | `FR-EVENT-AUTOMATION-030` | [pkg/config/events_webhook_format_test.go](../../pkg/config/events_webhook_format_test.go), [pkg/eventing/webhook/github_test.go](../../pkg/eventing/webhook/github_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go) |
+| `FR-EVENT-AUTOMATION-031` | [pkg/workflows/templates.go](../../pkg/workflows/templates.go), [pkg/workflows/templates_test.go](../../pkg/workflows/templates_test.go), [pkg/workflows/agent_output_test.go](../../pkg/workflows/agent_output_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [cmd/picoclaw/internal/workflow/command_test.go](../../cmd/picoclaw/internal/workflow/command_test.go) |
 
 ## Implementation Anchors
 
@@ -749,6 +779,7 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 - [pkg/config/events.go](../../pkg/config/events.go)
 - [pkg/workflows/event_trigger.go](../../pkg/workflows/event_trigger.go)
 - [pkg/workflows/event_dispatcher.go](../../pkg/workflows/event_dispatcher.go)
+- [pkg/workflows/templates.go](../../pkg/workflows/templates.go)
 - [pkg/agent/workflow_eventing.go](../../pkg/agent/workflow_eventing.go)
 - [pkg/gateway/event_automation.go](../../pkg/gateway/event_automation.go)
 - [pkg/gateway/event_webhook.go](../../pkg/gateway/event_webhook.go)

@@ -20,6 +20,9 @@ as a fallback, and publish validates, writes, reloads, and stamps the workflow
 against the current PicoClaw runtime. Native workflow functions provide common
 state, artifact, git inventory, and git filter primitives so AI-authored
 workflows do not need helper scripts for durable planning and reporting.
+An explicitly installed GitHub issue-triage template composes deterministic
+`issues.opened` routing, a no-tool structured classifier, and one separately
+declared GitHub MCP comment action.
 
 ## Reconstruction Notes
 
@@ -37,8 +40,9 @@ workflows do not need helper scripts for durable planning and reporting.
 - Non-obvious constraints: `uses: workflows/foo.yml` is canonical for local
   reusable workflows, reusable workflows are called at job level, workflow
   steps reuse existing tool/agent/MCP policy gates, classifier-style agent
-  steps can read history without writing it, and delivery is separate from
-  session memory. Only one workflow development session can be active at a
+  steps can read history without writing it or set `tools: none` so untrusted
+  content cannot invoke tools, and delivery is separate from session memory.
+  Only one workflow development session can be active at a
   time; release/version changes force deterministic revalidation before
   published workflows can trigger or run. External-event routing is
   deterministic; an AI classifier is an ordinary workflow step after a broad
@@ -71,6 +75,8 @@ workflows do not need helper scripts for durable planning and reporting.
 | `FR-WORKFLOW-021` | MUST | Agent workflow steps integrate with the dedicated [Managed Agent Execution](agent-execution-optimization.md) contract: `with.output` declares structured JSON output, `with.managed` enables generic hidden scope/task/hybrid splitting, and the visible workflow step persists the combined structured result plus managed diagnostics. | AI-driven workflow development needs generic, inspectable agent adaptation that preserves output quality while reducing token and model spend. |
 | `FR-WORKFLOW-022` | MUST | PicoClaw can install a local `workflows/code-review.yml` template that acquires a git workspace, inventories repository structure with workspace/file links, releases the workspace before asking an agent to propose include/exclude globs, reacquires only long enough for `git.filter` to refresh selected workspace file links, releases again before model review, and runs an agent step with structured JSON review output; workflow tool steps expose JSON object results as addressable step outputs for downstream workflow expressions. | Code review automation needs a local hosted workflow that composes the git workspace feature with AI-assisted path selection, deterministic filter enforcement, and inspectable review output. |
 | `FR-WORKFLOW-023` | MUST | `on.event` accepts explicit non-empty source, connector, event-type, actor, subject, and attribute string-or-list filters with anchored `*`/`?` globs. Durable routing uses OR within lists and AND across fields, case-insensitive normalized types/connector identity and case-sensitive IDs/attribute values; a matched dispatch runs under its deterministic run ID with the full redacted envelope, event/dispatch inputs, an isolated `workflow:<ref>:event:<event-id>` session, and empty delivery. The executor exclusively creates that run and invokes `OnRunPersisted` to link its dispatch before any step; crash reconciliation never repeats an existing running, terminal, or previously linked-but-pruned run. | GitHub, chat, email, and webhook automation need one deterministic trigger contract and one safe bridge into existing AI/tool workflow execution. |
+| `FR-WORKFLOW-024` | MUST | An `agent/*` workflow step may declare `with.tools: none`; the initial model request, structured-output repair requests, managed fallbacks, and child work then expose no tool definitions and cannot execute a model-authored tool call. Omitted `tools` or explicit `inherit` preserves existing behavior. Unsupported or non-string modes fail workflow validation, and the workflow compatibility identity changes so a binary that ignored `tools: none` cannot run a newly stamped classifier workflow. | Classifying attacker-controlled event content must not silently grant the model the default agent's tools. |
+| `FR-WORKFLOW-025` | MUST | `picoclaw workflow install github-issue-triage` idempotently installs a valid, opt-in `workflows/github-issue-triage.yml`. It deterministically matches native GitHub `issues.opened` events whose body-authenticated attribute is true, gives only signed repository/issue fields to an isolated no-tool `agent/main` step, requires enum category/priority plus a boolean comment decision, and conditionally calls the separately declared `mcp/github/add_issue_comment` step with owner, repository, and issue number from the signed body. The posted text is a fixed template containing only validated enum values and an event marker, never model prose or issue text. | A useful AI-driven action should be reviewable as ordinary workflow YAML and keep classification separate from authority-bearing effects. |
 
 ## Data And State Model
 
@@ -103,17 +109,34 @@ and error summaries. Delivery context stores outbound target metadata such as
 channel, chat ID, topic/thread identifier, and reply target. Session context
 stores the memory key used by agent steps.
 
+The GitHub issue-triage template is never installed or activated implicitly:
+
+```sh
+picoclaw workflow install github-issue-triage
+```
+
+The operator must separately enable workflows, native GitHub event ingress, and
+an MCP server named `github` that exposes `add_issue_comment`. That server must
+be enabled and non-deferred (`"deferred": false`) so the explicit workflow step
+can resolve `mcp/github/add_issue_comment`; its write credential is independent
+from the webhook signing secret. Installation revalidates the local catalog,
+but does not change gateway or MCP configuration. The template matches all
+native GitHub connectors unless the operator adds an explicit
+`on.event.connectors` filter to the installed definition and revalidates it.
+
 ## Auxiliary Interfaces
 
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
-| File | `workspace/workflows/*.yml`, `workspace/workflows/*.yaml` | GitHub-style workflow definitions with `on`, `jobs`, `needs`, `uses`, `with`, `if`, `outputs`, `schedule`, `runtime_event`, `event`, and `workflow_call`. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016`, `FR-WORKFLOW-023` |
-| Go API | `pkg/workflows.Parse`, `Resolver.ResolveLocal`, `Validate`, `LoadRunnableLocalSnapshot`, `Executor.Run`, `Executor.Retry`, `FileRunStore`, `MatchChannelMessage`, `MatchCommandMessage`, `MatchRuntimeEvent`, `MatchEventTrigger`, `EventWorkflowRouter`, `EventWorkflowDispatcher`, `BuildRunGraph`, `ReloadLocal`, `InstallWorkflowTemplate` | Parse GitHub-shaped YAML, normalize local reusable refs, reject unsafe refs, validate an exact compatibility-stamped byte snapshot, install local workflow templates, match process-local and durable triggers, durably route/reconcile external-event runs, run/retry/cancel workflows, build run graphs, reload definitions, and persist run state. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016`, `FR-WORKFLOW-018`, `FR-WORKFLOW-022`, `FR-WORKFLOW-023` |
+| File | `workspace/workflows/*.yml`, `workspace/workflows/*.yaml` | GitHub-style workflow definitions with `on`, `jobs`, `needs`, `uses`, `with`, `if`, `outputs`, `schedule`, `runtime_event`, `event`, and `workflow_call`. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016`, `FR-WORKFLOW-023` through `FR-WORKFLOW-025` |
+| Go API | `pkg/workflows.Parse`, `Resolver.ResolveLocal`, `Validate`, `LoadRunnableLocalSnapshot`, `Executor.Run`, `Executor.Retry`, `FileRunStore`, `MatchChannelMessage`, `MatchCommandMessage`, `MatchRuntimeEvent`, `MatchEventTrigger`, `EventWorkflowRouter`, `EventWorkflowDispatcher`, `BuildRunGraph`, `ReloadLocal`, `InstallWorkflowTemplate` | Parse GitHub-shaped YAML, normalize local reusable refs, reject unsafe refs, validate an exact compatibility-stamped byte snapshot, install local workflow templates, match process-local and durable triggers, durably route/reconcile external-event runs, run/retry/cancel workflows, build run graphs, reload definitions, and persist run state. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016`, `FR-WORKFLOW-018`, `FR-WORKFLOW-022` through `FR-WORKFLOW-025` |
 | Config | `workflows.*`, `tools.workflow` | Global enablement, workflow tool enablement, max call depth, definitions directory, concurrency, timeout, and retention defaults. | `FR-WORKFLOW-009`, `FR-WORKFLOW-013` |
-| CLI | `picoclaw workflow install/list/compatibility/revalidate/validate/reload/run/cancel/retry/status/events/graph` | Install local workflow templates, manage definitions, compatibility stamps, and runs through the same workflow runtime and file run store used by agent tools. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-018`, `FR-WORKFLOW-022` |
+| CLI | `picoclaw workflow install/list/compatibility/revalidate/validate/reload/run/cancel/retry/status/events/graph` | Install local workflow templates, including `code-review` and `github-issue-triage`, then manage definitions, compatibility stamps, and runs through the same workflow runtime and file run store used by agent tools. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-018`, `FR-WORKFLOW-022`, `FR-WORKFLOW-025` |
 | HTTP | `/api/workflows*`, `/api/workflows/runs*`, `/api/workflows/development*`, `/api/workflows/compatibility`, `/api/workflows/revalidate` | List, validate, reload, run, cancel, retry, inspect, stream workflow events, read run graph data, manage the singleton development session, run configured-agent YAML revisions, test active drafts inline or asynchronously after a run record is persisted, reject draft-changing development mutations while the current draft test is still running, execute configured agent/tool/MCP workflow steps synchronously or asynchronously, publish drafts, and revalidate release compatibility. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-017`, `FR-WORKFLOW-018`, `FR-WORKFLOW-019` |
 | UI | `/agent/workflows` | Two-mode workflow console: Develop shows singleton start readiness, starts new briefs with AI by default, resumes the singleton AI brief/YAML development cycle, marks the one active draft, sends active drafts to the configured agent for YAML revision, offers deterministic scaffold fallback, validates and test-runs drafts asynchronously with inline JSON validation for inputs/secrets/session/delivery context through configured workflow runtime steps, preserves structured validation feedback from failed draft tests, can ask AI to repair the current draft with the latest failed draft-test status, run ID, compact run/job/step state, recent event payloads, and error context, restores the latest draft-test result when resuming the active session, treats a running draft test as the active development operation, gates publish on a current successful draft test, shows publish readiness with the next blocking reason, shows the active development operation while mutations run, opens the repair/review queue with compatibility issue summaries, can start AI review or AI repair directly from blocked compatibility entries, and after publish switches Operate to the published workflow; Operate shows definitions, compatibility status, a GitHub-style manual run popover generated from declared `workflow_call` inputs and secrets with advanced session/delivery/raw secret JSON controls, compatibility-gated asynchronous launch, inline payload validation, the selected workflow run-readiness reason, runs, selected run detail, persisted delivery and trigger event context, job and step outputs, live streamed event payloads with polling fallback, graph, cancel, compatibility-gated retry with retry-secret JSON validation, reload, and refresh. | `FR-WORKFLOW-015`, `FR-WORKFLOW-017`, `FR-WORKFLOW-018`, `FR-WORKFLOW-019` |
 | Managed agent step | `uses: agent/*` with `with.output`, `with.managed`, and optional `with.scope` | Workflow-owned output schemas are injected into the agent prompt, parsed from the response, repaired once by default, validated locally, and exposed as `structured`. Managed options choose split strategy, fixed or token-adaptive chunk sizes, calibration sample/match/cache policy, parallel child limit, model candidates with price metadata, and effort optimization. Child runs are hidden from chat history by default and publish one combined structured result plus `managed` diagnostics. | `FR-WORKFLOW-007`, `FR-WORKFLOW-009`, `FR-WORKFLOW-019`, `FR-WORKFLOW-021` |
+| Agent step policy | `uses: agent/*` with `with.tools` | Omitted/`inherit` retains the selected agent's registered tools; `none` disables tools for every model request made by that step. | `FR-WORKFLOW-024` |
+| Local template | `workflows/github-issue-triage.yml` | Explicitly installed authenticated GitHub issue classifier plus a conditional declared MCP comment effect. | `FR-WORKFLOW-025` |
 | Tool | `workflow` | Agent-callable list, compatibility, revalidate, validate, reload, run, cancel, retry, status, graph, events, `dev_status`, `dev_start`, `dev_revise`, `dev_validate`, `dev_test`, `dev_publish`, and `dev_discard` actions. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-017`, `FR-WORKFLOW-018` |
 | Native functions | `function/workflow.state`, `function/workflow.artifact`, `function/git.inventory`, `function/git.filter` | Store/retrieve workflow-owned JSON state, write/read/list run artifacts, inventory git files by commit and blob hash inside a workspace, and apply structured include/exclude path policies to inventory output. `git.inventory` accepts a git workspace object or compatible working directory and emits file metadata plus workspace/file source references without embedding file content. `git.filter` accepts inventory files plus AI- or user-produced `includeGlobs`, `excludeGlobs`, and `selectedPaths`, supports recursive `**` globs, deterministically refreshes selected file source references for the active workspace, and does not embed file content in JSON output. Domain workflows compose these primitives for planning, reports, review scopes, and reuse decisions. | `FR-WORKFLOW-020` |
 | Events | `workflow.*` | Trigger, run, job, and step lifecycle events. | `FR-WORKFLOW-008`, `FR-WORKFLOW-009`, `FR-WORKFLOW-011`, `FR-WORKFLOW-015` |
@@ -126,7 +149,7 @@ stores the memory key used by agent steps.
    delivery contracts.
 3. Validate input types, output expressions, unknown dependencies, graph cycles,
    allowed `uses` targets, schedule cron expressions, runtime-event filters,
-   channel trigger regex, and agent step history/cache modes.
+   channel trigger regex, and agent step history/cache/tool modes.
 4. For channel and command triggers, match normalized `bus.InboundMessage`
    facts and bind event, session, and delivery context before normal agent
    handling.
@@ -182,6 +205,13 @@ stores the memory key used by agent steps.
     calls `OnRunPersisted` to link and renew the dispatch before any workflow
     step. Renew throughout long runs, cancel on lost ownership, and fail closed
     if a linked run is missing.
+16. For the GitHub issue-triage template, route only an explicit
+    body-authenticated `github`/`issues.opened` match, render a narrow signed
+    payload projection as untrusted classifier scope, run classifier and repair
+    requests with tools disabled, validate the required enum/enum/boolean
+    decision, and only then evaluate the declared MCP comment step. The action
+    receives signed body identity fields and fixed bounded text, not classifier
+    prose.
 
 ## Cross-Feature Behavior
 
@@ -195,7 +225,8 @@ workflow trigger, run, job, and step lifecycle state.
 redacted GitHub/chat/email/webhook envelopes plus fenced routing/dispatch
 state. Workflows own filter validation, matching, run context, and execution;
 AI classification remains inside ordinary agent steps and receives no extra
-tool authority.
+tool authority. The issue-triage template makes that boundary explicit with
+`tools: none`; its GitHub mutation exists only as the following MCP step.
 The code-review workflow template composes the git workspace tool, native git
 inventory/filter functions, and agent structured-output path; checkout
 allocation, locking, preservation, and retention remain owned by the git
@@ -315,8 +346,20 @@ inventory-and-review shape when it recognizes repository-wide review prompts.
 - Adding `on.event` changes the workflow engine/schema validator fingerprint,
   so workflows stamped by a binary that ignored this trigger remain blocked
   until revalidation.
+- Adding `tools: none` changes the workflow engine/validator identity. A
+  classifier stamped by the new runtime cannot run on an older binary that
+  would have ignored the no-tool restriction.
 - Installing the code-review workflow is idempotent when the target file already
   exists; overwrite requires an explicit force request.
+- Installing the GitHub issue-triage workflow is also idempotent and never
+  enables GitHub ingress, an MCP server, or the workflow engine. The operator
+  configures those separately and revalidates the installed definition.
+- GitHub MCP comments have no provider idempotency key. The template writes a
+  deterministic event marker for audit/search, but does not read existing
+  comments before writing; an explicit workflow retry, event replay, or GitHub
+  redelivery after retention pruning can post another comment. Automatic
+  dispatch recovery still refuses to repeat a run that reached its durable
+  pre-effect boundary.
 - A malformed code-review filter, unsupported file inventory shape, or filter
   result that excludes every useful file fails or produces an empty review scope
   through normal step outputs; the raw filter artifact remains inspectable.
@@ -336,6 +379,8 @@ inventory-and-review shape when it recognizes repository-wide review prompts.
 | `FR-WORKFLOW-021` | [docs/features/agent-execution-optimization.md](agent-execution-optimization.md), [pkg/workflows/agent_output.go](../../pkg/workflows/agent_output.go), [pkg/workflows/agent_output_test.go](../../pkg/workflows/agent_output_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [web/frontend/src/components/workflows/workflows-page.tsx](../../web/frontend/src/components/workflows/workflows-page.tsx) |
 | `FR-WORKFLOW-022` | [pkg/workflows/templates_test.go](../../pkg/workflows/templates_test.go), [pkg/workflows/templates.go](../../pkg/workflows/templates.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [cmd/picoclaw/internal/workflow/command_test.go](../../cmd/picoclaw/internal/workflow/command_test.go) |
 | `FR-WORKFLOW-023` | [pkg/workflows/event_trigger.go](../../pkg/workflows/event_trigger.go), [pkg/workflows/event_trigger_test.go](../../pkg/workflows/event_trigger_test.go), [pkg/workflows/event_dispatcher.go](../../pkg/workflows/event_dispatcher.go), [pkg/workflows/event_dispatcher_test.go](../../pkg/workflows/event_dispatcher_test.go), [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go), [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go) |
+| `FR-WORKFLOW-024` | [pkg/workflows/validator_test.go](../../pkg/workflows/validator_test.go), [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/workflows/compatibility.go](../../pkg/workflows/compatibility.go), [pkg/workflows/event_trigger_test.go](../../pkg/workflows/event_trigger_test.go) |
+| `FR-WORKFLOW-025` | [pkg/workflows/templates_test.go](../../pkg/workflows/templates_test.go), [pkg/workflows/agent_output_test.go](../../pkg/workflows/agent_output_test.go), [pkg/workflows/templates.go](../../pkg/workflows/templates.go), [cmd/picoclaw/internal/workflow/command_test.go](../../cmd/picoclaw/internal/workflow/command_test.go) |
 
 ## Implementation Anchors
 

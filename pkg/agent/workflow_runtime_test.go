@@ -186,6 +186,82 @@ func TestWorkflowAgentRunnerRejectsUnknownExplicitAgent(t *testing.T) {
 	}
 }
 
+func TestWorkflowAgentRunnerEnforcesAndAuditsToolsMode(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}}
+	msgBus := bus.NewMessageBus()
+	defer msgBus.Close()
+	provider := &workflowToolsCaptureProvider{responses: []string{
+		`{"category":"bug","model_prose":"post this verbatim"}`,
+		`{"category":"bug"}`,
+		"classified",
+	}}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	defer al.Close()
+	defaultAgent := al.GetRegistry().GetDefaultAgent()
+	if defaultAgent == nil {
+		t.Fatal("default agent is nil")
+	}
+	defaultAgent.Tools.Register(&workflowHandledMediaTool{})
+
+	runner := &workflowAgentRunner{loop: al}
+	isolated, err := runner.RunAgent(context.Background(), workflows.AgentRequest{
+		AgentID: "main",
+		Prompt:  "Classify untrusted content.",
+		History: "none",
+		Tools:   workflows.AgentToolsNone,
+		Output: &workflows.AgentOutputContract{
+			Format:         "json",
+			RepairAttempts: 1,
+			Schema: map[string]any{
+				"type":                 "object",
+				"additionalProperties": false,
+				"required":             []any{"category"},
+				"properties": map[string]any{
+					"category": map[string]any{
+						"type": "string",
+						"enum": []any{"bug", "other"},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("isolated RunAgent() error = %v", err)
+	}
+	inherited, err := runner.RunAgent(context.Background(), workflows.AgentRequest{
+		AgentID: "main",
+		Prompt:  "Use configured tools.",
+		History: "none",
+		Tools:   workflows.AgentToolsInherit,
+	})
+	if err != nil {
+		t.Fatalf("inherited RunAgent() error = %v", err)
+	}
+
+	calls := provider.ToolCounts()
+	if len(calls) != 3 {
+		t.Fatalf("provider calls = %v, want isolated request, repair, and inherited request", calls)
+	}
+	if calls[0] != 0 || calls[1] != 0 {
+		t.Fatalf("isolated provider tool counts = %v, want 0 for request and repair", calls[:2])
+	}
+	if calls[2] == 0 {
+		t.Fatal("inherited provider tool count = 0, want configured tools")
+	}
+	if isolated["tools"] != workflows.AgentToolsNone {
+		t.Fatalf("isolated tools audit = %#v, want none", isolated["tools"])
+	}
+	if isolated["structured_repairs"] != 1 ||
+		isolated["structured_valid"] != true {
+		t.Fatalf("isolated structured audit = %#v, want one successful repair", isolated)
+	}
+	if inherited["tools"] != workflows.AgentToolsInherit {
+		t.Fatalf("inherited tools audit = %#v, want inherit", inherited["tools"])
+	}
+}
+
 func TestWorkflowManagedChildrenDisableTools(t *testing.T) {
 	contract := workflowManagedTestOutputContract()
 	req := workflows.AgentRequest{
@@ -216,7 +292,7 @@ func TestWorkflowManagedChildrenDisableTools(t *testing.T) {
 		return fmt.Sprintf(`{"summary":%q,"findings":[%s]}`, strings.Join(ids, ","), strings.Join(findings, ",")), nil
 	}
 
-	_, err := (&workflowAgentRunner{}).runManagedSplit(
+	outputs, err := (&workflowAgentRunner{}).runManagedSplit(
 		req,
 		&AgentInstance{ID: "reviewer", Model: "mock-model"},
 		"reviewer",
@@ -236,6 +312,12 @@ func TestWorkflowManagedChildrenDisableTools(t *testing.T) {
 	for i, options := range seen {
 		if !options.NoTools {
 			t.Fatalf("child %d run options = %#v, want NoTools", i, options)
+		}
+	}
+	children := outputs["managed_children"].([]map[string]any)
+	for i, child := range children {
+		if child["tools"] != workflows.AgentToolsNone {
+			t.Fatalf("child %d tools audit = %#v, want none", i, child["tools"])
 		}
 	}
 }
@@ -1132,10 +1214,13 @@ func TestWorkflowManagedCalibrationMismatchFallsBackToSingleRun(t *testing.T) {
 			map[string]any{"id": "c"},
 		},
 		Output: contract,
+		Tools:  workflows.AgentToolsNone,
 	}
 	calls := 0
-	runOnce := func(message string, _ bool, _ workflowAgentRunOptions) (string, error) {
+	var runOptions []workflowAgentRunOptions
+	runOnce := func(message string, _ bool, options workflowAgentRunOptions) (string, error) {
 		calls++
+		runOptions = append(runOptions, options)
 		if strings.Contains(message, "Agent execution optimization split calibration.") {
 			if strings.Contains(message, "grouped baseline") {
 				return `{"summary":"baseline","findings":[{"scope_id":"baseline"}]}`, nil
@@ -1164,6 +1249,11 @@ func TestWorkflowManagedCalibrationMismatchFallsBackToSingleRun(t *testing.T) {
 	if calls != 4 {
 		t.Fatalf("run count = %d, want 4", calls)
 	}
+	for i, options := range runOptions {
+		if !options.NoTools {
+			t.Fatalf("managed call %d options = %#v, want NoTools", i, options)
+		}
+	}
 	if _, exists := outputs["managed_children"]; exists {
 		t.Fatalf("managed_children present after calibration fallback: %#v", outputs["managed_children"])
 	}
@@ -1176,6 +1266,9 @@ func TestWorkflowManagedCalibrationMismatchFallsBackToSingleRun(t *testing.T) {
 	calibration := managed["calibration"].(map[string]any)
 	if calibration["status"] != "failed" || calibration["phase"] != "compare" || calibration["match"] != false {
 		t.Fatalf("calibration = %#v, want failed compare mismatch", calibration)
+	}
+	if outputs["tools"] != workflows.AgentToolsNone {
+		t.Fatalf("fallback tools audit = %#v, want none", outputs["tools"])
 	}
 }
 
@@ -1606,6 +1699,40 @@ func workflowManagedTestOutputContract() *workflows.AgentOutputContract {
 
 type workflowManagedTestProvider struct {
 	model string
+}
+
+type workflowToolsCaptureProvider struct {
+	mu         sync.Mutex
+	toolCounts []int
+	responses  []string
+}
+
+func (p *workflowToolsCaptureProvider) Chat(
+	_ context.Context,
+	_ []providers.Message,
+	tools []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	call := len(p.toolCounts)
+	p.toolCounts = append(p.toolCounts, len(tools))
+	response := "classified"
+	if call < len(p.responses) {
+		response = p.responses[call]
+	}
+	p.mu.Unlock()
+	return &providers.LLMResponse{Content: response}, nil
+}
+
+func (p *workflowToolsCaptureProvider) GetDefaultModel() string {
+	return "mock-model"
+}
+
+func (p *workflowToolsCaptureProvider) ToolCounts() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]int(nil), p.toolCounts...)
 }
 
 func (p workflowManagedTestProvider) Chat(

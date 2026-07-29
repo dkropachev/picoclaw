@@ -289,7 +289,7 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 			AllowInterimPicoPublish: false,
 			SuppressToolFeedback:    true,
 			NoHistory:               noHistory || noHistoryOverride,
-			DisableTools:            runOptions.NoTools,
+			DisableTools:            workflowAgentToolsDisabled(req.Tools) || runOptions.NoTools,
 			DisablePromptCache:      disablePromptCache,
 		})
 	}
@@ -312,27 +312,31 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 			runOnce,
 		)
 	}
-	response, err := runOnce(message, false, workflowAgentRunOptions{})
+	requestedRunOptions := workflowAgentRunOptions{
+		NoTools: workflowAgentToolsDisabled(req.Tools),
+	}
+	response, err := runOnce(message, false, requestedRunOptions)
 	if err != nil {
 		return nil, err
 	}
-	outputs := map[string]any{
-		"text":       response,
-		"agent_id":   agentID,
-		"session":    sessionKey,
-		"history":    historyMode,
-		"cache":      workflowCacheMode(req.Cache),
-		"cache_key":  promptCacheKey,
-		"message_id": strings.TrimSpace(req.MessageID),
-		"managed":    workflowManagedMetadata(req, agent),
-	}
+	outputs := workflowAgentBaseOutputs(
+		response,
+		agentID,
+		sessionKey,
+		historyMode,
+		req.Cache,
+		promptCacheKey,
+		req.MessageID,
+		req.Tools,
+	)
+	outputs["managed"] = workflowManagedMetadata(req, agent)
 	if req.Output != nil && req.Output.Enabled() {
 		structured := workflows.ValidateAgentStructuredOutput(response, req.Output)
 		repairs := 0
 		for !structured.Valid && repairs < req.Output.RepairAttempts {
 			repairs++
 			repairMessage := workflowStructuredRepairMessage(response, structured.Error, req.Output)
-			repaired, repairErr := runOnce(repairMessage, true, workflowAgentRunOptions{})
+			repaired, repairErr := runOnce(repairMessage, true, requestedRunOptions)
 			if repairErr != nil {
 				outputs["structured_valid"] = false
 				outputs["structured_error"] = repairErr.Error()
@@ -392,7 +396,7 @@ func workflowRunStructuredAgentWithOptions(
 }
 
 func workflowAgentBaseOutputs(
-	text, agentID, sessionKey, historyMode, cacheMode, promptCacheKey, messageID string,
+	text, agentID, sessionKey, historyMode, cacheMode, promptCacheKey, messageID, toolsMode string,
 ) map[string]any {
 	return map[string]any{
 		"text":       text,
@@ -402,7 +406,19 @@ func workflowAgentBaseOutputs(
 		"cache":      workflowCacheMode(cacheMode),
 		"cache_key":  promptCacheKey,
 		"message_id": strings.TrimSpace(messageID),
+		"tools":      workflowAgentToolsMode(toolsMode),
 	}
+}
+
+func workflowAgentToolsMode(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), workflows.AgentToolsNone) {
+		return workflows.AgentToolsNone
+	}
+	return workflows.AgentToolsInherit
+}
+
+func workflowAgentToolsDisabled(mode string) bool {
+	return workflowAgentToolsMode(mode) == workflows.AgentToolsNone
 }
 
 func workflowAgentMessage(req workflows.AgentRequest) string {

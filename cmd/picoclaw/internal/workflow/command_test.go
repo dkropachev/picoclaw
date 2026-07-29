@@ -27,6 +27,19 @@ func TestNewWorkflowCommandIncludesCompatibilityCommands(t *testing.T) {
 }
 
 func TestInstallWorkflowCommandInstallsCodeReviewWorkflow(t *testing.T) {
+	testInstallWorkflowCommand(t, "code-review", "workflows/code-review.yml")
+}
+
+func TestInstallWorkflowCommandInstallsGitHubIssueTriageWorkflow(t *testing.T) {
+	testInstallWorkflowCommand(
+		t,
+		"github-issue-triage",
+		"workflows/github-issue-triage.yml",
+	)
+}
+
+func testInstallWorkflowCommand(t *testing.T, template string, ref string) {
+	t.Helper()
 	workspace := t.TempDir()
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = workspace
@@ -39,26 +52,41 @@ func TestInstallWorkflowCommandInstallsCodeReviewWorkflow(t *testing.T) {
 	cmd := NewWorkflowCommand()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
-	cmd.SetArgs([]string{"install", "code-review"})
+	cmd.SetArgs([]string{"install", template})
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("workflow install command failed: %v\n%s", err, out.String())
 	}
-	if !strings.Contains(out.String(), `"ref": "workflows/code-review.yml"`) {
-		t.Fatalf("install output = %s, want code-review ref", out.String())
+	if !strings.Contains(out.String(), `"ref": "`+ref+`"`) {
+		t.Fatalf("install output = %s, want ref %q", out.String(), ref)
 	}
-	if _, err := os.Stat(filepath.Join(workspace, "workflows", "code-review.yml")); err != nil {
-		t.Fatalf("installed code-review workflow stat error = %v", err)
+	if _, err := os.Stat(filepath.Join(workspace, filepath.FromSlash(ref))); err != nil {
+		t.Fatalf("installed workflow %q stat error = %v", ref, err)
 	}
 
 	validate := NewWorkflowCommand()
 	var validateOut bytes.Buffer
 	validate.SetOut(&validateOut)
-	validate.SetArgs([]string{"validate", "workflows/code-review.yml"})
+	validate.SetArgs([]string{"validate", ref})
 	if err := validate.ExecuteContext(context.Background()); err != nil {
 		t.Fatalf("workflow validate command failed: %v\n%s", err, validateOut.String())
 	}
 	if !strings.Contains(validateOut.String(), `"valid": true`) {
 		t.Fatalf("validate output = %s, want valid", validateOut.String())
+	}
+}
+
+func TestInstallWorkflowCommandHelpListsAvailableTemplates(t *testing.T) {
+	cmd := NewWorkflowCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"install", "--help"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatalf("workflow install --help failed: %v\n%s", err, out.String())
+	}
+	for _, template := range []string{"code-review", "github-issue-triage"} {
+		if !strings.Contains(out.String(), template) {
+			t.Fatalf("install help = %q, missing template %q", out.String(), template)
+		}
 	}
 }
 

@@ -543,6 +543,12 @@ func validateAgentStepOptions(path string, with map[string]any) ValidationErrors
 	if value, ok := stringOption(with, "session"); ok && !validRunSession(value) {
 		errs = append(errs, ValidationError{Path: path + ".session", Message: "unsupported session context"})
 	}
+	if raw, exists := with["tools"]; exists {
+		value, ok := raw.(string)
+		if !ok || !validAgentToolsMode(strings.TrimSpace(value)) {
+			errs = append(errs, ValidationError{Path: path + ".tools", Message: "unsupported tools mode"})
+		}
+	}
 	return errs
 }
 
@@ -576,4 +582,8 @@ func validCacheMode(value string) bool {
 	default:
 		return false
 	}
+}
+
+func validAgentToolsMode(value string) bool {
+	return value == AgentToolsInherit || value == AgentToolsNone
 }

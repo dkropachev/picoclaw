@@ -34,6 +34,7 @@ with context, limits, filtering, and error normalization.
 | `FR-TOOL-010` | SHOULD | The `/agent/tools` page stores the selected Tool Library, Web Search, Thread Policy, or Adaptation tab in the route search params so tab views can be linked, refreshed, and restored through browser history. | Tool configuration work often spans multiple views, and URL-addressable tabs make navigation predictable. |
 | `FR-TOOL-011` | MUST | Before `spawn` launches background subturn work, an AgentLoop-backed spawner synchronously retains the caller's runtime generation and transfers that ownership to the goroutine through completion and callback delivery. Failure to retain returns a tool error without launching work. | A parent turn may finish immediately after spawn acknowledgement; reload must still see and drain the admitted child before closing its provider. |
 | `FR-TOOL-012` | MUST | Tool execution context carries the active turn's opaque transient-UX identity. A cloned subturn retains that identity, and `message` propagates it only to a delivery targeting the same channel and chat as the tool context. Same-turn tool and stream output uses the additive turn-scoped delivery interfaces when available, with source-compatible legacy fallback, so stale output cannot consume a newer turn's typing, reaction, placeholder, or stream-finalization state. | Tool and subturn output can overlap later turns in the same chat; exact ownership prevents delayed cleanup from corrupting newer user-visible UX without leaking a chat-local identity to another destination. |
+| `FR-TOOL-013` | MUST | Tool argument validation accepts finite lossless `json.Number` values for JSON Schema `number` fields and accepts them for `integer` fields only when their exact decimal value is integral. Exponent handling is bounded by the input length and never allocates or computes an exponent-sized value. | Durable event payloads preserve JSON numbers without `float64` precision loss, while untrusted numeric text must not cause precision drift or resource amplification during workflow tool calls. |
 
 ## Data And State Model
 
@@ -44,7 +45,9 @@ values, profile-specific tool adaptation overrides in `tools.adaptation.profile_
 and the runtime-learned tool adaptation state file at
 `$PICOCLAW_HOME/tool_adaptation_state.json`. Per-execution context may also
 carry an opaque process-local turn UX identity used only to bind same-chat
-delivery and cleanup to its originating turn.
+delivery and cleanup to its originating turn. Arguments decoded from durable
+JSON may retain numeric values as `json.Number` through schema validation and
+tool execution.
 
 ## Surface Ownership
 
@@ -118,12 +121,16 @@ Owns: TOOL write_file
 | Frontend | Tool library, adaptation, and web-search configuration pages under `web/frontend/src/components/agent/tools/**` | Browser tool management follows shared frontend API, accessibility, formatting, and route smoke-test rules while preserving tool enablement and adaptation semantics. | `FR-TOOL-001`, `FR-TOOL-004`, `FR-TOOL-009` |
 | Tool | `spawn` with optional asynchronous context preparation | Retain AgentLoop runtime ownership synchronously before background goroutine launch, then release after subturn and callback completion. | `FR-TOOL-011` |
 | Go context | `WithToolTurnUXContext`, `ToolTurnUXID`, `message` delivery callback | Preserve the active turn identity through tool and cloned-subturn execution, but copy it to outbound delivery only for the exact originating channel/chat. | `FR-TOOL-012` |
+| Tool validation | JSON Schema `number` and `integer` arguments | Validate finite `float64` values and lossless `json.Number` values, including exact integrality without exponent expansion. | `FR-TOOL-013` |
 
 ## Algorithms And Ordering
 
 1. Build the registry from config, registering only enabled tools and preserving discovery tools where allowed.
 2. Convert registry definitions to provider-specific tool schemas.
-3. On execution, inject context, validate args, enforce security constraints, then call the tool.
+3. On execution, inject context, validate args, enforce security constraints,
+   then call the tool. Numeric validation preserves `json.Number`; integer
+   checks compare decimal scale and trailing zeroes with exponent parsing
+   saturated to a bound derived from the input length.
 4. Recover panics and nil results into normalized tool errors.
 5. Apply sensitive-data filtering before returning model-visible content.
 6. Resolve the tool adaptation decision from `tools.adaptation`, provider, and model. Apply a matching canonical provider/model profile override before global auto-resolution; omitted override policy fields inherit the global setting. When the visible surface is `auto`, prefer a persisted learned surface with successful tool outcomes for that profile, otherwise select the best-known provider/model heuristic before the session starts, then pin that resolved surface for the session. Account routers own no model profile: router-backed sessions resolve their initial adaptation identity from the first concrete upstream account, and each turn-scoped model override or fallback attempt derives tool definitions from its actual concrete provider/model profile.
@@ -170,6 +177,9 @@ same-chat consumption.
   parent turn returns.
 - Cross-chat `message` sends omit the originating turn UX identity, and legacy
   channel-manager or stream implementations retain their pre-scoped behavior.
+- Invalid, fractional integer, and non-finite numeric arguments fail before
+  tool execution. Extremely large positive or negative decimal exponents are
+  classified without constructing exponent-sized integers or powers of ten.
 
 ## Acceptance Evidence
 
@@ -185,6 +195,7 @@ same-chat consumption.
 | `FR-TOOL-010` | [web/frontend/src/routes/agent/tools.tsx](../../web/frontend/src/routes/agent/tools.tsx), [web/frontend/src/components/agent/tools/tools-page.tsx](../../web/frontend/src/components/agent/tools/tools-page.tsx), [web/frontend/src/components/agent/tools/use-tools-page.ts](../../web/frontend/src/components/agent/tools/use-tools-page.ts) |
 | `FR-TOOL-011` | [pkg/agent/runtime_gate_test.go](../../pkg/agent/runtime_gate_test.go), [pkg/tools/spawn.go](../../pkg/tools/spawn.go) |
 | `FR-TOOL-012` | [pkg/tools/integration/message_test.go](../../pkg/tools/integration/message_test.go), [pkg/agent/agent_test.go](../../pkg/agent/agent_test.go), [pkg/agent/agent_turn_ux_test.go](../../pkg/agent/agent_turn_ux_test.go), [pkg/channels/manager_test.go](../../pkg/channels/manager_test.go) |
+| `FR-TOOL-013` | [pkg/tools/validate.go](../../pkg/tools/validate.go), [pkg/tools/validate_test.go](../../pkg/tools/validate_test.go), [pkg/workflows/store_test.go](../../pkg/workflows/store_test.go) |
 
 ## Implementation Anchors
 
@@ -192,5 +203,6 @@ same-chat consumption.
 - [pkg/tools/fs](../../pkg/tools/fs)
 - [pkg/tools/integration/web.go](../../pkg/tools/integration/web.go)
 - [pkg/tools/shared/base.go](../../pkg/tools/shared/base.go)
+- [pkg/tools/validate.go](../../pkg/tools/validate.go)
 - [pkg/tools/integration/message.go](../../pkg/tools/integration/message.go)
 - [pkg/tools/spawn.go](../../pkg/tools/spawn.go)

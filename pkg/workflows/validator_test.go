@@ -105,6 +105,53 @@ jobs:
 	}
 }
 
+func TestValidateAgentToolsMode(t *testing.T) {
+	for _, mode := range []string{AgentToolsInherit, AgentToolsNone} {
+		t.Run(mode, func(t *testing.T) {
+			workflow := parseWorkflow(t, `
+name: Agent tools
+on:
+  manual: {}
+jobs:
+  classify:
+    runs-on: picoclaw
+    steps:
+      - uses: agent/main
+        with:
+          prompt: Classify content.
+          tools: `+mode+`
+`)
+			if err := Validate(workflow); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsUnsupportedAgentToolsMode(t *testing.T) {
+	for _, value := range []string{"all", "true", "null", "${{ inputs.tools }}"} {
+		t.Run(value, func(t *testing.T) {
+			workflow := parseWorkflow(t, `
+name: Invalid agent tools
+on:
+  manual: {}
+jobs:
+  classify:
+    runs-on: picoclaw
+    steps:
+      - uses: agent/main
+        with:
+          prompt: Classify content.
+          tools: `+value+`
+`)
+			err := Validate(workflow)
+			if err == nil || !strings.Contains(err.Error(), "unsupported tools mode") {
+				t.Fatalf("Validate() error = %v, want unsupported tools mode", err)
+			}
+		})
+	}
+}
+
 func TestValidateCommandTriggerContract(t *testing.T) {
 	workflow := parseWorkflow(t, `
 name: Command

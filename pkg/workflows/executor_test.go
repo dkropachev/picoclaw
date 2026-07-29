@@ -425,6 +425,44 @@ jobs:
 	}
 }
 
+func TestExecutorPassesValidatedAgentToolsMode(t *testing.T) {
+	workflow := parseWorkflow(t, `
+name: Agent tool isolation
+on:
+  manual: {}
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - id: inherited
+        uses: agent/main
+        with:
+          prompt: Use the configured agent policy.
+      - id: isolated
+        uses: agent/main
+        with:
+          prompt: Classify untrusted content.
+          tools: none
+`)
+	agents := &fakeAgentRunner{outputs: map[string]any{"text": "ok"}}
+	_, err := (&Executor{WorkspaceDir: t.TempDir(), Agents: agents}).Run(
+		context.Background(),
+		RunRequest{Workflow: workflow, WorkflowRef: "inline"},
+	)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(agents.requests) != 2 {
+		t.Fatalf("agent requests = %d, want 2", len(agents.requests))
+	}
+	if got := agents.requests[0].Tools; got != AgentToolsInherit {
+		t.Fatalf("inherited tools mode = %q, want %q", got, AgentToolsInherit)
+	}
+	if got := agents.requests[1].Tools; got != AgentToolsNone {
+		t.Fatalf("isolated tools mode = %q, want %q", got, AgentToolsNone)
+	}
+}
+
 func TestExecutorRunsReusableWorkflowJob(t *testing.T) {
 	workspace := t.TempDir()
 	writeWorkflowFile(t, workspace, "child.yml", `
