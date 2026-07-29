@@ -44,7 +44,7 @@ type eventAutomationService struct {
 type eventAutomationRuntimeAcquire func(context.Context) (context.Context, func(), error)
 
 type eventRetentionPruner interface {
-	Prune(context.Context, time.Time, int) (int64, error)
+	Prune(ctx context.Context, before time.Time, limit int) (int64, error)
 }
 
 func setupEventAutomationService(
