@@ -1371,14 +1371,17 @@ func TestEventWorkflowDispatcherReconcileRenewalRetriesBeforeMutation(t *testing
 
 func TestEventWorkflowDispatcherCancelsRunWhenLeaseRenewalFails(t *testing.T) {
 	fixture := newEventDispatchFixture(t, "dispatcher-heartbeat")
+	executorStarted := make(chan struct{})
 	renewed := make(chan struct{})
 	inbox := &renewFailureEventInbox{
-		Store:   fixture.store,
-		renewed: renewed,
+		Store:     fixture.store,
+		failAfter: executorStarted,
+		renewed:   renewed,
 	}
 	canceled := make(chan error, 1)
 	executor := &recordingEventExecutor{
 		run: func(ctx context.Context, req RunRequest) (*RunResult, error) {
+			close(executorStarted)
 			<-ctx.Done()
 			canceled <- ctx.Err()
 			return &RunResult{
@@ -1397,6 +1400,11 @@ func TestEventWorkflowDispatcherCancelsRunWhenLeaseRenewalFails(t *testing.T) {
 		_, err := dispatcher.ProcessOne(context.Background())
 		processDone <- err
 	}()
+	select {
+	case <-executorStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatcher did not start the executor")
+	}
 	select {
 	case <-renewed:
 	case <-time.After(2 * time.Second):
@@ -1682,10 +1690,9 @@ func (e *recordingEventExecutor) SetRun(
 
 type renewFailureEventInbox struct {
 	*eventing.Store
-	once    sync.Once
-	mu      sync.Mutex
-	calls   int
-	renewed chan struct{}
+	once      sync.Once
+	failAfter <-chan struct{}
+	renewed   chan struct{}
 }
 
 type alwaysFailRenewEventInbox struct {
@@ -1730,17 +1737,15 @@ func (i *renewFailureEventInbox) RenewDispatchLease(
 	leaseToken string,
 	lease time.Duration,
 ) error {
-	i.mu.Lock()
-	i.calls++
-	call := i.calls
-	i.mu.Unlock()
-	if call <= 2 {
+	select {
+	case <-i.failAfter:
+		i.once.Do(func() {
+			close(i.renewed)
+		})
+		return errEventTestRenewLease
+	default:
 		return i.Store.RenewDispatchLease(ctx, id, leaseToken, lease)
 	}
-	i.once.Do(func() {
-		close(i.renewed)
-	})
-	return errEventTestRenewLease
 }
 
 type advanceOnLinkEventInbox struct {
