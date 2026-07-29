@@ -3077,7 +3077,9 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
     .locator("#workflow-test-delivery")
     .fill('{"channel":"telegram","chat_id":"support"}')
   await page.getByRole("button", { name: "Test Draft" }).click()
-  await expect(page.getByText("wr_draft_failed")).toBeVisible()
+  await expect(
+    page.getByText("wr_draft_failed", { exact: true }).first(),
+  ).toBeVisible()
   await expect(page.getByText("agent step failed").first()).toBeVisible()
   await expect(page.getByRole("button", { name: "Fix With AI" })).toBeVisible()
   await page.getByRole("button", { name: "Fix With AI" }).click()
