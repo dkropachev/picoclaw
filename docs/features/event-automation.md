@@ -21,9 +21,10 @@ Chat email channel instances into durable `message.received` admission. It also
 offers an explicitly installed GitHub issue-triage workflow that keeps its AI
 classifier separate from the declared GitHub comment action. Authenticated
 operator API and CLI surfaces inspect events and dispatches and create explicit
-additive replays through the exact live gateway store generation. The event UI
-remains a later stage. Durable inputs
-remain separate from the process-local
+additive replays through the exact live gateway store generation. An
+authenticated responsive dashboard provides the same bounded inspection,
+explicit payload reveal, and deliberate replay operations without opening
+storage independently. Durable inputs remain separate from the process-local
 [`pkg/events`](../../pkg/events) observability bus: runtime events are
 best-effort in-process signals, while external automation events and dispatch
 state survive restart.
@@ -99,6 +100,7 @@ state survive restart.
 
 | `FR-EVENT-AUTOMATION-032` | MUST | An authenticated launcher user or local CLI operator requests the live event list, one event, its payload, or the dispatch list while ingress is enabled. | The launcher proxies through the gateway's PID bearer credential and the CLI calls that protected runtime endpoint directly. Lists support exact source/connector/type/status filters and filter-bound, versioned newest-first keyset cursors with a default of 50 and maximum of 100. Dedicated event and dispatch projections and their metadata store queries omit every owner/lease token; event metadata additionally omits deduplication and payload blobs and derives only `length(payload_json)`. Ordinary event responses omit payload, while the explicit payload endpoint returns the already-redacted JSON bytes exactly and all responses prohibit caching. | Read operations mutate no event, routing, dispatch, or workflow state and remain admitted to one live operator-controller generation until the store call and response projection complete. | Missing/invalid filters, IDs, cursors, or limits fail with `400`; missing events return `404`; absent, starting, reloading, stale, or stopped gateway state returns retryable `503`. Disabled ingress registers no operator route and opens no store. Reload rejects new operations and drains admitted calls before closing the old store; delayed cleanup cannot deactivate a replacement. | Operators need inspectable durable state without opening SQLite beside a reloading gateway, materializing a page of payload blobs, exposing worker fencing credentials, or losing exact JSON numbers in browser parsing. |
 | `FR-EVENT-AUTOMATION-033` | MUST | An authenticated operator explicitly requests replay of one existing event through the live gateway, and CLI callers additionally pass `--yes`. | Exactly one accepted `POST` with an empty JSON object creates a fresh pending event linked by `replay_of`, returns `201` and its new location, and leaves the source and prior dispatches unchanged. The launcher enforces same-origin browser metadata before proxying; neither client automatically retries a replay. | Replay uses the active generation's ordinary redacting store insertion and therefore creates new routing state that current deterministic workflow definitions process normally. | Missing events return `404`; malformed media type/body/query/ID or cross-site launcher requests fail without mutation. After replay dispatch, storage, cancellation, timeout, or transport failure reports a fixed unknown outcome without `Retry-After`; the operator must inspect replay lineage before deciding whether to issue another explicit request. Every replay can repeat workflows and external effects. | Replay must be deliberate, auditable, and additive rather than a hidden dispatch reset or an unsafe retry abstraction. |
+| `FR-EVENT-AUTOMATION-034` | MUST | An authenticated dashboard user opens the Events route, changes exact event filters, selects an event, requests more results, explicitly reveals its payload, or opens replay confirmation. | The responsive master/detail surface keeps normalized filters and selection in the URL, keeps opaque cursors only in filter-bound query state, lists newest events, shows token-free event and dispatch projections, and loads exact payload text only after an explicit action. Replay presents an unmistakable duplicate-effects warning and sends one non-retried empty-object request only after confirmation. | Inspection and filter/selection changes mutate no durable state. Payload text is discarded when selection changes. A successful replay creates the additive event defined by `FR-EVENT-AUTOMATION-033`, invalidates affected reads, and selects the returned event. | Loading, empty, unavailable, malformed-response, not-found, and replay-failure states remain operable on desktop and narrow mobile widths. Payload never enters route state, browser persistence, logs, toast text, clipboard state, or HTML interpretation; cancel sends no request, failure keeps confirmation available, and ambiguous replay failure is never retried automatically. | Operators need a safe, accessible control plane that preserves the API's least-exposure and replay boundaries instead of turning inspection into hidden data retention or side effects. |
 
 ## Data And State Model
 
@@ -400,6 +402,9 @@ Owns: CODE pkg/gateway/event_operator*
 Owns: CODE cmd/picoclaw/internal/events/**
 Owns: CODE web/backend/api/config.go
 Owns: CODE web/backend/api/events.go
+Owns: CODE web/frontend/src/api/events.ts
+Owns: CODE web/frontend/src/components/events/**
+Owns: CODE web/frontend/src/routes/events.tsx
 Owns: CONFIG.events
 Owns: CONFIG.events.ingress*
 Owns: CONFIG.events.ingress.webhooks*
@@ -422,6 +427,9 @@ Owns: TEST pkg/gateway/event_operator_test.go
 Owns: TEST cmd/picoclaw/internal/events/*
 Owns: TEST web/backend/api/config_event_channel_test.go
 Owns: TEST web/backend/api/events_test.go
+Owns: TEST web/frontend/src/api/events.test.ts
+Owns: TEST web/frontend/src/components/events/*
+Owns: TEST web/frontend/tests/ui-smoke.spec.ts
 
 ## Auxiliary Interfaces
 
@@ -435,6 +443,7 @@ Owns: TEST web/backend/api/events_test.go
 | HTTP | `POST /webhooks/events/{connector}` | Strict, bounded format-selected Standard Webhooks or native GitHub authentication and normalization with durable `202`/duplicate `200` acknowledgement and retry-safe error statuses. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-023`, `FR-EVENT-AUTOMATION-030` |
 | HTTP | `/runtime/eventing/*`, launcher `/api/events*` proxy | PID-bearer-protected, generation-fenced event/dispatch inspection, exact opt-in payload text, and explicit additive replay; the launcher substitutes its authenticated session boundary without forwarding browser credentials. | `FR-EVENT-AUTOMATION-032`, `FR-EVENT-AUTOMATION-033` |
 | CLI | `picoclaw events list|get|payload|dispatches|replay` | Call the live protected gateway using the local PID credential, print bounded projected JSON, emit an explicitly requested payload's validated object bytes exactly, and require `--yes` before a non-retried replay. | `FR-EVENT-AUTOMATION-032`, `FR-EVENT-AUTOMATION-033` |
+| Frontend | authenticated `/events` dashboard route | Responsive filter-bound event inspection, selected-event dispatch history, explicit exact-text payload reveal, and warned non-retried replay through launcher-owned authenticated endpoints. | `FR-EVENT-AUTOMATION-034` |
 | Go API | `bus.InboundAdmission`, `MessageBus.PublishInboundWithPreparation` | Synchronous detached channel-origin admission before queue and conditional turn UX; internal messages and unconfigured channels preserve direct queueing. | `FR-EVENT-AUTOMATION-027` |
 | Go API | `pkg/eventing/channelmessage.Backend`, `Controller` | Bounded safe message normalization, hashed deduplication, synchronous store insertion, mirror/event-only decision, and exact prepared-generation activation/drain. | `FR-EVENT-AUTOMATION-026`, `FR-EVENT-AUTOMATION-027`, `FR-EVENT-AUTOMATION-029` |
 | Runtime | Delta Chat ordered provider queue, notification events, and acknowledgement loop | Drain `get_next_msgs` on startup and provider wake events, correlate full-download replacement IDs process-locally, retry strictly in order before cursor advancement, and expose only safe event metadata. | `FR-EVENT-AUTOMATION-028` |
@@ -634,6 +643,14 @@ Owns: TEST web/backend/api/events_test.go
     live-store call that returns the new additive event and location. Once the
     replay is dispatched, a storage, cancellation, timeout, or transport error
     returns a fixed unknown-outcome response without retry guidance.
+27. The dashboard binds normalized list filters and the selected event ID to
+    route search state, while keeping opaque pagination cursors inside matching
+    query keys. Selecting an event loads only its payload-free detail and
+    dispatch pages. Mount the no-retry, zero-retention payload query only after
+    explicit reveal and render the returned bytes as escaped text. Replay opens
+    a duplicate-effects warning, sends exactly one empty-object mutation after
+    confirmation, and on success refreshes affected projections and selects the
+    returned event.
 
 ## Cross-Feature Behavior
 
@@ -659,7 +676,7 @@ durable channel-message adapter. Delta Chat additionally owns notification-
 driven ordered fetch, process-local full-download replacement correlation, and
 retry-before-seen email acknowledgement. The operator API/CLI consumes the live
 gateway-owned store without redefining its deduplication, leasing, redaction,
-replay, or retention semantics; the later dashboard consumes only the
+replay, or retention semantics; the dashboard consumes only the
 launcher-authenticated projection.
 
 [Security and isolation](security-isolation.md) owns secure persistence of each
@@ -783,7 +800,7 @@ existing workflow agent/tool policy.
   separate dependency configuration. Its event marker aids audit/search but is
   not a GitHub idempotency key, so an explicit workflow retry, event replay, or
   provider redelivery after retention pruning can duplicate a comment. Other
-  GitHub actions and frontend routes remain separate later stages.
+  GitHub actions remain separate later stages.
 - Operator list/detail projections cannot serialize deduplication or lease
   tokens because those fields are absent from their DTOs. Payload is fetched
   only through its no-store exact-text route. An inactive or draining
@@ -792,6 +809,9 @@ existing workflow agent/tool policy.
   or post-dispatch error may have created a new pending event, so it carries no
   `Retry-After` hint and the operator must inspect replay lineage before deciding
   whether to issue another explicit request.
+- Dashboard list/detail selection never fetches payload. Exact payload text is
+  held only by the explicitly mounted query and is discarded on deselection;
+  it is never parsed into JavaScript numbers or included in route state.
 
 GitHub protocol references: [validating webhook
 deliveries](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries),
@@ -824,6 +844,7 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 | `FR-EVENT-AUTOMATION-030` | [pkg/config/events_webhook_format_test.go](../../pkg/config/events_webhook_format_test.go), [pkg/eventing/webhook/github_test.go](../../pkg/eventing/webhook/github_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go) |
 | `FR-EVENT-AUTOMATION-031` | [pkg/workflows/templates.go](../../pkg/workflows/templates.go), [pkg/workflows/templates_test.go](../../pkg/workflows/templates_test.go), [pkg/workflows/agent_output_test.go](../../pkg/workflows/agent_output_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [cmd/picoclaw/internal/workflow/command_test.go](../../cmd/picoclaw/internal/workflow/command_test.go) |
 | `FR-EVENT-AUTOMATION-032`, `FR-EVENT-AUTOMATION-033` | [pkg/eventing/operator](../../pkg/eventing/operator), [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go), [pkg/gateway/event_operator_test.go](../../pkg/gateway/event_operator_test.go), [web/backend/api/events_test.go](../../web/backend/api/events_test.go), [cmd/picoclaw/internal/events](../../cmd/picoclaw/internal/events) |
+| `FR-EVENT-AUTOMATION-034` | [web/frontend/src/api/events.test.ts](../../web/frontend/src/api/events.test.ts), [web/frontend/src/components/events](../../web/frontend/src/components/events), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 
 ## Implementation Anchors
 
@@ -844,6 +865,9 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 - [pkg/eventing/webhook](../../pkg/eventing/webhook)
 - [pkg/eventing/channelmessage](../../pkg/eventing/channelmessage)
 - [pkg/eventing/operator](../../pkg/eventing/operator)
+- [web/frontend/src/api/events.ts](../../web/frontend/src/api/events.ts)
+- [web/frontend/src/components/events](../../web/frontend/src/components/events)
+- [web/frontend/src/routes/events.tsx](../../web/frontend/src/routes/events.tsx)
 - [pkg/bus/bus.go](../../pkg/bus/bus.go)
 - [pkg/channels/deltachat/handler.go](../../pkg/channels/deltachat/handler.go)
 - [web/backend/api/config.go](../../web/backend/api/config.go)

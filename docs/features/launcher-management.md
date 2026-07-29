@@ -168,10 +168,11 @@ shared authenticated dashboard layout and routing shell components.
 Workflow HTTP endpoints and dashboard routes are exposed through the launcher
 router and shared shell, while workflow definition, run, graph, cancel, retry,
 and event semantics remain owned by the workflows feature.
-Event operator proxy endpoints are likewise registered through the shared
-launcher router and inherit dashboard authentication, while event inspection,
-payload, replay, and live-gateway authorization semantics remain owned by event
-automation and security isolation.
+Event operator proxy endpoints and the Events dashboard route are likewise
+registered through the shared launcher router and navigation shell and inherit
+dashboard authentication. Event inspection, payload, replay, and live-gateway
+authorization semantics remain owned by event automation and security
+isolation.
 Git workspace config fields, API routes, sidebar navigation, and dashboard entry
 points are exposed through shared launcher surfaces, while workspace allocation,
 inventory, cleanup, drop, and retention semantics are owned by the git
@@ -221,7 +222,7 @@ workspaces feature.
 | `FR-LAUNCHER-004`                    | [web/backend/api/oauth_test.go](../../web/backend/api/oauth_test.go), [web/backend/api/codex_account_limits_test.go](../../web/backend/api/codex_account_limits_test.go), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [cmd/picoclaw/internal/auth](../../cmd/picoclaw/internal/auth)                                                                                                                                                                                                         |
 | `FR-LAUNCHER-005`, `FR-LAUNCHER-006` | [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [web/backend/api/startup_test.go](../../web/backend/api/startup_test.go), [web/backend/api/version_test.go](../../web/backend/api/version_test.go)                                                                                                                                                                                                                                                                                                       |
 | `FR-LAUNCHER-008`                    | [web/backend/api/models_test.go](../../web/backend/api/models_test.go)                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `FR-LAUNCHER-009`                    | [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/scripts/lint-ui-rules.mjs](../../web/frontend/scripts/lint-ui-rules.mjs)                                                                                                                                                                                                                                                                                                                                                           |
+| `FR-LAUNCHER-009`                    | [web/frontend/src/components/app-sidebar.test.tsx](../../web/frontend/src/components/app-sidebar.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/scripts/lint-ui-rules.mjs](../../web/frontend/scripts/lint-ui-rules.mjs)                                                                                                                                                                                                                                                     |
 
 ## Implementation Anchors
 

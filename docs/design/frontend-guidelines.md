@@ -24,6 +24,7 @@ behavior:
 | Tool configuration and tool library pages | `docs/features/tool-execution.md` |
 | Session logs and transcript history pages | `docs/features/session-memory.md` |
 | Model, config, OAuth, auth, startup, update, and app shell management | `docs/features/launcher-management.md` |
+| Durable event inspection, payload reveal, dispatch history, and replay | `docs/features/event-automation.md` |
 | Skill and hub pages | `docs/features/skills.md` |
 | Thread search, cards, policy, and open-thread pages | `docs/features/threads.md` |
 
