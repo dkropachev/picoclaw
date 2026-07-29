@@ -1,5 +1,6 @@
 import { IconChevronRight } from "@tabler/icons-react"
 import {
+  IconBellRinging,
   IconChevronsDown,
   IconChevronsUp,
   IconDatabase,
@@ -69,6 +70,13 @@ const logsNavItem: NavItem = {
   title: "navigation.logs",
   url: "/logs",
   icon: IconListDetails,
+  translateTitle: true,
+}
+
+const eventsNavItem: NavItem = {
+  title: "navigation.events",
+  url: "/events",
+  icon: IconBellRinging,
   translateTitle: true,
 }
 
@@ -272,7 +280,10 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                   {renderNavItem(accountsNavItem)}
                 </SidebarMenu>
                 {serviceSections.map(renderServiceSection)}
-                <SidebarMenu>{renderNavItem(logsNavItem)}</SidebarMenu>
+                <SidebarMenu>
+                  {renderNavItem(eventsNavItem)}
+                  {renderNavItem(logsNavItem)}
+                </SidebarMenu>
               </SidebarGroupContent>
             </CollapsibleContent>
           </SidebarGroup>

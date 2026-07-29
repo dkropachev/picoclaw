@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import { Provider } from "jotai"
-import type { ReactNode } from "react"
+import type { AnchorHTMLAttributes, ReactNode } from "react"
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { AppSidebar } from "@/components/app-sidebar"
@@ -9,8 +10,17 @@ import { SidebarProvider } from "@/components/ui/sidebar"
 let pathname = "/threads/search"
 
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ children, to }: { children: ReactNode; to: string }) => (
-    <a href={to}>{children}</a>
+  Link: ({
+    children,
+    to,
+    ...props
+  }: {
+    children: ReactNode
+    to: string
+  } & AnchorHTMLAttributes<HTMLAnchorElement>) => (
+    <a {...props} href={to}>
+      {children}
+    </a>
   ),
   useRouterState: () => ({
     location: {
@@ -83,5 +93,22 @@ describe("AppSidebar", () => {
       "href",
       "/threads/search",
     )
+  })
+
+  it("links Events from Services and marks the route active", async () => {
+    pathname = "/events"
+    const user = userEvent.setup()
+
+    renderSidebar()
+    await user.click(screen.getByRole("button", { name: "Services" }))
+
+    expect(screen.getByRole("link", { name: "Events" })).toHaveAttribute(
+      "href",
+      "/events",
+    )
+    const activeItem = screen
+      .getByRole("link", { name: "Events" })
+      .closest('[data-sidebar="menu-button"]')
+    expect(activeItem).toHaveAttribute("data-active", "true")
   })
 })

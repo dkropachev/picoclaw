@@ -5,6 +5,7 @@ const smokeRoutes = [
   "/",
   "/models",
   "/accounts",
+  "/events",
   "/logs",
   "/agent/git-workspaces",
   "/agent/tools",
@@ -183,6 +184,56 @@ const gitWorkspaceResponse = {
     },
   ],
 }
+
+const eventResponse = {
+  id: "ev_0123456789abcdef0123456789abcdef",
+  source: "github",
+  connector: "triage",
+  type: "issues.opened",
+  actor: {
+    id: "octocat",
+    type: "user",
+    display_name: "The Octocat",
+  },
+  subject: {
+    id: "42",
+    type: "issue",
+    name: "Printer is offline",
+    url: "https://example.test/issues/42",
+  },
+  occurred_at: "2026-07-16T11:59:59Z",
+  received_at: "2026-07-16T12:00:00Z",
+  attributes: {
+    body_authenticated: "true",
+    signature_algorithm: "hmac-sha256",
+  },
+  payload_bytes: 84,
+  routing: {
+    status: "succeeded",
+    available_at: "2026-07-16T12:00:00Z",
+    attempts: 1,
+    updated_at: "2026-07-16T12:00:01Z",
+  },
+}
+
+const eventDispatchResponse = {
+  id: "dsp_smoke",
+  event_id: eventResponse.id,
+  workflow_ref: "workflows/github-issue-triage.yml",
+  run_id: "wr_smoke",
+  status: "succeeded",
+  available_at: "2026-07-16T12:00:00Z",
+  attempts: 1,
+  created_at: "2026-07-16T12:00:00Z",
+  updated_at: "2026-07-16T12:00:02Z",
+  linked_at: "2026-07-16T12:00:01Z",
+  finished_at: "2026-07-16T12:00:02Z",
+}
+
+const eventPayloadText =
+  '{"issue":42,"estimate":9007199254740993,"title":"Printer is offline"}'
+
+const replayEventID = "ev_fedcba9876543210fedcba9876543210"
 
 const webSearchConfigResponse = {
   provider: "openai",
@@ -929,6 +980,24 @@ async function mockLauncherApis(
               workflows: workflowDefinitions,
               errors: [],
             })
+          case `/api/events/${eventResponse.id}/replay`:
+            expect(request.postData()).toBe("{}")
+            return json(
+              route,
+              {
+                event: {
+                  ...eventResponse,
+                  id: replayEventID,
+                  replay_of: eventResponse.id,
+                  routing: {
+                    ...eventResponse.routing,
+                    status: "pending",
+                    attempts: 0,
+                  },
+                },
+              },
+              201,
+            )
           default:
             return json(route, { status: "ok" })
         }
@@ -997,6 +1066,18 @@ async function mockLauncherApis(
           return json(route, toolsResponse)
         case "/api/git-workspaces":
           return json(route, gitWorkspaceResponse)
+        case "/api/events":
+          return json(route, { events: [eventResponse] })
+        case "/api/events/dispatches":
+          return json(route, { dispatches: [eventDispatchResponse] })
+        case `/api/events/${eventResponse.id}`:
+          return json(route, eventResponse)
+        case `/api/events/${eventResponse.id}/payload`:
+          return route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: eventPayloadText,
+          })
         case "/api/workflows":
           return json(route, {
             workflows: options.nullableWorkflowPayloads
@@ -1403,6 +1484,58 @@ for (const routePath of smokeRoutes) {
     expect(errors).toEqual([])
   })
 }
+
+test("events payload stays opt-in and replay remains deliberate", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  let payloadRequests = 0
+  let replayRequests = 0
+
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname
+    if (path === `/api/events/${eventResponse.id}/payload`) {
+      payloadRequests += 1
+    }
+    if (path === `/api/events/${eventResponse.id}/replay`) {
+      replayRequests += 1
+    }
+  })
+
+  await gotoMockedRoute(page, "/events")
+  await expect(
+    page.getByRole("button", { name: /issues\.opened.*github\/triage/ }),
+  ).toBeVisible()
+  await expect(page.getByRole("button", { name: "Show payload" })).toBeVisible()
+  expect(payloadRequests).toBe(0)
+
+  await page.getByRole("button", { name: "Show payload" }).click()
+  await expect(page.locator("pre")).toHaveText(eventPayloadText)
+  expect(payloadRequests).toBe(1)
+
+  await page.getByRole("button", { name: "Replay", exact: true }).click()
+  const dialog = page.getByRole("alertdialog")
+  await expect(dialog).toContainText(
+    "may repeat workflows and external effects",
+  )
+  await dialog.getByRole("button", { name: "Cancel" }).click()
+  await expect(dialog).toBeHidden()
+  expect(replayRequests).toBe(0)
+
+  await page.getByRole("button", { name: "Replay", exact: true }).click()
+  await dialog
+    .getByRole("button", { name: "Replay event", exact: true })
+    .click()
+  await expect.poll(() => replayRequests).toBe(1)
+  await expect(page).toHaveURL(new RegExp(`event=${replayEventID}`))
+  await expect(page.locator("pre")).toHaveCount(0)
+
+  await page.waitForTimeout(100)
+  expect(replayRequests).toBe(1)
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
 
 test("accounts page lists registered accounts and opens onboarding", async ({
   page,
