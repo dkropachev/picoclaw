@@ -67,20 +67,29 @@ export function WorkflowDependencyReadinessPanel({
   dependencyState,
   dependencyReport,
   onRetry,
+  ariaLabel = "Published workflow dependency readiness",
+  heading = "Dependency readiness",
+  idleMessage = "Select a published workflow to inspect its dependencies.",
+  loadingMessage = "Checking dependencies for the selected published workflow…",
+  staleMessage = "The dependency result is stale. Waiting for a fresh published workflow check…",
+  unavailableMessage = "Published workflow dependency readiness is unavailable.",
 }: {
   workflowRef: string
   dependencyState: WorkflowDependencyCheckState
   dependencyReport?: WorkflowDependencyCheckResponse
   onRetry: () => void
+  ariaLabel?: string
+  heading?: string
+  idleMessage?: string
+  loadingMessage?: string
+  staleMessage?: string
+  unavailableMessage?: string
 }) {
   return (
-    <section
-      aria-label="Published workflow dependency readiness"
-      className="grid min-w-0 gap-3 p-3"
-    >
+    <section aria-label={ariaLabel} className="grid min-w-0 gap-3 p-3">
       <div className="flex min-w-0 items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="text-sm font-medium">Dependency readiness</h3>
+          <h3 className="text-sm font-medium">{heading}</h3>
           <p className="text-muted-foreground mt-0.5 truncate font-mono text-xs">
             {workflowRef}
           </p>
@@ -94,8 +103,10 @@ export function WorkflowDependencyReadinessPanel({
         state={dependencyState}
         report={dependencyReport}
         context="published"
-        idleMessage="Select a published workflow to inspect its dependencies."
-        unavailableMessage="Published workflow dependency readiness is unavailable."
+        idleMessage={idleMessage}
+        loadingMessage={loadingMessage}
+        staleMessage={staleMessage}
+        unavailableMessage={unavailableMessage}
       />
 
       {dependencyState === "error" ? (
@@ -118,12 +129,16 @@ function DependencyDetails({
   report,
   context = "draft",
   idleMessage = "Complete the target and YAML to check dependencies.",
+  loadingMessage,
+  staleMessage,
   unavailableMessage = "Workflow dependency readiness is unavailable. Edit the draft or refresh to try again.",
 }: {
   state: WorkflowDependencyCheckState
   report?: WorkflowDependencyCheckResponse
   context?: "draft" | "published"
   idleMessage?: string
+  loadingMessage?: string
+  staleMessage?: string
   unavailableMessage?: string
 }) {
   if (state === "idle") {
@@ -132,16 +147,20 @@ function DependencyDetails({
   if (state === "loading") {
     return (
       <ReadinessNotice role="status">
-        {context === "published"
-          ? "Checking dependencies for the selected published workflow…"
-          : "Checking dependencies for the exact current draft…"}
+        {loadingMessage ??
+          (context === "published"
+            ? "Checking dependencies for the selected published workflow…"
+            : "Checking dependencies for the exact current draft…")}
       </ReadinessNotice>
     )
   }
   if (state === "stale") {
     return (
       <ReadinessNotice role="status" warning>
-        The dependency result is stale. Waiting for the current draft check…
+        {staleMessage ??
+          (context === "published"
+            ? "The dependency result is stale. Waiting for a fresh published workflow check…"
+            : "The dependency result is stale. Waiting for the current draft check…")}
       </ReadinessNotice>
     )
   }

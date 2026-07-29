@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import { launcherFetch } from "@/api/http"
 import {
   WorkflowAPIError,
+  cancelWorkflowRun,
   checkWorkflowDependencies,
   getWorkflowRun,
   getWorkflowRunEvents,
@@ -18,6 +19,8 @@ import {
   publishWorkflowDevelopment,
   reloadWorkflows,
   renderWorkflowEventTrigger,
+  retryWorkflowRun,
+  runWorkflow,
   testWorkflowDevelopment,
 } from "@/api/workflows"
 
@@ -147,6 +150,132 @@ describe("workflow API normalization", () => {
       jobs: {},
       steps: {},
     })
+  })
+
+  it("submits exact dependency revisions for run and retry", async () => {
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({ run_id: "wr_started", status: "running" }, 202),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ run_id: "wr_retried", status: "running" }, 202),
+      )
+
+    await expect(
+      runWorkflow({
+        ref: "workflows/review.yml",
+        expected_dependency_revision: "opaque:run/revision?exact",
+        inputs: { issue: 42 },
+        async: true,
+      }),
+    ).resolves.toMatchObject({
+      result: { run_id: "wr_started", status: "running" },
+    })
+    await expect(
+      retryWorkflowRun("wr_original", {
+        expected_dependency_revision: "opaque:retry/revision?exact",
+        secrets: { token: "secret" },
+      }),
+    ).resolves.toMatchObject({
+      result: { run_id: "wr_retried", status: "running" },
+    })
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/workflows/run",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          ref: "workflows/review.yml",
+          expected_dependency_revision: "opaque:run/revision?exact",
+          inputs: { issue: 42 },
+          async: true,
+        }),
+      }),
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/workflows/runs/wr_original/retry",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          expected_dependency_revision: "opaque:retry/revision?exact",
+          secrets: { token: "secret" },
+        }),
+      }),
+    )
+  })
+
+  it("preserves launch error status with bounded dependency guidance", async () => {
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({ error: "dependency_revision_mismatch" }, 409),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ error: "dependency_check_unavailable" }, 503),
+      )
+
+    await expect(
+      runWorkflow({
+        ref: "workflows/review.yml",
+        expected_dependency_revision: "stale",
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<WorkflowAPIError>>({
+        status: 409,
+        message:
+          "Workflow dependencies changed. Wait for a fresh readiness check and try again.",
+      }),
+    )
+    await expect(
+      retryWorkflowRun("wr_original", {
+        expected_dependency_revision: "current",
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<WorkflowAPIError>>({
+        status: 503,
+        message: "Workflow dependency readiness is temporarily unavailable.",
+      }),
+    )
+  })
+
+  it("trims and validates explicit cancel reasons before sending", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        id: "wr_running",
+        workflow_ref: "workflows/review.yml",
+        status: "canceled",
+        cancel_reason: "operator intervention",
+        cancel_requested_at: "2026-07-29T12:00:01Z",
+        completed_at: "2026-07-29T12:00:01Z",
+        created_at: "2026-07-29T12:00:00Z",
+        updated_at: "2026-07-29T12:00:01Z",
+      }),
+    )
+
+    await expect(
+      cancelWorkflowRun("wr_running", "  operator intervention  "),
+    ).resolves.toMatchObject({
+      id: "wr_running",
+      status: "canceled",
+      cancel_reason: "operator intervention",
+      child_run_ids: [],
+    })
+    expect(mockedLauncherFetch).toHaveBeenCalledWith(
+      "/api/workflows/runs/wr_running/cancel",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ reason: "operator intervention" }),
+      }),
+    )
+
+    await expect(cancelWorkflowRun("wr_running", " \n ")).rejects.toMatchObject(
+      { status: 400 },
+    )
+    await expect(
+      cancelWorkflowRun("wr_running", ` ${"é".repeat(513)} `),
+    ).rejects.toMatchObject({ status: 400 })
+    expect(mockedLauncherFetch).toHaveBeenCalledTimes(1)
   })
 
   it("keeps exact run lookup status and identity authoritative", async () => {

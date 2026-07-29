@@ -8,9 +8,8 @@ export interface WorkflowsRouteSearch {
 }
 
 const workflowRunIDPattern = /^wr_[A-Za-z0-9_-]+$/
-const eventIDPattern = /^ev_[0-9a-f]{32}$/
 const maximumWorkflowRefBytes = 1024
-const maximumWorkflowRunIDLength = 256
+const maximumWorkflowRunIDLength = 1024
 const maximumQueryCharacters = 256
 
 export function normalizeWorkflowsSearch(
@@ -56,22 +55,6 @@ export function navigableWorkflowRef(value: unknown): string | undefined {
   return workflow?.startsWith("draft:") ? undefined : workflow
 }
 
-export function trustedWorkflowEventID(
-  event: Record<string, unknown> | undefined,
-): string | undefined {
-  if (
-    event == null ||
-    typeof event.id !== "string" ||
-    !eventIDPattern.test(event.id) ||
-    !isNonEmptyText(event.source) ||
-    !isNonEmptyText(event.connector) ||
-    !isNonEmptyText(event.type)
-  ) {
-    return undefined
-  }
-  return event.id
-}
-
 function optionalByteText(
   value: unknown,
   maximumBytes: number,
@@ -97,8 +80,4 @@ function optionalCharacterText(
   return normalized !== "" && Array.from(normalized).length <= maximumCharacters
     ? normalized
     : undefined
-}
-
-function isNonEmptyText(value: unknown): value is string {
-  return typeof value === "string" && value.trim() !== ""
 }

@@ -430,6 +430,45 @@ const retryWorkflowRun = {
   completed_at: "2026-07-16T12:00:03Z",
 }
 
+const lifecycleEventID = "ev_0123456789abcdef0123456789abcdef"
+const lifecycleDispatchID = "dsp_0123456789abcdef0123456789abcdef"
+const lifecycleDecoyEventID = "ev_fedcba9876543210fedcba9876543210"
+const lifecycleDecoyDispatchID = "dsp_fedcba9876543210fedcba9876543210"
+
+const lifecycleWorkflowRun = {
+  ...workflowRun,
+  id: "wr_lifecycle",
+  workflow_ref: "workflows/github-issue-triage.yml",
+  origin: {
+    kind: "external_event",
+    event_id: lifecycleEventID,
+    dispatch_id: lifecycleDispatchID,
+    root_run_id: "wr_lifecycle_root",
+  },
+  event: {
+    id: lifecycleDecoyEventID,
+    source: "github",
+    connector: "primary",
+    type: "issues.opened",
+  },
+  inputs: {
+    event_id: lifecycleDecoyEventID,
+    dispatch_id: lifecycleDecoyDispatchID,
+  },
+  session: `event:${lifecycleDecoyEventID}:dispatch:${lifecycleDecoyDispatchID}`,
+}
+
+const cancelableWorkflowRun = {
+  ...workflowRun,
+  id: "wr_cancel",
+  status: "running",
+  outputs: {},
+  jobs: {},
+  steps: {},
+  updated_at: "2026-07-16T12:04:00Z",
+  completed_at: undefined,
+}
+
 const workflowDraftYAML = `name: Support Triage
 on:
   workflow_call:
@@ -738,6 +777,7 @@ interface MockLauncherApiOptions {
     path: string
     body: unknown
   }>
+  workflowCancelReasons?: string[]
 }
 
 async function mockLauncherApis(
@@ -758,6 +798,7 @@ async function mockLauncherApis(
   let completeDraftViaPolling = false
   let reviseRequestCount = 0
   let currentMCPResponse = structuredClone(mcpResponse)
+  let currentCancelableWorkflowRun = structuredClone(cancelableWorkflowRun)
 
   function mcpServerFromInput(
     input: MCPServerInput,
@@ -1315,6 +1356,7 @@ async function mockLauncherApis(
             expect(request.postDataJSON()).toMatchObject({
               async: true,
               ref: "workflows/support-triage.yml",
+              expected_dependency_revision: "opaque-dependency-revision",
               inputs: { ticket: "Printer is offline" },
               session: "workflow:manual",
               delivery: {
@@ -1332,6 +1374,7 @@ async function mockLauncherApis(
             })
           case "/api/workflows/runs/wr_test/retry":
             expect(request.postDataJSON()).toMatchObject({
+              expected_dependency_revision: "opaque-dependency-revision",
               secrets: { token: "retry-token" },
             })
             runs = [
@@ -1342,6 +1385,20 @@ async function mockLauncherApis(
               run_id: retryWorkflowRun.id,
               status: retryWorkflowRun.status,
             })
+          case "/api/workflows/runs/wr_cancel/cancel": {
+            const body = request.postDataJSON() as { reason: string }
+            expect(body).toEqual({ reason: "operator intervention" })
+            options.workflowCancelReasons?.push(body.reason)
+            currentCancelableWorkflowRun = {
+              ...currentCancelableWorkflowRun,
+              status: "canceled",
+              cancel_reason: body.reason,
+              cancel_requested_at: "2026-07-16T12:05:00Z",
+              completed_at: "2026-07-16T12:05:00Z",
+              updated_at: "2026-07-16T12:05:00Z",
+            }
+            return json(route, currentCancelableWorkflowRun)
+          }
           case "/api/workflows/revalidate":
             workflowsRevalidated = true
             return json(route, compatibilityResponse())
@@ -1552,6 +1609,10 @@ async function mockLauncherApis(
           return json(route, workflowRun)
         case "/api/workflows/runs/wr_retry":
           return json(route, retryWorkflowRun)
+        case "/api/workflows/runs/wr_lifecycle":
+          return json(route, lifecycleWorkflowRun)
+        case "/api/workflows/runs/wr_cancel":
+          return json(route, currentCancelableWorkflowRun)
         case "/api/workflows/runs/wr_draft":
           return json(route, draftWorkflowRun)
         case "/api/workflows/runs/wr_draft_failed":
@@ -1597,6 +1658,16 @@ async function mockLauncherApis(
                 },
               },
             ],
+          })
+        case "/api/workflows/runs/wr_lifecycle/events":
+          return json(route, {
+            run_id: "wr_lifecycle",
+            events: [],
+          })
+        case "/api/workflows/runs/wr_cancel/events":
+          return json(route, {
+            run_id: "wr_cancel",
+            events: [],
           })
         case "/api/workflows/runs/wr_draft/events":
         case "/api/workflows/runs/wr_draft_failed/events":
@@ -1657,6 +1728,9 @@ async function mockLauncherApis(
               },
             },
           ])
+        case "/api/workflows/runs/wr_lifecycle/events/stream":
+        case "/api/workflows/runs/wr_cancel/events/stream":
+          return sse(route, [])
         case "/api/workflows/runs/wr_draft/events/stream":
         case "/api/workflows/runs/wr_draft_failed/events/stream":
         case "/api/workflows/runs/wr_manual/events/stream": {
@@ -1752,6 +1826,18 @@ async function mockLauncherApis(
                 kind: "retry",
               },
             ],
+          })
+        case "/api/workflows/runs/wr_lifecycle/graph":
+          return json(route, {
+            run_id: "wr_lifecycle",
+            nodes: [],
+            edges: [],
+          })
+        case "/api/workflows/runs/wr_cancel/graph":
+          return json(route, {
+            run_id: "wr_cancel",
+            nodes: [],
+            edges: [],
           })
         case "/api/workflows/runs/wr_draft/graph":
         case "/api/workflows/runs/wr_draft_failed/graph":
@@ -2029,6 +2115,89 @@ test("dispatch and workflow deep links survive reload with exact relationships",
   await expect(page.getByText("wr_test", { exact: true }).first()).toBeVisible()
   await expect(page).toHaveURL(/mode=operate/)
   await expect(page).toHaveURL(/run=wr_test/)
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("workflow lifecycle links use only validated server origin", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(
+    page,
+    "/agent/workflows?mode=operate&workflow=workflows%2Fgithub-issue-triage.yml&run=wr_lifecycle",
+  )
+
+  await expect(
+    page.getByRole("link", { name: lifecycleEventID }),
+  ).toHaveAttribute("href", `/events?event=${lifecycleEventID}`)
+  await expect(
+    page.getByRole("link", { name: lifecycleDispatchID }),
+  ).toHaveAttribute(
+    "href",
+    `/events?view=dispatches&dispatch=${lifecycleDispatchID}`,
+  )
+  await expect(
+    page.getByRole("link", { name: "wr_lifecycle_root" }),
+  ).toHaveAttribute(
+    "href",
+    "/agent/workflows?mode=operate&run=wr_lifecycle_root",
+  )
+  await expect(page.locator(`a[href*="${lifecycleDecoyEventID}"]`)).toHaveCount(
+    0,
+  )
+  await expect(
+    page.locator(`a[href*="${lifecycleDecoyDispatchID}"]`),
+  ).toHaveCount(0)
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("workflow cancellation requires and persists an accessible explicit reason", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const workflowCancelReasons: string[] = []
+  await gotoMockedRoute(
+    page,
+    "/agent/workflows?mode=operate&workflow=workflows%2Fsummarize-text.yml&run=wr_cancel",
+    { workflowCancelReasons },
+  )
+
+  const cancelButton = page.getByRole("button", { name: "Cancel" })
+  await expect(cancelButton).toBeEnabled()
+  await cancelButton.click()
+  const dialog = page.getByRole("alertdialog")
+  await expect(dialog).toContainText("wr_cancel")
+  await expectElementFitsViewport(
+    page,
+    '[data-slot="alert-dialog-content"]',
+    "workflow cancel dialog",
+  )
+  await expect(
+    dialog.getByRole("button", { name: "Cancel run" }),
+  ).toBeDisabled()
+  await dialog.getByRole("textbox", { name: "Cancel reason" }).fill("   ")
+  await expect(dialog.getByText("A cancel reason is required.")).toBeVisible()
+  await expect(
+    dialog.getByRole("button", { name: "Cancel run" }),
+  ).toBeDisabled()
+  await dialog
+    .getByRole("textbox", { name: "Cancel reason" })
+    .fill("operator intervention")
+  await dialog.getByRole("button", { name: "Cancel run" }).click()
+
+  await expect
+    .poll(() => workflowCancelReasons)
+    .toEqual(["operator intervention"])
+  await expect(dialog).toBeHidden()
+  await expect(page.getByText("Cancel requested")).toBeVisible()
+  await expect(page.getByText("Completed")).toBeVisible()
+  await expect(
+    page.getByText("operator intervention", { exact: true }).first(),
+  ).toBeVisible()
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
@@ -3001,8 +3170,12 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
     page.getByRole("button", { name: "Run workflow" }).last(),
   ).toBeDisabled()
   await page.keyboard.press("Escape")
-  await expect(page.getByRole("button", { name: "Retry" })).toBeDisabled()
-  await expect(page.getByRole("button", { name: "Retry" })).toHaveAttribute(
+  await expect(
+    page.getByRole("button", { name: "Retry", exact: true }),
+  ).toBeDisabled()
+  await expect(
+    page.getByRole("button", { name: "Retry", exact: true }),
+  ).toHaveAttribute(
     "title",
     "Revalidate this workflow before retrying the run.",
   )
@@ -3019,11 +3192,15 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
   await expect(retrySecrets).toBeVisible()
   await retrySecrets.fill("{")
   await expect(page.getByText(/Retry secrets JSON is invalid/)).toBeVisible()
-  await expect(page.getByRole("button", { name: "Retry" })).toBeDisabled()
+  await expect(
+    page.getByRole("button", { name: "Retry", exact: true }),
+  ).toBeDisabled()
   await retrySecrets.fill('{"token":"retry-token"}')
   await expect(page.getByText("Ready to retry.")).toBeVisible()
-  await expect(page.getByRole("button", { name: "Retry" })).toBeEnabled()
-  await page.getByRole("button", { name: "Retry" }).click()
+  await expect(
+    page.getByRole("button", { name: "Retry", exact: true }),
+  ).toBeEnabled()
+  await page.getByRole("button", { name: "Retry", exact: true }).click()
   await expect(page.getByText("wr_retry").first()).toBeVisible()
   await expect(page.getByText("retry summary").first()).toBeVisible()
   await expect(page.getByText('"result": "retry event"')).toBeVisible()
