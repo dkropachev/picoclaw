@@ -38,13 +38,15 @@ const (
 	routeEventPayload
 	routeEventWorkflowContext
 	routeDispatches
+	routeDispatch
 	routeReplay
 )
 
 type operatorRoute struct {
-	kind    routeKind
-	eventID string
-	method  string
+	kind       routeKind
+	eventID    string
+	dispatchID string
+	method     string
 }
 
 func (backend *Backend) serveHTTP(
@@ -110,6 +112,17 @@ func (backend *Backend) serveHTTP(
 			return
 		}
 		writeOperatorJSON(w, http.StatusOK, page)
+	case routeDispatch:
+		if request.URL.RawQuery != "" {
+			writeOperatorError(w, ErrInvalidRequest)
+			return
+		}
+		dispatch, err := backend.GetDispatch(request.Context(), route.dispatchID)
+		if err != nil {
+			writeOperatorError(w, err)
+			return
+		}
+		writeOperatorJSON(w, http.StatusOK, dispatch)
 	case routeReplay:
 		if request.URL.RawQuery != "" ||
 			!jsonRequestContentType(request.Header) ||
@@ -143,6 +156,20 @@ func routeFromRequest(request *http.Request) operatorRoute {
 		return operatorRoute{kind: routeEvents, method: http.MethodGet}
 	case RoutePrefix + "dispatches":
 		return operatorRoute{kind: routeDispatches, method: http.MethodGet}
+	}
+	if strings.HasPrefix(path, RoutePrefix+"dispatches/") {
+		segments := strings.Split(
+			strings.TrimPrefix(path, RoutePrefix+"dispatches/"),
+			"/",
+		)
+		if len(segments) == 1 && segments[0] != "" {
+			return operatorRoute{
+				kind:       routeDispatch,
+				dispatchID: segments[0],
+				method:     http.MethodGet,
+			}
+		}
+		return operatorRoute{}
 	}
 	if !strings.HasPrefix(path, RoutePrefix+"events/") {
 		return operatorRoute{}

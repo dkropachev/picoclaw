@@ -113,6 +113,26 @@ func TestEventOperatorRouteUsesProtectedLiveStoreGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Insert() error = %v", err)
 	}
+	claimed, err := service.store.ClaimRouting(
+		context.Background(),
+		"operator-route-test",
+		1,
+		time.Minute,
+	)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("ClaimRouting() = %#v, %v", claimed, err)
+	}
+	const workflowRevision = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	dispatch, created, err := service.store.CreateRevisionedDispatchForRoutingClaim(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+		claimed[0].Routing.LeaseToken,
+		"workflows/operator-detail.yaml",
+		workflowRevision,
+	)
+	if err != nil || !created {
+		t.Fatalf("CreateRevisionedDispatchForRoutingClaim() = %#v, %t, %v", dispatch, created, err)
+	}
 	if err = activateEventOperator(runningServices); err != nil {
 		t.Fatalf("activateEventOperator() error = %v", err)
 	}
@@ -177,6 +197,56 @@ func TestEventOperatorRouteUsesProtectedLiveStoreGeneration(t *testing.T) {
 	}
 	if !bytes.Equal(body, payload) {
 		t.Fatalf("payload body = %s, want exact %s", body, payload)
+	}
+
+	status, headers, body = performEventOperatorRequest(
+		t,
+		client,
+		http.MethodGet,
+		baseURL+"dispatches/"+dispatch.ID,
+		token,
+		nil,
+	)
+	if status != http.StatusOK {
+		t.Fatalf("dispatch detail status = %d, want %d: %s", status, http.StatusOK, body)
+	}
+	if headers.Get("Cache-Control") != "no-store" {
+		t.Fatalf(
+			"dispatch detail Cache-Control = %q, want no-store",
+			headers.Get("Cache-Control"),
+		)
+	}
+	var dispatchResponse eventoperator.DispatchView
+	if err = json.Unmarshal(body, &dispatchResponse); err != nil {
+		t.Fatalf("decode dispatch detail: %v", err)
+	}
+	if dispatchResponse.ID != dispatch.ID ||
+		dispatchResponse.EventID != inserted.Event.Envelope.ID ||
+		dispatchResponse.WorkflowRevision != workflowRevision ||
+		dispatchResponse.CreatedAt.IsZero() ||
+		dispatchResponse.UpdatedAt.IsZero() {
+		t.Fatalf("dispatch detail = %#v", dispatchResponse)
+	}
+	for _, forbidden := range []string{
+		claimed[0].Routing.LeaseToken,
+		`"owner"`,
+		`"lease_token"`,
+	} {
+		if bytes.Contains(body, []byte(forbidden)) {
+			t.Fatalf("dispatch detail exposed %q: %s", forbidden, body)
+		}
+	}
+
+	status, _, _ = performEventOperatorRequest(
+		t,
+		client,
+		http.MethodGet,
+		baseURL+"dispatches/dsp_ffffffffffffffffffffffffffffffff",
+		token,
+		nil,
+	)
+	if status != http.StatusNotFound {
+		t.Fatalf("missing dispatch status = %d, want %d", status, http.StatusNotFound)
 	}
 
 	status, _, _ = performEventOperatorRequest(

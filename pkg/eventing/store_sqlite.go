@@ -45,6 +45,7 @@ var (
 	_ Inbox                          = (*Store)(nil)
 	_ EventOperatorReader            = (*Store)(nil)
 	_ DispatchOperatorReader         = (*Store)(nil)
+	_ DispatchOperatorGetter         = (*Store)(nil)
 	_ RoutingDispatchCreator         = (*Store)(nil)
 	_ RevisionRoutingDispatchCreator = (*Store)(nil)
 	_ RoutingLeaseRenewer            = (*Store)(nil)
@@ -1709,6 +1710,26 @@ func (s *Store) GetDispatch(ctx context.Context, id string) (Dispatch, error) {
 		`SELECT `+dispatchColumns+` FROM event_dispatches WHERE id = ?`, id))
 	if err != nil {
 		return Dispatch{}, s.dbError(err)
+	}
+	return dispatch, nil
+}
+
+// GetDispatchMetadata retrieves one dispatch without selecting worker
+// owner/lease-token credentials.
+func (s *Store) GetDispatchMetadata(
+	ctx context.Context,
+	id string,
+) (DispatchMetadata, error) {
+	if err := s.ready(ctx); err != nil {
+		return DispatchMetadata{}, err
+	}
+	dispatch, err := scanDispatchMetadata(s.db.QueryRowContext(
+		ctx,
+		`SELECT `+dispatchMetadataColumns+` FROM event_dispatches WHERE id = ?`,
+		id,
+	))
+	if err != nil {
+		return DispatchMetadata{}, s.dbError(err)
 	}
 	return dispatch, nil
 }

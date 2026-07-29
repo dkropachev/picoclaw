@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/eventing"
 )
@@ -158,10 +159,15 @@ func (store *workflowEventMismatchStore) GetEventMetadata(
 
 func TestBackendProjectsDispatchWithoutLeaseToken(t *testing.T) {
 	dispatch := testDispatch()
+	dispatch.WorkflowRevision = "sha256:revision"
+	finishedAt := testTime.Add(time.Second)
+	dispatch.FinishedAt = &finishedAt
+	metadata := testDispatchMetadata(dispatch)
 	store := &fakeStore{
+		dispatchResult: metadata,
 		dispatchPage: eventing.DispatchMetadataPage{
 			Dispatches: []eventing.DispatchMetadata{
-				testDispatchMetadata(dispatch),
+				metadata,
 			},
 		},
 	}
@@ -191,6 +197,7 @@ func TestBackendProjectsDispatchWithoutLeaseToken(t *testing.T) {
 		"id",
 		"event_id",
 		"workflow_ref",
+		"workflow_revision",
 		"run_id",
 		"status",
 		"lease_until",
@@ -200,6 +207,7 @@ func TestBackendProjectsDispatchWithoutLeaseToken(t *testing.T) {
 		"created_at",
 		"updated_at",
 		"linked_at",
+		"finished_at",
 	}
 	if len(fields) != len(wantFields) {
 		t.Fatalf("dispatch JSON fields = %#v, want %v", fields, wantFields)
@@ -212,6 +220,21 @@ func TestBackendProjectsDispatchWithoutLeaseToken(t *testing.T) {
 	calls := store.dispatchFilters()
 	if len(calls) != 1 || calls[0].Limit != DefaultLimit {
 		t.Fatalf("dispatch filters = %#v, want default limit", calls)
+	}
+
+	detail, err := backend.GetDispatch(context.Background(), testDispatchID)
+	if err != nil {
+		t.Fatalf("GetDispatch() error = %v", err)
+	}
+	if detail.ID != testDispatchID ||
+		detail.WorkflowRevision != dispatch.WorkflowRevision ||
+		detail.CreatedAt != dispatch.CreatedAt ||
+		detail.LinkedAt == nil {
+		t.Fatalf("dispatch detail = %#v", detail)
+	}
+	assertSerializedSecretsAbsent(t, detail)
+	if ids := store.dispatchIDs(); len(ids) != 1 || ids[0] != testDispatchID {
+		t.Fatalf("dispatch detail calls = %#v", ids)
 	}
 }
 
@@ -306,13 +329,24 @@ func TestBackendRejectsInvalidFiltersBeforeStore(t *testing.T) {
 		_, err := backend.ListDispatches(context.Background(), request)
 		requireErrorIs(t, err, ErrInvalidRequest)
 	}
+	for _, id := range []string{
+		"",
+		"dsp_invalid",
+		"dsp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		" dsp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	} {
+		_, err := backend.GetDispatch(context.Background(), id)
+		requireErrorIs(t, err, ErrInvalidRequest)
+	}
 	eventCalls := store.eventFilters()
 	dispatchCalls := store.dispatchFilters()
-	if len(eventCalls) != 0 || len(dispatchCalls) != 0 {
+	dispatchIDs := store.dispatchIDs()
+	if len(eventCalls) != 0 || len(dispatchCalls) != 0 || len(dispatchIDs) != 0 {
 		t.Fatalf(
-			"invalid filters reached store: events=%d dispatches=%d",
+			"invalid filters reached store: events=%d dispatches=%d detail=%d",
 			len(eventCalls),
 			len(dispatchCalls),
+			len(dispatchIDs),
 		)
 	}
 }
@@ -359,10 +393,11 @@ func TestBackendReplayIsSingleAdditiveSanitizedOperation(t *testing.T) {
 func TestBackendPreservesStoreErrorsAndRejectsNonInsertReplay(t *testing.T) {
 	sentinel := errors.New("store unavailable")
 	store := &fakeStore{
-		getErr:      sentinel,
-		listErr:     sentinel,
-		dispatchErr: sentinel,
-		replayErr:   sentinel,
+		getErr:         sentinel,
+		listErr:        sentinel,
+		dispatchErr:    sentinel,
+		dispatchGetErr: sentinel,
+		replayErr:      sentinel,
 	}
 	backend := testBackend(t, store)
 
@@ -378,14 +413,26 @@ func TestBackendPreservesStoreErrorsAndRejectsNonInsertReplay(t *testing.T) {
 	); !errors.Is(err, sentinel) {
 		t.Fatalf("ListDispatches() error = %v, want sentinel", err)
 	}
-	if _, err := backend.Replay(context.Background(), testEventID); !errors.Is(err, sentinel) {
-		t.Fatalf("Replay() error = %v, want sentinel", err)
+	if _, err := backend.GetDispatch(
+		context.Background(),
+		testDispatchID,
+	); !errors.Is(err, sentinel) {
+		t.Fatalf("GetDispatch() error = %v, want sentinel", err)
+	}
+	store.dispatchGetErr = nil
+	store.dispatchResult = testDispatchMetadata(testDispatch())
+	store.dispatchResult.ID = "dsp_55555555555555555555555555555555"
+	_, dispatchErr := backend.GetDispatch(context.Background(), testDispatchID)
+	requireErrorIs(t, dispatchErr, ErrUnavailable)
+	_, replayErr := backend.Replay(context.Background(), testEventID)
+	if !errors.Is(replayErr, sentinel) {
+		t.Fatalf("Replay() error = %v, want sentinel", replayErr)
 	}
 
 	store.replayErr = nil
 	store.replayResult = eventing.InsertResult{Inserted: false}
-	_, err := backend.Replay(context.Background(), testEventID)
-	requireErrorIs(t, err, ErrUnavailable)
+	_, replayErr = backend.Replay(context.Background(), testEventID)
+	requireErrorIs(t, replayErr, ErrUnavailable)
 }
 
 func TestNewBackendAndNilBackendRejectMissingStore(t *testing.T) {
@@ -398,6 +445,12 @@ func TestNewBackendAndNilBackendRejectMissingStore(t *testing.T) {
 		ErrUnavailable,
 	) {
 		t.Fatalf("nil Backend.ListEvents() error = %v", err)
+	}
+	if _, err := backend.GetDispatch(context.Background(), testDispatchID); !errors.Is(
+		err,
+		ErrUnavailable,
+	) {
+		t.Fatalf("nil Backend.GetDispatch() error = %v", err)
 	}
 }
 

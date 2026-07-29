@@ -208,6 +208,12 @@ type DispatchOperatorReader interface {
 	) (DispatchMetadataPage, error)
 }
 
+// DispatchOperatorGetter exposes exact dispatch inspection without widening
+// the established list-reader contract.
+type DispatchOperatorGetter interface {
+	GetDispatchMetadata(ctx context.Context, id string) (DispatchMetadata, error)
+}
+
 // EventStore owns durable envelope ingestion and retrieval.
 type EventStore interface {
 	Close() error

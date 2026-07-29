@@ -26,6 +26,7 @@ func TestControllerServesSanitizedOperatorRoutes(t *testing.T) {
 		eventPage: eventing.EventPage{
 			Events: []eventing.StoredEvent{original},
 		},
+		dispatchResult: testDispatchMetadata(testDispatch()),
 		dispatchPage: eventing.DispatchMetadataPage{
 			Dispatches: []eventing.DispatchMetadata{
 				testDispatchMetadata(testDispatch()),
@@ -157,6 +158,34 @@ func TestControllerServesSanitizedOperatorRoutes(t *testing.T) {
 		t.Fatalf("dispatch list filters = %#v", dispatchCalls)
 	}
 
+	dispatchDetailResponse := performRequest(
+		controller,
+		http.MethodGet,
+		RoutePrefix+"dispatches/"+testDispatchID,
+		"",
+		false,
+	)
+	if dispatchDetailResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"dispatch detail status = %d, body=%s",
+			dispatchDetailResponse.Code,
+			dispatchDetailResponse.Body.String(),
+		)
+	}
+	requireNoStoreJSON(t, dispatchDetailResponse)
+	assertHTTPBodySecretsAbsent(t, dispatchDetailResponse.Body.String())
+	if !strings.Contains(dispatchDetailResponse.Body.String(), testDispatchID) ||
+		!strings.Contains(dispatchDetailResponse.Body.String(), testEventID) {
+		t.Fatalf(
+			"dispatch detail omitted lifecycle identity: %s",
+			dispatchDetailResponse.Body.String(),
+		)
+	}
+	dispatchIDs := store.dispatchIDs()
+	if len(dispatchIDs) != 1 || dispatchIDs[0] != testDispatchID {
+		t.Fatalf("dispatch detail calls = %#v", dispatchIDs)
+	}
+
 	replayResponse := performRequest(
 		controller,
 		http.MethodPost,
@@ -222,6 +251,9 @@ func TestControllerRejectsInvalidQueries(t *testing.T) {
 		RoutePrefix + "dispatches?status=unknown",
 		RoutePrefix + "dispatches?workflow_ref=",
 		RoutePrefix + "dispatches?cursor=not-base64",
+		RoutePrefix + "dispatches/not-a-dispatch",
+		RoutePrefix + "dispatches/dsp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		RoutePrefix + "dispatches/" + testDispatchID + "?include_owner=true",
 		RoutePrefix + "events?source=" + strings.Repeat("x", maxQueryBytes),
 	}
 	for _, target := range tests {
@@ -241,11 +273,13 @@ func TestControllerRejectsInvalidQueries(t *testing.T) {
 	}
 	eventCalls := store.eventFilters()
 	dispatchCalls := store.dispatchFilters()
-	if len(eventCalls) != 0 || len(dispatchCalls) != 0 {
+	dispatchIDs := store.dispatchIDs()
+	if len(eventCalls) != 0 || len(dispatchCalls) != 0 || len(dispatchIDs) != 0 {
 		t.Fatalf(
-			"invalid query reached store: event=%d dispatch=%d",
+			"invalid query reached store: event=%d dispatch=%d detail=%d",
 			len(eventCalls),
 			len(dispatchCalls),
+			len(dispatchIDs),
 		)
 	}
 }
@@ -258,8 +292,11 @@ func TestControllerStrictCanonicalPathsAndMethods(t *testing.T) {
 		RoutePrefix + "events/",
 		RoutePrefix + "events//payload",
 		RoutePrefix + "events/" + testEventID + "/unknown",
+		RoutePrefix + "dispatches/",
+		RoutePrefix + "dispatches/" + testDispatchID + "/unknown",
 		RoutePrefix + "unknown",
 		"/runtime/eventing/%65vents",
+		"/runtime/eventing/dispatches/%64sp_33333333333333333333333333333333",
 	}
 	for _, target := range notFound {
 		response := performRequest(controller, http.MethodGet, target, "", false)
@@ -279,6 +316,7 @@ func TestControllerStrictCanonicalPathsAndMethods(t *testing.T) {
 		{http.MethodPost, RoutePrefix + "events/" + testEventID + "/payload", http.MethodGet},
 		{http.MethodPost, RoutePrefix + "events/" + testEventID + "/workflow-context", http.MethodGet},
 		{http.MethodPost, RoutePrefix + "dispatches", http.MethodGet},
+		{http.MethodPost, RoutePrefix + "dispatches/" + testDispatchID, http.MethodGet},
 		{http.MethodGet, RoutePrefix + "events/" + testEventID + "/replay", http.MethodPost},
 	}
 	for _, test := range methodTests {
@@ -480,6 +518,38 @@ func TestPayloadEndpointMapsNotFoundAndUnavailable(t *testing.T) {
 			if got := response.Header().Get("Retry-After"); got != test.wantRetry {
 				t.Fatalf("Retry-After = %q, want %q", got, test.wantRetry)
 			}
+		})
+	}
+}
+
+func TestDispatchEndpointMapsNotFoundAndUnavailable(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantRetry  string
+	}{
+		{"not found", eventing.ErrNotFound, http.StatusNotFound, ""},
+		{"unavailable", errors.New("offline"), http.StatusServiceUnavailable, "1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &fakeStore{dispatchGetErr: test.err}
+			controller, _ := testController(t, store)
+			response := performRequest(
+				controller,
+				http.MethodGet,
+				RoutePrefix+"dispatches/"+testDispatchID,
+				"",
+				false,
+			)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+			}
+			if got := response.Header().Get("Retry-After"); got != test.wantRetry {
+				t.Fatalf("Retry-After = %q, want %q", got, test.wantRetry)
+			}
+			requireNoStoreJSON(t, response)
 		})
 	}
 }

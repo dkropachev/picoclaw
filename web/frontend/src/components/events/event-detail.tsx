@@ -1,5 +1,6 @@
 import {
   IconBolt,
+  IconExternalLink,
   IconRotateClockwise,
   IconRoute,
   IconUser,
@@ -25,6 +26,7 @@ import {
   formatEventBytes,
   formatEventDate,
 } from "./event-format"
+import { exactDispatchHref } from "./event-links"
 import { EventPayloadPanel } from "./event-payload-panel"
 import {
   EventMeta,
@@ -496,6 +498,12 @@ function DispatchRow({ dispatch }: { dispatch: DispatchView }) {
           breakAll
         />
         <EventMeta
+          label={t("pages.events.dispatches.revision", "Revision")}
+          value={dispatch.workflow_revision}
+          mono
+          breakAll
+        />
+        <EventMeta
           label={t("pages.events.dispatches.attempts", "Attempts")}
           value={dispatch.attempts}
         />
@@ -512,6 +520,14 @@ function DispatchRow({ dispatch }: { dispatch: DispatchView }) {
           value={formatEventDate(dispatch.available_at)}
         />
         <EventMeta
+          label={t("pages.events.dispatches.linked", "Run linked")}
+          value={formatEventDate(dispatch.linked_at)}
+        />
+        <EventMeta
+          label={t("pages.events.dispatches.lease_until", "Lease until")}
+          value={formatEventDate(dispatch.lease_until)}
+        />
+        <EventMeta
           label={t("pages.events.dispatches.finished", "Finished")}
           value={formatEventDate(dispatch.finished_at)}
         />
@@ -524,6 +540,14 @@ function DispatchRow({ dispatch }: { dispatch: DispatchView }) {
           {dispatch.last_error}
         </div>
       ) : null}
+      <div>
+        <Button type="button" variant="outline" size="sm" asChild>
+          <a href={exactDispatchHref(dispatch.id)}>
+            <IconExternalLink className="size-4" />
+            {t("pages.events.dispatches.open", "Open dispatch")}
+          </a>
+        </Button>
+      </div>
     </article>
   )
 }

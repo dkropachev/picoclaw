@@ -81,9 +81,38 @@ var eventDispatchQueryContract = map[string]eventQueryValidator{
 func (h *Handler) registerEventRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/events", h.handleEventList)
 	mux.HandleFunc("/api/events/dispatches", h.handleEventDispatchList)
-	mux.HandleFunc("/api/events/{id}", h.handleEventGet)
-	mux.HandleFunc("/api/events/{id}/payload", h.handleEventPayload)
-	mux.HandleFunc("/api/events/{id}/replay", h.handleEventReplay)
+	mux.HandleFunc("/api/events/", h.handleEventSubtree)
+}
+
+func (h *Handler) handleEventSubtree(w http.ResponseWriter, r *http.Request) {
+	const prefix = "/api/events/"
+	if r == nil || r.URL == nil || !strings.HasPrefix(r.URL.Path, prefix) {
+		writeEventAPIError(w, http.StatusNotFound, "not found")
+		return
+	}
+	segments := strings.Split(strings.TrimPrefix(r.URL.Path, prefix), "/")
+	if len(segments) == 2 && segments[0] == "dispatches" && segments[1] != "" {
+		r.SetPathValue("id", segments[1])
+		h.handleEventDispatchGet(w, r)
+		return
+	}
+	if len(segments) == 1 && segments[0] != "" {
+		r.SetPathValue("id", segments[0])
+		h.handleEventGet(w, r)
+		return
+	}
+	if len(segments) == 2 && segments[0] != "" {
+		r.SetPathValue("id", segments[0])
+		switch segments[1] {
+		case "payload":
+			h.handleEventPayload(w, r)
+			return
+		case "replay":
+			h.handleEventReplay(w, r)
+			return
+		}
+	}
+	writeEventAPIError(w, http.StatusNotFound, "not found")
 }
 
 func (h *Handler) handleEventList(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +145,30 @@ func (h *Handler) handleEventDispatchList(w http.ResponseWriter, r *http.Request
 		return
 	}
 	h.proxyEventGateway(w, r, "/runtime/eventing/dispatches", query, nil, false, false)
+}
+
+func (h *Handler) handleEventDispatchGet(w http.ResponseWriter, r *http.Request) {
+	if !requireEventMethod(w, r, http.MethodGet) {
+		return
+	}
+	const prefix = "/api/events/dispatches/"
+	id := r.PathValue("id")
+	if !canonicalEventRequestPath(r) ||
+		r.URL.Path != prefix+id ||
+		!validOperatorDispatchID(id) ||
+		r.URL.RawQuery != "" {
+		writeEventAPIError(w, http.StatusBadRequest, "invalid dispatch request")
+		return
+	}
+	h.proxyEventGateway(
+		w,
+		r,
+		"/runtime/eventing/dispatches/"+id,
+		"",
+		nil,
+		false,
+		false,
+	)
 }
 
 func (h *Handler) handleEventGet(w http.ResponseWriter, r *http.Request) {
@@ -369,10 +422,18 @@ func eventIDQueryValue(value string) error {
 }
 
 func validOperatorEventID(value string) bool {
-	if len(value) != len("ev_")+32 || !strings.HasPrefix(value, "ev_") {
+	return validOperatorPrefixedID(value, "ev_")
+}
+
+func validOperatorDispatchID(value string) bool {
+	return validOperatorPrefixedID(value, "dsp_")
+}
+
+func validOperatorPrefixedID(value, prefix string) bool {
+	if len(value) != len(prefix)+32 || !strings.HasPrefix(value, prefix) {
 		return false
 	}
-	for _, char := range value[len("ev_"):] {
+	for _, char := range value[len(prefix):] {
 		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
 			return false
 		}

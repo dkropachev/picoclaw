@@ -18,6 +18,7 @@ import {
   IconTrash,
 } from "@tabler/icons-react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { Link } from "@tanstack/react-router"
 import {
   type ReactNode,
   useCallback,
@@ -30,6 +31,7 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import {
+  WorkflowAPIError,
   type WorkflowCompatibilitySummary,
   type WorkflowDefinition,
   type WorkflowDeliveryPayload,
@@ -112,6 +114,14 @@ import {
   WorkflowPublishReadinessPanel,
 } from "./workflow-publish-readiness"
 import { workflowDraftTestRepairPrompt } from "./workflow-repair-context"
+import {
+  type WorkflowPageMode,
+  type WorkflowsRouteSearch,
+  isWorkflowRunID,
+  navigableWorkflowRef,
+  normalizeWorkflowsSearch,
+  trustedWorkflowEventID,
+} from "./workflow-route-search"
 import { WorkflowSettingsDialog } from "./workflow-settings-dialog"
 import { WorkflowTemplateCatalog } from "./workflow-template-catalog"
 
@@ -134,8 +144,13 @@ const workflowTerminalEventKinds = new Set([
   "workflow.run.canceled",
 ])
 
-type PageMode = "develop" | "operate"
 type DraftEditorMode = WorkflowEditorMode
+type WorkflowRunDetailState =
+  | "none"
+  | "loading"
+  | "ready"
+  | "not-found"
+  | "unavailable"
 type DevelopmentPendingAction =
   | "start-ai"
   | "start"
@@ -192,12 +207,61 @@ const initialEventTestMatch: WorkflowEventTestMatchState = {
   message: "Select a recent event to check this trigger.",
 }
 
-export function WorkflowsPage() {
+export function WorkflowsPage({
+  search,
+  onSearchChange,
+}: {
+  search: WorkflowsRouteSearch
+  onSearchChange: (search: WorkflowsRouteSearch, replace?: boolean) => void
+}) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const [mode, setMode] = useState<PageMode>("develop")
-  const [query, setQuery] = useState("")
-  const [selectedRunID, setSelectedRunID] = useState<string | null>(null)
+  const mode = search.mode ?? "develop"
+  const query = search.q ?? ""
+  const selectedRunID = search.run ?? null
+  const selectedWorkflowRef = search.workflow ?? null
+  const updateRouteSearch = useCallback(
+    (
+      patch: Partial<Record<keyof WorkflowsRouteSearch, string | undefined>>,
+      replace = false,
+    ) => {
+      const next = normalizeWorkflowsSearch({ ...search, ...patch })
+      onSearchChange(next, replace)
+    },
+    [onSearchChange, search],
+  )
+  const setMode = useCallback(
+    (nextMode: WorkflowPageMode) => {
+      if (nextMode === mode) {
+        return
+      }
+      updateRouteSearch(
+        { mode: nextMode === "develop" ? undefined : nextMode },
+        false,
+      )
+    },
+    [mode, updateRouteSearch],
+  )
+  const setQuery = useCallback(
+    (nextQuery: string) => updateRouteSearch({ q: nextQuery }, true),
+    [updateRouteSearch],
+  )
+  const setSelectedRunID = useCallback(
+    (runID: string) => {
+      if (runID !== selectedRunID) {
+        updateRouteSearch({ run: runID }, false)
+      }
+    },
+    [selectedRunID, updateRouteSearch],
+  )
+  const setSelectedWorkflowRef = useCallback(
+    (workflowRef: string) => {
+      if (workflowRef !== selectedWorkflowRef) {
+        updateRouteSearch({ workflow: workflowRef }, false)
+      }
+    },
+    [selectedWorkflowRef, updateRouteSearch],
+  )
   const [startPrompt, setStartPrompt] = useState("")
   const [startTargetRef, setStartTargetRef] = useState("")
   const [draftPrompt, setDraftPrompt] = useState("")
@@ -213,9 +277,6 @@ export function WorkflowsPage() {
   const [testSecretsJSON, setTestSecretsJSON] = useState("{}")
   const [testSession, setTestSession] = useState("")
   const [testDeliveryJSON, setTestDeliveryJSON] = useState("{}")
-  const [selectedWorkflowRef, setSelectedWorkflowRef] = useState<string | null>(
-    null,
-  )
   const [runInputValues, setRunInputValues] = useState<WorkflowRunInputValues>(
     {},
   )
@@ -265,19 +326,25 @@ export function WorkflowsPage() {
     queryKey: ["workflows", "runs", selectedRunID],
     queryFn: () => getWorkflowRun(selectedRunID ?? ""),
     enabled: selectedRunID != null,
-    refetchInterval: selectedRunID == null ? false : 3000,
+    refetchInterval: (query) => {
+      const run = query.state.data
+      return run != null && !terminalStatuses.has(run.status) ? 3000 : false
+    },
+    retry: false,
   })
   const eventsQuery = useQuery({
     queryKey: ["workflows", "runs", selectedRunID, "events"],
     queryFn: () => getWorkflowRunEvents(selectedRunID ?? ""),
-    enabled: selectedRunID != null,
-    refetchInterval: selectedRunID == null ? false : 3000,
+    enabled: selectedRunID != null && runQuery.data != null,
+    refetchInterval:
+      selectedRunID == null || runQuery.data == null ? false : 3000,
   })
   const graphQuery = useQuery({
     queryKey: ["workflows", "runs", selectedRunID, "graph"],
     queryFn: () => getWorkflowRunGraph(selectedRunID ?? ""),
-    enabled: selectedRunID != null,
-    refetchInterval: selectedRunID == null ? false : 5000,
+    enabled: selectedRunID != null && runQuery.data != null,
+    refetchInterval:
+      selectedRunID == null || runQuery.data == null ? false : 5000,
   })
 
   const session = developmentQuery.data?.session ?? null
@@ -358,8 +425,17 @@ export function WorkflowsPage() {
     return map
   }, [compatibility?.workflows])
 
-  const selectedRun =
-    runQuery.data ?? runs.find((run) => run.id === selectedRunID)
+  const selectedRun = runQuery.data
+  const runDetailState: WorkflowRunDetailState =
+    selectedRunID == null
+      ? "none"
+      : selectedRun != null
+        ? "ready"
+        : runQuery.isPending
+          ? "loading"
+          : workflowRunWasNotFound(runQuery.error)
+            ? "not-found"
+            : "unavailable"
   const queriedEvents = useMemo(
     () => eventsQuery.data?.events ?? [],
     [eventsQuery.data?.events],
@@ -421,27 +497,33 @@ export function WorkflowsPage() {
   )
 
   useEffect(() => {
-    if (selectedRunID == null && runs.length > 0) {
-      setSelectedRunID(runs[0].id)
-    }
-  }, [runs, selectedRunID])
-
-  useEffect(() => {
-    if (workflows.length === 0) {
-      setSelectedWorkflowRef(null)
+    if (workflowsQuery.isPending || runsQuery.isPending) {
       return
     }
-    if (
-      selectedWorkflowRef == null ||
-      !workflows.some((workflow) => workflow.ref === selectedWorkflowRef)
-    ) {
-      setSelectedWorkflowRef(workflows[0].ref)
+    const patch: Partial<WorkflowsRouteSearch> = {}
+    if (selectedWorkflowRef == null && workflows.length > 0) {
+      patch.workflow = workflows[0].ref
     }
-  }, [selectedWorkflowRef, workflows])
+    if (selectedRunID == null && runs.length > 0) {
+      patch.run = runs[0].id
+    }
+    if (patch.workflow || patch.run) {
+      updateRouteSearch(patch, true)
+    }
+  }, [
+    runs,
+    runsQuery.isPending,
+    selectedRunID,
+    selectedWorkflowRef,
+    updateRouteSearch,
+    workflows,
+    workflowsQuery.isPending,
+  ])
 
   useEffect(() => {
     if (
       selectedRunID == null ||
+      selectedRun?.id !== selectedRunID ||
       typeof window === "undefined" ||
       typeof window.EventSource === "undefined"
     ) {
@@ -485,7 +567,7 @@ export function WorkflowsPage() {
       setEventStreamActive(false)
       source.close()
     }
-  }, [queryClient, selectedRunID])
+  }, [queryClient, selectedRun?.id, selectedRunID])
 
   useEffect(() => {
     setRetrySecretsJSON("{}")
@@ -1030,11 +1112,12 @@ export function WorkflowsPage() {
     },
     onSuccess: (result) => {
       toast.success(`Published ${result.workflow_ref}`)
-      setMode("operate")
+      updateRouteSearch(
+        { mode: "operate", workflow: result.workflow_ref },
+        false,
+      )
       setLastDraftTest(null)
-      void invalidateWorkflowQueries(queryClient).then(() => {
-        setSelectedWorkflowRef(result.workflow_ref)
-      })
+      void invalidateWorkflowQueries(queryClient)
     },
     onError: (err) => {
       toast.error(errorMessage(err))
@@ -1428,8 +1511,7 @@ export function WorkflowsPage() {
             onPublish={() => publishMutation.mutate()}
             onDiscard={() => discardMutation.mutate()}
             onOpenTestRun={(runID) => {
-              setSelectedRunID(runID)
-              setMode("operate")
+              updateRouteSearch({ mode: "operate", run: runID }, false)
             }}
             canStartNew={canStartNew}
             canTestDraft={canTestDraft}
@@ -1464,6 +1546,7 @@ export function WorkflowsPage() {
             allRuns={runs}
             selectedRunID={selectedRunID}
             selectedRun={selectedRun}
+            runDetailState={runDetailState}
             events={selectedEvents}
             graph={graphQuery.data}
             loadingRuns={runsQuery.isLoading}
@@ -1488,6 +1571,7 @@ export function WorkflowsPage() {
             onRunDeliveryJSONChange={setRunDeliveryJSON}
             onRetrySecretsJSONChange={setRetrySecretsJSON}
             onSelectRun={setSelectedRunID}
+            onRetryRunDetail={() => void runQuery.refetch()}
             onReload={() => reloadMutation.mutate()}
             onRunWorkflow={() => runWorkflowMutation.mutate()}
             reloading={reloadMutation.isPending}
@@ -2298,6 +2382,7 @@ function OperateSurface({
   allRuns,
   selectedRunID,
   selectedRun,
+  runDetailState,
   events,
   graph,
   loadingRuns,
@@ -2314,6 +2399,7 @@ function OperateSurface({
   onRunDeliveryJSONChange,
   onRetrySecretsJSONChange,
   onSelectRun,
+  onRetryRunDetail,
   onReload,
   onRunWorkflow,
   reloading,
@@ -2345,6 +2431,7 @@ function OperateSurface({
   allRuns: WorkflowRun[]
   selectedRunID: string | null
   selectedRun?: WorkflowRun
+  runDetailState: WorkflowRunDetailState
   events: Awaited<ReturnType<typeof getWorkflowRunEvents>>["events"]
   graph?: Awaited<ReturnType<typeof getWorkflowRunGraph>>
   loadingRuns: boolean
@@ -2361,6 +2448,7 @@ function OperateSurface({
   onRunDeliveryJSONChange: (value: string) => void
   onRetrySecretsJSONChange: (value: string) => void
   onSelectRun: (runID: string) => void
+  onRetryRunDetail: () => void
   onReload: () => void
   onRunWorkflow: () => void
   reloading: boolean
@@ -2447,6 +2535,7 @@ function OperateSurface({
       <section className="border-border bg-card/40 flex min-h-0 flex-col overflow-hidden rounded-lg border">
         <RunDetailHeader
           run={selectedRun}
+          requestedRunID={selectedRunID}
           onCancel={onCancel}
           onRetry={onRetry}
           canceling={canceling}
@@ -2462,7 +2551,11 @@ function OperateSurface({
           className="min-h-0 flex-1 overflow-auto p-4"
         >
           {selectedRun == null ? (
-            <EmptyPanel label="No run selected" />
+            <RunDetailAvailability
+              state={runDetailState}
+              runID={selectedRunID}
+              onRetry={onRetryRunDetail}
+            />
           ) : (
             <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.65fr)]">
               <RunSummary run={selectedRun} />
@@ -2478,6 +2571,52 @@ function OperateSurface({
           )}
         </ScrollRegion>
       </section>
+    </div>
+  )
+}
+
+function RunDetailAvailability({
+  state,
+  runID,
+  onRetry,
+}: {
+  state: WorkflowRunDetailState
+  runID: string | null
+  onRetry: () => void
+}) {
+  if (state === "none" || runID == null) {
+    return <EmptyPanel label="No run selected" />
+  }
+  if (state === "loading") {
+    return (
+      <div
+        role="status"
+        className="border-border/70 text-muted-foreground grid gap-2 rounded-md border border-dashed p-6 text-center text-sm"
+      >
+        <span>Loading workflow run</span>
+        <span className="font-mono text-xs">{runID}</span>
+      </div>
+    )
+  }
+  return (
+    <div
+      role="alert"
+      className="border-border/70 grid justify-items-center gap-3 rounded-md border border-dashed p-6 text-center text-sm"
+    >
+      <div>
+        <div className="font-medium">
+          {state === "not-found"
+            ? "Workflow run not found"
+            : "Workflow run unavailable"}
+        </div>
+        <div className="text-muted-foreground mt-1 font-mono text-xs">
+          {runID}
+        </div>
+      </div>
+      <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+        <IconRefresh className="size-4" />
+        Retry run detail
+      </Button>
     </div>
   )
 }
@@ -2942,6 +3081,7 @@ function RunList({
 
 function RunDetailHeader({
   run,
+  requestedRunID,
   canCancel,
   canRetry,
   canceling,
@@ -2953,6 +3093,7 @@ function RunDetailHeader({
   onRetry,
 }: {
   run?: WorkflowRun
+  requestedRunID: string | null
   canCancel: boolean
   canRetry: boolean
   canceling: boolean
@@ -2978,7 +3119,7 @@ function RunDetailHeader({
             {run ? <StatusBadge status={run.status} /> : null}
           </div>
           <div className="text-muted-foreground mt-0.5 truncate font-mono text-xs">
-            {run?.id ?? "Select a workflow run"}
+            {run?.id ?? requestedRunID ?? "Select a workflow run"}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -3035,9 +3176,50 @@ function RunDetailHeader({
 }
 
 function RunSummary({ run }: { run: WorkflowRun }) {
+  const workflowRef = navigableWorkflowRef(run.workflow_ref)
+  const runID = isWorkflowRunID(run.id) ? run.id : undefined
+  const eventID = trustedWorkflowEventID(run.event)
   return (
     <Panel title="Summary">
       <dl className="grid grid-cols-2 gap-3 text-sm">
+        <Meta
+          label="Workflow"
+          value={
+            workflowRef ? (
+              <Link
+                to="/agent/workflows"
+                search={{
+                  mode: "operate",
+                  workflow: workflowRef,
+                  ...(runID ? { run: runID } : {}),
+                }}
+                className="text-primary hover:underline"
+              >
+                {workflowRef}
+              </Link>
+            ) : (
+              run.workflow_ref
+            )
+          }
+          mono
+        />
+        <Meta
+          label="Event"
+          value={
+            eventID ? (
+              <Link
+                to="/events"
+                search={{ event: eventID }}
+                className="text-primary hover:underline"
+              >
+                {eventID}
+              </Link>
+            ) : (
+              "-"
+            )
+          }
+          mono
+        />
         <Meta label="Created" value={formatDate(run.created_at)} />
         <Meta label="Updated" value={formatDate(run.updated_at)} />
         <Meta label="Completed" value={formatDate(run.completed_at)} />
@@ -3730,7 +3912,7 @@ function Meta({
   mono,
 }: {
   label: string
-  value: string
+  value: ReactNode
   mono?: boolean
 }) {
   return (
@@ -4109,6 +4291,10 @@ function jsonStringObjectValidationMessage(value: string, label: string) {
 
 function jsonSyntaxMessage(err: unknown) {
   return err instanceof Error ? err.message : "invalid JSON"
+}
+
+function workflowRunWasNotFound(err: unknown) {
+  return err instanceof WorkflowAPIError && err.status === 404
 }
 
 function errorMessage(err: unknown) {

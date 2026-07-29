@@ -4,9 +4,10 @@ import userEvent from "@testing-library/user-event"
 import type { AnchorHTMLAttributes, ReactNode } from "react"
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
-import type { EventView } from "@/api/events"
+import type { DispatchView, EventView } from "@/api/events"
 import {
   getEvent,
+  getEventDispatch,
   getEventPayload,
   listEventDispatches,
   listEvents,
@@ -20,6 +21,7 @@ import { SidebarProvider } from "@/components/ui/sidebar"
 
 vi.mock("@/api/events", () => ({
   getEvent: vi.fn(),
+  getEventDispatch: vi.fn(),
   getEventPayload: vi.fn(),
   listEventDispatches: vi.fn(),
   listEvents: vi.fn(),
@@ -90,6 +92,36 @@ const replayedEvent: EventView = {
   },
 }
 
+const dispatchA: DispatchView = {
+  id: "dsp_11111111111111111111111111111111",
+  event_id: eventA.id,
+  workflow_ref: "workflows/github-issue-triage.yml",
+  workflow_revision:
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  run_id: "wr_event_1",
+  status: "succeeded",
+  available_at: "2026-07-29T13:00:01Z",
+  attempts: 1,
+  created_at: "2026-07-29T13:00:02Z",
+  updated_at: "2026-07-29T13:00:03Z",
+  linked_at: "2026-07-29T13:00:02Z",
+  finished_at: "2026-07-29T13:00:03Z",
+}
+
+const dispatchB: DispatchView = {
+  ...dispatchA,
+  id: "dsp_22222222222222222222222222222222",
+  event_id: eventB.id,
+  workflow_ref: "workflows/pull-request-close.yml",
+  run_id: "",
+  status: "pending",
+  workflow_revision:
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  updated_at: "2026-07-29T13:01:03Z",
+  linked_at: undefined,
+  finished_at: undefined,
+}
+
 describe("EventsPage", () => {
   beforeAll(() => {
     Object.defineProperty(window, "matchMedia", {
@@ -109,6 +141,7 @@ describe("EventsPage", () => {
 
   beforeEach(() => {
     vi.mocked(getEvent).mockReset()
+    vi.mocked(getEventDispatch).mockReset()
     vi.mocked(getEventPayload).mockReset()
     vi.mocked(listEventDispatches).mockReset()
     vi.mocked(listEvents).mockReset()
@@ -127,21 +160,11 @@ describe("EventsPage", () => {
       return eventA
     })
     vi.mocked(listEventDispatches).mockResolvedValue({
-      dispatches: [
-        {
-          id: "dsp_11111111111111111111111111111111",
-          event_id: eventA.id,
-          workflow_ref: "github-issue-triage",
-          run_id: "wr_event_1",
-          status: "succeeded",
-          available_at: "2026-07-29T13:00:01Z",
-          attempts: 1,
-          created_at: "2026-07-29T13:00:02Z",
-          updated_at: "2026-07-29T13:00:03Z",
-          finished_at: "2026-07-29T13:00:03Z",
-        },
-      ],
+      dispatches: [dispatchA],
     })
+    vi.mocked(getEventDispatch).mockImplementation(async (dispatchID) =>
+      dispatchID === dispatchB.id ? dispatchB : dispatchA,
+    )
     vi.mocked(getEventPayload).mockResolvedValue('{"issue":9007199254740993}')
     vi.mocked(replayEvent).mockResolvedValue({ event: replayedEvent })
   })
@@ -165,7 +188,7 @@ describe("EventsPage", () => {
     })
     expect(getEventPayload).not.toHaveBeenCalled()
     expect(
-      (await screen.findAllByText("github-issue-triage")).length,
+      (await screen.findAllByText("workflows/github-issue-triage.yml")).length,
     ).toBeGreaterThan(0)
 
     await user.click(screen.getByRole("button", { name: "Load more" }))
@@ -358,6 +381,184 @@ describe("EventsPage", () => {
       })
     })
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument()
+  })
+
+  it("loads globally filtered dispatch pages and exact selected detail", async () => {
+    vi.mocked(listEventDispatches)
+      .mockResolvedValueOnce({
+        dispatches: [dispatchA],
+        next_cursor: "dispatch-page-2",
+      })
+      .mockResolvedValueOnce({ dispatches: [dispatchB] })
+    const user = userEvent.setup()
+
+    renderEventsPage({
+      view: "dispatches",
+      dispatch_event: eventA.id,
+      workflow: dispatchA.workflow_ref,
+      dispatch_status: "succeeded",
+      dispatch: dispatchA.id,
+    })
+
+    await waitFor(() => {
+      expect(listEventDispatches).toHaveBeenCalledWith({
+        eventID: eventA.id,
+        workflowRef: dispatchA.workflow_ref,
+        status: "succeeded",
+        limit: 40,
+        cursor: undefined,
+      })
+      expect(getEventDispatch).toHaveBeenCalledWith(dispatchA.id)
+    })
+    expect(
+      await screen.findByText(dispatchA.workflow_revision!),
+    ).toBeInTheDocument()
+
+    expect(screen.getByRole("link", { name: "Open event" })).toHaveAttribute(
+      "href",
+      `/events?event=${eventA.id}`,
+    )
+    expect(screen.getByRole("link", { name: "Open workflow" })).toHaveAttribute(
+      "href",
+      "/agent/workflows?mode=operate&workflow=workflows%2Fgithub-issue-triage.yml",
+    )
+    expect(screen.getByRole("link", { name: "Open run" })).toHaveAttribute(
+      "href",
+      "/agent/workflows?mode=operate&workflow=workflows%2Fgithub-issue-triage.yml&run=wr_event_1",
+    )
+    expect(
+      screen.getByRole("link", { name: "Dispatch permalink" }),
+    ).toHaveAttribute(
+      "href",
+      `/events?view=dispatches&dispatch=${dispatchA.id}`,
+    )
+
+    await user.click(screen.getByRole("button", { name: "Load more" }))
+    await waitFor(() => {
+      expect(listEventDispatches).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ cursor: "dispatch-page-2" }),
+      )
+    })
+    expect(
+      screen.getByText("workflows/pull-request-close.yml"),
+    ).toBeInTheDocument()
+  })
+
+  it("keeps exact dispatch detail selected outside the list filters", async () => {
+    vi.mocked(listEventDispatches).mockResolvedValue({ dispatches: [] })
+    const onSearchChange = vi.fn()
+
+    renderEventsPage(
+      {
+        view: "dispatches",
+        workflow: "workflows/no-match.yml",
+        dispatch: dispatchA.id,
+      },
+      onSearchChange,
+    )
+
+    expect(
+      await screen.findByText(dispatchA.workflow_revision!),
+    ).toBeInTheDocument()
+    expect(getEventDispatch).toHaveBeenCalledWith(dispatchA.id)
+    expect(onSearchChange).not.toHaveBeenCalled()
+  })
+
+  it("preserves hidden URL state across view toggles and filter changes", async () => {
+    const onSearchChange = vi.fn()
+    const user = userEvent.setup()
+    const search: EventsRouteSearch = {
+      source: "github",
+      connector: "primary",
+      type: "issues.opened",
+      routing_status: "succeeded",
+      event: eventA.id,
+      dispatch_event: eventB.id,
+      workflow: dispatchB.workflow_ref,
+      dispatch_status: "pending",
+      dispatch: dispatchB.id,
+    }
+    renderEventsPage(search, onSearchChange)
+
+    await user.click(screen.getByRole("tab", { name: "Dispatches" }))
+    expect(onSearchChange).toHaveBeenCalledWith({
+      ...search,
+      view: "dispatches",
+    })
+
+    onSearchChange.mockClear()
+    await user.clear(screen.getByLabelText("Source"))
+    await user.type(screen.getByLabelText("Source"), "email")
+    await user.click(screen.getByRole("button", { name: "Apply filters" }))
+    expect(onSearchChange).toHaveBeenCalledWith(
+      {
+        source: "email",
+        connector: "primary",
+        type: "issues.opened",
+        routing_status: "succeeded",
+        dispatch_event: eventB.id,
+        workflow: dispatchB.workflow_ref,
+        dispatch_status: "pending",
+        dispatch: dispatchB.id,
+      },
+      true,
+    )
+  })
+
+  it("rehydrates each view from URL state during back-forward rerenders", async () => {
+    const view = renderEventsPage({
+      view: "dispatches",
+      dispatch_event: eventB.id,
+      workflow: dispatchB.workflow_ref,
+      dispatch_status: "pending",
+      dispatch: dispatchB.id,
+    })
+
+    expect(await screen.findByLabelText("Event ID")).toHaveValue(eventB.id)
+    expect(screen.getByLabelText("Workflow")).toHaveValue(
+      dispatchB.workflow_ref,
+    )
+
+    view.rerenderPage({
+      source: "github",
+      connector: "primary",
+      type: "issues.opened",
+      routing_status: "succeeded",
+      event: eventA.id,
+      dispatch_event: eventB.id,
+      workflow: dispatchB.workflow_ref,
+      dispatch_status: "pending",
+      dispatch: dispatchB.id,
+    })
+
+    expect(await screen.findByLabelText("Source")).toHaveValue("github")
+    expect(screen.getByLabelText("Connector")).toHaveValue("primary")
+    expect(screen.getByLabelText("Event type")).toHaveValue("issues.opened")
+
+    view.rerenderPage({
+      view: "dispatches",
+      dispatch_event: eventB.id,
+      workflow: dispatchB.workflow_ref,
+      dispatch_status: "pending",
+      dispatch: dispatchB.id,
+    })
+
+    expect(await screen.findByLabelText("Event ID")).toHaveValue(eventB.id)
+    expect(screen.getByLabelText("Workflow")).toHaveValue(
+      dispatchB.workflow_ref,
+    )
+  })
+
+  it("links event dispatch rows to exact dispatch URLs", async () => {
+    renderEventsPage({ event: eventA.id })
+
+    expect(
+      await screen.findByRole("link", { name: "Open dispatch" }),
+    ).toHaveAttribute(
+      "href",
+      `/events?view=dispatches&dispatch=${dispatchA.id}`,
+    )
   })
 })
 

@@ -272,9 +272,10 @@ const eventResponse = {
 }
 
 const eventDispatchResponse = {
-  id: "dsp_smoke",
+  id: "dsp_0123456789abcdef0123456789abcdef",
   event_id: eventResponse.id,
   workflow_ref: "workflows/github-issue-triage.yml",
+  workflow_revision: "sha256:0123456789abcdef",
   run_id: "wr_smoke",
   status: "succeeded",
   available_at: "2026-07-16T12:00:00Z",
@@ -1479,6 +1480,8 @@ async function mockLauncherApis(
           return json(route, { events: [eventResponse] })
         case "/api/events/dispatches":
           return json(route, { dispatches: [eventDispatchResponse] })
+        case `/api/events/dispatches/${eventDispatchResponse.id}`:
+          return json(route, eventDispatchResponse)
         case `/api/events/${eventResponse.id}`:
           return json(route, eventResponse)
         case `/api/events/${eventResponse.id}/payload`:
@@ -1973,6 +1976,59 @@ test("events payload stays opt-in and replay remains deliberate", async ({
 
   await page.waitForTimeout(100)
   expect(replayRequests).toBe(1)
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("dispatch and workflow deep links survive reload with exact relationships", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(
+    page,
+    `/events?view=dispatches&dispatch=${eventDispatchResponse.id}`,
+  )
+
+  await expect(
+    page.getByText(eventDispatchResponse.workflow_revision),
+  ).toBeVisible()
+  await expect(page.getByRole("link", { name: "Open event" })).toHaveAttribute(
+    "href",
+    `/events?event=${eventResponse.id}`,
+  )
+  await expect(
+    page.getByRole("link", { name: "Open workflow" }),
+  ).toHaveAttribute(
+    "href",
+    "/agent/workflows?mode=operate&workflow=workflows%2Fgithub-issue-triage.yml",
+  )
+  await expect(page.getByRole("link", { name: "Open run" })).toHaveAttribute(
+    "href",
+    "/agent/workflows?mode=operate&workflow=workflows%2Fgithub-issue-triage.yml&run=wr_smoke",
+  )
+  await page.reload()
+  await expect(
+    page.getByText(eventDispatchResponse.workflow_revision),
+  ).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+
+  await page.goto(
+    "/agent/workflows?mode=operate&workflow=workflows%2Fsummarize-text.yml&run=wr_test&q=succeeded",
+  )
+  await expect(page.getByText("wr_test", { exact: true }).first()).toBeVisible()
+  await expect(
+    page.getByRole("link", { name: "workflows/summarize-text.yml" }),
+  ).toHaveAttribute(
+    "href",
+    expect.stringContaining(
+      "mode=operate&workflow=workflows%2Fsummarize-text.yml&run=wr_test",
+    ),
+  )
+  await page.reload()
+  await expect(page.getByText("wr_test", { exact: true }).first()).toBeVisible()
+  await expect(page).toHaveURL(/mode=operate/)
+  await expect(page).toHaveURL(/run=wr_test/)
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
@@ -3021,7 +3077,9 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
     .locator("#workflow-test-delivery")
     .fill('{"channel":"telegram","chat_id":"support"}')
   await page.getByRole("button", { name: "Test Draft" }).click()
-  await expect(page.getByText("wr_draft_failed")).toBeVisible()
+  await expect(
+    page.getByText("wr_draft_failed", { exact: true }).first(),
+  ).toBeVisible()
   await expect(page.getByText("agent step failed").first()).toBeVisible()
   await expect(page.getByRole("button", { name: "Fix With AI" })).toBeVisible()
   await page.getByRole("button", { name: "Fix With AI" }).click()

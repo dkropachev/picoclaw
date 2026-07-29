@@ -39,17 +39,51 @@ export function EventFilterBar({
 }) {
   const { t } = useTranslation()
   const [draft, setDraft] = useState(filters)
+  const [validationError, setValidationError] = useState("")
 
   useEffect(() => {
     setDraft(filters)
+    setValidationError("")
   }, [filters])
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    const source = draft.source.trim()
+    const connector = draft.connector.trim()
+    const type = draft.type.trim()
+    const encoder = new TextEncoder()
+    if (encoder.encode(source).byteLength > 128) {
+      setValidationError(
+        t(
+          "pages.events.filters.invalid_source",
+          "Source must not exceed 128 UTF-8 bytes.",
+        ),
+      )
+      return
+    }
+    if (encoder.encode(connector).byteLength > 256) {
+      setValidationError(
+        t(
+          "pages.events.filters.invalid_connector",
+          "Connector must not exceed 256 UTF-8 bytes.",
+        ),
+      )
+      return
+    }
+    if (encoder.encode(type).byteLength > 256) {
+      setValidationError(
+        t(
+          "pages.events.filters.invalid_type",
+          "Event type must not exceed 256 UTF-8 bytes.",
+        ),
+      )
+      return
+    }
+    setValidationError("")
     onApply({
-      source: draft.source.trim(),
-      connector: draft.connector.trim(),
-      type: draft.type.trim(),
+      source,
+      connector,
+      type,
       routingStatus: draft.routingStatus,
     })
   }
@@ -62,6 +96,7 @@ export function EventFilterBar({
       routingStatus: "",
     }
     setDraft(empty)
+    setValidationError("")
     onReset()
   }
 
@@ -78,6 +113,7 @@ export function EventFilterBar({
           id="events-source"
           value={draft.source}
           maxLength={128}
+          aria-invalid={validationError !== "" || undefined}
           onChange={(event) =>
             setDraft((current) => ({
               ...current,
@@ -95,6 +131,7 @@ export function EventFilterBar({
           id="events-connector"
           value={draft.connector}
           maxLength={256}
+          aria-invalid={validationError !== "" || undefined}
           onChange={(event) =>
             setDraft((current) => ({
               ...current,
@@ -112,6 +149,7 @@ export function EventFilterBar({
           id="events-type"
           value={draft.type}
           maxLength={256}
+          aria-invalid={validationError !== "" || undefined}
           onChange={(event) =>
             setDraft((current) => ({
               ...current,
@@ -150,6 +188,14 @@ export function EventFilterBar({
           </SelectContent>
         </Select>
       </div>
+      {validationError ? (
+        <p
+          role="alert"
+          className="text-destructive min-w-0 text-xs sm:col-span-2 xl:col-span-4"
+        >
+          {validationError}
+        </p>
+      ) : null}
       <div className="flex min-w-0 gap-2 sm:col-span-2 xl:col-span-4 xl:justify-end">
         <Button
           type="button"

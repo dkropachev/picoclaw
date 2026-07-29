@@ -13,6 +13,7 @@ type Store struct{}
 var _ Inbox = (*Store)(nil)
 var _ EventOperatorReader = (*Store)(nil)
 var _ DispatchOperatorReader = (*Store)(nil)
+var _ DispatchOperatorGetter = (*Store)(nil)
 var _ RevisionRoutingDispatchCreator = (*Store)(nil)
 var _ DispatchLeaseRenewer = (*Store)(nil)
 
@@ -99,6 +100,10 @@ func (*Store) CreateDispatch(context.Context, string, string) (Dispatch, bool, e
 
 func (*Store) GetDispatch(context.Context, string) (Dispatch, error) {
 	return Dispatch{}, ErrUnsupportedPlatform
+}
+
+func (*Store) GetDispatchMetadata(context.Context, string) (DispatchMetadata, error) {
+	return DispatchMetadata{}, ErrUnsupportedPlatform
 }
 
 func (*Store) ClaimDispatches(context.Context, string, int, time.Duration) ([]Dispatch, error) {

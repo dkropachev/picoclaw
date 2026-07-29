@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	testEventID  = "ev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	testReplayID = "ev_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	testEventID    = "ev_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testReplayID   = "ev_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	testDispatchID = "dsp_cccccccccccccccccccccccccccccccc"
 )
 
 func TestEventRoutesProxyAllowlistedContractAndKeepHeadersPrivate(t *testing.T) {
@@ -99,6 +100,11 @@ func TestEventRoutesProxyAllowlistedContractAndKeepHeadersPrivate(t *testing.T) 
 				"cursor":       {"v1_dispatch"},
 			},
 			wantBody: `{"ok":true}`,
+		},
+		{
+			path:         "/api/events/dispatches/" + testDispatchID,
+			upstreamPath: "/runtime/eventing/dispatches/" + testDispatchID,
+			wantBody:     `{"ok":true}`,
 		},
 	}
 
@@ -188,6 +194,10 @@ func TestEventRoutesRejectPathsAndQueriesOutsideContract(t *testing.T) {
 		"/api/events/dispatches?workflow_ref=",
 		"/api/events/dispatches?limit=10&limit=20",
 		"/api/events/dispatches?source=github",
+		"/api/events/dispatches/not-a-dispatch",
+		"/api/events/dispatches/dsp_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+		"/api/events/dispatches/%64sp_cccccccccccccccccccccccccccccccc",
+		"/api/events/dispatches/" + testDispatchID + "?include_owner=true",
 	}
 	for _, path := range tests {
 		rec := httptest.NewRecorder()
@@ -198,6 +208,28 @@ func TestEventRoutesRejectPathsAndQueriesOutsideContract(t *testing.T) {
 		if rec.Header().Get("Cache-Control") != "no-store" {
 			t.Fatalf("%s did not set no-store", path)
 		}
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(
+		rec,
+		httptest.NewRequest(
+			http.MethodPost,
+			"/api/events/dispatches/"+testDispatchID,
+			nil,
+		),
+	)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf(
+			"dispatch detail POST status = %d, want 405, body=%s",
+			rec.Code,
+			rec.Body.String(),
+		)
+	}
+	if got := rec.Header().Get("Allow"); got != http.MethodGet {
+		t.Fatalf("dispatch detail Allow = %q, want GET", got)
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("dispatch detail method rejection did not set no-store")
 	}
 	if upstreamCalls != 0 {
 		t.Fatalf("invalid requests reached upstream %d times", upstreamCalls)
@@ -325,6 +357,41 @@ func TestEventProxyMapsUnavailableAndMalformedUpstreamSafely(t *testing.T) {
 				t.Fatal("retryable response did not set Retry-After")
 			}
 		})
+	}
+}
+
+func TestEventDispatchDetailPreservesSafeNotFound(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	installEventProxyStubs(t, func(req *http.Request, _ time.Duration) (*http.Response, error) {
+		if req.Method != http.MethodGet ||
+			req.URL.Path != "/runtime/eventing/dispatches/"+testDispatchID {
+			t.Fatalf("upstream request = %s %s", req.Method, req.URL.Path)
+		}
+		return eventUpstreamResponse(http.StatusNotFound, `{"error":"Not Found"}`), nil
+	})
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(
+		rec,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/api/events/dispatches/"+testDispatchID,
+			nil,
+		),
+	)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("dispatch not-found response did not set no-store")
+	}
+	if got := rec.Body.String(); got != `{"error":"Not Found"}` {
+		t.Fatalf("body = %q, want safe upstream not-found body", got)
 	}
 }
 

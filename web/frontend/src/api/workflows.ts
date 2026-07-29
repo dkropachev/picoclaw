@@ -370,11 +370,34 @@ export interface WorkflowDevelopmentPublishRequest {
 
 export type WorkflowDeliveryPayload = Record<string, unknown>
 
+export class WorkflowAPIError extends Error {
+  readonly status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = "WorkflowAPIError"
+    this.status = status
+  }
+}
+
+const workflowRunIDPattern = /^wr_[A-Za-z0-9_-]+$/
+const maximumWorkflowRunIDLength = 256
+
+function validWorkflowRunID(value: string): boolean {
+  return (
+    value.length <= maximumWorkflowRunIDLength &&
+    workflowRunIDPattern.test(value)
+  )
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await launcherFetch(path, options)
   if (!res.ok) {
     const text = await res.text()
-    throw new Error(apiErrorMessage(text, res.status, res.statusText))
+    throw new WorkflowAPIError(
+      apiErrorMessage(text, res.status, res.statusText),
+      res.status,
+    )
   }
   return res.json() as Promise<T>
 }
@@ -732,11 +755,21 @@ export async function listWorkflowRuns(): Promise<{ runs: WorkflowRun[] }> {
 }
 
 export async function getWorkflowRun(runID: string): Promise<WorkflowRun> {
-  return normalizeWorkflowRun(
+  if (!validWorkflowRunID(runID)) {
+    throw new WorkflowAPIError("Invalid workflow run identifier.", 400)
+  }
+  const run = normalizeWorkflowRun(
     await request<WorkflowRun>(
       `/api/workflows/runs/${encodeURIComponent(runID)}`,
     ),
   )
+  if (run.id !== runID) {
+    throw new WorkflowAPIError(
+      "The workflow service returned a mismatched run.",
+      502,
+    )
+  }
+  return run
 }
 
 export async function getWorkflowRunEvents(

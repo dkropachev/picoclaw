@@ -38,9 +38,12 @@ type fakeStore struct {
 	listEntered chan struct{}
 	listRelease chan struct{}
 
-	dispatchPage  eventing.DispatchMetadataPage
-	dispatchErr   error
-	dispatchCalls []eventing.DispatchFilter
+	dispatchPage     eventing.DispatchMetadataPage
+	dispatchErr      error
+	dispatchCalls    []eventing.DispatchFilter
+	dispatchResult   eventing.DispatchMetadata
+	dispatchGetErr   error
+	dispatchGetCalls []string
 
 	replayResult eventing.InsertResult
 	replayErr    error
@@ -125,6 +128,16 @@ func (store *fakeStore) ListDispatchMetadata(
 	return store.dispatchPage, store.dispatchErr
 }
 
+func (store *fakeStore) GetDispatchMetadata(
+	_ context.Context,
+	id string,
+) (eventing.DispatchMetadata, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.dispatchGetCalls = append(store.dispatchGetCalls, id)
+	return store.dispatchResult, store.dispatchGetErr
+}
+
 func (store *fakeStore) Replay(
 	ctx context.Context,
 	id string,
@@ -145,6 +158,12 @@ func (store *fakeStore) dispatchFilters() []eventing.DispatchFilter {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	return append([]eventing.DispatchFilter(nil), store.dispatchCalls...)
+}
+
+func (store *fakeStore) dispatchIDs() []string {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return append([]string(nil), store.dispatchGetCalls...)
 }
 
 func (store *fakeStore) replayIDs() []string {
@@ -229,19 +248,20 @@ func testDispatch() eventing.Dispatch {
 
 func testDispatchMetadata(dispatch eventing.Dispatch) eventing.DispatchMetadata {
 	return eventing.DispatchMetadata{
-		ID:          dispatch.ID,
-		EventID:     dispatch.EventID,
-		WorkflowRef: dispatch.WorkflowRef,
-		RunID:       dispatch.RunID,
-		Status:      dispatch.Status,
-		LeaseUntil:  cloneTime(dispatch.LeaseUntil),
-		AvailableAt: dispatch.AvailableAt,
-		Attempts:    dispatch.Attempts,
-		LastError:   dispatch.LastError,
-		CreatedAt:   dispatch.CreatedAt,
-		UpdatedAt:   dispatch.UpdatedAt,
-		LinkedAt:    cloneTime(dispatch.LinkedAt),
-		FinishedAt:  cloneTime(dispatch.FinishedAt),
+		ID:               dispatch.ID,
+		EventID:          dispatch.EventID,
+		WorkflowRef:      dispatch.WorkflowRef,
+		WorkflowRevision: dispatch.WorkflowRevision,
+		RunID:            dispatch.RunID,
+		Status:           dispatch.Status,
+		LeaseUntil:       cloneTime(dispatch.LeaseUntil),
+		AvailableAt:      dispatch.AvailableAt,
+		Attempts:         dispatch.Attempts,
+		LastError:        dispatch.LastError,
+		CreatedAt:        dispatch.CreatedAt,
+		UpdatedAt:        dispatch.UpdatedAt,
+		LinkedAt:         cloneTime(dispatch.LinkedAt),
+		FinishedAt:       cloneTime(dispatch.FinishedAt),
 	}
 }
 
