@@ -87,6 +87,17 @@ type WorkflowsConfig struct {
 }
 
 const (
+	DefaultWorkflowMaxCallDepth      = 4
+	DefaultWorkflowMaxConcurrentRuns = 4
+	DefaultWorkflowTimeoutSeconds    = 5 * 60
+	DefaultWorkflowRetentionDays     = 30
+	MaxWorkflowMaxCallDepth          = 64
+	MaxWorkflowMaxConcurrentRuns     = 1024
+	MaxWorkflowDefaultTimeoutSeconds = 31 * 24 * 60 * 60
+	MaxWorkflowRetentionDays         = 10 * 365
+)
+
+const (
 	DefaultGitWorkspaceMaxTotalSizeBytes       int64 = 20 * 1024 * 1024 * 1024
 	DefaultGitWorkspaceIgnoredCleanupDelaySecs       = 24 * 60 * 60
 	DefaultGitWorkspaceDropDelaySecs                 = 30 * 24 * 60 * 60
@@ -134,21 +145,30 @@ func (c GitWorkspacesConfig) EffectiveDropDelay() time.Duration {
 
 func (c WorkflowsConfig) EffectiveMaxCallDepth() int {
 	if c.MaxCallDepth > 0 {
+		if c.MaxCallDepth > MaxWorkflowMaxCallDepth {
+			return MaxWorkflowMaxCallDepth
+		}
 		return c.MaxCallDepth
 	}
-	return 4
+	return DefaultWorkflowMaxCallDepth
 }
 
 func (c WorkflowsConfig) EffectiveMaxConcurrentRuns() int {
 	if c.MaxConcurrentRuns > 0 {
+		if c.MaxConcurrentRuns > MaxWorkflowMaxConcurrentRuns {
+			return MaxWorkflowMaxConcurrentRuns
+		}
 		return c.MaxConcurrentRuns
 	}
-	return 4
+	return DefaultWorkflowMaxConcurrentRuns
 }
 
 func (c WorkflowsConfig) EffectiveDefaultTimeout() time.Duration {
 	if c.DefaultTimeoutSeconds <= 0 {
-		return 5 * time.Minute
+		return time.Duration(DefaultWorkflowTimeoutSeconds) * time.Second
+	}
+	if c.DefaultTimeoutSeconds > MaxWorkflowDefaultTimeoutSeconds {
+		return time.Duration(MaxWorkflowDefaultTimeoutSeconds) * time.Second
 	}
 	return time.Duration(c.DefaultTimeoutSeconds) * time.Second
 }
@@ -163,9 +183,12 @@ func (c WorkflowsConfig) EffectiveDefinitionsDir() string {
 
 func (c WorkflowsConfig) EffectiveRetentionDays() int {
 	if c.RetentionDays > 0 {
+		if c.RetentionDays > MaxWorkflowRetentionDays {
+			return MaxWorkflowRetentionDays
+		}
 		return c.RetentionDays
 	}
-	return 30
+	return DefaultWorkflowRetentionDays
 }
 
 func (c EvolutionConfig) MarshalJSON() ([]byte, error) {
@@ -2527,6 +2550,15 @@ func toNameIndex(list []*ModelConfig) []string {
 }
 
 func SaveConfig(path string, cfg *Config) error {
+	unlock, err := lockConfigMutation(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return saveConfigUnlocked(path, cfg)
+}
+
+func saveConfigUnlocked(path string, cfg *Config) error {
 	if err := cfg.Events.Ingress.ValidatePublicIdentities(
 		cfg.SensitiveDataValues()...,
 	); err != nil {
@@ -2887,6 +2919,11 @@ func (c *Config) securityCopyFrom(path string, resolveEventWebhooks bool) error 
 // ResetToDefaults backs up the current config, creates a default config,
 // preserves security credentials from the existing config, and saves it.
 func ResetToDefaults(configPath string) error {
+	unlock, err := lockConfigMutation(configPath)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := MakeBackup(configPath); err != nil {
 		return fmt.Errorf("backup before reset: %w", err)
 	}
@@ -2896,7 +2933,7 @@ func ResetToDefaults(configPath string) error {
 	if err := cfg.SecurityCopyFrom(configPath); err != nil {
 		logger.WarnF("could not preserve security config", map[string]any{"error": err})
 	}
-	return SaveConfig(configPath, cfg)
+	return saveConfigUnlocked(configPath, cfg)
 }
 
 func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {

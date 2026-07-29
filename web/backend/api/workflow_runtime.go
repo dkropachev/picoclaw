@@ -19,6 +19,18 @@ type workflowRuntimeRunners struct {
 	RuntimeEvents workflows.RuntimeEventPublisher
 }
 
+type workflowDependencyRuntime interface {
+	workflows.WorkflowDependencyRuntimeResolver
+	Close() error
+}
+
+var newWorkflowDependencyRuntime = func(
+	configPath string,
+	cfg *config.Config,
+) workflowDependencyRuntime {
+	return &webWorkflowRuntimeRunner{configPath: configPath, config: cfg}
+}
+
 var newWorkflowRuntimeRunners = func(configPath string) workflowRuntimeRunners {
 	runner := &webWorkflowRuntimeRunner{configPath: configPath}
 	return workflowRuntimeRunners{
@@ -29,10 +41,12 @@ var newWorkflowRuntimeRunners = func(configPath string) workflowRuntimeRunners {
 }
 
 type webWorkflowRuntimeRunner struct {
-	configPath string
-	mu         sync.Mutex
-	msgBus     *bus.MessageBus
-	loop       *agentloop.AgentLoop
+	configPath    string
+	config        *config.Config
+	mu            sync.Mutex
+	msgBus        *bus.MessageBus
+	loop          *agentloop.AgentLoop
+	initializeMCP func(context.Context, *agentloop.AgentLoop) error
 }
 
 func (r *webWorkflowRuntimeRunner) RunAgent(ctx context.Context, req workflows.AgentRequest) (map[string]any, error) {
@@ -55,6 +69,17 @@ func (r *webWorkflowRuntimeRunner) RunTool(ctx context.Context, req workflows.To
 	defer r.mu.Unlock()
 	if err := r.ensureLoopLocked(); err != nil {
 		return nil, err
+	}
+	if req.MCP {
+		initializeMCP := r.initializeMCP
+		if initializeMCP == nil {
+			initializeMCP = func(ctx context.Context, loop *agentloop.AgentLoop) error {
+				return loop.EnsureMCPInitialized(ctx)
+			}
+		}
+		if err := initializeMCP(ctx, r.loop); err != nil {
+			return nil, fmt.Errorf("failed to initialize MCP for workflow tool step: %w", err)
+		}
 	}
 	runner, err := agentloop.NewWorkflowToolRunner(r.loop, req.AgentID)
 	if err != nil {
@@ -79,13 +104,39 @@ func (r *webWorkflowRuntimeRunner) PublishNonBlocking(evt runtimeevents.Event) r
 	return bus.PublishNonBlocking(evt)
 }
 
+func (r *webWorkflowRuntimeRunner) ResolveWorkflowDependency(
+	ctx context.Context,
+	dependency workflows.WorkflowDependencyOccurrence,
+) workflows.WorkflowDependencyReadinessCode {
+	if r == nil {
+		return workflows.WorkflowDependencyReadinessUnavailable
+	}
+	if dependency.Kind == workflows.WorkflowDependencyKindReusable {
+		return workflows.WorkflowDependencyReadinessReady
+	}
+	if dependency.Kind == workflows.WorkflowDependencyKindFunction &&
+		workflows.IsNativeFunction(dependency.Name) {
+		return workflows.WorkflowDependencyReadinessReady
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.ensureLoopLocked(); err != nil {
+		return workflows.WorkflowDependencyReadinessInvalidConfiguration
+	}
+	return r.loop.ResolveWorkflowDependency(ctx, dependency)
+}
+
 func (r *webWorkflowRuntimeRunner) ensureLoopLocked() error {
 	if r.loop != nil {
 		return nil
 	}
-	cfg, err := config.LoadConfig(r.configPath)
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+	cfg := r.config
+	if cfg == nil {
+		var err error
+		cfg, err = config.LoadConfig(r.configPath)
+		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
 	}
 	provider, modelID, err := providers.CreateProvider(cfg)
 	if err != nil {

@@ -200,6 +200,14 @@ func (r *ToolRegistry) toolAllowedLocked(name string) bool {
 	return ok
 }
 
+// AllowsRegistration reports whether the registry's allowlist accepts name.
+// It does not inspect whether name is already occupied.
+func (r *ToolRegistry) AllowsRegistration(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.toolAllowedLocked(name)
+}
+
 // HasRegistered reports whether a tool name is present in the registry,
 // including hidden tools whose TTL is currently zero.
 func (r *ToolRegistry) HasRegistered(name string) bool {
@@ -207,6 +215,18 @@ func (r *ToolRegistry) HasRegistered(name string) bool {
 	defer r.mu.RUnlock()
 	_, ok := r.tools[name]
 	return ok
+}
+
+// GetRegistered returns a registered tool regardless of whether a hidden
+// tool's TTL currently makes it callable.
+func (r *ToolRegistry) GetRegistered(name string) (Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	entry, ok := r.tools[name]
+	if !ok {
+		return nil, false
+	}
+	return entry.Tool, true
 }
 
 // HiddenToolSnapshot holds a consistent snapshot of hidden tools and the

@@ -44,4 +44,17 @@ func TestStoreRoutingDispatchCapabilitiesUnsupported(t *testing.T) {
 	); !errors.Is(err, ErrUnsupportedPlatform) {
 		t.Fatalf("CreateDispatchForRoutingClaim() error = %v, want %v", err, ErrUnsupportedPlatform)
 	}
+	if _, _, err := store.CreateRevisionedDispatchForRoutingClaim(
+		context.Background(),
+		"ev_00000000000000000000000000000000",
+		"lease_worker_00000000000000000000000000000000",
+		"workflows/test.yaml",
+		"sha256:revision",
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf(
+			"CreateRevisionedDispatchForRoutingClaim() error = %v, want %v",
+			err,
+			ErrUnsupportedPlatform,
+		)
+	}
 }

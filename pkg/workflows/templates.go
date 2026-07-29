@@ -1,11 +1,15 @@
 package workflows
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
 const (
@@ -414,6 +418,38 @@ type InstalledWorkflowTemplate struct {
 	Overwritten bool   `json:"overwritten,omitempty"`
 }
 
+type builtInWorkflowTemplate struct {
+	name string
+	ref  string
+	raw  string
+}
+
+var builtInWorkflowTemplateRegistry = []builtInWorkflowTemplate{
+	{
+		name: CodeReviewWorkflowName,
+		ref:  CodeReviewWorkflowRef,
+		raw:  CodeReviewWorkflowYAML,
+	},
+	{
+		name: GitHubIssueTriageWorkflowName,
+		ref:  GitHubIssueTriageWorkflowRef,
+		raw:  GitHubIssueTriageWorkflowYAML,
+	},
+}
+
+func findBuiltInWorkflowTemplate(name string) (builtInWorkflowTemplate, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if normalized == "" {
+		normalized = CodeReviewWorkflowName
+	}
+	for _, template := range builtInWorkflowTemplateRegistry {
+		if template.name == normalized {
+			return template, true
+		}
+	}
+	return builtInWorkflowTemplate{}, false
+}
+
 func InstallCodeReviewWorkflow(
 	ctx context.Context,
 	workspace string,
@@ -460,8 +496,43 @@ func installWorkflowTemplate(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := validateWorkflowTemplate(raw); err != nil {
+	unlock, err := lockWorkflowMutation(workspace)
+	if err != nil {
 		return nil, err
+	}
+	defer unlock()
+	return installWorkflowTemplateLocked(
+		ctx,
+		workspace,
+		name,
+		ref,
+		raw,
+		overwrite,
+		opts...,
+	)
+}
+
+func installWorkflowTemplateLocked(
+	ctx context.Context,
+	workspace string,
+	name string,
+	ref string,
+	raw string,
+	overwrite bool,
+	opts ...LocalOption,
+) (*InstalledWorkflowTemplate, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	active, err := getWorkflowDevelopmentSessionLocked(workspace)
+	if err != nil {
+		return nil, err
+	}
+	if active != nil {
+		return nil, ErrActiveDevelopmentExists
+	}
+	if validationErr := validateWorkflowTemplate(raw); validationErr != nil {
+		return nil, validationErr
 	}
 	local := collectLocalOptions(opts...)
 	resolved, err := local.resolver(workspace).ResolveLocal(ref)
@@ -473,22 +544,32 @@ func installWorkflowTemplate(
 		Ref:  resolved.Canonical,
 		Path: resolved.Path,
 	}
-	if _, statErr := os.Stat(resolved.Path); statErr == nil && !overwrite {
-		return result, nil
-	} else if statErr != nil && !os.IsNotExist(statErr) {
-		return nil, statErr
-	} else if statErr == nil {
+	info, statErr := os.Lstat(resolved.Path)
+	switch {
+	case statErr == nil:
+		if !info.Mode().IsRegular() {
+			return nil, ErrWorkflowTemplateTargetBlocked
+		}
+		current, readErr := os.ReadFile(resolved.Path)
+		if readErr != nil {
+			return nil, ErrWorkflowTemplateTargetBlocked
+		}
+		if bytes.Equal(current, []byte(raw)) {
+			return result, nil
+		}
+		if !overwrite {
+			return nil, ErrWorkflowTemplateOverwriteRequired
+		}
 		result.Overwritten = true
+	case errors.Is(statErr, os.ErrNotExist):
+		// The target is available.
+	default:
+		return nil, ErrWorkflowTemplateTargetBlocked
 	}
-	if err := os.MkdirAll(filepath.Dir(resolved.Path), 0o755); err != nil {
+	if err := fileutil.MkdirAllDurable(filepath.Dir(resolved.Path), 0o755); err != nil {
 		return nil, err
 	}
-	tmp := resolved.Path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(raw), 0o644); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(tmp, resolved.Path); err != nil {
-		_ = os.Remove(tmp)
+	if err := writeWorkflowTemplateAtomic(resolved.Path, []byte(raw), 0o644); err != nil {
 		return nil, err
 	}
 	result.Installed = true
@@ -502,14 +583,19 @@ func InstallWorkflowTemplate(
 	overwrite bool,
 	opts ...LocalOption,
 ) (*InstalledWorkflowTemplate, error) {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "", CodeReviewWorkflowName:
-		return InstallCodeReviewWorkflow(ctx, workspace, overwrite, opts...)
-	case GitHubIssueTriageWorkflowName:
-		return InstallGitHubIssueTriageWorkflow(ctx, workspace, overwrite, opts...)
-	default:
+	template, ok := findBuiltInWorkflowTemplate(name)
+	if !ok {
 		return nil, fmt.Errorf("unknown workflow template %q", name)
 	}
+	return installWorkflowTemplate(
+		ctx,
+		workspace,
+		template.name,
+		template.ref,
+		template.raw,
+		overwrite,
+		opts...,
+	)
 }
 
 func validateWorkflowTemplate(raw string) error {

@@ -13,6 +13,7 @@ type Store struct{}
 var _ Inbox = (*Store)(nil)
 var _ EventOperatorReader = (*Store)(nil)
 var _ DispatchOperatorReader = (*Store)(nil)
+var _ RevisionRoutingDispatchCreator = (*Store)(nil)
 var _ DispatchLeaseRenewer = (*Store)(nil)
 
 func Open(context.Context, string, ...Option) (*Store, error) {
@@ -71,6 +72,16 @@ func (*Store) DeadRouting(context.Context, string, string, string) error {
 
 func (*Store) CreateDispatchForRoutingClaim(
 	context.Context,
+	string,
+	string,
+	string,
+) (Dispatch, bool, error) {
+	return Dispatch{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) CreateRevisionedDispatchForRoutingClaim(
+	context.Context,
+	string,
 	string,
 	string,
 	string,

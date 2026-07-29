@@ -12,6 +12,7 @@ import (
 	"time"
 
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
 )
 
 const defaultMaxCallDepth = 4
@@ -82,7 +83,7 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		ctx, cancel = context.WithTimeout(ctx, e.DefaultTimeout)
 		defer cancel()
 	}
-	workflow, workflowRef, loadErr := e.loadWorkflow(req)
+	workflow, workflowRef, loadErr := e.loadWorkflow(ctx, req)
 	if loadErr != nil {
 		return nil, loadErr
 	}
@@ -359,7 +360,10 @@ func checkRunCanceled(ctx context.Context, store RunStore, run *Run) error {
 	return nil
 }
 
-func (e *Executor) loadWorkflow(req RunRequest) (*Workflow, string, error) {
+func (e *Executor) loadWorkflow(
+	ctx context.Context,
+	req RunRequest,
+) (*Workflow, string, error) {
 	if req.Workflow != nil {
 		ref := strings.TrimSpace(req.WorkflowRef)
 		if ref == "" {
@@ -369,6 +373,23 @@ func (e *Executor) loadWorkflow(req RunRequest) (*Workflow, string, error) {
 			ref = "inline"
 		}
 		return req.Workflow, ref, nil
+	}
+	if runtimeCompatibilityConfigured(e.RuntimeCompatibility) {
+		workflow, err := LoadRunnableLocalSnapshot(
+			ctx,
+			e.WorkspaceDir,
+			req.Ref,
+			e.RuntimeCompatibility,
+			e.localOptions()...,
+		)
+		if err != nil {
+			return nil, "", err
+		}
+		canonical, err := CanonicalLocalRef(req.Ref)
+		if err != nil {
+			return nil, "", err
+		}
+		return workflow, canonical, nil
 	}
 	resolved, err := (Resolver{WorkspaceDir: e.WorkspaceDir, DefinitionsDir: e.DefinitionsDir}).ResolveLocal(req.Ref)
 	if err != nil {
@@ -879,11 +900,19 @@ func (e *Executor) runStepTarget(
 		if e.Tools == nil {
 			return nil, fmt.Errorf("tool runner not configured")
 		}
+		target := strings.TrimPrefix(uses, "mcp/")
+		serverName, toolName, ok := strings.Cut(target, "/")
+		if !ok || strings.TrimSpace(serverName) == "" || strings.TrimSpace(toolName) == "" {
+			return nil, fmt.Errorf("invalid MCP uses target %q: expected mcp/<server>/<tool>", uses)
+		}
 		return e.Tools.RunTool(ctx, ToolRequest{
-			Name:     "mcp_" + strings.ReplaceAll(strings.TrimPrefix(uses, "mcp/"), "/", "_"),
-			Args:     with,
-			Session:  stepSession(step.Context, with, execCtx),
-			Delivery: stepDelivery(step.Context, execCtx),
+			Name:      picomcp.CanonicalToolName(serverName, toolName),
+			Args:      with,
+			Session:   stepSession(step.Context, with, execCtx),
+			Delivery:  stepDelivery(step.Context, execCtx),
+			MCP:       true,
+			MCPServer: serverName,
+			MCPTool:   toolName,
 		})
 	case strings.HasPrefix(uses, "agent/"):
 		if e.Agents == nil {

@@ -28,7 +28,7 @@ const (
 // events to workflow definitions.
 type EventRoutingInbox interface {
 	eventing.RoutingQueue
-	eventing.RoutingDispatchCreator
+	eventing.RevisionRoutingDispatchCreator
 }
 
 // EventDispatchInbox is the durable boundary used while delivering a matched
@@ -126,9 +126,9 @@ func (r *EventWorkflowRouter) routeClaim(ctx context.Context, item eventing.Stor
 		if definition.Error != "" {
 			continue
 		}
-		var workflow *Workflow
+		var snapshot *LocalWorkflowSnapshot
 		if runtimeCompatibilityConfigured(r.RuntimeCompatibility) {
-			workflow, err = LoadRunnableLocalSnapshot(
+			snapshot, err = LoadRunnableLocalSnapshotWithRevision(
 				ctx,
 				r.WorkspaceDir,
 				definition.Ref,
@@ -139,22 +139,25 @@ func (r *EventWorkflowRouter) routeClaim(ctx context.Context, item eventing.Stor
 				continue
 			}
 		} else {
-			workflow, err = LoadLocal(ctx, r.WorkspaceDir, definition.Ref, localOpts...)
+			snapshot, err = LoadValidatedLocalSnapshot(
+				ctx,
+				r.WorkspaceDir,
+				definition.Ref,
+				localOpts...,
+			)
 			if err != nil {
 				continue
 			}
-			if err := Validate(workflow); err != nil {
-				continue
-			}
 		}
-		if !WorkflowMatchesEvent(workflow, item.Envelope) {
+		if !WorkflowMatchesEvent(snapshot.Workflow, item.Envelope) {
 			continue
 		}
-		dispatch, created, err := r.Inbox.CreateDispatchForRoutingClaim(
+		dispatch, created, err := r.Inbox.CreateRevisionedDispatchForRoutingClaim(
 			ctx,
 			item.Envelope.ID,
 			item.Routing.LeaseToken,
 			definition.Ref,
+			snapshot.Revision,
 		)
 		if err != nil {
 			return fmt.Errorf("create event dispatch for %s: %w", definition.Ref, err)
@@ -426,9 +429,25 @@ func (d *EventWorkflowDispatcher) dispatchClaim(
 		return missingRunErr
 	}
 
-	workflow, err := d.loadRunnableWorkflow(ctx, dispatch.WorkflowRef)
+	snapshot, err := d.loadRunnableWorkflow(ctx, dispatch.WorkflowRef)
 	if err != nil {
 		return errors.Join(err, d.retryDispatch(ctx, dispatch, err))
+	}
+	if dispatch.WorkflowRevision != "" &&
+		dispatch.WorkflowRevision != snapshot.Revision {
+		revisionErr := fmt.Errorf(
+			"event workflow %s revision changed after dispatch selection",
+			dispatch.WorkflowRef,
+		)
+		return errors.Join(revisionErr, d.retryDispatch(ctx, dispatch, revisionErr))
+	}
+	if !WorkflowMatchesEvent(snapshot.Workflow, stored.Envelope) {
+		triggerErr := fmt.Errorf(
+			"event workflow %s no longer matches dispatch event %s",
+			dispatch.WorkflowRef,
+			dispatch.EventID,
+		)
+		return errors.Join(triggerErr, d.retryDispatch(ctx, dispatch, triggerErr))
 	}
 	runContext, err := EventWorkflowRunContextFromEnvelope(
 		dispatch.WorkflowRef,
@@ -450,7 +469,7 @@ func (d *EventWorkflowDispatcher) dispatchClaim(
 	result, runErr := d.Executor.Run(ctx, RunRequest{
 		RunID:       dispatch.RunID,
 		Ref:         dispatch.WorkflowRef,
-		Workflow:    workflow,
+		Workflow:    snapshot.Workflow,
 		WorkflowRef: dispatch.WorkflowRef,
 		Inputs:      runContext.Inputs,
 		Event:       runContext.Event,
@@ -554,10 +573,10 @@ func (d *EventWorkflowDispatcher) dispatchClaim(
 func (d *EventWorkflowDispatcher) loadRunnableWorkflow(
 	ctx context.Context,
 	ref string,
-) (*Workflow, error) {
+) (*LocalWorkflowSnapshot, error) {
 	localOpts := eventLocalOptions(d.DefinitionsDir)
 	if runtimeCompatibilityConfigured(d.RuntimeCompatibility) {
-		workflow, err := LoadRunnableLocalSnapshot(
+		snapshot, err := LoadRunnableLocalSnapshotWithRevision(
 			ctx,
 			d.WorkspaceDir,
 			ref,
@@ -567,16 +586,13 @@ func (d *EventWorkflowDispatcher) loadRunnableWorkflow(
 		if err != nil {
 			return nil, fmt.Errorf("event workflow %s is not runnable: %w", ref, err)
 		}
-		return workflow, nil
+		return snapshot, nil
 	}
-	workflow, err := LoadLocal(ctx, d.WorkspaceDir, ref, localOpts...)
+	snapshot, err := LoadValidatedLocalSnapshot(ctx, d.WorkspaceDir, ref, localOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("load event workflow %s: %w", ref, err)
 	}
-	if err := Validate(workflow); err != nil {
-		return nil, fmt.Errorf("validate event workflow %s: %w", ref, err)
-	}
-	return workflow, nil
+	return snapshot, nil
 }
 
 func (d *EventWorkflowDispatcher) reconcileRun(

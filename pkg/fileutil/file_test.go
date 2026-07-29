@@ -1,6 +1,7 @@
 package fileutil
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -95,6 +96,94 @@ func TestWriteFileAtomic_CreatesParentDirs(t *testing.T) {
 	}
 }
 
+func TestMkdirAllDurable_FirstOperationCreatesEveryParent(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "first", "second", "third")
+	if err := MkdirAllDurable(dir, 0o750); err != nil {
+		t.Fatalf("MkdirAllDurable() error = %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("created path mode = %v, want directory", info.Mode())
+	}
+	if err := MkdirAllDurable(dir, 0o700); err != nil {
+		t.Fatalf("MkdirAllDurable(existing) error = %v", err)
+	}
+}
+
+func TestRemoveDurable_FileAndEmptyDirectory(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "state.json")
+	if err := os.WriteFile(file, []byte("state"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := RemoveDurable(file); err != nil {
+		t.Fatalf("RemoveDurable(file) error = %v", err)
+	}
+	if _, err := os.Lstat(file); !os.IsNotExist(err) {
+		t.Fatalf("Lstat(removed file) error = %v, want not exist", err)
+	}
+
+	dir := filepath.Join(root, "empty")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+	if err := RemoveDurable(dir); err != nil {
+		t.Fatalf("RemoveDurable(directory) error = %v", err)
+	}
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Fatalf("Lstat(removed directory) error = %v, want not exist", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("durable remove left entries = %v", entries)
+	}
+}
+
+func TestRemoveDurable_PreservesRemoveErrors(t *testing.T) {
+	root := t.TempDir()
+	if err := RemoveDurable(filepath.Join(root, "missing")); !os.IsNotExist(err) {
+		t.Fatalf("RemoveDurable(missing) error = %v, want not exist", err)
+	}
+	file := filepath.Join(root, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := RemoveDurable(file + string(filepath.Separator)); err == nil {
+		t.Fatal("RemoveDurable(file with trailing separator) error = nil, want error")
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Fatalf("Stat(file after rejected remove) error = %v", err)
+	}
+	nonEmpty := filepath.Join(root, "non-empty")
+	if err := os.Mkdir(nonEmpty, 0o700); err != nil {
+		t.Fatalf("Mkdir() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nonEmpty, "child"), nil, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := RemoveDurable(nonEmpty); err == nil {
+		t.Fatal("RemoveDurable(non-empty directory) error = nil, want error")
+	}
+	if _, err := os.Stat(nonEmpty); err != nil {
+		t.Fatalf("Stat(non-empty directory) error = %v", err)
+	}
+}
+
+func TestDurablePathOperationsRejectEmptyPath(t *testing.T) {
+	if err := MkdirAllDurable("", 0o700); err == nil {
+		t.Fatal("MkdirAllDurable(empty) error = nil, want error")
+	}
+	if err := RemoveDurable(""); err == nil {
+		t.Fatal("RemoveDurable(empty) error = nil, want error")
+	}
+}
+
 func TestWriteFileAtomic_NoTempFileOnSuccess(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "clean.txt")
@@ -109,6 +198,43 @@ func TestWriteFileAtomic_NoTempFileOnSuccess(t *testing.T) {
 		if e.Name() != "clean.txt" {
 			t.Errorf("unexpected file remaining: %s", e.Name())
 		}
+	}
+}
+
+func TestWriteFileAtomic_DoesNotRemoveReusedTempNameAfterReplace(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	injected := errors.New("injected directory sync failure")
+	var replacedSource string
+	const sentinel = "new owner"
+
+	err := writeFileAtomicWithHooks(
+		target,
+		[]byte("target data"),
+		0o600,
+		func(source, target string) error {
+			replacedSource = source
+			return replaceFile(source, target)
+		},
+		func(string) error {
+			if writeErr := os.WriteFile(replacedSource, []byte(sentinel), 0o600); writeErr != nil {
+				t.Fatalf("create reused temp name: %v", writeErr)
+			}
+			return injected
+		},
+	)
+	if !errors.Is(err, injected) {
+		t.Fatalf("WriteFileAtomic() error = %v, want injected sync failure", err)
+	}
+	if data, readErr := os.ReadFile(replacedSource); readErr != nil {
+		t.Fatalf("reused temp name was removed: %v", readErr)
+	} else if string(data) != sentinel {
+		t.Fatalf("reused temp data = %q, want %q", data, sentinel)
+	}
+	if data, readErr := os.ReadFile(target); readErr != nil {
+		t.Fatalf("read replaced target: %v", readErr)
+	} else if string(data) != "target data" {
+		t.Fatalf("target data = %q, want target data", data)
 	}
 }
 

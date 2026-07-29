@@ -727,6 +727,100 @@ func TestMCPBrowserOAuthPersistenceRollsBackCredentialWhenConfigSaveFails(t *tes
 	}
 }
 
+func TestMCPBrowserOAuthPersistenceRollsBackCredentialOnConfigRevisionConflict(t *testing.T) {
+	const credentialID = "mcp:remote"
+	harness := newMCPOAuthTestHarness(t, func(cfg *config.Config) {
+		remoteMCPOAuthServerConfig(cfg)
+		server := cfg.Tools.MCP.Servers["remote"]
+		server.Auth = &config.MCPServerAuthConfig{
+			Type:         "bearer",
+			CredentialID: credentialID,
+			Revision:     17,
+		}
+		cfg.Tools.MCP.Servers["remote"] = server
+	})
+	originalCredential := &picoauth.AuthCredential{
+		AccessToken: "original-bearer-token",
+		Provider:    "mcp",
+		AuthMethod:  "bearer",
+	}
+	if err := picoauth.SetCredential(credentialID, originalCredential); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	originalSave := mcpSaveConfigIfRevision
+	var injected atomic.Bool
+	mcpSaveConfigIfRevision = func(
+		path string,
+		cfg *config.Config,
+		expectedRevision string,
+	) (string, error) {
+		if injected.CompareAndSwap(false, true) {
+			concurrent, revision, err := config.LoadConfigForUpdateSnapshot(path)
+			if err != nil {
+				return "", fmt.Errorf("load concurrent config: %w", err)
+			}
+			concurrent.Workflows.Enabled = true
+			concurrent.Workflows.MaxConcurrentRuns = 29
+			if _, err = originalSave(path, concurrent, revision); err != nil {
+				return "", fmt.Errorf("save concurrent config: %w", err)
+			}
+		}
+		return originalSave(path, cfg, expectedRevision)
+	}
+	t.Cleanup(func() {
+		mcpSaveConfigIfRevision = originalSave
+	})
+
+	err := harness.handler.persistMCPOAuthResult(
+		&mcpOAuthFlow{
+			ServerName: "remote",
+			ServerURL:  "https://mcp.example.test/api",
+			Transport:  "http",
+			StartingAuth: &config.MCPServerAuthConfig{
+				Type:         "bearer",
+				CredentialID: credentialID,
+				Revision:     17,
+			},
+		},
+		&picomcp.OAuthLoginResult{
+			Token: &oauth2.Token{
+				AccessToken:  "new-oauth-access-token",
+				RefreshToken: "new-oauth-refresh-token",
+			},
+		},
+	)
+	if !errors.Is(err, config.ErrConfigRevisionMismatch) {
+		t.Fatalf(
+			"persistMCPOAuthResult() error = %v, want config revision mismatch",
+			err,
+		)
+	}
+
+	credential, getErr := picoauth.GetCredential(credentialID)
+	if getErr != nil {
+		t.Fatalf("GetCredential() error = %v", getErr)
+	}
+	if credential == nil ||
+		credential.AccessToken != originalCredential.AccessToken ||
+		credential.Provider != originalCredential.Provider ||
+		credential.AuthMethod != originalCredential.AuthMethod {
+		t.Fatalf("credential after CAS rollback = %#v, want %#v", credential, originalCredential)
+	}
+
+	cfg := loadMCPTestConfig(t, harness.configPath)
+	if !cfg.Workflows.Enabled || cfg.Workflows.MaxConcurrentRuns != 29 {
+		t.Fatalf("concurrent workflow settings were lost: %#v", cfg.Workflows)
+	}
+	authConfig := cfg.Tools.MCP.Servers["remote"].Auth
+	if authConfig == nil ||
+		authConfig.Type != "bearer" ||
+		authConfig.CredentialID != credentialID ||
+		authConfig.Revision != 17 {
+		t.Fatalf("config auth after CAS conflict = %#v, want original bearer linkage", authConfig)
+	}
+}
+
 func TestMCPOAuthNetworkGuardBlocksPublicServerPivotToLocalNetworks(t *testing.T) {
 	guard := &mcpOAuthNetworkGuardTransport{configuredHost: "8.8.8.8"}
 

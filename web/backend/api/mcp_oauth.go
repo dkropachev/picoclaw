@@ -377,8 +377,8 @@ func (h *Handler) persistMCPOAuthResult(
 	flow *mcpOAuthFlow,
 	result *picomcp.OAuthLoginResult,
 ) error {
-	h.mcpMu.Lock()
-	defer h.mcpMu.Unlock()
+	unlock := h.lockMCPConfigMutation()
+	defer unlock()
 	if flow.ID != "" {
 		h.mcpOAuthMu.Lock()
 		defer h.mcpOAuthMu.Unlock()
@@ -390,7 +390,7 @@ func (h *Handler) persistMCPOAuthResult(
 		}
 	}
 
-	cfg, err := config.LoadConfigForUpdate(h.configPath)
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		return fmt.Errorf("load config after OAuth login: %w", err)
 	}
@@ -442,7 +442,7 @@ func (h *Handler) persistMCPOAuthResult(
 		Revision:     nextMCPAuthRevision(server.Auth),
 	}
 	cfg.Tools.MCP.Servers[name] = server
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
+	if _, err := mcpSaveConfigIfRevision(h.configPath, cfg, revision); err != nil {
 		if oldCredential == nil {
 			_ = picoauth.DeleteCredential(credentialID)
 		} else {

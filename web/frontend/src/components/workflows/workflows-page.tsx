@@ -13,6 +13,7 @@ import {
   IconReload,
   IconRocket,
   IconRotateClockwise,
+  IconSettings,
   IconSparkles,
   IconTrash,
 } from "@tabler/icons-react"
@@ -22,6 +23,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react"
 import { useTranslation } from "react-i18next"
@@ -31,22 +33,30 @@ import {
   type WorkflowCompatibilitySummary,
   type WorkflowDefinition,
   type WorkflowDeliveryPayload,
+  type WorkflowDependencyCheckResponse,
   type WorkflowDevelopmentSession,
   type WorkflowDevelopmentTestResult,
   type WorkflowInputDefinition,
   type WorkflowRun,
   type WorkflowRunEvent,
+  type WorkflowSettingsValues,
+  type WorkflowTemplateCatalogEntry,
   type WorkflowValidationIssue,
   type WorkflowValidationStamp,
   aiReviseWorkflowDevelopment,
   cancelWorkflowRun,
+  checkWorkflowDependencies,
   discardWorkflowDevelopment,
   getWorkflowDevelopment,
   getWorkflowRun,
   getWorkflowRunEvents,
   getWorkflowRunGraph,
+  getWorkflowSettings,
+  installWorkflowTemplate,
   listWorkflowRuns,
+  listWorkflowTemplates,
   listWorkflows,
+  patchWorkflowSettings,
   publishWorkflowDevelopment,
   reloadWorkflows,
   retryWorkflowRun,
@@ -96,7 +106,14 @@ import {
   WorkflowEventTriggerEditor,
   type WorkflowEventTriggerInspectionState,
 } from "./workflow-event-trigger-editor"
+import {
+  type WorkflowDependencyCheckState,
+  WorkflowDependencyReadinessPanel,
+  WorkflowPublishReadinessPanel,
+} from "./workflow-publish-readiness"
 import { workflowDraftTestRepairPrompt } from "./workflow-repair-context"
+import { WorkflowSettingsDialog } from "./workflow-settings-dialog"
+import { WorkflowTemplateCatalog } from "./workflow-template-catalog"
 
 const terminalStatuses = new Set(["succeeded", "failed", "canceled", "skipped"])
 const workflowEventStreamKinds = [
@@ -137,6 +154,7 @@ type WorkflowDevelopmentMutationResult = {
 type DraftTestSnapshot = {
   sessionID: string
   draftKey: string
+  draftRevision?: string
   runID?: string
   eventID?: string
   status: string
@@ -146,6 +164,12 @@ type DraftTestSnapshot = {
 type DraftEditorSnapshot = {
   sessionID: string
   prompt: string
+  targetRef: string
+  yaml: string
+}
+type WorkflowDependencyDraftSnapshot = {
+  key: number
+  sessionID: string
   targetRef: string
   yaml: string
 }
@@ -209,6 +233,10 @@ export function WorkflowsPage() {
   const [streamedRunID, setStreamedRunID] = useState<string | null>(null)
   const [streamedEvents, setStreamedEvents] = useState<WorkflowRunEvent[]>([])
   const [eventStreamActive, setEventStreamActive] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [dependencyDraftSnapshot, setDependencyDraftSnapshot] =
+    useState<WorkflowDependencyDraftSnapshot | null>(null)
+  const dependencySnapshotCounter = useRef(0)
 
   const workflowsQuery = useQuery({
     queryKey: ["workflows"],
@@ -217,6 +245,16 @@ export function WorkflowsPage() {
   const developmentQuery = useQuery({
     queryKey: ["workflows", "development"],
     queryFn: getWorkflowDevelopment,
+  })
+  const templatesQuery = useQuery({
+    queryKey: ["workflows", "templates"],
+    queryFn: listWorkflowTemplates,
+    enabled: mode === "develop",
+  })
+  const settingsQuery = useQuery({
+    queryKey: ["workflows", "settings"],
+    queryFn: getWorkflowSettings,
+    enabled: settingsOpen,
   })
   const runsQuery = useQuery({
     queryKey: ["workflows", "runs"],
@@ -243,6 +281,69 @@ export function WorkflowsPage() {
   })
 
   const session = developmentQuery.data?.session ?? null
+  const dependencySessionID = session?.id
+  const dependencyCandidateTargetRef = draftTargetRef.trim()
+  const dependencyCandidateYAML = draftYAML
+  useEffect(() => {
+    if (
+      dependencySessionID == null ||
+      dependencyCandidateTargetRef === "" ||
+      dependencyCandidateYAML.trim() === ""
+    ) {
+      setDependencyDraftSnapshot(null)
+      return
+    }
+    const timer = setTimeout(() => {
+      dependencySnapshotCounter.current += 1
+      setDependencyDraftSnapshot({
+        key: dependencySnapshotCounter.current,
+        sessionID: dependencySessionID,
+        targetRef: dependencyCandidateTargetRef,
+        yaml: dependencyCandidateYAML,
+      })
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [
+    dependencyCandidateTargetRef,
+    dependencyCandidateYAML,
+    dependencySessionID,
+  ])
+  const dependencyQuery = useQuery({
+    queryKey: [
+      "workflows",
+      "dependencies",
+      "draft",
+      dependencyDraftSnapshot?.sessionID,
+      dependencyDraftSnapshot?.key,
+    ],
+    queryFn: ({ signal }) => {
+      if (dependencyDraftSnapshot == null) {
+        throw new Error("Workflow dependency readiness is unavailable.")
+      }
+      return checkWorkflowDependencies(
+        {
+          draft: {
+            target_ref: dependencyDraftSnapshot.targetRef,
+            yaml: dependencyDraftSnapshot.yaml,
+          },
+        },
+        signal,
+      )
+    },
+    enabled: mode === "develop" && dependencyDraftSnapshot != null,
+    retry: false,
+  })
+  const publishedDependencyQuery = useQuery({
+    queryKey: ["workflows", "dependencies", "published", selectedWorkflowRef],
+    queryFn: ({ signal }) => {
+      if (selectedWorkflowRef == null) {
+        throw new Error("Select a published workflow to check dependencies.")
+      }
+      return checkWorkflowDependencies({ ref: selectedWorkflowRef }, signal)
+    },
+    enabled: mode === "operate" && selectedWorkflowRef != null,
+    retry: false,
+  })
   const runs = useMemo(() => runsQuery.data?.runs ?? [], [runsQuery.data?.runs])
   const workflows = useMemo(
     () => workflowsQuery.data?.workflows ?? [],
@@ -462,17 +563,68 @@ export function WorkflowsPage() {
   const draftDirty =
     session != null &&
     (session.target_workflow_ref !== draftTargetRef ||
-      normalizeWorkflowYAML(session.yaml) !== normalizeWorkflowYAML(draftYAML))
+      session.yaml !== draftYAML)
   const currentValidationInvalid =
     session?.validation?.valid === false && !draftDirty
   const lastDraftTestStale =
-    lastDraftTest != null && lastDraftTest.draftKey !== currentDraftKey
+    lastDraftTest != null &&
+    (lastDraftTest.draftKey !== currentDraftKey ||
+      session == null ||
+      lastDraftTest.draftRevision == null ||
+      lastDraftTest.draftRevision !== session.draft_revision)
   const draftTestRunning = lastDraftTest?.status === "running"
   const publishTestReady = isPublishTestReady(lastDraftTest, lastDraftTestStale)
+  const publishValidationState = publishValidationStatus(
+    session?.validation,
+    draftDirty,
+    currentValidationInvalid,
+  )
+  const publishTestState = publishTestStatus(lastDraftTest, lastDraftTestStale)
+  const publishSessionSnapshotReady =
+    session?.last_test?.status === "succeeded" &&
+    session.last_test.draft_revision != null &&
+    session.last_test.draft_revision === session.draft_revision
+  const dependencySnapshotCurrent =
+    session != null &&
+    dependencyDraftSnapshot != null &&
+    dependencyDraftSnapshot.sessionID === session.id &&
+    dependencyDraftSnapshot.targetRef === dependencyCandidateTargetRef &&
+    dependencyDraftSnapshot.yaml === dependencyCandidateYAML
+  const dependencyCheckState: WorkflowDependencyCheckState =
+    session == null ||
+    dependencyCandidateTargetRef === "" ||
+    dependencyCandidateYAML.trim() === ""
+      ? "idle"
+      : !dependencySnapshotCurrent
+        ? "stale"
+        : dependencyQuery.isFetching
+          ? "loading"
+          : dependencyQuery.isError
+            ? "error"
+            : dependencyQuery.data == null
+              ? "loading"
+              : "current"
+  const currentDependencyReport =
+    dependencyCheckState === "current" ? dependencyQuery.data : undefined
+  const dependencyReady = currentDependencyReport?.ready === true
   const selectedWorkflow = useMemo(
     () => workflows.find((workflow) => workflow.ref === selectedWorkflowRef),
     [selectedWorkflowRef, workflows],
   )
+  const publishedDependencyState: WorkflowDependencyCheckState =
+    selectedWorkflowRef == null
+      ? "idle"
+      : publishedDependencyQuery.isFetching
+        ? "loading"
+        : publishedDependencyQuery.isError
+          ? "error"
+          : publishedDependencyQuery.data == null
+            ? "loading"
+            : "current"
+  const publishedDependencyReport =
+    publishedDependencyState === "current"
+      ? publishedDependencyQuery.data
+      : undefined
   const selectedWorkflowContractSignature = useMemo(
     () => workflowRunContractSignature(selectedWorkflow ?? null),
     [selectedWorkflow],
@@ -537,9 +689,12 @@ export function WorkflowsPage() {
     session,
     targetRef: draftTargetRef,
     yaml: draftYAML,
-    currentValidationInvalid,
+    validationStatus: publishValidationState,
     testResult: lastDraftTest,
     testStale: lastDraftTestStale,
+    sessionSnapshotReady: publishSessionSnapshotReady,
+    dependencyState: dependencyCheckState,
+    dependencyReport: currentDependencyReport,
   })
   const selectedWorkflowStamp =
     selectedWorkflowRef == null
@@ -804,6 +959,8 @@ export function WorkflowsPage() {
       setLastDraftTest({
         sessionID: nextSession.id,
         draftKey: draftKey(nextSession.target_workflow_ref, nextSession.yaml),
+        draftRevision:
+          nextSession.last_test?.draft_revision ?? nextSession.draft_revision,
         runID: result?.run_id,
         eventID: eventTriggerPresent ? eventTestMatch.eventID : undefined,
         status: result?.status ?? "validation_failed",
@@ -828,12 +985,48 @@ export function WorkflowsPage() {
 
   const publishMutation = useMutation({
     mutationFn: async () => {
-      await reviseWorkflowDevelopment({
-        prompt: draftPrompt,
-        target_ref: draftTargetRef,
-        yaml: draftYAML,
+      const publishSession = session
+      const checkedSnapshot = dependencyDraftSnapshot
+      const checkedReport = currentDependencyReport
+      if (
+        publishSession == null ||
+        dependencyCheckState !== "current" ||
+        checkedSnapshot == null ||
+        checkedReport?.ready !== true ||
+        checkedReport.revision === ""
+      ) {
+        throw new Error(
+          "Wait for a current successful dependency check before publishing.",
+        )
+      }
+      const exactTest = publishSession.last_test
+      if (
+        publishSession.id !== checkedSnapshot.sessionID ||
+        publishSession.target_workflow_ref !== checkedReport.root_ref ||
+        publishSession.yaml !== checkedSnapshot.yaml ||
+        publishSession.validation?.valid !== true ||
+        exactTest?.status !== "succeeded" ||
+        exactTest.draft_revision == null ||
+        exactTest.draft_revision !== publishSession.draft_revision
+      ) {
+        throw new Error(
+          "The draft changed. Validate it, run a successful test, and wait for a fresh dependency check.",
+        )
+      }
+      if (
+        publishSession.session_revision === "" ||
+        publishSession.draft_revision === "" ||
+        publishSession.base_target_revision === ""
+      ) {
+        throw new Error("Reload the workflow draft before publishing.")
+      }
+      return publishWorkflowDevelopment({
+        session_id: publishSession.id,
+        expected_session_revision: publishSession.session_revision,
+        expected_draft_revision: publishSession.draft_revision,
+        expected_base_target_revision: publishSession.base_target_revision,
+        expected_dependency_revision: checkedReport.revision,
       })
-      return publishWorkflowDevelopment()
     },
     onSuccess: (result) => {
       toast.success(`Published ${result.workflow_ref}`)
@@ -855,6 +1048,32 @@ export function WorkflowsPage() {
       toast.success("Workflow development discarded")
       setLastDraftTest(null)
       void invalidateWorkflowQueries(queryClient)
+    },
+    onError: (err) => toast.error(errorMessage(err)),
+  })
+
+  const installTemplateMutation = useMutation({
+    mutationFn: ({ name, overwrite }: { name: string; overwrite: boolean }) =>
+      installWorkflowTemplate(name, overwrite),
+    onSuccess: ({ result, templates }) => {
+      queryClient.setQueryData(["workflows", "templates"], { templates })
+      toast.success(
+        result.overwritten
+          ? `Restored ${result.ref}`
+          : result.installed
+            ? `Installed ${result.ref}`
+            : `${result.ref} is already installed`,
+      )
+      void queryClient.invalidateQueries({
+        queryKey: ["workflows"],
+        exact: true,
+      })
+      void queryClient.invalidateQueries({
+        queryKey: ["workflows", "templates"],
+      })
+      void queryClient.invalidateQueries({
+        queryKey: ["workflows", "dependencies"],
+      })
     },
     onError: (err) => toast.error(errorMessage(err)),
   })
@@ -884,6 +1103,45 @@ export function WorkflowsPage() {
       void queryClient.invalidateQueries({ queryKey: ["workflows"] })
     },
     onError: (err) => toast.error(errorMessage(err)),
+  })
+
+  const settingsMutation = useMutation({
+    mutationFn: (values: WorkflowSettingsValues) => {
+      const expectedRevision = settingsQuery.data?.config_revision
+      if (!expectedRevision) {
+        throw new Error("Reload workflow settings and try again.")
+      }
+      return patchWorkflowSettings({
+        expected_config_revision: expectedRevision,
+        ...values,
+      })
+    },
+    onSuccess: (settings) => {
+      queryClient.setQueryData(["workflows", "settings"], settings)
+      const guidance =
+        settings.effects.gateway_effect === "restart_required"
+          ? " Gateway restart required."
+          : settings.effects.catalog_effect === "reload_required"
+            ? " Reload workflow definitions to apply catalog changes."
+            : ""
+      toast.success(`Workflow settings saved.${guidance}`)
+      void queryClient.invalidateQueries({
+        queryKey: ["workflows"],
+        exact: true,
+      })
+      void queryClient.invalidateQueries({
+        queryKey: ["workflows", "templates"],
+      })
+      void queryClient.invalidateQueries({
+        queryKey: ["workflows", "dependencies"],
+      })
+    },
+    onError: (err) => {
+      toast.error(errorMessage(err))
+      void queryClient.invalidateQueries({
+        queryKey: ["workflows", "settings"],
+      })
+    },
   })
 
   const runWorkflowMutation = useMutation({
@@ -974,8 +1232,10 @@ export function WorkflowsPage() {
     !draftTestRunning &&
     draftTargetRef.trim() !== "" &&
     draftYAML.trim() !== "" &&
-    !currentValidationInvalid &&
-    publishTestReady
+    publishValidationState === "valid" &&
+    publishTestReady &&
+    publishSessionSnapshotReady &&
+    dependencyReady
   const canCancel = selectedRun?.status === "running"
   const canRetry =
     selectedRun != null &&
@@ -1056,6 +1316,20 @@ export function WorkflowsPage() {
           </Button>
         </div>
         <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            settingsMutation.reset()
+            setSettingsOpen(true)
+          }}
+          aria-label="Workflow settings"
+          title="Workflow settings"
+        >
+          <IconSettings className="size-4" />
+          <span className="hidden lg:inline">Settings</span>
+        </Button>
+        <Button
           variant="outline"
           size="sm"
           onClick={refresh}
@@ -1065,9 +1339,10 @@ export function WorkflowsPage() {
             developmentQuery.isFetching
           }
           title="Refresh"
+          aria-label="Refresh"
         >
           <IconRefresh className="size-4" />
-          Refresh
+          <span className="hidden lg:inline">Refresh</span>
         </Button>
       </PageHeader>
 
@@ -1082,6 +1357,19 @@ export function WorkflowsPage() {
           <DevelopSurface
             session={session}
             workflows={workflows}
+            templates={templatesQuery.data?.templates ?? []}
+            templatesLoading={templatesQuery.isLoading}
+            templatesUnavailable={templatesQuery.isError}
+            templatesUnavailableMessage={
+              templatesQuery.isError
+                ? errorMessage(templatesQuery.error)
+                : undefined
+            }
+            installingTemplateName={
+              installTemplateMutation.isPending
+                ? installTemplateMutation.variables?.name
+                : undefined
+            }
             compatibilityByRef={compatibilityByRef}
             invalidWorkflows={invalidWorkflows}
             startPrompt={startPrompt}
@@ -1128,6 +1416,9 @@ export function WorkflowsPage() {
             onStartRepairWithAI={(ref, status) =>
               startRepairWithAIMutation.mutate({ ref, status })
             }
+            onInstallTemplate={(name, overwrite) =>
+              installTemplateMutation.mutate({ name, overwrite })
+            }
             onSave={() => saveMutation.mutate()}
             onAIRevise={() => aiReviseMutation.mutate(undefined)}
             onFixTestWithAI={() => fixDraftTestMutation.mutate()}
@@ -1145,8 +1436,10 @@ export function WorkflowsPage() {
             canPublish={canPublish}
             testReadinessMessage={testReadinessMessage}
             publishReadinessMessage={publishReadinessMessage}
-            draftDirty={draftDirty}
-            currentValidationInvalid={currentValidationInvalid}
+            publishValidationStatus={publishValidationState}
+            publishTestStatus={publishTestState}
+            dependencyState={dependencyCheckState}
+            dependencyReport={currentDependencyReport}
             lastDraftTest={lastDraftTest}
             lastDraftTestStale={lastDraftTestStale}
             pendingAction={developmentPendingAction}
@@ -1159,6 +1452,8 @@ export function WorkflowsPage() {
             compatibilityByRef={compatibilityByRef}
             compatibility={compatibility}
             selectedWorkflowRef={selectedWorkflowRef}
+            publishedDependencyState={publishedDependencyState}
+            publishedDependencyReport={publishedDependencyReport}
             runInputValues={runInputValues}
             runSecretValues={runSecretValues}
             runSecretsJSON={runSecretsJSON}
@@ -1179,6 +1474,9 @@ export function WorkflowsPage() {
             loadingGraph={graphQuery.isLoading}
             onQueryChange={setQuery}
             onSelectWorkflow={setSelectedWorkflowRef}
+            onRetryPublishedDependencies={() =>
+              void publishedDependencyQuery.refetch()
+            }
             onRunInputChange={(name, value) =>
               setRunInputValues((current) => ({ ...current, [name]: value }))
             }
@@ -1208,6 +1506,28 @@ export function WorkflowsPage() {
           />
         )}
       </div>
+      <WorkflowSettingsDialog
+        open={settingsOpen}
+        onOpenChange={(open) => {
+          if (open) {
+            settingsMutation.reset()
+          }
+          setSettingsOpen(open)
+        }}
+        settings={settingsQuery.data}
+        loading={settingsQuery.isLoading}
+        unavailable={settingsQuery.isError}
+        saving={settingsMutation.isPending}
+        saveError={
+          settingsMutation.isError
+            ? errorMessage(settingsMutation.error)
+            : undefined
+        }
+        reloading={reloadMutation.isPending}
+        onRetry={() => void settingsQuery.refetch()}
+        onSave={(values) => settingsMutation.mutate(values)}
+        onReload={() => reloadMutation.mutate()}
+      />
     </div>
   )
 }
@@ -1270,6 +1590,11 @@ function CompatibilityBanner({
 function DevelopSurface({
   session,
   workflows,
+  templates,
+  templatesLoading,
+  templatesUnavailable,
+  templatesUnavailableMessage,
+  installingTemplateName,
   compatibilityByRef,
   invalidWorkflows,
   startPrompt,
@@ -1302,6 +1627,7 @@ function DevelopSurface({
   onStartEdit,
   onStartRepair,
   onStartRepairWithAI,
+  onInstallTemplate,
   onSave,
   onAIRevise,
   onFixTestWithAI,
@@ -1316,8 +1642,10 @@ function DevelopSurface({
   canPublish,
   testReadinessMessage,
   publishReadinessMessage,
-  draftDirty,
-  currentValidationInvalid,
+  publishValidationStatus,
+  publishTestStatus,
+  dependencyState,
+  dependencyReport,
   lastDraftTest,
   lastDraftTestStale,
   pendingAction,
@@ -1325,6 +1653,11 @@ function DevelopSurface({
 }: {
   session: WorkflowDevelopmentSession | null
   workflows: WorkflowDefinition[]
+  templates: WorkflowTemplateCatalogEntry[]
+  templatesLoading: boolean
+  templatesUnavailable: boolean
+  templatesUnavailableMessage?: string
+  installingTemplateName?: string
   compatibilityByRef: Map<string, WorkflowValidationStamp>
   invalidWorkflows: WorkflowValidationStamp[]
   startPrompt: string
@@ -1359,6 +1692,7 @@ function DevelopSurface({
   onStartEdit: (ref: string) => void
   onStartRepair: (ref: string) => void
   onStartRepairWithAI: (ref: string, status?: string) => void
+  onInstallTemplate: (name: string, overwrite: boolean) => void
   onSave: () => void
   onAIRevise: () => void
   onFixTestWithAI: () => void
@@ -1373,8 +1707,10 @@ function DevelopSurface({
   canPublish: boolean
   testReadinessMessage: string
   publishReadinessMessage: string
-  draftDirty: boolean
-  currentValidationInvalid: boolean
+  publishValidationStatus: string
+  publishTestStatus: string
+  dependencyState: WorkflowDependencyCheckState
+  dependencyReport?: WorkflowDependencyCheckResponse
   lastDraftTest: DraftTestSnapshot | null
   lastDraftTestStale: boolean
   pendingAction: DevelopmentPendingAction | null
@@ -1394,7 +1730,7 @@ function DevelopSurface({
           <div className="border-border border-b px-4 py-3">
             <h2 className="text-sm font-medium">New workflow</h2>
           </div>
-          <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
+          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-4">
             <Textarea
               value={startPrompt}
               onChange={(event) => onStartPromptChange(event.target.value)}
@@ -1429,6 +1765,15 @@ function DevelopSurface({
             <div className="text-muted-foreground rounded-md border border-dashed px-3 py-2 text-xs">
               {startReadinessMessage}
             </div>
+            <WorkflowTemplateCatalog
+              templates={templates}
+              loading={templatesLoading}
+              unavailable={templatesUnavailable}
+              unavailableMessage={templatesUnavailableMessage}
+              installingName={installingTemplateName}
+              disabled={busy || installingTemplateName != null}
+              onInstall={onInstallTemplate}
+            />
           </div>
         </section>
 
@@ -1519,6 +1864,7 @@ function DevelopSurface({
               id="workflow-target-ref"
               value={draftTargetRef}
               onChange={(event) => onDraftTargetRefChange(event.target.value)}
+              disabled={busy}
               className="font-mono text-xs"
             />
           </div>
@@ -1533,6 +1879,7 @@ function DevelopSurface({
               id="workflow-brief"
               value={draftPrompt}
               onChange={(event) => onDraftPromptChange(event.target.value)}
+              disabled={busy}
               className="min-h-32 resize-none"
             />
           </div>
@@ -1653,15 +2000,24 @@ function DevelopSurface({
               </div>
             </div>
           </Panel>
-          <PublishReadinessPanel
-            targetRef={draftTargetRef}
-            yaml={draftYAML}
-            validation={session.validation}
-            validationStale={draftDirty}
-            currentValidationInvalid={currentValidationInvalid}
-            testResult={lastDraftTest}
-            testStale={lastDraftTestStale}
+          <WorkflowPublishReadinessPanel
+            targetReady={draftTargetRef.trim() !== ""}
+            yamlReady={draftYAML.trim() !== ""}
+            validationStatus={publishValidationStatus}
+            testStatus={publishTestStatus}
+            dependencyState={dependencyState}
+            dependencyReport={dependencyReport}
             readinessMessage={publishReadinessMessage}
+          />
+          <WorkflowTemplateCatalog
+            templates={templates}
+            loading={templatesLoading}
+            unavailable={templatesUnavailable}
+            unavailableMessage={templatesUnavailableMessage}
+            installingName={installingTemplateName}
+            disabled
+            disabledReason="Finish or discard the active workflow draft before installing or restoring templates."
+            onInstall={onInstallTemplate}
           />
         </div>
         <div className="border-border flex flex-wrap gap-2 border-t p-3">
@@ -1766,6 +2122,7 @@ function DevelopSurface({
             aria-label="Workflow YAML"
             value={draftYAML}
             onChange={(event) => onDraftYAMLChange(event.target.value)}
+            disabled={busy}
             spellCheck={false}
             className="size-full min-h-0 resize-none rounded-none border-0 p-4 font-mono text-xs shadow-none focus-visible:ring-0"
           />
@@ -1929,6 +2286,8 @@ function OperateSurface({
   compatibilityByRef,
   compatibility,
   selectedWorkflowRef,
+  publishedDependencyState,
+  publishedDependencyReport,
   runInputValues,
   runSecretValues,
   runSecretsJSON,
@@ -1947,6 +2306,7 @@ function OperateSurface({
   loadingGraph,
   onQueryChange,
   onSelectWorkflow,
+  onRetryPublishedDependencies,
   onRunInputChange,
   onRunSecretChange,
   onRunSecretsJSONChange,
@@ -1973,6 +2333,8 @@ function OperateSurface({
   compatibilityByRef: Map<string, WorkflowValidationStamp>
   compatibility?: WorkflowCompatibilitySummary
   selectedWorkflowRef: string | null
+  publishedDependencyState: WorkflowDependencyCheckState
+  publishedDependencyReport?: WorkflowDependencyCheckResponse
   runInputValues: WorkflowRunInputValues
   runSecretValues: WorkflowRunSecretValues
   runSecretsJSON: string
@@ -1991,6 +2353,7 @@ function OperateSurface({
   loadingGraph: boolean
   onQueryChange: (value: string) => void
   onSelectWorkflow: (ref: string) => void
+  onRetryPublishedDependencies: () => void
   onRunInputChange: (name: string, value: string) => void
   onRunSecretChange: (name: string, value: string) => void
   onRunSecretsJSONChange: (value: string) => void
@@ -2052,12 +2415,15 @@ function OperateSurface({
             stamp={selectedStamp}
             compatibility={compatibility}
             selectedWorkflowRef={selectedWorkflowRef}
+            dependencyState={publishedDependencyState}
+            dependencyReport={publishedDependencyReport}
             inputValues={runInputValues}
             secretValues={runSecretValues}
             secretsJSON={runSecretsJSON}
             session={runSession}
             deliveryJSON={runDeliveryJSON}
             onSelectWorkflow={onSelectWorkflow}
+            onRetryDependencies={onRetryPublishedDependencies}
             onInputChange={onRunInputChange}
             onSecretChange={onRunSecretChange}
             onSecretsJSONChange={onRunSecretsJSONChange}
@@ -2176,12 +2542,15 @@ function WorkflowRunPanel({
   stamp,
   compatibility,
   selectedWorkflowRef,
+  dependencyState,
+  dependencyReport,
   inputValues,
   secretValues,
   secretsJSON,
   session,
   deliveryJSON,
   onSelectWorkflow,
+  onRetryDependencies,
   onInputChange,
   onSecretChange,
   onSecretsJSONChange,
@@ -2197,12 +2566,15 @@ function WorkflowRunPanel({
   stamp?: WorkflowValidationStamp
   compatibility?: WorkflowCompatibilitySummary
   selectedWorkflowRef: string | null
+  dependencyState: WorkflowDependencyCheckState
+  dependencyReport?: WorkflowDependencyCheckResponse
   inputValues: WorkflowRunInputValues
   secretValues: WorkflowRunSecretValues
   secretsJSON: string
   session: string
   deliveryJSON: string
   onSelectWorkflow: (ref: string) => void
+  onRetryDependencies: () => void
   onInputChange: (name: string, value: string) => void
   onSecretChange: (name: string, value: string) => void
   onSecretsJSONChange: (value: string) => void
@@ -2242,6 +2614,31 @@ function WorkflowRunPanel({
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <ValidationStatusBadge status={status} />
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon-sm"
+                disabled={workflow == null}
+                aria-label="Inspect workflow dependencies"
+                title="Inspect workflow dependencies"
+              >
+                <IconGitBranch className="size-4" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent
+              align="end"
+              className="max-h-[min(36rem,calc(100dvh-2rem))] w-[min(480px,calc(100vw-2rem))] overflow-y-auto p-0"
+            >
+              <WorkflowDependencyReadinessPanel
+                workflowRef={workflow?.ref ?? "No workflow selected"}
+                dependencyState={dependencyState}
+                dependencyReport={dependencyReport}
+                onRetry={onRetryDependencies}
+              />
+            </PopoverContent>
+          </Popover>
           <Popover open={open} onOpenChange={setOpen}>
             <PopoverTrigger asChild>
               <Button
@@ -3048,61 +3445,6 @@ function DraftTestResultPanel({
   )
 }
 
-function PublishReadinessPanel({
-  targetRef,
-  yaml,
-  validation,
-  validationStale,
-  currentValidationInvalid,
-  testResult,
-  testStale,
-  readinessMessage,
-}: {
-  targetRef: string
-  yaml: string
-  validation?: WorkflowDevelopmentSession["validation"]
-  validationStale: boolean
-  currentValidationInvalid: boolean
-  testResult: DraftTestSnapshot | null
-  testStale: boolean
-  readinessMessage: string
-}) {
-  const validationStatus = publishValidationStatus(
-    validation,
-    validationStale,
-    currentValidationInvalid,
-  )
-  const testStatus = publishTestStatus(testResult, testStale)
-  return (
-    <Panel title="Publish readiness">
-      <div className="grid gap-2">
-        <ReadinessRow
-          label="Target"
-          status={targetRef.trim() === "" ? "missing" : "ready"}
-        />
-        <ReadinessRow
-          label="YAML"
-          status={yaml.trim() === "" ? "missing" : "ready"}
-        />
-        <ReadinessRow label="Validation" status={validationStatus} />
-        <ReadinessRow label="Latest test" status={testStatus} />
-        <div className="text-muted-foreground border-border/70 mt-1 border-t pt-2 text-xs">
-          {readinessMessage}
-        </div>
-      </div>
-    </Panel>
-  )
-}
-
-function ReadinessRow({ label, status }: { label: string; status: string }) {
-  return (
-    <div className="flex min-w-0 items-center justify-between gap-3 text-sm">
-      <span className="text-muted-foreground min-w-0 truncate">{label}</span>
-      <ValidationStatusBadge status={status} />
-    </div>
-  )
-}
-
 function publishValidationStatus(
   validation: WorkflowDevelopmentSession["validation"],
   validationStale: boolean,
@@ -3137,16 +3479,22 @@ function workflowPublishReadinessMessage({
   session,
   targetRef,
   yaml,
-  currentValidationInvalid,
+  validationStatus,
   testResult,
   testStale,
+  sessionSnapshotReady,
+  dependencyState,
+  dependencyReport,
 }: {
   session: WorkflowDevelopmentSession | null
   targetRef: string
   yaml: string
-  currentValidationInvalid: boolean
+  validationStatus: string
   testResult: DraftTestSnapshot | null
   testStale: boolean
+  sessionSnapshotReady: boolean
+  dependencyState: WorkflowDependencyCheckState
+  dependencyReport?: WorkflowDependencyCheckResponse
 }) {
   if (session == null) {
     return "Start workflow development before publishing."
@@ -3157,8 +3505,14 @@ function workflowPublishReadinessMessage({
   if (yaml.trim() === "") {
     return "Add workflow YAML before publishing."
   }
-  if (currentValidationInvalid) {
+  if (validationStatus === "invalid") {
     return "Fix validation errors before publishing."
+  }
+  if (validationStatus === "stale") {
+    return "Validate the draft again after the latest edits."
+  }
+  if (validationStatus !== "valid") {
+    return "Validate the current draft before publishing."
   }
   if (testResult == null) {
     return "Run a successful draft test before publishing."
@@ -3171,6 +3525,33 @@ function workflowPublishReadinessMessage({
   }
   if (testResult.status !== "succeeded") {
     return "Fix the failing draft test before publishing."
+  }
+  if (!sessionSnapshotReady) {
+    return "Refreshing the tested draft revision before publishing."
+  }
+  if (dependencyState === "idle") {
+    return "Complete the draft before checking dependencies."
+  }
+  if (dependencyState === "stale") {
+    return "Wait for dependency readiness to catch up with the latest edits."
+  }
+  if (dependencyState === "loading") {
+    return "Checking dependencies for the current draft."
+  }
+  if (dependencyState === "error" || dependencyReport == null) {
+    return "Dependency readiness could not be checked. Refresh and try again."
+  }
+  if (!dependencyReport.workflow_enabled) {
+    return "Enable workflows in Settings before publishing."
+  }
+  if (!dependencyReport.structural_ready) {
+    return "Resolve the structural dependency blockers before publishing."
+  }
+  if (!dependencyReport.runtime_ready) {
+    return "Resolve the runtime dependency blockers before publishing."
+  }
+  if (!dependencyReport.ready) {
+    return "Resolve the dependency blockers before publishing."
   }
   return "Ready to publish."
 }
@@ -3869,7 +4250,11 @@ function draftTestSnapshotFromSession(
   }
   return {
     sessionID: session.id,
-    draftKey: session.last_test.draft_key,
+    // The persisted legacy draft key normalizes trailing whitespace. UI
+    // currentness must instead track the exact editor bytes because dependency
+    // and publish revisions are byte-exact.
+    draftKey: draftKey(session.target_workflow_ref, session.yaml),
+    draftRevision: session.last_test.draft_revision,
     runID: session.last_test.run_id,
     eventID: session.last_test.event_id,
     status: session.last_test.status,
@@ -3896,7 +4281,7 @@ function editorMatchesDraftSnapshot(
   return (
     editor.prompt === snapshot.prompt &&
     editor.targetRef === snapshot.targetRef &&
-    normalizeWorkflowYAML(editor.yaml) === normalizeWorkflowYAML(snapshot.yaml)
+    editor.yaml === snapshot.yaml
   )
 }
 
@@ -3909,17 +4294,12 @@ function draftEditorSnapshotsEqual(
     left.sessionID === right.sessionID &&
     left.prompt === right.prompt &&
     left.targetRef === right.targetRef &&
-    normalizeWorkflowYAML(left.yaml) === normalizeWorkflowYAML(right.yaml)
+    left.yaml === right.yaml
   )
 }
 
-function normalizeWorkflowYAML(value: string) {
-  const trimmed = value.trimEnd()
-  return trimmed === "" ? "" : `${trimmed}\n`
-}
-
 function draftKey(targetRef: string, yaml: string) {
-  return `${targetRef.trim()}\u0000${normalizeWorkflowYAML(yaml)}`
+  return `${targetRef.trim()}\u0000${yaml}`
 }
 
 async function invalidateWorkflowQueries(

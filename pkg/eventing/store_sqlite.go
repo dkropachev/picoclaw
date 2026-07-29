@@ -42,12 +42,13 @@ type Store struct {
 }
 
 var (
-	_ Inbox                  = (*Store)(nil)
-	_ EventOperatorReader    = (*Store)(nil)
-	_ DispatchOperatorReader = (*Store)(nil)
-	_ RoutingDispatchCreator = (*Store)(nil)
-	_ RoutingLeaseRenewer    = (*Store)(nil)
-	_ DispatchLeaseRenewer   = (*Store)(nil)
+	_ Inbox                          = (*Store)(nil)
+	_ EventOperatorReader            = (*Store)(nil)
+	_ DispatchOperatorReader         = (*Store)(nil)
+	_ RoutingDispatchCreator         = (*Store)(nil)
+	_ RevisionRoutingDispatchCreator = (*Store)(nil)
+	_ RoutingLeaseRenewer            = (*Store)(nil)
+	_ DispatchLeaseRenewer           = (*Store)(nil)
 )
 
 // Open creates or opens a durable eventing store at path.
@@ -260,6 +261,17 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 	if err = validateSchemaV1(ctx, conn); err != nil {
 		return fmt.Errorf("validate eventing schema v1: %w", err)
 	}
+	if version < 2 {
+		if _, err = conn.ExecContext(ctx, schemaV2); err != nil {
+			return fmt.Errorf("create eventing schema v2: %w", err)
+		}
+		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 2"); err != nil {
+			return fmt.Errorf("record eventing schema v2: %w", err)
+		}
+	}
+	if err = validateSchemaV2(ctx, conn); err != nil {
+		return fmt.Errorf("validate eventing schema v2: %w", err)
+	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit eventing migration: %w", err)
 	}
@@ -324,6 +336,11 @@ const (
 		schemaV1EventDispatchesTable + "\n" +
 		schemaV1EventDispatchesClaimIndex + "\n" +
 		schemaV1EventDispatchesListIndex
+	schemaV2DispatchWorkflowRevisionsTable = `CREATE TABLE IF NOT EXISTS event_dispatch_workflow_revisions (
+	dispatch_id TEXT PRIMARY KEY REFERENCES event_dispatches(id) ON DELETE CASCADE,
+	workflow_revision TEXT NOT NULL CHECK (workflow_revision <> '')
+);`
+	schemaV2 = schemaV2DispatchWorkflowRevisionsTable
 )
 
 type schemaValidationError struct {
@@ -382,6 +399,19 @@ func validateSchemaV1(ctx context.Context, conn *sql.Conn) error {
 		}
 	}
 	return nil
+}
+
+func validateSchemaV2(ctx context.Context, conn *sql.Conn) error {
+	return validateSchemaTable(ctx, conn, schemaTableSpec{
+		name:      "event_dispatch_workflow_revisions",
+		createSQL: schemaV2DispatchWorkflowRevisionsTable,
+		uniqueIndexes: []schemaUniqueIndexSpec{
+			{
+				origin:  "pk",
+				columns: []schemaIndexColumn{{name: "dispatch_id", collation: "BINARY"}},
+			},
+		},
+	})
 }
 
 func validateSchemaTable(ctx context.Context, conn *sql.Conn, spec schemaTableSpec) error {
@@ -1476,6 +1506,46 @@ func (s *Store) CreateDispatchForRoutingClaim(
 	ctx context.Context,
 	eventID, leaseToken, workflowRef string,
 ) (Dispatch, bool, error) {
+	return s.createDispatchForRoutingClaim(
+		ctx,
+		eventID,
+		leaseToken,
+		workflowRef,
+		"",
+	)
+}
+
+// CreateRevisionedDispatchForRoutingClaim idempotently creates one workflow
+// delivery and atomically persists the exact workflow content revision that
+// matched under the live routing claim.
+func (s *Store) CreateRevisionedDispatchForRoutingClaim(
+	ctx context.Context,
+	eventID, leaseToken, workflowRef, workflowRevision string,
+) (Dispatch, bool, error) {
+	workflowRevision = strings.TrimSpace(workflowRevision)
+	if workflowRevision == "" {
+		return Dispatch{}, false, fmt.Errorf("workflow revision is required")
+	}
+	if err := validateBoundedString(
+		"workflow revision",
+		workflowRevision,
+		maxWorkflowRevisionLength,
+	); err != nil {
+		return Dispatch{}, false, err
+	}
+	return s.createDispatchForRoutingClaim(
+		ctx,
+		eventID,
+		leaseToken,
+		workflowRef,
+		workflowRevision,
+	)
+}
+
+func (s *Store) createDispatchForRoutingClaim(
+	ctx context.Context,
+	eventID, leaseToken, workflowRef, workflowRevision string,
+) (Dispatch, bool, error) {
 	if err := s.ready(ctx); err != nil {
 		return Dispatch{}, false, err
 	}
@@ -1539,6 +1609,19 @@ func (s *Store) CreateDispatchForRoutingClaim(
 		)
 		if err != nil {
 			return err
+		}
+		if workflowRevision != "" {
+			if _, revisionErr := conn.ExecContext(ctx, `
+				INSERT INTO event_dispatch_workflow_revisions (
+					dispatch_id, workflow_revision
+				)
+				VALUES (?, ?)
+				ON CONFLICT(dispatch_id) DO NOTHING`,
+				dispatchID,
+				workflowRevision,
+			); revisionErr != nil {
+				return revisionErr
+			}
 		}
 		affected, err := result.RowsAffected()
 		if err != nil {
@@ -1641,11 +1724,17 @@ func (s *Store) getDispatchByPair(ctx context.Context, eventID, workflowRef stri
 }
 
 const dispatchColumns = `
-	id, event_id, workflow_ref, run_id, status, owner, lease_until,
+	id, event_id, workflow_ref,
+	COALESCE((SELECT workflow_revision FROM event_dispatch_workflow_revisions
+		WHERE dispatch_id = event_dispatches.id), ''),
+	run_id, status, owner, lease_until,
 	available_at, attempts, last_error, created_at, updated_at, linked_at, finished_at`
 
 const dispatchMetadataColumns = `
-	id, event_id, workflow_ref, run_id, status, lease_until,
+	id, event_id, workflow_ref,
+	COALESCE((SELECT workflow_revision FROM event_dispatch_workflow_revisions
+		WHERE dispatch_id = event_dispatches.id), ''),
+	run_id, status, lease_until,
 	available_at, attempts, last_error, created_at, updated_at, linked_at, finished_at`
 
 // ClaimDispatches claims the oldest available or expired workflow deliveries.
@@ -2273,6 +2362,7 @@ func scanDispatch(scanner rowScanner) (Dispatch, error) {
 		&dispatch.ID,
 		&dispatch.EventID,
 		&dispatch.WorkflowRef,
+		&dispatch.WorkflowRevision,
 		&dispatch.RunID,
 		&dispatch.Status,
 		&dispatch.LeaseToken,
@@ -2307,6 +2397,7 @@ func scanDispatchMetadata(scanner rowScanner) (DispatchMetadata, error) {
 		&dispatch.ID,
 		&dispatch.EventID,
 		&dispatch.WorkflowRef,
+		&dispatch.WorkflowRevision,
 		&dispatch.RunID,
 		&dispatch.Status,
 		&leaseUntil,

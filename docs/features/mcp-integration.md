@@ -10,14 +10,19 @@ PicoClaw enables MCP integration by default, connects configured servers,
 discovers tools, wraps remote calls as agent tools, supports eager and deferred
 discovery, and provides CLI plus dedicated launcher management for server
 configuration, connectivity testing, bearer credentials, and browser OAuth
-login.
+login. One shared canonical server/tool naming contract is used by wrapper
+registration, direct workflow MCP execution, and workflow dependency readiness;
+ambiguous canonical names fail closed.
 
 ## Reconstruction Notes
 
 - Similarity target: recreate an MCP manager that connects configured servers, lists tools, wraps remote tools, handles reconnect cases, and exposes CLI config management.
 - Core types/functions: MCP manager, server connection, command/HTTP transport setup, auth-store credential resolution, tool wrapper, runtime event publisher, launcher MCP handlers, and Cobra MCP subcommands.
 - Runtime ordering: load enabled servers, connect transport, initialize session, list tools, register wrappers eagerly or behind discovery, execute remote calls, publish events.
-- Non-obvious constraints: CLI mutates config only, server names prefix tool names, env files and headers are transport-specific, and empty server removal disables MCP globally.
+- Non-obvious constraints: CLI mutates config only, server names prefix tool
+  names through one canonicalizer, collisions are rejected before partial
+  registration, env files and headers are transport-specific, and empty server
+  removal disables MCP globally.
 
 ## Requirements
 
@@ -33,6 +38,7 @@ login.
 | `FR-MCP-008` | MUST   | A missing `tools.mcp.enabled` value defaults to true, while an explicit false remains disabled. New default configurations leave the server map empty and discovery disabled until an operator opts in.                                                                                                                                                                                                                                                                                                                                                                                                                        | A newly installed launcher should be ready to add an MCP server without overriding an explicit opt-out or exposing unnecessary discovery tools. |
 | `FR-MCP-009` | MUST   | The authenticated launcher exposes an Agent → MCP sidebar entry, dedicated `/agent/mcp` management page, and `/api/mcp*` endpoints instead of a duplicate editor in the generic config form. It lists settings and sanitized summaries with env/header key names and auth status but never values; explicit key inventories let updates preserve unchanged secret values. Operators can add or update validated stdio/HTTP/SSE definitions, enable or disable servers, delete with confirmation, and test unsaved or saved definitions without mutating unrelated config; the first add auto-enables MCP. The responsive, keyboard-accessible guided form starts from local-command or remote-URL intent, offers Save, Save & Test, and Save & log in actions when applicable, progressively reveals transport/auth details, and reports actionable probe results, tool counts, validation errors, and gateway-restart state. Every mutation, including a stdio probe that may execute a process, requires same-origin browser context; body-bearing mutations require JSON. | MCP setup and diagnosis should not require raw JSON, expose secret values, or hide process-launching mutations behind weak browser controls. |
 | `FR-MCP-010` | MUST   | Remote server auth config may reference an external auth-store credential by `credential_id` with `bearer` or `oauth` type and a nonsecret `revision` counter. Credential identities are normalized and server-scoped; a rename preserves the existing explicit reference, while a recreated or shared-name attachment forks a collision-resistant ID rather than inheriting another server incarnation's credential, and cleanup occurs only after the final reference. The runtime resolves stored access tokens and injects them as Bearer headers without persisting tokens in `config.json` or returning them from launcher APIs; credential changes bump `revision` so gateway restart detection observes them. The launcher supports setting, replacing, and removing bearer tokens plus browser OAuth authorization-code login with PKCE, state validation, expiry, dynamic client registration, popup-safe save-before-login, sanitized polling, refresh persistence, and reconnect. Custom headers and bearer/OAuth auth require HTTPS except for intentional loopback development; configured MCP URLs reject userinfo, launcher-managed headers reject reserved transport names and runtime skips such configured overrides, secrets stay bound to the configured origin, and runtime redirects remain same-origin. OAuth completion rechecks the server transport, URL, auth, and latest-flow snapshot before persistence; OAuth discovery, token, authenticated-probe, and refresh transports disable proxies and DNS-pin policy-approved addresses; a stale serialized refresh cannot overwrite a replacement credential. | Server credentials need a simple UI while remaining out of ordinary config reads, logs, frontend state, unrelated network origins, and stale concurrent flows. |
+| `FR-MCP-011` | MUST   | Every remote identity is represented as a canonical local tool name derived from its server and tool components by the same function used for eager wrapper registration, deferred discovery, direct `mcp/<server>/<tool>` workflow execution, and workflow readiness. Every registered wrapper also retains its exact original server and tool components; direct execution and readiness require those components to equal the workflow request before calling the manager. Before exposing any wrapper, registration preflights the complete discovered set and every affected agent registry, including hidden entries. It rejects two distinct remote identities that canonicalize to one name and rejects a canonical name already occupied by a built-in, local, plugin, or different MCP tool; only the exact same MCP identity may be refreshed. Runtime/readiness also report collision or exact-identity mismatch instead of selecting or replacing a tool by iteration order. | Normalization must not make a workflow invoke a different remote capability from the one it reviewed, overwrite an unrelated capability, or make startup behavior depend on map ordering. |
 
 ## Data And State Model
 
@@ -54,6 +60,8 @@ Owns: CODE web/backend/api/mcp*
 Owns: CODE web/frontend/src/api/mcp*
 Owns: CODE web/frontend/src/components/agent/mcp/**
 Owns: CODE web/frontend/src/routes/agent/mcp.tsx
+Owns: CODE pkg/tools/integration/mcp_tool.go
+Owns: CODE pkg/agent/agent_mcp.go
 Owns: CLI cmd/picoclaw/internal/mcp/*
 Owns: CONFIG.tools.mcp*
 Owns: HTTP * /api/mcp*
@@ -72,7 +80,7 @@ Owns: EVENT mcp.*
 | ----------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
 | Config      | `tools.mcp.*`                                 | Default-on global enablement, discovery settings, per-server transport details, and external credential references.    | `FR-MCP-001`, `FR-MCP-003`, `FR-MCP-008`, `FR-MCP-010` |
 | CLI         | `picoclaw mcp add/list/show/test/edit/remove` | Config management and live diagnostics.                                                                                | `FR-MCP-005`, `FR-MCP-006`, `FR-MCP-007`               |
-| Runtime     | MCP manager and MCP tool wrapper              | Connection lifecycle, discovery, and remote tool execution.                                                            | `FR-MCP-001`, `FR-MCP-002`, `FR-MCP-004`               |
+| Runtime     | MCP manager, canonical tool identity, and MCP tool wrapper | Connection lifecycle, collision-safe discovery/registration, canonical readiness, and remote tool execution. | `FR-MCP-001`, `FR-MCP-002`, `FR-MCP-004`, `FR-MCP-011` |
 | HTTP        | `/api/mcp*`, `/mcp/oauth/callback`            | Sanitized settings/server inventory, isolated mutations, probes, bearer management, and short-lived OAuth flows.        | `FR-MCP-007`, `FR-MCP-009`, `FR-MCP-010`               |
 | Frontend    | `/agent/mcp`                                  | Responsive server management, progressive forms, testing, status, token actions, and OAuth login/reconnect.             | `FR-MCP-009`, `FR-MCP-010`                             |
 | Integration | Docker-backed MCP streamable suite            | Real server protocol compatibility.                                                                                    | `FR-MCP-001`, `FR-MCP-004`                             |
@@ -101,9 +109,15 @@ Owns: EVENT mcp.*
    where supported, cross-process auth-store locks; after acquiring the lock,
    re-read identity so a stale refresh cannot replace a newer credential.
 6. Initialize the client session and list remote tools.
-7. Register tools eagerly or hide them behind discovery based on
-   global/per-server deferral.
-8. On tool call, forward arguments and convert MCP content into PicoClaw tool
+7. Canonicalize every server/tool component, preflight the full discovered set
+   and all affected visible/hidden registry occupants for collisions, then
+   register tools eagerly or hide them behind discovery based on
+   global/per-server deferral. Retain the exact original server/tool components
+   in each wrapper; an exact-identity registration refreshes its manager-bound
+   wrapper.
+8. On agent or workflow tool call, resolve the same canonical identity, verify
+   the wrapper's exact original components against the request, forward
+   arguments only on an exact match, and convert MCP content into PicoClaw tool
    result text/media.
 9. Launcher mutations load the latest config, validate one MCP operation,
    preserve unrelated config and secrets, save atomically, auto-enable on the
@@ -156,6 +170,14 @@ server and tool lifecycle. Security and isolation affect stdio process startup.
 - Enabled config or auth-revision changes require a gateway restart, while
   disabled MCP details do not.
 - Deferred per-server override wins over global discovery defaults.
+- Distinct remote identities that normalize to the same canonical local name
+  fail registration, workflow readiness, and direct workflow execution without
+  exposing a partially registered set or choosing an arbitrary winner.
+- A built-in, local, plugin, or different MCP tool already occupying a
+  canonical name is preserved; initialization fails before exposing any new
+  MCP wrapper.
+- A wrapper registered at the expected canonical name but carrying different
+  original server/tool components is not ready and cannot execute.
 
 ## Acceptance Evidence
 
@@ -168,6 +190,7 @@ server and tool lifecycle. Security and isolation affect stdio process startup.
 | `FR-MCP-009`                                           | [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [web/backend/api/mcp_test.go](../../web/backend/api/mcp_test.go), [web/frontend/src/api/mcp.test.ts](../../web/frontend/src/api/mcp.test.ts), [web/frontend/src/components/agent/mcp/mcp-server-card.test.tsx](../../web/frontend/src/components/agent/mcp/mcp-server-card.test.tsx), [web/frontend/src/components/agent/mcp/mcp-server-form.test.ts](../../web/frontend/src/components/agent/mcp/mcp-server-form.test.ts), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-MCP-010`                                           | [cmd/picoclaw/internal/mcp/command_test.go](../../cmd/picoclaw/internal/mcp/command_test.go), [pkg/auth/store_test.go](../../pkg/auth/store_test.go), [pkg/mcp/auth_test.go](../../pkg/mcp/auth_test.go), [pkg/mcp/network_test.go](../../pkg/mcp/network_test.go), [pkg/mcp/oauth_test.go](../../pkg/mcp/oauth_test.go), [web/backend/api/mcp_oauth_test.go](../../web/backend/api/mcp_oauth_test.go), [web/backend/api/mcp_test.go](../../web/backend/api/mcp_test.go), [web/frontend/src/api/mcp.test.ts](../../web/frontend/src/api/mcp.test.ts), [web/frontend/src/components/agent/mcp/use-mcp-oauth.test.ts](../../web/frontend/src/components/agent/mcp/use-mcp-oauth.test.ts) |
 | `FR-MCP-001`, `FR-MCP-004`                             | [integration/README.md](../../integration/README.md), [integration/suites/mcp-streamable](../../integration/suites/mcp-streamable)                                                                                                                                                             |
+| `FR-MCP-011`                                           | [pkg/mcp/toolname_test.go](../../pkg/mcp/toolname_test.go), [pkg/tools/integration/mcp_tool_test.go](../../pkg/tools/integration/mcp_tool_test.go), [pkg/agent/agent_mcp_test.go](../../pkg/agent/agent_mcp_test.go), [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go), [web/backend/api/workflow_runtime_test.go](../../web/backend/api/workflow_runtime_test.go) |
 
 ## Implementation Anchors
 
@@ -175,7 +198,9 @@ server and tool lifecycle. Security and isolation affect stdio process startup.
 - [pkg/mcp/auth.go](../../pkg/mcp/auth.go)
 - [pkg/mcp/network.go](../../pkg/mcp/network.go)
 - [pkg/mcp/oauth.go](../../pkg/mcp/oauth.go)
+- [pkg/mcp/toolname.go](../../pkg/mcp/toolname.go)
 - [pkg/tools/integration/mcp_tool.go](../../pkg/tools/integration/mcp_tool.go)
+- [pkg/agent/agent_mcp.go](../../pkg/agent/agent_mcp.go)
 - [cmd/picoclaw/internal/mcp](../../cmd/picoclaw/internal/mcp)
 - [web/backend/api/mcp.go](../../web/backend/api/mcp.go)
 - [web/backend/api/mcp_oauth.go](../../web/backend/api/mcp_oauth.go)

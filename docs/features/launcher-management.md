@@ -9,6 +9,10 @@
 The web launcher provides authenticated browser management for configuration,
 models, OAuth credentials, tools, skills, MCP servers, sessions, gateway
 process lifecycle, startup behavior, update, and runtime version metadata.
+Full-config writes and workflow-specific config-coupled operations share one
+launcher mutation boundary so a scoped workflow settings response cannot pair
+values from one in-process config generation with another generation's
+revision.
 
 ## Reconstruction Notes
 
@@ -31,6 +35,7 @@ process lifecycle, startup behavior, update, and runtime version metadata.
 | `FR-LAUNCHER-008` | MUST   | Model fetch distinguishes regular OpenAI API-key listings from OpenAI OAuth/token Codex subscription listings; credential-backed OpenAI fetches use the stored credential, account headers, and the current minimum Codex-compatible client version required for GPT-5.6 model visibility against the ChatGPT Codex models endpoint, while API-key fetches continue to use the OpenAI-compatible `/models` endpoint; GitHub Copilot model fetch exposes static metadata/common models without a credential, uses direct Copilot model listing with the stored token for credential-backed fetches, and credential-backed status checks validate stored credentials instead of probing the local bridge.                                                                                                                                                                                                                                                             | Subscription and API-key accounts have different upstream auth and must not fail or mix credentials.                                                           |
 | `FR-LAUNCHER-009` | SHOULD | Shared launcher layout, theme, and primitive controls remain responsive, token-driven, keyboard-accessible, and free of clipped controls across desktop and narrow mobile widths.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Dashboard navigation and process controls must stay usable while visual styling evolves.                                                                       |
 | `FR-LAUNCHER-010` | MUST   | The authenticated launcher composition registers the feature-owned MCP management and OAuth callback routes, exposes a dedicated Agent → MCP navigation entry, and removes MCP editing from the generic config form. Gateway restart detection includes enabled MCP discovery, server transport, custom-header, and nonsecret auth-revision changes. Shared forms announce validation errors and provide keyboard-accessible, labeled secret visibility controls.                                                                                                                                                                                                                                                                                                                                                                                                                                                        | MCP management must be easy to find, must not conflict with generic config saves, and must clearly apply runtime-relevant changes without weakening shared form accessibility. |
+| `FR-LAUNCHER-011` | MUST   | Full-config PUT/PATCH/reset and workflow-specific settings, template-install, and publish operations are serialized by one handler mutation boundary. Every cooperating `SaveConfig` call also holds a config-path advisory process/file lock, with the opaque generation covering both public JSON and the security sidecar. Full-config PUT/PATCH and workflow settings perform final compare-and-swap saves against the exact generation they loaded; reset holds the lock across backup, secret preservation, and replacement. A workflow settings read holds the handler boundary while loading a stable update-safe config snapshot and deriving its opaque revision.                                                                                                                                                     | Scoped or merge-patch management must not return values from one config generation with another generation's revision, lose a concurrent secret-only update, or overwrite a mutation from another launcher or gateway process. |
 
 ## Data And State Model
 
@@ -48,6 +53,7 @@ Owns: CODE cmd/picoclaw/internal/helpers.go
 Owns: CODE cmd/picoclaw/internal/migrate/**
 Owns: CODE cmd/picoclaw/internal/onboard/**
 Owns: CODE pkg/migrate/**
+Owns: CODE pkg/config/mutation*.go
 Owns: CODE web/backend/**
 Owns: CODE web/frontend/src/api/launcher-auth.ts
 Owns: CODE web/frontend/src/api/models.ts
@@ -101,6 +107,7 @@ Owns: TEST cmd/picoclaw/internal/onboard/* *
 Owns: TEST pkg/migrate/* *
 Owns: TEST pkg/migrate/internal/* *
 Owns: TEST pkg/migrate/sources/openclaw/* *
+Owns: TEST pkg/config/mutation_test.go *
 Owns: TEST scripts/featuretools_lib_test.go *
 Owns: TEST web/backend/* *
 Owns: TEST web/backend/api/auth*
@@ -137,7 +144,16 @@ Owns: TEST web/backend/api/weixin*
    model-name refs, validate model-router targets before saving top-level
    router lists, write the config atomically, and apply runtime log-level
    changes.
-3. For OAuth requests, create bounded flow state, redirect or poll provider
+3. Serialize full-config writes and workflow-specific config-coupled
+   operations through the handler mutation boundary. For workflow settings,
+   read the config between two identical file revisions, compare the submitted
+   revision, validate only the workflow subtree, recheck the file revision, and
+   then compare and save atomically under the config-path advisory lock shared
+   by all config saves. Hash both public JSON and security-sidecar bytes into
+   the opaque generation. Full PUT/PATCH also compare-and-swap the generation
+   they loaded; reset holds the same lock for its complete backup-and-replace
+   transaction.
+4. For OAuth requests, create bounded flow state, redirect or poll provider
    login, exchange callback state for credentials, then persist or clear
    provider auth records. Token-backed account providers such as GitHub Copilot
    validate the submitted token before storage and create the default provider
@@ -149,23 +165,23 @@ Owns: TEST web/backend/api/weixin*
    lookup uses Picoclaw credential records instead of Codex CLI config and maps
    an upstream earned-reset count to the matching account summary without
    exposing credentials or making the read path consume a reset.
-4. For model fetch requests, resolve stored model auth when a model index is
+5. For model fetch requests, resolve stored model auth when a model index is
    supplied, prefer explicit request credentials otherwise, route OpenAI
    OAuth/token fetches to the ChatGPT Codex model list endpoint with a
    Codex-compatible `client_version` new enough to surface GPT-5.6 subscription
    models, expose GitHub Copilot static metadata models for Copilot requests,
    and keep regular API-key fetches on the OpenAI-compatible `/models` path.
-5. For gateway lifecycle requests, inspect current process state first, execute
+6. For gateway lifecycle requests, inspect current process state first, execute
    start/stop/restart transitions only when valid, and retain log buffers for
    status and diagnostics responses. Include the complete enabled MCP config,
    including custom-header values, in the internal restart signature while
    representing external bearer/OAuth token changes only through their
    nonsecret revision so token bytes never enter the signature.
-6. Register feature-specific MCP handlers through the authenticated launcher
+7. Register feature-specific MCP handlers through the authenticated launcher
    router, expose their dedicated route in the shared navigation shell, remove
    their fields from the generic config editor, and cancel unfinished browser
    login flows when the handler shuts down.
-7. Return JSON for success and error paths with status codes that match
+8. Return JSON for success and error paths with status codes that match
    validation, auth, not-found, conflict, or internal failure classes.
 
 ## Cross-Feature Behavior
@@ -199,6 +215,9 @@ the MCP integration and security-isolation features.
 - OAuth flow IDs expire and unknown states fail.
 - Config update preserves model API-key payloads and keeps existing model
   secrets when equivalent provider/model/API-base entries are renamed.
+- A concurrent full-config or workflow-scoped write from the same or another
+  process that changes the config revision before a workflow settings
+  compare-and-swap receives a conflict; the scoped request does not write.
 - Model update preserves existing secrets unless explicitly changed and avoids
   persisting blank secret placeholders for models with no key.
 - Account-router add/update rejects unknown, router, or ambiguous account
@@ -246,11 +265,13 @@ the MCP integration and security-isolation features.
 | `FR-LAUNCHER-008`                    | [web/backend/api/models_test.go](../../web/backend/api/models_test.go)                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `FR-LAUNCHER-009`                    | [web/frontend/src/components/app-sidebar.test.tsx](../../web/frontend/src/components/app-sidebar.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/scripts/lint-ui-rules.mjs](../../web/frontend/scripts/lint-ui-rules.mjs)                                                                                                                                                                                                                                                     |
 | `FR-LAUNCHER-010`                    | [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [web/backend/api/mcp_test.go](../../web/backend/api/mcp_test.go), [web/frontend/src/components/app-sidebar.test.tsx](../../web/frontend/src/components/app-sidebar.test.tsx), [web/frontend/src/components/agent/mcp/mcp-server-card.test.tsx](../../web/frontend/src/components/agent/mcp/mcp-server-card.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
+| `FR-LAUNCHER-011`                    | [pkg/config/mutation_test.go](../../pkg/config/mutation_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/workflow_settings_test.go](../../web/backend/api/workflow_settings_test.go), [web/backend/api/workflow_templates_test.go](../../web/backend/api/workflow_templates_test.go), [web/backend/api/workflow_publish_test.go](../../web/backend/api/workflow_publish_test.go) |
 
 ## Implementation Anchors
 
 - [web/backend/api/router.go](../../web/backend/api/router.go)
 - [web/backend/api/gateway.go](../../web/backend/api/gateway.go)
+- [pkg/config/mutation.go](../../pkg/config/mutation.go)
 - [web/backend/middleware](../../web/backend/middleware)
 - [web/backend/launcherconfig](../../web/backend/launcherconfig)
 - [web/frontend/src/components/app-sidebar.tsx](../../web/frontend/src/components/app-sidebar.tsx)

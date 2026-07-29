@@ -722,6 +722,40 @@ func TestNativeWorkflowStateDeleteAndArtifactReadList(t *testing.T) {
 	}
 }
 
+func TestNativeWorkflowStateSetOverwritesExistingValue(t *testing.T) {
+	execCtx := ExecutionContext{WorkspaceDir: t.TempDir()}
+	for _, value := range []string{"first", "second"} {
+		_, handled, err := RunNativeFunction(
+			context.Background(),
+			"workflow.state",
+			map[string]any{
+				"action": "set",
+				"key":    "replace",
+				"value":  value,
+			},
+			execCtx,
+		)
+		if err != nil || !handled {
+			t.Fatalf("workflow.state set(%q) handled=%v error=%v", value, handled, err)
+		}
+	}
+	got, handled, err := RunNativeFunction(
+		context.Background(),
+		"workflow.state",
+		map[string]any{
+			"action": "get",
+			"key":    "replace",
+		},
+		execCtx,
+	)
+	if err != nil || !handled {
+		t.Fatalf("workflow.state get handled=%v error=%v", handled, err)
+	}
+	if got["value"] != "second" {
+		t.Fatalf("workflow.state value = %#v, want second", got["value"])
+	}
+}
+
 func TestNativeGitInventoryRejectsWorkspaceEscape(t *testing.T) {
 	requireGit(t)
 	workspace := t.TempDir()

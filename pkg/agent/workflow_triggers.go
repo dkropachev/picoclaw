@@ -55,30 +55,18 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 		if def.Error != "" {
 			continue
 		}
-		if err := workflows.EnsureWorkflowRunnable(
+		workflow, err := workflows.LoadRunnableLocalSnapshot(
 			ctx,
 			workspace,
 			def.Ref,
 			workflowRuntimeCompatibility(),
 			localOpts...,
-		); err != nil {
+		)
+		if err != nil {
 			logger.WarnCF(
 				"workflow",
 				"Workflow skipped until revalidated",
 				map[string]any{"ref": def.Ref, "error": err.Error()},
-			)
-			continue
-		}
-		workflow, err := workflows.LoadLocal(ctx, workspace, def.Ref, localOpts...)
-		if err != nil {
-			logger.WarnCF("workflow", "Failed to load workflow", map[string]any{"ref": def.Ref, "error": err.Error()})
-			continue
-		}
-		if validateErr := workflows.Validate(workflow); validateErr != nil {
-			logger.WarnCF(
-				"workflow",
-				"Invalid workflow skipped",
-				map[string]any{"ref": def.Ref, "error": validateErr.Error()},
 			)
 			continue
 		}
@@ -123,19 +111,22 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 			runCtx context.Context,
 			release func(),
 			ref string,
+			workflow *workflows.Workflow,
 			m *workflows.ChannelMessageMatch,
 		) {
 			defer release()
 			if _, err := executor.Run(runCtx, workflows.RunRequest{
-				Ref:      ref,
-				Inputs:   m.Inputs,
-				Event:    m.Event,
-				Session:  m.Session,
-				Delivery: m.Delivery,
+				Ref:         ref,
+				Workflow:    workflow,
+				WorkflowRef: ref,
+				Inputs:      m.Inputs,
+				Event:       m.Event,
+				Session:     m.Session,
+				Delivery:    m.Delivery,
 			}); err != nil {
 				logger.WarnCF("workflow", "Workflow run failed", map[string]any{"ref": ref, "error": err.Error()})
 			}
-		}(workflowCtx, releaseWorkflow, def.Ref, match)
+		}(workflowCtx, releaseWorkflow, def.Ref, workflow, match)
 	}
 	return consume
 }

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -68,6 +69,9 @@ func (h *Handler) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 //
 //	PUT /api/config
 func (h *Handler) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
+	h.configMutationMu.Lock()
+	defer h.configMutationMu.Unlock()
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
@@ -102,7 +106,9 @@ func (h *Handler) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Load existing config and copy security credentials before validation,
 	// so that security-managed fields (e.g. pico token) are available.
-	existingCfg, err := config.LoadConfigForUpdate(h.configPath)
+	existingCfg, expectedRevision, err := loadStableWorkflowSettingsConfig(
+		h.configPath,
+	)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load existing config: %v", err), http.StatusInternalServerError)
 		return
@@ -129,7 +135,14 @@ func (h *Handler) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := config.SaveConfig(h.configPath, &cfg); err != nil {
+	if _, err := config.SaveConfigIfRevision(
+		h.configPath,
+		&cfg,
+		expectedRevision,
+	); errors.Is(err, config.ErrConfigRevisionMismatch) {
+		http.Error(w, "Configuration changed; reload and try again", http.StatusConflict)
+		return
+	} else if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -160,6 +173,9 @@ func execAllowRemoteOmitted(body []byte) bool {
 //
 //	PATCH /api/config
 func (h *Handler) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
+	h.configMutationMu.Lock()
+	defer h.configMutationMu.Unlock()
+
 	patchBody, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
@@ -175,7 +191,7 @@ func (h *Handler) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Load existing config and marshal to a map for merging
-	cfg, err := config.LoadConfigForUpdate(h.configPath)
+	cfg, expectedRevision, err := loadStableWorkflowSettingsConfig(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
@@ -251,7 +267,14 @@ func (h *Handler) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := config.SaveConfig(h.configPath, &newCfg); err != nil {
+	if _, err := config.SaveConfigIfRevision(
+		h.configPath,
+		&newCfg,
+		expectedRevision,
+	); errors.Is(err, config.ErrConfigRevisionMismatch) {
+		http.Error(w, "Configuration changed; reload and try again", http.StatusConflict)
+		return
+	} else if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -268,6 +291,9 @@ func (h *Handler) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 //
 //	POST /api/config/reset
 func (h *Handler) handleResetConfig(w http.ResponseWriter, r *http.Request) {
+	h.configMutationMu.Lock()
+	defer h.configMutationMu.Unlock()
+
 	if err := config.ResetToDefaults(h.configPath); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to reset config: %v", err), http.StatusInternalServerError)
 		return

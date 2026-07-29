@@ -758,6 +758,165 @@ func TestMCPBearerCredentialLifecycleIsIsolatedAndRevisioned(t *testing.T) {
 	}
 }
 
+func TestMCPMutationUsesSharedConfigLockAndPreservesConcurrentSettings(t *testing.T) {
+	harness := newMCPAPITestHarness(t, nil)
+
+	harness.handler.configMutationMu.Lock()
+	configLocked := true
+	defer func() {
+		if configLocked {
+			harness.handler.configMutationMu.Unlock()
+		}
+	}()
+
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response <- harness.request(t, http.MethodPatch, "/api/mcp/settings", map[string]any{
+			"enabled": true,
+			"discovery": map[string]any{
+				"enabled":            true,
+				"ttl":                60,
+				"max_search_results": 7,
+				"use_bm25":           true,
+				"use_regex":          false,
+			},
+		})
+	}()
+
+	select {
+	case rec := <-response:
+		t.Fatalf(
+			"MCP mutation completed while shared config lock was held: status=%d body=%s",
+			rec.Code,
+			rec.Body.String(),
+		)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	concurrent, revision, err := config.LoadConfigForUpdateSnapshot(harness.configPath)
+	if err != nil {
+		t.Fatalf("LoadConfigForUpdateSnapshot() error = %v", err)
+	}
+	concurrent.Workflows.Enabled = true
+	concurrent.Workflows.MaxConcurrentRuns = 23
+	if _, err = config.SaveConfigIfRevision(
+		harness.configPath,
+		concurrent,
+		revision,
+	); err != nil {
+		t.Fatalf("SaveConfigIfRevision(concurrent workflow settings) error = %v", err)
+	}
+
+	harness.handler.configMutationMu.Unlock()
+	configLocked = false
+
+	var rec *httptest.ResponseRecorder
+	select {
+	case rec = <-response:
+	case <-time.After(time.Second):
+		t.Fatal("MCP mutation did not resume after shared config lock was released")
+	}
+	requireMCPStatus(t, rec, http.StatusOK)
+
+	saved := loadMCPTestConfig(t, harness.configPath)
+	if !saved.Workflows.Enabled || saved.Workflows.MaxConcurrentRuns != 23 {
+		t.Fatalf(
+			"concurrent workflow settings were lost: %#v",
+			saved.Workflows,
+		)
+	}
+	if !saved.Tools.MCP.Enabled ||
+		!saved.Tools.MCP.Discovery.Enabled ||
+		saved.Tools.MCP.Discovery.MaxSearchResults != 7 {
+		t.Fatalf("MCP settings were not persisted: %#v", saved.Tools.MCP)
+	}
+}
+
+func TestMCPBearerCredentialRollsBackOnConfigRevisionConflict(t *testing.T) {
+	const credentialID = "mcp:remote"
+	harness := newMCPAPITestHarness(t, func(cfg *config.Config) {
+		cfg.Tools.MCP.Servers = map[string]config.MCPServerConfig{
+			"remote": {
+				Enabled: true,
+				Type:    "http",
+				URL:     "https://mcp.example.test/api",
+				Auth: &config.MCPServerAuthConfig{
+					Type:         "bearer",
+					CredentialID: credentialID,
+					Revision:     11,
+				},
+			},
+		}
+	})
+	originalCredential := &picoauth.AuthCredential{
+		AccessToken: "original-bearer-token",
+		Provider:    "mcp",
+		AuthMethod:  "bearer",
+	}
+	if err := picoauth.SetCredential(credentialID, originalCredential); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	originalSave := mcpSaveConfigIfRevision
+	injected := false
+	mcpSaveConfigIfRevision = func(
+		path string,
+		cfg *config.Config,
+		expectedRevision string,
+	) (string, error) {
+		if !injected {
+			injected = true
+			concurrent, revision, err := config.LoadConfigForUpdateSnapshot(path)
+			if err != nil {
+				return "", fmt.Errorf("load concurrent config: %w", err)
+			}
+			concurrent.Workflows.Enabled = true
+			concurrent.Workflows.MaxConcurrentRuns = 31
+			if _, err = originalSave(path, concurrent, revision); err != nil {
+				return "", fmt.Errorf("save concurrent config: %w", err)
+			}
+		}
+		return originalSave(path, cfg, expectedRevision)
+	}
+	t.Cleanup(func() {
+		mcpSaveConfigIfRevision = originalSave
+	})
+
+	rec := harness.request(
+		t,
+		http.MethodPut,
+		"/api/mcp/servers/remote/credential",
+		map[string]any{
+			"auth_type": "bearer",
+			"token":     "replacement-bearer-token",
+		},
+	)
+	requireMCPStatus(t, rec, http.StatusConflict)
+
+	credential, err := picoauth.GetCredential(credentialID)
+	if err != nil {
+		t.Fatalf("GetCredential() error = %v", err)
+	}
+	if credential == nil ||
+		credential.AccessToken != originalCredential.AccessToken ||
+		credential.Provider != originalCredential.Provider ||
+		credential.AuthMethod != originalCredential.AuthMethod {
+		t.Fatalf("credential after CAS rollback = %#v, want %#v", credential, originalCredential)
+	}
+
+	cfg := loadMCPTestConfig(t, harness.configPath)
+	if !cfg.Workflows.Enabled || cfg.Workflows.MaxConcurrentRuns != 31 {
+		t.Fatalf("concurrent workflow settings were lost: %#v", cfg.Workflows)
+	}
+	authConfig := cfg.Tools.MCP.Servers["remote"].Auth
+	if authConfig == nil ||
+		authConfig.Type != "bearer" ||
+		authConfig.CredentialID != credentialID ||
+		authConfig.Revision != 11 {
+		t.Fatalf("config auth after CAS conflict = %#v, want original bearer linkage", authConfig)
+	}
+}
+
 func TestMCPRecreatedRenamedServerForksDefaultCredentialOwnership(t *testing.T) {
 	const (
 		originalToken  = "renamed-server-token"

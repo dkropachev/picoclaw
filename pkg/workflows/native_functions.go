@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
 const (
@@ -30,6 +32,13 @@ var nativeFunctionNames = map[string]struct{}{
 	"workflow.artifact": {},
 	"git.inventory":     {},
 	"git.filter":        {},
+}
+
+// IsNativeFunction reports whether name is implemented by the workflow
+// runtime without an embedding FunctionRunner.
+func IsNativeFunction(name string) bool {
+	_, ok := nativeFunctionNames[strings.TrimSpace(name)]
+	return ok
 }
 
 var nativeCodeExtensions = map[string]struct{}{
@@ -107,7 +116,7 @@ func RunNativeFunction(
 	exec ExecutionContext,
 ) (map[string]any, bool, error) {
 	name = strings.TrimSpace(name)
-	if _, ok := nativeFunctionNames[name]; !ok {
+	if !IsNativeFunction(name) {
 		return nil, false, nil
 	}
 	switch name {
@@ -808,7 +817,7 @@ func writeNativeStateValue(exec ExecutionContext, namespace, key string, value a
 		return err
 	}
 	stateDir := filepath.Dir(statePath)
-	if mkdirErr := os.MkdirAll(stateDir, 0o755); mkdirErr != nil {
+	if mkdirErr := fileutil.MkdirAllDurable(stateDir, 0o755); mkdirErr != nil {
 		return mkdirErr
 	}
 	env := nativeStateEnvelope{Key: key, Value: value, UpdatedAt: time.Now().UTC()}
@@ -816,30 +825,7 @@ func writeNativeStateValue(exec ExecutionContext, namespace, key string, value a
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(stateDir, "."+filepath.Base(statePath)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer func() {
-		_ = os.Remove(tmpPath)
-	}()
-	if err := nativeEnsureInside(nativeWorkspace(exec), tmpPath); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("temporary state path must stay inside workflow workspace: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, statePath)
+	return fileutil.WriteFileAtomic(statePath, data, 0o600)
 }
 
 func deleteNativeStateValue(exec ExecutionContext, namespace, key string) (bool, error) {
@@ -847,7 +833,7 @@ func deleteNativeStateValue(exec ExecutionContext, namespace, key string) (bool,
 	if err != nil {
 		return false, err
 	}
-	if err := os.Remove(statePath); err != nil {
+	if err := fileutil.RemoveDurable(statePath); err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
@@ -1036,6 +1022,24 @@ func nativeArtifactPath(exec ExecutionContext, namespace, runID, name string) (s
 func nativeConfinedPath(exec ExecutionContext, parts ...string) (string, error) {
 	workspace := nativeWorkspace(exec)
 	target := filepath.Join(append([]string{workspace}, parts...)...)
+	if len(parts) > 0 && parts[0] == workflowStateDir {
+		var err error
+		if len(parts) == 1 {
+			target, err = resolveWorkflowInternalRoot(workspace, workflowStateDir)
+		} else {
+			target, err = resolveWorkflowInternalPath(
+				workspace,
+				workflowStateDir,
+				parts[1:]...,
+			)
+		}
+		if err != nil {
+			return "", fmt.Errorf(
+				"path must stay inside workflow workspace storage root: %w",
+				err,
+			)
+		}
+	}
 	if err := nativeEnsureInside(workspace, target); err != nil {
 		return "", fmt.Errorf("path must stay inside workflow workspace: %w", err)
 	}

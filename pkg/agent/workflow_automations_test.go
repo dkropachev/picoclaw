@@ -20,6 +20,21 @@ type scheduleAdmissionContext struct {
 	entered chan struct{}
 }
 
+type workflowTriggerMutationBus struct {
+	runtimeevents.Bus
+	once   sync.Once
+	mutate func()
+}
+
+func (b *workflowTriggerMutationBus) PublishNonBlocking(
+	evt runtimeevents.Event,
+) runtimeevents.PublishResult {
+	if evt.Kind == runtimeevents.KindWorkflowTriggered && b.mutate != nil {
+		b.once.Do(b.mutate)
+	}
+	return b.Bus.PublishNonBlocking(evt)
+}
+
 func (c *scheduleAdmissionContext) Value(key any) any {
 	c.once.Do(func() { close(c.entered) })
 	return c.Context.Value(key)
@@ -66,6 +81,73 @@ jobs:
 	}
 }
 
+func TestScheduledWorkflowRunsMatchedSnapshotAfterDefinitionDrift(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	const workflowA = `
+name: Scheduled A
+on:
+  schedule:
+    - cron: "* * * * *"
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - id: version_a
+        uses: agent/default
+`
+	const workflowB = `
+name: Scheduled B
+on:
+  schedule:
+    - cron: "* * * * *"
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - id: version_b
+        uses: agent/default
+`
+	writeWorkflowAutomationFile(t, workspace, "scheduled.yml", workflowA)
+	al := newWorkflowAutomationTestLoop(workspace)
+	defer al.Close()
+	if _, err := workflows.RevalidateLocal(
+		ctx,
+		workspace,
+		workflowRuntimeCompatibility(),
+	); err != nil {
+		t.Fatalf("RevalidateLocal(A) error = %v", err)
+	}
+	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
+	schedules, err := al.loadScheduledWorkflowRuns(ctx, workspace, now, nil)
+	if err != nil {
+		t.Fatalf("loadScheduledWorkflowRuns() error = %v", err)
+	}
+	schedule, ok := schedules["workflows/scheduled.yml#0"]
+	if !ok || schedule.workflow == nil {
+		t.Fatalf("bound schedule = %#v, want exact workflow snapshot", schedule)
+	}
+	schedule.generation = al.GetConfig()
+
+	writeWorkflowAutomationFile(t, workspace, "scheduled.yml", workflowB)
+	if _, err := workflows.RevalidateLocal(
+		ctx,
+		workspace,
+		workflowRuntimeCompatibility(),
+	); err != nil {
+		t.Fatalf("RevalidateLocal(B) error = %v", err)
+	}
+	al.runScheduledWorkflow(ctx, schedule, now)
+
+	run := waitForWorkflowRunCompletion(t, workspace)
+	if _, ok := run.Steps["main/version_a"]; !ok {
+		t.Fatalf("run steps = %#v, want version-A snapshot", run.Steps)
+	}
+	if _, ok := run.Steps["main/version_b"]; ok {
+		t.Fatalf("run steps = %#v, definition B leaked into selected run", run.Steps)
+	}
+}
+
 func TestHandleWorkflowRuntimeEventSkipsUntilRevalidated(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()
@@ -103,6 +185,146 @@ jobs:
 	run := waitForWorkflowRunCompletion(t, workspace)
 	if run.WorkflowRef != "workflows/runtime.yml" {
 		t.Fatalf("workflow ref = %q, want workflows/runtime.yml", run.WorkflowRef)
+	}
+}
+
+func TestChannelAndCommandWorkflowsRunMatchedSnapshotAfterDefinitionDrift(t *testing.T) {
+	tests := []struct {
+		name    string
+		trigger string
+		content string
+	}{
+		{
+			name: "channel message",
+			trigger: `channel_message:
+    channels: test
+    passthrough: false`,
+			content: "run snapshot",
+		},
+		{
+			name: "command",
+			trigger: `command:
+    name: snapshot
+    channels: test
+    passthrough: false`,
+			content: "/snapshot",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			workspace := t.TempDir()
+			workflow := func(version string) string {
+				return `
+name: Immediate ` + version + `
+on:
+  ` + test.trigger + `
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - id: version_` + version + `
+        uses: agent/default
+`
+			}
+			writeWorkflowAutomationFile(t, workspace, "immediate.yml", workflow("a"))
+			al := newWorkflowAutomationTestLoop(workspace)
+			defer al.Close()
+			if _, err := workflows.RevalidateLocal(
+				ctx,
+				workspace,
+				workflowRuntimeCompatibility(),
+			); err != nil {
+				t.Fatalf("RevalidateLocal(A) error = %v", err)
+			}
+			al.runtimeEvents = &workflowTriggerMutationBus{
+				Bus: al.runtimeEvents,
+				mutate: func() {
+					writeWorkflowAutomationFile(t, workspace, "immediate.yml", workflow("b"))
+					if _, err := workflows.RevalidateLocal(
+						ctx,
+						workspace,
+						workflowRuntimeCompatibility(),
+					); err != nil {
+						t.Fatalf("RevalidateLocal(B) error = %v", err)
+					}
+				},
+			}
+
+			consumed := al.handleWorkflowTriggers(ctx, bus.InboundMessage{
+				Context: bus.InboundContext{
+					Channel:  "test",
+					ChatID:   "snapshot-chat",
+					ChatType: "direct",
+					SenderID: "user",
+				},
+				Content: test.content,
+			})
+			if !consumed {
+				t.Fatal("handleWorkflowTriggers() consumed = false, want true")
+			}
+			run := waitForWorkflowRunCompletion(t, workspace)
+			if _, ok := run.Steps["main/version_a"]; !ok {
+				t.Fatalf("run steps = %#v, want matched version-A snapshot", run.Steps)
+			}
+			if _, ok := run.Steps["main/version_b"]; ok {
+				t.Fatalf("run steps = %#v, definition B leaked into selected run", run.Steps)
+			}
+		})
+	}
+}
+
+func TestRuntimeEventWorkflowRunsMatchedSnapshotAfterDefinitionDrift(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	workflow := func(version string) string {
+		return `
+name: Runtime ` + version + `
+on:
+  runtime_event:
+    kinds: gateway.ready
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - id: version_` + version + `
+        uses: agent/default
+`
+	}
+	writeWorkflowAutomationFile(t, workspace, "runtime.yml", workflow("a"))
+	al := newWorkflowAutomationTestLoop(workspace)
+	defer al.Close()
+	if _, err := workflows.RevalidateLocal(
+		ctx,
+		workspace,
+		workflowRuntimeCompatibility(),
+	); err != nil {
+		t.Fatalf("RevalidateLocal(A) error = %v", err)
+	}
+	al.runtimeEvents = &workflowTriggerMutationBus{
+		Bus: al.runtimeEvents,
+		mutate: func() {
+			writeWorkflowAutomationFile(t, workspace, "runtime.yml", workflow("b"))
+			if _, err := workflows.RevalidateLocal(
+				ctx,
+				workspace,
+				workflowRuntimeCompatibility(),
+			); err != nil {
+				t.Fatalf("RevalidateLocal(B) error = %v", err)
+			}
+		},
+	}
+
+	al.handleWorkflowRuntimeEvent(ctx, runtimeevents.Event{
+		Kind:   runtimeevents.KindGatewayReady,
+		Source: runtimeevents.Source{Component: "gateway", Name: "main"},
+	})
+	run := waitForWorkflowRunCompletion(t, workspace)
+	if _, ok := run.Steps["main/version_a"]; !ok {
+		t.Fatalf("run steps = %#v, want matched version-A snapshot", run.Steps)
+	}
+	if _, ok := run.Steps["main/version_b"]; ok {
+		t.Fatalf("run steps = %#v, definition B leaked into selected run", run.Steps)
 	}
 }
 

@@ -416,7 +416,19 @@ func newNoopWorkflowTool(
 		WorkspaceDir: workspace,
 		Store:        store,
 		Functions:    registry,
-	}, workspace, runtime)
+	}, workspace, runtime).ConfigureDevelopmentPublishGate(
+		WorkflowDevelopmentPublishGateConfig{
+			WorkflowsEnabled: true,
+			DefinitionsDir:   workflows.DefaultDefinitionsDir,
+			MaxCallDepth:     4,
+			Resolver: workflows.WorkflowDependencyRuntimeResolverFunc(func(
+				context.Context,
+				workflows.WorkflowDependencyOccurrence,
+			) workflows.WorkflowDependencyReadinessCode {
+				return workflows.WorkflowDependencyReadinessReady
+			}),
+		},
+	)
 }
 
 func workflowToolRunCount(t *testing.T, ctx context.Context, store workflows.RunStore) int {

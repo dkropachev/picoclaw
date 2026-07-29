@@ -9,9 +9,12 @@ import (
 	"sync"
 	"testing"
 
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
+	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -1846,6 +1849,76 @@ func TestWorkflowToolRunnerDeliversHandledMedia(t *testing.T) {
 	if len(got.Parts) != 1 || got.Parts[0].Ref != ref || got.Parts[0].Type != "file" {
 		t.Fatalf("parts = %#v", got.Parts)
 	}
+}
+
+type workflowMCPCall struct {
+	server string
+	tool   string
+}
+
+type workflowMCPRecordingManager struct {
+	calls []workflowMCPCall
+}
+
+func (m *workflowMCPRecordingManager) CallTool(
+	_ context.Context,
+	serverName, toolName string,
+	_ map[string]any,
+) (*sdkmcp.CallToolResult, error) {
+	m.calls = append(m.calls, workflowMCPCall{server: serverName, tool: toolName})
+	return &sdkmcp.CallToolResult{
+		Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "ok"}},
+	}, nil
+}
+
+func TestWorkflowToolRunnerRequiresExactMCPIdentity(t *testing.T) {
+	t.Run("boundary-canonical alternate is not executed", func(t *testing.T) {
+		manager := &workflowMCPRecordingManager{}
+		registry := tools.NewToolRegistry()
+		registry.Register(tools.NewMCPTool(
+			manager,
+			"a",
+			&sdkmcp.Tool{Name: "b_c"},
+		))
+		runner := &workflowToolRunner{agentID: "main", registry: registry}
+
+		_, err := runner.RunTool(context.Background(), workflows.ToolRequest{
+			Name:      picomcp.CanonicalToolName("a_b", "c"),
+			MCP:       true,
+			MCPServer: "a_b",
+			MCPTool:   "c",
+		})
+		if err == nil || !strings.Contains(err.Error(), "does not match") {
+			t.Fatalf("RunTool() error = %v, want exact MCP identity mismatch", err)
+		}
+		if len(manager.calls) != 0 {
+			t.Fatalf("MCP calls = %#v, want no execution", manager.calls)
+		}
+	})
+
+	t.Run("exact identity executes", func(t *testing.T) {
+		manager := &workflowMCPRecordingManager{}
+		registry := tools.NewToolRegistry()
+		registry.Register(tools.NewMCPTool(
+			manager,
+			"a_b",
+			&sdkmcp.Tool{Name: "c"},
+		))
+		runner := &workflowToolRunner{agentID: "main", registry: registry}
+
+		if _, err := runner.RunTool(context.Background(), workflows.ToolRequest{
+			Name:      picomcp.CanonicalToolName("a_b", "c"),
+			MCP:       true,
+			MCPServer: "a_b",
+			MCPTool:   "c",
+		}); err != nil {
+			t.Fatalf("RunTool() error = %v", err)
+		}
+		if len(manager.calls) != 1 ||
+			manager.calls[0] != (workflowMCPCall{server: "a_b", tool: "c"}) {
+			t.Fatalf("MCP calls = %#v, want exact a_b/c execution", manager.calls)
+		}
+	})
 }
 
 func TestWorkflowToolResultOutputsExposesJSONFields(t *testing.T) {

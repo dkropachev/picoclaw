@@ -2,13 +2,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { launcherFetch } from "@/api/http"
 import {
+  checkWorkflowDependencies,
   getWorkflowRun,
   getWorkflowRunEvents,
   getWorkflowRunGraph,
+  getWorkflowSettings,
   inspectWorkflowEventTrigger,
+  installWorkflowTemplate,
   listWorkflowRuns,
+  listWorkflowTemplates,
   listWorkflows,
   matchWorkflowEventTrigger,
+  patchWorkflowSettings,
+  publishWorkflowDevelopment,
   reloadWorkflows,
   renderWorkflowEventTrigger,
   testWorkflowDevelopment,
@@ -174,6 +180,320 @@ describe("workflow API normalization", () => {
       workflows: [],
       errors: [],
     })
+  })
+
+  it("lists and installs built-in workflow templates with encoded names", async () => {
+    mockedLauncherFetch
+      .mockResolvedValueOnce(jsonResponse({ templates: null }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          result: {
+            name: "review/template",
+            ref: "workflows/review.yml",
+            state: "installed",
+            installed: true,
+            revalidated: true,
+          },
+          templates: [
+            {
+              name: "review/template",
+              ref: "workflows/review.yml",
+              state: "installed",
+            },
+          ],
+        }),
+      )
+
+    await expect(listWorkflowTemplates()).resolves.toEqual({ templates: [] })
+    await expect(
+      installWorkflowTemplate("review/template", false),
+    ).resolves.toMatchObject({
+      result: {
+        name: "review/template",
+        installed: true,
+        revalidated: true,
+      },
+      templates: [{ name: "review/template", state: "installed" }],
+    })
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/workflows/templates",
+      undefined,
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/workflows/templates/review%2Ftemplate/install",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ overwrite: false }),
+      }),
+    )
+  })
+
+  it("gets and revision-fences workflow settings updates", async () => {
+    const settings = {
+      configured: {
+        enabled: true,
+        definitions_dir: "",
+        max_concurrent_runs: 0,
+        default_timeout_seconds: 0,
+        max_call_depth: 0,
+        retention_days: 0,
+      },
+      effective: {
+        enabled: true,
+        definitions_dir: "workflows",
+        max_concurrent_runs: 4,
+        default_timeout_seconds: 300,
+        max_call_depth: 8,
+        retention_days: 30,
+      },
+      config_revision: "sha256:settings-1",
+      effects: {
+        launcher_effect: "applied",
+        catalog_effect: "applied",
+        gateway_effect: "applied",
+      },
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(jsonResponse(settings))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...settings,
+          config_revision: "sha256:settings-2",
+          effects: {
+            ...settings.effects,
+            catalog_effect: "reload_required",
+          },
+        }),
+      )
+
+    await expect(getWorkflowSettings()).resolves.toEqual(settings)
+    await expect(
+      patchWorkflowSettings({
+        expected_config_revision: "sha256:settings-1",
+        definitions_dir: "automations",
+        max_concurrent_runs: 6,
+      }),
+    ).resolves.toMatchObject({
+      config_revision: "sha256:settings-2",
+      effects: { catalog_effect: "reload_required" },
+    })
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/workflows/settings",
+      undefined,
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/workflows/settings",
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          expected_config_revision: "sha256:settings-1",
+          definitions_dir: "automations",
+          max_concurrent_runs: 6,
+        }),
+      }),
+    )
+  })
+
+  it("maps workflow control errors without exposing raw backend text", async () => {
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        new Response('{"error":"config_revision_mismatch"}', {
+          status: 409,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response("read /private/config.yaml: permission denied", {
+          status: 500,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response('{"error":"workflow_development_active"}', {
+          status: 409,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response('{"error":"workflow_transaction_recovery_conflict"}', {
+          status: 409,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response('{"error":"template_recovery_failed"}', {
+          status: 503,
+        }),
+      )
+
+    await expect(
+      patchWorkflowSettings({
+        expected_config_revision: "stale",
+        enabled: true,
+      }),
+    ).rejects.toThrow(
+      "Workflow settings changed elsewhere. Reload them and try again.",
+    )
+    await expect(listWorkflowTemplates()).rejects.toThrow(
+      "Built-in workflow templates are unavailable.",
+    )
+    await expect(
+      patchWorkflowSettings({
+        expected_config_revision: "current",
+        definitions_dir: "automations",
+      }),
+    ).rejects.toThrow(
+      "Finish or discard the active workflow draft before changing workflow definitions or templates.",
+    )
+    await expect(listWorkflowTemplates()).rejects.toThrow(
+      "Workflow recovery found files changed outside the interrupted transaction. Operator reconciliation is required; no files were changed.",
+    )
+    await expect(listWorkflowTemplates()).rejects.toThrow(
+      "Template recovery needs operator attention. No further changes were attempted.",
+    )
+  })
+
+  it("checks the exact draft dependency candidate and keeps its revision opaque", async () => {
+    const draft = {
+      target_ref: "workflows/review.yml",
+      yaml: "name: Review\njobs:\n  inspect:\n    steps: []\n",
+    }
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        root_ref: "workflows/review.yml",
+        revision: "opaque:dependency/revision?keep=exact",
+        ready: false,
+        workflow_enabled: true,
+        structural_ready: false,
+        runtime_ready: false,
+        dependencies: [
+          {
+            dependency: {
+              kind: "mcp",
+              name: "github/get_pull_request",
+              workflow_ref: "workflows/review.yml",
+              path: "jobs.inspect.steps[0].uses",
+            },
+            code: "not_connected",
+            ready: false,
+          },
+        ],
+        structural_issues: [
+          {
+            code: "missing_required_input",
+            workflow_ref: "workflows/review.yml",
+            path: "jobs.reusable.with.owner",
+            dependency_kind: "reusable",
+            dependency_name: "workflows/shared.yml",
+          },
+        ],
+      }),
+    )
+
+    await expect(checkWorkflowDependencies({ draft })).resolves.toMatchObject({
+      revision: "opaque:dependency/revision?keep=exact",
+      dependencies: [
+        {
+          dependency: {
+            kind: "mcp",
+            name: "github/get_pull_request",
+          },
+          code: "not_connected",
+          ready: false,
+        },
+      ],
+      structural_issues: [{ code: "missing_required_input" }],
+    })
+    expect(mockedLauncherFetch).toHaveBeenCalledWith(
+      "/api/workflows/dependencies/check",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ draft }),
+      }),
+    )
+  })
+
+  it("normalizes nullable dependency report arrays", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        root_ref: "workflows/empty.yml",
+        revision: "opaque-empty",
+        ready: true,
+        workflow_enabled: true,
+        structural_ready: true,
+        runtime_ready: true,
+        dependencies: null,
+        structural_issues: null,
+      }),
+    )
+
+    await expect(
+      checkWorkflowDependencies({
+        draft: {
+          target_ref: "workflows/empty.yml",
+          yaml: "name: Empty\njobs: {}\n",
+        },
+      }),
+    ).resolves.toMatchObject({
+      revision: "opaque-empty",
+      dependencies: [],
+      structural_issues: [],
+    })
+  })
+
+  it("revision-fences publish and masks dependency and publish errors", async () => {
+    const publishRequest = {
+      session_id: "dev-1",
+      expected_session_revision: "opaque-session",
+      expected_draft_revision: "opaque-draft",
+      expected_base_target_revision: "opaque-base",
+      expected_dependency_revision: "opaque-dependencies",
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          workflow_ref: "workflows/review.yml",
+          session: {
+            id: "dev-1",
+            status: "published",
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response('{"error":"dependency_revision_mismatch"}', {
+          status: 409,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response("read /private/workflows: permission denied", {
+          status: 500,
+        }),
+      )
+
+    await expect(
+      publishWorkflowDevelopment(publishRequest),
+    ).resolves.toMatchObject({
+      workflow_ref: "workflows/review.yml",
+    })
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/workflows/development/publish",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(publishRequest),
+      }),
+    )
+    await expect(publishWorkflowDevelopment(publishRequest)).rejects.toThrow(
+      "Workflow dependencies changed. Wait for a fresh readiness check and try again.",
+    )
+    await expect(
+      checkWorkflowDependencies({
+        draft: {
+          target_ref: "workflows/review.yml",
+          yaml: "name: Review\n",
+        },
+      }),
+    ).rejects.toThrow("Workflow dependency readiness is unavailable.")
   })
 
   it("inspects and renders an event trigger without mutating the draft", async () => {

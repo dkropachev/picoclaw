@@ -1028,8 +1028,8 @@ jobs:
 }
 
 func TestAgentToolsModeBumpsWorkflowCompatibility(t *testing.T) {
-	if WorkflowEngineVersion != "6" {
-		t.Fatalf("WorkflowEngineVersion = %q, want 6", WorkflowEngineVersion)
+	if WorkflowEngineVersion != "7" {
+		t.Fatalf("WorkflowEngineVersion = %q, want 7", WorkflowEngineVersion)
 	}
 	if WorkflowSchemaVersion != "2" {
 		t.Fatalf("WorkflowSchemaVersion = %q, want 2", WorkflowSchemaVersion)

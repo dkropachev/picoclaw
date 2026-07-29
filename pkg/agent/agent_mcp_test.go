@@ -12,9 +12,12 @@ import (
 	"strings"
 	"testing"
 
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/mcp"
 	agenttools "github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 func boolPtr(b bool) *bool { return &b }
@@ -169,6 +172,216 @@ func TestToolRegistryIncludesReportsOnlyRegisteredTools(t *testing.T) {
 	}
 	if toolRegistryIncludes(registry, "mcp_github_create_issue") {
 		t.Fatal("blocked MCP tool should not be included")
+	}
+}
+
+func TestValidateCanonicalMCPToolNamesRejectsAmbiguousCaseVariants(t *testing.T) {
+	servers := map[string]*mcp.ServerConnection{
+		"GitHub": {
+			Tools: []*sdkmcp.Tool{{Name: "Search"}},
+		},
+		"github": {
+			Tools: []*sdkmcp.Tool{{Name: "search"}},
+		},
+	}
+
+	err := validateCanonicalMCPToolNames(servers)
+	if !errors.Is(err, mcp.ErrCanonicalToolNameCollision) {
+		t.Fatalf("validateCanonicalMCPToolNames() error = %v, want canonical collision", err)
+	}
+}
+
+func TestValidateCanonicalMCPToolNamesAllowsDistinctLossyNames(t *testing.T) {
+	servers := map[string]*mcp.ServerConnection{
+		"GitHub Server": {
+			Tools: []*sdkmcp.Tool{
+				{Name: "issues.list"},
+				{Name: "issues/list"},
+			},
+		},
+	}
+
+	if err := validateCanonicalMCPToolNames(servers); err != nil {
+		t.Fatalf("validateCanonicalMCPToolNames() error = %v, want nil", err)
+	}
+}
+
+func TestEnsureMCPInitializedRejectsRegistryCollisionBeforeExposure(t *testing.T) {
+	for _, deferred := range []bool{false, true} {
+		mode := "eager"
+		if deferred {
+			mode = "deferred"
+		}
+		t.Run(mode, func(t *testing.T) {
+			loop := mcpRegistryTestLoop(t, deferred, []string{"available", "search"})
+			defer loop.Close()
+
+			agent := loop.registry.GetDefaultAgent()
+			collisionName := mcp.CanonicalToolName("github", "search")
+			existing := &allowlistTestTool{name: collisionName}
+			agent.Tools.Register(existing)
+
+			err := loop.ensureMCPInitialized(context.Background())
+			if !errors.Is(err, mcp.ErrCanonicalToolNameCollision) {
+				t.Fatalf("ensureMCPInitialized() error = %v, want canonical collision", err)
+			}
+			if loop.mcp.getManager() != nil {
+				t.Fatal("MCP manager was retained after registry collision")
+			}
+			got, ok := agent.Tools.GetRegistered(collisionName)
+			if !ok || got != existing {
+				t.Fatalf("collision occupant = %T %p, want original tool %p", got, got, existing)
+			}
+			availableName := mcp.CanonicalToolName("github", "available")
+			if agent.Tools.HasRegistered(availableName) {
+				t.Fatalf("non-conflicting wrapper %q was partially exposed", availableName)
+			}
+
+			if !deferred {
+				readiness := loop.ResolveWorkflowDependency(
+					context.Background(),
+					workflows.WorkflowDependencyOccurrence{
+						Kind: workflows.WorkflowDependencyKindMCP,
+						Name: "github/search",
+					},
+				)
+				if readiness != workflows.WorkflowDependencyReadinessNameCollision {
+					t.Fatalf("readiness = %q, want name_collision", readiness)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateMCPToolRegistrationsRejectsDifferentRegisteredMCPIdentity(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Tools.MCP = config.MCPConfig{
+		ToolConfig: config.ToolConfig{Enabled: true},
+		Servers: map[string]config.MCPServerConfig{
+			"a": {Enabled: true},
+		},
+	}
+	registry := NewAgentRegistry(cfg, nil)
+	defer registry.Close()
+	previousManager := mcp.NewManager()
+	defer func() {
+		if err := previousManager.Close(); err != nil {
+			t.Errorf("close previous MCP manager: %v", err)
+		}
+	}()
+	registry.GetDefaultAgent().Tools.Register(agenttools.NewMCPTool(
+		previousManager,
+		"a_b",
+		&sdkmcp.Tool{Name: "c"},
+	))
+
+	err := validateMCPToolRegistrations(
+		map[string]*mcp.ServerConnection{
+			"a": {Tools: []*sdkmcp.Tool{{Name: "b_c"}}},
+		},
+		cfg.Tools.MCP,
+		registry,
+	)
+	if !errors.Is(err, mcp.ErrCanonicalToolNameCollision) {
+		t.Fatalf("validateMCPToolRegistrations() error = %v, want canonical collision", err)
+	}
+	var collision *mcp.CanonicalToolNameCollisionError
+	if !errors.As(err, &collision) {
+		t.Fatalf("error type = %T, want canonical collision details", err)
+	}
+	if collision.First != (mcp.ToolIdentity{Server: "a_b", Tool: "c"}) ||
+		collision.Second != (mcp.ToolIdentity{Server: "a", Tool: "b_c"}) {
+		t.Fatalf("collision identities = %#v / %#v", collision.First, collision.Second)
+	}
+}
+
+func TestEnsureMCPInitializedAllowsExactRegisteredMCPIdentity(t *testing.T) {
+	for _, deferred := range []bool{false, true} {
+		mode := "eager"
+		if deferred {
+			mode = "deferred"
+		}
+		t.Run(mode, func(t *testing.T) {
+			loop := mcpRegistryTestLoop(t, deferred, []string{"search"})
+			defer loop.Close()
+
+			agent := loop.registry.GetDefaultAgent()
+			previousManager := mcp.NewManager()
+			t.Cleanup(func() {
+				if err := previousManager.Close(); err != nil {
+					t.Errorf("close previous MCP manager: %v", err)
+				}
+			})
+			previous := agenttools.NewMCPTool(
+				previousManager,
+				"github",
+				&sdkmcp.Tool{Name: "search"},
+			)
+			if deferred {
+				agent.Tools.RegisterHidden(previous)
+			} else {
+				agent.Tools.Register(previous)
+			}
+
+			if err := loop.ensureMCPInitialized(context.Background()); err != nil {
+				t.Fatalf("ensureMCPInitialized() error = %v, want nil", err)
+			}
+			name := mcp.CanonicalToolName("github", "search")
+			registered, ok := agent.Tools.GetRegistered(name)
+			if !ok {
+				t.Fatalf("exact MCP wrapper %q was not registered", name)
+			}
+			wrapped, ok := registered.(*agenttools.MCPTool)
+			if !ok {
+				t.Fatalf("registered tool = %T, want *tools.MCPTool", registered)
+			}
+			serverName, toolName := wrapped.MCPIdentity()
+			if serverName != "github" || toolName != "search" {
+				t.Fatalf(
+					"MCP identity = %q/%q, want github/search",
+					serverName,
+					toolName,
+				)
+			}
+			if registered == previous {
+				t.Fatal("exact idempotent registration retained the stale MCP manager wrapper")
+			}
+			_, callable := agent.Tools.Get(name)
+			if callable == deferred {
+				t.Fatalf("callable = %v with deferred = %v", callable, deferred)
+			}
+		})
+	}
+}
+
+func mcpRegistryTestLoop(
+	t *testing.T,
+	deferred bool,
+	toolNames []string,
+) *AgentLoop {
+	t.Helper()
+	httpServer := workflowDependencyMCPTestServer(t, toolNames)
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Tools.MCP = config.MCPConfig{
+		ToolConfig: config.ToolConfig{Enabled: true},
+		Discovery: config.ToolDiscoveryConfig{
+			Enabled: deferred,
+			UseBM25: deferred,
+		},
+		Servers: map[string]config.MCPServerConfig{
+			"github": {
+				Enabled:  true,
+				Deferred: boolPtr(deferred),
+				Type:     "http",
+				URL:      httpServer.URL,
+			},
+		},
+	}
+	return &AgentLoop{
+		cfg:      cfg,
+		registry: NewAgentRegistry(cfg, nil),
 	}
 }
 

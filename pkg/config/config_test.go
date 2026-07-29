@@ -1734,6 +1734,28 @@ func TestDefaultConfig_WorkflowsEnabled(t *testing.T) {
 	}
 }
 
+func TestWorkflowsConfigEffectiveValuesClampUnsafeUpperBounds(t *testing.T) {
+	cfg := WorkflowsConfig{
+		MaxConcurrentRuns:     MaxWorkflowMaxConcurrentRuns + 1,
+		DefaultTimeoutSeconds: MaxWorkflowDefaultTimeoutSeconds + 1,
+		MaxCallDepth:          MaxWorkflowMaxCallDepth + 1,
+		RetentionDays:         MaxWorkflowRetentionDays + 1,
+	}
+	if got := cfg.EffectiveMaxConcurrentRuns(); got != MaxWorkflowMaxConcurrentRuns {
+		t.Fatalf("EffectiveMaxConcurrentRuns() = %d", got)
+	}
+	if got := cfg.EffectiveDefaultTimeout(); got !=
+		time.Duration(MaxWorkflowDefaultTimeoutSeconds)*time.Second {
+		t.Fatalf("EffectiveDefaultTimeout() = %s", got)
+	}
+	if got := cfg.EffectiveMaxCallDepth(); got != MaxWorkflowMaxCallDepth {
+		t.Fatalf("EffectiveMaxCallDepth() = %d", got)
+	}
+	if got := cfg.EffectiveRetentionDays(); got != MaxWorkflowRetentionDays {
+		t.Fatalf("EffectiveRetentionDays() = %d", got)
+	}
+}
+
 func TestToolsConfig_GetFilterMinLength(t *testing.T) {
 	tests := []struct {
 		name     string

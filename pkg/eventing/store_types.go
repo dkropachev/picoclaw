@@ -7,11 +7,12 @@ import (
 	"time"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 const (
-	maxWorkflowRefLength = 1024
-	maxErrorDetailBytes  = 16 << 10
+	maxWorkflowRefLength      = 1024
+	maxWorkflowRevisionLength = 256
+	maxErrorDetailBytes       = 16 << 10
 )
 
 var (
@@ -86,20 +87,21 @@ type InsertResult struct {
 
 // Dispatch tracks delivery of one event to one workflow definition.
 type Dispatch struct {
-	ID          string         `json:"id"`
-	EventID     string         `json:"event_id"`
-	WorkflowRef string         `json:"workflow_ref"`
-	RunID       string         `json:"run_id"`
-	Status      DispatchStatus `json:"status"`
-	LeaseToken  string         `json:"lease_token,omitempty"`
-	LeaseUntil  *time.Time     `json:"lease_until,omitempty"`
-	AvailableAt time.Time      `json:"available_at"`
-	Attempts    int            `json:"attempts"`
-	LastError   string         `json:"last_error,omitempty"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
-	LinkedAt    *time.Time     `json:"linked_at,omitempty"`
-	FinishedAt  *time.Time     `json:"finished_at,omitempty"`
+	ID               string         `json:"id"`
+	EventID          string         `json:"event_id"`
+	WorkflowRef      string         `json:"workflow_ref"`
+	WorkflowRevision string         `json:"workflow_revision,omitempty"`
+	RunID            string         `json:"run_id"`
+	Status           DispatchStatus `json:"status"`
+	LeaseToken       string         `json:"lease_token,omitempty"`
+	LeaseUntil       *time.Time     `json:"lease_until,omitempty"`
+	AvailableAt      time.Time      `json:"available_at"`
+	Attempts         int            `json:"attempts"`
+	LastError        string         `json:"last_error,omitempty"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+	LinkedAt         *time.Time     `json:"linked_at,omitempty"`
+	FinishedAt       *time.Time     `json:"finished_at,omitempty"`
 }
 
 // EventCursor is an opaque-in-spirit keyset position. Callers should pass back
@@ -175,19 +177,20 @@ type DispatchPage struct {
 // LeaseUntil remains observable, while the worker owner/lease token is
 // structurally omitted.
 type DispatchMetadata struct {
-	ID          string         `json:"id"`
-	EventID     string         `json:"event_id"`
-	WorkflowRef string         `json:"workflow_ref"`
-	RunID       string         `json:"run_id"`
-	Status      DispatchStatus `json:"status"`
-	LeaseUntil  *time.Time     `json:"lease_until,omitempty"`
-	AvailableAt time.Time      `json:"available_at"`
-	Attempts    int            `json:"attempts"`
-	LastError   string         `json:"last_error,omitempty"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
-	LinkedAt    *time.Time     `json:"linked_at,omitempty"`
-	FinishedAt  *time.Time     `json:"finished_at,omitempty"`
+	ID               string         `json:"id"`
+	EventID          string         `json:"event_id"`
+	WorkflowRef      string         `json:"workflow_ref"`
+	WorkflowRevision string         `json:"workflow_revision,omitempty"`
+	RunID            string         `json:"run_id"`
+	Status           DispatchStatus `json:"status"`
+	LeaseUntil       *time.Time     `json:"lease_until,omitempty"`
+	AvailableAt      time.Time      `json:"available_at"`
+	Attempts         int            `json:"attempts"`
+	LastError        string         `json:"last_error,omitempty"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+	LinkedAt         *time.Time     `json:"linked_at,omitempty"`
+	FinishedAt       *time.Time     `json:"finished_at,omitempty"`
 }
 
 // DispatchMetadataPage is a newest-first operator-safe dispatch page.
@@ -238,6 +241,15 @@ type RoutingDispatchCreator interface {
 	CreateDispatchForRoutingClaim(
 		ctx context.Context,
 		eventID, leaseToken, workflowRef string,
+	) (Dispatch, bool, error)
+}
+
+// RevisionRoutingDispatchCreator atomically binds a dispatch to the exact
+// workflow content revision that matched while its routing claim is live.
+type RevisionRoutingDispatchCreator interface {
+	CreateRevisionedDispatchForRoutingClaim(
+		ctx context.Context,
+		eventID, leaseToken, workflowRef, workflowRevision string,
 	) (Dispatch, bool, error)
 }
 

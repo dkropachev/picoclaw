@@ -66,6 +66,9 @@ type ToolRequest struct {
 	Delivery  Delivery
 	AgentID   string
 	MessageID string
+	MCP       bool
+	MCPServer string
+	MCPTool   string
 }
 
 type AgentRunner interface {
