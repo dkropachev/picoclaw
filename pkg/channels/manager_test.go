@@ -218,6 +218,24 @@ func newTestManager() *Manager {
 	}
 }
 
+func installTestChannelFactory(t *testing.T, channelType string, factory ChannelFactory) {
+	t.Helper()
+
+	factoriesMu.Lock()
+	previousFactory, hadPreviousFactory := factories[channelType]
+	factories[channelType] = factory
+	factoriesMu.Unlock()
+	t.Cleanup(func() {
+		factoriesMu.Lock()
+		if hadPreviousFactory {
+			factories[channelType] = previousFactory
+		} else {
+			delete(factories, channelType)
+		}
+		factoriesMu.Unlock()
+	})
+}
+
 func TestSetMediaStorePropagatesToExistingChannels(t *testing.T) {
 	oldStore := media.NewFileMediaStore()
 	newStore := media.NewFileMediaStore()
@@ -329,6 +347,857 @@ func TestStartAll_PartialFailure_StartsSuccessfulWorkers(t *testing.T) {
 	defer stopCancel()
 	if err := m.StopAll(stopCtx); err != nil {
 		t.Fatalf("StopAll() error = %v", err)
+	}
+}
+
+func TestStopAllReturnsChannelErrorsAndCanRetry(t *testing.T) {
+	m := newTestManager()
+	stopFailure := errors.New("injected channel stop failure")
+	var stopCalls atomic.Int32
+	var successfulStopCalls atomic.Int32
+	m.channels["failing"] = &mockChannel{
+		stopFn: func(context.Context) error {
+			if stopCalls.Add(1) == 1 {
+				return stopFailure
+			}
+			return nil
+		},
+	}
+	m.channels["successful"] = &mockChannel{
+		stopFn: func(context.Context) error {
+			successfulStopCalls.Add(1)
+			return nil
+		},
+	}
+	if err := m.StartAll(context.Background()); err != nil {
+		t.Fatalf("StartAll() error = %v", err)
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	err := m.StopAll(stopCtx)
+	stopCancel()
+	if !errors.Is(err, stopFailure) {
+		t.Fatalf("first StopAll() error = %v, want injected failure", err)
+	}
+
+	retryCtx, retryCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer retryCancel()
+	if err = m.StopAll(retryCtx); err != nil {
+		t.Fatalf("retry StopAll() error = %v", err)
+	}
+	if got := stopCalls.Load(); got != 2 {
+		t.Fatalf("channel Stop() calls = %d, want 2", got)
+	}
+	if got := successfulStopCalls.Load(); got != 1 {
+		t.Fatalf("successful channel Stop() calls = %d, want 1 across retry", got)
+	}
+}
+
+func TestStopAllContinuesCurrentChannelsWhenPendingRetirementFails(t *testing.T) {
+	m := newTestManager()
+	stopFailure := errors.New("injected pending retirement stop failure")
+	var retirementStopCalls atomic.Int32
+	var currentStopCalls atomic.Int32
+	m.pendingRetirements = map[string]*channelRetirement{
+		"retiring": {
+			name: "retiring",
+			channel: &mockChannel{
+				stopFn: func(context.Context) error {
+					if retirementStopCalls.Add(1) == 1 {
+						return stopFailure
+					}
+					return nil
+				},
+			},
+		},
+	}
+	m.channels["current"] = &mockChannel{
+		stopFn: func(context.Context) error {
+			currentStopCalls.Add(1)
+			return nil
+		},
+	}
+
+	err := m.StopAll(t.Context())
+	if !errors.Is(err, stopFailure) {
+		t.Fatalf("first StopAll() error = %v, want pending retirement failure", err)
+	}
+	if got := retirementStopCalls.Load(); got != 1 {
+		t.Fatalf("pending channel Stop() calls = %d, want 1", got)
+	}
+	if got := currentStopCalls.Load(); got != 1 {
+		t.Fatalf("current channel Stop() calls = %d, want 1 despite pending failure", got)
+	}
+	m.mu.RLock()
+	_, pending := m.pendingRetirements["retiring"]
+	m.mu.RUnlock()
+	if !pending {
+		t.Fatal("failed pending retirement was not retained for retry")
+	}
+
+	if err = m.StopAll(t.Context()); err != nil {
+		t.Fatalf("retry StopAll() error = %v", err)
+	}
+	if got := retirementStopCalls.Load(); got != 2 {
+		t.Fatalf("pending channel Stop() calls = %d, want 2", got)
+	}
+	if got := currentStopCalls.Load(); got != 1 {
+		t.Fatalf("current channel Stop() calls = %d, want 1 across retry", got)
+	}
+	m.mu.RLock()
+	pendingCount := len(m.pendingRetirements)
+	m.mu.RUnlock()
+	if pendingCount != 0 {
+		t.Fatalf("pending retirements after successful retry = %d, want 0", pendingCount)
+	}
+}
+
+func TestStopAllTimeoutWaitingForWorkerIsRetryable(t *testing.T) {
+	m := newTestManager()
+	sendEntered := make(chan struct{})
+	allowSend := make(chan struct{})
+	var stopCalls atomic.Int32
+	m.channels["blocked"] = &mockChannel{
+		sendFn: func(context.Context, bus.OutboundMessage) error {
+			close(sendEntered)
+			<-allowSend
+			return nil
+		},
+		stopFn: func(context.Context) error {
+			stopCalls.Add(1)
+			return nil
+		},
+	}
+	if err := m.StartAll(context.Background()); err != nil {
+		t.Fatalf("StartAll() error = %v", err)
+	}
+	if err := m.bus.PublishOutbound(context.Background(), testOutboundMessage(bus.OutboundMessage{
+		Channel: "blocked",
+		ChatID:  "chat-1",
+		Content: "hold worker",
+	})); err != nil {
+		t.Fatalf("PublishOutbound() error = %v", err)
+	}
+	select {
+	case <-sendEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not enter blocking send")
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	err := m.StopAll(stopCtx)
+	stopCancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		close(allowSend)
+		t.Fatalf("first StopAll() error = %v, want deadline exceeded", err)
+	}
+	if got := stopCalls.Load(); got != 0 {
+		close(allowSend)
+		t.Fatalf("channel Stop() called %d times before worker joined", got)
+	}
+
+	close(allowSend)
+	retryCtx, retryCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer retryCancel()
+	if err = m.StopAll(retryCtx); err != nil {
+		t.Fatalf("retry StopAll() error = %v", err)
+	}
+	if got := stopCalls.Load(); got != 1 {
+		t.Fatalf("channel Stop() calls = %d, want 1", got)
+	}
+}
+
+func TestStopAllUnblocksBackgroundSendToFullWorkerQueue(t *testing.T) {
+	m := newTestManager()
+	sendEntered := make(chan struct{})
+	var enterOnce sync.Once
+	var stopCalls atomic.Int32
+	m.channels["full"] = &mockChannel{
+		sendFn: func(ctx context.Context, _ bus.OutboundMessage) error {
+			enterOnce.Do(func() { close(sendEntered) })
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		stopFn: func(context.Context) error {
+			stopCalls.Add(1)
+			return nil
+		},
+	}
+	if err := m.StartAll(context.Background()); err != nil {
+		t.Fatalf("StartAll() error = %v", err)
+	}
+
+	m.mu.RLock()
+	worker := m.workers["full"]
+	m.mu.RUnlock()
+	if worker == nil {
+		t.Fatal("worker was not created")
+	}
+	worker.queue <- testOutboundMessage(bus.OutboundMessage{
+		Channel: "full",
+		ChatID:  "chat-active",
+		Content: "block active worker send",
+	})
+	select {
+	case <-sendEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not enter blocking send")
+	}
+	for i := 0; i < cap(worker.queue); i++ {
+		worker.queue <- testOutboundMessage(bus.OutboundMessage{
+			Channel: "full",
+			ChatID:  "chat-queued",
+			Content: fmt.Sprintf("queued-%d", i),
+		})
+	}
+
+	blockedSendDone := make(chan error, 1)
+	go func() {
+		blockedSendDone <- m.SendToChannel(
+			context.Background(),
+			"full",
+			"chat-blocked",
+			"must be released by retirement",
+		)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		m.mu.RLock()
+		active := m.activeSendsByChannel["full"]
+		m.mu.RUnlock()
+		if active == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			worker.stop()
+			t.Fatal("SendToChannel() did not block on the full queue")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case err := <-blockedSendDone:
+		worker.stop()
+		t.Fatalf("SendToChannel() returned before shutdown: %v", err)
+	default:
+	}
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	err := m.StopAll(stopCtx)
+	stopCancel()
+	if err != nil {
+		// Ensure a regression failure does not strand the test goroutines.
+		worker.stop()
+	}
+	select {
+	case sendErr := <-blockedSendDone:
+		if !errors.Is(sendErr, ErrNotRunning) {
+			t.Fatalf("SendToChannel() error = %v, want ErrNotRunning", sendErr)
+		}
+	case <-time.After(2 * time.Second):
+		worker.stop()
+		t.Fatal("SendToChannel() remained blocked after worker retirement")
+	}
+	if err != nil {
+		retryCtx, retryCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer retryCancel()
+		_ = m.StopAll(retryCtx)
+		t.Fatalf("StopAll() error = %v", err)
+	}
+	if got := stopCalls.Load(); got != 1 {
+		t.Fatalf("channel Stop() calls = %d, want 1", got)
+	}
+}
+
+func TestStopAllDrainsAdmittedSynchronousSendBeforeChannelStop(t *testing.T) {
+	m := newTestManager()
+	sendEntered := make(chan struct{})
+	allowSend := make(chan struct{})
+	stopEntered := make(chan struct{}, 1)
+	m.channels["synchronous"] = &mockChannel{
+		sendFn: func(context.Context, bus.OutboundMessage) error {
+			close(sendEntered)
+			<-allowSend
+			return nil
+		},
+		stopFn: func(context.Context) error {
+			stopEntered <- struct{}{}
+			return nil
+		},
+	}
+	if err := m.StartAll(context.Background()); err != nil {
+		t.Fatalf("StartAll() error = %v", err)
+	}
+
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- m.SendMessage(context.Background(), testOutboundMessage(bus.OutboundMessage{
+			Channel: "synchronous",
+			ChatID:  "chat-1",
+			Content: "hold direct send",
+		}))
+	}()
+	select {
+	case <-sendEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("synchronous send did not enter channel")
+	}
+
+	stopDone := make(chan error, 1)
+	go func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer stopCancel()
+		stopDone <- m.StopAll(stopCtx)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		m.mu.RLock()
+		stopping := m.stopping
+		m.mu.RUnlock()
+		if stopping {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(allowSend)
+			t.Fatal("StopAll() did not publish stopping state")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-stopEntered:
+		close(allowSend)
+		t.Fatal("channel Stop() ran while synchronous send was active")
+	default:
+	}
+
+	close(allowSend)
+	select {
+	case err := <-sendDone:
+		if err != nil {
+			t.Fatalf("SendMessage() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("synchronous send did not finish")
+	}
+	select {
+	case err := <-stopDone:
+		if err != nil {
+			t.Fatalf("StopAll() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("StopAll() did not finish after synchronous send drained")
+	}
+	select {
+	case <-stopEntered:
+	default:
+		t.Fatal("channel Stop() did not run after synchronous send drained")
+	}
+}
+
+func TestReloadChangedChannelRetiresOldIdentityAndKeepsReplacementWorker(t *testing.T) {
+	const (
+		channelName = "reload-identity"
+		channelType = config.ChannelMaixCam
+	)
+	var (
+		factoryMu sync.Mutex
+		created   []*mockChannel
+		stopCalls []int
+	)
+	oldSendEntered := make(chan struct{})
+	allowOldSend := make(chan struct{})
+	replacementSent := make(chan struct{}, 1)
+	factory := func(
+		_, _ string,
+		_ *config.Config,
+		_ *bus.MessageBus,
+	) (Channel, error) {
+		factoryMu.Lock()
+		defer factoryMu.Unlock()
+		index := len(created)
+		stopCalls = append(stopCalls, 0)
+		channel := &mockChannel{
+			stopFn: func(context.Context) error {
+				factoryMu.Lock()
+				stopCalls[index]++
+				factoryMu.Unlock()
+				return nil
+			},
+		}
+		if index == 0 {
+			channel.sendFn = func(context.Context, bus.OutboundMessage) error {
+				close(oldSendEntered)
+				<-allowOldSend
+				return nil
+			}
+		} else if index == 1 {
+			channel.sendFn = func(context.Context, bus.OutboundMessage) error {
+				replacementSent <- struct{}{}
+				return nil
+			}
+		}
+		created = append(created, channel)
+		return channel, nil
+	}
+	factoriesMu.Lock()
+	previousFactory, hadPreviousFactory := factories[channelType]
+	factories[channelType] = factory
+	factoriesMu.Unlock()
+	t.Cleanup(func() {
+		factoriesMu.Lock()
+		if hadPreviousFactory {
+			factories[channelType] = previousFactory
+		} else {
+			delete(factories, channelType)
+		}
+		factoriesMu.Unlock()
+	})
+
+	makeConfig := func(version string) *config.Config {
+		cfg := config.DefaultConfig()
+		cfg.Channels[channelName] = &config.Channel{
+			Enabled:  true,
+			Type:     channelType,
+			Settings: config.RawNode(fmt.Sprintf(`{"enabled":true,"version":%q}`, version)),
+		}
+		return cfg
+	}
+
+	msgBus := bus.NewMessageBus()
+	manager, err := NewManager(makeConfig("old"), msgBus, nil)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	if err = manager.StartAll(context.Background()); err != nil {
+		t.Fatalf("StartAll() error = %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer stopCancel()
+		if stopErr := manager.StopAll(stopCtx); stopErr != nil {
+			t.Errorf("StopAll() error = %v", stopErr)
+		}
+		msgBus.Close()
+	})
+
+	if err = msgBus.PublishOutbound(context.Background(), testOutboundMessage(bus.OutboundMessage{
+		Channel: channelName,
+		ChatID:  "chat-old",
+		Content: "block old worker",
+	})); err != nil {
+		t.Fatalf("PublishOutbound(old) error = %v", err)
+	}
+	select {
+	case <-oldSendEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old worker did not enter blocking send")
+	}
+	firstReloadCtx, firstReloadCancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	err = manager.Reload(firstReloadCtx, makeConfig("new"))
+	firstReloadCancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		close(allowOldSend)
+		t.Fatalf("first Reload() error = %v, want deadline exceeded", err)
+	}
+	factoryMu.Lock()
+	createdAfterTimeout := len(created)
+	factoryMu.Unlock()
+	if createdAfterTimeout != 1 {
+		close(allowOldSend)
+		t.Fatalf("channels created before retirement retry = %d, want 1", createdAfterTimeout)
+	}
+	manager.mu.RLock()
+	pendingAfterTimeout := len(manager.pendingRetirements)
+	manager.mu.RUnlock()
+	if pendingAfterTimeout != 1 {
+		close(allowOldSend)
+		t.Fatalf("pending retirements after timeout = %d, want 1", pendingAfterTimeout)
+	}
+	close(allowOldSend)
+
+	reloadCtx, reloadCancel := context.WithCancel(context.Background())
+	if err = manager.Reload(reloadCtx, makeConfig("new")); err != nil {
+		reloadCancel()
+		t.Fatalf("Reload() error = %v", err)
+	}
+	reloadCancel()
+
+	factoryMu.Lock()
+	if len(created) != 2 {
+		factoryMu.Unlock()
+		t.Fatalf("created channels = %d, want 2", len(created))
+	}
+	oldChannel := created[0]
+	newChannel := created[1]
+	oldStopCalls := stopCalls[0]
+	factoryMu.Unlock()
+	if oldStopCalls != 1 {
+		t.Fatalf("old channel Stop() calls = %d, want 1", oldStopCalls)
+	}
+
+	manager.mu.RLock()
+	currentChannel := manager.channels[channelName]
+	currentWorker := manager.workers[channelName]
+	manager.mu.RUnlock()
+	if currentChannel != newChannel {
+		t.Fatalf("current channel = %p, want replacement %p", currentChannel, newChannel)
+	}
+	if currentWorker == nil || currentWorker.ch != newChannel {
+		t.Fatalf("replacement worker = %#v, want worker bound to %p", currentWorker, newChannel)
+	}
+	if currentChannel == oldChannel {
+		t.Fatal("old channel identity remained installed after reload")
+	}
+
+	if err = msgBus.PublishOutbound(context.Background(), testOutboundMessage(bus.OutboundMessage{
+		Channel: channelName,
+		ChatID:  "chat-1",
+		Content: "replacement delivery",
+	})); err != nil {
+		t.Fatalf("PublishOutbound() error = %v", err)
+	}
+	select {
+	case <-replacementSent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("replacement worker did not deliver outbound message")
+	}
+}
+
+func TestReloadDoesNotPublishReplacementBeforeStartSucceeds(t *testing.T) {
+	const (
+		channelName = "reload-start-barrier"
+		channelType = config.ChannelMaixCam
+	)
+	startFailure := errors.New("injected replacement start failure")
+	candidateStartEntered := make(chan struct{})
+	allowCandidateStart := make(chan struct{})
+	candidateSendEntered := make(chan struct{})
+	allowCandidateSend := make(chan struct{})
+	candidateStopped := make(chan struct{})
+	var candidateSendActive atomic.Int32
+	var candidateSendCalls atomic.Int32
+	var cleanupOverlappedSend atomic.Bool
+	var factoryCalls atomic.Int32
+
+	factory := func(
+		_, _ string,
+		_ *config.Config,
+		_ *bus.MessageBus,
+	) (Channel, error) {
+		switch factoryCalls.Add(1) {
+		case 1:
+			return &mockChannel{}, nil
+		case 2:
+			return &mockChannel{
+				startFn: func(context.Context) error {
+					close(candidateStartEntered)
+					<-allowCandidateStart
+					return startFailure
+				},
+				sendFn: func(context.Context, bus.OutboundMessage) error {
+					candidateSendCalls.Add(1)
+					candidateSendActive.Add(1)
+					close(candidateSendEntered)
+					<-allowCandidateSend
+					candidateSendActive.Add(-1)
+					return nil
+				},
+				stopFn: func(context.Context) error {
+					if candidateSendActive.Load() != 0 {
+						cleanupOverlappedSend.Store(true)
+					}
+					close(candidateStopped)
+					return nil
+				},
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected factory call %d", factoryCalls.Load())
+		}
+	}
+	installTestChannelFactory(t, channelType, factory)
+
+	makeConfig := func(version string) *config.Config {
+		cfg := config.DefaultConfig()
+		cfg.Channels[channelName] = &config.Channel{
+			Enabled:  true,
+			Type:     channelType,
+			Settings: config.RawNode(fmt.Sprintf(`{"enabled":true,"version":%q}`, version)),
+		}
+		return cfg
+	}
+
+	msgBus := bus.NewMessageBus()
+	manager, err := NewManager(makeConfig("old"), msgBus, nil)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	if err = manager.StartAll(context.Background()); err != nil {
+		t.Fatalf("StartAll() error = %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer stopCancel()
+		if stopErr := manager.StopAll(stopCtx); stopErr != nil {
+			t.Errorf("StopAll() error = %v", stopErr)
+		}
+		msgBus.Close()
+	})
+
+	reloadDone := make(chan error, 1)
+	go func() {
+		reloadDone <- manager.Reload(context.Background(), makeConfig("new"))
+	}()
+	select {
+	case <-candidateStartEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("replacement did not enter Start()")
+	}
+
+	type getChannelResult struct {
+		channel Channel
+		ok      bool
+	}
+	getDone := make(chan getChannelResult, 1)
+	go func() {
+		channel, ok := manager.GetChannel(channelName)
+		getDone <- getChannelResult{channel: channel, ok: ok}
+	}()
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- manager.SendToChannel(
+			context.Background(),
+			channelName,
+			"chat-1",
+			"must not reach unstarted candidate",
+		)
+	}()
+
+	var getResult getChannelResult
+	select {
+	case getResult = <-getDone:
+	case <-time.After(2 * time.Second):
+		close(allowCandidateStart)
+		t.Fatal("GetChannel() blocked while replacement Start() was in progress")
+	}
+
+	var sendErr error
+	sendFinished := false
+	candidateWasReached := false
+	select {
+	case sendErr = <-sendDone:
+		sendFinished = true
+	case <-candidateSendEntered:
+		candidateWasReached = true
+	case <-time.After(2 * time.Second):
+		close(allowCandidateStart)
+		t.Fatal("SendToChannel() neither rejected nor reached the candidate")
+	}
+
+	close(allowCandidateStart)
+	select {
+	case <-candidateStopped:
+	case <-time.After(2 * time.Second):
+		close(allowCandidateSend)
+		t.Fatal("failed replacement was not cleaned up")
+	}
+	close(allowCandidateSend)
+	if !sendFinished {
+		select {
+		case sendErr = <-sendDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("SendToChannel() did not finish after candidate cleanup")
+		}
+	}
+	select {
+	case err = <-reloadDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Reload() did not finish after replacement Start() failed")
+	}
+
+	if !errors.Is(err, startFailure) {
+		t.Fatalf("Reload() error = %v, want replacement start failure", err)
+	}
+	if getResult.ok || getResult.channel != nil {
+		t.Fatalf("GetChannel() exposed unstarted replacement: channel=%p ok=%v", getResult.channel, getResult.ok)
+	}
+	if sendErr == nil || !strings.Contains(sendErr.Error(), "not found") {
+		t.Fatalf("SendToChannel() error = %v, want channel-not-found rejection", sendErr)
+	}
+	if candidateWasReached || candidateSendCalls.Load() != 0 {
+		t.Fatal("SendToChannel() reached replacement before Start() succeeded")
+	}
+	if cleanupOverlappedSend.Load() {
+		t.Fatal("failed replacement cleanup overlapped an admitted send")
+	}
+}
+
+func TestReloadRetainsFailedCandidateCleanupUntilRetry(t *testing.T) {
+	const (
+		channelName = "reload-cleanup-retry"
+		channelType = config.ChannelMaixCam
+	)
+	startFailure := errors.New("injected candidate start failure")
+	stopFailure := errors.New("injected candidate cleanup failure")
+	var factoryCalls atomic.Int32
+	var failedCandidateStopCalls atomic.Int32
+	var replacement *mockChannel
+	factory := func(
+		_, _ string,
+		_ *config.Config,
+		_ *bus.MessageBus,
+	) (Channel, error) {
+		switch factoryCalls.Add(1) {
+		case 1:
+			return &mockChannel{
+				startFn: func(context.Context) error {
+					return startFailure
+				},
+				stopFn: func(context.Context) error {
+					if failedCandidateStopCalls.Add(1) < 3 {
+						return stopFailure
+					}
+					return nil
+				},
+			}, nil
+		case 2:
+			replacement = &mockChannel{}
+			return replacement, nil
+		default:
+			return nil, fmt.Errorf("unexpected factory call %d", factoryCalls.Load())
+		}
+	}
+	installTestChannelFactory(t, channelType, factory)
+
+	oldConfig := config.DefaultConfig()
+	oldConfig.Channels = make(config.ChannelsConfig)
+	newConfig := config.DefaultConfig()
+	newConfig.Channels = make(config.ChannelsConfig)
+	newConfig.Channels[channelName] = &config.Channel{
+		Enabled:  true,
+		Type:     channelType,
+		Settings: config.RawNode(`{"enabled":true,"version":"new"}`),
+	}
+
+	msgBus := bus.NewMessageBus()
+	manager, err := NewManager(oldConfig, msgBus, nil)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer stopCancel()
+		if stopErr := manager.StopAll(stopCtx); stopErr != nil {
+			t.Errorf("StopAll() error = %v", stopErr)
+		}
+		msgBus.Close()
+	})
+
+	err = manager.Reload(context.Background(), newConfig)
+	if !errors.Is(err, startFailure) || !errors.Is(err, stopFailure) {
+		t.Fatalf("first Reload() error = %v, want start and cleanup failures", err)
+	}
+	if got := factoryCalls.Load(); got != 1 {
+		t.Fatalf("factory calls after failed cleanup = %d, want 1", got)
+	}
+	manager.mu.RLock()
+	firstPending := manager.pendingRetirements[channelName]
+	manager.mu.RUnlock()
+	if firstPending == nil {
+		t.Fatal("failed candidate cleanup was not retained")
+	}
+
+	err = manager.Reload(context.Background(), newConfig)
+	if !errors.Is(err, stopFailure) {
+		t.Fatalf("second Reload() error = %v, want pending cleanup failure", err)
+	}
+	if got := factoryCalls.Load(); got != 1 {
+		t.Fatalf("factory calls before cleanup succeeded = %d, want 1", got)
+	}
+	manager.mu.RLock()
+	secondPending := manager.pendingRetirements[channelName]
+	manager.mu.RUnlock()
+	if secondPending != firstPending {
+		t.Fatal("pending cleanup identity changed before Stop() succeeded")
+	}
+
+	if err = manager.Reload(context.Background(), newConfig); err != nil {
+		t.Fatalf("third Reload() error = %v", err)
+	}
+	if got := failedCandidateStopCalls.Load(); got != 3 {
+		t.Fatalf("failed candidate Stop() calls = %d, want 3", got)
+	}
+	if got := factoryCalls.Load(); got != 2 {
+		t.Fatalf("factory calls after cleanup retry = %d, want 2", got)
+	}
+	manager.mu.RLock()
+	current := manager.channels[channelName]
+	worker := manager.workers[channelName]
+	pendingCount := len(manager.pendingRetirements)
+	manager.mu.RUnlock()
+	if current != replacement {
+		t.Fatalf("current channel = %p, want replacement %p", current, replacement)
+	}
+	if worker == nil || worker.ch != replacement {
+		t.Fatalf("current worker = %#v, want worker for replacement %p", worker, replacement)
+	}
+	if pendingCount != 0 {
+		t.Fatalf("pending retirements after cleanup succeeded = %d, want 0", pendingCount)
+	}
+}
+
+func TestDispatcherContinuesAfterCapturedRetiredWorkerQueueIsFull(t *testing.T) {
+	manager := newTestManager()
+	retired := newChannelWorker("retired", &mockChannel{}, "retired")
+	for range cap(retired.queue) {
+		retired.queue <- testOutboundMessage(bus.OutboundMessage{
+			Channel: "retired",
+			ChatID:  "full",
+			Content: "queued",
+		})
+	}
+	active := newChannelWorker("active", &mockChannel{}, "active")
+	manager.channels["retired"] = retired.ch
+	manager.channels["active"] = active.ch
+	manager.workers["retired"] = retired
+	manager.workers["active"] = active
+
+	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
+	dispatchDone := make(chan struct{})
+	go func() {
+		defer close(dispatchDone)
+		manager.dispatchOutbound(dispatchCtx)
+	}()
+	defer func() {
+		dispatchCancel()
+		select {
+		case <-dispatchDone:
+		case <-time.After(2 * time.Second):
+			t.Error("dispatcher did not stop")
+		}
+	}()
+
+	if err := manager.bus.PublishOutbound(context.Background(), testOutboundMessage(bus.OutboundMessage{
+		Channel: "retired",
+		ChatID:  "chat-1",
+		Content: "would block",
+	})); err != nil {
+		t.Fatalf("PublishOutbound(retired) error = %v", err)
+	}
+	retired.markRetired()
+
+	if err := manager.bus.PublishOutbound(context.Background(), testOutboundMessage(bus.OutboundMessage{
+		Channel: "active",
+		ChatID:  "chat-2",
+		Content: "must continue",
+	})); err != nil {
+		t.Fatalf("PublishOutbound(active) error = %v", err)
+	}
+	select {
+	case msg := <-active.queue:
+		if msg.Content != "must continue" {
+			t.Fatalf("active queue content = %q", msg.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatcher stopped or remained blocked on retired worker")
 	}
 }
 

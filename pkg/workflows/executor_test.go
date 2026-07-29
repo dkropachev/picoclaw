@@ -215,6 +215,70 @@ jobs:
 	}
 }
 
+func TestExecutorPersistenceCallbackFailurePreventsWorkflowSideEffects(t *testing.T) {
+	callbackErr := errors.New("injected durable dispatch link failure")
+	functionCalls := 0
+	registry := NewFunctionRegistry()
+	if err := registry.Register(
+		"side-effect",
+		func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
+			functionCalls++
+			return map[string]any{"called": true}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	workflow := parseWorkflow(t, `
+name: Persistence callback
+on:
+  manual: {}
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - uses: function/side-effect
+`)
+	workspace := t.TempDir()
+	store := NewFileRunStore(workspace)
+	result, err := (&Executor{
+		WorkspaceDir: workspace,
+		Store:        store,
+		Functions:    registry,
+	}).Run(context.Background(), RunRequest{
+		RunID:       "wr_persistence_callback",
+		Workflow:    workflow,
+		WorkflowRef: "workflows/persistence-callback.yml",
+		OnRunPersisted: func(run *Run) error {
+			if run == nil ||
+				run.ID != "wr_persistence_callback" ||
+				run.Status != RunStatusRunning {
+				t.Fatalf("OnRunPersisted() run = %#v", run)
+			}
+			persisted, getErr := store.GetRun(context.Background(), run.ID)
+			if getErr != nil || persisted.Status != RunStatusRunning {
+				t.Fatalf("GetRun() during OnRunPersisted = %#v, %v", persisted, getErr)
+			}
+			return callbackErr
+		},
+	})
+	if !errors.Is(err, callbackErr) {
+		t.Fatalf("Run() error = %v, want callback failure", err)
+	}
+	if result == nil || result.Status != RunStatusFailed {
+		t.Fatalf("Run() result = %#v, want failed durable run", result)
+	}
+	if functionCalls != 0 {
+		t.Fatalf("side-effect function calls = %d, want 0", functionCalls)
+	}
+	run, getErr := store.GetRun(context.Background(), "wr_persistence_callback")
+	if getErr != nil {
+		t.Fatalf("GetRun() error = %v", getErr)
+	}
+	if run.Status != RunStatusFailed || !strings.Contains(run.Error, callbackErr.Error()) {
+		t.Fatalf("durable run = %#v, want callback failure", run)
+	}
+}
+
 func TestExecutorCancelRunPublishesRuntimeEvent(t *testing.T) {
 	workspace := t.TempDir()
 	store := NewFileRunStore(workspace)
@@ -1078,8 +1142,56 @@ jobs:
 		MaxConcurrentRuns: 1,
 	}
 	_, err := executor.Run(context.Background(), RunRequest{Workflow: workflow, WorkflowRef: "inline"})
-	if err == nil || !strings.Contains(err.Error(), "concurrency limit") {
-		t.Fatalf("Run error = %v, want concurrency limit", err)
+	if !errors.Is(err, ErrRunConcurrencyLimit) {
+		t.Fatalf("Run error = %v, want ErrRunConcurrencyLimit", err)
+	}
+}
+
+func TestExecutorPropagatesTypedDuplicateRunIDError(t *testing.T) {
+	store := NewFileRunStore(t.TempDir())
+	registry := NewFunctionRegistry()
+	if err := registry.Register(
+		"noop",
+		func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
+			return map[string]any{}, nil
+		},
+	); err != nil {
+		t.Fatalf("Register(noop) error = %v", err)
+	}
+	workflow := parseWorkflow(t, `
+name: Duplicate
+on:
+  manual: {}
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - uses: function/noop
+`)
+	executor := &Executor{
+		WorkspaceDir: t.TempDir(),
+		Store:        store,
+		Functions:    registry,
+	}
+	const runID = "wr_deterministic"
+	if _, err := executor.Run(context.Background(), RunRequest{
+		RunID:       runID,
+		Workflow:    workflow,
+		WorkflowRef: "inline",
+	}); err != nil {
+		t.Fatalf("first Run() error = %v", err)
+	}
+
+	_, err := executor.Run(context.Background(), RunRequest{
+		RunID:       runID,
+		Workflow:    workflow,
+		WorkflowRef: "inline",
+	})
+	if !errors.Is(err, ErrRunAlreadyExists) {
+		t.Fatalf("second Run() error = %v, want ErrRunAlreadyExists", err)
+	}
+	if !strings.Contains(err.Error(), runID) {
+		t.Fatalf("second Run() error = %q, want run ID %q", err, runID)
 	}
 }
 

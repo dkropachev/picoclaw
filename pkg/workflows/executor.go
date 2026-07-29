@@ -52,7 +52,11 @@ type RunRequest struct {
 	WorkflowRef  string
 	RetryOfRunID string
 	CallDepth    int
-	OnRunCreated func(*Run)
+	// OnRunPersisted runs after the durable run record is created and before
+	// lifecycle publication, user callbacks, or workflow side effects. An
+	// error fails the new run without executing the workflow.
+	OnRunPersisted func(*Run) error
+	OnRunCreated   func(*Run)
 }
 
 type RunResult struct {
@@ -113,6 +117,26 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 	}
 	if createErr := e.createRun(ctx, store, run, req.ParentRunID == ""); createErr != nil {
 		return nil, createErr
+	}
+	if req.OnRunPersisted != nil {
+		if persistedErr := req.OnRunPersisted(cloneRun(run)); persistedErr != nil {
+			completedAt := time.Now().UTC()
+			run.Status = RunStatusFailed
+			run.Error = fmt.Sprintf("run persistence callback failed: %v", persistedErr)
+			run.CompletedAt = &completedAt
+			run.UpdatedAt = completedAt
+			_ = store.UpdateRun(context.Background(), run)
+			e.appendEvent(
+				context.Background(),
+				store,
+				RunEvent{Kind: "workflow.run.failed", RunID: run.ID, Message: run.Error},
+			)
+			return &RunResult{
+				RunID:  run.ID,
+				Status: RunStatusFailed,
+				Error:  run.Error,
+			}, fmt.Errorf("run persistence callback: %w", persistedErr)
+		}
 	}
 	e.appendEvent(
 		ctx,
@@ -285,7 +309,12 @@ func (e *Executor) enforceConcurrency(ctx context.Context, store RunStore) error
 		}
 	}
 	if running >= e.MaxConcurrentRuns {
-		return fmt.Errorf("workflow concurrency limit reached: %d running, max %d", running, e.MaxConcurrentRuns)
+		return fmt.Errorf(
+			"%w: %d running, max %d",
+			ErrRunConcurrencyLimit,
+			running,
+			e.MaxConcurrentRuns,
+		)
 	}
 	return nil
 }

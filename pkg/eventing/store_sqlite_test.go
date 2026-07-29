@@ -477,6 +477,115 @@ func TestStoreExpiredRoutingClaimRejectsStaleWorker(t *testing.T) {
 	))
 }
 
+func TestStoreRenewRoutingLeaseExtendsLiveClaim(t *testing.T) {
+	t.Parallel()
+
+	clock := newMutableClock(time.Date(2026, 7, 28, 16, 0, 0, 0, time.UTC))
+	store, _ := openTestStore(t, clock)
+	inserted, err := store.Insert(context.Background(), testEnvelope("routing-renew"))
+	require.NoError(t, err)
+	claimed, err := store.ClaimRouting(context.Background(), "router", 1, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+
+	clock.Advance(30 * time.Second)
+	require.NoError(t, store.RenewRoutingLease(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+		claimed[0].Routing.LeaseToken,
+		2*time.Minute,
+	))
+	renewed, err := store.Get(context.Background(), inserted.Event.Envelope.ID)
+	require.NoError(t, err)
+	require.NotNil(t, renewed.Routing.LeaseUntil)
+	assert.Equal(t, clock.Now().Add(2*time.Minute), *renewed.Routing.LeaseUntil)
+
+	clock.Advance(90 * time.Second)
+	reclaimed, err := store.ClaimRouting(context.Background(), "competitor", 1, time.Minute)
+	require.NoError(t, err)
+	assert.Empty(t, reclaimed)
+	require.NoError(t, store.AckRouting(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+		claimed[0].Routing.LeaseToken,
+	))
+}
+
+func TestStoreClaimedDispatchCreationFencesStaleRouter(t *testing.T) {
+	t.Parallel()
+
+	clock := newMutableClock(time.Date(2026, 7, 28, 16, 0, 0, 0, time.UTC))
+	store, _ := openTestStore(t, clock)
+	inserted, err := store.Insert(context.Background(), testEnvelope("routing-dispatch-fence"))
+	require.NoError(t, err)
+	first, err := store.ClaimRouting(context.Background(), "router-a", 1, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+
+	firstDispatch, created, err := store.CreateDispatchForRoutingClaim(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+		first[0].Routing.LeaseToken,
+		"workflows/first.yaml",
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	duplicate, created, err := store.CreateDispatchForRoutingClaim(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+		first[0].Routing.LeaseToken,
+		"workflows/first.yaml",
+	)
+	require.NoError(t, err)
+	assert.False(t, created)
+	assert.Equal(t, firstDispatch.ID, duplicate.ID)
+
+	clock.Advance(time.Minute)
+	second, err := store.ClaimRouting(context.Background(), "router-b", 1, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, second, 1)
+	assert.ErrorIs(t, func() error {
+		_, _, createErr := store.CreateDispatchForRoutingClaim(
+			context.Background(),
+			inserted.Event.Envelope.ID,
+			first[0].Routing.LeaseToken,
+			"workflows/stale.yaml",
+		)
+		return createErr
+	}(), ErrStaleLease)
+
+	page, err := store.ListDispatches(
+		context.Background(),
+		DispatchFilter{EventID: inserted.Event.Envelope.ID},
+	)
+	require.NoError(t, err)
+	require.Len(t, page.Dispatches, 1)
+	assert.Equal(t, "workflows/first.yaml", page.Dispatches[0].WorkflowRef)
+
+	_, created, err = store.CreateDispatchForRoutingClaim(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+		second[0].Routing.LeaseToken,
+		"workflows/current.yaml",
+	)
+	require.NoError(t, err)
+	assert.True(t, created)
+	require.NoError(t, store.AckRouting(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+		second[0].Routing.LeaseToken,
+	))
+	assert.ErrorIs(t, func() error {
+		_, _, createErr := store.CreateDispatchForRoutingClaim(
+			context.Background(),
+			inserted.Event.Envelope.ID,
+			second[0].Routing.LeaseToken,
+			"workflows/after-ack.yaml",
+		)
+		return createErr
+	}(), ErrStaleLease)
+}
+
 func TestStoreDispatchLifecycleAndUniqueness(t *testing.T) {
 	t.Parallel()
 
@@ -551,6 +660,231 @@ func TestStoreDispatchLifecycleAndUniqueness(t *testing.T) {
 	assert.NotNil(t, finished.FinishedAt)
 	assert.LessOrEqual(t, len(finished.LastError), maxErrorDetailBytes)
 	assert.True(t, json.Valid([]byte(fmt.Sprintf("%q", finished.LastError))))
+}
+
+func TestStoreRenewDispatchLeaseExtendsClaimedAndRunningWork(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 28, 16, 0, 0, 0, time.UTC)
+	clock := newMutableClock(now)
+	store, _ := openTestStore(t, clock)
+	event, err := store.Insert(context.Background(), testEnvelope("renew-dispatch"))
+	require.NoError(t, err)
+	dispatch, created, err := store.CreateDispatch(
+		context.Background(), event.Event.Envelope.ID, "workflows/renew.yaml",
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	claimed, err := store.ClaimDispatches(context.Background(), "dispatcher", 1, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	token := claimed[0].LeaseToken
+
+	clock.Advance(30 * time.Second)
+	require.NoError(t, store.RenewDispatchLease(
+		context.Background(), dispatch.ID, token, 2*time.Minute,
+	))
+	renewed, err := store.GetDispatch(context.Background(), dispatch.ID)
+	require.NoError(t, err)
+	require.NotNil(t, renewed.LeaseUntil)
+	assert.Equal(t, clock.Now().Add(2*time.Minute), *renewed.LeaseUntil)
+	assert.Equal(t, clock.Now(), renewed.UpdatedAt)
+	assert.Equal(t, DispatchClaimed, renewed.Status)
+	assert.Equal(t, token, renewed.LeaseToken)
+	assert.Equal(t, 1, renewed.Attempts)
+
+	// The original one-minute lease has expired, but the renewed lease still
+	// owns the dispatch and can transition it to running.
+	clock.Advance(90 * time.Second)
+	require.NoError(t, store.LinkDispatchRun(
+		context.Background(), dispatch.ID, token, dispatch.RunID,
+	))
+	clock.Advance(15 * time.Second)
+	require.NoError(t, store.RenewDispatchLease(
+		context.Background(), dispatch.ID, token, 3*time.Minute,
+	))
+	running, err := store.GetDispatch(context.Background(), dispatch.ID)
+	require.NoError(t, err)
+	require.NotNil(t, running.LeaseUntil)
+	assert.Equal(t, clock.Now().Add(3*time.Minute), *running.LeaseUntil)
+	assert.Equal(t, clock.Now(), running.UpdatedAt)
+	assert.Equal(t, DispatchRunning, running.Status)
+	assert.Equal(t, token, running.LeaseToken)
+}
+
+func TestStoreRenewDispatchLeaseRejectsUnownedExpiredAndInactiveWork(t *testing.T) {
+	t.Parallel()
+
+	t.Run("wrong lease token", func(t *testing.T) {
+		t.Parallel()
+
+		clock := newMutableClock(time.Date(2026, 7, 28, 16, 0, 0, 0, time.UTC))
+		store, _ := openTestStore(t, clock)
+		event, err := store.Insert(context.Background(), testEnvelope("renew-wrong-token"))
+		require.NoError(t, err)
+		dispatch, _, err := store.CreateDispatch(
+			context.Background(), event.Event.Envelope.ID, "workflows/wrong-token.yaml",
+		)
+		require.NoError(t, err)
+		claimed, err := store.ClaimDispatches(
+			context.Background(), "dispatcher", 1, time.Minute,
+		)
+		require.NoError(t, err)
+		require.Len(t, claimed, 1)
+
+		assert.ErrorIs(t, store.RenewDispatchLease(
+			context.Background(), dispatch.ID, claimed[0].LeaseToken+"-wrong", time.Minute,
+		), ErrStaleLease)
+		unchanged, err := store.GetDispatch(context.Background(), dispatch.ID)
+		require.NoError(t, err)
+		assert.Equal(t, claimed[0].LeaseUntil, unchanged.LeaseUntil)
+		assert.Equal(t, claimed[0].UpdatedAt, unchanged.UpdatedAt)
+	})
+
+	t.Run("expired lease", func(t *testing.T) {
+		t.Parallel()
+
+		clock := newMutableClock(time.Date(2026, 7, 28, 16, 0, 0, 0, time.UTC))
+		store, _ := openTestStore(t, clock)
+		event, err := store.Insert(context.Background(), testEnvelope("renew-expired"))
+		require.NoError(t, err)
+		dispatch, _, err := store.CreateDispatch(
+			context.Background(), event.Event.Envelope.ID, "workflows/expired.yaml",
+		)
+		require.NoError(t, err)
+		claimed, err := store.ClaimDispatches(
+			context.Background(), "dispatcher", 1, time.Minute,
+		)
+		require.NoError(t, err)
+		require.Len(t, claimed, 1)
+		clock.Advance(time.Minute)
+
+		assert.ErrorIs(t, store.RenewDispatchLease(
+			context.Background(), dispatch.ID, claimed[0].LeaseToken, time.Minute,
+		), ErrStaleLease)
+	})
+
+	t.Run("pending dispatch", func(t *testing.T) {
+		t.Parallel()
+
+		clock := newMutableClock(time.Date(2026, 7, 28, 16, 0, 0, 0, time.UTC))
+		store, _ := openTestStore(t, clock)
+		event, err := store.Insert(context.Background(), testEnvelope("renew-pending"))
+		require.NoError(t, err)
+		dispatch, _, err := store.CreateDispatch(
+			context.Background(), event.Event.Envelope.ID, "workflows/pending.yaml",
+		)
+		require.NoError(t, err)
+
+		assert.ErrorIs(t, store.RenewDispatchLease(
+			context.Background(), dispatch.ID, "lease_not_an_owner", time.Minute,
+		), ErrStaleLease)
+	})
+
+	t.Run("terminal dispatch", func(t *testing.T) {
+		t.Parallel()
+
+		clock := newMutableClock(time.Date(2026, 7, 28, 16, 0, 0, 0, time.UTC))
+		store, _ := openTestStore(t, clock)
+		event, err := store.Insert(context.Background(), testEnvelope("renew-terminal"))
+		require.NoError(t, err)
+		dispatch, _, err := store.CreateDispatch(
+			context.Background(), event.Event.Envelope.ID, "workflows/terminal.yaml",
+		)
+		require.NoError(t, err)
+		claimed, err := store.ClaimDispatches(
+			context.Background(), "dispatcher", 1, time.Minute,
+		)
+		require.NoError(t, err)
+		require.Len(t, claimed, 1)
+		token := claimed[0].LeaseToken
+		require.NoError(t, store.FinishDispatch(
+			context.Background(), dispatch.ID, token, DispatchSucceeded, "",
+		))
+
+		assert.ErrorIs(t, store.RenewDispatchLease(
+			context.Background(), dispatch.ID, token, time.Minute,
+		), ErrStaleLease)
+	})
+
+	t.Run("missing dispatch", func(t *testing.T) {
+		t.Parallel()
+
+		clock := newMutableClock(time.Date(2026, 7, 28, 16, 0, 0, 0, time.UTC))
+		store, _ := openTestStore(t, clock)
+		assert.ErrorIs(t, store.RenewDispatchLease(
+			context.Background(),
+			"dsp_00000000000000000000000000000000",
+			"lease_dispatcher_00000000000000000000000000000000",
+			time.Minute,
+		), ErrNotFound)
+	})
+}
+
+func TestStoreRenewDispatchLeaseValidatesArguments(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 28, 16, 0, 0, 0, time.UTC)
+	clock := newMutableClock(now)
+	store, _ := openTestStore(t, clock)
+	event, err := store.Insert(context.Background(), testEnvelope("renew-invalid"))
+	require.NoError(t, err)
+	dispatch, _, err := store.CreateDispatch(
+		context.Background(), event.Event.Envelope.ID, "workflows/invalid.yaml",
+	)
+	require.NoError(t, err)
+	claimed, err := store.ClaimDispatches(context.Background(), "dispatcher", 1, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+
+	for _, testCase := range []struct {
+		name       string
+		id         string
+		leaseToken string
+		lease      time.Duration
+	}{
+		{"empty ID", "", claimed[0].LeaseToken, time.Minute},
+		{"blank ID", " \t", claimed[0].LeaseToken, time.Minute},
+		{"empty token", dispatch.ID, "", time.Minute},
+		{"blank token", dispatch.ID, " \t", time.Minute},
+		{"zero duration", dispatch.ID, claimed[0].LeaseToken, 0},
+		{"negative lease", dispatch.ID, claimed[0].LeaseToken, -time.Second},
+	} {
+		assert.EqualError(
+			t,
+			store.RenewDispatchLease(
+				context.Background(), testCase.id, testCase.leaseToken, testCase.lease,
+			),
+			"dispatch ID, lease token, and positive lease are required",
+			testCase.name,
+		)
+	}
+
+	require.NoError(t, store.RenewDispatchLease(
+		context.Background(), dispatch.ID, claimed[0].LeaseToken, time.Minute,
+	))
+}
+
+func TestStoreRenewDispatchLeaseRejectsOutOfRangeDeadline(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2260, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := newMutableClock(now)
+	store, _ := openTestStore(t, clock)
+	event, err := store.Insert(context.Background(), testEnvelope("renew-overflow"))
+	require.NoError(t, err)
+	dispatch, _, err := store.CreateDispatch(
+		context.Background(), event.Event.Envelope.ID, "workflows/overflow.yaml",
+	)
+	require.NoError(t, err)
+	claimed, err := store.ClaimDispatches(context.Background(), "dispatcher", 1, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+
+	assert.ErrorIs(t, store.RenewDispatchLease(
+		context.Background(), dispatch.ID, claimed[0].LeaseToken,
+		time.Duration(1<<63-1),
+	), ErrTimestampOutOfRange)
 }
 
 func TestStoreListFiltersAndKeysetPagination(t *testing.T) {

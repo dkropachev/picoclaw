@@ -172,6 +172,22 @@ type RoutingQueue interface {
 	DeadRouting(ctx context.Context, id, leaseToken, detail string) error
 }
 
+// RoutingDispatchCreator fences workflow fan-out to the live routing claim
+// that authorized it. A stale router must never create new dispatches after
+// another worker has reclaimed or completed the event.
+type RoutingDispatchCreator interface {
+	CreateDispatchForRoutingClaim(
+		ctx context.Context,
+		eventID, leaseToken, workflowRef string,
+	) (Dispatch, bool, error)
+}
+
+// RoutingLeaseRenewer is an optional capability for catalogs whose matching
+// work may outlive the routing lease initially returned by ClaimRouting.
+type RoutingLeaseRenewer interface {
+	RenewRoutingLease(ctx context.Context, id, leaseToken string, lease time.Duration) error
+}
+
 // DispatchQueue owns durable per-workflow delivery state.
 type DispatchQueue interface {
 	CreateDispatch(ctx context.Context, eventID, workflowRef string) (Dispatch, bool, error)
@@ -196,6 +212,18 @@ type DispatchQueue interface {
 		detail string,
 	) error
 	ListDispatches(ctx context.Context, filter DispatchFilter) (DispatchPage, error)
+}
+
+// DispatchLeaseRenewer is an optional capability for workers whose execution
+// may outlive the dispatch lease initially returned by ClaimDispatches. It is
+// intentionally separate from DispatchQueue and Inbox so existing
+// implementations remain source compatible.
+type DispatchLeaseRenewer interface {
+	RenewDispatchLease(
+		ctx context.Context,
+		id, leaseToken string,
+		lease time.Duration,
+	) error
 }
 
 // EventMaintenance owns additive replay and bounded retention.

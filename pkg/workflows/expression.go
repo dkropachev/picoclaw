@@ -1,13 +1,21 @@
 package workflows
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
+	"math/big"
 	"regexp"
 	"strconv"
 	"strings"
 )
 
-var expressionPattern = regexp.MustCompile(`\$\{\{\s*([^}]+?)\s*\}\}`)
+var (
+	expressionPattern    = regexp.MustCompile(`\$\{\{\s*([^}]+?)\s*\}\}`)
+	decimalNumberPattern = regexp.MustCompile(
+		`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$`,
+	)
+)
 
 type expressionContext struct {
 	Inputs   map[string]any
@@ -107,11 +115,11 @@ func evalExpression(expr string, ctx expressionContext) (any, error) {
 	expr = strings.TrimSpace(expr)
 	for _, op := range []string{" == ", " != ", " >= ", " <= ", " > ", " < "} {
 		if idx := strings.Index(expr, op); idx >= 0 {
-			left, err := evalExpression(expr[:idx], ctx)
+			left, err := evalComparisonOperand(expr[:idx], ctx)
 			if err != nil {
 				return nil, err
 			}
-			right, err := evalExpression(expr[idx+len(op):], ctx)
+			right, err := evalComparisonOperand(expr[idx+len(op):], ctx)
 			if err != nil {
 				return nil, err
 			}
@@ -143,6 +151,16 @@ func evalExpression(expr string, ctx expressionContext) (any, error) {
 		return n, nil
 	}
 	return lookupPath(expr, ctx)
+}
+
+func evalComparisonOperand(expr string, ctx expressionContext) (any, error) {
+	expr = strings.TrimSpace(expr)
+	if decimalNumberPattern.MatchString(expr) {
+		if _, ok := new(big.Rat).SetString(expr); ok {
+			return json.Number(expr), nil
+		}
+	}
+	return evalExpression(expr, ctx)
 }
 
 func lookupPath(path string, ctx expressionContext) (any, error) {
@@ -223,11 +241,33 @@ func stringMapAny(values map[string]string) map[string]any {
 }
 
 func compareValues(left any, op string, right any) bool {
+	if leftNumber, leftIsNumber := asNumericRat(left); leftIsNumber {
+		if rightNumber, rightIsNumber := asNumericRat(right); rightIsNumber {
+			comparison := leftNumber.Cmp(rightNumber)
+			switch op {
+			case "==":
+				return comparison == 0
+			case "!=":
+				return comparison != 0
+			case ">":
+				return comparison > 0
+			case ">=":
+				return comparison >= 0
+			case "<":
+				return comparison < 0
+			case "<=":
+				return comparison <= 0
+			}
+		}
+	}
+
 	switch op {
-	case "==":
-		return fmt.Sprint(left) == fmt.Sprint(right)
-	case "!=":
-		return fmt.Sprint(left) != fmt.Sprint(right)
+	case "==", "!=":
+		equal := fmt.Sprint(left) == fmt.Sprint(right)
+		if op == "!=" {
+			return !equal
+		}
+		return equal
 	case ">", ">=", "<", "<=":
 		lf, lok := asFloat(left)
 		rf, rok := asFloat(right)
@@ -248,7 +288,28 @@ func compareValues(left any, op string, right any) bool {
 	return false
 }
 
-func asFloat(value any) (float64, bool) {
+func asNumericRat(value any) (*big.Rat, bool) {
+	var text string
+	switch v := value.(type) {
+	case int:
+		text = strconv.Itoa(v)
+	case int64:
+		text = strconv.FormatInt(v, 10)
+	case float64:
+		if math.IsInf(v, 0) || math.IsNaN(v) {
+			return nil, false
+		}
+		text = strconv.FormatFloat(v, 'g', -1, 64)
+	case json.Number:
+		text = v.String()
+	default:
+		return nil, false
+	}
+	number, ok := new(big.Rat).SetString(text)
+	return number, ok
+}
+
+func asNumericFloat(value any) (float64, bool) {
 	switch v := value.(type) {
 	case int:
 		return float64(v), true
@@ -256,6 +317,19 @@ func asFloat(value any) (float64, bool) {
 		return float64(v), true
 	case float64:
 		return v, true
+	case json.Number:
+		number, err := v.Float64()
+		return number, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func asFloat(value any) (float64, bool) {
+	if number, ok := asNumericFloat(value); ok {
+		return number, true
+	}
+	switch v := value.(type) {
 	case string:
 		n, err := strconv.ParseFloat(v, 64)
 		return n, err == nil
@@ -278,6 +352,9 @@ func truthy(value any) bool {
 		return v != 0
 	case float64:
 		return v != 0
+	case json.Number:
+		number, ok := asNumericRat(v)
+		return ok && number.Sign() != 0
 	default:
 		return true
 	}

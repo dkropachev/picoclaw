@@ -41,7 +41,12 @@ type Store struct {
 	closeErr error
 }
 
-var _ Inbox = (*Store)(nil)
+var (
+	_ Inbox                  = (*Store)(nil)
+	_ RoutingDispatchCreator = (*Store)(nil)
+	_ RoutingLeaseRenewer    = (*Store)(nil)
+	_ DispatchLeaseRenewer   = (*Store)(nil)
+)
 
 // Open creates or opens a durable eventing store at path.
 func Open(ctx context.Context, path string, options ...Option) (*Store, error) {
@@ -1197,6 +1202,46 @@ func (s *Store) ClaimRouting(
 	return claimed, nil
 }
 
+// RenewRoutingLease extends an owned, live routing claim from current store
+// time. Ownership and liveness are checked atomically with the update.
+func (s *Store) RenewRoutingLease(
+	ctx context.Context,
+	id, leaseToken string,
+	lease time.Duration,
+) error {
+	if err := s.ready(ctx); err != nil {
+		return err
+	}
+	if strings.TrimSpace(id) == "" ||
+		strings.TrimSpace(leaseToken) == "" ||
+		lease <= 0 {
+		return fmt.Errorf("event ID, lease token, and positive lease are required")
+	}
+	now, err := s.currentTime()
+	if err != nil {
+		return err
+	}
+	leaseUntil := now.Add(lease)
+	if timestampErr := validateDBTimestamp(
+		"routing lease deadline",
+		leaseUntil,
+	); timestampErr != nil {
+		return timestampErr
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE event_inbox
+		SET routing_lease_until = ?, routing_updated_at = ?
+		WHERE id = ? AND routing_status = ? AND routing_owner = ?
+		  AND routing_lease_until > ?`,
+		toDBTime(leaseUntil), toDBTime(now), id,
+		RoutingClaimed, leaseToken, toDBTime(now),
+	)
+	if err != nil {
+		return fmt.Errorf("renew event routing lease: %w", s.dbError(err))
+	}
+	return s.requireLeaseUpdate(ctx, result, "event_inbox", id)
+}
+
 // AckRouting marks owned, live routing work successful.
 func (s *Store) AckRouting(ctx context.Context, id, leaseToken string) error {
 	return s.finishRouting(ctx, id, leaseToken, RoutingSucceeded, time.Time{}, "")
@@ -1256,6 +1301,101 @@ func (s *Store) finishRouting(
 		return fmt.Errorf("finish routing work: %w", s.dbError(err))
 	}
 	return s.requireLeaseUpdate(ctx, result, "event_inbox", id)
+}
+
+// CreateDispatchForRoutingClaim idempotently creates one workflow delivery
+// only while leaseToken still owns a live routing claim for the event.
+func (s *Store) CreateDispatchForRoutingClaim(
+	ctx context.Context,
+	eventID, leaseToken, workflowRef string,
+) (Dispatch, bool, error) {
+	if err := s.ready(ctx); err != nil {
+		return Dispatch{}, false, err
+	}
+	eventID = strings.TrimSpace(eventID)
+	leaseToken = strings.TrimSpace(leaseToken)
+	workflowRef = strings.TrimSpace(workflowRef)
+	if eventID == "" || leaseToken == "" || workflowRef == "" {
+		return Dispatch{}, false, fmt.Errorf(
+			"event ID, routing lease token, and workflow reference are required",
+		)
+	}
+	if !validEventID(eventID) {
+		return Dispatch{}, false, fmt.Errorf("event ID is invalid")
+	}
+	if err := validateBoundedString("workflow reference", workflowRef, maxWorkflowRefLength); err != nil {
+		return Dispatch{}, false, err
+	}
+	dispatchID, runID := deterministicDispatchIDs(eventID, workflowRef)
+	var (
+		dispatch Dispatch
+		created  bool
+	)
+	createErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
+		now, err := s.currentTime()
+		if err != nil {
+			return err
+		}
+		var live int
+		err = conn.QueryRowContext(ctx, `
+			SELECT 1 FROM event_inbox
+			WHERE id = ? AND routing_status = ? AND routing_owner = ?
+			  AND routing_lease_until > ?`,
+			eventID, RoutingClaimed, leaseToken, toDBTime(now),
+		).Scan(&live)
+		if errors.Is(err, sql.ErrNoRows) {
+			var exists int
+			existsErr := conn.QueryRowContext(
+				ctx,
+				`SELECT 1 FROM event_inbox WHERE id = ?`,
+				eventID,
+			).Scan(&exists)
+			if errors.Is(existsErr, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			if existsErr != nil {
+				return existsErr
+			}
+			return ErrStaleLease
+		}
+		if err != nil {
+			return err
+		}
+		result, err := conn.ExecContext(ctx, `
+			INSERT INTO event_dispatches (
+				id, event_id, workflow_ref, run_id, status, available_at, created_at, updated_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(event_id, workflow_ref) DO NOTHING`,
+			dispatchID, eventID, workflowRef, runID, DispatchPending,
+			toDBTime(now), toDBTime(now), toDBTime(now),
+		)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		dispatch, err = scanDispatch(conn.QueryRowContext(ctx, `
+			SELECT `+dispatchColumns+` FROM event_dispatches
+			WHERE event_id = ? AND workflow_ref = ?`,
+			eventID,
+			workflowRef,
+		))
+		if err != nil {
+			return err
+		}
+		created = affected == 1
+		return nil
+	})
+	if createErr != nil {
+		return Dispatch{}, false, fmt.Errorf(
+			"create event dispatch for routing claim: %w",
+			s.dbError(createErr),
+		)
+	}
+	return dispatch, created, nil
 }
 
 // CreateDispatch idempotently creates one workflow delivery for an event.
@@ -1435,6 +1575,46 @@ func (s *Store) LinkDispatchRun(ctx context.Context, id, leaseToken, runID strin
 	)
 	if err != nil {
 		return fmt.Errorf("link event dispatch: %w", s.dbError(err))
+	}
+	return s.requireLeaseUpdate(ctx, result, "event_dispatches", id)
+}
+
+// RenewDispatchLease extends an owned, live claimed or running dispatch lease
+// from the current store time. Ownership and liveness are checked atomically
+// with the update.
+func (s *Store) RenewDispatchLease(
+	ctx context.Context,
+	id, leaseToken string,
+	lease time.Duration,
+) error {
+	if err := s.ready(ctx); err != nil {
+		return err
+	}
+	if strings.TrimSpace(id) == "" ||
+		strings.TrimSpace(leaseToken) == "" ||
+		lease <= 0 {
+		return fmt.Errorf("dispatch ID, lease token, and positive lease are required")
+	}
+	now, err := s.currentTime()
+	if err != nil {
+		return err
+	}
+	leaseUntil := now.Add(lease)
+	if timestampErr := validateDBTimestamp(
+		"dispatch lease deadline",
+		leaseUntil,
+	); timestampErr != nil {
+		return timestampErr
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE event_dispatches
+		SET lease_until = ?, updated_at = ?
+		WHERE id = ? AND status IN (?, ?) AND owner = ? AND lease_until > ?`,
+		toDBTime(leaseUntil), toDBTime(now), id,
+		DispatchClaimed, DispatchRunning, leaseToken, toDBTime(now),
+	)
+	if err != nil {
+		return fmt.Errorf("renew event dispatch lease: %w", s.dbError(err))
 	}
 	return s.requireLeaseUpdate(ctx, result, "event_dispatches", id)
 }

@@ -19,6 +19,7 @@ type WorkflowTriggers struct {
 	ChannelMessage *ChannelMessageTrigger `json:"channel_message,omitempty" yaml:"channel_message,omitempty"`
 	Command        *CommandTrigger        `json:"command,omitempty"         yaml:"command,omitempty"`
 	RuntimeEvent   *RuntimeEventTrigger   `json:"runtime_event,omitempty"   yaml:"runtime_event,omitempty"`
+	Event          *EventTrigger          `json:"event,omitempty"           yaml:"event,omitempty"`
 	WorkflowCall   *WorkflowCall          `json:"workflow_call,omitempty"   yaml:"workflow_call,omitempty"`
 }
 
@@ -54,6 +55,26 @@ type RuntimeEventTrigger struct {
 	Sessions StringList `json:"sessions,omitempty" yaml:"sessions,omitempty"`
 	Channels StringList `json:"channels,omitempty" yaml:"channels,omitempty"`
 	Chats    StringList `json:"chats,omitempty"    yaml:"chats,omitempty"`
+}
+
+// EventTrigger filters connector-independent events from the durable external
+// event inbox. Values in each list are alternatives; populated fields are
+// combined.
+type EventTrigger struct {
+	Sources    StringList            `json:"sources,omitempty"    yaml:"sources,omitempty"`
+	Connectors StringList            `json:"connectors,omitempty" yaml:"connectors,omitempty"`
+	Types      StringList            `json:"types,omitempty"      yaml:"types,omitempty"`
+	Actor      *EventEntityTrigger   `json:"actor,omitempty"      yaml:"actor,omitempty"`
+	Subject    *EventEntityTrigger   `json:"subject,omitempty"    yaml:"subject,omitempty"`
+	Attributes map[string]StringList `json:"attributes,omitempty" yaml:"attributes,omitempty"`
+}
+
+// EventEntityTrigger filters the normalized actor or subject attached to an
+// external event.
+type EventEntityTrigger struct {
+	IDs        StringList            `json:"ids,omitempty"        yaml:"ids,omitempty"`
+	Types      StringList            `json:"types,omitempty"      yaml:"types,omitempty"`
+	Attributes map[string]StringList `json:"attributes,omitempty" yaml:"attributes,omitempty"`
 }
 
 type WorkflowCall struct {
@@ -155,12 +176,70 @@ func (t *WorkflowTriggers) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind != yaml.MappingNode {
 		return fmt.Errorf("on must be a mapping")
 	}
+	if err := validateWorkflowTriggersEventNodes(value); err != nil {
+		return err
+	}
 	type rawTriggers WorkflowTriggers
 	var raw rawTriggers
 	if err := value.Decode(&raw); err != nil {
 		return err
 	}
 	*t = WorkflowTriggers(raw)
+	return nil
+}
+
+func validateWorkflowTriggersEventNodes(value *yaml.Node) error {
+	return validateWorkflowTriggersEventNodesWithState(
+		value,
+		newEventYAMLValidationState(),
+	)
+}
+
+func validateWorkflowTriggersEventNodesWithState(
+	value *yaml.Node,
+	state *eventYAMLValidationState,
+) error {
+	value = dereferenceYAMLNode(value)
+	if value == nil || value.Kind != yaml.MappingNode {
+		return nil
+	}
+	complete, leave, err := state.enter(value, eventYAMLValidationTriggers, "on")
+	if err != nil {
+		return err
+	}
+	if complete {
+		return nil
+	}
+	defer leave()
+	for index := 0; index+1 < len(value.Content); index += 2 {
+		rawKeyNode := value.Content[index]
+		keyNode := dereferenceYAMLNode(rawKeyNode)
+		valueNode := value.Content[index+1]
+		if keyNode == nil || keyNode.Kind != yaml.ScalarNode {
+			continue
+		}
+		if eventYAMLNodeIsMergeKey(rawKeyNode) {
+			merged := dereferenceYAMLNode(valueNode)
+			if merged == nil {
+				continue
+			}
+			if merged.Kind == yaml.SequenceNode {
+				for _, item := range merged.Content {
+					if err := validateWorkflowTriggersEventNodesWithState(item, state); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			if err := validateWorkflowTriggersEventNodesWithState(merged, state); err != nil {
+				return err
+			}
+			continue
+		}
+		if keyNode.Value == "event" && eventYAMLNodeIsNull(valueNode) {
+			return fmt.Errorf("event trigger cannot be null")
+		}
+	}
 	return nil
 }
 

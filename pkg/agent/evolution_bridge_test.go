@@ -1025,6 +1025,189 @@ func TestAgentLoop_ReloadProviderAndConfig_RebuildsEvolutionBridge(t *testing.T)
 	}
 }
 
+func TestEvolutionBridge_ReloadCandidateIsInertAndRollbackRejectsColdPath(t *testing.T) {
+	oldCfg := evolutionBridgeGenerationTestConfig(t.TempDir(), config.EvolutionConfig{
+		Enabled: false,
+		Mode:    "observe",
+	})
+	al := NewAgentLoop(oldCfg, bus.NewMessageBus(), &simpleMockProvider{response: "ok"})
+	defer al.Close()
+
+	candidateCfg := evolutionBridgeGenerationTestConfig(t.TempDir(), config.EvolutionConfig{
+		Enabled:         true,
+		Mode:            "draft",
+		ColdPathTrigger: "scheduled",
+		ColdPathTimes:   []string{"03:00"},
+	})
+	candidate, err := newEvolutionBridge(nil, candidateCfg, nil)
+	if err != nil {
+		t.Fatalf("newEvolutionBridge(candidate): %v", err)
+	}
+	defer candidate.Close()
+
+	fakeRuntime := newControlledEvolutionRuntime(false)
+	candidate.runtime = fakeRuntime
+	if candidate.coldPathRunner == nil {
+		t.Fatal("expected candidate cold path runner")
+	}
+	if candidate.scheduleActive {
+		t.Fatal("reload candidate started its schedule before installation")
+	}
+	if candidate.activated || candidate.agentLoop != nil {
+		t.Fatal("reload candidate attached to an AgentLoop before installation")
+	}
+	candidate.setCurrentCheck(al.isCurrentEvolutionBridge)
+	if activateErr := candidate.activate(al); activateErr == nil {
+		t.Fatal("activate(candidate) succeeded before atomic installation")
+	}
+	if candidate.scheduleActive || candidate.activated || candidate.agentLoop != nil {
+		t.Fatal("failed pre-install activation changed candidate lifecycle state")
+	}
+
+	resumeRuntime, err := al.PauseRuntimeForReload(context.Background())
+	if err != nil {
+		t.Fatalf("PauseRuntimeForReload: %v", err)
+	}
+	resumed := false
+	defer func() {
+		if !resumed {
+			resumeRuntime()
+		}
+	}()
+
+	al.mu.Lock()
+	oldBridge := al.evolution
+	al.cfg = candidateCfg
+	al.evolution = candidate
+	al.mu.Unlock()
+	if err := candidate.activate(al); err != nil {
+		t.Fatalf("activate(installed candidate): %v", err)
+	}
+	if !candidate.scheduleActive || !candidate.activated || candidate.agentLoop != al {
+		t.Fatal("installed candidate did not activate while reload was paused")
+	}
+
+	coldPathErr := make(chan error, 1)
+	if err := candidate.coldPathRunner.Close(); err != nil {
+		t.Fatalf("close constructor runner: %v", err)
+	}
+	candidate.coldPathRunner = evolution.NewColdPathRunnerWithErrorHandler(candidate, func(err error) {
+		coldPathErr <- err
+	})
+	if !candidate.coldPathRunner.Trigger(candidateCfg.Agents.Defaults.Workspace) {
+		t.Fatal("candidate cold path trigger was rejected")
+	}
+
+	// Roll back the provisional generation without opening the outer reload
+	// gate. The queued candidate run must fail generation admission on resume.
+	al.mu.Lock()
+	al.cfg = oldCfg
+	al.evolution = oldBridge
+	al.mu.Unlock()
+	resumeRuntime()
+	resumed = true
+
+	select {
+	case err := <-coldPathErr:
+		if err == nil || !strings.Contains(err.Error(), "runtime config generation changed") {
+			t.Fatalf("candidate cold path error = %v, want generation change rejection", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for rolled-back cold path rejection")
+	}
+	select {
+	case <-fakeRuntime.started:
+		t.Fatal("rolled-back candidate executed its cold path runtime")
+	default:
+	}
+}
+
+func TestEvolutionBridge_CurrentGenerationColdPathOwnsRuntimeLease(t *testing.T) {
+	cfg := evolutionBridgeGenerationTestConfig(t.TempDir(), config.EvolutionConfig{
+		Enabled: true,
+		Mode:    "draft",
+	})
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &simpleMockProvider{response: "ok"})
+	defer al.Close()
+
+	bridge := al.currentEvolutionBridge()
+	if bridge == nil || bridge.coldPathRunner == nil {
+		t.Fatal("expected active cold path bridge")
+	}
+	fakeRuntime := newControlledEvolutionRuntime(true)
+	bridge.runtime = fakeRuntime
+
+	if !bridge.coldPathRunner.Trigger(cfg.Agents.Defaults.Workspace) {
+		t.Fatal("current generation cold path trigger was rejected")
+	}
+	select {
+	case <-fakeRuntime.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for current cold path runtime")
+	}
+
+	al.runtimeGateMu.Lock()
+	active := al.runtimeGateActive
+	al.runtimeGateMu.Unlock()
+	if active != 1 {
+		t.Fatalf("active runtime leases = %d, want 1 while cold path is running", active)
+	}
+
+	close(fakeRuntime.unblock)
+	if err := bridge.coldPathRunner.Close(); err != nil {
+		t.Fatalf("close cold path runner: %v", err)
+	}
+	al.runtimeGateMu.Lock()
+	active = al.runtimeGateActive
+	al.runtimeGateMu.Unlock()
+	if active != 0 {
+		t.Fatalf("active runtime leases after cold path = %d, want 0", active)
+	}
+}
+
+func TestEvolutionBridge_StartupBarrierFencesInitialColdPath(t *testing.T) {
+	cfg := evolutionBridgeGenerationTestConfig(t.TempDir(), config.EvolutionConfig{
+		Enabled: true,
+		Mode:    "draft",
+	})
+	al := NewAgentLoop(
+		cfg,
+		bus.NewMessageBus(),
+		&simpleMockProvider{response: "ok"},
+		WithRuntimeStartupBarrier(),
+		WithDeferredEvolutionActivation(),
+	)
+	defer al.Close()
+
+	bridge := al.currentEvolutionBridge()
+	if bridge == nil || bridge.coldPathRunner == nil {
+		t.Fatal("expected active cold path bridge")
+	}
+	if bridge.activated || bridge.scheduleActive {
+		t.Fatal("deferred startup evolution activated during construction")
+	}
+	fakeRuntime := newControlledEvolutionRuntime(false)
+	bridge.runtime = fakeRuntime
+	if err := al.ActivateEvolution(); err != nil {
+		t.Fatalf("ActivateEvolution() error = %v", err)
+	}
+	if !bridge.coldPathRunner.Trigger(cfg.Agents.Defaults.Workspace) {
+		t.Fatal("initial generation cold path trigger was rejected")
+	}
+	select {
+	case <-fakeRuntime.started:
+		t.Fatal("initial cold path ran before startup barrier release")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	al.ReleaseRuntimeStartupBarrier()
+	select {
+	case <-fakeRuntime.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial cold path did not run after startup barrier release")
+	}
+}
+
 func TestEvolutionBridge_ColdPathScheduleParsing(t *testing.T) {
 	schedule := parseColdPathSchedule([]string{"18:30", "bad", "03:05", "18:30", "24:00", "09:99"})
 	if len(schedule) != 2 {
@@ -1151,6 +1334,60 @@ func newEvolutionTestLoop(
 	}
 
 	return NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+}
+
+func evolutionBridgeGenerationTestConfig(
+	workspace string,
+	evo config.EvolutionConfig,
+) *config.Config {
+	return &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         workspace,
+				ModelName:         "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 3,
+			},
+		},
+		Evolution: evo,
+	}
+}
+
+type controlledEvolutionRuntime struct {
+	started chan struct{}
+	unblock chan struct{}
+	block   bool
+	once    sync.Once
+}
+
+func newControlledEvolutionRuntime(block bool) *controlledEvolutionRuntime {
+	return &controlledEvolutionRuntime{
+		started: make(chan struct{}),
+		unblock: make(chan struct{}),
+		block:   block,
+	}
+}
+
+func (r *controlledEvolutionRuntime) FinalizeTurn(
+	context.Context,
+	evolution.TurnCaseInput,
+) error {
+	return nil
+}
+
+func (r *controlledEvolutionRuntime) RunColdPathOnce(ctx context.Context, _ string) error {
+	r.once.Do(func() {
+		close(r.started)
+	})
+	if !r.block {
+		return nil
+	}
+	select {
+	case <-r.unblock:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func waitForEvolutionRecord(t *testing.T, path string) map[string]any {

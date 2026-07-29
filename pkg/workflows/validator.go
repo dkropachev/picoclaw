@@ -50,6 +50,7 @@ func Validate(workflow *Workflow) error {
 	errs = append(errs, validateChannelTrigger("on.channel_message", workflow.On.ChannelMessage)...)
 	errs = append(errs, validateCommandTrigger("on.command", workflow.On.Command)...)
 	errs = append(errs, validateRuntimeEventTrigger("on.runtime_event", workflow.On.RuntimeEvent)...)
+	errs = append(errs, validateEventTrigger("on.event", workflow.On.Event)...)
 	errs = append(errs, validateJobs(workflow.Jobs)...)
 	if len(errs) > 0 {
 		sort.SliceStable(errs, func(i, j int) bool {

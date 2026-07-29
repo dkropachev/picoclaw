@@ -369,6 +369,13 @@ func (al *AgentLoop) agentForSession(sessionKey string) *AgentInstance {
 //
 // If no steering messages are pending, it returns an empty string.
 func (al *AgentLoop) Continue(ctx context.Context, sessionKey, channel, chatID string) (string, error) {
+	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer releaseRuntime()
+	ctx = leaseCtx
+
 	// Claim the session with a unique placeholder to prevent a TOCTOU race where two
 	// concurrent Continue calls for the same session both pass the active-turn
 	// check and create parallel turns. The placeholder is replaced by the real

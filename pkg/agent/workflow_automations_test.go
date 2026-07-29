@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +13,17 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
+
+type scheduleAdmissionContext struct {
+	context.Context
+	once    sync.Once
+	entered chan struct{}
+}
+
+func (c *scheduleAdmissionContext) Value(key any) any {
+	c.once.Do(func() { close(c.entered) })
+	return c.Context.Value(key)
+}
 
 func TestLoadScheduledWorkflowRunsSkipsUntilRevalidated(t *testing.T) {
 	ctx := context.Background()
@@ -94,8 +106,268 @@ jobs:
 	}
 }
 
+func TestScheduledWorkflowRejectsStaleGenerationAfterCrossWorkspaceReload(t *testing.T) {
+	workspaceA := t.TempDir()
+	workspaceB := t.TempDir()
+	workflowYAML := `
+name: Scheduled
+on:
+  schedule:
+    - cron: "* * * * *"
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - uses: agent/default
+`
+	writeWorkflowAutomationFile(t, workspaceA, "scheduled.yml", workflowYAML)
+	writeWorkflowAutomationFile(t, workspaceB, "scheduled.yml", workflowYAML)
+	if _, err := workflows.RevalidateLocal(
+		context.Background(),
+		workspaceB,
+		workflowRuntimeCompatibility(),
+	); err != nil {
+		t.Fatalf("RevalidateLocal(workspace B) error = %v", err)
+	}
+
+	al := newWorkflowAutomationTestLoop(workspaceA)
+	defer al.Close()
+	cfgA := al.GetConfig()
+	cfgBValue := *cfgA
+	cfgBValue.Agents.Defaults.Workspace = workspaceB
+	cfgB := &cfgBValue
+	eventCh, closeSubscription := subscribeRuntimeEventsForTest(
+		t,
+		al,
+		4,
+		runtimeevents.KindWorkflowTriggered,
+	)
+	defer closeSubscription()
+
+	resumeRuntime, err := al.PauseRuntimeForReload(context.Background())
+	if err != nil {
+		t.Fatalf("PauseRuntimeForReload() error = %v", err)
+	}
+	previous, err := al.ReloadProviderAndConfigRetainingPrevious(
+		context.Background(),
+		&mockProvider{},
+		cfgB,
+	)
+	if err != nil {
+		resumeRuntime()
+		t.Fatalf("ReloadProviderAndConfigRetainingPrevious() error = %v", err)
+	}
+	if previous == nil {
+		resumeRuntime()
+		t.Fatal("reload did not retain the workspace A provider")
+	}
+
+	admissionEntered := make(chan struct{})
+	runDone := make(chan struct{})
+	runCtx := &scheduleAdmissionContext{
+		Context: context.Background(),
+		entered: admissionEntered,
+	}
+	go func() {
+		al.runScheduledWorkflow(runCtx, scheduledWorkflowRun{
+			ref:        "workflows/scheduled.yml",
+			index:      0,
+			cron:       "* * * * *",
+			next:       time.Now().UTC(),
+			generation: cfgA,
+		}, time.Now().UTC())
+		close(runDone)
+	}()
+	select {
+	case <-admissionEntered:
+	case <-time.After(2 * time.Second):
+		resumeRuntime()
+		t.Fatal("stale schedule did not reach runtime admission")
+	}
+	resumeRuntime()
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stale scheduled workflow did not leave runtime admission")
+	}
+
+	runs, err := workflows.NewFileRunStore(workspaceB).ListRuns(context.Background())
+	if err != nil {
+		t.Fatalf("ListRuns(workspace B) error = %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("stale workspace A schedule created workspace B runs: %#v", runs)
+	}
+	select {
+	case event := <-eventCh:
+		t.Fatalf("stale schedule published workflow-triggered event: %#v", event)
+	default:
+	}
+}
+
+func TestRuntimeEventWorkflowPumpFollowsWorkflowEnableReloads(t *testing.T) {
+	workspace := t.TempDir()
+	cfgDisabled := workflowAutomationTestConfig(workspace, false)
+	al := NewAgentLoop(cfgDisabled, bus.NewMessageBus(), &mockProvider{})
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- al.Run(runCtx) }()
+	defer func() {
+		cancelRun()
+		al.Stop()
+		if err := al.WaitStopped(context.Background()); err != nil {
+			t.Errorf("WaitStopped() error = %v", err)
+		}
+		al.Close()
+	}()
+	waitForWorkflowAutomationController(t, al)
+	if got := workflowRuntimeEventSubscriberCount(al); got != 0 {
+		t.Fatalf("runtime-event workflow subscribers while disabled = %d, want 0", got)
+	}
+
+	cfgEnabledValue := *cfgDisabled
+	cfgEnabledValue.Workflows.Enabled = true
+	cfgEnabled := &cfgEnabledValue
+	if err := al.ReloadProviderAndConfig(context.Background(), &mockProvider{}, cfgEnabled); err != nil {
+		t.Fatalf("false -> true reload error = %v", err)
+	}
+	if got := workflowRuntimeEventSubscriberCount(al); got != 1 {
+		t.Fatalf("runtime-event workflow subscribers after enable = %d, want 1", got)
+	}
+
+	cfgDisabledAgainValue := *cfgEnabled
+	cfgDisabledAgainValue.Workflows.Enabled = false
+	cfgDisabledAgain := &cfgDisabledAgainValue
+	if err := al.ReloadProviderAndConfig(
+		context.Background(),
+		&mockProvider{},
+		cfgDisabledAgain,
+	); err != nil {
+		t.Fatalf("true -> false reload error = %v", err)
+	}
+	if got := workflowRuntimeEventSubscriberCount(al); got != 0 {
+		t.Fatalf("runtime-event workflow subscribers after disable = %d, want 0", got)
+	}
+
+	cfgEnabledAgainValue := *cfgDisabledAgain
+	cfgEnabledAgainValue.Workflows.Enabled = true
+	if err := al.ReloadProviderAndConfig(
+		context.Background(),
+		&mockProvider{},
+		&cfgEnabledAgainValue,
+	); err != nil {
+		t.Fatalf("second enable reload error = %v", err)
+	}
+	if got := workflowRuntimeEventSubscriberCount(al); got != 1 {
+		t.Fatalf("runtime-event workflow subscribers after second enable = %d, want 1", got)
+	}
+
+	cancelRun()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not stop")
+	}
+}
+
+func TestRuntimeEventWorkflowPumpDropsProvisionalEventsOnRollback(t *testing.T) {
+	workspaceA := t.TempDir()
+	workspaceB := t.TempDir()
+	writeWorkflowAutomationFile(t, workspaceA, "runtime.yml", `
+name: Runtime
+on:
+  runtime_event:
+    kinds: gateway.ready
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - uses: agent/default
+`)
+	if _, err := workflows.RevalidateLocal(
+		context.Background(),
+		workspaceA,
+		workflowRuntimeCompatibility(),
+	); err != nil {
+		t.Fatalf("RevalidateLocal(workspace A) error = %v", err)
+	}
+	cfgA := workflowAutomationTestConfig(workspaceA, true)
+	providerA := &mockProvider{}
+	al := NewAgentLoop(cfgA, bus.NewMessageBus(), providerA)
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	go func() { _ = al.Run(runCtx) }()
+	defer func() {
+		cancelRun()
+		al.Stop()
+		_ = al.WaitStopped(context.Background())
+		al.Close()
+	}()
+	waitForWorkflowRuntimeEventSubscribers(t, al, 1)
+
+	resumeRuntime, err := al.PauseRuntimeForReload(context.Background())
+	if err != nil {
+		t.Fatalf("PauseRuntimeForReload() error = %v", err)
+	}
+	if got := workflowRuntimeEventSubscriberCount(al); got != 0 {
+		resumeRuntime()
+		t.Fatalf("runtime-event subscribers during outer pause = %d, want 0", got)
+	}
+	cfgBValue := *cfgA
+	cfgBValue.Agents.Defaults.Workspace = workspaceB
+	cfgB := &cfgBValue
+	previous, err := al.ReloadProviderAndConfigRetainingPrevious(
+		context.Background(),
+		&mockProvider{},
+		cfgB,
+	)
+	if err != nil {
+		resumeRuntime()
+		t.Fatalf("candidate reload error = %v", err)
+	}
+	if got := workflowRuntimeEventSubscriberCount(al); got != 0 {
+		resumeRuntime()
+		t.Fatalf("candidate runtime-event subscribers while transaction paused = %d, want 0", got)
+	}
+	al.RuntimeEventBus().Publish(context.Background(), runtimeevents.Event{
+		Kind:   runtimeevents.KindGatewayReady,
+		Source: runtimeevents.Source{Component: "gateway", Name: "candidate"},
+	})
+
+	if _, err := al.ReloadProviderAndConfigRetainingPrevious(
+		context.Background(),
+		previous,
+		cfgA,
+	); err != nil {
+		resumeRuntime()
+		t.Fatalf("rollback reload error = %v", err)
+	}
+	resumeRuntime()
+	waitForWorkflowRuntimeEventSubscribers(t, al, 1)
+	assertNoWorkflowRunsWithin(t, workspaceA, 100*time.Millisecond)
+
+	al.RuntimeEventBus().Publish(context.Background(), runtimeevents.Event{
+		Kind:   runtimeevents.KindGatewayReady,
+		Source: runtimeevents.Source{Component: "gateway", Name: "committed"},
+	})
+	run := waitForWorkflowRun(t, workspaceA)
+	if run.WorkflowRef != "workflows/runtime.yml" {
+		t.Fatalf("workflow ref = %q, want workflows/runtime.yml", run.WorkflowRef)
+	}
+}
+
 func newWorkflowAutomationTestLoop(workspace string) *AgentLoop {
-	cfg := &config.Config{
+	return NewAgentLoop(
+		workflowAutomationTestConfig(workspace, true),
+		bus.NewMessageBus(),
+		&mockProvider{},
+	)
+}
+
+func workflowAutomationTestConfig(workspace string, enabled bool) *config.Config {
+	return &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
 				Workspace: workspace,
@@ -104,10 +376,50 @@ func newWorkflowAutomationTestLoop(workspace string) *AgentLoop {
 			},
 		},
 		Workflows: config.WorkflowsConfig{
-			Enabled: true,
+			Enabled: enabled,
 		},
 	}
-	return NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+}
+
+func waitForWorkflowAutomationController(t *testing.T, al *AgentLoop) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		al.workflowAutomationMu.RLock()
+		started := al.workflowAutomationReset != nil
+		al.workflowAutomationMu.RUnlock()
+		if started {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("workflow automation controller did not start")
+}
+
+func workflowRuntimeEventSubscriberCount(al *AgentLoop) int {
+	count := 0
+	for _, subscriber := range al.RuntimeEventBus().Stats().SubscriberStats {
+		if subscriber.Name == "workflow-runtime-events" {
+			count++
+		}
+	}
+	return count
+}
+
+func waitForWorkflowRuntimeEventSubscribers(t *testing.T, al *AgentLoop, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if workflowRuntimeEventSubscriberCount(al) == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf(
+		"runtime-event workflow subscriber count = %d, want %d",
+		workflowRuntimeEventSubscriberCount(al),
+		want,
+	)
 }
 
 func writeWorkflowAutomationFile(t *testing.T, workspace, name, contents string) {

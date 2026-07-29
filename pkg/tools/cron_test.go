@@ -3,7 +3,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,6 +28,24 @@ type stubJobExecutor struct {
 	publishedChan   string
 	publishedChatID string
 	publishedKey    string
+}
+
+type guardedStubJobExecutor struct {
+	*stubJobExecutor
+	err      error
+	expected *config.Config
+	released bool
+}
+
+func (s *guardedStubJobExecutor) AcquireRuntimeGeneration(
+	ctx context.Context,
+	expected *config.Config,
+) (context.Context, func(), error) {
+	s.expected = expected
+	if s.err != nil {
+		return ctx, func() {}, s.err
+	}
+	return ctx, func() { s.released = true }, nil
 }
 
 func (s *stubJobExecutor) ProcessDirectWithChannel(
@@ -1257,6 +1277,37 @@ func TestCronTool_ExecuteJobRunsCommand(t *testing.T) {
 	}
 	if !strings.Contains(msg.Content, "cron-test-ok") {
 		t.Fatalf("expected command output containing 'cron-test-ok', got: %s", msg.Content)
+	}
+}
+
+func TestCronTool_ExecuteJobRejectsStaleRuntimeBeforeCommand(t *testing.T) {
+	cfg := config.DefaultConfig()
+	guardErr := errors.New("stale candidate runtime")
+	executor := &guardedStubJobExecutor{
+		stubJobExecutor: &stubJobExecutor{},
+		err:             guardErr,
+	}
+	tool := newTestCronToolWithExecutorAndConfig(t, executor, cfg)
+	marker := filepath.Join(t.TempDir(), "command-ran")
+	job := &cron.CronJob{}
+	job.Payload.Channel = "cli"
+	job.Payload.To = "direct"
+	job.Payload.Command = fmt.Sprintf("touch %q", marker)
+
+	got := tool.ExecuteJob(context.Background(), job)
+	if !strings.Contains(got, guardErr.Error()) {
+		t.Fatalf("ExecuteJob() = %q, want runtime guard error", got)
+	}
+	if executor.expected != cfg {
+		t.Fatal("ExecuteJob() did not fence against the CronTool config generation")
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scheduled command marker stat error = %v, want os.ErrNotExist", err)
+	}
+	select {
+	case msg := <-tool.msgBus.OutboundChan():
+		t.Fatalf("stale scheduled command published outbound message: %#v", msg)
+	default:
 	}
 }
 

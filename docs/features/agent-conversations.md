@@ -34,6 +34,7 @@ auxiliary to this capability.
 | `FR-AGENT-010` | MUST | Per-model OpenAI-style `reasoning_effort` is normalized before provider calls; blank/default values are omitted, `off` maps to `none`, and unsupported values are rejected by config validation. | Provider requests must not forward invalid reasoning controls. |
 | `FR-AGENT-011` | MUST | Provider prompt serialization preserves ordered text/media parts, scoped context, tool call/result identifiers, and token estimates through the provider-neutral prompt representation before mapping to provider-specific wire formats. | Multi-provider turns need one canonical prompt model so media, summaries, cache hints, and tool relationships are not silently lost or double-counted. |
 | `FR-AGENT-012` | MUST | Each primary or fallback provider attempt derives tool adaptation from the concrete provider/model profile after router resolution, applies that profile's visible surface to a candidate-specific base schema, and retains the successful candidate's surface and schema for tool execution and observations; explicit profile overrides still obey configured runtime visible-change policy. | Routed and fallback turns must not probe or expose tools using a virtual router identity or another candidate's schema. |
+| `FR-AGENT-013` | MUST | Provider/config reload pauses admission of new root runtime users, drains the current registry generation before replacement, and never closes a retained provider while a turn, workflow, summarizer, child turn, or gateway-owned background action can still use it. One inbound lease covers workflow-trigger matching, route/session placeholder selection, and a synchronously retained queued worker so semaphore backlog cannot split an ingress decision across generations. Other asynchronous work retains its generation before goroutine launch; independently cancelable subturn contexts preserve that lease marker; stale captured agent pointers are resolved by ID against the current registry before a root turn starts; and independently launched summarizers/background consumers require the exact config and registry generation that created them. The first reload pause synchronously removes the generation-owned runtime-event workflow subscription and the final nested resume recreates it for only the committed/restored config before opening admission. Terminal Stop is remembered even before `Run` registers; shutdown first quiesces producers, then cancels/joins AgentLoop-owned automation and permanently pauses/drains runtime users, then closes channel/media dependencies and the provider. | Reload, rollback, and shutdown must not create use-after-close provider calls, admit provisional runtime state/events, execute stale cross-workspace work, leak queued session placeholders, or deadlock nested work behind their own drain. |
 
 ## Data And State Model
 
@@ -94,6 +95,7 @@ Owns: EVENT agent.*
 | Config | `agents.*`, `model_list.*` | Agent defaults, per-agent models, fallbacks, turn profile, retry, token, media, tool iteration policy, and optional model price metadata used by workflow-managed child selection. | `FR-AGENT-002`, `FR-AGENT-003`, `FR-AGENT-004` |
 | Config | `model_list[].reasoning_effort` | Optional OpenAI-style reasoning effort forwarded only after shared normalization and validation. | `FR-AGENT-003`, `FR-AGENT-010` |
 | Tools | `spawn`, `spawn_status`, `subagent`, `delegate` | Child work delegation and status reporting. | `FR-AGENT-007` |
+| Runtime | `AgentLoop.PauseRuntimeForReload`, retained runtime leases, provider/config reload | Quiesce root and asynchronous runtime users across a registry generation swap, service commit, or rollback. | `FR-AGENT-013` |
 | Events | `agent.*` | Turn, LLM, tool, steering, interrupt, subturn, and error telemetry. | `FR-AGENT-001`, `FR-AGENT-004`, `FR-AGENT-006` |
 
 ## Algorithms And Ordering
@@ -103,6 +105,20 @@ Owns: EVENT agent.*
 3. Select model candidates, normalize optional provider controls such as `reasoning_effort`, then execute provider attempts with retry/fallback policy.
 4. For each tool-call response, validate tool availability and arguments, run hooks and registry execution, append tool results, and re-enter provider execution until done or capped.
 5. Write final messages and summaries after the assistant response is known.
+6. Before replacing provider/config state, pause new runtime admission and wait
+   for current generation leases. Acquire before inbound trigger/routing
+   decisions and transfer a retained lease to any worker waiting for a
+   semaphore. Retain before launching other asynchronous workflows or spawn
+   work, propagate through independently cancelable child contexts, require
+   exact config/registry identity for summarizers and gateway-owned
+   scheduled/event work, remove the runtime-event subscription for the outer
+   transaction, and recreate it for the final config before admission resumes.
+7. On terminal shutdown, remember Stop even if `Run` has not registered yet,
+   quiesce runtime producers, cancel and join the AgentLoop and its automation
+   controller, and hold a permanent runtime pause until active leases reach
+   zero. Only then stop channel/media dependencies and close provider, bus, and
+   registry resources. A timeout leaves dependencies/resources open for
+   process teardown.
 
 ## Cross-Feature Behavior
 
@@ -141,6 +157,20 @@ account/model overrides are turn-scoped and do not rewrite persisted
 - Iteration limits stop repeated tool-call loops.
 - Media too large for configured limits is rejected before provider execution.
 - Child turns that cannot deliver results report orphan or failed status.
+- A reload waits for turns and retained asynchronous work from the old
+  generation. Nested subturn work borrows the retained marker and cannot block
+  behind the pause that is waiting for its parent generation to drain.
+- Background work created by a provisional or cached config waits at the same
+  gate and fails closed if that exact config generation is not active when
+  admission resumes.
+- A message routed before its worker semaphore is available retains that route
+  generation through placeholder replacement and turn completion. A stale
+  summarizer cannot retarget the same agent/session key in a replacement
+  workspace.
+- Runtime events emitted by provisional replacement services have no workflow
+  subscription and cannot be replayed against restored workflows after
+  rollback. Workflow enable/disable reloads synchronously create or remove
+  exactly one subscription.
 
 ## Acceptance Evidence
 
@@ -154,9 +184,11 @@ account/model overrides are turn-scoped and do not rewrite persisted
 | `FR-AGENT-010` | [pkg/agent/reasoning_effort_test.go](../../pkg/agent/reasoning_effort_test.go), [pkg/providers/common/reasoning_effort_test.go](../../pkg/providers/common/reasoning_effort_test.go), [pkg/providers/openai_compat/provider_test.go](../../pkg/providers/openai_compat/provider_test.go), [pkg/providers/azure/provider_test.go](../../pkg/providers/azure/provider_test.go), [pkg/providers/oauth/codex_provider_test.go](../../pkg/providers/oauth/codex_provider_test.go) |
 | `FR-AGENT-011` | [pkg/providers/promptir/conversion_test.go](../../pkg/providers/promptir/conversion_test.go), [pkg/providers/common/common_test.go](../../pkg/providers/common/common_test.go), [pkg/providers/openai_responses_common/responses_common_test.go](../../pkg/providers/openai_responses_common/responses_common_test.go), [pkg/tokenizer/estimator_test.go](../../pkg/tokenizer/estimator_test.go) |
 | `FR-AGENT-012` | [pkg/agent/pipeline_llm_adaptation_test.go](../../pkg/agent/pipeline_llm_adaptation_test.go), [pkg/agent/instance_test.go](../../pkg/agent/instance_test.go) |
+| `FR-AGENT-013` | [pkg/agent/runtime_gate_test.go](../../pkg/agent/runtime_gate_test.go), [pkg/agent/runtime_event_logger_test.go](../../pkg/agent/runtime_event_logger_test.go), [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go) |
 
 ## Implementation Anchors
 
 - [pkg/agent/pipeline.go](../../pkg/agent/pipeline.go)
 - [pkg/agent/instance.go](../../pkg/agent/instance.go)
+- [pkg/agent/runtime_gate.go](../../pkg/agent/runtime_gate.go)
 - [pkg/providers/factory.go](../../pkg/providers/factory.go)

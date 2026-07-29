@@ -12,7 +12,22 @@ import (
 )
 
 func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.InboundMessage) bool {
-	if al == nil || al.cfg == nil || !al.cfg.Workflows.Enabled {
+	if al == nil {
+		return false
+	}
+	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+	if err != nil {
+		logger.WarnCF(
+			"workflow",
+			"Failed to acquire workflow trigger runtime",
+			map[string]any{"error": err.Error()},
+		)
+		return false
+	}
+	defer releaseRuntime()
+	ctx = leaseCtx
+
+	if al.cfg == nil || !al.cfg.Workflows.Enabled {
 		return false
 	}
 	msg = bus.NormalizeInboundMessage(msg)
@@ -95,8 +110,23 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 		}
 		al.publishWorkflowTriggered(def.Ref, msg, match)
 		executor := al.newWorkflowExecutor(workspace, defaultAgent)
-		go func(ref string, m *workflows.ChannelMessageMatch) {
-			if _, err := executor.Run(ctx, workflows.RunRequest{
+		workflowCtx, releaseWorkflow, err := al.retainRuntimeUse(ctx)
+		if err != nil {
+			logger.WarnCF(
+				"workflow",
+				"Failed to retain workflow trigger runtime",
+				map[string]any{"ref": def.Ref, "error": err.Error()},
+			)
+			continue
+		}
+		go func(
+			runCtx context.Context,
+			release func(),
+			ref string,
+			m *workflows.ChannelMessageMatch,
+		) {
+			defer release()
+			if _, err := executor.Run(runCtx, workflows.RunRequest{
 				Ref:      ref,
 				Inputs:   m.Inputs,
 				Event:    m.Event,
@@ -105,7 +135,7 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 			}); err != nil {
 				logger.WarnCF("workflow", "Workflow run failed", map[string]any{"ref": ref, "error": err.Error()})
 			}
-		}(def.Ref, match)
+		}(workflowCtx, releaseWorkflow, def.Ref, match)
 	}
 	return consume
 }
@@ -137,6 +167,7 @@ func (al *AgentLoop) newWorkflowExecutor(workspace string, defaultAgent *AgentIn
 			agentID:  defaultAgent.ID,
 			registry: defaultAgent.Tools,
 			loop:     al,
+			dynamic:  true,
 		}
 	}
 	return executor

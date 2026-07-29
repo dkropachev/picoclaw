@@ -28,3 +28,24 @@ func WithConfigPath(path string) AgentLoopOption {
 		al.configPath = strings.TrimSpace(path)
 	}
 }
+
+// WithRuntimeStartupBarrier constructs the AgentLoop with root runtime
+// admission paused. Gateway startup uses this so constructor-owned background
+// services cannot run before the gateway is ready.
+func WithRuntimeStartupBarrier() AgentLoopOption {
+	return func(al *AgentLoop) {
+		al.runtimeGatePaused = true
+		al.runtimeGatePauses++
+		al.runtimeStartupBarrier = true
+	}
+}
+
+// WithDeferredEvolutionActivation keeps the constructed evolution bridge inert
+// until ActivateEvolution is called. Gateway startup combines this with the
+// runtime startup barrier so a scheduled cold path cannot start in the
+// constructor-to-readiness window.
+func WithDeferredEvolutionActivation() AgentLoopOption {
+	return func(al *AgentLoop) {
+		al.deferEvolutionActivation = true
+	}
+}

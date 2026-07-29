@@ -210,6 +210,17 @@ type AgentLoopSpawner struct {
 	al *AgentLoop
 }
 
+// PrepareAsyncSubTurn retains the caller's runtime generation before SpawnTool
+// launches its goroutine.
+func (s *AgentLoopSpawner) PrepareAsyncSubTurn(
+	ctx context.Context,
+) (context.Context, func(), error) {
+	if s == nil || s.al == nil {
+		return ctx, func() {}, errors.New("agent loop not configured")
+	}
+	return s.al.retainRuntimeUse(ctx)
+}
+
 // SpawnSubTurn implements tools.SubTurnSpawner interface.
 func (s *AgentLoopSpawner) SpawnSubTurn(
 	ctx context.Context,
@@ -272,6 +283,17 @@ func spawnSubTurn(
 	parentTS *turnState,
 	cfg SubTurnConfig,
 ) (result *tools.ToolResult, err error) {
+	var releaseRuntime func()
+	if cfg.Async || cfg.Critical {
+		ctx, releaseRuntime, err = al.retainRuntimeUse(ctx)
+	} else {
+		ctx, releaseRuntime, err = al.acquireRuntimeUse(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer releaseRuntime()
+
 	// Get effective SubTurn configuration
 	rtCfg := al.getSubTurnConfig()
 
@@ -330,10 +352,10 @@ func spawnSubTurn(
 		timeout = rtCfg.defaultTimeout
 	}
 
-	// 4. Create INDEPENDENT child context (not derived from parent ctx).
-	// This allows the child to continue running after parent finishes gracefully.
-	// The child has its own timeout for self-protection.
-	childCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	// 4. Create an independently cancelable child context while preserving the
+	// retained runtime-generation marker. WithoutCancel lets a critical child
+	// survive parent completion; the child timeout remains its protection.
+	childCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
 
 	childID := al.generateSubTurnID()
@@ -342,17 +364,23 @@ func spawnSubTurn(
 	// When TargetAgentID is set, look up that agent from the registry so the
 	// child runs with the target's workspace, model, tools, and system prompt.
 	// Otherwise fall back to the parent's agent (existing behavior).
+	registry := al.GetRegistry()
+	if registry == nil {
+		return nil, errors.New("agent registry not configured")
+	}
 	var baseAgent *AgentInstance
 	if cfg.TargetAgentID != "" {
 		var ok bool
-		baseAgent, ok = al.registry.GetAgent(cfg.TargetAgentID)
+		baseAgent, ok = registry.GetAgent(cfg.TargetAgentID)
 		if !ok {
 			return nil, fmt.Errorf("target agent %q not found in registry", cfg.TargetAgentID)
 		}
 	} else {
-		baseAgent = parentTS.agent
+		if parentTS.agent != nil && parentTS.agent.ID != "" {
+			baseAgent, _ = registry.GetAgent(parentTS.agent.ID)
+		}
 		if baseAgent == nil {
-			baseAgent = al.registry.GetDefaultAgent()
+			baseAgent = registry.GetDefaultAgent()
 		}
 	}
 	if baseAgent == nil {

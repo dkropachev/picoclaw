@@ -24,6 +24,13 @@ type JobExecutor interface {
 	PublishResponseIfNeeded(ctx context.Context, channel, chatID, sessionKey, response string)
 }
 
+type cronRuntimeGenerationGuard interface {
+	AcquireRuntimeGeneration(
+		ctx context.Context,
+		expected *config.Config,
+	) (context.Context, func(), error)
+}
+
 // CronTool provides scheduling capabilities for the agent
 type CronTool struct {
 	cronService           *cron.CronService
@@ -33,6 +40,7 @@ type CronTool struct {
 	allowCommand          bool
 	execEnabled           bool
 	commandAllowedRemotes []string
+	runtimeConfig         *config.Config
 }
 
 // NewCronTool creates a new CronTool
@@ -70,6 +78,7 @@ func NewCronTool(
 		allowCommand:          allowCommand,
 		execEnabled:           execEnabled,
 		commandAllowedRemotes: commandAllowedRemotes,
+		runtimeConfig:         config,
 	}, nil
 }
 
@@ -592,6 +601,15 @@ func (t *CronTool) enableJob(ctx context.Context, args map[string]any, enable bo
 
 // ExecuteJob executes a cron job through the agent
 func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
+	if guard, ok := t.executor.(cronRuntimeGenerationGuard); ok {
+		leaseCtx, releaseRuntime, err := guard.AcquireRuntimeGeneration(ctx, t.runtimeConfig)
+		if err != nil {
+			return fmt.Sprintf("Error: scheduled job runtime unavailable: %v", err)
+		}
+		defer releaseRuntime()
+		ctx = leaseCtx
+	}
+
 	// Get channel/chatID from job payload
 	channel := job.Payload.Channel
 	chatID := job.Payload.To

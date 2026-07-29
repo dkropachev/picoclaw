@@ -450,6 +450,9 @@ func TestCompatibilityRevalidationBlocksChangedWorkflowHash(t *testing.T) {
 	if previousHash == "" {
 		t.Fatal("validated workflow hash is empty")
 	}
+	if _, snapshotErr := LoadRunnableLocalSnapshot(ctx, workspace, ref, runtime); snapshotErr != nil {
+		t.Fatalf("LoadRunnableLocalSnapshot() after revalidation error = %v", snapshotErr)
+	}
 
 	if writeErr := os.WriteFile(
 		filepath.Join(workspace, ref),
@@ -473,5 +476,8 @@ func TestCompatibilityRevalidationBlocksChangedWorkflowHash(t *testing.T) {
 	}
 	if err := EnsureWorkflowRunnable(ctx, workspace, ref, runtime); err == nil {
 		t.Fatal("EnsureWorkflowRunnable() after workflow hash change error = nil, want error")
+	}
+	if _, err := LoadRunnableLocalSnapshot(ctx, workspace, ref, runtime); err == nil {
+		t.Fatal("LoadRunnableLocalSnapshot() after workflow hash change error = nil, want error")
 	}
 }

@@ -6,19 +6,21 @@
 
 ## Behavior Summary
 
-Durable external event automation provides the restart-safe foundation for
-accepting normalized notifications from GitHub, chat, email, and generic
-webhooks. It stores a source-neutral event envelope in an embedded inbox,
-deduplicates provider deliveries, tracks event-routing and per-workflow
-dispatch work independently, protects stored payloads through size limits and
-recursive redaction, and supports bounded retention and auditable replay.
+Durable external event automation accepts normalized notifications from
+GitHub, chat, email, and generic webhooks through a restart-safe source-neutral
+inbox. It deduplicates provider deliveries, protects stored payloads through
+size limits and recursive redaction, matches explicit `on.event` workflow
+filters, persists one deterministic dispatch per event/workflow pair, and
+reconciles workflow runs after process failure without repeating an interrupted
+run.
 
-This foundation does not listen on HTTP or channel transports, match workflow
-definitions, launch workflows, expose operator APIs, or render UI. Those
-surfaces are added by later feature stages. It is also separate from the
+The current stage opens the opt-in inbox and runs routing/dispatch workers with
+the gateway lifecycle, but it does not yet register an inbound HTTP or channel
+transport, expose operator API/CLI endpoints, or render event UI. Those
+surfaces are added by later stages. Durable inputs remain separate from the
 process-local [`pkg/events`](../../pkg/events) observability bus: runtime events
-are best-effort in-process signals, while external automation events are
-durable inputs that survive restart.
+are best-effort in-process signals, while external automation events and
+dispatch state survive restart.
 
 ## Reconstruction Notes
 
@@ -29,19 +31,26 @@ durable inputs that survive restart.
   validation, and cloning helpers, `Redactor`, `Inbox`, `Store`,
   `Open`/`OpenStore`, store options,
   routing/dispatch claim and completion records, replay records, retention
-  results, and `config.EventIngressConfig` with effective-default resolution.
+  results, `config.EventIngressConfig` with effective-default resolution,
+  workflow `EventTrigger`/`EventEntityTrigger`, deterministic trigger matching,
+  and gateway-owned `EventWorkflowRouter`/`EventWorkflowDispatcher` workers.
 - Runtime ordering: resolve disabled-safe config, normalize and validate an
   envelope, enforce the payload limit, redact configured fields, atomically
-  insert or return the existing deduplicated event, lease routing, create
-  deterministic per-workflow dispatches, lease/complete each dispatch, then
-  retain or replay only through explicit store operations.
+  insert or return the existing deduplicated event, lease and renew routing,
+  create deterministic per-workflow dispatches through the current claim,
+  reconcile the deterministic run ID, exclusively create a new run, link its
+  dispatch before effects, execute with lease renewal, then retain or replay
+  only through explicit store operations.
 - Non-obvious constraints: deduplication is scoped by source and connector;
   duplicate input never replaces the first stored payload; lease ownership is
-  fenced against stale workers; routing and dispatch state are distinct;
-  replay points back to its immutable source event; SQLite migrations are
-  transactional; disabled ingress opens no database; and targets excluded from
-  the repository's SQLite build matrix must compile through an unsupported
-  stub instead of acquiring a new platform dependency.
+  fenced against stale workers; stale routing cannot authorize a dispatch;
+  routing and dispatch state are distinct; file run creation is exclusive
+  across processes; replay points back to its immutable source event; SQLite
+  migrations are transactional; disabled ingress opens no database; and targets
+  excluded from the repository's SQLite build matrix must compile through an
+  unsupported stub instead of acquiring a new platform dependency. Matching is
+  deterministic and AI decisions belong inside a matched workflow, not inside
+  the router.
 
 ## Requirements
 
@@ -59,6 +68,15 @@ durable inputs that survive restart.
 | `FR-EVENT-AUTOMATION-010` | MUST | An operator-layer caller requests replay of an existing durable event. | A new pending event is returned with new `ev_` identity and deduplication identity and a `replay_of` link to the event that was replayed. | The replay adds new inbox/routing state; the source envelope and prior dispatch history remain unchanged. | A missing source fails without mutation; replay itself does not claim routing or launch a workflow; replaying a replay creates another additive record linked to its immediate source. | Operators need auditable reprocessing without rewriting history. |
 | `FR-EVENT-AUTOMATION-011` | MUST | Retention runs with a non-zero cutoff and positive bounded limit after routing and dispatch processing. | It reports the number of removed records and leaves too-new, non-terminal, or replay-lineage-required work available. | Up to the bounded limit of oldest eligible `succeeded`/`dead` events and their terminal dispatches are deleted transactionally. | Pending/claimed routing, events with pending/claimed/running dispatches, and source events referenced by retained replays are preserved. | Storage must remain bounded without deleting actionable work or breaking replay lineage. |
 | `FR-EVENT-AUTOMATION-012` | MUST | The foundation package is constructed or imported while no connector/listener integration is configured. | Existing runtime-event publication, workflow triggers, gateway routes, CLI/API behavior, and UI behavior remain unchanged. | No listener, workflow run, API registration, UI state, or process-local event subscription is created by `pkg/eventing`. | A disabled config or unsupported platform is inert rather than silently falling back to volatile delivery. | PR 1 must introduce durable primitives without disturbing existing infrastructure or pretending later stages exist. |
+| `FR-EVENT-AUTOMATION-013` | MUST | A validated workflow declares `on.event` with one or more source, connector, type, actor, subject, or attribute filters. | Scalar or list values parse into typed filters; alternatives within one list use OR, populated fields use AND, and anchored `*`/`?` globs select a workflow deterministically. | Parsing and matching do not mutate the workflow or envelope. | An absent trigger, unknown/typoed field (including one inherited through YAML merge), empty trigger, empty list/map, blank pattern, empty entity filter, or missing required entity/attribute does not match and fails parsing/validation where applicable. Source, connector, event type, and entity type compare case-insensitively; IDs and attribute values remain case-sensitive. | Operators need explicit reviewable routing policy before AI or side-effecting steps run. |
+| `FR-EVENT-AUTOMATION-014` | MUST | The router claims one durable event while both ingress and workflows are enabled. | It renews the routing lease, loads current local definitions, skips malformed, invalid, or compatibility-blocked workflows consistently with existing automatic triggers, and creates every matching dispatch idempotently through the current live routing token. It acknowledges only after all selected rows are durable; zero matches is successful routing. | Each new `(event_id, workflow_ref)` creates one deterministic dispatch while the authorizing claim remains live; routing then becomes `succeeded`. | A stale/expired/replaced claim cannot insert even when another worker has already completed routing. Fan-out or lease-renewal failure uses bounded exponential retry, safe duplicate encounter, and `dead` attempt exhaustion. | A crash or slow catalog scan must neither lose selected work, duplicate a dispatch, nor let a stale routing claim authorize work. |
+| `FR-EVENT-AUTOMATION-015` | MUST | The dispatcher claims a durable event/workflow dispatch with its deterministic run ID. | Before execution it loads the redacted envelope, rechecks current workflow validation/compatibility, renews its claim, and invokes the shared executor with exactly the dispatch run ID. The executor exclusively creates the durable run and calls `OnRunPersisted`; that callback links the dispatch and renews again before any workflow side effect. | The dispatch moves through claimed/running to succeeded, failed, pending retry, or dead while the normal file run store records the workflow run. | Pre-run failures retry with bounded exponential backoff and become dead after the configured attempt limit. A link/callback or ordinary workflow failure leaves a terminal durable run and becomes dispatch `failed` rather than being executed again. | Durable intent must be linked to the same auditable workflow run before effects on every recovery path. |
+| `FR-EVENT-AUTOMATION-016` | MUST | A claimed dispatch is recovered after restart and its deterministic run may be absent, terminal, still marked running, or missing after it was linked. | A never-created run may start; an existing successful run completes the dispatch successfully; an existing failed/canceled/skipped run completes it failed; an orphan running/unknown run is canceled as interrupted and completes failed without repeating workflow side effects. A linked dispatch whose run record disappeared fails closed without replay. | Reconciliation updates only the owned dispatch and existing run record. The first file run create uses a cross-process exclusive filesystem boundary and returns only after syncing the run file, run directory, store root, and workspace directory; later terminal updates use atomic synced replacement. | Duplicate run creation and concurrency-limit failures are typed; a crash before exclusive durable run creation remains retryable, while a crash after creation cannot start that run again even if normal run retention later removes its record. | Exactly-once external effects are not generally possible, so the safe recovery boundary is the durable run record plus its pre-effect dispatch link. |
+| `FR-EVENT-AUTOMATION-017` | MUST | A workflow starts from an external event. | `event` exposes detached `id`, `source`, `connector`, `type`, actor, subject, occurrence/receipt times, payload, attributes, and replay lineage; inputs additionally expose `event_id`, `dispatch_id`, `source`, `connector`, `type`, and the event object. JSON numbers retain their original decimal token for exact conditions and persisted event snapshots. The session is `workflow:<ref>:event:<event-id>` and delivery is empty. | The executor persists detached input/event snapshots in the normal run record without changing existing non-event workflow numeric value types. | Only the already-redacted durable envelope reaches workflow context. No arbitrary raw payload path participates in router policy; connectors promote routing facts into normalized fields/attributes. | Deterministic routing stays small while workflows retain full-fidelity context for deterministic or AI-driven decisions. |
+| `FR-EVENT-AUTOMATION-018` | MUST | Routing or workflow execution may outlive its initial lease. | `RoutingLeaseRenewer` optionally extends catalog work; the durable dispatcher requires `DispatchLeaseRenewer`. The dispatcher renews immediately after claim, throughout event/run lookup, synchronously again before any terminal reconciliation or interrupted-run cancellation, before run creation, immediately after linking, and periodically during execution. | Renewal changes only lease/update timestamps and never increments attempts or changes run identity. A heartbeat that observes the worker's own completed/nacked transition is reconciled against durable state rather than reported as ownership loss. | Blank IDs/tokens, non-positive/overflowing durations, pending/terminal/missing work, expiry, or a foreign token fail without mutation. Renewal failures consume the normal bounded retry/dead budget where the claim remains live; a stale worker cannot cancel a replacement worker's running deterministic run; unsupported builds return `ErrUnsupportedPlatform`. | Healthy long matching/execution must not be reclaimed concurrently, and a worker that loses ownership must stop creating, canceling, or performing side effects promptly. |
+| `FR-EVENT-AUTOMATION-019` | MUST | The gateway starts, reloads, or shuts down with event ingress enabled or disabled. | Disabled ingress returns before creating the database, directories, or workers. Enabled ingress opens and validates the inbox and initializes event workflow hooks/MCP synchronously before workers. Reload makes readiness false, drains old workers, swaps while retaining the previous provider/config, preflights the candidate event runtime before starting any candidate service, and restores the previous runtime/service on failure. Candidate router/dispatcher iterations require the exact config generation and therefore cannot route or execute while the outer transaction is paused. Shutdown quiesces event and other runtime producers before AgentLoop drain, stops channel/media dependencies afterward, and only then closes provider state. | The service owns exactly one store and router/dispatcher pair per active gateway configuration, and readiness reflects failed recovery. | Store-open/schema/platform/runtime-init failures fail enabled startup instead of falling back to memory. Drain or post-swap restart failure retries cleanup and rolls back when safe; a canceled or stale candidate worker exits without durable routing or workflow effects; if recovery itself fails, readiness remains false and providers/dependencies are not closed out from under active workers. | Existing installations remain inert by default and reload cannot expose a half-committed runtime or workers using stale/closed providers. |
+| `FR-EVENT-AUTOMATION-020` | MUST | A newly created dispatch is published to the process-local runtime event bus. | A best-effort `workflow.triggered` event identifies trigger kind, event/dispatch IDs, normalized source/connector/type, workflow ref, and deterministic session without including the external payload or secrets. | Runtime telemetry has no effect on durable routing or dispatch completion and is emitted only for a newly inserted dispatch. | A closed, full, or absent runtime bus cannot fail durable routing; duplicate routing does not republish the same dispatch trigger. | Observability is useful but must not become a second delivery or secret-retention path. |
+| `FR-EVENT-AUTOMATION-021` | MUST | A release adds `on.event` parsing/validation semantics that older binaries ignored. | Workflow engine/schema/fingerprint compatibility changes make earlier validation stamps stale and require explicit revalidation before automatic execution. | Revalidation writes the normal compatibility manifest with the current workflow hash and validation result. | Existing channel, command, schedule, runtime-event, manual, and workflow-call trigger parsing and execution remain unchanged. | Previously stamped YAML must not silently activate newly understood automation after upgrade. |
 
 ## Data And State Model
 
@@ -135,15 +153,55 @@ That set is `authorization`, `proxy_authorization`, `cookie`, `set_cookie`,
 GitHub's `x_hub_signature` and `x_hub_signature_256` headers are also mandatory.
 Configuration owns policy; `pkg/eventing` owns normalized data and persistence.
 
+Workflow event filters are declared under `on.event`. `sources`, `connectors`,
+and `types` accept a string or string list. Optional `actor` and `subject`
+filters accept `ids`, `types`, and string-list `attributes`; top-level
+`attributes` filter envelope attributes. Each pattern is a fully anchored glob
+where `*` spans zero or more Unicode code points and `?` spans exactly one.
+Alternatives inside a list are ORed; every populated field, entity, and
+attribute is ANDed. Missing entities or attributes never satisfy a wildcard.
+
+```yaml
+on:
+  event:
+    sources: github
+    connectors: primary
+    types:
+      - pull_request.opened
+      - pull_request.synchronize
+    actor:
+      types: bot
+    subject:
+      types: repository
+      attributes:
+        repository: acme/*
+    attributes:
+      installation: production
+```
+
+The deterministic dispatch run ID is also the file-run-store identity. The
+executor creates that run exclusively, then invokes a persistence callback that
+links the dispatch before any workflow step. A linked dispatch whose run file
+later disappears fails closed. Connector and action stages that require
+stronger guarantees must use dispatch/run identity as an idempotency key with
+the external system.
+
 ## Surface Ownership
 
 Owns: CODE pkg/eventing/**
 Owns: CODE pkg/config/events.go
 Owns: CODE pkg/config/defaults.go
+Owns: CODE pkg/workflows/event_trigger.go
+Owns: CODE pkg/workflows/event_dispatcher.go
+Owns: CODE pkg/agent/workflow_eventing.go
+Owns: CODE pkg/gateway/event_automation.go
 Owns: CONFIG.events
 Owns: CONFIG.events.ingress*
 Owns: TEST pkg/eventing/*
 Owns: TEST pkg/config/events*
+Owns: TEST pkg/workflows/event_trigger_test.go
+Owns: TEST pkg/workflows/event_dispatcher_test.go
+Owns: TEST pkg/gateway/event_automation_test.go
 
 ## Auxiliary Interfaces
 
@@ -154,6 +212,10 @@ Owns: TEST pkg/config/events*
 | Go API | `pkg/eventing.Envelope` | Source-neutral immutable external-event input and stored representation with connector-scoped deduplication and optional replay lineage. | `FR-EVENT-AUTOMATION-002`, `FR-EVENT-AUTOMATION-004`, `FR-EVENT-AUTOMATION-010` |
 | Go API | `pkg/eventing.Inbox` / `Store` | `Inbox` defines `Insert`, `Get`, newest-first filtered keyset list, routing claim/ack/nack/dead transitions, dispatch create/get/claim/link/nack/finish/keyset-list, `Replay`, bounded `Prune`, and `Close`; `Store` is its SQLite implementation. The contract provides atomic deduplication and fresh-token fenced leases. | `FR-EVENT-AUTOMATION-002`, `FR-EVENT-AUTOMATION-004`, `FR-EVENT-AUTOMATION-006` through `FR-EVENT-AUTOMATION-011` |
 | Storage | `pkg/eventing.Open` / `OpenStore`, `WithMaxPayloadBytes`, `WithClock`, `WithBusyTimeout`, `WithRedaction` | Open the embedded store with transactional `PRAGMA user_version` migration, WAL, foreign keys, busy handling, one authoritative SQLite connection, restrictive permissions, restart persistence, a one-MiB default payload limit, mandatory/custom redaction, optional exact-secret replacement, and deterministic test clocks on supported targets. | `FR-EVENT-AUTOMATION-003`, `FR-EVENT-AUTOMATION-005` through `FR-EVENT-AUTOMATION-011` |
+| Go API | `pkg/eventing.RoutingDispatchCreator`, `RoutingLeaseRenewer`, `DispatchLeaseRenewer` | Additive capabilities that create a dispatch only through the current routing claim and renew current live leases without expanding the compatibility-critical `Inbox` interface. Routing renewal remains optional; `EventDispatchInbox` requires dispatch renewal because interrupted-run cancellation cannot otherwise be fenced across stores. | `FR-EVENT-AUTOMATION-014`, `FR-EVENT-AUTOMATION-018` |
+| Workflow YAML | `on.event` | Typed source/connector/type/entity/attribute filters with scalar/list syntax, explicit non-empty validation, anchored globs, and deterministic case rules. | `FR-EVENT-AUTOMATION-013`, `FR-EVENT-AUTOMATION-021` |
+| Go API | `EventWorkflowRouter`, `EventWorkflowDispatcher`, `RunRequest.OnRunPersisted`, `LoadRunnableLocalSnapshot`, `EventContextFromEnvelope` | Claim one item, compatibility-check the exact loaded workflow bytes, durably fan out deterministic dispatches, reconcile deterministic runs, link a newly persisted run before effects, renew long leases, and build the detached redacted workflow context. | `FR-EVENT-AUTOMATION-014` through `FR-EVENT-AUTOMATION-018`, `FR-EVENT-AUTOMATION-020`, `FR-EVENT-AUTOMATION-021` |
+| Runtime | gateway event automation service | Open enabled storage before readiness, initialize workflow runtime dependencies before workers, and transactionally drain, replace, roll back, and close services/providers in gateway shutdown and reload ordering. | `FR-EVENT-AUTOMATION-019` |
 | Build | `pkg/eventing` unsupported-platform implementation | Preserves the same construction surface and returns `ErrUnsupportedPlatform` without pulling SQLite into excluded targets. | `FR-EVENT-AUTOMATION-005`, `FR-EVENT-AUTOMATION-012` |
 
 ## Algorithms And Ordering
@@ -190,10 +252,11 @@ Owns: TEST pkg/config/events*
    claimed state, and unexpired lease still match. Ack success, dead-letter
    terminal failure, or nack to pending with an explicit future availability
    time without touching envelope data.
-8. Insert selected workflow dispatches idempotently by event/workflow identity,
-   derive stable `dsp_` and `wr_` IDs from that pair, and commit them before any
-   future executor is allowed to launch a workflow. A claimed dispatcher links
-   only that expected run ID before moving to `running`.
+8. Insert selected workflow dispatches idempotently by event/workflow identity
+   only while the authorizing routing claim is current, derive stable `dsp_` and
+   `wr_` IDs from that pair, and commit them before any future executor is
+   allowed to launch a workflow. A claimed dispatcher can link only that
+   expected run ID after its run record exists and before effects.
 9. Claim and transition dispatches with the same fresh-token lease fencing and
    availability rules as routing. Link only the deterministic expected run ID;
    nack retry to pending or finish with a terminal state. Routing completion
@@ -209,19 +272,61 @@ Owns: TEST pkg/config/events*
 12. List events and dispatches newest first with stable timestamp-plus-ID keyset
     cursors. Use 50 rows when a list limit is omitted and cap list, claim, and
     prune batches at 500 rows.
+13. When gateway ingress is enabled, open and validate the store synchronously.
+    If workflows are disabled, keep it open for connector/operations ownership
+    but start no routing or dispatch goroutine.
+14. A router claims one event, renews its routing lease while reading the current
+    local catalog, requires current compatibility, parses and validates each
+    candidate, evaluates deterministic `on.event` filters, and atomically fences
+    every idempotent dispatch insert through the live routing token. Acknowledge
+    only after the complete fan-out is durable; nack live-claim failures with
+    capped exponential backoff and dead-letter exhausted routing.
+15. A dispatcher claims one delivery, renews immediately, and holds a heartbeat
+    through event/run lookup. It renews synchronously again after run lookup and
+    before reconciling its deterministic run ID. Terminal runs finish the
+    dispatch consistently; an orphan running or unknown run is canceled as
+    interrupted only while that renewed token is still current and is never
+    executed again. A dispatch already linked to a now-missing run fails closed.
+16. If no run exists, require a current runnable workflow, build detached
+    redacted event/input context, renew the dispatch lease, and call the shared
+    executor with that exact run ID and an `OnRunPersisted` callback. The
+    executor exclusively creates the run, invokes the callback to link and
+    renew the dispatch, and only then starts lifecycle callbacks or workflow
+    steps. Creation returns only after the run file and every directory entry
+    needed to find it are synced; later state updates atomically replace the
+    prior valid JSON record. A callback or ordinary workflow failure leaves a
+    terminal run and a failed dispatch; only a failure before durable run
+    creation can retry.
+17. During execution, renew a capable store's dispatch lease every one-third of
+    its duration. Cancel the execution context immediately on renewal failure;
+    never let a stale worker finish or nack work owned by a replacement token.
+18. On reload, mark readiness false, preflight new event storage and provider
+    construction, pause new agent turns and drain old runtime users and
+    services, then swap runtime state while retaining the prior provider/config.
+    Synchronously initialize the candidate event hooks/MCP before any candidate
+    service starts. Fence each replacement router/dispatcher iteration to that
+    exact config generation and start cron only after all other fallible
+    replacement initialization. Commit by restoring readiness, resuming turn
+    admission, and closing the retained provider only after active work drains;
+    otherwise cancel/drain partial workers, restore the old runtime and
+    services, and reject candidate scheduled work before resuming. Keep
+    readiness false if recovery cannot complete. On shutdown, first quiesce
+    workers and other runtime producers, drain AgentLoop generation users, then
+    stop outbound channel/media dependencies before closing inbox/provider
+    state.
 
 ## Cross-Feature Behavior
 
-[Runtime events and observability](runtime-events.md) may later report
-`eventing.*` lifecycle telemetry, but its process-local bus is not the durable
-inbox, a delivery source, or a recovery mechanism. Event logging filters never
-change durable ingestion.
+[Runtime events and observability](runtime-events.md) receives a best-effort
+`workflow.triggered` notification only when routing creates a dispatch. Its
+process-local bus is not the durable inbox, a delivery source, or a recovery
+mechanism, and event logging filters never change durable ingestion.
 
-[Workflows](workflows.md) will later own `on.event` parsing, deterministic
-matching, execution, and persisted workflow runs. This feature owns only the
-input, routing work, dispatch intent, deterministic run identity, and recovery
-state that the workflow dispatcher consumes. Creating a dispatch does not
-execute a workflow.
+[Workflows](workflows.md) owns `on.event` parsing, deterministic matching,
+execution, compatibility checks, and persisted workflow runs. Durable eventing
+owns the input, routing work, dispatch intent, deterministic run identity, and
+lease/recovery state consumed by those workers. Creating a dispatch is still a
+separate durable step before execution.
 
 [Chat channels](chat-channels.md) and later GitHub, Delta Chat email, and generic
 webhook connectors normalize their provider-specific deliveries into this
@@ -231,8 +336,9 @@ the store but do not redefine its deduplication, leasing, redaction, replay, or
 retention semantics.
 
 [Security and isolation](security-isolation.md) continues to own connector
-credentials and workflow side-effect policy. The durable foundation stores no
-listener credentials and grants no mutation authority.
+credentials and workflow side-effect policy. This stage stores no listener
+credentials and grants no new tool authority: deterministic or AI-driven
+decisions execute through existing workflow agent/tool policy.
 
 ## Failure And Edge Cases
 
@@ -252,8 +358,33 @@ listener credentials and grants no mutation authority.
 - A worker whose lease expired cannot finish work after another worker claims
   it, even when both claims use the same human-readable worker label, because
   their store-generated lease tokens differ.
+- A stale routing worker cannot create another dispatch after its lease expires,
+  another worker reclaims it, or routing is acknowledged, even if the
+  event/workflow pair was not inserted previously.
+- A long workflow renews its existing token without incrementing attempts. A
+  renewal failure cancels its execution and leaves reconciliation to a later
+  owner instead of writing through a stale lease.
 - Routing failure does not silently delete dispatch history. Dispatch failure
   does not mutate the source event or report routing success.
+- Invalid, malformed, or compatibility-blocked workflow definitions are skipped
+  consistently with existing automatic triggers. A transient fan-out/store
+  failure retries the whole event, relying on dispatch uniqueness for completed
+  matches.
+- A missing actor, subject, or attribute cannot satisfy `*`; explicit empty
+  filters fail validation rather than becoming an accidental catch-all.
+- AI classification is expressed as an agent step inside a broadly but
+  deterministically matched workflow. The router never invokes a model or
+  treats model output as durable delivery identity.
+- Event payload numbers remain lossless through expression comparison,
+  file-run reads, listing, and cancellation updates, including integers beyond
+  float64's exact range and very small exponent values.
+- If execution crashes after the run record is created, recovery cancels the
+  orphan record and marks the dispatch failed; it does not repeat workflow
+  steps. External actions that need exactly-once behavior still require
+  provider-supported idempotency keyed by dispatch/run ID.
+- A dispatch-link callback failure marks the already-created run failed before
+  workflow steps. If a linked run file is later pruned or removed, recovery
+  fails the dispatch without reconstructing or replaying that run.
 - Replay is additive. It cannot replace its source, inherit a live lease, or
   erase earlier dispatch outcomes. Its self-referential foreign key preserves
   the source while a retained replay points to it.
@@ -267,8 +398,17 @@ listener credentials and grants no mutation authority.
 - On unsupported build targets, opening durable ingress returns
   `ErrUnsupportedPlatform`. With ingress disabled, normal PicoClaw behavior
   remains available.
-- This stage intentionally has no inbound HTTP path, background listener,
-  workflow trigger, agent action, CLI/API endpoint, or frontend route.
+- Enabled invalid storage fails gateway startup before readiness. Disabled
+  ingress creates no database or worker; enabled ingress with workflows
+  disabled opens storage but leaves routing pending.
+- Reload stays unready while services are drained or replacement state is
+  provisional. Storage, runtime initialization, service restart, or rollback
+  failure cannot close a provider still owned by active work or report a
+  half-restored gateway as ready.
+- The compatibility version bump makes pre-`on.event` stamps stale, so newly
+  understood event YAML cannot activate until explicitly revalidated.
+- This stage intentionally has no inbound HTTP/channel connector, event
+  operator CLI/API endpoint, or frontend route.
 
 ## Acceptance Evidence
 
@@ -281,6 +421,10 @@ listener credentials and grants no mutation authority.
 | `FR-EVENT-AUTOMATION-006`, `FR-EVENT-AUTOMATION-007` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go) |
 | `FR-EVENT-AUTOMATION-008`, `FR-EVENT-AUTOMATION-009` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go) |
 | `FR-EVENT-AUTOMATION-010`, `FR-EVENT-AUTOMATION-011` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go) |
+| `FR-EVENT-AUTOMATION-013`, `FR-EVENT-AUTOMATION-021` | [pkg/workflows/event_trigger_test.go](../../pkg/workflows/event_trigger_test.go), [pkg/workflows/validator_test.go](../../pkg/workflows/validator_test.go), [pkg/workflows/development_compatibility_test.go](../../pkg/workflows/development_compatibility_test.go) |
+| `FR-EVENT-AUTOMATION-014`, `FR-EVENT-AUTOMATION-015`, `FR-EVENT-AUTOMATION-016`, `FR-EVENT-AUTOMATION-017`, `FR-EVENT-AUTOMATION-020` | [pkg/workflows/event_dispatcher_test.go](../../pkg/workflows/event_dispatcher_test.go), [pkg/workflows/store_test.go](../../pkg/workflows/store_test.go), [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go) |
+| `FR-EVENT-AUTOMATION-018` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go), [pkg/eventing/store_unsupported_test.go](../../pkg/eventing/store_unsupported_test.go), [pkg/workflows/event_dispatcher_test.go](../../pkg/workflows/event_dispatcher_test.go) |
+| `FR-EVENT-AUTOMATION-019` | [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go), [pkg/gateway/gateway_test.go](../../pkg/gateway/gateway_test.go) |
 
 ## Implementation Anchors
 
@@ -290,3 +434,7 @@ listener credentials and grants no mutation authority.
 - [pkg/eventing/store_sqlite.go](../../pkg/eventing/store_sqlite.go)
 - [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go)
 - [pkg/config/events.go](../../pkg/config/events.go)
+- [pkg/workflows/event_trigger.go](../../pkg/workflows/event_trigger.go)
+- [pkg/workflows/event_dispatcher.go](../../pkg/workflows/event_dispatcher.go)
+- [pkg/agent/workflow_eventing.go](../../pkg/agent/workflow_eventing.go)
+- [pkg/gateway/event_automation.go](../../pkg/gateway/event_automation.go)

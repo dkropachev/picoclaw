@@ -14,6 +14,10 @@ type SpawnTool struct {
 	allowlistCheck func(targetAgentID string) bool
 }
 
+type asyncSubTurnContextPreparer interface {
+	PrepareAsyncSubTurn(ctx context.Context) (context.Context, func(), error)
+}
+
 // Compile-time check: SpawnTool implements AsyncExecutor.
 var _ AsyncExecutor = (*SpawnTool)(nil)
 
@@ -127,9 +131,19 @@ Task: %s`,
 
 	// Use spawner if available (direct SpawnSubTurn call)
 	if t.spawner != nil {
+		spawnCtx := ctx
+		releaseRuntime := func() {}
+		if preparer, ok := t.spawner.(asyncSubTurnContextPreparer); ok {
+			var err error
+			spawnCtx, releaseRuntime, err = preparer.PrepareAsyncSubTurn(ctx)
+			if err != nil {
+				return ErrorResult(fmt.Sprintf("Spawn failed: %v", err)).WithError(err)
+			}
+		}
 		// Launch async sub-turn in goroutine
 		go func() {
-			result, err := t.spawner.SpawnSubTurn(ctx, SubTurnConfig{
+			defer releaseRuntime()
+			result, err := t.spawner.SpawnSubTurn(spawnCtx, SubTurnConfig{
 				Model:         t.defaultModel,
 				Tools:         nil, // Will inherit from parent via context
 				SystemPrompt:  systemPrompt,
@@ -145,7 +159,7 @@ Task: %s`,
 
 			// Call callback if provided
 			if cb != nil {
-				cb(ctx, result)
+				cb(spawnCtx, result)
 			}
 		}()
 

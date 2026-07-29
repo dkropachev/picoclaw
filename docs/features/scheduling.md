@@ -27,6 +27,7 @@ through channels or run gated shell commands.
 | `FR-SCHED-004` | MUST | Command jobs require cron command enablement and exec remote permission gates before shell execution. | Scheduled shell execution is high risk. |
 | `FR-SCHED-005` | MUST | CLI cron add/list/enable/disable/remove reflects persisted job state. | Operators need direct schedule management. |
 | `FR-SCHED-006` | SHOULD | Heartbeat prompts run on configured interval and share the normal agent execution path. | Periodic assistant behavior should stay consistent. |
+| `FR-SCHED-007` | MUST | Gateway-owned cron commands, cron agent turns, heartbeat prompts, and workflow schedules acquire the exact config generation that created them before effects. A cron service obtains that admission before clearing and persisting a due occurrence and holds it through callback bookkeeping; reload starts replacement cron only after other fallible initialization. Already-due durable occurrences remain due across restart, while stale candidate or cached schedule work is rejected without executing commands, creating workflow runs, or publishing trigger telemetry. | Background schedules must not escape the reload transaction, lose a one-shot occurrence, execute against another workspace, or observe provisional provider/config state. |
 
 ## Data And State Model
 
@@ -39,6 +40,8 @@ and heartbeat interval/prompt state.
 Owns: CODE cmd/picoclaw/internal/cron/**
 Owns: CODE pkg/cron/**
 Owns: CODE pkg/heartbeat/**
+Owns: CODE pkg/tools/cron.go
+Owns: CODE pkg/agent/workflow_automations.go
 Owns: CLI cmd/picoclaw/internal/cron/*
 Owns: CONFIG.tools.cron*
 Owns: CONFIG.heartbeat*
@@ -54,6 +57,7 @@ Owns: TOOL cron
 | CLI | `picoclaw cron add/list/enable/disable/remove` | Persistent job management. | `FR-SCHED-005` |
 | Tool | `cron` | Agent-callable scheduling actions. | `FR-SCHED-001` through `FR-SCHED-004` |
 | Config | `tools.cron.*`, `heartbeat.*` | Command gates, timeout, allowed remotes, and heartbeat interval. | `FR-SCHED-004`, `FR-SCHED-006` |
+| Runtime | `AgentLoop.AcquireRuntimeGeneration`, gateway reload lifecycle | Fence due work to its originating config/provider generation and activate replacement cron only after fallible service setup. | `FR-SCHED-007` |
 
 ## Algorithms And Ordering
 
@@ -62,6 +66,15 @@ Owns: TOOL cron
 3. Persist job state and expose CLI list/status operations from the same store.
 4. On due execution, either enqueue an agent prompt for delivery or run the gated command.
 5. Heartbeat periodically submits configured prompts through the same agent path.
+6. A gateway cron service acquires the originating config generation before it
+   clears a due `nextRunAtMs`, persists that claim, invokes the callback, and
+   saves terminal/next-run state. If service cancellation wins admission, the
+   durable occurrence remains untouched. Startup preserves already-due
+   occurrences, including overdue one-shots, for immediate execution.
+7. Workflow schedule refresh detects config pointer changes immediately,
+   discards the old cache, and admits asynchronous runs before goroutine
+   launch. Reload initializes replacement services with cron stopped, starts
+   cron last, and resumes the generation gate only after commit or rollback.
 
 ## Cross-Feature Behavior
 
@@ -74,6 +87,13 @@ tool execution and security gates. Agent conversations process scheduled prompts
 - Disabled jobs remain stored but do not execute.
 - Command jobs fail closed when exec or cron command gates are disabled.
 - Missing target channel/chat prevents delivery and reports failure.
+- A due candidate command waiting during rollback is rejected when the old
+  generation resumes. A cached schedule from another generation cannot run a
+  same-named workflow in the replacement workspace and emits no triggered
+  event.
+- Stopping an old cron service before runtime admission neither clears nor
+  deletes its due job. The replacement/restarted service preserves the overdue
+  timestamp and executes it once admitted.
 
 ## Acceptance Evidence
 
@@ -82,9 +102,12 @@ tool execution and security gates. Agent conversations process scheduled prompts
 | `FR-SCHED-001`, `FR-SCHED-002`, `FR-SCHED-003`, `FR-SCHED-004` | [pkg/tools/cron_test.go](../../pkg/tools/cron_test.go), [docs/reference/cron.md](../reference/cron.md) |
 | `FR-SCHED-005` | [cmd/picoclaw/internal/cron/add_test.go](../../cmd/picoclaw/internal/cron/add_test.go), [cmd/picoclaw/internal/cron/list_test.go](../../cmd/picoclaw/internal/cron/list_test.go), [cmd/picoclaw/internal/cron/enable_test.go](../../cmd/picoclaw/internal/cron/enable_test.go), [cmd/picoclaw/internal/cron/disable_test.go](../../cmd/picoclaw/internal/cron/disable_test.go), [cmd/picoclaw/internal/cron/remove_test.go](../../cmd/picoclaw/internal/cron/remove_test.go) |
 | `FR-SCHED-006` | [pkg/heartbeat/service_test.go](../../pkg/heartbeat/service_test.go) |
+| `FR-SCHED-007` | [pkg/tools/cron_test.go](../../pkg/tools/cron_test.go), [pkg/agent/workflow_automations_test.go](../../pkg/agent/workflow_automations_test.go), [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go) |
 
 ## Implementation Anchors
 
 - [pkg/tools/cron.go](../../pkg/tools/cron.go)
+- [pkg/agent/workflow_automations.go](../../pkg/agent/workflow_automations.go)
+- [pkg/gateway/gateway.go](../../pkg/gateway/gateway.go)
 - [pkg/heartbeat/service.go](../../pkg/heartbeat/service.go)
 - [cmd/picoclaw/internal/cron](../../cmd/picoclaw/internal/cron)

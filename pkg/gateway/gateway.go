@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -70,6 +71,7 @@ type services struct {
 	MediaStore       media.MediaStore
 	ChannelManager   *channels.Manager
 	DeviceService    *devices.Service
+	EventAutomation  *eventAutomationService
 	HealthServer     *health.Server
 	VoiceAgentCancel context.CancelFunc
 	manualReloadChan chan struct{}
@@ -201,7 +203,24 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	}
 
 	msgBus := bus.NewMessageBus()
-	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider, agent.WithConfigPath(configPath))
+	agentLoop := agent.NewAgentLoop(
+		cfg,
+		msgBus,
+		provider,
+		agent.WithConfigPath(configPath),
+		agent.WithRuntimeStartupBarrier(),
+		agent.WithDeferredEvolutionActivation(),
+	)
+	var runningServices *services
+	startupResourcesOwned := true
+	defer func() {
+		if startupResourcesOwned {
+			cleanupFailedGatewayStartup(runningServices, agentLoop, provider, msgBus)
+		}
+	}()
+	if err = agentLoop.ActivateEvolution(); err != nil {
+		return fmt.Errorf("activate startup evolution runtime: %w", err)
+	}
 	msgBus.SetEventPublisher(agentLoop.RuntimeEventBus())
 	publishGatewayEvent(agentLoop, runtimeevents.KindGatewayStart, startedAt, nil)
 
@@ -212,19 +231,12 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 
 	logger.InfoCF("agent", "Agent initialized", startupStatus.logFields)
 
-	runningServices, err := setupAndStartServices(cfg, agentLoop, msgBus, pidData.Token, listenResult)
+	runningServices, err = setupAndStartServices(cfg, agentLoop, msgBus, pidData.Token, listenResult)
 	if err != nil {
 		return err
 	}
-	// All services (channels + shared HTTP server) are up; mark the health
-	// server ready so GET /ready reports "ready". The health endpoints are
-	// mounted on the shared gateway mux, so Health.Server.Start() (which would
-	// otherwise set this) is never called — we flip the flag explicitly here.
-	runningServices.HealthServer.SetReady(true)
-	publishGatewayEvent(agentLoop, runtimeevents.KindGatewayReady, startedAt, nil)
-	closeListeners = false
 
-	// Setup manual reload channel for /reload endpoint
+	// Setup manual reload channel for /reload endpoint before readiness.
 	manualReloadChan := make(chan struct{}, 1)
 	runningServices.manualReloadChan = manualReloadChan
 	reloadTrigger := func() error {
@@ -242,6 +254,19 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	}
 	runningServices.HealthServer.SetReloadFunc(reloadTrigger)
 	agentLoop.SetReloadFunc(reloadTrigger)
+
+	// All services (channels + shared HTTP server) are up; mark the health
+	// server ready so GET /ready reports "ready". The health endpoints are
+	// mounted on the shared gateway mux, so Health.Server.Start() (which would
+	// otherwise set this) is never called — we flip the flag explicitly here.
+	runningServices.HealthServer.SetReady(true)
+	publishGatewayEvent(agentLoop, runtimeevents.KindGatewayReady, startedAt, nil)
+	closeListeners = false
+
+	// Readiness is now externally observable, so autonomous runtime work may
+	// begin. From here on, normal shutdown owns all initialized resources.
+	agentLoop.ReleaseRuntimeStartupBarrier()
+	startupResourcesOwned = false
 
 	for _, bindHost := range listenResult.BindHosts {
 		fmt.Printf("✓ Gateway started on %s\n", net.JoinHostPort(bindHost, strconv.Itoa(cfg.Gateway.Port)))
@@ -268,6 +293,7 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 		select {
 		case <-sigChan:
 			logger.Info("Shutting down...")
+			cancel()
 			shutdownGateway(runningServices, agentLoop, provider, msgBus, true)
 			return nil
 		case newCfg := <-configReloadChan:
@@ -300,6 +326,15 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 			}
 		}
 	}
+}
+
+func cleanupFailedGatewayStartup(
+	runningServices *services,
+	agentLoop *agent.AgentLoop,
+	provider providers.LLMProvider,
+	msgBus *bus.MessageBus,
+) {
+	shutdownGateway(runningServices, agentLoop, provider, msgBus, true)
 }
 
 func preCheckConfig(cfg *config.Config) error {
@@ -410,6 +445,13 @@ func setupAndStartServices(
 	authToken string,
 	listenResult netbind.OpenResult,
 ) (*services, error) {
+	if err := validateEventAutomationStorage(context.Background(), cfg); err != nil {
+		return nil, fmt.Errorf("validate event automation storage: %w", err)
+	}
+	if err := validateEventAutomationRuntime(context.Background(), cfg, agentLoop); err != nil {
+		return nil, fmt.Errorf("validate event automation runtime: %w", err)
+	}
+
 	runningServices := &services{}
 
 	execTimeout := time.Duration(cfg.Tools.Cron.ExecTimeoutMinutes) * time.Minute
@@ -423,12 +465,8 @@ func setupAndStartServices(
 		cfg,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("error setting up cron service: %w", err)
+		return runningServices, fmt.Errorf("error setting up cron service: %w", err)
 	}
-	if err = runningServices.CronService.Start(); err != nil {
-		return nil, fmt.Errorf("error starting cron service: %w", err)
-	}
-	fmt.Println("✓ Cron service started")
 
 	runningServices.HeartbeatService = heartbeat.NewHeartbeatService(
 		cfg.WorkspacePath(),
@@ -436,11 +474,7 @@ func setupAndStartServices(
 		cfg.Heartbeat.Enabled,
 	)
 	runningServices.HeartbeatService.SetBus(msgBus)
-	runningServices.HeartbeatService.SetHandler(createHeartbeatHandler(agentLoop))
-	if err = runningServices.HeartbeatService.Start(); err != nil {
-		return nil, fmt.Errorf("error starting heartbeat service: %w", err)
-	}
-	fmt.Println("✓ Heartbeat service started")
+	runningServices.HeartbeatService.SetHandler(createHeartbeatHandler(agentLoop, cfg))
 
 	runningServices.MediaStore = media.NewFileMediaStoreWithCleanup(media.MediaCleanerConfig{
 		Enabled:  cfg.Tools.MediaCleanup.Enabled,
@@ -458,10 +492,7 @@ func setupAndStartServices(
 		channels.WithRuntimeEvents(agentLoop.RuntimeEventBus()),
 	)
 	if err != nil {
-		if fms, ok := runningServices.MediaStore.(*media.FileMediaStore); ok {
-			fms.Stop()
-		}
-		return nil, fmt.Errorf("error creating channel manager: %w", err)
+		return runningServices, fmt.Errorf("error creating channel manager: %w", err)
 	}
 
 	agentLoop.SetChannelManager(runningServices.ChannelManager)
@@ -517,7 +548,7 @@ func setupAndStartServices(
 	)
 
 	if err = runningServices.ChannelManager.StartAll(context.Background()); err != nil {
-		return nil, fmt.Errorf("error starting channels: %w", err)
+		return runningServices, fmt.Errorf("error starting channels: %w", err)
 	}
 
 	logChannelVoiceCapabilities(runningServices.ChannelManager, transcriber != nil, ttsAvailable)
@@ -548,19 +579,70 @@ func setupAndStartServices(
 		fmt.Println("✓ Device event service started")
 	}
 
+	runningServices.EventAutomation, err = setupEventAutomationService(
+		context.Background(),
+		cfg,
+		agentLoop,
+	)
+	if err != nil {
+		return runningServices, fmt.Errorf("error starting event automation: %w", err)
+	}
+	if runningServices.EventAutomation != nil {
+		if cfg.Workflows.Enabled {
+			fmt.Println("✓ Durable event inbox and workflow workers started")
+		} else {
+			fmt.Println("✓ Durable event inbox opened (workflow dispatch disabled)")
+		}
+	}
+
+	if err = runningServices.HeartbeatService.Start(); err != nil {
+		return runningServices, fmt.Errorf("error starting heartbeat service: %w", err)
+	}
+	fmt.Println("✓ Heartbeat service started")
+
+	// Cron is deliberately the final service started. Its durable store may
+	// contain overdue jobs, so starting it before later fallible initialization
+	// could execute work for a gateway that never becomes ready.
+	if err = runningServices.CronService.Start(); err != nil {
+		return runningServices, fmt.Errorf("error starting cron service: %w", err)
+	}
+	fmt.Println("✓ Cron service started")
+
 	return runningServices, nil
 }
 
-func stopAndCleanupServices(runningServices *services, shutdownTimeout time.Duration, isReload bool) {
+func stopAndCleanupServices(
+	runningServices *services,
+	shutdownTimeout time.Duration,
+	isReload bool,
+) error {
+	producerErr := stopRuntimeProducers(runningServices, shutdownTimeout)
+	dependencyErr := stopRuntimeDependencies(
+		runningServices,
+		shutdownTimeout,
+		!isReload,
+	)
+	return errors.Join(producerErr, dependencyErr)
+}
+
+func stopRuntimeProducers(
+	runningServices *services,
+	shutdownTimeout time.Duration,
+) error {
+	if runningServices == nil {
+		return nil
+	}
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer shutdownCancel()
 
-	// reload should not stop channel manager
-	if !isReload && runningServices.ChannelManager != nil {
-		runningServices.ChannelManager.StopAll(shutdownCtx)
+	var cleanupErr error
+	if err := closeEventAutomationService(shutdownCtx, &runningServices.EventAutomation); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("stop event automation: %w", err))
 	}
+
 	if runningServices.VoiceAgentCancel != nil {
 		runningServices.VoiceAgentCancel()
+		runningServices.VoiceAgentCancel = nil
 	}
 	if runningServices.DeviceService != nil {
 		runningServices.DeviceService.Stop()
@@ -571,11 +653,32 @@ func stopAndCleanupServices(runningServices *services, shutdownTimeout time.Dura
 	if runningServices.CronService != nil {
 		runningServices.CronService.Stop()
 	}
+	return cleanupErr
+}
+
+func stopRuntimeDependencies(
+	runningServices *services,
+	shutdownTimeout time.Duration,
+	stopChannels bool,
+) error {
+	if runningServices == nil {
+		return nil
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer shutdownCancel()
+
+	var cleanupErr error
+	if stopChannels && runningServices.ChannelManager != nil {
+		if err := runningServices.ChannelManager.StopAll(shutdownCtx); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("stop channels: %w", err))
+		}
+	}
 	if runningServices.MediaStore != nil {
 		if fms, ok := runningServices.MediaStore.(*media.FileMediaStore); ok {
 			fms.Stop()
 		}
 	}
+	return cleanupErr
 }
 
 func shutdownGateway(
@@ -587,18 +690,56 @@ func shutdownGateway(
 ) {
 	publishGatewayEvent(agentLoop, runtimeevents.KindGatewayShutdown, time.Time{}, nil)
 
-	if cp, ok := provider.(providers.StatefulProvider); ok && fullShutdown {
-		cp.Close()
-	}
-
-	stopAndCleanupServices(runningServices, gracefulShutdownTimeout, false)
-
-	if fullShutdown && msgBus != nil {
-		msgBus.Close()
+	producerErr := stopRuntimeProducers(runningServices, gracefulShutdownTimeout)
+	if producerErr != nil {
+		logger.ErrorCF("gateway", "Failed to stop runtime producers cleanly", map[string]any{
+			"error": producerErr.Error(),
+		})
 	}
 
 	agentLoop.Stop()
-	agentLoop.Close()
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+	defer drainCancel()
+	runStopErr := agentLoop.WaitStopped(drainCtx)
+	if runStopErr != nil {
+		logger.ErrorCF("gateway", "Agent loop did not stop cleanly", map[string]any{"error": runStopErr.Error()})
+	}
+	_, runtimeDrainErr := agentLoop.PauseRuntimeForReload(drainCtx)
+	if runtimeDrainErr != nil {
+		logger.ErrorCF("gateway", "Agent runtime did not drain cleanly", map[string]any{
+			"error": runtimeDrainErr.Error(),
+		})
+	}
+
+	var dependencyErr error
+	if runStopErr == nil && runtimeDrainErr == nil {
+		dependencyErr = stopRuntimeDependencies(
+			runningServices,
+			gracefulShutdownTimeout,
+			true,
+		)
+		if dependencyErr != nil {
+			logger.ErrorCF("gateway", "Failed to stop runtime dependencies cleanly", map[string]any{
+				"error": dependencyErr.Error(),
+			})
+		}
+	}
+
+	// Keep the terminal runtime pause held. Resuming it after closing the
+	// provider would allow a blocked background admission onto closed state.
+	safeToClose := producerErr == nil &&
+		runStopErr == nil &&
+		runtimeDrainErr == nil &&
+		dependencyErr == nil
+	if safeToClose {
+		if fullShutdown && msgBus != nil {
+			msgBus.Close()
+		}
+		agentLoop.Close()
+		if cp, ok := provider.(providers.StatefulProvider); ok && fullShutdown {
+			cp.Close()
+		}
+	}
 
 	logger.Info("✓ Gateway stopped")
 }
@@ -613,51 +754,193 @@ func handleConfigReload(
 	allowEmptyStartup bool,
 	debug bool,
 ) error {
+	return handleConfigReloadWithServiceOps(
+		ctx,
+		al,
+		newCfg,
+		providerRef,
+		runningServices,
+		msgBus,
+		allowEmptyStartup,
+		debug,
+		configReloadServiceOps{
+			stop:    stopAndCleanupServices,
+			restart: restartServices,
+		},
+	)
+}
+
+type configReloadServiceOps struct {
+	stop    func(*services, time.Duration, bool) error
+	restart func(*agent.AgentLoop, *services, *bus.MessageBus) error
+}
+
+func handleConfigReloadWithServiceOps(
+	ctx context.Context,
+	al *agent.AgentLoop,
+	newCfg *config.Config,
+	providerRef *providers.LLMProvider,
+	runningServices *services,
+	msgBus *bus.MessageBus,
+	allowEmptyStartup bool,
+	debug bool,
+	serviceOps configReloadServiceOps,
+) error {
 	logger.Info("🔄 Config file changed, reloading...")
 
+	if err := validateEventAutomationStorage(ctx, newCfg); err != nil {
+		return fmt.Errorf("validate event automation before reload: %w", err)
+	}
+	if al == nil || al.GetConfig() == nil || providerRef == nil || *providerRef == nil {
+		return fmt.Errorf("active agent configuration and provider are required for reload")
+	}
+	if serviceOps.stop == nil || serviceOps.restart == nil {
+		return fmt.Errorf("reload service lifecycle operations are required")
+	}
+
+	oldCfg := al.GetConfig()
+	oldProvider := *providerRef
 	newModel := newCfg.Agents.Defaults.ModelName
 
 	logger.Infof(" New model is '%s', recreating provider...", newModel)
 
-	logger.Info("  Stopping all services...")
-	stopAndCleanupServices(runningServices, serviceShutdownTimeout, true)
-
 	newProvider, newModelID, err := createStartupProvider(newCfg, allowEmptyStartup)
 	if err != nil {
 		logger.Errorf("  ⚠ Error creating new provider: %v", err)
-		logger.Warn("  Attempting to restart services with old provider and config...")
-		if restartErr := restartServices(al, runningServices, msgBus); restartErr != nil {
-			logger.Errorf("  ⚠ Failed to restart services: %v", restartErr)
-		}
 		return fmt.Errorf("error creating new provider: %w", err)
 	}
-
 	if newModelID != "" {
 		newCfg.Agents.Defaults.ModelName = newModelID
+	}
+
+	if runningServices != nil && runningServices.HealthServer != nil {
+		runningServices.HealthServer.SetReady(false)
+	}
+	pauseCtx, pauseCancel := context.WithTimeout(ctx, providerReloadTimeout)
+	resumeRuntime, pauseErr := al.PauseRuntimeForReload(pauseCtx)
+	pauseCancel()
+	if pauseErr != nil {
+		if stateful, ok := newProvider.(providers.StatefulProvider); ok {
+			stateful.Close()
+		}
+		if runningServices != nil && runningServices.HealthServer != nil {
+			runningServices.HealthServer.SetReady(true)
+		}
+		return fmt.Errorf("pause agent runtime for reload: %w", pauseErr)
+	}
+	defer resumeRuntime()
+
+	logger.Info("  Stopping all services...")
+	if stopErr := serviceOps.stop(runningServices, serviceShutdownTimeout, true); stopErr != nil {
+		if stateful, ok := newProvider.(providers.StatefulProvider); ok {
+			stateful.Close()
+		}
+		recoveryStopErr := serviceOps.stop(runningServices, serviceShutdownTimeout, true)
+		var recoveryRestartErr error
+		if recoveryStopErr == nil {
+			recoveryRestartErr = serviceOps.restart(al, runningServices, msgBus)
+			if recoveryRestartErr == nil &&
+				runningServices != nil &&
+				runningServices.HealthServer != nil {
+				runningServices.HealthServer.SetReady(true)
+			}
+		}
+		return errors.Join(
+			fmt.Errorf("stop services for reload: %w", stopErr),
+			recoveryStopErr,
+			recoveryRestartErr,
+		)
 	}
 
 	reloadCtx, reloadCancel := context.WithTimeout(context.Background(), providerReloadTimeout)
 	defer reloadCancel()
 
-	if err := al.ReloadProviderAndConfig(reloadCtx, newProvider, newCfg); err != nil {
+	previousProvider, err := al.ReloadProviderAndConfigRetainingPrevious(
+		reloadCtx,
+		newProvider,
+		newCfg,
+	)
+	if err != nil {
 		logger.Errorf("  ⚠ Error reloading agent loop: %v", err)
-		if cp, ok := newProvider.(providers.StatefulProvider); ok {
-			cp.Close()
+		if stateful, ok := newProvider.(providers.StatefulProvider); ok {
+			stateful.Close()
 		}
 		logger.Warn("  Attempting to restart services with old provider and config...")
-		if restartErr := restartServices(al, runningServices, msgBus); restartErr != nil {
+		restartErr := serviceOps.restart(al, runningServices, msgBus)
+		if restartErr != nil {
 			logger.Errorf("  ⚠ Failed to restart services: %v", restartErr)
+		} else if runningServices != nil && runningServices.HealthServer != nil {
+			runningServices.HealthServer.SetReady(true)
 		}
-		return fmt.Errorf("error reloading agent loop: %w", err)
+		return errors.Join(fmt.Errorf("error reloading agent loop: %w", err), restartErr)
+	}
+	if previousProvider == nil {
+		previousProvider = oldProvider
+	}
+
+	logger.Info("  Preflighting and restarting all services with new configuration...")
+	candidateServicesStarted := false
+	restartErr := validateEventAutomationRuntime(reloadCtx, newCfg, al)
+	if restartErr != nil {
+		restartErr = fmt.Errorf("preflight replacement event runtime: %w", restartErr)
+	} else {
+		candidateServicesStarted = true
+		restartErr = serviceOps.restart(al, runningServices, msgBus)
+	}
+	if restartErr != nil {
+		logger.Errorf("  ⚠ Error restarting services: %v", restartErr)
+		var cleanupErr error
+		if candidateServicesStarted {
+			cleanupErr = serviceOps.stop(runningServices, serviceShutdownTimeout, true)
+		}
+		if cleanupErr != nil {
+			*providerRef = newProvider
+			closeRetainedProviderAfterReload(al, previousProvider)
+			return errors.Join(
+				fmt.Errorf("error restarting services: %w", restartErr),
+				fmt.Errorf("stop partially restarted services: %w", cleanupErr),
+			)
+		}
+
+		rollbackCtx, rollbackCancel := context.WithTimeout(
+			context.Background(),
+			providerReloadTimeout,
+		)
+		failedProvider, rollbackErr := al.ReloadProviderAndConfigRetainingPrevious(
+			rollbackCtx,
+			previousProvider,
+			oldCfg,
+		)
+		rollbackCancel()
+		if rollbackErr != nil {
+			*providerRef = newProvider
+			closeRetainedProviderAfterReload(al, previousProvider)
+			return errors.Join(
+				fmt.Errorf("error restarting services: %w", restartErr),
+				fmt.Errorf("roll back agent configuration: %w", rollbackErr),
+			)
+		}
+		if failedProvider == nil {
+			failedProvider = newProvider
+		}
+		recoveryErr := serviceOps.restart(al, runningServices, msgBus)
+		if recoveryErr == nil &&
+			runningServices != nil &&
+			runningServices.HealthServer != nil {
+			runningServices.HealthServer.SetReady(true)
+		}
+		closeRetainedProviderAfterReload(al, failedProvider)
+		return errors.Join(
+			fmt.Errorf("error restarting services: %w", restartErr),
+			recoveryErr,
+		)
 	}
 
 	*providerRef = newProvider
-
-	logger.Info("  Restarting all services with new configuration...")
-	if err := restartServices(al, runningServices, msgBus); err != nil {
-		logger.Errorf("  ⚠ Error restarting services: %v", err)
-		return fmt.Errorf("error restarting services: %w", err)
+	if runningServices != nil && runningServices.HealthServer != nil {
+		runningServices.HealthServer.SetReady(true)
 	}
+	closeRetainedProviderAfterReload(al, previousProvider)
 
 	logger.Info("  ✓ Provider, configuration, and services reloaded successfully (thread-safe)")
 
@@ -670,6 +953,15 @@ func handleConfigReload(
 	}
 
 	return nil
+}
+
+func closeRetainedProviderAfterReload(
+	agentLoop *agent.AgentLoop,
+	provider providers.LLMProvider,
+) {
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), providerReloadTimeout)
+	defer closeCancel()
+	agentLoop.CloseRetainedProvider(closeCtx, provider)
 }
 
 func restartServices(
@@ -692,10 +984,6 @@ func restartServices(
 	if err != nil {
 		return fmt.Errorf("error restarting cron service: %w", err)
 	}
-	if err = runningServices.CronService.Start(); err != nil {
-		return fmt.Errorf("error restarting cron service: %w", err)
-	}
-	fmt.Println("  ✓ Cron service restarted")
 
 	runningServices.HeartbeatService = heartbeat.NewHeartbeatService(
 		cfg.WorkspacePath(),
@@ -703,7 +991,7 @@ func restartServices(
 		cfg.Heartbeat.Enabled,
 	)
 	runningServices.HeartbeatService.SetBus(msgBus)
-	runningServices.HeartbeatService.SetHandler(createHeartbeatHandler(al))
+	runningServices.HeartbeatService.SetHandler(createHeartbeatHandler(al, cfg))
 	if err = runningServices.HeartbeatService.Start(); err != nil {
 		return fmt.Errorf("error restarting heartbeat service: %w", err)
 	}
@@ -742,8 +1030,8 @@ func restartServices(
 		MonitorUSB: cfg.Devices.MonitorUSB,
 	}, stateManager)
 	runningServices.DeviceService.SetBus(msgBus)
-	if err := runningServices.DeviceService.Start(context.Background()); err != nil {
-		logger.WarnCF("device", "Failed to restart device service", map[string]any{"error": err.Error()})
+	if startErr := runningServices.DeviceService.Start(context.Background()); startErr != nil {
+		logger.WarnCF("device", "Failed to restart device service", map[string]any{"error": startErr.Error()})
 	} else if cfg.Devices.Enabled {
 		fmt.Println("  ✓ Device event service restarted")
 	}
@@ -764,6 +1052,29 @@ func restartServices(
 
 	ttsAvailable := tts.DetectTTS(cfg) != nil
 	logChannelVoiceCapabilities(runningServices.ChannelManager, transcriber != nil, ttsAvailable)
+
+	runningServices.EventAutomation, err = setupEventAutomationService(
+		context.Background(),
+		cfg,
+		al,
+	)
+	if err != nil {
+		return fmt.Errorf("error restarting event automation: %w", err)
+	}
+	if runningServices.EventAutomation != nil {
+		if cfg.Workflows.Enabled {
+			fmt.Println("  ✓ Durable event inbox and workflow workers restarted")
+		} else {
+			fmt.Println("  ✓ Durable event inbox reopened (workflow dispatch disabled)")
+		}
+	}
+	// Start cron last. Event workers and agent-backed services are fenced by the
+	// outer runtime pause, so no candidate scheduled command can run before all
+	// other fallible replacement initialization has succeeded.
+	if err = runningServices.CronService.Start(); err != nil {
+		return fmt.Errorf("error restarting cron service: %w", err)
+	}
+	fmt.Println("  ✓ Cron service restarted")
 	// NOTE: PID file is written once at startup and not updated on reload.
 	// Changing the gateway listen address requires a full restart.
 
@@ -863,6 +1174,12 @@ func setupCronTool(
 	cronStorePath := filepath.Join(workspace, "cron", "jobs.json")
 
 	cronService := cron.NewCronService(cronStorePath, nil)
+	cronService.SetJobAdmission(func(
+		ctx context.Context,
+		_ *cron.CronJob,
+	) (context.Context, func(), error) {
+		return agentLoop.AcquireRuntimeGeneration(ctx, cfg)
+	})
 
 	var cronTool *tools.CronTool
 	if cfg.Tools.IsToolEnabled("cron") {
@@ -876,8 +1193,11 @@ func setupCronTool(
 	}
 
 	if cronTool != nil {
-		cronService.SetOnJob(func(job *cron.CronJob) (string, error) {
-			result := cronTool.ExecuteJob(context.Background(), job)
+		cronService.SetOnJobContext(func(
+			ctx context.Context,
+			job *cron.CronJob,
+		) (string, error) {
+			result := cronTool.ExecuteJob(ctx, job)
 			return result, nil
 		})
 	}
@@ -885,13 +1205,25 @@ func setupCronTool(
 	return cronService, nil
 }
 
-func createHeartbeatHandler(agentLoop *agent.AgentLoop) func(prompt, channel, chatID string) *tools.ToolResult {
+func createHeartbeatHandler(
+	agentLoop *agent.AgentLoop,
+	runtimeConfig *config.Config,
+) func(prompt, channel, chatID string) *tools.ToolResult {
 	return func(prompt, channel, chatID string) *tools.ToolResult {
+		ctx, releaseRuntime, err := agentLoop.AcquireRuntimeGeneration(
+			context.Background(),
+			runtimeConfig,
+		)
+		if err != nil {
+			return tools.ErrorResult(fmt.Sprintf("Heartbeat runtime unavailable: %v", err))
+		}
+		defer releaseRuntime()
+
 		if channel == "" || chatID == "" {
 			channel, chatID = "cli", "direct"
 		}
 
-		response, err := agentLoop.ProcessHeartbeat(context.Background(), prompt, channel, chatID)
+		response, err := agentLoop.ProcessHeartbeat(ctx, prompt, channel, chatID)
 		if err != nil {
 			return tools.ErrorResult(fmt.Sprintf("Heartbeat error: %v", err))
 		}
