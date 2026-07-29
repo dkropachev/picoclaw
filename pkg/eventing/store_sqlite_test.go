@@ -1322,6 +1322,8 @@ func TestStoreCancellationCloseAndNotFound(t *testing.T) {
 	assert.ErrorIs(t, err, ErrClosed)
 	_, err = store.Insert(context.Background(), testEnvelope("closed"))
 	assert.ErrorIs(t, err, ErrClosed)
+	_, err = store.Prune(context.Background(), clock.Now(), 1)
+	assert.ErrorIs(t, err, ErrClosed)
 }
 
 func TestStoreConcurrentCloseIsRaceSafe(t *testing.T) {

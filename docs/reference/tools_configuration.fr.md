@@ -222,7 +222,7 @@ Au lieu de charger tous les outils, le LLM reçoit un outil de recherche léger 
 
 | Config      | Type   | Par défaut | Description                                  |
 |-------------|--------|------------|----------------------------------------------|
-| `enabled`   | bool   | false      | Activer l'intégration MCP globalement        |
+| `enabled`   | bool   | true       | Activer l'intégration MCP globalement        |
 | `discovery` | object | `{}`       | Configuration de la découverte d'outils (voir ci-dessous) |
 | `servers`   | object | `{}`       | Mappage du nom de serveur à la configuration du serveur |
 

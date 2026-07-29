@@ -42,6 +42,14 @@
       ]
     },
     {
+      "spec": "docs/features/mcp-integration.md",
+      "patterns": [
+        "web/frontend/src/api/mcp*.ts",
+        "web/frontend/src/components/agent/mcp/**",
+        "web/frontend/src/routes/agent/mcp.tsx"
+      ]
+    },
+    {
       "spec": "docs/features/skills.md",
       "patterns": [
         "web/frontend/src/api/skills.ts",
@@ -100,6 +108,7 @@
         "web/frontend/src/components/config/**",
         "web/frontend/src/components/credentials/**",
         "web/frontend/src/components/models/**",
+        "web/frontend/src/components/shared-form.tsx",
         "web/frontend/src/components/tour/**",
         "web/frontend/src/components/ui/**",
         "web/frontend/src/hooks/use-credentials-page.ts",

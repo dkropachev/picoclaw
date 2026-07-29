@@ -1645,6 +1645,197 @@ func TestConfigSignatureIncludesModelStreamingForDefaultModelRef(t *testing.T) {
 	}
 }
 
+func TestConfigSignatureMCPConfigIsDeterministicAcrossMapOrder(t *testing.T) {
+	first := config.DefaultConfig()
+	first.Tools.MCP.Servers = map[string]config.MCPServerConfig{
+		"zeta": {
+			Enabled: true,
+			Type:    "http",
+			URL:     "https://zeta.example.test/mcp",
+			Headers: map[string]string{
+				"X-Zeta":   "zeta",
+				"X-Shared": "shared",
+			},
+		},
+		"alpha": {
+			Enabled: true,
+			Type:    "stdio",
+			Command: "npx",
+			Args:    []string{"-y", "alpha-server"},
+			Env: map[string]string{
+				"ZETA":  "zeta",
+				"ALPHA": "alpha",
+			},
+		},
+	}
+
+	second := config.DefaultConfig()
+	second.Tools.MCP.Servers = make(map[string]config.MCPServerConfig)
+	second.Tools.MCP.Servers["alpha"] = config.MCPServerConfig{
+		Enabled: true,
+		Type:    "stdio",
+		Command: "npx",
+		Args:    []string{"-y", "alpha-server"},
+		Env: map[string]string{
+			"ALPHA": "alpha",
+			"ZETA":  "zeta",
+		},
+	}
+	second.Tools.MCP.Servers["zeta"] = config.MCPServerConfig{
+		Enabled: true,
+		Type:    "http",
+		URL:     "https://zeta.example.test/mcp",
+		Headers: map[string]string{
+			"X-Shared": "shared",
+			"X-Zeta":   "zeta",
+		},
+	}
+
+	firstSignature := computeConfigSignature(first)
+	secondSignature := computeConfigSignature(second)
+	if firstSignature != secondSignature {
+		t.Fatalf(
+			"equivalent MCP configs produced different signatures:\nfirst:  %s\nsecond: %s",
+			firstSignature,
+			secondSignature,
+		)
+	}
+	if repeated := computeConfigSignature(first); repeated != firstSignature {
+		t.Fatalf("repeated signature = %q, want deterministic %q", repeated, firstSignature)
+	}
+}
+
+func TestConfigSignatureChangesForMCPRuntimeConfig(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*config.Config)
+	}{
+		{
+			name: "server URL",
+			mutate: func(cfg *config.Config) {
+				server := cfg.Tools.MCP.Servers["remote"]
+				server.URL = "https://changed.example.test/mcp"
+				cfg.Tools.MCP.Servers["remote"] = server
+			},
+		},
+		{
+			name: "server header",
+			mutate: func(cfg *config.Config) {
+				server := cfg.Tools.MCP.Servers["remote"]
+				server.Headers["X-API-Key"] = "replacement"
+				cfg.Tools.MCP.Servers["remote"] = server
+			},
+		},
+		{
+			name: "server command",
+			mutate: func(cfg *config.Config) {
+				server := cfg.Tools.MCP.Servers["local"]
+				server.Command = "bunx"
+				cfg.Tools.MCP.Servers["local"] = server
+			},
+		},
+		{
+			name: "server arguments",
+			mutate: func(cfg *config.Config) {
+				server := cfg.Tools.MCP.Servers["local"]
+				server.Args = append(server.Args, "--verbose")
+				cfg.Tools.MCP.Servers["local"] = server
+			},
+		},
+		{
+			name: "server environment",
+			mutate: func(cfg *config.Config) {
+				server := cfg.Tools.MCP.Servers["local"]
+				server.Env["TOKEN"] = "replacement"
+				cfg.Tools.MCP.Servers["local"] = server
+			},
+		},
+		{
+			name: "credential revision",
+			mutate: func(cfg *config.Config) {
+				server := cfg.Tools.MCP.Servers["remote"]
+				server.Auth.Revision++
+				cfg.Tools.MCP.Servers["remote"] = server
+			},
+		},
+		{
+			name: "discovery TTL",
+			mutate: func(cfg *config.Config) {
+				cfg.Tools.MCP.Discovery.TTL++
+			},
+		},
+		{
+			name: "inline text limit",
+			mutate: func(cfg *config.Config) {
+				cfg.Tools.MCP.MaxInlineTextChars++
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Tools.MCP.Enabled = true
+			cfg.Tools.MCP.Discovery = config.ToolDiscoveryConfig{
+				Enabled:          true,
+				TTL:              5,
+				MaxSearchResults: 5,
+				UseBM25:          true,
+			}
+			cfg.Tools.MCP.Servers = map[string]config.MCPServerConfig{
+				"remote": {
+					Enabled: true,
+					Type:    "http",
+					URL:     "https://remote.example.test/mcp",
+					Headers: map[string]string{"X-API-Key": "original"},
+					Auth: &config.MCPServerAuthConfig{
+						Type:         "bearer",
+						CredentialID: "mcp:remote",
+						Revision:     1,
+					},
+				},
+				"local": {
+					Enabled: true,
+					Type:    "stdio",
+					Command: "npx",
+					Args:    []string{"-y", "local-server"},
+					Env:     map[string]string{"TOKEN": "original"},
+				},
+			}
+
+			before := computeConfigSignature(cfg)
+			tt.mutate(cfg)
+			after := computeConfigSignature(cfg)
+			if before == after {
+				t.Fatalf("config signature did not change after MCP %s changed", tt.name)
+			}
+		})
+	}
+}
+
+func TestConfigSignatureIgnoresMCPDetailsWhileDisabled(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.MCP.Enabled = false
+	cfg.Tools.MCP.Discovery.Enabled = true
+	cfg.Tools.MCP.Servers = map[string]config.MCPServerConfig{
+		"remote": {
+			Enabled: true,
+			Type:    "http",
+			URL:     "https://remote.example.test/mcp",
+		},
+	}
+	before := computeConfigSignature(cfg)
+
+	cfg.Tools.MCP.Discovery.TTL++
+	server := cfg.Tools.MCP.Servers["remote"]
+	server.URL = "https://changed.example.test/mcp"
+	cfg.Tools.MCP.Servers["remote"] = server
+
+	if after := computeConfigSignature(cfg); before != after {
+		t.Fatalf("disabled MCP details changed gateway signature:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
 func TestConfigSignatureIncludesModelStreamingForLoadBalancedAliasEntries(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ModelList = []*config.ModelConfig{

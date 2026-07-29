@@ -32,10 +32,10 @@ approved side effect as a separately declared workflow action.
 | ID | Level | Requirement | Rationale |
 | --- | --- | --- | --- |
 | `FR-SEC-001` | MUST | Secure string config fields avoid plaintext exposure in launcher read paths and preserve secret values on partial updates; router model entries must not persist provider API keys, and router graph account refs are limited to non-secret credential account identifiers such as `credential:openai:work`. | Credentials must not leak through management surfaces. |
-| `FR-SEC-002` | MUST | Credential store operations save, load, list, and delete provider credentials with provider/auth-method identity; provider aliases such as `copilot` are canonicalized before credential lookup or persistence; provider construction and model discovery reject stored provider-identity mismatches, and named token refresh and persistence remain bound to the normalized credential ID; provider-specific token validators reject unsupported token forms before storage; storage writes use same-directory, collision-resistant temp files before atomic rename so concurrent saves do not fail on temp-name reuse. | Auth-backed providers require durable credentials without crossing account or provider identity. |
+| `FR-SEC-002` | MUST | Credential store operations save, load, list, delete, and transactionally update credentials with provider/auth-method identity; provider aliases such as `copilot` are canonicalized before credential lookup or persistence; provider construction and model discovery reject stored provider-identity mismatches, and named token refresh and persistence remain bound to the normalized credential ID; provider-specific token validators reject unsupported token forms before storage. Every mutation acquires a process-local lock and, on supported Unix and Windows hosts, an OS file lock, reloads the latest store while locked, and uses a same-directory, collision-resistant temporary file plus atomic rename so concurrent processes cannot lose unrelated credentials or overwrite a replacement during refresh. | Auth-backed providers and MCP servers require durable credentials without crossing account identity or losing updates during concurrent launcher and gateway activity. |
 | `FR-SEC-003` | MUST | Sensitive-data filtering redacts configured secrets from model-visible tool output when enabled. Durable external-event store construction also receives detached resolved secure-config values longer than three bytes for exact-value redaction, without logging or serializing that trusted list. | Tool results and channel-origin event text can contain credentials. |
 | `FR-SEC-004` | MUST | Dashboard auth rejects unauthenticated access, uses CSRF-safe logout, and rate-limits login attempts. | Web management is sensitive. |
-| `FR-SEC-005` | MUST | HTTP guard blocks private/internal targets unless explicitly allowed or proxy first-hop rules apply. | Web tools must not become SSRF primitives. |
+| `FR-SEC-005` | MUST | HTTP guard blocks private/internal targets unless explicitly allowed or proxy first-hop rules apply. Configured MCP URLs reject embedded credentials; credential-bearing remote servers require HTTPS except for intentional loopback development, and remote MCP redirects remain same-origin. MCP OAuth discovery, token exchange, authenticated probing, and refresh clients additionally reject cross-origin or downgrade redirects, disable environment proxies, resolve and pin an approved address into the actual dial, block private and special-use destinations from public-looking hosts, and restrict intentionally local discovery to the configured local address. | Web tools and browser-managed authentication must not become SSRF or credential-exfiltration primitives. |
 | `FR-SEC-006` | MUST | Isolation runtime starts supported commands with configured exposed paths and fails closed on unsupported/invalid setup. | Optional isolation must not silently weaken execution. |
 | `FR-SEC-007` | SHOULD | Key generation and token helpers produce unique, parseable, and revocable values for auth flows. | Auth flows need reliable primitives. |
 | `FR-SEC-008` | MUST | Model-list and tool-adaptation config validation rejects unsupported provider-control values such as invalid `reasoning_effort`, invalid account-router account references, invalid model-router target references, and invalid tool-adaptation policy values before those values are persisted or used; profile-specific tool-adaptation overrides normalize provider/model identity and replace earlier duplicate identities as whole entries; account routers and model routers are stored in top-level router lists rather than as secret-bearing `model_list[]` entries; strict diagnostics tolerate deprecated `account_routers[].model` input, but runtime and output ignore it so routers remain model-agnostic. | Invalid config should fail early instead of producing unsafe or broken provider requests. |
@@ -50,9 +50,10 @@ approved side effect as a separately declared workflow action.
 ## Data And State Model
 
 Security state includes secure-string sentinels, credential records keyed by
-provider and auth method with optional non-secret account email metadata,
-dashboard password/session data, login attempt counters, configured secret
-filters, private-host allowlists, isolation exposed paths, generated token IDs,
+provider and auth method with optional non-secret account email and OAuth
+refresh metadata, process and supported-host cross-process auth-store locks, dashboard
+password/session data, login attempt counters, configured secret filters,
+private-host allowlists, isolation exposed paths, generated token IDs,
 revocation metadata, per-connector event webhook formats/signing secrets, and
 explicit normalized webhook body/header trust metadata. Workflow agent requests
 also carry an explicit inherited-or-none tool policy; declared MCP actions use
@@ -102,8 +103,8 @@ Owns: TEST pkg/config/version*
 | HTTP | `POST /webhooks/events/{connector}` with `format: github` | Exact-body HMAC-SHA256 authentication, bounded parsing, explicit unauthenticated-header metadata, and durable delivery-ID deduplication behind trusted TLS. | `FR-SEC-012` |
 | HTTP / CLI | protected `/runtime/eventing/*`, launcher `/api/events*`, `picoclaw events *` | Translate authenticated launcher or owner-local PID authority into bounded live-gateway operator calls without exposing PID credentials, lease tokens, deduplication keys, or automatically fetched payloads. | `FR-SEC-014` |
 | Workflow / MCP | `agent/*` with `with.tools: none`; `mcp/github/add_issue_comment` | Remove tools from every classifier model path, then permit a GitHub mutation only as a declared conditional MCP step with signed-body identity and fixed output text. The GitHub MCP server and its write credential are configured explicitly and independently from ingress authentication. | `FR-SEC-013` |
-| Storage | Credential store | Provider credential CRUD, auth method metadata, and optional non-secret account email metadata extracted from OAuth token responses. | `FR-SEC-002`, `FR-SEC-007`, `FR-SEC-009` |
-| Network | Safe HTTP client and net binding helpers | Private host controls and bind behavior. | `FR-SEC-005` |
+| Storage | Credential store | Provider and MCP credential CRUD, transactional refresh updates, auth/OAuth metadata, cross-process serialization on supported hosts, and optional non-secret account email metadata extracted from OAuth token responses. | `FR-SEC-002`, `FR-SEC-007`, `FR-SEC-009` |
+| Network | Safe HTTP clients, MCP OAuth transports, and net binding helpers | Private/special-use host controls, DNS-pinned MCP OAuth discovery/token/probe/refresh requests, same-origin redirects, explicit local-development policy, and bind behavior. | `FR-SEC-005` |
 
 ## Algorithms And Ordering
 
@@ -113,7 +114,11 @@ Owns: TEST pkg/config/version*
    replace, clear, or reject secrets only through explicit update semantics.
 3. Canonicalize provider-scoped credential aliases before lookup or persistence
    and run provider-specific token validators before saving token-backed
-   credentials.
+   credentials. Serialize each credential mutation with a process-local mutex
+   and an OS file lock where the host supports it, reload the latest store under
+   that lock, and keep the lock across a refresh read-modify-write transaction
+   so a concurrent launcher replacement or unrelated credential update is not
+   lost.
 4. Parse OAuth token responses into credential records, copy non-secret email
    claims from JWT payloads when available, and retain an existing email when a
    refresh response omits it.
@@ -121,7 +126,11 @@ Owns: TEST pkg/config/version*
    semantics for logout so browser navigation cannot clear sessions.
 6. Resolve HTTP targets to concrete host/IP data, deny private or internal
    destinations unless allow rules apply, then execute the request through the
-   guarded client.
+   guarded client. For credential-bearing MCP OAuth discovery, exchange,
+   probing, and refresh, validate each endpoint and keep each redirect on its
+   request origin, disable environment proxies, pin an approved address into
+   the transport dial, and allow a private result only when the configured
+   intentional-local endpoint resolves to that same address.
 7. Build isolation command specs from supported runtime configuration, validate
    exposed paths, start only supported commands, and return errors rather than
    weakening to unisolated execution.
@@ -194,16 +203,31 @@ text nor supplies the MCP server's write credential.
 Event operator access composes launcher authentication or local PID-file
 authority with the gateway's protected runtime route. It does not add a second
 database opener, listener credential, or browser-visible bearer.
+MCP bearer and OAuth records reuse the shared auth store but remain keyed by
+normalized server-scoped IDs, with collision-resistant forks when
+rename/recreate/shared-name conflicts would otherwise reuse an active
+credential. Runtime refresh and launcher replacement share the same
+transactional locking boundary, while MCP-specific protocol and management
+behavior remains owned by
+[MCP Integration And Discovery](mcp-integration.md).
 
 ## Failure And Edge Cases
 
 - Partial secret updates preserve old value unless an explicit clear is requested.
 - Concurrent atomic writes do not fail due to temporary filename collisions.
+- Concurrent auth-store writers preserve unrelated credentials; on hosts with
+  OS file locking, a stale OAuth refresh cannot overwrite a credential replaced
+  by another process while it waited for that lock.
 - Unsupported provider token families, such as classic GitHub PATs for
   Copilot-backed accounts, are rejected before persistence.
 - Invalid protected command patterns fail validation.
 - Unsupported isolation platform returns clear error.
 - Private host requests are denied unless whitelisted.
+- Public-looking MCP OAuth hosts cannot pivot to loopback, private, CGNAT, or
+  other special-use addresses through DNS rebinding or environment proxies;
+  redirects cannot change origin or downgrade HTTPS.
+- A deliberately local MCP server may use loopback HTTP, but discovered OAuth
+  endpoints cannot pivot to a different local address.
 - Missing or malformed OAuth JWT email claims do not fail token parsing.
 - Security YAML cannot enable, add, or resurrect a removed event webhook
   connector; malformed enabled secrets fail before the shared route is active.
@@ -242,9 +266,9 @@ database opener, listener credential, or browser-visible bearer.
 | Requirement IDs | Evidence |
 | --- | --- |
 | `FR-SEC-001`, `FR-SEC-003` | [pkg/config/config_struct_test.go](../../pkg/config/config_struct_test.go), [pkg/config/security_test.go](../../pkg/config/security_test.go), [pkg/gateway/event_channel_test.go](../../pkg/gateway/event_channel_test.go), [docs/security/sensitive_data_filtering.md](../security/sensitive_data_filtering.md) |
-| `FR-SEC-002`, `FR-SEC-007` | [pkg/credential/store_test.go](../../pkg/credential/store_test.go), [pkg/fileutil/file_test.go](../../pkg/fileutil/file_test.go), [pkg/auth/token_test.go](../../pkg/auth/token_test.go), [pkg/auth/pkce_test.go](../../pkg/auth/pkce_test.go) |
+| `FR-SEC-002`, `FR-SEC-007` | [pkg/credential/store_test.go](../../pkg/credential/store_test.go), [pkg/fileutil/file_test.go](../../pkg/fileutil/file_test.go), [pkg/auth/store_test.go](../../pkg/auth/store_test.go), [pkg/auth/token_test.go](../../pkg/auth/token_test.go), [pkg/auth/pkce_test.go](../../pkg/auth/pkce_test.go), [pkg/mcp/auth_test.go](../../pkg/mcp/auth_test.go) |
 | `FR-SEC-004` | [web/backend/api/auth_test.go](../../web/backend/api/auth_test.go), [web/backend/api/auth_csrf_test.go](../../web/backend/api/auth_csrf_test.go) |
-| `FR-SEC-005`, `FR-SEC-006` | [pkg/utils/http_guard.go](../../pkg/utils/http_guard.go), [pkg/isolation/runtime_test.go](../../pkg/isolation/runtime_test.go), [pkg/netbind/netbind_test.go](../../pkg/netbind/netbind_test.go) |
+| `FR-SEC-005`, `FR-SEC-006` | [pkg/utils/http_guard.go](../../pkg/utils/http_guard.go), [pkg/isolation/runtime_test.go](../../pkg/isolation/runtime_test.go), [pkg/netbind/netbind_test.go](../../pkg/netbind/netbind_test.go), [pkg/mcp/network_test.go](../../pkg/mcp/network_test.go), [pkg/mcp/oauth_test.go](../../pkg/mcp/oauth_test.go), [web/backend/api/mcp_oauth_test.go](../../web/backend/api/mcp_oauth_test.go) |
 | `FR-SEC-008` | [pkg/config/model_config_test.go](../../pkg/config/model_config_test.go), [pkg/config/account_router_test.go](../../pkg/config/account_router_test.go), [pkg/config/config_test.go](../../pkg/config/config_test.go), [pkg/providers/common/reasoning_effort_test.go](../../pkg/providers/common/reasoning_effort_test.go) |
 | `FR-SEC-009` | [pkg/auth/oauth_test.go](../../pkg/auth/oauth_test.go), [web/backend/api/oauth_test.go](../../web/backend/api/oauth_test.go) |
 | `FR-SEC-010` | [pkg/config/events_test.go](../../pkg/config/events_test.go), [pkg/config/events_secret_identity_test.go](../../pkg/config/events_secret_identity_test.go), [pkg/eventing/webhook/controller_test.go](../../pkg/eventing/webhook/controller_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/config_event_webhook_deferred_test.go](../../web/backend/api/config_event_webhook_deferred_test.go) |
@@ -260,6 +284,9 @@ database opener, listener credential, or browser-visible bearer.
 - [pkg/config/events.go](../../pkg/config/events.go)
 - [web/backend/api/config.go](../../web/backend/api/config.go)
 - [pkg/auth/oauth.go](../../pkg/auth/oauth.go)
+- [pkg/auth/store.go](../../pkg/auth/store.go)
+- [pkg/mcp/network.go](../../pkg/mcp/network.go)
+- [pkg/mcp/oauth.go](../../pkg/mcp/oauth.go)
 - [pkg/credential](../../pkg/credential)
 - [pkg/isolation](../../pkg/isolation)
 - [pkg/workflows/templates.go](../../pkg/workflows/templates.go)

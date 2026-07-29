@@ -384,8 +384,20 @@ func TestTurnProfileConfig_ValidationRejectsUnsupportedModes(t *testing.T) {
 	}
 }
 
-func TestDefaultConfig_MCPMaxInlineTextChars(t *testing.T) {
+func TestDefaultConfig_MCPDefaults(t *testing.T) {
 	cfg := DefaultConfig()
+	if !cfg.Tools.MCP.Enabled {
+		t.Fatal("DefaultConfig().Tools.MCP.Enabled = false, want true")
+	}
+	if cfg.Tools.MCP.Discovery.Enabled {
+		t.Fatal("DefaultConfig().Tools.MCP.Discovery.Enabled = true, want false")
+	}
+	if len(cfg.Tools.MCP.Servers) != 0 {
+		t.Fatalf(
+			"len(DefaultConfig().Tools.MCP.Servers) = %d, want 0",
+			len(cfg.Tools.MCP.Servers),
+		)
+	}
 	if cfg.Tools.MCP.GetMaxInlineTextChars() != DefaultMCPMaxInlineTextChars {
 		t.Fatalf(
 			"DefaultConfig().Tools.MCP.GetMaxInlineTextChars() = %d, want %d",

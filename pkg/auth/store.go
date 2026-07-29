@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -14,14 +15,19 @@ import (
 )
 
 type AuthCredential struct {
-	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"refresh_token,omitempty"`
-	AccountID    string    `json:"account_id,omitempty"`
-	ExpiresAt    time.Time `json:"expires_at,omitempty"`
-	Provider     string    `json:"provider"`
-	AuthMethod   string    `json:"auth_method"`
-	Email        string    `json:"email,omitempty"`
-	ProjectID    string    `json:"project_id,omitempty"`
+	AccessToken       string    `json:"access_token"`
+	RefreshToken      string    `json:"refresh_token,omitempty"`
+	TokenType         string    `json:"token_type,omitempty"`
+	OAuthTokenURL     string    `json:"oauth_token_url,omitempty"`
+	OAuthClientID     string    `json:"oauth_client_id,omitempty"`
+	OAuthClientSecret string    `json:"oauth_client_secret,omitempty"`
+	OAuthAuthStyle    string    `json:"oauth_auth_style,omitempty"`
+	AccountID         string    `json:"account_id,omitempty"`
+	ExpiresAt         time.Time `json:"expires_at,omitempty"`
+	Provider          string    `json:"provider"`
+	AuthMethod        string    `json:"auth_method"`
+	Email             string    `json:"email,omitempty"`
+	ProjectID         string    `json:"project_id,omitempty"`
 }
 
 type AuthStore struct {
@@ -142,6 +148,21 @@ func mergeCredentials(primary, secondary *AuthCredential) *AuthCredential {
 	if merged.RefreshToken == "" {
 		merged.RefreshToken = secondary.RefreshToken
 	}
+	if merged.TokenType == "" {
+		merged.TokenType = secondary.TokenType
+	}
+	if merged.OAuthTokenURL == "" {
+		merged.OAuthTokenURL = secondary.OAuthTokenURL
+	}
+	if merged.OAuthClientID == "" {
+		merged.OAuthClientID = secondary.OAuthClientID
+	}
+	if merged.OAuthClientSecret == "" {
+		merged.OAuthClientSecret = secondary.OAuthClientSecret
+	}
+	if merged.OAuthAuthStyle == "" {
+		merged.OAuthAuthStyle = secondary.OAuthAuthStyle
+	}
 	if merged.AccountID == "" {
 		merged.AccountID = secondary.AccountID
 	}
@@ -247,10 +268,26 @@ func LoadStore() (*AuthStore, error) {
 }
 
 func SaveStore(store *AuthStore) error {
-	authStoreWriteMu.Lock()
-	defer authStoreWriteMu.Unlock()
+	unlock, err := lockAuthStoreForWrite()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	return saveStore(store)
+}
+
+func lockAuthStoreForWrite() (func(), error) {
+	authStoreWriteMu.Lock()
+	unlockFile, err := lockAuthStore(authFilePath())
+	if err != nil {
+		authStoreWriteMu.Unlock()
+		return nil, err
+	}
+	return func() {
+		unlockFile()
+		authStoreWriteMu.Unlock()
+	}, nil
 }
 
 func saveStore(store *AuthStore) error {
@@ -277,8 +314,11 @@ func GetCredential(provider string) (*AuthCredential, error) {
 }
 
 func SetCredential(provider string, cred *AuthCredential) error {
-	authStoreWriteMu.Lock()
-	defer authStoreWriteMu.Unlock()
+	unlock, err := lockAuthStoreForWrite()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	store, err := LoadStore()
 	if err != nil {
@@ -298,9 +338,55 @@ func SetCredential(provider string, cred *AuthCredential) error {
 	return saveStore(store)
 }
 
+// UpdateCredential serializes a credential read-modify-write transaction
+// across goroutines and PicoClaw processes. The callback runs while the auth
+// store is locked so token refresh cannot race a launcher credential change.
+func UpdateCredential(
+	provider string,
+	update func(current *AuthCredential) (*AuthCredential, error),
+) (*AuthCredential, error) {
+	if update == nil {
+		return nil, fmt.Errorf("credential update callback is required")
+	}
+	unlock, err := lockAuthStoreForWrite()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	store, err := LoadStore()
+	if err != nil {
+		return nil, err
+	}
+	canonical := canonicalProvider(provider)
+	replacement, err := update(cloneCredential(store.Credentials[canonical]))
+	if err != nil {
+		return nil, err
+	}
+	if replacement == nil {
+		return nil, fmt.Errorf("credential update returned nil")
+	}
+	normalized := cloneCredential(replacement)
+	normalized.Provider = canonicalProvider(normalized.Provider)
+	if normalized.Provider == "" {
+		normalized.Provider = canonical
+	}
+	if reflect.DeepEqual(store.Credentials[canonical], normalized) {
+		return cloneCredential(normalized), nil
+	}
+	store.Credentials[canonical] = normalized
+	if err := saveStore(store); err != nil {
+		return nil, err
+	}
+	return cloneCredential(normalized), nil
+}
+
 func DeleteCredential(provider string) error {
-	authStoreWriteMu.Lock()
-	defer authStoreWriteMu.Unlock()
+	unlock, err := lockAuthStoreForWrite()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	store, err := LoadStore()
 	if err != nil {
@@ -311,8 +397,11 @@ func DeleteCredential(provider string) error {
 }
 
 func DeleteAllCredentials() error {
-	authStoreWriteMu.Lock()
-	defer authStoreWriteMu.Unlock()
+	unlock, err := lockAuthStoreForWrite()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	path := authFilePath()
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

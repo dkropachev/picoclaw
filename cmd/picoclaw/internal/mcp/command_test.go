@@ -337,6 +337,33 @@ func TestSaveValidatedConfigNormalizesStreamableHTTPAlias(t *testing.T) {
 	assert.Equal(t, "streamable-http", cfg.Tools.MCP.Servers["context7"].Type)
 }
 
+func TestSaveValidatedConfigPreservesExternalAuthReference(t *testing.T) {
+	configPath := setupMCPConfigEnv(t)
+
+	cfg := config.DefaultConfig()
+	cfg.Tools.MCP.Servers = map[string]config.MCPServerConfig{
+		"protected": {
+			Enabled: true,
+			Type:    "http",
+			URL:     "https://mcp.example.com/mcp",
+			Auth: &config.MCPServerAuthConfig{
+				Type:         "bearer",
+				CredentialID: "mcp:protected",
+				Revision:     2,
+			},
+		},
+	}
+
+	require.NoError(t, saveValidatedConfig(cfg))
+
+	saved := readMCPConfig(t, configPath)
+	server := saved.Tools.MCP.Servers["protected"]
+	require.NotNil(t, server.Auth)
+	assert.Equal(t, "bearer", server.Auth.Type)
+	assert.Equal(t, "mcp:protected", server.Auth.CredentialID)
+	assert.EqualValues(t, 2, server.Auth.Revision)
+}
+
 func TestMCPRemoveRemovesLastServerAndDisablesMCP(t *testing.T) {
 	configPath := setupMCPConfigEnv(t)
 	writeMCPConfig(t, configPath, &config.Config{

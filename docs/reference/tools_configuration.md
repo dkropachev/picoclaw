@@ -324,6 +324,10 @@ For schedule types, execution modes (`deliver`, agent turn, and command jobs), p
 
 The MCP tool enables integration with external Model Context Protocol servers.
 
+For the guided setup, open **Agent → MCP** in the authenticated dashboard. That
+page can add, edit, test, enable, and remove servers, store bearer tokens outside
+`config.json`, and complete OAuth login in the browser.
+
 If you prefer not to edit JSON manually, PicoClaw also provides an MCP configuration manager CLI:
 
 - `picoclaw mcp add` — add or update a server (supports `--deferred` / `--no-deferred`)
@@ -348,7 +352,7 @@ and injected into the context for a configured number of turns (`ttl`).
 
 | Config      | Type   | Default | Description                                  |
 |-------------|--------|---------|----------------------------------------------|
-| `enabled`   | bool   | false   | Enable MCP integration globally              |
+| `enabled`   | bool   | true    | Enable MCP integration globally              |
 | `discovery` | object | `{}`    | Configuration for Tool Discovery (see below) |
 | `servers`   | object | `{}`    | Map of server name to server config          |
 
@@ -357,7 +361,7 @@ and injected into the context for a configured number of turns (`ttl`).
 | Config               | Type | Default | Description                                                                                                                       |
 |----------------------|------|---------|-----------------------------------------------------------------------------------------------------------------------------------|
 | `enabled`            | bool | false   | Global default: if `true`, all MCP tools are hidden and loaded on-demand via search; if `false`, all tools are loaded into context. Individual servers can override this with the per-server `deferred` field. |
-| `ttl`                | int  | 5       | Number of conversational turns a discovered tool remains unlocked                                                                 |
+| `ttl`                | int  | 5       | Number of tool-execution TTL ticks a discovered tool remains unlocked                                                             |
 | `max_search_results` | int  | 5       | Maximum number of tools returned per search query                                                                                 |
 | `use_bm25`           | bool | true    | Enable the natural language/keyword search tool (`tool_search_tool_bm25`). **Warning**: consumes more resources than regex search |
 | `use_regex`          | bool | false   | Enable the regex pattern search tool (`tool_search_tool_regex`)                                                                   |
@@ -378,6 +382,7 @@ and injected into the context for a configured number of turns (`ttl`).
 | `env_file` | string  | no       | Path to environment file for stdio process                                                                                                                      |
 | `url`      | string  | sse/http | Endpoint URL for `sse`/`http` transport                                                                                                                         |
 | `headers`  | object  | no       | HTTP headers for `sse`/`http` transport                                                                                                                         |
+| `auth`     | object  | no       | Nonsecret reference to a dashboard-managed bearer or OAuth credential. Token material remains in the external credential store.                                 |
 
 ### Transport Behavior
 
@@ -433,6 +438,12 @@ and injected into the context for a configured number of turns (`ttl`).
   }
 }
 ```
+
+For new bearer or OAuth credentials, prefer **Agent → MCP** instead of placing
+an `Authorization` value in JSON. Existing custom headers remain supported for
+servers that require another authentication scheme. Credentials and custom
+headers require HTTPS except for loopback development servers. PicoClaw binds
+them to the configured origin and rejects cross-origin redirects.
 
 #### 3) Massive MCP setup with Tool Discovery enabled
 

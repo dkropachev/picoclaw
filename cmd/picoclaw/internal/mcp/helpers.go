@@ -72,6 +72,21 @@ const mcpConfigSchemaJSON = `{
                   "headers": {
                     "type": "object",
                     "additionalProperties": { "type": "string" }
+                  },
+                  "auth": {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "type": "string",
+                        "enum": ["", "none", "bearer", "oauth"]
+                      },
+                      "credential_id": { "type": "string" },
+                      "revision": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "additionalProperties": false
                   }
                 },
                 "required": ["enabled"],

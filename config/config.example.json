@@ -333,7 +333,7 @@
       "command_allowed_remotes": []
     },
     "mcp": {
-      "enabled": false,
+      "enabled": true,
       "discovery": {
         "enabled": false,
         "ttl": 5,

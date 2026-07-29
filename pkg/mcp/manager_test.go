@@ -537,6 +537,38 @@ func TestConnectServer_StreamableHTTPRequestResponseMode(t *testing.T) {
 	}
 }
 
+func TestConnectServerRejectsUnsafeRemoteURLs(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		rawURL  string
+		wantErr string
+	}{
+		{name: "unsupported scheme", rawURL: "ftp://example.com/mcp", wantErr: "HTTP or HTTPS"},
+		{name: "embedded credentials", rawURL: "https://user:secret@example.com/mcp", wantErr: "embedded credentials"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := connectServer(context.Background(), "unsafe", config.MCPServerConfig{
+				Enabled: true,
+				Type:    "http",
+				URL:     test.rawURL,
+			})
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("connectServer() error = %v, want substring %q", err, test.wantErr)
+			}
+		})
+	}
+
+	_, err := connectServer(context.Background(), "cleartext-headers", config.MCPServerConfig{
+		Enabled: true,
+		Type:    "http",
+		URL:     "http://mcp.example.test/api",
+		Headers: map[string]string{"X-API-Key": "secret"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "custom headers require HTTPS") {
+		t.Fatalf("connectServer() cleartext-header error = %v, want HTTPS requirement", err)
+	}
+}
+
 func TestCallTool_ReconnectsWhenHTTPServerLosesSession(t *testing.T) {
 	originalConnectServerFunc := connectServerFunc
 	t.Cleanup(func() {
