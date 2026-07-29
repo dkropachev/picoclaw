@@ -137,7 +137,7 @@ func workflowEventContextResponseLimit(
 	if parseErr != nil || strconv.FormatUint(parsed, 10) != raw {
 		return 0, 0, errors.New("workflow event payload length header is invalid")
 	}
-	maximumInt64 := uint64(^uint64(0) >> 1)
+	maximumInt64 := ^uint64(0) >> 1
 	// loadWorkflowEventEnvelope passes maximum+1 to io.LimitReader.
 	if parsed >
 		(maximumInt64-1)-workflowEventContextMetadataAllowanceBytes {

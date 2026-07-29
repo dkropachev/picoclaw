@@ -126,11 +126,14 @@ func TestWorkflowDevelopmentEventTestPersistsSafeSyncAndAsyncDiagnostics(t *test
 
 func TestEventBackedDraftBrowserProjectionMasksRunAndLifecycleDiagnostics(t *testing.T) {
 	run := &Run{
-		ID:           "wr_event",
-		WorkflowRef:  "draft:workflows/triage.yml",
-		Status:       RunStatusFailed,
-		Session:      "workflow:workflows/triage.yml:event:ev_0123456789abcdef0123456789abcdef",
-		Event:        map[string]any{"id": "ev_0123456789abcdef0123456789abcdef", "payload": map[string]any{"visible": "redacted event context"}},
+		ID:          "wr_event",
+		WorkflowRef: "draft:workflows/triage.yml",
+		Status:      RunStatusFailed,
+		Session:     "workflow:workflows/triage.yml:event:ev_0123456789abcdef0123456789abcdef",
+		Event: map[string]any{
+			"id":      "ev_0123456789abcdef0123456789abcdef",
+			"payload": map[string]any{"visible": "redacted event context"},
+		},
 		Inputs:       map[string]any{"event_id": "ev_0123456789abcdef0123456789abcdef"},
 		Outputs:      map[string]any{"visible": "workflow output"},
 		Error:        eventDraftPrivateDiagnostic,

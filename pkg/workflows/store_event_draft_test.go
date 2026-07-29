@@ -168,8 +168,7 @@ func TestExecutorEventSnapshotSurvivesMutatingFunction(t *testing.T) {
 				t.Fatalf("array expression result aliased execution event: state = %#v", state)
 			}
 
-			exec.Event["payload"].(map[string]any)["nested"].(map[string]any)["state"] =
-				"mutated through execution event"
+			exec.Event["payload"].(map[string]any)["nested"].(map[string]any)["state"] = "mutated through execution event"
 			exec.Inputs["event"].(map[string]any)["payload"].(map[string]any)["items"].([]any)[1].(map[string]any)["state"] = "mutated through execution inputs"
 			return map[string]any{"ok": true}, nil
 		},

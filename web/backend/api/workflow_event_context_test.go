@@ -108,7 +108,7 @@ func TestWorkflowEventContextResponseLimitRequiresCanonicalExactHeader(t *testin
 		t.Fatalf("payload bytes = %d", payloadBytes)
 	}
 
-	maximumInt64 := uint64(^uint64(0) >> 1)
+	maximumInt64 := ^uint64(0) >> 1
 	boundary := (maximumInt64 - 1) - workflowEventContextMetadataAllowanceBytes
 	header.Set(eventoperator.WorkflowEventPayloadBytesHeader, strconv.FormatUint(boundary, 10))
 	limit, payloadBytes, err = workflowEventContextResponseLimit(header)
@@ -370,8 +370,8 @@ func TestHandleListWorkflowsProjectsEventTrigger(t *testing.T) {
 			EventTrigger *workflows.EventTrigger `json:"event_trigger"`
 		} `json:"workflows"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
-		t.Fatalf("response JSON error = %v", err)
+	if unmarshalErr := json.Unmarshal(rec.Body.Bytes(), &response); unmarshalErr != nil {
+		t.Fatalf("response JSON error = %v", unmarshalErr)
 	}
 	if len(response.Workflows) != 1 ||
 		response.Workflows[0].Ref != "workflows/event-preview.yml" ||
@@ -577,8 +577,8 @@ func TestHandleTestWorkflowDevelopmentUsesProductionEventParityContext(t *testin
 		Result  *workflows.RunResult                  `json:"result"`
 		Error   string                                `json:"error"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
-		t.Fatalf("response JSON error = %v", err)
+	if unmarshalErr := json.Unmarshal(rec.Body.Bytes(), &response); unmarshalErr != nil {
+		t.Fatalf("response JSON error = %v", unmarshalErr)
 	}
 	if response.Error != "" ||
 		response.Session == nil ||
@@ -889,8 +889,8 @@ func TestEventBackedDraftFailureIsSafeAcrossPostRunListEventsAndSSE(t *testing.T
 			var postResponse struct {
 				Result *workflows.RunResult `json:"result"`
 			}
-			if err := json.Unmarshal(rec.Body.Bytes(), &postResponse); err != nil {
-				t.Fatalf("POST response JSON error = %v", err)
+			if unmarshalErr := json.Unmarshal(rec.Body.Bytes(), &postResponse); unmarshalErr != nil {
+				t.Fatalf("POST response JSON error = %v", unmarshalErr)
 			}
 			runID := postResponse.Result.RunID
 			store := workflows.NewFileRunStore(workspace)
