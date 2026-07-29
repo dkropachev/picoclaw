@@ -60,12 +60,14 @@ type EffectiveEventChannelAdapterConfig struct {
 	AllowUnverifiedEmail bool
 }
 
-// GenericWebhookConfig controls one named, Standard Webhooks-compatible event
-// endpoint. Secret is stored in .security.yml; config.json contains only the
-// [NOT_HERE] marker when a secret is configured.
+// GenericWebhookConfig controls one named event endpoint. An omitted Format
+// preserves the original Standard Webhooks behavior. Secret is stored in
+// .security.yml; config.json contains only the [NOT_HERE] marker when a secret
+// is configured.
 type GenericWebhookConfig struct {
 	Enabled bool         `json:"enabled"`
-	Secret  SecureString `json:"secret,omitzero" yaml:"secret,omitempty"`
+	Format  string       `json:"format,omitempty"`
+	Secret  SecureString `json:"secret,omitzero"  yaml:"secret,omitempty"`
 }
 
 // MarshalJSON keeps a stable marker in config.json without ever exposing the
@@ -73,6 +75,7 @@ type GenericWebhookConfig struct {
 func (c GenericWebhookConfig) MarshalJSON() ([]byte, error) {
 	type genericWebhookJSON struct {
 		Enabled bool          `json:"enabled"`
+		Format  string        `json:"format,omitempty"`
 		Secret  *SecureString `json:"secret,omitempty"`
 	}
 
@@ -83,6 +86,7 @@ func (c GenericWebhookConfig) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(genericWebhookJSON{
 		Enabled: c.Enabled,
+		Format:  c.Format,
 		Secret:  secret,
 	})
 }
@@ -94,6 +98,7 @@ func (c GenericWebhookConfig) MarshalJSON() ([]byte, error) {
 func (c *GenericWebhookConfig) UnmarshalJSON(value []byte) error {
 	var decoded struct {
 		Enabled *bool           `json:"enabled"`
+		Format  *string         `json:"format"`
 		Secret  json.RawMessage `json:"secret"`
 	}
 	if err := json.Unmarshal(value, &decoded); err != nil {
@@ -101,6 +106,9 @@ func (c *GenericWebhookConfig) UnmarshalJSON(value []byte) error {
 	}
 	if decoded.Enabled != nil {
 		c.Enabled = *decoded.Enabled
+	}
+	if decoded.Format != nil {
+		c.Format = *decoded.Format
 	}
 	if len(decoded.Secret) == 0 || string(decoded.Secret) == notHere {
 		return nil
@@ -145,7 +153,14 @@ const (
 	// message through the existing chat path.
 	EventChannelModeEventOnly = "event_only"
 
-	eventChannelMaxNameBytes = 256
+	// EventWebhookFormatStandard verifies Standard Webhooks signatures.
+	EventWebhookFormatStandard = "standard"
+	// EventWebhookFormatGitHub verifies GitHub webhook signatures.
+	EventWebhookFormatGitHub = "github"
+
+	eventChannelMaxNameBytes    = 256
+	githubWebhookMinSecretBytes = 32
+	githubWebhookMaxSecretBytes = 256
 )
 
 var genericWebhookConnectorNamePattern = regexp.MustCompile(
@@ -162,23 +177,8 @@ var eventChannelSupportedTypes = map[string]struct{}{
 // Credential-bearing map keys are always rejected because configuration
 // persistence is independent of runtime activation.
 func (c EventIngressConfig) Validate() error {
-	identitySecrets := make([]string, 0, len(c.Webhooks))
-	for _, webhook := range c.Webhooks {
-		secret := webhook.Secret.String()
-		if secret == "" {
-			continue
-		}
-		if validateGenericWebhookSecret(secret) == nil ||
-			(c.Enabled && webhook.Enabled) {
-			identitySecrets = append(identitySecrets, secret)
-		}
-	}
-	for name := range c.Webhooks {
-		for _, secret := range identitySecrets {
-			if strings.Contains(name, secret) {
-				return errors.New(genericWebhookConnectorSecretConflictMessage)
-			}
-		}
+	if err := c.validateWebhookPublicIdentities(); err != nil {
+		return err
 	}
 	if !c.Enabled {
 		return nil
@@ -216,11 +216,63 @@ func (c EventIngressConfig) Validate() error {
 		if !webhook.Enabled {
 			continue
 		}
-		if err := validateGenericWebhookSecret(webhook.Secret.String()); err != nil {
+		switch webhook.Format {
+		case "", EventWebhookFormatStandard, EventWebhookFormatGitHub:
+		default:
+			return fmt.Errorf(
+				"webhook connector %q has unsupported format %q",
+				name,
+				webhook.Format,
+			)
+		}
+		if err := validateEventWebhookSecret(webhook); err != nil {
 			return fmt.Errorf("webhook connector %q: %w", name, err)
 		}
 	}
 	return nil
+}
+
+func (c EventIngressConfig) validateWebhookPublicIdentities() error {
+	secrets := make([]string, 0, len(c.Webhooks))
+	for _, webhook := range c.Webhooks {
+		secret := webhook.Secret.String()
+		if secret != "" &&
+			(validateGenericWebhookSecret(secret) == nil ||
+				validateGitHubWebhookSecret(secret) == nil ||
+				c.Enabled && webhook.Enabled) {
+			secrets = append(secrets, secret)
+		}
+	}
+	for name, webhook := range c.Webhooks {
+		for _, publicValue := range [...]string{name, webhook.Format} {
+			for _, secret := range secrets {
+				if strings.Contains(publicValue, secret) {
+					return errors.New(genericWebhookConnectorSecretConflictMessage)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// EffectiveEventWebhookFormat returns the format used by a webhook connector.
+// Empty values retain the original Standard Webhooks behavior.
+func EffectiveEventWebhookFormat(webhook GenericWebhookConfig) string {
+	if webhook.Format == "" {
+		return EventWebhookFormatStandard
+	}
+	return webhook.Format
+}
+
+func validateEventWebhookSecret(webhook GenericWebhookConfig) error {
+	switch EffectiveEventWebhookFormat(webhook) {
+	case EventWebhookFormatStandard:
+		return validateGenericWebhookSecret(webhook.Secret.String())
+	case EventWebhookFormatGitHub:
+		return validateGitHubWebhookSecret(webhook.Secret.String())
+	default:
+		return errors.New("unsupported webhook format")
+	}
 }
 
 func validateGenericWebhookSecret(secret string) error {
@@ -238,6 +290,24 @@ func validateGenericWebhookSecret(secret string) error {
 		return fmt.Errorf(
 			"secret must decode to at least %d bytes",
 			genericWebhookMinSecretBytes,
+		)
+	}
+	return nil
+}
+
+func validateGitHubWebhookSecret(secret string) error {
+	if !utf8.ValidString(secret) {
+		return fmt.Errorf("GitHub secret must be valid UTF-8")
+	}
+	if secret != strings.TrimSpace(secret) {
+		return fmt.Errorf("GitHub secret must not have leading or trailing whitespace")
+	}
+	if len(secret) < githubWebhookMinSecretBytes ||
+		len(secret) > githubWebhookMaxSecretBytes {
+		return fmt.Errorf(
+			"GitHub secret must be between %d and %d bytes",
+			githubWebhookMinSecretBytes,
+			githubWebhookMaxSecretBytes,
 		)
 	}
 	return nil
@@ -682,6 +752,7 @@ func EffectiveEventIngressConfig(cfg *Config, workspace string) EventIngressConf
 	if len(out.Webhooks) > 0 {
 		out.Webhooks = make(map[string]GenericWebhookConfig, len(out.Webhooks))
 		for name, webhook := range cfg.Events.Ingress.Webhooks {
+			webhook.Format = EffectiveEventWebhookFormat(webhook)
 			out.Webhooks[name] = webhook
 		}
 	}

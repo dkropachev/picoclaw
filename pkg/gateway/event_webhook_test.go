@@ -5,7 +5,10 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -37,6 +40,8 @@ import (
 const (
 	gatewayWebhookConnector   = "build-system"
 	gatewayWebhookWorkflowRef = "workflows/webhook-native.yml"
+	gatewayGitHubConnector    = "github-app"
+	gatewayGitHubWorkflowRef  = "workflows/github-native.yml"
 )
 
 func gatewayWebhookSecret(fill byte) string {
@@ -47,6 +52,20 @@ func configureGatewayWebhook(cfg *config.Config, secret string) {
 	cfg.Events.Ingress.Webhooks = map[string]config.GenericWebhookConfig{
 		gatewayWebhookConnector: {
 			Enabled: true,
+			Secret:  *config.NewSecureString(secret),
+		},
+	}
+}
+
+func gatewayGitHubWebhookSecret(fill byte) string {
+	return string(bytes.Repeat([]byte{fill}, 40))
+}
+
+func configureGatewayGitHubWebhook(cfg *config.Config, secret string) {
+	cfg.Events.Ingress.Webhooks = map[string]config.GenericWebhookConfig{
+		gatewayGitHubConnector: {
+			Enabled: true,
+			Format:  config.EventWebhookFormatGitHub,
 			Secret:  *config.NewSecureString(secret),
 		},
 	}
@@ -80,6 +99,33 @@ func gatewayWebhookSignedRequest(
 		strconv.FormatInt(timestamp.Unix(), 10),
 	)
 	request.Header.Set(standardwebhooks.HeaderWebhookSignature, signature)
+	return request
+}
+
+func gatewayGitHubSignedRequest(
+	t *testing.T,
+	target string,
+	secret string,
+	deliveryID string,
+	eventType string,
+	body string,
+) *http.Request {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, target, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Github-Delivery", deliveryID)
+	request.Header.Set("X-Github-Event", eventType)
+	mac := hmac.New(sha256.New, []byte(secret))
+	if _, err := mac.Write([]byte(body)); err != nil {
+		t.Fatalf("HMAC Write() error = %v", err)
+	}
+	request.Header.Set(
+		"X-Hub-Signature-256",
+		"sha256="+hex.EncodeToString(mac.Sum(nil)),
+	)
 	return request
 }
 
@@ -139,6 +185,43 @@ jobs:
         with:
           action: set
           namespace: webhook-integration
+          key: handled
+          value: complete
+`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("WriteFile(workflow) error = %v", err)
+	}
+}
+
+func writeGatewayGitHubNativeWorkflow(
+	t *testing.T,
+	workspace string,
+	definitionsDir string,
+) {
+	t.Helper()
+	path := filepath.Join(
+		workspace,
+		filepath.FromSlash(definitionsDir),
+		"github-native.yml",
+	)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(workflow definitions) error = %v", err)
+	}
+	contents := `name: GitHub native integration
+on:
+  event:
+    sources: [github]
+    connectors: [github-app]
+    types: [issues.opened]
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - id: remember
+        uses: function/workflow.state
+        with:
+          action: set
+          namespace: github-integration
           key: handled
           value: complete
 `
@@ -218,6 +301,8 @@ func assertGatewayWebhookPipelineStable(
 	eventID string,
 	dispatchID string,
 	runID string,
+	source string,
+	connector string,
 ) {
 	t.Helper()
 	deadline := time.NewTimer(3 * workflows.DefaultEventWorkerPollInterval)
@@ -233,8 +318,8 @@ func assertGatewayWebhookPipelineStable(
 		}
 
 		eventPage, err := store.List(context.Background(), eventing.EventFilter{
-			Source:    "webhook",
-			Connector: gatewayWebhookConnector,
+			Source:    source,
+			Connector: connector,
 			Limit:     10,
 		})
 		if err != nil {
@@ -409,7 +494,325 @@ func TestEventWebhookDeliveryRunsOneNativeEventWorkflow(t *testing.T) {
 		accepted.EventID,
 		dispatch.ID,
 		run.ID,
+		"webhook",
+		gatewayWebhookConnector,
 	)
+}
+
+func TestEventGitHubWebhookDeliveryRunsOneNativeEventWorkflow(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := eventAutomationTestConfig(
+		workspace,
+		filepath.Join(workspace, "eventing", "events.db"),
+		true,
+		true,
+	)
+	secret := gatewayGitHubWebhookSecret('g')
+	configureGatewayGitHubWebhook(cfg, secret)
+	definitionsDir := cfg.Workflows.EffectiveDefinitionsDir()
+	writeGatewayGitHubNativeWorkflow(t, workspace, definitionsDir)
+
+	runStore := workflows.NewFileRunStore(workspace)
+	executor := &workflows.Executor{
+		WorkspaceDir:   workspace,
+		DefinitionsDir: definitionsDir,
+		Store:          runStore,
+		DefaultTimeout: 2 * time.Second,
+	}
+	service, err := newEventAutomationService(
+		context.Background(),
+		cfg,
+		executor,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("newEventAutomationService() error = %v", err)
+	}
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := service.Close(closeCtx); closeErr != nil {
+			t.Errorf("event automation Close() error = %v", closeErr)
+		}
+	})
+
+	controller := eventwebhook.NewController()
+	generation, err := controller.Activate(service.webhookBackend)
+	if err != nil {
+		t.Fatalf("Activate() error = %v", err)
+	}
+	t.Cleanup(func() {
+		drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if drainErr := controller.Deactivate(drainCtx, generation); drainErr != nil {
+			t.Errorf("Deactivate() error = %v", drainErr)
+		}
+	})
+	server := httptest.NewServer(controller)
+	t.Cleanup(server.Close)
+	client := server.Client()
+	client.Timeout = 2 * time.Second
+	target := server.URL + eventwebhook.RoutePrefix + gatewayGitHubConnector
+	deliveryID := "github-native-workflow-delivery"
+	body := `{
+		"action":"opened",
+		"issue":{"number":42,"title":"Production is unavailable"},
+		"repository":{
+			"id":901,
+			"node_id":"R_repo",
+			"name":"automation",
+			"full_name":"octo/automation",
+			"html_url":"https://github.example/octo/automation",
+			"owner":{"login":"octo"},
+			"default_branch":"main",
+			"visibility":"private",
+			"private":true,
+			"fork":false
+		},
+		"sender":{
+			"id":7,
+			"node_id":"U_sender",
+			"login":"octocat",
+			"type":"User",
+			"html_url":"https://github.example/octocat"
+		}
+	}`
+
+	status, responseBody := performGatewayWebhookRequest(
+		t,
+		client,
+		gatewayGitHubSignedRequest(
+			t,
+			target,
+			secret,
+			deliveryID,
+			"issues",
+			body,
+		),
+	)
+	if status != http.StatusAccepted {
+		t.Fatalf("new GitHub delivery status = %d, want %d: %s", status, http.StatusAccepted, responseBody)
+	}
+	var accepted struct {
+		EventID  string `json:"event_id"`
+		Inserted bool   `json:"inserted"`
+	}
+	if decodeErr := json.Unmarshal(responseBody, &accepted); decodeErr != nil {
+		t.Fatalf("Unmarshal(accepted response) error = %v", decodeErr)
+	}
+	if accepted.EventID == "" || !accepted.Inserted {
+		t.Fatalf("accepted response = %#v, want inserted durable event", accepted)
+	}
+
+	stored, err := service.store.Get(context.Background(), accepted.EventID)
+	if err != nil {
+		t.Fatalf("Get(accepted event) error = %v", err)
+	}
+	if stored.Envelope.Source != "github" ||
+		stored.Envelope.Connector != gatewayGitHubConnector ||
+		stored.Envelope.Type != "issues.opened" ||
+		stored.Envelope.DedupeKey != deliveryID {
+		t.Fatalf("stored GitHub identity = %#v", stored.Envelope)
+	}
+	if stored.Envelope.OccurredAt != nil {
+		t.Fatalf("GitHub occurred_at = %v, want unset", stored.Envelope.OccurredAt)
+	}
+	for key, want := range map[string]string{
+		"body_authenticated":    "true",
+		"headers_authenticated": "false",
+		"signature_algorithm":   "hmac-sha256",
+	} {
+		if got := stored.Envelope.Attributes[key]; got != want {
+			t.Fatalf("GitHub attribute %q = %q, want %q", key, got, want)
+		}
+	}
+	var payload map[string]any
+	if decodeErr := json.Unmarshal(stored.Envelope.Payload, &payload); decodeErr != nil {
+		t.Fatalf("Unmarshal(stored payload) error = %v", decodeErr)
+	}
+	if payload["action"] != "opened" {
+		t.Fatalf("stored GitHub payload action = %#v, want opened", payload["action"])
+	}
+
+	dispatch, run := waitForGatewayWebhookWorkflow(
+		t,
+		service.store,
+		runStore,
+		accepted.EventID,
+	)
+	if dispatch.WorkflowRef != gatewayGitHubWorkflowRef || dispatch.RunID != run.ID {
+		t.Fatalf("dispatch/run identity mismatch: dispatch=%#v run=%#v", dispatch, run)
+	}
+	step, exists := run.Steps["main/remember"]
+	if !exists ||
+		step.Status != workflows.RunStatusSucceeded ||
+		step.Outputs["updated"] != true {
+		t.Fatalf("native workflow.state step = %#v, want successful update", step)
+	}
+
+	duplicateBody := `{"action":"closed","issue":{"number":42}}`
+	status, responseBody = performGatewayWebhookRequest(
+		t,
+		client,
+		gatewayGitHubSignedRequest(
+			t,
+			target,
+			secret,
+			deliveryID,
+			"issues",
+			duplicateBody,
+		),
+	)
+	if status != http.StatusOK {
+		t.Fatalf("duplicate GitHub delivery status = %d, want %d: %s", status, http.StatusOK, responseBody)
+	}
+	var duplicate struct {
+		EventID  string `json:"event_id"`
+		Inserted bool   `json:"inserted"`
+	}
+	if decodeErr := json.Unmarshal(responseBody, &duplicate); decodeErr != nil {
+		t.Fatalf("Unmarshal(duplicate response) error = %v", decodeErr)
+	}
+	if duplicate.EventID != accepted.EventID || duplicate.Inserted {
+		t.Fatalf("duplicate response = %#v, original = %#v", duplicate, accepted)
+	}
+	assertGatewayWebhookPipelineStable(
+		t,
+		service.store,
+		runStore,
+		accepted.EventID,
+		dispatch.ID,
+		run.ID,
+		"github",
+		gatewayGitHubConnector,
+	)
+}
+
+func TestGitHubAndStandardWebhooksShareGatewayLifecycle(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := eventAutomationTestConfig(
+		workspace,
+		filepath.Join(workspace, "eventing", "events.db"),
+		true,
+		false,
+	)
+	standardSecret := gatewayWebhookSecret(0x56)
+	gitHubSecret := gatewayGitHubWebhookSecret('h')
+	cfg.Events.Ingress.Webhooks = map[string]config.GenericWebhookConfig{
+		gatewayWebhookConnector: {
+			Enabled: true,
+			Secret:  *config.NewSecureString(standardSecret),
+		},
+		gatewayGitHubConnector: {
+			Enabled: true,
+			Format:  config.EventWebhookFormatGitHub,
+			Secret:  *config.NewSecureString(gitHubSecret),
+		},
+	}
+	service, err := newEventAutomationService(
+		context.Background(),
+		cfg,
+		nil,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("newEventAutomationService() error = %v", err)
+	}
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := service.Close(closeCtx); closeErr != nil {
+			t.Errorf("event automation Close() error = %v", closeErr)
+		}
+	})
+
+	controller := eventwebhook.NewController()
+	staged, err := controller.Stage(service.webhookBackend)
+	if err != nil {
+		t.Fatalf("Stage() error = %v", err)
+	}
+	generation := staged.Generation()
+	server := httptest.NewServer(controller)
+	t.Cleanup(server.Close)
+	client := server.Client()
+	client.Timeout = 2 * time.Second
+	standardTarget := server.URL + eventwebhook.RoutePrefix + gatewayWebhookConnector
+	gitHubTarget := server.URL + eventwebhook.RoutePrefix + gatewayGitHubConnector
+
+	status, _ := performGatewayWebhookRequest(
+		t,
+		client,
+		gatewayGitHubSignedRequest(
+			t,
+			gitHubTarget,
+			gitHubSecret,
+			"github-before-commit",
+			"ping",
+			`{"zen":"staged"}`,
+		),
+	)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("staged GitHub status = %d, want %d", status, http.StatusServiceUnavailable)
+	}
+
+	staged.Commit()
+	status, body := performGatewayWebhookRequest(
+		t,
+		client,
+		gatewayWebhookSignedRequest(
+			t,
+			standardTarget,
+			standardSecret,
+			"standard-after-commit",
+			`{"type":"deploy.completed","payload":{"format":"standard"}}`,
+		),
+	)
+	if status != http.StatusAccepted {
+		t.Fatalf("standard status = %d, want %d: %s", status, http.StatusAccepted, body)
+	}
+	status, body = performGatewayWebhookRequest(
+		t,
+		client,
+		gatewayGitHubSignedRequest(
+			t,
+			gitHubTarget,
+			gitHubSecret,
+			"github-after-commit",
+			"ping",
+			`{"zen":"committed"}`,
+		),
+	)
+	if status != http.StatusAccepted {
+		t.Fatalf("GitHub status = %d, want %d: %s", status, http.StatusAccepted, body)
+	}
+
+	if err := controller.Deactivate(context.Background(), generation); err != nil {
+		t.Fatalf("Deactivate() error = %v", err)
+	}
+	for name, request := range map[string]*http.Request{
+		"standard": gatewayWebhookSignedRequest(
+			t,
+			standardTarget,
+			standardSecret,
+			"standard-after-drain",
+			`{"type":"deploy.completed","payload":{}}`,
+		),
+		"github": gatewayGitHubSignedRequest(
+			t,
+			gitHubTarget,
+			gitHubSecret,
+			"github-after-drain",
+			"ping",
+			`{"zen":"drained"}`,
+		),
+	} {
+		status, _ = performGatewayWebhookRequest(t, client, request)
+		if status != http.StatusServiceUnavailable {
+			t.Fatalf("%s status after drain = %d, want %d", name, status, http.StatusServiceUnavailable)
+		}
+	}
 }
 
 func TestEventWebhookUsesSharedListenerAndDurableCommitBoundary(t *testing.T) {

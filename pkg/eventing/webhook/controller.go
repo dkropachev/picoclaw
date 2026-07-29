@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	standardwebhooks "github.com/standard-webhooks/standard-webhooks/libraries/go"
 
@@ -25,8 +26,17 @@ const (
 	// leaving MaxPayloadBytes as the authoritative payload limit.
 	RequestMetadataAllowanceBytes = 256 << 10
 
-	minimumSecretBytes                     = 32
+	minimumStandardSecretBytes             = 32
+	minimumGitHubSecretBytes               = 32
+	maximumGitHubSecretBytes               = 256
 	connectorIdentitySecretConflictMessage = "webhook connector identity conflicts with a signing secret"
+)
+
+type connectorFormat uint8
+
+const (
+	connectorFormatStandard connectorFormat = iota
+	connectorFormatGitHub
 )
 
 var (
@@ -53,19 +63,28 @@ type Inserter interface {
 
 // BackendConfig contains the generation-specific dependencies prepared before
 // a gateway reload commits. ConnectorSecrets must contain only enabled
-// connectors.
+// connectors. ConnectorFormats selects the immutable authentication and
+// normalization format for a connector; a missing or empty value selects
+// Standard Webhooks for backward compatibility.
 type BackendConfig struct {
 	Store            Inserter
 	ConnectorSecrets map[string]string
+	ConnectorFormats map[string]string
 	MaxPayloadBytes  int
 }
 
 // Backend is an immutable, prevalidated admission backend. Preparing a backend
 // does not make it externally reachable.
 type Backend struct {
-	store               Inserter
-	connectors          map[string]*standardwebhooks.Webhook
-	secretValues        []string
+	store        Inserter
+	connectors   map[string]connectorRuntime
+	secretValues []string
+}
+
+type connectorRuntime struct {
+	format              connectorFormat
+	standardVerifier    *standardwebhooks.Webhook
+	githubSecret        []byte
 	maxRequestBodyBytes int64
 }
 
@@ -102,7 +121,14 @@ func NewBackend(config BackendConfig) (*Backend, error) {
 		seenSecrets[secret] = struct{}{}
 		secretValues = append(secretValues, secret)
 	}
+	identityNames := make([]string, 0, len(config.ConnectorSecrets)+len(config.ConnectorFormats))
 	for name := range config.ConnectorSecrets {
+		identityNames = append(identityNames, name)
+	}
+	for name := range config.ConnectorFormats {
+		identityNames = append(identityNames, name)
+	}
+	for _, name := range identityNames {
 		for _, secret := range secretValues {
 			if strings.Contains(name, secret) {
 				return nil, errors.New(connectorIdentitySecretConflictMessage)
@@ -110,7 +136,16 @@ func NewBackend(config BackendConfig) (*Backend, error) {
 		}
 	}
 
-	connectors := make(map[string]*standardwebhooks.Webhook, len(config.ConnectorSecrets))
+	for name := range config.ConnectorFormats {
+		if _, exists := config.ConnectorSecrets[name]; !exists {
+			return nil, fmt.Errorf(
+				"webhook connector format %q has no enabled connector",
+				name,
+			)
+		}
+	}
+
+	connectors := make(map[string]connectorRuntime, len(config.ConnectorSecrets))
 	caseFoldedNames := make(map[string]string, len(config.ConnectorSecrets))
 	for name, secret := range config.ConnectorSecrets {
 		if !validConnectorName(name) {
@@ -126,19 +161,51 @@ func NewBackend(config BackendConfig) (*Backend, error) {
 		}
 		caseFoldedNames[folded] = name
 
-		verifier, err := verifierForSecret(secret)
+		format := config.ConnectorFormats[name]
+		runtime, err := runtimeForConnector(format, secret)
 		if err != nil {
+			if format != "" && format != "standard" && format != "github" {
+				return nil, fmt.Errorf("webhook connector %q has an invalid format", name)
+			}
 			return nil, fmt.Errorf("webhook connector %q has an invalid signing secret", name)
 		}
-		connectors[name] = verifier
+		runtime.maxRequestBodyBytes = int64(config.MaxPayloadBytes)
+		if runtime.format == connectorFormatStandard {
+			runtime.maxRequestBodyBytes += RequestMetadataAllowanceBytes
+		}
+		connectors[name] = runtime
 	}
 
 	return &Backend{
-		store:               config.Store,
-		connectors:          connectors,
-		secretValues:        secretValues,
-		maxRequestBodyBytes: int64(config.MaxPayloadBytes + RequestMetadataAllowanceBytes),
+		store:        config.Store,
+		connectors:   connectors,
+		secretValues: secretValues,
 	}, nil
+}
+
+func runtimeForConnector(format, secret string) (connectorRuntime, error) {
+	switch format {
+	case "", "standard":
+		verifier, err := verifierForSecret(secret)
+		if err != nil {
+			return connectorRuntime{}, err
+		}
+		return connectorRuntime{
+			format:           connectorFormatStandard,
+			standardVerifier: verifier,
+		}, nil
+	case "github":
+		secretBytes, err := githubSecretBytes(secret)
+		if err != nil {
+			return connectorRuntime{}, err
+		}
+		return connectorRuntime{
+			format:       connectorFormatGitHub,
+			githubSecret: secretBytes,
+		}, nil
+	default:
+		return connectorRuntime{}, errors.New("unsupported webhook connector format")
+	}
 }
 
 func verifierForSecret(secret string) (*standardwebhooks.Webhook, error) {
@@ -148,11 +215,21 @@ func verifierForSecret(secret string) (*standardwebhooks.Webhook, error) {
 	}
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(secret, prefix))
 	if err != nil ||
-		len(raw) < minimumSecretBytes ||
+		len(raw) < minimumStandardSecretBytes ||
 		base64.StdEncoding.EncodeToString(raw) != strings.TrimPrefix(secret, prefix) {
 		return nil, errors.New("invalid Standard Webhooks secret")
 	}
 	return standardwebhooks.NewWebhook(secret)
+}
+
+func githubSecretBytes(secret string) ([]byte, error) {
+	if !utf8.ValidString(secret) ||
+		strings.TrimSpace(secret) != secret ||
+		len(secret) < minimumGitHubSecretBytes ||
+		len(secret) > maximumGitHubSecretBytes {
+		return nil, errors.New("invalid GitHub webhook secret")
+	}
+	return append([]byte(nil), secret...), nil
 }
 
 func validConnectorName(name string) bool {

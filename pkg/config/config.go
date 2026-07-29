@@ -2506,6 +2506,9 @@ func toNameIndex(list []*ModelConfig) []string {
 }
 
 func SaveConfig(path string, cfg *Config) error {
+	if err := cfg.Events.Ingress.validateWebhookPublicIdentities(); err != nil {
+		return err
+	}
 	if cfg.Version < CurrentVersion {
 		cfg.Version = CurrentVersion
 	}

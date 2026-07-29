@@ -1048,6 +1048,58 @@ func TestConfigAPIEventWebhookSecretRotationAndAddition(t *testing.T) {
 	}
 }
 
+func TestConfigAPIEventWebhookGitHubFormatAndSecretUpdate(t *testing.T) {
+	for _, method := range []string{http.MethodPut, http.MethodPatch} {
+		t.Run(method, func(t *testing.T) {
+			configPath, cleanup, originalSecret := setupEventWebhookAPIConfig(t)
+			defer cleanup()
+
+			gitHubSecret := strings.Repeat("github-webhook-secret-", 2)
+			body := eventWebhookAPIUpdateBody(t, configPath, method, map[string]map[string]any{
+				"deploy": {
+					"format": config.EventWebhookFormatGitHub,
+					"secret": gitHubSecret,
+				},
+			})
+			response := performConfigAPIRequest(t, configPath, method, body)
+			if response.Code != http.StatusOK {
+				t.Fatalf(
+					"%s /api/config status = %d, want %d, body=%s",
+					method,
+					response.Code,
+					http.StatusOK,
+					response.Body.String(),
+				)
+			}
+
+			updated, err := config.LoadConfig(configPath)
+			if err != nil {
+				t.Fatalf("LoadConfig(updated) error = %v", err)
+			}
+			webhook := updated.Events.Ingress.Webhooks["deploy"]
+			if webhook.Format != config.EventWebhookFormatGitHub {
+				t.Fatalf("updated webhook format = %q, want github", webhook.Format)
+			}
+			if got := webhook.Secret.String(); got != gitHubSecret {
+				t.Fatalf("updated GitHub webhook secret = %q, want new value", got)
+			}
+
+			configJSON, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatalf("ReadFile(config.json) error = %v", err)
+			}
+			if !bytes.Contains(configJSON, []byte(`"format": "github"`)) {
+				t.Fatal("config.json omitted the GitHub webhook format")
+			}
+			for _, secret := range []string{originalSecret, gitHubSecret} {
+				if bytes.Contains(configJSON, []byte(secret)) {
+					t.Fatal("config.json exposed an event webhook signing secret")
+				}
+			}
+		})
+	}
+}
+
 func TestConfigAPIRejectsInvalidEventWebhookSecret(t *testing.T) {
 	for _, method := range []string{http.MethodPut, http.MethodPatch} {
 		t.Run(method, func(t *testing.T) {

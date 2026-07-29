@@ -222,11 +222,13 @@ func newEventWebhookBackend(
 	}
 	ingress := config.EffectiveEventIngressConfig(cfg, cfg.WorkspacePath())
 	secrets := make(map[string]string)
+	formats := make(map[string]string)
 	for name, connector := range ingress.Webhooks {
 		if !connector.Enabled {
 			continue
 		}
 		secrets[name] = connector.Secret.String()
+		formats[name] = config.EffectiveEventWebhookFormat(connector)
 	}
 	if len(secrets) == 0 {
 		return nil, nil
@@ -234,6 +236,7 @@ func newEventWebhookBackend(
 	backend, err := eventwebhook.NewBackend(eventwebhook.BackendConfig{
 		Store:            store,
 		ConnectorSecrets: secrets,
+		ConnectorFormats: formats,
 		MaxPayloadBytes:  ingress.MaxPayloadBytes,
 	})
 	if err != nil {

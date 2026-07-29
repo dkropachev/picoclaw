@@ -38,17 +38,18 @@ security behavior that other feature specs rely on.
 | `FR-SEC-007` | SHOULD | Key generation and token helpers produce unique, parseable, and revocable values for auth flows. | Auth flows need reliable primitives. |
 | `FR-SEC-008` | MUST | Model-list and tool-adaptation config validation rejects unsupported provider-control values such as invalid `reasoning_effort`, invalid account-router account references, invalid model-router target references, and invalid tool-adaptation policy values before those values are persisted or used; profile-specific tool-adaptation overrides normalize provider/model identity and replace earlier duplicate identities as whole entries; account routers and model routers are stored in top-level router lists rather than as secret-bearing `model_list[]` entries; strict diagnostics tolerate deprecated `account_routers[].model` input, but runtime and output ignore it so routers remain model-agnostic. | Invalid config should fail early instead of producing unsafe or broken provider requests. |
 | `FR-SEC-009` | MUST | OAuth token response parsing extracts non-secret account email claims from ID-token or access-token JWT payloads when present, preserves the email across refreshes, and leaves the email empty without failing when claims are absent or malformed. | Launcher account naming and credential metadata need stable non-secret account identity without weakening token validation or persistence. |
-| `FR-SEC-010` | MUST | Generic event webhook secrets use the existing secure-string persistence path: JSON exposes only `[NOT_HERE]`, `.security.yml` stores plaintext/encrypted/file references, masked updates preserve a current value, and security-only connector entries cannot create or resurrect JSON configuration. Reference resolution follows final master enablement without touching inactive credential files, and an explicit management replacement can repair an active broken reference without resolving the old value first. Connector map keys and client-controlled durable identity fields cannot contain a configured signing secret; those conflicts fail opaquely before persistence. Enabled secrets are validated and used for exact-value durable content redaction as well as Standard Webhooks HMAC verification. | A listener credential must neither leak through config, error, identity, or event-storage surfaces nor survive as stale active configuration after its connector is removed. |
+| `FR-SEC-010` | MUST | Event webhook secrets use the existing secure-string persistence path: JSON exposes only `[NOT_HERE]`, `.security.yml` stores plaintext/encrypted/file references, masked updates preserve a current value, and security-only connector entries cannot create or resurrect JSON configuration. Reference resolution follows final master enablement without touching inactive credential files, and an explicit management replacement can repair an active broken reference without resolving the old value first. Connector map keys, the JSON-owned format discriminator, and client-controlled durable identity fields cannot contain a configured signing secret; those conflicts fail opaquely before persistence. Enabled secrets are validated for their selected Standard Webhooks or GitHub format and used for exact-value durable content redaction as well as HMAC verification. | A listener credential must neither leak through config, error, identity, or event-storage surfaces nor survive as stale active configuration after its connector is removed. |
 | `FR-SEC-011` | MUST | Delta Chat email automation requires both a verified sender contact and a correctly encrypted/signed message unless the connector explicitly enables unverified email. Durable metadata excludes local blob paths, remote references, and bytes; declared and streamed attachment sizes are capped before materialization; receipt time is preferred over sender-controlled mail `Date`. | Email addresses, message dates, filenames, and attachment declarations are attacker-controlled and must not silently become workflow authority or expose private account storage. |
+| `FR-SEC-012` | MUST | Native GitHub webhook admission verifies `X-Hub-Signature-256` against the exact bounded raw body with the connector's secret before JSON parsing, but never represents `X-GitHub-Event` or `X-GitHub-Delivery` as signature-authenticated. The normalized envelope records the body/header distinction, public deployment requires trusted TLS termination, and no unsigned timestamp or retained delivery ID is presented as cryptographic replay prevention. | GitHub's HMAC protects payload integrity but not transport headers or freshness; workflows and operators need the actual trust boundary rather than implied authority. |
 
 ## Data And State Model
 
 Security state includes secure-string sentinels, credential records keyed by
 provider and auth method with optional non-secret account email metadata,
-dashboard password/session data, login attempt
-counters, configured secret filters, private-host allowlists, isolation exposed
-paths, generated token IDs, revocation metadata, and per-connector event
-webhook signing secrets.
+dashboard password/session data, login attempt counters, configured secret
+filters, private-host allowlists, isolation exposed paths, generated token IDs,
+revocation metadata, per-connector event webhook formats/signing secrets, and
+explicit normalized webhook body/header trust metadata.
 
 ## Surface Ownership
 
@@ -85,8 +86,9 @@ Owns: TEST pkg/config/version*
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Config | Secure strings, `isolation.*`, filtering fields, model-list validation | Secret preservation, isolation controls, sensitive-data filtering, and early rejection of unsupported provider-control values. | `FR-SEC-001`, `FR-SEC-003`, `FR-SEC-006`, `FR-SEC-008` |
-| Config | `events.ingress.webhooks.*.secret` | Masked JSON plus secure-YAML merge/preservation for per-connector Standard Webhooks secrets, without security-only connector resurrection. | `FR-SEC-010` |
+| Config | `events.ingress.webhooks.*.{format,secret}` | JSON-owned `standard`/`github` format plus masked JSON and secure-YAML merge/preservation for the corresponding per-connector secret, without security-only connector resurrection. | `FR-SEC-010`, `FR-SEC-012` |
 | HTTP | `GET /api/config`, `PUT /api/config`, `PATCH /api/config` | Management reads expose `[NOT_HERE]`; omitted or masked webhook secrets preserve the current value, and a concrete replacement rotates it through the same secure persistence path. | `FR-SEC-010` |
+| HTTP | `POST /webhooks/events/{connector}` with `format: github` | Exact-body HMAC-SHA256 authentication, bounded parsing, explicit unauthenticated-header metadata, and durable delivery-ID deduplication behind trusted TLS. | `FR-SEC-012` |
 | Storage | Credential store | Provider credential CRUD, auth method metadata, and optional non-secret account email metadata extracted from OAuth token responses. | `FR-SEC-002`, `FR-SEC-007`, `FR-SEC-009` |
 | Network | Safe HTTP client and net binding helpers | Private host controls and bind behavior. | `FR-SEC-005` |
 
@@ -113,10 +115,13 @@ Owns: TEST pkg/config/version*
 8. Merge webhook secrets only into connector names already loaded from JSON,
    defer event-secret reference resolution until final master enablement is
    known, reject signing-secret substrings in connector and client-controlled
-   durable identity fields with opaque errors, validate enabled values before
-   listener/storage construction, compare signatures without disclosing
-   mismatch details, and pass the same secret values into recursive durable
-   content redaction.
+   durable identity fields with opaque errors, validate enabled values against
+   their explicit effective format before listener/storage construction,
+   compare signatures without disclosing mismatch details, and pass the same
+   secret values into recursive durable content redaction. For GitHub, verify
+   the exact body while separately marking event/delivery headers
+   unauthenticated; require TLS rather than treating HMAC or durable
+   deduplication as header authentication or signature freshness.
 9. At durable event-store construction, collect resolved secure configuration
    values into a detached process-local list, discard values of three bytes or
    fewer to avoid redacting common text fragments, and pass the rest to exact
@@ -169,6 +174,11 @@ contract are owned by
 - Inactive file/encrypted webhook references are preserved without resolution;
   credential-bearing connector/type/deduplication identities fail before config
   or event persistence and error responses omit the conflicting values.
+- GitHub webhook bodies are authenticated before decoding, but event and
+  delivery headers remain unauthenticated and there is no signed timestamp.
+  Trusted TLS protects those headers; retained delivery-ID deduplication limits
+  retries but is not cryptographic replay prevention and ends when retention
+  pruning removes the original event.
 - Resolved channel and provider credentials are detached only at the trusted
   event-store construction boundary; they are never added to event identity,
   payload, config JSON, or logs.
@@ -188,6 +198,7 @@ contract are owned by
 | `FR-SEC-009` | [pkg/auth/oauth_test.go](../../pkg/auth/oauth_test.go), [web/backend/api/oauth_test.go](../../web/backend/api/oauth_test.go) |
 | `FR-SEC-010` | [pkg/config/events_test.go](../../pkg/config/events_test.go), [pkg/config/events_secret_identity_test.go](../../pkg/config/events_secret_identity_test.go), [pkg/eventing/webhook/controller_test.go](../../pkg/eventing/webhook/controller_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/config_event_webhook_deferred_test.go](../../web/backend/api/config_event_webhook_deferred_test.go) |
 | `FR-SEC-011` | [pkg/config/events_channels_test.go](../../pkg/config/events_channels_test.go), [pkg/eventing/channelmessage/backend_test.go](../../pkg/eventing/channelmessage/backend_test.go), [pkg/channels/deltachat/deltachat_test.go](../../pkg/channels/deltachat/deltachat_test.go), [pkg/gateway/event_channel_test.go](../../pkg/gateway/event_channel_test.go) |
+| `FR-SEC-012` | [pkg/config/events_webhook_format_test.go](../../pkg/config/events_webhook_format_test.go), [pkg/eventing/webhook/github_test.go](../../pkg/eventing/webhook/github_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go) |
 
 ## Implementation Anchors
 

@@ -529,6 +529,7 @@
       "webhooks": {
         "example": {
           "enabled": false,
+          "format": "github",
           "secret": "[NOT_HERE]"
         }
       }
