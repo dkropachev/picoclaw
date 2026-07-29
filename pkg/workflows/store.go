@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -245,54 +247,237 @@ func readRunFile(path string) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
-	var run Run
-	if err := json.Unmarshal(data, &run); err != nil {
+	run, raw, err := decodeRunWithExactEventFields(data)
+	if err != nil {
 		return nil, err
 	}
-	if err := restoreExternalEventJSONNumbers(data, &run); err != nil {
-		return nil, err
+	trustedEventID, trusted := trustedExternalEventRunFamily(path, run)
+	if !trusted {
+		if err := restoreOrdinaryRunEventFields(run, raw); err != nil {
+			return nil, err
+		}
+		return run, nil
 	}
-	return &run, nil
+	inputEvent, ok := run.Inputs["event"].(map[string]any)
+	if raw.hasInputEvent &&
+		(!ok ||
+			!isExternalEventContext(inputEvent) ||
+			inputEvent["id"] != trustedEventID) {
+		if err := restoreOrdinaryRunInputEvent(run, raw); err != nil {
+			return nil, err
+		}
+	}
+	return run, nil
 }
 
-func restoreExternalEventJSONNumbers(data []byte, run *Run) error {
+type runEventJSONFields struct {
+	event         json.RawMessage
+	inputEvent    json.RawMessage
+	hasEvent      bool
+	hasInputEvent bool
+}
+
+func decodeRunWithExactEventFields(
+	data []byte,
+) (*Run, runEventJSONFields, error) {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return nil, runEventJSONFields{}, err
+	}
+	raw := runEventJSONFields{}
+	raw.event, raw.hasEvent = document["event"]
+	if raw.hasEvent {
+		document["event"] = json.RawMessage(`{}`)
+	}
+	if encodedInputs, exists := document["inputs"]; exists {
+		var inputs map[string]json.RawMessage
+		if err := json.Unmarshal(encodedInputs, &inputs); err != nil {
+			return nil, runEventJSONFields{}, err
+		}
+		if inputs != nil {
+			raw.inputEvent, raw.hasInputEvent = inputs["event"]
+			if raw.hasInputEvent {
+				inputs["event"] = json.RawMessage(`{}`)
+				maskedInputs, err := json.Marshal(inputs)
+				if err != nil {
+					return nil, runEventJSONFields{}, err
+				}
+				document["inputs"] = maskedInputs
+			}
+		}
+	}
+	masked, err := json.Marshal(document)
+	if err != nil {
+		return nil, runEventJSONFields{}, err
+	}
+	var run Run
+	if err := json.Unmarshal(masked, &run); err != nil {
+		var fallback Run
+		if fallbackErr := decodeJSONWithNumbers(masked, &fallback); fallbackErr != nil {
+			return nil, runEventJSONFields{}, err
+		}
+		retainedOverflow, fallbackErr := normalizeRunOverflowNumbers(&fallback)
+		if fallbackErr != nil || !retainedOverflow {
+			return nil, runEventJSONFields{}, err
+		}
+		run = fallback
+	}
+	if raw.hasEvent {
+		var event map[string]any
+		if err := decodeJSONWithNumbers(raw.event, &event); err != nil {
+			return nil, runEventJSONFields{}, err
+		}
+		run.Event = event
+	}
+	if raw.hasInputEvent {
+		var inputEvent any
+		if err := decodeJSONWithNumbers(raw.inputEvent, &inputEvent); err != nil {
+			return nil, runEventJSONFields{}, err
+		}
+		if run.Inputs == nil {
+			run.Inputs = make(map[string]any)
+		}
+		run.Inputs["event"] = inputEvent
+	}
+	return &run, raw, nil
+}
+
+func restoreOrdinaryRunEventFields(
+	run *Run,
+	raw runEventJSONFields,
+) error {
 	if run == nil {
 		return nil
 	}
-	var raw struct {
-		Event  json.RawMessage            `json:"event"`
-		Inputs map[string]json.RawMessage `json:"inputs"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	if !isExternalEventRun(run) {
-		return nil
-	}
-	if len(raw.Event) > 0 {
+	if raw.hasEvent {
 		var event map[string]any
-		if err := decodeJSONWithNumbers(raw.Event, &event); err != nil {
+		if err := json.Unmarshal(raw.event, &event); err != nil {
 			return err
 		}
 		run.Event = event
 	}
-	inputEvent, ok := run.Inputs["event"].(map[string]any)
-	rawInputEvent, hasRawInputEvent := raw.Inputs["event"]
-	if !ok || !hasRawInputEvent || !isExternalEventContext(inputEvent) {
+	return restoreOrdinaryRunInputEvent(run, raw)
+}
+
+func restoreOrdinaryRunInputEvent(
+	run *Run,
+	raw runEventJSONFields,
+) error {
+	if run == nil || !raw.hasInputEvent {
 		return nil
 	}
-	var exactInputEvent map[string]any
-	if err := decodeJSONWithNumbers(rawInputEvent, &exactInputEvent); err != nil {
+	var inputEvent any
+	if err := json.Unmarshal(raw.inputEvent, &inputEvent); err != nil {
 		return err
 	}
-	run.Inputs["event"] = exactInputEvent
+	if run.Inputs == nil {
+		run.Inputs = make(map[string]any)
+	}
+	run.Inputs["event"] = inputEvent
 	return nil
 }
 
 func decodeJSONWithNumbers(data []byte, value any) error {
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.UseNumber()
-	return decoder.Decode(value)
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("JSON contains multiple values")
+		}
+		return err
+	}
+	return nil
+}
+
+// normalizeRunOverflowNumbers restores json.Unmarshal's legacy float64 shape
+// after a UseNumber fallback, retaining json.Number only for valid tokens that
+// cannot be represented by float64. Event and inputs.event are replaced from
+// their separately decoded raw fields after this step.
+func normalizeRunOverflowNumbers(run *Run) (bool, error) {
+	if run == nil {
+		return false, nil
+	}
+	retainedOverflow := false
+	for _, values := range []map[string]any{
+		run.Event,
+		run.Inputs,
+		run.Outputs,
+	} {
+		retained, err := normalizeOverflowJSONMap(values)
+		if err != nil {
+			return false, err
+		}
+		retainedOverflow = retainedOverflow || retained
+	}
+	for key, job := range run.Jobs {
+		retained, err := normalizeOverflowJSONMap(job.Outputs)
+		if err != nil {
+			return false, err
+		}
+		retainedOverflow = retainedOverflow || retained
+		run.Jobs[key] = job
+	}
+	for key, step := range run.Steps {
+		retained, err := normalizeOverflowJSONMap(step.Outputs)
+		if err != nil {
+			return false, err
+		}
+		retainedOverflow = retainedOverflow || retained
+		run.Steps[key] = step
+	}
+	return retainedOverflow, nil
+}
+
+func normalizeOverflowJSONMap(values map[string]any) (bool, error) {
+	retainedOverflow := false
+	for key, value := range values {
+		normalized, retained, err := normalizeOverflowJSONValue(value)
+		if err != nil {
+			return false, err
+		}
+		values[key] = normalized
+		retainedOverflow = retainedOverflow || retained
+	}
+	return retainedOverflow, nil
+}
+
+func normalizeOverflowJSONValue(value any) (any, bool, error) {
+	switch typed := value.(type) {
+	case json.Number:
+		number, err := strconv.ParseFloat(typed.String(), 64)
+		if err == nil {
+			return number, false, nil
+		}
+		var numericError *strconv.NumError
+		if errors.As(err, &numericError) &&
+			errors.Is(numericError.Err, strconv.ErrRange) {
+			return typed, true, nil
+		}
+		return nil, false, err
+	case map[string]any:
+		retained, err := normalizeOverflowJSONMap(typed)
+		if err != nil {
+			return nil, false, err
+		}
+		return typed, retained, nil
+	case []any:
+		retainedOverflow := false
+		for index, item := range typed {
+			normalized, retained, err := normalizeOverflowJSONValue(item)
+			if err != nil {
+				return nil, false, err
+			}
+			typed[index] = normalized
+			retainedOverflow = retainedOverflow || retained
+		}
+		return typed, retainedOverflow, nil
+	default:
+		return value, false, nil
+	}
 }
 
 func isExternalEventRun(run *Run) bool {
@@ -307,6 +492,84 @@ func isExternalEventRun(run *Run) bool {
 		dispatchIDOK &&
 		isExternalDispatchID(dispatchID) &&
 		run.Session == EventWorkflowSession(run.WorkflowRef, eventID)
+}
+
+func isEventBackedDraftTopLevelRun(run *Run) bool {
+	if run == nil ||
+		strings.TrimSpace(run.ParentRunID) != "" ||
+		!isExternalEventContext(run.Event) {
+		return false
+	}
+	workflowRef := strings.TrimSpace(run.WorkflowRef)
+	targetRef, draft := strings.CutPrefix(workflowRef, "draft:")
+	if !draft || strings.TrimSpace(targetRef) == "" {
+		return false
+	}
+	eventID, _ := run.Event["id"].(string)
+	inputEventID, eventIDOK := run.Inputs["event_id"].(string)
+	inputEvent, inputEventOK := run.Inputs["event"].(map[string]any)
+	_, dispatchPresent := run.Inputs["dispatch_id"]
+	return eventIDOK &&
+		inputEventID == eventID &&
+		inputEventOK &&
+		isExternalEventContext(inputEvent) &&
+		inputEvent["id"] == eventID &&
+		!dispatchPresent &&
+		run.Session == EventWorkflowSession(targetRef, eventID)
+}
+
+func trustedExternalEventRunFamily(path string, run *Run) (string, bool) {
+	if run == nil {
+		return "", false
+	}
+	eventID, eventIDOK := run.Event["id"].(string)
+	if !eventIDOK || !isExternalEventContext(run.Event) {
+		return "", false
+	}
+	if isExternalEventRun(run) || isEventBackedDraftTopLevelRun(run) {
+		return eventID, true
+	}
+	if strings.TrimSpace(run.ParentRunID) == "" ||
+		!isExternalEventContext(run.Event) {
+		return "", false
+	}
+	storeRoot := filepath.Dir(filepath.Dir(path))
+	parentID := strings.TrimSpace(run.ParentRunID)
+	seen := map[string]struct{}{run.ID: {}}
+	for depth := 0; depth < eventBackedDraftAncestryMaximumDepth; depth++ {
+		if _, exists := seen[parentID]; exists {
+			return "", false
+		}
+		seen[parentID] = struct{}{}
+		parentData, err := os.ReadFile(filepath.Join(
+			storeRoot,
+			safeID(parentID),
+			"run.json",
+		))
+		if err != nil {
+			return "", false
+		}
+		parent, _, decodeErr := decodeRunWithExactEventFields(parentData)
+		if decodeErr != nil ||
+			parent == nil ||
+			parent.ID != parentID {
+			return "", false
+		}
+		parentEventID, parentEventOK := parent.Event["id"].(string)
+		if !parentEventOK ||
+			parentEventID != eventID ||
+			!isExternalEventContext(parent.Event) {
+			return "", false
+		}
+		if isExternalEventRun(parent) || isEventBackedDraftTopLevelRun(parent) {
+			return eventID, true
+		}
+		parentID = strings.TrimSpace(parent.ParentRunID)
+		if parentID == "" {
+			return "", false
+		}
+	}
+	return "", false
 }
 
 func isExternalEventContext(event map[string]any) bool {
@@ -504,9 +767,23 @@ func (s *FileRunStore) Events(ctx context.Context, runID string) ([]RunEvent, er
 			continue
 		}
 		var event RunEvent
-		if err := json.Unmarshal([]byte(line), &event); err == nil {
-			events = append(events, event)
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			var fallback RunEvent
+			if fallbackErr := decodeJSONWithNumbers(
+				[]byte(line),
+				&fallback,
+			); fallbackErr != nil {
+				continue
+			}
+			retainedOverflow, fallbackErr := normalizeOverflowJSONMap(
+				fallback.Payload,
+			)
+			if fallbackErr != nil || !retainedOverflow {
+				continue
+			}
+			event = fallback
 		}
+		events = append(events, event)
 	}
 	return events, nil
 }

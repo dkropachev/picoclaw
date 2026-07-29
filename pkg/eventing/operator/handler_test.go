@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -15,6 +16,9 @@ import (
 
 func TestControllerServesSanitizedOperatorRoutes(t *testing.T) {
 	original := testStoredEvent(testEventID)
+	original.Envelope.Payload = json.RawMessage(
+		`{"large_integer":9007199254740993,"redacted":"[REDACTED]","html":"<tag>&"}`,
+	)
 	replayed := testStoredEvent(testReplayID)
 	replayed.Envelope.ReplayOf = testEventID
 	store := &fakeStore{
@@ -88,6 +92,46 @@ func TestControllerServesSanitizedOperatorRoutes(t *testing.T) {
 	}
 	if !strings.Contains(payloadResponse.Body.String(), "9007199254740993") {
 		t.Fatal("payload response changed the large numeric token")
+	}
+
+	workflowContextResponse := performRequest(
+		controller,
+		http.MethodGet,
+		RoutePrefix+"events/"+testEventID+"/workflow-context",
+		"",
+		false,
+	)
+	if workflowContextResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"workflow context status = %d, body=%s",
+			workflowContextResponse.Code,
+			workflowContextResponse.Body.String(),
+		)
+	}
+	requireNoStoreJSON(t, workflowContextResponse)
+	assertHTTPBodySecretsAbsent(t, workflowContextResponse.Body.String())
+	if got, want := workflowContextResponse.Header().Get(WorkflowEventPayloadBytesHeader),
+		strconv.Itoa(len(original.Envelope.Payload)); got != want {
+		t.Fatalf("workflow context payload bytes = %q, want %q", got, want)
+	}
+	if !strings.Contains(workflowContextResponse.Body.String(), "9007199254740993") {
+		t.Fatal("workflow context response changed the large numeric token")
+	}
+	if !strings.Contains(workflowContextResponse.Body.String(), `"<tag>&"`) ||
+		strings.Contains(workflowContextResponse.Body.String(), `\u003c`) {
+		t.Fatalf(
+			"workflow context HTML-expanded the exact raw payload: %s",
+			workflowContextResponse.Body.String(),
+		)
+	}
+	for _, forbidden := range []string{"routing", "payload_bytes", testDedupeKey} {
+		if strings.Contains(workflowContextResponse.Body.String(), forbidden) {
+			t.Fatalf(
+				"workflow context exposed %q: %s",
+				forbidden,
+				workflowContextResponse.Body.String(),
+			)
+		}
 	}
 
 	dispatchResponse := performRequest(
@@ -173,6 +217,7 @@ func TestControllerRejectsInvalidQueries(t *testing.T) {
 		RoutePrefix + "events?cursor=not-base64",
 		RoutePrefix + "events/" + testEventID + "?source=github",
 		RoutePrefix + "events/" + testEventID + "/payload?x=1",
+		RoutePrefix + "events/" + testEventID + "/workflow-context?x=1",
 		RoutePrefix + "dispatches?event_id=invalid",
 		RoutePrefix + "dispatches?status=unknown",
 		RoutePrefix + "dispatches?workflow_ref=",
@@ -232,6 +277,7 @@ func TestControllerStrictCanonicalPathsAndMethods(t *testing.T) {
 		{http.MethodPost, RoutePrefix + "events", http.MethodGet},
 		{http.MethodPost, RoutePrefix + "events/" + testEventID, http.MethodGet},
 		{http.MethodPost, RoutePrefix + "events/" + testEventID + "/payload", http.MethodGet},
+		{http.MethodPost, RoutePrefix + "events/" + testEventID + "/workflow-context", http.MethodGet},
 		{http.MethodPost, RoutePrefix + "dispatches", http.MethodGet},
 		{http.MethodGet, RoutePrefix + "events/" + testEventID + "/replay", http.MethodPost},
 	}

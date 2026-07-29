@@ -75,7 +75,11 @@ func renderString(input string, ctx expressionContext) (any, error) {
 		return input, nil
 	}
 	if len(matches) == 1 && strings.TrimSpace(matches[0][0]) == strings.TrimSpace(input) {
-		return evalExpression(matches[0][1], ctx)
+		value, err := evalExpression(matches[0][1], ctx)
+		if err != nil {
+			return nil, err
+		}
+		return cloneJSONValue(value), nil
 	}
 	var firstErr error
 	out := expressionPattern.ReplaceAllStringFunc(input, func(match string) string {

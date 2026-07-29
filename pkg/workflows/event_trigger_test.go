@@ -648,6 +648,154 @@ func TestMatchEventTriggerCombinesFieldsAndAlternatives(t *testing.T) {
 	}
 }
 
+func TestEvaluateEventTriggerReturnsDeterministicRuntimeChecks(t *testing.T) {
+	trigger := &EventTrigger{
+		Sources:    StringList{"git*"},
+		Connectors: StringList{"PRIMARY"},
+		Types:      StringList{"issues.*"},
+		Actor: &EventEntityTrigger{
+			IDs:   StringList{"actor-*"},
+			Types: StringList{"BOT"},
+			Attributes: map[string]StringList{
+				"zeta":  {"last"},
+				"alpha": {"first"},
+			},
+		},
+		Subject: &EventEntityTrigger{
+			Types: StringList{"repository"},
+		},
+		Attributes: map[string]StringList{
+			"region":       {"us-*"},
+			"installation": {"prod"},
+		},
+	}
+	event := eventing.Envelope{
+		Source:    "GitHub",
+		Connector: "primary",
+		Type:      "Issues.Opened",
+		Actor: &eventing.Actor{
+			ID:   "actor-1",
+			Type: "bot",
+			Attributes: map[string]string{
+				"alpha": "first",
+				"zeta":  "last",
+			},
+		},
+		Subject: &eventing.Subject{Type: "Repository"},
+		Attributes: map[string]string{
+			"installation": "prod",
+			"region":       "us-east",
+		},
+	}
+
+	result, err := EvaluateEventTrigger(trigger, event)
+	if err != nil {
+		t.Fatalf("EvaluateEventTrigger() error = %v", err)
+	}
+	if !result.Matched || !MatchEventTrigger(trigger, event) {
+		t.Fatalf("match result = %#v, want runtime match", result)
+	}
+	gotPaths := make([]string, 0, len(result.Checks))
+	for _, check := range result.Checks {
+		gotPaths = append(gotPaths, check.Path)
+		if !check.Present || !check.Matched {
+			t.Fatalf("check = %#v, want present match", check)
+		}
+	}
+	wantPaths := []string{
+		"on.event.actor.attributes.alpha",
+		"on.event.actor.attributes.zeta",
+		"on.event.actor.ids",
+		"on.event.actor.types",
+		"on.event.attributes.installation",
+		"on.event.attributes.region",
+		"on.event.connectors",
+		"on.event.sources",
+		"on.event.subject.types",
+		"on.event.types",
+	}
+	if !reflect.DeepEqual(gotPaths, wantPaths) {
+		t.Fatalf("check paths = %#v, want %#v", gotPaths, wantPaths)
+	}
+}
+
+func TestEvaluateEventTriggerExplainsMissingAndNonMatchingFields(t *testing.T) {
+	trigger := &EventTrigger{
+		Types: StringList{"issues.*"},
+		Actor: &EventEntityTrigger{
+			IDs: StringList{"actor-*"},
+			Attributes: map[string]StringList{
+				"role": {"automation"},
+			},
+		},
+		Attributes: map[string]StringList{
+			"installation": {"prod"},
+		},
+	}
+	result, err := EvaluateEventTrigger(trigger, eventing.Envelope{
+		Type:       "pull_request.opened",
+		Attributes: map[string]string{"installation": "prod"},
+	})
+	if err != nil {
+		t.Fatalf("EvaluateEventTrigger() error = %v", err)
+	}
+	if result.Matched || MatchEventTrigger(trigger, eventing.Envelope{
+		Type:       "pull_request.opened",
+		Attributes: map[string]string{"installation": "prod"},
+	}) {
+		t.Fatalf("match result = %#v, want non-match", result)
+	}
+	checks := make(map[string]EventTriggerMatchCheck, len(result.Checks))
+	for _, check := range result.Checks {
+		checks[check.Path] = check
+	}
+	if check := checks["on.event.types"]; !check.Present || check.Matched {
+		t.Fatalf("type check = %#v, want present non-match", check)
+	}
+	for _, path := range []string{
+		"on.event.actor.ids",
+		"on.event.actor.attributes.role",
+	} {
+		if check := checks[path]; check.Present || check.Matched {
+			t.Fatalf("%s check = %#v, want missing non-match", path, check)
+		}
+	}
+	if check := checks["on.event.attributes.installation"]; !check.Present || !check.Matched {
+		t.Fatalf("installation check = %#v, want present match", check)
+	}
+}
+
+func TestEvaluateEventTriggerRejectsAbsentAndInvalidTriggers(t *testing.T) {
+	tests := []struct {
+		name    string
+		trigger *EventTrigger
+		want    string
+	}{
+		{name: "absent", want: "on.event: event trigger is required"},
+		{
+			name:    "empty",
+			trigger: &EventTrigger{},
+			want:    "on.event: at least one filter is required",
+		},
+		{
+			name:    "blank pattern",
+			trigger: &EventTrigger{Types: StringList{""}},
+			want:    "on.event.types[0]: pattern is required",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := EvaluateEventTrigger(test.trigger, eventing.Envelope{})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("EvaluateEventTrigger() result=%#v error=%v, want %q", result, err, test.want)
+			}
+			if result.Matched || MatchEventTrigger(test.trigger, eventing.Envelope{}) {
+				t.Fatalf("invalid trigger matched: %#v", test.trigger)
+			}
+		})
+	}
+}
+
 func TestMatchEventTriggerCaseAndMissingValueSemantics(t *testing.T) {
 	baseEvent := eventing.Envelope{
 		Source:    "GitHub",

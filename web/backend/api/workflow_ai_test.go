@@ -625,6 +625,9 @@ func TestBuildWorkflowAuthorPromptIncludesNativeFunctionTargets(t *testing.T) {
 	if !strings.Contains(prompt, "function/git.inventory") {
 		t.Fatalf("prompt does not include native function targets:\n%s", prompt)
 	}
+	if !strings.Contains(prompt, "function/git.filter") {
+		t.Fatalf("prompt does not include git filter target:\n%s", prompt)
+	}
 	if strings.Contains(prompt, "function/git.file_plan") || strings.Contains(prompt, "function/git.file_record") {
 		t.Fatalf("prompt includes review-specific native function targets:\n%s", prompt)
 	}
@@ -636,6 +639,50 @@ func TestBuildWorkflowAuthorPromptIncludesNativeFunctionTargets(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "`message` - Send a message") {
 		t.Fatalf("prompt does not include tool target inventory:\n%s", prompt)
+	}
+}
+
+func TestBuildWorkflowAuthorPromptDefinesSafeEventAutomationContract(t *testing.T) {
+	session := &workflows.WorkflowDevelopmentSession{
+		ID:                "dev_event",
+		Reason:            workflows.WorkflowDevelopmentReasonNew,
+		TargetWorkflowRef: "workflows/event.yml",
+		YAML:              "name: Event\non:\n  event:\n    sources: github\njobs: {}\n",
+	}
+	prompt := buildWorkflowAuthorPrompt(session, nil, nil, workflowAuthorCapabilities{})
+
+	required := []string{
+		"runtime_event, event, or workflow_call",
+		"at least one explicit non-blank filter",
+		"OR within a field",
+		"populated fields use AND",
+		"fully anchored wildcards",
+		"case-insensitive",
+		"IDs and attribute values are case-sensitive",
+		"${{ event.id }}",
+		"A model is never a router",
+		"history: none",
+		"tools: none",
+		"bounded JSON output schema",
+		"separate declared step",
+		"authenticated event fields",
+	}
+	for _, value := range required {
+		if !strings.Contains(prompt, value) {
+			t.Fatalf("prompt does not include %q:\n%s", value, prompt)
+		}
+	}
+
+	request := workflowAuthorRequest(session, nil, nil, workflowAuthorCapabilities{})
+	if request.Tools != workflows.AgentToolsNone ||
+		request.History != "none" ||
+		request.Session != "workflow-dev:"+session.ID ||
+		request.Delivery.Channel != "" ||
+		request.Delivery.ReplyHandles != nil {
+		t.Fatalf("workflow author request is not isolated: %#v", request)
+	}
+	if request.Prompt != prompt {
+		t.Fatal("workflow author request prompt differs from the audited prompt")
 	}
 }
 

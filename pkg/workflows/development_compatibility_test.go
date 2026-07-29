@@ -379,6 +379,118 @@ func TestWorkflowDevelopmentAsyncCompletionDoesNotRecordStaleDraft(t *testing.T)
 	}
 }
 
+func TestWorkflowDevelopmentEventTestRetainsEventIdentityThroughAsyncCompletion(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	runtime := RuntimeCompatibility{PicoclawVersion: "v1.0.0", GitCommit: "abc123"}
+	const eventID = "ev_0123456789abcdef0123456789abcdef"
+
+	session, err := StartWorkflowDevelopment(
+		ctx,
+		workspace,
+		runtime,
+		WorkflowDevelopmentStartRequest{Prompt: "triage events"},
+	)
+	if err != nil {
+		t.Fatalf("StartWorkflowDevelopment() error = %v", err)
+	}
+	draftKey := WorkflowDevelopmentDraftKey(session.TargetWorkflowRef, session.YAML)
+	active, err := RecordWorkflowDevelopmentEventTest(
+		workspace,
+		eventID,
+		&RunResult{RunID: "wr_event", Status: RunStatusRunning},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("RecordWorkflowDevelopmentEventTest() error = %v", err)
+	}
+	if active.LastTest == nil || active.LastTest.EventID != eventID {
+		t.Fatalf("running event test = %#v, want event ID", active.LastTest)
+	}
+
+	active, recorded, err := RecordWorkflowDevelopmentEventTestIfCurrent(
+		workspace,
+		session.ID,
+		draftKey,
+		eventID,
+		&RunResult{RunID: "wr_event", Status: RunStatusSucceeded},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("RecordWorkflowDevelopmentEventTestIfCurrent() error = %v", err)
+	}
+	if !recorded ||
+		active.LastTest == nil ||
+		active.LastTest.EventID != eventID ||
+		active.LastTest.Status != RunStatusSucceeded {
+		t.Fatalf("completed event test = %#v, recorded=%v", active.LastTest, recorded)
+	}
+}
+
+func TestWorkflowDevelopmentEventTestFencesStaleAsyncEventCompletion(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	runtime := RuntimeCompatibility{PicoclawVersion: "v1.0.0", GitCommit: "abc123"}
+	const (
+		currentEventID = "ev_0123456789abcdef0123456789abcdef"
+		staleEventID   = "ev_fedcba9876543210fedcba9876543210"
+	)
+	session, err := StartWorkflowDevelopment(
+		ctx,
+		workspace,
+		runtime,
+		WorkflowDevelopmentStartRequest{Prompt: "triage events"},
+	)
+	if err != nil {
+		t.Fatalf("StartWorkflowDevelopment() error = %v", err)
+	}
+	draftKey := WorkflowDevelopmentDraftKey(session.TargetWorkflowRef, session.YAML)
+	if _, err = RecordWorkflowDevelopmentEventTest(
+		workspace,
+		currentEventID,
+		&RunResult{RunID: "wr_current", Status: RunStatusRunning},
+		nil,
+	); err != nil {
+		t.Fatalf("RecordWorkflowDevelopmentEventTest() error = %v", err)
+	}
+
+	active, recorded, err := RecordWorkflowDevelopmentEventTestIfCurrent(
+		workspace,
+		session.ID,
+		draftKey,
+		staleEventID,
+		&RunResult{RunID: "wr_stale", Status: RunStatusSucceeded},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("stale event completion error = %v", err)
+	}
+	if recorded {
+		t.Fatal("stale event completion recorded, want fenced")
+	}
+	if active.LastTest == nil ||
+		active.LastTest.EventID != currentEventID ||
+		active.LastTest.RunID != "wr_current" ||
+		active.LastTest.Status != RunStatusRunning {
+		t.Fatalf("active last test changed = %#v", active.LastTest)
+	}
+
+	active, recorded, err = RecordWorkflowDevelopmentEventTestIfCurrent(
+		workspace,
+		session.ID,
+		draftKey,
+		currentEventID,
+		&RunResult{RunID: "wr_stale", Status: RunStatusSucceeded},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("stale run completion error = %v", err)
+	}
+	if recorded || active.LastTest.RunID != "wr_current" {
+		t.Fatalf("stale run completion recorded=%v last_test=%#v", recorded, active.LastTest)
+	}
+}
+
 func TestCompatibilityRevalidationBlocksStaleRuntime(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()

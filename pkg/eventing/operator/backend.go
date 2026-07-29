@@ -4,6 +4,7 @@ package operator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -123,6 +124,24 @@ type EventView struct {
 	ReplayOf     string            `json:"replay_of,omitempty"`
 	PayloadBytes int               `json:"payload_bytes"`
 	Routing      RoutingView       `json:"routing"`
+}
+
+// WorkflowEventView is the exact already-redacted event projection used by
+// trusted workflow-development callers. It deliberately omits deduplication
+// identity and every routing owner/lease field while keeping the payload and
+// its JSON number tokens available to the workflow expression decoder.
+type WorkflowEventView struct {
+	ID         string            `json:"id"`
+	Source     string            `json:"source"`
+	Connector  string            `json:"connector"`
+	Type       string            `json:"type"`
+	Actor      *ActorView        `json:"actor,omitempty"`
+	Subject    *SubjectView      `json:"subject,omitempty"`
+	OccurredAt *time.Time        `json:"occurred_at,omitempty"`
+	ReceivedAt time.Time         `json:"received_at"`
+	Payload    json.RawMessage   `json:"payload"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+	ReplayOf   string            `json:"replay_of,omitempty"`
 }
 
 // EventPage is a sanitized event page.
@@ -255,6 +274,54 @@ func (backend *Backend) GetEventPayload(
 		return nil, err
 	}
 	return append([]byte(nil), payload...), nil
+}
+
+// GetWorkflowEvent returns metadata and payload through one acquired operator
+// generation. Events are immutable, so reading metadata before payload is a
+// consistent snapshot; retention between the reads fails the whole operation
+// instead of returning a partial projection.
+func (backend *Backend) GetWorkflowEvent(
+	ctx context.Context,
+	id string,
+) (WorkflowEventView, error) {
+	if backend == nil || backend.store == nil {
+		return WorkflowEventView{}, ErrUnavailable
+	}
+	if !validEventID(id) {
+		return WorkflowEventView{}, fmt.Errorf("%w: event ID is invalid", ErrInvalidRequest)
+	}
+	stored, err := backend.store.GetEventMetadata(ctx, id)
+	if err != nil {
+		return WorkflowEventView{}, err
+	}
+	if stored.Envelope.ID != id {
+		return WorkflowEventView{}, fmt.Errorf("%w: event metadata identity changed", ErrUnavailable)
+	}
+	payload, err := backend.store.GetEventPayload(ctx, id)
+	if err != nil {
+		return WorkflowEventView{}, err
+	}
+	if len(payload) != stored.PayloadBytes {
+		return WorkflowEventView{}, fmt.Errorf("%w: event payload metadata changed", ErrUnavailable)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &object); err != nil || object == nil {
+		return WorkflowEventView{}, fmt.Errorf("%w: event payload is invalid", ErrUnavailable)
+	}
+	envelope := stored.Envelope
+	return WorkflowEventView{
+		ID:         envelope.ID,
+		Source:     envelope.Source,
+		Connector:  envelope.Connector,
+		Type:       envelope.Type,
+		Actor:      projectActor(envelope.Actor),
+		Subject:    projectSubject(envelope.Subject),
+		OccurredAt: cloneTime(envelope.OccurredAt),
+		ReceivedAt: envelope.ReceivedAt,
+		Payload:    append(json.RawMessage(nil), payload...),
+		Attributes: cloneStringMap(envelope.Attributes),
+		ReplayOf:   envelope.ReplayOf,
+	}, nil
 }
 
 // ListDispatches returns a bounded sanitized dispatch page.

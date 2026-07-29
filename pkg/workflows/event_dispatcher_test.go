@@ -157,6 +157,56 @@ func TestEventContextFromEnvelopeRejectsNonObjectPayload(t *testing.T) {
 	}
 }
 
+func TestEventWorkflowRunContextFromEnvelopeSharesProductionAndPreviewShape(t *testing.T) {
+	envelope := eventing.Envelope{
+		ID:         "ev_00000000000000000000000000000001",
+		Source:     "github",
+		Connector:  "primary",
+		Type:       "issues.opened",
+		ReceivedAt: time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC),
+		Payload:    json.RawMessage(`{"count":9007199254740993}`),
+	}
+	const workflowRef = "workflows/triage.yml"
+	const dispatchID = "dsp_11111111111111111111111111111111"
+
+	production, err := EventWorkflowRunContextFromEnvelope(
+		workflowRef,
+		dispatchID,
+		envelope,
+	)
+	if err != nil {
+		t.Fatalf("EventWorkflowRunContextFromEnvelope(production) error = %v", err)
+	}
+	preview, err := EventWorkflowRunContextFromEnvelope(workflowRef, "", envelope)
+	if err != nil {
+		t.Fatalf("EventWorkflowRunContextFromEnvelope(preview) error = %v", err)
+	}
+	if production.Inputs["dispatch_id"] != dispatchID {
+		t.Fatalf("production dispatch_id = %#v", production.Inputs["dispatch_id"])
+	}
+	if _, present := preview.Inputs["dispatch_id"]; present {
+		t.Fatalf("preview invented dispatch_id: %#v", preview.Inputs)
+	}
+	for _, context := range []EventWorkflowRunContext{production, preview} {
+		if context.Inputs["event_id"] != envelope.ID ||
+			context.Inputs["source"] != envelope.Source ||
+			context.Inputs["connector"] != envelope.Connector ||
+			context.Inputs["type"] != envelope.Type ||
+			context.Session != EventWorkflowSession(workflowRef, envelope.ID) ||
+			!reflect.DeepEqual(context.Delivery, Delivery{}) {
+			t.Fatalf("run context = %#v, want production event shape", context)
+		}
+		payload := context.Event["payload"].(map[string]any)
+		number, ok := payload["count"].(json.Number)
+		if !ok || number.String() != "9007199254740993" {
+			t.Fatalf("event payload count = %#v, want exact json.Number", payload["count"])
+		}
+		if !reflect.DeepEqual(context.Inputs["event"], context.Event) {
+			t.Fatalf("inputs.event = %#v, event = %#v", context.Inputs["event"], context.Event)
+		}
+	}
+}
+
 func TestEventContextJSONNumbersMatchExistingExpressionSemantics(t *testing.T) {
 	event, err := EventContextFromEnvelope(eventing.Envelope{
 		Payload: json.RawMessage(`{"count":3.5,"zero":0,"one":1.0,"exponent":1e0}`),

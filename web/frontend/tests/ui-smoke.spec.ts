@@ -392,6 +392,28 @@ jobs:
           prompt: Summarize support tickets
 `
 
+const workflowEventDraftYAML = `name: Support Triage
+on:
+  workflow_call:
+    inputs:
+      ticket:
+        type: string
+        required: true
+  event:
+    sources:
+      - github
+    types:
+      - issues.opened
+jobs:
+  triage:
+    runs-on: picoclaw
+    steps:
+      - id: summarize
+        uses: agent/main
+        with:
+          prompt: Summarize support tickets
+`
+
 const supportTriageWorkflowDefinition = {
   ref: "workflows/support-triage.yml",
   name: "Support Triage",
@@ -433,9 +455,16 @@ const workflowDraftLastTest = {
   tested_at: "2026-07-16T12:01:01Z",
 }
 
-type MockWorkflowDevelopmentSession = typeof workflowDraftSession & {
+type MockWorkflowDraftLastTest = typeof workflowDraftLastTest & {
+  event_id?: string
+}
+
+type MockWorkflowDevelopmentSession = Omit<
+  typeof workflowDraftSession,
+  "last_test"
+> & {
   source_workflow_ref?: string
-  last_test?: typeof workflowDraftLastTest
+  last_test?: MockWorkflowDraftLastTest
 }
 
 const draftWorkflowRun = {
@@ -699,6 +728,10 @@ async function mockLauncherApis(
     return workflowDraftKey(session.target_workflow_ref, session.yaml)
   }
 
+  function eventTriggerRevision(yaml: string) {
+    return `mock-revision:${normalizeWorkflowDraftYAML(yaml).length}`
+  }
+
   await page.route(
     (url) => url.pathname.startsWith("/api/"),
     async (route) => {
@@ -769,6 +802,82 @@ async function mockLauncherApis(
             }
             return json(route, { session: activeDevelopmentSession })
           }
+          case "/api/workflows/development/event-trigger/inspect": {
+            const body = request.postDataJSON() as { yaml: string }
+            const eventTrigger = body.yaml.includes("\n  event:")
+              ? {
+                  sources: ["github"],
+                  types: ["issues.opened"],
+                }
+              : null
+            return json(route, {
+              revision: eventTriggerRevision(body.yaml),
+              editable: true,
+              event_trigger: eventTrigger,
+              validation: {
+                valid: true,
+                validated_at: "2026-07-16T12:00:00Z",
+              },
+            })
+          }
+          case "/api/workflows/development/event-trigger/render": {
+            const body = request.postDataJSON() as {
+              yaml: string
+              revision: string
+              event_trigger: {
+                sources?: string[]
+                connectors?: string[]
+                types?: string[]
+              } | null
+            }
+            expect(body.revision).toBe(eventTriggerRevision(body.yaml))
+            const renderedYAML =
+              body.event_trigger == null
+                ? workflowDraftYAML
+                : workflowEventDraftYAML
+            return json(route, {
+              yaml: renderedYAML,
+              revision: eventTriggerRevision(renderedYAML),
+              editable: true,
+              event_trigger: body.event_trigger,
+              validation: {
+                valid: true,
+                validated_at: "2026-07-16T12:00:00Z",
+              },
+            })
+          }
+          case "/api/workflows/development/event-trigger/match": {
+            const body = request.postDataJSON() as {
+              yaml: string
+              event_id: string
+            }
+            expect(body).toEqual({
+              yaml: workflowEventDraftYAML,
+              event_id: eventResponse.id,
+            })
+            return json(route, {
+              event_id: eventResponse.id,
+              matched: true,
+              checks: [
+                {
+                  path: "on.event.sources",
+                  present: true,
+                  value: "github",
+                  matched: true,
+                },
+                {
+                  path: "on.event.types",
+                  present: true,
+                  value: "issues.opened",
+                  matched: true,
+                },
+              ],
+              validation: {
+                valid: true,
+                validated_at: "2026-07-16T12:00:00Z",
+              },
+            })
+          }
           case "/api/workflows/development/ai-revise": {
             const body = request.postDataJSON() as {
               prompt?: string
@@ -783,7 +892,9 @@ async function mockLauncherApis(
               )
               expect(body.prompt).toContain('"triage/summarize"')
               expect(body.prompt).toContain('"kind": "workflow.run.end"')
-              expect(body.prompt).toContain("draft failure event")
+              expect(body.prompt).not.toContain("draft failure event")
+              expect(body.prompt).not.toContain('"payload"')
+              expect(body.prompt).not.toContain('"message"')
             }
             const previous = activeDevelopmentSession ?? workflowDraftSession
             activeDevelopmentSession = {
@@ -847,9 +958,48 @@ async function mockLauncherApis(
           case "/api/workflows/development/test": {
             const testBody = request.postDataJSON() as {
               async: boolean
+              prompt?: string
+              target_ref?: string
+              yaml?: string
               inputs?: { ticket?: string }
+              secrets?: Record<string, string>
               session?: string
               delivery?: Record<string, unknown>
+              event_id?: string
+            }
+            if (testBody.event_id) {
+              expect(testBody).toEqual({
+                async: true,
+                prompt: workflowDraftSession.prompt,
+                target_ref: workflowDraftSession.target_workflow_ref,
+                yaml: workflowEventDraftYAML,
+                event_id: eventResponse.id,
+              })
+              activeDevelopmentSession = {
+                ...workflowDraftSession,
+                status: "testing",
+                yaml: workflowEventDraftYAML,
+                last_test: {
+                  ...workflowDraftLastTest,
+                  draft_key: workflowDraftKey(
+                    workflowDraftSession.target_workflow_ref,
+                    workflowEventDraftYAML,
+                  ),
+                  event_id: eventResponse.id,
+                  status: "running",
+                },
+              }
+              runs = [
+                runningDraftWorkflowRun,
+                ...runs.filter((run) => run.id !== "wr_draft"),
+              ]
+              return json(route, {
+                session: activeDevelopmentSession,
+                result: {
+                  run_id: draftWorkflowRun.id,
+                  status: "running",
+                },
+              })
             }
             expect(testBody).toMatchObject({
               async: true,
@@ -1273,11 +1423,21 @@ async function mockLauncherApis(
                 ? "draft failure stream"
                 : "draft stream"
           if (runID === "wr_draft") {
-            activeDevelopmentSession = {
-              ...workflowDraftSession,
-              status: "ready_to_publish",
-              last_test: workflowDraftLastTest,
-            }
+            activeDevelopmentSession =
+              activeDevelopmentSession?.last_test?.event_id != null
+                ? {
+                    ...activeDevelopmentSession,
+                    status: "ready_to_publish",
+                    last_test: {
+                      ...activeDevelopmentSession.last_test,
+                      status: "succeeded",
+                    },
+                  }
+                : {
+                    ...workflowDraftSession,
+                    status: "ready_to_publish",
+                    last_test: workflowDraftLastTest,
+                  }
             runs = [
               draftWorkflowRun,
               ...runs.filter((run) => run.id !== "wr_draft"),
@@ -2291,6 +2451,58 @@ test("workflow dashboard tolerates null persisted collections", async ({
   expect(errors).toEqual([])
 })
 
+test("workflow event builder applies YAML and runs a matched event-parity draft test", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+
+  await gotoMockedRoute(page, "/agent/workflows")
+  await page
+    .getByPlaceholder("Describe the workflow outcome")
+    .fill("Triage support tickets")
+  await page.getByRole("button", { name: "Start with AI" }).click()
+  await expect(
+    page.getByRole("heading", { name: "Workflow YAML", exact: true }),
+  ).toBeVisible()
+
+  await page.getByRole("tab", { name: "Builder" }).click()
+  await expect(page.getByText("Deterministic event routing")).toBeVisible()
+  await page
+    .getByRole("switch", { name: "Enable durable event trigger" })
+    .click()
+  await page
+    .getByRole("textbox", { name: "Sources", exact: true })
+    .fill("github")
+  await page
+    .getByRole("textbox", { name: "Event types", exact: true })
+    .fill("issues.opened")
+  await expect(
+    page.getByRole("button", { name: "Apply to YAML" }),
+  ).toBeEnabled()
+  await page.getByRole("button", { name: "Apply to YAML" }).click()
+
+  const eventPicker = page.getByLabel("Draft test event")
+  await expect(eventPicker).toBeVisible()
+  await expect(page.getByLabel("Secrets JSON")).toHaveCount(0)
+  await expect(page.getByRole("button", { name: "Test Draft" })).toBeDisabled()
+  await eventPicker.selectOption(eventResponse.id)
+  await expect(page.getByText(/selected event matches/)).toBeVisible()
+  await expect(page.getByRole("button", { name: "Test Draft" })).toBeEnabled()
+
+  await page.getByRole("button", { name: /payload/i }).click()
+  await expect(page.getByText(eventPayloadText)).toBeVisible()
+  await page.getByRole("button", { name: "Test Draft" }).click()
+  await expect(page.getByText("wr_draft", { exact: true })).toBeVisible()
+
+  await page.reload()
+  await expect(page.getByLabel("Draft test event")).toHaveValue(
+    eventResponse.id,
+  )
+  await expect(page.getByText(/selected event matches/)).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  expect(errors).toEqual([])
+})
+
 test("workflow dashboard supports AI draft, publish, and manual run loop", async ({
   page,
 }) => {
@@ -2306,7 +2518,9 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
   ).toBeAttached()
   await expect(page.getByRole("button", { name: "AI Review" })).toBeVisible()
   await page.getByRole("button", { name: "AI Review" }).click()
-  await expect(page.getByText("Workflow YAML")).toBeVisible()
+  await expect(
+    page.getByRole("heading", { name: "Workflow YAML", exact: true }),
+  ).toBeVisible()
   await expect(page.getByRole("textbox", { name: "AI brief" })).toHaveValue(
     /Review this workflow against the current PicoClaw runtime/,
   )
@@ -2366,7 +2580,9 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
   ).toBeVisible()
   await page.getByRole("button", { name: "Start with AI" }).click()
 
-  await expect(page.getByText("Workflow YAML")).toBeVisible()
+  await expect(
+    page.getByRole("heading", { name: "Workflow YAML", exact: true }),
+  ).toBeVisible()
   await expect(page.getByText("Only active draft")).toBeVisible()
   await expect(page.getByText("Publish readiness")).toBeVisible()
   const yamlEditor = page.getByRole("textbox", { name: "Workflow YAML" })
@@ -2415,7 +2631,9 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
   await expect(page.getByText("Ready to publish.")).toBeVisible()
 
   await page.reload()
-  await expect(page.getByText("Workflow YAML")).toBeVisible()
+  await expect(
+    page.getByRole("heading", { name: "Workflow YAML", exact: true }),
+  ).toBeVisible()
   await expect(page.getByText("wr_draft", { exact: true })).toBeVisible()
   await expect(page.getByRole("button", { name: "Publish" })).toBeEnabled()
   await expect(page.getByText("Ready to publish.")).toBeVisible()
@@ -2493,7 +2711,9 @@ test("workflow dashboard refreshes async draft status from polling without SSE",
     .getByPlaceholder("Describe the workflow outcome")
     .fill("Triage support tickets")
   await page.getByRole("button", { name: "Start with AI" }).click()
-  await expect(page.getByText("Workflow YAML")).toBeVisible()
+  await expect(
+    page.getByRole("heading", { name: "Workflow YAML", exact: true }),
+  ).toBeVisible()
   await page
     .locator("#workflow-test-inputs")
     .fill('{"ticket":"Printer is offline"}')

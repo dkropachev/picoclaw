@@ -30,12 +30,15 @@ type workflowDevelopmentTestRequest struct {
 	Prompt    string             `json:"prompt,omitempty"`
 	TargetRef string             `json:"target_ref,omitempty"`
 	YAML      *string            `json:"yaml,omitempty"`
+	EventID   string             `json:"event_id,omitempty"`
 	Inputs    map[string]any     `json:"inputs,omitempty"`
 	Secrets   map[string]string  `json:"secrets,omitempty"`
 	Session   string             `json:"session,omitempty"`
 	Delivery  workflows.Delivery `json:"delivery,omitempty"`
 	Async     bool               `json:"async,omitempty"`
 }
+
+const workflowDevelopmentTestRequestMaxBytes = 1 << 20
 
 type workflowCancelRequest struct {
 	Reason string `json:"reason,omitempty"`
@@ -48,6 +51,7 @@ type workflowRetryRequest struct {
 type workflowDefinitionResponse struct {
 	workflows.Definition
 	WorkflowCall *workflowCallContractResponse `json:"workflow_call,omitempty"`
+	EventTrigger *workflows.EventTrigger       `json:"event_trigger,omitempty"`
 }
 
 type workflowCallContractResponse struct {
@@ -56,6 +60,7 @@ type workflowCallContractResponse struct {
 }
 
 func (h *Handler) registerWorkflowRoutes(mux *http.ServeMux) {
+	h.registerWorkflowEditorRoutes(mux)
 	mux.HandleFunc("GET /api/workflows", h.handleListWorkflows)
 	mux.HandleFunc("GET /api/workflows/compatibility", h.handleGetWorkflowCompatibility)
 	mux.HandleFunc("POST /api/workflows/revalidate", h.handleRevalidateWorkflows)
@@ -130,6 +135,9 @@ func workflowDefinitionResponses(
 					Secrets: workflow.On.WorkflowCall.Secrets,
 				}
 			}
+			// LoadLocal returns a fresh parsed workflow owned by this response,
+			// so this is a safe read-only projection with no shared runtime state.
+			response.EventTrigger = workflow.On.Event
 		}
 		out = append(out, response)
 	}
@@ -310,7 +318,7 @@ func (h *Handler) handleCancelWorkflowRun(w http.ResponseWriter, r *http.Request
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 		return
 	}
-	_, _, executor, err := h.workflowRuntime(r.Context())
+	_, store, executor, err := h.workflowRuntime(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -322,7 +330,13 @@ func (h *Handler) handleCancelWorkflowRun(w http.ResponseWriter, r *http.Request
 		return
 	}
 	h.recordCanceledWorkflowDevelopmentRun(r.Context(), run)
-	writeWorkflowJSON(w, run)
+	writeWorkflowJSON(
+		w,
+		workflows.ProjectWorkflowRunForBrowser(
+			run,
+			workflows.IsEventBackedDraftRunFamily(r.Context(), store, run),
+		),
+	)
 }
 
 func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request) {
@@ -344,6 +358,14 @@ func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request)
 	previousRun, err := store.GetRun(r.Context(), r.PathValue("run_id"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if workflows.IsEventBackedDraftRunFamily(r.Context(), store, previousRun) {
+		http.Error(
+			w,
+			"event-backed draft run retries are unavailable; run the draft test again",
+			http.StatusConflict,
+		)
 		return
 	}
 	if err := workflows.EnsureWorkflowRunnable(
@@ -375,7 +397,10 @@ func (h *Handler) handleListWorkflowRuns(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeWorkflowJSON(w, map[string]any{"runs": runs})
+	writeWorkflowJSON(
+		w,
+		map[string]any{"runs": workflows.ProjectEventBackedDraftRunsForBrowser(runs)},
+	)
 }
 
 func (h *Handler) handleGetWorkflowRun(w http.ResponseWriter, r *http.Request) {
@@ -389,7 +414,13 @@ func (h *Handler) handleGetWorkflowRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	writeWorkflowJSON(w, run)
+	writeWorkflowJSON(
+		w,
+		workflows.ProjectWorkflowRunForBrowser(
+			run,
+			workflows.IsEventBackedDraftRunFamily(r.Context(), store, run),
+		),
+	)
 }
 
 func (h *Handler) handleGetWorkflowRunEvents(w http.ResponseWriter, r *http.Request) {
@@ -398,12 +429,27 @@ func (h *Handler) handleGetWorkflowRunEvents(w http.ResponseWriter, r *http.Requ
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	events, err := store.Events(r.Context(), r.PathValue("run_id"))
+	runID := r.PathValue("run_id")
+	run, err := store.GetRun(r.Context(), runID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	writeWorkflowJSON(w, map[string]any{"run_id": r.PathValue("run_id"), "events": events})
+	events, err := store.Events(r.Context(), runID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeWorkflowJSON(
+		w,
+		map[string]any{
+			"run_id": runID,
+			"events": workflows.ProjectWorkflowRunEventsForBrowser(
+				events,
+				workflows.IsEventBackedDraftRunFamily(r.Context(), store, run),
+			),
+		},
+	)
 }
 
 func (h *Handler) handleStreamWorkflowRunEvents(w http.ResponseWriter, r *http.Request) {
@@ -413,10 +459,12 @@ func (h *Handler) handleStreamWorkflowRunEvents(w http.ResponseWriter, r *http.R
 		return
 	}
 	runID := r.PathValue("run_id")
-	if _, err := store.GetRun(r.Context(), runID); err != nil {
+	run, err := store.GetRun(r.Context(), runID)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	maskDiagnostics := workflows.IsEventBackedDraftRunFamily(r.Context(), store, run)
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming is not supported", http.StatusInternalServerError)
@@ -434,6 +482,7 @@ func (h *Handler) handleStreamWorkflowRunEvents(w http.ResponseWriter, r *http.R
 		if err != nil {
 			return
 		}
+		events = workflows.ProjectWorkflowRunEventsForBrowser(events, maskDiagnostics)
 		for ; sent < len(events); sent++ {
 			data, err := json.Marshal(events[sent])
 			if err != nil {
@@ -570,9 +619,24 @@ func (h *Handler) handleValidateWorkflowDevelopment(w http.ResponseWriter, r *ht
 
 func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.Request) {
 	var req workflowDevelopmentTestRequest
-	if err := decodeOptionalWorkflowJSON(r, &req); err != nil {
-		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+	if err := decodeWorkflowDevelopmentTestRequest(w, r, &req); err != nil {
+		writeWorkflowDevelopmentTestRequestError(w, err)
 		return
+	}
+	eventID := req.EventID
+	if eventID != "" {
+		if !validOperatorEventID(eventID) {
+			writeWorkflowEventContextError(w, errWorkflowEventInvalid)
+			return
+		}
+		if workflowEventTestHasManualOverrides(req) {
+			http.Error(
+				w,
+				"event-backed draft tests use server-owned inputs, secrets, session, and delivery",
+				http.StatusBadRequest,
+			)
+			return
+		}
 	}
 	unlock := h.tryLockWorkflowDevelopment(w)
 	if unlock == nil {
@@ -598,8 +662,9 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 		return
 	}
 	if session.Validation == nil || !session.Validation.Valid {
-		recorded, recordErr := workflows.RecordWorkflowDevelopmentTest(
+		recorded, recordErr := recordWorkflowDevelopmentTestForEvent(
 			workspace,
+			eventID,
 			nil,
 			errors.New("workflow draft is not valid"),
 		)
@@ -616,16 +681,87 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 	}
 	workflow, err := workflows.Parse([]byte(session.YAML))
 	if err != nil {
-		recorded, recordErr := workflows.RecordWorkflowDevelopmentTest(workspace, nil, err)
+		responseError := err.Error()
+		if eventID != "" {
+			responseError = "workflow draft is not valid"
+		}
+		recorded, recordErr := recordWorkflowDevelopmentTestForEvent(
+			workspace,
+			eventID,
+			nil,
+			err,
+		)
 		if recordErr != nil {
 			writeWorkflowDevelopmentError(w, recordErr)
 			return
 		}
-		writeWorkflowJSONStatus(w, http.StatusBadRequest, map[string]any{"session": recorded, "error": err.Error()})
+		writeWorkflowJSONStatus(
+			w,
+			http.StatusBadRequest,
+			map[string]any{"session": recorded, "error": responseError},
+		)
 		return
+	}
+	runReq := workflows.RunRequest{
+		Workflow:    workflow,
+		WorkflowRef: "draft:" + session.TargetWorkflowRef,
+		Inputs:      req.Inputs,
+		Secrets:     req.Secrets,
+		Session:     req.Session,
+		Delivery:    req.Delivery,
+	}
+	if eventID != "" {
+		envelope, loadErr := h.loadWorkflowEventEnvelope(r.Context(), eventID, true)
+		if loadErr != nil {
+			writeWorkflowEventContextError(w, loadErr)
+			return
+		}
+		if workflow.On.Event == nil || !workflows.WorkflowMatchesEvent(workflow, envelope) {
+			recorded, recordErr := recordWorkflowDevelopmentTestForEvent(
+				workspace,
+				eventID,
+				nil,
+				errors.New("selected event does not match workflow event trigger"),
+			)
+			if recordErr != nil {
+				writeWorkflowDevelopmentError(w, recordErr)
+				return
+			}
+			writeWorkflowJSONStatus(
+				w,
+				http.StatusBadRequest,
+				map[string]any{
+					"session": recorded,
+					"error":   "selected event does not match workflow event trigger",
+				},
+			)
+			return
+		}
+		eventContext, contextErr := workflows.EventWorkflowRunContextFromEnvelope(
+			session.TargetWorkflowRef,
+			"",
+			envelope,
+		)
+		if contextErr != nil {
+			writeWorkflowEventContextError(w, errWorkflowEventUnavailable)
+			return
+		}
+		runReq.Inputs = eventContext.Inputs
+		runReq.Secrets = nil
+		runReq.Event = eventContext.Event
+		runReq.Session = eventContext.Session
+		runReq.Delivery = eventContext.Delivery
 	}
 	cfg, _, executor, err := h.workflowRuntime(r.Context())
 	if err != nil {
+		if eventID != "" {
+			http.Error(
+				w,
+				"event-backed draft test is unavailable",
+				http.StatusServiceUnavailable,
+			)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -639,14 +775,6 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 		http.Error(w, "workflows are disabled", http.StatusBadRequest)
 		return
 	}
-	runReq := workflows.RunRequest{
-		Workflow:    workflow,
-		WorkflowRef: "draft:" + session.TargetWorkflowRef,
-		Inputs:      req.Inputs,
-		Secrets:     req.Secrets,
-		Session:     req.Session,
-		Delivery:    req.Delivery,
-	}
 	if req.Async {
 		backgroundOwnsRuntime = true
 		asyncSessionID := session.ID
@@ -657,10 +785,11 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 			func(result *workflows.RunResult, runErr error) {
 				h.workflowDevelopmentMu.Lock()
 				defer h.workflowDevelopmentMu.Unlock()
-				_, _, _ = workflows.RecordWorkflowDevelopmentTestIfCurrent(
+				_, _, _ = recordWorkflowDevelopmentTestIfCurrentForEvent(
 					workspace,
 					asyncSessionID,
 					asyncDraftKey,
+					eventID,
 					result,
 					runErr,
 				)
@@ -671,8 +800,9 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 				RunID:  started.Run.ID,
 				Status: workflows.RunStatusRunning,
 			}
-			recorded, recordErr := workflows.RecordWorkflowDevelopmentTest(
+			recorded, recordErr := recordWorkflowDevelopmentTestForEvent(
 				workspace,
+				eventID,
 				runningResult,
 				nil,
 			)
@@ -689,23 +819,33 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 			return
 		}
 		if started.Err != nil {
-			recorded, recordErr := workflows.RecordWorkflowDevelopmentTest(workspace, started.Result, started.Err)
+			publicResult, publicErr := workflowDevelopmentTestOutcomeForEvent(
+				eventID,
+				started.Result,
+				started.Err,
+			)
+			recorded, recordErr := recordWorkflowDevelopmentTestForEvent(
+				workspace,
+				eventID,
+				publicResult,
+				publicErr,
+			)
 			if recordErr != nil {
 				writeWorkflowDevelopmentError(w, recordErr)
 				return
 			}
-			if started.Result == nil {
+			if publicResult == nil {
 				writeWorkflowJSONStatus(
 					w,
 					http.StatusBadRequest,
-					map[string]any{"session": recorded, "error": started.Err.Error()},
+					map[string]any{"session": recorded, "error": publicErr.Error()},
 				)
 				return
 			}
 			writeWorkflowJSONStatus(
 				w,
 				http.StatusBadRequest,
-				map[string]any{"session": recorded, "result": started.Result, "error": started.Err.Error()},
+				map[string]any{"session": recorded, "result": publicResult, "error": publicErr.Error()},
 			)
 			return
 		}
@@ -713,8 +853,14 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 		return
 	}
 	result, runErr := executor.Run(r.Context(), runReq)
+	result, runErr = workflowDevelopmentTestOutcomeForEvent(eventID, result, runErr)
 	if runErr != nil {
-		recorded, recordErr := workflows.RecordWorkflowDevelopmentTest(workspace, result, runErr)
+		recorded, recordErr := recordWorkflowDevelopmentTestForEvent(
+			workspace,
+			eventID,
+			result,
+			runErr,
+		)
 		if recordErr != nil {
 			writeWorkflowDevelopmentError(w, recordErr)
 			return
@@ -730,7 +876,12 @@ func (h *Handler) handleTestWorkflowDevelopment(w http.ResponseWriter, r *http.R
 		writeWorkflowJSON(w, map[string]any{"session": recorded, "result": result, "error": runErr.Error()})
 		return
 	}
-	recorded, recordErr := workflows.RecordWorkflowDevelopmentTest(workspace, result, nil)
+	recorded, recordErr := recordWorkflowDevelopmentTestForEvent(
+		workspace,
+		eventID,
+		result,
+		nil,
+	)
 	if recordErr != nil {
 		writeWorkflowDevelopmentError(w, recordErr)
 		return
@@ -880,6 +1031,49 @@ func decodeOptionalWorkflowJSON(r *http.Request, dest any) error {
 	return err
 }
 
+func decodeWorkflowDevelopmentTestRequest(
+	w http.ResponseWriter,
+	r *http.Request,
+	destination *workflowDevelopmentTestRequest,
+) error {
+	if r.Body == nil {
+		return nil
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(
+		w,
+		r.Body,
+		workflowDevelopmentTestRequestMaxBytes,
+	))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("workflow draft test request contains multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func writeWorkflowDevelopmentTestRequestError(w http.ResponseWriter, err error) {
+	var maximum *http.MaxBytesError
+	if errors.As(err, &maximum) {
+		http.Error(
+			w,
+			"workflow draft test request exceeds 1 MiB",
+			http.StatusRequestEntityTooLarge,
+		)
+		return
+	}
+	http.Error(w, "invalid workflow draft test request", http.StatusBadRequest)
+}
+
 func writeWorkflowJSON(w http.ResponseWriter, value any) {
 	writeWorkflowJSONStatus(w, http.StatusOK, value)
 }
@@ -957,6 +1151,86 @@ func writeWorkflowDevelopmentError(w http.ResponseWriter, err error) {
 	}
 }
 
+func writeWorkflowEventContextError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errWorkflowEventInvalid):
+		http.Error(w, "workflow event ID is invalid", http.StatusBadRequest)
+	case errors.Is(err, errWorkflowEventNotFound):
+		http.Error(w, "workflow event was not found", http.StatusNotFound)
+	default:
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "workflow event service is unavailable", http.StatusServiceUnavailable)
+	}
+}
+
+func workflowEventTestHasManualOverrides(req workflowDevelopmentTestRequest) bool {
+	return len(req.Inputs) != 0 ||
+		len(req.Secrets) != 0 ||
+		req.Session != "" ||
+		req.Delivery.Channel != "" ||
+		req.Delivery.ChatID != "" ||
+		req.Delivery.TopicID != "" ||
+		req.Delivery.ThreadTS != "" ||
+		req.Delivery.MessageID != "" ||
+		req.Delivery.ReplyToMessageID != "" ||
+		len(req.Delivery.ReplyHandles) != 0
+}
+
+func recordWorkflowDevelopmentTestForEvent(
+	workspace string,
+	eventID string,
+	result *workflows.RunResult,
+	testErr error,
+) (*workflows.WorkflowDevelopmentSession, error) {
+	if eventID == "" {
+		return workflows.RecordWorkflowDevelopmentTest(workspace, result, testErr)
+	}
+	return workflows.RecordWorkflowDevelopmentEventTest(
+		workspace,
+		eventID,
+		result,
+		testErr,
+	)
+}
+
+func workflowDevelopmentTestOutcomeForEvent(
+	eventID string,
+	result *workflows.RunResult,
+	testErr error,
+) (*workflows.RunResult, error) {
+	if eventID == "" {
+		return result, testErr
+	}
+	return workflows.SanitizeEventBackedDraftTestOutcome(result, testErr)
+}
+
+func recordWorkflowDevelopmentTestIfCurrentForEvent(
+	workspace string,
+	sessionID string,
+	draftKey string,
+	eventID string,
+	result *workflows.RunResult,
+	testErr error,
+) (*workflows.WorkflowDevelopmentSession, bool, error) {
+	if eventID == "" {
+		return workflows.RecordWorkflowDevelopmentTestIfCurrent(
+			workspace,
+			sessionID,
+			draftKey,
+			result,
+			testErr,
+		)
+	}
+	return workflows.RecordWorkflowDevelopmentEventTestIfCurrent(
+		workspace,
+		sessionID,
+		draftKey,
+		eventID,
+		result,
+		testErr,
+	)
+}
+
 func (h *Handler) recordCanceledWorkflowDevelopmentRun(ctx context.Context, run *workflows.Run) {
 	if run == nil || run.ID == "" || run.Status != workflows.RunStatusCanceled {
 		return
@@ -979,10 +1253,11 @@ func (h *Handler) recordCanceledWorkflowDevelopmentRun(ctx context.Context, run 
 		Status: workflows.RunStatusCanceled,
 		Error:  run.CancelReason,
 	}
-	_, _, recordErr := workflows.RecordWorkflowDevelopmentTestIfCurrent(
+	_, _, recordErr := recordWorkflowDevelopmentTestIfCurrentForEvent(
 		workspace,
 		session.ID,
 		session.LastTest.DraftKey,
+		session.LastTest.EventID,
 		result,
 		nil,
 	)

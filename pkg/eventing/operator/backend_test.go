@@ -79,6 +79,27 @@ func TestBackendProjectsSanitizedEventAndExactPayload(t *testing.T) {
 		t.Fatal("mutating returned payload changed the stored projection")
 	}
 
+	workflowEvent, err := backend.GetWorkflowEvent(context.Background(), testEventID)
+	if err != nil {
+		t.Fatalf("GetWorkflowEvent() error = %v", err)
+	}
+	if workflowEvent.ID != testEventID ||
+		string(workflowEvent.Payload) != string(stored.Envelope.Payload) {
+		t.Fatalf("workflow event = %#v, want exact event payload", workflowEvent)
+	}
+	serializedWorkflowEvent, err := json.Marshal(workflowEvent)
+	if err != nil {
+		t.Fatalf("json.Marshal(workflow event) error = %v", err)
+	}
+	assertSerializedSecretsAbsent(t, workflowEvent)
+	if !strings.Contains(string(serializedWorkflowEvent), "9007199254740993") {
+		t.Fatalf("workflow event changed the large numeric token: %s", serializedWorkflowEvent)
+	}
+	if strings.Contains(string(serializedWorkflowEvent), "routing") ||
+		strings.Contains(string(serializedWorkflowEvent), "payload_bytes") {
+		t.Fatalf("workflow event exposed operator bookkeeping: %s", serializedWorkflowEvent)
+	}
+
 	page.Events[0].Attributes["action"] = "changed"
 	page.Events[0].Actor.Attributes["login"] = "changed"
 	page.Events[0].Subject.Attributes["repo"] = "changed"
@@ -87,6 +108,52 @@ func TestBackendProjectsSanitizedEventAndExactPayload(t *testing.T) {
 		stored.Envelope.Subject.Attributes["repo"] != "owner/repo" {
 		t.Fatal("mutating an event view changed source maps")
 	}
+}
+
+func TestBackendWorkflowEventFailsClosedOnPayloadMetadataMismatch(t *testing.T) {
+	stored := testStoredEvent(testEventID)
+	changed := stored
+	changed.Envelope.Payload = append(
+		append(json.RawMessage(nil), stored.Envelope.Payload...),
+		' ',
+	)
+	store := &fakeStore{getResult: changed}
+
+	// The fake metadata read obtains this size, then the payload read obtains
+	// the replacement. A real event is immutable; a discrepancy indicates an
+	// inconsistent backend and must not produce a partial workflow context.
+	metadata := testEventMetadata(stored)
+	if metadata.PayloadBytes == len(store.getResult.Envelope.Payload) {
+		t.Fatal("test fixture did not create a payload size mismatch")
+	}
+
+	// Exercise the invariant directly with a store that returns the original
+	// metadata size and changed payload.
+	mismatch := &workflowEventMismatchStore{
+		fakeStore: store,
+		metadata:  metadata,
+	}
+	backend := testBackend(t, mismatch)
+	_, err := backend.GetWorkflowEvent(context.Background(), testEventID)
+	requireErrorIs(t, err, ErrUnavailable)
+
+	metadata = testEventMetadata(changed)
+	metadata.Envelope.ID = testReplayID
+	mismatch.metadata = metadata
+	_, err = backend.GetWorkflowEvent(context.Background(), testEventID)
+	requireErrorIs(t, err, ErrUnavailable)
+}
+
+type workflowEventMismatchStore struct {
+	*fakeStore
+	metadata eventing.StoredEventMetadata
+}
+
+func (store *workflowEventMismatchStore) GetEventMetadata(
+	context.Context,
+	string,
+) (eventing.StoredEventMetadata, error) {
+	return store.metadata, nil
 }
 
 func TestBackendProjectsDispatchWithoutLeaseToken(t *testing.T) {

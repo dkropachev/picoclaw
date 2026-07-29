@@ -430,7 +430,11 @@ func (d *EventWorkflowDispatcher) dispatchClaim(
 	if err != nil {
 		return errors.Join(err, d.retryDispatch(ctx, dispatch, err))
 	}
-	eventContext, err := EventContextFromEnvelope(stored.Envelope)
+	runContext, err := EventWorkflowRunContextFromEnvelope(
+		dispatch.WorkflowRef,
+		dispatch.ID,
+		stored.Envelope,
+	)
 	if err != nil {
 		return errors.Join(err, d.retryDispatch(ctx, dispatch, err))
 	}
@@ -448,17 +452,10 @@ func (d *EventWorkflowDispatcher) dispatchClaim(
 		Ref:         dispatch.WorkflowRef,
 		Workflow:    workflow,
 		WorkflowRef: dispatch.WorkflowRef,
-		Inputs: map[string]any{
-			"event_id":    stored.Envelope.ID,
-			"dispatch_id": dispatch.ID,
-			"source":      stored.Envelope.Source,
-			"connector":   stored.Envelope.Connector,
-			"type":        stored.Envelope.Type,
-			"event":       cloneMap(eventContext),
-		},
-		Event:    eventContext,
-		Session:  EventWorkflowSession(dispatch.WorkflowRef, stored.Envelope.ID),
-		Delivery: Delivery{},
+		Inputs:      runContext.Inputs,
+		Event:       runContext.Event,
+		Session:     runContext.Session,
+		Delivery:    runContext.Delivery,
 		OnRunPersisted: func(run *Run) error {
 			if run == nil || run.ID != dispatch.RunID {
 				return fmt.Errorf(
@@ -786,6 +783,45 @@ func (d *EventWorkflowDispatcher) now() time.Time {
 		return d.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+// EventWorkflowRunContext is the source-neutral workflow execution context
+// derived from one already-redacted durable envelope.
+type EventWorkflowRunContext struct {
+	Inputs   map[string]any
+	Event    map[string]any
+	Session  string
+	Delivery Delivery
+}
+
+// EventWorkflowRunContextFromEnvelope builds the context shared by durable
+// dispatch and explicit draft previews. A non-empty dispatch ID is included
+// only for a real durable dispatch; previews must not invent one.
+func EventWorkflowRunContextFromEnvelope(
+	workflowRef string,
+	dispatchID string,
+	envelope eventing.Envelope,
+) (EventWorkflowRunContext, error) {
+	eventContext, err := EventContextFromEnvelope(envelope)
+	if err != nil {
+		return EventWorkflowRunContext{}, err
+	}
+	inputs := map[string]any{
+		"event_id":  envelope.ID,
+		"source":    envelope.Source,
+		"connector": envelope.Connector,
+		"type":      envelope.Type,
+		"event":     cloneMap(eventContext),
+	}
+	if dispatchID = strings.TrimSpace(dispatchID); dispatchID != "" {
+		inputs["dispatch_id"] = dispatchID
+	}
+	return EventWorkflowRunContext{
+		Inputs:   inputs,
+		Event:    eventContext,
+		Session:  EventWorkflowSession(workflowRef, envelope.ID),
+		Delivery: Delivery{},
+	}, nil
 }
 
 // EventContextFromEnvelope returns a detached workflow expression context for
