@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -131,5 +132,98 @@ func TestCrossConnectorSecretIdentityNeverReachesDurableInbox(t *testing.T) {
 			bytes.Contains(data, []byte(secondSecret)) {
 			t.Fatal("durable event store contains a configured webhook signing credential")
 		}
+	}
+}
+
+func TestGitHubDeliveryPersistsRedactedPayloadAndDeduplicates(t *testing.T) {
+	t.Parallel()
+	secret := strings.Repeat("r", minimumGitHubSecretBytes)
+	databaseDir := t.TempDir()
+	store, err := eventing.Open(
+		context.Background(),
+		filepath.Join(databaseDir, "events.db"),
+		eventing.WithRedaction(nil, []string{secret}),
+	)
+	require.NoError(t, err)
+	storeClosed := false
+	t.Cleanup(func() {
+		if !storeClosed {
+			require.NoError(t, store.Close())
+		}
+	})
+
+	backend, err := NewBackend(BackendConfig{
+		Store: store,
+		ConnectorSecrets: map[string]string{
+			githubTestConnector: secret,
+		},
+		ConnectorFormats: map[string]string{
+			githubTestConnector: "github",
+		},
+		MaxPayloadBytes: 1 << 20,
+	})
+	require.NoError(t, err)
+	controller := NewController()
+	generation, err := controller.Activate(backend)
+	require.NoError(t, err)
+
+	firstBody := `{
+		"action":"opened",
+		"token":"` + secret + `",
+		"other":"kept",
+		"sender":{"login":"user-` + secret + `"},
+		"repository":{"full_name":"owner/repository-` + secret + `"}
+	}`
+	first := performRequest(
+		controller,
+		githubSignedRequest(
+			secret,
+			"issues",
+			"github-store-delivery",
+			firstBody,
+		),
+	)
+	second := performRequest(
+		controller,
+		githubSignedRequest(
+			secret,
+			"issues",
+			"github-store-delivery",
+			`{"action":"closed","other":"replacement"}`,
+		),
+	)
+	require.Equal(t, http.StatusAccepted, first.Code, first.Body.String())
+	require.Equal(t, http.StatusOK, second.Code, second.Body.String())
+
+	page, err := store.List(context.Background(), eventing.EventFilter{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, page.Events, 1)
+	stored := page.Events[0].Envelope
+	assert.Equal(t, "github", stored.Source)
+	assert.Equal(t, "issues.opened", stored.Type)
+	assert.Equal(t, "github-store-delivery", stored.DedupeKey)
+	assert.Nil(t, stored.OccurredAt)
+	assert.Contains(t, string(stored.Payload), eventing.RedactedValue)
+	assert.Contains(t, string(stored.Payload), `"other":"kept"`)
+	assert.NotContains(t, string(stored.Payload), "replacement")
+	assert.NotContains(t, string(stored.Payload), secret)
+	require.NotNil(t, stored.Actor)
+	assert.NotContains(t, stored.Actor.DisplayName, secret)
+	require.NotNil(t, stored.Subject)
+	assert.NotContains(t, stored.Subject.Name, secret)
+
+	require.NoError(t, controller.Deactivate(context.Background(), generation))
+	require.NoError(t, store.Close())
+	storeClosed = true
+
+	entries, err := os.ReadDir(databaseDir)
+	require.NoError(t, err)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(databaseDir, entry.Name()))
+		require.NoError(t, readErr)
+		assert.NotContains(t, string(data), secret)
 	}
 }

@@ -36,15 +36,21 @@ type admissionResponse struct {
 	Inserted bool   `json:"inserted"`
 }
 
+type admissionAuthentication struct {
+	dedupeKey    string
+	githubEvent  string
+	githubDigest []byte
+}
+
 func (backend *Backend) serveHTTP(w http.ResponseWriter, request *http.Request) {
 	connector, _ := connectorFromPath(request.URL.Path)
-	verifier, exists := backend.connectors[connector]
+	runtime, exists := backend.connectors[connector]
 	if !exists {
 		writeError(w, http.StatusNotFound)
 		return
 	}
 
-	webhookID, headersOK := authenticationHeaders(request.Header)
+	authentication, headersOK := runtime.authenticationHeaders(request.Header)
 	if !headersOK {
 		writeError(w, http.StatusUnauthorized)
 		return
@@ -54,7 +60,7 @@ func (backend *Backend) serveHTTP(w http.ResponseWriter, request *http.Request) 
 		return
 	}
 
-	request.Body = http.MaxBytesReader(w, request.Body, backend.maxRequestBodyBytes)
+	request.Body = http.MaxBytesReader(w, request.Body, runtime.maxRequestBodyBytes)
 	body, err := io.ReadAll(request.Body)
 	if err != nil {
 		var maximumError *http.MaxBytesError
@@ -66,25 +72,26 @@ func (backend *Backend) serveHTTP(w http.ResponseWriter, request *http.Request) 
 		return
 	}
 
-	if verifyErr := verifier.Verify(body, request.Header); verifyErr != nil {
+	if !runtime.verify(body, request.Header, authentication) {
 		writeError(w, http.StatusUnauthorized)
 		return
 	}
-	input, err := decodeAdmissionRequest(body)
-	if err != nil {
+
+	input, source, decodeErr := runtime.decode(body, authentication)
+	if decodeErr != nil {
 		writeError(w, http.StatusBadRequest)
 		return
 	}
-	if backend.identityContainsSecret(webhookID, input.eventType) {
+	if backend.identityContainsSecret(authentication.dedupeKey, input.eventType) {
 		writeError(w, http.StatusBadRequest)
 		return
 	}
 
 	result, err := backend.store.Insert(request.Context(), eventing.Envelope{
-		Source:     "webhook",
+		Source:     source,
 		Connector:  connector,
 		Type:       input.eventType,
-		DedupeKey:  webhookID,
+		DedupeKey:  authentication.dedupeKey,
 		Actor:      input.actor,
 		Subject:    input.subject,
 		OccurredAt: input.occurredAt,
@@ -114,6 +121,56 @@ func (backend *Backend) serveHTTP(w http.ResponseWriter, request *http.Request) 
 	})
 }
 
+func (runtime connectorRuntime) authenticationHeaders(
+	headers http.Header,
+) (admissionAuthentication, bool) {
+	switch runtime.format {
+	case connectorFormatStandard:
+		id, ok := standardAuthenticationHeaders(headers)
+		return admissionAuthentication{dedupeKey: id}, ok
+	case connectorFormatGitHub:
+		return githubAuthenticationHeaders(headers)
+	default:
+		return admissionAuthentication{}, false
+	}
+}
+
+func (runtime connectorRuntime) verify(
+	body []byte,
+	headers http.Header,
+	authentication admissionAuthentication,
+) bool {
+	switch runtime.format {
+	case connectorFormatStandard:
+		return runtime.standardVerifier != nil &&
+			runtime.standardVerifier.Verify(body, headers) == nil
+	case connectorFormatGitHub:
+		return verifyGitHubSignature(
+			runtime.githubSecret,
+			body,
+			authentication.githubDigest,
+		)
+	default:
+		return false
+	}
+}
+
+func (runtime connectorRuntime) decode(
+	body []byte,
+	authentication admissionAuthentication,
+) (admissionRequest, string, error) {
+	switch runtime.format {
+	case connectorFormatStandard:
+		input, err := decodeAdmissionRequest(body)
+		return input, "webhook", err
+	case connectorFormatGitHub:
+		input, err := decodeGitHubAdmissionRequest(body, authentication.githubEvent)
+		return input, "github", err
+	default:
+		return admissionRequest{}, "", errors.New("unsupported webhook connector format")
+	}
+}
+
 func (backend *Backend) identityContainsSecret(values ...string) bool {
 	for _, value := range values {
 		for _, secret := range backend.secretValues {
@@ -125,7 +182,7 @@ func (backend *Backend) identityContainsSecret(values ...string) bool {
 	return false
 }
 
-func authenticationHeaders(headers http.Header) (string, bool) {
+func standardAuthenticationHeaders(headers http.Header) (string, bool) {
 	id, idOK := exactlyOneHeader(headers, standardwebhooks.HeaderWebhookID)
 	timestamp, timestampOK := exactlyOneHeader(
 		headers,

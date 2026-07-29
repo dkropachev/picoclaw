@@ -15,11 +15,11 @@ reconciles workflow runs after process failure without repeating an interrupted
 run.
 
 The current stage opens the opt-in inbox, runs routing/dispatch workers with the
-gateway lifecycle, accepts authenticated generic webhook deliveries on the
-existing shared gateway listener, and can opt existing Delta Chat email channel
-instances into durable `message.received` admission. GitHub-specific
-delivery, operator API/CLI endpoints, and event UI remain later stages. Durable
-inputs remain separate from the process-local
+gateway lifecycle, accepts authenticated Standard Webhooks and native GitHub
+deliveries on the existing shared gateway listener, and can opt existing Delta
+Chat email channel instances into durable `message.received` admission.
+Operator API/CLI endpoints and event UI remain later stages. Durable inputs
+remain separate from the process-local
 [`pkg/events`](../../pkg/events) observability bus: runtime events are
 best-effort in-process signals, while external automation events and dispatch
 state survive restart.
@@ -90,6 +90,7 @@ state survive restart.
 | `FR-EVENT-AUTOMATION-027` | MUST | A configured channel message is synchronously admitted after allow-list and group-trigger filtering. | Durable insertion succeeds or deduplicates before the ordinary channel turn continues. `mirror` then preserves the existing queue and opaque process-local turn-UX identity; `event_only` consumes the message without queueing, typing, reaction, or placeholder UX and releases turn-scoped media. Unconfigured and process-internal messages retain their prior path. | A successful insert owns the durable event; an insert error releases turn media, queues nothing, and is returned to a transport capable of retrying. Mirror typing, reaction, and placeholder artifacts form one exact-turn generation. The manager detaches and gives the prior generation bounded cleanup before starting the next provider generation, and provider stop/undo callbacks are exact-generation pinned so an older timed-out callback cannot clear newer UX. Cancellation, bus closure, abandoned/no-output work, or a stale worker removes only its exact generation; a committed buffered normal/error/tool/stream output retains cleanup ownership. Steering atomically commits to a live session owner after slow preparation or claims a new worker, and continuation output retains the original same-chat UX identity; cross-chat or ownerless steering cleans its secondary generation immediately after the queue commit. | Rejected senders and group noise never reach event admission. Admission receives detached metadata, cannot mutate the queued message, and a closed bus never runs the hook. Turn UX identity is excluded from serialized routing context. | The transport must not acknowledge volatile work, leak unconsumed media, strand a steering message, leave user-facing artifacts for an unqueued message, or let a stale rollback corrupt a newer turn. |
 | `FR-EVENT-AUTOMATION-028` | MUST | Delta Chat starts or emits `IncomingMsg`, message-specific `MsgsChanged`, pending-download `MsgsChanged`, or `EventChannelOverflow`. | Provider events are notification-only: startup, every `IncomingMsg`, every message-specific `MsgsChanged`, pending-download generic `MsgsChanged`, and overflow wake an ascending `get_next_msgs` drain; overflow is handled before account filtering because it reports `contextId=0`. Authorized complete content uses only the provider-local Delta message ID as deduplication input, prefers locally observed receipt time over sender-controlled mail `Date`, and runs `markseen_msgs` only after successful durable admission or ordinary forwarding. There is no listener acknowledged-ID ring. | Successful, deliberately filtered, own, device, empty, or undecipherable messages advance the provider cursor in strict ascending order. Retryable download/fetch/admission/ack failure at a lower accepted ID blocks all later IDs. An incomplete message's RFC724 Message-ID is retained only in process for replacement correlation, never deduplication or durable payload. | A full download is driven by provider notifications rather than bounded polling. If the original remains in the ordered queue it must complete; if absent, it retires only after candidates through the last RFC-correlated replacement are processed. An unrelated complete batch cannot retire it, and without a visible correlated replacement the pending original conservatively blocks the queue. Shutdown cancels retry loops. Raw account blob paths never cross admission or enter agent text; unavailable media yields only a safe filename annotation. | Email ingestion must not lose MIME parts, duplicate mirror turns from stale provider notifications, retire pending work on unrelated traffic, acknowledge before durable ownership, let a forged mail date steer time-based routing, or skip retryable work through high-water advancement. |
 | `FR-EVENT-AUTOMATION-029` | MUST | Startup, reload, rollback, shutdown, or a timed-out insert drain changes channel adapter/store generations. | A process-stable admission controller fences the exact prepared connector set before channels publish and collision-safely, identity-owned registers on the existing bus seam. Gateway commit first stages both channel and webhook backends as validated non-accepting reservations, aborts earlier reservations if any later staging check fails, records their generation identities, and only then reaches an irreversible aggregate commit point and publishes both sequentially through no-fail commits under its serialized lifecycle. It waits for admitted inserts before store close, restores a freshly prepared old backend on rollback, and closes only after pending publishers and active inserts resolve. | Generation identities fence delayed cleanup; active, retiring, staged, prepared, pending, and closed connector state move atomically. Sequential publication may transiently make one transport observable before the other after the irreversible commit point; both backends share the committed store and readiness remains false until both are published. | Candidate-only configured messages wait while unrelated/internal messages pass. Mismatched preparation, a pre-existing admission owner, or either controller's staging invariant fails closed before either candidate accepts traffic; no aggregate activation that returns an error exposes or acknowledges either candidate. Stale abort/cleanup cannot affect a replacement, a drain timeout leaves the old store open for retry, and failed recovery remains unready. | Hot reload must not insert an acknowledged channel event into a provisional/closed database, leave a failed half-commit, let a newly configured connector bypass durable admission, or displace another bus admission owner. |
+| `FR-EVENT-AUTOMATION-030` | MUST | An enabled `events.ingress.webhooks.<connector>` selects `format: github` and GitHub sends one bounded JSON-object delivery with exactly one `X-Hub-Signature-256`, `X-GitHub-Delivery`, and `X-GitHub-Event` header. | The adapter verifies the `sha256=` HMAC over the exact raw body before decoding, passes the complete authenticated object to the ordinary payload redaction and normalization path, assigns source `github`, the path connector, type `<event>` or `<event>.<action>`, and the delivery ID as deduplication key, and promotes only bounded sender/repository metadata. Envelope attributes explicitly record `body_authenticated=true`, `headers_authenticated=false`, and `signature_algorithm=hmac-sha256`. | The ordinary redacting inbox atomically owns a new delivery before `202`, or returns the retained first event with `200` and `inserted: false`; it uses the same generation-fenced shared route and lifecycle as Standard Webhooks. | Missing, duplicated, malformed, or oversized authentication headers fail uniformly with `401`; malformed JSON, an invalid signed action, or a secret-bearing identity fails before mutation with `400`. GitHub signs the body but not its event/delivery headers and supplies no signed timestamp, so public ingress requires trusted TLS termination. The local default body limit is 1 MiB even though GitHub permits payloads up to 25 MiB. Deduplication protects a delivery only while its durable event remains retained; a redelivery after eligible pruning is a new event. | Native mapping makes GitHub automation useful without a second listener or a parallel durability, redaction, workflow, or reload system, while preserving the provider protocol's real trust boundary. |
 
 ## Data And State Model
 
@@ -169,8 +170,15 @@ GitHub's `x_hub_signature` and `x_hub_signature_256` headers are also mandatory.
 Configuration owns policy; `pkg/eventing` owns normalized data and persistence.
 
 `events.ingress.webhooks` maps conservative, case-distinct connector names to
-an `enabled` flag and a Standard Webhooks `whsec_` signing secret with at least
-32 decoded bytes. JSON serialization emits only `[NOT_HERE]`; the normal
+an `enabled` flag, an optional `format`, and a signing secret. Omitted or
+`standard` format preserves the existing Standard Webhooks contract and
+requires a canonical `whsec_` secret containing at least 32 decoded bytes.
+`github` selects native GitHub delivery authentication and requires an exactly
+trimmed 32–256 byte UTF-8 webhook secret. The format is explicit and closed;
+unknown values fail enabled configuration rather than falling back to another
+verifier.
+
+JSON serialization emits only `[NOT_HERE]` for either secret format; the normal
 `.security.yml`, `enc://`, and `file://` secure-string paths own the actual
 value. Security-only entries cannot create or resurrect connectors removed
 from JSON. Secure references are resolved only after the supported master
@@ -179,7 +187,7 @@ connectors present in the persisted JSON, then apply explicit replacements and
 quietly resolve the final active candidate; this permits repair of a broken old
 reference without probing it first. The master ingress switch is authoritative:
 inactive references remain unresolved and load/save-stable. No configured
-connector map key may contain a canonical signing secret, even while inactive.
+connector map key may contain a validated signing secret, even while inactive.
 
 `events.ingress.channels` maps existing Delta Chat channel instance names to
 `enabled`, `source`, and `mode`. `source` must be `email` and defaults to email
@@ -263,6 +271,57 @@ uses the exact bounded request bytes, so JSON numbers—including integers
 outside JavaScript's exact range and exponent spellings—reach the durable
 payload unchanged before store redaction and normalization.
 
+With `format: github`, the same route accepts GitHub's native delivery shape
+rather than the transport-owned schema above:
+
+```http
+POST /webhooks/events/primary
+Content-Type: application/json
+X-GitHub-Delivery: 4f30a410-...
+X-GitHub-Event: pull_request
+X-Hub-Signature-256: sha256=<hex HMAC>
+```
+
+The adapter verifies the exact body using HMAC-SHA256 and then submits the
+complete JSON object to the ordinary payload redaction and normalization path.
+`X-GitHub-Event: pull_request` plus a signed
+top-level `"action": "opened"` maps to `pull_request.opened`; without a
+top-level action field it maps to `pull_request`. `X-GitHub-Delivery` is the
+connector-scoped deduplication key. Safe bounded `sender` metadata may become
+the actor and `repository` metadata may become the subject. The authenticated
+object remains the semantic source, while its durable copy is subject to the
+same recursive redaction and canonical normalization as every inbox payload.
+
+GitHub's signature covers only the body—not `X-GitHub-Event`,
+`X-GitHub-Delivery`, or other headers—and includes no signed timestamp. The
+adapter therefore persists `body_authenticated: "true"`,
+`headers_authenticated: "false"`, and
+`signature_algorithm: "hmac-sha256"` attributes. A trusted TLS boundary must
+protect the route and preserve one exact value for each required header.
+Workflows making security-sensitive decisions should inspect signed payload
+fields in addition to routing metadata.
+
+PicoClaw's default `events.ingress.max_payload_bytes` remains 1 MiB. GitHub
+allows webhook payloads up to 25 MiB, so operators who need larger provider
+events must deliberately raise the local bound and account for durable storage
+and workflow-context cost. A delivery ID deduplicates while its first event is
+retained; after terminal retention pruning removes that event, a later GitHub
+redelivery with the same ID is admitted as a new event.
+
+GitHub and Standard Webhooks share the same transport status policy:
+
+| Status | Meaning |
+| --- | --- |
+| `202 Accepted` | A new event is durably inserted; routing continues asynchronously. |
+| `200 OK` | The retained first event already owns this connector-scoped delivery ID. |
+| `400 Bad Request` | Authenticated content or a durable identity is malformed or unsafe. |
+| `401 Unauthorized` | Required authentication headers are missing, duplicated, malformed, or do not verify. |
+| `404 Not Found` | The connector/path is unknown, disabled, or non-canonical. |
+| `405 Method Not Allowed` | The route was called with a method other than `POST`. |
+| `413 Content Too Large` | The request or normalized payload exceeds configured bounds. |
+| `415 Unsupported Media Type` | Content type or encoding is unsupported. |
+| `503 Service Unavailable` | Admission is inactive/draining or the durable insert failed retryably. |
+
 Workflow event filters are declared under `on.event`. `sources`, `connectors`,
 and `types` accept a string or string list. Optional `actor` and `subject`
 filters accept `ids`, `types`, and string-list `attributes`; top-level
@@ -332,10 +391,10 @@ Owns: TEST web/backend/api/config_event_channel_test.go
 | --- | --- | --- | --- |
 | Config | `events.ingress.enabled` | Opt-in master switch; omitted and explicit `false` preserve the pre-feature runtime and create no database. | `FR-EVENT-AUTOMATION-001`, `FR-EVENT-AUTOMATION-012` |
 | Config | `events.ingress.database_path`, `retention_days`, `max_payload_bytes`, `redact_fields` | Resolve a safe workspace database default while preserving explicit policy values used by store construction and ingest/retention calls. | `FR-EVENT-AUTOMATION-001`, `FR-EVENT-AUTOMATION-003`, `FR-EVENT-AUTOMATION-011` |
-| Config | `events.ingress.webhooks.<connector>` | Opt-in connector name, enablement, and securely persisted Standard Webhooks secret; enabled values are validated before storage or route construction and passed to durable exact-secret redaction. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-024` |
+| Config | `events.ingress.webhooks.<connector>` | Opt-in connector name, enablement, `standard`/`github` format, and securely persisted format-specific secret; omitted format remains Standard Webhooks. Enabled values are validated before storage or route construction and passed to durable exact-secret redaction. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-024`, `FR-EVENT-AUTOMATION-030` |
 | Config | `events.ingress.channels.<channel-instance>` | Opt-in source and mirror/event-only mode for one existing enabled channel instance, with Delta Chat email defaults and enabled-load/API validation. | `FR-EVENT-AUTOMATION-025` |
 | HTTP | `PUT /api/config`, `PATCH /api/config` | Omitted or `[NOT_HERE]` webhook secrets preserve the current secure value; an explicit valid secret rotates it, while an explicit empty value can clear only a disabled connector because enabled connector validation rejects it. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-024` |
-| HTTP | `POST /webhooks/events/{connector}` | Strict, bounded Standard Webhooks authentication and envelope normalization with durable `202`/duplicate `200` acknowledgement and retry-safe error statuses. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-023` |
+| HTTP | `POST /webhooks/events/{connector}` | Strict, bounded format-selected Standard Webhooks or native GitHub authentication and normalization with durable `202`/duplicate `200` acknowledgement and retry-safe error statuses. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-023`, `FR-EVENT-AUTOMATION-030` |
 | Go API | `bus.InboundAdmission`, `MessageBus.PublishInboundWithPreparation` | Synchronous detached channel-origin admission before queue and conditional turn UX; internal messages and unconfigured channels preserve direct queueing. | `FR-EVENT-AUTOMATION-027` |
 | Go API | `pkg/eventing/channelmessage.Backend`, `Controller` | Bounded safe message normalization, hashed deduplication, synchronous store insertion, mirror/event-only decision, and exact prepared-generation activation/drain. | `FR-EVENT-AUTOMATION-026`, `FR-EVENT-AUTOMATION-027`, `FR-EVENT-AUTOMATION-029` |
 | Runtime | Delta Chat ordered provider queue, notification events, and acknowledgement loop | Drain `get_next_msgs` on startup and provider wake events, correlate full-download replacement IDs process-locally, retry strictly in order before cursor advancement, and expose only safe event metadata. | `FR-EVENT-AUTOMATION-028` |
@@ -406,9 +465,9 @@ Owns: TEST web/backend/api/config_event_channel_test.go
     prune batches at 500 rows.
 13. When gateway ingress is enabled, open and validate the store synchronously,
     include every enabled webhook secret in exact-value redaction, and build an
-    inactive candidate webhook backend. If workflows are disabled, keep the
-    store open for connector/operations ownership but start no routing or
-    dispatch goroutine.
+    inactive candidate webhook backend with each connector's effective format.
+    If workflows are disabled, keep the store open for connector/operations
+    ownership but start no routing or dispatch goroutine.
 14. A router claims one event, renews its routing lease while reading the current
     local catalog, requires current compatibility, parses and validates each
     candidate, evaluates deterministic `on.event` filters, and atomically fences
@@ -454,18 +513,27 @@ Owns: TEST web/backend/api/config_event_channel_test.go
     channel/media dependencies, and provider state.
 19. For HTTP admission, require the escaped path to equal the literal decoded
     ASCII route before selecting its named connector. Reject percent-encoded
-    aliases, unsupported method/media/content encoding, cap the raw body, and
-    require exactly one of each Standard Webhooks header. Verify timestamp
-    tolerance and HMAC over the exact raw body with only that connector's
-    precompiled secret before decoding any envelope field.
-20. Decode exactly one strict object, reject transport/server-owned or unknown
-    fields, require an object payload, and map `Webhook-Id` to `dedupe_key`,
-    source to `webhook`, and connector to the route name. Reject configured
-    signing-secret substrings in connector, type, or deduplication identities
-    instead of persisting or rewriting them. Insert synchronously; return `202`
-    for a new row or `200` with the original ID for a duplicate. Workflow
-    routing and execution remain asynchronous after that durable transport
-    acknowledgement.
+    aliases, unsupported method/media/content encoding, and cap the raw body.
+    For `standard`, require exactly one Standard Webhooks ID, timestamp, and
+    signature header, then verify timestamp tolerance and HMAC over the exact
+    raw body. For `github`, require exactly one delivery ID, event type, and
+    `sha256=` signature header and verify HMAC-SHA256 over the exact raw body.
+    Authentication always uses only that connector's prevalidated secret and
+    precedes JSON decoding.
+20. For `standard`, decode exactly one strict transport object, reject
+    transport/server-owned or unknown fields, require an object payload, and
+    map `Webhook-Id` to `dedupe_key`, source to `webhook`, and connector to the
+    route name. For `github`, require the complete body to be one object, pass
+    it as payload through ordinary redaction and normalization, derive source
+    `github`, deduplication from
+    `X-GitHub-Delivery`, and type from `X-GitHub-Event` plus a non-empty signed
+    top-level action. Promote only bounded sender/repository projections and
+    persist that the body is authenticated while headers are not. Reject
+    configured signing-secret substrings in connector, type, action, or
+    deduplication identities instead of persisting or rewriting them. Insert
+    synchronously; return `202` for a new row or `200` with the original ID for
+    a duplicate. Workflow routing and execution remain asynchronous after that
+    durable transport acknowledgement.
 21. After channel authorization and group-trigger filtering, normalize only
     allow-listed message, subject, actor, conversation, reply, occurrence, and
     attachment metadata. Derive a fixed-length deduplication key from length-prefixed
@@ -509,15 +577,16 @@ owns the input, routing work, dispatch intent, deterministic run identity, and
 lease/recovery state consumed by those workers. Creating a dispatch is still a
 separate durable step before execution.
 
-[Generic webhooks](../../pkg/eventing/webhook) normalize their strict signed
-body directly into this envelope on the channel manager's shared HTTP mux.
+[Webhook ingress](../../pkg/eventing/webhook) normalizes Standard Webhooks or
+native GitHub deliveries directly into this envelope on the channel manager's
+shared HTTP mux.
 [Chat channels](chat-channels.md) own provider authorization, group filtering,
 and transport UX; opted-in instances pass safe normalized metadata through the
 durable channel-message adapter. Delta Chat additionally owns notification-
 driven ordered fetch, process-local full-download replacement correlation, and
-retry-before-seen email acknowledgement. Later GitHub-specific,
-operator API/CLI, and dashboard stages consume the store but do not redefine
-its deduplication, leasing, redaction, replay, or retention semantics.
+retry-before-seen email acknowledgement. Later operator API/CLI and dashboard
+stages consume the store but do not redefine its deduplication, leasing,
+redaction, replay, or retention semantics.
 
 [Security and isolation](security-isolation.md) owns secure persistence of each
 webhook signing secret and workflow side-effect policy. Signing adds no new
@@ -597,10 +666,19 @@ existing workflow agent/tool policy.
   stale, future, or mismatched signing header. Unsupported methods, media types,
   encodings, non-canonical encoded route aliases, malformed bodies,
   secret-bearing identity fields, and body limits mutate no durable state.
+- GitHub authentication validates the raw body only. Its event and delivery
+  headers remain explicitly unauthenticated routing metadata, so TLS must
+  protect the client-to-gateway path (or every hop to a trusted terminating
+  proxy). The absence of a signed timestamp means retained delivery-ID
+  deduplication, not signature freshness, is the replay boundary.
+- The one-MiB local default intentionally rejects larger GitHub deliveries with
+  `413` even though the provider permits payloads up to 25 MiB. Raising the
+  configured bound is explicit resource policy, not an automatic provider
+  exception.
 - A successful response always names a durable event. Concurrent retries with
-  the same `Webhook-Id` return the original ID and first payload; workflow
-  failure occurs after acknowledgement and is visible through durable dispatch
-  state instead of changing the HTTP result.
+  the same `Webhook-Id` or `X-GitHub-Delivery` return the retained original ID
+  and first payload; workflow failure occurs after acknowledgement and is
+  visible through durable dispatch state instead of changing the HTTP result.
 - Reload and shutdown reject new webhook requests with retryable `503` before
   draining admitted inserts. A drain timeout leaves the store open for a later
   retry; a provisional candidate never acknowledges into its database.
@@ -627,8 +705,16 @@ existing workflow agent/tool policy.
   and shutdown cancels the retry loop.
 - The compatibility version bump makes pre-`on.event` stamps stale, so newly
   understood event YAML cannot activate until explicitly revalidated.
-- This stage intentionally has no GitHub-specific event adapter, event operator
-  CLI/API endpoint, or frontend route.
+- This stage intentionally adds GitHub delivery ingestion only; GitHub
+  side-effect actions, event operator CLI/API endpoints, and frontend routes
+  remain separate later stages.
+
+GitHub protocol references: [validating webhook
+deliveries](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries),
+[webhook best
+practices](https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks),
+and [event/payload
+schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 
 ## Acceptance Evidence
 
@@ -651,6 +737,7 @@ existing workflow agent/tool policy.
 | `FR-EVENT-AUTOMATION-026`, `FR-EVENT-AUTOMATION-027` | [pkg/eventing/channelmessage/backend_test.go](../../pkg/eventing/channelmessage/backend_test.go), [pkg/bus/bus_test.go](../../pkg/bus/bus_test.go), [pkg/channels/base_test.go](../../pkg/channels/base_test.go), [pkg/gateway/event_channel_test.go](../../pkg/gateway/event_channel_test.go) |
 | `FR-EVENT-AUTOMATION-028` | [pkg/channels/deltachat/deltachat_test.go](../../pkg/channels/deltachat/deltachat_test.go) |
 | `FR-EVENT-AUTOMATION-029` | [pkg/eventing/channelmessage/controller_test.go](../../pkg/eventing/channelmessage/controller_test.go), [pkg/gateway/event_channel_test.go](../../pkg/gateway/event_channel_test.go) |
+| `FR-EVENT-AUTOMATION-030` | [pkg/config/events_webhook_format_test.go](../../pkg/config/events_webhook_format_test.go), [pkg/eventing/webhook/github_test.go](../../pkg/eventing/webhook/github_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go) |
 
 ## Implementation Anchors
 
