@@ -10,12 +10,14 @@ PicoClaw exposes the agent through chat channels and the gateway. Channels
 normalize inbound messages, enforce allow/trigger rules, forward work to the
 agent bus, optionally pass opted-in instances through synchronous durable-event
 admission, and deliver outbound text/media responses through platform-specific
-transports.
+transports. The authenticated channel catalog and editor include the built-in
+Delta Chat email channel with presence-only legacy password handling, required
+email validation, sidebar discovery, and ordinary gateway restart feedback.
 
 ## Reconstruction Notes
 
 - Similarity target: recreate channel adapters with a common base, manager startup, webhook/socket registration, inbound normalization, outbound workers, and gateway lifecycle.
-- Core types/functions: channel factory registry, `BaseChannel`, `ChannelManager`, message bus, gateway bootstrap/reload/shutdown, Pico websocket/media handlers.
+- Core types/functions: channel factory registry, `BaseChannel`, `ChannelManager`, message bus, gateway bootstrap/reload/shutdown, Pico websocket/media handlers, and the secret-safe Delta Chat catalog/config projection.
 - Runtime ordering: load channel config, instantiate enabled adapters, register webhooks, start workers, publish inbound context, queue outbound response, send platform message, emit events.
 - Non-obvious constraints: platform-specific allow lists, group trigger logic,
   placeholder/typing UX, reply IDs, media references, rate limiting, closed-bus
@@ -40,6 +42,7 @@ transports.
 | `FR-CHANNEL-012` | MUST | Channel reload detaches and retires an old adapter identity before replacement construction, drains its admitted sends, joins its workers, and stops it before starting a same-name candidate. The candidate remains absent from lookup, synchronous send, outbound dispatch, and HTTP routing until `Start` succeeds. Failed or timed-out retirement remains manager-owned and blocks duplicate construction until cleanup succeeds. Shutdown joins dispatchers, retires/cancels workers to release full-queue senders, drains admitted direct sends, joins workers, then stops each adapter; errors are returned and successful stops are not repeated on retry. | A replacement must never overlap the old adapter or receive traffic before it is ready, and shutdown must neither panic on raced queue access nor deadlock behind a full retired queue. |
 | `FR-CHANNEL-013` | MUST | After channel allow-list and group-trigger checks, BaseChannel marks accepted transport messages as channel-origin and publishes through the optional synchronous inbound-admission seam. Admission-consumed or rejected messages release turn-scoped media and return without entering the agent queue or creating typing, reaction, or placeholder UX; forwarded and unconfigured messages preserve the existing pre-queue UX and chat path; process-internal bus messages bypass admission. Every forwarded turn receives an opaque process-local UX identity excluded from serialized context. Typing, reaction, and placeholder artifacts are registered as one same-chat generation; the manager serializes each provider transition, detaches and gives the prior generation bounded cleanup before starting the next, and mutates all three artifacts atomically under a separate short-lived map lock. Provider stop/undo callbacks are exact-generation pinned, so a timed-out older callback cannot clear newer UX. Steering preparation rechecks session ownership after slow work, then atomically queues and rebinds same-chat UX to a pinned owner or claims a fresh worker; a committed cross-chat or ownerless steering message immediately removes its secondary chat generation because the active turn cannot own that key. Cancellation, bus closure, abandoned reservations, no-output turns, and stale workers remove only their exact artifacts, while buffered normal/error/tool/stream output retains cleanup ownership. | Durable event-only routing must be additive and cannot leak copied media, strand a steering message, leave an unanswered “Thinking…” artifact, corrupt a concurrent turn, or change non-channel producers. |
 | `FR-CHANNEL-014` | MUST | Delta Chat treats provider events only as notifications: startup, every `IncomingMsg`, and every message-specific `MsgsChanged` wake an ascending `get_next_msgs` drain; pending downloads also wake on generic `MsgsChanged`, and `EventChannelOverflow` wakes before account filtering because overflow reports `contextId=0`. The provider queue is authoritative and no acknowledged-event ring is retained. Incomplete download/fetch, publish, and acknowledgement retry with capped context-aware backoff; acknowledgement is strictly ascending after successful durable admission or ordinary forwarding, so a retryable lower message blocks every later ID. Deliberately filtered, own, device, empty, and undecipherable messages advance the cursor. An incomplete original's RFC724 Message-ID is retained process-locally only to correlate replacement IDs, never for deduplication or a durable payload: an original still present must complete, while an absent original retires only after candidates through the last RFC-correlated replacement complete. An unrelated complete batch cannot retire it, and no visible correlated replacement leaves the queue conservatively blocked. Only safe filename/type/size and stable-message metadata cross channel admission; private blob paths never enter agent text or admission, and a missing media store yields only a safe filename annotation. | Delta Chat email must not expose partially downloaded MIME content, duplicate a mirror turn from stale provider notifications, retire pending work on unrelated traffic, skip a failed lower message, or acknowledge before durable event/agent ownership. |
+| `FR-CHANNEL-015` | MUST | The authenticated channel catalog exposes `{name: "deltachat", display_name: "Delta Chat", config_key: "deltachat"}` and the ordinary `/channels/deltachat` editor reads its safe config through `GET /api/channels/deltachat/config`. Email is the only required/configured-readiness field; all non-secret Delta Chat settings and shared channel controls remain editable. Optional IMAP/SMTP ports use numeric controls and accept only `0` for automatic selection or an integer from `1` through `65535`. A configured legacy password is omitted from the config body and represented only by `configured_secrets: ["password"]`; a blank password edit preserves it, while a non-empty `_password` explicitly rotates it through the existing scoped `PATCH /api/config`. Save validation blocks a missing email or invalid port before persistence. Once PATCH succeeds, the submitted password draft is cleared immediately; success/restart feedback requires a successful masked reload followed by gateway-state refresh, while reload failure leaves an actionable error without retaining or rendering the submitted credential or claiming success. Sidebar discovery shows Delta Chat with an email affordance and derives enablement from `channel_list.deltachat`, with legacy `channels` as a read-only compatibility fallback. WhatsApp mode discovery likewise prefers modern `channel_list.whatsapp.settings.use_native` and retains only a flat legacy read fallback. Channels remain disabled by default, an existing password is never rendered or copied into browser state, and visual setup creates no second listener or bypass around the normal channel lifecycle. | Delta Chat must be set up without raw config editing or credential disclosure while preserving existing channel, secret-persistence, disabled-default, and restart semantics. |
 
 ## Data And State Model
 
@@ -87,6 +90,9 @@ Owns: TEST cmd/picoclaw/internal/gateway/*
 Owns: TEST web/backend/api/gateway*
 Owns: TEST web/backend/api/channels*
 Owns: TEST web/backend/api/pico*
+Owns: TEST web/frontend/src/components/channels/channel-config-fields.test.ts
+Owns: TEST web/frontend/src/components/channels/channel-config-page.test.tsx
+Owns: TEST web/frontend/src/hooks/use-sidebar-channels.test.ts
 Owns: EVENT channel.*
 Owns: EVENT gateway.*
 Owns: EVENT bus.*
@@ -95,16 +101,17 @@ Owns: EVENT bus.*
 
 | Type     | Surface                                                                                                                                                                     | Contract                                                                                                                                                      | Requirement IDs                                      |
 | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| Channels | Telegram, Discord, WhatsApp, Matrix, QQ, DingTalk, LINE, WeCom, Weixin, Feishu, Slack, IRC, OneBot, MQTT, MaixCam, Pico                                                     | Platform adapters normalize inbound messages and deliver outbound responses.                                                                                  | `FR-CHANNEL-001`, `FR-CHANNEL-002`, `FR-CHANNEL-004` |
-| HTTP     | `/api/gateway/*`, `/api/channels/*`, `/api/pico/*`, `/pico/*`                                                                                                               | Gateway lifecycle, channel catalog/config, Pico token/info/setup, websocket and media proxy.                                                                  | `FR-CHANNEL-006`                                     |
+| Channels | Telegram, Discord, WhatsApp, Matrix, QQ, DingTalk, LINE, WeCom, Weixin, Feishu, Slack, IRC, OneBot, MQTT, MaixCam, Delta Chat, Pico                                          | Platform adapters normalize inbound messages and deliver outbound responses.                                                                                  | `FR-CHANNEL-001`, `FR-CHANNEL-002`, `FR-CHANNEL-004`, `FR-CHANNEL-015` |
+| HTTP     | `/api/gateway/*`, `/api/channels/*`, `/api/pico/*`, `/pico/*`                                                                                                               | Gateway lifecycle, secret-safe channel catalog/config, Pico token/info/setup, websocket and media proxy.                                                       | `FR-CHANNEL-006`, `FR-CHANNEL-015`                   |
 | Config   | `channel_list.*`, `gateway.*`                                                                                                                                               | Channel enablement, settings, trigger, placeholder, typing, gateway host/port/log/hot reload.                                                                 | `FR-CHANNEL-001`, `FR-CHANNEL-003`, `FR-CHANNEL-005` |
 | Events   | `channel.*`, `gateway.*`, `bus.*`                                                                                                                                           | Lifecycle, webhook, outbound, rate limit, gateway, and bus failure telemetry.                                                                                 | `FR-CHANNEL-001`, `FR-CHANNEL-008`                   |
-| Frontend | Chat, Pico, channel, message, code-block, account/model selection, and context-usage UI under `web/frontend/src/components/chat/**`, `web/frontend/src/features/chat/**`, and related channel routes | Browser chat surfaces expose channel delivery behavior and follow shared frontend API, token, responsive layout, accessibility, and dynamic-style lint rules. | `FR-CHANNEL-005`, `FR-CHANNEL-006`, `FR-CHANNEL-009`, `FR-CHANNEL-010` |
+| Frontend | Chat, Pico, channel, message, code-block, account/model selection, context-usage UI, and `/channels/deltachat` setup under `web/frontend/src/components/chat/**`, `web/frontend/src/features/chat/**`, and related channel routes | Browser chat and channel-setup surfaces expose delivery/configuration behavior and follow shared frontend API, secret, token, responsive layout, accessibility, and dynamic-style lint rules. | `FR-CHANNEL-005`, `FR-CHANNEL-006`, `FR-CHANNEL-009`, `FR-CHANNEL-010`, `FR-CHANNEL-015` |
 | Runtime  | Gateway reload service transaction and `AgentLoop.PauseRuntimeForReload` | Hold channel turns outside the provisional provider/config window and resume them only after replacement services commit or old services recover. | `FR-CHANNEL-011` |
 | Go API | `Manager.RegisterHTTPRoute` | Collision-safe additive registration on the existing dynamic gateway mux with stale-release protection. | `FR-CHANNEL-006` |
 | Go API | `health.Server.Protect`, `UsesBearerToken` | Reuse and verify the gateway's fail-closed PID-bearer authorization boundary for independently registered runtime subtrees without exposing the token. | `FR-CHANNEL-006` |
 | Go API | `bus.InboundAdmission`, `MessageBus.RegisterInboundAdmission`, `MessageBus.PublishInboundWithPreparation` | Collision-safely register one identity-owned admission hook, admit detached channel-origin metadata synchronously before queueing, and invoke turn UX only for messages that will continue to the agent. | `FR-CHANNEL-013` |
 | Channel | Delta Chat inbound listener | Provider events wake the authoritative ordered message queue; the listener retries before seen acknowledgement, exposes only safe metadata, and correlates full-download replacement IDs with process-local RFC724 identity. | `FR-CHANNEL-014` |
+| Frontend / HTTP | Delta Chat channel catalog, sidebar item, and `/channels/deltachat` editor backed by `GET /api/channels/deltachat/config` and scoped `PATCH /api/config` | Discover, validate, and save the built-in email channel while exposing password presence but never its value and reporting the normal restart requirement after persistence. | `FR-CHANNEL-015` |
 
 ## Algorithms And Ordering
 
@@ -145,6 +152,17 @@ Owns: EVENT bus.*
    original when it remains visible, or process through the last correlated
    replacement before retiring an absent original; unrelated complete batches
    cannot retire it, and no visible correlation conservatively blocks the queue.
+10. Channel discovery adds the built-in Delta Chat catalog entry, reads its
+    secret-safe config projection, and constructs a blank password edit field
+    from `configured_secrets` rather than from credential bytes. The editor
+    requires email, omits a blank password so secure persistence preserves the
+    current value, includes a non-empty replacement only in the authenticated
+    scoped patch, clears the submitted password draft immediately after PATCH,
+    and claims success only after reloading the masked config and gateway
+    status. Numeric mail ports accept only zero or an integer through 65535.
+    Sidebar enablement follows `channel_list` and uses the legacy `channels` key
+    only while reading older launcher projections; WhatsApp mode reads nested
+    modern settings before its flat legacy fallback.
 
 ## Cross-Feature Behavior
 
@@ -158,6 +176,18 @@ views without changing the channel delivery contract.
 
 - Disabled channels do not start or register routes.
 - Unknown channel config returns an explicit error through launcher API.
+- Delta Chat setup cannot enable/save a missing email. A configured legacy
+  password is represented only by its field name in `configured_secrets`; its
+  value never appears in the GET body, form state, placeholder, sidebar, or
+  toast. Leaving the replacement blank preserves it, while a failed rotation
+  leaves the prior secure value and the editable page available. Port values
+  outside zero or the integer range 1 through 65535 fail before PATCH.
+- Loading or saving Delta Chat config and refreshing gateway state expose
+  actionable error or restart-required feedback. A post-PATCH reload failure
+  clears the submitted secret draft and cannot emit a success notice. Sidebar
+  catalog/config failure does not fabricate an enabled channel, and visual
+  configuration does not start the adapter before the normal gateway lifecycle
+  applies the saved enabled state.
 - Webhook registration conflicts fail gateway startup or reload.
 - A closed bus rejects publish operations and emits close events.
 - Platform media delivery falls back to text when supported by the channel.
@@ -212,6 +242,7 @@ views without changing the channel delivery contract.
 | `FR-CHANNEL-012`                                                                         | [pkg/channels/manager_test.go](../../pkg/channels/manager_test.go)                                                                                                                                                                               |
 | `FR-CHANNEL-013`                                                                         | [pkg/bus/bus_test.go](../../pkg/bus/bus_test.go), [pkg/channels/base_test.go](../../pkg/channels/base_test.go), [pkg/channels/manager_test.go](../../pkg/channels/manager_test.go), [pkg/agent/steering_test.go](../../pkg/agent/steering_test.go), [pkg/agent/agent_turn_ux_test.go](../../pkg/agent/agent_turn_ux_test.go), [pkg/gateway/event_channel_test.go](../../pkg/gateway/event_channel_test.go) |
 | `FR-CHANNEL-014`                                                                         | [pkg/channels/deltachat/deltachat_test.go](../../pkg/channels/deltachat/deltachat_test.go), [pkg/gateway/event_channel_test.go](../../pkg/gateway/event_channel_test.go)                                                                                                                                    |
+| `FR-CHANNEL-015`                                                                         | [web/backend/api/channels_test.go](../../web/backend/api/channels_test.go), [web/frontend/src/components/channels/channel-config-fields.test.ts](../../web/frontend/src/components/channels/channel-config-fields.test.ts), [web/frontend/src/components/channels/channel-config-page.test.tsx](../../web/frontend/src/components/channels/channel-config-page.test.tsx), [web/frontend/src/hooks/use-sidebar-channels.test.ts](../../web/frontend/src/hooks/use-sidebar-channels.test.ts)                                                                                                                                    |
 
 ## Implementation Anchors
 
@@ -219,4 +250,7 @@ views without changing the channel delivery contract.
 - [pkg/bus/bus.go](../../pkg/bus/bus.go)
 - [pkg/channels/manager.go](../../pkg/channels/manager.go)
 - [pkg/channels/deltachat/handler.go](../../pkg/channels/deltachat/handler.go)
+- [web/backend/api/channels.go](../../web/backend/api/channels.go)
+- [web/frontend/src/components/channels/channel-config-page.tsx](../../web/frontend/src/components/channels/channel-config-page.tsx)
+- [web/frontend/src/hooks/use-sidebar-channels.ts](../../web/frontend/src/hooks/use-sidebar-channels.ts)
 - [web/backend/api/pico.go](../../web/backend/api/pico.go)

@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -148,6 +150,95 @@ func TestEventIngressConfigInactiveNoncanonicalSecretsRemainInert(t *testing.T) 
 		}
 		if err := cfg.Validate(); err != nil {
 			t.Fatal("inactive noncanonical secret was validated or resolved")
+		}
+	}
+}
+
+func TestEventIngressConfigRejectsExternalSecretsInPublicIdentities(t *testing.T) {
+	t.Parallel()
+	const secret = "external-model-credential"
+
+	tests := []struct {
+		name    string
+		ingress EventIngressConfig
+		want    string
+	}{
+		{
+			name: "webhook name",
+			ingress: EventIngressConfig{
+				Webhooks: map[string]GenericWebhookConfig{
+					"hook-" + secret: {},
+				},
+			},
+			want: genericWebhookConnectorSecretConflictMessage,
+		},
+		{
+			name: "webhook format",
+			ingress: EventIngressConfig{
+				Webhooks: map[string]GenericWebhookConfig{
+					"hook": {Format: "format-" + secret},
+				},
+			},
+			want: genericWebhookConnectorSecretConflictMessage,
+		},
+		{
+			name: "channel name",
+			ingress: EventIngressConfig{
+				Channels: map[string]ChannelEventIngressConfig{
+					"channel-" + secret: {},
+				},
+			},
+			want: eventChannelSecretConflictMessage,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := test.ingress.ValidatePublicIdentities(secret)
+			if err == nil || err.Error() != test.want {
+				t.Fatalf(
+					"ValidatePublicIdentities() error = %v, want %q",
+					err,
+					test.want,
+				)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatal("validation error exposed an external credential")
+			}
+		})
+	}
+}
+
+func TestSaveConfigRejectsExternalSecretInEventPublicIdentity(t *testing.T) {
+	t.Parallel()
+	const secret = "external-model-credential"
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := DefaultConfig()
+	cfg.ModelList = []*ModelConfig{{
+		ModelName: "protected",
+		Model:     "openai/gpt-4o",
+		APIKeys:   SimpleSecureStrings(secret),
+	}}
+	cfg.Events.Ingress.Webhooks = map[string]GenericWebhookConfig{
+		"hook-" + secret: {},
+	}
+
+	err := SaveConfig(path, cfg)
+	if err == nil || err.Error() != genericWebhookConnectorSecretConflictMessage {
+		t.Fatalf("SaveConfig() error = %v, want opaque identity conflict", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatal("save error exposed an external credential")
+	}
+	for _, candidate := range []string{path, securityPath(path)} {
+		if _, statErr := os.Stat(candidate); !os.IsNotExist(statErr) {
+			t.Fatalf(
+				"%s was persisted before public identity validation: %v",
+				candidate,
+				statErr,
+			)
 		}
 	}
 }

@@ -15,6 +15,7 @@ import { Route as LogsRouteImport } from './routes/logs'
 import { Route as LauncherSetupRouteImport } from './routes/launcher-setup'
 import { Route as LauncherLoginRouteImport } from './routes/launcher-login'
 import { Route as EventsRouteImport } from './routes/events'
+import { Route as EventSourcesRouteImport } from './routes/event-sources'
 import { Route as ConfigRouteImport } from './routes/config'
 import { Route as AgentRouteImport } from './routes/agent'
 import { Route as AccountsRouteImport } from './routes/accounts'
@@ -62,6 +63,11 @@ const LauncherLoginRoute = LauncherLoginRouteImport.update({
 const EventsRoute = EventsRouteImport.update({
   id: '/events',
   path: '/events',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const EventSourcesRoute = EventSourcesRouteImport.update({
+  id: '/event-sources',
+  path: '/event-sources',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ConfigRoute = ConfigRouteImport.update({
@@ -163,6 +169,7 @@ export interface FileRoutesByFullPath {
   '/accounts': typeof AccountsRouteWithChildren
   '/agent': typeof AgentRouteWithChildren
   '/config': typeof ConfigRouteWithChildren
+  '/event-sources': typeof EventSourcesRoute
   '/events': typeof EventsRoute
   '/launcher-login': typeof LauncherLoginRoute
   '/launcher-setup': typeof LauncherSetupRoute
@@ -189,6 +196,7 @@ export interface FileRoutesByTo {
   '/accounts': typeof AccountsRouteWithChildren
   '/agent': typeof AgentRouteWithChildren
   '/config': typeof ConfigRouteWithChildren
+  '/event-sources': typeof EventSourcesRoute
   '/events': typeof EventsRoute
   '/launcher-login': typeof LauncherLoginRoute
   '/launcher-setup': typeof LauncherSetupRoute
@@ -216,6 +224,7 @@ export interface FileRoutesById {
   '/accounts': typeof AccountsRouteWithChildren
   '/agent': typeof AgentRouteWithChildren
   '/config': typeof ConfigRouteWithChildren
+  '/event-sources': typeof EventSourcesRoute
   '/events': typeof EventsRoute
   '/launcher-login': typeof LauncherLoginRoute
   '/launcher-setup': typeof LauncherSetupRoute
@@ -244,6 +253,7 @@ export interface FileRouteTypes {
     | '/accounts'
     | '/agent'
     | '/config'
+    | '/event-sources'
     | '/events'
     | '/launcher-login'
     | '/launcher-setup'
@@ -270,6 +280,7 @@ export interface FileRouteTypes {
     | '/accounts'
     | '/agent'
     | '/config'
+    | '/event-sources'
     | '/events'
     | '/launcher-login'
     | '/launcher-setup'
@@ -296,6 +307,7 @@ export interface FileRouteTypes {
     | '/accounts'
     | '/agent'
     | '/config'
+    | '/event-sources'
     | '/events'
     | '/launcher-login'
     | '/launcher-setup'
@@ -323,6 +335,7 @@ export interface RootRouteChildren {
   AccountsRoute: typeof AccountsRouteWithChildren
   AgentRoute: typeof AgentRouteWithChildren
   ConfigRoute: typeof ConfigRouteWithChildren
+  EventSourcesRoute: typeof EventSourcesRoute
   EventsRoute: typeof EventsRoute
   LauncherLoginRoute: typeof LauncherLoginRoute
   LauncherSetupRoute: typeof LauncherSetupRoute
@@ -373,6 +386,13 @@ declare module '@tanstack/react-router' {
       path: '/events'
       fullPath: '/events'
       preLoaderRoute: typeof EventsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/event-sources': {
+      id: '/event-sources'
+      path: '/event-sources'
+      fullPath: '/event-sources'
+      preLoaderRoute: typeof EventSourcesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/config': {
@@ -592,6 +612,7 @@ const rootRouteChildren: RootRouteChildren = {
   AccountsRoute: AccountsRouteWithChildren,
   AgentRoute: AgentRouteWithChildren,
   ConfigRoute: ConfigRouteWithChildren,
+  EventSourcesRoute: EventSourcesRoute,
   EventsRoute: EventsRoute,
   LauncherLoginRoute: LauncherLoginRoute,
   LauncherSetupRoute: LauncherSetupRoute,

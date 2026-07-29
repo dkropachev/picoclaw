@@ -255,6 +255,56 @@ func (c EventIngressConfig) validateWebhookPublicIdentities() error {
 	return nil
 }
 
+// ValidateWebhookPublicIdentities prevents resolved credentials from being
+// persisted in webhook names or format fields. It is intentionally independent
+// of the master ingress switch because these values are serialized even while
+// their runtime is disabled.
+func (c EventIngressConfig) ValidateWebhookPublicIdentities(
+	sensitiveValues ...string,
+) error {
+	if err := c.validateWebhookPublicIdentities(); err != nil {
+		return err
+	}
+
+	for name, webhook := range c.Webhooks {
+		for _, publicValue := range [...]string{name, webhook.Format} {
+			for _, secret := range sensitiveValues {
+				if len(secret) > 3 && strings.Contains(publicValue, secret) {
+					// Never echo either side of a public/private conflict.
+					return errors.New(genericWebhookConnectorSecretConflictMessage)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (c EventIngressConfig) validateEventChannelPublicIdentities(
+	sensitiveValues ...string,
+) error {
+	for name := range c.Channels {
+		for _, secret := range sensitiveValues {
+			if len(secret) > 3 && strings.Contains(name, secret) {
+				// Channel names are serialized as unredacted JSON map keys.
+				// Never echo either side of a public/private conflict.
+				return errors.New(eventChannelSecretConflictMessage)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidatePublicIdentities prevents resolved credentials from being persisted
+// in the public, operational portion of event-ingress configuration.
+func (c EventIngressConfig) ValidatePublicIdentities(
+	sensitiveValues ...string,
+) error {
+	if err := c.ValidateWebhookPublicIdentities(sensitiveValues...); err != nil {
+		return err
+	}
+	return c.validateEventChannelPublicIdentities(sensitiveValues...)
+}
+
 // EffectiveEventWebhookFormat returns the format used by a webhook connector.
 // Empty values retain the original Standard Webhooks behavior.
 func EffectiveEventWebhookFormat(webhook GenericWebhookConfig) string {
@@ -321,15 +371,8 @@ func (c EventIngressConfig) ValidateEventChannelAdapters(
 	channels ChannelsConfig,
 	sensitiveValues ...string,
 ) error {
-	for name := range c.Channels {
-		for _, secret := range sensitiveValues {
-			if len(secret) > 3 && strings.Contains(name, secret) {
-				// Connector identities persist as unredacted JSON map keys even
-				// while master ingress is disabled. Never echo either side of
-				// this conflict.
-				return errors.New(eventChannelSecretConflictMessage)
-			}
-		}
+	if err := c.validateEventChannelPublicIdentities(sensitiveValues...); err != nil {
+		return err
 	}
 	if !c.Enabled {
 		return nil

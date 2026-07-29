@@ -57,13 +57,13 @@ func TestEventAutomationIngressWithoutWorkflowsPersistsPendingEvent(t *testing.T
 	if service == nil || service.store == nil {
 		t.Fatal("setupEventAutomationService() did not open the durable event store")
 	}
-	if service.cancel != nil {
-		t.Fatal("service.cancel is non-nil with workflows disabled; workers were unexpectedly configured")
+	if service.cancel == nil {
+		t.Fatal("service.cancel is nil with ingress enabled; retention worker was not configured")
 	}
 	select {
 	case <-service.done:
+		t.Fatal("retention worker stopped before service shutdown")
 	default:
-		t.Fatal("service.done is open with workflows disabled; no workers should be running")
 	}
 
 	inserted, err := service.store.Insert(context.Background(), eventAutomationTestEnvelope("disabled-workflows"))
@@ -88,6 +88,11 @@ func TestEventAutomationIngressWithoutWorkflowsPersistsPendingEvent(t *testing.T
 	if closeErr := service.Close(context.Background()); closeErr != nil {
 		t.Fatalf("second Close() error = %v", closeErr)
 	}
+	select {
+	case <-service.done:
+	default:
+		t.Fatal("Close() returned before the retention worker drained")
+	}
 	if _, getErr := service.store.Get(
 		context.Background(),
 		inserted.Event.Envelope.ID,
@@ -110,6 +115,562 @@ func TestEventAutomationIngressWithoutWorkflowsPersistsPendingEvent(t *testing.T
 	}
 	if got := persisted.Routing.Status; got != eventing.RoutingPending {
 		t.Fatalf("reopened routing status = %q, want %q", got, eventing.RoutingPending)
+	}
+}
+
+func TestPruneExpiredEventsUsesConfiguredRetentionCutoff(t *testing.T) {
+	now := time.Date(2026, 7, 29, 17, 0, 0, 0, time.FixedZone("AST", -4*60*60))
+	storeNow := now.AddDate(0, 0, -31)
+	store, err := eventing.Open(
+		context.Background(),
+		filepath.Join(t.TempDir(), "eventing", "events.db"),
+		eventing.WithClock(func() time.Time { return storeNow }),
+	)
+	if err != nil {
+		t.Fatalf("eventing.Open() error = %v", err)
+	}
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil {
+			t.Errorf("store.Close() error = %v", closeErr)
+		}
+	}()
+
+	insertTerminal := func(dedupeKey string) string {
+		t.Helper()
+		inserted, insertErr := store.Insert(
+			context.Background(),
+			eventAutomationTestEnvelope(dedupeKey),
+		)
+		if insertErr != nil {
+			t.Fatalf("Insert(%q) error = %v", dedupeKey, insertErr)
+		}
+		claimed, claimErr := store.ClaimRouting(
+			context.Background(),
+			"retention-test-router",
+			1,
+			time.Minute,
+		)
+		if claimErr != nil {
+			t.Fatalf("ClaimRouting(%q) error = %v", dedupeKey, claimErr)
+		}
+		if len(claimed) != 1 {
+			t.Fatalf("ClaimRouting(%q) returned %d events, want 1", dedupeKey, len(claimed))
+		}
+		if ackErr := store.AckRouting(
+			context.Background(),
+			inserted.Event.Envelope.ID,
+			claimed[0].Routing.LeaseToken,
+		); ackErr != nil {
+			t.Fatalf("AckRouting(%q) error = %v", dedupeKey, ackErr)
+		}
+		return inserted.Event.Envelope.ID
+	}
+
+	expiredID := insertTerminal("expired-retention-event")
+	storeNow = now
+	retainedID := insertTerminal("retained-retention-event")
+
+	pruned, err := pruneExpiredEvents(
+		context.Background(),
+		store,
+		30,
+		func() time.Time { return now },
+	)
+	if err != nil {
+		t.Fatalf("pruneExpiredEvents() error = %v", err)
+	}
+	if pruned != 1 {
+		t.Fatalf("pruneExpiredEvents() count = %d, want 1", pruned)
+	}
+	if _, getErr := store.Get(context.Background(), expiredID); !errors.Is(
+		getErr,
+		eventing.ErrNotFound,
+	) {
+		t.Fatalf("Get(expired) error = %v, want eventing.ErrNotFound", getErr)
+	}
+	if _, getErr := store.Get(context.Background(), retainedID); getErr != nil {
+		t.Fatalf("Get(retained) error = %v", getErr)
+	}
+}
+
+func TestPruneExpiredEventsDoesNotWrapOversizedRetentionIntoFuture(
+	t *testing.T,
+) {
+	const overflowRetentionDays64 int64 = 213_503_982_334_601
+	overflowRetentionDays := int(overflowRetentionDays64)
+	if int64(overflowRetentionDays) != overflowRetentionDays64 {
+		t.Skip("exact overflow regression requires a 64-bit int")
+	}
+	now := time.Date(2026, 7, 29, 21, 0, 0, 0, time.UTC)
+	calls := 0
+	pruner := eventRetentionPrunerFunc(
+		func(_ context.Context, cutoff time.Time, _ int) (int64, error) {
+			calls++
+			if cutoff.After(now) {
+				t.Fatalf("retention cutoff wrapped into the future: %s", cutoff)
+			}
+			return 1, nil
+		},
+	)
+
+	pruned, err := pruneExpiredEvents(
+		context.Background(),
+		pruner,
+		overflowRetentionDays,
+		func() time.Time { return now },
+	)
+	if err != nil {
+		t.Fatalf("pruneExpiredEvents() error = %v", err)
+	}
+	if pruned != 0 {
+		t.Fatalf("pruneExpiredEvents() count = %d, want safe no-op", pruned)
+	}
+	if calls != 0 {
+		t.Fatalf("oversized retention invoked Prune %d times, want zero", calls)
+	}
+}
+
+func TestEventRetentionWorkerRunsImmediatelyAndJoinsOnCancellation(t *testing.T) {
+	now := time.Date(2026, 7, 29, 21, 0, 0, 0, time.UTC)
+	type pruneCall struct {
+		cutoff time.Time
+		limit  int
+	}
+	calls := make(chan pruneCall, 2)
+	pruner := eventRetentionPrunerFunc(
+		func(_ context.Context, cutoff time.Time, limit int) (int64, error) {
+			calls <- pruneCall{cutoff: cutoff, limit: limit}
+			return 0, nil
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var workers sync.WaitGroup
+	workers.Add(1)
+	go runEventRetentionWorker(
+		ctx,
+		&workers,
+		pruner,
+		nil,
+		45,
+		time.Hour,
+		func() time.Time { return now },
+	)
+
+	var call pruneCall
+	select {
+	case call = <-calls:
+	case <-time.After(time.Second):
+		t.Fatal("retention worker did not run startup maintenance")
+	}
+	wantCutoff := now.AddDate(0, 0, -45)
+	if !call.cutoff.Equal(wantCutoff) {
+		t.Fatalf("retention cutoff = %s, want %s", call.cutoff, wantCutoff)
+	}
+	if call.limit != eventRetentionPruneBatchSize {
+		t.Fatalf(
+			"retention prune limit = %d, want %d",
+			call.limit,
+			eventRetentionPruneBatchSize,
+		)
+	}
+
+	cancel()
+	joined := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(joined)
+	}()
+	select {
+	case <-joined:
+	case <-time.After(time.Second):
+		t.Fatal("retention worker did not join after cancellation")
+	}
+	select {
+	case extra := <-calls:
+		t.Fatalf("retention worker invoked prune after join: %#v", extra)
+	default:
+	}
+}
+
+func TestEventRetentionWorkerAcquiresRuntimeBeforePruning(t *testing.T) {
+	acquireEntered := make(chan struct{})
+	allowAcquire := make(chan struct{})
+	pruneCalled := make(chan struct{})
+	runtimeReleased := make(chan struct{})
+	var acquireOnce sync.Once
+	var pruneOnce sync.Once
+	var releaseOnce sync.Once
+
+	acquire := func(ctx context.Context) (context.Context, func(), error) {
+		acquireOnce.Do(func() { close(acquireEntered) })
+		select {
+		case <-ctx.Done():
+			return ctx, func() {}, ctx.Err()
+		case <-allowAcquire:
+			return ctx, func() {
+				releaseOnce.Do(func() { close(runtimeReleased) })
+			}, nil
+		}
+	}
+	pruner := eventRetentionPrunerFunc(
+		func(context.Context, time.Time, int) (int64, error) {
+			pruneOnce.Do(func() { close(pruneCalled) })
+			return 0, nil
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var workers sync.WaitGroup
+	workers.Add(1)
+	go runEventRetentionWorker(
+		ctx,
+		&workers,
+		pruner,
+		acquire,
+		30,
+		time.Hour,
+		time.Now,
+	)
+	select {
+	case <-acquireEntered:
+	case <-time.After(time.Second):
+		t.Fatal("retention worker did not reach runtime acquisition")
+	}
+	select {
+	case <-pruneCalled:
+		t.Fatal("retention worker pruned before runtime acquisition completed")
+	default:
+	}
+
+	close(allowAcquire)
+	select {
+	case <-pruneCalled:
+	case <-time.After(time.Second):
+		t.Fatal("retention worker did not prune after runtime acquisition")
+	}
+	select {
+	case <-runtimeReleased:
+	case <-time.After(time.Second):
+		t.Fatal("retention worker did not release the runtime generation")
+	}
+	cancel()
+	workers.Wait()
+}
+
+func TestEventRetentionWorkerFailureDoesNotStopMaintenance(t *testing.T) {
+	calls := make(chan int, 3)
+	callNumber := 0
+	acquireCalls := 0
+	runtimeReleases := 0
+	acquire := func(ctx context.Context) (context.Context, func(), error) {
+		acquireCalls++
+		return ctx, func() { runtimeReleases++ }, nil
+	}
+	pruner := eventRetentionPrunerFunc(
+		func(context.Context, time.Time, int) (int64, error) {
+			callNumber++
+			calls <- callNumber
+			if callNumber == 1 {
+				return 0, errors.New("temporary retention failure")
+			}
+			return 0, nil
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var workers sync.WaitGroup
+	workers.Add(1)
+	go runEventRetentionWorker(
+		ctx,
+		&workers,
+		pruner,
+		acquire,
+		30,
+		5*time.Millisecond,
+		time.Now,
+	)
+	for want := 1; want <= 2; want++ {
+		select {
+		case got := <-calls:
+			if got != want {
+				t.Fatalf("retention call = %d, want %d", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("retention worker stopped before call %d", want)
+		}
+	}
+	cancel()
+	workers.Wait()
+	if acquireCalls < 2 || acquireCalls != callNumber {
+		t.Fatalf(
+			"runtime acquisitions = %d for %d maintenance cycles",
+			acquireCalls,
+			callNumber,
+		)
+	}
+	if runtimeReleases != acquireCalls {
+		t.Fatalf(
+			"runtime releases = %d, want %d",
+			runtimeReleases,
+			acquireCalls,
+		)
+	}
+}
+
+func TestEventRetentionWorkerReloadStopsOldGenerationBeforeStartingNew(t *testing.T) {
+	type generationCall struct {
+		generation string
+		cutoff     time.Time
+	}
+	calls := make(chan generationCall, 3)
+	now := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+
+	start := func(generation string, retentionDays int) (context.CancelFunc, *sync.WaitGroup) {
+		t.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		workers := &sync.WaitGroup{}
+		workers.Add(1)
+		go runEventRetentionWorker(
+			ctx,
+			workers,
+			eventRetentionPrunerFunc(
+				func(_ context.Context, cutoff time.Time, _ int) (int64, error) {
+					calls <- generationCall{generation: generation, cutoff: cutoff}
+					return 0, nil
+				},
+			),
+			nil,
+			retentionDays,
+			time.Hour,
+			func() time.Time { return now },
+		)
+		return cancel, workers
+	}
+
+	oldCancel, oldWorkers := start("old", 30)
+	select {
+	case call := <-calls:
+		if call.generation != "old" ||
+			!call.cutoff.Equal(now.AddDate(0, 0, -30)) {
+			t.Fatalf("old generation startup call = %#v", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("old retention generation did not start")
+	}
+	oldCancel()
+	oldWorkers.Wait()
+
+	newCancel, newWorkers := start("new", 7)
+	select {
+	case call := <-calls:
+		if call.generation != "new" ||
+			!call.cutoff.Equal(now.AddDate(0, 0, -7)) {
+			t.Fatalf("new generation startup call = %#v", call)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("new retention generation did not start")
+	}
+	newCancel()
+	newWorkers.Wait()
+
+	select {
+	case unexpected := <-calls:
+		t.Fatalf("stopped retention generation ran again: %#v", unexpected)
+	default:
+	}
+}
+
+func TestPruneExpiredEventsBoundsEachMaintenanceCycle(t *testing.T) {
+	calls := 0
+	pruner := eventRetentionPrunerFunc(
+		func(context.Context, time.Time, int) (int64, error) {
+			calls++
+			return eventRetentionPruneBatchSize, nil
+		},
+	)
+	pruned, err := pruneExpiredEvents(
+		context.Background(),
+		pruner,
+		30,
+		time.Now,
+	)
+	if err != nil {
+		t.Fatalf("pruneExpiredEvents() error = %v", err)
+	}
+	if calls != eventRetentionMaxBatchesPerCycle {
+		t.Fatalf(
+			"Prune() calls = %d, want bounded maximum %d",
+			calls,
+			eventRetentionMaxBatchesPerCycle,
+		)
+	}
+	wantPruned := int64(
+		eventRetentionPruneBatchSize * eventRetentionMaxBatchesPerCycle,
+	)
+	if pruned != wantPruned {
+		t.Fatalf("pruneExpiredEvents() count = %d, want %d", pruned, wantPruned)
+	}
+}
+
+func TestHandleConfigReloadFailedCandidateCannotPruneWithShorterRetention(t *testing.T) {
+	workspace := t.TempDir()
+	databasePath := filepath.Join(workspace, "eventing", "events.db")
+	expiredOnlyForCandidate := time.Now().UTC().AddDate(0, 0, -10)
+	seedStore, err := eventing.Open(
+		context.Background(),
+		databasePath,
+		eventing.WithClock(func() time.Time { return expiredOnlyForCandidate }),
+	)
+	if err != nil {
+		t.Fatalf("eventing.Open(seed) error = %v", err)
+	}
+	inserted, err := seedStore.Insert(
+		context.Background(),
+		eventAutomationTestEnvelope("candidate-retention-rollback"),
+	)
+	if err != nil {
+		t.Fatalf("seedStore.Insert() error = %v", err)
+	}
+	claimed, err := seedStore.ClaimRouting(
+		context.Background(),
+		"retention-seed-router",
+		1,
+		time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("seedStore.ClaimRouting() error = %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("seedStore.ClaimRouting() returned %d events, want 1", len(claimed))
+	}
+	if err = seedStore.AckRouting(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+		claimed[0].Routing.LeaseToken,
+	); err != nil {
+		t.Fatalf("seedStore.AckRouting() error = %v", err)
+	}
+	if err = seedStore.Close(); err != nil {
+		t.Fatalf("seedStore.Close() error = %v", err)
+	}
+
+	oldCfg := eventAutomationTestConfig(workspace, databasePath, true, false)
+	oldCfg.Events.Ingress.RetentionDays = 30
+	newCfg := eventAutomationTestConfig(workspace, databasePath, true, false)
+	newCfg.Events.Ingress.RetentionDays = 1
+	newCfg.Agents.Defaults.ModelName = ""
+
+	msgBus := bus.NewMessageBus()
+	oldProvider := &orderedShutdownProvider{closed: make(chan struct{})}
+	agentLoop := agent.NewAgentLoop(oldCfg, msgBus, oldProvider)
+	oldService, err := setupEventAutomationService(
+		context.Background(),
+		oldCfg,
+		agentLoop,
+	)
+	if err != nil {
+		t.Fatalf("setupEventAutomationService(old) error = %v", err)
+	}
+	runningServices := &services{EventAutomation: oldService}
+	installTestEventOperatorGeneration(t, runningServices)
+	defer func() {
+		_ = deactivateEventOperator(context.Background(), runningServices)
+		_ = closeEventAutomationService(
+			context.Background(),
+			&runningServices.EventAutomation,
+		)
+		msgBus.Close()
+		agentLoop.Close()
+		oldProvider.Close()
+	}()
+
+	if _, getErr := oldService.store.Get(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+	); getErr != nil {
+		t.Fatalf("old-retention event missing before reload: %v", getErr)
+	}
+
+	candidateAtFence := make(chan struct{})
+	var candidateFenceOnce sync.Once
+	forcedRestartErr := errors.New("forced failure after candidate retention start")
+	serviceOps := configReloadServiceOps{
+		stop: stopAndCleanupServices,
+		restart: func(
+			currentLoop *agent.AgentLoop,
+			currentServices *services,
+			_ *bus.MessageBus,
+		) error {
+			currentCfg := currentLoop.GetConfig()
+			if currentCfg != newCfg {
+				recovered, setupErr := setupEventAutomationService(
+					context.Background(),
+					currentCfg,
+					currentLoop,
+				)
+				if setupErr != nil {
+					return setupErr
+				}
+				currentServices.EventAutomation = recovered
+				return nil
+			}
+
+			acquireCandidateRuntime := func(
+				ctx context.Context,
+			) (context.Context, func(), error) {
+				candidateFenceOnce.Do(func() { close(candidateAtFence) })
+				return currentLoop.AcquireRuntimeGeneration(ctx, currentCfg)
+			}
+			candidate, setupErr := newEventAutomationService(
+				context.Background(),
+				currentCfg,
+				nil,
+				nil,
+				acquireCandidateRuntime,
+			)
+			if setupErr != nil {
+				return setupErr
+			}
+			currentServices.EventAutomation = candidate
+			select {
+			case <-candidateAtFence:
+				return forcedRestartErr
+			case <-time.After(2 * time.Second):
+				return fmt.Errorf("candidate retention did not reach runtime fence")
+			}
+		},
+	}
+	providerRef := providers.LLMProvider(oldProvider)
+
+	err = handleConfigReloadWithServiceOps(
+		context.Background(),
+		agentLoop,
+		newCfg,
+		&providerRef,
+		runningServices,
+		msgBus,
+		true,
+		false,
+		serviceOps,
+	)
+	if !errors.Is(err, forcedRestartErr) {
+		t.Fatalf(
+			"handleConfigReloadWithServiceOps() error = %v, want forced restart failure",
+			err,
+		)
+	}
+	if agentLoop.GetConfig() != oldCfg || providerRef != oldProvider {
+		t.Fatal("failed candidate retention reload did not restore old runtime")
+	}
+	if runningServices.EventAutomation == nil {
+		t.Fatal("failed candidate retention reload did not restart old event service")
+	}
+	if _, getErr := runningServices.EventAutomation.store.Get(
+		context.Background(),
+		inserted.Event.Envelope.ID,
+	); getErr != nil {
+		t.Fatalf("candidate retention mutated durable inbox before rollback: %v", getErr)
 	}
 }
 
@@ -1092,4 +1653,14 @@ func eventAutomationTestEnvelope(dedupeKey string) eventing.Envelope {
 		DedupeKey: dedupeKey,
 		Payload:   json.RawMessage(`{"action":"opened"}`),
 	}
+}
+
+type eventRetentionPrunerFunc func(context.Context, time.Time, int) (int64, error)
+
+func (f eventRetentionPrunerFunc) Prune(
+	ctx context.Context,
+	before time.Time,
+	limit int,
+) (int64, error) {
+	return f(ctx, before, limit)
 }

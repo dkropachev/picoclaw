@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/health"
@@ -515,7 +517,150 @@ func computeConfigSignature(cfg *config.Config) string {
 	if len(channelSignatures) > 0 {
 		parts = append(parts, "channels:"+strings.Join(channelSignatures, ","))
 	}
+	if eventIngressSignature := computeEventIngressSignature(cfg); eventIngressSignature != "" {
+		parts = append(parts, "event_ingress:"+eventIngressSignature)
+	}
 	return strings.Join(parts, ";")
+}
+
+func computeEventIngressSignature(cfg *config.Config) string {
+	if cfg == nil || !cfg.Events.Ingress.Enabled {
+		return ""
+	}
+
+	effective := config.EffectiveEventIngressConfig(cfg, cfg.Agents.Defaults.Workspace)
+	workflowDispatch := eventWorkflowDispatchSignature{
+		Enabled: cfg.Events.Ingress.Enabled && cfg.Workflows.Enabled,
+	}
+	if workflowDispatch.Enabled {
+		workflowDispatch.Workspace = cfg.WorkspacePath()
+		workflowDispatch.DefinitionsDir = cfg.Workflows.EffectiveDefinitionsDir()
+		workflowDispatch.MaxConcurrentRuns = cfg.Workflows.EffectiveMaxConcurrentRuns()
+		workflowDispatch.DefaultTimeout = cfg.Workflows.EffectiveDefaultTimeout()
+		workflowDispatch.MaxCallDepth = cfg.Workflows.EffectiveMaxCallDepth()
+	}
+	webhooks := make(map[string]eventWebhookSignature)
+	for name, webhook := range effective.Webhooks {
+		if webhook.Enabled {
+			webhooks[name] = eventWebhookSignature{
+				Format:       config.EffectiveEventWebhookFormat(webhook),
+				SecretDigest: eventSecretDigest(webhook.Secret.String()),
+			}
+		}
+	}
+
+	payload := struct {
+		DatabasePath     string                                               `json:"database_path"`
+		RetentionDays    int                                                  `json:"retention_days"`
+		MaxPayloadBytes  int                                                  `json:"max_payload_bytes"`
+		RedactFields     []string                                             `json:"redact_fields"`
+		RedactionSecrets []string                                             `json:"redaction_secrets,omitempty"`
+		Webhooks         map[string]eventWebhookSignature                     `json:"webhooks,omitempty"`
+		Channels         map[string]config.EffectiveEventChannelAdapterConfig `json:"channels,omitempty"`
+		WorkflowDispatch eventWorkflowDispatchSignature                       `json:"workflow_dispatch"`
+	}{
+		DatabasePath:     effective.DatabasePath,
+		RetentionDays:    effective.RetentionDays,
+		MaxPayloadBytes:  effective.MaxPayloadBytes,
+		RedactFields:     canonicalEventRedactFields(effective.RedactFields),
+		RedactionSecrets: eventRedactionSecretDigests(cfg, effective),
+		Webhooks:         webhooks,
+		Channels:         config.EffectiveEventChannelAdapters(cfg),
+		WorkflowDispatch: workflowDispatch,
+	}
+
+	encoded, err := json.Marshal(canonicalizeSignatureValue(reflect.ValueOf(payload)))
+	if err != nil {
+		return "<invalid>"
+	}
+	return string(encoded)
+}
+
+type eventWebhookSignature struct {
+	Format       string `json:"format"`
+	SecretDigest string `json:"secret_digest"`
+}
+
+type eventWorkflowDispatchSignature struct {
+	Enabled           bool          `json:"enabled"`
+	Workspace         string        `json:"workspace,omitempty"`
+	DefinitionsDir    string        `json:"definitions_dir,omitempty"`
+	MaxConcurrentRuns int           `json:"max_concurrent_runs,omitempty"`
+	DefaultTimeout    time.Duration `json:"default_timeout,omitempty"`
+	MaxCallDepth      int           `json:"max_call_depth,omitempty"`
+}
+
+func canonicalEventRedactFields(fields []string) []string {
+	seen := make(map[string]struct{}, len(fields))
+	canonical := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+
+		var normalized strings.Builder
+		for _, char := range field {
+			if unicode.IsLetter(char) || unicode.IsDigit(char) {
+				normalized.WriteRune(unicode.ToLower(char))
+			}
+		}
+		identity := "normalized:" + normalized.String()
+		if normalized.Len() == 0 {
+			// The event redactor preserves punctuation-only configured keys in
+			// its exact-match set because their normalized identity is empty.
+			identity = "exact:" + field
+		}
+		if _, exists := seen[identity]; exists {
+			continue
+		}
+		seen[identity] = struct{}{}
+		canonical = append(canonical, identity)
+	}
+	sort.Strings(canonical)
+	return canonical
+}
+
+func eventSecretDigest(secret string) string {
+	if secret == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(secret))
+	return fmt.Sprintf("sha256:%x", sum[:])
+}
+
+func eventRedactionSecretDigests(
+	cfg *config.Config,
+	ingress config.EventIngressConfig,
+) []string {
+	seen := make(map[string]struct{})
+	digests := make([]string, 0)
+	add := func(secret string) {
+		if secret == "" {
+			return
+		}
+		digest := eventSecretDigest(secret)
+		if _, exists := seen[digest]; exists {
+			return
+		}
+		seen[digest] = struct{}{}
+		digests = append(digests, digest)
+	}
+
+	for _, webhook := range ingress.Webhooks {
+		if webhook.Enabled {
+			add(webhook.Secret.String())
+		}
+	}
+	if cfg != nil {
+		for _, secret := range cfg.SensitiveDataValues() {
+			if len(secret) > 3 {
+				add(secret)
+			}
+		}
+	}
+	sort.Strings(digests)
+	return digests
 }
 
 func computeModelStreamingSignatures(cfg *config.Config) []string {
@@ -755,19 +900,19 @@ func canonicalizeSignatureValue(value reflect.Value) any {
 	if value.CanInterface() {
 		switch typed := value.Interface().(type) {
 		case config.SecureString:
-			return typed.String()
+			return eventSecretDigest(typed.String())
 		case *config.SecureString:
 			if typed == nil {
 				return ""
 			}
-			return typed.String()
+			return eventSecretDigest(typed.String())
 		case config.SecureStrings:
-			return typed.Values()
+			return signatureSecretDigests(typed.Values())
 		case *config.SecureStrings:
 			if typed == nil {
 				return nil
 			}
-			return typed.Values()
+			return signatureSecretDigests(typed.Values())
 		}
 	}
 
@@ -824,6 +969,17 @@ func canonicalizeSignatureValue(value reflect.Value) any {
 		}
 		return nil
 	}
+}
+
+func signatureSecretDigests(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	digests := make([]string, len(values))
+	for index, value := range values {
+		digests[index] = eventSecretDigest(value)
+	}
+	return digests
 }
 
 func gatewayRestartRequiredBySignature(bootSignature, currentSignature, gatewayStatus string) bool {

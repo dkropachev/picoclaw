@@ -18,6 +18,7 @@ import {
   SECRET_FIELD_MAP,
   buildEditConfig,
   getFieldValueForValidation,
+  getRequiredFieldKeys,
   isSecretField,
 } from "@/components/channels/channel-config-fields"
 import { getChannelDisplayName } from "@/components/channels/channel-display-name"
@@ -32,6 +33,7 @@ import { WeixinForm } from "@/components/channels/channel-forms/weixin-form"
 import { ConfigChangeNotice } from "@/components/config-change-notice"
 import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
+import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { useGateway } from "@/hooks/use-gateway"
 import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
@@ -54,6 +56,32 @@ function asString(value: unknown): string {
 
 function asBool(value: unknown): boolean {
   return value === true
+}
+
+function isPortFieldKey(key: string): boolean {
+  return key === "port" || key.endsWith("_port")
+}
+
+function parseOptionalPort(value: unknown): number | undefined {
+  if (value === "") {
+    return 0
+  }
+  if (
+    typeof value !== "number" &&
+    (typeof value !== "string" || value.trim() === "")
+  ) {
+    return undefined
+  }
+  const parsed = typeof value === "number" ? value : Number(value)
+  if (
+    !Number.isFinite(parsed) ||
+    !Number.isInteger(parsed) ||
+    parsed < 0 ||
+    parsed > 65535
+  ) {
+    return undefined
+  }
+  return parsed
 }
 
 function setRecordValueByPath(
@@ -140,6 +168,13 @@ function buildSavePayload(
     }
     if (isSecretField(key)) continue
 
+    if (isPortFieldKey(key)) {
+      const port = parseOptionalPort(value)
+      if (port !== undefined) {
+        settings[key] = port
+      }
+      continue
+    }
     settings[key] = serializeStringArrayForSubmit(value)
   }
 
@@ -214,49 +249,14 @@ function isConfigured(
         hasValue("user_id") &&
         hasValue("access_token")
       )
+    case "deltachat":
+      return hasValue("email")
     case "irc":
       return hasValue("server")
     case "mqtt":
       return hasValue("broker") && hasValue("agent_id")
     default:
       return false
-  }
-}
-
-function getRequiredFieldKeys(channelName: string): string[] {
-  switch (channelName) {
-    case "telegram":
-      return ["token"]
-    case "discord":
-      return ["token"]
-    case "slack":
-      return ["bot_token"]
-    case "feishu":
-      return ["app_id", "app_secret"]
-    case "dingtalk":
-      return ["client_id", "client_secret"]
-    case "line":
-      return ["channel_secret", "channel_access_token"]
-    case "qq":
-      return ["app_id", "app_secret"]
-    case "onebot":
-      return ["ws_url"]
-    case "wecom":
-      return []
-    case "whatsapp":
-      return ["bridge_url"]
-    case "pico":
-      return ["token"]
-    case "maixcam":
-      return ["host"]
-    case "matrix":
-      return ["homeserver", "user_id", "access_token"]
-    case "irc":
-      return ["server"]
-    case "mqtt":
-      return ["broker", "agent_id"]
-    default:
-      return []
   }
 }
 
@@ -273,6 +273,27 @@ function isMissingRequiredValue(value: unknown): boolean {
   return false
 }
 
+function clearSubmittedSecretDrafts(
+  current: ChannelConfig,
+  submitted: ChannelConfig,
+): ChannelConfig {
+  let next = current
+  for (const editKey of Object.values(SECRET_FIELD_MAP)) {
+    const submittedValue = asString(submitted[editKey])
+    if (
+      submittedValue === "" ||
+      asString(current[editKey]) !== submittedValue
+    ) {
+      continue
+    }
+    if (next === current) {
+      next = { ...current }
+    }
+    next[editKey] = ""
+  }
+  return next
+}
+
 function getChannelDocSlug(channelName: string): string {
   return channelName.replaceAll("_", "-")
 }
@@ -281,6 +302,7 @@ const CHANNELS_WITHOUT_DOCS = new Set([
   "pico",
   "wecom",
   "matrix",
+  "deltachat",
   "irc",
   "whatsapp",
   "whatsapp_native",
@@ -320,28 +342,44 @@ export function ChannelConfigPage({ channelName }: ChannelConfigPageProps) {
   }, [])
 
   const loadData = useCallback(
-    async (silent = false) => {
+    async (silent = false, throwOnError = false) => {
       const requestId = loadRequestIdRef.current + 1
       loadRequestIdRef.current = requestId
+      const supersededMessage = t("channels.page.reloadSuperseded", {
+        defaultValue:
+          "Channel configuration reload was superseded. Please try again.",
+      })
       if (!silent) setLoading(true)
       try {
         const catalog = await getChannelsCatalog()
-        if (loadRequestIdRef.current !== requestId) return
+        if (loadRequestIdRef.current !== requestId) {
+          if (throwOnError) {
+            throw new Error(supersededMessage)
+          }
+          return
+        }
         const matched =
           catalog.channels.find((item) => item.name === channelName) ?? null
 
         if (!matched) {
+          const message = t("channels.page.notFound", {
+            name: channelName,
+          })
           resetPageState()
-          setFetchError(
-            t("channels.page.notFound", {
-              name: channelName,
-            }),
-          )
+          setFetchError(message)
+          if (throwOnError) {
+            throw new Error(message)
+          }
           return
         }
 
         const channelConfig = await getChannelConfig(channelName)
-        if (loadRequestIdRef.current !== requestId) return
+        if (loadRequestIdRef.current !== requestId) {
+          if (throwOnError) {
+            throw new Error(supersededMessage)
+          }
+          return
+        }
         const raw = asRecord(channelConfig.config)
         const normalized = normalizeConfig(matched, raw)
 
@@ -354,9 +392,19 @@ export function ChannelConfigPage({ channelName }: ChannelConfigPageProps) {
         setServerError("")
         setFieldErrors({})
       } catch (e) {
-        if (loadRequestIdRef.current !== requestId) return
+        if (loadRequestIdRef.current !== requestId) {
+          if (throwOnError) {
+            throw new Error(supersededMessage, { cause: e })
+          }
+          return
+        }
+        const error =
+          e instanceof Error ? e : new Error(t("channels.loadError"))
         setConfiguredSecrets([])
-        setFetchError(e instanceof Error ? e.message : t("channels.loadError"))
+        setFetchError(error.message)
+        if (throwOnError) {
+          throw error
+        }
       } finally {
         if (!silent && loadRequestIdRef.current === requestId) {
           setLoading(false)
@@ -495,12 +543,28 @@ export function ChannelConfigPage({ channelName }: ChannelConfigPageProps) {
         getFieldValueForValidation(preparedEditConfig, configuredSecrets, key),
       ),
     )
+    const nextFieldErrors: Record<string, string> = {}
     if (missingRequiredFields.length > 0) {
       const requiredFieldError = t("channels.validation.requiredField")
-      const nextFieldErrors: Record<string, string> = {}
       for (const key of missingRequiredFields) {
         nextFieldErrors[key] = requiredFieldError
       }
+    }
+    const invalidPortFields = Object.entries(preparedEditConfig)
+      .filter(
+        ([key, value]) =>
+          isPortFieldKey(key) && parseOptionalPort(value) === undefined,
+      )
+      .map(([key]) => key)
+    if (invalidPortFields.length > 0) {
+      const invalidPortError = t("channels.validation.invalidPort", {
+        defaultValue: "Enter 0 or an integer from 1 to 65535.",
+      })
+      for (const key of invalidPortFields) {
+        nextFieldErrors[key] = invalidPortError
+      }
+    }
+    if (Object.keys(nextFieldErrors).length > 0) {
       setFieldErrors(nextFieldErrors)
       setServerError("")
       return
@@ -516,7 +580,10 @@ export function ChannelConfigPage({ channelName }: ChannelConfigPageProps) {
           [channel.config_key]: savePayload,
         },
       })
-      await loadData()
+      setEditConfig((current) =>
+        clearSubmittedSecretDrafts(current, preparedEditConfig),
+      )
+      await loadData(true, true)
       const gateway = await refreshGatewayState({ force: true })
       showSaveSuccessOrRestartToast(
         t,
@@ -715,16 +782,26 @@ export function ChannelConfigPage({ channelName }: ChannelConfigPageProps) {
           </div>
         ) : (
           <div className="w-full max-w-4xl space-y-6 pt-5">
-            {!hidesPageLevelEnableToggle && (
-              <div className="bg-card text-card-foreground border-border/60 flex items-center justify-between rounded-xl border px-6 py-4 shadow-sm">
-                <p className="text-sm font-medium">
-                  {t("channels.page.enableLabel")}
-                </p>
-                <Switch checked={enabled} onCheckedChange={setEnabled} />
-              </div>
-            )}
+            <fieldset disabled={saving} className="contents">
+              {!hidesPageLevelEnableToggle && (
+                <div className="bg-card text-card-foreground border-border/60 flex items-center justify-between rounded-xl border px-6 py-4 shadow-sm">
+                  <Label
+                    htmlFor="channel-enabled"
+                    className="text-sm font-medium"
+                  >
+                    {t("channels.page.enableLabel")}
+                  </Label>
+                  <Switch
+                    id="channel-enabled"
+                    checked={enabled}
+                    onCheckedChange={setEnabled}
+                    aria-label={t("channels.page.enableLabel")}
+                  />
+                </div>
+              )}
 
-            {renderForm()}
+              {renderForm()}
+            </fieldset>
 
             {serverError && (
               <p className="text-destructive text-sm">{serverError}</p>

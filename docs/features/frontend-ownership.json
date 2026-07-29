@@ -73,8 +73,10 @@
     {
       "spec": "docs/features/event-automation.md",
       "patterns": [
+        "web/frontend/src/api/event-sources.ts",
         "web/frontend/src/api/events.ts",
         "web/frontend/src/components/events/**",
+        "web/frontend/src/routes/event-sources.tsx",
         "web/frontend/src/routes/events.tsx"
       ]
     },

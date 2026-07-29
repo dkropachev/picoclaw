@@ -15,6 +15,224 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
+func TestHandleGetConfigMasksUnresolvableEventWebhookSecret(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	configData := []byte(`{
+		"version": 3,
+		"events": {
+			"ingress": {
+				"enabled": true,
+				"webhooks": {
+					"deploy": {
+						"enabled": true,
+						"secret": "[NOT_HERE]"
+					}
+				}
+			}
+		}
+	}`)
+	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+	securityData := []byte(`events:
+  ingress:
+    webhooks:
+      deploy:
+        secret: file://missing-webhook-secret.txt
+`)
+	if err := os.WriteFile(
+		filepath.Join(dir, config.SecurityConfigFile),
+		securityData,
+		0o600,
+	); err != nil {
+		t.Fatalf("write .security.yml: %v", err)
+	}
+
+	if _, err := config.LoadConfig(configPath); err == nil {
+		t.Fatal("LoadConfig() error = nil, want unresolved active secret error")
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf(
+			"GET /api/config status = %d, want %d, body=%s",
+			rec.Code,
+			http.StatusOK,
+			rec.Body.String(),
+		)
+	}
+	if strings.Contains(rec.Body.String(), "missing-webhook-secret") {
+		t.Fatal("GET /api/config exposed the unresolved webhook secret reference")
+	}
+	if !strings.Contains(rec.Body.String(), `"secret":"[NOT_HERE]"`) {
+		t.Fatalf("GET /api/config body=%s, want masked secret marker", rec.Body.String())
+	}
+}
+
+func TestHandleGetConfigRejectsCredentialBearingEventPublicIdentity(t *testing.T) {
+	const secret = "sk-default"
+
+	tests := []struct {
+		name    string
+		ingress config.EventIngressConfig
+	}{
+		{
+			name: "webhook name",
+			ingress: config.EventIngressConfig{
+				Webhooks: map[string]config.GenericWebhookConfig{
+					"hook-" + secret: {},
+				},
+			},
+		},
+		{
+			name: "webhook format",
+			ingress: config.EventIngressConfig{
+				Webhooks: map[string]config.GenericWebhookConfig{
+					"hook": {Format: "format-" + secret},
+				},
+			},
+		},
+		{
+			name: "channel name",
+			ingress: config.EventIngressConfig{
+				Channels: map[string]config.ChannelEventIngressConfig{
+					"channel-" + secret: {},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			configPath, cleanup := setupOAuthTestEnv(t)
+			defer cleanup()
+
+			cfg, err := config.LoadConfigForUpdate(configPath)
+			if err != nil {
+				t.Fatalf("LoadConfigForUpdate() error = %v", err)
+			}
+			cfg.Events.Ingress = test.ingress
+			operational, err := json.MarshalIndent(cfg, "", "  ")
+			if err != nil {
+				t.Fatalf("marshal corrupt operational config: %v", err)
+			}
+			if err = os.WriteFile(configPath, operational, 0o600); err != nil {
+				t.Fatalf("write corrupt operational config: %v", err)
+			}
+
+			h := NewHandler(configPath)
+			mux := http.NewServeMux()
+			h.RegisterRoutes(mux)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(
+				rec,
+				httptest.NewRequest(http.MethodGet, "/api/config", nil),
+			)
+
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf(
+					"GET /api/config status = %d, want %d, body=%s",
+					rec.Code,
+					http.StatusInternalServerError,
+					rec.Body.String(),
+				)
+			}
+			if strings.Contains(rec.Body.String(), secret) {
+				t.Fatal("GET /api/config exposed a configured credential")
+			}
+			if rec.Body.String() != "Failed to project config safely\n" {
+				t.Fatalf(
+					"GET /api/config body = %q, want opaque projection failure",
+					rec.Body.String(),
+				)
+			}
+		})
+	}
+}
+
+func TestConfigAPIRepairsActiveAdapterWithDisabledChannel(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	configData := []byte(`{
+		"version": 3,
+		"events": {
+			"ingress": {
+				"enabled": true,
+				"channels": {
+					"deltachat": {
+						"enabled": true,
+						"source": "email",
+						"mode": "mirror"
+					}
+				}
+			}
+		}
+	}`)
+	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+
+	if _, err := config.LoadConfig(configPath); err == nil {
+		t.Fatal("LoadConfig() error = nil, want disabled channel dependency error")
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	getRec := httptest.NewRecorder()
+	mux.ServeHTTP(
+		getRec,
+		httptest.NewRequest(http.MethodGet, "/api/config", nil),
+	)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf(
+			"GET /api/config status = %d, want %d, body=%s",
+			getRec.Code,
+			http.StatusOK,
+			getRec.Body.String(),
+		)
+	}
+
+	patchBody := bytes.NewBufferString(`{
+		"events": {
+			"ingress": {
+				"channels": {
+					"deltachat": {
+						"enabled": false
+					}
+				}
+			}
+		}
+	}`)
+	patchReq := httptest.NewRequest(http.MethodPatch, "/api/config", patchBody)
+	patchReq.Header.Set("Content-Type", "application/json")
+	patchRec := httptest.NewRecorder()
+	mux.ServeHTTP(patchRec, patchReq)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf(
+			"PATCH /api/config status = %d, want %d, body=%s",
+			patchRec.Code,
+			http.StatusOK,
+			patchRec.Body.String(),
+		)
+	}
+
+	repaired, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig(repaired) error = %v", err)
+	}
+	if repaired.Events.Ingress.Channels["deltachat"].Enabled {
+		t.Fatal("repaired Delta Chat event adapter is still enabled")
+	}
+}
+
 func TestHandlePatchConfig_PreservesTurnProfile(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()

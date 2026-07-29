@@ -76,6 +76,10 @@ function asBool(value: unknown): boolean {
   return value === true
 }
 
+function isPortFieldKey(key: string): boolean {
+  return key === "port" || key.endsWith("_port")
+}
+
 export function GenericForm({
   config,
   onChange,
@@ -189,6 +193,11 @@ export function GenericForm({
     }
 
     const value = config[key]
+    const isNumericField = typeof value === "number" || isPortFieldKey(key)
+    const inputValue =
+      typeof value === "number" && !Number.isFinite(value)
+        ? ""
+        : String(value ?? "")
     if (typeof value === "boolean") {
       return (
         <SwitchCardField
@@ -229,11 +238,17 @@ export function GenericForm({
         error={fieldErrors[key]}
       >
         <Input
-          value={String(value ?? "")}
+          type={isNumericField ? "number" : undefined}
+          min={isPortFieldKey(key) ? 0 : undefined}
+          max={isPortFieldKey(key) ? 65535 : undefined}
+          step={isPortFieldKey(key) ? 1 : undefined}
+          inputMode={isPortFieldKey(key) ? "numeric" : undefined}
+          value={inputValue}
           onChange={(e) => {
             const v = e.target.value
-            if (typeof config[key] === "number") {
-              onChange(key, v === "" ? 0 : Number(v))
+            if (isNumericField) {
+              const parsed = v === "" ? 0 : Number(v)
+              onChange(key, Number.isFinite(parsed) ? parsed : v)
             } else {
               onChange(key, v)
             }

@@ -1282,6 +1282,286 @@ func TestGatewayStatusRequiresRestartAfterChannelChange(t *testing.T) {
 	}
 }
 
+func TestConfigSignatureHashesDeltaChatPassword(t *testing.T) {
+	cfg := config.DefaultConfig()
+	delta := cfg.Channels.Get(config.ChannelDeltaChat)
+	if delta == nil {
+		t.Fatal("expected default Delta Chat channel config")
+	}
+	decoded, err := delta.GetDecoded()
+	if err != nil {
+		t.Fatalf("GetDecoded() error = %v", err)
+	}
+	settings, ok := decoded.(*config.DeltaChatSettings)
+	if !ok {
+		t.Fatalf(
+			"Delta Chat settings type = %T, want *config.DeltaChatSettings",
+			decoded,
+		)
+	}
+
+	const oldPassword = "delta-password-before"
+	const newPassword = "delta-password-after"
+	settings.Password.Set(oldPassword)
+	before := computeConfigSignature(cfg)
+	settings.Password.Set(newPassword)
+	after := computeConfigSignature(cfg)
+
+	if after == before {
+		t.Fatal("rotating the Delta Chat password should change the config signature")
+	}
+	for _, signature := range []string{before, after} {
+		if strings.Contains(signature, oldPassword) ||
+			strings.Contains(signature, newPassword) {
+			t.Fatal("config signature must not contain a plaintext Delta Chat password")
+		}
+	}
+}
+
+func TestConfigSignatureTracksOnlyActiveEventIngressRuntime(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+
+	disabledSignature := computeConfigSignature(cfg)
+	cfg.Events.Ingress.DatabasePath = "eventing/alternate.db"
+	cfg.Events.Ingress.RetentionDays = 14
+	cfg.Events.Ingress.Webhooks = map[string]config.GenericWebhookConfig{
+		"inactive": {
+			Enabled: false,
+			Format:  config.EventWebhookFormatGitHub,
+			Secret:  *config.NewSecureString("01234567890123456789012345678901"),
+		},
+	}
+	if got := computeConfigSignature(cfg); got != disabledSignature {
+		t.Fatal("disabled event ingress configuration should not require a restart")
+	}
+
+	cfg.Events.Ingress.Enabled = true
+	enabledSignature := computeConfigSignature(cfg)
+	if enabledSignature == disabledSignature {
+		t.Fatal("enabling event ingress should change the config signature")
+	}
+
+	cfg.Events.Ingress.RetentionDays = 21
+	retentionSignature := computeConfigSignature(cfg)
+	if retentionSignature == enabledSignature {
+		t.Fatal("active event retention policy should change the config signature")
+	}
+
+	inactive := cfg.Events.Ingress.Webhooks["inactive"]
+	inactive.Format = config.EventWebhookFormatStandard
+	cfg.Events.Ingress.Webhooks["inactive"] = inactive
+	if got := computeConfigSignature(cfg); got != retentionSignature {
+		t.Fatal("inactive webhook routing metadata should not change the active runtime signature")
+	}
+
+	inactive.Secret = *config.NewSecureString("inactive-secret-change")
+	cfg.Events.Ingress.Webhooks["inactive"] = inactive
+	inactiveRedactionSignature := computeConfigSignature(cfg)
+	if inactiveRedactionSignature == retentionSignature {
+		t.Fatal("rotating an inactive webhook secret should change the active store redactor signature")
+	}
+
+	active := inactive
+	active.Enabled = true
+	active.Format = config.EventWebhookFormatGitHub
+	active.Secret = *config.NewSecureString("01234567890123456789012345678901")
+	cfg.Events.Ingress.Webhooks["primary"] = active
+	webhookSignature := computeConfigSignature(cfg)
+	if webhookSignature == inactiveRedactionSignature {
+		t.Fatal("an active webhook should change the config signature")
+	}
+
+	active.Secret = *config.NewSecureString("abcdefghijklmnopqrstuvwxyzABCDEF")
+	cfg.Events.Ingress.Webhooks["primary"] = active
+	if got := computeConfigSignature(cfg); got == webhookSignature {
+		t.Fatal("rotating an active webhook secret should change the config signature")
+	}
+}
+
+func TestConfigSignatureCanonicalizesEventRedactFieldsLikeRedactor(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Events.Ingress.Enabled = true
+	cfg.Events.Ingress.RedactFields = []string{
+		"Tenant_Secret",
+		"Custom-Field",
+		"tenant_secret",
+		" *** ",
+	}
+
+	before := computeConfigSignature(cfg)
+	cfg.Events.Ingress.RedactFields = []string{
+		"custom field",
+		"TENANT-SECRET",
+		"CustomField",
+		"***",
+	}
+	after := computeConfigSignature(cfg)
+
+	if after != before {
+		t.Fatal("semantically equivalent redact fields should not change the runtime signature")
+	}
+
+	cfg.Events.Ingress.RedactFields = []string{
+		"custom field",
+		"TENANT-SECRET",
+		"CustomField",
+		"!!!",
+	}
+	if got := computeConfigSignature(cfg); got == after {
+		t.Fatal("changing an exact punctuation-only redact field should change the runtime signature")
+	}
+}
+
+func TestConfigSignatureTracksEventWorkflowDispatchToggleBothDirections(t *testing.T) {
+	tests := []struct {
+		name   string
+		before bool
+		after  bool
+	}{
+		{name: "enable workers", before: false, after: true},
+		{name: "disable workers", before: true, after: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Agents.Defaults.Workspace = t.TempDir()
+			cfg.Events.Ingress.Enabled = true
+			cfg.Workflows.Enabled = tt.before
+
+			before := computeConfigSignature(cfg)
+			cfg.Workflows.Enabled = tt.after
+			after := computeConfigSignature(cfg)
+			if after == before {
+				t.Fatalf(
+					"changing event workflow dispatch from %t to %t should change the runtime signature",
+					tt.before,
+					tt.after,
+				)
+			}
+		})
+	}
+}
+
+func TestConfigSignatureTracksActiveEventWorkflowExecutorSettings(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Events.Ingress.Enabled = true
+	cfg.Workflows.Enabled = true
+
+	before := computeConfigSignature(cfg)
+	cfg.Workflows.MaxConcurrentRuns = cfg.Workflows.EffectiveMaxConcurrentRuns() + 1
+	after := computeConfigSignature(cfg)
+	if after == before {
+		t.Fatal("changing an active event workflow executor setting should change the runtime signature")
+	}
+
+	cfg.Workflows.Enabled = false
+	disabledBefore := computeConfigSignature(cfg)
+	cfg.Workflows.MaxConcurrentRuns++
+	disabledAfter := computeConfigSignature(cfg)
+	if disabledAfter != disabledBefore {
+		t.Fatal("inactive event workflow executor settings should not change the runtime signature")
+	}
+}
+
+func TestConfigSignatureTracksActiveEventWorkflowWorkspace(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Events.Ingress.Enabled = true
+	cfg.Events.Ingress.DatabasePath = filepath.Join(
+		t.TempDir(),
+		"absolute-events.db",
+	)
+	cfg.Workflows.Enabled = true
+	cfg.Agents.Defaults.Workspace = filepath.Join(t.TempDir(), "workspace-one")
+
+	before := computeConfigSignature(cfg)
+	cfg.Agents.Defaults.Workspace = filepath.Join(t.TempDir(), "workspace-two")
+	after := computeConfigSignature(cfg)
+	if after == before {
+		t.Fatal("changing the active event workflow workspace should change the config signature")
+	}
+
+	cfg.Workflows.Enabled = false
+	disabledBefore := computeConfigSignature(cfg)
+	cfg.Agents.Defaults.Workspace = filepath.Join(t.TempDir(), "workspace-three")
+	if got := computeConfigSignature(cfg); got != disabledBefore {
+		t.Fatal("workflow workspace changes should be inert when event dispatch is disabled")
+	}
+}
+
+func TestConfigSignatureTracksEventRedactionCredentialDigests(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Events.Ingress.Enabled = true
+	cfg.Tools.Web.Enabled = false
+
+	model := addGatewayTestModel(cfg)
+	cfg.Agents.Defaults.ModelName = model.ModelName
+	const oldModelSecret = "model-redaction-secret-old"
+	const newModelSecret = "model-redaction-secret-new"
+	model.SetAPIKey(oldModelSecret)
+
+	beforeModelRotation := computeConfigSignature(cfg)
+	model.SetAPIKey(newModelSecret)
+	afterModelRotation := computeConfigSignature(cfg)
+	if afterModelRotation == beforeModelRotation {
+		t.Fatal("rotating a model credential should change the event redaction runtime signature")
+	}
+	for _, signature := range []string{beforeModelRotation, afterModelRotation} {
+		if strings.Contains(signature, oldModelSecret) ||
+			strings.Contains(signature, newModelSecret) {
+			t.Fatal("event redaction runtime signature must not contain plaintext model credentials")
+		}
+	}
+
+	const oldToolSecret = "tool-redaction-secret-old"
+	const newToolSecret = "tool-redaction-secret-new"
+	cfg.Tools.Web.Brave.SetAPIKey(oldToolSecret)
+	beforeToolRotation := computeConfigSignature(cfg)
+	cfg.Tools.Web.Brave.SetAPIKey(newToolSecret)
+	afterToolRotation := computeConfigSignature(cfg)
+	if afterToolRotation == beforeToolRotation {
+		t.Fatal("rotating a tool credential should change the event redaction runtime signature")
+	}
+	for _, signature := range []string{beforeToolRotation, afterToolRotation} {
+		if strings.Contains(signature, oldToolSecret) ||
+			strings.Contains(signature, newToolSecret) {
+			t.Fatal("event redaction runtime signature must not contain plaintext tool credentials")
+		}
+	}
+}
+
+func TestConfigSignatureTracksActiveEventChannelAdapter(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Events.Ingress.Enabled = true
+
+	delta := cfg.Channels.Get("deltachat")
+	if delta == nil {
+		t.Fatal("expected default Delta Chat channel config")
+	}
+	delta.Enabled = true
+	cfg.Events.Ingress.Channels = map[string]config.ChannelEventIngressConfig{
+		"deltachat": {
+			Enabled: true,
+			Source:  config.EventChannelSourceEmail,
+			Mode:    config.EventChannelModeMirror,
+		},
+	}
+
+	before := computeConfigSignature(cfg)
+	adapter := cfg.Events.Ingress.Channels["deltachat"]
+	adapter.Mode = config.EventChannelModeEventOnly
+	cfg.Events.Ingress.Channels["deltachat"] = adapter
+	after := computeConfigSignature(cfg)
+	if after == before {
+		t.Fatal("changing an active event channel adapter should change the config signature")
+	}
+}
+
 func TestGatewayStatusRequiresRestartAfterDefaultModelStreamingChange(t *testing.T) {
 	resetGatewayTestState(t)
 

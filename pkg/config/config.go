@@ -2103,7 +2103,7 @@ func LoadConfigForUpdate(path string) (*Config, error) {
 	return loadConfigWithOptions(path, false)
 }
 
-func loadConfigWithOptions(path string, resolveEventWebhooks bool) (*Config, error) {
+func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Config, error) {
 	updateResolver(filepath.Dir(path))
 
 	data, err := os.ReadFile(path)
@@ -2335,13 +2335,13 @@ func loadConfigWithOptions(path string, resolveEventWebhooks bool) (*Config, err
 	if err = env.Parse(cfg); err != nil {
 		return nil, err
 	}
-	if resolveEventWebhooks {
+	if validateEventIngressRuntime {
 		if err = cfg.Events.Ingress.resolveWebhookSecrets(); err != nil {
 			return nil, fmt.Errorf("resolve event ingress secrets: %w", err)
 		}
 	}
 	applySkillsRegistryEnvCompat(cfg)
-	if resolveEventWebhooks {
+	if validateEventIngressRuntime {
 		if err = cfg.Events.Ingress.Validate(); err != nil {
 			return nil, fmt.Errorf("invalid event ingress config: %w", err)
 		}
@@ -2350,11 +2350,18 @@ func loadConfigWithOptions(path string, resolveEventWebhooks bool) (*Config, err
 	if err = InitChannelList(cfg.Channels); err != nil {
 		return nil, err
 	}
-	if err = cfg.Events.Ingress.ValidateEventChannelAdapters(
-		cfg.Channels,
-		cfg.SensitiveDataValues()...,
-	); err != nil {
-		return nil, fmt.Errorf("invalid event channel ingress config: %w", err)
+	if validateEventIngressRuntime {
+		if err = cfg.Events.Ingress.ValidatePublicIdentities(
+			cfg.SensitiveDataValues()...,
+		); err != nil {
+			return nil, fmt.Errorf("invalid event ingress public identity: %w", err)
+		}
+		if err = cfg.Events.Ingress.ValidateEventChannelAdapters(
+			cfg.Channels,
+			cfg.SensitiveDataValues()...,
+		); err != nil {
+			return nil, fmt.Errorf("invalid event channel ingress config: %w", err)
+		}
 	}
 	if err = cfg.ValidateTurnProfile(); err != nil {
 		return nil, err
@@ -2506,7 +2513,9 @@ func toNameIndex(list []*ModelConfig) []string {
 }
 
 func SaveConfig(path string, cfg *Config) error {
-	if err := cfg.Events.Ingress.validateWebhookPublicIdentities(); err != nil {
+	if err := cfg.Events.Ingress.ValidatePublicIdentities(
+		cfg.SensitiveDataValues()...,
+	); err != nil {
 		return err
 	}
 	if cfg.Version < CurrentVersion {
