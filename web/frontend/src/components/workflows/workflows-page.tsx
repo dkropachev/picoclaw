@@ -37,6 +37,7 @@ import {
   type WorkflowDeliveryPayload,
   type WorkflowDependencyCheckResponse,
   type WorkflowDevelopmentSession,
+  type WorkflowDevelopmentTestReconciliation,
   type WorkflowDevelopmentTestResult,
   type WorkflowInputDefinition,
   type WorkflowRun,
@@ -97,6 +98,14 @@ import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 
 import {
+  WorkflowCancelDialog,
+  type WorkflowCancelTarget,
+} from "./workflow-cancel-dialog"
+import {
+  workflowDependencyFence,
+  workflowDependencyFenceMessage,
+} from "./workflow-dependency-fence"
+import {
   type WorkflowEditorMode,
   WorkflowEditorTabs,
 } from "./workflow-editor-tabs"
@@ -120,8 +129,8 @@ import {
   isWorkflowRunID,
   navigableWorkflowRef,
   normalizeWorkflowsSearch,
-  trustedWorkflowEventID,
 } from "./workflow-route-search"
+import { trustedWorkflowRunOrigin } from "./workflow-run-origin"
 import { WorkflowSettingsDialog } from "./workflow-settings-dialog"
 import { WorkflowTemplateCatalog } from "./workflow-template-catalog"
 
@@ -194,6 +203,26 @@ type WorkflowRepairStart = {
 }
 type WorkflowRunInputValues = Record<string, string>
 type WorkflowRunSecretValues = Record<string, string>
+type WorkflowRunSubmission = {
+  ref: string
+  expected_dependency_revision: string
+  inputs?: Record<string, unknown>
+  secrets?: Record<string, string>
+  session?: string
+  delivery?: WorkflowDeliveryPayload
+  async: boolean
+}
+type WorkflowRetrySubmission = {
+  runID: string
+  workflowRef: string
+  expectedDependencyRevision: string
+  secrets?: Record<string, string>
+  secretsJSON: string
+}
+type WorkflowCancelSubmission = {
+  runID: string
+  reason: string
+}
 
 const initialEventTriggerInspection: WorkflowEventTriggerInspectionState = {
   yaml: "",
@@ -295,6 +324,9 @@ export function WorkflowsPage({
   const [streamedEvents, setStreamedEvents] = useState<WorkflowRunEvent[]>([])
   const [eventStreamActive, setEventStreamActive] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [cancelTarget, setCancelTarget] = useState<WorkflowCancelTarget | null>(
+    null,
+  )
   const [dependencyDraftSnapshot, setDependencyDraftSnapshot] =
     useState<WorkflowDependencyDraftSnapshot | null>(null)
   const dependencySnapshotCounter = useRef(0)
@@ -330,6 +362,30 @@ export function WorkflowsPage({
       const run = query.state.data
       return run != null && !terminalStatuses.has(run.status) ? 3000 : false
     },
+    retry: false,
+  })
+  const selectedRun = runQuery.data
+  const selectedRunOrigin = trustedWorkflowRunOrigin(selectedRun?.origin)
+  const retryWorkflowRef =
+    selectedRun == null || selectedRun.workflow_ref.startsWith("draft:")
+      ? null
+      : selectedRun.workflow_ref
+  const retryDependencyQuery = useQuery({
+    queryKey: ["workflows", "dependencies", "published", retryWorkflowRef],
+    queryFn: ({ signal }) => {
+      if (retryWorkflowRef == null) {
+        throw new Error(
+          "Select a published workflow run to check dependencies.",
+        )
+      }
+      return checkWorkflowDependencies({ ref: retryWorkflowRef }, signal)
+    },
+    enabled:
+      mode === "operate" &&
+      retryWorkflowRef != null &&
+      selectedRun != null &&
+      terminalStatuses.has(selectedRun.status) &&
+      selectedRunOrigin?.kind !== "external_event_draft_test",
     retry: false,
   })
   const eventsQuery = useQuery({
@@ -425,7 +481,6 @@ export function WorkflowsPage({
     return map
   }, [compatibility?.workflows])
 
-  const selectedRun = runQuery.data
   const runDetailState: WorkflowRunDetailState =
     selectedRunID == null
       ? "none"
@@ -694,7 +749,7 @@ export function WorkflowsPage({
     [selectedWorkflowRef, workflows],
   )
   const publishedDependencyState: WorkflowDependencyCheckState =
-    selectedWorkflowRef == null
+    mode !== "operate" || selectedWorkflowRef == null
       ? "idle"
       : publishedDependencyQuery.isFetching
         ? "loading"
@@ -707,6 +762,32 @@ export function WorkflowsPage({
     publishedDependencyState === "current"
       ? publishedDependencyQuery.data
       : undefined
+  const retryDependencyState: WorkflowDependencyCheckState =
+    mode !== "operate" ||
+    retryWorkflowRef == null ||
+    selectedRun == null ||
+    !terminalStatuses.has(selectedRun.status) ||
+    selectedRunOrigin?.kind === "external_event_draft_test"
+      ? "idle"
+      : retryDependencyQuery.isFetching
+        ? "loading"
+        : retryDependencyQuery.isError
+          ? "error"
+          : retryDependencyQuery.data == null
+            ? "loading"
+            : "current"
+  const retryDependencyReport =
+    retryDependencyState === "current" ? retryDependencyQuery.data : undefined
+  const runDependencyFence = workflowDependencyFence(
+    selectedWorkflowRef,
+    publishedDependencyState,
+    publishedDependencyReport,
+  )
+  const retryDependencyFence = workflowDependencyFence(
+    retryWorkflowRef,
+    retryDependencyState,
+    retryDependencyReport,
+  )
   const selectedWorkflowContractSignature = useMemo(
     () => workflowRunContractSignature(selectedWorkflow ?? null),
     [selectedWorkflow],
@@ -792,12 +873,23 @@ export function WorkflowsPage({
     selectedRun == null || selectedRun.workflow_ref.startsWith("draft:")
       ? undefined
       : compatibilityByRef.get(selectedRun.workflow_ref)
+  const workflowRunBaseMessage = workflowRunReadinessMessage(
+    selectedWorkflow ?? null,
+    selectedWorkflowStamp,
+    compatibility,
+  )
+  const runReadinessMessage =
+    runPayloadError ??
+    (workflowRunBaseMessage === "Ready to run."
+      ? workflowDependencyFenceMessage("run", runDependencyFence)
+      : workflowRunBaseMessage)
   const canRunSelectedWorkflow =
     selectedWorkflow != null &&
     !selectedWorkflow.error &&
     selectedWorkflow.ref.trim() !== "" &&
     isRunnableWorkflowStatus(selectedWorkflowStamp?.status, compatibility) &&
-    runPayloadError == null
+    runPayloadError == null &&
+    runDependencyFence.status === "ready"
 
   const startMutation = useMutation({
     mutationFn: startWorkflowDevelopment,
@@ -1036,7 +1128,7 @@ export function WorkflowsPage({
         event_id: eventTriggerPresent ? eventTestMatch.eventID : undefined,
         async: true,
       }),
-    onSuccess: ({ session: nextSession, result, error }) => {
+    onSuccess: ({ session: nextSession, result, reconciliation, error }) => {
       applySessionDraft(nextSession)
       setLastDraftTest({
         sessionID: nextSession.id,
@@ -1053,6 +1145,8 @@ export function WorkflowsPage({
         setSelectedRunID(result.run_id)
         if (error) {
           toast.error(`Draft test ${result.status}: ${error}`)
+        } else if (reconciliation != null) {
+          toast.warning(reconciliation.message)
         } else {
           toast.success(`Draft test ${result.status}`)
         }
@@ -1228,18 +1322,106 @@ export function WorkflowsPage({
   })
 
   const runWorkflowMutation = useMutation({
-    mutationFn: () => {
-      if (selectedWorkflowRef == null) {
-        throw new Error("Select a workflow to run")
+    mutationFn: (submission: WorkflowRunSubmission) => runWorkflow(submission),
+    onSuccess: ({ result, error }, submission) => {
+      toast[error ? "error" : "success"](
+        error
+          ? `Workflow run ${result.status}: ${error}`
+          : `Workflow run ${result.status}`,
+      )
+      updateRouteSearch(
+        {
+          mode: "operate",
+          workflow: submission.ref,
+          run: result.run_id,
+        },
+        false,
+      )
+      void invalidateRunQueries(queryClient, result.run_id)
+    },
+    onError: (err, submission) => {
+      toast.error(errorMessage(err))
+      void refetchPublishedDependency(queryClient, submission.ref)
+    },
+  })
+
+  const cancelMutation = useMutation({
+    mutationFn: ({ runID, reason }: WorkflowCancelSubmission) =>
+      cancelWorkflowRun(runID, reason),
+    onSuccess: (run, submission) => {
+      queryClient.setQueryData(["workflows", "runs", submission.runID], run)
+      queryClient.setQueryData<{ runs: WorkflowRun[] }>(
+        ["workflows", "runs"],
+        (current) =>
+          current == null
+            ? current
+            : {
+                runs: current.runs.map((candidate) =>
+                  candidate.id === submission.runID ? run : candidate,
+                ),
+              },
+      )
+      if (run.status === "canceled") {
+        toast.success("Workflow run canceled")
+      } else {
+        toast.info(`Workflow run already ${run.status}`)
       }
-      return runWorkflow({
+      setCancelTarget((current) =>
+        current?.id === submission.runID ? null : current,
+      )
+      void invalidateRunQueries(queryClient, submission.runID)
+    },
+    onError: (err) => toast.error(errorMessage(err)),
+  })
+
+  const retryMutation = useMutation({
+    mutationFn: (submission: WorkflowRetrySubmission) =>
+      retryWorkflowRun(submission.runID, {
+        expected_dependency_revision: submission.expectedDependencyRevision,
+        secrets: submission.secrets,
+      }),
+    onSuccess: ({ result, error }, submission) => {
+      toast[error ? "error" : "success"](
+        error
+          ? `Workflow retry ${result.status}: ${error}`
+          : "Workflow retry started",
+      )
+      setRetrySecretsJSON((current) =>
+        current === submission.secretsJSON ? "{}" : current,
+      )
+      updateRouteSearch(
+        {
+          mode: "operate",
+          workflow: submission.workflowRef,
+          run: result.run_id,
+        },
+        false,
+      )
+      void invalidateRunQueries(queryClient, result.run_id)
+    },
+    onError: (err, submission) => {
+      toast.error(errorMessage(err))
+      void refetchPublishedDependency(queryClient, submission.workflowRef)
+    },
+  })
+
+  const submitWorkflowRun = async () => {
+    if (
+      selectedWorkflowRef == null ||
+      selectedWorkflow == null ||
+      runDependencyFence.status !== "ready" ||
+      runDependencyFence.revision == null
+    ) {
+      toast.error(runReadinessMessage)
+      return false
+    }
+    try {
+      await runWorkflowMutation.mutateAsync({
         ref: selectedWorkflowRef,
-        inputs: workflowRunInputsPayload(
-          selectedWorkflow ?? null,
-          runInputValues,
-        ),
+        expected_dependency_revision: runDependencyFence.revision,
+        inputs: workflowRunInputsPayload(selectedWorkflow, runInputValues),
         secrets: workflowRunSecretsPayload(
-          selectedWorkflow ?? null,
+          selectedWorkflow,
           runSecretValues,
           runSecretsJSON,
         ),
@@ -1247,47 +1429,30 @@ export function WorkflowsPage({
         delivery: parseDeliveryJSONObject(runDeliveryJSON, "Delivery"),
         async: true,
       })
-    },
-    onSuccess: ({ result, error }) => {
-      toast[error ? "error" : "success"](
-        error
-          ? `Workflow run ${result.status}: ${error}`
-          : `Workflow run ${result.status}`,
-      )
-      setSelectedRunID(result.run_id)
-      void invalidateRunQueries(queryClient, result.run_id)
-    },
-    onError: (err) => toast.error(errorMessage(err)),
-  })
+      return true
+    } catch {
+      return false
+    }
+  }
 
-  const cancelMutation = useMutation({
-    mutationFn: (runID: string) => cancelWorkflowRun(runID),
-    onSuccess: () => {
-      toast.success("Workflow run canceled")
-      void invalidateRunQueries(queryClient, selectedRunID)
-      void invalidateWorkflowQueries(queryClient)
-    },
-    onError: (err) => toast.error(errorMessage(err)),
-  })
-
-  const retryMutation = useMutation({
-    mutationFn: (runID: string) =>
-      retryWorkflowRun(
-        runID,
-        parseStringJSONObject(retrySecretsJSON, "Retry secrets"),
-      ),
-    onSuccess: ({ result, error }) => {
-      toast[error ? "error" : "success"](
-        error
-          ? `Workflow retry ${result.status}: ${error}`
-          : "Workflow retry started",
-      )
-      setRetrySecretsJSON("{}")
-      setSelectedRunID(result.run_id)
-      void invalidateRunQueries(queryClient, result.run_id)
-    },
-    onError: (err) => toast.error(errorMessage(err)),
-  })
+  const retrySelectedWorkflowRun = () => {
+    if (
+      selectedRun == null ||
+      retryWorkflowRef == null ||
+      retryDependencyFence.status !== "ready" ||
+      retryDependencyFence.revision == null
+    ) {
+      toast.error(retryReadinessMessage)
+      return
+    }
+    retryMutation.mutate({
+      runID: selectedRun.id,
+      workflowRef: retryWorkflowRef,
+      expectedDependencyRevision: retryDependencyFence.revision,
+      secrets: parseStringJSONObject(retrySecretsJSON, "Retry secrets"),
+      secretsJSON: retrySecretsJSON,
+    })
+  }
 
   const startScaffold = () => {
     startMutation.mutate({
@@ -1302,6 +1467,13 @@ export function WorkflowsPage({
     !startMutation.isPending &&
     !startWithAIMutation.isPending &&
     !startRepairWithAIMutation.isPending
+  const acceptedTestReconciliation =
+    testDraftMutation.data != null &&
+    testDraftMutation.data.session.id === session?.id
+      ? testDraftMutation.data.reconciliation
+      : undefined
+  const currentDevelopmentReconciliation =
+    developmentQuery.data?.reconciliation ?? acceptedTestReconciliation
   const canTestDraft =
     session != null &&
     draftTargetRef.trim() !== "" &&
@@ -1320,20 +1492,29 @@ export function WorkflowsPage({
     publishSessionSnapshotReady &&
     dependencyReady
   const canCancel = selectedRun?.status === "running"
+  const retryCompatibilityMessage = workflowRetryReadinessMessage(
+    selectedRun,
+    selectedRunWorkflow,
+    selectedRunWorkflowStamp,
+    compatibility,
+  )
+  const retryDraftEventBlocked =
+    selectedRunOrigin?.kind === "external_event_draft_test"
   const canRetry =
     selectedRun != null &&
     terminalStatuses.has(selectedRun.status) &&
     !selectedRun.workflow_ref.startsWith("draft:") &&
+    !retryDraftEventBlocked &&
     isRunnableWorkflowStatus(selectedRunWorkflowStamp?.status, compatibility) &&
-    retryPayloadError == null
+    retryPayloadError == null &&
+    retryDependencyFence.status === "ready"
   const retryReadinessMessage =
     retryPayloadError ??
-    workflowRetryReadinessMessage(
-      selectedRun,
-      selectedRunWorkflow,
-      selectedRunWorkflowStamp,
-      compatibility,
-    )
+    (retryDraftEventBlocked
+      ? "Event-backed draft test runs cannot be retried. Run the draft test again."
+      : retryCompatibilityMessage === "Ready to retry."
+        ? workflowDependencyFenceMessage("retry", retryDependencyFence)
+        : retryCompatibilityMessage)
   const developmentPendingAction: DevelopmentPendingAction | null =
     startWithAIMutation.isPending || startRepairWithAIMutation.isPending
       ? "start-ai"
@@ -1439,6 +1620,7 @@ export function WorkflowsPage({
         {mode === "develop" ? (
           <DevelopSurface
             session={session}
+            reconciliation={currentDevelopmentReconciliation}
             workflows={workflows}
             templates={templatesQuery.data?.templates ?? []}
             templatesLoading={templatesQuery.isLoading}
@@ -1536,6 +1718,9 @@ export function WorkflowsPage({
             selectedWorkflowRef={selectedWorkflowRef}
             publishedDependencyState={publishedDependencyState}
             publishedDependencyReport={publishedDependencyReport}
+            retryDependencyState={retryDependencyState}
+            retryDependencyReport={retryDependencyReport}
+            retryWorkflowRef={retryWorkflowRef}
             runInputValues={runInputValues}
             runSecretValues={runSecretValues}
             runSecretsJSON={runSecretsJSON}
@@ -1560,6 +1745,7 @@ export function WorkflowsPage({
             onRetryPublishedDependencies={() =>
               void publishedDependencyQuery.refetch()
             }
+            onRetryRunDependencies={() => void retryDependencyQuery.refetch()}
             onRunInputChange={(name, value) =>
               setRunInputValues((current) => ({ ...current, [name]: value }))
             }
@@ -1573,17 +1759,23 @@ export function WorkflowsPage({
             onSelectRun={setSelectedRunID}
             onRetryRunDetail={() => void runQuery.refetch()}
             onReload={() => reloadMutation.mutate()}
-            onRunWorkflow={() => runWorkflowMutation.mutate()}
+            onRunWorkflow={submitWorkflowRun}
             reloading={reloadMutation.isPending}
             runningWorkflow={runWorkflowMutation.isPending}
-            onCancel={() =>
-              selectedRun && cancelMutation.mutate(selectedRun.id)
-            }
-            onRetry={() => selectedRun && retryMutation.mutate(selectedRun.id)}
+            onCancel={() => {
+              if (selectedRun != null) {
+                cancelMutation.reset()
+                setCancelTarget({
+                  id: selectedRun.id,
+                  workflowRef: selectedRun.workflow_ref,
+                })
+              }
+            }}
+            onRetry={retrySelectedWorkflowRun}
             canceling={cancelMutation.isPending}
             retrying={retryMutation.isPending}
             canRunWorkflow={canRunSelectedWorkflow}
-            runPayloadError={runPayloadError}
+            runReadinessMessage={runReadinessMessage}
             canCancel={canCancel}
             canRetry={canRetry}
             retryReadinessMessage={retryReadinessMessage}
@@ -1611,6 +1803,24 @@ export function WorkflowsPage({
         onRetry={() => void settingsQuery.refetch()}
         onSave={(values) => settingsMutation.mutate(values)}
         onReload={() => reloadMutation.mutate()}
+      />
+      <WorkflowCancelDialog
+        target={cancelTarget}
+        pending={cancelMutation.isPending}
+        requestError={
+          cancelMutation.isError
+            ? errorMessage(cancelMutation.error)
+            : undefined
+        }
+        onDismiss={() => {
+          cancelMutation.reset()
+          setCancelTarget(null)
+        }}
+        onConfirm={(reason) => {
+          if (cancelTarget != null) {
+            cancelMutation.mutate({ runID: cancelTarget.id, reason })
+          }
+        }}
       />
     </div>
   )
@@ -1673,6 +1883,7 @@ function CompatibilityBanner({
 
 function DevelopSurface({
   session,
+  reconciliation,
   workflows,
   templates,
   templatesLoading,
@@ -1736,6 +1947,7 @@ function DevelopSurface({
   busy,
 }: {
   session: WorkflowDevelopmentSession | null
+  reconciliation?: WorkflowDevelopmentTestReconciliation
   workflows: WorkflowDefinition[]
   templates: WorkflowTemplateCatalogEntry[]
   templatesLoading: boolean
@@ -1936,6 +2148,12 @@ function DevelopSurface({
       <section className="border-border bg-card/40 flex min-h-[36rem] flex-col rounded-lg border xl:min-h-0">
         <DevelopmentHeader session={session} />
         {busyLabel ? <DevelopmentBusyBar label={busyLabel} /> : null}
+        {reconciliation != null ? (
+          <DevelopmentReconciliationWarning
+            reconciliation={reconciliation}
+            onOpenRun={onOpenTestRun}
+          />
+        ) : null}
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4">
           <div className="grid gap-2">
             <label
@@ -2256,6 +2474,48 @@ function DevelopmentBusyBar({ label }: { label: string }) {
   )
 }
 
+function DevelopmentReconciliationWarning({
+  reconciliation,
+  onOpenRun,
+}: {
+  reconciliation: WorkflowDevelopmentTestReconciliation
+  onOpenRun: (runID: string) => void
+}) {
+  const canOpenRun = isWorkflowRunID(reconciliation.run_id)
+  return (
+    <div
+      role="alert"
+      className="text-foreground flex min-w-0 items-start gap-3 border-b border-amber-500/40 bg-amber-500/10 px-4 py-3 text-xs"
+    >
+      <IconAlertTriangle
+        className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400"
+        aria-hidden="true"
+      />
+      <div className="min-w-0 flex-1">
+        <div className="font-medium">Draft test reconciliation degraded</div>
+        <div className="mt-1 break-words">{reconciliation.message}</div>
+        {reconciliation.run_id ? (
+          <div className="mt-1 font-mono break-all">
+            {reconciliation.run_id}
+          </div>
+        ) : null}
+      </div>
+      {canOpenRun ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => onOpenRun(reconciliation.run_id)}
+          aria-label={`Open reconciled run ${reconciliation.run_id}`}
+        >
+          <IconExternalLink className="size-4" aria-hidden="true" />
+          Open Run
+        </Button>
+      ) : null}
+    </div>
+  )
+}
+
 function developmentBusyLabel(action: DevelopmentPendingAction | null) {
   switch (action) {
     case "start-ai":
@@ -2372,6 +2632,9 @@ function OperateSurface({
   selectedWorkflowRef,
   publishedDependencyState,
   publishedDependencyReport,
+  retryDependencyState,
+  retryDependencyReport,
+  retryWorkflowRef,
   runInputValues,
   runSecretValues,
   runSecretsJSON,
@@ -2392,6 +2655,7 @@ function OperateSurface({
   onQueryChange,
   onSelectWorkflow,
   onRetryPublishedDependencies,
+  onRetryRunDependencies,
   onRunInputChange,
   onRunSecretChange,
   onRunSecretsJSONChange,
@@ -2409,7 +2673,7 @@ function OperateSurface({
   canceling,
   retrying,
   canRunWorkflow,
-  runPayloadError,
+  runReadinessMessage,
   canCancel,
   canRetry,
   retryReadinessMessage,
@@ -2421,6 +2685,9 @@ function OperateSurface({
   selectedWorkflowRef: string | null
   publishedDependencyState: WorkflowDependencyCheckState
   publishedDependencyReport?: WorkflowDependencyCheckResponse
+  retryDependencyState: WorkflowDependencyCheckState
+  retryDependencyReport?: WorkflowDependencyCheckResponse
+  retryWorkflowRef: string | null
   runInputValues: WorkflowRunInputValues
   runSecretValues: WorkflowRunSecretValues
   runSecretsJSON: string
@@ -2441,6 +2708,7 @@ function OperateSurface({
   onQueryChange: (value: string) => void
   onSelectWorkflow: (ref: string) => void
   onRetryPublishedDependencies: () => void
+  onRetryRunDependencies: () => void
   onRunInputChange: (name: string, value: string) => void
   onRunSecretChange: (name: string, value: string) => void
   onRunSecretsJSONChange: (value: string) => void
@@ -2450,7 +2718,7 @@ function OperateSurface({
   onSelectRun: (runID: string) => void
   onRetryRunDetail: () => void
   onReload: () => void
-  onRunWorkflow: () => void
+  onRunWorkflow: () => Promise<boolean>
   reloading: boolean
   runningWorkflow: boolean
   onCancel: () => void
@@ -2458,7 +2726,7 @@ function OperateSurface({
   canceling: boolean
   retrying: boolean
   canRunWorkflow: boolean
-  runPayloadError: string | null
+  runReadinessMessage: string
   canCancel: boolean
   canRetry: boolean
   retryReadinessMessage: string
@@ -2520,7 +2788,7 @@ function OperateSurface({
             onRun={onRunWorkflow}
             running={runningWorkflow}
             canRun={canRunWorkflow}
-            payloadError={runPayloadError}
+            readinessMessage={runReadinessMessage}
           />
           <RunList
             runs={runs}
@@ -2543,6 +2811,10 @@ function OperateSurface({
           canCancel={canCancel}
           canRetry={canRetry}
           retryReadinessMessage={retryReadinessMessage}
+          retryWorkflowRef={retryWorkflowRef}
+          retryDependencyState={retryDependencyState}
+          retryDependencyReport={retryDependencyReport}
+          onRetryDependencies={onRetryRunDependencies}
           retrySecretsJSON={retrySecretsJSON}
           onRetrySecretsJSONChange={onRetrySecretsJSONChange}
         />
@@ -2698,7 +2970,7 @@ function WorkflowRunPanel({
   onRun,
   running,
   canRun,
-  payloadError,
+  readinessMessage,
 }: {
   workflows: WorkflowDefinition[]
   workflow: WorkflowDefinition | null
@@ -2719,25 +2991,31 @@ function WorkflowRunPanel({
   onSecretsJSONChange: (value: string) => void
   onSessionChange: (value: string) => void
   onDeliveryJSONChange: (value: string) => void
-  onRun: () => void
+  onRun: () => Promise<boolean>
   running: boolean
   canRun: boolean
-  payloadError: string | null
+  readinessMessage: string
 }) {
   const [open, setOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
   const status = workflowRunStatus(workflow, stamp, compatibility)
-  const readinessMessage =
-    payloadError ?? workflowRunReadinessMessage(workflow, stamp, compatibility)
   const inputs = workflowRunInputEntries(workflow)
   const secrets = workflowRunSecretEntries(workflow)
-  const runnable = canRun && !running
-  const runNow = () => {
+  const busy = running || submitting
+  const runnable = canRun && !busy
+  const runNow = async () => {
     if (!runnable) {
       return
     }
-    setOpen(false)
-    onRun()
+    setSubmitting(true)
+    try {
+      if (await onRun()) {
+        setOpen(false)
+      }
+    } finally {
+      setSubmitting(false)
+    }
   }
   return (
     <div className="border-border border-b p-3">
@@ -2808,7 +3086,7 @@ function WorkflowRunPanel({
                   <Select
                     value={selectedWorkflowRef ?? ""}
                     onValueChange={onSelectWorkflow}
-                    disabled={workflows.length === 0 || running}
+                    disabled={workflows.length === 0 || busy}
                   >
                     <SelectTrigger
                       id="workflow-run-ref"
@@ -2833,7 +3111,7 @@ function WorkflowRunPanel({
                         name={name}
                         input={input}
                         value={inputValues[name] ?? ""}
-                        disabled={running}
+                        disabled={busy}
                         onChange={(value) => onInputChange(name, value)}
                       />
                     ))}
@@ -2864,7 +3142,7 @@ function WorkflowRunPanel({
                           onChange={(event) =>
                             onSecretChange(name, event.target.value)
                           }
-                          disabled={running}
+                          disabled={busy}
                           className="font-mono text-xs"
                         />
                       </div>
@@ -2895,6 +3173,7 @@ function WorkflowRunPanel({
                         onSecretsJSONChange(event.target.value)
                       }
                       spellCheck={false}
+                      disabled={busy}
                       placeholder="Additional secrets JSON"
                       className="min-h-16 resize-none font-mono text-xs"
                     />
@@ -2904,6 +3183,7 @@ function WorkflowRunPanel({
                       value={session}
                       onChange={(event) => onSessionChange(event.target.value)}
                       placeholder="Session"
+                      disabled={busy}
                       className="font-mono text-xs"
                     />
                     <Textarea
@@ -2914,6 +3194,7 @@ function WorkflowRunPanel({
                         onDeliveryJSONChange(event.target.value)
                       }
                       spellCheck={false}
+                      disabled={busy}
                       placeholder="Delivery JSON"
                       className="min-h-16 resize-none font-mono text-xs"
                     />
@@ -2940,7 +3221,7 @@ function WorkflowRunPanel({
                   title={!runnable ? readinessMessage : undefined}
                 >
                   <IconPlayerPlay className="size-4" />
-                  {running ? "Running" : "Run workflow"}
+                  {busy ? "Running" : "Run workflow"}
                 </Button>
               </div>
             </PopoverContent>
@@ -3087,8 +3368,12 @@ function RunDetailHeader({
   canceling,
   retrying,
   retryReadinessMessage,
+  retryWorkflowRef,
+  retryDependencyState,
+  retryDependencyReport,
   retrySecretsJSON,
   onRetrySecretsJSONChange,
+  onRetryDependencies,
   onCancel,
   onRetry,
 }: {
@@ -3099,8 +3384,12 @@ function RunDetailHeader({
   canceling: boolean
   retrying: boolean
   retryReadinessMessage: string
+  retryWorkflowRef: string | null
+  retryDependencyState: WorkflowDependencyCheckState
+  retryDependencyReport?: WorkflowDependencyCheckResponse
   retrySecretsJSON: string
   onRetrySecretsJSONChange: (value: string) => void
+  onRetryDependencies: () => void
   onCancel: () => void
   onRetry: () => void
 }) {
@@ -3110,7 +3399,7 @@ function RunDetailHeader({
     !run.workflow_ref.startsWith("draft:")
   return (
     <div className="border-border min-h-14 border-b px-4 py-3">
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
             <h3 className="min-w-0 truncate text-sm font-medium">
@@ -3122,7 +3411,7 @@ function RunDetailHeader({
             {run?.id ?? requestedRunID ?? "Select a workflow run"}
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
           <Button
             variant="outline"
             size="sm"
@@ -3133,6 +3422,41 @@ function RunDetailHeader({
             <IconPlayerStop className="size-4" />
             Cancel
           </Button>
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon-sm"
+                disabled={
+                  !showRetrySecrets ||
+                  retryWorkflowRef == null ||
+                  retryDependencyState === "idle"
+                }
+                aria-label="Inspect retry dependencies"
+                title="Inspect retry dependencies"
+              >
+                <IconGitBranch className="size-4" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent
+              align="end"
+              className="max-h-[min(36rem,calc(100dvh-2rem))] w-[min(480px,calc(100vw-2rem))] overflow-y-auto p-0"
+            >
+              <WorkflowDependencyReadinessPanel
+                workflowRef={retryWorkflowRef ?? "No run selected"}
+                dependencyState={retryDependencyState}
+                dependencyReport={retryDependencyReport}
+                onRetry={onRetryDependencies}
+                ariaLabel="Retry workflow dependency readiness"
+                heading="Retry dependency readiness"
+                idleMessage="Select a retryable workflow run to inspect its dependencies."
+                loadingMessage="Checking dependencies for the selected run’s workflow…"
+                staleMessage="The retry dependency result is stale. Waiting for a fresh check…"
+                unavailableMessage="Retry dependency readiness is unavailable."
+              />
+            </PopoverContent>
+          </Popover>
           <Button
             variant="outline"
             size="sm"
@@ -3158,6 +3482,7 @@ function RunDetailHeader({
             aria-label="Retry secrets JSON"
             value={retrySecretsJSON}
             onChange={(event) => onRetrySecretsJSONChange(event.target.value)}
+            disabled={retrying}
             spellCheck={false}
             className="min-h-16 resize-none font-mono text-xs"
           />
@@ -3178,10 +3503,10 @@ function RunDetailHeader({
 function RunSummary({ run }: { run: WorkflowRun }) {
   const workflowRef = navigableWorkflowRef(run.workflow_ref)
   const runID = isWorkflowRunID(run.id) ? run.id : undefined
-  const eventID = trustedWorkflowEventID(run.event)
+  const origin = trustedWorkflowRunOrigin(run.origin)
   return (
     <Panel title="Summary">
-      <dl className="grid grid-cols-2 gap-3 text-sm">
+      <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
         <Meta
           label="Workflow"
           value={
@@ -3203,16 +3528,17 @@ function RunSummary({ run }: { run: WorkflowRun }) {
           }
           mono
         />
+        <Meta label="Origin" value={origin?.kind.replaceAll("_", " ") ?? "-"} />
         <Meta
           label="Event"
           value={
-            eventID ? (
+            origin ? (
               <Link
                 to="/events"
-                search={{ event: eventID }}
+                search={{ event: origin.event_id }}
                 className="text-primary hover:underline"
               >
-                {eventID}
+                {origin.event_id}
               </Link>
             ) : (
               "-"
@@ -3220,18 +3546,70 @@ function RunSummary({ run }: { run: WorkflowRun }) {
           }
           mono
         />
+        <Meta
+          label="Dispatch"
+          value={
+            origin?.dispatch_id ? (
+              <Link
+                to="/events"
+                search={{
+                  view: "dispatches",
+                  dispatch: origin.dispatch_id,
+                }}
+                className="text-primary hover:underline"
+              >
+                {origin.dispatch_id}
+              </Link>
+            ) : (
+              "-"
+            )
+          }
+          mono
+        />
+        <Meta
+          label="Root run"
+          value={
+            origin == null ? (
+              "-"
+            ) : origin.root_run_id === run.id ? (
+              origin.root_run_id
+            ) : (
+              <Link
+                to="/agent/workflows"
+                search={{
+                  mode: "operate",
+                  run: origin.root_run_id,
+                }}
+                className="text-primary hover:underline"
+              >
+                {origin.root_run_id}
+              </Link>
+            )
+          }
+          mono
+        />
         <Meta label="Created" value={formatDate(run.created_at)} />
         <Meta label="Updated" value={formatDate(run.updated_at)} />
+        <Meta
+          label="Cancel requested"
+          value={formatDate(run.cancel_requested_at)}
+        />
         <Meta label="Completed" value={formatDate(run.completed_at)} />
+        <Meta
+          label="Cancel reason"
+          value={run.cancel_reason ?? "-"}
+          className="sm:col-span-2"
+          valueClassName="break-words whitespace-pre-wrap"
+        />
         <Meta label="Session" value={run.session ?? "-"} mono />
         <Meta label="Parent" value={run.parent_run_id ?? "-"} mono />
         <Meta label="Caller job" value={run.caller_job_id ?? "-"} mono />
         <Meta label="Retry of" value={run.retry_of_run_id ?? "-"} mono />
         <Meta label="Children" value={formatIDList(run.child_run_ids)} mono />
       </dl>
-      {run.error || run.cancel_reason ? (
+      {run.error ? (
         <div className="bg-destructive/10 text-destructive mt-3 rounded-md px-3 py-2 text-sm">
-          {run.cancel_reason || run.error}
+          {run.error}
         </div>
       ) : null}
       <JsonBlock label="Inputs" value={run.inputs} />
@@ -3910,15 +4288,25 @@ function Meta({
   label,
   value,
   mono,
+  className,
+  valueClassName,
 }: {
   label: string
   value: ReactNode
   mono?: boolean
+  className?: string
+  valueClassName?: string
 }) {
   return (
-    <div className="min-w-0">
+    <div className={cn("min-w-0", className)}>
       <dt className="text-muted-foreground text-xs">{label}</dt>
-      <dd className={cn("min-w-0 truncate", mono && "font-mono text-xs")}>
+      <dd
+        className={cn(
+          "min-w-0 truncate",
+          mono && "font-mono text-xs",
+          valueClassName,
+        )}
+      >
         {value}
       </dd>
     </div>
@@ -4492,6 +4880,17 @@ async function invalidateWorkflowQueries(
   queryClient: ReturnType<typeof useQueryClient>,
 ) {
   await queryClient.invalidateQueries({ queryKey: ["workflows"] })
+}
+
+async function refetchPublishedDependency(
+  queryClient: ReturnType<typeof useQueryClient>,
+  workflowRef: string,
+) {
+  await queryClient.invalidateQueries({
+    queryKey: ["workflows", "dependencies", "published", workflowRef],
+    exact: true,
+    refetchType: "all",
+  })
 }
 
 async function invalidateRunQueries(

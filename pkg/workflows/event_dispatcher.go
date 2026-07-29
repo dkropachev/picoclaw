@@ -473,6 +473,7 @@ func (d *EventWorkflowDispatcher) dispatchClaim(
 		WorkflowRef: dispatch.WorkflowRef,
 		Inputs:      runContext.Inputs,
 		Event:       runContext.Event,
+		Origin:      runContext.Origin,
 		Session:     runContext.Session,
 		Delivery:    runContext.Delivery,
 		OnRunPersisted: func(run *Run) error {
@@ -806,6 +807,7 @@ func (d *EventWorkflowDispatcher) now() time.Time {
 type EventWorkflowRunContext struct {
 	Inputs   map[string]any
 	Event    map[string]any
+	Origin   *RunOrigin
 	Session  string
 	Delivery Delivery
 }
@@ -832,9 +834,18 @@ func EventWorkflowRunContextFromEnvelope(
 	if dispatchID = strings.TrimSpace(dispatchID); dispatchID != "" {
 		inputs["dispatch_id"] = dispatchID
 	}
+	origin := &RunOrigin{
+		Kind:    RunOriginExternalEventDraftTest,
+		EventID: envelope.ID,
+	}
+	if dispatchID != "" {
+		origin.Kind = RunOriginExternalEvent
+		origin.DispatchID = dispatchID
+	}
 	return EventWorkflowRunContext{
 		Inputs:   inputs,
 		Event:    eventContext,
+		Origin:   origin,
 		Session:  EventWorkflowSession(workflowRef, envelope.ID),
 		Delivery: Delivery{},
 	}, nil

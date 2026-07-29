@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -396,10 +397,13 @@ func RecordWorkflowDevelopmentEventTest(
 	return session, nil
 }
 
+// RecordWorkflowDevelopmentTestIfCurrent applies a terminal result only while
+// the exact session, draft, and running test identity still own LastTest.
 func RecordWorkflowDevelopmentTestIfCurrent(
 	workspace string,
 	sessionID string,
 	draftKey string,
+	expectedRunID string,
 	result *RunResult,
 	testErr error,
 ) (*WorkflowDevelopmentSession, bool, error) {
@@ -416,6 +420,15 @@ func RecordWorkflowDevelopmentTestIfCurrent(
 		WorkflowDevelopmentDraftKey(session.TargetWorkflowRef, session.YAML) != draftKey {
 		return session, false, nil
 	}
+	if !currentWorkflowDevelopmentTestMatchesRun(
+		session,
+		draftKey,
+		"",
+		expectedRunID,
+		result,
+	) {
+		return session, false, nil
+	}
 	recordWorkflowDevelopmentTest(session, "", result, testErr)
 	if err := writeActiveDevelopment(workspace, session); err != nil {
 		return nil, false, err
@@ -430,6 +443,7 @@ func RecordWorkflowDevelopmentEventTestIfCurrent(
 	sessionID string,
 	draftKey string,
 	eventID string,
+	expectedRunID string,
 	result *RunResult,
 	testErr error,
 ) (*WorkflowDevelopmentSession, bool, error) {
@@ -447,16 +461,14 @@ func RecordWorkflowDevelopmentEventTestIfCurrent(
 		return session, false, nil
 	}
 	trimmedEventID := strings.TrimSpace(eventID)
-	if current := session.LastTest; current != nil && current.DraftKey == draftKey {
-		if current.EventID != trimmedEventID {
-			return session, false, nil
-		}
-		if result != nil &&
-			current.RunID != "" &&
-			result.RunID != "" &&
-			current.RunID != result.RunID {
-			return session, false, nil
-		}
+	if !currentWorkflowDevelopmentTestMatchesRun(
+		session,
+		draftKey,
+		trimmedEventID,
+		expectedRunID,
+		result,
+	) {
+		return session, false, nil
 	}
 	result, testErr = SanitizeEventBackedDraftTestOutcome(result, testErr)
 	recordWorkflowDevelopmentTest(session, trimmedEventID, result, testErr)
@@ -464,6 +476,29 @@ func RecordWorkflowDevelopmentEventTestIfCurrent(
 		return nil, false, err
 	}
 	return session, true, nil
+}
+
+func currentWorkflowDevelopmentTestMatchesRun(
+	session *WorkflowDevelopmentSession,
+	draftKey string,
+	eventID string,
+	expectedRunID string,
+	result *RunResult,
+) bool {
+	normalizedRunID := strings.TrimSpace(expectedRunID)
+	if session == nil ||
+		session.LastTest == nil ||
+		normalizedRunID == "" ||
+		normalizedRunID != expectedRunID ||
+		result == nil ||
+		result.RunID != expectedRunID {
+		return false
+	}
+	current := session.LastTest
+	return current.DraftKey == draftKey &&
+		current.EventID == eventID &&
+		current.RunID == expectedRunID &&
+		current.Status == RunStatusRunning
 }
 
 // SanitizeEventBackedDraftTestOutcome returns the browser-safe snapshot used
@@ -497,7 +532,14 @@ func SanitizeEventBackedDraftTestOutcome(
 // IsEventBackedDraftRun identifies the narrow browser projection boundary:
 // draft workflow identity plus a persisted structured event context.
 func IsEventBackedDraftRun(run *Run) bool {
-	if run == nil || !strings.HasPrefix(strings.TrimSpace(run.WorkflowRef), "draft:") {
+	if run == nil {
+		return false
+	}
+	if origin, trusted := trustedRunOrigin(run); trusted &&
+		origin.Kind == RunOriginExternalEventDraftTest {
+		return true
+	}
+	if !strings.HasPrefix(strings.TrimSpace(run.WorkflowRef), "draft:") {
 		return false
 	}
 	return len(run.Event) != 0
@@ -516,29 +558,16 @@ func IsEventBackedDraftRunFamily(
 	if run == nil {
 		return false
 	}
-	current := run
-	carriesEvent := len(run.Event) != 0
-	seen := make(map[string]struct{}, eventBackedDraftAncestryMaximumDepth)
-	for depth := 0; depth < eventBackedDraftAncestryMaximumDepth; depth++ {
-		carriesEvent = carriesEvent || len(current.Event) != 0
-		if IsEventBackedDraftRun(current) {
-			return true
+	if store != nil {
+		if origin, trusted := trustedRunOriginWithStore(ctx, store, run); trusted {
+			return origin.Kind == RunOriginExternalEventDraftTest
 		}
-		parentID := strings.TrimSpace(current.ParentRunID)
-		if parentID == "" {
-			return false
-		}
-		if _, exists := seen[parentID]; exists || store == nil {
-			return carriesEvent
-		}
-		seen[parentID] = struct{}{}
-		parent, err := store.GetRun(ctx, parentID)
-		if err != nil || parent == nil {
-			return carriesEvent
-		}
-		current = parent
 	}
-	return carriesEvent
+	var lookup runOriginLookup
+	if store != nil {
+		lookup = store.GetRun
+	}
+	return eventBackedDraftRunFamilyWithLookup(ctx, run, lookup)
 }
 
 // ProjectEventBackedDraftRunForBrowser masks diagnostic fields without
@@ -550,10 +579,33 @@ func ProjectEventBackedDraftRunForBrowser(run *Run) *Run {
 // ProjectWorkflowRunForBrowser applies an ancestry decision already resolved
 // by the API or a batched run listing.
 func ProjectWorkflowRunForBrowser(run *Run, eventBackedDraft bool) *Run {
+	origin, _ := trustedRunOrigin(run)
+	return projectWorkflowRunForBrowser(run, eventBackedDraft, origin)
+}
+
+// ProjectWorkflowRunForBrowserWithStore additionally verifies inherited
+// provenance against every available parent and retry ancestor before
+// projecting authoritative event, dispatch, and root-run identifiers.
+func ProjectWorkflowRunForBrowserWithStore(
+	ctx context.Context,
+	store RunStore,
+	run *Run,
+	eventBackedDraft bool,
+) *Run {
+	origin, _ := trustedRunOriginWithStore(ctx, store, run)
+	return projectWorkflowRunForBrowser(run, eventBackedDraft, origin)
+}
+
+func projectWorkflowRunForBrowser(
+	run *Run,
+	eventBackedDraft bool,
+	origin *RunOrigin,
+) *Run {
 	if run == nil {
 		return nil
 	}
 	projected := cloneRun(run)
+	projected.Origin = cloneRunOrigin(origin)
 	if !eventBackedDraft {
 		return projected
 	}
@@ -581,74 +633,210 @@ func ProjectWorkflowRunForBrowser(run *Run, eventBackedDraft bool) *Run {
 // ProjectEventBackedDraftRunsForBrowser applies the same projection to a run
 // listing while leaving production and manual run diagnostics unchanged.
 func ProjectEventBackedDraftRunsForBrowser(runs []Run) []Run {
+	return projectEventBackedDraftRunsForBrowser(
+		context.Background(),
+		nil,
+		runs,
+	)
+}
+
+// ProjectEventBackedDraftRunsForBrowserWithStore applies the run-list
+// projection while resolving retained provenance ancestry through the store.
+// Only an actual not-found result is treated as an independent-retention
+// boundary; an unreadable or corrupt retained ancestor suppresses origin.
+func ProjectEventBackedDraftRunsForBrowserWithStore(
+	ctx context.Context,
+	store RunStore,
+	runs []Run,
+) []Run {
+	return projectEventBackedDraftRunsForBrowser(ctx, store, runs)
+}
+
+func projectEventBackedDraftRunsForBrowser(
+	ctx context.Context,
+	store RunStore,
+	runs []Run,
+) []Run {
 	byID := make(map[string]*Run, len(runs))
 	for index := range runs {
 		byID[runs[index].ID] = &runs[index]
 	}
-	memo := make(map[string]bool, len(runs))
 	projected := make([]Run, len(runs))
+	type lookupResult struct {
+		run *Run
+		err error
+	}
+	lookups := make(map[string]lookupResult)
+	lookup := func(ctx context.Context, runID string) (*Run, error) {
+		run, exists := byID[runID]
+		if exists && run != nil {
+			return run, nil
+		}
+		if result, cached := lookups[runID]; cached {
+			return result.run, result.err
+		}
+		if store != nil {
+			run, err := store.GetRun(ctx, runID)
+			lookups[runID] = lookupResult{run: run, err: err}
+			return run, err
+		}
+		err := fmt.Errorf(
+			"workflow run %q is unavailable: %w",
+			runID,
+			fs.ErrNotExist,
+		)
+		lookups[runID] = lookupResult{err: err}
+		return nil, err
+	}
+	runPointers := make([]*Run, len(runs))
 	for index := range runs {
-		masked := eventBackedDraftRunFamilyInMap(&runs[index], byID, memo)
-		projected[index] = *ProjectWorkflowRunForBrowser(&runs[index], masked)
+		runPointers[index] = &runs[index]
+	}
+	origins := trustedRunOriginsWithLookup(ctx, runPointers, lookup)
+	for index := range runs {
+		origin := origins[runs[index].ID]
+		masked := origin != nil &&
+			origin.Kind == RunOriginExternalEventDraftTest
+		if origin == nil {
+			masked = eventBackedDraftRunFamilyWithLookup(
+				ctx,
+				&runs[index],
+				lookup,
+			)
+		}
+		projected[index] = *projectWorkflowRunForBrowser(
+			&runs[index],
+			masked,
+			origin,
+		)
 	}
 	return projected
 }
 
-func eventBackedDraftRunFamilyInMap(
+func eventBackedDraftRunFamilyWithLookup(
+	ctx context.Context,
 	run *Run,
-	byID map[string]*Run,
-	memo map[string]bool,
+	lookup runOriginLookup,
 ) bool {
 	if run == nil {
 		return false
 	}
-	current := run
-	path := make([]string, 0, eventBackedDraftAncestryMaximumDepth)
-	seen := make(map[string]struct{}, eventBackedDraftAncestryMaximumDepth)
-	masked := false
-	resolved := false
-	carriesEvent := len(run.Event) != 0
-	for depth := 0; depth < eventBackedDraftAncestryMaximumDepth; depth++ {
+
+	const (
+		fallbackLineageVisiting = iota + 1
+		fallbackLineageValidated
+	)
+	type lineageFrame struct {
+		run         *Run
+		ancestorIDs []string
+		next        int
+		depth       int
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	carriesEvent := false
+	unsafeAncestry := false
+	states := make(map[string]int, eventBackedDraftAncestryMaximumDepth)
+	newFrame := func(current *Run, depth int) (lineageFrame, bool) {
+		if current == nil {
+			unsafeAncestry = true
+			return lineageFrame{}, false
+		}
 		carriesEvent = carriesEvent || len(current.Event) != 0
-		// Only a positive classification is safe to memoize. A false result
-		// can come from an event-free path whose parent was absent from this
-		// listing; an event-bearing child that reaches that same path must
-		// still fail closed rather than inherit the earlier false result.
-		if value := memo[current.ID]; value {
-			masked = true
-			resolved = true
-			break
-		}
 		if IsEventBackedDraftRun(current) {
-			masked = true
-			resolved = true
-			break
+			return lineageFrame{}, true
 		}
-		if _, exists := seen[current.ID]; exists {
-			break
+		if !validRunOriginRunID(current.ID) {
+			unsafeAncestry = true
+			return lineageFrame{}, false
 		}
-		seen[current.ID] = struct{}{}
-		path = append(path, current.ID)
-		parentID := strings.TrimSpace(current.ParentRunID)
-		if parentID == "" {
-			resolved = true
-			break
+		ancestorIDs, valid := eventBackedDraftFallbackAncestorIDs(current)
+		if !valid {
+			unsafeAncestry = true
 		}
-		parent, exists := byID[parentID]
-		if !exists || parent == nil {
-			break
-		}
-		current = parent
+		states[current.ID] = fallbackLineageVisiting
+		return lineageFrame{
+			run:         current,
+			ancestorIDs: ancestorIDs,
+			depth:       depth,
+		}, false
 	}
-	if !resolved {
-		masked = carriesEvent
+
+	frame, draft := newFrame(run, 0)
+	if draft {
+		return true
 	}
-	if masked {
-		for _, runID := range path {
-			memo[runID] = true
+	stack := make([]lineageFrame, 0, eventBackedDraftAncestryMaximumDepth)
+	if frame.run != nil {
+		stack = append(stack, frame)
+	}
+	for len(stack) != 0 {
+		current := &stack[len(stack)-1]
+		if current.next >= len(current.ancestorIDs) {
+			states[current.run.ID] = fallbackLineageValidated
+			stack = stack[:len(stack)-1]
+			continue
+		}
+
+		ancestorID := current.ancestorIDs[current.next]
+		current.next++
+		if current.depth+1 >= eventBackedDraftAncestryMaximumDepth {
+			unsafeAncestry = true
+			continue
+		}
+		switch states[ancestorID] {
+		case fallbackLineageVisiting:
+			unsafeAncestry = true
+			continue
+		case fallbackLineageValidated:
+			continue
+		}
+		if lookup == nil || ctx.Err() != nil {
+			unsafeAncestry = true
+			continue
+		}
+		ancestor, err := lookup(ctx, ancestorID)
+		if err != nil ||
+			ancestor == nil ||
+			ancestor.ID != ancestorID {
+			unsafeAncestry = true
+			continue
+		}
+		ancestorFrame, ancestorDraft := newFrame(
+			ancestor,
+			current.depth+1,
+		)
+		if ancestorDraft {
+			return true
+		}
+		if ancestorFrame.run != nil {
+			stack = append(stack, ancestorFrame)
 		}
 	}
-	return masked
+	return carriesEvent && unsafeAncestry
+}
+
+func eventBackedDraftFallbackAncestorIDs(run *Run) ([]string, bool) {
+	if run == nil {
+		return nil, false
+	}
+	ancestorIDs := make([]string, 0, 2)
+	valid := true
+	for _, runID := range []string{run.ParentRunID, run.RetryOfRunID} {
+		if runID == "" {
+			continue
+		}
+		if !validRunOriginRunID(runID) || runID == run.ID {
+			valid = false
+			continue
+		}
+		if len(ancestorIDs) == 0 || ancestorIDs[0] != runID {
+			ancestorIDs = append(ancestorIDs, runID)
+		}
+	}
+	return ancestorIDs, valid
 }
 
 // ProjectEventBackedDraftEventsForBrowser masks both free-form lifecycle

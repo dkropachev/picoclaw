@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -360,6 +361,168 @@ func TestHandleTestWorkflowDevelopmentStartsAsyncRun(t *testing.T) {
 	}
 }
 
+func TestRetryWorkflowDevelopmentTestRecordRetriesTransientFailure(t *testing.T) {
+	wantSession := &workflows.WorkflowDevelopmentSession{ID: "dev_retry"}
+	attempts := 0
+	session, recorded, err := retryWorkflowDevelopmentTestRecord(
+		func() (*workflows.WorkflowDevelopmentSession, bool, error) {
+			attempts++
+			if attempts < workflowDevelopmentTestRecordAttempts {
+				return nil, false, errors.New("transient development snapshot failure")
+			}
+			return wantSession, true, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("retryWorkflowDevelopmentTestRecord() error = %v", err)
+	}
+	if attempts != workflowDevelopmentTestRecordAttempts {
+		t.Fatalf("attempts = %d, want %d", attempts, workflowDevelopmentTestRecordAttempts)
+	}
+	if session != wantSession || !recorded {
+		t.Fatalf("result = session %#v recorded=%v, want successful retry", session, recorded)
+	}
+}
+
+func TestWriteAcceptedWorkflowDevelopmentTestRunSurfacesDegradedSnapshot(t *testing.T) {
+	rec := httptest.NewRecorder()
+	fallbackSession := &workflows.WorkflowDevelopmentSession{ID: "dev_degraded"}
+	runningResult := &workflows.RunResult{
+		RunID:  "wr_degraded",
+		Status: workflows.RunStatusRunning,
+	}
+	var (
+		initialStateRecorded atomic.Bool
+		releases             atomic.Int32
+		attempts             atomic.Int32
+	)
+	writeAcceptedWorkflowDevelopmentTestRun(
+		rec,
+		backgroundWorkflowStart{
+			Run: &workflows.Run{ID: runningResult.RunID},
+			Release: func() {
+				releases.Add(1)
+			},
+		},
+		fallbackSession,
+		runningResult,
+		&initialStateRecorded,
+		func() (*workflows.WorkflowDevelopmentSession, bool, error) {
+			attempts.Add(1)
+			return nil, false, errors.New("development snapshot unavailable")
+		},
+	)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if attempts.Load() != workflowDevelopmentTestRecordAttempts {
+		t.Fatalf(
+			"record attempts = %d, want %d",
+			attempts.Load(),
+			workflowDevelopmentTestRecordAttempts,
+		)
+	}
+	if releases.Load() != 1 {
+		t.Fatalf("release count = %d, want 1", releases.Load())
+	}
+	if initialStateRecorded.Load() {
+		t.Fatal("initial state marked recorded after bounded failure")
+	}
+	var response struct {
+		Session        *workflows.WorkflowDevelopmentSession  `json:"session"`
+		Result         *workflows.RunResult                   `json:"result"`
+		Reconciliation *workflowDevelopmentTestReconciliation `json:"reconciliation"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("response JSON error = %v", err)
+	}
+	if response.Session == nil || response.Session.ID != fallbackSession.ID {
+		t.Fatalf("fallback session = %#v", response.Session)
+	}
+	if response.Result == nil ||
+		response.Result.RunID != runningResult.RunID ||
+		response.Result.Status != workflows.RunStatusRunning {
+		t.Fatalf("accepted result = %#v", response.Result)
+	}
+	if response.Reconciliation == nil ||
+		response.Reconciliation.State != "degraded" ||
+		response.Reconciliation.Reason != "draft_test_snapshot_not_recorded" ||
+		response.Reconciliation.RunID != runningResult.RunID {
+		t.Fatalf("reconciliation = %#v", response.Reconciliation)
+	}
+}
+
+func TestHandleGetWorkflowDevelopmentReconcilesTerminalDraftTest(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	h := NewHandler(writeWorkflowAITestConfig(t, workspace))
+	session, startErr := workflows.StartWorkflowDevelopment(
+		ctx,
+		workspace,
+		workflows.RuntimeCompatibility{PicoclawVersion: "v1.0.0", GitCommit: "abc123"},
+		workflows.WorkflowDevelopmentStartRequest{Prompt: "summarize support issues"},
+	)
+	if startErr != nil {
+		t.Fatalf("StartWorkflowDevelopment() error = %v", startErr)
+	}
+	const runID = "wr_poll_reconcile"
+	if _, recordErr := workflows.RecordWorkflowDevelopmentTest(
+		workspace,
+		&workflows.RunResult{RunID: runID, Status: workflows.RunStatusRunning},
+		nil,
+	); recordErr != nil {
+		t.Fatalf("RecordWorkflowDevelopmentTest(running) error = %v", recordErr)
+	}
+	now := time.Now().UTC()
+	if createErr := workflows.NewFileRunStore(workspace).CreateRun(ctx, &workflows.Run{
+		ID:          runID,
+		WorkflowRef: "draft:" + session.TargetWorkflowRef,
+		Status:      workflows.RunStatusSucceeded,
+		Outputs:     map[string]any{"text": "done"},
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		CompletedAt: &now,
+	}); createErr != nil {
+		t.Fatalf("CreateRun() error = %v", createErr)
+	}
+
+	rec := httptest.NewRecorder()
+	h.handleGetWorkflowDevelopment(
+		rec,
+		httptest.NewRequest(http.MethodGet, "/api/workflows/development", nil),
+	)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Session        *workflows.WorkflowDevelopmentSession  `json:"session"`
+		Reconciliation *workflowDevelopmentTestReconciliation `json:"reconciliation"`
+	}
+	if decodeErr := json.Unmarshal(rec.Body.Bytes(), &response); decodeErr != nil {
+		t.Fatalf("response JSON error = %v", decodeErr)
+	}
+	if response.Reconciliation != nil {
+		t.Fatalf("reconciliation = %#v, want repaired snapshot", response.Reconciliation)
+	}
+	if response.Session == nil ||
+		response.Session.LastTest == nil ||
+		response.Session.LastTest.RunID != runID ||
+		response.Session.LastTest.Status != workflows.RunStatusSucceeded {
+		t.Fatalf("reconciled session = %#v", response.Session)
+	}
+	persisted, err := workflows.GetWorkflowDevelopmentSession(workspace)
+	if err != nil {
+		t.Fatalf("GetWorkflowDevelopmentSession() error = %v", err)
+	}
+	if persisted == nil ||
+		persisted.LastTest == nil ||
+		persisted.LastTest.RunID != runID ||
+		persisted.LastTest.Status != workflows.RunStatusSucceeded {
+		t.Fatalf("persisted session = %#v", persisted)
+	}
+}
+
 func TestHandleCancelWorkflowRunRecordsRunningDraftTestCanceled(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()
@@ -545,6 +708,8 @@ jobs:
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	h := NewHandler(writeWorkflowAITestConfig(t, workspace))
+	restoreDependencies := stubWorkflowDependencyRuntime(t, nil)
+	t.Cleanup(restoreDependencies)
 	if _, err := workflows.RevalidateLocal(ctx, workspace, h.workflowCompatibilityRuntime(ctx)); err != nil {
 		t.Fatalf("RevalidateLocal() error = %v", err)
 	}

@@ -98,6 +98,21 @@ export interface WorkflowDevelopmentSession {
   updated_at: string
 }
 
+export interface WorkflowDevelopmentTestReconciliation {
+  state: "degraded"
+  reason:
+    | "draft_test_snapshot_not_recorded"
+    | "draft_test_run_unavailable"
+    | "draft_test_terminal_snapshot_not_recorded"
+  run_id: string
+  message: string
+}
+
+export interface WorkflowDevelopmentResult {
+  session: WorkflowDevelopmentSession | null
+  reconciliation?: WorkflowDevelopmentTestReconciliation
+}
+
 export interface WorkflowEventEntityTrigger {
   ids?: string[]
   types?: string[]
@@ -143,6 +158,7 @@ export interface WorkflowRun {
   id: string
   workflow_ref: string
   status: string
+  origin?: WorkflowRunOrigin
   parent_run_id?: string
   child_run_ids?: string[]
   caller_job_id?: string
@@ -160,6 +176,13 @@ export interface WorkflowRun {
   updated_at: string
   completed_at?: string
   cancel_requested_at?: string
+}
+
+export interface WorkflowRunOrigin {
+  kind: "external_event" | "external_event_draft_test"
+  event_id: string
+  dispatch_id?: string
+  root_run_id: string
 }
 
 export interface WorkflowJobExecution {
@@ -220,6 +243,7 @@ export interface WorkflowRunResult {
 export interface WorkflowDevelopmentTestResult {
   session: WorkflowDevelopmentSession
   result?: WorkflowRunResult
+  reconciliation?: WorkflowDevelopmentTestReconciliation
   error?: string
 }
 
@@ -380,12 +404,14 @@ export class WorkflowAPIError extends Error {
   }
 }
 
+export const WORKFLOW_CANCEL_REASON_MAX_BYTES = 1024
+
 const workflowRunIDPattern = /^wr_[A-Za-z0-9_-]+$/
-const maximumWorkflowRunIDLength = 256
+const maximumWorkflowRunIDBytes = 1024
 
 function validWorkflowRunID(value: string): boolean {
   return (
-    value.length <= maximumWorkflowRunIDLength &&
+    new TextEncoder().encode(value).byteLength <= maximumWorkflowRunIDBytes &&
     workflowRunIDPattern.test(value)
   )
 }
@@ -527,9 +553,7 @@ export async function checkWorkflowDependencies(
   }
 }
 
-export async function getWorkflowDevelopment(): Promise<{
-  session: WorkflowDevelopmentSession | null
-}> {
+export async function getWorkflowDevelopment(): Promise<WorkflowDevelopmentResult> {
   return request("/api/workflows/development")
 }
 
@@ -661,6 +685,7 @@ export async function testWorkflowDevelopment(payload: {
       return {
         session: body.session,
         result: body.result,
+        reconciliation: body.reconciliation,
         error:
           typeof body.error === "string" && body.error.trim() !== ""
             ? body.error
@@ -706,6 +731,7 @@ export async function reloadWorkflows(): Promise<WorkflowReloadResult> {
 
 export async function runWorkflow(payload: {
   ref: string
+  expected_dependency_revision: string
   inputs?: Record<string, unknown>
   secrets?: Record<string, string>
   session?: string
@@ -744,7 +770,10 @@ async function workflowRunLaunchResultFromResponse(
   } catch {
     // Fall through to the normal error message path.
   }
-  throw new Error(apiErrorMessage(text, res.status, res.statusText))
+  throw new WorkflowAPIError(
+    workflowLaunchErrorMessage(text, res.status, res.statusText),
+    res.status,
+  )
 }
 
 export async function listWorkflowRuns(): Promise<{ runs: WorkflowRun[] }> {
@@ -798,28 +827,78 @@ export async function getWorkflowRunGraph(
 
 export async function cancelWorkflowRun(
   runID: string,
-  reason = "canceled from dashboard",
+  reason: string,
 ): Promise<WorkflowRun> {
-  return request(`/api/workflows/runs/${encodeURIComponent(runID)}/cancel`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ reason }),
-  })
+  if (!validWorkflowRunID(runID)) {
+    throw new WorkflowAPIError("Invalid workflow run identifier.", 400)
+  }
+  const normalizedReason = reason.trim()
+  if (
+    normalizedReason === "" ||
+    new TextEncoder().encode(normalizedReason).byteLength >
+      WORKFLOW_CANCEL_REASON_MAX_BYTES
+  ) {
+    throw new WorkflowAPIError(
+      "Cancel reason must be between 1 and 1024 UTF-8 bytes.",
+      400,
+    )
+  }
+  const run = normalizeWorkflowRun(
+    await request<WorkflowRun>(
+      `/api/workflows/runs/${encodeURIComponent(runID)}/cancel`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: normalizedReason }),
+      },
+    ),
+  )
+  if (run.id !== runID) {
+    throw new WorkflowAPIError(
+      "The workflow service returned a mismatched run.",
+      502,
+    )
+  }
+  return run
 }
 
 export async function retryWorkflowRun(
   runID: string,
-  secrets?: Record<string, string>,
+  payload: {
+    expected_dependency_revision: string
+    secrets?: Record<string, string>
+  },
 ): Promise<WorkflowRunLaunchResult> {
+  if (!validWorkflowRunID(runID)) {
+    throw new WorkflowAPIError("Invalid workflow run identifier.", 400)
+  }
   const res = await launcherFetch(
     `/api/workflows/runs/${encodeURIComponent(runID)}/retry`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ secrets }),
+      body: JSON.stringify(payload),
     },
   )
   return workflowRunLaunchResultFromResponse(res)
+}
+
+function workflowLaunchErrorMessage(
+  text: string,
+  status: number,
+  statusText: string,
+) {
+  const code = workflowErrorCode(text)
+  switch (code) {
+    case "dependency_revision_mismatch":
+      return "Workflow dependencies changed. Wait for a fresh readiness check and try again."
+    case "workflow_dependencies_not_ready":
+      return "Resolve the workflow dependency blockers and try again."
+    case "dependency_check_unavailable":
+      return "Workflow dependency readiness is temporarily unavailable."
+    default:
+      return apiErrorMessage(text, status, statusText)
+  }
 }
 
 async function requestWorkflowControl<T>(
@@ -840,15 +919,7 @@ async function requestWorkflowControl<T>(
 }
 
 function workflowControlErrorMessage(text: string, fallbackMessage: string) {
-  let code = ""
-  try {
-    const body = JSON.parse(text) as { error?: unknown }
-    if (typeof body.error === "string") {
-      code = body.error
-    }
-  } catch {
-    // Raw backend text is intentionally not exposed by workflow controls.
-  }
+  const code = workflowErrorCode(text)
   switch (code) {
     case "template_not_found":
       return "That built-in workflow template is no longer available."
@@ -909,6 +980,15 @@ function workflowControlErrorMessage(text: string, fallbackMessage: string) {
       return "The workflow could not be published. Reload the draft and try again."
     default:
       return fallbackMessage
+  }
+}
+
+function workflowErrorCode(text: string) {
+  try {
+    const body = JSON.parse(text) as { error?: unknown }
+    return typeof body.error === "string" ? body.error : ""
+  } catch {
+    return ""
   }
 }
 

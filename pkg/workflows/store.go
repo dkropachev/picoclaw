@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
@@ -23,18 +24,24 @@ const (
 	RunStatusFailed    = "failed"
 	RunStatusCanceled  = "canceled"
 	RunStatusSkipped   = "skipped"
+
+	// MaxWorkflowCancelReasonBytes bounds a persisted nonempty cancellation
+	// reason after surrounding whitespace is removed.
+	MaxWorkflowCancelReasonBytes = 1024
 )
 
 var (
 	ErrRunCanceled         = errors.New("workflow run canceled")
 	ErrRunAlreadyExists    = errors.New("workflow run already exists")
 	ErrRunConcurrencyLimit = errors.New("workflow concurrency limit reached")
+	ErrInvalidCancelReason = errors.New("invalid workflow cancellation reason")
 )
 
 type Run struct {
 	ID                string                   `json:"id"`
 	WorkflowRef       string                   `json:"workflow_ref"`
 	Status            string                   `json:"status"`
+	Origin            *RunOrigin               `json:"origin,omitempty"`
 	ParentRunID       string                   `json:"parent_run_id,omitempty"`
 	ChildRunIDs       []string                 `json:"child_run_ids,omitempty"`
 	CallerJobID       string                   `json:"caller_job_id,omitempty"`
@@ -522,6 +529,9 @@ func trustedExternalEventRunFamily(path string, run *Run) (string, bool) {
 	if run == nil {
 		return "", false
 	}
+	if origin, trusted := trustedRunOrigin(run); trusted {
+		return origin.EventID, true
+	}
 	eventID, eventIDOK := run.Event["id"].(string)
 	if !eventIDOK || !isExternalEventContext(run.Event) {
 		return "", false
@@ -611,6 +621,10 @@ func isExternalDispatchID(id string) bool {
 }
 
 func (s *FileRunStore) CancelRun(ctx context.Context, runID, reason string) (*Run, error) {
+	reason, err := NormalizeWorkflowCancelReason(reason)
+	if err != nil {
+		return nil, err
+	}
 	runPath := filepath.Join(s.root, safeID(runID), "run.json")
 	unlock, err := s.lockRoot()
 	if err != nil {
@@ -650,6 +664,21 @@ func (s *FileRunStore) CancelRun(ctx context.Context, runID, reason string) (*Ru
 	})
 	s.cancelChildRuns(ctx, run.ID, run.CancelReason)
 	return run, nil
+}
+
+// NormalizeWorkflowCancelReason trims and bounds a cancellation reason for
+// durable storage. Empty reasons remain valid for compatibility with existing
+// non-HTTP callers; operator HTTP requests apply their stricter policy before
+// calling the store.
+func NormalizeWorkflowCancelReason(reason string) (string, error) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return "", nil
+	}
+	if !utf8.ValidString(reason) || len(reason) > MaxWorkflowCancelReasonBytes {
+		return "", ErrInvalidCancelReason
+	}
+	return reason, nil
 }
 
 func (s *FileRunStore) cancelChildRuns(ctx context.Context, parentRunID, reason string) {

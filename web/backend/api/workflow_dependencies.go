@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash"
 	"io"
 	"net/http"
@@ -25,6 +26,8 @@ var (
 	errWorkflowDependencyNotFound       = errors.New("workflow dependency root not found")
 	errWorkflowDependencyInvalid        = errors.New("workflow dependency root is invalid")
 	errWorkflowDependencyUnavailable    = errors.New("workflow dependency check unavailable")
+	errWorkflowDependencyRevisionStale  = errors.New("workflow dependency revision mismatch")
+	errWorkflowDependenciesNotReady     = errors.New("workflow dependencies are not ready")
 )
 
 type workflowDependencyDraftRequest struct {
@@ -51,6 +54,7 @@ type workflowDependencyCheckResponse struct {
 type workflowDependencySnapshotLoader struct {
 	resolver  workflows.Resolver
 	revisions map[string]string
+	snapshots map[string]*workflows.LocalWorkflowSnapshot
 	bytesRead int64
 }
 
@@ -79,8 +83,41 @@ func (l *workflowDependencySnapshotLoader) LoadReusableWorkflow(
 		return nil, err
 	}
 	l.bytesRead += int64(len(data))
-	l.revisions[canonical] = workflowDependencyContentRevision(data)
-	return workflows.Parse(data)
+	revision := workflowDependencyContentRevision(data)
+	l.revisions[canonical] = revision
+	workflow, err := workflows.Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	l.snapshots[canonical] = &workflows.LocalWorkflowSnapshot{
+		Ref:      canonical,
+		Revision: revision,
+		Workflow: workflow,
+	}
+	return workflow, nil
+}
+
+type workflowDependencyAdmission struct {
+	Response       *workflowDependencyCheckResponse
+	Config         *config.Config
+	ConfigRevision string
+	Snapshots      map[string]*workflows.LocalWorkflowSnapshot
+}
+
+func (a *workflowDependencyAdmission) orderedSnapshots() []*workflows.LocalWorkflowSnapshot {
+	if a == nil {
+		return nil
+	}
+	refs := make([]string, 0, len(a.Snapshots))
+	for ref := range a.Snapshots {
+		refs = append(refs, ref)
+	}
+	sort.Strings(refs)
+	snapshots := make([]*workflows.LocalWorkflowSnapshot, 0, len(refs))
+	for _, ref := range refs {
+		snapshots = append(snapshots, a.Snapshots[ref])
+	}
+	return snapshots
 }
 
 func (h *Handler) handleCheckWorkflowDependencies(w http.ResponseWriter, r *http.Request) {
@@ -152,6 +189,204 @@ func (h *Handler) evaluateCurrentWorkflowDependencies(
 	return h.evaluateWorkflowDependencies(ctx, cfg, revision, rootRef, raw)
 }
 
+// evaluatePublishedWorkflowDependencyAdmission evaluates and retains the
+// exact config and parsed workflow closure that produced the readiness
+// revision. Run admission hands these snapshots to the executor rather than
+// independently reloading mutable state.
+func (h *Handler) evaluatePublishedWorkflowDependencyAdmission(
+	ctx context.Context,
+	ref string,
+) (*workflowDependencyAdmission, error) {
+	cfg, revision, err := loadStableWorkflowDependencyConfig(h.configPath)
+	if err != nil {
+		return nil, errWorkflowDependencyUnavailable
+	}
+	return h.evaluatePublishedWorkflowDependencyAdmissionFromConfig(
+		ctx,
+		cfg,
+		revision,
+		ref,
+	)
+}
+
+func (h *Handler) evaluatePublishedWorkflowDependencyAdmissionFromConfig(
+	ctx context.Context,
+	cfg *config.Config,
+	configRevision string,
+	ref string,
+) (*workflowDependencyAdmission, error) {
+	rootRef, raw, err := workflowDependencyRequestRoot(
+		ctx,
+		cfg,
+		workflowDependencyCheckRequest{Ref: ref},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return h.evaluateWorkflowDependencyAdmission(
+		ctx,
+		cfg,
+		configRevision,
+		rootRef,
+		raw,
+	)
+}
+
+func (h *Handler) requirePublishedWorkflowDependenciesReady(
+	ctx context.Context,
+	ref string,
+	expectedRevision string,
+) (*workflowDependencyAdmission, error) {
+	admission, err := h.evaluatePublishedWorkflowDependencyAdmission(ctx, ref)
+	return requireWorkflowDependencyAdmissionReady(
+		admission,
+		err,
+		expectedRevision,
+	)
+}
+
+func (h *Handler) requirePublishedWorkflowDependenciesReadyFromConfig(
+	ctx context.Context,
+	cfg *config.Config,
+	configRevision string,
+	ref string,
+	expectedRevision string,
+) (*workflowDependencyAdmission, error) {
+	admission, err := h.evaluatePublishedWorkflowDependencyAdmissionFromConfig(
+		ctx,
+		cfg,
+		configRevision,
+		ref,
+	)
+	return requireWorkflowDependencyAdmissionReady(
+		admission,
+		err,
+		expectedRevision,
+	)
+}
+
+func requireWorkflowDependencyAdmissionReady(
+	admission *workflowDependencyAdmission,
+	err error,
+	expectedRevision string,
+) (*workflowDependencyAdmission, error) {
+	if err != nil {
+		switch {
+		case errors.Is(err, errWorkflowDependencyRevisionStale):
+			return nil, errWorkflowDependencyRevisionStale
+		case errors.Is(err, errWorkflowDependencyInvalidRequest),
+			errors.Is(err, errWorkflowDependencyNotFound),
+			errors.Is(err, errWorkflowDependencyInvalid):
+			return nil, errWorkflowDependenciesNotReady
+		default:
+			return nil, errWorkflowDependencyUnavailable
+		}
+	}
+	if expectedRevision != "" && expectedRevision != admission.Response.Revision {
+		return nil, errWorkflowDependencyRevisionStale
+	}
+	if !admission.Response.Ready {
+		return nil, errWorkflowDependenciesNotReady
+	}
+	return admission, nil
+}
+
+// fenceWorkflowDependencyAdmission rechecks readiness at the executor's
+// durable-create boundary while the workflow mutation lock is held.
+func (h *Handler) fenceWorkflowDependencyAdmission(
+	ctx context.Context,
+	original *workflowDependencyAdmission,
+	expectedRevision string,
+) error {
+	if original == nil || original.Response == nil {
+		return errWorkflowDependencyUnavailable
+	}
+	current, err := h.requirePublishedWorkflowDependenciesReady(
+		ctx,
+		original.Response.RootRef,
+		expectedRevision,
+	)
+	if err != nil {
+		return err
+	}
+	if current.ConfigRevision != original.ConfigRevision {
+		return errWorkflowDependencyRevisionStale
+	}
+	if current.Response.Revision != original.Response.Revision {
+		return errWorkflowDependencyRevisionStale
+	}
+	return nil
+}
+
+// guardWorkflowDependencyAdmissionConfig reacquires the canonical config
+// mutation lock after the full readiness fence, rejects any intervening file
+// generation, and retains the lock through compatibility and durable create.
+// Its caller already owns the workflow mutation lock, preserving the global
+// workflow-before-config lock order used by workflow settings mutations.
+func (h *Handler) guardWorkflowDependencyAdmissionConfig(
+	original *workflowDependencyAdmission,
+	operation func() error,
+) error {
+	if original == nil ||
+		strings.TrimSpace(original.ConfigRevision) == "" ||
+		operation == nil {
+		return errWorkflowDependencyUnavailable
+	}
+	locked := false
+	err := config.WithConfigMutationLock(h.configPath, func() error {
+		locked = true
+		currentRevision, revisionErr := config.ConfigRevision(h.configPath)
+		if revisionErr != nil {
+			return fmt.Errorf(
+				"%w: %v",
+				workflows.ErrWorkflowSnapshotAdmissionUnavailable,
+				revisionErr,
+			)
+		}
+		if currentRevision != original.ConfigRevision {
+			return errWorkflowDependencyRevisionStale
+		}
+		return operation()
+	})
+	if err != nil && !locked {
+		return fmt.Errorf(
+			"%w: %v",
+			workflows.ErrWorkflowSnapshotAdmissionUnavailable,
+			err,
+		)
+	}
+	return err
+}
+
+func writeWorkflowRunDependencyError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errWorkflowDependencyRevisionStale):
+		writeWorkflowDependencyError(
+			w,
+			http.StatusConflict,
+			"dependency_revision_mismatch",
+		)
+	case errors.Is(err, errWorkflowDependenciesNotReady):
+		writeWorkflowDependencyError(
+			w,
+			http.StatusConflict,
+			"workflow_dependencies_not_ready",
+		)
+	default:
+		writeWorkflowDependencyError(
+			w,
+			http.StatusServiceUnavailable,
+			"dependency_check_unavailable",
+		)
+	}
+}
+
+func isWorkflowRunDependencyError(err error) bool {
+	return errors.Is(err, errWorkflowDependencyRevisionStale) ||
+		errors.Is(err, errWorkflowDependenciesNotReady) ||
+		errors.Is(err, errWorkflowDependencyUnavailable)
+}
+
 func (h *Handler) evaluateWorkflowDependencies(
 	ctx context.Context,
 	cfg *config.Config,
@@ -159,6 +394,26 @@ func (h *Handler) evaluateWorkflowDependencies(
 	rootRef string,
 	raw string,
 ) (*workflowDependencyCheckResponse, error) {
+	admission, err := h.evaluateWorkflowDependencyAdmission(
+		ctx,
+		cfg,
+		configRevision,
+		rootRef,
+		raw,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return admission.Response, nil
+}
+
+func (h *Handler) evaluateWorkflowDependencyAdmission(
+	ctx context.Context,
+	cfg *config.Config,
+	configRevision string,
+	rootRef string,
+	raw string,
+) (*workflowDependencyAdmission, error) {
 	if cfg == nil {
 		return nil, errWorkflowDependencyUnavailable
 	}
@@ -174,13 +429,21 @@ func (h *Handler) evaluateWorkflowDependencies(
 		return nil, errWorkflowDependencyInvalid
 	}
 
+	rootRevision := workflowDependencyContentRevision([]byte(raw))
 	loader := &workflowDependencySnapshotLoader{
 		resolver: workflows.Resolver{
 			WorkspaceDir:   cfg.WorkspacePath(),
 			DefinitionsDir: cfg.Workflows.EffectiveDefinitionsDir(),
 		},
 		revisions: map[string]string{
-			canonical: workflowDependencyContentRevision([]byte(raw)),
+			canonical: rootRevision,
+		},
+		snapshots: map[string]*workflows.LocalWorkflowSnapshot{
+			canonical: {
+				Ref:      canonical,
+				Revision: rootRevision,
+				Workflow: workflow,
+			},
 		},
 	}
 	closure, err := workflows.CheckWorkflowDependencyClosure(
@@ -229,8 +492,11 @@ func (h *Handler) evaluateWorkflowDependencies(
 		StructuralIssues: closure.Issues,
 	}
 	latestConfigRevision, err := config.ConfigRevision(h.configPath)
-	if err != nil || latestConfigRevision != configRevision {
+	if err != nil {
 		return nil, errWorkflowDependencyUnavailable
+	}
+	if latestConfigRevision != configRevision {
+		return nil, errWorkflowDependencyRevisionStale
 	}
 	response.Revision, err = workflowDependencyEvaluationRevision(
 		configRevision,
@@ -241,7 +507,12 @@ func (h *Handler) evaluateWorkflowDependencies(
 	if err != nil {
 		return nil, errWorkflowDependencyUnavailable
 	}
-	return response, nil
+	return &workflowDependencyAdmission{
+		Response:       response,
+		Config:         cfg,
+		ConfigRevision: configRevision,
+		Snapshots:      loader.snapshots,
+	}, nil
 }
 
 func workflowDependencyRequestRoot(

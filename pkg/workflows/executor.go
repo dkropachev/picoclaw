@@ -29,6 +29,19 @@ type Executor struct {
 	MaxCallDepth         int
 	MaxConcurrentRuns    int
 	DefaultTimeout       time.Duration
+	// WorkflowSnapshots is an immutable, pre-admitted reusable closure. When
+	// present, the executor uses these exact parsed bytes instead of reloading
+	// definitions after admission.
+	WorkflowSnapshots map[string]*LocalWorkflowSnapshot
+	// AdmittedRunCreate wraps the durable create for a top-level run or an
+	// explicit retry (including a reusable child retry). The wrapper can hold
+	// admission locks and revalidate immutable snapshots through the create
+	// itself, closing the final check/create TOCTOU window.
+	AdmittedRunCreate func(
+		context.Context,
+		*Run,
+		func() error,
+	) error
 }
 
 type RuntimeEventPublisher interface {
@@ -45,6 +58,7 @@ type RunRequest struct {
 	Inputs       map[string]any
 	Secrets      map[string]string
 	Event        map[string]any
+	Origin       *RunOrigin
 	Session      string
 	Delivery     Delivery
 	ParentRunID  string
@@ -98,11 +112,24 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 	if runID == "" {
 		runID = NewRunID()
 	}
+	origin, originErr := normalizeRunOrigin(
+		req.Origin,
+		runID,
+		req.ParentRunID,
+		req.RetryOfRunID,
+		req.Event,
+		req.Inputs,
+	)
+	if originErr != nil {
+		return nil, originErr
+	}
+	req.Origin = origin
 	now := time.Now().UTC()
 	run := &Run{
 		ID:           runID,
 		WorkflowRef:  workflowRef,
 		Status:       RunStatusRunning,
+		Origin:       cloneRunOrigin(origin),
 		ParentRunID:  req.ParentRunID,
 		CallerJobID:  req.CallerJobID,
 		RetryOfRunID: req.RetryOfRunID,
@@ -116,7 +143,21 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	if createErr := e.createRun(ctx, store, run, req.ParentRunID == ""); createErr != nil {
+	topLevel := req.ParentRunID == ""
+	admittedRun := topLevel || strings.TrimSpace(req.RetryOfRunID) != ""
+	create := func() error {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
+		return e.createRun(ctx, store, run, topLevel)
+	}
+	var createErr error
+	if admittedRun && e.AdmittedRunCreate != nil {
+		createErr = e.AdmittedRunCreate(ctx, cloneRun(run), create)
+	} else {
+		createErr = create()
+	}
+	if createErr != nil {
 		return nil, createErr
 	}
 	if req.OnRunPersisted != nil {
@@ -263,11 +304,35 @@ func (e *Executor) Retry(ctx context.Context, runID string, secrets map[string]s
 	if err != nil {
 		return nil, err
 	}
+	return e.RetryCaptured(ctx, run, secrets)
+}
+
+// RetryCaptured retries one already-loaded immutable source run. Admission
+// callers use this method so the authoritative workflow ref and invocation
+// context cannot be replaced by a second store read after readiness checks.
+func (e *Executor) RetryCaptured(
+	ctx context.Context,
+	source *Run,
+	secrets map[string]string,
+) (*RunResult, error) {
+	if e == nil {
+		return nil, fmt.Errorf("workflow executor is nil")
+	}
+	if source == nil {
+		return nil, fmt.Errorf("workflow retry source is required")
+	}
+	run := cloneRun(source)
+	store := e.Store
+	if store == nil {
+		store = NewFileRunStore(e.WorkspaceDir)
+	}
+	origin, _ := trustedRunOriginWithStore(ctx, store, run)
 	return e.Run(ctx, RunRequest{
 		Ref:          run.WorkflowRef,
 		Inputs:       cloneMap(run.Inputs),
 		Secrets:      cloneStringMap(secrets),
 		Event:        cloneMap(run.Event),
+		Origin:       origin,
 		Session:      run.Session,
 		Delivery:     run.Delivery,
 		ParentRunID:  run.ParentRunID,
@@ -373,6 +438,15 @@ func (e *Executor) loadWorkflow(
 			ref = "inline"
 		}
 		return req.Workflow, ref, nil
+	}
+	if len(e.WorkflowSnapshots) != 0 {
+		if snapshot, canonical, ok := e.workflowSnapshot(req.Ref); ok {
+			return snapshot.Workflow, canonical, nil
+		}
+		return nil, "", fmt.Errorf(
+			"workflow %q is outside the admitted snapshot closure",
+			req.Ref,
+		)
 	}
 	if runtimeCompatibilityConfigured(e.RuntimeCompatibility) {
 		workflow, err := LoadRunnableLocalSnapshot(
@@ -630,6 +704,7 @@ func (e *Executor) executeReusableJob(
 		Ref:         job.Uses,
 		Inputs:      with,
 		Event:       execCtx.Event,
+		Origin:      cloneRunOrigin(req.Origin),
 		Session:     inheritedContextValue(job.Context.Session, execCtx.Session),
 		Delivery:    inheritedDelivery(job.Context.Delivery, execCtx.Delivery),
 		ParentRunID: parentRunID,
@@ -754,10 +829,37 @@ func (e *Executor) executeStep(
 }
 
 func (e *Executor) ensureReusableWorkflowRunnable(ctx context.Context, ref string) error {
-	if e == nil || !runtimeCompatibilityConfigured(e.RuntimeCompatibility) {
+	if e == nil {
+		return nil
+	}
+	if len(e.WorkflowSnapshots) != 0 {
+		if _, _, ok := e.workflowSnapshot(ref); ok {
+			return nil
+		}
+		return fmt.Errorf(
+			"workflow %q is outside the admitted snapshot closure",
+			ref,
+		)
+	}
+	if !runtimeCompatibilityConfigured(e.RuntimeCompatibility) {
 		return nil
 	}
 	return EnsureWorkflowRunnable(ctx, e.WorkspaceDir, ref, e.RuntimeCompatibility, e.localOptions()...)
+}
+
+func (e *Executor) workflowSnapshot(ref string) (*LocalWorkflowSnapshot, string, bool) {
+	if e == nil || len(e.WorkflowSnapshots) == 0 {
+		return nil, "", false
+	}
+	canonical, err := CanonicalLocalRef(ref)
+	if err != nil {
+		return nil, "", false
+	}
+	snapshot, ok := e.WorkflowSnapshots[canonical]
+	if !ok || snapshot == nil || snapshot.Workflow == nil || snapshot.Ref != canonical {
+		return nil, "", false
+	}
+	return snapshot, canonical, true
 }
 
 func (e *Executor) localOptions() []LocalOption {
@@ -1202,6 +1304,7 @@ func cloneRun(run *Run) *Run {
 		return nil
 	}
 	out := *run
+	out.Origin = cloneRunOrigin(run.Origin)
 	out.ChildRunIDs = append([]string(nil), run.ChildRunIDs...)
 	out.Delivery = run.Delivery
 	out.Delivery.ReplyHandles = cloneStringMap(run.Delivery.ReplyHandles)

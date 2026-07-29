@@ -76,6 +76,10 @@ const secondWorkflowRef = "workflows/second.yml"
 const requestedRunID = "wr_requested-run_01"
 const otherRunID = "wr_other-run_02"
 const eventID = "ev_0123456789abcdef0123456789abcdef"
+const dispatchID = "dsp_0123456789abcdef0123456789abcdef"
+const rootRunID = "wr_root-run_03"
+const decoyEventID = "ev_fedcba9876543210fedcba9876543210"
+const decoyDispatchID = "dsp_fedcba9876543210fedcba9876543210"
 
 const workflows: WorkflowDefinition[] = [
   { ref: workflowRef, name: "Issue triage" },
@@ -298,18 +302,25 @@ describe("WorkflowsPage navigation", () => {
     )
   })
 
-  it("links only a validated server event context and never input dispatch hints", async () => {
+  it("links only validated server origin and never payload relationship hints", async () => {
     const trustedRun = workflowRun(requestedRunID, {
+      origin: {
+        kind: "external_event",
+        event_id: eventID,
+        dispatch_id: dispatchID,
+        root_run_id: rootRunID,
+      },
       event: {
-        id: eventID,
+        id: decoyEventID,
         source: "github",
         connector: "primary",
         type: "issues.opened",
       },
       inputs: {
-        event_id: eventID,
-        dispatch_id: "dsp_0123456789abcdef0123456789abcdef",
+        event_id: decoyEventID,
+        dispatch_id: decoyDispatchID,
       },
+      session: `event:${decoyEventID}:dispatch:${decoyDispatchID}`,
     })
     workflowMocks.listWorkflows.mockResolvedValue({
       workflows: [workflows[0]],
@@ -327,6 +338,14 @@ describe("WorkflowsPage navigation", () => {
       "href",
       `/events?event=${eventID}`,
     )
+    expect(screen.getByRole("link", { name: dispatchID })).toHaveAttribute(
+      "href",
+      `/events?view=dispatches&dispatch=${dispatchID}`,
+    )
+    expect(screen.getByRole("link", { name: rootRunID })).toHaveAttribute(
+      "href",
+      `/agent/workflows?mode=operate&run=${rootRunID}`,
+    )
     expect(screen.getByRole("link", { name: workflowRef })).toHaveAttribute(
       "href",
       expect.stringContaining(
@@ -335,24 +354,33 @@ describe("WorkflowsPage navigation", () => {
     )
     expect(
       screen.queryByRole("link", {
-        name: "dsp_0123456789abcdef0123456789abcdef",
+        name: decoyDispatchID,
       }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole("link", { name: decoyEventID }),
     ).not.toBeInTheDocument()
 
     trustedView.unmount()
     const untrustedRun = workflowRun(requestedRunID, {
+      origin: {
+        kind: "external_event",
+        event_id: eventID,
+        root_run_id: rootRunID,
+      },
       event: {
         id: eventID,
         source: "github",
+        connector: "primary",
         type: "issues.opened",
       },
       inputs: {
         event_id: eventID,
-        dispatch_id: "dsp_0123456789abcdef0123456789abcdef",
+        dispatch_id: dispatchID,
       },
     })
     workflowMocks.getWorkflowRun.mockResolvedValue(untrustedRun)
-    renderWorkflowsPage({
+    const untrustedView = renderWorkflowsPage({
       mode: "operate",
       workflow: workflowRef,
       run: requestedRunID,
@@ -364,8 +392,38 @@ describe("WorkflowsPage navigation", () => {
     ).not.toBeInTheDocument()
     expect(
       screen.queryByRole("link", {
-        name: "dsp_0123456789abcdef0123456789abcdef",
+        name: dispatchID,
       }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole("link", { name: rootRunID }),
+    ).not.toBeInTheDocument()
+
+    untrustedView.unmount()
+    const malformedDraftOriginRun = workflowRun(requestedRunID, {
+      origin: {
+        kind: "external_event_draft_test",
+        event_id: eventID,
+        dispatch_id: dispatchID,
+        root_run_id: rootRunID,
+      },
+    })
+    workflowMocks.getWorkflowRun.mockResolvedValue(malformedDraftOriginRun)
+    renderWorkflowsPage({
+      mode: "operate",
+      workflow: workflowRef,
+      run: requestedRunID,
+    })
+
+    await screen.findByText("Summary")
+    expect(
+      screen.queryByRole("link", { name: eventID }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole("link", { name: dispatchID }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole("link", { name: rootRunID }),
     ).not.toBeInTheDocument()
   })
 })

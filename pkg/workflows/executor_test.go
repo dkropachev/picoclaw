@@ -36,6 +36,22 @@ type fakeAgentRunner struct {
 	err      error
 }
 
+type retrySourceTrackingStore struct {
+	RunStore
+	sourceID    string
+	sourceReads int
+}
+
+func (s *retrySourceTrackingStore) GetRun(
+	ctx context.Context,
+	runID string,
+) (*Run, error) {
+	if runID == s.sourceID {
+		s.sourceReads++
+	}
+	return s.RunStore.GetRun(ctx, runID)
+}
+
 func (r *fakeAgentRunner) RunAgent(_ context.Context, req AgentRequest) (map[string]any, error) {
 	r.requests = append(r.requests, req)
 	if r.err != nil {
@@ -534,6 +550,287 @@ jobs:
 	if len(parentRun.ChildRunIDs) != 1 {
 		t.Fatalf("child run ids = %#v, want one", parentRun.ChildRunIDs)
 	}
+}
+
+func TestExecutorUsesAdmittedReusableSnapshotAfterDefinitionChanges(t *testing.T) {
+	workspace := t.TempDir()
+	childBefore := []byte(`
+name: Child before
+on:
+  workflow_call: {}
+jobs:
+  child:
+    runs-on: picoclaw
+    steps:
+      - uses: function/old-child
+`)
+	childAfter := `
+name: Child after
+on:
+  workflow_call: {}
+jobs:
+  child:
+    runs-on: picoclaw
+    steps:
+      - uses: function/new-child
+`
+	writeWorkflowFile(t, workspace, "child.yml", string(childBefore))
+	childSnapshot := parseWorkflow(t, string(childBefore))
+	parent := parseWorkflow(t, `
+name: Parent
+on:
+  manual: {}
+jobs:
+  mutate:
+    runs-on: picoclaw
+    steps:
+      - uses: function/mutate-child
+  call:
+    needs: mutate
+    uses: workflows/child.yml
+`)
+	oldCalls := 0
+	newCalls := 0
+	registry := NewFunctionRegistry()
+	if err := registry.Register(
+		"mutate-child",
+		func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
+			writeWorkflowFile(t, workspace, "child.yml", childAfter)
+			return map[string]any{}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register(
+		"old-child",
+		func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
+			oldCalls++
+			return map[string]any{}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register(
+		"new-child",
+		func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
+			newCalls++
+			return map[string]any{}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	result, err := (&Executor{
+		WorkspaceDir: workspace,
+		Functions:    registry,
+		WorkflowSnapshots: map[string]*LocalWorkflowSnapshot{
+			"workflows/child.yml": {
+				Ref:      "workflows/child.yml",
+				Revision: workflowHashBytes(childBefore),
+				Workflow: childSnapshot,
+			},
+		},
+	}).Run(context.Background(), RunRequest{
+		Workflow:    parent,
+		WorkflowRef: "workflows/parent.yml",
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result == nil || result.Status != RunStatusSucceeded {
+		t.Fatalf("result = %#v, want succeeded", result)
+	}
+	if oldCalls != 1 || newCalls != 0 {
+		t.Fatalf("child calls = (old=%d, new=%d), want (1, 0)", oldCalls, newCalls)
+	}
+}
+
+func TestExecutorAdmissionFenceRunsBeforeConcurrencyLimitedCreate(t *testing.T) {
+	workspace := t.TempDir()
+	store := NewFileRunStore(workspace)
+	admissionErr := errors.New("admission revision changed")
+	executor := &Executor{
+		WorkspaceDir:      workspace,
+		Store:             store,
+		MaxConcurrentRuns: 1,
+		AdmittedRunCreate: func(
+			context.Context,
+			*Run,
+			func() error,
+		) error {
+			return admissionErr
+		},
+	}
+	result, err := executor.Run(context.Background(), RunRequest{
+		Workflow: parseWorkflow(t, `
+name: Fenced
+on:
+  manual: {}
+jobs:
+  inspect:
+    runs-on: picoclaw
+    steps:
+      - uses: function/workflow.state
+        with:
+          action: list
+`),
+		WorkflowRef: "workflows/fenced.yml",
+	})
+	if !errors.Is(err, admissionErr) {
+		t.Fatalf("Run() error = %v, want admission error", err)
+	}
+	if result != nil {
+		t.Fatalf("Run() result = %#v, want nil", result)
+	}
+	runs, listErr := store.ListRuns(context.Background())
+	if listErr != nil {
+		t.Fatalf("ListRuns() error = %v", listErr)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("persisted runs = %#v, want none", runs)
+	}
+}
+
+func TestExecutorRetryCapturedNeverRereadsSourceAndWrapsChildRetryCreate(
+	t *testing.T,
+) {
+	workspace := t.TempDir()
+	fileStore := NewFileRunStore(workspace)
+	store := &retrySourceTrackingStore{
+		RunStore: fileStore,
+		sourceID: "wr_captured_source",
+	}
+	workflow := parseWorkflow(t, `
+name: Captured retry
+on:
+  manual: {}
+jobs:
+  retry:
+    runs-on: picoclaw
+    steps:
+      - uses: function/retry-noop
+`)
+	registry := NewFunctionRegistry()
+	if err := registry.Register(
+		"retry-noop",
+		func(context.Context, map[string]any, ExecutionContext) (map[string]any, error) {
+			return map[string]any{}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	var admittedCandidate *Run
+	executor := &Executor{
+		WorkspaceDir: workspace,
+		Store:        store,
+		Functions:    registry,
+		WorkflowSnapshots: map[string]*LocalWorkflowSnapshot{
+			"workflows/captured.yml": {
+				Ref:      "workflows/captured.yml",
+				Revision: "captured-revision",
+				Workflow: workflow,
+			},
+		},
+		AdmittedRunCreate: func(
+			_ context.Context,
+			candidate *Run,
+			create func() error,
+		) error {
+			admittedCandidate = cloneRun(candidate)
+			return create()
+		},
+	}
+	source := &Run{
+		ID:          store.sourceID,
+		WorkflowRef: "workflows/captured.yml",
+		Status:      RunStatusFailed,
+		ParentRunID: "wr_reusable_parent",
+		CallerJobID: "child",
+		Inputs:      map[string]any{"captured": true},
+	}
+	result, err := executor.RetryCaptured(context.Background(), source, nil)
+	if err != nil {
+		t.Fatalf("RetryCaptured() error = %v", err)
+	}
+	if result == nil || result.Status != RunStatusSucceeded {
+		t.Fatalf("RetryCaptured() result = %#v, want succeeded", result)
+	}
+	if store.sourceReads != 0 {
+		t.Fatalf("source GetRun calls = %d, want 0", store.sourceReads)
+	}
+	if admittedCandidate == nil ||
+		admittedCandidate.WorkflowRef != source.WorkflowRef ||
+		admittedCandidate.ParentRunID != source.ParentRunID ||
+		admittedCandidate.RetryOfRunID != source.ID {
+		t.Fatalf(
+			"admitted child retry = %#v, want captured source context",
+			admittedCandidate,
+		)
+	}
+}
+
+func TestExecutorAdmittedSnapshotClosureFailsClosed(t *testing.T) {
+	workspace := t.TempDir()
+	liveWorkflow := `
+name: Live workflow
+on:
+  workflow_call: {}
+jobs:
+  live:
+    runs-on: picoclaw
+    steps:
+      - uses: function/live
+`
+	writeWorkflowFile(t, workspace, "live.yml", liveWorkflow)
+	admitted := parseWorkflow(t, `
+name: Admitted workflow
+on:
+  workflow_call: {}
+jobs:
+  admitted:
+    runs-on: picoclaw
+    steps:
+      - uses: function/admitted
+`)
+	snapshots := map[string]*LocalWorkflowSnapshot{
+		"workflows/admitted.yml": {
+			Ref:      "workflows/admitted.yml",
+			Revision: "admitted-revision",
+			Workflow: admitted,
+		},
+	}
+
+	t.Run("root", func(t *testing.T) {
+		result, err := (&Executor{
+			WorkspaceDir:      workspace,
+			WorkflowSnapshots: snapshots,
+		}).Run(context.Background(), RunRequest{Ref: "workflows/live.yml"})
+		if err == nil ||
+			!strings.Contains(err.Error(), "outside the admitted snapshot closure") {
+			t.Fatalf("Run() = (%#v, %v), want fail-closed snapshot error", result, err)
+		}
+	})
+
+	t.Run("reusable child", func(t *testing.T) {
+		parent := parseWorkflow(t, `
+name: Parent
+on:
+  manual: {}
+jobs:
+  child:
+    uses: workflows/live.yml
+`)
+		result, err := (&Executor{
+			WorkspaceDir:      t.TempDir(),
+			WorkflowSnapshots: snapshots,
+		}).Run(context.Background(), RunRequest{
+			Workflow:    parent,
+			WorkflowRef: "workflows/parent.yml",
+		})
+		if err == nil ||
+			!strings.Contains(err.Error(), "outside the admitted snapshot closure") {
+			t.Fatalf("Run() = (%#v, %v), want fail-closed child error", result, err)
+		}
+	})
 }
 
 func TestExecutorReusableWorkflowRequiresCurrentValidationStamp(t *testing.T) {

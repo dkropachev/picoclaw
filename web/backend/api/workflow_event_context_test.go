@@ -974,6 +974,472 @@ func TestEventBackedDraftFailureIsSafeAcrossPostRunListEventsAndSSE(t *testing.T
 	}
 }
 
+func TestUnsafeFallbackAncestryStaysMaskedAcrossWorkflowRunHTTP(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		runID        string
+		parentRunID  string
+		retryOfRunID string
+	}{
+		{
+			name:        "whitespace parent",
+			runID:       "wr_http_whitespace_parent",
+			parentRunID: " wr_missing_parent ",
+		},
+		{
+			name:         "invalid retry without parent",
+			runID:        "wr_http_invalid_retry",
+			retryOfRunID: "invalid-retry-id",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			workspace := t.TempDir()
+			h := NewHandler(writeWorkflowEventTestConfig(t, workspace))
+			now := time.Now().UTC()
+			run := &workflows.Run{
+				ID:           test.runID,
+				WorkflowRef:  "workflows/reusable.yml",
+				Status:       workflows.RunStatusRunning,
+				ParentRunID:  test.parentRunID,
+				RetryOfRunID: test.retryOfRunID,
+				Event: map[string]any{
+					"id": "event-context-present",
+					"payload": map[string]any{
+						"redacted": "visible",
+					},
+				},
+				Error:     eventDraftPrivateAPIDiagnostic,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}
+			store := workflows.NewFileRunStore(workspace)
+			if err := store.CreateRun(ctx, run); err != nil {
+				t.Fatalf("CreateRun() error = %v", err)
+			}
+			if err := store.AppendEvent(ctx, workflows.RunEvent{
+				Kind:    "workflow.step.failed",
+				RunID:   run.ID,
+				Message: eventDraftPrivateAPIDiagnostic,
+				Payload: map[string]any{
+					"private": eventDraftPrivateAPIDiagnostic,
+				},
+			}); err != nil {
+				t.Fatalf("AppendEvent() error = %v", err)
+			}
+
+			detail := httptest.NewRecorder()
+			detailRequest := httptest.NewRequest(
+				http.MethodGet,
+				"/api/workflows/runs/"+run.ID,
+				nil,
+			)
+			detailRequest.SetPathValue("run_id", run.ID)
+			h.handleGetWorkflowRun(detail, detailRequest)
+			if detail.Code != http.StatusOK {
+				t.Fatalf(
+					"detail status = %d, body=%s",
+					detail.Code,
+					detail.Body.String(),
+				)
+			}
+			var detailed workflows.Run
+			if err := json.Unmarshal(detail.Body.Bytes(), &detailed); err != nil {
+				t.Fatalf("detail JSON error = %v", err)
+			}
+			assertUnsafeFallbackRunMasked(t, &detailed)
+
+			list := httptest.NewRecorder()
+			h.handleListWorkflowRuns(
+				list,
+				httptest.NewRequest(http.MethodGet, "/api/workflows/runs", nil),
+			)
+			if list.Code != http.StatusOK {
+				t.Fatalf(
+					"list status = %d, body=%s",
+					list.Code,
+					list.Body.String(),
+				)
+			}
+			var listed struct {
+				Runs []workflows.Run `json:"runs"`
+			}
+			if err := json.Unmarshal(list.Body.Bytes(), &listed); err != nil ||
+				len(listed.Runs) != 1 {
+				t.Fatalf("list response = %#v, error=%v", listed, err)
+			}
+			assertUnsafeFallbackRunMasked(t, &listed.Runs[0])
+
+			events := httptest.NewRecorder()
+			eventsRequest := httptest.NewRequest(
+				http.MethodGet,
+				"/api/workflows/runs/"+run.ID+"/events",
+				nil,
+			)
+			eventsRequest.SetPathValue("run_id", run.ID)
+			h.handleGetWorkflowRunEvents(events, eventsRequest)
+			if events.Code != http.StatusOK {
+				t.Fatalf(
+					"events status = %d, body=%s",
+					events.Code,
+					events.Body.String(),
+				)
+			}
+			assertSafeEventDraftLifecycleResponse(t, events.Body.String())
+
+			stream := httptest.NewRecorder()
+			streamRequest := httptest.NewRequest(
+				http.MethodGet,
+				"/api/workflows/runs/"+run.ID+"/events/stream?once=true",
+				nil,
+			)
+			streamRequest.SetPathValue("run_id", run.ID)
+			h.handleStreamWorkflowRunEvents(stream, streamRequest)
+			if stream.Code != http.StatusOK {
+				t.Fatalf(
+					"stream status = %d, body=%s",
+					stream.Code,
+					stream.Body.String(),
+				)
+			}
+			assertSafeEventDraftLifecycleResponse(t, stream.Body.String())
+
+			retry := httptest.NewRecorder()
+			retryRequest := httptest.NewRequest(
+				http.MethodPost,
+				"/api/workflows/runs/"+run.ID+"/retry",
+				strings.NewReader(`{}`),
+			)
+			retryRequest.SetPathValue("run_id", run.ID)
+			h.handleRetryWorkflowRun(retry, retryRequest)
+			if retry.Code != http.StatusConflict ||
+				!strings.Contains(
+					retry.Body.String(),
+					"event-backed draft run retries are unavailable",
+				) {
+				t.Fatalf(
+					"retry response = (%d, %q)",
+					retry.Code,
+					retry.Body.String(),
+				)
+			}
+
+			cancel := httptest.NewRecorder()
+			cancelRequest := httptest.NewRequest(
+				http.MethodPost,
+				"/api/workflows/runs/"+run.ID+"/cancel",
+				strings.NewReader(
+					`{"reason":"`+eventDraftPrivateAPIDiagnostic+`"}`,
+				),
+			)
+			cancelRequest.SetPathValue("run_id", run.ID)
+			h.handleCancelWorkflowRun(cancel, cancelRequest)
+			if cancel.Code != http.StatusOK {
+				t.Fatalf(
+					"cancel status = %d, body=%s",
+					cancel.Code,
+					cancel.Body.String(),
+				)
+			}
+			var canceled workflows.Run
+			if err := json.Unmarshal(cancel.Body.Bytes(), &canceled); err != nil {
+				t.Fatalf("cancel JSON error = %v", err)
+			}
+			assertUnsafeFallbackRunMasked(t, &canceled)
+			if canceled.Status != workflows.RunStatusCanceled ||
+				canceled.CancelReason !=
+					workflows.EventBackedDraftCancelReasonDiagnostic ||
+				strings.Contains(cancel.Body.String(), eventDraftPrivateAPIDiagnostic) {
+				t.Fatalf("unsafe cancel response = %s", cancel.Body.String())
+			}
+		})
+	}
+}
+
+func TestPrunedTrustedOriginKindControlsWorkflowRunHTTPFamily(t *testing.T) {
+	const (
+		eventID           = "ev_0123456789abcdef0123456789abcdef"
+		dispatchID        = "dsp_0123456789abcdef0123456789abcdef"
+		workflowRef       = "workflows/pruned-origin.yml"
+		productionRootID  = "wr_pruned_production_root"
+		productionChildID = "wr_pruned_production_child"
+		draftRootID       = "wr_pruned_draft_root"
+		draftChildID      = "wr_pruned_draft_child"
+	)
+	ctx := context.Background()
+	workspace := t.TempDir()
+	configPath := writeWorkflowDependencyTestConfig(t, workspace, true)
+	writeWorkflowDependencyDefinition(
+		t,
+		workspace,
+		"automation",
+		workflowRef,
+		workflowRunReadinessDefinition,
+	)
+	h := NewHandler(configPath)
+	restoreDependencies := stubWorkflowDependencyRuntime(t, nil)
+	defer restoreDependencies()
+	revalidateWorkflowRunReadinessDefinition(t, h, configPath)
+	readiness := checkPublishedWorkflowDependencies(t, h, workflowRef)
+	if !readiness.Ready {
+		t.Fatalf("dependency response = %#v, want ready", readiness)
+	}
+
+	event := func() map[string]any {
+		return map[string]any{
+			"id":        eventID,
+			"source":    "github",
+			"connector": "primary",
+			"type":      "issues.opened",
+			"payload": map[string]any{
+				"private": eventDraftPrivateAPIDiagnostic,
+			},
+		}
+	}
+	productionOrigin := &workflows.RunOrigin{
+		Kind:       workflows.RunOriginExternalEvent,
+		EventID:    eventID,
+		DispatchID: dispatchID,
+		RootRunID:  productionRootID,
+	}
+	draftOrigin := &workflows.RunOrigin{
+		Kind:      workflows.RunOriginExternalEventDraftTest,
+		EventID:   eventID,
+		RootRunID: draftRootID,
+	}
+	now := time.Now().UTC()
+	completed := now.Add(time.Second)
+	store := workflows.NewFileRunStore(workspace)
+	for _, run := range []*workflows.Run{
+		{
+			ID:          productionRootID,
+			WorkflowRef: workflowRef,
+			Status:      workflows.RunStatusFailed,
+			Event:       event(),
+			Inputs: map[string]any{
+				"event_id":    eventID,
+				"dispatch_id": dispatchID,
+			},
+			Origin:      productionOrigin,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			CompletedAt: &completed,
+		},
+		{
+			ID:          productionChildID,
+			WorkflowRef: workflowRef,
+			Status:      workflows.RunStatusFailed,
+			ParentRunID: productionRootID,
+			Event:       event(),
+			Inputs: map[string]any{
+				"event_id":    eventID,
+				"dispatch_id": dispatchID,
+			},
+			Origin:      productionOrigin,
+			Error:       eventDraftPrivateAPIDiagnostic,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			CompletedAt: &completed,
+		},
+		{
+			ID:          draftRootID,
+			WorkflowRef: "draft:" + workflowRef,
+			Status:      workflows.RunStatusFailed,
+			Event:       event(),
+			Inputs:      map[string]any{"event_id": eventID},
+			Origin:      draftOrigin,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			CompletedAt: &completed,
+		},
+		{
+			ID:          draftChildID,
+			WorkflowRef: workflowRef,
+			Status:      workflows.RunStatusFailed,
+			ParentRunID: draftRootID,
+			Event:       event(),
+			Inputs:      map[string]any{"event_id": eventID},
+			Origin:      draftOrigin,
+			Error:       eventDraftPrivateAPIDiagnostic,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			CompletedAt: &completed,
+		},
+	} {
+		if err := store.CreateRun(ctx, run); err != nil {
+			t.Fatalf("CreateRun(%s) error = %v", run.ID, err)
+		}
+	}
+	for _, runID := range []string{productionChildID, draftChildID} {
+		if err := store.AppendEvent(ctx, workflows.RunEvent{
+			Kind:    "workflow.step.failed",
+			RunID:   runID,
+			Message: eventDraftPrivateAPIDiagnostic,
+			Payload: map[string]any{
+				"private": eventDraftPrivateAPIDiagnostic,
+			},
+		}); err != nil {
+			t.Fatalf("AppendEvent(%s) error = %v", runID, err)
+		}
+	}
+	for _, rootID := range []string{productionRootID, draftRootID} {
+		if err := store.DeleteRun(ctx, rootID); err != nil {
+			t.Fatalf("DeleteRun(%s) error = %v", rootID, err)
+		}
+	}
+
+	getDetail := func(runID string) workflows.Run {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(
+			http.MethodGet,
+			"/api/workflows/runs/"+runID,
+			nil,
+		)
+		request.SetPathValue("run_id", runID)
+		h.handleGetWorkflowRun(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf(
+				"detail %s status = %d, body=%s",
+				runID,
+				recorder.Code,
+				recorder.Body.String(),
+			)
+		}
+		var run workflows.Run
+		if err := json.Unmarshal(recorder.Body.Bytes(), &run); err != nil {
+			t.Fatalf("detail %s JSON error = %v", runID, err)
+		}
+		return run
+	}
+	productionDetail := getDetail(productionChildID)
+	if productionDetail.Error != eventDraftPrivateAPIDiagnostic ||
+		productionDetail.Origin == nil ||
+		productionDetail.Origin.Kind != workflows.RunOriginExternalEvent {
+		t.Fatalf("pruned production detail = %#v", productionDetail)
+	}
+	draftDetail := getDetail(draftChildID)
+	if draftDetail.Error != workflows.EventBackedDraftRunErrorDiagnostic ||
+		draftDetail.Origin == nil ||
+		draftDetail.Origin.Kind != workflows.RunOriginExternalEventDraftTest {
+		t.Fatalf("pruned draft detail = %#v", draftDetail)
+	}
+
+	listRecorder := httptest.NewRecorder()
+	h.handleListWorkflowRuns(
+		listRecorder,
+		httptest.NewRequest(http.MethodGet, "/api/workflows/runs", nil),
+	)
+	if listRecorder.Code != http.StatusOK {
+		t.Fatalf(
+			"list status = %d, body=%s",
+			listRecorder.Code,
+			listRecorder.Body.String(),
+		)
+	}
+	var listResponse struct {
+		Runs []workflows.Run `json:"runs"`
+	}
+	if err := json.Unmarshal(listRecorder.Body.Bytes(), &listResponse); err != nil {
+		t.Fatalf("list JSON error = %v", err)
+	}
+	listed := make(map[string]workflows.Run, len(listResponse.Runs))
+	for _, run := range listResponse.Runs {
+		listed[run.ID] = run
+	}
+	if listed[productionChildID].Error != eventDraftPrivateAPIDiagnostic {
+		t.Fatalf("pruned production list = %#v", listed[productionChildID])
+	}
+	if listed[draftChildID].Error != workflows.EventBackedDraftRunErrorDiagnostic {
+		t.Fatalf("pruned draft list = %#v", listed[draftChildID])
+	}
+
+	getEvents := func(runID string) []workflows.RunEvent {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(
+			http.MethodGet,
+			"/api/workflows/runs/"+runID+"/events",
+			nil,
+		)
+		request.SetPathValue("run_id", runID)
+		h.handleGetWorkflowRunEvents(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf(
+				"events %s status = %d, body=%s",
+				runID,
+				recorder.Code,
+				recorder.Body.String(),
+			)
+		}
+		var response struct {
+			Events []workflows.RunEvent `json:"events"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatalf("events %s JSON error = %v", runID, err)
+		}
+		return response.Events
+	}
+	productionEvents := getEvents(productionChildID)
+	if len(productionEvents) != 1 ||
+		productionEvents[0].Message != eventDraftPrivateAPIDiagnostic ||
+		productionEvents[0].Payload["private"] != eventDraftPrivateAPIDiagnostic {
+		t.Fatalf("pruned production events = %#v", productionEvents)
+	}
+	draftEvents := getEvents(draftChildID)
+	if len(draftEvents) != 1 ||
+		draftEvents[0].Message != workflows.EventBackedDraftEventMessageDiagnostic ||
+		draftEvents[0].Payload["diagnostic"] !=
+			workflows.EventBackedDraftEventPayloadDiagnostic {
+		t.Fatalf("pruned draft events = %#v", draftEvents)
+	}
+
+	draftRetry := postWorkflowRetry(t, h, draftChildID, map[string]any{})
+	if draftRetry.Code != http.StatusConflict ||
+		!strings.Contains(
+			draftRetry.Body.String(),
+			"event-backed draft run retries are unavailable",
+		) {
+		t.Fatalf(
+			"pruned draft retry = (%d, %q)",
+			draftRetry.Code,
+			draftRetry.Body.String(),
+		)
+	}
+	productionRetry := postWorkflowRetry(
+		t,
+		h,
+		productionChildID,
+		map[string]any{
+			"expected_dependency_revision": readiness.Revision,
+		},
+	)
+	if productionRetry.Code != http.StatusOK {
+		t.Fatalf(
+			"pruned production retry = (%d, %q)",
+			productionRetry.Code,
+			productionRetry.Body.String(),
+		)
+	}
+	runs, err := store.ListRuns(ctx)
+	if err != nil {
+		t.Fatalf("ListRuns() error = %v", err)
+	}
+	var retried *workflows.Run
+	for index := range runs {
+		if runs[index].RetryOfRunID == productionChildID {
+			retried = &runs[index]
+			break
+		}
+	}
+	if retried == nil ||
+		retried.Origin == nil ||
+		retried.Origin.Kind != workflows.RunOriginExternalEvent ||
+		retried.Origin.RootRunID != productionRootID {
+		t.Fatalf("pruned production retry run = %#v", retried)
+	}
+}
+
 func TestEventBackedDraftAsyncFailureKeepsRunningAndCompletionSnapshotsSafe(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()
@@ -1294,6 +1760,13 @@ func assertSafeEventDraftRunProjection(t *testing.T, run *workflows.Run) {
 		run.Error != workflows.EventBackedDraftRunErrorDiagnostic {
 		t.Fatalf("run projection = %#v", run)
 	}
+	if run.Origin == nil ||
+		run.Origin.Kind != workflows.RunOriginExternalEventDraftTest ||
+		run.Origin.EventID != testEventID ||
+		run.Origin.DispatchID != "" ||
+		run.Origin.RootRunID != run.ID {
+		t.Fatalf("run origin = %#v, run id = %q", run.Origin, run.ID)
+	}
 	if len(run.Jobs) == 0 || len(run.Steps) == 0 {
 		t.Fatalf("run projection omitted executions: %#v", run)
 	}
@@ -1315,6 +1788,22 @@ func assertSafeEventDraftRunProjection(t *testing.T, run *workflows.Run) {
 	}
 	if strings.Contains(string(encoded), "provider echoed") {
 		t.Fatalf("run projection exposed private diagnostic: %s", encoded)
+	}
+}
+
+func assertUnsafeFallbackRunMasked(t *testing.T, run *workflows.Run) {
+	t.Helper()
+	if run == nil ||
+		run.Error != workflows.EventBackedDraftRunErrorDiagnostic ||
+		run.Origin != nil {
+		t.Fatalf("unsafe fallback projection = %#v", run)
+	}
+	encoded, err := json.Marshal(run)
+	if err != nil {
+		t.Fatalf("json.Marshal(run) error = %v", err)
+	}
+	if strings.Contains(string(encoded), eventDraftPrivateAPIDiagnostic) {
+		t.Fatalf("unsafe fallback projection exposed diagnostic: %s", encoded)
 	}
 }
 

@@ -40,6 +40,23 @@ var newWorkflowRuntimeRunners = func(configPath string) workflowRuntimeRunners {
 	}
 }
 
+func workflowRuntimeRunnersForConfig(
+	configPath string,
+	cfg *config.Config,
+) workflowRuntimeRunners {
+	runners := newWorkflowRuntimeRunners(configPath)
+	bindWorkflowRuntimeRunnerConfig(runners.Tools, cfg)
+	bindWorkflowRuntimeRunnerConfig(runners.Agents, cfg)
+	bindWorkflowRuntimeRunnerConfig(runners.RuntimeEvents, cfg)
+	return runners
+}
+
+func bindWorkflowRuntimeRunnerConfig(runner any, cfg *config.Config) {
+	if concrete, ok := runner.(*webWorkflowRuntimeRunner); ok {
+		concrete.config = cfg
+	}
+}
+
 type webWorkflowRuntimeRunner struct {
 	configPath    string
 	config        *config.Config

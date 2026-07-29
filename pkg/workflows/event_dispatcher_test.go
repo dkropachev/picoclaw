@@ -184,8 +184,22 @@ func TestEventWorkflowRunContextFromEnvelopeSharesProductionAndPreviewShape(t *t
 	if production.Inputs["dispatch_id"] != dispatchID {
 		t.Fatalf("production dispatch_id = %#v", production.Inputs["dispatch_id"])
 	}
+	if production.Origin == nil ||
+		production.Origin.Kind != RunOriginExternalEvent ||
+		production.Origin.EventID != envelope.ID ||
+		production.Origin.DispatchID != dispatchID ||
+		production.Origin.RootRunID != "" {
+		t.Fatalf("production origin = %#v", production.Origin)
+	}
 	if _, present := preview.Inputs["dispatch_id"]; present {
 		t.Fatalf("preview invented dispatch_id: %#v", preview.Inputs)
+	}
+	if preview.Origin == nil ||
+		preview.Origin.Kind != RunOriginExternalEventDraftTest ||
+		preview.Origin.EventID != envelope.ID ||
+		preview.Origin.DispatchID != "" ||
+		preview.Origin.RootRunID != "" {
+		t.Fatalf("preview origin = %#v", preview.Origin)
 	}
 	for _, context := range []EventWorkflowRunContext{production, preview} {
 		if context.Inputs["event_id"] != envelope.ID ||
@@ -593,6 +607,12 @@ func TestEventWorkflowDispatcherRunsDeterministicRequestAndSucceeds(t *testing.T
 	if request.Event["id"] != fixture.event.Envelope.ID ||
 		request.Event["payload"].(map[string]any)["action"] != "opened" {
 		t.Fatalf("request event = %#v", request.Event)
+	}
+	if request.Origin == nil ||
+		request.Origin.Kind != RunOriginExternalEvent ||
+		request.Origin.EventID != fixture.event.Envelope.ID ||
+		request.Origin.DispatchID != fixture.dispatch.ID {
+		t.Fatalf("request origin = %#v", request.Origin)
 	}
 	if request.Workflow == nil || request.Workflow.On.Event == nil {
 		t.Fatalf("request workflow = %#v", request.Workflow)
@@ -1351,14 +1371,17 @@ func TestEventWorkflowDispatcherReconcileRenewalRetriesBeforeMutation(t *testing
 
 func TestEventWorkflowDispatcherCancelsRunWhenLeaseRenewalFails(t *testing.T) {
 	fixture := newEventDispatchFixture(t, "dispatcher-heartbeat")
+	executorStarted := make(chan struct{})
 	renewed := make(chan struct{})
 	inbox := &renewFailureEventInbox{
-		Store:   fixture.store,
-		renewed: renewed,
+		Store:     fixture.store,
+		failAfter: executorStarted,
+		renewed:   renewed,
 	}
 	canceled := make(chan error, 1)
 	executor := &recordingEventExecutor{
 		run: func(ctx context.Context, req RunRequest) (*RunResult, error) {
+			close(executorStarted)
 			<-ctx.Done()
 			canceled <- ctx.Err()
 			return &RunResult{
@@ -1377,6 +1400,11 @@ func TestEventWorkflowDispatcherCancelsRunWhenLeaseRenewalFails(t *testing.T) {
 		_, err := dispatcher.ProcessOne(context.Background())
 		processDone <- err
 	}()
+	select {
+	case <-executorStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatcher did not start the executor")
+	}
 	select {
 	case <-renewed:
 	case <-time.After(2 * time.Second):
@@ -1662,10 +1690,9 @@ func (e *recordingEventExecutor) SetRun(
 
 type renewFailureEventInbox struct {
 	*eventing.Store
-	once    sync.Once
-	mu      sync.Mutex
-	calls   int
-	renewed chan struct{}
+	once      sync.Once
+	failAfter <-chan struct{}
+	renewed   chan struct{}
 }
 
 type alwaysFailRenewEventInbox struct {
@@ -1710,17 +1737,15 @@ func (i *renewFailureEventInbox) RenewDispatchLease(
 	leaseToken string,
 	lease time.Duration,
 ) error {
-	i.mu.Lock()
-	i.calls++
-	call := i.calls
-	i.mu.Unlock()
-	if call <= 2 {
+	select {
+	case <-i.failAfter:
+		i.once.Do(func() {
+			close(i.renewed)
+		})
+		return errEventTestRenewLease
+	default:
 		return i.Store.RenewDispatchLease(ctx, id, leaseToken, lease)
 	}
-	i.once.Do(func() {
-		close(i.renewed)
-	})
-	return errEventTestRenewLease
 }
 
 type advanceOnLinkEventInbox struct {

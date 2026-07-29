@@ -3,6 +3,7 @@ package workflows
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -103,6 +104,7 @@ func TestWorkflowDevelopmentEventTestPersistsSafeSyncAndAsyncDiagnostics(t *test
 		session.ID,
 		draftKey,
 		eventID,
+		"wr_async",
 		&RunResult{
 			RunID:  "wr_async",
 			Status: RunStatusFailed,
@@ -224,17 +226,34 @@ func TestEventBackedDraftBrowserProjectionMasksRunAndLifecycleDiagnostics(t *tes
 func TestEventBackedDraftBrowserProjectionResolvesChildrenAndProductionRoots(t *testing.T) {
 	ctx := context.Background()
 	store := NewFileRunStore(t.TempDir())
+	const (
+		eventID    = "ev_0123456789abcdef0123456789abcdef"
+		dispatchID = "dsp_0123456789abcdef0123456789abcdef"
+	)
 	event := map[string]any{
-		"id":        "ev_0123456789abcdef0123456789abcdef",
+		"id":        eventID,
 		"source":    "github",
 		"connector": "primary",
 		"type":      "issues.opened",
+	}
+	draftOrigin := &RunOrigin{
+		Kind:      RunOriginExternalEventDraftTest,
+		EventID:   eventID,
+		RootRunID: "wr_draft_root",
+	}
+	productionOrigin := &RunOrigin{
+		Kind:       RunOriginExternalEvent,
+		EventID:    eventID,
+		DispatchID: dispatchID,
+		RootRunID:  "wr_production_root",
 	}
 	draftRoot := &Run{
 		ID:          "wr_draft_root",
 		WorkflowRef: "draft:workflows/triage.yml",
 		Status:      RunStatusFailed,
 		Event:       cloneMap(event),
+		Inputs:      map[string]any{"event_id": eventID},
+		Origin:      cloneRunOrigin(draftOrigin),
 		Error:       eventDraftPrivateDiagnostic,
 	}
 	draftChild := &Run{
@@ -243,6 +262,7 @@ func TestEventBackedDraftBrowserProjectionResolvesChildrenAndProductionRoots(t *
 		ParentRunID: draftRoot.ID,
 		Status:      RunStatusFailed,
 		Event:       cloneMap(event),
+		Origin:      cloneRunOrigin(draftOrigin),
 		Error:       eventDraftPrivateDiagnostic,
 	}
 	productionRoot := &Run{
@@ -250,7 +270,12 @@ func TestEventBackedDraftBrowserProjectionResolvesChildrenAndProductionRoots(t *
 		WorkflowRef: "workflows/triage.yml",
 		Status:      RunStatusFailed,
 		Event:       cloneMap(event),
-		Error:       eventDraftPrivateDiagnostic,
+		Inputs: map[string]any{
+			"event_id":    eventID,
+			"dispatch_id": dispatchID,
+		},
+		Origin: cloneRunOrigin(productionOrigin),
+		Error:  eventDraftPrivateDiagnostic,
 	}
 	productionChild := &Run{
 		ID:          "wr_production_child",
@@ -258,6 +283,7 @@ func TestEventBackedDraftBrowserProjectionResolvesChildrenAndProductionRoots(t *
 		ParentRunID: productionRoot.ID,
 		Status:      RunStatusFailed,
 		Event:       cloneMap(event),
+		Origin:      cloneRunOrigin(productionOrigin),
 		Error:       eventDraftPrivateDiagnostic,
 	}
 	for _, run := range []*Run{
@@ -277,12 +303,16 @@ func TestEventBackedDraftBrowserProjectionResolvesChildrenAndProductionRoots(t *
 		t.Fatal("production reusable child was classified as draft")
 	}
 
-	projected := ProjectEventBackedDraftRunsForBrowser([]Run{
-		*draftChild,
-		*productionChild,
-		*draftRoot,
-		*productionRoot,
-	})
+	projected := ProjectEventBackedDraftRunsForBrowserWithStore(
+		ctx,
+		store,
+		[]Run{
+			*draftChild,
+			*productionChild,
+			*draftRoot,
+			*productionRoot,
+		},
+	)
 	byID := make(map[string]Run, len(projected))
 	for _, run := range projected {
 		byID[run.ID] = run
@@ -294,6 +324,57 @@ func TestEventBackedDraftBrowserProjectionResolvesChildrenAndProductionRoots(t *
 	if byID[productionRoot.ID].Error != eventDraftPrivateDiagnostic ||
 		byID[productionChild.ID].Error != eventDraftPrivateDiagnostic {
 		t.Fatalf("production family diagnostics changed = %#v", byID)
+	}
+
+	if err := store.DeleteRun(ctx, draftRoot.ID); err != nil {
+		t.Fatalf("DeleteRun(draft root) error = %v", err)
+	}
+	if err := store.DeleteRun(ctx, productionRoot.ID); err != nil {
+		t.Fatalf("DeleteRun(production root) error = %v", err)
+	}
+	if !IsEventBackedDraftRunFamily(ctx, store, draftChild) {
+		t.Fatal("pruned trusted draft child was not classified as draft")
+	}
+	if IsEventBackedDraftRunFamily(ctx, store, productionChild) {
+		t.Fatal("pruned trusted production child was classified as draft")
+	}
+	projected = ProjectEventBackedDraftRunsForBrowserWithStore(
+		ctx,
+		store,
+		[]Run{*draftChild, *productionChild},
+	)
+	byID = make(map[string]Run, len(projected))
+	for _, run := range projected {
+		byID[run.ID] = run
+	}
+	if byID[draftChild.ID].Error != EventBackedDraftRunErrorDiagnostic {
+		t.Fatalf("pruned draft child projection = %#v", byID[draftChild.ID])
+	}
+	if byID[productionChild.ID].Error != eventDraftPrivateDiagnostic {
+		t.Fatalf(
+			"pruned production child projection = %#v",
+			byID[productionChild.ID],
+		)
+	}
+
+	projected = ProjectEventBackedDraftRunsForBrowser(
+		[]Run{*draftChild, *productionChild},
+	)
+	byID = make(map[string]Run, len(projected))
+	for _, run := range projected {
+		byID[run.ID] = run
+	}
+	if byID[draftChild.ID].Error != EventBackedDraftRunErrorDiagnostic {
+		t.Fatalf(
+			"no-store pruned draft child projection = %#v",
+			byID[draftChild.ID],
+		)
+	}
+	if byID[productionChild.ID].Error != eventDraftPrivateDiagnostic {
+		t.Fatalf(
+			"no-store pruned production child projection = %#v",
+			byID[productionChild.ID],
+		)
 	}
 }
 
@@ -331,6 +412,145 @@ func TestEventBackedDraftBrowserProjectionFailsClosedForMixedEventCycle(t *testi
 			t.Fatalf("cycle run %s error = %q", run.ID, run.Error)
 		}
 	}
+}
+
+func TestEventBackedDraftFallbackRejectsRawParentAndRetryLinks(t *testing.T) {
+	ctx := context.Background()
+	for _, test := range []struct {
+		name string
+		run  Run
+	}{
+		{
+			name: "whitespace parent",
+			run: Run{
+				ID:          "wr_whitespace_parent",
+				WorkflowRef: "workflows/reusable.yml",
+				ParentRunID: " wr_missing_parent ",
+			},
+		},
+		{
+			name: "invalid retry without parent",
+			run: Run{
+				ID:           "wr_invalid_retry",
+				WorkflowRef:  "workflows/reusable.yml",
+				RetryOfRunID: "invalid-retry-id",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewFileRunStore(t.TempDir())
+			test.run.Status = RunStatusFailed
+			test.run.Event = map[string]any{"id": "event-context-present"}
+			test.run.Error = eventDraftPrivateDiagnostic
+			if err := store.CreateRun(ctx, &test.run); err != nil {
+				t.Fatalf("CreateRun() error = %v", err)
+			}
+			if !IsEventBackedDraftRunFamily(ctx, store, &test.run) {
+				t.Fatalf("run with unsafe ancestry was not classified: %#v", test.run)
+			}
+			projected := ProjectEventBackedDraftRunsForBrowserWithStore(
+				ctx,
+				store,
+				[]Run{test.run},
+			)
+			if len(projected) != 1 ||
+				projected[0].Error != EventBackedDraftRunErrorDiagnostic {
+				t.Fatalf("batch projection = %#v, want masked diagnostic", projected)
+			}
+		})
+	}
+}
+
+func TestEventBackedDraftFallbackFailsClosedForUnsafeRetryGraph(t *testing.T) {
+	eventRun := func(id string) *Run {
+		return &Run{
+			ID:          id,
+			WorkflowRef: "workflows/reusable.yml",
+			Event:       map[string]any{"id": "event-context-present"},
+		}
+	}
+	t.Run("missing", func(t *testing.T) {
+		run := eventRun("wr_missing_retry_source")
+		run.RetryOfRunID = "wr_missing_retry_ancestor"
+		if !eventBackedDraftRunFamilyWithLookup(
+			context.Background(),
+			run,
+			func(context.Context, string) (*Run, error) {
+				return nil, errors.New("not found")
+			},
+		) {
+			t.Fatal("missing retry ancestry did not fail closed")
+		}
+	})
+	t.Run("unreadable", func(t *testing.T) {
+		run := eventRun("wr_unreadable_retry_source")
+		run.RetryOfRunID = "wr_unreadable_retry_ancestor"
+		if !eventBackedDraftRunFamilyWithLookup(
+			context.Background(),
+			run,
+			func(context.Context, string) (*Run, error) {
+				return nil, errors.New("permission denied")
+			},
+		) {
+			t.Fatal("unreadable retry ancestry did not fail closed")
+		}
+	})
+	t.Run("self", func(t *testing.T) {
+		run := eventRun("wr_self_retry")
+		run.RetryOfRunID = run.ID
+		if !eventBackedDraftRunFamilyWithLookup(
+			context.Background(),
+			run,
+			nil,
+		) {
+			t.Fatal("self retry ancestry did not fail closed")
+		}
+	})
+	t.Run("cycle", func(t *testing.T) {
+		first := eventRun("wr_retry_cycle_first")
+		second := &Run{
+			ID:           "wr_retry_cycle_second",
+			WorkflowRef:  "workflows/reusable.yml",
+			RetryOfRunID: first.ID,
+		}
+		first.RetryOfRunID = second.ID
+		runs := map[string]*Run{
+			first.ID:  first,
+			second.ID: second,
+		}
+		if !eventBackedDraftRunFamilyWithLookup(
+			context.Background(),
+			first,
+			func(_ context.Context, runID string) (*Run, error) {
+				return runs[runID], nil
+			},
+		) {
+			t.Fatal("retry cycle did not fail closed")
+		}
+	})
+	t.Run("depth exhausted", func(t *testing.T) {
+		root := eventRun("wr_retry_depth_0")
+		runs := map[string]*Run{root.ID: root}
+		current := root
+		for depth := 1; depth <= eventBackedDraftAncestryMaximumDepth; depth++ {
+			ancestor := &Run{
+				ID:          fmt.Sprintf("wr_retry_depth_%d", depth),
+				WorkflowRef: "workflows/reusable.yml",
+			}
+			runs[ancestor.ID] = ancestor
+			current.RetryOfRunID = ancestor.ID
+			current = ancestor
+		}
+		if !eventBackedDraftRunFamilyWithLookup(
+			context.Background(),
+			root,
+			func(_ context.Context, runID string) (*Run, error) {
+				return runs[runID], nil
+			},
+		) {
+			t.Fatal("depth-exhausted retry ancestry did not fail closed")
+		}
+	})
 }
 
 func TestEventBackedDraftBrowserProjectionDoesNotReuseUnresolvedFalseMemo(t *testing.T) {

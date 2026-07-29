@@ -18,6 +18,22 @@ var ErrConfigRevisionMismatch = errors.New("config revision mismatch")
 
 var configMutationLocks sync.Map
 
+// WithConfigMutationLock runs operation while holding the same process and
+// advisory lock used by SaveConfig, SaveConfigIfRevision, and atomic config
+// snapshots. Callers must not invoke another config mutation or snapshot
+// operation from the callback because the lock is intentionally non-reentrant.
+func WithConfigMutationLock(path string, operation func() error) error {
+	if operation == nil {
+		return errors.New("config mutation operation is required")
+	}
+	unlock, err := lockConfigMutation(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return operation()
+}
+
 // ConfigRevision returns an opaque revision for the exact public and
 // security-managed config bytes. A not-yet-created config has the stable
 // "missing" revision. Security bytes are hashed, never returned.
