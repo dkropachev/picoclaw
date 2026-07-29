@@ -96,20 +96,47 @@ type dcContact struct {
 	DisplayName string `json:"displayName"`
 	Name        string `json:"name"`
 	NameAndAddr string `json:"nameAndAddr"`
+	IsVerified  bool   `json:"isVerified"`
 }
 
 // dcMessage is the subset of Delta Chat's MessageObject we consume.
 type dcMessage struct {
-	ID        int64      `json:"id"`
-	ChatID    int64      `json:"chatId"`
-	FromID    int64      `json:"fromId"`
-	Text      string     `json:"text"`
-	File      string     `json:"file"`
-	FileName  string     `json:"fileName"`
-	FileMime  string     `json:"fileMime"`
-	Timestamp int64      `json:"timestamp"`
-	IsInfo    bool       `json:"isInfo"`
-	Sender    *dcContact `json:"sender"`
+	ID                    int64      `json:"id"`
+	ChatID                int64      `json:"chatId"`
+	FromID                int64      `json:"fromId"`
+	Text                  string     `json:"text"`
+	Subject               string     `json:"subject"`
+	File                  string     `json:"file"`
+	FileName              string     `json:"fileName"`
+	FileMime              string     `json:"fileMime"`
+	FileBytes             int64      `json:"fileBytes"`
+	ViewType              string     `json:"viewType"`
+	DownloadState         string     `json:"downloadState"`
+	Timestamp             int64      `json:"timestamp"`
+	ReceivedTimestamp     int64      `json:"receivedTimestamp"`
+	HasDeviatingTimestamp bool       `json:"hasDeviatingTimestamp"`
+	ShowPadlock           bool       `json:"showPadlock"`
+	IsInfo                bool       `json:"isInfo"`
+	Sender                *dcContact `json:"sender"`
+}
+
+// dcMessageInfo is the process-local identity subset used only to correlate a
+// full-download replacement with the incomplete message that requested it.
+// RFC724MID must never become durable deduplication input or event payload.
+type dcMessageInfo struct {
+	RFC724MID string `json:"rfc724Mid"`
+}
+
+// dcEvent is the account-manager event shape returned by get_next_event.
+type dcEvent struct {
+	ContextID int64       `json:"contextId"`
+	Event     dcEventType `json:"event"`
+}
+
+type dcEventType struct {
+	Kind   string `json:"kind"`
+	ChatID int64  `json:"chatId"`
+	MsgID  int64  `json:"msgId"`
 }
 
 // dcChat is the subset of Delta Chat's FullChat we consume.

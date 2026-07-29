@@ -2350,6 +2350,12 @@ func loadConfigWithOptions(path string, resolveEventWebhooks bool) (*Config, err
 	if err = InitChannelList(cfg.Channels); err != nil {
 		return nil, err
 	}
+	if err = cfg.Events.Ingress.ValidateEventChannelAdapters(
+		cfg.Channels,
+		cfg.SensitiveDataValues()...,
+	); err != nil {
+		return nil, fmt.Errorf("invalid event channel ingress config: %w", err)
+	}
 	if err = cfg.ValidateTurnProfile(); err != nil {
 		return nil, err
 	}

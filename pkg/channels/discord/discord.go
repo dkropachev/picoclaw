@@ -45,7 +45,7 @@ type DiscordChannel struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	typingMu   sync.Mutex
-	typingStop map[string]chan struct{} // chatID → stop signal
+	typingStop map[string]*discordTypingSession // chatID → exact typing session
 	progress   *channels.ToolFeedbackAnimator
 	botUserID  string // stored for mention checking
 	bus        *bus.MessageBus
@@ -59,6 +59,21 @@ type DiscordChannel struct {
 	ttsMu     sync.Mutex
 	cancelTTS context.CancelFunc
 	ttsPlayID uint64
+}
+
+type discordTypingSession struct {
+	stop chan struct{}
+	once sync.Once
+}
+
+func newDiscordTypingSession() *discordTypingSession {
+	return &discordTypingSession{stop: make(chan struct{})}
+}
+
+func (session *discordTypingSession) close() {
+	if session != nil {
+		session.once.Do(func() { close(session.stop) })
+	}
 }
 
 func NewDiscordChannel(
@@ -94,7 +109,7 @@ func NewDiscordChannel(
 		session:     session,
 		config:      cfg,
 		ctx:         context.Background(),
-		typingStop:  make(map[string]chan struct{}),
+		typingStop:  make(map[string]*discordTypingSession),
 		bus:         bus,
 		voiceSSRC:   make(map[string]map[uint32]string),
 	}
@@ -140,8 +155,8 @@ func (c *DiscordChannel) Stop(ctx context.Context) error {
 
 	// Stop all typing goroutines before closing session
 	c.typingMu.Lock()
-	for chatID, stop := range c.typingStop {
-		close(stop)
+	for chatID, session := range c.typingStop {
+		session.close()
 		delete(c.typingStop, chatID)
 	}
 	c.typingMu.Unlock()
@@ -686,14 +701,14 @@ func (c *DiscordChannel) handleMessage(s *discordgo.Session, m *discordgo.Messag
 
 // startTyping starts a continuous typing indicator loop for the given chatID.
 // It stops any existing typing loop for that chatID before starting a new one.
-func (c *DiscordChannel) startTyping(chatID string) {
+func (c *DiscordChannel) startTyping(chatID string) *discordTypingSession {
 	c.typingMu.Lock()
 	// Stop existing loop for this chatID if any
-	if stop, ok := c.typingStop[chatID]; ok {
-		close(stop)
+	if session, ok := c.typingStop[chatID]; ok {
+		session.close()
 	}
-	stop := make(chan struct{})
-	c.typingStop[chatID] = stop
+	session := newDiscordTypingSession()
+	c.typingStop[chatID] = session
 	c.typingMu.Unlock()
 
 	go func() {
@@ -705,7 +720,7 @@ func (c *DiscordChannel) startTyping(chatID string) {
 		timeout := time.After(5 * time.Minute)
 		for {
 			select {
-			case <-stop:
+			case <-session.stop:
 				return
 			case <-timeout:
 				return
@@ -718,14 +733,15 @@ func (c *DiscordChannel) startTyping(chatID string) {
 			}
 		}
 	}()
+	return session
 }
 
-// stopTyping stops the typing indicator loop for the given chatID.
-func (c *DiscordChannel) stopTyping(chatID string) {
+// stopTyping stops only the exact typing session returned by startTyping.
+func (c *DiscordChannel) stopTyping(chatID string, expected *discordTypingSession) {
 	c.typingMu.Lock()
 	defer c.typingMu.Unlock()
-	if stop, ok := c.typingStop[chatID]; ok {
-		close(stop)
+	expected.close()
+	if current, ok := c.typingStop[chatID]; ok && current == expected {
 		delete(c.typingStop, chatID)
 	}
 }
@@ -733,8 +749,8 @@ func (c *DiscordChannel) stopTyping(chatID string) {
 // StartTyping implements channels.TypingCapable.
 // It starts a continuous typing indicator and returns an idempotent stop function.
 func (c *DiscordChannel) StartTyping(ctx context.Context, chatID string) (func(), error) {
-	c.startTyping(chatID)
-	return func() { c.stopTyping(chatID) }, nil
+	session := c.startTyping(chatID)
+	return func() { c.stopTyping(chatID, session) }, nil
 }
 
 func (c *DiscordChannel) downloadAttachment(url, filename string) string {

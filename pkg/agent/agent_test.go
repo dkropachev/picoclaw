@@ -73,6 +73,22 @@ func (m *recordingChannelManager) GetEnabledChannels() []string {
 
 func (m *recordingChannelManager) InvokeTypingStop(channel, chatID string) {}
 
+func (m *recordingChannelManager) InvokeTypingStopForMessage(
+	channel, chatID, messageID string,
+) {
+}
+
+func (m *recordingChannelManager) CleanupTurnUXForMessage(
+	_ context.Context,
+	channel, chatID, turnUXID string,
+) {
+}
+
+func (m *recordingChannelManager) RebindTurnUXForMessage(
+	channel, chatID, fromMessageID, toMessageID string,
+) {
+}
+
 func (m *recordingChannelManager) SendMessage(ctx context.Context, msg bus.OutboundMessage) error {
 	return nil
 }
@@ -82,6 +98,13 @@ func (m *recordingChannelManager) SendMedia(ctx context.Context, msg bus.Outboun
 }
 
 func (m *recordingChannelManager) SendPlaceholder(ctx context.Context, channel, chatID string) bool {
+	return false
+}
+
+func (m *recordingChannelManager) SendPlaceholderForMessage(
+	ctx context.Context,
+	channel, chatID, messageID string,
+) bool {
 	return false
 }
 
@@ -447,6 +470,52 @@ func TestPublishResponseIfNeeded_MarksFinalOutbound(t *testing.T) {
 		}
 		if outbound.SessionKey != "session-1" {
 			t.Fatalf("outbound session key = %q, want session-1", outbound.SessionKey)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected final outbound")
+	}
+}
+
+func TestPublishResponseIfNeededPreservesInboundMessageIdentity(t *testing.T) {
+	al, _, msgBus, provider, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+	_ = provider
+
+	inbound := &bus.InboundContext{
+		Channel:   "pico",
+		ChatID:    "pico:session-1",
+		SenderID:  "user-1",
+		MessageID: "inbound-42",
+		TurnUXID:  "turn-42",
+	}
+	al.publishResponseIfNeeded(
+		context.Background(),
+		"pico",
+		"pico:session-1",
+		"session-1",
+		"final reply",
+		inbound,
+	)
+
+	select {
+	case outbound := <-msgBus.OutboundChan():
+		if outbound.Context.MessageID != "inbound-42" {
+			t.Fatalf(
+				"outbound message identity = %q, want inbound-42",
+				outbound.Context.MessageID,
+			)
+		}
+		if outbound.Context.TurnUXID != "turn-42" {
+			t.Fatalf(
+				"outbound turn UX identity = %q, want turn-42",
+				outbound.Context.TurnUXID,
+			)
+		}
+		if outbound.Context.SenderID != "user-1" {
+			t.Fatalf(
+				"outbound sender identity = %q, want user-1",
+				outbound.Context.SenderID,
+			)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected final outbound")
@@ -6294,6 +6363,13 @@ func TestProcessMessage_MessageToolPublishesOutboundWithTurnMetadata(t *testing.
 	al := NewAgentLoop(cfg, msgBus, provider)
 
 	response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:  "telegram",
+			ChatID:   "chat-1",
+			ChatType: "direct",
+			SenderID: "user-1",
+			TurnUXID: "turn-ux-message-tool",
+		},
 		Channel:  "telegram",
 		SenderID: "user-1",
 		ChatID:   "chat-1",
@@ -6322,6 +6398,12 @@ func TestProcessMessage_MessageToolPublishesOutboundWithTurnMetadata(t *testing.
 		}
 		if outbound.Context.Channel != "telegram" || outbound.Context.ChatID != "chat-1" {
 			t.Fatalf("unexpected message tool outbound context: %+v", outbound.Context)
+		}
+		if outbound.Context.TurnUXID != "turn-ux-message-tool" {
+			t.Fatalf(
+				"message tool outbound TurnUXID = %q, want turn-ux-message-tool",
+				outbound.Context.TurnUXID,
+			)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected message tool outbound")

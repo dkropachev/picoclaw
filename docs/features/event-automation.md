@@ -15,12 +15,14 @@ reconciles workflow runs after process failure without repeating an interrupted
 run.
 
 The current stage opens the opt-in inbox, runs routing/dispatch workers with the
-gateway lifecycle, and accepts authenticated generic webhook deliveries on the
-existing shared gateway listener. GitHub-specific and channel/email adapters,
-operator API/CLI endpoints, and event UI remain later stages. Durable inputs
-remain separate from the process-local [`pkg/events`](../../pkg/events)
-observability bus: runtime events are best-effort in-process signals, while
-external automation events and dispatch state survive restart.
+gateway lifecycle, accepts authenticated generic webhook deliveries on the
+existing shared gateway listener, and can opt existing Delta Chat email channel
+instances into durable `message.received` admission. GitHub-specific
+delivery, operator API/CLI endpoints, and event UI remain later stages. Durable
+inputs remain separate from the process-local
+[`pkg/events`](../../pkg/events) observability bus: runtime events are
+best-effort in-process signals, while external automation events and dispatch
+state survive restart.
 
 ## Reconstruction Notes
 
@@ -33,7 +35,9 @@ external automation events and dispatch state survive restart.
   routing/dispatch claim and completion records, replay records, retention
   results, `config.EventIngressConfig` with effective-default resolution,
   workflow `EventTrigger`/`EventEntityTrigger`, deterministic trigger matching,
-  and gateway-owned `EventWorkflowRouter`/`EventWorkflowDispatcher` workers.
+  gateway-owned `EventWorkflowRouter`/`EventWorkflowDispatcher` workers,
+  `channelmessage.Backend`/`Controller`, and the message-bus inbound admission
+  seam.
 - Runtime ordering: resolve disabled-safe config, normalize and validate an
   envelope, enforce the payload limit, redact configured fields, atomically
   insert or return the existing deduplicated event, lease and renew routing,
@@ -50,7 +54,8 @@ external automation events and dispatch state survive restart.
   excluded from the repository's SQLite build matrix must compile through an
   unsupported stub instead of acquiring a new platform dependency. Matching is
   deterministic and AI decisions belong inside a matched workflow, not inside
-  the router.
+  the router. Configured channel admission is synchronous with durable insert;
+  Delta Chat advances its provider cursor only after that boundary.
 
 ## Requirements
 
@@ -80,6 +85,11 @@ external automation events and dispatch state survive restart.
 | `FR-EVENT-AUTOMATION-022` | MUST | Master ingress and at least one named `events.ingress.webhooks` connector are enabled with a valid Standard Webhooks signing secret. | The gateway collision-safely registers `POST /webhooks/events/{connector}` on its existing shared listener and verifies exactly one `Webhook-Id`, `Webhook-Timestamp`, and `Webhook-Signature` header against the connector's HMAC-SHA256 secret. | Route registration is additive and identity-owned; no second listener or transport runtime is created. Connector names containing a configured canonical signing secret are rejected opaquely before config persistence or backend construction, including inactive names that would otherwise expose the credential as a JSON map key. | Disabled or unknown connectors and non-canonical percent-encoded path aliases return `404`; missing, duplicated, stale, future, or invalid signature headers return the same `401`; wrong methods return `405` with `Allow: POST`; route collisions fail startup/reload rather than replacing an existing handler. | Generic producers need an interoperable authenticated ingress without disturbing existing gateway and channel routes. |
 | `FR-EVENT-AUTOMATION-023` | MUST | An authenticated connector submits one bounded JSON object containing `type`, optional `occurred_at`, actor, subject, attributes, and object payload. | The adapter preserves the exact signed bytes until authentication, strictly rejects unknown/server-owned fields and trailing data, derives deduplication from `Webhook-Id`, assigns source `webhook` and the path connector, and acknowledges only after synchronous durable insertion. New events return `202` and duplicates return `200`, both with the original event ID and `inserted` flag. | The normal inbox insert atomically stores the redacted normalized envelope or returns its first durable duplicate; provider retries never replace content or create another routing record. Client-controlled identity fields containing any configured signing secret are rejected before insertion because routing and deduplication identities cannot be safely rewritten. | Unsupported media/content encodings return `415`, oversized input returns `413`, malformed or secret-bearing identity input returns `400`, and storage failure returns retryable `503`; responses never echo payload, signature, secret, connector identity, or raw storage errors. | A transport acknowledgement must mean durable ownership, not workflow completion or volatile acceptance. |
 | `FR-EVENT-AUTOMATION-024` | MUST | Gateway startup, reload, rollback, or shutdown changes the active event store, connector set, or signing secret. | Admission remains inactive until startup commit, becomes `503` before reload drain, waits for admitted inserts before store close, activates only the committed generation immediately before readiness, and restores only a fully restarted old generation after rollback. Secrets persist through secure-string storage and participate in exact-value redaction. | A stable generation-fenced controller swaps connector/store backends and stale cleanup cannot deactivate or unregister a replacement. | A timed-out drain remains retryable with its store open; candidate backends never acknowledge requests; failed recovery stays unready; disabling ingress removes the event route after commit. Public exposure requires TLS termination at a trusted reverse proxy. | Reload must not strand acknowledged events in a candidate database or close state still used by an in-flight request. |
+| `FR-EVENT-AUTOMATION-025` | MUST | Master ingress and one or more named `events.ingress.channels.<channel-instance>` entries are enabled. | Each entry resolves to an existing enabled Delta Chat channel instance with mandatory `email` source and `mirror` or `event_only` mode. Omitted source defaults to `email`, while omitted mode defaults to `mirror`. Delta email requires a verified sender contact plus an encrypted/signed message unless `allow_unverified_email` is explicitly true. | Effective adapter maps are detached copies and no transport, database, or admission hook is created by disabled master ingress. | Empty, untrimmed, oversized, case-colliding, secret-bearing, missing, disabled, non-Delta, unsupported-source, unsupported-mode, chat-source, or unverified-email-opt-in-on-chat entries fail enabled config load and management validation; identity/secret conflicts fail opaquely before persistence even while master ingress or an entry is disabled, and all other disabled bodies remain inert. | Channel eventing must be explicitly additive, identify configured instances, and never silently turn a best-effort transport, spoofable mail `From` address, or credential-bearing name into workflow authority. |
+| `FR-EVENT-AUTOMATION-026` | MUST | A configured, already-authorized Delta Chat message reaches inbound admission with its retry-stable provider-local message identity. | The adapter emits source `email`, connector equal to the channel instance, type `message.received`, a length-prefixed SHA-256 deduplication key scoped by account/conversation/topic, safe actor/conversation entities, bounded text/subject/reply/message fields, safe attachment name/type/size metadata, and an optional UTC occurrence time. Email events also expose `email_trust` and separate boolean sender-verification/transport-authentication attributes. | The normal redacting store receives only the bounded normalized envelope; all resolved configuration secrets longer than three bytes participate in exact-value redaction. | Missing stable identity fails retryably instead of using a content fingerprint. Email that lacks either trust proof creates no durable event unless explicitly opted in; mirror still follows the prior chat path and event-only consumes it. RFC724 Message-ID is never used for deduplication and, when fetched solely to correlate a full-download replacement, remains process-local; provider blob path, remote URL, media reference, bytes, routing `Raw` metadata, and media scope never enter the envelope. Oversized work is bounded before encoding and falls back to a valid truncated object. | Email needs useful workflow context without turning the durable inbox into an archive of transport internals, credentials, or spoofable authority. |
+| `FR-EVENT-AUTOMATION-027` | MUST | A configured channel message is synchronously admitted after allow-list and group-trigger filtering. | Durable insertion succeeds or deduplicates before the ordinary channel turn continues. `mirror` then preserves the existing queue and opaque process-local turn-UX identity; `event_only` consumes the message without queueing, typing, reaction, or placeholder UX and releases turn-scoped media. Unconfigured and process-internal messages retain their prior path. | A successful insert owns the durable event; an insert error releases turn media, queues nothing, and is returned to a transport capable of retrying. Mirror typing, reaction, and placeholder artifacts form one exact-turn generation. The manager detaches and gives the prior generation bounded cleanup before starting the next provider generation, and provider stop/undo callbacks are exact-generation pinned so an older timed-out callback cannot clear newer UX. Cancellation, bus closure, abandoned/no-output work, or a stale worker removes only its exact generation; a committed buffered normal/error/tool/stream output retains cleanup ownership. Steering atomically commits to a live session owner after slow preparation or claims a new worker, and continuation output retains the original same-chat UX identity; cross-chat or ownerless steering cleans its secondary generation immediately after the queue commit. | Rejected senders and group noise never reach event admission. Admission receives detached metadata, cannot mutate the queued message, and a closed bus never runs the hook. Turn UX identity is excluded from serialized routing context. | The transport must not acknowledge volatile work, leak unconsumed media, strand a steering message, leave user-facing artifacts for an unqueued message, or let a stale rollback corrupt a newer turn. |
+| `FR-EVENT-AUTOMATION-028` | MUST | Delta Chat starts or emits `IncomingMsg`, message-specific `MsgsChanged`, pending-download `MsgsChanged`, or `EventChannelOverflow`. | Provider events are notification-only: startup, every `IncomingMsg`, every message-specific `MsgsChanged`, pending-download generic `MsgsChanged`, and overflow wake an ascending `get_next_msgs` drain; overflow is handled before account filtering because it reports `contextId=0`. Authorized complete content uses only the provider-local Delta message ID as deduplication input, prefers locally observed receipt time over sender-controlled mail `Date`, and runs `markseen_msgs` only after successful durable admission or ordinary forwarding. There is no listener acknowledged-ID ring. | Successful, deliberately filtered, own, device, empty, or undecipherable messages advance the provider cursor in strict ascending order. Retryable download/fetch/admission/ack failure at a lower accepted ID blocks all later IDs. An incomplete message's RFC724 Message-ID is retained only in process for replacement correlation, never deduplication or durable payload. | A full download is driven by provider notifications rather than bounded polling. If the original remains in the ordered queue it must complete; if absent, it retires only after candidates through the last RFC-correlated replacement are processed. An unrelated complete batch cannot retire it, and without a visible correlated replacement the pending original conservatively blocks the queue. Shutdown cancels retry loops. Raw account blob paths never cross admission or enter agent text; unavailable media yields only a safe filename annotation. | Email ingestion must not lose MIME parts, duplicate mirror turns from stale provider notifications, retire pending work on unrelated traffic, acknowledge before durable ownership, let a forged mail date steer time-based routing, or skip retryable work through high-water advancement. |
+| `FR-EVENT-AUTOMATION-029` | MUST | Startup, reload, rollback, shutdown, or a timed-out insert drain changes channel adapter/store generations. | A process-stable admission controller fences the exact prepared connector set before channels publish and collision-safely, identity-owned registers on the existing bus seam. Gateway commit first stages both channel and webhook backends as validated non-accepting reservations, aborts earlier reservations if any later staging check fails, records their generation identities, and only then reaches an irreversible aggregate commit point and publishes both sequentially through no-fail commits under its serialized lifecycle. It waits for admitted inserts before store close, restores a freshly prepared old backend on rollback, and closes only after pending publishers and active inserts resolve. | Generation identities fence delayed cleanup; active, retiring, staged, prepared, pending, and closed connector state move atomically. Sequential publication may transiently make one transport observable before the other after the irreversible commit point; both backends share the committed store and readiness remains false until both are published. | Candidate-only configured messages wait while unrelated/internal messages pass. Mismatched preparation, a pre-existing admission owner, or either controller's staging invariant fails closed before either candidate accepts traffic; no aggregate activation that returns an error exposes or acknowledges either candidate. Stale abort/cleanup cannot affect a replacement, a drain timeout leaves the old store open for retry, and failed recovery remains unready. | Hot reload must not insert an acknowledged channel event into a provisional/closed database, leave a failed half-commit, let a newly configured connector bypass durable admission, or displace another bus admission owner. |
 
 ## Data And State Model
 
@@ -134,7 +144,9 @@ and also scrubs actor, subject, and envelope attributes. Existing
 again during replay. Configured punctuation-only field names retain exact-key
 matching; an exact configured secret found in a JSON or attribute-map key is
 rejected because changing structural keys could collide or alter event
-semantics. Worker labels seed a
+semantics. Store construction adds resolved secure configuration values longer
+than three bytes to exact-value redaction without persisting that trusted list.
+Worker labels seed a
 diagnostic token prefix only; each claim adds fresh cryptographic randomness
 and transitions compare the complete opaque lease token. Store clocks are
 injectable and
@@ -168,6 +180,69 @@ quietly resolve the final active candidate; this permits repair of a broken old
 reference without probing it first. The master ingress switch is authoritative:
 inactive references remain unresolved and load/save-stable. No configured
 connector map key may contain a canonical signing secret, even while inactive.
+
+`events.ingress.channels` maps existing Delta Chat channel instance names to
+`enabled`, `source`, and `mode`. `source` must be `email` and defaults to email
+when omitted. `mode` is `mirror` or `event_only` and defaults to mirror.
+Mirror inserts the event before retaining the existing agent turn; event-only
+inserts without queueing a turn. Disabled master ingress and disabled entries
+are inert. Delta Chat email is secure-by-default: both the sender contact's
+bidirectional verification and the message's encrypted/signed padlock must be
+present before durable ingestion. `allow_unverified_email: true` explicitly
+opts an email adapter into ordinary unauthenticated mail; those events carry
+`email_trust: unverified` plus separate sender-verification and
+transport-authentication actor attributes. A skipped unverified mirror message
+continues through the existing chat path, while event-only consumes it without
+creating an actionable event. The opt-in is invalid for a chat source.
+
+An enabled transport must supply a retry-stable message identity. Delta Chat
+uses only its stable provider-local message ID for deduplication. It fetches
+RFC724 Message-ID only within an incomplete-message replacement lifecycle and
+retains it process-locally solely to correlate the original and candidate IDs.
+An enabled adapter rejects identity-free messages instead of inventing a
+collision-prone content fingerprint.
+
+PR4 intentionally enables durable channel admission only where the transport
+can defer or fail its provider acknowledgement:
+
+| Channel type | Event admission | Provider boundary |
+| --- | --- | --- |
+| Delta Chat | Supported | `markseen_msgs` follows successful admission; failures remain in the ordered retry loop. |
+| MQTT | Not yet supported | Existing Paho auto-ack behavior, clean sessions, and optional process-random client IDs do not provide a crash-durable ownership boundary. |
+| DingTalk | Not yet supported | Chatbot delivery is fire-and-forget; its ACK is diagnostic and cannot request redelivery. |
+| MaixCam | Not yet supported | The protocol has no positive application acknowledgement or documented resend-on-disconnect contract. |
+| Other inbound channels | Not yet supported | Their handlers currently acknowledge, advance, or swallow delivery before a failed durable insert can be retried. |
+
+DingTalk exposes native `msgId` and occurrence time, while MQTT and MaixCam
+accept optional explicit `message_id` values. These normalized metadata fields
+are groundwork for future adapters only; ordinary acknowledgement and error
+behavior remains unchanged until each transport has a durable retry contract.
+
+Channel messages use this normalized payload shape:
+
+```json
+{
+  "text": "please triage this",
+  "subject": "Production alert",
+  "message_id": "provider-local-42",
+  "reply_to_message_id": "provider-local-41",
+  "attachments": [
+    {
+      "kind": "file",
+      "filename": "report.pdf",
+      "content_type": "application/pdf",
+      "size_bytes": 1234
+    }
+  ]
+}
+```
+
+The exposed adapter's envelope source is `email`, connector is the configured
+instance, type is `message.received`, and its deduplication key is a SHA-256
+digest rather than the raw stable provider identity. Any RFC724 Message-ID
+fetched to correlate an incomplete message's full-download replacement remains
+process-local; transport paths, URLs, media references, bytes, and arbitrary
+routing metadata are excluded.
 
 The signed request body has this transport-owned schema:
 
@@ -225,6 +300,7 @@ the external system.
 
 Owns: CODE pkg/eventing/**
 Owns: CODE pkg/eventing/webhook/**
+Owns: CODE pkg/eventing/channelmessage/**
 Owns: CODE pkg/config/events.go
 Owns: CODE pkg/config/defaults.go
 Owns: CODE pkg/workflows/event_trigger.go
@@ -232,18 +308,23 @@ Owns: CODE pkg/workflows/event_dispatcher.go
 Owns: CODE pkg/agent/workflow_eventing.go
 Owns: CODE pkg/gateway/event_automation.go
 Owns: CODE pkg/gateway/event_webhook*
+Owns: CODE pkg/gateway/event_channel*
 Owns: CODE web/backend/api/config.go
 Owns: CONFIG.events
 Owns: CONFIG.events.ingress*
 Owns: CONFIG.events.ingress.webhooks*
+Owns: CONFIG.events.ingress.channels*
 Owns: HTTP POST /webhooks/events/*
 Owns: TEST pkg/eventing/*
 Owns: TEST pkg/eventing/webhook/*
+Owns: TEST pkg/eventing/channelmessage/*
 Owns: TEST pkg/config/events*
 Owns: TEST pkg/workflows/event_trigger_test.go
 Owns: TEST pkg/workflows/event_dispatcher_test.go
 Owns: TEST pkg/gateway/event_automation_test.go
 Owns: TEST pkg/gateway/event_webhook_test.go
+Owns: TEST pkg/gateway/event_channel_test.go
+Owns: TEST web/backend/api/config_event_channel_test.go
 
 ## Auxiliary Interfaces
 
@@ -252,24 +333,28 @@ Owns: TEST pkg/gateway/event_webhook_test.go
 | Config | `events.ingress.enabled` | Opt-in master switch; omitted and explicit `false` preserve the pre-feature runtime and create no database. | `FR-EVENT-AUTOMATION-001`, `FR-EVENT-AUTOMATION-012` |
 | Config | `events.ingress.database_path`, `retention_days`, `max_payload_bytes`, `redact_fields` | Resolve a safe workspace database default while preserving explicit policy values used by store construction and ingest/retention calls. | `FR-EVENT-AUTOMATION-001`, `FR-EVENT-AUTOMATION-003`, `FR-EVENT-AUTOMATION-011` |
 | Config | `events.ingress.webhooks.<connector>` | Opt-in connector name, enablement, and securely persisted Standard Webhooks secret; enabled values are validated before storage or route construction and passed to durable exact-secret redaction. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-024` |
+| Config | `events.ingress.channels.<channel-instance>` | Opt-in source and mirror/event-only mode for one existing enabled channel instance, with Delta Chat email defaults and enabled-load/API validation. | `FR-EVENT-AUTOMATION-025` |
 | HTTP | `PUT /api/config`, `PATCH /api/config` | Omitted or `[NOT_HERE]` webhook secrets preserve the current secure value; an explicit valid secret rotates it, while an explicit empty value can clear only a disabled connector because enabled connector validation rejects it. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-024` |
 | HTTP | `POST /webhooks/events/{connector}` | Strict, bounded Standard Webhooks authentication and envelope normalization with durable `202`/duplicate `200` acknowledgement and retry-safe error statuses. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-023` |
+| Go API | `bus.InboundAdmission`, `MessageBus.PublishInboundWithPreparation` | Synchronous detached channel-origin admission before queue and conditional turn UX; internal messages and unconfigured channels preserve direct queueing. | `FR-EVENT-AUTOMATION-027` |
+| Go API | `pkg/eventing/channelmessage.Backend`, `Controller` | Bounded safe message normalization, hashed deduplication, synchronous store insertion, mirror/event-only decision, and exact prepared-generation activation/drain. | `FR-EVENT-AUTOMATION-026`, `FR-EVENT-AUTOMATION-027`, `FR-EVENT-AUTOMATION-029` |
+| Runtime | Delta Chat ordered provider queue, notification events, and acknowledgement loop | Drain `get_next_msgs` on startup and provider wake events, correlate full-download replacement IDs process-locally, retry strictly in order before cursor advancement, and expose only safe event metadata. | `FR-EVENT-AUTOMATION-028` |
 | Go API | `pkg/eventing.Envelope` | Source-neutral immutable external-event input and stored representation with connector-scoped deduplication and optional replay lineage. | `FR-EVENT-AUTOMATION-002`, `FR-EVENT-AUTOMATION-004`, `FR-EVENT-AUTOMATION-010` |
 | Go API | `pkg/eventing.Inbox` / `Store` | `Inbox` defines `Insert`, `Get`, newest-first filtered keyset list, routing claim/ack/nack/dead transitions, dispatch create/get/claim/link/nack/finish/keyset-list, `Replay`, bounded `Prune`, and `Close`; `Store` is its SQLite implementation. The contract provides atomic deduplication and fresh-token fenced leases. | `FR-EVENT-AUTOMATION-002`, `FR-EVENT-AUTOMATION-004`, `FR-EVENT-AUTOMATION-006` through `FR-EVENT-AUTOMATION-011` |
 | Storage | `pkg/eventing.Open` / `OpenStore`, `WithMaxPayloadBytes`, `WithClock`, `WithBusyTimeout`, `WithRedaction` | Open the embedded store with transactional `PRAGMA user_version` migration, WAL, foreign keys, busy handling, one authoritative SQLite connection, restrictive permissions, restart persistence, a one-MiB default payload limit, mandatory/custom redaction, optional exact-secret replacement, and deterministic test clocks on supported targets. | `FR-EVENT-AUTOMATION-003`, `FR-EVENT-AUTOMATION-005` through `FR-EVENT-AUTOMATION-011` |
 | Go API | `pkg/eventing.RoutingDispatchCreator`, `RoutingLeaseRenewer`, `DispatchLeaseRenewer` | Additive capabilities that create a dispatch only through the current routing claim and renew current live leases without expanding the compatibility-critical `Inbox` interface. Routing renewal remains optional; `EventDispatchInbox` requires dispatch renewal because interrupted-run cancellation cannot otherwise be fenced across stores. | `FR-EVENT-AUTOMATION-014`, `FR-EVENT-AUTOMATION-018` |
 | Workflow YAML | `on.event` | Typed source/connector/type/entity/attribute filters with scalar/list syntax, explicit non-empty validation, anchored globs, and deterministic case rules. | `FR-EVENT-AUTOMATION-013`, `FR-EVENT-AUTOMATION-021` |
 | Go API | `EventWorkflowRouter`, `EventWorkflowDispatcher`, `RunRequest.OnRunPersisted`, `LoadRunnableLocalSnapshot`, `EventContextFromEnvelope` | Claim one item, compatibility-check the exact loaded workflow bytes, durably fan out deterministic dispatches, reconcile deterministic runs, link a newly persisted run before effects, renew long leases, and build the detached redacted workflow context. | `FR-EVENT-AUTOMATION-014` through `FR-EVENT-AUTOMATION-018`, `FR-EVENT-AUTOMATION-020`, `FR-EVENT-AUTOMATION-021` |
-| Runtime | gateway event automation service and webhook controller | Open enabled storage before readiness, initialize workflow runtime dependencies before workers, and generation-fence HTTP admission while transactionally draining, replacing, rolling back, and closing services/providers. | `FR-EVENT-AUTOMATION-019`, `FR-EVENT-AUTOMATION-024` |
+| Runtime | gateway event automation service, webhook controller, and channel admission controller | Open enabled storage before readiness, initialize workflow runtime dependencies before workers, and generation-fence HTTP and channel admission while transactionally draining, replacing, rolling back, and closing services/providers. | `FR-EVENT-AUTOMATION-019`, `FR-EVENT-AUTOMATION-024`, `FR-EVENT-AUTOMATION-029` |
 | Build | `pkg/eventing` unsupported-platform implementation | Preserves the same construction surface and returns `ErrUnsupportedPlatform` without pulling SQLite into excluded targets. | `FR-EVENT-AUTOMATION-005`, `FR-EVENT-AUTOMATION-012` |
 
 ## Algorithms And Ordering
 
 1. Resolve `EventIngressConfig` without side effects. If disabled, stop before
-   validating inert webhook entries, creating directories, opening SQLite,
-   registering routes, or starting goroutines. Otherwise validate connector
-   names, case collisions, enabled signing secrets, and shared-route ownership
-   before opening the store.
+   validating inert webhook/channel entries, creating directories, opening
+   SQLite, registering routes/hooks, or starting goroutines. Otherwise validate
+   connector names, case collisions, channel instance/source/mode references,
+   enabled signing secrets, and shared-route ownership before opening the store.
 2. For enabled configuration, resolve an explicit database path or derive
    `<workspace>/eventing/events.db`, validate positive resource policy, create
    positive defaults for non-positive limits, append configured redaction fields
@@ -349,17 +434,21 @@ Owns: TEST pkg/gateway/event_webhook_test.go
 17. During execution, renew a capable store's dispatch lease every one-third of
     its duration. Cancel the execution context immediately on renewal failure;
     never let a stale worker finish or nack work owned by a replacement token.
-18. On reload, mark readiness false and deactivate webhook admission before
-    pausing long-lived runtime users. Wait for every request admitted by the old
-    webhook generation before closing its store, then swap runtime state while
-    retaining the prior provider/config. Build but do not activate the
-    candidate backend; fence each replacement router/dispatcher iteration to
-    that exact config generation and start cron only after all other fallible
-    replacement initialization. Commit by activating the candidate immediately
-    before readiness and only then close the retained provider after active
-    work drains. Otherwise cancel/drain partial workers, fully restart the old
-    runtime, activate its backend, and reject candidate scheduled work before
-    resuming. Keep the route retryable with `503` and readiness false if
+18. On reload, prepare the exact candidate channel connector set, mark readiness
+    false, and deactivate webhook admission before pausing long-lived runtime
+    users. Deactivate channel admission and wait for every webhook request and
+    channel insert admitted by the old generations before closing their store,
+    then swap runtime state while retaining the prior provider/config. Build but
+    do not activate candidate backends; fence each replacement
+    router/dispatcher iteration to that exact config generation and start cron
+    only after all other fallible replacement initialization. After the
+    irreversible aggregate commit point, publish channel and webhook candidates
+    sequentially through no-fail commits immediately before readiness; one
+    transport may be observable first during that bounded scheduling interval.
+    Only then close the retained provider after active work drains. Otherwise
+    cancel/drain partial workers, prepare and fully restart the old runtime,
+    activate its matching backends, and reject candidate scheduled work before
+    resuming. Keep webhook routes retryable with `503` and readiness false if
     recovery cannot complete. Shutdown follows the same admission-drain
     boundary before worker/store close, then drains AgentLoop generation users,
     channel/media dependencies, and provider state.
@@ -377,6 +466,35 @@ Owns: TEST pkg/gateway/event_webhook_test.go
     for a new row or `200` with the original ID for a duplicate. Workflow
     routing and execution remain asynchronous after that durable transport
     acknowledgement.
+21. After channel authorization and group-trigger filtering, normalize only
+    allow-listed message, subject, actor, conversation, reply, occurrence, and
+    attachment metadata. Derive a fixed-length deduplication key from length-prefixed
+    account/conversation/topic/stable-message identity, bound input work by the
+    payload policy, and insert synchronously through the ordinary redacting
+    store.
+22. If insertion succeeds, consume `event_only` without agent-turn UX and
+    release its media scope or, for `mirror`, create the existing
+    typing/reaction/placeholder UX immediately before queueing the unchanged
+    normalized message. The manager serializes this per-chat provider
+    transition: it detaches and gives the previous exact generation bounded
+    cleanup before starting the next, whose callbacks remain generation-pinned
+    if an older cleanup outlives its deadline. On insertion failure, release
+    turn media and return the error without queueing or acknowledging;
+    unconfigured/internal traffic bypasses the event adapter.
+23. Delta Chat treats provider events as queue-wake notifications. Drain
+    `get_next_msgs` in ascending order at startup and after every `IncomingMsg`
+    or message-specific `MsgsChanged`; while a full download is pending, generic
+    `MsgsChanged` also wakes the drain, and `EventChannelOverflow` wakes it
+    before account filtering despite its zero `contextId`. Fetch complete
+    content, use only the stable provider-local
+    Delta message ID as hash input, publish through synchronous admission, and
+    retry before `markseen_msgs`; a lower retryable failure blocks later IDs,
+    while intentionally filtered messages advance. For an incomplete message,
+    retain RFC724 Message-ID only in process. Complete an original that remains
+    visible; if it disappears, process through the last RFC-correlated
+    replacement before retiring it. An unrelated complete batch cannot retire
+    the pending original, and no visible correlation conservatively blocks the
+    ordered queue.
 
 ## Cross-Feature Behavior
 
@@ -393,11 +511,13 @@ separate durable step before execution.
 
 [Generic webhooks](../../pkg/eventing/webhook) normalize their strict signed
 body directly into this envelope on the channel manager's shared HTTP mux.
-[Chat channels](chat-channels.md), later GitHub-specific delivery, and Delta
-Chat email adapters own their provider-specific authentication, normalization,
-and transport lifecycles. Later operator API/CLI and dashboard stages consume
-the store but do not redefine its deduplication, leasing, redaction, replay, or
-retention semantics.
+[Chat channels](chat-channels.md) own provider authorization, group filtering,
+and transport UX; opted-in instances pass safe normalized metadata through the
+durable channel-message adapter. Delta Chat additionally owns notification-
+driven ordered fetch, process-local full-download replacement correlation, and
+retry-before-seen email acknowledgement. Later GitHub-specific,
+operator API/CLI, and dashboard stages consume the store but do not redefine
+its deduplication, leasing, redaction, replay, or retention semantics.
 
 [Security and isolation](security-isolation.md) owns secure persistence of each
 webhook signing secret and workflow side-effect policy. Signing adds no new
@@ -484,10 +604,31 @@ existing workflow agent/tool policy.
 - Reload and shutdown reject new webhook requests with retryable `503` before
   draining admitted inserts. A drain timeout leaves the store open for a later
   retry; a provisional candidate never acknowledges into its database.
+- Configured channel messages wait behind startup/reload preparation until a
+  backend with the exact connector set commits. An insert failure queues no
+  turn; `event_only` creates no turn UX; a drain timeout keeps the owning store
+  open; unrelated and internal traffic remain unchanged.
+- Provider retries resolve to the first channel event through the hashed stable
+  provider-local identity. RFC724 Message-ID is fetched only within an
+  incomplete-message replacement lifecycle, retained process-locally solely to
+  correlate the original and candidate IDs, and never used for deduplication or
+  durable payload.
+  Blob path, media reference, and routing metadata are not durable payload
+  fields, and raw blob paths never cross channel admission or enter agent text.
+- Mirror mode cannot atomically couple the durable SQLite insert, in-memory
+  agent queue, and provider acknowledgement. A crash in that interval may cause
+  a provider retry to repeat the legacy chat turn, while the durable event and
+  its workflow dispatch remain deduplicated.
+- Delta Chat provider events only wake its authoritative ordered queue. It
+  retries incomplete fetch, durable admission, and provider acknowledgement in
+  strict order and does not mark an accepted message seen before durable
+  ownership. An unrelated complete batch cannot retire a pending download; no
+  visible RFC-correlated replacement conservatively blocks later queue work,
+  and shutdown cancels the retry loop.
 - The compatibility version bump makes pre-`on.event` stamps stale, so newly
   understood event YAML cannot activate until explicitly revalidated.
-- This stage intentionally has no GitHub-specific or channel/email event
-  adapter, event operator CLI/API endpoint, or frontend route.
+- This stage intentionally has no GitHub-specific event adapter, event operator
+  CLI/API endpoint, or frontend route.
 
 ## Acceptance Evidence
 
@@ -506,6 +647,10 @@ existing workflow agent/tool policy.
 | `FR-EVENT-AUTOMATION-019` | [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go), [pkg/gateway/gateway_test.go](../../pkg/gateway/gateway_test.go) |
 | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-023` | [pkg/eventing/webhook/controller_test.go](../../pkg/eventing/webhook/controller_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [pkg/channels/dynamic_mux_test.go](../../pkg/channels/dynamic_mux_test.go), [pkg/config/events_test.go](../../pkg/config/events_test.go), [pkg/config/events_secret_identity_test.go](../../pkg/config/events_secret_identity_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/config_event_webhook_deferred_test.go](../../web/backend/api/config_event_webhook_deferred_test.go) |
 | `FR-EVENT-AUTOMATION-024` | [pkg/eventing/webhook/controller_test.go](../../pkg/eventing/webhook/controller_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [pkg/config/events_test.go](../../pkg/config/events_test.go) |
+| `FR-EVENT-AUTOMATION-025` | [pkg/config/events_channels_test.go](../../pkg/config/events_channels_test.go), [pkg/config/security_test.go](../../pkg/config/security_test.go), [web/backend/api/config_event_channel_test.go](../../web/backend/api/config_event_channel_test.go) |
+| `FR-EVENT-AUTOMATION-026`, `FR-EVENT-AUTOMATION-027` | [pkg/eventing/channelmessage/backend_test.go](../../pkg/eventing/channelmessage/backend_test.go), [pkg/bus/bus_test.go](../../pkg/bus/bus_test.go), [pkg/channels/base_test.go](../../pkg/channels/base_test.go), [pkg/gateway/event_channel_test.go](../../pkg/gateway/event_channel_test.go) |
+| `FR-EVENT-AUTOMATION-028` | [pkg/channels/deltachat/deltachat_test.go](../../pkg/channels/deltachat/deltachat_test.go) |
+| `FR-EVENT-AUTOMATION-029` | [pkg/eventing/channelmessage/controller_test.go](../../pkg/eventing/channelmessage/controller_test.go), [pkg/gateway/event_channel_test.go](../../pkg/gateway/event_channel_test.go) |
 
 ## Implementation Anchors
 
@@ -520,5 +665,9 @@ existing workflow agent/tool policy.
 - [pkg/agent/workflow_eventing.go](../../pkg/agent/workflow_eventing.go)
 - [pkg/gateway/event_automation.go](../../pkg/gateway/event_automation.go)
 - [pkg/gateway/event_webhook.go](../../pkg/gateway/event_webhook.go)
+- [pkg/gateway/event_channel.go](../../pkg/gateway/event_channel.go)
 - [pkg/eventing/webhook](../../pkg/eventing/webhook)
+- [pkg/eventing/channelmessage](../../pkg/eventing/channelmessage)
+- [pkg/bus/bus.go](../../pkg/bus/bus.go)
+- [pkg/channels/deltachat/handler.go](../../pkg/channels/deltachat/handler.go)
 - [web/backend/api/config.go](../../web/backend/api/config.go)

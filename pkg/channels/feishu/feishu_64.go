@@ -36,6 +36,8 @@ import (
 // on this error, so we do it ourselves.
 const errCodeTenantTokenInvalid = 99991663
 
+const reactionCleanupTimeout = 5 * time.Second
+
 type FeishuChannel struct {
 	*channels.BaseChannel
 	bc         *config.Channel
@@ -479,7 +481,12 @@ func (c *FeishuChannel) ReactToMessage(ctx context.Context, chatID, messageID st
 			MessageId(messageID).
 			ReactionId(reactionID).
 			Build()
-		_, _ = c.client.Im.V1.MessageReaction.Delete(context.Background(), delReq)
+		cleanupCtx, cancel := context.WithTimeout(
+			context.Background(),
+			reactionCleanupTimeout,
+		)
+		defer cancel()
+		_, _ = c.client.Im.V1.MessageReaction.Delete(cleanupCtx, delReq)
 	}
 	return undo, nil
 }

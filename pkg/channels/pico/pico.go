@@ -478,13 +478,18 @@ func (c *PicoChannel) FinalizeToolFeedbackMessage(ctx context.Context, msg bus.O
 
 // StartTyping implements channels.TypingCapable.
 func (c *PicoChannel) StartTyping(ctx context.Context, chatID string) (func(), error) {
+	generation := c.BeginTypingGeneration(chatID)
 	startMsg := newMessage(TypeTypingStart, nil)
-	if err := c.broadcastToSession(chatID, startMsg); err != nil {
+	if err := c.broadcast(chatID, startMsg); err != nil {
+		generation.End()
 		return func() {}, err
 	}
 	return func() {
+		if !generation.End() {
+			return
+		}
 		stopMsg := newMessage(TypeTypingStop, nil)
-		c.broadcastToSession(chatID, stopMsg)
+		_ = c.broadcast(chatID, stopMsg)
 	}, nil
 }
 

@@ -42,10 +42,24 @@ func (al *AgentLoop) tryHandleStopCommand(
 	}
 
 	if al.channelManager != nil {
-		al.channelManager.InvokeTypingStop(msg.Channel, msg.ChatID)
+		invokeTypingStopForMessage(
+			al.channelManager,
+			msg.Channel,
+			msg.ChatID,
+			msg.Context.TurnUXID,
+		)
 	}
 	al.resetMessageToolRound(sessionKey)
-	al.PublishResponseIfNeeded(ctx, msg.Channel, msg.ChatID, sessionKey, reply)
+	if !al.publishResponseIfNeeded(
+		ctx,
+		msg.Channel,
+		msg.ChatID,
+		sessionKey,
+		reply,
+		&msg.Context,
+	) {
+		al.cleanupInboundTurnUX(ctx, msg)
+	}
 	return true
 }
 

@@ -43,6 +43,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/cron"
 	"github.com/sipeed/picoclaw/pkg/devices"
+	eventchannel "github.com/sipeed/picoclaw/pkg/eventing/channelmessage"
 	eventwebhook "github.com/sipeed/picoclaw/pkg/eventing/webhook"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/health"
@@ -74,6 +75,11 @@ type services struct {
 	DeviceService          *devices.Service
 	EventAutomation        *eventAutomationService
 	HealthServer           *health.Server
+	eventChannelBus        *bus.MessageBus
+	eventChannelController *eventchannel.Controller
+	eventChannelGeneration eventchannel.Generation
+	eventChannelInstalled  bool
+	eventChannelRelease    func()
 	eventWebhookController *eventwebhook.Controller
 	eventWebhookGeneration eventwebhook.Generation
 	eventWebhookRelease    func()
@@ -259,10 +265,10 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 	runningServices.HealthServer.SetReloadFunc(reloadTrigger)
 	agentLoop.SetReloadFunc(reloadTrigger)
 
-	// Generic event webhook admission is the final generation-specific service
-	// committed before readiness. Its route may already be mounted, but it
-	// returns 503 until this activation publishes the durable store backend.
-	if err = activateEventWebhook(runningServices); err != nil {
+	// Event admission is the final generation-specific service committed before
+	// readiness. Webhook requests return 503 and configured channel publishers
+	// wait until these activations publish the durable store backends.
+	if err = activateEventAdmissions(runningServices); err != nil {
 		return err
 	}
 
@@ -354,6 +360,12 @@ func preCheckConfig(cfg *config.Config) error {
 	}
 	if err := cfg.Events.Ingress.Validate(); err != nil {
 		return fmt.Errorf("invalid event ingress: %w", err)
+	}
+	if err := cfg.Events.Ingress.ValidateEventChannelAdapters(
+		cfg.Channels,
+		cfg.SensitiveDataValues()...,
+	); err != nil {
+		return fmt.Errorf("invalid event channel adapters: %w", err)
 	}
 	return nil
 }
@@ -464,6 +476,9 @@ func setupAndStartServices(
 	}
 
 	runningServices := &services{}
+	if err := setupEventChannelController(runningServices, msgBus, cfg); err != nil {
+		return runningServices, err
+	}
 
 	execTimeout := time.Duration(cfg.Tools.Cron.ExecTimeoutMinutes) * time.Minute
 	var err error
@@ -652,16 +667,25 @@ func stopRuntimeProducers(
 	defer shutdownCancel()
 
 	var cleanupErr error
+	admissionDrained := true
+	if err := deactivateEventChannel(shutdownCtx, runningServices, nil); err != nil {
+		cleanupErr = errors.Join(cleanupErr, err)
+		admissionDrained = false
+	}
 	if err := deactivateEventWebhook(shutdownCtx, runningServices); err != nil {
 		cleanupErr = errors.Join(cleanupErr, err)
-	} else if err := closeEventAutomationService(
-		shutdownCtx,
-		&runningServices.EventAutomation,
-	); err != nil {
-		cleanupErr = errors.Join(
-			cleanupErr,
-			fmt.Errorf("stop event automation: %w", err),
-		)
+		admissionDrained = false
+	}
+	if admissionDrained {
+		if err := closeEventAutomationService(
+			shutdownCtx,
+			&runningServices.EventAutomation,
+		); err != nil {
+			cleanupErr = errors.Join(
+				cleanupErr,
+				fmt.Errorf("stop event automation: %w", err),
+			)
+		}
 	}
 
 	if runningServices.VoiceAgentCancel != nil {
@@ -740,7 +764,13 @@ func shutdownGateway(
 	}
 
 	var dependencyErr error
-	if runStopErr == nil && runtimeDrainErr == nil {
+	admissionCloseErr := closeEventChannelAdmission(drainCtx, runningServices)
+	if admissionCloseErr != nil {
+		logger.ErrorCF("gateway", "Channel event admission did not close cleanly", map[string]any{
+			"error": admissionCloseErr.Error(),
+		})
+	}
+	if runStopErr == nil && runtimeDrainErr == nil && admissionCloseErr == nil {
 		dependencyErr = stopRuntimeDependencies(
 			runningServices,
 			gracefulShutdownTimeout,
@@ -758,6 +788,7 @@ func shutdownGateway(
 	safeToClose := producerErr == nil &&
 		runStopErr == nil &&
 		runtimeDrainErr == nil &&
+		admissionCloseErr == nil &&
 		dependencyErr == nil
 	if safeToClose {
 		if fullShutdown && msgBus != nil {
@@ -862,6 +893,12 @@ func handleConfigReloadWithServiceOps(
 	if newModelID != "" {
 		newCfg.Agents.Defaults.ModelName = newModelID
 	}
+	if err = prepareEventChannelAdmission(runningServices, newCfg); err != nil {
+		if stateful, ok := newProvider.(providers.StatefulProvider); ok {
+			stateful.Close()
+		}
+		return fmt.Errorf("prepare channel event admission before reload: %w", err)
+	}
 
 	if runningServices != nil && runningServices.HealthServer != nil {
 		runningServices.HealthServer.SetReady(false)
@@ -880,9 +917,12 @@ func handleConfigReloadWithServiceOps(
 		if stateful, ok := newProvider.(providers.StatefulProvider); ok {
 			stateful.Close()
 		}
-		return fmt.Errorf(
-			"deactivate event webhook admission for reload: %w",
-			webhookDrainErr,
+		return errors.Join(
+			fmt.Errorf(
+				"deactivate event webhook admission for reload: %w",
+				webhookDrainErr,
+			),
+			cancelEventChannelPreparation(runningServices),
 		)
 	}
 	pauseCtx, pauseCancel := context.WithTimeout(ctx, providerReloadTimeout)
@@ -892,18 +932,41 @@ func handleConfigReloadWithServiceOps(
 		if stateful, ok := newProvider.(providers.StatefulProvider); ok {
 			stateful.Close()
 		}
-		reactivateErr := activateEventWebhook(runningServices)
-		if reactivateErr == nil &&
+		restoreChannelErr := cancelEventChannelPreparation(runningServices)
+		reactivateWebhookErr := activateEventWebhook(runningServices)
+		if restoreChannelErr == nil &&
+			reactivateWebhookErr == nil &&
 			runningServices != nil &&
 			runningServices.HealthServer != nil {
 			runningServices.HealthServer.SetReady(true)
 		}
 		return errors.Join(
 			fmt.Errorf("pause agent runtime for reload: %w", pauseErr),
-			reactivateErr,
+			restoreChannelErr,
+			reactivateWebhookErr,
 		)
 	}
 	defer resumeRuntime()
+
+	channelDrainCtx, channelDrainCancel := context.WithTimeout(
+		ctx,
+		providerReloadTimeout,
+	)
+	channelDrainErr := deactivateEventChannel(
+		channelDrainCtx,
+		runningServices,
+		newCfg,
+	)
+	channelDrainCancel()
+	if channelDrainErr != nil {
+		if stateful, ok := newProvider.(providers.StatefulProvider); ok {
+			stateful.Close()
+		}
+		return fmt.Errorf(
+			"deactivate channel event admission for reload: %w",
+			channelDrainErr,
+		)
+	}
 
 	logger.Info("  Stopping all services...")
 	if stopErr := serviceOps.stop(runningServices, serviceShutdownTimeout, true); stopErr != nil {
@@ -914,9 +977,12 @@ func handleConfigReloadWithServiceOps(
 		var recoveryRestartErr error
 		var recoveryActivateErr error
 		if recoveryStopErr == nil {
-			recoveryRestartErr = serviceOps.restart(al, runningServices, msgBus)
+			recoveryRestartErr = prepareEventChannelAdmission(runningServices, oldCfg)
 			if recoveryRestartErr == nil {
-				recoveryActivateErr = activateEventWebhook(runningServices)
+				recoveryRestartErr = serviceOps.restart(al, runningServices, msgBus)
+			}
+			if recoveryRestartErr == nil {
+				recoveryActivateErr = activateEventAdmissions(runningServices)
 			}
 			if recoveryRestartErr == nil &&
 				recoveryActivateErr == nil &&
@@ -947,10 +1013,13 @@ func handleConfigReloadWithServiceOps(
 			stateful.Close()
 		}
 		logger.Warn("  Attempting to restart services with old provider and config...")
-		restartErr := serviceOps.restart(al, runningServices, msgBus)
+		restartErr := prepareEventChannelAdmission(runningServices, oldCfg)
+		if restartErr == nil {
+			restartErr = serviceOps.restart(al, runningServices, msgBus)
+		}
 		var reactivateErr error
 		if restartErr == nil {
-			reactivateErr = activateEventWebhook(runningServices)
+			reactivateErr = activateEventAdmissions(runningServices)
 		}
 		if restartErr != nil {
 			logger.Errorf("  ⚠ Failed to restart services: %v", restartErr)
@@ -978,7 +1047,7 @@ func handleConfigReloadWithServiceOps(
 		candidateServicesStarted = true
 		restartErr = serviceOps.restart(al, runningServices, msgBus)
 		if restartErr == nil {
-			restartErr = activateEventWebhook(runningServices)
+			restartErr = activateEventAdmissions(runningServices)
 		}
 	}
 	if restartErr != nil {
@@ -1017,10 +1086,13 @@ func handleConfigReloadWithServiceOps(
 		if failedProvider == nil {
 			failedProvider = newProvider
 		}
-		recoveryErr := serviceOps.restart(al, runningServices, msgBus)
+		recoveryErr := prepareEventChannelAdmission(runningServices, oldCfg)
+		if recoveryErr == nil {
+			recoveryErr = serviceOps.restart(al, runningServices, msgBus)
+		}
 		var recoveryActivateErr error
 		if recoveryErr == nil {
-			recoveryActivateErr = activateEventWebhook(runningServices)
+			recoveryActivateErr = activateEventAdmissions(runningServices)
 		}
 		if recoveryErr == nil &&
 			recoveryActivateErr == nil &&

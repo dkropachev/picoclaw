@@ -33,6 +33,8 @@ import (
 	"github.com/sipeed/picoclaw/pkg/media"
 )
 
+const typingCleanupTimeout = 5 * time.Second
+
 const (
 	sqliteDriver = "sqlite"
 	dbName       = "store.db"
@@ -163,17 +165,23 @@ func (c *roomKindCache) evictOldestLocked() bool {
 
 type typingSession struct {
 	stopCh chan struct{}
+	doneCh chan struct{}
+	cancel context.CancelFunc
 	once   sync.Once
 }
 
-func newTypingSession() *typingSession {
+func newTypingSession(parent context.Context) (*typingSession, context.Context) {
+	ctx, cancel := context.WithCancel(parent)
 	return &typingSession{
 		stopCh: make(chan struct{}),
-	}
+		doneCh: make(chan struct{}),
+		cancel: cancel,
+	}, ctx
 }
 
 func (s *typingSession) stop() {
 	s.once.Do(func() {
+		s.cancel()
 		close(s.stopCh)
 	})
 }
@@ -587,7 +595,8 @@ func (c *MatrixChannel) StartTyping(ctx context.Context, chatID string) (func(),
 		return func() {}, fmt.Errorf("matrix room ID is empty")
 	}
 
-	session := newTypingSession()
+	parent := c.baseContext()
+	session, typingCtx := newTypingSession(parent)
 
 	c.typingMu.Lock()
 	if prev := c.typingSessions[chatID]; prev != nil {
@@ -596,19 +605,33 @@ func (c *MatrixChannel) StartTyping(ctx context.Context, chatID string) (func(),
 	c.typingSessions[chatID] = session
 	c.typingMu.Unlock()
 
-	parent := c.baseContext()
-	go c.typingLoop(parent, roomID, session)
+	go c.typingLoop(typingCtx, roomID, session)
 
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
 			session.stop()
+			stopProvider := false
 			c.typingMu.Lock()
 			if current := c.typingSessions[chatID]; current == session {
 				delete(c.typingSessions, chatID)
+				stopProvider = true
 			}
 			c.typingMu.Unlock()
-			_, _ = c.client.UserTyping(context.Background(), roomID, false, 0)
+			if !stopProvider {
+				return
+			}
+			cleanupCtx, cancel := context.WithTimeout(
+				context.Background(),
+				typingCleanupTimeout,
+			)
+			defer cancel()
+			select {
+			case <-session.doneCh:
+			case <-cleanupCtx.Done():
+				return
+			}
+			_, _ = c.client.UserTyping(cleanupCtx, roomID, false, 0)
 		})
 	}
 
@@ -1321,6 +1344,8 @@ func decodeMatrixMentionHref(v string) string {
 }
 
 func (c *MatrixChannel) typingLoop(ctx context.Context, roomID id.RoomID, session *typingSession) {
+	defer close(session.doneCh)
+
 	sendTyping := func() {
 		_, err := c.client.UserTyping(ctx, roomID, true, typingServerTTL)
 		if err != nil {
@@ -1331,6 +1356,13 @@ func (c *MatrixChannel) typingLoop(ctx context.Context, roomID id.RoomID, sessio
 		}
 	}
 
+	select {
+	case <-ctx.Done():
+		return
+	case <-session.stopCh:
+		return
+	default:
+	}
 	sendTyping()
 	ticker := time.NewTicker(typingRefreshInterval)
 	defer ticker.Stop()
@@ -1359,6 +1391,11 @@ func (c *MatrixChannel) stopTypingSessions(ctx context.Context) {
 	}
 	for roomID, session := range sessions {
 		session.stop()
+		select {
+		case <-session.doneCh:
+		case <-stopCtx.Done():
+			continue
+		}
 		_, _ = c.client.UserTyping(stopCtx, id.RoomID(roomID), false, 0)
 	}
 }

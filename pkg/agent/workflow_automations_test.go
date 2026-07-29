@@ -100,7 +100,7 @@ jobs:
 		t.Fatalf("RevalidateLocal() error = %v", err)
 	}
 	al.handleWorkflowRuntimeEvent(ctx, evt)
-	run := waitForWorkflowRun(t, workspace)
+	run := waitForWorkflowRunCompletion(t, workspace)
 	if run.WorkflowRef != "workflows/runtime.yml" {
 		t.Fatalf("workflow ref = %q, want workflows/runtime.yml", run.WorkflowRef)
 	}
@@ -352,7 +352,7 @@ jobs:
 		Kind:   runtimeevents.KindGatewayReady,
 		Source: runtimeevents.Source{Component: "gateway", Name: "committed"},
 	})
-	run := waitForWorkflowRun(t, workspaceA)
+	run := waitForWorkflowRunCompletion(t, workspaceA)
 	if run.WorkflowRef != "workflows/runtime.yml" {
 		t.Fatalf("workflow ref = %q, want workflows/runtime.yml", run.WorkflowRef)
 	}
@@ -449,7 +449,7 @@ func assertNoWorkflowRunsWithin(t *testing.T, workspace string, duration time.Du
 	}
 }
 
-func waitForWorkflowRun(t *testing.T, workspace string) *workflows.Run {
+func waitForWorkflowRunCompletion(t *testing.T, workspace string) *workflows.Run {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	store := workflows.NewFileRunStore(workspace)
@@ -458,12 +458,35 @@ func waitForWorkflowRun(t *testing.T, workspace string) *workflows.Run {
 		if err != nil {
 			t.Fatalf("ListRuns() error = %v", err)
 		}
-		if len(runs) > 0 {
-			run := runs[0]
+		if len(runs) == 0 {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		run := runs[0]
+		var terminalEvent string
+		switch run.Status {
+		case workflows.RunStatusSucceeded:
+			terminalEvent = "workflow.run.end"
+		case workflows.RunStatusFailed:
+			terminalEvent = "workflow.run.failed"
+		case workflows.RunStatusCanceled:
+			terminalEvent = "workflow.run.canceled"
+		default:
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		events, err := store.Events(context.Background(), run.ID)
+		if err != nil {
+			t.Fatalf("Events() error = %v", err)
+		}
+		for _, event := range events {
+			if event.Kind != terminalEvent {
+				continue
+			}
 			return &run
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("timed out waiting for workflow run")
+	t.Fatal("timed out waiting for workflow run completion")
 	return nil
 }

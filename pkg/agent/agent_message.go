@@ -29,9 +29,10 @@ func (al *AgentLoop) buildContinuationTarget(msg bus.InboundMessage) (*continuat
 	allocation := al.allocateRouteSession(route, msg)
 
 	return &continuationTarget{
-		SessionKey: resolveScopeKey(allocation.SessionKey, msg.SessionKey),
-		Channel:    msg.Channel,
-		ChatID:     msg.ChatID,
+		SessionKey:     resolveScopeKey(allocation.SessionKey, msg.SessionKey),
+		Channel:        msg.Channel,
+		ChatID:         msg.ChatID,
+		InboundContext: cloneInboundContext(&msg.Context),
 	}, nil
 }
 
@@ -158,13 +159,34 @@ func (al *AgentLoop) prepareInboundMessageForAgent(
 	// For audio messages the placeholder was deferred by the channel.
 	// Now that transcription (and optional feedback) is done, send it.
 	if hadAudio && al.channelManager != nil {
-		al.channelManager.SendPlaceholder(ctx, msg.Channel, msg.ChatID)
+		sendPlaceholderForMessage(
+			ctx,
+			al.channelManager,
+			msg.Channel,
+			msg.ChatID,
+			msg.Context.TurnUXID,
+		)
 	}
 
 	return msg
 }
 
 func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage) (string, error) {
+	return al.processMessageWithPreparation(ctx, msg, false)
+}
+
+func (al *AgentLoop) processPreparedMessage(
+	ctx context.Context,
+	msg bus.InboundMessage,
+) (string, error) {
+	return al.processMessageWithPreparation(ctx, msg, true)
+}
+
+func (al *AgentLoop) processMessageWithPreparation(
+	ctx context.Context,
+	msg bus.InboundMessage,
+	prepared bool,
+) (string, error) {
 	leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
 	if err != nil {
 		return "", err
@@ -172,7 +194,9 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	defer releaseRuntime()
 	ctx = leaseCtx
 
-	msg = al.prepareInboundMessageForAgent(ctx, msg)
+	if !prepared {
+		msg = al.prepareInboundMessageForAgent(ctx, msg)
+	}
 
 	// Add message preview to log (show full content for error messages)
 	var logContent string
@@ -246,6 +270,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		EnableSummary:           true,
 		SendResponse:            false,
 		AllowInterimPicoPublish: true,
+		turnReservation:         turnReservationFromContext(ctx),
 	}
 	if msg.Context.Raw != nil {
 		opts.ModelNameOverride = strings.TrimSpace(msg.Context.Raw["model_name"])

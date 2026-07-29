@@ -31,7 +31,7 @@ security behavior that other feature specs rely on.
 | --- | --- | --- | --- |
 | `FR-SEC-001` | MUST | Secure string config fields avoid plaintext exposure in launcher read paths and preserve secret values on partial updates; router model entries must not persist provider API keys, and router graph account refs are limited to non-secret credential account identifiers such as `credential:openai:work`. | Credentials must not leak through management surfaces. |
 | `FR-SEC-002` | MUST | Credential store operations save, load, list, and delete provider credentials with provider/auth-method identity; provider aliases such as `copilot` are canonicalized before credential lookup or persistence; provider construction and model discovery reject stored provider-identity mismatches, and named token refresh and persistence remain bound to the normalized credential ID; provider-specific token validators reject unsupported token forms before storage; storage writes use same-directory, collision-resistant temp files before atomic rename so concurrent saves do not fail on temp-name reuse. | Auth-backed providers require durable credentials without crossing account or provider identity. |
-| `FR-SEC-003` | MUST | Sensitive-data filtering redacts configured secrets from model-visible tool output when enabled. | Tool results can contain credentials. |
+| `FR-SEC-003` | MUST | Sensitive-data filtering redacts configured secrets from model-visible tool output when enabled. Durable external-event store construction also receives detached resolved secure-config values longer than three bytes for exact-value redaction, without logging or serializing that trusted list. | Tool results and channel-origin event text can contain credentials. |
 | `FR-SEC-004` | MUST | Dashboard auth rejects unauthenticated access, uses CSRF-safe logout, and rate-limits login attempts. | Web management is sensitive. |
 | `FR-SEC-005` | MUST | HTTP guard blocks private/internal targets unless explicitly allowed or proxy first-hop rules apply. | Web tools must not become SSRF primitives. |
 | `FR-SEC-006` | MUST | Isolation runtime starts supported commands with configured exposed paths and fails closed on unsupported/invalid setup. | Optional isolation must not silently weaken execution. |
@@ -39,6 +39,7 @@ security behavior that other feature specs rely on.
 | `FR-SEC-008` | MUST | Model-list and tool-adaptation config validation rejects unsupported provider-control values such as invalid `reasoning_effort`, invalid account-router account references, invalid model-router target references, and invalid tool-adaptation policy values before those values are persisted or used; profile-specific tool-adaptation overrides normalize provider/model identity and replace earlier duplicate identities as whole entries; account routers and model routers are stored in top-level router lists rather than as secret-bearing `model_list[]` entries; strict diagnostics tolerate deprecated `account_routers[].model` input, but runtime and output ignore it so routers remain model-agnostic. | Invalid config should fail early instead of producing unsafe or broken provider requests. |
 | `FR-SEC-009` | MUST | OAuth token response parsing extracts non-secret account email claims from ID-token or access-token JWT payloads when present, preserves the email across refreshes, and leaves the email empty without failing when claims are absent or malformed. | Launcher account naming and credential metadata need stable non-secret account identity without weakening token validation or persistence. |
 | `FR-SEC-010` | MUST | Generic event webhook secrets use the existing secure-string persistence path: JSON exposes only `[NOT_HERE]`, `.security.yml` stores plaintext/encrypted/file references, masked updates preserve a current value, and security-only connector entries cannot create or resurrect JSON configuration. Reference resolution follows final master enablement without touching inactive credential files, and an explicit management replacement can repair an active broken reference without resolving the old value first. Connector map keys and client-controlled durable identity fields cannot contain a configured signing secret; those conflicts fail opaquely before persistence. Enabled secrets are validated and used for exact-value durable content redaction as well as Standard Webhooks HMAC verification. | A listener credential must neither leak through config, error, identity, or event-storage surfaces nor survive as stale active configuration after its connector is removed. |
+| `FR-SEC-011` | MUST | Delta Chat email automation requires both a verified sender contact and a correctly encrypted/signed message unless the connector explicitly enables unverified email. Durable metadata excludes local blob paths, remote references, and bytes; declared and streamed attachment sizes are capped before materialization; receipt time is preferred over sender-controlled mail `Date`. | Email addresses, message dates, filenames, and attachment declarations are attacker-controlled and must not silently become workflow authority or expose private account storage. |
 
 ## Data And State Model
 
@@ -116,6 +117,15 @@ Owns: TEST pkg/config/version*
    listener/storage construction, compare signatures without disclosing
    mismatch details, and pass the same secret values into recursive durable
    content redaction.
+9. At durable event-store construction, collect resolved secure configuration
+   values into a detached process-local list, discard values of three bytes or
+   fewer to avoid redacting common text fragments, and pass the rest to exact
+   recursive redaction without exposing the list through config JSON or logs.
+10. Admit Delta Chat email as trusted automation only when contact verification
+    and encrypted/signature authentication are both present, unless an explicit
+    per-connector opt-in accepts unverified mail. Prefer provider receipt time,
+    expose only bounded attachment metadata, and cap the actual copied stream
+    independently of its declared size.
 
 ## Cross-Feature Behavior
 
@@ -139,8 +149,9 @@ launcher normalization, and intentionally clear credential-bearing fields
 because underlying account entries own secrets. Branch condition expressions are
 validated as numeric account metrics and math constants, so routing decisions do
 not require storing new secret material on router entries.
-Generic durable event webhooks reuse secure-string persistence and redaction;
-their transport lifecycle and request contract are owned by
+Generic durable event webhooks and channel-message adapters reuse secure-string
+persistence and exact-value redaction; their transport lifecycle and request
+contract are owned by
 [Durable External Event Automation](event-automation.md).
 
 ## Failure And Edge Cases
@@ -158,18 +169,25 @@ their transport lifecycle and request contract are owned by
 - Inactive file/encrypted webhook references are preserved without resolution;
   credential-bearing connector/type/deduplication identities fail before config
   or event persistence and error responses omit the conflicting values.
+- Resolved channel and provider credentials are detached only at the trusted
+  event-store construction boundary; they are never added to event identity,
+  payload, config JSON, or logs.
+- Unverified email is skipped by default; an explicit opt-in marks it
+  unverified. Private Delta Chat blob paths and copy errors do not enter durable
+  events or attachment diagnostics, and oversized files are not materialized.
 
 ## Acceptance Evidence
 
 | Requirement IDs | Evidence |
 | --- | --- |
-| `FR-SEC-001`, `FR-SEC-003` | [pkg/config/config_struct_test.go](../../pkg/config/config_struct_test.go), [pkg/config/security_test.go](../../pkg/config/security_test.go), [docs/security/sensitive_data_filtering.md](../security/sensitive_data_filtering.md) |
+| `FR-SEC-001`, `FR-SEC-003` | [pkg/config/config_struct_test.go](../../pkg/config/config_struct_test.go), [pkg/config/security_test.go](../../pkg/config/security_test.go), [pkg/gateway/event_channel_test.go](../../pkg/gateway/event_channel_test.go), [docs/security/sensitive_data_filtering.md](../security/sensitive_data_filtering.md) |
 | `FR-SEC-002`, `FR-SEC-007` | [pkg/credential/store_test.go](../../pkg/credential/store_test.go), [pkg/fileutil/file_test.go](../../pkg/fileutil/file_test.go), [pkg/auth/token_test.go](../../pkg/auth/token_test.go), [pkg/auth/pkce_test.go](../../pkg/auth/pkce_test.go) |
 | `FR-SEC-004` | [web/backend/api/auth_test.go](../../web/backend/api/auth_test.go), [web/backend/api/auth_csrf_test.go](../../web/backend/api/auth_csrf_test.go) |
 | `FR-SEC-005`, `FR-SEC-006` | [pkg/utils/http_guard.go](../../pkg/utils/http_guard.go), [pkg/isolation/runtime_test.go](../../pkg/isolation/runtime_test.go), [pkg/netbind/netbind_test.go](../../pkg/netbind/netbind_test.go) |
 | `FR-SEC-008` | [pkg/config/model_config_test.go](../../pkg/config/model_config_test.go), [pkg/config/account_router_test.go](../../pkg/config/account_router_test.go), [pkg/config/config_test.go](../../pkg/config/config_test.go), [pkg/providers/common/reasoning_effort_test.go](../../pkg/providers/common/reasoning_effort_test.go) |
 | `FR-SEC-009` | [pkg/auth/oauth_test.go](../../pkg/auth/oauth_test.go), [web/backend/api/oauth_test.go](../../web/backend/api/oauth_test.go) |
 | `FR-SEC-010` | [pkg/config/events_test.go](../../pkg/config/events_test.go), [pkg/config/events_secret_identity_test.go](../../pkg/config/events_secret_identity_test.go), [pkg/eventing/webhook/controller_test.go](../../pkg/eventing/webhook/controller_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/config_event_webhook_deferred_test.go](../../web/backend/api/config_event_webhook_deferred_test.go) |
+| `FR-SEC-011` | [pkg/config/events_channels_test.go](../../pkg/config/events_channels_test.go), [pkg/eventing/channelmessage/backend_test.go](../../pkg/eventing/channelmessage/backend_test.go), [pkg/channels/deltachat/deltachat_test.go](../../pkg/channels/deltachat/deltachat_test.go), [pkg/gateway/event_channel_test.go](../../pkg/gateway/event_channel_test.go) |
 
 ## Implementation Anchors
 

@@ -377,7 +377,7 @@ func TestMessageTool_Execute_WithReplyToMessageID(t *testing.T) {
 func TestMessageTool_Execute_PropagatesTurnSessionMetadata(t *testing.T) {
 	tool := NewMessageTool()
 
-	var gotAgentID, gotSessionKey string
+	var gotAgentID, gotSessionKey, gotTurnUXID string
 	var gotScope *session.SessionScope
 	tool.SetSendCallback(func(
 		ctx context.Context,
@@ -387,6 +387,7 @@ func TestMessageTool_Execute_PropagatesTurnSessionMetadata(t *testing.T) {
 		gotAgentID = ToolAgentID(ctx)
 		gotSessionKey = ToolSessionKey(ctx)
 		gotScope = ToolSessionScope(ctx)
+		gotTurnUXID = ToolTurnUXID(ctx)
 		return nil
 	})
 
@@ -400,6 +401,7 @@ func TestMessageTool_Execute_PropagatesTurnSessionMetadata(t *testing.T) {
 			"chat": "direct:test-chat-id",
 		},
 	})
+	ctx = WithToolTurnUXContext(ctx, "turn-ux-42")
 
 	result := tool.Execute(ctx, map[string]any{"content": "Hello, world!"})
 	if result.IsError {
@@ -413,6 +415,9 @@ func TestMessageTool_Execute_PropagatesTurnSessionMetadata(t *testing.T) {
 	}
 	if gotScope == nil || gotScope.Values["chat"] != "direct:test-chat-id" {
 		t.Fatalf("ToolSessionScope() = %+v, want chat scope", gotScope)
+	}
+	if gotTurnUXID != "turn-ux-42" {
+		t.Fatalf("ToolTurnUXID() = %q, want turn-ux-42", gotTurnUXID)
 	}
 }
 

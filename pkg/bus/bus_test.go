@@ -2,13 +2,152 @@ package bus
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 )
+
+type inboundAdmissionFunc func(context.Context, InboundMessage) (bool, error)
+
+func (f inboundAdmissionFunc) AdmitInbound(ctx context.Context, msg InboundMessage) (bool, error) {
+	return f(ctx, msg)
+}
+
+type pointerInboundAdmission struct{}
+
+func (*pointerInboundAdmission) AdmitInbound(
+	context.Context,
+	InboundMessage,
+) (bool, error) {
+	return false, nil
+}
+
+type streamCompatibilityStreamer struct{}
+
+func (*streamCompatibilityStreamer) Update(context.Context, string) error {
+	return nil
+}
+
+func (*streamCompatibilityStreamer) Finalize(context.Context, string) error {
+	return nil
+}
+
+func (*streamCompatibilityStreamer) Cancel(context.Context) {}
+
+type legacyStreamDelegate struct {
+	streamer   Streamer
+	calls      int
+	sessionKey string
+}
+
+func (delegate *legacyStreamDelegate) GetStreamer(
+	_ context.Context,
+	_, _, sessionKey string,
+) (Streamer, bool) {
+	delegate.calls++
+	delegate.sessionKey = sessionKey
+	return delegate.streamer, delegate.streamer != nil
+}
+
+type turnScopedStreamDelegate struct {
+	legacyStreamDelegate
+	scopedCalls int
+	turnUXID    string
+}
+
+func (delegate *turnScopedStreamDelegate) GetStreamerForTurn(
+	_ context.Context,
+	_, _, _, turnUXID string,
+) (Streamer, bool) {
+	delegate.scopedCalls++
+	delegate.turnUXID = turnUXID
+	return delegate.streamer, delegate.streamer != nil
+}
+
+func TestMessageBusStreamingDelegateCompatibility(t *testing.T) {
+	t.Run("legacy delegate serves both entry points", func(t *testing.T) {
+		messageBus := NewMessageBus()
+		defer messageBus.Close()
+
+		streamer := &streamCompatibilityStreamer{}
+		delegate := &legacyStreamDelegate{streamer: streamer}
+		messageBus.SetStreamDelegate(delegate)
+
+		got, ok := messageBus.GetStreamer(
+			context.Background(),
+			"legacy",
+			"chat",
+			"legacy-session",
+		)
+		if !ok || got != streamer {
+			t.Fatalf("legacy GetStreamer() = (%T, %t), want configured streamer", got, ok)
+		}
+		got, ok = messageBus.GetStreamerForTurn(
+			context.Background(),
+			"legacy",
+			"chat",
+			"fallback-session",
+			"turn-ignored-by-legacy",
+		)
+		if !ok || got != streamer {
+			t.Fatalf("turn-scoped fallback = (%T, %t), want configured streamer", got, ok)
+		}
+		if delegate.calls != 2 || delegate.sessionKey != "fallback-session" {
+			t.Fatalf(
+				"legacy delegate calls/session = %d/%q, want 2/fallback-session",
+				delegate.calls,
+				delegate.sessionKey,
+			)
+		}
+	})
+
+	t.Run("turn-scoped entry point prefers additive capability", func(t *testing.T) {
+		messageBus := NewMessageBus()
+		defer messageBus.Close()
+
+		streamer := &streamCompatibilityStreamer{}
+		delegate := &turnScopedStreamDelegate{
+			legacyStreamDelegate: legacyStreamDelegate{streamer: streamer},
+		}
+		messageBus.SetStreamDelegate(delegate)
+
+		got, ok := messageBus.GetStreamerForTurn(
+			context.Background(),
+			"scoped",
+			"chat",
+			"session",
+			"turn-exact",
+		)
+		if !ok || got != streamer {
+			t.Fatalf("GetStreamerForTurn() = (%T, %t), want configured streamer", got, ok)
+		}
+		if delegate.scopedCalls != 1 || delegate.turnUXID != "turn-exact" {
+			t.Fatalf(
+				"turn-scoped calls/identity = %d/%q, want 1/turn-exact",
+				delegate.scopedCalls,
+				delegate.turnUXID,
+			)
+		}
+		if delegate.calls != 0 {
+			t.Fatalf("legacy delegate calls = %d, want 0", delegate.calls)
+		}
+
+		_, _ = messageBus.GetStreamer(
+			context.Background(),
+			"scoped",
+			"chat",
+			"legacy-session",
+		)
+		if delegate.calls != 1 {
+			t.Fatalf("legacy entry point calls = %d, want 1", delegate.calls)
+		}
+	})
+}
 
 func TestPublishConsume(t *testing.T) {
 	mb := NewMessageBus()
@@ -48,6 +187,748 @@ func TestPublishConsume(t *testing.T) {
 	}
 	if got.Context.SenderID != "user1" {
 		t.Fatalf("expected context sender ID 'user1', got %q", got.Context.SenderID)
+	}
+}
+
+func TestPublishInbound_NilAdmissionPreservesQueueBehavior(t *testing.T) {
+	mb := NewMessageBus()
+	defer mb.Close()
+
+	called := false
+	mb.SetInboundAdmission(inboundAdmissionFunc(func(context.Context, InboundMessage) (bool, error) {
+		called = true
+		return false, nil
+	}))
+	mb.SetInboundAdmission(nil)
+
+	msg := InboundMessage{
+		Context: InboundContext{
+			Channel:  "test",
+			ChatID:   "chat-1",
+			SenderID: "user-1",
+		},
+		Content:       "hello",
+		ChannelOrigin: true,
+	}
+	if err := mb.PublishInbound(context.Background(), msg); err != nil {
+		t.Fatalf("PublishInbound failed: %v", err)
+	}
+	if called {
+		t.Fatal("cleared admission hook was called")
+	}
+	if got := <-mb.InboundChan(); got.Content != "hello" {
+		t.Fatalf("queued content = %q, want hello", got.Content)
+	}
+}
+
+func TestRegisterInboundAdmissionIsCollisionSafeAndOwnerScoped(t *testing.T) {
+	mb := NewMessageBus()
+	defer mb.Close()
+
+	firstCalls := 0
+	first := inboundAdmissionFunc(func(context.Context, InboundMessage) (bool, error) {
+		firstCalls++
+		return false, nil
+	})
+	firstRelease, err := mb.RegisterInboundAdmission(first)
+	if err != nil {
+		t.Fatalf("RegisterInboundAdmission(first) error = %v", err)
+	}
+
+	secondCalls := 0
+	second := inboundAdmissionFunc(func(context.Context, InboundMessage) (bool, error) {
+		secondCalls++
+		return false, nil
+	})
+	if _, err = mb.RegisterInboundAdmission(second); !errors.Is(
+		err,
+		ErrInboundAdmissionRegistered,
+	) {
+		t.Fatalf(
+			"RegisterInboundAdmission(collision) error = %v, want %v",
+			err,
+			ErrInboundAdmissionRegistered,
+		)
+	}
+
+	message := InboundMessage{
+		Context: InboundContext{
+			Channel:  "test",
+			ChatID:   "chat-1",
+			SenderID: "user-1",
+		},
+		ChannelOrigin: true,
+	}
+	if err = mb.PublishInbound(context.Background(), message); err != nil {
+		t.Fatalf("PublishInbound(first) error = %v", err)
+	}
+	if firstCalls != 1 || secondCalls != 0 {
+		t.Fatalf("admission calls after collision = first:%d second:%d", firstCalls, secondCalls)
+	}
+
+	firstRelease()
+	secondRelease, err := mb.RegisterInboundAdmission(second)
+	if err != nil {
+		t.Fatalf("RegisterInboundAdmission(second) error = %v", err)
+	}
+	// A stale release is harmless after a replacement acquires the seam.
+	firstRelease()
+	if err = mb.PublishInbound(context.Background(), message); err != nil {
+		t.Fatalf("PublishInbound(second) error = %v", err)
+	}
+	if secondCalls != 1 {
+		t.Fatalf("second admission calls = %d, want 1", secondCalls)
+	}
+
+	replacementCalls := 0
+	mb.SetInboundAdmission(inboundAdmissionFunc(
+		func(context.Context, InboundMessage) (bool, error) {
+			replacementCalls++
+			return false, nil
+		},
+	))
+	// Releasing an owner that was externally replaced must not clear the newer
+	// admission hook.
+	secondRelease()
+	if err = mb.PublishInbound(context.Background(), message); err != nil {
+		t.Fatalf("PublishInbound(replacement) error = %v", err)
+	}
+	if replacementCalls != 1 {
+		t.Fatalf("replacement admission calls = %d, want 1", replacementCalls)
+	}
+}
+
+func TestRegisterInboundAdmissionRejectsTypedNil(t *testing.T) {
+	mb := NewMessageBus()
+	defer mb.Close()
+
+	var admission *pointerInboundAdmission
+	if _, err := mb.RegisterInboundAdmission(admission); !errors.Is(
+		err,
+		ErrInvalidInboundAdmission,
+	) {
+		t.Fatalf(
+			"RegisterInboundAdmission(typed nil) error = %v, want %v",
+			err,
+			ErrInvalidInboundAdmission,
+		)
+	}
+
+	// The legacy replacement API treats the same value as clearing the hook,
+	// so a later publish cannot dispatch through a nil concrete pointer.
+	mb.SetInboundAdmission(admission)
+	message := InboundMessage{
+		Context: InboundContext{
+			Channel:  "test",
+			ChatID:   "chat-1",
+			SenderID: "user-1",
+		},
+		ChannelOrigin: true,
+	}
+	if err := mb.PublishInbound(context.Background(), message); err != nil {
+		t.Fatalf("PublishInbound after typed nil Set error = %v", err)
+	}
+	select {
+	case <-mb.InboundChan():
+	case <-time.After(time.Second):
+		t.Fatal("typed nil Set did not preserve direct queue behavior")
+	}
+}
+
+func TestPublishInbound_AdmissionRunsBeforeQueuePublication(t *testing.T) {
+	mb := NewMessageBus()
+	defer mb.Close()
+
+	called := false
+	mb.SetInboundAdmission(inboundAdmissionFunc(func(_ context.Context, msg InboundMessage) (bool, error) {
+		called = true
+		if got := len(mb.inbound); got != 0 {
+			t.Errorf("inbound queue depth in admission = %d, want 0", got)
+		}
+		if msg.Content != "hello" {
+			t.Errorf("admitted content = %q, want hello", msg.Content)
+		}
+		return true, nil
+	}))
+
+	msg := InboundMessage{
+		Context: InboundContext{
+			Channel:  "test",
+			ChatID:   "chat-1",
+			SenderID: "user-1",
+		},
+		Content:       "hello",
+		ChannelOrigin: true,
+	}
+	if err := mb.PublishInbound(context.Background(), msg); err != nil {
+		t.Fatalf("PublishInbound failed: %v", err)
+	}
+	if !called {
+		t.Fatal("admission hook was not called")
+	}
+	if got := len(mb.inbound); got != 1 {
+		t.Fatalf("inbound queue depth after publish = %d, want 1", got)
+	}
+}
+
+func TestPublishInbound_AdmissionErrorPublishesFailureWithoutQueueing(t *testing.T) {
+	eventBus := runtimeevents.NewBus()
+	defer func() {
+		if err := eventBus.Close(); err != nil {
+			t.Errorf("event bus close failed: %v", err)
+		}
+	}()
+	_, eventsCh, err := eventBus.Channel().OfKind(runtimeevents.KindBusPublishFailed).
+		SubscribeChan(t.Context(), runtimeevents.SubscribeOptions{Name: "admission-failure", Buffer: 1})
+	if err != nil {
+		t.Fatalf("SubscribeChan failed: %v", err)
+	}
+
+	mb := NewMessageBus()
+	defer mb.Close()
+	mb.SetEventPublisher(eventBus)
+	admissionErr := errors.New("durable event insert failed")
+	mb.SetInboundAdmission(inboundAdmissionFunc(func(context.Context, InboundMessage) (bool, error) {
+		return false, admissionErr
+	}))
+
+	err = mb.PublishInbound(context.Background(), InboundMessage{
+		Context: InboundContext{
+			Channel:  "test",
+			ChatID:   "chat-1",
+			SenderID: "user-1",
+		},
+		ChannelOrigin: true,
+	})
+	if !errors.Is(err, admissionErr) {
+		t.Fatalf("PublishInbound error = %v, want %v", err, admissionErr)
+	}
+	if got := len(mb.inbound); got != 0 {
+		t.Fatalf("inbound queue depth = %d, want 0", got)
+	}
+
+	failed := receiveBusRuntimeEvent(t, eventsCh)
+	if failed.Kind != runtimeevents.KindBusPublishFailed || failed.Source.Name != "inbound" {
+		t.Fatalf("publish failure event = %+v", failed)
+	}
+	if failed.Attrs["error"] != admissionErr.Error() {
+		t.Fatalf("publish failure error = %#v, want %q", failed.Attrs["error"], admissionErr)
+	}
+}
+
+func TestPublishInbound_AdmissionCanConsumeWithoutQueueing(t *testing.T) {
+	mb := NewMessageBus()
+	defer mb.Close()
+
+	mb.SetInboundAdmission(inboundAdmissionFunc(func(context.Context, InboundMessage) (bool, error) {
+		return false, nil
+	}))
+	err := mb.PublishInbound(context.Background(), InboundMessage{
+		Context: InboundContext{
+			Channel:  "test",
+			ChatID:   "chat-1",
+			SenderID: "user-1",
+		},
+		ChannelOrigin: true,
+	})
+	if err != nil {
+		t.Fatalf("PublishInbound failed: %v", err)
+	}
+	if got := len(mb.inbound); got != 0 {
+		t.Fatalf("inbound queue depth = %d, want 0", got)
+	}
+}
+
+func TestPublishInbound_AdmissionSeesNormalizedIsolatedMetadata(t *testing.T) {
+	mb := NewMessageBus()
+	defer mb.Close()
+
+	originalTime := time.Date(2026, time.July, 28, 12, 30, 0, 123, time.FixedZone("test", -4*60*60))
+	originalRaw := map[string]string{"safe": "original"}
+	originalHandles := map[string]string{"thread": "reply-1"}
+	originalMedia := []string{"media://one"}
+	originalAttachments := []InboundAttachment{{
+		Filename:    "report.pdf",
+		ContentType: "application/pdf",
+		Kind:        "file",
+		SizeBytes:   42,
+	}}
+
+	mb.SetInboundAdmission(inboundAdmissionFunc(func(_ context.Context, msg InboundMessage) (bool, error) {
+		if msg.Context.Channel != "slack" || msg.Context.ChatType != "group" {
+			t.Errorf("admission context = %+v, want trimmed channel and normalized chat type", msg.Context)
+		}
+		if msg.EventDedupeID != "event-1" ||
+			msg.EventSubject != "Release notice" ||
+			msg.ConversationName != "Release room" {
+			t.Errorf(
+				"admission event metadata = %q/%q/%q",
+				msg.EventDedupeID,
+				msg.EventSubject,
+				msg.ConversationName,
+			)
+		}
+		if msg.Context.EventDedupeID != msg.EventDedupeID ||
+			msg.Context.EventSubject != msg.EventSubject ||
+			msg.Context.ConversationName != msg.ConversationName {
+			t.Errorf("context metadata was not mirrored to message: %+v", msg)
+		}
+		if !msg.EventSenderVerified ||
+			!msg.EventTransportAuthenticated ||
+			!msg.Context.EventSenderVerified ||
+			!msg.Context.EventTransportAuthenticated {
+			t.Errorf("email trust metadata was not mirrored: %+v", msg)
+		}
+		if msg.OccurredAt == nil || !msg.OccurredAt.Equal(originalTime.UTC()) ||
+			msg.OccurredAt.Location() != time.UTC {
+			t.Errorf("admission occurred_at = %v, want UTC %v", msg.OccurredAt, originalTime.UTC())
+		}
+		if msg.Context.OccurredAt == msg.OccurredAt ||
+			&msg.Context.Attachments[0] == &msg.Attachments[0] {
+			t.Error("context and top-level event metadata share mutable storage")
+		}
+
+		msg.Context.Raw["safe"] = "hook"
+		msg.Context.ReplyHandles["thread"] = "hook"
+		msg.Media[0] = "hook"
+		msg.Attachments[0].Filename = "hook"
+		msg.Context.Attachments[0].Filename = "context-hook"
+		*msg.OccurredAt = time.Time{}
+		*msg.Context.OccurredAt = time.Time{}
+		return true, nil
+	}))
+
+	input := InboundMessage{
+		Context: InboundContext{
+			Channel:                     " slack ",
+			ChatID:                      " chat-1 ",
+			ChatType:                    " GROUP ",
+			SenderID:                    " user-1 ",
+			Raw:                         originalRaw,
+			ReplyHandles:                originalHandles,
+			EventDedupeID:               " event-1 ",
+			OccurredAt:                  &originalTime,
+			EventSubject:                " Release notice ",
+			ConversationName:            " Release room ",
+			Attachments:                 originalAttachments,
+			EventSenderVerified:         true,
+			EventTransportAuthenticated: true,
+		},
+		Content:       "hello",
+		Media:         originalMedia,
+		ChannelOrigin: true,
+	}
+	if err := mb.PublishInbound(context.Background(), input); err != nil {
+		t.Fatalf("PublishInbound failed: %v", err)
+	}
+
+	if originalRaw["safe"] != "original" ||
+		originalHandles["thread"] != "reply-1" ||
+		originalMedia[0] != "media://one" ||
+		originalAttachments[0].Filename != "report.pdf" ||
+		originalTime.IsZero() {
+		t.Fatal("admission mutated caller-owned metadata")
+	}
+
+	queued := <-mb.InboundChan()
+	if queued.Context.Raw["safe"] != "original" ||
+		queued.Context.ReplyHandles["thread"] != "reply-1" ||
+		queued.Media[0] != "media://one" ||
+		queued.Attachments[0].Filename != "report.pdf" ||
+		queued.Context.Attachments[0].Filename != "report.pdf" ||
+		queued.EventSubject != "Release notice" ||
+		queued.Context.EventSubject != "Release notice" ||
+		!queued.EventSenderVerified ||
+		!queued.EventTransportAuthenticated ||
+		!queued.Context.EventSenderVerified ||
+		!queued.Context.EventTransportAuthenticated ||
+		queued.OccurredAt == nil || queued.OccurredAt.IsZero() ||
+		queued.Context.OccurredAt == nil || queued.Context.OccurredAt.IsZero() {
+		t.Fatalf("admission mutated queued metadata: %+v", queued)
+	}
+}
+
+func TestPublishInbound_InternalMessageBypassesAdmission(t *testing.T) {
+	mb := NewMessageBus()
+	defer mb.Close()
+
+	calls := 0
+	mb.SetInboundAdmission(inboundAdmissionFunc(func(context.Context, InboundMessage) (bool, error) {
+		calls++
+		return false, nil
+	}))
+	err := mb.PublishInbound(context.Background(), InboundMessage{
+		Context: InboundContext{
+			Channel:  "internal",
+			ChatID:   "job-1",
+			SenderID: "system",
+		},
+		Content: "run",
+	})
+	if err != nil {
+		t.Fatalf("PublishInbound failed: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("admission calls = %d, want 0", calls)
+	}
+	if got := <-mb.InboundChan(); got.Content != "run" {
+		t.Fatalf("queued content = %q, want run", got.Content)
+	}
+}
+
+func TestPublishInboundPreparationRunsAfterAdmissionOnlyForForwardedMessage(t *testing.T) {
+	t.Run("forwarded", func(t *testing.T) {
+		mb := NewMessageBus()
+		defer mb.Close()
+
+		order := make([]string, 0, 2)
+		mb.SetInboundAdmission(inboundAdmissionFunc(
+			func(context.Context, InboundMessage) (bool, error) {
+				order = append(order, "admission")
+				return true, nil
+			},
+		))
+		err := mb.PublishInboundWithPreparation(
+			context.Background(),
+			InboundMessage{
+				Context: InboundContext{
+					Channel:  "test",
+					ChatID:   "chat-1",
+					SenderID: "user-1",
+				},
+				ChannelOrigin: true,
+			},
+			func() { order = append(order, "prepare") },
+		)
+		if err != nil {
+			t.Fatalf("PublishInboundWithPreparation failed: %v", err)
+		}
+		if len(order) != 2 || order[0] != "admission" || order[1] != "prepare" {
+			t.Fatalf("callback order = %#v, want [admission prepare]", order)
+		}
+		if got := len(mb.InboundChan()); got != 1 {
+			t.Fatalf("inbound queue depth = %d, want 1", got)
+		}
+	})
+
+	t.Run("consumed", func(t *testing.T) {
+		mb := NewMessageBus()
+		defer mb.Close()
+
+		prepared := false
+		mb.SetInboundAdmission(inboundAdmissionFunc(
+			func(context.Context, InboundMessage) (bool, error) {
+				return false, nil
+			},
+		))
+		err := mb.PublishInboundWithPreparation(
+			context.Background(),
+			InboundMessage{
+				Context: InboundContext{
+					Channel:  "test",
+					ChatID:   "chat-1",
+					SenderID: "user-1",
+				},
+				ChannelOrigin: true,
+			},
+			func() { prepared = true },
+		)
+		if err != nil {
+			t.Fatalf("PublishInboundWithPreparation failed: %v", err)
+		}
+		if prepared {
+			t.Fatal("preparation ran for admission-consumed message")
+		}
+		if got := len(mb.InboundChan()); got != 0 {
+			t.Fatalf("inbound queue depth = %d, want 0", got)
+		}
+	})
+
+	t.Run("rejected", func(t *testing.T) {
+		mb := NewMessageBus()
+		defer mb.Close()
+
+		wantErr := errors.New("durable insert failed")
+		prepared := false
+		mb.SetInboundAdmission(inboundAdmissionFunc(
+			func(context.Context, InboundMessage) (bool, error) {
+				return false, wantErr
+			},
+		))
+		err := mb.PublishInboundWithPreparation(
+			context.Background(),
+			InboundMessage{
+				Context: InboundContext{
+					Channel:  "test",
+					ChatID:   "chat-1",
+					SenderID: "user-1",
+				},
+				ChannelOrigin: true,
+			},
+			func() { prepared = true },
+		)
+		if !errors.Is(err, wantErr) {
+			t.Fatalf("PublishInboundWithPreparation error = %v, want %v", err, wantErr)
+		}
+		if prepared {
+			t.Fatal("preparation ran for admission-rejected message")
+		}
+		if got := len(mb.InboundChan()); got != 0 {
+			t.Fatalf("inbound queue depth = %d, want 0", got)
+		}
+	})
+}
+
+func TestPublishInboundTransactionalPreparationRollsBackWhenQueueingIsCanceled(t *testing.T) {
+	mb := NewMessageBus()
+	defer mb.Close()
+	for index := 0; index < cap(mb.inbound); index++ {
+		err := mb.PublishInbound(context.Background(), InboundMessage{
+			Context: InboundContext{
+				Channel:  "test",
+				ChatID:   "occupied",
+				SenderID: "user",
+			},
+		})
+		if err != nil {
+			t.Fatalf("fill inbound queue: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	prepared := make(chan struct{})
+	rolledBack := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		_, err := mb.PublishInboundWithTransactionalPreparationResult(
+			ctx,
+			InboundMessage{
+				Context: InboundContext{
+					Channel:  "test",
+					ChatID:   "chat-1",
+					SenderID: "user-1",
+				},
+			},
+			func() func() {
+				close(prepared)
+				return func() { close(rolledBack) }
+			},
+		)
+		result <- err
+	}()
+
+	select {
+	case <-prepared:
+	case <-time.After(time.Second):
+		t.Fatal("transactional preparation did not run")
+	}
+	cancel()
+	select {
+	case <-rolledBack:
+	case <-time.After(time.Second):
+		t.Fatal("transactional preparation was not rolled back")
+	}
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("publish error = %v, want context.Canceled", err)
+	}
+	if got := len(mb.inbound); got != cap(mb.inbound) {
+		t.Fatalf("inbound queue depth = %d, want %d", got, cap(mb.inbound))
+	}
+}
+
+func TestPublishInboundTransactionalRollbackDoesNotBlockBusClose(t *testing.T) {
+	mb := NewMessageBus()
+	for index := 0; index < cap(mb.inbound); index++ {
+		err := mb.PublishInbound(context.Background(), InboundMessage{
+			Context: InboundContext{
+				Channel:  "test",
+				ChatID:   "occupied",
+				SenderID: "user",
+			},
+		})
+		if err != nil {
+			t.Fatalf("fill inbound queue: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	prepared := make(chan struct{})
+	rollbackStarted := make(chan struct{})
+	releaseRollback := make(chan struct{})
+	publishResult := make(chan error, 1)
+	go func() {
+		_, err := mb.PublishInboundWithTransactionalPreparationResult(
+			ctx,
+			InboundMessage{
+				Context: InboundContext{
+					Channel:  "test",
+					ChatID:   "chat-1",
+					SenderID: "user-1",
+				},
+			},
+			func() func() {
+				close(prepared)
+				return func() {
+					close(rollbackStarted)
+					<-releaseRollback
+				}
+			},
+		)
+		publishResult <- err
+	}()
+
+	select {
+	case <-prepared:
+	case <-time.After(time.Second):
+		t.Fatal("transactional preparation did not run")
+	}
+	cancel()
+	select {
+	case <-rollbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("transactional rollback did not start")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		mb.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("MessageBus.Close waited for provider rollback")
+	}
+
+	close(releaseRollback)
+	if err := <-publishResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("publish error = %v, want context.Canceled", err)
+	}
+}
+
+func TestPublishInbound_ClosedBusDoesNotRunAdmission(t *testing.T) {
+	mb := NewMessageBus()
+	calls := 0
+	mb.SetInboundAdmission(inboundAdmissionFunc(func(context.Context, InboundMessage) (bool, error) {
+		calls++
+		return false, nil
+	}))
+	mb.Close()
+
+	err := mb.PublishInbound(context.Background(), InboundMessage{
+		Context: InboundContext{
+			Channel:  "test",
+			ChatID:   "chat-1",
+			SenderID: "user-1",
+		},
+		ChannelOrigin: true,
+	})
+	if !errors.Is(err, ErrBusClosed) {
+		t.Fatalf("PublishInbound error = %v, want ErrBusClosed", err)
+	}
+	if calls != 0 {
+		t.Fatalf("admission calls = %d, want 0", calls)
+	}
+}
+
+func TestCloseCancelsInFlightAdmission(t *testing.T) {
+	mb := NewMessageBus()
+	admissionStarted := make(chan struct{})
+	mb.SetInboundAdmission(inboundAdmissionFunc(
+		func(ctx context.Context, _ InboundMessage) (bool, error) {
+			close(admissionStarted)
+			<-ctx.Done()
+			return false, ctx.Err()
+		},
+	))
+
+	published := make(chan error, 1)
+	go func() {
+		published <- mb.PublishInbound(context.Background(), InboundMessage{
+			Context: InboundContext{
+				Channel:  "test",
+				ChatID:   "chat-1",
+				SenderID: "user-1",
+			},
+			ChannelOrigin: true,
+		})
+	}()
+	select {
+	case <-admissionStarted:
+	case <-time.After(time.Second):
+		t.Fatal("admission did not start")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		mb.Close()
+		close(closed)
+	}()
+	select {
+	case err := <-published:
+		if !errors.Is(err, ErrBusClosed) {
+			t.Fatalf("PublishInbound() error = %v, want ErrBusClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("PublishInbound did not unblock during Close")
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not wait for and finish canceled admission")
+	}
+}
+
+func TestInboundAdmissionMetadataIsNotSerialized(t *testing.T) {
+	now := time.Now()
+	encoded, err := json.Marshal(InboundMessage{
+		Context: InboundContext{
+			TurnUXID:         "process-local-turn-ux",
+			EventDedupeID:    "context-event-secret",
+			OccurredAt:       &now,
+			EventSubject:     "context private subject",
+			ConversationName: "context private room",
+			Attachments: []InboundAttachment{{
+				Filename: "context-private.txt",
+			}},
+			EventSenderVerified:         true,
+			EventTransportAuthenticated: true,
+		},
+		ChannelOrigin:               true,
+		EventDedupeID:               "event-secret",
+		OccurredAt:                  &now,
+		EventSubject:                "private subject",
+		ConversationName:            "private room",
+		EventSenderVerified:         true,
+		EventTransportAuthenticated: true,
+		Attachments: []InboundAttachment{{
+			Filename:    "private.txt",
+			ContentType: "text/plain",
+			Kind:        "file",
+			SizeBytes:   10,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	for _, forbidden := range []string{
+		"event-secret",
+		"private room",
+		"private.txt",
+		"context-event-secret",
+		"context private subject",
+		"context private room",
+		"context-private.txt",
+		"process-local-turn-ux",
+		"private subject",
+		"channel_origin",
+		"occurred_at",
+		"EventSenderVerified",
+		"EventTransportAuthenticated",
+	} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("serialized inbound message contains admission metadata %q: %s", forbidden, encoded)
+		}
 	}
 }
 

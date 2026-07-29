@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -57,20 +58,294 @@ var (
 
 // typingEntry wraps a typing stop function with a creation timestamp for TTL eviction.
 type typingEntry struct {
+	identity  *turnUXIdentity
 	stop      func()
 	createdAt time.Time
 }
 
 // reactionEntry wraps a reaction undo function with a creation timestamp for TTL eviction.
 type reactionEntry struct {
+	identity  *turnUXIdentity
 	undo      func()
 	createdAt time.Time
 }
 
 // placeholderEntry wraps a placeholder ID with a creation timestamp for TTL eviction.
 type placeholderEntry struct {
+	identity  *turnUXIdentity
 	id        string
 	createdAt time.Time
+	owner     Channel
+}
+
+// turnUXIdentity is shared by every transient artifact for one inbound
+// registration. Rebinding the identity for a steering continuation therefore
+// changes typing, reaction, and placeholder ownership atomically.
+type turnUXIdentity struct {
+	turnUXID atomic.Pointer[string]
+}
+
+func newTurnUXIdentity(turnUXID string) *turnUXIdentity {
+	turnUXID = strings.TrimSpace(turnUXID)
+	if turnUXID == "" {
+		return nil
+	}
+	identity := &turnUXIdentity{}
+	identity.turnUXID.Store(&turnUXID)
+	return identity
+}
+
+func (identity *turnUXIdentity) currentTurnUXID() string {
+	if identity == nil {
+		return ""
+	}
+	turnUXID := identity.turnUXID.Load()
+	if turnUXID == nil {
+		return ""
+	}
+	return *turnUXID
+}
+
+func (identity *turnUXIdentity) rebind(fromTurnUXID, toTurnUXID string) bool {
+	if identity == nil {
+		return false
+	}
+	fromTurnUXID = strings.TrimSpace(fromTurnUXID)
+	toTurnUXID = strings.TrimSpace(toTurnUXID)
+	if fromTurnUXID == "" || toTurnUXID == "" {
+		return false
+	}
+	for {
+		current := identity.turnUXID.Load()
+		if current == nil || *current != fromTurnUXID {
+			return false
+		}
+		replacement := toTurnUXID
+		if identity.turnUXID.CompareAndSwap(current, &replacement) {
+			return true
+		}
+	}
+}
+
+func asTypingEntry(value any) *typingEntry {
+	entry, _ := value.(*typingEntry)
+	return entry
+}
+
+func asReactionEntry(value any) *reactionEntry {
+	entry, _ := value.(*reactionEntry)
+	return entry
+}
+
+func asPlaceholderEntry(value any) *placeholderEntry {
+	entry, _ := value.(*placeholderEntry)
+	return entry
+}
+
+func placeholderEntryOwner(entry *placeholderEntry, fallback Channel) Channel {
+	if entry != nil && entry.owner != nil {
+		return entry.owner
+	}
+	return fallback
+}
+
+func deleteTurnUXEntryIfCurrent(entries *sync.Map, key, value any) bool {
+	return entries.CompareAndDelete(key, value)
+}
+
+type turnUXScopedEntry interface {
+	currentTurnUXID() string
+}
+
+func (entry *typingEntry) currentTurnUXID() string {
+	if entry == nil {
+		return ""
+	}
+	return entry.identity.currentTurnUXID()
+}
+
+func (entry *reactionEntry) currentTurnUXID() string {
+	if entry == nil {
+		return ""
+	}
+	return entry.identity.currentTurnUXID()
+}
+
+func (entry *placeholderEntry) currentTurnUXID() string {
+	if entry == nil {
+		return ""
+	}
+	return entry.identity.currentTurnUXID()
+}
+
+// takeTurnUXEntryForMessage atomically consumes an entry only when it belongs
+// to the requested turn UX identity. Empty entry IDs are legacy/unscoped and
+// retain their historical consume-on-next-outbound behavior. An empty caller
+// ID cannot prove ownership of a scoped entry, so it leaves that entry intact.
+func takeTurnUXEntryForMessage(
+	entries *sync.Map,
+	key, turnUXID string,
+) (any, bool) {
+	turnUXID = strings.TrimSpace(turnUXID)
+	for {
+		value, loaded := entries.Load(key)
+		if !loaded {
+			return nil, false
+		}
+		if scoped, ok := value.(turnUXScopedEntry); ok {
+			entryTurnUXID := strings.TrimSpace(scoped.currentTurnUXID())
+			if entryTurnUXID != "" &&
+				(turnUXID == "" || entryTurnUXID != turnUXID) {
+				return nil, false
+			}
+		}
+		if entries.CompareAndDelete(key, value) {
+			return value, true
+		}
+	}
+}
+
+func boundedTurnUXCleanupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	detached := context.WithoutCancel(parent)
+	if deadline, ok := parent.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining < turnUXRollbackTimeout {
+			return context.WithDeadline(detached, deadline)
+		}
+	}
+	return context.WithTimeout(detached, turnUXRollbackTimeout)
+}
+
+func runAsyncTurnUXCleanup(
+	parent context.Context,
+	operation func(context.Context),
+) {
+	if operation == nil {
+		return
+	}
+	detached := context.Background()
+	if parent != nil {
+		detached = context.WithoutCancel(parent)
+	}
+	go func() {
+		cleanupCtx, cancel := context.WithTimeout(
+			detached,
+			turnUXRollbackTimeout,
+		)
+		defer cancel()
+		defer func() {
+			if recover() != nil {
+				logger.WarnC(
+					"channels",
+					"Detached turn UX cleanup panicked",
+				)
+			}
+		}()
+		operation(cleanupCtx)
+	}()
+}
+
+func runBoundedTurnUXOperation(
+	parent context.Context,
+	channel, chatID, kind string,
+	operation func(context.Context),
+) {
+	if operation == nil {
+		return
+	}
+	cleanupCtx, cancel := boundedTurnUXCleanupContext(parent)
+	defer cancel()
+	if cleanupCtx.Err() != nil {
+		logger.WarnCF("channels", "Turn UX cleanup callback timed out", map[string]any{
+			"channel": channel,
+			"chat_id": chatID,
+			"kind":    kind,
+		})
+		return
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() {
+			if recover() != nil {
+				logger.WarnCF("channels", "Turn UX cleanup callback panicked", map[string]any{
+					"channel": channel,
+					"chat_id": chatID,
+					"kind":    kind,
+				})
+			}
+		}()
+		operation(cleanupCtx)
+	}()
+
+	select {
+	case <-done:
+	case <-cleanupCtx.Done():
+		logger.WarnCF("channels", "Turn UX cleanup callback timed out", map[string]any{
+			"channel": channel,
+			"chat_id": chatID,
+			"kind":    kind,
+		})
+	}
+}
+
+func runBoundedTurnUXCallback(
+	parent context.Context,
+	channel, chatID, kind string,
+	callback func(),
+) {
+	if callback == nil {
+		return
+	}
+	runBoundedTurnUXOperation(
+		parent,
+		channel,
+		chatID,
+		kind,
+		func(context.Context) {
+			callback()
+		},
+	)
+}
+
+func logTurnUXPlaceholderCleanup(
+	ctx context.Context,
+	owner Channel,
+	channel, chatID, placeholderID string,
+) {
+	if err := removeTurnUXPlaceholder(ctx, owner, chatID, placeholderID); err != nil {
+		logger.WarnCF("channels", "Failed to roll back turn placeholder", map[string]any{
+			"channel": channel,
+			"chat_id": chatID,
+			"error":   err.Error(),
+		})
+	}
+}
+
+func runBoundedTurnUXPlaceholderCleanup(
+	parent context.Context,
+	owner Channel,
+	channel, chatID, placeholderID string,
+) {
+	runBoundedTurnUXOperation(
+		parent,
+		channel,
+		chatID,
+		"placeholder",
+		func(cleanupCtx context.Context) {
+			logTurnUXPlaceholderCleanup(
+				cleanupCtx,
+				owner,
+				channel,
+				chatID,
+				placeholderID,
+			)
+		},
+	)
 }
 
 // channelRateConfig maps channel name to per-second rate limit.
@@ -103,6 +378,16 @@ type channelRetirement struct {
 	worker      *channelWorker
 }
 
+type turnUXKeyLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+type turnUXTransitionLock struct {
+	token chan struct{}
+	refs  int
+}
+
 type Manager struct {
 	channels                  map[string]Channel
 	workers                   map[string]*channelWorker
@@ -124,9 +409,13 @@ type Manager struct {
 	activeSends               int
 	activeSendsByChannel      map[string]int
 	activeSendsChanged        chan struct{}
-	placeholders              sync.Map          // "channel:chatID" → placeholderID (string)
-	typingStops               sync.Map          // "channel:chatID" → func()
-	reactionUndos             sync.Map          // "channel:chatID" → reactionEntry
+	placeholders              sync.Map // "channel:chatID" → placeholderID (string)
+	typingStops               sync.Map // "channel:chatID" → func()
+	reactionUndos             sync.Map // "channel:chatID" → reactionEntry
+	turnUXLocksMu             sync.Mutex
+	turnUXLocks               map[string]*turnUXKeyLock
+	turnUXTransitionsMu       sync.Mutex
+	turnUXTransitions         map[string]*turnUXTransitionLock
 	streamActive              sync.Map          // streamSuppressionKey → true (set when streamer.Finalize sent the message)
 	streamAuxiliaryTombstones sync.Map          // streamSuppressionKey → time.Time (drops late auxiliary messages after stream final)
 	channelHashes             map[string]string // channel name → config hash
@@ -250,12 +539,21 @@ func outboundMediaChatID(msg bus.OutboundMediaMessage) string {
 	return msg.ChatID
 }
 
-func streamSuppressionKey(channel, chatID, sessionKey string) string {
+func streamSuppressionKey(
+	channel, chatID, sessionKey, turnUXID string,
+) string {
 	key := channel + ":" + chatID
-	if strings.TrimSpace(sessionKey) == "" {
-		return key
+	if sessionKey = strings.TrimSpace(sessionKey); sessionKey != "" {
+		key += ":" + sessionKey
 	}
-	return key + ":" + sessionKey
+	// Preserve the legacy channel/chat[/session] key when no exact turn
+	// identity is available. Agent turns provide TurnUXID, which prevents one
+	// finalized stream from consuming or suppressing another turn's marker
+	// while their rate-limited final outbounds overlap.
+	if turnUXID = strings.TrimSpace(turnUXID); turnUXID != "" {
+		key += ":turn:" + turnUXID
+	}
+	return key
 }
 
 func trackedToolFeedbackMessageChatID(ch Channel, chatID string, outboundCtx *bus.InboundContext) string {
@@ -349,16 +647,161 @@ func (m *Manager) splitOnMarkerEnabled() bool {
 	return m.config != nil && m.config.Agents.Defaults.SplitOnMarker
 }
 
+func (m *Manager) lockTurnUXKey(key string) func() {
+	m.turnUXLocksMu.Lock()
+	if m.turnUXLocks == nil {
+		m.turnUXLocks = make(map[string]*turnUXKeyLock)
+	}
+	keyLock := m.turnUXLocks[key]
+	if keyLock == nil {
+		keyLock = &turnUXKeyLock{}
+		m.turnUXLocks[key] = keyLock
+	}
+	keyLock.refs++
+	m.turnUXLocksMu.Unlock()
+
+	keyLock.mu.Lock()
+	return func() {
+		keyLock.mu.Unlock()
+		m.turnUXLocksMu.Lock()
+		keyLock.refs--
+		if keyLock.refs == 0 {
+			delete(m.turnUXLocks, key)
+		}
+		m.turnUXLocksMu.Unlock()
+	}
+}
+
+// lockTurnUXTransition serializes provider lifecycle transitions for one chat.
+// It is intentionally separate from the short-lived map mutation lock because
+// provider cleanup and preparation may perform network I/O. Acquisition is
+// context-aware so a follower never inherits another transition's callback or
+// provider latency after its own deadline.
+func (m *Manager) lockTurnUXTransition(
+	ctx context.Context,
+	key string,
+) (func(), bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return nil, false
+	}
+
+	m.turnUXTransitionsMu.Lock()
+	if m.turnUXTransitions == nil {
+		m.turnUXTransitions = make(map[string]*turnUXTransitionLock)
+	}
+	keyLock := m.turnUXTransitions[key]
+	if keyLock == nil {
+		keyLock = &turnUXTransitionLock{
+			token: make(chan struct{}, 1),
+		}
+		keyLock.token <- struct{}{}
+		m.turnUXTransitions[key] = keyLock
+	}
+	keyLock.refs++
+	m.turnUXTransitionsMu.Unlock()
+
+	select {
+	case <-keyLock.token:
+		if ctx.Err() != nil {
+			keyLock.token <- struct{}{}
+			m.releaseTurnUXTransitionRef(key, keyLock)
+			return nil, false
+		}
+		return func() {
+			keyLock.token <- struct{}{}
+			m.releaseTurnUXTransitionRef(key, keyLock)
+		}, true
+	case <-ctx.Done():
+		m.releaseTurnUXTransitionRef(key, keyLock)
+		return nil, false
+	}
+}
+
+func (m *Manager) releaseTurnUXTransitionRef(
+	key string,
+	keyLock *turnUXTransitionLock,
+) {
+	m.turnUXTransitionsMu.Lock()
+	keyLock.refs--
+	if keyLock.refs == 0 && m.turnUXTransitions[key] == keyLock {
+		delete(m.turnUXTransitions, key)
+	}
+	m.turnUXTransitionsMu.Unlock()
+}
+
 // RecordPlaceholder registers a placeholder message for later editing.
 // Implements PlaceholderRecorder.
 func (m *Manager) RecordPlaceholder(channel, chatID, placeholderID string) {
+	m.mu.RLock()
+	owner := m.channels[channel]
+	m.mu.RUnlock()
+	m.recordPlaceholder(
+		context.Background(),
+		channel,
+		chatID,
+		placeholderID,
+		"",
+		owner,
+	)
+}
+
+func (m *Manager) recordPlaceholder(
+	ctx context.Context,
+	channel, chatID, placeholderID, turnUXID string,
+	owner Channel,
+) bool {
 	key := channel + ":" + chatID
-	m.placeholders.Store(key, placeholderEntry{id: placeholderID, createdAt: time.Now()})
+	unlockTransition, acquired := m.lockTurnUXTransition(ctx, key)
+	if !acquired {
+		runAsyncTurnUXCleanup(ctx, func(cleanupCtx context.Context) {
+			runBoundedTurnUXPlaceholderCleanup(
+				cleanupCtx,
+				owner,
+				channel,
+				chatID,
+				placeholderID,
+			)
+		})
+		return false
+	}
+	defer unlockTransition()
+	unlock := m.lockTurnUXKey(key)
+	entry := &placeholderEntry{
+		identity:  newTurnUXIdentity(turnUXID),
+		id:        placeholderID,
+		createdAt: time.Now(),
+		owner:     owner,
+	}
+	previous, loaded := m.placeholders.Swap(key, entry)
+	unlock()
+
+	if oldEntry := asPlaceholderEntry(previous); loaded && oldEntry != nil {
+		runBoundedTurnUXPlaceholderCleanup(
+			ctx,
+			placeholderEntryOwner(oldEntry, owner),
+			channel,
+			chatID,
+			oldEntry.id,
+		)
+	}
+	return true
 }
 
 // SendPlaceholder sends a "Thinking…" placeholder for the given channel/chatID
 // and records it for later editing. Returns true if a placeholder was sent.
 func (m *Manager) SendPlaceholder(ctx context.Context, channel, chatID string) bool {
+	return m.SendPlaceholderForMessage(ctx, channel, chatID, "")
+}
+
+// SendPlaceholderForMessage sends and scopes a deferred placeholder to the
+// inbound message that caused it.
+func (m *Manager) SendPlaceholderForMessage(
+	ctx context.Context,
+	channel, chatID, turnUXID string,
+) bool {
 	m.mu.RLock()
 	ch, ok := m.channels[channel]
 	m.mu.RUnlock()
@@ -373,19 +816,34 @@ func (m *Manager) SendPlaceholder(ctx context.Context, channel, chatID string) b
 	if err != nil || phID == "" {
 		return false
 	}
-	m.RecordPlaceholder(channel, chatID, phID)
-	return true
+	return m.recordPlaceholder(ctx, channel, chatID, phID, turnUXID, ch)
 }
 
 // RecordTypingStop registers a typing stop function for later invocation.
 // Implements PlaceholderRecorder.
 func (m *Manager) RecordTypingStop(channel, chatID string, stop func()) {
 	key := channel + ":" + chatID
-	entry := typingEntry{stop: stop, createdAt: time.Now()}
-	if previous, loaded := m.typingStops.Swap(key, entry); loaded {
-		if oldEntry, ok := previous.(typingEntry); ok && oldEntry.stop != nil {
-			oldEntry.stop()
-		}
+	unlockTransition, acquired := m.lockTurnUXTransition(
+		context.Background(),
+		key,
+	)
+	if !acquired {
+		return
+	}
+	defer unlockTransition()
+	unlock := m.lockTurnUXKey(key)
+	entry := &typingEntry{stop: stop, createdAt: time.Now()}
+	previous, loaded := m.typingStops.Swap(key, entry)
+	unlock()
+
+	if oldEntry := asTypingEntry(previous); loaded && oldEntry != nil && oldEntry.stop != nil {
+		runBoundedTurnUXCallback(
+			context.Background(),
+			channel,
+			chatID,
+			"typing",
+			oldEntry.stop,
+		)
 	}
 }
 
@@ -395,10 +853,103 @@ func (m *Manager) RecordTypingStop(channel, chatID string, stop func()) {
 // regardless of whether an outbound message is published.
 func (m *Manager) InvokeTypingStop(channel, chatID string) {
 	key := channel + ":" + chatID
+	unlockTransition, acquired := m.lockTurnUXTransition(
+		context.Background(),
+		key,
+	)
+	if !acquired {
+		return
+	}
+	defer unlockTransition()
 	if v, loaded := m.typingStops.LoadAndDelete(key); loaded {
-		if entry, ok := v.(typingEntry); ok {
-			entry.stop()
+		if entry := asTypingEntry(v); entry != nil {
+			runBoundedTurnUXCallback(
+				context.Background(),
+				channel,
+				chatID,
+				"typing",
+				entry.stop,
+			)
 		}
+	}
+}
+
+// InvokeTypingStopForMessage stops typing only when the current registration
+// belongs to turnUXID. This prevents an older worker finishing late from
+// consuming a newer turn's indicator for the same chat.
+func (m *Manager) InvokeTypingStopForMessage(channel, chatID, turnUXID string) {
+	key := channel + ":" + chatID
+	unlockTransition, acquired := m.lockTurnUXTransition(
+		context.Background(),
+		key,
+	)
+	if !acquired {
+		return
+	}
+	defer unlockTransition()
+	if v, loaded := takeTurnUXEntryForMessage(&m.typingStops, key, turnUXID); loaded {
+		if entry := asTypingEntry(v); entry != nil {
+			runBoundedTurnUXCallback(
+				context.Background(),
+				channel,
+				chatID,
+				"typing",
+				entry.stop,
+			)
+		}
+	}
+}
+
+// RebindTurnUXForMessage makes a steering message's freshly-created UX belong
+// to the already-active turn. Every artifact in one registration shares the
+// same identity, so a single successful CAS updates all of them atomically.
+func (m *Manager) RebindTurnUXForMessage(
+	channel, chatID, fromTurnUXID, toTurnUXID string,
+) {
+	fromTurnUXID = strings.TrimSpace(fromTurnUXID)
+	toTurnUXID = strings.TrimSpace(toTurnUXID)
+	if fromTurnUXID == "" || toTurnUXID == "" ||
+		fromTurnUXID == toTurnUXID {
+		return
+	}
+	key := channel + ":" + chatID
+	unlockTransition, acquired := m.lockTurnUXTransition(
+		context.Background(),
+		key,
+	)
+	if !acquired {
+		return
+	}
+	defer unlockTransition()
+	unlock := m.lockTurnUXKey(key)
+	defer unlock()
+	seen := make(map[*turnUXIdentity]struct{}, 3)
+	for _, entries := range []*sync.Map{
+		&m.typingStops,
+		&m.reactionUndos,
+		&m.placeholders,
+	} {
+		value, loaded := entries.Load(key)
+		if !loaded {
+			continue
+		}
+		var identity *turnUXIdentity
+		switch entry := value.(type) {
+		case *typingEntry:
+			identity = entry.identity
+		case *reactionEntry:
+			identity = entry.identity
+		case *placeholderEntry:
+			identity = entry.identity
+		}
+		if identity == nil {
+			continue
+		}
+		if _, duplicate := seen[identity]; duplicate {
+			continue
+		}
+		seen[identity] = struct{}{}
+		identity.rebind(fromTurnUXID, toTurnUXID)
 	}
 }
 
@@ -406,7 +957,436 @@ func (m *Manager) InvokeTypingStop(channel, chatID string) {
 // Implements PlaceholderRecorder.
 func (m *Manager) RecordReactionUndo(channel, chatID string, undo func()) {
 	key := channel + ":" + chatID
-	m.reactionUndos.Store(key, reactionEntry{undo: undo, createdAt: time.Now()})
+	unlockTransition, acquired := m.lockTurnUXTransition(
+		context.Background(),
+		key,
+	)
+	if !acquired {
+		return
+	}
+	defer unlockTransition()
+	unlock := m.lockTurnUXKey(key)
+	entry := &reactionEntry{undo: undo, createdAt: time.Now()}
+	previous, loaded := m.reactionUndos.Swap(key, entry)
+	unlock()
+
+	if oldEntry := asReactionEntry(previous); loaded && oldEntry != nil && oldEntry.undo != nil {
+		runBoundedTurnUXCallback(
+			context.Background(),
+			channel,
+			chatID,
+			"reaction",
+			oldEntry.undo,
+		)
+	}
+}
+
+// RecordTurnUX atomically tracks one inbound turn's transient UX and returns a
+// generation-specific rollback. CompareAndDelete prevents an older canceled
+// publish from removing a newer turn's indicators for the same chat.
+func (m *Manager) RecordTurnUX(
+	ctx context.Context,
+	channel, chatID string,
+	registration TurnUXRegistration,
+) func(context.Context) {
+	key := channel + ":" + chatID
+	unlockTransition, acquired := m.lockTurnUXTransition(ctx, key)
+	if !acquired {
+		m.cleanupUnrecordedTurnUXAsync(
+			ctx,
+			channel,
+			chatID,
+			registration,
+		)
+		return nil
+	}
+	defer unlockTransition()
+	return m.recordTurnUXWithinTransition(
+		ctx,
+		channel,
+		chatID,
+		registration,
+	)
+}
+
+// ReplaceTurnUX performs the entire provider UX handoff as one per-chat
+// transition. Prior effects receive bounded cleanup before build starts the
+// next provider generation.
+func (m *Manager) ReplaceTurnUX(
+	ctx context.Context,
+	channel, chatID string,
+	build func() TurnUXRegistration,
+) func(context.Context) {
+	key := channel + ":" + chatID
+	unlockTransition, acquired := m.lockTurnUXTransition(ctx, key)
+	if !acquired {
+		return nil
+	}
+	defer unlockTransition()
+
+	unlock := m.lockTurnUXKey(key)
+	previousTyping, typingLoaded := m.typingStops.LoadAndDelete(key)
+	previousReaction, reactionLoaded := m.reactionUndos.LoadAndDelete(key)
+	previousPlaceholder, placeholderLoaded := m.placeholders.LoadAndDelete(key)
+	unlock()
+
+	m.mu.RLock()
+	currentOwner := m.channels[channel]
+	m.mu.RUnlock()
+	cleanupReplacedTurnUX(
+		ctx,
+		channel,
+		chatID,
+		currentOwner,
+		previousTyping,
+		typingLoaded,
+		previousReaction,
+		reactionLoaded,
+		previousPlaceholder,
+		placeholderLoaded,
+	)
+
+	if build == nil {
+		return nil
+	}
+	return m.recordTurnUXWithinTransition(
+		ctx,
+		channel,
+		chatID,
+		build(),
+	)
+}
+
+func (m *Manager) recordTurnUXWithinTransition(
+	ctx context.Context,
+	channel, chatID string,
+	registration TurnUXRegistration,
+) func(context.Context) {
+	key := channel + ":" + chatID
+	owner := registration.Owner
+	if owner == nil {
+		// Legacy callers do not identify the creator. Resolve once at
+		// registration time; all later cleanup remains pinned to this owner.
+		m.mu.RLock()
+		owner = m.channels[channel]
+		m.mu.RUnlock()
+	}
+	identity := newTurnUXIdentity(registration.Identity)
+	now := time.Now()
+	var typing *typingEntry
+	if registration.TypingStop != nil {
+		typing = &typingEntry{
+			identity:  identity,
+			stop:      registration.TypingStop,
+			createdAt: now,
+		}
+	}
+
+	var reaction *reactionEntry
+	if registration.ReactionUndo != nil {
+		reaction = &reactionEntry{
+			identity:  identity,
+			undo:      registration.ReactionUndo,
+			createdAt: now,
+		}
+	}
+
+	var placeholder *placeholderEntry
+	if registration.Placeholder != "" {
+		placeholder = &placeholderEntry{
+			identity:  identity,
+			id:        registration.Placeholder,
+			createdAt: now,
+			owner:     owner,
+		}
+	}
+
+	// Serialize the three map mutations for this chat, then release the
+	// per-key lock before invoking any provider-owned cleanup callback.
+	unlock := m.lockTurnUXKey(key)
+	var previousTyping, previousReaction, previousPlaceholder any
+	var typingLoaded, reactionLoaded, placeholderLoaded bool
+	if typing != nil {
+		previousTyping, typingLoaded = m.typingStops.Swap(key, typing)
+	} else {
+		previousTyping, typingLoaded = m.typingStops.LoadAndDelete(key)
+	}
+	if reaction != nil {
+		previousReaction, reactionLoaded = m.reactionUndos.Swap(key, reaction)
+	} else {
+		previousReaction, reactionLoaded = m.reactionUndos.LoadAndDelete(key)
+	}
+	if placeholder != nil {
+		previousPlaceholder, placeholderLoaded = m.placeholders.Swap(key, placeholder)
+	} else {
+		previousPlaceholder, placeholderLoaded = m.placeholders.LoadAndDelete(key)
+	}
+	unlock()
+
+	cleanupReplacedTurnUX(
+		ctx,
+		channel,
+		chatID,
+		owner,
+		previousTyping,
+		typingLoaded,
+		previousReaction,
+		reactionLoaded,
+		previousPlaceholder,
+		placeholderLoaded,
+	)
+
+	if typing == nil && reaction == nil && placeholder == nil {
+		return nil
+	}
+	return func(rollbackCtx context.Context) {
+		unlockTransition, acquired := m.lockTurnUXTransition(
+			rollbackCtx,
+			key,
+		)
+		var typingDetached, reactionDetached, placeholderDetached bool
+		if acquired {
+			typingDetached, reactionDetached, placeholderDetached = m.detachRecordedTurnUX(
+				key,
+				typing,
+				reaction,
+				placeholder,
+			)
+		} else {
+			typingDetached, reactionDetached, placeholderDetached = m.detachRecordedTurnUXUnserialized(
+				key,
+				typing,
+				reaction,
+				placeholder,
+			)
+		}
+		cleanup := func(cleanupCtx context.Context) {
+			cleanupReplacedTurnUX(
+				cleanupCtx,
+				channel,
+				chatID,
+				placeholderEntryOwner(placeholder, registration.Owner),
+				typing,
+				typingDetached,
+				reaction,
+				reactionDetached,
+				placeholder,
+				placeholderDetached,
+			)
+		}
+		if !acquired {
+			runAsyncTurnUXCleanup(rollbackCtx, cleanup)
+			return
+		}
+		defer unlockTransition()
+		cleanup(rollbackCtx)
+	}
+}
+
+func (m *Manager) detachRecordedTurnUXUnserialized(
+	key string,
+	typing *typingEntry,
+	reaction *reactionEntry,
+	placeholder *placeholderEntry,
+) (bool, bool, bool) {
+	return typing != nil && m.typingStops.CompareAndDelete(key, typing),
+		reaction != nil && m.reactionUndos.CompareAndDelete(key, reaction),
+		placeholder != nil && m.placeholders.CompareAndDelete(key, placeholder)
+}
+
+func (m *Manager) detachRecordedTurnUX(
+	key string,
+	typing *typingEntry,
+	reaction *reactionEntry,
+	placeholder *placeholderEntry,
+) (bool, bool, bool) {
+	unlock := m.lockTurnUXKey(key)
+	defer unlock()
+	return typing != nil && m.typingStops.CompareAndDelete(key, typing),
+		reaction != nil && m.reactionUndos.CompareAndDelete(key, reaction),
+		placeholder != nil && m.placeholders.CompareAndDelete(key, placeholder)
+}
+
+func (m *Manager) detachTurnUXForMessageUnserialized(
+	key, turnUXID string,
+) (
+	typingValue any,
+	typingLoaded bool,
+	reactionValue any,
+	reactionLoaded bool,
+	placeholderValue any,
+	placeholderLoaded bool,
+) {
+	typingValue, typingLoaded = takeTurnUXEntryForMessage(
+		&m.typingStops,
+		key,
+		turnUXID,
+	)
+	reactionValue, reactionLoaded = takeTurnUXEntryForMessage(
+		&m.reactionUndos,
+		key,
+		turnUXID,
+	)
+	placeholderValue, placeholderLoaded = takeTurnUXEntryForMessage(
+		&m.placeholders,
+		key,
+		turnUXID,
+	)
+	return typingValue, typingLoaded,
+		reactionValue, reactionLoaded,
+		placeholderValue, placeholderLoaded
+}
+
+func (m *Manager) detachTurnUXForMessage(
+	key, turnUXID string,
+) (
+	typingValue any,
+	typingLoaded bool,
+	reactionValue any,
+	reactionLoaded bool,
+	placeholderValue any,
+	placeholderLoaded bool,
+) {
+	unlock := m.lockTurnUXKey(key)
+	defer unlock()
+	typingValue, typingLoaded = takeTurnUXEntryForMessage(
+		&m.typingStops,
+		key,
+		turnUXID,
+	)
+	reactionValue, reactionLoaded = takeTurnUXEntryForMessage(
+		&m.reactionUndos,
+		key,
+		turnUXID,
+	)
+	placeholderValue, placeholderLoaded = takeTurnUXEntryForMessage(
+		&m.placeholders,
+		key,
+		turnUXID,
+	)
+	return typingValue, typingLoaded,
+		reactionValue, reactionLoaded,
+		placeholderValue, placeholderLoaded
+}
+
+func (m *Manager) cleanupUnrecordedTurnUXAsync(
+	ctx context.Context,
+	channel, chatID string,
+	registration TurnUXRegistration,
+) {
+	runAsyncTurnUXCleanup(ctx, func(cleanupCtx context.Context) {
+		owner := registration.Owner
+		if owner == nil {
+			m.mu.RLock()
+			owner = m.channels[channel]
+			m.mu.RUnlock()
+		}
+		cleanupReplacedTurnUX(
+			cleanupCtx,
+			channel,
+			chatID,
+			owner,
+			&typingEntry{stop: registration.TypingStop},
+			registration.TypingStop != nil,
+			&reactionEntry{undo: registration.ReactionUndo},
+			registration.ReactionUndo != nil,
+			&placeholderEntry{
+				id:    registration.Placeholder,
+				owner: owner,
+			},
+			registration.Placeholder != "",
+		)
+	})
+}
+
+func cleanupReplacedTurnUX(
+	ctx context.Context,
+	channel, chatID string,
+	fallbackOwner Channel,
+	previousTyping any,
+	typingLoaded bool,
+	previousReaction any,
+	reactionLoaded bool,
+	previousPlaceholder any,
+	placeholderLoaded bool,
+) {
+	cleanupCtx, cancel := boundedTurnUXCleanupContext(ctx)
+	defer cancel()
+	if entry := asTypingEntry(previousTyping); typingLoaded && entry != nil && entry.stop != nil {
+		runBoundedTurnUXCallback(
+			cleanupCtx,
+			channel,
+			chatID,
+			"typing",
+			entry.stop,
+		)
+	}
+	if entry := asReactionEntry(previousReaction); reactionLoaded && entry != nil && entry.undo != nil {
+		runBoundedTurnUXCallback(
+			cleanupCtx,
+			channel,
+			chatID,
+			"reaction",
+			entry.undo,
+		)
+	}
+	if entry := asPlaceholderEntry(previousPlaceholder); placeholderLoaded && entry != nil {
+		runBoundedTurnUXPlaceholderCleanup(
+			cleanupCtx,
+			placeholderEntryOwner(entry, fallbackOwner),
+			channel,
+			chatID,
+			entry.id,
+		)
+	}
+}
+
+// CleanupTurnUXForMessage removes every transient artifact owned by turnUXID.
+// Entries for a newer turn sharing the same channel/chat are left intact.
+// All provider callbacks run after the per-key mutation lock is released.
+func (m *Manager) CleanupTurnUXForMessage(
+	ctx context.Context,
+	channel, chatID, turnUXID string,
+) {
+	key := channel + ":" + chatID
+	unlockTransition, acquired := m.lockTurnUXTransition(ctx, key)
+	var (
+		typingValue, reactionValue, placeholderValue    any
+		typingLoaded, reactionLoaded, placeholderLoaded bool
+	)
+	if acquired {
+		typingValue, typingLoaded, reactionValue, reactionLoaded,
+			placeholderValue, placeholderLoaded = m.detachTurnUXForMessage(
+			key,
+			turnUXID,
+		)
+	} else {
+		typingValue, typingLoaded, reactionValue, reactionLoaded,
+			placeholderValue, placeholderLoaded = m.detachTurnUXForMessageUnserialized(
+			key,
+			turnUXID,
+		)
+	}
+	cleanup := func(cleanupCtx context.Context) {
+		cleanupReplacedTurnUX(
+			cleanupCtx,
+			channel,
+			chatID,
+			nil,
+			typingValue,
+			typingLoaded,
+			reactionValue,
+			reactionLoaded,
+			placeholderValue,
+			placeholderLoaded,
+		)
+	}
+	if !acquired {
+		runAsyncTurnUXCleanup(ctx, cleanup)
+		return
+	}
+	defer unlockTransition()
+	cleanup(ctx)
 }
 
 // preSend handles typing stop, reaction undo, and placeholder editing before sending a message.
@@ -414,19 +1394,25 @@ func (m *Manager) RecordReactionUndo(channel, chatID string, undo func()) {
 func (m *Manager) preSend(ctx context.Context, name string, msg bus.OutboundMessage, ch Channel) ([]string, bool) {
 	chatID := outboundMessageChatID(msg)
 	key := name + ":" + chatID
-	streamKey := streamSuppressionKey(name, chatID, msg.SessionKey)
+	turnUXID := strings.TrimSpace(msg.Context.TurnUXID)
+	streamKey := streamSuppressionKey(
+		name,
+		chatID,
+		msg.SessionKey,
+		turnUXID,
+	)
 
 	// 1. Stop typing
-	if v, loaded := m.typingStops.LoadAndDelete(key); loaded {
-		if entry, ok := v.(typingEntry); ok {
-			entry.stop() // idempotent, safe
+	if v, loaded := takeTurnUXEntryForMessage(&m.typingStops, key, turnUXID); loaded {
+		if entry := asTypingEntry(v); entry != nil {
+			runBoundedTurnUXCallback(ctx, name, chatID, "typing", entry.stop)
 		}
 	}
 
 	// 2. Undo reaction
-	if v, loaded := m.reactionUndos.LoadAndDelete(key); loaded {
-		if entry, ok := v.(reactionEntry); ok {
-			entry.undo() // idempotent, safe
+	if v, loaded := takeTurnUXEntryForMessage(&m.reactionUndos, key, turnUXID); loaded {
+		if entry := asReactionEntry(v); entry != nil {
+			runBoundedTurnUXCallback(ctx, name, chatID, "reaction", entry.undo)
 		}
 	}
 
@@ -456,13 +1442,18 @@ func (m *Manager) preSend(ctx context.Context, name string, msg bus.OutboundMess
 	// outbound. Earlier queued visible messages must still be delivered.
 	if isFinalMessage {
 		if _, loaded := m.streamActive.LoadAndDelete(streamKey); loaded {
-			if v, loaded := m.placeholders.LoadAndDelete(key); loaded {
-				if entry, ok := v.(placeholderEntry); ok && entry.id != "" {
+			if v, loaded := takeTurnUXEntryForMessage(
+				&m.placeholders,
+				key,
+				turnUXID,
+			); loaded {
+				if entry := asPlaceholderEntry(v); entry != nil && entry.id != "" {
+					placeholderChannel := placeholderEntryOwner(entry, ch)
 					// Prefer deleting the placeholder (cleaner UX than editing to same content)
-					if deleter, ok := ch.(MessageDeleter); ok {
+					if deleter, ok := placeholderChannel.(MessageDeleter); ok {
 						deleter.DeleteMessage(ctx, chatID, entry.id) // best effort
-					} else if editor, ok := ch.(MessageEditor); ok {
-						if payloadEditor, ok := ch.(MessageEditorWithPayload); ok {
+					} else if editor, ok := placeholderChannel.(MessageEditor); ok {
+						if payloadEditor, ok := placeholderChannel.(MessageEditorWithPayload); ok {
 							_ = payloadEditor.EditMessageWithPayload(
 								ctx,
 								chatID,
@@ -502,29 +1493,37 @@ func (m *Manager) preSend(ctx context.Context, name string, msg bus.OutboundMess
 	}
 
 	// 5. Try editing placeholder
-	if v, loaded := m.placeholders.LoadAndDelete(key); loaded {
-		if entry, ok := v.(placeholderEntry); ok && entry.id != "" {
+	if v, loaded := takeTurnUXEntryForMessage(
+		&m.placeholders,
+		key,
+		turnUXID,
+	); loaded {
+		if entry := asPlaceholderEntry(v); entry != nil && entry.id != "" {
+			placeholderChannel := placeholderEntryOwner(entry, ch)
 			if isToolFeedback && separateToolFeedbackMessages {
-				if deleter, ok := ch.(MessageDeleter); ok {
+				if deleter, ok := placeholderChannel.(MessageDeleter); ok {
 					deleter.DeleteMessage(ctx, chatID, entry.id) // best effort
 				}
 				return nil, false
 			}
 			if outboundMessageBypassesPlaceholderEdit(msg) {
-				if deleter, ok := ch.(MessageDeleter); ok {
+				if deleter, ok := placeholderChannel.(MessageDeleter); ok {
 					deleter.DeleteMessage(ctx, chatID, entry.id) // best effort
 				}
 				return nil, false
 			}
-			if editor, ok := ch.(MessageEditor); ok {
+			if editor, ok := placeholderChannel.(MessageEditor); ok {
 				content := msg.Content
 				trackedContent := msg.Content
 				if isToolFeedback {
-					trackedContent = prepareToolFeedbackMessageContent(ch, msg.Content)
+					trackedContent = prepareToolFeedbackMessageContent(
+						placeholderChannel,
+						msg.Content,
+					)
 					content = InitialAnimatedToolFeedbackContent(trackedContent)
 				}
 				err := func() error {
-					if payloadEditor, ok := ch.(MessageEditorWithPayload); ok {
+					if payloadEditor, ok := placeholderChannel.(MessageEditorWithPayload); ok {
 						return payloadEditor.EditMessageWithPayload(
 							ctx,
 							chatID,
@@ -535,11 +1534,20 @@ func (m *Manager) preSend(ctx context.Context, name string, msg bus.OutboundMess
 					return editor.EditMessage(ctx, chatID, entry.id, content)
 				}()
 				if err == nil {
-					trackedChatID := trackedToolFeedbackMessageChatID(ch, chatID, &msg.Context)
-					if tracker, ok := ch.(toolFeedbackMessageTracker); ok && isToolFeedback {
+					trackedChatID := trackedToolFeedbackMessageChatID(
+						placeholderChannel,
+						chatID,
+						&msg.Context,
+					)
+					if tracker, ok := placeholderChannel.(toolFeedbackMessageTracker); ok && isToolFeedback {
 						tracker.RecordToolFeedbackMessage(trackedChatID, entry.id, trackedContent)
 					} else if !isToolFeedback {
-						dismissTrackedToolFeedbackMessage(ctx, ch, chatID, &msg.Context)
+						dismissTrackedToolFeedbackMessage(
+							ctx,
+							placeholderChannel,
+							chatID,
+							&msg.Context,
+						)
 					}
 					return []string{entry.id}, true
 				}
@@ -558,19 +1566,25 @@ func (m *Manager) preSend(ctx context.Context, name string, msg bus.OutboundMess
 func (m *Manager) preSendMedia(ctx context.Context, name string, msg bus.OutboundMediaMessage, ch Channel) {
 	chatID := outboundMediaChatID(msg)
 	key := name + ":" + chatID
-	streamKey := streamSuppressionKey(name, chatID, msg.SessionKey)
+	turnUXID := strings.TrimSpace(msg.Context.TurnUXID)
+	streamKey := streamSuppressionKey(
+		name,
+		chatID,
+		msg.SessionKey,
+		turnUXID,
+	)
 
 	// 1. Stop typing
-	if v, loaded := m.typingStops.LoadAndDelete(key); loaded {
-		if entry, ok := v.(typingEntry); ok {
-			entry.stop() // idempotent, safe
+	if v, loaded := takeTurnUXEntryForMessage(&m.typingStops, key, turnUXID); loaded {
+		if entry := asTypingEntry(v); entry != nil {
+			runBoundedTurnUXCallback(ctx, name, chatID, "typing", entry.stop)
 		}
 	}
 
 	// 2. Undo reaction
-	if v, loaded := m.reactionUndos.LoadAndDelete(key); loaded {
-		if entry, ok := v.(reactionEntry); ok {
-			entry.undo() // idempotent, safe
+	if v, loaded := takeTurnUXEntryForMessage(&m.reactionUndos, key, turnUXID); loaded {
+		if entry := asReactionEntry(v); entry != nil {
+			runBoundedTurnUXCallback(ctx, name, chatID, "reaction", entry.undo)
 		}
 	}
 
@@ -583,9 +1597,13 @@ func (m *Manager) preSendMedia(ctx context.Context, name string, msg bus.Outboun
 	}
 
 	// 4. Delete placeholder if present.
-	if v, loaded := m.placeholders.LoadAndDelete(key); loaded {
-		if entry, ok := v.(placeholderEntry); ok && entry.id != "" {
-			if deleter, ok := ch.(MessageDeleter); ok {
+	if v, loaded := takeTurnUXEntryForMessage(
+		&m.placeholders,
+		key,
+		turnUXID,
+	); loaded {
+		if entry := asPlaceholderEntry(v); entry != nil && entry.id != "" {
+			if deleter, ok := placeholderEntryOwner(entry, ch).(MessageDeleter); ok {
 				deleter.DeleteMessage(ctx, chatID, entry.id) // best effort
 			}
 		}
@@ -642,9 +1660,27 @@ func (m *Manager) SetMediaStore(store media.MediaStore) {
 	}
 }
 
-// GetStreamer implements bus.StreamDelegate.
-// It checks if the named channel supports streaming and returns a Streamer.
-func (m *Manager) GetStreamer(ctx context.Context, channelName, chatID, sessionKey string) (bus.Streamer, bool) {
+// GetStreamer implements the source-compatible bus.StreamDelegate contract.
+func (m *Manager) GetStreamer(
+	ctx context.Context,
+	channelName, chatID, sessionKey string,
+) (bus.Streamer, bool) {
+	return m.GetStreamerForTurn(
+		ctx,
+		channelName,
+		chatID,
+		sessionKey,
+		"",
+	)
+}
+
+// GetStreamerForTurn implements bus.TurnScopedStreamDelegate. It checks if the
+// named channel supports streaming and binds stream suppression to one turn.
+// An empty turnUXID preserves the legacy chat/session-scoped behavior.
+func (m *Manager) GetStreamerForTurn(
+	ctx context.Context,
+	channelName, chatID, sessionKey, turnUXID string,
+) (bus.Streamer, bool) {
 	m.mu.RLock()
 	ch, exists := m.channels[channelName]
 	m.mu.RUnlock()
@@ -669,7 +1705,12 @@ func (m *Manager) GetStreamer(ctx context.Context, channelName, chatID, sessionK
 
 	// Mark streamActive on Finalize so preSend knows to clean up the placeholder
 	// and late auxiliary messages cannot leak after streaming produced a final.
-	streamKey := streamSuppressionKey(channelName, chatID, sessionKey)
+	streamKey := streamSuppressionKey(
+		channelName,
+		chatID,
+		sessionKey,
+		turnUXID,
+	)
 	placeholderKey := channelName + ":" + chatID
 	clearMarker := func() {
 		m.streamActive.Delete(streamKey)
@@ -695,11 +1736,16 @@ func (m *Manager) GetStreamer(ctx context.Context, channelName, chatID, sessionK
 				},
 			)
 		}
-		if v, loaded := m.placeholders.LoadAndDelete(placeholderKey); loaded {
-			if entry, ok := v.(placeholderEntry); ok && entry.id != "" {
-				if deleter, ok := ch.(MessageDeleter); ok {
+		if v, loaded := takeTurnUXEntryForMessage(
+			&m.placeholders,
+			placeholderKey,
+			turnUXID,
+		); loaded {
+			if entry := asPlaceholderEntry(v); entry != nil && entry.id != "" {
+				placeholderChannel := placeholderEntryOwner(entry, ch)
+				if deleter, ok := placeholderChannel.(MessageDeleter); ok {
 					deleter.DeleteMessage(finalizeCtx, chatID, entry.id) // best effort
-				} else if editor, ok := ch.(MessageEditor); ok {
+				} else if editor, ok := placeholderChannel.(MessageEditor); ok {
 					editor.EditMessage(finalizeCtx, chatID, entry.id, finalContent) // best effort fallback
 				}
 			}
@@ -937,7 +1983,7 @@ func (m *Manager) streamAuxiliaryTombstoneActive(key string) bool {
 }
 
 func (m *Manager) streamActiveForChat(channel, chatID string) bool {
-	chatKey := streamSuppressionKey(channel, chatID, "")
+	chatKey := streamSuppressionKey(channel, chatID, "", "")
 	found := false
 	m.streamActive.Range(func(key, _ any) bool {
 		keyString, ok := key.(string)
@@ -1038,6 +2084,13 @@ func (m *Manager) initChannel(typeName, channelName string) {
 			"error":   err.Error(),
 		})
 	} else {
+		// The config map key is the runtime channel identity. Apply it
+		// centrally so safe factories, legacy factories, and out-of-tree
+		// factories cannot accidentally publish under the shared type name
+		// when multiple aliased instances are configured.
+		if setter, ok := ch.(interface{ SetName(name string) }); ok {
+			setter.SetName(channelName)
+		}
 		// Inject MediaStore if channel supports it
 		if m.mediaStore != nil {
 			if setter, ok := ch.(mediaStoreSetter); ok {
@@ -1902,7 +2955,12 @@ func (m *Manager) finalizedStreamActiveForMessage(channelName string, msg bus.Ou
 	if strings.TrimSpace(channelName) == "" || strings.TrimSpace(chatID) == "" {
 		return false
 	}
-	_, active := m.streamActive.Load(streamSuppressionKey(channelName, chatID, msg.SessionKey))
+	_, active := m.streamActive.Load(streamSuppressionKey(
+		channelName,
+		chatID,
+		msg.SessionKey,
+		msg.Context.TurnUXID,
+	))
 	return active
 }
 
@@ -2221,34 +3279,7 @@ func (m *Manager) runTTLJanitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			m.typingStops.Range(func(key, value any) bool {
-				if entry, ok := value.(typingEntry); ok {
-					if now.Sub(entry.createdAt) > typingStopTTL {
-						if _, loaded := m.typingStops.LoadAndDelete(key); loaded {
-							entry.stop() // idempotent, safe
-						}
-					}
-				}
-				return true
-			})
-			m.reactionUndos.Range(func(key, value any) bool {
-				if entry, ok := value.(reactionEntry); ok {
-					if now.Sub(entry.createdAt) > typingStopTTL {
-						if _, loaded := m.reactionUndos.LoadAndDelete(key); loaded {
-							entry.undo() // idempotent, safe
-						}
-					}
-				}
-				return true
-			})
-			m.placeholders.Range(func(key, value any) bool {
-				if entry, ok := value.(placeholderEntry); ok {
-					if now.Sub(entry.createdAt) > placeholderTTL {
-						m.placeholders.Delete(key)
-					}
-				}
-				return true
-			})
+			m.evictExpiredTurnUX(now)
 			m.streamAuxiliaryTombstones.Range(func(key, value any) bool {
 				if createdAt, ok := value.(time.Time); !ok || now.Sub(createdAt) > streamAuxiliaryTombstoneTTL {
 					m.streamAuxiliaryTombstones.Delete(key)
@@ -2257,6 +3288,66 @@ func (m *Manager) runTTLJanitor(ctx context.Context) {
 			})
 		}
 	}
+}
+
+func turnUXKeyParts(key any) (channel, chatID string) {
+	keyString, _ := key.(string)
+	channel, chatID, _ = strings.Cut(keyString, ":")
+	return channel, chatID
+}
+
+func (m *Manager) evictExpiredTurnUX(now time.Time) {
+	m.typingStops.Range(func(key, value any) bool {
+		entry := asTypingEntry(value)
+		if entry == nil || now.Sub(entry.createdAt) <= typingStopTTL {
+			return true
+		}
+		if deleteTurnUXEntryIfCurrent(&m.typingStops, key, value) {
+			channel, chatID := turnUXKeyParts(key)
+			runBoundedTurnUXCallback(
+				context.Background(),
+				channel,
+				chatID,
+				"typing",
+				entry.stop,
+			)
+		}
+		return true
+	})
+	m.reactionUndos.Range(func(key, value any) bool {
+		entry := asReactionEntry(value)
+		if entry == nil || now.Sub(entry.createdAt) <= typingStopTTL {
+			return true
+		}
+		if deleteTurnUXEntryIfCurrent(&m.reactionUndos, key, value) {
+			channel, chatID := turnUXKeyParts(key)
+			runBoundedTurnUXCallback(
+				context.Background(),
+				channel,
+				chatID,
+				"reaction",
+				entry.undo,
+			)
+		}
+		return true
+	})
+	m.placeholders.Range(func(key, value any) bool {
+		entry := asPlaceholderEntry(value)
+		if entry == nil || now.Sub(entry.createdAt) <= placeholderTTL {
+			return true
+		}
+		if deleteTurnUXEntryIfCurrent(&m.placeholders, key, value) {
+			channel, chatID := turnUXKeyParts(key)
+			runBoundedTurnUXPlaceholderCleanup(
+				context.Background(),
+				entry.owner,
+				channel,
+				chatID,
+				entry.id,
+			)
+		}
+		return true
+	})
 }
 
 func (m *Manager) GetChannel(name string) (Channel, bool) {

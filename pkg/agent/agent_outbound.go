@@ -16,12 +16,23 @@ import (
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
-func (al *AgentLoop) maybePublishError(ctx context.Context, channel, chatID, sessionKey string, err error) bool {
+func (al *AgentLoop) maybePublishError(
+	ctx context.Context,
+	channel, chatID, sessionKey string,
+	err error,
+	inboundContext ...*bus.InboundContext,
+) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
-	al.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, formatProcessingError(err))
-	return true
+	return al.publishResponseIfNeeded(
+		ctx,
+		channel,
+		chatID,
+		sessionKey,
+		formatProcessingError(err),
+		firstInboundContext(inboundContext),
+	)
 }
 
 func (al *AgentLoop) publishResponseOrError(
@@ -29,32 +40,45 @@ func (al *AgentLoop) publishResponseOrError(
 	channel, chatID, sessionKey string,
 	response string,
 	err error,
-) {
+	inboundContext *bus.InboundContext,
+) bool {
 	if err != nil {
-		if !al.maybePublishError(ctx, channel, chatID, sessionKey, err) {
-			return
+		if !al.maybePublishError(
+			ctx,
+			channel,
+			chatID,
+			sessionKey,
+			err,
+			inboundContext,
+		) {
+			return false
 		}
-		response = ""
+		return true
 	}
-	al.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, response)
+	return al.publishResponseIfNeeded(
+		ctx,
+		channel,
+		chatID,
+		sessionKey,
+		response,
+		inboundContext,
+	)
 }
 
 func (al *AgentLoop) PublishResponseIfNeeded(ctx context.Context, channel, chatID, sessionKey, response string) {
+	al.publishResponseIfNeeded(ctx, channel, chatID, sessionKey, response, nil)
+}
+
+func (al *AgentLoop) publishResponseIfNeeded(
+	ctx context.Context,
+	channel, chatID, sessionKey, response string,
+	inboundContext *bus.InboundContext,
+) bool {
 	if response == "" {
-		return
+		return false
 	}
 
-	alreadySentToSameChat := false
-	defaultAgent := al.GetRegistry().GetDefaultAgent()
-	if defaultAgent != nil {
-		if tool, ok := defaultAgent.Tools.Get("message"); ok {
-			if mt, ok := tool.(*tools.MessageTool); ok {
-				alreadySentToSameChat = mt.HasSentTo(sessionKey, channel, chatID)
-			}
-		}
-	}
-
-	if alreadySentToSameChat {
+	if al.messageToolSentTo(sessionKey, channel, chatID) {
 		if al.channelManager != nil && channel != "" && chatID != "" {
 			dismissCtx, dismissCancel := context.WithTimeout(ctx, 5*time.Second)
 			al.channelManager.DismissToolFeedback(
@@ -70,11 +94,20 @@ func (al *AgentLoop) PublishResponseIfNeeded(ctx context.Context, channel, chatI
 			"Skipped outbound (message tool already sent to same chat)",
 			map[string]any{"channel": channel, "chat_id": chatID},
 		)
-		return
+		return true
 	}
 
+	outboundContext := bus.NewOutboundContext(channel, chatID, "")
+	if inboundContext != nil {
+		outboundContext = outboundContextFromInbound(
+			inboundContext,
+			channel,
+			chatID,
+			inboundContext.ReplyToMessageID,
+		)
+	}
 	msg := bus.OutboundMessage{
-		Context:    bus.NewOutboundContext(channel, chatID, ""),
+		Context:    outboundContext,
 		SessionKey: sessionKey,
 		Content:    response,
 	}
@@ -82,13 +115,40 @@ func (al *AgentLoop) PublishResponseIfNeeded(ctx context.Context, channel, chatI
 		msg.ContextUsage = computeContextUsage(al.agentForSession(sessionKey), sessionKey)
 	}
 	markFinalOutbound(&msg)
-	al.bus.PublishOutbound(ctx, msg)
+	err := al.bus.PublishOutbound(ctx, msg)
 	logger.InfoCF("agent", "Published outbound response",
 		map[string]any{
 			"channel":     channel,
 			"chat_id":     chatID,
 			"content_len": len(response),
 		})
+	return err == nil
+}
+
+func (al *AgentLoop) messageToolSentTo(sessionKey, channel, chatID string) bool {
+	registry := al.GetRegistry()
+	if registry == nil {
+		return false
+	}
+	defaultAgent := registry.GetDefaultAgent()
+	if defaultAgent == nil {
+		return false
+	}
+	tool, ok := defaultAgent.Tools.Get("message")
+	if !ok {
+		return false
+	}
+	messageTool, ok := tool.(*tools.MessageTool)
+	return ok && messageTool.HasSentTo(sessionKey, channel, chatID)
+}
+
+func firstInboundContext(contexts []*bus.InboundContext) *bus.InboundContext {
+	for _, inboundContext := range contexts {
+		if inboundContext != nil {
+			return inboundContext
+		}
+	}
+	return nil
 }
 
 func (al *AgentLoop) targetReasoningChannelID(channelName string) (chatID string) {

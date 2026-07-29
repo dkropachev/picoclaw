@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/agent/interfaces"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -37,8 +38,25 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		return nil, false, nil
 	}
 
-	streamer, ok := p.Bus.GetStreamer(ctx, ts.channel, ts.chatID, ts.sessionKey)
-	if !ok || streamer == nil {
+	var streamer bus.Streamer
+	var streamerOK bool
+	if scopedBus, scoped := p.Bus.(interfaces.TurnScopedMessageBus); scoped {
+		streamer, streamerOK = scopedBus.GetStreamerForTurn(
+			ctx,
+			ts.channel,
+			ts.chatID,
+			ts.sessionKey,
+			ts.turnUXID,
+		)
+	} else {
+		streamer, streamerOK = p.Bus.GetStreamer(
+			ctx,
+			ts.channel,
+			ts.chatID,
+			ts.sessionKey,
+		)
+	}
+	if !streamerOK || streamer == nil {
 		logger.DebugCF("agent", "configured streaming not used", map[string]any{
 			"agent_id": ts.agent.ID,
 			"channel":  ts.channel,

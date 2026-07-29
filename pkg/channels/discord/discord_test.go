@@ -114,6 +114,46 @@ func TestApplyDiscordProxy_InvalidProxyURL(t *testing.T) {
 	}
 }
 
+func TestStopTypingDoesNotStopNewerSession(t *testing.T) {
+	older := newDiscordTypingSession()
+	newer := newDiscordTypingSession()
+	ch := &DiscordChannel{
+		typingStop: map[string]*discordTypingSession{
+			"chat-1": newer,
+		},
+	}
+
+	ch.stopTyping("chat-1", older)
+
+	select {
+	case <-older.stop:
+	default:
+		t.Fatal("stale stop did not close its exact typing session")
+	}
+	select {
+	case <-newer.stop:
+		t.Fatal("stale stop closed the newer typing session")
+	default:
+	}
+	if got := ch.typingStop["chat-1"]; got != newer {
+		t.Fatalf("current typing session = %p, want newer session %p", got, newer)
+	}
+
+	ch.stopTyping("chat-1", newer)
+	select {
+	case <-newer.stop:
+	default:
+		t.Fatal("current stop did not close the newer typing session")
+	}
+	if _, ok := ch.typingStop["chat-1"]; ok {
+		t.Fatal("current stop did not remove its typing session")
+	}
+
+	// Exact cleanup callbacks are idempotent.
+	ch.stopTyping("chat-1", older)
+	ch.stopTyping("chat-1", newer)
+}
+
 func TestSend_NonToolFeedbackDeletesTrackedProgressMessage(t *testing.T) {
 	var (
 		mu       sync.Mutex
@@ -151,7 +191,7 @@ func TestSend_NonToolFeedbackDeletesTrackedProgressMessage(t *testing.T) {
 		BaseChannel: channels.NewBaseChannel("discord", nil, bus.NewMessageBus(), nil),
 		session:     session,
 		ctx:         context.Background(),
-		typingStop:  make(map[string]chan struct{}),
+		typingStop:  make(map[string]*discordTypingSession),
 		voiceSSRC:   make(map[string]map[uint32]string),
 	}
 	ch.progress = channels.NewToolFeedbackAnimator(ch.EditMessage)
@@ -296,7 +336,7 @@ func TestSend_NonToolFeedbackFinalizerStillStartsTTS(t *testing.T) {
 		BaseChannel: channels.NewBaseChannel("discord", nil, bus.NewMessageBus(), nil),
 		session:     session,
 		ctx:         context.Background(),
-		typingStop:  make(map[string]chan struct{}),
+		typingStop:  make(map[string]*discordTypingSession),
 		voiceSSRC:   make(map[string]map[uint32]string),
 		tts:         tts.TTSProvider(stubTTSProvider{}),
 	}

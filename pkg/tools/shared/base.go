@@ -47,6 +47,7 @@ var (
 	ctxKeyChatID           = &toolCtxKey{"chatID"}
 	ctxKeyTopicID          = &toolCtxKey{"topicID"}
 	ctxKeyMessageID        = &toolCtxKey{"messageID"}
+	ctxKeyTurnUXID         = &toolCtxKey{"turnUXID"}
 	ctxKeyReplyToMessageID = &toolCtxKey{"replyToMessageID"}
 	ctxKeyAgentID          = &toolCtxKey{"agentID"}
 	ctxKeySessionKey       = &toolCtxKey{"sessionKey"}
@@ -70,6 +71,12 @@ func WithToolMessageContext(ctx context.Context, messageID, replyToMessageID str
 	ctx = context.WithValue(ctx, ctxKeyMessageID, messageID)
 	ctx = context.WithValue(ctx, ctxKeyReplyToMessageID, replyToMessageID)
 	return ctx
+}
+
+// WithToolTurnUXContext returns a child context carrying the opaque transient
+// UX registration identity for the active inbound turn.
+func WithToolTurnUXContext(ctx context.Context, turnUXID string) context.Context {
+	return context.WithValue(ctx, ctxKeyTurnUXID, turnUXID)
 }
 
 // WithToolInboundContext returns a child context carrying channel/chat and inbound IDs.
@@ -124,6 +131,15 @@ func ToolTopicID(ctx context.Context) string {
 // ToolMessageID extracts the current inbound message ID from ctx, or "" if unset.
 func ToolMessageID(ctx context.Context) string {
 	v, ok := ctx.Value(ctxKeyMessageID).(string)
+	if !ok {
+		return ""
+	}
+	return v
+}
+
+// ToolTurnUXID extracts the active turn's transient UX identity from ctx.
+func ToolTurnUXID(ctx context.Context) string {
+	v, ok := ctx.Value(ctxKeyTurnUXID).(string)
 	if !ok {
 		return ""
 	}

@@ -29,7 +29,12 @@ func (al *AgentLoop) runTurn(
 	turnCtx = withTurnState(turnCtx, ts)
 	turnCtx = WithAgentLoop(turnCtx, al)
 
-	al.registerActiveTurn(ts)
+	if !al.registerActiveTurn(ts) {
+		return turnResult{}, fmt.Errorf(
+			"session %q is already owned by another turn",
+			ts.sessionKey,
+		)
+	}
 	defer al.clearActiveTurn(ts)
 	defer al.releaseGitWorkspacesForTurn(turnCtx, ts)
 

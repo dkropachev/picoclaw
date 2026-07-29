@@ -1,5 +1,7 @@
 package bus
 
+import "time"
+
 // SenderInfo provides structured sender identity information.
 type SenderInfo struct {
 	Platform    string `json:"platform,omitempty"`     // "telegram", "discord", "slack", ...
@@ -33,6 +35,19 @@ type InboundContext struct {
 
 	ReplyHandles map[string]string `json:"reply_handles,omitempty"`
 	Raw          map[string]string `json:"raw,omitempty"`
+
+	// Event admission metadata is process-local and intentionally excluded
+	// from the serialized routing context.
+	TurnUXID         string              `json:"-"`
+	EventDedupeID    string              `json:"-"`
+	OccurredAt       *time.Time          `json:"-"`
+	EventSubject     string              `json:"-"`
+	ConversationName string              `json:"-"`
+	Attachments      []InboundAttachment `json:"-"`
+	// Email trust facts are transport-provided process-local policy inputs.
+	// They are never accepted from serialized routing context.
+	EventSenderVerified         bool `json:"-"`
+	EventTransportAuthenticated bool `json:"-"`
 }
 
 type InboundMessage struct {
@@ -48,6 +63,28 @@ type InboundMessage struct {
 	SenderID  string `json:"sender_id"`
 	ChatID    string `json:"chat_id"`
 	MessageID string `json:"message_id,omitempty"` // platform message ID
+
+	// Event admission metadata is intentionally process-local. It gives inbound
+	// channel adapters a narrow, allow-listed view without exposing it through
+	// the existing serialized message contract.
+	ChannelOrigin               bool                `json:"-"`
+	EventDedupeID               string              `json:"-"`
+	OccurredAt                  *time.Time          `json:"-"`
+	EventSubject                string              `json:"-"`
+	ConversationName            string              `json:"-"`
+	Attachments                 []InboundAttachment `json:"-"`
+	EventSenderVerified         bool                `json:"-"`
+	EventTransportAuthenticated bool                `json:"-"`
+}
+
+// InboundAttachment is the safe attachment metadata exposed to inbound event
+// admission. It deliberately excludes local paths, remote URLs, and payload
+// bytes.
+type InboundAttachment struct {
+	Filename    string `json:"-"`
+	ContentType string `json:"-"`
+	Kind        string `json:"-"`
+	SizeBytes   int64  `json:"-"`
 }
 
 // OutboundScope captures the structured session scope associated with an

@@ -41,6 +41,13 @@ func (r DispatchRequest) MessageID() string {
 	return r.InboundContext.MessageID
 }
 
+func (r DispatchRequest) TurnUXID() string {
+	if r.InboundContext == nil {
+		return ""
+	}
+	return r.InboundContext.TurnUXID
+}
+
 func (r DispatchRequest) ReplyToMessageID() string {
 	if r.InboundContext == nil {
 		return ""

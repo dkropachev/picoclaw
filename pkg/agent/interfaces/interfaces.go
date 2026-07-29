@@ -22,10 +22,22 @@ type MessageBus interface {
 	PublishOutboundMedia(ctx context.Context, msg bus.OutboundMediaMessage) error
 
 	// GetStreamer returns a channel streamer when the active channel supports streaming.
-	GetStreamer(ctx context.Context, channel, chatID, sessionKey string) (bus.Streamer, bool)
+	GetStreamer(
+		ctx context.Context,
+		channel, chatID, sessionKey string,
+	) (bus.Streamer, bool)
 
 	// InboundChan returns the channel for receiving inbound messages.
 	InboundChan() <-chan bus.InboundMessage
+}
+
+// TurnScopedMessageBus is an additive streaming capability. Agent integrations
+// implementing only the legacy MessageBus contract remain source-compatible.
+type TurnScopedMessageBus interface {
+	GetStreamerForTurn(
+		ctx context.Context,
+		channel, chatID, sessionKey, turnUXID string,
+	) (bus.Streamer, bool)
 }
 
 // ChannelManager manages channel lifecycle and provides channel access.
@@ -54,4 +66,34 @@ type ChannelManager interface {
 	// outboundCtx carries topic/thread info needed for channels that use
 	// scoped tracker keys (e.g., Telegram forum topics); may be nil.
 	DismissToolFeedback(ctx context.Context, channel, chatID string, outboundCtx *bus.InboundContext)
+}
+
+// MessageScopedTypingStopper stops only the typing registration owned by one
+// opaque turn UX identity.
+type MessageScopedTypingStopper interface {
+	InvokeTypingStopForMessage(channel, chatID, turnUXID string)
+}
+
+// MessageScopedTurnUXCleaner removes transient artifacts owned by one
+// abandoned turn without touching a newer turn.
+type MessageScopedTurnUXCleaner interface {
+	CleanupTurnUXForMessage(
+		ctx context.Context,
+		channel, chatID, turnUXID string,
+	)
+}
+
+// MessageScopedTurnUXRebinder assigns a steering message's transient UX to the
+// already-active turn that will produce its response.
+type MessageScopedTurnUXRebinder interface {
+	RebindTurnUXForMessage(channel, chatID, fromTurnUXID, toTurnUXID string)
+}
+
+// MessageScopedPlaceholderSender creates a placeholder owned by one inbound
+// turn.
+type MessageScopedPlaceholderSender interface {
+	SendPlaceholderForMessage(
+		ctx context.Context,
+		channel, chatID, turnUXID string,
+	) bool
 }

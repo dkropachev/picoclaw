@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/caarlos0/env/v11"
 	"gopkg.in/yaml.v3"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
@@ -216,6 +217,20 @@ func (sec *Config) SensitiveDataReplacer() *strings.Replacer {
 	return sec.sensitiveCache.replacer
 }
 
+// SensitiveDataValues returns a detached list of resolved secure configuration
+// values. It is intended for trusted, process-local redaction boundaries such
+// as the durable event inbox; callers must never log or serialize the result.
+func (sec *Config) SensitiveDataValues() []string {
+	if sec == nil {
+		return nil
+	}
+	values := sec.collectSensitiveValues()
+	if len(values) == 0 {
+		return nil
+	}
+	return append([]string(nil), values...)
+}
+
 // initSensitiveCache initializes the sensitive data cache if not already done.
 func (sec *Config) initSensitiveCache() {
 	if sec.sensitiveCache == nil {
@@ -260,6 +275,39 @@ func collectSensitive(v reflect.Value, values *[]string) {
 	}
 
 	t := v.Type()
+
+	// Configuration-management callers may request a sensitive-value snapshot
+	// before InitChannelList has decoded raw channel settings. Resolve those
+	// settings on detached Channel copies so event-ingress identity validation
+	// cannot miss a channel credential or mutate the candidate configuration.
+	if t == reflect.TypeOf(ChannelsConfig{}) {
+		channels := v.Interface().(ChannelsConfig)
+		for name, channel := range channels {
+			if channel == nil {
+				continue
+			}
+			cloned := *channel
+			cloned.SetName(name)
+			if cloned.Type == "" {
+				cloned.Type = name
+			}
+			if cloned.extend == nil {
+				target := newChannelSettings(cloned.Type)
+				if target == nil {
+					continue
+				}
+				if err := cloned.Decode(target); err != nil {
+					continue
+				}
+				// Match InitChannelList: channel credentials supplied through
+				// supported env bindings are part of the effective config.
+				_ = env.Parse(target)
+				applyTelegramStreamingEnvCompat(target)
+			}
+			collectSensitive(reflect.ValueOf(cloned.extend), values)
+		}
+		return
+	}
 
 	// Channel: use CollectSensitiveValues() method
 	if t == reflect.TypeOf(Channel{}) {

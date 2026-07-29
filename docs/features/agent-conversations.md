@@ -14,9 +14,14 @@ auxiliary to this capability.
 ## Reconstruction Notes
 
 - Similarity target: recreate an agent loop that builds prompt context, selects provider candidates, executes tool calls, and stores a final turn.
-- Core types/functions: `AgentLoop`, agent instance creation, context builder, pipeline setup/execute/finalize helpers, provider factory, and tool registry.
+- Core types/functions: `AgentLoop`, agent instance creation, context builder,
+  pipeline setup/execute/finalize helpers, turn reservations and scoped steering,
+  message-scoped channel capabilities, provider factory, and tool registry.
 - Runtime ordering: normalize input, resolve route/session, build prompt, select model candidate, call provider, execute tool calls, stream/finalize response, persist history, emit runtime events.
-- Non-obvious constraints: tool iteration limits, media limits, turn profile block disabling, fallback candidates, and child-turn concurrency must stay explicit.
+- Non-obvious constraints: tool iteration limits, media limits, turn profile block
+  disabling, fallback candidates, child-turn concurrency, exact transient-UX
+  ownership, and source-compatible channel/streaming fallbacks must stay
+  explicit.
 
 ## Requirements
 
@@ -36,6 +41,9 @@ auxiliary to this capability.
 | `FR-AGENT-012` | MUST | Each primary or fallback provider attempt derives tool adaptation from the concrete provider/model profile after router resolution, applies that profile's visible surface to a candidate-specific base schema, and retains the successful candidate's surface and schema for tool execution and observations; explicit profile overrides still obey configured runtime visible-change policy. | Routed and fallback turns must not probe or expose tools using a virtual router identity or another candidate's schema. |
 | `FR-AGENT-013` | MUST | Provider/config reload pauses admission of new root runtime users, drains the current registry generation before replacement, and never closes a retained provider while a turn, workflow, summarizer, child turn, or gateway-owned background action can still use it. One inbound lease covers workflow-trigger matching, route/session placeholder selection, and a synchronously retained queued worker so semaphore backlog cannot split an ingress decision across generations. Other asynchronous work retains its generation before goroutine launch; independently cancelable subturn contexts preserve that lease marker; stale captured agent pointers are resolved by ID against the current registry before a root turn starts; and independently launched summarizers/background consumers require the exact config and registry generation that created them. The first reload pause synchronously removes the generation-owned runtime-event workflow subscription and the final nested resume recreates it for only the committed/restored config before opening admission. Terminal Stop is remembered even before `Run` registers; shutdown first quiesces producers, then cancels/joins AgentLoop-owned automation and permanently pauses/drains runtime users, then closes channel/media dependencies and the provider. | Reload, rollback, and shutdown must not create use-after-close provider calls, admit provisional runtime state/events, execute stale cross-workspace work, leak queued session placeholders, or deadlock nested work behind their own drain. |
 | `FR-AGENT-014` | MUST | When a credential-backed Codex OAuth request fails with the structured `usage_limit_reached` error, the provider rechecks the authoritative main Codex rate-limit state and automatically consumes one earned reset only when that main limit is eligible and exhausted; reset attempts are serialized, reuse an idempotency key across redemption retries, and reconcile through a post-consume usage read. A confirmed redemption or concurrent reset retries the original provider request at most once, while a redemption that is not verified to recover the same exhaustion episode suppresses further automatic consumption for that episode. Generic `429` responses, workspace credit or spend-control limits, additional-model-only limits, unsupported reset state, and accounts with no resets must not consume one. | Automatic recovery must restore an exhausted eligible account without double-spending finite resets or masking other quota and billing failures. |
+| `FR-AGENT-015` | MUST | An admitted inbound message's opaque turn-UX identity remains attached to its session reservation, active or rescued continuation, same-chat tool/stream/final/error output, and exact cleanup decision. A successfully buffered output stops only that identity's typing registration and leaves its reaction/placeholder for delivery-time cleanup; a no-output, rejected, canceled, failed, or panicked turn removes only its exact artifacts. Same-chat steering atomically queues and rebinds its identity to the pinned active owner after slow message preparation rechecks ownership; cross-chat steering, enqueue failure, and abandoned ownership clean the secondary exact identity, while committed steering is rescued or transferred instead of being stranded. Channel-side typing/reaction callbacks remain pinned to the provider generation that created them, so late older callbacks cannot clear a newer turn. | Concurrent turns and steering must not strand transient UX, erase a newer provider generation, or lose a committed user message. |
+| `FR-AGENT-016` | MUST | The original `ChannelManager` and four-argument `MessageBus.GetStreamer` contracts remain sufficient for agent integrations. Exact typing stop, cleanup, rebind, placeholder, and turn-scoped streaming are additive optional capabilities: legacy managers fall back to chat-scoped typing stop and placeholder calls plus one detached bounded tool-feedback cleanup, rebind is a no-op, and legacy buses use `GetStreamer`; capable implementations receive the exact turn identity instead. | Existing channel and message-bus implementations must remain source-compatible while built-in channels gain exact ownership. |
+| `FR-AGENT-017` | MUST | Agent-owned inbound snapshots preserve process-local turn/event identity, deduplication, occurrence time, subject, conversation, safe attachment descriptors, and transport trust facts through primary turns, queued continuations, and derived outbound contexts. Mutable maps, occurrence-time pointers, and attachment slices are detached when copied, and these fields remain excluded from serialized routing context. | Asynchronous turn and delivery work must retain admission facts without aliasing caller-owned state or expanding the serialized contract. |
 
 ## Data And State Model
 
@@ -43,6 +51,11 @@ Agent state includes configured defaults, resolved candidate providers, register
 tools, skills filter, MCP allowlist, context builder cache, runtime event bus,
 turn scope, and session store references. A turn records user input, media,
 assistant content, tool calls/results, optional reasoning, and runtime metadata.
+Inbound session reservations additionally retain a process-local turn-UX
+identity and detached inbound-context snapshot. Per-session handoff locks
+serialize reservation, steering enqueue/dequeue, rebind, and abandonment;
+rescue markers explicitly own committed steering until a live continuation or
+competing turn takes it.
 
 ## Surface Ownership
 
@@ -97,6 +110,9 @@ Owns: EVENT agent.*
 | Config | `model_list[].reasoning_effort` | Optional OpenAI-style reasoning effort forwarded only after shared normalization and validation. | `FR-AGENT-003`, `FR-AGENT-010` |
 | Tools | `spawn`, `spawn_status`, `subagent`, `delegate` | Child work delegation and status reporting. | `FR-AGENT-007` |
 | Runtime | `AgentLoop.PauseRuntimeForReload`, retained runtime leases, provider/config reload | Quiesce root and asynchronous runtime users across a registry generation swap, service commit, or rollback. | `FR-AGENT-013` |
+| Go API | `interfaces.ChannelManager`, optional `MessageScopedTypingStopper`, `MessageScopedTurnUXCleaner`, `MessageScopedTurnUXRebinder`, and `MessageScopedPlaceholderSender` | Keep the legacy manager surface sufficient while allowing built-in channels to stop, clean, transfer, and create transient UX for one opaque turn identity. | `FR-AGENT-015`, `FR-AGENT-016` |
+| Go API | `interfaces.MessageBus.GetStreamer`, optional `interfaces.TurnScopedMessageBus.GetStreamerForTurn` | Use turn-scoped streaming when implemented and otherwise call the original four-argument streamer lookup. | `FR-AGENT-015`, `FR-AGENT-016` |
+| Runtime | `bus.InboundContext`, `DispatchRequest`, turn reservations, continuation targets, and outbound context derivation | Carry detached process-local event and transient-UX metadata across one turn without adding it to serialized routing context. | `FR-AGENT-015`, `FR-AGENT-017` |
 | Events | `agent.*` | Turn, LLM, tool, steering, interrupt, subturn, and error telemetry. | `FR-AGENT-001`, `FR-AGENT-004`, `FR-AGENT-006` |
 
 ## Algorithms And Ordering
@@ -112,8 +128,20 @@ Owns: EVENT agent.*
    redemption before fallback observes the error. Failed verification
    suppresses another automatic reset for that exhaustion episode.
 4. For each tool-call response, validate tool availability and arguments, run hooks and registry execution, append tool results, and re-enter provider execution until done or capped.
-5. Write final messages and summaries after the assistant response is known.
-6. Before replacing provider/config state, pause new runtime admission and wait
+5. Keep the detached inbound snapshot on the reservation and real turn. After
+   any slow inbound preparation, recheck the session owner under the handoff
+   lock; either claim the idle session or atomically enqueue and rebind
+   same-chat steering to the pinned owner. Retire cross-chat transient UX
+   immediately after its queue commit because the active turn cannot own that
+   chat key. If a reservation is abandoned after steering commits, a bounded
+   rescue continues the queue or transfers it to a competing live owner.
+6. Write final messages and summaries after the assistant response is known.
+   Propagate the inbound snapshot to same-chat output. Once buffered delivery
+   accepts output, stop only exact typing and let channel pre-send own
+   reaction/placeholder cleanup; otherwise perform exact full cleanup. Use the
+   optional message-scoped manager and streamer capabilities when present and
+   their legacy fallbacks when absent.
+7. Before replacing provider/config state, pause new runtime admission and wait
    for current generation leases. Acquire before inbound trigger/routing
    decisions and transfer a retained lease to any worker waiting for a
    semaphore. Retain before launching other asynchronous workflows or spawn
@@ -121,7 +149,7 @@ Owns: EVENT agent.*
    exact config/registry identity for summarizers and gateway-owned
    scheduled/event work, remove the runtime-event subscription for the outer
    transaction, and recreate it for the final config before admission resumes.
-7. On terminal shutdown, remember Stop even if `Run` has not registered yet,
+8. On terminal shutdown, remember Stop even if `Run` has not registered yet,
    quiesce runtime producers, cancel and join the AgentLoop and its automation
    controller, and hold a permanent runtime pause until active leases reach
    zero. Only then stop channel/media dependencies and close provider, bus, and
@@ -155,6 +183,13 @@ Model-router aliases plug into the same step before light/heavy routing and can
 target either a concrete model alias or an account-router alias. Pico chat
 account/model overrides are turn-scoped and do not rewrite persisted
 `model_list[]`, `account_routers[]`, or `model_routers[]` entries.
+[Chat channels](chat-channels.md) create the opaque turn-UX identity and own the
+provider-specific typing, reaction, placeholder, and generation-pinned callback
+implementations. This feature carries that identity through turn ownership,
+steering, streaming, tools, and outbound delivery and requests only exact
+transitions. [Durable external event automation](event-automation.md) owns
+admission and event normalization; the agent preserves its process-local
+metadata but does not persist or reinterpret those trust facts.
 
 ## Failure And Edge Cases
 
@@ -184,6 +219,20 @@ account/model overrides are turn-scoped and do not rewrite persisted
   subscription and cannot be replayed against restored workflows after
   rollback. Workflow enable/disable reloads synchronously create or remove
   exactly one subscription.
+- If buffered output is rejected, no-output cleanup removes the exact
+  typing/reaction/placeholder generation. If it is accepted, only exact typing
+  is stopped early because channel pre-send still owns the matching reaction
+  and placeholder.
+- A queued steering owner that panics or abandons setup is rescued with its
+  detached inbound identity; a competing live owner wins without surfacing an
+  error, and cross-chat steering cleans only the secondary chat's exact UX.
+- A legacy channel manager cannot express exact ownership, so cleanup makes one
+  bounded detached best-effort chat-scoped call. Missing optional rebind support
+  is a no-op, and missing turn-scoped streaming support uses the original
+  streamer lookup.
+- Cloning an inbound snapshot must not share its maps, occurrence-time pointer,
+  or attachment backing slice with the producer. Event and transport-trust
+  fields remain process-local even when copied to an outbound context.
 
 ## Acceptance Evidence
 
@@ -199,10 +248,17 @@ account/model overrides are turn-scoped and do not rewrite persisted
 | `FR-AGENT-012` | [pkg/agent/pipeline_llm_adaptation_test.go](../../pkg/agent/pipeline_llm_adaptation_test.go), [pkg/agent/instance_test.go](../../pkg/agent/instance_test.go) |
 | `FR-AGENT-013` | [pkg/agent/runtime_gate_test.go](../../pkg/agent/runtime_gate_test.go), [pkg/agent/runtime_event_logger_test.go](../../pkg/agent/runtime_event_logger_test.go), [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go) |
 | `FR-AGENT-014` | [pkg/providers/oauth/codex_rate_limit_reset_test.go](../../pkg/providers/oauth/codex_rate_limit_reset_test.go) |
+| `FR-AGENT-015` | [pkg/agent/agent_turn_ux_test.go](../../pkg/agent/agent_turn_ux_test.go), [pkg/agent/steering_test.go](../../pkg/agent/steering_test.go), [pkg/agent/agent_test.go](../../pkg/agent/agent_test.go), [pkg/channels/base_test.go](../../pkg/channels/base_test.go), [pkg/channels/manager_test.go](../../pkg/channels/manager_test.go) |
+| `FR-AGENT-016` | [pkg/agent/channel_manager_compat_test.go](../../pkg/agent/channel_manager_compat_test.go), [pkg/agent/pipeline_streaming_test.go](../../pkg/agent/pipeline_streaming_test.go), [pkg/channels/manager_test.go](../../pkg/channels/manager_test.go) |
+| `FR-AGENT-017` | [pkg/agent/turn_context_test.go](../../pkg/agent/turn_context_test.go), [pkg/agent/agent_test.go](../../pkg/agent/agent_test.go), [pkg/agent/steering_test.go](../../pkg/agent/steering_test.go), [pkg/bus/bus_test.go](../../pkg/bus/bus_test.go) |
 
 ## Implementation Anchors
 
 - [pkg/agent/pipeline.go](../../pkg/agent/pipeline.go)
 - [pkg/agent/instance.go](../../pkg/agent/instance.go)
+- [pkg/agent/agent.go](../../pkg/agent/agent.go)
+- [pkg/agent/channel_manager_compat.go](../../pkg/agent/channel_manager_compat.go)
+- [pkg/agent/steering.go](../../pkg/agent/steering.go)
+- [pkg/agent/turn_context.go](../../pkg/agent/turn_context.go)
 - [pkg/agent/runtime_gate.go](../../pkg/agent/runtime_gate.go)
 - [pkg/providers/factory.go](../../pkg/providers/factory.go)

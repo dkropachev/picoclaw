@@ -48,28 +48,31 @@ type AgentLoop struct {
 	hooks              *HookManager
 
 	// Runtime state
-	running        atomic.Bool
-	contextManager ContextManager
-	fallback       *providers.FallbackChain
-	channelManager interfaces.ChannelManager
-	mediaStore     media.MediaStore
-	transcriber    asr.Transcriber
-	cmdRegistry    *commands.Registry
-	mcp            mcpRuntime
-	evolution      *evolutionBridge
-	hookRuntime    hookRuntime
-	steering       *steeringQueue
-	gitWorkspaces  gitWorkspaceManager
-	pendingSkills  sync.Map
-	pendingStops   sync.Map
-	mu             sync.RWMutex
+	running         atomic.Bool
+	contextManager  ContextManager
+	fallback        *providers.FallbackChain
+	channelManager  interfaces.ChannelManager
+	mediaStore      media.MediaStore
+	transcriber     asr.Transcriber
+	cmdRegistry     *commands.Registry
+	mcp             mcpRuntime
+	evolution       *evolutionBridge
+	hookRuntime     hookRuntime
+	steering        *steeringQueue
+	steeringRescues sync.Map
+	gitWorkspaces   gitWorkspaceManager
+	pendingSkills   sync.Map
+	pendingStops    sync.Map
+	mu              sync.RWMutex
 
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}
 
 	// activeTurnStates tracks active turns per session to prevent duplicates.
-	activeTurnStates sync.Map
-	subTurnCounter   atomic.Int64
+	activeTurnStates   sync.Map
+	sessionTurnLocksMu sync.Mutex
+	sessionTurnLocks   map[string]*sessionTurnLock
+	subTurnCounter     atomic.Int64
 
 	turnSeq atomic.Uint64
 
@@ -142,12 +145,14 @@ type processOptions struct {
 	InboundContext          *bus.InboundContext    // Normalized inbound facts for events/hooks
 	RouteResult             *routing.ResolvedRoute // Route decision snapshot for events/hooks
 	SessionScope            *session.SessionScope  // Session scope snapshot for events/hooks
+	turnReservation         *turnState             // exact root/continuation placeholder, process-local only
 }
 
 type continuationTarget struct {
-	SessionKey string
-	Channel    string
-	ChatID     string
+	SessionKey     string
+	Channel        string
+	ChatID         string
+	InboundContext *bus.InboundContext
 }
 
 const (
@@ -235,6 +240,7 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 			}
 			inboundCtx, releaseInbound, err := al.acquireRuntimeUse(ctx)
 			if err != nil {
+				al.cleanupInboundTurnUX(ctx, msg)
 				if ctx.Err() != nil {
 					return nil
 				}
@@ -246,6 +252,7 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				continue
 			}
 			if al.handleWorkflowTriggers(inboundCtx, msg) {
+				al.cleanupInboundTurnUX(inboundCtx, msg)
 				releaseInbound()
 				continue
 			}
@@ -268,38 +275,126 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 			// during turn setup. Each placeholder has a unique turnID to prevent
 			// cross-worker cleanup issues.
 			placeholder := &turnState{
-				turnID: makePendingTurnID(sessionKey, al.turnSeq.Add(1)),
-				phase:  TurnPhaseSetup,
+				turnID:         makePendingTurnID(sessionKey, al.turnSeq.Add(1)),
+				agentID:        agentID,
+				sessionKey:     sessionKey,
+				channel:        msg.Channel,
+				chatID:         msg.ChatID,
+				turnUXID:       msg.Context.TurnUXID,
+				handoffContext: cloneInboundContext(&msg.Context),
+				phase:          TurnPhaseSetup,
 			}
-			if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
+			unlockSessionTurn := al.lockSessionTurn(sessionKey)
+			_, loaded := al.activeTurnStates.LoadOrStore(
+				sessionKey,
+				placeholder,
+			)
+			unlockSessionTurn()
+			messagePrepared := false
+			if loaded {
 				if al.tryHandleStopCommand(inboundCtx, msg, sessionKey) {
 					releaseInbound()
 					continue
 				}
 
 				msg = al.prepareInboundMessageForAgent(inboundCtx, msg)
+				messagePrepared = true
 
-				// Another turn is already active (or reserved) for this session — enqueue
-				if enqueueErr := al.enqueueSteeringMessage(sessionKey, agentID, providers.Message{
-					Role:    "user",
-					Content: msg.Content,
-					Media:   append([]string(nil), msg.Media...),
-				}); enqueueErr != nil {
-					logger.WarnCF("agent", "Failed to enqueue steering message",
-						map[string]any{
-							"error":       enqueueErr.Error(),
-							"channel":     msg.Channel,
-							"chat_id":     msg.ChatID,
-							"session_key": sessionKey,
-						})
+				// ASR and other preparation may be slow. Recheck the active
+				// owner afterward: commit to that pinned owner, or claim the
+				// session when it has already exited.
+				unlockSessionTurn = al.lockSessionTurn(sessionKey)
+				current, stillActive := al.activeTurnStates.Load(sessionKey)
+				if !stillActive {
+					al.activeTurnStates.Store(sessionKey, placeholder)
+					unlockSessionTurn()
+				} else {
+					activeTurnUXID := ""
+					activeChannel := ""
+					activeChatID := ""
+					if active, ok := current.(*turnState); ok {
+						activeChannel = active.channel
+						activeChatID = active.chatID
+						activeTurnUXID = active.turnUXID
+					}
+					queued, queueDepth, enqueueErr := al.pushSteeringMessage(
+						sessionKey,
+						providers.Message{
+							Role:    "user",
+							Content: msg.Content,
+							Media:   append([]string(nil), msg.Media...),
+						},
+					)
+					cleanupSteeringUX := false
+					if enqueueErr == nil && al.channelManager != nil {
+						// Scoped dequeues use this same handoff lock, so the
+						// active turn cannot consume the entry first.
+						if activeTurnUXID != "" &&
+							activeChannel == msg.Channel &&
+							activeChatID == msg.ChatID {
+							rebindTurnUXForMessage(
+								al.channelManager,
+								msg.Channel,
+								msg.ChatID,
+								msg.Context.TurnUXID,
+								activeTurnUXID,
+							)
+						} else {
+							// Session scopes such as global/per-peer can steer
+							// from another chat. The active turn's eventual
+							// outbound cleanup cannot address that secondary
+							// chat key, so retire its exact transient UX after
+							// the queue commit instead of orphaning it.
+							cleanupSteeringUX = true
+						}
+					}
+					unlockSessionTurn()
+					if cleanupSteeringUX {
+						cleanupTurnUXForMessage(
+							inboundCtx,
+							al.channelManager,
+							msg.Channel,
+							msg.ChatID,
+							msg.Context.TurnUXID,
+						)
+					}
+					al.reportSteeringEnqueue(
+						sessionKey,
+						agentID,
+						queued,
+						queueDepth,
+						enqueueErr,
+					)
+					if enqueueErr != nil {
+						if al.channelManager != nil {
+							cleanupTurnUXForMessage(
+								inboundCtx,
+								al.channelManager,
+								msg.Channel,
+								msg.ChatID,
+								msg.Context.TurnUXID,
+							)
+						}
+						logger.WarnCF("agent", "Failed to enqueue steering message",
+							map[string]any{
+								"error":       enqueueErr.Error(),
+								"channel":     msg.Channel,
+								"chat_id":     msg.ChatID,
+								"session_key": sessionKey,
+							})
+					}
+					releaseInbound()
+					continue
 				}
-				releaseInbound()
-				continue
 			}
 
-			workerCtx, releaseWorker, err := al.retainRuntimeUse(inboundCtx)
+			workerCtx, releaseWorker, err := al.retainInboundWorkerRuntime(
+				inboundCtx,
+				sessionKey,
+				placeholder,
+				msg,
+			)
 			if err != nil {
-				al.releaseSessionTurnState(sessionKey, placeholder)
 				releaseInbound()
 				logger.WarnCF(
 					"agent",
@@ -323,9 +418,9 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				sessionKey string,
 				m bus.InboundMessage,
 				ph *turnState,
+				prepared bool,
 			) {
 				defer releaseWorker()
-				var releaseSession bool
 				// Acquire semaphore slot (blocks if at capacity)
 				select {
 				case al.workerSem <- struct{}{}:
@@ -333,37 +428,25 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				case <-workerCtx.Done():
 					// Context canceled while waiting for a slot — clean up the
 					// placeholder to prevent session-level deadlock.
-					al.releaseSessionTurnState(sessionKey, nil)
+					transferred := al.abandonSessionTurnState(
+						workerCtx,
+						sessionKey,
+						ph,
+					)
+					if al.channelManager != nil && !transferred {
+						cleanupTurnUXForMessage(
+							workerCtx,
+							al.channelManager,
+							m.Channel,
+							m.ChatID,
+							m.Context.TurnUXID,
+						)
+					}
 					return
 				}
 
-				// Safety-net cleanup: if the placeholder was never replaced by a real
-				// turnState (e.g., error before runTurn), delete it here. When runTurn
-				// completes normally, clearActiveTurn deletes the real turnState and
-				// this becomes a no-op (the key is already gone).
-				defer func() {
-					if releaseSession {
-						// Conditional delete: only remove the entry if it still points
-						// to our placeholder. A new message may have claimed the slot
-						// between the panic and this defer.
-						if actual, ok := al.activeTurnStates.Load(sessionKey); ok {
-							if ts, ok := actual.(*turnState); ok && ts == ph {
-								al.releaseSessionTurnState(sessionKey, ts)
-							}
-						}
-						return
-					}
-					if actual, ok := al.activeTurnStates.Load(sessionKey); ok {
-						if ts, ok := actual.(*turnState); ok && strings.HasPrefix(ts.turnID, pendingTurnPrefix) {
-							// Placeholder still present — runTurn never replaced it.
-							al.releaseSessionTurnState(sessionKey, ts)
-						}
-					}
-				}()
-
 				defer func() {
 					if r := recover(); r != nil {
-						releaseSession = true
 						logger.RecoverPanicNoExit(r)
 						logger.ErrorCF("agent", "Worker goroutine panicked",
 							map[string]any{
@@ -376,42 +459,94 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				}()
 				defer func() { <-al.workerSem }() // Release slot
 
-				if al.channelManager != nil {
-					defer al.channelManager.InvokeTypingStop(m.Channel, m.ChatID)
-				}
+				outboundEnqueued := false
+				defer func() {
+					// If setup never replaced the exact reservation, abandon it
+					// before checking for a committed steering handoff. A rescue
+					// that accepts the queue also takes ownership of this turn's
+					// rebound transient UX.
+					transferred := al.abandonSessionTurnState(
+						workerCtx,
+						sessionKey,
+						ph,
+					)
+					if !transferred {
+						transferred = al.rescueOrClearOrphanedSteering(
+							workerCtx,
+							sessionKey,
+							m.Channel,
+							m.ChatID,
+							&m.Context,
+							outboundEnqueued,
+						)
+					}
+					if al.channelManager == nil || transferred {
+						return
+					}
+					if outboundEnqueued {
+						// Buffered outbound delivery still owns the reaction
+						// and placeholder. Preserve the historical typing
+						// stop without racing that delivery.
+						invokeTypingStopForMessage(
+							al.channelManager,
+							m.Channel,
+							m.ChatID,
+							m.Context.TurnUXID,
+						)
+						return
+					}
+					cleanupTurnUXForMessage(
+						workerCtx,
+						al.channelManager,
+						m.Channel,
+						m.ChatID,
+						m.Context.TurnUXID,
+					)
+				}()
 
 				if al.takePendingStop(sessionKey) {
-					al.releaseSessionTurnState(sessionKey, nil)
+					al.releaseSessionTurnState(sessionKey, ph)
 					target := &continuationTarget{
-						SessionKey: sessionKey,
-						Channel:    m.Channel,
-						ChatID:     m.ChatID,
+						SessionKey:     sessionKey,
+						Channel:        m.Channel,
+						ChatID:         m.ChatID,
+						InboundContext: cloneInboundContext(&m.Context),
 					}
 					continued, continueErr := al.drainQueuedSteeringContinuations(workerCtx, target)
 					if continueErr != nil {
-						al.maybePublishError(
+						outboundEnqueued = al.maybePublishError(
 							workerCtx,
 							m.Channel,
 							m.ChatID,
 							sessionKey,
 							continueErr,
+							&m.Context,
 						)
 						return
 					}
 					if continued != "" {
-						al.PublishResponseIfNeeded(
+						outboundEnqueued = al.publishResponseIfNeeded(
 							workerCtx,
 							target.Channel,
 							target.ChatID,
 							target.SessionKey,
 							continued,
+							target.InboundContext,
 						)
+					}
+					if al.messageToolSentTo(
+						target.SessionKey,
+						target.Channel,
+						target.ChatID,
+					) {
+						outboundEnqueued = true
 					}
 					return
 				}
 
-				al.runTurnWithSteering(workerCtx, m)
-			}(workerCtx, releaseWorker, sessionKey, msg, placeholder)
+				turnCtx := withTurnReservation(workerCtx, ph)
+				outboundEnqueued = al.runTurnWithSteering(turnCtx, m, prepared)
+			}(workerCtx, releaseWorker, sessionKey, msg, placeholder, messagePrepared)
 			releaseInbound()
 
 			// TODO: Re-enable media cleanup after inbound media is properly consumed by the agent.
@@ -430,13 +565,45 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 	}
 }
 
+func (al *AgentLoop) cleanupInboundTurnUX(
+	ctx context.Context,
+	msg bus.InboundMessage,
+) {
+	if al == nil || al.channelManager == nil {
+		return
+	}
+	msg = bus.NormalizeInboundMessage(msg)
+	cleanupTurnUXForMessage(
+		ctx,
+		al.channelManager,
+		msg.Channel,
+		msg.ChatID,
+		msg.Context.TurnUXID,
+	)
+}
+
+func (al *AgentLoop) retainInboundWorkerRuntime(
+	ctx context.Context,
+	sessionKey string,
+	placeholder *turnState,
+	msg bus.InboundMessage,
+) (context.Context, func(), error) {
+	workerCtx, releaseWorker, err := al.retainRuntimeUse(ctx)
+	if err == nil {
+		return workerCtx, releaseWorker, nil
+	}
+	if !al.abandonSessionTurnState(ctx, sessionKey, placeholder) {
+		al.cleanupInboundTurnUX(ctx, msg)
+	}
+	return workerCtx, releaseWorker, err
+}
+
 // processMessageSync processes a message synchronously (for non-routable/system messages).
 
 // runTurnWithSteering runs a complete turn for a message and drains its steering queue.
 
-// maybePublishError publishes an error response unless the error is context.Canceled.
-// Returns true if processing should continue (non-cancellation error or no error),
-// false if context was canceled and the caller should return.
+// maybePublishError publishes an error response unless the error is
+// context.Canceled and reports whether outbound delivery accepted it.
 
 // publishResponseOrError publishes the response, or an error message if processing failed.
 

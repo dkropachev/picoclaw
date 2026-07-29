@@ -10,6 +10,8 @@ import (
 // TypingCapable — channels that can show a typing/thinking indicator.
 // StartTyping begins the indicator and returns a stop function.
 // The stop function MUST be idempotent and safe to call multiple times.
+// It MUST also be pinned to the exact provider generation it created: a
+// delayed stop from an older turn must not clear a newer turn's indicator.
 type TypingCapable interface {
 	StartTyping(ctx context.Context, chatID string) (stop func(), err error)
 }
@@ -39,6 +41,8 @@ type MessageDeleter interface {
 // ReactionCapable — channels that can add a reaction (e.g. 👀) to an inbound message.
 // ReactToMessage adds a reaction and returns an undo function to remove it.
 // The undo function MUST be idempotent and safe to call multiple times.
+// It MUST also be pinned to the exact provider reaction it created: a delayed
+// undo from an older turn must not remove a newer turn's reaction.
 type ReactionCapable interface {
 	ReactToMessage(ctx context.Context, chatID, messageID string) (undo func(), err error)
 }
@@ -71,6 +75,46 @@ type PlaceholderRecorder interface {
 	RecordPlaceholder(channel, chatID, placeholderID string)
 	RecordTypingStop(channel, chatID string, stop func())
 	RecordReactionUndo(channel, chatID string, undo func())
+}
+
+// TurnUXRegistration groups the transient artifacts created immediately before
+// an admitted inbound message enters the agent queue.
+type TurnUXRegistration struct {
+	TypingStop   func()
+	ReactionUndo func()
+	Placeholder  string
+	// Identity is an opaque process-local ID that binds these artifacts to the
+	// inbound turn that created them.
+	// A later outbound for an older turn must not consume a newer registration
+	// that happens to share the same channel and chat.
+	Identity string
+	// Owner is the exact channel generation that created Placeholder. Cleanup
+	// must never resolve the name through a potentially replaced manager map.
+	Owner Channel
+}
+
+// TransactionalPlaceholderRecorder lets the message bus roll back transient
+// UX when cancellation or shutdown wins after preparation but before queueing.
+// The returned function must affect only this registration, not a newer turn
+// for the same chat.
+type TransactionalPlaceholderRecorder interface {
+	RecordTurnUX(
+		ctx context.Context,
+		channel, chatID string,
+		registration TurnUXRegistration,
+	) (rollback func(context.Context))
+}
+
+// TurnUXTransitionRecorder serializes replacement of one chat's transient UX.
+// build is invoked synchronously only after the prior registration has been
+// detached and its provider effects have been given a bounded cleanup window.
+// The returned rollback must affect only the registration built by this call.
+type TurnUXTransitionRecorder interface {
+	ReplaceTurnUX(
+		ctx context.Context,
+		channel, chatID string,
+		build func() TurnUXRegistration,
+	) (rollback func(context.Context))
 }
 
 // CommandRegistrarCapable is implemented by channels that can register

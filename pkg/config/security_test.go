@@ -30,6 +30,61 @@ func TestSecurityConfig(t *testing.T) {
 	})
 }
 
+func TestSensitiveDataValuesReturnsDetachedResolvedChannelSecrets(t *testing.T) {
+	cfg := DefaultConfig()
+	channel := &Channel{
+		Enabled: true,
+		Type:    ChannelTelegram,
+	}
+	channel.SetName("support-chat")
+	const secret = "resolved-channel-secret"
+	require.NoError(t, channel.Decode(&TelegramSettings{
+		Token: *NewSecureString(secret),
+	}))
+	cfg.Channels["support-chat"] = channel
+
+	values := cfg.SensitiveDataValues()
+	require.Contains(t, values, secret)
+	for index := range values {
+		if values[index] == secret {
+			values[index] = "mutated"
+		}
+	}
+	require.Contains(t, cfg.SensitiveDataValues(), secret)
+}
+
+func TestSensitiveDataValuesResolvesRawChannelSettingsWithoutMutation(t *testing.T) {
+	const secret = "raw-deltachat-secret"
+	connector := "mail-" + secret
+	channel := &Channel{
+		Enabled: true,
+		Type:    ChannelDeltaChat,
+		Settings: RawNode(
+			`{"email":"events@example.org","password":"` + secret + `"}`,
+		),
+	}
+	cfg := DefaultConfig()
+	cfg.Channels[connector] = channel
+	cfg.Events.Ingress = EventIngressConfig{
+		Enabled: true,
+		Channels: map[string]ChannelEventIngressConfig{
+			connector: {Enabled: true},
+		},
+	}
+
+	values := cfg.SensitiveDataValues()
+	require.Contains(t, values, secret)
+	require.Nil(t, channel.extend, "sensitive snapshot mutated raw channel initialization")
+
+	err := cfg.Events.Ingress.ValidateEventChannelAdapters(
+		cfg.Channels,
+		values...,
+	)
+	require.EqualError(t, err, eventChannelSecretConflictMessage)
+	require.NotContains(t, err.Error(), secret)
+	require.NotContains(t, err.Error(), connector)
+}
+
 func TestSecurityPath(t *testing.T) {
 	tests := []struct {
 		name      string
