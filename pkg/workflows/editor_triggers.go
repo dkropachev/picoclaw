@@ -1009,6 +1009,10 @@ func WorkflowJSONNumberIsBrowserSafe(text string) bool {
 	if !workflowJSONNumberPattern.MatchString(text) {
 		return false
 	}
+	number, err := strconv.ParseFloat(text, 64)
+	if err != nil || math.IsInf(number, 0) || math.IsNaN(number) {
+		return false
+	}
 	exact, ok := new(big.Rat).SetString(text)
 	if !ok {
 		return false
@@ -1019,10 +1023,6 @@ func WorkflowJSONNumberIsBrowserSafe(text string) bool {
 		if absolute.Cmp(limit) > 0 {
 			return false
 		}
-	}
-	number, err := strconv.ParseFloat(text, 64)
-	if err != nil || math.IsInf(number, 0) || math.IsNaN(number) {
-		return false
 	}
 	roundTrip, ok := new(big.Rat).SetString(
 		strconv.FormatFloat(number, 'g', -1, 64),

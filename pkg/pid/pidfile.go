@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -16,6 +17,8 @@ import (
 )
 
 const pidFileName = ".picoclaw.pid"
+
+const maxPeekPidFileBytes int64 = 64 << 10
 
 var errInvalidPidFile = errors.New("invalid pid file")
 
@@ -153,6 +156,37 @@ func ReadPidFileWithCheck(homePath string) *PidFileData {
 	return data
 }
 
+// PeekPidFile reads a syntactically valid PID file without checking process
+// liveness or modifying the file. Callers that only need connection metadata
+// can probe the protected endpoint as the authoritative liveness check.
+func PeekPidFile(homePath string) *PidFileData {
+	pidMu.Lock()
+	defer pidMu.Unlock()
+
+	file, err := openPidFileForPeek(pidFilePath(homePath))
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil ||
+		!info.Mode().IsRegular() ||
+		info.Size() < 0 ||
+		info.Size() > maxPeekPidFileBytes {
+		return nil
+	}
+
+	raw, err := io.ReadAll(io.LimitReader(file, maxPeekPidFileBytes+1))
+	if err != nil || int64(len(raw)) > maxPeekPidFileBytes {
+		return nil
+	}
+	data, err := decodePidFileData(raw)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
 // RemovePidFile deletes the PID file (e.g. on graceful shutdown).
 func RemovePidFile(homePath string) {
 	pidMu.Lock()
@@ -202,7 +236,10 @@ func readPidFileUnlocked(pidPath string) (*PidFileData, error) {
 	if err != nil {
 		return nil, err
 	}
+	return decodePidFileData(raw)
+}
 
+func decodePidFileData(raw []byte) (*PidFileData, error) {
 	var data PidFileData
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return nil, fmt.Errorf("%w: %v", errInvalidPidFile, err)

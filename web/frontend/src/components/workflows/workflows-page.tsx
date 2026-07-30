@@ -101,6 +101,7 @@ import {
   WorkflowCancelDialog,
   type WorkflowCancelTarget,
 } from "./workflow-cancel-dialog"
+import { WorkflowCapabilityCatalog } from "./workflow-capability-catalog"
 import { WorkflowDefinitionInspector } from "./workflow-definition-inspector"
 import {
   workflowDependencyFence,
@@ -1726,6 +1727,7 @@ export function WorkflowsPage({
             Operate
           </Button>
         </div>
+        <WorkflowCapabilityCatalog />
         <Button
           type="button"
           variant="outline"

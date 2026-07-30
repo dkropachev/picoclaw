@@ -69,28 +69,30 @@ const (
 )
 
 type services struct {
-	CronService             *cron.CronService
-	HeartbeatService        *heartbeat.HeartbeatService
-	MediaStore              media.MediaStore
-	ChannelManager          *channels.Manager
-	DeviceService           *devices.Service
-	EventAutomation         *eventAutomationService
-	HealthServer            *health.Server
-	eventChannelBus         *bus.MessageBus
-	eventChannelController  *eventchannel.Controller
-	eventChannelGeneration  eventchannel.Generation
-	eventChannelInstalled   bool
-	eventChannelRelease     func()
-	eventWebhookController  *eventwebhook.Controller
-	eventWebhookGeneration  eventwebhook.Generation
-	eventWebhookRelease     func()
-	eventOperatorController *eventoperator.Controller
-	eventOperatorGeneration eventoperator.Generation
-	eventOperatorRelease    func()
-	VoiceAgentCancel        context.CancelFunc
-	manualReloadChan        chan struct{}
-	reloading               atomic.Bool
-	authToken               string
+	CronService              *cron.CronService
+	HeartbeatService         *heartbeat.HeartbeatService
+	MediaStore               media.MediaStore
+	ChannelManager           *channels.Manager
+	DeviceService            *devices.Service
+	EventAutomation          *eventAutomationService
+	HealthServer             *health.Server
+	eventChannelBus          *bus.MessageBus
+	eventChannelController   *eventchannel.Controller
+	eventChannelGeneration   eventchannel.Generation
+	eventChannelInstalled    bool
+	eventChannelRelease      func()
+	eventWebhookController   *eventwebhook.Controller
+	eventWebhookGeneration   eventwebhook.Generation
+	eventWebhookRelease      func()
+	eventOperatorController  *eventoperator.Controller
+	eventOperatorGeneration  eventoperator.Generation
+	eventOperatorRelease     func()
+	workflowAuthoringHandler *workflowAuthoringCapabilitiesHandler
+	workflowAuthoringRelease func()
+	VoiceAgentCancel         context.CancelFunc
+	manualReloadChan         chan struct{}
+	reloading                atomic.Bool
+	authToken                string
 }
 
 type startupBlockedProvider struct {
@@ -576,6 +578,9 @@ func setupAndStartServices(
 		listenAddr,
 		runningServices.HealthServer,
 	)
+	if err = prepareWorkflowAuthoringRoute(runningServices, agentLoop); err != nil {
+		return runningServices, err
+	}
 	if err = prepareEventHTTPRoutesForConfig(runningServices, cfg); err != nil {
 		return runningServices, err
 	}
@@ -1213,6 +1218,9 @@ func restartServices(
 
 	al.SetChannelManager(runningServices.ChannelManager)
 
+	if err = prepareWorkflowAuthoringRoute(runningServices, al); err != nil {
+		return err
+	}
 	if err = prepareEventHTTPRoutesForConfig(runningServices, cfg); err != nil {
 		return err
 	}

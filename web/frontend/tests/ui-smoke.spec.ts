@@ -580,6 +580,101 @@ function workflowDefinitionInspection(source: MockWorkflowInspectionSource) {
   return inspection
 }
 
+const workflowCapabilityLongToolName = `z${"x".repeat(200)}`
+
+function workflowAuthoringCapabilities() {
+  return {
+    complete: true,
+    mcp_status: "ready",
+    agents: [
+      {
+        id: "main",
+        target: "agent/main",
+        is_default: true,
+        readiness: "ready",
+      },
+      {
+        id: "reviewer",
+        target: "agent/reviewer",
+        is_default: false,
+        readiness: "not_configured",
+      },
+    ],
+    tools: [
+      {
+        name: "message",
+        target: "tool/message",
+        readiness: "ready",
+        parameter_shape_projected: true,
+        parameter_shape: {
+          type: "object",
+          properties: [
+            {
+              name: "channel",
+              required: false,
+              shape: { type: "string" },
+            },
+            {
+              name: "text",
+              required: true,
+              shape: {
+                type: "string",
+                enum: ["brief", "full"],
+              },
+            },
+          ],
+          additional_properties: { allowed: false },
+        },
+      },
+      {
+        name: workflowCapabilityLongToolName,
+        target: `tool/${workflowCapabilityLongToolName}`,
+        readiness: "ready",
+        parameter_shape_projected: true,
+        parameter_shape: {},
+      },
+    ],
+    mcp_tools: [
+      {
+        server: "github",
+        tool: "create_issue",
+        target: "mcp/github/create_issue",
+        readiness: "ready",
+        parameter_shape_projected: true,
+        parameter_shape: {
+          type: "object",
+          additional_properties: {
+            shape: { type: "string" },
+          },
+        },
+      },
+    ],
+    functions: [
+      {
+        name: "git.filter",
+        target: "function/git.filter",
+        readiness: "ready",
+      },
+      {
+        name: "git.inventory",
+        target: "function/git.inventory",
+        readiness: "ready",
+      },
+      {
+        name: "workflow.artifact",
+        target: "function/workflow.artifact",
+        readiness: "ready",
+      },
+      {
+        name: "workflow.state",
+        target: "function/workflow.state",
+        readiness: "ready",
+      },
+    ],
+    limits: [],
+  }
+}
+
 const supportTriageWorkflowDefinition = {
   ref: "workflows/support-triage.yml",
   name: "Support Triage",
@@ -853,6 +948,10 @@ interface MockLauncherApiOptions {
     method: string
     path: string
     body: unknown
+  }>
+  workflowCapabilityRequests?: Array<{
+    method: string
+    path: string
   }>
   workflowCancelReasons?: string[]
 }
@@ -1750,6 +1849,9 @@ async function mockLauncherApis(
           )
         case "/api/workflows/development":
           return json(route, { session: activeDevelopmentSession })
+        case "/api/workflows/authoring/capabilities":
+          options.workflowCapabilityRequests?.push({ method, path })
+          return json(route, workflowAuthoringCapabilities())
         case "/api/workflows/templates":
           return json(route, {
             templates: [
@@ -3275,6 +3377,113 @@ test("workflow Operate shows only the sanitized published definition inspection"
   }
   await expect(inspection).not.toContainText(workflowInspectionSecretCanary)
   await expect(inspection).not.toContainText(workflowInspectionRawYAMLCanary)
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("workflow capability catalog is lazy, searchable, and available across workflow modes", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "desktop",
+    "desktop workflow capability coverage",
+  )
+  const errors = collectPageErrors(page)
+  const capabilityRequests: NonNullable<
+    MockLauncherApiOptions["workflowCapabilityRequests"]
+  > = []
+
+  await gotoMockedRoute(page, "/agent/workflows", {
+    workflowCapabilityRequests: capabilityRequests,
+  })
+  const capabilitiesButton = page.getByRole("button", {
+    name: "Workflow capabilities",
+  })
+  await expect(capabilitiesButton).toBeVisible()
+  expect(capabilityRequests).toEqual([])
+
+  await capabilitiesButton.click()
+  const dialog = page.getByRole("dialog", {
+    name: "Workflow capabilities",
+  })
+  await expect(dialog).toBeVisible()
+  await expect(
+    dialog.getByRole("region", { name: "Workflow capability results" }),
+  ).toHaveAttribute("tabindex", "0")
+  await expect(dialog.getByText("agent/main")).toBeVisible()
+  await expect(dialog.getByText("tool/message")).toBeVisible()
+  await expect(dialog.getByText("mcp/github/create_issue")).toBeVisible()
+  await expect(dialog.getByText("Additional property values")).toBeVisible()
+  await expect(
+    dialog.getByRole("button", { name: "Copy agent/reviewer" }),
+  ).toBeDisabled()
+  expect(capabilityRequests).toEqual([
+    {
+      method: "GET",
+      path: "/api/workflows/authoring/capabilities",
+    },
+  ])
+
+  await dialog
+    .getByRole("searchbox", { name: "Search capabilities" })
+    .fill("create_issue")
+  await expect(dialog.getByText("mcp/github/create_issue")).toBeVisible()
+  await expect(dialog.getByText("agent/main")).toHaveCount(0)
+  await dialog.getByRole("button", { name: "MCP tools" }).click()
+  await expect(
+    dialog.getByText(
+      "No capabilities match the current search and category filters.",
+    ),
+  ).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  await dialog.getByRole("button", { name: "Close" }).click()
+
+  await page.getByRole("button", { name: "Operate" }).click()
+  await expect(capabilitiesButton).toBeVisible()
+  await page.getByRole("button", { name: "Develop" }).click()
+  await page
+    .getByPlaceholder("Describe the workflow outcome")
+    .fill("Triage support tickets")
+  await page.getByRole("button", { name: "Start with AI" }).click()
+  await expect(
+    page.getByRole("heading", { name: "Workflow YAML", exact: true }),
+  ).toBeVisible()
+  await expect(capabilitiesButton).toBeVisible()
+  await expect(capabilitiesButton).toBeEnabled()
+
+  await expectNoHorizontalOverflow(page)
+  expect(errors).toEqual([])
+})
+
+test("workflow capability catalog fits and wraps exact targets at 320px", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "mobile",
+    "mobile workflow capability coverage",
+  )
+  await page.setViewportSize({ width: 320, height: 720 })
+  const errors = collectPageErrors(page)
+
+  await gotoMockedRoute(page, "/agent/workflows")
+  await page.getByRole("button", { name: "Workflow capabilities" }).click()
+  const dialog = page.getByRole("dialog", {
+    name: "Workflow capabilities",
+  })
+  await expect(dialog).toBeVisible()
+  await dialog
+    .getByRole("searchbox", { name: "Search capabilities" })
+    .fill(workflowCapabilityLongToolName)
+  await expect(
+    dialog.getByText(`tool/${workflowCapabilityLongToolName}`),
+  ).toBeVisible()
+  await expectElementFitsViewport(
+    page,
+    '[role="dialog"]',
+    "workflow capability catalog",
+  )
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])

@@ -19,6 +19,12 @@ var (
 	trailingDashRe = regexp.MustCompile(`-+$`)
 )
 
+// IsCanonicalAgentID reports whether id is already in the exact runtime
+// address form accepted by agent routing.
+func IsCanonicalAgentID(id string) bool {
+	return validIDRe.MatchString(id)
+}
+
 // NormalizeAgentID sanitizes an agent ID to [a-z0-9][a-z0-9_-]{0,63}.
 // Invalid characters are collapsed to "-". Leading/trailing dashes stripped.
 // Empty input returns DefaultAgentID ("main").

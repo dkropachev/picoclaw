@@ -410,6 +410,71 @@ func TestCallTool_ErrorsForClosedOrMissingServer(t *testing.T) {
 	})
 }
 
+func TestWorkflowAuthoringIdentitySafetyTracksManagerMutations(t *testing.T) {
+	manager := NewManager()
+	setTools := func(toolNames ...string) {
+		t.Helper()
+		listed := make([]*sdkmcp.Tool, 0, len(toolNames))
+		for _, toolName := range toolNames {
+			listed = append(listed, &sdkmcp.Tool{Name: toolName})
+		}
+		manager.mu.Lock()
+		manager.servers = map[string]*ServerConnection{
+			"github": {
+				Name:  "github",
+				Tools: listed,
+			},
+		}
+		manager.refreshWorkflowAuthoringIdentitySafetyLocked()
+		manager.mu.Unlock()
+	}
+
+	setTools("echo", "echo")
+	if !manager.WorkflowAuthoringIdentitiesSafe() {
+		t.Fatal("exact duplicate identity marked unsafe")
+	}
+
+	setTools("Search", "search")
+	if manager.WorkflowAuthoringIdentitiesSafe() {
+		t.Fatal("distinct canonical collision marked safe")
+	}
+	visited := false
+	identitySafe, err := manager.VisitWorkflowAuthoringServers(
+		context.Background(),
+		func(string, *ServerConnection) bool {
+			visited = true
+			return true
+		},
+	)
+	if err != nil || identitySafe || visited {
+		t.Fatalf("collision visit = safe %v, visited %v, error %v", identitySafe, visited, err)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, canceledErr := manager.VisitWorkflowAuthoringServers(
+		canceled,
+		func(string, *ServerConnection) bool { return true },
+	); canceledErr != context.Canceled {
+		t.Fatalf("canceled collision visit error = %v, want context.Canceled", canceledErr)
+	}
+
+	setTools("echo", "list")
+	if !manager.WorkflowAuthoringIdentitiesSafe() {
+		t.Fatal("collision-safe refresh did not recover manager state")
+	}
+	identitySafe, err = manager.VisitWorkflowAuthoringServers(
+		context.Background(),
+		func(name string, connection *ServerConnection) bool {
+			visited = name == "github" && connection != nil
+			return true
+		},
+	)
+	if err != nil || !identitySafe || !visited {
+		t.Fatalf("refreshed visit = safe %v, visited %v, error %v", identitySafe, visited, err)
+	}
+}
+
 func TestConnectServer_StreamableHTTPRequestResponseMode(t *testing.T) {
 	t.Parallel()
 
@@ -646,9 +711,26 @@ func TestCallTool_ReconnectsWhenHTTPServerLosesSession(t *testing.T) {
 
 func TestClose_IdempotentOnEmptyManager(t *testing.T) {
 	mgr := NewManager()
+	if !mgr.WorkflowAuthoringIdentitiesSafe() {
+		t.Fatal("new manager identity state should be safe")
+	}
 
 	if err := mgr.Close(); err != nil {
 		t.Fatalf("first close should succeed, got: %v", err)
+	}
+	if mgr.WorkflowAuthoringIdentitiesSafe() {
+		t.Fatal("closed manager retained safe workflow-authoring identity state")
+	}
+	visited := false
+	identitySafe, err := mgr.VisitWorkflowAuthoringServers(
+		context.Background(),
+		func(string, *ServerConnection) bool {
+			visited = true
+			return true
+		},
+	)
+	if err != nil || identitySafe || visited {
+		t.Fatalf("closed visit = safe %v, visited %v, error %v", identitySafe, visited, err)
 	}
 	if err := mgr.Close(); err != nil {
 		t.Fatalf("second close should be idempotent, got: %v", err)

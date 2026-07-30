@@ -34,6 +34,17 @@ var nativeFunctionNames = map[string]struct{}{
 	"git.filter":        {},
 }
 
+// NativeFunctionNames returns a sorted copy of the workflow functions
+// implemented by the runtime. Callers may mutate the returned slice.
+func NativeFunctionNames() []string {
+	names := make([]string, 0, len(nativeFunctionNames))
+	for name := range nativeFunctionNames {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // IsNativeFunction reports whether name is implemented by the workflow
 // runtime without an embedding FunctionRunner.
 func IsNativeFunction(name string) bool {

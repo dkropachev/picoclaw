@@ -5,6 +5,35 @@ import (
 	"testing"
 )
 
+func TestIsCanonicalAgentID(t *testing.T) {
+	for _, id := range []string{
+		"main",
+		"agent-1",
+		"agent_1",
+		"0",
+		strings.Repeat("a", MaxAgentIDLength),
+	} {
+		if !IsCanonicalAgentID(id) {
+			t.Errorf("IsCanonicalAgentID(%q) = false, want true", id)
+		}
+	}
+	for _, id := range []string{
+		"",
+		"Main",
+		"foo/bar",
+		"foo.bar",
+		"foo bar",
+		"á",
+		"-leading",
+		"_leading",
+		strings.Repeat("a", MaxAgentIDLength+1),
+	} {
+		if IsCanonicalAgentID(id) {
+			t.Errorf("IsCanonicalAgentID(%q) = true, want false", id)
+		}
+	}
+}
+
 func TestNormalizeAgentID_Empty(t *testing.T) {
 	if got := NormalizeAgentID(""); got != DefaultAgentID {
 		t.Errorf("NormalizeAgentID('') = %q, want %q", got, DefaultAgentID)

@@ -156,6 +156,7 @@ func releaseEventOperatorRoute(runningServices *services) {
 }
 
 func releaseEventHTTPRoutes(runningServices *services) {
+	releaseWorkflowAuthoringRoute(runningServices)
 	releaseEventOperatorRoute(runningServices)
 	releaseEventWebhookRoute(runningServices)
 }

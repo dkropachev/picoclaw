@@ -565,6 +565,105 @@ export interface WorkflowDefinitionInspection {
   >
 }
 
+export const workflowAuthoringCapabilitiesQueryKey = [
+  "workflows",
+  "authoring",
+  "capabilities",
+] as const
+
+export type WorkflowCapabilityReadiness =
+  | "ready"
+  | "unchecked"
+  | "not_configured"
+  | "disabled"
+  | "not_allowed"
+  | "not_connected"
+  | "not_found"
+  | "invalid_configuration"
+  | "name_collision"
+  | "unavailable"
+
+export type WorkflowCapabilityParameterType =
+  | "object"
+  | "array"
+  | "string"
+  | "number"
+  | "integer"
+  | "boolean"
+  | "null"
+
+export type WorkflowCapabilityParameterEnumValue =
+  | string
+  | number
+  | boolean
+  | null
+
+export interface WorkflowCapabilityParameterProperty {
+  name: string
+  required: boolean
+  shape: WorkflowCapabilityParameterShape
+}
+
+export type WorkflowCapabilityAdditionalProperties =
+  | { allowed: boolean }
+  | { shape: WorkflowCapabilityParameterShape }
+
+export interface WorkflowCapabilityParameterShape {
+  type?: WorkflowCapabilityParameterType
+  properties?: WorkflowCapabilityParameterProperty[]
+  items?: WorkflowCapabilityParameterShape
+  enum?: WorkflowCapabilityParameterEnumValue[]
+  additional_properties?: WorkflowCapabilityAdditionalProperties
+}
+
+export interface WorkflowAgentCapability {
+  id: string
+  target: string
+  is_default: boolean
+  readiness: WorkflowCapabilityReadiness
+}
+
+export interface WorkflowToolCapability {
+  name: string
+  target: string
+  readiness: WorkflowCapabilityReadiness
+  parameter_shape_projected: boolean
+  parameter_shape?: WorkflowCapabilityParameterShape
+}
+
+export interface WorkflowMCPCapability {
+  server: string
+  tool: string
+  target: string
+  readiness: WorkflowCapabilityReadiness
+  parameter_shape_projected: boolean
+  parameter_shape?: WorkflowCapabilityParameterShape
+}
+
+export interface WorkflowFunctionCapability {
+  name: string
+  target: string
+  readiness: WorkflowCapabilityReadiness
+}
+
+export type WorkflowAuthoringCapabilityLimit =
+  | "agents_truncated"
+  | "tools_truncated"
+  | "mcp_tools_truncated"
+  | "functions_truncated"
+  | "parameter_shapes_omitted"
+  | "unsafe_fields_omitted"
+
+export interface WorkflowAuthoringCapabilities {
+  complete: boolean
+  mcp_status: "ready" | "disabled" | "unavailable"
+  agents: WorkflowAgentCapability[]
+  tools: WorkflowToolCapability[]
+  mcp_tools: WorkflowMCPCapability[]
+  functions: WorkflowFunctionCapability[]
+  limits: WorkflowAuthoringCapabilityLimit[]
+}
+
 export interface WorkflowSettingsValues {
   enabled: boolean
   tool_enabled: boolean
@@ -898,6 +997,13 @@ export async function inspectWorkflowTemplate(
     kind: "template",
     template_name: name,
   })
+}
+
+export async function getWorkflowAuthoringCapabilities(
+  signal?: AbortSignal,
+): Promise<WorkflowAuthoringCapabilities> {
+  const payload = await requestWorkflowAuthoringCapabilities(signal)
+  return parseWorkflowAuthoringCapabilities(payload)
 }
 
 export async function getWorkflowSettings(): Promise<WorkflowSettingsResponse> {
@@ -1364,24 +1470,91 @@ async function requestWorkflowInspection(
   }
 }
 
+async function requestWorkflowAuthoringCapabilities(
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const res = await launcherFetch("/api/workflows/authoring/capabilities", {
+    signal,
+  })
+  let text: string
+  try {
+    text = await boundedWorkflowResponseText(
+      res,
+      workflowAuthoringCapabilitiesResponseMaxBytes,
+    )
+  } catch {
+    throw new Error(
+      res.ok
+        ? "Workflow capabilities returned an invalid response."
+        : "Workflow capabilities are unavailable.",
+    )
+  }
+  if (!res.ok) {
+    throw new Error(workflowAuthoringCapabilitiesErrorMessage(text))
+  }
+  if (
+    !workflowAuthoringCapabilitiesJSONContentType(
+      res.headers.get("Content-Type"),
+    )
+  ) {
+    throw new Error("Workflow capabilities returned an invalid response.")
+  }
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    throw new Error("Workflow capabilities returned an invalid response.")
+  }
+}
+
+function workflowAuthoringCapabilitiesJSONContentType(value: string | null) {
+  if (value == null) {
+    return false
+  }
+  const [mediaType, ...rawParameters] = value.split(";")
+  if (mediaType.trim().toLowerCase() !== "application/json") {
+    return false
+  }
+  if (rawParameters.length > 1) {
+    return false
+  }
+  return rawParameters.every((rawParameter) => {
+    const separator = rawParameter.indexOf("=")
+    if (separator < 0) {
+      return false
+    }
+    const name = rawParameter.slice(0, separator).trim().toLowerCase()
+    const parameterValue = rawParameter
+      .slice(separator + 1)
+      .trim()
+      .replace(/^"(.*)"$/, "$1")
+      .toLowerCase()
+    return name === "charset" && parameterValue === "utf-8"
+  })
+}
+
 const workflowInspectionResponseMaxBytes = 32 << 20
 const workflowInspectionSourceRefMaxBytes = 16 << 10
+const workflowAuthoringCapabilitiesResponseMaxBytes = 4 << 20
 
 async function boundedWorkflowInspectionResponseText(res: Response) {
+  return boundedWorkflowResponseText(res, workflowInspectionResponseMaxBytes)
+}
+
+async function boundedWorkflowResponseText(
+  res: Response,
+  maximumBytes: number,
+) {
   const lengthHeader = res.headers.get("Content-Length")
   if (
     lengthHeader != null &&
     /^\d+$/.test(lengthHeader) &&
-    Number(lengthHeader) > workflowInspectionResponseMaxBytes
+    Number(lengthHeader) > maximumBytes
   ) {
     throw new Error("response too large")
   }
   if (res.body == null) {
     const text = await res.text()
-    if (
-      new TextEncoder().encode(text).byteLength >
-      workflowInspectionResponseMaxBytes
-    ) {
+    if (new TextEncoder().encode(text).byteLength > maximumBytes) {
       throw new Error("response too large")
     }
     return text
@@ -1398,7 +1571,7 @@ async function boundedWorkflowInspectionResponseText(res: Response) {
         return text + decoder.decode()
       }
       total += value.byteLength
-      if (total > workflowInspectionResponseMaxBytes) {
+      if (total > maximumBytes) {
         await reader.cancel()
         throw new Error("response too large")
       }
@@ -1406,6 +1579,15 @@ async function boundedWorkflowInspectionResponseText(res: Response) {
     }
   } finally {
     reader.releaseLock()
+  }
+}
+
+function workflowAuthoringCapabilitiesErrorMessage(text: string) {
+  switch (workflowErrorCode(text)) {
+    case "workflow_authoring_capabilities_unavailable":
+      return "Workflow capabilities are temporarily unavailable."
+    default:
+      return "Workflow capabilities are unavailable."
   }
 }
 
@@ -1598,6 +1780,555 @@ const workflowInspectionLimitKinds = new Set<
   "unsafe_fields_omitted",
   "validation_issues_truncated",
 ])
+const workflowCapabilityReadinessValues = new Set<WorkflowCapabilityReadiness>([
+  "ready",
+  "unchecked",
+  "not_configured",
+  "disabled",
+  "not_allowed",
+  "not_connected",
+  "not_found",
+  "invalid_configuration",
+  "name_collision",
+  "unavailable",
+])
+const workflowCapabilityParameterTypes =
+  new Set<WorkflowCapabilityParameterType>([
+    "object",
+    "array",
+    "string",
+    "number",
+    "integer",
+    "boolean",
+    "null",
+  ])
+const workflowAuthoringCapabilityLimitValues =
+  new Set<WorkflowAuthoringCapabilityLimit>([
+    "agents_truncated",
+    "tools_truncated",
+    "mcp_tools_truncated",
+    "functions_truncated",
+    "parameter_shapes_omitted",
+    "unsafe_fields_omitted",
+  ])
+const workflowNativeFunctionNames = new Set([
+  "git.filter",
+  "git.inventory",
+  "workflow.artifact",
+  "workflow.state",
+])
+
+const workflowCapabilityBounds = {
+  agents: 128,
+  tools: 256,
+  mcpTools: 256,
+  functions: 4,
+  identityBytes: 256,
+  targetBytes: 1024,
+  schemaDepth: 6,
+  schemaProperties: 128,
+  schemaEnum: 64,
+  schemaUnits: 4096,
+  schemaStringBytes: 256,
+} as const
+
+function parseWorkflowAuthoringCapabilities(
+  value: unknown,
+): WorkflowAuthoringCapabilities {
+  const invalid = (): never => {
+    throw new Error("Workflow capabilities returned an invalid response.")
+  }
+  const root = inspectionObject(
+    value,
+    [
+      "complete",
+      "mcp_status",
+      "agents",
+      "tools",
+      "mcp_tools",
+      "functions",
+      "limits",
+    ],
+    invalid,
+  )
+  const schemaBudget = { remaining: workflowCapabilityBounds.schemaUnits }
+  const targets = new Set<string>()
+  let defaultAgentSeen = false
+
+  const agents = parseSortedWorkflowCapabilities(
+    root.agents,
+    workflowCapabilityBounds.agents,
+    (itemValue) => {
+      const item = inspectionObject(
+        itemValue,
+        ["id", "target", "is_default", "readiness"],
+        invalid,
+      )
+      const id = workflowCapabilityAgentIdentity(item.id, invalid)
+      const target = workflowCapabilityTarget(
+        item.target,
+        `agent/${id}`,
+        invalid,
+      )
+      const isDefault = inspectionBoolean(item.is_default, invalid)
+      if (isDefault && defaultAgentSeen) {
+        return invalid()
+      }
+      defaultAgentSeen ||= isDefault
+      addWorkflowCapabilityTarget(targets, target, invalid)
+      return {
+        sortKey: id,
+        value: {
+          id,
+          target,
+          is_default: isDefault,
+          readiness: inspectionEnum(
+            item.readiness,
+            workflowCapabilityReadinessValues,
+            invalid,
+          ),
+        },
+      }
+    },
+    invalid,
+  )
+
+  let parameterShapeOmitted = false
+  const tools = parseSortedWorkflowCapabilities(
+    root.tools,
+    workflowCapabilityBounds.tools,
+    (itemValue) => {
+      const item = inspectionObject(
+        itemValue,
+        [
+          "name",
+          "target",
+          "readiness",
+          "parameter_shape_projected",
+          "parameter_shape",
+        ],
+        invalid,
+      )
+      const name = workflowCapabilityIdentity(item.name, invalid)
+      if (name.toLowerCase() === "workflow") {
+        return invalid()
+      }
+      const target = workflowCapabilityTarget(
+        item.target,
+        `tool/${name}`,
+        invalid,
+      )
+      addWorkflowCapabilityTarget(targets, target, invalid)
+      const parameterShapeProjected = inspectionBoolean(
+        item.parameter_shape_projected,
+        invalid,
+      )
+      const hasShape = hasInspectionField(item, "parameter_shape")
+      if (parameterShapeProjected !== hasShape) {
+        return invalid()
+      }
+      const readiness = inspectionEnum(
+        item.readiness,
+        workflowCapabilityReadinessValues,
+        invalid,
+      )
+      if (readiness !== "ready") {
+        return invalid()
+      }
+      parameterShapeOmitted ||= !parameterShapeProjected
+      return {
+        sortKey: name,
+        value: {
+          name,
+          target,
+          readiness,
+          parameter_shape_projected: parameterShapeProjected,
+          ...(hasShape
+            ? {
+                parameter_shape: parseWorkflowCapabilityParameterShape(
+                  item.parameter_shape,
+                  1,
+                  schemaBudget,
+                  invalid,
+                ),
+              }
+            : {}),
+        },
+      }
+    },
+    invalid,
+  )
+
+  const mcpTools = parseSortedWorkflowCapabilities(
+    root.mcp_tools,
+    workflowCapabilityBounds.mcpTools,
+    (itemValue) => {
+      const item = inspectionObject(
+        itemValue,
+        [
+          "server",
+          "tool",
+          "target",
+          "readiness",
+          "parameter_shape_projected",
+          "parameter_shape",
+        ],
+        invalid,
+      )
+      const server = workflowCapabilityIdentity(item.server, invalid)
+      if (server.includes("/")) {
+        return invalid()
+      }
+      const tool = workflowCapabilityIdentity(item.tool, invalid)
+      if (tool.includes("/")) {
+        return invalid()
+      }
+      const target = workflowCapabilityTarget(
+        item.target,
+        `mcp/${server}/${tool}`,
+        invalid,
+      )
+      addWorkflowCapabilityTarget(targets, target, invalid)
+      const parameterShapeProjected = inspectionBoolean(
+        item.parameter_shape_projected,
+        invalid,
+      )
+      const hasShape = hasInspectionField(item, "parameter_shape")
+      if (parameterShapeProjected !== hasShape) {
+        return invalid()
+      }
+      const readiness = inspectionEnum(
+        item.readiness,
+        workflowCapabilityReadinessValues,
+        invalid,
+      )
+      if (readiness !== "ready") {
+        return invalid()
+      }
+      parameterShapeOmitted ||= !parameterShapeProjected
+      return {
+        sortKey: `${server}\u0000${tool}`,
+        value: {
+          server,
+          tool,
+          target,
+          readiness,
+          parameter_shape_projected: parameterShapeProjected,
+          ...(hasShape
+            ? {
+                parameter_shape: parseWorkflowCapabilityParameterShape(
+                  item.parameter_shape,
+                  1,
+                  schemaBudget,
+                  invalid,
+                ),
+              }
+            : {}),
+        },
+      }
+    },
+    invalid,
+  )
+
+  const functions = parseSortedWorkflowCapabilities(
+    root.functions,
+    workflowCapabilityBounds.functions,
+    (itemValue) => {
+      const item = inspectionObject(
+        itemValue,
+        ["name", "target", "readiness"],
+        invalid,
+      )
+      const name = workflowCapabilityIdentity(item.name, invalid)
+      if (!workflowNativeFunctionNames.has(name)) {
+        return invalid()
+      }
+      const target = workflowCapabilityTarget(
+        item.target,
+        `function/${name}`,
+        invalid,
+      )
+      addWorkflowCapabilityTarget(targets, target, invalid)
+      const readiness = inspectionEnum(
+        item.readiness,
+        workflowCapabilityReadinessValues,
+        invalid,
+      )
+      if (readiness !== "ready") {
+        return invalid()
+      }
+      return {
+        sortKey: name,
+        value: {
+          name,
+          target,
+          readiness,
+        },
+      }
+    },
+    invalid,
+  )
+
+  const limits = parseSortedWorkflowCapabilities(
+    root.limits,
+    workflowAuthoringCapabilityLimitValues.size,
+    (limitValue) => {
+      const limit = inspectionEnum(
+        limitValue,
+        workflowAuthoringCapabilityLimitValues,
+        invalid,
+      )
+      return { sortKey: limit, value: limit }
+    },
+    invalid,
+  )
+  const complete = inspectionBoolean(root.complete, invalid)
+  const mcpStatus = inspectionEnum(
+    root.mcp_status,
+    new Set(["ready", "disabled", "unavailable"] as const),
+    invalid,
+  )
+  const hasParameterShapeLimit = limits.includes("parameter_shapes_omitted")
+  if (
+    complete !== (limits.length === 0 && mcpStatus !== "unavailable") ||
+    (mcpStatus !== "ready" && mcpTools.length !== 0) ||
+    parameterShapeOmitted !== hasParameterShapeLimit ||
+    !defaultAgentSeen ||
+    (limits.includes("agents_truncated") &&
+      agents.length !== workflowCapabilityBounds.agents) ||
+    (limits.includes("tools_truncated") &&
+      tools.length !== workflowCapabilityBounds.tools) ||
+    (limits.includes("mcp_tools_truncated") &&
+      mcpTools.length !== workflowCapabilityBounds.mcpTools) ||
+    (limits.includes("functions_truncated") &&
+      functions.length !== workflowCapabilityBounds.functions) ||
+    (!limits.includes("functions_truncated") &&
+      functions.length !== workflowCapabilityBounds.functions)
+  ) {
+    return invalid()
+  }
+
+  return {
+    complete,
+    mcp_status: mcpStatus,
+    agents,
+    tools,
+    mcp_tools: mcpTools,
+    functions,
+    limits,
+  }
+}
+
+function parseSortedWorkflowCapabilities<Value>(
+  value: unknown,
+  maximum: number,
+  parse: (item: unknown) => { sortKey: string; value: Value },
+  invalid: () => never,
+): Value[] {
+  let previousKey: string | undefined
+  return inspectionArray(value, maximum, invalid).map((item) => {
+    const parsed = parse(item)
+    if (
+      previousKey != null &&
+      compareInspectionUTF8(previousKey, parsed.sortKey) >= 0
+    ) {
+      return invalid()
+    }
+    previousKey = parsed.sortKey
+    return parsed.value
+  })
+}
+
+function workflowCapabilityIdentity(
+  value: unknown,
+  invalid: () => never,
+): string {
+  const identity = inspectionString(value, invalid, {
+    maximumBytes: workflowCapabilityBounds.identityBytes,
+  })
+  return identity === identity.trim() ? identity : invalid()
+}
+
+const workflowCapabilityAgentIdentityPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/
+
+function workflowCapabilityAgentIdentity(
+  value: unknown,
+  invalid: () => never,
+): string {
+  const identity = workflowCapabilityIdentity(value, invalid)
+  return workflowCapabilityAgentIdentityPattern.test(identity)
+    ? identity
+    : invalid()
+}
+
+function workflowCapabilityTarget(
+  value: unknown,
+  expected: string,
+  invalid: () => never,
+) {
+  const target = inspectionString(value, invalid, {
+    maximumBytes: workflowCapabilityBounds.targetBytes,
+  })
+  return target === target.trim() && target === expected ? target : invalid()
+}
+
+function addWorkflowCapabilityTarget(
+  targets: Set<string>,
+  target: string,
+  invalid: () => never,
+) {
+  if (targets.has(target)) {
+    return invalid()
+  }
+  targets.add(target)
+}
+
+function parseWorkflowCapabilityParameterShape(
+  value: unknown,
+  depth: number,
+  budget: { remaining: number },
+  invalid: () => never,
+): WorkflowCapabilityParameterShape {
+  consumeWorkflowCapabilitySchemaBudget(budget, 1, invalid)
+  if (depth > workflowCapabilityBounds.schemaDepth) {
+    return invalid()
+  }
+  const shape = inspectionObject(
+    value,
+    ["type", "properties", "items", "enum", "additional_properties"],
+    invalid,
+  )
+  const parsed: WorkflowCapabilityParameterShape = {}
+  if (hasInspectionField(shape, "type")) {
+    parsed.type = inspectionEnum(
+      shape.type,
+      workflowCapabilityParameterTypes,
+      invalid,
+    )
+  }
+
+  if (hasInspectionField(shape, "properties")) {
+    let previousName: string | undefined
+    parsed.properties = inspectionArray(
+      shape.properties,
+      workflowCapabilityBounds.schemaProperties,
+      invalid,
+    ).map((propertyValue) => {
+      consumeWorkflowCapabilitySchemaBudget(budget, 1, invalid)
+      const property = inspectionObject(
+        propertyValue,
+        ["name", "required", "shape"],
+        invalid,
+      )
+      const name = workflowCapabilityIdentity(property.name, invalid)
+      if (
+        previousName != null &&
+        compareInspectionUTF8(previousName, name) >= 0
+      ) {
+        return invalid()
+      }
+      previousName = name
+      const required = inspectionBoolean(property.required, invalid)
+      if (required) {
+        consumeWorkflowCapabilitySchemaBudget(budget, 1, invalid)
+      }
+      return {
+        name,
+        required,
+        shape: parseWorkflowCapabilityParameterShape(
+          property.shape,
+          depth + 1,
+          budget,
+          invalid,
+        ),
+      }
+    })
+  }
+
+  if (hasInspectionField(shape, "items")) {
+    parsed.items = parseWorkflowCapabilityParameterShape(
+      shape.items,
+      depth + 1,
+      budget,
+      invalid,
+    )
+  }
+  if (hasInspectionField(shape, "enum")) {
+    const enumKeys = new Set<string>()
+    parsed.enum = inspectionArray(
+      shape.enum,
+      workflowCapabilityBounds.schemaEnum,
+      invalid,
+    ).map((enumValue) => {
+      consumeWorkflowCapabilitySchemaBudget(budget, 1, invalid)
+      const parsedValue = workflowCapabilityEnumValue(enumValue, invalid)
+      const key = `${typeof parsedValue}:${String(parsedValue)}`
+      if (enumKeys.has(key)) {
+        return invalid()
+      }
+      enumKeys.add(key)
+      return parsedValue
+    })
+  }
+  if (hasInspectionField(shape, "additional_properties")) {
+    const additionalProperties = inspectionObject(
+      shape.additional_properties,
+      ["allowed", "shape"],
+      invalid,
+    )
+    const hasAllowed = hasInspectionField(additionalProperties, "allowed")
+    const hasShape = hasInspectionField(additionalProperties, "shape")
+    if (hasAllowed === hasShape) {
+      return invalid()
+    }
+    parsed.additional_properties = hasAllowed
+      ? {
+          allowed: inspectionBoolean(additionalProperties.allowed, invalid),
+        }
+      : {
+          shape: parseWorkflowCapabilityParameterShape(
+            additionalProperties.shape,
+            depth + 1,
+            budget,
+            invalid,
+          ),
+        }
+  }
+  return parsed
+}
+
+function workflowCapabilityEnumValue(
+  value: unknown,
+  invalid: () => never,
+): WorkflowCapabilityParameterEnumValue {
+  if (value === null || typeof value === "boolean") {
+    return value
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) &&
+      (!Number.isInteger(value) || Number.isSafeInteger(value))
+      ? value
+      : invalid()
+  }
+  if (typeof value === "string") {
+    return inspectionString(value, invalid, {
+      allowEmpty: true,
+      maximumBytes: workflowCapabilityBounds.schemaStringBytes,
+    })
+  }
+  return invalid()
+}
+
+function consumeWorkflowCapabilitySchemaBudget(
+  budget: { remaining: number },
+  amount: number,
+  invalid: () => never,
+) {
+  budget.remaining -= amount
+  if (budget.remaining < 0) {
+    invalid()
+  }
+}
 
 function parseWorkflowDefinitionInspection(
   value: unknown,
