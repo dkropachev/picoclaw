@@ -862,6 +862,32 @@ func toolAdaptationMayUseCodexCompatibleTools(
 	return false
 }
 
+// AgentModelMayUseCodexCompatibleTools reports whether runtime construction
+// can register Codex-compatible tool identities for an already resolved model.
+func AgentModelMayUseCodexCompatibleTools(
+	resolvedModel string,
+	defaults *config.AgentDefaults,
+	cfg *config.Config,
+) bool {
+	if defaults == nil || cfg == nil {
+		return false
+	}
+	provider, toolModel := resolveToolAdaptationProfileForAgent(
+		cfg,
+		defaults.Provider,
+		strings.TrimSpace(resolvedModel),
+	)
+	initial := tools.ResolveToolAdaptation(
+		cfg.Tools.Adaptation,
+		provider,
+		toolModel,
+	)
+	return toolAdaptationMayUseCodexCompatibleTools(
+		cfg.Tools.Adaptation,
+		initial,
+	)
+}
+
 // resolveAgentWorkspace determines the workspace directory for an agent.
 func resolveAgentWorkspace(agentCfg *config.AgentConfig, defaults *config.AgentDefaults) string {
 	if agentCfg != nil && strings.TrimSpace(agentCfg.Workspace) != "" {
@@ -877,17 +903,41 @@ func resolveAgentWorkspace(agentCfg *config.AgentConfig, defaults *config.AgentD
 	return filepath.Join(expandHome(defaults.Workspace), "..", "workspace-"+id)
 }
 
+// ResolveAgentWorkspace returns the exact workspace path used when the runtime
+// constructs an agent instance. Management surfaces use this wrapper so they
+// never drift from runtime workspace selection.
+func ResolveAgentWorkspace(agentCfg *config.AgentConfig, defaults *config.AgentDefaults) string {
+	return resolveAgentWorkspace(agentCfg, defaults)
+}
+
 // resolveAgentModel resolves the primary model for an agent.
 func resolveAgentModel(
 	agentCfg *config.AgentConfig,
 	defaults *config.AgentDefaults,
 	definition AgentContextDefinition,
 ) string {
-	if definition.Agent != nil && strings.TrimSpace(definition.Agent.Frontmatter.Model) != "" {
-		return strings.TrimSpace(definition.Agent.Frontmatter.Model)
+	definitionModel := ""
+	if definition.Agent != nil {
+		definitionModel = definition.Agent.Frontmatter.Model
+	}
+	return ResolveAgentModelFromDefinition(agentCfg, defaults, definitionModel)
+}
+
+// ResolveAgentModelFromDefinition applies runtime model precedence to a model
+// value already captured from an AGENT.md definition.
+func ResolveAgentModelFromDefinition(
+	agentCfg *config.AgentConfig,
+	defaults *config.AgentDefaults,
+	definitionModel string,
+) string {
+	if model := strings.TrimSpace(definitionModel); model != "" {
+		return model
 	}
 	if agentCfg != nil && agentCfg.Model != nil && strings.TrimSpace(agentCfg.Model.Primary) != "" {
 		return strings.TrimSpace(agentCfg.Model.Primary)
+	}
+	if defaults == nil {
+		return ""
 	}
 	return defaults.GetModelName()
 }

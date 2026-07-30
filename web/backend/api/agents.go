@@ -89,6 +89,15 @@ func (h *Handler) registerAgentRoutes(mux *http.ServeMux) {
 	)
 	mux.HandleFunc("GET /api/agents/{id}", h.handleGetAgent)
 	mux.HandleFunc(
+		"GET /api/agents/{id}/capabilities",
+		h.handleGetAgentCapabilities,
+	)
+	mux.HandleFunc(
+		"PATCH /api/agents/{id}/capabilities",
+		h.requireAgentMutationOrigin(h.handlePatchAgentCapabilities),
+	)
+	mux.HandleFunc("/api/agents/{id}/activity", h.handleGetAgentActivity)
+	mux.HandleFunc(
 		"PUT /api/agents/{id}",
 		h.requireAgentMutationOrigin(h.handleUpdateAgent),
 	)
@@ -510,7 +519,7 @@ func (h *Handler) buildAgentsCollectionResponse(
 }
 
 func agentEffectsForConfig(cfg *config.Config) agentEffects {
-	currentSignature := computeConfigSignature(cfg)
+	currentSignature := computeGatewayRuntimeSignature(cfg)
 	gateway.mu.Lock()
 	bootSignature := gateway.bootConfigSignature
 	runtimeStatus := gateway.runtimeStatus
@@ -882,6 +891,20 @@ func agentDeleteBlockers(
 }
 
 func decodeAgentRequest(w http.ResponseWriter, r *http.Request, destination any) bool {
+	return decodeAgentRequestWithMaxBytes(
+		w,
+		r,
+		destination,
+		agentRequestMaxBytes,
+	)
+}
+
+func decodeAgentRequestWithMaxBytes(
+	w http.ResponseWriter,
+	r *http.Request,
+	destination any,
+	maxBytes int64,
+) bool {
 	if r.Body == nil {
 		writeAgentError(w, http.StatusBadRequest, "invalid_agent_request", nil)
 		return false
@@ -903,7 +926,7 @@ func decodeAgentRequest(w http.ResponseWriter, r *http.Request, destination any)
 			return false
 		}
 	}
-	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, agentRequestMaxBytes))
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBytes))
 	if err != nil {
 		var maximum *http.MaxBytesError
 		if errors.As(err, &maximum) {

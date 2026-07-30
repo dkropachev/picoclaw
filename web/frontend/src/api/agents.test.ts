@@ -5,7 +5,10 @@ import {
   createAgent,
   deleteAgent,
   getAgent,
+  getAgentActivity,
+  getAgentCapabilities,
   getAgents,
+  patchAgentCapabilities,
   setDefaultAgent,
   updateAgent,
 } from "@/api/agents"
@@ -209,7 +212,244 @@ describe("agents API", () => {
       message: "config_revision_mismatch",
     })
   })
+
+  it("fetches and patches capability policies with only caller-provided fields", async () => {
+    const capabilities = capabilityResponse()
+    const responseWithCanaries = {
+      ...capabilities,
+      capabilities: {
+        ...capabilities.capabilities,
+        tools: {
+          ...capabilities.capabilities.tools,
+          raw_policy: "CANARY_RAW_POLICY",
+        },
+        raw_frontmatter: "CANARY_RAW_FRONTMATTER",
+      },
+      catalogs: {
+        ...capabilities.catalogs,
+        tools: capabilities.catalogs.tools.map((tool) => ({
+          ...tool,
+          config_key: "CANARY_CONFIG_KEY",
+        })),
+        raw_config: "CANARY_RAW_CONFIG",
+      },
+      effects: {
+        ...capabilities.effects,
+        command: "CANARY_COMMAND",
+      },
+      raw_document: "CANARY_RAW_DOCUMENT",
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(jsonResponse(responseWithCanaries))
+      .mockResolvedValueOnce(jsonResponse(responseWithCanaries))
+
+    const fetched = await getAgentCapabilities("reviewer")
+    expect(fetched).toEqual(capabilities)
+    expect(JSON.stringify(fetched)).not.toContain("CANARY_")
+    const patched = await patchAgentCapabilities("reviewer", {
+      expected_revision: "capability-revision-1",
+      tools: { mode: "none", values: [] },
+    })
+    expect(patched).toEqual(capabilities)
+    expect(JSON.stringify(patched)).not.toContain("CANARY_")
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/agents/reviewer/capabilities",
+      { signal: undefined },
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/agents/reviewer/capabilities",
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_revision: "capability-revision-1",
+          tools: { mode: "none", values: [] },
+        }),
+        signal: undefined,
+      },
+    )
+  })
+
+  it("rejects malformed and cross-agent capability responses", async () => {
+    const capabilities = capabilityResponse()
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...capabilities,
+          capabilities: {
+            ...capabilities.capabilities,
+            tools: { mode: "selected", values: [] },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ ...capabilities, agent_id: "writer" }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ ...capabilities, agent_id: "writer" }),
+      )
+
+    await expect(getAgentCapabilities("reviewer")).rejects.toThrow(
+      "invalid_agent_capabilities_response",
+    )
+    await expect(getAgentCapabilities("reviewer")).rejects.toThrow(
+      "invalid_agent_capabilities_response",
+    )
+    await expect(
+      patchAgentCapabilities("reviewer", {
+        expected_revision: "capability-revision-1",
+        tools: { mode: "none", values: [] },
+      }),
+    ).rejects.toThrow("invalid_agent_capabilities_response")
+  })
+
+  it("strictly projects activity and drops unapproved sensitive canary fields", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        agent_id: "reviewer",
+        events: [
+          {
+            sequence: "18446744073709551615",
+            agent_id: "reviewer",
+            timestamp: "2026-07-30T12:00:00.000000001Z",
+            kind: "agent.tool.exec_end",
+            severity: "info",
+            details: {
+              tool_name: "web_search",
+              duration_ms: "25",
+              is_error: false,
+              async: true,
+              arguments: "CANARY_ARGUMENT_SECRET",
+              result: "CANARY_RESULT_SECRET",
+            },
+            prompt: "CANARY_PROMPT_SECRET",
+            error: "CANARY_ERROR_SECRET",
+          },
+        ],
+        next_cursor: "opaque-cursor",
+        reset: true,
+        truncated: true,
+        dropped: {
+          subscription: "1",
+          retention: "2",
+          projection: "3",
+          secret_counter: "CANARY_COUNTER_SECRET",
+        },
+        raw_payload: "CANARY_RAW_SECRET",
+      }),
+    )
+
+    const projected = await getAgentActivity("reviewer", {
+      cursor: "cursor/one",
+      limit: 100,
+    })
+
+    expect(mockedLauncherFetch).toHaveBeenCalledWith(
+      "/api/agents/reviewer/activity?limit=100&cursor=cursor%2Fone",
+      { signal: undefined },
+    )
+    expect(projected).toEqual({
+      agent_id: "reviewer",
+      events: [
+        {
+          sequence: "18446744073709551615",
+          agent_id: "reviewer",
+          timestamp: "2026-07-30T12:00:00.000000001Z",
+          kind: "agent.tool.exec_end",
+          severity: "info",
+          details: {
+            tool_name: "web_search",
+            duration_ms: "25",
+            is_error: false,
+            async: true,
+          },
+        },
+      ],
+      next_cursor: "opaque-cursor",
+      reset: true,
+      truncated: true,
+      dropped: {
+        subscription: "1",
+        retention: "2",
+        projection: "3",
+      },
+    })
+    expect(JSON.stringify(projected)).not.toContain("CANARY_")
+  })
+
+  it("rejects unrecognized activity kinds instead of exposing generic details", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        agent_id: "reviewer",
+        events: [
+          {
+            sequence: "1",
+            agent_id: "reviewer",
+            timestamp: "2026-07-30T12:00:00Z",
+            kind: "agent.unknown",
+            severity: "info",
+            details: { text: "CANARY_SECRET" },
+          },
+        ],
+        next_cursor: "",
+        reset: false,
+        truncated: false,
+        dropped: {
+          subscription: "0",
+          retention: "0",
+          projection: "0",
+        },
+      }),
+    )
+
+    await expect(getAgentActivity("reviewer")).rejects.toThrow(
+      "invalid_agent_activity_response",
+    )
+  })
 })
+
+function capabilityResponse() {
+  return {
+    agent_id: "reviewer",
+    source: "agent" as const,
+    editable: true,
+    issue_code: "",
+    legacy_upgrade_required: false,
+    capabilities: {
+      tools: { mode: "all" as const, values: [] },
+      skills: {
+        mode: "inherit" as const,
+        values: [],
+        inherited_values: ["review"],
+      },
+      mcp_servers: { mode: "none" as const, values: [] },
+    },
+    catalogs: {
+      tools: [
+        {
+          name: "web_search",
+          description: "Search",
+          category: "web",
+          status: "enabled",
+          reason_code: "",
+        },
+      ],
+      skills: [{ name: "review", source: "workspace" }],
+      mcp_servers: [{ name: "github", enabled: true }],
+    },
+    catalog_truncated: {
+      tools: false,
+      skills: false,
+      mcp_servers: false,
+    },
+    revision: "capability-revision-1",
+    config_revision: "config-revision-1",
+    effects: response.effects,
+  }
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {

@@ -56,10 +56,11 @@ func (info SkillInfo) validate() error {
 }
 
 type SkillsLoader struct {
-	workspace       string
-	workspaceSkills string // workspace skills (project-level)
-	globalSkills    string // global skills (~/.picoclaw/skills)
-	builtinSkills   string // builtin skills
+	workspace        string
+	workspaceSkills  string // workspace skills (project-level)
+	globalSkills     string // global skills (~/.picoclaw/skills)
+	builtinSkills    string // builtin skills
+	readMetadataFile func(string) ([]byte, error)
 }
 
 // SkillRoots returns all unique skill root directories used by this loader.
@@ -87,10 +88,11 @@ func (sl *SkillsLoader) SkillRoots() []string {
 
 func NewSkillsLoader(workspace string, globalSkills string, builtinSkills string) *SkillsLoader {
 	return &SkillsLoader{
-		workspace:       workspace,
-		workspaceSkills: filepath.Join(workspace, "skills"),
-		globalSkills:    globalSkills, // ~/.picoclaw/skills
-		builtinSkills:   builtinSkills,
+		workspace:        workspace,
+		workspaceSkills:  filepath.Join(workspace, "skills"),
+		globalSkills:     globalSkills, // ~/.picoclaw/skills
+		builtinSkills:    builtinSkills,
+		readMetadataFile: os.ReadFile,
 	}
 }
 
@@ -128,10 +130,11 @@ func (sl *SkillsLoader) ListSkills() []SkillInfo {
 				slog.Warn("invalid skill from "+source, "name", info.Name, "error", err)
 				continue
 			}
-			if seen[info.Name] {
+			identityKey := strings.ToLower(info.Name)
+			if seen[identityKey] {
 				continue
 			}
-			seen[info.Name] = true
+			seen[identityKey] = true
 			skills = append(skills, info)
 		}
 	}
@@ -145,35 +148,35 @@ func (sl *SkillsLoader) ListSkills() []SkillInfo {
 }
 
 func (sl *SkillsLoader) LoadSkill(name string) (string, bool) {
+	return sl.loadSkillFromIndex(name, indexSkillsByCanonicalName(sl.ListSkills()))
+}
+
+func (sl *SkillsLoader) loadSkillFromIndex(
+	name string,
+	index map[string]SkillInfo,
+) (string, bool) {
+	name = strings.TrimSpace(name)
 	if err := ValidateSkillName(name); err != nil {
 		return "", false
 	}
 
-	// 1. load from workspace skills first (project-level)
-	if sl.workspaceSkills != "" {
-		skillFile := filepath.Join(sl.workspaceSkills, name, "SKILL.md")
-		if content, err := os.ReadFile(skillFile); err == nil {
-			return sl.stripFrontmatter(string(content)), true
-		}
+	skill, ok := index[strings.ToLower(name)]
+	if !ok {
+		return "", false
 	}
-
-	// 2. then load from global skills (~/.picoclaw/skills)
-	if sl.globalSkills != "" {
-		skillFile := filepath.Join(sl.globalSkills, name, "SKILL.md")
-		if content, err := os.ReadFile(skillFile); err == nil {
-			return sl.stripFrontmatter(string(content)), true
-		}
+	content, err := os.ReadFile(skill.Path)
+	if err != nil {
+		return "", false
 	}
+	return sl.stripFrontmatter(string(content)), true
+}
 
-	// 3. finally load from builtin skills
-	if sl.builtinSkills != "" {
-		skillFile := filepath.Join(sl.builtinSkills, name, "SKILL.md")
-		if content, err := os.ReadFile(skillFile); err == nil {
-			return sl.stripFrontmatter(string(content)), true
-		}
+func indexSkillsByCanonicalName(skills []SkillInfo) map[string]SkillInfo {
+	index := make(map[string]SkillInfo, len(skills))
+	for _, skill := range skills {
+		index[strings.ToLower(skill.Name)] = skill
 	}
-
-	return "", false
+	return index
 }
 
 func (sl *SkillsLoader) LoadSkillsForContext(skillNames []string) string {
@@ -182,8 +185,9 @@ func (sl *SkillsLoader) LoadSkillsForContext(skillNames []string) string {
 	}
 
 	var parts []string
+	index := indexSkillsByCanonicalName(sl.ListSkills())
 	for _, name := range skillNames {
-		content, ok := sl.LoadSkill(name)
+		content, ok := sl.loadSkillFromIndex(name, index)
 		if ok {
 			parts = append(parts, fmt.Sprintf("### Skill: %s\n\n%s", name, content))
 		}
@@ -218,7 +222,11 @@ func (sl *SkillsLoader) BuildSkillsSummary() string {
 }
 
 func (sl *SkillsLoader) getSkillMetadata(skillPath string) *SkillMetadata {
-	content, err := os.ReadFile(skillPath)
+	readMetadataFile := sl.readMetadataFile
+	if readMetadataFile == nil {
+		readMetadataFile = os.ReadFile
+	}
+	content, err := readMetadataFile(skillPath)
 	if err != nil {
 		logger.WarnCF("skills", "Failed to read skill metadata",
 			map[string]any{

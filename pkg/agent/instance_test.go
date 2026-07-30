@@ -16,6 +16,34 @@ import (
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
+func TestResolveAgentWorkspaceMatchesRuntimeResolution(t *testing.T) {
+	defaults := &config.AgentDefaults{Workspace: filepath.Join(t.TempDir(), "workspace")}
+	for name, agentConfig := range map[string]*config.AgentConfig{
+		"implicit main": nil,
+		"configured main": {
+			ID: "main",
+		},
+		"named default": {
+			ID:      "primary",
+			Default: true,
+		},
+		"named derived": {
+			ID: "worker",
+		},
+		"explicit": {
+			ID:        "worker",
+			Workspace: filepath.Join(t.TempDir(), "explicit"),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			want := resolveAgentWorkspace(agentConfig, defaults)
+			if got := ResolveAgentWorkspace(agentConfig, defaults); got != want {
+				t.Fatalf("ResolveAgentWorkspace() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestNewAgentInstance_UsesDefaultsTemperatureAndMaxTokens(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "agent-instance-test-*")
 	if err != nil {

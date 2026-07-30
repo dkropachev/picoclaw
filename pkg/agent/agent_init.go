@@ -107,6 +107,11 @@ func NewAgentLoop(
 		}
 	}
 	al.activeReqCond = sync.NewCond(&al.activeReqMu)
+	if err := al.initAgentActivityRecorder(); err != nil {
+		logger.WarnCF("agent", "Failed to initialize agent activity recorder", map[string]any{
+			"error": err.Error(),
+		})
+	}
 	al.refreshRuntimeEventLogger(cfg)
 	al.providerFactory = providers.CreateProviderFromConfig
 	al.hooks = NewHookManager(al.runtimeEvents.Channel())

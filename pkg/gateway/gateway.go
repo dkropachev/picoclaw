@@ -89,6 +89,8 @@ type services struct {
 	eventOperatorRelease     func()
 	workflowAuthoringHandler *workflowAuthoringCapabilitiesHandler
 	workflowAuthoringRelease func()
+	agentActivityHandler     *agentActivityHandler
+	agentActivityRelease     func()
 	VoiceAgentCancel         context.CancelFunc
 	manualReloadChan         chan struct{}
 	reloading                atomic.Bool
@@ -189,8 +191,19 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 		return fmt.Errorf("error opening gateway listeners: %w", err)
 	}
 
+	pidProbeHost, err := gatewayPIDProbeHost(
+		bindPlan.ProbeHost,
+		listenResult.Listeners,
+	)
+	if err != nil {
+		for _, ln := range listenResult.Listeners {
+			_ = ln.Close()
+		}
+		return fmt.Errorf("select gateway PID probe host: %w", err)
+	}
+
 	// Enforce singleton: write PID file with generated token.
-	pidData, err := pid.WritePidFile(homePath, bindPlan.ProbeHost, cfg.Gateway.Port)
+	pidData, err := pid.WritePidFile(homePath, pidProbeHost, cfg.Gateway.Port)
 	if err != nil {
 		logger.Warnf("write pid file failed: %v", err)
 		for _, ln := range listenResult.Listeners {
@@ -349,6 +362,59 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 			}
 		}
 	}
+}
+
+func gatewayPIDProbeHost(
+	plannedProbeHost string,
+	listeners []net.Listener,
+) (string, error) {
+	// Adaptive wildcard listeners deliberately publish a concrete loopback as
+	// their planned probe host. A localhost or custom-hostname plan must instead
+	// publish an address from the listener that actually opened: preserving the
+	// hostname could send a bearer-bearing internal request to an occupied
+	// address from the other IP family.
+	if ip := net.ParseIP(plannedProbeHost); ip != nil {
+		if ip.IsUnspecified() || ip.IsMulticast() {
+			return "", fmt.Errorf(
+				"planned probe host %q is not a concrete unicast address",
+				plannedProbeHost,
+			)
+		}
+		return ip.String(), nil
+	}
+
+	// A hostname was already resolved by net.Listen. Reuse the concrete address
+	// selected for the listener instead of making PID consumers resolve it
+	// again.
+	for _, listener := range listeners {
+		tcpAddr, ok := listener.Addr().(*net.TCPAddr)
+		if !ok || tcpAddr.IP == nil ||
+			tcpAddr.IP.IsUnspecified() ||
+			tcpAddr.IP.IsMulticast() {
+			continue
+		}
+		return tcpAddr.IP.String(), nil
+	}
+	// Wildcard listeners intentionally report an unspecified address. Publish
+	// the matching numeric loopback family, which the opened wildcard listener
+	// necessarily accepts, instead of retaining the ambiguous localhost probe.
+	for _, listener := range listeners {
+		tcpAddr, ok := listener.Addr().(*net.TCPAddr)
+		if !ok || tcpAddr.IP == nil || !tcpAddr.IP.IsUnspecified() {
+			continue
+		}
+		if tcpAddr.IP.To4() != nil {
+			return "127.0.0.1", nil
+		}
+		if tcpAddr.IP.To16() != nil {
+			return "::1", nil
+		}
+	}
+
+	return "", fmt.Errorf(
+		"no concrete listener address available for probe host %q",
+		plannedProbeHost,
+	)
 }
 
 func cleanupFailedGatewayStartup(
@@ -579,6 +645,9 @@ func setupAndStartServices(
 		runningServices.HealthServer,
 	)
 	if err = prepareWorkflowAuthoringRoute(runningServices, agentLoop); err != nil {
+		return runningServices, err
+	}
+	if err = prepareAgentActivityRoute(runningServices, agentLoop); err != nil {
 		return runningServices, err
 	}
 	if err = prepareEventHTTPRoutesForConfig(runningServices, cfg); err != nil {
@@ -1219,6 +1288,9 @@ func restartServices(
 	al.SetChannelManager(runningServices.ChannelManager)
 
 	if err = prepareWorkflowAuthoringRoute(runningServices, al); err != nil {
+		return err
+	}
+	if err = prepareAgentActivityRoute(runningServices, al); err != nil {
 		return err
 	}
 	if err = prepareEventHTTPRoutesForConfig(runningServices, cfg); err != nil {

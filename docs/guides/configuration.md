@@ -67,7 +67,7 @@ PicoClaw stores data in your configured workspace (default: `~/.picoclaw/workspa
 └── USER.md           # User preferences
 ```
 
-> **Note:** Changes to `AGENT.md`, `SOUL.md`, `USER.md` and `memory/MEMORY.md` are automatically detected at runtime via file modification time (mtime) tracking. You do **not** need to restart the gateway after editing these files — the agent picks up the new content on the next request.
+> **Note:** Ordinary prompt-prose changes in `AGENT.md`, `SOUL.md`, `USER.md`, and `memory/MEMORY.md` are automatically detected through file modification time (mtime) tracking and apply on the next request. Machine-readable `AGENT.md` frontmatter that changes agent identity, model, tools, skills, or MCP access, and the structured `Tasks` section in `AGENT.md`, are resolved when the agent runtime is constructed and apply after a gateway restart; the Agent UI reports when that restart is required.
 
 ### Agent Self-Evolution
 
@@ -309,6 +309,45 @@ Notes:
 - Tool names are matched against the runtime tool name 1:1.
 - Use runtime tool names such as `web_search`, `web_fetch`, `spawn`, `subagent`, `send_file`.
 - Tool declarations in `AGENT.md` are used by runtime/tooling, but they are not injected into the discovery prompt.
+
+### Agent Management UI
+
+Open `/agent/agents` in the authenticated dashboard to manage agents without
+editing `config.json` or `AGENT.md` directly. The existing ordered agent grid
+remains the starting point. Choose **Manage** on an agent to open shareable
+Overview, Capabilities, and Activity tabs.
+
+- **Overview** shows the configured workspace, model policy, skills,
+  delegation, default status, and an Edit action for persistent launcher
+  configuration.
+- **Capabilities** controls workspace `AGENT.md` policy. Tools support all,
+  none, or selected runtime tool names. Skills support inherit, none, or
+  selected names. MCP servers support all, none, or selected names. Existing
+  unknown selections remain visible and are preserved for forward
+  compatibility.
+- A legacy `AGENTS.md` is read-only until you explicitly confirm its upgrade;
+  the legacy file is retained. The page never exposes a raw-file editor.
+- Capability editing is read-only when the host cannot provide a no-follow
+  atomic replacement primitive. Windows currently has this restriction;
+  Overview and Activity remain available.
+- Unsaved capability changes block navigation until you keep or explicitly
+  discard them. If another editor changes the config or definition, your draft
+  is preserved and you must reload the latest revision before saving again.
+- **Activity** shows only privacy-safe lifecycle fields. It never shows message
+  text, prompts, tool arguments or results, raw errors, paths, session or chat
+  identity, provider/model identity, or credentials.
+
+The gateway must be running for live Activity. Polling runs every 2.5 seconds
+only while the browser is online, the page is visible, and the operator has not
+paused it. It pauses after a request failure until **Retry activity** is used,
+keeps at most 200 browser rows, and offers info, warning, and error display
+filters. Runtime resets, retained-window truncation, and subscription,
+retention, or privacy-projection drop counters are shown explicitly. Activity
+and cursors are process-local and are not persisted in browser storage.
+
+Saving configuration-time capabilities can require a gateway restart. Follow
+the dashboard restart notice so the running agent uses the new identity, model,
+capability, or structured task policy.
 
 ### Agent Discovery (Automatic)
 

@@ -21,7 +21,9 @@ import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { refreshGatewayState } from "@/store/gateway"
 
 import { AgentCard } from "./agent-card"
+import { AgentDetailPage } from "./agent-detail-page"
 import { type AgentEditorSession, AgentEditorSheet } from "./agent-editor-sheet"
+import type { AgentDetailTab, AgentsRouteSearch } from "./agent-route-search"
 import {
   DeleteAgentDialog,
   type DeleteAgentSession,
@@ -29,7 +31,13 @@ import {
 
 const agentsQueryKey = ["agents"] as const
 
-export function AgentsPage() {
+export function AgentsPage({
+  search = {},
+  onSearchChange = () => undefined,
+}: {
+  search?: AgentsRouteSearch
+  onSearchChange?: (search: AgentsRouteSearch, replace?: boolean) => void
+}) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [editor, setEditor] = useState<AgentEditorSession | null>(null)
@@ -111,6 +119,10 @@ export function AgentsPage() {
       agent: structuredClone(agent),
       revision: query.data.config_revision,
     })
+  }
+
+  const openManage = (agent: AgentInfo) => {
+    onSearchChange({ agent: agent.id, tab: "overview" })
   }
 
   const openDelete = (agent: AgentInfo) => {
@@ -211,6 +223,38 @@ export function AgentsPage() {
   }
 
   const agents = query.data?.agents ?? []
+  const selectedAgent =
+    search.agent == null
+      ? undefined
+      : agents.find((agent) => agent.id === search.agent)
+
+  if (search.agent != null) {
+    return (
+      <>
+        <AgentDetailPage
+          agent={selectedAgent}
+          agentID={search.agent}
+          tab={search.tab ?? "overview"}
+          loading={query.isLoading || query.isFetching}
+          loadError={query.isError && query.data == null}
+          onBack={() => onSearchChange({})}
+          onTabChange={(tab: AgentDetailTab) =>
+            onSearchChange({ agent: search.agent, tab })
+          }
+          onEdit={() => selectedAgent && openEdit(selectedAgent)}
+          onRefresh={() => void query.refetch()}
+        />
+        <AgentEditorSheet
+          session={editor}
+          agents={agents}
+          latestRevision={query.data?.config_revision ?? ""}
+          onSubmit={save}
+          onConflict={refreshAfterConflict}
+          onClose={closeEditor}
+        />
+      </>
+    )
+  }
 
   return (
     <div className="flex h-full flex-col">
@@ -297,6 +341,7 @@ export function AgentsPage() {
                   agent={agent}
                   settingDefault={settingDefaultID === agent.id}
                   onEdit={() => openEdit(agent)}
+                  onManage={() => openManage(agent)}
                   onSetDefault={() => void makeDefault(agent)}
                   onDelete={() => openDelete(agent)}
                 />

@@ -1,4 +1,10 @@
-import { IconEdit, IconLoader2, IconStar, IconTrash } from "@tabler/icons-react"
+import {
+  IconAdjustments,
+  IconEdit,
+  IconLoader2,
+  IconStar,
+  IconTrash,
+} from "@tabler/icons-react"
 import { useTranslation } from "react-i18next"
 
 import type { AgentInfo } from "@/api/agents"
@@ -16,12 +22,14 @@ export function AgentCard({
   agent,
   settingDefault,
   onEdit,
+  onManage,
   onSetDefault,
   onDelete,
 }: {
   agent: AgentInfo
   settingDefault: boolean
   onEdit: () => void
+  onManage: () => void
   onSetDefault: () => void
   onDelete: () => void
 }) {
@@ -154,7 +162,20 @@ export function AgentCard({
         </dl>
       </CardContent>
 
-      <CardFooter className="border-border/60 justify-end border-t">
+      <CardFooter className="border-border/60 flex-wrap justify-between border-t">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={onManage}
+          aria-label={t("pages.agent.agents.action.manage_agent", {
+            defaultValue: "Manage {{name}}",
+            name: agent.id,
+          })}
+        >
+          <IconAdjustments className="size-4" />
+          {t("pages.agent.agents.action.manage", "Manage")}
+        </Button>
         <Button
           type="button"
           variant={agent.is_default ? "secondary" : "outline"}

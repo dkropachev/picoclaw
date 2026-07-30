@@ -56,3 +56,13 @@ func RemoveDurable(path string) error {
 	}
 	return removeDurable(path)
 }
+
+// SyncDirectory makes prior entry changes in path durable. Callers use this
+// after an atomic rename that did not otherwise create or remove an entry
+// through this package.
+func SyncDirectory(path string) error {
+	if path == "" {
+		return syncDirectory(path)
+	}
+	return syncDirectory(filepath.Clean(path))
+}

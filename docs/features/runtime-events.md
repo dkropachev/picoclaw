@@ -33,13 +33,15 @@ not the durable external-event inbox used for restart-safe automation.
 | `FR-EVENTS-003` | MUST | Logging include/exclude/min-severity filters affect printed logs only, not event bus publication. | Observability should not mutate runtime behavior. |
 | `FR-EVENTS-004` | MUST | Known event names cover agent, workflow, channel, bus, gateway, and MCP domains. | Feature telemetry must be discoverable. |
 | `FR-EVENTS-005` | SHOULD | Event payloads avoid full sensitive args by default and include lengths/counts when safer. | Logs should be useful without leaking secrets. |
+| `FR-EVENTS-006` | MUST | Per-agent browser activity is derived through a bounded non-blocking subscriber and fixed-capacity recorder that accepts only an explicit typed allowlist of agent event kinds. Its cursor-based projection uses one opaque recorder generation plus decimal-string sequence and drop counters, reports resets and retained-window truncation, and never exposes generic payload maps, text, prompts, tool arguments/results, raw errors, attributes, paths, chat/session/provider/model identity, or credentials. | Live operator visibility must neither stall the runtime event bus nor turn internal telemetry into a sensitive-data API. |
 
 ## Data And State Model
 
 Event state includes immutable event envelopes with kind, timestamp, severity,
 scope, and payload fields; subscriber registrations with prefix filters and
 buffered channels; bus closed state; event logging include/exclude/min-severity
-config; and known kind constants for each runtime domain.
+config; known kind constants for each runtime domain; and a process-local,
+generation-scoped bounded activity window containing only safe typed fields.
 
 ## Surface Ownership
 
@@ -47,6 +49,9 @@ Owns: CODE pkg/events/**
 Owns: CODE pkg/agent/event*
 Owns: CODE pkg/agent/events*
 Owns: CODE pkg/agent/runtime_event*
+Owns: CODE pkg/agent/activity*
+Owns: CODE pkg/gateway/agent_activity*
+Owns: CODE web/backend/api/agent_activity*
 Owns: CONFIG.events.logging*
 Owns: TEST pkg/events/*
 Owns: TEST pkg/config/events*
@@ -58,6 +63,7 @@ Owns: EVENT *
 | --- | --- | --- | --- |
 | Config | `events.logging.*` | Event logging enablement, filters, payload inclusion, and severity threshold. | `FR-EVENTS-003`, `FR-EVENTS-005` |
 | Events | `agent.*`, `workflow.*`, `channel.*`, `bus.*`, `gateway.*`, `mcp.*` | Published runtime event kinds. | `FR-EVENTS-001`, `FR-EVENTS-004` |
+| HTTP/UI | Protected `/runtime/agents/{id}/activity`, authenticated `/api/agents/{id}/activity`, and the Agent Activity tab | Return only the bounded typed per-agent activity projection with opaque cursor, reset, truncation, and drop state. | `FR-EVENTS-006` |
 
 ## Algorithms And Ordering
 
@@ -71,6 +77,12 @@ Owns: EVENT *
 4. On bus close, mark closed state once and close all subscriber channels.
 5. For runtime logging, evaluate include, exclude, and severity filters against
    published events and print only matching entries without affecting delivery.
+6. For operator activity, filter the explicit kind and `agent` source
+   allowlists before the bounded subscriber queue, then validate the exact
+   source-name/scope relationship and payload type. Unsupported high-rate
+   events therefore cannot evict supported activity. Store only the safe typed
+   projection and page the retained window in ascending sequence order without
+   placing cursors or activity in durable browser state.
 
 ## Cross-Feature Behavior
 
@@ -90,6 +102,9 @@ semantics defined here.
 - Closed buses stop delivery and close subscriber channels.
 - Slow subscribers are bounded by buffer behavior.
 - Invalid filter patterns match no events rather than all events.
+- Unknown or newly introduced event kinds are omitted until explicitly
+  projected, and a stale recorder cursor resets rather than crossing process
+  generations.
 
 ## Acceptance Evidence
 
@@ -97,9 +112,12 @@ semantics defined here.
 | --- | --- |
 | `FR-EVENTS-001`, `FR-EVENTS-002`, `FR-EVENTS-004` | [pkg/events/events_test.go](../../pkg/events/events_test.go), [pkg/events/subscription_test.go](../../pkg/events/subscription_test.go), [pkg/events/kind.go](../../pkg/events/kind.go) |
 | `FR-EVENTS-003`, `FR-EVENTS-005` | [pkg/events/filter_test.go](../../pkg/events/filter_test.go), [pkg/config/events_test.go](../../pkg/config/events_test.go), [docs/architecture/runtime-events.md](../architecture/runtime-events.md) |
+| `FR-EVENTS-006` | [pkg/agent/activity_test.go](../../pkg/agent/activity_test.go), [pkg/gateway/agent_activity_test.go](../../pkg/gateway/agent_activity_test.go), [web/backend/api/agent_activity_test.go](../../web/backend/api/agent_activity_test.go), [web/frontend/src/components/agent/agents/agent-activity-panel.test.tsx](../../web/frontend/src/components/agent/agents/agent-activity-panel.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 
 ## Implementation Anchors
 
 - [pkg/events](../../pkg/events)
 - [pkg/agent/runtime_event_logger.go](../../pkg/agent/runtime_event_logger.go)
+- [pkg/agent/activity.go](../../pkg/agent/activity.go)
+- [pkg/gateway/agent_activity.go](../../pkg/gateway/agent_activity.go)
 - [docs/architecture/runtime-events.md](../architecture/runtime-events.md)

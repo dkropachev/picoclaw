@@ -99,6 +99,7 @@ func resetGatewayTestState(t *testing.T) {
 	originalHealthGet := gatewayHealthGet
 	originalProcessMatcher := gatewayProcessMatcher
 	originalExecCommand := gatewayExecCommand
+	originalBeforeCommandStart := gatewayBeforeCommandStart
 	originalRestartGracePeriod := gatewayRestartGracePeriod
 	originalRestartForceKillWindow := gatewayRestartForceKillWindow
 	originalRestartPollInterval := gatewayRestartPollInterval
@@ -107,6 +108,7 @@ func resetGatewayTestState(t *testing.T) {
 		gatewayHealthGet = originalHealthGet
 		gatewayProcessMatcher = originalProcessMatcher
 		gatewayExecCommand = originalExecCommand
+		gatewayBeforeCommandStart = originalBeforeCommandStart
 		gatewayRestartGracePeriod = originalRestartGracePeriod
 		gatewayRestartForceKillWindow = originalRestartForceKillWindow
 		gatewayRestartPollInterval = originalRestartPollInterval
@@ -349,6 +351,119 @@ func TestStartGatewayLocked_UsesReloadedConfigForBootSignature(t *testing.T) {
 	}
 	if bootSignature != expectedSignature {
 		t.Fatalf("bootConfigSignature = %q, want %q", bootSignature, expectedSignature)
+	}
+}
+
+func TestStartGatewayLockedCapturesRuntimeSignatureBeforeChildStart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sleep command differs on Windows")
+	}
+
+	resetGatewayTestState(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("MkdirAll(workspace) error = %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	definitionPath := filepath.Join(workspace, agentDefinitionFileCurrent)
+	before := []byte("---\ntools: [exec]\n---\nbody\n")
+	after := []byte("---\ntools: [write_file]\n---\nbody\n")
+	if err := os.WriteFile(definitionPath, before, 0o600); err != nil {
+		t.Fatalf("WriteFile(before AGENT.md) error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	h.SetServerOptions(18800, false, false, nil)
+	gatewayExecCommand = func(_ string, _ ...string) *exec.Cmd {
+		return exec.Command("sleep", "30")
+	}
+	gatewayBeforeCommandStart = func() {
+		if err := os.WriteFile(definitionPath, after, 0o600); err != nil {
+			t.Fatalf("WriteFile(after AGENT.md) error = %v", err)
+		}
+	}
+
+	pid, err := h.startGatewayLocked("starting", 0)
+	if err != nil {
+		t.Fatalf("startGatewayLocked() error = %v", err)
+	}
+	if pid <= 0 {
+		t.Fatalf("startGatewayLocked() pid = %d, want > 0", pid)
+	}
+	gateway.mu.Lock()
+	cmd := gateway.cmd
+	bootSignature := gateway.bootConfigSignature
+	gateway.mu.Unlock()
+	t.Cleanup(func() {
+		if cmd != nil && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		if cmd != nil {
+			_ = cmd.Wait()
+		}
+	})
+
+	updatedCfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if err = os.WriteFile(definitionPath, before, 0o600); err != nil {
+		t.Fatalf("restore before AGENT.md error = %v", err)
+	}
+	expectedBootSignature := computeGatewayRuntimeSignature(updatedCfg)
+	if err = os.WriteFile(definitionPath, after, 0o600); err != nil {
+		t.Fatalf("restore after AGENT.md error = %v", err)
+	}
+	currentSignature := computeGatewayRuntimeSignature(updatedCfg)
+	if bootSignature != expectedBootSignature {
+		t.Fatalf(
+			"bootConfigSignature = %q, want pre-start %q",
+			bootSignature,
+			expectedBootSignature,
+		)
+	}
+	if currentSignature == bootSignature ||
+		!gatewayRestartRequiredBySignature(
+			bootSignature,
+			currentSignature,
+			"running",
+		) {
+		t.Fatal("post-snapshot capability change was not conservatively detected")
+	}
+}
+
+func TestAttachToGatewayUsesUnknownRuntimeSignatureBaseline(t *testing.T) {
+	resetGatewayTestState(t)
+	cfg := config.DefaultConfig()
+
+	gateway.mu.Lock()
+	err := attachToGatewayProcessLocked(os.Getpid(), cfg)
+	bootSignature := gateway.bootConfigSignature
+	gateway.mu.Unlock()
+	if err != nil {
+		t.Fatalf("attachToGatewayProcessLocked() error = %v", err)
+	}
+	if bootSignature != gatewayUnknownBootConfigSignature {
+		t.Fatalf("bootConfigSignature = %q, want unknown", bootSignature)
+	}
+	if !gatewayRestartRequiredBySignature(
+		bootSignature,
+		computeGatewayRuntimeSignature(cfg),
+		"running",
+	) {
+		t.Fatal("unknown attached-process baseline did not require restart")
+	}
+	if !gatewayRestartRequiredBySignature(
+		gatewayUnknownBootConfigSignature,
+		gatewayUnknownBootConfigSignature,
+		"running",
+	) {
+		t.Fatal("unknown current and boot signatures must remain conservative")
 	}
 }
 
@@ -1063,8 +1178,11 @@ func TestGatewayStatusReportsRunningFromPidProbe(t *testing.T) {
 	if got := body["gateway_status"]; got != "running" {
 		t.Fatalf("gateway_status = %#v, want %q", got, "running")
 	}
-	if got := body["gateway_restart_required"]; got != false {
-		t.Fatalf("gateway_restart_required = %#v, want false", got)
+	if got := body["gateway_restart_required"]; got != true {
+		t.Fatalf(
+			"gateway_restart_required = %#v, want conservative true for attached process",
+			got,
+		)
 	}
 }
 
