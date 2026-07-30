@@ -101,6 +101,7 @@ import {
   WorkflowCancelDialog,
   type WorkflowCancelTarget,
 } from "./workflow-cancel-dialog"
+import { WorkflowDefinitionInspector } from "./workflow-definition-inspector"
 import {
   workflowDependencyFence,
   workflowDependencyFenceMessage,
@@ -136,6 +137,10 @@ import {
 } from "./workflow-trigger-editor"
 
 const terminalStatuses = new Set(["succeeded", "failed", "canceled", "skipped"])
+const workflowDefinitionInspectionQueryKey = [
+  "workflows",
+  "definition-inspections",
+] as const
 const workflowEventStreamKinds = [
   "workflow.run.start",
   "workflow.run.end",
@@ -1333,6 +1338,7 @@ export function WorkflowsPage({
       )
       setLastDraftTest(null)
       void invalidateWorkflowQueries(queryClient)
+      void invalidateWorkflowDefinitionInspections(queryClient)
     },
     onError: (err) => {
       toast.error(errorMessage(err))
@@ -1372,6 +1378,7 @@ export function WorkflowsPage({
       void queryClient.invalidateQueries({
         queryKey: ["workflows", "dependencies"],
       })
+      void invalidateWorkflowDefinitionInspections(queryClient)
     },
     onError: (err) => toast.error(errorMessage(err)),
   })
@@ -1399,6 +1406,7 @@ export function WorkflowsPage({
           : `Reloaded with ${result.errors.length} validation error(s)`,
       )
       void queryClient.invalidateQueries({ queryKey: ["workflows"] })
+      void invalidateWorkflowDefinitionInspections(queryClient)
     },
     onError: (err) => toast.error(errorMessage(err)),
   })
@@ -1416,7 +1424,10 @@ export function WorkflowsPage({
         ...values,
       })
     },
-    onSuccess: (settings) => {
+    onSuccess: (settings, variables) => {
+      const definitionsDirectoryChanged =
+        variables.values.definitions_dir !==
+        settingsQuery.data?.configured.definitions_dir
       queryClient.setQueryData(["workflows", "settings"], settings)
       const guidance =
         settings.effects.gateway_effect === "restart_required"
@@ -1432,6 +1443,9 @@ export function WorkflowsPage({
       void queryClient.invalidateQueries({
         queryKey: ["workflows", "templates"],
       })
+      if (definitionsDirectoryChanged) {
+        void invalidateWorkflowDefinitionInspections(queryClient)
+      }
     },
     onError: (err) => {
       toast.error(errorMessage(err))
@@ -3445,6 +3459,13 @@ function WorkflowRunPanel({
           </Popover>
         </div>
       </div>
+      {workflow != null ? (
+        <WorkflowDefinitionInspector
+          key={workflow.ref}
+          target={{ kind: "published", ref: workflow.ref }}
+          className="mt-3"
+        />
+      ) : null}
     </div>
   )
 }
@@ -5152,6 +5173,14 @@ async function invalidateWorkflowQueries(
   queryClient: ReturnType<typeof useQueryClient>,
 ) {
   await queryClient.invalidateQueries({ queryKey: ["workflows"] })
+}
+
+async function invalidateWorkflowDefinitionInspections(
+  queryClient: ReturnType<typeof useQueryClient>,
+) {
+  await queryClient.invalidateQueries({
+    queryKey: workflowDefinitionInspectionQueryKey,
+  })
 }
 
 async function refetchPublishedDependency(

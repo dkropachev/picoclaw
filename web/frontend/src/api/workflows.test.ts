@@ -10,7 +10,9 @@ import {
   getWorkflowRunEvents,
   getWorkflowRunGraph,
   getWorkflowSettings,
+  inspectPublishedWorkflowDefinition,
   inspectWorkflowEventTrigger,
+  inspectWorkflowTemplate,
   inspectWorkflowTriggers,
   installWorkflowTemplate,
   listWorkflowRuns,
@@ -457,6 +459,442 @@ describe("workflow API normalization", () => {
         method: "POST",
         body: JSON.stringify({ overwrite: false }),
       }),
+    )
+  })
+
+  it("strictly inspects published definitions and encoded templates", async () => {
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse(
+          definitionInspection({
+            source: { kind: "published", ref: "workflows/review.yml" },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          definitionInspection({
+            source: {
+              kind: "template",
+              template_name: "review/template",
+            },
+          }),
+        ),
+      )
+
+    const controller = new AbortController()
+    await expect(
+      inspectPublishedWorkflowDefinition(
+        "workflows/review.yml",
+        controller.signal,
+      ),
+    ).resolves.toMatchObject({
+      source: { kind: "published", ref: "workflows/review.yml" },
+      complete: true,
+      jobs: [{ id: "review", steps: [{ target: "agent/reviewer" }] }],
+    })
+    await expect(
+      inspectWorkflowTemplate("review/template", controller.signal),
+    ).resolves.toMatchObject({
+      source: { kind: "template", template_name: "review/template" },
+      effects: [{ kind: "external_state_change_possible", occurrences: 1 }],
+    })
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/workflows/definitions/inspect",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ ref: "workflows/review.yml" }),
+        signal: controller.signal,
+      }),
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/workflows/templates/review%2Ftemplate/inspect",
+      { signal: controller.signal },
+    )
+  })
+
+  it("rejects mismatched and malformed workflow inspection DTOs", async () => {
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse(
+          definitionInspection({
+            source: { kind: "published", ref: "workflows/other.yml" },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...definitionInspection({
+            source: { kind: "template", template_name: "review" },
+          }),
+          triggers: {
+            manual: { present: true, projected: true },
+          },
+        }),
+      )
+    await expect(
+      inspectPublishedWorkflowDefinition("workflows/review.yml"),
+    ).rejects.toThrow("invalid response")
+    await expect(inspectWorkflowTemplate("review")).rejects.toThrow(
+      "invalid response",
+    )
+  })
+
+  it("fails closed on unknown inspection claims and projection invariants", async () => {
+    const base = definitionInspection({
+      source: { kind: "published", ref: "workflows/review.yml" },
+    })
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...base,
+          effects: [{ kind: "looks_safe", occurrences: 1 }],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...base,
+          triggers: {
+            ...base.triggers,
+            manual: {
+              present: false,
+              projected: true,
+              value: {},
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...base,
+          dependencies: [{ kind: "agent", target: "reviewer", occurrences: 0 }],
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response("{}", {
+          headers: { "Content-Length": String((32 << 20) + 1) },
+        }),
+      )
+
+    for (let index = 0; index < 4; index += 1) {
+      await expect(
+        inspectPublishedWorkflowDefinition("workflows/review.yml"),
+      ).rejects.toThrow("invalid response")
+    }
+  })
+
+  it("accepts server-bounded incomplete trigger and unsafe-field projections", async () => {
+    const ref = `workflows/${"r".repeat(1500)}.yml`
+    const base = definitionInspection({
+      source: { kind: "published", ref },
+    })
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...base,
+          complete: false,
+          triggers: {
+            ...base.triggers,
+            schedule: { present: true, projected: false },
+          },
+          limits: ["triggers_truncated"],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...definitionInspection({
+            source: { kind: "published", ref: "workflows/unsafe.yml" },
+          }),
+          complete: false,
+          jobs: [
+            {
+              id: "review",
+              kind: "steps",
+              steps: [{ index: 0, kind: "mcp" }],
+            },
+          ],
+          dependencies: [],
+          effects: [
+            {
+              kind: "external_state_change_possible",
+              occurrences: 1,
+            },
+          ],
+          limits: ["unsafe_fields_omitted"],
+        }),
+      )
+
+    await expect(
+      inspectPublishedWorkflowDefinition(ref),
+    ).resolves.toMatchObject({
+      source: { kind: "published", ref },
+      complete: false,
+      triggers: { schedule: { present: true, projected: false } },
+      limits: ["triggers_truncated"],
+    })
+    await expect(
+      inspectPublishedWorkflowDefinition("workflows/unsafe.yml"),
+    ).resolves.toMatchObject({
+      complete: false,
+      jobs: [{ steps: [{ kind: "mcp" }] }],
+      effects: [{ kind: "external_state_change_possible" }],
+      limits: ["unsafe_fields_omitted"],
+    })
+  })
+
+  it("enforces the server trigger projection boundaries", async () => {
+    const ref = "workflows/bounds.yml"
+    const base = definitionInspection({
+      source: { kind: "published", ref },
+    })
+    const exactSchedules = Array.from({ length: 256 }, () => ({
+      cron: "",
+    }))
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...base,
+          triggers: {
+            ...base.triggers,
+            schedule: {
+              present: true,
+              projected: true,
+              value: exactSchedules,
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...base,
+          triggers: {
+            ...base.triggers,
+            workflow_call: {
+              present: true,
+              projected: true,
+              value: { outputs: ["o".repeat(256)] },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...base,
+          triggers: {
+            ...base.triggers,
+            workflow_call: {
+              present: true,
+              projected: true,
+              value: { outputs: ["o".repeat(257)] },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...base,
+          triggers: {
+            ...base.triggers,
+            schedule: {
+              present: true,
+              projected: true,
+              value: [...exactSchedules, { cron: "" }],
+            },
+          },
+        }),
+      )
+
+    await expect(
+      inspectPublishedWorkflowDefinition(ref),
+    ).resolves.toMatchObject({
+      triggers: { schedule: { value: exactSchedules } },
+    })
+    await expect(
+      inspectPublishedWorkflowDefinition(ref),
+    ).resolves.toMatchObject({
+      triggers: {
+        workflow_call: { value: { outputs: ["o".repeat(256)] } },
+      },
+    })
+    await expect(inspectPublishedWorkflowDefinition(ref)).rejects.toThrow(
+      "invalid response",
+    )
+    await expect(inspectPublishedWorkflowDefinition(ref)).rejects.toThrow(
+      "invalid response",
+    )
+  })
+
+  it("accepts only sanitized trigger declaration metadata", async () => {
+    const base = definitionInspection({
+      source: { kind: "published", ref: "workflows/review.yml" },
+    })
+    const safeTriggers = {
+      ...base.triggers,
+      channel_message: {
+        present: true,
+        projected: true,
+        value: {
+          channels: ["github"],
+          session_configured: true,
+          delivery_configured: false,
+        },
+      },
+      runtime_event: {
+        present: true,
+        projected: true,
+        value: {
+          kinds: ["workflow.run.failed"],
+          session_filter_present: true,
+          session_filter_count: 2,
+        },
+      },
+      workflow_call: {
+        present: true,
+        projected: true,
+        value: {
+          inputs: {
+            ticket: {
+              type: "string",
+              required: true,
+              has_default: false,
+            },
+          },
+          secrets: { api_token: { required: true } },
+          outputs: ["summary"],
+        },
+      },
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(jsonResponse({ ...base, triggers: safeTriggers }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...base,
+          triggers: {
+            ...safeTriggers,
+            runtime_event: {
+              ...safeTriggers.runtime_event,
+              value: {
+                ...safeTriggers.runtime_event.value,
+                sessions: ["must-not-cross-boundary"],
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ...base,
+          triggers: {
+            ...safeTriggers,
+            schedule: {
+              present: true,
+              projected: true,
+              value: [{ cron: "\u202e" }],
+            },
+          },
+        }),
+      )
+
+    await expect(
+      inspectPublishedWorkflowDefinition("workflows/review.yml"),
+    ).resolves.toMatchObject({
+      triggers: {
+        channel_message: {
+          value: {
+            session_configured: true,
+            delivery_configured: false,
+          },
+        },
+        runtime_event: {
+          value: {
+            session_filter_present: true,
+            session_filter_count: 2,
+          },
+        },
+        workflow_call: {
+          value: {
+            inputs: { ticket: { has_default: false } },
+            secrets: { api_token: { required: true } },
+          },
+        },
+      },
+    })
+    await expect(
+      inspectPublishedWorkflowDefinition("workflows/review.yml"),
+    ).rejects.toThrow("invalid response")
+    await expect(
+      inspectPublishedWorkflowDefinition("workflows/review.yml"),
+    ).rejects.toThrow("invalid response")
+  })
+
+  it("keeps sanitized invalid topology inspectable", async () => {
+    const base = definitionInspection({
+      source: { kind: "published", ref: "workflows/invalid.yml" },
+    })
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        ...base,
+        validation: {
+          valid: false,
+          issue_count: 1,
+          issues: [{ code: "step_id_duplicate", scope: "jobs" }],
+          truncated: false,
+        },
+        jobs: [
+          {
+            id: "review",
+            kind: "steps",
+            steps: [
+              {
+                index: 0,
+                id: "duplicate",
+                kind: "agent",
+                target: "agent/reviewer",
+              },
+              {
+                index: 1,
+                id: "duplicate",
+                kind: "tool",
+                target: "tool/message",
+              },
+            ],
+          },
+        ],
+      }),
+    )
+
+    await expect(
+      inspectPublishedWorkflowDefinition("workflows/invalid.yml"),
+    ).resolves.toMatchObject({
+      validation: {
+        valid: false,
+        issues: [{ code: "step_id_duplicate", scope: "jobs" }],
+      },
+      jobs: [{ steps: [{ id: "duplicate" }, { id: "duplicate" }] }],
+    })
+  })
+
+  it("maps bounded workflow inspection failures without exposing responses", async () => {
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({ error: "workflow_definition_too_large" }, 413),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ error: "workflow_inspection_unavailable" }, 503),
+      )
+      .mockResolvedValueOnce(jsonResponse({ secret: "must not surface" }, 500))
+
+    await expect(
+      inspectPublishedWorkflowDefinition("workflows/large.yml"),
+    ).rejects.toThrow("too large to inspect safely")
+    await expect(inspectWorkflowTemplate("review")).rejects.toThrow(
+      "temporarily unavailable",
+    )
+    await expect(inspectWorkflowTemplate("review")).rejects.toThrow(
+      "inspection is unavailable",
     )
   })
 
@@ -1108,4 +1546,54 @@ function jsonResponse(body: unknown, status = 200) {
     status,
     headers: { "Content-Type": "application/json" },
   })
+}
+
+function definitionInspection({
+  source,
+}: {
+  source:
+    | { kind: "published"; ref: string }
+    | { kind: "template"; template_name: string }
+}) {
+  return {
+    source,
+    revision: "sha256:inspection",
+    complete: true,
+    validation: {
+      valid: true,
+      issue_count: 0,
+      issues: [],
+      truncated: false,
+    },
+    triggers: {
+      manual: { present: false, projected: true },
+      schedule: {
+        present: true,
+        projected: true,
+        value: [{ cron: "0 9 * * 1" }],
+      },
+      channel_message: { present: false, projected: true },
+      command: { present: false, projected: true },
+      runtime_event: { present: false, projected: true },
+      event: { present: false, projected: true },
+      workflow_call: { present: false, projected: true },
+    },
+    jobs: [
+      {
+        id: "review",
+        kind: "steps",
+        steps: [
+          {
+            index: 0,
+            id: "inspect",
+            kind: "agent",
+            target: "agent/reviewer",
+          },
+        ],
+      },
+    ],
+    dependencies: [{ kind: "agent", target: "reviewer", occurrences: 1 }],
+    effects: [{ kind: "external_state_change_possible", occurrences: 1 }],
+    limits: [],
+  }
 }

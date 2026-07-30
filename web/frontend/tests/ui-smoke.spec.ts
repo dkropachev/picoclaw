@@ -508,6 +508,78 @@ jobs:
           prompt: Summarize support tickets
 `
 
+const workflowInspectionSecretCanary =
+  "ui-smoke-workflow-secret-must-not-render"
+const workflowInspectionRawYAMLCanary =
+  "name: ui-smoke-raw-workflow-yaml-must-not-render"
+
+type MockWorkflowInspectionSource =
+  | { kind: "published"; ref: string }
+  | { kind: "template"; template_name: string }
+
+function workflowDefinitionInspection(source: MockWorkflowInspectionSource) {
+  const inspection = {
+    source,
+    revision:
+      "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    complete: true,
+    validation: {
+      valid: true,
+      issue_count: 0,
+      issues: [],
+      truncated: false,
+    },
+    triggers: {
+      manual: { present: false, projected: true },
+      schedule: {
+        present: true,
+        projected: true,
+        value: [{ cron: "0 9 * * 1" }],
+      },
+      channel_message: { present: false, projected: true },
+      command: { present: false, projected: true },
+      runtime_event: { present: false, projected: true },
+      event: {
+        present: true,
+        projected: true,
+        value: {
+          sources: ["github"],
+          types: ["issues.opened"],
+        },
+      },
+      workflow_call: { present: false, projected: true },
+    },
+    jobs: [
+      {
+        id: "review",
+        kind: "steps",
+        steps: [
+          {
+            index: 0,
+            id: "analyze",
+            kind: "agent",
+            target: "agent/main",
+          },
+        ],
+      },
+    ],
+    dependencies: [{ kind: "agent", target: "main", occurrences: 1 }],
+    effects: [
+      {
+        kind: "model_or_delegated_action_possible",
+        target: "main",
+        occurrences: 1,
+      },
+    ],
+    limits: [],
+  }
+
+  const serialized = JSON.stringify(inspection)
+  expect(serialized).not.toContain(workflowInspectionSecretCanary)
+  expect(serialized).not.toContain(workflowInspectionRawYAMLCanary)
+  return inspection
+}
+
 const supportTriageWorkflowDefinition = {
   ref: "workflows/support-triage.yml",
   name: "Support Triage",
@@ -773,6 +845,11 @@ interface MockLauncherApiOptions {
   oauthProviders?: unknown[]
   statefulMCP?: boolean
   mcpRequests?: Array<{
+    method: string
+    path: string
+    body: unknown
+  }>
+  workflowInspectionRequests?: Array<{
     method: string
     path: string
     body: unknown
@@ -1053,6 +1130,23 @@ async function mockLauncherApis(
               }
             }
             return json(route, { session: activeDevelopmentSession })
+          }
+          case "/api/workflows/definitions/inspect": {
+            const body = request.postDataJSON() as { ref?: unknown }
+            expect(request.headers()["content-type"]).toBe("application/json")
+            expect(typeof body.ref).toBe("string")
+            const ref = body.ref as string
+            expect(body).toEqual({ ref })
+            expect(ref).toMatch(/^workflows\/[^/]+\.ya?ml$/)
+            options.workflowInspectionRequests?.push({
+              method,
+              path,
+              body,
+            })
+            return json(
+              route,
+              workflowDefinitionInspection({ kind: "published", ref }),
+            )
           }
           case "/api/workflows/development/event-trigger/inspect": {
             const body = request.postDataJSON() as { yaml: string }
@@ -1497,6 +1591,27 @@ async function mockLauncherApis(
 
       if (method !== "GET") {
         return json(route, { status: "ok" })
+      }
+
+      const templateInspectionMatch = path.match(
+        /^\/api\/workflows\/templates\/([^/]+)\/inspect$/,
+      )
+      if (templateInspectionMatch) {
+        const templateName = decodeURIComponent(templateInspectionMatch[1])
+        expect(templateName.trim()).not.toBe("")
+        expect(request.postData()).toBeNull()
+        options.workflowInspectionRequests?.push({
+          method,
+          path,
+          body: null,
+        })
+        return json(
+          route,
+          workflowDefinitionInspection({
+            kind: "template",
+            template_name: templateName,
+          }),
+        )
       }
 
       switch (path) {
@@ -3115,6 +3230,96 @@ test("workflow dashboard tolerates null persisted collections", async ({
   await expect(page.getByText("wr_nulls").first()).toBeVisible()
   await expect(page.getByText("No events")).toBeVisible()
   await expect(page.getByText("No graph")).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("workflow Operate shows only the sanitized published definition inspection", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "desktop",
+    "desktop workflow inspection coverage",
+  )
+  const errors = collectPageErrors(page)
+  const inspectionRequests: NonNullable<
+    MockLauncherApiOptions["workflowInspectionRequests"]
+  > = []
+
+  await gotoMockedRoute(page, "/agent/workflows", {
+    workflowInspectionRequests: inspectionRequests,
+  })
+  await page.getByRole("button", { name: "Operate" }).click()
+
+  const inspectionTrigger = page.getByRole("button", {
+    name: "Published definition: workflows/summarize-text.yml",
+  })
+  await expect(inspectionTrigger).toBeVisible()
+  const inspection = inspectionTrigger.locator("..").locator("..")
+  await expect(inspection).toContainText("Inspected")
+  await expect(inspection).toContainText("workflows/summarize-text.yml")
+  await expect(inspection).toContainText("issues.opened")
+  await expect(inspection).toContainText("review")
+  await expect(inspection).toContainText("main")
+  await expect(inspection).toContainText("Possible effects")
+  await expect(inspection).toContainText("model or delegated action possible")
+
+  expect(inspectionRequests.length).toBeGreaterThan(0)
+  for (const request of inspectionRequests) {
+    expect(request).toEqual({
+      method: "POST",
+      path: "/api/workflows/definitions/inspect",
+      body: { ref: "workflows/summarize-text.yml" },
+    })
+  }
+  await expect(inspection).not.toContainText(workflowInspectionSecretCanary)
+  await expect(inspection).not.toContainText(workflowInspectionRawYAMLCanary)
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("narrow mobile lazily opens a sanitized built-in workflow inspection", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "mobile",
+    "mobile workflow inspection coverage",
+  )
+  await page.setViewportSize({ width: 320, height: 720 })
+  const errors = collectPageErrors(page)
+  const inspectionRequests: NonNullable<
+    MockLauncherApiOptions["workflowInspectionRequests"]
+  > = []
+
+  await gotoMockedRoute(page, "/agent/workflows", {
+    workflowInspectionRequests: inspectionRequests,
+  })
+  const template = page.getByRole("article", {
+    name: "Code review template",
+  })
+  await expect(template).toBeVisible()
+  expect(inspectionRequests).toEqual([])
+
+  await template
+    .getByRole("button", { name: "Built-in definition: code-review" })
+    .click()
+  await expect(template.getByText("Inspected")).toBeVisible()
+  await expect(template).toContainText("code-review")
+  await expect(template).toContainText("issues.opened")
+  await expect(template).toContainText("main")
+
+  expect(inspectionRequests.length).toBeGreaterThan(0)
+  for (const request of inspectionRequests) {
+    expect(request).toEqual({
+      method: "GET",
+      path: "/api/workflows/templates/code-review/inspect",
+      body: null,
+    })
+  }
+  await expect(template).not.toContainText(workflowInspectionSecretCanary)
+  await expect(template).not.toContainText(workflowInspectionRawYAMLCanary)
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
