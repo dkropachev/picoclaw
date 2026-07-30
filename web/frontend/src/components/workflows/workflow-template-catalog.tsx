@@ -20,6 +20,8 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 
+import { WorkflowDefinitionInspector } from "./workflow-definition-inspector"
+
 export function WorkflowTemplateCatalog({
   templates,
   loading,
@@ -128,6 +130,11 @@ export function WorkflowTemplateCatalog({
                       the built-in version.
                     </p>
                   ) : null}
+
+                  <WorkflowDefinitionInspector
+                    target={{ kind: "template", name: template.name }}
+                    defaultOpen={false}
+                  />
 
                   <div className="mt-auto">
                     {template.state === "available" ? (

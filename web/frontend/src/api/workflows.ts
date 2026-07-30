@@ -371,6 +371,200 @@ export interface WorkflowTemplateCatalog {
   templates: WorkflowTemplateCatalogEntry[]
 }
 
+export type WorkflowDefinitionInspectionSource =
+  | {
+      kind: "published"
+      ref: string
+    }
+  | {
+      kind: "template"
+      template_name: string
+    }
+
+export type WorkflowDefinitionInspectionValidationCode =
+  | "invalid_yaml"
+  | "jobs_required"
+  | "schedule_cron_required"
+  | "schedule_cron_invalid"
+  | "input_name_required"
+  | "input_type_unsupported"
+  | "input_default_invalid"
+  | "output_required"
+  | "output_expression_invalid"
+  | "conversation_session_unsupported"
+  | "conversation_delivery_unsupported"
+  | "channel_pattern_invalid"
+  | "command_name_required"
+  | "runtime_filter_required"
+  | "event_filter_required"
+  | "event_entity_filter_required"
+  | "event_pattern_required"
+  | "event_attribute_required"
+  | "job_id_required"
+  | "job_dependency_unknown"
+  | "job_dependency_cycle"
+  | "reusable_target_invalid"
+  | "reusable_steps_unsupported"
+  | "job_runner_required"
+  | "job_steps_required"
+  | "step_id_duplicate"
+  | "step_target_required"
+  | "reusable_step_unsupported"
+  | "step_target_unsupported"
+  | "run_session_unsupported"
+  | "run_delivery_unsupported"
+  | "agent_history_unsupported"
+  | "agent_cache_unsupported"
+  | "agent_tools_unsupported"
+  | "definition_invalid"
+
+export type WorkflowDefinitionInspectionValidationScope =
+  | "workflow"
+  | "jobs"
+  | "trigger.manual"
+  | "trigger.schedule"
+  | "trigger.channel_message"
+  | "trigger.command"
+  | "trigger.runtime_event"
+  | "trigger.event"
+  | "trigger.workflow_call"
+
+export interface WorkflowDefinitionInspectionValidationIssue {
+  code: WorkflowDefinitionInspectionValidationCode
+  scope: WorkflowDefinitionInspectionValidationScope
+}
+
+export interface WorkflowDefinitionInspectionValidation {
+  valid: boolean
+  issue_count: number
+  issues: WorkflowDefinitionInspectionValidationIssue[]
+  truncated: boolean
+}
+
+export interface WorkflowDefinitionInspectionInput {
+  type?: string
+  required: boolean
+  has_default: boolean
+}
+
+export interface WorkflowDefinitionInspectionChannelTrigger {
+  channels?: string[]
+  chats?: string[]
+  senders?: string[]
+  mentioned?: boolean
+  command?: string
+  text_matches?: string
+  passthrough?: boolean
+  session_configured: boolean
+  delivery_configured: boolean
+}
+
+export interface WorkflowDefinitionInspectionCommandTrigger {
+  name?: string
+  channels?: string[]
+  chats?: string[]
+  senders?: string[]
+  args?: Record<string, WorkflowDefinitionInspectionInput>
+  passthrough?: boolean
+  session_configured: boolean
+  delivery_configured: boolean
+}
+
+export interface WorkflowDefinitionInspectionRuntimeEventTrigger {
+  kinds?: string[]
+  sources?: string[]
+  agents?: string[]
+  session_filter_present: boolean
+  session_filter_count: number
+  channels?: string[]
+  chats?: string[]
+}
+
+export interface WorkflowDefinitionInspectionSecret {
+  required: boolean
+}
+
+export interface WorkflowDefinitionInspectionWorkflowCallTrigger {
+  inputs?: Record<string, WorkflowDefinitionInspectionInput>
+  secrets?: Record<string, WorkflowDefinitionInspectionSecret>
+  outputs?: string[]
+}
+
+export interface WorkflowDefinitionInspectionTriggerValueMap {
+  manual: Record<string, never>
+  schedule: WorkflowScheduleTrigger[]
+  channel_message: WorkflowDefinitionInspectionChannelTrigger
+  command: WorkflowDefinitionInspectionCommandTrigger
+  runtime_event: WorkflowDefinitionInspectionRuntimeEventTrigger
+  event: WorkflowEventTrigger
+  workflow_call: WorkflowDefinitionInspectionWorkflowCallTrigger
+}
+
+export interface WorkflowDefinitionInspectionTrigger<
+  Value = WorkflowDefinitionInspectionTriggerValueMap[WorkflowTriggerKind],
+> {
+  present: boolean
+  projected: boolean
+  value?: Value
+}
+
+export type WorkflowDefinitionInspectionTriggers = {
+  [Kind in WorkflowTriggerKind]: WorkflowDefinitionInspectionTrigger<
+    WorkflowDefinitionInspectionTriggerValueMap[Kind]
+  >
+}
+
+export interface WorkflowDefinitionInspectionStep {
+  index: number
+  id?: string
+  kind: "agent" | "tool" | "mcp" | "function" | "unknown"
+  target?: string
+}
+
+export interface WorkflowDefinitionInspectionJob {
+  id: string
+  kind: "steps" | "reusable"
+  reusable_target?: string
+  steps: WorkflowDefinitionInspectionStep[]
+}
+
+export interface WorkflowDefinitionInspectionDependency {
+  kind: WorkflowDependencyKind
+  target: string
+  occurrences: number
+}
+
+export interface WorkflowDefinitionInspectionEffect {
+  kind:
+    | "model_or_delegated_action_possible"
+    | "state_change_possible"
+    | "external_state_change_possible"
+    | "transitive_effects_unknown"
+    | "unclassified_action"
+  target?: string
+  occurrences: number
+}
+
+export interface WorkflowDefinitionInspection {
+  source: WorkflowDefinitionInspectionSource
+  revision: string
+  complete: boolean
+  validation: WorkflowDefinitionInspectionValidation
+  triggers: WorkflowDefinitionInspectionTriggers
+  jobs: WorkflowDefinitionInspectionJob[]
+  dependencies: WorkflowDefinitionInspectionDependency[]
+  effects: WorkflowDefinitionInspectionEffect[]
+  limits: Array<
+    | "jobs_truncated"
+    | "steps_truncated"
+    | "dependencies_truncated"
+    | "effects_truncated"
+    | "triggers_truncated"
+    | "unsafe_fields_omitted"
+    | "validation_issues_truncated"
+  >
+}
+
 export interface WorkflowSettingsValues {
   enabled: boolean
   tool_enabled: boolean
@@ -671,6 +865,39 @@ export async function installWorkflowTemplate(
     "The workflow template could not be installed.",
   )
   return { ...payload, templates: arrayOrEmpty(payload.templates) }
+}
+
+export async function inspectPublishedWorkflowDefinition(
+  ref: string,
+  signal?: AbortSignal,
+): Promise<WorkflowDefinitionInspection> {
+  const payload = await requestWorkflowInspection(
+    "/api/workflows/definitions/inspect",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ref }),
+      signal,
+    },
+  )
+  return parseWorkflowDefinitionInspection(payload, {
+    kind: "published",
+    ref,
+  })
+}
+
+export async function inspectWorkflowTemplate(
+  name: string,
+  signal?: AbortSignal,
+): Promise<WorkflowDefinitionInspection> {
+  const payload = await requestWorkflowInspection(
+    `/api/workflows/templates/${encodeURIComponent(name)}/inspect`,
+    { signal },
+  )
+  return parseWorkflowDefinitionInspection(payload, {
+    kind: "template",
+    template_name: name,
+  })
 }
 
 export async function getWorkflowSettings(): Promise<WorkflowSettingsResponse> {
@@ -1110,6 +1337,98 @@ async function requestWorkflowControl<T>(
   }
 }
 
+async function requestWorkflowInspection(
+  path: string,
+  options?: RequestInit,
+): Promise<unknown> {
+  const res = await launcherFetch(path, options)
+  let text: string
+  try {
+    text = await boundedWorkflowInspectionResponseText(res)
+  } catch {
+    throw new Error(
+      res.ok
+        ? "Workflow definition inspection returned an invalid response."
+        : "Workflow definition inspection is unavailable.",
+    )
+  }
+  if (!res.ok) {
+    throw new Error(workflowInspectionErrorMessage(text))
+  }
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    throw new Error(
+      "Workflow definition inspection returned an invalid response.",
+    )
+  }
+}
+
+const workflowInspectionResponseMaxBytes = 32 << 20
+const workflowInspectionSourceRefMaxBytes = 16 << 10
+
+async function boundedWorkflowInspectionResponseText(res: Response) {
+  const lengthHeader = res.headers.get("Content-Length")
+  if (
+    lengthHeader != null &&
+    /^\d+$/.test(lengthHeader) &&
+    Number(lengthHeader) > workflowInspectionResponseMaxBytes
+  ) {
+    throw new Error("response too large")
+  }
+  if (res.body == null) {
+    const text = await res.text()
+    if (
+      new TextEncoder().encode(text).byteLength >
+      workflowInspectionResponseMaxBytes
+    ) {
+      throw new Error("response too large")
+    }
+    return text
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder("utf-8", { fatal: true })
+  let total = 0
+  let text = ""
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) {
+        return text + decoder.decode()
+      }
+      total += value.byteLength
+      if (total > workflowInspectionResponseMaxBytes) {
+        await reader.cancel()
+        throw new Error("response too large")
+      }
+      text += decoder.decode(value, { stream: true })
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+function workflowInspectionErrorMessage(text: string) {
+  switch (workflowErrorCode(text)) {
+    case "invalid_definition_inspection_request":
+    case "invalid_definition_inspection_content_type":
+      return "The workflow inspection request is invalid. Refresh and try again."
+    case "definition_inspection_request_too_large":
+      return "The workflow reference is too large to inspect."
+    case "workflow_definition_too_large":
+      return "This workflow definition is too large to inspect safely."
+    case "workflow_not_found":
+      return "That published workflow is no longer available."
+    case "template_not_found":
+      return "That built-in workflow template is no longer available."
+    case "workflow_inspection_unavailable":
+      return "Workflow definition inspection is temporarily unavailable."
+    default:
+      return "Workflow definition inspection is unavailable."
+  }
+}
+
 function workflowControlErrorMessage(text: string, fallbackMessage: string) {
   const code = workflowErrorCode(text)
   switch (code) {
@@ -1192,6 +1511,913 @@ function recordOrEmpty<T>(
   value: Record<string, T> | null | undefined,
 ): Record<string, T> {
   return value == null ? {} : value
+}
+
+const workflowInspectionValidationCodes =
+  new Set<WorkflowDefinitionInspectionValidationCode>([
+    "invalid_yaml",
+    "jobs_required",
+    "schedule_cron_required",
+    "schedule_cron_invalid",
+    "input_name_required",
+    "input_type_unsupported",
+    "input_default_invalid",
+    "output_required",
+    "output_expression_invalid",
+    "conversation_session_unsupported",
+    "conversation_delivery_unsupported",
+    "channel_pattern_invalid",
+    "command_name_required",
+    "runtime_filter_required",
+    "event_filter_required",
+    "event_entity_filter_required",
+    "event_pattern_required",
+    "event_attribute_required",
+    "job_id_required",
+    "job_dependency_unknown",
+    "job_dependency_cycle",
+    "reusable_target_invalid",
+    "reusable_steps_unsupported",
+    "job_runner_required",
+    "job_steps_required",
+    "step_id_duplicate",
+    "step_target_required",
+    "reusable_step_unsupported",
+    "step_target_unsupported",
+    "run_session_unsupported",
+    "run_delivery_unsupported",
+    "agent_history_unsupported",
+    "agent_cache_unsupported",
+    "agent_tools_unsupported",
+    "definition_invalid",
+  ])
+const workflowInspectionValidationScopes =
+  new Set<WorkflowDefinitionInspectionValidationScope>([
+    "workflow",
+    "jobs",
+    "trigger.manual",
+    "trigger.schedule",
+    "trigger.channel_message",
+    "trigger.command",
+    "trigger.runtime_event",
+    "trigger.event",
+    "trigger.workflow_call",
+  ])
+const workflowInspectionJobKinds = new Set(["steps", "reusable"] as const)
+const workflowInspectionStepKinds = new Set([
+  "agent",
+  "tool",
+  "mcp",
+  "function",
+  "unknown",
+] as const)
+const workflowInspectionDependencyKinds = new Set<WorkflowDependencyKind>([
+  "agent",
+  "tool",
+  "mcp",
+  "function",
+  "reusable",
+])
+const workflowInspectionEffectKinds = new Set<
+  WorkflowDefinitionInspectionEffect["kind"]
+>([
+  "model_or_delegated_action_possible",
+  "state_change_possible",
+  "external_state_change_possible",
+  "transitive_effects_unknown",
+  "unclassified_action",
+])
+const workflowInspectionLimitKinds = new Set<
+  WorkflowDefinitionInspection["limits"][number]
+>([
+  "jobs_truncated",
+  "steps_truncated",
+  "dependencies_truncated",
+  "effects_truncated",
+  "triggers_truncated",
+  "unsafe_fields_omitted",
+  "validation_issues_truncated",
+])
+
+function parseWorkflowDefinitionInspection(
+  value: unknown,
+  expectedSource: WorkflowDefinitionInspectionSource,
+): WorkflowDefinitionInspection {
+  const invalid = (): never => {
+    throw new Error(
+      "Workflow definition inspection returned an invalid response.",
+    )
+  }
+  const root = inspectionObject(
+    value,
+    [
+      "source",
+      "revision",
+      "complete",
+      "validation",
+      "triggers",
+      "jobs",
+      "dependencies",
+      "effects",
+      "limits",
+    ],
+    invalid,
+  )
+  const sourceValue = inspectionObject(
+    root.source,
+    ["kind", "ref", "template_name"],
+    invalid,
+  )
+  const sourceKind = inspectionString(sourceValue.kind, invalid, {
+    maximumBytes: 16,
+  })
+  let source: WorkflowDefinitionInspectionSource
+  if (
+    sourceKind === "published" &&
+    hasInspectionField(sourceValue, "ref") &&
+    !hasInspectionField(sourceValue, "template_name")
+  ) {
+    source = {
+      kind: "published",
+      ref: inspectionString(sourceValue.ref, invalid, {
+        maximumBytes: workflowInspectionSourceRefMaxBytes,
+      }),
+    }
+  } else if (
+    sourceKind === "template" &&
+    hasInspectionField(sourceValue, "template_name") &&
+    !hasInspectionField(sourceValue, "ref")
+  ) {
+    source = {
+      kind: "template",
+      template_name: inspectionString(sourceValue.template_name, invalid, {
+        maximumBytes: 256,
+      }),
+    }
+  } else {
+    return invalid()
+  }
+  if (
+    source.kind !== expectedSource.kind ||
+    (source.kind === "published" &&
+      expectedSource.kind === "published" &&
+      source.ref !== expectedSource.ref) ||
+    (source.kind === "template" &&
+      expectedSource.kind === "template" &&
+      source.template_name !== expectedSource.template_name)
+  ) {
+    return invalid()
+  }
+
+  const validationValue = inspectionObject(
+    root.validation,
+    ["valid", "issue_count", "issues", "truncated"],
+    invalid,
+  )
+  const issues = inspectionArray(validationValue.issues, 128, invalid).map(
+    (issueValue) => {
+      const issue = inspectionObject(issueValue, ["code", "scope"], invalid)
+      return {
+        code: inspectionEnum(
+          issue.code,
+          workflowInspectionValidationCodes,
+          invalid,
+        ),
+        scope: inspectionEnum(
+          issue.scope,
+          workflowInspectionValidationScopes,
+          invalid,
+        ),
+      }
+    },
+  )
+  const issueCount = inspectionInteger(validationValue.issue_count, invalid)
+  const validationTruncated = inspectionBoolean(
+    validationValue.truncated,
+    invalid,
+  )
+  const validationValid = inspectionBoolean(validationValue.valid, invalid)
+  if (
+    issueCount < issues.length ||
+    (!validationTruncated && issueCount !== issues.length) ||
+    validationValid !== (issueCount === 0)
+  ) {
+    return invalid()
+  }
+
+  const triggerValues = inspectionObject(
+    root.triggers,
+    [...workflowTriggerKinds],
+    invalid,
+  )
+  if (Object.keys(triggerValues).length !== workflowTriggerKinds.length) {
+    return invalid()
+  }
+  const triggerBudget = { remaining: 4096 }
+  const triggers = Object.fromEntries(
+    workflowTriggerKinds.map((kind) => {
+      const trigger = inspectionObject(
+        triggerValues[kind],
+        ["present", "projected", "value"],
+        invalid,
+      )
+      const present = inspectionBoolean(trigger.present, invalid)
+      const projected = inspectionBoolean(trigger.projected, invalid)
+      const hasValue = hasInspectionField(trigger, "value")
+      if ((present && projected) !== hasValue) {
+        return invalid()
+      }
+      const next: WorkflowDefinitionInspectionTrigger = {
+        present,
+        projected,
+      }
+      if (hasValue) {
+        next.value = parseWorkflowInspectionTriggerValue(
+          kind,
+          trigger.value,
+          triggerBudget,
+          invalid,
+        ) as WorkflowDefinitionInspectionTrigger["value"]
+      }
+      return [kind, next]
+    }),
+  ) as WorkflowDefinitionInspectionTriggers
+
+  let stepCount = 0
+  let hasOmittedUnsafeStepTarget = false
+  const jobs = inspectionArray(root.jobs, 256, invalid).map((jobValue) => {
+    const job = inspectionObject(
+      jobValue,
+      ["id", "kind", "reusable_target", "steps"],
+      invalid,
+    )
+    const id = inspectionString(job.id, invalid, {
+      maximumBytes: 256,
+    })
+    const kind = inspectionEnum(job.kind, workflowInspectionJobKinds, invalid)
+    if (kind === "steps" && hasInspectionField(job, "reusable_target")) {
+      return invalid()
+    }
+    const steps = inspectionArray(job.steps, 4096, invalid).map(
+      (stepValue, expectedIndex) => {
+        stepCount += 1
+        if (stepCount > 4096) {
+          return invalid()
+        }
+        const step = inspectionObject(
+          stepValue,
+          ["index", "id", "kind", "target"],
+          invalid,
+        )
+        const index = inspectionInteger(step.index, invalid)
+        if (index !== expectedIndex) {
+          return invalid()
+        }
+        const stepKind = inspectionEnum(
+          step.kind,
+          workflowInspectionStepKinds,
+          invalid,
+        )
+        const parsed: WorkflowDefinitionInspectionStep = {
+          index,
+          kind: stepKind,
+        }
+        if (hasInspectionField(step, "id")) {
+          const stepID = inspectionString(step.id, invalid, {
+            maximumBytes: 256,
+          })
+          parsed.id = stepID
+        }
+        if (hasInspectionField(step, "target")) {
+          parsed.target = inspectionString(step.target, invalid, {
+            maximumBytes: 512,
+          })
+        } else if (stepKind !== "unknown") {
+          hasOmittedUnsafeStepTarget = true
+        }
+        return parsed
+      },
+    )
+    const parsed: WorkflowDefinitionInspectionJob = {
+      id,
+      kind,
+      steps,
+    }
+    if (hasInspectionField(job, "reusable_target")) {
+      parsed.reusable_target = inspectionString(job.reusable_target, invalid, {
+        maximumBytes: 1024,
+      })
+    }
+    return parsed
+  })
+
+  let previousDependencyKey: string | undefined
+  const dependencies = inspectionArray(root.dependencies, 4096, invalid).map(
+    (dependencyValue) => {
+      const dependency = inspectionObject(
+        dependencyValue,
+        ["kind", "target", "occurrences"],
+        invalid,
+      )
+      const kind = inspectionEnum(
+        dependency.kind,
+        workflowInspectionDependencyKinds,
+        invalid,
+      )
+      const target = inspectionString(dependency.target, invalid, {
+        maximumBytes: 1024,
+      })
+      const key = `${kind}\u0000${target}`
+      if (
+        previousDependencyKey != null &&
+        compareInspectionUTF8(previousDependencyKey, key) >= 0
+      ) {
+        return invalid()
+      }
+      previousDependencyKey = key
+      return {
+        kind,
+        target,
+        occurrences: inspectionPositiveInteger(dependency.occurrences, invalid),
+      }
+    },
+  )
+  let previousEffectKey: string | undefined
+  const effects = inspectionArray(root.effects, 4096, invalid).map(
+    (effectValue) => {
+      const effect = inspectionObject(
+        effectValue,
+        ["kind", "target", "occurrences"],
+        invalid,
+      )
+      const kind = inspectionEnum(
+        effect.kind,
+        workflowInspectionEffectKinds,
+        invalid,
+      )
+      const parsed: WorkflowDefinitionInspectionEffect = {
+        kind,
+        occurrences: inspectionPositiveInteger(effect.occurrences, invalid),
+      }
+      if (hasInspectionField(effect, "target")) {
+        parsed.target = inspectionString(effect.target, invalid, {
+          maximumBytes: 1024,
+        })
+      }
+      const key = `${kind}\u0000${parsed.target ?? ""}`
+      if (
+        previousEffectKey != null &&
+        compareInspectionUTF8(previousEffectKey, key) >= 0
+      ) {
+        return invalid()
+      }
+      previousEffectKey = key
+      return parsed
+    },
+  )
+  let previousLimit: string | undefined
+  const limits = inspectionArray(root.limits, 7, invalid).map((limitValue) => {
+    const limit = inspectionEnum(
+      limitValue,
+      workflowInspectionLimitKinds,
+      invalid,
+    )
+    if (
+      previousLimit != null &&
+      compareInspectionUTF8(previousLimit, limit) >= 0
+    ) {
+      return invalid()
+    }
+    previousLimit = limit
+    return limit
+  })
+  const complete = inspectionBoolean(root.complete, invalid)
+  if (
+    complete !== (limits.length === 0) ||
+    validationTruncated !== limits.includes("validation_issues_truncated") ||
+    (hasOmittedUnsafeStepTarget && !limits.includes("unsafe_fields_omitted"))
+  ) {
+    return invalid()
+  }
+
+  return {
+    source,
+    revision: inspectionString(root.revision, invalid, { maximumBytes: 256 }),
+    complete,
+    validation: {
+      valid: validationValid,
+      issue_count: issueCount,
+      issues,
+      truncated: validationTruncated,
+    },
+    triggers,
+    jobs,
+    dependencies,
+    effects,
+    limits,
+  }
+}
+
+function parseWorkflowInspectionTriggerValue(
+  kind: WorkflowTriggerKind,
+  value: unknown,
+  budget: { remaining: number },
+  invalid: () => never,
+): WorkflowDefinitionInspectionTrigger["value"] {
+  switch (kind) {
+    case "manual": {
+      const manual = inspectionObject(value, [], invalid)
+      if (Object.keys(manual).length !== 0) {
+        return invalid()
+      }
+      return {}
+    }
+    case "schedule":
+      return inspectionArray(value, 256, invalid).map((scheduleValue) => {
+        consumeWorkflowInspectionBudget(budget, 1, invalid)
+        const schedule = inspectionObject(scheduleValue, ["cron"], invalid)
+        return {
+          cron: inspectionString(schedule.cron, invalid, {
+            allowEmpty: true,
+            maximumBytes: 4096,
+          }),
+        }
+      })
+    case "channel_message":
+      return parseWorkflowInspectionChannelTrigger(value, budget, invalid)
+    case "command":
+      return parseWorkflowInspectionCommandTrigger(value, budget, invalid)
+    case "runtime_event":
+      return parseWorkflowInspectionRuntimeTrigger(value, budget, invalid)
+    case "event":
+      return parseWorkflowInspectionEventTrigger(value, budget, invalid)
+    case "workflow_call":
+      return parseWorkflowInspectionCallTrigger(value, budget, invalid)
+  }
+}
+
+function parseWorkflowInspectionChannelTrigger(
+  value: unknown,
+  budget: { remaining: number },
+  invalid: () => never,
+): WorkflowDefinitionInspectionChannelTrigger {
+  const trigger = inspectionObject(
+    value,
+    [
+      "channels",
+      "chats",
+      "senders",
+      "mentioned",
+      "command",
+      "text_matches",
+      "passthrough",
+      "session_configured",
+      "delivery_configured",
+    ],
+    invalid,
+  )
+  return {
+    ...inspectionOptionalStringLists(
+      trigger,
+      ["channels", "chats", "senders"],
+      budget,
+      invalid,
+    ),
+    ...(hasInspectionField(trigger, "mentioned")
+      ? { mentioned: inspectionBoolean(trigger.mentioned, invalid) }
+      : {}),
+    ...(hasInspectionField(trigger, "command")
+      ? {
+          command: inspectionString(trigger.command, invalid, {
+            allowEmpty: true,
+          }),
+        }
+      : {}),
+    ...(hasInspectionField(trigger, "text_matches")
+      ? {
+          text_matches: inspectionString(trigger.text_matches, invalid, {
+            allowEmpty: true,
+          }),
+        }
+      : {}),
+    ...(hasInspectionField(trigger, "passthrough")
+      ? { passthrough: inspectionBoolean(trigger.passthrough, invalid) }
+      : {}),
+    session_configured: inspectionBoolean(trigger.session_configured, invalid),
+    delivery_configured: inspectionBoolean(
+      trigger.delivery_configured,
+      invalid,
+    ),
+  }
+}
+
+function parseWorkflowInspectionCommandTrigger(
+  value: unknown,
+  budget: { remaining: number },
+  invalid: () => never,
+): WorkflowDefinitionInspectionCommandTrigger {
+  const trigger = inspectionObject(
+    value,
+    [
+      "name",
+      "channels",
+      "chats",
+      "senders",
+      "args",
+      "passthrough",
+      "session_configured",
+      "delivery_configured",
+    ],
+    invalid,
+  )
+  return {
+    ...(hasInspectionField(trigger, "name")
+      ? {
+          name: inspectionString(trigger.name, invalid, {
+            allowEmpty: true,
+          }),
+        }
+      : {}),
+    ...inspectionOptionalStringLists(
+      trigger,
+      ["channels", "chats", "senders"],
+      budget,
+      invalid,
+    ),
+    ...(hasInspectionField(trigger, "args")
+      ? {
+          args: parseWorkflowInspectionInputs(trigger.args, budget, invalid),
+        }
+      : {}),
+    ...(hasInspectionField(trigger, "passthrough")
+      ? { passthrough: inspectionBoolean(trigger.passthrough, invalid) }
+      : {}),
+    session_configured: inspectionBoolean(trigger.session_configured, invalid),
+    delivery_configured: inspectionBoolean(
+      trigger.delivery_configured,
+      invalid,
+    ),
+  }
+}
+
+function parseWorkflowInspectionRuntimeTrigger(
+  value: unknown,
+  budget: { remaining: number },
+  invalid: () => never,
+): WorkflowDefinitionInspectionRuntimeEventTrigger {
+  const trigger = inspectionObject(
+    value,
+    [
+      "kinds",
+      "sources",
+      "agents",
+      "session_filter_present",
+      "session_filter_count",
+      "channels",
+      "chats",
+    ],
+    invalid,
+  )
+  const sessionFilterPresent = inspectionBoolean(
+    trigger.session_filter_present,
+    invalid,
+  )
+  const sessionFilterCount = inspectionInteger(
+    trigger.session_filter_count,
+    invalid,
+  )
+  if (!sessionFilterPresent && sessionFilterCount !== 0) {
+    return invalid()
+  }
+  return {
+    ...inspectionOptionalStringLists(
+      trigger,
+      ["kinds", "sources", "agents", "channels", "chats"],
+      budget,
+      invalid,
+    ),
+    session_filter_present: sessionFilterPresent,
+    session_filter_count: sessionFilterCount,
+  }
+}
+
+function parseWorkflowInspectionEventTrigger(
+  value: unknown,
+  budget: { remaining: number },
+  invalid: () => never,
+): WorkflowEventTrigger {
+  const trigger = inspectionObject(
+    value,
+    ["sources", "connectors", "types", "actor", "subject", "attributes"],
+    invalid,
+  )
+  return {
+    ...inspectionOptionalStringLists(
+      trigger,
+      ["sources", "connectors", "types"],
+      budget,
+      invalid,
+    ),
+    ...(hasInspectionField(trigger, "actor")
+      ? {
+          actor: parseWorkflowInspectionEventEntity(
+            trigger.actor,
+            budget,
+            invalid,
+          ),
+        }
+      : {}),
+    ...(hasInspectionField(trigger, "subject")
+      ? {
+          subject: parseWorkflowInspectionEventEntity(
+            trigger.subject,
+            budget,
+            invalid,
+          ),
+        }
+      : {}),
+    ...(hasInspectionField(trigger, "attributes")
+      ? {
+          attributes: parseWorkflowInspectionStringListMap(
+            trigger.attributes,
+            budget,
+            invalid,
+          ),
+        }
+      : {}),
+  }
+}
+
+function parseWorkflowInspectionEventEntity(
+  value: unknown,
+  budget: { remaining: number },
+  invalid: () => never,
+): WorkflowEventEntityTrigger {
+  const entity = inspectionObject(
+    value,
+    ["ids", "types", "attributes"],
+    invalid,
+  )
+  return {
+    ...inspectionOptionalStringLists(entity, ["ids", "types"], budget, invalid),
+    ...(hasInspectionField(entity, "attributes")
+      ? {
+          attributes: parseWorkflowInspectionStringListMap(
+            entity.attributes,
+            budget,
+            invalid,
+          ),
+        }
+      : {}),
+  }
+}
+
+function parseWorkflowInspectionCallTrigger(
+  value: unknown,
+  budget: { remaining: number },
+  invalid: () => never,
+): WorkflowDefinitionInspectionWorkflowCallTrigger {
+  const trigger = inspectionObject(
+    value,
+    ["inputs", "secrets", "outputs"],
+    invalid,
+  )
+  return {
+    ...(hasInspectionField(trigger, "inputs")
+      ? {
+          inputs: parseWorkflowInspectionInputs(
+            trigger.inputs,
+            budget,
+            invalid,
+          ),
+        }
+      : {}),
+    ...(hasInspectionField(trigger, "secrets")
+      ? {
+          secrets: parseWorkflowInspectionSecrets(
+            trigger.secrets,
+            budget,
+            invalid,
+          ),
+        }
+      : {}),
+    ...(hasInspectionField(trigger, "outputs")
+      ? {
+          outputs: inspectionStringArray(trigger.outputs, budget, invalid, 256),
+        }
+      : {}),
+  }
+}
+
+function parseWorkflowInspectionInputs(
+  value: unknown,
+  budget: { remaining: number },
+  invalid: () => never,
+) {
+  const inputs = inspectionObject(value, undefined, invalid)
+  const entries = Object.entries(inputs)
+  consumeWorkflowInspectionBudget(budget, entries.length, invalid)
+  return Object.fromEntries(
+    entries.map(([name, inputValue]) => {
+      const input = inspectionObject(
+        inputValue,
+        ["type", "required", "has_default"],
+        invalid,
+      )
+      return [
+        inspectionString(name, invalid, {
+          allowEmpty: true,
+          maximumBytes: 256,
+        }),
+        {
+          ...(hasInspectionField(input, "type")
+            ? {
+                type: inspectionString(input.type, invalid, {
+                  allowEmpty: true,
+                  maximumBytes: 64,
+                }),
+              }
+            : {}),
+          required: inspectionBoolean(input.required, invalid),
+          has_default: inspectionBoolean(input.has_default, invalid),
+        },
+      ]
+    }),
+  )
+}
+
+function parseWorkflowInspectionSecrets(
+  value: unknown,
+  budget: { remaining: number },
+  invalid: () => never,
+) {
+  const secrets = inspectionObject(value, undefined, invalid)
+  const entries = Object.entries(secrets)
+  consumeWorkflowInspectionBudget(budget, entries.length, invalid)
+  return Object.fromEntries(
+    entries.map(([name, secretValue]) => {
+      const secret = inspectionObject(secretValue, ["required"], invalid)
+      return [
+        inspectionString(name, invalid, {
+          allowEmpty: true,
+          maximumBytes: 256,
+        }),
+        { required: inspectionBoolean(secret.required, invalid) },
+      ]
+    }),
+  )
+}
+
+function parseWorkflowInspectionStringListMap(
+  value: unknown,
+  budget: { remaining: number },
+  invalid: () => never,
+) {
+  const record = inspectionObject(value, undefined, invalid)
+  const entries = Object.entries(record)
+  consumeWorkflowInspectionBudget(budget, entries.length, invalid)
+  return Object.fromEntries(
+    entries.map(([name, list]) => [
+      inspectionString(name, invalid, {
+        allowEmpty: true,
+        maximumBytes: 256,
+      }),
+      inspectionStringArray(list, budget, invalid),
+    ]),
+  )
+}
+
+function inspectionOptionalStringLists(
+  record: Record<string, unknown>,
+  fields: string[],
+  budget: { remaining: number },
+  invalid: () => never,
+): Record<string, string[]> {
+  return Object.fromEntries(
+    fields.flatMap((field) =>
+      hasInspectionField(record, field)
+        ? [[field, inspectionStringArray(record[field], budget, invalid)]]
+        : [],
+    ),
+  )
+}
+
+function inspectionStringArray(
+  value: unknown,
+  budget: { remaining: number },
+  invalid: () => never,
+  maximumBytes = 4096,
+) {
+  const values = inspectionArray(value, 4096, invalid)
+  consumeWorkflowInspectionBudget(budget, values.length, invalid)
+  return values.map((item) =>
+    inspectionString(item, invalid, { allowEmpty: true, maximumBytes }),
+  )
+}
+
+function consumeWorkflowInspectionBudget(
+  budget: { remaining: number },
+  amount: number,
+  invalid: () => never,
+) {
+  budget.remaining -= amount
+  if (budget.remaining < 0) {
+    invalid()
+  }
+}
+
+function inspectionObject(
+  value: unknown,
+  allowedFields: readonly string[] | undefined,
+  invalid: () => never,
+): Record<string, unknown> {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    return invalid()
+  }
+  const record = value as Record<string, unknown>
+  if (
+    allowedFields != null &&
+    Object.keys(record).some((field) => !allowedFields.includes(field))
+  ) {
+    return invalid()
+  }
+  return record
+}
+
+function hasInspectionField(record: Record<string, unknown>, field: string) {
+  return Object.prototype.hasOwnProperty.call(record, field)
+}
+
+function inspectionArray(
+  value: unknown,
+  maximum: number,
+  invalid: () => never,
+): unknown[] {
+  if (!Array.isArray(value) || value.length > maximum) {
+    return invalid()
+  }
+  return value
+}
+
+function inspectionString(
+  value: unknown,
+  invalid: () => never,
+  {
+    allowEmpty = false,
+    maximumBytes = 4096,
+  }: { allowEmpty?: boolean; maximumBytes?: number } = {},
+): string {
+  if (
+    typeof value !== "string" ||
+    (!allowEmpty && value === "") ||
+    new TextEncoder().encode(value).byteLength > maximumBytes ||
+    /[\p{Cc}\p{Cf}]/u.test(value)
+  ) {
+    return invalid()
+  }
+  return value
+}
+
+function inspectionBoolean(value: unknown, invalid: () => never): boolean {
+  return typeof value === "boolean" ? value : invalid()
+}
+
+function inspectionInteger(value: unknown, invalid: () => never): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : invalid()
+}
+
+function inspectionPositiveInteger(
+  value: unknown,
+  invalid: () => never,
+): number {
+  const integer = inspectionInteger(value, invalid)
+  return integer > 0 ? integer : invalid()
+}
+
+function inspectionEnum<Value extends string>(
+  value: unknown,
+  allowed: ReadonlySet<Value>,
+  invalid: () => never,
+): Value {
+  return typeof value === "string" && allowed.has(value as Value)
+    ? (value as Value)
+    : invalid()
+}
+
+function compareInspectionUTF8(left: string, right: string) {
+  const encoder = new TextEncoder()
+  const leftBytes = encoder.encode(left)
+  const rightBytes = encoder.encode(right)
+  const length = Math.min(leftBytes.length, rightBytes.length)
+  for (let index = 0; index < length; index += 1) {
+    const difference = leftBytes[index] - rightBytes[index]
+    if (difference !== 0) {
+      return difference
+    }
+  }
+  return leftBytes.length - rightBytes.length
 }
 
 function normalizeWorkflowCompatibilitySummary(

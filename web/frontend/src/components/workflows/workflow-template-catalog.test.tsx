@@ -1,14 +1,36 @@
-import { render, screen, within } from "@testing-library/react"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { describe, expect, it, vi } from "vitest"
+import type { ReactElement } from "react"
+import { beforeEach, describe, expect, it, vi } from "vitest"
+
+import {
+  type WorkflowDefinitionInspection,
+  inspectWorkflowTemplate,
+} from "@/api/workflows"
 
 import { WorkflowTemplateCatalog } from "./workflow-template-catalog"
 
+vi.mock("@/api/workflows", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/api/workflows")>()
+  return {
+    ...actual,
+    inspectWorkflowTemplate: vi.fn(),
+  }
+})
+
 describe("WorkflowTemplateCatalog", () => {
+  beforeEach(() => {
+    vi.mocked(inspectWorkflowTemplate).mockReset()
+    vi.mocked(inspectWorkflowTemplate).mockImplementation((name) =>
+      Promise.resolve(templateInspection(name)),
+    )
+  })
+
   it("offers install, installed, modified, and blocked states safely", async () => {
     const onInstall = vi.fn()
     const user = userEvent.setup()
-    render(
+    renderCatalog(
       <WorkflowTemplateCatalog
         templates={[
           {
@@ -56,14 +78,14 @@ describe("WorkflowTemplateCatalog", () => {
     expect(
       within(
         screen.getByRole("article", { name: "Blocked Template template" }),
-      ).queryByRole("button"),
+      ).queryByRole("button", { name: /^(Install|Restore built-in)$/ }),
     ).not.toBeInTheDocument()
   })
 
   it("requires explicit confirmation before restoring a modified template", async () => {
     const onInstall = vi.fn()
     const user = userEvent.setup()
-    render(
+    renderCatalog(
       <WorkflowTemplateCatalog
         templates={[
           {
@@ -91,8 +113,9 @@ describe("WorkflowTemplateCatalog", () => {
     expect(onInstall).toHaveBeenCalledWith("code-review", true)
   })
 
-  it("keeps catalog states visible but disables mutations during active development", () => {
-    render(
+  it("keeps catalog states visible but disables mutations during active development", async () => {
+    const user = userEvent.setup()
+    renderCatalog(
       <WorkflowTemplateCatalog
         templates={[
           {
@@ -121,10 +144,37 @@ describe("WorkflowTemplateCatalog", () => {
     expect(
       screen.getByRole("button", { name: "Restore built-in" }),
     ).toBeDisabled()
+    expect(inspectWorkflowTemplate).not.toHaveBeenCalled()
+    const available = screen.getByRole("article", {
+      name: "Available Template template",
+    })
+    const modified = screen.getByRole("article", {
+      name: "Modified Template template",
+    })
+    const availableInspection = within(available).getByRole("button", {
+      name: "Built-in definition: available-template",
+    })
+    const modifiedInspection = within(modified).getByRole("button", {
+      name: "Built-in definition: modified-template",
+    })
+    expect(availableInspection).toBeEnabled()
+    expect(modifiedInspection).toBeEnabled()
+    await user.click(availableInspection)
+    await user.click(modifiedInspection)
+    await waitFor(() => {
+      expect(inspectWorkflowTemplate).toHaveBeenCalledWith(
+        "available-template",
+        expect.any(AbortSignal),
+      )
+      expect(inspectWorkflowTemplate).toHaveBeenCalledWith(
+        "modified-template",
+        expect.any(AbortSignal),
+      )
+    })
   })
 
   it("uses a bounded unavailable message", () => {
-    render(
+    renderCatalog(
       <WorkflowTemplateCatalog
         templates={[]}
         loading={false}
@@ -139,7 +189,7 @@ describe("WorkflowTemplateCatalog", () => {
   })
 
   it("shows operator guidance instead of retry advice for recovery conflicts", () => {
-    render(
+    renderCatalog(
       <WorkflowTemplateCatalog
         templates={[]}
         loading={false}
@@ -155,3 +205,41 @@ describe("WorkflowTemplateCatalog", () => {
     expect(screen.getByRole("alert")).not.toHaveTextContent("Refresh")
   })
 })
+
+function renderCatalog(element: ReactElement) {
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: Number.POSITIVE_INFINITY },
+    },
+  })
+  return render(
+    <QueryClientProvider client={client}>{element}</QueryClientProvider>,
+  )
+}
+
+function templateInspection(name: string): WorkflowDefinitionInspection {
+  return {
+    source: { kind: "template", template_name: name },
+    revision: `revision:${name}`,
+    complete: true,
+    validation: {
+      valid: true,
+      issue_count: 0,
+      issues: [],
+      truncated: false,
+    },
+    triggers: {
+      manual: { present: false, projected: true },
+      schedule: { present: false, projected: true },
+      channel_message: { present: false, projected: true },
+      command: { present: false, projected: true },
+      runtime_event: { present: false, projected: true },
+      event: { present: false, projected: true },
+      workflow_call: { present: false, projected: true },
+    },
+    jobs: [],
+    dependencies: [],
+    effects: [],
+    limits: [],
+  }
+}

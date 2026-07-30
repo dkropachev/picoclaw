@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   WorkflowAPIError,
+  type WorkflowDefinitionInspection,
   type WorkflowDependencyCheckResponse,
   type WorkflowRun,
 } from "@/api/workflows"
@@ -24,10 +25,12 @@ const workflowMocks = vi.hoisted(() => ({
   getWorkflowRun: vi.fn(),
   getWorkflowRunEvents: vi.fn(),
   getWorkflowRunGraph: vi.fn(),
+  inspectPublishedWorkflowDefinition: vi.fn(),
   listWorkflowRuns: vi.fn(),
   listWorkflowTemplates: vi.fn(),
   listWorkflows: vi.fn(),
   retryWorkflowRun: vi.fn(),
+  reloadWorkflows: vi.fn(),
   runWorkflow: vi.fn(),
 }))
 
@@ -120,6 +123,14 @@ describe("WorkflowsPage lifecycle controls", () => {
       nodes: [],
       edges: [],
     })
+    workflowMocks.inspectPublishedWorkflowDefinition.mockImplementation(
+      (ref: string) => Promise.resolve(definitionInspection(ref)),
+    )
+    workflowMocks.reloadWorkflows.mockResolvedValue({
+      reloaded_at: "2026-07-29T12:00:00Z",
+      workflows: [],
+      errors: [],
+    })
     workflowMocks.checkWorkflowDependencies.mockImplementation(
       ({ ref }: { ref: string }) =>
         Promise.resolve(
@@ -182,6 +193,26 @@ describe("WorkflowsPage lifecycle controls", () => {
       { ref: retryWorkflowRef },
       expect.any(AbortSignal),
     )
+  })
+
+  it("inspects the selected definition and refetches it after reload", async () => {
+    const user = userEvent.setup()
+    renderWorkflowsPage()
+
+    expect(
+      await screen.findByTitle("inspection:workflows/manual.yml"),
+    ).toBeInTheDocument()
+    expect(
+      workflowMocks.inspectPublishedWorkflowDefinition,
+    ).toHaveBeenCalledWith(runWorkflowRef, expect.any(AbortSignal))
+
+    await user.click(screen.getByRole("button", { name: "Reload" }))
+    await waitFor(() => {
+      expect(workflowMocks.reloadWorkflows).toHaveBeenCalledTimes(1)
+      expect(
+        workflowMocks.inspectPublishedWorkflowDefinition.mock.calls.length,
+      ).toBeGreaterThan(1)
+    })
   })
 
   it("keeps run and retry forms while exact dependency refetches fail closed", async () => {
@@ -330,4 +361,31 @@ function deferred<T>() {
     reject = rejectPromise
   })
   return { promise, resolve, reject }
+}
+
+function definitionInspection(ref: string): WorkflowDefinitionInspection {
+  return {
+    source: { kind: "published", ref },
+    revision: `inspection:${ref}`,
+    complete: true,
+    validation: {
+      valid: true,
+      issue_count: 0,
+      issues: [],
+      truncated: false,
+    },
+    triggers: {
+      manual: { present: true, projected: true, value: {} },
+      schedule: { present: false, projected: true },
+      channel_message: { present: false, projected: true },
+      command: { present: false, projected: true },
+      runtime_event: { present: false, projected: true },
+      event: { present: false, projected: true },
+      workflow_call: { present: false, projected: true },
+    },
+    jobs: [],
+    dependencies: [],
+    effects: [],
+    limits: [],
+  }
 }
