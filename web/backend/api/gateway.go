@@ -434,6 +434,9 @@ func computeConfigSignature(cfg *config.Config) string {
 		return ""
 	}
 	var parts []string
+	if agentSignature := computeAgentConfigSignature(cfg); agentSignature != "" {
+		parts = append(parts, "agents:"+agentSignature)
+	}
 	defaultModel := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
 	if defaultModel != "" {
 		parts = append(parts, "model:"+defaultModel)
@@ -529,6 +532,18 @@ func computeConfigSignature(cfg *config.Config) string {
 		parts = append(parts, "event_ingress:"+eventIngressSignature)
 	}
 	return strings.Join(parts, ";")
+}
+
+func computeAgentConfigSignature(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	encoded, err := json.Marshal(canonicalizeAgentSignatureValue(reflect.ValueOf(cfg.Agents)))
+	if err != nil {
+		return "<invalid>"
+	}
+	digest := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", digest)
 }
 
 func computeWorkflowRuntimeSignature(cfg *config.Config) string {
@@ -933,6 +948,17 @@ func normalizeRawJSON(raw config.RawNode) json.RawMessage {
 }
 
 func canonicalizeSignatureValue(value reflect.Value) any {
+	return canonicalizeSignatureValueWithOptions(value, false)
+}
+
+func canonicalizeAgentSignatureValue(value reflect.Value) any {
+	return canonicalizeSignatureValueWithOptions(value, true)
+}
+
+func canonicalizeSignatureValueWithOptions(
+	value reflect.Value,
+	preserveNilCollections bool,
+) any {
 	if !value.IsValid() {
 		return nil
 	}
@@ -961,7 +987,10 @@ func canonicalizeSignatureValue(value reflect.Value) any {
 		if value.IsNil() {
 			return nil
 		}
-		return canonicalizeSignatureValue(value.Elem())
+		return canonicalizeSignatureValueWithOptions(
+			value.Elem(),
+			preserveNilCollections,
+		)
 	case reflect.Struct:
 		result := make(map[string]any)
 		valueType := value.Type()
@@ -983,24 +1012,49 @@ func canonicalizeSignatureValue(value reflect.Value) any {
 					name = tag
 				}
 			}
-			result[name] = canonicalizeSignatureValue(value.Field(i))
+			result[name] = canonicalizeSignatureValueWithOptions(
+				value.Field(i),
+				preserveNilCollections,
+			)
 		}
 		return result
-	case reflect.Slice, reflect.Array:
+	case reflect.Slice:
+		if preserveNilCollections && value.IsNil() {
+			return nil
+		}
 		length := value.Len()
 		result := make([]any, 0, length)
 		for i := 0; i < length; i++ {
-			result = append(result, canonicalizeSignatureValue(value.Index(i)))
+			result = append(result, canonicalizeSignatureValueWithOptions(
+				value.Index(i),
+				preserveNilCollections,
+			))
+		}
+		return result
+	case reflect.Array:
+		length := value.Len()
+		result := make([]any, 0, length)
+		for i := 0; i < length; i++ {
+			result = append(result, canonicalizeSignatureValueWithOptions(
+				value.Index(i),
+				preserveNilCollections,
+			))
 		}
 		return result
 	case reflect.Map:
+		if preserveNilCollections && value.IsNil() {
+			return nil
+		}
 		if value.Type().Key().Kind() != reflect.String {
 			return value.Interface()
 		}
 		result := make(map[string]any, value.Len())
 		iter := value.MapRange()
 		for iter.Next() {
-			result[iter.Key().String()] = canonicalizeSignatureValue(iter.Value())
+			result[iter.Key().String()] = canonicalizeSignatureValueWithOptions(
+				iter.Value(),
+				preserveNilCollections,
+			)
 		}
 		return result
 	default:

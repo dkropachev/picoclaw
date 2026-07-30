@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1318,6 +1319,161 @@ func TestConfigSignatureHashesDeltaChatPassword(t *testing.T) {
 	}
 }
 
+func TestConfigSignatureTracksFullOrderedAgentConfiguration(t *testing.T) {
+	newConfig := func() *config.Config {
+		cfg := config.DefaultConfig()
+		cfg.Agents.List = []config.AgentConfig{
+			{
+				ID:      "main",
+				Default: true,
+				Model: &config.AgentModelConfig{
+					Primary:   "primary-model",
+					Fallbacks: nil,
+				},
+				Skills: nil,
+				Subagents: &config.SubagentsConfig{
+					AllowAgents: []string{"worker"},
+				},
+			},
+			{ID: "worker", Name: "Worker"},
+		}
+		cfg.Agents.Dispatch = &config.DispatchConfig{
+			Rules: []config.DispatchRule{
+				{
+					Name:  "github",
+					Agent: "worker",
+					When:  config.DispatchSelector{Channel: "github"},
+				},
+			},
+		}
+		return cfg
+	}
+
+	baseline := computeConfigSignature(newConfig())
+	tests := []struct {
+		name   string
+		mutate func(*config.Config)
+	}{
+		{
+			name: "configured order",
+			mutate: func(cfg *config.Config) {
+				cfg.Agents.List[0], cfg.Agents.List[1] = cfg.Agents.List[1], cfg.Agents.List[0]
+			},
+		},
+		{
+			name: "agent fields",
+			mutate: func(cfg *config.Config) {
+				cfg.Agents.List[1].Name = "Renamed worker"
+			},
+		},
+		{
+			name: "agent defaults",
+			mutate: func(cfg *config.Config) {
+				cfg.Agents.Defaults.MaxTokens++
+			},
+		},
+		{
+			name: "dispatch",
+			mutate: func(cfg *config.Config) {
+				cfg.Agents.Dispatch.Rules[0].Agent = "main"
+			},
+		},
+		{
+			name: "nil versus empty model fallbacks",
+			mutate: func(cfg *config.Config) {
+				cfg.Agents.List[0].Model.Fallbacks = []string{}
+			},
+		},
+		{
+			name: "nil versus empty skills",
+			mutate: func(cfg *config.Config) {
+				cfg.Agents.List[0].Skills = []string{}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newConfig()
+			tt.mutate(cfg)
+			if got := computeConfigSignature(cfg); got == baseline {
+				t.Fatalf("%s must change the config signature", tt.name)
+			}
+		})
+	}
+}
+
+func TestSignatureCanonicalizerKeepsLegacyNilCollectionSemanticsOutsideAgents(
+	t *testing.T,
+) {
+	type payload struct {
+		Items  []string          `json:"items"`
+		Labels map[string]string `json:"labels"`
+	}
+
+	nilCollections, err := json.Marshal(canonicalizeSignatureValue(
+		reflect.ValueOf(payload{}),
+	))
+	if err != nil {
+		t.Fatalf("marshal nil collections: %v", err)
+	}
+	emptyCollections, err := json.Marshal(canonicalizeSignatureValue(
+		reflect.ValueOf(payload{
+			Items:  []string{},
+			Labels: map[string]string{},
+		}),
+	))
+	if err != nil {
+		t.Fatalf("marshal empty collections: %v", err)
+	}
+	if string(nilCollections) != string(emptyCollections) {
+		t.Fatalf(
+			"non-agent nil collections = %s, empty collections = %s; want legacy-equivalent signatures",
+			nilCollections,
+			emptyCollections,
+		)
+	}
+
+	nilAgentCollections, err := json.Marshal(canonicalizeAgentSignatureValue(
+		reflect.ValueOf(payload{}),
+	))
+	if err != nil {
+		t.Fatalf("marshal nil agent collections: %v", err)
+	}
+	emptyAgentCollections, err := json.Marshal(canonicalizeAgentSignatureValue(
+		reflect.ValueOf(payload{
+			Items:  []string{},
+			Labels: map[string]string{},
+		}),
+	))
+	if err != nil {
+		t.Fatalf("marshal empty agent collections: %v", err)
+	}
+	if string(nilAgentCollections) == string(emptyAgentCollections) {
+		t.Fatalf(
+			"agent nil and empty collections must remain distinct: %s",
+			nilAgentCollections,
+		)
+	}
+}
+
+func TestConfigSignatureKeepsNilAndEmptyEquivalentOutsideAgents(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Web.Enabled = true
+	cfg.Tools.Web.PrivateHostWhitelist = nil
+	cfg.Tools.MCP.Enabled = true
+	cfg.Tools.MCP.Servers = nil
+	nilCollections := computeConfigSignature(cfg)
+
+	cfg.Tools.Web.PrivateHostWhitelist = config.FlexibleStringSlice{}
+	cfg.Tools.MCP.Servers = map[string]config.MCPServerConfig{}
+	emptyCollections := computeConfigSignature(cfg)
+
+	if nilCollections != emptyCollections {
+		t.Fatal("non-agent nil and empty collections must retain legacy-equivalent signatures")
+	}
+}
+
 func TestConfigSignatureTracksOnlyActiveEventIngressRuntime(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
@@ -1523,8 +1679,8 @@ func TestConfigSignatureTracksActiveEventWorkflowWorkspace(t *testing.T) {
 	cfg.Workflows.Enabled = false
 	disabledBefore := computeConfigSignature(cfg)
 	cfg.Agents.Defaults.Workspace = filepath.Join(t.TempDir(), "workspace-three")
-	if got := computeConfigSignature(cfg); got != disabledBefore {
-		t.Fatal("workflow workspace changes should be inert when event dispatch is disabled")
+	if got := computeConfigSignature(cfg); got == disabledBefore {
+		t.Fatal("agent workspace changes should require restart when event dispatch is disabled")
 	}
 }
 
@@ -2378,7 +2534,7 @@ func TestGatewayStatusRequiresRestartAfterWebSearchConfigChange(t *testing.T) {
 	}
 }
 
-func TestGatewayStatusNoRestartRequiredForNonSensitiveChanges(t *testing.T) {
+func TestGatewayStatusRequiresRestartAfterAgentRuntimeChange(t *testing.T) {
 	resetGatewayTestState(t)
 
 	configPath := filepath.Join(t.TempDir(), "config.json")
@@ -2437,8 +2593,8 @@ func TestGatewayStatusNoRestartRequiredForNonSensitiveChanges(t *testing.T) {
 	if got := body["gateway_status"]; got != "running" {
 		t.Fatalf("gateway_status = %#v, want %q", got, "running")
 	}
-	if got := body["gateway_restart_required"]; got != false {
-		t.Fatalf("gateway_restart_required = %#v, want false", got)
+	if got := body["gateway_restart_required"]; got != true {
+		t.Fatalf("gateway_restart_required = %#v, want true", got)
 	}
 }
 

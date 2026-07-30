@@ -22,6 +22,7 @@ behavior:
 | --- | --- |
 | Chat page, Pico websocket UI, channel pages | `docs/features/chat-channels.md` |
 | Tool configuration and tool library pages | `docs/features/tool-execution.md` |
+| Persistent agent policy, default selection, model fallback, skills, and delegation management | `docs/features/agent-conversations.md` |
 | Session logs and transcript history pages | `docs/features/session-memory.md` |
 | Model, config, OAuth, auth, startup, update, and app shell management | `docs/features/launcher-management.md` |
 | Durable event inspection, payload reveal, dispatch history, and replay | `docs/features/event-automation.md` |

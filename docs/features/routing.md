@@ -28,6 +28,7 @@ message complexity.
 | `FR-ROUTE-005` | MUST | Identity links canonicalize sender matching and session identity consistently. | Same user identities should route and persist together. |
 | `FR-ROUTE-006` | MUST | Model routing computes structural complexity and selects light model below threshold when enabled and available. | Cost-saving model selection must be predictable. |
 | `FR-ROUTE-007` | SHOULD | Code blocks, attachments, long prompts, tool-call-heavy history, and deep conversations increase complexity. | Complex turns should avoid weak models. |
+| `FR-ROUTE-008` | MUST | Agent management preserves configured order, accepts only unique canonical IDs, resolves the default as explicit default then first configured agent then implicit `main`, and validates explicit delegation targets against the post-mutation agent set. Wildcard delegation means all other agents and never permits self-targeting. Deletion is blocked only by direct dispatch targets or another agent's explicit delegation allowlist; wildcard delegation is not a blocker. | Browser-managed policy must remain targetable and deterministic without treating dynamic workflow references or wildcard delegation as permanent ownership or allowing recursive self-spawn. |
 
 ## Data And State Model
 
@@ -47,6 +48,7 @@ Owns: TEST pkg/routing/*
 | --- | --- | --- | --- |
 | Config | `agents.dispatch.*`, `session.identity_links`, `agents.defaults.routing.*`, `routing.*` | Dispatch, session handoff, and model routing policy. | `FR-ROUTE-001` through `FR-ROUTE-007` |
 | Runtime | Route resolver and router | Agent dispatch and model candidate selection. | `FR-ROUTE-001`, `FR-ROUTE-006` |
+| HTTP/UI | Agent management API and UI | Preserve canonical target IDs, configured order, default priority, delegation references, and direct-reference deletion blockers. | `FR-ROUTE-003`, `FR-ROUTE-008` |
 
 ## Algorithms And Ordering
 
@@ -75,6 +77,7 @@ candidates.
 | --- | --- |
 | `FR-ROUTE-001`, `FR-ROUTE-002`, `FR-ROUTE-003`, `FR-ROUTE-004`, `FR-ROUTE-005` | [pkg/routing/route_test.go](../../pkg/routing/route_test.go), [pkg/routing/agent_id_test.go](../../pkg/routing/agent_id_test.go), [pkg/agent/workflow_authoring_test.go](../../pkg/agent/workflow_authoring_test.go), [docs/architecture/routing-system.md](../architecture/routing-system.md) |
 | `FR-ROUTE-006`, `FR-ROUTE-007` | [pkg/routing/router_test.go](../../pkg/routing/router_test.go), [pkg/routing/features.go](../../pkg/routing/features.go) |
+| `FR-ROUTE-008` | [web/backend/api/agents_test.go](../../web/backend/api/agents_test.go), [pkg/agent/registry_test.go](../../pkg/agent/registry_test.go), [pkg/agent/workflow_authoring_test.go](../../pkg/agent/workflow_authoring_test.go), [pkg/tools/spawn_test.go](../../pkg/tools/spawn_test.go) |
 
 ## Implementation Anchors
 

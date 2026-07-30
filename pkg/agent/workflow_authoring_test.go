@@ -182,6 +182,39 @@ func TestWorkflowAuthoringCapabilitiesUsesRegistryKeysAndSanitizesShapes(t *test
 	}
 }
 
+func TestWorkflowAuthoringCapabilitiesUsesConfiguredDefaultAheadOfMain(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.List = []config.AgentConfig{
+		{ID: "main"},
+		{ID: "beta", Default: true},
+	}
+	cfg.Tools.MCP.Enabled = false
+	loop := workflowDependencyTestLoop(cfg)
+
+	catalog, err := loop.WorkflowAuthoringCapabilities(context.Background())
+	if err != nil {
+		t.Fatalf("WorkflowAuthoringCapabilities() error = %v", err)
+	}
+	if len(catalog.Agents) != 2 {
+		t.Fatalf("agents = %#v, want main and beta", catalog.Agents)
+	}
+	for _, capability := range catalog.Agents {
+		switch capability.ID {
+		case "beta":
+			if !capability.IsDefault {
+				t.Fatalf("beta capability = %#v, want configured default", capability)
+			}
+		case "main":
+			if capability.IsDefault {
+				t.Fatalf("main capability = %#v, must not override configured default", capability)
+			}
+		default:
+			t.Fatalf("unexpected agent capability: %#v", capability)
+		}
+	}
+}
+
 func containsWorkflowAuthoringTestString(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {

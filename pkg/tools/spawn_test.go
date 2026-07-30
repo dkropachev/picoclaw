@@ -99,6 +99,33 @@ func TestSpawnTool_Execute_ValidTask(t *testing.T) {
 	}
 }
 
+func TestSpawnTool_Execute_RejectsTargetDeniedByAgentPolicy(t *testing.T) {
+	provider := &MockLLMProvider{}
+	manager := NewSubagentManager(provider, "test-model", "/tmp/test")
+	tool := NewSpawnTool(manager)
+	spawner := &mockSpawner{done: make(chan struct{})}
+	tool.SetSpawner(spawner)
+	tool.SetAllowlistChecker(func(targetAgentID string) bool {
+		return targetAgentID != "parent"
+	})
+
+	result := tool.Execute(
+		context.Background(),
+		map[string]any{"task": "recurse", "agent_id": "parent"},
+	)
+	if result == nil || !result.IsError {
+		t.Fatalf("SpawnTool result = %#v, want policy rejection", result)
+	}
+	if !strings.Contains(result.ForLLM, "not allowed to spawn agent 'parent'") {
+		t.Fatalf("SpawnTool error = %q, want target policy rejection", result.ForLLM)
+	}
+	select {
+	case <-spawner.done:
+		t.Fatal("denied target reached the subturn spawner")
+	default:
+	}
+}
+
 func TestSpawnTool_Execute_NilManager(t *testing.T) {
 	tool := NewSpawnTool(nil)
 

@@ -101,7 +101,7 @@ func TestAgentRegistry_GetAgent_Normalize(t *testing.T) {
 
 func TestAgentRegistry_GetDefaultAgent(t *testing.T) {
 	cfg := testCfg([]config.AgentConfig{
-		{ID: "alpha"},
+		{ID: "main"},
 		{ID: "beta", Default: true},
 	})
 	registry := NewAgentRegistry(cfg, &mockRegistryProvider{})
@@ -110,6 +110,25 @@ func TestAgentRegistry_GetDefaultAgent(t *testing.T) {
 	agent := registry.GetDefaultAgent()
 	if agent == nil {
 		t.Fatal("expected a default agent")
+	}
+	if agent.ID != "beta" {
+		t.Fatalf("default agent = %q, want configured default %q", agent.ID, "beta")
+	}
+}
+
+func TestAgentRegistry_GetDefaultAgentPrefersFirstConfiguredAgentOverMain(t *testing.T) {
+	cfg := testCfg([]config.AgentConfig{
+		{ID: "beta"},
+		{ID: "main"},
+	})
+	registry := NewAgentRegistry(cfg, &mockRegistryProvider{})
+
+	agent := registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("expected a default agent")
+	}
+	if agent.ID != "beta" {
+		t.Fatalf("default agent = %q, want first configured agent %q", agent.ID, "beta")
 	}
 }
 
@@ -160,6 +179,9 @@ func TestAgentRegistry_CanSpawnSubagent_Wildcard(t *testing.T) {
 	}
 	if !registry.CanSpawnSubagent("admin", "nonexistent") {
 		t.Error("expected wildcard to allow spawning even nonexistent agents")
+	}
+	if registry.CanSpawnSubagent("admin", "admin") {
+		t.Error("expected wildcard delegation to exclude the parent agent itself")
 	}
 }
 

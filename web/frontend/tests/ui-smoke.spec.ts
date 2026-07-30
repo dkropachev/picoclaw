@@ -2,6 +2,11 @@ import AxeBuilder from "@axe-core/playwright"
 import { type Page, type Route, expect, test } from "@playwright/test"
 
 import type {
+  AgentInfo,
+  AgentMutationInput,
+  AgentsResponse,
+} from "../src/api/agents"
+import type {
   MCPConfigResponse,
   MCPServer,
   MCPServerInput,
@@ -14,6 +19,7 @@ const smokeRoutes = [
   "/events",
   "/event-sources",
   "/logs",
+  "/agent/agents",
   "/agent/git-workspaces",
   "/agent/mcp",
   "/agent/tools",
@@ -931,6 +937,11 @@ const channelCatalogResponse = {
 }
 
 interface MockLauncherApiOptions {
+  agentRequests?: Array<{
+    method: string
+    path: string
+    body: unknown
+  }>
   completeDraftViaPolling?: boolean
   codexAccountLimits?: unknown
   fetchModelEmptyCredentials?: string[]
@@ -938,6 +949,7 @@ interface MockLauncherApiOptions {
   modelResponse?: unknown
   nullableWorkflowPayloads?: boolean
   oauthProviders?: unknown[]
+  statefulAgents?: boolean
   statefulMCP?: boolean
   mcpRequests?: Array<{
     method: string
@@ -992,6 +1004,55 @@ async function mockLauncherApis(
   let reviseRequestCount = 0
   let currentMCPResponse = structuredClone(mcpResponse)
   let currentCancelableWorkflowRun = structuredClone(cancelableWorkflowRun)
+  let currentAgentRevision = 1
+  let currentDefaultAgentID = "main"
+  let currentAgents: AgentInfo[] = [
+    {
+      id: "main",
+      name: "Main",
+      workspace: "",
+      model: null,
+      skills: null,
+      subagents: null,
+      is_default: true,
+      default_configured: options.statefulAgents === true,
+      implicit: options.statefulAgents !== true,
+    },
+    {
+      id: "reviewer",
+      name: "Reviewer",
+      workspace: "/workspace/reviewer",
+      model: {
+        primary: "openai/gpt-4o",
+        fallbacks: [],
+      },
+      skills: ["review-helper"],
+      subagents: { allow_agents: ["main"] },
+      is_default: false,
+      default_configured: false,
+      implicit: false,
+    },
+  ]
+
+  const agentEffects = {
+    launcher_effect: "applied",
+    catalog_effect: "applied",
+    gateway_effect: "applied",
+  } as const
+
+  function currentAgentsResponse(): AgentsResponse {
+    return {
+      agents: structuredClone(currentAgents),
+      default_agent_id: currentDefaultAgentID,
+      config_revision: `agent-revision-${currentAgentRevision}`,
+      effects: agentEffects,
+    }
+  }
+
+  function advanceAgentsRevision() {
+    currentAgentRevision += 1
+    return currentAgentsResponse()
+  }
 
   function mcpServerFromInput(
     input: MCPServerInput,
@@ -1174,6 +1235,101 @@ async function mockLauncherApis(
       const url = new URL(request.url())
       const path = url.pathname
       const method = request.method()
+
+      if (options.statefulAgents && path.startsWith("/api/agents")) {
+        const rawBody = request.postData()
+        const body = rawBody
+          ? (request.postDataJSON() as {
+              expected_config_revision?: string
+              agent?: AgentMutationInput
+            })
+          : undefined
+        if (method !== "GET") {
+          options.agentRequests?.push({ method, path, body })
+        }
+
+        if (method === "GET" && path === "/api/agents") {
+          return json(route, currentAgentsResponse())
+        }
+
+        const defaultMatch = path.match(/^\/api\/agents\/([^/]+)\/default$/)
+        const itemMatch = path.match(/^\/api\/agents\/([^/]+)$/)
+
+        if (method === "GET" && itemMatch) {
+          const id = decodeURIComponent(itemMatch[1])
+          const agent = currentAgents.find((candidate) => candidate.id === id)
+          if (agent == null) {
+            return json(route, { error: "agent_not_found" }, 404)
+          }
+          const collection = currentAgentsResponse()
+          return json(route, {
+            agent: structuredClone(agent),
+            default_agent_id: collection.default_agent_id,
+            config_revision: collection.config_revision,
+            effects: collection.effects,
+          })
+        }
+
+        if (
+          body?.expected_config_revision !==
+          currentAgentsResponse().config_revision
+        ) {
+          return json(route, { error: "config_revision_mismatch" }, 409)
+        }
+
+        if (method === "POST" && path === "/api/agents" && body.agent) {
+          currentAgents.push({
+            ...structuredClone(body.agent),
+            is_default: false,
+            default_configured: false,
+            implicit: false,
+          })
+          return json(route, advanceAgentsRevision(), 201)
+        }
+
+        if (method === "POST" && defaultMatch) {
+          const id = decodeURIComponent(defaultMatch[1])
+          currentDefaultAgentID = id
+          currentAgents = currentAgents.map((agent) => ({
+            ...agent,
+            is_default: agent.id === id,
+            default_configured: agent.id === id,
+          }))
+          return json(route, advanceAgentsRevision())
+        }
+
+        if (itemMatch) {
+          const id = decodeURIComponent(itemMatch[1])
+          const index = currentAgents.findIndex((agent) => agent.id === id)
+          if (index < 0) {
+            return json(route, { error: "agent_not_found" }, 404)
+          }
+          if (method === "PUT" && body.agent) {
+            const existing = currentAgents[index]
+            currentAgents[index] = {
+              ...structuredClone(body.agent),
+              is_default: existing.is_default,
+              default_configured: existing.default_configured,
+              implicit: false,
+            }
+            return json(route, advanceAgentsRevision())
+          }
+          if (method === "DELETE") {
+            currentAgents.splice(index, 1)
+            if (currentDefaultAgentID === id) {
+              currentDefaultAgentID = currentAgents[0]?.id ?? "main"
+              currentAgents = currentAgents.map((agent, agentIndex) => ({
+                ...agent,
+                is_default: agentIndex === 0,
+                default_configured: agentIndex === 0,
+              }))
+            }
+            return json(route, advanceAgentsRevision())
+          }
+        }
+
+        return json(route, { error: "unsupported_agent_request" }, 405)
+      }
 
       if (options.statefulMCP && path.startsWith("/api/mcp")) {
         const rawBody = request.postData()
@@ -2037,6 +2193,8 @@ async function mockLauncherApis(
           )
         case "/api/git-workspaces":
           return json(route, gitWorkspaceResponse)
+        case "/api/agents":
+          return json(route, currentAgentsResponse())
         case "/api/events":
           return json(route, { events: [eventResponse] })
         case "/api/events/dispatches":
@@ -2544,6 +2702,154 @@ for (const routePath of smokeRoutes) {
     expect(errors).toEqual([])
   })
 }
+
+test("agent management keeps configured policy editing safe on mobile", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 320, height: 720 })
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(page, "/agent/agents")
+
+  await expect(page.getByText("Reviewer", { exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Delete main" })).toBeDisabled()
+  await page.getByRole("button", { name: "Edit reviewer" }).click()
+
+  const sheet = page.getByRole("dialog", { name: "Edit agent" })
+  await expect(sheet).toBeVisible()
+  await expect(sheet).toContainText("Configured policy")
+  await expectElementFitsViewport(
+    page,
+    '[data-slot="sheet-content"]',
+    "agent editor sheet",
+  )
+  await sheet
+    .getByRole("textbox", { name: "Configured name" })
+    .fill("Review team")
+  await sheet.getByRole("button", { name: "Close" }).click()
+
+  const discard = page.getByRole("alertdialog", {
+    name: "Discard unsaved changes?",
+  })
+  await expect(discard).toBeVisible()
+  await discard.getByRole("button", { name: "Keep editing" }).click()
+  await expect(sheet).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("agent management completes a stateful policy lifecycle with exact revisions", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 })
+  const errors = collectPageErrors(page)
+  const agentRequests: NonNullable<MockLauncherApiOptions["agentRequests"]> = []
+  await gotoMockedRoute(page, "/agent/agents", {
+    statefulAgents: true,
+    agentRequests,
+  })
+
+  // Establish an in-app history entry, then verify browser Back uses the same
+  // discard confirmation as closing a dirty editor.
+  await page.getByRole("link", { name: "Models", exact: true }).click()
+  await expect(page).toHaveURL(/\/models$/)
+  await page.getByRole("link", { name: "Agents", exact: true }).click()
+  await expect(page).toHaveURL(/\/agent\/agents$/)
+
+  await page.getByRole("button", { name: "Edit reviewer" }).click()
+  const reviewerSheet = page.getByRole("dialog", { name: "Edit agent" })
+  await reviewerSheet
+    .getByRole("textbox", { name: "Configured name" })
+    .fill("Review team")
+  await page.evaluate(() => window.history.back())
+
+  const navigationDiscard = page.getByRole("alertdialog", {
+    name: "Discard unsaved changes?",
+  })
+  await expect(navigationDiscard).toBeVisible()
+  await navigationDiscard.getByRole("button", { name: "Keep editing" }).click()
+  await expect(page).toHaveURL(/\/agent\/agents$/)
+  await reviewerSheet.getByRole("button", { name: "Cancel" }).click()
+  await page
+    .getByRole("alertdialog", { name: "Discard unsaved changes?" })
+    .getByRole("button", { name: "Discard changes" })
+    .click()
+  await expect(reviewerSheet).toBeHidden()
+
+  await page.getByRole("button", { name: "Create agent" }).click()
+  const createSheet = page.getByRole("dialog", { name: "Create agent" })
+  await createSheet.getByRole("textbox", { name: "Agent ID" }).fill("triager")
+  await createSheet
+    .getByRole("textbox", { name: "Configured name" })
+    .fill("Triager")
+  await createSheet.getByRole("button", { name: "Save" }).click()
+
+  const triagerCard = page.locator('[data-agent-id="triager"]')
+  await expect(triagerCard).toBeVisible()
+  await triagerCard.getByRole("button", { name: "Edit triager" }).click()
+
+  const editSheet = page.getByRole("dialog", { name: "Edit agent" })
+  await editSheet.getByRole("combobox", { name: "Fallback models" }).click()
+  await page.getByRole("option", { name: "None", exact: true }).click()
+  await editSheet.getByRole("button", { name: "Save" }).click()
+  await expect(triagerCard).toContainText("None")
+
+  await triagerCard.getByRole("button", { name: "Set default" }).click()
+  await expect(triagerCard.getByText("Default", { exact: true })).toBeVisible()
+
+  await triagerCard.getByRole("button", { name: "Delete triager" }).click()
+  const deleteDialog = page.getByRole("alertdialog", {
+    name: "Delete agent?",
+  })
+  await deleteDialog
+    .getByRole("button", { name: "Delete agent", exact: true })
+    .click()
+  await expect(triagerCard).toHaveCount(0)
+
+  expect(agentRequests).toEqual([
+    {
+      method: "POST",
+      path: "/api/agents",
+      body: {
+        expected_config_revision: "agent-revision-1",
+        agent: {
+          id: "triager",
+          name: "Triager",
+          workspace: "",
+          model: null,
+          skills: null,
+          subagents: null,
+        },
+      },
+    },
+    {
+      method: "PUT",
+      path: "/api/agents/triager",
+      body: {
+        expected_config_revision: "agent-revision-2",
+        agent: {
+          id: "triager",
+          name: "Triager",
+          workspace: "",
+          model: { primary: "", fallbacks: [] },
+          skills: null,
+          subagents: null,
+        },
+      },
+    },
+    {
+      method: "POST",
+      path: "/api/agents/triager/default",
+      body: { expected_config_revision: "agent-revision-3" },
+    },
+    {
+      method: "DELETE",
+      path: "/api/agents/triager",
+      body: { expected_config_revision: "agent-revision-4" },
+    },
+  ])
+  expect(errors).toEqual([])
+})
 
 test("events payload stays opt-in and replay remains deliberate", async ({
   page,
