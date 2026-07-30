@@ -193,11 +193,14 @@ func frontmatterDeclaresField(definition AgentContextDefinition, field string) b
 }
 
 func frontmatterParseFailed(definition AgentContextDefinition) bool {
+	if strings.TrimSpace(definition.DefinitionErr) != "" {
+		return true
+	}
 	if definition.Agent == nil {
 		return false
 	}
-	if strings.TrimSpace(definition.Agent.RawFrontmatter) == "" {
-		return false
+	if strings.TrimSpace(definition.Agent.FrontmatterErr) != "" {
+		return true
 	}
-	return strings.TrimSpace(definition.Agent.FrontmatterErr) != ""
+	return false
 }

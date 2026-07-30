@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import type { ComponentProps } from "react"
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
@@ -460,6 +461,19 @@ describe("AgentsPage", () => {
     expect(deleteAgent).toHaveBeenCalledWith("reviewer", "revision-1")
     expect(getAgents).toHaveBeenCalledTimes(1)
   })
+
+  it("shows not-found for an exact valid deep-linked ID absent from the catalog", async () => {
+    vi.mocked(getAgents).mockResolvedValue(collection([agent()], "revision-1"))
+
+    renderPage({
+      search: { agent: "unknown-valid", tab: "overview" },
+    })
+
+    expect(
+      await screen.findByRole("heading", { name: "Agent not found" }),
+    ).toBeVisible()
+    expect(screen.getAllByText("unknown-valid")).toHaveLength(2)
+  })
 })
 
 function cardOrder(container: HTMLElement): Array<string | null> {
@@ -468,7 +482,7 @@ function cardOrder(container: HTMLElement): Array<string | null> {
   )
 }
 
-function renderPage() {
+function renderPage(props: ComponentProps<typeof AgentsPage> = {}) {
   const client = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
@@ -478,7 +492,7 @@ function renderPage() {
   return render(
     <QueryClientProvider client={client}>
       <SidebarProvider>
-        <AgentsPage />
+        <AgentsPage {...props} />
       </SidebarProvider>
     </QueryClientProvider>,
   )

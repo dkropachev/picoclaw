@@ -197,6 +197,90 @@ func TestListSkillsMetadataNameDedup(t *testing.T) {
 	assert.Equal(t, "workspace", skills[0].Source)
 }
 
+func TestListSkillsMetadataNameDedupIsCaseInsensitive(t *testing.T) {
+	tmp := t.TempDir()
+	ws := filepath.Join(tmp, "workspace")
+	global := filepath.Join(tmp, "global")
+
+	createSkillDir(
+		t,
+		filepath.Join(ws, "skills"),
+		"workspace-weather",
+		"Weather",
+		"workspace version",
+	)
+	createSkillDir(
+		t,
+		global,
+		"global-weather",
+		"weather",
+		"global version",
+	)
+
+	sl := NewSkillsLoader(ws, global, "")
+	skills := sl.ListSkills()
+
+	require.Len(t, skills, 1)
+	assert.Equal(t, "Weather", skills[0].Name)
+	assert.Equal(t, "workspace", skills[0].Source)
+	assert.Equal(t, "workspace version", skills[0].Description)
+}
+
+func TestLoadSkillResolvesCanonicalMetadataNameToDiscoveredPath(t *testing.T) {
+	tmp := t.TempDir()
+	ws := filepath.Join(tmp, "workspace")
+	global := filepath.Join(tmp, "global")
+
+	createSkillDir(
+		t,
+		filepath.Join(ws, "skills"),
+		"directory-foo",
+		"Bar",
+		"workspace version",
+	)
+	createSkillDir(
+		t,
+		global,
+		"directory-bar",
+		"bar",
+		"global version",
+	)
+
+	sl := NewSkillsLoader(ws, global, "")
+	content, ok := sl.LoadSkill(" bar ")
+
+	require.True(t, ok)
+	assert.Equal(t, "# Bar", content)
+	_, directoryNameLoaded := sl.LoadSkill("directory-foo")
+	assert.False(t, directoryNameLoaded)
+	assert.Contains(t, sl.LoadSkillsForContext([]string{"BAR"}), "# Bar")
+}
+
+func TestLoadSkillsForContextDiscoversMetadataOnce(t *testing.T) {
+	tmp := t.TempDir()
+	ws := filepath.Join(tmp, "workspace")
+	skillsRoot := filepath.Join(ws, "skills")
+	createSkillDir(t, skillsRoot, "one-dir", "one", "first skill")
+	createSkillDir(t, skillsRoot, "two-dir", "two", "second skill")
+	createSkillDir(t, skillsRoot, "three-dir", "three", "third skill")
+
+	sl := NewSkillsLoader(ws, "", "")
+	metadataReads := make(map[string]int)
+	sl.readMetadataFile = func(path string) ([]byte, error) {
+		metadataReads[path]++
+		return os.ReadFile(path)
+	}
+
+	content := sl.LoadSkillsForContext([]string{"one", "TWO"})
+
+	assert.Contains(t, content, "# one")
+	assert.Contains(t, content, "# two")
+	require.Len(t, metadataReads, 3)
+	for path, count := range metadataReads {
+		assert.Equal(t, 1, count, "metadata reads for %s", path)
+	}
+}
+
 func TestListSkillsMultipleDistinctSkills(t *testing.T) {
 	tmp := t.TempDir()
 	ws := filepath.Join(tmp, "workspace")

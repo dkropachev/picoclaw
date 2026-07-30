@@ -106,6 +106,73 @@ func TestLoadAgentDefinitionFallsBackToLegacyAgentsMarkdown(t *testing.T) {
 	}
 }
 
+func TestLoadAgentDefinitionDoesNotLoadOrBypassUnsafeCurrentFile(t *testing.T) {
+	t.Run("oversized", func(t *testing.T) {
+		workspace := t.TempDir()
+		if err := os.WriteFile(
+			filepath.Join(workspace, string(AgentDefinitionSourceAgent)),
+			make([]byte, AgentDefinitionMaxBytes+1),
+			0o600,
+		); err != nil {
+			t.Fatalf("WriteFile(oversized) error = %v", err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(workspace, string(AgentDefinitionSourceAgents)),
+			[]byte("legacy must not bypass unsafe current"),
+			0o600,
+		); err != nil {
+			t.Fatalf("WriteFile(legacy) error = %v", err)
+		}
+		definition := loadAgentDefinition(workspace)
+		if definition.Source != AgentDefinitionSourceAgent ||
+			definition.Agent != nil ||
+			definition.DefinitionErr == "" {
+			t.Fatalf("unsafe current definition loaded: %#v", definition)
+		}
+		if tools := resolveAgentToolAllowlist(definition); tools == nil ||
+			len(tools) != 0 {
+			t.Fatalf("unsafe tool allowlist = %#v, want explicit empty", tools)
+		}
+		if servers := resolveAgentMCPServerAllowlist(definition); servers == nil ||
+			len(servers) != 0 {
+			t.Fatalf("unsafe MCP allowlist = %#v, want explicit empty", servers)
+		}
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		workspace := t.TempDir()
+		target := filepath.Join(t.TempDir(), "target.md")
+		if err := os.WriteFile(target, []byte("symlink prompt"), 0o600); err != nil {
+			t.Fatalf("WriteFile(target) error = %v", err)
+		}
+		path := filepath.Join(workspace, string(AgentDefinitionSourceAgent))
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("Symlink() unavailable: %v", err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(workspace, string(AgentDefinitionSourceAgents)),
+			[]byte("legacy must not bypass unsafe current"),
+			0o600,
+		); err != nil {
+			t.Fatalf("WriteFile(legacy) error = %v", err)
+		}
+		definition := loadAgentDefinition(workspace)
+		if definition.Source != AgentDefinitionSourceAgent ||
+			definition.Agent != nil ||
+			definition.DefinitionErr == "" {
+			t.Fatalf("unsafe current definition loaded: %#v", definition)
+		}
+		if tools := resolveAgentToolAllowlist(definition); tools == nil ||
+			len(tools) != 0 {
+			t.Fatalf("unsafe tool allowlist = %#v, want explicit empty", tools)
+		}
+		if servers := resolveAgentMCPServerAllowlist(definition); servers == nil ||
+			len(servers) != 0 {
+			t.Fatalf("unsafe MCP allowlist = %#v, want explicit empty", servers)
+		}
+	})
+}
+
 func TestLoadAgentDefinitionLoadsWorkspaceUserMarkdown(t *testing.T) {
 	tmpDir := setupWorkspace(t, map[string]string{
 		"AGENT.md": "# Agent\nStructured agent.",
@@ -198,6 +265,99 @@ Keep going.
 		len(definition.Agent.Frontmatter.MCPServers) != 0 ||
 		len(definition.Agent.Frontmatter.Fields) != 0 {
 		t.Fatalf("expected invalid frontmatter to decode as empty struct, got %+v", definition.Agent.Frontmatter)
+	}
+}
+
+func TestLoadAgentDefinitionMalformedClosedFrontmatterTasksFailClosed(t *testing.T) {
+	tests := map[string]string{
+		"syntax error": `---
+tools: [
+---
+# Tasks
+- must not become a runtime task
+`,
+		"typed decode error": `---
+tools: exec
+---
+# Tasks
+- must not become a runtime task
+`,
+	}
+	for name, content := range tests {
+		t.Run(name, func(t *testing.T) {
+			tmpDir := setupWorkspace(t, map[string]string{
+				"AGENT.md": content,
+			})
+			defer cleanupWorkspace(t, tmpDir)
+
+			definition := NewContextBuilder(tmpDir).LoadAgentDefinition()
+			if definition.Source != AgentDefinitionSourceAgent ||
+				definition.Agent == nil {
+				t.Fatalf("definition = %#v", definition)
+			}
+			if definition.Agent.FrontmatterErr == "" {
+				t.Fatal("malformed frontmatter was not marked invalid")
+			}
+			if len(definition.Agent.Tasks) != 0 {
+				t.Fatalf(
+					"malformed frontmatter tasks = %#v, want none",
+					definition.Agent.Tasks,
+				)
+			}
+		})
+	}
+}
+
+func TestLoadAgentDefinitionUnterminatedFrontmatterFailsClosed(t *testing.T) {
+	tmpDir := setupWorkspace(t, map[string]string{
+		"AGENT.md": `---
+tools: [read_file]
+mcpServers: [github]
+
+# Tasks
+- must not become a runtime task
+`,
+	})
+	defer cleanupWorkspace(t, tmpDir)
+
+	definition := NewContextBuilder(tmpDir).LoadAgentDefinition()
+	if definition.Source != AgentDefinitionSourceAgent ||
+		definition.Agent == nil {
+		t.Fatalf("definition = %#v", definition)
+	}
+	if definition.Agent.FrontmatterErr == "" {
+		t.Fatal("unterminated frontmatter was not marked invalid")
+	}
+	if definition.Agent.Body != "" {
+		t.Fatalf("unterminated frontmatter body = %q, want empty", definition.Agent.Body)
+	}
+	if len(definition.Agent.Tasks) != 0 {
+		t.Fatalf(
+			"unterminated frontmatter tasks = %#v, want none",
+			definition.Agent.Tasks,
+		)
+	}
+	if tools := resolveAgentToolAllowlist(definition); tools == nil ||
+		len(tools) != 0 {
+		t.Fatalf("tool allowlist = %#v, want explicit empty", tools)
+	}
+	if servers := resolveAgentMCPServerAllowlist(definition); servers == nil ||
+		len(servers) != 0 {
+		t.Fatalf("MCP allowlist = %#v, want explicit empty", servers)
+	}
+
+	openingPrompt := parseAgentPromptDefinition("AGENT.md", "---")
+	openingOnly := AgentContextDefinition{
+		Source: AgentDefinitionSourceAgent,
+		Agent:  &openingPrompt,
+	}
+	if openingOnly.Agent.FrontmatterErr == "" ||
+		!frontmatterParseFailed(openingOnly) {
+		t.Fatalf("opening-only definition did not fail closed: %#v", openingOnly)
+	}
+	if tools := resolveAgentToolAllowlist(openingOnly); tools == nil ||
+		len(tools) != 0 {
+		t.Fatalf("opening-only tool allowlist = %#v, want explicit empty", tools)
 	}
 }
 

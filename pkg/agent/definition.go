@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +11,10 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
+)
+
+var errUnterminatedAgentFrontmatter = errors.New(
+	"unterminated AGENT.md frontmatter",
 )
 
 // AgentDefinitionSource identifies which agent bootstrap file produced the definition.
@@ -63,10 +68,11 @@ type UserDefinition struct {
 
 // AgentContextDefinition captures the workspace agent definition in a runtime-friendly shape.
 type AgentContextDefinition struct {
-	Source AgentDefinitionSource  `json:"source,omitempty"`
-	Agent  *AgentPromptDefinition `json:"agent,omitempty"`
-	Soul   *SoulDefinition        `json:"soul,omitempty"`
-	User   *UserDefinition        `json:"user,omitempty"`
+	Source        AgentDefinitionSource  `json:"source,omitempty"`
+	Agent         *AgentPromptDefinition `json:"agent,omitempty"`
+	Soul          *SoulDefinition        `json:"soul,omitempty"`
+	User          *UserDefinition        `json:"user,omitempty"`
+	DefinitionErr string                 `json:"definition_error,omitempty"`
 }
 
 // LoadAgentDefinition parses the workspace agent bootstrap files.
@@ -82,27 +88,37 @@ func loadAgentDefinition(workspace string) AgentContextDefinition {
 	definition := AgentContextDefinition{}
 	definition.User = loadUserDefinition(workspace)
 	agentPath := filepath.Join(workspace, string(AgentDefinitionSourceAgent))
-	if content, err := os.ReadFile(agentPath); err == nil {
-		prompt := parseAgentPromptDefinition(agentPath, string(content))
-		definition.Source = AgentDefinitionSourceAgent
-		definition.Agent = &prompt
-		soulPath := filepath.Join(workspace, "SOUL.md")
-		if content, err := os.ReadFile(soulPath); err == nil {
-			definition.Soul = &SoulDefinition{
-				Path:    soulPath,
-				Content: string(content),
+	if file, exists, err := ReadAgentDefinitionFile(agentPath); exists || err != nil {
+		if err != nil {
+			definition.Source = AgentDefinitionSourceAgent
+			definition.DefinitionErr = err.Error()
+		} else {
+			prompt := parseAgentPromptDefinition(agentPath, string(file.Data))
+			definition.Source = AgentDefinitionSourceAgent
+			definition.Agent = &prompt
+			soulPath := filepath.Join(workspace, "SOUL.md")
+			if content, readErr := os.ReadFile(soulPath); readErr == nil {
+				definition.Soul = &SoulDefinition{
+					Path:    soulPath,
+					Content: string(content),
+				}
 			}
 		}
 		return definition
 	}
 
 	legacyPath := filepath.Join(workspace, string(AgentDefinitionSourceAgents))
-	if content, err := os.ReadFile(legacyPath); err == nil {
-		definition.Source = AgentDefinitionSourceAgents
-		definition.Agent = &AgentPromptDefinition{
-			Path: legacyPath,
-			Raw:  string(content),
-			Body: string(content),
+	if file, exists, err := ReadAgentDefinitionFile(legacyPath); exists || err != nil {
+		if err != nil {
+			definition.Source = AgentDefinitionSourceAgents
+			definition.DefinitionErr = err.Error()
+		} else {
+			definition.Source = AgentDefinitionSourceAgents
+			definition.Agent = &AgentPromptDefinition{
+				Path: legacyPath,
+				Raw:  string(file.Data),
+				Body: string(file.Data),
+			}
 		}
 	}
 
@@ -147,13 +163,23 @@ func loadUserDefinition(workspace string) *UserDefinition {
 }
 
 func parseAgentPromptDefinition(path, content string) AgentPromptDefinition {
-	frontmatter, body := splitAgentFrontmatter(content)
-	parsedFrontmatter, err := parseAgentFrontmatter(path, frontmatter)
+	frontmatter, body, unterminated := splitAgentFrontmatter(content)
+	parsedFrontmatter := AgentFrontmatter{}
+	var err error
+	if unterminated {
+		err = errUnterminatedAgentFrontmatter
+	} else {
+		parsedFrontmatter, err = parseAgentFrontmatter(path, frontmatter)
+	}
+	var tasks []string
+	if !unterminated && err == nil {
+		tasks = extractAgentTasks(body)
+	}
 	return AgentPromptDefinition{
 		Path:           path,
 		Raw:            content,
 		Body:           body,
-		Tasks:          extractAgentTasks(body),
+		Tasks:          tasks,
 		RawFrontmatter: frontmatter,
 		Frontmatter:    parsedFrontmatter,
 		FrontmatterErr: errorString(err),
@@ -161,6 +187,17 @@ func parseAgentPromptDefinition(path, content string) AgentPromptDefinition {
 }
 
 func parseAgentFrontmatter(path, frontmatter string) (AgentFrontmatter, error) {
+	parsed, err := decodeAgentFrontmatter(frontmatter)
+	if err != nil {
+		logger.WarnCF("agent", "Failed to parse AGENT.md frontmatter", map[string]any{
+			"path":  path,
+			"error": err.Error(),
+		})
+	}
+	return parsed, err
+}
+
+func decodeAgentFrontmatter(frontmatter string) (AgentFrontmatter, error) {
 	frontmatter = strings.TrimSpace(frontmatter)
 	if frontmatter == "" {
 		return AgentFrontmatter{}, nil
@@ -168,10 +205,6 @@ func parseAgentFrontmatter(path, frontmatter string) (AgentFrontmatter, error) {
 
 	rawFields := make(map[string]any)
 	if err := yaml.Unmarshal([]byte(frontmatter), &rawFields); err != nil {
-		logger.WarnCF("agent", "Failed to parse AGENT.md frontmatter", map[string]any{
-			"path":  path,
-			"error": err.Error(),
-		})
 		return AgentFrontmatter{}, err
 	}
 
@@ -185,10 +218,6 @@ func parseAgentFrontmatter(path, frontmatter string) (AgentFrontmatter, error) {
 		MCPServers  []string `yaml:"mcpServers"`
 	}
 	if err := yaml.Unmarshal([]byte(frontmatter), &typed); err != nil {
-		logger.WarnCF("agent", "Failed to decode AGENT.md frontmatter fields", map[string]any{
-			"path":  path,
-			"error": err.Error(),
-		})
 		return AgentFrontmatter{}, err
 	}
 
@@ -204,11 +233,13 @@ func parseAgentFrontmatter(path, frontmatter string) (AgentFrontmatter, error) {
 	}, nil
 }
 
-func splitAgentFrontmatter(content string) (frontmatter, body string) {
+func splitAgentFrontmatter(
+	content string,
+) (frontmatter, body string, unterminated bool) {
 	normalized := string(parser.NormalizeNewlines([]byte(content)))
 	lines := strings.Split(normalized, "\n")
 	if len(lines) == 0 || lines[0] != "---" {
-		return "", content
+		return "", content, false
 	}
 
 	end := -1
@@ -219,13 +250,13 @@ func splitAgentFrontmatter(content string) (frontmatter, body string) {
 		}
 	}
 	if end == -1 {
-		return "", content
+		return strings.Join(lines[1:], "\n"), "", true
 	}
 
 	frontmatter = strings.Join(lines[1:end], "\n")
 	body = strings.Join(lines[end+1:], "\n")
 	body = strings.TrimLeft(body, "\n")
-	return frontmatter, body
+	return frontmatter, body, false
 }
 
 func extractAgentTasks(body string) []string {

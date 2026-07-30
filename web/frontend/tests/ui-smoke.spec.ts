@@ -2,6 +2,7 @@ import AxeBuilder from "@axe-core/playwright"
 import { type Page, type Route, expect, test } from "@playwright/test"
 
 import type {
+  AgentCapabilitiesResponse,
   AgentInfo,
   AgentMutationInput,
   AgentsResponse,
@@ -937,6 +938,12 @@ const channelCatalogResponse = {
 }
 
 interface MockLauncherApiOptions {
+  agentActivityRequests?: Array<{ method: string; path: string }>
+  agentCapabilityRequests?: Array<{
+    method: string
+    path: string
+    body: unknown
+  }>
   agentRequests?: Array<{
     method: string
     path: string
@@ -951,6 +958,7 @@ interface MockLauncherApiOptions {
   oauthProviders?: unknown[]
   statefulAgents?: boolean
   statefulMCP?: boolean
+  gatewayRunning?: boolean
   mcpRequests?: Array<{
     method: string
     path: string
@@ -1005,6 +1013,7 @@ async function mockLauncherApis(
   let currentMCPResponse = structuredClone(mcpResponse)
   let currentCancelableWorkflowRun = structuredClone(cancelableWorkflowRun)
   let currentAgentRevision = 1
+  let currentCapabilityRevision = 1
   let currentDefaultAgentID = "main"
   let currentAgents: AgentInfo[] = [
     {
@@ -1039,6 +1048,57 @@ async function mockLauncherApis(
     catalog_effect: "applied",
     gateway_effect: "applied",
   } as const
+
+  let currentAgentCapabilities: AgentCapabilitiesResponse = {
+    agent_id: "reviewer",
+    source: "agent",
+    editable: true,
+    issue_code: "",
+    legacy_upgrade_required: false,
+    capabilities: {
+      tools: {
+        mode: "selected",
+        values: ["web_search", "legacy_unknown"],
+      },
+      skills: {
+        mode: "inherit",
+        values: [],
+        inherited_values: ["review-helper"],
+      },
+      mcp_servers: {
+        mode: "all",
+        values: [],
+      },
+    },
+    catalogs: {
+      tools: [
+        {
+          name: "web_search",
+          description: "Search the web",
+          category: "web",
+          status: "enabled",
+          reason_code: "",
+        },
+        {
+          name: "filesystem",
+          description: "Read approved workspace files",
+          category: "workspace",
+          status: "enabled",
+          reason_code: "",
+        },
+      ],
+      skills: [{ name: "review-helper", source: "workspace" }],
+      mcp_servers: [{ name: "github", enabled: true }],
+    },
+    catalog_truncated: {
+      tools: false,
+      skills: false,
+      mcp_servers: false,
+    },
+    revision: "capability-revision-1",
+    config_revision: "agent-revision-1",
+    effects: agentEffects,
+  }
 
   function currentAgentsResponse(): AgentsResponse {
     return {
@@ -1235,6 +1295,96 @@ async function mockLauncherApis(
       const url = new URL(request.url())
       const path = url.pathname
       const method = request.method()
+
+      const capabilitiesMatch = path.match(
+        /^\/api\/agents\/([^/]+)\/capabilities$/,
+      )
+      if (capabilitiesMatch) {
+        const body =
+          method === "PATCH"
+            ? (request.postDataJSON() as Record<string, unknown>)
+            : undefined
+        options.agentCapabilityRequests?.push({ method, path, body })
+        if (decodeURIComponent(capabilitiesMatch[1]) !== "reviewer") {
+          return json(route, { error: "agent_not_found" }, 404)
+        }
+        if (method === "GET") {
+          return json(route, structuredClone(currentAgentCapabilities))
+        }
+        if (
+          method === "PATCH" &&
+          body?.expected_revision === currentAgentCapabilities.revision
+        ) {
+          currentCapabilityRevision += 1
+          currentAgentCapabilities = {
+            ...currentAgentCapabilities,
+            capabilities: {
+              tools:
+                (body.tools as AgentCapabilitiesResponse["capabilities"]["tools"]) ??
+                currentAgentCapabilities.capabilities.tools,
+              skills: body.skills
+                ? {
+                    ...(body.skills as {
+                      mode: "inherit" | "none" | "selected"
+                      values: string[]
+                    }),
+                    inherited_values:
+                      currentAgentCapabilities.capabilities.skills
+                        .inherited_values,
+                  }
+                : currentAgentCapabilities.capabilities.skills,
+              mcp_servers:
+                (body.mcp_servers as AgentCapabilitiesResponse["capabilities"]["mcp_servers"]) ??
+                currentAgentCapabilities.capabilities.mcp_servers,
+            },
+            revision: `capability-revision-${currentCapabilityRevision}`,
+          }
+          return json(route, structuredClone(currentAgentCapabilities))
+        }
+        return json(route, { error: "capabilities_revision_mismatch" }, 409)
+      }
+
+      const activityMatch = path.match(/^\/api\/agents\/([^/]+)\/activity$/)
+      if (activityMatch) {
+        options.agentActivityRequests?.push({ method, path })
+        if (
+          method !== "GET" ||
+          decodeURIComponent(activityMatch[1]) !== "reviewer"
+        ) {
+          return json(route, { error: "agent_not_found" }, 404)
+        }
+        return json(route, {
+          agent_id: "reviewer",
+          events: [
+            {
+              sequence: "1",
+              agent_id: "reviewer",
+              timestamp: "2026-07-30T12:00:00.000000001Z",
+              kind: "agent.tool.exec_end",
+              severity: "info",
+              details: {
+                tool_name: "web_search",
+                duration_ms: "25",
+                is_error: false,
+                async: false,
+                arguments: "CANARY_ARGUMENT_SECRET",
+                result: "CANARY_RESULT_SECRET",
+              },
+              prompt: "CANARY_PROMPT_SECRET",
+              error: "CANARY_ERROR_SECRET",
+            },
+          ],
+          next_cursor: "opaque-cursor-1",
+          reset: true,
+          truncated: true,
+          dropped: {
+            subscription: "1",
+            retention: "2",
+            projection: "3",
+          },
+          raw_payload: "CANARY_RAW_SECRET",
+        })
+      }
 
       if (options.statefulAgents && path.startsWith("/api/agents")) {
         const rawBody = request.postData()
@@ -2102,7 +2252,7 @@ async function mockLauncherApis(
           return json(route, { authenticated: true, initialized: true })
         case "/api/gateway/status":
           return json(route, {
-            gateway_status: "stopped",
+            gateway_status: options.gatewayRunning ? "running" : "stopped",
             gateway_start_allowed: true,
             gateway_restart_required: false,
             boot_default_model: "gpt-4o-mini",
@@ -2848,6 +2998,88 @@ test("agent management completes a stateful policy lifecycle with exact revision
       body: { expected_config_revision: "agent-revision-4" },
     },
   ])
+  expect(errors).toEqual([])
+})
+
+test("agent details manage capabilities and privacy-safe activity at 320px", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 320, height: 720 })
+  const errors = collectPageErrors(page)
+  const capabilityRequests: NonNullable<
+    MockLauncherApiOptions["agentCapabilityRequests"]
+  > = []
+  const activityRequests: NonNullable<
+    MockLauncherApiOptions["agentActivityRequests"]
+  > = []
+  await page.routeWebSocket(/\/pico\/ws/, () => undefined)
+  await gotoMockedRoute(page, "/agent/agents", {
+    agentCapabilityRequests: capabilityRequests,
+    agentActivityRequests: activityRequests,
+    gatewayRunning: true,
+  })
+
+  await page
+    .locator('[data-agent-id="reviewer"]')
+    .getByRole("button", { name: "Manage reviewer" })
+    .click()
+  await expect(page).toHaveURL(/\/agent\/agents\?agent=reviewer&tab=overview$/)
+  const tabs = page.getByRole("tablist", { name: "Agent management" })
+  await tabs.getByRole("tab", { name: "Capabilities" }).click()
+  await expect(page).toHaveURL(/tab=capabilities$/)
+  await expect(tabs.getByRole("tab", { name: "Capabilities" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  )
+  await expect(page.getByText("Existing unknown selections")).toBeVisible()
+  await page
+    .getByRole("button", {
+      name: "Remove unknown selection legacy_unknown",
+    })
+    .click()
+  await page.getByRole("button", { name: "Save capabilities" }).click()
+  await expect
+    .poll(() => capabilityRequests.filter((entry) => entry.method === "PATCH"))
+    .toEqual([
+      {
+        method: "PATCH",
+        path: "/api/agents/reviewer/capabilities",
+        body: {
+          expected_revision: "capability-revision-1",
+          tools: { mode: "selected", values: ["web_search"] },
+        },
+      },
+    ])
+
+  const tools = page.getByRole("group", { name: "Tools" })
+  await tools.getByRole("radio", { name: "No tools" }).click()
+  await tabs.getByRole("tab", { name: "Activity" }).click()
+  const discard = page.getByRole("alertdialog", {
+    name: "Discard capability changes?",
+  })
+  await expect(discard).toBeVisible()
+  await discard.getByRole("button", { name: "Keep editing" }).click()
+  await expect(page).toHaveURL(/tab=capabilities$/)
+
+  await tabs.getByRole("tab", { name: "Activity" }).click()
+  await page
+    .getByRole("alertdialog", { name: "Discard capability changes?" })
+    .getByRole("button", { name: "Discard changes" })
+    .click()
+  await expect(page).toHaveURL(/tab=activity$/)
+  await expect(page.getByText("Tool execution ended")).toBeVisible()
+  await expect(page.getByText(/web_search; 25 ms; completed/)).toBeVisible()
+  await expect(page.getByText(/cursor was reset/)).toBeVisible()
+  expect(activityRequests.length).toBeGreaterThan(0)
+  await expect(page.locator("body")).not.toContainText("CANARY_")
+
+  await tabs.getByRole("tab", { name: "Activity" }).focus()
+  await page.keyboard.press("Home")
+  await expect(page).toHaveURL(/tab=overview$/)
+  await expect(tabs.getByRole("tab", { name: "Overview" })).toBeFocused()
+
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
 })
 

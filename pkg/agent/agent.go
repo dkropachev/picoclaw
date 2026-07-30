@@ -45,6 +45,9 @@ type AgentLoop struct {
 	runtimeEventLogMu  sync.RWMutex
 	runtimeEventLogger *runtimeEventLogger
 	runtimeEventLogSub runtimeevents.Subscription
+	agentActivityMu    sync.RWMutex
+	agentActivity      *agentActivityRecorder
+	agentActivitySub   runtimeevents.Subscription
 	hooks              *HookManager
 
 	// Runtime state
@@ -668,6 +671,7 @@ func (al *AgentLoop) Close() {
 		al.hooks.Close()
 	}
 	al.closeRuntimeEventLogger()
+	al.closeAgentActivityRecorder()
 	if al.runtimeEvents != nil && al.ownsRuntimeEvents {
 		if err := al.runtimeEvents.Close(); err != nil {
 			logger.ErrorCF("agent", "Failed to close runtime event bus",

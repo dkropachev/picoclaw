@@ -21,7 +21,7 @@ and lets chat users force a skill for one request or the next message.
 
 | ID | Level | Requirement | Rationale |
 | --- | --- | --- | --- |
-| `FR-SKILLS-001` | MUST | Skill loading discovers valid `SKILL.md` files from workspace, global, and builtin roots in precedence order. | Users need predictable skill availability. |
+| `FR-SKILLS-001` | MUST | Skill loading discovers valid `SKILL.md` files from workspace, global, and builtin roots in precedence order, resolves metadata-declared names to their discovered files, and deduplicates those identities case-insensitively before building one batch lookup index for context loading. | Users need predictable skill availability, and the UI catalog must identify the same effective skill content that runtime loading uses. |
 | `FR-SKILLS-002` | MUST | Invalid, missing, or malformed skill files are skipped or reported without breaking unrelated skills. | One bad skill must not disable the agent. |
 | `FR-SKILLS-003` | MUST | Search uses configured registries and cache settings, returning bounded results with registry identity. | Skill discovery must be reproducible and efficient. |
 | `FR-SKILLS-004` | MUST | Install/import writes skill content into workspace skills and makes it listable/readable after success. | Installed skills are persistent capabilities. |

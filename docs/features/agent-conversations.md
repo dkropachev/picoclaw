@@ -45,6 +45,7 @@ auxiliary to this capability.
 | `FR-AGENT-016` | MUST | The original `ChannelManager` and four-argument `MessageBus.GetStreamer` contracts remain sufficient for agent integrations. Exact typing stop, cleanup, rebind, placeholder, and turn-scoped streaming are additive optional capabilities: legacy managers fall back to chat-scoped typing stop and placeholder calls plus one detached bounded tool-feedback cleanup, rebind is a no-op, and legacy buses use `GetStreamer`; capable implementations receive the exact turn identity instead. | Existing channel and message-bus implementations must remain source-compatible while built-in channels gain exact ownership. |
 | `FR-AGENT-017` | MUST | Agent-owned inbound snapshots preserve process-local turn/event identity, deduplication, occurrence time, subject, conversation, safe attachment descriptors, and transport trust facts through primary turns, queued continuations, and derived outbound contexts. Mutable maps, occurrence-time pointers, and attachment slices are detached when copied, and these fields remain excluded from serialized routing context. | Asynchronous turn and delivery work must retain admission facts without aliasing caller-owned state or expanding the serialized contract. |
 | `FR-AGENT-018` | MUST | The authenticated Agent management API and responsive Agent UI project an implicit `main` policy without writing an empty config and support ordered create, inspect, edit, default-selection, and delete operations against an explicit opaque config revision. The surface preserves model inheritance versus an explicit empty fallback list, labels editable values as configured policy, preserves fields it does not expose, reports whether a gateway restart is required, and never deletes workspaces, sessions, threads, history, runs, or workflow files. | Operators need complete, concurrency-safe browser management of persistent agent policy without mistaking configured values for workspace overrides or destroying runtime data. |
+| `FR-AGENT-019` | MUST | The selected-agent UI exposes deep-linkable Overview, Capabilities, and Activity tabs without replacing the ordered management grid. Capabilities use a separate composite config-plus-workspace revision and preserve the exact tools all/none/selected, skills inherit/none/selected, and MCP all/none/selected states; an edit changes only requested frontmatter nodes while preserving unrelated YAML nodes, comments, ordering, and prompt body, retains unknown existing selections, and upgrades legacy `AGENTS.md` only after explicit confirmation without deleting it. Malformed, unterminated, unsafe, or unsupported-platform definition state is fail-closed and read-only. Capability and activity views use only bounded sanitized projections, retain dirty drafts across conflicts until explicit reload, report required gateway restart, and never expose a raw-file editor or persist activity cursors. | Operators need full browser control and visibility for one agent without collapsing workspace policy into global config, overwriting concurrent prompt edits, leaking runtime payloads, or discarding forward-compatible declarations. |
 
 ## Data And State Model
 
@@ -56,7 +57,9 @@ Inbound session reservations additionally retain a process-local turn-UX
 identity and detached inbound-context snapshot. Per-session handoff locks
 serialize reservation, steering enqueue/dequeue, rebind, and abandonment;
 rescue markers explicitly own committed steering until a live continuation or
-competing turn takes it.
+competing turn takes it. Workspace capability state also retains its active
+definition source and exact composite revision independently from the global
+agent-config revision; runtime activity remains process-local and bounded.
 
 ## Surface Ownership
 
@@ -72,7 +75,8 @@ Owns: CODE pkg/devices/**
 Owns: CODE pkg/providers/**
 Owns: CODE pkg/tokenizer/**
 Owns: CODE web/backend/api/agents*
-Owns: CODE web/frontend/src/api/agents.ts
+Owns: CODE web/backend/api/agent_capabilities*
+Owns: CODE web/frontend/src/api/agents*.ts
 Owns: CODE web/frontend/src/components/agent/**
 Owns: CODE web/frontend/src/routes/agent/**
 Owns: CLI cmd/picoclaw/main.go *
@@ -89,6 +93,7 @@ Owns: CONFIG.tools.spawn*
 Owns: CONFIG.tools.spawn_status*
 Owns: CONFIG.tools.subagent*
 Owns: CONFIG.devices*
+Owns: HTTP /api/agents*
 Owns: HTTP * /api/agents*
 Owns: TEST cmd/picoclaw/main_test.go *
 Owns: TEST cmd/picoclaw/internal/agent/*
@@ -119,7 +124,7 @@ Owns: EVENT agent.*
 | Go API | `interfaces.MessageBus.GetStreamer`, optional `interfaces.TurnScopedMessageBus.GetStreamerForTurn` | Use turn-scoped streaming when implemented and otherwise call the original four-argument streamer lookup. | `FR-AGENT-015`, `FR-AGENT-016` |
 | Runtime | `bus.InboundContext`, `DispatchRequest`, turn reservations, continuation targets, and outbound context derivation | Carry detached process-local event and transient-UX metadata across one turn without adding it to serialized routing context. | `FR-AGENT-015`, `FR-AGENT-017` |
 | Events | `agent.*` | Turn, LLM, tool, steering, interrupt, subturn, and error telemetry. | `FR-AGENT-001`, `FR-AGENT-004`, `FR-AGENT-006` |
-| HTTP/UI | `/api/agents*`, `/agent/agents` | Project and mutate persistent configured agent policy with ordered results, revision fencing, explicit model fallback semantics, and restart feedback. | `FR-AGENT-018` |
+| HTTP/UI | `/api/agents*`, `/agent/agents` | Project and mutate persistent configured agent policy with ordered results, revision fencing, explicit model fallback semantics, workspace capability CAS, sanitized live activity, deep links, and restart feedback. | `FR-AGENT-018`, `FR-AGENT-019` |
 
 ## Algorithms And Ordering
 
@@ -161,6 +166,20 @@ Owns: EVENT agent.*
    zero. Only then stop channel/media dependencies and close provider, bus, and
    registry resources. A timeout leaves dependencies/resources open for
    process teardown.
+9. In Agent management, keep the ordered grid as the entry surface and put the
+   exact selected agent and allow-listed detail tab in the URL. A capability
+   draft owns its loaded composite revision until save or explicit reload.
+   Block tab, agent, route, and browser navigation while that draft is dirty;
+   proceed only after the operator explicitly discards it. A revision conflict
+   preserves the draft, disables another save, and requires an explicit reload
+   before editing can resume.
+10. Mount activity polling only on the selected Activity tab. Poll while the
+    gateway and browser are online, the document is visible, and the operator
+    has not paused; abort on unmount or agent change, and pause after a request
+    error until explicit retry. Merge by sequence into at most 200 browser
+    rows, apply severity switches only as a presentation filter, and surface
+    recorder reset, truncation, and each drop counter without persisting the
+    cursor.
 
 ## Cross-Feature Behavior
 
@@ -239,6 +258,13 @@ metadata but does not persist or reinterpret those trust facts.
 - Cloning an inbound snapshot must not share its maps, occurrence-time pointer,
   or attachment backing slice with the producer. Event and transport-trust
   fields remain process-local even when copied to an outbound context.
+- A dirty capability draft is never silently replaced by navigation, refresh,
+  a concurrent-write conflict, or a failed reload. Confirmed discard and
+  explicit latest-version reload are the only destructive draft transitions.
+- Hidden or offline browser tabs, a stopped gateway, an operator pause, and an
+  activity request failure stop polling without clearing retained rows. A
+  process-generation reset starts a new row window and is shown to the
+  operator.
 
 ## Acceptance Evidence
 
@@ -258,6 +284,7 @@ metadata but does not persist or reinterpret those trust facts.
 | `FR-AGENT-016` | [pkg/agent/channel_manager_compat_test.go](../../pkg/agent/channel_manager_compat_test.go), [pkg/agent/pipeline_streaming_test.go](../../pkg/agent/pipeline_streaming_test.go), [pkg/channels/manager_test.go](../../pkg/channels/manager_test.go) |
 | `FR-AGENT-017` | [pkg/agent/turn_context_test.go](../../pkg/agent/turn_context_test.go), [pkg/agent/agent_test.go](../../pkg/agent/agent_test.go), [pkg/agent/steering_test.go](../../pkg/agent/steering_test.go), [pkg/bus/bus_test.go](../../pkg/bus/bus_test.go) |
 | `FR-AGENT-018` | [web/backend/api/agents_test.go](../../web/backend/api/agents_test.go), [pkg/config/config_test.go](../../pkg/config/config_test.go), [web/frontend/src/api/agents.test.ts](../../web/frontend/src/api/agents.test.ts), [web/frontend/src/components/agent/agents/agents-page.test.tsx](../../web/frontend/src/components/agent/agents/agents-page.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
+| `FR-AGENT-019` | [web/backend/api/agent_capabilities_test.go](../../web/backend/api/agent_capabilities_test.go), [web/backend/api/agent_capabilities_cas_test.go](../../web/backend/api/agent_capabilities_cas_test.go), [web/backend/api/agent_capabilities_replace_linux_test.go](../../web/backend/api/agent_capabilities_replace_linux_test.go), [pkg/agent/activity_test.go](../../pkg/agent/activity_test.go), [web/frontend/src/api/agents.test.ts](../../web/frontend/src/api/agents.test.ts), [web/frontend/src/components/agent/agents/agent-capabilities-panel.test.tsx](../../web/frontend/src/components/agent/agents/agent-capabilities-panel.test.tsx), [web/frontend/src/components/agent/agents/agent-activity-panel.test.tsx](../../web/frontend/src/components/agent/agents/agent-activity-panel.test.tsx), [web/frontend/src/routes/agent/-agents-route.test.tsx](../../web/frontend/src/routes/agent/-agents-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 
 ## Implementation Anchors
 
@@ -270,4 +297,5 @@ metadata but does not persist or reinterpret those trust facts.
 - [pkg/agent/runtime_gate.go](../../pkg/agent/runtime_gate.go)
 - [pkg/providers/factory.go](../../pkg/providers/factory.go)
 - [web/backend/api/agents.go](../../web/backend/api/agents.go)
+- [web/backend/api/agent_capabilities.go](../../web/backend/api/agent_capabilities.go)
 - [web/frontend/src/components/agent/agents](../../web/frontend/src/components/agent/agents)

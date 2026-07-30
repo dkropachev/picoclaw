@@ -86,8 +86,9 @@ func (h *Handler) gatewayCommandArgs() []string {
 }
 
 const (
-	protocolKey = "Sec-Websocket-Protocol"
-	tokenPrefix = "token."
+	protocolKey                       = "Sec-Websocket-Protocol"
+	tokenPrefix                       = "token."
+	gatewayUnknownBootConfigSignature = "<unknown>"
 )
 
 // picoGatewayProtocol returns the gateway-facing pico subprotocol that the
@@ -107,6 +108,7 @@ var (
 	gatewayRestartForceKillWindow = 3 * time.Second
 	gatewayRestartPollInterval    = 100 * time.Millisecond
 	gatewayExecCommand            = exec.Command
+	gatewayBeforeCommandStart     = func() {}
 )
 
 var gatewayHealthGet = func(url string, timeout time.Duration) (*http.Response, error) {
@@ -1083,6 +1085,10 @@ func gatewayRestartRequiredBySignature(bootSignature, currentSignature, gatewayS
 	if bootSignature == "" || currentSignature == "" {
 		return false
 	}
+	if bootSignature == gatewayUnknownBootConfigSignature ||
+		currentSignature == gatewayUnknownBootConfigSignature {
+		return true
+	}
 	return bootSignature != currentSignature
 }
 
@@ -1133,11 +1139,13 @@ func attachToGatewayProcessLocked(pid int, cfg *config.Config) error {
 	gateway.owned = false // We didn't start this process
 	setGatewayRuntimeStatusLocked("running")
 
-	// Update bootDefaultModel and bootConfigSignature from config
+	// The launcher cannot prove which config or workspace bytes an already
+	// running process loaded, so retain its display model but make restart
+	// comparison conservatively unknown until the launcher starts it.
 	if cfg != nil {
 		defaultModelName := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
 		gateway.bootDefaultModel = defaultModelName
-		gateway.bootConfigSignature = computeConfigSignature(cfg)
+		gateway.bootConfigSignature = gatewayUnknownBootConfigSignature
 	}
 
 	logger.InfoC("gateway", fmt.Sprintf("Attached to gateway process (PID: %d)", pid))
@@ -1348,6 +1356,8 @@ func (h *Handler) startGatewayLocked(initialStatus string, existingPid int) (int
 		defaultModelName = strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
 	}
 
+	bootConfigSignature := computeGatewayRuntimeSignature(cfg)
+	gatewayBeforeCommandStart()
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("failed to start gateway: %w", err)
 	}
@@ -1355,7 +1365,7 @@ func (h *Handler) startGatewayLocked(initialStatus string, existingPid int) (int
 	gateway.cmd = cmd
 	gateway.owned = true // We started this process
 	gateway.bootDefaultModel = defaultModelName
-	gateway.bootConfigSignature = computeConfigSignature(cfg)
+	gateway.bootConfigSignature = bootConfigSignature
 	setGatewayRuntimeStatusLocked(initialStatus)
 	pid = cmd.Process.Pid
 	logger.InfoC("gateway", fmt.Sprintf("Started picoclaw gateway (PID: %d) from %s", pid, execPath))
@@ -1738,7 +1748,7 @@ func (h *Handler) gatewayStatusData() map[string]any {
 	}
 
 	gatewayStatus, _ := data["gateway_status"].(string)
-	currentConfigSignature := computeConfigSignature(cfg)
+	currentConfigSignature := computeGatewayRuntimeSignature(cfg)
 	gateway.mu.Lock()
 	bootConfigSignature := gateway.bootConfigSignature
 	gateway.mu.Unlock()

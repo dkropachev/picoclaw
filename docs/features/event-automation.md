@@ -786,6 +786,10 @@ independent retained records.
 [Webhook ingress](../../pkg/eventing/webhook) normalizes Standard Webhooks or
 native GitHub deliveries directly into this envelope on the channel manager's
 shared HTTP mux.
+Aggregate shared-route teardown releases independently owned workflow-authoring
+and agent-activity routes before releasing event operator and ingress routes;
+that lifecycle coordination does not transfer their behavior or state into
+durable eventing.
 [Chat channels](chat-channels.md) own provider authorization, group filtering,
 and transport UX; opted-in instances pass safe normalized metadata through the
 durable channel-message adapter. Delta Chat additionally owns notification-
