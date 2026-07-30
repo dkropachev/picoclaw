@@ -761,6 +761,8 @@ func TestWorkflowJSONNumberIsBrowserSafeUsesExactDecimalRoundTrip(t *testing.T) 
 		{"9007199254740993e0", false},
 		{"0.10000000000000001", false},
 		{"1e400", false},
+		{"1e999999999", false},
+		{"1e-999999999", false},
 	}
 	for _, test := range tests {
 		t.Run(test.value, func(t *testing.T) {

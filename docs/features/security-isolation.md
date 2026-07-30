@@ -13,7 +13,9 @@ classification can explicitly remove model tool authority while leaving any
 approved side effect as a separately declared workflow action. Workflow
 inspection exposes only bounded structural metadata and conservative
 possible-effect classifications, never the underlying source or sensitive
-values.
+values. Workflow-authoring capability discovery similarly exposes exact
+addressable identities and typed parameter shapes from one leased live runtime,
+never descriptions, raw schemas, configuration, paths, or internal errors.
 
 ## Reconstruction Notes
 
@@ -51,6 +53,7 @@ values.
 | `FR-SEC-014` | MUST | Event operator runtime routes require the gateway's process-local PID bearer using constant-time comparison. The authenticated launcher injects that credential server-side without forwarding browser cookies or authorization, maps internal authorization/stale-process failures to unavailable rather than a new login challenge, and applies same-origin checks to replay. The local CLI obtains the credential only from the owner-readable live PID file. Public event/dispatch projections have no deduplication or lease-token fields, ordinary detail omits payload, the explicit exact-payload response is non-cacheable, and all clients bound response size and error text; CLI payload output validates an object but emits its original bytes without normalization. | Durable operator data contains worker fencing credentials and potentially sensitive redacted-at-rest content; management access must not expose internal authority, become a CSRF primitive, or silently weaken during reload. |
 | `FR-SEC-015` | MUST | Shared durable file primitives reject empty paths, create each missing parent directory before its child reaches a durable boundary, write a synced same-directory temporary file before atomic replacement, and durably remove a file or empty directory while preserving ordinary missing/non-empty errors. POSIX implementations sync the containing directory after creation, replacement, and removal. Windows implementations use write-through moves for directory creation and replacement, and make logical deletion durable by moving the original to a collision-resistant same-parent tombstone before best-effort tombstone cleanup. | Workflow journals and other local state must not report a committed first-directory creation, replacement, or deletion that can disappear or revert after power loss, and Windows must not depend on replacing an open file or syncing a directory handle. |
 | `FR-SEC-016` | MUST | Authenticated workflow definition and built-in-template inspection reads one bounded exact source; a published read opens the configured definition nonblocking through workspace- and definitions-root-confined handles and verifies the opened handle is regular, so neither a symlink race nor a swap to a FIFO can escape or indefinitely hold mutation boundaries. It releases the cross-process file lock before parsing and the handler-local config mutation lock before encoding or response writing. The response contains only path-free whitelisted trigger fields, declaration names and required/default-presence metadata, declared action targets, fixed validation/limit codes, and conservative possible-effect classifications. Whole-family trigger preflight, aggregate entry limits, bounded topology fields, rejection of control and Unicode format characters, and a fixed encoded-response ceiling prevent YAML aliases or invalid definitions from amplifying or visually spoofing a bounded review response. The response cannot represent raw YAML, prompts, arbitrary `with` or `if` values, session or delivery values, input default values, secret values or mappings, output expressions, filesystem paths, captured event payloads, or raw parser/filesystem/provider errors. Every truncation or field omission is explicit, dependency/effect aggregation is independent from topology truncation, and a known effect class survives target omission; unknown or reusable actions cannot be presented as read-only. | A convenient browser review surface must not become a definition-file reader, sensitive-value oracle, or false assurance that an automation is side-effect-free. |
+| `FR-SEC-017` | MUST | Workflow-authoring capability discovery runs only against the existing PID-bearer-protected gateway loop while a runtime-use lease pins its generation; the authenticated launcher reads process authority without cleaning a stale PID file or loading, migrating, backing up, or saving configuration, substitutes the credential on one exact bounded GET, and never forwards browser credentials or upstream error detail. Projection requires agent IDs in the runtime's exact canonical `[a-z0-9][a-z0-9_-]{0,63}` form, sorts and validates every other exact UTF-8 identity, rejects control and Unicode format characters, uses the default agent's effective core registration keys, excludes the recursive workflow tool, and derives MCP targets only from exact separator-safe server/tool identity rather than a lossy provider-facing name. Tool and MCP parameter maps are untrusted: calls are panic-contained and transactionally projected into an ordered typed whitelist containing only fixed type, property/required membership, items, bounded scalar enum, and additional-properties shape. Non-whitelisted schema metadata is outside that DTO rather than a partially projected constraint. Bounded source selection plus shared collection, depth, property, enum, numeric-text, work, and encoded-response limits prevent cycles, aliases, panic loops, huge registry copies, oversized numeric parsing, or many discarded shapes from amplifying a response; every removed identity, omitted whole shape, and collection truncation has a fixed code, and an unsafe structural declaration omits its shape whole. Responses cannot contain agent/tool/MCP descriptions, prompts, raw schema maps, defaults, examples, constants, patterns, formats, references or compositions, provider/model/MCP configuration, URLs, commands, headers, environment, credentials, source paths, durable state, or raw runtime/proxy/panic errors. Discovery never initializes or connects MCP, emits MCP lifecycle events, or refreshes OAuth credentials: disabled MCP is a complete empty category; enabled MCP includes only a live collision-free manager's ready tools; a live identity-colliding manager produces an empty partial MCP category with a fixed unsafe-omission code; and no live manager produces a fixed unavailable partial state. It cannot construct another agent loop, edit configuration or YAML, create sessions/runs, execute a capability, or perform a durable mutation. | Production-equivalent discovery must not become a prompt, configuration, filesystem, credential, or denial-of-service oracle, and a read-only UI must not silently change persistent infrastructure. |
 
 ## Data And State Model
 
@@ -108,6 +111,7 @@ Owns: TEST pkg/config/version*
 | HTTP | `POST /webhooks/events/{connector}` with `format: github` | Exact-body HMAC-SHA256 authentication, bounded parsing, explicit unauthenticated-header metadata, and durable delivery-ID deduplication behind trusted TLS. | `FR-SEC-012` |
 | HTTP / CLI | protected `/runtime/eventing/*`, launcher `/api/events*`, `picoclaw events *` | Translate authenticated launcher or owner-local PID authority into bounded live-gateway operator calls without exposing PID credentials, lease tokens, deduplication keys, or automatically fetched payloads. | `FR-SEC-014` |
 | HTTP / UI | `/api/workflows/definitions/inspect`, `/api/workflows/templates/{name}/inspect`, `/agent/workflows` | Return and render one non-cacheable, fixed-code, bounded structural projection without exposing definition source, sensitive values, source paths, event payloads, or raw internal errors. | `FR-SEC-016` |
+| HTTP / UI | protected `/runtime/workflows/authoring/capabilities`, launcher `/api/workflows/authoring/capabilities`, `/agent/workflows` | Translate the authenticated dashboard session into one bounded live-generation catalog containing only exact targets, fixed readiness, and typed parameter shapes; the browser can search and copy a ready target but cannot invoke it from this surface. | `FR-SEC-017` |
 | Workflow / MCP | `agent/*` with `with.tools: none`; `mcp/github/add_issue_comment` | Remove tools from every classifier model path, then permit a GitHub mutation only as a declared conditional MCP step with signed-body identity and fixed output text. The GitHub MCP server and its write credential are configured explicitly and independently from ingress authentication. | `FR-SEC-013` |
 | Storage | Credential store | Provider and MCP credential CRUD, transactional refresh updates, auth/OAuth metadata, cross-process serialization on supported hosts, and optional non-secret account email metadata extracted from OAuth token responses. | `FR-SEC-002`, `FR-SEC-007`, `FR-SEC-009` |
 | Storage | `pkg/fileutil` durable path operations | Durable recursive parent creation, synced same-directory atomic replacement, and durable logical removal with POSIX directory sync or Windows write-through moves. | `FR-SEC-015` |
@@ -193,6 +197,22 @@ Owns: TEST pkg/config/version*
     field, and encoded-response limits; return only fixed validation and limit
     codes, mark every omission incomplete, and preserve conservative action
     classification even when a target cannot be returned.
+15. For workflow-authoring capability discovery, read the bounded PID record
+    without cleanup and without loading configuration, validate its live
+    authority, and authenticate one exact launcher-to-gateway GET with the
+    process-local bearer. Acquire the existing loop's runtime-use lease and
+    retain it across bounded registry selection, readiness checks,
+    sanitization, and pre-marshalling. Never initialize MCP from this path;
+    inspect ready MCP tools only when the pinned generation already owns a live
+    manager. Address ordinary tools by effective core registration key and MCP
+    tools by exact immutable server/tool identity. Treat every identity and
+    parameter map as untrusted, contain per-tool panics, reject unsafe visible
+    text before target construction, traverse only whitelisted shape keys with
+    cycle and shared work budgets, and discard an unsafe shape as a whole.
+    Bound and revalidate the internal response at the launcher, replace every
+    internal failure with a fixed unavailable or partial state, and never
+    forward browser credentials, process authority, descriptions, raw
+    schema/config values, or error text.
 
 ## Cross-Feature Behavior
 
@@ -214,6 +234,10 @@ Workflow definition inspection is likewise owned by the workflows feature. Its
 authenticated UI and API expose a path-free whitelist rather than source YAML,
 captured event content, authoring values, secrets, output expressions, or raw
 internal errors.
+Workflow-authoring capability discovery is also owned by the workflows feature.
+It reuses the process-local gateway authority and live runtime lease, reports
+only exact addressable identity, fixed readiness, and bounded typed parameter
+shape, and does not weaken the normal publish or execution readiness checks.
 Git workspace configuration and tool enablement reuse the same config
 normalization and defaulting path, while checkout retention, dirty preservation,
 and workspace inventory security boundaries are owned by the git workspaces
@@ -292,6 +316,17 @@ behavior remains owned by
 - Event and dispatch responses cannot include live lease tokens or
   deduplication keys through accidental struct serialization. Payload responses
   are opt-in, exact, and non-cacheable; clients render them only as text.
+- Missing or wrong PID authority, a stale or old gateway, timeout, malformed or
+  oversized internal capability response, and base runtime unavailability all
+  become one fixed non-cacheable dashboard `503`; upstream credentials,
+  headers, bodies, and error strings are never reflected. A missing live MCP
+  manager instead returns a fixed partial catalog without initializing it or
+  revealing its cause.
+- Capability identities containing invalid UTF-8, control or Unicode format
+  characters, unsafe separators, or over-bound text are omitted. Panicking,
+  cyclic, composition-heavy, reference-bearing, or over-budget parameter maps
+  cannot escape the typed shape whitelist or consume a fresh full budget per
+  discarded schema; one omitted shape never exposes its raw value or error.
 - Unverified email is skipped by default; an explicit opt-in marks it
   unverified. Private Delta Chat blob paths and copy errors do not enter durable
   events or attachment diagnostics, and oversized files are not materialized.
@@ -313,6 +348,7 @@ behavior remains owned by
 | `FR-SEC-014` | [pkg/health/server_test.go](../../pkg/health/server_test.go), [pkg/eventing/operator](../../pkg/eventing/operator), [pkg/gateway/event_operator_test.go](../../pkg/gateway/event_operator_test.go), [web/backend/api/events_test.go](../../web/backend/api/events_test.go), [cmd/picoclaw/internal/events](../../cmd/picoclaw/internal/events) |
 | `FR-SEC-015` | [pkg/fileutil/file_test.go](../../pkg/fileutil/file_test.go), [pkg/fileutil/durable.go](../../pkg/fileutil/durable.go), [pkg/fileutil/durable_unix.go](../../pkg/fileutil/durable_unix.go), [pkg/fileutil/durable_windows.go](../../pkg/fileutil/durable_windows.go) |
 | `FR-SEC-016` | [pkg/workflows/inspection.go](../../pkg/workflows/inspection.go), [pkg/workflows/inspection_open_unix.go](../../pkg/workflows/inspection_open_unix.go), [pkg/workflows/inspection_open_other.go](../../pkg/workflows/inspection_open_other.go), [pkg/workflows/inspection_test.go](../../pkg/workflows/inspection_test.go), [pkg/workflows/inspection_open_unix_test.go](../../pkg/workflows/inspection_open_unix_test.go), [web/backend/api/workflow_inspection.go](../../web/backend/api/workflow_inspection.go), [web/backend/api/workflow_inspection_test.go](../../web/backend/api/workflow_inspection_test.go), [web/frontend/src/components/workflows/workflow-definition-inspector.tsx](../../web/frontend/src/components/workflows/workflow-definition-inspector.tsx), [web/frontend/src/components/workflows/workflow-definition-inspector.test.tsx](../../web/frontend/src/components/workflows/workflow-definition-inspector.test.tsx) |
+| `FR-SEC-017` | [pkg/workflows/authoring_capabilities.go](../../pkg/workflows/authoring_capabilities.go), [pkg/workflows/authoring_capabilities_test.go](../../pkg/workflows/authoring_capabilities_test.go), [pkg/agent/workflow_authoring.go](../../pkg/agent/workflow_authoring.go), [pkg/agent/workflow_authoring_test.go](../../pkg/agent/workflow_authoring_test.go), [pkg/gateway/workflow_authoring.go](../../pkg/gateway/workflow_authoring.go), [pkg/gateway/workflow_authoring_test.go](../../pkg/gateway/workflow_authoring_test.go), [web/backend/api/workflow_authoring.go](../../web/backend/api/workflow_authoring.go), [web/backend/api/workflow_authoring_test.go](../../web/backend/api/workflow_authoring_test.go), [web/frontend/src/api/workflow-capabilities.test.ts](../../web/frontend/src/api/workflow-capabilities.test.ts), [web/frontend/src/components/workflows/workflow-capability-catalog.test.tsx](../../web/frontend/src/components/workflows/workflow-capability-catalog.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 
 ## Implementation Anchors
 
@@ -330,7 +366,12 @@ behavior remains owned by
 - [pkg/workflows/inspection.go](../../pkg/workflows/inspection.go)
 - [pkg/workflows/inspection_open_unix.go](../../pkg/workflows/inspection_open_unix.go)
 - [pkg/workflows/inspection_open_other.go](../../pkg/workflows/inspection_open_other.go)
+- [pkg/workflows/authoring_capabilities.go](../../pkg/workflows/authoring_capabilities.go)
+- [pkg/agent/workflow_authoring.go](../../pkg/agent/workflow_authoring.go)
+- [pkg/gateway/workflow_authoring.go](../../pkg/gateway/workflow_authoring.go)
 - [web/backend/api/workflow_inspection.go](../../web/backend/api/workflow_inspection.go)
+- [web/backend/api/workflow_authoring.go](../../web/backend/api/workflow_authoring.go)
+- [web/frontend/src/components/workflows/workflow-capability-catalog.tsx](../../web/frontend/src/components/workflows/workflow-capability-catalog.tsx)
 - [web/frontend/src/components/workflows/workflow-definition-inspector.tsx](../../web/frontend/src/components/workflows/workflow-definition-inspector.tsx)
 - [pkg/workflows/templates.go](../../pkg/workflows/templates.go)
 - [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go)

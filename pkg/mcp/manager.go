@@ -170,11 +170,12 @@ type ServerConnection struct {
 
 // Manager manages multiple MCP server connections
 type Manager struct {
-	servers       map[string]*ServerConnection
-	runtimeEvents runtimeevents.Bus
-	mu            sync.RWMutex
-	closed        atomic.Bool    // changed from bool to atomic.Bool to avoid TOCTOU race
-	wg            sync.WaitGroup // tracks in-flight CallTool calls
+	servers                         map[string]*ServerConnection
+	runtimeEvents                   runtimeevents.Bus
+	mu                              sync.RWMutex
+	closed                          atomic.Bool // changed from bool to atomic.Bool to avoid TOCTOU race
+	workflowAuthoringIdentitiesSafe atomic.Bool
+	wg                              sync.WaitGroup // tracks in-flight CallTool calls
 }
 
 var connectServerFunc = connectServer
@@ -205,6 +206,7 @@ func NewManager(opts ...ManagerOption) *Manager {
 	m := &Manager{
 		servers: make(map[string]*ServerConnection),
 	}
+	m.workflowAuthoringIdentitiesSafe.Store(true)
 	for _, opt := range opts {
 		if opt != nil {
 			opt(m)
@@ -352,6 +354,7 @@ func (m *Manager) ConnectServer(
 	}
 
 	m.servers[name] = conn
+	m.refreshWorkflowAuthoringIdentitySafetyLocked()
 	for _, tool := range conn.Tools {
 		toolName := ""
 		if tool != nil {
@@ -610,6 +613,74 @@ func (m *Manager) GetServer(name string) (*ServerConnection, bool) {
 	return conn, ok
 }
 
+// WorkflowAuthoringIdentitiesSafe reports whether distinct exact identities in
+// the manager's current tool set have unique canonical names. It is maintained
+// whenever a live connection changes, outside the catalog request path.
+func (m *Manager) WorkflowAuthoringIdentitiesSafe() bool {
+	return m != nil && m.workflowAuthoringIdentitiesSafe.Load()
+}
+
+func (m *Manager) refreshWorkflowAuthoringIdentitySafetyLocked() {
+	seen := make(map[string]ToolIdentity)
+	safe := true
+	for serverName, connection := range m.servers {
+		if connection == nil {
+			continue
+		}
+		for _, tool := range connection.Tools {
+			if tool == nil {
+				continue
+			}
+			canonical := CanonicalToolName(serverName, tool.Name)
+			identity := ToolIdentity{
+				Server: serverName,
+				Tool:   tool.Name,
+			}
+			if previous, duplicateOrCollision := seen[canonical]; duplicateOrCollision {
+				if previous != identity {
+					safe = false
+				}
+				continue
+			}
+			seen[canonical] = identity
+		}
+	}
+	m.workflowAuthoringIdentitiesSafe.Store(safe)
+}
+
+// VisitWorkflowAuthoringServers visits one identity-safe live server snapshot
+// without allocating a full map copy. The callback runs under the manager read
+// lock and must not mutate the manager.
+func (m *Manager) VisitWorkflowAuthoringServers(
+	ctx context.Context,
+	visit func(string, *ServerConnection) bool,
+) (bool, error) {
+	if m == nil || visit == nil {
+		return false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if m.closed.Load() || !m.workflowAuthoringIdentitiesSafe.Load() {
+		return false, nil
+	}
+	for name, connection := range m.servers {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if !visit(name, connection) {
+			return true, ctx.Err()
+		}
+	}
+	return true, ctx.Err()
+}
+
 // CallTool calls a tool on a specific server
 func (m *Manager) CallTool(
 	ctx context.Context,
@@ -758,7 +829,9 @@ func (m *Manager) reconnectServer(
 	}
 
 	if currentConn == staleConn {
+		m.workflowAuthoringIdentitiesSafe.Store(false)
 		m.servers[serverName] = freshConn
+		m.refreshWorkflowAuthoringIdentitySafetyLocked()
 		staleToClose := staleConn
 		m.mu.Unlock()
 		_ = staleToClose.Session.Close()
@@ -777,6 +850,7 @@ func (m *Manager) Close() error {
 	if m.closed.Swap(true) {
 		return nil // already closed
 	}
+	m.workflowAuthoringIdentitiesSafe.Store(false)
 
 	// Wait for all in-flight CallTool calls to finish before closing sessions
 	// After closed=true is set, no new CallTool can start (they check closed first)
@@ -803,6 +877,7 @@ func (m *Manager) Close() error {
 	}
 
 	m.servers = make(map[string]*ServerConnection)
+	m.workflowAuthoringIdentitiesSafe.Store(false)
 
 	if len(errs) > 0 {
 		return fmt.Errorf("failed to close %d server(s): %w", len(errs), errors.Join(errs...))

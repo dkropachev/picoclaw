@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -204,6 +205,50 @@ func TestReadPidFileWithCheckInvalidFile(t *testing.T) {
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Error("malformed PID file should be removed")
+	}
+}
+
+func TestPeekPidFileNeverMutatesMalformedStaleOrOversizedFiles(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{name: "malformed", raw: []byte("not json")},
+		{
+			name: "stale",
+			raw: []byte(
+				`{"pid":99999999,"token":"deadbeef","host":"127.0.0.1","port":18790}`,
+			),
+		},
+		{
+			name: "oversized",
+			raw:  []byte(`{"pid":1,"token":"` + strings.Repeat("x", 64<<10) + `"}`),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := tmpDir(t)
+			path := filepath.Join(dir, pidFileName)
+			if err := os.WriteFile(path, test.raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			got := PeekPidFile(dir)
+			if test.name == "stale" {
+				if got == nil || got.PID != 99999999 {
+					t.Fatalf("PeekPidFile() = %#v", got)
+				}
+			} else if got != nil {
+				t.Fatalf("PeekPidFile() = %#v, want nil", got)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("PID file was removed: %v", err)
+			}
+			if string(after) != string(test.raw) {
+				t.Fatal("PeekPidFile modified the PID file")
+			}
+		})
 	}
 }
 

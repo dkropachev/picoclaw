@@ -28,6 +28,14 @@ type ToolRegistry struct {
 	allowlist  map[string]struct{}
 }
 
+// CoreToolSnapshotEntry preserves the exact registry key used to execute a
+// core tool. Tool.Name can be mutable or panic, so catalog callers must not
+// derive executable targets from it.
+type CoreToolSnapshotEntry struct {
+	Name string
+	Tool Tool
+}
+
 type mediaStoreAware interface {
 	SetMediaStore(store media.MediaStore)
 }
@@ -224,6 +232,18 @@ func (r *ToolRegistry) GetRegistered(name string) (Tool, bool) {
 	defer r.mu.RUnlock()
 	entry, ok := r.tools[name]
 	if !ok {
+		return nil, false
+	}
+	return entry.Tool, true
+}
+
+// GetCoreTool returns one exact core registry entry. Hidden tools remain
+// excluded even while discovery temporarily promotes their TTL.
+func (r *ToolRegistry) GetCoreTool(name string) (Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	entry, ok := r.tools[name]
+	if !ok || entry == nil || !entry.IsCore || entry.Tool == nil {
 		return nil, false
 	}
 	return entry.Tool, true
@@ -577,4 +597,34 @@ func (r *ToolRegistry) GetAll() []Tool {
 		}
 	}
 	return tools
+}
+
+// VisitCoreTools visits live core registry entries without materializing a
+// full snapshot. The callback runs under the registry read lock and must not
+// mutate the registry.
+func (r *ToolRegistry) VisitCoreTools(
+	ctx context.Context,
+	visit func(CoreToolSnapshotEntry) bool,
+) error {
+	if r == nil || visit == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for name, entry := range r.tools {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry == nil || !entry.IsCore || entry.Tool == nil {
+			continue
+		}
+		if !visit(CoreToolSnapshotEntry{Name: name, Tool: entry.Tool}) {
+			return ctx.Err()
+		}
+	}
+	return ctx.Err()
 }

@@ -96,6 +96,7 @@ type workflowCallContractResponse struct {
 func (h *Handler) registerWorkflowRoutes(mux *http.ServeMux) {
 	h.registerWorkflowEditorRoutes(mux)
 	h.registerWorkflowInspectionRoutes(mux)
+	h.registerWorkflowAuthoringRoutes(mux)
 	mux.HandleFunc("GET /api/workflows", h.handleListWorkflows)
 	mux.HandleFunc("GET /api/workflows/settings", h.handleGetWorkflowSettings)
 	mux.HandleFunc("PATCH /api/workflows/settings", h.handlePatchWorkflowSettings)

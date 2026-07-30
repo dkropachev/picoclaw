@@ -22,7 +22,7 @@ message complexity.
 | ID | Level | Requirement | Rationale |
 | --- | --- | --- | --- |
 | `FR-ROUTE-001` | MUST | Dispatch rules match normalized channel, account, space, chat, topic, sender, and mentioned fields with first-match-wins ordering. | Routing must be deterministic. |
-| `FR-ROUTE-002` | MUST | Invalid target agent IDs fall back to default agent selection. | Bad config should not drop messages. |
+| `FR-ROUTE-002` | MUST | Runtime-targetable agent IDs use the exact canonical grammar `[a-z0-9][a-z0-9_-]{0,63}` through one shared validator. Invalid dispatch targets fall back to default agent selection, while authoring catalogs omit invalid configured IDs instead of emitting targets that routing cannot resolve. | Bad config should not drop messages or produce unusable authoring targets. |
 | `FR-ROUTE-003` | MUST | Default agent selection uses explicit default, then first configured agent, then implicit `main`. | Empty/simple configs need stable behavior. |
 | `FR-ROUTE-004` | MUST | Matched dispatch rules can override session dimensions before session allocation. | Routing and history isolation must stay aligned. |
 | `FR-ROUTE-005` | MUST | Identity links canonicalize sender matching and session identity consistently. | Same user identities should route and persist together. |
@@ -73,11 +73,12 @@ candidates.
 
 | Requirement IDs | Evidence |
 | --- | --- |
-| `FR-ROUTE-001`, `FR-ROUTE-002`, `FR-ROUTE-003`, `FR-ROUTE-004`, `FR-ROUTE-005` | [pkg/routing/route_test.go](../../pkg/routing/route_test.go), [docs/architecture/routing-system.md](../architecture/routing-system.md) |
+| `FR-ROUTE-001`, `FR-ROUTE-002`, `FR-ROUTE-003`, `FR-ROUTE-004`, `FR-ROUTE-005` | [pkg/routing/route_test.go](../../pkg/routing/route_test.go), [pkg/routing/agent_id_test.go](../../pkg/routing/agent_id_test.go), [pkg/agent/workflow_authoring_test.go](../../pkg/agent/workflow_authoring_test.go), [docs/architecture/routing-system.md](../architecture/routing-system.md) |
 | `FR-ROUTE-006`, `FR-ROUTE-007` | [pkg/routing/router_test.go](../../pkg/routing/router_test.go), [pkg/routing/features.go](../../pkg/routing/features.go) |
 
 ## Implementation Anchors
 
 - [pkg/routing/route.go](../../pkg/routing/route.go)
+- [pkg/routing/agent_id.go](../../pkg/routing/agent_id.go)
 - [pkg/routing/router.go](../../pkg/routing/router.go)
 - [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go)
