@@ -1258,8 +1258,8 @@ func TestHandleUpdateToolStateRejectsCASConflictWithoutOverwrite(t *testing.T) {
 	}
 	cfg.Tools.Cron.Enabled = false
 	cfg.Gateway.Port = 20001
-	if err := config.SaveConfig(configPath, cfg); err != nil {
-		t.Fatalf("SaveConfig() error = %v", err)
+	if saveErr := config.SaveConfig(configPath, cfg); saveErr != nil {
+		t.Fatalf("SaveConfig() error = %v", saveErr)
 	}
 
 	h := NewHandler(configPath)
@@ -1316,8 +1316,8 @@ func TestHandleUpdateToolStateSerializesConcurrentUpdates(t *testing.T) {
 	}
 	cfg.Tools.Cron.Enabled = false
 	cfg.Tools.Workflow.Enabled = false
-	if err := config.SaveConfig(configPath, cfg); err != nil {
-		t.Fatalf("SaveConfig() error = %v", err)
+	if saveErr := config.SaveConfig(configPath, cfg); saveErr != nil {
+		t.Fatalf("SaveConfig() error = %v", saveErr)
 	}
 
 	h := NewHandler(configPath)
@@ -1327,7 +1327,6 @@ func TestHandleUpdateToolStateSerializesConcurrentUpdates(t *testing.T) {
 	results := make(chan int, 2)
 	var wait sync.WaitGroup
 	for _, name := range []string{"cron", "workflow"} {
-		name := name
 		wait.Add(1)
 		go func() {
 			defer wait.Done()

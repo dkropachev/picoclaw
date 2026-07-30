@@ -325,8 +325,8 @@ func (h *Handler) handleUpdateToolState(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
 	}
-	if err := applyToolState(cfg, r.PathValue("name"), *req.Enabled); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if applyErr := applyToolState(cfg, r.PathValue("name"), *req.Enabled); applyErr != nil {
+		http.Error(w, applyErr.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -377,8 +377,8 @@ func decodeToolStateRequest(
 	if err != nil {
 		return err
 	}
-	opening, ok := first.(json.Delim)
-	if !ok || opening != '{' {
+	opening, isDelimiter := first.(json.Delim)
+	if !isDelimiter || opening != '{' {
 		return errors.New("tool state request must be an object")
 	}
 	seenEnabled := false
@@ -387,8 +387,8 @@ func decodeToolStateRequest(
 		if tokenErr != nil {
 			return tokenErr
 		}
-		name, ok := nameToken.(string)
-		if !ok {
+		name, isString := nameToken.(string)
+		if !isString {
 			return errors.New("tool state field name must be a string")
 		}
 		if name != "enabled" {

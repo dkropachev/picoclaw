@@ -674,22 +674,58 @@ func TestInspectWorkflowTriggersRejectsUnsafeASTWithoutNormalizing(t *testing.T)
 		{"merge", WorkflowTriggerEvent, "shared: &x {sources: [github]}\non:\n  event:\n    <<: *x\njobs: {}\n"},
 		{"multiple documents", WorkflowTriggerEvent, "on: {event: {sources: [github]}}\njobs: {}\n---\njobs: {}\n"},
 		{"unknown trigger", WorkflowTriggerEvent, "on: {webhook: {}}\njobs: {}\n"},
-		{"duplicate trigger", WorkflowTriggerEvent, "on:\n  event: {sources: [github]}\n  event: {sources: [gmail]}\njobs: {}\n"},
+		{
+			"duplicate trigger",
+			WorkflowTriggerEvent,
+			"on:\n  event: {sources: [github]}\n  event: {sources: [gmail]}\njobs: {}\n",
+		},
 		{"unknown nested field", WorkflowTriggerEvent, "on: {event: {sources: [github], hidden: true}}\njobs: {}\n"},
-		{"duplicate nested field", WorkflowTriggerEvent, "on:\n  event:\n    sources: [github]\n    sources: [gmail]\njobs: {}\n"},
+		{
+			"duplicate nested field",
+			WorkflowTriggerEvent,
+			"on:\n  event:\n    sources: [github]\n    sources: [gmail]\njobs: {}\n",
+		},
 		{"null trigger", WorkflowTriggerEvent, "on: {event: null}\njobs: {}\n"},
 		{"wrong node kind", WorkflowTriggerEvent, "on: {event: [github]}\njobs: {}\n"},
 		{"unsafe tag", WorkflowTriggerEvent, "on: {event: {sources: !unsafe github}}\njobs: {}\n"},
 		{"non string key", WorkflowTriggerEvent, "on:\n  event:\n    ? [bad]\n    : github\njobs: {}\n"},
 		{"multiline value", WorkflowTriggerEvent, "on: {event: {sources: [\"github\\ncorp\"]}}\njobs: {}\n"},
 		{"normalized list", WorkflowTriggerEvent, "on: {event: {sources: [\" github \"]}}\njobs: {}\n"},
-		{"unsafe integer default", WorkflowTriggerCommand, "on:\n  command:\n    name: run\n    args:\n      count: {type: number, default: 9007199254740992}\njobs: {}\n"},
-		{"unsafe negative integer default", WorkflowTriggerCommand, "on:\n  command:\n    name: run\n    args:\n      count: {type: number, default: -9007199254740992}\njobs: {}\n"},
-		{"unsafe decimal integer default", WorkflowTriggerCommand, "on:\n  command:\n    name: run\n    args:\n      count: {type: number, default: 9007199254740993.0}\njobs: {}\n"},
-		{"unsafe exponent integer default", WorkflowTriggerCommand, "on:\n  command:\n    name: run\n    args:\n      count: {type: number, default: 9007199254740993e0}\njobs: {}\n"},
-		{"top null default", WorkflowTriggerCommand, "on:\n  command:\n    name: run\n    args:\n      count: {type: number, default: null}\njobs: {}\n"},
-		{"timestamp default", WorkflowTriggerCommand, "on:\n  command:\n    name: run\n    args:\n      date: {type: string, default: 2026-07-29}\njobs: {}\n"},
-		{"hex default", WorkflowTriggerCommand, "on:\n  command:\n    name: run\n    args:\n      count: {type: number, default: 0x10}\njobs: {}\n"},
+		{
+			"unsafe integer default",
+			WorkflowTriggerCommand,
+			"on:\n  command:\n    name: run\n    args:\n      count: {type: number, default: 9007199254740992}\njobs: {}\n",
+		},
+		{
+			"unsafe negative integer default",
+			WorkflowTriggerCommand,
+			"on:\n  command:\n    name: run\n    args:\n      count: {type: number, default: -9007199254740992}\njobs: {}\n",
+		},
+		{
+			"unsafe decimal integer default",
+			WorkflowTriggerCommand,
+			"on:\n  command:\n    name: run\n    args:\n      count: {type: number, default: 9007199254740993.0}\njobs: {}\n",
+		},
+		{
+			"unsafe exponent integer default",
+			WorkflowTriggerCommand,
+			"on:\n  command:\n    name: run\n    args:\n      count: {type: number, default: 9007199254740993e0}\njobs: {}\n",
+		},
+		{
+			"top null default",
+			WorkflowTriggerCommand,
+			"on:\n  command:\n    name: run\n    args:\n      count: {type: number, default: null}\njobs: {}\n",
+		},
+		{
+			"timestamp default",
+			WorkflowTriggerCommand,
+			"on:\n  command:\n    name: run\n    args:\n      date: {type: string, default: 2026-07-29}\njobs: {}\n",
+		},
+		{
+			"hex default",
+			WorkflowTriggerCommand,
+			"on:\n  command:\n    name: run\n    args:\n      count: {type: number, default: 0x10}\njobs: {}\n",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
