@@ -11,6 +11,7 @@ import {
   getWorkflowRunGraph,
   getWorkflowSettings,
   inspectWorkflowEventTrigger,
+  inspectWorkflowTriggers,
   installWorkflowTemplate,
   listWorkflowRuns,
   listWorkflowTemplates,
@@ -20,6 +21,7 @@ import {
   publishWorkflowDevelopment,
   reloadWorkflows,
   renderWorkflowEventTrigger,
+  renderWorkflowTrigger,
   retryWorkflowRun,
   runWorkflow,
   testWorkflowDevelopment,
@@ -462,6 +464,7 @@ describe("workflow API normalization", () => {
     const settings = {
       configured: {
         enabled: true,
+        tool_enabled: false,
         definitions_dir: "",
         max_concurrent_runs: 0,
         default_timeout_seconds: 0,
@@ -470,6 +473,7 @@ describe("workflow API normalization", () => {
       },
       effective: {
         enabled: true,
+        tool_enabled: false,
         definitions_dir: "workflows",
         max_concurrent_runs: 4,
         default_timeout_seconds: 300,
@@ -500,6 +504,7 @@ describe("workflow API normalization", () => {
     await expect(
       patchWorkflowSettings({
         expected_config_revision: "sha256:settings-1",
+        tool_enabled: true,
         definitions_dir: "automations",
         max_concurrent_runs: 6,
       }),
@@ -519,6 +524,7 @@ describe("workflow API normalization", () => {
         method: "PATCH",
         body: JSON.stringify({
           expected_config_revision: "sha256:settings-1",
+          tool_enabled: true,
           definitions_dir: "automations",
           max_concurrent_runs: 6,
         }),
@@ -785,6 +791,163 @@ describe("workflow API normalization", () => {
         }),
       }),
     )
+  })
+
+  it("inspects all typed triggers and renders an explicit family deletion", async () => {
+    const yaml =
+      "name: Multi trigger\non:\n  schedule:\n    - cron: '0 * * * *'\njobs: {}\n"
+    const projections = {
+      manual: { present: false, editable: true, value: null },
+      schedule: {
+        present: true,
+        editable: true,
+        value: [{ cron: "0 * * * *" }],
+      },
+      channel_message: { present: false, editable: true, value: null },
+      command: { present: false, editable: true, value: null },
+      runtime_event: { present: false, editable: true, value: null },
+      event: { present: false, editable: true, value: null },
+      workflow_call: { present: false, editable: true, value: null },
+    }
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse({
+          revision: "opaque:trigger/revision?exact",
+          triggers: projections,
+          validation: { valid: true, validated_at: "2026-07-29T12:00:00Z" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          yaml: "name: Multi trigger\njobs: {}\n",
+          revision: "opaque:trigger/revision?next",
+          triggers: {
+            ...projections,
+            schedule: { present: false, editable: true, value: null },
+          },
+          validation: { valid: true, validated_at: "2026-07-29T12:00:01Z" },
+        }),
+      )
+
+    await expect(inspectWorkflowTriggers(yaml)).resolves.toMatchObject({
+      revision: "opaque:trigger/revision?exact",
+      triggers: {
+        schedule: {
+          present: true,
+          value: [{ cron: "0 * * * *" }],
+        },
+      },
+    })
+    await expect(
+      renderWorkflowTrigger({
+        yaml,
+        revision: "opaque:trigger/revision?exact",
+        trigger_type: "schedule",
+        trigger: null,
+      }),
+    ).resolves.toMatchObject({
+      revision: "opaque:trigger/revision?next",
+      triggers: { schedule: { present: false, value: null } },
+    })
+
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/workflows/development/triggers/inspect",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ yaml }),
+      }),
+    )
+    expect(mockedLauncherFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/workflows/development/triggers/render",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          yaml,
+          revision: "opaque:trigger/revision?exact",
+          trigger_type: "schedule",
+          trigger: null,
+        }),
+      }),
+    )
+  })
+
+  it("retains bounded candidate validation details on trigger render errors", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          error: "invalid_workflow_trigger",
+          candidate_validation: {
+            valid: false,
+            errors: [
+              {
+                path: "on.schedule[0].cron",
+                message: "invalid cron expression",
+              },
+            ],
+            validated_at: "2026-07-29T12:00:00Z",
+          },
+        },
+        422,
+      ),
+    )
+
+    await expect(
+      renderWorkflowTrigger({
+        yaml: "on:\n  schedule: []\njobs: {}\n",
+        revision: "trigger-revision",
+        trigger_type: "schedule",
+        trigger: [{ cron: "not-a-cron" }],
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<WorkflowAPIError>>({
+        status: 422,
+        message: "invalid_workflow_trigger",
+        candidateValidation: {
+          valid: false,
+          errors: [
+            {
+              path: "on.schedule[0].cron",
+              message: "invalid cron expression",
+            },
+          ],
+          validated_at: "2026-07-29T12:00:00Z",
+        },
+      }),
+    )
+  })
+
+  it("accepts the backend candidate-validation limit of 128 issues", async () => {
+    const errors = Array.from({ length: 128 }, (_, index) => ({
+      path: `on.schedule[${index}].cron`,
+      message: `invalid cron expression ${index}`,
+    }))
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          error: "invalid_workflow_trigger",
+          candidate_validation: {
+            valid: false,
+            errors,
+            validated_at: "2026-07-29T12:00:00Z",
+          },
+        },
+        422,
+      ),
+    )
+
+    const error = await renderWorkflowTrigger({
+      yaml: "on:\n  schedule: []\njobs: {}\n",
+      revision: "trigger-revision",
+      trigger_type: "schedule",
+      trigger: [{ cron: "not-a-cron" }],
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(WorkflowAPIError)
+    expect(
+      (error as WorkflowAPIError).candidateValidation?.errors,
+    ).toHaveLength(128)
   })
 
   it("matches a selected event using only YAML and event identity", async () => {

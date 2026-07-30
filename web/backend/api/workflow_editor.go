@@ -60,6 +60,14 @@ type workflowEventTriggerErrorResponse struct {
 // so the main workflow router remains stable while this surface evolves.
 func (h *Handler) registerWorkflowEditorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc(
+		"POST /api/workflows/development/triggers/inspect",
+		h.handleInspectWorkflowTriggers,
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/development/triggers/render",
+		h.handleRenderWorkflowTrigger,
+	)
+	mux.HandleFunc(
 		"POST /api/workflows/development/event-trigger/inspect",
 		h.handleInspectWorkflowEventTrigger,
 	)

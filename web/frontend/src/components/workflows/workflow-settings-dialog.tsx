@@ -26,6 +26,7 @@ import { Switch } from "@/components/ui/switch"
 
 type WorkflowSettingsForm = {
   enabled: boolean
+  toolEnabled: boolean
   definitionsDir: string
   maxConcurrentRuns: string
   defaultTimeoutSeconds: string
@@ -40,6 +41,7 @@ type HydratedWorkflowSettings = {
 
 const emptyForm: WorkflowSettingsForm = {
   enabled: false,
+  toolEnabled: false,
   definitionsDir: "",
   maxConcurrentRuns: "0",
   defaultTimeoutSeconds: "0",
@@ -76,7 +78,7 @@ export function WorkflowSettingsDialog({
   saveError?: string
   reloading: boolean
   onRetry: () => void
-  onSave: (values: WorkflowSettingsValues) => void
+  onSave: (values: WorkflowSettingsValues, expectedRevision: string) => void
   onReload: () => void
 }) {
   const [form, setForm] = useState<WorkflowSettingsForm>(emptyForm)
@@ -105,14 +107,16 @@ export function WorkflowSettingsDialog({
     if (hydratedSettings.revision === settings.config_revision) {
       return
     }
-    const locallyDirty = !workflowSettingsFormsEqual(
-      form,
+    const rebasedForm = rebaseWorkflowSettingsForm(
       hydratedSettings.form,
+      form,
+      nextForm,
     )
-    if (!locallyDirty) {
-      setForm(nextForm)
-      setValidationMessage("")
+    if (rebasedForm == null) {
+      return
     }
+    setForm(rebasedForm)
+    setValidationMessage("")
     setHydratedSettings({
       revision: settings.config_revision,
       form: nextForm,
@@ -121,8 +125,13 @@ export function WorkflowSettingsDialog({
 
   const parsedForm = useMemo(() => parseWorkflowSettingsForm(form), [form])
   const dirty =
+    hydratedSettings != null &&
+    !workflowSettingsFormsEqual(form, hydratedSettings.form)
+  const revisionConflict =
     settings != null &&
-    !workflowSettingsFormsEqual(form, workflowSettingsForm(settings.configured))
+    hydratedSettings != null &&
+    settings.config_revision !== hydratedSettings.revision &&
+    dirty
 
   const update = <K extends keyof WorkflowSettingsForm>(
     key: K,
@@ -138,7 +147,11 @@ export function WorkflowSettingsDialog({
       setValidationMessage(parsed.error)
       return
     }
-    onSave(parsed.values)
+    if (hydratedSettings == null) {
+      setValidationMessage("Reload workflow settings and try again.")
+      return
+    }
+    onSave(parsed.values, hydratedSettings.revision)
   }
 
   return (
@@ -214,6 +227,45 @@ export function WorkflowSettingsDialog({
                 />
               </div>
 
+              <div className="border-border flex items-center justify-between gap-4 rounded-md border p-3">
+                <div>
+                  <Label htmlFor="workflow-settings-tool-enabled">
+                    Enable workflow tool
+                  </Label>
+                  <p
+                    id="workflow-settings-tool-enabled-help"
+                    className="text-muted-foreground mt-1 text-xs"
+                  >
+                    Configured:{" "}
+                    {settings.configured.tool_enabled ? "Enabled" : "Disabled"}{" "}
+                    · Effective:{" "}
+                    {settings.configured.tool_enabled &&
+                    !settings.effective.tool_enabled
+                      ? "Blocked (workflows disabled)"
+                      : settings.effective.tool_enabled
+                        ? "Enabled"
+                        : "Disabled"}
+                  </p>
+                </div>
+                <Switch
+                  id="workflow-settings-tool-enabled"
+                  checked={form.toolEnabled}
+                  onCheckedChange={(checked) => update("toolEnabled", checked)}
+                  aria-describedby="workflow-settings-tool-enabled-help"
+                  disabled={saving}
+                />
+              </div>
+
+              {form.toolEnabled && !form.enabled ? (
+                <div
+                  role="status"
+                  className="border-border bg-muted/40 rounded-md border px-3 py-2 text-xs"
+                >
+                  Workflow tool access will remain blocked while workflows are
+                  disabled.
+                </div>
+              ) : null}
+
               <SettingsField
                 id="workflow-settings-definitions-dir"
                 label="Definitions directory"
@@ -283,6 +335,37 @@ export function WorkflowSettingsDialog({
               </div>
             </div>
 
+            {revisionConflict ? (
+              <div
+                role="alert"
+                className="border-border bg-muted/40 rounded-md border px-3 py-2 text-xs"
+              >
+                <p>
+                  Workflow settings changed elsewhere. Review the latest
+                  configured values, then move your local edits onto that
+                  revision before saving, or reload the latest values and
+                  discard your edits.
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-2"
+                  onClick={() => {
+                    const latestForm = workflowSettingsForm(settings.configured)
+                    setForm(latestForm)
+                    setHydratedSettings({
+                      revision: settings.config_revision,
+                      form: latestForm,
+                    })
+                    setValidationMessage("")
+                  }}
+                >
+                  Reload latest values
+                </Button>
+              </div>
+            ) : null}
+
             {validationMessage ? (
               <div
                 role="alert"
@@ -321,7 +404,12 @@ export function WorkflowSettingsDialog({
             type="button"
             onClick={submit}
             disabled={
-              loading || unavailable || settings == null || saving || !dirty
+              loading ||
+              unavailable ||
+              settings == null ||
+              saving ||
+              !dirty ||
+              revisionConflict
             }
             title={
               parsedForm.values == null
@@ -526,6 +614,7 @@ function workflowSettingsForm(
 ): WorkflowSettingsForm {
   return {
     enabled: values.enabled,
+    toolEnabled: values.tool_enabled,
     definitionsDir: values.definitions_dir,
     maxConcurrentRuns: String(values.max_concurrent_runs),
     defaultTimeoutSeconds: String(values.default_timeout_seconds),
@@ -582,6 +671,7 @@ function parseWorkflowSettingsForm(
   return {
     values: {
       enabled: form.enabled,
+      tool_enabled: form.toolEnabled,
       definitions_dir: form.definitionsDir.trim(),
       max_concurrent_runs: parsed[0],
       default_timeout_seconds: parsed[1],
@@ -598,10 +688,44 @@ function workflowSettingsFormsEqual(
 ) {
   return (
     left.enabled === right.enabled &&
+    left.toolEnabled === right.toolEnabled &&
     left.definitionsDir === right.definitionsDir &&
     left.maxConcurrentRuns === right.maxConcurrentRuns &&
     left.defaultTimeoutSeconds === right.defaultTimeoutSeconds &&
     left.maxCallDepth === right.maxCallDepth &&
     left.retentionDays === right.retentionDays
   )
+}
+
+const workflowSettingsFormKeys: ReadonlyArray<keyof WorkflowSettingsForm> = [
+  "enabled",
+  "toolEnabled",
+  "definitionsDir",
+  "maxConcurrentRuns",
+  "defaultTimeoutSeconds",
+  "maxCallDepth",
+  "retentionDays",
+]
+
+function rebaseWorkflowSettingsForm(
+  base: WorkflowSettingsForm,
+  local: WorkflowSettingsForm,
+  remote: WorkflowSettingsForm,
+): WorkflowSettingsForm | null {
+  const merged = { ...remote }
+  for (const key of workflowSettingsFormKeys) {
+    const localChanged = local[key] !== base[key]
+    const remoteChanged = remote[key] !== base[key]
+    if (localChanged && remoteChanged && local[key] !== remote[key]) {
+      return null
+    }
+    if (localChanged) {
+      const values = merged as Record<
+        keyof WorkflowSettingsForm,
+        string | boolean
+      >
+      values[key] = local[key]
+    }
+  }
+  return merged
 }

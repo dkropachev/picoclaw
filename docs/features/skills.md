@@ -28,6 +28,7 @@ and lets chat users force a skill for one request or the next message.
 | `FR-SKILLS-005` | MUST | Remove deletes an installed workspace skill without deleting builtin or unrelated content. | Users need safe cleanup. |
 | `FR-SKILLS-006` | MUST | `/use` and related commands force a selected skill for the requested message scope and can clear pending selection. | Chat workflows need direct skill control. |
 | `FR-SKILLS-007` | SHOULD | Deprecated GitHub registry config remains accepted while canonical registry config is preferred. | Existing configs must keep working. |
+| `FR-SKILLS-008` | MUST | Browser skill surfaces identify skill origin with accessible text and badge colors that retain sufficient contrast in supported themes. | Origin is operationally important and must remain perceivable without relying on low-contrast color alone. |
 
 ## Data And State Model
 
@@ -67,7 +68,7 @@ Owns: TOOL install_skill
 | HTTP | `/api/skills*` | Launcher list, detail, search, install, import, and delete. | `FR-SKILLS-003`, `FR-SKILLS-004`, `FR-SKILLS-005` |
 | Tools | `find_skills`, `install_skill` | Agent-callable registry search and install. | `FR-SKILLS-003`, `FR-SKILLS-004` |
 | Config | `tools.skills.*` | Registries, cache, concurrency, and legacy GitHub fields. | `FR-SKILLS-003`, `FR-SKILLS-007` |
-| Frontend | Skill list, import, detail, and hub marketplace pages under `web/frontend/src/components/agent/skills/**` and `web/frontend/src/components/agent/hub/**` | Browser skill management and registry discovery surfaces follow shared frontend API, accessibility, formatting, and route smoke-test rules. | `FR-SKILLS-003`, `FR-SKILLS-004`, `FR-SKILLS-005` |
+| Frontend | Skill list, import, detail, and hub marketplace pages under `web/frontend/src/components/agent/skills/**` and `web/frontend/src/components/agent/hub/**` | Browser skill management and registry discovery surfaces follow shared frontend API, accessibility, formatting, and route smoke-test rules; origin badges retain accessible text and contrast. | `FR-SKILLS-003`, `FR-SKILLS-004`, `FR-SKILLS-005`, `FR-SKILLS-008` |
 
 ## Algorithms And Ordering
 
@@ -98,6 +99,7 @@ policies apply to registry tokens and generated content.
 | `FR-SKILLS-003`, `FR-SKILLS-007` | [pkg/skills/search_cache_test.go](../../pkg/skills/search_cache_test.go), [pkg/skills/clawhub_registry_test.go](../../pkg/skills/clawhub_registry_test.go), [pkg/skills/github_registry_test.go](../../pkg/skills/github_registry_test.go) |
 | `FR-SKILLS-004`, `FR-SKILLS-005` | [pkg/skills/installer_test.go](../../pkg/skills/installer_test.go), [web/backend/api/skills_test.go](../../web/backend/api/skills_test.go) |
 | `FR-SKILLS-006` | [pkg/commands/show_list_handlers_test.go](../../pkg/commands/show_list_handlers_test.go), [docs/guides/configuration.md](../guides/configuration.md) |
+| `FR-SKILLS-008` | [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts), [web/frontend/src/components/agent/skills/origin-utils.ts](../../web/frontend/src/components/agent/skills/origin-utils.ts) |
 
 ## Implementation Anchors
 

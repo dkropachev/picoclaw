@@ -16,6 +16,7 @@ const workflowSettingsRequestMaxBytes = 1 << 20
 type workflowSettingsPatchRequest struct {
 	ExpectedConfigRevision *string `json:"expected_config_revision"`
 	Enabled                *bool   `json:"enabled,omitempty"`
+	ToolEnabled            *bool   `json:"tool_enabled,omitempty"`
 	DefinitionsDir         *string `json:"definitions_dir,omitempty"`
 	MaxConcurrentRuns      *int    `json:"max_concurrent_runs,omitempty"`
 	DefaultTimeoutSeconds  *int    `json:"default_timeout_seconds,omitempty"`
@@ -23,8 +24,19 @@ type workflowSettingsPatchRequest struct {
 	RetentionDays          *int    `json:"retention_days,omitempty"`
 }
 
+type workflowSettingsConfigured struct {
+	Enabled               bool   `json:"enabled"`
+	ToolEnabled           bool   `json:"tool_enabled"`
+	DefinitionsDir        string `json:"definitions_dir"`
+	MaxConcurrentRuns     int    `json:"max_concurrent_runs"`
+	DefaultTimeoutSeconds int    `json:"default_timeout_seconds"`
+	MaxCallDepth          int    `json:"max_call_depth"`
+	RetentionDays         int    `json:"retention_days"`
+}
+
 type workflowSettingsEffective struct {
 	Enabled               bool   `json:"enabled"`
+	ToolEnabled           bool   `json:"tool_enabled"`
 	DefinitionsDir        string `json:"definitions_dir"`
 	MaxConcurrentRuns     int    `json:"max_concurrent_runs"`
 	DefaultTimeoutSeconds int    `json:"default_timeout_seconds"`
@@ -39,10 +51,10 @@ type workflowSettingsEffects struct {
 }
 
 type workflowSettingsResponse struct {
-	Configured     config.WorkflowsConfig    `json:"configured"`
-	Effective      workflowSettingsEffective `json:"effective"`
-	ConfigRevision string                    `json:"config_revision"`
-	Effects        workflowSettingsEffects   `json:"effects"`
+	Configured     workflowSettingsConfigured `json:"configured"`
+	Effective      workflowSettingsEffective  `json:"effective"`
+	ConfigRevision string                     `json:"config_revision"`
+	Effects        workflowSettingsEffects    `json:"effects"`
 }
 
 func (h *Handler) handleGetWorkflowSettings(w http.ResponseWriter, _ *http.Request) {
@@ -57,6 +69,7 @@ func (h *Handler) handleGetWorkflowSettings(w http.ResponseWriter, _ *http.Reque
 	writeWorkflowSettingsResponse(
 		w,
 		cfg.Workflows,
+		cfg.Tools.Workflow.Enabled,
 		revision,
 		workflowSettingsEffects{
 			LauncherEffect: "applied",
@@ -97,8 +110,13 @@ func (h *Handler) handlePatchWorkflowSettings(w http.ResponseWriter, r *http.Req
 		return
 	}
 	previous := cfg.Workflows
+	previousToolEnabled := cfg.Tools.Workflow.Enabled
 	next := previous
 	applyWorkflowSettingsPatch(&next, request)
+	nextToolEnabled := previousToolEnabled
+	if request.ToolEnabled != nil {
+		nextToolEnabled = *request.ToolEnabled
+	}
 	if validationErr := validateWorkflowSettings(cfg.WorkspacePath(), next); validationErr != nil {
 		writeWorkflowJSONStatus(w, http.StatusUnprocessableEntity, map[string]any{
 			"error": "invalid_workflow_settings",
@@ -128,6 +146,7 @@ func (h *Handler) handlePatchWorkflowSettings(w http.ResponseWriter, r *http.Req
 		return
 	}
 	cfg.Workflows = next
+	cfg.Tools.Workflow.Enabled = nextToolEnabled
 	var revision string
 	save := func() error {
 		var saveErr error
@@ -175,6 +194,7 @@ func (h *Handler) handlePatchWorkflowSettings(w http.ResponseWriter, r *http.Req
 	writeWorkflowSettingsResponse(
 		w,
 		next,
+		nextToolEnabled,
 		revision,
 		workflowSettingsEffects{
 			LauncherEffect: "applied",
@@ -258,14 +278,24 @@ func validateWorkflowSettings(workspace string, settings config.WorkflowsConfig)
 func writeWorkflowSettingsResponse(
 	w http.ResponseWriter,
 	settings config.WorkflowsConfig,
+	toolEnabled bool,
 	revision string,
 	effects workflowSettingsEffects,
 ) {
 	w.Header().Set("Cache-Control", "no-store")
 	writeWorkflowJSON(w, workflowSettingsResponse{
-		Configured: settings,
+		Configured: workflowSettingsConfigured{
+			Enabled:               settings.Enabled,
+			ToolEnabled:           toolEnabled,
+			DefinitionsDir:        settings.DefinitionsDir,
+			MaxConcurrentRuns:     settings.MaxConcurrentRuns,
+			DefaultTimeoutSeconds: settings.DefaultTimeoutSeconds,
+			MaxCallDepth:          settings.MaxCallDepth,
+			RetentionDays:         settings.RetentionDays,
+		},
 		Effective: workflowSettingsEffective{
 			Enabled:               settings.Enabled,
+			ToolEnabled:           settings.Enabled && toolEnabled,
 			DefinitionsDir:        settings.EffectiveDefinitionsDir(),
 			MaxConcurrentRuns:     settings.EffectiveMaxConcurrentRuns(),
 			DefaultTimeoutSeconds: int(settings.EffectiveDefaultTimeout().Seconds()),

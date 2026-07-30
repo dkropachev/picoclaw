@@ -101,20 +101,14 @@ export function useToolsPage({
   const toggleToolMutation = useMutation({
     mutationFn: async ({ name, enabled }: { name: string; enabled: boolean }) =>
       setToolEnabled(name, enabled),
-    onSuccess: async (_, variables) => {
+    onSuccess: async () => {
       const gateway = await refreshGatewayState({ force: true })
       showSaveSuccessOrRestartToast(
         t,
-        variables.enabled
-          ? t("pages.agent.tools.enable_success", "Tool enabled successfully")
-          : t(
-              "pages.agent.tools.disable_success",
-              "Tool disabled successfully",
-            ),
+        t("pages.agent.tools.toggle_success", "Tool setting saved"),
         t("navigation.tools", "Tools"),
         gateway?.restartRequired === true,
       )
-      void queryClient.invalidateQueries({ queryKey: ["tools"] })
     },
     onError: (error) => {
       toast.error(
@@ -122,6 +116,15 @@ export function useToolsPage({
           ? error.message
           : t("pages.agent.tools.toggle_error", "Failed to toggle tool"),
       )
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ["tools"] })
+      void queryClient.invalidateQueries({
+        queryKey: ["workflows", "settings"],
+      })
+      void queryClient.invalidateQueries({
+        queryKey: ["workflows", "dependencies"],
+      })
     },
   })
 

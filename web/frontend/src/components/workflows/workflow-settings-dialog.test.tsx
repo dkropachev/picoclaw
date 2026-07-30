@@ -21,6 +21,9 @@ describe("WorkflowSettingsDialog", () => {
     ).toBeInTheDocument()
 
     await user.click(screen.getByRole("switch", { name: "Enable workflows" }))
+    await user.click(
+      screen.getByRole("switch", { name: "Enable workflow tool" }),
+    )
     await user.type(
       screen.getByLabelText("Definitions directory"),
       "automations",
@@ -30,14 +33,21 @@ describe("WorkflowSettingsDialog", () => {
     await user.type(concurrency, "6")
     await user.click(screen.getByRole("button", { name: "Save settings" }))
 
-    expect(onSave).toHaveBeenCalledWith({
-      enabled: false,
-      definitions_dir: "automations",
-      max_concurrent_runs: 6,
-      default_timeout_seconds: 0,
-      max_call_depth: 0,
-      retention_days: 0,
-    })
+    expect(onSave).toHaveBeenCalledWith(
+      {
+        enabled: false,
+        tool_enabled: true,
+        definitions_dir: "automations",
+        max_concurrent_runs: 6,
+        default_timeout_seconds: 0,
+        max_call_depth: 0,
+        retention_days: 0,
+      },
+      "sha256:settings-1",
+    )
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Workflow tool access will remain blocked",
+    )
   })
 
   it("rejects invalid numeric values before save", async () => {
@@ -156,6 +166,7 @@ describe("WorkflowSettingsDialog", () => {
   it("preserves dirty values and shows a conflict after settings refetch", async () => {
     const user = userEvent.setup()
     const first = workflowSettings()
+    const onSave = vi.fn()
     const { rerender } = render(
       <WorkflowSettingsDialog
         open
@@ -166,7 +177,7 @@ describe("WorkflowSettingsDialog", () => {
         saving={false}
         reloading={false}
         onRetry={vi.fn()}
-        onSave={vi.fn()}
+        onSave={onSave}
         onReload={vi.fn()}
       />,
     )
@@ -181,16 +192,16 @@ describe("WorkflowSettingsDialog", () => {
           config_revision: "sha256:settings-2",
           configured: {
             ...first.configured,
+            definitions_dir: "server-workflows",
             retention_days: 90,
           },
         })}
         loading={false}
         unavailable={false}
         saving={false}
-        saveError="Workflow settings changed elsewhere. Reload them and try again."
         reloading={false}
         onRetry={vi.fn()}
-        onSave={vi.fn()}
+        onSave={onSave}
         onReload={vi.fn()}
       />,
     )
@@ -198,6 +209,65 @@ describe("WorkflowSettingsDialog", () => {
     expect(definitions).toHaveValue("my-workflows")
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Workflow settings changed elsewhere.",
+    )
+    expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled()
+
+    await user.click(
+      screen.getByRole("button", { name: "Reload latest values" }),
+    )
+    expect(definitions).toHaveValue("server-workflows")
+    expect(screen.getByLabelText("Run retention")).toHaveValue(90)
+    expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled()
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it("rebases disjoint local edits without overwriting a concurrent tool setting", async () => {
+    const user = userEvent.setup()
+    const first = workflowSettings()
+    const onSave = vi.fn()
+    const view = renderSettings({ settings: first, onSave })
+
+    const retention = screen.getByLabelText("Run retention")
+    await user.clear(retention)
+    await user.type(retention, "60")
+
+    view.rerender(
+      <WorkflowSettingsDialog
+        open
+        onOpenChange={vi.fn()}
+        settings={workflowSettings({
+          config_revision: "sha256:settings-2",
+          configured: {
+            ...first.configured,
+            tool_enabled: true,
+          },
+          effective: {
+            ...first.effective,
+            tool_enabled: true,
+          },
+        })}
+        loading={false}
+        unavailable={false}
+        saving={false}
+        reloading={false}
+        onRetry={vi.fn()}
+        onSave={onSave}
+        onReload={vi.fn()}
+      />,
+    )
+
+    expect(
+      screen.getByRole("switch", { name: "Enable workflow tool" }),
+    ).toBeChecked()
+    expect(retention).toHaveValue(60)
+    await user.click(screen.getByRole("button", { name: "Save settings" }))
+
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tool_enabled: true,
+        retention_days: 60,
+      }),
+      "sha256:settings-2",
     )
   })
 })
@@ -210,7 +280,10 @@ function renderSettings({
 }: {
   settings?: WorkflowSettingsResponse
   unavailable?: boolean
-  onSave?: (values: WorkflowSettingsResponse["configured"]) => void
+  onSave?: (
+    values: WorkflowSettingsResponse["configured"],
+    expectedRevision: string,
+  ) => void
   onReload?: () => void
 } = {}) {
   return render(
@@ -235,6 +308,7 @@ function workflowSettings(
   return {
     configured: {
       enabled: true,
+      tool_enabled: false,
       definitions_dir: "",
       max_concurrent_runs: 0,
       default_timeout_seconds: 0,
@@ -243,6 +317,7 @@ function workflowSettings(
     },
     effective: {
       enabled: true,
+      tool_enabled: false,
       definitions_dir: "workflows",
       max_concurrent_runs: 4,
       default_timeout_seconds: 300,

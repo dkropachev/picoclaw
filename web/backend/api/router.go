@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/web/backend/launcherconfig"
 )
 
@@ -34,6 +35,7 @@ type Handler struct {
 	mcpOAuthLatestByServer     map[string]string
 	configMutationMu           sync.Mutex
 	workflowDevelopmentMu      sync.Mutex
+	saveToolStateConfig        func(string, *config.Config, string) (string, error)
 }
 
 // NewHandler creates an instance of the API handler.
@@ -49,6 +51,7 @@ func NewHandler(configPath string) *Handler {
 		mcpOAuthFlows:              make(map[string]*mcpOAuthFlow),
 		mcpOAuthState:              make(map[string]string),
 		mcpOAuthLatestByServer:     make(map[string]string),
+		saveToolStateConfig:        config.SaveConfigIfRevision,
 	}
 }
 

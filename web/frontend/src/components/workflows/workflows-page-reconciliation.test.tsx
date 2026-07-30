@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { ReactNode } from "react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
@@ -14,7 +14,7 @@ import { WorkflowsPage } from "@/components/workflows/workflows-page"
 const workflowMocks = vi.hoisted(() => ({
   checkWorkflowDependencies: vi.fn(),
   getWorkflowDevelopment: vi.fn(),
-  inspectWorkflowEventTrigger: vi.fn(),
+  inspectWorkflowTriggers: vi.fn(),
   listWorkflowRuns: vi.fn(),
   listWorkflowTemplates: vi.fn(),
   listWorkflows: vi.fn(),
@@ -93,10 +93,9 @@ describe("WorkflowsPage draft-test reconciliation", () => {
     workflowMocks.listWorkflows.mockResolvedValue({ workflows: [] })
     workflowMocks.listWorkflowRuns.mockResolvedValue({ runs: [] })
     workflowMocks.listWorkflowTemplates.mockResolvedValue({ templates: [] })
-    workflowMocks.inspectWorkflowEventTrigger.mockResolvedValue({
+    workflowMocks.inspectWorkflowTriggers.mockResolvedValue({
       revision: "trigger-revision",
-      editable: true,
-      event_trigger: null,
+      triggers: emptyTriggerProjections(),
       validation: {
         valid: true,
         validated_at: "2026-07-29T12:00:00Z",
@@ -174,10 +173,259 @@ describe("WorkflowsPage draft-test reconciliation", () => {
     expect(toastMocks.error).not.toHaveBeenCalled()
     expect(onSearchChange).toHaveBeenCalledWith({ run: runID }, false)
   })
+
+  it("blocks draft actions and mode changes while builder edits are pending", async () => {
+    const session = developmentSession()
+    workflowMocks.getWorkflowDevelopment.mockResolvedValue({ session })
+    const onSearchChange = vi.fn()
+    const user = userEvent.setup()
+
+    renderWorkflowsPage(onSearchChange)
+
+    await user.click(await screen.findByRole("tab", { name: "Builder" }))
+    await user.click(
+      await screen.findByRole("switch", {
+        name: "Enable manual trigger",
+      }),
+    )
+
+    expect(
+      await screen.findByText("Trigger builder changes are pending."),
+    ).toBeInTheDocument()
+    for (const name of [
+      "Save Draft",
+      "Ask AI",
+      "Scaffold",
+      "Validate",
+      "Test Draft",
+      "Publish",
+      "Discard",
+    ]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled()
+    }
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeDisabled()
+
+    await user.click(screen.getByRole("tab", { name: "YAML" }))
+    expect(screen.getByRole("tab", { name: "Builder" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    )
+    expect(toastMocks.warning).toHaveBeenCalledWith(
+      "Apply or reset the trigger builder changes before leaving or running another draft action.",
+    )
+
+    onSearchChange.mockClear()
+    await user.click(screen.getByRole("button", { name: "Operate" }))
+    expect(onSearchChange).not.toHaveBeenCalled()
+    expect(toastMocks.warning).toHaveBeenLastCalledWith(
+      "Apply or reset the trigger builder changes before leaving or running another draft action.",
+    )
+  })
+
+  it("retains builder edits when browser navigation requests Operate mode", async () => {
+    const session = developmentSession()
+    workflowMocks.getWorkflowDevelopment.mockResolvedValue({ session })
+    const onSearchChange = vi.fn()
+    const user = userEvent.setup()
+    const view = renderWorkflowsPage(onSearchChange)
+
+    await user.click(await screen.findByRole("tab", { name: "Builder" }))
+    const manualSwitch = await screen.findByRole("switch", {
+      name: "Enable manual trigger",
+    })
+    await user.click(manualSwitch)
+    await screen.findByText("Trigger builder changes are pending.")
+    onSearchChange.mockClear()
+
+    view.rerenderPage({ mode: "operate" })
+
+    await waitFor(() => expect(onSearchChange).toHaveBeenCalledWith({}, true))
+    expect(screen.getByRole("tab", { name: "Builder" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    )
+    expect(
+      screen.getByRole("switch", { name: "Enable manual trigger" }),
+    ).toBeChecked()
+    expect(
+      screen.getByText("Trigger builder changes are pending."),
+    ).toBeInTheDocument()
+    expect(toastMocks.warning).toHaveBeenCalledWith(
+      "Apply or reset the trigger builder changes before leaving or running another draft action.",
+    )
+  })
+
+  it("retains dirty builder edits until an external session update is explicitly loaded", async () => {
+    const session = developmentSession()
+    workflowMocks.getWorkflowDevelopment.mockResolvedValue({ session })
+    const user = userEvent.setup()
+    const view = renderWorkflowsPage(vi.fn())
+
+    await user.click(await screen.findByRole("tab", { name: "Builder" }))
+    await user.click(
+      await screen.findByRole("switch", {
+        name: "Enable manual trigger",
+      }),
+    )
+    await screen.findByText("Trigger builder changes are pending.")
+
+    const updatedSession: WorkflowDevelopmentSession = {
+      ...session,
+      session_revision: "session-revision-external",
+      draft_revision: "draft-revision-external",
+      prompt: "Changed by another operator",
+      yaml: "name: Externally changed\non: {}\njobs: {}\n",
+      updated_at: "2026-07-29T12:05:00Z",
+    }
+    workflowMocks.getWorkflowDevelopment.mockResolvedValue({
+      session: updatedSession,
+    })
+    await act(async () => {
+      await view.client.refetchQueries({
+        queryKey: ["workflows", "development"],
+      })
+    })
+
+    expect(
+      await screen.findByText("Workflow development changed elsewhere."),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(/authoritative workflow draft changed elsewhere/i),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole("switch", { name: "Enable manual trigger" }),
+    ).toBeChecked()
+    expect(screen.getByRole("button", { name: "Save Draft" })).toBeDisabled()
+    expect(screen.getByRole("button", { name: "Apply to YAML" })).toBeDisabled()
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Discard local edits and load latest state",
+      }),
+    )
+
+    await waitFor(() =>
+      expect(workflowMocks.inspectWorkflowTriggers).toHaveBeenLastCalledWith(
+        updatedSession.yaml,
+        expect.any(AbortSignal),
+      ),
+    )
+    expect(
+      screen.queryByText("Workflow development changed elsewhere."),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.getByRole("switch", { name: "Enable manual trigger" }),
+    ).not.toBeChecked()
+  })
+
+  it("turns an external update into a conflict while local draft YAML is unsaved", async () => {
+    const session = developmentSession()
+    workflowMocks.getWorkflowDevelopment.mockResolvedValue({ session })
+    const user = userEvent.setup()
+    const view = renderWorkflowsPage(vi.fn())
+
+    const yamlEditor = await screen.findByRole("textbox", {
+      name: "Workflow YAML",
+    })
+    fireEvent.change(yamlEditor, {
+      target: {
+        value: "name: Locally applied builder draft\non: {}\njobs: {}\n",
+      },
+    })
+
+    const updatedSession: WorkflowDevelopmentSession = {
+      ...session,
+      session_revision: "session-revision-after-local-apply",
+      draft_revision: "draft-revision-after-local-apply",
+      yaml: "name: Externally changed\non: {}\njobs: {}\n",
+      updated_at: "2026-07-29T12:06:00Z",
+    }
+    workflowMocks.getWorkflowDevelopment.mockResolvedValue({
+      session: updatedSession,
+    })
+    await act(async () => {
+      await view.client.refetchQueries({
+        queryKey: ["workflows", "development"],
+      })
+    })
+
+    expect(
+      await screen.findByText("Workflow development changed elsewhere."),
+    ).toBeInTheDocument()
+    expect(yamlEditor).toHaveValue(
+      "name: Locally applied builder draft\non: {}\njobs: {}\n",
+    )
+    expect(screen.getByRole("button", { name: "Save Draft" })).toBeDisabled()
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Discard local edits and load latest state",
+      }),
+    )
+    expect(yamlEditor).toHaveValue(updatedSession.yaml)
+  })
+
+  it("retains dirty builder edits when the active session is removed elsewhere", async () => {
+    const session = developmentSession()
+    workflowMocks.getWorkflowDevelopment.mockResolvedValue({ session })
+    const user = userEvent.setup()
+    const view = renderWorkflowsPage(vi.fn())
+
+    await user.click(await screen.findByRole("tab", { name: "Builder" }))
+    await user.click(
+      await screen.findByRole("switch", {
+        name: "Enable manual trigger",
+      }),
+    )
+    await screen.findByText("Trigger builder changes are pending.")
+
+    workflowMocks.getWorkflowDevelopment.mockResolvedValue({ session: null })
+    await act(async () => {
+      await view.client.refetchQueries({
+        queryKey: ["workflows", "development"],
+      })
+    })
+
+    expect(
+      await screen.findByText("Workflow development changed elsewhere."),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(/development session was removed elsewhere/i),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole("switch", { name: "Enable manual trigger" }),
+    ).toBeChecked()
+    expect(screen.queryByText("New workflow")).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Save Draft" })).toBeDisabled()
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Discard local edits and load latest state",
+      }),
+    )
+
+    expect(await screen.findByText("New workflow")).toBeInTheDocument()
+    expect(
+      screen.queryByRole("switch", { name: "Enable manual trigger" }),
+    ).not.toBeInTheDocument()
+  })
 })
+
+function emptyTriggerProjections() {
+  return {
+    manual: { present: false, editable: true, value: null },
+    schedule: { present: false, editable: true, value: null },
+    channel_message: { present: false, editable: true, value: null },
+    command: { present: false, editable: true, value: null },
+    runtime_event: { present: false, editable: true, value: null },
+    event: { present: false, editable: true, value: null },
+    workflow_call: { present: false, editable: true, value: null },
+  }
+}
 
 function renderWorkflowsPage(
   onSearchChange: (search: WorkflowsRouteSearch, replace?: boolean) => void,
+  search: WorkflowsRouteSearch = {},
 ) {
   const client = new QueryClient({
     defaultOptions: {
@@ -185,9 +433,17 @@ function renderWorkflowsPage(
       mutations: { retry: false },
     },
   })
-  return render(
+  const page = (nextSearch: WorkflowsRouteSearch) => (
     <QueryClientProvider client={client}>
-      <WorkflowsPage search={{}} onSearchChange={onSearchChange} />
-    </QueryClientProvider>,
+      <WorkflowsPage search={nextSearch} onSearchChange={onSearchChange} />
+    </QueryClientProvider>
   )
+  const view = render(page(search))
+  return {
+    ...view,
+    client,
+    rerenderPage(nextSearch: WorkflowsRouteSearch) {
+      view.rerender(page(nextSearch))
+    },
+  }
 }

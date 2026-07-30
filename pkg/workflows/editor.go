@@ -1,11 +1,9 @@
 package workflows
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 
@@ -13,12 +11,25 @@ import (
 )
 
 var (
+	// ErrWorkflowTriggerStaleRevision prevents a structured edit from
+	// overwriting YAML that changed after it was inspected.
+	ErrWorkflowTriggerStaleRevision = errors.New("workflow YAML revision is stale")
+	// ErrWorkflowTriggerNotEditable reports YAML whose aliases, merges, tags,
+	// or shape cannot be changed losslessly by the structured editor.
+	ErrWorkflowTriggerNotEditable = errors.New("workflow trigger is not safely editable")
+	// ErrWorkflowTriggerKind reports a trigger family outside the supported
+	// workflow schema.
+	ErrWorkflowTriggerKind = errors.New("unsupported workflow trigger type")
+	// ErrWorkflowTriggerValue reports a replacement whose Go or projected YAML
+	// shape is not safe for the structured editor.
+	ErrWorkflowTriggerValue = errors.New("invalid workflow trigger value")
+
 	// ErrWorkflowEventTriggerStaleRevision prevents a structured edit from
 	// overwriting YAML that changed after it was inspected.
-	ErrWorkflowEventTriggerStaleRevision = errors.New("workflow YAML revision is stale")
+	ErrWorkflowEventTriggerStaleRevision = ErrWorkflowTriggerStaleRevision
 	// ErrWorkflowEventTriggerNotEditable reports YAML whose aliases, merges, or
 	// shape cannot be changed safely by the narrow structured editor.
-	ErrWorkflowEventTriggerNotEditable = errors.New("workflow event trigger is not safely editable")
+	ErrWorkflowEventTriggerNotEditable = ErrWorkflowTriggerNotEditable
 )
 
 // WorkflowEventTriggerInspection is the authoritative parsed projection used
@@ -35,48 +46,17 @@ type WorkflowEventTriggerInspection struct {
 // YAML is still returned as structured validation feedback; unsafe AST shapes
 // remain available through the raw editor but are marked non-editable.
 func InspectWorkflowEventTrigger(raw string) WorkflowEventTriggerInspection {
+	all := InspectWorkflowTriggers(raw)
+	event := all.Triggers[WorkflowTriggerEvent]
 	inspection := WorkflowEventTriggerInspection{
-		Revision:   workflowEditorRevision(raw),
-		Validation: validateDevelopmentYAML(raw),
+		Revision:   all.Revision,
+		Editable:   event.Editable,
+		Reason:     event.Reason,
+		Validation: all.Validation,
 	}
-
-	workflow, parseErr := Parse([]byte(raw))
-	if parseErr == nil && workflow != nil {
-		inspection.EventTrigger = cloneEventTrigger(workflow.On.Event)
+	if trigger, ok := event.Value.(*EventTrigger); ok {
+		inspection.EventTrigger = trigger
 	}
-
-	document, err := decodeWorkflowEditorDocument(raw)
-	if err != nil {
-		if errors.Is(err, errWorkflowEditorMultipleDocuments) {
-			inspection.Reason = "Workflow YAML must contain exactly one document."
-			return inspection
-		}
-		inspection.Reason = "Fix YAML syntax errors before using the structured event-trigger editor."
-		return inspection
-	}
-	root, reason := editableWorkflowRoot(document)
-	if reason != "" {
-		inspection.Reason = reason
-		return inspection
-	}
-	if reason = unsafeWorkflowEditorNodeReason(root); reason != "" {
-		inspection.Reason = reason
-		return inspection
-	}
-	if reason = validateWorkflowEditorTriggerPath(root); reason != "" {
-		inspection.Reason = reason
-		return inspection
-	}
-	if parseErr != nil {
-		inspection.Reason = "Fix workflow parse errors before using the structured event-trigger editor."
-		return inspection
-	}
-	if reason = workflowEventTriggerProjectionReason(inspection.EventTrigger); reason != "" {
-		inspection.Reason = reason
-		return inspection
-	}
-
-	inspection.Editable = true
 	return inspection
 }
 
@@ -88,49 +68,27 @@ func RenderWorkflowEventTrigger(
 	revision string,
 	trigger *EventTrigger,
 ) (string, WorkflowEventTriggerInspection, error) {
-	inspection := InspectWorkflowEventTrigger(raw)
-	if revision == "" || revision != inspection.Revision {
-		return "", inspection, ErrWorkflowEventTriggerStaleRevision
-	}
-	if !inspection.Editable {
-		return "", inspection, fmt.Errorf(
-			"%w: %s",
-			ErrWorkflowEventTriggerNotEditable,
-			inspection.Reason,
-		)
-	}
+	var replacement any
 	if trigger != nil {
-		if errs := validateEventTrigger("on.event", trigger); len(errs) != 0 {
-			return "", inspection, errs
-		}
+		replacement = trigger
 	}
-
-	document, err := decodeWorkflowEditorDocument(raw)
-	if err != nil {
-		return "", inspection, err
+	rendered, all, err := RenderWorkflowTrigger(
+		raw,
+		revision,
+		WorkflowTriggerEvent,
+		replacement,
+	)
+	event := all.Triggers[WorkflowTriggerEvent]
+	inspection := WorkflowEventTriggerInspection{
+		Revision:   all.Revision,
+		Editable:   event.Editable,
+		Reason:     event.Reason,
+		Validation: all.Validation,
 	}
-	root := document.Content[0]
-	changed, err := replaceWorkflowEventTriggerNode(root, trigger)
-	if err != nil {
-		return "", inspection, err
+	if projected, ok := event.Value.(*EventTrigger); ok {
+		inspection.EventTrigger = projected
 	}
-	if !changed {
-		return raw, inspection, nil
-	}
-
-	var rendered bytes.Buffer
-	encoder := yaml.NewEncoder(&rendered)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(document); err != nil {
-		_ = encoder.Close()
-		return "", inspection, err
-	}
-	if err := encoder.Close(); err != nil {
-		return "", inspection, err
-	}
-	next := rendered.String()
-	nextInspection := InspectWorkflowEventTrigger(next)
-	return next, nextInspection, nil
+	return rendered, inspection, err
 }
 
 func workflowEditorRevision(raw string) string {
@@ -196,25 +154,6 @@ func unsafeWorkflowEditorNodeReason(node *yaml.Node) string {
 	return ""
 }
 
-func validateWorkflowEditorTriggerPath(root *yaml.Node) string {
-	onIndexes := workflowRootOnPairIndexes(root)
-	if len(onIndexes) > 1 {
-		return "Duplicate on mappings require the raw editor."
-	}
-	if len(onIndexes) == 0 {
-		return ""
-	}
-	onNode := root.Content[onIndexes[0]+1]
-	if onNode == nil || onNode.Kind != yaml.MappingNode {
-		return "The on value must be a mapping before using the structured editor."
-	}
-	eventIndexes := workflowMappingPairIndexes(onNode, "event")
-	if len(eventIndexes) > 1 {
-		return "Duplicate on.event mappings require the raw editor."
-	}
-	return ""
-}
-
 func workflowMappingPairIndexes(mapping *yaml.Node, names ...string) []int {
 	if mapping == nil || mapping.Kind != yaml.MappingNode {
 		return nil
@@ -243,172 +182,13 @@ func workflowRootOnPairIndexes(root *yaml.Node) []int {
 	var indexes []int
 	for index := 0; index+1 < len(root.Content); index += 2 {
 		key := root.Content[index]
-		if key == nil || key.Kind != yaml.ScalarNode {
+		if key == nil ||
+			key.Kind != yaml.ScalarNode ||
+			key.Value != "on" ||
+			(key.Tag != "" && key.ShortTag() != "!!str") {
 			continue
 		}
-		switch strings.TrimSpace(key.Value) {
-		case "on", "true":
-			indexes = append(indexes, index)
-		}
+		indexes = append(indexes, index)
 	}
 	return indexes
-}
-
-func replaceWorkflowEventTriggerNode(root *yaml.Node, trigger *EventTrigger) (bool, error) {
-	onIndexes := workflowRootOnPairIndexes(root)
-	if len(onIndexes) == 0 {
-		if trigger == nil {
-			return false, nil
-		}
-		onNode := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-		root.Content = append(
-			root.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "on"},
-			onNode,
-		)
-		return addWorkflowEventTriggerNode(onNode, trigger)
-	}
-
-	onNode := root.Content[onIndexes[0]+1]
-	eventIndexes := workflowMappingPairIndexes(onNode, "event")
-	if len(eventIndexes) == 0 {
-		if trigger == nil {
-			return false, nil
-		}
-		return addWorkflowEventTriggerNode(onNode, trigger)
-	}
-	eventIndex := eventIndexes[0]
-	if trigger == nil {
-		onNode.Content = append(
-			onNode.Content[:eventIndex],
-			onNode.Content[eventIndex+2:]...,
-		)
-		return true, nil
-	}
-
-	replacement, err := workflowEventTriggerYAMLNode(trigger)
-	if err != nil {
-		return false, err
-	}
-	previous := onNode.Content[eventIndex+1]
-	replacement.HeadComment = previous.HeadComment
-	replacement.LineComment = previous.LineComment
-	replacement.FootComment = previous.FootComment
-	onNode.Content[eventIndex+1] = replacement
-	return true, nil
-}
-
-func addWorkflowEventTriggerNode(onNode *yaml.Node, trigger *EventTrigger) (bool, error) {
-	value, err := workflowEventTriggerYAMLNode(trigger)
-	if err != nil {
-		return false, err
-	}
-	onNode.Content = append(
-		onNode.Content,
-		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "event"},
-		value,
-	)
-	return true, nil
-}
-
-func workflowEventTriggerYAMLNode(trigger *EventTrigger) (*yaml.Node, error) {
-	var node yaml.Node
-	if err := node.Encode(trigger); err != nil {
-		return nil, err
-	}
-	if node.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("encoded event trigger must be a mapping")
-	}
-	return &node, nil
-}
-
-func cloneEventTrigger(trigger *EventTrigger) *EventTrigger {
-	if trigger == nil {
-		return nil
-	}
-	out := &EventTrigger{
-		Sources:    cloneEventPatternList(trigger.Sources),
-		Connectors: cloneEventPatternList(trigger.Connectors),
-		Types:      cloneEventPatternList(trigger.Types),
-		Actor:      cloneEventEntityTrigger(trigger.Actor),
-		Subject:    cloneEventEntityTrigger(trigger.Subject),
-		Attributes: cloneEventTriggerAttributes(trigger.Attributes),
-	}
-	return out
-}
-
-func cloneEventEntityTrigger(trigger *EventEntityTrigger) *EventEntityTrigger {
-	if trigger == nil {
-		return nil
-	}
-	return &EventEntityTrigger{
-		IDs:        cloneEventPatternList(trigger.IDs),
-		Types:      cloneEventPatternList(trigger.Types),
-		Attributes: cloneEventTriggerAttributes(trigger.Attributes),
-	}
-}
-
-func cloneEventTriggerAttributes(
-	attributes map[string]StringList,
-) map[string]StringList {
-	if attributes == nil {
-		return nil
-	}
-	out := make(map[string]StringList, len(attributes))
-	for key, patterns := range attributes {
-		out[key] = cloneEventPatternList(patterns)
-	}
-	return out
-}
-
-func cloneEventPatternList(patterns StringList) StringList {
-	if patterns == nil {
-		return nil
-	}
-	return append(StringList{}, patterns...)
-}
-
-func workflowEventTriggerProjectionReason(trigger *EventTrigger) string {
-	if trigger == nil {
-		return ""
-	}
-	if eventPatternListsContainLineBreak(
-		trigger.Sources,
-		trigger.Connectors,
-		trigger.Types,
-	) ||
-		eventAttributesContainLineBreak(trigger.Attributes) {
-		return "Event filters containing line breaks require the raw editor."
-	}
-	for _, entity := range []*EventEntityTrigger{trigger.Actor, trigger.Subject} {
-		if entity == nil {
-			continue
-		}
-		if eventPatternListsContainLineBreak(entity.IDs, entity.Types) ||
-			eventAttributesContainLineBreak(entity.Attributes) {
-			return "Event filters containing line breaks require the raw editor."
-		}
-	}
-	return ""
-}
-
-func eventPatternListsContainLineBreak(lists ...StringList) bool {
-	for _, patterns := range lists {
-		for _, pattern := range patterns {
-			if strings.ContainsAny(pattern, "\r\n") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func eventAttributesContainLineBreak(attributes map[string]StringList) bool {
-	for key, patterns := range attributes {
-		if strings.ContainsAny(key, "\r\n") ||
-			eventPatternListsContainLineBreak(patterns) {
-			return true
-		}
-	}
-	return false
 }

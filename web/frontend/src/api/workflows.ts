@@ -12,6 +12,7 @@ export interface WorkflowDefinition {
 export interface WorkflowCallDefinition {
   inputs?: Record<string, WorkflowInputDefinition>
   secrets?: Record<string, WorkflowSecretDefinition>
+  outputs?: Record<string, WorkflowOutputDefinition>
 }
 
 export interface WorkflowInputDefinition {
@@ -22,6 +23,10 @@ export interface WorkflowInputDefinition {
 
 export interface WorkflowSecretDefinition {
   required?: boolean
+}
+
+export interface WorkflowOutputDefinition {
+  value?: string
 }
 
 export interface WorkflowValidationIssue {
@@ -137,6 +142,90 @@ export interface WorkflowEventTriggerInspection {
 }
 
 export interface WorkflowEventTriggerRenderResult extends WorkflowEventTriggerInspection {
+  yaml: string
+}
+
+export const workflowTriggerKinds = [
+  "manual",
+  "schedule",
+  "channel_message",
+  "command",
+  "runtime_event",
+  "event",
+  "workflow_call",
+] as const
+
+export type WorkflowTriggerKind = (typeof workflowTriggerKinds)[number]
+
+export type WorkflowManualTrigger = Record<string, never>
+
+export interface WorkflowScheduleTrigger {
+  cron?: string
+}
+
+export interface WorkflowConversationSpec {
+  session?: "discussion" | "sender" | "global" | string
+  delivery?: "same_discussion" | "none" | string
+}
+
+export interface WorkflowChannelMessageTrigger {
+  channels?: string[]
+  chats?: string[]
+  senders?: string[]
+  mentioned?: boolean
+  command?: string
+  text_matches?: string
+  passthrough?: boolean
+  conversation?: WorkflowConversationSpec
+}
+
+export interface WorkflowCommandTrigger {
+  name?: string
+  channels?: string[]
+  chats?: string[]
+  senders?: string[]
+  args?: Record<string, WorkflowInputDefinition>
+  passthrough?: boolean
+  conversation?: WorkflowConversationSpec
+}
+
+export interface WorkflowRuntimeEventTrigger {
+  kinds?: string[]
+  sources?: string[]
+  agents?: string[]
+  sessions?: string[]
+  channels?: string[]
+  chats?: string[]
+}
+
+export type WorkflowCallTrigger = WorkflowCallDefinition
+
+export interface WorkflowTriggerValueMap {
+  manual: WorkflowManualTrigger
+  schedule: WorkflowScheduleTrigger[]
+  channel_message: WorkflowChannelMessageTrigger
+  command: WorkflowCommandTrigger
+  runtime_event: WorkflowRuntimeEventTrigger
+  event: WorkflowEventTrigger
+  workflow_call: WorkflowCallTrigger
+}
+
+export type WorkflowTriggerProjectionMap = {
+  [Kind in WorkflowTriggerKind]: {
+    present: boolean
+    editable: boolean
+    reason?: string
+    value: WorkflowTriggerValueMap[Kind] | null
+  }
+}
+
+export interface WorkflowTriggersInspection {
+  revision: string
+  validation?: WorkflowDevelopmentValidation
+  triggers: WorkflowTriggerProjectionMap
+}
+
+export interface WorkflowTriggerRenderResult extends WorkflowTriggersInspection {
   yaml: string
 }
 
@@ -284,6 +373,7 @@ export interface WorkflowTemplateCatalog {
 
 export interface WorkflowSettingsValues {
   enabled: boolean
+  tool_enabled: boolean
   definitions_dir: string
   max_concurrent_runs: number
   default_timeout_seconds: number
@@ -396,11 +486,17 @@ export type WorkflowDeliveryPayload = Record<string, unknown>
 
 export class WorkflowAPIError extends Error {
   readonly status: number
+  readonly candidateValidation?: WorkflowDevelopmentValidation
 
-  constructor(message: string, status: number) {
+  constructor(
+    message: string,
+    status: number,
+    candidateValidation?: WorkflowDevelopmentValidation,
+  ) {
     super(message)
     this.name = "WorkflowAPIError"
     this.status = status
+    this.candidateValidation = candidateValidation
   }
 }
 
@@ -420,30 +516,97 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await launcherFetch(path, options)
   if (!res.ok) {
     const text = await res.text()
+    const details = apiErrorDetails(text, res.status, res.statusText)
     throw new WorkflowAPIError(
-      apiErrorMessage(text, res.status, res.statusText),
+      details.message,
       res.status,
+      details.candidateValidation,
     )
   }
   return res.json() as Promise<T>
 }
 
 function apiErrorMessage(text: string, status: number, statusText: string) {
+  return apiErrorDetails(text, status, statusText).message
+}
+
+function apiErrorDetails(text: string, status: number, statusText: string) {
   let message = text.trim()
+  let candidateValidation: WorkflowDevelopmentValidation | undefined
   try {
     const body = JSON.parse(text) as {
       error?: string
       errors?: string[]
+      candidate_validation?: unknown
     }
     if (typeof body.error === "string" && body.error.trim() !== "") {
       message = body.error
     } else if (Array.isArray(body.errors) && body.errors.length > 0) {
       message = body.errors.join("; ")
     }
+    candidateValidation = workflowCandidateValidation(body.candidate_validation)
   } catch {
     // Keep the plain-text response when the backend did not return JSON.
   }
-  return message || `API error: ${status} ${statusText}`
+  return {
+    message: message || `API error: ${status} ${statusText}`,
+    candidateValidation,
+  }
+}
+
+function workflowCandidateValidation(
+  value: unknown,
+): WorkflowDevelopmentValidation | undefined {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined
+  }
+  const candidate = value as Record<string, unknown>
+  if (candidate.valid !== false || typeof candidate.validated_at !== "string") {
+    return undefined
+  }
+  const errors = workflowCandidateValidationIssues(candidate.errors)
+  const warnings = workflowCandidateValidationIssues(candidate.warnings)
+  if (errors == null || warnings == null) {
+    return undefined
+  }
+  return {
+    valid: false,
+    validated_at: candidate.validated_at.slice(0, 128),
+    ...(errors.length > 0 ? { errors } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
+  }
+}
+
+function workflowCandidateValidationIssues(
+  value: unknown,
+): WorkflowValidationIssue[] | null {
+  if (value == null) {
+    return []
+  }
+  if (!Array.isArray(value) || value.length > 128) {
+    return null
+  }
+  const issues: WorkflowValidationIssue[] = []
+  for (const item of value) {
+    if (item == null || typeof item !== "object" || Array.isArray(item)) {
+      return null
+    }
+    const issue = item as Record<string, unknown>
+    if (
+      typeof issue.message !== "string" ||
+      issue.message === "" ||
+      issue.message.length > 4096 ||
+      (issue.path != null &&
+        (typeof issue.path !== "string" || issue.path.length > 1024))
+    ) {
+      return null
+    }
+    issues.push({
+      message: issue.message,
+      ...(typeof issue.path === "string" ? { path: issue.path } : {}),
+    })
+  }
+  return issues
 }
 
 export async function listWorkflows(): Promise<{
@@ -623,6 +786,35 @@ export async function renderWorkflowEventTrigger(payload: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+  })
+}
+
+export async function inspectWorkflowTriggers(
+  yaml: string,
+  signal?: AbortSignal,
+): Promise<WorkflowTriggersInspection> {
+  return request("/api/workflows/development/triggers/inspect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ yaml }),
+    signal,
+  })
+}
+
+export async function renderWorkflowTrigger<Kind extends WorkflowTriggerKind>(
+  payload: {
+    yaml: string
+    revision: string
+    trigger_type: Kind
+    trigger: WorkflowTriggerValueMap[Kind] | null
+  },
+  signal?: AbortSignal,
+): Promise<WorkflowTriggerRenderResult> {
+  return request("/api/workflows/development/triggers/render", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
   })
 }
 

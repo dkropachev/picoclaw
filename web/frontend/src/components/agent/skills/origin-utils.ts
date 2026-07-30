@@ -48,7 +48,7 @@ export function getOriginLabel(origin: string, t: TFunction) {
 
 export function getOriginAccentClasses(origin: string) {
   if (origin === "manual") {
-    return "bg-emerald-100 text-emerald-700"
+    return "bg-emerald-100 text-emerald-800"
   }
   if (origin === "third_party") {
     return "bg-sky-100 text-sky-700"
@@ -61,7 +61,7 @@ export function getOriginAccentClasses(origin: string) {
 
 export function getOriginBadgeClasses(origin: string) {
   if (origin === "manual") {
-    return "bg-emerald-100 text-emerald-700"
+    return "bg-emerald-100 text-emerald-800"
   }
   if (origin === "third_party") {
     return "bg-sky-100 text-sky-700"

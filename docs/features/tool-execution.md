@@ -37,6 +37,7 @@ with context, limits, filtering, and error normalization.
 | `FR-TOOL-013` | MUST | Tool argument validation accepts finite lossless `json.Number` values for JSON Schema `number` fields and accepts them for `integer` fields only when their exact decimal value is integral. Exponent handling is bounded by the input length and never allocates or computes an exponent-sized value. | Durable event payloads preserve JSON numbers without `float64` precision loss, while untrusted numeric text must not cause precision drift or resource amplification during workflow tool calls. |
 | `FR-TOOL-014` | MUST | Tool registry inspection applies the same allowlist decision used by registration and can return an existing occupant even when it is a hidden tool with expired TTL. MCP initialization uses this concurrency-safe inspection to validate every admitted canonical name before registering any wrapper, rejects collisions with built-in or differently identified MCP tools, and permits replacement only for the exact same original MCP server/tool identity. | Flattened MCP names can collide with existing or differently partitioned identities; preflight must fail without partially exposing the new MCP surface or overwriting the current occupant. |
 | `FR-TOOL-015` | MUST | Agent-callable workflow `dev_publish` fails closed unless its runtime injects effective workflow enablement, definitions directory, call-depth policy, and a live dependency resolver. The gate parses and validates the exact active draft, walks reusable dependencies within fixed workflow analysis budgets, resolves production readiness, and returns an opaque revision bound to the exact draft, sorted reachable dependency bytes or absence, effective gate values, and readiness report. Publish submits the active session, draft, target pre-image, and dependency revisions to the fenced workflow publisher, which rejects a missing, blocked, stale, or changed gate result. | Agent-side publishing must enforce the same exact dependency and optimistic-concurrency fences as dashboard publishing rather than bypassing production readiness. |
+| `FR-TOOL-016` | MUST | The authenticated tool library exposes the configured workflow-tool flag independently from workflow master enablement: configured off is `disabled`, configured on while workflows are off is `blocked` with `requires_workflows`, and both on is `enabled`. The blocked switch remains checked and operable so the raw flag can be turned off, and its reason is accessibly associated. `PUT /api/tools/{name}/state` requires exactly one `application/json` media type and accepts one bounded strict JSON object with a required boolean `enabled`, rejects null/scalar/array, duplicate/unknown/trailing data, and saves an update-safe public-plus-security config snapshot only when its exact generation still matches under the shared handler and advisory mutation locks. Changing the workflow tool never implicitly changes workflow master enablement; the tool library and workflow settings refetch each other after every mutation outcome. | Browser tool state must match runtime registration without hiding a disabled prerequisite, implicitly enabling automation, or overwriting a concurrent settings or credential update. |
 
 ## Data And State Model
 
@@ -121,9 +122,9 @@ Owns: TOOL write_file
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Tools | `read_file`, `write_file`, `edit_file`, `append_file`, `list_dir`, `load_image`, `send_file`, `exec`, `web_search`, `web_fetch`, hardware and delivery tools | Built-in tool schemas and execution behavior. | `FR-TOOL-001` through `FR-TOOL-008` |
-| HTTP | `/api/tools`, `/api/tools/{name}/state`, `/api/tools/web-search-config`, `/api/tools/adaptation`, `/api/tools/adaptation/probe` | Launcher tool state, web search configuration, and model-aware tool surface policy/probing. | `FR-TOOL-004`, `FR-TOOL-009` |
+| HTTP | `/api/tools`, `/api/tools/{name}/state`, `/api/tools/web-search-config`, `/api/tools/adaptation`, `/api/tools/adaptation/probe` | Effective launcher tool state, strict generation-safe state mutation, web search configuration, and model-aware tool surface policy/probing. | `FR-TOOL-004`, `FR-TOOL-009`, `FR-TOOL-016` |
 | Config | `tools.*` subtrees except MCP, skills, and cron ownership in their feature specs | Tool enablement, limits, providers, filtering, and policies. | `FR-TOOL-002` through `FR-TOOL-006` |
-| Frontend | Tool library, adaptation, and web-search configuration pages under `web/frontend/src/components/agent/tools/**` | Browser tool management follows shared frontend API, accessibility, formatting, and route smoke-test rules while preserving tool enablement and adaptation semantics. | `FR-TOOL-001`, `FR-TOOL-004`, `FR-TOOL-009` |
+| Frontend | Tool library, adaptation, and web-search configuration pages under `web/frontend/src/components/agent/tools/**` | Browser tool management follows shared frontend API, accessibility, formatting, and route smoke-test rules while preserving configured/effective tool enablement, blocked dependency, and adaptation semantics. | `FR-TOOL-001`, `FR-TOOL-004`, `FR-TOOL-009`, `FR-TOOL-016` |
 | Tool | `spawn` with optional asynchronous context preparation | Retain AgentLoop runtime ownership synchronously before background goroutine launch, then release after subturn and callback completion. | `FR-TOOL-011` |
 | Go context | `WithToolTurnUXContext`, `ToolTurnUXID`, `message` delivery callback | Preserve the active turn identity through tool and cloned-subturn execution, but copy it to outbound delivery only for the exact originating channel/chat. | `FR-TOOL-012` |
 | Tool validation | JSON Schema `number` and `integer` arguments | Validate finite `float64` values and lossless `json.Number` values, including exact integrality without exponent expansion. | `FR-TOOL-013` |
@@ -165,6 +166,13 @@ Owns: TOOL write_file
     and effective readiness values; then pass that revision with all active
     development fences to the workflow publisher for repeated gate checks and
     transactional commit.
+16. For generic tool-state mutation, strictly decode one bounded request,
+    serialize through the handler mutation boundary, load one update-safe
+    public-plus-security config generation, apply the selected tool's
+    allowlisted state transition, and compare-and-save that same generation
+    under the advisory lock. The workflow transition changes only its raw tool
+    flag; its status is then resolved with workflow master enablement without
+    mutating that prerequisite.
 
 ## Cross-Feature Behavior
 
@@ -205,6 +213,9 @@ same-chat consumption.
 - Workflow `dev_publish` fails without an injected live resolver, when
   workflows or any dependency are not ready, or when reachable definition
   content changes between dependency evaluation and fenced publication.
+- Invalid, oversized, or stale tool-state writes do not mutate configuration;
+  a configured workflow tool whose workflow prerequisite is disabled remains
+  explicitly blocked rather than appearing disabled or enabled.
 
 ## Acceptance Evidence
 
@@ -223,6 +234,7 @@ same-chat consumption.
 | `FR-TOOL-013` | [pkg/tools/validate.go](../../pkg/tools/validate.go), [pkg/tools/validate_test.go](../../pkg/tools/validate_test.go), [pkg/workflows/store_test.go](../../pkg/workflows/store_test.go) |
 | `FR-TOOL-014` | [pkg/tools/registry.go](../../pkg/tools/registry.go), [pkg/agent/agent_mcp_test.go](../../pkg/agent/agent_mcp_test.go) |
 | `FR-TOOL-015` | [pkg/tools/workflow_publish.go](../../pkg/tools/workflow_publish.go), [pkg/tools/workflow_publish_test.go](../../pkg/tools/workflow_publish_test.go), [pkg/workflows/development_publish_test.go](../../pkg/workflows/development_publish_test.go) |
+| `FR-TOOL-016` | [web/backend/api/tools.go](../../web/backend/api/tools.go), [web/backend/api/tools_test.go](../../web/backend/api/tools_test.go), [web/backend/api/workflow_settings_test.go](../../web/backend/api/workflow_settings_test.go), [web/frontend/src/api/tools.test.ts](../../web/frontend/src/api/tools.test.ts), [web/frontend/src/components/agent/tools/tool-library-tab.test.tsx](../../web/frontend/src/components/agent/tools/tool-library-tab.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 
 ## Implementation Anchors
 

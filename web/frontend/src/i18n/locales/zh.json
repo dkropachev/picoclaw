@@ -1032,7 +1032,9 @@
           "requires_skills": "需要先启用 `tools.skills`，该技能注册表工具才能使用。",
           "requires_subagent": "需要先启用 `tools.subagent`，`spawn` 才能委派任务。",
           "requires_mcp_discovery": "需要先启用 `tools.mcp.discovery`，MCP 发现工具才会可用。",
-          "requires_web_search_provider": "请至少配置一个可用的外部网络搜索 provider。"
+          "requires_web_search_provider": "请至少配置一个可用的外部网络搜索 provider。",
+          "requires_workflows": "需要先启用工作流，才能使用工作流工具。",
+          "unknown_dependency": "该工具因依赖项未满足而被阻止。"
         }
       }
     },

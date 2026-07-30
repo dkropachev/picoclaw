@@ -870,6 +870,48 @@ async function mockLauncherApis(
     return `mock-revision:${normalizeWorkflowDraftYAML(yaml).length}`
   }
 
+  function workflowTriggerInspection(yaml: string) {
+    const eventTrigger = yaml.includes("\n  event:")
+      ? {
+          sources: ["github"],
+          types: ["issues.opened"],
+        }
+      : null
+    const workflowCall = yaml.includes("\n  workflow_call:")
+      ? {
+          inputs: {
+            ticket: {
+              type: "string",
+              required: true,
+            },
+          },
+        }
+      : null
+    const absent = { present: false, editable: true, value: null }
+    return {
+      revision: eventTriggerRevision(yaml),
+      triggers: {
+        manual: absent,
+        schedule: absent,
+        channel_message: absent,
+        command: absent,
+        runtime_event: absent,
+        event:
+          eventTrigger == null
+            ? absent
+            : { present: true, editable: true, value: eventTrigger },
+        workflow_call:
+          workflowCall == null
+            ? absent
+            : { present: true, editable: true, value: workflowCall },
+      },
+      validation: {
+        valid: true,
+        validated_at: "2026-07-16T12:00:00Z",
+      },
+    }
+  }
+
   await page.route(
     (url) => url.pathname.startsWith("/api/"),
     async (route) => {
@@ -1028,6 +1070,26 @@ async function mockLauncherApis(
                 valid: true,
                 validated_at: "2026-07-16T12:00:00Z",
               },
+            })
+          }
+          case "/api/workflows/development/triggers/inspect": {
+            const body = request.postDataJSON() as { yaml: string }
+            return json(route, workflowTriggerInspection(body.yaml))
+          }
+          case "/api/workflows/development/triggers/render": {
+            const body = request.postDataJSON() as {
+              yaml: string
+              revision: string
+              trigger_type: string
+              trigger: unknown
+            }
+            expect(body.revision).toBe(eventTriggerRevision(body.yaml))
+            expect(body.trigger_type).toBe("event")
+            const renderedYAML =
+              body.trigger == null ? workflowDraftYAML : workflowEventDraftYAML
+            return json(route, {
+              yaml: renderedYAML,
+              ...workflowTriggerInspection(renderedYAML),
             })
           }
           case "/api/workflows/development/event-trigger/render": {
@@ -3073,10 +3135,14 @@ test("workflow event builder applies YAML and runs a matched event-parity draft 
   ).toBeVisible()
 
   await page.getByRole("tab", { name: "Builder" }).click()
-  await expect(page.getByText("Deterministic event routing")).toBeVisible()
+  await page.getByRole("combobox", { name: "Trigger type" }).click()
+  await page
+    .getByRole("option", { name: "Durable event · Not configured" })
+    .click()
   await page
     .getByRole("switch", { name: "Enable durable event trigger" })
     .click()
+  await expect(page.getByText("Deterministic event routing")).toBeVisible()
   await page
     .getByRole("textbox", { name: "Sources", exact: true })
     .fill("github")
