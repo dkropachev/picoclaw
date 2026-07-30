@@ -1006,8 +1006,30 @@ func workflowJSONValueNodeReason(node *yaml.Node, nested bool) string {
 // decimal value. Exact integers must also remain within JavaScript's safe
 // integer range even when written with a decimal point or exponent.
 func WorkflowJSONNumberIsBrowserSafe(text string) bool {
-	if !workflowJSONNumberPattern.MatchString(text) {
+	const (
+		maximumNumberTextBytes = 256
+		maximumDecimalExponent = 400
+	)
+	if len(text) == 0 ||
+		len(text) > maximumNumberTextBytes ||
+		!workflowJSONNumberPattern.MatchString(text) {
 		return false
+	}
+	if exponentIndex := strings.IndexAny(text, "eE"); exponentIndex >= 0 {
+		exponentText := text[exponentIndex+1:]
+		if len(exponentText) > 0 &&
+			(exponentText[0] == '+' || exponentText[0] == '-') {
+			exponentText = exponentText[1:]
+		}
+		if len(exponentText) == 0 || len(exponentText) > 4 {
+			return false
+		}
+		exponent, err := strconv.ParseInt(text[exponentIndex+1:], 10, 16)
+		if err != nil ||
+			exponent < -maximumDecimalExponent ||
+			exponent > maximumDecimalExponent {
+			return false
+		}
 	}
 	number, err := strconv.ParseFloat(text, 64)
 	if err != nil || math.IsInf(number, 0) || math.IsNaN(number) {

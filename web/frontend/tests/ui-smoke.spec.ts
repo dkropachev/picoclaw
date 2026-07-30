@@ -953,6 +953,11 @@ interface MockLauncherApiOptions {
     method: string
     path: string
   }>
+  workflowJobRequests?: Array<{
+    method: string
+    path: string
+    body: unknown
+  }>
   workflowCancelReasons?: string[]
 }
 
@@ -1081,6 +1086,68 @@ async function mockLauncherApis(
             ? absent
             : { present: true, editable: true, value: workflowCall },
       },
+      validation: {
+        valid: true,
+        validated_at: "2026-07-16T12:00:00Z",
+      },
+    }
+  }
+
+  function workflowJobsRevision(yaml: string) {
+    return `mock-jobs-revision:${normalizeWorkflowDraftYAML(yaml).length}`
+  }
+
+  function workflowJobsInspection(yaml: string) {
+    const projectedName = yaml.match(/^# mock-step-name: (.*)$/m)?.[1]
+    const absent = { present: false, value: null }
+    return {
+      revision: workflowJobsRevision(yaml),
+      editable: true,
+      complete: true,
+      limits: [],
+      jobs: [
+        {
+          id: "triage",
+          index: 0,
+          editable: true,
+          advanced_fields_present: false,
+          steps_present: true,
+          fields: {
+            name: absent,
+            runs_on: { present: true, value: "picoclaw" },
+            needs: absent,
+            uses: absent,
+            if: absent,
+            continue_on_error: absent,
+            with: absent,
+            secrets: absent,
+            outputs: absent,
+            context: absent,
+          },
+          steps: [
+            {
+              index: 0,
+              editable: true,
+              advanced_fields_present: false,
+              fields: {
+                id: { present: true, value: "summarize" },
+                name:
+                  projectedName == null
+                    ? absent
+                    : { present: true, value: projectedName },
+                uses: { present: true, value: "agent/main" },
+                if: absent,
+                continue_on_error: absent,
+                with: {
+                  present: true,
+                  value: { prompt: "Summarize support tickets" },
+                },
+                context: absent,
+              },
+            },
+          ],
+        },
+      ],
       validation: {
         valid: true,
         validated_at: "2026-07-16T12:00:00Z",
@@ -1283,6 +1350,35 @@ async function mockLauncherApis(
             return json(route, {
               yaml: renderedYAML,
               ...workflowTriggerInspection(renderedYAML),
+            })
+          }
+          case "/api/workflows/development/jobs/inspect": {
+            const body = request.postDataJSON() as { yaml: string }
+            options.workflowJobRequests?.push({ method, path, body })
+            return json(route, workflowJobsInspection(body.yaml))
+          }
+          case "/api/workflows/development/jobs/render": {
+            const body = request.postDataJSON() as {
+              yaml: string
+              revision: string
+              operation: {
+                type: string
+                fields?: {
+                  name?: { mode: string; value?: string }
+                }
+              }
+            }
+            expect(body.revision).toBe(workflowJobsRevision(body.yaml))
+            options.workflowJobRequests?.push({ method, path, body })
+            const nameMutation = body.operation.fields?.name
+            const renderedYAML =
+              body.operation.type === "step.patch" &&
+              nameMutation?.mode === "set"
+                ? `${normalizeWorkflowDraftYAML(body.yaml)}# mock-step-name: ${nameMutation.value ?? ""}\n`
+                : normalizeWorkflowDraftYAML(body.yaml)
+            return json(route, {
+              yaml: renderedYAML,
+              ...workflowJobsInspection(renderedYAML),
             })
           }
           case "/api/workflows/development/event-trigger/render": {
@@ -2257,9 +2353,29 @@ async function expectNoSeriousA11yViolations(page: Page) {
     blocking.map((violation) => ({
       id: violation.id,
       impact: violation.impact,
-      targets: violation.nodes.map((node) => node.target.join(" ")),
+      nodes: violation.nodes.map((node) => ({
+        target: node.target.join(" "),
+        html: node.html,
+      })),
     })),
   ).toEqual([])
+}
+
+async function confirmDraftTestReview(page: Page) {
+  const dialog = page.getByRole("dialog", { name: "Review draft test" })
+  await expect(dialog).toBeVisible()
+  const confirm = dialog.getByRole("button", {
+    name: "Confirm and run test",
+  })
+  await expect(confirm).toBeDisabled()
+  await dialog
+    .getByRole("switch", {
+      name: "I reviewed this scenario and its possible effects",
+    })
+    .click()
+  await expect(confirm).toBeEnabled()
+  await confirm.click()
+  await expect(dialog).toBeHidden()
 }
 
 async function gotoMockedRoute(
@@ -3579,6 +3695,12 @@ test("workflow event builder applies YAML and runs a matched event-parity draft 
   await page.getByRole("button", { name: /payload/i }).click()
   await expect(page.getByText(eventPayloadText)).toBeVisible()
   await page.getByRole("button", { name: "Test Draft" }).click()
+  await expect(page.getByText("wr_draft", { exact: true })).toHaveCount(0)
+  const eventReview = page.getByRole("dialog", { name: "Review draft test" })
+  await expect(
+    eventReview.getByText(eventResponse.id, { exact: true }),
+  ).toBeVisible()
+  await confirmDraftTestReview(page)
   await expect(page.getByText("wr_draft", { exact: true })).toBeVisible()
 
   await page.reload()
@@ -3587,6 +3709,71 @@ test("workflow event builder applies YAML and runs a matched event-parity draft 
   )
   await expect(page.getByText(/selected event matches/)).toBeVisible()
   await expectNoHorizontalOverflow(page)
+  expect(errors).toEqual([])
+})
+
+test("workflow jobs builder applies a surgical action field edit", async ({
+  page,
+}, testInfo) => {
+  if (testInfo.project.name === "mobile") {
+    await page.setViewportSize({ width: 320, height: 720 })
+  }
+  const errors = collectPageErrors(page)
+  const jobRequests: NonNullable<
+    MockLauncherApiOptions["workflowJobRequests"]
+  > = []
+
+  await gotoMockedRoute(page, "/agent/workflows", {
+    workflowJobRequests: jobRequests,
+  })
+  await page
+    .getByPlaceholder("Describe the workflow outcome")
+    .fill("Triage support tickets")
+  await page.getByRole("button", { name: "Start with AI" }).click()
+  await page.getByRole("tab", { name: "Builder" }).click()
+  await page.getByRole("tab", { name: "Jobs & actions" }).click()
+
+  await expect(page.getByText("Job graph")).toBeVisible()
+  await expect(page.getByText("agent/main").first()).toBeVisible()
+  const actionSection = page
+    .getByRole("heading", { name: "Action 1" })
+    .locator("xpath=ancestor::section[1]")
+  await actionSection
+    .getByRole("combobox", { name: "Display name mutation" })
+    .click()
+  await page.getByRole("option", { name: "Set value" }).click()
+  await actionSection
+    .getByRole("textbox", { name: "Display name value" })
+    .fill("Summarize ticket")
+  await page.getByRole("button", { name: "Apply fields to YAML" }).click()
+
+  await expect
+    .poll(
+      () =>
+        jobRequests.filter(
+          (request) =>
+            request.path === "/api/workflows/development/jobs/render",
+        ).length,
+    )
+    .toBe(1)
+  const renderRequest = jobRequests.find(
+    (request) => request.path === "/api/workflows/development/jobs/render",
+  )
+  expect(renderRequest?.body).toMatchObject({
+    operation: {
+      type: "step.patch",
+      job_id: "triage",
+      step_index: 0,
+      fields: {
+        name: { mode: "set", value: "Summarize ticket" },
+      },
+    },
+  })
+  await expect(
+    actionSection.getByText("Source: Summarize ticket"),
+  ).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
 })
 
@@ -3734,6 +3921,10 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
     .locator("#workflow-test-delivery")
     .fill('{"channel":"telegram","chat_id":"support"}')
   await page.getByRole("button", { name: "Test Draft" }).click()
+  await expect(page.getByText("wr_draft_failed", { exact: true })).toHaveCount(
+    0,
+  )
+  await confirmDraftTestReview(page)
   await expect(
     page.getByText("wr_draft_failed", { exact: true }).first(),
   ).toBeVisible()
@@ -3748,6 +3939,7 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
     .locator("#workflow-test-inputs")
     .fill('{"ticket":"Printer is offline"}')
   await page.getByRole("button", { name: "Test Draft" }).click()
+  await confirmDraftTestReview(page)
   await expect(page.getByText("wr_draft", { exact: true })).toBeVisible()
   await expect(page.getByRole("button", { name: "Publish" })).toBeEnabled()
   await expect(page.getByText("Ready to publish.")).toBeVisible()
@@ -3874,6 +4066,7 @@ test("workflow dashboard refreshes async draft status from polling without SSE",
     .locator("#workflow-test-delivery")
     .fill('{"channel":"telegram","chat_id":"support"}')
   await page.getByRole("button", { name: "Test Draft" }).click()
+  await confirmDraftTestReview(page)
 
   await expect(page.getByText("wr_draft", { exact: true })).toBeVisible()
   await expect(page.getByRole("button", { name: "Publish" })).toBeEnabled()

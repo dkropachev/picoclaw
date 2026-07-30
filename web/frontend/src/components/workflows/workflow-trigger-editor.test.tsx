@@ -393,6 +393,9 @@ describe("WorkflowTriggerEditor", () => {
       "9007199254740991.1",
       "0.10000000000000001",
       "9007199254740993e0",
+      "1e-400",
+      "0e401",
+      "0e10000",
     ]) {
       fireEvent.change(defaultJSON, {
         target: { value: `{"count":${token}}` },
@@ -407,7 +410,8 @@ describe("WorkflowTriggerEditor", () => {
 
     fireEvent.change(defaultJSON, {
       target: {
-        value: '{"fraction":0.1,"limit":9007199254740991e0}',
+        value:
+          '{"fraction":0.1,"limit":9007199254740991e0,"decimal":1.0,"exponent":1e0,"zero":0e400}',
       },
     })
     expect(
