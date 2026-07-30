@@ -351,21 +351,26 @@ func (al *AgentLoop) runScheduledWorkflow(
 		)
 		return
 	}
-	executor := al.newWorkflowExecutor(cfg.WorkspacePath(), defaultAgent)
-	event := map[string]any{
-		"trigger":      "schedule",
-		"workflow_ref": schedule.ref,
-		"schedule": map[string]any{
-			"cron":         schedule.cron,
-			"index":        schedule.index,
-			"scheduled_at": scheduledAt,
-		},
+	runContext, contextErr := workflows.BuildWorkflowScheduleRunContext(
+		schedule.workflow,
+		schedule.ref,
+		schedule.index,
+		scheduledAt,
+	)
+	if contextErr != nil {
+		logger.WarnCF(
+			"workflow",
+			"Scheduled workflow context is invalid",
+			map[string]any{"ref": schedule.ref, "error": contextErr.Error()},
+		)
+		return
 	}
+	executor := al.newWorkflowExecutor(cfg.WorkspacePath(), defaultAgent)
 	al.publishWorkflowAutomationTriggered(
 		schedule.ref,
 		"schedule",
-		workflowScheduleSession(schedule.ref, schedule.index),
-		workflows.Delivery{},
+		runContext.Session,
+		runContext.Delivery,
 		map[string]any{
 			"cron":         schedule.cron,
 			"schedule_idx": schedule.index,
@@ -376,12 +381,10 @@ func (al *AgentLoop) runScheduledWorkflow(
 		Ref:         schedule.ref,
 		Workflow:    schedule.workflow,
 		WorkflowRef: schedule.ref,
-		Inputs: map[string]any{
-			"cron":         schedule.cron,
-			"scheduled_at": scheduledAt.Format(time.RFC3339),
-		},
-		Event:   event,
-		Session: workflowScheduleSession(schedule.ref, schedule.index),
+		Inputs:      runContext.Inputs,
+		Event:       runContext.Event,
+		Session:     runContext.Session,
+		Delivery:    runContext.Delivery,
 	}); err != nil {
 		logger.WarnCF("workflow", "Scheduled workflow run failed", map[string]any{
 			"ref":   schedule.ref,
@@ -544,7 +547,7 @@ func workflowScheduleKey(ref string, index int) string {
 }
 
 func workflowScheduleSession(ref string, index int) string {
-	return fmt.Sprintf("workflow:%s:schedule:%d", ref, index)
+	return workflows.WorkflowScheduleSession(ref, index)
 }
 
 func (al *AgentLoop) publishWorkflowAutomationTriggered(

@@ -203,6 +203,9 @@ Workflow HTTP endpoints and dashboard routes are exposed through the launcher
 router and shared shell, including stateless structured-authoring helpers, while
 workflow definition, projection, authoring, run, graph, cancel, retry, and event
 semantics remain owned by the workflows and security-isolation features.
+Reviewed trigger routes keep their process-local signing key and bounded
+one-use bookkeeping on the authenticated launcher handler; token binding,
+admission, and execution semantics remain owned by those same feature specs.
 Event operator proxy endpoints and the Events dashboard route are likewise
 registered through the shared launcher router and navigation shell and inherit
 dashboard authentication. Event inspection, payload, replay, and live-gateway

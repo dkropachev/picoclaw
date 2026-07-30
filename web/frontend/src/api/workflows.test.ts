@@ -3,8 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import { launcherFetch } from "@/api/http"
 import {
   WorkflowAPIError,
+  type WorkflowTriggerSimulationRequest,
   cancelWorkflowRun,
   checkWorkflowDependencies,
+  executeWorkflowDevelopmentTrigger,
   getWorkflowDevelopment,
   getWorkflowRun,
   getWorkflowRunEvents,
@@ -26,7 +28,9 @@ import {
   renderWorkflowTrigger,
   retryWorkflowRun,
   runWorkflow,
+  simulateWorkflowDevelopmentTrigger,
   testWorkflowDevelopment,
+  workflowTriggerSimulationRequestBody,
 } from "@/api/workflows"
 
 vi.mock("@/api/http", () => ({
@@ -1539,7 +1543,374 @@ describe("workflow API normalization", () => {
       error: "The accepted test state could not be refreshed.",
     })
   })
+
+  it.each([
+    [
+      "manual",
+      {
+        trigger: { type: "manual" },
+        scenario: {
+          inputs: { ticket: "PIC-42" },
+          secrets: { token: "hidden" },
+          session: "workflow:test",
+          delivery: { channel: "slack" },
+        },
+      },
+    ],
+    [
+      "workflow_call",
+      {
+        trigger: { type: "workflow_call" },
+        scenario: { inputs: {}, secrets: {}, delivery: {} },
+      },
+    ],
+    [
+      "schedule",
+      {
+        trigger: { type: "schedule", schedule_index: 1 },
+        scenario: { scheduled_at: "2026-07-30T12:00:00Z" },
+      },
+    ],
+    [
+      "channel_message",
+      {
+        trigger: { type: "channel_message" },
+        scenario: { message: { channel: "slack", text: "hello" } },
+      },
+    ],
+    [
+      "command",
+      {
+        trigger: { type: "command" },
+        scenario: { message: { channel: "slack", text: "/review 42" } },
+      },
+    ],
+    [
+      "runtime_event",
+      {
+        trigger: { type: "runtime_event" },
+        scenario: {
+          event: {
+            id: "runtime-1",
+            kind: "agent.turn.completed",
+            time: "2026-07-30T12:00:00Z",
+            source: { component: "agent" },
+          },
+        },
+      },
+    ],
+    [
+      "event",
+      {
+        trigger: { type: "event" },
+        scenario: { event_id: "ev_0123456789abcdef0123456789abcdef" },
+      },
+    ],
+  ] as const)(
+    "serializes the exact %s tagged trigger request",
+    (_kind, variant) => {
+      const request = {
+        ...simulationRequestBase(),
+        ...variant,
+      } as WorkflowTriggerSimulationRequest
+      expect(JSON.parse(workflowTriggerSimulationRequestBody(request))).toEqual(
+        {
+          ...simulationRequestBase(),
+          ...variant,
+        },
+      )
+    },
+  )
+
+  it("strictly parses a safe server simulation without reflected values", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse(triggerSimulationResponse()),
+    )
+
+    await expect(
+      simulateWorkflowDevelopmentTrigger(manualSimulationRequest()),
+    ).resolves.toEqual(triggerSimulationResponse())
+    expect(mockedLauncherFetch).toHaveBeenCalledWith(
+      "/api/workflows/development/triggers/simulate",
+      expect.objectContaining({ method: "POST" }),
+    )
+    const init = mockedLauncherFetch.mock.calls[0][1] as RequestInit
+    expect(String(init.body)).toContain('"secrets":{"token":"hidden"}')
+    expect(String(init.body)).not.toContain('"async"')
+  })
+
+  it.each([
+    ["unknown root field", { reflected_secret: "hidden" }],
+    [
+      "unsafe simulation reflection",
+      {
+        simulation: {
+          ...triggerSimulationResponse().simulation,
+          message_text: "protected-payload",
+        },
+      },
+    ],
+    [
+      "unsafe context reflection",
+      {
+        simulation: {
+          ...triggerSimulationResponse().simulation,
+          context_summary: {
+            ...triggerSimulationResponse().simulation.context_summary,
+            session: "private-session",
+          },
+        },
+      },
+    ],
+  ])("rejects a simulation with %s", async (_label, override) => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({
+        ...triggerSimulationResponse(),
+        ...override,
+      }),
+    )
+    await expect(
+      simulateWorkflowDevelopmentTrigger(manualSimulationRequest()),
+    ).rejects.toThrow("invalid response")
+  })
+
+  it("requires a review token exactly when simulation is executable", async () => {
+    const response = triggerSimulationResponse()
+    const withoutToken: Partial<typeof response> = { ...response }
+    delete withoutToken.review_token
+    mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(withoutToken))
+
+    await expect(
+      simulateWorkflowDevelopmentTrigger(manualSimulationRequest()),
+    ).rejects.toThrow("invalid response")
+  })
+
+  it("executes only an HTTP 202 response with a fenced run identity", async () => {
+    const execution = triggerExecutionResponse()
+    mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(execution, 202))
+
+    await expect(
+      executeWorkflowDevelopmentTrigger(
+        manualSimulationRequest(),
+        "review-token",
+      ),
+    ).resolves.toEqual(execution)
+    const init = mockedLauncherFetch.mock.calls[0][1] as RequestInit
+    expect(JSON.parse(String(init.body))).toEqual({
+      ...JSON.parse(
+        workflowTriggerSimulationRequestBody(manualSimulationRequest()),
+      ),
+      review_token: "review-token",
+    })
+
+    mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(execution, 200))
+    await expect(
+      executeWorkflowDevelopmentTrigger(
+        manualSimulationRequest(),
+        "review-token",
+      ),
+    ).rejects.toBeInstanceOf(WorkflowAPIError)
+  })
+
+  it("rejects oversized review tokens and non-running execution results", async () => {
+    const oversized = triggerSimulationResponse()
+    oversized.review_token = "x".repeat(4097)
+    mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(oversized))
+    await expect(
+      simulateWorkflowDevelopmentTrigger(manualSimulationRequest()),
+    ).rejects.toThrow("invalid response")
+
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          ...triggerExecutionResponse(),
+          result: {
+            run_id: "wr_trigger_test",
+            status: "succeeded",
+            outputs: {},
+          },
+        },
+        202,
+      ),
+    )
+    await expect(
+      executeWorkflowDevelopmentTrigger(
+        manualSimulationRequest(),
+        "review-token",
+      ),
+    ).rejects.toThrow("invalid response")
+  })
+
+  it("strictly validates returned execution session snapshots", async () => {
+    const invalid = triggerExecutionResponse()
+    invalid.session.last_test = {
+      ...invalid.session.last_test,
+      reflected_payload: "protected-payload",
+    } as typeof invalid.session.last_test
+    mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(invalid, 202))
+
+    await expect(
+      executeWorkflowDevelopmentTrigger(
+        manualSimulationRequest(),
+        "review-token",
+      ),
+    ).rejects.toThrow("invalid response")
+  })
+
+  it("accepts a session-omitted 202 only for the bounded truncated response", async () => {
+    const truncated = {
+      result: {
+        run_id: "wr_trigger_test",
+        status: "running",
+      },
+      reconciliation: {
+        state: "degraded",
+        reason: "draft_test_response_truncated",
+        run_id: "wr_trigger_test",
+        message:
+          "The workflow run was created; refresh to load its development state.",
+      },
+    }
+    mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(truncated, 202))
+    await expect(
+      executeWorkflowDevelopmentTrigger(
+        manualSimulationRequest(),
+        "review-token",
+      ),
+    ).resolves.toEqual(truncated)
+
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          ...truncated,
+          reconciliation: {
+            ...truncated.reconciliation,
+            reason: "draft_test_snapshot_not_recorded",
+          },
+        },
+        202,
+      ),
+    )
+    await expect(
+      executeWorkflowDevelopmentTrigger(
+        manualSimulationRequest(),
+        "review-token",
+      ),
+    ).rejects.toThrow("invalid response")
+
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse({ result: truncated.result }, 202),
+    )
+    await expect(
+      executeWorkflowDevelopmentTrigger(
+        manualSimulationRequest(),
+        "review-token",
+      ),
+    ).rejects.toThrow("invalid response")
+  })
 })
+
+function simulationRequestBase() {
+  return {
+    session_id: "dev-session",
+    expected_session_revision: "session-revision",
+    expected_draft_revision: "draft-revision",
+    prompt: "Simulate the workflow",
+    target_ref: "workflows/simulate.yml",
+    yaml: "name: Simulate\non: manual\njobs: {}\n",
+  }
+}
+
+function manualSimulationRequest(): WorkflowTriggerSimulationRequest {
+  return {
+    ...simulationRequestBase(),
+    trigger: { type: "manual" },
+    scenario: {
+      inputs: { ticket: "PIC-42" },
+      secrets: { token: "hidden" },
+      session: "workflow:test",
+      delivery: { channel: "slack" },
+    },
+  }
+}
+
+function triggerSimulationResponse() {
+  return {
+    simulation: {
+      selected_kind: "manual" as const,
+      effective_kind: "manual" as const,
+      present: true,
+      matched: true,
+      executable: true,
+      reason: "matched" as const,
+      context_summary: {
+        input_count: 1,
+        secret_count: 1,
+        has_event: false,
+        has_session: true,
+        has_delivery: true,
+      },
+    },
+    review: {
+      job_count: 1,
+      step_count: 1,
+      targets: ["agent/main"],
+      effects: [
+        {
+          kind: "model_or_delegated_action_possible" as const,
+          target: "agent/main",
+          occurrences: 1,
+        },
+      ],
+      complete: true,
+      validation: {
+        valid: true,
+        issue_count: 0,
+        issues: [],
+        truncated: false,
+      },
+      limits: [],
+    },
+    review_token: "review-token",
+  }
+}
+
+function triggerExecutionResponse() {
+  return {
+    session: {
+      id: "dev-session",
+      session_revision: "session-revision-2",
+      draft_revision: "draft-revision-2",
+      base_target_revision: "base-revision",
+      reason: "new",
+      status: "testing",
+      prompt: "Simulate the workflow",
+      target_workflow_ref: "workflows/simulate.yml",
+      target_picoclaw_version: "test",
+      target_git_commit: "abcdef",
+      yaml: "name: Simulate\non: manual\njobs: {}\n",
+      validation: {
+        valid: true,
+        validated_at: "2026-07-30T12:00:00Z",
+      },
+      last_test: {
+        draft_key:
+          "workflows/simulate.yml\u0000name: Simulate\non: manual\njobs: {}\n",
+        draft_revision: "draft-revision-2",
+        target_workflow_ref: "workflows/simulate.yml",
+        run_id: "wr_trigger_test",
+        status: "running",
+        tested_at: "2026-07-30T12:00:01Z",
+      },
+      created_at: "2026-07-30T12:00:00Z",
+      updated_at: "2026-07-30T12:00:01Z",
+    },
+    result: {
+      run_id: "wr_trigger_test",
+      status: "running",
+    },
+  }
+}
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {

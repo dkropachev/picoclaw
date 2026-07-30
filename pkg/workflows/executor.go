@@ -487,7 +487,7 @@ func (e *Executor) executeWorkflow(
 	workflow *Workflow,
 	req RunRequest,
 ) (map[string]any, error) {
-	inputs, err := applyWorkflowCallContract(workflow.On.WorkflowCall, req.Inputs, req.Secrets)
+	inputs, err := ResolveWorkflowCallInvocation(workflow.On.WorkflowCall, req.Inputs, req.Secrets)
 	if err != nil {
 		return nil, err
 	}
@@ -1060,7 +1060,10 @@ func agentToolsMode(with map[string]any) string {
 	return AgentToolsInherit
 }
 
-func applyWorkflowCallContract(
+// ResolveWorkflowCallInvocation applies workflow_call defaults and validates
+// provided input types and required secrets. It is pure and shared by normal
+// execution and trigger simulation.
+func ResolveWorkflowCallInvocation(
 	call *WorkflowCall,
 	provided map[string]any,
 	secrets map[string]string,
@@ -1081,7 +1084,7 @@ func applyWorkflowCallContract(
 			if err := validateWorkflowInputValue(name, input.Type, input.Default); err != nil {
 				return nil, err
 			}
-			out[name] = input.Default
+			out[name] = cloneJSONValue(input.Default)
 			continue
 		}
 		if input.Required {

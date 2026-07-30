@@ -20,9 +20,12 @@ import (
 )
 
 var (
-	ErrActiveDevelopmentExists = errors.New("a workflow development session is already active")
-	ErrNoActiveDevelopment     = errors.New("no active workflow development session")
-	ErrDevelopmentBusy         = errors.New("a workflow development operation is already in progress")
+	ErrActiveDevelopmentExists          = errors.New("a workflow development session is already active")
+	ErrNoActiveDevelopment              = errors.New("no active workflow development session")
+	ErrDevelopmentBusy                  = errors.New("a workflow development operation is already in progress")
+	ErrWorkflowDevelopmentFenceMismatch = errors.New(
+		"workflow development test draft fence mismatch",
+	)
 )
 
 const (
@@ -98,6 +101,14 @@ type WorkflowDevelopmentReviseRequest struct {
 	TargetRef  string  `json:"target_ref,omitempty"`
 	YAML       *string `json:"yaml,omitempty"`
 	Regenerate bool    `json:"regenerate,omitempty"`
+}
+
+// WorkflowDevelopmentTestDraftFence identifies one exact active draft
+// snapshot. All fields are required and opaque to callers.
+type WorkflowDevelopmentTestDraftFence struct {
+	SessionID               string `json:"session_id"`
+	ExpectedSessionRevision string `json:"expected_session_revision"`
+	ExpectedDraftRevision   string `json:"expected_draft_revision"`
 }
 
 type WorkflowDevelopmentPublishResult struct {
@@ -245,6 +256,52 @@ func ReviseWorkflowDevelopment(
 	if sessionErr != nil {
 		return nil, sessionErr
 	}
+	return reviseWorkflowDevelopmentLocked(workspace, session, req, opts...)
+}
+
+// ReviseWorkflowDevelopmentFenced applies a revision only when the active
+// development session still matches the exact tested draft snapshot. Fence
+// comparison and revision share the workspace's process and advisory lock.
+func ReviseWorkflowDevelopmentFenced(
+	workspace string,
+	fence WorkflowDevelopmentTestDraftFence,
+	req WorkflowDevelopmentReviseRequest,
+	opts ...LocalOption,
+) (*WorkflowDevelopmentSession, error) {
+	unlock, lockErr := lockWorkflowMutation(workspace)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
+	session, sessionErr := requireActiveDevelopment(workspace)
+	if sessionErr != nil {
+		return nil, sessionErr
+	}
+	if !workflowDevelopmentTestDraftFenceMatches(session, fence) {
+		return nil, ErrWorkflowDevelopmentFenceMismatch
+	}
+	return reviseWorkflowDevelopmentLocked(workspace, session, req, opts...)
+}
+
+func workflowDevelopmentTestDraftFenceMatches(
+	session *WorkflowDevelopmentSession,
+	fence WorkflowDevelopmentTestDraftFence,
+) bool {
+	return session != nil &&
+		fence.SessionID != "" &&
+		fence.SessionID == session.ID &&
+		fence.ExpectedSessionRevision != "" &&
+		fence.ExpectedSessionRevision == session.SessionRevision &&
+		fence.ExpectedDraftRevision != "" &&
+		fence.ExpectedDraftRevision == session.DraftRevision
+}
+
+func reviseWorkflowDevelopmentLocked(
+	workspace string,
+	session *WorkflowDevelopmentSession,
+	req WorkflowDevelopmentReviseRequest,
+	opts ...LocalOption,
+) (*WorkflowDevelopmentSession, error) {
 	if err := ensureNoCurrentRunningDevelopmentTest(session); err != nil {
 		return nil, err
 	}

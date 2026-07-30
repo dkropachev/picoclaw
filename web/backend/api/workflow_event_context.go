@@ -15,6 +15,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/eventing"
 	eventoperator "github.com/sipeed/picoclaw/pkg/eventing/operator"
+	ppid "github.com/sipeed/picoclaw/pkg/pid"
 )
 
 var (
@@ -31,6 +32,13 @@ var (
 // so the configured payload maximum itself does not need an expansion factor.
 const workflowEventContextMetadataAllowanceBytes uint64 = 24 << 20
 
+var workflowEventReadOnlyGatewayPIDData = func(
+	h *Handler,
+	cfg *config.Config,
+) *ppid.PidFileData {
+	return h.readOnlyWorkflowEventGatewayPIDData(cfg)
+}
+
 // loadWorkflowEventEnvelope reads one already-redacted event through the live
 // gateway operator generation. Metadata previews stay payload-free. Full
 // workflow context uses one protected upstream request whose controller holds
@@ -40,11 +48,6 @@ func (h *Handler) loadWorkflowEventEnvelope(
 	eventID string,
 	includePayload bool,
 ) (eventing.Envelope, error) {
-	trimmedEventID := strings.TrimSpace(eventID)
-	if eventID != trimmedEventID || !validOperatorEventID(eventID) {
-		return eventing.Envelope{}, errWorkflowEventInvalid
-	}
-
 	var cfg *config.Config
 	if loaded, err := config.LoadConfig(h.configPath); err == nil {
 		cfg = loaded
@@ -54,7 +57,47 @@ func (h *Handler) loadWorkflowEventEnvelope(
 			errWorkflowEventUnavailable,
 		)
 	}
-	pidData := eventGatewayPIDData(h, cfg)
+	return h.loadWorkflowEventEnvelopeWithConfig(
+		ctx,
+		eventID,
+		includePayload,
+		cfg,
+		eventGatewayPIDData,
+	)
+}
+
+// loadWorkflowEventEnvelopeReadOnly uses an already-loaded immutable config
+// snapshot and peeks process authority without cleaning a stale PID file.
+func (h *Handler) loadWorkflowEventEnvelopeReadOnly(
+	ctx context.Context,
+	eventID string,
+	includePayload bool,
+	cfg *config.Config,
+) (eventing.Envelope, error) {
+	return h.loadWorkflowEventEnvelopeWithConfig(
+		ctx,
+		eventID,
+		includePayload,
+		cfg,
+		workflowEventReadOnlyGatewayPIDData,
+	)
+}
+
+func (h *Handler) loadWorkflowEventEnvelopeWithConfig(
+	ctx context.Context,
+	eventID string,
+	includePayload bool,
+	cfg *config.Config,
+	pidDataForConfig func(*Handler, *config.Config) *ppid.PidFileData,
+) (eventing.Envelope, error) {
+	trimmedEventID := strings.TrimSpace(eventID)
+	if eventID != trimmedEventID || !validOperatorEventID(eventID) {
+		return eventing.Envelope{}, errWorkflowEventInvalid
+	}
+	if cfg == nil || pidDataForConfig == nil {
+		return eventing.Envelope{}, errWorkflowEventUnavailable
+	}
+	pidData := pidDataForConfig(h, cfg)
 	if !validEventGatewayPIDData(pidData) {
 		return eventing.Envelope{}, errWorkflowEventUnavailable
 	}
@@ -123,6 +166,30 @@ func (h *Handler) loadWorkflowEventEnvelope(
 		return eventing.Envelope{}, errWorkflowEventUnavailable
 	}
 	return envelope, nil
+}
+
+func (h *Handler) readOnlyWorkflowEventGatewayPIDData(
+	cfg *config.Config,
+) *ppid.PidFileData {
+	candidates := []*ppid.PidFileData{
+		cloneEventGatewayPIDData(ppid.PeekPidFile(globalConfigDir())),
+	}
+	gateway.mu.Lock()
+	candidates = append(
+		candidates,
+		cloneEventGatewayPIDData(gateway.pidData),
+	)
+	gateway.mu.Unlock()
+	for _, candidate := range candidates {
+		if !validEventGatewayPIDData(candidate) {
+			continue
+		}
+		ok, _, _ := h.validateGatewayPidData(candidate, cfg)
+		if ok {
+			return cloneEventGatewayPIDData(candidate)
+		}
+	}
+	return nil
 }
 
 func workflowEventContextResponseLimit(

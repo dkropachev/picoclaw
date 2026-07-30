@@ -958,6 +958,18 @@ interface MockLauncherApiOptions {
     path: string
     body: unknown
   }>
+  workflowDevelopmentYAML?: string
+  workflowTriggerSimulationRequests?: Array<{
+    method: string
+    path: string
+    body: Record<string, unknown>
+  }>
+  workflowTriggerExecutionRequests?: Array<{
+    method: string
+    path: string
+    body: Record<string, unknown>
+  }>
+  workflowEventPayloadRequests?: string[]
   workflowCancelReasons?: string[]
 }
 
@@ -1293,6 +1305,8 @@ async function mockLauncherApis(
                 prompt: body.prompt ?? workflowDraftSession.prompt,
                 target_workflow_ref:
                   body.target_ref ?? workflowDraftSession.target_workflow_ref,
+                yaml:
+                  options.workflowDevelopmentYAML ?? workflowDraftSession.yaml,
               }
             }
             return json(route, { session: activeDevelopmentSession })
@@ -1438,6 +1452,124 @@ async function mockLauncherApis(
                 validated_at: "2026-07-16T12:00:00Z",
               },
             })
+          }
+          case "/api/workflows/development/triggers/simulate": {
+            const body = request.postDataJSON() as Record<string, unknown>
+            options.workflowTriggerSimulationRequests?.push({
+              method,
+              path,
+              body,
+            })
+            const trigger = body.trigger as {
+              type: string
+              schedule_index?: number
+            }
+            const scenario = body.scenario as {
+              inputs?: Record<string, unknown>
+              secrets?: Record<string, string>
+              session?: string
+              delivery?: Record<string, unknown>
+            }
+            return json(route, {
+              simulation: {
+                selected_kind: trigger.type,
+                effective_kind: trigger.type,
+                ...(trigger.type === "schedule"
+                  ? { schedule_index: trigger.schedule_index }
+                  : {}),
+                present: true,
+                matched: true,
+                executable: true,
+                reason: "matched",
+                context_summary: {
+                  input_count: Object.keys(scenario.inputs ?? {}).length,
+                  secret_count: Object.keys(scenario.secrets ?? {}).length,
+                  has_event:
+                    trigger.type === "event" ||
+                    trigger.type === "runtime_event",
+                  has_session:
+                    typeof scenario.session === "string" &&
+                    scenario.session !== "",
+                  has_delivery:
+                    scenario.delivery != null &&
+                    Object.keys(scenario.delivery).length > 0,
+                },
+              },
+              review: {
+                job_count: 1,
+                step_count: 1,
+                targets: ["agent/main"],
+                effects: [
+                  {
+                    kind: "model_or_delegated_action_possible",
+                    target: "agent/main",
+                    occurrences: 1,
+                  },
+                ],
+                complete: true,
+                validation: {
+                  valid: true,
+                  issue_count: 0,
+                  issues: [],
+                  truncated: false,
+                },
+                limits: [],
+              },
+              review_token: `review-token:${trigger.type}`,
+            })
+          }
+          case "/api/workflows/development/test/execute": {
+            const body = request.postDataJSON() as Record<string, unknown>
+            options.workflowTriggerExecutionRequests?.push({
+              method,
+              path,
+              body,
+            })
+            const current =
+              activeDevelopmentSession ??
+              ({
+                ...workflowDraftSession,
+                yaml:
+                  options.workflowDevelopmentYAML ?? workflowDraftSession.yaml,
+              } satisfies MockWorkflowDevelopmentSession)
+            activeDevelopmentSession = {
+              ...current,
+              prompt:
+                typeof body.prompt === "string" ? body.prompt : current.prompt,
+              target_workflow_ref:
+                typeof body.target_ref === "string"
+                  ? body.target_ref
+                  : current.target_workflow_ref,
+              yaml: typeof body.yaml === "string" ? body.yaml : current.yaml,
+              session_revision: "opaque-session-reviewed-running",
+              status: "testing",
+              last_test: {
+                ...workflowDraftLastTest,
+                draft_key: workflowDraftKey(
+                  typeof body.target_ref === "string"
+                    ? body.target_ref
+                    : current.target_workflow_ref,
+                  typeof body.yaml === "string" ? body.yaml : current.yaml,
+                ),
+                draft_revision: current.draft_revision,
+                run_id: "wr_draft",
+                status: "running",
+                tested_at: "2026-07-30T12:01:01Z",
+              },
+              updated_at: "2026-07-30T12:01:01Z",
+            }
+            completeDraftViaPolling = options.completeDraftViaPolling === true
+            return json(
+              route,
+              {
+                session: activeDevelopmentSession,
+                result: {
+                  run_id: "wr_draft",
+                  status: "running",
+                },
+              },
+              202,
+            )
           }
           case "/api/workflows/development/ai-revise": {
             const body = request.postDataJSON() as {
@@ -1914,6 +2046,7 @@ async function mockLauncherApis(
         case `/api/events/${eventResponse.id}`:
           return json(route, eventResponse)
         case `/api/events/${eventResponse.id}/payload`:
+          options.workflowEventPayloadRequests?.push(path)
           return route.fulfill({
             status: 200,
             contentType: "application/json",
@@ -2361,16 +2494,18 @@ async function expectNoSeriousA11yViolations(page: Page) {
   ).toEqual([])
 }
 
-async function confirmDraftTestReview(page: Page) {
-  const dialog = page.getByRole("dialog", { name: "Review draft test" })
+async function confirmTriggerExecutionReview(page: Page) {
+  const dialog = page.getByRole("dialog", {
+    name: "Review trigger execution",
+  })
   await expect(dialog).toBeVisible()
   const confirm = dialog.getByRole("button", {
-    name: "Confirm and run test",
+    name: "Confirm and execute",
   })
   await expect(confirm).toBeDisabled()
   await dialog
     .getByRole("switch", {
-      name: "I reviewed this scenario and its possible effects",
+      name: "I reviewed this server simulation and its possible effects",
     })
     .click()
   await expect(confirm).toBeEnabled()
@@ -3650,7 +3785,145 @@ test("narrow mobile lazily opens a sanitized built-in workflow inspection", asyn
   expect(errors).toEqual([])
 })
 
-test("workflow event builder applies YAML and runs a matched event-parity draft test", async ({
+test("mobile workflow trigger simulator reviews one explicit redacted scenario", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "mobile",
+    "mobile workflow trigger simulator coverage",
+  )
+  const errors = collectPageErrors(page)
+  const simulationRequests: NonNullable<
+    MockLauncherApiOptions["workflowTriggerSimulationRequests"]
+  > = []
+  const executionRequests: NonNullable<
+    MockLauncherApiOptions["workflowTriggerExecutionRequests"]
+  > = []
+  const payloadRequests: string[] = []
+  const secretCanary = "mobile-trigger-secret-value-must-not-render"
+
+  await gotoMockedRoute(page, "/agent/workflows?mode=develop", {
+    workflowDevelopmentYAML: workflowEventDraftYAML,
+    workflowTriggerSimulationRequests: simulationRequests,
+    workflowTriggerExecutionRequests: executionRequests,
+    workflowEventPayloadRequests: payloadRequests,
+  })
+  await page.waitForURL((url) => {
+    return (
+      !url.searchParams.has("mode") &&
+      url.searchParams.get("workflow") === "workflows/summarize-text.yml" &&
+      url.searchParams.get("run") === "wr_test"
+    )
+  })
+  await page
+    .getByPlaceholder("Describe the workflow outcome")
+    .fill("Triage support tickets from calls and durable events")
+  const startWithAI = page.getByRole("button", { name: "Start with AI" })
+  await expect(startWithAI).toBeEnabled()
+  await startWithAI.click()
+
+  await expect(
+    page.getByText("Trigger simulator", { exact: true }),
+  ).toBeVisible()
+  const triggerScenario = page.getByRole("combobox", {
+    name: "Trigger scenario",
+  })
+  await expect(triggerScenario).toHaveValue("")
+  await expect(page.getByText(/dashboard will not guess/i)).toBeVisible()
+  expect(simulationRequests).toEqual([])
+  await expectNoHorizontalOverflow(page)
+
+  await triggerScenario.selectOption("event")
+  const durableEvent = page.getByRole("combobox", { name: "Durable event" })
+  await durableEvent.selectOption(eventResponse.id)
+  await expect
+    .poll(() =>
+      simulationRequests.some(
+        (entry) =>
+          (entry.body.trigger as { type?: string }).type === "event" &&
+          (entry.body.scenario as { event_id?: string }).event_id ===
+            eventResponse.id,
+      ),
+    )
+    .toBe(true)
+  await expect(
+    page.getByText(/protected payload content stays server-side/i),
+  ).toBeVisible()
+  expect(payloadRequests).toEqual([])
+  await expect(page.locator("body")).not.toContainText(eventPayloadText)
+
+  await triggerScenario.selectOption("workflow_call")
+  await page.getByLabel("Inputs JSON").fill('{"ticket":"PIC-mobile-review"}')
+  await page
+    .getByLabel("Secrets JSON")
+    .fill(JSON.stringify({ github_token: secretCanary }))
+  await expect
+    .poll(() => {
+      const latest = simulationRequests.at(-1)?.body
+      return (
+        (latest?.trigger as { type?: string } | undefined)?.type ===
+          "workflow_call" &&
+        (latest?.scenario as { secrets?: Record<string, string> } | undefined)
+          ?.secrets?.github_token === secretCanary
+      )
+    })
+    .toBe(true)
+
+  const reviewButton = page.getByRole("button", {
+    name: "Review & execute",
+  })
+  await expect(reviewButton).toBeEnabled()
+  await reviewButton.click()
+  const dialog = page.getByRole("dialog", {
+    name: "Review trigger execution",
+  })
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText("Provided secrets")
+  await expect(dialog).not.toContainText(secretCanary)
+  await expect(dialog).not.toContainText(eventPayloadText)
+  await expectElementFitsViewport(
+    page,
+    '[role="dialog"]',
+    "workflow trigger execution review",
+  )
+  await expectNoHorizontalOverflow(page)
+
+  await dialog
+    .getByRole("switch", {
+      name: "I reviewed this server simulation and its possible effects",
+    })
+    .click()
+  const confirm = dialog.getByRole("button", {
+    name: "Confirm and execute",
+  })
+  await expect(confirm).toBeEnabled()
+  await confirm.evaluate((button: HTMLButtonElement) => {
+    button.click()
+    button.click()
+  })
+  await expect.poll(() => executionRequests.length).toBe(1)
+  expect(executionRequests).toEqual([
+    {
+      method: "POST",
+      path: "/api/workflows/development/test/execute",
+      body: expect.objectContaining({
+        trigger: { type: "workflow_call" },
+        scenario: expect.objectContaining({
+          inputs: { ticket: "PIC-mobile-review" },
+          secrets: { github_token: secretCanary },
+        }),
+        review_token: "review-token:workflow_call",
+      }),
+    },
+  ])
+  await expect(dialog).toBeHidden()
+  expect(payloadRequests).toEqual([])
+  await expect(page.locator("body")).not.toContainText(eventPayloadText)
+  await expectNoHorizontalOverflow(page)
+  expect(errors).toEqual([])
+})
+
+test("workflow event builder routes one exact durable event through server review", async ({
   page,
 }) => {
   const errors = collectPageErrors(page)
@@ -3684,30 +3957,41 @@ test("workflow event builder applies YAML and runs a matched event-parity draft 
   ).toBeEnabled()
   await page.getByRole("button", { name: "Apply to YAML" }).click()
 
-  const eventPicker = page.getByLabel("Draft test event")
+  const triggerScenario = page.getByRole("combobox", {
+    name: "Trigger scenario",
+  })
+  await expect(triggerScenario).toHaveValue("")
+  await triggerScenario.selectOption("event")
+  const eventPicker = page.getByRole("combobox", { name: "Durable event" })
   await expect(eventPicker).toBeVisible()
   await expect(page.getByLabel("Secrets JSON")).toHaveCount(0)
-  await expect(page.getByRole("button", { name: "Test Draft" })).toBeDisabled()
+  const reviewButton = page.getByRole("button", {
+    name: "Review & execute",
+  })
+  await expect(reviewButton).toBeDisabled()
   await eventPicker.selectOption(eventResponse.id)
-  await expect(page.getByText(/selected event matches/)).toBeVisible()
-  await expect(page.getByRole("button", { name: "Test Draft" })).toBeEnabled()
-
-  await page.getByRole("button", { name: /payload/i }).click()
-  await expect(page.getByText(eventPayloadText)).toBeVisible()
-  await page.getByRole("button", { name: "Test Draft" }).click()
-  await expect(page.getByText("wr_draft", { exact: true })).toHaveCount(0)
-  const eventReview = page.getByRole("dialog", { name: "Review draft test" })
   await expect(
-    eventReview.getByText(eventResponse.id, { exact: true }),
+    page.getByText(/server-reviewed execution token is ready/i),
   ).toBeVisible()
-  await confirmDraftTestReview(page)
+  await expect(reviewButton).toBeEnabled()
+  await expect(page.locator("body")).not.toContainText(eventPayloadText)
+
+  await reviewButton.click()
+  const eventReview = page.getByRole("dialog", {
+    name: "Review trigger execution",
+  })
+  await expect(eventReview).toContainText("Event context")
+  await expect(eventReview).toContainText("Yes")
+  await expect(eventReview).not.toContainText(eventPayloadText)
+  await eventReview
+    .getByRole("switch", {
+      name: "I reviewed this server simulation and its possible effects",
+    })
+    .click()
+  await eventReview.getByRole("button", { name: "Confirm and execute" }).click()
   await expect(page.getByText("wr_draft", { exact: true })).toBeVisible()
 
-  await page.reload()
-  await expect(page.getByLabel("Draft test event")).toHaveValue(
-    eventResponse.id,
-  )
-  await expect(page.getByText(/selected event matches/)).toBeVisible()
+  await expect(page.locator("body")).not.toContainText(eventPayloadText)
   await expectNoHorizontalOverflow(page)
   expect(errors).toEqual([])
 })
@@ -3782,7 +4066,9 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
 }) => {
   const errors = collectPageErrors(page)
 
-  await gotoMockedRoute(page, "/agent/workflows")
+  await gotoMockedRoute(page, "/agent/workflows", {
+    completeDraftViaPolling: true,
+  })
   await expect(
     page
       .locator(
@@ -3904,42 +4190,27 @@ test("workflow dashboard supports AI draft, publish, and manual run loop", async
   await developmentRefresh
   await expect(yamlEditor).toHaveValue(localDraftYAML)
   await yamlEditor.fill(workflowDraftYAML)
-  await expect(page.getByRole("button", { name: "Test Draft" })).toBeEnabled()
-  await page.locator("#workflow-test-inputs").fill("{")
-  await expect(page.getByText(/Inputs JSON is invalid/)).toBeVisible()
-  await expect(page.getByRole("button", { name: "Test Draft" })).toBeDisabled()
+  const reviewDraft = page.getByRole("button", {
+    name: "Review & execute",
+  })
+  await expect(reviewDraft).toBeEnabled()
+  await page.getByLabel("Inputs JSON").fill("{")
+  await expect(page.getByText(/Inputs must be valid JSON/)).toBeVisible()
+  await expect(reviewDraft).toBeDisabled()
   await expect(page.getByRole("button", { name: "Publish" })).toBeDisabled()
   await expect(
     page.getByText("Run a successful draft test before publishing."),
   ).toBeVisible()
 
+  await page.getByLabel("Inputs JSON").fill('{"ticket":"Printer is offline"}')
+  await page.getByLabel("Session").fill("workflow:draft")
   await page
-    .locator("#workflow-test-inputs")
-    .fill('{"ticket":"Trigger failure"}')
-  await page.locator("#workflow-test-session").fill("workflow:draft")
-  await page
-    .locator("#workflow-test-delivery")
+    .getByLabel("Delivery JSON")
     .fill('{"channel":"telegram","chat_id":"support"}')
-  await page.getByRole("button", { name: "Test Draft" }).click()
-  await expect(page.getByText("wr_draft_failed", { exact: true })).toHaveCount(
-    0,
-  )
-  await confirmDraftTestReview(page)
-  await expect(
-    page.getByText("wr_draft_failed", { exact: true }).first(),
-  ).toBeVisible()
-  await expect(page.getByText("agent step failed").first()).toBeVisible()
-  await expect(page.getByRole("button", { name: "Fix With AI" })).toBeVisible()
-  await page.getByRole("button", { name: "Fix With AI" }).click()
-  await expect(page.getByRole("textbox", { name: "AI brief" })).toHaveValue(
-    /Last draft test failed/,
-  )
-
-  await page
-    .locator("#workflow-test-inputs")
-    .fill('{"ticket":"Printer is offline"}')
-  await page.getByRole("button", { name: "Test Draft" }).click()
-  await confirmDraftTestReview(page)
+  await expect(reviewDraft).toBeEnabled()
+  await reviewDraft.click()
+  await expect(page.getByText("wr_draft", { exact: true })).toHaveCount(0)
+  await confirmTriggerExecutionReview(page)
   await expect(page.getByText("wr_draft", { exact: true })).toBeVisible()
   await expect(page.getByRole("button", { name: "Publish" })).toBeEnabled()
   await expect(page.getByText("Ready to publish.")).toBeVisible()
@@ -4058,15 +4329,17 @@ test("workflow dashboard refreshes async draft status from polling without SSE",
   await expect(
     page.getByRole("heading", { name: "Workflow YAML", exact: true }),
   ).toBeVisible()
+  await page.getByLabel("Inputs JSON").fill('{"ticket":"Printer is offline"}')
+  await page.getByLabel("Session").fill("workflow:draft")
   await page
-    .locator("#workflow-test-inputs")
-    .fill('{"ticket":"Printer is offline"}')
-  await page.locator("#workflow-test-session").fill("workflow:draft")
-  await page
-    .locator("#workflow-test-delivery")
+    .getByLabel("Delivery JSON")
     .fill('{"channel":"telegram","chat_id":"support"}')
-  await page.getByRole("button", { name: "Test Draft" }).click()
-  await confirmDraftTestReview(page)
+  const reviewDraft = page.getByRole("button", {
+    name: "Review & execute",
+  })
+  await expect(reviewDraft).toBeEnabled()
+  await reviewDraft.click()
+  await confirmTriggerExecutionReview(page)
 
   await expect(page.getByText("wr_draft", { exact: true })).toBeVisible()
   await expect(page.getByRole("button", { name: "Publish" })).toBeEnabled()

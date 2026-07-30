@@ -5,9 +5,123 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
+
+func TestLoadCurrentConfigSnapshotRejectsLegacyWithoutMigration(t *testing.T) {
+	for _, version := range []int{0, 1, 2} {
+		t.Run(strconv.Itoa(version), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			publicBefore := []byte(`{"version":` + strconv.Itoa(version) + `}`)
+			securityBefore := []byte("legacy-security-canary")
+			if err := os.WriteFile(path, publicBefore, 0o600); err != nil {
+				t.Fatalf("WriteFile(config) error = %v", err)
+			}
+			if err := os.WriteFile(
+				securityPath(path),
+				securityBefore,
+				0o600,
+			); err != nil {
+				t.Fatalf("WriteFile(security) error = %v", err)
+			}
+
+			if _, _, err := LoadCurrentConfigSnapshot(path); !errors.Is(
+				err,
+				ErrConfigMigrationRequired,
+			) {
+				t.Fatalf("LoadCurrentConfigSnapshot() error = %v", err)
+			}
+			publicAfter, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("ReadFile(config) error = %v", err)
+			}
+			securityAfter, err := os.ReadFile(securityPath(path))
+			if err != nil {
+				t.Fatalf("ReadFile(security) error = %v", err)
+			}
+			if string(publicAfter) != string(publicBefore) ||
+				string(securityAfter) != string(securityBefore) {
+				t.Fatalf(
+					"read-only snapshot changed legacy files: public=%q security=%q",
+					publicAfter,
+					securityAfter,
+				)
+			}
+			backups, err := filepath.Glob(path + ".*.bak")
+			if err != nil {
+				t.Fatalf("Glob(config backups) error = %v", err)
+			}
+			securityBackups, err := filepath.Glob(
+				securityPath(path) + ".*.bak",
+			)
+			if err != nil {
+				t.Fatalf("Glob(security backups) error = %v", err)
+			}
+			if len(backups) != 0 || len(securityBackups) != 0 {
+				t.Fatalf(
+					"read-only snapshot created backups: config=%v security=%v",
+					backups,
+					securityBackups,
+				)
+			}
+		})
+	}
+}
+
+func TestLoadCurrentConfigSnapshotKeepsCurrentBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := DefaultConfig()
+	cfg.Workflows.Enabled = true
+	if err := SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	publicBefore, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(before) error = %v", err)
+	}
+	revisionBefore, err := ConfigRevision(path)
+	if err != nil {
+		t.Fatalf("ConfigRevision(before) error = %v", err)
+	}
+
+	loaded, revision, err := LoadCurrentConfigSnapshot(path)
+	if err != nil {
+		t.Fatalf("LoadCurrentConfigSnapshot() error = %v", err)
+	}
+	if loaded == nil || !loaded.Workflows.Enabled {
+		t.Fatalf("loaded config = %#v", loaded)
+	}
+	if revision != revisionBefore {
+		t.Fatalf("revision = %q, want %q", revision, revisionBefore)
+	}
+	publicAfter, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(after) error = %v", err)
+	}
+	if string(publicAfter) != string(publicBefore) {
+		t.Fatal("read-only snapshot changed current config bytes")
+	}
+}
+
+func TestLoadCurrentConfigSnapshotMissingUsesDefaultsWithoutConfigFiles(
+	t *testing.T,
+) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg, revision, err := LoadCurrentConfigSnapshot(path)
+	if err != nil {
+		t.Fatalf("LoadCurrentConfigSnapshot() error = %v", err)
+	}
+	if cfg == nil || revision != "missing" {
+		t.Fatalf("snapshot = (%#v, %q)", cfg, revision)
+	}
+	for _, candidate := range []string{path, securityPath(path)} {
+		if _, statErr := os.Stat(candidate); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("read-only snapshot created %s: %v", candidate, statErr)
+		}
+	}
+}
 
 func TestSaveConfigIfRevisionRejectsStaleWriter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")

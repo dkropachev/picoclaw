@@ -50,6 +50,7 @@ import {
   cancelWorkflowRun,
   checkWorkflowDependencies,
   discardWorkflowDevelopment,
+  executeWorkflowDevelopmentTrigger,
   getWorkflowDevelopment,
   getWorkflowRun,
   getWorkflowRunEvents,
@@ -67,7 +68,6 @@ import {
   reviseWorkflowDevelopment,
   runWorkflow,
   startWorkflowDevelopment,
-  testWorkflowDevelopment,
   validateWorkflowDevelopment,
   workflowRunEventsStreamURL,
 } from "@/api/workflows"
@@ -111,23 +111,14 @@ import {
   workflowDependencyFence,
   workflowDependencyFenceMessage,
 } from "./workflow-dependency-fence"
-import {
-  type WorkflowDraftActionReview,
-  workflowDraftTestReviewIdentity,
-} from "./workflow-draft-test-review"
 import { WorkflowDraftTestReviewDialog } from "./workflow-draft-test-review-dialog"
 import {
   type WorkflowEditorMode,
   WorkflowEditorTabs,
 } from "./workflow-editor-tabs"
 import {
-  WorkflowEventTestContext,
-  type WorkflowEventTestMatchState,
-} from "./workflow-event-test-context"
-import {
   WorkflowJobEditor,
   type WorkflowJobEditorActivity,
-  type WorkflowStructuredActionsState,
 } from "./workflow-job-editor"
 import {
   type WorkflowDependencyCheckState,
@@ -150,6 +141,10 @@ import {
   type WorkflowTriggerEditorActivity,
   type WorkflowTriggerInspectionState,
 } from "./workflow-trigger-editor"
+import {
+  WorkflowTriggerSimulator,
+  type WorkflowTriggerSimulatorState,
+} from "./workflow-trigger-simulator"
 
 const terminalStatuses = new Set(["succeeded", "failed", "canceled", "skipped"])
 const workflowDefinitionInspectionQueryKey = [
@@ -248,6 +243,10 @@ type WorkflowCancelSubmission = {
   runID: string
   reason: string
 }
+type WorkflowTriggerExecutionSubmission = Extract<
+  WorkflowTriggerSimulatorState,
+  { status: "ready" }
+>
 
 const initialEventTriggerInspection: WorkflowTriggerInspectionState = {
   yaml: "",
@@ -265,16 +264,6 @@ const initialJobEditorActivity: WorkflowJobEditorActivity = {
   dirty: false,
   applying: false,
   conflict: false,
-}
-
-const initialStructuredActionsState: WorkflowStructuredActionsState = {
-  yaml: "",
-  status: "loading",
-}
-
-const initialEventTestMatch: WorkflowEventTestMatchState = {
-  status: "idle",
-  message: "Select a recent event to check this trigger.",
 }
 
 export function WorkflowsPage({
@@ -392,12 +381,6 @@ export function WorkflowsPage({
     useState<DraftEditorMode>("yaml")
   const [eventTriggerInspection, setEventTriggerInspection] =
     useState<WorkflowTriggerInspectionState>(initialEventTriggerInspection)
-  const [eventTestMatch, setEventTestMatch] =
-    useState<WorkflowEventTestMatchState>(initialEventTestMatch)
-  const [testInputsJSON, setTestInputsJSON] = useState("{}")
-  const [testSecretsJSON, setTestSecretsJSON] = useState("{}")
-  const [testSession, setTestSession] = useState("")
-  const [testDeliveryJSON, setTestDeliveryJSON] = useState("{}")
   const [runInputValues, setRunInputValues] = useState<WorkflowRunInputValues>(
     {},
   )
@@ -817,21 +800,6 @@ export function WorkflowsPage({
     setLastDraftTest(draftTestSnapshotFromSession(session))
   }, [session])
 
-  useEffect(() => {
-    if (
-      eventTriggerInspection.yaml !== draftYAML ||
-      eventTriggerInspection.status !== "ready" ||
-      !eventTriggerInspection.eventTriggerPresent
-    ) {
-      setEventTestMatch(initialEventTestMatch)
-    }
-  }, [
-    draftYAML,
-    eventTriggerInspection.status,
-    eventTriggerInspection.eventTriggerPresent,
-    eventTriggerInspection.yaml,
-  ])
-
   const filteredRuns = useMemo(() => {
     const needle = query.trim().toLowerCase()
     if (needle === "") {
@@ -954,38 +922,24 @@ export function WorkflowsPage({
     setRunInputValues(workflowRunInitialInputValues(selectedWorkflow ?? null))
     setRunSecretValues(workflowRunInitialSecretValues(selectedWorkflow ?? null))
   }, [selectedWorkflow, selectedWorkflowContractSignature])
-  const eventTriggerInspectionCurrent =
+  const triggerInspectionCurrent =
     eventTriggerInspection.yaml === draftYAML &&
-    eventTriggerInspection.status === "ready"
-  const eventTriggerPresent =
-    eventTriggerInspectionCurrent && eventTriggerInspection.eventTriggerPresent
-  const eventContextReadinessError =
+    eventTriggerInspection.status === "ready" &&
+    eventTriggerInspection.inspection != null
+  const triggerSimulationReadinessError =
     eventTriggerInspection.yaml !== draftYAML ||
     eventTriggerInspection.status === "loading"
       ? "Wait for the current YAML to be inspected before testing."
       : eventTriggerInspection.status === "error"
         ? `Workflow trigger inspection failed: ${eventTriggerInspection.reason ?? "unknown error"}`
-        : eventTriggerPresent &&
-            (eventTestMatch.status !== "matched" || !eventTestMatch.eventID)
-          ? eventTestMatch.message
+        : !triggerInspectionCurrent
+          ? "Wait for the current YAML to be inspected before testing."
           : null
-  const testPayloadError = firstMessage([
-    eventContextReadinessError,
-    eventTriggerPresent
-      ? null
-      : jsonObjectValidationMessage(testInputsJSON, "Inputs"),
-    eventTriggerPresent
-      ? null
-      : jsonStringObjectValidationMessage(testSecretsJSON, "Secrets"),
-    eventTriggerPresent
-      ? null
-      : jsonObjectValidationMessage(testDeliveryJSON, "Delivery"),
-  ])
   const testReadinessMessage = workflowTestReadinessMessage({
     session,
     targetRef: draftTargetRef,
     yaml: draftYAML,
-    payloadError: testPayloadError,
+    payloadError: triggerSimulationReadinessError,
     runningTest: draftTestRunning,
   })
   const runSecretsJSONError = jsonStringObjectValidationMessage(
@@ -1267,42 +1221,90 @@ export function WorkflowsPage({
     onError: (err) => toast.error(errorMessage(err)),
   })
 
-  const testDraftMutation = useMutation<WorkflowDevelopmentTestResult, Error>({
-    mutationFn: () =>
-      testWorkflowDevelopment({
-        prompt: draftPrompt,
-        target_ref: draftTargetRef,
-        yaml: draftYAML,
-        inputs: eventTriggerPresent
-          ? undefined
-          : parseJSONObject(testInputsJSON, "Inputs"),
-        secrets: eventTriggerPresent
-          ? undefined
-          : parseStringJSONObject(testSecretsJSON, "Secrets"),
-        session: eventTriggerPresent ? undefined : optionalString(testSession),
-        delivery: eventTriggerPresent
-          ? undefined
-          : parseDeliveryJSONObject(testDeliveryJSON, "Delivery"),
-        event_id: eventTriggerPresent ? eventTestMatch.eventID : undefined,
-        async: true,
-      }),
-    onSuccess: ({ session: nextSession, result, reconciliation, error }) => {
-      applySessionDraft(nextSession)
+  const triggerExecutionFenceRef = useRef({
+    sessionID: session?.id,
+    sessionRevision: session?.session_revision,
+    draftRevision: session?.draft_revision,
+    prompt: draftPrompt,
+    targetRef: draftTargetRef,
+    yaml: draftYAML,
+  })
+  useEffect(() => {
+    triggerExecutionFenceRef.current = {
+      sessionID: session?.id,
+      sessionRevision: session?.session_revision,
+      draftRevision: session?.draft_revision,
+      prompt: draftPrompt,
+      targetRef: draftTargetRef,
+      yaml: draftYAML,
+    }
+  }, [
+    draftPrompt,
+    draftTargetRef,
+    draftYAML,
+    session?.draft_revision,
+    session?.id,
+    session?.session_revision,
+  ])
+  const testDraftMutation = useMutation<
+    WorkflowDevelopmentTestResult,
+    Error,
+    WorkflowTriggerExecutionSubmission
+  >({
+    mutationFn: (submission) => {
+      const token = submission.response.review_token
+      if (!submission.response.simulation.executable || token == null) {
+        throw new Error(
+          "The exact trigger scenario does not have an executable server review.",
+        )
+      }
+      return executeWorkflowDevelopmentTrigger(submission.request, token)
+    },
+    onSuccess: (
+      { session: nextSession, result, reconciliation },
+      submission,
+    ) => {
+      const fence = triggerExecutionFenceRef.current
+      const request = submission.request
+      if (
+        fence.sessionID !== request.session_id ||
+        fence.sessionRevision !== request.expected_session_revision ||
+        fence.draftRevision !== request.expected_draft_revision ||
+        fence.prompt !== request.prompt ||
+        fence.targetRef !== request.target_ref ||
+        fence.yaml !== request.yaml
+      ) {
+        toast.warning(
+          "The draft changed while execution was starting. The stale response was ignored.",
+        )
+        return
+      }
+      if (nextSession != null) {
+        applySessionDraft(nextSession)
+      }
       setLastDraftTest({
-        sessionID: nextSession.id,
-        draftKey: draftKey(nextSession.target_workflow_ref, nextSession.yaml),
+        sessionID: nextSession?.id ?? request.session_id,
+        draftKey: draftKey(
+          nextSession?.target_workflow_ref ?? request.target_ref,
+          nextSession?.yaml ?? request.yaml,
+        ),
         draftRevision:
-          nextSession.last_test?.draft_revision ?? nextSession.draft_revision,
+          nextSession?.last_test?.draft_revision ??
+          nextSession?.draft_revision ??
+          request.expected_draft_revision,
         runID: result?.run_id,
-        eventID: eventTriggerPresent ? eventTestMatch.eventID : undefined,
+        eventID:
+          request.trigger.type === "event"
+            ? (request.scenario as { event_id: string }).event_id
+            : undefined,
         status: result?.status ?? "validation_failed",
-        error: error ?? result?.error,
+        error: result?.error,
         testedAt: new Date().toISOString(),
       })
       if (result?.run_id) {
         setSelectedRunID(result.run_id)
-        if (error) {
-          toast.error(`Draft test ${result.status}: ${error}`)
+        if (result.error) {
+          toast.error(`Draft test ${result.status}: ${result.error}`)
         } else if (reconciliation != null) {
           toast.warning(reconciliation.message)
         } else {
@@ -1310,11 +1312,33 @@ export function WorkflowsPage({
         }
         void invalidateRunQueries(queryClient, result.run_id)
       } else {
-        toast.error(error ?? "Draft test did not create a run")
+        toast.error("Draft test did not create a run")
+      }
+      if (
+        nextSession == null &&
+        reconciliation?.reason === "draft_test_response_truncated"
+      ) {
+        void queryClient.refetchQueries({
+          queryKey: ["workflows", "development"],
+          exact: true,
+        })
       }
       void invalidateWorkflowQueries(queryClient)
     },
-    onError: (err) => toast.error(errorMessage(err)),
+    onError: (err, submission) => {
+      const fence = triggerExecutionFenceRef.current
+      const request = submission.request
+      if (
+        fence.sessionID === request.session_id &&
+        fence.sessionRevision === request.expected_session_revision &&
+        fence.draftRevision === request.expected_draft_revision &&
+        fence.prompt === request.prompt &&
+        fence.targetRef === request.target_ref &&
+        fence.yaml === request.yaml
+      ) {
+        toast.error(errorMessage(err))
+      }
+    },
   })
 
   const publishMutation = useMutation({
@@ -1639,9 +1663,18 @@ export function WorkflowsPage({
     !startMutation.isPending &&
     !startWithAIMutation.isPending &&
     !startRepairWithAIMutation.isPending
+  const acceptedTestRequest = testDraftMutation.variables?.request
   const acceptedTestReconciliation =
     testDraftMutation.data != null &&
-    testDraftMutation.data.session.id === session?.id
+    acceptedTestRequest != null &&
+    session != null &&
+    acceptedTestRequest.session_id === session.id &&
+    acceptedTestRequest.expected_session_revision ===
+      session.session_revision &&
+    acceptedTestRequest.expected_draft_revision === session.draft_revision &&
+    acceptedTestRequest.prompt === draftPrompt &&
+    acceptedTestRequest.target_ref === draftTargetRef &&
+    acceptedTestRequest.yaml === draftYAML
       ? testDraftMutation.data.reconciliation
       : undefined
   const currentDevelopmentReconciliation =
@@ -1650,7 +1683,7 @@ export function WorkflowsPage({
     session != null &&
     draftTargetRef.trim() !== "" &&
     draftYAML.trim() !== "" &&
-    testPayloadError == null &&
+    triggerSimulationReadinessError == null &&
     !draftTestRunning &&
     !testDraftMutation.isPending
   const canPublish =
@@ -1731,7 +1764,7 @@ export function WorkflowsPage({
     }
     void invalidateWorkflowQueries(queryClient)
     void queryClient.invalidateQueries({
-      queryKey: ["events", "workflow-draft-context"],
+      queryKey: ["events", "workflow-trigger-simulator"],
     })
   }
 
@@ -1829,17 +1862,6 @@ export function WorkflowsPage({
             triggerEditorResetKey={triggerEditorResetKey}
             jobEditorResetKey={jobEditorResetKey}
             eventTriggerInspection={eventTriggerInspection}
-            eventTriggerPresent={eventTriggerPresent}
-            testEventID={
-              eventTestMatch.eventID ??
-              (lastDraftTest?.draftKey === currentDraftKey
-                ? lastDraftTest.eventID
-                : undefined)
-            }
-            testInputsJSON={testInputsJSON}
-            testSecretsJSON={testSecretsJSON}
-            testSession={testSession}
-            testDeliveryJSON={testDeliveryJSON}
             onStartPromptChange={setStartPrompt}
             onStartTargetRefChange={setStartTargetRef}
             onDraftPromptChange={setDraftPrompt}
@@ -1858,11 +1880,6 @@ export function WorkflowsPage({
             onLoadAuthoritativeDevelopmentSession={
               loadAuthoritativeDevelopmentSession
             }
-            onEventTestMatchChange={setEventTestMatch}
-            onTestInputsJSONChange={setTestInputsJSON}
-            onTestSecretsJSONChange={setTestSecretsJSON}
-            onTestSessionChange={setTestSession}
-            onTestDeliveryJSONChange={setTestDeliveryJSON}
             onStartWithAI={() => startWithAIMutation.mutate()}
             onStartScaffold={startScaffold}
             onStartEdit={(ref) =>
@@ -1886,7 +1903,7 @@ export function WorkflowsPage({
             onFixTestWithAI={() => fixDraftTestMutation.mutate()}
             onRegenerate={() => regenerateMutation.mutate()}
             onValidate={() => validateMutation.mutate()}
-            onTest={() => testDraftMutation.mutate()}
+            onTest={(submission) => testDraftMutation.mutate(submission)}
             onPublish={() => publishMutation.mutate()}
             onDiscard={() => discardMutation.mutate()}
             onOpenTestRun={(runID) => {
@@ -2106,12 +2123,6 @@ function DevelopSurface({
   triggerEditorResetKey,
   jobEditorResetKey,
   eventTriggerInspection,
-  eventTriggerPresent,
-  testEventID,
-  testInputsJSON,
-  testSecretsJSON,
-  testSession,
-  testDeliveryJSON,
   onStartPromptChange,
   onStartTargetRefChange,
   onDraftPromptChange,
@@ -2122,11 +2133,6 @@ function DevelopSurface({
   onTriggerEditorActivityChange,
   onJobEditorActivityChange,
   onLoadAuthoritativeDevelopmentSession,
-  onEventTestMatchChange,
-  onTestInputsJSONChange,
-  onTestSecretsJSONChange,
-  onTestSessionChange,
-  onTestDeliveryJSONChange,
   onStartWithAI,
   onStartScaffold,
   onStartEdit,
@@ -2177,12 +2183,6 @@ function DevelopSurface({
   triggerEditorResetKey: number
   jobEditorResetKey: number
   eventTriggerInspection: WorkflowTriggerInspectionState
-  eventTriggerPresent: boolean
-  testEventID?: string
-  testInputsJSON: string
-  testSecretsJSON: string
-  testSession: string
-  testDeliveryJSON: string
   onStartPromptChange: (value: string) => void
   onStartTargetRefChange: (value: string) => void
   onDraftPromptChange: (value: string) => void
@@ -2195,11 +2195,6 @@ function DevelopSurface({
   onTriggerEditorActivityChange: (value: WorkflowTriggerEditorActivity) => void
   onJobEditorActivityChange: (value: WorkflowJobEditorActivity) => void
   onLoadAuthoritativeDevelopmentSession: () => void
-  onEventTestMatchChange: (value: WorkflowEventTestMatchState) => void
-  onTestInputsJSONChange: (value: string) => void
-  onTestSecretsJSONChange: (value: string) => void
-  onTestSessionChange: (value: string) => void
-  onTestDeliveryJSONChange: (value: string) => void
   onStartWithAI: () => void
   onStartScaffold: () => void
   onStartEdit: (ref: string) => void
@@ -2211,7 +2206,7 @@ function DevelopSurface({
   onFixTestWithAI: () => void
   onRegenerate: () => void
   onValidate: () => void
-  onTest: () => void
+  onTest: (submission: WorkflowTriggerExecutionSubmission) => void
   onPublish: () => void
   onDiscard: () => void
   onOpenTestRun: (runID: string) => void
@@ -2234,53 +2229,73 @@ function DevelopSurface({
   const draftActionDisabled = busy || triggerEditorBlocked
   const [builderSection, setBuilderSection] =
     useState<WorkflowBuilderSection>("triggers")
-  const [structuredActionsState, setStructuredActionsState] =
-    useState<WorkflowStructuredActionsState>(initialStructuredActionsState)
   const [testReviewOpen, setTestReviewOpen] = useState(false)
-  const structuredActionsCurrent =
-    structuredActionsState.yaml === draftYAML &&
-    structuredActionsState.status === "ready"
-  const structuredActionReview = structuredActionsCurrent
-    ? structuredActionsState.review
-    : structuredActionsState.yaml === draftYAML &&
-        structuredActionsState.status === "error"
-      ? conservativeWorkflowDraftActionReview
-      : undefined
-  const structuredReviewPending =
-    structuredActionsState.yaml !== draftYAML ||
-    structuredActionsState.status === "loading" ||
-    structuredActionReview == null
-  const testScenario = workflowDraftTestScenario(
-    eventTriggerPresent,
-    testEventID,
+  const [triggerSimulation, setTriggerSimulation] =
+    useState<WorkflowTriggerSimulatorState>({
+      status: "idle",
+      message: "Choose a trigger scenario to simulate.",
+    })
+  const simulationBase = {
+    sessionID: session?.id,
+    sessionRevision: session?.session_revision,
+    draftRevision: session?.draft_revision,
+    prompt: draftPrompt,
+    targetRef: draftTargetRef,
+    yaml: draftYAML,
+  }
+  const simulationBaseIdentity = JSON.stringify(simulationBase)
+  const invalidateTriggerSimulation = useCallback(() => {
+    setTestReviewOpen(false)
+    setTriggerSimulation({
+      status: "idle",
+      message: "The draft or trigger scenario changed. Simulate it again.",
+    })
+  }, [])
+  useEffect(() => {
+    invalidateTriggerSimulation()
+  }, [invalidateTriggerSimulation, simulationBaseIdentity])
+  const handleTriggerSimulationChange = useCallback(
+    (next: WorkflowTriggerSimulatorState) => {
+      if (next.status === "ready") {
+        const request = next.request
+        if (
+          session?.id !== request.session_id ||
+          session.session_revision !== request.expected_session_revision ||
+          session.draft_revision !== request.expected_draft_revision ||
+          draftPrompt !== request.prompt ||
+          draftTargetRef !== request.target_ref ||
+          draftYAML !== request.yaml
+        ) {
+          return
+        }
+      }
+      setTestReviewOpen(false)
+      setTriggerSimulation(next)
+    },
+    [draftPrompt, draftTargetRef, draftYAML, session],
   )
-  const testScenarioDetails = workflowDraftTestScenarioDetails({
-    eventTriggerPresent,
-    eventID: testEventID,
-    inputsJSON: testInputsJSON,
-    secretsJSON: testSecretsJSON,
-    session: testSession,
-    deliveryJSON: testDeliveryJSON,
-  })
-  const testReviewIdentity =
-    structuredActionReview == null
-      ? ""
-      : workflowDraftTestReviewIdentity({
-          targetRef: draftTargetRef,
-          yaml: draftYAML,
-          prompt: draftPrompt,
-          mode: eventTriggerPresent ? "event" : "manual",
-          eventID: testEventID,
-          inputsJSON: testInputsJSON,
-          secretsJSON: testSecretsJSON,
-          session: testSession,
-          deliveryJSON: testDeliveryJSON,
-          review: structuredActionReview,
-        })
+  const currentTriggerSimulation =
+    triggerSimulation.status === "ready" &&
+    session != null &&
+    triggerSimulation.request.session_id === session.id &&
+    triggerSimulation.request.expected_session_revision ===
+      session.session_revision &&
+    triggerSimulation.request.expected_draft_revision ===
+      session.draft_revision &&
+    triggerSimulation.request.prompt === draftPrompt &&
+    triggerSimulation.request.target_ref === draftTargetRef &&
+    triggerSimulation.request.yaml === draftYAML
+      ? triggerSimulation
+      : null
+  const triggerReviewReady =
+    currentTriggerSimulation?.response.simulation.executable === true &&
+    currentTriggerSimulation.response.review.complete &&
+    currentTriggerSimulation.response.review_token != null
+  const ignoreStructuredActionsChange = useCallback(() => {}, [])
   const requestDraftTest = () => {
-    if (structuredActionReview == null) {
+    if (!triggerReviewReady) {
       toast.warning(
-        "Wait for the current jobs and actions review before testing.",
+        "Wait for a matching, complete server simulation before execution.",
       )
       return
     }
@@ -2466,7 +2481,10 @@ function DevelopSurface({
             <Input
               id="workflow-target-ref"
               value={draftTargetRef}
-              onChange={(event) => onDraftTargetRefChange(event.target.value)}
+              onChange={(event) => {
+                invalidateTriggerSimulation()
+                onDraftTargetRefChange(event.target.value)
+              }}
               disabled={draftActionDisabled}
               className="font-mono text-xs"
             />
@@ -2481,111 +2499,26 @@ function DevelopSurface({
             <Textarea
               id="workflow-brief"
               value={draftPrompt}
-              onChange={(event) => onDraftPromptChange(event.target.value)}
+              onChange={(event) => {
+                invalidateTriggerSimulation()
+                onDraftPromptChange(event.target.value)
+              }}
               disabled={draftActionDisabled}
               className="min-h-32 resize-none"
             />
           </div>
           <ValidationPanel validation={session.validation} />
-          <Panel title="Test run">
+          <Panel title="Trigger simulator">
             <div className="grid gap-3">
-              {eventTriggerInspection.yaml !== draftYAML ||
-              eventTriggerInspection.status === "loading" ? (
-                <div
-                  role="status"
-                  className="text-muted-foreground rounded-md border border-dashed px-3 py-4 text-center text-xs"
-                >
-                  Inspecting the current workflow triggers…
-                </div>
-              ) : eventTriggerInspection.status === "error" ? (
-                <div
-                  role="alert"
-                  className="border-destructive/40 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-xs break-words"
-                >
-                  Workflow trigger inspection failed:{" "}
-                  {eventTriggerInspection.reason ?? "unknown error"}
-                </div>
-              ) : eventTriggerPresent ? (
-                <WorkflowEventTestContext
-                  yaml={draftYAML}
-                  disabled={busy}
-                  initialEventID={testEventID}
-                  onMatchStateChange={onEventTestMatchChange}
-                />
-              ) : (
-                <>
-                  <div className="grid gap-2">
-                    <label
-                      className="text-muted-foreground text-xs"
-                      htmlFor="workflow-test-inputs"
-                    >
-                      Inputs JSON
-                    </label>
-                    <Textarea
-                      id="workflow-test-inputs"
-                      value={testInputsJSON}
-                      onChange={(event) =>
-                        onTestInputsJSONChange(event.target.value)
-                      }
-                      spellCheck={false}
-                      className="min-h-20 resize-none font-mono text-xs"
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <label
-                      className="text-muted-foreground text-xs"
-                      htmlFor="workflow-test-session"
-                    >
-                      Session
-                    </label>
-                    <Input
-                      id="workflow-test-session"
-                      value={testSession}
-                      onChange={(event) =>
-                        onTestSessionChange(event.target.value)
-                      }
-                      placeholder="workflow:test"
-                      className="font-mono text-xs"
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <label
-                      className="text-muted-foreground text-xs"
-                      htmlFor="workflow-test-delivery"
-                    >
-                      Delivery JSON
-                    </label>
-                    <Textarea
-                      id="workflow-test-delivery"
-                      value={testDeliveryJSON}
-                      onChange={(event) =>
-                        onTestDeliveryJSONChange(event.target.value)
-                      }
-                      spellCheck={false}
-                      className="min-h-20 resize-none font-mono text-xs"
-                    />
-                  </div>
-                </>
-              )}
-              {!eventTriggerPresent ? (
-                <div className="grid gap-2">
-                  <label
-                    className="text-muted-foreground text-xs"
-                    htmlFor="workflow-test-secrets"
-                  >
-                    Secrets JSON
-                  </label>
-                  <Textarea
-                    id="workflow-test-secrets"
-                    value={testSecretsJSON}
-                    onChange={(event) =>
-                      onTestSecretsJSONChange(event.target.value)
-                    }
-                    spellCheck={false}
-                    className="min-h-20 resize-none font-mono text-xs"
-                  />
-                </div>
-              ) : null}
+              <WorkflowTriggerSimulator
+                session={session}
+                prompt={draftPrompt}
+                targetRef={draftTargetRef}
+                yaml={draftYAML}
+                inspectionState={eventTriggerInspection}
+                disabled={draftActionDisabled}
+                onSimulationChange={handleTriggerSimulationChange}
+              />
               <DraftTestResultPanel
                 result={lastDraftTest}
                 stale={lastDraftTestStale}
@@ -2670,12 +2603,12 @@ function DevelopSurface({
             size="sm"
             onClick={requestDraftTest}
             disabled={
-              !canTestDraft || draftActionDisabled || structuredReviewPending
+              !canTestDraft || draftActionDisabled || !triggerReviewReady
             }
             title={
               triggerEditorBlockingMessage ??
-              (structuredReviewPending
-                ? "Wait for the current jobs and actions to be inspected before testing."
+              (!triggerReviewReady
+                ? "Wait for a matching, complete server simulation before execution."
                 : !canTestDraft
                   ? testReadinessMessage
                   : undefined)
@@ -2683,8 +2616,8 @@ function DevelopSurface({
           >
             <IconPlayerPlay className="size-4" />
             {pendingAction === "test" || pendingAction === "test-running"
-              ? "Testing"
-              : "Test Draft"}
+              ? "Executing"
+              : "Review & execute"}
           </Button>
           <Button
             size="sm"
@@ -2760,7 +2693,10 @@ function DevelopSurface({
               key={triggerEditorResetKey}
               yaml={draftYAML}
               disabled={busy || developmentSessionConflict}
-              onYAMLChange={onDraftYAMLChange}
+              onYAMLChange={(nextYAML) => {
+                invalidateTriggerSimulation()
+                onDraftYAMLChange(nextYAML)
+              }}
               onInspectionChange={onEventTriggerInspectionChange}
               onActivityChange={onTriggerEditorActivityChange}
               onOpenYAML={() => onDraftEditorModeChange("yaml")}
@@ -2777,9 +2713,12 @@ function DevelopSurface({
               key={jobEditorResetKey}
               yaml={draftYAML}
               disabled={busy || developmentSessionConflict}
-              onYAMLChange={onDraftYAMLChange}
+              onYAMLChange={(nextYAML) => {
+                invalidateTriggerSimulation()
+                onDraftYAMLChange(nextYAML)
+              }}
               onActivityChange={onJobEditorActivityChange}
-              onStructuredActionsChange={setStructuredActionsState}
+              onStructuredActionsChange={ignoreStructuredActionsChange}
               onOpenYAML={() => onDraftEditorModeChange("yaml")}
             />
           </div>
@@ -2794,43 +2733,47 @@ function DevelopSurface({
           <Textarea
             aria-label="Workflow YAML"
             value={draftYAML}
-            onChange={(event) => onDraftYAMLChange(event.target.value)}
+            onChange={(event) => {
+              invalidateTriggerSimulation()
+              onDraftYAMLChange(event.target.value)
+            }}
             disabled={busy}
             spellCheck={false}
             className="size-full min-h-0 resize-none rounded-none border-0 p-4 font-mono text-xs shadow-none focus-visible:ring-0"
           />
         </div>
       </section>
-      {structuredActionReview != null ? (
+      {currentTriggerSimulation != null ? (
         <WorkflowDraftTestReviewDialog
           open={testReviewOpen}
           pending={pendingAction === "test" || pendingAction === "test-running"}
-          identity={testReviewIdentity}
-          scenario={testScenario}
-          scenarioDetails={testScenarioDetails}
-          review={structuredActionReview}
+          identity={currentTriggerSimulation.identity}
+          simulation={currentTriggerSimulation.response.simulation}
+          review={currentTriggerSimulation.response.review}
           onOpenChange={setTestReviewOpen}
           onConfirm={(reviewedIdentity) => {
-            const currentIdentity = workflowDraftTestReviewIdentity({
-              targetRef: draftTargetRef,
-              yaml: draftYAML,
-              prompt: draftPrompt,
-              mode: eventTriggerPresent ? "event" : "manual",
-              eventID: testEventID,
-              inputsJSON: testInputsJSON,
-              secretsJSON: testSecretsJSON,
-              session: testSession,
-              deliveryJSON: testDeliveryJSON,
-              review: structuredActionReview,
-            })
-            if (reviewedIdentity !== currentIdentity) {
+            const request = currentTriggerSimulation.request
+            if (
+              reviewedIdentity !== currentTriggerSimulation.identity ||
+              session.id !== request.session_id ||
+              session.session_revision !== request.expected_session_revision ||
+              session.draft_revision !== request.expected_draft_revision ||
+              draftPrompt !== request.prompt ||
+              draftTargetRef !== request.target_ref ||
+              draftYAML !== request.yaml
+            ) {
               toast.warning(
-                "The draft or test scenario changed. Review its effects again.",
+                "The draft or trigger scenario changed. Simulate and review it again.",
               )
+              invalidateTriggerSimulation()
               return
             }
             setTestReviewOpen(false)
-            onTest()
+            setTriggerSimulation({
+              status: "idle",
+              message: "Execution started. Simulate again before another run.",
+            })
+            onTest(currentTriggerSimulation)
           }}
         />
       ) : null}
@@ -4589,195 +4532,6 @@ function workflowJobEditorBlockingMessage(activity: WorkflowJobEditorActivity) {
     return "Apply, reset, or cancel the jobs and actions changes before leaving or running another draft action."
   }
   return null
-}
-
-const conservativeWorkflowDraftActionReview: WorkflowDraftActionReview = {
-  jobCount: 0,
-  stepCount: 0,
-  targets: [],
-  rawOnlyCount: 1,
-}
-
-function workflowDraftTestScenario(
-  eventTriggerPresent: boolean,
-  eventID?: string,
-) {
-  if (eventTriggerPresent) {
-    return eventID == null || eventID === ""
-      ? "Durable event trigger; no event is selected yet."
-      : `Durable event ${eventID}`
-  }
-  return "Manual or workflow-call inputs with the current session and delivery context."
-}
-
-function workflowDraftTestScenarioDetails({
-  eventTriggerPresent,
-  eventID,
-  inputsJSON,
-  secretsJSON,
-  session,
-  deliveryJSON,
-}: {
-  eventTriggerPresent: boolean
-  eventID?: string
-  inputsJSON: string
-  secretsJSON: string
-  session: string
-  deliveryJSON: string
-}) {
-  if (eventTriggerPresent) {
-    return [
-      { label: "Mode", value: "Durable event" },
-      {
-        label: "Event ID",
-        value: workflowDraftScenarioDisplayText(
-          eventID ?? "",
-          "(not selected)",
-        ),
-      },
-    ]
-  }
-  return [
-    { label: "Mode", value: "Manual / workflow call" },
-    {
-      label: "Inputs JSON",
-      value: workflowDraftScenarioDisplayText(inputsJSON, "(empty)"),
-    },
-    {
-      label: "Session",
-      value: workflowDraftScenarioDisplayText(session, "(not set)"),
-    },
-    {
-      label: "Delivery JSON",
-      value: workflowDraftScenarioDisplayText(deliveryJSON, "(empty)"),
-    },
-    {
-      label: "Secrets",
-      value: workflowDraftSecretSummary(secretsJSON),
-    },
-  ]
-}
-
-const workflowDraftScenarioDisplayMaximumBytes = 4096
-const workflowDraftSecretNameMaximumBytes = 128
-const workflowDraftSecretSummaryMaximumBytes = 1024
-
-function workflowDraftScenarioDisplayText(
-  value: string,
-  empty: string,
-  maximumBytes = workflowDraftScenarioDisplayMaximumBytes,
-) {
-  if (value === "") {
-    return empty
-  }
-  const encoder = new TextEncoder()
-  const parts: string[] = []
-  let outputBytes = 0
-  let truncated = false
-  for (const character of value) {
-    const visible = workflowDraftScenarioVisibleCharacter(character)
-    const visibleBytes = encoder.encode(visible).byteLength
-    if (outputBytes + visibleBytes > maximumBytes) {
-      truncated = true
-      break
-    }
-    parts.push(visible)
-    outputBytes += visibleBytes
-  }
-  if (!truncated) {
-    return parts.join("")
-  }
-  const suffix =
-    "\n… (display truncated; confirmation remains bound to the exact value)"
-  const suffixBytes = encoder.encode(suffix).byteLength
-  while (parts.length > 0 && outputBytes + suffixBytes > maximumBytes) {
-    outputBytes -= encoder.encode(parts.pop() ?? "").byteLength
-  }
-  return `${parts.join("")}${suffix}`
-}
-
-function workflowDraftScenarioVisibleCharacter(character: string) {
-  switch (character) {
-    case "\n":
-      return "\\n"
-    case "\r":
-      return "\\r"
-    case "\t":
-      return "\\t"
-  }
-  if (/[\p{Cc}\p{Cf}\p{Cs}]/u.test(character)) {
-    return Array.from(character)
-      .flatMap((part) =>
-        Array.from(part).map(
-          (unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`,
-        ),
-      )
-      .join("")
-  }
-  return character
-}
-
-function workflowDraftSecretSummary(secretsJSON: string) {
-  if (secretsJSON.trim() === "") {
-    return "None"
-  }
-  try {
-    const parsed = JSON.parse(secretsJSON) as unknown
-    if (parsed == null || Array.isArray(parsed) || typeof parsed !== "object") {
-      return "Present; secret values hidden (names unavailable)"
-    }
-    const names = Object.keys(parsed)
-    if (names.length === 0) {
-      return "None"
-    }
-    const encoder = new TextEncoder()
-    const visibleNames: string[] = []
-    for (const name of names.slice(0, 20)) {
-      const candidate = [...visibleNames, workflowDraftSecretNameDisplay(name)]
-      if (
-        encoder.encode(workflowDraftSecretSummaryText(names.length, candidate))
-          .byteLength > workflowDraftSecretSummaryMaximumBytes
-      ) {
-        break
-      }
-      visibleNames.push(candidate[candidate.length - 1])
-    }
-    return workflowDraftSecretSummaryText(names.length, visibleNames)
-  } catch {
-    return "Present; secret values hidden (names unavailable until JSON is valid)"
-  }
-}
-
-function workflowDraftSecretNameDisplay(name: string) {
-  const encoder = new TextEncoder()
-  const ellipsis = "…"
-  const contentLimit =
-    workflowDraftSecretNameMaximumBytes - encoder.encode(ellipsis).byteLength
-  let output = ""
-  for (const character of name) {
-    const visible = workflowDraftScenarioVisibleCharacter(character)
-    if (
-      encoder.encode(output).byteLength + encoder.encode(visible).byteLength >
-      contentLimit
-    ) {
-      return `${output}${ellipsis}`
-    }
-    output += visible
-  }
-  return output === "" ? "(empty name)" : output
-}
-
-function workflowDraftSecretSummaryText(
-  configured: number,
-  visibleNames: string[],
-) {
-  const omitted = configured - visibleNames.length
-  if (visibleNames.length === 0) {
-    return `${configured} configured; names omitted`
-  }
-  return `${configured} configured: ${visibleNames.join(", ")}${
-    omitted > 0 ? `, … +${omitted} more` : ""
-  }`
 }
 
 function workflowDevelopmentSessionConflictMessage(

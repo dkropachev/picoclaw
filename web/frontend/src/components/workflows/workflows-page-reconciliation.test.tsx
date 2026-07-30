@@ -20,12 +20,14 @@ import { WorkflowsPage } from "@/components/workflows/workflows-page"
 
 const workflowMocks = vi.hoisted(() => ({
   checkWorkflowDependencies: vi.fn(),
+  executeWorkflowDevelopmentTrigger: vi.fn(),
   getWorkflowDevelopment: vi.fn(),
   inspectWorkflowJobs: vi.fn(),
   inspectWorkflowTriggers: vi.fn(),
   listWorkflowRuns: vi.fn(),
   listWorkflowTemplates: vi.fn(),
   listWorkflows: vi.fn(),
+  simulateWorkflowDevelopmentTrigger: vi.fn(),
   testWorkflowDevelopment: vi.fn(),
 }))
 
@@ -72,6 +74,13 @@ const reconciliation: WorkflowDevelopmentTestReconciliation = {
   run_id: runID,
   message:
     "The workflow run was created, but its development snapshot could not be recorded.",
+}
+const truncatedResponseReconciliation: WorkflowDevelopmentTestReconciliation = {
+  state: "degraded",
+  reason: "draft_test_response_truncated",
+  run_id: runID,
+  message:
+    "The workflow run was created; refresh to load its development state.",
 }
 
 function developmentSession(): WorkflowDevelopmentSession {
@@ -130,6 +139,9 @@ describe("WorkflowsPage draft-test reconciliation", () => {
       dependencies: [],
       structural_issues: [],
     })
+    workflowMocks.simulateWorkflowDevelopmentTrigger.mockResolvedValue(
+      triggerSimulationResponse(),
+    )
   })
 
   it("renders polled reconciliation as an accessible Develop warning", async () => {
@@ -162,7 +174,15 @@ describe("WorkflowsPage draft-test reconciliation", () => {
   it("warns for an accepted degraded launch and still selects its durable run", async () => {
     const session = developmentSession()
     workflowMocks.getWorkflowDevelopment.mockResolvedValue({ session })
-    workflowMocks.testWorkflowDevelopment.mockResolvedValue({
+    workflowMocks.inspectWorkflowTriggers.mockResolvedValue({
+      revision: "trigger-revision",
+      triggers: workflowCallTriggerProjections(),
+      validation: {
+        valid: true,
+        validated_at: "2026-07-29T12:00:00Z",
+      },
+    })
+    workflowMocks.executeWorkflowDevelopmentTrigger.mockResolvedValue({
       session,
       result: { run_id: runID, status: "running" },
       reconciliation,
@@ -173,42 +193,215 @@ describe("WorkflowsPage draft-test reconciliation", () => {
     renderWorkflowsPage(onSearchChange)
 
     const testButton = await screen.findByRole("button", {
-      name: "Test Draft",
+      name: "Review & execute",
     })
     await waitFor(() => expect(testButton).toBeEnabled())
     await user.click(testButton)
 
     expect(workflowMocks.testWorkflowDevelopment).not.toHaveBeenCalled()
     const reviewDialog = await screen.findByRole("dialog", {
-      name: "Review draft test",
+      name: "Review trigger execution",
     })
     await user.click(
       within(reviewDialog).getByRole("switch", {
-        name: "I reviewed this scenario and its possible effects",
+        name: "I reviewed this server simulation and its possible effects",
       }),
     )
     await user.click(
       within(reviewDialog).getByRole("button", {
-        name: "Confirm and run test",
+        name: "Confirm and execute",
       }),
     )
 
     await waitFor(() =>
-      expect(workflowMocks.testWorkflowDevelopment).toHaveBeenCalled(),
+      expect(
+        workflowMocks.executeWorkflowDevelopmentTrigger,
+      ).toHaveBeenCalled(),
     )
-    expect(workflowMocks.testWorkflowDevelopment).toHaveBeenCalledWith(
+    expect(
+      workflowMocks.executeWorkflowDevelopmentTrigger,
+    ).toHaveBeenCalledWith(
       expect.objectContaining({
         target_ref: session.target_workflow_ref,
         yaml: session.yaml,
-        async: true,
       }),
+      "review-token",
     )
+    expect(workflowMocks.testWorkflowDevelopment).not.toHaveBeenCalled()
     await waitFor(() => {
       expect(toastMocks.warning).toHaveBeenCalledWith(reconciliation.message)
     })
     expect(screen.getByRole("alert")).toHaveTextContent(reconciliation.message)
     expect(toastMocks.error).not.toHaveBeenCalled()
     expect(onSearchChange).toHaveBeenCalledWith({ run: runID }, false)
+  })
+
+  it("preserves the editor and records the run while a truncated 202 refetches", async () => {
+    const session = developmentSession()
+    let resolveRefetch:
+      | ((value: { session: WorkflowDevelopmentSession }) => void)
+      | undefined
+    const refetch = new Promise<{ session: WorkflowDevelopmentSession }>(
+      (resolve) => {
+        resolveRefetch = resolve
+      },
+    )
+    workflowMocks.getWorkflowDevelopment
+      .mockResolvedValueOnce({ session })
+      .mockReturnValue(refetch)
+    workflowMocks.inspectWorkflowTriggers.mockResolvedValue({
+      revision: "trigger-revision",
+      triggers: workflowCallTriggerProjections(),
+      validation: {
+        valid: true,
+        validated_at: "2026-07-29T12:00:00Z",
+      },
+    })
+    workflowMocks.executeWorkflowDevelopmentTrigger.mockResolvedValue({
+      result: { run_id: runID, status: "running" },
+      reconciliation: truncatedResponseReconciliation,
+    })
+    const onSearchChange = vi.fn()
+    const user = userEvent.setup()
+
+    renderWorkflowsPage(onSearchChange)
+    const execute = await screen.findByRole("button", {
+      name: "Review & execute",
+    })
+    await waitFor(() => expect(execute).toBeEnabled())
+    await user.click(execute)
+    const dialog = await screen.findByRole("dialog", {
+      name: "Review trigger execution",
+    })
+    await user.click(
+      within(dialog).getByRole("switch", {
+        name: "I reviewed this server simulation and its possible effects",
+      }),
+    )
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "Confirm and execute",
+      }),
+    )
+
+    await waitFor(() =>
+      expect(
+        workflowMocks.getWorkflowDevelopment.mock.calls.length,
+      ).toBeGreaterThan(1),
+    )
+    expect(screen.getByRole("textbox", { name: "Workflow YAML" })).toHaveValue(
+      session.yaml,
+    )
+    expect(screen.getByRole("textbox", { name: "AI brief" })).toHaveValue(
+      session.prompt,
+    )
+    expect(screen.getAllByText(runID, { exact: true }).length).toBeGreaterThan(
+      0,
+    )
+    expect(onSearchChange).toHaveBeenCalledWith({ run: runID }, false)
+    expect(toastMocks.warning).toHaveBeenCalledWith(
+      truncatedResponseReconciliation.message,
+    )
+    expect(toastMocks.error).not.toHaveBeenCalled()
+
+    await act(async () => {
+      resolveRefetch?.({ session })
+      await refetch
+    })
+  })
+
+  it("does not surface a delayed execution response after the exact draft changes", async () => {
+    const session = developmentSession()
+    let resolveExecution:
+      | ((value: {
+          session: WorkflowDevelopmentSession
+          result: { run_id: string; status: "running" }
+          reconciliation: WorkflowDevelopmentTestReconciliation
+        }) => void)
+      | undefined
+    const execution = new Promise<{
+      session: WorkflowDevelopmentSession
+      result: { run_id: string; status: "running" }
+      reconciliation: WorkflowDevelopmentTestReconciliation
+    }>((resolve) => {
+      resolveExecution = resolve
+    })
+    workflowMocks.getWorkflowDevelopment.mockResolvedValue({ session })
+    workflowMocks.inspectWorkflowTriggers.mockResolvedValue({
+      revision: "trigger-revision",
+      triggers: workflowCallTriggerProjections(),
+      validation: {
+        valid: true,
+        validated_at: "2026-07-29T12:00:00Z",
+      },
+    })
+    workflowMocks.executeWorkflowDevelopmentTrigger.mockReturnValue(execution)
+    const onSearchChange = vi.fn()
+    const user = userEvent.setup()
+    const view = renderWorkflowsPage(onSearchChange)
+
+    const execute = await screen.findByRole("button", {
+      name: "Review & execute",
+    })
+    await waitFor(() => expect(execute).toBeEnabled())
+    await user.click(execute)
+    const dialog = await screen.findByRole("dialog", {
+      name: "Review trigger execution",
+    })
+    await user.click(
+      within(dialog).getByRole("switch", {
+        name: "I reviewed this server simulation and its possible effects",
+      }),
+    )
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "Confirm and execute",
+      }),
+    )
+    await waitFor(() =>
+      expect(
+        workflowMocks.executeWorkflowDevelopmentTrigger,
+      ).toHaveBeenCalledTimes(1),
+    )
+
+    const updatedSession: WorkflowDevelopmentSession = {
+      ...session,
+      session_revision: "session-revision-external-during-execution",
+      draft_revision: "draft-revision-external-during-execution",
+      prompt: "Changed elsewhere while execution was starting",
+      yaml: "name: Externally changed during execution\non:\n  workflow_call:\njobs: {}\n",
+      updated_at: "2026-07-29T12:08:00Z",
+    }
+    workflowMocks.getWorkflowDevelopment.mockResolvedValue({
+      session: updatedSession,
+    })
+    await act(async () => {
+      await view.client.refetchQueries({
+        queryKey: ["workflows", "development"],
+      })
+    })
+    await waitFor(() =>
+      expect(
+        screen.getByRole("textbox", { name: "Workflow YAML" }),
+      ).toHaveValue(updatedSession.yaml),
+    )
+
+    await act(async () => {
+      resolveExecution?.({
+        session,
+        result: { run_id: runID, status: "running" },
+        reconciliation,
+      })
+      await execution
+    })
+    await waitFor(() =>
+      expect(toastMocks.warning).toHaveBeenCalledWith(
+        "The draft changed while execution was starting. The stale response was ignored.",
+      ),
+    )
+    expect(screen.queryByText(reconciliation.message)).not.toBeInTheDocument()
+    expect(toastMocks.warning).not.toHaveBeenCalledWith(reconciliation.message)
+    expect(onSearchChange).not.toHaveBeenCalledWith({ run: runID }, false)
   })
 
   it("blocks draft actions and mode changes while builder edits are pending", async () => {
@@ -234,7 +427,7 @@ describe("WorkflowsPage draft-test reconciliation", () => {
       "Ask AI",
       "Scaffold",
       "Validate",
-      "Test Draft",
+      "Review & execute",
       "Publish",
       "Discard",
     ]) {
@@ -457,6 +650,52 @@ function emptyTriggerProjections() {
     runtime_event: { present: false, editable: true, value: null },
     event: { present: false, editable: true, value: null },
     workflow_call: { present: false, editable: true, value: null },
+  }
+}
+
+function workflowCallTriggerProjections() {
+  return {
+    ...emptyTriggerProjections(),
+    workflow_call: {
+      present: true,
+      editable: true,
+      value: { inputs: {}, secrets: {}, outputs: {} },
+    },
+  }
+}
+
+function triggerSimulationResponse() {
+  return {
+    simulation: {
+      selected_kind: "workflow_call",
+      effective_kind: "workflow_call",
+      present: true,
+      matched: true,
+      executable: true,
+      reason: "matched",
+      context_summary: {
+        input_count: 0,
+        secret_count: 0,
+        has_event: false,
+        has_session: false,
+        has_delivery: false,
+      },
+    },
+    review: {
+      job_count: 0,
+      step_count: 0,
+      targets: [],
+      effects: [],
+      complete: true,
+      validation: {
+        valid: true,
+        issue_count: 0,
+        issues: [],
+        truncated: false,
+      },
+      limits: [],
+    },
+    review_token: "review-token",
   }
 }
 

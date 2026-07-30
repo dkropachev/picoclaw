@@ -35,6 +35,46 @@ type ChannelMessageMatch struct {
 	Passthrough bool
 }
 
+// InboundMessageTriggerMatch is the authoritative command-first result for
+// one inbound message. Match is deliberately excluded from JSON so callers
+// cannot accidentally expose the raw event context through a review API.
+type InboundMessageTriggerMatch struct {
+	Kind  WorkflowTriggerKind  `json:"kind"`
+	Match *ChannelMessageMatch `json:"-"`
+}
+
+// MatchInboundMessageTrigger preserves the production inbound-trigger
+// precedence: command is evaluated first, a command evaluation error stops
+// evaluation, and channel_message is considered only when command did not
+// match.
+func MatchInboundMessageTrigger(
+	workflow *Workflow,
+	ref string,
+	event ChannelMessageEvent,
+) (*InboundMessageTriggerMatch, bool, error) {
+	match, ok, err := MatchCommandMessage(workflow, ref, event)
+	if err != nil {
+		return nil, false, err
+	}
+	if ok {
+		return &InboundMessageTriggerMatch{
+			Kind:  WorkflowTriggerCommand,
+			Match: match,
+		}, true, nil
+	}
+	match, ok, err = MatchChannelMessage(workflow, ref, event)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return &InboundMessageTriggerMatch{
+		Kind:  WorkflowTriggerChannelMessage,
+		Match: match,
+	}, true, nil
+}
+
 func MatchChannelMessage(
 	workflow *Workflow,
 	ref string,

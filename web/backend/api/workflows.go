@@ -1227,18 +1227,41 @@ func (h *Handler) workflowRuntimeFromConfig(
 	)
 }
 
+func (h *Handler) workflowRuntimeFromConfigWithoutPrune(
+	ctx context.Context,
+	cfg *config.Config,
+) (*config.Config, *workflows.FileRunStore, *workflows.Executor, error) {
+	return h.workflowRuntimeWithRunnersMode(
+		ctx,
+		cfg,
+		workflowRuntimeRunnersForConfig(h.configPath, cfg),
+		false,
+	)
+}
+
 func (h *Handler) workflowRuntimeWithRunners(
 	ctx context.Context,
 	cfg *config.Config,
 	runners workflowRuntimeRunners,
+) (*config.Config, *workflows.FileRunStore, *workflows.Executor, error) {
+	return h.workflowRuntimeWithRunnersMode(ctx, cfg, runners, true)
+}
+
+func (h *Handler) workflowRuntimeWithRunnersMode(
+	ctx context.Context,
+	cfg *config.Config,
+	runners workflowRuntimeRunners,
+	prune bool,
 ) (*config.Config, *workflows.FileRunStore, *workflows.Executor, error) {
 	if cfg == nil {
 		return nil, nil, nil, fmt.Errorf("workflow config is required")
 	}
 	workspace := cfg.WorkspacePath()
 	store := workflows.NewFileRunStore(workspace)
-	if err := pruneWorkflowRunStore(ctx, cfg, store); err != nil {
-		return nil, nil, nil, err
+	if prune {
+		if err := pruneWorkflowRunStore(ctx, cfg, store); err != nil {
+			return nil, nil, nil, err
+		}
 	}
 	executor := &workflows.Executor{
 		WorkspaceDir:         workspace,
@@ -1714,6 +1737,11 @@ func (h *Handler) reconcileWorkflowDevelopmentTestCompletion(
 	runErr error,
 	initialStateRecorded bool,
 ) {
+	defer func() {
+		if h.workflowDevelopmentTestDone != nil {
+			h.workflowDevelopmentTestDone()
+		}
+	}()
 	result, runErr = terminalWorkflowDevelopmentTestOutcome(
 		expectedRunID,
 		result,

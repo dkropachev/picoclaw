@@ -12,9 +12,14 @@ import (
 	"sync"
 )
 
-// ErrConfigRevisionMismatch means a compare-and-swap save observed a newer
-// configuration generation and did not write either config file.
-var ErrConfigRevisionMismatch = errors.New("config revision mismatch")
+var (
+	// ErrConfigRevisionMismatch means a compare-and-swap save observed a newer
+	// configuration generation and did not write either config file.
+	ErrConfigRevisionMismatch = errors.New("config revision mismatch")
+	// ErrConfigMigrationRequired means a read-only snapshot found a legacy
+	// schema that must be migrated by an explicit configuration lifecycle.
+	ErrConfigMigrationRequired = errors.New("config migration required")
+)
 
 var configMutationLocks sync.Map
 
@@ -59,6 +64,34 @@ func ConfigRevision(path string) (string, error) {
 // public-plus-security revision under the config mutation lock.
 func LoadConfigSnapshot(path string) (*Config, string, error) {
 	return loadConfigSnapshot(path, true)
+}
+
+// LoadCurrentConfigSnapshot atomically loads a current-schema runtime config
+// and its exact opaque public-plus-security revision without migrating,
+// backing up, or saving configuration. Legacy schemas fail closed with
+// ErrConfigMigrationRequired.
+func LoadCurrentConfigSnapshot(path string) (*Config, string, error) {
+	unlock, err := lockConfigMutation(path)
+	if err != nil {
+		return nil, "", err
+	}
+	defer unlock()
+	requiresMigration, err := configSnapshotRequiresMigration(path)
+	if err != nil {
+		return nil, "", err
+	}
+	if requiresMigration {
+		return nil, "", ErrConfigMigrationRequired
+	}
+	cfg, err := loadConfigWithOptions(path, true)
+	if err != nil {
+		return nil, "", err
+	}
+	revision, err := ConfigRevision(path)
+	if err != nil {
+		return nil, "", err
+	}
+	return cfg, revision, nil
 }
 
 // LoadConfigForUpdateSnapshot atomically loads the update-safe config and its
