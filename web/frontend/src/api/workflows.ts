@@ -229,6 +229,166 @@ export interface WorkflowTriggerRenderResult extends WorkflowTriggersInspection 
   yaml: string
 }
 
+export type WorkflowEditorJSONValue =
+  | null
+  | boolean
+  | number
+  | string
+  | WorkflowEditorJSONValue[]
+  | { [key: string]: WorkflowEditorJSONValue }
+
+export interface WorkflowEditorField<Value> {
+  present: boolean
+  value: Value | null
+}
+
+export interface WorkflowJobEditorContext {
+  session?: string
+  delivery?: string
+}
+
+export interface WorkflowJobEditorJobFields {
+  name: WorkflowEditorField<string>
+  runs_on: WorkflowEditorField<string>
+  needs: WorkflowEditorField<string[]>
+  uses: WorkflowEditorField<string>
+  if: WorkflowEditorField<string>
+  continue_on_error: WorkflowEditorField<boolean>
+  with: WorkflowEditorField<Record<string, WorkflowEditorJSONValue>>
+  secrets: WorkflowEditorField<
+    "inherit" | Record<string, WorkflowEditorJSONValue>
+  >
+  outputs: WorkflowEditorField<Record<string, string>>
+  context: WorkflowEditorField<WorkflowJobEditorContext>
+}
+
+export interface WorkflowJobEditorStepFields {
+  id: WorkflowEditorField<string>
+  name: WorkflowEditorField<string>
+  uses: WorkflowEditorField<string>
+  if: WorkflowEditorField<string>
+  continue_on_error: WorkflowEditorField<boolean>
+  with: WorkflowEditorField<Record<string, WorkflowEditorJSONValue>>
+  context: WorkflowEditorField<WorkflowJobEditorContext>
+}
+
+export interface WorkflowJobEditorStep {
+  index: number
+  editable: boolean
+  reason?: string
+  advanced_fields_present: boolean
+  fields: WorkflowJobEditorStepFields
+}
+
+export interface WorkflowJobEditorJob {
+  id: string
+  index: number
+  editable: boolean
+  reason?: string
+  advanced_fields_present: boolean
+  steps_present: boolean
+  fields: WorkflowJobEditorJobFields
+  steps: WorkflowJobEditorStep[]
+}
+
+export type WorkflowJobEditorLimit =
+  | "jobs_truncated"
+  | "steps_truncated"
+  | "unsafe_fields_omitted"
+  | "validation_truncated"
+
+export interface WorkflowJobsInspection {
+  revision: string
+  editable: boolean
+  reason?: string
+  complete: boolean
+  limits: WorkflowJobEditorLimit[]
+  jobs: WorkflowJobEditorJob[]
+  validation: WorkflowDevelopmentValidation
+}
+
+export interface WorkflowJobsRenderResult extends WorkflowJobsInspection {
+  yaml: string
+}
+
+export type WorkflowEditorSetMutation<Value> = {
+  mode: "set"
+  value: Value
+}
+
+export type WorkflowEditorRemoveMutation = {
+  mode: "remove"
+}
+
+export type WorkflowEditorFieldMutation<Value> =
+  | WorkflowEditorSetMutation<Value>
+  | WorkflowEditorRemoveMutation
+
+export type WorkflowJobEditorJobPatch = {
+  [Key in keyof WorkflowJobEditorJobFields]?: WorkflowEditorFieldMutation<
+    NonNullable<WorkflowJobEditorJobFields[Key]["value"]>
+  >
+}
+
+export type WorkflowJobEditorStepPatch = {
+  [Key in keyof WorkflowJobEditorStepFields]?: WorkflowEditorFieldMutation<
+    NonNullable<WorkflowJobEditorStepFields[Key]["value"]>
+  >
+}
+
+export type WorkflowJobEditorJobInsertFields = {
+  [Key in keyof WorkflowJobEditorJobFields]?: WorkflowEditorSetMutation<
+    NonNullable<WorkflowJobEditorJobFields[Key]["value"]>
+  >
+}
+
+export type WorkflowJobEditorStepInsertFields = {
+  [Key in keyof WorkflowJobEditorStepFields]?: WorkflowEditorSetMutation<
+    NonNullable<WorkflowJobEditorStepFields[Key]["value"]>
+  >
+}
+
+export type WorkflowJobEditorOperation =
+  | {
+      type: "job.insert"
+      job_id: string
+      index: number
+      fields: WorkflowJobEditorJobInsertFields
+    }
+  | {
+      type: "job.delete"
+      job_id: string
+    }
+  | {
+      type: "job.patch"
+      job_id: string
+      fields: WorkflowJobEditorJobPatch
+      new_job_id?: WorkflowEditorSetMutation<string>
+    }
+  | {
+      type: "step.insert"
+      job_id: string
+      index: number
+      fields: WorkflowJobEditorStepInsertFields
+    }
+  | {
+      type: "step.delete"
+      job_id: string
+      step_index: number
+    }
+  | {
+      type: "step.move"
+      job_id: string
+      step_index: number
+      to_index: number
+    }
+  | {
+      type: "step.patch"
+      job_id: string
+      step_index: number
+      fields: WorkflowJobEditorStepPatch
+    }
+
 export interface WorkflowEventTriggerMatchCheck {
   path: string
   present: boolean
@@ -793,6 +953,20 @@ export class WorkflowAPIError extends Error {
   }
 }
 
+export class WorkflowJobsEditorAPIError extends WorkflowAPIError {
+  readonly inspection?: WorkflowJobsInspection
+
+  constructor(
+    message: string,
+    status: number,
+    inspection?: WorkflowJobsInspection,
+  ) {
+    super(message, status, inspection?.validation)
+    this.name = "WorkflowJobsEditorAPIError"
+    this.inspection = inspection
+  }
+}
+
 export const WORKFLOW_CANCEL_REASON_MAX_BYTES = 1024
 
 const workflowRunIDPattern = /^wr_[A-Za-z0-9_-]+$/
@@ -1151,6 +1325,56 @@ export async function renderWorkflowTrigger<Kind extends WorkflowTriggerKind>(
   })
 }
 
+export async function inspectWorkflowJobs(
+  yaml: string,
+  signal?: AbortSignal,
+): Promise<WorkflowJobsInspection> {
+  const body = workflowJobsEditorRequestBody({ yaml })
+  const payload = await requestWorkflowJobsEditor(
+    "/api/workflows/development/jobs/inspect",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      signal,
+    },
+  )
+  return parseWorkflowJobsInspection(payload)
+}
+
+export async function renderWorkflowJobs(
+  payload: {
+    yaml: string
+    revision: string
+    operation: WorkflowJobEditorOperation
+  },
+  signal?: AbortSignal,
+): Promise<WorkflowJobsRenderResult> {
+  if (!workflowJobEditorOperationIDsValid(payload.operation)) {
+    throw new WorkflowJobsEditorAPIError(
+      "Workflow job and action IDs must be single-line values no larger than 256 UTF-8 bytes.",
+      400,
+    )
+  }
+  if (!workflowJobEditorOperationValuesValid(payload.operation)) {
+    throw new WorkflowJobsEditorAPIError(
+      "The jobs and actions change contains a value that cannot be rendered safely.",
+      400,
+    )
+  }
+  const body = workflowJobsEditorRequestBody(payload)
+  const response = await requestWorkflowJobsEditor(
+    "/api/workflows/development/jobs/render",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      signal,
+    },
+  )
+  return parseWorkflowJobsRenderResult(response)
+}
+
 export async function matchWorkflowEventTrigger(
   payload: {
     yaml: string
@@ -1506,7 +1730,75 @@ async function requestWorkflowAuthoringCapabilities(
   }
 }
 
+async function requestWorkflowJobsEditor(
+  path: string,
+  options: RequestInit,
+): Promise<unknown> {
+  const res = await launcherFetch(path, options)
+  let text: string
+  try {
+    text = await boundedWorkflowResponseText(
+      res,
+      workflowJobsEditorResponseMaxBytes,
+    )
+  } catch {
+    throw new WorkflowJobsEditorAPIError(
+      res.ok
+        ? "The jobs and actions editor returned an invalid response."
+        : "The jobs and actions editor is unavailable.",
+      res.status,
+    )
+  }
+  if (!workflowJSONContentType(res.headers.get("Content-Type"))) {
+    throw new WorkflowJobsEditorAPIError(
+      res.ok
+        ? "The jobs and actions editor returned an invalid response."
+        : "The jobs and actions editor is unavailable.",
+      res.status,
+    )
+  }
+  let payload: unknown
+  try {
+    payload = JSON.parse(text) as unknown
+  } catch {
+    throw new WorkflowJobsEditorAPIError(
+      res.ok
+        ? "The jobs and actions editor returned an invalid response."
+        : "The jobs and actions editor is unavailable.",
+      res.status,
+    )
+  }
+  if (res.ok) {
+    return payload
+  }
+  let inspection: WorkflowJobsInspection | undefined
+  if (
+    payload != null &&
+    typeof payload === "object" &&
+    !Array.isArray(payload) &&
+    Object.prototype.hasOwnProperty.call(payload, "inspection")
+  ) {
+    try {
+      inspection = parseWorkflowJobsInspection(
+        (payload as Record<string, unknown>).inspection,
+      )
+    } catch {
+      // Error details are advisory; malformed details must not replace the
+      // bounded, sanitized error shown to the operator.
+    }
+  }
+  throw new WorkflowJobsEditorAPIError(
+    workflowJobsEditorErrorMessage(text),
+    res.status,
+    inspection,
+  )
+}
+
 function workflowAuthoringCapabilitiesJSONContentType(value: string | null) {
+  return workflowJSONContentType(value)
+}
+
+function workflowJSONContentType(value: string | null) {
   if (value == null) {
     return false
   }
@@ -1535,6 +1827,8 @@ function workflowAuthoringCapabilitiesJSONContentType(value: string | null) {
 const workflowInspectionResponseMaxBytes = 32 << 20
 const workflowInspectionSourceRefMaxBytes = 16 << 10
 const workflowAuthoringCapabilitiesResponseMaxBytes = 4 << 20
+const workflowJobsEditorResponseMaxBytes = 8 << 20
+const workflowJobsEditorSourceMaxBytes = 1 << 20
 
 async function boundedWorkflowInspectionResponseText(res: Response) {
   return boundedWorkflowResponseText(res, workflowInspectionResponseMaxBytes)
@@ -1588,6 +1882,25 @@ function workflowAuthoringCapabilitiesErrorMessage(text: string) {
       return "Workflow capabilities are temporarily unavailable."
     default:
       return "Workflow capabilities are unavailable."
+  }
+}
+
+function workflowJobsEditorErrorMessage(text: string) {
+  switch (workflowErrorCode(text)) {
+    case "workflow_jobs_revision_mismatch":
+      return "The jobs and actions source revision is stale. Refresh the current YAML and try again."
+    case "workflow_jobs_raw_only":
+      return "This job or step has source features that must be edited in Workflow YAML."
+    case "invalid_workflow_jobs_operation":
+      return "The jobs and actions change is invalid. Review the highlighted fields and try again."
+    case "unsupported_workflow_jobs_operation":
+      return "That jobs and actions change is not supported."
+    case "invalid_workflow_jobs_request":
+      return "The jobs and actions request is invalid. Refresh and try again."
+    case "workflow_jobs_request_too_large":
+      return "This workflow is too large for the structured jobs and actions editor."
+    default:
+      return "The jobs and actions editor is unavailable."
   }
 }
 
@@ -1831,6 +2144,962 @@ const workflowCapabilityBounds = {
   schemaUnits: 4096,
   schemaStringBytes: 256,
 } as const
+
+const workflowJobEditorLimitValues = new Set<WorkflowJobEditorLimit>([
+  "jobs_truncated",
+  "steps_truncated",
+  "unsafe_fields_omitted",
+  "validation_truncated",
+])
+
+const workflowJobEditorJobFieldNames = [
+  "name",
+  "runs_on",
+  "needs",
+  "uses",
+  "if",
+  "continue_on_error",
+  "with",
+  "secrets",
+  "outputs",
+  "context",
+] as const
+
+const workflowJobEditorStepFieldNames = [
+  "id",
+  "name",
+  "uses",
+  "if",
+  "continue_on_error",
+  "with",
+  "context",
+] as const
+
+const workflowJobEditorBounds = {
+  jobs: 256,
+  steps: 4096,
+  fieldStringBytes: 16 << 10,
+  identityBytes: 256,
+  reasonBytes: 16 << 10,
+  issues: 1024,
+  issueBytes: 16 << 10,
+  listEntries: 4096,
+  objectEntries: 4096,
+  jsonDepth: 16,
+  jsonEntries: 4096,
+  jsonValueBytes: 256 << 10,
+} as const
+
+function parseWorkflowJobsInspection(value: unknown): WorkflowJobsInspection {
+  return parseWorkflowJobsEnvelope(value, false)
+}
+
+function parseWorkflowJobsRenderResult(
+  value: unknown,
+): WorkflowJobsRenderResult {
+  return parseWorkflowJobsEnvelope(value, true)
+}
+
+function parseWorkflowJobsEnvelope(
+  value: unknown,
+  render: false,
+): WorkflowJobsInspection
+function parseWorkflowJobsEnvelope(
+  value: unknown,
+  render: true,
+): WorkflowJobsRenderResult
+function parseWorkflowJobsEnvelope(
+  value: unknown,
+  render: boolean,
+): WorkflowJobsInspection | WorkflowJobsRenderResult {
+  const invalid = (): never => {
+    throw new Error("The jobs and actions editor returned an invalid response.")
+  }
+  const allowedRootFields = [
+    "revision",
+    "editable",
+    "reason",
+    "complete",
+    "limits",
+    "jobs",
+    "validation",
+    ...(render ? ["yaml"] : []),
+  ]
+  const root = inspectionObject(value, allowedRootFields, invalid)
+  const requiredRootFields = [
+    "revision",
+    "editable",
+    "complete",
+    "limits",
+    "jobs",
+    "validation",
+    ...(render ? ["yaml"] : []),
+  ]
+  if (
+    requiredRootFields.some((field) => !hasInspectionField(root, field)) ||
+    (!render && hasInspectionField(root, "yaml"))
+  ) {
+    return invalid()
+  }
+
+  const jobIDs = new Set<string>()
+  let totalSteps = 0
+  const jobs = inspectionArray(
+    root.jobs,
+    workflowJobEditorBounds.jobs,
+    invalid,
+  ).map((jobValue, expectedIndex) => {
+    const job = inspectionObject(
+      jobValue,
+      [
+        "id",
+        "index",
+        "editable",
+        "reason",
+        "advanced_fields_present",
+        "steps_present",
+        "fields",
+        "steps",
+      ],
+      invalid,
+    )
+    if (
+      [
+        "id",
+        "index",
+        "editable",
+        "advanced_fields_present",
+        "steps_present",
+        "fields",
+        "steps",
+      ].some((field) => !hasInspectionField(job, field))
+    ) {
+      return invalid()
+    }
+    const id = workflowJobEditorIdentity(job.id, invalid)
+    if (jobIDs.has(id)) {
+      return invalid()
+    }
+    jobIDs.add(id)
+    const index = inspectionInteger(job.index, invalid)
+    if (index !== expectedIndex) {
+      return invalid()
+    }
+    const steps = inspectionArray(
+      job.steps,
+      workflowJobEditorBounds.steps,
+      invalid,
+    ).map((stepValue, expectedStepIndex) => {
+      totalSteps += 1
+      if (totalSteps > workflowJobEditorBounds.steps) {
+        return invalid()
+      }
+      const step = inspectionObject(
+        stepValue,
+        ["index", "editable", "reason", "advanced_fields_present", "fields"],
+        invalid,
+      )
+      if (
+        ["index", "editable", "advanced_fields_present", "fields"].some(
+          (field) => !hasInspectionField(step, field),
+        )
+      ) {
+        return invalid()
+      }
+      const stepIndex = inspectionInteger(step.index, invalid)
+      if (stepIndex !== expectedStepIndex) {
+        return invalid()
+      }
+      return {
+        index: stepIndex,
+        editable: inspectionBoolean(step.editable, invalid),
+        ...(hasInspectionField(step, "reason")
+          ? {
+              reason: workflowJobEditorString(step.reason, invalid, {
+                maximumBytes: workflowJobEditorBounds.reasonBytes,
+              }),
+            }
+          : {}),
+        advanced_fields_present: inspectionBoolean(
+          step.advanced_fields_present,
+          invalid,
+        ),
+        fields: parseWorkflowJobEditorStepFields(step.fields, invalid),
+      }
+    })
+    const stepsPresent = inspectionBoolean(job.steps_present, invalid)
+    if (!stepsPresent && steps.length !== 0) {
+      return invalid()
+    }
+    return {
+      id,
+      index,
+      editable: inspectionBoolean(job.editable, invalid),
+      ...(hasInspectionField(job, "reason")
+        ? {
+            reason: workflowJobEditorString(job.reason, invalid, {
+              maximumBytes: workflowJobEditorBounds.reasonBytes,
+            }),
+          }
+        : {}),
+      advanced_fields_present: inspectionBoolean(
+        job.advanced_fields_present,
+        invalid,
+      ),
+      steps_present: stepsPresent,
+      fields: parseWorkflowJobEditorJobFields(job.fields, invalid),
+      steps,
+    }
+  })
+
+  let previousLimit: string | undefined
+  const limits = inspectionArray(
+    root.limits,
+    workflowJobEditorLimitValues.size,
+    invalid,
+  ).map((limitValue) => {
+    const limit = inspectionEnum(
+      limitValue,
+      workflowJobEditorLimitValues,
+      invalid,
+    )
+    if (
+      previousLimit != null &&
+      compareInspectionUTF8(previousLimit, limit) >= 0
+    ) {
+      return invalid()
+    }
+    previousLimit = limit
+    return limit
+  })
+  const complete = inspectionBoolean(root.complete, invalid)
+  if (complete !== (limits.length === 0)) {
+    return invalid()
+  }
+
+  const inspection: WorkflowJobsInspection = {
+    revision: workflowJobEditorString(root.revision, invalid, {
+      maximumBytes: 256,
+    }),
+    editable: inspectionBoolean(root.editable, invalid),
+    ...(hasInspectionField(root, "reason")
+      ? {
+          reason: workflowJobEditorString(root.reason, invalid, {
+            maximumBytes: workflowJobEditorBounds.reasonBytes,
+          }),
+        }
+      : {}),
+    complete,
+    limits,
+    jobs,
+    validation: parseWorkflowJobEditorValidation(root.validation, invalid),
+  }
+  if (!render) {
+    return inspection
+  }
+  return {
+    ...inspection,
+    yaml: workflowJobEditorString(root.yaml, invalid, {
+      allowEmpty: true,
+      maximumBytes: workflowJobsEditorResponseMaxBytes,
+      allowFormattingControls: true,
+    }),
+  }
+}
+
+function parseWorkflowJobEditorJobFields(
+  value: unknown,
+  invalid: () => never,
+): WorkflowJobEditorJobFields {
+  const fields = workflowJobEditorFields(
+    value,
+    workflowJobEditorJobFieldNames,
+    invalid,
+  )
+  return {
+    name: workflowJobEditorField(fields.name, invalid, (fieldValue) =>
+      workflowJobEditorFieldString(fieldValue, invalid),
+    ),
+    runs_on: workflowJobEditorField(fields.runs_on, invalid, (fieldValue) =>
+      workflowJobEditorFieldString(fieldValue, invalid),
+    ),
+    needs: workflowJobEditorField(fields.needs, invalid, (fieldValue) =>
+      workflowJobEditorIDReferenceArray(fieldValue, invalid),
+    ),
+    uses: workflowJobEditorField(fields.uses, invalid, (fieldValue) =>
+      workflowJobEditorFieldString(fieldValue, invalid),
+    ),
+    if: workflowJobEditorField(fields.if, invalid, (fieldValue) =>
+      workflowJobEditorFieldString(fieldValue, invalid),
+    ),
+    continue_on_error: workflowJobEditorField(
+      fields.continue_on_error,
+      invalid,
+      (fieldValue) => inspectionBoolean(fieldValue, invalid),
+    ),
+    with: workflowJobEditorField(fields.with, invalid, (fieldValue) =>
+      workflowJobEditorDynamicJSONObject(fieldValue, invalid),
+    ),
+    secrets: workflowJobEditorField(fields.secrets, invalid, (fieldValue) => {
+      if (fieldValue === "inherit") {
+        return fieldValue
+      }
+      return workflowJobEditorDynamicJSONObject(fieldValue, invalid)
+    }),
+    outputs: workflowJobEditorField(fields.outputs, invalid, (fieldValue) =>
+      workflowJobEditorStringRecord(fieldValue, invalid),
+    ),
+    context: workflowJobEditorField(fields.context, invalid, (fieldValue) =>
+      workflowJobEditorContext(fieldValue, invalid),
+    ),
+  }
+}
+
+function parseWorkflowJobEditorStepFields(
+  value: unknown,
+  invalid: () => never,
+): WorkflowJobEditorStepFields {
+  const fields = workflowJobEditorFields(
+    value,
+    workflowJobEditorStepFieldNames,
+    invalid,
+  )
+  return {
+    id: workflowJobEditorField(fields.id, invalid, (fieldValue) =>
+      workflowJobEditorIDReference(fieldValue, invalid),
+    ),
+    name: workflowJobEditorField(fields.name, invalid, (fieldValue) =>
+      workflowJobEditorFieldString(fieldValue, invalid),
+    ),
+    uses: workflowJobEditorField(fields.uses, invalid, (fieldValue) =>
+      workflowJobEditorFieldString(fieldValue, invalid),
+    ),
+    if: workflowJobEditorField(fields.if, invalid, (fieldValue) =>
+      workflowJobEditorFieldString(fieldValue, invalid),
+    ),
+    continue_on_error: workflowJobEditorField(
+      fields.continue_on_error,
+      invalid,
+      (fieldValue) => inspectionBoolean(fieldValue, invalid),
+    ),
+    with: workflowJobEditorField(fields.with, invalid, (fieldValue) =>
+      workflowJobEditorDynamicJSONObject(fieldValue, invalid),
+    ),
+    context: workflowJobEditorField(fields.context, invalid, (fieldValue) =>
+      workflowJobEditorContext(fieldValue, invalid),
+    ),
+  }
+}
+
+function workflowJobEditorFields(
+  value: unknown,
+  fieldNames: readonly string[],
+  invalid: () => never,
+) {
+  const fields = inspectionObject(value, fieldNames, invalid)
+  if (
+    Object.keys(fields).length !== fieldNames.length ||
+    fieldNames.some((field) => !hasInspectionField(fields, field))
+  ) {
+    return invalid()
+  }
+  return fields
+}
+
+function workflowJobEditorField<Value>(
+  value: unknown,
+  invalid: () => never,
+  parse: (value: unknown) => Value,
+): WorkflowEditorField<Value> {
+  const field = inspectionObject(value, ["present", "value"], invalid)
+  if (
+    !hasInspectionField(field, "present") ||
+    !hasInspectionField(field, "value")
+  ) {
+    return invalid()
+  }
+  const present = inspectionBoolean(field.present, invalid)
+  if (!present) {
+    if (field.value !== null) {
+      return invalid()
+    }
+    return { present: false, value: null }
+  }
+  return { present: true, value: parse(field.value) }
+}
+
+function workflowJobEditorFieldString(value: unknown, invalid: () => never) {
+  return workflowJobEditorString(value, invalid, {
+    allowEmpty: true,
+    maximumBytes: workflowJobEditorBounds.fieldStringBytes,
+    allowFormattingControls: true,
+  })
+}
+
+function workflowJobEditorIDReferenceArray(
+  value: unknown,
+  invalid: () => never,
+) {
+  return inspectionArray(
+    value,
+    workflowJobEditorBounds.listEntries,
+    invalid,
+  ).map((entry) => workflowJobEditorIDReference(entry, invalid))
+}
+
+function workflowJobEditorStringRecord(value: unknown, invalid: () => never) {
+  const record = inspectionObject(value, undefined, invalid)
+  if (Object.keys(record).length > workflowJobEditorBounds.objectEntries) {
+    return invalid()
+  }
+  return Object.fromEntries(
+    Object.entries(record).map(([key, entryValue]) => [
+      workflowJobEditorIdentity(key, invalid),
+      workflowJobEditorFieldString(entryValue, invalid),
+    ]),
+  )
+}
+
+function workflowJobEditorContext(
+  value: unknown,
+  invalid: () => never,
+): WorkflowJobEditorContext {
+  const context = inspectionObject(value, ["session", "delivery"], invalid)
+  return {
+    ...(hasInspectionField(context, "session")
+      ? { session: workflowJobEditorFieldString(context.session, invalid) }
+      : {}),
+    ...(hasInspectionField(context, "delivery")
+      ? { delivery: workflowJobEditorFieldString(context.delivery, invalid) }
+      : {}),
+  }
+}
+
+function workflowJobEditorJSONObject(
+  value: unknown,
+  depth: number,
+  budget: { remaining: number },
+  invalid: () => never,
+): Record<string, WorkflowEditorJSONValue> {
+  const parsed = workflowJobEditorJSONValue(value, depth, budget, invalid)
+  return parsed != null && typeof parsed === "object" && !Array.isArray(parsed)
+    ? parsed
+    : invalid()
+}
+
+function workflowJobEditorDynamicJSONObject(
+  value: unknown,
+  invalid: () => never,
+) {
+  let encoded: string
+  try {
+    encoded = JSON.stringify(value)
+  } catch {
+    return invalid()
+  }
+  if (
+    typeof encoded !== "string" ||
+    new TextEncoder().encode(encoded).byteLength >
+      workflowJobEditorBounds.jsonValueBytes
+  ) {
+    return invalid()
+  }
+  return workflowJobEditorJSONObject(
+    value,
+    1,
+    { remaining: workflowJobEditorBounds.jsonEntries },
+    invalid,
+  )
+}
+
+function workflowJobEditorJSONValue(
+  value: unknown,
+  depth: number,
+  budget: { remaining: number },
+  invalid: () => never,
+): WorkflowEditorJSONValue {
+  budget.remaining -= 1
+  if (budget.remaining < 0) {
+    return invalid()
+  }
+  if (depth > workflowJobEditorBounds.jsonDepth) {
+    return invalid()
+  }
+  if (value === null || typeof value === "boolean") {
+    return value
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) &&
+      (!Number.isInteger(value) || Number.isSafeInteger(value))
+      ? value
+      : invalid()
+  }
+  if (typeof value === "string") {
+    return workflowJobEditorFieldString(value, invalid)
+  }
+  if (Array.isArray(value)) {
+    if (value.length > workflowJobEditorBounds.listEntries) {
+      return invalid()
+    }
+    return value.map((entry) =>
+      workflowJobEditorJSONValue(entry, depth + 1, budget, invalid),
+    )
+  }
+  const record = inspectionObject(value, undefined, invalid)
+  const entries = Object.entries(record)
+  if (entries.length > workflowJobEditorBounds.objectEntries) {
+    return invalid()
+  }
+  return Object.fromEntries(
+    entries.map(([key, entryValue]) => [
+      workflowJobEditorString(key, invalid, {
+        maximumBytes: workflowJobEditorBounds.identityBytes,
+      }),
+      workflowJobEditorJSONValue(entryValue, depth + 1, budget, invalid),
+    ]),
+  )
+}
+
+function parseWorkflowJobEditorValidation(
+  value: unknown,
+  invalid: () => never,
+): WorkflowDevelopmentValidation {
+  const validation = inspectionObject(
+    value,
+    ["valid", "errors", "warnings", "validated_at"],
+    invalid,
+  )
+  if (
+    !hasInspectionField(validation, "valid") ||
+    !hasInspectionField(validation, "validated_at")
+  ) {
+    return invalid()
+  }
+  const errors = hasInspectionField(validation, "errors")
+    ? workflowJobEditorValidationIssues(validation.errors, invalid)
+    : undefined
+  const warnings = hasInspectionField(validation, "warnings")
+    ? workflowJobEditorValidationIssues(validation.warnings, invalid)
+    : undefined
+  const valid = inspectionBoolean(validation.valid, invalid)
+  if (valid && (errors?.length ?? 0) !== 0) {
+    return invalid()
+  }
+  return {
+    valid,
+    ...(errors != null ? { errors } : {}),
+    ...(warnings != null ? { warnings } : {}),
+    validated_at: workflowJobEditorString(validation.validated_at, invalid, {
+      maximumBytes: 256,
+    }),
+  }
+}
+
+function workflowJobEditorValidationIssues(
+  value: unknown,
+  invalid: () => never,
+) {
+  return inspectionArray(value, workflowJobEditorBounds.issues, invalid).map(
+    (issueValue) => {
+      const issue = inspectionObject(issueValue, ["path", "message"], invalid)
+      if (!hasInspectionField(issue, "message")) {
+        return invalid()
+      }
+      return {
+        ...(hasInspectionField(issue, "path")
+          ? {
+              path: workflowJobEditorString(issue.path, invalid, {
+                allowEmpty: true,
+                maximumBytes: workflowJobEditorBounds.issueBytes,
+              }),
+            }
+          : {}),
+        message: workflowJobEditorString(issue.message, invalid, {
+          maximumBytes: workflowJobEditorBounds.issueBytes,
+          allowFormattingControls: true,
+        }),
+      }
+    },
+  )
+}
+
+function workflowJobEditorIdentity(value: unknown, invalid: () => never) {
+  return workflowJobEditorString(value, invalid, {
+    maximumBytes: workflowJobEditorBounds.identityBytes,
+  })
+}
+
+function workflowJobEditorIDReference(value: unknown, invalid: () => never) {
+  return workflowJobEditorString(value, invalid, {
+    allowEmpty: true,
+    maximumBytes: workflowJobEditorBounds.identityBytes,
+  })
+}
+
+function workflowJobEditorOperationIDsValid(
+  operation: WorkflowJobEditorOperation,
+) {
+  if (!workflowJobEditorRequestIDValid(operation.job_id, false, true)) {
+    return false
+  }
+  if (
+    operation.type === "job.patch" &&
+    operation.new_job_id != null &&
+    !workflowJobEditorRequestIDValid(operation.new_job_id.value, false, true)
+  ) {
+    return false
+  }
+  if (
+    (operation.type === "step.insert" || operation.type === "step.patch") &&
+    operation.fields.id?.mode === "set" &&
+    !workflowJobEditorRequestIDValid(operation.fields.id.value, true)
+  ) {
+    return false
+  }
+  if (
+    (operation.type === "job.insert" || operation.type === "job.patch") &&
+    operation.fields.needs?.mode === "set" &&
+    !operation.fields.needs.value.every((value) =>
+      workflowJobEditorRequestIDValid(value, false, true),
+    )
+  ) {
+    return false
+  }
+  return true
+}
+
+function workflowJobEditorOperationValuesValid(
+  operation: WorkflowJobEditorOperation,
+) {
+  if (!("fields" in operation)) {
+    return true
+  }
+  const step = operation.type.startsWith("step.")
+  const insert =
+    operation.type === "job.insert" || operation.type === "step.insert"
+  const fields = operation.fields as Record<string, unknown>
+  return Object.entries(fields).every(([field, candidate]) => {
+    if (
+      candidate == null ||
+      typeof candidate !== "object" ||
+      Array.isArray(candidate)
+    ) {
+      return false
+    }
+    const mutation = candidate as Record<string, unknown>
+    const keys = Object.keys(mutation)
+    if (mutation.mode === "remove") {
+      return !insert && keys.length === 1 && keys[0] === "mode"
+    }
+    if (
+      mutation.mode !== "set" ||
+      keys.length !== 2 ||
+      !keys.includes("mode") ||
+      !keys.includes("value")
+    ) {
+      return false
+    }
+    return workflowJobEditorMutationValueValid(field, mutation.value, step)
+  })
+}
+
+function workflowJobEditorMutationValueValid(
+  field: string,
+  value: unknown,
+  step: boolean,
+) {
+  switch (field) {
+    case "id":
+      return (
+        step &&
+        typeof value === "string" &&
+        workflowJobEditorRequestIDValid(value, true)
+      )
+    case "name":
+    case "if":
+      return workflowJobEditorMutationStringValid(value, true)
+    case "runs_on":
+      return !step && workflowJobEditorMutationStringValid(value, true)
+    case "uses":
+      return workflowJobEditorUsesValid(value, step)
+    case "continue_on_error":
+      return typeof value === "boolean"
+    case "needs":
+      return (
+        !step &&
+        Array.isArray(value) &&
+        value.length <= workflowJobEditorBounds.listEntries &&
+        value.every(
+          (item) =>
+            typeof item === "string" &&
+            workflowJobEditorRequestIDValid(item, false, true),
+        )
+      )
+    case "with":
+      return workflowJobEditorDynamicJSONObjectValid(value)
+    case "secrets":
+      return (
+        !step &&
+        (value === "inherit" || workflowJobEditorDynamicJSONObjectValid(value))
+      )
+    case "outputs":
+      return !step && workflowJobEditorStringRecordValid(value)
+    case "context":
+      return workflowJobEditorContextMutationValid(value)
+    default:
+      return false
+  }
+}
+
+function workflowJobEditorMutationStringValid(
+  value: unknown,
+  multiline: boolean,
+) {
+  if (
+    typeof value !== "string" ||
+    new TextEncoder().encode(value).byteLength >
+      workflowJobEditorBounds.fieldStringBytes
+  ) {
+    return false
+  }
+  for (const character of value) {
+    if (/[\p{Cf}\p{Cs}]/u.test(character)) {
+      return false
+    }
+    if (
+      /\p{Cc}/u.test(character) &&
+      character !== "\t" &&
+      character !== "\n" &&
+      character !== "\r"
+    ) {
+      return false
+    }
+    if (!multiline && (character === "\n" || character === "\r")) {
+      return false
+    }
+  }
+  return true
+}
+
+function workflowJobEditorMutationKeyValid(value: string) {
+  return (
+    value !== "" &&
+    new TextEncoder().encode(value).byteLength <=
+      workflowJobEditorBounds.identityBytes &&
+    !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(value)
+  )
+}
+
+function workflowJobEditorUsesValid(value: unknown, step: boolean) {
+  if (
+    !workflowJobEditorMutationStringValid(value, false) ||
+    typeof value !== "string"
+  ) {
+    return false
+  }
+  if (value === "") {
+    return true
+  }
+  if (value.trim() !== value) {
+    return false
+  }
+  if (step) {
+    return ["agent/", "tool/", "mcp/", "function/"].some(
+      (prefix) =>
+        value.startsWith(prefix) && value.slice(prefix.length).trim() !== "",
+    )
+  }
+  return workflowJobEditorCanonicalLocalRefValid(value)
+}
+
+function workflowJobEditorCanonicalLocalRefValid(value: string) {
+  if (
+    value.startsWith("/") ||
+    value.startsWith("./") ||
+    !value.startsWith("workflows/")
+  ) {
+    return false
+  }
+  const parts = value.split("/")
+  if (parts.some((part) => part === "" || part === "." || part === "..")) {
+    return false
+  }
+  const finalPart = parts[parts.length - 1].toLowerCase()
+  return finalPart.endsWith(".yml") || finalPart.endsWith(".yaml")
+}
+
+function workflowJobEditorDynamicJSONObjectValid(value: unknown) {
+  return (
+    workflowJobEditorPlainObject(value) &&
+    workflowJobEditorJSONValueValid(value)
+  )
+}
+
+function workflowJobEditorJSONValueValid(value: unknown) {
+  let encoded: string | undefined
+  try {
+    encoded = JSON.stringify(value)
+  } catch {
+    return false
+  }
+  if (
+    encoded == null ||
+    workflowJobEditorGoJSONEncodedBytes(encoded) >
+      workflowJobEditorBounds.jsonValueBytes
+  ) {
+    return false
+  }
+
+  let entries = 0
+  const visit = (candidate: unknown, depth: number): boolean => {
+    if (depth > workflowJobEditorBounds.jsonDepth) {
+      return false
+    }
+    entries += 1
+    if (entries > workflowJobEditorBounds.jsonEntries) {
+      return false
+    }
+    if (
+      candidate === null ||
+      typeof candidate === "boolean" ||
+      workflowJobEditorMutationStringValid(candidate, true)
+    ) {
+      return true
+    }
+    if (typeof candidate === "number") {
+      return (
+        Number.isFinite(candidate) &&
+        (!Number.isInteger(candidate) || Number.isSafeInteger(candidate))
+      )
+    }
+    if (Array.isArray(candidate)) {
+      return candidate.every((item) => visit(item, depth + 1))
+    }
+    if (!workflowJobEditorPlainObject(candidate)) {
+      return false
+    }
+    return Object.entries(candidate).every(
+      ([key, item]) =>
+        workflowJobEditorMutationKeyValid(key) && visit(item, depth + 1),
+    )
+  }
+  return visit(value, 0)
+}
+
+function workflowJobEditorGoJSONEncodedBytes(encoded: string) {
+  let bytes = new TextEncoder().encode(encoded).byteLength
+  for (const character of encoded) {
+    if (character === "<" || character === ">" || character === "&") {
+      bytes += 5
+    } else if (character === "\u2028" || character === "\u2029") {
+      bytes += 3
+    }
+  }
+  return bytes
+}
+
+function workflowJobEditorStringRecordValid(value: unknown) {
+  return (
+    workflowJobEditorPlainObject(value) &&
+    Object.keys(value).length <= workflowJobEditorBounds.objectEntries &&
+    Object.entries(value).every(
+      ([key, item]) =>
+        workflowJobEditorMutationKeyValid(key) &&
+        workflowJobEditorMutationStringValid(item, true),
+    )
+  )
+}
+
+function workflowJobEditorContextMutationValid(value: unknown) {
+  return (
+    workflowJobEditorPlainObject(value) &&
+    Object.entries(value).every(
+      ([key, item]) =>
+        (key === "session" || key === "delivery") &&
+        workflowJobEditorMutationStringValid(item, true),
+    )
+  )
+}
+
+function workflowJobEditorPlainObject(
+  value: unknown,
+): value is Record<string, unknown> {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    return false
+  }
+  const prototype = Object.getPrototypeOf(value) as unknown
+  return prototype === Object.prototype || prototype === null
+}
+
+function workflowJobEditorRequestIDValid(
+  value: string,
+  allowEmpty: boolean,
+  requireTrimmedValue = false,
+) {
+  return (
+    (allowEmpty || value !== "") &&
+    (!requireTrimmedValue || (value.trim() !== "" && value.trim() === value)) &&
+    new TextEncoder().encode(value).byteLength <=
+      workflowJobEditorBounds.identityBytes &&
+    !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(value)
+  )
+}
+
+function workflowJobEditorString(
+  value: unknown,
+  invalid: () => never,
+  {
+    allowEmpty = false,
+    maximumBytes,
+    allowFormattingControls = false,
+  }: {
+    allowEmpty?: boolean
+    maximumBytes: number
+    allowFormattingControls?: boolean
+  },
+) {
+  if (
+    typeof value !== "string" ||
+    (!allowEmpty && value === "") ||
+    new TextEncoder().encode(value).byteLength > maximumBytes ||
+    value.includes("\u0000") ||
+    (!allowFormattingControls && /[\p{Cc}\p{Cf}\p{Cs}]/u.test(value)) ||
+    (allowFormattingControls && workflowJobEditorUnsafeControl(value))
+  ) {
+    return invalid()
+  }
+  return value
+}
+
+function workflowJobEditorUnsafeControl(value: string) {
+  for (const character of value) {
+    if (/[\p{Cf}\p{Cs}]/u.test(character)) {
+      return true
+    }
+    if (
+      /\p{Cc}/u.test(character) &&
+      character !== "\t" &&
+      character !== "\n" &&
+      character !== "\r"
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+function workflowJobsEditorRequestBody(payload: unknown) {
+  const body = JSON.stringify(payload)
+  if (
+    new TextEncoder().encode(body).byteLength > workflowJobsEditorSourceMaxBytes
+  ) {
+    throw new WorkflowJobsEditorAPIError(
+      "This workflow is too large for the structured jobs and actions editor.",
+      413,
+    )
+  }
+  return body
+}
 
 function parseWorkflowAuthoringCapabilities(
   value: unknown,

@@ -40,6 +40,8 @@ import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 
+import { workflowJSONNumberIsBrowserSafe } from "./workflow-json-number"
+
 export interface WorkflowTriggerInspectionState {
   yaml: string
   status: "loading" | "ready" | "error"
@@ -2591,7 +2593,7 @@ function inspectStrictJSONTokens(raw: string): {
           token != null &&
           jsonNumberTokenPattern.test(token) &&
           unsafeNumber == null &&
-          !browserSafeJSONNumberToken(token)
+          !workflowJSONNumberIsBrowserSafe(token)
         ) {
           unsafeNumber = token
         }
@@ -2605,72 +2607,6 @@ function inspectStrictJSONTokens(raw: string): {
 }
 
 const jsonNumberTokenPattern = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/
-
-interface ExactDecimal {
-  sign: -1 | 0 | 1
-  coefficient: bigint
-  exponent: number
-}
-
-function browserSafeJSONNumberToken(token: string) {
-  if (!jsonNumberTokenPattern.test(token) || token.length > 1024) {
-    return false
-  }
-  const number = Number(token)
-  if (!Number.isFinite(number)) {
-    return false
-  }
-  const exact = exactDecimal(token)
-  const roundTrip = exactDecimal(String(number))
-  if (
-    exact == null ||
-    roundTrip == null ||
-    exact.sign !== roundTrip.sign ||
-    exact.coefficient !== roundTrip.coefficient ||
-    exact.exponent !== roundTrip.exponent
-  ) {
-    return false
-  }
-  if (exact.sign === 0 || exact.exponent < 0) {
-    return true
-  }
-  const digits = exact.coefficient.toString()
-  if (digits.length + exact.exponent > 16) {
-    return false
-  }
-  const integer = exact.coefficient * 10n ** BigInt(exact.exponent)
-  return integer <= BigInt(Number.MAX_SAFE_INTEGER)
-}
-
-function exactDecimal(token: string): ExactDecimal | null {
-  const match = token.match(/^(-?)(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/)
-  if (match == null) {
-    return null
-  }
-  const fraction = match[3] ?? ""
-  const parsedExponent = Number(match[4] ?? "0")
-  if (!Number.isSafeInteger(parsedExponent)) {
-    return null
-  }
-  let digits = `${match[2]}${fraction}`.replace(/^0+/, "")
-  if (digits === "") {
-    return { sign: 0, coefficient: 0n, exponent: 0 }
-  }
-  let trailingZeros = 0
-  while (digits.endsWith("0")) {
-    digits = digits.slice(0, -1)
-    trailingZeros += 1
-  }
-  const exponent = parsedExponent - fraction.length + trailingZeros
-  if (!Number.isSafeInteger(exponent)) {
-    return null
-  }
-  return {
-    sign: match[1] === "-" ? -1 : 1,
-    coefficient: BigInt(digits),
-    exponent,
-  }
-}
 
 function containsInvalidJSONNumber(value: unknown): boolean {
   if (typeof value === "number") {

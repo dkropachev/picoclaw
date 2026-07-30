@@ -1,5 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { ReactNode } from "react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
@@ -14,6 +21,7 @@ import { WorkflowsPage } from "@/components/workflows/workflows-page"
 const workflowMocks = vi.hoisted(() => ({
   checkWorkflowDependencies: vi.fn(),
   getWorkflowDevelopment: vi.fn(),
+  inspectWorkflowJobs: vi.fn(),
   inspectWorkflowTriggers: vi.fn(),
   listWorkflowRuns: vi.fn(),
   listWorkflowTemplates: vi.fn(),
@@ -101,6 +109,17 @@ describe("WorkflowsPage draft-test reconciliation", () => {
         validated_at: "2026-07-29T12:00:00Z",
       },
     })
+    workflowMocks.inspectWorkflowJobs.mockResolvedValue({
+      revision: "jobs-revision",
+      editable: true,
+      complete: true,
+      limits: [],
+      jobs: [],
+      validation: {
+        valid: true,
+        validated_at: "2026-07-29T12:00:00Z",
+      },
+    })
     workflowMocks.checkWorkflowDependencies.mockResolvedValue({
       root_ref: "workflows/reconciliation.yml",
       revision: "dependency-revision",
@@ -159,6 +178,24 @@ describe("WorkflowsPage draft-test reconciliation", () => {
     await waitFor(() => expect(testButton).toBeEnabled())
     await user.click(testButton)
 
+    expect(workflowMocks.testWorkflowDevelopment).not.toHaveBeenCalled()
+    const reviewDialog = await screen.findByRole("dialog", {
+      name: "Review draft test",
+    })
+    await user.click(
+      within(reviewDialog).getByRole("switch", {
+        name: "I reviewed this scenario and its possible effects",
+      }),
+    )
+    await user.click(
+      within(reviewDialog).getByRole("button", {
+        name: "Confirm and run test",
+      }),
+    )
+
+    await waitFor(() =>
+      expect(workflowMocks.testWorkflowDevelopment).toHaveBeenCalled(),
+    )
     expect(workflowMocks.testWorkflowDevelopment).toHaveBeenCalledWith(
       expect.objectContaining({
         target_ref: session.target_workflow_ref,
@@ -190,7 +227,7 @@ describe("WorkflowsPage draft-test reconciliation", () => {
     )
 
     expect(
-      await screen.findByText("Trigger builder changes are pending."),
+      await screen.findByText("Structured builder changes are pending."),
     ).toBeInTheDocument()
     for (const name of [
       "Save Draft",
@@ -234,7 +271,7 @@ describe("WorkflowsPage draft-test reconciliation", () => {
       name: "Enable manual trigger",
     })
     await user.click(manualSwitch)
-    await screen.findByText("Trigger builder changes are pending.")
+    await screen.findByText("Structured builder changes are pending.")
     onSearchChange.mockClear()
 
     view.rerenderPage({ mode: "operate" })
@@ -248,7 +285,7 @@ describe("WorkflowsPage draft-test reconciliation", () => {
       screen.getByRole("switch", { name: "Enable manual trigger" }),
     ).toBeChecked()
     expect(
-      screen.getByText("Trigger builder changes are pending."),
+      screen.getByText("Structured builder changes are pending."),
     ).toBeInTheDocument()
     expect(toastMocks.warning).toHaveBeenCalledWith(
       "Apply or reset the trigger builder changes before leaving or running another draft action.",
@@ -267,7 +304,7 @@ describe("WorkflowsPage draft-test reconciliation", () => {
         name: "Enable manual trigger",
       }),
     )
-    await screen.findByText("Trigger builder changes are pending.")
+    await screen.findByText("Structured builder changes are pending.")
 
     const updatedSession: WorkflowDevelopmentSession = {
       ...session,
@@ -377,7 +414,7 @@ describe("WorkflowsPage draft-test reconciliation", () => {
         name: "Enable manual trigger",
       }),
     )
-    await screen.findByText("Trigger builder changes are pending.")
+    await screen.findByText("Structured builder changes are pending.")
 
     workflowMocks.getWorkflowDevelopment.mockResolvedValue({ session: null })
     await act(async () => {

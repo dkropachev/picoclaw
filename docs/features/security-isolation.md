@@ -16,6 +16,10 @@ possible-effect classifications, never the underlying source or sensitive
 values. Workflow-authoring capability discovery similarly exposes exact
 addressable identities and typed parameter shapes from one leased live runtime,
 never descriptions, raw schemas, configuration, paths, or internal errors.
+Structured job/action authoring treats draft YAML and mutation operations as
+bounded untrusted input, remains a stateless AST transformation, and requires
+an exact-identity conservative effect review before the separate execution
+path.
 
 ## Reconstruction Notes
 
@@ -24,13 +28,16 @@ never descriptions, raw schemas, configuration, paths, or internal errors.
   isolation with fail-closed setup.
 - Core types/functions: secure string config helpers, credential store,
   dashboard auth middleware, CSRF/logout handlers, HTTP guard, isolation runtime,
-  token, OAuth response parsing, and PKCE helpers.
+  token, OAuth response parsing, PKCE helpers, strict bounded request decoders,
+  and raw-only AST classification for structured workflow authoring.
 - Runtime ordering: load security config, normalize protected values, validate
   access or target, execute guarded storage/network/process operation, redact
   sensitive output, and emit clear errors.
 - Non-obvious constraints: masked secure values preserve existing secrets,
   private network denial is the default, unsupported isolation does not fall back
-  to unisolated execution, and generated auth tokens must remain revocable.
+  to unisolated execution, generated auth tokens must remain revocable, and a
+  workflow-authoring projection or acknowledgement never grants runtime
+  authority.
 
 ## Requirements
 
@@ -54,6 +61,7 @@ never descriptions, raw schemas, configuration, paths, or internal errors.
 | `FR-SEC-015` | MUST | Shared durable file primitives reject empty paths, create each missing parent directory before its child reaches a durable boundary, write a synced same-directory temporary file before atomic replacement, and durably remove a file or empty directory while preserving ordinary missing/non-empty errors. POSIX implementations sync the containing directory after creation, replacement, and removal. Windows implementations use write-through moves for directory creation and replacement, and make logical deletion durable by moving the original to a collision-resistant same-parent tombstone before best-effort tombstone cleanup. | Workflow journals and other local state must not report a committed first-directory creation, replacement, or deletion that can disappear or revert after power loss, and Windows must not depend on replacing an open file or syncing a directory handle. |
 | `FR-SEC-016` | MUST | Authenticated workflow definition and built-in-template inspection reads one bounded exact source; a published read opens the configured definition nonblocking through workspace- and definitions-root-confined handles and verifies the opened handle is regular, so neither a symlink race nor a swap to a FIFO can escape or indefinitely hold mutation boundaries. It releases the cross-process file lock before parsing and the handler-local config mutation lock before encoding or response writing. The response contains only path-free whitelisted trigger fields, declaration names and required/default-presence metadata, declared action targets, fixed validation/limit codes, and conservative possible-effect classifications. Whole-family trigger preflight, aggregate entry limits, bounded topology fields, rejection of control and Unicode format characters, and a fixed encoded-response ceiling prevent YAML aliases or invalid definitions from amplifying or visually spoofing a bounded review response. The response cannot represent raw YAML, prompts, arbitrary `with` or `if` values, session or delivery values, input default values, secret values or mappings, output expressions, filesystem paths, captured event payloads, or raw parser/filesystem/provider errors. Every truncation or field omission is explicit, dependency/effect aggregation is independent from topology truncation, and a known effect class survives target omission; unknown or reusable actions cannot be presented as read-only. | A convenient browser review surface must not become a definition-file reader, sensitive-value oracle, or false assurance that an automation is side-effect-free. |
 | `FR-SEC-017` | MUST | Workflow-authoring capability discovery runs only against the existing PID-bearer-protected gateway loop while a runtime-use lease pins its generation; the authenticated launcher reads process authority without cleaning a stale PID file or loading, migrating, backing up, or saving configuration, substitutes the credential on one exact bounded GET, and never forwards browser credentials or upstream error detail. Projection requires agent IDs in the runtime's exact canonical `[a-z0-9][a-z0-9_-]{0,63}` form, sorts and validates every other exact UTF-8 identity, rejects control and Unicode format characters, uses the default agent's effective core registration keys, excludes the recursive workflow tool, and derives MCP targets only from exact separator-safe server/tool identity rather than a lossy provider-facing name. Tool and MCP parameter maps are untrusted: calls are panic-contained and transactionally projected into an ordered typed whitelist containing only fixed type, property/required membership, items, bounded scalar enum, and additional-properties shape. Non-whitelisted schema metadata is outside that DTO rather than a partially projected constraint. Bounded source selection plus shared collection, depth, property, enum, numeric-text, work, and encoded-response limits prevent cycles, aliases, panic loops, huge registry copies, oversized numeric parsing, or many discarded shapes from amplifying a response; every removed identity, omitted whole shape, and collection truncation has a fixed code, and an unsafe structural declaration omits its shape whole. Responses cannot contain agent/tool/MCP descriptions, prompts, raw schema maps, defaults, examples, constants, patterns, formats, references or compositions, provider/model/MCP configuration, URLs, commands, headers, environment, credentials, source paths, durable state, or raw runtime/proxy/panic errors. Discovery never initializes or connects MCP, emits MCP lifecycle events, or refreshes OAuth credentials: disabled MCP is a complete empty category; enabled MCP includes only a live collision-free manager's ready tools; a live identity-colliding manager produces an empty partial MCP category with a fixed unsafe-omission code; and no live manager produces a fixed unavailable partial state. It cannot construct another agent loop, edit configuration or YAML, create sessions/runs, execute a capability, or perform a durable mutation. | Production-equivalent discovery must not become a prompt, configuration, filesystem, credential, or denial-of-service oracle, and a read-only UI must not silently change persistent infrastructure. |
+| `FR-SEC-018` | MUST | Authenticated structured job/action inspect and render routes strictly decode one bounded JSON object containing caller-supplied exact YAML, and render additionally requires its nonblank opaque revision plus exactly one allow-listed typed operation; unknown or trailing JSON, duplicate object members, null required members, invalid UTF-8, unpaired JSON surrogate escapes, unsafe/browser-inexact numbers, excessive nesting, collections, strings, YAML, operation work, validation detail, or encoded output fail closed through fixed public codes. The server hashes and parses only those supplied bytes, never reads a configured definition, active development session, configuration, PID authority, capability registry, credential, provider, filesystem path, event, or run. Ordered projection and rendering operate on YAML nodes rather than flattened maps: version/tag directives that the AST cannot retain, anchors/aliases, merge keys, unsafe tags, duplicate or non-string structural keys, malformed containers, and normalization-prone values never enter typed mutation state. Step IDs and every `needs` job-identity reference use the fixed 256-byte single-line identity bound. Global source directives, anchors/aliases, container ambiguity, complexity exhaustion, `jobs_truncated`, or `steps_truncated` blocks all operations; aggregate `validation_truncated` only marks diagnostics incomplete and does not block an otherwise structurally safe operation. Outside a global block, `unsafe_fields_omitted` can mark local raw-only state, a locally raw-only job rejects patch/delete, a locally raw-only step rejects patch/delete/move, and an editable step cannot move across a raw-only step in its inclusive source-to-destination span; other safe sibling edits or structurally safe insertions remain available. One successful render fences the exact revision before typed operation decoding, mutates only a transient AST copy, preserves unrelated unknown nodes/comments/order/style, returns original bytes for a semantic no-op, and emits only data derived from the caller's source—plus candidate YAML after render—through a bounded typed projection, fixed limits, and sanitized validation; raw parser/runtime/filesystem/provider errors are never returned. A set-only job-ID rename rejects collisions and replaces only the mapping key scalar, never performs a broad textual rewrite, and never implicitly retargets `needs` or authority-bearing expressions. Inspect, render, tab selection, capability selection, and effect review cannot save a draft or config, initialize or invoke a capability, create a session/run, or mutate runtime or durable state. Ready catalog targets are suggestions only and exact manual targets remain untrusted. The draft-test review conservatively treats every tool, MCP, agent, native function, local reusable workflow, unrecognized/manual target, raw-only action, and incomplete or empty projection as potentially effectful; its acknowledgement is component-local and keyed to the exact YAML/scenario/review identity, is cleared on any identity change, and is rechecked at final confirmation before the separate existing test endpoint may execute. | Draft editing handles attacker- and model-authored YAML; it must not become an alias-expansion denial of service, a secret/configuration oracle, a stale-consent execution path, or a new way to exercise runtime authority. |
 
 ## Data And State Model
 
@@ -69,7 +77,11 @@ their ordinary independently configured credentials rather than ingress signing
 secrets. The gateway PID bearer remains process-local management authority;
 launcher sessions and owner-readable local CLI access can use it only through
 the bounded event proxy/client, and event DTO types make lease and
-deduplication credentials unrepresentable.
+deduplication credentials unrepresentable. Structured job/action editor
+revisions are opaque hashes of caller-supplied draft bytes, not durable
+authority. Editor inspections, operations, capability choices, and
+effect-review acknowledgements are transient request/browser state and add no
+configuration, credential, workflow, session, or run record.
 
 ## Surface Ownership
 
@@ -112,6 +124,7 @@ Owns: TEST pkg/config/version*
 | HTTP / CLI | protected `/runtime/eventing/*`, launcher `/api/events*`, `picoclaw events *` | Translate authenticated launcher or owner-local PID authority into bounded live-gateway operator calls without exposing PID credentials, lease tokens, deduplication keys, or automatically fetched payloads. | `FR-SEC-014` |
 | HTTP / UI | `/api/workflows/definitions/inspect`, `/api/workflows/templates/{name}/inspect`, `/agent/workflows` | Return and render one non-cacheable, fixed-code, bounded structural projection without exposing definition source, sensitive values, source paths, event payloads, or raw internal errors. | `FR-SEC-016` |
 | HTTP / UI | protected `/runtime/workflows/authoring/capabilities`, launcher `/api/workflows/authoring/capabilities`, `/agent/workflows` | Translate the authenticated dashboard session into one bounded live-generation catalog containing only exact targets, fixed readiness, and typed parameter shapes; the browser can search and copy a ready target but cannot invoke it from this surface. | `FR-SEC-017` |
+| HTTP / UI | `POST /api/workflows/development/jobs/inspect`, `POST /api/workflows/development/jobs/render`, `/agent/workflows` Jobs & actions/effect review | Transform only exact bounded caller-supplied YAML through a strictly decoded ordered AST projection or one revision-fenced operation; retain unsafe shapes as raw-only, keep all state in the browser/request, and require exact-identity conservative acknowledgement before the separate draft-test endpoint. | `FR-SEC-018` |
 | Workflow / MCP | `agent/*` with `with.tools: none`; `mcp/github/add_issue_comment` | Remove tools from every classifier model path, then permit a GitHub mutation only as a declared conditional MCP step with signed-body identity and fixed output text. The GitHub MCP server and its write credential are configured explicitly and independently from ingress authentication. | `FR-SEC-013` |
 | Storage | Credential store | Provider and MCP credential CRUD, transactional refresh updates, auth/OAuth metadata, cross-process serialization on supported hosts, and optional non-secret account email metadata extracted from OAuth token responses. | `FR-SEC-002`, `FR-SEC-007`, `FR-SEC-009` |
 | Storage | `pkg/fileutil` durable path operations | Durable recursive parent creation, synced same-directory atomic replacement, and durable logical removal with POSIX directory sync or Windows write-through moves. | `FR-SEC-015` |
@@ -213,6 +226,41 @@ Owns: TEST pkg/config/version*
     internal failure with a fixed unavailable or partial state, and never
     forward browser credentials, process authority, descriptions, raw
     schema/config values, or error text.
+16. For structured job/action authoring, authenticate through the existing
+    dashboard boundary, strictly and incrementally decode one bounded request,
+    and reject duplicates, unknown members, trailing values, invalid text,
+    unpaired surrogate escapes, excessive numeric precision, and aggregate
+    budgets before AST mutation.
+    Hash the exact YAML, parse one document, and classify every structural node
+    before projection; source directives, anchors/aliases, merges, unsafe tags,
+    ambiguous mappings, and lossy values never enter typed mutation state.
+    Global source directives, anchors/aliases, container ambiguity, and topology
+    truncation block all mutation; a locally raw-only job/step
+    remains present but does not block safe siblings. Share one aggregate
+    budget across validation issue paths/messages, set fixed
+    `validation_truncated` plus
+    incomplete state whenever any diagnostic is omitted, but do not block an
+    otherwise safe edit; pre-marshal under the final success ceiling. Compare
+    the render revision, decode one operation and its set/remove envelopes under
+    aggregate request work plus separate recursive budgets for each dynamic
+    JSON value, reject operations whose exact target is raw-only, and reject a
+    step move whose inclusive source-to-destination span contains a raw-only
+    step. Apply the 256-byte single-line identity bound to step IDs and every
+    `needs` reference. Expose every source-order insertion boundary in the
+    browser, including boundaries beside raw-only nodes that cannot be crossed
+    by a later move. Before sending a mutation, mirror the server's bounded
+    string, key, control/format, collection, encoded-value, target, and numeric
+    checks in the client while retaining the server as authority. Then edit one
+    local AST and project the result without filesystem, config,
+    development-store, runtime, event, or provider access.
+    A set-only job-ID rename collision-checks the new exact key and edits only
+    that key scalar; it never performs a broad textual rewrite or implicitly
+    retargets `needs`. Sanitize validation and failures into fixed bounded
+    data. In the browser, fence asynchronous editor/catalog/dependency responses
+    to exact identities, treat manual and unprojectable actions as unknown
+    authority, bind effect acknowledgement to the exact draft/scenario/review
+    identity, and compare that captured identity again before invoking the
+    separately authorized test request.
 
 ## Cross-Feature Behavior
 
@@ -238,6 +286,13 @@ Workflow-authoring capability discovery is also owned by the workflows feature.
 It reuses the process-local gateway authority and live runtime lease, reports
 only exact addressable identity, fixed readiness, and bounded typed parameter
 shape, and does not weaken the normal publish or execution readiness checks.
+Structured job/action authoring is owned by the workflows feature. Security
+defines its untrusted-input, statelessness, resource, stale-result, and
+effect-acknowledgement boundary. The renderer does not inherit the catalog's
+gateway authority; a catalog choice or manual target is merely draft text, and
+the normal dependency, compatibility, workflow, tool, MCP, credential, and
+isolation policies remain authoritative when a separately confirmed test or
+published run executes it.
 Git workspace configuration and tool enablement reuse the same config
 normalization and defaulting path, while checkout retention, dirty preservation,
 and workspace inventory security boundaries are owned by the git workspaces
@@ -327,6 +382,36 @@ behavior remains owned by
   cyclic, composition-heavy, reference-bearing, or over-budget parameter maps
   cannot escape the typed shape whitelist or consume a fresh full budget per
   discarded schema; one omitted shape never exposes its raw value or error.
+- Job/action requests with duplicate or unknown members, trailing JSON, missing
+  required values, stale revision, invalid operation identity, invalid UTF-8 or
+  unpaired surrogate escapes, non-JSON-compatible dynamic values,
+  browser-unsafe numbers, or exceeded source/work/response budgets return fixed
+  bounded failures and mutate nothing. A semantically invalid but structurally
+  safe candidate is returned only with sanitized bounded validation so it can
+  be repaired locally. A colliding job rename is rejected, and a successful
+  rename cannot silently rewrite authority-bearing expressions or dependency
+  references elsewhere.
+- Validation count or aggregate text exhaustion sets the fixed
+  `validation_truncated` limit, marks the result incomplete, and retains only
+  bounded sanitized diagnostics; it cannot create an oversized or opaque
+  success response.
+- YAML version/tag directives, anchors/aliases, merges, unsafe tags, duplicate
+  or non-string keys, ambiguous containers, cycles, and lossy scalar or dynamic
+  shapes cannot be expanded, flattened, or partially edited by the job/action
+  API. They stay outside typed
+  mutation state; a safe sibling render preserves their nodes, values,
+  comments, order, and scalar style, while only a semantic no-op guarantees
+  byte-exact source identity. Global ambiguity or topology truncation blocks
+  every structured operation; validation-only truncation does not. A locally
+  raw-only job rejects patch/delete and a locally raw-only step rejects
+  patch/delete/move or being crossed by another step's move, while other safe
+  sibling edits and structurally safe insertions remain available.
+- A capability-picker result, editor response, dependency report, or effect
+  acknowledgement for another exact identity cannot authorize or change the
+  current draft. Unknown/manual targets, `workflows/` calls, raw-only actions,
+  and incomplete or empty projections remain conservatively effectful even
+  when mixed with known targets. Closing or changing the review clears consent,
+  and a final identity mismatch creates no run.
 - Unverified email is skipped by default; an explicit opt-in marks it
   unverified. Private Delta Chat blob paths and copy errors do not enter durable
   events or attachment diagnostics, and oversized files are not materialized.
@@ -349,6 +434,7 @@ behavior remains owned by
 | `FR-SEC-015` | [pkg/fileutil/file_test.go](../../pkg/fileutil/file_test.go), [pkg/fileutil/durable.go](../../pkg/fileutil/durable.go), [pkg/fileutil/durable_unix.go](../../pkg/fileutil/durable_unix.go), [pkg/fileutil/durable_windows.go](../../pkg/fileutil/durable_windows.go) |
 | `FR-SEC-016` | [pkg/workflows/inspection.go](../../pkg/workflows/inspection.go), [pkg/workflows/inspection_open_unix.go](../../pkg/workflows/inspection_open_unix.go), [pkg/workflows/inspection_open_other.go](../../pkg/workflows/inspection_open_other.go), [pkg/workflows/inspection_test.go](../../pkg/workflows/inspection_test.go), [pkg/workflows/inspection_open_unix_test.go](../../pkg/workflows/inspection_open_unix_test.go), [web/backend/api/workflow_inspection.go](../../web/backend/api/workflow_inspection.go), [web/backend/api/workflow_inspection_test.go](../../web/backend/api/workflow_inspection_test.go), [web/frontend/src/components/workflows/workflow-definition-inspector.tsx](../../web/frontend/src/components/workflows/workflow-definition-inspector.tsx), [web/frontend/src/components/workflows/workflow-definition-inspector.test.tsx](../../web/frontend/src/components/workflows/workflow-definition-inspector.test.tsx) |
 | `FR-SEC-017` | [pkg/workflows/authoring_capabilities.go](../../pkg/workflows/authoring_capabilities.go), [pkg/workflows/authoring_capabilities_test.go](../../pkg/workflows/authoring_capabilities_test.go), [pkg/agent/workflow_authoring.go](../../pkg/agent/workflow_authoring.go), [pkg/agent/workflow_authoring_test.go](../../pkg/agent/workflow_authoring_test.go), [pkg/gateway/workflow_authoring.go](../../pkg/gateway/workflow_authoring.go), [pkg/gateway/workflow_authoring_test.go](../../pkg/gateway/workflow_authoring_test.go), [web/backend/api/workflow_authoring.go](../../web/backend/api/workflow_authoring.go), [web/backend/api/workflow_authoring_test.go](../../web/backend/api/workflow_authoring_test.go), [web/frontend/src/api/workflow-capabilities.test.ts](../../web/frontend/src/api/workflow-capabilities.test.ts), [web/frontend/src/components/workflows/workflow-capability-catalog.test.tsx](../../web/frontend/src/components/workflows/workflow-capability-catalog.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
+| `FR-SEC-018` | [pkg/workflows/editor_jobs.go](../../pkg/workflows/editor_jobs.go), [pkg/workflows/editor_jobs_test.go](../../pkg/workflows/editor_jobs_test.go), [web/backend/api/workflow_jobs_editor.go](../../web/backend/api/workflow_jobs_editor.go), [web/backend/api/workflow_jobs_editor_test.go](../../web/backend/api/workflow_jobs_editor_test.go), [web/frontend/src/api/workflow-jobs-editor.test.ts](../../web/frontend/src/api/workflow-jobs-editor.test.ts), [web/frontend/src/components/workflows/workflow-job-editor.test.tsx](../../web/frontend/src/components/workflows/workflow-job-editor.test.tsx), [web/frontend/src/components/workflows/workflow-capability-target-field.test.tsx](../../web/frontend/src/components/workflows/workflow-capability-target-field.test.tsx), [web/frontend/src/components/workflows/workflow-draft-test-review-dialog.test.tsx](../../web/frontend/src/components/workflows/workflow-draft-test-review-dialog.test.tsx), [web/frontend/src/components/workflows/workflow-job-builder-integration.test.tsx](../../web/frontend/src/components/workflows/workflow-job-builder-integration.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 
 ## Implementation Anchors
 
@@ -367,11 +453,15 @@ behavior remains owned by
 - [pkg/workflows/inspection_open_unix.go](../../pkg/workflows/inspection_open_unix.go)
 - [pkg/workflows/inspection_open_other.go](../../pkg/workflows/inspection_open_other.go)
 - [pkg/workflows/authoring_capabilities.go](../../pkg/workflows/authoring_capabilities.go)
+- [pkg/workflows/editor_jobs.go](../../pkg/workflows/editor_jobs.go)
 - [pkg/agent/workflow_authoring.go](../../pkg/agent/workflow_authoring.go)
 - [pkg/gateway/workflow_authoring.go](../../pkg/gateway/workflow_authoring.go)
 - [web/backend/api/workflow_inspection.go](../../web/backend/api/workflow_inspection.go)
 - [web/backend/api/workflow_authoring.go](../../web/backend/api/workflow_authoring.go)
+- [web/backend/api/workflow_jobs_editor.go](../../web/backend/api/workflow_jobs_editor.go)
 - [web/frontend/src/components/workflows/workflow-capability-catalog.tsx](../../web/frontend/src/components/workflows/workflow-capability-catalog.tsx)
+- [web/frontend/src/components/workflows/workflow-job-editor.tsx](../../web/frontend/src/components/workflows/workflow-job-editor.tsx)
+- [web/frontend/src/components/workflows/workflow-draft-test-review-dialog.tsx](../../web/frontend/src/components/workflows/workflow-draft-test-review-dialog.tsx)
 - [web/frontend/src/components/workflows/workflow-definition-inspector.tsx](../../web/frontend/src/components/workflows/workflow-definition-inspector.tsx)
 - [pkg/workflows/templates.go](../../pkg/workflows/templates.go)
 - [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go)
