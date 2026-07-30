@@ -1030,7 +1030,9 @@
           "requires_skills": "Nejprve aktivujte `tools.skills`, aby byl tento nástroj registru dovedností dostupný.",
           "requires_subagent": "Nejprve aktivujte `tools.subagent`, aby nástroj spawn mohl delegovat práci.",
           "requires_mcp_discovery": "Nejprve aktivujte `tools.mcp.discovery`, aby byly nástroje MCP discovery dostupné.",
-          "requires_web_search_provider": "Nakonfigurujte alespoň jednoho připraveného externího providera webového vyhledávání."
+          "requires_web_search_provider": "Nakonfigurujte alespoň jednoho připraveného externího providera webového vyhledávání.",
+          "requires_workflows": "Nejprve povolte workflow, aby bylo možné nástroj workflow použít.",
+          "unknown_dependency": "Tento nástroj je blokován nesplněnou závislostí."
         }
       }
     },

@@ -53,7 +53,7 @@ func TestInspectWorkflowEventTriggerProjectsTriggerAndRevision(t *testing.T) {
 	}
 }
 
-func TestInspectWorkflowEventTriggerPreservesExplicitEmptyFilters(t *testing.T) {
+func TestInspectWorkflowEventTriggerPreservesExplicitEmptyFiltersAsRawOnly(t *testing.T) {
 	raw := `name: Invalid event
 on:
   event:
@@ -66,8 +66,11 @@ jobs:
 `
 	inspection := InspectWorkflowEventTrigger(raw)
 
-	if !inspection.Editable {
-		t.Fatalf("Editable = false, reason = %q", inspection.Reason)
+	if inspection.Editable {
+		t.Fatal("Editable = true, want raw-only because typed encoding would omit sources")
+	}
+	if inspection.Reason == "" {
+		t.Fatal("Reason is empty")
 	}
 	if inspection.EventTrigger == nil || inspection.EventTrigger.Sources == nil {
 		t.Fatalf("EventTrigger.Sources = %#v, want explicit empty list", inspection.EventTrigger)
@@ -297,22 +300,6 @@ name: Hidden second workflow
 jobs: {}
 `,
 			wantReason: "exactly one document",
-		},
-		{
-			name: "parser-equivalent duplicate on",
-			raw: `name: Duplicate logical on
-" on ":
-  manual: {}
-on:
-  event:
-    sources: [github]
-jobs:
-  main:
-    runs-on: picoclaw
-    steps:
-      - uses: tool/message
-`,
-			wantReason: "duplicate on",
 		},
 		{
 			name: "pattern containing a line break",

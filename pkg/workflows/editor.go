@@ -1,7 +1,6 @@
 package workflows
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -13,12 +12,25 @@ import (
 )
 
 var (
+	// ErrWorkflowTriggerStaleRevision prevents a structured edit from
+	// overwriting YAML that changed after it was inspected.
+	ErrWorkflowTriggerStaleRevision = errors.New("workflow YAML revision is stale")
+	// ErrWorkflowTriggerNotEditable reports YAML whose aliases, merges, tags,
+	// or shape cannot be changed losslessly by the structured editor.
+	ErrWorkflowTriggerNotEditable = errors.New("workflow trigger is not safely editable")
+	// ErrWorkflowTriggerKind reports a trigger family outside the supported
+	// workflow schema.
+	ErrWorkflowTriggerKind = errors.New("unsupported workflow trigger type")
+	// ErrWorkflowTriggerValue reports a replacement whose Go or projected YAML
+	// shape is not safe for the structured editor.
+	ErrWorkflowTriggerValue = errors.New("invalid workflow trigger value")
+
 	// ErrWorkflowEventTriggerStaleRevision prevents a structured edit from
 	// overwriting YAML that changed after it was inspected.
-	ErrWorkflowEventTriggerStaleRevision = errors.New("workflow YAML revision is stale")
+	ErrWorkflowEventTriggerStaleRevision = ErrWorkflowTriggerStaleRevision
 	// ErrWorkflowEventTriggerNotEditable reports YAML whose aliases, merges, or
 	// shape cannot be changed safely by the narrow structured editor.
-	ErrWorkflowEventTriggerNotEditable = errors.New("workflow event trigger is not safely editable")
+	ErrWorkflowEventTriggerNotEditable = ErrWorkflowTriggerNotEditable
 )
 
 // WorkflowEventTriggerInspection is the authoritative parsed projection used
@@ -35,48 +47,17 @@ type WorkflowEventTriggerInspection struct {
 // YAML is still returned as structured validation feedback; unsafe AST shapes
 // remain available through the raw editor but are marked non-editable.
 func InspectWorkflowEventTrigger(raw string) WorkflowEventTriggerInspection {
+	all := InspectWorkflowTriggers(raw)
+	event := all.Triggers[WorkflowTriggerEvent]
 	inspection := WorkflowEventTriggerInspection{
-		Revision:   workflowEditorRevision(raw),
-		Validation: validateDevelopmentYAML(raw),
+		Revision:   all.Revision,
+		Editable:   event.Editable,
+		Reason:     event.Reason,
+		Validation: all.Validation,
 	}
-
-	workflow, parseErr := Parse([]byte(raw))
-	if parseErr == nil && workflow != nil {
-		inspection.EventTrigger = cloneEventTrigger(workflow.On.Event)
+	if trigger, ok := event.Value.(*EventTrigger); ok {
+		inspection.EventTrigger = trigger
 	}
-
-	document, err := decodeWorkflowEditorDocument(raw)
-	if err != nil {
-		if errors.Is(err, errWorkflowEditorMultipleDocuments) {
-			inspection.Reason = "Workflow YAML must contain exactly one document."
-			return inspection
-		}
-		inspection.Reason = "Fix YAML syntax errors before using the structured event-trigger editor."
-		return inspection
-	}
-	root, reason := editableWorkflowRoot(document)
-	if reason != "" {
-		inspection.Reason = reason
-		return inspection
-	}
-	if reason = unsafeWorkflowEditorNodeReason(root); reason != "" {
-		inspection.Reason = reason
-		return inspection
-	}
-	if reason = validateWorkflowEditorTriggerPath(root); reason != "" {
-		inspection.Reason = reason
-		return inspection
-	}
-	if parseErr != nil {
-		inspection.Reason = "Fix workflow parse errors before using the structured event-trigger editor."
-		return inspection
-	}
-	if reason = workflowEventTriggerProjectionReason(inspection.EventTrigger); reason != "" {
-		inspection.Reason = reason
-		return inspection
-	}
-
-	inspection.Editable = true
 	return inspection
 }
 
@@ -88,49 +69,27 @@ func RenderWorkflowEventTrigger(
 	revision string,
 	trigger *EventTrigger,
 ) (string, WorkflowEventTriggerInspection, error) {
-	inspection := InspectWorkflowEventTrigger(raw)
-	if revision == "" || revision != inspection.Revision {
-		return "", inspection, ErrWorkflowEventTriggerStaleRevision
-	}
-	if !inspection.Editable {
-		return "", inspection, fmt.Errorf(
-			"%w: %s",
-			ErrWorkflowEventTriggerNotEditable,
-			inspection.Reason,
-		)
-	}
+	var replacement any
 	if trigger != nil {
-		if errs := validateEventTrigger("on.event", trigger); len(errs) != 0 {
-			return "", inspection, errs
-		}
+		replacement = trigger
 	}
-
-	document, err := decodeWorkflowEditorDocument(raw)
-	if err != nil {
-		return "", inspection, err
+	rendered, all, err := RenderWorkflowTrigger(
+		raw,
+		revision,
+		WorkflowTriggerEvent,
+		replacement,
+	)
+	event := all.Triggers[WorkflowTriggerEvent]
+	inspection := WorkflowEventTriggerInspection{
+		Revision:   all.Revision,
+		Editable:   event.Editable,
+		Reason:     event.Reason,
+		Validation: all.Validation,
 	}
-	root := document.Content[0]
-	changed, err := replaceWorkflowEventTriggerNode(root, trigger)
-	if err != nil {
-		return "", inspection, err
+	if projected, ok := event.Value.(*EventTrigger); ok {
+		inspection.EventTrigger = projected
 	}
-	if !changed {
-		return raw, inspection, nil
-	}
-
-	var rendered bytes.Buffer
-	encoder := yaml.NewEncoder(&rendered)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(document); err != nil {
-		_ = encoder.Close()
-		return "", inspection, err
-	}
-	if err := encoder.Close(); err != nil {
-		return "", inspection, err
-	}
-	next := rendered.String()
-	nextInspection := InspectWorkflowEventTrigger(next)
-	return next, nextInspection, nil
+	return rendered, inspection, err
 }
 
 func workflowEditorRevision(raw string) string {
@@ -243,13 +202,13 @@ func workflowRootOnPairIndexes(root *yaml.Node) []int {
 	var indexes []int
 	for index := 0; index+1 < len(root.Content); index += 2 {
 		key := root.Content[index]
-		if key == nil || key.Kind != yaml.ScalarNode {
+		if key == nil ||
+			key.Kind != yaml.ScalarNode ||
+			key.Value != "on" ||
+			(key.Tag != "" && key.ShortTag() != "!!str") {
 			continue
 		}
-		switch strings.TrimSpace(key.Value) {
-		case "on", "true":
-			indexes = append(indexes, index)
-		}
+		indexes = append(indexes, index)
 	}
 	return indexes
 }

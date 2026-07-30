@@ -114,10 +114,6 @@ import {
   type WorkflowEventTestMatchState,
 } from "./workflow-event-test-context"
 import {
-  WorkflowEventTriggerEditor,
-  type WorkflowEventTriggerInspectionState,
-} from "./workflow-event-trigger-editor"
-import {
   type WorkflowDependencyCheckState,
   WorkflowDependencyReadinessPanel,
   WorkflowPublishReadinessPanel,
@@ -133,6 +129,11 @@ import {
 import { trustedWorkflowRunOrigin } from "./workflow-run-origin"
 import { WorkflowSettingsDialog } from "./workflow-settings-dialog"
 import { WorkflowTemplateCatalog } from "./workflow-template-catalog"
+import {
+  WorkflowTriggerEditor,
+  type WorkflowTriggerEditorActivity,
+  type WorkflowTriggerInspectionState,
+} from "./workflow-trigger-editor"
 
 const terminalStatuses = new Set(["succeeded", "failed", "canceled", "skipped"])
 const workflowEventStreamKinds = [
@@ -191,6 +192,10 @@ type DraftEditorSnapshot = {
   targetRef: string
   yaml: string
 }
+type WorkflowDevelopmentSessionConflict = {
+  baseSession: WorkflowDevelopmentSession
+  incomingSession: WorkflowDevelopmentSession | null
+}
 type WorkflowDependencyDraftSnapshot = {
   key: number
   sessionID: string
@@ -224,11 +229,16 @@ type WorkflowCancelSubmission = {
   reason: string
 }
 
-const initialEventTriggerInspection: WorkflowEventTriggerInspectionState = {
+const initialEventTriggerInspection: WorkflowTriggerInspectionState = {
   yaml: "",
   status: "loading",
-  triggerPresent: false,
-  editable: false,
+  eventTriggerPresent: false,
+}
+
+const initialTriggerEditorActivity: WorkflowTriggerEditorActivity = {
+  dirty: false,
+  applying: false,
+  conflict: false,
 }
 
 const initialEventTestMatch: WorkflowEventTestMatchState = {
@@ -245,7 +255,23 @@ export function WorkflowsPage({
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const mode = search.mode ?? "develop"
+  const requestedMode = search.mode ?? "develop"
+  const [triggerEditorActivity, setTriggerEditorActivity] =
+    useState<WorkflowTriggerEditorActivity>(initialTriggerEditorActivity)
+  const [retainedDevelopmentSession, setRetainedDevelopmentSession] =
+    useState<WorkflowDevelopmentSession | null>(null)
+  const [developmentSessionConflict, setDevelopmentSessionConflict] =
+    useState<WorkflowDevelopmentSessionConflict | null>(null)
+  const [triggerEditorResetKey, setTriggerEditorResetKey] = useState(0)
+  const triggerEditorBlockingMessage =
+    workflowDevelopmentSessionConflictMessage(developmentSessionConflict) ??
+    workflowTriggerEditorBlockingMessage(triggerEditorActivity)
+  const triggerEditorBlocked = triggerEditorBlockingMessage != null
+  const [heldOperateRoute, setHeldOperateRoute] = useState(false)
+  const reconciledHeldRouteRef = useRef(false)
+  const holdOperateRoute =
+    requestedMode === "operate" && (triggerEditorBlocked || heldOperateRoute)
+  const mode = holdOperateRoute ? "develop" : requestedMode
   const query = search.q ?? ""
   const selectedRunID = search.run ?? null
   const selectedWorkflowRef = search.workflow ?? null
@@ -259,17 +285,48 @@ export function WorkflowsPage({
     },
     [onSearchChange, search],
   )
+  useEffect(() => {
+    if (requestedMode !== "operate") {
+      setHeldOperateRoute(false)
+      reconciledHeldRouteRef.current = false
+      return
+    }
+    if (triggerEditorBlocked) {
+      setHeldOperateRoute(true)
+    }
+    if (!holdOperateRoute || reconciledHeldRouteRef.current) {
+      return
+    }
+    reconciledHeldRouteRef.current = true
+    toast.warning(
+      triggerEditorBlockingMessage ??
+        "Pending trigger builder changes were retained in Develop mode.",
+    )
+    updateRouteSearch({ mode: undefined }, true)
+  }, [
+    holdOperateRoute,
+    requestedMode,
+    triggerEditorBlocked,
+    triggerEditorBlockingMessage,
+    updateRouteSearch,
+  ])
   const setMode = useCallback(
     (nextMode: WorkflowPageMode) => {
       if (nextMode === mode) {
         return
       }
+      if (nextMode === "operate" && triggerEditorBlockingMessage != null) {
+        toast.warning(triggerEditorBlockingMessage)
+        return
+      }
+      setHeldOperateRoute(false)
+      reconciledHeldRouteRef.current = false
       updateRouteSearch(
         { mode: nextMode === "develop" ? undefined : nextMode },
         false,
       )
     },
-    [mode, updateRouteSearch],
+    [mode, triggerEditorBlockingMessage, updateRouteSearch],
   )
   const setQuery = useCallback(
     (nextQuery: string) => updateRouteSearch({ q: nextQuery }, true),
@@ -299,7 +356,7 @@ export function WorkflowsPage({
   const [draftEditorMode, setDraftEditorMode] =
     useState<DraftEditorMode>("yaml")
   const [eventTriggerInspection, setEventTriggerInspection] =
-    useState<WorkflowEventTriggerInspectionState>(initialEventTriggerInspection)
+    useState<WorkflowTriggerInspectionState>(initialEventTriggerInspection)
   const [eventTestMatch, setEventTestMatch] =
     useState<WorkflowEventTestMatchState>(initialEventTestMatch)
   const [testInputsJSON, setTestInputsJSON] = useState("{}")
@@ -403,7 +460,12 @@ export function WorkflowsPage({
       selectedRunID == null || runQuery.data == null ? false : 5000,
   })
 
-  const session = developmentQuery.data?.session ?? null
+  const authoritativeSession = developmentQuery.data?.session
+  const session =
+    developmentSessionConflict?.baseSession ??
+    retainedDevelopmentSession ??
+    authoritativeSession ??
+    null
   const dependencySessionID = session?.id
   const dependencyCandidateTargetRef = draftTargetRef.trim()
   const dependencyCandidateYAML = draftYAML
@@ -551,6 +613,25 @@ export function WorkflowsPage({
     [],
   )
 
+  const loadAuthoritativeDevelopmentSession = useCallback(() => {
+    if (developmentSessionConflict == null) {
+      return
+    }
+    const nextSession = developmentSessionConflict.incomingSession
+    setDevelopmentSessionConflict(null)
+    setTriggerEditorActivity(initialTriggerEditorActivity)
+    setTriggerEditorResetKey((current) => current + 1)
+    setRetainedDevelopmentSession(nextSession)
+    if (nextSession == null) {
+      setDraftPrompt("")
+      setDraftTargetRef("")
+      setDraftYAML("")
+      setAppliedDraftSnapshot(null)
+      return
+    }
+    applySessionDraft(nextSession)
+  }, [applySessionDraft, developmentSessionConflict])
+
   useEffect(() => {
     if (workflowsQuery.isPending || runsQuery.isPending) {
       return
@@ -629,30 +710,70 @@ export function WorkflowsPage({
   }, [selectedRunID])
 
   useEffect(() => {
-    if (session == null) {
-      setDraftPrompt("")
-      setDraftTargetRef("")
-      setDraftYAML("")
-      setAppliedDraftSnapshot(null)
+    if (developmentQuery.data === undefined) {
       return
     }
-    if (
-      appliedDraftSnapshot?.sessionID === session.id &&
+    const nextSession = authoritativeSession ?? null
+    if (developmentSessionConflict != null) {
+      if (
+        !workflowDevelopmentSessionsEqual(
+          developmentSessionConflict.incomingSession,
+          nextSession,
+        )
+      ) {
+        setDevelopmentSessionConflict((current) =>
+          current == null
+            ? current
+            : { ...current, incomingSession: nextSession },
+        )
+      }
+      return
+    }
+    const localDraftChanged =
+      retainedDevelopmentSession != null &&
+      appliedDraftSnapshot?.sessionID === retainedDevelopmentSession.id &&
       !editorMatchesDraftSnapshot(
         { prompt: draftPrompt, targetRef: draftTargetRef, yaml: draftYAML },
         appliedDraftSnapshot,
       )
+    if (
+      !workflowDevelopmentSessionsEqual(
+        retainedDevelopmentSession,
+        nextSession,
+      ) &&
+      (triggerEditorBlocked || localDraftChanged) &&
+      retainedDevelopmentSession != null
     ) {
+      setDevelopmentSessionConflict({
+        baseSession: retainedDevelopmentSession,
+        incomingSession: nextSession,
+      })
       return
     }
-    applySessionDraft(session)
+    if (nextSession == null) {
+      setDraftPrompt("")
+      setDraftTargetRef("")
+      setDraftYAML("")
+      setAppliedDraftSnapshot(null)
+      setRetainedDevelopmentSession(null)
+      return
+    }
+    if (localDraftChanged) {
+      return
+    }
+    applySessionDraft(nextSession)
+    setRetainedDevelopmentSession(nextSession)
   }, [
     appliedDraftSnapshot,
     applySessionDraft,
+    authoritativeSession,
+    developmentQuery.data,
+    developmentSessionConflict,
     draftPrompt,
     draftTargetRef,
     draftYAML,
-    session,
+    retainedDevelopmentSession,
+    triggerEditorBlocked,
   ])
 
   useEffect(() => {
@@ -663,14 +784,14 @@ export function WorkflowsPage({
     if (
       eventTriggerInspection.yaml !== draftYAML ||
       eventTriggerInspection.status !== "ready" ||
-      !eventTriggerInspection.triggerPresent
+      !eventTriggerInspection.eventTriggerPresent
     ) {
       setEventTestMatch(initialEventTestMatch)
     }
   }, [
     draftYAML,
     eventTriggerInspection.status,
-    eventTriggerInspection.triggerPresent,
+    eventTriggerInspection.eventTriggerPresent,
     eventTriggerInspection.yaml,
   ])
 
@@ -800,13 +921,13 @@ export function WorkflowsPage({
     eventTriggerInspection.yaml === draftYAML &&
     eventTriggerInspection.status === "ready"
   const eventTriggerPresent =
-    eventTriggerInspectionCurrent && eventTriggerInspection.triggerPresent
+    eventTriggerInspectionCurrent && eventTriggerInspection.eventTriggerPresent
   const eventContextReadinessError =
     eventTriggerInspection.yaml !== draftYAML ||
     eventTriggerInspection.status === "loading"
       ? "Wait for the current YAML to be inspected before testing."
       : eventTriggerInspection.status === "error"
-        ? `Event trigger inspection failed: ${eventTriggerInspection.reason ?? "unknown error"}`
+        ? `Workflow trigger inspection failed: ${eventTriggerInspection.reason ?? "unknown error"}`
         : eventTriggerPresent &&
             (eventTestMatch.status !== "matched" || !eventTestMatch.eventID)
           ? eventTestMatch.message
@@ -1283,11 +1404,13 @@ export function WorkflowsPage({
   })
 
   const settingsMutation = useMutation({
-    mutationFn: (values: WorkflowSettingsValues) => {
-      const expectedRevision = settingsQuery.data?.config_revision
-      if (!expectedRevision) {
-        throw new Error("Reload workflow settings and try again.")
-      }
+    mutationFn: ({
+      values,
+      expectedRevision,
+    }: {
+      values: WorkflowSettingsValues
+      expectedRevision: string
+    }) => {
       return patchWorkflowSettings({
         expected_config_revision: expectedRevision,
         ...values,
@@ -1309,15 +1432,18 @@ export function WorkflowsPage({
       void queryClient.invalidateQueries({
         queryKey: ["workflows", "templates"],
       })
-      void queryClient.invalidateQueries({
-        queryKey: ["workflows", "dependencies"],
-      })
     },
     onError: (err) => {
       toast.error(errorMessage(err))
+    },
+    onSettled: () => {
       void queryClient.invalidateQueries({
         queryKey: ["workflows", "settings"],
       })
+      void queryClient.invalidateQueries({
+        queryKey: ["workflows", "dependencies"],
+      })
+      void queryClient.invalidateQueries({ queryKey: ["tools"] })
     },
   })
 
@@ -1549,9 +1675,14 @@ export function WorkflowsPage({
     testDraftMutation.isPending ||
     draftTestRunning ||
     publishMutation.isPending ||
-    discardMutation.isPending
+    discardMutation.isPending ||
+    triggerEditorActivity.applying
 
   const refresh = () => {
+    if (triggerEditorBlockingMessage != null) {
+      toast.warning(triggerEditorBlockingMessage)
+      return
+    }
     void invalidateWorkflowQueries(queryClient)
     void queryClient.invalidateQueries({
       queryKey: ["events", "workflow-draft-context"],
@@ -1574,6 +1705,8 @@ export function WorkflowsPage({
             variant={mode === "operate" ? "secondary" : "ghost"}
             size="sm"
             onClick={() => setMode("operate")}
+            aria-disabled={triggerEditorBlocked}
+            title={triggerEditorBlockingMessage ?? undefined}
           >
             <IconActivity className="size-4" />
             Operate
@@ -1598,11 +1731,12 @@ export function WorkflowsPage({
           size="sm"
           onClick={refresh}
           disabled={
+            triggerEditorBlocked ||
             workflowsQuery.isFetching ||
             runsQuery.isFetching ||
             developmentQuery.isFetching
           }
-          title="Refresh"
+          title={triggerEditorBlockingMessage ?? "Refresh"}
           aria-label="Refresh"
         >
           <IconRefresh className="size-4" />
@@ -1643,6 +1777,9 @@ export function WorkflowsPage({
             draftTargetRef={draftTargetRef}
             draftYAML={draftYAML}
             draftEditorMode={draftEditorMode}
+            triggerEditorBlockingMessage={triggerEditorBlockingMessage}
+            developmentSessionConflict={developmentSessionConflict != null}
+            triggerEditorResetKey={triggerEditorResetKey}
             eventTriggerInspection={eventTriggerInspection}
             eventTriggerPresent={eventTriggerPresent}
             testEventID={
@@ -1659,8 +1796,18 @@ export function WorkflowsPage({
             onDraftPromptChange={setDraftPrompt}
             onDraftTargetRefChange={setDraftTargetRef}
             onDraftYAMLChange={setDraftYAML}
-            onDraftEditorModeChange={setDraftEditorMode}
+            onDraftEditorModeChange={(nextMode) => {
+              if (nextMode === "yaml" && triggerEditorBlockingMessage != null) {
+                toast.warning(triggerEditorBlockingMessage)
+                return
+              }
+              setDraftEditorMode(nextMode)
+            }}
             onEventTriggerInspectionChange={setEventTriggerInspection}
+            onTriggerEditorActivityChange={setTriggerEditorActivity}
+            onLoadAuthoritativeDevelopmentSession={
+              loadAuthoritativeDevelopmentSession
+            }
             onEventTestMatchChange={setEventTestMatch}
             onTestInputsJSONChange={setTestInputsJSON}
             onTestSecretsJSONChange={setTestSecretsJSON}
@@ -1693,6 +1840,10 @@ export function WorkflowsPage({
             onPublish={() => publishMutation.mutate()}
             onDiscard={() => discardMutation.mutate()}
             onOpenTestRun={(runID) => {
+              if (triggerEditorBlockingMessage != null) {
+                toast.warning(triggerEditorBlockingMessage)
+                return
+              }
               updateRouteSearch({ mode: "operate", run: runID }, false)
             }}
             canStartNew={canStartNew}
@@ -1801,7 +1952,9 @@ export function WorkflowsPage({
         }
         reloading={reloadMutation.isPending}
         onRetry={() => void settingsQuery.refetch()}
-        onSave={(values) => settingsMutation.mutate(values)}
+        onSave={(values, expectedRevision) =>
+          settingsMutation.mutate({ values, expectedRevision })
+        }
         onReload={() => reloadMutation.mutate()}
       />
       <WorkflowCancelDialog
@@ -1898,6 +2051,9 @@ function DevelopSurface({
   draftTargetRef,
   draftYAML,
   draftEditorMode,
+  triggerEditorBlockingMessage,
+  developmentSessionConflict,
+  triggerEditorResetKey,
   eventTriggerInspection,
   eventTriggerPresent,
   testEventID,
@@ -1912,6 +2068,8 @@ function DevelopSurface({
   onDraftYAMLChange,
   onDraftEditorModeChange,
   onEventTriggerInspectionChange,
+  onTriggerEditorActivityChange,
+  onLoadAuthoritativeDevelopmentSession,
   onEventTestMatchChange,
   onTestInputsJSONChange,
   onTestSecretsJSONChange,
@@ -1962,7 +2120,10 @@ function DevelopSurface({
   draftTargetRef: string
   draftYAML: string
   draftEditorMode: DraftEditorMode
-  eventTriggerInspection: WorkflowEventTriggerInspectionState
+  triggerEditorBlockingMessage: string | null
+  developmentSessionConflict: boolean
+  triggerEditorResetKey: number
+  eventTriggerInspection: WorkflowTriggerInspectionState
   eventTriggerPresent: boolean
   testEventID?: string
   testInputsJSON: string
@@ -1976,8 +2137,10 @@ function DevelopSurface({
   onDraftYAMLChange: (value: string) => void
   onDraftEditorModeChange: (value: DraftEditorMode) => void
   onEventTriggerInspectionChange: (
-    value: WorkflowEventTriggerInspectionState,
+    value: WorkflowTriggerInspectionState,
   ) => void
+  onTriggerEditorActivityChange: (value: WorkflowTriggerEditorActivity) => void
+  onLoadAuthoritativeDevelopmentSession: () => void
   onEventTestMatchChange: (value: WorkflowEventTestMatchState) => void
   onTestInputsJSONChange: (value: string) => void
   onTestSecretsJSONChange: (value: string) => void
@@ -2013,6 +2176,8 @@ function DevelopSurface({
   busy: boolean
 }) {
   const busyLabel = developmentBusyLabel(pendingAction)
+  const triggerEditorBlocked = triggerEditorBlockingMessage != null
+  const draftActionDisabled = busy || triggerEditorBlocked
   if (session == null) {
     const startingAI = pendingAction === "start-ai"
     const starting = pendingAction === "start"
@@ -2148,6 +2313,34 @@ function DevelopSurface({
       <section className="border-border bg-card/40 flex min-h-[36rem] flex-col rounded-lg border xl:min-h-0">
         <DevelopmentHeader session={session} />
         {busyLabel ? <DevelopmentBusyBar label={busyLabel} /> : null}
+        {triggerEditorBlockingMessage ? (
+          <div
+            role="alert"
+            className="border-b border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs"
+          >
+            <div className="font-medium">
+              {developmentSessionConflict
+                ? "Workflow development changed elsewhere."
+                : "Trigger builder changes are pending."}
+            </div>
+            <p className="text-muted-foreground mt-1">
+              {triggerEditorBlockingMessage}
+            </p>
+            {developmentSessionConflict ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={onLoadAuthoritativeDevelopmentSession}
+                disabled={busy}
+              >
+                <IconRefresh className="size-4" />
+                Discard local edits and load latest state
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
         {reconciliation != null ? (
           <DevelopmentReconciliationWarning
             reconciliation={reconciliation}
@@ -2166,7 +2359,7 @@ function DevelopSurface({
               id="workflow-target-ref"
               value={draftTargetRef}
               onChange={(event) => onDraftTargetRefChange(event.target.value)}
-              disabled={busy}
+              disabled={draftActionDisabled}
               className="font-mono text-xs"
             />
           </div>
@@ -2181,7 +2374,7 @@ function DevelopSurface({
               id="workflow-brief"
               value={draftPrompt}
               onChange={(event) => onDraftPromptChange(event.target.value)}
-              disabled={busy}
+              disabled={draftActionDisabled}
               className="min-h-32 resize-none"
             />
           </div>
@@ -2194,14 +2387,14 @@ function DevelopSurface({
                   role="status"
                   className="text-muted-foreground rounded-md border border-dashed px-3 py-4 text-center text-xs"
                 >
-                  Inspecting the current YAML for an event trigger…
+                  Inspecting the current workflow triggers…
                 </div>
               ) : eventTriggerInspection.status === "error" ? (
                 <div
                   role="alert"
                   className="border-destructive/40 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-xs break-words"
                 >
-                  Event trigger inspection failed:{" "}
+                  Workflow trigger inspection failed:{" "}
                   {eventTriggerInspection.reason ?? "unknown error"}
                 </div>
               ) : eventTriggerPresent ? (
@@ -2291,6 +2484,8 @@ function DevelopSurface({
                 onOpenRun={onOpenTestRun}
                 onFixWithAI={onFixTestWithAI}
                 fixingWithAI={pendingAction === "ai-revise"}
+                actionsDisabled={triggerEditorBlocked}
+                disabledReason={triggerEditorBlockingMessage ?? undefined}
               />
               <div
                 className={cn(
@@ -2323,11 +2518,22 @@ function DevelopSurface({
           />
         </div>
         <div className="border-border flex flex-wrap gap-2 border-t p-3">
-          <Button variant="outline" size="sm" onClick={onSave} disabled={busy}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onSave}
+            disabled={draftActionDisabled}
+            title={triggerEditorBlockingMessage ?? undefined}
+          >
             <IconDeviceFloppy className="size-4" />
             {pendingAction === "save" ? "Saving" : "Save Draft"}
           </Button>
-          <Button size="sm" onClick={onAIRevise} disabled={busy}>
+          <Button
+            size="sm"
+            onClick={onAIRevise}
+            disabled={draftActionDisabled}
+            title={triggerEditorBlockingMessage ?? undefined}
+          >
             <IconSparkles className="size-4" />
             {pendingAction === "ai-revise" ? "Drafting" : "Ask AI"}
           </Button>
@@ -2335,7 +2541,8 @@ function DevelopSurface({
             variant="outline"
             size="sm"
             onClick={onRegenerate}
-            disabled={busy}
+            disabled={draftActionDisabled}
+            title={triggerEditorBlockingMessage ?? undefined}
           >
             <IconRotateClockwise className="size-4" />
             {pendingAction === "regenerate" ? "Scaffolding" : "Scaffold"}
@@ -2344,7 +2551,8 @@ function DevelopSurface({
             variant="outline"
             size="sm"
             onClick={onValidate}
-            disabled={busy}
+            disabled={draftActionDisabled}
+            title={triggerEditorBlockingMessage ?? undefined}
           >
             <IconCheck className="size-4" />
             {pendingAction === "validate" ? "Validating" : "Validate"}
@@ -2353,8 +2561,11 @@ function DevelopSurface({
             variant="outline"
             size="sm"
             onClick={onTest}
-            disabled={!canTestDraft || busy}
-            title={!canTestDraft ? testReadinessMessage : undefined}
+            disabled={!canTestDraft || draftActionDisabled}
+            title={
+              triggerEditorBlockingMessage ??
+              (!canTestDraft ? testReadinessMessage : undefined)
+            }
           >
             <IconPlayerPlay className="size-4" />
             {pendingAction === "test" || pendingAction === "test-running"
@@ -2364,8 +2575,11 @@ function DevelopSurface({
           <Button
             size="sm"
             onClick={onPublish}
-            disabled={!canPublish || busy}
-            title={!canPublish ? publishReadinessMessage : undefined}
+            disabled={!canPublish || draftActionDisabled}
+            title={
+              triggerEditorBlockingMessage ??
+              (!canPublish ? publishReadinessMessage : undefined)
+            }
           >
             <IconRocket className="size-4" />
             {pendingAction === "publish" ? "Publishing" : "Publish"}
@@ -2374,7 +2588,8 @@ function DevelopSurface({
             variant="destructive"
             size="sm"
             onClick={onDiscard}
-            disabled={busy}
+            disabled={draftActionDisabled}
+            title={triggerEditorBlockingMessage ?? undefined}
           >
             <IconTrash className="size-4" />
             {pendingAction === "discard" ? "Discarding" : "Discard"}
@@ -2388,7 +2603,7 @@ function DevelopSurface({
             <IconCode className="text-muted-foreground size-4" />
             <h2 className="truncate text-sm font-medium">
               {draftEditorMode === "builder"
-                ? "Event trigger builder"
+                ? "Trigger builder"
                 : "Workflow YAML"}
             </h2>
           </div>
@@ -2405,11 +2620,13 @@ function DevelopSurface({
           hidden={draftEditorMode !== "builder"}
           className="min-h-0 flex-1"
         >
-          <WorkflowEventTriggerEditor
+          <WorkflowTriggerEditor
+            key={triggerEditorResetKey}
             yaml={draftYAML}
-            disabled={busy}
+            disabled={busy || developmentSessionConflict}
             onYAMLChange={onDraftYAMLChange}
             onInspectionChange={onEventTriggerInspectionChange}
+            onActivityChange={onTriggerEditorActivityChange}
             onOpenYAML={() => onDraftEditorModeChange("yaml")}
           />
         </div>
@@ -3949,12 +4166,16 @@ function DraftTestResultPanel({
   onOpenRun,
   onFixWithAI,
   fixingWithAI,
+  actionsDisabled = false,
+  disabledReason,
 }: {
   result: DraftTestSnapshot | null
   stale: boolean
   onOpenRun: (runID: string) => void
   onFixWithAI: () => void
   fixingWithAI: boolean
+  actionsDisabled?: boolean
+  disabledReason?: string
 }) {
   if (result == null) {
     return <EmptyPanel label="No draft test" compact />
@@ -3974,7 +4195,8 @@ function DraftTestResultPanel({
             variant="ghost"
             size="sm"
             onClick={() => onOpenRun(result.runID ?? "")}
-            title="Open run"
+            disabled={actionsDisabled}
+            title={disabledReason ?? "Open run"}
           >
             <IconExternalLink className="size-4" />
             Open Run
@@ -3985,8 +4207,8 @@ function DraftTestResultPanel({
             variant="outline"
             size="sm"
             onClick={onFixWithAI}
-            disabled={fixingWithAI}
-            title="Ask AI to fix this draft test failure"
+            disabled={fixingWithAI || actionsDisabled}
+            title={disabledReason ?? "Ask AI to fix this draft test failure"}
           >
             <IconSparkles className="size-4" />
             {fixingWithAI ? "Fixing" : "Fix With AI"}
@@ -4145,6 +4367,56 @@ function workflowTestReadinessMessage({
     return "Wait for the running draft test to finish."
   }
   return "Ready to test."
+}
+
+function workflowTriggerEditorBlockingMessage(
+  activity: WorkflowTriggerEditorActivity,
+) {
+  if (activity.applying) {
+    return "Wait for the trigger builder to finish applying before leaving or running another draft action."
+  }
+  if (activity.conflict) {
+    return "Discard the preserved trigger builder edits and load the latest YAML before leaving or running another draft action."
+  }
+  if (activity.dirty) {
+    return "Apply or reset the trigger builder changes before leaving or running another draft action."
+  }
+  return null
+}
+
+function workflowDevelopmentSessionConflictMessage(
+  conflict: WorkflowDevelopmentSessionConflict | null,
+) {
+  if (conflict == null) {
+    return null
+  }
+  if (conflict.incomingSession == null) {
+    return "The active workflow development session was removed elsewhere. Your unsaved draft and builder edits remain local until you explicitly discard them and load the latest state."
+  }
+  if (conflict.incomingSession.id !== conflict.baseSession.id) {
+    return "A different workflow development session became active elsewhere. Your unsaved draft and builder edits remain local until you explicitly discard them and load the latest state."
+  }
+  return "The authoritative workflow draft changed elsewhere. Your unsaved draft and builder edits remain local until you explicitly discard them and load the latest state."
+}
+
+function workflowDevelopmentSessionsEqual(
+  left: WorkflowDevelopmentSession | null,
+  right: WorkflowDevelopmentSession | null,
+) {
+  if (left == null || right == null) {
+    return left === right
+  }
+  return (
+    left.id === right.id &&
+    left.session_revision === right.session_revision &&
+    left.draft_revision === right.draft_revision &&
+    left.base_target_revision === right.base_target_revision &&
+    left.status === right.status &&
+    left.prompt === right.prompt &&
+    left.target_workflow_ref === right.target_workflow_ref &&
+    left.yaml === right.yaml &&
+    left.updated_at === right.updated_at
+  )
 }
 
 function isPublishTestReady(result: DraftTestSnapshot | null, stale: boolean) {

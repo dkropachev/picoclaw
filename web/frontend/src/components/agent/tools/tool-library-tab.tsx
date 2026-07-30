@@ -1,4 +1,5 @@
 import { IconSearch, IconSettings } from "@tabler/icons-react"
+import { useId } from "react"
 import { useTranslation } from "react-i18next"
 
 import type { ToolSupportItem } from "@/api/tools"
@@ -169,8 +170,14 @@ function ToolCard({
   onToggleTool: (name: string, enabled: boolean) => void
 }) {
   const { t } = useTranslation()
+  const reasonID = useId()
   const reasonText = tool.reason_code
-    ? t(`pages.agent.tools.reasons.${tool.reason_code}`)
+    ? t(`pages.agent.tools.reasons.${tool.reason_code}`, {
+        defaultValue: t(
+          "pages.agent.tools.reasons.unknown_dependency",
+          "This tool is blocked by an unmet dependency.",
+        ),
+      })
     : ""
   const isEnabled = tool.status === "enabled"
   const isToggledOn = tool.status !== "disabled"
@@ -231,6 +238,7 @@ function ToolCard({
                 defaultValue: "Toggle {{name}}",
                 name: tool.name,
               })}
+              aria-describedby={reasonText ? reasonID : undefined}
               onCheckedChange={(checked) => onToggleTool(tool.name, checked)}
               className={cn(
                 "shrink-0",
@@ -246,7 +254,10 @@ function ToolCard({
 
         {reasonText && (
           <div className="border-border/40 mt-4 border-t pt-4">
-            <div className="inline-flex rounded-lg border border-amber-200/50 bg-amber-50/80 px-3 py-2 text-[13px] font-medium text-amber-600 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-400">
+            <div
+              id={reasonID}
+              className="inline-flex rounded-lg border border-amber-200/50 bg-amber-50/80 px-3 py-2 text-[13px] font-medium text-amber-600 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-400"
+            >
               {reasonText}
             </div>
           </div>

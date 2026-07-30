@@ -55,6 +55,9 @@ func TestWorkflowSettingsGetAndPatchPreserveUnrelatedConfigAndSecrets(t *testing
 		getResponse.Effective.DefaultTimeoutSeconds <= 0 {
 		t.Fatalf("GET response = %#v", getResponse)
 	}
+	if !getResponse.Configured.ToolEnabled || !getResponse.Effective.ToolEnabled {
+		t.Fatalf("GET workflow tool settings = %#v", getResponse)
+	}
 	if getRecorder.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("GET Cache-Control = %q", getRecorder.Header().Get("Cache-Control"))
 	}
@@ -62,6 +65,7 @@ func TestWorkflowSettingsGetAndPatchPreserveUnrelatedConfigAndSecrets(t *testing
 	patchBody, err := json.Marshal(map[string]any{
 		"expected_config_revision": getResponse.ConfigRevision,
 		"enabled":                  true,
+		"tool_enabled":             false,
 		"max_concurrent_runs":      7,
 		"retention_days":           45,
 	})
@@ -85,6 +89,8 @@ func TestWorkflowSettingsGetAndPatchPreserveUnrelatedConfigAndSecrets(t *testing
 		t.Fatalf("PATCH response JSON error = %v", decodeErr)
 	}
 	if !patchResponse.Configured.Enabled ||
+		patchResponse.Configured.ToolEnabled ||
+		patchResponse.Effective.ToolEnabled ||
 		patchResponse.Configured.MaxConcurrentRuns != 7 ||
 		patchResponse.Configured.RetentionDays != 45 ||
 		patchResponse.ConfigRevision == getResponse.ConfigRevision {
@@ -100,10 +106,175 @@ func TestWorkflowSettingsGetAndPatchPreserveUnrelatedConfigAndSecrets(t *testing
 		t.Fatalf("LoadConfigForUpdate() error = %v", err)
 	}
 	if saved.Gateway.Port != 23456 ||
+		saved.Tools.Workflow.Enabled ||
 		saved.Agents.Defaults.GetModelName() != "private-model" ||
 		len(saved.ModelList) != 1 ||
 		saved.ModelList[0].APIKey() != "sk-workflow-settings-secret" {
 		t.Fatalf("PATCH changed unrelated config or secrets: %#v", saved)
+	}
+}
+
+func TestWorkflowSettingsToolFlagAndMasterRemainIndependent(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Workflows.Enabled = false
+	cfg.Tools.Workflow.Enabled = true
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	h := NewHandler(configPath)
+
+	get := func() workflowSettingsResponse {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		h.handleGetWorkflowSettings(
+			recorder,
+			httptest.NewRequest(http.MethodGet, "/api/workflows/settings", nil),
+		)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("GET status = %d, body=%s", recorder.Code, recorder.Body.String())
+		}
+		var response workflowSettingsResponse
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatalf("GET response JSON error = %v", err)
+		}
+		return response
+	}
+	patch := func(revision string, body string) workflowSettingsResponse {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		h.handlePatchWorkflowSettings(
+			recorder,
+			httptest.NewRequest(
+				http.MethodPatch,
+				"/api/workflows/settings",
+				strings.NewReader(`{"expected_config_revision":"`+revision+`",`+body+`}`),
+			),
+		)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("PATCH status = %d, body=%s", recorder.Code, recorder.Body.String())
+		}
+		var response workflowSettingsResponse
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatalf("PATCH response JSON error = %v", err)
+		}
+		return response
+	}
+
+	initial := get()
+	if initial.Configured.Enabled ||
+		!initial.Configured.ToolEnabled ||
+		initial.Effective.Enabled ||
+		initial.Effective.ToolEnabled {
+		t.Fatalf("initial settings = %#v", initial)
+	}
+
+	toolDisabled := patch(initial.ConfigRevision, `"tool_enabled":false`)
+	if toolDisabled.Configured.Enabled ||
+		toolDisabled.Configured.ToolEnabled ||
+		toolDisabled.Effective.Enabled ||
+		toolDisabled.Effective.ToolEnabled {
+		t.Fatalf("tool-only PATCH changed master or effective state: %#v", toolDisabled)
+	}
+
+	masterEnabled := patch(toolDisabled.ConfigRevision, `"enabled":true`)
+	if !masterEnabled.Configured.Enabled ||
+		masterEnabled.Configured.ToolEnabled ||
+		!masterEnabled.Effective.Enabled ||
+		masterEnabled.Effective.ToolEnabled {
+		t.Fatalf("master-only PATCH changed raw tool flag: %#v", masterEnabled)
+	}
+
+	toolEnabled := patch(masterEnabled.ConfigRevision, `"tool_enabled":true`)
+	if !toolEnabled.Configured.Enabled ||
+		!toolEnabled.Configured.ToolEnabled ||
+		!toolEnabled.Effective.Enabled ||
+		!toolEnabled.Effective.ToolEnabled {
+		t.Fatalf("enabled settings = %#v", toolEnabled)
+	}
+}
+
+func TestToolStateMutationInvalidatesWorkflowSettingsRevision(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Workflows.Enabled = true
+	cfg.Tools.Workflow.Enabled = true
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	initialRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(
+		initialRecorder,
+		httptest.NewRequest(http.MethodGet, "/api/workflows/settings", nil),
+	)
+	if initialRecorder.Code != http.StatusOK {
+		t.Fatalf(
+			"initial GET status = %d, body=%s",
+			initialRecorder.Code,
+			initialRecorder.Body.String(),
+		)
+	}
+	var initial workflowSettingsResponse
+	if err := json.Unmarshal(initialRecorder.Body.Bytes(), &initial); err != nil {
+		t.Fatalf("initial GET response JSON error = %v", err)
+	}
+
+	toolRecorder := httptest.NewRecorder()
+	toolRequest := httptest.NewRequest(
+		http.MethodPut,
+		"/api/tools/workflow/state",
+		strings.NewReader(`{"enabled":false}`),
+	)
+	toolRequest.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(toolRecorder, toolRequest)
+	if toolRecorder.Code != http.StatusOK {
+		t.Fatalf(
+			"tool PUT status = %d, body=%s",
+			toolRecorder.Code,
+			toolRecorder.Body.String(),
+		)
+	}
+
+	staleRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(
+		staleRecorder,
+		httptest.NewRequest(
+			http.MethodPatch,
+			"/api/workflows/settings",
+			strings.NewReader(`{"expected_config_revision":"`+
+				initial.ConfigRevision+`","retention_days":60}`),
+		),
+	)
+	if staleRecorder.Code != http.StatusConflict ||
+		!strings.Contains(staleRecorder.Body.String(), "config_revision_mismatch") {
+		t.Fatalf(
+			"stale PATCH response = %d/%q",
+			staleRecorder.Code,
+			staleRecorder.Body.String(),
+		)
+	}
+
+	currentRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(
+		currentRecorder,
+		httptest.NewRequest(http.MethodGet, "/api/workflows/settings", nil),
+	)
+	var current workflowSettingsResponse
+	if err := json.Unmarshal(currentRecorder.Body.Bytes(), &current); err != nil {
+		t.Fatalf("current GET response JSON error = %v", err)
+	}
+	if !current.Configured.Enabled ||
+		current.Configured.ToolEnabled ||
+		!current.Effective.Enabled ||
+		current.Effective.ToolEnabled ||
+		current.ConfigRevision == initial.ConfigRevision {
+		t.Fatalf("current workflow settings = %#v", current)
 	}
 }
 

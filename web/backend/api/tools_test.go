@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -28,6 +29,8 @@ func TestHandleListTools(t *testing.T) {
 	cfg.Tools.Skills.Enabled = true
 	cfg.Tools.Spawn.Enabled = true
 	cfg.Tools.Subagent.Enabled = false
+	cfg.Tools.Workflow.Enabled = true
+	cfg.Workflows.Enabled = false
 	cfg.Tools.MCP.Enabled = true
 	cfg.Tools.MCP.Discovery.Enabled = true
 	cfg.Tools.MCP.Discovery.UseRegex = true
@@ -71,6 +74,10 @@ func TestHandleListTools(t *testing.T) {
 	}
 	if gotTools["find_skills"].Status != "enabled" {
 		t.Fatalf("find_skills status = %q, want enabled", gotTools["find_skills"].Status)
+	}
+	if gotTools["workflow"].Status != "blocked" ||
+		gotTools["workflow"].ReasonCode != "requires_workflows" {
+		t.Fatalf("workflow = %#v, want blocked/requires_workflows", gotTools["workflow"])
 	}
 	if gotTools["tool_search_tool_regex"].Status != "enabled" {
 		t.Fatalf("tool_search_tool_regex status = %q, want enabled", gotTools["tool_search_tool_regex"].Status)
@@ -159,6 +166,62 @@ func TestHandleListTools(t *testing.T) {
 				t.Fatalf("serial = %#v, want blocked/requires_serial_platform", gotTools["serial"])
 			}
 		}
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("GET tools response did not disable caching")
+	}
+}
+
+func TestBuildToolSupportResolvesWorkflowMasterAndToolFlag(t *testing.T) {
+	tests := []struct {
+		name             string
+		workflowsEnabled bool
+		toolEnabled      bool
+		wantStatus       string
+		wantReason       string
+	}{
+		{
+			name:             "raw tool off",
+			workflowsEnabled: true,
+			toolEnabled:      false,
+			wantStatus:       "disabled",
+		},
+		{
+			name:             "raw tool on master off",
+			workflowsEnabled: false,
+			toolEnabled:      true,
+			wantStatus:       "blocked",
+			wantReason:       "requires_workflows",
+		},
+		{
+			name:             "both on",
+			workflowsEnabled: true,
+			toolEnabled:      true,
+			wantStatus:       "enabled",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Workflows.Enabled = test.workflowsEnabled
+			cfg.Tools.Workflow.Enabled = test.toolEnabled
+			var workflow toolSupportItem
+			for _, item := range buildToolSupport(cfg) {
+				if item.Name == "workflow" {
+					workflow = item
+					break
+				}
+			}
+			if workflow.Status != test.wantStatus ||
+				workflow.ReasonCode != test.wantReason {
+				t.Fatalf(
+					"workflow support = %#v, want status=%q reason=%q",
+					workflow,
+					test.wantStatus,
+					test.wantReason,
+				)
+			}
+		})
 	}
 }
 
@@ -924,6 +987,8 @@ func TestHandleUpdateToolState(t *testing.T) {
 	cfg.Tools.Spawn.Enabled = false
 	cfg.Tools.Subagent.Enabled = false
 	cfg.Tools.Cron.Enabled = false
+	cfg.Tools.Workflow.Enabled = false
+	cfg.Workflows.Enabled = false
 	cfg.Tools.MCP.Enabled = false
 	cfg.Tools.MCP.Discovery.Enabled = false
 	cfg.Tools.MCP.Discovery.UseRegex = false
@@ -1004,6 +1069,295 @@ func TestHandleUpdateToolState(t *testing.T) {
 	}
 	if !updated.Tools.Serial.Enabled {
 		t.Fatalf("serial should be enabled: %#v", updated.Tools.Serial)
+	}
+
+	rec5 := httptest.NewRecorder()
+	req5 := httptest.NewRequest(
+		http.MethodPut,
+		"/api/tools/workflow/state",
+		bytes.NewBufferString(`{"enabled":true}`),
+	)
+	req5.Header.Set("Content-Type", "application/json; charset=utf-8")
+	mux.ServeHTTP(rec5, req5)
+	if rec5.Code != http.StatusOK || rec5.Body.String() != "{\"status\":\"ok\"}\n" {
+		t.Fatalf("workflow response = %d/%q", rec5.Code, rec5.Body.String())
+	}
+	if rec5.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("PUT tool state response did not disable caching")
+	}
+	updated, err = config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig(updated workflow) error = %v", err)
+	}
+	if !updated.Tools.Workflow.Enabled {
+		t.Fatalf("workflow tool should be enabled: %#v", updated.Tools.Workflow)
+	}
+	if updated.Workflows.Enabled {
+		t.Fatal("enabling the workflow tool must not enable workflow execution")
+	}
+}
+
+func TestHandleUpdateToolStateRejectsNonStrictRequests(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		mutate      func(*http.Request)
+		wantStatus  int
+	}{
+		{
+			name:       "missing content type",
+			body:       `{"enabled":true}`,
+			wantStatus: http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "wrong content type",
+			contentType: "text/plain",
+			body:        `{"enabled":true}`,
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "duplicate content type",
+			contentType: "application/json",
+			body:        `{"enabled":true}`,
+			mutate: func(request *http.Request) {
+				request.Header["Content-Type"] = []string{
+					"application/json",
+					"application/json",
+				}
+			},
+			wantStatus: http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "empty object",
+			contentType: "application/json",
+			body:        `{}`,
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "null object",
+			contentType: "application/json",
+			body:        `null`,
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "scalar",
+			contentType: "application/json",
+			body:        `true`,
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "array",
+			contentType: "application/json",
+			body:        `[{"enabled":true}]`,
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "unknown field",
+			contentType: "application/json",
+			body:        `{"enabled":true,"other":false}`,
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "trailing value",
+			contentType: "application/json",
+			body:        `{"enabled":true}{}`,
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "duplicate enabled",
+			contentType: "application/json",
+			body:        `{"enabled":true,"enabled":false}`,
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "null enabled",
+			contentType: "application/json",
+			body:        `{"enabled":null}`,
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "string enabled",
+			contentType: "application/json",
+			body:        `{"enabled":"true"}`,
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "malformed",
+			contentType: "application/json",
+			body:        `{"enabled":true`,
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "empty body",
+			contentType: "application/json",
+			body:        ``,
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "oversized",
+			contentType: "application/json",
+			body: `{"enabled":true}` +
+				strings.Repeat(" ", toolStateRequestMaxBytes),
+			wantStatus: http.StatusRequestEntityTooLarge,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			before, err := config.ConfigRevision(configPath)
+			if err != nil {
+				t.Fatalf("ConfigRevision(before) error = %v", err)
+			}
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(
+				http.MethodPut,
+				"/api/tools/cron/state",
+				strings.NewReader(test.body),
+			)
+			if test.contentType != "" {
+				request.Header.Set("Content-Type", test.contentType)
+			}
+			if test.mutate != nil {
+				test.mutate(request)
+			}
+			mux.ServeHTTP(recorder, request)
+			if recorder.Code != test.wantStatus {
+				t.Fatalf(
+					"status = %d, want %d, body=%s",
+					recorder.Code,
+					test.wantStatus,
+					recorder.Body.String(),
+				)
+			}
+			if recorder.Header().Get("Cache-Control") != "no-store" {
+				t.Fatal("rejected response did not disable caching")
+			}
+			after, err := config.ConfigRevision(configPath)
+			if err != nil {
+				t.Fatalf("ConfigRevision(after) error = %v", err)
+			}
+			if after != before {
+				t.Fatalf("invalid request mutated config: %q -> %q", before, after)
+			}
+		})
+	}
+}
+
+func TestHandleUpdateToolStateRejectsCASConflictWithoutOverwrite(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	cfg, err := config.LoadConfigForUpdate(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfigForUpdate() error = %v", err)
+	}
+	cfg.Tools.Cron.Enabled = false
+	cfg.Gateway.Port = 20001
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	originalSave := h.saveToolStateConfig
+	h.saveToolStateConfig = func(
+		path string,
+		requested *config.Config,
+		expectedRevision string,
+	) (string, error) {
+		external, revision, loadErr := config.LoadConfigForUpdateSnapshot(path)
+		if loadErr != nil {
+			return "", loadErr
+		}
+		external.Gateway.Port = 20002
+		if _, saveErr := originalSave(path, external, revision); saveErr != nil {
+			return "", saveErr
+		}
+		return originalSave(path, requested, expectedRevision)
+	}
+
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPut,
+		"/api/tools/cron/state",
+		strings.NewReader(`{"enabled":true}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict ||
+		!strings.Contains(recorder.Body.String(), "config_revision_mismatch") {
+		t.Fatalf("response = %d/%q", recorder.Code, recorder.Body.String())
+	}
+
+	saved, err := config.LoadConfigForUpdate(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfigForUpdate(saved) error = %v", err)
+	}
+	if saved.Tools.Cron.Enabled {
+		t.Fatal("stale tool-state writer overwrote the requested tool flag")
+	}
+	if saved.Gateway.Port != 20002 {
+		t.Fatalf("external config update was lost: port = %d", saved.Gateway.Port)
+	}
+}
+
+func TestHandleUpdateToolStateSerializesConcurrentUpdates(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	cfg, err := config.LoadConfigForUpdate(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfigForUpdate() error = %v", err)
+	}
+	cfg.Tools.Cron.Enabled = false
+	cfg.Tools.Workflow.Enabled = false
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	start := make(chan struct{})
+	results := make(chan int, 2)
+	var wait sync.WaitGroup
+	for _, name := range []string{"cron", "workflow"} {
+		name := name
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(
+				http.MethodPut,
+				"/api/tools/"+name+"/state",
+				strings.NewReader(`{"enabled":true}`),
+			)
+			request.Header.Set("Content-Type", "application/json")
+			mux.ServeHTTP(recorder, request)
+			results <- recorder.Code
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	for status := range results {
+		if status != http.StatusOK {
+			t.Fatalf("concurrent update status = %d, want %d", status, http.StatusOK)
+		}
+	}
+
+	saved, err := config.LoadConfigForUpdate(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfigForUpdate(saved) error = %v", err)
+	}
+	if !saved.Tools.Cron.Enabled || !saved.Tools.Workflow.Enabled {
+		t.Fatalf("concurrent updates were not both preserved: %#v", saved.Tools)
 	}
 }
 

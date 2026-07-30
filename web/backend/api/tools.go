@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"runtime"
 	"strings"
@@ -14,6 +16,8 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	picotools "github.com/sipeed/picoclaw/pkg/tools"
 )
+
+const toolStateRequestMaxBytes = 1 << 20
 
 type toolCatalogEntry struct {
 	Name        string
@@ -36,7 +40,7 @@ type toolSupportResponse struct {
 }
 
 type toolStateRequest struct {
-	Enabled bool `json:"enabled"`
+	Enabled *bool `json:"enabled"`
 }
 
 type webSearchProviderOption struct {
@@ -283,6 +287,7 @@ func (h *Handler) registerToolRoutes(mux *http.ServeMux) {
 }
 
 func (h *Handler) handleListTools(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	cfg, err := config.LoadConfig(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
@@ -296,30 +301,131 @@ func (h *Handler) handleListTools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleUpdateToolState(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.LoadConfig(h.configPath)
+	w.Header().Set("Cache-Control", "no-store")
+	if err := validateToolStateContentType(r); err != nil {
+		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+	var req toolStateRequest
+	if err := decodeToolStateRequest(w, r, &req); err != nil {
+		var maximum *http.MaxBytesError
+		if errors.As(err, &maximum) {
+			http.Error(w, "Tool state request exceeds 1 MiB", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "Invalid tool state request", http.StatusBadRequest)
+		return
+	}
+
+	h.configMutationMu.Lock()
+	defer h.configMutationMu.Unlock()
+
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
 	}
-
-	var req toolStateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	if err := applyToolState(cfg, r.PathValue("name"), req.Enabled); err != nil {
+	if err := applyToolState(cfg, r.PathValue("name"), *req.Enabled); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
+	_, err = h.saveToolStateConfig(h.configPath, cfg, revision)
+	if errors.Is(err, config.ErrConfigRevisionMismatch) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "config_revision_mismatch",
+		})
+		return
+	}
+	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func validateToolStateContentType(r *http.Request) error {
+	values := r.Header.Values("Content-Type")
+	if len(values) != 1 {
+		return errors.New("exactly one Content-Type header is required")
+	}
+	mediaType, _, err := mime.ParseMediaType(values[0])
+	if err != nil || mediaType != "application/json" {
+		return errors.New("Content-Type must be application/json")
+	}
+	return nil
+}
+
+func decodeToolStateRequest(
+	w http.ResponseWriter,
+	r *http.Request,
+	request *toolStateRequest,
+) error {
+	if r.Body == nil {
+		return io.EOF
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(
+		w,
+		r.Body,
+		toolStateRequestMaxBytes,
+	))
+	first, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	opening, ok := first.(json.Delim)
+	if !ok || opening != '{' {
+		return errors.New("tool state request must be an object")
+	}
+	seenEnabled := false
+	for decoder.More() {
+		nameToken, tokenErr := decoder.Token()
+		if tokenErr != nil {
+			return tokenErr
+		}
+		name, ok := nameToken.(string)
+		if !ok {
+			return errors.New("tool state field name must be a string")
+		}
+		if name != "enabled" {
+			return fmt.Errorf("unknown tool state field %q", name)
+		}
+		if seenEnabled {
+			return errors.New("duplicate enabled field")
+		}
+		seenEnabled = true
+		var enabled *bool
+		if decodeErr := decoder.Decode(&enabled); decodeErr != nil {
+			return decodeErr
+		}
+		if enabled == nil {
+			return errors.New("enabled must be a boolean")
+		}
+		request.Enabled = enabled
+	}
+	closingToken, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	closing, ok := closingToken.(json.Delim)
+	if !ok || closing != '}' {
+		return errors.New("tool state request is not a complete object")
+	}
+	if !seenEnabled {
+		return errors.New("enabled is required")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("tool state request contains multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 func (h *Handler) handleGetToolAdaptation(w http.ResponseWriter, r *http.Request) {
@@ -1433,6 +1539,15 @@ func buildToolSupport(cfg *config.Config) []toolSupportItem {
 			status, reasonCode = resolveDiscoveryToolSupport(cfg, cfg.Tools.MCP.Discovery.UseBM25)
 		case "web_search":
 			status, reasonCode = resolveWebSearchToolSupport(cfg)
+		case "workflow":
+			if cfg.Tools.Workflow.Enabled {
+				if cfg.Workflows.Enabled {
+					status = "enabled"
+				} else {
+					status = "blocked"
+					reasonCode = "requires_workflows"
+				}
+			}
 		case "i2c", "spi":
 			status, reasonCode = resolveHardwareToolSupport(cfg.Tools.IsToolEnabled(entry.ConfigKey))
 		case "serial":
@@ -1546,6 +1661,8 @@ func applyToolState(cfg *config.Config, toolName string, enabled bool) error {
 		}
 	case "threads":
 		cfg.Tools.Threads.Enabled = enabled
+	case "workflow":
+		cfg.Tools.Workflow.Enabled = enabled
 	case "i2c":
 		cfg.Tools.I2C.Enabled = enabled
 	case "spi":
