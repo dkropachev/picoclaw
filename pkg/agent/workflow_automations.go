@@ -546,10 +546,6 @@ func workflowScheduleKey(ref string, index int) string {
 	return fmt.Sprintf("%s#%d", ref, index)
 }
 
-func workflowScheduleSession(ref string, index int) string {
-	return workflows.WorkflowScheduleSession(ref, index)
-}
-
 func (al *AgentLoop) publishWorkflowAutomationTriggered(
 	ref, trigger, session string,
 	delivery workflows.Delivery,

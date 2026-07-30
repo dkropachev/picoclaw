@@ -112,12 +112,11 @@ func AdmitWorkflowDevelopmentTestRun[T any](
 	if candidate.TargetWorkflowRef != previousTargetRef ||
 		candidate.BaseTargetRevision == "" ||
 		candidate.BaseTargetRevision == WorkflowTargetRevisionUnknown {
-		baseTargetRevision, revisionErr :=
-			captureWorkflowDevelopmentTargetRevision(
-				workspace,
-				candidate.TargetWorkflowRef,
-				opts...,
-			)
+		baseTargetRevision, revisionErr := captureWorkflowDevelopmentTargetRevision(
+			workspace,
+			candidate.TargetWorkflowRef,
+			opts...,
+		)
 		if revisionErr != nil {
 			return cloneWorkflowDevelopmentSession(current),
 				false,

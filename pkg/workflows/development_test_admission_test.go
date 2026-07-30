@@ -29,22 +29,21 @@ func TestAdmitWorkflowDevelopmentTestRunPersistsOnlyFinalCandidate(t *testing.T)
 	admission.RunID = "wr_admitted"
 
 	callbacks := 0
-	session, recorded, started, err :=
-		AdmitWorkflowDevelopmentTestRun(
-			workspace,
-			admission,
-			func() (string, error) {
-				callbacks++
-				assertDevelopmentAdmissionBytes(
-					t,
-					activePath,
-					before,
-					"before durable start",
-				)
-				assertWorkflowMutationLockHeld(t, workspace)
-				return "durable-run", nil
-			},
-		)
+	session, recorded, started, err := AdmitWorkflowDevelopmentTestRun(
+		workspace,
+		admission,
+		func() (string, error) {
+			callbacks++
+			assertDevelopmentAdmissionBytes(
+				t,
+				activePath,
+				before,
+				"before durable start",
+			)
+			assertWorkflowMutationLockHeld(t, workspace)
+			return "durable-run", nil
+		},
+	)
 	if err != nil || !recorded || started != "durable-run" {
 		t.Fatalf(
 			"AdmitWorkflowDevelopmentTestRun() recorded=%v started=%q error=%v",
@@ -106,18 +105,16 @@ func TestAdmitWorkflowDevelopmentTestRunPromptRules(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			workspace, original, _, _ :=
-				newDevelopmentAdmissionFixture(t)
+			workspace, original, _, _ := newDevelopmentAdmissionFixture(t)
 			admission := developmentTestRunAdmissionFor(original)
 			admission.Prompt = test.prompt
-			session, recorded, _, err :=
-				AdmitWorkflowDevelopmentTestRun(
-					workspace,
-					admission,
-					func() (struct{}, error) {
-						return struct{}{}, nil
-					},
-				)
+			session, recorded, _, err := AdmitWorkflowDevelopmentTestRun(
+				workspace,
+				admission,
+				func() (struct{}, error) {
+					return struct{}{}, nil
+				},
+			)
 			if err != nil || !recorded {
 				t.Fatalf(
 					"AdmitWorkflowDevelopmentTestRun() recorded=%v error=%v",
@@ -169,15 +166,14 @@ func TestAdmitWorkflowDevelopmentTestRunRejectsStaleFenceWithoutStartOrWrite(
 			admission := exact
 			test.mutate(&admission)
 			callbacks := 0
-			session, recorded, _, err :=
-				AdmitWorkflowDevelopmentTestRun(
-					workspace,
-					admission,
-					func() (struct{}, error) {
-						callbacks++
-						return struct{}{}, nil
-					},
-				)
+			session, recorded, _, err := AdmitWorkflowDevelopmentTestRun(
+				workspace,
+				admission,
+				func() (struct{}, error) {
+					callbacks++
+					return struct{}{}, nil
+				},
+			)
 			if !errors.Is(err, ErrWorkflowDevelopmentFenceMismatch) ||
 				recorded ||
 				session == nil ||
@@ -397,20 +393,19 @@ func TestAdmitWorkflowDevelopmentEventRunBlocksCompletionUntilClaimed(
 			assertWorkflowMutationLockHeld(t, workspace)
 			go func() {
 				close(completionStarted)
-				session, applied, completionErr :=
-					RecordWorkflowDevelopmentEventTestIfCurrent(
-						workspace,
-						original.ID,
-						draftKey,
-						eventID,
-						runID,
-						&RunResult{
-							RunID:  runID,
-							Status: RunStatusFailed,
-							Error:  eventDraftPrivateDiagnostic,
-						},
-						errors.New(eventDraftPrivateDiagnostic),
-					)
+				session, applied, completionErr := RecordWorkflowDevelopmentEventTestIfCurrent(
+					workspace,
+					original.ID,
+					draftKey,
+					eventID,
+					runID,
+					&RunResult{
+						RunID:  runID,
+						Status: RunStatusFailed,
+						Error:  eventDraftPrivateDiagnostic,
+					},
+					errors.New(eventDraftPrivateDiagnostic),
+				)
 				completed <- completionResult{
 					session:  session,
 					recorded: applied,

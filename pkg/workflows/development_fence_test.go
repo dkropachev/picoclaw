@@ -80,6 +80,7 @@ func TestReviseWorkflowDevelopmentFencedRejectsMismatchWithoutWrite(t *testing.T
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			fence := exact
 			test.mutate(&fence)
 			revised, reviseErr := ReviseWorkflowDevelopmentFenced(
@@ -146,23 +147,23 @@ func TestReviseWorkflowDevelopmentFencedChecksFenceBeforeBusyState(t *testing.T)
 		ExpectedSessionRevision: active.SessionRevision,
 		ExpectedDraftRevision:   active.DraftRevision,
 	}
-	if _, err := ReviseWorkflowDevelopmentFenced(
+	if _, reviseErr := ReviseWorkflowDevelopmentFenced(
 		workspace,
 		exact,
 		WorkflowDevelopmentReviseRequest{Prompt: "changed"},
-	); !errors.Is(err, ErrDevelopmentBusy) {
-		t.Fatalf("exact fence error = %v, want ErrDevelopmentBusy", err)
+	); !errors.Is(reviseErr, ErrDevelopmentBusy) {
+		t.Fatalf("exact fence error = %v, want ErrDevelopmentBusy", reviseErr)
 	}
 	stale := exact
 	stale.ExpectedDraftRevision = "sha256:stale"
-	if _, err := ReviseWorkflowDevelopmentFenced(
+	if _, reviseErr := ReviseWorkflowDevelopmentFenced(
 		workspace,
 		stale,
 		WorkflowDevelopmentReviseRequest{Prompt: "changed"},
-	); !errors.Is(err, ErrWorkflowDevelopmentFenceMismatch) {
+	); !errors.Is(reviseErr, ErrWorkflowDevelopmentFenceMismatch) {
 		t.Fatalf(
 			"stale fence error = %v, want ErrWorkflowDevelopmentFenceMismatch",
-			err,
+			reviseErr,
 		)
 	}
 	after, err := os.ReadFile(activePath)

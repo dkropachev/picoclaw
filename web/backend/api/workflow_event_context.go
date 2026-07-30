@@ -171,9 +171,11 @@ func (h *Handler) loadWorkflowEventEnvelopeWithConfig(
 func (h *Handler) readOnlyWorkflowEventGatewayPIDData(
 	cfg *config.Config,
 ) *ppid.PidFileData {
-	candidates := []*ppid.PidFileData{
+	candidates := make([]*ppid.PidFileData, 0, 2)
+	candidates = append(
+		candidates,
 		cloneEventGatewayPIDData(ppid.PeekPidFile(globalConfigDir())),
-	}
+	)
 	gateway.mu.Lock()
 	candidates = append(
 		candidates,

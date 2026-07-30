@@ -190,7 +190,9 @@ func SimulateWorkflowTrigger(
 	workflow, parseErr := Parse([]byte(input.YAML))
 	if parseErr != nil || Validate(workflow) != nil {
 		simulation.Simulation.Reason = WorkflowTriggerSimulationInvalidWorkflow
-		return simulation, nil
+		// Parse and validation failures are modeled as a safe simulation status,
+		// not an internal simulation failure.
+		return simulation, nil //nolint:nilerr
 	}
 	if input.Trigger.Kind == WorkflowTriggerSchedule {
 		index := *input.Trigger.ScheduleIndex
@@ -221,7 +223,9 @@ func SimulateWorkflowTrigger(
 		simulation.Simulation.Matched = false
 		simulation.Simulation.Reason = WorkflowTriggerSimulationInvalidScenario
 		simulation.Simulation.Passthrough = nil
-		return simulation, nil
+		// Invocation-contract failures are modeled as a safe scenario status,
+		// not an internal simulation failure.
+		return simulation, nil //nolint:nilerr
 	}
 	request.Inputs = resolvedInputs
 	request.Ref = input.WorkflowRef

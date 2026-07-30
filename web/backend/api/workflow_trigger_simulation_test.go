@@ -937,19 +937,19 @@ func TestWorkflowTriggerExecutionStartFailureLeavesCandidateUnapplied(
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
 	cfg.Workflows.MaxConcurrentRuns = 1
-	if err := config.SaveConfig(handler.configPath, cfg); err != nil {
-		t.Fatalf("SaveConfig() error = %v", err)
+	if saveErr := config.SaveConfig(handler.configPath, cfg); saveErr != nil {
+		t.Fatalf("SaveConfig() error = %v", saveErr)
 	}
 	now := time.Now().UTC()
 	store := workflows.NewFileRunStore(workspace)
-	if err := store.CreateRun(context.Background(), &workflows.Run{
+	if createErr := store.CreateRun(context.Background(), &workflows.Run{
 		ID:          "wr_existing_capacity",
 		WorkflowRef: "workflows/existing.yml",
 		Status:      workflows.RunStatusRunning,
 		CreatedAt:   now,
 		UpdatedAt:   now,
-	}); err != nil {
-		t.Fatalf("CreateRun(existing) error = %v", err)
+	}); createErr != nil {
+		t.Fatalf("CreateRun(existing) error = %v", createErr)
 	}
 	simulationRequest, token := simulateWorkflowTriggerReviewedManual(
 		t,
@@ -1222,8 +1222,11 @@ func TestWorkflowTriggerAcceptedNearLimitUsesBounded202Fallback(t *testing.T) {
 		t.Fatalf("simulate status = %d; body=%s", simulated.Code, simulated.Body.String())
 	}
 	var reviewed workflowTriggerSimulationResponse
-	if err := json.Unmarshal(simulated.Body.Bytes(), &reviewed); err != nil {
-		t.Fatalf("decode simulation response: %v", err)
+	if decodeErr := json.Unmarshal(
+		simulated.Body.Bytes(),
+		&reviewed,
+	); decodeErr != nil {
+		t.Fatalf("decode simulation response: %v", decodeErr)
 	}
 	execution := workflowTriggerExecutionFromSimulation(
 		largeRequest,
@@ -2021,8 +2024,7 @@ func equivalentWorkflowTriggerReviewTokenAliases(
 		if candidateMAC == parts[1] {
 			continue
 		}
-		candidateBytes, decodeErr :=
-			base64.RawURLEncoding.DecodeString(candidateMAC)
+		candidateBytes, decodeErr := base64.RawURLEncoding.DecodeString(candidateMAC)
 		if decodeErr == nil && bytes.Equal(candidateBytes, decodedMAC) {
 			trailingBitsAlias = parts[0] + "." + candidateMAC
 			break

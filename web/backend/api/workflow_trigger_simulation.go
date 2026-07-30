@@ -241,8 +241,7 @@ func (h *Handler) pruneWorkflowTriggerReviewUsesLocked() {
 func workflowTriggerReviewTokenIdentity(
 	token string,
 ) ([32]byte, int64, bool) {
-	payloadBytes, providedMAC, payload, ok :=
-		parseWorkflowTriggerReviewToken(token)
+	payloadBytes, providedMAC, payload, ok := parseWorkflowTriggerReviewToken(token)
 	if !ok || payload.ExpiresAt <= 0 {
 		return [32]byte{}, 0, false
 	}
@@ -984,12 +983,12 @@ func (h *Handler) handleExecuteWorkflowDevelopmentTest(w http.ResponseWriter, r 
 		)
 		return
 	}
-	if err := h.verifyWorkflowTriggerReviewToken(
+	if tokenErr := h.verifyWorkflowTriggerReviewToken(
 		request.ReviewToken,
 		simulationRequest,
 		simulation,
 		binding,
-	); err != nil {
+	); tokenErr != nil {
 		writeWorkflowTriggerSimulationError(
 			w,
 			http.StatusForbidden,
@@ -1039,12 +1038,12 @@ func (h *Handler) handleExecuteWorkflowDevelopmentTest(w http.ResponseWriter, r 
 		)
 		return
 	}
-	if err := h.verifyWorkflowTriggerReviewToken(
+	if tokenErr := h.verifyWorkflowTriggerReviewToken(
 		request.ReviewToken,
 		simulationRequest,
 		simulation,
 		binding,
-	); err != nil {
+	); tokenErr != nil {
 		writeWorkflowTriggerSimulationError(
 			w,
 			http.StatusForbidden,
@@ -1117,103 +1116,102 @@ func (h *Handler) handleExecuteWorkflowDevelopmentTest(w http.ResponseWriter, r 
 	)
 	eventID := workflowTriggerSimulationEventID(simulationRequest)
 	var initialStateRecorded atomic.Bool
-	admitted, recorded, started, admissionErr :=
-		admitWorkflowTriggerDevelopmentTestRun(
-			workspace,
-			workflows.WorkflowDevelopmentTestRunAdmission{
-				SessionID:               request.SessionID,
-				ExpectedSessionRevision: request.ExpectedSessionRevision,
-				ExpectedDraftRevision:   request.ExpectedDraftRevision,
-				Prompt:                  request.Prompt,
-				TargetWorkflowRef:       request.TargetRef,
-				YAML:                    request.YAML,
-				EventID:                 eventID,
-				RunID:                   runID,
-			},
-			func() (backgroundWorkflowStart, error) {
-				configLocked := false
-				var started backgroundWorkflowStart
-				configErr := config.WithConfigMutationLock(
-					h.configPath,
-					func() error {
-						configLocked = true
-						currentRevision, revisionErr := config.ConfigRevision(
-							h.configPath,
+	admitted, recorded, started, admissionErr := admitWorkflowTriggerDevelopmentTestRun(
+		workspace,
+		workflows.WorkflowDevelopmentTestRunAdmission{
+			SessionID:               request.SessionID,
+			ExpectedSessionRevision: request.ExpectedSessionRevision,
+			ExpectedDraftRevision:   request.ExpectedDraftRevision,
+			Prompt:                  request.Prompt,
+			TargetWorkflowRef:       request.TargetRef,
+			YAML:                    request.YAML,
+			EventID:                 eventID,
+			RunID:                   runID,
+		},
+		func() (backgroundWorkflowStart, error) {
+			configLocked := false
+			var started backgroundWorkflowStart
+			configErr := config.WithConfigMutationLock(
+				h.configPath,
+				func() error {
+					configLocked = true
+					currentRevision, revisionErr := config.ConfigRevision(
+						h.configPath,
+					)
+					if revisionErr != nil {
+						return fmt.Errorf(
+							"%w: %v",
+							errWorkflowTriggerConfigUnavailable,
+							revisionErr,
 						)
-						if revisionErr != nil {
+					}
+					if currentRevision != configRevision {
+						return errWorkflowTriggerConfigMismatch
+					}
+					if tokenErr := h.verifyWorkflowTriggerReviewToken(
+						request.ReviewToken,
+						simulationRequest,
+						simulation,
+						binding,
+					); tokenErr != nil {
+						return tokenErr
+					}
+					// The executor receives only the private request returned
+					// by the same current, token-bound simulation. Retaining
+					// both mutation locks until OnRunCreated fences the durable
+					// run to this exact draft and config generation.
+					backgroundStarted = true
+					started = startWorkflowRunBackground(
+						executor,
+						runRequest,
+						func(result *workflows.RunResult, runErr error) {
+							h.reconcileWorkflowDevelopmentTestCompletion(
+								workspace,
+								request.SessionID,
+								draftKey,
+								eventID,
+								runID,
+								result,
+								runErr,
+								initialStateRecorded.Load(),
+							)
+						},
+					)
+					if started.Run == nil {
+						if started.Err != nil {
 							return fmt.Errorf(
 								"%w: %v",
 								errWorkflowTriggerConfigUnavailable,
-								revisionErr,
+								started.Err,
 							)
 						}
-						if currentRevision != configRevision {
-							return errWorkflowTriggerConfigMismatch
-						}
-						if tokenErr := h.verifyWorkflowTriggerReviewToken(
-							request.ReviewToken,
-							simulationRequest,
-							simulation,
-							binding,
-						); tokenErr != nil {
-							return tokenErr
-						}
-						// The executor receives only the private request returned
-						// by the same current, token-bound simulation. Retaining
-						// both mutation locks until OnRunCreated fences the durable
-						// run to this exact draft and config generation.
-						backgroundStarted = true
-						started = startWorkflowRunBackground(
-							executor,
-							runRequest,
-							func(result *workflows.RunResult, runErr error) {
-								h.reconcileWorkflowDevelopmentTestCompletion(
-									workspace,
-									request.SessionID,
-									draftKey,
-									eventID,
-									runID,
-									result,
-									runErr,
-									initialStateRecorded.Load(),
-								)
-							},
+						return errWorkflowTriggerConfigUnavailable
+					}
+					if !h.consumeWorkflowTriggerReviewToken(
+						request.ReviewToken,
+					) {
+						return errWorkflowTriggerReviewConsumed
+					}
+					if started.Run.ID != runID {
+						return fmt.Errorf(
+							"%w: durable run identity mismatch",
+							errWorkflowTriggerConfigUnavailable,
 						)
-						if started.Run == nil {
-							if started.Err != nil {
-								return fmt.Errorf(
-									"%w: %v",
-									errWorkflowTriggerConfigUnavailable,
-									started.Err,
-								)
-							}
-							return errWorkflowTriggerConfigUnavailable
-						}
-						if !h.consumeWorkflowTriggerReviewToken(
-							request.ReviewToken,
-						) {
-							return errWorkflowTriggerReviewConsumed
-						}
-						if started.Run.ID != runID {
-							return fmt.Errorf(
-								"%w: durable run identity mismatch",
-								errWorkflowTriggerConfigUnavailable,
-							)
-						}
-						return nil
-					},
+					}
+					return nil
+				},
+			)
+			if configErr != nil && !configLocked {
+				configErr = fmt.Errorf(
+					"%w: %v",
+					errWorkflowTriggerConfigUnavailable,
+					configErr,
 				)
-				if configErr != nil && !configLocked {
-					configErr = fmt.Errorf(
-						"%w: %v",
-						errWorkflowTriggerConfigUnavailable,
-						configErr,
-					)
-				}
-				return started, configErr
-			},
-			workflowLocalOptionsFromConfig(cfg)...,
-		)
+			}
+			return started, configErr
+		},
+		workflowLocalOptionsFromConfig(cfg)...,
+	)
 	initialStateRecorded.Store(recorded)
 	if started.Run == nil {
 		h.writeWorkflowTriggerExecutionMutationError(w, admissionErr)
@@ -1408,7 +1406,9 @@ func writeAcceptedWorkflowTriggerSimulationJSON(
 	})
 	if fallbackErr != nil {
 		// All fallback fields are fixed strings, so this is defensive only.
-		fallback = []byte(`{"result":{"run_id":"","status":"running"},"reconciliation":{"state":"degraded","reason":"draft_test_response_truncated","run_id":"","message":"the workflow run was accepted, but its development session was too large to return; retain the editor draft and refresh the durable run"}}`)
+		fallback = []byte(
+			`{"result":{"run_id":"","status":"running"},"reconciliation":{"state":"degraded","reason":"draft_test_response_truncated","run_id":"","message":"the workflow run was accepted, but its development session was too large to return; retain the editor draft and refresh the durable run"}}`,
+		)
 	}
 	writeWorkflowTriggerEncodedJSON(w, http.StatusAccepted, fallback)
 }
@@ -1775,8 +1775,7 @@ func (h *Handler) verifyWorkflowTriggerReviewToken(
 	if err != nil {
 		return errWorkflowTriggerReviewToken
 	}
-	payloadBytes, providedMAC, payload, ok :=
-		parseWorkflowTriggerReviewToken(token)
+	payloadBytes, providedMAC, payload, ok := parseWorkflowTriggerReviewToken(token)
 	if !ok {
 		return errWorkflowTriggerReviewToken
 	}

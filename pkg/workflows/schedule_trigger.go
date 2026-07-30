@@ -6,11 +6,9 @@ import (
 	"time"
 )
 
-var (
-	// ErrWorkflowScheduleTriggerContext identifies an invalid request to build
-	// the pure execution context for one exact schedule entry.
-	ErrWorkflowScheduleTriggerContext = errors.New("workflow schedule trigger context is invalid")
-)
+// ErrWorkflowScheduleTriggerContext identifies an invalid request to build
+// the pure execution context for one exact schedule entry.
+var ErrWorkflowScheduleTriggerContext = errors.New("workflow schedule trigger context is invalid")
 
 // WorkflowScheduleRunContext is the pure execution context shared by the
 // scheduler and trigger simulation.
