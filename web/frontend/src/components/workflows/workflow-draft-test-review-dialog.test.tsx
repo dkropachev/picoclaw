@@ -1,11 +1,12 @@
-import { render, screen } from "@testing-library/react"
+import { act, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeAll, describe, expect, it, vi } from "vitest"
 
-import {
-  type WorkflowDraftTestReviewContext,
-  workflowDraftTestReviewIdentity,
-} from "./workflow-draft-test-review"
+import type {
+  WorkflowTriggerSimulation,
+  WorkflowTriggerSimulationReview,
+} from "@/api/workflows"
+
 import { WorkflowDraftTestReviewDialog } from "./workflow-draft-test-review-dialog"
 
 describe("WorkflowDraftTestReviewDialog", () => {
@@ -16,21 +17,16 @@ describe("WorkflowDraftTestReviewDialog", () => {
     })
   })
 
-  it("requires a second explicit effects confirmation", async () => {
+  it("requires explicit consent before submitting the server review", async () => {
     const user = userEvent.setup()
     const onConfirm = vi.fn()
     render(
       <WorkflowDraftTestReviewDialog
         open
         pending={false}
-        identity="draft:first"
-        scenario="Durable event ev_123"
-        review={{
-          jobCount: 1,
-          stepCount: 2,
-          targets: ["agent/main", "mcp/github/create_issue"],
-          rawOnlyCount: 0,
-        }}
+        identity="review:first"
+        simulation={simulation()}
+        review={review()}
         onOpenChange={vi.fn()}
         onConfirm={onConfirm}
       />,
@@ -39,31 +35,90 @@ describe("WorkflowDraftTestReviewDialog", () => {
     expect(screen.getByText("agent/main")).toBeInTheDocument()
     expect(screen.getByText("mcp/github/create_issue")).toBeInTheDocument()
     expect(screen.getByText(/external system state/i)).toBeInTheDocument()
-    const run = screen.getByRole("button", {
-      name: "Confirm and run test",
+    const execute = screen.getByRole("button", {
+      name: "Confirm and execute",
     })
-    expect(run).toBeDisabled()
+    expect(execute).toBeDisabled()
     await user.click(
       screen.getByRole("switch", {
-        name: "I reviewed this scenario and its possible effects",
+        name: "I reviewed this server simulation and its possible effects",
       }),
     )
-    await user.click(run)
-    expect(onConfirm).toHaveBeenCalledWith("draft:first")
+    await user.click(execute)
+    expect(onConfirm).toHaveBeenCalledWith("review:first")
   })
 
-  it("warns when raw-only actions cannot be summarized", () => {
+  it("consumes one identity synchronously across rapid confirmation clicks", async () => {
+    const user = userEvent.setup()
+    const onConfirm = vi.fn()
     render(
       <WorkflowDraftTestReviewDialog
         open
         pending={false}
-        identity="draft:raw"
-        scenario="Manual inputs"
+        identity="review:rapid"
+        simulation={simulation()}
+        review={review()}
+        onOpenChange={vi.fn()}
+        onConfirm={onConfirm}
+      />,
+    )
+    await user.click(
+      screen.getByRole("switch", {
+        name: "I reviewed this server simulation and its possible effects",
+      }),
+    )
+    const execute = screen.getByRole("button", {
+      name: "Confirm and execute",
+    })
+
+    act(() => {
+      execute.click()
+      execute.click()
+    })
+
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+    expect(onConfirm).toHaveBeenCalledWith("review:rapid")
+  })
+
+  it("renders only safe server context counts, never scenario values", () => {
+    render(
+      <WorkflowDraftTestReviewDialog
+        open
+        pending={false}
+        identity="review:redacted"
+        simulation={{
+          ...simulation(),
+          context_summary: {
+            input_count: 2,
+            secret_count: 3,
+            has_event: true,
+            has_session: true,
+            has_delivery: true,
+          },
+        }}
+        review={review()}
+        onOpenChange={vi.fn()}
+        onConfirm={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText("3")).toBeInTheDocument()
+    expect(screen.getByText("session + delivery")).toBeInTheDocument()
+    expect(screen.queryByText("top-secret-value")).not.toBeInTheDocument()
+    expect(screen.queryByText("protected-payload")).not.toBeInTheDocument()
+  })
+
+  it("blocks consent for an incomplete server review", () => {
+    render(
+      <WorkflowDraftTestReviewDialog
+        open
+        pending={false}
+        identity="review:incomplete"
+        simulation={{ ...simulation(), executable: false }}
         review={{
-          jobCount: 1,
-          stepCount: 0,
-          targets: [],
-          rawOnlyCount: 1,
+          ...review(),
+          complete: false,
+          limits: ["effects_truncated"],
         }}
         onOpenChange={vi.fn()}
         onConfirm={vi.fn()}
@@ -71,205 +126,105 @@ describe("WorkflowDraftTestReviewDialog", () => {
     )
 
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "1 preserved item is raw-only",
+      "server review is incomplete",
     )
-    expect(screen.getByText(/transitive effects/i)).toBeInTheDocument()
+    expect(
+      screen.getByRole("switch", {
+        name: "I reviewed this server simulation and its possible effects",
+      }),
+    ).toBeDisabled()
   })
 
-  it("shows exact nonsecret manual context and secret names without secret values", () => {
-    render(
-      <WorkflowDraftTestReviewDialog
-        open
-        pending={false}
-        identity="draft:manual-context"
-        scenario="Manual or workflow-call test."
-        scenarioDetails={[
-          { label: "Mode", value: "Manual / workflow call" },
-          { label: "Inputs JSON", value: '{"ticket":"PIC-42"}' },
-          { label: "Session", value: "workflow:test" },
-          {
-            label: "Delivery JSON",
-            value: '{"channel":"engineering"}',
-          },
-          { label: "Secrets", value: "2 configured: api_key, token" },
-        ]}
-        review={{
-          jobCount: 1,
-          stepCount: 1,
-          targets: ["tool/message"],
-          rawOnlyCount: 0,
-        }}
-        onOpenChange={vi.fn()}
-        onConfirm={vi.fn()}
-      />,
-    )
-
-    expect(screen.getByText('{"ticket":"PIC-42"}')).toBeInTheDocument()
-    expect(screen.getByText("workflow:test")).toBeInTheDocument()
-    expect(screen.getByText('{"channel":"engineering"}')).toBeInTheDocument()
-    expect(screen.getByText("2 configured: api_key, token")).toBeInTheDocument()
-    expect(screen.queryByText(/secret-value/i)).not.toBeInTheDocument()
-  })
-
-  it("resets acknowledgement when the exact reviewed draft changes", async () => {
+  it("invalidates consent when the exact server identity changes", async () => {
     const user = userEvent.setup()
-    const onConfirm = vi.fn()
-    const review = {
-      jobCount: 1,
-      stepCount: 1,
-      targets: ["tool/message"],
-      rawOnlyCount: 0,
+    const props = {
+      open: true,
+      pending: false,
+      simulation: simulation(),
+      review: review(),
+      onOpenChange: vi.fn(),
+      onConfirm: vi.fn(),
     }
     const { rerender } = render(
-      <WorkflowDraftTestReviewDialog
-        open
-        pending={false}
-        identity="draft:first"
-        scenario="Manual inputs"
-        review={review}
-        onOpenChange={vi.fn()}
-        onConfirm={onConfirm}
-      />,
+      <WorkflowDraftTestReviewDialog identity="review:first" {...props} />,
     )
-    const acknowledgement = screen.getByRole("switch", {
-      name: "I reviewed this scenario and its possible effects",
+    const consent = screen.getByRole("switch", {
+      name: "I reviewed this server simulation and its possible effects",
     })
-    await user.click(acknowledgement)
-    expect(acknowledgement).toBeChecked()
+    await user.click(consent)
+    expect(consent).toBeChecked()
 
     rerender(
-      <WorkflowDraftTestReviewDialog
-        open
-        pending={false}
-        identity="draft:second"
-        scenario="Durable event ev_456"
-        review={{
-          ...review,
-          targets: ["tool/message", "workflows/child.yml"],
-        }}
-        onOpenChange={vi.fn()}
-        onConfirm={onConfirm}
-      />,
+      <WorkflowDraftTestReviewDialog identity="review:second" {...props} />,
     )
 
-    expect(acknowledgement).not.toBeChecked()
+    expect(consent).not.toBeChecked()
     expect(
-      screen.getByRole("button", { name: "Confirm and run test" }),
+      screen.getByRole("button", { name: "Confirm and execute" }),
     ).toBeDisabled()
-    expect(screen.getByText(/transitive effects/i)).toBeInTheDocument()
   })
 
-  it("clears acknowledgement synchronously on close before the same identity reopens", async () => {
+  it("clears consent synchronously when closed", async () => {
     const user = userEvent.setup()
     const onOpenChange = vi.fn()
     const props = {
       open: true,
       pending: false,
-      identity: "draft:same",
-      scenario: "Manual inputs",
-      review: {
-        jobCount: 1,
-        stepCount: 1,
-        targets: ["tool/message"],
-        rawOnlyCount: 0,
-      },
+      identity: "review:same",
+      simulation: simulation(),
+      review: review(),
       onOpenChange,
       onConfirm: vi.fn(),
     }
     const { rerender } = render(<WorkflowDraftTestReviewDialog {...props} />)
-    const acknowledgement = screen.getByRole("switch", {
-      name: "I reviewed this scenario and its possible effects",
+    const consent = screen.getByRole("switch", {
+      name: "I reviewed this server simulation and its possible effects",
     })
-    await user.click(acknowledgement)
-    expect(acknowledgement).toBeChecked()
-
+    await user.click(consent)
     await user.click(screen.getByRole("button", { name: "Keep editing" }))
     expect(onOpenChange).toHaveBeenCalledWith(false)
     rerender(<WorkflowDraftTestReviewDialog {...props} />)
-
-    expect(acknowledgement).not.toBeChecked()
-    expect(
-      screen.getByRole("button", { name: "Confirm and run test" }),
-    ).toBeDisabled()
-  })
-
-  it("adds a conservative warning for mixed known and advanced targets", () => {
-    render(
-      <WorkflowDraftTestReviewDialog
-        open
-        pending={false}
-        identity="draft:mixed"
-        scenario="Manual inputs"
-        review={{
-          jobCount: 1,
-          stepCount: 2,
-          targets: ["agent/main", "advanced/custom"],
-          rawOnlyCount: 0,
-        }}
-        onOpenChange={vi.fn()}
-        onConfirm={vi.fn()}
-      />,
-    )
-
-    expect(screen.getByText(/delegated tools/i)).toBeInTheDocument()
-    expect(screen.getByText(/transitive effects/i)).toBeInTheDocument()
-  })
-
-  it.each([
-    ["targetRef", "workflows/changed.yml"],
-    ["yaml", "name: Changed\njobs: {}\n"],
-    ["prompt", "Changed prompt"],
-    ["inputsJSON", '{"ticket":"changed"}'],
-    ["secretsJSON", '{"token":"changed"}'],
-    ["session", "workflow:changed"],
-    ["deliveryJSON", '{"channel":"changed"}'],
-  ] as const)(
-    "binds acknowledgement to the exact manual %s value",
-    (field, value) => {
-      const context = manualReviewContext()
-      expect(
-        workflowDraftTestReviewIdentity({ ...context, [field]: value }),
-      ).not.toBe(workflowDraftTestReviewIdentity(context))
-    },
-  )
-
-  it("binds event acknowledgement to mode and exact event ID without exposing unrelated manual fields", () => {
-    const manual = manualReviewContext()
-    const event: WorkflowDraftTestReviewContext = {
-      ...manual,
-      mode: "event",
-      eventID: "ev_first",
-    }
-    const identity = workflowDraftTestReviewIdentity(event)
-
-    expect(identity).not.toBe(workflowDraftTestReviewIdentity(manual))
-    expect(
-      workflowDraftTestReviewIdentity({ ...event, eventID: "ev_second" }),
-    ).not.toBe(identity)
-    expect(
-      workflowDraftTestReviewIdentity({
-        ...event,
-        secretsJSON: '{"hidden":"changed"}',
-      }),
-    ).toBe(identity)
+    expect(consent).not.toBeChecked()
   })
 })
 
-function manualReviewContext(): WorkflowDraftTestReviewContext {
+function simulation(): WorkflowTriggerSimulation {
   return {
-    targetRef: "workflows/review.yml",
-    yaml: "name: Review\njobs: {}\n",
-    prompt: "Review changes",
-    mode: "manual",
-    inputsJSON: '{"ticket":"123"}',
-    secretsJSON: '{"token":"secret-ref"}',
-    session: "workflow:test",
-    deliveryJSON: '{"channel":"same"}',
-    review: {
-      jobCount: 1,
-      stepCount: 1,
-      targets: ["agent/main"],
-      rawOnlyCount: 0,
+    selected_kind: "manual",
+    effective_kind: "manual",
+    present: true,
+    matched: true,
+    executable: true,
+    reason: "matched",
+    context_summary: {
+      input_count: 1,
+      secret_count: 1,
+      has_event: false,
+      has_session: false,
+      has_delivery: false,
     },
+  }
+}
+
+function review(): WorkflowTriggerSimulationReview {
+  return {
+    job_count: 1,
+    step_count: 2,
+    targets: ["agent/main", "mcp/github/create_issue"],
+    effects: [
+      {
+        kind: "external_state_change_possible",
+        target: "mcp/github/create_issue",
+        occurrences: 1,
+      },
+    ],
+    complete: true,
+    validation: {
+      valid: true,
+      issue_count: 0,
+      issues: [],
+      truncated: false,
+    },
+    limits: [],
   }
 }

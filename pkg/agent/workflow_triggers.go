@@ -70,18 +70,11 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 			)
 			continue
 		}
-		match, ok, err := workflows.MatchCommandMessage(workflow, def.Ref, event)
-		if err != nil {
-			logger.WarnCF(
-				"workflow",
-				"Workflow command trigger evaluation failed",
-				map[string]any{"ref": def.Ref, "error": err.Error()},
-			)
-			continue
-		}
-		if !ok {
-			match, ok, err = workflows.MatchChannelMessage(workflow, def.Ref, event)
-		}
+		inboundMatch, ok, err := workflows.MatchInboundMessageTrigger(
+			workflow,
+			def.Ref,
+			event,
+		)
 		if err != nil {
 			logger.WarnCF(
 				"workflow",
@@ -90,9 +83,10 @@ func (al *AgentLoop) handleWorkflowTriggers(ctx context.Context, msg bus.Inbound
 			)
 			continue
 		}
-		if !ok {
+		if !ok || inboundMatch == nil || inboundMatch.Match == nil {
 			continue
 		}
+		match := inboundMatch.Match
 		if !match.Passthrough {
 			consume = true
 		}

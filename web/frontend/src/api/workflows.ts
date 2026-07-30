@@ -109,6 +109,7 @@ export interface WorkflowDevelopmentTestReconciliation {
     | "draft_test_snapshot_not_recorded"
     | "draft_test_run_unavailable"
     | "draft_test_terminal_snapshot_not_recorded"
+    | "draft_test_response_truncated"
   run_id: string
   message: string
 }
@@ -490,7 +491,7 @@ export interface WorkflowRunResult {
 }
 
 export interface WorkflowDevelopmentTestResult {
-  session: WorkflowDevelopmentSession
+  session?: WorkflowDevelopmentSession
   result?: WorkflowRunResult
   reconciliation?: WorkflowDevelopmentTestReconciliation
   error?: string
@@ -936,6 +937,139 @@ export interface WorkflowDevelopmentPublishRequest {
 }
 
 export type WorkflowDeliveryPayload = Record<string, unknown>
+
+export interface WorkflowTriggerSimulationRequestBase {
+  session_id: string
+  expected_session_revision: string
+  expected_draft_revision: string
+  prompt: string
+  target_ref: string
+  yaml: string
+}
+
+export interface WorkflowTriggerInvocationScenario {
+  inputs?: Record<string, unknown>
+  secrets?: Record<string, string>
+  session?: string
+  delivery?: WorkflowDeliveryPayload
+}
+
+export interface WorkflowTriggerMessageEnvelope {
+  channel?: string
+  account?: string
+  chat_id?: string
+  chat_type?: string
+  topic_id?: string
+  space_id?: string
+  space_type?: string
+  sender_id?: string
+  sender_username?: string
+  sender_name?: string
+  message_id?: string
+  reply_to_message_id?: string
+  mentioned?: boolean
+  text?: string
+  media?: string[]
+  reply_handles?: Record<string, string>
+  raw?: Record<string, string>
+}
+
+export interface WorkflowTriggerRuntimeEventEnvelope {
+  id: string
+  kind: string
+  time: string
+  source: {
+    component: string
+    name?: string
+  }
+  scope?: Record<string, unknown>
+  correlation?: Record<string, unknown>
+  severity?: string
+  payload?: unknown
+  attrs?: Record<string, unknown>
+}
+
+export type WorkflowTriggerSimulationRequest =
+  WorkflowTriggerSimulationRequestBase &
+    (
+      | {
+          trigger: { type: "manual" }
+          scenario: WorkflowTriggerInvocationScenario
+        }
+      | {
+          trigger: { type: "workflow_call" }
+          scenario: WorkflowTriggerInvocationScenario
+        }
+      | {
+          trigger: { type: "schedule"; schedule_index: number }
+          scenario: { scheduled_at: string }
+        }
+      | {
+          trigger: { type: "channel_message" }
+          scenario: { message: WorkflowTriggerMessageEnvelope }
+        }
+      | {
+          trigger: { type: "command" }
+          scenario: { message: WorkflowTriggerMessageEnvelope }
+        }
+      | {
+          trigger: { type: "runtime_event" }
+          scenario: { event: WorkflowTriggerRuntimeEventEnvelope }
+        }
+      | {
+          trigger: { type: "event" }
+          scenario: { event_id: string }
+        }
+    )
+
+export type WorkflowTriggerSimulationReason =
+  | "matched"
+  | "invalid_workflow"
+  | "trigger_absent"
+  | "schedule_index_required"
+  | "schedule_index_out_of_range"
+  | "invalid_scenario"
+  | "not_matched"
+  | "shadowed_by_command"
+  | "runtime_feedback_suppressed"
+  | "trigger_evaluation_failed"
+  | "review_incomplete"
+
+export interface WorkflowTriggerSimulationContextSummary {
+  input_count: number
+  secret_count: number
+  has_session: boolean
+  has_delivery: boolean
+  has_event: boolean
+}
+
+export interface WorkflowTriggerSimulation {
+  selected_kind: WorkflowTriggerKind
+  effective_kind?: WorkflowTriggerKind
+  schedule_index?: number
+  present: boolean
+  matched: boolean
+  executable: boolean
+  reason: WorkflowTriggerSimulationReason
+  passthrough?: boolean
+  context_summary: WorkflowTriggerSimulationContextSummary
+}
+
+export interface WorkflowTriggerSimulationReview {
+  job_count: number
+  step_count: number
+  targets: string[]
+  effects: WorkflowDefinitionInspectionEffect[]
+  complete: boolean
+  validation: WorkflowDefinitionInspectionValidation
+  limits: WorkflowDefinitionInspection["limits"]
+}
+
+export interface WorkflowTriggerSimulationResponse {
+  simulation: WorkflowTriggerSimulation
+  review: WorkflowTriggerSimulationReview
+  review_token?: string
+}
 
 export class WorkflowAPIError extends Error {
   readonly status: number
@@ -1445,6 +1579,129 @@ export async function testWorkflowDevelopment(payload: {
     // Fall through to the normal error message path.
   }
   throw new Error(apiErrorMessage(text, res.status, res.statusText))
+}
+
+export function workflowTriggerSimulationRequestBody(
+  request: WorkflowTriggerSimulationRequest,
+): string {
+  const base = {
+    session_id: request.session_id,
+    expected_session_revision: request.expected_session_revision,
+    expected_draft_revision: request.expected_draft_revision,
+    prompt: request.prompt,
+    target_ref: request.target_ref,
+    yaml: request.yaml,
+  }
+  switch (request.trigger.type) {
+    case "manual":
+    case "workflow_call":
+      return JSON.stringify({
+        ...base,
+        trigger: { type: request.trigger.type },
+        scenario: workflowTriggerInvocationScenarioBody(
+          request.scenario as WorkflowTriggerInvocationScenario,
+        ),
+      })
+    case "schedule":
+      return JSON.stringify({
+        ...base,
+        trigger: {
+          type: request.trigger.type,
+          schedule_index: request.trigger.schedule_index,
+        },
+        scenario: {
+          scheduled_at: (request.scenario as { scheduled_at: string })
+            .scheduled_at,
+        },
+      })
+    case "channel_message":
+    case "command":
+      return JSON.stringify({
+        ...base,
+        trigger: { type: request.trigger.type },
+        scenario: {
+          message: (
+            request.scenario as { message: WorkflowTriggerMessageEnvelope }
+          ).message,
+        },
+      })
+    case "runtime_event":
+      return JSON.stringify({
+        ...base,
+        trigger: { type: request.trigger.type },
+        scenario: {
+          event: (
+            request.scenario as { event: WorkflowTriggerRuntimeEventEnvelope }
+          ).event,
+        },
+      })
+    case "event":
+      return JSON.stringify({
+        ...base,
+        trigger: { type: request.trigger.type },
+        scenario: {
+          event_id: (request.scenario as { event_id: string }).event_id,
+        },
+      })
+  }
+}
+
+export function workflowTriggerSimulationIdentity(
+  request: WorkflowTriggerSimulationRequest,
+  response?: WorkflowTriggerSimulationResponse,
+): string {
+  const requestBody = workflowTriggerSimulationRequestBody(request)
+  if (response == null) {
+    return requestBody
+  }
+  return JSON.stringify([
+    requestBody,
+    response.review_token ?? "",
+    response.simulation,
+    response.review,
+  ])
+}
+
+export async function simulateWorkflowDevelopmentTrigger(
+  payload: WorkflowTriggerSimulationRequest,
+  signal?: AbortSignal,
+): Promise<WorkflowTriggerSimulationResponse> {
+  const res = await launcherFetch(
+    "/api/workflows/development/triggers/simulate",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: workflowTriggerSimulationRequestBody(payload),
+      signal,
+    },
+  )
+  const value = await workflowTriggerSimulationResponseValue(
+    res,
+    "Workflow trigger simulation is unavailable.",
+  )
+  return parseWorkflowTriggerSimulationResponse(value)
+}
+
+export async function executeWorkflowDevelopmentTrigger(
+  payload: WorkflowTriggerSimulationRequest,
+  reviewToken: string,
+  signal?: AbortSignal,
+): Promise<WorkflowDevelopmentTestResult> {
+  const requestValue = JSON.parse(
+    workflowTriggerSimulationRequestBody(payload),
+  ) as Record<string, unknown>
+  const res = await launcherFetch("/api/workflows/development/test/execute", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...requestValue, review_token: reviewToken }),
+    signal,
+  })
+  const value = await workflowTriggerSimulationResponseValue(
+    res,
+    "Workflow trigger execution is unavailable.",
+    202,
+  )
+  return parseWorkflowTriggerExecutionResult(value, payload.session_id)
 }
 
 export async function publishWorkflowDevelopment(
@@ -4324,6 +4581,642 @@ function consumeWorkflowInspectionBudget(
   if (budget.remaining < 0) {
     invalid()
   }
+}
+
+const workflowTriggerSimulationReasons =
+  new Set<WorkflowTriggerSimulationReason>([
+    "matched",
+    "invalid_workflow",
+    "trigger_absent",
+    "schedule_index_required",
+    "schedule_index_out_of_range",
+    "invalid_scenario",
+    "not_matched",
+    "shadowed_by_command",
+    "runtime_feedback_suppressed",
+    "trigger_evaluation_failed",
+    "review_incomplete",
+  ])
+
+function workflowTriggerInvocationScenarioBody(
+  scenario: WorkflowTriggerInvocationScenario,
+): WorkflowTriggerInvocationScenario {
+  return {
+    ...(scenario.inputs === undefined ? {} : { inputs: scenario.inputs }),
+    ...(scenario.secrets === undefined ? {} : { secrets: scenario.secrets }),
+    ...(scenario.session === undefined ? {} : { session: scenario.session }),
+    ...(scenario.delivery === undefined ? {} : { delivery: scenario.delivery }),
+  }
+}
+
+async function workflowTriggerSimulationResponseValue(
+  response: Response,
+  unavailableMessage: string,
+  expectedStatus = 200,
+): Promise<unknown> {
+  let responseText: string
+  try {
+    responseText = await boundedWorkflowResponseText(response, 1 << 20)
+  } catch {
+    throw new WorkflowAPIError(unavailableMessage, response.status)
+  }
+  if (response.status !== expectedStatus) {
+    const details = apiErrorDetails(
+      responseText,
+      response.status,
+      response.statusText,
+    )
+    throw new WorkflowAPIError(
+      details.message,
+      response.status,
+      details.candidateValidation,
+    )
+  }
+  const contentType = response.headers.get("Content-Type")?.toLowerCase() ?? ""
+  if (!contentType.startsWith("application/json")) {
+    throw new WorkflowAPIError(
+      "Workflow trigger service returned an invalid response.",
+      502,
+    )
+  }
+  try {
+    return JSON.parse(responseText) as unknown
+  } catch {
+    throw new WorkflowAPIError(
+      "Workflow trigger service returned an invalid response.",
+      502,
+    )
+  }
+}
+
+function parseWorkflowTriggerSimulationResponse(
+  value: unknown,
+): WorkflowTriggerSimulationResponse {
+  const invalid = (): never => {
+    throw new WorkflowAPIError(
+      "Workflow trigger simulation returned an invalid response.",
+      502,
+    )
+  }
+  const root = inspectionObject(
+    value,
+    ["simulation", "review", "review_token"],
+    invalid,
+  )
+  const simulationValue = inspectionObject(
+    root.simulation,
+    [
+      "selected_kind",
+      "effective_kind",
+      "schedule_index",
+      "present",
+      "matched",
+      "executable",
+      "reason",
+      "passthrough",
+      "context_summary",
+    ],
+    invalid,
+  )
+  const selectedKind = inspectionEnum(
+    simulationValue.selected_kind,
+    new Set(workflowTriggerKinds),
+    invalid,
+  )
+  const present = inspectionBoolean(simulationValue.present, invalid)
+  const matched = inspectionBoolean(simulationValue.matched, invalid)
+  const executable = inspectionBoolean(simulationValue.executable, invalid)
+  const reason = inspectionEnum(
+    simulationValue.reason,
+    workflowTriggerSimulationReasons,
+    invalid,
+  )
+  const contextValue = inspectionObject(
+    simulationValue.context_summary,
+    ["input_count", "secret_count", "has_event", "has_session", "has_delivery"],
+    invalid,
+  )
+  if (Object.keys(contextValue).length !== 5) {
+    return invalid()
+  }
+  const simulation: WorkflowTriggerSimulation = {
+    selected_kind: selectedKind,
+    present,
+    matched,
+    executable,
+    reason,
+    context_summary: {
+      input_count: inspectionInteger(contextValue.input_count, invalid),
+      secret_count: inspectionInteger(contextValue.secret_count, invalid),
+      has_event: inspectionBoolean(contextValue.has_event, invalid),
+      has_session: inspectionBoolean(contextValue.has_session, invalid),
+      has_delivery: inspectionBoolean(contextValue.has_delivery, invalid),
+    },
+  }
+  if (hasInspectionField(simulationValue, "effective_kind")) {
+    simulation.effective_kind = inspectionEnum(
+      simulationValue.effective_kind,
+      new Set(workflowTriggerKinds),
+      invalid,
+    )
+  }
+  if (hasInspectionField(simulationValue, "schedule_index")) {
+    simulation.schedule_index = inspectionInteger(
+      simulationValue.schedule_index,
+      invalid,
+    )
+  }
+  if (hasInspectionField(simulationValue, "passthrough")) {
+    simulation.passthrough = inspectionBoolean(
+      simulationValue.passthrough,
+      invalid,
+    )
+  }
+
+  const reviewValue = inspectionObject(
+    root.review,
+    [
+      "job_count",
+      "step_count",
+      "targets",
+      "effects",
+      "complete",
+      "validation",
+      "limits",
+    ],
+    invalid,
+  )
+  let previousTarget: string | undefined
+  const targets = inspectionArray(reviewValue.targets, 4096, invalid).map(
+    (targetValue) => {
+      const target = inspectionString(targetValue, invalid, {
+        maximumBytes: 1024,
+      })
+      if (
+        previousTarget != null &&
+        compareInspectionUTF8(previousTarget, target) >= 0
+      ) {
+        return invalid()
+      }
+      previousTarget = target
+      return target
+    },
+  )
+  let previousEffectKey: string | undefined
+  const effects = inspectionArray(reviewValue.effects, 4096, invalid).map(
+    (effectValue) => {
+      const effect = inspectionObject(
+        effectValue,
+        ["kind", "target", "occurrences"],
+        invalid,
+      )
+      const parsed: WorkflowDefinitionInspectionEffect = {
+        kind: inspectionEnum(
+          effect.kind,
+          workflowInspectionEffectKinds,
+          invalid,
+        ),
+        occurrences: inspectionPositiveInteger(effect.occurrences, invalid),
+      }
+      if (hasInspectionField(effect, "target")) {
+        parsed.target = inspectionString(effect.target, invalid, {
+          maximumBytes: 1024,
+        })
+      }
+      const key = `${parsed.kind}\u0000${parsed.target ?? ""}`
+      if (
+        previousEffectKey != null &&
+        compareInspectionUTF8(previousEffectKey, key) >= 0
+      ) {
+        return invalid()
+      }
+      previousEffectKey = key
+      return parsed
+    },
+  )
+  const validationValue = inspectionObject(
+    reviewValue.validation,
+    ["valid", "issue_count", "issues", "truncated"],
+    invalid,
+  )
+  const issues = inspectionArray(validationValue.issues, 128, invalid).map(
+    (issueValue) => {
+      const issue = inspectionObject(issueValue, ["code", "scope"], invalid)
+      return {
+        code: inspectionEnum(
+          issue.code,
+          workflowInspectionValidationCodes,
+          invalid,
+        ),
+        scope: inspectionEnum(
+          issue.scope,
+          workflowInspectionValidationScopes,
+          invalid,
+        ),
+      }
+    },
+  )
+  const issueCount = inspectionInteger(validationValue.issue_count, invalid)
+  const truncated = inspectionBoolean(validationValue.truncated, invalid)
+  const valid = inspectionBoolean(validationValue.valid, invalid)
+  if (
+    issueCount < issues.length ||
+    (!truncated && issueCount !== issues.length) ||
+    valid !== (issueCount === 0)
+  ) {
+    return invalid()
+  }
+  let previousLimit: string | undefined
+  const limits = inspectionArray(reviewValue.limits, 7, invalid).map(
+    (limitValue) => {
+      const limit = inspectionEnum(
+        limitValue,
+        workflowInspectionLimitKinds,
+        invalid,
+      )
+      if (
+        previousLimit != null &&
+        compareInspectionUTF8(previousLimit, limit) >= 0
+      ) {
+        return invalid()
+      }
+      previousLimit = limit
+      return limit
+    },
+  )
+  const complete = inspectionBoolean(reviewValue.complete, invalid)
+  if (
+    complete !== (limits.length === 0) ||
+    truncated !== limits.includes("validation_issues_truncated")
+  ) {
+    return invalid()
+  }
+  const review: WorkflowTriggerSimulationReview = {
+    job_count: inspectionInteger(reviewValue.job_count, invalid),
+    step_count: inspectionInteger(reviewValue.step_count, invalid),
+    targets,
+    effects,
+    complete,
+    validation: {
+      valid,
+      issue_count: issueCount,
+      issues,
+      truncated,
+    },
+    limits,
+  }
+  const hasToken = hasInspectionField(root, "review_token")
+  const reviewToken = hasToken
+    ? inspectionString(root.review_token, invalid, { maximumBytes: 4096 })
+    : undefined
+  if (
+    hasToken !== executable ||
+    executable !==
+      (present && matched && reason === "matched" && complete && valid)
+  ) {
+    return invalid()
+  }
+  return {
+    simulation,
+    review,
+    ...(reviewToken === undefined ? {} : { review_token: reviewToken }),
+  }
+}
+
+function parseWorkflowTriggerExecutionResult(
+  value: unknown,
+  expectedSessionID: string,
+): WorkflowDevelopmentTestResult {
+  const invalid = (): never => {
+    throw new WorkflowAPIError(
+      "Workflow trigger execution returned an invalid response.",
+      502,
+    )
+  }
+  const root = inspectionObject(
+    value,
+    ["session", "result", "reconciliation"],
+    invalid,
+  )
+  let parsedSession: WorkflowDevelopmentSession | undefined
+  if (hasInspectionField(root, "session")) {
+    const session = inspectionObject(
+      root.session,
+      [
+        "id",
+        "session_revision",
+        "draft_revision",
+        "base_target_revision",
+        "reason",
+        "status",
+        "prompt",
+        "source_workflow_ref",
+        "target_workflow_ref",
+        "target_picoclaw_version",
+        "target_git_commit",
+        "yaml",
+        "validation",
+        "last_test",
+        "created_at",
+        "updated_at",
+      ],
+      invalid,
+    )
+    const requiredSessionFields = [
+      "id",
+      "session_revision",
+      "draft_revision",
+      "base_target_revision",
+      "reason",
+      "status",
+      "target_workflow_ref",
+      "yaml",
+      "created_at",
+      "updated_at",
+    ] as const
+    if (
+      requiredSessionFields.some((field) => !hasInspectionField(session, field))
+    ) {
+      return invalid()
+    }
+    parsedSession = parseWorkflowTriggerExecutionSession(
+      session,
+      expectedSessionID,
+      invalid,
+    )
+  }
+  const resultValue = inspectionObject(
+    root.result,
+    ["run_id", "status"],
+    invalid,
+  )
+  if (
+    !hasInspectionField(resultValue, "run_id") ||
+    !hasInspectionField(resultValue, "status")
+  ) {
+    return invalid()
+  }
+  const runID = inspectionString(resultValue.run_id, invalid, {
+    maximumBytes: maximumWorkflowRunIDBytes,
+  })
+  if (!validWorkflowRunID(runID) || resultValue.status !== "running") {
+    return invalid()
+  }
+  const result: WorkflowRunResult = {
+    run_id: runID,
+    status: "running",
+  }
+  let reconciliation: WorkflowDevelopmentTestReconciliation | undefined
+  if (hasInspectionField(root, "reconciliation")) {
+    const value = inspectionObject(
+      root.reconciliation,
+      ["state", "reason", "run_id", "message"],
+      invalid,
+    )
+    if (
+      value.state !== "degraded" ||
+      ![
+        "draft_test_snapshot_not_recorded",
+        "draft_test_run_unavailable",
+        "draft_test_terminal_snapshot_not_recorded",
+        "draft_test_response_truncated",
+      ].includes(String(value.reason))
+    ) {
+      return invalid()
+    }
+    reconciliation = {
+      state: "degraded",
+      reason: value.reason as WorkflowDevelopmentTestReconciliation["reason"],
+      run_id: inspectionString(value.run_id, invalid, {
+        maximumBytes: maximumWorkflowRunIDBytes,
+      }),
+      message: inspectionString(value.message, invalid, {
+        maximumBytes: 16 * 1024,
+      }),
+    }
+    if (
+      reconciliation.run_id !== runID ||
+      !validWorkflowRunID(reconciliation.run_id)
+    ) {
+      return invalid()
+    }
+  }
+  if (
+    parsedSession == null &&
+    reconciliation?.reason !== "draft_test_response_truncated"
+  ) {
+    return invalid()
+  }
+  return {
+    ...(parsedSession === undefined ? {} : { session: parsedSession }),
+    result,
+    ...(reconciliation === undefined ? {} : { reconciliation }),
+  }
+}
+
+function parseWorkflowTriggerExecutionSession(
+  session: Record<string, unknown>,
+  expectedSessionID: string,
+  invalid: () => never,
+): WorkflowDevelopmentSession {
+  const id = inspectionString(session.id, invalid, { maximumBytes: 4096 })
+  if (id !== expectedSessionID) {
+    return invalid()
+  }
+  const parsed: WorkflowDevelopmentSession = {
+    id,
+    session_revision: inspectionString(session.session_revision, invalid, {
+      maximumBytes: 4096,
+    }),
+    draft_revision: inspectionString(session.draft_revision, invalid, {
+      maximumBytes: 4096,
+    }),
+    base_target_revision: inspectionString(
+      session.base_target_revision,
+      invalid,
+      { maximumBytes: 4096 },
+    ),
+    reason: inspectionEnum(
+      session.reason,
+      new Set(["new", "edit", "version_revalidation"]),
+      invalid,
+    ),
+    status: inspectionEnum(
+      session.status,
+      new Set([
+        "planning",
+        "editing",
+        "validating",
+        "testing",
+        "ready_to_publish",
+      ]),
+      invalid,
+    ),
+    target_workflow_ref: inspectionString(
+      session.target_workflow_ref,
+      invalid,
+      { maximumBytes: 4096 },
+    ),
+    yaml: workflowJobEditorString(session.yaml, invalid, {
+      allowEmpty: true,
+      maximumBytes: 1 << 20,
+      allowFormattingControls: true,
+    }),
+    created_at: workflowTriggerExecutionTimestamp(session.created_at, invalid),
+    updated_at: workflowTriggerExecutionTimestamp(session.updated_at, invalid),
+  }
+  if (hasInspectionField(session, "prompt")) {
+    parsed.prompt = workflowJobEditorString(session.prompt, invalid, {
+      allowEmpty: true,
+      maximumBytes: 64 << 10,
+      allowFormattingControls: true,
+    })
+  }
+  if (hasInspectionField(session, "source_workflow_ref")) {
+    parsed.source_workflow_ref = inspectionString(
+      session.source_workflow_ref,
+      invalid,
+      { maximumBytes: 4096 },
+    )
+  }
+  if (hasInspectionField(session, "target_picoclaw_version")) {
+    parsed.target_picoclaw_version = inspectionString(
+      session.target_picoclaw_version,
+      invalid,
+      { maximumBytes: 4096 },
+    )
+  }
+  if (hasInspectionField(session, "target_git_commit")) {
+    parsed.target_git_commit = inspectionString(
+      session.target_git_commit,
+      invalid,
+      { maximumBytes: 4096 },
+    )
+  }
+  if (hasInspectionField(session, "validation")) {
+    const validation = parseWorkflowJobEditorValidation(
+      session.validation,
+      invalid,
+    )
+    validation.validated_at = workflowTriggerExecutionTimestamp(
+      validation.validated_at,
+      invalid,
+    )
+    parsed.validation = validation
+  }
+  if (hasInspectionField(session, "last_test")) {
+    parsed.last_test = parseWorkflowTriggerExecutionLastTest(
+      session.last_test,
+      invalid,
+    )
+  }
+  return parsed
+}
+
+function parseWorkflowTriggerExecutionLastTest(
+  value: unknown,
+  invalid: () => never,
+): WorkflowDevelopmentTestSnapshot {
+  const snapshot = inspectionObject(
+    value,
+    [
+      "draft_key",
+      "draft_revision",
+      "target_workflow_ref",
+      "run_id",
+      "event_id",
+      "status",
+      "error",
+      "tested_at",
+    ],
+    invalid,
+  )
+  const required = [
+    "draft_key",
+    "target_workflow_ref",
+    "status",
+    "tested_at",
+  ] as const
+  if (required.some((field) => !hasInspectionField(snapshot, field))) {
+    return invalid()
+  }
+  const parsed: WorkflowDevelopmentTestSnapshot = {
+    draft_key: workflowTriggerExecutionDraftKey(snapshot.draft_key, invalid),
+    target_workflow_ref: inspectionString(
+      snapshot.target_workflow_ref,
+      invalid,
+      { maximumBytes: 4096 },
+    ),
+    status: inspectionString(snapshot.status, invalid, { maximumBytes: 64 }),
+    tested_at: workflowTriggerExecutionTimestamp(snapshot.tested_at, invalid),
+  }
+  if (hasInspectionField(snapshot, "draft_revision")) {
+    parsed.draft_revision = inspectionString(snapshot.draft_revision, invalid, {
+      maximumBytes: 4096,
+    })
+  }
+  if (hasInspectionField(snapshot, "run_id")) {
+    const runID = inspectionString(snapshot.run_id, invalid, {
+      maximumBytes: maximumWorkflowRunIDBytes,
+    })
+    if (!validWorkflowRunID(runID)) {
+      return invalid()
+    }
+    parsed.run_id = runID
+  }
+  if (hasInspectionField(snapshot, "event_id")) {
+    parsed.event_id = inspectionString(snapshot.event_id, invalid, {
+      maximumBytes: 4096,
+    })
+  }
+  if (hasInspectionField(snapshot, "error")) {
+    parsed.error = workflowJobEditorString(snapshot.error, invalid, {
+      allowEmpty: true,
+      maximumBytes: 16 << 10,
+      allowFormattingControls: true,
+    })
+  }
+  return parsed
+}
+
+function workflowTriggerExecutionDraftKey(
+  value: unknown,
+  invalid: () => never,
+) {
+  if (typeof value !== "string") {
+    return invalid()
+  }
+  const separator = value.indexOf("\u0000")
+  if (
+    separator <= 0 ||
+    separator !== value.lastIndexOf("\u0000") ||
+    separator === value.length - 1 ||
+    new TextEncoder().encode(value).byteLength > 1 << 20
+  ) {
+    return invalid()
+  }
+  inspectionString(value.slice(0, separator), invalid, { maximumBytes: 4096 })
+  workflowJobEditorString(value.slice(separator + 1), invalid, {
+    maximumBytes: 1 << 20,
+    allowFormattingControls: true,
+  })
+  return value
+}
+
+function workflowTriggerExecutionTimestamp(
+  value: unknown,
+  invalid: () => never,
+) {
+  const timestamp = inspectionString(value, invalid, { maximumBytes: 128 })
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(
+      timestamp,
+    ) ||
+    Number.isNaN(Date.parse(timestamp))
+  ) {
+    return invalid()
+  }
+  return timestamp
 }
 
 function inspectionObject(

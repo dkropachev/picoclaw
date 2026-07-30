@@ -46,6 +46,7 @@ export interface WorkflowTriggerInspectionState {
   yaml: string
   status: "loading" | "ready" | "error"
   eventTriggerPresent: boolean
+  inspection?: WorkflowTriggersInspection
   reason?: string
 }
 
@@ -2937,6 +2938,7 @@ function inspectionState(
     yaml,
     status: "ready",
     eventTriggerPresent: inspection.triggers.event.present,
+    inspection,
   }
 }
 

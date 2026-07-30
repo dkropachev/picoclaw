@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/web/backend/launcherconfig"
@@ -11,31 +12,38 @@ import (
 
 // Handler serves HTTP API requests.
 type Handler struct {
-	configPath                 string
-	serverPort                 int
-	serverPublic               bool
-	serverPublicExplicit       bool
-	serverHostInput            string
-	serverHostExplicit         bool
-	serverCIDRs                []string
-	serverAllowLocalhostBypass bool
-	serverTrustedProxyCIDRs    []string
-	debug                      bool
-	oauthMu                    sync.Mutex
-	oauthFlows                 map[string]*oauthFlow
-	oauthState                 map[string]string
-	weixinMu                   sync.Mutex
-	weixinFlows                map[string]*weixinFlow
-	wecomMu                    sync.Mutex
-	wecomFlows                 map[string]*wecomFlow
-	mcpMu                      sync.Mutex
-	mcpOAuthMu                 sync.Mutex
-	mcpOAuthFlows              map[string]*mcpOAuthFlow
-	mcpOAuthState              map[string]string
-	mcpOAuthLatestByServer     map[string]string
-	configMutationMu           sync.Mutex
-	workflowDevelopmentMu      sync.Mutex
-	saveToolStateConfig        func(string, *config.Config, string) (string, error)
+	configPath                  string
+	serverPort                  int
+	serverPublic                bool
+	serverPublicExplicit        bool
+	serverHostInput             string
+	serverHostExplicit          bool
+	serverCIDRs                 []string
+	serverAllowLocalhostBypass  bool
+	serverTrustedProxyCIDRs     []string
+	debug                       bool
+	oauthMu                     sync.Mutex
+	oauthFlows                  map[string]*oauthFlow
+	oauthState                  map[string]string
+	weixinMu                    sync.Mutex
+	weixinFlows                 map[string]*weixinFlow
+	wecomMu                     sync.Mutex
+	wecomFlows                  map[string]*wecomFlow
+	mcpMu                       sync.Mutex
+	mcpOAuthMu                  sync.Mutex
+	mcpOAuthFlows               map[string]*mcpOAuthFlow
+	mcpOAuthState               map[string]string
+	mcpOAuthLatestByServer      map[string]string
+	configMutationMu            sync.Mutex
+	workflowDevelopmentMu       sync.Mutex
+	workflowTriggerReviewOnce   sync.Once
+	workflowTriggerReviewKey    [32]byte
+	workflowTriggerReviewErr    error
+	workflowTriggerReviewNow    func() time.Time
+	workflowTriggerReviewUseMu  sync.Mutex
+	workflowTriggerReviewUsed   map[[32]byte]int64
+	workflowDevelopmentTestDone func()
+	saveToolStateConfig         func(string, *config.Config, string) (string, error)
 }
 
 // NewHandler creates an instance of the API handler.
@@ -51,6 +59,8 @@ func NewHandler(configPath string) *Handler {
 		mcpOAuthFlows:              make(map[string]*mcpOAuthFlow),
 		mcpOAuthState:              make(map[string]string),
 		mcpOAuthLatestByServer:     make(map[string]string),
+		workflowTriggerReviewNow:   time.Now,
+		workflowTriggerReviewUsed:  make(map[[32]byte]int64),
 		saveToolStateConfig:        config.SaveConfigIfRevision,
 	}
 }

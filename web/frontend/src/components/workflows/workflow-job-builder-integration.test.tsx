@@ -20,11 +20,13 @@ import { WorkflowsPage } from "@/components/workflows/workflows-page"
 const workflowMocks = vi.hoisted(() => ({
   checkWorkflowDependencies: vi.fn(),
   getWorkflowDevelopment: vi.fn(),
+  executeWorkflowDevelopmentTrigger: vi.fn(),
   inspectWorkflowJobs: vi.fn(),
   inspectWorkflowTriggers: vi.fn(),
   listWorkflowRuns: vi.fn(),
   listWorkflowTemplates: vi.fn(),
   listWorkflows: vi.fn(),
+  simulateWorkflowDevelopmentTrigger: vi.fn(),
   testWorkflowDevelopment: vi.fn(),
 }))
 
@@ -103,7 +105,17 @@ describe("WorkflowsPage jobs and actions integration", () => {
       dependencies: [],
       structural_issues: [],
     })
-    workflowMocks.testWorkflowDevelopment.mockResolvedValue({
+    workflowMocks.simulateWorkflowDevelopmentTrigger.mockImplementation(
+      async (request) => {
+        const scenario = request.scenario as {
+          secrets?: Record<string, string>
+        }
+        return triggerSimulationResponse(
+          Object.keys(scenario.secrets ?? {}).length,
+        )
+      },
+    )
+    workflowMocks.executeWorkflowDevelopmentTrigger.mockResolvedValue({
       session,
       result: { run_id: "wr_reviewed", status: "running" },
     })
@@ -134,7 +146,7 @@ describe("WorkflowsPage jobs and actions integration", () => {
       "Ask AI",
       "Scaffold",
       "Validate",
-      "Test Draft",
+      "Review & execute",
       "Publish",
       "Discard",
     ]) {
@@ -147,7 +159,7 @@ describe("WorkflowsPage jobs and actions integration", () => {
     )
   })
 
-  it("never starts a test before exact scenario review and hides secret values", async () => {
+  it("executes only after an exact server review and hides scenario values", async () => {
     const user = userEvent.setup()
     renderWorkflowsPage()
     const inputs = await screen.findByLabelText("Inputs JSON")
@@ -167,54 +179,81 @@ describe("WorkflowsPage jobs and actions integration", () => {
       },
     })
 
-    const testDraft = screen.getByRole("button", { name: "Test Draft" })
-    await waitFor(() => expect(testDraft).toBeEnabled())
-    await user.click(testDraft)
+    const execute = screen.getByRole("button", { name: "Review & execute" })
+    await waitFor(() => expect(execute).toBeEnabled())
+    await user.click(execute)
 
     expect(workflowMocks.testWorkflowDevelopment).not.toHaveBeenCalled()
-    const dialog = screen.getByRole("dialog", { name: "Review draft test" })
-    expect(dialog).toHaveTextContent('{"ticket":"PIC-42"}')
-    expect(dialog).toHaveTextContent("workflow:review")
-    expect(dialog).toHaveTextContent('{"channel":"engineering"}')
-    expect(dialog).toHaveTextContent("2 configured: github_token, api_key")
+    expect(
+      workflowMocks.executeWorkflowDevelopmentTrigger,
+    ).not.toHaveBeenCalled()
+    const dialog = screen.getByRole("dialog", {
+      name: "Review trigger execution",
+    })
+    expect(dialog).not.toHaveTextContent('{"ticket":"PIC-42"}')
+    expect(dialog).not.toHaveTextContent("workflow:review")
+    expect(dialog).not.toHaveTextContent('{"channel":"engineering"}')
+    expect(dialog).not.toHaveTextContent("github_token")
+    expect(dialog).not.toHaveTextContent("api_key")
+    expect(dialog).toHaveTextContent("Provided secrets")
+    expect(dialog).toHaveTextContent("2")
     expect(dialog).not.toHaveTextContent("super-secret-value")
     expect(dialog).not.toHaveTextContent("another-secret")
 
     await user.click(
       within(dialog).getByRole("switch", {
-        name: "I reviewed this scenario and its possible effects",
+        name: "I reviewed this server simulation and its possible effects",
       }),
     )
     fireEvent.change(inputs, {
       target: { value: '{"ticket":"PIC-43"}' },
     })
-    const confirm = within(dialog).getByRole("button", {
-      name: "Confirm and run test",
-    })
-    expect(confirm).toBeDisabled()
-    expect(workflowMocks.testWorkflowDevelopment).not.toHaveBeenCalled()
+    expect(
+      screen.queryByRole("dialog", { name: "Review trigger execution" }),
+    ).not.toBeInTheDocument()
+    expect(
+      workflowMocks.executeWorkflowDevelopmentTrigger,
+    ).not.toHaveBeenCalled()
 
+    await waitFor(() => expect(execute).toBeEnabled())
+    await user.click(execute)
+    const currentDialog = screen.getByRole("dialog", {
+      name: "Review trigger execution",
+    })
     await user.click(
-      within(dialog).getByRole("switch", {
-        name: "I reviewed this scenario and its possible effects",
+      within(currentDialog).getByRole("switch", {
+        name: "I reviewed this server simulation and its possible effects",
       }),
     )
-    await user.click(confirm)
+    await user.click(
+      within(currentDialog).getByRole("button", {
+        name: "Confirm and execute",
+      }),
+    )
 
     await waitFor(() =>
-      expect(workflowMocks.testWorkflowDevelopment).toHaveBeenCalledWith(
+      expect(
+        workflowMocks.executeWorkflowDevelopmentTrigger,
+      ).toHaveBeenCalledWith(
         expect.objectContaining({
-          inputs: { ticket: "PIC-43" },
-          secrets: {
-            github_token: "super-secret-value",
-            api_key: "another-secret",
-          },
-          session: "workflow:review",
-          delivery: { channel: "engineering" },
-          async: true,
+          trigger: { type: "workflow_call" },
+          scenario: expect.objectContaining({
+            inputs: { ticket: "PIC-43" },
+            secrets: {
+              github_token: "super-secret-value",
+              api_key: "another-secret",
+            },
+            session: "workflow:review",
+            delivery: { channel: "engineering" },
+          }),
         }),
+        "review-token",
       ),
     )
+    expect(
+      workflowMocks.executeWorkflowDevelopmentTrigger,
+    ).toHaveBeenCalledTimes(1)
+    expect(workflowMocks.testWorkflowDevelopment).not.toHaveBeenCalled()
   })
 
   it("requires the same explicit review for an empty structured projection", async () => {
@@ -222,33 +261,43 @@ describe("WorkflowsPage jobs and actions integration", () => {
     const empty = jobsInspection()
     empty.jobs = []
     workflowMocks.inspectWorkflowJobs.mockResolvedValue(empty)
+    workflowMocks.simulateWorkflowDevelopmentTrigger.mockResolvedValue(
+      triggerSimulationResponse(0, []),
+    )
     renderWorkflowsPage()
 
-    const testDraft = await screen.findByRole("button", {
-      name: "Test Draft",
+    const execute = await screen.findByRole("button", {
+      name: "Review & execute",
     })
-    await waitFor(() => expect(testDraft).toBeEnabled())
-    await user.click(testDraft)
+    await waitFor(() => expect(execute).toBeEnabled())
+    await user.click(execute)
 
-    const dialog = screen.getByRole("dialog", { name: "Review draft test" })
-    expect(dialog).toHaveTextContent("No safe action targets were projected")
+    const dialog = screen.getByRole("dialog", {
+      name: "Review trigger execution",
+    })
+    expect(dialog).toHaveTextContent(
+      "No action target was included in the bounded server review",
+    )
     expect(workflowMocks.testWorkflowDevelopment).not.toHaveBeenCalled()
     const confirm = within(dialog).getByRole("button", {
-      name: "Confirm and run test",
+      name: "Confirm and execute",
     })
     expect(confirm).toBeDisabled()
     await user.click(
       within(dialog).getByRole("switch", {
-        name: "I reviewed this scenario and its possible effects",
+        name: "I reviewed this server simulation and its possible effects",
       }),
     )
     await user.click(confirm)
     await waitFor(() =>
-      expect(workflowMocks.testWorkflowDevelopment).toHaveBeenCalledOnce(),
+      expect(
+        workflowMocks.executeWorkflowDevelopmentTrigger,
+      ).toHaveBeenCalledOnce(),
     )
+    expect(workflowMocks.testWorkflowDevelopment).not.toHaveBeenCalled()
   })
 
-  it("caps aggregate secret-name disclosure without rendering values", async () => {
+  it("renders only a server secret count without names or values", async () => {
     const user = userEvent.setup()
     renderWorkflowsPage()
     const secrets = Object.fromEntries(
@@ -260,18 +309,16 @@ describe("WorkflowsPage jobs and actions integration", () => {
     fireEvent.change(await screen.findByLabelText("Secrets JSON"), {
       target: { value: JSON.stringify(secrets) },
     })
-    const testDraft = screen.getByRole("button", { name: "Test Draft" })
-    await waitFor(() => expect(testDraft).toBeEnabled())
-    await user.click(testDraft)
+    const execute = screen.getByRole("button", { name: "Review & execute" })
+    await waitFor(() => expect(execute).toBeEnabled())
+    await user.click(execute)
 
-    const dialog = screen.getByRole("dialog", { name: "Review draft test" })
-    const secretsLabel = within(dialog).getByText("Secrets")
-    const summary = secretsLabel.nextElementSibling?.textContent ?? ""
-    expect(new TextEncoder().encode(summary).byteLength).toBeLessThanOrEqual(
-      1024,
-    )
-    expect(summary).toMatch(/^20 configured:/)
-    expect(summary).toMatch(/\+\d+ more$/)
+    const dialog = screen.getByRole("dialog", {
+      name: "Review trigger execution",
+    })
+    const secretsLabel = within(dialog).getByText("Provided secrets")
+    expect(secretsLabel.nextElementSibling).toHaveTextContent("20")
+    expect(dialog).not.toHaveTextContent("secret_0_")
     expect(dialog).not.toHaveTextContent("never-render-value")
     expect(workflowMocks.testWorkflowDevelopment).not.toHaveBeenCalled()
   })
@@ -328,7 +375,58 @@ function emptyTriggerProjections() {
     command: { present: false, editable: true, value: null },
     runtime_event: { present: false, editable: true, value: null },
     event: { present: false, editable: true, value: null },
-    workflow_call: { present: false, editable: true, value: null },
+    workflow_call: {
+      present: true,
+      editable: true,
+      value: { inputs: {}, secrets: {}, outputs: {} },
+    },
+  }
+}
+
+function triggerSimulationResponse(
+  secretCount: number,
+  targets = ["agent/main"],
+) {
+  return {
+    simulation: {
+      selected_kind: "workflow_call",
+      effective_kind: "workflow_call",
+      present: true,
+      matched: true,
+      executable: true,
+      reason: "matched",
+      context_summary: {
+        input_count: 1,
+        secret_count: secretCount,
+        has_event: false,
+        has_session: true,
+        has_delivery: true,
+      },
+    },
+    review: {
+      job_count: targets.length === 0 ? 0 : 1,
+      step_count: targets.length,
+      targets,
+      effects:
+        targets.length === 0
+          ? []
+          : [
+              {
+                kind: "model_or_delegated_action_possible",
+                target: "agent/main",
+                occurrences: 1,
+              },
+            ],
+      complete: true,
+      validation: {
+        valid: true,
+        issue_count: 0,
+        issues: [],
+        truncated: false,
+      },
+      limits: [],
+    },
+    review_token: "review-token",
   }
 }
 

@@ -76,6 +76,14 @@ func (h *Handler) registerWorkflowEditorRoutes(mux *http.ServeMux) {
 		h.handleRenderWorkflowTrigger,
 	)
 	mux.HandleFunc(
+		"POST /api/workflows/development/triggers/simulate",
+		h.handleSimulateWorkflowTrigger,
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/development/test/execute",
+		h.handleExecuteWorkflowDevelopmentTest,
+	)
+	mux.HandleFunc(
 		"POST /api/workflows/development/event-trigger/inspect",
 		h.handleInspectWorkflowEventTrigger,
 	)
