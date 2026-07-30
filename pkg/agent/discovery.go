@@ -201,9 +201,6 @@ func (r *AgentRegistry) workspaceForAgentIDLocked(agentID string) string {
 }
 
 func (r *AgentRegistry) defaultAgentIDLocked() string {
-	if _, ok := r.agents[routing.DefaultAgentID]; ok {
-		return routing.DefaultAgentID
-	}
 	if r.cfg != nil && len(r.cfg.Agents.List) > 0 {
 		for _, agentCfg := range r.cfg.Agents.List {
 			if !agentCfg.Default {
@@ -214,13 +211,23 @@ func (r *AgentRegistry) defaultAgentIDLocked() string {
 				return id
 			}
 		}
-		id := routing.NormalizeAgentID(r.cfg.Agents.List[0].ID)
-		if _, ok := r.agents[id]; ok {
-			return id
+		for _, agentCfg := range r.cfg.Agents.List {
+			id := routing.NormalizeAgentID(agentCfg.ID)
+			if _, ok := r.agents[id]; ok {
+				return id
+			}
 		}
 	}
+	if _, ok := r.agents[routing.DefaultAgentID]; ok {
+		return routing.DefaultAgentID
+	}
+	ids := make([]string, 0, len(r.agents))
 	for id := range r.agents {
-		return id
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if len(ids) > 0 {
+		return ids[0]
 	}
 	return ""
 }

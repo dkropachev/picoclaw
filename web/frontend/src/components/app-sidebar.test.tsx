@@ -123,4 +123,22 @@ describe("AppSidebar", () => {
     )
     expect(screen.getByRole("link", { name: "MCP Servers" })).toBeVisible()
   })
+
+  it("links agent management first in the Agent section", () => {
+    pathname = "/agent/agents"
+
+    renderSidebar()
+
+    const agentsLink = screen.getByRole("link", { name: "Agents" })
+    const hubLink = screen.getByRole("link", { name: "Hub" })
+    expect(agentsLink).toHaveAttribute("href", "/agent/agents")
+    expect(
+      agentsLink.compareDocumentPosition(hubLink) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    expect(agentsLink.closest('[data-sidebar="menu-button"]')).toHaveAttribute(
+      "data-active",
+      "true",
+    )
+  })
 })

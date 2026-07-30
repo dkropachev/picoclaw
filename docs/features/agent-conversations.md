@@ -44,6 +44,7 @@ auxiliary to this capability.
 | `FR-AGENT-015` | MUST | An admitted inbound message's opaque turn-UX identity remains attached to its session reservation, active or rescued continuation, same-chat tool/stream/final/error output, and exact cleanup decision. A successfully buffered output stops only that identity's typing registration and leaves its reaction/placeholder for delivery-time cleanup; a no-output, rejected, canceled, failed, or panicked turn removes only its exact artifacts. Same-chat steering atomically queues and rebinds its identity to the pinned active owner after slow message preparation rechecks ownership; cross-chat steering, enqueue failure, and abandoned ownership clean the secondary exact identity, while committed steering is rescued or transferred instead of being stranded. Channel-side typing/reaction callbacks remain pinned to the provider generation that created them, so late older callbacks cannot clear a newer turn. | Concurrent turns and steering must not strand transient UX, erase a newer provider generation, or lose a committed user message. |
 | `FR-AGENT-016` | MUST | The original `ChannelManager` and four-argument `MessageBus.GetStreamer` contracts remain sufficient for agent integrations. Exact typing stop, cleanup, rebind, placeholder, and turn-scoped streaming are additive optional capabilities: legacy managers fall back to chat-scoped typing stop and placeholder calls plus one detached bounded tool-feedback cleanup, rebind is a no-op, and legacy buses use `GetStreamer`; capable implementations receive the exact turn identity instead. | Existing channel and message-bus implementations must remain source-compatible while built-in channels gain exact ownership. |
 | `FR-AGENT-017` | MUST | Agent-owned inbound snapshots preserve process-local turn/event identity, deduplication, occurrence time, subject, conversation, safe attachment descriptors, and transport trust facts through primary turns, queued continuations, and derived outbound contexts. Mutable maps, occurrence-time pointers, and attachment slices are detached when copied, and these fields remain excluded from serialized routing context. | Asynchronous turn and delivery work must retain admission facts without aliasing caller-owned state or expanding the serialized contract. |
+| `FR-AGENT-018` | MUST | The authenticated Agent management API and responsive Agent UI project an implicit `main` policy without writing an empty config and support ordered create, inspect, edit, default-selection, and delete operations against an explicit opaque config revision. The surface preserves model inheritance versus an explicit empty fallback list, labels editable values as configured policy, preserves fields it does not expose, reports whether a gateway restart is required, and never deletes workspaces, sessions, threads, history, runs, or workflow files. | Operators need complete, concurrency-safe browser management of persistent agent policy without mistaking configured values for workspace overrides or destroying runtime data. |
 
 ## Data And State Model
 
@@ -70,6 +71,8 @@ Owns: CODE pkg/audio/**
 Owns: CODE pkg/devices/**
 Owns: CODE pkg/providers/**
 Owns: CODE pkg/tokenizer/**
+Owns: CODE web/backend/api/agents*
+Owns: CODE web/frontend/src/api/agents.ts
 Owns: CODE web/frontend/src/components/agent/**
 Owns: CODE web/frontend/src/routes/agent/**
 Owns: CLI cmd/picoclaw/main.go *
@@ -86,6 +89,7 @@ Owns: CONFIG.tools.spawn*
 Owns: CONFIG.tools.spawn_status*
 Owns: CONFIG.tools.subagent*
 Owns: CONFIG.devices*
+Owns: HTTP * /api/agents*
 Owns: TEST cmd/picoclaw/main_test.go *
 Owns: TEST cmd/picoclaw/internal/agent/*
 Owns: TEST cmd/picoclaw/internal/model/*
@@ -115,6 +119,7 @@ Owns: EVENT agent.*
 | Go API | `interfaces.MessageBus.GetStreamer`, optional `interfaces.TurnScopedMessageBus.GetStreamerForTurn` | Use turn-scoped streaming when implemented and otherwise call the original four-argument streamer lookup. | `FR-AGENT-015`, `FR-AGENT-016` |
 | Runtime | `bus.InboundContext`, `DispatchRequest`, turn reservations, continuation targets, and outbound context derivation | Carry detached process-local event and transient-UX metadata across one turn without adding it to serialized routing context. | `FR-AGENT-015`, `FR-AGENT-017` |
 | Events | `agent.*` | Turn, LLM, tool, steering, interrupt, subturn, and error telemetry. | `FR-AGENT-001`, `FR-AGENT-004`, `FR-AGENT-006` |
+| HTTP/UI | `/api/agents*`, `/agent/agents` | Project and mutate persistent configured agent policy with ordered results, revision fencing, explicit model fallback semantics, and restart feedback. | `FR-AGENT-018` |
 
 ## Algorithms And Ordering
 
@@ -252,6 +257,7 @@ metadata but does not persist or reinterpret those trust facts.
 | `FR-AGENT-015` | [pkg/agent/agent_turn_ux_test.go](../../pkg/agent/agent_turn_ux_test.go), [pkg/agent/steering_test.go](../../pkg/agent/steering_test.go), [pkg/agent/agent_test.go](../../pkg/agent/agent_test.go), [pkg/channels/base_test.go](../../pkg/channels/base_test.go), [pkg/channels/manager_test.go](../../pkg/channels/manager_test.go) |
 | `FR-AGENT-016` | [pkg/agent/channel_manager_compat_test.go](../../pkg/agent/channel_manager_compat_test.go), [pkg/agent/pipeline_streaming_test.go](../../pkg/agent/pipeline_streaming_test.go), [pkg/channels/manager_test.go](../../pkg/channels/manager_test.go) |
 | `FR-AGENT-017` | [pkg/agent/turn_context_test.go](../../pkg/agent/turn_context_test.go), [pkg/agent/agent_test.go](../../pkg/agent/agent_test.go), [pkg/agent/steering_test.go](../../pkg/agent/steering_test.go), [pkg/bus/bus_test.go](../../pkg/bus/bus_test.go) |
+| `FR-AGENT-018` | [web/backend/api/agents_test.go](../../web/backend/api/agents_test.go), [pkg/config/config_test.go](../../pkg/config/config_test.go), [web/frontend/src/api/agents.test.ts](../../web/frontend/src/api/agents.test.ts), [web/frontend/src/components/agent/agents/agents-page.test.tsx](../../web/frontend/src/components/agent/agents/agents-page.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 
 ## Implementation Anchors
 
@@ -263,3 +269,5 @@ metadata but does not persist or reinterpret those trust facts.
 - [pkg/agent/turn_context.go](../../pkg/agent/turn_context.go)
 - [pkg/agent/runtime_gate.go](../../pkg/agent/runtime_gate.go)
 - [pkg/providers/factory.go](../../pkg/providers/factory.go)
+- [web/backend/api/agents.go](../../web/backend/api/agents.go)
+- [web/frontend/src/components/agent/agents](../../web/frontend/src/components/agent/agents)

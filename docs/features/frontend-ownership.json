@@ -79,6 +79,14 @@
       ]
     },
     {
+      "spec": "docs/features/agent-conversations.md",
+      "patterns": [
+        "web/frontend/src/api/agents*.ts",
+        "web/frontend/src/components/agent/agents/**",
+        "web/frontend/src/routes/agent/agents.tsx"
+      ]
+    },
+    {
       "spec": "docs/features/event-automation.md",
       "patterns": [
         "web/frontend/src/api/event-sources.ts",

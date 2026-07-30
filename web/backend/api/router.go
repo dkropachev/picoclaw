@@ -99,6 +99,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	// Config CRUD
 	h.registerConfigRoutes(mux)
 
+	// Persistent agent management
+	h.registerAgentRoutes(mux)
+
 	// Pico Channel (WebSocket chat)
 	h.registerPicoRoutes(mux)
 

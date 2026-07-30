@@ -424,12 +424,12 @@ func (m *AgentModelConfig) UnmarshalJSON(data []byte) error {
 }
 
 func (m AgentModelConfig) MarshalJSON() ([]byte, error) {
-	if len(m.Fallbacks) == 0 && m.Primary != "" {
+	if m.Fallbacks == nil {
 		return json.Marshal(m.Primary)
 	}
 	type raw struct {
 		Primary   string   `json:"primary,omitempty"`
-		Fallbacks []string `json:"fallbacks,omitempty"`
+		Fallbacks []string `json:"fallbacks"`
 	}
 	return json.Marshal(raw{Primary: m.Primary, Fallbacks: m.Fallbacks})
 }

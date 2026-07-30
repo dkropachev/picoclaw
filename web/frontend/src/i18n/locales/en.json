@@ -9,6 +9,7 @@
     "credentials": "Credentials",
     "accounts": "Accounts",
     "agent_group": "Agent",
+    "agents": "Agents",
     "hub": "Hub",
     "skills": "Skills",
     "tools": "Tools",
@@ -1018,6 +1019,98 @@
     },
     "agent": {
       "load_error": "Failed to load agent support information.",
+      "agents": {
+        "description": "Create agents, choose the default, and configure model, skills, workspace, and delegation policies.",
+        "create": "Create agent",
+        "count": "{{count}} agents",
+        "empty": "No agents are available.",
+        "load_error": "Failed to load agents.",
+        "configured_policy": "Configured policy",
+        "configured_policy_hint": "An agent workspace AGENT.md file can override the configured name, model, and skills at runtime.",
+        "badge": {
+          "default": "Default",
+          "implicit": "Implicit"
+        },
+        "action": {
+          "edit": "Edit {{name}}",
+          "delete": "Delete {{name}}",
+          "implicit_delete": "The implicit main agent is restored automatically and cannot be deleted.",
+          "current_default": "Current default",
+          "pin_default": "Pin as default",
+          "set_default": "Set default"
+        },
+        "summary": {
+          "workspace": "Workspace",
+          "primary": "Primary",
+          "fallbacks": "Fallbacks",
+          "skills": "Skills",
+          "delegation": "Delegation"
+        },
+        "policy": {
+          "inherit": "Inherit",
+          "none": "None",
+          "custom": "Custom",
+          "all_skills": "All skills",
+          "selected_skills": "Selected skills",
+          "no_delegation": "No delegation",
+          "all_peers": "All peers",
+          "selected_agents": "Selected agents"
+        },
+        "form": {
+          "create_title": "Create agent",
+          "edit_title": "Edit agent",
+          "description": "Manage the configured policy used when PicoClaw starts this agent.",
+          "identity": "Identity",
+          "id": "Agent ID",
+          "id_hint": "Lowercase letters, numbers, underscores, and hyphens.",
+          "id_immutable": "Agent IDs cannot be changed after creation.",
+          "name": "Configured name",
+          "workspace": "Workspace",
+          "workspace_placeholder": "Inherit the default workspace",
+          "model_policy": "Model policy",
+          "primary_policy": "Primary model",
+          "fallback_policy": "Fallback models",
+          "primary_model": "Primary model name",
+          "fallback_order": "Fallback order",
+          "fallback_order_hint": "Models are tried from top to bottom.",
+          "reset_model": "Reset model policy to inherited defaults",
+          "skills_policy": "Skills policy",
+          "skills": "Available skills",
+          "selected_skills": "Selected skills",
+          "delegation_policy": "Delegation policy",
+          "delegation": "May delegate to",
+          "selected_agents": "Selected agents",
+          "unknown_agents_hint": "Unknown configured IDs are retained until you remove them."
+        },
+        "conflict": {
+          "description": "Agent configuration changed after this editor opened. Review the latest configuration before saving.",
+          "delete": "Agent configuration changed. Close this dialog, review the latest agent, and reopen Delete if you still want to remove it.",
+          "deleted": "This agent no longer exists. Close the editor and review the current list.",
+          "refresh_failed": "Configuration changed, and the latest revision could not be loaded. Close and retry.",
+          "reload": "Reload latest configuration",
+          "review_latest": "Close and review latest"
+        },
+        "discard": {
+          "title": "Discard unsaved changes?",
+          "description": "Your changes to this configured policy will be lost.",
+          "keep": "Keep editing",
+          "confirm": "Discard changes"
+        },
+        "delete": {
+          "title": "Delete agent?",
+          "description": "The configured policy for \"{{name}}\" will be removed. Workspaces, sessions, runs, and history are not deleted.",
+          "confirm": "Delete agent"
+        },
+        "toast": {
+          "created": "Created {{name}}.",
+          "saved": "Saved {{name}}.",
+          "save_failed": "Failed to save the agent.",
+          "deleted": "Deleted {{name}}.",
+          "delete_failed": "Failed to delete the agent.",
+          "default_changed": "{{name}} is now the default agent.",
+          "default_failed": "Failed to change the default agent."
+        }
+      },
       "mcp": {
         "description": "Connect PicoClaw to remote or local Model Context Protocol servers and manage what your agents can use.",
         "add": "Add server",

@@ -10,6 +10,7 @@ import {
   IconMessageCircle,
   IconMessages,
   IconPlugConnected,
+  IconRobot,
   IconRoute,
   IconSearch,
   IconSettings,
@@ -138,6 +139,12 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       {
         label: "navigation.agent_group",
         items: [
+          {
+            title: "navigation.agents",
+            url: "/agent/agents",
+            icon: IconRobot,
+            translateTitle: true,
+          },
           {
             title: "navigation.hub",
             url: "/agent/hub",

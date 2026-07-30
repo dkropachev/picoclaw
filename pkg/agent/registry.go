@@ -123,7 +123,10 @@ func (r *AgentRegistry) CanSpawnSubagent(parentAgentID, targetAgentID string) bo
 }
 
 func agentAllowsSubagent(parent *AgentInstance, targetNorm string) bool {
-	if parent == nil || parent.Subagents == nil || parent.Subagents.AllowAgents == nil {
+	if parent == nil ||
+		targetNorm == routing.NormalizeAgentID(parent.ID) ||
+		parent.Subagents == nil ||
+		parent.Subagents.AllowAgents == nil {
 		return false
 	}
 	for _, allowed := range parent.Subagents.AllowAgents {

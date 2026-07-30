@@ -178,6 +178,66 @@ func TestAgentModelConfig_MarshalObject(t *testing.T) {
 	if result["primary"] != "claude-opus" {
 		t.Errorf("primary = %v", result["primary"])
 	}
+	assert.Equal(t, []any{"haiku"}, result["fallbacks"])
+}
+
+func TestAgentModelConfig_MarshalExplicitEmptyFallbacks(t *testing.T) {
+	m := AgentModelConfig{Primary: "gpt-4", Fallbacks: []string{}}
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if got, want := string(data), `{"primary":"gpt-4","fallbacks":[]}`; got != want {
+		t.Fatalf("marshal = %s, want %s", got, want)
+	}
+}
+
+func TestAgentModelConfig_SaveLoadPreservesExplicitEmptyFallbacks(t *testing.T) {
+	mustSetupSSHKey(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := DefaultConfig()
+	cfg.Agents.List = []AgentConfig{
+		{
+			ID:      "main",
+			Default: true,
+			Model: &AgentModelConfig{
+				Primary:   "agent-primary",
+				Fallbacks: []string{},
+			},
+			Subagents: &SubagentsConfig{
+				AllowAgents: []string{"worker"},
+				Model: &AgentModelConfig{
+					Primary:   "subagent-primary",
+					Fallbacks: []string{},
+				},
+			},
+		},
+		{ID: "worker"},
+	}
+
+	if err := SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	loaded, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if len(loaded.Agents.List) != 2 {
+		t.Fatalf("agents.list = %#v, want two agents", loaded.Agents.List)
+	}
+	main := loaded.Agents.List[0]
+	if main.Model == nil || main.Model.Fallbacks == nil || len(main.Model.Fallbacks) != 0 {
+		t.Fatalf("agent model fallbacks = %#v, want explicit empty slice", main.Model)
+	}
+	if main.Subagents == nil ||
+		main.Subagents.Model == nil ||
+		main.Subagents.Model.Fallbacks == nil ||
+		len(main.Subagents.Model.Fallbacks) != 0 {
+		t.Fatalf(
+			"subagent model fallbacks = %#v, want explicit empty slice",
+			main.Subagents,
+		)
+	}
 }
 
 func TestAgentConfig_FullParse(t *testing.T) {
