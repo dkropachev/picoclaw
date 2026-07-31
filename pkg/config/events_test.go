@@ -36,7 +36,7 @@ func TestDefaultEventLoggingConfig(t *testing.T) {
 func TestLoadConfigEventLoggingOverrides(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	data := []byte(`{
-		"version": 4,
+		"version": 5,
 		"events": {
 			"logging": {
 				"enabled": false,
@@ -82,7 +82,7 @@ func TestLoadConfigEventLoggingEnvOverrides(t *testing.T) {
 	t.Setenv("PICOCLAW_EVENTS_LOGGING_INCLUDE_PAYLOAD", "true")
 
 	path := filepath.Join(t.TempDir(), "config.json")
-	data := []byte(`{"version": 4}`)
+	data := []byte(`{"version": 5}`)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestEffectiveEventIngressConfigPaths(t *testing.T) {
 func TestLoadConfigEventIngressJSONOverrides(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	data := []byte(`{
-		"version": 4,
+		"version": 5,
 		"events": {
 			"ingress": {
 				"enabled": true,
@@ -293,7 +293,7 @@ func TestLoadConfigEventIngressEnvOverrides(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "config.json")
 	data := []byte(`{
-		"version": 4,
+		"version": 5,
 		"events": {
 			"ingress": {
 				"enabled": false,
@@ -673,7 +673,7 @@ func TestLoadGenericWebhookSecurityOverlayIsNarrow(t *testing.T) {
 	path := filepath.Join(dir, "config.json")
 	secret := eventWebhookTestSecret("kept")
 	configData := []byte(`{
-		"version": 4,
+		"version": 5,
 		"events": {
 			"ingress": {
 				"enabled": true,
@@ -754,7 +754,7 @@ func TestGenericWebhookSecurityReferencesRoundTrip(t *testing.T) {
 	}
 
 	configData := []byte(`{
-		"version": 4,
+		"version": 5,
 		"events": {
 			"ingress": {
 				"enabled": true,
@@ -837,7 +837,7 @@ func TestDisabledGenericWebhookPreservesUnresolvedSecurityReference(t *testing.T
 			dir := t.TempDir()
 			path := filepath.Join(dir, "config.json")
 			configData := fmt.Sprintf(`{
-				"version": 4,
+				"version": 5,
 				"events": {
 					"ingress": {
 						"enabled": %t,
@@ -947,7 +947,7 @@ func TestLoadWebhookSecurityShapeErrorDoesNotExposeConnectorName(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.json")
 			configData := fmt.Sprintf(`{
-				"version": 4,
+				"version": 5,
 				"events": {
 					"ingress": {
 						"enabled": true,
@@ -1049,7 +1049,7 @@ func TestLoadGenericWebhookSecurityUsesMasterEnvOverride(t *testing.T) {
 				jsonSecret = "[NOT_HERE]"
 			}
 			configData := fmt.Sprintf(`{
-				"version": 4,
+				"version": 5,
 				"events": {
 					"ingress": {
 						"enabled": %t,
@@ -1197,7 +1197,7 @@ func TestLoadGenericWebhookConnectorEnablementIsJSONOnly(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	configData := []byte(`{
-		"version": 4,
+		"version": 5,
 		"events": {
 			"ingress": {
 				"enabled": true,
@@ -1240,7 +1240,7 @@ func TestLoadGenericWebhookConnectorEnablementIsJSONOnly(t *testing.T) {
 func TestLoadConfigRejectsInvalidEnabledWebhook(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	configData := []byte(`{
-		"version": 4,
+		"version": 5,
 		"events": {
 			"ingress": {
 				"enabled": true,

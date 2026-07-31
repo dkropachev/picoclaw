@@ -26,7 +26,7 @@ import (
 var rrCounter atomic.Uint64
 
 // CurrentVersion is the latest config schema version
-const CurrentVersion = 4
+const CurrentVersion = 5
 
 // ErrNoModelConfigured is returned when model resolution is requested without
 // a configured model alias.
@@ -2252,6 +2252,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV4ToV5(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V4→V5 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -2271,7 +2275,7 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 
 		migratedFrom = versionInfo.Version
 	case 1:
-		// V1→V4 migration: infer Enabled, migrate channels, and introduce model aliases.
+		// V1→V5 migration: infer Enabled, migrate channels, and introduce semantic model aliases.
 		logger.InfoF(
 			"config migrate start",
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
@@ -2308,6 +2312,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV4ToV5(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V4→V5 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -2327,7 +2335,7 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 
 		migratedFrom = versionInfo.Version
 	case 2:
-		// V2→V4 migration: migrate channels and introduce model aliases.
+		// V2→V5 migration: migrate channels and introduce semantic model aliases.
 		logger.InfoF(
 			"config migrate start",
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
@@ -2358,6 +2366,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV4ToV5(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V4→V5 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -2377,7 +2389,7 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 
 		migratedFrom = versionInfo.Version
 	case 3:
-		// V3→V4 migration: introduce model aliases and separate account selection.
+		// V3→V5 migration: separate account selection and normalize semantic aliases.
 		logger.InfoF(
 			"config migrate start",
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
@@ -2404,6 +2416,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV4ToV5(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V4→V5 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -2416,6 +2432,33 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		}
 		err = MakeBackup(path)
 		if err != nil {
+			return nil, err
+		}
+		migratedFrom = versionInfo.Version
+	case 4:
+		// V4→V5 migration: remove mechanically generated account/model aliases.
+		logger.InfoF(
+			"config migrate start",
+			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
+		)
+		var m map[string]any
+		m, err = loadConfigMap(path)
+		if err != nil {
+			return nil, err
+		}
+		if migrateErr := migrateV4ToV5(m); migrateErr != nil {
+			return nil, fmt.Errorf("V4→V5 migration failed: %w", migrateErr)
+		}
+		var migrated []byte
+		migrated, err = json.Marshal(m)
+		if err != nil {
+			return nil, err
+		}
+		cfg, err = loadConfig(migrated)
+		if err != nil {
+			return nil, err
+		}
+		if err = MakeBackup(path); err != nil {
 			return nil, err
 		}
 		migratedFrom = versionInfo.Version

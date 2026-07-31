@@ -437,7 +437,7 @@ func TestValidateEventChannelAdaptersRejectsSecretBearingIdentityOpaquely(t *tes
 func TestLoadConfigValidatesEventChannelAdaptersAfterChannelInitialization(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	data := []byte(`{
-		"version": 4,
+		"version": 5,
 		"events": {
 			"ingress": {
 				"enabled": true,
@@ -463,7 +463,7 @@ func TestLoadConfigValidatesEventChannelAdaptersAfterChannelInitialization(t *te
 func TestLoadConfigResolvesCustomDeltaChatEventChannelInstance(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	data := []byte(`{
-		"version": 4,
+		"version": 5,
 		"channel_list": {
 			"primary-inbox": {
 				"enabled": true,

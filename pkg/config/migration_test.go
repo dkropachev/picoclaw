@@ -175,6 +175,8 @@ func TestMigrateV0ToV3(t *testing.T) {
 	require.NoError(t, err)
 	err = migrateV3ToV4(m)
 	require.NoError(t, err)
+	err = migrateV4ToV5(m)
+	require.NoError(t, err)
 
 	// Version should be set to CurrentVersion
 	require.Equal(t, CurrentVersion, m["version"])
@@ -235,6 +237,8 @@ func TestMigrateV0ToV3_WithExistingModelList(t *testing.T) {
 	require.NoError(t, err)
 	err = migrateV3ToV4(m)
 	require.NoError(t, err)
+	err = migrateV4ToV5(m)
+	require.NoError(t, err)
 
 	// Existing model_list should be preserved (not overridden by providers)
 	modelList := m["model_list"].([]any)
@@ -278,6 +282,8 @@ func TestMigrateV1ToV3(t *testing.T) {
 	err = migrateV2ToV3(m)
 	require.NoError(t, err)
 	err = migrateV3ToV4(m)
+	require.NoError(t, err)
+	err = migrateV4ToV5(m)
 	require.NoError(t, err)
 
 	// Version should be set to CurrentVersion

@@ -219,6 +219,93 @@ func TestMigrateV3ToV4RejectsWrongVersion(t *testing.T) {
 	require.ErrorContains(t, err, "expected version 3")
 }
 
+func TestMigrateV4ToV5RemovesGeneratedAliasesAndNormalizesSearchRole(t *testing.T) {
+	defaults := map[string]any{
+		"model_name":      "openai-work",
+		"model_fallbacks": []any{"custom", "gpt-5.4"},
+	}
+	gemini := map[string]any{"model_alias": "web-search-gemini"}
+	m := map[string]any{
+		"version": 4,
+		"agents":  map[string]any{"defaults": defaults},
+		"model_list": []any{
+			map[string]any{
+				"model_name": "openai-work",
+				"provider":   "openai",
+				"model":      "gpt-5.4",
+			},
+		},
+		"model_aliases": []any{
+			map[string]any{"name": "openai-work", "model": "gpt-5.4"},
+			map[string]any{"name": "gpt-5.4", "model": "gpt-5.4"},
+			map[string]any{"name": "custom", "model": "gpt-5.4-mini"},
+			map[string]any{"name": "web-search-gemini", "model": "gemini-2.5-flash"},
+		},
+		"tools": map[string]any{
+			"web": map[string]any{"gemini": gemini},
+		},
+	}
+
+	require.NoError(t, migrateV4ToV5(m))
+	require.Equal(t, 5, m["version"])
+	require.Equal(t, []any{
+		map[string]any{"name": "custom", "model": "gpt-5.4-mini"},
+		map[string]any{"name": "investigate", "model": "gemini-2.5-flash"},
+	}, m["model_aliases"])
+	require.Equal(t, "", defaults["model_name"])
+	require.Equal(t, []any{"custom"}, defaults["model_fallbacks"])
+	require.Equal(t, "investigate", gemini["model_alias"])
+}
+
+func TestMigrateV4ToV5PreservesPredefinedRoleMapping(t *testing.T) {
+	m := map[string]any{
+		"version": 4,
+		"model_list": []any{
+			map[string]any{"model_name": "code", "provider": "openai", "model": "gpt-5.4"},
+		},
+		"model_aliases": []any{
+			map[string]any{"name": "code", "model": "gpt-5.4"},
+		},
+	}
+
+	require.NoError(t, migrateV4ToV5(m))
+	require.Equal(t, []any{
+		map[string]any{"name": "code", "model": "gpt-5.4"},
+	}, m["model_aliases"])
+}
+
+func TestMigrateV4ToV5DropsRouterAndSelectionForRemovedGeneratedAlias(t *testing.T) {
+	defaults := map[string]any{"model_name": "task-router"}
+	m := map[string]any{
+		"version": 4,
+		"agents":  map[string]any{"defaults": defaults},
+		"model_list": []any{
+			map[string]any{"model_name": "openai-work", "provider": "openai", "model": "gpt-5.4"},
+		},
+		"model_aliases": []any{
+			map[string]any{"name": "openai-work", "model": "gpt-5.4"},
+		},
+		"model_routers": []any{
+			map[string]any{
+				"name": "task-router",
+				"blocks": []any{
+					map[string]any{"id": "entry", "type": ModelRouterBlockTypeModel, "model": "openai-work"},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, migrateV4ToV5(m))
+	require.Empty(t, m["model_aliases"])
+	require.Empty(t, m["model_routers"])
+	require.Equal(t, "", defaults["model_name"])
+}
+
+func TestMigrateV4ToV5RejectsWrongVersion(t *testing.T) {
+	err := migrateV4ToV5(map[string]any{"version": 3})
+	require.ErrorContains(t, err, "expected version 4")
+}
+
 func TestMigrateV3ToV4MovesWebSearchModelsBehindAliases(t *testing.T) {
 	gemini := map[string]any{
 		"enabled": true,
@@ -329,17 +416,16 @@ func TestLoadConfigMigratesV3ModelAliasesEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, CurrentVersion, cfg.Version)
 	require.Equal(t, "account-work", cfg.Agents.Defaults.AccountRef)
-	require.Equal(t, "account-work", cfg.Agents.Defaults.ModelName)
-	alias, err := cfg.GetModelAlias("account-work")
-	require.NoError(t, err)
-	require.Equal(t, "gpt-5.4", alias.Model)
+	require.Empty(t, cfg.Agents.Defaults.ModelName)
+	_, err = cfg.GetModelAlias("account-work")
+	require.ErrorContains(t, err, "not configured")
 
 	saved, err := os.ReadFile(path)
 	require.NoError(t, err)
 	var raw map[string]any
 	require.NoError(t, json.Unmarshal(saved, &raw))
 	require.Equal(t, float64(CurrentVersion), raw["version"])
-	require.Len(t, raw["model_aliases"], 1)
+	require.Empty(t, raw["model_aliases"])
 
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
