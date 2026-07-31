@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, waitFor, within } from "@testing-library/react"
+import { act, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { AnchorHTMLAttributes, ReactNode } from "react"
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
@@ -13,6 +13,8 @@ import {
   listEvents,
   replayEvent,
 } from "@/api/events"
+import type { WorkflowRun } from "@/api/workflows"
+import { getWorkflowRun } from "@/api/workflows"
 import {
   EventsPage,
   type EventsRouteSearch,
@@ -26,6 +28,10 @@ vi.mock("@/api/events", () => ({
   listEventDispatches: vi.fn(),
   listEvents: vi.fn(),
   replayEvent: vi.fn(),
+}))
+
+vi.mock("@/api/workflows", () => ({
+  getWorkflowRun: vi.fn(),
 }))
 
 vi.mock("@tanstack/react-router", () => ({
@@ -60,7 +66,13 @@ const eventA: EventView = {
   },
   occurred_at: "2026-07-29T13:00:00Z",
   received_at: "2026-07-29T13:00:01Z",
-  attributes: { repository: "octo/repo" },
+  attributes: {
+    repository: "octo/repo",
+    repository_full_name: "octo/repo",
+    pull_request_number: "42",
+    pull_request_url: "https://github.com/octo/repo/pull/42",
+    pull_request_head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  },
   payload_bytes: 74,
   routing: {
     status: "succeeded",
@@ -122,6 +134,42 @@ const dispatchB: DispatchView = {
   finished_at: undefined,
 }
 
+const hiddenPayloadValue = "<img src=x onerror=alert('not markup')>"
+
+const runA: WorkflowRun = {
+  id: dispatchA.run_id,
+  workflow_ref: dispatchA.workflow_ref,
+  status: "succeeded",
+  origin: {
+    kind: "external_event",
+    event_id: dispatchA.event_id,
+    dispatch_id: dispatchA.id,
+    root_run_id: dispatchA.run_id,
+  },
+  inputs: {
+    source: "github",
+    connector: "primary",
+    type: "issues.opened",
+    event_id: dispatchA.event_id,
+    dispatch_id: dispatchA.id,
+    event: {
+      id: dispatchA.event_id,
+      attributes: {
+        repository_full_name: "octo/repo",
+        pull_request_number: "42",
+        pull_request_url: "https://github.com/octo/repo/pull/42",
+        pull_request_head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
+      payload: {
+        untrusted: hiddenPayloadValue,
+      },
+    },
+  },
+  created_at: dispatchA.created_at,
+  updated_at: dispatchA.updated_at,
+  completed_at: dispatchA.finished_at,
+}
+
 describe("EventsPage", () => {
   beforeAll(() => {
     Object.defineProperty(window, "matchMedia", {
@@ -146,6 +194,7 @@ describe("EventsPage", () => {
     vi.mocked(listEventDispatches).mockReset()
     vi.mocked(listEvents).mockReset()
     vi.mocked(replayEvent).mockReset()
+    vi.mocked(getWorkflowRun).mockReset()
 
     vi.mocked(listEvents).mockResolvedValue({
       events: [eventA, eventB],
@@ -167,6 +216,7 @@ describe("EventsPage", () => {
     )
     vi.mocked(getEventPayload).mockResolvedValue('{"issue":9007199254740993}')
     vi.mocked(replayEvent).mockResolvedValue({ event: replayedEvent })
+    vi.mocked(getWorkflowRun).mockResolvedValue(runA)
   })
 
   it("loads a cursor-paginated event list and selected detail", async () => {
@@ -433,6 +483,57 @@ describe("EventsPage", () => {
       `/events?view=dispatches&dispatch=${dispatchA.id}`,
     )
 
+    const parametersHeading = screen.getByRole("heading", {
+      name: "Workflow parameters",
+    })
+    const parametersPanel = parametersHeading.closest("section")
+    expect(parametersPanel).not.toBeNull()
+    const parameters = within(parametersPanel!)
+    expect(parameters.getByText("source")).toBeInTheDocument()
+    expect(parameters.getByText("github")).toBeInTheDocument()
+    expect(parameters.getByText("repository_full_name")).toBeInTheDocument()
+    expect(parameters.getAllByText("octo/repo")).not.toHaveLength(0)
+    expect(parameters.queryByText(hiddenPayloadValue)).not.toBeInTheDocument()
+    expect(getWorkflowRun).not.toHaveBeenCalled()
+
+    await user.click(
+      parameters.getByRole("button", {
+        name: "Load full parameters",
+      }),
+    )
+
+    await waitFor(() => {
+      expect(getWorkflowRun).toHaveBeenCalledWith(dispatchA.run_id)
+    })
+    const hideFullParameters = await parameters.findByRole("button", {
+      name: "Hide full parameters",
+    })
+    expect(hideFullParameters).toHaveAttribute("aria-expanded", "true")
+    const parameterJSON = parameters.getByRole("region", {
+      name: "Workflow parameters JSON",
+    })
+    expect(parameterJSON).toHaveTextContent(hiddenPayloadValue)
+    expect(parameterJSON.querySelector("img")).toBeNull()
+
+    await user.click(hideFullParameters)
+    expect(hideFullParameters).toHaveAttribute("aria-expanded", "false")
+    expect(
+      parameters.queryByRole("region", {
+        name: "Workflow parameters JSON",
+      }),
+    ).not.toBeInTheDocument()
+
+    const showFullParameters = parameters.getByRole("button", {
+      name: "Show full parameters",
+    })
+    showFullParameters.focus()
+    await user.keyboard("{Enter}")
+    expect(
+      parameters.getByRole("region", {
+        name: "Workflow parameters JSON",
+      }),
+    ).toBeInTheDocument()
+
     await user.click(screen.getByRole("button", { name: "Load more" }))
     await waitFor(() => {
       expect(listEventDispatches).toHaveBeenNthCalledWith(
@@ -463,6 +564,155 @@ describe("EventsPage", () => {
     ).toBeInTheDocument()
     expect(getEventDispatch).toHaveBeenCalledWith(dispatchA.id)
     expect(onSearchChange).not.toHaveBeenCalled()
+  })
+
+  it("does not request workflow parameters before a run is linked", async () => {
+    vi.mocked(listEventDispatches).mockResolvedValue({
+      dispatches: [dispatchB],
+    })
+
+    renderEventsPage({
+      view: "dispatches",
+      dispatch: dispatchB.id,
+    })
+
+    expect(
+      await screen.findByText(
+        "Full parameters become available after the workflow run is linked.",
+      ),
+    ).toBeInTheDocument()
+    expect(getWorkflowRun).not.toHaveBeenCalled()
+  })
+
+  it("waits for verified event context before loading full parameters", async () => {
+    const user = userEvent.setup()
+    let resolveEvent!: (event: EventView) => void
+    vi.mocked(getEvent).mockImplementation(
+      () =>
+        new Promise<EventView>((resolve) => {
+          resolveEvent = resolve
+        }),
+    )
+
+    renderEventsPage({
+      view: "dispatches",
+      dispatch: dispatchA.id,
+    })
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Load full parameters",
+      }),
+    )
+    expect(
+      await screen.findByText("Waiting for the invocation summary…"),
+    ).toBeInTheDocument()
+    expect(getWorkflowRun).not.toHaveBeenCalled()
+
+    await act(async () => {
+      resolveEvent(eventA)
+    })
+    await waitFor(() => {
+      expect(getWorkflowRun).toHaveBeenCalledWith(dispatchA.run_id)
+    })
+  })
+
+  it("rejects mismatched event context without exposing its attributes", async () => {
+    const user = userEvent.setup()
+    vi.mocked(getEvent).mockResolvedValue({
+      ...eventA,
+      id: eventB.id,
+      attributes: {
+        repository_full_name: "wrong/repository",
+      },
+    })
+
+    renderEventsPage({
+      view: "dispatches",
+      dispatch: dispatchA.id,
+    })
+
+    expect(
+      await screen.findByText(
+        "Invocation summary could not be verified for this dispatch.",
+      ),
+    ).toBeInTheDocument()
+    expect(screen.queryByText("wrong/repository")).not.toBeInTheDocument()
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Load full parameters",
+      }),
+    )
+    expect(
+      await screen.findByText(
+        "Full workflow parameters require a verified invocation summary.",
+      ),
+    ).toBeInTheDocument()
+    expect(getWorkflowRun).not.toHaveBeenCalled()
+  })
+
+  it("fails closed when the workflow run is not bound to the dispatch", async () => {
+    const user = userEvent.setup()
+    vi.mocked(getWorkflowRun).mockResolvedValue({
+      ...runA,
+      origin: {
+        ...runA.origin!,
+        event_id: eventB.id,
+      },
+    })
+
+    renderEventsPage({
+      view: "dispatches",
+      dispatch: dispatchA.id,
+    })
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Load full parameters",
+      }),
+    )
+    expect(
+      await screen.findByText(
+        "Workflow parameters could not be verified for this dispatch.",
+      ),
+    ).toBeInTheDocument()
+    expect(screen.getByText(dispatchA.workflow_revision!)).toBeInTheDocument()
+    expect(screen.queryByText(hiddenPayloadValue)).not.toBeInTheDocument()
+  })
+
+  it("keeps dispatch detail usable and retries failed parameter loads", async () => {
+    const user = userEvent.setup()
+    vi.mocked(getWorkflowRun)
+      .mockRejectedValueOnce(new Error("Run temporarily unavailable"))
+      .mockResolvedValueOnce(runA)
+
+    renderEventsPage({
+      view: "dispatches",
+      dispatch: dispatchA.id,
+    })
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Load full parameters",
+      }),
+    )
+    expect(
+      await screen.findByText("Run temporarily unavailable"),
+    ).toBeInTheDocument()
+    expect(screen.getByText(dispatchA.workflow_revision!)).toBeInTheDocument()
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Retry parameters",
+      }),
+    )
+    expect(
+      await screen.findByRole("region", {
+        name: "Workflow parameters JSON",
+      }),
+    ).toHaveTextContent(hiddenPayloadValue)
+    expect(getWorkflowRun).toHaveBeenCalledTimes(2)
   })
 
   it("preserves hidden URL state across view toggles and filter changes", async () => {
