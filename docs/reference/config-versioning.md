@@ -58,7 +58,9 @@ PicoClaw uses a schema versioning system for `config.json` to ensure smooth upgr
   - Aliases mechanically generated from legacy account names or concrete model
     IDs are removed. References to removed aliases are cleared rather than
     redirected to a guessed model.
-  - Explicit custom aliases remain supported for specialized capabilities.
+  - Explicit custom aliases remain supported for specialized capabilities;
+    legacy web-search aliases remain custom and never configure a predefined
+    semantic role implicitly.
 - **Auto-migration**: V4 configurations are backed up and migrated
   deterministically.
 

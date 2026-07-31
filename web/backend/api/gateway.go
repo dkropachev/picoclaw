@@ -1647,6 +1647,11 @@ func (h *Handler) gatewayStatusData() map[string]any {
 	var configDefaultModel string
 	cfg, cfgErr := config.LoadConfig(h.configPath)
 	if cfgErr == nil && cfg != nil {
+		_, chatAliasErr := cfg.GetModelAlias("chat")
+		data["model_setup_required"] = chatAliasErr != nil
+		if chatAliasErr != nil {
+			data["model_setup_reason"] = `model alias "chat" is not configured`
+		}
 		configDefaultModel = strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
 		if configDefaultModel != "" {
 			data["config_default_model"] = configDefaultModel

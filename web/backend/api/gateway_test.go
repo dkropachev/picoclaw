@@ -1093,6 +1093,33 @@ func TestGatewayStatusAllowsLimitedModeWithoutModel(t *testing.T) {
 	if reason, ok := body["gateway_start_reason"]; ok {
 		t.Fatalf("gateway_start_reason = %#v, want omitted", reason)
 	}
+	if required, ok := body["model_setup_required"].(bool); !ok || !required {
+		t.Fatalf("model_setup_required = %#v, want true", body["model_setup_required"])
+	}
+	if reason, ok := body["model_setup_reason"].(string); !ok || reason != `model alias "chat" is not configured` {
+		t.Fatalf("model_setup_reason = %#v", body["model_setup_reason"])
+	}
+}
+
+func TestGatewayStatusReportsModelSetupCompleteWithChatAlias(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.DefaultConfig()
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name:  "chat",
+		Model: "gpt-5.4",
+	}}
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	data := h.gatewayStatusData()
+	if required, ok := data["model_setup_required"].(bool); !ok || required {
+		t.Fatalf("model_setup_required = %#v, want false", data["model_setup_required"])
+	}
+	if reason, ok := data["model_setup_reason"]; ok {
+		t.Fatalf("model_setup_reason = %#v, want omitted", reason)
+	}
 }
 
 func TestGatewayStatusKeepsRunningWhenHealthProbeFailsAfterRunning(t *testing.T) {

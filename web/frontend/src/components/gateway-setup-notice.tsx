@@ -9,10 +9,9 @@ import { gatewayAtom } from "@/store/gateway"
 export function GatewaySetupNotice() {
   const { t } = useTranslation()
   const gateway = useAtomValue(gatewayAtom)
-  const reason = gateway.startReason?.trim()
-  const isStopped = gateway.status === "stopped" || gateway.status === "error"
+  const reason = gateway.modelSetupReason?.trim()
 
-  if (!isStopped || gateway.canStart || !reason) {
+  if (!gateway.modelSetupRequired || !reason) {
     return null
   }
 
@@ -27,7 +26,7 @@ export function GatewaySetupNotice() {
       />
       <p className="min-w-0 flex-1">
         <span className="font-medium">
-          {t("header.gateway.setupRequired", "Gateway setup required")}
+          {t("header.gateway.modelSetupRequired", "Model setup required")}
         </span>
         <span className="text-muted-foreground">
           {t("header.gateway.setupReason", ": {{reason}}.", { reason })}

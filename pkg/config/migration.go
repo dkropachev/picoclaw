@@ -612,9 +612,9 @@ func migrateV3ToV4(m map[string]any) error {
 // migrateV4ToV5 removes aliases that v3 migration mechanically derived from
 // account names or concrete model IDs. Those values expose provider details
 // and do not describe a stable task role. Explicit custom aliases survive.
-// Legacy web-search aliases are normalized to the predefined investigate role
-// when that role is still available. Removed references are cleared instead of
-// guessing a replacement model.
+// Legacy web-search aliases remain explicit custom aliases; predefined roles
+// must stay unconfigured until the user maps them deliberately. Removed
+// references are cleared instead of guessing a replacement model.
 func migrateV4ToV5(m map[string]any) error {
 	if !compareInt(m["version"], 4) {
 		return fmt.Errorf("migrateV4ToV5: expected version 4, got %v", m["version"])
@@ -642,16 +642,6 @@ func migrateV4ToV5(m map[string]any) error {
 	}
 
 	aliases, _ := m["model_aliases"].([]any)
-	investigateTaken := false
-	for _, item := range aliases {
-		alias, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		name, _ := alias["name"].(string)
-		investigateTaken = investigateTaken || strings.TrimSpace(name) == "investigate"
-	}
-
 	rewrites := make(map[string]string)
 	retained := make([]any, 0, len(aliases))
 	for _, item := range aliases {
@@ -664,14 +654,6 @@ func migrateV4ToV5(m map[string]any) error {
 		name = strings.TrimSpace(name)
 		model = strings.TrimSpace(model)
 		if name == "" {
-			continue
-		}
-
-		if !investigateTaken && strings.HasPrefix(name, "web-search-") {
-			alias["name"] = "investigate"
-			rewrites[name] = "investigate"
-			investigateTaken = true
-			retained = append(retained, alias)
 			continue
 		}
 

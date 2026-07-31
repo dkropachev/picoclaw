@@ -25,9 +25,9 @@ and revision-fences whole-config mutations so neither a missing model nor a
 stale writer can silently delegate behavior to a provider default.
 Schema v5 removes aliases mechanically derived from account names or concrete
 model IDs, clears their references rather than guessing replacements, and
-normalizes an unambiguous legacy web-search mapping to the semantic
-`investigate` role. Explicit custom aliases and configured predefined roles are
-preserved.
+preserves legacy web-search mappings as explicit custom aliases instead of
+silently assigning them to a predefined semantic role. Explicit custom aliases
+and deliberately configured predefined roles are preserved.
 
 ## Reconstruction Notes
 

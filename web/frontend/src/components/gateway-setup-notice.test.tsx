@@ -30,25 +30,26 @@ describe("GatewaySetupNotice", () => {
     })
   })
 
-  it("directs the user to model configuration when startup is blocked", () => {
+  it("directs the user to model configuration while the gateway is running", () => {
     getDefaultStore().set(gatewayAtom, {
-      status: "stopped",
-      canStart: false,
-      startReason: "no model configured",
+      status: "running",
+      canStart: true,
+      modelSetupRequired: true,
+      modelSetupReason: 'model alias "chat" is not configured',
       restartRequired: false,
     })
 
     render(<GatewaySetupNotice />)
 
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Gateway setup required: no model configured.",
+      'Model setup required: model alias "chat" is not configured.',
     )
     expect(
       screen.getByRole("link", { name: "Configure models" }),
     ).toHaveAttribute("href", "/models")
   })
 
-  it("stays hidden when the gateway can start", () => {
+  it("stays hidden when model setup is complete", () => {
     render(<GatewaySetupNotice />)
 
     expect(screen.queryByRole("status")).not.toBeInTheDocument()

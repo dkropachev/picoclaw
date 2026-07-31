@@ -7,6 +7,8 @@ interface GatewayStatusResponse {
   gateway_start_allowed?: boolean
   gateway_start_reason?: string
   gateway_restart_required?: boolean
+  model_setup_required?: boolean
+  model_setup_reason?: string
   pid?: number
   [key: string]: unknown
 }

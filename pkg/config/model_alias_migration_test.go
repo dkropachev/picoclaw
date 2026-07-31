@@ -219,7 +219,7 @@ func TestMigrateV3ToV4RejectsWrongVersion(t *testing.T) {
 	require.ErrorContains(t, err, "expected version 3")
 }
 
-func TestMigrateV4ToV5RemovesGeneratedAliasesAndNormalizesSearchRole(t *testing.T) {
+func TestMigrateV4ToV5RemovesGeneratedAliasesWithoutConfiguringPredefinedRoles(t *testing.T) {
 	defaults := map[string]any{
 		"model_name":      "openai-work",
 		"model_fallbacks": []any{"custom", "gpt-5.4"},
@@ -250,11 +250,11 @@ func TestMigrateV4ToV5RemovesGeneratedAliasesAndNormalizesSearchRole(t *testing.
 	require.Equal(t, 5, m["version"])
 	require.Equal(t, []any{
 		map[string]any{"name": "custom", "model": "gpt-5.4-mini"},
-		map[string]any{"name": "investigate", "model": "gemini-2.5-flash"},
+		map[string]any{"name": "web-search-gemini", "model": "gemini-2.5-flash"},
 	}, m["model_aliases"])
 	require.Equal(t, "", defaults["model_name"])
 	require.Equal(t, []any{"custom"}, defaults["model_fallbacks"])
-	require.Equal(t, "investigate", gemini["model_alias"])
+	require.Equal(t, "web-search-gemini", gemini["model_alias"])
 }
 
 func TestMigrateV4ToV5PreservesPredefinedRoleMapping(t *testing.T) {
