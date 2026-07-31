@@ -17,6 +17,9 @@ The authenticated launcher also exposes a narrowly validated same-origin
 review API that projects browser requests to the managed gateway using only the
 gateway process bearer and fixed request, response, redirect, and network
 boundaries.
+When gateway startup readiness fails, the shared dashboard shell keeps the
+gateway stopped and shows the reported reason with a direct model-configuration
+action instead of leaving the disabled lifecycle control as the only signal.
 
 ## Reconstruction Notes
 
