@@ -24,6 +24,8 @@ interface ModelCardProps {
   onSetDefault: (model: ModelInfo) => void
   onDelete: (model: ModelInfo) => void
   settingDefault: boolean
+  defaultChangePending?: boolean
+  isDefault?: boolean
 }
 
 export function ModelCard({
@@ -32,6 +34,8 @@ export function ModelCard({
   onSetDefault,
   onDelete,
   settingDefault,
+  defaultChangePending = false,
+  isDefault: isDefaultOverride,
 }: ModelCardProps) {
   const { t } = useTranslation()
   const isRouter = model.provider === "router" || model.router != null
@@ -40,23 +44,21 @@ export function ModelCard({
   const isOAuth = model.auth_method === "oauth"
   const status = model.status
   const statusLabel = t(`models.status.${status}`)
+  const isDefault = isDefaultOverride ?? model.is_default
   const canSetDefault =
     model.available &&
-    !model.is_default &&
-    (model.is_virtual !== true || isModelRouter) &&
-    model.default_model_allowed !== false
+    !isDefault &&
+    (model.is_virtual !== true || isModelRouter)
 
   const setDefaultLabel = t("models.action.setDefault")
   const setDefaultDisabledReason = (() => {
-    if (settingDefault) return t("models.action.setDefaultDisabled.setting")
+    if (defaultChangePending)
+      return t("models.action.setDefaultDisabled.setting")
     if (!model.available)
       return t("models.action.setDefaultDisabled.unavailable")
-    if (model.is_default) return t("models.action.setDefaultDisabled.isDefault")
+    if (isDefault) return t("models.action.setDefaultDisabled.isDefault")
     if (model.is_virtual && !isModelRouter)
       return t("models.action.setDefaultDisabled.isVirtual")
-    if (model.default_model_allowed === false) {
-      return t("models.action.setDefaultDisabled.unsupportedProvider")
-    }
     return setDefaultLabel
   })()
 
@@ -70,10 +72,10 @@ export function ModelCard({
     : isRouter
       ? t("models.router.actionDelete")
       : t("models.action.delete")
-  const deleteDisabledReason = model.is_default
+  const deleteDisabledReason = isDefault
     ? t("models.action.deleteDisabled.isDefault")
     : deleteLabel
-  const deleteDisabled = model.is_default
+  const deleteDisabled = isDefault
   return (
     <div
       className={[
@@ -88,7 +90,7 @@ export function ModelCard({
           <span
             className={[
               "mt-0.5 h-2 w-2 shrink-0 rounded-full",
-              model.is_default
+              isDefault
                 ? "bg-green-400 ring-2 ring-green-400/35"
                 : status === "available"
                   ? "bg-green-500"
@@ -101,7 +103,7 @@ export function ModelCard({
           <span className="text-foreground truncate text-sm font-semibold">
             {model.model_name}
           </span>
-          {model.is_default && (
+          {isDefault && (
             <span className="bg-primary/10 text-primary shrink-0 rounded px-1.5 py-0.5 text-[10px] leading-none font-medium">
               {t("models.badge.default")}
             </span>
@@ -124,7 +126,7 @@ export function ModelCard({
         </div>
 
         <div className="flex shrink-0 items-center gap-0.5">
-          {model.is_default ? (
+          {isDefault ? (
             <span
               className="text-primary p-1"
               title={t("models.badge.default")}
@@ -136,22 +138,28 @@ export function ModelCard({
               <TooltipTrigger asChild>
                 <span
                   className={
-                    !canSetDefault || settingDefault
+                    !canSetDefault || defaultChangePending
                       ? "cursor-not-allowed"
                       : undefined
                   }
-                  tabIndex={!canSetDefault || settingDefault ? 0 : undefined}
-                  role={!canSetDefault || settingDefault ? "button" : undefined}
+                  tabIndex={
+                    !canSetDefault || defaultChangePending ? 0 : undefined
+                  }
+                  role={
+                    !canSetDefault || defaultChangePending
+                      ? "button"
+                      : undefined
+                  }
                   aria-disabled={
-                    !canSetDefault || settingDefault ? true : undefined
+                    !canSetDefault || defaultChangePending ? true : undefined
                   }
                   aria-label={
-                    !canSetDefault || settingDefault
+                    !canSetDefault || defaultChangePending
                       ? setDefaultLabel
                       : undefined
                   }
                   title={
-                    !canSetDefault || settingDefault
+                    !canSetDefault || defaultChangePending
                       ? setDefaultLabel
                       : undefined
                   }
@@ -160,7 +168,7 @@ export function ModelCard({
                     variant="ghost"
                     size="icon-sm"
                     onClick={() => onSetDefault(model)}
-                    disabled={settingDefault || !canSetDefault}
+                    disabled={defaultChangePending || !canSetDefault}
                     aria-label={setDefaultLabel}
                     title={setDefaultLabel}
                   >

@@ -241,23 +241,21 @@ func (c *Config) validateModelRouterReferences() error {
 	if c == nil {
 		return nil
 	}
-	targets := make(map[string]struct{})
+	aliases := make(map[string]struct{}, len(c.ModelAliases))
+	accountRouterNames := make(map[string]int, len(c.AccountRouters))
 	routerNames := make(map[string]int, len(c.ModelRouters))
-	for _, model := range c.ModelList {
-		if model == nil || model.IsModelRouter() {
-			continue
-		}
-		if name := strings.TrimSpace(model.ModelName); name != "" {
-			targets[name] = struct{}{}
+	for i := range c.ModelAliases {
+		if name := c.ModelAliases[i].Name; strings.TrimSpace(name) != "" {
+			aliases[name] = struct{}{}
 		}
 	}
 	for i := range c.AccountRouters {
-		if name := strings.TrimSpace(c.AccountRouters[i].Name); name != "" {
-			targets[name] = struct{}{}
+		if name := c.AccountRouters[i].Name; strings.TrimSpace(name) != "" {
+			accountRouterNames[name] = i
 		}
 	}
 	for i := range c.ModelRouters {
-		if name := strings.TrimSpace(c.ModelRouters[i].Name); name != "" {
+		if name := c.ModelRouters[i].Name; strings.TrimSpace(name) != "" {
 			routerNames[name] = i
 		}
 	}
@@ -267,8 +265,8 @@ func (c *Config) validateModelRouterReferences() error {
 			if strings.TrimSpace(block.Type) != ModelRouterBlockTypeModel {
 				continue
 			}
-			model := strings.TrimSpace(block.Model)
-			if model == "" {
+			model := block.Model
+			if strings.TrimSpace(model) == "" {
 				continue
 			}
 			if routerIdx, ok := routerNames[model]; ok {
@@ -280,9 +278,18 @@ func (c *Config) validateModelRouterReferences() error {
 					routerIdx,
 				)
 			}
-			if _, ok := targets[model]; !ok {
+			if routerIdx, ok := accountRouterNames[model]; ok {
 				return fmt.Errorf(
-					"model_routers[%d] block %q references unknown model %q",
+					"model_routers[%d] block %q references account router %q at account_routers[%d]; model routers must target model aliases",
+					i,
+					block.ID,
+					model,
+					routerIdx,
+				)
+			}
+			if _, ok := aliases[model]; !ok {
+				return fmt.Errorf(
+					"model_routers[%d] block %q references unknown model alias %q",
 					i,
 					block.ID,
 					model,

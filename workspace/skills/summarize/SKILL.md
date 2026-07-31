@@ -43,7 +43,9 @@ Set the API key for your chosen provider:
 - xAI: `XAI_API_KEY`
 - Google: `GEMINI_API_KEY` (aliases: `GOOGLE_GENERATIVE_AI_API_KEY`, `GOOGLE_API_KEY`)
 
-Default model is `google/gemini-3-flash-preview` if none is set.
+Every invocation must pass `--model` with an explicitly configured model. If
+the caller did not configure one, stop with `no model configured`; do not rely
+on the summarize CLI's own default.
 
 ## Useful flags
 

@@ -2,16 +2,15 @@ package asr
 
 import (
 	"context"
-	"strings"
+	"fmt"
 
+	audiocapabilities "github.com/sipeed/picoclaw/pkg/audio/capabilities"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-const elevenLabsSupportedModelID = "scribe_v1"
-
 func ElevenLabsSupportedModelID() string {
-	return elevenLabsSupportedModelID
+	return audiocapabilities.ElevenLabsASRModelID
 }
 
 type Transcriber interface {
@@ -25,122 +24,97 @@ type TranscriptionResponse struct {
 	Duration float64 `json:"duration,omitempty"`
 }
 
-func supportsAudioTranscription(modelCfg *config.ModelConfig) bool {
-	protocol, _ := providers.ExtractProtocol(modelCfg)
+func transcriberFromModelConfigWithError(
+	modelCfg *config.ModelConfig,
+) (Transcriber, error) {
+	route, provider, modelID, err := asrRouteFromModelConfig(modelCfg)
+	if err != nil {
+		return nil, err
+	}
+	if (route == audiocapabilities.ASRRouteElevenLabs ||
+		route == audiocapabilities.ASRRouteWhisper) &&
+		modelCfg.APIKey() == "" {
+		return nil, fmt.Errorf(
+			"voice transcription provider %q has no API key configured",
+			provider,
+		)
+	}
 
-	switch protocol {
-	case "openai", "azure",
-		"litellm", "openrouter", "groq", "zhipu", "gemini", "nvidia",
-		"ollama", "moonshot", "shengsuanyun", "deepseek", "cerebras",
-		"vivgrid", "volcengine", "vllm", "qwen-portal", "qwen-intl", "qwen-us",
-		"mistral", "avian", "minimax", "longcat", "modelscope", "novita",
-		"alibaba-coding", "zai":
-		// These protocols all go through the OpenAI-compatible or Azure provider path in
-		// providers.CreateProviderFromConfig, so they are the only ones that can supply
-		// the audio media payload shape expected by NewAudioModelTranscriber.
-
-		// TODO: Further restrict this by modelID, since not every model under these
-		// protocols supports audio transcription.
-		return true
+	resolved := *modelCfg
+	resolved.Provider = provider
+	resolved.Model = modelID
+	switch route {
+	case audiocapabilities.ASRRouteElevenLabs:
+		return NewElevenLabsTranscriber(
+			resolved.APIKey(),
+			resolved.APIBase,
+			modelID,
+		), nil
+	case audiocapabilities.ASRRouteWhisper:
+		transcriber := NewWhisperTranscriber(&resolved)
+		if transcriber == nil {
+			return nil, fmt.Errorf(
+				"failed to initialize Whisper transcription provider %q",
+				provider,
+			)
+		}
+		return transcriber, nil
+	case audiocapabilities.ASRRouteAudioModel:
+		transcriber := NewAudioModelTranscriber(&resolved)
+		if transcriber == nil {
+			return nil, fmt.Errorf(
+				"failed to initialize audio-model transcription provider %q",
+				provider,
+			)
+		}
+		return transcriber, nil
 	default:
-		return false
+		return nil, fmt.Errorf(
+			"voice transcription provider %q has no supported ASR route",
+			provider,
+		)
 	}
 }
 
-func supportsWhisperTranscription(modelCfg *config.ModelConfig) bool {
-	protocol, _ := providers.ExtractProtocol(modelCfg)
-
-	switch protocol {
-	case "openai", "litellm", "openrouter", "groq", "zhipu", "gemini", "nvidia",
-		"ollama", "moonshot", "shengsuanyun", "deepseek", "cerebras",
-		"vivgrid", "volcengine", "vllm", "qwen-portal", "qwen-intl", "qwen-us",
-		"mistral", "avian", "minimax", "longcat", "modelscope", "novita",
-		"alibaba-coding", "zai", "mimo":
-		return true
-	default:
-		return false
-	}
-}
-
-func whisperModelID(modelCfg *config.ModelConfig) string {
-	if modelCfg == nil || modelCfg.APIKey() == "" {
-		return ""
-	}
-
-	if !supportsWhisperTranscription(modelCfg) {
-		return ""
-	}
-
-	_, modelID := providers.ExtractProtocol(modelCfg)
-	if strings.Contains(strings.ToLower(modelID), "whisper") {
-		return modelID
-	}
-	return ""
-}
-
-func isElevenLabsTranscriptionModel(modelCfg *config.ModelConfig) bool {
-	if modelCfg == nil || modelCfg.APIKey() == "" {
-		return false
-	}
-
-	protocol, _ := providers.ExtractProtocol(modelCfg)
-	return protocol == "elevenlabs"
-}
-
-func transcriberFromModelConfig(modelCfg *config.ModelConfig) Transcriber {
+func asrRouteFromModelConfig(
+	modelCfg *config.ModelConfig,
+) (audiocapabilities.ASRRoute, string, string, error) {
 	if modelCfg == nil {
-		return nil
+		return "", "", "", config.ErrNoModelConfigured
 	}
-
-	if isElevenLabsTranscriptionModel(modelCfg) {
-		_, modelID := providers.ExtractProtocol(modelCfg)
-		return NewElevenLabsTranscriber(modelCfg.APIKey(), modelCfg.APIBase, modelID)
+	provider, configuredModel := providers.ExtractProtocol(modelCfg)
+	modelID, err := providers.ResolveModelForProvider(provider, configuredModel)
+	if err != nil {
+		return "", "", "", err
 	}
-	if modelID := whisperModelID(modelCfg); modelID != "" {
-		return NewWhisperTranscriber(modelCfg)
+	route, err := audiocapabilities.ResolveASRRoute(provider, modelID)
+	if err != nil {
+		return "", provider, modelID, err
 	}
-	if supportsAudioTranscription(modelCfg) {
-		return NewAudioModelTranscriber(modelCfg)
-	}
-	return nil
+	return route, provider, modelID, nil
 }
 
-func fallbackTranscriberFromModelConfig(modelCfg *config.ModelConfig) Transcriber {
-	if modelCfg == nil {
-		return nil
-	}
-
-	if isElevenLabsTranscriptionModel(modelCfg) {
-		_, modelID := providers.ExtractProtocol(modelCfg)
-		return NewElevenLabsTranscriber(modelCfg.APIKey(), modelCfg.APIBase, modelID)
-	}
-	if modelID := whisperModelID(modelCfg); modelID != "" {
-		return NewWhisperTranscriber(modelCfg)
-	}
-	return nil
-}
-
-// DetectTranscriber inspects cfg and returns the appropriate Transcriber, or
-// nil if no supported transcription provider is configured.
+// DetectTranscriber resolves the explicitly configured ASR account and model
+// alias. It never scans model_list or invents a provider model.
 func DetectTranscriber(cfg *config.Config) Transcriber {
+	transcriber, _ := DetectTranscriberWithError(cfg)
+	return transcriber
+}
+
+// DetectTranscriberWithError is the diagnostic form of DetectTranscriber. It
+// distinguishes intentionally unconfigured ASR from an invalid or unsupported
+// account/model selection.
+func DetectTranscriberWithError(cfg *config.Config) (Transcriber, error) {
 	if cfg == nil {
-		return nil
+		return nil, nil
 	}
 
-	if modelName := strings.TrimSpace(cfg.Voice.ModelName); modelName != "" {
-		modelCfg, err := cfg.GetModelConfig(modelName)
-		if err == nil {
-			if tr := transcriberFromModelConfig(modelCfg); tr != nil {
-				return tr
-			}
-		}
+	modelCfg, err := cfg.ResolveVoiceASRModelConfig()
+	if err != nil {
+		return nil, err
 	}
-
-	// Fall back to compatibility scanning for legacy auto-detected ASR providers.
-	for _, mc := range cfg.ModelList {
-		if tr := fallbackTranscriberFromModelConfig(mc); tr != nil {
-			return tr
-		}
+	if modelCfg == nil {
+		return nil, nil
 	}
-	return nil
+	return transcriberFromModelConfigWithError(modelCfg)
 }

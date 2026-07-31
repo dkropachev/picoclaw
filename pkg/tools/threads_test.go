@@ -371,6 +371,64 @@ func TestThreadsToolSetPolicyPersistsConfig(t *testing.T) {
 	}
 }
 
+func TestThreadsToolSetPolicyRejectsStaleConfigRevision(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.DefaultConfig()
+	cfg.Tools.Threads.Policy.Enabled = false
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	originalSave := saveThreadPolicyConfig
+	injected := false
+	saveThreadPolicyConfig = func(
+		path string,
+		candidate *config.Config,
+		expectedRevision string,
+	) (string, error) {
+		if !injected {
+			injected = true
+			concurrent, revision, err := config.LoadConfigForUpdateSnapshot(path)
+			if err != nil {
+				return "", err
+			}
+			concurrent.ModelAliases = append(
+				concurrent.ModelAliases,
+				config.ModelAliasConfig{Name: "concurrent", Model: "new-model"},
+			)
+			if _, err := originalSave(path, concurrent, revision); err != nil {
+				return "", err
+			}
+		}
+		return originalSave(path, candidate, expectedRevision)
+	}
+	t.Cleanup(func() {
+		saveThreadPolicyConfig = originalSave
+	})
+
+	tool := NewThreadsTool(cfg, configPath)
+	_, _, err := tool.updateThreadPolicy(map[string]any{
+		"policy_enabled": true,
+	})
+	if err == nil {
+		t.Fatal("updateThreadPolicy() error = nil, want stale revision conflict")
+	}
+	if !strings.Contains(err.Error(), "config changed while updating thread policy; reload and retry") {
+		t.Fatalf("updateThreadPolicy() error = %v, want clear conflict", err)
+	}
+
+	updated, loadErr := config.LoadConfig(configPath)
+	if loadErr != nil {
+		t.Fatalf("LoadConfig() error = %v", loadErr)
+	}
+	if len(updated.ModelAliases) != 1 || updated.ModelAliases[0].Name != "concurrent" {
+		t.Fatalf("model aliases = %#v, want concurrent update preserved", updated.ModelAliases)
+	}
+	if updated.Tools.Threads.Policy.Enabled {
+		t.Fatal("stale thread policy update was persisted")
+	}
+}
+
 func assertThreadCount(t *testing.T, cfg *config.Config, want int) {
 	t.Helper()
 	store := threadstore.NewStoreFromWorkspace(cfg.Agents.Defaults.Workspace)

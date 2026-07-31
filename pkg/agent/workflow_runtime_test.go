@@ -177,7 +177,7 @@ func TestWorkflowAgentRunnerRejectsUnknownExplicitAgent(t *testing.T) {
 	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}}
 	msgBus := bus.NewMessageBus()
 	defer msgBus.Close()
-	al := NewAgentLoop(cfg, msgBus, &mockProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, &mockProvider{})
 	defer al.Close()
 
 	_, err := (&workflowAgentRunner{loop: al}).RunAgent(context.Background(), workflows.AgentRequest{
@@ -200,7 +200,7 @@ func TestWorkflowAgentRunnerEnforcesAndAuditsToolsMode(t *testing.T) {
 		`{"category":"bug"}`,
 		"classified",
 	}}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	defer al.Close()
 	defaultAgent := al.GetRegistry().GetDefaultAgent()
 	if defaultAgent == nil {
@@ -1064,13 +1064,23 @@ func TestWorkflowManagedOptimizationSelectsCheaperModelAndEffort(t *testing.T) {
 	}
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{Provider: "openai"},
+			Defaults: config.AgentDefaults{
+				AccountRef: "expensive-model",
+				ModelName:  "expensive-model",
+			},
+		},
+		ModelAliases: []config.ModelAliasConfig{
+			{Name: "expensive-model", Model: "expensive-model"},
+			{Name: "cheap-model", Model: "cheap-model"},
 		},
 		ModelList: []*config.ModelConfig{
 			{
 				ModelName:          "expensive-model",
 				Provider:           "openai",
 				Model:              "openai/expensive-model",
+				APIBase:            "http://example.invalid/v1",
+				APIKeys:            config.SimpleSecureStrings("test-key"),
+				Enabled:            true,
 				InputPricePerMTok:  5.0,
 				OutputPricePerMTok: 15.0,
 			},
@@ -1085,6 +1095,7 @@ func TestWorkflowManagedOptimizationSelectsCheaperModelAndEffort(t *testing.T) {
 	}
 	agent := &AgentInstance{
 		ID:                 "reviewer",
+		AccountRef:         "expensive-model",
 		Model:              "expensive-model",
 		Workspace:          t.TempDir(),
 		CandidateProviders: map[string]providers.LLMProvider{},
@@ -1504,7 +1515,20 @@ func TestWorkflowManagedCombinedOutputIsValidated(t *testing.T) {
 
 func TestWorkflowManagedProviderInitializationRegistersCandidate(t *testing.T) {
 	cfg := &config.Config{
+		ModelAliases: []config.ModelAliasConfig{
+			{Name: "default-model", Model: "default-model"},
+			{Name: "cheap-model", Model: "cheap-model"},
+			{Name: "subscription-model", Model: "subscription-model"},
+			{Name: "metered-model", Model: "metered-model"},
+		},
 		ModelList: []*config.ModelConfig{
+			{
+				ModelName: "account",
+				Provider:  "openai",
+				APIBase:   "http://example.invalid/v1",
+				APIKeys:   config.SimpleSecureStrings("test-key"),
+				Enabled:   true,
+			},
 			{
 				ModelName: "default-model",
 				Provider:  "openai",
@@ -1518,17 +1542,14 @@ func TestWorkflowManagedProviderInitializationRegistersCandidate(t *testing.T) {
 		},
 	}
 	agent := &AgentInstance{
-		ID:        "reviewer",
-		Model:     "default-model",
-		Workspace: t.TempDir(),
+		ID:                 "reviewer",
+		AccountRef:         "account",
+		Model:              "default-model",
+		Workspace:          t.TempDir(),
+		CandidateProviders: map[string]providers.LLMProvider{},
 	}
-	var created []string
 	runner := &workflowAgentRunner{loop: &AgentLoop{
 		cfg: cfg,
-		providerFactory: func(mc *config.ModelConfig) (providers.LLMProvider, string, error) {
-			created = append(created, mc.ModelName)
-			return workflowManagedTestProvider{model: mc.Model}, mc.Model, nil
-		},
 	}}
 	raw := map[string]any{
 		"optimization": map[string]any{
@@ -1542,18 +1563,12 @@ func TestWorkflowManagedProviderInitializationRegistersCandidate(t *testing.T) {
 	if err := runner.ensureWorkflowManagedProviders(agent, raw); err != nil {
 		t.Fatalf("ensureWorkflowManagedProviders() error = %v", err)
 	}
-	if len(created) != 1 || created[0] != "cheap-model" {
-		t.Fatalf("created providers = %#v, want cheap-model once", created)
-	}
-	protocol, modelID := providers.ExtractProtocol(cfg.ModelList[1])
+	protocol, modelID := "openai", "cheap-model"
 	if agent.CandidateProviders[providers.ModelKey(protocol, modelID)] == nil {
 		t.Fatalf("candidate provider for %s/%s not registered: %#v", protocol, modelID, agent.CandidateProviders)
 	}
 	if err := runner.ensureWorkflowManagedProviders(agent, raw); err != nil {
 		t.Fatalf("second ensureWorkflowManagedProviders() error = %v", err)
-	}
-	if len(created) != 1 {
-		t.Fatalf("created providers after second call = %#v, want no duplicate", created)
 	}
 }
 
@@ -1569,6 +1584,48 @@ func TestWorkflowManagedProviderInitializationReportsCandidateFailures(t *testin
 	})
 	if err == nil || !strings.Contains(err.Error(), "missing-model") {
 		t.Fatalf("ensureWorkflowManagedProviders() error = %v, want missing-model failure", err)
+	}
+}
+
+func TestWorkflowManagedMissingAliasFailsBeforeLLMCall(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}}
+	provider := &aliasRuntimeCountingProvider{}
+	loop := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
+	t.Cleanup(loop.Close)
+
+	_, err := (&workflowAgentRunner{loop: loop}).RunAgent(
+		context.Background(),
+		workflows.AgentRequest{
+			AgentID: "main",
+			Prompt:  "Review the assigned scope.",
+			History: "none",
+			Managed: map[string]any{
+				"mode":                "auto",
+				"max_items_per_chunk": 1,
+				"optimization": map[string]any{
+					"model": map[string]any{
+						"enabled":    true,
+						"candidates": []any{"raw-or-missing-model"},
+					},
+				},
+			},
+			Scope: []any{
+				map[string]any{"id": "a"},
+				map[string]any{"id": "b"},
+			},
+			Output: &workflows.AgentOutputContract{
+				Format: "json",
+				Schema: map[string]any{"type": "object"},
+			},
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "raw-or-missing-model") {
+		t.Fatalf("RunAgent() error = %v, want strict missing-alias failure", err)
+	}
+	if calls := provider.calls.Load(); calls != 0 {
+		t.Fatalf("provider calls = %d, want failure before LLM I/O", calls)
 	}
 }
 
@@ -1600,25 +1657,36 @@ func TestWorkflowManagedModelCandidateMapUsesModelFallback(t *testing.T) {
 
 func TestWorkflowManagedModelProfileUsesSubscriptionEquivalentPricing(t *testing.T) {
 	cfg := &config.Config{
+		ModelAliases: []config.ModelAliasConfig{
+			{Name: "subscription-model", Model: "subscription-model"},
+			{Name: "metered-model", Model: "metered-model"},
+		},
 		ModelList: []*config.ModelConfig{
+			{
+				ModelName: "account",
+				Provider:  "openai",
+				APIBase:   "http://example.invalid/v1",
+				APIKeys:   config.SimpleSecureStrings("test-key"),
+				Enabled:   true,
+			},
 			{
 				ModelName:                   "subscription-model",
 				Provider:                    "openai",
-				Model:                       "openai/subscription-model",
+				Model:                       "subscription-model",
 				Subscription:                true,
 				SubscriptionEquivalentModel: "metered-model",
 			},
 			{
 				ModelName:          "metered-model",
 				Provider:           "openai",
-				Model:              "openai/metered-model",
+				Model:              "metered-model",
 				InputPricePerMTok:  2.5,
 				OutputPricePerMTok: 10,
 			},
 		},
 	}
 
-	profile := workflowModelCandidateProfile(cfg, "subscription-model")
+	profile := workflowModelCandidateProfile(cfg, "account", "subscription-model")
 	if !profile.subscription || !profile.priceKnown {
 		t.Fatalf("profile = %#v, want subscription with known equivalent price", profile)
 	}
@@ -1631,6 +1699,83 @@ func TestWorkflowManagedModelProfileUsesSubscriptionEquivalentPricing(t *testing
 	}
 	if profile.source != "subscription_equivalent_model_config" {
 		t.Fatalf("profile source = %q, want subscription_equivalent_model_config", profile.source)
+	}
+}
+
+func TestWorkflowManagedModelProfileStopsSubscriptionEquivalentCycle(t *testing.T) {
+	cfg := &config.Config{
+		ModelAliases: []config.ModelAliasConfig{
+			{Name: "subscription-a", Model: "subscription-a"},
+			{Name: "subscription-b", Model: "subscription-b"},
+		},
+		ModelList: []*config.ModelConfig{
+			{
+				ModelName: "account",
+				Provider:  "openai",
+				Enabled:   true,
+			},
+			{
+				ModelName:                   "subscription-a-metadata",
+				Provider:                    "openai",
+				Model:                       "subscription-a",
+				Subscription:                true,
+				SubscriptionEquivalentModel: "subscription-b",
+			},
+			{
+				ModelName:                   "subscription-b-metadata",
+				Provider:                    "openai",
+				Model:                       "subscription-b",
+				Subscription:                true,
+				SubscriptionEquivalentModel: "subscription-a",
+			},
+		},
+	}
+
+	profile := workflowModelCandidateProfile(cfg, "account", "subscription-a")
+	if !profile.subscription {
+		t.Fatalf("profile = %#v, want subscription metadata", profile)
+	}
+	if profile.priceKnown {
+		t.Fatalf("profile = %#v, want cycle to stop without inherited pricing", profile)
+	}
+}
+
+func TestWorkflowManagedModelProfileBoundsSubscriptionEquivalentDepth(t *testing.T) {
+	const terminalIndex = workflowModelCandidateProfileMaxEquivalentDepth
+	cfg := &config.Config{
+		ModelList: []*config.ModelConfig{{
+			ModelName: "account",
+			Provider:  "openai",
+			Enabled:   true,
+		}},
+	}
+	for i := 0; i <= terminalIndex; i++ {
+		name := fmt.Sprintf("subscription-%d", i)
+		cfg.ModelAliases = append(cfg.ModelAliases, config.ModelAliasConfig{
+			Name:  name,
+			Model: name,
+		})
+		metadata := &config.ModelConfig{
+			ModelName:    name + "-metadata",
+			Provider:     "openai",
+			Model:        name,
+			Subscription: true,
+		}
+		if i < terminalIndex {
+			metadata.SubscriptionEquivalentModel = fmt.Sprintf("subscription-%d", i+1)
+		} else {
+			metadata.InputPricePerMTok = 1
+			metadata.OutputPricePerMTok = 2
+		}
+		cfg.ModelList = append(cfg.ModelList, metadata)
+	}
+
+	profile := workflowModelCandidateProfile(cfg, "account", "subscription-0")
+	if profile.priceKnown {
+		t.Fatalf(
+			"profile inherited pricing beyond depth limit: %#v",
+			profile,
+		)
 	}
 }
 
@@ -1728,10 +1873,6 @@ func (p *workflowToolsCaptureProvider) Chat(
 	return &providers.LLMResponse{Content: response}, nil
 }
 
-func (p *workflowToolsCaptureProvider) GetDefaultModel() string {
-	return "mock-model"
-}
-
 func (p *workflowToolsCaptureProvider) ToolCounts() []int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1746,10 +1887,6 @@ func (p workflowManagedTestProvider) Chat(
 	map[string]any,
 ) (*providers.LLMResponse, error) {
 	return &providers.LLMResponse{Content: "{}"}, nil
-}
-
-func (p workflowManagedTestProvider) GetDefaultModel() string {
-	return p.model
 }
 
 func workflowTestScopeIDs(t *testing.T, message string) []string {

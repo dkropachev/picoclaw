@@ -16,12 +16,19 @@ import (
 var configPath = ""
 
 func initTest(t *testing.T) {
+	t.Helper()
 	tmpDir := t.TempDir()
 	configPath = filepath.Join(tmpDir, "config.json")
-	_ = os.Setenv("PICOCLAW_CONFIG", configPath)
+	t.Setenv("PICOCLAW_CONFIG", configPath)
 }
 
-// captureStdout captures stdout during the execution of fn and returns the captured output
+func testConfigRevision(t *testing.T, path string) string {
+	t.Helper()
+	revision, err := config.ConfigRevision(path)
+	require.NoError(t, err)
+	return revision
+}
+
 func captureStdout(fn func()) string {
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
@@ -29,380 +36,210 @@ func captureStdout(fn func()) string {
 
 	fn()
 
-	w.Close()
+	_ = w.Close()
 	os.Stdout = oldStdout
 
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	_, _ = io.Copy(&buf, r)
+	_ = r.Close()
 	return buf.String()
+}
+
+func configuredAliases() *config.Config {
+	return &config.Config{
+		Version: config.CurrentVersion,
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				AccountRef: "account-main",
+				ModelName:  "coding",
+			},
+		},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "account-main",
+			Model:     "provider-model",
+			APIKeys:   config.SimpleSecureStrings("test"),
+			Enabled:   true,
+		}},
+		ModelAliases: []config.ModelAliasConfig{
+			{Name: "coding", Model: "provider-model"},
+			{
+				Name:  "fast",
+				Model: "fast-model",
+				AccountOverrides: map[string]string{
+					"account-main": "fast-model-for-main",
+				},
+			},
+		},
+	}
 }
 
 func TestNewModelCommand(t *testing.T) {
 	cmd := NewModelCommand()
 
 	require.NotNil(t, cmd)
-
-	assert.Equal(t, "model [model_name]", cmd.Use)
-	assert.Equal(t, "Show or change the default model", cmd.Short)
-
-	assert.Len(t, cmd.Aliases, 0)
-
-	assert.False(t, cmd.HasFlags())
-
-	assert.Nil(t, cmd.Run)
+	assert.Equal(t, "model [model_alias]", cmd.Use)
+	assert.Equal(t, "Show or change the configured model alias", cmd.Short)
 	assert.NotNil(t, cmd.RunE)
-
-	assert.Nil(t, cmd.PersistentPreRunE)
-	assert.Nil(t, cmd.PersistentPreRun)
-	assert.Nil(t, cmd.PersistentPostRun)
+	assert.NotNil(t, cmd.Args)
 }
 
-func TestShowCurrentModel_WithDefaultModel(t *testing.T) {
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				ModelName: "gpt-4",
-			},
-		},
-		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "gpt-4",
-				Model:     "openai/gpt-4",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-			{
-				ModelName: "claude-3",
-				Model:     "anthropic/claude-3",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-		},
-	}
+func TestShowCurrentModel_ShowsAccountAndAliasSeparately(t *testing.T) {
+	output := captureStdout(func() {
+		showCurrentModel(configuredAliases())
+	})
+
+	assert.Contains(t, output, "Current account: account-main")
+	assert.Contains(t, output, "Current model alias: coding")
+	assert.Contains(t, output, "Available model aliases:")
+	assert.Contains(t, output, "> - coding (provider-model)")
+	assert.Contains(t, output, "  - fast (fast-model, 1 account override(s))")
+}
+
+func TestShowCurrentModel_NoAliasSurfacesExactError(t *testing.T) {
+	cfg := configuredAliases()
+	cfg.Agents.Defaults.ModelName = ""
 
 	output := captureStdout(func() {
 		showCurrentModel(cfg)
 	})
 
-	assert.Contains(t, output, "Current default model: gpt-4")
-	assert.Contains(t, output, "Available models in your config:")
-	assert.Contains(t, output, "gpt-4")
-	assert.Contains(t, output, "claude-3")
-}
-
-func TestShowCurrentModel_NoDefaultModel(t *testing.T) {
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				ModelName: "",
-			},
-		},
-		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "gpt-4",
-				Model:     "openai/gpt-4",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-		},
-	}
-
-	output := captureStdout(func() {
-		showCurrentModel(cfg)
-	})
-
-	assert.Contains(t, output, "No default model is currently set.")
-	assert.Contains(t, output, "Available models in your config:")
+	assert.Contains(t, output, "Current model alias: (none) — no model configured")
 }
 
 func TestListAvailableModels_Empty(t *testing.T) {
-	cfg := &config.Config{
-		ModelList: []*config.ModelConfig{},
-	}
-
 	output := captureStdout(func() {
-		listAvailableModels(cfg)
+		listAvailableModels(&config.Config{})
 	})
 
-	assert.Contains(t, output, "No models configured in model_list")
+	assert.Contains(t, output, "No model aliases configured")
 }
 
-func TestListAvailableModels_WithModels(t *testing.T) {
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				ModelName: "gpt-4",
-			},
-		},
-		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "gpt-4",
-				Model:     "openai/gpt-4",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-			{
-				ModelName: "claude-3",
-				Model:     "anthropic/claude-3",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-			{ModelName: "no-key-model", Model: "openai/test"},
-		},
-	}
-
-	output := captureStdout(func() {
-		listAvailableModels(cfg)
-	})
-
-	assert.NotEmpty(t, output)
-	assert.Contains(t, output, "> - gpt-4 (openai/gpt-4)")
-	assert.Contains(t, output, "claude-3 (anthropic/claude-3)")
-	assert.NotContains(t, output, "no-key-model")
-}
-
-func TestSetDefaultModel_ValidModel(t *testing.T) {
+func TestSelectModelAlias_ExactAliasRetainsAccount(t *testing.T) {
 	initTest(t)
-
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				ModelName: "old-model",
-			},
-		},
-		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "new-model",
-				Model:     "openai/new-model",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-			{
-				ModelName: "old-model",
-				Model:     "openai/old-model",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-		},
-	}
+	cfg := configuredAliases()
 
 	output := captureStdout(func() {
-		err := setDefaultModel(configPath, cfg, "new-model")
-		assert.NoError(t, err)
+		require.NoError(t, selectModelAlias(
+			configPath,
+			cfg,
+			"fast",
+			testConfigRevision(t, configPath),
+		))
 	})
 
-	assert.Contains(t, output, "Default model changed from 'old-model' to 'new-model'")
+	assert.Contains(t, output, "Model alias changed from 'coding' to 'fast'")
+	assert.Contains(t, output, "Account remains 'account-main'")
 
-	// Verify config was updated
 	updatedCfg, err := config.LoadConfig(configPath)
 	require.NoError(t, err)
-	assert.Equal(t, "new-model", updatedCfg.Agents.Defaults.ModelName)
+	assert.Equal(t, "account-main", updatedCfg.Agents.Defaults.AccountRef)
+	assert.Equal(t, "fast", updatedCfg.Agents.Defaults.ModelName)
 }
 
-func TestSetDefaultModel_InvalidModel(t *testing.T) {
+func TestSelectModelAlias_RejectsStaleConfigRevision(t *testing.T) {
 	initTest(t)
+	require.NoError(t, config.SaveConfig(configPath, configuredAliases()))
 
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				ModelName: "existing-model",
-			},
-		},
-		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "existing-model",
-				Model:     "openai/existing",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-		},
-	}
+	stale, staleRevision, err := config.LoadConfigForUpdateSnapshot(configPath)
+	require.NoError(t, err)
+	concurrent, concurrentRevision, err := config.LoadConfigForUpdateSnapshot(configPath)
+	require.NoError(t, err)
+	concurrent.ModelAliases = append(
+		concurrent.ModelAliases,
+		config.ModelAliasConfig{Name: "concurrent", Model: "new-model"},
+	)
+	_, err = config.SaveConfigIfRevision(configPath, concurrent, concurrentRevision)
+	require.NoError(t, err)
 
-	assert.Error(t, setDefaultModel(configPath, cfg, "nonexistent-model"))
+	err = selectModelAlias(configPath, stale, "fast", staleRevision)
+	require.ErrorIs(t, err, config.ErrConfigRevisionMismatch)
+	assert.Contains(t, err.Error(), "config changed while selecting model alias; reload and retry")
+
+	updated, err := config.LoadConfig(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "coding", updated.Agents.Defaults.ModelName)
+	require.Len(t, updated.ModelAliases, 3)
+	assert.Equal(t, "concurrent", updated.ModelAliases[2].Name)
 }
 
-func TestSetDefaultModel_ModelWithoutAPIKey(t *testing.T) {
+func TestSelectModelAlias_RejectsRawModelID(t *testing.T) {
 	initTest(t)
+	cfg := configuredAliases()
 
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				ModelName: "existing-model",
-			},
-		},
-		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "existing-model",
-				Model:     "openai/existing",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-			{ModelName: "no-key-model", Model: "openai/nokey"},
-		},
-	}
+	err := selectModelAlias(
+		configPath,
+		cfg,
+		"provider-model",
+		testConfigRevision(t, configPath),
+	)
 
-	assert.Error(t, setDefaultModel(configPath, cfg, "no-key-model"))
+	require.EqualError(t, err, `model alias "provider-model" is not configured`)
+	assert.Equal(t, "coding", cfg.Agents.Defaults.ModelName)
 }
 
-func TestSetDefaultModel_SaveConfigError(t *testing.T) {
-	// Use an invalid path to trigger save error
-	invalidPath := "/nonexistent/directory/config.json"
+func TestSelectModelAlias_EmptyReturnsExactConfigurationError(t *testing.T) {
+	initTest(t)
+	cfg := configuredAliases()
 
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				ModelName: "old-model",
-			},
-		},
-		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "new-model",
-				Model:     "openai/new-model",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-		},
-	}
+	err := selectModelAlias(configPath, cfg, "", testConfigRevision(t, configPath))
 
-	err := setDefaultModel(invalidPath, cfg, "new-model")
+	require.ErrorIs(t, err, config.ErrNoModelConfigured)
+	require.EqualError(t, err, "no model configured")
+	assert.Equal(t, "coding", cfg.Agents.Defaults.ModelName)
+}
 
-	assert.Error(t, err)
+func TestSelectModelAlias_RequiresExplicitAccount(t *testing.T) {
+	initTest(t)
+	cfg := configuredAliases()
+	cfg.Agents.Defaults.AccountRef = ""
+
+	err := selectModelAlias(
+		configPath,
+		cfg,
+		"fast",
+		testConfigRevision(t, configPath),
+	)
+
+	require.EqualError(t, err, "no account configured")
+	assert.Equal(t, "coding", cfg.Agents.Defaults.ModelName)
+}
+
+func TestSelectModelAlias_SaveConfigError(t *testing.T) {
+	cfg := configuredAliases()
+
+	const invalidPath = "/nonexistent/directory/config.json"
+	err := selectModelAlias(
+		invalidPath,
+		cfg,
+		"fast",
+		testConfigRevision(t, invalidPath),
+	)
+
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to save config")
 }
 
 func TestFormatModelName(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{"empty string", "", "(none)"},
-		{"simple model", "gpt-4", "gpt-4"},
-		{"model with version", "claude-sonnet-4.6", "claude-sonnet-4.6"},
-		{"model with spaces", "my model", "my model"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := formatModelName(tt.input)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
+	assert.Equal(t, "(none)", formatModelName(""))
+	assert.Equal(t, "coding", formatModelName("coding"))
 }
 
-func TestModelCommandExecution_Show(t *testing.T) {
+func TestModelCommandExecution_SetExactAlias(t *testing.T) {
 	initTest(t)
-
-	// Create a test config
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				ModelName: "test-model",
-			},
-		},
-		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "test-model",
-				Model:     "openai/test",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-		},
-	}
-
-	err := config.SaveConfig(configPath, cfg)
-	require.NoError(t, err)
+	require.NoError(t, config.SaveConfig(configPath, configuredAliases()))
 
 	cmd := NewModelCommand()
-
 	output := captureStdout(func() {
-		err = cmd.RunE(cmd, []string{})
-		assert.NoError(t, err)
+		require.NoError(t, cmd.RunE(cmd, []string{"fast"}))
 	})
 
-	assert.Contains(t, output, "Current default model: test-model")
-}
-
-func TestModelCommandExecution_Set(t *testing.T) {
-	initTest(t)
-
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				ModelName: "old-model",
-			},
-		},
-		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "old-model",
-				Model:     "openai/old",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-			{
-				ModelName: "new-model",
-				Model:     "openai/new",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-		},
-	}
-
-	err := config.SaveConfig(configPath, cfg)
-	require.NoError(t, err)
-
-	cmd := NewModelCommand()
-
-	output := captureStdout(func() {
-		err = cmd.RunE(cmd, []string{"new-model"})
-		assert.NoError(t, err)
-	})
-
-	assert.Contains(t, output, "Default model changed from 'old-model' to 'new-model'")
+	assert.Contains(t, output, "Model alias changed from 'coding' to 'fast'")
 }
 
 func TestModelCommandExecution_TooManyArgs(t *testing.T) {
 	cmd := NewModelCommand()
 
-	err := cmd.RunE(cmd, []string{"model1", "model2"})
+	err := cmd.Args(cmd, []string{"one", "two"})
 
-	assert.Error(t, err)
-}
-
-func TestListAvailableModels_MarkerLogic(t *testing.T) {
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				ModelName: "middle-model",
-			},
-		},
-		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "first-model",
-				Model:     "openai/first",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-			{
-				ModelName: "middle-model",
-				Model:     "openai/middle",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-			{
-				ModelName: "last-model",
-				Model:     "openai/last",
-				APIKeys:   config.SecureStrings{config.NewSecureString("test")},
-				Enabled:   true,
-			},
-		},
-	}
-
-	output := captureStdout(func() {
-		listAvailableModels(cfg)
-	})
-
-	assert.Contains(t, output, "  - first-model (openai/first)")
-	assert.Contains(t, output, "> - middle-model (openai/middle)")
-	assert.Contains(t, output, "  - last-model (openai/last)")
+	require.Error(t, err)
 }

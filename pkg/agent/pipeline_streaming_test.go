@@ -113,10 +113,6 @@ func (p *configuredStreamingProvider) ChatStreamEvents(
 	return &providers.LLMResponse{Content: "stream response"}, nil
 }
 
-func (p *configuredStreamingProvider) GetDefaultModel() string {
-	return "mock-model"
-}
-
 type configuredStreamingChatOnlyProvider struct {
 	chatCalls int
 }
@@ -130,10 +126,6 @@ func (p *configuredStreamingChatOnlyProvider) Chat(
 ) (*providers.LLMResponse, error) {
 	p.chatCalls++
 	return &providers.LLMResponse{Content: "chat only"}, nil
-}
-
-func (p *configuredStreamingChatOnlyProvider) GetDefaultModel() string {
-	return "mock-model"
 }
 
 type configuredStreamingDelegate struct {
@@ -365,7 +357,7 @@ func TestConfiguredStreamingEligibilityGates(t *testing.T) {
 
 			if tt.streamingProvider {
 				provider := &configuredStreamingProvider{}
-				al := NewAgentLoop(cfg, msgBus, provider)
+				al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 				runConfiguredStreamingTurn(t, al, tt.channel)
 				if provider.streamCalls != tt.wantStreamCalls {
 					t.Fatalf("ChatStream calls = %d, want %d", provider.streamCalls, tt.wantStreamCalls)
@@ -377,7 +369,7 @@ func TestConfiguredStreamingEligibilityGates(t *testing.T) {
 			}
 
 			provider := &configuredStreamingChatOnlyProvider{}
-			al := NewAgentLoop(cfg, msgBus, provider)
+			al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 			runConfiguredStreamingTurn(t, al, tt.channel)
 			if provider.chatCalls != tt.wantChatCalls {
 				t.Fatalf("Chat calls = %d, want %d", provider.chatCalls, tt.wantChatCalls)
@@ -396,7 +388,7 @@ func TestConfiguredStreamingPreChunkFailureFallsBackToChat(t *testing.T) {
 		}},
 		chatResponse: &providers.LLMResponse{Content: "chat after stream failure"},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	got := runConfiguredStreamingTurn(t, al, "pico")
 
@@ -428,7 +420,7 @@ func TestConfiguredStreamingDisabledForInternalTurnWithoutUserVisibleOutput(t *t
 		}},
 		chatResponse: &providers.LLMResponse{Content: "chat response"},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	opts := configuredStreamingProcessOptions("pico")
 	opts.SendResponse = false
 	opts.AllowInterimPicoPublish = false
@@ -459,7 +451,7 @@ func TestConfiguredStreamingVisibleSendResponseFalseRetainsFinalizedStreamMarker
 			response: &providers.LLMResponse{Content: "stream response"},
 		}},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	got := runConfiguredStreamingTurn(t, al, "pico")
 
@@ -489,7 +481,7 @@ func TestConfiguredStreamingStreamsPicoReasoningBeforeAnswerContent(t *testing.T
 			},
 		}},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	got := runConfiguredStreamingTurn(t, al, "pico")
 	if got != "answer" {
@@ -535,7 +527,7 @@ func TestConfiguredStreamingSuppressesPicoReasoningWhenThinkingOff(t *testing.T)
 			},
 		}},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	got := runConfiguredStreamingTurn(t, al, "pico")
 	if got != "answer" {
@@ -568,7 +560,7 @@ func TestConfiguredStreamingFinalFlushFailureAfterVisibleOutputReturnsErrorWitho
 			response: &providers.LLMResponse{Content: "stream response"},
 		}},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	_, err := al.runAgentLoop(
 		context.Background(),
@@ -598,7 +590,7 @@ func TestConfiguredStreamingFinalFlushFailureBeforeVisibleOutputPublishesFallbac
 			response: &providers.LLMResponse{Content: "stream response"},
 		}},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	got := runConfiguredStreamingTurn(t, al, "pico")
 
@@ -631,7 +623,7 @@ func TestConfiguredStreamingFinalFlushFailureBeforeVisibleOutputKeepsNormalOutbo
 			response: &providers.LLMResponse{Content: "stream response"},
 		}},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	opts := configuredStreamingProcessOptions("pico")
 	opts.SendResponse = true
 
@@ -667,7 +659,7 @@ func TestConfiguredStreamingUpdateFailureThenStreamErrorFallsBackToChat(t *testi
 		}},
 		chatResponse: &providers.LLMResponse{Content: "chat fallback after invisible update"},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	got := runConfiguredStreamingTurn(t, al, "pico")
 
@@ -702,7 +694,7 @@ func TestConfiguredStreamingUpdateFailureThenStreamSuccessFallsBackToChat(t *tes
 		}},
 		chatResponse: &providers.LLMResponse{Content: "chat fallback after invisible update"},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	got := runConfiguredStreamingTurn(t, al, "pico")
 
@@ -737,7 +729,7 @@ func TestConfiguredStreamingLaterUpdateFailureThenStreamSuccessReturnsVisibleErr
 		}},
 		chatResponse: &providers.LLMResponse{Content: "chat fallback after later update failure"},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	_, err := al.runAgentLoop(
 		context.Background(),
@@ -763,7 +755,7 @@ func TestConfiguredStreamingLaterUpdateFailureThenStreamSuccessReturnsVisibleErr
 	}
 }
 
-func TestConfiguredStreamingBeforeLLMModelRewriteReevaluatesModelStreaming(t *testing.T) {
+func TestConfiguredStreamingBeforeLLMModelRewritePreservesAccountStreaming(t *testing.T) {
 	tests := []struct {
 		name                   string
 		initialModelStreaming  bool
@@ -775,18 +767,18 @@ func TestConfiguredStreamingBeforeLLMModelRewriteReevaluatesModelStreaming(t *te
 		wantFinalizedResponses int
 	}{
 		{
-			name:                  "rewrite to disabled model uses chat",
-			initialModelStreaming: true,
-			rewriteModel:          "hook-disabled-model",
-			wantChatCalls:         1,
-		},
-		{
-			name:                   "rewrite to enabled model streams",
-			rewriteModel:           "hook-enabled-model",
-			rewriteModelStreaming:  true,
-			fallbacks:              []string{"fallback-model"},
+			name:                   "rewrite keeps enabled account streaming",
+			initialModelStreaming:  true,
+			rewriteModel:           "hook-disabled-model",
 			wantStreamCalls:        1,
 			wantFinalizedResponses: 1,
+		},
+		{
+			name:                  "rewrite keeps disabled account streaming",
+			rewriteModel:          "hook-enabled-model",
+			rewriteModelStreaming: true,
+			fallbacks:             []string{"fallback-model"},
+			wantChatCalls:         1,
 		},
 	}
 
@@ -808,7 +800,7 @@ func TestConfiguredStreamingBeforeLLMModelRewriteReevaluatesModelStreaming(t *te
 					response: &providers.LLMResponse{Content: "stream response"},
 				}},
 			}
-			al := NewAgentLoop(cfg, msgBus, provider)
+			al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 			if err := al.MountHook(NamedHook("rewrite-model", configuredStreamingBeforeModelHook{
 				model: tt.rewriteModel,
 			})); err != nil {
@@ -832,7 +824,7 @@ func TestConfiguredStreamingBeforeLLMModelRewriteReevaluatesModelStreaming(t *te
 			if tt.wantStreamCalls == 1 && got != "stream response" {
 				t.Fatalf("response = %q, want stream response", got)
 			}
-			wantResolvedModel := "openai/" + tt.rewriteModel
+			wantResolvedModel := tt.rewriteModel
 			if tt.wantStreamCalls == 1 &&
 				(len(provider.streamModels) != 1 || provider.streamModels[0] != wantResolvedModel) {
 				t.Fatalf("stream models = %v, want [%s]", provider.streamModels, wantResolvedModel)
@@ -855,7 +847,7 @@ func TestConfiguredStreamingPostChunkFailureDoesNotFallBackToChat(t *testing.T) 
 			err:    errors.New("stream failed after chunk"),
 		}},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	_, err := al.runAgentLoop(
 		context.Background(),
@@ -888,7 +880,7 @@ func TestConfiguredStreamingPostChunkEOFDoesNotRetryOrCancelVisibleOutput(t *tes
 		}},
 		chatResponse: &providers.LLMResponse{Content: "chat retry"},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	_, err := al.runAgentLoop(
 		context.Background(),
@@ -920,7 +912,7 @@ func TestConfiguredStreamingFinalizesAfterAfterLLMHookMutation(t *testing.T) {
 			response: &providers.LLMResponse{Content: "original streamed response"},
 		}},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	if err := al.MountHook(NamedHook("rewrite-stream-response", configuredStreamingAfterHook{
 		content: "hooked final response",
 	})); err != nil {
@@ -958,7 +950,7 @@ func TestConfiguredStreamingAfterLLMAbortCancelsPublishedStream(t *testing.T) {
 					response: &providers.LLMResponse{Content: "should not be visible"},
 				}},
 			}
-			al := NewAgentLoop(cfg, msgBus, provider)
+			al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 			if err := al.MountHook(NamedHook("abort-stream-response", configuredStreamingAfterHook{
 				action: tt.action,
 			})); err != nil {
@@ -992,7 +984,7 @@ func TestConfiguredStreamingFinalizesWithDefaultResponseWhenContentEmpty(t *test
 			response: &providers.LLMResponse{},
 		}},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	got := runConfiguredStreamingTurn(t, al, "pico")
 
@@ -1028,7 +1020,7 @@ func TestConfiguredStreamingToolCallsUseCompleteStreamResponse(t *testing.T) {
 			},
 		},
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	agent := al.GetRegistry().GetDefaultAgent()
 	agent.Tools.Register(&toolLimitTestTool{})
 

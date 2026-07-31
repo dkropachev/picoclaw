@@ -5,8 +5,12 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -23,6 +27,9 @@ type seahorseContextManager struct {
 	engine   *seahorse.Engine
 	sessions session.SessionStore // for startup bootstrap
 	al       *AgentLoop           // for resolving the agent that owns a session
+	engines  map[string]*seahorse.Engine
+	closeMu  sync.Mutex
+	closed   bool
 }
 
 // newSeahorseContextManager creates a seahorse-backed ContextManager.
@@ -31,39 +38,59 @@ func newSeahorseContextManager(_ json.RawMessage, al *AgentLoop) (ContextManager
 		return nil, fmt.Errorf("seahorse: AgentLoop is required")
 	}
 
-	// Resolve workspace for DB path
-	// DB stores session data, so it goes in sessions/ directory
-	agent := al.registry.GetDefaultAgent()
-	dbPath := agent.Workspace + "/sessions/seahorse.db"
-
-	// Create CompleteFn from provider
-	completeFn := providerToCompleteFn(agent.Provider, agent.Model)
-
-	// Create engine
-	engine, err := seahorse.NewEngine(seahorse.Config{
-		DBPath: dbPath,
-	}, completeFn)
-	if err != nil {
-		return nil, fmt.Errorf("seahorse: create engine: %w", err)
+	registry := al.GetRegistry()
+	if registry == nil {
+		return nil, fmt.Errorf("seahorse: agent registry is required")
 	}
-
+	defaultAgent := registry.GetDefaultAgent()
+	if defaultAgent == nil {
+		return nil, fmt.Errorf("seahorse: default agent is required")
+	}
 	mgr := &seahorseContextManager{
-		engine:   engine,
-		sessions: agent.Sessions,
+		sessions: defaultAgent.Sessions,
 		al:       al,
+		engines:  make(map[string]*seahorse.Engine),
 	}
 
-	// Register seahorse tools with the agent's tool registry
-	retrieval := mgr.engine.GetRetrieval()
-	al.RegisterTool(seahorse.NewGrepTool(retrieval))
-	al.RegisterTool(seahorse.NewExpandTool(retrieval))
-
-	// Bootstrap all existing sessions at startup
-	if agent.Sessions != nil {
-		ctx := context.Background()
-		for _, sessionKey := range agent.Sessions.ListSessions() {
-			mgr.bootstrapSession(ctx, sessionKey)
+	agentIDs := registry.ListAgentIDs()
+	sort.Strings(agentIDs)
+	for _, agentID := range agentIDs {
+		agent, ok := registry.GetAgent(agentID)
+		if !ok || agent == nil {
+			continue
 		}
+		engine, err := seahorse.NewEngine(seahorse.Config{
+			DBPath: filepath.Join(agent.Workspace, "sessions", "seahorse.db"),
+		}, agentProviderToCompleteFn(al, agent))
+		if err != nil {
+			for _, created := range mgr.engines {
+				_ = created.Close()
+			}
+			return nil, fmt.Errorf(
+				"seahorse: create engine for agent %q: %w",
+				agent.ID,
+				err,
+			)
+		}
+		mgr.engines[agent.ID] = engine
+		if agent == defaultAgent {
+			mgr.engine = engine
+		}
+
+		if agent.Tools != nil {
+			retrieval := engine.GetRetrieval()
+			agent.Tools.Register(seahorse.NewGrepTool(retrieval))
+			agent.Tools.Register(seahorse.NewExpandTool(retrieval))
+		}
+		if agent.Sessions != nil {
+			ctx := context.Background()
+			for _, sessionKey := range agent.Sessions.ListSessions() {
+				mgr.bootstrapAgentSession(ctx, agent, engine, sessionKey)
+			}
+		}
+	}
+	if mgr.engine == nil {
+		return nil, fmt.Errorf("seahorse: default agent engine is required")
 	}
 
 	return mgr, nil
@@ -90,6 +117,123 @@ func providerToCompleteFn(provider providers.LLMProvider, model string) seahorse
 	}
 }
 
+func agentProviderToCompleteFn(al *AgentLoop, agent *AgentInstance) seahorse.CompleteFn {
+	agentID := ""
+	if agent != nil {
+		agentID = agent.ID
+	}
+	return func(ctx context.Context, prompt string, opts seahorse.CompleteOptions) (string, error) {
+		if al == nil {
+			return "", fmt.Errorf("seahorse completion: agent loop is not initialized")
+		}
+		if strings.TrimSpace(agentID) == "" {
+			return "", fmt.Errorf("seahorse completion: agent ID is not configured")
+		}
+
+		leaseCtx, releaseRuntime, err := al.acquireRuntimeUse(ctx)
+		if err != nil {
+			return "", fmt.Errorf("seahorse completion: acquire current runtime: %w", err)
+		}
+		defer releaseRuntime()
+
+		registry := al.GetRegistry()
+		if registry == nil {
+			return "", fmt.Errorf("seahorse completion: agent registry is not configured")
+		}
+		currentAgent, ok := registry.GetAgent(agentID)
+		if !ok || currentAgent == nil {
+			return "", fmt.Errorf(
+				"seahorse completion: agent %q is not present in the current runtime",
+				agentID,
+			)
+		}
+		provider, model, err := al.resolveContextCompletionTarget(
+			currentAgent,
+			prompt,
+			agentID+":seahorse",
+		)
+		if err != nil {
+			return "", err
+		}
+		return providerToCompleteFn(provider, model)(leaseCtx, prompt, opts)
+	}
+}
+
+func (m *seahorseContextManager) engineForSession(
+	sessionKey string,
+) (*seahorse.Engine, *AgentInstance) {
+	if m == nil {
+		return nil, nil
+	}
+	var resolvedAgent *AgentInstance
+	if m.al != nil {
+		if agent := m.al.agentForSession(sessionKey); agent != nil {
+			resolvedAgent = agent
+		}
+	}
+	m.closeMu.Lock()
+	defer m.closeMu.Unlock()
+	if m.closed {
+		return nil, resolvedAgent
+	}
+	if resolvedAgent != nil {
+		if engine := m.engines[resolvedAgent.ID]; engine != nil {
+			return engine, resolvedAgent
+		}
+	}
+	return m.engine, resolvedAgent
+}
+
+// Close releases every per-agent Seahorse engine. It is idempotent so reload
+// and shutdown paths can safely converge on the same manager.
+func (m *seahorseContextManager) Close() error {
+	if m == nil {
+		return nil
+	}
+
+	m.closeMu.Lock()
+	if m.closed {
+		m.closeMu.Unlock()
+		return nil
+	}
+	m.closed = true
+	engines := m.engines
+	defaultEngine := m.engine
+	m.engines = nil
+	m.engine = nil
+	m.closeMu.Unlock()
+
+	seen := make(map[*seahorse.Engine]struct{}, len(engines))
+	closeErrors := make([]error, 0)
+	for agentID, engine := range engines {
+		if engine == nil {
+			continue
+		}
+		if _, duplicate := seen[engine]; duplicate {
+			continue
+		}
+		seen[engine] = struct{}{}
+		if err := engine.Close(); err != nil {
+			closeErrors = append(closeErrors, fmt.Errorf(
+				"close Seahorse engine for agent %q: %w",
+				agentID,
+				err,
+			))
+		}
+	}
+	if defaultEngine != nil {
+		if _, duplicate := seen[defaultEngine]; !duplicate {
+			if err := defaultEngine.Close(); err != nil {
+				closeErrors = append(closeErrors, fmt.Errorf(
+					"close default Seahorse engine: %w",
+					err,
+				))
+			}
+		}
+	}
+	return errors.Join(closeErrors...)
+}
+
 // Assemble builds budget-aware context from seahorse SQLite.
 func (m *seahorseContextManager) Assemble(ctx context.Context, req *AssembleRequest) (*AssembleResponse, error) {
 	if req == nil {
@@ -111,7 +255,11 @@ func (m *seahorseContextManager) Assemble(ctx context.Context, req *AssembleRequ
 		effectiveBudget = budget / 2
 	}
 
-	result, err := m.engine.Assemble(ctx, req.SessionKey, seahorse.AssembleInput{
+	engine, _ := m.engineForSession(req.SessionKey)
+	if engine == nil {
+		return nil, fmt.Errorf("seahorse assemble: no engine for session")
+	}
+	result, err := engine.Assemble(ctx, req.SessionKey, seahorse.AssembleInput{
 		Budget: effectiveBudget,
 	})
 	if err != nil {
@@ -132,15 +280,19 @@ func (m *seahorseContextManager) Compact(ctx context.Context, req *CompactReques
 	if req == nil {
 		return nil
 	}
+	engine, _ := m.engineForSession(req.SessionKey)
+	if engine == nil {
+		return fmt.Errorf("seahorse compact: no engine for session")
+	}
 
 	// For retry (LLM overflow), use aggressive CompactUntilUnder to guarantee
 	// context shrinks below budget (spec lines ~1410).
 	if req.Reason == ContextCompressReasonRetry && req.Budget > 0 {
-		_, err := m.engine.CompactUntilUnder(ctx, req.SessionKey, req.Budget)
+		_, err := engine.CompactUntilUnder(ctx, req.SessionKey, req.Budget)
 		return err
 	}
 
-	_, err := m.engine.Compact(ctx, req.SessionKey, seahorse.CompactInput{
+	_, err := engine.Compact(ctx, req.SessionKey, seahorse.CompactInput{
 		Force:  req.Reason == ContextCompressReasonRetry,
 		Budget: &req.Budget,
 	})
@@ -153,24 +305,30 @@ func (m *seahorseContextManager) Ingest(ctx context.Context, req *IngestRequest)
 	if req == nil {
 		return nil
 	}
+	engine, _ := m.engineForSession(req.SessionKey)
+	if engine == nil {
+		return fmt.Errorf("seahorse ingest: no engine for session")
+	}
 
 	msg := providerToSeahorseMessage(req.Message)
-	_, err := m.engine.Ingest(ctx, req.SessionKey, []seahorse.Message{msg})
+	_, err := engine.Ingest(ctx, req.SessionKey, []seahorse.Message{msg})
 	return err
 }
 
 // Clear removes all stored context for a session (seahorse DB + JSONL).
 func (m *seahorseContextManager) Clear(ctx context.Context, sessionKey string) error {
-	if err := m.engine.ClearSession(ctx, sessionKey); err != nil {
+	engine, agent := m.engineForSession(sessionKey)
+	if engine == nil {
+		return fmt.Errorf("seahorse clear: no engine for session")
+	}
+	if err := engine.ClearSession(ctx, sessionKey); err != nil {
 		return err
 	}
 	// The session may belong to a routed (non-default) agent whose JSONL
 	// store differs from the bootstrap store, so clear the owner's store.
 	sessions := m.sessions
-	if m.al != nil {
-		if agent := m.al.agentForSession(sessionKey); agent != nil && agent.Sessions != nil {
-			sessions = agent.Sessions
-		}
+	if agent != nil && agent.Sessions != nil {
+		sessions = agent.Sessions
 	}
 	if sessions != nil {
 		sessions.SetHistory(sessionKey, []providers.Message{})
@@ -180,13 +338,16 @@ func (m *seahorseContextManager) Clear(ctx context.Context, sessionKey string) e
 	return nil
 }
 
-// bootstrapSession reconciles JSONL session history into seahorse SQLite.
-func (m *seahorseContextManager) bootstrapSession(ctx context.Context, sessionKey string) {
-	if m.sessions == nil {
+func (m *seahorseContextManager) bootstrapAgentSession(
+	ctx context.Context,
+	agent *AgentInstance,
+	engine *seahorse.Engine,
+	sessionKey string,
+) {
+	if agent == nil || agent.Sessions == nil || engine == nil {
 		return
 	}
-
-	history := m.sessions.GetHistory(sessionKey)
+	history := agent.Sessions.GetHistory(sessionKey)
 	if len(history) == 0 {
 		return
 	}
@@ -197,7 +358,7 @@ func (m *seahorseContextManager) bootstrapSession(ctx context.Context, sessionKe
 		msgs[i] = providerToSeahorseMessage(h)
 	}
 
-	if err := m.engine.Bootstrap(ctx, sessionKey, msgs); err != nil {
+	if err := engine.Bootstrap(ctx, sessionKey, msgs); err != nil {
 		logger.WarnCF("seahorse", "bootstrap", map[string]any{
 			"session": sessionKey,
 			"error":   err.Error(),

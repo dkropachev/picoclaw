@@ -162,9 +162,6 @@ func (c *LLMPatternClusterer) BuildPatterns(
 	}
 	model := strings.TrimSpace(c.model)
 	if model == "" {
-		model = strings.TrimSpace(c.provider.GetDefaultModel())
-	}
-	if model == "" {
 		return fallback.BuildPatterns(ctx, workspace, tasks, existing)
 	}
 
@@ -222,9 +219,6 @@ func (c *LLMPatternClusterer) BuildPatternsWithEvidence(
 		)
 	}
 	model := strings.TrimSpace(c.model)
-	if model == "" {
-		model = strings.TrimSpace(c.provider.GetDefaultModel())
-	}
 	if model == "" {
 		return buildFallbackPatternsWithEvidence(
 			ctx,

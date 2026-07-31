@@ -28,21 +28,28 @@ func buildModelWithProtocol(protocol, model string) string {
 }
 
 type legacyDiagnosticConfig struct {
-	Version     int                    `json:"version"`
-	Isolation   IsolationConfig        `json:"isolation,omitempty"`
-	Agents      legacyDiagnosticAgents `json:"agents,omitempty"`
-	Session     SessionConfig          `json:"session,omitempty"`
-	Channels    map[string]any         `json:"channels,omitempty"`
-	ChannelList ChannelsConfig         `json:"channel_list,omitempty"`
-	ModelList   []map[string]any       `json:"model_list,omitempty"`
-	Gateway     GatewayConfig          `json:"gateway,omitempty"`
-	Hooks       HooksConfig            `json:"hooks,omitempty"`
-	Tools       ToolsConfig            `json:"tools,omitempty"`
-	Heartbeat   HeartbeatConfig        `json:"heartbeat,omitempty"`
-	Devices     DevicesConfig          `json:"devices,omitempty"`
-	Voice       VoiceConfig            `json:"voice,omitempty"`
-	Bindings    json.RawMessage        `json:"bindings,omitempty"`
-	Providers   json.RawMessage        `json:"providers,omitempty"`
+	Version        int                    `json:"version"`
+	Isolation      IsolationConfig        `json:"isolation,omitempty"`
+	Agents         legacyDiagnosticAgents `json:"agents,omitempty"`
+	Session        SessionConfig          `json:"session,omitempty"`
+	Evolution      EvolutionConfig        `json:"evolution,omitempty"`
+	Channels       map[string]any         `json:"channels,omitempty"`
+	ChannelList    ChannelsConfig         `json:"channel_list,omitempty"`
+	ModelList      []map[string]any       `json:"model_list,omitempty"`
+	AccountRouters AccountRouterList      `json:"account_routers,omitempty"`
+	ModelRouters   ModelRouterList        `json:"model_routers,omitempty"`
+	Gateway        GatewayConfig          `json:"gateway,omitempty"`
+	Events         EventsConfig           `json:"events,omitempty"`
+	Workflows      WorkflowsConfig        `json:"workflows,omitempty"`
+	GitWorkspaces  GitWorkspacesConfig    `json:"git_workspaces,omitempty"`
+	Hooks          HooksConfig            `json:"hooks,omitempty"`
+	Tools          ToolsConfig            `json:"tools,omitempty"`
+	Heartbeat      HeartbeatConfig        `json:"heartbeat,omitempty"`
+	Devices        DevicesConfig          `json:"devices,omitempty"`
+	Voice          VoiceConfig            `json:"voice,omitempty"`
+	BuildInfo      BuildInfo              `json:"build_info,omitempty"`
+	Bindings       json.RawMessage        `json:"bindings,omitempty"`
+	Providers      json.RawMessage        `json:"providers,omitempty"`
 }
 
 type legacyDiagnosticAgents struct {
@@ -57,6 +64,27 @@ type legacyDiagnosticAgentDefaults struct {
 }
 
 func validateLegacyConfigDiagnostics(data []byte) error {
+	var raw map[string]any
+	removedLegacyGeminiModel := false
+	if err := json.Unmarshal(data, &raw); err == nil {
+		if tools, ok := raw["tools"].(map[string]any); ok {
+			if web, ok := tools["web"].(map[string]any); ok {
+				if gemini, ok := web["gemini"].(map[string]any); ok {
+					// Accepted only by the legacy diagnostics pass; the v3→v4
+					// migration consumes this raw selector into model_alias.
+					if _, exists := gemini["model"]; exists {
+						delete(gemini, "model")
+						removedLegacyGeminiModel = true
+					}
+				}
+			}
+		}
+		if removedLegacyGeminiModel {
+			if normalized, err := json.Marshal(raw); err == nil {
+				data = normalized
+			}
+		}
+	}
 	var cfg legacyDiagnosticConfig
 	return decodeJSONWithDiagnostics(data, &cfg, "config.json")
 }
@@ -91,7 +119,7 @@ func loadConfig(data []byte) (*Config, error) {
 	// zero-initializing them, so fields absent from the user's JSON (e.g. api_base)
 	// would silently inherit values from the DefaultConfig template at the same
 	// index position. We only reset cfg.ModelList when the user actually provides
-	// entries; when count is 0 we keep DefaultConfig's built-in list as fallback.
+	// entries; the current DefaultConfig intentionally has no model entries.
 	var tmp Config
 	if err := decodeJSONWithDiagnostics(data, &tmp, "config.json"); err != nil {
 		return nil, err
@@ -396,9 +424,532 @@ func migrateV2ToV3(m map[string]any) error {
 		m["channel_list"] = channels
 	}
 
-	m["version"] = CurrentVersion
+	m["version"] = 3
 
 	return nil
+}
+
+type legacyV3ModelAccount struct {
+	name     string
+	provider string
+	model    string
+}
+
+// migrateV3ToV4 introduces model aliases and separates the account selector
+// from the model alias selected by agents.
+//
+// Only model_list names that map unambiguously to one concrete model are
+// promoted to aliases. The migration never invents a provider default. An old
+// agent selector is retained as a model alias only when such an alias was
+// generated. A selector is moved to account_ref only when it names a known
+// concrete account, enabled account router, or supported credential account.
+// Unknown legacy values are cleared so the migrated first-run configuration
+// remains loadable without fabricating either half of the selection.
+func migrateV3ToV4(m map[string]any) error {
+	if !compareInt(m["version"], 3) {
+		return fmt.Errorf("migrateV3ToV4: expected version 3, got %v", m["version"])
+	}
+
+	type aliasCandidate struct {
+		name      string
+		model     string
+		ambiguous bool
+	}
+	candidates := make([]aliasCandidate, 0)
+	candidateIndex := make(map[string]int)
+	accounts := make([]legacyV3ModelAccount, 0)
+	configuredAccounts := make(map[string]struct{})
+	if modelList, ok := m["model_list"].([]any); ok {
+		for _, item := range modelList {
+			model, ok := item.(map[string]any)
+			if !ok || migrationModelIsRouter(model) {
+				continue
+			}
+			name, _ := model["model_name"].(string)
+			concreteModel, _ := model["model"].(string)
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			if enabled, _ := model["enabled"].(bool); enabled {
+				configuredAccounts[name] = struct{}{}
+			}
+			if strings.TrimSpace(concreteModel) == "" {
+				continue
+			}
+			provider, _ := model["provider"].(string)
+			accounts = append(accounts, legacyV3ModelAccount{
+				name:     name,
+				provider: strings.TrimSpace(provider),
+				model:    strings.TrimSpace(concreteModel),
+			})
+			if index, exists := candidateIndex[name]; exists {
+				if candidates[index].model != concreteModel {
+					candidates[index].ambiguous = true
+				}
+				continue
+			}
+			candidateIndex[name] = len(candidates)
+			candidates = append(candidates, aliasCandidate{name: name, model: concreteModel})
+		}
+	}
+	if routers, ok := m["account_routers"].([]any); ok {
+		for _, item := range routers {
+			router, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _ := router["name"].(string)
+			enabled, _ := router["enabled"].(bool)
+			if name = strings.TrimSpace(name); name != "" && enabled {
+				configuredAccounts[name] = struct{}{}
+			}
+		}
+	}
+
+	generatedAliases := make(map[string]string, len(candidates))
+	aliasAccounts := make(map[string]string, len(candidates))
+	aliases := make([]any, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.ambiguous {
+			continue
+		}
+		generatedAliases[candidate.name] = candidate.model
+		aliasAccounts[candidate.name] = candidate.name
+		aliases = append(aliases, map[string]any{
+			"name":  candidate.name,
+			"model": candidate.model,
+		})
+	}
+
+	// Older resolution accepted a raw concrete model ID (for example
+	// "gpt-4o") even when the account entry was named "openai". Preserve that
+	// explicit user selection as an alias only when it resolves to one
+	// unambiguous concrete account. Never derive a provider default.
+	for _, ref := range legacyV3ModelReferences(m) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			continue
+		}
+		if _, exists := generatedAliases[ref]; exists {
+			continue
+		}
+		account, concreteModel, ok := resolveLegacyV3ConcreteSelection(accounts, ref)
+		if !ok {
+			continue
+		}
+		generatedAliases[ref] = concreteModel
+		aliasAccounts[ref] = account
+		aliases = append(aliases, map[string]any{
+			"name":  ref,
+			"model": concreteModel,
+		})
+	}
+
+	ensureWebSearchAlias := func(rawModel, preferredName string) string {
+		rawModel = strings.TrimSpace(rawModel)
+		if rawModel == "" {
+			return ""
+		}
+		for _, item := range aliases {
+			alias, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			model, _ := alias["model"].(string)
+			if strings.TrimSpace(model) == rawModel {
+				name, _ := alias["name"].(string)
+				return name
+			}
+		}
+		aliasName := preferredName
+		for suffix := 2; ; suffix++ {
+			if _, exists := generatedAliases[aliasName]; !exists {
+				break
+			}
+			aliasName = fmt.Sprintf("%s-%d", preferredName, suffix)
+		}
+		generatedAliases[aliasName] = rawModel
+		aliases = append(aliases, map[string]any{
+			"name":  aliasName,
+			"model": rawModel,
+		})
+		return aliasName
+	}
+
+	// Model-backed web search providers now reference aliases. Preserve the
+	// concrete model that a v3 configuration actually used, but never install
+	// one for a newly-created v4 configuration.
+	if tools, ok := m["tools"].(map[string]any); ok {
+		if web, ok := tools["web"].(map[string]any); ok {
+			if gemini, ok := web["gemini"].(map[string]any); ok {
+				rawModel, _ := gemini["model"].(string)
+				delete(gemini, "model")
+				if aliasName := ensureWebSearchAlias(rawModel, "web-search-gemini"); aliasName != "" {
+					gemini["model_alias"] = aliasName
+				}
+			}
+			if perplexity, ok := web["perplexity"].(map[string]any); ok {
+				enabled, _ := perplexity["enabled"].(bool)
+				if enabled {
+					// v3 hardcoded this concrete model in the request path.
+					perplexity["model_alias"] = ensureWebSearchAlias(
+						"perplexity/sonar",
+						"web-search-perplexity",
+					)
+				}
+			}
+		}
+	}
+	m["model_aliases"] = aliases
+
+	migrateV3AgentModelSelections(m, generatedAliases, aliasAccounts, configuredAccounts)
+	migrateV3VoiceModelSelections(m, generatedAliases, aliasAccounts, configuredAccounts)
+	m["version"] = 4
+	return nil
+}
+
+func legacyV3ModelReferences(m map[string]any) []string {
+	refs := make([]string, 0)
+	addString := func(value any) {
+		if value, ok := value.(string); ok && strings.TrimSpace(value) != "" {
+			refs = append(refs, value)
+		}
+	}
+	addList := func(value any) {
+		switch values := value.(type) {
+		case []any:
+			for _, value := range values {
+				addString(value)
+			}
+		case []string:
+			for _, value := range values {
+				addString(value)
+			}
+		}
+	}
+	addModelPolicy := func(value any) {
+		switch model := value.(type) {
+		case string:
+			addString(model)
+		case map[string]any:
+			addString(model["primary"])
+			addList(model["fallbacks"])
+		}
+	}
+
+	if agents, ok := m["agents"].(map[string]any); ok {
+		if defaults, ok := agents["defaults"].(map[string]any); ok {
+			addString(defaults["model_name"])
+			addList(defaults["model_fallbacks"])
+			addString(defaults["image_model"])
+			addList(defaults["image_model_fallbacks"])
+			if routing, ok := defaults["routing"].(map[string]any); ok {
+				addString(routing["light_model"])
+			}
+		}
+		if list, ok := agents["list"].([]any); ok {
+			for _, value := range list {
+				agent, ok := value.(map[string]any)
+				if !ok {
+					continue
+				}
+				addModelPolicy(agent["model"])
+				if subagents, ok := agent["subagents"].(map[string]any); ok {
+					addModelPolicy(subagents["model"])
+				}
+			}
+		}
+	}
+	if voice, ok := m["voice"].(map[string]any); ok {
+		addString(voice["model_name"])
+		addString(voice["tts_model_name"])
+	}
+	if routers, ok := m["model_routers"].([]any); ok {
+		for _, value := range routers {
+			router, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			blocks, _ := router["blocks"].([]any)
+			for _, blockValue := range blocks {
+				block, ok := blockValue.(map[string]any)
+				if ok {
+					addString(block["model"])
+				}
+			}
+		}
+	}
+	return refs
+}
+
+func resolveLegacyV3ConcreteSelection(
+	accounts []legacyV3ModelAccount,
+	ref string,
+) (string, string, bool) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", "", false
+	}
+
+	type match struct {
+		account string
+		model   string
+	}
+	matches := make(map[string]match)
+	for _, account := range accounts {
+		if !legacyV3AccountMatchesModelRef(account, ref) {
+			continue
+		}
+		key := account.name + "\x00" + account.model
+		matches[key] = match{account: account.name, model: account.model}
+	}
+	if len(matches) != 1 {
+		return "", "", false
+	}
+	for _, result := range matches {
+		return result.account, result.model, true
+	}
+	return "", "", false
+}
+
+func legacyV3AccountMatchesModelRef(account legacyV3ModelAccount, ref string) bool {
+	if account.name == ref || account.model == ref {
+		return true
+	}
+	provider := strings.TrimSpace(account.provider)
+	if provider != "" {
+		if provider+"/"+account.model == ref {
+			return true
+		}
+		if strings.TrimPrefix(account.model, provider+"/") == ref &&
+			strings.HasPrefix(account.model, provider+"/") {
+			return true
+		}
+		return false
+	}
+	_, modelID, found := strings.Cut(account.model, "/")
+	return found && strings.TrimSpace(modelID) == ref
+}
+
+func migrationModelIsRouter(model map[string]any) bool {
+	provider, _ := model["provider"].(string)
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case AccountRouterProvider, ModelRouterProvider:
+		return true
+	}
+	return model["router"] != nil || model["model_router"] != nil
+}
+
+func migrateV3AgentModelSelections(
+	m map[string]any,
+	aliases map[string]string,
+	aliasAccounts map[string]string,
+	configuredAccounts map[string]struct{},
+) {
+	agents, ok := m["agents"].(map[string]any)
+	if !ok {
+		return
+	}
+	if defaults, defaultsOK := agents["defaults"].(map[string]any); defaultsOK {
+		migrateV3DefaultModelSelections(
+			defaults,
+			aliases,
+			aliasAccounts,
+			configuredAccounts,
+		)
+	}
+	agentList, ok := agents["list"].([]any)
+	if !ok {
+		return
+	}
+	for _, item := range agentList {
+		agent, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		migrateV3AgentModelSelection(
+			agent,
+			aliases,
+			aliasAccounts,
+			configuredAccounts,
+		)
+		if subagents, ok := agent["subagents"].(map[string]any); ok {
+			migrateV3NestedModelPolicy(subagents, aliases)
+		}
+	}
+}
+
+func migrateV3VoiceModelSelections(
+	m map[string]any,
+	aliases map[string]string,
+	aliasAccounts map[string]string,
+	configuredAccounts map[string]struct{},
+) {
+	voice, ok := m["voice"].(map[string]any)
+	if !ok {
+		return
+	}
+	migrate := func(modelField, accountField string) {
+		selector, _ := voice[modelField].(string)
+		selector = strings.TrimSpace(selector)
+		if selector == "" {
+			return
+		}
+		voice[accountField] = migrationAccountRef(
+			selector,
+			aliasAccounts,
+			configuredAccounts,
+		)
+		if _, found := aliases[selector]; !found {
+			voice[modelField] = ""
+		}
+	}
+	migrate("model_name", "account_ref")
+	migrate("tts_model_name", "tts_account_ref")
+}
+
+func migrateV3DefaultModelSelections(
+	defaults map[string]any,
+	aliases map[string]string,
+	aliasAccounts map[string]string,
+	configuredAccounts map[string]struct{},
+) {
+	if selector, ok := defaults["model_name"].(string); ok &&
+		strings.TrimSpace(selector) != "" {
+		defaults["account_ref"] = migrationAccountRef(
+			selector,
+			aliasAccounts,
+			configuredAccounts,
+		)
+		if _, found := aliases[selector]; !found {
+			defaults["model_name"] = ""
+		}
+	}
+	migrationFilterAliasListField(defaults, "model_fallbacks", aliases)
+	if imageModel, ok := defaults["image_model"].(string); ok &&
+		strings.TrimSpace(imageModel) != "" {
+		if _, found := aliases[imageModel]; !found {
+			defaults["image_model"] = ""
+		}
+	}
+	migrationFilterAliasListField(defaults, "image_model_fallbacks", aliases)
+	if routing, ok := defaults["routing"].(map[string]any); ok {
+		if lightModel, ok := routing["light_model"].(string); ok &&
+			strings.TrimSpace(lightModel) != "" {
+			if _, found := aliases[lightModel]; !found {
+				routing["light_model"] = ""
+			}
+		}
+	}
+}
+
+func migrateV3AgentModelSelection(
+	agent map[string]any,
+	aliases map[string]string,
+	aliasAccounts map[string]string,
+	configuredAccounts map[string]struct{},
+) {
+	switch model := agent["model"].(type) {
+	case string:
+		if strings.TrimSpace(model) == "" {
+			return
+		}
+		agent["account_ref"] = migrationAccountRef(
+			model,
+			aliasAccounts,
+			configuredAccounts,
+		)
+		if _, found := aliases[model]; !found {
+			agent["model"] = ""
+		}
+	case map[string]any:
+		primary, _ := model["primary"].(string)
+		if strings.TrimSpace(primary) != "" {
+			agent["account_ref"] = migrationAccountRef(
+				primary,
+				aliasAccounts,
+				configuredAccounts,
+			)
+			if _, found := aliases[primary]; !found {
+				model["primary"] = ""
+			}
+		}
+		migrationFilterAliasListField(model, "fallbacks", aliases)
+	}
+}
+
+func migrationAccountRef(
+	selector string,
+	aliasAccounts map[string]string,
+	configuredAccounts map[string]struct{},
+) string {
+	selector = strings.TrimSpace(selector)
+	if resolvedAccount := aliasAccounts[selector]; resolvedAccount != "" {
+		if _, enabled := configuredAccounts[resolvedAccount]; enabled {
+			return resolvedAccount
+		}
+		return ""
+	}
+	if _, ok := configuredAccounts[selector]; ok {
+		return selector
+	}
+	if _, ok := AccountRouterCredentialAccountProvider(selector); ok {
+		return selector
+	}
+	return ""
+}
+
+func migrateV3NestedModelPolicy(container map[string]any, aliases map[string]string) {
+	switch model := container["model"].(type) {
+	case string:
+		if _, found := aliases[model]; !found {
+			container["model"] = ""
+		}
+	case map[string]any:
+		if primary, ok := model["primary"].(string); ok &&
+			strings.TrimSpace(primary) != "" {
+			if _, found := aliases[primary]; !found {
+				model["primary"] = ""
+			}
+		}
+		migrationFilterAliasListField(model, "fallbacks", aliases)
+	}
+}
+
+func migrationFilterAliasListField(
+	container map[string]any,
+	field string,
+	aliases map[string]string,
+) {
+	value, exists := container[field]
+	if !exists || value == nil {
+		return
+	}
+	container[field] = migrationFilterAliasList(value, aliases)
+}
+
+func migrationFilterAliasList(value any, aliases map[string]string) []any {
+	filtered := make([]any, 0)
+	switch values := value.(type) {
+	case []any:
+		for _, item := range values {
+			name, ok := item.(string)
+			if !ok {
+				continue
+			}
+			if _, found := aliases[name]; found {
+				filtered = append(filtered, name)
+			}
+		}
+	case []string:
+		for _, name := range values {
+			if _, found := aliases[name]; found {
+				filtered = append(filtered, name)
+			}
+		}
+	}
+	return filtered
 }
 
 func loadConfigMap(path string) (map[string]any, error) {

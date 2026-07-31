@@ -16,10 +16,10 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers/common"
 	orc "github.com/sipeed/picoclaw/pkg/providers/openai_responses_common"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 const (
-	codexDefaultModel        = "gpt-5.3-codex"
 	codexDefaultInstructions = "You are Codex, a coding assistant."
 )
 
@@ -93,25 +93,18 @@ func NewCodexProviderWithTokenSource(
 func (p *CodexProvider) Chat(
 	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
 ) (*LLMResponse, error) {
+	resolvedModel, err := protocoltypes.RequireModel(model)
+	if err != nil {
+		return nil, err
+	}
+
 	var opts []option.RequestOption
 	token := p.token
 	accountID := p.accountID
-	resolvedModel, fallbackReason := resolveCodexModel(model)
-	if fallbackReason != "" {
-		logger.WarnCF(
-			"provider.codex",
-			"Requested model is empty, using Codex default",
-			map[string]any{
-				"requested_model": model,
-				"resolved_model":  resolvedModel,
-				"reason":          fallbackReason,
-			},
-		)
-	}
 	if p.tokenSource != nil {
-		tok, accID, err := p.tokenSource()
-		if err != nil {
-			return nil, fmt.Errorf("refreshing token: %w", err)
+		tok, accID, tokenErr := p.tokenSource()
+		if tokenErr != nil {
+			return nil, fmt.Errorf("refreshing token: %w", tokenErr)
 		}
 		token = tok
 		opts = append(opts, option.WithAPIKey(tok))
@@ -278,21 +271,8 @@ func codexFailedResponseError(resp responses.Response) error {
 	return &details
 }
 
-func (p *CodexProvider) GetDefaultModel() string {
-	return codexDefaultModel
-}
-
 func (p *CodexProvider) SupportsNativeSearch() bool {
 	return p.enableWebSearch
-}
-
-func resolveCodexModel(model string) (string, string) {
-	m := strings.TrimSpace(model)
-	if m == "" {
-		return codexDefaultModel, "empty model"
-	}
-
-	return m, ""
 }
 
 func buildCodexParams(

@@ -30,10 +30,6 @@ func (p *factoryStubProvider) Chat(
 	return &LLMResponse{Content: ""}, nil
 }
 
-func (p *factoryStubProvider) GetDefaultModel() string {
-	return "auto"
-}
-
 func TestExtractProtocol(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -1451,13 +1447,8 @@ func TestModelProviderOptions(t *testing.T) {
 	}
 	if option, ok := seen["elevenlabs"]; !ok {
 		t.Fatal("elevenlabs option missing")
-	} else {
-		if option.DefaultAPIBase != "https://api.elevenlabs.io" {
-			t.Fatalf("elevenlabs default_api_base = %q, want %q", option.DefaultAPIBase, "https://api.elevenlabs.io")
-		}
-		if option.DefaultModelAllowed {
-			t.Fatal("elevenlabs should be ASR-only and therefore not allowed as a default chat model")
-		}
+	} else if option.DefaultAPIBase != "https://api.elevenlabs.io" {
+		t.Fatalf("elevenlabs default_api_base = %q, want %q", option.DefaultAPIBase, "https://api.elevenlabs.io")
 	}
 	if option, ok := seen["antigravity"]; !ok {
 		t.Fatal("antigravity option missing")
@@ -1484,6 +1475,12 @@ func TestModelProviderOptions(t *testing.T) {
 		t.Fatal("github-copilot should support static model fetches")
 	} else if len(option.CommonModels) == 0 {
 		t.Fatal("github-copilot common_models should not be empty")
+	} else {
+		for _, model := range option.CommonModels {
+			if model == "auto" {
+				t.Fatal("github-copilot must not advertise implicit model auto")
+			}
+		}
 	}
 	if option, ok := seen["qwen-portal"]; !ok {
 		t.Fatal("qwen-portal option missing")
@@ -1508,25 +1505,6 @@ func TestModelProviderOptions(t *testing.T) {
 			}
 			seenModels[model] = struct{}{}
 		}
-	}
-}
-
-func TestDefaultModelForProviderUsesRuntimeDefaults(t *testing.T) {
-	tests := map[string]string{
-		"openai":             "gpt-5.3-codex",
-		"anthropic":          "claude-sonnet-4.6",
-		"github-copilot":     "auto",
-		"copilot":            "auto",
-		"antigravity":        "gemini-3-flash",
-		"google-antigravity": "gemini-3-flash",
-	}
-	for provider, want := range tests {
-		if got := DefaultModelForProvider(provider); got != want {
-			t.Errorf("DefaultModelForProvider(%q) = %q, want %q", provider, got, want)
-		}
-	}
-	if got := DefaultModelForProvider("unknown-provider"); got != "" {
-		t.Fatalf("unknown provider default = %q, want empty", got)
 	}
 }
 
@@ -1922,7 +1900,7 @@ func TestCreateProviderFromConfig_InvalidToolSchemaTransform(t *testing.T) {
 	}
 }
 
-func TestCreateProviderUsesCredentialProviderDefaultForModelAgnosticAccountRouter(t *testing.T) {
+func TestCreateProviderResolvesExplicitAliasForCredentialAccount(t *testing.T) {
 	origGetCredential := getCredential
 	origNewCopilotProvider := newGitHubCopilotProviderWithToken
 	t.Cleanup(func() {
@@ -1951,20 +1929,12 @@ func TestCreateProviderUsesCredentialProviderDefaultForModelAgnosticAccountRoute
 	}
 
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = "router-1"
-	cfg.AccountRouters = []config.AccountRouterConfig{
-		{
-			Name:    "router-1",
-			Enabled: true,
-			Entry:   "account-1",
-			Blocks: []config.AccountRouterBlock{{
-				ID:      "account-1",
-				Type:    config.AccountRouterBlockTypeAccount,
-				Account: "credential:github-copilot:gh-copilot",
-			}},
-		},
-	}
-	cfg.MaterializeAccountRouterModels()
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name:  "coding",
+		Model: "gpt-5.4",
+	}}
+	cfg.Agents.Defaults.ModelName = "coding"
+	cfg.Agents.Defaults.AccountRef = "credential:github-copilot:gh-copilot"
 
 	provider, modelID, err := CreateProvider(cfg)
 	if err != nil {
@@ -1973,43 +1943,53 @@ func TestCreateProviderUsesCredentialProviderDefaultForModelAgnosticAccountRoute
 	if provider == nil {
 		t.Fatal("CreateProvider() returned nil provider")
 	}
-	if modelID != "router-1" {
-		t.Fatalf("model selector = %q, want account router alias router-1", modelID)
+	if modelID != "coding" {
+		t.Fatalf("model selector = %q, want alias coding", modelID)
 	}
-	if gotModel != "auto" {
-		t.Fatalf("constructor model = %q, want GitHub Copilot default auto", gotModel)
+	if gotModel != "gpt-5.4" {
+		t.Fatalf("constructor model = %q, want exact alias model gpt-5.4", gotModel)
 	}
 }
 
-func TestCreateProviderSupportsCredentialRefDefaultWithoutModelList(t *testing.T) {
+func TestCreateProviderRejectsMissingAliasBeforeProviderConstruction(t *testing.T) {
 	origGetCredential := getCredential
+	origNewCopilotProvider := newGitHubCopilotProviderWithToken
 	t.Cleanup(func() {
 		getCredential = origGetCredential
+		newGitHubCopilotProviderWithToken = origNewCopilotProvider
 	})
 
+	credentialLookups := 0
 	getCredential = func(provider string) (*auth.AuthCredential, error) {
-		if provider != "openai:work" {
-			t.Fatalf("provider = %q, want openai:work", provider)
-		}
+		credentialLookups++
 		return &auth.AuthCredential{
-			AccessToken: "oauth-token",
-			Provider:    "openai",
-			AuthMethod:  "oauth",
+			AccessToken: "gho_test-token",
+			Provider:    "github-copilot",
+			AuthMethod:  "token",
 		}, nil
+	}
+	providerConstructions := 0
+	newGitHubCopilotProviderWithToken = func(token, model string) (LLMProvider, error) {
+		providerConstructions++
+		return &factoryStubProvider{}, nil
 	}
 
 	cfg := config.DefaultConfig()
-	cfg.ModelList = nil
-	cfg.Agents.Defaults.ModelName = "credential:openai:work"
+	cfg.Agents.Defaults.ModelName = "  "
+	cfg.Agents.Defaults.AccountRef = "credential:github-copilot:work"
 
 	provider, modelID, err := CreateProvider(cfg)
-	if err != nil {
-		t.Fatalf("CreateProvider() error = %v", err)
+	if err == nil || err.Error() != "no model configured" {
+		t.Fatalf("CreateProvider() error = %v, want no model configured", err)
 	}
-	if provider == nil {
-		t.Fatal("CreateProvider() returned nil provider")
+	if provider != nil || modelID != "" {
+		t.Fatalf("CreateProvider() = (%T, %q), want nil provider and empty model", provider, modelID)
 	}
-	if modelID != "gpt-5.3-codex" {
-		t.Fatalf("modelID = %q, want OpenAI Codex default gpt-5.3-codex", modelID)
+	if credentialLookups != 0 || providerConstructions != 0 {
+		t.Fatalf(
+			"provider work occurred for missing alias: lookups=%d constructions=%d",
+			credentialLookups,
+			providerConstructions,
+		)
 	}
 }

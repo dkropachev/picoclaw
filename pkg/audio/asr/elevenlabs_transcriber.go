@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -30,14 +32,10 @@ func NewElevenLabsTranscriber(apiKey, apiBase, modelID string) *ElevenLabsTransc
 	if apiBase == "" {
 		apiBase = "https://api.elevenlabs.io"
 	}
-	if modelID == "" || modelID != ElevenLabsSupportedModelID() {
-		modelID = ElevenLabsSupportedModelID()
-	}
-
 	return &ElevenLabsTranscriber{
 		apiKey:  apiKey,
 		apiBase: apiBase,
-		modelID: modelID,
+		modelID: strings.TrimSpace(modelID),
 		httpClient: &http.Client{
 			Timeout: 120 * time.Second,
 		},
@@ -45,6 +43,15 @@ func NewElevenLabsTranscriber(apiKey, apiBase, modelID string) *ElevenLabsTransc
 }
 
 func (t *ElevenLabsTranscriber) Transcribe(ctx context.Context, audioFilePath string) (*TranscriptionResponse, error) {
+	modelID, err := protocoltypes.RequireModel(t.modelID)
+	if err != nil {
+		return nil, err
+	}
+	if modelID != ElevenLabsSupportedModelID() {
+		return nil, fmt.Errorf("unsupported ElevenLabs model %q", modelID)
+	}
+	t.modelID = modelID
+
 	logger.InfoCF("voice", "Starting ElevenLabs transcription", map[string]any{"audio_file": audioFilePath})
 
 	audioFile, err := os.Open(audioFilePath)

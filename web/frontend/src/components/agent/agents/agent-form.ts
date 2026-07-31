@@ -13,6 +13,7 @@ export interface AgentDraft {
   id: string
   name: string
   workspace: string
+  accountRef: string
   modelConfigured: boolean
   primaryMode: PrimaryPolicyMode
   primary: string
@@ -42,6 +43,7 @@ export function emptyAgentDraft(): AgentDraft {
     id: "",
     name: "",
     workspace: "",
+    accountRef: "",
     modelConfigured: false,
     primaryMode: "inherit",
     primary: "",
@@ -62,6 +64,7 @@ export function agentDraftFromInfo(agent: AgentInfo): AgentDraft {
     id: agent.id,
     name: agent.name,
     workspace: agent.workspace,
+    accountRef: agent.account_ref ?? "",
     modelConfigured: agent.model != null,
     primaryMode:
       agent.model != null && agent.model.primary !== "" ? "custom" : "inherit",
@@ -111,14 +114,14 @@ export function validateAgentDraft(
   }
 
   if (draft.primaryMode === "custom" && draft.primary.trim() === "") {
-    errors.primary = "Enter a primary model or choose Inherit."
+    errors.primary = "Choose a primary model alias or Inherit."
   }
   if (
     draft.fallbackMode === "custom" &&
     tokensWithPending(draft.fallbacks, draft.fallbackInput).length === 0
   ) {
     errors.fallbacks =
-      "Add at least one fallback model or choose Inherit or None."
+      "Add at least one fallback model alias or choose Inherit or None."
   }
   if (
     draft.skillsMode === "selected" &&
@@ -195,6 +198,7 @@ export function agentInputFromDraft(draft: AgentDraft): AgentMutationInput {
     id,
     name: draft.name.trim(),
     workspace: draft.workspace.trim(),
+    account_ref: draft.accountRef.trim(),
     model,
     skills,
     subagents,

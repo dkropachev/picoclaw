@@ -125,12 +125,9 @@ func (r *cliWorkflowRuntimeRunner) ensureLoopLocked() error {
 	if r.cfg == nil {
 		return fmt.Errorf("config not loaded")
 	}
-	provider, modelID, err := providers.CreateProvider(r.cfg)
+	provider, _, err := providers.CreateProvider(r.cfg)
 	if err != nil {
 		return err
-	}
-	if modelID != "" {
-		r.cfg.Agents.Defaults.ModelName = modelID
 	}
 	r.msgBus = bus.NewMessageBus()
 	r.loop = agentloop.NewAgentLoop(

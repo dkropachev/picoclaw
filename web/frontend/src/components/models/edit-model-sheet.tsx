@@ -10,7 +10,6 @@ import {
   type ModelInfo,
   type ModelProviderOption,
   getCatalogs,
-  setDefaultModel,
   updateModel,
 } from "@/api/models"
 import { ConfigChangeNotice } from "@/components/config-change-notice"
@@ -79,6 +78,7 @@ interface EditForm {
 
 interface EditModelSheetProps {
   model: ModelInfo | null
+  revision: string
   open: boolean
   onClose: () => void
   onSaved: () => void
@@ -114,6 +114,7 @@ function buildInitialEditForm(model: ModelInfo): EditForm {
 
 export function EditModelSheet({
   model,
+  revision,
   open,
   onClose,
   onSaved,
@@ -263,12 +264,6 @@ export function EditModelSheet({
     if (form.modelId) {
       debouncedValidateModel(form.modelId, provider)
     }
-    const allowed =
-      getProviderCatalogEntry(provider, providerOptions)?.defaultModelAllowed ??
-      false
-    if (!allowed) {
-      setSetAsDefault(false)
-    }
   }
 
   const applyFix = () => {
@@ -315,7 +310,6 @@ export function EditModelSheet({
   const isOAuth = effectiveAuthMethod === "oauth"
   const usesCredential =
     effectiveAuthMethod === "oauth" || effectiveAuthMethod === "token"
-  const defaultModelAllowed = providerDef?.defaultModelAllowed === true
   const apiBasePlaceholder =
     getProviderDefaultAPIBase(form.provider, providerOptions) ||
     "https://api.example.com/v1"
@@ -374,7 +368,7 @@ export function EditModelSheet({
         model.streaming?.enabled === true || form.streamingEnabled
           ? { enabled: form.streamingEnabled }
           : undefined
-      await updateModel(model.index, {
+      await updateModel(model.index, revision, {
         model_name: model.model_name,
         provider: provider,
         model: modelId,
@@ -398,10 +392,8 @@ export function EditModelSheet({
         streaming,
         extra_body: extraBody,
         custom_headers: customHeaders,
+        set_as_default: setAsDefault,
       })
-      if (setAsDefault && !model.is_default) {
-        await setDefaultModel(model.model_name)
-      }
       const gateway = await refreshGatewayState({ force: true })
       showSaveSuccessOrRestartToast(
         t,
@@ -620,14 +612,9 @@ export function EditModelSheet({
 
               <SwitchCardField
                 label={t("models.defaultOnSave.label")}
-                hint={
-                  !defaultModelAllowed
-                    ? t("models.defaultOnSave.unsupportedProvider")
-                    : t("models.defaultOnSave.description")
-                }
+                hint={t("models.defaultOnSave.description")}
                 checked={setAsDefault}
                 onCheckedChange={setSetAsDefault}
-                disabled={!defaultModelAllowed}
               />
 
               <AdvancedSection>

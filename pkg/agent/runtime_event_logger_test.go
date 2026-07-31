@@ -144,7 +144,7 @@ func TestReloadProviderAndConfigRefreshesRuntimeEventLogger(t *testing.T) {
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	cfg.Events.Logging.Include = []string{"agent.*"}
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockProvider{})
 	defer al.Close()
 
 	eventLogger, logSub := runtimeEventLoggerStateForTest(al)
@@ -221,10 +221,6 @@ func (p *reloadBlockingProvider) Chat(
 	}
 }
 
-func (p *reloadBlockingProvider) GetDefaultModel() string {
-	return "reload-blocking"
-}
-
 func (p *reloadBlockingProvider) Close() {
 	select {
 	case <-p.closeCalled:
@@ -242,7 +238,7 @@ func TestReloadProviderAndConfigWaitsForInFlightRequestsBeforeClosingOldProvider
 		releaseChat: make(chan struct{}),
 		closeCalled: make(chan struct{}),
 	}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), oldProvider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), oldProvider)
 	defer al.Close()
 
 	msg := testInboundMessage(bus.InboundMessage{
@@ -324,7 +320,7 @@ func TestReloadProviderAndConfigReturnsCanceledErrorWhenRegistryCreationPanics(t
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockProvider{})
 	defer al.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -346,10 +342,6 @@ func (p *panicProviderForReloadTest) Chat(
 	options map[string]any,
 ) (*providers.LLMResponse, error) {
 	return &providers.LLMResponse{Content: "unused"}, nil
-}
-
-func (p *panicProviderForReloadTest) GetDefaultModel() string {
-	panic("boom")
 }
 
 func TestCloseRuntimeEventLoggerSubscriptionWaitsForDrain(t *testing.T) {

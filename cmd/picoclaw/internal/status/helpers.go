@@ -36,6 +36,7 @@ func statusCmd() {
 		ConfigOK:      configOK,
 		WorkspacePath: workspace,
 		WorkspaceOK:   wsOK,
+		Account:       cfg.Agents.Defaults.AccountRef,
 		Model:         cfg.Agents.Defaults.GetModelName(),
 	}
 

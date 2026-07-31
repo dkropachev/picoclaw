@@ -414,7 +414,7 @@ func TestRuntime_RunColdPathOnce_FallbackUsesJudgeAdjustedSuccessRatio(t *testin
 		},
 	}
 	clusterer := evolution.NewLLMPatternClusterer(
-		&llmClusterTestProvider{content: `not-json`, defaultModel: "test-model"},
+		&llmClusterTestProvider{content: `not-json`},
 		"test-model",
 		evolution.NewHeuristicPatternClusterer(1, nil),
 		1,
@@ -502,7 +502,7 @@ func TestRuntime_RunColdPathOnce_FallbackMarksAcceptedFailureEvidenceClustered(t
 		},
 	}
 	clusterer := evolution.NewLLMPatternClusterer(
-		&llmClusterTestProvider{content: `not-json`, defaultModel: "test-model"},
+		&llmClusterTestProvider{content: `not-json`},
 		"test-model",
 		evolution.NewHeuristicPatternClusterer(1, nil),
 		1,
@@ -1085,8 +1085,7 @@ func TestRuntime_RunColdPathOnce_UsesGeneratorFactoryWorkspaceForFallback(t *tes
 	}
 
 	provider := &llmDraftRuntimeProvider{
-		response:     &providers.LLMResponse{Content: `not-json`},
-		defaultModel: "runtime-test-model",
+		response: &providers.LLMResponse{Content: `not-json`},
 	}
 
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
@@ -1260,10 +1259,9 @@ func TestRuntime_RunColdPathOnce_RegeneratesAfterQuarantinedDraft(t *testing.T) 
 }
 
 type llmDraftRuntimeProvider struct {
-	response     *providers.LLMResponse
-	err          error
-	calls        int
-	defaultModel string
+	response *providers.LLMResponse
+	err      error
+	calls    int
 }
 
 func (p *llmDraftRuntimeProvider) Chat(
@@ -1275,11 +1273,4 @@ func (p *llmDraftRuntimeProvider) Chat(
 ) (*providers.LLMResponse, error) {
 	p.calls++
 	return p.response, p.err
-}
-
-func (p *llmDraftRuntimeProvider) GetDefaultModel() string {
-	if p.defaultModel != "" {
-		return p.defaultModel
-	}
-	return "runtime-test-model"
 }

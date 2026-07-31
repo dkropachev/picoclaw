@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -247,6 +248,16 @@ func TestConvertToPicoClaw(t *testing.T) {
 	if picoCfg.Agents.Defaults.ModelName != "claude-sonnet-4-20250514" {
 		t.Errorf("expected model 'claude-sonnet-4-20250514', got '%s'", picoCfg.Agents.Defaults.ModelName)
 	}
+	if picoCfg.Agents.Defaults.AccountRef != "anthropic" {
+		t.Errorf(
+			"expected account ref 'anthropic', got '%s'",
+			picoCfg.Agents.Defaults.AccountRef,
+		)
+	}
+	if len(picoCfg.ModelAliases) != 1 ||
+		picoCfg.ModelAliases[0].Name != "claude-sonnet-4-20250514" {
+		t.Fatalf("expected the explicit source model to become an alias, got %#v", picoCfg.ModelAliases)
+	}
 	if picoCfg.Agents.Defaults.Workspace != "~/.picoclaw/workspace" {
 		t.Errorf("expected workspace '~/.picoclaw/workspace', got '%s'", picoCfg.Agents.Defaults.Workspace)
 	}
@@ -289,6 +300,87 @@ func TestConvertToPicoClaw(t *testing.T) {
 	}
 	if !foundWarning {
 		t.Log("warnings should be generated for skills, memory, cron, and unsupported channels")
+	}
+}
+
+func TestConvertToPicoClawAgentsUseAliasesAndOneAccountSelection(t *testing.T) {
+	cfg := &OpenClawConfig{
+		Agents: &OpenClawAgents{
+			Defaults: &OpenClawAgentDefaults{
+				Model: &OpenClawAgentModel{
+					Primary: strPtr("openai/gpt-4o"),
+				},
+			},
+			List: []OpenClawAgentEntry{{
+				ID: "reviewer",
+				Model: &OpenClawAgentModel{
+					Primary: strPtr("anthropic/claude-sonnet-4"),
+					Fallbacks: []string{
+						"anthropic/claude-haiku-3.5",
+						"claude-haiku-3",
+						"openai/gpt-4o-mini",
+					},
+				},
+			}},
+		},
+	}
+
+	picoCfg, warnings, err := cfg.ConvertToPicoClaw("")
+	if err != nil {
+		t.Fatalf("ConvertToPicoClaw() error = %v", err)
+	}
+	if len(picoCfg.Agents.List) != 1 {
+		t.Fatalf("expected one migrated agent, got %d", len(picoCfg.Agents.List))
+	}
+	agent := picoCfg.Agents.List[0]
+	if agent.AccountRef != "anthropic" {
+		t.Fatalf("expected concrete account ref anthropic, got %q", agent.AccountRef)
+	}
+	if agent.Model == nil || agent.Model.Primary != "claude-sonnet-4" {
+		t.Fatalf("expected alias-only primary, got %#v", agent.Model)
+	}
+	if got, want := agent.Model.Fallbacks, []string{"claude-haiku-3.5", "claude-haiku-3"}; !slices.Equal(got, want) {
+		t.Fatalf("fallbacks = %#v, want %#v", got, want)
+	}
+	if len(warnings) != 1 ||
+		!strings.Contains(warnings[0], "configure an account router for cross-account fallback") {
+		t.Fatalf("expected cross-account fallback warning, got %#v", warnings)
+	}
+
+	for _, want := range []string{
+		"gpt-4o",
+		"claude-sonnet-4",
+		"claude-haiku-3.5",
+		"claude-haiku-3",
+	} {
+		found := false
+		for _, alias := range picoCfg.ModelAliases {
+			if alias.Name == want && alias.Model == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing alias %q in %#v", want, picoCfg.ModelAliases)
+		}
+	}
+	for _, want := range []string{"openai", "anthropic"} {
+		if !hasModelAccount(picoCfg.ModelList, want) {
+			t.Errorf("missing concrete account %q in %#v", want, picoCfg.ModelList)
+		}
+	}
+
+	standard := picoCfg.ToStandardConfig()
+	if standard.Agents.List[0].AccountRef != "anthropic" {
+		t.Errorf("standard agent account ref = %q", standard.Agents.List[0].AccountRef)
+	}
+	if err := standard.ValidateModelList(); err != nil {
+		t.Fatalf("migrated standard config is invalid: %v", err)
+	}
+	for _, account := range standard.ModelList {
+		if !account.Enabled {
+			t.Errorf("migrated account %q is disabled", account.ModelName)
+		}
 	}
 }
 
@@ -564,11 +656,52 @@ func TestGetDefaultModelWithNoDefaults(t *testing.T) {
 	cfg := &OpenClawConfig{}
 
 	provider, model := cfg.GetDefaultModel()
-	if provider != "anthropic" {
-		t.Errorf("expected default provider 'anthropic', got '%s'", provider)
+	if provider != "" {
+		t.Errorf("expected no provider, got '%s'", provider)
 	}
-	if model != "claude-sonnet-4-20250514" {
-		t.Errorf("expected default model 'claude-sonnet-4-20250514', got '%s'", model)
+	if model != "" {
+		t.Errorf("expected no model, got '%s'", model)
+	}
+}
+
+func TestConvertToPicoClawPreservesBareDefaultModelWithoutGuessingAccount(t *testing.T) {
+	cfg := &OpenClawConfig{
+		Agents: &OpenClawAgents{
+			Defaults: &OpenClawAgentDefaults{
+				Model: &OpenClawAgentModel{
+					Primary: strPtr("gpt-4o"),
+				},
+			},
+		},
+	}
+
+	picoCfg, warnings, err := cfg.ConvertToPicoClaw("")
+	if err != nil {
+		t.Fatalf("ConvertToPicoClaw() error = %v", err)
+	}
+	if picoCfg.Agents.Defaults.ModelName != "gpt-4o" {
+		t.Fatalf(
+			"default model = %q, want preserved bare alias",
+			picoCfg.Agents.Defaults.ModelName,
+		)
+	}
+	if picoCfg.Agents.Defaults.AccountRef != "" {
+		t.Fatalf(
+			"default account = %q, want no guessed provider account",
+			picoCfg.Agents.Defaults.AccountRef,
+		)
+	}
+	if len(picoCfg.ModelAliases) != 1 ||
+		picoCfg.ModelAliases[0].Name != "gpt-4o" ||
+		picoCfg.ModelAliases[0].Model != "gpt-4o" {
+		t.Fatalf("model aliases = %#v, want preserved gpt-4o alias", picoCfg.ModelAliases)
+	}
+	if len(picoCfg.ModelList) != 0 {
+		t.Fatalf("model list = %#v, want no guessed account", picoCfg.ModelList)
+	}
+	if len(warnings) != 1 ||
+		!strings.Contains(warnings[0], "configure agents.defaults.account_ref") {
+		t.Fatalf("warnings = %#v, want actionable missing-account warning", warnings)
 	}
 }
 
@@ -639,9 +772,9 @@ func TestToStandardConfig(t *testing.T) {
 	picoCfg := &PicoClawConfig{
 		Agents: AgentsConfig{
 			Defaults: AgentDefaults{
-				Provider:  "anthropic",
-				ModelName: "claude-sonnet-4-20250514",
-				Workspace: "~/.picoclaw/workspace",
+				AccountRef: "anthropic",
+				ModelName:  "claude-sonnet-4-20250514",
+				Workspace:  "~/.picoclaw/workspace",
 			},
 			List: []AgentConfig{
 				{
@@ -653,11 +786,17 @@ func TestToStandardConfig(t *testing.T) {
 		},
 		ModelList: []ModelConfig{
 			{
-				ModelName: "claude-sonnet-4-20250514",
+				ModelName: "anthropic",
+				Provider:  "anthropic",
 				Model:     "anthropic/claude-sonnet-4-20250514",
 				APIKey:    "sk-ant-test",
+				Enabled:   true,
 			},
 		},
+		ModelAliases: []ModelAliasConfig{{
+			Name:  "claude-sonnet-4-20250514",
+			Model: "claude-sonnet-4-20250514",
+		}},
 		Channels: ChannelsConfig{
 			Telegram: TelegramConfig{
 				Enabled:   true,
@@ -677,8 +816,11 @@ func TestToStandardConfig(t *testing.T) {
 
 	stdCfg := picoCfg.ToStandardConfig()
 
-	if stdCfg.Agents.Defaults.Provider != "anthropic" {
-		t.Errorf("expected provider 'anthropic', got '%s'", stdCfg.Agents.Defaults.Provider)
+	if stdCfg.Agents.Defaults.AccountRef != "anthropic" {
+		t.Errorf(
+			"expected account ref 'anthropic', got '%s'",
+			stdCfg.Agents.Defaults.AccountRef,
+		)
 	}
 	if stdCfg.Agents.Defaults.ModelName != "claude-sonnet-4-20250514" {
 		t.Errorf("expected model name 'claude-sonnet-4-20250514', got '%s'", stdCfg.Agents.Defaults.ModelName)
@@ -697,14 +839,14 @@ func TestToStandardConfig(t *testing.T) {
 	foundModel := false
 	var foundAPIKey string
 	for _, m := range stdCfg.ModelList {
-		if m.ModelName == "claude-sonnet-4-20250514" {
+		if m.ModelName == "anthropic" {
 			foundModel = true
 			foundAPIKey = m.APIKey()
 			break
 		}
 	}
 	if !foundModel {
-		t.Error("expected to find claude-sonnet-4-20250514 model config")
+		t.Error("expected to find anthropic account config")
 	}
 	if foundAPIKey != "sk-ant-test" {
 		t.Errorf("expected api key 'sk-ant-test', got '%s'", foundAPIKey)

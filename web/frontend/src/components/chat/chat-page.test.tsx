@@ -91,9 +91,10 @@ describe("ChatPage thread context", () => {
       error: null,
     })
     vi.mocked(useChatModels).mockReturnValue({
+      defaultAccountRef: "credential:openai:work",
       defaultModelName: "gpt-test",
       selectedAccountName: "credential:openai:work",
-      selectedModelID: "gpt-test",
+      selectedModelAlias: "gpt-test",
       hasAvailableModels: true,
       accountModels: [
         {
@@ -102,16 +103,13 @@ describe("ChatPage thread context", () => {
           provider: "openai",
           authMethod: "oauth",
           credentialID: "openai:work",
-          modelID: "gpt-test",
         },
       ],
       accountRouterModels: [],
-      modelOptions: [{ id: "gpt-test" }],
-      isLoadingModelOptions: false,
-      modelDiscoveryError: null,
+      aliasOptions: [{ name: "gpt-test", model: "gpt-5.4" }],
+      isSavingSelection: false,
       handleSetAccount: vi.fn(),
-      handleSetModel: vi.fn(),
-      retryModelDiscovery: vi.fn(),
+      handleSetModelAlias: vi.fn(),
     })
     vi.mocked(useSessionHistory).mockReturnValue({
       sessions: [],
@@ -165,7 +163,7 @@ describe("ChatPage thread context", () => {
     ).not.toBeInTheDocument()
   })
 
-  it("disables chat while the selected account has no resolved model", () => {
+  it("disables chat when no account and alias defaults are configured", () => {
     vi.mocked(getThread).mockResolvedValue({
       id: "thread-session",
       ui_session_id: "thread-session",
@@ -178,18 +176,17 @@ describe("ChatPage thread context", () => {
       updated: "2026-07-28T00:00:00Z",
     })
     vi.mocked(useChatModels).mockReturnValue({
-      defaultModelName: "router-1",
-      selectedAccountName: "router-1",
-      selectedModelID: "",
+      defaultAccountRef: "",
+      defaultModelName: "",
+      selectedAccountName: "",
+      selectedModelAlias: "",
       hasAvailableModels: true,
       accountModels: [],
       accountRouterModels: [],
-      modelOptions: [],
-      isLoadingModelOptions: true,
-      modelDiscoveryError: null,
+      aliasOptions: [{ name: "coding", model: "gpt-5.4" }],
+      isSavingSelection: false,
       handleSetAccount: vi.fn(),
-      handleSetModel: vi.fn(),
-      retryModelDiscovery: vi.fn(),
+      handleSetModelAlias: vi.fn(),
     })
 
     render(
@@ -201,24 +198,23 @@ describe("ChatPage thread context", () => {
     expect(screen.getByRole("textbox")).toBeDisabled()
     expect(screen.getByRole("textbox")).toHaveAttribute(
       "placeholder",
-      "Unable to chat: Loading models for the selected account.",
+      "Unable to chat: No account and model alias are configured. Set both on the Models page.",
     )
   })
 
-  it("shows a failed-discovery reason when no configured fallback remains", () => {
+  it("disables chat until both a selected account and alias are present", () => {
     vi.mocked(useChatModels).mockReturnValue({
-      defaultModelName: "router-1",
+      defaultAccountRef: "router-1",
+      defaultModelName: "coding",
       selectedAccountName: "router-1",
-      selectedModelID: "",
+      selectedModelAlias: "",
       hasAvailableModels: true,
       accountModels: [],
       accountRouterModels: [],
-      modelOptions: [],
-      isLoadingModelOptions: false,
-      modelDiscoveryError: "model discovery failed",
+      aliasOptions: [{ name: "coding", model: "gpt-5.4" }],
+      isSavingSelection: false,
       handleSetAccount: vi.fn(),
-      handleSetModel: vi.fn(),
-      retryModelDiscovery: vi.fn(),
+      handleSetModelAlias: vi.fn(),
     })
 
     render(
@@ -230,15 +226,16 @@ describe("ChatPage thread context", () => {
     expect(screen.getByRole("textbox")).toBeDisabled()
     expect(screen.getByRole("textbox")).toHaveAttribute(
       "placeholder",
-      "Unable to chat: Model discovery failed. Retry model discovery above.",
+      "Unable to chat: Select both an account and a model alias.",
     )
   })
 
-  it("keeps chat enabled after discovery fails when a configured fallback remains", () => {
+  it("keeps chat enabled when a configured account and alias are selected", () => {
     vi.mocked(useChatModels).mockReturnValue({
-      defaultModelName: "claude-work",
+      defaultAccountRef: "credential:anthropic:work",
+      defaultModelName: "coding",
       selectedAccountName: "credential:anthropic:work",
-      selectedModelID: "claude-sonnet-4.6",
+      selectedModelAlias: "coding",
       hasAvailableModels: true,
       accountModels: [
         {
@@ -246,16 +243,13 @@ describe("ChatPage thread context", () => {
           label: "anthropic:work",
           provider: "anthropic",
           credentialID: "anthropic:work",
-          modelID: "claude-sonnet-4.6",
         },
       ],
       accountRouterModels: [],
-      modelOptions: [{ id: "claude-sonnet-4.6" }],
-      isLoadingModelOptions: false,
-      modelDiscoveryError: "model discovery failed",
+      aliasOptions: [{ name: "coding", model: "claude-sonnet-4.6" }],
+      isSavingSelection: false,
       handleSetAccount: vi.fn(),
-      handleSetModel: vi.fn(),
-      retryModelDiscovery: vi.fn(),
+      handleSetModelAlias: vi.fn(),
     })
 
     render(

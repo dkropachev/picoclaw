@@ -131,6 +131,7 @@ function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
     id: "main",
     name: "",
     workspace: "",
+    account_ref: "",
     model: null,
     skills: null,
     subagents: null,

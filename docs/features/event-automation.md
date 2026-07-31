@@ -42,6 +42,11 @@ remain separate from the process-local
 [`pkg/events`](../../pkg/events) observability bus: runtime events are
 best-effort in-process signals, while external automation events and dispatch
 state survive restart.
+The application default is doubly inert: event ingress is disabled and both
+the concrete account list and model-alias list are empty. Enabling durable
+ingress never manufactures a model for workflow agent steps; model-backed
+automation must separately configure an explicit account and alias and
+otherwise fails before a provider request.
 
 ## Reconstruction Notes
 
@@ -73,14 +78,16 @@ state survive restart.
   excluded from the repository's SQLite build matrix must compile through an
   unsupported stub instead of acquiring a new platform dependency. Matching is
   deterministic and AI decisions belong inside a matched workflow, not inside
-  the router. Configured channel admission is synchronous with durable insert;
-  Delta Chat advances its provider cursor only after that boundary.
+  the router. Default event configuration does not seed a provider account or
+  model alias, and event setup never substitutes a provider default for
+  model-backed steps. Configured channel admission is synchronous with durable
+  insert; Delta Chat advances its provider cursor only after that boundary.
 
 ## Requirements
 
 | ID | Level | Trigger/Input | Required Output | State Mutation | Failure/Edge | Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
-| `FR-EVENT-AUTOMATION-001` | MUST | Configuration is omitted, explicitly disabled, or resolved for an enabled agent workspace. | Omitted ingress is disabled; effective config defaults its database to `<workspace>/eventing/events.db`, retention to 30 days, payload size to 1 MiB, and redaction to the mandatory sensitive-field set. | Resolution returns an independent effective config and does not open or create storage. | Non-positive limits receive defaults; relative paths resolve under the workspace, absolute paths are preserved, and exactly `~`, `~/`, or `~\` home prefixes are expanded without treating `~name` as home. | Existing installations must remain unchanged until durable ingress is deliberately enabled. |
+| `FR-EVENT-AUTOMATION-001` | MUST | Configuration is omitted, explicitly disabled, or resolved for an enabled agent workspace. | Omitted ingress is disabled; effective config defaults its database to `<workspace>/eventing/events.db`, retention to 30 days, payload size to 1 MiB, and redaction to the mandatory sensitive-field set. New application defaults also leave `model_list` and `model_aliases` empty, so model-backed workflow steps require a separately configured explicit account and alias. | Resolution returns an independent effective config and does not open or create storage, add an account, or create a model alias. | Non-positive limits receive defaults; relative paths resolve under the workspace, absolute paths are preserved, and exactly `~`, `~/`, or `~\` home prefixes are expanded without treating `~name` as home. Enabling ingress does not select a provider default; a model-backed step without an explicit runnable selection fails through the shared `no model configured` boundary before a provider request. | Existing installations must remain unchanged until durable ingress and any model-backed execution are deliberately enabled. |
 | `FR-EVENT-AUTOMATION-002` | MUST | A caller submits an external envelope with source, connector, deduplication key, event type, and JSON-object payload, optionally including actor, subject, occurrence time, attributes, and receipt time. | Normalization returns an immutable deep copy, assigns a stable opaque `ev_` ID and missing receipt time, and canonicalizes timestamps to UTC. | A successful store insert commits the normalized inbox data and pending routing state together. | Missing/oversized/non-UTF-8 identity, entity, attribute, or payload data, excessive/invalid attributes, non-object/trailing/invalid JSON, out-of-range timestamps, invalid caller-supplied event/replay IDs, or self-referential replay lineage fail before mutation; caller-owned payloads, maps, pointers, actors, and subjects cannot mutate stored or returned state. | All connectors need one safe, bounded, source-neutral contract. |
 | `FR-EVENT-AUTOMATION-003` | MUST | An envelope is prepared for persistence with a payload byte limit, configured sensitive field names, and optional exact secret values. | Sensitive values and embedded secret strings are recursively replaced with `[REDACTED]` while unrelated JSON types and structure are preserved; actor, subject, and envelope attribute strings receive the same protection, and repeated redaction is idempotent. | Only the redacted deep copy is eligible for durable insertion. | Oversized or invalid JSON is rejected; key matching ignores case and punctuation/underscore/camel-case differences, recognizes sensitive suffixes and explicitly configured punctuation-only keys, and descends through nested objects/arrays. An exact configured secret in a JSON or attribute-map key fails closed rather than leaking or causing a redacted-key collision. The caller's input is never rewritten. | Durable automation must not turn provider secrets or credentials into an unbounded local archive. |
 | `FR-EVENT-AUTOMATION-004` | MUST | One or more workers concurrently ingest deliveries with the same non-empty `(source, connector, dedupe_key)`. | Every caller receives the same original event and an observable duplicate indication after exactly one insert. | The first envelope remains authoritative; later duplicates add no inbox/routing state and never overwrite its payload or metadata. | Database contention may wait within the configured SQLite busy timeout, but must not surface as two durable events. | Provider retries and concurrent receivers must be safe. |
@@ -842,6 +849,10 @@ existing workflow agent/tool policy.
 - AI classification is expressed as an agent step inside a broadly but
   deterministically matched workflow. The router never invokes a model or
   treats model output as durable delivery identity.
+- Enabling event ingress with no configured account and model alias never
+  selects an upstream provider default. Deterministic ingestion remains
+  independent, while a model-backed workflow path fails at the shared
+  `no model configured` boundary before a provider request.
 - Event payload numbers remain lossless through expression comparison,
   file-run reads, listing, cancellation updates, and values propagated into
   dynamic run or lifecycle outputs, including integers beyond float64's exact
@@ -1015,7 +1026,7 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 
 | Requirement IDs | Evidence |
 | --- | --- |
-| `FR-EVENT-AUTOMATION-001`, `FR-EVENT-AUTOMATION-012` | [pkg/config/events_test.go](../../pkg/config/events_test.go), [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go) |
+| `FR-EVENT-AUTOMATION-001`, `FR-EVENT-AUTOMATION-012` | [pkg/config/events_test.go](../../pkg/config/events_test.go), [pkg/config/config_test.go](../../pkg/config/config_test.go), [pkg/gateway/event_automation_test.go](../../pkg/gateway/event_automation_test.go), [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go) |
 | `FR-EVENT-AUTOMATION-002`, `FR-EVENT-AUTOMATION-004` | [pkg/eventing/envelope_test.go](../../pkg/eventing/envelope_test.go), [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go) |
 | `FR-EVENT-AUTOMATION-003` | [pkg/eventing/redaction_test.go](../../pkg/eventing/redaction_test.go), [pkg/eventing/store_replay_redaction_test.go](../../pkg/eventing/store_replay_redaction_test.go) |
 | `FR-EVENT-AUTOMATION-005` | [pkg/eventing/store_sqlite_test.go](../../pkg/eventing/store_sqlite_test.go), [pkg/eventing/store_schema_test.go](../../pkg/eventing/store_schema_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go) |

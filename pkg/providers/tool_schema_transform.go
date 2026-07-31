@@ -47,10 +47,6 @@ func (p *toolSchemaTransformProvider) Chat(
 	return p.delegate.Chat(ctx, messages, transformed, model, options)
 }
 
-func (p *toolSchemaTransformProvider) GetDefaultModel() string {
-	return p.delegate.GetDefaultModel()
-}
-
 func (p *toolSchemaStreamingProvider) ChatStream(
 	ctx context.Context,
 	messages []Message,

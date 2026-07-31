@@ -562,14 +562,10 @@ function AdaptationProfilesPanel({
               )
               const profileIsProbing =
                 isProbing &&
-                adaptationProfileKey(
-                  probingProfile?.provider ?? "",
-                  probingProfile?.model ?? "",
-                ) ===
-                  adaptationProfileKey(
-                    profile.resolved.provider,
-                    profile.resolved.model,
-                  )
+                (probingProfile?.account_ref ?? "") ===
+                  (profile.probe_account_ref ?? "") &&
+                (probingProfile?.model_alias ?? "") ===
+                  (profile.probe_model_alias ?? "")
               const probeDisabledReason = toolAdaptationProbeDisabledReason(
                 {
                   isDirty,
@@ -594,8 +590,8 @@ function AdaptationProfilesPanel({
                   canEditOverride={!isSaving && !isProbing}
                   onRunProbe={() =>
                     onRunProbe({
-                      provider: profile.resolved.provider,
-                      model: profile.resolved.model,
+                      account_ref: profile.probe_account_ref ?? "",
+                      model_alias: profile.probe_model_alias ?? "",
                     })
                   }
                   onEditOverride={() => {

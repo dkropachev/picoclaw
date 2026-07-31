@@ -30,6 +30,9 @@ func (h *Handler) registerModelRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/accounts/models/catalog/{id}", h.handleDeleteCatalog)
 	mux.HandleFunc("POST /api/accounts/models", h.handleAddModel)
 	mux.HandleFunc("POST /api/accounts/models/default", h.handleSetDefaultModel)
+	mux.HandleFunc("POST /api/accounts/model-aliases", h.handleAddModelAlias)
+	mux.HandleFunc("PUT /api/accounts/model-aliases/{index}", h.handleUpdateModelAlias)
+	mux.HandleFunc("DELETE /api/accounts/model-aliases/{index}", h.handleDeleteModelAlias)
 	mux.HandleFunc("PUT /api/accounts/models/{index}", h.handleUpdateModel)
 	mux.HandleFunc("DELETE /api/accounts/models/{index}", h.handleDeleteModel)
 	mux.HandleFunc("POST /api/accounts/models/{index}/test", h.handleTestModel)
@@ -63,12 +66,11 @@ type modelResponse struct {
 	ExtraBody           map[string]any              `json:"extra_body,omitempty"`
 	CustomHeaders       map[string]string           `json:"custom_headers,omitempty"`
 	// Meta
-	Enabled             bool   `json:"enabled"`
-	Available           bool   `json:"available"`
-	Status              string `json:"status"`
-	IsDefault           bool   `json:"is_default"`
-	IsVirtual           bool   `json:"is_virtual"`
-	DefaultModelAllowed bool   `json:"default_model_allowed"`
+	Enabled   bool   `json:"enabled"`
+	Available bool   `json:"available"`
+	Status    string `json:"status"`
+	IsDefault bool   `json:"is_default"`
+	IsVirtual bool   `json:"is_virtual"`
 }
 
 func normalizeStoredModelConfig(mc *config.ModelConfig) bool {
@@ -122,10 +124,6 @@ func normalizeStoredModelConfig(mc *config.ModelConfig) bool {
 					mc.Model = strippedModel
 					changed = true
 				}
-			}
-			if strings.TrimSpace(mc.Model) != asr.ElevenLabsSupportedModelID() {
-				mc.Model = asr.ElevenLabsSupportedModelID()
-				changed = true
 			}
 		}
 		return changed
@@ -244,14 +242,6 @@ func modelProviderOptionsForResponse() []providers.ModelProviderOption {
 		options[i].CreateAllowed = createAllowedForProvider(options[i].ID)
 	}
 	return options
-}
-
-func defaultModelAllowedForModelConfig(mc *config.ModelConfig) bool {
-	if mc != nil && mc.IsModelRouter() {
-		return true
-	}
-	provider, _ := providers.ExtractProtocol(mc)
-	return providers.IsDefaultModelProvider(provider)
 }
 
 func modelRouterFromModelConfig(mc *config.ModelConfig) (*config.ModelRouterConfig, error) {
@@ -390,7 +380,7 @@ func normalizeStoredModelProviders(cfg *config.Config) bool {
 //
 //	GET /api/accounts/models
 func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.LoadConfig(h.configPath)
+	cfg, revision, err := config.LoadConfigSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
@@ -400,7 +390,8 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 	// through the current API shape without mutating the on-disk config.
 	normalizeStoredModelProviders(cfg)
 
-	defaultModel := cfg.Agents.Defaults.GetModelName()
+	defaultModel := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
+	defaultAccountRef := strings.TrimSpace(cfg.Agents.Defaults.AccountRef)
 	modelStatuses := make([]modelConfigurationSummary, len(cfg.ModelList))
 
 	var wg sync.WaitGroup
@@ -442,25 +433,27 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 			Enabled:             m.Enabled,
 			Available:           modelStatuses[i].Available,
 			Status:              modelStatuses[i].Status,
-			IsDefault:           m.ModelName == defaultModel,
+			IsDefault:           m.ModelName == defaultAccountRef,
 			IsVirtual:           m.IsVirtual(),
-			DefaultModelAllowed: defaultModelAllowedForModelConfig(m),
 		})
 	}
-	models = appendCredentialAccountModelResponses(models, defaultModel)
+	models = appendCredentialAccountModelResponses(models, defaultAccountRef)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"models":           models,
-		"total":            len(models),
-		"default_model":    defaultModel,
-		"provider_options": modelProviderOptionsForResponse(),
+		"models":              models,
+		"model_aliases":       cfg.ModelAliases,
+		"total":               len(models),
+		"default_account_ref": defaultAccountRef,
+		"default_model":       defaultModel,
+		"revision":            revision,
+		"provider_options":    modelProviderOptionsForResponse(),
 	})
 }
 
 func appendCredentialAccountModelResponses(
 	models []modelResponse,
-	defaultModel string,
+	defaultAccountRef string,
 ) []modelResponse {
 	store, err := oauthLoadStore()
 	if err != nil || store == nil {
@@ -485,8 +478,7 @@ func appendCredentialAccountModelResponses(
 		}
 		provider := credentialIDProvider(credentialID)
 		if provider == "" ||
-			!credentialProviderMatches(cred, provider) ||
-			!providers.IsDefaultModelProvider(provider) {
+			!credentialProviderMatches(cred, provider) {
 			continue
 		}
 		credentialIDs = append(credentialIDs, credentialID)
@@ -500,7 +492,6 @@ func appendCredentialAccountModelResponses(
 		modelName := config.AccountRouterCredentialAccountPrefix + strings.ToLower(
 			strings.TrimSpace(credentialID),
 		)
-		modelID := defaultCredentialAccountModel(provider)
 		authMethod := strings.ToLower(strings.TrimSpace(cred.AuthMethod))
 		if authMethod == "" {
 			authMethod = defaultCredentialAccountAuthMethod(provider)
@@ -511,19 +502,18 @@ func appendCredentialAccountModelResponses(
 			status = "unconfigured"
 		}
 		models = append(models, modelResponse{
-			Index:               nextIndex,
-			ModelName:           modelName,
-			Provider:            provider,
-			Model:               modelID,
-			APIKey:              "",
-			AuthMethod:          authMethod,
-			CredentialID:        credentialID,
-			Enabled:             true,
-			Available:           available,
-			Status:              status,
-			IsDefault:           modelName == defaultModel,
-			IsVirtual:           true,
-			DefaultModelAllowed: true,
+			Index:        nextIndex,
+			ModelName:    modelName,
+			Provider:     provider,
+			Model:        "",
+			APIKey:       "",
+			AuthMethod:   authMethod,
+			CredentialID: credentialID,
+			Enabled:      true,
+			Available:    available,
+			Status:       status,
+			IsDefault:    modelName == defaultAccountRef,
+			IsVirtual:    true,
 		})
 		nextIndex++
 	}
@@ -566,13 +556,6 @@ func authProviderForCredentialModel(provider string) string {
 	}
 }
 
-func defaultCredentialAccountModel(provider string) string {
-	if model := providers.DefaultModelForProvider(provider); model != "" {
-		return model
-	}
-	return "auto"
-}
-
 func defaultCredentialAccountAuthMethod(provider string) string {
 	switch providers.NormalizeProvider(provider) {
 	case "openai", "antigravity":
@@ -586,6 +569,9 @@ func defaultCredentialAccountAuthMethod(provider string) string {
 //
 //	POST /api/accounts/models
 func (h *Handler) handleAddModel(w http.ResponseWriter, r *http.Request) {
+	h.configMutationMu.Lock()
+	defer h.configMutationMu.Unlock()
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
@@ -595,12 +581,19 @@ func (h *Handler) handleAddModel(w http.ResponseWriter, r *http.Request) {
 
 	type custom struct {
 		config.ModelConfig
-		APIKey string `json:"api_key"`
+		APIKey       string `json:"api_key"`
+		SetAsDefault bool   `json:"set_as_default"`
 	}
 
 	var mc custom
 	if err = json.Unmarshal(body, &mc); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+		return
+	}
+	if mc.Router == nil &&
+		mc.ModelRouter == nil &&
+		strings.TrimSpace(mc.Provider) == "" {
+		http.Error(w, "Validation error: provider is required", http.StatusBadRequest)
 		return
 	}
 
@@ -615,7 +608,7 @@ func (h *Handler) handleAddModel(w http.ResponseWriter, r *http.Request) {
 		mc.ModelConfig.SetAPIKey(mc.APIKey)
 	}
 
-	cfg, err := config.LoadConfig(h.configPath)
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
@@ -636,7 +629,13 @@ func (h *Handler) handleAddModel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cfg.AccountRouters = append(cfg.AccountRouters, *router)
-		h.saveAddedRouterModel(w, cfg)
+		h.saveAddedRouterModel(
+			w,
+			cfg,
+			revision,
+			&mc.ModelConfig,
+			mc.SetAsDefault,
+		)
 		return
 	}
 	if mc.ModelConfig.IsModelRouter() {
@@ -654,19 +653,32 @@ func (h *Handler) handleAddModel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cfg.ModelRouters = append(cfg.ModelRouters, *router)
-		h.saveAddedRouterModel(w, cfg)
+		h.saveAddedRouterModel(
+			w,
+			cfg,
+			revision,
+			&mc.ModelConfig,
+			mc.SetAsDefault,
+		)
 		return
 	}
 
 	cfg.ModelList = append(cfg.ModelList, &mc.ModelConfig)
 	normalizeStoredModelProviders(cfg)
-	if err := cfg.ValidateModelList(); err != nil {
+	if err := applyDefaultForModelMutation(
+		cfg,
+		&mc.ModelConfig,
+		mc.SetAsDefault,
+	); err != nil {
+		http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
+		return
+	}
+	if err := validateAPIModelConfiguration(cfg); err != nil {
 		http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+	if !saveModelConfigMutation(w, h.configPath, cfg, revision) {
 		return
 	}
 
@@ -677,15 +689,24 @@ func (h *Handler) handleAddModel(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Handler) saveAddedRouterModel(w http.ResponseWriter, cfg *config.Config) {
+func (h *Handler) saveAddedRouterModel(
+	w http.ResponseWriter,
+	cfg *config.Config,
+	revision string,
+	model *config.ModelConfig,
+	setAsDefault bool,
+) {
 	cfg.MaterializeAccountRouterModels()
 	cfg.MaterializeModelRouterModels()
-	if err := cfg.ValidateModelList(); err != nil {
+	if err := applyDefaultForModelMutation(cfg, model, setAsDefault); err != nil {
 		http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
 		return
 	}
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+	if err := validateAPIModelConfiguration(cfg); err != nil {
+		http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
+		return
+	}
+	if !saveModelConfigMutation(w, h.configPath, cfg, revision) {
 		return
 	}
 
@@ -703,6 +724,9 @@ func (h *Handler) saveAddedRouterModel(w http.ResponseWriter, cfg *config.Config
 //
 //	PUT /api/accounts/models/{index}
 func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
+	h.configMutationMu.Lock()
+	defer h.configMutationMu.Unlock()
+
 	idx, err := strconv.Atoi(r.PathValue("index"))
 	if err != nil {
 		http.Error(w, "Invalid index", http.StatusBadRequest)
@@ -724,7 +748,8 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 
 	type custom struct {
 		config.ModelConfig
-		APIKey string `json:"api_key"`
+		APIKey       string `json:"api_key"`
+		SetAsDefault bool   `json:"set_as_default"`
 	}
 
 	var mc custom
@@ -733,7 +758,7 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, err := config.LoadConfig(h.configPath)
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
@@ -747,7 +772,18 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	if !requireModelListRevision(w, r, revision) {
+		return
+	}
 	existing := cfg.ModelList[idx]
+	if strings.TrimSpace(mc.ModelName) != strings.TrimSpace(existing.ModelName) {
+		http.Error(
+			w,
+			"account and router names are immutable; create a replacement before deleting the old entry",
+			http.StatusBadRequest,
+		)
+		return
+	}
 	incomingIsRouter := mc.ModelConfig.IsAccountRouter()
 	existingIsRouter := existing.IsAccountRouter()
 	incomingIsModelRouter := mc.ModelConfig.IsModelRouter()
@@ -782,13 +818,22 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 				)
 				return
 			}
-			if cfg.Agents.Defaults.ModelName == existing.ModelName {
-				cfg.Agents.Defaults.ModelName = router.Name
-			}
 			cfg.ModelRouters[routerIndex] = *router
 			cfg.MaterializeAccountRouterModels()
 			cfg.MaterializeModelRouterModels()
-			if validateErr := cfg.ValidateModelList(); validateErr != nil {
+			if defaultErr := applyDefaultForModelMutation(
+				cfg,
+				&mc.ModelConfig,
+				mc.SetAsDefault,
+			); defaultErr != nil {
+				http.Error(
+					w,
+					fmt.Sprintf("Validation error: %v", defaultErr),
+					http.StatusBadRequest,
+				)
+				return
+			}
+			if validateErr := validateAPIModelConfiguration(cfg); validateErr != nil {
 				http.Error(
 					w,
 					fmt.Sprintf("Validation error: %v", validateErr),
@@ -796,12 +841,7 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 				)
 				return
 			}
-			if saveErr := config.SaveConfig(h.configPath, cfg); saveErr != nil {
-				http.Error(
-					w,
-					fmt.Sprintf("Failed to save config: %v", saveErr),
-					http.StatusInternalServerError,
-				)
+			if !saveModelConfigMutation(w, h.configPath, cfg, revision) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -831,22 +871,26 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 			)
 			return
 		}
-		if cfg.Agents.Defaults.ModelName == existing.ModelName {
-			cfg.Agents.Defaults.ModelName = router.Name
-		}
 		cfg.AccountRouters[routerIndex] = *router
 		cfg.MaterializeAccountRouterModels()
 		cfg.MaterializeModelRouterModels()
-		if validateErr := cfg.ValidateModelList(); validateErr != nil {
+		if defaultErr := applyDefaultForModelMutation(
+			cfg,
+			&mc.ModelConfig,
+			mc.SetAsDefault,
+		); defaultErr != nil {
+			http.Error(
+				w,
+				fmt.Sprintf("Validation error: %v", defaultErr),
+				http.StatusBadRequest,
+			)
+			return
+		}
+		if validateErr := validateAPIModelConfiguration(cfg); validateErr != nil {
 			http.Error(w, fmt.Sprintf("Validation error: %v", validateErr), http.StatusBadRequest)
 			return
 		}
-		if saveErr := config.SaveConfig(h.configPath, cfg); saveErr != nil {
-			http.Error(
-				w,
-				fmt.Sprintf("Failed to save config: %v", saveErr),
-				http.StatusInternalServerError,
-			)
+		if !saveModelConfigMutation(w, h.configPath, cfg, revision) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -888,6 +932,9 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 	if _, ok := rawFields["credential_id"]; !ok {
 		mc.CredentialID = cfg.ModelList[idx].CredentialID
 	}
+	if _, ok := rawFields["enabled"]; !ok {
+		mc.Enabled = cfg.ModelList[idx].Enabled
+	}
 	// Preserve the existing Provider when the caller omits it. This keeps the
 	// update API backward-compatible for clients that haven't started sending
 	// the new field yet, while still allowing explicit clearing via "".
@@ -924,27 +971,139 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
 		return
 	}
-	if cfg.Agents.Defaults.ModelName == cfg.ModelList[idx].ModelName &&
-		!defaultModelAllowedForModelConfig(&mc.ModelConfig) {
-		// Allow users to recover from legacy/invalid defaults by saving the model
-		// and clearing the default chat model reference in the same write.
-		cfg.Agents.Defaults.ModelName = ""
-	}
-
 	cfg.ModelList[idx] = &mc.ModelConfig
 	normalizeStoredModelProviders(cfg)
-	if err := cfg.ValidateModelList(); err != nil {
+	if err := applyDefaultForModelMutation(
+		cfg,
+		&mc.ModelConfig,
+		mc.SetAsDefault,
+	); err != nil {
+		http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
+		return
+	}
+	if err := validateAPIModelConfiguration(cfg); err != nil {
 		http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
 		return
 	}
 
 	logger.Debugf("update model config: %#v", mc.ModelConfig)
 
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+	if !saveModelConfigMutation(w, h.configPath, cfg, revision) {
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func applyDefaultForModelMutation(
+	cfg *config.Config,
+	model *config.ModelConfig,
+	setAsDefault bool,
+) error {
+	if !setAsDefault {
+		return nil
+	}
+	if cfg == nil {
+		return fmt.Errorf("model configuration is required")
+	}
+	if model == nil {
+		return fmt.Errorf("model is required")
+	}
+
+	name := strings.TrimSpace(model.ModelName)
+	if name == "" {
+		return fmt.Errorf("model_name is required")
+	}
+	if model.IsModelRouter() {
+		if strings.TrimSpace(cfg.Agents.Defaults.AccountRef) == "" {
+			return fmt.Errorf("no account configured")
+		}
+		cfg.Agents.Defaults.ModelName = name
+		return nil
+	}
+	if strings.TrimSpace(cfg.Agents.Defaults.ModelName) == "" {
+		return config.ErrNoModelConfigured
+	}
+	cfg.Agents.Defaults.AccountRef = name
+	return nil
+}
+
+func requireModelListRevision(
+	w http.ResponseWriter,
+	r *http.Request,
+	currentRevision string,
+) bool {
+	expectedRevision := strings.TrimSpace(r.URL.Query().Get("revision"))
+	if expectedRevision == "" {
+		http.Error(w, "config revision is required; reload and try again", http.StatusPreconditionRequired)
+		return false
+	}
+	if expectedRevision != currentRevision {
+		http.Error(w, "Configuration changed; reload and try again", http.StatusConflict)
+		return false
+	}
+	return true
+}
+
+func (h *Handler) handleDeleteVirtualModel(
+	w http.ResponseWriter,
+	cfg *config.Config,
+	revision string,
+	deletedModelName string,
+	accountRouter bool,
+) {
+	referenceKind := "model router"
+	displayKind := "Model router"
+	references := modelAliasReferences(cfg, deletedModelName)
+	routerIndex := findModelRouterIndex(cfg, deletedModelName)
+	if accountRouter {
+		referenceKind = "account router"
+		displayKind = "Account router"
+		references = modelAccountReferences(cfg, deletedModelName)
+		routerIndex = findAccountRouterIndex(cfg, deletedModelName)
+	}
+
+	if len(references) > 0 {
+		http.Error(
+			w,
+			fmt.Sprintf(
+				"%s %q is still referenced by %s",
+				referenceKind,
+				deletedModelName,
+				strings.Join(references, ", "),
+			),
+			http.StatusConflict,
+		)
+		return
+	}
+	if routerIndex < 0 {
+		http.Error(
+			w,
+			fmt.Sprintf("%s %q not found", displayKind, deletedModelName),
+			http.StatusNotFound,
+		)
+		return
+	}
+
+	if accountRouter {
+		cfg.AccountRouters = append(
+			cfg.AccountRouters[:routerIndex],
+			cfg.AccountRouters[routerIndex+1:]...)
+	} else {
+		cfg.ModelRouters = append(
+			cfg.ModelRouters[:routerIndex],
+			cfg.ModelRouters[routerIndex+1:]...)
+	}
+	cfg.MaterializeAccountRouterModels()
+	cfg.MaterializeModelRouterModels()
+	if err := validateAPIModelConfiguration(cfg); err != nil {
+		http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
+		return
+	}
+	if !saveModelConfigMutation(w, h.configPath, cfg, revision) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
@@ -953,13 +1112,16 @@ func (h *Handler) handleUpdateModel(w http.ResponseWriter, r *http.Request) {
 //
 //	DELETE /api/accounts/models/{index}
 func (h *Handler) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
+	h.configMutationMu.Lock()
+	defer h.configMutationMu.Unlock()
+
 	idx, err := strconv.Atoi(r.PathValue("index"))
 	if err != nil {
 		http.Error(w, "Invalid index", http.StatusBadRequest)
 		return
 	}
 
-	cfg, err := config.LoadConfig(h.configPath)
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
@@ -973,79 +1135,54 @@ func (h *Handler) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	if !requireModelListRevision(w, r, revision) {
+		return
+	}
 
 	deletedModelName := cfg.ModelList[idx].ModelName
 
 	if cfg.ModelList[idx].IsAccountRouter() {
-		routerIndex := findAccountRouterIndex(cfg, deletedModelName)
-		if routerIndex < 0 {
-			http.Error(
-				w,
-				fmt.Sprintf("Account router %q not found", deletedModelName),
-				http.StatusNotFound,
-			)
-			return
-		}
-		cfg.AccountRouters = append(
-			cfg.AccountRouters[:routerIndex],
-			cfg.AccountRouters[routerIndex+1:]...)
-		cfg.MaterializeAccountRouterModels()
-		cfg.MaterializeModelRouterModels()
-		if cfg.Agents.Defaults.ModelName == deletedModelName {
-			cfg.Agents.Defaults.ModelName = ""
-		}
-		if err := config.SaveConfig(h.configPath, cfg); err != nil {
-			http.Error(
-				w,
-				fmt.Sprintf("Failed to save config: %v", err),
-				http.StatusInternalServerError,
-			)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		h.handleDeleteVirtualModel(w, cfg, revision, deletedModelName, true)
 		return
 	}
 	if cfg.ModelList[idx].IsModelRouter() {
-		routerIndex := findModelRouterIndex(cfg, deletedModelName)
-		if routerIndex < 0 {
-			http.Error(
-				w,
-				fmt.Sprintf("Model router %q not found", deletedModelName),
-				http.StatusNotFound,
-			)
-			return
-		}
-		cfg.ModelRouters = append(
-			cfg.ModelRouters[:routerIndex],
-			cfg.ModelRouters[routerIndex+1:]...)
-		cfg.MaterializeAccountRouterModels()
-		cfg.MaterializeModelRouterModels()
-		if cfg.Agents.Defaults.ModelName == deletedModelName {
-			cfg.Agents.Defaults.ModelName = ""
-		}
-		if err := config.SaveConfig(h.configPath, cfg); err != nil {
-			http.Error(
-				w,
-				fmt.Sprintf("Failed to save config: %v", err),
-				http.StatusInternalServerError,
-			)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		h.handleDeleteVirtualModel(w, cfg, revision, deletedModelName, false)
 		return
 	}
 
+	accountWillRemain := false
+	for candidateIndex, candidate := range cfg.ModelList {
+		if candidateIndex == idx || candidate == nil || candidate.IsVirtual() ||
+			candidate.IsAccountRouter() || candidate.IsModelRouter() {
+			continue
+		}
+		if strings.TrimSpace(candidate.ModelName) == strings.TrimSpace(deletedModelName) {
+			accountWillRemain = true
+			break
+		}
+	}
+	if !accountWillRemain {
+		if references := modelAccountReferences(cfg, deletedModelName); len(references) > 0 {
+			http.Error(
+				w,
+				fmt.Sprintf(
+					"account %q is still referenced by %s",
+					deletedModelName,
+					strings.Join(references, ", "),
+				),
+				http.StatusConflict,
+			)
+			return
+		}
+	}
 	cfg.ModelList = append(cfg.ModelList[:idx], cfg.ModelList[idx+1:]...)
 
-	// If the deleted model was the default, clear it.
-	if cfg.Agents.Defaults.ModelName == deletedModelName {
-		cfg.Agents.Defaults.ModelName = ""
+	if err := validateAPIModelConfiguration(cfg); err != nil {
+		http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
+		return
 	}
 
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+	if !saveModelConfigMutation(w, h.configPath, cfg, revision) {
 		return
 	}
 
@@ -1053,10 +1190,13 @@ func (h *Handler) handleDeleteModel(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-// handleSetDefaultModel sets the default model for all agents.
+// handleSetDefaultModel atomically sets the default account and model alias.
 //
 //	POST /api/accounts/models/default
 func (h *Handler) handleSetDefaultModel(w http.ResponseWriter, r *http.Request) {
+	h.configMutationMu.Lock()
+	defer h.configMutationMu.Unlock()
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
@@ -1065,87 +1205,74 @@ func (h *Handler) handleSetDefaultModel(w http.ResponseWriter, r *http.Request) 
 	defer r.Body.Close()
 
 	var req struct {
-		ModelName string `json:"model_name"`
+		AccountRef string `json:"account_ref"`
+		ModelName  string `json:"model_name"`
 	}
 	if err = json.Unmarshal(body, &req); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 		return
 	}
 
+	req.AccountRef = strings.TrimSpace(req.AccountRef)
+	req.ModelName = strings.TrimSpace(req.ModelName)
+	if req.AccountRef == "" {
+		http.Error(w, "account_ref is required", http.StatusBadRequest)
+		return
+	}
 	if req.ModelName == "" {
-		http.Error(w, "model_name is required", http.StatusBadRequest)
+		http.Error(w, config.ErrNoModelConfigured.Error(), http.StatusBadRequest)
 		return
 	}
 
-	cfg, err := config.LoadConfig(h.configPath)
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Verify the model_name exists in model_list and is not a virtual model
-	found := false
-	isDisallowedVirtual := false
-	for _, m := range cfg.ModelList {
-		if m.ModelName == req.ModelName {
-			found = true
-			isDisallowedVirtual = m.IsVirtual() && !m.IsAccountRouter() && !m.IsModelRouter()
-			break
-		}
+	if err := validateSelectableAccountRef(cfg, req.AccountRef); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
-	if !found {
-		if !credentialAccountDefaultModelAllowed(req.ModelName) {
-			http.Error(
-				w,
-				fmt.Sprintf("Model %q not found in model_list", req.ModelName),
-				http.StatusNotFound,
-			)
-			return
-		}
-	}
-	if isDisallowedVirtual {
+	if !modelAliasOrRouterConfigured(cfg, req.ModelName) {
 		http.Error(
 			w,
-			fmt.Sprintf("Cannot set virtual model %q as default", req.ModelName),
-			http.StatusBadRequest,
+			fmt.Sprintf("model alias %q is not configured", req.ModelName),
+			http.StatusNotFound,
 		)
 		return
 	}
-	for _, m := range cfg.ModelList {
-		if m.ModelName == req.ModelName {
-			if !defaultModelAllowedForModelConfig(m) {
-				http.Error(
-					w,
-					fmt.Sprintf("Model %q cannot be used as the default chat model", req.ModelName),
-					http.StatusBadRequest,
-				)
-				return
-			}
-			break
-		}
+	if err := validateSelectionGraph(cfg, req.AccountRef, req.ModelName, true); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
+	cfg.Agents.Defaults.AccountRef = req.AccountRef
 	cfg.Agents.Defaults.ModelName = req.ModelName
+	if err := validateAPIModelConfiguration(cfg); err != nil {
+		http.Error(w, fmt.Sprintf("Validation error: %v", err), http.StatusBadRequest)
+		return
+	}
 
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
+	if !saveModelConfigMutation(w, h.configPath, cfg, revision) {
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
-		"status":        "ok",
-		"default_model": req.ModelName,
+		"status":              "ok",
+		"default_account_ref": req.AccountRef,
+		"default_model":       req.ModelName,
 	})
 }
 
-func credentialAccountDefaultModelAllowed(modelName string) bool {
-	credentialID, ok := config.AccountRouterCredentialAccountID(modelName)
+func credentialAccountAvailable(accountRef string) bool {
+	credentialID, ok := config.AccountRouterCredentialAccountID(accountRef)
 	if !ok {
 		return false
 	}
-	provider, ok := config.AccountRouterCredentialAccountProvider(modelName)
-	if !ok || !providers.IsDefaultModelProvider(provider) {
+	provider, ok := config.AccountRouterCredentialAccountProvider(accountRef)
+	if !ok {
 		return false
 	}
 	credentialID, err := auth.NormalizeCredentialID(
@@ -1522,7 +1649,7 @@ func resolveAccountModelConfig(
 		return &config.ModelConfig{
 			ModelName:    accountRef,
 			Provider:     provider,
-			Model:        defaultCredentialAccountModel(provider),
+			Model:        "",
 			AuthMethod:   defaultCredentialAccountAuthMethod(provider),
 			CredentialID: normalizedCredentialID,
 			Enabled:      true,

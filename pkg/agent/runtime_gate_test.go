@@ -37,10 +37,6 @@ func (p *runtimeGateProvider) Chat(
 	return &providers.LLMResponse{Content: p.name}, nil
 }
 
-func (p *runtimeGateProvider) GetDefaultModel() string {
-	return p.name
-}
-
 func (p *runtimeGateProvider) Close() {
 	select {
 	case <-p.closed:
@@ -56,7 +52,7 @@ func TestAgentLoopStopBeforeRunPreventsLateStartup(t *testing.T) {
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	msgBus := bus.NewMessageBus()
 	provider := &runtimeGateProvider{name: "provider", closed: make(chan struct{})}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	// Model the gateway shutdown winning immediately after spawning Run but
 	// before the goroutine is scheduled. Stop is terminal and must be
@@ -83,7 +79,7 @@ func TestAgentLoopStopRejectsNewRootRuntimeButAllowsRetainedChildren(t *testing.
 
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
-	al := NewAgentLoop(
+	al := newTestAgentLoopWithStrictModels(
 		cfg,
 		bus.NewMessageBus(),
 		&runtimeGateProvider{name: "provider", closed: make(chan struct{})},
@@ -115,7 +111,7 @@ func TestAgentLoopStopWakesPausedRootRuntimeAdmission(t *testing.T) {
 
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
-	al := NewAgentLoop(
+	al := newTestAgentLoopWithStrictModels(
 		cfg,
 		bus.NewMessageBus(),
 		&runtimeGateProvider{name: "provider", closed: make(chan struct{})},
@@ -152,7 +148,7 @@ func TestReloadDrainsRuntimeGenerationBeforeReturningRetainedProvider(t *testing
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	providerA := &runtimeGateProvider{name: "provider-a", closed: make(chan struct{})}
 	providerB := &runtimeGateProvider{name: "provider-b", closed: make(chan struct{})}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), providerA)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), providerA)
 	defer al.Close()
 
 	previous, err := al.ReloadProviderAndConfigRetainingPrevious(
@@ -274,7 +270,7 @@ func TestChannelWorkflowRetainsRuntimeAfterTriggerReturns(t *testing.T) {
 	cfg.Workflows.Enabled = true
 	providerA := &runtimeGateProvider{name: "provider-a", closed: make(chan struct{})}
 	providerB := &runtimeGateProvider{name: "provider-b", closed: make(chan struct{})}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), providerA)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), providerA)
 	defer al.Close()
 
 	blockingTool := &runtimeGateBlockingWorkflowTool{
@@ -396,7 +392,7 @@ func TestInboundMessageRetainsRoutingGenerationWhileWaitingForWorker(t *testing.
 		called: make(chan struct{}, 1),
 	}
 	msgBus := bus.NewMessageBus()
-	al := NewAgentLoop(cfgA, msgBus, providerA)
+	al := newTestAgentLoopWithStrictModels(cfgA, msgBus, providerA)
 	defer al.Close()
 
 	// Saturate the only worker slot so the admitted message must wait after
@@ -526,7 +522,7 @@ func TestLegacySummarizerRejectsReloadedWorkspaceGeneration(t *testing.T) {
 		closed: make(chan struct{}),
 		called: make(chan struct{}, 1),
 	}
-	al := NewAgentLoop(cfgA, bus.NewMessageBus(), providerA)
+	al := newTestAgentLoopWithStrictModels(cfgA, bus.NewMessageBus(), providerA)
 	defer al.Close()
 	manager := &legacyContextManager{al: al}
 	const sessionKey = "summarizer-generation"
@@ -629,7 +625,7 @@ func TestSpawnToolRetainsRuntimeBeforeLaunchingBackgroundSubturn(t *testing.T) {
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	providerA := &runtimeGateProvider{name: "provider-a", closed: make(chan struct{})}
 	providerB := &runtimeGateProvider{name: "provider-b", closed: make(chan struct{})}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), providerA)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), providerA)
 	defer al.Close()
 
 	rootCtx, releaseRoot, err := al.acquireRuntimeUse(context.Background())

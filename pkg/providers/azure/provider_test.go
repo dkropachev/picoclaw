@@ -39,6 +39,24 @@ func writeValidResponse(w http.ResponseWriter) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+func TestProviderChatRejectsMissingModelBeforeRequest(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	provider := NewProvider("test-key", server.URL, "", "")
+	_, err := provider.Chat(context.Background(), nil, nil, "  ", nil)
+	if !errors.Is(err, protocoltypes.ErrNoModelConfigured) {
+		t.Fatalf("Chat() error = %v, want no model configured", err)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+}
+
 func TestProviderChat_AzureURLConstruction(t *testing.T) {
 	var capturedPath string
 

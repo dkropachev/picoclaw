@@ -292,9 +292,9 @@ func (h *Handler) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 //	POST /api/config/reset
 func (h *Handler) handleResetConfig(w http.ResponseWriter, r *http.Request) {
 	h.configMutationMu.Lock()
-	defer h.configMutationMu.Unlock()
-
-	if err := config.ResetToDefaults(h.configPath); err != nil {
+	err := config.ResetToDefaults(h.configPath)
+	h.configMutationMu.Unlock()
+	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to reset config: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -384,8 +384,8 @@ func (h *Handler) handleTestCommandPatterns(w http.ResponseWriter, r *http.Reque
 func validateConfig(cfg *config.Config) []string {
 	var errs []string
 
-	// Validate model_list entries
-	if err := cfg.ValidateModelList(); err != nil {
+	// Validate accounts, aliases, selectors, and every reachable routing pair.
+	if err := validateAPIModelConfiguration(cfg); err != nil {
 		errs = append(errs, err.Error())
 	}
 

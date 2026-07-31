@@ -19,6 +19,7 @@ import {
   type AgentMutationInput,
   AgentsAPIError,
 } from "@/api/agents"
+import type { ModelAlias } from "@/api/models"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -58,6 +59,8 @@ import {
 } from "./agent-form"
 import { AgentTokenListField } from "./agent-token-list-field"
 
+const INHERIT_ACCOUNT_VALUE = "__picoclaw_inherit_account__"
+
 export interface AgentEditorSession {
   mode: "create" | "edit"
   agent: AgentInfo | null
@@ -67,6 +70,9 @@ export interface AgentEditorSession {
 export function AgentEditorSheet({
   session,
   agents,
+  accountRefs,
+  modelAliases,
+  modelRouterNames,
   latestRevision,
   onSubmit,
   onConflict,
@@ -74,6 +80,9 @@ export function AgentEditorSheet({
 }: {
   session: AgentEditorSession | null
   agents: AgentInfo[]
+  accountRefs: string[]
+  modelAliases: ModelAlias[]
+  modelRouterNames: string[]
   latestRevision: string
   onSubmit: (
     input: AgentMutationInput,
@@ -145,6 +154,14 @@ export function AgentEditorSheet({
   const peerIDs = useMemo(
     () => agents.map((agent) => agent.id).filter((id) => id !== draft.id),
     [agents, draft.id],
+  )
+  const modelAliasNames = useMemo(
+    () => modelAliases.map((alias) => alias.name),
+    [modelAliases],
+  )
+  const primaryModelNames = useMemo(
+    () => [...new Set([...modelAliasNames, ...modelRouterNames])],
+    [modelAliasNames, modelRouterNames],
   )
   const retainedUnknownAgentIDs =
     session?.mode === "edit"
@@ -369,6 +386,54 @@ export function AgentEditorSheet({
                     }
                   />
                 </div>
+                <div className="space-y-2">
+                  <Label htmlFor="agent-account-ref">
+                    {t("pages.agent.agents.form.account", "Provider account")}
+                  </Label>
+                  <Select
+                    value={draft.accountRef || INHERIT_ACCOUNT_VALUE}
+                    disabled={saving}
+                    onValueChange={(value) =>
+                      update(
+                        "accountRef",
+                        value === INHERIT_ACCOUNT_VALUE ? "" : value,
+                      )
+                    }
+                  >
+                    <SelectTrigger id="agent-account-ref" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={INHERIT_ACCOUNT_VALUE}>
+                        {t(
+                          "pages.agent.agents.form.account_inherit",
+                          "Inherit default account",
+                        )}
+                      </SelectItem>
+                      {draft.accountRef &&
+                        !accountRefs.includes(draft.accountRef) && (
+                          <SelectItem value={draft.accountRef} disabled>
+                            {t(
+                              "pages.agent.agents.form.not_configured",
+                              "{{name}} (not configured)",
+                              { name: draft.accountRef },
+                            )}
+                          </SelectItem>
+                        )}
+                      {accountRefs.map((accountRef) => (
+                        <SelectItem key={accountRef} value={accountRef}>
+                          {accountRef}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-muted-foreground text-xs">
+                    {t(
+                      "pages.agent.agents.form.account_hint",
+                      "Choose a concrete account or account router independently from the model alias.",
+                    )}
+                  </p>
+                </div>
               </section>
 
               <section className="space-y-4" aria-labelledby="agent-model">
@@ -380,7 +445,7 @@ export function AgentEditorSheet({
                     <Label htmlFor="agent-primary-mode">
                       {t(
                         "pages.agent.agents.form.primary_policy",
-                        "Primary model",
+                        "Primary model alias",
                       )}
                     </Label>
                     <Select
@@ -416,7 +481,7 @@ export function AgentEditorSheet({
                     <Label htmlFor="agent-fallback-mode">
                       {t(
                         "pages.agent.agents.form.fallback_policy",
-                        "Fallback models",
+                        "Fallback model aliases",
                       )}
                     </Label>
                     <Select
@@ -460,19 +525,44 @@ export function AgentEditorSheet({
                     <Label htmlFor="agent-primary">
                       {t(
                         "pages.agent.agents.form.primary_model",
-                        "Primary model name",
+                        "Primary model alias",
                       )}
                     </Label>
-                    <Input
-                      id="agent-primary"
+                    <Select
                       value={draft.primary}
                       disabled={saving}
-                      aria-invalid={Boolean(errors.primary)}
-                      placeholder="provider/model"
-                      onChange={(event) =>
-                        update("primary", event.target.value)
-                      }
-                    />
+                      onValueChange={(value) => update("primary", value)}
+                    >
+                      <SelectTrigger
+                        id="agent-primary"
+                        className="w-full"
+                        aria-invalid={Boolean(errors.primary)}
+                      >
+                        <SelectValue
+                          placeholder={t(
+                            "pages.agent.agents.form.select_alias",
+                            "Select model alias",
+                          )}
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {draft.primary &&
+                          !primaryModelNames.includes(draft.primary) && (
+                            <SelectItem value={draft.primary} disabled>
+                              {t(
+                                "pages.agent.agents.form.not_configured",
+                                "{{name}} (not configured)",
+                                { name: draft.primary },
+                              )}
+                            </SelectItem>
+                          )}
+                        {primaryModelNames.map((modelName) => (
+                          <SelectItem key={modelName} value={modelName}>
+                            {modelName}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                     {errors.primary && (
                       <p className="text-destructive text-xs">
                         {errors.primary}
@@ -488,13 +578,18 @@ export function AgentEditorSheet({
                     )}
                     description={t(
                       "pages.agent.agents.form.fallback_order_hint",
-                      "Models are tried from top to bottom.",
+                      "Model aliases are tried from top to bottom.",
                     )}
                     values={draft.fallbacks}
                     input={draft.fallbackInput}
+                    suggestions={modelAliasNames}
+                    restrictToSuggestions
                     disabled={saving}
                     error={errors.fallbacks}
-                    placeholder="provider/model"
+                    placeholder={t(
+                      "pages.agent.agents.form.select_alias",
+                      "Select model alias",
+                    )}
                     onChange={(values) => update("fallbacks", values)}
                     onInputChange={(value) => update("fallbackInput", value)}
                   />
@@ -525,7 +620,7 @@ export function AgentEditorSheet({
                   >
                     {t(
                       "pages.agent.agents.form.reset_model",
-                      "Reset model policy to inherited defaults",
+                      "Reset alias policy to inherited defaults",
                     )}
                   </Button>
                 )}

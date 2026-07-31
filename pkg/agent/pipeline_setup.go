@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/accountrouter"
-	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -18,6 +17,9 @@ import (
 // It replaces lines 56-145 of the original runTurn.
 func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution, error) {
 	cfg := p.Cfg
+	if ts != nil && ts.agent != nil && ts.agent.ConfigurationError != nil {
+		return nil, ts.agent.ConfigurationError
+	}
 	maxMediaSize := cfg.Agents.Defaults.GetMaxMediaSize()
 	routerSelectReason := accountrouter.SelectReasonInitial
 
@@ -150,25 +152,57 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 		activeModelName = strings.TrimSpace(sideQuestionModelName(ts.agent, true))
 	}
 	activeModelName = resolvedCandidateModelName(activeCandidates, activeModelName)
-	if override := strings.TrimSpace(ts.opts.ModelNameOverride); override != "" {
+	if strings.TrimSpace(ts.opts.ModelNameOverride) != "" ||
+		strings.TrimSpace(ts.opts.AccountRefOverride) != "" ||
+		ts.opts.ModelFallbacksOverride != nil {
+		overrideSelector := firstNonEmpty(ts.opts.ModelNameOverride, ts.agent.Model)
+		overrideAlias, err := resolveModelSelectorAlias(
+			cfg,
+			overrideSelector,
+			ts.userMessage,
+			messages,
+		)
+		if err != nil {
+			return nil, err
+		}
+		overrideFallbacks := ts.opts.ModelFallbacksOverride
+		if overrideFallbacks == nil && overrideSelector == ts.agent.Model {
+			overrideFallbacks = ts.agent.Fallbacks
+		}
+		if err := validateModelAliasReferences(cfg, overrideAlias, overrideFallbacks); err != nil {
+			return nil, err
+		}
+		if firstNonEmpty(ts.opts.AccountRefOverride, ts.agent.AccountRef) == "" {
+			return nil, fmt.Errorf("no account configured")
+		}
 		activeCandidates, activeModel, activeModelName, activeAccountRouter, routerSelection = p.al.selectOverrideCandidates(
 			ts.agent,
-			override,
-			ts.opts.ModelIDOverride,
+			ts.opts.AccountRefOverride,
+			overrideAlias,
+			overrideFallbacks,
 			ts.sessionKey,
 			routerSelectReason,
 		)
-		if _, isCredentialOverride := config.AccountRouterCredentialAccountID(override); (activeAccountRouter != nil ||
-			isCredentialOverride) && !candidateSelectionHasProvider(ts.agent, activeCandidates) {
-			return nil, fmt.Errorf("model override %q has no runnable account provider", override)
+		if !candidateSelectionHasProvider(ts.agent, activeCandidates) {
+			return nil, fmt.Errorf(
+				"model alias %q with account %q has no runnable provider",
+				activeModelName,
+				firstNonEmpty(ts.opts.AccountRefOverride, ts.agent.AccountRef),
+			)
 		}
 		activeProvider = workflowProviderForCandidates(ts.agent, activeProvider, activeCandidates)
 		usedLight = false
-	} else if activeAccountRouter != nil &&
-		!candidateSelectionHasProvider(ts.agent, activeCandidates) {
+	} else if !candidateSelectionHasProvider(ts.agent, activeCandidates) {
+		if activeAccountRouter != nil {
+			return nil, fmt.Errorf(
+				"account router %q has no runnable account provider",
+				activeAccountRouter.Name,
+			)
+		}
 		return nil, fmt.Errorf(
-			"account router %q has no runnable account provider",
-			activeAccountRouter.Name,
+			"model alias %q with account %q has no runnable provider",
+			activeModelName,
+			ts.agent.AccountRef,
 		)
 	}
 
@@ -211,24 +245,6 @@ func candidateSelectionHasProvider(
 		}
 	}
 	return true
-}
-
-func workflowOverrideModelCandidates(
-	cfg *config.Config,
-	agent *AgentInstance,
-	modelName string,
-) ([]providers.FallbackCandidate, string, string) {
-	defaultProvider := "openai"
-	if cfg != nil {
-		defaultProvider = cfg.Agents.Defaults.Provider
-	}
-	candidates := resolveModelCandidates(cfg, defaultProvider, modelName, nil)
-	activeModel := resolvedCandidateModel(candidates, modelName)
-	displayName := resolvedCandidateModelName(candidates, modelName)
-	if strings.TrimSpace(displayName) == "" && agent != nil {
-		displayName = agent.Model
-	}
-	return candidates, activeModel, displayName
 }
 
 func workflowProviderForCandidates(

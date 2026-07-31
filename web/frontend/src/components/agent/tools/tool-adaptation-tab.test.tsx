@@ -5,6 +5,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest"
 
 import type {
   ToolAdaptationConfig,
+  ToolAdaptationProbeTarget,
   ToolAdaptationProfileState,
 } from "@/api/tools"
 import { ToolAdaptationTab } from "@/components/agent/tools/tool-adaptation-tab"
@@ -16,6 +17,8 @@ const profile: ToolAdaptationProfileState = {
   is_default: true,
   is_override: false,
   probe_available: true,
+  probe_account_ref: "openai-work",
+  probe_model_alias: "coding",
   resolved: {
     provider: "openai",
     model: "gpt-5.4",
@@ -83,15 +86,18 @@ describe("ToolAdaptationTab", () => {
     )
 
     expect(onRunProbe).toHaveBeenCalledWith({
-      provider: "openai",
-      model: "gpt-5.4",
+      account_ref: "openai-work",
+      model_alias: "coding",
     })
   })
 
   it("shows an accessible probing state for the selected profile", () => {
     renderTab({
       isProbing: true,
-      probingProfile: { provider: "openai", model: "gpt-5.4" },
+      probingProfile: {
+        account_ref: "openai-work",
+        model_alias: "coding",
+      },
     })
 
     const probeButton = screen.getByRole("button", {
@@ -166,7 +172,10 @@ describe("ToolAdaptationTab", () => {
       isDirty: false,
       isSaving: false,
       isProbing: true,
-      probingProfile: { provider: "anthropic", model: "claude-sonnet" },
+      probingProfile: {
+        account_ref: "anthropic-work",
+        model_alias: "coding",
+      },
       reason: "Another profile probe is running.",
     },
   ])(
@@ -231,7 +240,7 @@ describe("ToolAdaptationTab", () => {
         isSaving,
         isProbing,
         probingProfile: isProbing
-          ? { provider: "openai", model: "gpt-5.4" }
+          ? { account_ref: "openai-work", model_alias: "coding" }
           : null,
       })
 
@@ -381,8 +390,8 @@ function renderTab({
   isDirty?: boolean
   isSaving?: boolean
   isProbing?: boolean
-  probingProfile?: { provider: string; model: string } | null
-  onRunProbe?: (profile: { provider: string; model: string }) => void
+  probingProfile?: ToolAdaptationProbeTarget | null
+  onRunProbe?: (profile: ToolAdaptationProbeTarget) => void
   onUpdateDraft?: (
     updater: (current: ToolAdaptationConfig) => ToolAdaptationConfig,
   ) => void

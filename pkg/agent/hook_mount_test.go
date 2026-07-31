@@ -53,10 +53,14 @@ func newConfiguredHookLoop(t *testing.T, provider *llmHookTestProvider, hooks co
 				MaxToolIterations: 10,
 			},
 		},
+		ModelAliases: []config.ModelAliasConfig{
+			{Name: "builtin-model", Model: "builtin-model"},
+			{Name: "process-model", Model: "process-model"},
+		},
 		Hooks: hooks,
 	}
 
-	return NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	return newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 }
 
 func TestAgentLoop_ProcessDirectWithChannel_AutoMountsBuiltinHook(t *testing.T) {

@@ -12,7 +12,9 @@ discovery, and provides CLI plus dedicated launcher management for server
 configuration, connectivity testing, bearer credentials, and browser OAuth
 login. One shared canonical server/tool naming contract is used by wrapper
 registration, direct workflow MCP execution, and workflow dependency readiness;
-ambiguous canonical names fail closed.
+ambiguous canonical names fail closed. Structured CLI add/remove mutations are
+revision-fenced so they cannot replace unrelated configuration written by
+another launcher, CLI, or gateway process.
 
 ## Reconstruction Notes
 
@@ -22,7 +24,12 @@ ambiguous canonical names fail closed.
 - Non-obvious constraints: CLI mutates config only, server names prefix tool
   names through one canonicalizer, collisions are rejected before partial
   registration, env files and headers are transport-specific, and empty server
-  removal disables MCP globally.
+  removal disables MCP globally. Add and remove operate on one
+  public-plus-security config snapshot and reject a stale compare-and-save
+  instead of replaying a partial MCP change over newer state. Edit performs the
+  same fenced validation/normalization preflight before handing the config file
+  to the operator's editor; the subsequent external editor write is not a
+  compare-and-save mutation.
 
 ## Requirements
 
@@ -32,7 +39,7 @@ ambiguous canonical names fail closed.
 | `FR-MCP-002` | MUST   | Tool discovery registers remote tool names with server prefixes and preserves remote descriptions and schemas.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | The model needs unambiguous callable tool definitions.                                                                                        |
 | `FR-MCP-003` | MUST   | Deferred discovery hides remote tools behind search/open behavior until selected. Its TTL is measured in agent tool-execution ticks, and a per-server deferred override wins over the global setting. The launcher accepts enabled discovery settings only when TTL and maximum results are at least one and at least one BM25 or regex matcher is enabled; runtime config with nonpositive TTL or maximum results falls back to five, while no enabled matcher fails initialization.                                                                                                                                                                                                              | Large MCP setups must not exhaust context or expire selected tools on an ambiguous clock.                                                      |
 | `FR-MCP-004` | MUST   | Remote tool calls forward JSON arguments, return text/media results, and publish start/end runtime events including failures.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | MCP execution must be observable and model-readable.                                                                                          |
-| `FR-MCP-005` | MUST   | MCP CLI add/list/show/test/edit/remove changes only config state and does not keep servers running.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | CLI is a configuration manager, not a daemon.                                                                                                 |
+| `FR-MCP-005` | MUST   | MCP CLI add/list/show/test/edit/remove changes only config state and does not keep servers running. Add and remove load one update-safe config snapshot with its opaque public-plus-security revision, validate the complete candidate, and save only if that revision is still current. A conflict reports that configuration changed and requires an explicit reload/retry; it neither applies the stale structured MCP mutation nor replaces unrelated concurrent state such as model aliases. Edit applies this fence only to its validation/normalization preflight, then launches the operator's editor against the config path; the editor's direct write is outside PicoClaw's compare-and-save boundary. | CLI is a configuration manager, not a daemon; structured mutations must not lose concurrent configuration changes, while the explicit editor boundary must remain accurate. |
 | `FR-MCP-006` | MUST   | CLI add enables MCP globally, creating the first server through the launcher auto-enables it, and removing the final server through either management surface disables global MCP enablement.                                                                                                                                                                                                                                                                                                                                                                                                                                  | Add/remove boundaries should produce an immediately usable and internally consistent global state.                                            |
 | `FR-MCP-007` | SHOULD | Live server inspection reports reachable status and tool counts without mutating configuration.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Operators need safe diagnostics.                                                                                                              |
 | `FR-MCP-008` | MUST   | A missing `tools.mcp.enabled` value defaults to true, while an explicit false remains disabled. New default configurations leave the server map empty and discovery disabled until an operator opts in.                                                                                                                                                                                                                                                                                                                                                                                                                        | A newly installed launcher should be ready to add an MCP server without overriding an explicit opt-out or exposing unnecessary discovery tools. |
@@ -47,8 +54,9 @@ references, sanitized env/header key inventories, credential ownership and
 reference IDs, bearer and OAuth tokens held in the external auth store, OAuth
 refresh metadata, short-lived browser-login flows and server snapshots, live
 client sessions, discovered remote tool definitions, generated local tool
-names, runtime event metadata, a deterministic gateway restart signature, and
-CLI- or launcher-managed JSON config entries.
+names, runtime event metadata, a deterministic gateway restart signature,
+CLI- or launcher-managed JSON config entries, and the opaque config revision
+captured for each structured CLI add/remove operation and edit preflight.
 
 ## Surface Ownership
 
@@ -79,7 +87,7 @@ Owns: EVENT mcp.*
 | Type        | Surface                                       | Contract                                                                                                               | Requirement IDs                                        |
 | ----------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
 | Config      | `tools.mcp.*`                                 | Default-on global enablement, discovery settings, per-server transport details, and external credential references.    | `FR-MCP-001`, `FR-MCP-003`, `FR-MCP-008`, `FR-MCP-010` |
-| CLI         | `picoclaw mcp add/list/show/test/edit/remove` | Config management and live diagnostics.                                                                                | `FR-MCP-005`, `FR-MCP-006`, `FR-MCP-007`               |
+| CLI         | `picoclaw mcp add/list/show/test/edit/remove` | Config management and live diagnostics; add/remove use snapshot-plus-CAS persistence, while edit uses the same fence only before launching the external editor. | `FR-MCP-005`, `FR-MCP-006`, `FR-MCP-007` |
 | Runtime     | MCP manager, canonical tool identity, and MCP tool wrapper | Connection lifecycle, collision-safe discovery/registration, canonical readiness, and remote tool execution. | `FR-MCP-001`, `FR-MCP-002`, `FR-MCP-004`, `FR-MCP-011` |
 | HTTP        | `/api/mcp*`, `/mcp/oauth/callback`            | Sanitized settings/server inventory, isolated mutations, probes, bearer management, and short-lived OAuth flows.        | `FR-MCP-007`, `FR-MCP-009`, `FR-MCP-010`               |
 | Frontend    | `/agent/mcp`                                  | Responsive server management, progressive forms, testing, status, token actions, and OAuth login/reconnect.             | `FR-MCP-009`, `FR-MCP-010`                             |
@@ -126,6 +134,13 @@ Owns: EVENT mcp.*
    includes complete enabled MCP config and nonsecret auth revisions; it ignores
    disabled MCP details and never reads or hashes external bearer/OAuth token
    bytes.
+10. CLI add and remove capture the update-safe configuration and its exact
+    public-plus-security revision together, derive and validate one complete
+    candidate, and compare-and-save against that revision. Edit performs that
+    fenced save as a preflight before launching the configured editor, whose
+    direct file write is outside this transaction. A preflight or structured
+    mutation mismatch preserves the newer configuration and requires a reload
+    before the operator decides whether to retry.
 
 ## Cross-Feature Behavior
 
@@ -165,6 +180,11 @@ server and tool lifecycle. Security and isolation affect stdio process startup.
 - Stdio servers reject remote-only auth configuration.
 - Launcher probes do not save an unsaved server definition, and failed
   mutations do not partially update the MCP server map.
+- A concurrent config or security-sidecar change makes a structured CLI
+  add/remove or edit preflight stale. The command returns a revision conflict,
+  preserves that newer state, and does not apply the stale snapshot. Once the
+  external editor starts, conflict handling is the editor/operator's
+  responsibility rather than PicoClaw CAS.
 - Credential cleanup deletes only an unreferenced credential; same-origin rename
   and shared references keep the active record.
 - Enabled config or auth-revision changes require a gateway restart, while
@@ -185,7 +205,7 @@ server and tool lifecycle. Security and isolation affect stdio process startup.
 | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `FR-MCP-001`, `FR-MCP-002`, `FR-MCP-004`, `FR-MCP-007` | [pkg/mcp/manager_test.go](../../pkg/mcp/manager_test.go), [pkg/mcp/manager_integration_test.go](../../pkg/mcp/manager_integration_test.go), [pkg/mcp/manager_real_server_integration_test.go](../../pkg/mcp/manager_real_server_integration_test.go)                                           |
 | `FR-MCP-003`                                           | [pkg/tools/search_tools_test.go](../../pkg/tools/search_tools_test.go), [web/backend/api/mcp_test.go](../../web/backend/api/mcp_test.go), [docs/reference/tools_configuration.md](../reference/tools_configuration.md)                                                                                                                        |
-| `FR-MCP-005`, `FR-MCP-006`                             | [cmd/picoclaw/internal/mcp/command_test.go](../../cmd/picoclaw/internal/mcp/command_test.go), [web/backend/api/mcp_test.go](../../web/backend/api/mcp_test.go), [docs/reference/mcp-cli.md](../reference/mcp-cli.md)                                                                                                                          |
+| `FR-MCP-005`, `FR-MCP-006`                             | [cmd/picoclaw/internal/mcp/command_test.go](../../cmd/picoclaw/internal/mcp/command_test.go), [cmd/picoclaw/internal/mcp/helpers.go](../../cmd/picoclaw/internal/mcp/helpers.go), [pkg/config/mutation_test.go](../../pkg/config/mutation_test.go), [web/backend/api/mcp_test.go](../../web/backend/api/mcp_test.go), [docs/reference/mcp-cli.md](../reference/mcp-cli.md) |
 | `FR-MCP-008`                                           | [pkg/config/config_test.go](../../pkg/config/config_test.go), [config/config.example.json](../../config/config.example.json)                                                                                                                                                                   |
 | `FR-MCP-009`                                           | [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go), [web/backend/api/mcp_test.go](../../web/backend/api/mcp_test.go), [web/frontend/src/api/mcp.test.ts](../../web/frontend/src/api/mcp.test.ts), [web/frontend/src/components/agent/mcp/mcp-server-card.test.tsx](../../web/frontend/src/components/agent/mcp/mcp-server-card.test.tsx), [web/frontend/src/components/agent/mcp/mcp-server-form.test.ts](../../web/frontend/src/components/agent/mcp/mcp-server-form.test.ts), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-MCP-010`                                           | [cmd/picoclaw/internal/mcp/command_test.go](../../cmd/picoclaw/internal/mcp/command_test.go), [pkg/auth/store_test.go](../../pkg/auth/store_test.go), [pkg/mcp/auth_test.go](../../pkg/mcp/auth_test.go), [pkg/mcp/network_test.go](../../pkg/mcp/network_test.go), [pkg/mcp/oauth_test.go](../../pkg/mcp/oauth_test.go), [web/backend/api/mcp_oauth_test.go](../../web/backend/api/mcp_oauth_test.go), [web/backend/api/mcp_test.go](../../web/backend/api/mcp_test.go), [web/frontend/src/api/mcp.test.ts](../../web/frontend/src/api/mcp.test.ts), [web/frontend/src/components/agent/mcp/use-mcp-oauth.test.ts](../../web/frontend/src/components/agent/mcp/use-mcp-oauth.test.ts) |

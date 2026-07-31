@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -33,6 +34,7 @@ type agentResource struct {
 	ID                string                `json:"id"`
 	Name              string                `json:"name"`
 	Workspace         string                `json:"workspace"`
+	AccountRef        string                `json:"account_ref"`
 	Model             *agentModelPolicy     `json:"model"`
 	Skills            []string              `json:"skills"`
 	Subagents         *agentSubagentsPolicy `json:"subagents"`
@@ -78,6 +80,7 @@ type agentDeleteBlocker struct {
 
 type agentErrorResponse struct {
 	Error    string               `json:"error"`
+	Message  string               `json:"message,omitempty"`
 	Blockers []agentDeleteBlocker `json:"blockers,omitempty"`
 }
 
@@ -190,7 +193,12 @@ func (h *Handler) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	next, err := agentConfigFromResource(*request.Agent)
 	if err != nil {
-		writeAgentError(w, http.StatusUnprocessableEntity, "invalid_agent", nil)
+		writeAgentValidationError(
+			w,
+			http.StatusUnprocessableEntity,
+			"invalid_agent",
+			err,
+		)
 		return
 	}
 
@@ -218,7 +226,12 @@ func (h *Handler) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg.Agents.List = append(cfg.Agents.List, next)
 	if err = validateAgentConfiguration(cfg); err != nil {
-		writeAgentError(w, http.StatusUnprocessableEntity, "invalid_agent", nil)
+		writeAgentValidationError(
+			w,
+			http.StatusUnprocessableEntity,
+			"invalid_agent",
+			err,
+		)
 		return
 	}
 	revision, ok := h.saveAgentConfig(w, cfg, currentRevision)
@@ -257,7 +270,12 @@ func (h *Handler) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	next, err := agentConfigFromResource(*request.Agent)
 	if err != nil {
-		writeAgentError(w, http.StatusUnprocessableEntity, "invalid_agent", nil)
+		writeAgentValidationError(
+			w,
+			http.StatusUnprocessableEntity,
+			"invalid_agent",
+			err,
+		)
 		return
 	}
 
@@ -287,7 +305,12 @@ func (h *Handler) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 		cfg.Agents.List[index] = next
 	}
 	if err = validateAgentConfiguration(cfg); err != nil {
-		writeAgentError(w, http.StatusUnprocessableEntity, "invalid_agent", nil)
+		writeAgentValidationError(
+			w,
+			http.StatusUnprocessableEntity,
+			"invalid_agent",
+			err,
+		)
 		return
 	}
 	revision, ok := h.saveAgentConfig(w, cfg, currentRevision)
@@ -349,7 +372,12 @@ func (h *Handler) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := validateAgentConfiguration(cfg); err != nil {
-		writeAgentError(w, http.StatusUnprocessableEntity, "invalid_agent", nil)
+		writeAgentValidationError(
+			w,
+			http.StatusUnprocessableEntity,
+			"invalid_agent",
+			err,
+		)
 		return
 	}
 	revision, ok := h.saveAgentConfig(w, cfg, currentRevision)
@@ -450,7 +478,12 @@ func validateLoadedAgentConfig(
 		return nil, "", false
 	}
 	if err = validateAgentConfiguration(cfg); err != nil {
-		writeAgentError(w, http.StatusConflict, "invalid_agent_configuration", nil)
+		writeAgentValidationError(
+			w,
+			http.StatusConflict,
+			"invalid_agent_configuration",
+			err,
+		)
 		return nil, "", false
 	}
 	return cfg, revision, true
@@ -593,6 +626,7 @@ func agentResourceFromConfig(
 		ID:                agent.ID,
 		Name:              agent.Name,
 		Workspace:         agent.Workspace,
+		AccountRef:        agent.AccountRef,
 		Model:             modelPolicyFromConfig(agent.Model),
 		Skills:            cloneStrings(agent.Skills),
 		IsDefault:         agent.ID == defaultID,
@@ -630,6 +664,10 @@ func agentConfigFromResource(resource agentResource) (config.AgentConfig, error)
 	if err != nil {
 		return config.AgentConfig{}, err
 	}
+	accountRef, err := normalizeAgentScalar(resource.AccountRef, 1024)
+	if err != nil {
+		return config.AgentConfig{}, err
+	}
 	model, err := modelPolicyToConfig(resource.Model)
 	if err != nil {
 		return config.AgentConfig{}, err
@@ -650,12 +688,13 @@ func agentConfigFromResource(resource agentResource) (config.AgentConfig, error)
 		subagents = &config.SubagentsConfig{AllowAgents: allowAgents}
 	}
 	return config.AgentConfig{
-		ID:        resource.ID,
-		Name:      name,
-		Workspace: workspace,
-		Model:     model,
-		Skills:    skills,
-		Subagents: subagents,
+		ID:         resource.ID,
+		Name:       name,
+		Workspace:  workspace,
+		AccountRef: accountRef,
+		Model:      model,
+		Skills:     skills,
+		Subagents:  subagents,
 	}, nil
 }
 
@@ -730,6 +769,9 @@ func validateAgentConfiguration(cfg *config.Config) error {
 	if cfg == nil {
 		return errors.New("agent configuration is required")
 	}
+	if err := validateAgentDefaultsSelection(cfg); err != nil {
+		return err
+	}
 	ids := make(map[string]struct{}, len(cfg.Agents.List)+1)
 	if len(cfg.Agents.List) == 0 {
 		ids[routing.DefaultAgentID] = struct{}{}
@@ -747,7 +789,7 @@ func validateAgentConfiguration(cfg *config.Config) error {
 		if agent.Default {
 			defaults++
 		}
-		if err := validateConfiguredAgentValues(agent); err != nil {
+		if err := validateConfiguredAgentValues(cfg, agent); err != nil {
 			return err
 		}
 	}
@@ -784,15 +826,55 @@ func validateAgentConfiguration(cfg *config.Config) error {
 			}
 		}
 	}
+	return validateConfiguredModelSelectionGraphs(cfg)
+}
+
+func validateAgentDefaultsSelection(cfg *config.Config) error {
+	if cfg == nil {
+		return errors.New("agent configuration is required")
+	}
+	defaults := &cfg.Agents.Defaults
+	if _, err := normalizeAgentScalar(defaults.AccountRef, 1024); err != nil {
+		return err
+	}
+	if _, err := normalizeAgentScalar(defaults.ModelName, 1024); err != nil {
+		return err
+	}
+	if _, err := normalizeAgentList(defaults.ModelFallbacks, false); err != nil {
+		return err
+	}
+	if accountRef := strings.TrimSpace(defaults.AccountRef); accountRef != "" {
+		if err := validateSelectableAccountRef(cfg, accountRef); err != nil {
+			return fmt.Errorf("agents.defaults.account_ref: %w", err)
+		}
+	}
+	if err := validateAgentModelPolicy(
+		cfg,
+		strings.TrimSpace(defaults.ModelName),
+		defaults.ModelFallbacks,
+	); err != nil {
+		return fmt.Errorf("agents.defaults: %w", err)
+	}
 	return nil
 }
 
-func validateConfiguredAgentValues(agent *config.AgentConfig) error {
+func validateConfiguredAgentValues(
+	cfg *config.Config,
+	agent *config.AgentConfig,
+) error {
 	if _, err := normalizeAgentScalar(agent.Name, 256); err != nil {
 		return err
 	}
 	if _, err := normalizeAgentScalar(agent.Workspace, 16<<10); err != nil {
 		return err
+	}
+	if _, err := normalizeAgentScalar(agent.AccountRef, 1024); err != nil {
+		return err
+	}
+	if accountRef := strings.TrimSpace(agent.AccountRef); accountRef != "" {
+		if err := validateSelectableAccountRef(cfg, accountRef); err != nil {
+			return fmt.Errorf("agent %q account_ref: %w", agent.ID, err)
+		}
 	}
 	if agent.Model != nil {
 		if _, err := normalizeAgentScalar(agent.Model.Primary, 1024); err != nil {
@@ -800,6 +882,13 @@ func validateConfiguredAgentValues(agent *config.AgentConfig) error {
 		}
 		if _, err := normalizeAgentList(agent.Model.Fallbacks, false); err != nil {
 			return err
+		}
+		if err := validateAgentModelPolicy(
+			cfg,
+			strings.TrimSpace(agent.Model.Primary),
+			agent.Model.Fallbacks,
+		); err != nil {
+			return fmt.Errorf("agent %q model: %w", agent.ID, err)
 		}
 	}
 	if _, err := normalizeAgentList(agent.Skills, false); err != nil {
@@ -819,6 +908,33 @@ func validateConfiguredAgentValues(agent *config.AgentConfig) error {
 			); err != nil {
 				return err
 			}
+			if err := validateAgentModelPolicy(
+				cfg,
+				strings.TrimSpace(agent.Subagents.Model.Primary),
+				agent.Subagents.Model.Fallbacks,
+			); err != nil {
+				return fmt.Errorf("agent %q subagents model: %w", agent.ID, err)
+			}
+		}
+	}
+	return nil
+}
+
+func validateAgentModelPolicy(
+	cfg *config.Config,
+	primary string,
+	fallbacks []string,
+) error {
+	if primary != "" && !modelAliasOrRouterConfigured(cfg, primary) {
+		return fmt.Errorf("model alias %q is not configured", primary)
+	}
+	for _, fallback := range fallbacks {
+		fallback = strings.TrimSpace(fallback)
+		if _, err := cfg.GetModelAlias(fallback); err != nil {
+			if errors.Is(err, config.ErrNoModelConfigured) {
+				return config.ErrNoModelConfigured
+			}
+			return fmt.Errorf("fallback model alias %q is not configured", fallback)
 		}
 	}
 	return nil
@@ -1050,6 +1166,22 @@ func writeAgentError(
 	writeAgentJSON(w, status, agentErrorResponse{
 		Error:    code,
 		Blockers: blockers,
+	})
+}
+
+func writeAgentValidationError(
+	w http.ResponseWriter,
+	status int,
+	code string,
+	err error,
+) {
+	message := ""
+	if err != nil {
+		message = err.Error()
+	}
+	writeAgentJSON(w, status, agentErrorResponse{
+		Error:   code,
+		Message: message,
 	})
 }
 

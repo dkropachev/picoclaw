@@ -3,6 +3,8 @@ package providers
 import (
 	"sort"
 	"strings"
+
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 // ModelProviderOptions returns the canonical provider catalog exposed to the Web UI.
@@ -43,30 +45,11 @@ func CommonModelsForProvider(provider string) []string {
 	return models
 }
 
-// DefaultModelForProvider returns the provider's actual runtime default model.
-// It is intentionally separate from CommonModelsForProvider, whose ordering is
-// curated for discovery rather than execution.
-func DefaultModelForProvider(provider string) string {
-	option, ok := modelProviderOptionForName(provider)
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(option.DefaultModel)
-}
-
 // IsCreatableModelProvider reports whether provider can be selected for a new
 // model entry from the Web UI.
 func IsCreatableModelProvider(provider string) bool {
 	option, ok := modelProviderOptionForName(provider)
 	return ok && option.CreateAllowed
-}
-
-// IsDefaultModelProvider reports whether provider can be used as the default
-// chat model. Some providers such as ASR-only entries are intentionally
-// exposed in model_list management but cannot drive the gateway default model.
-func IsDefaultModelProvider(provider string) bool {
-	option, ok := modelProviderOptionForName(provider)
-	return ok && option.DefaultModelAllowed
 }
 
 // SplitModelProviderAndID separates a legacy "provider/model" string into its
@@ -86,18 +69,14 @@ func SplitModelProviderAndID(model, defaultProvider string) (provider, modelID s
 	return NormalizeProvider(defaultProvider), model
 }
 
+// ResolveModelForProvider resolves a configured concrete model for a selected
+// account provider. A recognized provider prefix is treated as an explicit
+// constraint and must match the account. Unknown prefixes remain part of the
+// upstream model ID (for example, provider-specific namespaces).
+func ResolveModelForProvider(accountProvider, configuredModel string) (string, error) {
+	return protocoltypes.ResolveModelForProvider(accountProvider, configuredModel)
+}
+
 func splitKnownProviderModel(model string) (provider, modelID string) {
-	provider, modelID, found := strings.Cut(strings.TrimSpace(model), "/")
-	if !found {
-		return "", ""
-	}
-	provider = strings.TrimSpace(provider)
-	modelID = strings.TrimSpace(modelID)
-	if provider == "" {
-		return "", modelID
-	}
-	if !IsSupportedModelProvider(provider) {
-		return "", ""
-	}
-	return NormalizeProvider(provider), modelID
+	return protocoltypes.SplitKnownProviderModel(model)
 }

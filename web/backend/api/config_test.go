@@ -116,7 +116,7 @@ func TestHandleGetConfigMasksUnresolvableEventWebhookSecret(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	configData := []byte(`{
-		"version": 3,
+		"version": 4,
 		"events": {
 			"ingress": {
 				"enabled": true,
@@ -257,7 +257,7 @@ func TestConfigAPIRepairsActiveAdapterWithDisabledChannel(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	configData := []byte(`{
-		"version": 3,
+		"version": 4,
 		"events": {
 			"ingress": {
 				"enabled": true,
@@ -463,7 +463,7 @@ func TestHandleUpdateConfig_PreservesExecAllowRemoteDefaultWhenOmitted(t *testin
 	h.RegisterRoutes(mux)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewBufferString(`{
-"version": 3,
+"version": 4,
 		"agents": {
 			"defaults": {
 				"workspace": "~/.picoclaw/workspace"
@@ -542,18 +542,27 @@ func TestHandleUpdateConfig_AppliesModelAPIKeysFromPayload(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewBufferString(`{
-		"version": 3,
+		"version": 4,
 		"agents": {
 			"defaults": {
 				"workspace": "~/.picoclaw/workspace",
+				"account_ref": "custom-default",
 				"model_name": "custom-default"
 			}
 		},
+		"model_aliases": [
+			{
+				"name": "custom-default",
+				"model": "openai/gpt-4o"
+			}
+		],
 		"model_list": [
 			{
 				"model_name": "custom-default",
+				"provider": "openai",
 				"model": "openai/gpt-4o",
-				"api_keys": ["sk-updated"]
+				"api_keys": ["sk-updated"],
+				"enabled": true
 			}
 		]
 	}`))
@@ -583,18 +592,26 @@ func TestHandleUpdateConfig_PreservesModelAPIKeyWhenModelNameChanges(t *testing.
 	h.RegisterRoutes(mux)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewBufferString(`{
-		"version": 3,
+		"version": 4,
 		"agents": {
 			"defaults": {
 				"workspace": "~/.picoclaw/workspace",
+				"account_ref": "renamed-default",
 				"model_name": "renamed-default"
 			}
 		},
+		"model_aliases": [
+			{
+				"name": "renamed-default",
+				"model": "openai/gpt-4o"
+			}
+		],
 		"model_list": [
 			{
 				"model_name": "renamed-default",
 				"provider": "openai",
-				"model": "gpt-4o"
+				"model": "gpt-4o",
+				"enabled": true
 			}
 		]
 	}`))
@@ -1177,10 +1194,15 @@ func setupPicoEnabledEnv(t *testing.T) (string, func()) {
 	cfg := config.DefaultConfig()
 	cfg.ModelList = []*config.ModelConfig{{
 		ModelName: "custom-default",
-		Model:     "openai/gpt-4o",
+		Provider:  "openai",
+		Model:     "gpt-4o",
 		APIKeys:   config.SimpleSecureStrings("sk-default"),
+		Enabled:   true,
 	}}
-	cfg.Agents.Defaults.ModelName = "custom-default"
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name:  "custom-default",
+		Model: "openai/gpt-4o",
+	}}
 	bc := cfg.Channels["pico"]
 	decoded, err := bc.GetDecoded()
 	if err != nil {
@@ -1216,10 +1238,11 @@ func TestHandleUpdateConfig_SucceedsWhenPicoTokenInSecurityOnly(t *testing.T) {
 
 	// PUT request with pico enabled but no token in JSON — token is in .security.yml
 	req := httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewBufferString(`{
-		"version": 1,
+		"version": 4,
 		"agents": {
 			"defaults": {
 				"workspace": "~/.picoclaw/workspace",
+				"account_ref": "custom-default",
 				"model_name": "custom-default"
 			}
 		},
@@ -1232,11 +1255,19 @@ func TestHandleUpdateConfig_SucceedsWhenPicoTokenInSecurityOnly(t *testing.T) {
 				"max_connections": 100
 			}
 		},
+		"model_aliases": [
+			{
+				"name": "custom-default",
+				"model": "openai/gpt-4o"
+			}
+		],
 		"model_list": [
 			{
 				"model_name": "custom-default",
+				"provider": "openai",
 				"model": "openai/gpt-4o",
-				"api_keys": ["sk-default"]
+				"api_keys": ["sk-default"],
+				"enabled": true
 			}
 		]
 	}`))
@@ -1592,21 +1623,30 @@ func TestConfigAPIRejectsSecretBearingEventWebhookConnectorIdentity(t *testing.T
 
 func TestHandleUpdateConfig_AppliesGatewayLogLevel(t *testing.T) {
 	assertGatewayLogLevelApplied(t, http.MethodPut, `{
-		"version": 1,
+		"version": 4,
 		"agents": {
 			"defaults": {
 				"workspace": "~/.picoclaw/workspace",
+				"account_ref": "custom-default",
 				"model_name": "custom-default"
 			}
 		},
 		"gateway": {
 			"log_level": "error"
 		},
+		"model_aliases": [
+			{
+				"name": "custom-default",
+				"model": "openai/gpt-4o"
+			}
+		],
 		"model_list": [
 			{
 				"model_name": "custom-default",
+				"provider": "openai",
 				"model": "openai/gpt-4o",
-				"api_keys": ["sk-default"]
+				"api_keys": ["sk-default"],
+				"enabled": true
 			}
 		]
 	}`, logger.ERROR)

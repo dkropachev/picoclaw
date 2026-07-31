@@ -58,14 +58,9 @@
       "websocketConnecting": "Connecting to chat service... Please wait.",
       "websocketDisconnected": "Unable to chat: WebSocket connection is disconnected. Check network and gateway status, then refresh the page or restart Launcher.",
       "websocketError": "Unable to chat: WebSocket connection failed. Check network and gateway status, then retry.",
-      "noDefaultModel": "Unable to chat: No default model is selected. Set a default model on the Accounts page.",
-      "modelDiscoveryLoading": "Unable to chat: Loading models for the selected account.",
-      "modelDiscoveryFailed": "Unable to chat: Model discovery failed. Retry model discovery above.",
-      "noAvailableModel": "Unable to chat: No model is available for the selected account."
+      "noDefaultSelection": "Unable to chat: No account and model alias are configured. Set both on the Models page.",
+      "noAvailableModel": "Unable to chat: Select both an account and a model alias."
     },
-    "modelDiscoveryWarning": "Some accounts could not list models.",
-    "modelDiscoveryError": "Failed to load models for the selected account.",
-    "retryModelDiscovery": "Retry model discovery",
     "newChat": "New Chat",
     "notConnected": "Gateway is not running. Start it to chat.",
     "thinking": {
@@ -103,11 +98,12 @@
     "deleteSession": "Delete session",
     "messagesCount": "{{count}} messages",
     "account": "Account",
+    "modelAlias": "Model alias",
     "noAccount": "Select account",
-    "noModel": "Select model",
+    "noModel": "Select model alias",
     "inputDisabled": {
       "notConnected": "Gateway is not running. Start it to chat.",
-      "noModel": "No default model configured. Go to Accounts page to set one."
+      "noModel": "No account and model alias are configured. Set both on the Models page."
     },
     "sendMessage": "Send message",
     "composeHint": "Press Enter to send, Shift + Enter for a new line",
@@ -134,6 +130,7 @@
     "modelGroup": {
       "accounts": "Accounts",
       "accountRouters": "Account Routers",
+      "aliases": "Model Aliases",
       "modelRouters": "Model Routers"
     }
   },
@@ -166,6 +163,7 @@
     "cancel": "Cancel",
     "close": "Close",
     "save": "Save",
+    "delete": "Delete",
     "refresh": "Refresh",
     "enabled": "Enabled",
     "disabled": "Disabled",
@@ -321,15 +319,59 @@
     }
   },
   "models": {
-    "description": "Configure API keys for AI providers. Only configured models are available for chat.",
-    "defaultChangeSuccess": "Default model updated.",
+    "description": "Configure provider accounts and stable model aliases. Chat and workflows always select one of each.",
+    "accountsTitle": "Provider accounts",
+    "defaultChangeSuccess": "Default account and model alias updated.",
+    "defaultSelection": {
+      "title": "Default selection",
+      "current": "Current: {{account}} / {{alias}}",
+      "none": "No model configured. Choose both an account and a model alias.",
+      "account": "Default account",
+      "alias": "Default model alias",
+      "selectAccount": "Select account",
+      "selectAlias": "Select model alias",
+      "save": "Save default"
+    },
+    "alias": {
+      "title": "Model aliases",
+      "sectionDescription": "Stable names resolve to exact models, with optional per-account overrides.",
+      "description": "Chats and workflows use this alias. Each concrete account can map it to a different exact model.",
+      "add": "Add alias",
+      "addTitle": "Add model alias",
+      "edit": "Edit model alias",
+      "editTitle": "Edit model alias",
+      "delete": "Delete model alias",
+      "deleteTitle": "Delete model alias?",
+      "deleteDescription": "\"{{name}}\" will no longer be available to chats or workflows.",
+      "deleteDefault": "Change the default alias before deleting it.",
+      "deleteError": "Failed to delete model alias.",
+      "saveError": "Failed to save model alias.",
+      "name": "Alias",
+      "nameHint": "Stable name referenced by chats, workflows, and agents.",
+      "nameImmutable": "Alias names cannot be changed after creation.",
+      "namePlaceholder": "coding",
+      "baseModel": "Base model",
+      "baseModelHint": "Exact upstream model used unless the selected account has an override.",
+      "baseModelPlaceholder": "gpt-5.4",
+      "baseForAll": "Base model for every account",
+      "overrides": "Account overrides",
+      "overridesHint": "Overrides are allowed only for concrete accounts, never account routers.",
+      "addOverride": "Add override",
+      "noOverrides": "All accounts currently use the base model.",
+      "overrideAccount": "Override account",
+      "overrideModel": "Exact override model",
+      "overrideModelPlaceholder": "claude-sonnet-4.5",
+      "removeOverride": "Remove override",
+      "errorRequired": "Alias name and base model are required.",
+      "errorDuplicate": "This model alias already exists.",
+      "errorOverrideRequired": "Every account override needs an exact model.",
+      "empty": "No model aliases configured. Chat and workflows will fail with “no model configured” until an alias is added and selected."
+    },
     "unsavedPrompt": "This change has not been saved yet. Save to write it into the model configuration.",
     "restartHint": "Model configuration changes take effect after the gateway restarts.",
     "loadError": "Failed to load models",
     "retry": "Retry",
     "providerCatalogUnavailable": "The backend provider catalog is unavailable. New provider selections are disabled until the Models API loads successfully.",
-    "noDefaultHintPrefix": "No default model set yet. Click",
-    "noDefaultHintSuffix": "to set one.",
     "status": {
       "available": "Available",
       "unconfigured": "Not configured",
@@ -342,24 +384,22 @@
       "modelRouter": "Model Router"
     },
     "action": {
-      "edit": "Edit API key",
+      "edit": "Edit account",
       "setDefault": "Set as default",
-      "delete": "Delete model",
+      "delete": "Delete account",
       "setDefaultDisabled": {
-        "setting": "Setting as default...",
-        "unavailable": "Cannot set unavailable model as default",
-        "isDefault": "Already the default model",
-        "isVirtual": "Cannot set virtual model as default",
-        "unsupportedProvider": "This provider cannot be used as the default chat model."
+        "setting": "Saving default selection...",
+        "unavailable": "An unavailable account or router cannot be used in the default selection",
+        "isDefault": "Already part of the default selection",
+        "isVirtual": "This virtual entry cannot be used in the default selection"
       },
       "deleteDisabled": {
-        "isDefault": "Cannot delete the default model"
+        "isDefault": "Change the default selection before deleting this entry"
       }
     },
     "defaultOnSave": {
-      "label": "Default Model",
-      "description": "Automatically set this model as default after saving.",
-      "unsupportedProvider": "This provider can be saved in the model list but cannot be used as the default chat model."
+      "label": "Default Account",
+      "description": "Use this account with the currently selected model alias after saving."
     },
     "router": {
       "button": "Account Router",
@@ -543,7 +583,7 @@
       "button": "Model Router",
       "title": "Create Model Router",
       "editTitle": "Configure {{name}}",
-      "description": "Route chat turns to a configured model or account router from the current input.",
+      "description": "Route chat turns to configured model aliases from the current input.",
       "routerName": "Router Alias",
       "routerNamePlaceholder": "e.g. task-router",
       "defaultTarget": "Default Target",
@@ -553,6 +593,8 @@
       "containsTarget": "Contains Target",
       "regexText": "Regex Pattern",
       "regexTarget": "Regex Target",
+      "defaultOnSave": "Default model alias",
+      "defaultOnSaveHint": "Use this router as the default alias with the current default account.",
       "containsPlaceholder": "e.g. translate",
       "regexPlaceholder": "e.g. (?i)review|debug",
       "selectTarget": "Select target",
@@ -562,6 +604,8 @@
       "saveError": "Failed to save model router",
       "actionEdit": "Edit model router",
       "actionDelete": "Delete model router",
+      "deleteTitle": "Delete model router?",
+      "deleteDescription": "\"{{name}}\" will no longer be available as a model alias.",
       "errorNameRequired": "Router alias is required.",
       "errorDuplicate": "Router alias already exists.",
       "errorDefaultTarget": "Choose a default target.",
@@ -570,24 +614,27 @@
       "errorRegexInvalid": "Regex pattern is invalid."
     },
     "add": {
-      "button": "Add Model",
-      "title": "Add Custom Model",
-      "description": "Add an OpenAI-compatible or native model endpoint.",
-      "modelName": "Model Alias",
-      "modelNamePlaceholder": "e.g. my-gpt4",
-      "modelNameHint": "A short name used to identify this model in conversations.",
-      "modelId": "Model Identifier",
+      "button": "Add Account",
+      "title": "Add Provider Account",
+      "description": "Add provider credentials and connection settings. Model aliases are configured separately.",
+      "modelName": "Account Name",
+      "modelNamePlaceholder": "e.g. openai-work",
+      "modelNameHint": "A stable name for these provider credentials. Model aliases are configured separately.",
+      "accountName": "Account Name",
+      "accountNamePlaceholder": "e.g. openai-work",
+      "accountNameHint": "A stable name for these provider credentials. Model aliases are configured separately.",
+      "modelId": "Probe Model (Optional)",
       "modelIdPlaceholder": "e.g. gpt-4o or openai/gpt-4o",
-      "modelIdHint": "This field is treated as the canonical model ID for the selected provider. If the identifier itself contains a slash (for example openai/gpt-5.4), it is preserved as-is and not split again.",
+      "modelIdHint": "Optional metadata used for account discovery and connection testing. Runtime requests always use a separately configured model alias.",
       "errorRequired": "This field is required.",
-      "errorDuplicateModelName": "Model alias already exists. Please use a different name.",
-      "saveError": "Failed to add model",
-      "saveSuccess": "Model added.",
-      "confirm": "Add Model"
+      "errorDuplicateModelName": "Account name already exists. Please use a different name.",
+      "saveError": "Failed to add account",
+      "saveSuccess": "Account added.",
+      "confirm": "Add Account"
     },
     "delete": {
-      "title": "Delete Model?",
-      "description": "\"{{name}}\" will be permanently removed from your model list. This cannot be undone.",
+      "title": "Delete Account?",
+      "description": "\"{{name}}\" will be permanently removed from your provider accounts. This cannot be undone.",
       "confirm": "Delete"
     },
     "advanced": {
@@ -638,7 +685,7 @@
       "apiKeyHint": "A key is already set. Leave blank to keep it unchanged.",
       "oauthNote": "This provider uses OAuth — no API key required.",
       "saveError": "Failed to save",
-      "saveSuccess": "Model configuration saved."
+      "saveSuccess": "Account configuration saved."
     },
     "fetch": {
       "title": "Fetch Available Models",
@@ -1068,12 +1115,17 @@
           "workspace": "Workspace",
           "workspace_placeholder": "Inherit the default workspace",
           "model_policy": "Model policy",
-          "primary_policy": "Primary model",
-          "fallback_policy": "Fallback models",
-          "primary_model": "Primary model name",
+          "primary_policy": "Primary alias policy",
+          "fallback_policy": "Fallback alias policy",
+          "primary_model": "Primary model alias",
           "fallback_order": "Fallback order",
-          "fallback_order_hint": "Models are tried from top to bottom.",
-          "reset_model": "Reset model policy to inherited defaults",
+          "fallback_order_hint": "Model aliases are tried from top to bottom.",
+          "reset_model": "Reset alias policy to inherited defaults",
+          "account": "Provider account",
+          "account_inherit": "Inherit default account",
+          "account_hint": "Choose a concrete account or account router independently from the model alias.",
+          "select_alias": "Select model alias",
+          "not_configured": "{{name}} (not configured)",
           "skills_policy": "Skills policy",
           "skills": "Available skills",
           "selected_skills": "Selected skills",

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/workflows"
@@ -2019,8 +2020,16 @@ func workflowManagedRunChoice(
 	if agent != nil {
 		modelName = strings.TrimSpace(agent.Model)
 	}
-	current := workflowModelCandidateProfile(cfg, modelName)
-	candidateProfiles := workflowManagedCandidateProfiles(cfg, options.modelCandidates)
+	accountRef := ""
+	if agent != nil {
+		accountRef = agent.AccountRef
+	}
+	current := workflowModelCandidateProfile(cfg, accountRef, modelName)
+	candidateProfiles := workflowManagedCandidateProfiles(
+		cfg,
+		accountRef,
+		options.modelCandidates,
+	)
 	for _, candidate := range candidateProfiles {
 		if candidate.name == modelName {
 			current = candidate
@@ -2114,21 +2123,46 @@ func workflowManagedModelCandidateAvailable(
 	if cfg == nil || agent == nil {
 		return false
 	}
-	modelCfg, err := resolvedModelConfig(cfg, candidateName, agent.Workspace)
-	if err != nil {
+	if err := validateModelAliasReferences(cfg, candidateName, nil); err != nil {
 		return false
 	}
-	protocol, modelID := providers.ExtractProtocol(modelCfg)
-	return agent.candidateProvider(providers.ModelKey(protocol, modelID)) != nil
+	router := buildAccountRouterWithAliases(
+		cfg,
+		agent.AccountRef,
+		candidateName,
+		nil,
+		agent.Workspace,
+		agent.CandidateProviders,
+	)
+	if router != nil {
+		return candidateSelectionHasProvider(
+			agent,
+			router.Select("", accountrouter.SelectReasonInitial).Candidates,
+		)
+	}
+	candidates, err := candidatesForAccountAliases(
+		cfg,
+		agent.AccountRef,
+		candidateName,
+		nil,
+		agent.Workspace,
+		agent.CandidateProviders,
+	)
+	return err == nil && candidateSelectionHasProvider(agent, candidates)
 }
 
 func workflowManagedCandidateProfiles(
 	cfg *config.Config,
+	accountRef string,
 	candidates []workflowManagedModelCandidate,
 ) []workflowManagedModelCandidate {
 	out := make([]workflowManagedModelCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
-		if fromConfig := workflowModelCandidateProfile(cfg, candidate.name); fromConfig.name != "" {
+		if fromConfig := workflowModelCandidateProfile(
+			cfg,
+			accountRef,
+			candidate.name,
+		); fromConfig.name != "" {
 			if !candidate.priceKnown {
 				candidate.inputPricePerMTok = fromConfig.inputPricePerMTok
 				candidate.outputPricePerMTok = fromConfig.outputPricePerMTok
@@ -2145,28 +2179,69 @@ func workflowManagedCandidateProfiles(
 	return out
 }
 
-func workflowModelCandidateProfile(cfg *config.Config, name string) workflowManagedModelCandidate {
+func workflowModelCandidateProfile(
+	cfg *config.Config,
+	accountRef string,
+	name string,
+) workflowManagedModelCandidate {
+	return workflowModelCandidateProfileGuarded(
+		cfg,
+		accountRef,
+		name,
+		make(map[string]struct{}),
+		0,
+	)
+}
+
+const workflowModelCandidateProfileMaxEquivalentDepth = 64
+
+func workflowModelCandidateProfileGuarded(
+	cfg *config.Config,
+	accountRef string,
+	name string,
+	visited map[string]struct{},
+	depth int,
+) workflowManagedModelCandidate {
 	name = strings.TrimSpace(name)
 	if cfg == nil || name == "" {
 		return workflowManagedModelCandidate{name: name}
 	}
-	mc := lookupModelConfigByRef(cfg, name, cfg.Agents.Defaults.Provider)
-	if mc == nil {
+	// In-memory callers may bypass Config validation, so keep price inheritance
+	// bounded even when an equivalent-alias graph is malformed.
+	visitKey := strings.TrimSpace(accountRef) + "\x00" + name
+	if depth >= workflowModelCandidateProfileMaxEquivalentDepth {
 		return workflowManagedModelCandidate{name: name}
 	}
+	if _, seen := visited[visitKey]; seen {
+		return workflowManagedModelCandidate{name: name}
+	}
+	visited[visitKey] = struct{}{}
+	mc, err := concreteAccountModelConfig(
+		cfg,
+		firstConcreteAccountRef(cfg, accountRef),
+		name,
+		cfg.Agents.Defaults.Workspace,
+	)
+	if err != nil {
+		return workflowManagedModelCandidate{name: name}
+	}
+	metadata := modelConfigMetadataForConcreteModel(cfg, mc)
 	candidate := workflowManagedModelCandidate{
-		name:                strings.TrimSpace(mc.ModelName),
-		inputPricePerMTok:   mc.InputPricePerMTok,
-		outputPricePerMTok:  mc.OutputPricePerMTok,
-		subscription:        mc.Subscription,
-		equivalentModelName: strings.TrimSpace(mc.SubscriptionEquivalentModel),
+		name:                name,
+		inputPricePerMTok:   metadata.InputPricePerMTok,
+		outputPricePerMTok:  metadata.OutputPricePerMTok,
+		subscription:        metadata.Subscription,
+		equivalentModelName: strings.TrimSpace(metadata.SubscriptionEquivalentModel),
 		source:              "model_config",
 	}
-	if candidate.name == "" {
-		candidate.name = name
-	}
 	if candidate.subscription && candidate.equivalentModelName != "" {
-		equiv := workflowModelCandidateProfile(cfg, candidate.equivalentModelName)
+		equiv := workflowModelCandidateProfileGuarded(
+			cfg,
+			accountRef,
+			candidate.equivalentModelName,
+			visited,
+			depth+1,
+		)
 		if equiv.priceKnown {
 			candidate.inputPricePerMTok = equiv.inputPricePerMTok
 			candidate.outputPricePerMTok = equiv.outputPricePerMTok
@@ -2175,6 +2250,27 @@ func workflowModelCandidateProfile(cfg *config.Config, name string) workflowMana
 	}
 	candidate.priceKnown = candidate.inputPricePerMTok > 0 || candidate.outputPricePerMTok > 0
 	return candidate
+}
+
+func modelConfigMetadataForConcreteModel(
+	cfg *config.Config,
+	resolved *config.ModelConfig,
+) *config.ModelConfig {
+	if cfg == nil || resolved == nil {
+		return resolved
+	}
+	protocol, modelID := providers.ExtractProtocol(resolved)
+	key := providers.ModelKey(protocol, modelID)
+	for _, candidate := range cfg.ModelList {
+		if candidate == nil || candidate.IsAccountRouter() || candidate.IsModelRouter() {
+			continue
+		}
+		candidateProvider, candidateModel := providers.ExtractProtocol(candidate)
+		if providers.ModelKey(candidateProvider, candidateModel) == key {
+			return candidate
+		}
+	}
+	return resolved
 }
 
 func workflowManagedCostMeta(
@@ -2251,6 +2347,10 @@ func workflowManagedOptimizationSummary(
 	if options.effortOptimization {
 		effortReason = "per-child effort selected from estimated child complexity"
 	}
+	accountRef := ""
+	if agent != nil {
+		accountRef = agent.AccountRef
+	}
 	return map[string]any{
 		"model": map[string]any{
 			"enabled":         options.modelOptimization,
@@ -2272,7 +2372,11 @@ func workflowManagedOptimizationSummary(
 			"baseline_total_usd":      totalBaselineCost,
 			"estimated_savings_usd":   totalBaselineCost - totalSelectedCost,
 			"split_prompt_tokens":     workflows.EstimateAgentPayloadTokens(req),
-			"config_models_seen":      len(workflowManagedCandidateProfiles(cfg, options.modelCandidates)),
+			"config_models_seen": len(workflowManagedCandidateProfiles(
+				cfg,
+				accountRef,
+				options.modelCandidates,
+			)),
 		},
 	}
 }
@@ -2356,27 +2460,17 @@ func (r *workflowAgentRunner) ensureWorkflowManagedProviders(agent *AgentInstanc
 		if name == "" || name == strings.TrimSpace(agent.Model) {
 			continue
 		}
-		modelCfg, err := resolvedModelConfig(r.loop.cfg, name, agent.Workspace)
-		if err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", name, err))
+		if !workflowManagedModelCandidateAvailable(
+			r.loop.cfg,
+			agent,
+			agent.Model,
+			name,
+		) {
+			failures = append(
+				failures,
+				fmt.Sprintf("%s: model alias is not configured or runnable", name),
+			)
 			continue
-		}
-		protocol, modelID := providers.ExtractProtocol(modelCfg)
-		key := providers.ModelKey(protocol, modelID)
-		if agent.candidateProvider(key) != nil {
-			continue
-		}
-		factory := r.loop.providerFactory
-		if factory == nil {
-			factory = providers.CreateProviderFromConfig
-		}
-		provider, _, err := factory(modelCfg)
-		if err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", name, err))
-			continue
-		}
-		if !agent.setCandidateProviderIfAbsent(key, provider) {
-			closeProviderIfStateful(provider)
 		}
 	}
 	if len(failures) > 0 {

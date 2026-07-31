@@ -15,14 +15,14 @@ import (
 	copilot "github.com/github/copilot-sdk/go"
 
 	"github.com/sipeed/picoclaw/pkg/auth"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 const (
-	githubCopilotDefaultModel = "auto"
-	githubCopilotClientName   = "picoclaw"
-	githubCopilotSetupURL     = "https://github.com/github/copilot-sdk/blob/main/docs/getting-started.md"
-	githubCopilotTokenURL     = "https://api.github.com/copilot_internal/v2/token"
-	githubCopilotAPIBaseURL   = "https://api.githubcopilot.com"
+	githubCopilotClientName = "picoclaw"
+	githubCopilotSetupURL   = "https://github.com/github/copilot-sdk/blob/main/docs/getting-started.md"
+	githubCopilotTokenURL   = "https://api.github.com/copilot_internal/v2/token"
+	githubCopilotAPIBaseURL = "https://api.githubcopilot.com"
 )
 
 type copilotClient interface {
@@ -78,6 +78,10 @@ type GitHubCopilotProvider struct {
 }
 
 func NewGitHubCopilotProvider(uri string, connectMode string, model string) (*GitHubCopilotProvider, error) {
+	model, err := requireGitHubCopilotModel(model)
+	if err != nil {
+		return nil, err
+	}
 	if connectMode == "" {
 		connectMode = "grpc"
 	}
@@ -97,6 +101,10 @@ func NewGitHubCopilotProvider(uri string, connectMode string, model string) (*Gi
 }
 
 func NewGitHubCopilotProviderWithToken(token string, model string) (*GitHubCopilotProvider, error) {
+	model, err := requireGitHubCopilotModel(model)
+	if err != nil {
+		return nil, err
+	}
 	token = strings.TrimSpace(token)
 	if err := auth.ValidateGitHubCopilotToken(token); err != nil {
 		return nil, err
@@ -104,7 +112,7 @@ func NewGitHubCopilotProviderWithToken(token string, model string) (*GitHubCopil
 	return &GitHubCopilotProvider{
 		connectMode: "token",
 		token:       token,
-		model:       githubCopilotModelOrDefault(model),
+		model:       model,
 	}, nil
 }
 
@@ -142,18 +150,22 @@ func newGitHubCopilotProvider(
 	model string,
 	clientOptions *copilot.ClientOptions,
 ) (*GitHubCopilotProvider, error) {
+	model, err := requireGitHubCopilotModel(model)
+	if err != nil {
+		return nil, err
+	}
 	client := newCopilotClient(clientOptions)
-	if err := client.Start(context.Background()); err != nil {
+	if startErr := client.Start(context.Background()); startErr != nil {
 		return nil, fmt.Errorf(
 			"can't connect to GitHub Copilot: %w; see %s for setup details",
-			err,
+			startErr,
 			githubCopilotSetupURL,
 		)
 	}
 
 	session, err := client.CreateSession(context.Background(), &copilot.SessionConfig{
 		ClientName:          githubCopilotClientName,
-		Model:               githubCopilotModelOrDefault(model),
+		Model:               model,
 		OnPermissionRequest: copilot.PermissionHandler.ApproveAll,
 		Hooks:               &copilot.SessionHooks{},
 	})
@@ -165,16 +177,21 @@ func newGitHubCopilotProvider(
 	return &GitHubCopilotProvider{
 		uri:         uri,
 		connectMode: connectMode,
+		model:       model,
 		client:      client,
 		session:     session,
 	}, nil
 }
 
-func githubCopilotModelOrDefault(model string) string {
-	if model = strings.TrimSpace(model); model != "" {
-		return model
+func requireGitHubCopilotModel(model string) (string, error) {
+	model, err := protocoltypes.RequireModel(model)
+	if err != nil {
+		return "", err
 	}
-	return githubCopilotDefaultModel
+	if strings.EqualFold(model, "auto") {
+		return "", fmt.Errorf("github copilot model must be explicitly configured")
+	}
+	return model, nil
 }
 
 func (p *GitHubCopilotProvider) Close() {
@@ -194,8 +211,19 @@ func (p *GitHubCopilotProvider) Chat(
 	model string,
 	options map[string]any,
 ) (*LLMResponse, error) {
+	model, err := requireGitHubCopilotModel(model)
+	if err != nil {
+		return nil, err
+	}
 	if p.connectMode == "token" {
 		return p.chatWithToken(ctx, messages, model)
+	}
+	if configuredModel := strings.TrimSpace(p.model); configuredModel != "" && configuredModel != model {
+		return nil, fmt.Errorf(
+			"github copilot session model is %q, cannot use requested model %q",
+			configuredModel,
+			model,
+		)
 	}
 
 	type tempMessage struct {
@@ -241,10 +269,6 @@ func (p *GitHubCopilotProvider) Chat(
 		FinishReason: "stop",
 		Content:      content,
 	}, nil
-}
-
-func (p *GitHubCopilotProvider) GetDefaultModel() string {
-	return githubCopilotDefaultModel
 }
 
 type githubCopilotAPIAuth struct {
@@ -394,13 +418,6 @@ func (p *GitHubCopilotProvider) chatWithToken(
 	authInfo, err := resolveGitHubCopilotAPIAuth(ctx, p.token)
 	if err != nil {
 		return nil, err
-	}
-	model = githubCopilotModelOrDefault(model)
-	if model == githubCopilotDefaultModel {
-		model = p.model
-	}
-	if model == githubCopilotDefaultModel {
-		model = "gpt-4.1"
 	}
 
 	body := map[string]any{

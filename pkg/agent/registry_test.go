@@ -22,10 +22,6 @@ func (m *mockRegistryProvider) Chat(
 	return &providers.LLMResponse{Content: "mock", FinishReason: "stop"}, nil
 }
 
-func (m *mockRegistryProvider) GetDefaultModel() string {
-	return "mock-model"
-}
-
 func testCfg(agents []config.AgentConfig) *config.Config {
 	return &config.Config{
 		Agents: config.AgentsConfig{
@@ -81,6 +77,58 @@ func TestNewAgentRegistry_ExplicitAgents(t *testing.T) {
 	support, ok := registry.GetAgent("support")
 	if !ok || support == nil {
 		t.Fatal("expected to find 'support' agent")
+	}
+}
+
+func TestNewAgentRegistryDoesNotBindDefaultProviderToDifferentAgentSelection(t *testing.T) {
+	bootstrap := &mockRegistryProvider{}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.AccountRef = "openai-default"
+	cfg.Agents.Defaults.ModelName = "default"
+	cfg.Agents.List = []config.AgentConfig{
+		{ID: "main", Default: true},
+		{
+			ID:         "reviewer",
+			AccountRef: "anthropic-review",
+			Model:      &config.AgentModelConfig{Primary: "review"},
+		},
+	}
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "openai-default",
+			Provider:  "openai",
+			APIKeys:   config.SimpleSecureStrings("sk-openai"),
+			Enabled:   true,
+		},
+		{
+			ModelName: "anthropic-review",
+			Provider:  "anthropic",
+			APIKeys:   config.SimpleSecureStrings("sk-anthropic"),
+			Enabled:   true,
+		},
+	}
+	cfg.ModelAliases = []config.ModelAliasConfig{
+		{Name: "default", Model: "openai/gpt-5.4"},
+		{Name: "review", Model: "anthropic/claude-sonnet-4-6"},
+	}
+
+	registry := NewAgentRegistry(cfg, bootstrap)
+	main, ok := registry.GetAgent("main")
+	if !ok || len(main.Candidates) != 1 {
+		t.Fatalf("main agent candidates = %#v", main)
+	}
+	if got := main.candidateProviderForCandidate(main.Candidates[0]); got != bootstrap {
+		t.Fatalf("main provider = %T, want bootstrap provider", got)
+	}
+
+	reviewer, ok := registry.GetAgent("reviewer")
+	if !ok || len(reviewer.Candidates) != 1 {
+		t.Fatalf("reviewer agent candidates = %#v", reviewer)
+	}
+	if got := reviewer.candidateProviderForCandidate(reviewer.Candidates[0]); got == bootstrap {
+		t.Fatal("reviewer selection was incorrectly bound to the default account provider")
+	} else if got == nil {
+		t.Fatal("reviewer selection has no provider")
 	}
 }
 
@@ -269,7 +317,7 @@ Research agent.
 	cfg.Tools.Spawn.Enabled = true
 	cfg.Tools.Subagent.Enabled = true
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
 	defer al.Close()
 
 	research, ok := al.GetRegistry().GetAgent("research")
@@ -318,7 +366,7 @@ Research agent.
 	cfg.Tools.Web.Enabled = true
 	cfg.Tools.Web.DuckDuckGo.Enabled = true
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
 	defer al.Close()
 
 	research, ok := al.GetRegistry().GetAgent("research")

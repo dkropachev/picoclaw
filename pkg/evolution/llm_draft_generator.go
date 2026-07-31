@@ -56,9 +56,6 @@ func (g *LLMDraftGenerator) GenerateDraftWithEvidence(
 
 	model := g.model
 	if model == "" {
-		model = strings.TrimSpace(g.provider.GetDefaultModel())
-	}
-	if model == "" {
 		return g.generateFallback(ctx, rule, matches, evidence)
 	}
 

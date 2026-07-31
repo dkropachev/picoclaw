@@ -20,7 +20,3 @@ func (m *mockProvider) Chat(
 		ToolCalls: []providers.ToolCall{},
 	}, nil
 }
-
-func (m *mockProvider) GetDefaultModel() string {
-	return "mock-model"
-}

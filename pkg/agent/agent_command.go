@@ -299,17 +299,26 @@ func (al *AgentLoop) buildCommandsRuntime(
 		}
 		rt.SwitchModel = func(value string) (string, error) {
 			value = strings.TrimSpace(value)
-			modelCfg, err := resolvedModelConfig(cfg, value, agent.Workspace)
+			if _, err := cfg.GetModelAlias(value); err != nil {
+				return "", err
+			}
+			modelCfg, err := concreteAccountModelConfig(
+				cfg,
+				firstConcreteAccountRef(cfg, agent.AccountRef),
+				value,
+				agent.Workspace,
+			)
 			if err != nil {
 				return "", err
 			}
 
 			var nextProvider providers.LLMProvider
 			var nextCandidates []providers.FallbackCandidate
-			nextRouter := buildAccountRouter(
+			nextRouter := buildAccountRouterWithAliases(
 				cfg,
-				cfg.Agents.Defaults.Provider,
+				agent.AccountRef,
 				value,
+				agent.Fallbacks,
 				agent.Workspace,
 				agent.CandidateProviders,
 			)
@@ -318,14 +327,21 @@ func (al *AgentLoop) buildCommandsRuntime(
 				nextCandidates = selection.Candidates
 				nextProvider = workflowProviderForCandidates(agent, agent.Provider, nextCandidates)
 			} else {
-				nextProvider, _, err = providers.CreateProviderFromConfig(modelCfg)
+				nextCandidates, err = candidatesForAccountAliases(
+					cfg,
+					agent.AccountRef,
+					value,
+					agent.Fallbacks,
+					agent.Workspace,
+					agent.CandidateProviders,
+				)
 				if err != nil {
-					return "", fmt.Errorf("failed to initialize model %q: %w", value, err)
+					return "", fmt.Errorf("failed to initialize model alias %q: %w", value, err)
 				}
-				nextCandidates = resolveModelCandidates(cfg, cfg.Agents.Defaults.Provider, value, agent.Fallbacks)
+				nextProvider = workflowProviderForCandidates(agent, agent.Provider, nextCandidates)
 			}
 			if len(nextCandidates) == 0 {
-				return "", fmt.Errorf("model %q did not resolve to any provider candidates", value)
+				return "", fmt.Errorf("model alias %q did not resolve to any provider candidates", value)
 			}
 
 			oldModel := agent.Model

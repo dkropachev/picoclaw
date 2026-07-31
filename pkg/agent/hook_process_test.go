@@ -130,10 +130,6 @@ func (p *blockedToolProvider) Chat(
 	}, nil
 }
 
-func (p *blockedToolProvider) GetDefaultModel() string {
-	return "blocked-tool-provider"
-}
-
 func TestAgentLoop_MountProcessHook_ApprovalDeny(t *testing.T) {
 	provider := &blockedToolProvider{}
 	al, agent, cleanup := newHookTestLoop(t, provider)

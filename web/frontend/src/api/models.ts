@@ -35,7 +35,6 @@ export interface ModelInfo {
   status: "available" | "unconfigured" | "unreachable"
   is_default: boolean
   is_virtual: boolean
-  default_model_allowed?: boolean
 }
 
 export interface AccountRouterConfig {
@@ -103,21 +102,28 @@ export interface ModelProviderOption {
   default_api_base: string
   empty_api_key_allowed: boolean
   create_allowed: boolean
-  default_model_allowed: boolean
   supports_fetch?: boolean
   default_auth_method?: string
   auth_method_locked?: boolean
-  default_model?: string
   local?: boolean
   priority?: number
   common_models?: string[]
   aliases?: string[]
 }
 
+export interface ModelAlias {
+  name: string
+  model: string
+  account_overrides?: Record<string, string>
+}
+
 interface ModelsListResponse {
   models: ModelInfo[]
+  model_aliases: ModelAlias[]
   total: number
   default_model: string
+  default_account_ref: string
+  revision: string
   provider_options: ModelProviderOption[]
 }
 
@@ -125,6 +131,11 @@ interface ModelActionResponse {
   status: string
   index?: number
   default_model?: string
+  default_account_ref?: string
+}
+
+export type ModelMutation = Partial<ModelInfo> & {
+  set_as_default?: boolean
 }
 
 const BASE_URL = ""
@@ -148,7 +159,7 @@ export async function getModels(): Promise<ModelsListResponse> {
 }
 
 export async function addModel(
-  model: Partial<ModelInfo>,
+  model: ModelMutation,
 ): Promise<ModelActionResponse> {
   return request<ModelActionResponse>("/api/accounts/models", {
     method: "POST",
@@ -159,35 +170,106 @@ export async function addModel(
 
 export async function updateModel(
   index: number,
-  model: Partial<ModelInfo>,
+  revision: string,
+  model: ModelMutation,
 ): Promise<ModelActionResponse> {
-  return request<ModelActionResponse>(`/api/accounts/models/${index}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(model),
-  })
+  return request<ModelActionResponse>(
+    `/api/accounts/models/${index}?revision=${encodeURIComponent(revision)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(model),
+    },
+  )
 }
 
-export async function deleteModel(index: number): Promise<ModelActionResponse> {
-  return request<ModelActionResponse>(`/api/accounts/models/${index}`, {
-    method: "DELETE",
-  })
+export async function deleteModel(
+  index: number,
+  revision: string,
+): Promise<ModelActionResponse> {
+  return request<ModelActionResponse>(
+    `/api/accounts/models/${index}?revision=${encodeURIComponent(revision)}`,
+    {
+      method: "DELETE",
+    },
+  )
 }
 
-export async function setDefaultModel(
-  modelName: string,
+export async function setDefaultSelection(
+  accountRef: string,
+  modelAlias: string,
 ): Promise<ModelActionResponse> {
   const response = await request<ModelActionResponse>(
     "/api/accounts/models/default",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model_name: modelName }),
+      body: JSON.stringify({
+        account_ref: accountRef,
+        model_name: modelAlias,
+      }),
     },
   )
 
   await refreshGatewayState()
   return response
+}
+
+export async function setDefaultAccount(
+  accountRef: string,
+): Promise<ModelActionResponse> {
+  const current = await getModels()
+  if (!current.default_model?.trim()) {
+    throw new Error("no model configured")
+  }
+  return setDefaultSelection(accountRef, current.default_model)
+}
+
+export async function setDefaultModelAlias(
+  modelAlias: string,
+): Promise<ModelActionResponse> {
+  const current = await getModels()
+  if (!current.default_account_ref?.trim()) {
+    throw new Error("no account configured")
+  }
+  return setDefaultSelection(current.default_account_ref, modelAlias)
+}
+
+export async function addModelAlias(
+  alias: ModelAlias,
+): Promise<ModelActionResponse> {
+  return request<ModelActionResponse>("/api/accounts/model-aliases", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(alias),
+  })
+}
+
+export async function updateModelAlias(
+  index: number,
+  revision: string,
+  alias: ModelAlias,
+): Promise<ModelActionResponse> {
+  return request<ModelActionResponse>(
+    `/api/accounts/model-aliases/${index}?revision=${encodeURIComponent(revision)}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(alias),
+    },
+  )
+}
+
+export async function deleteModelAlias(
+  index: number,
+  revision: string,
+): Promise<ModelActionResponse> {
+  return request<ModelActionResponse>(
+    `/api/accounts/model-aliases/${index}?revision=${encodeURIComponent(revision)}`,
+    {
+      method: "DELETE",
+    },
+  )
 }
 
 export interface TestModelResponse {

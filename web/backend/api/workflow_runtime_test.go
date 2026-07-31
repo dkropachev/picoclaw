@@ -22,16 +22,20 @@ func TestWorkflowRuntimeRunnersForConfigUseCapturedConfigAfterDiskMutation(
 	newConfig := func(agentID string) *config.Config {
 		cfg := config.DefaultConfig()
 		cfg.Agents.Defaults.Workspace = workspace
-		cfg.Agents.Defaults.ModelName = "gpt-4.1"
+		cfg.Agents.Defaults.AccountRef = "openai-test"
+		cfg.Agents.Defaults.ModelName = "coding"
+		cfg.ModelAliases = []config.ModelAliasConfig{{
+			Name:  "coding",
+			Model: "openai/gpt-4.1",
+		}}
 		cfg.Agents.List = []config.AgentConfig{{
 			ID:        agentID,
 			Default:   true,
 			Workspace: workspace,
 		}}
 		cfg.ModelList = []*config.ModelConfig{{
-			ModelName: "gpt-4.1",
+			ModelName: "openai-test",
 			Provider:  "openai",
-			Model:     "gpt-4.1",
 			APIBase:   "http://127.0.0.1:1/v1",
 			Enabled:   true,
 		}}

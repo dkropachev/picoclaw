@@ -6,10 +6,42 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-func fallbackResultFromError(err error) *providers.FallbackResult {
+func fallbackResultFromError(
+	err error,
+	candidates ...providers.FallbackCandidate,
+) *providers.FallbackResult {
 	var exhausted *providers.FallbackExhaustedError
 	if errors.As(err, &exhausted) {
 		return &providers.FallbackResult{Attempts: exhausted.Attempts}
+	}
+	var failover *providers.FailoverError
+	if errors.As(err, &failover) {
+		if failover.IdentityKey != "" {
+			return &providers.FallbackResult{
+				Attempts: []providers.FallbackAttempt{{
+					Provider:    failover.Provider,
+					Model:       failover.Model,
+					IdentityKey: failover.IdentityKey,
+					Error:       failover,
+					Reason:      failover.Reason,
+				}},
+			}
+		}
+		for _, candidate := range candidates {
+			if providers.ModelKey(candidate.Provider, candidate.Model) !=
+				providers.ModelKey(failover.Provider, failover.Model) {
+				continue
+			}
+			return &providers.FallbackResult{
+				Attempts: []providers.FallbackAttempt{{
+					Provider:    candidate.Provider,
+					Model:       candidate.Model,
+					IdentityKey: candidate.StableKey(),
+					Error:       failover,
+					Reason:      failover.Reason,
+				}},
+			}
+		}
 	}
 	return nil
 }

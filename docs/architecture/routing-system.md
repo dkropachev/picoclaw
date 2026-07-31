@@ -7,7 +7,8 @@ It is the combined pipeline that decides:
 
 1. which agent handles an inbound message
 2. which session dimensions should isolate that conversation
-3. whether the turn should use the agent's primary model or a configured light model
+3. whether the turn should use the agent's primary alias or a configured light
+   alias
 
 This document covers the runtime path in `pkg/routing` and its integration in `pkg/agent`.
 It does not describe the launcher's HTTP `ServeMux` routes or the frontend's TanStack Router files under `web/`.
@@ -18,8 +19,8 @@ It does not describe the launcher's HTTP `ServeMux` routes or the frontend's Tan
 | --- | --- | --- |
 | Agent dispatch | `pkg/routing/route.go`, `pkg/routing/agent_id.go` | Choose the target agent for the inbound message. |
 | Session policy selection | `pkg/routing/route.go` | Decide which dimensions should define session isolation for that routed turn. |
-| Model routing | `pkg/routing/router.go`, `pkg/routing/features.go`, `pkg/routing/classifier.go` | Choose between the primary model and a configured light model based on message complexity. |
-| Runtime integration | `pkg/agent/registry.go`, `pkg/agent/agent_message.go`, `pkg/agent/turn_coord.go` | Apply the route result, allocate session scope, and select model candidates before provider execution. |
+| Model routing | `pkg/routing/router.go`, `pkg/routing/features.go`, `pkg/routing/classifier.go` | Choose between the primary alias and a configured light alias based on message complexity. |
+| Runtime integration | `pkg/agent/registry.go`, `pkg/agent/agent_message.go`, `pkg/agent/turn_coord.go` | Apply the route result, allocate session scope, select a concrete account, and resolve exact model aliases before provider execution. |
 
 ## End-To-End Flow
 
@@ -31,12 +32,15 @@ InboundMessage
   -> RouteResolver.ResolveRoute(...)
   -> session.AllocateRouteSession(...)
   -> ensureSessionMetadata(...)
+  -> resolve account_ref to a concrete account
   -> Router.SelectModel(...)
+  -> resolve the selected exact alias for that account
   -> provider execution
 ```
 
 The first half answers "who should handle this message and what session does it belong to".
-The second half answers "which model tier should that agent use for this turn".
+The second half answers "which alias tier should that agent use for this turn"
+while keeping account selection independent.
 
 ## Agent Dispatch
 
@@ -176,29 +180,57 @@ Without that symmetry, the system could route two messages to the same agent but
 
 ## Model Routing
 
-The second routing stage decides whether a turn can use a cheaper or faster light model.
+The second routing stage decides whether a turn can use a cheaper or faster
+light alias.
 
 Config shape:
 
 ```json
 {
-  "routing": {
-    "enabled": true,
-    "light_model": "gemini-2.0-flash",
-    "threshold": 0.35
+  "version": 4,
+  "model_list": [
+    {
+      "model_name": "openrouter-main",
+      "provider": "openrouter",
+      "model": ""
+    }
+  ],
+  "model_aliases": [
+    {
+      "name": "heavy",
+      "model": "openai/gpt-5.4"
+    },
+    {
+      "name": "light",
+      "model": "google/gemini-2.0-flash"
+    }
+  ],
+  "agents": {
+    "defaults": {
+      "account_ref": "openrouter-main",
+      "model_name": "heavy",
+      "routing": {
+        "enabled": true,
+        "light_model": "light",
+        "threshold": 0.35
+      }
+    }
   }
 }
 ```
 
 `pkg/routing.Router` compares the current turn against structural features and returns:
 
-- chosen model name
+- chosen exact alias
 - whether the light model was used
 - computed complexity score
 
-If the score is below the threshold, the light model wins.
-Otherwise the agent's primary model is used.
-At runtime this only matters when the agent actually has light-model candidates configured; otherwise execution stays on the primary candidate set.
+If the score is below the threshold, the light alias wins. Otherwise the
+agent's primary alias is used. The effective `account_ref` does not change. An
+account router first chooses a concrete account, and the chosen alias then
+resolves its base model or that concrete account's override. At runtime this
+only matters when the agent actually has light-alias candidates configured;
+otherwise execution stays on the primary candidate set.
 
 ## Complexity Features
 
@@ -245,8 +277,10 @@ Agent dispatch and model routing happen in different places:
 - `pkg/agent/agent_message.go` resolves the route and allocates session scope
 - `pkg/agent/turn_coord.go:selectCandidates` calls `agent.Router.SelectModel(...)`
 
-When the light model is selected, the agent loop swaps to `agent.LightCandidates`.
-When it is not selected, execution stays on the agent's primary provider candidate set.
+When the light alias is selected, the agent loop swaps to
+`agent.LightCandidates`, which were built from that exact alias and the
+effective account selection. Otherwise execution stays on the primary
+account-and-alias candidate set.
 
 ## Explicit Session Keys
 

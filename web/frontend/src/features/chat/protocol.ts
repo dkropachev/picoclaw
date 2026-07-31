@@ -99,6 +99,14 @@ function parseModelName(payload: Record<string, unknown>): string | undefined {
   return modelName || undefined
 }
 
+function parseAccountRef(payload: Record<string, unknown>): string | undefined {
+  if (typeof payload.account_ref !== "string") {
+    return undefined
+  }
+  const accountRef = payload.account_ref.trim()
+  return accountRef || undefined
+}
+
 export function handlePicoMessage(
   message: PicoMessage,
   expectedSessionId: string,
@@ -118,6 +126,7 @@ export function handlePicoMessage(
       const attachments = parseAttachments(payload)
       const contextUsage = parseContextUsage(payload)
       const isPlaceholder = payload.placeholder === true
+      const accountRef = parseAccountRef(payload)
       const modelName = parseModelName(payload)
       const timestamp =
         message.timestamp !== undefined &&
@@ -133,6 +142,7 @@ export function handlePicoMessage(
             role: "assistant",
             content,
             kind,
+            ...(accountRef ? { accountRef } : {}),
             ...(modelName ? { modelName } : {}),
             ...(toolCalls ? { toolCalls } : {}),
             attachments,
@@ -155,6 +165,7 @@ export function handlePicoMessage(
       const messageId = payload.message_id as string
       const attachments = parseAttachments(payload)
       const contextUsage = parseContextUsage(payload)
+      const accountRef = parseAccountRef(payload)
       const modelName = parseModelName(payload)
       const timestamp =
         message.timestamp !== undefined &&
@@ -181,6 +192,7 @@ export function handlePicoMessage(
               content,
               kind,
               toolCalls,
+              ...(accountRef ? { accountRef } : {}),
               ...(modelName ? { modelName } : {}),
               ...(attachments ? { attachments } : {}),
             }
@@ -200,6 +212,7 @@ export function handlePicoMessage(
               content,
               kind,
               toolCalls,
+              ...(accountRef ? { accountRef } : {}),
               ...(modelName ? { modelName } : {}),
               ...(attachments ? { attachments } : {}),
               timestamp,

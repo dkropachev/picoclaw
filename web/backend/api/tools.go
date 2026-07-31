@@ -57,7 +57,7 @@ type webSearchProviderConfig struct {
 	BaseURL    string   `json:"base_url,omitempty"`
 	APIKey     string   `json:"api_key,omitempty"`
 	APIKeys    []string `json:"api_keys,omitempty"`
-	Model      string   `json:"model,omitempty"`
+	ModelAlias string   `json:"model_alias,omitempty"`
 	APIKeySet  bool     `json:"api_key_set,omitempty"`
 }
 
@@ -67,6 +67,7 @@ type webSearchConfigResponse struct {
 	PreferNative   bool                               `json:"prefer_native"`
 	Proxy          string                             `json:"proxy,omitempty"`
 	Providers      []webSearchProviderOption          `json:"providers"`
+	ModelAliases   []string                           `json:"model_aliases"`
 	Settings       map[string]webSearchProviderConfig `json:"settings"`
 }
 
@@ -117,20 +118,22 @@ type toolAdaptationResolvedState struct {
 }
 
 type toolAdaptationProfileState struct {
-	ID             string                                `json:"id"`
-	Label          string                                `json:"label"`
-	Source         string                                `json:"source"`
-	IsDefault      bool                                  `json:"is_default"`
-	IsOverride     bool                                  `json:"is_override"`
-	ProbeAvailable bool                                  `json:"probe_available"`
-	Resolved       toolAdaptationResolvedState           `json:"resolved"`
-	Observation    *picotools.ToolAdaptationObservation  `json:"observation,omitempty"`
-	Outcomes       []picotools.ToolAdaptationToolOutcome `json:"outcomes,omitempty"`
+	ID              string                                `json:"id"`
+	Label           string                                `json:"label"`
+	Source          string                                `json:"source"`
+	IsDefault       bool                                  `json:"is_default"`
+	IsOverride      bool                                  `json:"is_override"`
+	ProbeAvailable  bool                                  `json:"probe_available"`
+	ProbeAccountRef string                                `json:"probe_account_ref,omitempty"`
+	ProbeModelAlias string                                `json:"probe_model_alias,omitempty"`
+	Resolved        toolAdaptationResolvedState           `json:"resolved"`
+	Observation     *picotools.ToolAdaptationObservation  `json:"observation,omitempty"`
+	Outcomes        []picotools.ToolAdaptationToolOutcome `json:"outcomes,omitempty"`
 }
 
 type toolAdaptationProbeRequest struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
+	AccountRef string `json:"account_ref"`
+	ModelAlias string `json:"model_alias"`
 }
 
 var toolCatalog = []toolCatalogEntry{
@@ -442,24 +445,29 @@ func (h *Handler) handleGetToolAdaptation(w http.ResponseWriter, r *http.Request
 }
 
 func (h *Handler) handleUpdateToolAdaptation(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.LoadConfig(h.configPath)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
-		return
-	}
-
 	var req toolAdaptationConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 		return
 	}
-
-	profileOverrides := cfg.Tools.Adaptation.ProfileOverrides
 	if req.ProfileOverrides != nil {
 		if err := validateToolAdaptationProfileOverrides(*req.ProfileOverrides); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+	}
+
+	h.configMutationMu.Lock()
+	defer h.configMutationMu.Unlock()
+
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	profileOverrides := cfg.Tools.Adaptation.ProfileOverrides
+	if req.ProfileOverrides != nil {
 		profileOverrides = canonicalToolAdaptationProfileOverrides(*req.ProfileOverrides)
 	}
 	cfg.Tools.Adaptation = config.ToolAdaptationConfig{
@@ -475,7 +483,11 @@ func (h *Handler) handleUpdateToolAdaptation(w http.ResponseWriter, r *http.Requ
 		ProfileOverrides:       profileOverrides,
 	}.Normalized()
 
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
+	if _, err := config.SaveConfigIfRevision(h.configPath, cfg, revision); err != nil {
+		if errors.Is(err, config.ErrConfigRevisionMismatch) {
+			http.Error(w, "Configuration changed; reload and try again", http.StatusConflict)
+			return
+		}
 		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -504,28 +516,41 @@ func (h *Handler) handleRunToolAdaptationProbe(w http.ResponseWriter, r *http.Re
 	}
 
 	var req toolAdaptationProbeRequest
-	if decodeErr := json.NewDecoder(r.Body).Decode(&req); decodeErr != nil && decodeErr != io.EOF {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if decodeErr := decoder.Decode(&req); decodeErr != nil && decodeErr != io.EOF {
 		http.Error(w, fmt.Sprintf("invalid probe request: %v", decodeErr), http.StatusBadRequest)
 		return
 	}
-	providerName := strings.TrimSpace(req.Provider)
-	model := strings.TrimSpace(req.Model)
-	if (providerName == "") != (model == "") {
-		http.Error(w, "probe provider and model must be provided together", http.StatusBadRequest)
+	accountRef := strings.TrimSpace(req.AccountRef)
+	modelAlias := strings.TrimSpace(req.ModelAlias)
+	if (accountRef == "") != (modelAlias == "") {
+		http.Error(w, "probe account_ref and model_alias must be provided together", http.StatusBadRequest)
 		return
 	}
-	if providerName == "" {
-		providerName, model = resolveToolAdaptationProfileForConfig(cfg)
+	if accountRef == "" {
+		accountRef, modelAlias = defaultToolAdaptationProbeSelection(cfg)
 	}
-	providerName = providers.NormalizeProvider(providerName)
-	if strings.TrimSpace(model) == "" {
-		http.Error(w, "default model is not configured", http.StatusBadRequest)
+	if modelAlias == "" {
+		http.Error(w, config.ErrNoModelConfigured.Error(), http.StatusBadRequest)
 		return
 	}
-
-	modelCfg, err := probeModelConfigForProfile(cfg, providerName, model)
+	if accountRef == "" {
+		http.Error(w, "no account configured", http.StatusBadRequest)
+		return
+	}
+	modelCfg, err := resolveToolAdaptationAccountAlias(cfg, accountRef, modelAlias)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to resolve probe profile: %v", err), http.StatusBadRequest)
+		http.Error(
+			w,
+			fmt.Sprintf(
+				"failed to resolve probe account %q with model alias %q: %v",
+				accountRef,
+				modelAlias,
+				err,
+			),
+			http.StatusBadRequest,
+		)
 		return
 	}
 	if strings.TrimSpace(modelCfg.Workspace) == "" {
@@ -539,14 +564,10 @@ func (h *Handler) handleRunToolAdaptationProbe(w http.ResponseWriter, r *http.Re
 	if stateful, ok := llmProvider.(providers.StatefulProvider); ok {
 		defer stateful.Close()
 	}
-	effectiveProvider, effectiveModel := providers.ExtractProtocol(modelCfg)
-	if strings.TrimSpace(effectiveProvider) != "" {
-		providerName = providers.NormalizeProvider(effectiveProvider)
-	}
+	effectiveProvider, model := providers.ExtractProtocol(modelCfg)
+	providerName := providers.NormalizeProvider(effectiveProvider)
 	if strings.TrimSpace(modelID) != "" {
 		model = modelID
-	} else if strings.TrimSpace(effectiveModel) != "" {
-		model = strings.TrimSpace(effectiveModel)
 	}
 
 	decision := picotools.ResolveToolAdaptation(adaptation, providerName, model)
@@ -567,6 +588,29 @@ func (h *Handler) handleRunToolAdaptationProbe(w http.ResponseWriter, r *http.Re
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 	}
+}
+
+func defaultToolAdaptationProbeSelection(cfg *config.Config) (string, string) {
+	if cfg == nil {
+		return "", ""
+	}
+	accountRef := strings.TrimSpace(cfg.Agents.Defaults.AccountRef)
+	if router := findAccountRouterForAdaptation(cfg, accountRef); router != nil {
+		accounts := accountRouterAccountsForAdaptation(router)
+		if len(accounts) == 0 {
+			return "", ""
+		}
+		accountRef = strings.TrimSpace(accounts[0])
+	}
+	modelAlias := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
+	if router := findModelRouterForAdaptation(cfg, modelAlias); router != nil {
+		aliases := modelRouterModelRefsForAdaptation(router)
+		if len(aliases) == 0 {
+			return "", ""
+		}
+		modelAlias = strings.TrimSpace(aliases[0])
+	}
+	return accountRef, modelAlias
 }
 
 func buildToolAdaptationResponse(cfg *config.Config) toolAdaptationConfigRequest {
@@ -638,169 +682,35 @@ func (s *toolAdaptationResolvedState) cacheObservation() *picotools.ToolAdaptati
 func resolveToolAdaptationProfileForConfig(
 	cfg *config.Config,
 ) (provider string, model string) {
-	provider = strings.TrimSpace(cfg.Agents.Defaults.Provider)
-	model = strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
-	defer func() {
-		provider = providers.NormalizeProvider(provider)
-		model = strings.TrimSpace(model)
-	}()
-	if model == "" {
-		return provider, ""
+	if cfg == nil {
+		return "", ""
 	}
-	for _, mc := range cfg.ModelList {
-		if mc == nil || !mc.Enabled {
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(mc.ModelName), model) {
-			continue
-		}
-		if mc.IsAccountRouter() {
-			router := mc.Router
-			if router == nil {
-				router = findAccountRouterForAdaptation(cfg, model)
-			}
-			if routerProvider, routerModel, ok := firstAccountRouterProfileForAdaptation(cfg, router); ok {
-				return routerProvider, routerModel
-			}
+	modelAlias := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
+	if modelAlias == "" {
+		return "", ""
+	}
+	if router := findModelRouterForAdaptation(cfg, modelAlias); router != nil {
+		refs := modelRouterModelRefsForAdaptation(router)
+		if len(refs) == 0 {
 			return "", ""
 		}
-		if mc.IsModelRouter() {
-			router := mc.ModelRouter
-			if router == nil {
-				router = findModelRouterForAdaptation(cfg, model)
-			}
-			if routerProvider, routerModel, ok := firstModelRouterProfileForAdaptation(cfg, router); ok {
-				return routerProvider, routerModel
-			}
-			return "", model
-		}
-		resolvedProvider, resolvedModel := providers.ExtractProtocol(mc)
-		if strings.TrimSpace(resolvedProvider) != "" {
-			provider = strings.TrimSpace(resolvedProvider)
-		}
-		if strings.TrimSpace(resolvedModel) != "" {
-			model = strings.TrimSpace(resolvedModel)
-		}
-		break
+		modelAlias = refs[0]
 	}
-	return provider, model
-}
 
-func firstModelRouterProfileForAdaptation(
-	cfg *config.Config,
-	router *config.ModelRouterConfig,
-) (string, string, bool) {
-	if router == nil || !router.Enabled {
-		return "", "", false
-	}
-	for _, modelRef := range modelRouterModelRefsForAdaptation(router) {
-		matches := modelConfigsByNameForAdaptation(cfg, modelRef)
-		if len(matches) == 0 {
-			if provider, model, ok := providerModelFromRefForAdaptation(modelRef); ok {
-				return provider, model, true
-			}
-			continue
+	accountRef := strings.TrimSpace(cfg.Agents.Defaults.AccountRef)
+	if router := findAccountRouterForAdaptation(cfg, accountRef); router != nil {
+		accounts := accountRouterAccountsForAdaptation(router)
+		if len(accounts) == 0 {
+			return "", ""
 		}
-		for _, mc := range matches {
-			if mc == nil || !mc.Enabled {
-				continue
-			}
-			switch {
-			case mc.IsAccountRouter():
-				accountRouter := mc.Router
-				if accountRouter == nil {
-					accountRouter = findAccountRouterForAdaptation(cfg, strings.TrimSpace(mc.ModelName))
-				}
-				if provider, model, ok := firstAccountRouterProfileForAdaptation(cfg, accountRouter); ok {
-					return provider, model, true
-				}
-			case mc.IsModelRouter():
-				continue
-			default:
-				provider, model := providers.ExtractProtocol(mc)
-				provider = providers.NormalizeProvider(provider)
-				model = strings.TrimSpace(model)
-				if provider != "" && model != "" {
-					return provider, model, true
-				}
-			}
-		}
+		accountRef = accounts[0]
 	}
-	return "", "", false
-}
-
-func firstAccountRouterProfileForAdaptation(
-	cfg *config.Config,
-	router *config.AccountRouterConfig,
-) (string, string, bool) {
-	if router == nil || !router.Enabled {
-		return "", "", false
+	modelCfg, err := resolveToolAdaptationAccountAlias(cfg, accountRef, modelAlias)
+	if err != nil {
+		return "", ""
 	}
-	for _, account := range accountRouterAccountsForAdaptation(router) {
-		if provider, model, ok := accountRouterCredentialProfileForAdaptation(account); ok {
-			return provider, model, true
-		}
-		if _, ok := config.AccountRouterCredentialAccountID(account); ok {
-			continue
-		}
-		for _, mc := range modelConfigsByNameForAdaptation(cfg, account) {
-			if mc == nil || !mc.Enabled {
-				continue
-			}
-			if mc.IsAccountRouter() {
-				nestedRouter := mc.Router
-				if nestedRouter == nil {
-					nestedRouter = findAccountRouterForAdaptation(cfg, strings.TrimSpace(mc.ModelName))
-				}
-				if provider, model, ok := firstAccountRouterProfileForAdaptation(cfg, nestedRouter); ok {
-					return provider, model, true
-				}
-				continue
-			}
-			if mc.IsModelRouter() {
-				modelRouter := mc.ModelRouter
-				if modelRouter == nil {
-					modelRouter = findModelRouterForAdaptation(cfg, strings.TrimSpace(mc.ModelName))
-				}
-				if provider, model, ok := firstModelRouterProfileForAdaptation(cfg, modelRouter); ok {
-					return provider, model, true
-				}
-				continue
-			}
-			provider, model := providers.ExtractProtocol(mc)
-			provider = providers.NormalizeProvider(provider)
-			model = strings.TrimSpace(model)
-			if provider != "" && model != "" {
-				return provider, model, true
-			}
-		}
-	}
-	return "", "", false
-}
-
-func accountRouterCredentialProfileForAdaptation(
-	account string,
-) (string, string, bool) {
-	provider, ok := config.AccountRouterCredentialAccountProvider(account)
-	if !ok {
-		return "", "", false
-	}
-	provider = probeCredentialRuntimeProvider(provider)
-	model := providers.DefaultModelForProvider(provider)
-	if provider == "" || model == "" {
-		return "", "", false
-	}
-	return provider, model, true
-}
-
-func providerModelFromRefForAdaptation(ref string) (string, string, bool) {
-	provider, model, ok := strings.Cut(strings.TrimSpace(ref), "/")
-	provider = strings.TrimSpace(provider)
-	model = strings.TrimSpace(model)
-	if !ok || provider == "" || model == "" {
-		return "", "", false
-	}
-	return providers.NormalizeProvider(provider), model, true
+	provider, model = providers.ExtractProtocol(modelCfg)
+	return providers.NormalizeProvider(provider), strings.TrimSpace(model)
 }
 
 func buildToolAdaptationProfiles(
@@ -815,13 +725,28 @@ func buildToolAdaptationProfiles(
 		cfg:          cfg,
 		adaptation:   adaptation,
 		activeKeys:   map[string]struct{}{},
-		accountRefs:  accountRouterAccountRefsForAdaptation(cfg),
 		overrideKeys: toolAdaptationOverrideKeys(adaptation.ProfileOverrides),
 		seenProfiles: map[string]struct{}{},
 	}
 	builder.addActiveProfile(defaultProfile.Provider, defaultProfile.Model)
-	for _, mc := range cfg.ModelList {
-		builder.addModelConfig(mc, "model alias")
+	for _, alias := range cfg.ModelAliases {
+		for _, accountRef := range concreteAccountRefsForToolAdaptation(cfg) {
+			modelCfg, err := resolveToolAdaptationAccountAlias(
+				cfg,
+				accountRef,
+				alias.Name,
+			)
+			if err != nil {
+				continue
+			}
+			provider, model := providers.ExtractProtocol(modelCfg)
+			builder.addProfile(
+				provider,
+				model,
+				"model alias",
+				strings.TrimSpace(alias.Name),
+			)
+		}
 	}
 	for _, override := range adaptation.ProfileOverrides {
 		builder.addProfile(
@@ -834,167 +759,77 @@ func buildToolAdaptationProfiles(
 	return builder.profiles
 }
 
+func resolveToolAdaptationAccountAlias(
+	cfg *config.Config,
+	accountRef string,
+	modelAlias string,
+) (*config.ModelConfig, error) {
+	if credentialID, ok := config.AccountRouterCredentialAccountID(accountRef); ok {
+		provider, ok := config.AccountRouterCredentialAccountProvider(accountRef)
+		if !ok {
+			return nil, fmt.Errorf("credential account %q has an unsupported provider", accountRef)
+		}
+		provider = probeCredentialRuntimeProvider(provider)
+		model, err := cfg.ResolveModelAlias(modelAlias, accountRef)
+		if err != nil {
+			return nil, err
+		}
+		model, err = providers.ResolveModelForProvider(provider, model)
+		if err != nil {
+			return nil, err
+		}
+		return &config.ModelConfig{
+			ModelName:    strings.TrimSpace(accountRef),
+			Provider:     providers.NormalizeProvider(provider),
+			Model:        model,
+			AuthMethod:   probeCredentialRuntimeAuthMethod(provider),
+			CredentialID: credentialID,
+			Enabled:      true,
+		}, nil
+	}
+	return resolveConcreteAccountAliasConfig(cfg, accountRef, modelAlias)
+}
+
+func concreteAccountRefsForToolAdaptation(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	refs := make([]string, 0, len(cfg.ModelList))
+	add := func(ref string) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" || seen[ref] {
+			return
+		}
+		seen[ref] = true
+		refs = append(refs, ref)
+	}
+	for _, account := range cfg.ModelList {
+		if account == nil || !account.Enabled ||
+			account.IsAccountRouter() || account.IsModelRouter() {
+			continue
+		}
+		add(account.ModelName)
+	}
+	for i := range cfg.AccountRouters {
+		for _, ref := range accountRouterAccountsForAdaptation(&cfg.AccountRouters[i]) {
+			add(ref)
+		}
+	}
+	return refs
+}
+
 type toolAdaptationProfileBuilder struct {
 	cfg          *config.Config
 	adaptation   config.ToolAdaptationConfig
 	activeKeys   map[string]struct{}
-	accountRefs  map[string]struct{}
 	overrideKeys map[string]struct{}
 	seenProfiles map[string]struct{}
 	profiles     []toolAdaptationProfileState
 }
 
 func (b *toolAdaptationProfileBuilder) addActiveProfile(provider string, model string) {
-	provider = providers.NormalizeProvider(provider)
-	model = strings.TrimSpace(model)
-	if model == "" {
-		b.addProfile(provider, model, "active configuration", "active")
-		return
-	}
-	for _, mc := range b.cfg.ModelList {
-		if mc == nil || !mc.Enabled ||
-			!strings.EqualFold(strings.TrimSpace(mc.ModelName), model) {
-			continue
-		}
-		switch {
-		case mc.IsAccountRouter():
-			router := mc.Router
-			if router == nil {
-				router = findAccountRouterForAdaptation(b.cfg, model)
-			}
-			b.addAccountRouter(router, "provider profile", true)
-			return
-		case mc.IsModelRouter():
-			router := mc.ModelRouter
-			if router == nil {
-				router = findModelRouterForAdaptation(b.cfg, model)
-			}
-			b.addModelRouter(router, "model router", true)
-			return
-		default:
-			resolvedProvider, resolvedModel := providers.ExtractProtocol(mc)
-			if strings.TrimSpace(resolvedProvider) != "" {
-				provider = strings.TrimSpace(resolvedProvider)
-			}
-			if strings.TrimSpace(resolvedModel) != "" {
-				model = strings.TrimSpace(resolvedModel)
-			}
-			b.addProfile(provider, model, "active configuration", "active")
-			return
-		}
-	}
-	b.addProfile(provider, model, "active configuration", "active")
-}
-
-func (b *toolAdaptationProfileBuilder) addModelConfig(mc *config.ModelConfig, source string) {
-	if mc == nil || !mc.Enabled {
-		return
-	}
-	modelName := strings.TrimSpace(mc.ModelName)
-	if _, ok := b.accountRefs[strings.ToLower(modelName)]; ok {
-		return
-	}
-	switch {
-	case mc.IsModelRouter():
-		router := mc.ModelRouter
-		if router == nil {
-			router = findModelRouterForAdaptation(b.cfg, modelName)
-		}
-		b.addModelRouter(router, "model router", false)
-	case mc.IsAccountRouter():
-		router := mc.Router
-		if router == nil {
-			router = findAccountRouterForAdaptation(b.cfg, modelName)
-		}
-		b.addAccountRouter(router, "provider profile", false)
-	default:
-		provider, model := providers.ExtractProtocol(mc)
-		b.addProfile(provider, model, source, modelName)
-	}
-}
-
-func (b *toolAdaptationProfileBuilder) addModelRouter(
-	router *config.ModelRouterConfig,
-	source string,
-	active bool,
-) {
-	if router == nil || !router.Enabled {
-		return
-	}
-	for _, modelRef := range modelRouterModelRefsForAdaptation(router) {
-		matches := modelConfigsByNameForAdaptation(b.cfg, modelRef)
-		if len(matches) == 0 {
-			if provider, model, ok := providerModelFromRefForAdaptation(modelRef); ok {
-				b.addProfileWithActive(provider, model, source, modelRef, active)
-			}
-			continue
-		}
-		for _, mc := range matches {
-			if mc == nil || !mc.Enabled {
-				continue
-			}
-			switch {
-			case mc.IsAccountRouter():
-				router := mc.Router
-				if router == nil {
-					router = findAccountRouterForAdaptation(b.cfg, strings.TrimSpace(mc.ModelName))
-				}
-				b.addAccountRouter(router, "provider profile", active)
-			case mc.IsModelRouter():
-				router := mc.ModelRouter
-				if router == nil {
-					router = findModelRouterForAdaptation(b.cfg, strings.TrimSpace(mc.ModelName))
-				}
-				b.addModelRouter(router, source, active)
-			default:
-				provider, model := providers.ExtractProtocol(mc)
-				b.addProfileWithActive(provider, model, source, strings.TrimSpace(mc.ModelName), active)
-			}
-		}
-	}
-}
-
-func (b *toolAdaptationProfileBuilder) addAccountRouter(
-	router *config.AccountRouterConfig,
-	source string,
-	active bool,
-) {
-	if router == nil || !router.Enabled {
-		return
-	}
-	for _, account := range accountRouterAccountsForAdaptation(router) {
-		if provider, model, ok := accountRouterCredentialProfileForAdaptation(account); ok {
-			b.addProfileWithActive(provider, model, source, provider, active)
-			continue
-		}
-		if _, ok := config.AccountRouterCredentialAccountID(account); ok {
-			continue
-		}
-		matches := modelConfigsByNameForAdaptation(b.cfg, account)
-		for _, mc := range matches {
-			if mc == nil || !mc.Enabled {
-				continue
-			}
-			if mc.IsAccountRouter() {
-				nestedRouter := mc.Router
-				if nestedRouter == nil {
-					nestedRouter = findAccountRouterForAdaptation(b.cfg, strings.TrimSpace(mc.ModelName))
-				}
-				b.addAccountRouter(nestedRouter, source, active)
-				continue
-			}
-			if mc.IsModelRouter() {
-				modelRouter := mc.ModelRouter
-				if modelRouter == nil {
-					modelRouter = findModelRouterForAdaptation(b.cfg, strings.TrimSpace(mc.ModelName))
-				}
-				b.addModelRouter(modelRouter, source, active)
-				continue
-			}
-			provider, model := providers.ExtractProtocol(mc)
-			b.addProfileWithActive(provider, model, source, provider, active)
-		}
-	}
+	b.addProfileWithActive(provider, model, "active configuration", "active", true)
 }
 
 func (b *toolAdaptationProfileBuilder) addProfile(provider string, model string, source string, label string) {
@@ -1037,19 +872,68 @@ func (b *toolAdaptationProfileBuilder) addProfileWithActive(
 	if displayLabel == "" {
 		displayLabel = strings.TrimSpace(strings.Join([]string{provider, model}, " / "))
 	}
-	probeConfig, probeErr := probeModelConfigForProfile(b.cfg, provider, model)
+	probeAccountRef, probeModelAlias, probeConfig, probeErr := probeSelectionForProfile(
+		b.cfg,
+		provider,
+		model,
+	)
 	probeAvailable := probeErr == nil && probeModelConfigReady(probeConfig)
 	b.profiles = append(b.profiles, toolAdaptationProfileState{
-		ID:             key,
-		Label:          displayLabel,
-		Source:         strings.TrimSpace(source),
-		IsDefault:      active || b.isActiveKey(key),
-		IsOverride:     b.isOverrideKey(key),
-		ProbeAvailable: probeAvailable,
-		Resolved:       *resolved,
-		Observation:    observation,
-		Outcomes:       outcomes,
+		ID:              key,
+		Label:           displayLabel,
+		Source:          strings.TrimSpace(source),
+		IsDefault:       active || b.isActiveKey(key),
+		IsOverride:      b.isOverrideKey(key),
+		ProbeAvailable:  probeAvailable,
+		ProbeAccountRef: probeAccountRef,
+		ProbeModelAlias: probeModelAlias,
+		Resolved:        *resolved,
+		Observation:     observation,
+		Outcomes:        outcomes,
 	})
+}
+
+func probeSelectionForProfile(
+	cfg *config.Config,
+	providerName string,
+	model string,
+) (string, string, *config.ModelConfig, error) {
+	if cfg == nil {
+		return "", "", nil, fmt.Errorf("config is nil")
+	}
+	providerName = providers.NormalizeProvider(providerName)
+	model = strings.TrimSpace(model)
+	var firstAccount string
+	var firstAlias string
+	var firstConfig *config.ModelConfig
+	for _, alias := range cfg.ModelAliases {
+		for _, accountRef := range concreteAccountRefsForToolAdaptation(cfg) {
+			modelCfg, err := resolveToolAdaptationAccountAlias(
+				cfg,
+				accountRef,
+				alias.Name,
+			)
+			if err != nil || !probeModelConfigMatches(modelCfg, providerName, model) {
+				continue
+			}
+			if firstConfig == nil {
+				firstAccount = strings.TrimSpace(accountRef)
+				firstAlias = strings.TrimSpace(alias.Name)
+				firstConfig = modelCfg
+			}
+			if probeModelConfigReady(modelCfg) {
+				return strings.TrimSpace(accountRef), strings.TrimSpace(alias.Name), modelCfg, nil
+			}
+		}
+	}
+	if firstConfig != nil {
+		return firstAccount, firstAlias, firstConfig, nil
+	}
+	return "", "", nil, fmt.Errorf(
+		"no configured account and model alias resolves to profile %s/%s",
+		providerName,
+		model,
+	)
 }
 
 func (b *toolAdaptationProfileBuilder) isActiveKey(key string) bool {
@@ -1134,7 +1018,7 @@ func validateToolAdaptationProfileOverrides(
 func findAccountRouterForAdaptation(cfg *config.Config, name string) *config.AccountRouterConfig {
 	name = strings.TrimSpace(name)
 	for i := range cfg.AccountRouters {
-		if strings.EqualFold(strings.TrimSpace(cfg.AccountRouters[i].Name), name) {
+		if strings.TrimSpace(cfg.AccountRouters[i].Name) == name {
 			return &cfg.AccountRouters[i]
 		}
 	}
@@ -1144,7 +1028,7 @@ func findAccountRouterForAdaptation(cfg *config.Config, name string) *config.Acc
 func findModelRouterForAdaptation(cfg *config.Config, name string) *config.ModelRouterConfig {
 	name = strings.TrimSpace(name)
 	for i := range cfg.ModelRouters {
-		if strings.EqualFold(strings.TrimSpace(cfg.ModelRouters[i].Name), name) {
+		if strings.TrimSpace(cfg.ModelRouters[i].Name) == name {
 			return &cfg.ModelRouters[i]
 		}
 	}
@@ -1158,7 +1042,7 @@ func modelConfigsByNameForAdaptation(cfg *config.Config, name string) []*config.
 		if mc == nil || !mc.Enabled {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(mc.ModelName), name) {
+		if strings.TrimSpace(mc.ModelName) == name {
 			matches = append(matches, mc)
 		}
 	}
@@ -1179,11 +1063,10 @@ func modelRouterModelRefsForAdaptation(router *config.ModelRouterConfig) []strin
 		if ref == "" {
 			continue
 		}
-		key := strings.ToLower(ref)
-		if _, ok := seen[key]; ok {
+		if _, ok := seen[ref]; ok {
 			continue
 		}
-		seen[key] = struct{}{}
+		seen[ref] = struct{}{}
 		refs = append(refs, ref)
 	}
 	return refs
@@ -1201,35 +1084,14 @@ func accountRouterAccountsForAdaptation(router *config.AccountRouterConfig) []st
 			if account == "" {
 				continue
 			}
-			key := strings.ToLower(account)
-			if _, ok := seen[key]; ok {
+			if _, ok := seen[account]; ok {
 				continue
 			}
-			seen[key] = struct{}{}
+			seen[account] = struct{}{}
 			accounts = append(accounts, account)
 		}
 	}
 	return accounts
-}
-
-func accountRouterAccountRefsForAdaptation(cfg *config.Config) map[string]struct{} {
-	refs := map[string]struct{}{}
-	if cfg == nil {
-		return refs
-	}
-	for i := range cfg.AccountRouters {
-		if !cfg.AccountRouters[i].Enabled {
-			continue
-		}
-		for _, account := range accountRouterAccountsForAdaptation(&cfg.AccountRouters[i]) {
-			account = strings.TrimSpace(account)
-			if account == "" {
-				continue
-			}
-			refs[strings.ToLower(account)] = struct{}{}
-		}
-	}
-	return refs
 }
 
 func accountRouterBlockAccountsForAdaptation(block config.AccountRouterBlock) []string {
@@ -1315,6 +1177,12 @@ func probeModelConfigCandidates(
 			continue
 		}
 		clone := *modelCfg
+		candidateProvider, _ := providers.ExtractProtocol(modelCfg)
+		if providers.NormalizeProvider(candidateProvider) ==
+			providers.NormalizeProvider(providerName) {
+			clone.Provider = candidateProvider
+			clone.Model = strings.TrimSpace(model)
+		}
 		candidates = append(candidates, &clone)
 	}
 	for i := range cfg.AccountRouters {
@@ -1701,12 +1569,6 @@ func (h *Handler) handleGetWebSearchConfig(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *Handler) handleUpdateWebSearchConfig(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.LoadConfig(h.configPath)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
-		return
-	}
-
 	var req webSearchConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
@@ -1716,6 +1578,15 @@ func (h *Handler) handleUpdateWebSearchConfig(w http.ResponseWriter, r *http.Req
 	provider := normalizeWebSearchProvider(req.Provider)
 	if provider == "" {
 		http.Error(w, "invalid web search provider", http.StatusBadRequest)
+		return
+	}
+
+	h.configMutationMu.Lock()
+	defer h.configMutationMu.Unlock()
+
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -1734,7 +1605,7 @@ func (h *Handler) handleUpdateWebSearchConfig(w http.ResponseWriter, r *http.Req
 	if settings, ok := req.Settings["gemini"]; ok {
 		cfg.Tools.Web.Gemini.Enabled = settings.Enabled
 		cfg.Tools.Web.Gemini.MaxResults = settings.MaxResults
-		cfg.Tools.Web.Gemini.Model = strings.TrimSpace(settings.Model)
+		cfg.Tools.Web.Gemini.ModelAlias = strings.TrimSpace(settings.ModelAlias)
 		if key := strings.TrimSpace(settings.APIKey); key != "" {
 			cfg.Tools.Web.Gemini.APIKey = *config.NewSecureString(key)
 		}
@@ -1765,6 +1636,7 @@ func (h *Handler) handleUpdateWebSearchConfig(w http.ResponseWriter, r *http.Req
 	if settings, ok := req.Settings["perplexity"]; ok {
 		cfg.Tools.Web.Perplexity.Enabled = settings.Enabled
 		cfg.Tools.Web.Perplexity.MaxResults = settings.MaxResults
+		cfg.Tools.Web.Perplexity.ModelAlias = strings.TrimSpace(settings.ModelAlias)
 		if keys, ok := normalizeWebSearchAPIKeys(settings.APIKeys, settings.APIKey); ok {
 			cfg.Tools.Web.Perplexity.APIKeys = config.SimpleSecureStrings(keys...)
 		}
@@ -1791,7 +1663,15 @@ func (h *Handler) handleUpdateWebSearchConfig(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
+	if err := cfg.ValidateModelSelections(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, err := config.SaveConfigIfRevision(h.configPath, cfg, revision); err != nil {
+		if errors.Is(err, config.ErrConfigRevisionMismatch) {
+			http.Error(w, "Configuration changed; reload and try again", http.StatusConflict)
+			return
+		}
 		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -1817,12 +1697,6 @@ func (h *Handler) handleGetThreadPolicy(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *Handler) handleUpdateThreadPolicy(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.LoadConfig(h.configPath)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
-		return
-	}
-
 	var req threadPolicyRequest
 	if decodeErr := json.NewDecoder(r.Body).Decode(&req); decodeErr != nil {
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", decodeErr), http.StatusBadRequest)
@@ -1842,6 +1716,15 @@ func (h *Handler) handleUpdateThreadPolicy(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	h.configMutationMu.Lock()
+	defer h.configMutationMu.Unlock()
+
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	cfg.Tools.Threads.Policy = config.ThreadPolicyConfig{
 		Enabled:      req.Enabled,
 		Mode:         mode,
@@ -1850,7 +1733,11 @@ func (h *Handler) handleUpdateThreadPolicy(w http.ResponseWriter, r *http.Reques
 		Agents:       normalizeThreadAgentPolicies(req.Agents),
 	}
 
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
+	if _, err := config.SaveConfigIfRevision(h.configPath, cfg, revision); err != nil {
+		if errors.Is(err, config.ErrConfigRevisionMismatch) {
+			http.Error(w, "Configuration changed; reload and try again", http.StatusConflict)
+			return
+		}
 		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -1977,7 +1864,7 @@ func buildWebSearchConfigResponse(cfg *config.Config) webSearchConfigResponse {
 		"gemini": {
 			Enabled:    cfg.Tools.Web.Gemini.Enabled,
 			MaxResults: cfg.Tools.Web.Gemini.MaxResults,
-			Model:      cfg.Tools.Web.Gemini.Model,
+			ModelAlias: cfg.Tools.Web.Gemini.ModelAlias,
 			APIKeySet:  cfg.Tools.Web.Gemini.APIKey.String() != "",
 		},
 		"brave": {
@@ -2000,6 +1887,7 @@ func buildWebSearchConfigResponse(cfg *config.Config) webSearchConfigResponse {
 		"perplexity": {
 			Enabled:    cfg.Tools.Web.Perplexity.Enabled,
 			MaxResults: cfg.Tools.Web.Perplexity.MaxResults,
+			ModelAlias: cfg.Tools.Web.Perplexity.ModelAlias,
 			APIKeySet:  len(cfg.Tools.Web.Perplexity.APIKeys.Values()) > 0,
 		},
 		"searxng": {
@@ -2109,8 +1997,22 @@ func buildWebSearchConfigResponse(cfg *config.Config) webSearchConfigResponse {
 		PreferNative:   cfg.Tools.Web.PreferNative,
 		Proxy:          cfg.Tools.Web.Proxy,
 		Providers:      providers,
+		ModelAliases:   configuredModelAliasNames(cfg),
 		Settings:       settings,
 	}
+}
+
+func configuredModelAliasNames(cfg *config.Config) []string {
+	if cfg == nil {
+		return []string{}
+	}
+	aliases := make([]string, 0, len(cfg.ModelAliases))
+	for i := range cfg.ModelAliases {
+		if name := strings.TrimSpace(cfg.ModelAliases[i].Name); name != "" {
+			aliases = append(aliases, name)
+		}
+	}
+	return aliases
 }
 
 func resolveCurrentWebSearchProvider(cfg *config.Config) string {

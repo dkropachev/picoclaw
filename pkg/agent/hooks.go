@@ -93,7 +93,7 @@ type ToolApprover interface {
 type LLMHookRequest struct {
 	Meta             HookMeta                   `json:"meta"`
 	Context          *TurnContext               `json:"context,omitempty"`
-	Model            string                     `json:"model"`
+	Model            string                     `json:"model"` // Exact configured model alias, never a provider model ID.
 	Messages         []providers.Message        `json:"messages,omitempty"`
 	Tools            []providers.ToolDefinition `json:"tools,omitempty"`
 	Options          map[string]any             `json:"options,omitempty"`
@@ -116,7 +116,7 @@ func (r *LLMHookRequest) Clone() *LLMHookRequest {
 type LLMHookResponse struct {
 	Meta     HookMeta               `json:"meta"`
 	Context  *TurnContext           `json:"context,omitempty"`
-	Model    string                 `json:"model"`
+	Model    string                 `json:"model"` // Exact configured model alias used for the request.
 	Response *providers.LLMResponse `json:"response,omitempty"`
 }
 

@@ -82,10 +82,12 @@ picoclaw onboard
 
 ```json
 {
+  "version": 4,
   "agents": {
     "defaults": {
       "workspace": "~/.picoclaw/workspace",
-      "model_name": "gpt-5.4",
+      "account_ref": "openai-work",
+      "model_name": "coding",
       "max_tokens": 8192,
       "temperature": 0.7,
       "max_tool_iterations": 20
@@ -93,24 +95,34 @@ picoclaw onboard
   },
   "model_list": [
     {
-      "model_name": "ark-code-latest",
+      "model_name": "volcengine-work",
       "provider": "volcengine",
-      "model": "ark-code-latest",
+      "model": "",
       "api_keys": ["sk-your-api-key"],
       "api_base":"https://ark.cn-beijing.volces.com/api/coding/v3"
     },
     {
-      "model_name": "gpt-5.4",
+      "model_name": "openai-work",
       "provider": "openai",
-      "model": "gpt-5.4",
+      "model": "",
       "api_keys": ["your-api-key"],
       "request_timeout": 300
     },
     {
-      "model_name": "claude-sonnet-4.6",
+      "model_name": "anthropic-work",
       "provider": "anthropic",
-      "model": "claude-sonnet-4.6",
+      "model": "",
       "api_keys": ["your-anthropic-key"]
+    }
+  ],
+  "model_aliases": [
+    {
+      "name": "coding",
+      "model": "gpt-5.4",
+      "account_overrides": {
+        "volcengine-work": "ark-code-latest",
+        "anthropic-work": "claude-sonnet-4.6"
+      }
     }
   ],
   "tools": {
@@ -147,7 +159,9 @@ picoclaw onboard
 }
 ```
 
-> **New**: The `model_list` configuration format allows zero-code provider addition. See [Model Configuration](#model-configuration-model_list) for details.
+> `model_list[]` configures provider accounts, while `model_aliases[]` configures
+> executable model policy. See
+> [Accounts and Model Aliases](configuration.md#accounts-and-model-aliases).
 > `request_timeout` is optional and uses seconds. If omitted or set to `<= 0`, PicoClaw uses the default timeout (120s).
 
 **3. Get API Keys**

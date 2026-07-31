@@ -155,12 +155,9 @@ func (r *webWorkflowRuntimeRunner) ensureLoopLocked() error {
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 	}
-	provider, modelID, err := providers.CreateProvider(cfg)
+	provider, _, err := providers.CreateProvider(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create provider: %w", err)
-	}
-	if modelID != "" {
-		cfg.Agents.Defaults.ModelName = modelID
 	}
 	r.msgBus = bus.NewMessageBus()
 	r.loop = agentloop.NewAgentLoop(

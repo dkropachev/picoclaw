@@ -196,6 +196,10 @@ func TestAgentModelConfig_SaveLoadPreservesExplicitEmptyFallbacks(t *testing.T) 
 	mustSetupSSHKey(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := DefaultConfig()
+	cfg.ModelAliases = []ModelAliasConfig{
+		{Name: "agent-primary", Model: "gpt-5.4"},
+		{Name: "subagent-primary", Model: "gpt-5.4-mini"},
+	}
 	cfg.Agents.List = []AgentConfig{
 		{
 			ID:      "main",
@@ -737,7 +741,7 @@ func TestLoadConfig_EvolutionEnabledWithoutModeUsesObserveSemantics(t *testing.T
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	raw := `{
-		"version": 3,
+		"version": 4,
 		"evolution": {
 			"enabled": true
 		}
@@ -762,7 +766,7 @@ func TestLoadConfig_EvolutionExplicitApplyModeAutoApplies(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	raw := `{
-		"version": 3,
+		"version": 4,
 		"evolution": {
 			"enabled": true,
 			"mode": "apply"

@@ -673,17 +673,77 @@ The subagent has access to tools (message, web_search, etc.) and can communicate
 | `cerebras`   | LLM (Cerebras direct)                   | [cerebras.ai](https://cerebras.ai)                           |
 | `vivgrid`    | LLM (Vivgrid direct)                    | [vivgrid.com](https://vivgrid.com)                           |
 
-### Model Configuration (model_list)
+### Accounts and Model Aliases
 
-> **What's New?** PicoClaw now prefers explicit `provider` + native `model` configuration (for example `"provider": "zhipu", "model": "glm-4.7"`). The legacy single-field `provider/model` form remains supported for compatibility when `provider` is omitted.
+Config version 4 separates provider accounts from model selection:
 
-This design also enables **multi-agent support** with flexible provider selection:
+- `model_list[]` and `credential:<provider>:<id>` references describe concrete
+  accounts and transport/auth settings.
+- `model_aliases[]` maps a stable exact name to a concrete upstream model.
+- `agents.defaults.account_ref` selects a concrete account or enabled account
+  router.
+- `agents.defaults.model_name` selects an exact model alias or enabled model
+  router. Per-agent `account_ref` and model policy may override or inherit these
+  two fields independently.
 
-- **Different agents, different providers**: Each agent can use its own LLM provider
-- **Model fallbacks**: Configure primary and fallback models for resilience
+An alias may override its concrete model for named concrete accounts:
+
+```json
+{
+  "version": 4,
+  "agents": {
+    "defaults": {
+      "account_ref": "openai-work",
+      "model_name": "coding"
+    }
+  },
+  "model_aliases": [
+    {
+      "name": "coding",
+      "model": "gpt-5.4",
+      "account_overrides": {
+        "credential:github-copilot:work": "gpt-4.1"
+      }
+    }
+  ],
+  "model_list": [
+    {
+      "model_name": "openai-work",
+      "provider": "openai",
+      "model": "gpt-5.4",
+      "enabled": true
+    }
+  ]
+}
+```
+
+Override keys must name concrete accounts. They cannot name account routers or
+model routers. At runtime an account router first chooses a concrete account;
+only then does the alias resolve its base model or matching account override.
+Model-router terminal blocks likewise target aliases only.
+
+PicoClaw does not infer an executable model from provider metadata,
+`model_list[].model`, a raw request model, or fuzzy matching. If the effective
+alias is empty, execution stops before the provider call with:
+
+```text
+no model configured
+```
+
+### Provider Account Configuration (`model_list`)
+
+> **Account metadata:** `provider` and transport settings live on
+> `model_list[]`. A legacy `model` value may remain as provider-profile
+> metadata, but v4 execution always gets its concrete model from an exact alias.
+
+This transport configuration supports:
+
+- **Different agents, different accounts**: Each agent can override `account_ref`
+- **Alias fallbacks**: Configure exact primary and fallback aliases for resilience
 - **Load balancing**: Distribute requests across multiple endpoints or keys
 - **Centralized configuration**: Manage all providers in one place
-- **Model enable/disable**: Use the `enabled` field to temporarily disable a model without removing its configuration
+- **Account enable/disable**: Use `enabled` to temporarily disable an account
+  without removing its transport configuration
 
 #### 🔒 Security Configuration (Recommended)
 
@@ -700,10 +760,10 @@ PicoClaw supports separating sensitive data (API keys, tokens, secrets) from you
 1. Create `~/.picoclaw/.security.yml` with your API keys:
 ```yaml
 model_list:
-  gpt-5.4:
+  openai-work:
     api_keys:
       - "sk-proj-your-actual-openai-key"
-  claude-sonnet-4.6:
+  anthropic-work:
     api_keys:
       - "sk-ant-your-actual-anthropic-key"
 channels:
@@ -725,19 +785,30 @@ chmod 600 ~/.picoclaw/.security.yml
 3. Remove sensitive fields from `config.json` (recommended):
 ```json
 {
+  "version": 4,
   "model_list": [
     {
-      "model_name": "gpt-5.4",
+      "model_name": "openai-work",
       "provider": "openai",
-      "model": "gpt-5.4"
-      // api_key loaded from .security.yml
+      "model": ""
     }
   ],
+  "model_aliases": [
+    {
+      "name": "chat",
+      "model": "gpt-5.4"
+    }
+  ],
+  "agents": {
+    "defaults": {
+      "account_ref": "openai-work",
+      "model_name": "chat"
+    }
+  },
   "channel_list": {
     "telegram": {
       "enabled": true,
-      "type": "telegram",
-      // token loaded from .security.yml
+      "type": "telegram"
     }
   }
 }
@@ -785,33 +856,45 @@ For complete documentation, see [`../security/security_configuration.md`](../sec
 {
   "model_list": [
     {
-      "model_name": "ark-code-latest",
+      "model_name": "volcengine-work",
       "provider": "volcengine",
       "model": "ark-code-latest",
       "api_keys": ["sk-your-api-key"]
     },
     {
-      "model_name": "gpt-5.4",
+      "model_name": "openai-work",
       "provider": "openai",
       "model": "gpt-5.4",
       "api_keys": ["sk-your-openai-key"]
     },
     {
-      "model_name": "claude-sonnet-4.6",
+      "model_name": "anthropic-work",
       "provider": "anthropic",
       "model": "claude-sonnet-4.6",
       "api_keys": ["sk-ant-your-key"]
     },
     {
-      "model_name": "glm-4.7",
+      "model_name": "zhipu-work",
       "provider": "zhipu",
       "model": "glm-4.7",
       "api_keys": ["your-zhipu-key"]
     }
   ],
+  "model_aliases": [
+    {
+      "name": "coding",
+      "model": "gpt-5.4",
+      "account_overrides": {
+        "volcengine-work": "ark-code-latest",
+        "anthropic-work": "claude-sonnet-4.6",
+        "zhipu-work": "glm-4.7"
+      }
+    }
+  ],
   "agents": {
     "defaults": {
-      "model": "gpt-5.4"
+      "account_ref": "openai-work",
+      "model_name": "coding"
     }
   }
 }
@@ -819,18 +902,23 @@ For complete documentation, see [`../security/security_configuration.md`](../sec
 
 > **Security Note**: You can remove `api_keys` fields from your config and store them in `.security.yml` instead. See [Security Configuration](#-security-configuration-recommended) above for details.
 >
-> **Note**: The `enabled` field can be set to `false` to disable a model entry without removing it. When omitted, it defaults to `true` during migration for models that have API keys.
+> **Note**: The `enabled` field can be set to `false` to disable an account
+> entry without removing it. Legacy migration may infer this account flag, but
+> it never creates an executable default alias.
 
-Resolution rules:
-
-- Prefer explicit `"provider": "openai", "model": "gpt-5.4"`.
-- If `provider` is set, PicoClaw sends `model` unchanged.
-- If `provider` is omitted, PicoClaw treats the first `/` segment in `model` as the provider and everything after that first `/` as the runtime model ID.
-- This means `"model": "openrouter/openai/gpt-5.4"` still works as a compatibility form and sends `openai/gpt-5.4` to OpenRouter.
+After account and alias selection, `provider` controls the transport and the
+alias-resolved concrete model is sent upstream unchanged. A provider-prefixed
+legacy `model_list[].model` may still help migrate old profile metadata, but it
+is never promoted to the selected alias.
 
 #### Streaming Configuration
 
-Provider streaming uses a double opt-in and is disabled by default. The agent only tries streaming when the current channel has `settings.streaming.enabled: true`, the active model entry has `streaming.enabled: true`, and both the provider and channel support streaming. If any condition is missing, PicoClaw uses the normal non-streaming request path.
+Provider streaming uses a double opt-in and is disabled by default. The agent
+only tries streaming when the current channel has
+`settings.streaming.enabled: true`, the selected account entry has
+`streaming.enabled: true`, and both the provider and channel support streaming.
+If any condition is missing, PicoClaw uses the normal non-streaming request
+path.
 
 Pico WebUI is the first fully wired channel. Pico creates the first assistant message with the existing `message.create` wire message, then updates that same message with `message.update`; no new Pico wire message type is introduced.
 
@@ -840,17 +928,30 @@ Opt-in example:
 
 ```json
 {
+  "version": 4,
   "model_list": [
     {
-      "model_name": "gpt-5.4",
+      "model_name": "openai-work",
       "provider": "openai",
-      "model": "gpt-5.4",
+      "model": "",
       "api_keys": ["sk-your-openai-key"],
       "streaming": {
         "enabled": true
       }
     }
   ],
+  "model_aliases": [
+    {
+      "name": "chat",
+      "model": "gpt-5.4"
+    }
+  ],
+  "agents": {
+    "defaults": {
+      "account_ref": "openai-work",
+      "model_name": "chat"
+    }
+  },
   "channel_list": {
     "pico": {
       "enabled": true,
@@ -871,18 +972,23 @@ Opt-in example:
 | `channel_list.<name>.settings.streaming.enabled` | bool | `false` | Allows this channel to display provider streaming output |
 | `channel_list.<name>.settings.streaming.throttle_seconds` | int | Pico default after enabling: `0` | Minimum interval for intermediate updates; final content is always flushed |
 | `channel_list.<name>.settings.streaming.min_growth_chars` | int | Pico default after enabling: `1` | Minimum character growth before sending an intermediate update; final content is always flushed |
-| `model_list[].streaming.enabled` | bool | `false` | Allows this model entry to try provider streaming requests |
+| `model_list[].streaming.enabled` | bool | `false` | Allows this account transport to try streaming requests |
 
 Legacy Telegram environment variables remain compatible: `PICOCLAW_CHANNELS_TELEGRAM_STREAMING_ENABLED`, `PICOCLAW_CHANNELS_TELEGRAM_STREAMING_THROTTLE_SECONDS`, and `PICOCLAW_CHANNELS_TELEGRAM_STREAMING_MIN_GROWTH_CHARS`. They only apply to Telegram settings and do not enable or modify Pico `settings.streaming`.
 
 Failure behavior is intentionally conservative: if streaming fails before any visible chunk is sent, PicoClaw retries once through the normal `Chat()` path. If a chunk has already been shown to the user, PicoClaw does not send a second non-streaming answer, because that would duplicate visible output.
 
-For model-specific TTS request fields such as custom speech `voice` names or
-`response_format: "mp3"`, use `model_list[].extra_body`.
+For account-specific TTS request fields such as custom speech `voice` names or
+`response_format: "mp3"`, use `model_list[].extra_body`; the concrete TTS model
+still comes from the selected voice alias.
 
 #### Vendor-Specific Examples
 
 > **Tip**: You can omit `api_key` fields and store them in `.security.yml` for better security. See [Security Configuration](#-security-configuration-recommended).
+>
+> Each object below is an account-row fragment. Give it an account identity in
+> `model_name`, create a separate `model_aliases[]` entry for the concrete model,
+> and select both through `account_ref` plus the alias.
 
 <details>
 <summary><b>OpenAI</b></summary>
@@ -903,9 +1009,9 @@ For model-specific TTS request fields such as custom speech `voice` names or
 
 ```json
 {
-  "model_name": "mai-voice-2",
+  "model_name": "openrouter-voice",
   "provider": "openrouter",
-  "model": "microsoft/mai-voice-2",
+  "model": "",
   "api_base": "https://openrouter.ai/api/v1",
   "extra_body": {
     "voice": "en-US-Harper:MAI-Voice-2",
@@ -919,8 +1025,15 @@ Pair this with:
 
 ```json
 {
+  "model_aliases": [
+    {
+      "name": "voice",
+      "model": "microsoft/mai-voice-2"
+    }
+  ],
   "voice": {
-    "tts_model_name": "mai-voice-2"
+    "tts_account_ref": "openrouter-voice",
+    "tts_model_name": "voice"
   }
 }
 ```
@@ -1047,7 +1160,9 @@ With explicit `provider`, PicoClaw sends `model` unchanged. That means `"provide
 
 #### Load Balancing
 
-Configure multiple endpoints for the same model name — PicoClaw will automatically round-robin between them:
+Configure multiple endpoints for the same account identity and PicoClaw can
+round-robin between them. These snippets configure only the account pool; pair
+that pool with a separate exact alias and select both values.
 
 **Option 1: Multiple API Keys in .security.yml (Recommended)**
 
@@ -1148,9 +1263,24 @@ This keeps the runtime lightweight while making new OpenAI-compatible backends m
 
 ```json
 {
+  "version": 4,
+  "model_list": [
+    {
+      "model_name": "anthropic-work",
+      "provider": "anthropic",
+      "model": ""
+    }
+  ],
+  "model_aliases": [
+    {
+      "name": "chat",
+      "model": "claude-opus-4-5"
+    }
+  ],
   "agents": {
     "defaults": {
-      "model_name": "claude-opus-4-5"
+      "account_ref": "anthropic-work",
+      "model_name": "chat"
     }
   },
   "session": {

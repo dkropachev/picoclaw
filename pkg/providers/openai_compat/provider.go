@@ -478,6 +478,10 @@ func (p *Provider) Chat(
 	model string,
 	options map[string]any,
 ) (*LLMResponse, error) {
+	model, err := protocoltypes.RequireModel(model)
+	if err != nil {
+		return nil, err
+	}
 	if p.apiBase == "" {
 		return nil, fmt.Errorf("API base not configured")
 	}
@@ -548,6 +552,10 @@ func (p *Provider) ChatStreamEvents(
 	options map[string]any,
 	onChunk func(StreamChunk),
 ) (*LLMResponse, error) {
+	model, err := protocoltypes.RequireModel(model)
+	if err != nil {
+		return nil, err
+	}
 	if p.apiBase == "" {
 		return nil, fmt.Errorf("API base not configured")
 	}

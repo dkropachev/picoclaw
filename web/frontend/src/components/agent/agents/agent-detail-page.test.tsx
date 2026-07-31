@@ -59,6 +59,7 @@ function agent(): AgentInfo {
     id: "reviewer",
     name: "Reviewer",
     workspace: "",
+    account_ref: "",
     model: null,
     skills: null,
     subagents: null,

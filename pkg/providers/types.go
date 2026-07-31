@@ -32,7 +32,6 @@ type LLMProvider interface {
 		model string,
 		options map[string]any,
 	) (*LLMResponse, error)
-	GetDefaultModel() string
 }
 
 type StatefulProvider interface {
@@ -98,11 +97,12 @@ const (
 
 // FailoverError wraps an LLM provider error with classification metadata.
 type FailoverError struct {
-	Reason   FailoverReason
-	Provider string
-	Model    string
-	Status   int
-	Wrapped  error
+	Reason      FailoverReason
+	Provider    string
+	Model       string
+	IdentityKey string
+	Status      int
+	Wrapped     error
 }
 
 func (e *FailoverError) Error() string {

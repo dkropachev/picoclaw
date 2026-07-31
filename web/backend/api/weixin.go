@@ -206,7 +206,31 @@ func (h *Handler) handlePollWeixinFlow(w http.ResponseWriter, r *http.Request) {
 // saveWeixinBinding writes the token/account ID, enables the Weixin channel,
 // and best-effort restarts the gateway when it is currently running.
 func (h *Handler) saveWeixinBinding(token, accountID string) error {
-	cfg, err := config.LoadConfig(h.configPath)
+	h.configMutationMu.Lock()
+	err := h.saveWeixinBindingLocked(token, accountID)
+	h.configMutationMu.Unlock()
+	if err != nil {
+		return err
+	}
+
+	status := h.gatewayStatusData()
+	gatewayStatus, _ := status["gateway_status"].(string)
+	if gatewayStatus != "running" {
+		return nil
+	}
+
+	if _, err := h.RestartGateway(); err != nil {
+		logger.ErrorCF("weixin", "failed to restart gateway after saving binding", map[string]any{
+			"error": err.Error(),
+		})
+	}
+	return nil
+}
+
+// saveWeixinBindingLocked persists Weixin settings while configMutationMu is
+// held. Gateway inspection and restart must happen after the caller unlocks.
+func (h *Handler) saveWeixinBindingLocked(token, accountID string) error {
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -230,20 +254,8 @@ func (h *Handler) saveWeixinBinding(token, accountID string) error {
 		weixinCfg.AccountID = accountID
 	}
 
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
+	if _, err := h.saveConfigIfRevision(h.configPath, cfg, revision); err != nil {
 		return err
-	}
-
-	status := h.gatewayStatusData()
-	gatewayStatus, _ := status["gateway_status"].(string)
-	if gatewayStatus != "running" {
-		return nil
-	}
-
-	if _, err := h.RestartGateway(); err != nil {
-		logger.ErrorCF("weixin", "failed to restart gateway after saving binding", map[string]any{
-			"error": err.Error(),
-		})
 	}
 	return nil
 }

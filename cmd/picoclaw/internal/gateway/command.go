@@ -78,7 +78,7 @@ func NewGatewayCommand() *cobra.Command {
 		"allow-empty",
 		"E",
 		false,
-		"Continue starting even when no default model is configured",
+		"Continue starting even when no model alias is configured",
 	)
 	cmd.Flags().StringVar(
 		&host,

@@ -38,10 +38,14 @@ At runtime the launcher and the main PicoClaw engine are separate processes:
 The current frontend exposes these major pages and flows:
 
 - `/`
-  - Chat UI with session history, default model selection, and Pico channel messaging.
+  - Chat UI with session history, independent account/model-alias selection,
+    and Pico channel messaging.
 - `/accounts`
-  - Manage registered provider accounts, runnable model configs, and account routers.
-  - Add, edit, delete, test, fetch, and set the default model from the Accounts surface.
+  - Manage registered provider accounts, runnable account transports, and
+    account routers.
+- `/models`
+  - Manage exact model aliases and model routers. Alias overrides may name only
+    concrete accounts, never account routers.
   - Current built-in flows: OpenAI, Anthropic, and Google Antigravity.
 - `/channels/*`
   - Configure supported channels from a shared catalog.
@@ -105,18 +109,23 @@ If onboarding or gateway startup cannot find the main binary, set `PICOCLAW_BINA
 
 The launcher manages `picoclaw gateway -E`.
 
-On startup it tries to auto-start or attach to the gateway, but only when startup preconditions pass. In the current code, the main checks are:
+On startup it tries to auto-start or attach to the gateway, but only when
+startup preconditions pass. The main checks are:
 
-- a default model is configured
-- the default model entry is valid
-- the default model has usable credentials
+- `agents.defaults.account_ref` selects an enabled concrete account or account
+  router
+- `agents.defaults.model_name` selects an exact model alias or enabled model
+  router
+- the alias resolves to a non-empty concrete model for the selected account
+- the selected account has usable credentials
 - local/runtime-probed models are reachable
 
 When a gateway process is started by the launcher, the launcher:
 
 - captures stdout and stderr into an in-memory ring buffer
 - tracks transient states such as `starting`, `restarting`, and `stopping`
-- marks restart-required when the default model or enabled tool set changed since boot
+- marks restart-required when the default account, model alias/mapping, agent
+  policy, or enabled tool set changed since boot
 - ensures the Pico channel is configured before startup
 
 ### Launcher Authentication
@@ -339,12 +348,18 @@ Sign in again with the dashboard password on `/launcher-login`.
 
 ### "Start Gateway" stays disabled
 
-The launcher only allows gateway startup when the configured default model is usable.
+The launcher only allows gateway startup when the configured default account
+and exact model alias are usable.
 Check these in the dashboard:
 
-- a default model is selected
-- the model has credentials or OAuth state
+- a default account or account router is selected
+- an exact model alias or enabled model router is selected
+- the alias resolves for the selected concrete account
+- the account has credentials or OAuth state
 - local models such as Ollama or vLLM are reachable
+
+If the alias is empty, startup reports `no model configured`. It does not choose
+a provider default, a fetched model, or the model stored on an account entry.
 
 ### The launcher cannot find `picoclaw`
 

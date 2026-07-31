@@ -11,24 +11,26 @@ import (
 
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 const defaultAliasName = "custom-prefer"
 
 func newAddCommand() *cobra.Command {
 	var (
-		apiBase   string
-		apiKey    string
-		modelID   string
-		alias     string
-		modelType string
+		apiBase    string
+		apiKey     string
+		modelID    string
+		alias      string
+		accountRef string
+		modelType  string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "add",
 		Short: "Add a model from an OpenAI-compatible endpoint",
 		Long: `Add a model entry by querying an OpenAI-compatible endpoint exposing
-GET <api-base>/models, then setting it as the default model.
+GET <api-base>/models, then creating an explicit account and model alias.
 
 If --model is omitted, the available models are listed and you can pick one
 interactively. If --model is provided, the entry is written without contacting
@@ -49,19 +51,20 @@ Sample interactive session (key shown masked):
         ...
       115) doubao-seed3d-2-0-260328    (doubao-seed3d-2-0)
     Pick a model (number or id): 48
-    ✓ Saved model 'custom-prefer' (deepseek-r1-250120) and set as default.`,
+    ✓ Saved account 'custom-prefer' and alias 'custom-prefer' (deepseek-r1-250120).`,
 		Example: `  picoclaw model add --api-base https://api.openai.com/v1 --api-key sk-...
   picoclaw model add -b http://localhost:8000/v1 -k dummy -m my-model -n local`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAdd(addOptions{
-				apiBase:   strings.TrimSpace(apiBase),
-				apiKey:    strings.TrimSpace(apiKey),
-				modelID:   strings.TrimSpace(modelID),
-				alias:     strings.TrimSpace(alias),
-				modelType: strings.TrimSpace(modelType),
-				stdin:     cmd.InOrStdin(),
-				stdout:    cmd.OutOrStdout(),
+				apiBase:    strings.TrimSpace(apiBase),
+				apiKey:     strings.TrimSpace(apiKey),
+				modelID:    strings.TrimSpace(modelID),
+				alias:      strings.TrimSpace(alias),
+				accountRef: strings.TrimSpace(accountRef),
+				modelType:  strings.TrimSpace(modelType),
+				stdin:      cmd.InOrStdin(),
+				stdout:     cmd.OutOrStdout(),
 			})
 		},
 	}
@@ -72,7 +75,9 @@ Sample interactive session (key shown masked):
 	cmd.Flags().StringVarP(&modelID, "model", "m", "",
 		"Model id; when set, skips the interactive picker and the network call")
 	cmd.Flags().StringVarP(&alias, "name", "n", defaultAliasName,
-		"Local alias written to model_list and used as the default model name")
+		"Model alias to create and select")
+	cmd.Flags().StringVarP(&accountRef, "account", "a", "",
+		"Account name to create and select (defaults to the alias name)")
 	cmd.Flags().StringVar(&modelType, "type", "openai-compatible",
 		"Endpoint type (only 'openai-compatible' is supported today)")
 	_ = cmd.MarkFlagRequired("api-base")
@@ -82,13 +87,14 @@ Sample interactive session (key shown masked):
 }
 
 type addOptions struct {
-	apiBase   string
-	apiKey    string
-	modelID   string
-	alias     string
-	modelType string
-	stdin     io.Reader
-	stdout    io.Writer
+	apiBase    string
+	apiKey     string
+	modelID    string
+	alias      string
+	accountRef string
+	modelType  string
+	stdin      io.Reader
+	stdout     io.Writer
 }
 
 func runAdd(opt addOptions) error {
@@ -97,6 +103,15 @@ func runAdd(opt addOptions) error {
 	}
 	if opt.alias == "" {
 		opt.alias = defaultAliasName
+	}
+	if opt.accountRef == "" {
+		opt.accountRef = opt.alias
+	}
+	if _, reserved := config.AccountRouterCredentialAccountID(opt.accountRef); reserved {
+		return fmt.Errorf(
+			"--account %q uses the reserved credential-account namespace",
+			opt.accountRef,
+		)
 	}
 
 	selected := opt.modelID
@@ -114,7 +129,14 @@ func runAdd(opt addOptions) error {
 		}
 	}
 
-	return upsertModelDefault(opt.apiBase, opt.apiKey, opt.alias, selected, opt.stdout)
+	return upsertModelSelection(
+		opt.apiBase,
+		opt.apiKey,
+		opt.accountRef,
+		opt.alias,
+		selected,
+		opt.stdout,
+	)
 }
 
 func pickModel(stdin io.Reader, stdout io.Writer, entries []modelEntry) (string, error) {
@@ -156,9 +178,16 @@ func pickModel(stdin io.Reader, stdout io.Writer, entries []modelEntry) (string,
 	}
 }
 
-func upsertModelDefault(apiBase, apiKey, alias, modelID string, stdout io.Writer) error {
+func upsertModelSelection(
+	apiBase,
+	apiKey,
+	accountRef,
+	alias,
+	modelID string,
+	stdout io.Writer,
+) error {
 	configPath := internal.GetConfigPath()
-	cfg, err := config.LoadConfig(configPath)
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -170,7 +199,20 @@ func upsertModelDefault(apiBase, apiKey, alias, modelID string, stdout io.Writer
 		if m == nil {
 			continue
 		}
-		if m.ModelName == alias {
+		if m.ModelName == accountRef {
+			if m.IsAccountRouter() || m.IsModelRouter() {
+				return fmt.Errorf(
+					"account %q conflicts with an existing router",
+					accountRef,
+				)
+			}
+			if provider := providers.NormalizeProvider(m.Provider); provider != "openai" {
+				return fmt.Errorf(
+					"account %q uses provider %q; --type openai-compatible requires an OpenAI-compatible account",
+					accountRef,
+					m.Provider,
+				)
+			}
 			m.Model = modelID
 			m.APIBase = apiBase
 			m.APIKeys = secureKeys
@@ -181,7 +223,8 @@ func upsertModelDefault(apiBase, apiKey, alias, modelID string, stdout io.Writer
 	}
 	if !found {
 		cfg.ModelList = append(cfg.ModelList, &config.ModelConfig{
-			ModelName: alias,
+			ModelName: accountRef,
+			Provider:  "openai",
 			Model:     modelID,
 			APIBase:   apiBase,
 			APIKeys:   secureKeys,
@@ -189,12 +232,41 @@ func upsertModelDefault(apiBase, apiKey, alias, modelID string, stdout io.Writer
 		})
 	}
 
+	aliasFound := false
+	for i := range cfg.ModelAliases {
+		if cfg.ModelAliases[i].Name != alias {
+			continue
+		}
+		cfg.ModelAliases[i].Model = modelID
+		aliasFound = true
+		break
+	}
+	if !aliasFound {
+		cfg.ModelAliases = append(cfg.ModelAliases, config.ModelAliasConfig{
+			Name:  alias,
+			Model: modelID,
+		})
+	}
+
+	cfg.Agents.Defaults.AccountRef = accountRef
 	cfg.Agents.Defaults.ModelName = alias
 
-	if err := config.SaveConfig(configPath, cfg); err != nil {
+	if err := cfg.ValidateModelList(); err != nil {
+		return fmt.Errorf("invalid model configuration: %w", err)
+	}
+	if err := cfg.ValidateModelSelections(); err != nil {
+		return fmt.Errorf("invalid model selection: %w", err)
+	}
+	if _, err := config.SaveConfigIfRevision(configPath, cfg, revision); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	fmt.Fprintf(stdout, "✓ Saved model '%s' (%s) and set as default.\n", alias, modelID)
+	fmt.Fprintf(
+		stdout,
+		"✓ Saved account '%s' and alias '%s' (%s), then selected both.\n",
+		accountRef,
+		alias,
+		modelID,
+	)
 	return nil
 }

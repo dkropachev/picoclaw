@@ -23,7 +23,6 @@ const routerModel: ModelInfo = {
   status: "available",
   is_default: false,
   is_virtual: false,
-  default_model_allowed: false,
 }
 
 function renderRouterCard(

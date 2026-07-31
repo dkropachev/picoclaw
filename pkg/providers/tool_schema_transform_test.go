@@ -23,10 +23,6 @@ func (p *toolCaptureProvider) Chat(
 	return &LLMResponse{Content: "ok"}, nil
 }
 
-func (p *toolCaptureProvider) GetDefaultModel() string {
-	return "test"
-}
-
 func TestWrapProviderWithToolSchemaTransform_DisabledPassesToolsThrough(t *testing.T) {
 	capture := &toolCaptureProvider{}
 	wrapped, err := wrapProviderWithToolSchemaTransform(capture, "")

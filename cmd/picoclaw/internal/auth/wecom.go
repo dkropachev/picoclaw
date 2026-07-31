@@ -111,7 +111,7 @@ func authWeComCmdWithScanner(
 		writer = os.Stdout
 	}
 
-	cfg, err := internal.LoadConfig()
+	cfg, revision, err := loadAuthConfigForUpdate()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -126,7 +126,7 @@ func authWeComCmdWithScanner(
 
 	applyWeComAuthResult(cfg, botInfo)
 
-	if saveErr := config.SaveConfig(internal.GetConfigPath(), cfg); saveErr != nil {
+	if saveErr := saveAuthConfigUpdate(cfg, revision); saveErr != nil {
 		return fmt.Errorf("failed to save config: %w", saveErr)
 	}
 

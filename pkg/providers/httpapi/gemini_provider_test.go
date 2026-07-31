@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,24 @@ import (
 	"testing"
 	"time"
 )
+
+func TestGeminiProviderRejectsMissingModelBeforeRequest(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	provider := NewGeminiProvider("test-key", server.URL, "", "", 0, nil, nil)
+	_, err := provider.Chat(context.Background(), nil, nil, "  ", nil)
+	if err == nil || err.Error() != "no model configured" {
+		t.Fatalf("Chat() error = %v, want no model configured", err)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
+	}
+}
 
 func TestGeminiProvider_ChatSeparatesThoughtAndToolCall(t *testing.T) {
 	var capturedBody map[string]any

@@ -66,26 +66,32 @@ This guide explains how to configure both for real deployments.
 
 ```json
 {
+  "version": 4,
   "model_list": [
     {
-      "model_name": "gpt-main",
-      "provider": "openai",
-      "model": "gpt-5.4",
-      "api_keys": ["sk-main"]
+      "model_name": "openrouter-main",
+      "provider": "openrouter",
+      "model": "",
+      "api_keys": ["sk-or-main"]
+    }
+  ],
+  "model_aliases": [
+    {
+      "name": "heavy",
+      "model": "openai/gpt-5.4"
     },
     {
-      "model_name": "flash-light",
-      "provider": "gemini",
-      "model": "gemini-2.0-flash-exp",
-      "api_keys": ["sk-light"]
+      "name": "light",
+      "model": "google/gemini-2.0-flash-exp"
     }
   ],
   "agents": {
     "defaults": {
-      "model_name": "gpt-main",
+      "account_ref": "openrouter-main",
+      "model_name": "heavy",
       "routing": {
         "enabled": true,
-        "light_model": "flash-light",
+        "light_model": "light",
         "threshold": 0.35
       }
     }
@@ -234,18 +240,21 @@ Current fields:
 | Field | Meaning |
 | --- | --- |
 | `enabled` | Turn model routing on or off |
-| `light_model` | `model_name` from `model_list` used for simple turns |
+| `light_model` | Exact `model_aliases[].name` used for simple turns |
 | `threshold` | Complexity cutoff in `[0, 1]` |
 
 Important behavior:
 
-- the light model must exist in `model_list`
-- PicoClaw resolves the light model at startup; if it is invalid, routing is disabled
-- one turn stays on one model tier, even if it later calls tools
+- the light alias must exist in `model_aliases[]`
+- the agent still needs an effective `account_ref`; an account router selects a
+  concrete account before either alias resolves
+- PicoClaw resolves the light alias at startup; if it is invalid, routing is
+  disabled
+- one turn stays on one alias tier, even if it later calls tools
 
 ## What Affects The Complexity Score
 
-The current account router looks at structural signals such as:
+The lightweight model classifier looks at structural signals such as:
 
 - message length
 - fenced code blocks
@@ -270,7 +279,7 @@ Recommended starting point:
     "defaults": {
       "routing": {
         "enabled": true,
-        "light_model": "flash-light",
+        "light_model": "light",
         "threshold": 0.35
       }
     }
@@ -309,8 +318,9 @@ Remember: first match wins.
 Check:
 
 - `agents.defaults.routing.enabled` is `true`
-- `light_model` exists in `model_list`
-- the light model can actually initialize
+- `light_model` exists exactly in `model_aliases[]`
+- `account_ref` selects an enabled concrete account or account router
+- the resolved account-and-alias pair can actually initialize
 - your threshold is not too low
 
 ### The primary model is still chosen for short messages

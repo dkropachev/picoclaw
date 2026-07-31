@@ -274,7 +274,7 @@ func (al *AgentLoop) processMessageWithPreparation(
 	}
 	if msg.Context.Raw != nil {
 		opts.ModelNameOverride = strings.TrimSpace(msg.Context.Raw["model_name"])
-		opts.ModelIDOverride = strings.TrimSpace(msg.Context.Raw["model"])
+		opts.AccountRefOverride = strings.TrimSpace(msg.Context.Raw["account_ref"])
 	}
 	opts, err = resolveTurnProfileOptions(al.GetConfig(), opts)
 	if err != nil {

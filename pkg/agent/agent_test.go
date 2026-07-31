@@ -165,10 +165,6 @@ func (p *panicAfterStartProvider) Chat(
 	panic("provider panic after turn registration")
 }
 
-func (p *panicAfterStartProvider) GetDefaultModel() string {
-	return "panic-after-start"
-}
-
 func (r *recordingProvider) Chat(
 	ctx context.Context,
 	messages []providers.Message,
@@ -182,10 +178,6 @@ func (r *recordingProvider) Chat(
 		Content:   "Mock response",
 		ToolCalls: []providers.ToolCall{},
 	}, nil
-}
-
-func (r *recordingProvider) GetDefaultModel() string {
-	return "mock-model"
 }
 
 type thinkingRecordingProvider struct {
@@ -204,10 +196,6 @@ func (r *thinkingRecordingProvider) Chat(
 		Content:   "Mock response",
 		ToolCalls: []providers.ToolCall{},
 	}, nil
-}
-
-func (r *thinkingRecordingProvider) GetDefaultModel() string {
-	return "mock-model"
 }
 
 func (r *thinkingRecordingProvider) SupportsThinking() bool {
@@ -232,10 +220,6 @@ func (r *thinkingOptionRecordingProvider) Chat(
 	}, nil
 }
 
-func (r *thinkingOptionRecordingProvider) GetDefaultModel() string {
-	return "mock-model"
-}
-
 type reasoningOptionRecordingProvider struct {
 	lastOptions map[string]any
 }
@@ -255,10 +239,6 @@ func (r *reasoningOptionRecordingProvider) Chat(
 	}, nil
 }
 
-func (r *reasoningOptionRecordingProvider) GetDefaultModel() string {
-	return "mock-model"
-}
-
 type reasoningResponseProvider struct{}
 
 func (p *reasoningResponseProvider) Chat(
@@ -273,10 +253,6 @@ func (p *reasoningResponseProvider) Chat(
 		ReasoningContent: "thinking trace",
 		ToolCalls:        []providers.ToolCall{},
 	}, nil
-}
-
-func (p *reasoningResponseProvider) GetDefaultModel() string {
-	return "mock-model"
 }
 
 type sideQuestionFallbackTestProvider struct {
@@ -297,10 +273,6 @@ func (p *sideQuestionFallbackTestProvider) Chat(
 		ReasoningContent: "thinking trace",
 		ToolCalls:        []providers.ToolCall{},
 	}, nil
-}
-
-func (p *sideQuestionFallbackTestProvider) GetDefaultModel() string {
-	return p.model
 }
 
 type modelRewriteHook struct {
@@ -325,12 +297,10 @@ func (h modelRewriteHook) AfterLLM(
 
 func useTestSideQuestionProvider(al *AgentLoop, provider providers.LLMProvider) {
 	al.providerFactory = func(mc *config.ModelConfig) (providers.LLMProvider, string, error) {
-		model := provider.GetDefaultModel()
-		if mc != nil {
-			if _, modelID := providers.ExtractProtocol(mc); modelID != "" {
-				model = modelID
-			}
+		if mc == nil {
+			return nil, "", config.ErrNoModelConfigured
 		}
+		_, model := providers.ExtractProtocol(mc)
 		return provider, model, nil
 	}
 }
@@ -355,7 +325,7 @@ func newTestAgentLoop(
 	}
 	msgBus = bus.NewMessageBus()
 	provider = &mockProvider{}
-	al = NewAgentLoop(cfg, msgBus, provider)
+	al = newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	return al, cfg, msgBus, provider, func() { os.RemoveAll(tmpDir) }
 }
 
@@ -363,7 +333,7 @@ func TestNewAgentLoop_RegistersWebSearchTool(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockProvider{})
 
 	agent := al.registry.GetDefaultAgent()
 	if agent == nil {
@@ -381,7 +351,7 @@ func TestNewAgentLoop_RegistersWebSearchTool_WhenExplicitProviderUnavailable(t *
 	cfg.Tools.Web.Brave.Enabled = true
 	cfg.Tools.Web.Sogou.Enabled = true
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockProvider{})
 
 	agent := al.registry.GetDefaultAgent()
 	if agent == nil {
@@ -400,7 +370,7 @@ func TestNewAgentLoop_DoesNotRegisterWebSearchTool_WhenNoReadyProviders(t *testi
 	cfg.Tools.Web.Sogou.Enabled = false
 	cfg.Tools.Web.DuckDuckGo.Enabled = false
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockProvider{})
 
 	agent := al.registry.GetDefaultAgent()
 	if agent == nil {
@@ -568,7 +538,7 @@ func TestProcessMessage_IncludesCurrentSenderInDynamicContext(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &recordingProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
 		Channel:  "discord",
@@ -614,7 +584,7 @@ func TestProcessMessage_DoesNotPassImplicitThinkingOffToCapableProvider(t *testi
 	}
 
 	provider := &thinkingRecordingProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 
 	response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
 		Channel: "pico",
@@ -650,7 +620,7 @@ func TestProcessMessage_PassesExplicitThinkingOffToCapableProvider(t *testing.T)
 	}
 
 	provider := &thinkingRecordingProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 
 	response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
 		Channel: "pico",
@@ -686,7 +656,7 @@ func TestProcessMessage_PassesExplicitThinkingOffToProviderWithoutThinkingCapabi
 	}
 
 	provider := &thinkingOptionRecordingProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 
 	response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
 		Channel: "pico",
@@ -723,7 +693,7 @@ func TestProcessMessage_PassesDeepSeekThinkingLevelToThinkingCapableProvider(t *
 	}
 
 	provider := &thinkingRecordingProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 
 	response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
 		Channel: "pico",
@@ -759,7 +729,7 @@ func TestProcessMessage_SuppressesReasoningWhenThinkingOff(t *testing.T) {
 	}
 
 	msgBus := bus.NewMessageBus()
-	al := NewAgentLoop(cfg, msgBus, &reasoningResponseProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, &reasoningResponseProvider{})
 
 	response, err := al.runAgentLoop(
 		context.Background(),
@@ -799,20 +769,20 @@ func TestProcessMessage_BeforeLLMModelRewriteReevaluatesThinkingOff(t *testing.T
 		},
 		ModelList: []*config.ModelConfig{
 			{
-				ModelName: "plain-model",
-				Model:     "openai/plain-model",
+				ModelName:     "plain-model",
+				Model:         "openai/plain-model",
+				ThinkingLevel: "off",
 			},
 			{
-				ModelName:     "off-model",
-				Model:         "openai/off-model",
-				ThinkingLevel: "off",
+				ModelName: "off-model",
+				Model:     "openai/off-model",
 			},
 		},
 	}
 
 	msgBus := bus.NewMessageBus()
 	provider := &reasoningOptionRecordingProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	if err := al.MountHook(NamedHook("rewrite-model", modelRewriteHook{model: "off-model"})); err != nil {
 		t.Fatalf("MountHook failed: %v", err)
 	}
@@ -851,20 +821,20 @@ func TestProcessMessage_BeforeLLMModelRewriteDoesNotLeakThinkingOff(t *testing.T
 		},
 		ModelList: []*config.ModelConfig{
 			{
-				ModelName:     "off-model",
-				Model:         "openai/off-model",
-				ThinkingLevel: "off",
+				ModelName: "off-model",
+				Model:     "openai/off-model",
 			},
 			{
-				ModelName: "plain-model",
-				Model:     "openai/plain-model",
+				ModelName:     "plain-model",
+				Model:         "openai/plain-model",
+				ThinkingLevel: "off",
 			},
 		},
 	}
 
 	msgBus := bus.NewMessageBus()
 	provider := &reasoningOptionRecordingProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	if err := al.MountHook(NamedHook("rewrite-model", modelRewriteHook{model: "plain-model"})); err != nil {
 		t.Fatalf("MountHook failed: %v", err)
 	}
@@ -915,7 +885,11 @@ func TestProcessMessage_BtwCommandSuppressesReasoningWhenThinkingOff(t *testing.
 		}},
 	}
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &sideQuestionFallbackTestProvider{model: "test-model"})
+	al := newTestAgentLoopWithStrictModels(
+		cfg,
+		bus.NewMessageBus(),
+		&sideQuestionFallbackTestProvider{model: "test-model"},
+	)
 	al.providerFactory = func(mc *config.ModelConfig) (providers.LLMProvider, string, error) {
 		model := ""
 		if mc != nil {
@@ -954,18 +928,22 @@ func TestProcessMessage_BtwHookModelRewriteReevaluatesThinkingOff(t *testing.T) 
 		},
 		ModelList: []*config.ModelConfig{
 			{
-				ModelName: "plain-model",
-				Model:     "openai/plain-model",
+				ModelName:     "plain-model",
+				Model:         "openai/plain-model",
+				ThinkingLevel: "off",
 			},
 			{
-				ModelName:     "off-model",
-				Model:         "openai/off-model",
-				ThinkingLevel: "off",
+				ModelName: "off-model",
+				Model:     "openai/off-model",
 			},
 		},
 	}
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &sideQuestionFallbackTestProvider{model: "plain-model"})
+	al := newTestAgentLoopWithStrictModels(
+		cfg,
+		bus.NewMessageBus(),
+		&sideQuestionFallbackTestProvider{model: "plain-model"},
+	)
 	al.providerFactory = func(mc *config.ModelConfig) (providers.LLMProvider, string, error) {
 		model := ""
 		if mc != nil {
@@ -1010,18 +988,22 @@ func TestProcessMessage_BtwHookModelRewriteDoesNotLeakThinkingOff(t *testing.T) 
 		},
 		ModelList: []*config.ModelConfig{
 			{
-				ModelName:     "off-model",
-				Model:         "openai/off-model",
-				ThinkingLevel: "off",
+				ModelName: "off-model",
+				Model:     "openai/off-model",
 			},
 			{
-				ModelName: "plain-model",
-				Model:     "openai/plain-model",
+				ModelName:     "plain-model",
+				Model:         "openai/plain-model",
+				ThinkingLevel: "off",
 			},
 		},
 	}
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &sideQuestionFallbackTestProvider{model: "off-model"})
+	al := newTestAgentLoopWithStrictModels(
+		cfg,
+		bus.NewMessageBus(),
+		&sideQuestionFallbackTestProvider{model: "off-model"},
+	)
 	al.providerFactory = func(mc *config.ModelConfig) (providers.LLMProvider, string, error) {
 		model := ""
 		if mc != nil {
@@ -1063,13 +1045,16 @@ func TestProcessMessage_BtwFallbackDoesNotInheritPrimaryThinkingOff(t *testing.T
 			},
 		},
 		ModelList: []*config.ModelConfig{{
-			ModelName:     "test-model",
-			Model:         "openai/test-model",
-			ThinkingLevel: "off",
+			ModelName: "test-model",
+			Model:     "openai/test-model",
 		}},
 	}
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &sideQuestionFallbackTestProvider{model: "test-model"})
+	al := newTestAgentLoopWithStrictModels(
+		cfg,
+		bus.NewMessageBus(),
+		&sideQuestionFallbackTestProvider{model: "test-model"},
+	)
 	al.providerFactory = func(mc *config.ModelConfig) (providers.LLMProvider, string, error) {
 		model := ""
 		if mc != nil {
@@ -1121,7 +1106,7 @@ func TestProcessMessage_UseCommandLoadsRequestedSkill(t *testing.T) {
 	}
 	msgBus := bus.NewMessageBus()
 	provider := &recordingProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
 		Channel:  "telegram",
@@ -1172,7 +1157,7 @@ func TestProcessMessage_BtwCommandRunsWithoutPersistingHistory(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &recordingProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	useTestSideQuestionProvider(al, provider)
 	defaultAgent := al.GetRegistry().GetDefaultAgent()
 	if defaultAgent == nil {
@@ -1244,7 +1229,7 @@ func TestProcessMessage_BtwCommandIncludesRequestContextAndMedia(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &recordingProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	useTestSideQuestionProvider(al, provider)
 
 	response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
@@ -1303,7 +1288,7 @@ func TestProcessMessage_BtwCommandUsesIsolatedProvider(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &recordingProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	useTestSideQuestionProvider(al, provider)
 	defaultAgent := al.GetRegistry().GetDefaultAgent()
 	if defaultAgent == nil {
@@ -1372,7 +1357,7 @@ func TestProcessMessage_BtwCommandRetriesWithoutMediaOnVisionUnsupported(t *test
 
 	msgBus := bus.NewMessageBus()
 	provider := &visionUnsupportedMediaProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	useTestSideQuestionProvider(al, provider)
 
 	response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
@@ -1416,7 +1401,7 @@ func TestProcessMessage_BtwCommandUsesProviderFactoryModel(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &recordingProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	useTestSideQuestionProvider(al, provider)
 
 	response, err := al.processMessage(context.Background(), bus.InboundMessage{
@@ -1454,11 +1439,15 @@ func TestProcessMessage_BtwCommandHookModelBypassesFallbackCandidates(t *testing
 				MaxToolIterations: 10,
 			},
 		},
+		ModelAliases: []config.ModelAliasConfig{{
+			Name:  "hook-model",
+			Model: "hook-model",
+		}},
 	}
 
 	msgBus := bus.NewMessageBus()
 	provider := &recordingProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	useTestSideQuestionProvider(al, provider)
 	if err := al.MountHook(NamedHook("rewrite-model", modelRewriteHook{model: "hook-model"})); err != nil {
 		t.Fatalf("MountHook failed: %v", err)
@@ -1495,7 +1484,7 @@ func TestHandleCommand_UseCommandRejectsUnknownSkill(t *testing.T) {
 	}
 	msgBus := bus.NewMessageBus()
 	provider := &recordingProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	agent := al.GetRegistry().GetDefaultAgent()
 
 	opts := processOptions{}
@@ -1539,7 +1528,7 @@ func TestProcessMessage_UseCommandArmsSkillForNextMessage(t *testing.T) {
 	}
 	msgBus := bus.NewMessageBus()
 	provider := &recordingProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
 		Channel:  "telegram",
@@ -1671,7 +1660,7 @@ func TestRecordLastChannel(t *testing.T) {
 	if got := al.state.GetLastChannel(); got != testChannel {
 		t.Errorf("Expected channel '%s', got '%s'", testChannel, got)
 	}
-	al2 := NewAgentLoop(cfg, msgBus, provider)
+	al2 := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	if got := al2.state.GetLastChannel(); got != testChannel {
 		t.Errorf("Expected persistent channel '%s', got '%s'", testChannel, got)
 	}
@@ -1688,7 +1677,7 @@ func TestRecordLastChatID(t *testing.T) {
 	if got := al.state.GetLastChatID(); got != testChatID {
 		t.Errorf("Expected chat ID '%s', got '%s'", testChatID, got)
 	}
-	al2 := NewAgentLoop(cfg, msgBus, provider)
+	al2 := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	if got := al2.state.GetLastChatID(); got != testChatID {
 		t.Errorf("Expected persistent chat ID '%s', got '%s'", testChatID, got)
 	}
@@ -1717,7 +1706,7 @@ func TestNewAgentLoop_StateInitialized(t *testing.T) {
 	// Create agent loop
 	msgBus := bus.NewMessageBus()
 	provider := &mockProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	// Verify state manager is initialized
 	if al.state == nil {
@@ -1752,7 +1741,7 @@ func TestToolRegistry_ToolRegistration(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &mockProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	// Register a custom tool
 	customTool := &mockCustomTool{}
@@ -1823,7 +1812,7 @@ func TestToolRegistry_GetDefinitions(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &mockProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	// Register a test tool and verify it shows up in startup info
 	testTool := &mockCustomTool{}
@@ -1855,7 +1844,7 @@ func TestProcessMessage_MediaToolHandledSkipsFollowUpLLMAndFinalText(t *testing.
 
 	msgBus := bus.NewMessageBus()
 	provider := &handledMediaProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	store := media.NewFileMediaStore()
 	al.SetMediaStore(store)
@@ -1957,7 +1946,7 @@ func TestProcessMessage_HandledToolProcessesQueuedSteeringBeforeReturning(t *tes
 
 	msgBus := bus.NewMessageBus()
 	provider := &handledMediaWithSteeringProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	store := media.NewFileMediaStore()
 	al.SetMediaStore(store)
@@ -2005,7 +1994,7 @@ func TestRunAgentLoop_ResponseHandledToolPublishesForUserWhenSendResponseDisable
 
 	msgBus := bus.NewMessageBus()
 	provider := &handledUserProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	store := media.NewFileMediaStore()
 	al.SetMediaStore(store)
@@ -2160,7 +2149,7 @@ func TestResolveMessageRoute_UsesInboundContextAccount(t *testing.T) {
 	}
 
 	msgBus := bus.NewMessageBus()
-	al := NewAgentLoop(cfg, msgBus, &simpleMockProvider{response: "ok"})
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, &simpleMockProvider{response: "ok"})
 
 	route, _, err := al.resolveMessageRoute(testInboundMessage(bus.InboundMessage{
 		Context: bus.InboundContext{
@@ -2231,7 +2220,7 @@ func TestResolveMessageRoute_UsesDispatchRulesInOrder(t *testing.T) {
 	}
 
 	msgBus := bus.NewMessageBus()
-	al := NewAgentLoop(cfg, msgBus, &simpleMockProvider{response: "ok"})
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, &simpleMockProvider{response: "ok"})
 
 	route, _, err := al.resolveMessageRoute(testInboundMessage(bus.InboundMessage{
 		Context: bus.InboundContext{
@@ -2266,7 +2255,7 @@ func TestProcessMessage_MediaArtifactCanBeForwardedBySendFile(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &artifactThenSendProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	store := media.NewFileMediaStore()
 	al.SetMediaStore(store)
@@ -2336,7 +2325,7 @@ func TestAgentLoop_GetStartupInfo(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &mockProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	info := al.GetStartupInfo()
 
@@ -2383,7 +2372,7 @@ func TestAgentLoop_Stop(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &mockProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	// Note: running is only set to true when Run() is called
 	// We can't test that without starting the event loop
@@ -2415,10 +2404,6 @@ func (m *simpleMockProvider) Chat(
 	}, nil
 }
 
-func (m *simpleMockProvider) GetDefaultModel() string {
-	return "mock-model"
-}
-
 type reasoningContentProvider struct {
 	response         string
 	reasoningContent string
@@ -2438,10 +2423,6 @@ func (m *reasoningContentProvider) Chat(
 	}, nil
 }
 
-func (m *reasoningContentProvider) GetDefaultModel() string {
-	return "reasoning-content-model"
-}
-
 type countingMockProvider struct {
 	response string
 	calls    int
@@ -2459,10 +2440,6 @@ func (m *countingMockProvider) Chat(
 		Content:   m.response,
 		ToolCalls: []providers.ToolCall{},
 	}, nil
-}
-
-func (m *countingMockProvider) GetDefaultModel() string {
-	return "counting-mock-model"
 }
 
 type handledMediaProvider struct {
@@ -2493,10 +2470,6 @@ func (m *handledMediaProvider) Chat(
 	return &providers.LLMResponse{}, nil
 }
 
-func (m *handledMediaProvider) GetDefaultModel() string {
-	return "handled-media-model"
-}
-
 type handledUserProvider struct {
 	calls int
 }
@@ -2521,10 +2494,6 @@ func (m *handledUserProvider) Chat(
 		}, nil
 	}
 	return &providers.LLMResponse{}, nil
-}
-
-func (m *handledUserProvider) GetDefaultModel() string {
-	return "handled-user-model"
 }
 
 type messageToolProvider struct {
@@ -2553,10 +2522,6 @@ func (m *messageToolProvider) Chat(
 	return &providers.LLMResponse{}, nil
 }
 
-func (m *messageToolProvider) GetDefaultModel() string {
-	return "message-tool-model"
-}
-
 type reasoningVisibleToolProvider struct {
 	filePath string
 	calls    int
@@ -2583,10 +2548,6 @@ func (m *reasoningVisibleToolProvider) Chat(
 		}, nil
 	}
 	return &providers.LLMResponse{Content: "DONE"}, nil
-}
-
-func (m *reasoningVisibleToolProvider) GetDefaultModel() string {
-	return "reasoning-visible-tool-model"
 }
 
 type artifactThenSendProvider struct {
@@ -2650,10 +2611,6 @@ func (m *artifactThenSendProvider) Chat(
 	}, nil
 }
 
-func (m *artifactThenSendProvider) GetDefaultModel() string {
-	return "artifact-then-send-model"
-}
-
 type toolFeedbackProvider struct {
 	filePath string
 	calls    int
@@ -2682,10 +2639,6 @@ func (m *toolFeedbackProvider) Chat(
 		Content:   "HEARTBEAT_OK",
 		ToolCalls: []providers.ToolCall{},
 	}, nil
-}
-
-func (m *toolFeedbackProvider) GetDefaultModel() string {
-	return "heartbeat-tool-feedback-model"
 }
 
 type toolFeedbackReasoningProvider struct {
@@ -2717,10 +2670,6 @@ func (m *toolFeedbackReasoningProvider) Chat(
 		Content:   "DONE",
 		ToolCalls: []providers.ToolCall{},
 	}, nil
-}
-
-func (m *toolFeedbackReasoningProvider) GetDefaultModel() string {
-	return "tool-feedback-reasoning-model"
 }
 
 func TestToolFeedbackExplanationFromResponse_UsesCurrentContentFirst(t *testing.T) {
@@ -2920,10 +2869,6 @@ func (m *picoInterleavedContentProvider) Chat(
 	}, nil
 }
 
-func (m *picoInterleavedContentProvider) GetDefaultModel() string {
-	return "pico-interleaved-content-model"
-}
-
 type picoDistinctToolCallContentProvider struct {
 	calls int
 }
@@ -2957,10 +2902,6 @@ func (m *picoDistinctToolCallContentProvider) Chat(
 	}, nil
 }
 
-func (m *picoDistinctToolCallContentProvider) GetDefaultModel() string {
-	return "pico-distinct-tool-call-content-model"
-}
-
 type toolLimitOnlyProvider struct{}
 
 func (m *toolLimitOnlyProvider) Chat(
@@ -2978,10 +2919,6 @@ func (m *toolLimitOnlyProvider) Chat(
 			Arguments: map[string]any{"value": "x"},
 		}},
 	}, nil
-}
-
-func (m *toolLimitOnlyProvider) GetDefaultModel() string {
-	return "tool-limit-only-model"
 }
 
 // mockCustomTool is a simple mock tool for registration testing
@@ -3085,10 +3022,6 @@ func (m *handledMediaWithSteeringProvider) Chat(
 	}
 
 	return nil, fmt.Errorf("provider did not receive queued steering message")
-}
-
-func (m *handledMediaWithSteeringProvider) GetDefaultModel() string {
-	return "handled-media-with-steering-model"
 }
 
 type handledMediaWithSteeringTool struct {
@@ -3322,7 +3255,7 @@ func TestProcessMessage_UsesRouteSessionKey(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &simpleMockProvider{response: "ok"}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	msg := bus.InboundMessage{
 		Context: bus.InboundContext{
@@ -3377,7 +3310,7 @@ func TestProcessMessage_CommandOutcomes(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &countingMockProvider{response: "LLM reply"}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	helper := testHelper{al: al}
 
 	baseMsg := bus.InboundMessage{
@@ -3476,7 +3409,7 @@ func TestProcessMessage_ClearCommandClearsRoutedAgentSession(t *testing.T) {
 		},
 	}
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &countingMockProvider{response: "LLM reply"})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &countingMockProvider{response: "LLM reply"})
 	mainAgent, ok := al.registry.GetAgent("main")
 	if !ok {
 		t.Fatal("expected main agent")
@@ -3573,7 +3506,7 @@ func TestProcessMessage_MCPCommandsHandledWithoutLLMCall(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &countingMockProvider{response: "LLM reply"}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	helper := testHelper{al: al}
 
 	baseContext := bus.InboundContext{
@@ -3630,18 +3563,16 @@ func TestProcessMessage_SwitchModelShowModelConsistency(t *testing.T) {
 				APIBase:   "https://local.example.invalid/v1",
 				APIKeys:   config.SimpleSecureStrings("test-key"),
 			},
-			{
-				ModelName: "deepseek",
-				Model:     "openrouter/deepseek/deepseek-v3.2",
-				APIBase:   "https://openrouter.ai/api/v1",
-				APIKeys:   config.SimpleSecureStrings("test-key"),
-			},
+		},
+		ModelAliases: []config.ModelAliasConfig{
+			{Name: "local", Model: "local-model"},
+			{Name: "deepseek", Model: "deepseek-v3.2"},
 		},
 	}
 
 	msgBus := bus.NewMessageBus()
 	provider := &countingMockProvider{response: "LLM reply"}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	helper := testHelper{al: al}
 
 	switchResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
@@ -3660,7 +3591,7 @@ func TestProcessMessage_SwitchModelShowModelConsistency(t *testing.T) {
 		ChatID:   "chat1",
 		Content:  "/show model",
 	})
-	if !strings.Contains(showResp, "Current Model: deepseek (Provider: openrouter)") {
+	if !strings.Contains(showResp, "Current Model: deepseek (Provider: openai)") {
 		t.Fatalf("unexpected /show model reply after switch: %q", showResp)
 	}
 
@@ -3698,7 +3629,7 @@ func TestProcessMessage_SwitchModelRejectsUnknownAlias(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &countingMockProvider{response: "LLM reply"}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	helper := testHelper{al: al}
 
 	switchResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
@@ -3707,7 +3638,7 @@ func TestProcessMessage_SwitchModelRejectsUnknownAlias(t *testing.T) {
 		ChatID:   "chat1",
 		Content:  "/switch model to missing",
 	})
-	if switchResp != `model "missing" not found in model_list or providers` {
+	if switchResp != `model alias "missing" is not configured` {
 		t.Fatalf("unexpected /switch error reply: %q", switchResp)
 	}
 
@@ -3738,11 +3669,6 @@ func TestProcessMessage_SwitchModelRoutesSubsequentRequestsToSelectedProvider(t 
 	localServer := newChatCompletionTestServer(t, "local", "local reply", &localCalls, &localModel)
 	defer localServer.Close()
 
-	remoteCalls := 0
-	remoteModel := ""
-	remoteServer := newChatCompletionTestServer(t, "remote", "remote reply", &remoteCalls, &remoteModel)
-	defer remoteServer.Close()
-
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
@@ -3760,21 +3686,19 @@ func TestProcessMessage_SwitchModelRoutesSubsequentRequestsToSelectedProvider(t 
 				APIBase:   localServer.URL,
 				APIKeys:   config.SimpleSecureStrings("local-key"),
 			},
-			{
-				ModelName: "deepseek",
-				Model:     "openrouter/deepseek/deepseek-v3.2",
-				APIBase:   remoteServer.URL,
-				APIKeys:   config.SimpleSecureStrings("remote-key"),
-			},
+		},
+		ModelAliases: []config.ModelAliasConfig{
+			{Name: "local", Model: "Qwen3.5-35B-A3B"},
+			{Name: "deepseek", Model: "deepseek-v3.2"},
 		},
 	}
 
 	msgBus := bus.NewMessageBus()
-	provider, _, err := providers.CreateProvider(cfg)
+	provider, _, err := createStrictTestProvider(cfg)
 	if err != nil {
 		t.Fatalf("CreateProvider() error = %v", err)
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	helper := testHelper{al: al}
 
 	firstResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
@@ -3788,9 +3712,6 @@ func TestProcessMessage_SwitchModelRoutesSubsequentRequestsToSelectedProvider(t 
 	}
 	if localCalls != 1 {
 		t.Fatalf("local calls before switch = %d, want 1", localCalls)
-	}
-	if remoteCalls != 0 {
-		t.Fatalf("remote calls before switch = %d, want 0", remoteCalls)
 	}
 	if localModel != "Qwen3.5-35B-A3B" {
 		t.Fatalf("local model before switch = %q, want %q", localModel, "Qwen3.5-35B-A3B")
@@ -3812,19 +3733,16 @@ func TestProcessMessage_SwitchModelRoutesSubsequentRequestsToSelectedProvider(t 
 		ChatID:   "chat1",
 		Content:  "hello after switch",
 	})
-	if secondResp != "remote reply" {
+	if secondResp != "local reply" {
 		t.Fatalf("unexpected response after switch: %q", secondResp)
 	}
-	if localCalls != 1 {
-		t.Fatalf("local calls after switch = %d, want 1", localCalls)
+	if localCalls != 2 {
+		t.Fatalf("local calls after switch = %d, want 2", localCalls)
 	}
-	if remoteCalls != 1 {
-		t.Fatalf("remote calls after switch = %d, want 1", remoteCalls)
-	}
-	if remoteModel != "deepseek-v3.2" {
+	if localModel != "deepseek-v3.2" {
 		t.Fatalf(
-			"remote model after switch = %q, want %q",
-			remoteModel,
+			"model after switch = %q, want %q",
+			localModel,
 			"deepseek-v3.2",
 		)
 	}
@@ -3836,16 +3754,6 @@ func TestProcessMessage_ModelRoutingUsesLightProvider(t *testing.T) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tmpDir)
-
-	heavyCalls := 0
-	heavyServer := newStrictChatCompletionTestServer(
-		t,
-		"heavy",
-		"gemini-2.5-flash",
-		"heavy reply",
-		&heavyCalls,
-	)
-	defer heavyServer.Close()
 
 	lightCalls := 0
 	lightServer := newStrictChatCompletionTestServer(
@@ -3874,13 +3782,15 @@ func TestProcessMessage_ModelRoutingUsesLightProvider(t *testing.T) {
 		ModelList: []*config.ModelConfig{
 			{
 				ModelName: "gemini-main",
-				Model:     "gemini/gemini-2.5-flash",
-				APIBase:   heavyServer.URL,
+				Provider:  "openai",
+				Model:     "openai/heavy-model",
+				APIBase:   lightServer.URL,
 				APIKeys:   config.SimpleSecureStrings("heavy-key"),
 			},
 			{
 				ModelName: "qwen-light",
-				Model:     "ollama/qwen2.5:0.5b",
+				Provider:  "openai",
+				Model:     "openai/qwen2.5:0.5b",
 				APIBase:   lightServer.URL,
 				APIKeys:   config.SimpleSecureStrings("light-key"),
 			},
@@ -3888,11 +3798,11 @@ func TestProcessMessage_ModelRoutingUsesLightProvider(t *testing.T) {
 	}
 
 	msgBus := bus.NewMessageBus()
-	provider, _, err := providers.CreateProvider(cfg)
+	provider, _, err := createStrictTestProvider(cfg)
 	if err != nil {
 		t.Fatalf("CreateProvider() error = %v", err)
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	helper := testHelper{al: al}
 
 	resp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
@@ -3904,25 +3814,34 @@ func TestProcessMessage_ModelRoutingUsesLightProvider(t *testing.T) {
 	if resp != "light reply" {
 		t.Fatalf("response = %q, want %q", resp, "light reply")
 	}
-	if heavyCalls != 0 {
-		t.Fatalf("heavy calls = %d, want 0", heavyCalls)
-	}
 	if lightCalls != 1 {
 		t.Fatalf("light calls = %d, want 1", lightCalls)
 	}
 }
 
-// TestProcessMessage_FallbackUsesPerCandidateProvider is the loop-level test for
-// bug #2140. It verifies that when the primary model returns a rate-limit error
-// the fallback closure routes the retry to the fallback model's own provider
-// (its own api_base), not back to the primary provider's endpoint.
-func TestProcessMessage_FallbackUsesPerCandidateProvider(t *testing.T) {
+func TestProcessMessage_FallbackUsesNextAliasOnSelectedAccount(t *testing.T) {
 	workspace := t.TempDir()
 
 	primaryCalls := 0
+	fallbackCalls := 0
 	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req["model"] == "gemma-3-27b-it" {
+			fallbackCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{{
+					"message":       map[string]any{"content": "fallback reply"},
+					"finish_reason": "stop",
+				}},
+			})
+			return
+		}
 		primaryCalls++
-		// Return 429 so FallbackChain classifies this as retriable and moves on.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -3933,12 +3852,6 @@ func TestProcessMessage_FallbackUsesPerCandidateProvider(t *testing.T) {
 		})
 	}))
 	defer primaryServer.Close()
-
-	fallbackCalls := 0
-	fallbackServer := newStrictChatCompletionTestServer(
-		t, "fallback", "gemma-3-27b-it", "fallback reply", &fallbackCalls,
-	)
-	defer fallbackServer.Close()
 
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
@@ -3961,19 +3874,19 @@ func TestProcessMessage_FallbackUsesPerCandidateProvider(t *testing.T) {
 			{
 				ModelName: "gemma-fallback",
 				Model:     "openrouter/gemma-3-27b-it",
-				APIBase:   fallbackServer.URL,
+				APIBase:   primaryServer.URL,
 				APIKeys:   config.SimpleSecureStrings("fallback-key"),
 				Workspace: workspace,
 			},
 		},
 	}
 
-	provider, _, err := providers.CreateProvider(cfg)
+	provider, _, err := createStrictTestProvider(cfg)
 	if err != nil {
 		t.Fatalf("CreateProvider() error = %v", err)
 	}
 	msgBus := bus.NewMessageBus()
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	helper := testHelper{al: al}
 
 	resp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
@@ -4011,7 +3924,6 @@ func TestProcessMessage_FallbackReceivesExplicitThinkingOff(t *testing.T) {
 
 	fallbackCalls := 0
 	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fallbackCalls++
 		if r.URL.Path != "/chat/completions" {
 			t.Fatalf("fallback server path = %q, want /chat/completions", r.URL.Path)
 		}
@@ -4021,6 +3933,14 @@ func TestProcessMessage_FallbackReceivesExplicitThinkingOff(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode fallback request: %v", err)
 		}
+		if req["model"] == "primary-model" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"message": "rate limit", "type": "rate_limit_error"},
+			})
+			return
+		}
+		fallbackCalls++
 		if got := req["model"]; got != "doubao-seed-1-6-flash-250828" {
 			t.Fatalf("fallback request model = %#v, want doubao-seed-1-6-flash-250828", got)
 		}
@@ -4058,11 +3978,12 @@ func TestProcessMessage_FallbackReceivesExplicitThinkingOff(t *testing.T) {
 		},
 		ModelList: []*config.ModelConfig{
 			{
-				ModelName: "primary-model",
-				Model:     "openrouter/primary-model",
-				APIBase:   primaryServer.URL,
-				APIKeys:   config.SimpleSecureStrings("primary-key"),
-				Workspace: workspace,
+				ModelName:     "primary-model",
+				Model:         "openai/primary-model",
+				APIBase:       fallbackServer.URL,
+				APIKeys:       config.SimpleSecureStrings("primary-key"),
+				ThinkingLevel: "off",
+				Workspace:     workspace,
 			},
 			{
 				ModelName:     "doubao-fallback",
@@ -4075,11 +3996,11 @@ func TestProcessMessage_FallbackReceivesExplicitThinkingOff(t *testing.T) {
 		},
 	}
 
-	provider, _, err := providers.CreateProvider(cfg)
+	provider, _, err := createStrictTestProvider(cfg)
 	if err != nil {
 		t.Fatalf("CreateProvider() error = %v", err)
 	}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 	helper := testHelper{al: al}
 
 	resp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
@@ -4122,6 +4043,13 @@ func TestProcessMessage_PrimaryThinkingOffDoesNotLeakToFallback(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode fallback request: %v", err)
 		}
+		if req["model"] == "primary-model" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"message": "rate limit", "type": "rate_limit_error"},
+			})
+			return
+		}
 		if _, ok := req["thinking"]; ok {
 			t.Fatalf("fallback request should not inherit primary thinking off, got thinking=%#v", req["thinking"])
 		}
@@ -4152,12 +4080,11 @@ func TestProcessMessage_PrimaryThinkingOffDoesNotLeakToFallback(t *testing.T) {
 		},
 		ModelList: []*config.ModelConfig{
 			{
-				ModelName:     "primary-model",
-				Model:         "openrouter/primary-model",
-				APIBase:       primaryServer.URL,
-				APIKeys:       config.SimpleSecureStrings("primary-key"),
-				ThinkingLevel: "off",
-				Workspace:     workspace,
+				ModelName: "primary-model",
+				Model:     "openai/primary-model",
+				APIBase:   fallbackServer.URL,
+				APIKeys:   config.SimpleSecureStrings("primary-key"),
+				Workspace: workspace,
 			},
 			{
 				ModelName: "doubao-fallback",
@@ -4169,11 +4096,11 @@ func TestProcessMessage_PrimaryThinkingOffDoesNotLeakToFallback(t *testing.T) {
 		},
 	}
 
-	provider, _, err := providers.CreateProvider(cfg)
+	provider, _, err := createStrictTestProvider(cfg)
 	if err != nil {
 		t.Fatalf("CreateProvider() error = %v", err)
 	}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 	helper := testHelper{al: al}
 
 	resp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
@@ -4212,6 +4139,13 @@ func TestProcessMessage_FallbackThinkingOffUsesCandidateIdentity(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode fallback request: %v", err)
 		}
+		if req["model"] == "primary-model" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"message": "rate limit", "type": "rate_limit_error"},
+			})
+			return
+		}
 		thinking, ok := req["thinking"].(map[string]any)
 		if !ok {
 			t.Fatalf("fallback request thinking = %#v, want map", req["thinking"])
@@ -4246,11 +4180,12 @@ func TestProcessMessage_FallbackThinkingOffUsesCandidateIdentity(t *testing.T) {
 		},
 		ModelList: []*config.ModelConfig{
 			{
-				ModelName: "primary-model",
-				Model:     "openrouter/primary-model",
-				APIBase:   primaryServer.URL,
-				APIKeys:   config.SimpleSecureStrings("primary-key"),
-				Workspace: workspace,
+				ModelName:     "primary-model",
+				Model:         "openai/primary-model",
+				APIBase:       fallbackServer.URL,
+				APIKeys:       config.SimpleSecureStrings("primary-key"),
+				ThinkingLevel: "off",
+				Workspace:     workspace,
 			},
 			{
 				ModelName: "doubao-default",
@@ -4270,11 +4205,11 @@ func TestProcessMessage_FallbackThinkingOffUsesCandidateIdentity(t *testing.T) {
 		},
 	}
 
-	provider, _, err := providers.CreateProvider(cfg)
+	provider, _, err := createStrictTestProvider(cfg)
 	if err != nil {
 		t.Fatalf("CreateProvider() error = %v", err)
 	}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 	helper := testHelper{al: al}
 
 	resp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
@@ -4339,12 +4274,12 @@ func TestProcessMessage_FallbackUsesActiveProviderWhenCandidateNotRegistered(t *
 		},
 	}
 
-	provider, _, err := providers.CreateProvider(cfg)
+	provider, _, err := createStrictTestProvider(cfg)
 	if err != nil {
 		t.Fatalf("CreateProvider() error = %v", err)
 	}
 	msgBus := bus.NewMessageBus()
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	helper := testHelper{al: al}
 	resp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
@@ -4383,7 +4318,7 @@ func TestToolResult_SilentToolDoesNotSendUserMessage(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &simpleMockProvider{response: "File operation complete"}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	helper := testHelper{al: al}
 
 	// ReadFileTool returns SilentResult, which should not send user message
@@ -4425,7 +4360,7 @@ func TestToolResult_UserFacingToolDoesSendMessage(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &simpleMockProvider{response: "Command output: hello world"}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	helper := testHelper{al: al}
 
 	// ExecTool returns UserResult, which should send user message
@@ -4471,10 +4406,6 @@ func (m *failFirstMockProvider) Chat(
 	}, nil
 }
 
-func (m *failFirstMockProvider) GetDefaultModel() string {
-	return "mock-fail-model"
-}
-
 // TestAgentLoop_ContextExhaustionRetry verify that the agent retries on context errors
 func TestAgentLoop_ContextExhaustionRetry(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "agent-test-*")
@@ -4504,7 +4435,7 @@ func TestAgentLoop_ContextExhaustionRetry(t *testing.T) {
 		successResp: "Recovered from context error",
 	}
 
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	// Inject some history to simulate a full context.
 	// Session history only stores user/assistant/tool messages — the system
@@ -4595,10 +4526,6 @@ func (p *visionUnsupportedMediaProvider) Chat(
 	}, nil
 }
 
-func (p *visionUnsupportedMediaProvider) GetDefaultModel() string {
-	return "mock-fail-model"
-}
-
 type loadImagePlanningProvider struct {
 	path        string
 	followUpErr error
@@ -4633,10 +4560,6 @@ func (p *loadImagePlanningProvider) Chat(
 	}
 
 	return nil, fmt.Errorf("load_image follow-up should not be handled by the text model")
-}
-
-func (p *loadImagePlanningProvider) GetDefaultModel() string {
-	return "load-image-planner"
 }
 
 type visionAnswerProvider struct {
@@ -4676,10 +4599,6 @@ func (p *visionAnswerProvider) Chat(
 		Content:   "vision answer",
 		ToolCalls: []providers.ToolCall{},
 	}, nil
-}
-
-func (p *visionAnswerProvider) GetDefaultModel() string {
-	return "vision-answer-model"
 }
 
 type resolvedImagePathVisionProvider struct {
@@ -4730,10 +4649,6 @@ func (p *resolvedImagePathVisionProvider) Chat(
 	}, nil
 }
 
-func (p *resolvedImagePathVisionProvider) GetDefaultModel() string {
-	return "resolved-image-path-vision-model"
-}
-
 type unexpectedTextAttachmentProvider struct {
 	calls int
 }
@@ -4752,10 +4667,6 @@ func (p *unexpectedTextAttachmentProvider) Chat(
 	}, nil
 }
 
-func (p *unexpectedTextAttachmentProvider) GetDefaultModel() string {
-	return "unexpected-text-attachment-model"
-}
-
 type unexpectedVisionProvider struct {
 	calls  int
 	models []string
@@ -4771,10 +4682,6 @@ func (p *unexpectedVisionProvider) Chat(
 	p.calls++
 	p.models = append(p.models, model)
 	return nil, fmt.Errorf("vision provider should not be called for this turn")
-}
-
-func (p *unexpectedVisionProvider) GetDefaultModel() string {
-	return "unexpected-vision-model"
 }
 
 type loadImageThenTextFollowUpProvider struct {
@@ -4838,10 +4745,6 @@ func (p *loadImageThenTextFollowUpProvider) Chat(
 	}
 }
 
-func (p *loadImageThenTextFollowUpProvider) GetDefaultModel() string {
-	return "load-image-then-text-follow-up-model"
-}
-
 func TestAgentLoop_VisionUnsupportedErrorReturnsClearFailure(t *testing.T) {
 	workspace := t.TempDir()
 
@@ -4858,7 +4761,7 @@ func TestAgentLoop_VisionUnsupportedErrorReturnsClearFailure(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &visionUnsupportedMediaProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	sessionKey := "agent:main:telegram:direct:user1"
 
@@ -4937,7 +4840,7 @@ func TestAgentLoop_UserAttachmentRoutesToImageModelAfterMediaResolution(t *testi
 
 	msgBus := bus.NewMessageBus()
 	textProvider := &unexpectedTextAttachmentProvider{}
-	al := NewAgentLoop(cfg, msgBus, textProvider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, textProvider)
 
 	store := media.NewFileMediaStore()
 	al.SetMediaStore(store)
@@ -4955,7 +4858,7 @@ func TestAgentLoop_UserAttachmentRoutesToImageModelAfterMediaResolution(t *testi
 	}
 
 	visionProvider := &resolvedImagePathVisionProvider{expectedPath: pngPath}
-	agent.CandidateProviders[providers.ModelKey("openai", "vision-model")] = visionProvider
+	bindBootstrapProvider(agent.CandidateProviders, agent.ImageCandidates[0], visionProvider)
 
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
 	defer cancel()
@@ -5026,7 +4929,7 @@ func TestAgentLoop_TextFollowUpAfterUserAttachmentStaysOnTextModel(t *testing.T)
 
 	msgBus := bus.NewMessageBus()
 	textProvider := &unexpectedTextAttachmentProvider{}
-	al := NewAgentLoop(cfg, msgBus, textProvider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, textProvider)
 
 	store := media.NewFileMediaStore()
 	al.SetMediaStore(store)
@@ -5041,7 +4944,7 @@ func TestAgentLoop_TextFollowUpAfterUserAttachmentStaysOnTextModel(t *testing.T)
 	}
 
 	visionProvider := &resolvedImagePathVisionProvider{expectedPath: pngPath}
-	agent.CandidateProviders[providers.ModelKey("openai", "vision-model")] = visionProvider
+	bindBootstrapProvider(agent.CandidateProviders, agent.ImageCandidates[0], visionProvider)
 
 	sessionKey := "agent:main:telegram:direct:user1"
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
@@ -5115,7 +5018,7 @@ func TestAgentLoop_GenericImagePlaceholderDoesNotRouteToImageModel(t *testing.T)
 
 	msgBus := bus.NewMessageBus()
 	textProvider := &unexpectedTextAttachmentProvider{}
-	al := NewAgentLoop(cfg, msgBus, textProvider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, textProvider)
 
 	agent := al.registry.GetDefaultAgent()
 	if agent == nil {
@@ -5123,7 +5026,7 @@ func TestAgentLoop_GenericImagePlaceholderDoesNotRouteToImageModel(t *testing.T)
 	}
 
 	visionProvider := &unexpectedVisionProvider{}
-	agent.CandidateProviders[providers.ModelKey("openai", "vision-model")] = visionProvider
+	bindBootstrapProvider(agent.CandidateProviders, agent.ImageCandidates[0], visionProvider)
 
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
 	defer cancel()
@@ -5187,7 +5090,7 @@ func TestAgentLoop_TextFollowUpAfterLoadImageStaysOnTextModel(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	textProvider := &loadImageThenTextFollowUpProvider{path: pngPath}
-	al := NewAgentLoop(cfg, msgBus, textProvider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, textProvider)
 	al.SetMediaStore(media.NewFileMediaStore())
 
 	agent := al.registry.GetDefaultAgent()
@@ -5199,7 +5102,7 @@ func TestAgentLoop_TextFollowUpAfterLoadImageStaysOnTextModel(t *testing.T) {
 	}
 
 	visionProvider := &visionAnswerProvider{}
-	agent.CandidateProviders[providers.ModelKey("openai", "vision-model")] = visionProvider
+	bindBootstrapProvider(agent.CandidateProviders, agent.ImageCandidates[0], visionProvider)
 
 	sessionKey := "agent:main:telegram:direct:user1"
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
@@ -5294,7 +5197,7 @@ func TestAgentLoop_LoadImageFollowUpRoutesToImageModel(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	planner := &loadImagePlanningProvider{path: pngPath}
-	al := NewAgentLoop(cfg, msgBus, planner)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, planner)
 	al.SetMediaStore(media.NewFileMediaStore())
 
 	agent := al.registry.GetDefaultAgent()
@@ -5306,7 +5209,7 @@ func TestAgentLoop_LoadImageFollowUpRoutesToImageModel(t *testing.T) {
 	}
 
 	visionProvider := &visionAnswerProvider{}
-	agent.CandidateProviders[providers.ModelKey("openai", "vision-model")] = visionProvider
+	bindBootstrapProvider(agent.CandidateProviders, agent.ImageCandidates[0], visionProvider)
 
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
 	defer cancel()
@@ -5379,7 +5282,7 @@ func TestAgentLoop_LoadImageFollowUpWithoutImageModelFailsClearly(t *testing.T) 
 			`API request failed: Status: 404 Body: {"error":{"message":"No endpoints found that support image input"}}`,
 		),
 	}
-	al := NewAgentLoop(cfg, msgBus, planner)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, planner)
 	al.SetMediaStore(media.NewFileMediaStore())
 
 	timeoutCtx, cancel := context.WithTimeout(context.Background(), responseTimeout)
@@ -5430,7 +5333,7 @@ func TestAgentLoop_EmptyModelResponseUsesAccurateFallback(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &simpleMockProvider{response: ""}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	response, err := al.ProcessDirectWithChannel(context.Background(), "hello", "empty-response", "test", "chat1")
 	if err != nil {
@@ -5461,7 +5364,7 @@ func TestAgentLoop_ToolLimitUsesDedicatedFallback(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &toolLimitOnlyProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	al.RegisterTool(&toolLimitTestTool{})
 
 	response, err := al.ProcessDirectWithChannel(context.Background(), "hello", "tool-limit", "test", "chat1")
@@ -5528,7 +5431,7 @@ func TestProcessDirectWithChannel_TriggersMCPInitialization(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &mockProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	defer al.Close()
 
 	if al.mcp.hasManager() {
@@ -5570,7 +5473,7 @@ func TestTargetReasoningChannelID_AllChannels(t *testing.T) {
 		},
 	}
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockProvider{})
 	chManager, err := channels.NewManager(&config.Config{}, bus.NewMessageBus(), nil)
 	if err != nil {
 		t.Fatalf("Failed to create channel manager: %v", err)
@@ -5638,7 +5541,7 @@ func TestHandleReasoning(t *testing.T) {
 			},
 		}
 		msgBus := bus.NewMessageBus()
-		return NewAgentLoop(cfg, msgBus, &mockProvider{}), msgBus
+		return newTestAgentLoopWithStrictModels(cfg, msgBus, &mockProvider{}), msgBus
 	}
 
 	t.Run("skips when any required field is empty", func(t *testing.T) {
@@ -5808,7 +5711,7 @@ func TestProcessMessage_PublishesReasoningContentToReasoningChannel(t *testing.T
 		response:         "final answer",
 		reasoningContent: "thinking trace",
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	chManager, err := channels.NewManager(&config.Config{}, msgBus, nil)
 	if err != nil {
@@ -5867,7 +5770,7 @@ func TestProcessMessage_PicoPublishesReasoningAsThoughtMessage(t *testing.T) {
 		response:         "final answer",
 		reasoningContent: "thinking trace",
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	response, err := al.processMessage(context.Background(), bus.InboundMessage{
 		Channel:  "pico",
@@ -5938,7 +5841,7 @@ func TestProcessHeartbeat_DoesNotPublishToolFeedback(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &toolFeedbackProvider{filePath: heartbeatFile}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	response, err := al.ProcessHeartbeat(context.Background(), "check heartbeat tasks", "telegram", "chat-1")
 	if err != nil {
@@ -5984,7 +5887,7 @@ func TestProcessMessage_PublishesToolFeedbackWhenEnabled(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &toolFeedbackProvider{filePath: heartbeatFile}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
 		Channel:  "telegram",
@@ -6061,7 +5964,7 @@ func TestProcessMessage_PersistsReasoningContentInSessionHistory(t *testing.T) {
 		response:         "final answer",
 		reasoningContent: "thinking trace",
 	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	response, err := al.processMessage(context.Background(), bus.InboundMessage{
 		Channel:  "pico",
@@ -6113,7 +6016,7 @@ func TestProcessMessage_PersistsReasoningToolResponseAsSingleAssistantRecord(t *
 
 	msgBus := bus.NewMessageBus()
 	provider := &reasoningVisibleToolProvider{filePath: inspectPath}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	response, err := al.processMessage(context.Background(), bus.InboundMessage{
 		Channel:  "telegram",
@@ -6248,7 +6151,7 @@ func TestProcessMessage_DoesNotLeakReasoningContentInToolFeedback(t *testing.T) 
 
 	msgBus := bus.NewMessageBus()
 	provider := &toolFeedbackReasoningProvider{filePath: heartbeatFile}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
 		Channel:  "telegram",
@@ -6320,7 +6223,7 @@ func assertToolFeedbackNotPublishedWhenDisabled(t *testing.T, channel string) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &toolFeedbackProvider{filePath: heartbeatFile}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
 		Channel:  channel,
@@ -6360,7 +6263,7 @@ func TestProcessMessage_MessageToolPublishesOutboundWithTurnMetadata(t *testing.
 
 	msgBus := bus.NewMessageBus()
 	provider := &messageToolProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	response, err := al.processMessage(context.Background(), testInboundMessage(bus.InboundMessage{
 		Context: bus.InboundContext{
@@ -6426,7 +6329,7 @@ func TestRun_PicoPublishesAssistantContentDuringToolCallsWithoutFinalDuplicate(t
 
 	msgBus := bus.NewMessageBus()
 	provider := &picoDistinctToolCallContentProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	agent := al.GetRegistry().GetDefaultAgent()
 	if agent == nil {
@@ -6510,7 +6413,7 @@ func TestRunAgentLoop_PicoSkipsInterimPublishWhenNotAllowed(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &picoInterleavedContentProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	agent := al.GetRegistry().GetDefaultAgent()
 	if agent == nil {
@@ -6562,7 +6465,7 @@ func TestRun_PicoToolFeedbackSuppressesDuplicateInterimAssistantContent(t *testi
 
 	msgBus := bus.NewMessageBus()
 	provider := &picoInterleavedContentProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	agent := al.GetRegistry().GetDefaultAgent()
 	if agent == nil {
@@ -7264,8 +7167,6 @@ func (p *nativeSearchProvider) Chat(
 	return &providers.LLMResponse{Content: "ok"}, nil
 }
 
-func (p *nativeSearchProvider) GetDefaultModel() string { return "test-model" }
-
 func (p *nativeSearchProvider) SupportsNativeSearch() bool { return p.supported }
 
 type plainProvider struct{}
@@ -7276,8 +7177,6 @@ func (p *plainProvider) Chat(
 ) (*providers.LLMResponse, error) {
 	return &providers.LLMResponse{Content: "ok"}, nil
 }
-
-func (p *plainProvider) GetDefaultModel() string { return "test-model" }
 
 func TestIsNativeSearchProvider_Supported(t *testing.T) {
 	if !isNativeSearchProvider(&nativeSearchProvider{supported: true}) {
@@ -7335,7 +7234,13 @@ func TestFilterClientWebSearch_EmptyInput(t *testing.T) {
 type overflowProvider struct {
 	calls        int
 	lastMessages []providers.Message
-	chatFunc     func(ctx context.Context, messages []providers.Message, tools []providers.ToolDefinition, model string, opts map[string]any) (*providers.LLMResponse, error)
+	chatFunc     func(
+		ctx context.Context,
+		messages []providers.Message,
+		tools []providers.ToolDefinition,
+		model string,
+		opts map[string]any,
+	) (*providers.LLMResponse, error)
 }
 
 func (p *overflowProvider) Chat(
@@ -7359,10 +7264,6 @@ func (p *overflowProvider) Chat(
 	return &providers.LLMResponse{
 		Content: "Recovered from overflow",
 	}, nil
-}
-
-func (p *overflowProvider) GetDefaultModel() string {
-	return "test-model"
 }
 
 func TestProcessMessage_ContextOverflowRecovery(t *testing.T) {
@@ -7498,7 +7399,7 @@ func TestParallelMessageProcessing_DifferentSessionsProcessedConcurrently(t *tes
 		},
 	}
 
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	defer al.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -7590,7 +7491,7 @@ func TestParallelMessageProcessing_SameSessionProcessedSequentially(t *testing.T
 	msgBus := bus.NewMessageBus()
 	defer msgBus.Close()
 
-	al := NewAgentLoop(cfg, msgBus, &concurrentMockProvider{
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, &concurrentMockProvider{
 		responseFunc: func(callID int) string {
 			firstResponse.Do(func() {
 				wg.Done()
@@ -7700,10 +7601,6 @@ func (p *concurrentMockProvider) Chat(
 	}, nil
 }
 
-func (p *concurrentMockProvider) GetDefaultModel() string {
-	return "test-model"
-}
-
 func TestRunWorkerPanicReleasesSessionTurnState(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
@@ -7711,7 +7608,7 @@ func TestRunWorkerPanicReleasesSessionTurnState(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &panicAfterStartProvider{started: make(chan struct{})}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	defer al.Close()
 
 	runCtx, cancelRun := context.WithCancel(context.Background())

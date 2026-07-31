@@ -28,10 +28,6 @@ func (*activityTestProvider) Chat(
 	return &providers.LLMResponse{Content: "unused"}, nil
 }
 
-func (*activityTestProvider) GetDefaultModel() string {
-	return "activity-test"
-}
-
 func TestProjectAgentActivityDetailsUsesExactSafeKindTypeUnion(t *testing.T) {
 	t.Parallel()
 
@@ -681,7 +677,7 @@ func TestAgentLoopActivitySubscriptionFiltersDomainAndCloses(t *testing.T) {
 	cfg.Agents.Defaults.Workspace = t.TempDir()
 	cfg.Tools.MCP.Enabled = false
 	messageBus := bus.NewMessageBus()
-	loop := NewAgentLoop(cfg, messageBus, &activityTestProvider{})
+	loop := newTestAgentLoopWithStrictModels(cfg, messageBus, &activityTestProvider{})
 	loop.agentActivityMu.RLock()
 	subscription := loop.agentActivitySub
 	loop.agentActivityMu.RUnlock()

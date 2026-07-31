@@ -3,10 +3,10 @@ import { useEffect, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
 import {
+  type ModelAlias,
   type ModelInfo,
   type ModelRouterConfig,
   addModel,
-  setDefaultModel,
   updateModel,
 } from "@/api/models"
 import { ConfigChangeNotice } from "@/components/config-change-notice"
@@ -34,7 +34,10 @@ import { refreshGatewayState } from "@/store/gateway"
 interface ModelRouterSheetProps {
   open: boolean
   model: ModelInfo | null
+  revision: string
   models: ModelInfo[]
+  modelAliases: ModelAlias[]
+  defaultModelName: string
   onClose: () => void
   onSaved: () => void
 }
@@ -59,24 +62,6 @@ const EMPTY_FORM: RouterForm = {
   containsTarget: "",
   regexText: "",
   regexTarget: "",
-}
-
-function isAccountRouterModel(model: ModelInfo): boolean {
-  return model.provider === "router" || model.router != null
-}
-
-function isModelRouterModel(model: ModelInfo): boolean {
-  return model.provider === "model-router" || model.model_router != null
-}
-
-function selectableTargets(models: ModelInfo[], currentName?: string) {
-  return models.filter(
-    (model) =>
-      model.model_name !== currentName &&
-      !isModelRouterModel(model) &&
-      !model.model_name.startsWith("credential:") &&
-      (model.is_virtual !== true || isAccountRouterModel(model)),
-  )
 }
 
 function blockTarget(config: ModelRouterConfig | undefined, id: string) {
@@ -171,7 +156,7 @@ function TargetSelect({
   value: string
   onValueChange: (value: string) => void
   placeholder: string
-  targetOptions: ModelInfo[]
+  targetOptions: ModelAlias[]
 }) {
   return (
     <Select value={value} onValueChange={onValueChange}>
@@ -180,8 +165,8 @@ function TargetSelect({
       </SelectTrigger>
       <SelectContent>
         {targetOptions.map((target) => (
-          <SelectItem key={target.model_name} value={target.model_name}>
-            {target.model_name}
+          <SelectItem key={target.name} value={target.name}>
+            {target.name}
           </SelectItem>
         ))}
       </SelectContent>
@@ -192,7 +177,10 @@ function TargetSelect({
 export function ModelRouterSheet({
   open,
   model,
+  revision,
   models,
+  modelAliases,
+  defaultModelName,
   onClose,
   onSaved,
 }: ModelRouterSheetProps) {
@@ -203,26 +191,29 @@ export function ModelRouterSheet({
   const [error, setError] = useState("")
   const isEdit = model != null
   const targetOptions = useMemo(
-    () => selectableTargets(models, model?.model_name),
-    [model?.model_name, models],
+    () => modelAliases.filter((alias) => alias.name !== model?.model_name),
+    [model?.model_name, modelAliases],
   )
   const existingNames = useMemo(
     () =>
-      new Set(
-        models
+      new Set([
+        ...models
           .filter((item) => item.index !== model?.index)
           .map((item) => item.model_name),
-      ),
-    [model?.index, models],
+        ...modelAliases
+          .filter((alias) => alias.name !== model?.model_name)
+          .map((alias) => alias.name),
+      ]),
+    [model?.index, model?.model_name, modelAliases, models],
   )
 
   useEffect(() => {
     if (!open) return
     setForm(parseRouterForm(model))
-    setSetAsDefault(model?.is_default === true)
+    setSetAsDefault(model?.model_name === defaultModelName)
     setSaving(false)
     setError("")
-  }, [model, open])
+  }, [defaultModelName, model, open])
 
   const update = <K extends keyof RouterForm>(key: K, value: RouterForm[K]) => {
     setForm((current) => ({ ...current, [key]: value }))
@@ -264,14 +255,14 @@ export function ModelRouterSheet({
       model: form.modelName.trim(),
       enabled: true,
       model_router: router,
+      set_as_default: setAsDefault,
     }
     try {
       if (isEdit && model != null) {
-        await updateModel(model.index, payload)
+        await updateModel(model.index, revision, payload)
       } else {
         await addModel(payload)
       }
-      if (setAsDefault) await setDefaultModel(form.modelName.trim())
       const gateway = await refreshGatewayState({ force: true })
       showSaveSuccessOrRestartToast(
         t,
@@ -380,11 +371,17 @@ export function ModelRouterSheet({
             </Field>
           </div>
           <SwitchCardField
-            label={t("models.defaultOnSave.label")}
-            hint={t("models.defaultOnSave.description")}
+            label={t("models.modelRouter.defaultOnSave", "Default model alias")}
+            hint={t(
+              "models.modelRouter.defaultOnSaveHint",
+              "Use this router as the default alias with the current default account.",
+            )}
             checked={setAsDefault}
             onCheckedChange={setSetAsDefault}
-            ariaLabel={t("models.defaultOnSave.label")}
+            ariaLabel={t(
+              "models.modelRouter.defaultOnSave",
+              "Default model alias",
+            )}
           />
         </div>
         <SheetFooter>

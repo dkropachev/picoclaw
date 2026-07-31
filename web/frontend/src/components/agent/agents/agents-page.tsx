@@ -1,6 +1,6 @@
 import { IconLoader2, IconPlus, IconRefresh } from "@tabler/icons-react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
@@ -14,6 +14,7 @@ import {
   setDefaultAgent,
   updateAgent,
 } from "@/api/agents"
+import { getModels } from "@/api/models"
 import { workflowAuthoringCapabilitiesQueryKey } from "@/api/workflows"
 import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
@@ -30,6 +31,13 @@ import {
 } from "./delete-agent-dialog"
 
 const agentsQueryKey = ["agents"] as const
+const agentModelsQueryKey = ["models", "agent-editor"] as const
+
+function isModelRouter(
+  model: Awaited<ReturnType<typeof getModels>>["models"][number],
+): boolean {
+  return model.provider === "model-router" || model.model_router != null
+}
 
 export function AgentsPage({
   search = {},
@@ -53,6 +61,33 @@ export function AgentsPage({
     queryFn: getAgents,
     retry: false,
   })
+  const modelsQuery = useQuery({
+    queryKey: agentModelsQueryKey,
+    queryFn: getModels,
+    retry: false,
+  })
+  const accountRefs = useMemo(
+    () =>
+      [
+        ...new Set(
+          (modelsQuery.data?.models ?? [])
+            .filter((model) => model.enabled !== false && !isModelRouter(model))
+            .map((model) => model.model_name.trim())
+            .filter(Boolean),
+        ),
+      ].sort((a, b) => a.localeCompare(b)),
+    [modelsQuery.data?.models],
+  )
+  const modelRouterNames = useMemo(
+    () =>
+      (modelsQuery.data?.models ?? [])
+        .filter((model) => model.enabled !== false && isModelRouter(model))
+        .map((model) => model.model_name.trim())
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b)),
+    [modelsQuery.data?.models],
+  )
+  const modelAliases = modelsQuery.data?.model_aliases ?? []
 
   const rememberFocus = () => {
     returnFocusRef.current =
@@ -247,6 +282,9 @@ export function AgentsPage({
         <AgentEditorSheet
           session={editor}
           agents={agents}
+          accountRefs={accountRefs}
+          modelAliases={modelAliases}
+          modelRouterNames={modelRouterNames}
           latestRevision={query.data?.config_revision ?? ""}
           onSubmit={save}
           onConflict={refreshAfterConflict}
@@ -359,6 +397,9 @@ export function AgentsPage({
       <AgentEditorSheet
         session={editor}
         agents={agents}
+        accountRefs={accountRefs}
+        modelAliases={modelAliases}
+        modelRouterNames={modelRouterNames}
         latestRevision={query.data?.config_revision ?? ""}
         onSubmit={save}
         onConflict={refreshAfterConflict}

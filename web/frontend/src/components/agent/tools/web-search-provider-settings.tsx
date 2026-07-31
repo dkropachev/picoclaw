@@ -6,6 +6,13 @@ import type { WebSearchProviderConfig } from "@/api/tools"
 import { maskedSecretPlaceholder } from "@/components/secret-placeholder"
 import { KeyInput } from "@/components/shared-form"
 import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { cn } from "@/lib/utils"
 
@@ -13,6 +20,7 @@ import type { WebSearchDraftUpdater } from "./types"
 
 interface WebSearchProviderSettingsProps {
   providerLabelMap: Map<string, string>
+  modelAliases: string[]
   settings: Record<string, WebSearchProviderConfig>
   expandedProvider: string | null
   onToggleProviderExpand: (providerId: string) => void
@@ -37,10 +45,12 @@ const apiKeyProviders = new Set([
   "baidu_search",
 ])
 
-const modelProviders = new Set(["gemini"])
+const modelProviders = new Set(["gemini", "perplexity"])
+const noModelAliasValue = "__no_model_alias__"
 
 export function WebSearchProviderSettings({
   providerLabelMap,
+  modelAliases,
   settings,
   expandedProvider,
   onToggleProviderExpand,
@@ -60,6 +70,7 @@ export function WebSearchProviderSettings({
             key={providerId}
             providerId={providerId}
             providerLabel={providerLabelMap.get(providerId) ?? providerId}
+            modelAliases={modelAliases}
             settings={providerSettings}
             isExpanded={expandedProvider === providerId}
             onToggleExpand={onToggleProviderExpand}
@@ -74,6 +85,7 @@ export function WebSearchProviderSettings({
 function ProviderCard({
   providerId,
   providerLabel,
+  modelAliases,
   settings,
   isExpanded,
   onToggleExpand,
@@ -81,6 +93,7 @@ function ProviderCard({
 }: {
   providerId: string
   providerLabel: string
+  modelAliases: string[]
   settings: WebSearchProviderConfig
   isExpanded: boolean
   onToggleExpand: (providerId: string) => void
@@ -243,23 +256,43 @@ function ProviderCard({
 
             {modelProviders.has(providerId) && (
               <ProviderField
-                label={t("pages.agent.tools.web_search.model", "Model")}
+                label={t(
+                  "pages.agent.tools.web_search.model_alias",
+                  "Model alias",
+                )}
               >
-                <Input
-                  aria-label={t("pages.agent.tools.web_search.model", "Model")}
-                  value={settings.model ?? ""}
-                  onChange={(event) =>
+                <Select
+                  value={settings.model_alias || noModelAliasValue}
+                  onValueChange={(value) =>
                     updateSettings((current) => ({
                       ...current,
-                      model: event.target.value,
+                      model_alias: value === noModelAliasValue ? "" : value,
                     }))
                   }
-                  placeholder={t(
-                    "pages.agent.tools.web_search.model_placeholder",
-                    "Optional model override",
-                  )}
-                  className="bg-muted/40 hover:bg-muted/60 focus:bg-background focus:ring-primary/20 h-10 rounded-xl border-transparent shadow-none transition-colors"
-                />
+                >
+                  <SelectTrigger
+                    aria-label={t(
+                      "pages.agent.tools.web_search.model_alias",
+                      "Model alias",
+                    )}
+                    className="bg-muted/40 hover:bg-muted/60 focus:bg-background focus:ring-primary/20 h-10 rounded-xl border-transparent shadow-none transition-colors"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={noModelAliasValue}>
+                      {t(
+                        "pages.agent.tools.web_search.no_model_alias",
+                        "No model configured",
+                      )}
+                    </SelectItem>
+                    {modelAliases.map((modelAlias) => (
+                      <SelectItem key={modelAlias} value={modelAlias}>
+                        {modelAlias}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </ProviderField>
             )}
           </div>

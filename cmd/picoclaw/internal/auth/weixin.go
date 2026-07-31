@@ -7,7 +7,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/sipeed/picoclaw/cmd/picoclaw/internal"
 	"github.com/sipeed/picoclaw/pkg/channels/weixin"
 	"github.com/sipeed/picoclaw/pkg/config"
 )
@@ -88,9 +87,7 @@ func runWeixinOnboard(baseURL, proxy string, timeout time.Duration) error {
 
 // saveWeixinConfig patches channels.weixin in the config and saves it.
 func saveWeixinConfig(token, baseURL, proxy string) error {
-	cfgPath := internal.GetConfigPath()
-
-	cfg, err := config.LoadConfig(cfgPath)
+	cfg, revision, err := loadAuthConfigForUpdate()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -115,7 +112,10 @@ func saveWeixinConfig(token, baseURL, proxy string) error {
 		}
 	}
 
-	return config.SaveConfig(cfgPath, cfg)
+	if err := saveAuthConfigUpdate(cfg, revision); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+	return nil
 }
 
 func printManualWeixinConfig(token, baseURL string) {

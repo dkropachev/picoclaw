@@ -23,9 +23,7 @@ export type ChatInputDisabledReason =
   | "websocketConnecting"
   | "websocketDisconnected"
   | "websocketError"
-  | "noDefaultModel"
-  | "modelDiscoveryLoading"
-  | "modelDiscoveryFailed"
+  | "noDefaultSelection"
   | "noAvailableModel"
 
 interface ChatComposerProps {

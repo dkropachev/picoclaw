@@ -329,38 +329,6 @@ func TestAccountRouterAccountNamesTrimsDedupesAndSkipsUnsupportedBlocks(t *testi
 	}
 }
 
-func TestResolvePrimaryProviderForAgentFallsBackForEmptyMissingAndRouterModels(t *testing.T) {
-	fallback := &mockProvider{}
-	if got := resolvePrimaryProviderForAgent(nil, "/workspace", "main", "model", fallback); got != fallback {
-		t.Fatal("nil config did not return fallback provider")
-	}
-	if got := resolvePrimaryProviderForAgent(&config.Config{}, "/workspace", "main", " ", fallback); got != fallback {
-		t.Fatal("blank model did not return fallback provider")
-	}
-
-	cfg := &config.Config{
-		AccountRouters: []config.AccountRouterConfig{
-			{
-				Name:    "router-main",
-				Enabled: true,
-				Entry:   "primary",
-				Blocks: []config.AccountRouterBlock{{
-					ID:      "primary",
-					Type:    config.AccountRouterBlockTypeAccount,
-					Account: "account-a",
-				}},
-			},
-		},
-	}
-	cfg.MaterializeAccountRouterModels()
-	if got := resolvePrimaryProviderForAgent(cfg, "/workspace", "main", "missing", fallback); got != fallback {
-		t.Fatal("missing model did not return fallback provider")
-	}
-	if got := resolvePrimaryProviderForAgent(cfg, "/workspace", "main", "router-main", fallback); got != fallback {
-		t.Fatal("router model did not return fallback provider")
-	}
-}
-
 func TestInstanceUtilityHelpersCoverFallbackBranches(t *testing.T) {
 	patterns := compilePatterns([]string{"[", "^/tmp/workspace$"})
 	if len(patterns) != 1 {
@@ -421,7 +389,6 @@ func TestNewAgentInstance_ResolveCandidatesFromModelListAlias(t *testing.T) {
 		name         string
 		aliasName    string
 		modelName    string
-		provider     string
 		apiBase      string
 		wantProvider string
 		wantModel    string
@@ -443,13 +410,12 @@ func TestNewAgentInstance_ResolveCandidatesFromModelListAlias(t *testing.T) {
 			wantModel:    "glm-5",
 		},
 		{
-			name:         "explicit provider overrides model prefix",
+			name:         "unknown namespace remains part of model ID",
 			aliasName:    "nvidia-gpt",
-			modelName:    "z-ai/glm-5.1",
-			provider:     "nvidia",
+			modelName:    "vendor/glm-5.1",
 			apiBase:      "https://integrate.api.nvidia.com/v1",
 			wantProvider: "nvidia",
-			wantModel:    "z-ai/glm-5.1",
+			wantModel:    "vendor/glm-5.1",
 		},
 	}
 
@@ -464,16 +430,22 @@ func TestNewAgentInstance_ResolveCandidatesFromModelListAlias(t *testing.T) {
 			cfg := &config.Config{
 				Agents: config.AgentsConfig{
 					Defaults: config.AgentDefaults{
-						Workspace: tmpDir,
-						ModelName: tt.aliasName,
+						Workspace:  tmpDir,
+						AccountRef: "account",
+						ModelName:  tt.aliasName,
 					},
 				},
+				ModelAliases: []config.ModelAliasConfig{{
+					Name:  tt.aliasName,
+					Model: tt.modelName,
+				}},
 				ModelList: []*config.ModelConfig{
 					{
-						ModelName: tt.aliasName,
-						Model:     tt.modelName,
-						Provider:  tt.provider,
+						ModelName: "account",
+						Provider:  tt.wantProvider,
 						APIBase:   tt.apiBase,
+						APIKeys:   config.SimpleSecureStrings("test-key"),
+						Enabled:   true,
 					},
 				},
 			}
@@ -482,7 +454,11 @@ func TestNewAgentInstance_ResolveCandidatesFromModelListAlias(t *testing.T) {
 			agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, provider)
 
 			if len(agent.Candidates) != 1 {
-				t.Fatalf("len(Candidates) = %d, want 1", len(agent.Candidates))
+				t.Fatalf(
+					"len(Candidates) = %d, want 1 (configuration error: %v)",
+					len(agent.Candidates),
+					agent.ConfigurationError,
+				)
 			}
 			if agent.Candidates[0].Provider != tt.wantProvider {
 				t.Fatalf("candidate provider = %q, want %q", agent.Candidates[0].Provider, tt.wantProvider)
@@ -501,22 +477,23 @@ func TestNewAgentInstance_PreservesDistinctLimiterIdentityForSharedResolvedModel
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
 				Workspace:      tmpDir,
-				ModelName:      "glm-4.7",
-				ModelFallbacks: []string{"glm-4.7__key_1"},
+				AccountRef:     "zhipu-account",
+				ModelName:      "primary",
+				ModelFallbacks: []string{"backup"},
 			},
 		},
-		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "glm-4.7",
-				Model:     "zhipu/glm-4.7",
-				RPM:       1,
-			},
-			{
-				ModelName: "glm-4.7__key_1",
-				Model:     "zhipu/glm-4.7",
-				RPM:       3,
-			},
+		ModelAliases: []config.ModelAliasConfig{
+			{Name: "primary", Model: "glm-4.7"},
+			{Name: "backup", Model: "glm-4.7"},
 		},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "zhipu-account",
+			Provider:  "zhipu",
+			APIBase:   "http://example.invalid/v1",
+			APIKeys:   config.SimpleSecureStrings("test-key"),
+			Enabled:   true,
+			RPM:       3,
+		}},
 	}
 
 	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
@@ -532,33 +509,34 @@ func TestNewAgentInstance_PreservesDistinctLimiterIdentityForSharedResolvedModel
 	if second.Provider != "zhipu" || second.Model != "glm-4.7" {
 		t.Fatalf("second candidate = %s/%s, want zhipu/glm-4.7", second.Provider, second.Model)
 	}
-	if first.IdentityKey != "model_name:glm-4.7" {
-		t.Fatalf("first identity key = %q, want %q", first.IdentityKey, "model_name:glm-4.7")
+	if first.IdentityKey != accountAliasIdentityKey("zhipu-account", "primary") {
+		t.Fatalf("first identity key = %q, want account/primary", first.IdentityKey)
 	}
-	if second.IdentityKey != "model_name:glm-4.7__key_1" {
-		t.Fatalf("second identity key = %q, want %q", second.IdentityKey, "model_name:glm-4.7__key_1")
+	if second.IdentityKey != accountAliasIdentityKey("zhipu-account", "backup") {
+		t.Fatalf("second identity key = %q, want account/backup", second.IdentityKey)
 	}
-	if first.RPM != 1 {
-		t.Fatalf("first RPM = %d, want 1", first.RPM)
+	if first.RPM != 3 {
+		t.Fatalf("first RPM = %d, want 3", first.RPM)
 	}
 	if second.RPM != 3 {
 		t.Fatalf("second RPM = %d, want 3", second.RPM)
 	}
 }
 
-func TestNewAgentInstance_PreservesConfigIdentityForExplicitProviderModelRef(t *testing.T) {
+func TestNewAgentInstance_RejectsRawProviderModelAsAlias(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
-				Workspace: tmpDir,
-				ModelName: "nvidia/z-ai/glm-5.1",
+				Workspace:  tmpDir,
+				AccountRef: "nvidia-account",
+				ModelName:  "nvidia/z-ai/glm-5.1",
 			},
 		},
 		ModelList: []*config.ModelConfig{
 			{
-				ModelName: "nvidia-glm",
+				ModelName: "nvidia-account",
 				Provider:  "nvidia",
 				Model:     "z-ai/glm-5.1",
 				RPM:       7,
@@ -567,19 +545,12 @@ func TestNewAgentInstance_PreservesConfigIdentityForExplicitProviderModelRef(t *
 	}
 
 	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
-	if len(agent.Candidates) != 1 {
-		t.Fatalf("len(Candidates) = %d, want 1", len(agent.Candidates))
+	if len(agent.Candidates) != 0 {
+		t.Fatalf("len(Candidates) = %d, want 0", len(agent.Candidates))
 	}
-
-	candidate := agent.Candidates[0]
-	if candidate.Provider != "nvidia" || candidate.Model != "z-ai/glm-5.1" {
-		t.Fatalf("candidate = %s/%s, want nvidia/z-ai/glm-5.1", candidate.Provider, candidate.Model)
-	}
-	if candidate.IdentityKey != "model_name:nvidia-glm" {
-		t.Fatalf("identity key = %q, want %q", candidate.IdentityKey, "model_name:nvidia-glm")
-	}
-	if candidate.RPM != 7 {
-		t.Fatalf("RPM = %d, want 7", candidate.RPM)
+	if agent.ConfigurationError == nil ||
+		!strings.Contains(agent.ConfigurationError.Error(), `model alias "nvidia/z-ai/glm-5.1" is not configured`) {
+		t.Fatalf("ConfigurationError = %v, want strict unknown alias error", agent.ConfigurationError)
 	}
 }
 
@@ -666,196 +637,39 @@ func TestNewAgentInstance_AllowsMediaTempDirForReadListAndExec(t *testing.T) {
 	}
 }
 
-// TestPopulateCandidateProviders_NilCfgIsNoop verifies that passing a nil
-// config does not panic and leaves the output map empty.
-func TestPopulateCandidateProviders_NilCfgIsNoop(t *testing.T) {
-	out := map[string]providers.LLMProvider{}
-	populateCandidateProvidersFromNames(nil, t.TempDir(), []string{"gpt-4o"}, out)
-	if len(out) != 0 {
-		t.Fatalf("expected empty map, got %d entries", len(out))
-	}
-}
-
-// TestPopulateCandidateProviders_SkipsExistingKeys verifies that a key already
-// present in the output map is not overwritten.
-func TestPopulateCandidateProviders_SkipsExistingKeys(t *testing.T) {
-	existing := &mockProvider{}
-	key := providers.ModelKey("openai", "gpt-4o")
-	out := map[string]providers.LLMProvider{key: existing}
-
-	cfg := &config.Config{
-		ModelList: []*config.ModelConfig{
-			{ModelName: "my-gpt", Model: "openai/gpt-4o", APIKeys: config.SimpleSecureStrings("test-key")},
-		},
-	}
-	populateCandidateProvidersFromNames(cfg, t.TempDir(), []string{"my-gpt"}, out)
-
-	if out[key] != existing {
-		t.Fatal("existing provider entry was overwritten; expected it to be preserved")
-	}
-}
-
-// TestPopulateCandidateProviders_ResolvesAlias verifies that a model_name
-// alias (e.g. "my-gpt") is resolved via GetModelConfig and the provider
-// is created using the underlying model's config.
-func TestPopulateCandidateProviders_ResolvesAlias(t *testing.T) {
-	workspace := t.TempDir()
-	out := map[string]providers.LLMProvider{}
-
-	cfg := &config.Config{
-		ModelList: []*config.ModelConfig{
-			{ModelName: "my-gpt", Model: "openai/gpt-4o", APIBase: "https://api.openai.com/v1", Workspace: workspace},
-		},
-	}
-	populateCandidateProvidersFromNames(cfg, workspace, []string{"my-gpt"}, out)
-
-	key := providers.ModelKey("openai", "gpt-4o")
-	if out[key] == nil {
-		t.Fatalf("expected CandidateProviders[%q] to be populated for alias", key)
-	}
-}
-
-// TestPopulateCandidateProviders_ResolvesProtocolPrefix verifies that a
-// model_list entry using full "provider/model" notation (e.g.
-// "gemini/gemma-3-27b-it") is matched correctly when referenced by model_name.
-func TestPopulateCandidateProviders_ResolvesProtocolPrefix(t *testing.T) {
-	workspace := t.TempDir()
-	out := map[string]providers.LLMProvider{}
-
-	cfg := &config.Config{
-		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "gemma",
-				Model:     "gemini/gemma-3-27b-it",
-				APIKeys:   config.SimpleSecureStrings("gemini-test-key"),
-				Workspace: workspace,
-			},
-		},
-	}
-	populateCandidateProvidersFromNames(cfg, workspace, []string{"gemma"}, out)
-
-	key := providers.ModelKey("gemini", "gemma-3-27b-it")
-	if out[key] == nil {
-		t.Fatalf("expected CandidateProviders[%q] to be populated for protocol-prefixed model", key)
-	}
-}
-
-// TestPopulateCandidateProviders_EmptyNamesIsNoop verifies the early-exit
-// path when the names slice is empty.
-func TestPopulateCandidateProviders_EmptyNamesIsNoop(t *testing.T) {
-	out := map[string]providers.LLMProvider{}
-	cfg := &config.Config{
-		ModelList: []*config.ModelConfig{
-			{ModelName: "my-gpt", Model: "openai/gpt-4o", APIKeys: config.SimpleSecureStrings("key")},
-		},
-	}
-	populateCandidateProvidersFromNames(cfg, t.TempDir(), nil, out)
-	if len(out) != 0 {
-		t.Fatalf("expected empty map, got %d entries", len(out))
-	}
-}
-
-// TestPopulateCandidateProviders_EmptyModelListIsNoop verifies the early-exit
-// path when model_list is empty — no provider can be created.
-func TestPopulateCandidateProviders_EmptyModelListIsNoop(t *testing.T) {
-	out := map[string]providers.LLMProvider{}
-	cfg := &config.Config{}
-	populateCandidateProvidersFromNames(cfg, t.TempDir(), []string{"gpt-4o"}, out)
-	if len(out) != 0 {
-		t.Fatalf("expected empty map, got %d entries", len(out))
-	}
-}
-
-// TestPopulateCandidateProviders_UnmatchedNameIsSkipped verifies that a
-// name with no matching model_list entry is skipped and does not
-// cause a panic or leave a nil entry in the map.
-func TestPopulateCandidateProviders_UnmatchedNameIsSkipped(t *testing.T) {
-	out := map[string]providers.LLMProvider{}
-	cfg := &config.Config{
-		ModelList: []*config.ModelConfig{
-			{ModelName: "my-gpt", Model: "openai/gpt-4o", APIKeys: config.SimpleSecureStrings("key")},
-		},
-	}
-	populateCandidateProvidersFromNames(cfg, t.TempDir(), []string{"nonexistent-model"}, out)
-
-	if len(out) != 0 {
-		t.Fatalf("expected empty map for unmatched name, got %d entries", len(out))
-	}
-}
-
-// TestNewAgentInstance_CandidateProvidersPopulatedForCrossProviderFallbacks
-// mirrors the exact scenario from bug #2140: primary model on OpenRouter with
-// Gemini fallbacks. Each entry must get its own provider instance so that
-// fallback requests go to the correct API endpoint, not the primary's.
-func TestNewAgentInstance_CandidateProvidersPopulatedForCrossProviderFallbacks(t *testing.T) {
+func TestNewAgentInstance_RejectsCrossProviderFallbackAliasesForSingleAccount(t *testing.T) {
 	workspace := t.TempDir()
 
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
 				Workspace:      workspace,
-				ModelName:      "mistral-small-3.1",
-				ModelFallbacks: []string{"gemma-3-27b", "gemini-images"},
+				AccountRef:     "openrouter-account",
+				ModelName:      "primary",
+				ModelFallbacks: []string{"gemini-fallback"},
 			},
 		},
-		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "mistral-small-3.1",
-				Model:     "openrouter/mistralai/mistral-small-3.1-24b-instruct:free",
-				APIBase:   "https://openrouter.ai/api/v1",
-				APIKeys:   config.SimpleSecureStrings("sk-or-test"),
-				Workspace: workspace,
-			},
-			{
-				ModelName: "gemma-3-27b",
-				Model:     "gemini/gemma-3-27b-it",
-				APIKeys:   config.SimpleSecureStrings("AIzaSy-test"),
-				Workspace: workspace,
-			},
-			{
-				ModelName: "gemini-images",
-				Model:     "gemini/gemini-2.5-flash-lite",
-				APIKeys:   config.SimpleSecureStrings("AIzaSy-test"),
-				Workspace: workspace,
-			},
+		ModelAliases: []config.ModelAliasConfig{
+			{Name: "primary", Model: "openrouter/mistralai/mistral-small-3.1"},
+			{Name: "gemini-fallback", Model: "gemini/gemma-3-27b-it"},
 		},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "openrouter-account",
+			Provider:  "openrouter",
+			APIBase:   "https://openrouter.ai/api/v1",
+			APIKeys:   config.SimpleSecureStrings("sk-or-test"),
+			Enabled:   true,
+			Workspace: workspace,
+		}},
 	}
 
-	primaryProvider := &mockProvider{}
-	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, primaryProvider)
-
-	// Only fallback models need entries — the primary uses the injected provider directly.
-	wantKeys := []string{
-		providers.ModelKey("gemini", "gemma-3-27b-it"),
-		providers.ModelKey("gemini", "gemini-2.5-flash-lite"),
-	}
-
-	for _, key := range wantKeys {
-		p, ok := agent.CandidateProviders[key]
-		if !ok {
-			t.Errorf("CandidateProviders missing key %q", key)
-			continue
-		}
-		if p == nil {
-			t.Errorf("CandidateProviders[%q] is nil", key)
-		}
-		// Each fallback must use its own provider, not the injected primary.
-		if p == primaryProvider {
-			t.Errorf(
-				"CandidateProviders[%q] is the same instance as the primary provider; fallback would inherit primary credentials",
-				key,
-			)
-		}
-	}
-
-	if t.Failed() {
-		t.Logf("CandidateProviders keys present: %v", func() []string {
-			keys := make([]string, 0, len(agent.CandidateProviders))
-			for k := range agent.CandidateProviders {
-				keys = append(keys, k)
-			}
-			return keys
-		}())
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, &mockProvider{})
+	if agent.ConfigurationError == nil ||
+		!strings.Contains(agent.ConfigurationError.Error(), "does not match account provider") {
+		t.Fatalf(
+			"ConfigurationError = %v, want cross-provider alias rejection",
+			agent.ConfigurationError,
+		)
 	}
 }
 
@@ -1113,16 +927,21 @@ func TestNewAgentInstance_ResolvesToolAdaptationFromAccountRouterOverride(t *tes
 	adaptation := config.DefaultToolAdaptationConfig()
 	adaptation.ProfileOverrides = []config.ToolAdaptationProfileOverride{{
 		Provider:           "openai",
-		Model:              providers.DefaultModelForProvider("openai"),
+		Model:              "gpt-5.4",
 		VisibleToolSurface: config.ToolSurfaceSimple,
 	}}
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
-				Workspace: workspace,
-				ModelName: "router-1",
+				Workspace:  workspace,
+				AccountRef: "router-1",
+				ModelName:  "coding",
 			},
 		},
+		ModelAliases: []config.ModelAliasConfig{{
+			Name:  "coding",
+			Model: "gpt-5.4",
+		}},
 		AccountRouters: []config.AccountRouterConfig{{
 			Name:    "router-1",
 			Enabled: true,
@@ -1363,7 +1182,7 @@ Use frontmatter identity.
 	}
 }
 
-func TestNewAgentInstance_UsesResolvedProviderForFrontmatterPrimaryModel(t *testing.T) {
+func TestNewAgentInstance_UsesConfiguredAccountForFrontmatterAlias(t *testing.T) {
 	workspace := setupWorkspace(t, map[string]string{
 		"AGENT.md": `---
 model: claude-frontmatter
@@ -1376,19 +1195,23 @@ model: claude-frontmatter
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
-				Workspace: workspace,
-				Provider:  "openai",
-				ModelName: "default-model",
+				Workspace:  workspace,
+				AccountRef: "openai-account",
+				ModelName:  "default-model",
 			},
 		},
-		ModelList: []*config.ModelConfig{
-			{
-				ModelName: "claude-frontmatter",
-				Model:     "anthropic/claude-3-7-sonnet",
-				APIKeys:   config.SimpleSecureStrings("test-anthropic-key"),
-				Workspace: workspace,
-			},
+		ModelAliases: []config.ModelAliasConfig{
+			{Name: "default-model", Model: "gpt-5.4"},
+			{Name: "claude-frontmatter", Model: "claude-3-7-sonnet"},
 		},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "openai-account",
+			Provider:  "openai",
+			APIBase:   "http://example.invalid/v1",
+			APIKeys:   config.SimpleSecureStrings("test-key"),
+			Enabled:   true,
+			Workspace: workspace,
+		}},
 	}
 
 	defaultProvider := &mockProvider{}
@@ -1403,14 +1226,19 @@ model: claude-frontmatter
 	if len(agent.Candidates) != 1 {
 		t.Fatalf("len(agent.Candidates) = %d, want 1", len(agent.Candidates))
 	}
-	if got := agent.Candidates[0].Provider; got != "anthropic" {
-		t.Fatalf("primary candidate provider = %q, want %q", got, "anthropic")
+	if got := agent.Candidates[0].Provider; got != "openai" {
+		t.Fatalf("primary candidate provider = %q, want %q", got, "openai")
 	}
 	if got := agent.Candidates[0].Model; got != "claude-3-7-sonnet" {
 		t.Fatalf("primary candidate model = %q, want %q", got, "claude-3-7-sonnet")
 	}
 	if agent.Provider == defaultProvider {
-		t.Fatal("expected primary provider to be resolved from model_list instead of using injected default provider")
+		t.Fatal("frontmatter alias incorrectly became bound to the default-model provider")
+	}
+	if got := agent.candidateProviderForCandidate(agent.Candidates[0]); got == defaultProvider {
+		t.Fatal("frontmatter alias incorrectly reused a provider bound to the default model")
+	} else if got == nil {
+		t.Fatal("frontmatter alias has no concrete provider")
 	}
 }
 

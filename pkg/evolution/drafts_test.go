@@ -193,12 +193,11 @@ func TestDefaultDraftGenerator_UsesAppendWhenExtendingExistingSkill(t *testing.T
 
 func TestLLMDraftGenerator_BuildPromptIncludesLateAddedSkillHint(t *testing.T) {
 	provider := &llmDraftTestProvider{
-		defaultModel: "test-model",
 		response: &providers.LLMResponse{
 			Content: `{"target_skill_name":"weather","draft_type":"shortcut","change_kind":"append","human_summary":"Prefer native-name lookup first","body_or_patch":"## Start Here\nUse native-name first."}`,
 		},
 	}
-	generator := evolution.NewLLMDraftGenerator(provider, "", &recordingDraftGenerator{})
+	generator := evolution.NewLLMDraftGenerator(provider, "test-model", &recordingDraftGenerator{})
 
 	_, err := generator.GenerateDraft(context.Background(), evolution.LearningRecord{
 		ID:                   "rule-1",

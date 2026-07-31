@@ -63,7 +63,8 @@ func DefaultConfig() *Config {
 				ApprovalTimeoutMS:    60000,
 			},
 		},
-		ModelList: []*ModelConfig{},
+		ModelList:    []*ModelConfig{},
+		ModelAliases: []ModelAliasConfig{},
 		Gateway: GatewayConfig{
 			Host:      "localhost",
 			Port:      18790,
@@ -134,7 +135,6 @@ func DefaultConfig() *Config {
 				},
 				Gemini: GeminiSearchConfig{
 					Enabled:    false,
-					Model:      "gemini-2.5-flash",
 					MaxResults: 5,
 				},
 				Perplexity: PerplexityConfig{

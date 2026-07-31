@@ -30,6 +30,8 @@ var (
 	editorCommand = exec.Command
 	serverProbe   = defaultServerProbe
 
+	mcpSaveConfigIfRevision = config.SaveConfigIfRevision
+
 	mcpConfigSchemaOnce sync.Once
 	mcpConfigSchema     *jsonschema.Resolved
 	errMcpConfigSchema  error
@@ -118,7 +120,15 @@ func loadConfig() (*config.Config, error) {
 	return cfg, nil
 }
 
-func saveValidatedConfig(cfg *config.Config) error {
+func loadConfigForUpdate() (*config.Config, string, error) {
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(internal.GetConfigPath())
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to load config: %w", err)
+	}
+	return cfg, revision, nil
+}
+
+func saveValidatedConfig(cfg *config.Config, expectedRevision string) error {
 	if cfg == nil {
 		return fmt.Errorf("config is nil")
 	}
@@ -134,7 +144,17 @@ func saveValidatedConfig(cfg *config.Config) error {
 		return err
 	}
 
-	if err := config.SaveConfig(internal.GetConfigPath(), normalizedCfg); err != nil {
+	if _, err := mcpSaveConfigIfRevision(
+		internal.GetConfigPath(),
+		normalizedCfg,
+		expectedRevision,
+	); err != nil {
+		if errors.Is(err, config.ErrConfigRevisionMismatch) {
+			return fmt.Errorf(
+				"config changed while updating MCP servers; reload and retry: %w",
+				err,
+			)
+		}
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 

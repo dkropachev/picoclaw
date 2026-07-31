@@ -13,7 +13,7 @@ const defaultThreshold = 0.35
 // It mirrors config.RoutingConfig but lives in pkg/routing to keep the
 // dependency graph simple: pkg/agent resolves config → routing, not the reverse.
 type RouterConfig struct {
-	// LightModel is the model_name (from model_list) used for simple tasks.
+	// LightModel is the exact configured model alias used for simple tasks.
 	LightModel string
 
 	// Threshold is the complexity score cutoff in [0, 1].
@@ -56,7 +56,7 @@ func newWithClassifier(cfg RouterConfig, c Classifier) *Router {
 //   - If score < cfg.Threshold: returns (cfg.LightModel, true, score)
 //   - Otherwise:               returns (primaryModel, false, score)
 //
-// The caller is responsible for resolving the returned model name into
+// The caller is responsible for resolving the returned alias into
 // provider candidates (see AgentInstance.LightCandidates).
 func (r *Router) SelectModel(
 	msg string,

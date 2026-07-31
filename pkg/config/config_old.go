@@ -34,7 +34,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 	type providerMigration struct {
 		jsonKeys  []string
 		protocol  string
-		defModel  string
 		extractFn func(prov map[string]any) map[string]any
 	}
 
@@ -42,7 +41,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"openai", "gpt"},
 			protocol: "openai",
-			defModel: "openai/gpt-5.4",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -69,7 +67,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"anthropic", "claude"},
 			protocol: "anthropic",
-			defModel: "anthropic/claude-sonnet-4.6",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -93,7 +90,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"litellm"},
 			protocol: "litellm",
-			defModel: "litellm/auto",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -114,7 +110,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"openrouter"},
 			protocol: "openrouter",
-			defModel: "openrouter/auto",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -135,7 +130,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"groq"},
 			protocol: "groq",
-			defModel: "groq/llama-3.1-70b-versatile",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -156,7 +150,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"zhipu", "glm"},
 			protocol: "zhipu",
-			defModel: "zhipu/glm-4",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -177,7 +170,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"vllm"},
 			protocol: "vllm",
-			defModel: "vllm/auto",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -198,7 +190,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"gemini", "google"},
 			protocol: "gemini",
-			defModel: "gemini/gemini-pro",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -219,7 +210,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"nvidia"},
 			protocol: "nvidia",
-			defModel: "nvidia/meta/llama-3.1-8b-instruct",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -240,7 +230,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"ollama"},
 			protocol: "ollama",
-			defModel: "ollama/llama3",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -261,7 +250,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"moonshot", "kimi"},
 			protocol: "moonshot",
-			defModel: "moonshot/kimi",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -282,7 +270,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"shengsuanyun"},
 			protocol: "shengsuanyun",
-			defModel: "shengsuanyun/auto",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -303,7 +290,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"deepseek"},
 			protocol: "deepseek",
-			defModel: "deepseek/deepseek-chat",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -324,7 +310,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"cerebras"},
 			protocol: "cerebras",
-			defModel: "cerebras/llama-3.3-70b",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -345,7 +330,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"vivgrid"},
 			protocol: "vivgrid",
-			defModel: "vivgrid/auto",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -366,7 +350,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"volcengine", "doubao"},
 			protocol: "volcengine",
-			defModel: "volcengine/doubao-pro",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -387,7 +370,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"github_copilot", "copilot"},
 			protocol: "github-copilot",
-			defModel: "github-copilot/gpt-5.4",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -405,7 +387,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"antigravity"},
 			protocol: "antigravity",
-			defModel: "antigravity/gemini-2.0-flash",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -420,7 +401,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"qwen", "tongyi"},
 			protocol: "qwen",
-			defModel: "qwen/qwen-max",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -441,7 +421,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"mistral"},
 			protocol: "mistral",
-			defModel: "mistral/mistral-small-latest",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -462,7 +441,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"avian"},
 			protocol: "avian",
-			defModel: "avian/deepseek/deepseek-v3.2",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -483,7 +461,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"minimax"},
 			protocol: "minimax",
-			defModel: "minimax/minimax",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -504,7 +481,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"longcat"},
 			protocol: "longcat",
-			defModel: "longcat/LongCat-Flash-Thinking",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -525,7 +501,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"modelscope"},
 			protocol: "modelscope",
-			defModel: "modelscope/Qwen/Qwen3-235B-A22B-Instruct-2507",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -546,7 +521,6 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 		{
 			jsonKeys: []string{"novita"},
 			protocol: "novita",
-			defModel: "novita/auto",
 			extractFn: func(prov map[string]any) map[string]any {
 				entry := make(map[string]any)
 				if v, ok := prov["api_key"]; ok && v != "" {
@@ -596,11 +570,12 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 			continue
 		}
 
-		// Add model_name and model
+		// Preserve this as an account transport. A model is attached only
+		// when the legacy config explicitly selected one for this provider.
 		entry["model_name"] = migration.jsonKeys[0]
+		entry["provider"] = migration.protocol
 
-		// Use the user's model if the provider matches, otherwise use the default
-		modelToUse := migration.defModel
+		modelToUse := ""
 		if userProvider != "" && userModel != "" {
 			for _, key := range migration.jsonKeys {
 				if userProvider == key {
@@ -614,7 +589,9 @@ func v0ProvidersMapToModelList(providers map[string]any, userProvider, userModel
 				}
 			}
 		}
-		entry["model"] = modelToUse
+		if modelToUse != "" {
+			entry["model"] = modelToUse
+		}
 
 		result = append(result, entry)
 	}

@@ -2,10 +2,20 @@
 
 > Back to [README](../README.md)
 
+> [!IMPORTANT]
+> Config version 4 separates accounts from model aliases. `model_list[]` and
+> credentials configure accounts; agents, chat, workflows, and voice select an
+> `account_ref` plus an exact `model_aliases[].name`. Standalone provider
+> fragments below are account examples, not executable model defaults. PicoClaw
+> does not infer a model from them; a missing alias fails with
+> `no model configured`.
+
 ### Providers
 
 > [!NOTE]
-> Voice transcription can use a configured multimodal model via `voice.model_name`. Groq Whisper remains available as a fallback when no voice model is configured.
+> Voice transcription requires `voice.account_ref` plus an exact alias in
+> `voice.model_name`. Groq Whisper is available only when explicitly configured
+> as that account-and-alias pair.
 
 | Provider     | Purpose                                 | Get API Key                                                  |
 | ------------ | --------------------------------------- | ------------------------------------------------------------ |
@@ -32,16 +42,18 @@
 | `modelscope` | LLM (ModelScope direct)                 | [modelscope.cn](https://modelscope.cn)                       |
 | `mimo`       | LLM (Xiaomi MiMo direct)                | [platform.xiaomimimo.com](https://platform.xiaomimimo.com)   |
 
-### Model Configuration (model_list)
+### Provider Account Configuration (`model_list`)
 
-> **What's New?** PicoClaw now prefers explicit `provider` + native `model` configuration (for example `"provider": "zhipu", "model": "glm-4.7"`). The legacy single-field `provider/model` form remains supported for compatibility when `provider` is omitted.
+`model_list[]` owns provider transport and account identity. Create a separate
+`model_aliases[]` entry for every concrete model policy you intend to execute.
 
 For agent dispatch and light-model routing examples, see the [Routing Guide](routing-guide.md).
 
 This design also enables **multi-agent support** with flexible provider selection:
 
-- **Different agents, different providers**: Each agent can use its own LLM provider
-- **Model fallbacks**: Configure primary and fallback models for resilience
+- **Different agents, different accounts**: Each agent can select its own
+  `account_ref`
+- **Alias fallbacks**: Configure exact primary and fallback aliases
 - **Load balancing**: Distribute requests across multiple endpoints
 - **Centralized configuration**: Manage all providers in one place
 
@@ -82,35 +94,48 @@ This design also enables **multi-agent support** with flexible provider selectio
 
 ```json
 {
+  "version": 4,
   "model_list": [
     {
-      "model_name": "ark-code-latest",
+      "model_name": "volcengine-work",
       "provider": "volcengine",
-      "model": "ark-code-latest",
+      "model": "",
       "api_keys": ["sk-your-api-key"]
     },
     {
-      "model_name": "gpt-5.4",
+      "model_name": "openai-work",
       "provider": "openai",
-      "model": "gpt-5.4",
+      "model": "",
       "api_keys": ["sk-your-openai-key"]
     },
     {
-      "model_name": "claude-sonnet-4.6",
+      "model_name": "anthropic-work",
       "provider": "anthropic",
-      "model": "claude-sonnet-4.6",
+      "model": "",
       "api_keys": ["sk-ant-your-key"]
     },
     {
-      "model_name": "glm-4.7",
+      "model_name": "zhipu-work",
       "provider": "zhipu",
-      "model": "glm-4.7",
+      "model": "",
       "api_keys": ["your-zhipu-key"]
+    }
+  ],
+  "model_aliases": [
+    {
+      "name": "coding",
+      "model": "gpt-5.4",
+      "account_overrides": {
+        "volcengine-work": "ark-code-latest",
+        "anthropic-work": "claude-sonnet-4.6",
+        "zhipu-work": "glm-4.7"
+      }
     }
   ],
   "agents": {
     "defaults": {
-      "model_name": "gpt-5.4"
+      "account_ref": "openai-work",
+      "model_name": "coding"
     }
   }
 }
@@ -120,14 +145,14 @@ This design also enables **multi-agent support** with flexible provider selectio
 
 | Field | Type | Required | Description                                                                                                                                                                                                                                 |
 |-------|------|----------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `model_name` | string | Yes | Unique name used to reference this model in agent config                                                                                                                                                                                    |
-| `provider` | string | No | Preferred provider identifier. When present, PicoClaw sends `model` unchanged to that provider                                                                                                                                              |
-| `model` | string | Yes | Native model ID when `provider` is set. If `provider` is omitted, the legacy `provider/model` form is still supported                                                                                                                       |
+| `model_name` | string | Yes | Concrete account/transport identity selected through `account_ref` |
+| `provider` | string | No | Provider identifier used by this account |
+| `model` | string | No | Legacy provider-profile metadata; v4 execution gets the concrete model from an exact alias |
 | `api_keys` | string[] | Yes* | API key(s) for authentication. Multiple keys enable per-request rotation. Not required for local providers (Ollama, LM Studio, VLLM)                                                                                                        |
 | `auth_method` | string | No | Authentication method for providers with non-API-key auth. Supported values include `oauth` and `token`                                                                                                                                     |
 | `credential_id` | string | No | Named OAuth/token credential from the auth store. Empty uses the provider default (for example `openai`); bare names are provider-scoped (for example `work` becomes `openai:work`)                                                        |
 | `api_base` | string | No | Override the default API endpoint URL                                                                                                                                                                                                       |
-| `proxy` | string | No | HTTP proxy URL for this model entry                                                                                                                                                                                                         |
+| `proxy` | string | No | HTTP proxy URL for this account entry |
 | `user_agent` | string | No | Custom `User-Agent` header sent with API requests (supported by OpenAI-compatible, Gemini, Anthropic, and Azure providers)                                                                                                                  |
 | `request_timeout` | int | No | Request timeout in seconds (default varies by provider)                                                                                                                                                                                     |
 | `max_tokens_field` | string | No | Override the max tokens field name in request body (e.g., `max_completion_tokens` for o1 models)                                                                                                                                            |
@@ -136,21 +161,26 @@ This design also enables **multi-agent support** with flexible provider selectio
 | `tool_schema_transform` | string | No | Optional compatibility transform for tool parameter schemas. Default: disabled. Supported values: `simple`.                                                                                             |
 | `extra_body` | object | No | Additional fields to inject into every request body                                                                                                                                                                                         |
 | `custom_headers` | object | No | Additional HTTP headers to inject into every request (e.g., `{"X-Source":"coding-plan"}`). If a key matches a built-in header, the custom value overrides the built-in one (e.g., `Authorization`, `User-Agent`, `Content-Type`, `Accept`). |
-| `streaming.enabled` | bool | No | Opt-in for provider streaming on this model entry. Defaults to `false` and also requires the active channel's `settings.streaming.enabled` to be `true`. |
+| `streaming.enabled` | bool | No | Opt-in for provider streaming on this account entry. Defaults to `false` and also requires the active channel's `settings.streaming.enabled` to be `true`. |
 | `rpm` | int | No | Per-minute request rate limit                                                                                                                                                                                                               |
-| `fallbacks` | string[] | No | Fallback model names for automatic failover                                                                                                                                                                                                 |
-| `enabled` | bool | No | Whether this model entry is active (default: `true`)                                                                                                                                                                                        |
+| `fallbacks` | string[] | No | Legacy field; configure alias-valued fallbacks under the agent model policy |
+| `enabled` | bool | No | Whether this account entry can be selected |
 
 When streaming is disabled, omit the `streaming` block. Writing `"streaming": {"enabled": false}` is optional and not needed in generated or hand-written config.
 
 `extra_body` is especially useful for model-specific TTS fields on OpenAI-compatible
 speech routes, for example custom `voice` names or `response_format: "mp3"`.
 
+`model_aliases[]` requires an exact `name` and base concrete `model`.
+`account_overrides` may map concrete account refs to alternate concrete model
+IDs; router names are invalid override keys.
+
 #### Multiple OAuth Accounts for the Same Provider
 
 OAuth/token credentials can be saved under provider-scoped names and selected
-per `model_list` entry with `credential_id`. This is useful for separate
-OpenAI/Codex subscription accounts that should participate in model fallback.
+per `model_list` account with `credential_id`. Use an account router when
+several credentials should participate in account failover; model aliases
+remain independent.
 
 ```bash
 picoclaw auth login --provider openai --device-code --credential-id work
@@ -159,34 +189,41 @@ picoclaw auth login --provider openai --device-code --credential-id personal
 
 ```json
 {
+  "version": 4,
   "model_list": [
     {
       "model_name": "codex-work",
       "provider": "openai",
-      "model": "gpt-5.3-codex",
+      "model": "",
       "auth_method": "oauth",
-      "credential_id": "openai:work",
-      "fallbacks": ["codex-personal"]
+      "credential_id": "openai:work"
     },
     {
       "model_name": "codex-personal",
       "provider": "openai",
-      "model": "gpt-5.3-codex",
+      "model": "",
       "auth_method": "oauth",
       "credential_id": "openai:personal"
     }
   ],
+  "model_aliases": [
+    {
+      "name": "codex",
+      "model": "gpt-5.3-codex"
+    }
+  ],
   "agents": {
     "defaults": {
-      "model_name": "codex-work"
+      "account_ref": "codex-work",
+      "model_name": "codex"
     }
   }
 }
 ```
 
-The fallback engine still reacts to provider errors such as quota or rate-limit
-responses. `credential_id` only makes each candidate use a different stored
-credential.
+Changing `account_ref` changes the credential account without changing the
+alias. An account router can automate that choice while preserving the same
+exact alias.
 
 #### Tool Schema Compatibility
 
@@ -211,53 +248,55 @@ Notes:
 - Default behavior is disabled. If you omit `tool_schema_transform`, PicoClaw sends the original tool schema.
 - The setting is per model entry, so you can enable it only for the providers that need it.
 
-#### Provider / Model Resolution
+#### Account / Alias Resolution
 
-PicoClaw resolves `provider` and the runtime model ID using these rules:
+PicoClaw resolves execution using these rules:
 
-- If `provider` is set, `model` is used as-is.
-- If `provider` is omitted, PicoClaw treats the first `/` segment in `model` as the provider and everything after that first `/` as the runtime model ID.
+1. Resolve `account_ref`, including any account-router choice, to one concrete
+   account.
+2. Resolve the exact alias from `model_aliases[]`.
+3. Apply that alias's override for the selected concrete account, or its base
+   model when no override exists.
+4. Send the concrete model through the account's provider transport.
 
-Examples:
-
-| Config | Resolved Provider | Model Sent Upstream |
-| --- | --- | --- |
-| `"provider": "openai", "model": "gpt-5.4"` | `openai` | `gpt-5.4` |
-| `"model": "openai/gpt-5.4"` | `openai` | `gpt-5.4` |
-| `"provider": "openrouter", "model": "openai/gpt-5.4"` | `openrouter` | `openai/gpt-5.4` |
-| `"model": "openrouter/openai/gpt-5.4"` | `openrouter` | `openai/gpt-5.4` |
+Raw model IDs, provider metadata, and fetched model catalogs never substitute
+for a missing alias.
 
 #### Voice Transcription
 
-You can configure a dedicated model for audio transcription with `voice.model_name`. This lets you reuse existing multimodal providers that support audio input instead of relying only on Groq.
-
-If `voice.model_name` is not configured, PicoClaw will continue to fall back to Groq transcription when a Groq API key is available.
+Configure audio transcription with `voice.account_ref` plus an exact alias in
+`voice.model_name`. Missing fields disable ASR; PicoClaw does not scan for a
+Groq account or infer a model.
 
 ```json
 {
+  "version": 4,
   "model_list": [
     {
-      "model_name": "voice-gemini",
+      "model_name": "gemini-voice",
       "provider": "gemini",
-      "model": "gemini-2.5-flash",
+      "model": "",
       "api_keys": ["your-gemini-key"]
     }
   ],
-  "voice": {
-    "model_name": "voice-gemini",
-    "echo_transcription": false
-  },
-  "providers": {
-    "groq": {
-      "api_key": "gsk_xxx"
+  "model_aliases": [
+    {
+      "name": "voice",
+      "model": "gemini-2.5-flash"
     }
+  ],
+  "voice": {
+    "account_ref": "gemini-voice",
+    "model_name": "voice",
+    "echo_transcription": false
   }
 }
 ```
 
 #### Voice Synthesis
 
-You can configure a dedicated text-to-speech model with `voice.tts_model_name`.
+Configure text-to-speech with `voice.tts_account_ref` plus an exact alias in
+`voice.tts_model_name`.
 When the provider needs model-specific TTS request fields, put them in
 `model_list[].extra_body`.
 
@@ -265,11 +304,12 @@ Example with OpenRouter `microsoft/mai-voice-2`:
 
 ```json
 {
+  "version": 4,
   "model_list": [
     {
-      "model_name": "mai-voice-2",
+      "model_name": "openrouter-voice",
       "provider": "openrouter",
-      "model": "microsoft/mai-voice-2",
+      "model": "",
       "api_base": "https://openrouter.ai/api/v1",
       "extra_body": {
         "voice": "en-US-Harper:MAI-Voice-2",
@@ -278,8 +318,15 @@ Example with OpenRouter `microsoft/mai-voice-2`:
       "api_keys": ["sk-or-your-openrouter-key"]
     }
   ],
+  "model_aliases": [
+    {
+      "name": "voice",
+      "model": "microsoft/mai-voice-2"
+    }
+  ],
   "voice": {
-    "tts_model_name": "mai-voice-2"
+    "tts_account_ref": "openrouter-voice",
+    "tts_model_name": "voice"
   }
 }
 ```
@@ -462,24 +509,33 @@ If the standard Zhipu endpoint (`https://open.bigmodel.cn/api/paas/v4`) returns 
 
 #### Load Balancing
 
-Configure multiple endpoints for the same model name—PicoClaw will automatically round-robin between them:
+Configure multiple endpoints for the same account identity; PicoClaw can
+round-robin between them while the selected alias independently supplies the
+concrete model:
 
 ```json
 {
+  "version": 4,
   "model_list": [
     {
-      "model_name": "gpt-5.4",
+      "model_name": "openai-pool",
       "provider": "openai",
-      "model": "gpt-5.4",
+      "model": "",
       "api_base": "https://api1.example.com/v1",
       "api_keys": ["sk-key1"]
     },
     {
-      "model_name": "gpt-5.4",
+      "model_name": "openai-pool",
       "provider": "openai",
-      "model": "gpt-5.4",
+      "model": "",
       "api_base": "https://api2.example.com/v1",
       "api_keys": ["sk-key2"]
+    }
+  ],
+  "model_aliases": [
+    {
+      "name": "chat",
+      "model": "gpt-5.4"
     }
   ]
 }
@@ -487,43 +543,48 @@ Configure multiple endpoints for the same model name—PicoClaw will automatical
 
 #### Automatic Model Failover (Cascade)
 
-PicoClaw already supports automatic failover when you configure `primary` + `fallbacks` in the agent model settings.
+PicoClaw supports automatic failover when `primary` plus `fallbacks` contain
+exact aliases in the agent model settings.
 The runtime fallback chain retries the next candidate for retriable failures such as HTTP `429`, quota/rate-limit errors, and timeout errors.
 It also applies cooldown tracking per candidate to avoid immediately retrying a recently failed target.
 
 ```json
 {
+  "version": 4,
   "model_list": [
     {
-      "model_name": "qwen-main",
-      "provider": "openai",
-      "model": "qwen3.5:cloud",
-      "api_base": "https://api.example.com/v1",
-      "api_keys": ["sk-main"]
+      "model_name": "openrouter-main",
+      "provider": "openrouter",
+      "model": "",
+      "api_keys": ["sk-or-main"]
+    }
+  ],
+  "model_aliases": [
+    {
+      "name": "qwen",
+      "model": "qwen/qwen3.5"
     },
     {
-      "model_name": "deepseek-backup",
-      "provider": "deepseek",
-      "model": "deepseek-chat",
-      "api_keys": ["sk-backup-1"]
+      "name": "deepseek",
+      "model": "deepseek/deepseek-chat"
     },
     {
-      "model_name": "gemini-backup",
-      "provider": "gemini",
-      "model": "gemini-2.5-flash",
-      "api_keys": ["sk-backup-2"]
+      "name": "gemini",
+      "model": "google/gemini-2.5-flash"
     }
   ],
   "agents": {
     "defaults": {
-      "model_name": "qwen-main",
-      "model_fallbacks": ["deepseek-backup", "gemini-backup"]
+      "account_ref": "openrouter-main",
+      "model_name": "qwen",
+      "model_fallbacks": ["deepseek", "gemini"]
     }
   }
 }
 ```
 
-If you use key-level failover for the same model, PicoClaw can chain through additional key-backed candidates before moving to cross-model backups.
+Key rotation and account routing choose transport credentials. Alias fallbacks
+choose model policy; they do not replace `account_ref`.
 
 #### Migration from Legacy `providers` Config
 
@@ -552,18 +613,25 @@ The old `providers` configuration is **deprecated** and has been removed in V2. 
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "model_list": [
     {
-      "model_name": "glm-4.7",
+      "model_name": "zhipu-work",
       "provider": "zhipu",
-      "model": "glm-4.7",
+      "model": "",
       "api_keys": ["your-key"]
+    }
+  ],
+  "model_aliases": [
+    {
+      "name": "chat",
+      "model": "glm-4.7"
     }
   ],
   "agents": {
     "defaults": {
-      "model_name": "glm-4.7"
+      "account_ref": "zhipu-work",
+      "model_name": "chat"
     }
   }
 }
@@ -593,19 +661,30 @@ This keeps the runtime lightweight while making new OpenAI-compatible backends m
 
 ```json
 {
+  "version": 4,
+  "model_list": [
+    {
+      "model_name": "zhipu-work",
+      "provider": "zhipu",
+      "model": "",
+      "api_keys": ["Your API Key"],
+      "api_base": "https://open.bigmodel.cn/api/paas/v4"
+    }
+  ],
+  "model_aliases": [
+    {
+      "name": "chat",
+      "model": "glm-4.7"
+    }
+  ],
   "agents": {
     "defaults": {
       "workspace": "~/.picoclaw/workspace",
-      "model_name": "glm-4.7",
+      "account_ref": "zhipu-work",
+      "model_name": "chat",
       "max_tokens": 8192,
       "temperature": 0.7,
       "max_tool_iterations": 20
-    }
-  },
-  "providers": {
-    "zhipu": {
-      "api_key": "Your API Key",
-      "api_base": "https://open.bigmodel.cn/api/paas/v4"
     }
   }
 }
@@ -624,24 +703,43 @@ picoclaw agent -m "Hello"
 
 ```json
 {
+  "version": 4,
+  "model_list": [
+    {
+      "model_name": "openrouter-main",
+      "provider": "openrouter",
+      "model": "",
+      "api_keys": ["sk-or-v1-xxx"]
+    },
+    {
+      "model_name": "groq-voice",
+      "provider": "groq",
+      "model": "",
+      "api_keys": ["gsk_xxx"]
+    }
+  ],
+  "model_aliases": [
+    {
+      "name": "chat",
+      "model": "anthropic/claude-opus-4.5"
+    },
+    {
+      "name": "asr",
+      "model": "whisper-large-v3-turbo"
+    }
+  ],
   "agents": {
     "defaults": {
-      "model_name": "claude-opus-4-5"
+      "account_ref": "openrouter-main",
+      "model_name": "chat"
     }
   },
   "session": {
     "dm_scope": "per-channel-peer"
   },
-  "providers": {
-    "openrouter": {
-      "api_key": "sk-or-v1-xxx"
-    },
-    "groq": {
-      "api_key": "gsk_xxx"
-    }
-  },
   "voice": {
-    "model_name": "voice-gemini",
+    "account_ref": "groq-voice",
+    "model_name": "asr",
     "echo_transcription": false
   },
   "channel_list": {

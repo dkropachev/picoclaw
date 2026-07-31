@@ -27,8 +27,8 @@ describe("tools API", () => {
     )
 
     await runToolAdaptationProbe({
-      provider: "openai",
-      model: "gpt-5.4",
+      account_ref: "openai-work",
+      model_alias: "coding",
     })
 
     expect(mockedLauncherFetch).toHaveBeenCalledWith(
@@ -37,8 +37,8 @@ describe("tools API", () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          provider: "openai",
-          model: "gpt-5.4",
+          account_ref: "openai-work",
+          model_alias: "coding",
         }),
       },
     )

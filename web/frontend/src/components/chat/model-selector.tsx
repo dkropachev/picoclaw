@@ -1,8 +1,6 @@
-import { IconRefresh } from "@tabler/icons-react"
 import { useTranslation } from "react-i18next"
 
-import type { ModelInfo, UpstreamModel } from "@/api/models"
-import { Button } from "@/components/ui/button"
+import type { ModelInfo } from "@/api/models"
 import {
   Select,
   SelectContent,
@@ -13,38 +11,43 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import type { ChatAccountOption } from "@/hooks/use-chat-models"
+import type {
+  ChatAccountOption,
+  ChatModelAliasOption,
+} from "@/hooks/use-chat-models"
 
 interface ModelSelectorProps {
   selectedAccountName: string
-  selectedModelID: string
+  selectedModelAlias: string
   accountModels: ChatAccountOption[]
   accountRouterModels: ModelInfo[]
-  modelOptions: UpstreamModel[]
-  isLoadingModelOptions: boolean
-  modelDiscoveryError: string | null
-  onAccountChange: (modelName: string) => void
-  onModelChange: (modelID: string) => void
-  onRetryModelDiscovery: () => void
+  aliasOptions: ChatModelAliasOption[]
+  isSavingSelection: boolean
+  onAccountChange: (accountRef: string) => void
+  onModelAliasChange: (modelAlias: string) => void
 }
 
 export function ModelSelector({
   selectedAccountName,
-  selectedModelID,
+  selectedModelAlias,
   accountModels,
   accountRouterModels,
-  modelOptions,
-  isLoadingModelOptions,
-  modelDiscoveryError,
+  aliasOptions,
+  isSavingSelection,
   onAccountChange,
-  onModelChange,
-  onRetryModelDiscovery,
+  onModelAliasChange,
 }: ModelSelectorProps) {
   const { t } = useTranslation()
+  const directAliases = aliasOptions.filter((alias) => !alias.isRouter)
+  const routerAliases = aliasOptions.filter((alias) => alias.isRouter)
 
   return (
     <div className="flex min-w-0 items-center gap-1.5">
-      <Select value={selectedAccountName} onValueChange={onAccountChange}>
+      <Select
+        value={selectedAccountName}
+        onValueChange={onAccountChange}
+        disabled={isSavingSelection}
+      >
         <SelectTrigger
           size="sm"
           aria-label={t("chat.account", "Account")}
@@ -84,48 +87,51 @@ export function ModelSelector({
       </Select>
 
       <Select
-        value={selectedModelID}
-        onValueChange={onModelChange}
-        disabled={isLoadingModelOptions || modelOptions.length === 0}
+        value={selectedModelAlias}
+        onValueChange={onModelAliasChange}
+        disabled={isSavingSelection || aliasOptions.length === 0}
       >
         <SelectTrigger
           size="sm"
-          aria-label={t("chat.model", "Model")}
+          aria-label={t("chat.modelAlias", "Model alias")}
           className="text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:border-input h-8 max-w-[180px] min-w-[96px] rounded-full border-transparent bg-transparent shadow-none focus-visible:ring-0 sm:max-w-[260px]"
         >
-          <SelectValue
-            placeholder={
-              isLoadingModelOptions ? t("common.loading") : t("chat.noModel")
-            }
-          />
+          <SelectValue placeholder={t("chat.noModel")} />
         </SelectTrigger>
         <SelectContent position="popper" align="start">
-          <SelectGroup>
-            {modelOptions.map((model) => (
-              <SelectItem key={model.id} value={model.id}>
-                {model.id}
-              </SelectItem>
-            ))}
-          </SelectGroup>
+          {directAliases.length > 0 && (
+            <SelectGroup>
+              <SelectLabel>
+                {t("chat.modelGroup.aliases", "Model aliases")}
+              </SelectLabel>
+              {directAliases.map((alias) => (
+                <SelectItem
+                  key={alias.name}
+                  value={alias.name}
+                  title={`${alias.name} → ${alias.model}`}
+                >
+                  {alias.name}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          )}
+          {directAliases.length > 0 && routerAliases.length > 0 && (
+            <SelectSeparator />
+          )}
+          {routerAliases.length > 0 && (
+            <SelectGroup>
+              <SelectLabel>
+                {t("chat.modelGroup.modelRouters", "Model routers")}
+              </SelectLabel>
+              {routerAliases.map((alias) => (
+                <SelectItem key={alias.name} value={alias.name}>
+                  {alias.name}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          )}
         </SelectContent>
       </Select>
-
-      {modelDiscoveryError && (
-        <Button
-          type="button"
-          variant="destructive"
-          size="sm"
-          onClick={onRetryModelDiscovery}
-          aria-label={t("chat.retryModelDiscovery")}
-          title={`${t("chat.retryModelDiscovery")}: ${modelDiscoveryError}`}
-          className="h-8 rounded-full"
-        >
-          <IconRefresh className="size-4" />
-          <span className="hidden lg:inline">
-            {t("chat.retryModelDiscovery")}
-          </span>
-        </Button>
-      )}
     </div>
   )
 }

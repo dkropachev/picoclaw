@@ -91,6 +91,7 @@ export function WebSearchTab({
             />
             <WebSearchProviderSettings
               providerLabelMap={providerLabelMap}
+              modelAliases={draft.model_aliases}
               settings={draft.settings}
               expandedProvider={expandedProvider}
               onToggleProviderExpand={onToggleProviderExpand}

@@ -7,11 +7,12 @@ import (
 )
 
 type SpawnTool struct {
-	spawner        SubTurnSpawner
-	defaultModel   string
-	maxTokens      int
-	temperature    float64
-	allowlistCheck func(targetAgentID string) bool
+	spawner               SubTurnSpawner
+	defaultModel          string
+	defaultModelFallbacks []string
+	maxTokens             int
+	temperature           float64
+	allowlistCheck        func(targetAgentID string) bool
 }
 
 type asyncSubTurnContextPreparer interface {
@@ -26,9 +27,10 @@ func NewSpawnTool(manager *SubagentManager) *SpawnTool {
 		return &SpawnTool{}
 	}
 	return &SpawnTool{
-		defaultModel: manager.defaultModel,
-		maxTokens:    manager.maxTokens,
-		temperature:  manager.temperature,
+		defaultModel:          manager.defaultModel,
+		defaultModelFallbacks: cloneStringSlice(manager.defaultModelFallbacks),
+		maxTokens:             manager.maxTokens,
+		temperature:           manager.temperature,
 	}
 }
 
@@ -144,14 +146,15 @@ Task: %s`,
 		go func() {
 			defer releaseRuntime()
 			result, err := t.spawner.SpawnSubTurn(spawnCtx, SubTurnConfig{
-				Model:         t.defaultModel,
-				Tools:         nil, // Will inherit from parent via context
-				SystemPrompt:  systemPrompt,
-				MaxTokens:     t.maxTokens,
-				Temperature:   t.temperature,
-				Async:         true, // Async execution
-				Critical:      true, // Background spawn should survive parent turn completion
-				TargetAgentID: targetAgentID,
+				Model:          t.defaultModel,
+				ModelFallbacks: cloneStringSlice(t.defaultModelFallbacks),
+				Tools:          nil, // Will inherit from parent via context
+				SystemPrompt:   systemPrompt,
+				MaxTokens:      t.maxTokens,
+				Temperature:    t.temperature,
+				Async:          true, // Async execution
+				Critical:       true, // Background spawn should survive parent turn completion
+				TargetAgentID:  targetAgentID,
 			})
 			if err != nil {
 				result = ErrorResult(fmt.Sprintf("Spawn failed: %v", err)).WithError(err)

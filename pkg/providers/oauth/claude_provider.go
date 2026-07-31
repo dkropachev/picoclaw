@@ -52,10 +52,6 @@ func (p *ClaudeProvider) Chat(
 	return resp, nil
 }
 
-func (p *ClaudeProvider) GetDefaultModel() string {
-	return p.delegate.GetDefaultModel()
-}
-
 func CreateClaudeTokenSource(getCredential func(string) (*auth.AuthCredential, error)) func() (string, error) {
 	return CreateClaudeTokenSourceForCredential(getCredential, "anthropic")
 }

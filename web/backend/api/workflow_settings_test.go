@@ -24,10 +24,15 @@ func TestWorkflowSettingsGetAndPatchPreserveUnrelatedConfigAndSecrets(t *testing
 	cfg.ModelList = []*config.ModelConfig{{
 		ModelName: "private-model",
 		Provider:  "openai",
-		Model:     "openai/test",
+		Model:     "test",
 		APIKeys:   config.SimpleSecureStrings("sk-workflow-settings-secret"),
 		Enabled:   true,
 	}}
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name:  "private-model",
+		Model: "openai/test",
+	}}
+	cfg.Agents.Defaults.AccountRef = "private-model"
 	cfg.Agents.Defaults.ModelName = "private-model"
 	if err := config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)

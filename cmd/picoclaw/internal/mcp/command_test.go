@@ -328,7 +328,9 @@ func TestSaveValidatedConfigNormalizesStreamableHTTPAlias(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, saveValidatedConfig(cfg))
+	revision, err := config.ConfigRevision(configPath)
+	require.NoError(t, err)
+	require.NoError(t, saveValidatedConfig(cfg, revision))
 
 	saved := readMCPConfig(t, configPath)
 	server := saved.Tools.MCP.Servers["context7"]
@@ -354,7 +356,9 @@ func TestSaveValidatedConfigPreservesExternalAuthReference(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, saveValidatedConfig(cfg))
+	revision, err := config.ConfigRevision(configPath)
+	require.NoError(t, err)
+	require.NoError(t, saveValidatedConfig(cfg, revision))
 
 	saved := readMCPConfig(t, configPath)
 	server := saved.Tools.MCP.Servers["protected"]
@@ -362,6 +366,54 @@ func TestSaveValidatedConfigPreservesExternalAuthReference(t *testing.T) {
 	assert.Equal(t, "bearer", server.Auth.Type)
 	assert.Equal(t, "mcp:protected", server.Auth.CredentialID)
 	assert.EqualValues(t, 2, server.Auth.Revision)
+}
+
+func TestMCPAddRejectsStaleConfigRevision(t *testing.T) {
+	configPath := setupMCPConfigEnv(t)
+	writeMCPConfig(t, configPath, config.DefaultConfig())
+
+	originalSave := mcpSaveConfigIfRevision
+	injected := false
+	mcpSaveConfigIfRevision = func(
+		path string,
+		candidate *config.Config,
+		expectedRevision string,
+	) (string, error) {
+		if !injected {
+			injected = true
+			concurrent, revision, err := config.LoadConfigForUpdateSnapshot(path)
+			if err != nil {
+				return "", err
+			}
+			concurrent.ModelAliases = append(
+				concurrent.ModelAliases,
+				config.ModelAliasConfig{Name: "concurrent", Model: "new-model"},
+			)
+			if _, err := originalSave(path, concurrent, revision); err != nil {
+				return "", err
+			}
+		}
+		return originalSave(path, candidate, expectedRevision)
+	}
+	t.Cleanup(func() {
+		mcpSaveConfigIfRevision = originalSave
+	})
+
+	cmd := NewMCPCommand()
+	_, err := executeCommand(cmd, []string{
+		"add",
+		"filesystem",
+		"npx",
+		"-y",
+		"@modelcontextprotocol/server-filesystem",
+	}, "")
+	require.ErrorIs(t, err, config.ErrConfigRevisionMismatch)
+	assert.Contains(t, err.Error(), "config changed while updating MCP servers; reload and retry")
+
+	updated := readMCPConfig(t, configPath)
+	require.Len(t, updated.ModelAliases, 1)
+	assert.Equal(t, "concurrent", updated.ModelAliases[0].Name)
+	assert.NotContains(t, updated.Tools.MCP.Servers, "filesystem")
 }
 
 func TestMCPRemoveRemovesLastServerAndDisablesMCP(t *testing.T) {

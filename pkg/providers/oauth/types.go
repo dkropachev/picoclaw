@@ -29,5 +29,4 @@ type LLMProvider interface {
 		model string,
 		options map[string]any,
 	) (*LLMResponse, error)
-	GetDefaultModel() string
 }

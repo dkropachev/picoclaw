@@ -44,6 +44,7 @@ type Handler struct {
 	workflowTriggerReviewUsed   map[[32]byte]int64
 	workflowDevelopmentTestDone func()
 	saveToolStateConfig         func(string, *config.Config, string) (string, error)
+	saveConfigIfRevision        func(string, *config.Config, string) (string, error)
 }
 
 // NewHandler creates an instance of the API handler.
@@ -62,6 +63,7 @@ func NewHandler(configPath string) *Handler {
 		workflowTriggerReviewNow:   time.Now,
 		workflowTriggerReviewUsed:  make(map[[32]byte]int64),
 		saveToolStateConfig:        config.SaveConfigIfRevision,
+		saveConfigIfRevision:       config.SaveConfigIfRevision,
 	}
 }
 

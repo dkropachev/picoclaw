@@ -1,6 +1,7 @@
 import { getDefaultStore } from "jotai"
 import { toast } from "sonner"
 
+import { getModels } from "@/api/models"
 import {
   loadSessionMessages,
   mergeHistoryMessages,
@@ -337,15 +338,15 @@ export async function hydrateActiveSession() {
 interface SendChatMessageInput {
   content: string
   attachments?: ChatAttachment[]
-  modelName?: string
-  model?: string
+  accountRef: string
+  modelName: string
 }
 
 export function sendChatMessage({
   content,
   attachments = [],
+  accountRef,
   modelName,
-  model,
 }: SendChatMessageInput) {
   if (!wsRef || wsRef.readyState !== WebSocket.OPEN) {
     console.warn("WebSocket not connected")
@@ -361,6 +362,13 @@ export function sendChatMessage({
     return false
   }
 
+  const selectedAccountRef = accountRef.trim()
+  const selectedModelAlias = modelName.trim()
+  if (!selectedAccountRef || !selectedModelAlias) {
+    console.warn("no model configured")
+    return false
+  }
+
   const socket = wsRef
   const id = `msg-${++msgIdCounter}-${Date.now()}`
 
@@ -373,6 +381,8 @@ export function sendChatMessage({
         content: normalizedContent,
         attachments:
           normalizedAttachments.length > 0 ? normalizedAttachments : undefined,
+        accountRef: selectedAccountRef,
+        modelName: selectedModelAlias,
         timestamp: Date.now(),
       },
     ],
@@ -383,14 +393,8 @@ export function sendChatMessage({
     const payload: Record<string, unknown> = {
       content: normalizedContent,
       media: normalizedAttachments.map((attachment) => attachment.url),
-    }
-    const selectedModelName = modelName?.trim()
-    const selectedModel = model?.trim()
-    if (selectedModelName) {
-      payload.model_name = selectedModelName
-    }
-    if (selectedModel) {
-      payload.model = selectedModel
+      account_ref: selectedAccountRef,
+      model_name: selectedModelAlias,
     }
 
     socket.send(
@@ -470,9 +474,32 @@ function waitForSessionSocketOpen(sessionId: string) {
   })
 }
 
+type SendChatMessageWithDefaultsInput = Omit<
+  SendChatMessageInput,
+  "accountRef" | "modelName"
+> &
+  Partial<Pick<SendChatMessageInput, "accountRef" | "modelName">>
+
+async function resolveChatSelection(
+  input: SendChatMessageWithDefaultsInput,
+): Promise<Pick<SendChatMessageInput, "accountRef" | "modelName"> | null> {
+  let accountRef = input.accountRef?.trim() ?? ""
+  let modelName = input.modelName?.trim() ?? ""
+  if (!accountRef || !modelName) {
+    try {
+      const configured = await getModels()
+      accountRef ||= configured.default_account_ref?.trim() ?? ""
+      modelName ||= configured.default_model?.trim() ?? ""
+    } catch {
+      return null
+    }
+  }
+  return accountRef && modelName ? { accountRef, modelName } : null
+}
+
 export async function switchChatSessionAndSend(
   sessionId: string,
-  input: SendChatMessageInput,
+  input: SendChatMessageWithDefaultsInput,
 ) {
   const normalizedContent = input.content.trim()
   const key = normalizedContent
@@ -494,7 +521,12 @@ export async function switchChatSessionAndSend(
   }
 
   try {
+    const selection = await resolveChatSelection(input)
     await switchChatSession(sessionId)
+    if (!selection) {
+      console.warn("no model configured")
+      return false
+    }
     if (activeSessionIdRef !== sessionId) {
       return false
     }
@@ -507,6 +539,7 @@ export async function switchChatSessionAndSend(
     }
     const sent = sendChatMessage({
       ...input,
+      ...selection,
       content: normalizedContent,
     })
     if (sent && key) {

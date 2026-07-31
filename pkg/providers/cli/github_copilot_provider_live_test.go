@@ -13,8 +13,12 @@ func TestGitHubCopilotProviderWithTokenLive(t *testing.T) {
 	if token == "" {
 		t.Skip("set PICOCLAW_LIVE_GITHUB_COPILOT_TOKEN to run live GitHub Copilot smoke test")
 	}
+	model := strings.TrimSpace(os.Getenv("PICOCLAW_LIVE_GITHUB_COPILOT_MODEL"))
+	if model == "" {
+		t.Skip("set PICOCLAW_LIVE_GITHUB_COPILOT_MODEL to an exact model to run the live smoke test")
+	}
 
-	provider, err := NewGitHubCopilotProviderWithToken(token, "auto")
+	provider, err := NewGitHubCopilotProviderWithToken(token, model)
 	if err != nil {
 		t.Fatalf("NewGitHubCopilotProviderWithToken() error = %v", err)
 	}
@@ -26,7 +30,7 @@ func TestGitHubCopilotProviderWithTokenLive(t *testing.T) {
 	resp, err := provider.Chat(ctx, []Message{{
 		Role:    "user",
 		Content: "Respond with exactly: pong",
-	}}, nil, "auto", nil)
+	}}, nil, model, nil)
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}

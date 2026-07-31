@@ -30,6 +30,23 @@ PicoClaw uses a schema versioning system for `config.json` to ensure smooth upgr
   - **Backup**: Before migration, the system creates a date-stamped backup (e.g., `config.json.20260413.bak`) in the same directory
   - **Downgrade risk**: Once migrated to V3, the config cannot be safely loaded by older V2-only versions. To downgrade, restore from the auto-created backup file.
 
+### Version 4
+
+- **Introduction**: Explicit account selection and first-class model aliases.
+- **Changes**:
+  - Added top-level `model_aliases[]`.
+  - Added `agents.defaults.account_ref`, per-agent `account_ref`,
+    `voice.account_ref`, and `voice.tts_account_ref`.
+  - `model_name`, agent primary/fallback values, image/light/subagent model
+    references, voice model names, workflow selections, chat selections, and
+    model-router terminals now name exact aliases (or an enabled model router
+    where the primary selector permits one).
+  - Provider metadata and credential accounts no longer supply executable
+    default models. A missing effective alias fails with
+    `no model configured`.
+- **Auto-migration**: V3 configurations are backed up and migrated
+  deterministically. The migration never invents a provider model.
+
 ## How It Works
 
 ### Automatic Migration
@@ -46,11 +63,12 @@ The `version` field in `config.json` indicates the schema version:
 - `0` or missing: Legacy config (no version field)
 - `1`: Previous version (will be auto-migrated to V2 on load)
 - `2`: Previous version (will be auto-migrated to V3 on load)
-- `3`: Current version
+- `3`: Previous version (will be auto-migrated to V4 on load)
+- `4`: Current version
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "agents": {...},
   ...
 }
@@ -65,8 +83,8 @@ When making breaking changes to the config schema:
 Create a new struct for the new version if the structure changes significantly:
 
 ```go
-// ConfigV3 represents version 3 config structure
-type ConfigV3 struct {
+// ConfigV4 represents version 4 config structure
+type ConfigV4 struct {
     Version   int             `json:"version"`
     Agents    AgentsConfig    `json:"agents"`
     // ... other fields with new structure
@@ -76,25 +94,25 @@ type ConfigV3 struct {
 ### Step 2: Update Current Config Version
 
 ```go
-const CurrentVersion = 3  // Increment this
+const CurrentVersion = 4  // Increment this
 ```
 
 ### Step 3: Add a Loader Function
 
 ```go
-// loadConfigV3 loads a version 3 config
-func loadConfigV3(data []byte) (*Config, error) {
+// loadConfigV4 loads a version 4 config
+func loadConfigV4(data []byte) (*Config, error) {
     cfg := DefaultConfig()
 
-    // Parse to ConfigV3 struct
-    var v3 ConfigV3
-    if err := json.Unmarshal(data, &v3); err != nil {
+    // Parse to ConfigV4 struct
+    var v4 ConfigV4
+    if err := json.Unmarshal(data, &v4); err != nil {
         return nil, err
     }
 
     // Convert to current Config
-    cfg.Version = v3.Version
-    cfg.Agents = v3.Agents
+    cfg.Version = v4.Version
+    cfg.Agents = v4.Agents
     // ... map other fields
 
     return cfg, nil
@@ -104,10 +122,10 @@ func loadConfigV3(data []byte) (*Config, error) {
 ### Step 4: Add Migration Logic
 
 ```go
-func (c *configV2) Migrate() (*Config, error) {
-    // Apply V2→V3 structural changes here
+func (c *configV3) Migrate() (*Config, error) {
+    // Apply V3→V4 structural changes here
     migrated := &c.Config
-    migrated.Version = 3
+    migrated.Version = 4
     // Apply structural changes
     return migrated, nil
 }
@@ -128,6 +146,8 @@ func LoadConfig(path string) (*Config, error) {
         cfg, err = loadConfig(data)
     case 3:
         cfg, err = loadConfigV3(data)
+    case 4:
+        cfg, err = loadConfigV4(data)
     default:
         return nil, fmt.Errorf("unsupported config version: %d", versionInfo.Version)
     }
@@ -141,22 +161,22 @@ func LoadConfig(path string) (*Config, error) {
 Create a test in `config_migration_test.go`:
 
 ```go
-func TestMigrateV2ToV3(t *testing.T) {
-    // Create a version 3 config
-    v3Config := Config{
-        Version: 3,
+func TestMigrateV3ToV4(t *testing.T) {
+    // Create a version 4 config
+    v4Config := Config{
+        Version: 4,
         // ... set up test data
     }
 
     // Apply migration
-    migrated, err := v2Config.Migrate()
+    migrated, err := v3Config.Migrate()
     if err != nil {
         t.Fatalf("Migration failed: %v", err)
     }
 
     // Verify version is updated
-    if migrated.Version != 3 {
-        t.Errorf("Expected version 3, got %d", migrated.Version)
+    if migrated.Version != 4 {
+        t.Errorf("Expected version 4, got %d", migrated.Version)
     }
 
     // Verify data is preserved/transformed correctly
@@ -221,9 +241,54 @@ Backups are created in the same directory as your config file:
 
 **Alternative**: Manually edit `config.json` and change `"version": 3` to `"version": 2`. This works because V3 changes are primarily code-level safety improvements, not structural schema changes.
 
+## V3→V4 Model Alias Migration
+
+Version 4 separates the two values that version 3 often overloaded in
+`model_name`:
+
+```json
+{
+  "version": 4,
+  "agents": {
+    "defaults": {
+      "account_ref": "openai-work",
+      "model_name": "coding"
+    }
+  },
+  "model_aliases": [
+    {
+      "name": "coding",
+      "model": "gpt-5.4",
+      "account_overrides": {
+        "credential:github-copilot:work": "gpt-4.1"
+      }
+    }
+  ]
+}
+```
+
+Migration rules are intentionally conservative:
+
+1. A non-router `model_list` name becomes an alias only when all rows with that
+   name map to one concrete model.
+2. A legacy raw model reference becomes an alias only when it maps to exactly
+   one concrete account/model pair.
+3. A successfully migrated selection stores the concrete account in
+   `account_ref` and retains the generated alias in the model field.
+4. Credential-only, account-router, unknown, and ambiguous selections move to
+   `account_ref`, but their model alias is cleared. Startup then reports
+   `no model configured` until the user chooses or creates an alias.
+5. Legacy fallback, image, light, subagent, voice, and model-router references
+   that are not generated aliases are removed or cleared. No provider default
+   is substituted.
+
+After migration, review every empty `model_name`, choose an exact alias, and
+verify that alias overrides use concrete account refs rather than account-router
+names.
+
 ## Example Migration
 
-### Scenario: Adding a new field with default value
+### Scenario: Unambiguous legacy model selection
 
 Old config (version 3):
 ```json
@@ -231,37 +296,42 @@ Old config (version 3):
   "version": 3,
   "model_list": [
     {
-      "model_name": "gpt-5.4",
-      "model": "openai/gpt-5.4"
+      "model_name": "openai-work",
+      "provider": "openai",
+      "model": "gpt-5.4"
     }
-  ]
+  ],
+  "agents": {
+    "defaults": {
+      "model_name": "openai-work"
+    }
+  }
 }
 ```
 
-Migration to version 3:
-```go
-func (c *configV2) Migrate() (*Config, error) {
-    migrated := &c.Config
-    migrated.Version = 3
-
-    // Add new field with default value if not set
-    // ...
-
-    return migrated, nil
-}
-```
-
-New config (version 3):
+New config (version 4):
 ```json
 {
-  "version": 3,
+  "version": 4,
   "model_list": [
     {
-      "model_name": "gpt-5.4",
-      "model": "openai/gpt-5.4",
-      "new_option": true
+      "model_name": "openai-work",
+      "provider": "openai",
+      "model": "gpt-5.4"
     }
-  ]
+  ],
+  "model_aliases": [
+    {
+      "name": "openai-work",
+      "model": "gpt-5.4"
+    }
+  ],
+  "agents": {
+    "defaults": {
+      "account_ref": "openai-work",
+      "model_name": "openai-work"
+    }
+  }
 }
 ```
 

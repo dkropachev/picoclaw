@@ -311,6 +311,10 @@ func TestAgentsAPICreateMaterializesMainAndPreservesOrderedModelPolicy(t *testin
 			APIKeys:   config.SimpleSecureStrings("agent-api-secret"),
 			Enabled:   true,
 		}}
+		cfg.ModelAliases = []config.ModelAliasConfig{{
+			Name:  "review-model",
+			Model: "provider/model",
+		}}
 	})
 	initial := decodeAgentCollection(
 		t,
@@ -320,9 +324,10 @@ func TestAgentsAPICreateMaterializesMainAndPreservesOrderedModelPolicy(t *testin
 	create := agentMutationRequest{
 		ExpectedConfigRevision: &initial.ConfigRevision,
 		Agent: &agentResource{
-			ID:        "reviewer",
-			Name:      "  Code reviewer  ",
-			Workspace: "  /srv/reviewer  ",
+			ID:         "reviewer",
+			Name:       "  Code reviewer  ",
+			Workspace:  "  /srv/reviewer  ",
+			AccountRef: "  secret-model  ",
 			Model: &agentModelPolicy{
 				Primary:   "  review-model  ",
 				Fallbacks: &noFallbacks,
@@ -347,6 +352,7 @@ func TestAgentsAPICreateMaterializesMainAndPreservesOrderedModelPolicy(t *testin
 	}
 	reviewer := created.Agents[1]
 	if reviewer.Name != "Code reviewer" || reviewer.Workspace != "/srv/reviewer" ||
+		reviewer.AccountRef != "secret-model" ||
 		reviewer.Model == nil || reviewer.Model.Primary != "review-model" ||
 		reviewer.Model.Fallbacks == nil || len(*reviewer.Model.Fallbacks) != 0 ||
 		reviewer.Subagents == nil ||
@@ -414,6 +420,10 @@ func TestAgentsAPIUpdateDefaultDeleteLifecycle(t *testing.T) {
 		t.Fatalf("WriteFile(session sentinel) error = %v", err)
 	}
 	harness := newAgentAPITestHarness(t, func(cfg *config.Config) {
+		cfg.ModelAliases = []config.ModelAliasConfig{{
+			Name:  "review-model",
+			Model: "provider/review-model",
+		}}
 		cfg.Agents.List = []config.AgentConfig{
 			{ID: "main", Default: true},
 			{ID: "reviewer", Name: "Old", Workspace: agentWorkspace},
@@ -578,6 +588,10 @@ func TestAgentsAPIUpdateImplicitMainAndPreservesHiddenSubagentModel(t *testing.T
 
 	t.Run("hidden delegation model survives reset", func(t *testing.T) {
 		harness := newAgentAPITestHarness(t, func(cfg *config.Config) {
+			cfg.ModelAliases = []config.ModelAliasConfig{{
+				Name:  "reserved-model",
+				Model: "provider/reserved-model",
+			}}
 			cfg.Agents.List = []config.AgentConfig{
 				{ID: "main", Default: true},
 				{

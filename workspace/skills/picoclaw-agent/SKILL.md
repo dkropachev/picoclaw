@@ -27,7 +27,7 @@ picoclaw onboard
 # Authenticate a provider
 picoclaw auth login --provider openai
 
-# Inspect or switch the default model
+# Inspect or switch the default model alias
 picoclaw model
 picoclaw model my-default-model
 
@@ -151,7 +151,8 @@ Notes:
 
 ## Providers
 
-PicoClaw supports 30+ LLM providers through `model_list`.
+PicoClaw supports 30+ LLM providers. `model_list` configures concrete account
+transports; `model_aliases` configures the exact model names used by execution.
 
 Credential patterns in PicoClaw are:
 
@@ -402,9 +403,10 @@ PicoClaw can transcribe inbound audio and synthesize outbound speech, but voice 
 
 The important pattern is:
 
-- ASR uses `voice.model_name`
-- TTS uses `voice.tts_model_name`
-- both resolve through named entries in `model_list`
+- ASR uses `voice.account_ref` plus alias-valued `voice.model_name`
+- TTS uses `voice.tts_account_ref` plus alias-valued
+  `voice.tts_model_name`
+- both resolve the alias only after selecting a concrete account
 - secrets belong in `.security.yml`, not inline in `voice`
 
 ### STT (Voice -> Text)
@@ -413,23 +415,32 @@ Voice and audio messages from supported channels can be transcribed automaticall
 
 Recommended setup:
 
-1. add an ASR-capable model entry to `model_list`
-2. set `voice.model_name` to that entry's `model_name`
-3. store the matching API key in `.security.yml`
-4. optionally set `voice.echo_transcription` if you want the transcript echoed back in chat
+1. add an ASR-capable concrete account to `model_list`
+2. add an ASR alias to `model_aliases`
+3. set `voice.account_ref` and alias-valued `voice.model_name`
+4. store the matching account API key in `.security.yml`
+5. optionally set `voice.echo_transcription`
 
 Example:
 
 ```json
 {
+  "model_aliases": [
+    {
+      "name": "asr",
+      "model": "whisper-large-v3-turbo"
+    }
+  ],
   "model_list": [
     {
       "model_name": "voice-groq",
-      "model": "groq/whisper-large-v3-turbo"
+      "provider": "groq",
+      "model": ""
     }
   ],
   "voice": {
-    "model_name": "voice-groq",
+    "account_ref": "voice-groq",
+    "model_name": "asr",
     "echo_transcription": true
   }
 }
@@ -446,18 +457,19 @@ model_list:
 
 | Route | Example model | Notes |
 | --- | --- | --- |
-| Groq Whisper | `groq/whisper-large-v3-turbo` | Fast OpenAI-compatible Whisper transcription and a common default choice |
+| Groq Whisper | `groq/whisper-large-v3-turbo` | Fast OpenAI-compatible Whisper transcription and a common explicit choice |
 | OpenAI Whisper | `openai/whisper-1` | Standard Whisper transcription through the OpenAI-compatible audio endpoint |
 | ElevenLabs Scribe | `provider: elevenlabs`, `model: scribe_v1` | Uses PicoClaw's dedicated ElevenLabs transcription path |
 | Audio-capable chat models | `gemini/gemini-2.5-flash`, `openai/gpt-4o-audio-preview` | Multimodal audio transcription path; some model combinations are still evolving |
 
 Detection behavior that matters:
 
-- `voice.model_name` is the preferred and recommended path
+- `voice.account_ref` and exact alias-valued `voice.model_name` are required
 - if it resolves to an ElevenLabs model, PicoClaw uses the ElevenLabs transcriber
 - if it resolves to a Whisper-compatible model, PicoClaw uses the Whisper transcription path
 - if it resolves to an audio-capable multimodal model, PicoClaw can use audio-model transcription
-- if `voice.model_name` is omitted, PicoClaw still performs compatibility scanning across `model_list` for legacy auto-detected ASR entries
+- if either field is missing or invalid, ASR remains unavailable; there is no
+  compatibility scan or provider-default model
 
 ### TTS (Text -> Voice)
 
@@ -465,24 +477,33 @@ Outbound speech is driven by `voice.tts_model_name` and exposed through `send_tt
 
 Recommended setup:
 
-1. add a TTS-capable model entry to `model_list`
-2. set `voice.tts_model_name` to that entry's `model_name`
-3. store the API key in `.security.yml`
-4. if the provider needs model-specific TTS fields, add them under `model_list[].extra_body`
-5. enable `send_tts` in the tool configuration if you want the agent to emit speech files
+1. add a TTS-capable concrete account to `model_list`
+2. add a TTS alias to `model_aliases`
+3. set `voice.tts_account_ref` and alias-valued `voice.tts_model_name`
+4. store the account API key in `.security.yml`
+5. if the provider needs TTS fields, add them under `model_list[].extra_body`
+6. enable `send_tts` if you want the agent to emit speech files
 
 Example:
 
 ```json
 {
+  "model_aliases": [
+    {
+      "name": "tts",
+      "model": "tts-1"
+    }
+  ],
   "model_list": [
     {
       "model_name": "openai-tts",
-      "model": "openai/tts-1"
+      "provider": "openai",
+      "model": ""
     }
   ],
   "voice": {
-    "tts_model_name": "openai-tts"
+    "tts_account_ref": "openai-tts",
+    "tts_model_name": "tts"
   }
 }
 ```
@@ -498,11 +519,17 @@ Example with OpenRouter MAI Voice 2:
 
 ```json
 {
+  "model_aliases": [
+    {
+      "name": "tts",
+      "model": "microsoft/mai-voice-2"
+    }
+  ],
   "model_list": [
     {
       "model_name": "mai-voice-2",
       "provider": "openrouter",
-      "model": "microsoft/mai-voice-2",
+      "model": "",
       "api_base": "https://openrouter.ai/api/v1",
       "extra_body": {
         "voice": "en-US-Harper:MAI-Voice-2",
@@ -511,7 +538,8 @@ Example with OpenRouter MAI Voice 2:
     }
   ],
   "voice": {
-    "tts_model_name": "mai-voice-2"
+    "tts_account_ref": "mai-voice-2",
+    "tts_model_name": "tts"
   }
 }
 ```
@@ -532,8 +560,10 @@ model_list:
 
 Operational notes:
 
-- the preferred selection path is `voice.tts_model_name`
-- if that is missing, PicoClaw can still scan `model_list` for the first API-backed model whose ID contains `tts`
+- selection requires `voice.tts_account_ref` plus an exact alias in
+  `voice.tts_model_name`
+- missing selection returns `no model configured`; PicoClaw does not scan
+  `model_list` or choose a provider model
 - the current OpenAI-style TTS request defaults to `voice: alloy` and `response_format: opus`
 - you can override `voice` and `response_format` for a specific TTS model through `model_list[].extra_body`
 - if a provider rejects `response_format`, PicoClaw retries once without that field
@@ -622,18 +652,25 @@ Use `PICOCLAW_HOME` when the user wants a portable or service-managed install.
 
 ### Model Configuration
 
-PicoClaw is model-centric. The key fields are:
+PicoClaw separates account and model identity. The key fields are:
 
+- `agents.defaults.account_ref`
 - `agents.defaults.model_name`
-- `model_list`
-- optional `provider`
-- runtime `model`
+- `model_aliases`
+- `model_list` or `credential:<provider>:<id>` accounts
+- optional per-agent `account_ref` and alias policy
 
 Important behavior:
 
-- `agents.defaults.model_name` must match a `model_name` entry in `model_list`.
-- If `provider` is set, PicoClaw sends `model` to that provider unchanged.
-- If `provider` is omitted, legacy `provider/model` parsing is still supported.
+- `agents.defaults.model_name` must exactly match `model_aliases[].name` or an
+  enabled model router.
+- An account router chooses a concrete account first; the alias then resolves
+  its base model or a per-concrete-account override.
+- Alias override keys cannot name account routers.
+- Model-router terminals target aliases only.
+- Missing aliases fail with `no model configured`. Never diagnose a blank
+  model by assuming a provider default, raw model ID, or fuzzy `model_list`
+  match.
 
 ### Sessions and Routing
 
@@ -710,7 +747,8 @@ Start with the most PicoClaw-native path:
 
 1. Check `picoclaw status`.
 2. Confirm which config file is active.
-3. Inspect `agents.defaults.model_name` and `model_list`.
+3. Inspect `agents.defaults.account_ref`, `agents.defaults.model_name`,
+   `model_aliases`, and the selected concrete account/router.
 4. Run `picoclaw gateway --debug` for runtime visibility.
 5. Add `--no-truncate` only when full prompt or tool payload inspection is necessary.
 6. For skill issues, inspect the skill directory and frontmatter.
@@ -765,7 +803,8 @@ When contributing code, these paths matter most:
 - `cmd/picoclaw/internal/agent/` — direct CLI agent command
 - `cmd/picoclaw/internal/gateway/` — gateway startup and flags
 - `cmd/picoclaw/internal/auth/` — auth flows, QR onboarding
-- `cmd/picoclaw/internal/model/` — default model switching and `model add`
+- `cmd/picoclaw/internal/model/` — default account/alias switching and model
+  alias management
 - `cmd/picoclaw/internal/skills/` — install/list/show/remove/search commands
 - `cmd/picoclaw/internal/mcp/` — MCP CLI configuration manager
 - `cmd/picoclaw/internal/cron/` — cron CLI
@@ -795,13 +834,20 @@ When changing PicoClaw:
 
 ## Common Troubleshooting
 
-### "model ... not found in model_list"
+### `no model configured` or `model alias "..." is not configured`
 
 Check that:
 
-- `agents.defaults.model_name` matches a configured `model_name`
-- the target `model_list` entry is enabled
-- the `provider` and `model` fields use PicoClaw's model-centric rules
+- `agents.defaults.account_ref` names an enabled concrete account or account
+  router
+- `agents.defaults.model_name` exactly matches a configured alias or enabled
+  model router
+- model-router terminals reference aliases
+- alias account overrides name concrete accounts, not routers
+- the chosen concrete account is enabled and has credentials
+
+Do not fix this by writing a provider model into `model_name`; create or select
+an alias.
 
 ### OpenRouter `free is not a valid model ID`
 

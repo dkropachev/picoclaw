@@ -31,7 +31,6 @@ func (g *recordingDraftGenerator) GenerateDraft(
 type llmDraftTestProvider struct {
 	response      *providers.LLMResponse
 	err           error
-	defaultModel  string
 	lastModel     string
 	lastMessages  []providers.Message
 	chatCallCount int
@@ -48,10 +47,6 @@ func (p *llmDraftTestProvider) Chat(
 	p.lastModel = model
 	p.lastMessages = append([]providers.Message(nil), messages...)
 	return p.response, p.err
-}
-
-func (p *llmDraftTestProvider) GetDefaultModel() string {
-	return p.defaultModel
 }
 
 func testLearningRule() evolution.LearningRecord {
@@ -78,7 +73,6 @@ func testSkillMatches() []skills.SkillInfo {
 
 func TestLLMDraftGenerator_GenerateDraft_ParsesJSONResponse(t *testing.T) {
 	provider := &llmDraftTestProvider{
-		defaultModel: "test-model",
 		response: &providers.LLMResponse{
 			Content: `{"target_skill_name":"weather","draft_type":"shortcut","change_kind":"append","human_summary":"Prefer native-name lookup first","body_or_patch":"## Start Here\nUse native-name first."}`,
 		},
@@ -86,7 +80,7 @@ func TestLLMDraftGenerator_GenerateDraft_ParsesJSONResponse(t *testing.T) {
 	fallback := &recordingDraftGenerator{
 		draft: evolution.SkillDraft{TargetSkillName: "fallback"},
 	}
-	generator := evolution.NewLLMDraftGenerator(provider, "", fallback)
+	generator := evolution.NewLLMDraftGenerator(provider, "test-model", fallback)
 
 	draft, err := generator.GenerateDraft(context.Background(), testLearningRule(), testSkillMatches())
 	if err != nil {
@@ -119,6 +113,51 @@ func TestLLMDraftGenerator_GenerateDraft_ParsesJSONResponse(t *testing.T) {
 	}
 }
 
+func TestLLMDraftGenerator_MissingModelUsesFallbackWithoutProviderCall(t *testing.T) {
+	provider := &llmDraftTestProvider{
+		response: &providers.LLMResponse{Content: `{"target_skill_name":"unexpected"}`},
+	}
+	fallback := &recordingDraftGenerator{
+		draft: evolution.SkillDraft{TargetSkillName: "fallback"},
+	}
+	generator := evolution.NewLLMDraftGenerator(provider, "  ", fallback)
+
+	draft, err := generator.GenerateDraft(context.Background(), testLearningRule(), testSkillMatches())
+	if err != nil {
+		t.Fatalf("GenerateDraft() error = %v", err)
+	}
+	if provider.chatCallCount != 0 {
+		t.Fatalf("provider calls = %d, want 0", provider.chatCallCount)
+	}
+	if fallback.calls != 1 {
+		t.Fatalf("fallback calls = %d, want 1", fallback.calls)
+	}
+	if draft.TargetSkillName != "fallback" {
+		t.Fatalf("TargetSkillName = %q, want fallback", draft.TargetSkillName)
+	}
+}
+
+func TestLLMTaskSuccessJudge_MissingModelUsesFallbackWithoutProviderCall(t *testing.T) {
+	provider := &llmDraftTestProvider{}
+	judge := evolution.NewLLMTaskSuccessJudge(provider, "  ", nil)
+	success := true
+
+	decision, err := judge.JudgeTaskRecord(context.Background(), evolution.LearningRecord{
+		Summary:     "completed task",
+		FinalOutput: "done",
+		Success:     &success,
+	})
+	if err != nil {
+		t.Fatalf("JudgeTaskRecord() error = %v", err)
+	}
+	if provider.chatCallCount != 0 {
+		t.Fatalf("provider calls = %d, want 0", provider.chatCallCount)
+	}
+	if !decision.Success {
+		t.Fatalf("decision = %#v, want heuristic success", decision)
+	}
+}
+
 func TestLLMDraftGenerator_BuildPromptIncludesMatchedSkillContent(t *testing.T) {
 	dir := t.TempDir()
 	skillPath := filepath.Join(dir, "skills", "three-one-theorem", "SKILL.md")
@@ -136,12 +175,11 @@ func TestLLMDraftGenerator_BuildPromptIncludesMatchedSkillContent(t *testing.T) 
 	}
 
 	provider := &llmDraftTestProvider{
-		defaultModel: "test-model",
 		response: &providers.LLMResponse{
 			Content: `{"target_skill_name":"calculate-100-via-theorems","draft_type":"shortcut","change_kind":"create","human_summary":"Combine theorem chain","body_or_patch":"## Start Here\nAdd 31, then continue."}`,
 		},
 	}
-	generator := evolution.NewLLMDraftGenerator(provider, "", &recordingDraftGenerator{})
+	generator := evolution.NewLLMDraftGenerator(provider, "test-model", &recordingDraftGenerator{})
 
 	_, err := generator.GenerateDraft(context.Background(), evolution.LearningRecord{
 		ID:          "rule-1",
@@ -208,12 +246,11 @@ func TestLLMDraftGenerator_BuildPromptIncludesMatchedSkillContent(t *testing.T) 
 
 func TestLLMDraftGenerator_BuildPromptIncludesTaskEvidence(t *testing.T) {
 	provider := &llmDraftTestProvider{
-		defaultModel: "test-model",
 		response: &providers.LLMResponse{
 			Content: `{"target_skill_name":"calculate-with-three-one-theorem","draft_type":"shortcut","change_kind":"create","human_summary":"Calculate using theorem chain","body_or_patch":"---\nname: calculate-with-three-one-theorem\ndescription: Calculate with theorem chain.\n---\n# Calculate With Three One Theorem\n\n## Procedure\nAdd 31, add 42, then subtract 53."}`,
 		},
 	}
-	generator := evolution.NewLLMDraftGenerator(provider, "", &recordingDraftGenerator{})
+	generator := evolution.NewLLMDraftGenerator(provider, "test-model", &recordingDraftGenerator{})
 
 	_, err := generator.GenerateDraftWithEvidence(context.Background(), evolution.LearningRecord{
 		ID:      "rule-1",
@@ -250,9 +287,8 @@ func TestLLMDraftGenerator_BuildPromptIncludesTaskEvidence(t *testing.T) {
 	}
 }
 
-func TestLLMDraftGenerator_GenerateDraft_PrefersExplicitModelIDOverProviderDefault(t *testing.T) {
+func TestLLMDraftGenerator_GenerateDraft_UsesExplicitModelID(t *testing.T) {
 	provider := &llmDraftTestProvider{
-		defaultModel: "provider-default-model",
 		response: &providers.LLMResponse{
 			Content: `{"target_skill_name":"weather","draft_type":"shortcut","change_kind":"append","human_summary":"Prefer native-name lookup first","body_or_patch":"## Start Here\nUse native-name first."}`,
 		},
@@ -279,9 +315,8 @@ func TestLLMDraftGenerator_GenerateDraft_FallsBackOnProviderError(t *testing.T) 
 		},
 	}
 	generator := evolution.NewLLMDraftGenerator(&llmDraftTestProvider{
-		defaultModel: "test-model",
-		err:          errors.New("provider unavailable"),
-	}, "", fallback)
+		err: errors.New("provider unavailable"),
+	}, "test-model", fallback)
 
 	draft, err := generator.GenerateDraft(context.Background(), testLearningRule(), testSkillMatches())
 	if err != nil {
@@ -317,9 +352,8 @@ func TestLLMDraftGenerator_GenerateDraft_FallsBackOnInvalidOrEmptyContent(t *tes
 				},
 			}
 			generator := evolution.NewLLMDraftGenerator(&llmDraftTestProvider{
-				defaultModel: "test-model",
-				response:     &providers.LLMResponse{Content: tt.content},
-			}, "", fallback)
+				response: &providers.LLMResponse{Content: tt.content},
+			}, "test-model", fallback)
 
 			draft, err := generator.GenerateDraft(context.Background(), testLearningRule(), testSkillMatches())
 			if err != nil {
@@ -347,11 +381,10 @@ func TestLLMDraftGenerator_GenerateDraft_FallsBackOnNumericOnlyTargetSkillName(t
 		},
 	}
 	generator := evolution.NewLLMDraftGenerator(&llmDraftTestProvider{
-		defaultModel: "test-model",
 		response: &providers.LLMResponse{
 			Content: `{"target_skill_name":"100","draft_type":"shortcut","change_kind":"create","human_summary":"Calculate 100","body_or_patch":"## Start Here\nCalculate 100."}`,
 		},
-	}, "", fallback)
+	}, "test-model", fallback)
 
 	draft, err := generator.GenerateDraft(context.Background(), testLearningRule(), testSkillMatches())
 	if err != nil {

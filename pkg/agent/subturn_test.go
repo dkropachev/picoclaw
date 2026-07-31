@@ -866,7 +866,7 @@ func TestSpawnSubTurn_PanicRecovery(t *testing.T) {
 			},
 		},
 	}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), panicProvider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), panicProvider)
 
 	parent := &turnState{
 		ctx:            context.Background(),
@@ -922,10 +922,6 @@ func (m *panicMockProvider) Chat(
 	panic("intentional panic for testing")
 }
 
-func (m *panicMockProvider) GetDefaultModel() string {
-	return "panic-model"
-}
-
 // ====================== Public API Tests ======================
 
 // simpleMockProviderAPI for testing public APIs
@@ -945,10 +941,6 @@ func (m *simpleMockProviderAPI) Chat(
 	}, nil
 }
 
-func (m *simpleMockProviderAPI) GetDefaultModel() string {
-	return "gpt-4o-mini"
-}
-
 // TestGetActiveTurn verifies that GetActiveTurn returns correct turn information
 func TestGetActiveTurn(t *testing.T) {
 	cfg := &config.Config{
@@ -959,7 +951,7 @@ func TestGetActiveTurn(t *testing.T) {
 			},
 		},
 	}
-	al := NewAgentLoop(cfg, nil, &simpleMockProviderAPI{response: "ok"})
+	al := newTestAgentLoopWithStrictModels(cfg, nil, &simpleMockProviderAPI{response: "ok"})
 
 	// Create a root turn state
 	rootCtx := context.Background()
@@ -1017,7 +1009,7 @@ func TestGetActiveTurn_WithChildren(t *testing.T) {
 			},
 		},
 	}
-	al := NewAgentLoop(cfg, nil, &simpleMockProviderAPI{response: "ok"})
+	al := newTestAgentLoopWithStrictModels(cfg, nil, &simpleMockProviderAPI{response: "ok"})
 
 	rootCtx := context.Background()
 	rootTS := &turnState{
@@ -1058,7 +1050,7 @@ func TestGetActiveTurns_ReturnsAllSessions(t *testing.T) {
 			},
 		},
 	}
-	al := NewAgentLoop(cfg, nil, &simpleMockProviderAPI{response: "ok"})
+	al := newTestAgentLoopWithStrictModels(cfg, nil, &simpleMockProviderAPI{response: "ok"})
 
 	first := &turnState{
 		turnID:     "turn-a",
@@ -1134,7 +1126,7 @@ func TestInjectFollowUp(t *testing.T) {
 		},
 	}
 
-	al := NewAgentLoop(cfg, nil, &simpleMockProviderAPI{response: "ok"})
+	al := newTestAgentLoopWithStrictModels(cfg, nil, &simpleMockProviderAPI{response: "ok"})
 
 	msg := providers.Message{
 		Role:    "user",
@@ -1163,7 +1155,7 @@ func TestAPIAliases(t *testing.T) {
 		},
 	}
 
-	al := NewAgentLoop(cfg, nil, &simpleMockProviderAPI{response: "ok"})
+	al := newTestAgentLoopWithStrictModels(cfg, nil, &simpleMockProviderAPI{response: "ok"})
 
 	msg := providers.Message{
 		Role:    "user",
@@ -1201,7 +1193,7 @@ func TestInterruptHard_Alias(t *testing.T) {
 			},
 		},
 	}
-	al := NewAgentLoop(cfg, nil, &simpleMockProviderAPI{response: "ok"})
+	al := newTestAgentLoopWithStrictModels(cfg, nil, &simpleMockProviderAPI{response: "ok"})
 
 	rootCtx := context.Background()
 	rootTS := &turnState{
@@ -1383,7 +1375,7 @@ func TestConcurrencySemaphore_Timeout(t *testing.T) {
 	}
 	msgBus := bus.NewMessageBus()
 	provider := &simpleMockProviderAPI{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	ctx := context.Background()
 	parentTS := &turnState{
@@ -1483,7 +1475,7 @@ func TestContextWrapping_SingleLayer(t *testing.T) {
 	}
 	msgBus := bus.NewMessageBus()
 	provider := &simpleMockProviderAPI{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	ctx := context.Background()
 	parentTS := &turnState{
@@ -1529,7 +1521,7 @@ func TestSyncSubTurn_NoChannelDelivery(t *testing.T) {
 	}
 	msgBus := bus.NewMessageBus()
 	provider := &simpleMockProviderAPI{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	ctx := context.Background()
 	parentTS := &turnState{
@@ -1586,7 +1578,7 @@ func TestAsyncSubTurn_ChannelDelivery(t *testing.T) {
 	}
 	msgBus := bus.NewMessageBus()
 	provider := &simpleMockProviderAPI{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	ctx := context.Background()
 	parentTS := &turnState{
@@ -1750,7 +1742,7 @@ func TestSpawnDuringAbort_RaceCondition(t *testing.T) {
 	}
 	msgBus := bus.NewMessageBus()
 	provider := &simpleMockProviderAPI{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	ctx := context.Background()
 	parentTS := &turnState{
@@ -1831,10 +1823,6 @@ func (m *slowMockProvider) Chat(
 	}
 }
 
-func (m *slowMockProvider) GetDefaultModel() string {
-	return "slow-model"
-}
-
 // TestAsyncSubTurn_ParentFinishesEarly simulates the scenario where:
 // 1. Parent spawns an async SubTurn that takes a long time
 // 2. Parent finishes quickly
@@ -1849,7 +1837,7 @@ func TestAsyncSubTurn_ParentFinishesEarly(t *testing.T) {
 	}
 	msgBus := bus.NewMessageBus()
 	provider := &slowMockProvider{delay: 5 * time.Second} // SubTurn takes 5 seconds
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	var mu sync.Mutex
 	var events []runtimeevents.Event
@@ -1942,7 +1930,7 @@ func TestAsyncSubTurn_ParentWaitsForChild(t *testing.T) {
 	}
 	msgBus := bus.NewMessageBus()
 	provider := &slowMockProvider{delay: 200 * time.Millisecond} // SubTurn takes 200ms
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	ctx := context.Background()
 	parentTS := &turnState{
@@ -2109,7 +2097,7 @@ func TestSubTurn_IndependentContext(t *testing.T) {
 	}
 	msgBus := bus.NewMessageBus()
 	provider := &slowMockProvider{delay: 500 * time.Millisecond}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	ctx := context.Background()
 	parentTS := &turnState{
@@ -2182,8 +2170,6 @@ func (rp *modelRecordingProvider) Chat(
 	return &providers.LLMResponse{Content: "Mock response"}, nil
 }
 
-func (rp *modelRecordingProvider) GetDefaultModel() string { return "mock-model" }
-
 func (rp *modelRecordingProvider) getLastModel() string {
 	rp.mu.Lock()
 	defer rp.mu.Unlock()
@@ -2228,7 +2214,7 @@ func newMultiAgentLoop(t *testing.T, provider providers.LLMProvider) (*AgentLoop
 	}
 
 	msgBus := bus.NewMessageBus()
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 
 	return al, func() { os.RemoveAll(tmpDir) }
 }

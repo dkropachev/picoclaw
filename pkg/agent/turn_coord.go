@@ -345,10 +345,11 @@ func (al *AgentLoop) selectCandidates(
 	reason accountrouter.SelectReason,
 ) (candidates []providers.FallbackCandidate, model string, usedLight bool, activeRouter *accountrouter.Router, routerSelection accountrouter.Selection) {
 	selectTarget := func(target string) ([]providers.FallbackCandidate, string, *accountrouter.Router, accountrouter.Selection) {
-		if router := buildAccountRouter(
+		if router := buildAccountRouterWithAliases(
 			al.GetConfig(),
-			al.cfg.Agents.Defaults.Provider,
+			agent.AccountRef,
 			target,
+			agent.Fallbacks,
 			agent.Workspace,
 			agent.CandidateProviders,
 		); router != nil {
@@ -361,18 +362,17 @@ func (al *AgentLoop) selectCandidates(
 			}
 			return nil, "", router, selection
 		}
-		populateCandidateProvidersFromNames(
+		targetCandidates, err := candidatesForAccountAliases(
 			al.GetConfig(),
+			agent.AccountRef,
+			target,
+			agent.Fallbacks,
 			agent.Workspace,
-			[]string{target},
 			agent.CandidateProviders,
 		)
-		targetCandidates := resolveModelCandidates(
-			al.GetConfig(),
-			al.cfg.Agents.Defaults.Provider,
-			target,
-			nil,
-		)
+		if err != nil {
+			return nil, "", nil, accountrouter.Selection{}
+		}
 		return targetCandidates, resolvedCandidateModel(
 			targetCandidates,
 			target,
@@ -438,6 +438,13 @@ func (al *AgentLoop) selectCandidates(
 			"score":       score,
 			"threshold":   agent.Router.Threshold(),
 		})
+	if agent.LightAccountRouter != nil {
+		selection := agent.LightAccountRouter.Select(sessionKey, reason)
+		return selection.Candidates, resolvedCandidateModel(
+			selection.Candidates,
+			agent.Router.LightModel(),
+		), true, agent.LightAccountRouter, selection
+	}
 	return agent.LightCandidates, resolvedCandidateModel(
 		agent.LightCandidates,
 		agent.Router.LightModel(),
@@ -446,69 +453,84 @@ func (al *AgentLoop) selectCandidates(
 
 func (al *AgentLoop) selectOverrideCandidates(
 	agent *AgentInstance,
-	target string,
-	modelID string,
+	accountRef string,
+	modelAlias string,
+	modelFallbacks []string,
 	sessionKey string,
 	reason accountrouter.SelectReason,
 ) (candidates []providers.FallbackCandidate, model string, displayName string, activeRouter *accountrouter.Router, routerSelection accountrouter.Selection) {
-	target = strings.TrimSpace(target)
-	modelID = strings.TrimSpace(modelID)
-	if agent == nil || target == "" {
-		return nil, "", target, nil, accountrouter.Selection{}
+	if agent == nil {
+		return nil, "", "", nil, accountrouter.Selection{}
 	}
-
-	if router := buildAccountRouterWithModel(
+	accountRef = firstNonEmpty(accountRef, agent.AccountRef)
+	modelAlias = firstNonEmpty(modelAlias, agent.Model)
+	if accountRef == "" || modelAlias == "" {
+		return nil, "", modelAlias, nil, accountrouter.Selection{}
+	}
+	if err := validateModelAliasReferences(al.GetConfig(), modelAlias, nil); err != nil {
+		return nil, "", modelAlias, nil, accountrouter.Selection{}
+	}
+	fallbacks := agent.Fallbacks
+	if modelAlias != agent.Model {
+		fallbacks = nil
+	}
+	if modelFallbacks != nil {
+		fallbacks = modelFallbacks
+	}
+	if router := buildAccountRouterWithAliases(
 		al.GetConfig(),
-		al.cfg.Agents.Defaults.Provider,
-		target,
-		modelID,
+		accountRef,
+		modelAlias,
+		fallbacks,
 		agent.Workspace,
 		agent.CandidateProviders,
 	); router != nil {
 		selection := router.Select(sessionKey, reason)
 		if len(selection.Candidates) > 0 {
-			model = resolvedCandidateModel(selection.Candidates, target)
-			return selection.Candidates, model, target, router, selection
+			model = resolvedCandidateModel(selection.Candidates, modelAlias)
+			return selection.Candidates, model, modelAlias, router, selection
 		}
-		return nil, "", target, router, selection
+		return nil, "", modelAlias, router, selection
 	}
+	candidates, err := candidatesForAccountAliases(
+		al.GetConfig(),
+		accountRef,
+		modelAlias,
+		fallbacks,
+		agent.Workspace,
+		agent.CandidateProviders,
+	)
+	if err != nil {
+		return nil, "", modelAlias, nil, accountrouter.Selection{}
+	}
+	return candidates, resolvedCandidateModel(candidates, modelAlias), modelAlias, nil, accountrouter.Selection{}
+}
 
-	if modelID != "" {
-		if credentialCfg, ok := accountRouterCredentialAccountConfig(target, modelID); ok {
-			if credentialCfg == nil {
-				return nil, "", target, nil, accountrouter.Selection{}
-			}
-			candidate, ok := candidateFromModelConfig(
-				al.cfg.Agents.Defaults.Provider,
-				credentialCfg,
-			)
-			if !ok {
-				return nil, "", target, nil, accountrouter.Selection{}
-			}
-			provider, _, err := providers.CreateProviderFromConfig(credentialCfg)
-			if err != nil {
-				logger.WarnCF(
-					"agent",
-					"chat model override: failed to create credential account provider",
-					map[string]any{
-						"account": target,
-						"model":   modelID,
-						"error":   err.Error(),
-					},
-				)
-				return nil, "", target, nil, accountrouter.Selection{}
-			}
-			if !registerCandidateProvider(agent.CandidateProviders, candidate, provider) {
-				closeProviderIfStateful(provider)
-			}
-			return []providers.FallbackCandidate{
-				candidate,
-			}, modelID, target, nil, accountrouter.Selection{}
+func resolveModelSelectorAlias(
+	cfg *config.Config,
+	selector string,
+	userMessage string,
+	messages []providers.Message,
+) (string, error) {
+	selector = strings.TrimSpace(selector)
+	if router := buildModelRouter(cfg, selector); router != nil {
+		if err := validateModelRouterAliases(cfg, router); err != nil {
+			return "", err
 		}
+		selection := router.Select(modelrouter.Input{
+			UserMessage: userMessage,
+			Messages:    messages,
+			HasMedia:    messagesHaveMedia(messages),
+		})
+		if strings.TrimSpace(selection.Target) == "" {
+			return "", fmt.Errorf("model router %q selected no model alias", selector)
+		}
+		return strings.TrimSpace(selection.Target), nil
 	}
-
-	candidates, model, displayName = workflowOverrideModelCandidates(al.GetConfig(), agent, target)
-	return candidates, model, displayName, nil, accountrouter.Selection{}
+	if _, err := cfg.GetModelAlias(selector); err != nil {
+		return "", err
+	}
+	return selector, nil
 }
 
 func messagesHaveMedia(messages []providers.Message) bool {
@@ -521,7 +543,11 @@ func messagesHaveMedia(messages []providers.Message) bool {
 }
 
 func (al *AgentLoop) resolveContextManager() ContextManager {
-	name := al.cfg.Agents.Defaults.ContextManager
+	cfg := al.GetConfig()
+	if cfg == nil {
+		return &legacyContextManager{al: al}
+	}
+	name := cfg.Agents.Defaults.ContextManager
 	if name == "" || name == "legacy" {
 		return &legacyContextManager{al: al}
 	}
@@ -532,7 +558,7 @@ func (al *AgentLoop) resolveContextManager() ContextManager {
 		})
 		return &legacyContextManager{al: al}
 	}
-	cm, err := factory(al.cfg.Agents.Defaults.ContextManagerConfig, al)
+	cm, err := factory(cfg.Agents.Defaults.ContextManagerConfig, al)
 	if err != nil {
 		logger.WarnCF(
 			"agent",
@@ -555,6 +581,9 @@ func (al *AgentLoop) askSideQuestion(
 ) (string, error) {
 	if agent == nil {
 		return "", fmt.Errorf("askSideQuestion: no agent available for /btw")
+	}
+	if agent.ConfigurationError != nil {
+		return "", agent.ConfigurationError
 	}
 
 	question = strings.TrimSpace(question)
@@ -637,29 +666,62 @@ func (al *AgentLoop) askSideQuestion(
 	)
 	selectedModelName := sideQuestionModelName(agent, usedLight)
 	if opts != nil {
-		if override := strings.TrimSpace(opts.ModelNameOverride); override != "" {
+		if strings.TrimSpace(opts.ModelNameOverride) != "" ||
+			strings.TrimSpace(opts.AccountRefOverride) != "" ||
+			opts.ModelFallbacksOverride != nil {
+			overrideSelector := firstNonEmpty(opts.ModelNameOverride, agent.Model)
+			overrideAlias, err := resolveModelSelectorAlias(
+				al.GetConfig(),
+				overrideSelector,
+				question,
+				messages,
+			)
+			if err != nil {
+				return "", err
+			}
+			overrideFallbacks := opts.ModelFallbacksOverride
+			if overrideFallbacks == nil && overrideSelector == agent.Model {
+				overrideFallbacks = agent.Fallbacks
+			}
+			if err := validateModelAliasReferences(
+				al.GetConfig(),
+				overrideAlias,
+				overrideFallbacks,
+			); err != nil {
+				return "", err
+			}
+			if firstNonEmpty(opts.AccountRefOverride, agent.AccountRef) == "" {
+				return "", fmt.Errorf("no account configured")
+			}
 			activeCandidates, activeModel, selectedModelName, activeAccountRouter, routerSelection = al.selectOverrideCandidates(
 				agent,
-				override,
-				opts.ModelIDOverride,
+				opts.AccountRefOverride,
+				overrideAlias,
+				overrideFallbacks,
 				opts.SessionKey,
 				accountrouter.SelectReasonInitial,
 			)
-			_, isCredentialOverride := config.AccountRouterCredentialAccountID(override)
-			if (activeAccountRouter != nil || isCredentialOverride) &&
-				!candidateSelectionHasProvider(agent, activeCandidates) {
+			if !candidateSelectionHasProvider(agent, activeCandidates) {
 				return "", fmt.Errorf(
-					"model override %q has no runnable account provider",
-					override,
+					"model alias %q with account %q has no runnable provider",
+					selectedModelName,
+					firstNonEmpty(opts.AccountRefOverride, agent.AccountRef),
 				)
 			}
-		} else if activeAccountRouter != nil &&
-			!candidateSelectionHasProvider(agent, activeCandidates) {
+		}
+	}
+	if !candidateSelectionHasProvider(agent, activeCandidates) {
+		if activeAccountRouter != nil {
 			return "", fmt.Errorf(
 				"account router %q has no runnable account provider",
 				activeAccountRouter.Name,
 			)
 		}
+		return "", fmt.Errorf(
+			"model alias %q with account %q has no runnable provider",
+			selectedModelName,
+			agent.AccountRef,
+		)
 	}
 
 	llmOpts := map[string]any{
@@ -723,7 +785,7 @@ func (al *AgentLoop) askSideQuestion(
 				turnContext: cloneTurnContext(turnCtx),
 			},
 			Context:          cloneTurnContext(turnCtx),
-			Model:            llmModel,
+			Model:            selectedModelName,
 			Messages:         messages,
 			Tools:            nil,
 			Options:          llmOpts,
@@ -732,10 +794,44 @@ func (al *AgentLoop) askSideQuestion(
 		switch decision.normalizedAction() {
 		case HookActionContinue, HookActionModify:
 			if llmReq != nil {
-				if strings.TrimSpace(llmReq.Model) != "" && llmReq.Model != llmModel {
+				nextAlias := strings.TrimSpace(llmReq.Model)
+				if nextAlias != strings.TrimSpace(selectedModelName) {
+					if err := validateModelAliasReferences(al.GetConfig(), nextAlias, nil); err != nil {
+						return "", err
+					}
+					accountRef := concreteAccountRefForCandidates(activeCandidates)
+					if accountRef == "" {
+						accountRef = firstConcreteAccountRef(al.GetConfig(), agent.AccountRef)
+					}
+					nextCandidates, err := candidatesForAccountAliases(
+						al.GetConfig(),
+						accountRef,
+						nextAlias,
+						nil,
+						agent.Workspace,
+						agent.CandidateProviders,
+					)
+					if err != nil {
+						return "", err
+					}
+					if !candidateSelectionHasProvider(agent, nextCandidates) {
+						return "", fmt.Errorf(
+							"model alias %q with account %q has no runnable provider",
+							nextAlias,
+							accountRef,
+						)
+					}
 					hookModelChanged = true
+					activeCandidates = nextCandidates
+					activeModel = resolvedCandidateModel(nextCandidates, nextAlias)
+					selectedModelName = nextAlias
+					llmModel = activeModel
+					associateRouterSelectionCandidate(
+						&routerSelection,
+						nextCandidates[0],
+						accountRef,
+					)
 				}
-				llmModel = llmReq.Model
 				messages = llmReq.Messages
 				llmOpts = llmReq.Options
 				delete(llmOpts, "native_search")
@@ -754,13 +850,6 @@ func (al *AgentLoop) askSideQuestion(
 			return "", fmt.Errorf("hook aborted turn during before_llm: %s", reason)
 		}
 	}
-	if hookModelChanged {
-		// Hook-selected models must not continue through the pre-hook fallback
-		// candidate list, otherwise fallback execution would call the original
-		// candidate model and silently ignore the hook decision.
-		activeCandidates = nil
-	}
-
 	callSideLLM := func(callMessages []providers.Message) (*providers.LLMResponse, error) {
 		if len(activeCandidates) > 1 && al.fallback != nil {
 			fbResult, err := al.fallback.ExecuteCandidate(
@@ -774,7 +863,7 @@ func (al *AgentLoop) askSideQuestion(
 				if activeAccountRouter != nil {
 					activeAccountRouter.RecordFallbackResult(
 						routerSelection,
-						fallbackResultFromError(err),
+						fallbackResultFromError(err, activeCandidates...),
 						err,
 					)
 				}
@@ -842,7 +931,7 @@ func (al *AgentLoop) askSideQuestion(
 				turnContext: cloneTurnContext(turnCtx),
 			},
 			Context:  cloneTurnContext(turnCtx),
-			Model:    llmModel,
+			Model:    selectedModelName,
 			Response: resp,
 		})
 		switch decision.normalizedAction() {
@@ -907,90 +996,22 @@ func (al *AgentLoop) sideQuestionModelConfig(
 		return nil, fmt.Errorf("sideQuestionModelConfig: no agent available for /btw")
 	}
 
-	if name := modelAliasFromCandidateIdentityKey(candidate.IdentityKey); name != "" {
-		if credentialCfg, isCredential := accountRouterCredentialAccountConfig(
-			name,
-			candidate.Model,
-		); isCredential {
-			if credentialCfg == nil {
-				return nil, fmt.Errorf(
-					"credential account %q has no runnable provider",
-					name,
-				)
-			}
-			credentialCfg.Workspace = agent.Workspace
-			return credentialCfg, nil
-		}
-		cfg := al.GetConfig()
-		defaultProvider := "openai"
-		if cfg != nil {
-			defaultProvider = cfg.Agents.Defaults.Provider
-		}
-		if modelCfg := resolveActiveModelConfig(
-			cfg,
+	if accountRef := accountRefFromCandidateIdentityKey(candidate.IdentityKey); accountRef != "" {
+		modelAlias := modelAliasFromCandidateIdentityKey(candidate.IdentityKey)
+		modelCfg, err := concreteAccountModelConfig(
+			al.GetConfig(),
+			accountRef,
+			modelAlias,
 			agent.Workspace,
-			[]providers.FallbackCandidate{candidate},
-			candidate.Model,
-			defaultProvider,
-		); modelCfg != nil {
-			return modelCfg, nil
+		)
+		if err != nil {
+			return nil, err
 		}
-		modelCfg, err := resolvedModelConfig(al.GetConfig(), name, agent.Workspace)
-		if err == nil {
-			return modelCfg, nil
-		}
-		// Fallback: create a minimal config if lookup fails
+		modelCfg.Model = strings.TrimSpace(candidate.Model)
+		return modelCfg, nil
 	}
-
-	// Older identity keys used provider/model; keep resolving those by model.
-	if name := modelNameFromIdentityKey(candidate.IdentityKey); name != "" {
-		modelCfg, err := resolvedModelConfig(al.GetConfig(), name, agent.Workspace)
-		if err == nil {
-			return modelCfg, nil
-		}
-		// Fallback: create a minimal config if lookup fails
-	}
-
-	if candidate.Provider != "" && candidate.Model != "" {
-		candidateRef := providers.NormalizeProvider(candidate.Provider) + "/" + candidate.Model
-		if modelCfg, err := resolvedModelConfig(al.GetConfig(), candidateRef, agent.Workspace); err == nil {
-			return modelCfg, nil
-		}
-		return &config.ModelConfig{
-			ModelName: candidateRef,
-			Model:     candidateRef,
-			Workspace: agent.Workspace,
-		}, nil
-	}
-
-	// Otherwise, clean up the base model name and use it
-	baseModelName = strings.TrimSpace(baseModelName)
-	modelCfg, err := resolvedModelConfig(al.GetConfig(), baseModelName, agent.Workspace)
-	if err != nil {
-		// Fallback: create a minimal config for test scenarios
-		model := strings.TrimSpace(baseModelName)
-		if candidate.Model != "" {
-			model = candidate.Model
-		}
-		if candidate.Provider != "" && candidate.Model != "" {
-			model = providers.NormalizeProvider(candidate.Provider) + "/" + candidate.Model
-		} else {
-			model = ensureProtocolModel(model)
-		}
-		return &config.ModelConfig{
-			ModelName: baseModelName,
-			Model:     model,
-			Workspace: agent.Workspace,
-		}, nil
-	}
-
-	// If candidate specifies a different provider/model, override
-	clone := *modelCfg
-	if strings.TrimSpace(candidate.Model) != "" {
-		clone.Model = strings.TrimSpace(candidate.Model)
-	}
-	if strings.TrimSpace(candidate.Provider) != "" {
-		clone.Provider = providers.NormalizeProvider(candidate.Provider)
-	}
-	return &clone, nil
+	return nil, fmt.Errorf(
+		"side-question candidate for model alias %q has no concrete account identity",
+		strings.TrimSpace(baseModelName),
+	)
 }

@@ -64,10 +64,8 @@ func (p *Provider) Chat(
 	model string,
 	options map[string]any,
 ) (*LLMResponse, error) {
+	if _, err := protocoltypes.RequireModel(model); err != nil {
+		return nil, err
+	}
 	return nil, fmt.Errorf("bedrock provider not available: build with -tags bedrock to enable AWS Bedrock support")
-}
-
-// GetDefaultModel returns an empty string.
-func (p *Provider) GetDefaultModel() string {
-	return ""
 }

@@ -114,15 +114,6 @@ func TestNewClaudeCliProvider_EmptyWorkspace(t *testing.T) {
 	}
 }
 
-// --- GetDefaultModel tests ---
-
-func TestClaudeCliProvider_GetDefaultModel(t *testing.T) {
-	p := NewClaudeCliProvider("/workspace")
-	if got := p.GetDefaultModel(); got != "claude-code" {
-		t.Errorf("GetDefaultModel() = %q, want %q", got, "claude-code")
-	}
-}
-
 // --- Chat() tests ---
 
 func TestChat_Success(t *testing.T) {
@@ -134,7 +125,7 @@ func TestChat_Success(t *testing.T) {
 
 	resp, err := p.Chat(context.Background(), []Message{
 		{Role: "user", Content: "Hello"},
-	}, nil, "", nil)
+	}, nil, "test-model", nil)
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
@@ -170,7 +161,7 @@ func TestChat_IsErrorResponse(t *testing.T) {
 
 	_, err := p.Chat(context.Background(), []Message{
 		{Role: "user", Content: "Hello"},
-	}, nil, "", nil)
+	}, nil, "test-model", nil)
 
 	if err == nil {
 		t.Fatal("Chat() expected error when is_error=true")
@@ -189,7 +180,7 @@ func TestChat_WithToolCallsInResponse(t *testing.T) {
 
 	resp, err := p.Chat(context.Background(), []Message{
 		{Role: "user", Content: "What's the weather?"},
-	}, nil, "", nil)
+	}, nil, "test-model", nil)
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
@@ -215,7 +206,7 @@ func TestChat_StderrError(t *testing.T) {
 
 	_, err := p.Chat(context.Background(), []Message{
 		{Role: "user", Content: "Hello"},
-	}, nil, "", nil)
+	}, nil, "test-model", nil)
 
 	if err == nil {
 		t.Fatal("Chat() expected error")
@@ -233,7 +224,7 @@ func TestChat_NonZeroExitNoStderr(t *testing.T) {
 
 	_, err := p.Chat(context.Background(), []Message{
 		{Role: "user", Content: "Hello"},
-	}, nil, "", nil)
+	}, nil, "test-model", nil)
 
 	if err == nil {
 		t.Fatal("Chat() expected error for non-zero exit")
@@ -249,7 +240,7 @@ func TestChat_CommandNotFound(t *testing.T) {
 
 	_, err := p.Chat(context.Background(), []Message{
 		{Role: "user", Content: "Hello"},
-	}, nil, "", nil)
+	}, nil, "test-model", nil)
 
 	if err == nil {
 		t.Fatal("Chat() expected error for missing command")
@@ -264,7 +255,7 @@ func TestChat_InvalidResponseJSON(t *testing.T) {
 
 	_, err := p.Chat(context.Background(), []Message{
 		{Role: "user", Content: "Hello"},
-	}, nil, "", nil)
+	}, nil, "test-model", nil)
 
 	if err == nil {
 		t.Fatal("Chat() expected error for invalid JSON")
@@ -286,7 +277,7 @@ func TestChat_ContextCancellation(t *testing.T) {
 	start := time.Now()
 	_, err := p.Chat(ctx, []Message{
 		{Role: "user", Content: "Hello"},
-	}, nil, "", nil)
+	}, nil, "test-model", nil)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -308,7 +299,7 @@ func TestChat_PassesSystemPromptFlag(t *testing.T) {
 	_, err := p.Chat(context.Background(), []Message{
 		{Role: "system", Content: "Be helpful."},
 		{Role: "user", Content: "Hi"},
-	}, nil, "", nil)
+	}, nil, "test-model", nil)
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
@@ -347,7 +338,7 @@ func TestChat_PassesModelFlag(t *testing.T) {
 	}
 }
 
-func TestChat_SkipsModelFlagForClaudeCode(t *testing.T) {
+func TestChat_PassesExplicitClaudeCodeModel(t *testing.T) {
 	argsFile := filepath.Join(t.TempDir(), "args.txt")
 	script := createArgCaptureCLI(t, argsFile)
 
@@ -363,29 +354,20 @@ func TestChat_SkipsModelFlagForClaudeCode(t *testing.T) {
 
 	argsBytes, _ := os.ReadFile(argsFile)
 	args := string(argsBytes)
-	if strings.Contains(args, "--model") {
-		t.Errorf("CLI args should NOT contain --model for claude-code, got: %s", args)
+	if !strings.Contains(args, "--model claude-code") {
+		t.Errorf("CLI args should contain explicit claude-code model, got: %s", args)
 	}
 }
 
-func TestChat_SkipsModelFlagForEmptyModel(t *testing.T) {
-	argsFile := filepath.Join(t.TempDir(), "args.txt")
-	script := createArgCaptureCLI(t, argsFile)
-
+func TestChat_RejectsMissingModelBeforeCommand(t *testing.T) {
 	p := NewClaudeCliProvider(t.TempDir())
-	p.command = script
+	p.command = filepath.Join(t.TempDir(), "must-not-run")
 
 	_, err := p.Chat(context.Background(), []Message{
 		{Role: "user", Content: "Hi"},
-	}, nil, "", nil)
-	if err != nil {
-		t.Fatalf("Chat() error = %v", err)
-	}
-
-	argsBytes, _ := os.ReadFile(argsFile)
-	args := string(argsBytes)
-	if strings.Contains(args, "--model") {
-		t.Errorf("CLI args should NOT contain --model for empty model, got: %s", args)
+	}, nil, "  ", nil)
+	if err == nil || err.Error() != "no model configured" {
+		t.Fatalf("Chat() error = %v, want no model configured", err)
 	}
 }
 
@@ -398,7 +380,7 @@ func TestChat_EmptyWorkspaceDoesNotSetDir(t *testing.T) {
 
 	resp, err := p.Chat(context.Background(), []Message{
 		{Role: "user", Content: "Hello"},
-	}, nil, "", nil)
+	}, nil, "test-model", nil)
 	if err != nil {
 		t.Fatalf("Chat() with empty workspace error = %v", err)
 	}

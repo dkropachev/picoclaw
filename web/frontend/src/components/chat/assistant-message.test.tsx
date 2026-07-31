@@ -60,6 +60,22 @@ describe("AssistantMessage", () => {
     navigateMock.mockReset()
   })
 
+  it("shows the concrete account reference with the stable model alias", () => {
+    render(
+      <Provider>
+        <AssistantMessage
+          content="Done"
+          accountRef="credential:openai:work"
+          modelName="coding"
+        />
+      </Provider>,
+    )
+
+    expect(
+      screen.getByText("credential:openai:work / coding"),
+    ).toBeInTheDocument()
+  })
+
   it("renders saved threads search tool calls as thread tiles", async () => {
     vi.mocked(getThreads).mockResolvedValue([japanThread])
 
