@@ -166,6 +166,7 @@ explicitly configured as an alias name.
 | `name` | Yes | Exact stable alias used by agents, chat, workflows, voice, and model routers |
 | `model` | Yes | Base concrete upstream model ID |
 | `account_overrides` | No | Map from concrete account refs to concrete model IDs; account-router and model-router keys are invalid |
+| `disabled_accounts` | No | Concrete account refs where the alias is explicitly unavailable; an account cannot be both overridden and disabled |
 
 ## Load Balancing
 

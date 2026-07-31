@@ -47,6 +47,23 @@ PicoClaw uses a schema versioning system for `config.json` to ensure smooth upgr
 - **Auto-migration**: V3 configurations are backed up and migrated
   deterministically. The migration never invents a provider model.
 
+### Version 5
+
+- **Introduction**: Semantic developer model aliases.
+- **Changes**:
+  - Launcher model management exposes `chat`, `code`, `investigate`, `review`,
+    and `fast` as stable task roles.
+  - Catalog roles are metadata only. They do not select, persist, or imply a
+    concrete model until explicitly configured.
+  - Aliases mechanically generated from legacy account names or concrete model
+    IDs are removed. References to removed aliases are cleared rather than
+    redirected to a guessed model.
+  - Explicit custom aliases remain supported for specialized capabilities;
+    legacy web-search aliases remain custom and never configure a predefined
+    semantic role implicitly.
+- **Auto-migration**: V4 configurations are backed up and migrated
+  deterministically.
+
 ## How It Works
 
 ### Automatic Migration
@@ -64,11 +81,12 @@ The `version` field in `config.json` indicates the schema version:
 - `1`: Previous version (will be auto-migrated to V2 on load)
 - `2`: Previous version (will be auto-migrated to V3 on load)
 - `3`: Previous version (will be auto-migrated to V4 on load)
-- `4`: Current version
+- `4`: Previous version (will be auto-migrated to V5 on load)
+- `5`: Current version
 
 ```json
 {
-  "version": 4,
+  "version": 5,
   "agents": {...},
   ...
 }
@@ -83,8 +101,8 @@ When making breaking changes to the config schema:
 Create a new struct for the new version if the structure changes significantly:
 
 ```go
-// ConfigV4 represents version 4 config structure
-type ConfigV4 struct {
+// ConfigV5 represents version 5 config structure
+type ConfigV5 struct {
     Version   int             `json:"version"`
     Agents    AgentsConfig    `json:"agents"`
     // ... other fields with new structure
@@ -94,25 +112,25 @@ type ConfigV4 struct {
 ### Step 2: Update Current Config Version
 
 ```go
-const CurrentVersion = 4  // Increment this
+const CurrentVersion = 5  // Increment this
 ```
 
 ### Step 3: Add a Loader Function
 
 ```go
-// loadConfigV4 loads a version 4 config
-func loadConfigV4(data []byte) (*Config, error) {
+// loadConfigV5 loads a version 5 config
+func loadConfigV5(data []byte) (*Config, error) {
     cfg := DefaultConfig()
 
-    // Parse to ConfigV4 struct
-    var v4 ConfigV4
-    if err := json.Unmarshal(data, &v4); err != nil {
+    // Parse to ConfigV5 struct
+    var v5 ConfigV5
+    if err := json.Unmarshal(data, &v5); err != nil {
         return nil, err
     }
 
     // Convert to current Config
-    cfg.Version = v4.Version
-    cfg.Agents = v4.Agents
+    cfg.Version = v5.Version
+    cfg.Agents = v5.Agents
     // ... map other fields
 
     return cfg, nil
@@ -122,10 +140,10 @@ func loadConfigV4(data []byte) (*Config, error) {
 ### Step 4: Add Migration Logic
 
 ```go
-func (c *configV3) Migrate() (*Config, error) {
-    // Apply V3→V4 structural changes here
+func (c *configV4) Migrate() (*Config, error) {
+    // Apply V4→V5 structural changes here
     migrated := &c.Config
-    migrated.Version = 4
+    migrated.Version = 5
     // Apply structural changes
     return migrated, nil
 }
@@ -148,6 +166,8 @@ func LoadConfig(path string) (*Config, error) {
         cfg, err = loadConfigV3(data)
     case 4:
         cfg, err = loadConfigV4(data)
+    case 5:
+        cfg, err = loadConfigV5(data)
     default:
         return nil, fmt.Errorf("unsupported config version: %d", versionInfo.Version)
     }
@@ -161,15 +181,15 @@ func LoadConfig(path string) (*Config, error) {
 Create a test in `config_migration_test.go`:
 
 ```go
-func TestMigrateV3ToV4(t *testing.T) {
-    // Create a version 4 config
-    v4Config := Config{
-        Version: 4,
+func TestMigrateV4ToV5(t *testing.T) {
+    // Create a version 5 config
+    v5Config := Config{
+        Version: 5,
         // ... set up test data
     }
 
     // Apply migration
-    migrated, err := v3Config.Migrate()
+    migrated, err := v4Config.Migrate()
     if err != nil {
         t.Fatalf("Migration failed: %v", err)
     }

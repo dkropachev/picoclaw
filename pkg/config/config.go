@@ -26,11 +26,15 @@ import (
 var rrCounter atomic.Uint64
 
 // CurrentVersion is the latest config schema version
-const CurrentVersion = 4
+const CurrentVersion = 5
 
 // ErrNoModelConfigured is returned when model resolution is requested without
 // a configured model alias.
 var ErrNoModelConfigured = protocoltypes.ErrNoModelConfigured
+
+// ErrModelAliasDisabled is returned when an alias is explicitly unavailable
+// for the selected concrete account.
+var ErrModelAliasDisabled = errors.New("model alias disabled for account")
 
 func init() {
 	initChannel()
@@ -1012,11 +1016,13 @@ type VoiceConfig struct {
 
 // ModelAliasConfig maps a stable user-facing alias to a concrete upstream
 // model. AccountOverrides can select a different concrete model for a direct
-// account, but never for an account router.
+// account, while DisabledAccounts can make the alias unavailable there. Both
+// apply only to concrete accounts, never account routers.
 type ModelAliasConfig struct {
 	Name             string            `json:"name"                        yaml:"name"`
 	Model            string            `json:"model"                       yaml:"model"`
 	AccountOverrides map[string]string `json:"account_overrides,omitempty" yaml:"account_overrides,omitempty"`
+	DisabledAccounts []string          `json:"disabled_accounts,omitempty" yaml:"disabled_accounts,omitempty"`
 }
 
 type ModelStreamingConfig struct {
@@ -2252,6 +2258,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV4ToV5(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V4→V5 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -2271,7 +2281,7 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 
 		migratedFrom = versionInfo.Version
 	case 1:
-		// V1→V4 migration: infer Enabled, migrate channels, and introduce model aliases.
+		// V1→V5 migration: infer Enabled, migrate channels, and introduce semantic model aliases.
 		logger.InfoF(
 			"config migrate start",
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
@@ -2308,6 +2318,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV4ToV5(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V4→V5 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -2327,7 +2341,7 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 
 		migratedFrom = versionInfo.Version
 	case 2:
-		// V2→V4 migration: migrate channels and introduce model aliases.
+		// V2→V5 migration: migrate channels and introduce semantic model aliases.
 		logger.InfoF(
 			"config migrate start",
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
@@ -2358,6 +2372,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV4ToV5(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V4→V5 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -2377,7 +2395,7 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 
 		migratedFrom = versionInfo.Version
 	case 3:
-		// V3→V4 migration: introduce model aliases and separate account selection.
+		// V3→V5 migration: separate account selection and normalize semantic aliases.
 		logger.InfoF(
 			"config migrate start",
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
@@ -2404,6 +2422,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV4ToV5(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V4→V5 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -2416,6 +2438,33 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		}
 		err = MakeBackup(path)
 		if err != nil {
+			return nil, err
+		}
+		migratedFrom = versionInfo.Version
+	case 4:
+		// V4→V5 migration: remove mechanically generated account/model aliases.
+		logger.InfoF(
+			"config migrate start",
+			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
+		)
+		var m map[string]any
+		m, err = loadConfigMap(path)
+		if err != nil {
+			return nil, err
+		}
+		if migrateErr := migrateV4ToV5(m); migrateErr != nil {
+			return nil, fmt.Errorf("V4→V5 migration failed: %w", migrateErr)
+		}
+		var migrated []byte
+		migrated, err = json.Marshal(m)
+		if err != nil {
+			return nil, err
+		}
+		cfg, err = loadConfig(migrated)
+		if err != nil {
+			return nil, err
+		}
+		if err = MakeBackup(path); err != nil {
 			return nil, err
 		}
 		migratedFrom = versionInfo.Version
@@ -2744,6 +2793,16 @@ func (c *Config) ResolveModelAlias(aliasName, concreteAccountRef string) (string
 	if err != nil {
 		return "", err
 	}
+	for _, disabledAccountRef := range alias.DisabledAccounts {
+		if disabledAccountRef == concreteAccountRef {
+			return "", fmt.Errorf(
+				"%w: model alias %q is disabled for account %q",
+				ErrModelAliasDisabled,
+				aliasName,
+				concreteAccountRef,
+			)
+		}
+	}
 	if alias.AccountOverrides != nil {
 		if model, ok := alias.AccountOverrides[concreteAccountRef]; ok {
 			if strings.TrimSpace(model) == "" {
@@ -2920,6 +2979,63 @@ func (c *Config) ValidateModelAliases() error {
 				"model_aliases[%d].account_overrides[%q] references an unknown concrete account",
 				i,
 				accountRef,
+			)
+		}
+		disabledSeen := make(map[string]struct{}, len(alias.DisabledAccounts))
+		for j, accountRef := range alias.DisabledAccounts {
+			if strings.TrimSpace(accountRef) == "" {
+				return fmt.Errorf(
+					"model_aliases[%d].disabled_accounts[%d] is empty",
+					i,
+					j,
+				)
+			}
+			if accountRef != strings.TrimSpace(accountRef) {
+				return fmt.Errorf(
+					"model_aliases[%d].disabled_accounts[%d] must be an exact account reference",
+					i,
+					j,
+				)
+			}
+			if _, duplicate := disabledSeen[accountRef]; duplicate {
+				return fmt.Errorf(
+					"model_aliases[%d].disabled_accounts contains duplicate account %q",
+					i,
+					accountRef,
+				)
+			}
+			disabledSeen[accountRef] = struct{}{}
+			if _, overridden := alias.AccountOverrides[accountRef]; overridden {
+				return fmt.Errorf(
+					"model_aliases[%d] cannot both override and disable account %q",
+					i,
+					accountRef,
+				)
+			}
+			if _, ok := accountRouters[accountRef]; ok {
+				return fmt.Errorf(
+					"model_aliases[%d].disabled_accounts[%d] must reference a concrete account, not an account router",
+					i,
+					j,
+				)
+			}
+			if _, ok := modelRouters[accountRef]; ok {
+				return fmt.Errorf(
+					"model_aliases[%d].disabled_accounts[%d] must reference a concrete account, not a model router",
+					i,
+					j,
+				)
+			}
+			if _, ok := concreteAccounts[accountRef]; ok {
+				continue
+			}
+			if _, ok := AccountRouterCredentialAccountProvider(accountRef); ok {
+				continue
+			}
+			return fmt.Errorf(
+				"model_aliases[%d].disabled_accounts[%d] references an unknown concrete account",
+				i,
+				j,
 			)
 		}
 	}

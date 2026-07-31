@@ -116,7 +116,7 @@ func TestHandleGetConfigMasksUnresolvableEventWebhookSecret(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	configData := []byte(`{
-		"version": 4,
+		"version": 5,
 		"events": {
 			"ingress": {
 				"enabled": true,
@@ -257,7 +257,7 @@ func TestConfigAPIRepairsActiveAdapterWithDisabledChannel(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	configData := []byte(`{
-		"version": 4,
+		"version": 5,
 		"events": {
 			"ingress": {
 				"enabled": true,
@@ -463,7 +463,7 @@ func TestHandleUpdateConfig_PreservesExecAllowRemoteDefaultWhenOmitted(t *testin
 	h.RegisterRoutes(mux)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewBufferString(`{
-"version": 4,
+"version": 5,
 		"agents": {
 			"defaults": {
 				"workspace": "~/.picoclaw/workspace"
@@ -542,7 +542,7 @@ func TestHandleUpdateConfig_AppliesModelAPIKeysFromPayload(t *testing.T) {
 	h.RegisterRoutes(mux)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewBufferString(`{
-		"version": 4,
+		"version": 5,
 		"agents": {
 			"defaults": {
 				"workspace": "~/.picoclaw/workspace",
@@ -592,7 +592,7 @@ func TestHandleUpdateConfig_PreservesModelAPIKeyWhenModelNameChanges(t *testing.
 	h.RegisterRoutes(mux)
 
 	req := httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewBufferString(`{
-		"version": 4,
+		"version": 5,
 		"agents": {
 			"defaults": {
 				"workspace": "~/.picoclaw/workspace",
@@ -1238,7 +1238,7 @@ func TestHandleUpdateConfig_SucceedsWhenPicoTokenInSecurityOnly(t *testing.T) {
 
 	// PUT request with pico enabled but no token in JSON — token is in .security.yml
 	req := httptest.NewRequest(http.MethodPut, "/api/config", bytes.NewBufferString(`{
-		"version": 4,
+		"version": 5,
 		"agents": {
 			"defaults": {
 				"workspace": "~/.picoclaw/workspace",
@@ -1623,7 +1623,7 @@ func TestConfigAPIRejectsSecretBearingEventWebhookConnectorIdentity(t *testing.T
 
 func TestHandleUpdateConfig_AppliesGatewayLogLevel(t *testing.T) {
 	assertGatewayLogLevelApplied(t, http.MethodPut, `{
-		"version": 4,
+		"version": 5,
 		"agents": {
 			"defaults": {
 				"workspace": "~/.picoclaw/workspace",

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -183,13 +184,26 @@ func (c *Config) validateSelectionCompatibility(
 	if err != nil {
 		return err
 	}
-	for _, accountRef := range accounts {
-		for _, alias := range aliases {
-			if err := c.validateConcreteAccountAliasCompatibility(
+	isAccountRouter := false
+	for i := range c.AccountRouters {
+		if c.AccountRouters[i].Enabled &&
+			strings.TrimSpace(c.AccountRouters[i].Name) == strings.TrimSpace(accountSelector) {
+			isAccountRouter = true
+			break
+		}
+	}
+	for _, alias := range aliases {
+		runnableAccounts := 0
+		for _, accountRef := range accounts {
+			err := c.validateConcreteAccountAliasCompatibility(
 				accountRef,
 				alias,
 				requireChatProvider,
-			); err != nil {
+			)
+			if isAccountRouter && errors.Is(err, ErrModelAliasDisabled) {
+				continue
+			}
+			if err != nil {
 				return fmt.Errorf(
 					"model alias %q with account %q: %w",
 					alias,
@@ -197,6 +211,14 @@ func (c *Config) validateSelectionCompatibility(
 					err,
 				)
 			}
+			runnableAccounts++
+		}
+		if isAccountRouter && runnableAccounts == 0 {
+			return fmt.Errorf(
+				"model alias %q is disabled for every account reachable through router %q",
+				alias,
+				accountSelector,
+			)
 		}
 	}
 	return nil

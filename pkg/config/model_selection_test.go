@@ -412,6 +412,17 @@ func TestValidateModelSelectionsChecksAccountAndModelRouterCrossProduct(t *testi
 		`model alias "deep" with account "openai-work"`,
 	)
 
+	cfg.ModelAliases[1].DisabledAccounts = []string{"openai-work"}
+	require.NoError(t, cfg.ValidateModelSelections())
+
+	cfg.ModelAliases[1].DisabledAccounts = []string{
+		"openai-work",
+		"anthropic-work",
+	}
+	err = cfg.ValidateModelSelections()
+	require.ErrorContains(t, err, `model alias "deep" is disabled for every account`)
+
+	cfg.ModelAliases[1].DisabledAccounts = nil
 	cfg.ModelAliases[1].AccountOverrides = map[string]string{
 		"openai-work": "openai/gpt-5.4",
 	}
@@ -462,7 +473,7 @@ func TestValidateModelSelectionsChecksInheritedAgentModelsAgainstAgentAccount(t 
 func TestLoadConfigValidatesModelSelectionsAfterMaterialization(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	require.NoError(t, os.WriteFile(path, []byte(`{
-		"version": 4,
+		"version": 5,
 		"agents": {
 			"defaults": {
 				"account_ref": "account",
@@ -494,7 +505,7 @@ func TestLoadConfigRejectsProviderIncompatibleReachableAccountRouterPair(t *test
 				`"` + override + `"}`
 		}
 		require.NoError(t, os.WriteFile(path, []byte(`{
-			"version": 4,
+			"version": 5,
 			"agents": {
 				"defaults": {
 					"account_ref": "router-1",
@@ -538,7 +549,7 @@ func TestLoadConfigRejectsProviderIncompatibleReachableAccountRouterPair(t *test
 func TestLoadConfigRejectsUnknownSubscriptionEquivalentAlias(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	require.NoError(t, os.WriteFile(path, []byte(`{
-		"version": 4,
+		"version": 5,
 		"model_list": [{
 			"model_name": "account",
 			"provider": "openai",

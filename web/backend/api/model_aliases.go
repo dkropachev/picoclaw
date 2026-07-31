@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -21,18 +22,34 @@ func normalizeModelAlias(alias *config.ModelAliasConfig) error {
 	alias.Model = strings.TrimSpace(alias.Model)
 	if len(alias.AccountOverrides) == 0 {
 		alias.AccountOverrides = nil
+	} else {
+		overrides := make(map[string]string, len(alias.AccountOverrides))
+		for rawAccountRef, rawModel := range alias.AccountOverrides {
+			accountRef := strings.TrimSpace(rawAccountRef)
+			model := strings.TrimSpace(rawModel)
+			if _, duplicate := overrides[accountRef]; duplicate {
+				return fmt.Errorf("duplicate account override %q", accountRef)
+			}
+			overrides[accountRef] = model
+		}
+		alias.AccountOverrides = overrides
+	}
+	if len(alias.DisabledAccounts) == 0 {
+		alias.DisabledAccounts = nil
 		return nil
 	}
-	overrides := make(map[string]string, len(alias.AccountOverrides))
-	for rawAccountRef, rawModel := range alias.AccountOverrides {
+	disabled := make([]string, 0, len(alias.DisabledAccounts))
+	seenDisabled := make(map[string]struct{}, len(alias.DisabledAccounts))
+	for _, rawAccountRef := range alias.DisabledAccounts {
 		accountRef := strings.TrimSpace(rawAccountRef)
-		model := strings.TrimSpace(rawModel)
-		if _, duplicate := overrides[accountRef]; duplicate {
-			return fmt.Errorf("duplicate account override %q", accountRef)
+		if _, duplicate := seenDisabled[accountRef]; duplicate {
+			return fmt.Errorf("duplicate disabled account %q", accountRef)
 		}
-		overrides[accountRef] = model
+		seenDisabled[accountRef] = struct{}{}
+		disabled = append(disabled, accountRef)
 	}
-	alias.AccountOverrides = overrides
+	sort.Strings(disabled)
+	alias.DisabledAccounts = disabled
 	return nil
 }
 
@@ -695,6 +712,12 @@ func modelAccountReferences(cfg *config.Config, accountRef string) []string {
 	for i := range cfg.ModelAliases {
 		if _, ok := cfg.ModelAliases[i].AccountOverrides[accountRef]; ok {
 			add(fmt.Sprintf("model_aliases[%d].account_overrides", i))
+		}
+		for _, disabledAccountRef := range cfg.ModelAliases[i].DisabledAccounts {
+			if match(disabledAccountRef) {
+				add(fmt.Sprintf("model_aliases[%d].disabled_accounts", i))
+				break
+			}
 		}
 	}
 	for i := range cfg.AccountRouters {

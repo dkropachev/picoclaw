@@ -320,23 +320,12 @@
     }
   },
   "models": {
-    "description": "Configure provider accounts and stable model aliases. Chat and workflows always select one of each.",
-    "accountsTitle": "Provider accounts",
-    "defaultChangeSuccess": "Default account and model alias updated.",
-    "defaultSelection": {
-      "title": "Default selection",
-      "current": "Current: {{account}} / {{alias}}",
-      "none": "No model configured. Choose both an account and a model alias.",
-      "account": "Default account",
-      "alias": "Default model alias",
-      "selectAccount": "Select account",
-      "selectAlias": "Select model alias",
-      "save": "Save default"
-    },
+    "description": "Configure stable model aliases used by chat, agents, and workflows.",
+    "defaultChangeSuccess": "Runtime selection updated.",
     "alias": {
       "title": "Model aliases",
       "sectionDescription": "Stable names resolve to exact models, with optional per-account overrides.",
-      "description": "Chats and workflows use this alias. Each concrete account can map it to a different exact model.",
+      "description": "Chats and workflows use this alias. Each account can use the default model, an override, or disable the alias.",
       "add": "Add alias",
       "addTitle": "Add model alias",
       "edit": "Edit model alias",
@@ -344,28 +333,37 @@
       "delete": "Delete model alias",
       "deleteTitle": "Delete model alias?",
       "deleteDescription": "\"{{name}}\" will no longer be available to chats or workflows.",
-      "deleteDefault": "Change the default alias before deleting it.",
       "deleteError": "Failed to delete model alias.",
       "saveError": "Failed to save model alias.",
       "name": "Alias",
       "nameHint": "Stable name referenced by chats, workflows, and agents.",
       "nameImmutable": "Alias names cannot be changed after creation.",
       "namePlaceholder": "coding",
-      "baseModel": "Base model",
-      "baseModelHint": "Exact upstream model used unless the selected account has an override.",
+      "baseModel": "Default model",
+      "baseModelHint": "Used for accounts without an override. Each option shows where the model is available.",
       "baseModelPlaceholder": "gpt-5.4",
-      "baseForAll": "Base model for every account",
+      "baseForAll": "Default model for every account",
       "overrides": "Account overrides",
-      "overridesHint": "Overrides are allowed only for concrete accounts, never account routers.",
+      "overridesHint": "Choose another model or disable this alias for a concrete account.",
       "addOverride": "Add override",
-      "noOverrides": "All accounts currently use the base model.",
+      "noOverrides": "Every account currently uses the default model.",
       "overrideAccount": "Override account",
-      "overrideModel": "Exact override model",
+      "overrideModel": "Override model",
       "overrideModelPlaceholder": "claude-sonnet-4.5",
       "removeOverride": "Remove override",
-      "errorRequired": "Alias name and base model are required.",
+      "errorRequired": "Alias name and default model are required.",
       "errorDuplicate": "This model alias already exists.",
-      "errorOverrideRequired": "Every account override needs an exact model.",
+      "errorOverrideRequired": "Every account override needs a model or must be disabled.",
+      "loadingModels": "Loading models...",
+      "selectModel": "Select a model",
+      "selectOverride": "Select model or disable",
+      "disableForAccount": "Disabled for this account",
+      "disabled": "Disabled",
+      "partialAvailability": "Some accounts did not return a model list",
+      "availabilityUnknown": "Availability unknown",
+      "availableAll": "All accounts ({{count}})",
+      "availableNone": "Not reported by any account",
+      "availableSome": "Available: {{available}} · Missing: {{missing}}",
       "empty": "No model aliases configured. Chat and workflows will fail with “no model configured” until an alias is added and selected."
     },
     "unsavedPrompt": "This change has not been saved yet. Save to write it into the model configuration.",
@@ -379,28 +377,28 @@
       "unreachable": "Service unreachable"
     },
     "badge": {
-      "default": "Default",
+      "default": "Active",
       "virtual": "Virtual",
       "router": "Account Router",
       "modelRouter": "Model Router"
     },
     "action": {
       "edit": "Edit account",
-      "setDefault": "Set as default",
+      "setDefault": "Use for runtime",
       "delete": "Delete account",
       "setDefaultDisabled": {
-        "setting": "Saving default selection...",
-        "unavailable": "An unavailable account or router cannot be used in the default selection",
-        "isDefault": "Already part of the default selection",
-        "isVirtual": "This virtual entry cannot be used in the default selection"
+        "setting": "Updating runtime selection...",
+        "unavailable": "An unavailable account or router cannot be used for runtime",
+        "isDefault": "Already used by the runtime selection",
+        "isVirtual": "This virtual entry cannot be used as the runtime account"
       },
       "deleteDisabled": {
-        "isDefault": "Change the default selection before deleting this entry"
+        "isDefault": "Change the runtime selection before deleting this entry"
       }
     },
     "defaultOnSave": {
-      "label": "Default Account",
-      "description": "Use this account with the currently selected model alias after saving."
+      "label": "Use as runtime account",
+      "description": "Use this account with the active runtime model alias after saving."
     },
     "router": {
       "button": "Account Router",
@@ -582,6 +580,7 @@
     },
     "modelRouter": {
       "button": "Model Router",
+      "sectionTitle": "Model routers",
       "title": "Create Model Router",
       "editTitle": "Configure {{name}}",
       "description": "Route chat turns to configured model aliases from the current input.",
@@ -594,8 +593,6 @@
       "containsTarget": "Contains Target",
       "regexText": "Regex Pattern",
       "regexTarget": "Regex Target",
-      "defaultOnSave": "Default model alias",
-      "defaultOnSaveHint": "Use this router as the default alias with the current default account.",
       "containsPlaceholder": "e.g. translate",
       "regexPlaceholder": "e.g. (?i)review|debug",
       "selectTarget": "Select target",

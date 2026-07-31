@@ -113,7 +113,7 @@ func TestValidateModelSelectionsRejectsSubscriptionEquivalentAliasCycles(t *test
 func TestLoadConfigRejectsSubscriptionEquivalentAliasCycle(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	require.NoError(t, os.WriteFile(path, []byte(`{
-		"version": 4,
+		"version": 5,
 		"model_aliases": [{
 			"name": "subscription",
 			"model": "openai/subscription-model"

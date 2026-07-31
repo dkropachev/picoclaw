@@ -16,6 +16,8 @@ export interface GatewayStoreState {
   canStart: boolean
   startReason?: string
   restartRequired: boolean
+  modelSetupRequired?: boolean
+  modelSetupReason?: string
 }
 
 type GatewayStorePatch = Partial<GatewayStoreState>
@@ -59,7 +61,9 @@ function normalizeGatewayStoreState(
     next.status === prev.status &&
     next.canStart === prev.canStart &&
     next.startReason === prev.startReason &&
-    next.restartRequired === prev.restartRequired
+    next.restartRequired === prev.restartRequired &&
+    next.modelSetupRequired === prev.modelSetupRequired &&
+    next.modelSetupReason === prev.modelSetupReason
   ) {
     return prev
   }
@@ -114,6 +118,8 @@ export function applyGatewayStatusToStore(
       | "gateway_start_allowed"
       | "gateway_start_reason"
       | "gateway_restart_required"
+      | "model_setup_required"
+      | "model_setup_reason"
     >
   >,
 ) {
@@ -134,6 +140,11 @@ export function applyGatewayStatusToStore(
       prev.status === "stopping" && data.gateway_status === "running"
         ? false
         : (data.gateway_restart_required ?? prev.restartRequired),
+    modelSetupRequired: data.model_setup_required ?? prev.modelSetupRequired,
+    modelSetupReason:
+      data.model_setup_required === false
+        ? undefined
+        : (data.model_setup_reason ?? prev.modelSetupReason),
   }))
 }
 

@@ -380,7 +380,11 @@ func (h *Handler) gatewayStartReady() (bool, string, error) {
 
 	modelAlias := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
 	if modelAlias == "" {
-		return false, config.ErrNoModelConfigured.Error(), nil
+		// The launcher starts the child with --allow-empty. Keep the gateway
+		// available for configuration and non-LLM services; individual model
+		// requests will fail explicitly until their execution context supplies
+		// a configured alias.
+		return true, "", nil
 	}
 	accountRef := strings.TrimSpace(cfg.Agents.Defaults.AccountRef)
 	if accountRef == "" {
@@ -466,11 +470,14 @@ func computeConfigSignature(cfg *config.Config) string {
 			overrides = append(overrides, accountRef+"="+model)
 		}
 		sort.Strings(overrides)
+		disabledAccounts := append([]string(nil), alias.DisabledAccounts...)
+		sort.Strings(disabledAccounts)
 		parts = append(parts, strings.Join([]string{
 			"alias",
 			strings.TrimSpace(alias.Name),
 			strings.TrimSpace(alias.Model),
 			strings.Join(overrides, ","),
+			strings.Join(disabledAccounts, ","),
 		}, ":"))
 	}
 	modelStreamingSignatures := computeModelStreamingSignatures(cfg)
@@ -1640,6 +1647,11 @@ func (h *Handler) gatewayStatusData() map[string]any {
 	var configDefaultModel string
 	cfg, cfgErr := config.LoadConfig(h.configPath)
 	if cfgErr == nil && cfg != nil {
+		_, chatAliasErr := cfg.GetModelAlias("chat")
+		data["model_setup_required"] = chatAliasErr != nil
+		if chatAliasErr != nil {
+			data["model_setup_reason"] = `model alias "chat" is not configured`
+		}
 		configDefaultModel = strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
 		if configDefaultModel != "" {
 			data["config_default_model"] = configDefaultModel

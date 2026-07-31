@@ -256,7 +256,7 @@
   },
   "models": {
     "description": "Configure API Keys para provedores de IA. Apenas modelos configurados ficam disponíveis para o chat.",
-    "defaultChangeSuccess": "Modelo padrão atualizado.",
+    "defaultChangeSuccess": "Seleção de execução atualizada.",
     "unsavedPrompt": "Esta alteração ainda não foi salva. Salve para gravá-la na configuração do modelo.",
     "restartHint": "Alterações na configuração de modelos só têm efeito após o gateway reiniciar.",
     "loadError": "Falha ao carregar modelos",
@@ -270,27 +270,27 @@
       "unreachable": "Serviço inacessível"
     },
     "badge": {
-      "default": "Padrão",
+      "default": "Ativo",
       "virtual": "Virtual"
     },
     "action": {
       "edit": "Editar API Key",
-      "setDefault": "Definir como padrão",
+      "setDefault": "Usar em execução",
       "delete": "Excluir modelo",
       "setDefaultDisabled": {
-        "setting": "Definindo como padrão...",
-        "unavailable": "Não é possível definir um modelo indisponível como padrão",
-        "isDefault": "Já é o modelo padrão",
-        "isVirtual": "Não é possível definir um modelo virtual como padrão",
+        "setting": "Atualizando a seleção de execução...",
+        "unavailable": "Uma conta ou roteador indisponível não pode ser usado em execução",
+        "isDefault": "Já faz parte da seleção de execução",
+        "isVirtual": "Esta entrada virtual não pode ser usada como conta de execução",
         "unsupportedProvider": "Este provedor não pode ser usado como modelo de chat padrão."
       },
       "deleteDisabled": {
-        "isDefault": "Não é possível excluir o modelo padrão"
+        "isDefault": "Altere a seleção de execução antes de excluir esta entrada"
       }
     },
     "defaultOnSave": {
-      "label": "Modelo Padrão",
-      "description": "Definir automaticamente este modelo como padrão após salvar.",
+      "label": "Usar como conta de execução",
+      "description": "Usar esta conta com o alias de modelo ativo após salvar.",
       "unsupportedProvider": "Este provedor pode ser salvo na lista de modelos, mas não pode ser usado como modelo de chat padrão."
     },
     "add": {

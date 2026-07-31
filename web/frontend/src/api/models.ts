@@ -115,11 +115,18 @@ export interface ModelAlias {
   name: string
   model: string
   account_overrides?: Record<string, string>
+  disabled_accounts?: string[]
+}
+
+export interface ModelAliasCatalogEntry {
+  name: string
+  description: string
 }
 
 interface ModelsListResponse {
   models: ModelInfo[]
   model_aliases: ModelAlias[]
+  model_alias_catalog?: ModelAliasCatalogEntry[]
   total: number
   default_model: string
   default_account_ref: string

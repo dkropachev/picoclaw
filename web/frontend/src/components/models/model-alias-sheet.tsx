@@ -2,35 +2,48 @@ import { IconLoader2, IconPlus, IconTrash } from "@tabler/icons-react"
 import { useEffect, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
-import { type ModelAlias, addModelAlias, updateModelAlias } from "@/api/models"
+import {
+  type ModelAlias,
+  addModelAlias,
+  fetchUpstreamModels,
+  updateModelAlias,
+} from "@/api/models"
 import { Field } from "@/components/shared-form"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
-  SelectValue,
 } from "@/components/ui/select"
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet"
+
+const DISABLED_MODEL_VALUE = "__picoclaw_alias_disabled__"
 
 interface OverrideRow {
   accountRef: string
   model: string
+  disabled: boolean
 }
 
-interface ModelAliasSheetProps {
+interface ModelAvailability {
+  id: string
+  accountRefs: string[]
+}
+
+interface ModelAliasDialogProps {
   open: boolean
   alias: ModelAlias | null
   aliasIndex: number | null
+  nameLocked?: boolean
   revision: string
   existingNames: string[]
   concreteAccountRefs: string[]
@@ -39,28 +52,121 @@ interface ModelAliasSheetProps {
 }
 
 function overrideRows(alias: ModelAlias | null): OverrideRow[] {
-  return Object.entries(alias?.account_overrides ?? {})
-    .map(([accountRef, model]) => ({ accountRef, model }))
-    .sort((a, b) => a.accountRef.localeCompare(b.accountRef))
+  const rows = Object.entries(alias?.account_overrides ?? {}).map(
+    ([accountRef, model]) => ({ accountRef, model, disabled: false }),
+  )
+  for (const accountRef of alias?.disabled_accounts ?? []) {
+    rows.push({ accountRef, model: "", disabled: true })
+  }
+  return rows.sort((a, b) => a.accountRef.localeCompare(b.accountRef))
 }
 
-export function ModelAliasSheet({
+interface ModelSelectProps {
+  value: string
+  options: ModelAvailability[]
+  allAccountRefs: string[]
+  placeholder: string
+  ariaLabel: string
+  allowDisabled?: boolean
+  disabledLabel: string
+  onValueChange: (value: string) => void
+}
+
+function ModelSelect({
+  value,
+  options,
+  allAccountRefs,
+  placeholder,
+  ariaLabel,
+  allowDisabled = false,
+  disabledLabel,
+  onValueChange,
+}: ModelSelectProps) {
+  const { t } = useTranslation()
+  const displayValue = value === DISABLED_MODEL_VALUE ? disabledLabel : value
+
+  return (
+    <Select value={value} onValueChange={onValueChange}>
+      <SelectTrigger className="w-full min-w-0" aria-label={ariaLabel}>
+        <span
+          className={
+            displayValue ? "truncate" : "text-muted-foreground truncate"
+          }
+        >
+          {displayValue || placeholder}
+        </span>
+      </SelectTrigger>
+      <SelectContent position="popper" className="max-w-[min(42rem,90vw)]">
+        {allowDisabled && (
+          <SelectItem value={DISABLED_MODEL_VALUE}>
+            <span className="text-destructive">{disabledLabel}</span>
+          </SelectItem>
+        )}
+        {options.map((option) => {
+          const available = new Set(option.accountRefs)
+          const missing = allAccountRefs.filter(
+            (accountRef) => !available.has(accountRef),
+          )
+          const availability =
+            allAccountRefs.length === 0
+              ? t("models.alias.availabilityUnknown", "Availability unknown")
+              : missing.length === 0
+                ? t("models.alias.availableAll", "All accounts ({{count}})", {
+                    count: allAccountRefs.length,
+                  })
+                : option.accountRefs.length === 0
+                  ? t(
+                      "models.alias.availableNone",
+                      "Not reported by any account",
+                    )
+                  : t(
+                      "models.alias.availableSome",
+                      "Available: {{available}} · Missing: {{missing}}",
+                      {
+                        available: option.accountRefs.join(", "),
+                        missing: missing.join(", "),
+                      },
+                    )
+          return (
+            <SelectItem key={option.id} value={option.id} className="py-2">
+              <span className="flex min-w-0 flex-col items-start gap-0.5">
+                <span className="max-w-[36rem] truncate font-mono">
+                  {option.id}
+                </span>
+                <span className="text-muted-foreground max-w-[36rem] truncate text-[11px]">
+                  {availability}
+                </span>
+              </span>
+            </SelectItem>
+          )
+        })}
+      </SelectContent>
+    </Select>
+  )
+}
+
+export function ModelAliasDialog({
   open,
   alias,
   aliasIndex,
+  nameLocked = false,
   revision,
   existingNames,
   concreteAccountRefs,
   onClose,
   onSaved,
-}: ModelAliasSheetProps) {
+}: ModelAliasDialogProps) {
   const { t } = useTranslation()
   const [name, setName] = useState("")
   const [model, setModel] = useState("")
   const [overrides, setOverrides] = useState<OverrideRow[]>([])
+  const [availability, setAvailability] = useState<ModelAvailability[]>([])
+  const [availabilityIssues, setAvailabilityIssues] = useState<string[]>([])
+  const [loadingAvailability, setLoadingAvailability] = useState(false)
   const [error, setError] = useState("")
   const [saving, setSaving] = useState(false)
   const isEdit = alias != null && aliasIndex != null
+  const lockName = isEdit || nameLocked
 
   useEffect(() => {
     if (!open) return
@@ -69,6 +175,77 @@ export function ModelAliasSheet({
     setOverrides(overrideRows(alias))
     setError("")
   }, [alias, open])
+
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setLoadingAvailability(true)
+    setAvailabilityIssues([])
+
+    void Promise.all(
+      concreteAccountRefs.map(async (accountRef) => {
+        try {
+          const response = await fetchUpstreamModels({
+            account_ref: accountRef,
+          })
+          return {
+            accountRef,
+            models: response.models
+              .map((item) => item.id.trim())
+              .filter(Boolean),
+            issue: response.issues?.map((item) => item.error).join("; ") ?? "",
+          }
+        } catch (fetchError) {
+          return {
+            accountRef,
+            models: [] as string[],
+            issue:
+              fetchError instanceof Error
+                ? fetchError.message
+                : "Failed to load models",
+          }
+        }
+      }),
+    ).then((results) => {
+      if (cancelled) return
+      const accountsByModel = new Map<string, Set<string>>()
+      for (const result of results) {
+        for (const modelID of result.models) {
+          const accounts = accountsByModel.get(modelID) ?? new Set<string>()
+          accounts.add(result.accountRef)
+          accountsByModel.set(modelID, accounts)
+        }
+      }
+      const configuredModels = [
+        alias?.model ?? "",
+        ...Object.values(alias?.account_overrides ?? {}),
+      ]
+      for (const configuredModel of configuredModels) {
+        const modelID = configuredModel.trim()
+        if (modelID && !accountsByModel.has(modelID)) {
+          accountsByModel.set(modelID, new Set())
+        }
+      }
+      setAvailability(
+        [...accountsByModel.entries()]
+          .map(([id, accountRefs]) => ({
+            id,
+            accountRefs: [...accountRefs].sort((a, b) => a.localeCompare(b)),
+          }))
+          .sort((a, b) => a.id.localeCompare(b.id)),
+      )
+      setAvailabilityIssues(
+        results
+          .filter((result) => result.issue)
+          .map((result) => `${result.accountRef}: ${result.issue}`),
+      )
+      setLoadingAvailability(false)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [alias, concreteAccountRefs, open])
 
   const availableAccountRefs = useMemo(
     () =>
@@ -79,10 +256,22 @@ export function ModelAliasSheet({
     [concreteAccountRefs, overrides],
   )
 
+  const modelOptions = useMemo(() => {
+    if (!model || availability.some((item) => item.id === model)) {
+      return availability
+    }
+    return [...availability, { id: model, accountRefs: [] }].sort((a, b) =>
+      a.id.localeCompare(b.id),
+    )
+  }, [availability, model])
+
   const addOverride = () => {
     const accountRef = availableAccountRefs[0]
     if (!accountRef) return
-    setOverrides((current) => [...current, { accountRef, model: "" }])
+    setOverrides((current) => [
+      ...current,
+      { accountRef, model: "", disabled: false },
+    ])
   }
 
   const save = async () => {
@@ -92,7 +281,7 @@ export function ModelAliasSheet({
       setError(
         t(
           "models.alias.errorRequired",
-          "Alias name and base model are required.",
+          "Alias name and default model are required.",
         ),
       )
       return
@@ -108,29 +297,36 @@ export function ModelAliasSheet({
     }
     if (
       overrides.some(
-        (override) => !override.accountRef.trim() || !override.model.trim(),
+        (override) =>
+          !override.accountRef.trim() ||
+          (!override.disabled && !override.model.trim()),
       )
     ) {
       setError(
         t(
           "models.alias.errorOverrideRequired",
-          "Every account override needs an exact model.",
+          "Every account override needs a model or must be disabled.",
         ),
       )
       return
     }
 
     const accountOverrides = Object.fromEntries(
-      overrides.map((override) => [
-        override.accountRef.trim(),
-        override.model.trim(),
-      ]),
+      overrides
+        .filter((override) => !override.disabled)
+        .map((override) => [override.accountRef.trim(), override.model.trim()]),
     )
+    const disabledAccounts = overrides
+      .filter((override) => override.disabled)
+      .map((override) => override.accountRef.trim())
     const payload: ModelAlias = {
       name: trimmedName,
       model: trimmedModel,
       ...(Object.keys(accountOverrides).length > 0
         ? { account_overrides: accountOverrides }
+        : {}),
+      ...(disabledAccounts.length > 0
+        ? { disabled_accounts: disabledAccounts }
         : {}),
     }
 
@@ -156,23 +352,25 @@ export function ModelAliasSheet({
   }
 
   return (
-    <Sheet open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
-      <SheetContent side="right" className="sm:max-w-lg">
-        <SheetHeader>
-          <SheetTitle>
+    <Dialog open={open} onOpenChange={(nextOpen) => !nextOpen && onClose()}>
+      <DialogContent className="flex max-h-[calc(100vh-2rem)] flex-col gap-0 p-0 sm:max-w-3xl">
+        <DialogHeader className="border-border border-b px-6 py-5 pr-14">
+          <DialogTitle>
             {isEdit
               ? t("models.alias.editTitle", "Edit model alias")
-              : t("models.alias.addTitle", "Add model alias")}
-          </SheetTitle>
-          <SheetDescription>
+              : nameLocked
+                ? t("models.alias.configureTitle", "Configure model alias")
+                : t("models.alias.addTitle", "Add model alias")}
+          </DialogTitle>
+          <DialogDescription>
             {t(
               "models.alias.description",
-              "Chats and workflows use this alias. Each concrete account can map it to a different exact model.",
+              "Chats and workflows use this alias. Each account can use the default model, an override, or disable the alias.",
             )}
-          </SheetDescription>
-        </SheetHeader>
+          </DialogDescription>
+        </DialogHeader>
 
-        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 pb-4">
+        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
           {error && (
             <p
               role="alert"
@@ -185,10 +383,10 @@ export function ModelAliasSheet({
           <Field
             label={t("models.alias.name", "Alias")}
             hint={
-              isEdit
+              lockName
                 ? t(
                     "models.alias.nameImmutable",
-                    "Alias names cannot be changed after creation.",
+                    "This stable role name cannot be changed.",
                   )
                 : t(
                     "models.alias.nameHint",
@@ -200,25 +398,52 @@ export function ModelAliasSheet({
             <Input
               value={name}
               onChange={(event) => setName(event.target.value)}
-              disabled={isEdit}
-              placeholder={t("models.alias.namePlaceholder", "coding")}
+              disabled={lockName}
+              placeholder={t("models.alias.namePlaceholder", "code")}
             />
           </Field>
 
           <Field
-            label={t("models.alias.baseModel", "Base model")}
+            label={t("models.alias.baseModel", "Default model")}
             hint={t(
               "models.alias.baseModelHint",
-              "Exact upstream model used unless the selected account has an override.",
+              "Used for accounts without an override. Each option shows where the model is available.",
             )}
             required
           >
-            <Input
+            <ModelSelect
               value={model}
-              onChange={(event) => setModel(event.target.value)}
-              placeholder={t("models.alias.baseModelPlaceholder", "gpt-5.4")}
+              options={modelOptions}
+              allAccountRefs={concreteAccountRefs}
+              placeholder={
+                loadingAvailability
+                  ? t("models.alias.loadingModels", "Loading models...")
+                  : t("models.alias.selectModel", "Select a model")
+              }
+              ariaLabel={t("models.alias.baseModel", "Default model")}
+              disabledLabel={t(
+                "models.alias.disableForAccount",
+                "Disabled for this account",
+              )}
+              onValueChange={setModel}
             />
           </Field>
+
+          {availabilityIssues.length > 0 && (
+            <div className="bg-muted text-muted-foreground rounded-lg px-3 py-2 text-xs">
+              <p className="text-foreground font-medium">
+                {t(
+                  "models.alias.partialAvailability",
+                  "Some accounts did not return a model list",
+                )}
+              </p>
+              {availabilityIssues.map((issue) => (
+                <p key={issue} className="mt-1 break-words">
+                  {issue}
+                </p>
+              ))}
+            </div>
+          )}
 
           <section className="space-y-3">
             <div className="flex items-start justify-between gap-3">
@@ -229,7 +454,7 @@ export function ModelAliasSheet({
                 <p className="text-muted-foreground mt-0.5 text-xs">
                   {t(
                     "models.alias.overridesHint",
-                    "Overrides are allowed only for concrete accounts, never account routers.",
+                    "Choose another model or disable this alias for a concrete account.",
                   )}
                 </p>
               </div>
@@ -249,100 +474,131 @@ export function ModelAliasSheet({
               <p className="border-border text-muted-foreground rounded-lg border border-dashed px-3 py-4 text-xs">
                 {t(
                   "models.alias.noOverrides",
-                  "All accounts currently use the base model.",
+                  "Every account currently uses the default model.",
                 )}
               </p>
             ) : (
               <div className="space-y-2">
-                {overrides.map((override, index) => (
-                  <div
-                    key={`${override.accountRef}-${index}`}
-                    className="border-border grid gap-2 rounded-lg border p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
-                  >
-                    <Select
-                      value={override.accountRef}
-                      onValueChange={(accountRef) =>
-                        setOverrides((current) =>
-                          current.map((row, rowIndex) =>
-                            rowIndex === index ? { ...row, accountRef } : row,
-                          ),
-                        )
-                      }
+                {overrides.map((override, index) => {
+                  const selectedValue = override.disabled
+                    ? DISABLED_MODEL_VALUE
+                    : override.model
+                  const rowOptions =
+                    override.model &&
+                    !availability.some((item) => item.id === override.model)
+                      ? [
+                          ...availability,
+                          { id: override.model, accountRefs: [] },
+                        ].sort((a, b) => a.id.localeCompare(b.id))
+                      : availability
+                  return (
+                    <div
+                      key={`${override.accountRef}-${index}`}
+                      className="border-border grid gap-2 rounded-lg border p-3 sm:grid-cols-[minmax(0,0.75fr)_minmax(0,1.25fr)_auto]"
                     >
-                      <SelectTrigger
+                      <Select
+                        value={override.accountRef}
+                        onValueChange={(accountRef) =>
+                          setOverrides((current) =>
+                            current.map((row, rowIndex) =>
+                              rowIndex === index ? { ...row, accountRef } : row,
+                            ),
+                          )
+                        }
+                      >
+                        <SelectTrigger
+                          className="w-full min-w-0"
+                          aria-label={t(
+                            "models.alias.overrideAccount",
+                            "Override account",
+                          )}
+                        >
+                          <span className="truncate">
+                            {override.accountRef}
+                          </span>
+                        </SelectTrigger>
+                        <SelectContent>
+                          {concreteAccountRefs
+                            .filter(
+                              (accountRef) =>
+                                accountRef === override.accountRef ||
+                                !overrides.some(
+                                  (row) => row.accountRef === accountRef,
+                                ),
+                            )
+                            .map((accountRef) => (
+                              <SelectItem key={accountRef} value={accountRef}>
+                                {accountRef}
+                              </SelectItem>
+                            ))}
+                        </SelectContent>
+                      </Select>
+                      <ModelSelect
+                        value={selectedValue}
+                        options={rowOptions}
+                        allAccountRefs={concreteAccountRefs}
+                        placeholder={t(
+                          "models.alias.selectOverride",
+                          "Select model or disable",
+                        )}
+                        ariaLabel={t(
+                          "models.alias.overrideModel",
+                          "Override model",
+                        )}
+                        allowDisabled
+                        disabledLabel={t(
+                          "models.alias.disableForAccount",
+                          "Disabled for this account",
+                        )}
+                        onValueChange={(nextValue) =>
+                          setOverrides((current) =>
+                            current.map((row, rowIndex) =>
+                              rowIndex === index
+                                ? {
+                                    ...row,
+                                    disabled:
+                                      nextValue === DISABLED_MODEL_VALUE,
+                                    model:
+                                      nextValue === DISABLED_MODEL_VALUE
+                                        ? ""
+                                        : nextValue,
+                                  }
+                                : row,
+                            ),
+                          )
+                        }
+                      />
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        onClick={() =>
+                          setOverrides((current) =>
+                            current.filter(
+                              (_row, rowIndex) => rowIndex !== index,
+                            ),
+                          )
+                        }
                         aria-label={t(
-                          "models.alias.overrideAccount",
-                          "Override account",
+                          "models.alias.removeOverride",
+                          "Remove override",
+                        )}
+                        title={t(
+                          "models.alias.removeOverride",
+                          "Remove override",
                         )}
                       >
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {concreteAccountRefs
-                          .filter(
-                            (accountRef) =>
-                              accountRef === override.accountRef ||
-                              !overrides.some(
-                                (row) => row.accountRef === accountRef,
-                              ),
-                          )
-                          .map((accountRef) => (
-                            <SelectItem key={accountRef} value={accountRef}>
-                              {accountRef}
-                            </SelectItem>
-                          ))}
-                      </SelectContent>
-                    </Select>
-                    <Input
-                      value={override.model}
-                      onChange={(event) =>
-                        setOverrides((current) =>
-                          current.map((row, rowIndex) =>
-                            rowIndex === index
-                              ? { ...row, model: event.target.value }
-                              : row,
-                          ),
-                        )
-                      }
-                      aria-label={t(
-                        "models.alias.overrideModel",
-                        "Exact override model",
-                      )}
-                      placeholder={t(
-                        "models.alias.overrideModelPlaceholder",
-                        "claude-sonnet-4.5",
-                      )}
-                    />
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="ghost"
-                      onClick={() =>
-                        setOverrides((current) =>
-                          current.filter(
-                            (_row, rowIndex) => rowIndex !== index,
-                          ),
-                        )
-                      }
-                      aria-label={t(
-                        "models.alias.removeOverride",
-                        "Remove override",
-                      )}
-                      title={t(
-                        "models.alias.removeOverride",
-                        "Remove override",
-                      )}
-                    >
-                      <IconTrash className="size-4" />
-                    </Button>
-                  </div>
-                ))}
+                        <IconTrash className="size-4" />
+                      </Button>
+                    </div>
+                  )
+                })}
               </div>
             )}
           </section>
         </div>
 
-        <SheetFooter className="border-border border-t">
+        <DialogFooter className="border-border border-t px-6 py-4">
           <Button type="button" variant="outline" onClick={onClose}>
             {t("common.cancel")}
           </Button>
@@ -350,8 +606,8 @@ export function ModelAliasSheet({
             {saving && <IconLoader2 className="size-4 animate-spin" />}
             {t("common.save")}
           </Button>
-        </SheetFooter>
-      </SheetContent>
-    </Sheet>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }

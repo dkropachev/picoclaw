@@ -254,7 +254,7 @@
   },
   "models": {
     "description": "Nastavení API klíčů pro AI providery. V chatu jsou dostupné pouze nakonfigurované modely.",
-    "defaultChangeSuccess": "Výchozí model aktualizován.",
+    "defaultChangeSuccess": "Výběr pro běh byl aktualizován.",
     "unsavedPrompt": "Tato změna ještě nebyla uložena. Uložte ji do konfigurace modelu.",
     "restartHint": "Změny konfigurace modelu se projeví po restartu gateway.",
     "loadError": "Načtení modelů selhalo",
@@ -268,27 +268,27 @@
       "unreachable": "Služba nedostupná"
     },
     "badge": {
-      "default": "Výchozí",
+      "default": "Aktivní",
       "virtual": "Virtuální"
     },
     "action": {
       "edit": "Upravit API klíč",
-      "setDefault": "Nastavit jako výchozí",
+      "setDefault": "Použít pro běh",
       "delete": "Smazat model",
       "setDefaultDisabled": {
-        "setting": "Nastavuji jako výchozí...",
-        "unavailable": "Nedostupný model nelze nastavit jako výchozí",
-        "isDefault": "Již je výchozím modelem",
-        "isVirtual": "Virtuální model nelze nastavit jako výchozí",
+        "setting": "Aktualizuji výběr pro běh...",
+        "unavailable": "Nedostupný účet nebo router nelze použít pro běh",
+        "isDefault": "Již je součástí výběru pro běh",
+        "isVirtual": "Tuto virtuální položku nelze použít jako účet pro běh",
         "unsupportedProvider": "Tento poskytovatel podporuje pouze ASR a nemůže být výchozím modelem chatu."
       },
       "deleteDisabled": {
-        "isDefault": "Výchozí model nelze smazat"
+        "isDefault": "Před odstraněním této položky změňte výběr pro běh"
       }
     },
     "defaultOnSave": {
-      "label": "Výchozí model",
-      "description": "Po uložení automaticky nastavit tento model jako výchozí.",
+      "label": "Použít jako účet pro běh",
+      "description": "Po uložení použít tento účet s aktivním aliasem modelu.",
       "unsupportedProvider": "Tento poskytovatel může být uložen v seznamu modelů, ale nemůže být použit jako výchozí model chatu."
     },
     "add": {
