@@ -5,6 +5,7 @@ import {
   IconChevronsUp,
   IconDatabase,
   IconGitBranch,
+  IconGitPullRequest,
   IconKey,
   IconListDetails,
   IconMessageCircle,
@@ -79,6 +80,13 @@ const eventsNavItem: NavItem = {
   title: "navigation.events",
   url: "/events",
   icon: IconBellRinging,
+  translateTitle: true,
+}
+
+const reviewsNavItem: NavItem = {
+  title: "navigation.reviews",
+  url: "/reviews",
+  icon: IconGitPullRequest,
   translateTitle: true,
 }
 
@@ -303,6 +311,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 </SidebarMenu>
                 {serviceSections.map(renderServiceSection)}
                 <SidebarMenu>
+                  {renderNavItem(reviewsNavItem)}
                   {renderNavItem(eventsNavItem)}
                   {renderNavItem(logsNavItem)}
                 </SidebarMenu>
