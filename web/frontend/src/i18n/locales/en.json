@@ -346,6 +346,7 @@
       "overrides": "Account overrides",
       "overridesHint": "Choose another model or disable this alias for a concrete account.",
       "addOverride": "Add override",
+      "noEnabledAccounts": "No enabled accounts are available. Add or restore one on the Accounts page before choosing models or overrides.",
       "noOverrides": "Every account currently uses the default model.",
       "overrideAccount": "Override account",
       "overrideModel": "Override model",

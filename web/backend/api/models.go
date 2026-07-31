@@ -463,6 +463,9 @@ func appendCredentialAccountModelResponses(
 
 	representedCredentials := make(map[string]bool, len(models))
 	for _, model := range models {
+		if !model.Enabled {
+			continue
+		}
 		if credentialID := representedModelCredentialID(model); credentialID != "" {
 			representedCredentials[credentialID] = true
 		}

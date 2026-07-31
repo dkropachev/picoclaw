@@ -3751,6 +3751,45 @@ test("models page exposes editable model aliases without global runtime selectio
   expect(errors).toEqual([])
 })
 
+test("model alias editor explains when no enabled accounts are available", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(page, "/models", {
+    modelResponse: {
+      ...modelResponse,
+      models: modelResponse.models
+        .filter((model) => model.provider !== "model-router")
+        .map((model) => ({ ...model, enabled: false })),
+      total: 2,
+    },
+  })
+
+  const aliasSection = page.locator("section").filter({
+    has: page.getByRole("heading", { name: "Developer aliases" }),
+  })
+  const investigateAlias = aliasSection.locator("article").filter({
+    has: page.getByRole("heading", { name: "investigate" }),
+  })
+  await investigateAlias
+    .getByRole("button", { name: "Configure model alias" })
+    .click()
+
+  const editor = page.getByRole("dialog", { name: "Configure model alias" })
+  await expect(
+    editor.getByText(
+      "No enabled accounts are available. Add or restore one on the Accounts page before choosing models or overrides.",
+    ),
+  ).toBeVisible()
+  await expect(
+    editor.getByRole("combobox", { name: "Default model" }),
+  ).toBeDisabled()
+  await expect(
+    editor.getByRole("button", { name: "Add override" }),
+  ).toBeDisabled()
+  expect(errors).toEqual([])
+})
+
 test("accounts page shows account routers beside registered accounts", async ({
   page,
 }) => {
