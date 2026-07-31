@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next"
 import { type DispatchView, getEventDispatch } from "@/api/events"
 import { Button } from "@/components/ui/button"
 
+import { DispatchParameters } from "./dispatch-parameters"
 import { eventErrorMessage, formatEventDate } from "./event-format"
 import {
   exactDispatchHref,
@@ -83,6 +84,7 @@ export function DispatchDetail({ dispatchID }: { dispatchID?: string }) {
         ) : (
           <div className="grid min-w-0 gap-3 xl:grid-cols-2">
             <DispatchSummary dispatch={detail} />
+            <DispatchParameters key={detail.id} dispatch={detail} />
             <DispatchRelationships dispatch={detail} />
             <DispatchLifecycle dispatch={detail} />
             {detail.last_error ? (

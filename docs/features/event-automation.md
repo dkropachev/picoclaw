@@ -27,6 +27,10 @@ explicit payload reveal, and deliberate replay operations without opening
 storage independently. Its global dispatch view binds payload-free
 event/workflow/status filters and exact dispatch selection to the URL and links
 each dispatch to its event, workflow, and run without exposing worker tokens.
+Selected dispatch detail loads a payload-free invocation summary automatically.
+Full persisted workflow inputs remain behind an explicit load action and render
+only after the run, workflow, trusted origin, event, and dispatch bindings match
+the selected dispatch.
 Workflow runs now persist a separate trusted, payload-free origin for those
 relationships: production dispatches carry exact event/dispatch/root-run
 identity, event-parity draft tests carry event/root-run identity without a
