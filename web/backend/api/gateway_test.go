@@ -490,6 +490,155 @@ func TestGatewayStartReady_NoDefaultModel(t *testing.T) {
 	}
 }
 
+func TestTryAutoStartGatewayRejectsInvalidSelectionWithoutLaunching(t *testing.T) {
+	tests := []struct {
+		name        string
+		writeConfig func(*testing.T, string)
+	}{
+		{
+			name: "no model configured",
+		},
+		{
+			name: "malformed config",
+			writeConfig: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+					t.Fatalf("WriteFile() error = %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetGatewayTestState(t)
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			if tt.writeConfig != nil {
+				tt.writeConfig(t, configPath)
+			}
+			h := NewHandler(configPath)
+
+			launched := false
+			gatewayExecCommand = func(_ string, _ ...string) *exec.Cmd {
+				launched = true
+				return exec.Command(os.Args[0])
+			}
+
+			h.TryAutoStartGateway()
+
+			if launched {
+				t.Fatal("TryAutoStartGateway() launched a process with an invalid model selection")
+			}
+			gateway.mu.Lock()
+			cmd := gateway.cmd
+			status := gateway.runtimeStatus
+			gateway.mu.Unlock()
+			if cmd != nil {
+				t.Fatalf("gateway.cmd = %#v, want nil", cmd)
+			}
+			if status != "stopped" {
+				t.Fatalf("gateway.runtimeStatus = %q, want stopped", status)
+			}
+		})
+	}
+}
+
+func TestHandleGatewayStartReportsMissingModelWithoutLaunching(t *testing.T) {
+	resetGatewayTestState(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	launched := false
+	gatewayExecCommand = func(_ string, _ ...string) *exec.Cmd {
+		launched = true
+		return exec.Command(os.Args[0])
+	}
+	process, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess() error = %v", err)
+	}
+	gateway.mu.Lock()
+	gateway.cmd = &exec.Cmd{Process: process}
+	setGatewayRuntimeStatusLocked("running")
+	gateway.mu.Unlock()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/gateway/start", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if got := body["status"]; got != "precondition_failed" {
+		t.Fatalf("status = %#v, want precondition_failed", got)
+	}
+	if got := body["message"]; got != config.ErrNoModelConfigured.Error() {
+		t.Fatalf("message = %#v, want %q", got, config.ErrNoModelConfigured)
+	}
+	if launched {
+		t.Fatal("POST /api/gateway/start launched a process without a configured model")
+	}
+}
+
+func TestGatewayStartReadyResolvesAccountAndModelRouters(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.DefaultConfig()
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName: "account-a",
+		Provider:  "openai",
+		Model:     "openai/gpt-5.4",
+		APIKeys:   config.SimpleSecureStrings("test-secret"),
+		Enabled:   true,
+	}}
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name:  "coding",
+		Model: "openai/gpt-5.4",
+	}}
+	cfg.AccountRouters = config.AccountRouterList{{
+		Name:    "account-pool",
+		Enabled: true,
+		Entry:   "primary",
+		Blocks: []config.AccountRouterBlock{{
+			ID:      "primary",
+			Type:    config.AccountRouterBlockTypeAccount,
+			Account: "account-a",
+		}},
+	}}
+	cfg.ModelRouters = config.ModelRouterList{{
+		Name:    "smart",
+		Enabled: true,
+		Entry:   "model",
+		Blocks: []config.ModelRouterBlock{{
+			ID:    "model",
+			Type:  config.ModelRouterBlockTypeModel,
+			Model: "coding",
+		}},
+	}}
+	cfg.Agents.Defaults.AccountRef = "account-pool"
+	cfg.Agents.Defaults.ModelName = "smart"
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	ready, reason, err := h.gatewayStartReady()
+	if err != nil {
+		t.Fatalf("gatewayStartReady() error = %v", err)
+	}
+	if !ready {
+		t.Fatalf("gatewayStartReady() ready = false, want true (reason=%q)", reason)
+	}
+	if reason != "" {
+		t.Fatalf("gatewayStartReady() reason = %q, want empty", reason)
+	}
+}
+
 func TestGatewayStartReady_RejectsASROnlyDefaultModel(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
 	defer cleanup()
@@ -1608,6 +1757,36 @@ func TestSignatureCanonicalizerKeepsLegacyNilCollectionSemanticsOutsideAgents(
 			"agent nil and empty collections must remain distinct: %s",
 			nilAgentCollections,
 		)
+	}
+}
+
+func TestNormalizeRawJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  config.RawNode
+		want string
+	}{
+		{
+			name: "empty",
+		},
+		{
+			name: "canonical JSON",
+			raw:  config.RawNode(` { "z": 2, "a": 1 } `),
+			want: `{"a":1,"z":2}`,
+		},
+		{
+			name: "malformed JSON remains trimmed",
+			raw:  config.RawNode(" \n {broken \t"),
+			want: "{broken",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := string(normalizeRawJSON(tt.raw)); got != tt.want {
+				t.Fatalf("normalizeRawJSON(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
 	}
 }
 
