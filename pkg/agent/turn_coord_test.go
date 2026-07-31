@@ -34,10 +34,6 @@ func (p *simpleConvProvider) Chat(
 	}, nil
 }
 
-func (p *simpleConvProvider) GetDefaultModel() string {
-	return "simple-model"
-}
-
 type sequenceProvider struct {
 	responses []*providers.LLMResponse
 	errors    []error
@@ -67,10 +63,6 @@ func (p *sequenceProvider) Chat(
 	return &providers.LLMResponse{Content: "ok", FinishReason: "stop"}, nil
 }
 
-func (p *sequenceProvider) GetDefaultModel() string {
-	return "sequence-model"
-}
-
 type nativeSearchCaptureProvider struct {
 	lastOpts map[string]any
 	messages []providers.Message
@@ -94,10 +86,6 @@ func (p *nativeSearchCaptureProvider) Chat(
 		Content:      "Using native search",
 		FinishReason: "stop",
 	}, nil
-}
-
-func (p *nativeSearchCaptureProvider) GetDefaultModel() string {
-	return "native-search-model"
 }
 
 func (p *nativeSearchCaptureProvider) SupportsNativeSearch() bool {
@@ -145,10 +133,6 @@ func (p *toolCallRespProvider) Chat(
 	}, nil
 }
 
-func (p *toolCallRespProvider) GetDefaultModel() string {
-	return "tool-model"
-}
-
 // errorProvider simulates various error conditions
 type errorProvider struct {
 	errType   string
@@ -189,10 +173,6 @@ func (p *errorProvider) Chat(
 	}
 }
 
-func (p *errorProvider) GetDefaultModel() string {
-	return "error-model"
-}
-
 type failOnceLLMProvider struct {
 	err       error
 	response  string
@@ -221,10 +201,6 @@ func (p *failOnceLLMProvider) Chat(
 	}, nil
 }
 
-func (p *failOnceLLMProvider) GetDefaultModel() string {
-	return "fail-once-model"
-}
-
 // =============================================================================
 // Test Helper Functions
 // =============================================================================
@@ -245,7 +221,7 @@ func newTurnCoordTestLoop(t *testing.T, provider providers.LLMProvider) (*AgentL
 	}
 
 	msgBus := bus.NewMessageBus()
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	agent := al.registry.GetDefaultAgent()
 	if agent == nil {
 		t.Fatal("expected default agent")
@@ -283,7 +259,8 @@ func (s *saveFailingSessionStore) Save(_ string) error {
 // =============================================================================
 
 func TestPipeline_SetupTurn_BasicInitialization(t *testing.T) {
-	al, agent, cleanup := newTurnCoordTestLoop(t, &simpleConvProvider{})
+	provider := &simpleConvProvider{}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
 	defer cleanup()
 
 	pipeline := NewPipeline(al)
@@ -342,13 +319,14 @@ func TestPipeline_CallLLM_SimpleResponse(t *testing.T) {
 }
 
 func TestPipeline_SetupTurn_ModelNameDoesNotUseFallbackAliasBeforeFallback(t *testing.T) {
-	al, agent, cleanup := newTurnCoordTestLoop(t, &simpleConvProvider{})
+	provider := &simpleConvProvider{}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
 	defer cleanup()
 
 	agent.Model = "primary-model"
 	agent.Candidates = []providers.FallbackCandidate{
-		{Provider: "openai", Model: "gpt-5.4"},
-		{Provider: "anthropic", Model: "claude-sonnet", IdentityKey: "model_name:fallback-model"},
+		strictTestCandidate(al.cfg, agent, provider, "primary-model", "gpt-5.4"),
+		strictTestCandidate(al.cfg, agent, provider, "fallback-model", "claude-sonnet"),
 	}
 
 	pipeline := NewPipeline(al)
@@ -366,104 +344,110 @@ func TestPipeline_SetupTurn_ModelNameDoesNotUseFallbackAliasBeforeFallback(t *te
 	}
 }
 
-func TestPipeline_CallLLM_UsesSuccessfulFallbackIdentityAlias(t *testing.T) {
-	provider := &sequenceProvider{
-		errors: []error{
-			errors.New("status: 429 - rate limit exceeded"),
-			nil,
+func TestPipeline_CallLLM_UsesSuccessfulFallbackAlias(t *testing.T) {
+	tests := []struct {
+		name          string
+		primaryAlias  string
+		primaryModel  string
+		fallbackAlias string
+		fallbackModel string
+	}{
+		{
+			name:          "identity distinguishes aliases for the same model",
+			primaryAlias:  "primary",
+			primaryModel:  "gpt-5.4",
+			fallbackAlias: "secondary",
+			fallbackModel: "gpt-5.4",
 		},
-		responses: []*providers.LLMResponse{
-			nil,
-			{Content: "fallback answer", FinishReason: "stop"},
-		},
-	}
-	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
-	defer cleanup()
-
-	agent.Model = "primary-model"
-	agent.Candidates = []providers.FallbackCandidate{
-		{Provider: "openai", Model: "gpt-5.4", IdentityKey: "model_name:primary"},
-		{Provider: "openai", Model: "gpt-5.4", IdentityKey: "model_name:secondary"},
-	}
-	al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), nil)
-
-	pipeline := NewPipeline(al)
-	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
-		turnID:  "turn-1",
-		context: newTurnContext(nil, nil, nil),
-	})
-
-	exec, err := pipeline.SetupTurn(context.Background(), ts)
-	if err != nil {
-		t.Fatalf("SetupTurn failed: %v", err)
-	}
-
-	ctrl, err := pipeline.CallLLM(context.Background(), context.Background(), ts, exec, 1)
-	if err != nil {
-		t.Fatalf("CallLLM failed: %v", err)
-	}
-	if ctrl != ControlBreak {
-		t.Fatalf("expected ControlBreak, got %v", ctrl)
-	}
-	if exec.llmModelName != "secondary" {
-		t.Fatalf("exec.llmModelName = %q, want %q", exec.llmModelName, "secondary")
-	}
-}
-
-func TestPipeline_CallLLM_UsesSuccessfulFallbackDisplayNameWithoutAlias(t *testing.T) {
-	provider := &sequenceProvider{
-		errors: []error{
-			errors.New("status: 429 - rate limit exceeded"),
-			nil,
-		},
-		responses: []*providers.LLMResponse{
-			nil,
-			{Content: "fallback answer", FinishReason: "stop"},
+		{
+			name:          "fallback uses a different model",
+			primaryAlias:  "primary-model",
+			primaryModel:  "gpt-5.4",
+			fallbackAlias: "claude",
+			fallbackModel: "claude-sonnet",
 		},
 	}
-	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
-	defer cleanup()
 
-	agent.Model = "primary-model"
-	agent.Candidates = []providers.FallbackCandidate{
-		{Provider: "openai", Model: "gpt-5.4", IdentityKey: "model_name:primary", DisplayName: "primary-model"},
-		{Provider: "anthropic", Model: "claude-sonnet", DisplayName: "anthropic/claude-sonnet"},
-	}
-	al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), nil)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &sequenceProvider{
+				errors: []error{
+					errors.New("status: 429 - rate limit exceeded"),
+					nil,
+				},
+				responses: []*providers.LLMResponse{
+					nil,
+					{Content: "fallback answer", FinishReason: "stop"},
+				},
+			}
+			al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+			defer cleanup()
 
-	pipeline := NewPipeline(al)
-	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
-		turnID:  "turn-1",
-		context: newTurnContext(nil, nil, nil),
-	})
+			agent.Model = tt.primaryAlias
+			agent.Candidates = []providers.FallbackCandidate{
+				strictTestCandidate(
+					al.cfg,
+					agent,
+					provider,
+					tt.primaryAlias,
+					tt.primaryModel,
+				),
+				strictTestCandidate(
+					al.cfg,
+					agent,
+					provider,
+					tt.fallbackAlias,
+					tt.fallbackModel,
+				),
+			}
+			al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), nil)
 
-	exec, err := pipeline.SetupTurn(context.Background(), ts)
-	if err != nil {
-		t.Fatalf("SetupTurn failed: %v", err)
-	}
+			pipeline := NewPipeline(al)
+			ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
+				turnID:  "turn-1",
+				context: newTurnContext(nil, nil, nil),
+			})
 
-	ctrl, err := pipeline.CallLLM(context.Background(), context.Background(), ts, exec, 1)
-	if err != nil {
-		t.Fatalf("CallLLM failed: %v", err)
-	}
-	if ctrl != ControlBreak {
-		t.Fatalf("expected ControlBreak, got %v", ctrl)
-	}
-	if exec.llmModelName != "anthropic/claude-sonnet" {
-		t.Fatalf("exec.llmModelName = %q, want %q", exec.llmModelName, "anthropic/claude-sonnet")
+			exec, err := pipeline.SetupTurn(context.Background(), ts)
+			if err != nil {
+				t.Fatalf("SetupTurn failed: %v", err)
+			}
+
+			ctrl, err := pipeline.CallLLM(
+				context.Background(),
+				context.Background(),
+				ts,
+				exec,
+				1,
+			)
+			if err != nil {
+				t.Fatalf("CallLLM failed: %v", err)
+			}
+			if ctrl != ControlBreak {
+				t.Fatalf("expected ControlBreak, got %v", ctrl)
+			}
+			if exec.llmModelName != tt.fallbackAlias {
+				t.Fatalf(
+					"exec.llmModelName = %q, want %q",
+					exec.llmModelName,
+					tt.fallbackAlias,
+				)
+			}
+		})
 	}
 }
 
 func TestPipeline_SetupTurn_UsesLightCandidateDisplayName(t *testing.T) {
-	al, agent, cleanup := newTurnCoordTestLoop(t, &simpleConvProvider{})
+	provider := &simpleConvProvider{}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
 	defer cleanup()
 
 	agent.Model = "primary-model"
 	agent.Candidates = []providers.FallbackCandidate{
-		{Provider: "openai", Model: "gpt-5.4", IdentityKey: "model_name:primary", DisplayName: "primary-model"},
+		strictTestCandidate(al.cfg, agent, provider, "primary-model", "gpt-5.4"),
 	}
 	agent.LightCandidates = []providers.FallbackCandidate{
-		{Provider: "openai", Model: "gpt-5.4-mini", IdentityKey: "model_name:light-model", DisplayName: "light-model"},
+		strictTestCandidate(al.cfg, agent, provider, "light-model", "gpt-5.4-mini"),
 	}
 	agent.Router = routing.New(routing.RouterConfig{LightModel: "light-model", Threshold: 1})
 
@@ -638,7 +622,7 @@ func TestPipeline_CallLLM_HTTP5xxRetry(t *testing.T) {
 	}
 
 	msgBus := bus.NewMessageBus()
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	defer al.Close()
 	agent := al.registry.GetDefaultAgent()
 	if agent == nil {
@@ -748,7 +732,7 @@ func TestPipeline_CallLLM_RetryConfigRespected(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &errorProvider{errType: "connection_reset"}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	defer al.Close()
 	agent := al.registry.GetDefaultAgent()
 	if agent == nil {
@@ -798,7 +782,7 @@ func TestPipeline_CallLLM_RetryCountLimit(t *testing.T) {
 	}
 
 	msgBus := bus.NewMessageBus()
-	al := NewAgentLoop(cfg, msgBus, counterPrv)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, counterPrv)
 	defer al.Close()
 	agent := al.registry.GetDefaultAgent()
 	if agent == nil {
@@ -844,10 +828,6 @@ func (p *countingErrorProvider) Chat(
 	p.callCount++
 	p.mu.Unlock()
 	return nil, errors.New("connection reset by peer")
-}
-
-func (p *countingErrorProvider) GetDefaultModel() string {
-	return "counting-error-model"
 }
 
 // =============================================================================

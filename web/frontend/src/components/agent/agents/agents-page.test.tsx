@@ -14,6 +14,7 @@ import {
   setDefaultAgent,
   updateAgent,
 } from "@/api/agents"
+import { getModels } from "@/api/models"
 import { AgentsPage } from "@/components/agent/agents/agents-page"
 import { SidebarProvider } from "@/components/ui/sidebar"
 import i18n from "@/i18n"
@@ -29,6 +30,14 @@ vi.mock("@/api/agents", async (importOriginal) => {
     updateAgent: vi.fn(),
     deleteAgent: vi.fn(),
     setDefaultAgent: vi.fn(),
+  }
+})
+
+vi.mock("@/api/models", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/api/models")>()
+  return {
+    ...actual,
+    getModels: vi.fn(),
   }
 })
 
@@ -94,12 +103,38 @@ describe("AgentsPage", () => {
     vi.mocked(updateAgent).mockReset()
     vi.mocked(deleteAgent).mockReset()
     vi.mocked(setDefaultAgent).mockReset()
+    vi.mocked(getModels).mockReset()
     vi.mocked(refreshGatewayState).mockReset()
     vi.mocked(showSaveSuccessOrRestartToast).mockReset()
     vi.mocked(refreshGatewayState).mockResolvedValue({
       status: "running",
       canStart: true,
       restartRequired: false,
+    })
+    vi.mocked(getModels).mockResolvedValue({
+      models: [
+        {
+          index: 0,
+          model_name: "openai-work",
+          provider: "openai",
+          model: "",
+          api_key: "",
+          enabled: true,
+          available: true,
+          status: "available",
+          is_default: true,
+          is_virtual: false,
+        },
+      ],
+      model_aliases: [
+        { name: "coding", model: "gpt-5.4" },
+        { name: "fast", model: "gpt-4.1-mini" },
+      ],
+      total: 1,
+      default_account_ref: "openai-work",
+      default_model: "coding",
+      revision: "models-revision-1",
+      provider_options: [],
     })
   })
 
@@ -177,6 +212,7 @@ describe("AgentsPage", () => {
         id: "reviewer",
         name: "Reviewer",
         workspace: "",
+        account_ref: "",
         model: null,
         skills: null,
         subagents: null,
@@ -503,6 +539,7 @@ function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
     id: "main",
     name: "Main",
     workspace: "",
+    account_ref: "",
     model: null,
     skills: null,
     subagents: null,

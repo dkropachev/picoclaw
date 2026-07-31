@@ -9,6 +9,13 @@ import { type KeyboardEvent, useId } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 
 export function AgentTokenListField({
   label,
@@ -16,6 +23,7 @@ export function AgentTokenListField({
   values,
   input,
   suggestions = [],
+  restrictToSuggestions = false,
   placeholder,
   error,
   disabled,
@@ -27,6 +35,7 @@ export function AgentTokenListField({
   values: string[]
   input: string
   suggestions?: string[]
+  restrictToSuggestions?: boolean
   placeholder?: string
   error?: string
   disabled?: boolean
@@ -67,17 +76,46 @@ export function AgentTokenListField({
         )}
       </div>
       <div className="flex gap-2">
-        <Input
-          id={inputID}
-          value={input}
-          list={suggestions.length > 0 ? listID : undefined}
-          placeholder={placeholder}
-          disabled={disabled}
-          aria-invalid={Boolean(error)}
-          onChange={(event) => onInputChange(event.target.value)}
-          onKeyDown={handleKeyDown}
-        />
-        {suggestions.length > 0 && (
+        {restrictToSuggestions ? (
+          <Select
+            value={input}
+            onValueChange={onInputChange}
+            disabled={
+              disabled ||
+              suggestions.every((suggestion) => values.includes(suggestion))
+            }
+          >
+            <SelectTrigger
+              id={inputID}
+              className="min-w-0 flex-1"
+              aria-label={label}
+              aria-invalid={Boolean(error)}
+            >
+              <SelectValue placeholder={placeholder} />
+            </SelectTrigger>
+            <SelectContent>
+              {suggestions
+                .filter((suggestion) => !values.includes(suggestion))
+                .map((suggestion) => (
+                  <SelectItem key={suggestion} value={suggestion}>
+                    {suggestion}
+                  </SelectItem>
+                ))}
+            </SelectContent>
+          </Select>
+        ) : (
+          <Input
+            id={inputID}
+            value={input}
+            list={suggestions.length > 0 ? listID : undefined}
+            placeholder={placeholder}
+            disabled={disabled}
+            aria-invalid={Boolean(error)}
+            onChange={(event) => onInputChange(event.target.value)}
+            onKeyDown={handleKeyDown}
+          />
+        )}
+        {!restrictToSuggestions && suggestions.length > 0 && (
           <datalist id={listID}>
             {suggestions
               .filter((suggestion) => !values.includes(suggestion))

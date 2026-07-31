@@ -152,6 +152,46 @@ func TestFallback_NonRetriableError(t *testing.T) {
 	}
 }
 
+func TestFallback_NonRetriableErrorKeepsTerminalCandidateIdentity(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, nil)
+
+	first := FallbackCandidate{
+		Provider:    "openai",
+		Model:       "gpt-5.4",
+		IdentityKey: "account:first|alias:coding",
+	}
+	terminal := FallbackCandidate{
+		Provider:    "openai",
+		Model:       "gpt-5.4",
+		IdentityKey: "account:terminal|alias:coding",
+	}
+	ct.MarkFailure(first.StableKey(), FailoverRateLimit)
+
+	calls := 0
+	_, err := fc.ExecuteCandidate(
+		context.Background(),
+		[]FallbackCandidate{first, terminal},
+		func(context.Context, FallbackCandidate) (*LLMResponse, error) {
+			calls++
+			return nil, errors.New("string should match pattern")
+		},
+	)
+	if err == nil {
+		t.Fatal("expected non-retriable error")
+	}
+	var failover *FailoverError
+	if !errors.As(err, &failover) {
+		t.Fatalf("error = %T, want FailoverError", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want only terminal candidate call", calls)
+	}
+	if failover.IdentityKey != terminal.IdentityKey {
+		t.Fatalf("identity = %q, want %q", failover.IdentityKey, terminal.IdentityKey)
+	}
+}
+
 func TestFallback_CooldownSkip(t *testing.T) {
 	now := time.Now()
 	ct, _ := newTestTracker(now)

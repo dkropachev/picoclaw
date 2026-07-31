@@ -207,8 +207,15 @@ func addGatewayTestModel(cfg *config.Config) *config.ModelConfig {
 		ModelName: "test-model",
 		Model:     "openai/gpt-4.1",
 		Provider:  "openai",
+		Enabled:   true,
 	}
 	cfg.ModelList = append(cfg.ModelList, model)
+	cfg.ModelAliases = append(cfg.ModelAliases, config.ModelAliasConfig{
+		Name:  model.ModelName,
+		Model: model.Model,
+	})
+	cfg.Agents.Defaults.AccountRef = model.ModelName
+	cfg.Agents.Defaults.ModelName = model.ModelName
 	return model
 }
 
@@ -478,8 +485,8 @@ func TestGatewayStartReady_NoDefaultModel(t *testing.T) {
 	if ready {
 		t.Fatalf("gatewayStartReady() ready = true, want false")
 	}
-	if reason != "no default model configured" {
-		t.Fatalf("gatewayStartReady() reason = %q, want %q", reason, "no default model configured")
+	if reason != "no model configured" {
+		t.Fatalf("gatewayStartReady() reason = %q, want %q", reason, "no model configured")
 	}
 }
 
@@ -494,10 +501,15 @@ func TestGatewayStartReady_RejectsASROnlyDefaultModel(t *testing.T) {
 	cfg.ModelList = []*config.ModelConfig{{
 		ModelName: "elevenlabs-asr",
 		Provider:  "elevenlabs",
-		Model:     "scribe_v1",
 		APIKeys:   config.SimpleSecureStrings("sk_elevenlabs_test"),
+		Enabled:   true,
 	}}
-	cfg.Agents.Defaults.ModelName = "elevenlabs-asr"
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name:  "transcription",
+		Model: "elevenlabs/scribe_v1",
+	}}
+	cfg.Agents.Defaults.AccountRef = "elevenlabs-asr"
+	cfg.Agents.Defaults.ModelName = "transcription"
 
 	err = config.SaveConfig(configPath, cfg)
 	if err != nil {
@@ -506,18 +518,14 @@ func TestGatewayStartReady_RejectsASROnlyDefaultModel(t *testing.T) {
 
 	h := NewHandler(configPath)
 	ready, reason, err := h.gatewayStartReady()
-	if err != nil {
-		t.Fatalf("gatewayStartReady() error = %v", err)
-	}
 	if ready {
 		t.Fatal("gatewayStartReady() ready = true, want false")
 	}
-	if reason != `default model "elevenlabs-asr" is not usable for chat` {
-		t.Fatalf(
-			"gatewayStartReady() reason = %q, want %q",
-			reason,
-			`default model "elevenlabs-asr" is not usable for chat`,
-		)
+	if reason != "" {
+		t.Fatalf("gatewayStartReady() reason = %q, want empty", reason)
+	}
+	if err == nil || !strings.Contains(err.Error(), `provider "elevenlabs" is not usable for chat`) {
+		t.Fatalf("gatewayStartReady() error = %v, want chat-capability validation error", err)
 	}
 }
 
@@ -623,6 +631,7 @@ func TestValidateGatewayPidDataRejectsHealthPidMismatchWhenMatcherInconclusive(t
 func TestGatewayStartReady_InvalidDefaultModel(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.DefaultConfig()
+	addGatewayTestModel(cfg)
 	cfg.Agents.Defaults.ModelName = "missing-model"
 	err := config.SaveConfig(configPath, cfg)
 	if err != nil {
@@ -630,15 +639,12 @@ func TestGatewayStartReady_InvalidDefaultModel(t *testing.T) {
 	}
 
 	h := NewHandler(configPath)
-	ready, reason, err := h.gatewayStartReady()
-	if err != nil {
+	_, _, err = h.gatewayStartReady()
+	if err == nil {
+		t.Fatal("gatewayStartReady() error = nil, want invalid alias error")
+	}
+	if !strings.Contains(err.Error(), "is not a configured model alias") {
 		t.Fatalf("gatewayStartReady() error = %v", err)
-	}
-	if ready {
-		t.Fatalf("gatewayStartReady() ready = true, want false")
-	}
-	if reason == "" {
-		t.Fatalf("gatewayStartReady() reason is empty")
 	}
 }
 
@@ -716,7 +722,13 @@ func TestGatewayStartReady_LocalModelWithoutAPIKey(t *testing.T) {
 		ModelName: "local-vllm",
 		Model:     "vllm/custom-model",
 		APIBase:   "http://localhost:8000/v1",
+		Enabled:   true,
 	}}
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name:  "local-vllm",
+		Model: "vllm/custom-model",
+	}}
+	cfg.Agents.Defaults.AccountRef = "local-vllm"
 	cfg.Agents.Defaults.ModelName = "local-vllm"
 	err = config.SaveConfig(configPath, cfg)
 	if err != nil {
@@ -753,7 +765,13 @@ func TestGatewayStartReady_LocalModelWithRunningService(t *testing.T) {
 		ModelName: "local-vllm",
 		Model:     "vllm/custom-model",
 		APIBase:   "http://127.0.0.1:8000/v1",
+		Enabled:   true,
 	}}
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name:  "local-vllm",
+		Model: "vllm/custom-model",
+	}}
+	cfg.Agents.Defaults.AccountRef = "local-vllm"
 	cfg.Agents.Defaults.ModelName = "local-vllm"
 	err = config.SaveConfig(configPath, cfg)
 	if err != nil {
@@ -788,8 +806,14 @@ func TestGatewayStartReady_RemoteVLLMWithAPIKeyDoesNotProbe(t *testing.T) {
 		ModelName: "remote-vllm",
 		Model:     "vllm/custom-model",
 		APIBase:   "https://models.example.com/v1",
+		Enabled:   true,
 	}}
 	cfg.ModelList[0o0].SetAPIKey("remote-key")
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name:  "remote-vllm",
+		Model: "vllm/custom-model",
+	}}
+	cfg.Agents.Defaults.AccountRef = "remote-vllm"
 	cfg.Agents.Defaults.ModelName = "remote-vllm"
 	err = config.SaveConfig(configPath, cfg)
 	if err != nil {
@@ -822,7 +846,13 @@ func TestGatewayStartReady_LocalOllamaUsesDefaultProbeBase(t *testing.T) {
 	cfg.ModelList = []*config.ModelConfig{{
 		ModelName: "local-ollama",
 		Model:     "ollama/llama3",
+		Enabled:   true,
 	}}
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name:  "local-ollama",
+		Model: "ollama/llama3",
+	}}
+	cfg.Agents.Defaults.AccountRef = "local-ollama"
 	cfg.Agents.Defaults.ModelName = "local-ollama"
 	err = config.SaveConfig(configPath, cfg)
 	if err != nil {
@@ -850,9 +880,16 @@ func TestGatewayStartReady_OAuthModelRequiresStoredCredential(t *testing.T) {
 	cfg.ModelList = []*config.ModelConfig{{
 		ModelName:  "openai-oauth",
 		Model:      "openai/gpt-5.4",
+		Provider:   "openai",
 		AuthMethod: "oauth",
+		Enabled:    true,
 	}}
-	cfg.Agents.Defaults.ModelName = "openai-oauth"
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name:  "coding",
+		Model: "openai/gpt-5.4",
+	}}
+	cfg.Agents.Defaults.AccountRef = "openai-oauth"
+	cfg.Agents.Defaults.ModelName = "coding"
 	err = config.SaveConfig(configPath, cfg)
 	if err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
@@ -1195,11 +1232,10 @@ func TestGatewayStatusRequiresRestartAfterDefaultModelChange(t *testing.T) {
 	model := addGatewayTestModel(cfg)
 	cfg.Agents.Defaults.ModelName = model.ModelName
 	model.SetAPIKey("test-key")
-	cfg.ModelList = append(cfg.ModelList, &config.ModelConfig{
-		ModelName: "second-model",
-		Model:     "openai/gpt-4.1",
+	cfg.ModelAliases = append(cfg.ModelAliases, config.ModelAliasConfig{
+		Name:  "second-model",
+		Model: "openai/gpt-4.1",
 	})
-	cfg.ModelList[len(cfg.ModelList)-1].SetAPIKey("second-key")
 	if err := config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
 	}
@@ -2388,7 +2424,7 @@ func TestConfigSignatureExplicitProviderRefIgnoresDefaultProvider(t *testing.T) 
 	}
 }
 
-func TestConfigSignatureExactModelNameTakesPrecedenceOverResolvedRefs(t *testing.T) {
+func TestConfigSignatureIncludesEveryAccountStreamingSetting(t *testing.T) {
 	tests := []struct {
 		name                  string
 		defaultProvider       string
@@ -2419,7 +2455,7 @@ func TestConfigSignatureExactModelNameTakesPrecedenceOverResolvedRefs(t *testing
 			},
 			shadowedEntryIndex:    1,
 			exactModelNameIndex:   0,
-			shadowedChangeMessage: "config signature should not change when an exact slash model_name shadows an explicit provider ref",
+			shadowedChangeMessage: "config signature should change when any account streaming setting changes",
 			exactChangeMessage:    "config signature should change when the exact slash model_name entry changes",
 		},
 		{
@@ -2442,7 +2478,7 @@ func TestConfigSignatureExactModelNameTakesPrecedenceOverResolvedRefs(t *testing
 			},
 			shadowedEntryIndex:    1,
 			exactModelNameIndex:   0,
-			shadowedChangeMessage: "config signature should not change when an exact bare model_name shadows a default-provider model id",
+			shadowedChangeMessage: "config signature should change when any account streaming setting changes",
 			exactChangeMessage:    "config signature should change when the exact bare model_name entry changes",
 		},
 	}
@@ -2459,7 +2495,7 @@ func TestConfigSignatureExactModelNameTakesPrecedenceOverResolvedRefs(t *testing
 			cfg.ModelList[tt.shadowedEntryIndex].Streaming = config.ModelStreamingConfig{Enabled: true}
 			afterShadowedChange := computeConfigSignature(cfg)
 
-			if before != afterShadowedChange {
+			if before == afterShadowedChange {
 				t.Fatal(tt.shadowedChangeMessage)
 			}
 
@@ -2552,7 +2588,7 @@ func TestConfigSignatureIncludesDefaultProviderPrefixedRefWithSplitConfig(t *tes
 	}
 }
 
-func TestConfigSignatureBareModelRefUsesExactModelBeforeDefaultProviderModelID(t *testing.T) {
+func TestConfigSignatureIncludesAccountsWithSharedConcreteModel(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ModelList = []*config.ModelConfig{
 		{
@@ -2582,8 +2618,8 @@ func TestConfigSignatureBareModelRefUsesExactModelBeforeDefaultProviderModelID(t
 	cfg.ModelList[1].Streaming = config.ModelStreamingConfig{Enabled: true}
 	afterDefaultProviderModelChange := computeConfigSignature(cfg)
 
-	if afterExactModelChange != afterDefaultProviderModelChange {
-		t.Fatal("config signature should not change when a shadowed default-provider model id changes streaming")
+	if afterExactModelChange == afterDefaultProviderModelChange {
+		t.Fatal("config signature should change when either account streaming setting changes")
 	}
 }
 

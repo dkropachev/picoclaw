@@ -1,13 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react"
-import { toast } from "sonner"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-import {
-  type ModelInfo,
-  fetchUpstreamModels,
-  getModels,
-  setDefaultModel,
-} from "@/api/models"
+import { type ModelInfo, getModels, setDefaultSelection } from "@/api/models"
 import { useChatModels } from "@/hooks/use-chat-models"
 
 vi.mock("react-i18next", () => ({
@@ -15,13 +9,12 @@ vi.mock("react-i18next", () => ({
 }))
 
 vi.mock("sonner", () => ({
-  toast: { error: vi.fn(), warning: vi.fn() },
+  toast: { error: vi.fn() },
 }))
 
 vi.mock("@/api/models", () => ({
-  fetchUpstreamModels: vi.fn(),
   getModels: vi.fn(),
-  setDefaultModel: vi.fn(),
+  setDefaultSelection: vi.fn(),
 }))
 
 vi.mock("@/lib/restart-required", () => ({
@@ -35,8 +28,8 @@ vi.mock("@/store/gateway", () => ({
 function model(overrides: Partial<ModelInfo>): ModelInfo {
   return {
     index: 0,
-    model_name: "model",
-    model: "model",
+    model_name: "openai-work",
+    model: "",
     api_key: "",
     enabled: true,
     available: true,
@@ -50,454 +43,194 @@ function model(overrides: Partial<ModelInfo>): ModelInfo {
 describe("useChatModels", () => {
   beforeEach(() => {
     vi.mocked(getModels).mockReset()
-    vi.mocked(fetchUpstreamModels).mockReset()
-    vi.mocked(setDefaultModel).mockReset()
-    vi.mocked(toast.error).mockReset()
-    vi.mocked(toast.warning).mockReset()
-    vi.mocked(fetchUpstreamModels).mockResolvedValue({
-      models: [{ id: "gpt-5.5" }],
-      total: 1,
-    })
+    vi.mocked(setDefaultSelection).mockReset()
+    vi.mocked(setDefaultSelection).mockResolvedValue({ status: "ok" })
   })
 
-  it("keeps accounts and account routers selectable and excludes model routers", async () => {
-    vi.mocked(fetchUpstreamModels).mockResolvedValue({
-      models: [{ id: "gpt-5.5" }],
-      total: 1,
-      issues: [
-        {
-          account_ref: "credential:openai:backup",
-          error: "account unavailable",
-        },
-      ],
-    })
+  it("selects a configured account and alias without discovering raw models", async () => {
     vi.mocked(getModels).mockResolvedValue({
       models: [
-        model({
-          index: 0,
-          model_name: "router-1",
-          provider: "router",
-          model: "",
-          router: {
-            name: "router-1",
-            enabled: true,
-            entry: "account",
-            blocks: [
-              {
-                id: "account",
-                type: "account",
-                account: "credential:openai:work",
-              },
-            ],
-          },
-          is_virtual: true,
-        }),
+        model({ model_name: "openai-work", provider: "openai" }),
         model({
           index: 1,
-          model_name: "internal-virtual",
+          model_name: "credential:github-copilot:personal",
+          provider: "github-copilot",
+          credential_id: "github-copilot:personal",
           is_virtual: true,
         }),
         model({
           index: 2,
-          model_name: "gpt-api",
-          provider: "openai",
-          available: false,
-          status: "unconfigured",
+          model_name: "router-1",
+          provider: "router",
+          router: { name: "router-1", enabled: true },
+          is_virtual: true,
         }),
         model({
           index: 3,
-          model_name: "credential:openai:work",
-          provider: "openai",
-          auth_method: "oauth",
-          credential_id: "openai:work",
-          is_virtual: true,
-        }),
-        model({
-          index: 4,
-          model_name: "credential:github-copilot:gh-copilot",
-          provider: "github-copilot",
-          auth_method: "token",
-          credential_id: "github-copilot:gh-copilot",
-          is_virtual: true,
-        }),
-        model({
-          index: 5,
           model_name: "task-router",
           provider: "model-router",
-          model_router: {
-            name: "task-router",
-            enabled: true,
-            entry: "entry",
-            blocks: [
-              {
-                id: "entry",
-                type: "model",
-                model: "credential:openai:work",
-              },
-            ],
-          },
+          model_router: { name: "task-router", enabled: true },
           is_virtual: true,
         }),
       ],
-      total: 3,
-      default_model: "router-1",
-      provider_options: [],
-    })
-
-    const { result } = renderHook(() => useChatModels({ isConnected: true }))
-
-    await waitFor(() => expect(result.current.selectedModelID).toBe("gpt-5.5"))
-
-    expect(result.current.accountModels.map((m) => m.accountName)).toEqual([
-      "credential:github-copilot:gh-copilot",
-      "credential:openai:work",
-    ])
-    expect(result.current.accountRouterModels.map((m) => m.model_name)).toEqual(
-      ["router-1"],
-    )
-    expect(result.current.hasAvailableModels).toBe(true)
-    expect(result.current.selectedAccountName).toBe("router-1")
-    expect(result.current.selectedModelID).toBe("gpt-5.5")
-    expect(fetchUpstreamModels).toHaveBeenCalledWith({
-      account_ref: "router-1",
-    })
-    expect(toast.warning).toHaveBeenCalledWith("chat.modelDiscoveryWarning", {
-      description: "openai:backup: account unavailable",
-    })
-  })
-
-  it("surfaces router discovery failures and retries without using the router alias as a model", async () => {
-    vi.mocked(fetchUpstreamModels).mockRejectedValueOnce(
-      new Error("model discovery failed"),
-    )
-    vi.mocked(getModels).mockResolvedValue({
-      models: [
-        model({
-          model_name: "router-1",
-          provider: "router",
-          model: "router-1",
-          router: {
-            name: "router-1",
-            enabled: true,
-            entry: "account",
-            blocks: [
-              {
-                id: "account",
-                type: "account",
-                account: "credential:openai:work",
-              },
-            ],
-          },
-          is_virtual: true,
-        }),
-      ],
-      total: 1,
-      default_model: "router-1",
-      provider_options: [],
-    })
-
-    const { result } = renderHook(() => useChatModels({ isConnected: true }))
-
-    await waitFor(() => {
-      expect(fetchUpstreamModels).toHaveBeenCalledWith({
-        account_ref: "router-1",
-      })
-      expect(result.current.isLoadingModelOptions).toBe(false)
-    })
-
-    expect(result.current.selectedAccountName).toBe("router-1")
-    expect(result.current.selectedModelID).toBe("")
-    expect(result.current.modelOptions).toEqual([])
-    expect(result.current.modelDiscoveryError).toBe("model discovery failed")
-    expect(toast.error).toHaveBeenCalledWith("chat.modelDiscoveryError", {
-      description: "model discovery failed",
-    })
-
-    act(() => {
-      result.current.retryModelDiscovery()
-    })
-
-    await waitFor(() => {
-      expect(fetchUpstreamModels).toHaveBeenCalledTimes(2)
-      expect(result.current.selectedModelID).toBe("gpt-5.5")
-    })
-    expect(result.current.modelDiscoveryError).toBeNull()
-  })
-
-  it("treats an empty all-failed router response as retryable discovery error", async () => {
-    vi.mocked(fetchUpstreamModels).mockResolvedValue({
-      models: [],
-      total: 0,
-      issues: [
+      model_aliases: [
         {
-          account_ref: "credential:openai:work",
-          error: "account unavailable",
-        },
-      ],
-    })
-    vi.mocked(getModels).mockResolvedValue({
-      models: [
-        model({
-          model_name: "router-1",
-          provider: "router",
-          model: "",
-          router: {
-            name: "router-1",
-            enabled: true,
-            entry: "account",
-            blocks: [
-              {
-                id: "account",
-                type: "account",
-                account: "credential:openai:work",
-              },
-            ],
+          name: "coding",
+          model: "gpt-5.4",
+          account_overrides: {
+            "credential:github-copilot:personal": "claude-sonnet-4.5",
           },
-          is_virtual: true,
-        }),
-      ],
-      total: 1,
-      default_model: "router-1",
-      provider_options: [],
-    })
-
-    const { result } = renderHook(() => useChatModels({ isConnected: true }))
-
-    await waitFor(() => {
-      expect(result.current.isLoadingModelOptions).toBe(false)
-      expect(result.current.modelDiscoveryError).toBe(
-        "openai:work: account unavailable",
-      )
-    })
-
-    expect(result.current.selectedModelID).toBe("")
-    expect(result.current.modelOptions).toEqual([])
-    expect(toast.error).toHaveBeenCalledWith("chat.modelDiscoveryError", {
-      description: "openai:work: account unavailable",
-    })
-    expect(toast.warning).not.toHaveBeenCalled()
-  })
-
-  it("preserves the configured model through initial credential discovery", async () => {
-    vi.mocked(fetchUpstreamModels).mockResolvedValue({
-      models: [{ id: "gpt-first" }, { id: "gpt-configured" }],
-      total: 2,
-    })
-    vi.mocked(getModels).mockResolvedValue({
-      models: [
-        model({
-          index: 0,
-          model_name: "credential:openai:work",
-          model: "gpt-first",
-          provider: "openai",
-          auth_method: "oauth",
-          credential_id: "openai:work",
-          is_virtual: true,
-        }),
-        model({
-          index: 1,
-          model_name: "work-codex",
-          model: "gpt-configured",
-          provider: "openai",
-          auth_method: "oauth",
-          credential_id: "openai:work",
-        }),
-      ],
-      total: 2,
-      default_model: "work-codex",
-      provider_options: [],
-    })
-
-    const { result } = renderHook(() => useChatModels({ isConnected: true }))
-
-    await waitFor(() => {
-      expect(fetchUpstreamModels).toHaveBeenCalledWith({
-        account_ref: "credential:openai:work",
-      })
-      expect(result.current.isLoadingModelOptions).toBe(false)
-    })
-
-    expect(result.current.selectedAccountName).toBe("credential:openai:work")
-    expect(result.current.selectedModelID).toBe("gpt-configured")
-  })
-
-  it("preserves a second configured credential default after hard discovery failure", async () => {
-    vi.mocked(fetchUpstreamModels).mockRejectedValue(
-      new Error("discovery unavailable"),
-    )
-    vi.mocked(getModels).mockResolvedValue({
-      models: [
-        model({
-          index: 0,
-          model_name: "credential:openai:work",
-          model: "gpt-first",
-          provider: "openai",
-          auth_method: "oauth",
-          credential_id: "openai:work",
-          is_virtual: true,
-        }),
-        model({
-          index: 1,
-          model_name: "work-codex",
-          model: "gpt-configured",
-          provider: "openai",
-          auth_method: "oauth",
-          credential_id: "openai:work",
-        }),
-      ],
-      total: 2,
-      default_model: "work-codex",
-      provider_options: [],
-    })
-
-    const { result } = renderHook(() => useChatModels({ isConnected: true }))
-
-    await waitFor(() => {
-      expect(result.current.isLoadingModelOptions).toBe(false)
-      expect(result.current.modelDiscoveryError).toBe("discovery unavailable")
-    })
-
-    expect(result.current.selectedModelID).toBe("gpt-configured")
-    expect(result.current.modelOptions).toEqual([{ id: "gpt-configured" }])
-  })
-
-  it.each([
-    {
-      provider: "anthropic",
-      credentialID: "anthropic:work",
-      modelID: "claude-sonnet-4.6",
-    },
-    {
-      provider: "antigravity",
-      credentialID: "antigravity:work",
-      modelID: "gemini-3-flash",
-    },
-  ])(
-    "keeps a configured $provider credential fallback usable after hard discovery failure",
-    async ({ provider, credentialID, modelID }) => {
-      vi.mocked(fetchUpstreamModels).mockRejectedValue(
-        new Error("discovery unavailable"),
-      )
-      vi.mocked(getModels).mockResolvedValue({
-        models: [
-          model({
-            model_name: `${provider}-work`,
-            model: modelID,
-            provider,
-            auth_method: "oauth",
-            credential_id: credentialID,
-          }),
-        ],
-        total: 1,
-        default_model: `${provider}-work`,
-        provider_options: [],
-      })
-
-      const { result } = renderHook(() => useChatModels({ isConnected: true }))
-
-      await waitFor(() => {
-        expect(fetchUpstreamModels).toHaveBeenCalledWith({
-          account_ref: `credential:${credentialID}`,
-        })
-        expect(result.current.isLoadingModelOptions).toBe(false)
-      })
-
-      expect(result.current.selectedModelID).toBe(modelID)
-      expect(result.current.modelOptions).toEqual([{ id: modelID }])
-      expect(result.current.modelDiscoveryError).toBe("discovery unavailable")
-    },
-  )
-
-  it.each([
-    {
-      kind: "API-key",
-      configuredModel: model({
-        model_name: "gpt-api",
-        model: "gpt-4.1",
-        provider: "openai",
-      }),
-      expectedModelID: "gpt-4.1",
-    },
-    {
-      kind: "local",
-      configuredModel: model({
-        model_name: "local-model",
-        model: "llama3.3",
-        auth_method: "local",
-        api_base: "http://localhost:11434",
-      }),
-      expectedModelID: "llama3.3",
-    },
-    {
-      kind: "model-router",
-      configuredModel: model({
-        model_name: "task-router",
-        model: "task-router",
-        provider: "model-router",
-        is_virtual: true,
-        model_router: {
-          name: "task-router",
-          enabled: true,
-          entry: "entry",
-          blocks: [{ id: "entry", type: "model", model: "gpt-api" }],
         },
-      }),
-      expectedModelID: "task-router",
-    },
-  ])(
-    "retains a configured $kind default when no account is selected",
-    async ({ configuredModel, expectedModelID }) => {
-      vi.mocked(getModels).mockResolvedValue({
-        models: [configuredModel],
-        total: 1,
-        default_model: configuredModel.model_name,
-        provider_options: [],
-      })
-
-      const { result } = renderHook(() => useChatModels({ isConnected: true }))
-
-      await waitFor(() => {
-        expect(result.current.selectedModelID).toBe(expectedModelID)
-      })
-
-      expect(result.current.selectedAccountName).toBe("")
-      expect(result.current.accountModels).toEqual([])
-      expect(result.current.accountRouterModels).toEqual([])
-      expect(result.current.hasAvailableModels).toBe(true)
-      expect(fetchUpstreamModels).not.toHaveBeenCalled()
-    },
-  )
-
-  it("does not expose API-key or local models in chat selector groups", async () => {
-    vi.mocked(getModels).mockResolvedValue({
-      models: [
-        model({
-          index: 0,
-          model_name: "gpt-api",
-          model: "gpt-4.1",
-          provider: "openai",
-        }),
-        model({
-          index: 1,
-          model_name: "local-model",
-          auth_method: "local",
-          api_base: "http://localhost:11434",
-        }),
       ],
-      total: 2,
-      default_model: "gpt-api",
+      total: 4,
+      default_account_ref: "router-1",
+      default_model: "coding",
+      revision: "models-revision-1",
       provider_options: [],
     })
 
     const { result } = renderHook(() => useChatModels({ isConnected: true }))
 
-    await waitFor(() => {
-      expect(result.current.defaultModelName).toBe("gpt-api")
+    await waitFor(() =>
+      expect(result.current.selectedModelAlias).toBe("coding"),
+    )
+
+    expect(result.current.selectedAccountName).toBe("router-1")
+    expect(
+      result.current.accountModels.map((item) => item.accountName),
+    ).toEqual(
+      ["github-copilot:personal", "openai-work"].map((name, index) =>
+        index === 0 ? `credential:${name}` : name,
+      ),
+    )
+    expect(
+      result.current.accountRouterModels.map((item) => item.model_name),
+    ).toEqual(["router-1"])
+    expect(result.current.aliasOptions.map((item) => item.name)).toEqual([
+      "coding",
+      "task-router",
+    ])
+  })
+
+  it("updates account and alias atomically", async () => {
+    vi.mocked(getModels).mockResolvedValue({
+      models: [
+        model({ model_name: "openai-work" }),
+        model({ index: 1, model_name: "openai-backup" }),
+      ],
+      model_aliases: [
+        { name: "coding", model: "gpt-5.4" },
+        { name: "fast", model: "gpt-4.1-mini" },
+      ],
+      total: 2,
+      default_account_ref: "openai-work",
+      default_model: "coding",
+      revision: "models-revision-1",
+      provider_options: [],
     })
 
-    expect(result.current.accountModels).toEqual([])
-    expect(result.current.accountRouterModels).toEqual([])
-    expect(result.current.hasAvailableModels).toBe(true)
-    expect(result.current.selectedModelID).toBe("gpt-4.1")
+    const { result } = renderHook(() => useChatModels({ isConnected: true }))
+    await waitFor(() =>
+      expect(result.current.selectedAccountName).toBe("openai-work"),
+    )
+
+    act(() => result.current.handleSetModelAlias("fast"))
+    await waitFor(() =>
+      expect(setDefaultSelection).toHaveBeenCalledWith("openai-work", "fast"),
+    )
+
+    act(() => result.current.handleSetAccount("openai-backup"))
+    await waitFor(() =>
+      expect(setDefaultSelection).toHaveBeenCalledWith("openai-backup", "fast"),
+    )
+  })
+
+  it("rolls back both valid optimistic selectors when the pair is rejected", async () => {
+    vi.mocked(getModels).mockResolvedValue({
+      models: [
+        model({ model_name: "openai-work", provider: "openai" }),
+        model({
+          index: 1,
+          model_name: "anthropic-work",
+          provider: "anthropic",
+        }),
+      ],
+      model_aliases: [
+        { name: "coding", model: "openai/gpt-5.4" },
+        { name: "fast", model: "openai/gpt-5.4-mini" },
+      ],
+      total: 2,
+      default_account_ref: "openai-work",
+      default_model: "coding",
+      revision: "models-revision-1",
+      provider_options: [],
+    })
+
+    const pending: Array<(error: Error) => void> = []
+    vi.mocked(setDefaultSelection).mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          pending.push(reject)
+        }),
+    )
+
+    const { result } = renderHook(() => useChatModels({ isConnected: true }))
+    await waitFor(() =>
+      expect(result.current.selectedAccountName).toBe("openai-work"),
+    )
+
+    act(() => result.current.handleSetAccount("anthropic-work"))
+    await waitFor(() =>
+      expect(setDefaultSelection).toHaveBeenCalledWith(
+        "anthropic-work",
+        "coding",
+      ),
+    )
+
+    act(() => result.current.handleSetModelAlias("fast"))
+    await waitFor(() =>
+      expect(setDefaultSelection).toHaveBeenLastCalledWith(
+        "anthropic-work",
+        "fast",
+      ),
+    )
+    expect(result.current.selectedAccountName).toBe("anthropic-work")
+    expect(result.current.selectedModelAlias).toBe("fast")
+
+    await act(async () => {
+      pending[1](new Error("model alias is incompatible with account"))
+      await Promise.resolve()
+    })
+
+    await waitFor(() => {
+      expect(result.current.selectedAccountName).toBe("openai-work")
+      expect(result.current.selectedModelAlias).toBe("coding")
+    })
+
+    await act(async () => {
+      pending[0](new Error("stale request"))
+      await Promise.resolve()
+    })
+    expect(result.current.selectedAccountName).toBe("openai-work")
+    expect(result.current.selectedModelAlias).toBe("coding")
+  })
+
+  it("does not invent a selection when no defaults are configured", async () => {
+    vi.mocked(getModels).mockResolvedValue({
+      models: [model({ model_name: "openai-work" })],
+      model_aliases: [{ name: "coding", model: "gpt-5.4" }],
+      total: 1,
+      default_account_ref: "",
+      default_model: "",
+      revision: "models-revision-1",
+      provider_options: [],
+    })
+
+    const { result } = renderHook(() => useChatModels({ isConnected: true }))
+    await waitFor(() => expect(result.current.hasAvailableModels).toBe(true))
+
+    expect(result.current.selectedAccountName).toBe("")
+    expect(result.current.selectedModelAlias).toBe("")
+    expect(setDefaultSelection).not.toHaveBeenCalled()
   })
 })

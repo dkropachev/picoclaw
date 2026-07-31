@@ -477,7 +477,7 @@ func TestLegacyCompact_PostTurn_ExceedsMessageThreshold(t *testing.T) {
 		},
 	}
 	msgBus := bus.NewMessageBus()
-	al := NewAgentLoop(cfg, msgBus, &simpleMockProvider{response: "summary"})
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, &simpleMockProvider{response: "summary"})
 
 	defaultAgent := al.registry.GetDefaultAgent()
 	if defaultAgent == nil {
@@ -518,6 +518,225 @@ func TestLegacyCompact_PostTurn_ExceedsMessageThreshold(t *testing.T) {
 	newHistory := defaultAgent.Sessions.GetHistory("session-threshold")
 	if len(newHistory) >= len(history) {
 		t.Fatalf("expected summarization to reduce history from %d messages, got %d", len(history), len(newHistory))
+	}
+}
+
+func TestLegacySummarizationUsesConcreteAliasModel(t *testing.T) {
+	provider := &contextCompletionCaptureProvider{response: "resolved summary"}
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         t.TempDir(),
+				AccountRef:        "summary-account",
+				ModelName:         "summary",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+				ContextWindow:     8000,
+			},
+		},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "summary-account",
+			Provider:  "openai",
+			APIBase:   "http://example.invalid/v1",
+			APIKeys:   config.SimpleSecureStrings("test-key"),
+			Enabled:   true,
+		}},
+		ModelAliases: []config.ModelAliasConfig{{
+			Name:  "summary",
+			Model: "upstream-summary-model",
+		}},
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	defer al.Close()
+
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("default agent is nil")
+	}
+	if agent.ConfigurationError != nil {
+		t.Fatalf("default agent configuration error = %v", agent.ConfigurationError)
+	}
+	agent.Sessions.SetHistory("summary-alias", []providers.Message{
+		{Role: "user", Content: "q1"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "user", Content: "q2"},
+		{Role: "assistant", Content: "a2"},
+		{Role: "user", Content: "q3"},
+		{Role: "assistant", Content: "a3"},
+	})
+
+	manager := &legacyContextManager{al: al}
+	manager.summarizeSession(agent, "summary-alias")
+
+	models := provider.Models()
+	if len(models) == 0 {
+		t.Fatal("summarization provider was not called")
+	}
+	for _, model := range models {
+		if model != "upstream-summary-model" {
+			t.Fatalf("summarization model = %q, want concrete upstream model", model)
+		}
+	}
+}
+
+func TestLegacySummarizationResolvesModelRouterTarget(t *testing.T) {
+	provider := &contextCompletionCaptureProvider{response: "resolved summary"}
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         t.TempDir(),
+				AccountRef:        "summary-account",
+				ModelName:         "summary-router",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "summary-account",
+			Provider:  "openai",
+			APIBase:   "http://example.invalid/v1",
+			APIKeys:   config.SimpleSecureStrings("test-key"),
+			Enabled:   true,
+		}},
+		ModelAliases: []config.ModelAliasConfig{
+			{Name: "fast-summary", Model: "upstream-fast-summary"},
+			{Name: "default-summary", Model: "upstream-default-summary"},
+		},
+		ModelRouters: []config.ModelRouterConfig{{
+			Name:    "summary-router",
+			Enabled: true,
+			Entry:   "rules",
+			Blocks: []config.ModelRouterBlock{
+				{
+					ID:   "rules",
+					Type: config.ModelRouterBlockTypeRules,
+					Rules: []config.ModelRouterRule{{
+						Match:  config.ModelRouterRuleContains,
+						Value:  "quick",
+						Target: "fast",
+					}},
+					Fallback: "default",
+				},
+				{ID: "fast", Type: config.ModelRouterBlockTypeModel, Model: "fast-summary"},
+				{ID: "default", Type: config.ModelRouterBlockTypeModel, Model: "default-summary"},
+			},
+		}},
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	defer al.Close()
+
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("default agent is nil")
+	}
+	if agent.ConfigurationError != nil {
+		t.Fatalf("default agent configuration error = %v", agent.ConfigurationError)
+	}
+	candidates, err := candidatesForAccountAliases(
+		cfg,
+		"summary-account",
+		"fast-summary",
+		nil,
+		cfg.Agents.Defaults.Workspace,
+		agent.CandidateProviders,
+	)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("fast summary candidates = %#v, error = %v", candidates, err)
+	}
+	bindBootstrapProvider(agent.CandidateProviders, candidates[0], provider)
+
+	manager := &legacyContextManager{al: al}
+	if _, err := manager.retryLLMCall(
+		context.Background(),
+		agent,
+		"summary-router-session",
+		"make a quick summary",
+		1,
+	); err != nil {
+		t.Fatalf("retryLLMCall: %v", err)
+	}
+	models := provider.Models()
+	if len(models) != 1 || models[0] != "upstream-fast-summary" {
+		t.Fatalf("summarization models = %#v, want concrete routed model", models)
+	}
+}
+
+func TestLegacySummarizationResolvesAccountRouterProviderAndOverride(t *testing.T) {
+	bootstrapProvider := &contextCompletionCaptureProvider{response: "wrong provider"}
+	selectedProvider := &contextCompletionCaptureProvider{response: "resolved summary"}
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         t.TempDir(),
+				AccountRef:        "summary-accounts",
+				ModelName:         "summary",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "account-b",
+			Provider:  "anthropic",
+			APIBase:   "http://example.invalid/v1",
+			APIKeys:   config.SimpleSecureStrings("test-key"),
+			Enabled:   true,
+		}},
+		ModelAliases: []config.ModelAliasConfig{{
+			Name:  "summary",
+			Model: "default-summary-model",
+			AccountOverrides: map[string]string{
+				"account-b": "account-b-summary-model",
+			},
+		}},
+		AccountRouters: []config.AccountRouterConfig{{
+			Name:    "summary-accounts",
+			Enabled: true,
+			Entry:   "selected",
+			Blocks: []config.AccountRouterBlock{{
+				ID:      "selected",
+				Type:    config.AccountRouterBlockTypeAccount,
+				Account: "account-b",
+			}},
+		}},
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), bootstrapProvider)
+	defer al.Close()
+
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("default agent is nil")
+	}
+	if agent.ConfigurationError != nil {
+		t.Fatalf("default agent configuration error = %v", agent.ConfigurationError)
+	}
+	if agent.AccountRouter == nil {
+		t.Fatal("account router was not configured")
+	}
+	selection := agent.AccountRouter.Select("account-router-summary", "compression")
+	if len(selection.Candidates) != 1 {
+		t.Fatalf("account router candidates = %#v, want one", selection.Candidates)
+	}
+	bindBootstrapProvider(
+		agent.CandidateProviders,
+		selection.Candidates[0],
+		selectedProvider,
+	)
+
+	manager := &legacyContextManager{al: al}
+	if _, err := manager.retryLLMCall(
+		context.Background(),
+		agent,
+		"account-router-summary",
+		"summarize this conversation",
+		1,
+	); err != nil {
+		t.Fatalf("retryLLMCall: %v", err)
+	}
+	if got := selectedProvider.Models(); len(got) != 1 || got[0] != "account-b-summary-model" {
+		t.Fatalf("selected provider models = %#v, want account override", got)
+	}
+	if got := bootstrapProvider.Models(); len(got) != 0 {
+		t.Fatalf("bootstrap provider was called with models %#v", got)
 	}
 }
 
@@ -633,7 +852,7 @@ func TestIngestCalledDuringTurn(t *testing.T) {
 	}
 
 	msgBus := bus.NewMessageBus()
-	al := NewAgentLoop(cfg, msgBus, &simpleMockProvider{response: "done"})
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, &simpleMockProvider{response: "done"})
 	defaultAgent := al.registry.GetDefaultAgent()
 	if defaultAgent == nil {
 		t.Fatal("expected default agent")
@@ -709,7 +928,7 @@ func TestClearCommandRoutedAgentCallsContextManagerClear(t *testing.T) {
 		},
 	}
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &simpleMockProvider{response: "done"})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &simpleMockProvider{response: "done"})
 	if al.contextManager != mock {
 		t.Fatalf("expected mock context manager, got %T", al.contextManager)
 	}
@@ -872,5 +1091,30 @@ func testConfig(t *testing.T) *config.Config {
 
 func newCMTestAgentLoop(cfg *config.Config) *AgentLoop {
 	msgBus := bus.NewMessageBus()
-	return NewAgentLoop(cfg, msgBus, &simpleMockProvider{response: "test"})
+	return newTestAgentLoopWithStrictModels(cfg, msgBus, &simpleMockProvider{response: "test"})
+}
+
+type contextCompletionCaptureProvider struct {
+	mu       sync.Mutex
+	response string
+	models   []string
+}
+
+func (p *contextCompletionCaptureProvider) Chat(
+	_ context.Context,
+	_ []providers.Message,
+	_ []providers.ToolDefinition,
+	model string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	p.models = append(p.models, model)
+	p.mu.Unlock()
+	return &providers.LLMResponse{Content: p.response}, nil
+}
+
+func (p *contextCompletionCaptureProvider) Models() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.models...)
 }

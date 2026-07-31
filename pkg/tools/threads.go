@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -37,6 +38,11 @@ var validThreadActions = []string{
 	"get_policy",
 	"set_policy",
 }
+
+var (
+	loadThreadPolicyConfigForUpdate = config.LoadConfigForUpdateSnapshot
+	saveThreadPolicyConfig          = config.SaveConfigIfRevision
+)
 
 type ThreadsTool struct {
 	cfg        *config.Config
@@ -525,16 +531,23 @@ func (t *ThreadsTool) Execute(ctx context.Context, args map[string]any) *ToolRes
 }
 
 func (t *ThreadsTool) updateThreadPolicy(args map[string]any) (*config.Config, config.ThreadPolicyConfig, error) {
+	configPath := strings.TrimSpace(t.configPath)
+	if configPath == "" {
+		configPath = strings.TrimSpace(os.Getenv(config.EnvConfig))
+	}
+
 	cfg := t.cfg
 	if cfg == nil {
 		cfg = config.DefaultConfig()
 	}
-	if t.configPath != "" {
-		loaded, err := config.LoadConfig(t.configPath)
+	revision := ""
+	if configPath != "" {
+		loaded, loadedRevision, err := loadThreadPolicyConfigForUpdate(configPath)
 		if err != nil {
 			return nil, config.ThreadPolicyConfig{}, err
 		}
 		cfg = loaded
+		revision = loadedRevision
 	}
 
 	policy := cfg.Tools.Threads.Policy
@@ -571,12 +584,14 @@ func (t *ThreadsTool) updateThreadPolicy(args map[string]any) (*config.Config, c
 	policy.Rules = config.NormalizeThreadPolicyRules(policy.Rules)
 	cfg.Tools.Threads.Policy = policy
 
-	if t.configPath != "" {
-		if err := config.SaveConfig(t.configPath, cfg); err != nil {
-			return nil, config.ThreadPolicyConfig{}, err
-		}
-	} else if path := strings.TrimSpace(os.Getenv(config.EnvConfig)); path != "" {
-		if err := config.SaveConfig(path, cfg); err != nil {
+	if configPath != "" {
+		if _, err := saveThreadPolicyConfig(configPath, cfg, revision); err != nil {
+			if errors.Is(err, config.ErrConfigRevisionMismatch) {
+				return nil, config.ThreadPolicyConfig{}, fmt.Errorf(
+					"config changed while updating thread policy; reload and retry: %w",
+					err,
+				)
+			}
 			return nil, config.ThreadPolicyConfig{}, err
 		}
 	}

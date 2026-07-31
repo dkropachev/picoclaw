@@ -430,7 +430,7 @@ jobs:
 func TestRuntimeEventWorkflowPumpFollowsWorkflowEnableReloads(t *testing.T) {
 	workspace := t.TempDir()
 	cfgDisabled := workflowAutomationTestConfig(workspace, false)
-	al := NewAgentLoop(cfgDisabled, bus.NewMessageBus(), &mockProvider{})
+	al := newTestAgentLoopWithStrictModels(cfgDisabled, bus.NewMessageBus(), &mockProvider{})
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
 	go func() { runDone <- al.Run(runCtx) }()
@@ -518,7 +518,7 @@ jobs:
 	}
 	cfgA := workflowAutomationTestConfig(workspaceA, true)
 	providerA := &mockProvider{}
-	al := NewAgentLoop(cfgA, bus.NewMessageBus(), providerA)
+	al := newTestAgentLoopWithStrictModels(cfgA, bus.NewMessageBus(), providerA)
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	go func() { _ = al.Run(runCtx) }()
 	defer func() {
@@ -581,7 +581,7 @@ jobs:
 }
 
 func newWorkflowAutomationTestLoop(workspace string) *AgentLoop {
-	return NewAgentLoop(
+	return newTestAgentLoopWithStrictModels(
 		workflowAutomationTestConfig(workspace, true),
 		bus.NewMessageBus(),
 		&mockProvider{},

@@ -16,6 +16,7 @@ export interface SessionDetail {
     content: string
     created_at?: string
     kind?: "normal" | "thought" | "tool_calls"
+    account_ref?: string
     model_name?: string
     media?: string[]
     attachments?: {

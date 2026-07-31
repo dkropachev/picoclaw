@@ -3,12 +3,10 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import {
-  type FetchModelsRequest,
+  type ModelAlias,
   type ModelInfo,
-  type UpstreamModel,
-  fetchUpstreamModels,
   getModels,
-  setDefaultModel,
+  setDefaultSelection,
 } from "@/api/models"
 import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { refreshGatewayState } from "@/store/gateway"
@@ -23,8 +21,11 @@ export interface ChatAccountOption {
   provider?: string
   authMethod?: string
   credentialID?: string
-  modelID?: string
   modelIndex?: number
+}
+
+export interface ChatModelAliasOption extends ModelAlias {
+  isRouter?: boolean
 }
 
 function isAccountRouterModel(model: ModelInfo): boolean {
@@ -35,68 +36,36 @@ function isModelRouterModel(model: ModelInfo): boolean {
   return model.provider === "model-router" || model.model_router != null
 }
 
-function isCredentialAccountModel(model: ModelInfo): boolean {
-  return model.model_name.startsWith("credential:")
-}
-
-function credentialAccountName(model: ModelInfo): string {
-  if (isCredentialAccountModel(model)) {
-    return model.model_name
-  }
-  const credentialID = model.credential_id?.trim()
-  if (!credentialID) {
-    return ""
-  }
-  return `credential:${credentialID.toLowerCase()}`
-}
-
 function displayAccountLabel(accountName: string): string {
   return accountName.startsWith("credential:")
     ? accountName.slice("credential:".length)
     : accountName
 }
 
-function modelOption(id: string): UpstreamModel | null {
-  const trimmed = id.trim()
-  return trimmed ? { id: trimmed } : null
-}
-
 export function useChatModels({ isConnected }: UseChatModelsOptions) {
   const { t } = useTranslation()
-  const modelDiscoveryWarning = t("chat.modelDiscoveryWarning")
-  const modelDiscoveryErrorTitle = t("chat.modelDiscoveryError")
   const [modelList, setModelList] = useState<ModelInfo[]>([])
+  const [modelAliases, setModelAliases] = useState<ModelAlias[]>([])
+  const [defaultAccountRef, setDefaultAccountRef] = useState("")
   const [defaultModelName, setDefaultModelName] = useState("")
   const [selectedAccountName, setSelectedAccountName] = useState("")
-  const [selectedModelID, setSelectedModelID] = useState("")
-  const [modelOptions, setModelOptions] = useState<UpstreamModel[]>([])
-  const [isLoadingModelOptions, setIsLoadingModelOptions] = useState(false)
-  const [modelDiscoveryError, setModelDiscoveryError] = useState<string | null>(
-    null,
-  )
-  const [modelDiscoveryAttempt, setModelDiscoveryAttempt] = useState(0)
-  const setDefaultRequestIdRef = useRef(0)
-
-  const syncDefaultModelName = useCallback(
-    (models: ModelInfo[], defaultModel: string) => {
-      if (models.some((m) => m.model_name === defaultModel)) {
-        setDefaultModelName(defaultModel)
-        return
-      }
-      setDefaultModelName("")
-    },
-    [],
-  )
+  const [selectedModelAlias, setSelectedModelAlias] = useState("")
+  const [isSavingSelection, setIsSavingSelection] = useState(false)
+  const requestIdRef = useRef(0)
 
   const loadModels = useCallback(async () => {
     try {
       const data = await getModels()
       setModelList(data.models)
-      syncDefaultModelName(data.models, data.default_model)
+      setModelAliases(data.model_aliases ?? [])
+      setDefaultAccountRef(data.default_account_ref ?? "")
+      setDefaultModelName(data.default_model ?? "")
+      return data
     } catch {
-      // silently fail
+      // The chat connection state owns the user-visible load failure.
+      return undefined
     }
-  }, [syncDefaultModelName])
+  }, [])
 
   useEffect(() => {
     const timerId = setTimeout(() => {
@@ -106,293 +75,173 @@ export function useChatModels({ isConnected }: UseChatModelsOptions) {
     return () => clearTimeout(timerId)
   }, [isConnected, loadModels])
 
-  const handleSetDefault = useCallback(
-    async (modelName: string) => {
-      if (modelName === defaultModelName) return
-      const requestId = ++setDefaultRequestIdRef.current
-
-      try {
-        await setDefaultModel(modelName)
-        const data = await getModels()
-        if (requestId !== setDefaultRequestIdRef.current) {
-          return
-        }
-
-        setModelList(data.models)
-        syncDefaultModelName(data.models, data.default_model)
-        const gateway = await refreshGatewayState({ force: true })
-        showSaveSuccessOrRestartToast(
-          t,
-          t("models.defaultChangeSuccess"),
-          modelName,
-          gateway?.restartRequired === true,
-        )
-      } catch (err) {
-        console.error("Failed to set default model:", err)
-        toast.error(err instanceof Error ? err.message : t("models.loadError"))
-      }
-    },
-    [defaultModelName, syncDefaultModelName, t],
-  )
-
-  const defaultSelectableModels = useMemo(
+  const selectableAccounts = useMemo(
     () =>
       modelList.filter(
-        (m) =>
-          m.default_model_allowed !== false &&
-          (m.is_virtual !== true ||
-            isAccountRouterModel(m) ||
-            isModelRouterModel(m) ||
-            isCredentialAccountModel(m)),
+        (model) => model.enabled !== false && !isModelRouterModel(model),
       ),
     [modelList],
   )
 
   const accountModels = useMemo(() => {
     const byAccount = new Map<string, ChatAccountOption>()
-    for (const model of defaultSelectableModels) {
-      if (isAccountRouterModel(model) || isModelRouterModel(model)) {
-        continue
-      }
-      const accountName = credentialAccountName(model)
-      if (!accountName || byAccount.has(accountName)) {
-        continue
-      }
+    for (const model of selectableAccounts) {
+      if (isAccountRouterModel(model)) continue
+      const accountName = model.model_name.trim()
+      if (!accountName || byAccount.has(accountName)) continue
       byAccount.set(accountName, {
         accountName,
         label: displayAccountLabel(accountName),
         provider: model.provider,
         authMethod: model.auth_method,
-        credentialID:
-          model.credential_id ?? accountName.slice("credential:".length),
-        modelID: model.model,
+        credentialID: model.credential_id,
         modelIndex: model.is_virtual ? undefined : model.index,
       })
     }
     return [...byAccount.values()].sort((a, b) =>
       a.label.localeCompare(b.label),
     )
-  }, [defaultSelectableModels])
+  }, [selectableAccounts])
 
   const accountRouterModels = useMemo(
-    () => defaultSelectableModels.filter(isAccountRouterModel),
-    [defaultSelectableModels],
+    () => selectableAccounts.filter(isAccountRouterModel),
+    [selectableAccounts],
   )
 
-  const selectedAccount = useMemo(
-    () =>
-      accountModels.find(
-        (account) => account.accountName === selectedAccountName,
-      ),
-    [accountModels, selectedAccountName],
-  )
-
-  const selectedAccountRouter = useMemo(
-    () =>
-      accountRouterModels.find(
-        (router) => router.model_name === selectedAccountName,
-      ),
-    [accountRouterModels, selectedAccountName],
-  )
-
-  useEffect(() => {
-    const defaultModel = modelList.find(
-      (model) => model.model_name === defaultModelName,
-    )
-    const defaultAccountName =
-      defaultModel && isAccountRouterModel(defaultModel)
-        ? defaultModel.model_name
-        : defaultModel
-          ? credentialAccountName(defaultModel)
-          : ""
-    const nextAccountName =
-      defaultAccountName ||
-      accountModels[0]?.accountName ||
-      accountRouterModels[0]?.model_name ||
-      ""
-
-    setSelectedAccountName((current) => {
+  const aliasOptions = useMemo<ChatModelAliasOption[]>(() => {
+    const aliases: ChatModelAliasOption[] = modelAliases.map((alias) => ({
+      ...alias,
+      isRouter: false,
+    }))
+    const names = new Set(aliases.map((alias) => alias.name))
+    for (const model of modelList) {
       if (
-        current &&
-        (accountModels.some((account) => account.accountName === current) ||
-          accountRouterModels.some((router) => router.model_name === current))
+        !isModelRouterModel(model) ||
+        model.enabled === false ||
+        names.has(model.model_name)
       ) {
-        return current
+        continue
       }
-      return nextAccountName
-    })
+      aliases.push({
+        name: model.model_name,
+        model: model.model,
+        isRouter: true,
+      })
+    }
+    return aliases.sort((a, b) => a.name.localeCompare(b.name))
+  }, [modelAliases, modelList])
 
-    setSelectedModelID((current) => {
-      if (current) return current
-      return defaultModel && !isAccountRouterModel(defaultModel)
-        ? defaultModel.model
-        : ""
-    })
-  }, [accountModels, accountRouterModels, defaultModelName, modelList])
+  const accountRefs = useMemo(
+    () =>
+      new Set([
+        ...accountModels.map((account) => account.accountName),
+        ...accountRouterModels.map((router) => router.model_name),
+      ]),
+    [accountModels, accountRouterModels],
+  )
+  const aliasNames = useMemo(
+    () => new Set(aliasOptions.map((alias) => alias.name)),
+    [aliasOptions],
+  )
 
   useEffect(() => {
-    let cancelled = false
-    const defaultModel = modelList.find(
-      (model) => model.model_name === defaultModelName,
-    )
-    const configuredFallbackOption =
-      selectedAccount &&
-      defaultModel &&
-      credentialAccountName(defaultModel) === selectedAccount.accountName
-        ? modelOption(defaultModel.model)
-        : null
-    const fallbackOption =
-      configuredFallbackOption ??
-      modelOption(selectedAccount?.modelID ?? "") ??
-      null
-
-    if (!selectedAccountName) {
-      setModelOptions([])
-      setSelectedModelID(
-        defaultModel && !isAccountRouterModel(defaultModel)
-          ? defaultModel.model
-          : "",
-      )
-      setIsLoadingModelOptions(false)
-      setModelDiscoveryError(null)
-      return () => {
-        cancelled = true
+    setSelectedAccountName((current) => {
+      if (current && accountRefs.has(current)) return current
+      if (defaultAccountRef && accountRefs.has(defaultAccountRef)) {
+        return defaultAccountRef
       }
-    }
-
-    let fetchRequest: FetchModelsRequest | null = null
-    if (selectedAccountRouter) {
-      fetchRequest = { account_ref: selectedAccountRouter.model_name }
-    } else if (selectedAccount) {
-      fetchRequest = { account_ref: selectedAccount.accountName }
-    }
-
-    if (!fetchRequest) {
-      const options = fallbackOption ? [fallbackOption] : []
-      setModelOptions(options)
-      setSelectedModelID((current) => current || options[0]?.id || "")
-      setIsLoadingModelOptions(false)
-      setModelDiscoveryError(null)
-      return () => {
-        cancelled = true
+      return ""
+    })
+    setSelectedModelAlias((current) => {
+      if (current && aliasNames.has(current)) return current
+      if (defaultModelName && aliasNames.has(defaultModelName)) {
+        return defaultModelName
       }
-    }
-
-    setModelOptions([])
-    setIsLoadingModelOptions(true)
-    setModelDiscoveryError(null)
-    void fetchUpstreamModels(fetchRequest)
-      .then((response) => {
-        if (cancelled) return
-        const issueDescription = response.issues
-          ?.map(
-            (issue) =>
-              `${displayAccountLabel(issue.account_ref)}: ${issue.error}`,
-          )
-          .join("\n")
-        const seen = new Set<string>()
-        const options = response.models.filter((model) => {
-          const id = model.id.trim()
-          const normalizedID = id.toLowerCase()
-          if (!id || seen.has(normalizedID)) return false
-          seen.add(normalizedID)
-          return true
-        })
-        if (
-          options.length === 0 &&
-          (selectedAccountRouter != null || Boolean(issueDescription))
-        ) {
-          const errorMessage = issueDescription || modelDiscoveryErrorTitle
-          setModelOptions(fallbackOption ? [fallbackOption] : [])
-          setSelectedModelID(fallbackOption?.id || "")
-          setModelDiscoveryError(errorMessage)
-          toast.error(modelDiscoveryErrorTitle, {
-            description: errorMessage,
-          })
-          return
-        }
-        if (issueDescription) {
-          toast.warning(modelDiscoveryWarning, {
-            description: issueDescription,
-          })
-        }
-        const resolvedOptions =
-          options.length > 0 ? options : fallbackOption ? [fallbackOption] : []
-        setModelOptions(resolvedOptions)
-        setSelectedModelID((current) => {
-          const selected = resolvedOptions.find(
-            (model) =>
-              model.id.trim().toLowerCase() === current.trim().toLowerCase(),
-          )
-          if (selected) {
-            return selected.id
-          }
-          return resolvedOptions[0]?.id || ""
-        })
-        setModelDiscoveryError(null)
-      })
-      .catch((err) => {
-        if (cancelled) return
-        console.error("Failed to fetch account models:", err)
-        const errorMessage =
-          err instanceof Error ? err.message : modelDiscoveryErrorTitle
-        setModelOptions(fallbackOption ? [fallbackOption] : [])
-        setSelectedModelID(fallbackOption?.id || "")
-        setModelDiscoveryError(errorMessage)
-        toast.error(modelDiscoveryErrorTitle, {
-          description: errorMessage,
-        })
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoadingModelOptions(false)
-      })
-
-    return () => {
-      cancelled = true
-    }
+      return ""
+    })
   }, [
+    accountModels,
+    accountRefs,
+    accountRouterModels,
+    aliasNames,
+    aliasOptions,
+    defaultAccountRef,
     defaultModelName,
-    modelDiscoveryAttempt,
-    modelDiscoveryErrorTitle,
-    modelDiscoveryWarning,
-    modelList,
-    selectedAccount,
-    selectedAccountName,
-    selectedAccountRouter,
   ])
 
-  const handleSetAccount = useCallback(
-    (accountName: string) => {
-      setSelectedAccountName(accountName)
-      setSelectedModelID("")
-      setModelDiscoveryError(null)
-      void handleSetDefault(accountName)
+  const saveSelection = useCallback(
+    async (accountRef: string, modelAlias: string) => {
+      if (!accountRef || !modelAlias) return
+      if (accountRef === defaultAccountRef && modelAlias === defaultModelName) {
+        return
+      }
+
+      const requestId = ++requestIdRef.current
+      setIsSavingSelection(true)
+      try {
+        await setDefaultSelection(accountRef, modelAlias)
+        if (requestId !== requestIdRef.current) return
+        setDefaultAccountRef(accountRef)
+        setDefaultModelName(modelAlias)
+        const gateway = await refreshGatewayState({ force: true })
+        showSaveSuccessOrRestartToast(
+          t,
+          t("models.defaultChangeSuccess"),
+          `${accountRef} / ${modelAlias}`,
+          gateway?.restartRequired === true,
+        )
+      } catch (error) {
+        if (requestId !== requestIdRef.current) return
+        toast.error(
+          error instanceof Error ? error.message : t("models.loadError"),
+        )
+        // Both selectors form one server-validated policy. Roll back the pair
+        // immediately, even when each optimistic value is valid on its own.
+        setSelectedAccountName(defaultAccountRef)
+        setSelectedModelAlias(defaultModelName)
+
+        const data = await loadModels()
+        if (requestId !== requestIdRef.current) return
+        if (data) {
+          setSelectedAccountName(data.default_account_ref ?? "")
+          setSelectedModelAlias(data.default_model ?? "")
+        }
+      } finally {
+        if (requestId === requestIdRef.current) {
+          setIsSavingSelection(false)
+        }
+      }
     },
-    [handleSetDefault],
+    [defaultAccountRef, defaultModelName, loadModels, t],
   )
 
-  const handleSetModel = useCallback((modelID: string) => {
-    setSelectedModelID(modelID)
-  }, [])
+  const handleSetAccount = useCallback(
+    (accountRef: string) => {
+      setSelectedAccountName(accountRef)
+      void saveSelection(accountRef, selectedModelAlias)
+    },
+    [saveSelection, selectedModelAlias],
+  )
 
-  const retryModelDiscovery = useCallback(() => {
-    setModelDiscoveryAttempt((attempt) => attempt + 1)
-  }, [])
-
-  const hasAvailableModels = defaultSelectableModels.length > 0
+  const handleSetModelAlias = useCallback(
+    (modelAlias: string) => {
+      setSelectedModelAlias(modelAlias)
+      void saveSelection(selectedAccountName, modelAlias)
+    },
+    [saveSelection, selectedAccountName],
+  )
 
   return {
+    defaultAccountRef,
     defaultModelName,
     selectedAccountName,
-    selectedModelID,
-    hasAvailableModels,
+    selectedModelAlias,
+    hasAvailableModels: accountRefs.size > 0 && aliasOptions.length > 0,
     accountModels,
     accountRouterModels,
-    modelOptions,
-    isLoadingModelOptions,
-    modelDiscoveryError,
+    aliasOptions,
+    isSavingSelection,
     handleSetAccount,
-    handleSetModel,
-    retryModelDiscovery,
+    handleSetModelAlias,
   }
 }

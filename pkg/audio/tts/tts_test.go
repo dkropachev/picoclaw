@@ -82,7 +82,7 @@ func TestOpenAITTSProvider_SynthesizeSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	provider := NewOpenAITTSProvider("k123", server.URL, "", "")
+	provider := NewOpenAITTSProvider("k123", server.URL, "", "tts-1")
 	stream, err := provider.Synthesize(context.Background(), "hello")
 	if err != nil {
 		t.Fatalf("Synthesize failed: %v", err)
@@ -122,7 +122,7 @@ func TestOpenAITTSProvider_SynthesizeNon200(t *testing.T) {
 	}))
 	defer server.Close()
 
-	provider := NewOpenAITTSProvider("k123", server.URL, "", "")
+	provider := NewOpenAITTSProvider("k123", server.URL, "", "tts-1")
 	_, err := provider.Synthesize(context.Background(), "hello")
 	if err == nil {
 		t.Fatal("expected error")
@@ -202,6 +202,16 @@ func TestNewOpenAITTSProvider_UsesConfiguredModel(t *testing.T) {
 	}
 }
 
+func TestOpenAITTSProvider_RejectsMissingModel(t *testing.T) {
+	t.Parallel()
+
+	provider := NewOpenAITTSProvider("key", "https://api.openai.com/v1", "", "")
+	_, err := provider.Synthesize(context.Background(), "hello")
+	if err == nil || err.Error() != "no model configured" {
+		t.Fatalf("Synthesize() error = %v, want no model configured", err)
+	}
+}
+
 func TestNewOpenAITTSProvider_UsesConfiguredVoiceAndResponseFormat(t *testing.T) {
 	t.Parallel()
 
@@ -227,12 +237,20 @@ func TestDetectTTS_UsesMimoProviderForMimoModels(t *testing.T) {
 	t.Parallel()
 
 	provider := DetectTTS(&config.Config{
-		Voice: config.VoiceConfig{TTSModelName: "mimo-tts"},
+		Voice: config.VoiceConfig{
+			TTSAccountRef: "mimo-account",
+			TTSModelName:  "mimo-tts",
+		},
+		ModelAliases: []config.ModelAliasConfig{{
+			Name:  "mimo-tts",
+			Model: "mimo/mimo-v2-tts",
+		}},
 		ModelList: []*config.ModelConfig{
 			{
-				ModelName: "mimo-tts",
+				ModelName: "mimo-account",
 				Model:     "mimo/mimo-v2-tts",
 				APIKeys:   config.SimpleSecureStrings("sk-mimo"),
+				Enabled:   true,
 			},
 		},
 	})
@@ -253,12 +271,20 @@ func TestDetectTTS_UsesOpenAIExtraBodyVoiceAndResponseFormat(t *testing.T) {
 	t.Parallel()
 
 	provider := DetectTTS(&config.Config{
-		Voice: config.VoiceConfig{TTSModelName: "mai-voice"},
+		Voice: config.VoiceConfig{
+			TTSAccountRef: "openrouter-voice",
+			TTSModelName:  "mai-voice",
+		},
+		ModelAliases: []config.ModelAliasConfig{{
+			Name:  "mai-voice",
+			Model: "openrouter/microsoft/mai-voice-2",
+		}},
 		ModelList: []*config.ModelConfig{
 			{
-				ModelName: "mai-voice",
+				ModelName: "openrouter-voice",
 				Model:     "openrouter/microsoft/mai-voice-2",
 				APIKeys:   config.SimpleSecureStrings("sk-openrouter"),
+				Enabled:   true,
 				ExtraBody: map[string]any{
 					"voice":           "en-US-Harper:MAI-Voice-2",
 					"response_format": "mp3",
@@ -279,6 +305,112 @@ func TestDetectTTS_UsesOpenAIExtraBodyVoiceAndResponseFormat(t *testing.T) {
 	}
 }
 
+func TestDetectTTSWithErrorUsesLiteLLMSpeechProxy(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Voice: config.VoiceConfig{
+			TTSAccountRef: "litellm-voice",
+			TTSModelName:  "speech",
+		},
+		ModelAliases: []config.ModelAliasConfig{{
+			Name:  "speech",
+			Model: "tts-proxy",
+		}},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "litellm-voice",
+			Provider:  "litellm",
+			APIBase:   "http://localhost:4000/v1",
+			APIKeys:   config.SimpleSecureStrings("proxy-key"),
+			Enabled:   true,
+		}},
+	}
+
+	provider, err := DetectTTSWithError(cfg)
+	if err != nil {
+		t.Fatalf("DetectTTSWithError() error = %v", err)
+	}
+	ttsProvider, ok := provider.(*OpenAITTSProvider)
+	if !ok {
+		t.Fatalf("DetectTTSWithError() type = %T, want *OpenAITTSProvider", provider)
+	}
+	if ttsProvider.model != "tts-proxy" {
+		t.Fatalf("model = %q, want %q", ttsProvider.model, "tts-proxy")
+	}
+	if ttsProvider.apiBase != "http://localhost:4000/v1/audio/speech" {
+		t.Fatalf(
+			"apiBase = %q, want %q",
+			ttsProvider.apiBase,
+			"http://localhost:4000/v1/audio/speech",
+		)
+	}
+}
+
+func TestDetectTTSWithErrorRejectsUnsupportedProvider(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Voice: config.VoiceConfig{
+			TTSAccountRef: "anthropic-account",
+			TTSModelName:  "speech",
+		},
+		ModelAliases: []config.ModelAliasConfig{{
+			Name:  "speech",
+			Model: "claude-sonnet-4-6",
+		}},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "anthropic-account",
+			Provider:  "anthropic",
+			APIKeys:   config.SimpleSecureStrings("sk-anthropic"),
+			Enabled:   true,
+		}},
+	}
+
+	provider, err := DetectTTSWithError(cfg)
+	if provider != nil {
+		t.Fatalf("DetectTTSWithError() = %T, want nil", provider)
+	}
+	if err == nil || !strings.Contains(err.Error(), `provider "anthropic" does not support speech synthesis`) {
+		t.Fatalf("DetectTTSWithError() error = %v, want unsupported anthropic provider", err)
+	}
+	if provider := DetectTTS(cfg); provider != nil {
+		t.Fatalf("DetectTTS() = %T, want nil", provider)
+	}
+}
+
+func TestDetectTTSWithErrorRejectsUnknownProvider(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		Voice: config.VoiceConfig{
+			TTSAccountRef: "custom-account",
+			TTSModelName:  "speech",
+		},
+		ModelAliases: []config.ModelAliasConfig{{
+			Name:  "speech",
+			Model: "tts-model",
+		}},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "custom-account",
+			Provider:  "custom-openai-compatible",
+			APIBase:   "https://custom.example.test/v1",
+			APIKeys:   config.SimpleSecureStrings("custom-key"),
+			Enabled:   true,
+		}},
+	}
+
+	provider, err := DetectTTSWithError(cfg)
+	if provider != nil {
+		t.Fatalf("DetectTTSWithError() = %T, want nil", provider)
+	}
+	if err == nil || !strings.Contains(
+		err.Error(),
+		`provider "custom-openai-compatible" does not support speech synthesis`,
+	) {
+		t.Fatalf("DetectTTSWithError() error = %v, want unknown provider rejection", err)
+	}
+}
+
 type stubTTSProvider struct {
 	name string
 }
@@ -289,6 +421,21 @@ func (s stubTTSProvider) Name() string {
 
 func (s stubTTSProvider) Synthesize(ctx context.Context, text string) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("audio")), nil
+}
+
+func TestSynthesizeAndStoreWithoutProviderReturnsNoModelConfigured(t *testing.T) {
+	_, err := SynthesizeAndStore(
+		t.Context(),
+		nil,
+		nil,
+		"hello",
+		"",
+		"pico",
+		"chat",
+	)
+	if err != config.ErrNoModelConfigured {
+		t.Fatalf("error = %v, want %v", err, config.ErrNoModelConfigured)
+	}
 }
 
 func TestSynthesizeAndStore_UsesOggMetadataByDefault(t *testing.T) {

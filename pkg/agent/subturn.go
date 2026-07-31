@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -84,7 +85,7 @@ type subTurnRuntimeConfig struct {
 // Synchronous sub-turn (Async=false):
 //
 //	cfg := SubTurnConfig{
-//	    Model: "gpt-4o-mini",
+//	    Model: "fast",
 //	    SystemPrompt: "Analyze this code",
 //	    Async: false,  // Result returned immediately
 //	}
@@ -95,7 +96,7 @@ type subTurnRuntimeConfig struct {
 // Asynchronous sub-turn (Async=true):
 //
 //	cfg := SubTurnConfig{
-//	    Model: "gpt-4o-mini",
+//	    Model: "fast",
 //	    SystemPrompt: "Background analysis",
 //	    Async: true,  // Result delivered to channel
 //	}
@@ -103,10 +104,11 @@ type subTurnRuntimeConfig struct {
 //	// Result also available in parent's pendingResults channel
 //	// Parent turn will poll and process it in a later iteration
 type SubTurnConfig struct {
-	Model        string
-	Tools        []tools.Tool
-	SystemPrompt string
-	MaxTokens    int
+	Model          string
+	ModelFallbacks []string
+	Tools          []tools.Tool
+	SystemPrompt   string
+	MaxTokens      int
 
 	// Async controls the result delivery mechanism:
 	//
@@ -180,6 +182,13 @@ type SubTurnConfig struct {
 	TargetAgentID string
 }
 
+func cloneOptionalModelFallbacks(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append(make([]string, 0, len(values)), values...)
+}
+
 // ====================== Context Keys ======================
 type agentLoopKeyType struct{}
 
@@ -236,6 +245,7 @@ func (s *AgentLoopSpawner) SpawnSubTurn(
 	// Convert tools.SubTurnConfig to agent.SubTurnConfig
 	agentCfg := SubTurnConfig{
 		Model:              cfg.Model,
+		ModelFallbacks:     cloneOptionalModelFallbacks(cfg.ModelFallbacks),
 		Tools:              cfg.Tools,
 		SystemPrompt:       cfg.SystemPrompt,
 		ActualSystemPrompt: cfg.ActualSystemPrompt,
@@ -415,6 +425,12 @@ func spawnSubTurn(
 		SendResponse:            false,
 		NoHistory:               true, // SubTurns don't use session history
 		SkipInitialSteeringPoll: true,
+	}
+	if cfg.TargetAgentID == "" {
+		opts.ModelNameOverride = strings.TrimSpace(cfg.Model)
+		if cfg.ModelFallbacks != nil {
+			opts.ModelFallbacksOverride = cloneOptionalModelFallbacks(cfg.ModelFallbacks)
+		}
 	}
 	if !opts.TurnProfile.Enabled {
 		opts.TurnProfile = parentTS.opts.TurnProfile

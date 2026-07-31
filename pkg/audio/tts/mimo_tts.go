@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 type MimoTTSProvider struct {
@@ -61,9 +62,6 @@ func NewMimoTTSProvider(apiKey string, apiBase string, model string, proxyURL st
 	}
 
 	model = strings.TrimSpace(model)
-	if model == "" {
-		model = "mimo-v2-tts"
-	}
 
 	client := &http.Client{Timeout: 60 * time.Second}
 	if proxyURL != "" {
@@ -92,6 +90,12 @@ func (t *MimoTTSProvider) Name() string {
 }
 
 func (t *MimoTTSProvider) Synthesize(ctx context.Context, text string) (io.ReadCloser, error) {
+	model, err := protocoltypes.RequireModel(t.model)
+	if err != nil {
+		return nil, err
+	}
+	t.model = model
+
 	logger.DebugCF("voice-tts", "Starting TTS synthesis", map[string]any{"text_len": len(text), "provider": t.Name()})
 
 	reqBody := map[string]any{

@@ -13,6 +13,7 @@ export interface AgentInfo {
   id: string
   name: string
   workspace: string
+  account_ref: string
   model: AgentModelPolicy | null
   skills: string[] | null
   subagents: AgentDelegationPolicy | null
@@ -25,6 +26,7 @@ export interface AgentMutationInput {
   id: string
   name: string
   workspace: string
+  account_ref: string
   model: AgentModelPolicy | null
   skills: string[] | null
   subagents: AgentDelegationPolicy | null

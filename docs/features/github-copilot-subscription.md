@@ -7,10 +7,11 @@
 ## Behavior Summary
 
 PicoClaw can use a user's GitHub Copilot subscription as a credential-backed
-model account. A user registers a named `github-copilot` account in the
-launcher Accounts surface, stores a supported GitHub user token in the shared
-auth store, and selects a `github-copilot` model entry anywhere a normal chat
-model can be selected.
+account. A user registers a named `github-copilot` account in the launcher
+Accounts surface, stores a supported GitHub user token in the shared auth store,
+and selects its `credential:github-copilot:<name>` ref anywhere a normal chat
+account can be selected. Execution pairs that account ref with an exact model
+alias; the credential never supplies a model implicitly.
 
 This feature is distinct from the existing local GitHub Copilot CLI bridge that
 talks to a user-managed `localhost:4321` Copilot service. Subscription-backed
@@ -71,12 +72,12 @@ Reference findings checked on 2026-07-24:
 
 | ID                      | Level  | Requirement                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Rationale                                                                                                                                  |
 | ----------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `FR-GITHUB-COPILOT-001` | MUST   | Provider metadata exposes `github-copilot` as both a selectable model provider and a credential-backed account provider, with display name `GitHub Copilot`, alias `copilot`, default model `auto`, and a token-based default auth method.                                                                                                                                                                                                                                                                                                                                         | Users need to discover Copilot alongside other subscription-backed accounts instead of configuring a local transport by hand.              |
+| `FR-GITHUB-COPILOT-001` | MUST   | Provider metadata exposes `github-copilot` as a credential-backed account provider with display name `GitHub Copilot`, provider alias `copilot`, and token auth. It exposes discovery hints but no executable default model. | Users need to discover Copilot accounts without silently selecting `auto` or another provider model. |
 | `FR-GITHUB-COPILOT-002` | MUST   | `/api/oauth/providers` lists `github-copilot` with token login support; login normalizes credential IDs as `github-copilot` or `github-copilot:<name>`, rejects invalid names, stores the token in `auth.AuthCredential`, and logout removes only the selected credential.                                                                                                                                                                                                                                                                                                         | Account routers and model entries need stable, provider-scoped credential references.                                                      |
 | `FR-GITHUB-COPILOT-003` | MUST   | Token login accepts supported GitHub token families used by Copilot SDK/CLI (`gho_`, `ghu_`, `github_pat_`) and rejects classic `ghp_` PATs with an actionable error before persisting.                                                                                                                                                                                                                                                                                                                                                                                            | Unsupported tokens should fail at setup time rather than during a chat turn.                                                               |
 | `FR-GITHUB-COPILOT-004` | MUST   | A `model_list` entry with provider `github-copilot` and credential auth (`auth_method` `token` or `oauth`) resolves the stored credential and uses direct HTTPS API calls with only that credential. It must not construct the Go Copilot SDK CLI client, start a CLI server, execute a `copilot` binary, or silently fall back to environment variables, keychain state, `gh auth`, or the local CLI bridge.                                                                                                                                                                      | Named accounts must run as the selected user, not whichever Copilot/GitHub identity happens to be logged in locally.                       |
 | `FR-GITHUB-COPILOT-005` | MUST   | The existing local Copilot bridge remains available when `github-copilot` is configured without credential auth and with local connection settings; the subscription-backed client does not require `localhost:4321` or a pre-started external Copilot server.                                                                                                                                                                                                                                                                                                                     | Current local users must not lose compatibility while account-backed usage gets a cleaner setup path.                                      |
-| `FR-GITHUB-COPILOT-006` | MUST   | Chat translation preserves the existing `LLMProvider` contract: messages become direct Copilot API request messages with role/content context, the requested model, including a turn-scoped ID selected in Chat after choosing an account router, is passed through unless blank, blank model uses the provider default, account-router config never supplies or stores that model, Copilot responses become `LLMResponse.Content`, and close is idempotent without requiring SDK/client/session shutdown for credential-backed mode.                                                                                                              | Agent turns, fallback, and account routers should treat Copilot like any other provider.                                                   |
+| `FR-GITHUB-COPILOT-006` | MUST   | Chat translation preserves the existing `LLMProvider` contract: messages become direct Copilot API requests with role/content context and the concrete model produced by exact alias resolution. A blank model fails with `no model configured`; Copilot `auto`, static metadata, and provider defaults are never substituted. Account routers remain model-free, responses become `LLMResponse.Content`, and close is idempotent. | Agent turns and account routers should treat Copilot like every other strict account-plus-alias provider. |
 | `FR-GITHUB-COPILOT-007` | MUST   | Model fetch/status logic does not call OpenAI-compatible `/models` for `github-copilot`; credential-backed fetch resolves the selected stored credential, exchanges it for Copilot API auth when applicable, and calls direct Copilot `GET /models`; if token exchange returns `403`, model fetch retries once against the fixed default Copilot API with the raw token and succeeds only when that API accepts it; account-specific API endpoints from successful exchanges are honored; static common models are exposed only as provider metadata/bootstrap hints; status treats credential-backed entries as configured only when the selected credential exists and only probes the local TCP bridge for non-credential configs. | Copilot subscriptions can expose more or different models than a static shortlist, and the UI needs the selected account's real model set. |
 | `FR-GITHUB-COPILOT-008` | MUST   | The Accounts UI, onboarding sheet, provider icon/label handling, TypeScript OAuth types, token placeholder text, status cards, and i18n strings include `github-copilot` and display registered Copilot credentials exactly like other named accounts.                                                                                                                                                                                                                                                                                                                             | Browser setup should be first-class and consistent with OpenAI, Anthropic, and Google Code Assist accounts.                                |
 | `FR-GITHUB-COPILOT-009` | MUST   | Errors from token exchange, direct model listing, direct chat calls, local-bridge SDK startup, session creation, entitlement/subscription denial, invalid tokens, unsupported token prefixes, timeouts, and canceled contexts are returned as concise provider errors with secrets redacted.                                                                                                                                                                                                                                                                                       | Users need actionable setup failures without leaking credentials in logs or launcher responses.                                            |
@@ -100,15 +101,25 @@ Credentials live in the existing auth store:
 }
 ```
 
-Model configuration uses the existing `model_list` shape:
+Selection uses a credential account plus a first-class alias:
 
 ```json
 {
-  "model_name": "copilot-work",
-  "provider": "github-copilot",
-  "model": "auto",
-  "auth_method": "token",
-  "credential_id": "github-copilot:work"
+  "agents": {
+    "defaults": {
+      "account_ref": "credential:github-copilot:work",
+      "model_name": "coding"
+    }
+  },
+  "model_aliases": [
+    {
+      "name": "coding",
+      "model": "gpt-5.4",
+      "account_overrides": {
+        "credential:github-copilot:work": "gpt-4.1"
+      }
+    }
+  ]
 }
 ```
 
@@ -140,16 +151,17 @@ Example account-router load balancer:
 }
 ```
 
-The existing local bridge keeps its local connection fields, for example
-`provider: "github-copilot"`, `model: "auto"`, `api_base: "localhost:4321"`,
-and `connect_mode: "grpc"`, but it is selected only when credential auth is not
-requested.
+The existing local bridge keeps only its local account/connection fields, for
+example `provider: "github-copilot"`, `model: ""`,
+`api_base: "localhost:4321"`, and `connect_mode: "grpc"`. It is selected only
+when credential auth is not requested, and its concrete model still comes from
+the independently selected exact alias; `auto` is never inserted.
 
 ## Auxiliary Interfaces
 
 | Type       | Surface                                                | Contract                                                                                                                                                                                                                             | Requirement IDs                                                                                                             |
 | ---------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
-| Config     | `model_list[]`                                         | Provider `github-copilot`, model ID, auth method, credential ID, account-router credential references, and optional local bridge connection settings.                                                                                | `FR-GITHUB-COPILOT-001`, `FR-GITHUB-COPILOT-004` through `FR-GITHUB-COPILOT-007`, `FR-GITHUB-COPILOT-011`                   |
+| Config     | `model_aliases[]`, account refs, optional local-bridge `model_list[]` | Exact alias-to-model mapping, concrete Copilot account overrides, credential account refs, and optional local bridge transport settings. | `FR-GITHUB-COPILOT-001`, `FR-GITHUB-COPILOT-004` through `FR-GITHUB-COPILOT-007`, `FR-GITHUB-COPILOT-011` |
 | Auth Store | `auth.AuthCredential`                                  | Store provider-scoped Copilot access tokens under normalized credential IDs with no plaintext exposure through read APIs.                                                                                                            | `FR-GITHUB-COPILOT-002`, `FR-GITHUB-COPILOT-003`, `FR-GITHUB-COPILOT-009`                                                   |
 | HTTP       | `/api/oauth*`, `/api/accounts/models*`                 | List/login/logout Copilot credentials without auto-creating model entries, expose provider metadata, save explicit model/router entries, fetch direct Copilot API model IDs for selected credentials, fetch sanitized account limits when available, and test model availability. | `FR-GITHUB-COPILOT-001` through `FR-GITHUB-COPILOT-012`                                                                     |
 | Provider   | `providers.CreateProviderFromConfig` and `LLMProvider` | Select the subscription client or local bridge, list models, create sessions, send prompts, close resources, and return normal responses/errors.                                                                                     | `FR-GITHUB-COPILOT-004` through `FR-GITHUB-COPILOT-009`                                                                     |
@@ -169,10 +181,11 @@ AuthMethod:"token"}`.
    subscription-backed path. Resolve the configured credential, require a
    non-empty access token, and build direct Copilot API requests with no
    ambient logged-in-user fallback.
-5. For credential-backed chat, exchange or apply the stored GitHub token for
-   Copilot API bearer auth, send the translated prompt to the direct Copilot
-   HTTPS chat endpoint for the requested model or default model, and return the
-   response content. This path must not invoke SDK startup or any executable.
+5. For credential-backed chat, require an already resolved non-empty concrete
+   model, exchange or apply the stored GitHub token for Copilot API bearer auth,
+   send the translated prompt to the direct Copilot HTTPS chat endpoint, and
+   return the response content. This path must not invoke SDK startup or any
+   executable.
 6. For local bridge chat, preserve the current `api_base` / `connect_mode`
    behavior and default endpoint. Do not read stored credentials in that mode.
 7. Account-router validation identifies `credential:` references before plain
@@ -209,14 +222,16 @@ Copilot-specific account options, credential references, direct API model
 listing, and provider behavior.
 Security isolation owns secret redaction and atomic credential writes, which
 Copilot credentials must reuse. Account routers may route to Copilot credential
-accounts without special routing behavior. Chat discovers selectable Copilot
-model IDs after the router is chosen and sends the user's choice only for that
-turn; other callers leave the model blank to use the Copilot provider default.
+accounts without special routing behavior. Chat and workflows send an exact
+alias with the selected account ref; after account routing, that alias resolves
+to its base model or concrete Copilot-account override.
 
 ## Failure And Edge Cases
 
 - Missing Copilot credential returns a setup error naming the credential ID and
   provider.
+- Missing model alias fails with `no model configured`; no request is sent with
+  `auto` merely because the selected account is GitHub Copilot.
 - Empty tokens, classic `ghp_` PATs, unknown token prefixes, and malformed
   credential IDs are rejected before saving.
 - A token that is syntactically valid but lacks Copilot entitlement fails during

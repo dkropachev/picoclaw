@@ -32,10 +32,6 @@ func (p *turnProfileCaptureProvider) Chat(
 	return &providers.LLMResponse{Content: "profile response"}, nil
 }
 
-func (p *turnProfileCaptureProvider) GetDefaultModel() string {
-	return "test-model"
-}
-
 type turnProfileSideQuestionCaptureProvider struct {
 	messages []providers.Message
 }
@@ -49,10 +45,6 @@ func (p *turnProfileSideQuestionCaptureProvider) Chat(
 ) (*providers.LLMResponse, error) {
 	p.messages = append([]providers.Message(nil), messages...)
 	return &providers.LLMResponse{Content: "side answer"}, nil
-}
-
-func (p *turnProfileSideQuestionCaptureProvider) GetDefaultModel() string {
-	return "test-model"
 }
 
 func newTurnProfileAgentLoop(
@@ -74,7 +66,7 @@ func newTurnProfileAgentLoop(
 	if cfg.Agents.Defaults.MaxToolIterations == 0 {
 		cfg.Agents.Defaults.MaxToolIterations = 10
 	}
-	return NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	return newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 }
 
 func writeTurnProfileSkill(t *testing.T, workspace, name, body string) {
@@ -244,7 +236,7 @@ func TestTurnProfile_BtwCommandUsesEnabledTurnProfile(t *testing.T) {
 	}
 	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
 	sideProvider := &turnProfileSideQuestionCaptureProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &turnProfileCaptureProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &turnProfileCaptureProvider{})
 	al.providerFactory = func(mc *config.ModelConfig) (providers.LLMProvider, string, error) {
 		return sideProvider, "test-model", nil
 	}
@@ -305,7 +297,7 @@ func TestTurnProfile_BtwCommandDoesNotAddToolFallbackWhenSystemPromptOff(t *test
 	}
 	t.Setenv("PICOCLAW_BUILTIN_SKILLS", t.TempDir())
 	sideProvider := &turnProfileSideQuestionCaptureProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &turnProfileCaptureProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &turnProfileCaptureProvider{})
 	al.RegisterTool(&echoTextTool{})
 	al.providerFactory = func(mc *config.ModelConfig) (providers.LLMProvider, string, error) {
 		return sideProvider, "test-model", nil
@@ -351,7 +343,7 @@ func TestTurnProfile_BtwHookCannotReenableNativeSearchWhenToolsOff(t *testing.T)
 		}},
 	}
 	provider := &nativeSearchCaptureProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 	al.providerFactory = func(mc *config.ModelConfig) (providers.LLMProvider, string, error) {
 		return provider, "test-model", nil
 	}
@@ -708,10 +700,6 @@ func (p *turnProfileToolCallProvider) Chat(
 	return &providers.LLMResponse{Content: "done"}, nil
 }
 
-func (p *turnProfileToolCallProvider) GetDefaultModel() string {
-	return "test-model"
-}
-
 func TestTurnProfile_ToolsCustomFiltersProviderToolsAndHookAdditions(t *testing.T) {
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
@@ -778,7 +766,7 @@ func TestTurnProfile_ToolsOffDisablesProviderAndNativeSearchTools(t *testing.T) 
 	cfg.Agents.Defaults.MaxTokens = 4096
 	cfg.Agents.Defaults.MaxToolIterations = 10
 	provider := &nativeSearchCaptureProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 
 	_, err := al.runAgentLoop(
 		context.Background(),
@@ -906,7 +894,7 @@ func TestTurnProfile_ToolsCustomAllowsNativeWebSearch(t *testing.T) {
 		},
 	}
 	provider := &nativeSearchCaptureProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 
 	_, err := al.runAgentLoop(
 		context.Background(),
@@ -953,7 +941,7 @@ func TestTurnProfile_SystemPromptOffAddsToolFallbackForNativeWebSearch(t *testin
 		},
 	}
 	provider := &nativeSearchCaptureProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 
 	_, err := al.runAgentLoop(
 		context.Background(),
@@ -998,7 +986,7 @@ func TestTurnProfile_BeforeLLMHookCannotReenableNativeSearchWhenToolsOff(t *test
 		},
 	}
 	provider := &nativeSearchCaptureProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 	if err := al.MountHook(NamedHook("enable-native-search", turnProfileEnableNativeSearchHook{})); err != nil {
 		t.Fatalf("MountHook() error = %v", err)
 	}
@@ -1048,7 +1036,7 @@ func TestTurnProfile_BeforeLLMHookCannotReenableNativeSearchWhenCustomToolsResol
 		},
 	}
 	provider := &nativeSearchCaptureProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 	if err := al.MountHook(NamedHook("enable-native-search", turnProfileEnableNativeSearchHook{})); err != nil {
 		t.Fatalf("MountHook() error = %v", err)
 	}
@@ -1089,7 +1077,7 @@ func TestTurnProfile_ToolExecutionRejectsDisallowedToolCalls(t *testing.T) {
 		},
 	}
 	provider := &turnProfileToolCallProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 	al.RegisterTool(&echoTextTool{})
 	al.RegisterTool(&echoTextRewrittenTool{})
 
@@ -1140,7 +1128,7 @@ func TestTurnProfile_BeforeToolRespondCannotBypassDisallowedTool(t *testing.T) {
 		},
 	}
 	provider := &turnProfileToolCallProvider{}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 	al.RegisterTool(&echoTextTool{})
 	al.RegisterTool(&echoTextRewrittenTool{})
 	if err := al.MountHook(NamedHook("respond-tool", turnProfileRespondToolHook{})); err != nil {

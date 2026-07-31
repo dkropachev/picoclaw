@@ -17,14 +17,14 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers/common"
 	"github.com/sipeed/picoclaw/pkg/providers/promptir"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 const (
-	antigravityBaseURL      = "https://cloudcode-pa.googleapis.com"
-	antigravityDefaultModel = "gemini-3-flash"
-	antigravityUserAgent    = "antigravity"
-	antigravityXGoogClient  = "google-cloud-sdk vscode_cloudshelleditor/0.1"
-	antigravityVersion      = "1.15.8"
+	antigravityBaseURL     = "https://cloudcode-pa.googleapis.com"
+	antigravityUserAgent   = "antigravity"
+	antigravityXGoogClient = "google-cloud-sdk vscode_cloudshelleditor/0.1"
+	antigravityVersion     = "1.15.8"
 )
 
 // AntigravityProvider implements LLMProvider using Google's Cloud Code Assist (Antigravity) API.
@@ -61,17 +61,21 @@ func (p *AntigravityProvider) Chat(
 	model string,
 	options map[string]any,
 ) (*LLMResponse, error) {
+	model = strings.TrimSpace(model)
+	if model == "antigravity" || model == "google-antigravity" {
+		return nil, protocoltypes.ErrNoModelConfigured
+	}
+	model = strings.TrimPrefix(model, "google-antigravity/")
+	model = strings.TrimPrefix(model, "antigravity/")
+	model, err := protocoltypes.RequireModel(model)
+	if err != nil {
+		return nil, err
+	}
+
 	accessToken, projectID, err := p.tokenSource()
 	if err != nil {
 		return nil, fmt.Errorf("antigravity auth: %w", err)
 	}
-
-	if model == "" || model == "antigravity" || model == "google-antigravity" {
-		model = antigravityDefaultModel
-	}
-	// Strip provider prefixes if present
-	model = strings.TrimPrefix(model, "google-antigravity/")
-	model = strings.TrimPrefix(model, "antigravity/")
 
 	logger.DebugCF("provider.antigravity", "Starting chat", map[string]any{
 		"model":     model,
@@ -154,11 +158,6 @@ func (p *AntigravityProvider) Chat(
 	}
 
 	return llmResp, nil
-}
-
-// GetDefaultModel returns the default model identifier.
-func (p *AntigravityProvider) GetDefaultModel() string {
-	return antigravityDefaultModel
 }
 
 // --- Request building ---
@@ -709,29 +708,6 @@ func FetchAntigravityModelsContext(
 		})
 	}
 
-	// Ensure gemini-3-flash-preview and gemini-3-flash are in the list if they aren't already
-	hasFlashPreview := false
-	hasFlash := false
-	for _, m := range models {
-		if m.ID == "gemini-3-flash-preview" {
-			hasFlashPreview = true
-		}
-		if m.ID == "gemini-3-flash" {
-			hasFlash = true
-		}
-	}
-	if !hasFlashPreview {
-		models = append(models, AntigravityModelInfo{
-			ID:          "gemini-3-flash-preview",
-			DisplayName: "Gemini 3 Flash (Preview)",
-		})
-	}
-	if !hasFlash {
-		models = append(models, AntigravityModelInfo{
-			ID:          "gemini-3-flash",
-			DisplayName: "Gemini 3 Flash",
-		})
-	}
 	sortAntigravityModels(models)
 
 	return models, nil
@@ -739,11 +715,6 @@ func FetchAntigravityModelsContext(
 
 func sortAntigravityModels(models []AntigravityModelInfo) {
 	sort.Slice(models, func(i, j int) bool {
-		leftDefault := models[i].ID == antigravityDefaultModel
-		rightDefault := models[j].ID == antigravityDefaultModel
-		if leftDefault != rightDefault {
-			return leftDefault
-		}
 		leftID := strings.ToLower(models[i].ID)
 		rightID := strings.ToLower(models[j].ID)
 		if leftID == rightID {

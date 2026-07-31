@@ -135,7 +135,14 @@ export function AgentCard({
               t("pages.agent.agents.policy.inherit", "Inherit")}
           </dd>
           <dt className="text-muted-foreground">
-            {t("pages.agent.agents.summary.primary", "Primary")}
+            {t("pages.agent.agents.summary.account", "Account")}
+          </dt>
+          <dd className="truncate text-right" title={agent.account_ref}>
+            {agent.account_ref ||
+              t("pages.agent.agents.policy.inherit", "Inherit")}
+          </dd>
+          <dt className="text-muted-foreground">
+            {t("pages.agent.agents.summary.primary", "Primary alias")}
           </dt>
           <dd className="truncate text-right" title={agent.model?.primary}>
             {agent.model?.primary ||

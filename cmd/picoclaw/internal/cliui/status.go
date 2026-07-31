@@ -22,6 +22,7 @@ type StatusReport struct {
 	ConfigOK      bool
 	WorkspacePath string
 	WorkspaceOK   bool
+	Account       string
 	Model         string
 	Providers     []ProviderRow
 	OAuthLines    []string // each full line "provider (method): state"
@@ -48,7 +49,8 @@ func printStatusPlain(r StatusReport) {
 	printPathLine("Workspace", r.WorkspacePath, r.WorkspaceOK)
 
 	if r.ConfigOK {
-		fmt.Printf("Model: %s\n", r.Model)
+		fmt.Printf("Account: %s\n", displaySelection(r.Account))
+		fmt.Printf("Model alias: %s\n", displaySelection(r.Model))
 		for _, p := range r.Providers {
 			fmt.Printf("%s: %s\n", p.Name, p.Val)
 		}
@@ -121,9 +123,24 @@ func pathStatusPanel(r StatusReport, inner int) string {
 	b.WriteString(" " + wsMark + "\n")
 	if r.ConfigOK {
 		b.WriteString("\n")
-		b.WriteString(kvKeyStyle().Render("Model") + "  " + kvValStyle().Render(r.Model))
+		b.WriteString(
+			kvKeyStyle().Render("Account") + "      " +
+				kvValStyle().Render(displaySelection(r.Account)),
+		)
+		b.WriteString("\n")
+		b.WriteString(
+			kvKeyStyle().Render("Model alias") + "  " +
+				kvValStyle().Render(displaySelection(r.Model)),
+		)
 	}
 	return borderStyle().Width(inner).Render(b.String())
+}
+
+func displaySelection(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "(none)"
+	}
+	return value
 }
 
 func statusMark(ok bool) string {

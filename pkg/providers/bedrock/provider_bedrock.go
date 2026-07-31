@@ -215,6 +215,10 @@ func (p *Provider) Chat(
 	model string,
 	options map[string]any,
 ) (*LLMResponse, error) {
+	model, err := protocoltypes.RequireModel(model)
+	if err != nil {
+		return nil, err
+	}
 	effectiveTimeout := p.requestTimeout
 	if effectiveTimeout <= 0 {
 		effectiveTimeout = common.DefaultRequestTimeout
@@ -260,6 +264,10 @@ func (p *Provider) ChatStream(
 	options map[string]any,
 	onChunk func(accumulated string),
 ) (*LLMResponse, error) {
+	model, err := protocoltypes.RequireModel(model)
+	if err != nil {
+		return nil, err
+	}
 	if p.requestTimeout > 0 {
 		if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 			var cancel context.CancelFunc
@@ -442,11 +450,6 @@ done:
 		FinishReason: finishReason,
 		Usage:        usage,
 	}, nil
-}
-
-// GetDefaultModel returns an empty string as Bedrock models are user-configured.
-func (p *Provider) GetDefaultModel() string {
-	return ""
 }
 
 // Region returns the AWS region configured for this Provider.

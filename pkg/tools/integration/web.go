@@ -22,6 +22,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
@@ -787,7 +788,7 @@ func (p *GeminiSearchProvider) Search(
 	}
 	model := strings.TrimSpace(p.model)
 	if model == "" {
-		model = "gemini-2.5-flash"
+		return "", config.ErrNoModelConfigured
 	}
 
 	payload := map[string]any{
@@ -1074,6 +1075,7 @@ func stripTags(content string) string {
 
 type PerplexitySearchProvider struct {
 	keyPool *APIKeyPool
+	model   string
 	proxy   string
 	client  *http.Client
 }
@@ -1086,6 +1088,10 @@ func (p *PerplexitySearchProvider) Search(
 ) (string, error) {
 	if p.keyPool == nil || len(p.keyPool.keys) == 0 {
 		return "", errors.New("no API key provided")
+	}
+	model, err := protocoltypes.RequireModel(p.model)
+	if err != nil {
+		return "", err
 	}
 
 	searchURL := "https://api.perplexity.ai/chat/completions"
@@ -1100,7 +1106,7 @@ func (p *PerplexitySearchProvider) Search(
 		}
 
 		payload := map[string]any{
-			"model": "sonar",
+			"model": model,
 			"messages": []map[string]string{
 				{
 					"role":    "system",
@@ -1485,6 +1491,7 @@ type WebSearchToolOptions struct {
 	GeminiMaxResults      int
 	GeminiEnabled         bool
 	PerplexityAPIKeys     []string
+	PerplexityModel       string
 	PerplexityMaxResults  int
 	PerplexityEnabled     bool
 	SearXNGBaseURL        string
@@ -1503,6 +1510,16 @@ type WebSearchToolOptions struct {
 }
 
 func WebSearchToolOptionsFromConfig(cfg *config.Config) WebSearchToolOptions {
+	geminiModel := resolveWebSearchAliasModel(
+		cfg,
+		cfg.Tools.Web.Gemini.ModelAlias,
+		"gemini",
+	)
+	perplexityModel := resolveWebSearchAliasModel(
+		cfg,
+		cfg.Tools.Web.Perplexity.ModelAlias,
+		"perplexity",
+	)
 	return WebSearchToolOptions{
 		Provider:              cfg.Tools.Web.Provider,
 		BraveAPIKeys:          cfg.Tools.Web.Brave.APIKeys.Values(),
@@ -1521,10 +1538,11 @@ func WebSearchToolOptionsFromConfig(cfg *config.Config) WebSearchToolOptions {
 		DuckDuckGoMaxResults:  cfg.Tools.Web.DuckDuckGo.MaxResults,
 		DuckDuckGoEnabled:     cfg.Tools.Web.DuckDuckGo.Enabled,
 		GeminiAPIKey:          cfg.Tools.Web.Gemini.APIKey.String(),
-		GeminiModel:           cfg.Tools.Web.Gemini.Model,
+		GeminiModel:           geminiModel,
 		GeminiMaxResults:      cfg.Tools.Web.Gemini.MaxResults,
 		GeminiEnabled:         cfg.Tools.Web.Gemini.Enabled,
 		PerplexityAPIKeys:     cfg.Tools.Web.Perplexity.APIKeys.Values(),
+		PerplexityModel:       perplexityModel,
 		PerplexityMaxResults:  cfg.Tools.Web.Perplexity.MaxResults,
 		PerplexityEnabled:     cfg.Tools.Web.Perplexity.Enabled,
 		SearXNGBaseURL:        cfg.Tools.Web.SearXNG.BaseURL,
@@ -1541,6 +1559,29 @@ func WebSearchToolOptionsFromConfig(cfg *config.Config) WebSearchToolOptions {
 		BaiduSearchEnabled:    cfg.Tools.Web.BaiduSearch.Enabled,
 		Proxy:                 cfg.Tools.Web.Proxy,
 	}
+}
+
+func resolveWebSearchAliasModel(
+	cfg *config.Config,
+	modelAlias string,
+	expectedProvider string,
+) string {
+	if cfg == nil {
+		return ""
+	}
+	alias, err := cfg.GetModelAlias(strings.TrimSpace(modelAlias))
+	if err != nil {
+		return ""
+	}
+	model := strings.TrimSpace(alias.Model)
+	if expectedProvider == "" {
+		return model
+	}
+	model, err = protocoltypes.ResolveModelForProvider(expectedProvider, model)
+	if err != nil {
+		return ""
+	}
+	return model
 }
 
 func WebSearchProviderReady(opts WebSearchToolOptions, name string) bool {
@@ -1585,7 +1626,9 @@ func (opts WebSearchToolOptions) providerReady(name string) bool {
 	case "duckduckgo":
 		return opts.DuckDuckGoEnabled
 	case "gemini":
-		return opts.GeminiEnabled && strings.TrimSpace(opts.GeminiAPIKey) != ""
+		return opts.GeminiEnabled &&
+			strings.TrimSpace(opts.GeminiAPIKey) != "" &&
+			strings.TrimSpace(opts.GeminiModel) != ""
 	case "brave":
 		return opts.BraveEnabled && len(opts.BraveAPIKeys) > 0
 	case "tavily":
@@ -1593,7 +1636,9 @@ func (opts WebSearchToolOptions) providerReady(name string) bool {
 	case "kagi":
 		return opts.KagiEnabled && len(opts.KagiAPIKeys) > 0
 	case "perplexity":
-		return opts.PerplexityEnabled && len(opts.PerplexityAPIKeys) > 0
+		return opts.PerplexityEnabled &&
+			len(opts.PerplexityAPIKeys) > 0 &&
+			strings.TrimSpace(opts.PerplexityModel) != ""
 	case "searxng":
 		return opts.SearXNGEnabled && strings.TrimSpace(opts.SearXNGBaseURL) != ""
 	case "glm_search":
@@ -1686,6 +1731,7 @@ func (opts WebSearchToolOptions) providerByName(name string) (SearchProvider, in
 		}
 		return &PerplexitySearchProvider{
 			keyPool: NewAPIKeyPool(opts.PerplexityAPIKeys),
+			model:   opts.PerplexityModel,
 			proxy:   opts.Proxy,
 			client:  client,
 		}, maxResults, nil

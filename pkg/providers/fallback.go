@@ -244,6 +244,7 @@ func (fc *FallbackChain) ExecuteCandidate(
 
 		// Non-retriable error: abort immediately.
 		if !failErr.IsRetriable() {
+			failErr.IdentityKey = cooldownKey
 			result.Attempts = append(result.Attempts, FallbackAttempt{
 				Provider:    candidate.Provider,
 				Model:       candidate.Model,
@@ -362,10 +363,11 @@ func (fc *FallbackChain) ExecuteImage(
 				Duration:    elapsed,
 			})
 			return nil, &FailoverError{
-				Reason:   FailoverFormat,
-				Provider: candidate.Provider,
-				Model:    candidate.Model,
-				Wrapped:  err,
+				Reason:      FailoverFormat,
+				Provider:    candidate.Provider,
+				Model:       candidate.Model,
+				IdentityKey: imageKey,
+				Wrapped:     err,
 			}
 		}
 

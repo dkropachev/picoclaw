@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	audiocapabilities "github.com/sipeed/picoclaw/pkg/audio/capabilities"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -23,26 +24,49 @@ type ttsAudioMetaProvider interface {
 	AudioFileMeta() (fileExt string, contentType string)
 }
 
-func providerFromModelConfig(mc *config.ModelConfig) TTSProvider {
-	if mc == nil || mc.APIKey() == "" {
-		return nil
+func providerFromModelConfigWithError(mc *config.ModelConfig) (TTSProvider, error) {
+	if mc == nil {
+		return nil, config.ErrNoModelConfigured
+	}
+	protocol, configuredModel := providers.ExtractProtocol(mc)
+	modelID, err := providers.ResolveModelForProvider(protocol, configuredModel)
+	if err != nil {
+		return nil, err
+	}
+	route, err := audiocapabilities.ResolveTTSRoute(protocol, modelID)
+	if err != nil {
+		return nil, err
+	}
+	if mc.APIKey() == "" {
+		return nil, fmt.Errorf(
+			"voice TTS provider %q has no API key configured",
+			protocol,
+		)
 	}
 
-	protocol, modelID := providers.ExtractProtocol(mc)
-	if modelID == "" {
-		modelID = strings.TrimSpace(mc.Model)
-	}
-
-	switch protocol {
-	case "mimo":
-		return NewMimoTTSProvider(mc.APIKey(), providers.ResolveAPIBase(mc), modelID, mc.Proxy)
-	default:
-		return NewOpenAITTSProviderWithOptions(
-			mc.APIKey(),
-			providers.ResolveAPIBase(mc),
-			mc.Proxy,
+	resolved := *mc
+	resolved.Provider = protocol
+	resolved.Model = modelID
+	switch route {
+	case audiocapabilities.TTSRouteMimo:
+		return NewMimoTTSProvider(
+			resolved.APIKey(),
+			providers.ResolveAPIBase(&resolved),
 			modelID,
-			openAITTSOptionsFromModelConfig(mc),
+			resolved.Proxy,
+		), nil
+	case audiocapabilities.TTSRouteOpenAI:
+		return NewOpenAITTSProviderWithOptions(
+			resolved.APIKey(),
+			providers.ResolveAPIBase(&resolved),
+			resolved.Proxy,
+			modelID,
+			openAITTSOptionsFromModelConfig(&resolved),
+		), nil
+	default:
+		return nil, fmt.Errorf(
+			"voice TTS provider %q has no supported synthesis route",
+			protocol,
 		)
 	}
 }
@@ -63,26 +87,26 @@ func openAITTSOptionsFromModelConfig(mc *config.ModelConfig) OpenAITTSOptions {
 }
 
 func DetectTTS(cfg *config.Config) TTSProvider {
+	provider, _ := DetectTTSWithError(cfg)
+	return provider
+}
+
+// DetectTTSWithError is the diagnostic form of DetectTTS. It reports invalid
+// and unsupported account/model selections instead of silently constructing an
+// OpenAI speech request for an unrelated provider.
+func DetectTTSWithError(cfg *config.Config) (TTSProvider, error) {
 	if cfg == nil {
-		return nil
+		return nil, nil
 	}
 
-	if modelName := strings.TrimSpace(cfg.Voice.TTSModelName); modelName != "" {
-		if mc, err := cfg.GetModelConfig(modelName); err == nil {
-			if provider := providerFromModelConfig(mc); provider != nil {
-				return provider
-			}
-		}
+	modelCfg, err := cfg.ResolveVoiceTTSModelConfig()
+	if err != nil {
+		return nil, err
 	}
-
-	for _, mc := range cfg.ModelList {
-		if strings.Contains(strings.ToLower(mc.Model), "tts") && mc.APIKey() != "" {
-			if provider := providerFromModelConfig(mc); provider != nil {
-				return provider
-			}
-		}
+	if modelCfg == nil {
+		return nil, nil
 	}
-	return nil
+	return providerFromModelConfigWithError(modelCfg)
 }
 
 // SynthesizeAndStore synthesizes text to speech and registers it in the media store, returning the media reference.
@@ -96,7 +120,7 @@ func SynthesizeAndStore(
 	chatID string,
 ) (string, error) {
 	if provider == nil {
-		return "", fmt.Errorf("tts provider is not configured")
+		return "", config.ErrNoModelConfigured
 	}
 	if store == nil {
 		return "", fmt.Errorf("media store not configured")

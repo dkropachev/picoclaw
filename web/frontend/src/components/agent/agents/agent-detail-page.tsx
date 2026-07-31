@@ -248,11 +248,15 @@ function AgentOverview({
             <dd className="min-w-0 text-right font-mono text-xs break-words">
               {agent.workspace || "Inherit"}
             </dd>
-            <dt className="text-muted-foreground">Primary model</dt>
+            <dt className="text-muted-foreground">Provider account</dt>
+            <dd className="min-w-0 text-right font-mono text-xs break-words">
+              {agent.account_ref || "Inherit"}
+            </dd>
+            <dt className="text-muted-foreground">Primary model alias</dt>
             <dd className="min-w-0 text-right break-words">
               {agent.model?.primary || "Inherit"}
             </dd>
-            <dt className="text-muted-foreground">Fallback models</dt>
+            <dt className="text-muted-foreground">Fallback model aliases</dt>
             <dd className="min-w-0 text-right break-words">{fallbacks}</dd>
             <dt className="text-muted-foreground">Configured skills</dt>
             <dd className="min-w-0 text-right break-words">{skills}</dd>

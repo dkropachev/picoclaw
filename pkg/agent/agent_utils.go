@@ -566,19 +566,10 @@ func sideQuestionModelName(agent *AgentInstance, usedLight bool) string {
 	return agent.Model
 }
 
-func modelNameFromIdentityKey(identityKey string) string {
-	identityKey = strings.TrimSpace(identityKey)
-	if identityKey == "" {
-		return ""
-	}
-	parts := strings.SplitN(identityKey, "/", 2)
-	if len(parts) == 2 {
-		return parts[1]
-	}
-	return identityKey
-}
-
 func modelAliasFromCandidateIdentityKey(identityKey string) string {
+	if alias := aliasFromAccountCandidateIdentityKey(identityKey); alias != "" {
+		return alias
+	}
 	const prefix = "model_name:"
 	if !strings.HasPrefix(identityKey, prefix) {
 		return ""

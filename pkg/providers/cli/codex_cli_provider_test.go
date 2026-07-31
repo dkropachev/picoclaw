@@ -388,15 +388,6 @@ func TestBuildPrompt_SystemAndTools(t *testing.T) {
 	}
 }
 
-// --- CLI Argument Tests ---
-
-func TestCodexCliProvider_GetDefaultModel(t *testing.T) {
-	p := NewCodexCliProvider("")
-	if got := p.GetDefaultModel(); got != "codex-cli" {
-		t.Errorf("GetDefaultModel() = %q, want %q", got, "codex-cli")
-	}
-}
-
 // --- Mock CLI Integration Test ---
 
 func createMockCodexCLI(t *testing.T, events []string) string {
@@ -433,7 +424,7 @@ func TestCodexCliProvider_MockCLI_Success(t *testing.T) {
 	}
 
 	messages := []Message{{Role: "user", Content: "Hello"}}
-	resp, err := p.Chat(context.Background(), messages, nil, "", nil)
+	resp, err := p.Chat(context.Background(), messages, nil, "test-model", nil)
 	if err != nil {
 		t.Fatalf("Chat() error: %v", err)
 	}
@@ -465,7 +456,7 @@ func TestCodexCliProvider_MockCLI_Error(t *testing.T) {
 	}
 
 	messages := []Message{{Role: "user", Content: "Hello"}}
-	_, err := p.Chat(context.Background(), messages, nil, "", nil)
+	_, err := p.Chat(context.Background(), messages, nil, "test-model", nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -545,7 +536,7 @@ func TestCodexCliProvider_MockCLI_ContextCancel(t *testing.T) {
 	cancel() // cancel immediately
 
 	messages := []Message{{Role: "user", Content: "test"}}
-	_, err := p.Chat(ctx, messages, nil, "", nil)
+	_, err := p.Chat(ctx, messages, nil, "test-model", nil)
 	if err == nil {
 		t.Fatal("expected error on canceled context")
 	}
@@ -555,9 +546,24 @@ func TestCodexCliProvider_EmptyCommand(t *testing.T) {
 	p := &CodexCliProvider{command: ""}
 
 	messages := []Message{{Role: "user", Content: "test"}}
-	_, err := p.Chat(context.Background(), messages, nil, "", nil)
+	_, err := p.Chat(context.Background(), messages, nil, "test-model", nil)
 	if err == nil {
 		t.Fatal("expected error for empty command")
+	}
+}
+
+func TestCodexCliProvider_RejectsMissingModelBeforeCommand(t *testing.T) {
+	p := &CodexCliProvider{command: filepath.Join(t.TempDir(), "must-not-run")}
+
+	_, err := p.Chat(
+		context.Background(),
+		[]Message{{Role: "user", Content: "test"}},
+		nil,
+		"  ",
+		nil,
+	)
+	if err == nil || err.Error() != "no model configured" {
+		t.Fatalf("Chat() error = %v, want no model configured", err)
 	}
 }
 
@@ -583,7 +589,7 @@ func TestCodexCliProvider_Integration(t *testing.T) {
 		{Role: "user", Content: "Respond with just the word 'hello' and nothing else."},
 	}
 
-	resp, err := p.Chat(context.Background(), messages, nil, "", nil)
+	resp, err := p.Chat(context.Background(), messages, nil, "gpt-5.3-codex", nil)
 	if err != nil {
 		t.Fatalf("Chat() error: %v", err)
 	}

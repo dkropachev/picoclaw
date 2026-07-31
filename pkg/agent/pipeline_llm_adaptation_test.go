@@ -308,10 +308,6 @@ func (p *adaptationFallbackCaptureProvider) Chat(
 	}, nil
 }
 
-func (p *adaptationFallbackCaptureProvider) GetDefaultModel() string {
-	return "adaptation-primary"
-}
-
 type adaptationNamedTool string
 
 func (t adaptationNamedTool) Name() string {
@@ -346,17 +342,36 @@ func TestPipelineCallLLMUsesFallbackProfileToolSurface(t *testing.T) {
 		Model:              fallbackModel,
 		VisibleToolSurface: config.ToolSurfaceCodex,
 	}}
+	accountRef := agent.AccountRef
+	al.cfg.ModelAliases = append(
+		al.cfg.ModelAliases,
+		config.ModelAliasConfig{Name: "primary", Model: "primary-simple"},
+		config.ModelAliasConfig{Name: "fallback", Model: fallbackModel},
+	)
 	agent.ToolAdaptation = picotools.ResolveToolAdaptation(
 		al.cfg.Tools.Adaptation,
-		"anthropic",
+		"openai",
 		"primary-simple",
 	)
 	agent.Tools = picotools.NewToolRegistry()
 	agent.Tools.Register(adaptationNamedTool("exec"))
 	agent.Tools.Register(adaptationNamedTool("exec_command"))
 	agent.Candidates = []providers.FallbackCandidate{
-		{Provider: "anthropic", Model: "primary-simple"},
-		{Provider: "openai", Model: fallbackModel},
+		{
+			Provider:    "openai",
+			Model:       "primary-simple",
+			DisplayName: "primary",
+			IdentityKey: accountAliasIdentityKey(accountRef, "primary"),
+		},
+		{
+			Provider:    "openai",
+			Model:       fallbackModel,
+			DisplayName: "fallback",
+			IdentityKey: accountAliasIdentityKey(accountRef, "fallback"),
+		},
+	}
+	for _, candidate := range agent.Candidates {
+		bindBootstrapProvider(agent.CandidateProviders, candidate, provider)
 	}
 	al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), nil)
 

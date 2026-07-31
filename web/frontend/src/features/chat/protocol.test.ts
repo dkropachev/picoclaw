@@ -71,4 +71,23 @@ describe("handlePicoMessage typing state", () => {
 
     expect(store.get(chatAtom).isTyping).toBe(false)
   })
+
+  it("retains the account reference and model alias from assistant messages", () => {
+    handlePicoMessage(
+      {
+        ...assistantCreate(),
+        payload: {
+          ...assistantCreate().payload,
+          account_ref: "credential:openai:work",
+          model_name: "coding",
+        },
+      },
+      sessionId,
+    )
+
+    expect(store.get(chatAtom).messages[0]).toMatchObject({
+      accountRef: "credential:openai:work",
+      modelName: "coding",
+    })
+  })
 })

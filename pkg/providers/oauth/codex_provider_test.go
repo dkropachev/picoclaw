@@ -802,52 +802,23 @@ func TestCodexProvider_ChatRoundTrip_PreservesRequestedModel(t *testing.T) {
 	}
 }
 
-func TestCodexProvider_ChatRoundTrip_EmptyModelUsesDefault(t *testing.T) {
+func TestCodexProvider_ChatRejectsMissingModelBeforeRequest(t *testing.T) {
+	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/responses" {
-			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
-			return
-		}
-
-		var reqBody map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
-			return
-		}
-		if reqBody["model"] != codexDefaultModel {
-			http.Error(w, "unexpected model", http.StatusBadRequest)
-			return
-		}
-
-		resp := map[string]any{
-			"id":     "resp_test",
-			"object": "response",
-			"status": "completed",
-			"output": []map[string]any{
-				{
-					"id":     "msg_1",
-					"type":   "message",
-					"role":   "assistant",
-					"status": "completed",
-					"content": []map[string]any{
-						{"type": "output_text", "text": "Hi from Codex!"},
-					},
-				},
-			},
-		}
-		writeCompletedSSE(w, resp)
+		requests++
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
 	}))
 	defer server.Close()
 
 	provider := NewCodexProvider("test-token", "")
 	provider.client = createOpenAITestClient(server.URL, "test-token", "")
 
-	resp, err := provider.Chat(t.Context(), []Message{{Role: "user", Content: "Hello"}}, nil, "  ", map[string]any{})
-	if err != nil {
-		t.Fatalf("Chat() error: %v", err)
+	_, err := provider.Chat(t.Context(), []Message{{Role: "user", Content: "Hello"}}, nil, "  ", map[string]any{})
+	if err == nil || err.Error() != "no model configured" {
+		t.Fatalf("Chat() error = %v, want no model configured", err)
 	}
-	if resp.Content != "Hi from Codex!" {
-		t.Errorf("Content = %q, want %q", resp.Content, "Hi from Codex!")
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
 	}
 }
 
@@ -920,13 +891,6 @@ func TestCodexProvider_ChatStreamWithoutCompletedResponse(t *testing.T) {
 	}
 }
 
-func TestCodexProvider_GetDefaultModel(t *testing.T) {
-	p := NewCodexProvider("test-token", "")
-	if got := p.GetDefaultModel(); got != codexDefaultModel {
-		t.Errorf("GetDefaultModel() = %q, want %q", got, codexDefaultModel)
-	}
-}
-
 func TestCodexProvider_SupportsNativeSearch(t *testing.T) {
 	p := NewCodexProvider("test-token", "")
 	if !p.SupportsNativeSearch() {
@@ -940,38 +904,6 @@ func TestCreateCodexTokenSourceConstructors(t *testing.T) {
 	}
 	if CreateCodexTokenSourceForCredential("work") == nil {
 		t.Fatal("CreateCodexTokenSourceForCredential() returned nil")
-	}
-}
-
-func TestResolveCodexModel(t *testing.T) {
-	tests := []struct {
-		name         string
-		input        string
-		wantModel    string
-		wantFallback bool
-	}{
-		{name: "empty", input: "", wantModel: codexDefaultModel, wantFallback: true},
-		{name: "namespaced model", input: "custom/gpt-5.3-codex", wantModel: "custom/gpt-5.3-codex"},
-		{name: "non-openai family", input: "glm-4.7", wantModel: "glm-4.7"},
-		{name: "openai prefix preserved", input: "openai/gpt-5.3-codex", wantModel: "openai/gpt-5.3-codex"},
-		{name: "direct gpt", input: "gpt-4o", wantModel: "gpt-4o", wantFallback: false},
-		{name: "trims whitespace", input: "  gpt-5.3-codex  ", wantModel: "gpt-5.3-codex"},
-		{name: "preserves case", input: "GPT-5.3-CODEX", wantModel: "GPT-5.3-CODEX"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotModel, reason := resolveCodexModel(tt.input)
-			if gotModel != tt.wantModel {
-				t.Fatalf("resolveCodexModel(%q) model = %q, want %q", tt.input, gotModel, tt.wantModel)
-			}
-			if tt.wantFallback && reason == "" {
-				t.Fatalf("resolveCodexModel(%q) expected fallback reason", tt.input)
-			}
-			if !tt.wantFallback && reason != "" {
-				t.Fatalf("resolveCodexModel(%q) unexpected fallback reason: %q", tt.input, reason)
-			}
-		})
 	}
 }
 

@@ -15,55 +15,146 @@ import (
 // CreateProvider creates a provider based on the configuration.
 // It uses the model_list configuration (new format) to create providers.
 // The old providers config is automatically converted to model_list during config loading.
-// Returns the provider, the model selector to keep in agent defaults, and any
-// error. For account routers the selector remains the router name; the
-// bootstrap provider's concrete model must not replace the router before the
-// agent loop builds its account graph.
+// Returns the provider, the model alias to keep in agent defaults, and any
+// error. Account selection and model selection are independent: account
+// routers choose a concrete account, then the configured alias resolves the
+// model for that account.
 func CreateProvider(cfg *config.Config) (LLMProvider, string, error) {
-	model := cfg.Agents.Defaults.GetModelName()
-
-	if credentialCfg, ok := credentialAccountModelConfig(model, ""); ok {
-		if credentialCfg == nil {
-			return nil, "", fmt.Errorf("credential account %q cannot be used as the default model", model)
-		}
-		provider, modelID, err := CreateProviderFromConfig(credentialCfg)
-		if err != nil {
-			return nil, "", fmt.Errorf("failed to create provider for model %q: %w", model, err)
-		}
-		return provider, modelID, nil
+	if cfg == nil {
+		return nil, "", fmt.Errorf("config is nil")
+	}
+	modelAlias := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
+	if modelAlias == "" {
+		return nil, "", config.ErrNoModelConfigured
+	}
+	requestedSelector := modelAlias
+	if terminalAlias, ok := firstModelRouterTerminalAlias(cfg, modelAlias); ok {
+		modelAlias = terminalAlias
+	}
+	accountRef := strings.TrimSpace(cfg.Agents.Defaults.AccountRef)
+	if accountRef == "" {
+		return nil, "", fmt.Errorf("no account configured")
 	}
 
-	// Must have model_list at this point
-	if len(cfg.ModelList) == 0 {
-		return nil, "", fmt.Errorf("no providers configured. Please add entries to model_list in your config")
+	if routerCfg := accountRouterConfigByName(cfg, accountRef); routerCfg != nil {
+		provider, _, err := createAccountRouterBootstrapProvider(
+			cfg,
+			accountRef,
+			modelAlias,
+			routerCfg,
+		)
+		return provider, requestedSelector, err
 	}
 
-	// Get model config from model_list
-	modelCfg, err := cfg.GetModelConfig(model)
+	modelID, err := cfg.ResolveModelAlias(modelAlias, accountRef)
 	if err != nil {
-		return nil, "", fmt.Errorf("model %q not found in model_list: %w", model, err)
+		return nil, "", err
 	}
-	if modelCfg.IsAccountRouter() {
-		return createAccountRouterBootstrapProvider(cfg, model, modelCfg.Router)
+	if credentialCfg, ok := credentialAccountModelConfig(accountRef, modelID); ok {
+		if credentialCfg == nil {
+			return nil, "", fmt.Errorf("credential account %q is not supported", accountRef)
+		}
+		provider, _, createErr := CreateProviderFromConfig(credentialCfg)
+		if createErr != nil {
+			return nil, "", fmt.Errorf(
+				"failed to create provider for model alias %q with account %q: %w",
+				modelAlias,
+				accountRef,
+				createErr,
+			)
+		}
+		return provider, requestedSelector, nil
 	}
 
-	// Inject global workspace if not set in model config
+	if len(cfg.ModelList) == 0 {
+		return nil, "", fmt.Errorf("no accounts configured")
+	}
+
+	accountCfg, err := cfg.GetEnabledModelConfig(accountRef)
+	if err != nil {
+		return nil, "", fmt.Errorf("account %q not found in model_list: %w", accountRef, err)
+	}
+	if accountCfg.IsAccountRouter() || accountCfg.IsModelRouter() {
+		return nil, "", fmt.Errorf("account %q is not a concrete account", accountRef)
+	}
+
+	modelCfg, err := resolvedAccountModelConfig(accountCfg, modelID)
+	if err != nil {
+		return nil, "", fmt.Errorf(
+			"failed to resolve model alias %q with account %q: %w",
+			modelAlias,
+			accountRef,
+			err,
+		)
+	}
 	if modelCfg.Workspace == "" {
 		modelCfg.Workspace = cfg.WorkspacePath()
 	}
 
-	// Use factory to create provider
-	provider, modelID, err := CreateProviderFromConfig(modelCfg)
+	provider, _, err := CreateProviderFromConfig(modelCfg)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to create provider for model %q: %w", model, err)
+		return nil, "", fmt.Errorf(
+			"failed to create provider for model alias %q with account %q: %w",
+			modelAlias,
+			accountRef,
+			err,
+		)
 	}
 
-	return provider, modelID, nil
+	return provider, requestedSelector, nil
+}
+
+func firstModelRouterTerminalAlias(
+	cfg *config.Config,
+	selector string,
+) (string, bool) {
+	if cfg == nil {
+		return "", false
+	}
+	selector = strings.TrimSpace(selector)
+	for i := range cfg.ModelRouters {
+		router := &cfg.ModelRouters[i]
+		if !router.Enabled || strings.TrimSpace(router.Name) != selector {
+			continue
+		}
+		blocks := make(map[string]config.ModelRouterBlock, len(router.Blocks))
+		for _, block := range router.Blocks {
+			blocks[strings.TrimSpace(block.ID)] = block
+		}
+		visited := make(map[string]bool, len(blocks))
+		var first func(string) string
+		first = func(blockID string) string {
+			blockID = strings.TrimSpace(blockID)
+			if blockID == "" || visited[blockID] {
+				return ""
+			}
+			visited[blockID] = true
+			block, ok := blocks[blockID]
+			if !ok {
+				return ""
+			}
+			if strings.TrimSpace(block.Type) == config.ModelRouterBlockTypeModel {
+				return strings.TrimSpace(block.Model)
+			}
+			for _, rule := range block.Rules {
+				if alias := first(rule.Target); alias != "" {
+					return alias
+				}
+			}
+			return first(block.Fallback)
+		}
+		if alias := first(router.Entry); alias != "" {
+			return alias, true
+		}
+		return "", false
+	}
+	return "", false
 }
 
 func createAccountRouterBootstrapProvider(
 	cfg *config.Config,
 	routerName string,
+	modelAlias string,
 	routerCfg *config.AccountRouterConfig,
 ) (LLMProvider, string, error) {
 	accountNames := reachableRouterAccounts(routerCfg)
@@ -73,7 +164,11 @@ func createAccountRouterBootstrapProvider(
 
 	failures := make([]string, 0, len(accountNames))
 	for _, accountName := range accountNames {
-		accountCfg, err := accountRouterBootstrapModelConfig(cfg, accountName)
+		accountCfg, err := accountRouterBootstrapModelConfig(
+			cfg,
+			accountName,
+			modelAlias,
+		)
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%q: %v", accountName, err))
 			continue
@@ -84,7 +179,7 @@ func createAccountRouterBootstrapProvider(
 			failures = append(failures, fmt.Sprintf("%q: %v", accountName, err))
 			continue
 		}
-		return provider, strings.TrimSpace(routerName), nil
+		return provider, strings.TrimSpace(modelAlias), nil
 	}
 
 	return nil, "", fmt.Errorf(
@@ -97,8 +192,13 @@ func createAccountRouterBootstrapProvider(
 func accountRouterBootstrapModelConfig(
 	cfg *config.Config,
 	accountName string,
+	modelAlias string,
 ) (*config.ModelConfig, error) {
-	if credentialCfg, ok := credentialAccountModelConfig(accountName, ""); ok {
+	modelID, err := cfg.ResolveModelAlias(modelAlias, accountName)
+	if err != nil {
+		return nil, err
+	}
+	if credentialCfg, ok := credentialAccountModelConfig(accountName, modelID); ok {
 		if credentialCfg == nil {
 			return nil, fmt.Errorf("credential account is unsupported")
 		}
@@ -124,11 +224,36 @@ func accountRouterBootstrapModelConfig(
 		return nil, fmt.Errorf("account resolves to another router")
 	}
 
-	accountCfg := *match
+	accountCfg, err := resolvedAccountModelConfig(match, modelID)
+	if err != nil {
+		return nil, err
+	}
 	if accountCfg.Workspace == "" {
 		accountCfg.Workspace = cfg.WorkspacePath()
 	}
-	return &accountCfg, nil
+	return accountCfg, nil
+}
+
+func resolvedAccountModelConfig(
+	accountCfg *config.ModelConfig,
+	resolvedModel string,
+) (*config.ModelConfig, error) {
+	if accountCfg == nil {
+		return nil, fmt.Errorf("account config is required")
+	}
+	accountProvider, _ := ExtractProtocol(accountCfg)
+	accountProvider = NormalizeProvider(accountProvider)
+	if accountProvider == "" {
+		return nil, fmt.Errorf("account provider is required")
+	}
+	resolvedModel, err := ResolveModelForProvider(accountProvider, resolvedModel)
+	if err != nil {
+		return nil, err
+	}
+	clone := *accountCfg
+	clone.Provider = accountProvider
+	clone.Model = resolvedModel
+	return &clone, nil
 }
 
 func credentialAccountModelConfig(accountName string, model string) (*config.ModelConfig, bool) {
@@ -143,9 +268,6 @@ func credentialAccountModelConfig(accountName string, model string) (*config.Mod
 	provider = credentialAccountRuntimeProvider(provider)
 	model = strings.TrimSpace(model)
 	if model == "" {
-		model = credentialAccountDefaultModel(provider)
-	}
-	if model == "" {
 		return nil, true
 	}
 	return &config.ModelConfig{
@@ -158,10 +280,6 @@ func credentialAccountModelConfig(accountName string, model string) (*config.Mod
 	}, true
 }
 
-func credentialAccountDefaultModel(provider string) string {
-	return DefaultModelForProvider(provider)
-}
-
 func credentialAccountRuntimeProvider(provider string) string {
 	switch strings.TrimSpace(provider) {
 	case "google-antigravity":
@@ -169,6 +287,28 @@ func credentialAccountRuntimeProvider(provider string) string {
 	default:
 		return strings.TrimSpace(provider)
 	}
+}
+
+func accountRouterConfigByName(
+	cfg *config.Config,
+	name string,
+) *config.AccountRouterConfig {
+	if cfg == nil {
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	for i := range cfg.AccountRouters {
+		if cfg.AccountRouters[i].Enabled &&
+			strings.TrimSpace(cfg.AccountRouters[i].Name) == name {
+			return &cfg.AccountRouters[i]
+		}
+	}
+	if modelCfg, err := cfg.GetEnabledModelConfig(name); err == nil &&
+		modelCfg != nil &&
+		modelCfg.IsAccountRouter() {
+		return modelCfg.Router
+	}
+	return nil
 }
 
 func credentialAccountRuntimeAuthMethod(provider string) string {

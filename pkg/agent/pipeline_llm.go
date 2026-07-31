@@ -112,7 +112,7 @@ func (p *Pipeline) CallLLM(
 		llmReq, decision := p.Hooks.BeforeLLM(turnCtx, &LLMHookRequest{
 			Meta:             ts.eventMeta("runTurn", "turn.llm.request"),
 			Context:          cloneTurnContext(ts.turnCtx),
-			Model:            exec.llmModel,
+			Model:            exec.llmModelName,
 			Messages:         exec.callMessages,
 			Tools:            exec.providerToolDefs,
 			Options:          exec.llmOpts,
@@ -121,8 +121,7 @@ func (p *Pipeline) CallLLM(
 		switch decision.normalizedAction() {
 		case HookActionContinue, HookActionModify:
 			if llmReq != nil {
-				prevModel := exec.llmModel
-				exec.llmModel = llmReq.Model
+				prevAlias := exec.llmModelName
 				exec.callMessages = llmReq.Messages
 				baseProviderToolDefs = mergeHookToolDefinitionChanges(
 					baseProviderToolDefs,
@@ -135,8 +134,10 @@ func (p *Pipeline) CallLLM(
 				if !nativeSearchAllowed {
 					delete(exec.llmOpts, "native_search")
 				}
-				if strings.TrimSpace(exec.llmModel) != "" && exec.llmModel != prevModel {
-					p.applyBeforeLLMModelRewrite(ts, exec)
+				if strings.TrimSpace(llmReq.Model) != strings.TrimSpace(prevAlias) {
+					if err := p.applyBeforeLLMModelRewrite(ts, exec, llmReq.Model); err != nil {
+						return ControlBreak, err
+					}
 					applyTurnThinkingOptions(exec, ts.agent, exec.activeProvider, true)
 					applyReasoningEffortOption(exec.llmOpts, exec.activeModelConfig)
 				}
@@ -282,7 +283,7 @@ func (p *Pipeline) CallLLM(
 				if exec.accountRouter != nil {
 					exec.accountRouter.RecordFallbackResult(
 						exec.routerSelection,
-						fallbackResultFromError(fbErr),
+						fallbackResultFromError(fbErr, exec.activeCandidates...),
 						fbErr,
 					)
 				}
@@ -544,7 +545,7 @@ func (p *Pipeline) CallLLM(
 		llmResp, decision := p.Hooks.AfterLLM(turnCtx, &LLMHookResponse{
 			Meta:     ts.eventMeta("runTurn", "turn.llm.response"),
 			Context:  cloneTurnContext(ts.turnCtx),
-			Model:    exec.llmModel,
+			Model:    exec.llmModelName,
 			Response: exec.response,
 		})
 		switch decision.normalizedAction() {
@@ -743,27 +744,55 @@ func (p *Pipeline) CallLLM(
 	return ControlToolLoop, nil
 }
 
-func (p *Pipeline) applyBeforeLLMModelRewrite(ts *turnState, exec *turnExecution) {
+func (p *Pipeline) applyBeforeLLMModelRewrite(
+	ts *turnState,
+	exec *turnExecution,
+	modelAlias string,
+) error {
 	if p == nil || ts == nil || ts.agent == nil || exec == nil {
-		return
+		return fmt.Errorf("cannot resolve hook model alias without an active agent")
 	}
-	rawModel := strings.TrimSpace(exec.llmModel)
-	if rawModel == "" {
-		return
+	modelAlias = strings.TrimSpace(modelAlias)
+	if err := validateModelAliasReferences(p.Cfg, modelAlias, nil); err != nil {
+		return err
 	}
-
-	defaultProvider := "openai"
-	if p.Cfg != nil {
-		if provider := strings.TrimSpace(p.Cfg.Agents.Defaults.Provider); provider != "" {
-			defaultProvider = provider
-		}
+	accountRef := concreteAccountRefForCandidates(exec.activeCandidates)
+	if accountRef == "" {
+		accountRef = firstConcreteAccountRef(p.Cfg, ts.agent.AccountRef)
 	}
-	defaultProvider = effectiveDefaultProvider(defaultProvider)
-	candidates := resolveModelCandidates(p.Cfg, defaultProvider, rawModel, nil)
+	candidates, err := candidatesForAccountAliases(
+		p.Cfg,
+		accountRef,
+		modelAlias,
+		nil,
+		ts.agent.Workspace,
+		ts.agent.CandidateProviders,
+	)
+	if err != nil {
+		return err
+	}
+	activeProvider := workflowProviderForCandidates(ts.agent, nil, candidates)
+	if activeProvider == nil {
+		return fmt.Errorf(
+			"model alias %q with account %q has no runnable provider",
+			modelAlias,
+			accountRef,
+		)
+	}
 	exec.activeCandidates = candidates
-	exec.activeModel = resolvedCandidateModel(candidates, rawModel)
+	exec.activeModel = resolvedCandidateModel(candidates, modelAlias)
 	exec.llmModel = exec.activeModel
-	exec.activeModelConfig = resolveActiveModelConfig(p.Cfg, ts.agent.Workspace, candidates, rawModel, defaultProvider)
+	exec.llmModelName = modelAlias
+	exec.activeProvider = activeProvider
+	exec.activeModelConfig = resolveActiveModelConfig(
+		p.Cfg,
+		ts.agent.Workspace,
+		candidates,
+		exec.activeModel,
+		"",
+	)
+	associateRouterSelectionCandidate(&exec.routerSelection, candidates[0], accountRef)
+	return nil
 }
 
 func (p *Pipeline) applySuccessfulFallbackCandidate(

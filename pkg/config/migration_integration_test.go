@@ -78,16 +78,20 @@ func TestMigration_Integration_LegacyConfigWithoutWorkspace(t *testing.T) {
 	}
 
 	t.Logf("defaults: %v", cfg.Agents.Defaults)
-	// Old "model" field is migrated to "model_name" field
-	if cfg.Agents.Defaults.ModelName != "gpt-4o" {
+	// V4 separates the old selector into account_ref and requires an explicit
+	// generated alias. This config has no concrete model_list entry, so it must
+	// not invent a model alias or provider default.
+	if cfg.Agents.Defaults.AccountRef != "" {
 		t.Errorf(
-			"ModelName = %q, want %q (user's setting should be preserved)",
-			cfg.Agents.Defaults.ModelName, "gpt-4o",
+			"AccountRef = %q, want empty without a configured account",
+			cfg.Agents.Defaults.AccountRef,
 		)
 	}
-	// GetModelName() should also return the migrated value
-	if cfg.Agents.Defaults.GetModelName() != "gpt-4o" {
-		t.Errorf("GetModelName() = %q, want %q", cfg.Agents.Defaults.GetModelName(), "gpt-4o")
+	if cfg.Agents.Defaults.ModelName != "" {
+		t.Errorf("ModelName = %q, want empty without a generated alias", cfg.Agents.Defaults.ModelName)
+	}
+	if cfg.Agents.Defaults.GetModelName() != "" {
+		t.Errorf("GetModelName() = %q, want empty", cfg.Agents.Defaults.GetModelName())
 	}
 	if cfg.Agents.Defaults.MaxTokens != 8192 {
 		t.Errorf("MaxTokens = %d, want %d", cfg.Agents.Defaults.MaxTokens, 8192)
@@ -170,8 +174,14 @@ func TestMigration_Integration_LegacyConfigWithWorkspace(t *testing.T) {
 	if cfg.Agents.Defaults.Provider != "deepseek" {
 		t.Errorf("Provider = %q, want %q", cfg.Agents.Defaults.Provider, "deepseek")
 	}
-	if cfg.Agents.Defaults.ModelName != "deepseek-chat" {
-		t.Errorf("ModelName = %q, want %q", cfg.Agents.Defaults.ModelName, "deepseek-chat")
+	if cfg.Agents.Defaults.AccountRef != "" {
+		t.Errorf(
+			"AccountRef = %q, want empty without a configured account",
+			cfg.Agents.Defaults.AccountRef,
+		)
+	}
+	if cfg.Agents.Defaults.ModelName != "" {
+		t.Errorf("ModelName = %q, want empty without a generated alias", cfg.Agents.Defaults.ModelName)
 	}
 	if cfg.Agents.Defaults.MaxTokens != 16384 {
 		t.Errorf("MaxTokens = %d, want %d", cfg.Agents.Defaults.MaxTokens, 16384)
@@ -258,26 +268,23 @@ func TestMigration_Integration_PreservesAllAgentsFields(t *testing.T) {
 	if d.Provider != "anthropic" {
 		t.Errorf("Provider = %q, want %q", d.Provider, "anthropic")
 	}
-	if d.ModelName != "claude-opus-4" {
-		t.Errorf("ModelName = %q, want %q", d.ModelName, "claude-opus-4")
+	if d.AccountRef != "" {
+		t.Errorf("AccountRef = %q, want empty without a configured account", d.AccountRef)
 	}
-	if len(d.ModelFallbacks) != 2 {
-		t.Errorf("len(ModelFallbacks) = %d, want 2", len(d.ModelFallbacks))
-	} else {
-		if d.ModelFallbacks[0] != "claude-sonnet-4" {
-			t.Errorf("ModelFallbacks[0] = %q, want %q", d.ModelFallbacks[0], "claude-sonnet-4")
-		}
-		if d.ModelFallbacks[1] != "claude-haiku-4" {
-			t.Errorf("ModelFallbacks[1] = %q, want %q", d.ModelFallbacks[1], "claude-haiku-4")
-		}
+	if d.ModelName != "" {
+		t.Errorf("ModelName = %q, want empty without a generated alias", d.ModelName)
 	}
-	if d.ImageModel != "claude-opus-4-vision" {
-		t.Errorf("ImageModel = %q, want %q", d.ImageModel, "claude-opus-4-vision")
+	if len(d.ModelFallbacks) != 0 {
+		t.Errorf("len(ModelFallbacks) = %d, want 0 unconfigured aliases", len(d.ModelFallbacks))
 	}
-	if len(d.ImageModelFallbacks) != 1 {
-		t.Errorf("len(ImageModelFallbacks) = %d, want 1", len(d.ImageModelFallbacks))
-	} else if d.ImageModelFallbacks[0] != "claude-sonnet-4-vision" {
-		t.Errorf("ImageModelFallbacks[0] = %q, want %q", d.ImageModelFallbacks[0], "claude-sonnet-4-vision")
+	if d.ImageModel != "" {
+		t.Errorf("ImageModel = %q, want empty without a generated alias", d.ImageModel)
+	}
+	if len(d.ImageModelFallbacks) != 0 {
+		t.Errorf(
+			"len(ImageModelFallbacks) = %d, want 0 unconfigured aliases",
+			len(d.ImageModelFallbacks),
+		)
 	}
 	if d.MaxTokens != 4096 {
 		t.Errorf("MaxTokens = %d, want %d", d.MaxTokens, 4096)
@@ -559,20 +566,23 @@ func TestMigration_Integration_ModelNameField(t *testing.T) {
 		t.Fatalf("LoadConfig failed: %v", err)
 	}
 
-	// model_name field should be preserved
-	if cfg.Agents.Defaults.ModelName != "deepseek-reasoner" {
-		t.Errorf("ModelName = %q, want %q", cfg.Agents.Defaults.ModelName, "deepseek-reasoner")
+	if cfg.Agents.Defaults.AccountRef != "" {
+		t.Errorf(
+			"AccountRef = %q, want empty without a configured account",
+			cfg.Agents.Defaults.AccountRef,
+		)
 	}
-
-	// GetModelName() should return model_name, not model (deprecated)
-	if cfg.Agents.Defaults.GetModelName() != "deepseek-reasoner" {
-		t.Errorf("GetModelName() = %q, want %q", cfg.Agents.Defaults.GetModelName(), "deepseek-reasoner")
+	if cfg.Agents.Defaults.ModelName != "" {
+		t.Errorf("ModelName = %q, want empty without a generated alias", cfg.Agents.Defaults.ModelName)
 	}
-
-	if len(cfg.Agents.Defaults.ModelFallbacks) != 1 {
-		t.Errorf("len(ModelFallbacks) = %d, want 1", len(cfg.Agents.Defaults.ModelFallbacks))
-	} else if cfg.Agents.Defaults.ModelFallbacks[0] != "deepseek-chat" {
-		t.Errorf("ModelFallbacks[0] = %q, want %q", cfg.Agents.Defaults.ModelFallbacks[0], "deepseek-chat")
+	if cfg.Agents.Defaults.GetModelName() != "" {
+		t.Errorf("GetModelName() = %q, want empty", cfg.Agents.Defaults.GetModelName())
+	}
+	if len(cfg.Agents.Defaults.ModelFallbacks) != 0 {
+		t.Errorf(
+			"len(ModelFallbacks) = %d, want 0 unconfigured aliases",
+			len(cfg.Agents.Defaults.ModelFallbacks),
+		)
 	}
 }
 
@@ -990,8 +1000,12 @@ func TestLoadConfig_V1ToV2Migration(t *testing.T) {
 	if err := json.Unmarshal(saved, &versionCheck); err != nil {
 		t.Fatalf("Unmarshal saved config: %v", err)
 	}
-	if versionCheck.Version != 3 {
-		t.Errorf("saved config version = %d, want 3", versionCheck.Version)
+	if versionCheck.Version != CurrentVersion {
+		t.Errorf(
+			"saved config version = %d, want %d",
+			versionCheck.Version,
+			CurrentVersion,
+		)
 	}
 }
 
@@ -1071,8 +1085,8 @@ func TestLoadConfig_V2DirectLoad(t *testing.T) {
 		t.Fatalf("LoadConfig: %v", err)
 	}
 
-	if cfg.Version != 3 {
-		t.Errorf("Version = %d, want 3", cfg.Version)
+	if cfg.Version != CurrentVersion {
+		t.Errorf("Version = %d, want %d", cfg.Version, CurrentVersion)
 	}
 
 	gpt4, _ := cfg.GetModelConfig("gpt-4")
@@ -1085,7 +1099,7 @@ func TestLoadConfig_V2DirectLoad(t *testing.T) {
 		t.Error("claude without enabled field should be false")
 	}
 
-	// V2→V3 migration creates a backup
+	// V2→current migration creates a backup
 	entries, _ := os.ReadDir(tmpDir)
 	foundBackup := false
 	for _, e := range entries {
@@ -1094,7 +1108,7 @@ func TestLoadConfig_V2DirectLoad(t *testing.T) {
 		}
 	}
 	if !foundBackup {
-		t.Error("V2→V3 migration should create backup")
+		t.Error("V2→current migration should create backup")
 	}
 
 	githubRegistry, ok := cfg.Tools.Skills.Registries.Get("github")

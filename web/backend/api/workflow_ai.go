@@ -114,12 +114,9 @@ func defaultRunWorkflowAuthorAgent(
 	if err != nil {
 		return "", fmt.Errorf("failed to load config: %w", err)
 	}
-	provider, modelID, err := providers.CreateProvider(cfg)
+	provider, _, err := providers.CreateProvider(cfg)
 	if err != nil {
 		return "", fmt.Errorf("failed to create provider: %w", err)
-	}
-	if modelID != "" {
-		cfg.Agents.Defaults.ModelName = modelID
 	}
 	msgBus := bus.NewMessageBus()
 	defer msgBus.Close()

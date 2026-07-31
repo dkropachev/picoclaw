@@ -14,6 +14,10 @@ func TestModelRouterMaterializesVirtualModel(t *testing.T) {
 			APIKeys:   SimpleSecureStrings("key"),
 			Enabled:   true,
 		}},
+		ModelAliases: []ModelAliasConfig{{
+			Name:  "gpt-main",
+			Model: "gpt-5",
+		}},
 		ModelRouters: []ModelRouterConfig{{
 			Name:    "task-router",
 			Enabled: true,
@@ -39,6 +43,41 @@ func TestModelRouterMaterializesVirtualModel(t *testing.T) {
 	}
 	if err := cfg.ValidateModelList(); err != nil {
 		t.Fatalf("ValidateModelList() error = %v", err)
+	}
+}
+
+func TestModelRouterValidationRejectsAccountRouterTarget(t *testing.T) {
+	cfg := &Config{
+		AccountRouters: []AccountRouterConfig{{
+			Name:    "account-router",
+			Enabled: true,
+			Entry:   "entry",
+			Blocks: []AccountRouterBlock{{
+				ID:      "entry",
+				Type:    AccountRouterBlockTypeAccount,
+				Account: "credential:openai:work",
+			}},
+		}},
+		ModelRouters: []ModelRouterConfig{{
+			Name:    "task-router",
+			Enabled: true,
+			Entry:   "entry",
+			Blocks: []ModelRouterBlock{{
+				ID:    "entry",
+				Type:  ModelRouterBlockTypeModel,
+				Model: "account-router",
+			}},
+		}},
+	}
+	cfg.MaterializeAccountRouterModels()
+	cfg.MaterializeModelRouterModels()
+
+	err := cfg.ValidateModelList()
+	if err == nil {
+		t.Fatal("ValidateModelList() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "must target model aliases") {
+		t.Fatalf("ValidateModelList() error = %v, want alias-only target error", err)
 	}
 }
 

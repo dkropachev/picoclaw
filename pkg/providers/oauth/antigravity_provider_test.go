@@ -21,7 +21,7 @@ func TestFetchAntigravityModelsContextHonorsCancellation(t *testing.T) {
 	}
 }
 
-func TestAntigravityModelOrderingUsesDefaultThenID(t *testing.T) {
+func TestAntigravityModelOrderingUsesID(t *testing.T) {
 	models := []AntigravityModelInfo{
 		{ID: "zeta"},
 		{ID: "gemini-3-flash"},
@@ -31,9 +31,27 @@ func TestAntigravityModelOrderingUsesDefaultThenID(t *testing.T) {
 	sortAntigravityModels(models)
 
 	got := []string{models[0].ID, models[1].ID, models[2].ID, models[3].ID}
-	want := []string{"gemini-3-flash", "Alpha", "beta", "zeta"}
+	want := []string{"Alpha", "beta", "gemini-3-flash", "zeta"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("model order = %v, want %v", got, want)
+	}
+}
+
+func TestAntigravityProviderRejectsMissingModelBeforeAuth(t *testing.T) {
+	authCalls := 0
+	provider := &AntigravityProvider{
+		tokenSource: func() (string, string, error) {
+			authCalls++
+			return "token", "project", nil
+		},
+	}
+
+	_, err := provider.Chat(context.Background(), nil, nil, "  ", nil)
+	if err == nil || err.Error() != "no model configured" {
+		t.Fatalf("Chat() error = %v, want no model configured", err)
+	}
+	if authCalls != 0 {
+		t.Fatalf("auth calls = %d, want 0", authCalls)
 	}
 }
 

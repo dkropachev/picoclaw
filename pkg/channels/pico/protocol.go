@@ -28,6 +28,7 @@ const (
 	PayloadKeyPlaceholder = "placeholder"
 	PayloadKeyToolCalls   = "tool_calls"
 	PayloadKeyModelName   = "model_name"
+	PayloadKeyAccountRef  = "account_ref"
 	PayloadKeyUsage       = "usage"
 
 	MessageKindThought   = "thought"

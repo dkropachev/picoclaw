@@ -73,9 +73,6 @@ func (j *LLMTaskSuccessJudge) JudgeTaskRecord(
 
 	model := strings.TrimSpace(j.model)
 	if model == "" {
-		model = strings.TrimSpace(j.provider.GetDefaultModel())
-	}
-	if model == "" {
 		return j.fallbackDecision(ctx, record)
 	}
 

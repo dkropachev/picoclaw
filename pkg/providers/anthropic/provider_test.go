@@ -312,10 +312,11 @@ func TestProvider_ChatRoundTrip(t *testing.T) {
 	}
 }
 
-func TestProvider_GetDefaultModel(t *testing.T) {
+func TestProvider_ChatRejectsMissingModel(t *testing.T) {
 	p := NewProvider("test-token")
-	if got := p.GetDefaultModel(); got != "claude-sonnet-4.6" {
-		t.Errorf("GetDefaultModel() = %q, want %q", got, "claude-sonnet-4.6")
+	_, err := p.Chat(t.Context(), nil, nil, "  ", nil)
+	if err == nil || err.Error() != "no model configured" {
+		t.Fatalf("Chat() error = %v, want no model configured", err)
 	}
 }
 

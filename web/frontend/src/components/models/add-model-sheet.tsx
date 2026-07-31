@@ -6,12 +6,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 
-import {
-  type ModelProviderOption,
-  addModel,
-  getCatalogs,
-  setDefaultModel,
-} from "@/api/models"
+import { type ModelProviderOption, addModel, getCatalogs } from "@/api/models"
 import { ConfigChangeNotice } from "@/components/config-change-notice"
 import { maskedSecretPlaceholder } from "@/components/secret-placeholder"
 import {
@@ -193,8 +188,7 @@ export function AddModelSheet({
     if (!providerDef) {
       errors.provider = t("models.field.providerInvalid")
     }
-    if (!form.model.trim()) errors.model = t("models.add.errorRequired")
-    if (modelValidation?.level === "error") {
+    if (form.model.trim() && modelValidation?.level === "error") {
       errors.model = t(
         modelValidation.messageKey,
         modelValidation.messageParams,
@@ -234,7 +228,12 @@ export function AddModelSheet({
     if (fieldErrors.model) {
       setFieldErrors((prev) => ({ ...prev, model: undefined }))
     }
-    debouncedValidateModel(value, form.provider)
+    if (!value.trim()) {
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+      setModelValidation(null)
+    } else {
+      debouncedValidateModel(value, form.provider)
+    }
   }
 
   const handleProviderChange = (provider: string) => {
@@ -279,13 +278,6 @@ export function AddModelSheet({
     // Re-validate model with new provider context
     if (form.model) {
       debouncedValidateModel(form.model, provider)
-    }
-    // Clear setAsDefault if the new provider doesn't support being default
-    const allowed =
-      getProviderCatalogEntry(provider, providerOptions)?.defaultModelAllowed ??
-      false
-    if (!allowed) {
-      setSetAsDefault(false)
     }
     if (fieldErrors.provider) {
       setFieldErrors((prev) => ({ ...prev, provider: undefined }))
@@ -342,7 +334,6 @@ export function AddModelSheet({
   const isOAuth = effectiveAuthMethod === "oauth"
   const usesCredential =
     effectiveAuthMethod === "oauth" || effectiveAuthMethod === "token"
-  const defaultModelAllowed = providerDef?.defaultModelAllowed === true
   const apiBasePlaceholder =
     getProviderDefaultAPIBase(form.provider, providerOptions) ||
     "https://api.example.com/v1"
@@ -413,10 +404,8 @@ export function AddModelSheet({
         streaming: form.streamingEnabled ? { enabled: true } : undefined,
         extra_body: extraBody,
         custom_headers: customHeaders,
+        set_as_default: setAsDefault,
       })
-      if (setAsDefault) {
-        await setDefaultModel(modelName)
-      }
       const gateway = await refreshGatewayState({ force: true })
       showSaveSuccessOrRestartToast(
         t,
@@ -455,13 +444,19 @@ export function AddModelSheet({
           >
             <div className="space-y-5 px-6 py-5">
               <Field
-                label={t("models.add.modelName")}
-                hint={t("models.add.modelNameHint")}
+                label={t("models.add.accountName", "Account Name")}
+                hint={t(
+                  "models.add.accountNameHint",
+                  "A stable name for these provider credentials. Model aliases are configured separately.",
+                )}
               >
                 <Input
                   value={form.modelName}
                   onChange={setField("modelName")}
-                  placeholder={t("models.add.modelNamePlaceholder")}
+                  placeholder={t(
+                    "models.add.accountNamePlaceholder",
+                    "e.g. openai-work",
+                  )}
                   aria-invalid={!!fieldErrors.modelName}
                 />
                 {fieldErrors.modelName && (
@@ -647,14 +642,9 @@ export function AddModelSheet({
 
               <SwitchCardField
                 label={t("models.defaultOnSave.label")}
-                hint={
-                  !defaultModelAllowed && form.provider
-                    ? t("models.defaultOnSave.unsupportedProvider")
-                    : t("models.defaultOnSave.description")
-                }
+                hint={t("models.defaultOnSave.description")}
                 checked={setAsDefault}
                 onCheckedChange={setSetAsDefault}
-                disabled={!defaultModelAllowed}
               />
 
               <AdvancedSection>

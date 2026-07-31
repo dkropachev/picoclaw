@@ -27,10 +27,24 @@ enc://AAAA...base64...
 
 ```json
 {
+  "version": 4,
+  "agents": {
+    "defaults": {
+      "account_ref": "openai-work",
+      "model_name": "chat"
+    }
+  },
+  "model_aliases": [
+    {
+      "name": "chat",
+      "model": "gpt-4o"
+    }
+  ],
   "model_list": [
     {
-      "model_name": "gpt-4o",
-      "model": "openai/gpt-4o",
+      "model_name": "openai-work",
+      "provider": "openai",
+      "model": "",
       // "api_keys": ["enc://AAAA...base64..."] move to .security.yml
       "api_base": "https://api.openai.com/v1"
     }

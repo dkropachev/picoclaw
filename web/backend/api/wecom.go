@@ -211,7 +211,31 @@ func (h *Handler) handlePollWecomFlow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) saveWecomBinding(botID, secret string) error {
-	cfg, err := config.LoadConfig(h.configPath)
+	h.configMutationMu.Lock()
+	err := h.saveWecomBindingLocked(botID, secret)
+	h.configMutationMu.Unlock()
+	if err != nil {
+		return err
+	}
+
+	status := h.gatewayStatusData()
+	gatewayStatus, _ := status["gateway_status"].(string)
+	if gatewayStatus != "running" {
+		return nil
+	}
+
+	if _, err := h.RestartGateway(); err != nil {
+		logger.ErrorCF("wecom", "failed to restart gateway after saving binding", map[string]any{
+			"error": err.Error(),
+		})
+	}
+	return nil
+}
+
+// saveWecomBindingLocked persists WeCom settings while configMutationMu is
+// held. Gateway inspection and restart must happen after the caller unlocks.
+func (h *Handler) saveWecomBindingLocked(botID, secret string) error {
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -230,20 +254,8 @@ func (h *Handler) saveWecomBinding(botID, secret string) error {
 	if strings.TrimSpace(wecomCfg.WebSocketURL) == "" {
 		wecomCfg.WebSocketURL = wecomDefaultWebSocketURL
 	}
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
+	if _, err := h.saveConfigIfRevision(h.configPath, cfg, revision); err != nil {
 		return err
-	}
-
-	status := h.gatewayStatusData()
-	gatewayStatus, _ := status["gateway_status"].(string)
-	if gatewayStatus != "running" {
-		return nil
-	}
-
-	if _, err := h.RestartGateway(); err != nil {
-		logger.ErrorCF("wecom", "failed to restart gateway after saving binding", map[string]any{
-			"error": err.Error(),
-		})
 	}
 	return nil
 }

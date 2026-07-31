@@ -19,13 +19,18 @@ import (
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	providercommon "github.com/sipeed/picoclaw/pkg/providers/common"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 // rrCounter is a global counter for round-robin load balancing across models.
 var rrCounter atomic.Uint64
 
 // CurrentVersion is the latest config schema version
-const CurrentVersion = 3
+const CurrentVersion = 4
+
+// ErrNoModelConfigured is returned when model resolution is requested without
+// a configured model alias.
+var ErrNoModelConfigured = protocoltypes.ErrNoModelConfigured
 
 func init() {
 	initChannel()
@@ -42,6 +47,8 @@ type Config struct {
 	Channels  ChannelsConfig  `json:"channel_list"        yaml:"channel_list"`
 	// ModelList stores runnable provider configurations.
 	ModelList SecureModelList `json:"model_list" yaml:"model_list"`
+	// ModelAliases map stable user-facing names to concrete upstream models.
+	ModelAliases []ModelAliasConfig `json:"model_aliases" yaml:"-"`
 	// AccountRouters select one or more accounts through a static graph.
 	AccountRouters AccountRouterList `json:"account_routers" yaml:"account_routers"`
 	// ModelRouters route a chat model alias to one of several configured model aliases.
@@ -435,13 +442,14 @@ func (m AgentModelConfig) MarshalJSON() ([]byte, error) {
 }
 
 type AgentConfig struct {
-	ID        string            `json:"id"`
-	Default   bool              `json:"default,omitempty"`
-	Name      string            `json:"name,omitempty"`
-	Workspace string            `json:"workspace,omitempty"`
-	Model     *AgentModelConfig `json:"model,omitempty"`
-	Skills    []string          `json:"skills,omitempty"`
-	Subagents *SubagentsConfig  `json:"subagents,omitempty"`
+	ID         string            `json:"id"`
+	Default    bool              `json:"default,omitempty"`
+	Name       string            `json:"name,omitempty"`
+	Workspace  string            `json:"workspace,omitempty"`
+	AccountRef string            `json:"account_ref,omitempty"`
+	Model      *AgentModelConfig `json:"model,omitempty"`
+	Skills     []string          `json:"skills,omitempty"`
+	Subagents  *SubagentsConfig  `json:"subagents,omitempty"`
 }
 
 type SubagentsConfig struct {
@@ -524,7 +532,7 @@ func (s *SessionConfig) DeriveDmScope() {
 // requiring any keyword matching — all scoring is language-agnostic.
 type RoutingConfig struct {
 	Enabled    bool    `json:"enabled"`
-	LightModel string  `json:"light_model"` // model_name from model_list to use for simple tasks
+	LightModel string  `json:"light_model"` // Exact model alias used for simple tasks
 	Threshold  float64 `json:"threshold"`   // complexity score in [0,1]; score >= threshold → primary model
 }
 
@@ -658,6 +666,7 @@ type AgentDefaults struct {
 	RestrictToWorkspace       bool               `json:"restrict_to_workspace"            env:"PICOCLAW_AGENTS_DEFAULTS_RESTRICT_TO_WORKSPACE"`
 	AllowReadOutsideWorkspace bool               `json:"allow_read_outside_workspace"     env:"PICOCLAW_AGENTS_DEFAULTS_ALLOW_READ_OUTSIDE_WORKSPACE"`
 	Provider                  string             `json:"provider"                         env:"PICOCLAW_AGENTS_DEFAULTS_PROVIDER"`
+	AccountRef                string             `json:"account_ref,omitempty"            env:"PICOCLAW_AGENTS_DEFAULTS_ACCOUNT_REF"`
 	ModelName                 string             `json:"model_name"                       env:"PICOCLAW_AGENTS_DEFAULTS_MODEL_NAME"`
 	ModelFallbacks            []string           `json:"model_fallbacks,omitempty"`
 	ImageModel                string             `json:"image_model,omitempty"            env:"PICOCLAW_AGENTS_DEFAULTS_IMAGE_MODEL"`
@@ -711,8 +720,7 @@ func (d *AgentDefaults) IsToolFeedbackSeparateMessagesEnabled() bool {
 	return d.ToolFeedback.SeparateMessages
 }
 
-// GetModelName returns the effective model name for the agent defaults.
-// It prefers the new "model_name" field but falls back to "model" for backward compatibility.
+// GetModelName returns the exact model alias selected by the agent defaults.
 func (d *AgentDefaults) GetModelName() string {
 	return d.ModelName
 }
@@ -994,10 +1002,21 @@ type DevicesConfig struct {
 }
 
 type VoiceConfig struct {
+	AccountRef        string `json:"account_ref,omitempty"        env:"PICOCLAW_VOICE_ACCOUNT_REF"`
 	ModelName         string `json:"model_name,omitempty"         env:"PICOCLAW_VOICE_MODEL_NAME"`
+	TTSAccountRef     string `json:"tts_account_ref,omitempty"    env:"PICOCLAW_VOICE_TTS_ACCOUNT_REF"`
 	TTSModelName      string `json:"tts_model_name,omitempty"     env:"PICOCLAW_VOICE_TTS_MODEL_NAME"`
 	EchoTranscription bool   `json:"echo_transcription"           env:"PICOCLAW_VOICE_ECHO_TRANSCRIPTION"`
 	ElevenLabsAPIKey  string `json:"elevenlabs_api_key,omitempty" env:"PICOCLAW_VOICE_ELEVENLABS_API_KEY"`
+}
+
+// ModelAliasConfig maps a stable user-facing alias to a concrete upstream
+// model. AccountOverrides can select a different concrete model for a direct
+// account, but never for an account router.
+type ModelAliasConfig struct {
+	Name             string            `json:"name"                        yaml:"name"`
+	Model            string            `json:"model"                       yaml:"model"`
+	AccountOverrides map[string]string `json:"account_overrides,omitempty" yaml:"account_overrides,omitempty"`
 }
 
 type ModelStreamingConfig struct {
@@ -1008,16 +1027,18 @@ func (c ModelStreamingConfig) IsZero() bool {
 	return !c.Enabled
 }
 
-// ModelConfig represents a model-centric provider configuration.
+// ModelConfig represents a concrete provider account and its transport settings.
 // It allows adding new providers (especially OpenAI-compatible ones) via configuration only.
-// The Model field may be either a plain model identifier or a provider-prefixed
-// identifier such as "openai/gpt-5.4" or "nvidia/z-ai/glm-5.1".
+// Model is optional account metadata; runtime selections resolve a model alias
+// and replace it before a request is sent. When present, it may be either a plain
+// model identifier or a provider-prefixed identifier such as
+// "openai/gpt-5.4" or "nvidia/z-ai/glm-5.1".
 // Supported providers include openai, anthropic, antigravity, claude-cli,
 // codex-cli, github-copilot, and named OpenAI-compatible protocols such as
 // groq, deepseek, modelscope, and novita.
 type ModelConfig struct {
 	// Required fields
-	ModelName string `json:"model_name"` // User-facing alias for the model
+	ModelName string `json:"model_name"` // Stable concrete account name
 	Provider  string `json:"provider"`   // Provider name for routing and selection. When empty, provider resolution infers it from Model.
 	Model     string `json:"model"`      // Model identifier, optionally provider-prefixed.
 
@@ -1043,7 +1064,7 @@ type ModelConfig struct {
 	InputPricePerMTok           float64              `json:"input_price_per_1m,omitempty"`            // Estimated input-token price in USD per 1M tokens
 	OutputPricePerMTok          float64              `json:"output_price_per_1m,omitempty"`           // Estimated output-token price in USD per 1M tokens
 	Subscription                bool                 `json:"subscription,omitempty"`                  // True when access is subscription-backed rather than direct metered API
-	SubscriptionEquivalentModel string               `json:"subscription_equivalent_model,omitempty"` // API-priced equivalent model for subscription cost estimates
+	SubscriptionEquivalentModel string               `json:"subscription_equivalent_model,omitempty"` // Exact alias of the API-priced equivalent used for subscription cost estimates
 	ToolSchemaTransform         string               `json:"tool_schema_transform,omitempty"`         // Optional tool schema compatibility transform (e.g. "simple")
 	Streaming                   ModelStreamingConfig `json:"streaming,omitzero"`                      // Opt-in for provider streaming on this model entry
 	ExtraBody                   map[string]any       `json:"extra_body,omitempty"`                    // Additional fields to inject into request body
@@ -1051,9 +1072,8 @@ type ModelConfig struct {
 
 	APIKeys SecureStrings `json:"api_keys,omitzero" yaml:"api_keys,omitempty"` // API authentication keys (multiple keys for failover)
 
-	// Enabled indicates whether this model entry is active. When omitted in
-	// existing configs, the field is inferred during load: models with API keys
-	// or the reserved "local-model" name are auto-enabled.
+	// Enabled indicates whether this account entry is active. Legacy migrations
+	// infer the field for existing keyed and local account configurations.
 	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 	// UserAgent is the user agent string to use for HTTP requests.
 	UserAgent string `json:"user_agent,omitempty" yaml:"-"`
@@ -1133,28 +1153,41 @@ func (c *ModelConfig) Validate() error {
 		}
 		return c.Router.validate(false)
 	}
-	if c.Model == "" {
-		return fmt.Errorf("model is required")
-	}
 	if _, err := providercommon.NormalizeToolSchemaTransform(c.ToolSchemaTransform); err != nil {
 		return err
 	}
 	if _, err := providercommon.NormalizeReasoningEffort(c.ReasoningEffort); err != nil {
 		return err
 	}
+	if strings.TrimSpace(c.Model) == "" {
+		if strings.TrimSpace(c.Provider) == "" {
+			return fmt.Errorf("provider is required when account model is empty")
+		}
+		return nil
+	}
+	if err := validateConcreteModelIdentifier(c.Model); err != nil {
+		return err
+	}
 
+	return nil
+}
+
+func validateConcreteModelIdentifier(model string) error {
+	if strings.TrimSpace(model) == "" {
+		return fmt.Errorf("model is required")
+	}
 	// Reject whitespace in model identifier
-	if strings.ContainsAny(c.Model, " \t\n\r") {
+	if strings.ContainsAny(model, " \t\n\r") {
 		return fmt.Errorf("model identifier contains whitespace")
 	}
 
 	// Reject leading slash
-	if strings.HasPrefix(c.Model, "/") {
+	if strings.HasPrefix(model, "/") {
 		return fmt.Errorf("model identifier must not start with /")
 	}
 
 	// Reject consecutive slashes
-	if strings.Contains(c.Model, "//") {
+	if strings.Contains(model, "//") {
 		return fmt.Errorf("model identifier must not contain //")
 	}
 	return nil
@@ -1634,13 +1667,14 @@ type SogouConfig struct {
 type GeminiSearchConfig struct {
 	Enabled    bool         `json:"enabled"          yaml:"-"                 env:"PICOCLAW_TOOLS_WEB_GEMINI_ENABLED"`
 	APIKey     SecureString `json:"api_key,omitzero" yaml:"api_key,omitempty" env:"PICOCLAW_TOOLS_WEB_GEMINI_API_KEY"`
-	Model      string       `json:"model"            yaml:"-"                 env:"PICOCLAW_TOOLS_WEB_GEMINI_MODEL"`
+	ModelAlias string       `json:"model_alias"      yaml:"-"                 env:"PICOCLAW_TOOLS_WEB_GEMINI_MODEL_ALIAS"`
 	MaxResults int          `json:"max_results"      yaml:"-"                 env:"PICOCLAW_TOOLS_WEB_GEMINI_MAX_RESULTS"`
 }
 
 type PerplexityConfig struct {
 	Enabled    bool          `json:"enabled"           yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_PERPLEXITY_ENABLED"`
 	APIKeys    SecureStrings `json:"api_keys,omitzero" yaml:"api_keys,omitempty" env:"PICOCLAW_TOOLS_WEB_PERPLEXITY_API_KEYS"`
+	ModelAlias string        `json:"model_alias"       yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_PERPLEXITY_MODEL_ALIAS"`
 	MaxResults int           `json:"max_results"       yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_PERPLEXITY_MAX_RESULTS"`
 }
 
@@ -2175,6 +2209,7 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 
 	// Load config based on detected version
 	var cfg *Config
+	migratedFrom := -1
 	switch versionInfo.Version {
 	case 0:
 		logger.InfoF(
@@ -2213,6 +2248,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V2→V3 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -2230,11 +2269,9 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 			return nil, err
 		}
 
-		defer func(cfg *Config) {
-			_ = SaveConfig(path, cfg)
-		}(cfg)
+		migratedFrom = versionInfo.Version
 	case 1:
-		// V1→V3 migration: rename channels→channel_list, infer Enabled, migrate channel configs
+		// V1→V4 migration: infer Enabled, migrate channels, and introduce model aliases.
 		logger.InfoF(
 			"config migrate start",
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
@@ -2267,6 +2304,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V2→V3 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -2284,15 +2325,9 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 			return nil, err
 		}
 
-		defer func(cfg *Config) {
-			_ = SaveConfig(path, cfg)
-		}(cfg)
-		logger.InfoF(
-			"config migrate success",
-			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
-		)
+		migratedFrom = versionInfo.Version
 	case 2:
-		// V2→V3 migration: rename channels→channel_list, convert flat→nested
+		// V2→V4 migration: migrate channels and introduce model aliases.
 		logger.InfoF(
 			"config migrate start",
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
@@ -2319,6 +2354,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V2→V3 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -2336,13 +2375,50 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 			return nil, err
 		}
 
-		defer func(cfg *Config) {
-			_ = SaveConfig(path, cfg)
-		}(cfg)
+		migratedFrom = versionInfo.Version
+	case 3:
+		// V3→V4 migration: introduce model aliases and separate account selection.
 		logger.InfoF(
-			"config migrate success",
+			"config migrate start",
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
 		)
+		if err = validateLegacyConfigDiagnostics(data); err != nil {
+			logger.ErrorCF(
+				"config",
+				formatDiagnosticLogMessage("Failed to load config", err),
+				map[string]any{"path": path},
+			)
+			return nil, err
+		}
+		var m map[string]any
+		m, err = loadConfigMap(path)
+		if err != nil {
+			logger.ErrorCF(
+				"config",
+				formatDiagnosticLogMessage("Failed to load config", err),
+				map[string]any{"path": path},
+			)
+			return nil, err
+		}
+		migrateErr := migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
+
+		var migrated []byte
+		migrated, err = json.Marshal(m)
+		if err != nil {
+			return nil, err
+		}
+		cfg, err = loadConfig(migrated)
+		if err != nil {
+			return nil, err
+		}
+		err = MakeBackup(path)
+		if err != nil {
+			return nil, err
+		}
+		migratedFrom = versionInfo.Version
 	case CurrentVersion:
 		// Current version
 		cfg, err = loadConfig(data)
@@ -2418,6 +2494,9 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 	if err = cfg.ValidateModelList(); err != nil {
 		return nil, err
 	}
+	if err = cfg.ValidateModelSelections(); err != nil {
+		return nil, err
+	}
 
 	// Ensure Workspace has a default if not set
 	if cfg.Agents.Defaults.Workspace == "" {
@@ -2427,6 +2506,24 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 
 	cfg.Session.ApplyDmScope()
 	cfg.Session.DeriveDmScope()
+
+	if migratedFrom >= 0 {
+		if saveErr := SaveConfig(path, cfg); saveErr != nil {
+			logger.WarnF(
+				"config migration validated but could not be persisted",
+				map[string]any{
+					"error": saveErr.Error(),
+					"from":  migratedFrom,
+					"to":    CurrentVersion,
+				},
+			)
+		} else {
+			logger.InfoF(
+				"config migrate success",
+				map[string]any{"from": migratedFrom, "to": CurrentVersion},
+			)
+		}
+	}
 
 	return cfg, nil
 }
@@ -2619,11 +2716,239 @@ func expandHome(path string) string {
 	return path
 }
 
+// GetModelAlias returns the alias with the exact configured name. Alias
+// lookup is intentionally exact: it never treats a raw model identifier,
+// account name, or router name as an alias.
+func (c *Config) GetModelAlias(name string) (*ModelAliasConfig, error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, ErrNoModelConfigured
+	}
+	if c != nil {
+		for i := range c.ModelAliases {
+			if c.ModelAliases[i].Name == name {
+				return &c.ModelAliases[i], nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("model alias %q is not configured", name)
+}
+
+// ResolveModelAlias resolves an exact alias for a concrete account. A
+// per-account override wins when present; account routers are not valid
+// override keys and are rejected during validation.
+func (c *Config) ResolveModelAlias(aliasName, concreteAccountRef string) (string, error) {
+	if err := c.validateConcreteModelAccountRef(concreteAccountRef); err != nil {
+		return "", err
+	}
+	alias, err := c.GetModelAlias(aliasName)
+	if err != nil {
+		return "", err
+	}
+	if alias.AccountOverrides != nil {
+		if model, ok := alias.AccountOverrides[concreteAccountRef]; ok {
+			if strings.TrimSpace(model) == "" {
+				return "", ErrNoModelConfigured
+			}
+			return model, nil
+		}
+	}
+	if strings.TrimSpace(alias.Model) == "" {
+		return "", ErrNoModelConfigured
+	}
+	return alias.Model, nil
+}
+
+// ResolveModelAliasConfig applies an exact model alias to a concrete
+// model_list account without mutating the stored account configuration.
+// Credential-backed virtual accounts are resolved by the runtime that owns
+// the credential store and therefore are not accepted here.
+func (c *Config) ResolveModelAliasConfig(
+	aliasName string,
+	concreteAccountRef string,
+) (*ModelConfig, error) {
+	concreteAccountRef = strings.TrimSpace(concreteAccountRef)
+	if concreteAccountRef == "" {
+		return nil, fmt.Errorf("no account configured")
+	}
+	model, err := c.ResolveModelAlias(aliasName, concreteAccountRef)
+	if err != nil {
+		return nil, err
+	}
+	account, err := c.GetEnabledModelConfig(concreteAccountRef)
+	if err != nil {
+		return nil, fmt.Errorf("account %q is not configured: %w", concreteAccountRef, err)
+	}
+	if account.IsAccountRouter() || account.IsModelRouter() {
+		return nil, fmt.Errorf("account %q is not a concrete account", concreteAccountRef)
+	}
+	clone := *account
+	clone.Model = model
+	return &clone, nil
+}
+
+// ValidateModelAliases validates alias identity, concrete model mappings, and
+// direct-account-only overrides.
+func (c *Config) ValidateModelAliases() error {
+	if c == nil {
+		return nil
+	}
+
+	accountRouters := make(map[string]struct{}, len(c.AccountRouters))
+	for i := range c.AccountRouters {
+		if name := c.AccountRouters[i].Name; strings.TrimSpace(name) != "" {
+			accountRouters[name] = struct{}{}
+		}
+	}
+	modelRouters := make(map[string]struct{}, len(c.ModelRouters))
+	for i := range c.ModelRouters {
+		if name := c.ModelRouters[i].Name; strings.TrimSpace(name) != "" {
+			modelRouters[name] = struct{}{}
+		}
+	}
+	concreteAccounts := make(map[string]struct{}, len(c.ModelList))
+	concreteAccountProviders := make(map[string][]string, len(c.ModelList))
+	for _, model := range c.ModelList {
+		if model == nil ||
+			!model.Enabled ||
+			model.IsAccountRouter() ||
+			model.IsModelRouter() {
+			continue
+		}
+		if name := model.ModelName; strings.TrimSpace(name) != "" {
+			concreteAccounts[name] = struct{}{}
+			provider := strings.TrimSpace(model.Provider)
+			if provider == "" {
+				provider, _ = protocoltypes.SplitKnownProviderModel(model.Model)
+				if provider == "" {
+					provider = "openai"
+				}
+			}
+			concreteAccountProviders[name] = append(
+				concreteAccountProviders[name],
+				provider,
+			)
+		}
+	}
+
+	seen := make(map[string]int, len(c.ModelAliases))
+	for i := range c.ModelAliases {
+		alias := &c.ModelAliases[i]
+		if strings.TrimSpace(alias.Name) == "" {
+			return fmt.Errorf("model_aliases[%d].name is required", i)
+		}
+		if previous, ok := seen[alias.Name]; ok {
+			return fmt.Errorf(
+				"model_aliases[%d].name %q duplicates model_aliases[%d]",
+				i,
+				alias.Name,
+				previous,
+			)
+		}
+		seen[alias.Name] = i
+		if _, ok := modelRouters[alias.Name]; ok {
+			return fmt.Errorf(
+				"model_aliases[%d].name %q conflicts with a model router",
+				i,
+				alias.Name,
+			)
+		}
+		if err := validateConcreteModelIdentifier(alias.Model); err != nil {
+			return fmt.Errorf("model_aliases[%d]: %w", i, err)
+		}
+		for accountRef, model := range alias.AccountOverrides {
+			if strings.TrimSpace(accountRef) == "" {
+				return fmt.Errorf(
+					"model_aliases[%d].account_overrides contains an empty account reference",
+					i,
+				)
+			}
+			if err := validateConcreteModelIdentifier(model); err != nil {
+				return fmt.Errorf(
+					"model_aliases[%d].account_overrides[%q]: %w",
+					i,
+					accountRef,
+					err,
+				)
+			}
+			if _, ok := accountRouters[accountRef]; ok {
+				return fmt.Errorf(
+					"model_aliases[%d].account_overrides[%q] must reference a concrete account, not an account router",
+					i,
+					accountRef,
+				)
+			}
+			if _, ok := modelRouters[accountRef]; ok {
+				return fmt.Errorf(
+					"model_aliases[%d].account_overrides[%q] must reference a concrete account, not a model router",
+					i,
+					accountRef,
+				)
+			}
+			if _, ok := concreteAccounts[accountRef]; ok {
+				for _, provider := range concreteAccountProviders[accountRef] {
+					if err := validateModelProviderCompatibility(
+						provider,
+						model,
+						false,
+					); err != nil {
+						return fmt.Errorf(
+							"model_aliases[%d].account_overrides[%q]: %w",
+							i,
+							accountRef,
+							err,
+						)
+					}
+				}
+				continue
+			}
+			if provider, ok := AccountRouterCredentialAccountProvider(accountRef); ok {
+				if err := validateModelProviderCompatibility(
+					provider,
+					model,
+					false,
+				); err != nil {
+					return fmt.Errorf(
+						"model_aliases[%d].account_overrides[%q]: %w",
+						i,
+						accountRef,
+						err,
+					)
+				}
+				continue
+			}
+			return fmt.Errorf(
+				"model_aliases[%d].account_overrides[%q] references an unknown concrete account",
+				i,
+				accountRef,
+			)
+		}
+	}
+	return nil
+}
+
 // GetModelConfig returns the ModelConfig for the given model name.
 // If multiple configs exist with the same model_name, it uses round-robin
 // selection for load balancing. Returns an error if the model is not found.
 func (c *Config) GetModelConfig(modelName string) (*ModelConfig, error) {
 	matches := c.findMatches(modelName)
+	return selectModelConfigMatch(modelName, matches)
+}
+
+// GetEnabledModelConfig returns an enabled ModelConfig for the exact account
+// or virtual-router name. Disabled entries are excluded before round-robin
+// selection so an inactive duplicate cannot be chosen by a runtime path.
+//
+// Virtual account and model routers remain eligible when enabled; callers
+// that require a concrete account must continue to reject router configs.
+func (c *Config) GetEnabledModelConfig(modelName string) (*ModelConfig, error) {
+	matches := c.findEnabledMatches(modelName)
+	return selectModelConfigMatch(modelName, matches)
+}
+
+func selectModelConfigMatch(
+	modelName string,
+	matches []*ModelConfig,
+) (*ModelConfig, error) {
 	if len(matches) == 0 {
 		return nil, fmt.Errorf("model %q not found in model_list or providers", modelName)
 	}
@@ -2640,11 +2965,23 @@ func (c *Config) GetModelConfig(modelName string) (*ModelConfig, error) {
 func (c *Config) findMatches(modelName string) []*ModelConfig {
 	var matches []*ModelConfig
 	for i := range c.ModelList {
-		if c.ModelList[i].ModelName == modelName {
-			matches = append(matches, c.ModelList[i])
+		model := c.ModelList[i]
+		if model != nil && model.ModelName == modelName {
+			matches = append(matches, model)
 		}
 	}
 	return matches
+}
+
+func (c *Config) findEnabledMatches(modelName string) []*ModelConfig {
+	matches := c.findMatches(modelName)
+	enabled := matches[:0]
+	for _, model := range matches {
+		if model.Enabled {
+			enabled = append(enabled, model)
+		}
+	}
+	return enabled
 }
 
 // ValidateModelList validates all ModelConfig entries in the model_list.
@@ -2681,6 +3018,9 @@ func (c *Config) ValidateModelList() error {
 		return err
 	}
 	if err := c.validateModelRouterReferences(); err != nil {
+		return err
+	}
+	if err := c.ValidateModelAliases(); err != nil {
 		return err
 	}
 	return nil

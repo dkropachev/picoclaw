@@ -91,9 +91,10 @@ func TestHandleMessageSend_ForwardsMessageMetadata(t *testing.T) {
 		ID:        "msg-1",
 		SessionID: "sess-1",
 		Payload: map[string]any{
-			PayloadKeyContent:   "hello",
-			PayloadKeyModelName: "credential:openai:work",
-			"model":             "gpt-5.6",
+			PayloadKeyContent:    "hello",
+			PayloadKeyAccountRef: "credential:openai:work",
+			PayloadKeyModelName:  "coding",
+			"model":              "gpt-5.6",
 		},
 	})
 
@@ -105,11 +106,14 @@ func TestHandleMessageSend_ForwardsMessageMetadata(t *testing.T) {
 		if got := inbound.Context.Raw["session_id"]; got != "sess-1" {
 			t.Fatalf("session_id raw = %q, want sess-1", got)
 		}
-		if got := inbound.Context.Raw[PayloadKeyModelName]; got != "credential:openai:work" {
-			t.Fatalf("model_name raw = %q, want credential:openai:work", got)
+		if got := inbound.Context.Raw[PayloadKeyAccountRef]; got != "credential:openai:work" {
+			t.Fatalf("account_ref raw = %q, want credential:openai:work", got)
 		}
-		if got := inbound.Context.Raw["model"]; got != "gpt-5.6" {
-			t.Fatalf("model raw = %q, want gpt-5.6", got)
+		if got := inbound.Context.Raw[PayloadKeyModelName]; got != "coding" {
+			t.Fatalf("model_name raw = %q, want coding alias", got)
+		}
+		if got := inbound.Context.Raw["model"]; got != "" {
+			t.Fatalf("raw model override = %q, want dropped", got)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected inbound pico message")

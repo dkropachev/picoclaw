@@ -85,6 +85,46 @@ func TestAccountFallbackWhenSelectedAccountUnavailable(t *testing.T) {
 	}
 }
 
+func TestRecordFallbackResultDoesNotDoubleCountRecordedAttempt(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	router := newTestRouter(t, &config.AccountRouterConfig{
+		Enabled: true,
+		Entry:   "entry",
+		Blocks: []config.AccountRouterBlock{{
+			ID:      "entry",
+			Type:    config.AccountRouterBlockTypeAccount,
+			Account: "account-a",
+		}},
+	}, now)
+
+	selection := router.Select("", SelectReasonInitial)
+	attempted := selection.Candidates[0]
+	failure := &providers.FailoverError{
+		Reason:      providers.FailoverFormat,
+		Provider:    attempted.Provider,
+		Model:       attempted.Model,
+		IdentityKey: attempted.StableKey(),
+		Wrapped:     errors.New("bad request"),
+	}
+	router.RecordFallbackResult(selection, &providers.FallbackResult{
+		Attempts: []providers.FallbackAttempt{{
+			Provider:    attempted.Provider,
+			Model:       attempted.Model,
+			IdentityKey: attempted.StableKey(),
+			Reason:      failure.Reason,
+			Error:       failure,
+		}},
+	}, failure)
+
+	state := router.store.st.Routers["router-main"].Accounts["account-a"]
+	if state == nil {
+		t.Fatal("account-a failure state is missing")
+	}
+	if state.FailureCount != 1 {
+		t.Fatalf("failure_count = %d, want one recorded attempt", state.FailureCount)
+	}
+}
+
 func TestLoadBalancerFallbackToAccountFallbackToLoadBalancer(t *testing.T) {
 	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	cfg := &config.AccountRouterConfig{

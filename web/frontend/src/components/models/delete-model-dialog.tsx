@@ -16,18 +16,23 @@ import {
 
 interface DeleteModelDialogProps {
   model: ModelInfo | null
+  revision: string
   onClose: () => void
   onDeleted: () => void
 }
 
 export function DeleteModelDialog({
   model,
+  revision,
   onClose,
   onDeleted,
 }: DeleteModelDialogProps) {
   const { t } = useTranslation()
   const [deleting, setDeleting] = useState(false)
-  const isRouter = model?.provider === "router" || Boolean(model?.router)
+  const [error, setError] = useState("")
+  const isAccountRouter = model?.provider === "router" || Boolean(model?.router)
+  const isModelRouter =
+    model?.provider === "model-router" || Boolean(model?.model_router)
 
   const handleConfirm = async () => {
     if (!model) return
@@ -36,34 +41,58 @@ export function DeleteModelDialog({
       return
     }
     setDeleting(true)
+    setError("")
     try {
-      await deleteModel(model.index)
+      await deleteModel(model.index, revision)
       onDeleted()
-    } catch {
-      // ignore, user can retry from list
+      onClose()
+    } catch (deleteError) {
+      setError(
+        deleteError instanceof Error
+          ? deleteError.message
+          : t("models.delete.error", "Failed to delete account."),
+      )
     } finally {
       setDeleting(false)
-      onClose()
     }
   }
 
   return (
-    <AlertDialog open={model !== null} onOpenChange={(v) => !v && onClose()}>
+    <AlertDialog
+      open={model !== null}
+      onOpenChange={(open) => {
+        if (!open) {
+          setError("")
+          onClose()
+        }
+      }}
+    >
       <AlertDialogContent size="sm">
         <AlertDialogHeader>
           <AlertDialogTitle>
-            {isRouter
+            {isAccountRouter
               ? t("models.router.deleteTitle")
-              : t("models.delete.title")}
+              : isModelRouter
+                ? t("models.modelRouter.deleteTitle")
+                : t("models.delete.title")}
           </AlertDialogTitle>
           <AlertDialogDescription>
-            {isRouter
+            {isAccountRouter
               ? t("models.router.deleteDescription", {
                   name: model?.model_name,
                 })
-              : t("models.delete.description", { name: model?.model_name })}
+              : isModelRouter
+                ? t("models.modelRouter.deleteDescription", {
+                    name: model?.model_name,
+                  })
+                : t("models.delete.description", { name: model?.model_name })}
           </AlertDialogDescription>
         </AlertDialogHeader>
+        {error && (
+          <p role="alert" className="text-destructive text-sm">
+            {error}
+          </p>
+        )}
         <AlertDialogFooter>
           <AlertDialogCancel onClick={onClose} disabled={deleting}>
             {t("common.cancel")}

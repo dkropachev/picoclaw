@@ -11,9 +11,8 @@ import (
 )
 
 type llmClusterTestProvider struct {
-	content      string
-	defaultModel string
-	messages     []providers.Message
+	content  string
+	messages []providers.Message
 }
 
 func (p *llmClusterTestProvider) Chat(
@@ -25,10 +24,6 @@ func (p *llmClusterTestProvider) Chat(
 ) (*providers.LLMResponse, error) {
 	p.messages = append([]providers.Message(nil), messages...)
 	return &providers.LLMResponse{Content: p.content}, nil
-}
-
-func (p *llmClusterTestProvider) GetDefaultModel() string {
-	return p.defaultModel
 }
 
 func TestHeuristicPatternClusterer_GroupsChineseSummariesWithoutLLM(t *testing.T) {
@@ -93,7 +88,7 @@ func TestLLMPatternClusterer_FallsBackWhenLLMReturnsNoUsableClusters(t *testing.
 		return time.Unix(1700000000, 0).UTC()
 	})
 	clusterer := evolution.NewLLMPatternClusterer(
-		&llmClusterTestProvider{content: `{"clusters":[]}`, defaultModel: "test-model"},
+		&llmClusterTestProvider{content: `{"clusters":[]}`},
 		"test-model",
 		fallback,
 		2,
@@ -133,10 +128,36 @@ func TestLLMPatternClusterer_FallsBackWhenLLMReturnsNoUsableClusters(t *testing.
 	}
 }
 
+func TestLLMPatternClusterer_MissingModelUsesFallbackWithoutProviderCall(t *testing.T) {
+	provider := &llmClusterTestProvider{content: `{"clusters":[{"label":"unexpected"}]}`}
+	clusterer := evolution.NewLLMPatternClusterer(
+		provider,
+		"  ",
+		evolution.NewHeuristicPatternClusterer(1, nil),
+		1,
+		nil,
+	)
+
+	patterns, clusteredIDs, err := clusterer.BuildPatterns(
+		context.Background(),
+		"workspace",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("BuildPatterns() error = %v", err)
+	}
+	if provider.messages != nil {
+		t.Fatalf("provider received messages for a missing model: %#v", provider.messages)
+	}
+	if len(patterns) != 0 || len(clusteredIDs) != 0 {
+		t.Fatalf("fallback result = (%#v, %#v), want empty", patterns, clusteredIDs)
+	}
+}
+
 func TestLLMPatternClusterer_PromptFiltersExistingPatternsByWorkspace(t *testing.T) {
 	provider := &llmClusterTestProvider{
-		content:      `{"clusters":[{"label":"current-weather-path","summary":"current summary","task_record_ids":["task-1"],"cluster_reason":"same goal"}]}`,
-		defaultModel: "test-model",
+		content: `{"clusters":[{"label":"current-weather-path","summary":"current summary","task_record_ids":["task-1"],"cluster_reason":"same goal"}]}`,
 	}
 	clusterer := evolution.NewLLMPatternClusterer(
 		provider,
@@ -191,8 +212,7 @@ func TestLLMPatternClusterer_PromptFiltersExistingPatternsByWorkspace(t *testing
 
 func TestLLMPatternClusterer_RejectsClusterBelowEvidenceSuccessRatio(t *testing.T) {
 	provider := &llmClusterTestProvider{
-		content:      `{"clusters":[{"label":"weather-lookup","summary":"lookup weather","task_record_ids":["task-success","task-failed"],"cluster_reason":"same weather lookup goal"}]}`,
-		defaultModel: "test-model",
+		content: `{"clusters":[{"label":"weather-lookup","summary":"lookup weather","task_record_ids":["task-success","task-failed"],"cluster_reason":"same weather lookup goal"}]}`,
 	}
 	clusterer := evolution.NewLLMPatternClusterer(
 		provider,
@@ -252,8 +272,7 @@ func TestLLMPatternClusterer_RejectsClusterBelowEvidenceSuccessRatio(t *testing.
 
 func TestLLMPatternClusterer_RejectsIncompleteEvidenceAssignment(t *testing.T) {
 	provider := &llmClusterTestProvider{
-		content:      `{"clusters":[{"label":"weather-lookup","summary":"lookup weather","task_record_ids":["task-success"],"cluster_reason":"same weather lookup goal"}]}`,
-		defaultModel: "test-model",
+		content: `{"clusters":[{"label":"weather-lookup","summary":"lookup weather","task_record_ids":["task-success"],"cluster_reason":"same weather lookup goal"}]}`,
 	}
 	clusterer := evolution.NewLLMPatternClusterer(
 		provider,
@@ -309,8 +328,7 @@ func TestLLMPatternClusterer_RejectsIncompleteEvidenceAssignment(t *testing.T) {
 
 func TestLLMPatternClusterer_MarksAllAcceptedEvidenceClusteredButStoresSuccessfulTaskIDs(t *testing.T) {
 	provider := &llmClusterTestProvider{
-		content:      `{"clusters":[{"label":"weather-lookup","summary":"lookup weather","task_record_ids":["task-success","task-failed"],"cluster_reason":"same weather lookup goal"}]}`,
-		defaultModel: "test-model",
+		content: `{"clusters":[{"label":"weather-lookup","summary":"lookup weather","task_record_ids":["task-success","task-failed"],"cluster_reason":"same weather lookup goal"}]}`,
 	}
 	assertClustererMarksAllAcceptedEvidenceClustered(
 		t,
@@ -324,8 +342,7 @@ func TestLLMPatternClusterer_MarksAllAcceptedEvidenceClusteredButStoresSuccessfu
 
 func TestLLMPatternClusterer_FallbackMarksAllAcceptedEvidenceClustered(t *testing.T) {
 	provider := &llmClusterTestProvider{
-		content:      `not-json`,
-		defaultModel: "test-model",
+		content: `not-json`,
 	}
 	assertClustererMarksAllAcceptedEvidenceClustered(
 		t,

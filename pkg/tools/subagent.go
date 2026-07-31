@@ -19,6 +19,7 @@ type SubTurnSpawner interface {
 // SubTurnConfig holds configuration for spawning a sub-turn.
 type SubTurnConfig struct {
 	Model              string
+	ModelFallbacks     []string
 	Tools              []Tool
 	SystemPrompt       string
 	MaxTokens          int
@@ -55,19 +56,20 @@ type SpawnSubTurnFunc func(
 ) (*ToolResult, error)
 
 type SubagentManager struct {
-	tasks          map[string]*SubagentTask
-	mu             sync.RWMutex
-	provider       providers.LLMProvider
-	defaultModel   string
-	workspace      string
-	tools          *ToolRegistry
-	maxIterations  int
-	maxTokens      int
-	temperature    float64
-	hasMaxTokens   bool
-	hasTemperature bool
-	nextID         int
-	spawner        SpawnSubTurnFunc
+	tasks                 map[string]*SubagentTask
+	mu                    sync.RWMutex
+	provider              providers.LLMProvider
+	defaultModel          string
+	defaultModelFallbacks []string
+	workspace             string
+	tools                 *ToolRegistry
+	maxIterations         int
+	maxTokens             int
+	temperature           float64
+	hasMaxTokens          bool
+	hasTemperature        bool
+	nextID                int
+	spawner               SpawnSubTurnFunc
 
 	// mediaResolver resolves media:// refs in tool-loop messages before
 	// each LLM call in the legacy RunToolLoop fallback path.
@@ -95,6 +97,21 @@ func (sm *SubagentManager) SetSpawner(spawner SpawnSubTurnFunc) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.spawner = spawner
+}
+
+// SetDefaultModelFallbacks configures exact fallback aliases for subagent
+// turns. A non-nil empty slice explicitly disables inherited fallbacks.
+func (sm *SubagentManager) SetDefaultModelFallbacks(fallbacks []string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.defaultModelFallbacks = cloneStringSlice(fallbacks)
+}
+
+func cloneStringSlice(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append(make([]string, 0, len(values)), values...)
 }
 
 // SetMediaResolver injects a message preprocessor that resolves media:// refs
@@ -338,10 +355,11 @@ func (sm *SubagentManager) ListTaskCopies() []SubagentTask {
 // SubagentTool executes a subagent task synchronously and returns the result.
 // It directly calls SubTurnSpawner with Async=false for synchronous execution.
 type SubagentTool struct {
-	spawner      SubTurnSpawner
-	defaultModel string
-	maxTokens    int
-	temperature  float64
+	spawner               SubTurnSpawner
+	defaultModel          string
+	defaultModelFallbacks []string
+	maxTokens             int
+	temperature           float64
 }
 
 func NewSubagentTool(manager *SubagentManager) *SubagentTool {
@@ -349,9 +367,10 @@ func NewSubagentTool(manager *SubagentManager) *SubagentTool {
 		return &SubagentTool{}
 	}
 	return &SubagentTool{
-		defaultModel: manager.defaultModel,
-		maxTokens:    manager.maxTokens,
-		temperature:  manager.temperature,
+		defaultModel:          manager.defaultModel,
+		defaultModelFallbacks: cloneStringSlice(manager.defaultModelFallbacks),
+		maxTokens:             manager.maxTokens,
+		temperature:           manager.temperature,
 	}
 }
 
@@ -417,12 +436,13 @@ Task: %s`,
 	// Use spawner if available (direct SpawnSubTurn call)
 	if t.spawner != nil {
 		result, err := t.spawner.SpawnSubTurn(ctx, SubTurnConfig{
-			Model:        t.defaultModel,
-			Tools:        nil, // Will inherit from parent via context
-			SystemPrompt: systemPrompt,
-			MaxTokens:    t.maxTokens,
-			Temperature:  t.temperature,
-			Async:        false, // Synchronous execution
+			Model:          t.defaultModel,
+			ModelFallbacks: cloneStringSlice(t.defaultModelFallbacks),
+			Tools:          nil, // Will inherit from parent via context
+			SystemPrompt:   systemPrompt,
+			MaxTokens:      t.maxTokens,
+			Temperature:    t.temperature,
+			Async:          false, // Synchronous execution
 		})
 		if err != nil {
 			return ErrorResult(fmt.Sprintf("Subagent execution failed: %v", err)).WithError(err)

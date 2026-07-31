@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/evolution"
@@ -56,7 +57,10 @@ func newEvolutionBridge(
 		return nil, nil
 	}
 
-	modelID := resolvedEvolutionModelID(cfg, provider)
+	provider, modelID := resolvedEvolutionCompletionTarget(
+		registry,
+		cfg,
+	)
 	runtime, err := evolution.NewRuntime(evolution.RuntimeOptions{
 		Config: cfg.Evolution,
 		PatternClusterer: evolution.NewLLMPatternClusterer(
@@ -106,16 +110,40 @@ func newEvolutionBridge(
 	return bridge, nil
 }
 
-func resolvedEvolutionModelID(cfg *config.Config, provider providers.LLMProvider) string {
-	if cfg != nil {
-		if modelID := cfg.Agents.Defaults.GetModelName(); modelID != "" {
-			return modelID
-		}
+func resolvedEvolutionCompletionTarget(
+	registry *AgentRegistry,
+	cfg *config.Config,
+) (providers.LLMProvider, string) {
+	if cfg == nil {
+		return nil, ""
 	}
-	if provider != nil {
-		return provider.GetDefaultModel()
+	if registry == nil {
+		return nil, ""
 	}
-	return ""
+
+	agent := registry.GetDefaultAgent()
+	if agent == nil || agent.ConfigurationError != nil {
+		return nil, ""
+	}
+	selector := &AgentLoop{cfg: cfg}
+	candidates, selectedModel, _, _, routerSelection := selector.selectCandidates(
+		agent,
+		"",
+		nil,
+		"evolution:"+agent.ID,
+		accountrouter.SelectReasonInitial,
+	)
+	_ = routerSelection
+	if len(candidates) == 0 {
+		return nil, ""
+	}
+	candidate := candidates[0]
+	selectedProvider := agent.candidateProviderForCandidate(candidate)
+	modelID := strings.TrimSpace(selectedModel)
+	if selectedProvider == nil || modelID == "" {
+		return nil, ""
+	}
+	return selectedProvider, modelID
 }
 
 // activate attaches a constructed bridge to its installed AgentLoop generation.

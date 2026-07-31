@@ -202,9 +202,6 @@ func TestStartupBlockedProviderReportsReason(t *testing.T) {
 	if resp != nil {
 		t.Fatalf("Chat() response = %#v, want nil", resp)
 	}
-	if model := provider.GetDefaultModel(); model != "" {
-		t.Fatalf("GetDefaultModel() = %q, want empty", model)
-	}
 }
 
 func TestCollectGatewayStartupStatusHandlesMalformedInfo(t *testing.T) {

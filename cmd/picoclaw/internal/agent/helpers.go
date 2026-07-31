@@ -14,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal"
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -36,17 +37,22 @@ func agentCmd(message, sessionKey, model string, debug bool) error {
 	}
 
 	if model != "" {
+		if _, aliasErr := cfg.GetModelAlias(model); aliasErr != nil {
+			return aliasErr
+		}
 		cfg.Agents.Defaults.ModelName = model
 	}
-
-	provider, modelID, err := providers.CreateProvider(cfg)
-	if err != nil {
-		return fmt.Errorf("error creating provider: %w", err)
+	modelAlias := cfg.Agents.Defaults.GetModelName()
+	if modelAlias == "" {
+		return config.ErrNoModelConfigured
+	}
+	if _, aliasErr := cfg.GetModelAlias(modelAlias); aliasErr != nil {
+		return aliasErr
 	}
 
-	// Use the resolved model ID from provider creation
-	if modelID != "" {
-		cfg.Agents.Defaults.ModelName = modelID
+	provider, _, err := providers.CreateProvider(cfg)
+	if err != nil {
+		return fmt.Errorf("error creating provider: %w", err)
 	}
 
 	msgBus := bus.NewMessageBus()

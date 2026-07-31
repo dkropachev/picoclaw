@@ -26,9 +26,9 @@ func testProviderWorkspace(t *testing.T, provider any) string {
 func TestCreateProvider_ClaudeCli(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ModelList = []*config.ModelConfig{
-		{ModelName: "claude-sonnet-4.6", Model: "claude-cli/claude-sonnet-4.6", Workspace: "/test/ws"},
+		{ModelName: "claude-sonnet-4.6", Model: "claude-cli/claude-sonnet-4.6", Workspace: "/test/ws", Enabled: true},
 	}
-	cfg.Agents.Defaults.ModelName = "claude-sonnet-4.6"
+	configureProviderTestSelection(cfg, "claude-sonnet-4.6", "coding", "claude-sonnet-4.6")
 
 	provider, _, err := CreateProvider(cfg)
 	if err != nil {
@@ -47,9 +47,9 @@ func TestCreateProvider_ClaudeCli(t *testing.T) {
 func TestCreateProvider_ClaudeCode(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ModelList = []*config.ModelConfig{
-		{ModelName: "claude-code", Model: "claude-cli/claude-code"},
+		{ModelName: "claude-code", Model: "claude-cli/claude-code", Enabled: true},
 	}
-	cfg.Agents.Defaults.ModelName = "claude-code"
+	configureProviderTestSelection(cfg, "claude-code", "coding", "claude-code")
 
 	provider, _, err := CreateProvider(cfg)
 	if err != nil {
@@ -63,9 +63,9 @@ func TestCreateProvider_ClaudeCode(t *testing.T) {
 func TestCreateProvider_ClaudeCodec(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ModelList = []*config.ModelConfig{
-		{ModelName: "claudecode", Model: "claude-cli/claudecode"},
+		{ModelName: "claudecode", Model: "claude-cli/claudecode", Enabled: true},
 	}
-	cfg.Agents.Defaults.ModelName = "claudecode"
+	configureProviderTestSelection(cfg, "claudecode", "coding", "claudecode")
 
 	provider, _, err := CreateProvider(cfg)
 	if err != nil {
@@ -79,9 +79,9 @@ func TestCreateProvider_ClaudeCodec(t *testing.T) {
 func TestCreateProvider_ClaudeCliDefaultWorkspace(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ModelList = []*config.ModelConfig{
-		{ModelName: "claude-cli", Model: "claude-cli/claude-sonnet"},
+		{ModelName: "claude-cli", Model: "claude-cli/claude-sonnet", Enabled: true},
 	}
-	cfg.Agents.Defaults.ModelName = "claude-cli"
+	configureProviderTestSelection(cfg, "claude-cli", "coding", "claude-sonnet")
 	cfg.Agents.Defaults.Workspace = ""
 
 	provider, _, err := CreateProvider(cfg)

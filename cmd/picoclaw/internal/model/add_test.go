@@ -14,6 +14,15 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 )
 
+func TestNewAddCommand_ExposesSeparateAccountAndAliasFlags(t *testing.T) {
+	cmd := newAddCommand()
+
+	require.NotNil(t, cmd.Flags().Lookup("account"))
+	require.NotNil(t, cmd.Flags().Lookup("name"))
+	assert.Contains(t, cmd.Flags().Lookup("account").Usage, "Account name")
+	assert.Contains(t, cmd.Flags().Lookup("name").Usage, "Model alias")
+}
+
 func TestFetchOpenAIModels_DataEnvelope(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/models", r.URL.Path)
@@ -160,32 +169,46 @@ func TestRunAdd_WithExplicitModel_NoNetwork(t *testing.T) {
 
 	out := &bytes.Buffer{}
 	err := runAdd(addOptions{
-		apiBase:   "https://invalid.invalid/v1",
-		apiKey:    "k",
-		modelID:   "explicit-model",
-		alias:     "myalias",
-		modelType: "openai-compatible",
-		stdout:    out,
+		apiBase:    "https://invalid.invalid/v1",
+		apiKey:     "k",
+		modelID:    "explicit-model",
+		alias:      "myalias",
+		accountRef: "my-account",
+		modelType:  "openai-compatible",
+		stdout:     out,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, out.String(), "Saved model 'myalias' (explicit-model)")
+	assert.Contains(t, out.String(), "Saved account 'my-account' and alias 'myalias' (explicit-model)")
 
 	cfg, err := config.LoadConfig(configPath)
 	require.NoError(t, err)
+	assert.Equal(t, "my-account", cfg.Agents.Defaults.AccountRef)
 	assert.Equal(t, "myalias", cfg.Agents.Defaults.GetModelName())
-	added := findModelByName(cfg, "myalias")
-	require.NotNil(t, added, "expected model 'myalias' in model_list")
+	added := findModelByName(cfg, "my-account")
+	require.NotNil(t, added, "expected account 'my-account' in model_list")
 	assert.Equal(t, "explicit-model", added.Model)
 	assert.Equal(t, "https://invalid.invalid/v1", added.APIBase)
 	assert.True(t, added.Enabled)
 	require.Len(t, added.APIKeys, 1)
 	assert.Equal(t, "k", added.APIKeys[0].String())
+	modelAlias := findModelAlias(cfg, "myalias")
+	require.NotNil(t, modelAlias)
+	assert.Equal(t, "explicit-model", modelAlias.Model)
 }
 
 func findModelByName(cfg *config.Config, name string) *config.ModelConfig {
 	for _, m := range cfg.ModelList {
 		if m != nil && m.ModelName == name {
 			return m
+		}
+	}
+	return nil
+}
+
+func findModelAlias(cfg *config.Config, name string) *config.ModelAliasConfig {
+	for i := range cfg.ModelAliases {
+		if cfg.ModelAliases[i].Name == name {
+			return &cfg.ModelAliases[i]
 		}
 	}
 	return nil
@@ -213,10 +236,14 @@ func TestRunAdd_FetchAndPick(t *testing.T) {
 
 	cfg, err := config.LoadConfig(configPath)
 	require.NoError(t, err)
+	assert.Equal(t, defaultAliasName, cfg.Agents.Defaults.AccountRef)
 	assert.Equal(t, defaultAliasName, cfg.Agents.Defaults.GetModelName())
 	added := findModelByName(cfg, defaultAliasName)
 	require.NotNil(t, added)
 	assert.Equal(t, "m2", added.Model)
+	modelAlias := findModelAlias(cfg, defaultAliasName)
+	require.NotNil(t, modelAlias)
+	assert.Equal(t, "m2", modelAlias.Model)
 }
 
 func TestRunAdd_UpsertsExistingAlias(t *testing.T) {
@@ -249,12 +276,22 @@ func TestRunAdd_UpsertsExistingAlias(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, matches, "alias should be updated, not duplicated")
+	aliasMatches := 0
+	for i := range cfg.ModelAliases {
+		if cfg.ModelAliases[i].Name == "shared" {
+			aliasMatches++
+		}
+	}
+	assert.Equal(t, 1, aliasMatches, "model alias should be updated, not duplicated")
 
 	updated := findModelByName(cfg, "shared")
 	require.NotNil(t, updated)
 	assert.Equal(t, "m2", updated.Model)
 	assert.Equal(t, "https://b.example/v1", updated.APIBase)
 	assert.Equal(t, "k2", updated.APIKeys[0].String())
+	updatedAlias := findModelAlias(cfg, "shared")
+	require.NotNil(t, updatedAlias)
+	assert.Equal(t, "m2", updatedAlias.Model)
 }
 
 func TestRunAdd_RejectsUnsupportedType(t *testing.T) {
@@ -270,4 +307,56 @@ func TestRunAdd_RejectsUnsupportedType(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported --type")
+}
+
+func TestRunAdd_RejectsReservedCredentialAccountName(t *testing.T) {
+	initTest(t)
+
+	err := runAdd(addOptions{
+		apiBase:    "https://x/v1",
+		apiKey:     "k",
+		modelID:    "m",
+		alias:      "coding",
+		accountRef: "credential:openai:work",
+		stdout:     &bytes.Buffer{},
+	})
+
+	require.EqualError(
+		t,
+		err,
+		`--account "credential:openai:work" uses the reserved credential-account namespace`,
+	)
+}
+
+func TestRunAdd_RejectsExistingNonOpenAICompatibleAccount(t *testing.T) {
+	initTest(t)
+
+	cfg := config.DefaultConfig()
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName: "work",
+		Provider:  "anthropic",
+		Model:     "claude-sonnet-4-6",
+		Enabled:   true,
+	}}
+	require.NoError(t, config.SaveConfig(configPath, cfg))
+
+	err := runAdd(addOptions{
+		apiBase:    "https://openai.example/v1",
+		apiKey:     "k",
+		modelID:    "gpt-5.4",
+		alias:      "coding",
+		accountRef: "work",
+		stdout:     &bytes.Buffer{},
+	})
+
+	require.EqualError(
+		t,
+		err,
+		`account "work" uses provider "anthropic"; --type openai-compatible requires an OpenAI-compatible account`,
+	)
+
+	unchanged, loadErr := config.LoadConfig(configPath)
+	require.NoError(t, loadErr)
+	require.Equal(t, "anthropic", findModelByName(unchanged, "work").Provider)
+	require.Equal(t, "claude-sonnet-4-6", findModelByName(unchanged, "work").Model)
 }

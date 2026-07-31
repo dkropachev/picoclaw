@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/isolation"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 // ClaudeCliProvider implements LLMProvider using the claude CLI as a subprocess.
@@ -29,6 +30,10 @@ func NewClaudeCliProvider(workspace string) *ClaudeCliProvider {
 func (p *ClaudeCliProvider) Chat(
 	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
 ) (*LLMResponse, error) {
+	model, err := protocoltypes.RequireModel(model)
+	if err != nil {
+		return nil, err
+	}
 	systemPrompt := p.buildSystemPrompt(messages, tools)
 	prompt := p.messagesToPrompt(messages)
 
@@ -36,9 +41,7 @@ func (p *ClaudeCliProvider) Chat(
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
 	}
-	if model != "" && model != "claude-code" {
-		args = append(args, "--model", model)
-	}
+	args = append(args, "--model", model)
 	args = append(args, "-") // read from stdin
 
 	cmd := exec.CommandContext(ctx, p.command, args...)
@@ -69,11 +72,6 @@ func (p *ClaudeCliProvider) Chat(
 	}
 
 	return p.parseClaudeCliResponse(stdout.String())
-}
-
-// GetDefaultModel returns the default model identifier.
-func (p *ClaudeCliProvider) GetDefaultModel() string {
-	return "claude-code"
 }
 
 // messagesToPrompt converts messages to a CLI-compatible prompt string.

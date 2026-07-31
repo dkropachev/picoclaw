@@ -22,7 +22,7 @@ import {
   type ModelInfo,
   type ModelProviderOption,
   getModels,
-  setDefaultModel,
+  setDefaultAccount,
 } from "@/api/models"
 import {
   type CodexAccountLimitAccount,
@@ -484,21 +484,13 @@ function AccountRouterCard({
   const { t } = useTranslation()
   const accountDetails = getRouterAccountDetails(model, accountIndex, t)
   const routerStatus = getRouterCardStatus(accountDetails, t)
-  const canSetDefault =
-    model.available &&
-    !model.is_default &&
-    !model.is_virtual &&
-    model.default_model_allowed !== false
+  const canSetDefault = model.available && !model.is_default
   const setDefaultLabel = t("models.action.setDefault")
   const setDefaultDisabledReason = (() => {
     if (settingDefault) return t("models.action.setDefaultDisabled.setting")
     if (!model.available)
       return t("models.action.setDefaultDisabled.unavailable")
     if (model.is_default) return t("models.action.setDefaultDisabled.isDefault")
-    if (model.is_virtual) return t("models.action.setDefaultDisabled.isVirtual")
-    if (model.default_model_allowed === false) {
-      return t("models.action.setDefaultDisabled.unsupportedProvider")
-    }
     return setDefaultLabel
   })()
   const deleteDisabled = model.is_default
@@ -701,6 +693,7 @@ function AccountsHomePage() {
   )
   const [modelsLoading, setModelsLoading] = useState(true)
   const [modelsError, setModelsError] = useState("")
+  const [modelsRevision, setModelsRevision] = useState("")
   const [codexLimits, setCodexLimits] =
     useState<CodexAccountLimitsResponse | null>(null)
   const [codexLimitsLoading, setCodexLimitsLoading] = useState(true)
@@ -748,6 +741,7 @@ function AccountsHomePage() {
     try {
       const data = await getModels()
       setModels(data.models)
+      setModelsRevision(data.revision)
       setProviderOptions(data.provider_options || [])
       setModelsError("")
     } catch (err) {
@@ -799,7 +793,7 @@ function AccountsHomePage() {
 
     setSettingDefaultIndex(model.index)
     try {
-      await setDefaultModel(model.model_name)
+      await setDefaultAccount(model.model_name)
       await fetchModels()
       const gateway = await refreshGatewayState({ force: true })
       showSaveSuccessOrRestartToast(
@@ -963,6 +957,7 @@ function AccountsHomePage() {
 
       <DeleteModelDialog
         model={deletingModel}
+        revision={modelsRevision}
         onClose={() => setDeletingModel(null)}
         onDeleted={fetchModels}
       />

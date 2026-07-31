@@ -1637,6 +1637,18 @@ func eventAutomationTestConfig(
 ) *config.Config {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = workspace
+	cfg.Agents.Defaults.AccountRef = "test-account"
+	cfg.Agents.Defaults.ModelName = "test-model"
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name:  "test-model",
+		Model: "test-model",
+	}}
+	cfg.ModelList = config.SecureModelList{&config.ModelConfig{
+		ModelName: "test-account",
+		Provider:  "openai",
+		APIBase:   "http://127.0.0.1",
+		Enabled:   true,
+	}}
 	cfg.Events.Ingress = config.EventIngressConfig{
 		Enabled:      ingressEnabled,
 		DatabasePath: databasePath,

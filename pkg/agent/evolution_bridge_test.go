@@ -601,13 +601,11 @@ func TestEvolutionBridge_DraftModeUsesProviderBackedDraftGenerator(t *testing.T)
 	}
 }
 
-func TestEvolutionBridge_DraftModeUsesProviderDefaultModel(t *testing.T) {
+func TestEvolutionBridge_DraftModeFailsWithoutConfiguredModel(t *testing.T) {
 	tmpDir := t.TempDir()
-	seedReadyRule(t, tmpDir)
 
 	provider := &capturingEvolutionDraftProvider{
-		defaultModel: "provider-explicit-model",
-		response:     `{"target_skill_name":"weather","draft_type":"shortcut","change_kind":"append","human_summary":"Prefer native-name path first","body_or_patch":"## Start Here\nUse native-name query first."}`,
+		response: `{"target_skill_name":"weather","draft_type":"shortcut","change_kind":"append","human_summary":"Prefer native-name path first","body_or_patch":"## Start Here\nUse native-name query first."}`,
 	}
 
 	cfg := &config.Config{
@@ -628,47 +626,55 @@ func TestEvolutionBridge_DraftModeUsesProviderDefaultModel(t *testing.T) {
 	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
 	defer al.Close()
 
-	if _, err := al.ProcessDirectWithChannel(
+	_, err := al.ProcessDirectWithChannel(
 		context.Background(),
 		"hello",
 		"session-auto-cold-path-model",
 		"cli",
 		"direct",
-	); err != nil {
-		t.Fatalf("ProcessDirectWithChannel failed: %v", err)
+	)
+	if err == nil || !strings.Contains(err.Error(), config.ErrNoModelConfigured.Error()) {
+		t.Fatalf("ProcessDirectWithChannel error = %v, want no model configured", err)
 	}
-
-	waitForEvolutionRecord(t, filepath.Join(tmpDir, "state", "evolution", "task-records.jsonl"))
-	waitForDrafts(t, filepath.Join(tmpDir, "state", "evolution", "skill-drafts.json"), 1)
-	if provider.lastModel != "provider-explicit-model" {
-		t.Fatalf("lastModel = %q, want provider-explicit-model", provider.lastModel)
+	if provider.lastModel != "" {
+		t.Fatalf("provider was called with model %q despite missing model configuration", provider.lastModel)
 	}
 }
 
-func TestEvolutionBridge_DraftModePrefersConfigDefaultModelName(t *testing.T) {
+func TestEvolutionBridge_DraftModeResolvesConfiguredAlias(t *testing.T) {
 	tmpDir := t.TempDir()
 	seedReadyRule(t, tmpDir)
 
 	provider := &capturingEvolutionDraftProvider{
-		defaultModel: "provider-default-model",
-		response:     `{"target_skill_name":"weather","draft_type":"shortcut","change_kind":"append","human_summary":"Prefer native-name path first","body_or_patch":"## Start Here\nUse native-name query first."}`,
+		response: `{"target_skill_name":"weather","draft_type":"shortcut","change_kind":"append","human_summary":"Prefer native-name path first","body_or_patch":"## Start Here\nUse native-name query first."}`,
 	}
 
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
 				Workspace:         tmpDir,
-				ModelName:         "test-model",
+				AccountRef:        "draft-account",
+				ModelName:         "draft",
 				MaxTokens:         4096,
 				MaxToolIterations: 3,
 			},
 		},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "draft-account",
+			Provider:  "openai",
+			APIBase:   "http://example.invalid/v1",
+			APIKeys:   config.SimpleSecureStrings("test-key"),
+			Enabled:   true,
+		}},
+		ModelAliases: []config.ModelAliasConfig{{
+			Name:  "draft",
+			Model: "resolved-config-model",
+		}},
 		Evolution: config.EvolutionConfig{
 			Enabled: true,
 			Mode:    "draft",
 		},
 	}
-	cfg.Agents.Defaults.ModelName = "resolved-config-model"
 
 	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
 	defer al.Close()
@@ -687,6 +693,178 @@ func TestEvolutionBridge_DraftModePrefersConfigDefaultModelName(t *testing.T) {
 	waitForDrafts(t, filepath.Join(tmpDir, "state", "evolution", "skill-drafts.json"), 1)
 	if provider.lastModel != "resolved-config-model" {
 		t.Fatalf("lastModel = %q, want resolved-config-model", provider.lastModel)
+	}
+}
+
+func TestResolvedEvolutionCompletionTargetResolvesModelRouterDefaultAlias(t *testing.T) {
+	bootstrapProvider := &capturingEvolutionDraftProvider{response: "bootstrap"}
+	selectedProvider := &capturingEvolutionDraftProvider{response: "selected"}
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:  t.TempDir(),
+				AccountRef: "draft-account",
+				ModelName:  "draft-router",
+				MaxTokens:  4096,
+			},
+		},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "draft-account",
+			Provider:  "openai",
+			APIBase:   "http://example.invalid/v1",
+			APIKeys:   config.SimpleSecureStrings("test-key"),
+			Enabled:   true,
+		}},
+		ModelAliases: []config.ModelAliasConfig{{
+			Name:  "draft-default",
+			Model: "upstream-evolution-model",
+		}},
+		ModelRouters: []config.ModelRouterConfig{{
+			Name:    "draft-router",
+			Enabled: true,
+			Entry:   "rules",
+			Blocks: []config.ModelRouterBlock{
+				{
+					ID:       "rules",
+					Type:     config.ModelRouterBlockTypeRules,
+					Fallback: "default",
+				},
+				{
+					ID:    "default",
+					Type:  config.ModelRouterBlockTypeModel,
+					Model: "draft-default",
+				},
+			},
+		}},
+	}
+	registry := NewAgentRegistry(cfg, bootstrapProvider)
+	defer registry.Close()
+	agent := registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("default agent is nil")
+	}
+	candidates, err := candidatesForAccountAliases(
+		cfg,
+		"draft-account",
+		"draft-default",
+		nil,
+		cfg.Agents.Defaults.Workspace,
+		agent.CandidateProviders,
+	)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("default router candidates = %#v, error = %v", candidates, err)
+	}
+	bindBootstrapProvider(
+		agent.CandidateProviders,
+		candidates[0],
+		selectedProvider,
+	)
+
+	provider, model := resolvedEvolutionCompletionTarget(
+		registry,
+		cfg,
+	)
+	if provider != selectedProvider {
+		t.Fatalf("provider = %T, want routed provider", provider)
+	}
+	if model != "upstream-evolution-model" {
+		t.Fatalf("model = %q, want concrete routed model", model)
+	}
+}
+
+func TestResolvedEvolutionCompletionTargetUsesRunnableAccountRouterFallback(t *testing.T) {
+	bootstrapProvider := &capturingEvolutionDraftProvider{response: "bootstrap"}
+	selectedProvider := &capturingEvolutionDraftProvider{response: "selected"}
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         t.TempDir(),
+				AccountRef:        "evolution-accounts",
+				ModelName:         "draft",
+				MaxTokens:         4096,
+				MaxToolIterations: 3,
+			},
+		},
+		ModelList: []*config.ModelConfig{
+			{
+				ModelName: "unrunnable-account",
+				Provider:  "openai",
+				Enabled:   true,
+			},
+			{
+				ModelName: "runnable-account",
+				Provider:  "anthropic",
+				APIBase:   "http://example.invalid/v1",
+				APIKeys:   config.SimpleSecureStrings("test-key"),
+				Enabled:   true,
+			},
+		},
+		ModelAliases: []config.ModelAliasConfig{{
+			Name:  "draft",
+			Model: "default-draft-model",
+			AccountOverrides: map[string]string{
+				"runnable-account": "routed-draft-model",
+			},
+		}},
+		AccountRouters: []config.AccountRouterConfig{{
+			Name:    "evolution-accounts",
+			Enabled: true,
+			Entry:   "primary",
+			Blocks: []config.AccountRouterBlock{
+				{
+					ID:       "primary",
+					Type:     config.AccountRouterBlockTypeAccount,
+					Account:  "unrunnable-account",
+					Fallback: "fallback",
+				},
+				{
+					ID:      "fallback",
+					Type:    config.AccountRouterBlockTypeAccount,
+					Account: "runnable-account",
+				},
+			},
+		}},
+	}
+	registry := NewAgentRegistry(cfg, bootstrapProvider)
+	defer registry.Close()
+	agent := registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("default agent is nil")
+	}
+	if agent.ConfigurationError != nil {
+		t.Fatalf("default agent configuration error = %v", agent.ConfigurationError)
+	}
+	selection := agent.AccountRouter.Select(
+		"evolution:"+agent.ID,
+		"initial",
+	)
+	if len(selection.Candidates) != 1 {
+		t.Fatalf("router candidates = %#v, want runnable fallback", selection.Candidates)
+	}
+	bindBootstrapProvider(
+		agent.CandidateProviders,
+		selection.Candidates[0],
+		selectedProvider,
+	)
+
+	provider, model := resolvedEvolutionCompletionTarget(
+		registry,
+		cfg,
+	)
+	if provider != selectedProvider {
+		t.Fatalf("provider = %T, want selected account provider", provider)
+	}
+	if model != "routed-draft-model" {
+		t.Fatalf("model = %q, want routed account override", model)
+	}
+	if _, err := provider.Chat(context.Background(), nil, nil, model, nil); err != nil {
+		t.Fatalf("selected provider Chat: %v", err)
+	}
+	if selectedProvider.lastModel != "routed-draft-model" {
+		t.Fatalf("selected provider model = %q, want routed-draft-model", selectedProvider.lastModel)
+	}
+	if bootstrapProvider.lastModel != "" {
+		t.Fatalf("bootstrap provider was called with %q", bootstrapProvider.lastModel)
 	}
 }
 
@@ -980,7 +1158,7 @@ func TestAgentLoop_ReloadProviderAndConfig_RebuildsEvolutionBridge(t *testing.T)
 		},
 	}
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockProvider{})
 	defer al.Close()
 
 	oldBridge := al.evolution
@@ -1030,7 +1208,7 @@ func TestEvolutionBridge_ReloadCandidateIsInertAndRollbackRejectsColdPath(t *tes
 		Enabled: false,
 		Mode:    "observe",
 	})
-	al := NewAgentLoop(oldCfg, bus.NewMessageBus(), &simpleMockProvider{response: "ok"})
+	al := newTestAgentLoopWithStrictModels(oldCfg, bus.NewMessageBus(), &simpleMockProvider{response: "ok"})
 	defer al.Close()
 
 	candidateCfg := evolutionBridgeGenerationTestConfig(t.TempDir(), config.EvolutionConfig{
@@ -1127,7 +1305,7 @@ func TestEvolutionBridge_CurrentGenerationColdPathOwnsRuntimeLease(t *testing.T)
 		Enabled: true,
 		Mode:    "draft",
 	})
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &simpleMockProvider{response: "ok"})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &simpleMockProvider{response: "ok"})
 	defer al.Close()
 
 	bridge := al.currentEvolutionBridge()
@@ -1170,7 +1348,7 @@ func TestEvolutionBridge_StartupBarrierFencesInitialColdPath(t *testing.T) {
 		Enabled: true,
 		Mode:    "draft",
 	})
-	al := NewAgentLoop(
+	al := newTestAgentLoopWithStrictModels(
 		cfg,
 		bus.NewMessageBus(),
 		&simpleMockProvider{response: "ok"},
@@ -1333,7 +1511,7 @@ func newEvolutionTestLoop(
 		Evolution: evo,
 	}
 
-	return NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	return newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 }
 
 func evolutionBridgeGenerationTestConfig(
@@ -1551,9 +1729,8 @@ func (o *blockingRuntimeObserver) OnRuntimeEvent(ctx context.Context, _ runtimee
 }
 
 type capturingEvolutionDraftProvider struct {
-	response     string
-	defaultModel string
-	lastModel    string
+	response  string
+	lastModel string
 }
 
 type lateSkillOnRetryProvider struct {
@@ -1586,10 +1763,6 @@ func (p *lateSkillOnRetryProvider) Chat(
 	return &providers.LLMResponse{Content: "Recovered after retry"}, nil
 }
 
-func (p *lateSkillOnRetryProvider) GetDefaultModel() string {
-	return "mock-model"
-}
-
 func (p *capturingEvolutionDraftProvider) Chat(
 	_ context.Context,
 	_ []providers.Message,
@@ -1599,8 +1772,4 @@ func (p *capturingEvolutionDraftProvider) Chat(
 ) (*providers.LLMResponse, error) {
 	p.lastModel = model
 	return &providers.LLMResponse{Content: p.response}, nil
-}
-
-func (p *capturingEvolutionDraftProvider) GetDefaultModel() string {
-	return p.defaultModel
 }

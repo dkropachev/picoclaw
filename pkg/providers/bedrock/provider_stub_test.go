@@ -33,3 +33,9 @@ func TestNewProvider_WithOptions_ReturnsStubError(t *testing.T) {
 	assert.True(t, strings.Contains(err.Error(), "build with -tags bedrock"),
 		"error should mention build tag requirement, got: %s", err.Error())
 }
+
+func TestStubChatRejectsMissingModelFirst(t *testing.T) {
+	provider := &Provider{}
+	_, err := provider.Chat(context.Background(), nil, nil, "  ", nil)
+	require.EqualError(t, err, "no model configured")
+}

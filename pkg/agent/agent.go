@@ -134,8 +134,9 @@ type processOptions struct {
 	InitialSteeringMessages []providers.Message    // Steering messages from refactor/agent
 	DefaultResponse         string                 // Response when LLM returns empty
 	PromptCacheKey          string                 // Optional provider prompt cache key override
-	ModelNameOverride       string                 // Optional model alias/ref override for this isolated turn
-	ModelIDOverride         string                 // Optional provider model ID for ModelNameOverride
+	ModelNameOverride       string                 // Optional exact model alias override for this isolated turn
+	ModelFallbacksOverride  []string               // Optional exact fallback aliases; non-nil replaces inherited fallbacks
+	AccountRefOverride      string                 // Optional concrete account or account-router override for this isolated turn
 	ReasoningEffortOverride string                 // Optional reasoning_effort override for this isolated turn
 	EnableSummary           bool                   // Whether to trigger summarization
 	SendResponse            bool                   // Whether to send response via bus
@@ -666,6 +667,12 @@ func (al *AgentLoop) Close() {
 		}
 	}
 
+	if err := closeContextManager(al.contextManager); err != nil {
+		logger.ErrorCF("agent", "Failed to close context manager",
+			map[string]any{
+				"error": err.Error(),
+			})
+	}
 	al.GetRegistry().Close()
 	if al.hooks != nil {
 		al.hooks.Close()
@@ -810,6 +817,7 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	al.mu.Lock()
 	oldRegistry := al.registry
 	oldEvolution := al.evolution
+	oldContextManager := al.contextManager
 
 	// Store new values
 	al.cfg = cfg
@@ -832,6 +840,20 @@ func (al *AgentLoop) reloadProviderAndConfig(
 	al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), newRL)
 
 	al.mu.Unlock()
+
+	// Context-manager factories derive per-agent resources from the current
+	// registry. Rebuild after the registry/config swap while the runtime gate
+	// remains paused, closing the previous generation first so Seahorse cannot
+	// retain stale engines or SQLite handles after workspace/topology changes.
+	if err := closeContextManager(oldContextManager); err != nil {
+		logger.WarnCF("agent", "Failed to close previous context manager during reload",
+			map[string]any{"error": err.Error()})
+	}
+	newContextManager := al.resolveContextManager()
+	al.mu.Lock()
+	al.contextManager = newContextManager
+	al.mu.Unlock()
+
 	if newEvolution != nil {
 		if err := newEvolution.activate(al); err != nil {
 			logger.WarnCF("agent", "Failed to activate reloaded evolution bridge",

@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -131,7 +132,17 @@ func (p *Pipeline) routeMediaTurn(ts *turnState, exec *turnExecution) error {
 
 	switch {
 	case len(ts.agent.ImageCandidates) > 0:
-		targetCandidates = append([]providers.FallbackCandidate(nil), ts.agent.ImageCandidates...)
+		if ts.agent.ImageAccountRouter != nil {
+			selection := ts.agent.ImageAccountRouter.Select(
+				ts.sessionKey,
+				accountrouter.SelectReasonInitial,
+			)
+			targetCandidates = selection.Candidates
+			exec.accountRouter = ts.agent.ImageAccountRouter
+			exec.routerSelection = selection
+		} else {
+			targetCandidates = append([]providers.FallbackCandidate(nil), ts.agent.ImageCandidates...)
+		}
 		targetModelName = strings.TrimSpace(p.Cfg.Agents.Defaults.ImageModel)
 		routeReason = "configured_image_model"
 	case exec.usedLight && len(ts.agent.Candidates) > 0:

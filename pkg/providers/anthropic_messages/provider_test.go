@@ -385,12 +385,11 @@ func TestNewProvider(t *testing.T) {
 	}
 }
 
-func TestGetDefaultModel(t *testing.T) {
+func TestChatRejectsMissingModel(t *testing.T) {
 	provider := NewProvider("test-key", "", "")
-	got := provider.GetDefaultModel()
-	expected := "claude-sonnet-4.6"
-	if got != expected {
-		t.Errorf("GetDefaultModel() = %q, want %q", got, expected)
+	_, err := provider.Chat(context.Background(), nil, nil, "  ", nil)
+	if err == nil || err.Error() != "no model configured" {
+		t.Fatalf("Chat() error = %v, want no model configured", err)
 	}
 }
 

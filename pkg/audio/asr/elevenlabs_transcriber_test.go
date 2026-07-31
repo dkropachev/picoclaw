@@ -114,47 +114,19 @@ func TestElevenLabsTranscribe(t *testing.T) {
 		}
 	})
 
-	t.Run("unsupported model falls back to scribe_v1", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-			if err != nil {
-				t.Fatalf("ParseMediaType() error = %v", err)
-			}
-			if mediaType != "multipart/form-data" {
-				t.Fatalf("content-type = %q, want multipart/form-data", mediaType)
-			}
-			reader := multipart.NewReader(r.Body, params["boundary"])
-			var gotModelID string
-			for {
-				part, err := reader.NextPart()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					t.Fatalf("NextPart() error = %v", err)
-				}
-				if part.FormName() != "model_id" {
-					continue
-				}
-				body, err := io.ReadAll(part)
-				if err != nil {
-					t.Fatalf("ReadAll(part) error = %v", err)
-				}
-				gotModelID = strings.TrimSpace(string(body))
-			}
-			if gotModelID != "scribe_v1" {
-				t.Fatalf("model_id = %q, want runtime fallback to %q", gotModelID, "scribe_v1")
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(TranscriptionResponse{Text: "ok"})
-		}))
-		defer srv.Close()
-
+	t.Run("unsupported model is rejected", func(t *testing.T) {
 		tr := NewElevenLabsTranscriber("sk_test", "", "unsupported-model")
-		tr.apiBase = srv.URL
+		if _, err := tr.Transcribe(context.Background(), audioPath); err == nil ||
+			!strings.Contains(err.Error(), "unsupported ElevenLabs model") {
+			t.Fatalf("Transcribe() error = %v, want unsupported model", err)
+		}
+	})
 
-		if _, err := tr.Transcribe(context.Background(), audioPath); err != nil {
-			t.Fatalf("Transcribe() error: %v", err)
+	t.Run("missing model is rejected", func(t *testing.T) {
+		tr := NewElevenLabsTranscriber("sk_test", "", "")
+		if _, err := tr.Transcribe(context.Background(), audioPath); err == nil ||
+			err.Error() != "no model configured" {
+			t.Fatalf("Transcribe() error = %v, want no model configured", err)
 		}
 	})
 }

@@ -196,7 +196,8 @@ func (r *Router) RecordFallbackResult(selection Selection, result *providers.Fal
 		rs := routerState(st, r.Name, r.ConfigHash, r.knownAccountNames())
 		now := r.now()
 		pruneRouterState(rs, now, r.ConfigHash, r.knownAccountNames())
-		for _, attempt := range resultAttempts(result) {
+		attempts := resultAttempts(result)
+		for _, attempt := range attempts {
 			if attempt.Error == nil {
 				continue
 			}
@@ -230,7 +231,7 @@ func (r *Router) RecordFallbackResult(selection Selection, result *providers.Fal
 					session.UpdatedAt = now
 				}
 			}
-		} else if err != nil {
+		} else if err != nil && len(attempts) == 0 {
 			for _, candidate := range selection.Candidates {
 				account := selection.CandidateAccounts[candidate.StableKey()]
 				if account == "" {

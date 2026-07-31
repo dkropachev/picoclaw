@@ -70,12 +70,12 @@ General settings for fetching and processing webpage content.
 
 Gemini search uses Gemini with Google Search grounding. It returns an AI-synthesized answer with citations from Google Search.
 
-| Config        | Type   | Default              | Description                       |
-|---------------|--------|----------------------|-----------------------------------|
-| `enabled`     | bool   | false                | Enable Gemini Google Search       |
-| `api_key`     | string | -                    | Google Gemini API key             |
-| `model`       | string | `gemini-2.5-flash`   | Gemini model used for search      |
-| `max_results` | int    | 5                    | Maximum number of citations       |
+| Config        | Type   | Default | Description                                      |
+|---------------|--------|---------|--------------------------------------------------|
+| `enabled`     | bool   | false   | Enable Gemini Google Search                      |
+| `api_key`     | string | -       | Google Gemini API key                            |
+| `model_alias` | string | -       | Required model alias when this provider is enabled |
+| `max_results` | int    | 5       | Maximum number of citations                      |
 
 ```json
 {
@@ -84,7 +84,7 @@ Gemini search uses Gemini with Google Search grounding. It returns an AI-synthes
       "gemini": {
         "enabled": true,
         "api_key": "YOUR_GEMINI_API_KEY",
-        "model": "gemini-2.5-flash",
+        "model_alias": "web-search-gemini",
         "max_results": 5
       }
     }
@@ -124,7 +124,26 @@ Baidu Search uses the [Qianfan AI Search API](https://cloud.baidu.com/doc/qianfa
 | `enabled`     | bool     | false   | Enable Perplexity search                       |
 | `api_key`     | string   | -       | Perplexity API key                             |
 | `api_keys`    | string[] | -       | Multiple API keys for rotation (takes priority over `api_key`) |
+| `model_alias` | string   | -       | Required model alias when this provider is enabled |
 | `max_results` | int      | 5       | Maximum number of results                      |
+
+Model-backed search integrations never choose a model implicitly. Their
+`model_alias` must name an entry in `model_aliases`; Gemini aliases must resolve
+to a Gemini model and Perplexity aliases must resolve to a Perplexity model.
+Because these integrations own their API credentials instead of executing
+through a configured model account, they resolve the alias's base mapping.
+Per-account alias overrides apply only to executions that select a concrete
+model account.
+For example:
+
+```json
+{
+  "model_aliases": [
+    {"name": "web-search-gemini", "model": "gemini/gemini-2.5-flash"},
+    {"name": "web-search-perplexity", "model": "perplexity/sonar"}
+  ]
+}
+```
 
 ### Kagi Search
 

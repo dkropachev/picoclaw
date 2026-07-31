@@ -171,7 +171,7 @@ func newThreadScopeAgentLoop(
 	}
 
 	msgBus := bus.NewMessageBus()
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	return al, func() { os.RemoveAll(root) }
 }
 
@@ -201,10 +201,6 @@ func (p *threadToolCaptureProvider) Chat(
 	p.system = system
 	p.mu.Unlock()
 	return &providers.LLMResponse{Content: "done"}, nil
-}
-
-func (p *threadToolCaptureProvider) GetDefaultModel() string {
-	return "test-model"
 }
 
 func (p *threadToolCaptureProvider) lastToolNames() []string {

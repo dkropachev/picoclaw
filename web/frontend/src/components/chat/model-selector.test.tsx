@@ -1,18 +1,14 @@
 import { render, screen } from "@testing-library/react"
-import userEvent from "@testing-library/user-event"
 import { describe, expect, it, vi } from "vitest"
 
 import { ModelSelector } from "@/components/chat/model-selector"
 
 describe("ModelSelector", () => {
-  it("offers an explicit retry control after model discovery fails", async () => {
-    const user = userEvent.setup()
-    const onRetryModelDiscovery = vi.fn()
-
+  it("shows stable aliases without exposing raw upstream model IDs", () => {
     render(
       <ModelSelector
         selectedAccountName="router-1"
-        selectedModelID=""
+        selectedModelAlias="coding"
         accountModels={[]}
         accountRouterModels={[
           {
@@ -28,25 +24,21 @@ describe("ModelSelector", () => {
             is_virtual: true,
           },
         ]}
-        modelOptions={[]}
-        isLoadingModelOptions={false}
-        modelDiscoveryError="network unavailable"
+        aliasOptions={[
+          { name: "coding", model: "gpt-5.4" },
+          { name: "fast", model: "gpt-4.1-mini" },
+        ]}
+        isSavingSelection={false}
         onAccountChange={vi.fn()}
-        onModelChange={vi.fn()}
-        onRetryModelDiscovery={onRetryModelDiscovery}
+        onModelAliasChange={vi.fn()}
       />,
     )
 
-    const retryButton = screen.getByRole("button", {
-      name: "Retry model discovery",
-    })
-    expect(retryButton).toHaveAttribute(
-      "title",
-      "Retry model discovery: network unavailable",
+    expect(screen.getByRole("combobox", { name: "Account" })).toHaveTextContent(
+      "router-1",
     )
-
-    await user.click(retryButton)
-
-    expect(onRetryModelDiscovery).toHaveBeenCalledOnce()
+    const aliasSelect = screen.getByRole("combobox", { name: "Model alias" })
+    expect(aliasSelect).toHaveTextContent("coding")
+    expect(screen.queryByText("gpt-5.4")).not.toBeInTheDocument()
   })
 })

@@ -74,7 +74,7 @@ func TestGitHubCopilotLocalProviderUsesExternalCLIURL(t *testing.T) {
 		return fakeClient
 	}
 
-	provider, err := NewGitHubCopilotProvider("localhost:4321", "grpc", "")
+	provider, err := NewGitHubCopilotProvider("localhost:4321", "grpc", "gpt-4.1")
 	if err != nil {
 		t.Fatalf("NewGitHubCopilotProvider() error = %v", err)
 	}
@@ -98,11 +98,56 @@ func TestGitHubCopilotLocalProviderUsesExternalCLIURL(t *testing.T) {
 	if fakeClient.config == nil {
 		t.Fatal("session config not captured")
 	}
-	if fakeClient.config.Model != githubCopilotDefaultModel {
-		t.Fatalf("Model = %q, want %q", fakeClient.config.Model, githubCopilotDefaultModel)
+	if fakeClient.config.Model != "gpt-4.1" {
+		t.Fatalf("Model = %q, want %q", fakeClient.config.Model, "gpt-4.1")
 	}
 	if fakeClient.config.OnPermissionRequest == nil {
 		t.Fatal("OnPermissionRequest should be configured")
+	}
+}
+
+func TestNewGitHubCopilotProviderRejectsMissingModelBeforeStartingClient(t *testing.T) {
+	origNewClient := newCopilotClient
+	t.Cleanup(func() { newCopilotClient = origNewClient })
+
+	clientCreated := false
+	newCopilotClient = func(opts *copilot.ClientOptions) copilotClient {
+		clientCreated = true
+		return &fakeCopilotClient{}
+	}
+
+	_, err := NewGitHubCopilotProvider("localhost:4321", "grpc", "  ")
+	if err == nil || err.Error() != "no model configured" {
+		t.Fatalf("NewGitHubCopilotProvider() error = %v, want no model configured", err)
+	}
+	if clientCreated {
+		t.Fatal("Copilot client was created for a missing model")
+	}
+}
+
+func TestNewGitHubCopilotProviderWithTokenRejectsMissingModel(t *testing.T) {
+	_, err := NewGitHubCopilotProviderWithToken("gho_test-token", "  ")
+	if err == nil || err.Error() != "no model configured" {
+		t.Fatalf("NewGitHubCopilotProviderWithToken() error = %v, want no model configured", err)
+	}
+}
+
+func TestNewGitHubCopilotProviderRejectsAutoModelBeforeStartingClient(t *testing.T) {
+	origNewClient := newCopilotClient
+	t.Cleanup(func() { newCopilotClient = origNewClient })
+
+	clientCreated := false
+	newCopilotClient = func(opts *copilot.ClientOptions) copilotClient {
+		clientCreated = true
+		return &fakeCopilotClient{}
+	}
+
+	_, err := NewGitHubCopilotProvider("localhost:4321", "grpc", "auto")
+	if err == nil || err.Error() != "github copilot model must be explicitly configured" {
+		t.Fatalf("NewGitHubCopilotProvider() error = %v, want explicit-model error", err)
+	}
+	if clientCreated {
+		t.Fatal("Copilot client was created for auto model")
 	}
 }
 

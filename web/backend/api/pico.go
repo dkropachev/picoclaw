@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httputil"
@@ -212,10 +213,32 @@ func (h *Handler) handleGetPicoInfo(w http.ResponseWriter, r *http.Request) {
 //
 //	POST /api/pico/token
 func (h *Handler) handleRegenPicoToken(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.LoadConfig(h.configPath)
+	h.configMutationMu.Lock()
+	cfg, token, err := h.regeneratePicoTokenLocked()
+	h.configMutationMu.Unlock()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to load config: %v", err), http.StatusInternalServerError)
+		if errors.Is(err, config.ErrConfigRevisionMismatch) {
+			http.Error(w, "Configuration changed; reload and try again", http.StatusConflict)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	gateway.mu.Lock()
+	gateway.picoToken = token
+	gateway.mu.Unlock()
+
+	h.writePicoInfoResponse(w, r, cfg, nil)
+}
+
+// regeneratePicoTokenLocked rotates the Pico token while configMutationMu is
+// held. It intentionally does not touch gateway state; callers must release
+// configMutationMu before acquiring gateway.mu.
+func (h *Handler) regeneratePicoTokenLocked() (*config.Config, string, error) {
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("Failed to load config: %w", err)
 	}
 
 	token := generateSecureToken()
@@ -228,22 +251,25 @@ func (h *Handler) handleRegenPicoToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := config.SaveConfig(h.configPath, cfg); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to save config: %v", err), http.StatusInternalServerError)
-		return
+	if _, err := h.saveConfigIfRevision(h.configPath, cfg, revision); err != nil {
+		return nil, "", fmt.Errorf("Failed to save config: %w", err)
 	}
-
-	gateway.mu.Lock()
-	gateway.picoToken = token
-	gateway.mu.Unlock()
-
-	h.writePicoInfoResponse(w, r, cfg, nil)
+	return cfg, token, nil
 }
 
 // EnsurePicoChannel enables the Pico channel with sane defaults if it isn't
 // already configured. Returns true when the config was modified.
 func (h *Handler) EnsurePicoChannel() (bool, error) {
-	cfg, err := config.LoadConfig(h.configPath)
+	h.configMutationMu.Lock()
+	defer h.configMutationMu.Unlock()
+	return h.ensurePicoChannelLocked()
+}
+
+// ensurePicoChannelLocked updates Pico settings while configMutationMu is
+// held. Keeping this helper non-locking makes the ownership boundary explicit
+// and avoids recursive locking if another mutation path needs to compose it.
+func (h *Handler) ensurePicoChannelLocked() (bool, error) {
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		return false, fmt.Errorf("failed to load config: %w", err)
 	}
@@ -271,7 +297,7 @@ func (h *Handler) EnsurePicoChannel() (bool, error) {
 	}
 
 	if changed {
-		if err := config.SaveConfig(h.configPath, cfg); err != nil {
+		if _, err := h.saveConfigIfRevision(h.configPath, cfg, revision); err != nil {
 			return false, fmt.Errorf("failed to save config: %w", err)
 		}
 	}

@@ -1,5 +1,10 @@
 # Migration
 
-Migration notes for major configuration and behavior changes across PicoClaw versions.
+Migration notes for major configuration and behavior changes across PicoClaw
+versions.
 
-- [Migration Guide: From `providers` to `model_list`](model-list-migration.md): update legacy provider config to the current `model_list` format.
+- [Provider accounts and model aliases](model-list-migration.md): migrate
+  legacy providers and version 3 model references to version 4
+  `account_ref` plus exact `model_aliases[]` selections.
+- [Configuration versioning](../reference/config-versioning.md): backup,
+  migration, and downgrade rules for every schema version.

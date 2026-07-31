@@ -21,7 +21,7 @@ func TestSubscribeEventsFiltersRuntimeBusToLegacyAgentEvents(t *testing.T) {
 			},
 		},
 	}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &simpleMockProvider{response: "ok"})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &simpleMockProvider{response: "ok"})
 	defer al.Close()
 
 	sub := al.SubscribeEvents(4)

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/isolation"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 // CodexCliProvider implements LLMProvider by wrapping the codex CLI as a subprocess.
@@ -30,6 +31,10 @@ func NewCodexCliProvider(workspace string) *CodexCliProvider {
 func (p *CodexCliProvider) Chat(
 	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
 ) (*LLMResponse, error) {
+	model, err := protocoltypes.RequireModel(model)
+	if err != nil {
+		return nil, err
+	}
 	if p.command == "" {
 		return nil, fmt.Errorf("codex command not configured")
 	}
@@ -43,9 +48,7 @@ func (p *CodexCliProvider) Chat(
 		"--skip-git-repo-check",
 		"--color", "never",
 	}
-	if model != "" && model != "codex-cli" {
-		args = append(args, "-m", model)
-	}
+	args = append(args, "-m", model)
 	if p.workspace != "" {
 		args = append(args, "-C", p.workspace)
 	}
@@ -60,7 +63,7 @@ func (p *CodexCliProvider) Chat(
 
 	// Execute the CLI through the shared isolation wrapper so external provider
 	// processes honor the configured isolation policy.
-	err := isolation.Run(cmd)
+	err = isolation.Run(cmd)
 
 	// Parse JSONL from stdout even if exit code is non-zero,
 	// because codex writes diagnostic noise to stderr (e.g. rollout errors)
@@ -83,11 +86,6 @@ func (p *CodexCliProvider) Chat(
 	}
 
 	return p.parseJSONLEvents(stdout.String())
-}
-
-// GetDefaultModel returns the default model identifier.
-func (p *CodexCliProvider) GetDefaultModel() string {
-	return "codex-cli"
 }
 
 // buildPrompt converts messages to a prompt string for the Codex CLI.

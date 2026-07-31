@@ -37,6 +37,7 @@ interface AssistantMessageProps {
   content: string
   attachments?: ChatAttachment[]
   kind?: AssistantMessageKind
+  accountRef?: string
   modelName?: string
   toolCalls?: ChatToolCall[]
   timestamp?: string | number
@@ -46,6 +47,7 @@ export function AssistantMessage({
   content,
   attachments = [],
   kind = "normal",
+  accountRef,
   modelName,
   toolCalls = [],
   timestamp = "",
@@ -72,7 +74,12 @@ export function AssistantMessage({
   const copyMessageLabel = isCopied
     ? t("chat.copiedLabel")
     : t("chat.copyMessage")
+  const trimmedAccountRef = accountRef?.trim() ?? ""
   const trimmedModelName = modelName?.trim() ?? ""
+  const selectionLabel =
+    trimmedAccountRef && trimmedModelName
+      ? `${trimmedAccountRef} / ${trimmedModelName}`
+      : trimmedModelName || trimmedAccountRef
   const threadCardPayload =
     kind === "normal" ? parseThreadCardPayload(content) : null
   const threadToolSearchRequest = useMemo(
@@ -86,10 +93,10 @@ export function AssistantMessage({
         <div className="text-muted-foreground/60 flex items-center justify-between gap-2 px-1 text-xs opacity-70">
           <div className="flex items-center gap-2">
             <span>PicoClaw</span>
-            {trimmedModelName && (
+            {selectionLabel && (
               <>
                 <span className="opacity-50">•</span>
-                <span>{trimmedModelName}</span>
+                <span>{selectionLabel}</span>
               </>
             )}
             {formattedTimestamp && (
@@ -111,10 +118,10 @@ export function AssistantMessage({
         <div className="text-muted-foreground/60 flex items-center justify-between gap-2 px-1 text-xs opacity-70">
           <div className="flex items-center gap-2">
             <span>PicoClaw</span>
-            {trimmedModelName && (
+            {selectionLabel && (
               <>
                 <span className="opacity-50">•</span>
-                <span>{trimmedModelName}</span>
+                <span>{selectionLabel}</span>
               </>
             )}
             {formattedTimestamp && (
@@ -136,10 +143,10 @@ export function AssistantMessage({
         <div className="text-muted-foreground/60 flex items-center justify-between gap-2 px-1 text-xs opacity-70">
           <div className="flex items-center gap-2">
             <span>PicoClaw</span>
-            {trimmedModelName && (
+            {selectionLabel && (
               <>
                 <span className="opacity-50">•</span>
-                <span>{trimmedModelName}</span>
+                <span>{selectionLabel}</span>
               </>
             )}
             {formattedTimestamp && (
@@ -175,9 +182,9 @@ export function AssistantMessage({
                   <IconTool className="size-3.5" />
                 )}
                 <span>{collapsedLabel}</span>
-                {trimmedModelName && (
+                {selectionLabel && (
                   <span className="text-muted-foreground/45">
-                    {trimmedModelName}
+                    {selectionLabel}
                   </span>
                 )}
               </div>

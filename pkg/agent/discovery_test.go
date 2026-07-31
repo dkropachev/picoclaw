@@ -83,7 +83,7 @@ func TestAgentRegistry_ListSpawnableAgentsRespectsPermissions(t *testing.T) {
 	cfg.Tools.Spawn.Enabled = true
 	cfg.Tools.Subagent.Enabled = true
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
 	defer al.Close()
 
 	descriptors := al.GetRegistry().ListSpawnableAgents("parent")
@@ -108,7 +108,7 @@ func TestAgentRegistry_ListSpawnableAgentsRequiresSpawnTool(t *testing.T) {
 	})
 	cfg.Tools.Subagent.Enabled = true
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
 	defer al.Close()
 
 	if descriptors := al.GetRegistry().ListSpawnableAgents("parent"); len(descriptors) != 0 {
@@ -169,7 +169,7 @@ Handle restricted work.
 	cfg.Tools.Spawn.Enabled = true
 	cfg.Tools.Subagent.Enabled = true
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
 	defer al.Close()
 
 	mainAgent, ok := al.GetRegistry().GetAgent("main")
@@ -244,7 +244,7 @@ Investigate deeply.
 	cfg.Tools.Spawn.Enabled = true
 	cfg.Tools.Subagent.Enabled = true
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
 	defer al.Close()
 
 	mainAgent, ok := al.GetRegistry().GetAgent("main")
@@ -314,7 +314,7 @@ Investigate deeply.
 	cfg.Tools.Spawn.Enabled = true
 	cfg.Tools.Subagent.Enabled = true
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
 	defer al.Close()
 
 	mainAgent, ok := al.GetRegistry().GetAgent("main")
@@ -364,7 +364,7 @@ Generalist.
 	cfg.Tools.Spawn.Enabled = true
 	cfg.Tools.Subagent.Enabled = true
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), &mockRegistryProvider{})
 	defer al.Close()
 
 	mainAgent, ok := al.GetRegistry().GetAgent("main")

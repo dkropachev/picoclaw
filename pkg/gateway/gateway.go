@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -132,10 +133,6 @@ func (p *startupBlockedProvider) Chat(
 	return nil, fmt.Errorf("%s", p.reason)
 }
 
-func (p *startupBlockedProvider) GetDefaultModel() string {
-	return ""
-}
-
 // Run starts the gateway runtime using the configuration loaded from configPath.
 func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runErr error) {
 	startedAt := time.Now()
@@ -222,13 +219,9 @@ func Run(debug bool, homePath, configPath string, allowEmptyStartup bool) (runEr
 		}
 	}()
 
-	provider, modelID, err := createStartupProvider(cfg, allowEmptyStartup)
+	provider, _, err := createStartupProvider(cfg, allowEmptyStartup)
 	if err != nil {
 		return fmt.Errorf("error creating provider: %w", err)
-	}
-
-	if modelID != "" {
-		cfg.Agents.Defaults.ModelName = modelID
 	}
 
 	msgBus := bus.NewMessageBus()
@@ -519,11 +512,11 @@ func createStartupProvider(
 	cfg *config.Config,
 	allowEmptyStartup bool,
 ) (providers.LLMProvider, string, error) {
-	modelName := cfg.Agents.Defaults.GetModelName()
+	modelName := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
 	if modelName == "" && allowEmptyStartup {
-		reason := "no default model configured; gateway started in limited mode"
+		reason := config.ErrNoModelConfigured.Error()
 		fmt.Printf("⚠ Warning: %s\n", reason)
-		logger.WarnCF("gateway", "Gateway started without default model", map[string]any{
+		logger.WarnCF("gateway", "Gateway started without a configured model alias", map[string]any{
 			"limited_mode": true,
 		})
 		return &startupBlockedProvider{reason: reason}, "", nil
@@ -986,13 +979,10 @@ func handleConfigReloadWithServiceOps(
 
 	logger.Infof(" New model is '%s', recreating provider...", newModel)
 
-	newProvider, newModelID, err := createStartupProvider(newCfg, allowEmptyStartup)
+	newProvider, _, err := createStartupProvider(newCfg, allowEmptyStartup)
 	if err != nil {
 		logger.Errorf("  ⚠ Error creating new provider: %v", err)
 		return fmt.Errorf("error creating new provider: %w", err)
-	}
-	if newModelID != "" {
-		newCfg.Agents.Defaults.ModelName = newModelID
 	}
 	if err = prepareEventChannelAdmission(runningServices, newCfg); err != nil {
 		if stateful, ok := newProvider.(providers.StatefulProvider); ok {

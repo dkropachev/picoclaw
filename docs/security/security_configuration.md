@@ -33,15 +33,15 @@ The security configuration works through **direct field mapping**, NOT through `
 ### Complete Example: .security.yml
 
 ```yaml
-# Model API Keys
-# All models MUST use `api_keys` (plural) array format
+# Provider account API keys
+# All model_list accounts MUST use `api_keys` (plural) array format
 # Even a single key must be provided as an array with one element
 model_list:
-  gpt-5.4:
+  openai-work:
     api_keys:
       - "sk-proj-your-actual-openai-key-1"
       - "sk-proj-your-actual-openai-key-2"  # Optional: Multiple keys for failover
-  claude-sonnet-4.6:
+  anthropic-work:
     api_keys:
       - "sk-ant-your-actual-anthropic-key"  # Single key in array format
 
@@ -147,10 +147,24 @@ You can now remove sensitive fields from `config.json` since they're loaded from
 **Before:**
 ```json
 {
+  "version": 4,
+  "agents": {
+    "defaults": {
+      "account_ref": "openai-work",
+      "model_name": "chat"
+    }
+  },
+  "model_aliases": [
+    {
+      "name": "chat",
+      "model": "gpt-5.4"
+    }
+  ],
   "model_list": [
     {
-      "model_name": "gpt-5.4",
-      "model": "openai/gpt-5.4",
+      "model_name": "openai-work",
+      "provider": "openai",
+      "model": "",
       "api_base": "https://api.openai.com/v1",
       "api_keys": ["sk-your-actual-api-key-here"]
     }
@@ -168,10 +182,24 @@ You can now remove sensitive fields from `config.json` since they're loaded from
 **After:**
 ```json
 {
+  "version": 4,
+  "agents": {
+    "defaults": {
+      "account_ref": "openai-work",
+      "model_name": "chat"
+    }
+  },
+  "model_aliases": [
+    {
+      "name": "chat",
+      "model": "gpt-5.4"
+    }
+  ],
   "model_list": [
     {
-      "model_name": "gpt-5.4",
-      "model": "openai/gpt-5.4",
+      "model_name": "openai-work",
+      "provider": "openai",
+      "model": "",
       "api_base": "https://api.openai.com/v1"
       // api_key is now loaded from .security.yml
     }
@@ -195,21 +223,22 @@ picoclaw --version
 
 ## Field Mapping Rules
 
-### Models
+### Provider Accounts
 
 **In .security.yml:**
 ```yaml
 model_list:
-  <model_name>:
+  <account_name>:
     api_keys:
       - "key-1"
       - "key-2"
 ```
 
 **Mapping:**
-- Field `api_keys` (array) maps to the model's API keys
-- The `<model_name>` must match the `model_name` field in `config.json`
-- Supports indexed names (e.g., "gpt-5.4:0") - the system will also try the base name ("gpt-5.4")
+- Field `api_keys` (array) maps to the concrete account's API keys.
+- `<account_name>` must match a `model_list[].model_name` account identity in
+  `config.json`; it is unrelated to `model_aliases[].name`.
+- Indexed account rows may also use their base account name for shared keys.
 
 ### Channels
 
@@ -290,22 +319,22 @@ skills:
 
 ## API Key Formats
 
-### Models - Single key
+### Provider Accounts - Single key
 
 Use array format with one element:
 ```yaml
 model_list:
-  gpt-5.4:
+  openai-work:
     api_keys:
       - "sk-your-key"
 ```
 
-### Models - Multiple keys (Load Balancing & Failover)
+### Provider Accounts - Multiple keys (Load Balancing & Failover)
 
 Use array format with multiple elements:
 ```yaml
 model_list:
-  gpt-5.4:
+  openai-work:
     api_keys:
       - "sk-your-key-1"
       - "sk-your-key-2"
@@ -354,23 +383,24 @@ web:
     api_key: "your-baidu-key"  # Single string (NOT array)
 ```
 
-## Model Name Matching
+## Account Name Matching
 
-The system supports intelligent model name matching in `.security.yml`:
+Security lookup matches `model_list` account identities; it never resolves
+model aliases:
 
 ### Example 1: Exact Match
 
 **config.json:**
 ```json
 {
-  "model_name": "gpt-5.4:0"
+  "model_name": "openai-work:0"
 }
 ```
 
 **.security.yml (exact match with index):**
 ```yaml
 model_list:
-  gpt-5.4:0:
+  openai-work:0:
     api_keys: ["key-1"]
 ```
 
@@ -379,18 +409,19 @@ model_list:
 **config.json:**
 ```json
 {
-  "model_name": "gpt-5.4:0"
+  "model_name": "openai-work:0"
 }
 ```
 
 **.security.yml (base name without index):**
 ```yaml
 model_list:
-  gpt-5.4:
+  openai-work:
     api_keys: ["key-1", "key-2"]
 ```
 
-Both methods work. The base name match allows you to use simpler keys in `.security.yml` even when your config uses indexed model names for load balancing.
+Both methods work. The base-name match allows simpler security keys for indexed
+account rows used in load balancing.
 
 ## Backward Compatibility
 
@@ -405,7 +436,7 @@ The system maintains full backward compatibility:
 
 You can override any security value using environment variables:
 
-**For models:**
+**For provider accounts:**
 ```bash
 export PICOCLAW_CHANNELS_TELEGRAM_TOKEN="token-from-env"
 ```
@@ -476,22 +507,34 @@ Returns the path to `.security.yml` relative to the config file.
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "agents": {
     "defaults": {
       "workspace": "~/picoclaw-workspace",
-      "model_name": "gpt-5.4"
+      "account_ref": "openai-work",
+      "model_name": "chat"
     }
   },
+  "model_aliases": [
+    {
+      "name": "chat",
+      "model": "gpt-5.4",
+      "account_overrides": {
+        "anthropic-work": "claude-sonnet-4.6"
+      }
+    }
+  ],
   "model_list": [
     {
-      "model_name": "gpt-5.4",
-      "model": "openai/gpt-5.4",
+      "model_name": "openai-work",
+      "provider": "openai",
+      "model": "",
       "api_base": "https://api.openai.com/v1"
     },
     {
-      "model_name": "claude-sonnet-4.6",
-      "model": "anthropic/claude-sonnet-4.6",
+      "model_name": "anthropic-work",
+      "provider": "anthropic",
+      "model": "",
       "api_base": "https://api.anthropic.com/v1"
     }
   ],
@@ -515,11 +558,11 @@ Returns the path to `.security.yml` relative to the config file.
 
 ```yaml
 model_list:
-  gpt-5.4:
+  openai-work:
     api_keys:
       - "sk-proj-actual-openai-key-1"
       - "sk-proj-actual-openai-key-2"
-  claude-sonnet-4.6:
+  anthropic-work:
     api_keys:
       - "sk-ant-actual-anthropic-key"
 
@@ -557,18 +600,22 @@ go test ./pkg/config -run TestSecurityConfig
 - Check the YAML syntax is valid (use a YAML validator)
 - Ensure file permissions allow reading
 
-### Error: "model security entry not found"
+### Error: "account security entry not found"
 
-- Ensure the model name in `config.json` matches exactly in `.security.yml`
+- Ensure the `model_list[].model_name` account identity in `config.json`
+  matches exactly in `.security.yml`.
 - Check that the `model_list` section exists in `.security.yml`
-- For models with indexed names (e.g., "gpt-5.4:0"), ensure the exact name is used or check the base name without index
+- For indexed account names, ensure the exact name is used or check the base
+  name without the index.
 - Verify the YAML structure is correct (proper indentation)
 
 ### Multiple API Keys Not Working
 
-- Ensure you're using `api_keys` (plural) in `.security.yml` for models and web tools (except GLMSearch/BaiduSearch)
+- Ensure you're using `api_keys` (plural) in `.security.yml` for provider
+  accounts and web tools (except GLMSearch/BaiduSearch).
 - Check that the array format is correct in YAML (proper indentation with dashes)
-- Remember: Models, Brave, Tavily, Perplexity, Kagi MUST use `api_keys` (array format)
+- Remember: provider accounts, Brave, Tavily, Perplexity, and Kagi use
+  `api_keys` array format.
 - GLMSearch and BaiduSearch MUST use `api_key` (single string format)
 
 ### Load Balancing/Failover Issues
@@ -584,7 +631,7 @@ go test ./pkg/config -run TestSecurityConfig
 - Verify the file permissions allow reading (`chmod 600 ~/.picoclaw/.security.yml`)
 - Ensure the YAML structure matches the expected format
 - Check for typos in field names (case-sensitive)
-- Verify the model/channel names match exactly (case-sensitive)
+- Verify account/channel names match exactly (case-sensitive).
 
 ## Migration Guide
 
@@ -628,7 +675,7 @@ picoclaw --version
 
 ### Step 7: Verify functionality
 
-Test your models and channels to ensure everything works correctly.
+Test your configured account-and-alias pairs and channels.
 
 ### Step 8: Clean up (optional)
 
@@ -660,7 +707,7 @@ SaveConfig(path, config)
 Encrypted keys are stored as:
 ```yaml
 model_list:
-  gpt-5.4:
+  openai-work:
     api_keys:
       - "enc://encrypted-base64-string"
 ```

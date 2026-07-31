@@ -61,17 +61,13 @@ interface ChatPageProps {
 }
 
 function resolveChatInputDisabledReason({
-  hasDefaultModel,
+  hasDefaultSelection,
   hasSelectedModel,
-  isLoadingModelOptions,
-  hasModelDiscoveryError,
   connectionState,
   gatewayState,
 }: {
-  hasDefaultModel: boolean
+  hasDefaultSelection: boolean
   hasSelectedModel: boolean
-  isLoadingModelOptions: boolean
-  hasModelDiscoveryError: boolean
   connectionState: ConnectionState
   gatewayState: GatewayState
 }): ChatInputDisabledReason | null {
@@ -111,14 +107,8 @@ function resolveChatInputDisabledReason({
     return "websocketDisconnected"
   }
 
-  if (!hasDefaultModel) {
-    return "noDefaultModel"
-  }
-  if (isLoadingModelOptions) {
-    return "modelDiscoveryLoading"
-  }
-  if (hasModelDiscoveryError) {
-    return "modelDiscoveryFailed"
+  if (!hasDefaultSelection) {
+    return "noDefaultSelection"
   }
   if (!hasSelectedModel) {
     return "noAvailableModel"
@@ -238,25 +228,22 @@ export function ChatPage({
   const isGatewayRunning = gwState === "running"
 
   const {
+    defaultAccountRef,
     defaultModelName,
     selectedAccountName,
-    selectedModelID,
+    selectedModelAlias,
     hasAvailableModels,
     accountModels,
     accountRouterModels,
-    modelOptions,
-    isLoadingModelOptions,
-    modelDiscoveryError,
+    aliasOptions,
+    isSavingSelection,
     handleSetAccount,
-    handleSetModel,
-    retryModelDiscovery,
+    handleSetModelAlias,
   } = useChatModels({ isConnected: isGatewayRunning })
-  const hasDefaultModel = Boolean(defaultModelName || selectedAccountName)
+  const hasDefaultSelection = Boolean(defaultAccountRef && defaultModelName)
   const inputDisabledReason = resolveChatInputDisabledReason({
-    hasDefaultModel,
-    hasSelectedModel: Boolean(selectedModelID),
-    isLoadingModelOptions,
-    hasModelDiscoveryError: Boolean(modelDiscoveryError && !selectedModelID),
+    hasDefaultSelection,
+    hasSelectedModel: Boolean(selectedAccountName && selectedModelAlias),
     connectionState,
     gatewayState: gwState,
   })
@@ -300,8 +287,8 @@ export function ChatPage({
       sendMessage({
         content: input,
         attachments,
-        modelName: selectedAccountName,
-        model: selectedModelID,
+        accountRef: selectedAccountName,
+        modelName: selectedModelAlias,
       })
     ) {
       setInput("")
@@ -420,7 +407,7 @@ export function ChatPage({
   const showThreadEmptyState =
     Boolean(activeThread) &&
     hasAvailableModels &&
-    Boolean(defaultModelName) &&
+    hasDefaultSelection &&
     isGatewayRunning
   const hasAccountChoices =
     accountModels.length > 0 || accountRouterModels.length > 0
@@ -442,15 +429,13 @@ export function ChatPage({
             {hasAccountChoices && (
               <ModelSelector
                 selectedAccountName={selectedAccountName}
-                selectedModelID={selectedModelID}
+                selectedModelAlias={selectedModelAlias}
                 accountModels={accountModels}
                 accountRouterModels={accountRouterModels}
-                modelOptions={modelOptions}
-                isLoadingModelOptions={isLoadingModelOptions}
-                modelDiscoveryError={modelDiscoveryError}
+                aliasOptions={aliasOptions}
+                isSavingSelection={isSavingSelection}
                 onAccountChange={handleSetAccount}
-                onModelChange={handleSetModel}
-                onRetryModelDiscovery={retryModelDiscovery}
+                onModelAliasChange={handleSetModelAlias}
               />
             )}
           </>
@@ -529,7 +514,7 @@ export function ChatPage({
               ) : (
                 <ChatEmptyState
                   hasAvailableModels={hasAvailableModels}
-                  defaultModelName={defaultModelName || selectedAccountName}
+                  defaultModelName={defaultModelName}
                   isConnected={isGatewayRunning}
                 />
               )}
@@ -550,6 +535,7 @@ export function ChatPage({
                     content={msg.content}
                     attachments={msg.attachments}
                     kind={msg.kind}
+                    accountRef={msg.accountRef}
                     modelName={msg.modelName}
                     toolCalls={msg.toolCalls}
                     timestamp={msg.timestamp}
@@ -595,8 +581,8 @@ export function ChatPage({
             sendMessage({
               content: "/context",
               attachments: [],
-              modelName: selectedAccountName,
-              model: selectedModelID,
+              accountRef: selectedAccountName,
+              modelName: selectedModelAlias,
             })
           ) {
             setInput("")

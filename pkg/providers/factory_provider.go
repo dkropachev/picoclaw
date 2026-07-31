@@ -17,6 +17,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers/azure"
 	"github.com/sipeed/picoclaw/pkg/providers/bedrock"
 	"github.com/sipeed/picoclaw/pkg/providers/common"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 // createClaudeAuthProvider creates a Claude provider using OAuth credentials from auth store.
@@ -196,15 +197,16 @@ func ResolveAPIBase(cfg *config.ModelConfig) string {
 // It uses ExtractProtocol to determine which provider to create.
 // Supported protocol families include OpenAI-compatible prefixes (e.g., openai, openrouter, groq),
 // Azure OpenAI, Amazon Bedrock, Anthropic (including messages), and various CLI/compatibility shims.
-// See the switch on protocol in this function for the authoritative list.
+// Generic OpenAI-compatible families are classified by protocoltypes; the
+// switch below handles providers with specialized construction.
 // Returns the provider, the effective model ID from ExtractProtocol, and any error.
 func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, error) {
 	if cfg == nil {
 		return nil, "", fmt.Errorf("config is nil")
 	}
 
-	if cfg.Model == "" {
-		return nil, "", fmt.Errorf("model is required")
+	if _, err := protocoltypes.RequireModel(cfg.Model); err != nil {
+		return nil, "", err
 	}
 
 	protocol, modelID := ExtractProtocol(cfg)
@@ -213,6 +215,34 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 	userAgent := cfg.UserAgent
 	if userAgent == "" {
 		userAgent = fmt.Sprintf("PicoClaw/%s", config.Version)
+	}
+
+	if protocol != "openai" &&
+		protocol != "minimax" &&
+		protocoltypes.UsesOpenAICompatibleHTTPTransport(protocol) {
+		apiKey, err := apiKeyFromConfigOrCredential(cfg, protocol)
+		if err != nil {
+			return nil, "", err
+		}
+		if apiKey == "" && cfg.APIBase == "" && !isEmptyAPIKeyAllowed(protocol) {
+			return nil, "", fmt.Errorf("api_key or api_base is required for HTTP-based protocol %q", protocol)
+		}
+		apiBase := cfg.APIBase
+		if apiBase == "" {
+			apiBase = getDefaultAPIBase(protocol)
+		}
+		provider := NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(
+			apiKey,
+			apiBase,
+			cfg.Proxy,
+			cfg.MaxTokensField,
+			userAgent,
+			cfg.RequestTimeout,
+			cfg.ExtraBody,
+			cfg.CustomHeaders,
+		)
+		provider.SetProviderName(protocol)
+		return finalizeProviderFromConfig(provider, modelID, cfg)
 	}
 
 	switch protocol {
@@ -310,35 +340,6 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		if err != nil {
 			return nil, "", fmt.Errorf("creating bedrock provider: %w", err)
 		}
-		return finalizeProviderFromConfig(provider, modelID, cfg)
-
-	case "litellm", "lmstudio", "gpt4free", "openrouter", "groq", "zhipu", "nvidia", "venice",
-		"nearai", "ollama", "moonshot", "shengsuanyun", "siliconflow", "deepseek", "cerebras",
-		"vivgrid", "volcengine", "vllm", "qwen-portal", "qwen-intl", "qwen-us", "mistral",
-		"avian", "longcat", "modelscope", "novita", "alibaba-coding", "zai", "mimo":
-		// All other OpenAI-compatible HTTP providers
-		apiKey, err := apiKeyFromConfigOrCredential(cfg, protocol)
-		if err != nil {
-			return nil, "", err
-		}
-		if apiKey == "" && cfg.APIBase == "" && !isEmptyAPIKeyAllowed(protocol) {
-			return nil, "", fmt.Errorf("api_key or api_base is required for HTTP-based protocol %q", protocol)
-		}
-		apiBase := cfg.APIBase
-		if apiBase == "" {
-			apiBase = getDefaultAPIBase(protocol)
-		}
-		provider := NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(
-			apiKey,
-			apiBase,
-			cfg.Proxy,
-			cfg.MaxTokensField,
-			userAgent,
-			cfg.RequestTimeout,
-			cfg.ExtraBody,
-			cfg.CustomHeaders,
-		)
-		provider.SetProviderName(protocol)
 		return finalizeProviderFromConfig(provider, modelID, cfg)
 
 	case "gemini":

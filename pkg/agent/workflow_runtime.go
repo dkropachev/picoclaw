@@ -331,10 +331,11 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	}
 	if strategy := workflowManagedSplitStrategy(req, agent); strategy != "" {
 		if managedErr := r.ensureWorkflowManagedProviders(agent, req.Managed); managedErr != nil {
-			logger.WarnCF("workflow", "Failed to initialize managed model provider", map[string]any{
-				"agent_id": agentID,
-				"error":    managedErr.Error(),
-			})
+			return nil, fmt.Errorf(
+				"initialize managed model aliases for workflow agent %q: %w",
+				agentID,
+				managedErr,
+			)
 		}
 		return r.runManagedSplit(
 			req,

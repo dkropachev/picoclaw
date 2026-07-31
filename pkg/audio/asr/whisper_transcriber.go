@@ -33,8 +33,9 @@ func NewWhisperTranscriber(modelCfg *config.ModelConfig) *WhisperTranscriber {
 	}
 
 	protocol, modelID := providers.ExtractProtocol(modelCfg)
-	if modelID == "" {
-		modelID = strings.TrimSpace(modelCfg.Model)
+	modelID, err := providers.ResolveModelForProvider(protocol, modelID)
+	if err != nil {
+		return nil
 	}
 
 	tr := newWhisperTranscriber(

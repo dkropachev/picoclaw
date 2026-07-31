@@ -33,7 +33,7 @@ func newAddCommand() *cobra.Command {
 				return err
 			}
 
-			cfg, err := loadConfig()
+			cfg, revision, err := loadConfigForUpdate()
 			if err != nil {
 				return err
 			}
@@ -61,7 +61,7 @@ func newAddCommand() *cobra.Command {
 			cfg.Tools.MCP.Enabled = true
 			cfg.Tools.MCP.Servers[name] = server
 
-			if err := saveValidatedConfig(cfg); err != nil {
+			if err := saveValidatedConfig(cfg, revision); err != nil {
 				return err
 			}
 

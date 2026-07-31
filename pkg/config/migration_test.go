@@ -41,10 +41,10 @@ func TestBuildModelWithProtocol_DifferentPrefix(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// V0/V1/V2 → V3 migration tests
+// V0/V1/V2/V3 → current migration tests
 // ---------------------------------------------------------------------------
 
-// TestLoadConfig_V0MigrateProducesV2 verifies that V0→V3 migration produces
+// TestLoadConfig_V0MigrateProducesV2 verifies that V0→current migration produces
 // correct Enabled fields and version.
 func TestLoadConfig_V0MigrateProducesV2(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -134,7 +134,7 @@ func searchString(s, substr string) bool {
 	return false
 }
 
-// TestMigrateV0ToV3 verifies V0 (legacy, no version) → V3 migration.
+// TestMigrateV0ToV3 verifies V0 (legacy, no version) → current migration.
 // V0 configs use the old providers format without model_list.
 func TestMigrateV0ToV3(t *testing.T) {
 	// V0 config: no version field, uses legacy providers
@@ -172,6 +172,8 @@ func TestMigrateV0ToV3(t *testing.T) {
 	err = migrateV1ToV2(m)
 	require.NoError(t, err)
 	err = migrateV2ToV3(m)
+	require.NoError(t, err)
+	err = migrateV3ToV4(m)
 	require.NoError(t, err)
 
 	// Version should be set to CurrentVersion
@@ -231,6 +233,8 @@ func TestMigrateV0ToV3_WithExistingModelList(t *testing.T) {
 	require.NoError(t, err)
 	err = migrateV2ToV3(m)
 	require.NoError(t, err)
+	err = migrateV3ToV4(m)
+	require.NoError(t, err)
 
 	// Existing model_list should be preserved (not overridden by providers)
 	modelList := m["model_list"].([]any)
@@ -272,6 +276,8 @@ func TestMigrateV1ToV3(t *testing.T) {
 	err = migrateV1ToV2(m)
 	require.NoError(t, err)
 	err = migrateV2ToV3(m)
+	require.NoError(t, err)
+	err = migrateV3ToV4(m)
 	require.NoError(t, err)
 
 	// Version should be set to CurrentVersion
@@ -335,6 +341,8 @@ func TestMigrateV1ToV3_ApiKeyConversion(t *testing.T) {
 	require.NoError(t, err)
 	err = migrateV2ToV3(m)
 	require.NoError(t, err)
+	err = migrateV3ToV4(m)
+	require.NoError(t, err)
 
 	// api_key should be converted to api_keys array
 	modelList := m["model_list"].([]any)
@@ -384,6 +392,8 @@ func TestMigrateV1ToV3_AlreadyNestedFormat(t *testing.T) {
 	err = migrateV1ToV2(m)
 	require.NoError(t, err)
 	err = migrateV2ToV3(m)
+	require.NoError(t, err)
+	err = migrateV3ToV4(m)
 	require.NoError(t, err)
 
 	channelList := m["channel_list"].(map[string]any)

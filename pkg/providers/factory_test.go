@@ -7,13 +7,28 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 )
 
+func configureProviderTestSelection(
+	cfg *config.Config,
+	accountRef string,
+	alias string,
+	model string,
+) {
+	cfg.Agents.Defaults.AccountRef = accountRef
+	cfg.Agents.Defaults.ModelName = alias
+	cfg.ModelAliases = append(cfg.ModelAliases, config.ModelAliasConfig{
+		Name:  alias,
+		Model: model,
+	})
+}
+
 func TestCreateProviderReturnsHTTPProviderForOpenRouter(t *testing.T) {
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = "test-openrouter"
+	configureProviderTestSelection(cfg, "test-openrouter", "coding", "openai/gpt-4o")
 	modelCfg := &config.ModelConfig{
 		ModelName: "test-openrouter",
-		Model:     "openrouter/auto",
+		Model:     "openai/gpt-4o",
 		APIBase:   "https://openrouter.ai/api/v1",
+		Enabled:   true,
 	}
 	modelCfg.SetAPIKey("sk-or-test")
 	cfg.ModelList = []*config.ModelConfig{modelCfg}
@@ -30,12 +45,13 @@ func TestCreateProviderReturnsHTTPProviderForOpenRouter(t *testing.T) {
 
 func TestCreateProviderReturnsCodexCliProviderForCodexCode(t *testing.T) {
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = "test-codex"
+	configureProviderTestSelection(cfg, "test-codex", "coding", "codex-model")
 	cfg.ModelList = []*config.ModelConfig{
 		{
 			ModelName: "test-codex",
 			Model:     "codex-cli/codex-model",
 			Workspace: "/tmp/workspace",
+			Enabled:   true,
 		},
 	}
 
@@ -51,12 +67,13 @@ func TestCreateProviderReturnsCodexCliProviderForCodexCode(t *testing.T) {
 
 func TestCreateProviderReturnsClaudeCliProviderForClaudeCli(t *testing.T) {
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = "test-claude-cli"
+	configureProviderTestSelection(cfg, "test-claude-cli", "coding", "claude-sonnet")
 	cfg.ModelList = []*config.ModelConfig{
 		{
 			ModelName: "test-claude-cli",
 			Model:     "claude-cli/claude-sonnet",
 			Workspace: "/tmp/workspace",
+			Enabled:   true,
 		},
 	}
 
@@ -85,12 +102,13 @@ func TestCreateProviderReturnsClaudeProviderForAnthropicOAuth(t *testing.T) {
 	}
 
 	cfg := config.DefaultConfig()
-	cfg.Agents.Defaults.ModelName = "test-claude-oauth"
+	configureProviderTestSelection(cfg, "test-claude-oauth", "coding", "claude-sonnet-4.6")
 	cfg.ModelList = []*config.ModelConfig{
 		{
 			ModelName:  "test-claude-oauth",
 			Model:      "anthropic/claude-sonnet-4.6",
 			AuthMethod: "oauth",
+			Enabled:    true,
 		},
 	}
 

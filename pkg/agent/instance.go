@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -26,6 +27,7 @@ import (
 type AgentInstance struct {
 	ID                        string
 	Name                      string
+	AccountRef                string
 	Model                     string
 	Fallbacks                 []string
 	Workspace                 string
@@ -65,7 +67,10 @@ type AgentInstance struct {
 	// and model.
 	CandidateProviders map[string]providers.LLMProvider
 	AccountRouter      *accountrouter.Router
+	ImageAccountRouter *accountrouter.Router
+	LightAccountRouter *accountrouter.Router
 	ModelRouter        *modelrouter.Router
+	ConfigurationError error
 
 	managedCalibrationCache map[string]workflowManagedCalibrationCacheEntry
 }
@@ -162,6 +167,41 @@ func registerCandidateProvider(
 	return inserted
 }
 
+func bindBootstrapProvider(
+	out map[string]providers.LLMProvider,
+	candidate providers.FallbackCandidate,
+	bootstrap providers.LLMProvider,
+) {
+	if out == nil || bootstrap == nil {
+		return
+	}
+	var replaced []providers.LLMProvider
+	agentCandidateProvidersMu.Lock()
+	for _, key := range candidateProviderKeys(candidate) {
+		if key == "" {
+			continue
+		}
+		if existing := out[key]; existing != nil && existing != bootstrap {
+			replaced = append(replaced, existing)
+		}
+		out[key] = bootstrap
+	}
+	remaining := make(map[providers.LLMProvider]bool, len(out))
+	for _, existing := range out {
+		remaining[existing] = true
+	}
+	agentCandidateProvidersMu.Unlock()
+
+	closed := make(map[providers.LLMProvider]bool, len(replaced))
+	for _, existing := range replaced {
+		if existing == nil || remaining[existing] || closed[existing] {
+			continue
+		}
+		closed[existing] = true
+		closeProviderIfStateful(existing)
+	}
+}
+
 // NewAgentInstance creates an agent instance from config.
 func NewAgentInstance(
 	agentCfg *config.AgentConfig,
@@ -180,9 +220,20 @@ func NewAgentInstance(
 
 	definition := loadAgentDefinition(workspace)
 
+	accountRef := resolveAgentAccountRef(agentCfg, defaults)
 	model := resolveAgentModel(agentCfg, defaults, definition)
 	fallbacks := resolveAgentFallbacks(agentCfg, defaults)
-	toolProvider, toolModel := resolveToolAdaptationProfileForAgent(cfg, defaults.Provider, model)
+	modelRouter := buildModelRouter(cfg, model)
+	toolModelAlias := model
+	if modelRouter != nil {
+		toolModelAlias = firstModelRouterAlias(modelRouter)
+	}
+	toolProvider, toolModel := resolveToolAdaptationProfileForAlias(
+		cfg,
+		accountRef,
+		toolModelAlias,
+		workspace,
+	)
 	toolAdaptation := tools.ResolveToolAdaptation(cfg.Tools.Adaptation, toolProvider, toolModel)
 	mayUseCodexCompatibleTools := toolAdaptationMayUseCodexCompatibleTools(
 		cfg.Tools.Adaptation,
@@ -295,7 +346,6 @@ func NewAgentInstance(
 		subagents = agentCfg.Subagents
 		skillsFilter = resolveAgentSkillsFilter(agentCfg, definition)
 	}
-	provider = resolvePrimaryProviderForAgent(cfg, workspace, agentID, model, provider)
 	warnOnUnknownAgentMCPServerDeclarations(agentID, workspace, cfg, definition)
 
 	maxIter := defaults.MaxToolIterations
@@ -325,7 +375,12 @@ func NewAgentInstance(
 	}
 
 	var thinkingLevelStr string
-	if mc, err := cfg.GetModelConfig(model); err == nil {
+	if mc, err := concreteAccountModelConfig(
+		cfg,
+		firstConcreteAccountRef(cfg, accountRef),
+		model,
+		workspace,
+	); err == nil {
 		thinkingLevelStr = mc.ThinkingLevel
 	}
 	thinkingLevel := parseThinkingLevel(thinkingLevelStr)
@@ -341,26 +396,105 @@ func NewAgentInstance(
 		summarizeTokenPercent = 75
 	}
 
-	// Resolve fallback candidates
-	candidates := resolveModelCandidates(cfg, defaults.Provider, model, fallbacks)
-	imageCandidates := resolveModelCandidates(
-		cfg,
-		defaults.Provider,
-		defaults.ImageModel,
-		defaults.ImageModelFallbacks,
-	)
-
 	candidateProviders := make(map[string]providers.LLMProvider)
-	populateCandidateProvidersFromNames(cfg, workspace, fallbacks, candidateProviders)
-	accountRouter := buildAccountRouter(cfg, defaults.Provider, model, workspace, candidateProviders)
-	modelRouter := buildModelRouter(cfg, defaults.Provider, model)
-	if accountRouter != nil {
-		initialSelection := accountRouter.Select("", accountrouter.SelectReasonInitial)
-		candidates = initialSelection.Candidates
+	var configurationErr error
+	if strings.TrimSpace(model) == "" {
+		configurationErr = config.ErrNoModelConfigured
+	} else if strings.TrimSpace(accountRef) == "" {
+		configurationErr = fmt.Errorf("no account configured")
+	} else if modelRouter != nil {
+		configurationErr = validateModelRouterAliases(cfg, modelRouter)
+	} else {
+		configurationErr = validateModelAliasReferences(cfg, model, fallbacks)
 	}
+
+	var accountRouter *accountrouter.Router
+	var candidates []providers.FallbackCandidate
+	if configurationErr == nil && modelRouter == nil {
+		accountRouter = buildAccountRouterWithAliases(
+			cfg,
+			accountRef,
+			model,
+			fallbacks,
+			workspace,
+			candidateProviders,
+		)
+		if accountRouter != nil {
+			initialSelection := accountRouter.Select("", accountrouter.SelectReasonInitial)
+			candidates = initialSelection.Candidates
+			if len(candidates) == 0 {
+				configurationErr = fmt.Errorf(
+					"account router %q has no runnable model alias %q",
+					accountRef,
+					model,
+				)
+			}
+		} else {
+			var err error
+			candidates, err = candidatesForAccountAliases(
+				cfg,
+				accountRef,
+				model,
+				fallbacks,
+				workspace,
+				candidateProviders,
+			)
+			if err != nil {
+				configurationErr = err
+			}
+		}
+	}
+	if len(candidates) > 0 &&
+		bootstrapProviderMatchesDefaultSelection(
+			cfg,
+			defaults,
+			accountRef,
+			model,
+			candidates[0],
+		) {
+		bindBootstrapProvider(candidateProviders, candidates[0], provider)
+	}
+
+	var imageCandidates []providers.FallbackCandidate
+	var imageAccountRouter *accountrouter.Router
 	if strings.TrimSpace(defaults.ImageModel) != "" {
-		imageNames := append([]string{defaults.ImageModel}, defaults.ImageModelFallbacks...)
-		populateCandidateProvidersFromNames(cfg, workspace, imageNames, candidateProviders)
+		imageAccountRouter = buildAccountRouterWithAliases(
+			cfg,
+			accountRef,
+			defaults.ImageModel,
+			defaults.ImageModelFallbacks,
+			workspace,
+			candidateProviders,
+		)
+		var imageErr error
+		if imageAccountRouter != nil {
+			imageCandidates = imageAccountRouter.Select(
+				"",
+				accountrouter.SelectReasonInitial,
+			).Candidates
+		} else {
+			imageCandidates, imageErr = candidatesForAccountAliases(
+				cfg,
+				accountRef,
+				defaults.ImageModel,
+				defaults.ImageModelFallbacks,
+				workspace,
+				candidateProviders,
+			)
+		}
+		if imageErr != nil && configurationErr == nil {
+			configurationErr = fmt.Errorf("image model alias: %w", imageErr)
+		} else if len(imageCandidates) == 0 && configurationErr == nil {
+			configurationErr = fmt.Errorf(
+				"image model alias %q has no runnable provider",
+				defaults.ImageModel,
+			)
+		}
+	}
+	if len(candidates) > 0 {
+		if selectedProvider := providerFromCandidateMap(candidateProviders, candidates[0]); selectedProvider != nil {
+			provider = selectedProvider
+		}
 	}
 
 	// Model routing setup: pre-resolve light model candidates at creation time
@@ -368,44 +502,57 @@ func NewAgentInstance(
 	var router *routing.Router
 	var lightCandidates []providers.FallbackCandidate
 	var lightProvider providers.LLMProvider
-	if rc := defaults.Routing; rc != nil && rc.Enabled && rc.LightModel != "" {
-		resolved := resolveModelCandidates(cfg, defaults.Provider, rc.LightModel, nil)
-		if len(resolved) > 0 {
-			lightModelCfg, err := resolvedModelConfig(cfg, rc.LightModel, workspace)
-			if err != nil {
-				logger.WarnCF(
-					"agent",
-					"Routing light model config invalid; routing disabled",
-					map[string]any{
-						"light_model": rc.LightModel,
-						"agent_id":    agentID,
-						"error":       err.Error(),
-					},
-				)
-			} else {
-				lp, _, err := providers.CreateProviderFromConfig(lightModelCfg)
-				if err != nil {
-					logger.WarnCF("agent", "Routing light model provider init failed; routing disabled",
-						map[string]any{"light_model": rc.LightModel, "agent_id": agentID, "error": err.Error()})
-				} else {
-					router = routing.New(routing.RouterConfig{
-						LightModel: rc.LightModel,
-						Threshold:  rc.Threshold,
-					})
-					lightCandidates = resolved
-					lightProvider = lp
-					populateCandidateProvidersFromNames(cfg, workspace, []string{rc.LightModel}, candidateProviders)
-				}
+	var lightAccountRouter *accountrouter.Router
+	routingConfig := defaults.Routing
+	if routingConfig != nil && routingConfig.Enabled && routingConfig.LightModel != "" {
+		if err := validateModelAliasReferences(cfg, routingConfig.LightModel, nil); err != nil {
+			if configurationErr == nil {
+				configurationErr = fmt.Errorf("light model alias: %w", err)
 			}
+			routingConfig = nil
+		}
+	}
+	if rc := routingConfig; rc != nil && rc.Enabled && rc.LightModel != "" {
+		lightAccountRouter = buildAccountRouterWithAliases(
+			cfg,
+			accountRef,
+			rc.LightModel,
+			nil,
+			workspace,
+			candidateProviders,
+		)
+		if lightAccountRouter != nil {
+			selection := lightAccountRouter.Select("", accountrouter.SelectReasonInitial)
+			lightCandidates = selection.Candidates
 		} else {
+			lightCandidates, _ = candidatesForAccountAliases(
+				cfg,
+				accountRef,
+				rc.LightModel,
+				nil,
+				workspace,
+				candidateProviders,
+			)
+		}
+		if len(lightCandidates) == 0 {
 			logger.WarnCF("agent", "Routing light model not found; routing disabled",
 				map[string]any{"light_model": rc.LightModel, "agent_id": agentID})
+		} else {
+			router = routing.New(routing.RouterConfig{
+				LightModel: rc.LightModel,
+				Threshold:  rc.Threshold,
+			})
+			lightProvider = providerFromCandidateMap(
+				candidateProviders,
+				lightCandidates[0],
+			)
 		}
 	}
 
 	return &AgentInstance{
 		ID:                        agentID,
 		Name:                      agentName,
+		AccountRef:                accountRef,
 		Model:                     model,
 		Fallbacks:                 fallbacks,
 		ToolAdaptation:            toolAdaptation,
@@ -433,137 +580,144 @@ func NewAgentInstance(
 		LightProvider:             lightProvider,
 		CandidateProviders:        candidateProviders,
 		AccountRouter:             accountRouter,
+		ImageAccountRouter:        imageAccountRouter,
+		LightAccountRouter:        lightAccountRouter,
 		ModelRouter:               modelRouter,
+		ConfigurationError:        configurationErr,
 		managedCalibrationCache:   make(map[string]workflowManagedCalibrationCacheEntry),
 	}
 }
 
-func buildModelRouter(cfg *config.Config, defaultProvider string, model string) *modelrouter.Router {
-	modelCfg := lookupModelConfigByRef(cfg, model, defaultProvider)
-	if modelCfg == nil || !modelCfg.IsModelRouter() || modelCfg.ModelRouter == nil {
-		return nil
-	}
-	return modelrouter.New(modelCfg.ModelName, modelCfg.ModelRouter)
-}
-
-func buildAccountRouter(
+func bootstrapProviderMatchesDefaultSelection(
 	cfg *config.Config,
-	defaultProvider string,
-	model string,
-	workspace string,
-	providersOut map[string]providers.LLMProvider,
-) *accountrouter.Router {
-	return buildAccountRouterWithModel(
+	defaults *config.AgentDefaults,
+	accountRef string,
+	modelSelector string,
+	candidate providers.FallbackCandidate,
+) bool {
+	if defaults == nil ||
+		strings.TrimSpace(accountRef) != strings.TrimSpace(defaults.AccountRef) {
+		return false
+	}
+	// Router bootstrap selects a representative terminal before the runtime
+	// router makes its actual choice. Reusing it could bind the wrong concrete
+	// account or alias, so routed selections always use their own providers.
+	if lookupAccountRouterConfig(cfg, accountRef) != nil {
+		return false
+	}
+	if buildModelRouter(cfg, modelSelector) != nil ||
+		buildModelRouter(cfg, defaults.ModelName) != nil {
+		return false
+	}
+	defaultConfig, err := concreteAccountModelConfig(
 		cfg,
-		defaultProvider,
-		model,
-		"",
-		workspace,
-		providersOut,
+		defaults.AccountRef,
+		defaults.ModelName,
+		defaults.Workspace,
 	)
+	if err != nil {
+		return false
+	}
+	defaultCandidate, ok := candidateFromModelConfig("", defaultConfig)
+	if !ok {
+		return false
+	}
+	return providers.NormalizeProvider(defaultCandidate.Provider) ==
+		providers.NormalizeProvider(candidate.Provider) &&
+		strings.TrimSpace(defaultCandidate.Model) == strings.TrimSpace(candidate.Model)
 }
 
-func buildAccountRouterWithModel(
-	cfg *config.Config,
-	defaultProvider string,
-	model string,
-	modelIDOverride string,
-	workspace string,
-	providersOut map[string]providers.LLMProvider,
-) *accountrouter.Router {
-	modelCfg := lookupModelConfigByRef(cfg, model, defaultProvider)
-	if modelCfg == nil || !modelCfg.IsAccountRouter() || modelCfg.Router == nil {
+func buildModelRouter(cfg *config.Config, model string) *modelrouter.Router {
+	if cfg == nil {
 		return nil
 	}
-	accountNames := accountRouterAccountNames(modelCfg.Router)
-	modelIDOverride = strings.TrimSpace(modelIDOverride)
-	accounts := make(map[string]accountrouter.Account, len(accountNames))
-	for _, accountName := range accountNames {
-		candidates := accountRouterAccountCandidates(
-			cfg,
-			defaultProvider,
-			workspace,
-			accountName,
-			modelIDOverride,
-			providersOut,
-		)
-		if len(candidates) == 0 {
+	for i := range cfg.ModelRouters {
+		if cfg.ModelRouters[i].Enabled &&
+			strings.TrimSpace(cfg.ModelRouters[i].Name) == strings.TrimSpace(model) {
+			return modelrouter.New(cfg.ModelRouters[i].Name, &cfg.ModelRouters[i])
+		}
+	}
+	return nil
+}
+
+func firstModelRouterAlias(router *modelrouter.Router) string {
+	if router == nil {
+		return ""
+	}
+	for _, block := range router.Config.Blocks {
+		if strings.TrimSpace(block.Type) == config.ModelRouterBlockTypeModel {
+			return strings.TrimSpace(block.Model)
+		}
+	}
+	return ""
+}
+
+func validateModelRouterAliases(cfg *config.Config, router *modelrouter.Router) error {
+	if router == nil {
+		return nil
+	}
+	found := false
+	for _, block := range router.Config.Blocks {
+		if strings.TrimSpace(block.Type) != config.ModelRouterBlockTypeModel {
 			continue
 		}
-		rpm := 0
-		if accountCfg := lookupModelConfigByRef(cfg, accountName, defaultProvider); accountCfg != nil {
-			rpm = accountCfg.RPM
-		}
-		accounts[accountName] = accountrouter.Account{
-			Name:       accountName,
-			Candidates: candidates,
-			RPM:        rpm,
+		found = true
+		alias := strings.TrimSpace(block.Model)
+		if _, err := cfg.GetModelAlias(alias); err != nil {
+			return fmt.Errorf(
+				"model router %q block %q: %w",
+				router.Name,
+				block.ID,
+				err,
+			)
 		}
 	}
-	statePath := filepath.Join(workspace, "account_router_state.json")
-	return accountrouter.New(modelCfg.ModelName, modelCfg.Router, accounts, statePath)
+	if !found {
+		return fmt.Errorf("model router %q has no model alias targets", router.Name)
+	}
+	return nil
 }
 
-func accountRouterAccountCandidates(
+func providerFromCandidateMap(
+	providerMap map[string]providers.LLMProvider,
+	candidate providers.FallbackCandidate,
+) providers.LLMProvider {
+	for _, key := range candidateProviderKeys(candidate) {
+		if providerMap[key] != nil {
+			return providerMap[key]
+		}
+	}
+	return nil
+}
+
+func firstConcreteAccountRef(cfg *config.Config, accountRef string) string {
+	accountRef = strings.TrimSpace(accountRef)
+	if router := lookupAccountRouterConfig(cfg, accountRef); router != nil {
+		accounts := accountRouterAccountNames(router)
+		if len(accounts) > 0 {
+			return accounts[0]
+		}
+	}
+	return accountRef
+}
+
+func resolveToolAdaptationProfileForAlias(
 	cfg *config.Config,
-	defaultProvider string,
+	accountRef string,
+	modelAlias string,
 	workspace string,
-	accountName string,
-	modelID string,
-	providersOut map[string]providers.LLMProvider,
-) []providers.FallbackCandidate {
-	if credentialCfg, ok := accountRouterCredentialAccountConfig(accountName, modelID); ok {
-		if credentialCfg == nil {
-			return nil
-		}
-		candidate, ok := candidateFromModelConfig(defaultProvider, credentialCfg)
-		if !ok {
-			return nil
-		}
-		provider, _, err := providers.CreateProviderFromConfig(credentialCfg)
-		if err != nil {
-			logger.WarnCF("agent", "account router: failed to create credential account provider",
-				map[string]any{
-					"account": accountName,
-					"model":   credentialCfg.Model,
-					"error":   err.Error(),
-				})
-			return nil
-		}
-		if !registerCandidateProvider(providersOut, candidate, provider) {
-			closeProviderIfStateful(provider)
-		}
-		return []providers.FallbackCandidate{candidate}
-	}
-	modelID = strings.TrimSpace(modelID)
-	accountCfg := lookupModelConfigByRef(cfg, accountName, defaultProvider)
-	if accountCfg == nil || accountCfg.IsAccountRouter() {
-		return nil
-	}
-	clone := cloneModelConfigForResolution(defaultProvider, accountCfg, workspace)
-	if modelID != "" {
-		accountProvider, _ := providers.ExtractProtocol(accountCfg)
-		clone.Provider = accountProvider
-		clone.Model = modelID
-	}
-	candidate, ok := candidateFromModelConfig(defaultProvider, clone)
-	if !ok {
-		return nil
-	}
-	provider, _, err := providers.CreateProviderFromConfig(clone)
+) (string, string) {
+	modelCfg, err := concreteAccountModelConfig(
+		cfg,
+		firstConcreteAccountRef(cfg, accountRef),
+		modelAlias,
+		workspace,
+	)
 	if err != nil {
-		logger.WarnCF("agent", "account router: failed to create provider",
-			map[string]any{
-				"account": accountName,
-				"model":   clone.Model,
-				"error":   err.Error(),
-			})
-		return nil
+		return "", strings.TrimSpace(modelAlias)
 	}
-	if !registerCandidateProvider(providersOut, candidate, provider) {
-		closeProviderIfStateful(provider)
-	}
-	return []providers.FallbackCandidate{candidate}
+	provider, model := providers.ExtractProtocol(modelCfg)
+	return providers.NormalizeProvider(provider), strings.TrimSpace(model)
 }
 
 func accountRouterCredentialAccountConfig(accountName string, modelID string) (*config.ModelConfig, bool) {
@@ -577,9 +731,6 @@ func accountRouterCredentialAccountConfig(accountName string, modelID string) (*
 	}
 	provider = credentialRuntimeProvider(provider)
 	modelID = strings.TrimSpace(modelID)
-	if modelID == "" {
-		modelID = providers.DefaultModelForProvider(provider)
-	}
 	if modelID == "" {
 		return nil, true
 	}
@@ -642,209 +793,6 @@ func accountRouterAccountNames(routerCfg *config.AccountRouterConfig) []string {
 	return out
 }
 
-// populateCandidateProvidersFromNames resolves each model name (alias or
-// "provider/model") via resolvedModelConfig and creates a dedicated LLMProvider
-// for it. This reuses the canonical config resolution path (GetModelConfig) so
-// alias handling and load-balancing stay consistent with the rest of the codebase.
-func populateCandidateProvidersFromNames(
-	cfg *config.Config,
-	workspace string,
-	names []string,
-	out map[string]providers.LLMProvider,
-) {
-	if cfg == nil || len(names) == 0 {
-		return
-	}
-	for _, name := range names {
-		mc, err := resolvedModelConfig(cfg, strings.TrimSpace(name), workspace)
-		if err != nil {
-			logger.WarnCF("agent",
-				"fallback provider: no model_list entry found; will inherit primary provider credentials",
-				map[string]any{"name": name, "error": err.Error()})
-			continue
-		}
-		candidate, ok := candidateFromModelConfig(cfg.Agents.Defaults.Provider, mc)
-		if !ok {
-			continue
-		}
-		agentCandidateProvidersMu.RLock()
-		existingProvider := out[candidate.StableKey()]
-		agentCandidateProvidersMu.RUnlock()
-		if existingProvider != nil {
-			continue
-		}
-		p, _, err := providers.CreateProviderFromConfig(mc)
-		if err != nil {
-			logger.WarnCF("agent", "fallback provider: failed to create provider",
-				map[string]any{"model": mc.Model, "error": err.Error()})
-			continue
-		}
-		if !registerCandidateProvider(out, candidate, p) {
-			closeProviderIfStateful(p)
-		}
-	}
-}
-
-// resolvePrimaryProviderForAgent resolves a dedicated provider for the active
-// primary model when the model points at a model_list entry. This keeps the
-// agent's single-candidate path aligned with the selected model's own
-// provider/api_base/api_key instead of inheriting the process default provider.
-func resolvePrimaryProviderForAgent(
-	cfg *config.Config,
-	workspace string,
-	agentID string,
-	model string,
-	fallback providers.LLMProvider,
-) providers.LLMProvider {
-	model = strings.TrimSpace(model)
-	if cfg == nil || model == "" {
-		return fallback
-	}
-
-	modelCfg := lookupModelConfigByRef(cfg, model)
-	if modelCfg == nil {
-		return fallback
-	}
-	if modelCfg.IsAccountRouter() || modelCfg.IsModelRouter() {
-		return fallback
-	}
-	clone := *modelCfg
-	if clone.Workspace == "" {
-		clone.Workspace = workspace
-	}
-
-	resolvedProvider, _, err := providers.CreateProviderFromConfig(&clone)
-	if err != nil {
-		logger.WarnCF("agent", "Primary model provider init failed; using injected provider",
-			map[string]any{
-				"agent_id": agentID,
-				"model":    model,
-				"error":    err.Error(),
-			})
-		return fallback
-	}
-	if resolvedProvider == nil {
-		return fallback
-	}
-	return resolvedProvider
-}
-
-func resolveToolAdaptationProfileForAgent(
-	cfg *config.Config,
-	defaultProvider string,
-	model string,
-) (string, string) {
-	provider := effectiveDefaultProvider(defaultProvider)
-	model = strings.TrimSpace(model)
-	if model == "" || cfg == nil {
-		return provider, model
-	}
-
-	if modelCfg := lookupModelConfigByRef(cfg, model, provider); modelCfg != nil {
-		if resolvedProvider, resolvedModel, ok := firstToolAdaptationProfileForModelConfig(
-			cfg,
-			provider,
-			modelCfg,
-			map[string]struct{}{},
-		); ok {
-			return providers.NormalizeProvider(resolvedProvider), strings.TrimSpace(resolvedModel)
-		}
-	}
-
-	return providers.NormalizeProvider(provider), model
-}
-
-func firstToolAdaptationProfileForModelConfig(
-	cfg *config.Config,
-	defaultProvider string,
-	modelCfg *config.ModelConfig,
-	visited map[string]struct{},
-) (string, string, bool) {
-	if modelCfg == nil {
-		return "", "", false
-	}
-	visitKey := strings.ToLower(strings.TrimSpace(modelCfg.ModelName))
-	if visitKey != "" {
-		if _, exists := visited[visitKey]; exists {
-			return "", "", false
-		}
-		visited[visitKey] = struct{}{}
-	}
-
-	switch {
-	case modelCfg.IsAccountRouter():
-		router := modelCfg.Router
-		if router == nil {
-			return "", "", false
-		}
-		for _, accountName := range accountRouterAccountNames(router) {
-			if credentialCfg, ok := accountRouterCredentialAccountConfig(accountName, ""); ok {
-				if credentialCfg == nil {
-					continue
-				}
-				provider, model := providers.ExtractProtocol(credentialCfg)
-				if strings.TrimSpace(provider) != "" && strings.TrimSpace(model) != "" {
-					return providers.NormalizeProvider(provider), strings.TrimSpace(model), true
-				}
-				continue
-			}
-			accountCfg := lookupModelConfigByRef(cfg, accountName, defaultProvider)
-			if accountCfg == nil {
-				continue
-			}
-			if accountCfg.IsAccountRouter() || accountCfg.IsModelRouter() {
-				if provider, model, ok := firstToolAdaptationProfileForModelConfig(
-					cfg,
-					defaultProvider,
-					accountCfg,
-					visited,
-				); ok {
-					return provider, model, true
-				}
-				continue
-			}
-			provider, model := providers.ExtractProtocol(accountCfg)
-			if strings.TrimSpace(provider) != "" && strings.TrimSpace(model) != "" {
-				return providers.NormalizeProvider(provider), strings.TrimSpace(model), true
-			}
-		}
-		return "", "", false
-	case modelCfg.IsModelRouter():
-		router := modelCfg.ModelRouter
-		if router == nil {
-			return "", "", false
-		}
-		for _, block := range router.Blocks {
-			if strings.TrimSpace(block.Type) != config.ModelRouterBlockTypeModel {
-				continue
-			}
-			modelRef := strings.TrimSpace(block.Model)
-			if candidateCfg := lookupModelConfigByRef(cfg, modelRef, defaultProvider); candidateCfg != nil {
-				if provider, model, ok := firstToolAdaptationProfileForModelConfig(
-					cfg,
-					defaultProvider,
-					candidateCfg,
-					visited,
-				); ok {
-					return provider, model, true
-				}
-				continue
-			}
-			if ref := providers.ParseModelRef(modelRef, defaultProvider); ref != nil &&
-				strings.TrimSpace(ref.Provider) != "" && strings.TrimSpace(ref.Model) != "" {
-				return providers.NormalizeProvider(ref.Provider), strings.TrimSpace(ref.Model), true
-			}
-		}
-		return "", "", false
-	default:
-		provider, model := providers.ExtractProtocol(modelCfg)
-		if strings.TrimSpace(provider) == "" || strings.TrimSpace(model) == "" {
-			return "", "", false
-		}
-		return providers.NormalizeProvider(provider), strings.TrimSpace(model), true
-	}
-}
-
 func toolAdaptationMayUseCodexCompatibleTools(
 	cfg config.ToolAdaptationConfig,
 	initial tools.ToolAdaptationDecision,
@@ -872,10 +820,15 @@ func AgentModelMayUseCodexCompatibleTools(
 	if defaults == nil || cfg == nil {
 		return false
 	}
-	provider, toolModel := resolveToolAdaptationProfileForAgent(
+	modelAlias := strings.TrimSpace(resolvedModel)
+	if router := buildModelRouter(cfg, modelAlias); router != nil {
+		modelAlias = firstModelRouterAlias(router)
+	}
+	provider, toolModel := resolveToolAdaptationProfileForAlias(
 		cfg,
-		defaults.Provider,
-		strings.TrimSpace(resolvedModel),
+		defaults.AccountRef,
+		modelAlias,
+		defaults.Workspace,
 	)
 	initial := tools.ResolveToolAdaptation(
 		cfg.Tools.Adaptation,
@@ -923,6 +876,19 @@ func resolveAgentModel(
 	return ResolveAgentModelFromDefinition(agentCfg, defaults, definitionModel)
 }
 
+func resolveAgentAccountRef(
+	agentCfg *config.AgentConfig,
+	defaults *config.AgentDefaults,
+) string {
+	if agentCfg != nil && strings.TrimSpace(agentCfg.AccountRef) != "" {
+		return strings.TrimSpace(agentCfg.AccountRef)
+	}
+	if defaults == nil {
+		return ""
+	}
+	return strings.TrimSpace(defaults.AccountRef)
+}
+
 // ResolveAgentModelFromDefinition applies runtime model precedence to a model
 // value already captured from an AGENT.md definition.
 func ResolveAgentModelFromDefinition(
@@ -948,6 +914,24 @@ func resolveAgentFallbacks(agentCfg *config.AgentConfig, defaults *config.AgentD
 		return agentCfg.Model.Fallbacks
 	}
 	return defaults.ModelFallbacks
+}
+
+func resolveSubagentModelPolicy(agent *AgentInstance) (string, []string) {
+	if agent == nil {
+		return "", nil
+	}
+	primary := strings.TrimSpace(agent.Model)
+	fallbacks := cloneOptionalModelFallbacks(agent.Fallbacks)
+	if agent.Subagents == nil || agent.Subagents.Model == nil {
+		return primary, fallbacks
+	}
+	if configured := strings.TrimSpace(agent.Subagents.Model.Primary); configured != "" {
+		primary = configured
+	}
+	if agent.Subagents.Model.Fallbacks != nil {
+		fallbacks = cloneOptionalModelFallbacks(agent.Subagents.Model.Fallbacks)
+	}
+	return primary, fallbacks
 }
 
 func resolveAgentSkillsFilter(

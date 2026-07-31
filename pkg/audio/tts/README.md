@@ -4,9 +4,10 @@ This package handles speech synthesis for PicoClaw.
 
 If you are new to TTS setup, the simplest workflow is:
 
-1. Add a TTS-capable entry to `model_list`.
-2. Point `voice.tts_model_name` at that entry.
-3. Put the API key in `.security.yml`.
+1. Configure a concrete TTS account in `model_list`.
+2. Add an exact TTS alias in `model_aliases`.
+3. Set `voice.tts_account_ref` and alias-valued `voice.tts_model_name`.
+4. Put the account API key in `.security.yml`.
 
 ## Quick Recommendation
 
@@ -23,11 +24,13 @@ PicoClaw does not keep TTS API keys inside `voice`.
 
 Instead:
 
-- `voice.tts_model_name` selects a named entry from `model_list`.
-- That `model_list` entry provides the provider, model ID, API base, and proxy settings.
+- `voice.tts_account_ref` selects a concrete `model_list` account.
+- `voice.tts_model_name` selects an exact `model_aliases[].name`.
+- The alias provides the concrete model ID, including a per-account override.
+- The account provides the provider, API base, proxy, and credentials.
 - For providers that need model-specific TTS parameters, use `model_list[].extra_body`
   to pass fields such as `voice` and `response_format`.
-- `.security.yml` stores the API key for the same named model entry.
+- `.security.yml` stores the API key for the same named account entry.
 
 This is the recommended and supported configuration pattern.
 
@@ -40,12 +43,20 @@ This is the recommended and supported configuration pattern.
 ```json
 {
   "voice": {
-    "tts_model_name": "openai-tts"
+    "tts_account_ref": "openai-voice",
+    "tts_model_name": "tts"
   },
+  "model_aliases": [
+    {
+      "name": "tts",
+      "model": "tts-1"
+    }
+  ],
   "model_list": [
     {
-      "model_name": "openai-tts",
-      "model": "openai/tts-1"
+      "model_name": "openai-voice",
+      "provider": "openai",
+      "model": ""
     }
   ]
 }
@@ -55,7 +66,7 @@ This is the recommended and supported configuration pattern.
 
 ```yaml
 model_list:
-  openai-tts:
+  openai-voice:
     api_keys:
       - "sk-openai-your-key"
 ```
@@ -67,12 +78,20 @@ model_list:
 ```json
 {
   "voice": {
-    "tts_model_name": "mimo-tts"
+    "tts_account_ref": "mimo-voice",
+    "tts_model_name": "tts"
   },
+  "model_aliases": [
+    {
+      "name": "tts",
+      "model": "mimo-v2-tts"
+    }
+  ],
   "model_list": [
     {
-      "model_name": "mimo-tts",
-      "model": "mimo/mimo-v2-tts"
+      "model_name": "mimo-voice",
+      "provider": "mimo",
+      "model": ""
     }
   ]
 }
@@ -82,12 +101,13 @@ model_list:
 
 ```yaml
 model_list:
-  mimo-tts:
+  mimo-voice:
     api_keys:
       - "your-mimo-key"
 ```
 
-If you use a custom MiMo endpoint, you can also set `api_base` explicitly. Otherwise PicoClaw will use the provider default.
+If you use a custom MiMo endpoint, set `api_base` explicitly. Otherwise
+PicoClaw uses MiMo's registered API base; this does not select a model.
 
 ### Option C: OpenRouter MAI Voice 2
 
@@ -100,13 +120,20 @@ voice name and works best with `response_format: "mp3"`.
 ```json
 {
   "voice": {
-    "tts_model_name": "mai-voice-2"
+    "tts_account_ref": "openrouter-voice",
+    "tts_model_name": "tts"
   },
+  "model_aliases": [
+    {
+      "name": "tts",
+      "model": "microsoft/mai-voice-2"
+    }
+  ],
   "model_list": [
     {
-      "model_name": "mai-voice-2",
+      "model_name": "openrouter-voice",
       "provider": "openrouter",
-      "model": "microsoft/mai-voice-2",
+      "model": "",
       "api_base": "https://openrouter.ai/api/v1",
       "extra_body": {
         "voice": "en-US-Harper:MAI-Voice-2",
@@ -121,7 +148,7 @@ voice name and works best with `response_format: "mp3"`.
 
 ```yaml
 model_list:
-  mai-voice-2:
+  openrouter-voice:
     api_keys:
       - "sk-or-your-openrouter-key"
 ```
@@ -133,14 +160,17 @@ The current TTS runtime uses an OpenAI-compatible speech request with these defa
 - Endpoint: `/audio/speech`
 - Response format: `opus`
 - Voice: `alloy`
-- Model: taken from the selected `model_list` entry
+- Model: produced by exact alias resolution for the selected account
 
 These defaults can now be overridden per model through `model_list[].extra_body`.
 
 That means:
 
 - `openai/tts-1` works naturally.
-- Other OpenAI-compatible providers can work if they accept the same request format.
+- Registered OpenAI-compatible provider families, including `litellm` proxies,
+  can work if the upstream accepts the same request format.
+- Unknown provider identifiers fail closed; use a registered provider family
+  and set its `api_base` for a custom endpoint.
 - Provider-specific TTS models may need their own `voice` and `response_format` values.
 - If a provider rejects `response_format`, PicoClaw retries once without that field.
 
@@ -148,11 +178,14 @@ That means:
 
 `DetectTTS` resolves TTS in this order:
 
-1. **Preferred path**: resolve `voice.tts_model_name` against `model_list`.
-2. If a matching model entry exists and has an API key, PicoClaw creates an OpenAI-compatible TTS provider using that model's settings.
-3. **Fallback path**: if `voice.tts_model_name` is not set or cannot be resolved, PicoClaw scans `model_list` for the first entry whose model string contains `tts` and has an API key.
+1. Resolve `voice.tts_account_ref` to one concrete account.
+2. Resolve the exact `voice.tts_model_name` alias for that account.
+3. If the resolved account has credentials, create the TTS provider with the
+   resolved concrete model and account transport settings.
 
-Fallback scanning exists for compatibility. New configs should set `voice.tts_model_name` explicitly.
+There is no model-list scan or provider-default model. Missing/invalid
+selections leave TTS unavailable, and `send_tts` reports
+`no model configured`.
 
 ## Notes About API Base Handling
 
@@ -160,11 +193,14 @@ PicoClaw normalizes the configured base URL for TTS:
 
 - For OpenAI, a base like `https://api.openai.com` or `https://api.openai.com/v1` becomes `https://api.openai.com/v1/audio/speech`.
 - For other OpenAI-compatible providers, PicoClaw preserves the configured base path and ensures it ends with `/audio/speech`.
-- If `api_base` is omitted, PicoClaw uses the provider default base when the model prefix is known.
+- If `api_base` is omitted, PicoClaw uses the provider's registered API base
+  when known; model selection still comes only from the alias.
 
 ## Common Mistakes
 
-- Setting `voice.tts_model_name` to a name that does not exist in `model_list`.
+- Setting `voice.tts_model_name` to a name that does not exist in
+  `model_aliases`.
+- Omitting `voice.tts_account_ref`.
 - Adding a TTS model but forgetting to put its API key in `.security.yml`.
 - Assuming PicoClaw will automatically infer provider-specific custom voices.
 - Forgetting to set `model_list[].extra_body.voice` or `model_list[].extra_body.response_format` for TTS models that require them.
@@ -174,7 +210,8 @@ PicoClaw normalizes the configured base URL for TTS:
 
 Before testing `send_tts`, make sure:
 
-- `voice.tts_model_name` matches a `model_list[].model_name`.
-- The matching `.security.yml` entry contains a valid API key.
+- `voice.tts_account_ref` names an enabled concrete account.
+- `voice.tts_model_name` exactly matches `model_aliases[].name`.
+- The account's `.security.yml` entry contains a valid API key.
 - The chosen provider supports an OpenAI-compatible speech synthesis endpoint.
 - Your selected model is actually a TTS-capable model.

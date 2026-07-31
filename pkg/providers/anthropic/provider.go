@@ -80,11 +80,16 @@ func (p *Provider) Chat(
 	model string,
 	options map[string]any,
 ) (*LLMResponse, error) {
+	model, err := protocoltypes.RequireModel(model)
+	if err != nil {
+		return nil, err
+	}
+
 	var opts []option.RequestOption
 	if p.tokenSource != nil {
-		tok, err := p.tokenSource()
-		if err != nil {
-			return nil, fmt.Errorf("refreshing token: %w", err)
+		tok, tokenErr := p.tokenSource()
+		if tokenErr != nil {
+			return nil, fmt.Errorf("refreshing token: %w", tokenErr)
 		}
 		opts = append(opts,
 			option.WithAuthToken(tok),
@@ -130,10 +135,6 @@ func (p *Provider) chatStreaming(
 	}
 
 	return parseResponse(&msg), nil
-}
-
-func (p *Provider) GetDefaultModel() string {
-	return "claude-sonnet-4.6"
 }
 
 func (p *Provider) BaseURL() string {

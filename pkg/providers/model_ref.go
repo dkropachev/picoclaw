@@ -1,6 +1,10 @@
 package providers
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
+)
 
 // ModelRef represents a parsed model reference with provider and model name.
 type ModelRef struct {
@@ -29,14 +33,7 @@ func ParseModelRef(raw string, defaultProvider string) *ModelRef {
 
 // NormalizeProvider normalizes provider identifiers to canonical form.
 func NormalizeProvider(provider string) string {
-	normalized := strings.ToLower(strings.TrimSpace(provider))
-	if normalized == "" {
-		return ""
-	}
-	if canonical, ok := normalizedModelProviderAliasesByName[normalized]; ok {
-		return canonical
-	}
-	return normalized
+	return protocoltypes.NormalizeProvider(provider)
 }
 
 // ModelKey returns a canonical "provider/model" key for deduplication.

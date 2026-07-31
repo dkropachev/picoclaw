@@ -31,7 +31,7 @@ export interface WebSearchProviderConfig {
   base_url?: string
   api_key?: string
   api_keys?: string[]
-  model?: string
+  model_alias?: string
   api_key_set?: boolean
 }
 
@@ -41,6 +41,7 @@ export interface WebSearchConfigResponse {
   prefer_native: boolean
   proxy?: string
   providers: WebSearchProviderOption[]
+  model_aliases: string[]
   settings: Record<string, WebSearchProviderConfig>
 }
 
@@ -135,6 +136,8 @@ export interface ToolAdaptationProfileState {
   is_default: boolean
   is_override: boolean
   probe_available: boolean
+  probe_account_ref?: string
+  probe_model_alias?: string
   resolved: ToolAdaptationResolvedState
   observation?: ToolAdaptationObservation
   outcomes?: ToolAdaptationToolOutcome[]
@@ -183,8 +186,8 @@ export interface ToolAdaptationProbeResult {
 }
 
 export interface ToolAdaptationProbeTarget {
-  provider: string
-  model: string
+  account_ref: string
+  model_alias: string
 }
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {

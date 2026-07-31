@@ -575,15 +575,24 @@ Each SSE message (`data: {...}`) is wrapped in a `response` field:
 
 ```json
 {
+  "version": 4,
   "model_list": [
     {
-      "model_name": "gemini-flash",
-      "model": "antigravity/gemini-3-flash",
+      "model_name": "antigravity-work",
+      "provider": "antigravity",
+      "model": "",
       "auth_method": "oauth"
+    }
+  ],
+  "model_aliases": [
+    {
+      "name": "gemini-flash",
+      "model": "gemini-3-flash"
     }
   ],
   "agents": {
     "defaults": {
+      "account_ref": "antigravity-work",
       "model_name": "gemini-flash"
     }
   }
@@ -685,12 +694,20 @@ case "your-provider":
 
 ```json
 {
+  "version": 4,
   "model_list": [
     {
-      "model_name": "your-model",
-      "model": "your-provider/model-name",
+      "model_name": "your-account",
+      "provider": "your-provider",
+      "model": "",
       "api_keys": ["your-api-key"],
       "api_base": "https://api.your-provider.com/v1"
+    }
+  ],
+  "model_aliases": [
+    {
+      "name": "your-alias",
+      "model": "model-name"
     }
   ]
 }
@@ -712,18 +729,19 @@ picoclaw auth models
 # Start the gateway
 picoclaw gateway
 
-# Run an agent with a specific model
-picoclaw agent -m "Hello" --model your-model
+# Run an agent with a specific configured alias
+picoclaw agent -m "Hello" --model your-alias
 ```
 
 ### Environment Variables for Testing
 
 ```bash
-# Override default model
-export PICOCLAW_AGENTS_DEFAULTS_MODEL=your-model
+# Override the selected account and exact alias
+export PICOCLAW_AGENTS_DEFAULTS_ACCOUNT_REF=your-account
+export PICOCLAW_AGENTS_DEFAULTS_MODEL=your-alias
 
-# Override provider settings
-export PICOCLAW_MODEL_LIST='[{"model_name":"your-model","model":"your-provider/model-name","api_keys":["..."]}]'
+# Override account transport settings; the alias still comes from config.json
+export PICOCLAW_MODEL_LIST='[{"model_name":"your-account","provider":"your-provider","model":"","api_keys":["..."]}]'
 ```
 
 ---

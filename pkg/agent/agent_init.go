@@ -335,7 +335,9 @@ func registerSharedTools(
 		spawnEnabled := cfg.Tools.IsToolEnabled("spawn")
 		spawnStatusEnabled := cfg.Tools.IsToolEnabled("spawn_status")
 		if (spawnEnabled || spawnStatusEnabled) && cfg.Tools.IsToolEnabled("subagent") {
-			subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace)
+			subagentModel, subagentFallbacks := resolveSubagentModelPolicy(agent)
+			subagentManager := tools.NewSubagentManager(provider, subagentModel, agent.Workspace)
+			subagentManager.SetDefaultModelFallbacks(subagentFallbacks)
 			subagentManager.SetLLMOptions(agent.MaxTokens, agent.Temperature)
 
 			// Inject a media resolver so the legacy RunToolLoop fallback path can
@@ -385,18 +387,22 @@ func registerSharedTools(
 					"Task: " + task
 
 				// 4. Resolve Model
-				modelToUse := agent.Model
+				modelToUse := subagentModel
+				modelFallbacksToUse := cloneOptionalModelFallbacks(subagentFallbacks)
 				if targetAgentID != "" {
 					if targetAgent, ok := al.GetRegistry().GetAgent(targetAgentID); ok {
 						modelToUse = targetAgent.Model
+						modelFallbacksToUse = cloneOptionalModelFallbacks(targetAgent.Fallbacks)
 					}
 				}
 
 				// 5. Build SubTurnConfig
 				cfg := SubTurnConfig{
-					Model:        modelToUse,
-					Tools:        tlSlice,
-					SystemPrompt: systemPrompt,
+					Model:          modelToUse,
+					ModelFallbacks: modelFallbacksToUse,
+					TargetAgentID:  targetAgentID,
+					Tools:          tlSlice,
+					SystemPrompt:   systemPrompt,
 				}
 				if hasMaxTokens {
 					cfg.MaxTokens = maxTokens

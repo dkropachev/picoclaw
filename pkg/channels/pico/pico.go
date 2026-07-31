@@ -1233,8 +1233,8 @@ func (c *PicoChannel) handleMessageSend(pc *picoConn, msg PicoMessage) {
 	if modelName, _ := msg.Payload[PayloadKeyModelName].(string); strings.TrimSpace(modelName) != "" {
 		metadata[PayloadKeyModelName] = strings.TrimSpace(modelName)
 	}
-	if modelID, _ := msg.Payload["model"].(string); strings.TrimSpace(modelID) != "" {
-		metadata["model"] = strings.TrimSpace(modelID)
+	if accountRef, _ := msg.Payload[PayloadKeyAccountRef].(string); strings.TrimSpace(accountRef) != "" {
+		metadata[PayloadKeyAccountRef] = strings.TrimSpace(accountRef)
 	}
 
 	logger.DebugCF("pico", "Received message", map[string]any{

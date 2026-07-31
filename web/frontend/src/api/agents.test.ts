@@ -26,6 +26,7 @@ const response = {
       id: "main",
       name: "",
       workspace: "",
+      account_ref: "",
       model: null,
       skills: null,
       subagents: null,
@@ -47,6 +48,7 @@ const agent = {
   id: "reviewer",
   name: "Reviewer",
   workspace: "",
+  account_ref: "openai-work",
   model: {
     primary: "",
     fallbacks: [] as string[],

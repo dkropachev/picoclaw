@@ -789,6 +789,7 @@ export function AccountRouterEditorPage({
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState("")
   const [models, setModels] = useState<ModelInfo[]>([])
+  const [configRevision, setConfigRevision] = useState("")
   const [accounts, setAccounts] = useState<RouterAccount[]>([])
   const [modelName, setModelName] = useState("")
   const [routerConfig, setRouterConfig] = useState<AccountRouterConfig>(
@@ -838,6 +839,7 @@ export function AccountRouterEditorPage({
         getOAuthProviders(),
       ])
       setModels(modelsData.models)
+      setConfigRevision(modelsData.revision)
       const nextAccounts = flattenCredentialAccounts(oauthData.providers)
       setAccounts(nextAccounts)
 
@@ -1050,7 +1052,7 @@ export function AccountRouterEditorPage({
             : routerConfig,
       }
       if (isEdit && editingModel) {
-        await updateModel(editingModel.index, payload)
+        await updateModel(editingModel.index, configRevision, payload)
       } else {
         await addModel(payload)
       }

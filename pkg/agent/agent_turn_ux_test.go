@@ -269,10 +269,6 @@ func (p *agentTurnUXGatedProvider) Chat(
 	return &providers.LLMResponse{Content: p.response}, nil
 }
 
-func (p *agentTurnUXGatedProvider) GetDefaultModel() string {
-	return "agent-turn-ux-test"
-}
-
 type agentTurnUXPanicThenContinueProvider struct {
 	firstStarted  chan struct{}
 	panicFirst    chan struct{}
@@ -325,10 +321,6 @@ func (p *agentTurnUXPanicThenContinueProvider) Chat(
 	}
 }
 
-func (p *agentTurnUXPanicThenContinueProvider) GetDefaultModel() string {
-	return "agent-turn-ux-panic-continue-test"
-}
-
 func (p *agentTurnUXPanicThenContinueProvider) capturedSecondMessages() []providers.Message {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -357,7 +349,7 @@ func startAgentTurnUXLoopWithConfig(
 	t.Helper()
 
 	msgBus := bus.NewMessageBus()
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	al.channelManager = manager
 
 	runCtx, cancelRun := context.WithCancel(context.Background())
@@ -481,7 +473,7 @@ func TestAgentTurnUXSynchronousRouteFailureTransfersOrCleansExactTurn(
 
 			cfg := config.DefaultConfig()
 			cfg.Agents.Defaults.Workspace = t.TempDir()
-			al := NewAgentLoop(
+			al := newTestAgentLoopWithStrictModels(
 				cfg,
 				innerBus,
 				newAgentTurnUXGatedProvider("must not run"),
@@ -576,7 +568,7 @@ func TestAgentTurnUXSynchronousNoOutputCleansExactTurn(t *testing.T) {
 	messageBus := bus.NewMessageBus()
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
-	al := NewAgentLoop(
+	al := newTestAgentLoopWithStrictModels(
 		cfg,
 		messageBus,
 		newAgentTurnUXGatedProvider("must not run"),
@@ -755,7 +747,7 @@ func TestAgentTurnUXRuntimeRetainFailurePreservesNewerReservation(t *testing.T) 
 	msgBus := bus.NewMessageBus()
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
-	al := NewAgentLoop(
+	al := newTestAgentLoopWithStrictModels(
 		cfg,
 		msgBus,
 		newAgentTurnUXGatedProvider("must not run"),
@@ -841,7 +833,7 @@ func TestAgentTurnUXStopPublishFailureCleansExactTurn(t *testing.T) {
 	msgBus := bus.NewMessageBus()
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
-	al := NewAgentLoop(
+	al := newTestAgentLoopWithStrictModels(
 		cfg,
 		msgBus,
 		newAgentTurnUXGatedProvider("must not run"),
@@ -1238,7 +1230,7 @@ func TestAgentTurnUXRescuePublishFailureCleansTransferredTurn(t *testing.T) {
 	messageBus.failOutbound.Store(true)
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
-	al := NewAgentLoop(cfg, innerBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, innerBus, provider)
 	al.bus = messageBus
 	al.channelManager = manager
 	al.running.Store(true)
@@ -1321,7 +1313,7 @@ func TestAgentTurnUXRescueMarkerHandsLateAbandonmentToSuccessor(t *testing.T) {
 	messageBus.blockOutbound.Store(true)
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
-	al := NewAgentLoop(cfg, innerBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, innerBus, provider)
 	al.bus = messageBus
 	al.channelManager = manager
 	al.running.Store(true)
@@ -1466,7 +1458,7 @@ func TestAgentTurnUXRescueTreatsCompetingOwnerAsQueueTransfer(t *testing.T) {
 	innerBus := bus.NewMessageBus()
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()
-	al := NewAgentLoop(cfg, innerBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, innerBus, provider)
 	al.channelManager = manager
 	al.running.Store(true)
 	t.Cleanup(func() {

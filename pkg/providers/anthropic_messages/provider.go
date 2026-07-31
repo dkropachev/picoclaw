@@ -78,6 +78,10 @@ func (p *Provider) Chat(
 	model string,
 	options map[string]any,
 ) (*LLMResponse, error) {
+	model, err := protocoltypes.RequireModel(model)
+	if err != nil {
+		return nil, err
+	}
 	if p.apiKey == "" {
 		return nil, fmt.Errorf("API key not configured")
 	}
@@ -149,11 +153,6 @@ func (p *Provider) Chat(
 
 	// Parse response
 	return parseResponseBody(body)
-}
-
-// GetDefaultModel returns the default model for this provider.
-func (p *Provider) GetDefaultModel() string {
-	return "claude-sonnet-4.6"
 }
 
 // buildRequestBody converts internal message format to Anthropic Messages API format.

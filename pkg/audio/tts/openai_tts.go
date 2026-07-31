@@ -14,6 +14,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers/common"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 type OpenAITTSProvider struct {
@@ -107,9 +108,6 @@ func NewOpenAITTSProviderWithOptions(
 	client.Timeout = 60 * time.Second
 
 	model = strings.TrimSpace(model)
-	if model == "" {
-		model = "tts-1"
-	}
 
 	voice := strings.TrimSpace(options.Voice)
 	if voice == "" {
@@ -136,6 +134,12 @@ func (t *OpenAITTSProvider) Name() string {
 }
 
 func (t *OpenAITTSProvider) Synthesize(ctx context.Context, text string) (io.ReadCloser, error) {
+	model, err := protocoltypes.RequireModel(t.model)
+	if err != nil {
+		return nil, err
+	}
+	t.model = model
+
 	logger.DebugCF("voice-tts", "Starting TTS synthesis", map[string]any{"text_len": len(text)})
 
 	responseFormat := t.responseFormat

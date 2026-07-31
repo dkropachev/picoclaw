@@ -378,14 +378,22 @@ This creates `~/.picoclaw/config.json` and the workspace directory.
 
 ```json
 {
+  "version": 4,
   "agents": {
     "defaults": {
-      "model_name": "gpt-5.4"
+      "account_ref": "openai-work",
+      "model_name": "coding"
     }
   },
+  "model_aliases": [
+    {
+      "name": "coding",
+      "model": "gpt-5.4"
+    }
+  ],
   "model_list": [
     {
-      "model_name": "gpt-5.4",
+      "model_name": "openai-work",
       "model": "openai/gpt-5.4"
       // api_key is now loaded from .security.yml
     }
@@ -395,7 +403,9 @@ This creates `~/.picoclaw/config.json` and the workspace directory.
 
 > See `config/config.example.json` in the repo for a complete configuration template with all available options.
 >
-> Please note: config.example.json format is version 0, with sensitive codes in it, and will be auto migrated to version 1+, then, the config.json will only store insensitive data, the sensitive codes will be stored in .security.yml, if you need manually modify the codes, please see `docs/security/security_configuration.md` for more details.
+> The example uses the current schema and contains no executable default model.
+> Store sensitive values in `.security.yml`; see
+> `docs/security/security_configuration.md`.
 
 
 **3. Chat**
@@ -415,7 +425,11 @@ picoclaw gateway
 
 ## 🔌 Providers (LLM)
 
-PicoClaw supports 30+ LLM providers through the `model_list` configuration. Use the `protocol/model` format:
+PicoClaw supports 30+ LLM providers. `model_list` configures concrete accounts
+and transports; `model_aliases` configures the exact model names selected by
+chat, agents, and workflows. Every execution needs both `account_ref` and an
+alias. PicoClaw never invents a provider-default model; a missing alias reports
+`no model configured`.
 
 | Provider | Protocol | API Key | Notes |
 |----------|----------|---------|-------|
@@ -454,9 +468,21 @@ PicoClaw supports 30+ LLM providers through the `model_list` configuration. Use 
 **Ollama:**
 ```json
 {
+  "agents": {
+    "defaults": {
+      "account_ref": "local-ollama",
+      "model_name": "local-chat"
+    }
+  },
+  "model_aliases": [
+    {
+      "name": "local-chat",
+      "model": "ollama/llama3.1:8b"
+    }
+  ],
   "model_list": [
     {
-      "model_name": "local-llama",
+      "model_name": "local-ollama",
       "model": "ollama/llama3.1:8b",
       "api_base": "http://localhost:11434/v1"
     }
@@ -467,6 +493,18 @@ PicoClaw supports 30+ LLM providers through the `model_list` configuration. Use 
 **vLLM:**
 ```json
 {
+  "agents": {
+    "defaults": {
+      "account_ref": "local-vllm",
+      "model_name": "local-chat"
+    }
+  },
+  "model_aliases": [
+    {
+      "name": "local-chat",
+      "model": "vllm/your-model"
+    }
+  ],
   "model_list": [
     {
       "model_name": "local-vllm",
@@ -625,7 +663,7 @@ Connect PicoClaw to the Agent Social Network simply by sending a single message 
 | `picoclaw gateway`        | Start the gateway                |
 | `picoclaw status`         | Show status                      |
 | `picoclaw version`        | Show version info                |
-| `picoclaw model`          | View or switch the default model |
+| `picoclaw model`          | View or switch the default model alias |
 | `picoclaw mcp list`       | List configured MCP servers      |
 | `picoclaw mcp add ...`    | Add or update an MCP server entry |
 | `picoclaw mcp test`       | Probe a configured MCP server    |
@@ -661,7 +699,7 @@ For detailed guides beyond this README:
 | [Configuration](docs/guides/configuration.md) | Environment variables, workspace layout, security sandbox |
 | [MCP Server CLI](docs/reference/mcp-cli.md) | Add, list, test, edit, and remove MCP server entries from the CLI |
 | [Scheduled Tasks and Cron Jobs](docs/reference/cron.md) | Cron schedule types, deliver modes, command gates, job storage |
-| [Providers & Models](docs/guides/providers.md) | 30+ LLM providers, model routing, model_list configuration |
+| [Providers & Models](docs/guides/providers.md) | 30+ LLM providers, account transports, aliases, and routing |
 | [Spawn & Async Tasks](docs/guides/spawn-tasks.md) | Quick tasks, long tasks with spawn, async sub-agent orchestration |
 | [Hooks](docs/architecture/hooks/README.md) | Event-driven hook system: observers, interceptors, approval hooks |
 | [Steering](docs/architecture/steering.md) | Inject messages into a running agent loop between tool calls |

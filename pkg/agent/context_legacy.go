@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/accountrouter"
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -248,22 +249,22 @@ func (m *legacyContextManager) summarizeSession(agent *AgentInstance, sessionKey
 		part1 := validMessages[:mid]
 		part2 := validMessages[mid:]
 
-		s1, _ := m.summarizeBatch(ctx, agent, part1, "")
-		s2, _ := m.summarizeBatch(ctx, agent, part2, "")
+		s1, _ := m.summarizeBatch(ctx, agent, sessionKey, part1, "")
+		s2, _ := m.summarizeBatch(ctx, agent, sessionKey, part2, "")
 
 		mergePrompt := fmt.Sprintf(
 			"Merge these two conversation summaries into one cohesive summary:\n\n1: %s\n\n2: %s",
 			s1, s2,
 		)
 
-		resp, err := m.retryLLMCall(ctx, agent, mergePrompt, llmMaxRetries)
+		resp, err := m.retryLLMCall(ctx, agent, sessionKey, mergePrompt, llmMaxRetries)
 		if err == nil && resp.Content != "" {
 			finalSummary = resp.Content
 		} else {
 			finalSummary = s1 + " " + s2
 		}
 	} else {
-		finalSummary, _ = m.summarizeBatch(ctx, agent, validMessages, summary)
+		finalSummary, _ = m.summarizeBatch(ctx, agent, sessionKey, validMessages, summary)
 	}
 
 	if omitted && finalSummary != "" {
@@ -313,6 +314,7 @@ func (m *legacyContextManager) findNearestUserMessage(messages []providers.Messa
 func (m *legacyContextManager) retryLLMCall(
 	ctx context.Context,
 	agent *AgentInstance,
+	sessionKey string,
 	prompt string,
 	maxRetries int,
 ) (*providers.LLMResponse, error) {
@@ -322,14 +324,22 @@ func (m *legacyContextManager) retryLLMCall(
 	var err error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
+		provider, model, resolveErr := m.al.resolveContextCompletionTarget(
+			agent,
+			prompt,
+			sessionKey,
+		)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
 		m.al.activeRequestsInc()
 		resp, err = func() (*providers.LLMResponse, error) {
 			defer m.al.activeRequestsDec()
-			return agent.Provider.Chat(
+			return provider.Chat(
 				ctx,
 				[]providers.Message{{Role: "user", Content: prompt}},
 				nil,
-				agent.Model,
+				model,
 				map[string]any{
 					"max_tokens":       agent.MaxTokens,
 					"temperature":      llmTemperature,
@@ -352,6 +362,7 @@ func (m *legacyContextManager) retryLLMCall(
 func (m *legacyContextManager) summarizeBatch(
 	ctx context.Context,
 	agent *AgentInstance,
+	sessionKey string,
 	batch []providers.Message,
 	existingSummary string,
 ) (string, error) {
@@ -374,7 +385,7 @@ func (m *legacyContextManager) summarizeBatch(
 	}
 	prompt := sb.String()
 
-	response, err := m.retryLLMCall(ctx, agent, prompt, llmMaxRetries)
+	response, err := m.retryLLMCall(ctx, agent, sessionKey, prompt, llmMaxRetries)
 	if err == nil && response.Content != "" {
 		return strings.TrimSpace(response.Content), nil
 	}
@@ -407,6 +418,56 @@ func (m *legacyContextManager) summarizeBatch(
 		fallback.WriteString(fmt.Sprintf("%s: %s", msg.Role, content))
 	}
 	return fallback.String(), nil
+}
+
+// resolveContextCompletionTarget resolves an alias or router selector to the
+// concrete provider/model pair used for internal context summarization calls.
+// Keeping this on the normal candidate-selection path also preserves account
+// overrides and model-router terminal selection.
+func (al *AgentLoop) resolveContextCompletionTarget(
+	agent *AgentInstance,
+	prompt string,
+	sessionKey string,
+) (providers.LLMProvider, string, error) {
+	if al == nil {
+		return nil, "", fmt.Errorf("context completion: agent loop is not initialized")
+	}
+	if agent == nil {
+		return nil, "", fmt.Errorf("context completion: agent is not configured")
+	}
+	if agent.ConfigurationError != nil {
+		return nil, "", agent.ConfigurationError
+	}
+
+	messages := []providers.Message{{Role: "user", Content: prompt}}
+	candidates, selectedModel, _, _, routerSelection := al.selectCandidates(
+		agent,
+		prompt,
+		messages,
+		sessionKey,
+		accountrouter.SelectReasonCompression,
+	)
+	_ = routerSelection
+	if len(candidates) == 0 {
+		return nil, "", fmt.Errorf(
+			"context completion: model selector %q resolved to no candidates",
+			agent.Model,
+		)
+	}
+
+	candidate := candidates[0]
+	provider := agent.candidateProviderForCandidate(candidate)
+	if provider == nil {
+		return nil, "", fmt.Errorf(
+			"context completion: no provider for resolved model %q",
+			candidate.Model,
+		)
+	}
+	model := strings.TrimSpace(selectedModel)
+	if model == "" {
+		return nil, "", config.ErrNoModelConfigured
+	}
+	return provider, model, nil
 }
 
 func (m *legacyContextManager) estimateTokens(messages []providers.Message) int {

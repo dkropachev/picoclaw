@@ -731,10 +731,15 @@ func setupOAuthTestEnv(t *testing.T) (string, func()) {
 	cfg := config.DefaultConfig()
 	cfg.ModelList = []*config.ModelConfig{{
 		ModelName: "custom-default",
-		Model:     "openai/gpt-4o",
+		Provider:  "openai",
+		Model:     "gpt-4o",
 		APIKeys:   config.SimpleSecureStrings("sk-default"),
+		Enabled:   true,
 	}}
-	cfg.Agents.Defaults.ModelName = "custom-default"
+	cfg.ModelAliases = []config.ModelAliasConfig{{
+		Name:  "custom-default",
+		Model: "openai/gpt-4o",
+	}}
 
 	configPath := filepath.Join(tmp, "config.json")
 	if err := config.SaveConfig(configPath, cfg); err != nil {
@@ -766,8 +771,6 @@ func resetOAuthHooks(t *testing.T) {
 	origSetCredential := oauthSetCredential
 	origDeleteCredential := oauthDeleteCredential
 	origLoadStore := oauthLoadStore
-	origLoadConfig := oauthLoadConfig
-	origSaveConfig := oauthSaveConfig
 	origFetchProject := oauthFetchAntigravityProject
 	origFetchGoogleEmail := oauthFetchGoogleUserEmailFunc
 
@@ -783,8 +786,6 @@ func resetOAuthHooks(t *testing.T) {
 		oauthSetCredential = origSetCredential
 		oauthDeleteCredential = origDeleteCredential
 		oauthLoadStore = origLoadStore
-		oauthLoadConfig = origLoadConfig
-		oauthSaveConfig = origSaveConfig
 		oauthFetchAntigravityProject = origFetchProject
 		oauthFetchGoogleUserEmailFunc = origFetchGoogleEmail
 	})

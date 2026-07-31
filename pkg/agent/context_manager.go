@@ -30,6 +30,20 @@ type ContextManager interface {
 	Clear(ctx context.Context, sessionKey string) error
 }
 
+// contextManagerCloser is implemented by context managers that own resources
+// such as database handles. It remains optional so external managers do not
+// need to add a no-op lifecycle method.
+type contextManagerCloser interface {
+	Close() error
+}
+
+func closeContextManager(manager ContextManager) error {
+	if closer, ok := manager.(contextManagerCloser); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
 // AssembleRequest is the input to Assemble.
 type AssembleRequest struct {
 	SessionKey string // session identifier

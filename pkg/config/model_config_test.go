@@ -112,6 +112,104 @@ func TestGetModelConfig_RoundRobinStartsFromFirstMatch(t *testing.T) {
 	}
 }
 
+func TestGetEnabledModelConfigIgnoresDisabledDuplicateRows(t *testing.T) {
+	rrCounter.Store(0)
+
+	cfg := &Config{
+		ModelList: []*ModelConfig{
+			{
+				ModelName: "account",
+				Provider:  "anthropic",
+				Model:     "disabled-before",
+				Enabled:   false,
+			},
+			{
+				ModelName: "account",
+				Provider:  "openai",
+				Model:     "enabled-one",
+				Enabled:   true,
+			},
+			{
+				ModelName: "account",
+				Provider:  "anthropic",
+				Model:     "disabled-after",
+				Enabled:   false,
+			},
+			{
+				ModelName: "account",
+				Provider:  "openai",
+				Model:     "enabled-two",
+				Enabled:   true,
+			},
+		},
+	}
+
+	seen := make(map[string]int)
+	for range 20 {
+		got, err := cfg.GetEnabledModelConfig("account")
+		if err != nil {
+			t.Fatalf("GetEnabledModelConfig() error = %v", err)
+		}
+		if !got.Enabled {
+			t.Fatalf("GetEnabledModelConfig() selected disabled row %#v", got)
+		}
+		seen[got.Model]++
+	}
+	if seen["enabled-one"] == 0 || seen["enabled-two"] == 0 {
+		t.Fatalf("enabled round-robin selections = %#v, want both enabled rows", seen)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("enabled round-robin selections = %#v, want no disabled rows", seen)
+	}
+
+	disabledOnly := &Config{ModelList: []*ModelConfig{{
+		ModelName: "disabled",
+		Provider:  "openai",
+		Enabled:   false,
+	}}}
+	if _, err := disabledOnly.GetEnabledModelConfig("disabled"); err == nil {
+		t.Fatal("GetEnabledModelConfig(disabled-only) error = nil")
+	}
+}
+
+func TestGetEnabledModelConfigPreservesEnabledVirtualRouters(t *testing.T) {
+	cfg := &Config{
+		AccountRouters: []AccountRouterConfig{
+			{Name: "enabled-account-router", Enabled: true},
+			{Name: "disabled-account-router", Enabled: false},
+		},
+		ModelRouters: []ModelRouterConfig{
+			{Name: "enabled-model-router", Enabled: true},
+			{Name: "disabled-model-router", Enabled: false},
+		},
+	}
+	cfg.MaterializeAccountRouterModels()
+	cfg.MaterializeModelRouterModels()
+
+	accountRouter, err := cfg.GetEnabledModelConfig("enabled-account-router")
+	if err != nil || !accountRouter.IsAccountRouter() {
+		t.Fatalf(
+			"enabled account router = %#v, %v; want enabled virtual router",
+			accountRouter,
+			err,
+		)
+	}
+	modelRouter, err := cfg.GetEnabledModelConfig("enabled-model-router")
+	if err != nil || !modelRouter.IsModelRouter() {
+		t.Fatalf(
+			"enabled model router = %#v, %v; want enabled virtual router",
+			modelRouter,
+			err,
+		)
+	}
+	if _, err := cfg.GetEnabledModelConfig("disabled-account-router"); err == nil {
+		t.Fatal("disabled account router remained runtime-selectable")
+	}
+	if _, err := cfg.GetEnabledModelConfig("disabled-model-router"); err == nil {
+		t.Fatal("disabled model router remained runtime-selectable")
+	}
+}
+
 func TestGetModelConfig_Concurrent(t *testing.T) {
 	cfg := &Config{
 		ModelList: []*ModelConfig{

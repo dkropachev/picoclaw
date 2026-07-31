@@ -127,6 +127,10 @@ func (p *Provider) Chat(
 	model string,
 	options map[string]any,
 ) (*LLMResponse, error) {
+	model, err := protocoltypes.RequireModel(model)
+	if err != nil {
+		return nil, err
+	}
 	if p.apiBase == "" {
 		return nil, fmt.Errorf("Azure API base not configured")
 	}
@@ -214,9 +218,4 @@ func (p *Provider) Chat(
 	}
 
 	return orc.ParseResponseBody(resp.Body)
-}
-
-// GetDefaultModel returns an empty string as Azure deployments are user-configured.
-func (p *Provider) GetDefaultModel() string {
-	return ""
 }

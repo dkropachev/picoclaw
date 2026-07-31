@@ -422,20 +422,20 @@ func GetChannelAllowFrom(ch any) []string {
 
 func (c *OpenClawConfig) GetDefaultModel() (provider, model string) {
 	if c.Agents == nil || c.Agents.Defaults == nil || c.Agents.Defaults.Model == nil {
-		return "anthropic", "claude-sonnet-4-20250514"
+		return "", ""
 	}
 
 	primary := c.Agents.Defaults.Model.GetPrimary()
 	if primary == "" {
-		return "anthropic", "claude-sonnet-4-20250514"
+		return "", ""
 	}
 
-	parts := strings.Split(primary, "/")
-	if len(parts) > 1 {
-		return mapProvider(parts[0]), parts[1]
+	rawProvider, rawModel, found := strings.Cut(primary, "/")
+	if found {
+		return mapProvider(rawProvider), rawModel
 	}
 
-	return "anthropic", primary
+	return "", primary
 }
 
 func (c *OpenClawConfig) GetDefaultWorkspace() string {
@@ -482,7 +482,7 @@ func (c *OpenClawConfig) ConvertToPicoClaw(sourceHome string) (*PicoClawConfig, 
 
 	provider, modelName := c.GetDefaultModel()
 	cfg.Agents.Defaults.Workspace = c.GetDefaultWorkspace()
-	cfg.Agents.Defaults.ModelName = modelName
+	cfg.Agents.Defaults.AccountRef = provider
 
 	providerConfigs := GetProviderConfigFromDir(sourceHome)
 	defaultAPIKey := ""
@@ -493,35 +493,64 @@ func (c *OpenClawConfig) ConvertToPicoClaw(sourceHome string) (*PicoClawConfig, 
 		defaultBaseURL = provCfg.BaseUrl
 	}
 
-	cfg.ModelList = []ModelConfig{
-		{
-			ModelName: modelName,
+	if modelName != "" {
+		cfg.Agents.Defaults.ModelName = modelName
+		cfg.ModelAliases = appendModelAlias(cfg.ModelAliases, modelName, modelName)
+	}
+	if provider != "" && modelName != "" {
+		cfg.ModelList = []ModelConfig{{
+			ModelName: provider,
+			Provider:  provider,
 			Model:     fmt.Sprintf("%s/%s", provider, modelName),
 			APIKey:    defaultAPIKey,
 			APIBase:   defaultBaseURL,
-		},
+			Enabled:   true,
+		}}
+	} else if modelName != "" {
+		warnings = append(
+			warnings,
+			fmt.Sprintf(
+				"Default model %q has no provider-qualified account; configure agents.defaults.account_ref before running PicoClaw",
+				modelName,
+			),
+		)
 	}
 
 	for provName, provCfg := range providerConfigs {
-		if provName == provider {
-			continue
-		}
-		if provCfg.ApiKey != "" {
+		if hasModelAccount(cfg.ModelList, provName) {
 			continue
 		}
 		cfg.ModelList = append(cfg.ModelList, ModelConfig{
-			ModelName: fmt.Sprintf("%s", provName),
-			Model:     fmt.Sprintf("%s/%s", provName, provName),
+			ModelName: provName,
+			Provider:  provName,
 			APIKey:    provCfg.ApiKey,
 			APIBase:   provCfg.BaseUrl,
+			Enabled:   true,
 		})
 	}
 
 	cfg.Channels = c.convertChannels(&warnings)
 
-	agentList := c.convertAgents(&warnings)
+	agentList, agentAccounts := c.convertAgents(
+		cfg.Agents.Defaults.AccountRef,
+		&cfg.ModelAliases,
+		&warnings,
+	)
 	if len(agentList) > 0 {
 		cfg.Agents.List = agentList
+	}
+	for accountRef := range agentAccounts {
+		if hasModelAccount(cfg.ModelList, accountRef) {
+			continue
+		}
+		providerCfg := providerConfigs[accountRef]
+		cfg.ModelList = append(cfg.ModelList, ModelConfig{
+			ModelName: accountRef,
+			Provider:  accountRef,
+			APIKey:    providerCfg.ApiKey,
+			APIBase:   providerCfg.BaseUrl,
+			Enabled:   true,
+		})
 	}
 
 	if c.HasSkills() {
@@ -560,19 +589,28 @@ func (c *OpenClawConfig) ConvertToPicoClaw(sourceHome string) (*PicoClawConfig, 
 
 type ModelConfig struct {
 	ModelName string `json:"model_name"`
+	Provider  string `json:"provider,omitempty"`
 	Model     string `json:"model"`
 	APIBase   string `json:"api_base,omitempty"`
 	APIKey    string `json:"api_key"`
 	Proxy     string `json:"proxy,omitempty"`
+	Enabled   bool   `json:"enabled"`
+}
+
+type ModelAliasConfig struct {
+	Name             string            `json:"name"`
+	Model            string            `json:"model"`
+	AccountOverrides map[string]string `json:"account_overrides,omitempty"`
 }
 
 type PicoClawConfig struct {
-	Agents    AgentsConfig   `json:"agents"`
-	Bindings  []AgentBinding `json:"bindings,omitempty"`
-	Channels  ChannelsConfig `json:"channels"`
-	ModelList []ModelConfig  `json:"model_list"`
-	Gateway   GatewayConfig  `json:"gateway"`
-	Tools     ToolsConfig    `json:"tools"`
+	Agents       AgentsConfig       `json:"agents"`
+	Bindings     []AgentBinding     `json:"bindings,omitempty"`
+	Channels     ChannelsConfig     `json:"channels"`
+	ModelList    []ModelConfig      `json:"model_list"`
+	ModelAliases []ModelAliasConfig `json:"model_aliases,omitempty"`
+	Gateway      GatewayConfig      `json:"gateway"`
+	Tools        ToolsConfig        `json:"tools"`
 }
 
 type AgentsConfig struct {
@@ -583,7 +621,7 @@ type AgentsConfig struct {
 type AgentDefaults struct {
 	Workspace           string   `json:"workspace"`
 	RestrictToWorkspace bool     `json:"restrict_to_workspace"`
-	Provider            string   `json:"provider"`
+	AccountRef          string   `json:"account_ref,omitempty"`
 	ModelName           string   `json:"model_name"`
 	Model               string   `json:"model,omitempty"`
 	ModelFallbacks      []string `json:"model_fallbacks,omitempty"`
@@ -595,17 +633,66 @@ type AgentDefaults struct {
 }
 
 type AgentConfig struct {
-	ID        string            `json:"id"`
-	Default   bool              `json:"default,omitempty"`
-	Name      string            `json:"name,omitempty"`
-	Workspace string            `json:"workspace,omitempty"`
-	Model     *AgentModelConfig `json:"model,omitempty"`
-	Skills    []string          `json:"skills,omitempty"`
+	ID         string            `json:"id"`
+	Default    bool              `json:"default,omitempty"`
+	Name       string            `json:"name,omitempty"`
+	Workspace  string            `json:"workspace,omitempty"`
+	AccountRef string            `json:"account_ref,omitempty"`
+	Model      *AgentModelConfig `json:"model,omitempty"`
+	Skills     []string          `json:"skills,omitempty"`
 }
 
 type AgentModelConfig struct {
 	Primary   string   `json:"primary,omitempty"`
 	Fallbacks []string `json:"fallbacks,omitempty"`
+}
+
+func splitOpenClawModelRef(raw string) (accountRef, model string, explicitAccount bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", false
+	}
+	rawProvider, rawModel, found := strings.Cut(raw, "/")
+	if !found {
+		return "", raw, false
+	}
+	rawProvider = strings.TrimSpace(rawProvider)
+	rawModel = strings.TrimSpace(rawModel)
+	if rawProvider == "" || rawModel == "" {
+		return "", "", false
+	}
+	return mapProvider(rawProvider), rawModel, true
+}
+
+func appendModelAlias(
+	aliases []ModelAliasConfig,
+	name string,
+	model string,
+) []ModelAliasConfig {
+	for i := range aliases {
+		if aliases[i].Name == name {
+			return aliases
+		}
+	}
+	return append(aliases, ModelAliasConfig{Name: name, Model: model})
+}
+
+func hasModelAccount(accounts []ModelConfig, accountRef string) bool {
+	for i := range accounts {
+		if accounts[i].ModelName == accountRef {
+			return true
+		}
+	}
+	return false
+}
+
+func hasStandardModelAlias(aliases []config.ModelAliasConfig, name string) bool {
+	for i := range aliases {
+		if aliases[i].Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 type AgentBinding struct {
@@ -924,11 +1011,16 @@ func (c *OpenClawConfig) convertChannels(warnings *[]string) ChannelsConfig {
 	return channels
 }
 
-func (c *OpenClawConfig) convertAgents(warnings *[]string) []AgentConfig {
+func (c *OpenClawConfig) convertAgents(
+	defaultAccountRef string,
+	aliases *[]ModelAliasConfig,
+	warnings *[]string,
+) ([]AgentConfig, map[string]struct{}) {
 	var agents []AgentConfig
+	accounts := make(map[string]struct{})
 
 	if c.Agents == nil {
-		return agents
+		return agents, accounts
 	}
 
 	for _, entry := range c.Agents.List {
@@ -953,11 +1045,42 @@ func (c *OpenClawConfig) convertAgents(warnings *[]string) []AgentConfig {
 		}
 
 		if entry.Model != nil {
-			primary := entry.Model.GetPrimary()
+			rawPrimary := strings.TrimSpace(entry.Model.GetPrimary())
+			accountRef, primary, explicitAccount := splitOpenClawModelRef(rawPrimary)
 			if primary != "" {
+				if explicitAccount {
+					agentCfg.AccountRef = accountRef
+					accounts[accountRef] = struct{}{}
+				}
+				selectedAccount := accountRef
+				if selectedAccount == "" {
+					selectedAccount = defaultAccountRef
+				}
+				*aliases = appendModelAlias(*aliases, primary, primary)
+				fallbacks := make([]string, 0, len(entry.Model.GetFallbacks()))
+				for _, rawFallback := range entry.Model.GetFallbacks() {
+					fallbackAccount, fallback, fallbackHasAccount := splitOpenClawModelRef(rawFallback)
+					if fallback == "" {
+						continue
+					}
+					if fallbackHasAccount &&
+						(selectedAccount == "" || fallbackAccount != selectedAccount) {
+						*warnings = append(
+							*warnings,
+							fmt.Sprintf(
+								"Agent %q fallback %q was not migrated: model aliases use one account selection; configure an account router for cross-account fallback",
+								agentID,
+								rawFallback,
+							),
+						)
+						continue
+					}
+					*aliases = appendModelAlias(*aliases, fallback, fallback)
+					fallbacks = append(fallbacks, fallback)
+				}
 				agentCfg.Model = &AgentModelConfig{
 					Primary:   primary,
-					Fallbacks: entry.Model.GetFallbacks(),
+					Fallbacks: fallbacks,
 				}
 			}
 		}
@@ -969,23 +1092,40 @@ func (c *OpenClawConfig) convertAgents(warnings *[]string) []AgentConfig {
 		agents = append(agents, agentCfg)
 	}
 
-	return agents
+	return agents, accounts
 }
 
 func (c *PicoClawConfig) ToStandardConfig() *config.Config {
 	cfg := config.DefaultConfig()
 
 	cfg.Agents.Defaults.Workspace = c.Agents.Defaults.Workspace
-	cfg.Agents.Defaults.Provider = c.Agents.Defaults.Provider
+	cfg.Agents.Defaults.AccountRef = c.Agents.Defaults.AccountRef
 	cfg.Agents.Defaults.ModelName = c.Agents.Defaults.ModelName
 	cfg.Agents.Defaults.ModelFallbacks = c.Agents.Defaults.ModelFallbacks
+	for _, alias := range c.ModelAliases {
+		cfg.ModelAliases = append(cfg.ModelAliases, config.ModelAliasConfig{
+			Name:             alias.Name,
+			Model:            alias.Model,
+			AccountOverrides: alias.AccountOverrides,
+		})
+	}
+	if cfg.Agents.Defaults.AccountRef != "" &&
+		cfg.Agents.Defaults.ModelName != "" &&
+		!hasStandardModelAlias(cfg.ModelAliases, cfg.Agents.Defaults.ModelName) {
+		cfg.ModelAliases = append(cfg.ModelAliases, config.ModelAliasConfig{
+			Name:  cfg.Agents.Defaults.ModelName,
+			Model: cfg.Agents.Defaults.ModelName,
+		})
+	}
 
 	for _, m := range c.ModelList {
 		mc := &config.ModelConfig{
 			ModelName: m.ModelName,
+			Provider:  m.Provider,
 			Model:     m.Model,
 			APIBase:   m.APIBase,
 			Proxy:     m.Proxy,
+			Enabled:   m.Enabled,
 		}
 		if m.APIKey != "" {
 			mc.SetAPIKey(m.APIKey)
@@ -1000,11 +1140,12 @@ func (c *PicoClawConfig) ToStandardConfig() *config.Config {
 	cfg.Agents.List = make([]config.AgentConfig, len(c.Agents.List))
 	for i, a := range c.Agents.List {
 		cfg.Agents.List[i] = config.AgentConfig{
-			ID:        a.ID,
-			Default:   a.Default,
-			Name:      a.Name,
-			Workspace: a.Workspace,
-			Skills:    a.Skills,
+			ID:         a.ID,
+			Default:    a.Default,
+			Name:       a.Name,
+			Workspace:  a.Workspace,
+			AccountRef: a.AccountRef,
+			Skills:     a.Skills,
 		}
 		if a.Model != nil {
 			cfg.Agents.List[i].Model = &config.AgentModelConfig{

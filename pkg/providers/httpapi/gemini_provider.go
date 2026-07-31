@@ -13,11 +13,11 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/providers/common"
 	"github.com/sipeed/picoclaw/pkg/providers/promptir"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 const (
 	geminiDefaultAPIBase                = "https://generativelanguage.googleapis.com/v1beta"
-	geminiDefaultModel                  = "gemini-2.0-flash"
 	geminiDefaultStreamingReadIdleLimit = 5 * time.Minute
 )
 
@@ -57,10 +57,6 @@ func NewGeminiProvider(
 	}
 }
 
-func (p *GeminiProvider) GetDefaultModel() string {
-	return geminiDefaultModel
-}
-
 func (p *GeminiProvider) SupportsThinking() bool {
 	return true
 }
@@ -72,11 +68,16 @@ func (p *GeminiProvider) Chat(
 	model string,
 	options map[string]any,
 ) (*LLMResponse, error) {
+	model = normalizeGeminiModel(model)
+	var err error
+	model, err = protocoltypes.RequireModel(model)
+	if err != nil {
+		return nil, err
+	}
 	if p.apiBase == "" {
 		return nil, fmt.Errorf("API base not configured")
 	}
 
-	model = normalizeGeminiModel(model)
 	requestBody := p.buildRequestBody(messages, tools, model, options)
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
@@ -139,11 +140,16 @@ func (p *GeminiProvider) ChatStreamEvents(
 	options map[string]any,
 	onChunk func(StreamChunk),
 ) (*LLMResponse, error) {
+	model = normalizeGeminiModel(model)
+	var err error
+	model, err = protocoltypes.RequireModel(model)
+	if err != nil {
+		return nil, err
+	}
 	if p.apiBase == "" {
 		return nil, fmt.Errorf("API base not configured")
 	}
 
-	model = normalizeGeminiModel(model)
 	requestBody := p.buildRequestBody(messages, tools, model, options)
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
@@ -418,9 +424,6 @@ func normalizeGeminiModel(model string) string {
 		if modelID != "" {
 			return modelID
 		}
-	}
-	if model == "" {
-		return geminiDefaultModel
 	}
 	return model
 }

@@ -43,7 +43,7 @@ scope items, and the structured output schema.
   output are both enabled, derive child plans from scope and/or agent tasks,
   run grouped-vs-split calibration without model/effort optimization, fall
   back to one full structured run on calibration failure, initialize candidate
-  providers for configured cheaper child models, run hidden children with
+  providers for configured cheaper child aliases, run hidden children with
   bounded parallelism, repair and validate each child JSON result, combine child
   structured outputs through the schema, validate the combined object, and return
   one visible step output with managed diagnostics.
@@ -53,7 +53,7 @@ scope items, and the structured output schema.
   optimization to compare only split quality; task splitting uses textual agent
   responsibilities as semantic hints, not workflow DAG steps; model
   optimization is allowed only when candidate price metadata is known from
-  managed options or model config; and all managed metadata is diagnostic
+  managed options or resolved concrete-model metadata; and all managed metadata is diagnostic
   workflow output, not a separate child workflow run graph.
 
 ## Requirements
@@ -70,9 +70,9 @@ scope items, and the structured output schema.
 | `FR-AGENT-EXECUTION-OPTIMIZATION-008` | MUST | Calibration is disabled or passes. | Hidden child calls execute with at most `max_parallel_children`; each child is prompted not to perform write actions and to return only the assigned structured result. | Step outputs include `managed_children`, each with index, label, scope count, task count, tasks, text, valid flag, repair count, structured object if present, error fields, model metadata, effort metadata, and estimated cost. | Child errors do not short-circuit sibling collection; the first error fails the step after diagnostics are built. | Operators need enough child diagnostics to audit split behavior while preserving one visible workflow step. |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-009` | MUST | Calibration fails or child planning produces one or fewer child plans. | The runtime falls back to a single full structured agent call with `Managed` disabled in the prompt context and returns that result with managed diagnostics. | `managed.calibration` persists the failure or skipped reason; no `managed_children` are emitted for a calibration-fallback result. | Fallback must still validate and repair against the same output contract; fallback errors fail the visible step normally. | Failed split quality must not silently produce a lower-quality combined result. |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-010` | MUST | All real child runs complete successfully. | Child structured outputs are combined through `CombineStructuredOutputs`; object schemas concatenate string fields, concatenate and deduplicate array fields, carry scalar/object fields from the first available child, and include unknown fields from child objects. | The visible step output text is the combined JSON, with `structured`, `structured_json`, `structured_valid`, and total `structured_repairs`. | Combined output is validated against the original schema; invalid combined output fails the visible step with `structured_error`. | Downstream workflow steps should consume one schema-valid object regardless of how many children ran internally. |
-| `FR-AGENT-EXECUTION-OPTIMIZATION-011` | MUST | Managed model optimization is enabled with candidate models. | For each child, the runtime estimates prompt and output tokens, compares known input/output prices, and selects the cheapest configured candidate with known price; the selected model is passed as an isolated child-run override. | Child outputs and `managed.optimization` record default model, selected model counts, price source, known-price flags, selected/baseline USD estimates, and total estimated savings. | Unknown-price candidates are ignored for replacement; subscription-backed models may inherit estimate prices from `subscription_equivalent_model`; provider initialization failures are logged and do not prevent the baseline agent model from running. | Agent execution optimization should reduce cost only when the runtime can explain and estimate the replacement. |
+| `FR-AGENT-EXECUTION-OPTIMIZATION-011` | MUST | Managed model optimization is enabled with candidate aliases. | For each child, the runtime estimates prompt and output tokens, compares known input/output prices, and selects the cheapest configured exact alias with known price; the selected alias is passed as an isolated child-run override while `account_ref` remains unchanged. | Child outputs and `managed.optimization` record baseline alias, selected alias counts, price source, known-price flags, selected/baseline USD estimates, and total estimated savings. | Unknown-price aliases are ignored for replacement; subscription-backed aliases may inherit estimate prices from an alias-valued `subscription_equivalent_model`; missing aliases fail strict validation and provider initialization failures do not prevent the baseline alias from running. | Agent execution optimization should reduce cost only when the runtime can explain and estimate the replacement without changing account policy. |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-012` | MUST | Managed effort optimization is enabled. | The runtime chooses a per-child reasoning effort from estimated child prompt size, scope count, and task count, and passes it as an isolated child-run override. | Child outputs and `managed.optimization.effort` record selected effort counts and whether effort changed. | Disabled effort optimization leaves the override empty; very large child prompts may choose higher effort. | Smaller child prompts can often use lower reasoning effort without changing the workflow contract. |
-| `FR-AGENT-EXECUTION-OPTIMIZATION-013` | MUST | A configured candidate child model is cheaper and absent from the agent's candidate provider map. | The runtime resolves the model config, creates a provider with the loop's provider factory, and stores it under the provider/model key used by model override resolution. | `agent.CandidateProviders` is initialized or extended in memory for the agent instance. | Missing model config or provider factory errors are returned to the caller for logging; the same candidate key is not initialized twice. | Child model overrides must have providers available before hidden child calls execute. |
+| `FR-AGENT-EXECUTION-OPTIMIZATION-013` | MUST | A configured candidate child alias is cheaper and absent from the agent's candidate provider map. | The runtime resolves that exact alias through the effective concrete account, creates the provider with the loop's provider factory, and stores it under the resolved provider/model key used by alias override resolution. | `agent.CandidateProviders` is initialized or extended in memory for the agent instance. | Missing aliases, missing effective accounts, or provider factory errors are returned to the caller for logging; the same account-and-alias candidate is not initialized twice. | Child alias overrides must have providers available before hidden child calls execute. |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-014` | MUST | The workflow dashboard displays a run whose step outputs contain `managed`. | The run detail view shows one optimization panel entry per managed step, including strategy, child count, calibration status, model-change status, effort-change status, estimated savings, and selected model information. | Dashboard rendering does not mutate run state. | Missing or malformed managed metadata hides the panel or displays fallback values without breaking the run detail page. | Agent execution optimization must be inspectable by operators without reading raw JSON output. |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-015` | MUST | A split contract has a passing calibration and calibration caching is enabled. | The agent instance remembers the passing calibration by a hash over strategy, model, prompt/context hash, output schema, task list, chunking options, child plan shape, scope path/hash/content/language signals, repository signals, and the effective child prompt target used by the planner. Exact matching runs calibrate aggressively at first, then only when the expanding use interval is due. When an exact key is absent, the runtime may borrow once from a trusted similar entry, create a separate provisional entry for the new key, and force verification on that key's next matching use. Verification success promotes the provisional entry with inherited confidence adjusted by similarity and split-fit score; verification failure clears inherited confidence and the key behaves like a fresh untrusted entry. Passing calibration stores a learned child prompt target based on observed child prompt sizes so later similar splits can reuse the learned target instead of a static configuration value. | `managed.calibration.status` is `trusted_cache` on exact or similar cache hits; `managed.calibration.cache` records the key, decision (`hit`, `similar_hit`, `borrowed_due`, `due`, `miss`, or `previous_not_trusted`), use count, success streak, provisional flag, borrowed source/similarity when present, split-fit score, next due use, model, language, repository, scope, task metadata, effective target, learned target, target source, and observed child prompt token statistics. | Failed or skipped calibrations are not trusted; materially different strategy, plan shape, schema, prompt, tasks, model, language, repository/scope identity, chunking, or effective target below the similarity threshold produces a cache miss. Low split-fit scores shorten the next probe interval even after successful calibration. | Proven split behavior should reduce repeated calibration token spend without blindly trusting small changes or weak split plans. |
 
@@ -163,14 +163,14 @@ optimization.model.candidates list of model aliases or candidate maps
 optimization.effort.enabled  enable effort override, default true
 ```
 
-Candidate model maps may include:
+Candidate maps name exact aliases and may include:
 
 ```text
 name | model
 input_price_per_1m
 output_price_per_1m
 subscription
-subscription_equivalent_model
+subscription_equivalent_model  exact alias used only for price estimation
 ```
 
 ## Auxiliary Interfaces
@@ -239,13 +239,14 @@ subscription_equivalent_model
     details in `managed.calibration` and without `managed_children`.
 13. Passing or disabled calibration runs real children through a semaphore
     bounded by `max_parallel_children`.
-14. For each child, the runtime estimates child prompt tokens, reads candidate
-    prices from managed options and model config, selects the cheapest known
-    candidate when model optimization is enabled, and chooses reasoning effort
-    when effort optimization is enabled.
-15. Before optimized child calls, configured candidate providers are resolved
-    and registered in `agent.CandidateProviders` so model overrides can be
-    executed by the normal agent pipeline.
+14. For each child, the runtime estimates child prompt tokens, reads alias
+    prices from managed options and resolved concrete-model metadata, selects
+    the cheapest known exact alias when optimization is enabled, and chooses
+    reasoning effort when effort optimization is enabled. It never changes the
+    effective `account_ref`.
+15. Before optimized child calls, candidate aliases are resolved through the
+    effective concrete account and their providers are registered in
+    `agent.CandidateProviders` so alias overrides can use the normal pipeline.
 16. Each child call suppresses chat response publishing, disables visible
     history writes, suppresses tool feedback, and tells the child not to perform
     write actions.
@@ -263,9 +264,10 @@ Agent execution optimization is a specialization of workflow `agent/*` step
 execution and therefore depends on the workflows feature for YAML parsing, step
 persistence, run records, dashboard run details, and compatibility gating. It
 depends on agent conversations for agent definitions, prompt construction, hidden
-no-history child calls, model override routing, provider factories, and
-reasoning-effort overrides. It depends on model configuration for candidate
-price metadata and subscription-equivalent estimates. It intentionally does
+no-history child calls, alias override routing, provider factories, and
+reasoning-effort overrides. It depends on strict model aliases and concrete
+account configuration for candidate price metadata and alias-valued
+subscription-equivalent estimates. It intentionally does
 not own workflow DAG execution, reusable workflows, workflow triggers, or
 domain-specific split/combine rules.
 
@@ -303,7 +305,7 @@ domain-specific split/combine rules.
   child that completed.
 - Combined validation errors fail the visible step even when every child was
   individually valid.
-- Unknown-price candidate models do not replace the default model.
+- Unknown-price candidate aliases do not replace the baseline alias.
 - Provider initialization failures are warnings during workflow execution and
   do not fail strategy selection by themselves.
 - Hidden child prompts instruct the agent not to perform write actions, but
@@ -320,7 +322,7 @@ domain-specific split/combine rules.
 | `FR-AGENT-EXECUTION-OPTIMIZATION-004`, `FR-AGENT-EXECUTION-OPTIMIZATION-005`, `FR-AGENT-EXECUTION-OPTIMIZATION-006` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go) |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-007`, `FR-AGENT-EXECUTION-OPTIMIZATION-009`, `FR-AGENT-EXECUTION-OPTIMIZATION-015` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/workflows/agent_output_test.go](../../pkg/workflows/agent_output_test.go), [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go), [pkg/workflows/agent_output.go](../../pkg/workflows/agent_output.go) |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-008`, `FR-AGENT-EXECUTION-OPTIMIZATION-010` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/workflows/agent_output_test.go](../../pkg/workflows/agent_output_test.go), [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go), [pkg/workflows/agent_output.go](../../pkg/workflows/agent_output.go) |
-| `FR-AGENT-EXECUTION-OPTIMIZATION-011`, `FR-AGENT-EXECUTION-OPTIMIZATION-012`, `FR-AGENT-EXECUTION-OPTIMIZATION-013` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go), [pkg/config/model_config_test.go](../../pkg/config/model_config_test.go) |
+| `FR-AGENT-EXECUTION-OPTIMIZATION-011`, `FR-AGENT-EXECUTION-OPTIMIZATION-012`, `FR-AGENT-EXECUTION-OPTIMIZATION-013` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go), [pkg/config/model_config_test.go](../../pkg/config/model_config_test.go), [pkg/config/subscription_equivalent_model_test.go](../../pkg/config/subscription_equivalent_model_test.go) |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-014` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [web/frontend/src/components/workflows/workflows-page.tsx](../../web/frontend/src/components/workflows/workflows-page.tsx) |
 
 ## Implementation Anchors
@@ -345,5 +347,6 @@ Owns: CODE pkg/agent/workflow_managed.go
 Owns: TEST pkg/workflows/agent_output_test.go
 Owns: TEST pkg/workflows/executor_test.go
 Owns: TEST pkg/agent/workflow_runtime_test.go
+Owns: TEST pkg/config/subscription_equivalent_model_test.go *
 Owns: WORKFLOW agent/* with with.output
 Owns: WORKFLOW agent/* with with.managed

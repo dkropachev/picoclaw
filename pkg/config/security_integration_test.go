@@ -272,7 +272,7 @@ func TestAllSecurityKeysAccessible(t *testing.T) {
         "enabled": true
       },
       "perplexity": {
-        "enabled": true
+        "enabled": false
       },
       "kagi": {
         "enabled": true

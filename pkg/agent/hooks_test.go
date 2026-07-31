@@ -39,9 +39,13 @@ func newHookTestLoop(
 				MaxToolIterations: 10,
 			},
 		},
+		ModelAliases: []config.ModelAliasConfig{
+			{Name: "hook-model", Model: "hook-model"},
+			{Name: "process-model", Model: "process-model"},
+		},
 	}
 
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	al := newTestAgentLoopWithStrictModels(cfg, bus.NewMessageBus(), provider)
 	agent := al.registry.GetDefaultAgent()
 	if agent == nil {
 		t.Fatal("expected default agent")
@@ -105,10 +109,6 @@ func (p *llmHookTestProvider) Chat(
 	return &providers.LLMResponse{
 		Content: "provider content",
 	}, nil
-}
-
-func (p *llmHookTestProvider) GetDefaultModel() string {
-	return "llm-hook-provider"
 }
 
 type llmObserverHook struct {
@@ -680,10 +680,6 @@ func (p *toolHookProvider) Chat(
 	return &providers.LLMResponse{
 		Content: last.Content,
 	}, nil
-}
-
-func (p *toolHookProvider) GetDefaultModel() string {
-	return "tool-hook-provider"
 }
 
 type echoTextTool struct{}
@@ -1338,10 +1334,6 @@ func (p *multiToolProvider) Chat(
 	return &providers.LLMResponse{
 		Content: p.finalContent,
 	}, nil
-}
-
-func (p *multiToolProvider) GetDefaultModel() string {
-	return "multi-tool-provider"
 }
 
 func TestAgentLoop_HookRespond_InterruptSkipsRemaining(t *testing.T) {

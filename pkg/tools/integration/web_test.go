@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1087,6 +1088,7 @@ func TestNewWebSearchTool_PropagatesProxy(t *testing.T) {
 		tool, err := NewWebSearchTool(WebSearchToolOptions{
 			PerplexityEnabled:    true,
 			PerplexityAPIKeys:    []string{"k"},
+			PerplexityModel:      "sonar",
 			PerplexityMaxResults: 3,
 			Proxy:                "http://127.0.0.1:7890",
 		})
@@ -1172,6 +1174,45 @@ func TestNewWebSearchTool_PropagatesProxy(t *testing.T) {
 			t.Fatalf("proxy URL = %v, want %q", proxyURL, "http://127.0.0.1:7890")
 		}
 	})
+}
+
+func TestPerplexitySearchProviderRequiresAndUsesConfiguredModel(t *testing.T) {
+	withoutModel := &PerplexitySearchProvider{
+		keyPool: NewAPIKeyPool([]string{"key"}),
+		client:  &http.Client{},
+	}
+	if _, err := withoutModel.Search(context.Background(), "query", 3, ""); err == nil ||
+		err.Error() != "no model configured" {
+		t.Fatalf("Search() error = %v, want no model configured", err)
+	}
+
+	provider := &PerplexitySearchProvider{
+		keyPool: NewAPIKeyPool([]string{"key"}),
+		model:   "sonar-pro",
+		client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			var payload map[string]any
+			if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			if got := payload["model"]; got != "sonar-pro" {
+				t.Fatalf("request model = %#v, want sonar-pro", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					`{"choices":[{"message":{"content":"result"}}]}`,
+				)),
+			}, nil
+		})},
+	}
+	result, err := provider.Search(context.Background(), "query", 3, "")
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if !strings.Contains(result, "result") {
+		t.Fatalf("Search() = %q, want result content", result)
+	}
 }
 
 // TestWebTool_TavilySearch_Success verifies successful Tavily search

@@ -48,7 +48,8 @@ func TestStatusCmd_RecognizesProviderFieldWithoutModelPrefix(t *testing.T) {
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
-				ModelName:   "gpt-5.4",
+				AccountRef:  "openai-account",
+				ModelName:   "coding",
 				Workspace:   workspace,
 				Provider:    "openai",
 				MaxTokens:   65536,
@@ -57,7 +58,7 @@ func TestStatusCmd_RecognizesProviderFieldWithoutModelPrefix(t *testing.T) {
 		},
 		ModelList: []*config.ModelConfig{
 			{
-				ModelName: "gpt-5.4",
+				ModelName: "openai-account",
 				Provider:  "openai",
 				Model:     "gpt-5.4",
 				APIBase:   "https://api.openai.com/v1",
@@ -73,6 +74,10 @@ func TestStatusCmd_RecognizesProviderFieldWithoutModelPrefix(t *testing.T) {
 				Enabled:   true,
 			},
 		},
+		ModelAliases: []config.ModelAliasConfig{{
+			Name:  "coding",
+			Model: "gpt-5.4",
+		}},
 	}
 	if err := config.SaveConfig(configPath, cfg); err != nil {
 		t.Fatalf("config.SaveConfig() error = %v", err)
@@ -85,5 +90,11 @@ func TestStatusCmd_RecognizesProviderFieldWithoutModelPrefix(t *testing.T) {
 	}
 	if !strings.Contains(output, "Qwen API: \u2713") {
 		t.Fatalf("status output missing Qwen provider: %s", output)
+	}
+	if !strings.Contains(output, "Account: openai-account") {
+		t.Fatalf("status output missing account reference: %s", output)
+	}
+	if !strings.Contains(output, "Model alias: coding") {
+		t.Fatalf("status output missing model alias: %s", output)
 	}
 }

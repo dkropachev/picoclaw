@@ -81,10 +81,6 @@ func (p *HTTPProvider) ChatStreamEvents(
 	return p.delegate.ChatStreamEvents(ctx, messages, tools, model, options, onChunk)
 }
 
-func (p *HTTPProvider) GetDefaultModel() string {
-	return ""
-}
-
 func (p *HTTPProvider) SupportsNativeSearch() bool {
 	return p.delegate.SupportsNativeSearch()
 }

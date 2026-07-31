@@ -29,7 +29,7 @@ auxiliary to this capability.
 | --- | --- | --- | --- |
 | `FR-AGENT-001` | MUST | A turn starts from normalized input and creates a scoped runtime context containing agent, session, channel, chat, sender, turn ID, and media metadata when available. | Downstream tools, events, and persistence need stable context. |
 | `FR-AGENT-002` | MUST | Prompt construction includes configured identity, workspace instructions, memory, session history, skills, and tool definitions unless the turn profile disables a block. | Current behavior depends on composable prompt contributors. |
-| `FR-AGENT-003` | MUST | Model resolution uses configured agent model candidates first, then defaults, then model list fallbacks, preserving provider/model identity for retries and updating the active provider when a fallback candidate succeeds; model-router aliases evaluate the current turn and select a configured model or account-router target before provider execution; router aliases expand credential-account blocks and load-balanced blocks to selected account candidates before provider execution and record fallback outcomes by stable account identity; Pico chat may provide a per-turn selected account and upstream model ID, which apply only to that turn across router candidates, including isolated `/btw`, while preserving account-scoped providers; startup may create the first runnable reachable account provider but retains the router alias so graph fallback, not bootstrap-provider fallthrough, governs execution; Codex OAuth and GitHub Copilot credential-backed requests preserve any non-empty requested model name and only substitute the provider default for an empty model; GitHub Copilot credential-backed entries resolve the selected stored credential into a direct HTTPS API client while non-credential entries keep the local bridge path. | Multi-provider behavior must be reproducible and provider-side model rollout names must not be rewritten locally. |
+| `FR-AGENT-003` | MUST | Every execution selection consists of an `account_ref` and an exact model alias. Per-agent empty fields inherit the corresponding agent defaults; primary may name an enabled model router, while fallbacks name exact aliases only. Account routers first select a concrete account, model routers select an alias, and the alias then resolves to its base concrete model or a per-concrete-account override. Override keys may never name account routers. Empty aliases fail before provider/network setup with `no model configured`; unknown aliases, raw model IDs, fuzzy model-list matches, and provider defaults are never substituted. Retries and fallbacks preserve the selected concrete account identity. | Multi-provider behavior must be explicit and reproducible, with account choice independent from model choice. |
 | `FR-AGENT-004` | MUST | LLM responses with tool calls execute registered tools until the configured maximum tool iterations is reached or no tool calls remain. | Prevents unbounded loops while preserving agent tool use. |
 | `FR-AGENT-005` | MUST | Tool execution errors are returned to the model or user in normalized error text without panicking the turn loop. | Tool failures are normal runtime outcomes. |
 | `FR-AGENT-006` | MUST | Streaming output emits deltas when supported and still produces a final assistant message for session storage. | Streaming and durable history must stay consistent. |
@@ -44,7 +44,7 @@ auxiliary to this capability.
 | `FR-AGENT-015` | MUST | An admitted inbound message's opaque turn-UX identity remains attached to its session reservation, active or rescued continuation, same-chat tool/stream/final/error output, and exact cleanup decision. A successfully buffered output stops only that identity's typing registration and leaves its reaction/placeholder for delivery-time cleanup; a no-output, rejected, canceled, failed, or panicked turn removes only its exact artifacts. Same-chat steering atomically queues and rebinds its identity to the pinned active owner after slow message preparation rechecks ownership; cross-chat steering, enqueue failure, and abandoned ownership clean the secondary exact identity, while committed steering is rescued or transferred instead of being stranded. Channel-side typing/reaction callbacks remain pinned to the provider generation that created them, so late older callbacks cannot clear a newer turn. | Concurrent turns and steering must not strand transient UX, erase a newer provider generation, or lose a committed user message. |
 | `FR-AGENT-016` | MUST | The original `ChannelManager` and four-argument `MessageBus.GetStreamer` contracts remain sufficient for agent integrations. Exact typing stop, cleanup, rebind, placeholder, and turn-scoped streaming are additive optional capabilities: legacy managers fall back to chat-scoped typing stop and placeholder calls plus one detached bounded tool-feedback cleanup, rebind is a no-op, and legacy buses use `GetStreamer`; capable implementations receive the exact turn identity instead. | Existing channel and message-bus implementations must remain source-compatible while built-in channels gain exact ownership. |
 | `FR-AGENT-017` | MUST | Agent-owned inbound snapshots preserve process-local turn/event identity, deduplication, occurrence time, subject, conversation, safe attachment descriptors, and transport trust facts through primary turns, queued continuations, and derived outbound contexts. Mutable maps, occurrence-time pointers, and attachment slices are detached when copied, and these fields remain excluded from serialized routing context. | Asynchronous turn and delivery work must retain admission facts without aliasing caller-owned state or expanding the serialized contract. |
-| `FR-AGENT-018` | MUST | The authenticated Agent management API and responsive Agent UI project an implicit `main` policy without writing an empty config and support ordered create, inspect, edit, default-selection, and delete operations against an explicit opaque config revision. The surface preserves model inheritance versus an explicit empty fallback list, labels editable values as configured policy, preserves fields it does not expose, reports whether a gateway restart is required, and never deletes workspaces, sessions, threads, history, runs, or workflow files. | Operators need complete, concurrency-safe browser management of persistent agent policy without mistaking configured values for workspace overrides or destroying runtime data. |
+| `FR-AGENT-018` | MUST | The authenticated Agent management API and responsive Agent UI project an implicit `main` policy without writing an empty config and support ordered create, inspect, edit, default-selection, and delete operations against an explicit opaque config revision. Each resource exposes an optional `account_ref`; model primary/fallback values are validated as exact aliases, except that primary may be an enabled model router. Empty per-agent values inherit defaults, and the surface preserves that inheritance versus an explicit empty fallback list. | Operators need concurrency-safe browser management of the same strict account-plus-alias policy used at runtime. |
 | `FR-AGENT-019` | MUST | The selected-agent UI exposes deep-linkable Overview, Capabilities, and Activity tabs without replacing the ordered management grid. Capabilities use a separate composite config-plus-workspace revision and preserve the exact tools all/none/selected, skills inherit/none/selected, and MCP all/none/selected states; an edit changes only requested frontmatter nodes while preserving unrelated YAML nodes, comments, ordering, and prompt body, retains unknown existing selections, and upgrades legacy `AGENTS.md` only after explicit confirmation without deleting it. Malformed, unterminated, unsafe, or unsupported-platform definition state is fail-closed and read-only. Capability and activity views use only bounded sanitized projections, retain dirty drafts across conflicts until explicit reload, report required gateway restart, and never expose a raw-file editor or persist activity cursors. | Operators need full browser control and visibility for one agent without collapsing workspace policy into global config, overwriting concurrent prompt edits, leaking runtime payloads, or discarding forward-compatible declarations. |
 
 ## Data And State Model
@@ -86,6 +86,7 @@ Owns: CLI cmd/picoclaw/internal/status/*
 Owns: CLI cmd/picoclaw/internal/version/*
 Owns: CONFIG.agents*
 Owns: CONFIG.model_list*
+Owns: CONFIG.model_aliases*
 Owns: CONFIG.build_info
 Owns: CONFIG.version
 Owns: CONFIG.voice*
@@ -104,6 +105,7 @@ Owns: TEST pkg/agent/*
 Owns: TEST pkg/providers/*
 Owns: TEST pkg/tokenizer/*
 Owns: TEST pkg/audio/*
+Owns: TEST pkg/config/voice_selection_test.go *
 Owns: TOOL spawn
 Owns: TOOL spawn_status
 Owns: TOOL subagent
@@ -116,7 +118,7 @@ Owns: EVENT agent.*
 | --- | --- | --- | --- |
 | CLI | `picoclaw agent`, `picoclaw model`, `picoclaw status`, `picoclaw version` | Direct agent use, model selection, status, and build metadata. | `FR-AGENT-003`, `FR-AGENT-009` |
 | CLI | root `picoclaw` command registration | Compose feature-owned subcommands such as workflow and event operations while leaving their implementation and policy in the owning package. | `FR-AGENT-009` |
-| Config | `agents.*`, `model_list.*` | Agent defaults, per-agent models, fallbacks, turn profile, retry, token, media, tool iteration policy, and optional model price metadata used by workflow-managed child selection. | `FR-AGENT-002`, `FR-AGENT-003`, `FR-AGENT-004` |
+| Config | `agents.*`, `model_aliases[]`, `account_routers[]`, `model_routers[]`, `model_list[]` | Default/per-agent account refs, exact aliases and fallback aliases, alias-to-concrete-model mappings, account overrides, routing, provider transport configuration, and execution policy. | `FR-AGENT-002`, `FR-AGENT-003`, `FR-AGENT-004` |
 | Config | `model_list[].reasoning_effort` | Optional OpenAI-style reasoning effort forwarded only after shared normalization and validation. | `FR-AGENT-003`, `FR-AGENT-010` |
 | Tools | `spawn`, `spawn_status`, `subagent`, `delegate` | Child work delegation and status reporting. | `FR-AGENT-007` |
 | Runtime | `AgentLoop.PauseRuntimeForReload`, retained runtime leases, provider/config reload | Quiesce root and asynchronous runtime users across a registry generation swap, service commit, or rollback. | `FR-AGENT-013` |
@@ -130,9 +132,11 @@ Owns: EVENT agent.*
 
 1. Build an `InboundContext` and resolve the route/session before prompt work.
 2. Resolve prompt contributors and turn profile decisions before provider calls.
-3. Select model candidates, normalize optional provider controls such as
-   `reasoning_effort`, then execute provider attempts with retry/fallback
-   policy. A credential-backed Codex attempt that returns the structured usage
+3. Resolve the effective `account_ref` and exact alias. Expand an account
+   router to concrete account candidates, evaluate any model router to an
+   alias, resolve that alias separately for each concrete account, and only
+   then build providers. Normalize optional controls such as `reasoning_effort`
+   and execute provider attempts with retry/fallback policy. A credential-backed Codex attempt that returns the structured usage
    exhaustion error serializes by account, rechecks the authoritative main
    limit and reset count, consumes at most one eligible reset, reconciles the
    same window, and retries the same provider request once after a confirmed
@@ -198,16 +202,13 @@ turn-finalization path.
 Git workspaces are allocated through the registered tool during a turn and are
 released or reconciled by the shared turn-finalization path, while checkout
 inventory and retention behavior are owned by the git workspaces feature.
-Account router aliases plug into this same candidate-selection step: the turn
-loop expands the router to concrete account candidates, can reselect after
-context compression, and records fallback outcomes without changing provider
-prompt serialization. Credential-backed GitHub Copilot entries use the same
-account identity and fallback accounting as other provider accounts while
-non-credential GitHub Copilot entries continue to represent the local bridge.
-Model-router aliases plug into the same step before light/heavy routing and can
-target either a concrete model alias or an account-router alias. Pico chat
-account/model overrides are turn-scoped and do not rewrite persisted
-`model_list[]`, `account_routers[]`, or `model_routers[]` entries.
+Account routers plug into the account-selection step: the turn loop expands the
+router to concrete candidates, can reselect after context compression, and
+records fallback outcomes without changing provider prompt serialization.
+Model routers independently choose only configured aliases. Pico chat supplies
+`account_ref` plus alias-valued `model_name`; these turn-scoped selections do not
+rewrite `model_list[]`, `model_aliases[]`, `account_routers[]`, or
+`model_routers[]`.
 [Chat channels](chat-channels.md) create the opaque turn-UX identity and own the
 provider-specific typing, reaction, placeholder, and generation-pinned callback
 implementations. This feature carries that identity through turn ownership,
@@ -218,7 +219,10 @@ metadata but does not persist or reinterpret those trust facts.
 
 ## Failure And Edge Cases
 
-- Missing or disabled providers fail the turn with a clear model/provider error.
+- Missing aliases fail with exactly `no model configured`; unknown aliases,
+  disabled/missing accounts, and unsupported alias/account combinations fail
+  before a provider request. Provider defaults and raw model fallbacks are not
+  recovery paths.
 - Missing GitHub Copilot credentials fail before provider execution, while
   local bridge Copilot entries continue to report local transport failures.
 - Codex reset lookup or redemption failure preserves the original
@@ -271,7 +275,7 @@ metadata but does not persist or reinterpret those trust facts.
 | Requirement IDs | Evidence |
 | --- | --- |
 | `FR-AGENT-001`, `FR-AGENT-002`, `FR-AGENT-006`, `FR-AGENT-008` | [pkg/agent/context_test.go](../../pkg/agent/context_test.go), [pkg/agent/pipeline_streaming_test.go](../../pkg/agent/pipeline_streaming_test.go), [pkg/agent/thinking_test.go](../../pkg/agent/thinking_test.go) |
-| `FR-AGENT-003` | [pkg/agent/model_resolution_test.go](../../pkg/agent/model_resolution_test.go), [pkg/agent/account_router_test.go](../../pkg/agent/account_router_test.go), [pkg/providers/factory_test.go](../../pkg/providers/factory_test.go), [pkg/providers/fallback_test.go](../../pkg/providers/fallback_test.go), [pkg/providers/oauth/codex_provider_test.go](../../pkg/providers/oauth/codex_provider_test.go) |
+| `FR-AGENT-003` | [pkg/agent/model_resolution_test.go](../../pkg/agent/model_resolution_test.go), [pkg/agent/account_router_test.go](../../pkg/agent/account_router_test.go), [pkg/config/voice_selection_test.go](../../pkg/config/voice_selection_test.go), [pkg/providers/factory_test.go](../../pkg/providers/factory_test.go), [pkg/providers/fallback_test.go](../../pkg/providers/fallback_test.go), [pkg/providers/oauth/codex_provider_test.go](../../pkg/providers/oauth/codex_provider_test.go) |
 | `FR-AGENT-004`, `FR-AGENT-005` | [pkg/agent/pipeline_execute_test.go](../../pkg/agent/pipeline_execute_test.go), [pkg/agent/error_format_test.go](../../pkg/agent/error_format_test.go), [pkg/tools/registry_test.go](../../pkg/tools/registry_test.go) |
 | `FR-AGENT-007` | [pkg/agent/subturn_test.go](../../pkg/agent/subturn_test.go), [pkg/tools/subagent_tool_test.go](../../pkg/tools/subagent_tool_test.go), [pkg/tools/spawn_status_test.go](../../pkg/tools/spawn_status_test.go) |
 | `FR-AGENT-009` | [cmd/picoclaw/main_test.go](../../cmd/picoclaw/main_test.go), [cmd/picoclaw/internal/agent/command_test.go](../../cmd/picoclaw/internal/agent/command_test.go), [cmd/picoclaw/internal/model/command_test.go](../../cmd/picoclaw/internal/model/command_test.go), [cmd/picoclaw/internal/events](../../cmd/picoclaw/internal/events) |

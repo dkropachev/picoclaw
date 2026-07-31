@@ -10,7 +10,6 @@ export interface ProviderCatalogEntry {
   defaultApiBase?: string
   requiresApiKey: boolean
   createAllowed: boolean
-  defaultModelAllowed: boolean
   supportsFetch: boolean
   defaultAuthMethod?: string
   authMethodLocked?: boolean
@@ -39,7 +38,6 @@ function toCatalogEntry(option: ModelProviderOption): ProviderCatalogEntry {
     defaultApiBase,
     requiresApiKey: !option.empty_api_key_allowed,
     createAllowed: option.create_allowed,
-    defaultModelAllowed: option.default_model_allowed,
     supportsFetch: option.supports_fetch === true,
     defaultAuthMethod: option.default_auth_method || undefined,
     authMethodLocked: option.auth_method_locked,

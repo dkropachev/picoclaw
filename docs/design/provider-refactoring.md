@@ -3,6 +3,11 @@
 > Issue: #283
 > Discussion: #122
 > Branch: feat/refactor-provider-by-protocol
+>
+> **Historical design:** This document predates config version 4. Its
+> `model_list` examples explain the provider-transport refactor only. Current
+> execution selects `account_ref` plus an exact `model_aliases[].name`; it does
+> not use `model_list[].model_name` as the selected model.
 
 ## 1. Current Problems
 
@@ -190,7 +195,9 @@ Identify protocol via prefix in `model` field:
 }
 ```
 
-Each Agent only needs to specify `model` (corresponds to `model_name` in `model_list`).
+In current version 4 configuration, each agent independently selects an
+`account_ref` plus an exact alias from `model_aliases[]`. The examples above are
+retained as historical context for the earlier provider refactor.
 
 ### 3.3 Industry Comparison
 

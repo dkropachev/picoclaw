@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -73,8 +74,6 @@ var (
 	oauthSetCredential            = auth.SetCredential
 	oauthDeleteCredential         = auth.DeleteCredential
 	oauthLoadStore                = auth.LoadStore
-	oauthLoadConfig               = config.LoadConfig
-	oauthSaveConfig               = config.SaveConfig
 	oauthFetchAntigravityProject  = providers.FetchAntigravityProjectID
 	oauthFetchGoogleUserEmailFunc = fetchGoogleUserEmail
 )
@@ -576,6 +575,10 @@ func (h *Handler) handleOAuthLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.clearProviderAuthMethod(provider, credentialID); err != nil {
+		if errors.Is(err, config.ErrConfigRevisionMismatch) {
+			http.Error(w, "Configuration changed; reload and try again", http.StatusConflict)
+			return
+		}
 		http.Error(w, fmt.Sprintf("failed to update config: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -954,7 +957,15 @@ func credentialNameFromEmail(email string) string {
 }
 
 func (h *Handler) clearProviderAuthMethod(provider, credentialID string) error {
-	cfg, err := oauthLoadConfig(h.configPath)
+	h.configMutationMu.Lock()
+	defer h.configMutationMu.Unlock()
+	return h.clearProviderAuthMethodLocked(provider, credentialID)
+}
+
+// clearProviderAuthMethodLocked clears account auth metadata while
+// configMutationMu is held.
+func (h *Handler) clearProviderAuthMethodLocked(provider, credentialID string) error {
+	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		return err
 	}
@@ -973,7 +984,8 @@ func (h *Handler) clearProviderAuthMethod(provider, credentialID string) error {
 		cfg.ModelList[i].AuthMethod = ""
 	}
 
-	return oauthSaveConfig(h.configPath, cfg)
+	_, err = h.saveConfigIfRevision(h.configPath, cfg, revision)
+	return err
 }
 
 func modelCredentialID(provider string, modelCfg *config.ModelConfig) string {

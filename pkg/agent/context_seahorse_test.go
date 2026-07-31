@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/seahorse"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
 
 // seahorseTestProvider implements providers.LLMProvider for seahorse tests.
@@ -30,10 +33,6 @@ func (m *seahorseTestProvider) Chat(
 		return m.chatFn(ctx, messages, tools, model, options)
 	}
 	return &providers.LLMResponse{Content: "mock response"}, nil
-}
-
-func (m *seahorseTestProvider) GetDefaultModel() string {
-	return "mock-model"
 }
 
 func TestSeahorseCMRegistration(t *testing.T) {
@@ -443,6 +442,406 @@ func TestProviderToCompleteFn(t *testing.T) {
 	}
 }
 
+func TestAgentProviderToCompleteFnUsesConcreteAliasModel(t *testing.T) {
+	var capturedModel string
+	provider := &seahorseTestProvider{
+		chatFn: func(
+			_ context.Context,
+			_ []providers.Message,
+			_ []providers.ToolDefinition,
+			model string,
+			_ map[string]any,
+		) (*providers.LLMResponse, error) {
+			capturedModel = model
+			return &providers.LLMResponse{Content: "summary"}, nil
+		},
+	}
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         t.TempDir(),
+				AccountRef:        "seahorse-account",
+				ModelName:         "seahorse-summary",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "seahorse-account",
+			Provider:  "openai",
+			APIBase:   "http://example.invalid/v1",
+			APIKeys:   config.SimpleSecureStrings("test-key"),
+			Enabled:   true,
+		}},
+		ModelAliases: []config.ModelAliasConfig{{
+			Name:  "seahorse-summary",
+			Model: "upstream-seahorse-summary",
+		}},
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), provider)
+	defer al.Close()
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("default agent is nil")
+	}
+	if agent.ConfigurationError != nil {
+		t.Fatalf("default agent configuration error = %v", agent.ConfigurationError)
+	}
+
+	completeFn := agentProviderToCompleteFn(al, agent)
+	if _, err := completeFn(
+		context.Background(),
+		"summarize this",
+		seahorse.CompleteOptions{MaxTokens: 500, Temperature: 0.3},
+	); err != nil {
+		t.Fatalf("completeFn: %v", err)
+	}
+	if capturedModel != "upstream-seahorse-summary" {
+		t.Fatalf("model = %q, want concrete upstream model", capturedModel)
+	}
+}
+
+func TestAgentProviderToCompleteFnUsesReloadedAgentGeneration(t *testing.T) {
+	workspace := t.TempDir()
+	newConfig := func(concreteModel string) *config.Config {
+		return &config.Config{
+			Agents: config.AgentsConfig{
+				Defaults: config.AgentDefaults{
+					Workspace:         workspace,
+					AccountRef:        "seahorse-account",
+					ModelName:         "seahorse-summary",
+					MaxTokens:         4096,
+					MaxToolIterations: 10,
+					ContextManager:    "seahorse",
+				},
+			},
+			ModelList: []*config.ModelConfig{{
+				ModelName: "seahorse-account",
+				Provider:  "openai",
+				APIBase:   "http://example.invalid/v1",
+				APIKeys:   config.SimpleSecureStrings("test-key"),
+				Enabled:   true,
+			}},
+			ModelAliases: []config.ModelAliasConfig{{
+				Name:  "seahorse-summary",
+				Model: concreteModel,
+			}},
+		}
+	}
+
+	providerA := &runtimeGateProvider{
+		name:   "provider-a",
+		closed: make(chan struct{}),
+		called: make(chan struct{}, 1),
+	}
+	providerB := &contextCompletionCaptureProvider{response: "generation-b summary"}
+	cfgA := newConfig("generation-a-model")
+	al := NewAgentLoop(cfgA, bus.NewMessageBus(), providerA)
+	defer al.Close()
+
+	manager, ok := al.contextManager.(*seahorseContextManager)
+	if !ok {
+		t.Fatalf("context manager = %T, want seahorse", al.contextManager)
+	}
+
+	agentA := al.GetRegistry().GetDefaultAgent()
+	if agentA == nil || agentA.ConfigurationError != nil {
+		t.Fatalf("generation A agent = %#v", agentA)
+	}
+	completeFn := agentProviderToCompleteFn(al, agentA)
+
+	cfgB := newConfig("generation-b-model")
+	if err := al.ReloadProviderAndConfig(
+		context.Background(),
+		providerB,
+		cfgB,
+	); err != nil {
+		t.Fatalf("ReloadProviderAndConfig() error = %v", err)
+	}
+	if al.contextManager == manager {
+		t.Fatal("reload retained the previous seahorse manager")
+	}
+	if engine, _ := manager.engineForSession("closed-generation"); engine != nil {
+		t.Fatal("previous seahorse manager still exposes an engine after reload")
+	}
+	select {
+	case <-providerA.closed:
+	default:
+		t.Fatal("generation A provider was not closed by reload")
+	}
+
+	got, err := completeFn(
+		context.Background(),
+		"summarize after reload",
+		seahorse.CompleteOptions{MaxTokens: 500, Temperature: 0.3},
+	)
+	if err != nil {
+		t.Fatalf("completion after reload: %v", err)
+	}
+	if got != "generation-b summary" {
+		t.Fatalf("completion = %q, want generation B response", got)
+	}
+	select {
+	case <-providerA.called:
+		t.Fatal("persistent seahorse completion called the closed generation A provider")
+	default:
+	}
+	models := providerB.Models()
+	if len(models) != 1 || models[0] != "generation-b-model" {
+		t.Fatalf("generation B models = %#v, want [generation-b-model]", models)
+	}
+}
+
+func TestReloadRebuildsSeahorseEnginesForAgentTopologyAndWorkspace(t *testing.T) {
+	root := t.TempDir()
+	newConfig := func(agentID, workspace string) *config.Config {
+		return &config.Config{
+			Agents: config.AgentsConfig{
+				Defaults: config.AgentDefaults{
+					Workspace:         filepath.Join(root, "default"),
+					AccountRef:        "seahorse-account",
+					ModelName:         "seahorse-summary",
+					MaxTokens:         4096,
+					MaxToolIterations: 10,
+					ContextManager:    "seahorse",
+				},
+				List: []config.AgentConfig{{
+					ID:        agentID,
+					Default:   true,
+					Workspace: workspace,
+				}},
+			},
+			ModelList: []*config.ModelConfig{{
+				ModelName: "seahorse-account",
+				Provider:  "openai",
+				APIBase:   "http://example.invalid/v1",
+				APIKeys:   config.SimpleSecureStrings("test-key"),
+				Enabled:   true,
+			}},
+			ModelAliases: []config.ModelAliasConfig{{
+				Name:  "seahorse-summary",
+				Model: "summary-model",
+			}},
+		}
+	}
+
+	workspaceA := filepath.Join(root, "workspace-a")
+	cfgA := newConfig("alpha", workspaceA)
+	al := NewAgentLoop(
+		cfgA,
+		bus.NewMessageBus(),
+		&seahorseTestProvider{},
+	)
+	defer al.Close()
+
+	managerA, ok := al.contextManager.(*seahorseContextManager)
+	if !ok {
+		t.Fatalf("generation A context manager = %T, want seahorse", al.contextManager)
+	}
+	engineA := managerA.engines["alpha"]
+	if engineA == nil || managerA.engine != engineA {
+		t.Fatal("generation A default engine is not alpha's engine")
+	}
+	if _, err := os.Stat(filepath.Join(workspaceA, "sessions", "seahorse.db")); err != nil {
+		t.Fatalf("generation A Seahorse DB: %v", err)
+	}
+
+	workspaceB := filepath.Join(root, "workspace-b")
+	cfgB := newConfig("beta", workspaceB)
+	if err := al.ReloadProviderAndConfig(
+		context.Background(),
+		&seahorseTestProvider{},
+		cfgB,
+	); err != nil {
+		t.Fatalf("ReloadProviderAndConfig() error = %v", err)
+	}
+
+	managerB, ok := al.contextManager.(*seahorseContextManager)
+	if !ok {
+		t.Fatalf("generation B context manager = %T, want seahorse", al.contextManager)
+	}
+	if managerB == managerA {
+		t.Fatal("reload reused generation A Seahorse manager")
+	}
+	if !managerA.closed {
+		t.Fatal("generation A Seahorse manager was not closed")
+	}
+	if engine, _ := managerA.engineForSession("after-reload"); engine != nil {
+		t.Fatal("generation A manager returned a stale engine after reload")
+	}
+	if len(managerB.engines) != 1 || managerB.engines["beta"] == nil {
+		t.Fatalf("generation B engines = %#v, want only beta", managerB.engines)
+	}
+	if _, found := managerB.engines["alpha"]; found {
+		t.Fatal("removed alpha engine survived reload")
+	}
+	if managerB.engine != managerB.engines["beta"] {
+		t.Fatal("generation B default engine is not beta's engine")
+	}
+	if managerB.engine == engineA {
+		t.Fatal("generation B reused the old workspace engine")
+	}
+	if _, err := os.Stat(filepath.Join(workspaceB, "sessions", "seahorse.db")); err != nil {
+		t.Fatalf("generation B Seahorse DB: %v", err)
+	}
+	engine, owner := managerB.engineForSession("generation-b-session")
+	if engine != managerB.engines["beta"] || owner == nil || owner.ID != "beta" {
+		t.Fatalf("generation B engine owner = %#v, engine = %p", owner, engine)
+	}
+}
+
+func TestSeahorseNonDefaultAgentSessionUsesOwningAgentCompletion(t *testing.T) {
+	var mainModels []string
+	var supportModels []string
+	mainProvider := &seahorseTestProvider{
+		chatFn: func(
+			_ context.Context,
+			_ []providers.Message,
+			_ []providers.ToolDefinition,
+			model string,
+			_ map[string]any,
+		) (*providers.LLMResponse, error) {
+			mainModels = append(mainModels, model)
+			return &providers.LLMResponse{Content: "main summary"}, nil
+		},
+	}
+	supportProvider := &seahorseTestProvider{
+		chatFn: func(
+			_ context.Context,
+			_ []providers.Message,
+			_ []providers.ToolDefinition,
+			model string,
+			_ map[string]any,
+		) (*providers.LLMResponse, error) {
+			supportModels = append(supportModels, model)
+			return &providers.LLMResponse{Content: "support summary"}, nil
+		},
+	}
+	workspace := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         workspace + "/main",
+				AccountRef:        "main-account",
+				ModelName:         "main-summary",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+				ContextManager:    "seahorse",
+			},
+			List: []config.AgentConfig{
+				{ID: "main", Default: true},
+				{
+					ID:         "support",
+					Workspace:  workspace + "/support",
+					AccountRef: "support-account",
+					Model:      &config.AgentModelConfig{Primary: "support-summary"},
+				},
+			},
+		},
+		ModelList: []*config.ModelConfig{
+			{
+				ModelName: "main-account",
+				Provider:  "openai",
+				APIBase:   "http://example.invalid/v1",
+				APIKeys:   config.SimpleSecureStrings("main-key"),
+				Enabled:   true,
+			},
+			{
+				ModelName: "support-account",
+				Provider:  "anthropic",
+				APIBase:   "http://example.invalid/v1",
+				APIKeys:   config.SimpleSecureStrings("support-key"),
+				Enabled:   true,
+			},
+		},
+		ModelAliases: []config.ModelAliasConfig{
+			{Name: "main-summary", Model: "upstream-main-summary"},
+			{Name: "support-summary", Model: "upstream-support-summary"},
+		},
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), mainProvider)
+	defer al.Close()
+	support, ok := al.registry.GetAgent("support")
+	if !ok || support == nil {
+		t.Fatal("support agent is not registered")
+	}
+	if support.ConfigurationError != nil {
+		t.Fatalf("support configuration error = %v", support.ConfigurationError)
+	}
+	if len(support.Candidates) != 1 {
+		t.Fatalf("support candidates = %#v, want one", support.Candidates)
+	}
+	bindBootstrapProvider(
+		support.CandidateProviders,
+		support.Candidates[0],
+		supportProvider,
+	)
+
+	metaStore, ok := support.Sessions.(session.MetadataAwareSessionStore)
+	if !ok {
+		t.Fatal("support session store does not support metadata")
+	}
+	alias := "agent:support:test:direct:summarization"
+	sessionKey := session.BuildOpaqueSessionKey(alias)
+	metaStore.EnsureSessionMetadata(sessionKey, &session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "support",
+		Channel:    "test",
+		Account:    "default",
+		Dimensions: []string{"chat"},
+		Values: map[string]string{
+			"chat": "summarization",
+		},
+	}, []string{alias})
+
+	manager, ok := al.contextManager.(*seahorseContextManager)
+	if !ok {
+		t.Fatalf("context manager = %T, want seahorse", al.contextManager)
+	}
+	engine, owner := manager.engineForSession(sessionKey)
+	if engine == nil || owner != support {
+		t.Fatalf("engine owner = %#v, want support", owner)
+	}
+	if engine == manager.engine {
+		t.Fatal("support session reused the default agent engine")
+	}
+
+	content := strings.Repeat("support conversation detail ", 250)
+	for i := 0; i < seahorse.FreshTailCount+8; i++ {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		if err := manager.Ingest(context.Background(), &IngestRequest{
+			SessionKey: sessionKey,
+			Message: providers.Message{
+				Role:    role,
+				Content: content,
+			},
+		}); err != nil {
+			t.Fatalf("Ingest(%d): %v", i, err)
+		}
+	}
+	if err := manager.Compact(context.Background(), &CompactRequest{
+		SessionKey: sessionKey,
+		Reason:     ContextCompressReasonRetry,
+		Budget:     1,
+	}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if len(supportModels) == 0 {
+		t.Fatal("support completion provider was not called")
+	}
+	for _, model := range supportModels {
+		if model != "upstream-support-summary" {
+			t.Fatalf("support completion model = %q, want concrete support model", model)
+		}
+	}
+	if len(mainModels) != 0 {
+		t.Fatalf("default provider was called for support session with models %#v", mainModels)
+	}
+}
+
 func TestSeahorseIgnoreHeartbeat(t *testing.T) {
 	// Verify that "heartbeat" sessions are ignored by default
 	// This tests the hardcoded ignore pattern from spec lines 1326-1328
@@ -615,7 +1014,7 @@ func TestSeahorseRealLoopNoDuplicateMessages(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	mockProvider := &simpleMockProvider{response: "I received your message."}
-	al := NewAgentLoop(cfg, msgBus, mockProvider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, mockProvider)
 	defaultAgent := al.registry.GetDefaultAgent()
 	if defaultAgent == nil {
 		t.Fatal("expected default agent")
@@ -966,7 +1365,7 @@ func TestSeahorseSteeringMessageIngested(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	mockProvider := &simpleMockProvider{response: "I received your message."}
-	al := NewAgentLoop(cfg, msgBus, mockProvider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, mockProvider)
 	defaultAgent := al.registry.GetDefaultAgent()
 	if defaultAgent == nil {
 		t.Fatal("expected default agent")
@@ -1073,7 +1472,7 @@ func TestSeahorseSummarizeSkipsCondensedWhenBelowThreshold(t *testing.T) {
 
 	msgBus := bus.NewMessageBus()
 	provider := &seahorseTestProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, provider)
 	defaultAgent := al.registry.GetDefaultAgent()
 	if defaultAgent == nil {
 		t.Fatal("expected default agent")

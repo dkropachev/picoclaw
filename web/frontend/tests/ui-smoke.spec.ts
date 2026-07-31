@@ -42,7 +42,6 @@ const modelResponse = {
       status: "available",
       is_default: true,
       is_virtual: false,
-      default_model_allowed: true,
     },
     {
       index: 1,
@@ -55,7 +54,6 @@ const modelResponse = {
       status: "available",
       is_default: false,
       is_virtual: false,
-      default_model_allowed: true,
     },
     {
       index: 2,
@@ -68,7 +66,6 @@ const modelResponse = {
       status: "available",
       is_default: false,
       is_virtual: true,
-      default_model_allowed: true,
       model_router: {
         name: "task-router",
         enabled: true,
@@ -94,8 +91,22 @@ const modelResponse = {
       },
     },
   ],
+  model_aliases: [
+    {
+      name: "coding",
+      model: "gpt-4o-mini",
+      account_overrides: {
+        "gpt-4o": "gpt-4o",
+      },
+    },
+    {
+      name: "fast",
+      model: "gpt-4o-mini",
+    },
+  ],
   total: 3,
-  default_model: "gpt-4o-mini",
+  default_account_ref: "gpt-4o-mini",
+  default_model: "coding",
   provider_options: [
     {
       id: "openai",
@@ -103,7 +114,6 @@ const modelResponse = {
       default_api_base: "https://api.openai.com/v1",
       empty_api_key_allowed: false,
       create_allowed: true,
-      default_model_allowed: true,
       supports_fetch: true,
     },
     {
@@ -112,7 +122,6 @@ const modelResponse = {
       default_api_base: "https://generativelanguage.googleapis.com/v1beta",
       empty_api_key_allowed: false,
       create_allowed: true,
-      default_model_allowed: true,
     },
     {
       id: "deepseek",
@@ -120,7 +129,6 @@ const modelResponse = {
       default_api_base: "https://api.deepseek.com/v1",
       empty_api_key_allowed: false,
       create_allowed: true,
-      default_model_allowed: true,
       supports_fetch: true,
     },
   ],
@@ -1020,6 +1028,7 @@ async function mockLauncherApis(
       id: "main",
       name: "Main",
       workspace: "",
+      account_ref: "",
       model: null,
       skills: null,
       subagents: null,
@@ -1031,8 +1040,9 @@ async function mockLauncherApis(
       id: "reviewer",
       name: "Reviewer",
       workspace: "/workspace/reviewer",
+      account_ref: "gpt-4o",
       model: {
-        primary: "openai/gpt-4o",
+        primary: "coding",
         fallbacks: [],
       },
       skills: ["review-helper"],
@@ -2932,6 +2942,25 @@ test("agent management completes a stateful policy lifecycle with exact revision
   await createSheet
     .getByRole("textbox", { name: "Configured name" })
     .fill("Triager")
+  await createSheet.getByRole("combobox", { name: "Provider account" }).click()
+  await page.getByRole("option", { name: "gpt-4o", exact: true }).click()
+  await createSheet
+    .getByRole("combobox", { name: "Primary alias policy" })
+    .click()
+  await page.getByRole("option", { name: "Custom", exact: true }).click()
+  await createSheet
+    .getByRole("combobox", { name: "Primary model alias" })
+    .click()
+  await page.getByRole("option", { name: "coding", exact: true }).click()
+  await createSheet
+    .getByRole("combobox", { name: "Fallback alias policy" })
+    .click()
+  await page.getByRole("option", { name: "Custom", exact: true }).click()
+  await createSheet.getByRole("combobox", { name: "Fallback order" }).click()
+  await page.getByRole("option", { name: "fast", exact: true }).click()
+  await createSheet
+    .getByRole("button", { name: "Add fallback order entry" })
+    .click()
   await createSheet.getByRole("button", { name: "Save" }).click()
 
   const triagerCard = page.locator('[data-agent-id="triager"]')
@@ -2939,7 +2968,9 @@ test("agent management completes a stateful policy lifecycle with exact revision
   await triagerCard.getByRole("button", { name: "Edit triager" }).click()
 
   const editSheet = page.getByRole("dialog", { name: "Edit agent" })
-  await editSheet.getByRole("combobox", { name: "Fallback models" }).click()
+  await editSheet
+    .getByRole("combobox", { name: "Fallback alias policy" })
+    .click()
   await page.getByRole("option", { name: "None", exact: true }).click()
   await editSheet.getByRole("button", { name: "Save" }).click()
   await expect(triagerCard).toContainText("None")
@@ -2966,7 +2997,8 @@ test("agent management completes a stateful policy lifecycle with exact revision
           id: "triager",
           name: "Triager",
           workspace: "",
-          model: null,
+          account_ref: "gpt-4o",
+          model: { primary: "coding", fallbacks: ["fast"] },
           skills: null,
           subagents: null,
         },
@@ -2981,7 +3013,8 @@ test("agent management completes a stateful policy lifecycle with exact revision
           id: "triager",
           name: "Triager",
           workspace: "",
-          model: { primary: "", fallbacks: [] },
+          account_ref: "gpt-4o",
+          model: { primary: "coding", fallbacks: [] },
           skills: null,
           subagents: null,
         },
@@ -3420,7 +3453,6 @@ test("accounts page lists registered accounts and opens onboarding", async ({
     status: "available",
     is_default: false,
     is_virtual: false,
-    default_model_allowed: true,
     auth_method: "oauth",
     credential_id: "openai:work",
   }
@@ -3623,6 +3655,46 @@ test("accounts page lists registered accounts and opens onboarding", async ({
   expect(errors).toEqual([])
 })
 
+test("models page exposes strict defaults and editable model aliases", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(page, "/models")
+
+  const defaultSection = page.locator("section").filter({
+    has: page.getByRole("heading", { name: "Default selection" }),
+  })
+  await expect(
+    defaultSection.getByText("Current: gpt-4o-mini / coding"),
+  ).toBeVisible()
+
+  const aliasSection = page.locator("section").filter({
+    has: page.getByRole("heading", { name: "Model aliases" }),
+  })
+  const codingAlias = aliasSection.locator("article").filter({
+    has: page.getByRole("heading", { name: "coding" }),
+  })
+  await expect(
+    codingAlias.getByRole("heading", { name: "coding" }),
+  ).toBeVisible()
+  await expect(codingAlias.getByText("gpt-4o-mini")).toBeVisible()
+  await codingAlias.getByRole("button", { name: "Edit model alias" }).click()
+
+  const editor = page.getByRole("dialog", { name: "Edit model alias" })
+  await expect(editor).toBeVisible()
+  await expect(editor.getByRole("textbox").first()).toHaveValue("coding")
+  await expect(editor.getByRole("textbox").first()).toBeDisabled()
+  await expect(
+    editor.getByText(
+      "Overrides are allowed only for concrete accounts, never account routers.",
+    ),
+  ).toBeVisible()
+  await expect(
+    editor.getByRole("button", { name: "Add override" }),
+  ).toBeEnabled()
+  expect(errors).toEqual([])
+})
+
 test("accounts page shows account routers beside registered accounts", async ({
   page,
 }) => {
@@ -3644,7 +3716,6 @@ test("accounts page shows account routers beside registered accounts", async ({
           status: "available",
           is_default: false,
           is_virtual: false,
-          default_model_allowed: true,
           router: {
             enabled: true,
             entry: "pool",

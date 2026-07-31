@@ -1,6 +1,7 @@
 package asr
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/config"
@@ -90,7 +91,7 @@ func TestDetectTranscriber(t *testing.T) {
 			wantName: "whisper",
 		},
 		{
-			name: "whisper via model list fallback",
+			name: "model list is not scanned without an explicit alias",
 			cfg: &config.Config{
 				ModelList: []*config.ModelConfig{
 					{ModelName: "openai", Model: "openai/gpt-4o", APIKeys: config.SimpleSecureStrings("sk-openai")},
@@ -101,7 +102,7 @@ func TestDetectTranscriber(t *testing.T) {
 					},
 				},
 			},
-			wantName: "whisper",
+			wantNil: true,
 		},
 		{
 			name: "voice model name alias selects non-gemini audio model transcriber",
@@ -155,7 +156,7 @@ func TestDetectTranscriber(t *testing.T) {
 			wantNil: true,
 		},
 		{
-			name: "provider key takes priority over model list",
+			name: "configured account without voice alias is ignored",
 			cfg: &config.Config{
 				ModelList: []*config.ModelConfig{
 					{
@@ -165,7 +166,7 @@ func TestDetectTranscriber(t *testing.T) {
 					},
 				},
 			},
-			wantName: "whisper",
+			wantNil: true,
 		},
 		{
 			name: "missing voice model name config returns nil",
@@ -182,16 +183,16 @@ func TestDetectTranscriber(t *testing.T) {
 			wantNil: true,
 		},
 		{
-			name: "elevenlabs voice config key",
+			name: "elevenlabs account without voice alias is ignored",
 			cfg: &config.Config{
 				ModelList: []*config.ModelConfig{
 					{Model: "elevenlabs/scribe_v1", APIKeys: config.SimpleSecureStrings("sk_elevenlabs_test")},
 				},
 			},
-			wantName: "elevenlabs",
+			wantNil: true,
 		},
 		{
-			name: "elevenlabs takes priority over groq model list",
+			name: "multiple accounts without a voice alias are ignored",
 			cfg: &config.Config{
 				ModelList: []*config.ModelConfig{
 					{Model: "elevenlabs/scribe_v1", APIKeys: config.SimpleSecureStrings("sk_elevenlabs_test")},
@@ -202,7 +203,7 @@ func TestDetectTranscriber(t *testing.T) {
 					},
 				},
 			},
-			wantName: "elevenlabs",
+			wantNil: true,
 		},
 		{
 			name: "voice model name takes priority over elevenlabs",
@@ -225,6 +226,7 @@ func TestDetectTranscriber(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			prepareStrictVoiceTestConfig(tc.cfg)
 			tr := DetectTranscriber(tc.cfg)
 			if tc.wantNil {
 				if tr != nil {
@@ -239,5 +241,53 @@ func TestDetectTranscriber(t *testing.T) {
 				t.Errorf("Name() = %q, want %q", got, tc.wantName)
 			}
 		})
+	}
+}
+
+func prepareStrictVoiceTestConfig(cfg *config.Config) {
+	if cfg == nil || cfg.Voice.ModelName == "" || cfg.Voice.AccountRef != "" {
+		return
+	}
+	for _, account := range cfg.ModelList {
+		if account == nil || account.ModelName != cfg.Voice.ModelName {
+			continue
+		}
+		account.Enabled = true
+		cfg.Voice.AccountRef = account.ModelName
+		cfg.ModelAliases = append(cfg.ModelAliases, config.ModelAliasConfig{
+			Name:  cfg.Voice.ModelName,
+			Model: account.Model,
+		})
+		return
+	}
+}
+
+func TestDetectTranscriberWithErrorRejectsUnsupportedProvider(t *testing.T) {
+	cfg := &config.Config{
+		Voice: config.VoiceConfig{
+			AccountRef: "anthropic-account",
+			ModelName:  "asr",
+		},
+		ModelAliases: []config.ModelAliasConfig{{
+			Name:  "asr",
+			Model: "claude-sonnet-4-6",
+		}},
+		ModelList: []*config.ModelConfig{{
+			ModelName: "anthropic-account",
+			Provider:  "anthropic",
+			APIKeys:   config.SimpleSecureStrings("sk-anthropic"),
+			Enabled:   true,
+		}},
+	}
+
+	transcriber, err := DetectTranscriberWithError(cfg)
+	if transcriber != nil {
+		t.Fatalf("DetectTranscriberWithError() = %T, want nil", transcriber)
+	}
+	if err == nil || !strings.Contains(err.Error(), `provider "anthropic"`) {
+		t.Fatalf("DetectTranscriberWithError() error = %v, want unsupported anthropic provider", err)
+	}
+	if transcriber := DetectTranscriber(cfg); transcriber != nil {
+		t.Fatalf("DetectTranscriber() = %T, want nil", transcriber)
 	}
 }
