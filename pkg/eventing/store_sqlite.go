@@ -273,6 +273,17 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 	if err = validateSchemaV2(ctx, conn); err != nil {
 		return fmt.Errorf("validate eventing schema v2: %w", err)
 	}
+	if version < 3 {
+		if _, err = conn.ExecContext(ctx, schemaV3); err != nil {
+			return fmt.Errorf("create eventing schema v3: %w", err)
+		}
+		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 3"); err != nil {
+			return fmt.Errorf("record eventing schema v3: %w", err)
+		}
+	}
+	if err = validateSchemaV3(ctx, conn); err != nil {
+		return fmt.Errorf("validate eventing schema v3: %w", err)
+	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit eventing migration: %w", err)
 	}
@@ -2126,6 +2137,10 @@ func (s *Store) Prune(ctx context.Context, before time.Time, limit int) (int64, 
 			  AND NOT EXISTS (
 				SELECT 1 FROM event_inbox replay
 				WHERE replay.replay_of = e.id
+			  )
+			  AND NOT EXISTS (
+				SELECT 1 FROM pr_review_cases review_case
+				WHERE review_case.event_id = e.id
 			  )
 			ORDER BY e.received_at ASC, e.id ASC
 			LIMIT ?

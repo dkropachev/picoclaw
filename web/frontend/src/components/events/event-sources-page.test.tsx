@@ -60,6 +60,8 @@ const persistedWebhook = webhook({
   name: "primary",
   persistedName: "primary",
   enabled: true,
+  repositories: ["scylladb/gocql"],
+  targetUser: "review-user",
   secretConfigured: true,
   persistedFormat: "github",
 })
@@ -163,6 +165,82 @@ describe("EventSourcesPage", () => {
     })
   })
 
+  it("imports a GitHub repository list and saves target-user routing metadata", async () => {
+    renderEventSources(eventSources({ webhooks: [persistedWebhook] }))
+    const user = userEvent.setup()
+
+    const targetUser = await screen.findByLabelText("GitHub user to notify")
+    await user.clear(targetUser)
+    await user.type(targetUser, "scylla-reviewer")
+    await user.click(
+      screen.getByRole("switch", { name: "Poll GitHub notifications" }),
+    )
+
+    const repositoryFile = new File(["unused"], "repo_list.txt", {
+      type: "text/plain",
+    })
+    Object.defineProperty(repositoryFile, "text", {
+      value: vi
+        .fn()
+        .mockResolvedValue(
+          "scylladb/scylla\nscylladb/gocql\nSCYLLADB/GOCQL\n\n",
+        ),
+    })
+    await user.upload(
+      screen.getByLabelText("Import owner/repo text file"),
+      repositoryFile,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Watched repositories")).toHaveValue(
+        "scylladb/scylla\nscylladb/gocql\nSCYLLADB/GOCQL\n\n",
+      )
+    })
+    await user.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => {
+      expect(saveEventSources).toHaveBeenCalledTimes(1)
+    })
+    expect(
+      vi.mocked(saveEventSources).mock.calls[0]?.[0].webhooks[0],
+    ).toMatchObject({
+      repositories: ["scylladb/scylla", "scylladb/gocql"],
+      targetUser: "scylla-reviewer",
+      pollNotifications: true,
+    })
+  })
+
+  it("allows an enabled GitHub notification poller without a webhook secret", async () => {
+    renderEventSources(
+      eventSources({
+        webhooks: [
+          webhook({
+            id: "poll-only",
+            name: "github-poll",
+            enabled: true,
+            pollNotifications: true,
+          }),
+        ],
+      }),
+    )
+    const user = userEvent.setup()
+
+    await screen.findByRole("switch", { name: "Poll GitHub notifications" })
+    await user.type(screen.getByLabelText("GitHub user to notify"), "reviewer")
+    await user.click(screen.getByRole("button", { name: "Save" }))
+
+    await waitFor(() => {
+      expect(saveEventSources).toHaveBeenCalledTimes(1)
+    })
+    expect(
+      vi.mocked(saveEventSources).mock.calls[0]?.[0].webhooks[0],
+    ).toMatchObject({
+      enabled: true,
+      pollNotifications: true,
+      secretConfigured: false,
+    })
+  })
+
   it("rotates one secret, clears a disabled source, and removes another source", async () => {
     const replacementSecret = "r".repeat(32)
     const loaded = eventSources({
@@ -240,6 +318,11 @@ describe("EventSourcesPage", () => {
     await user.type(retention, "0")
     await user.click(screen.getByRole("button", { name: "Add webhook" }))
     await user.type(screen.getByLabelText("Connector name"), "9 bad")
+    await user.type(screen.getByLabelText("GitHub user to notify"), "-bad")
+    await user.type(
+      screen.getByLabelText("Watched repositories"),
+      "missing-owner",
+    )
     await user.type(screen.getByLabelText("Signing secret"), "short")
     await user.click(screen.getByRole("button", { name: "Save" }))
 
@@ -256,6 +339,16 @@ describe("EventSourcesPage", () => {
     expect(screen.getByLabelText("Signing secret")).toHaveAccessibleDescription(
       "GitHub secrets must be 32–256 UTF-8 bytes with no leading or trailing whitespace.",
     )
+    expect(
+      screen.getByText(
+        "Each repository must be one trimmed owner/repo name of at most 256 bytes.",
+      ),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        "Use a trimmed GitHub login of at most 128 letters, numbers, or internal hyphens.",
+      ),
+    ).toBeInTheDocument()
     expect(saveEventSources).not.toHaveBeenCalled()
     expect(refreshGatewayState).not.toHaveBeenCalled()
   })
@@ -568,6 +661,9 @@ function webhook(
     name: "github",
     enabled: false,
     format: "github",
+    repositories: [],
+    targetUser: "",
+    pollNotifications: false,
     secretConfigured: false,
     secretUpdate: "preserve",
     secret: "",

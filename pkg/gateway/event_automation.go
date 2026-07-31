@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,10 +14,12 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/eventing"
 	eventchannel "github.com/sipeed/picoclaw/pkg/eventing/channelmessage"
+	eventgithubpoll "github.com/sipeed/picoclaw/pkg/eventing/githubpoll"
 	eventoperator "github.com/sipeed/picoclaw/pkg/eventing/operator"
 	eventwebhook "github.com/sipeed/picoclaw/pkg/eventing/webhook"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/reviews"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
@@ -33,6 +38,8 @@ type eventAutomationService struct {
 	operatorBackend *eventoperator.Backend
 	webhookBackend  *eventwebhook.Backend
 	channelBackend  *eventchannel.Backend
+	reviewService   *reviews.Service
+	githubPoller    *eventgithubpoll.Poller
 	cancel          context.CancelFunc
 	done            chan struct{}
 
@@ -45,6 +52,13 @@ type eventAutomationRuntimeAcquire func(context.Context) (context.Context, func(
 
 type eventRetentionPruner interface {
 	Prune(ctx context.Context, before time.Time, limit int) (int64, error)
+}
+
+type eventReviewRuntime struct {
+	agent           workflows.AgentRunner
+	submitter       reviews.Submitter
+	notificationMCP workflows.ToolRunner
+	mcpArtifactRoot string
 }
 
 func setupEventAutomationService(
@@ -73,7 +87,68 @@ func setupEventAutomationService(
 			return agentLoop.AcquireRuntimeGeneration(workerCtx, cfg)
 		}
 	}
-	return newEventAutomationService(ctx, cfg, executor, runtimeEvents, acquireRuntime)
+	reviewRuntime := eventReviewRuntime{}
+	if agentLoop != nil {
+		reviewRuntime.agent = agent.NewWorkflowAgentRunner(agentLoop)
+		pollNotifications := githubNotificationPollingEnabled(cfg)
+		reviewSubmission := githubReviewSubmissionReady(ctx, agentLoop)
+		if pollNotifications {
+			if err := validateGitHubNotificationPollingRuntime(
+				ctx,
+				cfg,
+				agentLoop,
+			); err != nil {
+				return nil, err
+			}
+		}
+		if pollNotifications || reviewSubmission {
+			toolRunner, err := agent.NewWorkflowToolRunner(agentLoop, "")
+			if err != nil {
+				return nil, fmt.Errorf("initialize GitHub event MCP tools: %w", err)
+			}
+			configureGitHubMCPReviewRuntime(
+				&reviewRuntime,
+				toolRunner,
+				githubMCPArtifactRoot(cfg, agentLoop),
+				pollNotifications,
+				reviewSubmission,
+			)
+		}
+	} else if githubNotificationPollingEnabled(cfg) {
+		return nil, errors.New(
+			"GitHub notification polling requires the agent MCP runtime",
+		)
+	}
+	return newEventAutomationServiceWithReviews(
+		ctx,
+		cfg,
+		executor,
+		runtimeEvents,
+		acquireRuntime,
+		reviewRuntime,
+	)
+}
+
+func configureGitHubMCPReviewRuntime(
+	runtime *eventReviewRuntime,
+	runner workflows.ToolRunner,
+	artifactRoot string,
+	pollNotifications bool,
+	reviewSubmission bool,
+) {
+	if runtime == nil {
+		return
+	}
+	runtime.mcpArtifactRoot = strings.TrimSpace(artifactRoot)
+	if pollNotifications {
+		runtime.notificationMCP = runner
+	}
+	if reviewSubmission {
+		runtime.submitter = &reviews.GitHubSubmitter{
+			Runner:       runner,
+			ArtifactRoot: runtime.mcpArtifactRoot,
+		}
+	}
 }
 
 func newEventAutomationService(
@@ -82,6 +157,28 @@ func newEventAutomationService(
 	executor *workflows.Executor,
 	runtimeEvents runtimeevents.Bus,
 	acquireRuntime eventAutomationRuntimeAcquire,
+) (*eventAutomationService, error) {
+	reviewRuntime := eventReviewRuntime{}
+	if executor != nil {
+		reviewRuntime.agent = executor.Agents
+	}
+	return newEventAutomationServiceWithReviews(
+		ctx,
+		cfg,
+		executor,
+		runtimeEvents,
+		acquireRuntime,
+		reviewRuntime,
+	)
+}
+
+func newEventAutomationServiceWithReviews(
+	ctx context.Context,
+	cfg *config.Config,
+	executor *workflows.Executor,
+	runtimeEvents runtimeevents.Bus,
+	acquireRuntime eventAutomationRuntimeAcquire,
+	reviewRuntime eventReviewRuntime,
 ) (*eventAutomationService, error) {
 	if cfg == nil || !cfg.Events.Ingress.Enabled {
 		return nil, nil
@@ -99,8 +196,17 @@ func newEventAutomationService(
 		return nil, err
 	}
 
+	reviewService, err := reviews.NewService(reviews.ServiceConfig{
+		Store:     store,
+		Agent:     reviewRuntime.agent,
+		Submitter: reviewRuntime.submitter,
+	})
+	if err != nil {
+		return nil, errors.Join(err, store.Close())
+	}
 	operatorBackend, err := eventoperator.NewBackend(eventoperator.BackendConfig{
-		Store: store,
+		Store:   store,
+		Reviews: &reviews.Handler{Service: reviewService},
 	})
 	if err != nil {
 		return nil, errors.Join(err, store.Close())
@@ -113,12 +219,23 @@ func newEventAutomationService(
 	if err != nil {
 		return nil, errors.Join(err, store.Close())
 	}
+	githubPoller, err := newGitHubNotificationPoller(
+		cfg,
+		store,
+		reviewRuntime.notificationMCP,
+		reviewRuntime.mcpArtifactRoot,
+	)
+	if err != nil {
+		return nil, errors.Join(err, store.Close())
+	}
 
 	service := &eventAutomationService{
 		store:           store,
 		operatorBackend: operatorBackend,
 		webhookBackend:  webhookBackend,
 		channelBackend:  channelBackend,
+		reviewService:   reviewService,
+		githubPoller:    githubPoller,
 		done:            make(chan struct{}),
 	}
 
@@ -160,6 +277,7 @@ func newEventAutomationService(
 			DefinitionsDir:       executor.DefinitionsDir,
 			RuntimeCompatibility: executor.RuntimeCompatibility,
 			WorkerLabel:          "gateway-workflow-dispatcher",
+			ReviewSink:           &reviews.CaptureSink{Store: store},
 		}
 
 		workers.Add(2)
@@ -176,6 +294,29 @@ func newEventAutomationService(
 			withEventAutomationRuntime(acquireRuntime, dispatcher.ProcessOne),
 		)
 	}
+	if reviewRuntime.submitter != nil {
+		submitter := &reviews.SubmissionWorker{
+			Queue:       store,
+			Submitter:   reviewRuntime.submitter,
+			WorkerLabel: "gateway-review-submitter",
+		}
+		workers.Add(1)
+		go runEventAutomationWorker(
+			workerCtx,
+			&workers,
+			"review submitter",
+			withEventAutomationRuntime(acquireRuntime, submitter.ProcessOne),
+		)
+	}
+	if githubPoller != nil {
+		workers.Add(1)
+		go runGitHubNotificationPollWorker(
+			workerCtx,
+			&workers,
+			githubPoller,
+			eventgithubpoll.DefaultInterval,
+		)
+	}
 	go func() {
 		workers.Wait()
 		close(service.done)
@@ -183,18 +324,192 @@ func newEventAutomationService(
 	return service, nil
 }
 
+func githubReviewSubmissionReady(
+	ctx context.Context,
+	agentLoop *agent.AgentLoop,
+) bool {
+	if agentLoop == nil {
+		return false
+	}
+	return githubReviewSubmissionToolsReady(func(
+		occurrence workflows.WorkflowDependencyOccurrence,
+	) workflows.WorkflowDependencyReadinessCode {
+		return agentLoop.ResolveWorkflowDependency(ctx, occurrence)
+	})
+}
+
+func githubReviewSubmissionToolsReady(
+	resolve func(
+		workflows.WorkflowDependencyOccurrence,
+	) workflows.WorkflowDependencyReadinessCode,
+) bool {
+	if resolve == nil {
+		return false
+	}
+	for _, tool := range []string{
+		reviews.GitHubPullRequestReadTool,
+		reviews.GitHubPullRequestReviewWriteTool,
+		reviews.GitHubPendingReviewCommentTool,
+	} {
+		readiness := resolve(
+			workflows.WorkflowDependencyOccurrence{
+				Kind: workflows.WorkflowDependencyKindMCP,
+				Name: reviews.DefaultGitHubMCPServer + "/" + tool,
+			},
+		)
+		if readiness != workflows.WorkflowDependencyReadinessReady {
+			return false
+		}
+	}
+	return true
+}
+
+func githubNotificationPollingEnabled(cfg *config.Config) bool {
+	if cfg == nil || !cfg.Events.Ingress.Enabled {
+		return false
+	}
+	for _, connector := range cfg.Events.Ingress.Webhooks {
+		if connector.Enabled &&
+			connector.PollNotifications &&
+			config.EffectiveEventWebhookFormat(connector) ==
+				config.EventWebhookFormatGitHub {
+			return true
+		}
+	}
+	return false
+}
+
+func validateGitHubNotificationPollingRuntime(
+	ctx context.Context,
+	cfg *config.Config,
+	agentLoop *agent.AgentLoop,
+) error {
+	if !githubNotificationPollingEnabled(cfg) {
+		return nil
+	}
+	if agentLoop == nil {
+		return errors.New(
+			"GitHub notification polling requires the agent MCP runtime",
+		)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for _, tool := range []string{
+		eventgithubpoll.ListNotificationsTool,
+		eventgithubpoll.PullRequestReadTool,
+	} {
+		readiness := agentLoop.ResolveWorkflowDependency(
+			ctx,
+			workflows.WorkflowDependencyOccurrence{
+				Kind: workflows.WorkflowDependencyKindMCP,
+				Name: eventgithubpoll.DefaultMCPServer + "/" + tool,
+			},
+		)
+		if readiness != workflows.WorkflowDependencyReadinessReady {
+			return fmt.Errorf(
+				"GitHub notification polling requires ready eager MCP tool %q (readiness %q)",
+				eventgithubpoll.DefaultMCPServer+"/"+tool,
+				readiness,
+			)
+		}
+	}
+	return nil
+}
+
 func validateEventAutomationRuntime(
 	ctx context.Context,
 	cfg *config.Config,
 	agentLoop *agent.AgentLoop,
 ) error {
-	if cfg == nil || !cfg.Events.Ingress.Enabled || !cfg.Workflows.Enabled {
+	if cfg == nil || !cfg.Events.Ingress.Enabled {
 		return nil
 	}
-	if _, err := agent.NewEventWorkflowExecutor(ctx, agentLoop); err != nil {
-		return fmt.Errorf("initialize event workflow runtime: %w", err)
+	if cfg.Workflows.Enabled {
+		if _, err := agent.NewEventWorkflowExecutor(ctx, agentLoop); err != nil {
+			return fmt.Errorf("initialize event workflow runtime: %w", err)
+		}
 	}
-	return nil
+	return validateGitHubNotificationPollingRuntime(ctx, cfg, agentLoop)
+}
+
+func newGitHubNotificationPoller(
+	cfg *config.Config,
+	store eventgithubpoll.Inserter,
+	toolRunner workflows.ToolRunner,
+	artifactRoot string,
+) (*eventgithubpoll.Poller, error) {
+	if !githubNotificationPollingEnabled(cfg) {
+		return nil, nil
+	}
+	if store == nil {
+		return nil, errors.New(
+			"GitHub notification polling requires the durable event store",
+		)
+	}
+	if toolRunner == nil {
+		return nil, errors.New(
+			"GitHub notification polling requires the dynamic MCP tool runner",
+		)
+	}
+	ingress := config.EffectiveEventIngressConfig(cfg, cfg.WorkspacePath())
+	connectors := make([]eventgithubpoll.Connector, 0, len(ingress.Webhooks))
+	names := make([]string, 0, len(ingress.Webhooks))
+	for name := range ingress.Webhooks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		connector := ingress.Webhooks[name]
+		if !connector.Enabled ||
+			!connector.PollNotifications ||
+			config.EffectiveEventWebhookFormat(connector) !=
+				config.EventWebhookFormatGitHub {
+			continue
+		}
+		connectors = append(connectors, eventgithubpoll.Connector{
+			Name:         name,
+			Repositories: append([]string(nil), connector.Repositories...),
+			TargetUser:   connector.TargetUser,
+		})
+	}
+	poller, err := eventgithubpoll.New(eventgithubpoll.Config{
+		Store:        store,
+		ToolRunner:   toolRunner,
+		Connectors:   connectors,
+		ArtifactRoot: effectiveGitHubMCPArtifactRoot(cfg, artifactRoot),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("prepare GitHub notification polling: %w", err)
+	}
+	return poller, nil
+}
+
+func githubMCPArtifactRoot(cfg *config.Config, agentLoop *agent.AgentLoop) string {
+	workspace := ""
+	if cfg != nil {
+		workspace = strings.TrimSpace(cfg.WorkspacePath())
+	}
+	if agentLoop != nil {
+		if registry := agentLoop.GetRegistry(); registry != nil {
+			if defaultAgent := registry.GetDefaultAgent(); defaultAgent != nil {
+				if resolved := strings.TrimSpace(defaultAgent.Workspace); resolved != "" {
+					workspace = resolved
+				}
+			}
+		}
+	}
+	if workspace == "" {
+		return ""
+	}
+	return filepath.Join(workspace, ".artifacts", "mcp")
+}
+
+func effectiveGitHubMCPArtifactRoot(cfg *config.Config, artifactRoot string) string {
+	if resolved := strings.TrimSpace(artifactRoot); resolved != "" {
+		return resolved
+	}
+	return githubMCPArtifactRoot(cfg, nil)
 }
 
 func withEventAutomationRuntime(
@@ -257,21 +572,35 @@ func newEventWebhookBackend(
 	ingress := config.EffectiveEventIngressConfig(cfg, cfg.WorkspacePath())
 	secrets := make(map[string]string)
 	formats := make(map[string]string)
+	repositories := make(map[string][]string)
+	targetUsers := make(map[string]string)
 	for name, connector := range ingress.Webhooks {
 		if !connector.Enabled {
 			continue
 		}
-		secrets[name] = connector.Secret.String()
+		secret := connector.Secret.String()
+		if secret == "" {
+			continue
+		}
+		secrets[name] = secret
 		formats[name] = config.EffectiveEventWebhookFormat(connector)
+		if len(connector.Repositories) > 0 {
+			repositories[name] = append([]string(nil), connector.Repositories...)
+		}
+		if connector.TargetUser != "" {
+			targetUsers[name] = connector.TargetUser
+		}
 	}
 	if len(secrets) == 0 {
 		return nil, nil
 	}
 	backend, err := eventwebhook.NewBackend(eventwebhook.BackendConfig{
-		Store:            store,
-		ConnectorSecrets: secrets,
-		ConnectorFormats: formats,
-		MaxPayloadBytes:  ingress.MaxPayloadBytes,
+		Store:                 store,
+		ConnectorSecrets:      secrets,
+		ConnectorFormats:      formats,
+		ConnectorRepositories: repositories,
+		ConnectorTargetUsers:  targetUsers,
+		MaxPayloadBytes:       ingress.MaxPayloadBytes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("prepare generic event webhook ingress: %w", err)
@@ -406,6 +735,63 @@ func runEventRetentionWorker(
 			return
 		case <-ticker.C:
 			runMaintenance()
+		}
+	}
+}
+
+func runGitHubNotificationPollWorker(
+	ctx context.Context,
+	workers *sync.WaitGroup,
+	poller *eventgithubpoll.Poller,
+	interval time.Duration,
+) {
+	defer workers.Done()
+	if poller == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = eventgithubpoll.DefaultInterval
+	}
+	poll := func() {
+		result, err := poller.Poll(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				logger.WarnCF(
+					"eventing",
+					"GitHub notification polling failed",
+					map[string]any{"error": err.Error()},
+				)
+			}
+			return
+		}
+		if result.Inserted > 0 {
+			logger.DebugCF(
+				"eventing",
+				"Stored GitHub notifications",
+				map[string]any{
+					"notifications": result.Notifications,
+					"matched":       result.Matched,
+					"inserted":      result.Inserted,
+				},
+			)
+		}
+	}
+
+	// Poll once at startup, then wait one complete interval after each scan.
+	// Slow scans cannot accumulate ticker ticks into a provider retry spin.
+	poll()
+	if ctx.Err() != nil {
+		return
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			poll()
+			timer.Reset(interval)
 		}
 	}
 }

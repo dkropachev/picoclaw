@@ -23,6 +23,14 @@ func TestInstallGitHubIssueTriageWorkflowWritesValidLocalDefinition(t *testing.T
 	)
 }
 
+func TestInstallGitHubPRReviewWorkflowWritesValidLocalDefinition(t *testing.T) {
+	testInstallWorkflowTemplate(
+		t,
+		GitHubPRReviewWorkflowRef,
+		InstallGitHubPRReviewWorkflow,
+	)
+}
+
 func testInstallWorkflowTemplate(
 	t *testing.T,
 	ref string,
@@ -244,6 +252,151 @@ func (r *githubIssueTriageToolRunner) RunTool(
 ) (map[string]any, error) {
 	r.requests = append(r.requests, req)
 	return map[string]any{"id": "issue-comment-1"}, nil
+}
+
+func TestGitHubPRReviewWorkflowReviewsOnlyChangedProductionFiles(t *testing.T) {
+	requireGit(t)
+	workspace := t.TempDir()
+	repo := filepath.Join(workspace, "pull-request")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo, "init")
+	gitCmd(t, repo, "config", "user.email", "test@example.com")
+	gitCmd(t, repo, "config", "user.name", "Test User")
+	writeTestFile(t, filepath.Join(repo, "main.go"), "package main\n\nfunc value() int { return 1 }\n")
+	writeTestFile(t, filepath.Join(repo, "README.md"), "base\n")
+	gitCmd(t, repo, "add", ".")
+	gitCmd(t, repo, "commit", "-m", "base")
+	base := strings.TrimSpace(gitCmd(t, repo, "rev-parse", "HEAD"))
+	writeTestFile(t, filepath.Join(repo, "main.go"), "package main\n\nfunc value() int { return 2 }\n")
+	writeTestFile(t, filepath.Join(repo, "README.md"), "updated\n")
+	gitCmd(t, repo, "add", ".")
+	gitCmd(t, repo, "commit", "-m", "head")
+	head := strings.TrimSpace(gitCmd(t, repo, "rev-parse", "HEAD"))
+
+	workflow := parseWorkflow(t, GitHubPRReviewWorkflowYAML)
+	trigger := workflow.On.Event
+	if trigger == nil ||
+		!reflect.DeepEqual(trigger.Sources, StringList{"github"}) ||
+		!reflect.DeepEqual(trigger.Types, StringList{"pull_request.review_requested"}) ||
+		!reflect.DeepEqual(trigger.Attributes["source_authenticated"], StringList{"true"}) ||
+		!reflect.DeepEqual(trigger.Attributes["targets_user"], StringList{"true"}) {
+		t.Fatalf("event trigger = %#v, want targeted authenticated review request", trigger)
+	}
+	toolRunner := &codeReviewTemplateToolRunner{repo: repo}
+	agentRunner := &githubPRReviewTemplateAgentRunner{
+		t:          t,
+		repo:       repo,
+		toolRunner: toolRunner,
+	}
+	result, err := (&Executor{
+		WorkspaceDir: workspace,
+		Tools:        toolRunner,
+		Agents:       agentRunner,
+	}).Run(context.Background(), RunRequest{
+		Workflow:    workflow,
+		WorkflowRef: GitHubPRReviewWorkflowRef,
+		Event: map[string]any{
+			"attributes": map[string]any{
+				"repository_full_name":  "octo-org/repository",
+				"pull_request_number":   "42",
+				"pull_request_url":      "https://github.com/octo-org/repository/pull/42",
+				"pull_request_base_sha": base,
+				"pull_request_head_sha": head,
+				"source_authenticated":  "true",
+				"targets_user":          "true",
+			},
+			"payload": map[string]any{
+				"pull_request": map[string]any{
+					"head": map[string]any{
+						"repo": map[string]any{"clone_url": repo},
+					},
+					"base": map[string]any{
+						"repo": map[string]any{"clone_url": repo},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run(GitHub PR review workflow) error = %v", err)
+	}
+	if !reflect.DeepEqual(toolRunner.actions, []string{"acquire", "release"}) {
+		t.Fatalf("git workspace actions = %v, want acquire/release", toolRunner.actions)
+	}
+	if !agentRunner.called {
+		t.Fatal("review agent was not called")
+	}
+	draft, ok := result.Outputs["picoclawReviewDraft"].(map[string]any)
+	if !ok || draft["schemaVersion"] != 1 {
+		t.Fatalf("picoclawReviewDraft = %#v, want schemaVersion 1 object", result.Outputs["picoclawReviewDraft"])
+	}
+	findings, ok := draft["findings"].([]any)
+	if !ok || len(findings) != 1 {
+		t.Fatalf("review findings = %#v, want one", draft["findings"])
+	}
+}
+
+type githubPRReviewTemplateAgentRunner struct {
+	t          *testing.T
+	repo       string
+	toolRunner *codeReviewTemplateToolRunner
+	called     bool
+}
+
+func (r *githubPRReviewTemplateAgentRunner) RunAgent(
+	_ context.Context,
+	req AgentRequest,
+) (map[string]any, error) {
+	r.called = true
+	if req.AgentID != "main" || req.History != "none" || req.Cache != "session" {
+		r.t.Fatalf("agent request = %#v", req)
+	}
+	if req.Tools != AgentToolsNone || req.Inputs["tools"] != "none" {
+		r.t.Fatalf("review request = %#v, want no-tool agent call", req)
+	}
+	if !reflect.DeepEqual(r.toolRunner.actions, []string{"acquire"}) {
+		r.t.Fatalf("review did not retain the workspace lease: %v", r.toolRunner.actions)
+	}
+	scope, ok := req.Scope.([]map[string]any)
+	if !ok || len(scope) != 1 || scope[0]["path"] != "main.go" {
+		r.t.Fatalf("review scope = %#v, want changed main.go only", req.Scope)
+	}
+	if _, leaked := scope[0]["source"]; leaked {
+		r.t.Fatalf("review scope leaked workspace source = %#v", scope[0])
+	}
+	diffText, ok := scope[0]["unifiedDiff"].(string)
+	if !ok ||
+		!strings.Contains(diffText, "-func value() int { return 1 }") ||
+		!strings.Contains(diffText, "+func value() int { return 2 }") {
+		r.t.Fatalf("review unifiedDiff = %q, want exact changed code", diffText)
+	}
+	if req.Output == nil || !req.Output.Enabled() {
+		r.t.Fatal("review structured output contract is not enabled")
+	}
+	structured := map[string]any{
+		"schemaVersion": 1,
+		"summary":       "One actionable finding.",
+		"findings": []any{
+			map[string]any{
+				"severity":       "high",
+				"title":          "Value changed",
+				"file":           "main.go",
+				"line":           3,
+				"message":        "The new value breaks callers.",
+				"evidence":       "value now returns 2",
+				"impact":         "Callers receive the wrong result.",
+				"recommendation": "Preserve the prior contract.",
+			},
+		},
+		"tests":         []any{"go test ./..."},
+		"residualRisks": []any{},
+	}
+	return map[string]any{
+		"text":       "structured review",
+		"structured": structured,
+	}, nil
 }
 
 func TestCodeReviewWorkflowRunsWithGitWorkspaceTool(t *testing.T) {

@@ -244,6 +244,8 @@ function templateTitle(name: string) {
       return "Code review"
     case "github-issue-triage":
       return "GitHub issue triage"
+    case "github-pr-review":
+      return "GitHub PR review"
     default:
       return name
         .split("-")

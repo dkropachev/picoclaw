@@ -49,6 +49,39 @@ func newGitHubTestController(
 	return controller, generation
 }
 
+func newScopedGitHubTestController(
+	t *testing.T,
+	store Inserter,
+	repositories []string,
+	targetUser string,
+) (*Controller, Generation) {
+	t.Helper()
+	backend, err := NewBackend(BackendConfig{
+		Store: store,
+		ConnectorSecrets: map[string]string{
+			githubTestConnector: githubTestSecret,
+		},
+		ConnectorFormats: map[string]string{
+			githubTestConnector: "github",
+		},
+		ConnectorRepositories: map[string][]string{
+			githubTestConnector: repositories,
+		},
+		ConnectorTargetUsers: map[string]string{
+			githubTestConnector: targetUser,
+		},
+		MaxPayloadBytes: 1 << 20,
+	})
+	require.NoError(t, err)
+	controller := NewController()
+	generation, err := controller.Activate(backend)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, controller.Deactivate(context.Background(), generation))
+	})
+	return controller, generation
+}
+
 func githubSignedRequest(
 	secret string,
 	event string,
@@ -478,10 +511,256 @@ func TestGitHubNormalizationPreservesSemanticPayload(t *testing.T) {
 	assert.Equal(t, "true", input.Subject.Attributes["fork"])
 
 	assert.Equal(t, "true", input.Attributes["body_authenticated"])
+	assert.Equal(t, "true", input.Attributes["source_authenticated"])
 	assert.Equal(t, "false", input.Attributes["headers_authenticated"])
 	assert.Equal(t, "hmac-sha256", input.Attributes["signature_algorithm"])
 	assert.Equal(t, "octocat/hello-world", input.Attributes["repository_full_name"])
 	assert.Equal(t, "public", input.Attributes["repository_visibility"])
+}
+
+func TestGitHubRepositoryScopeAndReviewTargetMetadata(t *testing.T) {
+	t.Parallel()
+	store := newMemoryInserter()
+	controller, _ := newScopedGitHubTestController(
+		t,
+		store,
+		[]string{"scylladb/gocql", "scylladb/scylla-rust-driver"},
+		"Review-User",
+	)
+
+	body := `{
+		"action":"review_requested",
+		"repository":{
+			"full_name":"ScyllaDB/GOCQL",
+			"name":"gocql",
+			"owner":{"login":"scylladb"}
+		},
+		"pull_request":{
+			"number":42,
+			"html_url":"https://github.com/scylladb/gocql/pull/42",
+			"title":"Keep @review-user-visible out of the mention match",
+			"body":"Please inspect the retry path.",
+			"draft":false,
+			"user":{"login":"contributor"},
+			"head":{"ref":"fix/retry","sha":"head-sha-42"},
+			"base":{"ref":"main","sha":"base-sha-42"}
+		},
+		"requested_reviewer":{"login":"review-user"}
+	}`
+	response := performRequest(
+		controller,
+		githubSignedRequest(
+			githubTestSecret,
+			"pull_request",
+			"review-requested-allowed",
+			body,
+		),
+	)
+	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
+
+	inputs := store.recordedInputs()
+	require.Len(t, inputs, 1)
+	input := inputs[0]
+	assert.Equal(t, "pull_request.review_requested", input.Type)
+	assert.Equal(t, "ScyllaDB/GOCQL", input.Attributes["repository_full_name"])
+	assert.Equal(t, "42", input.Attributes["pull_request_number"])
+	assert.Equal(t, "fix/retry", input.Attributes["pull_request_head_ref"])
+	assert.Equal(t, "head-sha-42", input.Attributes["pull_request_head_sha"])
+	assert.Equal(t, "main", input.Attributes["pull_request_base_ref"])
+	assert.Equal(t, "base-sha-42", input.Attributes["pull_request_base_sha"])
+	assert.Equal(t, "review-user", input.Attributes["requested_reviewer"])
+	assert.Equal(t, "review-user", input.Attributes["target_user"])
+	assert.Equal(t, "true", input.Attributes["targets_user"])
+	assert.Equal(t, "requested_reviewer", input.Attributes["target_reason"])
+}
+
+func TestGitHubRepositoryScopeAcknowledgesUnwatchedDeliveryWithoutPersisting(t *testing.T) {
+	t.Parallel()
+	store := newMemoryInserter()
+	controller, _ := newScopedGitHubTestController(
+		t,
+		store,
+		[]string{"scylladb/gocql"},
+		"review-user",
+	)
+	body := `{
+		"action":"opened",
+		"repository":{"full_name":"other/project"},
+		"issue":{"number":7,"html_url":"https://github.com/other/project/issues/7"}
+	}`
+	response := performRequest(
+		controller,
+		githubSignedRequest(
+			githubTestSecret,
+			"issues",
+			"unwatched-repository",
+			body,
+		),
+	)
+	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
+	var output admissionResponse
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &output))
+	assert.True(t, output.Ignored)
+	assert.False(t, output.Inserted)
+	assert.Empty(t, output.EventID)
+	assert.Empty(t, store.recordedInputs())
+}
+
+func TestGitHubRepositoryScopeDoesNotHideSecretBearingIdentity(t *testing.T) {
+	t.Parallel()
+	store := newMemoryInserter()
+	controller, _ := newScopedGitHubTestController(
+		t,
+		store,
+		[]string{"scylladb/gocql"},
+		"review-user",
+	)
+	body := `{
+		"action":"opened",
+		"repository":{"full_name":"other/project"},
+		"issue":{"number":7}
+	}`
+	response := performRequest(
+		controller,
+		githubSignedRequest(
+			githubTestSecret,
+			"issues",
+			"delivery-"+githubTestSecret,
+			body,
+		),
+	)
+	require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
+	assert.Empty(t, store.recordedInputs())
+}
+
+func TestGitHubMentionAndIssueMetadataTargetsConfiguredUser(t *testing.T) {
+	t.Parallel()
+	store := newMemoryInserter()
+	controller, _ := newScopedGitHubTestController(
+		t,
+		store,
+		[]string{"scylladb/gocql"},
+		"review-user",
+	)
+	body := `{
+		"action":"created",
+		"repository":{"full_name":"scylladb/gocql"},
+		"issue":{
+			"number":9,
+			"html_url":"https://github.com/scylladb/gocql/issues/9",
+			"title":"Question",
+			"body":"No direct mention here.",
+			"user":{"login":"author"}
+		},
+		"comment":{
+			"html_url":"https://github.com/scylladb/gocql/issues/9#issuecomment-1",
+			"body":"Could @Review-User check this?",
+			"user":{"login":"commenter"}
+		}
+	}`
+	response := performRequest(
+		controller,
+		githubSignedRequest(
+			githubTestSecret,
+			"issue_comment",
+			"issue-comment-mention",
+			body,
+		),
+	)
+	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
+	inputs := store.recordedInputs()
+	require.Len(t, inputs, 1)
+	assert.Equal(t, "9", inputs[0].Attributes["issue_number"])
+	assert.Equal(t, "commenter", inputs[0].Attributes["comment_author"])
+	assert.Equal(t, "true", inputs[0].Attributes["targets_user"])
+	assert.Equal(t, "mention", inputs[0].Attributes["target_reason"])
+}
+
+func TestGitHubTextMentionsUserRequiresLoginBoundaries(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		text string
+		want bool
+	}{
+		{text: "@review-user", want: true},
+		{text: "Please ask (@Review-User).", want: true},
+		{text: "@review-user-visible", want: false},
+		{text: "mail@review-user", want: false},
+		{text: "not mentioned", want: false},
+	} {
+		assert.Equal(
+			t,
+			test.want,
+			githubTextMentionsUser(test.text, "review-user"),
+			test.text,
+		)
+	}
+}
+
+func TestGitHubRemovedReviewRequestDoesNotTargetConfiguredUser(t *testing.T) {
+	t.Parallel()
+	store := newMemoryInserter()
+	controller, _ := newScopedGitHubTestController(
+		t,
+		store,
+		[]string{"scylladb/gocql"},
+		"review-user",
+	)
+	body := `{
+		"action":"review_request_removed",
+		"repository":{"full_name":"scylladb/gocql"},
+		"pull_request":{"number":10,"title":"No mention","body":""},
+		"requested_reviewer":{"login":"review-user"}
+	}`
+	response := performRequest(
+		controller,
+		githubSignedRequest(
+			githubTestSecret,
+			"pull_request",
+			"review-request-removed",
+			body,
+		),
+	)
+	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
+	inputs := store.recordedInputs()
+	require.Len(t, inputs, 1)
+	assert.Equal(t, "false", inputs[0].Attributes["targets_user"])
+	assert.Empty(t, inputs[0].Attributes["target_reason"])
+}
+
+func TestNewBackendRejectsInvalidGitHubScope(t *testing.T) {
+	t.Parallel()
+	tests := []BackendConfig{
+		{
+			ConnectorRepositories: map[string][]string{
+				githubTestConnector: {"missing-owner"},
+			},
+		},
+		{
+			ConnectorRepositories: map[string][]string{
+				"github-orphan": {"owner/repository"},
+			},
+		},
+		{
+			ConnectorTargetUsers: map[string]string{
+				githubTestConnector: "-invalid",
+			},
+		},
+	}
+	for _, config := range tests {
+		config.Store = newMemoryInserter()
+		config.ConnectorSecrets = map[string]string{
+			githubTestConnector: githubTestSecret,
+		}
+		config.ConnectorFormats = map[string]string{
+			githubTestConnector: "github",
+		}
+		config.MaxPayloadBytes = 1024
+		backend, err := NewBackend(config)
+		require.Error(t, err)
+		assert.Nil(t, backend)
+		assert.NotContains(t, err.Error(), githubTestSecret)
+	}
 }
 
 func TestGitHubOptionalProjectionIsBounded(t *testing.T) {

@@ -24,7 +24,7 @@ const (
 	// MaxWorkflowAuthoringMCPTools bounds projected eager MCP identities.
 	MaxWorkflowAuthoringMCPTools = 256
 	// MaxWorkflowAuthoringFunctions bounds projected native functions.
-	MaxWorkflowAuthoringFunctions = 4
+	MaxWorkflowAuthoringFunctions = 5
 	// MaxWorkflowAuthoringShapeDepth bounds nested properties and items.
 	MaxWorkflowAuthoringShapeDepth = 6
 	// MaxWorkflowAuthoringShapeProperties bounds properties on one object.

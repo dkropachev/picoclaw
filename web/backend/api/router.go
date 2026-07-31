@@ -132,6 +132,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	h.registerGitWorkspaceRoutes(mux)
 	h.registerWorkflowRoutes(mux)
 	h.registerEventRoutes(mux)
+	h.registerReviewRoutes(mux)
 
 	// OS startup / launch-at-login
 	h.registerStartupRoutes(mux)

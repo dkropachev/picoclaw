@@ -215,6 +215,539 @@ func TestNativeGitInventoryDefaultsToHead(t *testing.T) {
 	}
 }
 
+func TestNativeGitDiffProjectsChangedFilesWithBoundedUnifiedDiffs(t *testing.T) {
+	requireGit(t)
+	workspace := t.TempDir()
+	repo := filepath.Join(workspace, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo, "init")
+	gitCmd(t, repo, "config", "user.email", "test@example.com")
+	gitCmd(t, repo, "config", "user.name", "Test User")
+	writeTestFile(t, filepath.Join(repo, "old.go"), "package review\n\nconst Old = 1\n")
+	writeTestFile(t, filepath.Join(repo, "deleted.go"), "package review\n\nconst Deleted = 2\n")
+	writeTestFile(t, filepath.Join(repo, "README.md"), "base\n")
+	gitCmd(t, repo, "add", ".")
+	gitCmd(t, repo, "commit", "-m", "base")
+	base := strings.TrimSpace(gitCmd(t, repo, "rev-parse", "HEAD"))
+
+	gitCmd(t, repo, "mv", "old.go", "renamed.go")
+	if err := os.Remove(filepath.Join(repo, "deleted.go")); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(repo, "README.md"), "updated\n")
+	writeTestFile(t, filepath.Join(repo, "added.go"), "package review\n\nconst Added = 3\n")
+	gitCmd(t, repo, "add", "-A")
+	gitCmd(t, repo, "commit", "-m", "head")
+	head := strings.TrimSpace(gitCmd(t, repo, "rev-parse", "HEAD"))
+
+	outputs, handled, err := RunNativeFunction(
+		context.Background(),
+		"git.diff",
+		map[string]any{
+			"workspace": map[string]any{
+				"id":   "gw-diff",
+				"path": repo,
+			},
+			"base":   base,
+			"head":   head,
+			"target": "code",
+		},
+		ExecutionContext{WorkspaceDir: workspace},
+	)
+	if err != nil {
+		t.Fatalf("git.diff error = %v", err)
+	}
+	if !handled {
+		t.Fatal("git.diff was not handled")
+	}
+	if outputs["baseCommit"] != base || outputs["headCommit"] != head {
+		t.Fatalf(
+			"resolved commits = %#v..%#v, want %q..%q",
+			outputs["baseCommit"],
+			outputs["headCommit"],
+			base,
+			head,
+		)
+	}
+	if outputs["mode"] != "direct" || outputs["comparisonBaseCommit"] != base {
+		t.Fatalf(
+			"diff mode/base = %#v/%#v, want direct/%q",
+			outputs["mode"],
+			outputs["comparisonBaseCommit"],
+			base,
+		)
+	}
+	counts, ok := outputs["counts"].(map[string]any)
+	if !ok ||
+		counts["totalChangedFiles"] != 4 ||
+		counts["totalSelectedFiles"] != 3 ||
+		counts["deletedFiles"] != 1 {
+		t.Fatalf("counts = %#v, want 4 changed, 3 selected, 1 deleted", outputs["counts"])
+	}
+	deleted, ok := outputs["deletedPaths"].([]string)
+	if !ok || !reflect.DeepEqual(deleted, []string{"deleted.go"}) {
+		t.Fatalf("deletedPaths = %#v, want deleted.go", outputs["deletedPaths"])
+	}
+	selected, ok := outputs["selectedFiles"].([]map[string]any)
+	if !ok || len(selected) != 3 {
+		t.Fatalf("selectedFiles = %#v, want three code files", outputs["selectedFiles"])
+	}
+	byPath := make(map[string]map[string]any, len(selected))
+	for _, file := range selected {
+		byPath[file["path"].(string)] = file
+		if _, embedded := file["content"]; embedded {
+			t.Fatalf("changed file embedded content: %#v", file)
+		}
+		if _, leaked := file["source"]; leaked {
+			t.Fatalf("changed file leaked workspace source: %#v", file)
+		}
+	}
+	if byPath["added.go"]["changeStatus"] != "A" {
+		t.Fatalf("added.go projection = %#v", byPath["added.go"])
+	}
+	addedDiff, ok := byPath["added.go"]["unifiedDiff"].(string)
+	if !ok ||
+		!strings.Contains(addedDiff, "diff --git a/added.go b/added.go") ||
+		!strings.Contains(addedDiff, "@@ -0,0 +1,3 @@") ||
+		!strings.Contains(addedDiff, "+const Added = 3") {
+		t.Fatalf("added.go unifiedDiff = %q, want bounded unified patch", addedDiff)
+	}
+	if byPath["added.go"]["diffBytes"] != len(addedDiff) {
+		t.Fatalf("added.go diffBytes = %#v, want %d", byPath["added.go"]["diffBytes"], len(addedDiff))
+	}
+	deletedFile := byPath["deleted.go"]
+	deletedDiff, ok := deletedFile["unifiedDiff"].(string)
+	if deletedFile["changeStatus"] != "D" ||
+		!ok ||
+		!strings.Contains(deletedDiff, "diff --git a/deleted.go b/deleted.go") ||
+		!strings.Contains(deletedDiff, "-const Deleted = 2") {
+		t.Fatalf("deleted.go projection = %#v, want removed production-code patch", deletedFile)
+	}
+	if deletedFile["diffBytes"] != len(deletedDiff) ||
+		len(deletedDiff) > maxNativeGitDiffFileBytes {
+		t.Fatalf(
+			"deleted.go diffBytes = %#v with %d-byte patch, maximum %d",
+			deletedFile["diffBytes"],
+			len(deletedDiff),
+			maxNativeGitDiffFileBytes,
+		)
+	}
+	renamed := byPath["renamed.go"]
+	if !strings.HasPrefix(renamed["changeStatus"].(string), "R") ||
+		renamed["previousPath"] != "old.go" {
+		t.Fatalf("renamed.go projection = %#v", renamed)
+	}
+	renamedDiff, ok := renamed["unifiedDiff"].(string)
+	if !ok ||
+		!strings.Contains(renamedDiff, "rename from old.go") ||
+		!strings.Contains(renamedDiff, "rename to renamed.go") {
+		t.Fatalf("renamed.go unifiedDiff = %q, want rename metadata", renamedDiff)
+	}
+	if outputs["diffBytes"] != len(addedDiff)+len(deletedDiff)+len(renamedDiff) {
+		t.Fatalf(
+			"diffBytes = %#v, want %d",
+			outputs["diffBytes"],
+			len(addedDiff)+len(deletedDiff)+len(renamedDiff),
+		)
+	}
+}
+
+func TestNativeGitDiffEmbedsBoundedDeletedProductionFile(t *testing.T) {
+	requireGit(t)
+	workspace := t.TempDir()
+	repo := filepath.Join(workspace, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo, "init")
+	gitCmd(t, repo, "config", "user.email", "test@example.com")
+	gitCmd(t, repo, "config", "user.name", "Test User")
+	writeTestFile(
+		t,
+		filepath.Join(repo, "removed.go"),
+		"package review\n\nfunc Removed() bool { return true }\n",
+	)
+	writeTestFile(t, filepath.Join(repo, "README.md"), "removed documentation\n")
+	gitCmd(t, repo, "add", ".")
+	gitCmd(t, repo, "commit", "-m", "base")
+	base := strings.TrimSpace(gitCmd(t, repo, "rev-parse", "HEAD"))
+	if err := os.Remove(filepath.Join(repo, "removed.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(repo, "README.md")); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo, "add", "-A")
+	gitCmd(t, repo, "commit", "-m", "delete files")
+	head := strings.TrimSpace(gitCmd(t, repo, "rev-parse", "HEAD"))
+
+	outputs, handled, err := RunNativeFunction(
+		context.Background(),
+		"git.diff",
+		map[string]any{
+			"workspace": map[string]any{"path": repo},
+			"base":      base,
+			"head":      head,
+			"target":    "code",
+		},
+		ExecutionContext{WorkspaceDir: workspace},
+	)
+	if err != nil {
+		t.Fatalf("git.diff error = %v", err)
+	}
+	if !handled {
+		t.Fatal("git.diff was not handled")
+	}
+	if deleted, ok := outputs["deletedPaths"].([]string); !ok || !reflect.DeepEqual(
+		deleted,
+		[]string{"README.md", "removed.go"},
+	) {
+		t.Fatalf("deletedPaths = %#v, want compatibility list", outputs["deletedPaths"])
+	}
+	selected, ok := outputs["selectedFiles"].([]map[string]any)
+	if !ok || len(selected) != 1 || selected[0]["path"] != "removed.go" {
+		t.Fatalf("selectedFiles = %#v, want only removed production code", outputs["selectedFiles"])
+	}
+	removed := selected[0]
+	diffText, ok := removed["unifiedDiff"].(string)
+	if removed["changeStatus"] != "D" ||
+		!ok ||
+		!strings.Contains(diffText, "-func Removed() bool { return true }") {
+		t.Fatalf("removed.go projection = %#v, want deleted code evidence", removed)
+	}
+	if removed["diffBytes"] != len(diffText) ||
+		len(diffText) == 0 ||
+		len(diffText) > maxNativeGitDiffFileBytes {
+		t.Fatalf(
+			"removed.go diffBytes = %#v with %d-byte patch, maximum %d",
+			removed["diffBytes"],
+			len(diffText),
+			maxNativeGitDiffFileBytes,
+		)
+	}
+	if _, leaked := removed["source"]; leaked {
+		t.Fatalf("removed.go leaked absolute source projection: %#v", removed)
+	}
+}
+
+func TestNativeGitDiffIncludesContextRichUnifiedTextAndLiteralPath(t *testing.T) {
+	requireGit(t)
+	workspace := t.TempDir()
+	repo := filepath.Join(workspace, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo, "init")
+	gitCmd(t, repo, "config", "user.email", "test@example.com")
+	gitCmd(t, repo, "config", "user.name", "Test User")
+
+	lines := make([]string, 120)
+	for index := range lines {
+		lines[index] = "unchanged context"
+	}
+	lines[9] = "far context marker"
+	lines[89] = "const Reviewed = 1"
+	fileName := ":(exclude)review.go"
+	writeTestFile(t, filepath.Join(repo, fileName), strings.Join(lines, "\n")+"\n")
+	gitCmd(t, repo, "add", ".")
+	gitCmd(t, repo, "commit", "-m", "base")
+	base := strings.TrimSpace(gitCmd(t, repo, "rev-parse", "HEAD"))
+
+	lines[89] = "const Reviewed = 2"
+	writeTestFile(t, filepath.Join(repo, fileName), strings.Join(lines, "\n")+"\n")
+	gitCmd(t, repo, "add", ".")
+	gitCmd(t, repo, "commit", "-m", "head")
+	head := strings.TrimSpace(gitCmd(t, repo, "rev-parse", "HEAD"))
+
+	outputs, handled, err := RunNativeFunction(
+		context.Background(),
+		"git.diff",
+		map[string]any{
+			"workspace": map[string]any{"path": repo},
+			"base":      base,
+			"head":      head,
+			"target":    "code",
+		},
+		ExecutionContext{WorkspaceDir: workspace},
+	)
+	if err != nil {
+		t.Fatalf("git.diff error = %v", err)
+	}
+	if !handled {
+		t.Fatal("git.diff was not handled")
+	}
+	selected, ok := outputs["selectedFiles"].([]map[string]any)
+	if !ok || len(selected) != 1 || selected[0]["path"] != fileName {
+		t.Fatalf("selectedFiles = %#v, want literal path %q", outputs["selectedFiles"], fileName)
+	}
+	diffText, ok := selected[0]["unifiedDiff"].(string)
+	if !ok ||
+		!strings.Contains(diffText, "far context marker") ||
+		!strings.Contains(diffText, "-const Reviewed = 1") ||
+		!strings.Contains(diffText, "+const Reviewed = 2") {
+		t.Fatalf("unifiedDiff = %q, want 80-line context and changed line", diffText)
+	}
+}
+
+func TestNativeGitDiffFailsClosedOnUnifiedDiffByteLimits(t *testing.T) {
+	requireGit(t)
+	t.Run("per file", func(t *testing.T) {
+		workspace := t.TempDir()
+		repo := filepath.Join(workspace, "repo")
+		if err := os.MkdirAll(repo, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		gitCmd(t, repo, "init")
+		gitCmd(t, repo, "config", "user.email", "test@example.com")
+		gitCmd(t, repo, "config", "user.name", "Test User")
+		writeTestFile(t, filepath.Join(repo, "large.go"), "package review\n\nconst Value = 1\n")
+		gitCmd(t, repo, "add", ".")
+		gitCmd(t, repo, "commit", "-m", "base")
+		base := strings.TrimSpace(gitCmd(t, repo, "rev-parse", "HEAD"))
+		writeTestFile(
+			t,
+			filepath.Join(repo, "large.go"),
+			"package review\n\nvar Payload = \""+
+				strings.Repeat("x", maxNativeGitDiffFileBytes+1024)+
+				"\"\n",
+		)
+		gitCmd(t, repo, "add", ".")
+		gitCmd(t, repo, "commit", "-m", "head")
+		head := strings.TrimSpace(gitCmd(t, repo, "rev-parse", "HEAD"))
+
+		outputs, handled, err := RunNativeFunction(
+			context.Background(),
+			"git.diff",
+			map[string]any{
+				"workspace": map[string]any{"path": repo},
+				"base":      base,
+				"head":      head,
+				"target":    "code",
+			},
+			ExecutionContext{WorkspaceDir: workspace},
+		)
+		if !handled {
+			t.Fatal("git.diff was not handled")
+		}
+		if err == nil ||
+			!strings.Contains(err.Error(), "exceeds per-file maximum") ||
+			outputs != nil {
+			t.Fatalf("git.diff = %#v, %v; want fail-closed per-file limit", outputs, err)
+		}
+	})
+
+	t.Run("aggregate", func(t *testing.T) {
+		workspace := t.TempDir()
+		repo := filepath.Join(workspace, "repo")
+		if err := os.MkdirAll(repo, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		gitCmd(t, repo, "init")
+		gitCmd(t, repo, "config", "user.email", "test@example.com")
+		gitCmd(t, repo, "config", "user.name", "Test User")
+		writeTestFile(t, filepath.Join(repo, "README.md"), "base\n")
+		gitCmd(t, repo, "add", ".")
+		gitCmd(t, repo, "commit", "-m", "base")
+		base := strings.TrimSpace(gitCmd(t, repo, "rev-parse", "HEAD"))
+		fileCount := maxNativeGitDiffAggregateBytes/(maxNativeGitDiffFileBytes/2) + 2
+		for index := 0; index < fileCount; index++ {
+			fileName := string(rune('a'+index)) + ".go"
+			writeTestFile(
+				t,
+				filepath.Join(repo, fileName),
+				"package review\n\nvar Payload = \""+
+					strings.Repeat(string(rune('a'+index)), maxNativeGitDiffFileBytes/2)+
+					"\"\n",
+			)
+		}
+		gitCmd(t, repo, "add", ".")
+		gitCmd(t, repo, "commit", "-m", "head")
+		head := strings.TrimSpace(gitCmd(t, repo, "rev-parse", "HEAD"))
+
+		outputs, handled, err := RunNativeFunction(
+			context.Background(),
+			"git.diff",
+			map[string]any{
+				"workspace": map[string]any{"path": repo},
+				"base":      base,
+				"head":      head,
+				"target":    "code",
+			},
+			ExecutionContext{WorkspaceDir: workspace},
+		)
+		if !handled {
+			t.Fatal("git.diff was not handled")
+		}
+		if err == nil ||
+			!strings.Contains(err.Error(), "exceed aggregate maximum") ||
+			outputs != nil {
+			t.Fatalf("git.diff = %#v, %v; want fail-closed aggregate limit", outputs, err)
+		}
+	})
+}
+
+func TestNativeGitDiffPullRequestModeFetchesBaseAndUsesMergeBase(t *testing.T) {
+	requireGit(t)
+	workspace := t.TempDir()
+	upstream := filepath.Join(workspace, "upstream")
+	if err := os.MkdirAll(upstream, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, upstream, "init")
+	gitCmd(t, upstream, "config", "user.email", "test@example.com")
+	gitCmd(t, upstream, "config", "user.name", "Test User")
+	writeTestFile(t, filepath.Join(upstream, "main.go"), "package review\n\nconst Value = 1\n")
+	gitCmd(t, upstream, "add", ".")
+	gitCmd(t, upstream, "commit", "-m", "common")
+	common := strings.TrimSpace(gitCmd(t, upstream, "rev-parse", "HEAD"))
+
+	fork := filepath.Join(workspace, "fork")
+	gitCmd(t, workspace, "clone", upstream, fork)
+	gitCmd(t, fork, "config", "user.email", "test@example.com")
+	gitCmd(t, fork, "config", "user.name", "Test User")
+	gitCmd(t, fork, "checkout", "-b", "feature")
+	writeTestFile(t, filepath.Join(fork, "main.go"), "package review\n\nconst Value = 2\n")
+	gitCmd(t, fork, "add", ".")
+	gitCmd(t, fork, "commit", "-m", "feature")
+	head := strings.TrimSpace(gitCmd(t, fork, "rev-parse", "HEAD"))
+
+	writeTestFile(t, filepath.Join(upstream, "upstream.go"), "package review\n\nconst Upstream = true\n")
+	gitCmd(t, upstream, "add", ".")
+	gitCmd(t, upstream, "commit", "-m", "advance base")
+	base := strings.TrimSpace(gitCmd(t, upstream, "rev-parse", "HEAD"))
+	if err := osexec.Command("git", "-C", fork, "cat-file", "-e", base+"^{commit}").Run(); err == nil {
+		t.Fatalf("fork unexpectedly contained advanced base %q before git.diff", base)
+	}
+
+	diffArgs := map[string]any{
+		"workspace": map[string]any{
+			"id":   "gw-fork",
+			"ref":  head,
+			"path": fork,
+		},
+		"base":            base,
+		"head":            head,
+		"mode":            "pull_request",
+		"base_repository": upstream,
+		"target":          "code",
+	}
+	outputs, handled, err := RunNativeFunction(
+		context.Background(),
+		"git.diff",
+		diffArgs,
+		ExecutionContext{WorkspaceDir: workspace},
+	)
+	if err != nil {
+		t.Fatalf("pull-request git.diff error = %v", err)
+	}
+	if !handled {
+		t.Fatal("git.diff was not handled")
+	}
+	if outputs["mode"] != "pull_request" ||
+		outputs["baseCommit"] != base ||
+		outputs["headCommit"] != head ||
+		outputs["comparisonBaseCommit"] != common {
+		t.Fatalf(
+			"pull-request commits = mode %#v, base %#v, head %#v, comparison %#v; want pull_request %s %s %s",
+			outputs["mode"],
+			outputs["baseCommit"],
+			outputs["headCommit"],
+			outputs["comparisonBaseCommit"],
+			base,
+			head,
+			common,
+		)
+	}
+	selected, ok := outputs["selectedFiles"].([]map[string]any)
+	if !ok || len(selected) != 1 || selected[0]["path"] != "main.go" {
+		t.Fatalf(
+			"selectedFiles = %#v, want only feature-side main.go and no base-advanced upstream.go",
+			outputs["selectedFiles"],
+		)
+	}
+	diffText, ok := selected[0]["unifiedDiff"].(string)
+	if !ok ||
+		!strings.Contains(diffText, "-const Value = 1") ||
+		!strings.Contains(diffText, "+const Value = 2") ||
+		strings.Contains(diffText, "upstream.go") {
+		t.Fatalf("pull-request unifiedDiff = %q, want merge-base-to-head feature diff", diffText)
+	}
+
+	forkCopy := filepath.Join(workspace, "fork-copy")
+	gitCmd(t, workspace, "clone", fork, forkCopy)
+	copiedOutputs, handled, err := RunNativeFunction(
+		context.Background(),
+		"git.diff",
+		map[string]any{
+			"workspace": map[string]any{
+				"id":   "gw-fork-copy",
+				"ref":  head,
+				"path": forkCopy,
+			},
+			"base":            base,
+			"head":            head,
+			"mode":            "pull_request",
+			"base_repository": upstream,
+			"target":          "code",
+		},
+		ExecutionContext{WorkspaceDir: workspace},
+	)
+	if err != nil || !handled {
+		t.Fatalf("copied pull-request git.diff = %#v, %t, %v", copiedOutputs, handled, err)
+	}
+	if copiedOutputs["diffHash"] != outputs["diffHash"] {
+		t.Fatalf(
+			"diffHash changed across checkout paths: %#v != %#v",
+			copiedOutputs["diffHash"],
+			outputs["diffHash"],
+		)
+	}
+
+	unrelated := filepath.Join(workspace, "unrelated")
+	if err := os.MkdirAll(unrelated, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, unrelated, "init")
+	gitCmd(t, unrelated, "config", "user.email", "test@example.com")
+	gitCmd(t, unrelated, "config", "user.name", "Test User")
+	writeTestFile(t, filepath.Join(unrelated, "other.go"), "package other\n")
+	gitCmd(t, unrelated, "add", ".")
+	gitCmd(t, unrelated, "commit", "-m", "unrelated")
+	diffArgs["base_repository"] = unrelated
+	mismatchOutputs, handled, mismatchErr := RunNativeFunction(
+		context.Background(),
+		"git.diff",
+		diffArgs,
+		ExecutionContext{WorkspaceDir: workspace},
+	)
+	if !handled ||
+		mismatchErr == nil ||
+		!strings.Contains(mismatchErr.Error(), "fetch exact pull-request base commit") ||
+		mismatchOutputs != nil {
+		t.Fatalf(
+			"mismatched base repository = %#v, %t, %v; want fail-closed fetch error",
+			mismatchOutputs,
+			handled,
+			mismatchErr,
+		)
+	}
+}
+
+func TestParseNativeGitDiffEntriesRejectsMalformedOrEscapedPaths(t *testing.T) {
+	for _, raw := range []string{
+		"M\x00",
+		"R100\x00old.go\x00",
+		"Z\x00file.go\x00",
+		"M\x00../escape.go\x00",
+	} {
+		if _, err := parseNativeGitDiffEntries(raw); err == nil {
+			t.Fatalf("parseNativeGitDiffEntries(%q) error = nil, want rejection", raw)
+		}
+	}
+}
+
 func TestNativeGitInventoryLinksSelectedFilesWithoutEmbeddingContent(t *testing.T) {
 	requireGit(t)
 	workspace := t.TempDir()

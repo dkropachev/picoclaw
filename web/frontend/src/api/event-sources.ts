@@ -13,6 +13,10 @@ export interface EventWebhookSource {
   enabled: boolean
   format: EventWebhookFormat
   persistedFormat?: EventWebhookFormat
+  repositories: string[]
+  targetUser: string
+  pollNotifications: boolean
+  persistedPollNotifications?: boolean
   secretConfigured: boolean
   secretUpdate: EventSecretUpdate
   secret: string
@@ -124,6 +128,10 @@ export function parseEventSourcesConfig(value: unknown): LoadedEventSources {
         enabled: asBoolean(item.enabled),
         format: webhookFormat(item.format),
         persistedFormat: webhookFormat(item.format),
+        repositories: asStringList(item.repositories),
+        targetUser: asString(item.target_user),
+        pollNotifications: asBoolean(item.poll_notifications),
+        persistedPollNotifications: asBoolean(item.poll_notifications),
         secretConfigured:
           secret === EVENT_SECRET_PLACEHOLDER || secret.trim() !== "",
         secretUpdate: "preserve" as const,
@@ -206,6 +214,22 @@ function webhookPatch(source: EventWebhookSource): JsonRecord {
   const patch: JsonRecord = {
     enabled: source.enabled,
     format: source.format,
+  }
+  if (source.format === "github") {
+    patch.repositories =
+      (source.repositories ?? []).length > 0 ? source.repositories : null
+    patch.target_user = (source.targetUser ?? "").trim() || null
+    if (source.pollNotifications) {
+      patch.poll_notifications = true
+    } else if (source.persistedPollNotifications) {
+      patch.poll_notifications = null
+    }
+  } else {
+    patch.repositories = null
+    patch.target_user = null
+    if (source.persistedPollNotifications) {
+      patch.poll_notifications = null
+    }
   }
   if (source.secretUpdate === "replace" && source.secret !== "") {
     patch.secret = source.secret
@@ -291,6 +315,9 @@ export function newEventWebhookSource(): EventWebhookSource {
     name: "",
     enabled: false,
     format: "github",
+    repositories: [],
+    targetUser: "",
+    pollNotifications: false,
     secretConfigured: false,
     secretUpdate: "replace",
     secret: "",

@@ -693,6 +693,7 @@ func TestEventGitHubWebhookDeliveryRunsOneNativeEventWorkflow(t *testing.T) {
 	}
 	for key, want := range map[string]string{
 		"body_authenticated":    "true",
+		"source_authenticated":  "true",
 		"headers_authenticated": "false",
 		"signature_algorithm":   "hmac-sha256",
 	} {
@@ -760,6 +761,170 @@ func TestEventGitHubWebhookDeliveryRunsOneNativeEventWorkflow(t *testing.T) {
 		"github",
 		gatewayGitHubConnector,
 	)
+}
+
+func TestConfiguredGitHubScopeReachesGatewayAdmission(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := eventAutomationTestConfig(
+		workspace,
+		filepath.Join(workspace, "eventing", "events.db"),
+		true,
+		false,
+	)
+	secret := gatewayGitHubWebhookSecret('s')
+	configureGatewayGitHubWebhook(cfg, secret)
+	webhookConfig := cfg.Events.Ingress.Webhooks[gatewayGitHubConnector]
+	webhookConfig.Repositories = []string{"scylladb/gocql"}
+	webhookConfig.TargetUser = "Review-User"
+	cfg.Events.Ingress.Webhooks[gatewayGitHubConnector] = webhookConfig
+
+	service, err := setupEventAutomationService(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatalf("setupEventAutomationService() error = %v", err)
+	}
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := service.Close(closeCtx); closeErr != nil {
+			t.Errorf("event automation Close() error = %v", closeErr)
+		}
+	})
+
+	controller := eventwebhook.NewController()
+	generation, err := controller.Activate(service.webhookBackend)
+	if err != nil {
+		t.Fatalf("Activate() error = %v", err)
+	}
+	t.Cleanup(func() {
+		drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if drainErr := controller.Deactivate(drainCtx, generation); drainErr != nil {
+			t.Errorf("Deactivate() error = %v", drainErr)
+		}
+	})
+
+	target := eventwebhook.RoutePrefix + gatewayGitHubConnector
+	unwatchedBody := `{
+		"action":"opened",
+		"repository":{"full_name":"other/project"},
+		"issue":{"number":7,"html_url":"https://github.com/other/project/issues/7"}
+	}`
+	unwatchedResponse := performGatewayWebhookHandler(
+		controller,
+		gatewayGitHubSignedRequest(
+			t,
+			target,
+			secret,
+			"gateway-unwatched-repository",
+			"issues",
+			unwatchedBody,
+		),
+	)
+	if unwatchedResponse.Code != http.StatusAccepted {
+		t.Fatalf(
+			"unwatched GitHub delivery status = %d, want %d: %s",
+			unwatchedResponse.Code,
+			http.StatusAccepted,
+			unwatchedResponse.Body.String(),
+		)
+	}
+	var ignored struct {
+		EventID  string `json:"event_id"`
+		Inserted bool   `json:"inserted"`
+		Ignored  bool   `json:"ignored"`
+	}
+	if decodeErr := json.Unmarshal(unwatchedResponse.Body.Bytes(), &ignored); decodeErr != nil {
+		t.Fatalf("Unmarshal(ignored response) error = %v", decodeErr)
+	}
+	if !ignored.Ignored || ignored.Inserted || ignored.EventID != "" {
+		t.Fatalf("unwatched GitHub response = %#v, want ignored delivery", ignored)
+	}
+	eventPage, err := service.store.List(context.Background(), eventing.EventFilter{
+		Source:    "github",
+		Connector: gatewayGitHubConnector,
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatalf("List(events after ignored delivery) error = %v", err)
+	}
+	if len(eventPage.Events) != 0 {
+		t.Fatalf(
+			"events after ignored delivery = %#v, want none",
+			eventPage.Events,
+		)
+	}
+
+	deliveryID := "gateway-targeted-review-request"
+	targetedBody := `{
+		"action":"review_requested",
+		"repository":{
+			"full_name":"ScyllaDB/GOCQL",
+			"name":"gocql",
+			"owner":{"login":"scylladb"}
+		},
+		"pull_request":{
+			"number":42,
+			"html_url":"https://github.com/scylladb/gocql/pull/42",
+			"title":"Retry interrupted requests",
+			"body":"Please inspect the retry path.",
+			"draft":false,
+			"user":{"login":"contributor"},
+			"head":{"ref":"fix/retry","sha":"head-sha-42"},
+			"base":{"ref":"main","sha":"base-sha-42"}
+		},
+		"requested_reviewer":{"login":"review-user"}
+	}`
+	targetedResponse := performGatewayWebhookHandler(
+		controller,
+		gatewayGitHubSignedRequest(
+			t,
+			target,
+			secret,
+			deliveryID,
+			"pull_request",
+			targetedBody,
+		),
+	)
+	if targetedResponse.Code != http.StatusAccepted {
+		t.Fatalf(
+			"targeted GitHub delivery status = %d, want %d: %s",
+			targetedResponse.Code,
+			http.StatusAccepted,
+			targetedResponse.Body.String(),
+		)
+	}
+	var accepted struct {
+		EventID  string `json:"event_id"`
+		Inserted bool   `json:"inserted"`
+		Ignored  bool   `json:"ignored"`
+	}
+	if decodeErr := json.Unmarshal(targetedResponse.Body.Bytes(), &accepted); decodeErr != nil {
+		t.Fatalf("Unmarshal(accepted response) error = %v", decodeErr)
+	}
+	if accepted.EventID == "" || !accepted.Inserted || accepted.Ignored {
+		t.Fatalf("targeted GitHub response = %#v, want inserted event", accepted)
+	}
+
+	stored, err := service.store.Get(context.Background(), accepted.EventID)
+	if err != nil {
+		t.Fatalf("Get(targeted event) error = %v", err)
+	}
+	if stored.Envelope.Source != "github" ||
+		stored.Envelope.Connector != gatewayGitHubConnector ||
+		stored.Envelope.Type != "pull_request.review_requested" ||
+		stored.Envelope.DedupeKey != deliveryID {
+		t.Fatalf("stored targeted GitHub identity = %#v", stored.Envelope)
+	}
+	for key, want := range map[string]string{
+		"repository_full_name": "ScyllaDB/GOCQL",
+		"target_user":          "review-user",
+		"targets_user":         "true",
+		"target_reason":        "requested_reviewer",
+	} {
+		if got := stored.Envelope.Attributes[key]; got != want {
+			t.Fatalf("targeted GitHub attribute %q = %q, want %q", key, got, want)
+		}
+	}
 }
 
 func TestEventGitHubWebhookDeliveryRunsIsolatedTriageAndDeclaredComment(t *testing.T) {

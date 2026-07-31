@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	osexec "os/exec"
 	"path"
@@ -16,13 +17,21 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
 const (
-	workflowStateDir     = "workflow_state"
-	workflowArtifactsDir = "workflow_artifacts"
+	workflowStateDir                   = "workflow_state"
+	workflowArtifactsDir               = "workflow_artifacts"
+	maxNativeGitDiffFiles              = 4096
+	maxNativeGitDiffFileBytes          = 128 << 10
+	maxNativeGitDiffAggregateBytes     = 512 << 10
+	maxNativeGitRemoteBytes            = 2048
+	maxNativeGitErrorOutputBytes       = 64 << 10
+	nativeGitDiffContextLines          = 80
+	nativeGitDiffInterHunkContextLines = 16
 )
 
 var safeStorageSegmentPattern = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
@@ -31,6 +40,7 @@ var nativeFunctionNames = map[string]struct{}{
 	"workflow.state":    {},
 	"workflow.artifact": {},
 	"git.inventory":     {},
+	"git.diff":          {},
 	"git.filter":        {},
 }
 
@@ -139,6 +149,9 @@ func RunNativeFunction(
 		return out, true, err
 	case "git.inventory":
 		out, err := nativeGitInventory(ctx, args, exec)
+		return out, true, err
+	case "git.diff":
+		out, err := nativeGitDiff(ctx, args, exec)
 		return out, true, err
 	case "git.filter":
 		out, err := nativeGitFilter(ctx, args, exec)
@@ -295,6 +308,533 @@ func nativeGitInventory(ctx context.Context, args map[string]any, exec Execution
 			"filesExcluded":      excluded,
 		},
 	}, nil
+}
+
+type nativeGitDiffEntry struct {
+	Status       string `json:"status"`
+	Path         string `json:"path"`
+	PreviousPath string `json:"previousPath,omitempty"`
+}
+
+type nativeGitSelectedDiff struct {
+	Entry       nativeGitDiffEntry `json:"entry"`
+	UnifiedDiff string             `json:"unifiedDiff"`
+}
+
+func nativeGitDiff(
+	ctx context.Context,
+	args map[string]any,
+	exec ExecutionContext,
+) (map[string]any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	repo, workspace, err := nativeResolveGitWorkspace(exec, args)
+	if err != nil {
+		return nil, err
+	}
+	baseRevision := strings.TrimSpace(nativeStringAny(args, "base", "base_commit", "baseCommit"))
+	if baseRevision == "" {
+		return nil, fmt.Errorf("base commit is required")
+	}
+	headRevision := strings.TrimSpace(nativeStringAny(args, "head", "head_commit", "headCommit"))
+	mode := strings.ToLower(strings.TrimSpace(nativeString(args, "mode")))
+	if mode == "" {
+		mode = "direct"
+	}
+	baseCommit, headCommit, comparisonBaseCommit, err := nativeGitDiffCommits(
+		ctx,
+		repo,
+		workspace,
+		baseRevision,
+		headRevision,
+		mode,
+		args,
+		exec,
+	)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := nativeGit(
+		ctx,
+		repo,
+		"diff",
+		"--name-status",
+		"-z",
+		"--find-renames",
+		comparisonBaseCommit,
+		headCommit,
+		"--",
+	)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := parseNativeGitDiffEntries(raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) > maxNativeGitDiffFiles {
+		return nil, fmt.Errorf(
+			"git diff contains %d paths; maximum is %d",
+			len(entries),
+			maxNativeGitDiffFiles,
+		)
+	}
+
+	headInventory, err := nativeCollectInventory(ctx, repo, headCommit)
+	if err != nil {
+		return nil, err
+	}
+	headFiles := make(map[string]nativeGitFile, len(headInventory))
+	for _, file := range headInventory {
+		headFiles[file.Path] = file
+	}
+	comparisonBaseInventory, err := nativeCollectInventory(ctx, repo, comparisonBaseCommit)
+	if err != nil {
+		return nil, err
+	}
+	comparisonBaseFiles := make(map[string]nativeGitFile, len(comparisonBaseInventory))
+	for _, file := range comparisonBaseInventory {
+		comparisonBaseFiles[file.Path] = file
+	}
+	target := normalizeFileTarget(nativeStringDefault(args, "target", "code"))
+	files := make([]map[string]any, 0, len(entries))
+	selected := make([]map[string]any, 0, len(entries))
+	selectedDiffs := make([]nativeGitSelectedDiff, 0, len(entries))
+	deletedPaths := make([]string, 0)
+	totalDiffBytes := 0
+	for _, entry := range entries {
+		var inventoryFile nativeGitFile
+		var exists bool
+		if strings.HasPrefix(entry.Status, "D") {
+			deletedPaths = append(deletedPaths, entry.Path)
+			inventoryFile, exists = comparisonBaseFiles[entry.Path]
+		} else {
+			inventoryFile, exists = headFiles[entry.Path]
+		}
+		if !exists {
+			return nil, fmt.Errorf(
+				"changed path %q is absent from its trusted comparison inventory",
+				entry.Path,
+			)
+		}
+		projected, projectErr := nativeGitInventoryOutputFiles(
+			workspace,
+			[]nativeGitFile{inventoryFile},
+			target,
+			true,
+		)
+		if projectErr != nil {
+			return nil, projectErr
+		}
+		file := projected[0]
+		delete(file, "source")
+		file["changeStatus"] = entry.Status
+		if entry.PreviousPath != "" {
+			file["previousPath"] = entry.PreviousPath
+		}
+		if file["selected"] == true {
+			diffText, diffErr := nativeGitUnifiedDiff(
+				ctx,
+				repo,
+				comparisonBaseCommit,
+				headCommit,
+				entry,
+			)
+			if diffErr != nil {
+				return nil, diffErr
+			}
+			if len(diffText) > maxNativeGitDiffFileBytes {
+				return nil, fmt.Errorf(
+					"unified diff for %q is %d bytes; per-file maximum is %d",
+					entry.Path,
+					len(diffText),
+					maxNativeGitDiffFileBytes,
+				)
+			}
+			if totalDiffBytes > maxNativeGitDiffAggregateBytes-len(diffText) {
+				return nil, fmt.Errorf(
+					"selected unified diffs exceed aggregate maximum of %d bytes",
+					maxNativeGitDiffAggregateBytes,
+				)
+			}
+			totalDiffBytes += len(diffText)
+			file["unifiedDiff"] = diffText
+			file["diffBytes"] = len(diffText)
+			selected = append(selected, file)
+			selectedDiffs = append(selectedDiffs, nativeGitSelectedDiff{
+				Entry:       entry,
+				UnifiedDiff: diffText,
+			})
+		}
+		files = append(files, file)
+	}
+	diffHash, err := nativeStableHash(map[string]any{
+		"baseCommit":           baseCommit,
+		"headCommit":           headCommit,
+		"comparisonBaseCommit": comparisonBaseCommit,
+		"entries":              entries,
+		"selectedDiffs":        selectedDiffs,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"workingDirectory":     repo,
+		"workspace":            workspace.Map(),
+		"mode":                 mode,
+		"baseCommit":           baseCommit,
+		"headCommit":           headCommit,
+		"comparisonBaseCommit": comparisonBaseCommit,
+		"diffHash":             diffHash,
+		"diffBytes":            totalDiffBytes,
+		"files":                files,
+		"selectedFiles":        selected,
+		"deletedPaths":         deletedPaths,
+		"counts": map[string]any{
+			"totalChangedFiles":  len(entries),
+			"totalSelectedFiles": len(selected),
+			"deletedFiles":       len(deletedPaths),
+		},
+	}, nil
+}
+
+func nativeGitDiffCommits(
+	ctx context.Context,
+	repo string,
+	workspace nativeGitWorkspaceRef,
+	baseRevision string,
+	headRevision string,
+	mode string,
+	args map[string]any,
+	exec ExecutionContext,
+) (string, string, string, error) {
+	switch mode {
+	case "direct":
+		baseCommit, err := nativeResolveCommit(ctx, repo, baseRevision+"^{commit}")
+		if err != nil {
+			return "", "", "", fmt.Errorf("resolve base commit: %w", err)
+		}
+		if headRevision == "" {
+			headRevision = "HEAD"
+		}
+		headCommit, err := nativeResolveCommit(ctx, repo, headRevision+"^{commit}")
+		if err != nil {
+			return "", "", "", fmt.Errorf("resolve head commit: %w", err)
+		}
+		return baseCommit, headCommit, baseCommit, nil
+	case "pull_request":
+		if !nativeValidGitObjectID(baseRevision) {
+			return "", "", "", fmt.Errorf("pull-request base must be an exact Git object ID")
+		}
+		if !nativeValidGitObjectID(headRevision) {
+			return "", "", "", fmt.Errorf("pull-request head must be an exact Git object ID")
+		}
+		if workspace.Ref != "" && strings.TrimSpace(workspace.Ref) != headRevision {
+			return "", "", "", fmt.Errorf(
+				"workspace ref %q does not match pull-request head %q",
+				workspace.Ref,
+				headRevision,
+			)
+		}
+		headCommit, err := nativeResolveCommit(ctx, repo, headRevision+"^{commit}")
+		if err != nil {
+			return "", "", "", fmt.Errorf("resolve pull-request head commit: %w", err)
+		}
+		if headCommit != headRevision {
+			return "", "", "", fmt.Errorf(
+				"resolved pull-request head %q does not match requested commit %q",
+				headCommit,
+				headRevision,
+			)
+		}
+		checkedOutHead, err := nativeResolveCommit(ctx, repo, "HEAD^{commit}")
+		if err != nil {
+			return "", "", "", fmt.Errorf("resolve checked-out workspace head: %w", err)
+		}
+		if checkedOutHead != headCommit {
+			return "", "", "", fmt.Errorf(
+				"checked-out workspace head %q does not match pull-request head %q",
+				checkedOutHead,
+				headCommit,
+			)
+		}
+		baseRepository, err := nativePullRequestBaseRepository(
+			exec,
+			nativeStringAny(
+				args,
+				"base_repository",
+				"baseRepository",
+				"base_repository_url",
+				"baseRepositoryURL",
+			),
+		)
+		if err != nil {
+			return "", "", "", err
+		}
+		if fetchErr := nativeFetchExactGitCommit(
+			ctx,
+			repo,
+			baseRepository,
+			baseRevision,
+			exec,
+		); fetchErr != nil {
+			return "", "", "", fetchErr
+		}
+		baseCommit, err := nativeResolveCommit(ctx, repo, baseRevision+"^{commit}")
+		if err != nil {
+			return "", "", "", fmt.Errorf("resolve fetched pull-request base commit: %w", err)
+		}
+		if baseCommit != baseRevision {
+			return "", "", "", fmt.Errorf(
+				"fetched pull-request base %q does not match requested commit %q",
+				baseCommit,
+				baseRevision,
+			)
+		}
+		mergeBase, err := nativeGit(ctx, repo, "merge-base", baseCommit, headCommit)
+		if err != nil {
+			return "", "", "", fmt.Errorf("resolve pull-request merge base: %w", err)
+		}
+		mergeBase = strings.TrimSpace(mergeBase)
+		if !nativeValidGitObjectID(mergeBase) || strings.ContainsAny(mergeBase, "\r\n") {
+			return "", "", "", fmt.Errorf("pull-request merge base is not one exact Git object ID")
+		}
+		mergeBase, err = nativeResolveCommit(ctx, repo, mergeBase+"^{commit}")
+		if err != nil {
+			return "", "", "", fmt.Errorf("resolve pull-request merge-base commit: %w", err)
+		}
+		return baseCommit, headCommit, mergeBase, nil
+	default:
+		return "", "", "", fmt.Errorf("unsupported git.diff mode %q", mode)
+	}
+}
+
+func nativeFetchExactGitCommit(
+	ctx context.Context,
+	repo string,
+	remote string,
+	commit string,
+	exec ExecutionContext,
+) error {
+	tempRoot := strings.TrimSpace(exec.WorkspaceDir)
+	if tempRoot == "" {
+		tempRoot = "."
+	}
+	validationRepo, mkdirErr := os.MkdirTemp(tempRoot, ".picoclaw-git-fetch-")
+	if mkdirErr != nil {
+		return fmt.Errorf("create pull-request base validation repository: %w", mkdirErr)
+	}
+	defer func() {
+		_ = os.RemoveAll(validationRepo)
+	}()
+	if _, err := nativeGit(ctx, validationRepo, "init", "--quiet", "--bare"); err != nil {
+		return fmt.Errorf("initialize pull-request base validation repository: %w", err)
+	}
+	if _, err := nativeGit(
+		ctx,
+		validationRepo,
+		"fetch",
+		"--quiet",
+		"--no-tags",
+		"--no-write-fetch-head",
+		"--no-recurse-submodules",
+		"--no-auto-maintenance",
+		"--",
+		remote,
+		commit,
+	); err != nil {
+		return fmt.Errorf("fetch exact pull-request base commit: %w", err)
+	}
+	validatedCommit, err := nativeResolveCommit(ctx, validationRepo, commit+"^{commit}")
+	if err != nil {
+		return fmt.Errorf("resolve validated pull-request base commit: %w", err)
+	}
+	if validatedCommit != commit {
+		return fmt.Errorf(
+			"validated pull-request base %q does not match requested commit %q",
+			validatedCommit,
+			commit,
+		)
+	}
+	const validationRef = "refs/picoclaw/validated-base"
+	if _, err := nativeGit(ctx, validationRepo, "update-ref", validationRef, validatedCommit); err != nil {
+		return fmt.Errorf("pin validated pull-request base commit: %w", err)
+	}
+	if _, err := nativeGit(
+		ctx,
+		repo,
+		"fetch",
+		"--quiet",
+		"--no-tags",
+		"--no-write-fetch-head",
+		"--no-recurse-submodules",
+		"--no-auto-maintenance",
+		"--",
+		validationRepo,
+		validationRef,
+	); err != nil {
+		return fmt.Errorf("import validated pull-request base commit: %w", err)
+	}
+	return nil
+}
+
+func nativeValidGitObjectID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if char >= '0' && char <= '9' || char >= 'a' && char <= 'f' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func nativePullRequestBaseRepository(exec ExecutionContext, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("base repository is required in pull-request mode")
+	}
+	if len(value) > maxNativeGitRemoteBytes || !utf8.ValidString(value) {
+		return "", fmt.Errorf("base repository is invalid")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "", fmt.Errorf("base repository is invalid")
+	}
+	if parsed.Scheme == "" {
+		repo, resolveErr := nativeResolveRepo(exec, value)
+		if resolveErr != nil {
+			return "", fmt.Errorf("resolve local base repository: %w", resolveErr)
+		}
+		return repo, nil
+	}
+	if parsed.Scheme != "https" ||
+		parsed.Host == "" ||
+		parsed.User != nil ||
+		parsed.Opaque != "" ||
+		parsed.RawQuery != "" ||
+		parsed.Fragment != "" ||
+		strings.Trim(parsed.EscapedPath(), "/") == "" {
+		return "", fmt.Errorf(
+			"base repository must be an HTTPS URL or a local repository inside the workflow workspace",
+		)
+	}
+	return value, nil
+}
+
+func nativeGitUnifiedDiff(
+	ctx context.Context,
+	repo string,
+	baseCommit string,
+	headCommit string,
+	entry nativeGitDiffEntry,
+) (string, error) {
+	args := []string{
+		"--literal-pathspecs",
+		"-c", "core.quotePath=true",
+		"-c", "diff.noprefix=false",
+		"-c", "diff.mnemonicPrefix=false",
+		"diff",
+		"--no-ext-diff",
+		"--no-textconv",
+		"--no-color",
+		"--find-renames",
+		"--full-index",
+		"--diff-algorithm=histogram",
+		fmt.Sprintf("--unified=%d", nativeGitDiffContextLines),
+		fmt.Sprintf("--inter-hunk-context=%d", nativeGitDiffInterHunkContextLines),
+		"--src-prefix=a/",
+		"--dst-prefix=b/",
+		baseCommit,
+		headCommit,
+		"--",
+	}
+	if entry.PreviousPath != "" {
+		args = append(args, entry.PreviousPath)
+	}
+	args = append(args, entry.Path)
+	diffText, exceeded, err := nativeGitBoundedOutput(
+		ctx,
+		repo,
+		maxNativeGitDiffFileBytes,
+		args...,
+	)
+	if err != nil {
+		return "", fmt.Errorf("generate unified diff for %q: %w", entry.Path, err)
+	}
+	if exceeded {
+		return "", fmt.Errorf(
+			"unified diff for %q exceeds per-file maximum of %d bytes",
+			entry.Path,
+			maxNativeGitDiffFileBytes,
+		)
+	}
+	if diffText == "" {
+		return "", fmt.Errorf("unified diff for %q is empty", entry.Path)
+	}
+	if !utf8.ValidString(diffText) {
+		return "", fmt.Errorf("unified diff for %q is not valid UTF-8", entry.Path)
+	}
+	return diffText, nil
+}
+
+func parseNativeGitDiffEntries(raw string) ([]nativeGitDiffEntry, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	fields := strings.Split(raw, "\x00")
+	if fields[len(fields)-1] == "" {
+		fields = fields[:len(fields)-1]
+	}
+	entries := make([]nativeGitDiffEntry, 0, len(fields)/2)
+	for index := 0; index < len(fields); {
+		status := fields[index]
+		index++
+		if status == "" {
+			return nil, fmt.Errorf("git diff contains an empty status")
+		}
+		statusKind := status[0]
+		switch statusKind {
+		case 'A', 'M', 'D', 'T', 'U', 'X', 'B':
+			if index >= len(fields) {
+				return nil, fmt.Errorf("git diff status %q is missing its path", status)
+			}
+			filePath, err := nativeCleanRepoFilePath(fields[index])
+			if err != nil {
+				return nil, err
+			}
+			index++
+			entries = append(entries, nativeGitDiffEntry{
+				Status: status,
+				Path:   filePath,
+			})
+		case 'R', 'C':
+			if index+1 >= len(fields) {
+				return nil, fmt.Errorf("git diff status %q is missing rename paths", status)
+			}
+			previousPath, err := nativeCleanRepoFilePath(fields[index])
+			if err != nil {
+				return nil, err
+			}
+			filePath, err := nativeCleanRepoFilePath(fields[index+1])
+			if err != nil {
+				return nil, err
+			}
+			index += 2
+			entries = append(entries, nativeGitDiffEntry{
+				Status:       status,
+				Path:         filePath,
+				PreviousPath: previousPath,
+			})
+		default:
+			return nil, fmt.Errorf("git diff contains unsupported status %q", status)
+		}
+	}
+	return entries, nil
 }
 
 func nativeGitInventoryData(
@@ -548,6 +1088,49 @@ func nativeGit(ctx context.Context, repo string, args ...string) (string, error)
 		return "", nativeGitError{err: err, output: strings.TrimSpace(string(out)), args: args}
 	}
 	return string(out), nil
+}
+
+type nativeBoundedBuffer struct {
+	data     []byte
+	limit    int
+	exceeded bool
+}
+
+func (buffer *nativeBoundedBuffer) Write(value []byte) (int, error) {
+	remaining := buffer.limit - len(buffer.data)
+	if len(value) > remaining {
+		buffer.exceeded = true
+	}
+	if remaining > 0 {
+		if remaining > len(value) {
+			remaining = len(value)
+		}
+		buffer.data = append(buffer.data, value[:remaining]...)
+	}
+	return len(value), nil
+}
+
+func nativeGitBoundedOutput(
+	ctx context.Context,
+	repo string,
+	maxStdoutBytes int,
+	args ...string,
+) (string, bool, error) {
+	stdout := nativeBoundedBuffer{limit: maxStdoutBytes}
+	stderr := nativeBoundedBuffer{limit: maxNativeGitErrorOutputBytes}
+	cmd := osexec.CommandContext(ctx, "git", args...)
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "GIT_PAGER=cat")
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		output := strings.TrimSpace(string(stderr.data))
+		if output == "" {
+			output = strings.TrimSpace(string(stdout.data))
+		}
+		return "", stdout.exceeded, nativeGitError{err: err, output: output, args: args}
+	}
+	return string(stdout.data), stdout.exceeded, nil
 }
 
 type nativeGitError struct {

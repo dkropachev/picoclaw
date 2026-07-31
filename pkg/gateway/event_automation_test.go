@@ -23,6 +23,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/health"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/reviews"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
@@ -41,6 +42,55 @@ func TestSetupEventAutomationServiceDisabledDoesNotCreateStorage(t *testing.T) {
 	}
 	if _, err := os.Stat(workspace); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Stat(%q) error = %v, want os.ErrNotExist", workspace, err)
+	}
+}
+
+func TestGitHubMCPConsumersUseExplicitDefaultAgentWorkspace(t *testing.T) {
+	root := t.TempDir()
+	configuredWorkspace := filepath.Join(root, "configured-default")
+	customWorkspace := filepath.Join(root, "review-agent")
+	cfg := eventAutomationTestConfig(
+		configuredWorkspace,
+		filepath.Join(configuredWorkspace, "eventing", "events.db"),
+		true,
+		false,
+	)
+	cfg.Agents.List = []config.AgentConfig{{
+		ID:        "reviewer",
+		Default:   true,
+		Workspace: customWorkspace,
+	}}
+	cfg.Tools.MCP.Enabled = false
+
+	msgBus := bus.NewMessageBus()
+	agentLoop := agent.NewAgentLoop(
+		cfg,
+		msgBus,
+		&orderedShutdownProvider{closed: make(chan struct{})},
+	)
+	defer func() {
+		msgBus.Close()
+		agentLoop.Close()
+	}()
+
+	wantRoot := filepath.Join(customWorkspace, ".artifacts", "mcp")
+	gotRoot := githubMCPArtifactRoot(cfg, agentLoop)
+	if gotRoot != wantRoot {
+		t.Fatalf("githubMCPArtifactRoot() = %q, want %q", gotRoot, wantRoot)
+	}
+
+	runner := &gatewayNotificationPollRunner{}
+	runtime := eventReviewRuntime{}
+	configureGitHubMCPReviewRuntime(&runtime, runner, gotRoot, true, true)
+	if runtime.notificationMCP == nil || runtime.mcpArtifactRoot != wantRoot {
+		t.Fatalf("notification runtime = %#v, want custom artifact root", runtime)
+	}
+	submitter, ok := runtime.submitter.(*reviews.GitHubSubmitter)
+	if !ok {
+		t.Fatalf("review submitter = %T, want *reviews.GitHubSubmitter", runtime.submitter)
+	}
+	if submitter.ArtifactRoot != wantRoot {
+		t.Fatalf("review submitter artifact root = %q, want %q", submitter.ArtifactRoot, wantRoot)
 	}
 }
 

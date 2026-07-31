@@ -47,6 +47,19 @@ type EventWorkflowExecutor interface {
 	Run(ctx context.Context, req RunRequest) (*RunResult, error)
 }
 
+// EventReviewSink captures an opt-in structured review output from a
+// successfully completed event workflow before its dispatch is acknowledged.
+// Implementations must be idempotent for the immutable event, dispatch, and
+// run identity because reconciliation can repeat after a crash.
+type EventReviewSink interface {
+	CaptureSucceededEventRun(
+		ctx context.Context,
+		event eventing.Envelope,
+		dispatch eventing.Dispatch,
+		run *Run,
+	) error
+}
+
 // EventWorkflowRouter durably fans one claimed external event out to every
 // currently matching, runnable local workflow.
 type EventWorkflowRouter struct {
@@ -311,6 +324,7 @@ type EventWorkflowDispatcher struct {
 	WorkspaceDir         string
 	DefinitionsDir       string
 	RuntimeCompatibility RuntimeCompatibility
+	ReviewSink           EventReviewSink
 	WorkerLabel          string
 	LeaseDuration        time.Duration
 	MaxAttempts          int
@@ -405,7 +419,7 @@ func (d *EventWorkflowDispatcher) dispatchClaim(
 	}
 	switch {
 	case err == nil && existing != nil:
-		return d.reconcileRun(ctx, dispatch, existing)
+		return d.reconcileRun(ctx, stored.Envelope, dispatch, existing)
 	case err != nil && !errors.Is(err, fs.ErrNotExist):
 		return errors.Join(
 			fmt.Errorf("load workflow run %s: %w", dispatch.RunID, err),
@@ -507,7 +521,7 @@ func (d *EventWorkflowDispatcher) dispatchClaim(
 		return errors.Join(runErr, ctxErr)
 	}
 	if latestErr == nil && latest != nil {
-		reconcileErr := d.reconcileRun(ctx, dispatch, latest)
+		reconcileErr := d.reconcileRun(ctx, stored.Envelope, dispatch, latest)
 		var resultErr error
 		if result != nil &&
 			(result.RunID != latest.ID || (result.Status != "" && result.Status != latest.Status)) {
@@ -598,6 +612,7 @@ func (d *EventWorkflowDispatcher) loadRunnableWorkflow(
 
 func (d *EventWorkflowDispatcher) reconcileRun(
 	ctx context.Context,
+	envelope eventing.Envelope,
 	dispatch eventing.Dispatch,
 	run *Run,
 ) error {
@@ -628,6 +643,14 @@ func (d *EventWorkflowDispatcher) reconcileRun(
 	}
 	switch run.Status {
 	case RunStatusSucceeded:
+		if err := d.captureReview(ctx, envelope, dispatch, run); err != nil {
+			captureErr := fmt.Errorf(
+				"capture successful event review for dispatch %s: %w",
+				dispatch.ID,
+				err,
+			)
+			return errors.Join(captureErr, d.retryDispatch(ctx, dispatch, captureErr))
+		}
 		if err := d.Inbox.FinishDispatch(
 			ctx,
 			dispatch.ID,
@@ -672,6 +695,14 @@ func (d *EventWorkflowDispatcher) reconcileRun(
 		}
 		switch canceled.Status {
 		case RunStatusSucceeded:
+			if err := d.captureReview(ctx, envelope, dispatch, canceled); err != nil {
+				captureErr := fmt.Errorf(
+					"capture concurrently successful event review for dispatch %s: %w",
+					dispatch.ID,
+					err,
+				)
+				return errors.Join(captureErr, d.retryDispatch(ctx, dispatch, captureErr))
+			}
 			if err := d.Inbox.FinishDispatch(
 				ctx,
 				dispatch.ID,
@@ -702,6 +733,18 @@ func (d *EventWorkflowDispatcher) reconcileRun(
 			return errors.Join(cancelErr, d.retryDispatch(ctx, dispatch, cancelErr))
 		}
 	}
+}
+
+func (d *EventWorkflowDispatcher) captureReview(
+	ctx context.Context,
+	envelope eventing.Envelope,
+	dispatch eventing.Dispatch,
+	run *Run,
+) error {
+	if d.ReviewSink == nil {
+		return nil
+	}
+	return d.ReviewSink.CaptureSucceededEventRun(ctx, envelope, dispatch, run)
 }
 
 func (d *EventWorkflowDispatcher) retryDispatch(

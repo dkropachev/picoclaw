@@ -300,7 +300,7 @@ func (controller *Controller) ServeHTTP(
 		writeOperatorStatus(w, http.StatusNotFound)
 		return
 	}
-	if request.Method != route.method {
+	if route.method != "" && request.Method != route.method {
 		w.Header().Set("Allow", route.method)
 		writeOperatorStatus(w, http.StatusMethodNotAllowed)
 		return

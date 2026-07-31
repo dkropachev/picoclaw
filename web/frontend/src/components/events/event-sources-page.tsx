@@ -60,6 +60,10 @@ import { refreshGatewayState } from "@/store/gateway"
 
 const EVENT_SOURCES_QUERY_KEY = ["event-sources", "settings"] as const
 const CONNECTOR_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/
+const GITHUB_REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+const GITHUB_TARGET_USER_PATTERN =
+  /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,126}[A-Za-z0-9])?$/
+const MAX_GITHUB_REPOSITORIES = 4096
 const DEFAULT_DATABASE_PATH = "<workspace>/eventing/events.db"
 const DEFAULT_RETENTION_DAYS = 30
 const DEFAULT_MAX_PAYLOAD_BYTES = 1_048_576
@@ -67,6 +71,8 @@ const DEFAULT_MAX_PAYLOAD_BYTES = 1_048_576
 interface WebhookErrors {
   name?: string
   secret?: string
+  repositories?: string
+  targetUser?: string
 }
 
 interface EventSourcesErrors {
@@ -288,6 +294,13 @@ export function EventSourcesPage() {
     const normalizedSettings = {
       ...settings,
       redactFields: normalizeRedactFields(settings.redactFields),
+      webhooks: settings.webhooks.map((source) => ({
+        ...source,
+        repositories: normalizeGitHubRepositories(source.repositories ?? []),
+        targetUser: (source.targetUser ?? "").trim(),
+        pollNotifications:
+          source.format === "github" && source.pollNotifications,
+      })),
     }
     const nextErrors = validateEventSources(normalizedSettings)
     setErrors(nextErrors)
@@ -749,6 +762,9 @@ function WebhookSourceEditor({
           "the configured gateway listener",
         )
   const secretState = webhookSecretState(source)
+  const repositories = source.repositories ?? []
+  const targetUser = source.targetUser ?? ""
+  const pollNotifications = source.pollNotifications
 
   return (
     <fieldset className="border-border/70 space-y-5 rounded-lg border p-4">
@@ -869,26 +885,172 @@ function WebhookSourceEditor({
       </div>
 
       {source.format === "github" && (
-        <div
-          className="text-foreground flex gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs"
-          role="note"
-        >
-          <IconAlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
-          <div className="space-y-1">
-            <p className="font-medium">
-              {t(
-                "pages.event_sources.webhooks.github_https_title",
-                "GitHub requires a public HTTPS endpoint",
+        <>
+          <div className="bg-muted/35 flex flex-wrap items-center justify-between gap-4 rounded-lg border p-3">
+            <div className="min-w-0 space-y-1">
+              <Label htmlFor={`${prefix}-poll-notifications`}>
+                {t(
+                  "pages.event_sources.webhooks.github_poll_notifications",
+                  "Poll GitHub notifications",
+                )}
+              </Label>
+              <p className="text-muted-foreground text-xs">
+                {t(
+                  "pages.event_sources.webhooks.github_poll_notifications_hint",
+                  "Read mentions, assignments, issues, and review requests every minute through the configured read-only GitHub MCP tools. Notifications are never marked or dismissed.",
+                )}
+              </p>
+            </div>
+            <Switch
+              id={`${prefix}-poll-notifications`}
+              checked={pollNotifications}
+              onCheckedChange={(enabled) =>
+                onChange({ pollNotifications: enabled })
+              }
+              aria-label={t(
+                "pages.event_sources.webhooks.github_poll_notifications",
+                "Poll GitHub notifications",
               )}
-            </p>
-            <p className="text-muted-foreground">
-              {t(
-                "pages.event_sources.webhooks.github_https_warning",
-                "Terminate trusted TLS before this gateway and configure the same webhook secret in GitHub. GitHub authenticates the body with X-Hub-Signature-256, but its event and delivery headers rely on HTTPS for transport authenticity.",
-              )}
-            </p>
+            />
           </div>
-        </div>
+
+          <div className="grid gap-5 md:grid-cols-[minmax(190px,0.55fr)_minmax(0,1fr)]">
+            <Field data-invalid={Boolean(error?.targetUser)}>
+              <FieldLabel htmlFor={`${prefix}-target-user`}>
+                {t(
+                  "pages.event_sources.webhooks.github_target_user",
+                  "GitHub user to notify",
+                )}
+              </FieldLabel>
+              <Input
+                id={`${prefix}-target-user`}
+                value={targetUser}
+                maxLength={128}
+                placeholder="octocat"
+                autoComplete="off"
+                spellCheck={false}
+                aria-invalid={Boolean(error?.targetUser)}
+                aria-describedby={
+                  error?.targetUser
+                    ? `${prefix}-target-user-error`
+                    : `${prefix}-target-user-hint`
+                }
+                onChange={(event) =>
+                  onChange({ targetUser: event.target.value })
+                }
+              />
+              <FieldDescription id={`${prefix}-target-user-hint`}>
+                {t(
+                  "pages.event_sources.webhooks.github_target_user_hint",
+                  "Used to mark review requests, assignments, and @mentions that target you.",
+                )}
+              </FieldDescription>
+              <FieldError id={`${prefix}-target-user-error`}>
+                {error?.targetUser}
+              </FieldError>
+            </Field>
+
+            <Field data-invalid={Boolean(error?.repositories)}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <FieldLabel htmlFor={`${prefix}-repositories`}>
+                  {t(
+                    "pages.event_sources.webhooks.github_repositories",
+                    "Watched repositories",
+                  )}
+                </FieldLabel>
+                <Badge variant="outline">
+                  {t(
+                    "pages.event_sources.webhooks.github_repository_count",
+                    "{{count}} repositories",
+                    { count: repositories.filter(Boolean).length },
+                  )}
+                </Badge>
+              </div>
+              <Textarea
+                id={`${prefix}-repositories`}
+                value={repositories.join("\n")}
+                rows={8}
+                placeholder={"scylladb/scylla-rust-driver\nscylladb/gocql"}
+                spellCheck={false}
+                aria-invalid={Boolean(error?.repositories)}
+                aria-describedby={
+                  error?.repositories
+                    ? `${prefix}-repositories-error`
+                    : `${prefix}-repositories-hint`
+                }
+                onChange={(event) =>
+                  onChange({
+                    repositories: event.target.value.split(/\r?\n/),
+                  })
+                }
+              />
+              <FieldDescription id={`${prefix}-repositories-hint`}>
+                {t(
+                  "pages.event_sources.webhooks.github_repositories_hint",
+                  "One owner/repo per line. Webhook deliveries and polled notifications from other repositories are ignored. Leave empty to accept every repository visible to this source.",
+                )}
+              </FieldDescription>
+              <div className="space-y-1">
+                <Label htmlFor={`${prefix}-repository-file`}>
+                  {t(
+                    "pages.event_sources.webhooks.github_import",
+                    "Import owner/repo text file",
+                  )}
+                </Label>
+                <Input
+                  id={`${prefix}-repository-file`}
+                  type="file"
+                  accept=".txt,text/plain"
+                  onChange={(event) => {
+                    const input = event.currentTarget
+                    const file = input.files?.[0]
+                    if (!file) return
+                    void file.text().then((text) => {
+                      onChange({
+                        repositories: text.split(/\r?\n/),
+                      })
+                      input.value = ""
+                    })
+                  }}
+                />
+              </div>
+              <FieldError id={`${prefix}-repositories-error`}>
+                {error?.repositories}
+              </FieldError>
+            </Field>
+          </div>
+
+          <div
+            className="text-foreground flex gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs"
+            role="note"
+          >
+            <IconAlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+            <div className="space-y-1">
+              <p className="font-medium">
+                {pollNotifications
+                  ? t(
+                      "pages.event_sources.webhooks.github_poll_https_title",
+                      "Public webhook ingress is optional",
+                    )
+                  : t(
+                      "pages.event_sources.webhooks.github_https_title",
+                      "GitHub requires a public HTTPS endpoint",
+                    )}
+              </p>
+              <p className="text-muted-foreground">
+                {pollNotifications
+                  ? t(
+                      "pages.event_sources.webhooks.github_poll_https_warning",
+                      "Notification polling uses the authenticated GitHub MCP connection and needs no public listener. If you also configure a webhook secret, terminate trusted TLS before this gateway.",
+                    )
+                  : t(
+                      "pages.event_sources.webhooks.github_https_warning",
+                      "Terminate trusted TLS before this gateway and configure the same webhook secret in GitHub. GitHub authenticates the body with X-Hub-Signature-256, but its event and delivery headers rely on HTTPS for transport authenticity.",
+                    )}
+              </p>
+            </div>
+          </div>
+        </>
       )}
 
       <Field data-invalid={Boolean(error?.secret)}>
@@ -962,11 +1124,13 @@ function WebhookSourceEditor({
             type="button"
             variant="outline"
             disabled={
-              source.enabled ||
+              (source.enabled &&
+                !(source.format === "github" && pollNotifications)) ||
               (!source.secretConfigured && source.secretUpdate !== "replace")
             }
             title={
-              source.enabled
+              source.enabled &&
+              !(source.format === "github" && pollNotifications)
                 ? t(
                     "pages.event_sources.webhooks.clear_secret_disabled",
                     "Disable this webhook before clearing its signing secret.",
@@ -991,7 +1155,7 @@ function WebhookSourceEditor({
               )
             : t(
                 "pages.event_sources.webhooks.github_secret_hint",
-                "GitHub secrets must be 32–256 UTF-8 bytes with no leading or trailing whitespace.",
+                "Optional while notification polling is enabled. To admit public GitHub webhooks too, use a 32–256 byte secret with no leading or trailing whitespace.",
               )}
         </FieldDescription>
         <FieldError id={`${prefix}-secret-error`}>{error?.secret}</FieldError>
@@ -1351,6 +1515,21 @@ function normalizeRedactFields(fields: string[]): string[] {
   return normalizedFields
 }
 
+function normalizeGitHubRepositories(repositories: string[]): string[] {
+  const seen = new Set<string>()
+  const normalizedRepositories: string[] = []
+  for (const repository of repositories) {
+    const normalized = repository.trim()
+    const key = normalized.toLowerCase()
+    if (!normalized || seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    normalizedRepositories.push(normalized)
+  }
+  return normalizedRepositories
+}
+
 function validateEventSources(
   settings: EventSourcesSettings,
 ): EventSourcesErrors {
@@ -1405,8 +1584,55 @@ function validateEventSources(
       !isValidWebhookSecret(source.format, source.secret)
     ) {
       sourceErrors.secret = webhookSecretValidationMessage(source.format)
-    } else if (settings.enabled && source.enabled && !effectiveSecretPresent) {
+    } else if (
+      settings.enabled &&
+      source.enabled &&
+      !effectiveSecretPresent &&
+      !(source.format === "github" && source.pollNotifications)
+    ) {
       sourceErrors.secret = "An enabled webhook requires a signing secret."
+    }
+
+    if (source.format === "github") {
+      const repositories = source.repositories ?? []
+      const targetUser = source.targetUser ?? ""
+      if (repositories.length > MAX_GITHUB_REPOSITORIES) {
+        sourceErrors.repositories = `Use at most ${MAX_GITHUB_REPOSITORIES} watched repositories.`
+      } else {
+        const seenRepositories = new Set<string>()
+        for (const repository of repositories) {
+          const normalized = repository.trim()
+          if (!normalized) {
+            continue
+          }
+          const encodedLength = new TextEncoder().encode(normalized).byteLength
+          const key = normalized.toLowerCase()
+          if (
+            repository !== normalized ||
+            encodedLength > 256 ||
+            !GITHUB_REPOSITORY_PATTERN.test(normalized)
+          ) {
+            sourceErrors.repositories =
+              "Each repository must be one trimmed owner/repo name of at most 256 bytes."
+            break
+          }
+          if (seenRepositories.has(key)) {
+            sourceErrors.repositories =
+              "Watched repositories must be unique, including differences in letter case."
+            break
+          }
+          seenRepositories.add(key)
+        }
+      }
+      if (
+        targetUser !== "" &&
+        (targetUser !== targetUser.trim() ||
+          new TextEncoder().encode(targetUser).byteLength > 128 ||
+          !GITHUB_TARGET_USER_PATTERN.test(targetUser))
+      ) {
+        sourceErrors.targetUser =
+          "Use a trimmed GitHub login of at most 128 letters, numbers, or internal hyphens."
+      }
     }
 
     if (Object.keys(sourceErrors).length > 0) {

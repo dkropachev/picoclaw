@@ -133,6 +133,98 @@ func TestStoreMigratesV1DispatchesWithoutInventingWorkflowRevision(t *testing.T)
 	)
 }
 
+func TestStoreMigratesV2ToReviewSchema(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "migration-v2-review.db")
+	db := openSchemaTestDB(t, path)
+	_, err := db.Exec(schemaV1)
+	require.NoError(t, err)
+	_, err = db.Exec(schemaV2)
+	require.NoError(t, err)
+	setSchemaTestVersion(t, db, 2)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.NoError(t, err)
+	defer store.Close()
+
+	var version int
+	require.NoError(t, store.db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, schemaVersion, version)
+	for _, object := range []struct {
+		kind string
+		name string
+	}{
+		{kind: "table", name: "pr_review_cases"},
+		{kind: "table", name: "pr_review_findings"},
+		{kind: "table", name: "pr_review_messages"},
+		{kind: "table", name: "pr_review_submissions"},
+		{kind: "index", name: "pr_review_cases_list"},
+		{kind: "index", name: "pr_review_submissions_claim"},
+	} {
+		assert.True(t, schemaObjectExists(t, store.db, object.kind, object.name))
+	}
+}
+
+func TestStoreReviewMigrationValidationFailureRollsBackVersion(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "migration-v3-review-rollback.db")
+	db := openSchemaTestDB(t, path)
+	_, err := db.Exec(schemaV1)
+	require.NoError(t, err)
+	_, err = db.Exec(schemaV2)
+	require.NoError(t, err)
+	malformedReviewCases := strings.Replace(
+		schemaV3ReviewCasesTable,
+		"CHECK (active_findings <= total_findings)",
+		"CHECK (active_findings <= total_findings AND total_findings < 999)",
+		1,
+	)
+	_, err = db.Exec(malformedReviewCases)
+	require.NoError(t, err)
+	setSchemaTestVersion(t, db, 2)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorIs(t, err, ErrSchemaInvalid)
+	assert.Contains(t, err.Error(), "validate eventing schema v3")
+
+	db = openSchemaTestDB(t, path)
+	defer db.Close()
+	var version int
+	require.NoError(t, db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, 2, version, "failed v3 validation must roll back the version")
+	assert.False(
+		t,
+		schemaObjectExists(t, db, "table", "pr_review_findings"),
+		"objects created by the failed v3 migration must roll back",
+	)
+}
+
+func TestStoreRejectsCurrentReviewSchemaMissingRequiredIndex(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "missing-review-index.db")
+	db := openSchemaTestDB(t, path)
+	installSchemaV1ForTest(t, db)
+	_, err := db.Exec(`DROP INDEX pr_review_submissions_claim`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorIs(t, err, ErrSchemaInvalid)
+	assert.Contains(t, err.Error(), "validate eventing schema v3")
+	var validationErr *schemaValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, "pr_review_submissions_claim", validationErr.object)
+}
+
 func TestStoreRejectsCurrentSchemaMissingDispatchRevisionBindings(t *testing.T) {
 	t.Parallel()
 
@@ -528,6 +620,8 @@ func installSchemaV1ForTest(t *testing.T, db *sql.DB) {
 	_, err := db.Exec(schemaV1)
 	require.NoError(t, err)
 	_, err = db.Exec(schemaV2)
+	require.NoError(t, err)
+	_, err = db.Exec(schemaV3)
 	require.NoError(t, err)
 	setSchemaTestVersion(t, db, schemaVersion)
 }

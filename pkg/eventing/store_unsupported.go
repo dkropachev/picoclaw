@@ -16,6 +16,7 @@ var _ DispatchOperatorReader = (*Store)(nil)
 var _ DispatchOperatorGetter = (*Store)(nil)
 var _ RevisionRoutingDispatchCreator = (*Store)(nil)
 var _ DispatchLeaseRenewer = (*Store)(nil)
+var _ ReviewStore = (*Store)(nil)
 
 func Open(context.Context, string, ...Option) (*Store, error) {
 	return nil, ErrUnsupportedPlatform
@@ -143,4 +144,90 @@ func (*Store) Replay(context.Context, string) (InsertResult, error) {
 
 func (*Store) Prune(context.Context, time.Time, int) (int64, error) {
 	return 0, ErrUnsupportedPlatform
+}
+
+func (*Store) CaptureReview(
+	context.Context,
+	ReviewCaptureInput,
+) (ReviewCase, bool, error) {
+	return ReviewCase{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) GetReviewCase(context.Context, string) (ReviewCaseDetail, error) {
+	return ReviewCaseDetail{}, ErrUnsupportedPlatform
+}
+
+func (*Store) ListReviewCases(context.Context, ReviewCaseFilter) (ReviewCasePage, error) {
+	return ReviewCasePage{}, ErrUnsupportedPlatform
+}
+
+func (*Store) UpdateReviewFinding(
+	context.Context,
+	ReviewFindingUpdate,
+) (ReviewCaseDetail, error) {
+	return ReviewCaseDetail{}, ErrUnsupportedPlatform
+}
+
+func (*Store) DropReviewFinding(
+	context.Context,
+	ReviewFindingTransition,
+) (ReviewCaseDetail, error) {
+	return ReviewCaseDetail{}, ErrUnsupportedPlatform
+}
+
+func (*Store) RestoreReviewFinding(
+	context.Context,
+	ReviewFindingTransition,
+) (ReviewCaseDetail, error) {
+	return ReviewCaseDetail{}, ErrUnsupportedPlatform
+}
+
+func (*Store) AppendReviewMessages(
+	context.Context,
+	ReviewMessageAppend,
+) (ReviewCaseDetail, error) {
+	return ReviewCaseDetail{}, ErrUnsupportedPlatform
+}
+
+func (*Store) CreateReviewSubmission(
+	context.Context,
+	ReviewSubmissionDraft,
+) (ReviewCaseDetail, error) {
+	return ReviewCaseDetail{}, ErrUnsupportedPlatform
+}
+
+func (*Store) ReconcileReviewSubmission(
+	context.Context,
+	ReviewSubmissionReconciliation,
+) (ReviewCaseDetail, error) {
+	return ReviewCaseDetail{}, ErrUnsupportedPlatform
+}
+
+func (*Store) GetReviewSubmission(context.Context, string) (ReviewSubmission, error) {
+	return ReviewSubmission{}, ErrUnsupportedPlatform
+}
+
+func (*Store) ClaimReviewSubmissions(
+	context.Context,
+	string,
+	int,
+	time.Duration,
+) ([]ReviewSubmission, error) {
+	return nil, ErrUnsupportedPlatform
+}
+
+func (*Store) RenewReviewSubmissionLease(
+	context.Context,
+	string,
+	string,
+	time.Duration,
+) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Store) FinishReviewSubmission(
+	context.Context,
+	ReviewSubmissionOutcome,
+) (ReviewCaseDetail, error) {
+	return ReviewCaseDetail{}, ErrUnsupportedPlatform
 }

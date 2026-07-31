@@ -268,8 +268,10 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	if hooksErr := r.loop.ensureHooksInitialized(ctx); hooksErr != nil {
 		return nil, hooksErr
 	}
-	if mcpErr := r.loop.ensureMCPInitialized(ctx); mcpErr != nil {
-		return nil, mcpErr
+	if strings.TrimSpace(req.Tools) != workflows.AgentToolsNone {
+		if mcpErr := r.loop.ensureMCPInitialized(ctx); mcpErr != nil {
+			return nil, mcpErr
+		}
 	}
 	agentID := strings.TrimSpace(req.AgentID)
 	registry := r.loop.GetRegistry()

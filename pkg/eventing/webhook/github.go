@@ -54,6 +54,54 @@ type githubRepositoryPayload struct {
 	} `json:"owner"`
 }
 
+type githubUserPayload struct {
+	Login string `json:"login"`
+}
+
+type githubTeamPayload struct {
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+}
+
+type githubRefPayload struct {
+	Ref string `json:"ref"`
+	SHA string `json:"sha"`
+}
+
+type githubPullRequestPayload struct {
+	Number             json.RawMessage     `json:"number"`
+	HTMLURL            string              `json:"html_url"`
+	Title              string              `json:"title"`
+	Body               string              `json:"body"`
+	Draft              *bool               `json:"draft"`
+	User               githubUserPayload   `json:"user"`
+	Head               githubRefPayload    `json:"head"`
+	Base               githubRefPayload    `json:"base"`
+	RequestedReviewers []githubUserPayload `json:"requested_reviewers"`
+}
+
+type githubIssuePayload struct {
+	Number    json.RawMessage     `json:"number"`
+	HTMLURL   string              `json:"html_url"`
+	Title     string              `json:"title"`
+	Body      string              `json:"body"`
+	User      githubUserPayload   `json:"user"`
+	Assignees []githubUserPayload `json:"assignees"`
+}
+
+type githubCommentPayload struct {
+	HTMLURL string            `json:"html_url"`
+	Body    string            `json:"body"`
+	User    githubUserPayload `json:"user"`
+}
+
+type githubReviewPayload struct {
+	HTMLURL string            `json:"html_url"`
+	Body    string            `json:"body"`
+	User    githubUserPayload `json:"user"`
+	State   string            `json:"state"`
+}
+
 func githubAuthenticationHeaders(
 	headers http.Header,
 ) (admissionAuthentication, bool) {
@@ -101,6 +149,7 @@ func verifyGitHubSignature(secret, body, digest []byte) bool {
 func decodeGitHubAdmissionRequest(
 	body []byte,
 	event string,
+	targetUser string,
 ) (admissionRequest, error) {
 	fields, payload, err := decodeGitHubObject(body)
 	if err != nil {
@@ -122,8 +171,9 @@ func decodeGitHubAdmissionRequest(
 
 	actor := githubActor(fields["sender"])
 	subject, repositoryAttributes := githubSubject(fields["repository"])
-	attributes := githubAttributes(map[string]string{
+	attributeValues := map[string]string{
 		"body_authenticated":    githubAuthenticatedBodyValue,
+		"source_authenticated":  githubAuthenticatedBodyValue,
 		"headers_authenticated": githubUnauthenticatedHeadValue,
 		"signature_algorithm":   githubSignatureAlgorithm,
 		"repository_id":         repositoryAttributes["id"],
@@ -133,7 +183,11 @@ func decodeGitHubAdmissionRequest(
 		"repository_visibility": repositoryAttributes["visibility"],
 		"repository_private":    repositoryAttributes["private"],
 		"repository_branch":     repositoryAttributes["default_branch"],
-	})
+	}
+	for key, value := range githubResourceAttributes(fields, eventType, targetUser) {
+		attributeValues[key] = value
+	}
+	attributes := githubAttributes(attributeValues)
 
 	return admissionRequest{
 		eventType:  eventType,
@@ -175,7 +229,16 @@ func decodeGitHubObject(
 			return nil, nil, errors.New("GitHub payload has an invalid field value")
 		}
 		switch name {
-		case "action", "sender", "repository":
+		case "action",
+			"sender",
+			"repository",
+			"pull_request",
+			"issue",
+			"comment",
+			"review",
+			"requested_reviewer",
+			"requested_team",
+			"assignee":
 			fields[name] = raw
 		}
 	}
@@ -187,6 +250,165 @@ func decodeGitHubObject(
 		return nil, nil, errors.New("GitHub payload contains trailing data")
 	}
 	return fields, append(json.RawMessage(nil), trimmed...), nil
+}
+
+func githubResourceAttributes(
+	fields map[string]json.RawMessage,
+	eventType string,
+	targetUser string,
+) map[string]string {
+	values := make(map[string]string)
+	var mentionText []string
+	var targetReasons []string
+
+	var pullRequest githubPullRequestPayload
+	if decodeGitHubProjection(fields["pull_request"], &pullRequest) {
+		values["pull_request_number"] = githubDatabaseID(pullRequest.Number)
+		values["pull_request_url"] = pullRequest.HTMLURL
+		values["pull_request_author"] = pullRequest.User.Login
+		values["pull_request_head_ref"] = pullRequest.Head.Ref
+		values["pull_request_head_sha"] = pullRequest.Head.SHA
+		values["pull_request_base_ref"] = pullRequest.Base.Ref
+		values["pull_request_base_sha"] = pullRequest.Base.SHA
+		values["pull_request_draft"] = githubBool(pullRequest.Draft)
+		mentionText = append(mentionText, pullRequest.Title, pullRequest.Body)
+		if githubUsersContain(pullRequest.RequestedReviewers, targetUser) {
+			targetReasons = append(targetReasons, "requested_reviewer")
+		}
+	}
+
+	var issue githubIssuePayload
+	if decodeGitHubProjection(fields["issue"], &issue) {
+		values["issue_number"] = githubDatabaseID(issue.Number)
+		values["issue_url"] = issue.HTMLURL
+		values["issue_author"] = issue.User.Login
+		mentionText = append(mentionText, issue.Title, issue.Body)
+		if githubUsersContain(issue.Assignees, targetUser) {
+			targetReasons = append(targetReasons, "assignee")
+		}
+	}
+
+	var comment githubCommentPayload
+	if decodeGitHubProjection(fields["comment"], &comment) {
+		values["comment_url"] = comment.HTMLURL
+		values["comment_author"] = comment.User.Login
+		mentionText = append(mentionText, comment.Body)
+	}
+
+	var review githubReviewPayload
+	if decodeGitHubProjection(fields["review"], &review) {
+		values["review_url"] = review.HTMLURL
+		values["review_author"] = review.User.Login
+		values["review_state"] = strings.ToLower(review.State)
+		mentionText = append(mentionText, review.Body)
+	}
+
+	var requestedReviewer githubUserPayload
+	if decodeGitHubProjection(fields["requested_reviewer"], &requestedReviewer) {
+		values["requested_reviewer"] = requestedReviewer.Login
+		if eventType != "pull_request.review_request_removed" &&
+			githubLoginMatches(requestedReviewer.Login, targetUser) {
+			targetReasons = append(targetReasons, "requested_reviewer")
+		}
+	}
+
+	var requestedTeam githubTeamPayload
+	if decodeGitHubProjection(fields["requested_team"], &requestedTeam) {
+		values["requested_team"] = requestedTeam.Slug
+		if values["requested_team"] == "" {
+			values["requested_team"] = requestedTeam.Name
+		}
+	}
+
+	var assignee githubUserPayload
+	if decodeGitHubProjection(fields["assignee"], &assignee) {
+		values["assignee"] = assignee.Login
+		if eventType != "issues.unassigned" &&
+			githubLoginMatches(assignee.Login, targetUser) {
+			targetReasons = append(targetReasons, "assignee")
+		}
+	}
+
+	targetUser = strings.TrimSpace(targetUser)
+	if targetUser != "" {
+		for _, text := range mentionText {
+			if githubTextMentionsUser(text, targetUser) {
+				targetReasons = append(targetReasons, "mention")
+				break
+			}
+		}
+		targetReasons = uniqueGitHubStrings(targetReasons)
+		values["target_user"] = targetUser
+		values["targets_user"] = "false"
+		if len(targetReasons) > 0 {
+			values["targets_user"] = "true"
+			values["target_reason"] = strings.Join(targetReasons, ",")
+		}
+	}
+	return values
+}
+
+func decodeGitHubProjection(raw json.RawMessage, destination any) bool {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return false
+	}
+	return json.Unmarshal(raw, destination) == nil
+}
+
+func githubUsersContain(users []githubUserPayload, targetUser string) bool {
+	for _, user := range users {
+		if githubLoginMatches(user.Login, targetUser) {
+			return true
+		}
+	}
+	return false
+}
+
+func githubLoginMatches(login, targetUser string) bool {
+	return targetUser != "" && strings.EqualFold(strings.TrimSpace(login), targetUser)
+}
+
+func githubTextMentionsUser(text, targetUser string) bool {
+	text = strings.ToLower(text)
+	targetUser = strings.ToLower(strings.TrimSpace(targetUser))
+	if text == "" || targetUser == "" {
+		return false
+	}
+	needle := "@" + targetUser
+	for offset := 0; offset <= len(text)-len(needle); {
+		index := strings.Index(text[offset:], needle)
+		if index < 0 {
+			return false
+		}
+		index += offset
+		after := index + len(needle)
+		beforeBoundary := index == 0 || !githubLoginByte(text[index-1])
+		afterBoundary := after == len(text) || !githubLoginByte(text[after])
+		if beforeBoundary && afterBoundary {
+			return true
+		}
+		offset = index + len(needle)
+	}
+	return false
+}
+
+func githubLoginByte(value byte) bool {
+	return value >= 'a' && value <= 'z' ||
+		value >= '0' && value <= '9' ||
+		value == '-'
+}
+
+func uniqueGitHubStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func githubActor(raw json.RawMessage) *eventing.Actor {

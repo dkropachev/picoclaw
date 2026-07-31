@@ -666,6 +666,11 @@ function workflowAuthoringCapabilities() {
     ],
     functions: [
       {
+        name: "git.diff",
+        target: "function/git.diff",
+        readiness: "ready",
+      },
+      {
         name: "git.filter",
         target: "function/git.filter",
         readiness: "ready",
