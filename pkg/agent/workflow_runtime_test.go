@@ -189,6 +189,54 @@ func TestWorkflowAgentRunnerRejectsUnknownExplicitAgent(t *testing.T) {
 	}
 }
 
+func TestWorkflowAgentRunnerWithNoToolsDoesNotInitializeMCP(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "mcp-command-started")
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}}
+	cfg.Tools.MCP = config.MCPConfig{
+		ToolConfig: config.ToolConfig{Enabled: true},
+		Servers: map[string]config.MCPServerConfig{
+			"private-server": {
+				Enabled: true,
+				Command: "sh",
+				Args: []string{
+					"-c",
+					`printf started > "$1"`,
+					"workflow-agent-test",
+					marker,
+				},
+			},
+		},
+	}
+	msgBus := bus.NewMessageBus()
+	defer msgBus.Close()
+	al := newTestAgentLoopWithStrictModels(cfg, msgBus, &mockProvider{})
+	defer al.Close()
+
+	outputs, err := (&workflowAgentRunner{loop: al}).RunAgent(
+		context.Background(),
+		workflows.AgentRequest{
+			AgentID: "main",
+			Prompt:  "Review this without tools.",
+			History: "none",
+			Tools:   workflows.AgentToolsNone,
+		},
+	)
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if outputs["tools"] != workflows.AgentToolsNone {
+		t.Fatalf("tools audit = %#v, want none", outputs["tools"])
+	}
+	if al.mcp.getManager() != nil || al.mcp.getInitErr() != nil {
+		t.Fatal("no-tools agent run initialized or mutated MCP runtime state")
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("no-tools agent run executed MCP command: %v", statErr)
+	}
+}
+
 func TestWorkflowAgentRunnerEnforcesAndAuditsToolsMode(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.Workspace = t.TempDir()

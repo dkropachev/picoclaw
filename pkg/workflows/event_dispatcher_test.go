@@ -25,6 +25,7 @@ var (
 	errEventTestLinkDispatch   = errors.New("injected dispatch link failure")
 	errEventTestRenewLease     = errors.New("injected lease renewal failure")
 	errEventTestRenewRouting   = errors.New("injected routing lease renewal failure")
+	errEventTestReviewCapture  = errors.New("injected review capture failure")
 )
 
 func TestEventContextFromEnvelopeIncludesFullDetachedEnvelope(t *testing.T) {
@@ -634,6 +635,80 @@ func TestEventWorkflowDispatcherRunsDeterministicRequestAndSucceeds(t *testing.T
 		duplicate.ID != fixture.dispatch.ID ||
 		duplicate.RunID != fixture.dispatch.RunID {
 		t.Fatalf("deterministic duplicate = %#v, %v, %v", duplicate, created, err)
+	}
+}
+
+func TestEventWorkflowDispatcherCapturesReviewBeforeFinishingDispatch(t *testing.T) {
+	fixture := newEventDispatchFixture(t, "dispatcher-review-capture")
+	executor := &recordingEventExecutor{
+		run: func(_ context.Context, req RunRequest) (*RunResult, error) {
+			createAndLinkEventTestRun(t, req, fixture.runStore, &Run{
+				ID:          req.RunID,
+				WorkflowRef: req.WorkflowRef,
+				Status:      RunStatusSucceeded,
+				Outputs: map[string]any{
+					"picoclawReviewDraft": map[string]any{"schemaVersion": 1},
+				},
+			})
+			return &RunResult{RunID: req.RunID, Status: RunStatusSucceeded}, nil
+		},
+	}
+	sink := &recordingEventReviewSink{store: fixture.store}
+	dispatcher := fixture.dispatcher(executor)
+	dispatcher.ReviewSink = sink
+
+	processed, err := dispatcher.ProcessOne(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("ProcessOne() = %v, %v, want true, nil", processed, err)
+	}
+	if sink.calls != 1 ||
+		sink.envelope.ID != fixture.event.Envelope.ID ||
+		sink.dispatch.ID != fixture.dispatch.ID ||
+		sink.run == nil ||
+		sink.run.ID != fixture.dispatch.RunID {
+		t.Fatalf("review capture = %#v, want exact event/dispatch/run", sink)
+	}
+	if sink.statusAtCapture != eventing.DispatchRunning {
+		t.Fatalf(
+			"dispatch status at capture = %q, want running before acknowledgement",
+			sink.statusAtCapture,
+		)
+	}
+	if finished := fixture.getDispatch(t); finished.Status != eventing.DispatchSucceeded {
+		t.Fatalf("finished dispatch = %#v, want succeeded", finished)
+	}
+}
+
+func TestEventWorkflowDispatcherRetriesWhenReviewCaptureFails(t *testing.T) {
+	fixture := newEventDispatchFixture(t, "dispatcher-review-capture-failure")
+	executor := &recordingEventExecutor{
+		run: func(_ context.Context, req RunRequest) (*RunResult, error) {
+			createAndLinkEventTestRun(t, req, fixture.runStore, &Run{
+				ID:          req.RunID,
+				WorkflowRef: req.WorkflowRef,
+				Status:      RunStatusSucceeded,
+			})
+			return &RunResult{RunID: req.RunID, Status: RunStatusSucceeded}, nil
+		},
+	}
+	dispatcher := fixture.dispatcher(executor)
+	dispatcher.ReviewSink = &recordingEventReviewSink{
+		store: fixture.store,
+		err:   errEventTestReviewCapture,
+	}
+
+	processed, err := dispatcher.ProcessOne(context.Background())
+	if !processed || !errors.Is(err, errEventTestReviewCapture) {
+		t.Fatalf(
+			"ProcessOne() = %v, %v, want processed capture failure",
+			processed,
+			err,
+		)
+	}
+	pending := fixture.getDispatch(t)
+	if pending.Status != eventing.DispatchPending ||
+		!strings.Contains(pending.LastError, errEventTestReviewCapture.Error()) {
+		t.Fatalf("dispatch after capture failure = %#v, want pending retry", pending)
 	}
 }
 
@@ -1784,6 +1859,36 @@ type eventDispatchFixture struct {
 	event     eventing.StoredEvent
 	dispatch  eventing.Dispatch
 	runStore  *FileRunStore
+}
+
+type recordingEventReviewSink struct {
+	store           *eventing.Store
+	err             error
+	calls           int
+	envelope        eventing.Envelope
+	dispatch        eventing.Dispatch
+	run             *Run
+	statusAtCapture eventing.DispatchStatus
+}
+
+func (s *recordingEventReviewSink) CaptureSucceededEventRun(
+	ctx context.Context,
+	envelope eventing.Envelope,
+	dispatch eventing.Dispatch,
+	run *Run,
+) error {
+	s.calls++
+	s.envelope = envelope
+	s.dispatch = dispatch
+	s.run = cloneRun(run)
+	if s.store != nil {
+		current, err := s.store.GetDispatch(ctx, dispatch.ID)
+		if err != nil {
+			return err
+		}
+		s.statusAtCapture = current.Status
+	}
+	return s.err
 }
 
 func newEventDispatchFixture(t *testing.T, key string) *eventDispatchFixture {

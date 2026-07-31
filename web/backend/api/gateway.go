@@ -629,10 +629,16 @@ func computeEventIngressSignature(cfg *config.Config) string {
 	webhooks := make(map[string]eventWebhookSignature)
 	for name, webhook := range effective.Webhooks {
 		if webhook.Enabled {
-			webhooks[name] = eventWebhookSignature{
+			signature := eventWebhookSignature{
 				Format:       config.EffectiveEventWebhookFormat(webhook),
 				SecretDigest: eventSecretDigest(webhook.Secret.String()),
 			}
+			if signature.Format == config.EventWebhookFormatGitHub {
+				signature.Repositories = canonicalGitHubRepositories(webhook.Repositories)
+				signature.TargetUser = strings.ToLower(strings.TrimSpace(webhook.TargetUser))
+				signature.PollNotifications = webhook.PollNotifications
+			}
+			webhooks[name] = signature
 		}
 	}
 
@@ -664,8 +670,11 @@ func computeEventIngressSignature(cfg *config.Config) string {
 }
 
 type eventWebhookSignature struct {
-	Format       string `json:"format"`
-	SecretDigest string `json:"secret_digest"`
+	Format            string   `json:"format"`
+	Repositories      []string `json:"repositories,omitempty"`
+	TargetUser        string   `json:"target_user,omitempty"`
+	PollNotifications bool     `json:"poll_notifications,omitempty"`
+	SecretDigest      string   `json:"secret_digest"`
 }
 
 type eventWorkflowDispatchSignature struct {
@@ -675,6 +684,30 @@ type eventWorkflowDispatchSignature struct {
 	MaxConcurrentRuns int           `json:"max_concurrent_runs,omitempty"`
 	DefaultTimeout    time.Duration `json:"default_timeout,omitempty"`
 	MaxCallDepth      int           `json:"max_call_depth,omitempty"`
+}
+
+func canonicalGitHubRepositories(repositories []string) []string {
+	if len(repositories) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(repositories))
+	canonical := make([]string, 0, len(repositories))
+	for _, repository := range repositories {
+		repository = strings.ToLower(strings.TrimSpace(repository))
+		if repository == "" {
+			continue
+		}
+		if _, exists := seen[repository]; exists {
+			continue
+		}
+		seen[repository] = struct{}{}
+		canonical = append(canonical, repository)
+	}
+	sort.Strings(canonical)
+	if len(canonical) == 0 {
+		return nil
+	}
+	return canonical
 }
 
 func canonicalEventRedactFields(fields []string) []string {

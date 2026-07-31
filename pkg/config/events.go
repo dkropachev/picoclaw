@@ -65,18 +65,24 @@ type EffectiveEventChannelAdapterConfig struct {
 // .security.yml; config.json contains only the [NOT_HERE] marker when a secret
 // is configured.
 type GenericWebhookConfig struct {
-	Enabled bool         `json:"enabled"`
-	Format  string       `json:"format,omitempty"`
-	Secret  SecureString `json:"secret,omitzero"  yaml:"secret,omitempty"`
+	Enabled           bool         `json:"enabled"`
+	Format            string       `json:"format,omitempty"`
+	Repositories      []string     `json:"repositories,omitempty"`
+	TargetUser        string       `json:"target_user,omitempty"`
+	PollNotifications bool         `json:"poll_notifications,omitempty"`
+	Secret            SecureString `json:"secret,omitzero"  yaml:"secret,omitempty"`
 }
 
 // MarshalJSON keeps a stable marker in config.json without ever exposing the
 // webhook signing secret. A connector with no secret omits the field.
 func (c GenericWebhookConfig) MarshalJSON() ([]byte, error) {
 	type genericWebhookJSON struct {
-		Enabled bool          `json:"enabled"`
-		Format  string        `json:"format,omitempty"`
-		Secret  *SecureString `json:"secret,omitempty"`
+		Enabled           bool          `json:"enabled"`
+		Format            string        `json:"format,omitempty"`
+		Repositories      []string      `json:"repositories,omitempty"`
+		TargetUser        string        `json:"target_user,omitempty"`
+		PollNotifications bool          `json:"poll_notifications,omitempty"`
+		Secret            *SecureString `json:"secret,omitempty"`
 	}
 
 	var secret *SecureString
@@ -85,9 +91,12 @@ func (c GenericWebhookConfig) MarshalJSON() ([]byte, error) {
 		secret = &secretCopy
 	}
 	return json.Marshal(genericWebhookJSON{
-		Enabled: c.Enabled,
-		Format:  c.Format,
-		Secret:  secret,
+		Enabled:           c.Enabled,
+		Format:            c.Format,
+		Repositories:      c.Repositories,
+		TargetUser:        c.TargetUser,
+		PollNotifications: c.PollNotifications,
+		Secret:            secret,
 	})
 }
 
@@ -97,9 +106,12 @@ func (c GenericWebhookConfig) MarshalJSON() ([]byte, error) {
 // before env parsing can disable ingress.
 func (c *GenericWebhookConfig) UnmarshalJSON(value []byte) error {
 	var decoded struct {
-		Enabled *bool           `json:"enabled"`
-		Format  *string         `json:"format"`
-		Secret  json.RawMessage `json:"secret"`
+		Enabled           *bool           `json:"enabled"`
+		Format            *string         `json:"format"`
+		Repositories      []string        `json:"repositories"`
+		TargetUser        *string         `json:"target_user"`
+		PollNotifications *bool           `json:"poll_notifications"`
+		Secret            json.RawMessage `json:"secret"`
 	}
 	if err := json.Unmarshal(value, &decoded); err != nil {
 		return err
@@ -109,6 +121,15 @@ func (c *GenericWebhookConfig) UnmarshalJSON(value []byte) error {
 	}
 	if decoded.Format != nil {
 		c.Format = *decoded.Format
+	}
+	if decoded.Repositories != nil {
+		c.Repositories = append([]string(nil), decoded.Repositories...)
+	}
+	if decoded.TargetUser != nil {
+		c.TargetUser = *decoded.TargetUser
+	}
+	if decoded.PollNotifications != nil {
+		c.PollNotifications = *decoded.PollNotifications
 	}
 	if len(decoded.Secret) == 0 || string(decoded.Secret) == notHere {
 		return nil
@@ -158,13 +179,24 @@ const (
 	// EventWebhookFormatGitHub verifies GitHub webhook signatures.
 	EventWebhookFormatGitHub = "github"
 
-	eventChannelMaxNameBytes    = 256
-	githubWebhookMinSecretBytes = 32
-	githubWebhookMaxSecretBytes = 256
+	eventChannelMaxNameBytes     = 256
+	githubWebhookMinSecretBytes  = 32
+	githubWebhookMaxSecretBytes  = 256
+	githubWebhookMaxRepositories = 4096
+	githubRepositoryMaxBytes     = 256
+	githubTargetUserMaxBytes     = 128
 )
 
 var genericWebhookConnectorNamePattern = regexp.MustCompile(
 	`^[A-Za-z][A-Za-z0-9_-]{0,63}$`,
+)
+
+var githubRepositoryPattern = regexp.MustCompile(
+	`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`,
+)
+
+var githubTargetUserPattern = regexp.MustCompile(
+	`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,126}[A-Za-z0-9])?$`,
 )
 
 var eventChannelSupportedTypes = map[string]struct{}{
@@ -228,6 +260,64 @@ func (c EventIngressConfig) Validate() error {
 		if err := validateEventWebhookSecret(webhook); err != nil {
 			return fmt.Errorf("webhook connector %q: %w", name, err)
 		}
+		if err := validateGitHubWebhookScope(webhook); err != nil {
+			return fmt.Errorf("webhook connector %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func validateGitHubWebhookScope(webhook GenericWebhookConfig) error {
+	if EffectiveEventWebhookFormat(webhook) != EventWebhookFormatGitHub {
+		if webhook.PollNotifications {
+			return errors.New("notification polling requires GitHub format")
+		}
+		if len(webhook.Repositories) > 0 || webhook.TargetUser != "" {
+			return errors.New("repository and target-user filters require GitHub format")
+		}
+		return nil
+	}
+	if len(webhook.Repositories) > githubWebhookMaxRepositories {
+		return fmt.Errorf(
+			"GitHub repository list must contain at most %d entries",
+			githubWebhookMaxRepositories,
+		)
+	}
+	seen := make(map[string]string, len(webhook.Repositories))
+	for _, repository := range webhook.Repositories {
+		if repository == "" ||
+			repository != strings.TrimSpace(repository) ||
+			!utf8.ValidString(repository) ||
+			len(repository) > githubRepositoryMaxBytes ||
+			!githubRepositoryPattern.MatchString(repository) {
+			return fmt.Errorf(
+				"GitHub repository %q must be a trimmed owner/repo name of at most %d bytes",
+				repository,
+				githubRepositoryMaxBytes,
+			)
+		}
+		folded := strings.ToLower(repository)
+		if previous, exists := seen[folded]; exists {
+			return fmt.Errorf(
+				"GitHub repositories %q and %q differ only by case",
+				previous,
+				repository,
+			)
+		}
+		seen[folded] = repository
+	}
+	targetUser := webhook.TargetUser
+	if targetUser == "" {
+		return nil
+	}
+	if targetUser != strings.TrimSpace(targetUser) ||
+		!utf8.ValidString(targetUser) ||
+		len(targetUser) > githubTargetUserMaxBytes ||
+		!githubTargetUserPattern.MatchString(targetUser) {
+		return fmt.Errorf(
+			"GitHub target user must be a trimmed login of at most %d bytes",
+			githubTargetUserMaxBytes,
+		)
 	}
 	return nil
 }
@@ -244,7 +334,10 @@ func (c EventIngressConfig) validateWebhookPublicIdentities() error {
 		}
 	}
 	for name, webhook := range c.Webhooks {
-		for _, publicValue := range [...]string{name, webhook.Format} {
+		publicValues := make([]string, 0, 3+len(webhook.Repositories))
+		publicValues = append(publicValues, name, webhook.Format, webhook.TargetUser)
+		publicValues = append(publicValues, webhook.Repositories...)
+		for _, publicValue := range publicValues {
 			for _, secret := range secrets {
 				if strings.Contains(publicValue, secret) {
 					return errors.New(genericWebhookConnectorSecretConflictMessage)
@@ -267,7 +360,10 @@ func (c EventIngressConfig) ValidateWebhookPublicIdentities(
 	}
 
 	for name, webhook := range c.Webhooks {
-		for _, publicValue := range [...]string{name, webhook.Format} {
+		publicValues := make([]string, 0, 3+len(webhook.Repositories))
+		publicValues = append(publicValues, name, webhook.Format, webhook.TargetUser)
+		publicValues = append(publicValues, webhook.Repositories...)
+		for _, publicValue := range publicValues {
 			for _, secret := range sensitiveValues {
 				if len(secret) > 3 && strings.Contains(publicValue, secret) {
 					// Never echo either side of a public/private conflict.
@@ -319,6 +415,9 @@ func validateEventWebhookSecret(webhook GenericWebhookConfig) error {
 	case EventWebhookFormatStandard:
 		return validateGenericWebhookSecret(webhook.Secret.String())
 	case EventWebhookFormatGitHub:
+		if webhook.PollNotifications && webhook.Secret.String() == "" {
+			return nil
+		}
 		return validateGitHubWebhookSecret(webhook.Secret.String())
 	default:
 		return errors.New("unsupported webhook format")
@@ -796,6 +895,7 @@ func EffectiveEventIngressConfig(cfg *Config, workspace string) EventIngressConf
 		out.Webhooks = make(map[string]GenericWebhookConfig, len(out.Webhooks))
 		for name, webhook := range cfg.Events.Ingress.Webhooks {
 			webhook.Format = EffectiveEventWebhookFormat(webhook)
+			webhook.Repositories = append([]string(nil), webhook.Repositories...)
 			out.Webhooks[name] = webhook
 		}
 	}

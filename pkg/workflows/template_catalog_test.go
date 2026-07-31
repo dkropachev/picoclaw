@@ -63,8 +63,8 @@ func TestBuiltInWorkflowTemplateRegistryIsUniqueAndValid(t *testing.T) {
 			t.Fatalf("template %q validation error = %v", template.name, err)
 		}
 	}
-	if len(names) != 2 {
-		t.Fatalf("built-in template count = %d, want 2", len(names))
+	if len(names) != 3 {
+		t.Fatalf("built-in template count = %d, want 3", len(names))
 	}
 }
 
@@ -88,6 +88,13 @@ func TestListWorkflowTemplatesReportsSafeStatesInConfiguredDirectory(t *testing.
 		t,
 		entries,
 		GitHubIssueTriageWorkflowName,
+		WorkflowTemplateStateAvailable,
+		"",
+	)
+	assertWorkflowTemplateState(
+		t,
+		entries,
+		GitHubPRReviewWorkflowName,
 		WorkflowTemplateStateAvailable,
 		"",
 	)

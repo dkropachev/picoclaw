@@ -1839,6 +1839,8 @@ func TestConfigSignatureTracksOnlyActiveEventIngressRuntime(t *testing.T) {
 
 	inactive := cfg.Events.Ingress.Webhooks["inactive"]
 	inactive.Format = config.EventWebhookFormatStandard
+	inactive.Repositories = []string{"scylladb/gocql"}
+	inactive.TargetUser = "inactive-reviewer"
 	cfg.Events.Ingress.Webhooks["inactive"] = inactive
 	if got := computeConfigSignature(cfg); got != retentionSignature {
 		t.Fatal("inactive webhook routing metadata should not change the active runtime signature")
@@ -1863,8 +1865,31 @@ func TestConfigSignatureTracksOnlyActiveEventIngressRuntime(t *testing.T) {
 
 	active.Secret = *config.NewSecureString("abcdefghijklmnopqrstuvwxyzABCDEF")
 	cfg.Events.Ingress.Webhooks["primary"] = active
-	if got := computeConfigSignature(cfg); got == webhookSignature {
+	rotatedWebhookSignature := computeConfigSignature(cfg)
+	if rotatedWebhookSignature == webhookSignature {
 		t.Fatal("rotating an active webhook secret should change the config signature")
+	}
+
+	active.Repositories = []string{"scylladb/gocql", "scylladb/scylla"}
+	active.TargetUser = "Review-User"
+	cfg.Events.Ingress.Webhooks["primary"] = active
+	scopeSignature := computeConfigSignature(cfg)
+	if scopeSignature == rotatedWebhookSignature {
+		t.Fatal("changing active GitHub repository/user scope should change the config signature")
+	}
+
+	active.PollNotifications = true
+	cfg.Events.Ingress.Webhooks["primary"] = active
+	pollSignature := computeConfigSignature(cfg)
+	if pollSignature == scopeSignature {
+		t.Fatal("enabling active GitHub notification polling should change the config signature")
+	}
+
+	active.Repositories = []string{"SCYLLADB/SCYLLA", "SCYLLADB/GOCQL"}
+	active.TargetUser = "review-user"
+	cfg.Events.Ingress.Webhooks["primary"] = active
+	if got := computeConfigSignature(cfg); got != pollSignature {
+		t.Fatal("equivalent GitHub repository/user scope should have a stable config signature")
 	}
 }
 

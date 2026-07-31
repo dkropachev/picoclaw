@@ -2382,6 +2382,7 @@ const workflowAuthoringCapabilityLimitValues =
     "unsafe_fields_omitted",
   ])
 const workflowNativeFunctionNames = new Set([
+  "git.diff",
   "git.filter",
   "git.inventory",
   "workflow.artifact",
@@ -2392,7 +2393,7 @@ const workflowCapabilityBounds = {
   agents: 128,
   tools: 256,
   mcpTools: 256,
-  functions: 4,
+  functions: 5,
   identityBytes: 256,
   targetBytes: 1024,
   schemaDepth: 6,

@@ -30,6 +30,9 @@ const appConfig = {
         primary: {
           enabled: true,
           format: "github",
+          repositories: ["scylladb/gocql", "scylladb/scylla"],
+          target_user: "review-user",
+          poll_notifications: true,
           secret: EVENT_SECRET_PLACEHOLDER,
         },
         generic: {
@@ -90,6 +93,10 @@ describe("event sources API", () => {
         name: "primary",
         format: "github",
         persistedFormat: "github",
+        repositories: ["scylladb/gocql", "scylladb/scylla"],
+        targetUser: "review-user",
+        pollNotifications: true,
+        persistedPollNotifications: true,
         secretConfigured: true,
         secretUpdate: "preserve",
         secret: "",
@@ -153,6 +160,9 @@ describe("event sources API", () => {
             name: "deploy",
             enabled: false,
             format: "standard",
+            repositories: [],
+            targetUser: "",
+            pollNotifications: false,
             secretConfigured: false,
             secretUpdate: "clear",
             secret: "",
@@ -177,11 +187,16 @@ describe("event sources API", () => {
             primary: {
               enabled: true,
               format: "github",
+              repositories: ["scylladb/gocql", "scylladb/scylla"],
+              target_user: "review-user",
+              poll_notifications: true,
               secret: "01234567890123456789012345678901",
             },
             deploy: {
               enabled: false,
               format: "standard",
+              repositories: null,
+              target_user: null,
               secret: "",
             },
             generic: null,
@@ -224,10 +239,15 @@ describe("event sources API", () => {
             primary: {
               enabled: true,
               format: "github",
+              repositories: ["scylladb/gocql", "scylladb/scylla"],
+              target_user: "review-user",
+              poll_notifications: true,
             },
             generic: {
               enabled: false,
               format: "standard",
+              repositories: null,
+              target_user: null,
             },
           },
         },
@@ -278,6 +298,47 @@ describe("event sources API", () => {
         ).webhooks as Record<string, Record<string, unknown>>
       ).primary,
     ).not.toHaveProperty("secret")
+  })
+
+  it("clears a previously enabled notification poll without emitting default noise", () => {
+    const loaded = parseEventSourcesConfig(appConfig)
+    const primary = loaded.settings.webhooks.find(
+      (source) => source.name === "primary",
+    )
+    const generic = loaded.settings.webhooks.find(
+      (source) => source.name === "generic",
+    )
+    expect(primary).toBeDefined()
+    expect(generic).toBeDefined()
+
+    const patch = buildEventSourcesPatch(
+      {
+        ...loaded.settings,
+        webhooks: [{ ...primary!, pollNotifications: false }, generic!],
+      },
+      loaded.persisted,
+    )
+
+    expect(patch).toMatchObject({
+      events: {
+        ingress: {
+          webhooks: {
+            primary: { poll_notifications: null },
+            generic: {
+              enabled: false,
+              format: "standard",
+            },
+          },
+        },
+      },
+    })
+    expect(
+      (
+        patch.events as {
+          ingress: { webhooks: Record<string, Record<string, unknown>> }
+        }
+      ).ingress.webhooks.generic,
+    ).not.toHaveProperty("poll_notifications")
   })
 
   it("rejects renaming a persisted connector because its secret identity cannot move", () => {

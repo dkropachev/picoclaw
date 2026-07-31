@@ -29,6 +29,9 @@ const (
 	minimumStandardSecretBytes             = 32
 	minimumGitHubSecretBytes               = 32
 	maximumGitHubSecretBytes               = 256
+	maximumGitHubScopeRepositories         = 4096
+	maximumGitHubRepositoryScopeBytes      = 256
+	maximumGitHubTargetUserBytes           = 128
 	connectorIdentitySecretConflictMessage = "webhook connector identity conflicts with a signing secret"
 )
 
@@ -67,10 +70,12 @@ type Inserter interface {
 // normalization format for a connector; a missing or empty value selects
 // Standard Webhooks for backward compatibility.
 type BackendConfig struct {
-	Store            Inserter
-	ConnectorSecrets map[string]string
-	ConnectorFormats map[string]string
-	MaxPayloadBytes  int
+	Store                 Inserter
+	ConnectorSecrets      map[string]string
+	ConnectorFormats      map[string]string
+	ConnectorRepositories map[string][]string
+	ConnectorTargetUsers  map[string]string
+	MaxPayloadBytes       int
 }
 
 // Backend is an immutable, prevalidated admission backend. Preparing a backend
@@ -85,6 +90,8 @@ type connectorRuntime struct {
 	format              connectorFormat
 	standardVerifier    *standardwebhooks.Webhook
 	githubSecret        []byte
+	githubRepositories  map[string]struct{}
+	githubTargetUser    string
 	maxRequestBodyBytes int64
 }
 
@@ -121,12 +128,26 @@ func NewBackend(config BackendConfig) (*Backend, error) {
 		seenSecrets[secret] = struct{}{}
 		secretValues = append(secretValues, secret)
 	}
-	identityNames := make([]string, 0, len(config.ConnectorSecrets)+len(config.ConnectorFormats))
+	identityNames := make(
+		[]string,
+		0,
+		len(config.ConnectorSecrets)+
+			len(config.ConnectorFormats)+
+			len(config.ConnectorRepositories)+
+			len(config.ConnectorTargetUsers),
+	)
 	for name := range config.ConnectorSecrets {
 		identityNames = append(identityNames, name)
 	}
 	for name := range config.ConnectorFormats {
 		identityNames = append(identityNames, name)
+	}
+	for name, repositories := range config.ConnectorRepositories {
+		identityNames = append(identityNames, name)
+		identityNames = append(identityNames, repositories...)
+	}
+	for name, targetUser := range config.ConnectorTargetUsers {
+		identityNames = append(identityNames, name, targetUser)
 	}
 	for _, name := range identityNames {
 		for _, secret := range secretValues {
@@ -140,6 +161,22 @@ func NewBackend(config BackendConfig) (*Backend, error) {
 		if _, exists := config.ConnectorSecrets[name]; !exists {
 			return nil, fmt.Errorf(
 				"webhook connector format %q has no enabled connector",
+				name,
+			)
+		}
+	}
+	for name := range config.ConnectorRepositories {
+		if _, exists := config.ConnectorSecrets[name]; !exists {
+			return nil, fmt.Errorf(
+				"webhook connector repository scope %q has no enabled connector",
+				name,
+			)
+		}
+	}
+	for name := range config.ConnectorTargetUsers {
+		if _, exists := config.ConnectorSecrets[name]; !exists {
+			return nil, fmt.Errorf(
+				"webhook connector target user %q has no enabled connector",
 				name,
 			)
 		}
@@ -169,6 +206,31 @@ func NewBackend(config BackendConfig) (*Backend, error) {
 			}
 			return nil, fmt.Errorf("webhook connector %q has an invalid signing secret", name)
 		}
+		repositories := config.ConnectorRepositories[name]
+		targetUser := config.ConnectorTargetUsers[name]
+		if runtime.format != connectorFormatGitHub &&
+			(len(repositories) > 0 || strings.TrimSpace(targetUser) != "") {
+			return nil, fmt.Errorf(
+				"webhook connector %q has GitHub scope on a non-GitHub format",
+				name,
+			)
+		}
+		if runtime.format == connectorFormatGitHub {
+			runtime.githubRepositories, err = normalizedGitHubRepositories(repositories)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"webhook connector %q has an invalid GitHub repository scope",
+					name,
+				)
+			}
+			runtime.githubTargetUser, err = normalizedGitHubTargetUser(targetUser)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"webhook connector %q has an invalid GitHub target user",
+					name,
+				)
+			}
+		}
 		runtime.maxRequestBodyBytes = int64(config.MaxPayloadBytes)
 		if runtime.format == connectorFormatStandard {
 			runtime.maxRequestBodyBytes += RequestMetadataAllowanceBytes
@@ -181,6 +243,85 @@ func NewBackend(config BackendConfig) (*Backend, error) {
 		connectors:   connectors,
 		secretValues: secretValues,
 	}, nil
+}
+
+func normalizedGitHubRepositories(repositories []string) (map[string]struct{}, error) {
+	if len(repositories) == 0 {
+		return nil, nil
+	}
+	if len(repositories) > maximumGitHubScopeRepositories {
+		return nil, errors.New("too many GitHub repositories")
+	}
+	out := make(map[string]struct{}, len(repositories))
+	for _, repository := range repositories {
+		if !validGitHubRepository(repository) {
+			return nil, errors.New("invalid GitHub repository")
+		}
+		normalized := strings.ToLower(repository)
+		if _, exists := out[normalized]; exists {
+			return nil, errors.New("duplicate GitHub repository")
+		}
+		out[normalized] = struct{}{}
+	}
+	return out, nil
+}
+
+func normalizedGitHubTargetUser(targetUser string) (string, error) {
+	if targetUser == "" {
+		return "", nil
+	}
+	if !validGitHubTargetUser(targetUser) {
+		return "", errors.New("invalid GitHub target user")
+	}
+	return strings.ToLower(targetUser), nil
+}
+
+func validGitHubRepository(repository string) bool {
+	if repository == "" ||
+		len(repository) > maximumGitHubRepositoryScopeBytes ||
+		repository != strings.TrimSpace(repository) ||
+		!utf8.ValidString(repository) {
+		return false
+	}
+	owner, name, found := strings.Cut(repository, "/")
+	if !found || owner == "" || name == "" || strings.Contains(name, "/") {
+		return false
+	}
+	return validGitHubRepositorySegment(owner) && validGitHubRepositorySegment(name)
+}
+
+func validGitHubRepositorySegment(segment string) bool {
+	for _, char := range []byte(segment) {
+		if char >= 'a' && char <= 'z' ||
+			char >= 'A' && char <= 'Z' ||
+			char >= '0' && char <= '9' ||
+			char == '_' ||
+			char == '-' ||
+			char == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validGitHubTargetUser(targetUser string) bool {
+	if targetUser == "" ||
+		len(targetUser) > maximumGitHubTargetUserBytes ||
+		targetUser != strings.TrimSpace(targetUser) ||
+		!utf8.ValidString(targetUser) {
+		return false
+	}
+	for index, char := range []byte(targetUser) {
+		if char >= 'a' && char <= 'z' ||
+			char >= 'A' && char <= 'Z' ||
+			char >= '0' && char <= '9' ||
+			char == '-' && index > 0 && index < len(targetUser)-1 {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func runtimeForConnector(format, secret string) (connectorRuntime, error) {

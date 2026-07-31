@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -47,13 +48,15 @@ type Store interface {
 
 // BackendConfig contains generation-specific dependencies.
 type BackendConfig struct {
-	Store Store
+	Store   Store
+	Reviews http.Handler
 }
 
 // Backend is an immutable operator service suitable for sharing between an
 // HTTP controller and other in-process consumers.
 type Backend struct {
-	store Store
+	store   Store
+	reviews http.Handler
 }
 
 // NewBackend validates and freezes an operator backend.
@@ -61,7 +64,10 @@ func NewBackend(config BackendConfig) (*Backend, error) {
 	if config.Store == nil {
 		return nil, errors.New("event operator store is required")
 	}
-	return &Backend{store: config.Store}, nil
+	return &Backend{
+		store:   config.Store,
+		reviews: config.Reviews,
+	}, nil
 }
 
 // EventListRequest selects a newest-first event page.

@@ -40,6 +40,7 @@ const (
 	routeDispatches
 	routeDispatch
 	routeReplay
+	routeReviews
 )
 
 type operatorRoute struct {
@@ -138,6 +139,12 @@ func (backend *Backend) serveHTTP(
 		}
 		w.Header().Set("Location", RoutePrefix+"events/"+result.Event.ID)
 		writeOperatorJSON(w, http.StatusCreated, result)
+	case routeReviews:
+		if backend.reviews == nil {
+			writeOperatorStatus(w, http.StatusNotFound)
+			return
+		}
+		backend.reviews.ServeHTTP(w, request)
 	default:
 		writeOperatorStatus(w, http.StatusNotFound)
 	}
@@ -156,6 +163,10 @@ func routeFromRequest(request *http.Request) operatorRoute {
 		return operatorRoute{kind: routeEvents, method: http.MethodGet}
 	case RoutePrefix + "dispatches":
 		return operatorRoute{kind: routeDispatches, method: http.MethodGet}
+	}
+	if path == RoutePrefix+"reviews" ||
+		strings.HasPrefix(path, RoutePrefix+"reviews/") {
+		return operatorRoute{kind: routeReviews}
 	}
 	if strings.HasPrefix(path, RoutePrefix+"dispatches/") {
 		segments := strings.Split(

@@ -32,8 +32,9 @@ type admissionRequest struct {
 }
 
 type admissionResponse struct {
-	EventID  string `json:"event_id"`
+	EventID  string `json:"event_id,omitempty"`
 	Inserted bool   `json:"inserted"`
+	Ignored  bool   `json:"ignored,omitempty"`
 }
 
 type admissionAuthentication struct {
@@ -84,6 +85,10 @@ func (backend *Backend) serveHTTP(w http.ResponseWriter, request *http.Request) 
 	}
 	if backend.identityContainsSecret(authentication.dedupeKey, input.eventType) {
 		writeError(w, http.StatusBadRequest)
+		return
+	}
+	if !runtime.accepts(input) {
+		writeJSON(w, http.StatusAccepted, admissionResponse{Ignored: true})
 		return
 	}
 
@@ -164,11 +169,24 @@ func (runtime connectorRuntime) decode(
 		input, err := decodeAdmissionRequest(body)
 		return input, "webhook", err
 	case connectorFormatGitHub:
-		input, err := decodeGitHubAdmissionRequest(body, authentication.githubEvent)
+		input, err := decodeGitHubAdmissionRequest(
+			body,
+			authentication.githubEvent,
+			runtime.githubTargetUser,
+		)
 		return input, "github", err
 	default:
 		return admissionRequest{}, "", errors.New("unsupported webhook connector format")
 	}
+}
+
+func (runtime connectorRuntime) accepts(input admissionRequest) bool {
+	if runtime.format != connectorFormatGitHub || len(runtime.githubRepositories) == 0 {
+		return true
+	}
+	repository := strings.ToLower(strings.TrimSpace(input.attributes["repository_full_name"]))
+	_, accepted := runtime.githubRepositories[repository]
+	return accepted
 }
 
 func (backend *Backend) identityContainsSecret(values ...string) bool {
