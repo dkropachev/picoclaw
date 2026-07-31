@@ -2,10 +2,7 @@ import {
   IconEdit,
   IconGitBranch,
   IconKey,
-  IconLoader2,
   IconRoute,
-  IconStar,
-  IconStarFilled,
   IconTrash,
 } from "@tabler/icons-react"
 import { useTranslation } from "react-i18next"
@@ -21,22 +18,10 @@ import {
 interface ModelCardProps {
   model: ModelInfo
   onEdit: (model: ModelInfo) => void
-  onSetDefault: (model: ModelInfo) => void
   onDelete: (model: ModelInfo) => void
-  settingDefault: boolean
-  defaultChangePending?: boolean
-  isDefault?: boolean
 }
 
-export function ModelCard({
-  model,
-  onEdit,
-  onSetDefault,
-  onDelete,
-  settingDefault,
-  defaultChangePending = false,
-  isDefault: isDefaultOverride,
-}: ModelCardProps) {
+export function ModelCard({ model, onEdit, onDelete }: ModelCardProps) {
   const { t } = useTranslation()
   const isRouter = model.provider === "router" || model.router != null
   const isModelRouter =
@@ -44,24 +29,6 @@ export function ModelCard({
   const isOAuth = model.auth_method === "oauth"
   const status = model.status
   const statusLabel = t(`models.status.${status}`)
-  const isDefault = isDefaultOverride ?? model.is_default
-  const canSetDefault =
-    model.available &&
-    !isDefault &&
-    (model.is_virtual !== true || isModelRouter)
-
-  const setDefaultLabel = t("models.action.setDefault")
-  const setDefaultDisabledReason = (() => {
-    if (defaultChangePending)
-      return t("models.action.setDefaultDisabled.setting")
-    if (!model.available)
-      return t("models.action.setDefaultDisabled.unavailable")
-    if (isDefault) return t("models.action.setDefaultDisabled.isDefault")
-    if (model.is_virtual && !isModelRouter)
-      return t("models.action.setDefaultDisabled.isVirtual")
-    return setDefaultLabel
-  })()
-
   const editLabel = isModelRouter
     ? t("models.modelRouter.actionEdit")
     : isRouter
@@ -72,10 +39,6 @@ export function ModelCard({
     : isRouter
       ? t("models.router.actionDelete")
       : t("models.action.delete")
-  const deleteDisabledReason = isDefault
-    ? t("models.action.deleteDisabled.isDefault")
-    : deleteLabel
-  const deleteDisabled = isDefault
   return (
     <div
       className={[
@@ -90,24 +53,17 @@ export function ModelCard({
           <span
             className={[
               "mt-0.5 h-2 w-2 shrink-0 rounded-full",
-              isDefault
-                ? "bg-green-400 ring-2 ring-green-400/35"
-                : status === "available"
-                  ? "bg-green-500"
-                  : status === "unreachable"
-                    ? "bg-amber-500"
-                    : "bg-muted-foreground/25",
+              status === "available"
+                ? "bg-green-500"
+                : status === "unreachable"
+                  ? "bg-amber-500"
+                  : "bg-muted-foreground/25",
             ].join(" ")}
             title={statusLabel}
           />
           <span className="text-foreground truncate text-sm font-semibold">
             {model.model_name}
           </span>
-          {isDefault && (
-            <span className="bg-primary/10 text-primary shrink-0 rounded px-1.5 py-0.5 text-[10px] leading-none font-medium">
-              {t("models.badge.default")}
-            </span>
-          )}
           {model.is_virtual && (
             <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-[10px] leading-none font-medium">
               {t("models.badge.virtual")}
@@ -126,64 +82,6 @@ export function ModelCard({
         </div>
 
         <div className="flex shrink-0 items-center gap-0.5">
-          {isDefault ? (
-            <span
-              className="text-primary p-1"
-              title={t("models.badge.default")}
-            >
-              <IconStarFilled className="size-3.5" />
-            </span>
-          ) : (
-            <Tooltip delayDuration={!canSetDefault || settingDefault ? 0 : 700}>
-              <TooltipTrigger asChild>
-                <span
-                  className={
-                    !canSetDefault || defaultChangePending
-                      ? "cursor-not-allowed"
-                      : undefined
-                  }
-                  tabIndex={
-                    !canSetDefault || defaultChangePending ? 0 : undefined
-                  }
-                  role={
-                    !canSetDefault || defaultChangePending
-                      ? "button"
-                      : undefined
-                  }
-                  aria-disabled={
-                    !canSetDefault || defaultChangePending ? true : undefined
-                  }
-                  aria-label={
-                    !canSetDefault || defaultChangePending
-                      ? setDefaultLabel
-                      : undefined
-                  }
-                  title={
-                    !canSetDefault || defaultChangePending
-                      ? setDefaultLabel
-                      : undefined
-                  }
-                >
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    onClick={() => onSetDefault(model)}
-                    disabled={defaultChangePending || !canSetDefault}
-                    aria-label={setDefaultLabel}
-                    title={setDefaultLabel}
-                  >
-                    {settingDefault ? (
-                      <IconLoader2 className="size-3.5 animate-spin" />
-                    ) : (
-                      <IconStar className="size-3.5" />
-                    )}
-                  </Button>
-                </span>
-              </TooltipTrigger>
-              <TooltipContent>{setDefaultDisabledReason}</TooltipContent>
-            </Tooltip>
-          )}
-
           <Button
             variant="ghost"
             size="icon-sm"
@@ -194,21 +92,13 @@ export function ModelCard({
             <IconEdit className="size-3.5" />
           </Button>
 
-          <Tooltip delayDuration={deleteDisabled ? 0 : 700}>
+          <Tooltip delayDuration={700}>
             <TooltipTrigger asChild>
-              <span
-                className={deleteDisabled ? "cursor-not-allowed" : undefined}
-                tabIndex={deleteDisabled ? 0 : undefined}
-                role={deleteDisabled ? "button" : undefined}
-                aria-disabled={deleteDisabled ? true : undefined}
-                aria-label={deleteDisabled ? deleteLabel : undefined}
-                title={deleteDisabled ? deleteLabel : undefined}
-              >
+              <span>
                 <Button
                   variant="ghost"
                   size="icon-sm"
                   onClick={() => onDelete(model)}
-                  disabled={deleteDisabled}
                   aria-label={deleteLabel}
                   title={deleteLabel}
                   className="text-muted-foreground hover:text-destructive hover:bg-destructive/10"
@@ -217,7 +107,7 @@ export function ModelCard({
                 </Button>
               </span>
             </TooltipTrigger>
-            <TooltipContent>{deleteDisabledReason}</TooltipContent>
+            <TooltipContent>{deleteLabel}</TooltipContent>
           </Tooltip>
         </div>
       </div>

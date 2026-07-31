@@ -10,7 +10,7 @@ import {
   updateModel,
 } from "@/api/models"
 import { ConfigChangeNotice } from "@/components/config-change-notice"
-import { Field, SwitchCardField } from "@/components/shared-form"
+import { Field } from "@/components/shared-form"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -37,7 +37,6 @@ interface ModelRouterSheetProps {
   revision: string
   models: ModelInfo[]
   modelAliases: ModelAlias[]
-  defaultModelName: string
   onClose: () => void
   onSaved: () => void
 }
@@ -180,13 +179,11 @@ export function ModelRouterSheet({
   revision,
   models,
   modelAliases,
-  defaultModelName,
   onClose,
   onSaved,
 }: ModelRouterSheetProps) {
   const { t } = useTranslation()
   const [form, setForm] = useState<RouterForm>(EMPTY_FORM)
-  const [setAsDefault, setSetAsDefault] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState("")
   const isEdit = model != null
@@ -210,10 +207,9 @@ export function ModelRouterSheet({
   useEffect(() => {
     if (!open) return
     setForm(parseRouterForm(model))
-    setSetAsDefault(model?.model_name === defaultModelName)
     setSaving(false)
     setError("")
-  }, [defaultModelName, model, open])
+  }, [model, open])
 
   const update = <K extends keyof RouterForm>(key: K, value: RouterForm[K]) => {
     setForm((current) => ({ ...current, [key]: value }))
@@ -255,7 +251,6 @@ export function ModelRouterSheet({
       model: form.modelName.trim(),
       enabled: true,
       model_router: router,
-      set_as_default: setAsDefault,
     }
     try {
       if (isEdit && model != null) {
@@ -370,22 +365,6 @@ export function ModelRouterSheet({
               />
             </Field>
           </div>
-          <SwitchCardField
-            label={t(
-              "models.modelRouter.defaultOnSave",
-              "Use as runtime model alias",
-            )}
-            hint={t(
-              "models.modelRouter.defaultOnSaveHint",
-              "Use this router with the active runtime account.",
-            )}
-            checked={setAsDefault}
-            onCheckedChange={setSetAsDefault}
-            ariaLabel={t(
-              "models.modelRouter.defaultOnSave",
-              "Use as runtime model alias",
-            )}
-          />
         </div>
         <SheetFooter>
           <Button variant="outline" onClick={onClose} disabled={saving}>

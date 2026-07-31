@@ -31,13 +31,7 @@ function renderRouterCard(
 ) {
   render(
     <TooltipProvider>
-      <ModelCard
-        model={model}
-        onEdit={vi.fn()}
-        onSetDefault={vi.fn()}
-        onDelete={onDelete}
-        settingDefault={false}
-      />
+      <ModelCard model={model} onEdit={vi.fn()} onDelete={onDelete} />
     </TooltipProvider>,
   )
 }
@@ -62,11 +56,13 @@ describe("ModelCard router actions", () => {
     expect(onDelete).toHaveBeenCalledWith(routerModel)
   })
 
-  it("disables deleting the default router entry", () => {
+  it("does not treat the legacy default flag as a Models-page selection", async () => {
+    const user = userEvent.setup()
     const onDelete = vi.fn()
     renderRouterCard({ ...routerModel, is_default: true }, onDelete)
 
-    expect(getDeleteButton()).toBeDisabled()
-    expect(onDelete).not.toHaveBeenCalled()
+    await user.click(getDeleteButton())
+
+    expect(onDelete).toHaveBeenCalledWith({ ...routerModel, is_default: true })
   })
 })

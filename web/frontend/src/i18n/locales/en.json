@@ -322,16 +322,6 @@
   "models": {
     "description": "Configure stable model aliases used by chat, agents, and workflows.",
     "defaultChangeSuccess": "Runtime selection updated.",
-    "defaultSelection": {
-      "title": "Runtime selection",
-      "current": "Active: {{account}} / {{alias}}",
-      "none": "No runtime model configured. Choose both an account and a model alias.",
-      "account": "Runtime account",
-      "alias": "Runtime model alias",
-      "selectAccount": "Select account",
-      "selectAlias": "Select model alias",
-      "save": "Apply selection"
-    },
     "alias": {
       "title": "Model aliases",
       "sectionDescription": "Stable names resolve to exact models, with optional per-account overrides.",
@@ -343,7 +333,6 @@
       "delete": "Delete model alias",
       "deleteTitle": "Delete model alias?",
       "deleteDescription": "\"{{name}}\" will no longer be available to chats or workflows.",
-      "deleteDefault": "Change the runtime model alias before deleting it.",
       "deleteError": "Failed to delete model alias.",
       "saveError": "Failed to save model alias.",
       "name": "Alias",
@@ -604,8 +593,6 @@
       "containsTarget": "Contains Target",
       "regexText": "Regex Pattern",
       "regexTarget": "Regex Target",
-      "defaultOnSave": "Use as runtime model alias",
-      "defaultOnSaveHint": "Use this router with the active runtime account.",
       "containsPlaceholder": "e.g. translate",
       "regexPlaceholder": "e.g. (?i)review|debug",
       "selectTarget": "Select target",

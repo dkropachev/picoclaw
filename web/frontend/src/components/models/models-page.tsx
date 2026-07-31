@@ -7,27 +7,15 @@ import {
 } from "@tabler/icons-react"
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
-import { toast } from "sonner"
 
 import {
   type ModelAlias,
   type ModelAliasCatalogEntry,
   type ModelInfo,
   getModels,
-  setDefaultModelAlias,
-  setDefaultSelection,
 } from "@/api/models"
 import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
-import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
-import { refreshGatewayState } from "@/store/gateway"
 
 import { DeleteModelAliasDialog } from "./delete-model-alias-dialog"
 import { DeleteModelDialog } from "./delete-model-dialog"
@@ -50,11 +38,7 @@ export function ModelsPage() {
   const [modelAliasCatalog, setModelAliasCatalog] = useState<
     ModelAliasCatalogEntry[]
   >([])
-  const [defaultAccountRef, setDefaultAccountRef] = useState("")
-  const [defaultModelName, setDefaultModelName] = useState("")
   const [configRevision, setConfigRevision] = useState("")
-  const [draftAccountRef, setDraftAccountRef] = useState("")
-  const [draftModelName, setDraftModelName] = useState("")
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState("")
   const [deletingModel, setDeletingModel] = useState<ModelInfo | null>(null)
@@ -68,10 +52,6 @@ export function ModelsPage() {
   )
   const [routerOpen, setRouterOpen] = useState(false)
   const [editingRouter, setEditingRouter] = useState<ModelInfo | null>(null)
-  const [settingDefaultIndex, setSettingDefaultIndex] = useState<number | null>(
-    null,
-  )
-  const [savingDefaultSelection, setSavingDefaultSelection] = useState(false)
 
   const fetchModels = useCallback(async () => {
     setLoading(true)
@@ -88,11 +68,7 @@ export function ModelsPage() {
       )
       setModelAliases(data.model_aliases ?? [])
       setModelAliasCatalog(data.model_alias_catalog ?? [])
-      setDefaultAccountRef(data.default_account_ref ?? "")
-      setDefaultModelName(data.default_model ?? "")
       setConfigRevision(data.revision ?? "")
-      setDraftAccountRef(data.default_account_ref ?? "")
-      setDraftModelName(data.default_model ?? "")
       setFetchError("")
     } catch (e) {
       setFetchError(e instanceof Error ? e.message : t("models.loadError"))
@@ -126,30 +102,6 @@ export function ModelsPage() {
       ].sort((a, b) => a.localeCompare(b)),
     [models],
   )
-  const selectableAccountRefs = useMemo(
-    () =>
-      [
-        ...new Set(
-          models
-            .filter(
-              (model) => model.enabled !== false && !isModelRouterModel(model),
-            )
-            .map((model) => model.model_name.trim())
-            .filter(Boolean),
-        ),
-      ].sort((a, b) => a.localeCompare(b)),
-    [models],
-  )
-  const selectableModelNames = useMemo(
-    () => [
-      ...modelAliases.map((alias) => alias.name),
-      ...models
-        .filter((model) => isModelRouterModel(model) && model.enabled !== false)
-        .map((model) => model.model_name)
-        .filter((name) => !modelAliases.some((alias) => alias.name === name)),
-    ],
-    [modelAliases, models],
-  )
   const editingAlias =
     editingAliasIndex == null
       ? presetAliasName
@@ -160,8 +112,6 @@ export function ModelsPage() {
     deletingAliasIndex == null
       ? null
       : (modelAliases[deletingAliasIndex] ?? null)
-  const defaultSelectionChanged =
-    draftAccountRef !== defaultAccountRef || draftModelName !== defaultModelName
   const catalogAliasNames = useMemo(
     () => new Set(modelAliasCatalog.map((entry) => entry.name)),
     [modelAliasCatalog],
@@ -191,11 +141,6 @@ export function ModelsPage() {
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
             <h3 className="truncate text-sm font-semibold">{name}</h3>
-            {name === defaultModelName && (
-              <span className="bg-primary/10 text-primary rounded px-1.5 py-0.5 text-[10px] font-medium">
-                {t("models.badge.default")}
-              </span>
-            )}
           </div>
           {description && (
             <p className="text-muted-foreground mt-1 text-xs">{description}</p>
@@ -232,17 +177,9 @@ export function ModelsPage() {
             <Button
               size="icon-sm"
               variant="ghost"
-              disabled={name === defaultModelName}
               onClick={() => setDeletingAliasIndex(index)}
               aria-label={t("models.alias.delete", "Delete model alias")}
-              title={
-                name === defaultModelName
-                  ? t(
-                      "models.alias.deleteDefault",
-                      "Change the runtime model alias before deleting it.",
-                    )
-                  : t("models.alias.delete", "Delete model alias")
-              }
+              title={t("models.alias.delete", "Delete model alias")}
               className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
             >
               <IconTrash className="size-4" />
@@ -290,52 +227,9 @@ export function ModelsPage() {
     </article>
   )
 
-  const handleSetDefault = async (model: ModelInfo) => {
-    if (!isModelRouterModel(model) || model.model_name === defaultModelName)
-      return
-    setSettingDefaultIndex(model.index)
-    try {
-      await setDefaultModelAlias(model.model_name)
-      await fetchModels()
-      const gateway = await refreshGatewayState({ force: true })
-      showSaveSuccessOrRestartToast(
-        t,
-        t("models.defaultChangeSuccess"),
-        model.model_name,
-        gateway?.restartRequired === true,
-      )
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : t("models.loadError"))
-    } finally {
-      setSettingDefaultIndex(null)
-    }
-  }
-
   const handleEdit = (model: ModelInfo) => {
     setEditingRouter(model)
     setRouterOpen(true)
-  }
-
-  const handleSaveDefaultSelection = async () => {
-    if (!draftAccountRef || !draftModelName || !defaultSelectionChanged) return
-    setSavingDefaultSelection(true)
-    try {
-      await setDefaultSelection(draftAccountRef, draftModelName)
-      await fetchModels()
-      const gateway = await refreshGatewayState({ force: true })
-      showSaveSuccessOrRestartToast(
-        t,
-        t("models.defaultChangeSuccess"),
-        `${draftAccountRef} / ${draftModelName}`,
-        gateway?.restartRequired === true,
-      )
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : t("models.loadError"),
-      )
-    } finally {
-      setSavingDefaultSelection(false)
-    }
   }
 
   return (
@@ -380,98 +274,6 @@ export function ModelsPage() {
 
         {!loading && !fetchError && (
           <div className="mt-4 space-y-7">
-            <section className="border-border bg-card rounded-xl border p-4">
-              <div className="flex flex-col gap-4 lg:flex-row lg:items-end">
-                <div className="min-w-0 flex-1">
-                  <h2 className="text-sm font-semibold">
-                    {t("models.defaultSelection.title", "Runtime selection")}
-                  </h2>
-                  <p className="text-muted-foreground mt-1 text-xs">
-                    {defaultAccountRef && defaultModelName
-                      ? t(
-                          "models.defaultSelection.current",
-                          "Active: {{account}} / {{alias}}",
-                          {
-                            account: defaultAccountRef,
-                            alias: defaultModelName,
-                          },
-                        )
-                      : t(
-                          "models.defaultSelection.none",
-                          "No runtime model configured. Choose both an account and a model alias.",
-                        )}
-                  </p>
-                </div>
-                <div className="grid min-w-0 flex-[2] gap-2 sm:grid-cols-2 lg:max-w-2xl">
-                  <Select
-                    value={draftAccountRef}
-                    onValueChange={setDraftAccountRef}
-                  >
-                    <SelectTrigger
-                      aria-label={t(
-                        "models.defaultSelection.account",
-                        "Runtime account",
-                      )}
-                    >
-                      <SelectValue
-                        placeholder={t(
-                          "models.defaultSelection.selectAccount",
-                          "Select account",
-                        )}
-                      />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {selectableAccountRefs.map((accountRef) => (
-                        <SelectItem key={accountRef} value={accountRef}>
-                          {accountRef}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Select
-                    value={draftModelName}
-                    onValueChange={setDraftModelName}
-                  >
-                    <SelectTrigger
-                      aria-label={t(
-                        "models.defaultSelection.alias",
-                        "Runtime model alias",
-                      )}
-                    >
-                      <SelectValue
-                        placeholder={t(
-                          "models.defaultSelection.selectAlias",
-                          "Select model alias",
-                        )}
-                      />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {selectableModelNames.map((name) => (
-                        <SelectItem key={name} value={name}>
-                          {name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <Button
-                  size="sm"
-                  onClick={() => void handleSaveDefaultSelection()}
-                  disabled={
-                    savingDefaultSelection ||
-                    !draftAccountRef ||
-                    !draftModelName ||
-                    !defaultSelectionChanged
-                  }
-                >
-                  {savingDefaultSelection && (
-                    <IconLoader2 className="size-4 animate-spin" />
-                  )}
-                  {t("models.defaultSelection.save", "Apply selection")}
-                </Button>
-              </div>
-            </section>
-
             <section>
               <div>
                 <h2 className="text-sm font-semibold">
@@ -544,11 +346,7 @@ export function ModelsPage() {
                       key={`${model.index}-${model.model_name}`}
                       model={model}
                       onEdit={handleEdit}
-                      onSetDefault={(item) => void handleSetDefault(item)}
                       onDelete={setDeletingModel}
-                      settingDefault={settingDefaultIndex === model.index}
-                      defaultChangePending={settingDefaultIndex !== null}
-                      isDefault={model.model_name === defaultModelName}
                     />
                   ))}
                 </div>
@@ -564,7 +362,6 @@ export function ModelsPage() {
         revision={configRevision}
         models={models}
         modelAliases={modelAliases}
-        defaultModelName={defaultModelName}
         onClose={() => {
           setRouterOpen(false)
           setEditingRouter(null)

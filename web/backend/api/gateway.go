@@ -380,7 +380,11 @@ func (h *Handler) gatewayStartReady() (bool, string, error) {
 
 	modelAlias := strings.TrimSpace(cfg.Agents.Defaults.GetModelName())
 	if modelAlias == "" {
-		return false, config.ErrNoModelConfigured.Error(), nil
+		// The launcher starts the child with --allow-empty. Keep the gateway
+		// available for configuration and non-LLM services; individual model
+		// requests will fail explicitly until their execution context supplies
+		// a configured alias.
+		return true, "", nil
 	}
 	accountRef := strings.TrimSpace(cfg.Agents.Defaults.AccountRef)
 	if accountRef == "" {

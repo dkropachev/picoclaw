@@ -3690,18 +3690,18 @@ test("accounts page lists registered accounts and opens onboarding", async ({
   expect(errors).toEqual([])
 })
 
-test("models page exposes explicit runtime selection and editable model aliases", async ({
+test("models page exposes editable model aliases without global runtime selection", async ({
   page,
 }) => {
   const errors = collectPageErrors(page)
   await gotoMockedRoute(page, "/models")
 
-  const runtimeSection = page.locator("section").filter({
-    has: page.getByRole("heading", { name: "Runtime selection" }),
-  })
   await expect(
-    runtimeSection.getByText("Active: gpt-4o-mini / code"),
-  ).toBeVisible()
+    page.getByRole("heading", { name: "Runtime selection" }),
+  ).toHaveCount(0)
+  await expect(
+    page.getByRole("heading", { name: "Provider accounts" }),
+  ).toHaveCount(0)
 
   const aliasSection = page.locator("section").filter({
     has: page.getByRole("heading", { name: "Developer aliases" }),

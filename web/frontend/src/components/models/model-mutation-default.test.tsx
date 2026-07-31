@@ -155,7 +155,6 @@ describe("atomic model default mutations", () => {
         revision="revision-7"
         models={[routerModel]}
         modelAliases={[{ name: "coding", model: "openai/gpt-5.4" }]}
-        defaultModelName="task-router"
         onSaved={onSaved}
         onClose={onClose}
       />,
@@ -170,8 +169,10 @@ describe("atomic model default mutations", () => {
       expect.objectContaining({
         model_name: "task-router",
         provider: "model-router",
-        set_as_default: true,
       }),
+    )
+    expect(mockedUpdateModel.mock.calls[0]?.[2]).not.toHaveProperty(
+      "set_as_default",
     )
     expect(mockedSetDefaultModelAlias).not.toHaveBeenCalled()
     expect(onSaved).toHaveBeenCalledTimes(1)

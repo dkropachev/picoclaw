@@ -474,7 +474,7 @@ func TestAttachToGatewayUsesUnknownRuntimeSignatureBaseline(t *testing.T) {
 	}
 }
 
-func TestGatewayStartReady_NoDefaultModel(t *testing.T) {
+func TestGatewayStartReady_AllowsMissingModelInLimitedMode(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	h := NewHandler(configPath)
 
@@ -482,22 +482,19 @@ func TestGatewayStartReady_NoDefaultModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gatewayStartReady() error = %v", err)
 	}
-	if ready {
-		t.Fatalf("gatewayStartReady() ready = true, want false")
+	if !ready {
+		t.Fatalf("gatewayStartReady() ready = false, want true")
 	}
-	if reason != "no model configured" {
-		t.Fatalf("gatewayStartReady() reason = %q, want %q", reason, "no model configured")
+	if reason != "" {
+		t.Fatalf("gatewayStartReady() reason = %q, want empty", reason)
 	}
 }
 
-func TestTryAutoStartGatewayRejectsInvalidSelectionWithoutLaunching(t *testing.T) {
+func TestTryAutoStartGatewayRejectsMalformedConfigWithoutLaunching(t *testing.T) {
 	tests := []struct {
 		name        string
 		writeConfig func(*testing.T, string)
 	}{
-		{
-			name: "no model configured",
-		},
 		{
 			name: "malformed config",
 			writeConfig: func(t *testing.T, path string) {
@@ -527,7 +524,7 @@ func TestTryAutoStartGatewayRejectsInvalidSelectionWithoutLaunching(t *testing.T
 			h.TryAutoStartGateway()
 
 			if launched {
-				t.Fatal("TryAutoStartGateway() launched a process with an invalid model selection")
+				t.Fatal("TryAutoStartGateway() launched a process with malformed config")
 			}
 			gateway.mu.Lock()
 			cmd := gateway.cmd
@@ -543,47 +540,40 @@ func TestTryAutoStartGatewayRejectsInvalidSelectionWithoutLaunching(t *testing.T
 	}
 }
 
-func TestHandleGatewayStartReportsMissingModelWithoutLaunching(t *testing.T) {
+func TestHandleGatewayStartAllowsMissingModel(t *testing.T) {
 	resetGatewayTestState(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	h := NewHandler(configPath)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
-	launched := false
+	var child *exec.Cmd
 	gatewayExecCommand = func(_ string, _ ...string) *exec.Cmd {
-		launched = true
-		return exec.Command(os.Args[0])
+		child = exec.Command("sleep", "30")
+		return child
 	}
-	process, err := os.FindProcess(os.Getpid())
-	if err != nil {
-		t.Fatalf("FindProcess() error = %v", err)
-	}
-	gateway.mu.Lock()
-	gateway.cmd = &exec.Cmd{Process: process}
-	setGatewayRuntimeStatusLocked("running")
-	gateway.mu.Unlock()
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/gateway/start", nil)
 	mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	var body map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
-	if got := body["status"]; got != "precondition_failed" {
-		t.Fatalf("status = %#v, want precondition_failed", got)
+	if got := body["status"]; got != "ok" {
+		t.Fatalf("status = %#v, want ok", got)
 	}
-	if got := body["message"]; got != config.ErrNoModelConfigured.Error() {
-		t.Fatalf("message = %#v, want %q", got, config.ErrNoModelConfigured)
+	if child == nil || child.Process == nil {
+		t.Fatal("POST /api/gateway/start did not launch the limited-mode gateway")
 	}
-	if launched {
-		t.Fatal("POST /api/gateway/start launched a process without a configured model")
+	if err := child.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("Kill() error = %v", err)
 	}
+	_, _ = child.Process.Wait()
 }
 
 func TestGatewayStartReadyResolvesAccountAndModelRouters(t *testing.T) {
@@ -1074,7 +1064,7 @@ func TestGatewayStartReady_OAuthModelRequiresStoredCredential(t *testing.T) {
 	}
 }
 
-func TestGatewayStatusIncludesStartConditionWhenNotReady(t *testing.T) {
+func TestGatewayStatusAllowsLimitedModeWithoutModel(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	h := NewHandler(configPath)
 	mux := http.NewServeMux()
@@ -1097,11 +1087,11 @@ func TestGatewayStatusIncludesStartConditionWhenNotReady(t *testing.T) {
 	if !ok {
 		t.Fatalf("gateway_start_allowed missing or not bool: %#v", body["gateway_start_allowed"])
 	}
-	if allowed {
-		t.Fatalf("gateway_start_allowed = true, want false")
+	if !allowed {
+		t.Fatalf("gateway_start_allowed = false, want true")
 	}
-	if _, ok := body["gateway_start_reason"].(string); !ok {
-		t.Fatalf("gateway_start_reason missing or not string: %#v", body["gateway_start_reason"])
+	if reason, ok := body["gateway_start_reason"]; ok {
+		t.Fatalf("gateway_start_reason = %#v, want omitted", reason)
 	}
 }
 
