@@ -80,12 +80,12 @@ const modelResponse = {
           {
             id: "code-gpt-4o",
             type: "model",
-            model: "gpt-4o",
+            model: "code",
           },
           {
             id: "default-gpt-4o-mini",
             type: "model",
-            model: "gpt-4o-mini",
+            model: "fast",
           },
         ],
       },
@@ -93,7 +93,7 @@ const modelResponse = {
   ],
   model_aliases: [
     {
-      name: "coding",
+      name: "code",
       model: "gpt-4o-mini",
       account_overrides: {
         "gpt-4o": "gpt-4o",
@@ -104,9 +104,32 @@ const modelResponse = {
       model: "gpt-4o-mini",
     },
   ],
+  model_alias_catalog: [
+    {
+      name: "chat",
+      description: "General discussion, planning, and technical writing.",
+    },
+    {
+      name: "code",
+      description: "Implementation, refactoring, debugging, and tests.",
+    },
+    {
+      name: "investigate",
+      description: "Deep research, root-cause analysis, and unfamiliar code.",
+    },
+    {
+      name: "review",
+      description: "Correctness, maintainability, and security review.",
+    },
+    {
+      name: "fast",
+      description:
+        "Low-latency summaries, classification, and routine automation.",
+    },
+  ],
   total: 3,
   default_account_ref: "gpt-4o-mini",
-  default_model: "coding",
+  default_model: "code",
   provider_options: [
     {
       id: "openai",
@@ -1047,7 +1070,7 @@ async function mockLauncherApis(
       workspace: "/workspace/reviewer",
       account_ref: "gpt-4o",
       model: {
-        primary: "coding",
+        primary: "code",
         fallbacks: [],
       },
       skills: ["review-helper"],
@@ -2956,7 +2979,7 @@ test("agent management completes a stateful policy lifecycle with exact revision
   await createSheet
     .getByRole("combobox", { name: "Primary model alias" })
     .click()
-  await page.getByRole("option", { name: "coding", exact: true }).click()
+  await page.getByRole("option", { name: "code", exact: true }).click()
   await createSheet
     .getByRole("combobox", { name: "Fallback alias policy" })
     .click()
@@ -3003,7 +3026,7 @@ test("agent management completes a stateful policy lifecycle with exact revision
           name: "Triager",
           workspace: "",
           account_ref: "gpt-4o",
-          model: { primary: "coding", fallbacks: ["fast"] },
+          model: { primary: "code", fallbacks: ["fast"] },
           skills: null,
           subagents: null,
         },
@@ -3019,7 +3042,7 @@ test("agent management completes a stateful policy lifecycle with exact revision
           name: "Triager",
           workspace: "",
           account_ref: "gpt-4o",
-          model: { primary: "coding", fallbacks: [] },
+          model: { primary: "code", fallbacks: [] },
           skills: null,
           subagents: null,
         },
@@ -3670,24 +3693,31 @@ test("models page exposes strict defaults and editable model aliases", async ({
     has: page.getByRole("heading", { name: "Default selection" }),
   })
   await expect(
-    defaultSection.getByText("Current: gpt-4o-mini / coding"),
+    defaultSection.getByText("Current: gpt-4o-mini / code"),
   ).toBeVisible()
 
   const aliasSection = page.locator("section").filter({
-    has: page.getByRole("heading", { name: "Model aliases" }),
+    has: page.getByRole("heading", { name: "Developer aliases" }),
   })
   const codingAlias = aliasSection.locator("article").filter({
-    has: page.getByRole("heading", { name: "coding" }),
+    has: page.getByRole("heading", { name: "code" }),
   })
-  await expect(
-    codingAlias.getByRole("heading", { name: "coding" }),
-  ).toBeVisible()
+  await expect(codingAlias.getByRole("heading", { name: "code" })).toBeVisible()
   await expect(codingAlias.getByText("gpt-4o-mini")).toBeVisible()
+  const investigateAlias = aliasSection.locator("article").filter({
+    has: page.getByRole("heading", { name: "investigate" }),
+  })
+  await expect(investigateAlias.getByText("Not configured")).toBeVisible()
+  await expect(
+    investigateAlias.getByText(
+      "Deep research, root-cause analysis, and unfamiliar code.",
+    ),
+  ).toBeVisible()
   await codingAlias.getByRole("button", { name: "Edit model alias" }).click()
 
   const editor = page.getByRole("dialog", { name: "Edit model alias" })
   await expect(editor).toBeVisible()
-  await expect(editor.getByRole("textbox").first()).toHaveValue("coding")
+  await expect(editor.getByRole("textbox").first()).toHaveValue("code")
   await expect(editor.getByRole("textbox").first()).toBeDisabled()
   await expect(
     editor.getByText(

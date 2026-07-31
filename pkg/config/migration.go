@@ -609,6 +609,214 @@ func migrateV3ToV4(m map[string]any) error {
 	return nil
 }
 
+// migrateV4ToV5 removes aliases that v3 migration mechanically derived from
+// account names or concrete model IDs. Those values expose provider details
+// and do not describe a stable task role. Explicit custom aliases survive.
+// Legacy web-search aliases are normalized to the predefined investigate role
+// when that role is still available. Removed references are cleared instead of
+// guessing a replacement model.
+func migrateV4ToV5(m map[string]any) error {
+	if !compareInt(m["version"], 4) {
+		return fmt.Errorf("migrateV4ToV5: expected version 4, got %v", m["version"])
+	}
+
+	accounts := make([]legacyV3ModelAccount, 0)
+	if modelList, ok := m["model_list"].([]any); ok {
+		for _, item := range modelList {
+			model, ok := item.(map[string]any)
+			if !ok || migrationModelIsRouter(model) {
+				continue
+			}
+			name, _ := model["model_name"].(string)
+			concreteModel, _ := model["model"].(string)
+			provider, _ := model["provider"].(string)
+			if strings.TrimSpace(name) == "" || strings.TrimSpace(concreteModel) == "" {
+				continue
+			}
+			accounts = append(accounts, legacyV3ModelAccount{
+				name:     strings.TrimSpace(name),
+				provider: strings.TrimSpace(provider),
+				model:    strings.TrimSpace(concreteModel),
+			})
+		}
+	}
+
+	aliases, _ := m["model_aliases"].([]any)
+	investigateTaken := false
+	for _, item := range aliases {
+		alias, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := alias["name"].(string)
+		investigateTaken = investigateTaken || strings.TrimSpace(name) == "investigate"
+	}
+
+	rewrites := make(map[string]string)
+	retained := make([]any, 0, len(aliases))
+	for _, item := range aliases {
+		alias, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := alias["name"].(string)
+		model, _ := alias["model"].(string)
+		name = strings.TrimSpace(name)
+		model = strings.TrimSpace(model)
+		if name == "" {
+			continue
+		}
+
+		if !investigateTaken && strings.HasPrefix(name, "web-search-") {
+			alias["name"] = "investigate"
+			rewrites[name] = "investigate"
+			investigateTaken = true
+			retained = append(retained, alias)
+			continue
+		}
+
+		generated := false
+		if !IsDeveloperModelAlias(name) {
+			for _, account := range accounts {
+				if account.model == model && legacyV3AccountMatchesModelRef(account, name) {
+					generated = true
+					break
+				}
+			}
+		}
+		if generated {
+			rewrites[name] = ""
+			continue
+		}
+		retained = append(retained, alias)
+	}
+	m["model_aliases"] = retained
+	migrationRewriteModelAliasReferences(m, rewrites)
+	m["version"] = 5
+	return nil
+}
+
+func migrationRewriteModelAliasReferences(m map[string]any, rewrites map[string]string) {
+	if len(rewrites) == 0 {
+		return
+	}
+	rewriteField := func(container map[string]any, field string) {
+		value, ok := container[field].(string)
+		if !ok {
+			return
+		}
+		if replacement, found := rewrites[strings.TrimSpace(value)]; found {
+			container[field] = replacement
+		}
+	}
+	rewriteList := func(container map[string]any, field string) {
+		values, ok := container[field].([]any)
+		if !ok {
+			return
+		}
+		out := make([]any, 0, len(values))
+		for _, value := range values {
+			name, ok := value.(string)
+			if !ok {
+				continue
+			}
+			if replacement, found := rewrites[strings.TrimSpace(name)]; found {
+				if replacement != "" {
+					out = append(out, replacement)
+				}
+				continue
+			}
+			out = append(out, name)
+		}
+		container[field] = out
+	}
+	rewritePolicy := func(container map[string]any, field string) {
+		switch policy := container[field].(type) {
+		case string:
+			rewriteField(container, field)
+		case map[string]any:
+			rewriteField(policy, "primary")
+			rewriteList(policy, "fallbacks")
+		}
+	}
+
+	if agents, ok := m["agents"].(map[string]any); ok {
+		if defaults, ok := agents["defaults"].(map[string]any); ok {
+			rewriteField(defaults, "model_name")
+			rewriteList(defaults, "model_fallbacks")
+			rewriteField(defaults, "image_model")
+			rewriteList(defaults, "image_model_fallbacks")
+			if routing, ok := defaults["routing"].(map[string]any); ok {
+				rewriteField(routing, "light_model")
+			}
+		}
+		if list, ok := agents["list"].([]any); ok {
+			for _, value := range list {
+				agent, ok := value.(map[string]any)
+				if !ok {
+					continue
+				}
+				rewritePolicy(agent, "model")
+				if subagents, ok := agent["subagents"].(map[string]any); ok {
+					rewritePolicy(subagents, "model")
+				}
+			}
+		}
+	}
+	if voice, ok := m["voice"].(map[string]any); ok {
+		rewriteField(voice, "model_name")
+		rewriteField(voice, "tts_model_name")
+	}
+	if tools, ok := m["tools"].(map[string]any); ok {
+		if web, ok := tools["web"].(map[string]any); ok {
+			if gemini, ok := web["gemini"].(map[string]any); ok {
+				rewriteField(gemini, "model_alias")
+			}
+			if perplexity, ok := web["perplexity"].(map[string]any); ok {
+				rewriteField(perplexity, "model_alias")
+			}
+		}
+	}
+	if modelList, ok := m["model_list"].([]any); ok {
+		for _, value := range modelList {
+			if model, ok := value.(map[string]any); ok {
+				rewriteField(model, "subscription_equivalent_model")
+			}
+		}
+	}
+	if routers, ok := m["model_routers"].([]any); ok {
+		retainedRouters := make([]any, 0, len(routers))
+		removedRouters := make(map[string]string)
+		for _, value := range routers {
+			router, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			valid := true
+			if blocks, ok := router["blocks"].([]any); ok {
+				for _, blockValue := range blocks {
+					block, ok := blockValue.(map[string]any)
+					if !ok {
+						continue
+					}
+					rewriteField(block, "model")
+					if blockType, _ := block["type"].(string); blockType == ModelRouterBlockTypeModel {
+						model, _ := block["model"].(string)
+						valid = valid && strings.TrimSpace(model) != ""
+					}
+				}
+			}
+			if valid {
+				retainedRouters = append(retainedRouters, router)
+			} else if name, _ := router["name"].(string); strings.TrimSpace(name) != "" {
+				removedRouters[strings.TrimSpace(name)] = ""
+			}
+		}
+		m["model_routers"] = retainedRouters
+		migrationRewriteModelAliasReferences(m, removedRouters)
+	}
+}
+
 func legacyV3ModelReferences(m map[string]any) []string {
 	refs := make([]string, 0)
 	addString := func(value any) {

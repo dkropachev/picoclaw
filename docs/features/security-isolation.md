@@ -23,6 +23,11 @@ path. Current configuration also separates non-secret model aliases from
 provider accounts, validates every reachable account-and-alias combination,
 and revision-fences whole-config mutations so neither a missing model nor a
 stale writer can silently delegate behavior to a provider default.
+Schema v5 removes aliases mechanically derived from account names or concrete
+model IDs, clears their references rather than guessing replacements, and
+normalizes an unambiguous legacy web-search mapping to the semantic
+`investigate` role. Explicit custom aliases and configured predefined roles are
+preserved.
 
 ## Reconstruction Notes
 

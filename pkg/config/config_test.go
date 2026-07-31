@@ -741,7 +741,7 @@ func TestLoadConfig_EvolutionEnabledWithoutModeUsesObserveSemantics(t *testing.T
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	raw := `{
-		"version": 4,
+		"version": 5,
 		"evolution": {
 			"enabled": true
 		}
@@ -766,7 +766,7 @@ func TestLoadConfig_EvolutionExplicitApplyModeAutoApplies(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
 	raw := `{
-		"version": 4,
+		"version": 5,
 		"evolution": {
 			"enabled": true,
 			"mode": "apply"

@@ -462,7 +462,7 @@ func TestValidateModelSelectionsChecksInheritedAgentModelsAgainstAgentAccount(t 
 func TestLoadConfigValidatesModelSelectionsAfterMaterialization(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	require.NoError(t, os.WriteFile(path, []byte(`{
-		"version": 4,
+		"version": 5,
 		"agents": {
 			"defaults": {
 				"account_ref": "account",
@@ -494,7 +494,7 @@ func TestLoadConfigRejectsProviderIncompatibleReachableAccountRouterPair(t *test
 				`"` + override + `"}`
 		}
 		require.NoError(t, os.WriteFile(path, []byte(`{
-			"version": 4,
+			"version": 5,
 			"agents": {
 				"defaults": {
 					"account_ref": "router-1",
@@ -538,7 +538,7 @@ func TestLoadConfigRejectsProviderIncompatibleReachableAccountRouterPair(t *test
 func TestLoadConfigRejectsUnknownSubscriptionEquivalentAlias(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	require.NoError(t, os.WriteFile(path, []byte(`{
-		"version": 4,
+		"version": 5,
 		"model_list": [{
 			"model_name": "account",
 			"provider": "openai",

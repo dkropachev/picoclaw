@@ -12,6 +12,7 @@ import { toast } from "sonner"
 
 import {
   type ModelAlias,
+  type ModelAliasCatalogEntry,
   type ModelInfo,
   type ModelProviderOption,
   getModels,
@@ -58,6 +59,9 @@ export function ModelsPage() {
   const { t } = useTranslation()
   const [models, setModels] = useState<ModelInfo[]>([])
   const [modelAliases, setModelAliases] = useState<ModelAlias[]>([])
+  const [modelAliasCatalog, setModelAliasCatalog] = useState<
+    ModelAliasCatalogEntry[]
+  >([])
   const [defaultAccountRef, setDefaultAccountRef] = useState("")
   const [defaultModelName, setDefaultModelName] = useState("")
   const [configRevision, setConfigRevision] = useState("")
@@ -76,6 +80,7 @@ export function ModelsPage() {
   const [editingAliasIndex, setEditingAliasIndex] = useState<number | null>(
     null,
   )
+  const [presetAliasName, setPresetAliasName] = useState("")
   const [deletingAliasIndex, setDeletingAliasIndex] = useState<number | null>(
     null,
   )
@@ -100,6 +105,7 @@ export function ModelsPage() {
         }),
       )
       setModelAliases(data.model_aliases ?? [])
+      setModelAliasCatalog(data.model_alias_catalog ?? [])
       setDefaultAccountRef(data.default_account_ref ?? "")
       setDefaultModelName(data.default_model ?? "")
       setConfigRevision(data.revision ?? "")
@@ -159,13 +165,128 @@ export function ModelsPage() {
     [modelAliases, models],
   )
   const editingAlias =
-    editingAliasIndex == null ? null : (modelAliases[editingAliasIndex] ?? null)
+    editingAliasIndex == null
+      ? presetAliasName
+        ? { name: presetAliasName, model: "" }
+        : null
+      : (modelAliases[editingAliasIndex] ?? null)
   const deletingAlias =
     deletingAliasIndex == null
       ? null
       : (modelAliases[deletingAliasIndex] ?? null)
   const defaultSelectionChanged =
     draftAccountRef !== defaultAccountRef || draftModelName !== defaultModelName
+  const catalogAliasNames = useMemo(
+    () => new Set(modelAliasCatalog.map((entry) => entry.name)),
+    [modelAliasCatalog],
+  )
+  const customAliases = useMemo(
+    () =>
+      modelAliases
+        .map((alias, index) => ({ alias, index }))
+        .filter(({ alias }) => !catalogAliasNames.has(alias.name)),
+    [catalogAliasNames, modelAliases],
+  )
+
+  const openAliasEditor = (index: number | null, presetName = "") => {
+    setEditingAliasIndex(index)
+    setPresetAliasName(presetName)
+    setAliasOpen(true)
+  }
+
+  const renderAliasCard = (
+    name: string,
+    description: string,
+    alias: ModelAlias | null,
+    index: number | null,
+  ) => (
+    <article key={name} className="border-border bg-card rounded-xl border p-4">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <h3 className="truncate text-sm font-semibold">{name}</h3>
+            {name === defaultModelName && (
+              <span className="bg-primary/10 text-primary rounded px-1.5 py-0.5 text-[10px] font-medium">
+                {t("models.badge.default")}
+              </span>
+            )}
+          </div>
+          {description && (
+            <p className="text-muted-foreground mt-1 text-xs">{description}</p>
+          )}
+          <p
+            className={`mt-2 truncate font-mono text-xs ${
+              alias ? "text-foreground" : "text-muted-foreground"
+            }`}
+          >
+            {alias?.model || t("models.alias.notConfigured", "Not configured")}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            onClick={() =>
+              openAliasEditor(index, catalogAliasNames.has(name) ? name : "")
+            }
+            aria-label={
+              alias
+                ? t("models.alias.edit", "Edit model alias")
+                : t("models.alias.configure", "Configure model alias")
+            }
+            title={
+              alias
+                ? t("models.alias.edit", "Edit model alias")
+                : t("models.alias.configure", "Configure model alias")
+            }
+          >
+            <IconEdit className="size-4" />
+          </Button>
+          {alias && index != null && (
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              disabled={name === defaultModelName}
+              onClick={() => setDeletingAliasIndex(index)}
+              aria-label={t("models.alias.delete", "Delete model alias")}
+              title={
+                name === defaultModelName
+                  ? t(
+                      "models.alias.deleteDefault",
+                      "Change the default alias before deleting it.",
+                    )
+                  : t("models.alias.delete", "Delete model alias")
+              }
+              className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+            >
+              <IconTrash className="size-4" />
+            </Button>
+          )}
+        </div>
+      </div>
+      {alias && (
+        <div className="mt-3 space-y-1.5">
+          {Object.entries(alias.account_overrides ?? {}).map(
+            ([accountRef, overrideModel]) => (
+              <div
+                key={accountRef}
+                className="bg-muted/60 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-1 rounded px-2 py-1 font-mono text-[11px]"
+              >
+                <span className="truncate">{accountRef}</span>
+                <span className="text-muted-foreground">→</span>
+                <span className="truncate text-right">{overrideModel}</span>
+              </div>
+            ),
+          )}
+          {Object.keys(alias.account_overrides ?? {}).length === 0 && (
+            <p className="text-muted-foreground text-xs">
+              {t("models.alias.baseForAll", "Base model for every account")}
+            </p>
+          )}
+        </div>
+      )}
+    </article>
+  )
 
   const handleSetDefault = async (model: ModelInfo) => {
     const modelIsDefault = isModelRouterModel(model)
@@ -378,129 +499,65 @@ export function ModelsPage() {
             </section>
 
             <section>
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h2 className="text-sm font-semibold">
-                    {t("models.alias.title", "Model aliases")}
-                  </h2>
-                  <p className="text-muted-foreground mt-1 text-xs">
-                    {t(
-                      "models.alias.sectionDescription",
-                      "Stable names resolve to exact models, with optional per-account overrides.",
-                    )}
-                  </p>
-                </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    setEditingAliasIndex(null)
-                    setAliasOpen(true)
-                  }}
-                >
-                  <IconPlus className="size-4" />
-                  {t("models.alias.add", "Add alias")}
-                </Button>
+              <div>
+                <h2 className="text-sm font-semibold">
+                  {t("models.alias.developerTitle", "Developer aliases")}
+                </h2>
+                <p className="text-muted-foreground mt-1 text-xs">
+                  {t(
+                    "models.alias.developerDescription",
+                    "Stable task roles used by chat, agents, and workflows. Assign models explicitly; no role has an implicit default.",
+                  )}
+                </p>
               </div>
 
               <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {modelAliases.map((alias, index) => (
-                  <article
-                    key={alias.name}
-                    className="border-border bg-card rounded-xl border p-4"
+                {modelAliasCatalog.map((entry) => {
+                  const index = modelAliases.findIndex(
+                    (alias) => alias.name === entry.name,
+                  )
+                  return renderAliasCard(
+                    entry.name,
+                    entry.description,
+                    index >= 0 ? modelAliases[index] : null,
+                    index >= 0 ? index : null,
+                  )
+                })}
+              </div>
+            </section>
+
+            {(customAliases.length > 0 || modelAliasCatalog.length > 0) && (
+              <section>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold">
+                      {t("models.alias.customTitle", "Custom aliases")}
+                    </h2>
+                    <p className="text-muted-foreground mt-1 text-xs">
+                      {t(
+                        "models.alias.customDescription",
+                        "Optional specialized roles for capabilities outside the standard developer set.",
+                      )}
+                    </p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => openAliasEditor(null)}
                   >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="flex min-w-0 items-center gap-2">
-                          <h3 className="truncate text-sm font-semibold">
-                            {alias.name}
-                          </h3>
-                          {alias.name === defaultModelName && (
-                            <span className="bg-primary/10 text-primary rounded px-1.5 py-0.5 text-[10px] font-medium">
-                              {t("models.badge.default")}
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-muted-foreground mt-1 truncate font-mono text-xs">
-                          {alias.model}
-                        </p>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-1">
-                        <Button
-                          size="icon-sm"
-                          variant="ghost"
-                          onClick={() => {
-                            setEditingAliasIndex(index)
-                            setAliasOpen(true)
-                          }}
-                          aria-label={t(
-                            "models.alias.edit",
-                            "Edit model alias",
-                          )}
-                          title={t("models.alias.edit", "Edit model alias")}
-                        >
-                          <IconEdit className="size-4" />
-                        </Button>
-                        <Button
-                          size="icon-sm"
-                          variant="ghost"
-                          disabled={alias.name === defaultModelName}
-                          onClick={() => setDeletingAliasIndex(index)}
-                          aria-label={t(
-                            "models.alias.delete",
-                            "Delete model alias",
-                          )}
-                          title={
-                            alias.name === defaultModelName
-                              ? t(
-                                  "models.alias.deleteDefault",
-                                  "Change the default alias before deleting it.",
-                                )
-                              : t("models.alias.delete", "Delete model alias")
-                          }
-                          className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                        >
-                          <IconTrash className="size-4" />
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="mt-3 space-y-1.5">
-                      {Object.entries(alias.account_overrides ?? {}).map(
-                        ([accountRef, overrideModel]) => (
-                          <div
-                            key={accountRef}
-                            className="bg-muted/60 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-1 rounded px-2 py-1 font-mono text-[11px]"
-                          >
-                            <span className="truncate">{accountRef}</span>
-                            <span className="text-muted-foreground">→</span>
-                            <span className="truncate text-right">
-                              {overrideModel}
-                            </span>
-                          </div>
-                        ),
-                      )}
-                      {Object.keys(alias.account_overrides ?? {}).length ===
-                        0 && (
-                        <p className="text-muted-foreground text-xs">
-                          {t(
-                            "models.alias.baseForAll",
-                            "Base model for every account",
-                          )}
-                        </p>
-                      )}
-                    </div>
-                  </article>
-                ))}
-                {modelAliases.length === 0 && (
-                  <div className="border-border text-muted-foreground rounded-xl border border-dashed px-4 py-8 text-sm md:col-span-2 xl:col-span-3">
-                    {t(
-                      "models.alias.empty",
-                      "No model aliases configured. Chat and workflows will fail with “no model configured” until an alias is added and selected.",
+                    <IconPlus className="size-4" />
+                    {t("models.alias.add", "Add alias")}
+                  </Button>
+                </div>
+                {customAliases.length > 0 && (
+                  <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {customAliases.map(({ alias, index }) =>
+                      renderAliasCard(alias.name, "", alias, index),
                     )}
                   </div>
                 )}
-              </div>
-            </section>
+              </section>
+            )}
 
             <section>
               <h2 className="text-sm font-semibold">
@@ -578,12 +635,14 @@ export function ModelsPage() {
         open={aliasOpen}
         alias={editingAlias}
         aliasIndex={editingAliasIndex}
+        nameLocked={presetAliasName !== ""}
         revision={configRevision}
         existingNames={modelAliases.map((alias) => alias.name)}
         concreteAccountRefs={concreteAccountRefs}
         onClose={() => {
           setAliasOpen(false)
           setEditingAliasIndex(null)
+          setPresetAliasName("")
         }}
         onSaved={fetchModels}
       />

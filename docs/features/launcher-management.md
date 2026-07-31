@@ -20,6 +20,11 @@ boundaries.
 When gateway startup readiness fails, the shared dashboard shell keeps the
 gateway stopped and shows the reported reason with a direct model-configuration
 action instead of leaving the disabled lifecycle control as the only signal.
+Model management always exposes the predefined developer roles `chat`, `code`,
+`investigate`, `review`, and `fast`. These catalog entries carry no model
+mapping until the user configures one, so they provide stable vocabulary
+without restoring an implicit default model. Specialized custom aliases remain
+available separately from the developer catalog.
 
 ## Reconstruction Notes
 

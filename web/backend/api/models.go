@@ -443,6 +443,7 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"models":              models,
 		"model_aliases":       cfg.ModelAliases,
+		"model_alias_catalog": config.DeveloperModelAliasCatalog(),
 		"total":               len(models),
 		"default_account_ref": defaultAccountRef,
 		"default_model":       defaultModel,

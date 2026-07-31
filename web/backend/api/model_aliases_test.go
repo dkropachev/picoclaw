@@ -97,10 +97,11 @@ func TestListModelsIncludesAliasesAndSplitDefaultSelection(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
 	}
 	var response struct {
-		DefaultAccountRef string                    `json:"default_account_ref"`
-		DefaultModel      string                    `json:"default_model"`
-		Revision          string                    `json:"revision"`
-		ModelAliases      []config.ModelAliasConfig `json:"model_aliases"`
+		DefaultAccountRef string                          `json:"default_account_ref"`
+		DefaultModel      string                          `json:"default_model"`
+		Revision          string                          `json:"revision"`
+		ModelAliases      []config.ModelAliasConfig       `json:"model_aliases"`
+		ModelAliasCatalog []config.ModelAliasCatalogEntry `json:"model_alias_catalog"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
@@ -115,6 +116,11 @@ func TestListModelsIncludesAliasesAndSplitDefaultSelection(t *testing.T) {
 		response.ModelAliases[0].Name != "coding" ||
 		response.ModelAliases[0].Model != "gpt-5.4" {
 		t.Fatalf("model aliases = %#v", response.ModelAliases)
+	}
+	if len(response.ModelAliasCatalog) != 5 ||
+		response.ModelAliasCatalog[0].Name != "chat" ||
+		response.ModelAliasCatalog[1].Name != "code" {
+		t.Fatalf("model alias catalog = %#v", response.ModelAliasCatalog)
 	}
 }
 

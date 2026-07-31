@@ -31,6 +31,7 @@ interface ModelAliasSheetProps {
   open: boolean
   alias: ModelAlias | null
   aliasIndex: number | null
+  nameLocked?: boolean
   revision: string
   existingNames: string[]
   concreteAccountRefs: string[]
@@ -48,6 +49,7 @@ export function ModelAliasSheet({
   open,
   alias,
   aliasIndex,
+  nameLocked = false,
   revision,
   existingNames,
   concreteAccountRefs,
@@ -61,6 +63,7 @@ export function ModelAliasSheet({
   const [error, setError] = useState("")
   const [saving, setSaving] = useState(false)
   const isEdit = alias != null && aliasIndex != null
+  const lockName = isEdit || nameLocked
 
   useEffect(() => {
     if (!open) return
@@ -162,7 +165,9 @@ export function ModelAliasSheet({
           <SheetTitle>
             {isEdit
               ? t("models.alias.editTitle", "Edit model alias")
-              : t("models.alias.addTitle", "Add model alias")}
+              : nameLocked
+                ? t("models.alias.configureTitle", "Configure model alias")
+                : t("models.alias.addTitle", "Add model alias")}
           </SheetTitle>
           <SheetDescription>
             {t(
@@ -185,10 +190,10 @@ export function ModelAliasSheet({
           <Field
             label={t("models.alias.name", "Alias")}
             hint={
-              isEdit
+              lockName
                 ? t(
                     "models.alias.nameImmutable",
-                    "Alias names cannot be changed after creation.",
+                    "This stable role name cannot be changed.",
                   )
                 : t(
                     "models.alias.nameHint",
@@ -200,7 +205,7 @@ export function ModelAliasSheet({
             <Input
               value={name}
               onChange={(event) => setName(event.target.value)}
-              disabled={isEdit}
+              disabled={lockName}
               placeholder={t("models.alias.namePlaceholder", "coding")}
             />
           </Field>
