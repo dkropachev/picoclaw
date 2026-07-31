@@ -16,6 +16,7 @@
     "mcp": "MCP Servers",
     "workflows": "Workflows",
     "git_workspaces": "Git Workspaces",
+    "reviews": "PR Reviews",
     "events": "Events",
     "services": "Services",
     "channels_group": "Channels",
@@ -1062,6 +1063,140 @@
         "succeeded": "Succeeded",
         "failed": "Failed",
         "dead": "Dead"
+      }
+    },
+    "reviews": {
+      "title": "Pull request reviews",
+      "human_gate": "Human approval required",
+      "refresh": "Refresh reviews",
+      "error": "Failed to load reviews.",
+      "retry": "Retry",
+      "filters": {
+        "status": "Status",
+        "all": "All states",
+        "repository": "Repository",
+        "repository_placeholder": "owner/repository",
+        "apply": "Apply",
+        "reset": "Reset"
+      },
+      "list": {
+        "title": "Review inbox",
+        "region": "Review cases",
+        "loading": "Loading reviews…",
+        "empty": "No review cases match these filters.",
+        "finding_count": "{{active}} of {{total}} findings active",
+        "load_more": "Load more",
+        "loading_more": "Loading more…"
+      },
+      "detail": {
+        "title": "Review detail",
+        "region": "Review detail",
+        "back": "Back to review inbox",
+        "select_prompt": "Select a review case to inspect it.",
+        "loading": "Loading review detail…",
+        "open_pr": "Open PR"
+      },
+      "conflict": {
+        "title": "This review changed elsewhere.",
+        "description": "The latest version was loaded. Unsaved finding text remains in the editor so you can review it and save again."
+      },
+      "status": {
+        "open": "Open",
+        "all_dropped": "All dropped",
+        "submitting": "Submitting",
+        "submission_unknown": "Outcome unknown",
+        "submitted": "Submitted",
+        "stale": "Stale",
+        "submitting_title": "Submission in progress",
+        "submitting_body": "This case is locked while PicoClaw posts the review. Status refreshes automatically.",
+        "unknown_title": "Submission outcome is unknown",
+        "unknown_body": "The request may have reached GitHub. Inspect the pull request, then record what you found.",
+        "stale_title": "Review is stale",
+        "stale_body": "The pull request head changed, so this captured review can no longer be submitted.",
+        "all_dropped_title": "All findings are dropped",
+        "all_dropped_body": "Nothing will be sent to GitHub. Restore a finding if the review should be submitted."
+      },
+      "overview": {
+        "summary": "Review summary",
+        "tests": "Tests considered",
+        "risks": "Residual risks",
+        "none": "None recorded",
+        "submission": "Submission",
+        "attempts": "Attempts",
+        "open_submission": "Open result",
+        "error_code": "Error code"
+      },
+      "severity": {
+        "critical": "Critical",
+        "high": "High",
+        "medium": "Medium",
+        "low": "Low"
+      },
+      "findings": {
+        "title": "Findings",
+        "empty": "The workflow found no review findings.",
+        "general": "General",
+        "severity": "Severity",
+        "title_label": "Title",
+        "file": "File",
+        "line": "Line",
+        "message": "Comment",
+        "supporting": "Supporting review fields",
+        "evidence": "Evidence",
+        "impact": "Impact",
+        "recommendation": "Recommendation",
+        "validation": "Validation",
+        "drop": "Drop",
+        "dropping": "Dropping…",
+        "restore": "Restore",
+        "restoring": "Restoring…",
+        "drop_reason": "Reason",
+        "discard_edits": "Discard edits",
+        "save": "Save finding",
+        "saving": "Saving…"
+      },
+      "rephrase": {
+        "title": "Rephrase with AI",
+        "placeholder": "For example: make this concise and constructive",
+        "instruction_required": "Enter an instruction for the rephrase.",
+        "preview": "Preview rephrase",
+        "generating": "Generating…",
+        "preview_title": "Preview",
+        "dismiss": "Dismiss",
+        "apply": "Apply and save suggestion"
+      },
+      "chat": {
+        "title": "Review conversation",
+        "empty": "Ask about the review or request clarification.",
+        "you": "You",
+        "assistant": "Assistant",
+        "scope": "Finding context",
+        "whole_review": "Whole review",
+        "message": "Message",
+        "placeholder": "Ask about this review…",
+        "locked": "Conversation is locked for this case.",
+        "send": "Send message",
+        "waiting": "Waiting for the assistant…"
+      },
+      "submit": {
+        "action": "Submit review",
+        "starting": "Starting…",
+        "confirm_title": "Submit this review to GitHub?",
+        "confirm_description": "PicoClaw will create a pending review, add the active inline findings, and then submit it as a comment. This action can affect the pull request.",
+        "cancel": "Cancel",
+        "confirm": "Submit to GitHub"
+      },
+      "reconcile": {
+        "found": "I found the submitted review",
+        "absent": "I confirmed no review was posted",
+        "submitted_title": "Confirm the review exists on GitHub?",
+        "absent_title": "Confirm no review was posted?",
+        "submitted_description": "This records the case as submitted without making another GitHub call. Use it only after verifying the review on the pull request.",
+        "absent_description": "This reopens the case without making a GitHub call. Verify the review is absent first, or a later submission could duplicate it.",
+        "cancel": "Cancel",
+        "recording": "Recording…",
+        "confirm_submitted": "Mark as submitted",
+        "confirm_absent": "Reopen review"
       }
     },
     "agent": {

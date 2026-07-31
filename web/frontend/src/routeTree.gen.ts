@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as ThreadsRouteImport } from './routes/threads'
+import { Route as ReviewsRouteImport } from './routes/reviews'
 import { Route as ModelsRouteImport } from './routes/models'
 import { Route as LogsRouteImport } from './routes/logs'
 import { Route as LauncherSetupRouteImport } from './routes/launcher-setup'
@@ -40,6 +41,11 @@ import { Route as AccountsAccountRouterIndexRouteImport } from './routes/account
 const ThreadsRoute = ThreadsRouteImport.update({
   id: '/threads',
   path: '/threads',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ReviewsRoute = ReviewsRouteImport.update({
+  id: '/reviews',
+  path: '/reviews',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ModelsRoute = ModelsRouteImport.update({
@@ -187,6 +193,7 @@ export interface FileRoutesByFullPath {
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
   '/models': typeof ModelsRoute
+  '/reviews': typeof ReviewsRoute
   '/threads': typeof ThreadsRouteWithChildren
   '/agent/agents': typeof AgentAgentsRoute
   '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
@@ -216,6 +223,7 @@ export interface FileRoutesByTo {
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
   '/models': typeof ModelsRoute
+  '/reviews': typeof ReviewsRoute
   '/threads': typeof ThreadsRouteWithChildren
   '/agent/agents': typeof AgentAgentsRoute
   '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
@@ -246,6 +254,7 @@ export interface FileRoutesById {
   '/launcher-setup': typeof LauncherSetupRoute
   '/logs': typeof LogsRoute
   '/models': typeof ModelsRoute
+  '/reviews': typeof ReviewsRoute
   '/threads': typeof ThreadsRouteWithChildren
   '/agent/agents': typeof AgentAgentsRoute
   '/agent/git-workspaces': typeof AgentGitWorkspacesRoute
@@ -277,6 +286,7 @@ export interface FileRouteTypes {
     | '/launcher-setup'
     | '/logs'
     | '/models'
+    | '/reviews'
     | '/threads'
     | '/agent/agents'
     | '/agent/git-workspaces'
@@ -306,6 +316,7 @@ export interface FileRouteTypes {
     | '/launcher-setup'
     | '/logs'
     | '/models'
+    | '/reviews'
     | '/threads'
     | '/agent/agents'
     | '/agent/git-workspaces'
@@ -335,6 +346,7 @@ export interface FileRouteTypes {
     | '/launcher-setup'
     | '/logs'
     | '/models'
+    | '/reviews'
     | '/threads'
     | '/agent/agents'
     | '/agent/git-workspaces'
@@ -365,6 +377,7 @@ export interface RootRouteChildren {
   LauncherSetupRoute: typeof LauncherSetupRoute
   LogsRoute: typeof LogsRoute
   ModelsRoute: typeof ModelsRoute
+  ReviewsRoute: typeof ReviewsRoute
   ThreadsRoute: typeof ThreadsRouteWithChildren
 }
 
@@ -375,6 +388,13 @@ declare module '@tanstack/react-router' {
       path: '/threads'
       fullPath: '/threads'
       preLoaderRoute: typeof ThreadsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/reviews': {
+      id: '/reviews'
+      path: '/reviews'
+      fullPath: '/reviews'
+      preLoaderRoute: typeof ReviewsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/models': {
@@ -660,6 +680,7 @@ const rootRouteChildren: RootRouteChildren = {
   LauncherSetupRoute: LauncherSetupRoute,
   LogsRoute: LogsRoute,
   ModelsRoute: ModelsRoute,
+  ReviewsRoute: ReviewsRoute,
   ThreadsRoute: ThreadsRouteWithChildren,
 }
 export const routeTree = rootRouteImport
