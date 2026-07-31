@@ -67,6 +67,7 @@ interface ModelSelectProps {
   allAccountRefs: string[]
   placeholder: string
   ariaLabel: string
+  disabled?: boolean
   allowDisabled?: boolean
   disabledLabel: string
   onValueChange: (value: string) => void
@@ -78,6 +79,7 @@ function ModelSelect({
   allAccountRefs,
   placeholder,
   ariaLabel,
+  disabled = false,
   allowDisabled = false,
   disabledLabel,
   onValueChange,
@@ -86,7 +88,7 @@ function ModelSelect({
   const displayValue = value === DISABLED_MODEL_VALUE ? disabledLabel : value
 
   return (
-    <Select value={value} onValueChange={onValueChange}>
+    <Select value={value} onValueChange={onValueChange} disabled={disabled}>
       <SelectTrigger className="w-full min-w-0" aria-label={ariaLabel}>
         <span
           className={
@@ -167,6 +169,7 @@ export function ModelAliasDialog({
   const [saving, setSaving] = useState(false)
   const isEdit = alias != null && aliasIndex != null
   const lockName = isEdit || nameLocked
+  const hasConcreteAccounts = concreteAccountRefs.length > 0
 
   useEffect(() => {
     if (!open) return
@@ -415,6 +418,7 @@ export function ModelAliasDialog({
               value={model}
               options={modelOptions}
               allAccountRefs={concreteAccountRefs}
+              disabled={loadingAvailability || !hasConcreteAccounts}
               placeholder={
                 loadingAvailability
                   ? t("models.alias.loadingModels", "Loading models...")
@@ -428,6 +432,18 @@ export function ModelAliasDialog({
               onValueChange={setModel}
             />
           </Field>
+
+          {!loadingAvailability && !hasConcreteAccounts && (
+            <p
+              role="status"
+              className="border-border bg-muted text-muted-foreground rounded-lg border px-3 py-2 text-xs"
+            >
+              {t(
+                "models.alias.noEnabledAccounts",
+                "No enabled accounts are available. Add or restore one on the Accounts page before choosing models or overrides.",
+              )}
+            </p>
+          )}
 
           {availabilityIssues.length > 0 && (
             <div className="bg-muted text-muted-foreground rounded-lg px-3 py-2 text-xs">
@@ -463,7 +479,9 @@ export function ModelAliasDialog({
                 size="sm"
                 variant="outline"
                 onClick={addOverride}
-                disabled={availableAccountRefs.length === 0}
+                disabled={
+                  loadingAvailability || availableAccountRefs.length === 0
+                }
               >
                 <IconPlus className="size-4" />
                 {t("models.alias.addOverride", "Add override")}

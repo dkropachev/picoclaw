@@ -368,6 +368,7 @@ func TestHandleListModels_AvailabilityForOAuthModelWithCredential(t *testing.T) 
 		ModelName:  "claude-oauth",
 		Model:      "anthropic/claude-sonnet-4.6",
 		AuthMethod: "oauth",
+		Enabled:    true,
 	}}
 	err = config.SaveConfig(configPath, cfg)
 	if err != nil {
@@ -434,6 +435,7 @@ func TestHandleListModels_GitHubCopilotTokenCredentialDoesNotProbeLocalBridge(t 
 		Model:        "auto",
 		AuthMethod:   "token",
 		CredentialID: "github-copilot:work",
+		Enabled:      true,
 	}}
 	err = config.SaveConfig(configPath, cfg)
 	if err != nil {
@@ -519,6 +521,7 @@ func TestHandleListModels_AntigravityImplicitOAuthAvailability(t *testing.T) {
 		ModelName: "gemini-flash",
 		Provider:  "antigravity",
 		Model:     "gemini-3-flash",
+		Enabled:   true,
 	}}
 	err = config.SaveConfig(configPath, cfg)
 	if err != nil {
@@ -915,6 +918,72 @@ func TestHandleListModelsIncludesCredentialAccountsAsVirtualDefaults(t *testing.
 			"default selection = %q/%q, want credential:openai:work/coding",
 			resp.DefaultAccountRef,
 			resp.DefaultModel,
+		)
+	}
+}
+
+func TestHandleListModelsDisabledCredentialEntryDoesNotHideVirtualAccount(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	resetOAuthHooks(t)
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName:    "legacy-openai-work",
+		Provider:     "openai",
+		Model:        "gpt-5.4",
+		AuthMethod:   "oauth",
+		CredentialID: "openai:work",
+		Enabled:      false,
+	}}
+	if err := config.SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig() error = %v", err)
+	}
+	if err := auth.SetCredential("openai:work", &auth.AuthCredential{
+		Provider:    "openai",
+		AuthMethod:  "oauth",
+		AccessToken: "oauth-token",
+	}); err != nil {
+		t.Fatalf("SetCredential() error = %v", err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/accounts/models", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Models []modelResponse `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	modelsByName := make(map[string]modelResponse, len(resp.Models))
+	for _, model := range resp.Models {
+		modelsByName[model.ModelName] = model
+	}
+	if legacy, ok := modelsByName["legacy-openai-work"]; !ok || legacy.Enabled {
+		t.Fatalf("disabled legacy account = %#v, want present and disabled", legacy)
+	}
+	credential, ok := modelsByName["credential:openai:work"]
+	if !ok {
+		t.Fatalf("live credential account missing from models: %#v", modelsByName)
+	}
+	if !credential.Enabled || !credential.Available || !credential.IsVirtual {
+		t.Fatalf(
+			"credential account enabled/available/virtual = %v/%v/%v, want true/true/true",
+			credential.Enabled,
+			credential.Available,
+			credential.IsVirtual,
 		)
 	}
 }
