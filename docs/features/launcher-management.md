@@ -77,6 +77,7 @@ Owns: CODE web/frontend/src/app-providers.tsx
 Owns: CODE web/frontend/src/components/app-*
 Owns: CODE web/frontend/src/components/config/**
 Owns: CODE web/frontend/src/components/credentials/**
+Owns: CODE web/frontend/src/components/gateway-setup-notice.tsx
 Owns: CODE web/frontend/src/components/models/**
 Owns: CODE web/frontend/src/components/page-header.tsx
 Owns: CODE web/frontend/src/components/shared-form.tsx
