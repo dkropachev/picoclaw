@@ -59,8 +59,8 @@ func decodeReviewCursor(
 	if len(encoded) > maxReviewCursorBytes {
 		return nil, invalidReviewCursor()
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(encoded)
-	if err != nil ||
+	raw, decodeErr := base64.RawURLEncoding.DecodeString(encoded)
+	if decodeErr != nil ||
 		base64.RawURLEncoding.EncodeToString(raw) != encoded ||
 		len(raw) == 0 ||
 		len(raw) > maxReviewCursorBytes {
@@ -76,8 +76,8 @@ func decodeReviewCursor(
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return nil, invalidReviewCursor()
 	}
-	canonical, err := json.Marshal(cursor)
-	if err != nil ||
+	canonical, marshalErr := json.Marshal(cursor)
+	if marshalErr != nil ||
 		!bytes.Equal(raw, canonical) ||
 		cursor.Version != 1 ||
 		cursor.Kind != "reviews" ||

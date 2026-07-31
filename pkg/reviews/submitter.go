@@ -235,18 +235,18 @@ func (s *GitHubSubmitter) Submit(
 			args["line"] = *finding.Line
 			args["side"] = "RIGHT"
 		}
-		if _, err := s.run(
+		if _, commentErr := s.run(
 			ctx,
 			server,
 			GitHubPendingReviewCommentTool,
 			args,
-		); err != nil {
+		); commentErr != nil {
 			return SubmitResult{}, externalSubmitError(
 				SubmitStageAddComment,
 				index,
 				finding.ID,
 				completedCalls,
-				err,
+				commentErr,
 			)
 		}
 		completedCalls++

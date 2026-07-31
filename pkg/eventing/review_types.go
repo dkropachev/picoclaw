@@ -324,31 +324,31 @@ type ReviewSubmissionReconciliation struct {
 
 // ReviewCaseStore owns captured review inspection and optimistic editing.
 type ReviewCaseStore interface {
-	CaptureReview(context.Context, ReviewCaptureInput) (ReviewCase, bool, error)
-	GetReviewCase(context.Context, string) (ReviewCaseDetail, error)
-	ListReviewCases(context.Context, ReviewCaseFilter) (ReviewCasePage, error)
-	UpdateReviewFinding(context.Context, ReviewFindingUpdate) (ReviewCaseDetail, error)
-	DropReviewFinding(context.Context, ReviewFindingTransition) (ReviewCaseDetail, error)
-	RestoreReviewFinding(context.Context, ReviewFindingTransition) (ReviewCaseDetail, error)
-	AppendReviewMessages(context.Context, ReviewMessageAppend) (ReviewCaseDetail, error)
-	CreateReviewSubmission(context.Context, ReviewSubmissionDraft) (ReviewCaseDetail, error)
+	CaptureReview(ctx context.Context, input ReviewCaptureInput) (ReviewCase, bool, error)
+	GetReviewCase(ctx context.Context, caseID string) (ReviewCaseDetail, error)
+	ListReviewCases(ctx context.Context, filter ReviewCaseFilter) (ReviewCasePage, error)
+	UpdateReviewFinding(ctx context.Context, input ReviewFindingUpdate) (ReviewCaseDetail, error)
+	DropReviewFinding(ctx context.Context, input ReviewFindingTransition) (ReviewCaseDetail, error)
+	RestoreReviewFinding(ctx context.Context, input ReviewFindingTransition) (ReviewCaseDetail, error)
+	AppendReviewMessages(ctx context.Context, input ReviewMessageAppend) (ReviewCaseDetail, error)
+	CreateReviewSubmission(ctx context.Context, input ReviewSubmissionDraft) (ReviewCaseDetail, error)
 	ReconcileReviewSubmission(
-		context.Context,
-		ReviewSubmissionReconciliation,
+		ctx context.Context,
+		input ReviewSubmissionReconciliation,
 	) (ReviewCaseDetail, error)
 }
 
 // ReviewSubmissionQueue owns leased submission-outbox delivery.
 type ReviewSubmissionQueue interface {
-	GetReviewSubmission(context.Context, string) (ReviewSubmission, error)
+	GetReviewSubmission(ctx context.Context, submissionID string) (ReviewSubmission, error)
 	ClaimReviewSubmissions(
-		context.Context,
-		string,
-		int,
-		time.Duration,
+		ctx context.Context,
+		workerLabel string,
+		limit int,
+		lease time.Duration,
 	) ([]ReviewSubmission, error)
-	RenewReviewSubmissionLease(context.Context, string, string, time.Duration) error
-	FinishReviewSubmission(context.Context, ReviewSubmissionOutcome) (ReviewCaseDetail, error)
+	RenewReviewSubmissionLease(ctx context.Context, submissionID, leaseToken string, lease time.Duration) error
+	FinishReviewSubmission(ctx context.Context, outcome ReviewSubmissionOutcome) (ReviewCaseDetail, error)
 }
 
 // ReviewStore is the complete durable pull-request review boundary.

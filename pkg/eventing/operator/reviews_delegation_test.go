@@ -88,8 +88,8 @@ func TestControllerDoesNotDelegateInvalidOrUnconfiguredReviewRoutes(t *testing.T
 	if reviews.calls != 0 {
 		t.Fatalf("invalid encoded path delegated %d times", reviews.calls)
 	}
-	if err := controller.Deactivate(context.Background(), generation); err != nil {
-		t.Fatalf("Deactivate() error = %v", err)
+	if deactivateErr := controller.Deactivate(context.Background(), generation); deactivateErr != nil {
+		t.Fatalf("Deactivate() error = %v", deactivateErr)
 	}
 
 	withoutReviews, err := NewBackend(BackendConfig{Store: &fakeStore{}})

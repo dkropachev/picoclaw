@@ -70,7 +70,7 @@ type GenericWebhookConfig struct {
 	Repositories      []string     `json:"repositories,omitempty"`
 	TargetUser        string       `json:"target_user,omitempty"`
 	PollNotifications bool         `json:"poll_notifications,omitempty"`
-	Secret            SecureString `json:"secret,omitzero"  yaml:"secret,omitempty"`
+	Secret            SecureString `json:"secret,omitzero"              yaml:"secret,omitempty"`
 }
 
 // MarshalJSON keeps a stable marker in config.json without ever exposing the

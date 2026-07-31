@@ -38,7 +38,7 @@ type Store interface {
 
 // Submitter is the narrow GitHub protocol boundary used by the durable worker.
 type Submitter interface {
-	Submit(context.Context, SubmitRequest) (SubmitResult, error)
+	Submit(ctx context.Context, request SubmitRequest) (SubmitResult, error)
 }
 
 type ServiceConfig struct {
@@ -736,8 +736,8 @@ func normalizeAIText(field, value string, maximum int) (string, error) {
 func findFinding(findings []eventing.ReviewFinding, id string) *eventing.ReviewFinding {
 	for index := range findings {
 		if findings[index].ID == id {
-			copy := findings[index]
-			return &copy
+			findingCopy := findings[index]
+			return &findingCopy
 		}
 	}
 	return nil
@@ -764,8 +764,8 @@ func cloneInt(value *int) *int {
 	if value == nil {
 		return nil
 	}
-	copy := *value
-	return &copy
+	valueCopy := *value
+	return &valueCopy
 }
 
 func reviewSubmissionMarker(caseID string, version int64) string {

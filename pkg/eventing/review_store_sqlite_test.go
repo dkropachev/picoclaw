@@ -283,7 +283,7 @@ func TestStoreReviewUnknownSubmissionHumanReconciliation(t *testing.T) {
 		store, _, input := newReviewStoreFixture(t)
 		reviewCase, _, err := store.CaptureReview(ctx, input)
 		require.NoError(t, err)
-		detail, err := store.CreateReviewSubmission(ctx, ReviewSubmissionDraft{
+		_, err = store.CreateReviewSubmission(ctx, ReviewSubmissionDraft{
 			CaseID:          reviewCase.ID,
 			ExpectedVersion: reviewCase.Version,
 			Marker:          "picoclaw-review/" + reviewCase.ID + "/1",
@@ -298,7 +298,7 @@ func TestStoreReviewUnknownSubmissionHumanReconciliation(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.Len(t, claimed, 1)
-		detail, err = store.FinishReviewSubmission(ctx, ReviewSubmissionOutcome{
+		detail, err := store.FinishReviewSubmission(ctx, ReviewSubmissionOutcome{
 			SubmissionID:    claimed[0].ID,
 			LeaseToken:      claimed[0].LeaseToken,
 			Status:          ReviewSubmissionUnknown,
@@ -733,7 +733,7 @@ func newReviewStoreFixture(
 					Line:           &secondLine,
 					Message:        "The child operation ignores the caller context.",
 					Evidence:       "context.Background is passed to the child",
-					Impact:         "cancelled jobs keep running",
+					Impact:         "canceled jobs keep running",
 					Recommendation: "pass the caller context",
 					Validation:     "add a cancellation test",
 				},

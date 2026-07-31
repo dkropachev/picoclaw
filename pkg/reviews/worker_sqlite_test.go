@@ -22,8 +22,8 @@ func TestSubmissionWorkerNeverResubmitsExpiredClaimAfterCrash(t *testing.T) {
 		t.Fatalf("Open(event store) error = %v", err)
 	}
 	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
-			t.Errorf("Close(event store) error = %v", err)
+		if closeErr := store.Close(); closeErr != nil {
+			t.Errorf("Close(event store) error = %v", closeErr)
 		}
 	})
 

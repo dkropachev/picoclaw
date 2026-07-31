@@ -31,15 +31,16 @@ var captureRepositoryPattern = regexp.MustCompile(
 	`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`,
 )
 
-// CaptureSink implements workflows.EventReviewSink over the durable event
-// store. A workflow without the reserved output is deliberately ignored.
+// ReviewCapturer is the durable capture capability required by CaptureSink.
 type ReviewCapturer interface {
 	CaptureReview(
-		context.Context,
-		eventing.ReviewCaptureInput,
+		ctx context.Context,
+		input eventing.ReviewCaptureInput,
 	) (eventing.ReviewCase, bool, error)
 }
 
+// CaptureSink implements workflows.EventReviewSink over the durable event
+// store. A workflow without the reserved output is deliberately ignored.
 type CaptureSink struct {
 	Store ReviewCapturer
 }

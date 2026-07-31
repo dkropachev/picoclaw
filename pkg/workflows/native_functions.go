@@ -572,14 +572,14 @@ func nativeGitDiffCommits(
 		if err != nil {
 			return "", "", "", err
 		}
-		if err := nativeFetchExactGitCommit(
+		if fetchErr := nativeFetchExactGitCommit(
 			ctx,
 			repo,
 			baseRepository,
 			baseRevision,
 			exec,
-		); err != nil {
-			return "", "", "", err
+		); fetchErr != nil {
+			return "", "", "", fetchErr
 		}
 		baseCommit, err := nativeResolveCommit(ctx, repo, baseRevision+"^{commit}")
 		if err != nil {
@@ -621,9 +621,9 @@ func nativeFetchExactGitCommit(
 	if tempRoot == "" {
 		tempRoot = "."
 	}
-	validationRepo, err := os.MkdirTemp(tempRoot, ".picoclaw-git-fetch-")
-	if err != nil {
-		return fmt.Errorf("create pull-request base validation repository: %w", err)
+	validationRepo, mkdirErr := os.MkdirTemp(tempRoot, ".picoclaw-git-fetch-")
+	if mkdirErr != nil {
+		return fmt.Errorf("create pull-request base validation repository: %w", mkdirErr)
 	}
 	defer func() {
 		_ = os.RemoveAll(validationRepo)
@@ -719,7 +719,9 @@ func nativePullRequestBaseRepository(exec ExecutionContext, value string) (strin
 		parsed.RawQuery != "" ||
 		parsed.Fragment != "" ||
 		strings.Trim(parsed.EscapedPath(), "/") == "" {
-		return "", fmt.Errorf("base repository must be an HTTPS URL or a local repository inside the workflow workspace")
+		return "", fmt.Errorf(
+			"base repository must be an HTTPS URL or a local repository inside the workflow workspace",
+		)
 	}
 	return value, nil
 }

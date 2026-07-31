@@ -50,7 +50,7 @@ var notificationIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]+$`)
 
 // Inserter is the narrow durable-inbox capability required by the poller.
 type Inserter interface {
-	Insert(context.Context, eventing.Envelope) (eventing.InsertResult, error)
+	Insert(ctx context.Context, envelope eventing.Envelope) (eventing.InsertResult, error)
 }
 
 // Connector is one enabled GitHub event source that opted into polling.
@@ -228,7 +228,7 @@ func (p *Poller) listNotifications(
 func (p *Poller) ingestNotification(
 	ctx context.Context,
 	item notification,
-) (matched, inserted int, err error) {
+) (int, int, error) {
 	if err := item.validate(); err != nil {
 		return 0, 0, err
 	}
@@ -244,20 +244,22 @@ func (p *Poller) ingestNotification(
 		if parseErr != nil {
 			return 0, 0, parseErr
 		}
-		pullRequest, err = p.readPullRequest(ctx, owner, repo, number)
-		if err != nil {
-			return 0, 0, err
+		resolvedPullRequest, readErr := p.readPullRequest(ctx, owner, repo, number)
+		if readErr != nil {
+			return 0, 0, readErr
 		}
-		if err = validatePullRequestEnrichment(*pullRequest, repository, number); err != nil {
+		pullRequest = resolvedPullRequest
+		if validationErr := validatePullRequestEnrichment(*pullRequest, repository, number); validationErr != nil {
 			return 0, 0, fmt.Errorf(
 				"GitHub notification %q pull-request enrichment is incomplete: %w",
 				item.ID,
-				err,
+				validationErr,
 			)
 		}
 	}
 
-	matched = len(connectors)
+	matched := len(connectors)
+	inserted := 0
 	for _, connector := range connectors {
 		envelope, buildErr := p.envelope(item, pullRequest, connector)
 		if buildErr != nil {

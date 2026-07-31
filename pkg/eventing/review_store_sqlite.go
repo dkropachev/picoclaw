@@ -59,7 +59,7 @@ const reviewSubmissionColumns = `
 
 type reviewQueryer interface {
 	rowQueryer
-	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 // CaptureReview idempotently persists a typed workflow review draft. Both the
@@ -490,20 +490,16 @@ func queryReviewFindings(
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
 	findings := make([]ReviewFinding, 0)
 	for rows.Next() {
 		finding, scanErr := scanReviewFinding(rows)
 		if scanErr != nil {
-			_ = rows.Close()
 			return nil, scanErr
 		}
 		findings = append(findings, finding)
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 	return findings, nil
@@ -524,20 +520,16 @@ func queryReviewMessages(
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
 	messages := make([]ReviewMessage, 0)
 	for rows.Next() {
 		message, scanErr := scanReviewMessage(rows)
 		if scanErr != nil {
-			_ = rows.Close()
 			return nil, scanErr
 		}
 		messages = append(messages, message)
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 	return messages, nil
@@ -1141,21 +1133,21 @@ func (s *Store) UpdateReviewFinding(
 	); err != nil {
 		return ReviewCaseDetail{}, err
 	}
-	finding, err := normalizeReviewFindingDraft(input.Finding)
-	if err != nil {
-		return ReviewCaseDetail{}, err
+	finding, normalizeErr := normalizeReviewFindingDraft(input.Finding)
+	if normalizeErr != nil {
+		return ReviewCaseDetail{}, normalizeErr
 	}
 
 	var detail ReviewCaseDetail
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
-		reviewCase, err := requireReviewCaseVersion(
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
+		reviewCase, versionErr := requireReviewCaseVersion(
 			ctx,
 			conn,
 			input.CaseID,
 			input.ExpectedVersion,
 		)
-		if err != nil {
-			return err
+		if versionErr != nil {
+			return versionErr
 		}
 		if reviewCase.Status != ReviewCaseOpen {
 			return fmt.Errorf(
@@ -1163,14 +1155,14 @@ func (s *Store) UpdateReviewFinding(
 				ErrInvalidTransition,
 			)
 		}
-		stored, err := getReviewFindingRecord(
+		stored, findingErr := getReviewFindingRecord(
 			ctx,
 			conn,
 			input.CaseID,
 			input.FindingID,
 		)
-		if err != nil {
-			return err
+		if findingErr != nil {
+			return findingErr
 		}
 		if stored.State != ReviewFindingActive {
 			return fmt.Errorf(
@@ -1178,11 +1170,11 @@ func (s *Store) UpdateReviewFinding(
 				ErrInvalidTransition,
 			)
 		}
-		now, err := s.currentTime()
-		if err != nil {
-			return err
+		now, clockErr := s.currentTime()
+		if clockErr != nil {
+			return clockErr
 		}
-		if _, err := conn.ExecContext(ctx, `
+		if _, execErr := conn.ExecContext(ctx, `
 			UPDATE pr_review_findings
 			SET severity = ?, title = ?, file = ?, line = ?, message = ?,
 			    evidence = ?, impact = ?, recommendation = ?, validation = ?,
@@ -1200,25 +1192,26 @@ func (s *Store) UpdateReviewFinding(
 			toDBTime(now),
 			input.FindingID,
 			input.CaseID,
-		); err != nil {
-			return err
+		); execErr != nil {
+			return execErr
 		}
-		if _, err := conn.ExecContext(ctx, `
+		if _, execErr := conn.ExecContext(ctx, `
 			UPDATE pr_review_cases
 			SET version = version + 1, updated_at = ?, public_error_code = ''
 			WHERE id = ?`,
 			toDBTime(now),
 			input.CaseID,
-		); err != nil {
-			return err
+		); execErr != nil {
+			return execErr
 		}
-		detail, err = getReviewCaseDetailWith(ctx, conn, input.CaseID)
-		return err
+		loadedDetail, detailErr := getReviewCaseDetailWith(ctx, conn, input.CaseID)
+		detail = loadedDetail
+		return detailErr
 	})
-	if err != nil {
+	if transactionErr != nil {
 		return ReviewCaseDetail{}, fmt.Errorf(
 			"update pull request review finding: %w",
-			s.dbError(err),
+			s.dbError(transactionErr),
 		)
 	}
 	return detail, nil
@@ -1241,26 +1234,26 @@ func (s *Store) DropReviewFinding(
 	); err != nil {
 		return ReviewCaseDetail{}, err
 	}
-	reason, err := normalizeReviewText(
+	reason, normalizeErr := normalizeReviewText(
 		"finding drop reason",
 		input.Reason,
 		maxReviewTextBytes,
 		false,
 	)
-	if err != nil {
-		return ReviewCaseDetail{}, err
+	if normalizeErr != nil {
+		return ReviewCaseDetail{}, normalizeErr
 	}
 
 	var detail ReviewCaseDetail
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
-		reviewCase, err := requireReviewCaseVersion(
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
+		reviewCase, versionErr := requireReviewCaseVersion(
 			ctx,
 			conn,
 			input.CaseID,
 			input.ExpectedVersion,
 		)
-		if err != nil {
-			return err
+		if versionErr != nil {
+			return versionErr
 		}
 		if reviewCase.Status != ReviewCaseOpen {
 			return fmt.Errorf(
@@ -1268,14 +1261,14 @@ func (s *Store) DropReviewFinding(
 				ErrInvalidTransition,
 			)
 		}
-		finding, err := getReviewFindingRecord(
+		finding, findingErr := getReviewFindingRecord(
 			ctx,
 			conn,
 			input.CaseID,
 			input.FindingID,
 		)
-		if err != nil {
-			return err
+		if findingErr != nil {
+			return findingErr
 		}
 		if finding.State != ReviewFindingActive {
 			return fmt.Errorf(
@@ -1286,9 +1279,9 @@ func (s *Store) DropReviewFinding(
 		if reviewCase.ActiveFindings <= 0 {
 			return fmt.Errorf("stored review case active finding count is invalid")
 		}
-		now, err := s.currentTime()
-		if err != nil {
-			return err
+		now, clockErr := s.currentTime()
+		if clockErr != nil {
+			return clockErr
 		}
 		activeFindings := reviewCase.ActiveFindings - 1
 		status := ReviewCaseOpen
@@ -1297,7 +1290,7 @@ func (s *Store) DropReviewFinding(
 			status = ReviewCaseAllDropped
 			resolvedAt = toDBTime(now)
 		}
-		if _, err := conn.ExecContext(ctx, `
+		if _, execErr := conn.ExecContext(ctx, `
 			UPDATE pr_review_findings
 			SET state = ?, dropped_reason = ?, dropped_at = ?,
 			    revision = revision + 1, updated_at = ?
@@ -1308,10 +1301,10 @@ func (s *Store) DropReviewFinding(
 			toDBTime(now),
 			input.FindingID,
 			input.CaseID,
-		); err != nil {
-			return err
+		); execErr != nil {
+			return execErr
 		}
-		if _, err := conn.ExecContext(ctx, `
+		if _, execErr := conn.ExecContext(ctx, `
 			UPDATE pr_review_cases
 			SET status = ?, active_findings = ?, version = version + 1,
 			    updated_at = ?, resolved_at = ?, public_error_code = ''
@@ -1321,16 +1314,17 @@ func (s *Store) DropReviewFinding(
 			toDBTime(now),
 			resolvedAt,
 			input.CaseID,
-		); err != nil {
-			return err
+		); execErr != nil {
+			return execErr
 		}
-		detail, err = getReviewCaseDetailWith(ctx, conn, input.CaseID)
-		return err
+		loadedDetail, detailErr := getReviewCaseDetailWith(ctx, conn, input.CaseID)
+		detail = loadedDetail
+		return detailErr
 	})
-	if err != nil {
+	if transactionErr != nil {
 		return ReviewCaseDetail{}, fmt.Errorf(
 			"drop pull request review finding: %w",
-			s.dbError(err),
+			s.dbError(transactionErr),
 		)
 	}
 	return detail, nil
@@ -1355,15 +1349,15 @@ func (s *Store) RestoreReviewFinding(
 	}
 
 	var detail ReviewCaseDetail
-	err := s.withImmediate(ctx, func(conn *sql.Conn) error {
-		reviewCase, err := requireReviewCaseVersion(
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
+		reviewCase, versionErr := requireReviewCaseVersion(
 			ctx,
 			conn,
 			input.CaseID,
 			input.ExpectedVersion,
 		)
-		if err != nil {
-			return err
+		if versionErr != nil {
+			return versionErr
 		}
 		if reviewCase.Status != ReviewCaseOpen &&
 			reviewCase.Status != ReviewCaseAllDropped {
@@ -1373,14 +1367,14 @@ func (s *Store) RestoreReviewFinding(
 				reviewCase.Status,
 			)
 		}
-		finding, err := getReviewFindingRecord(
+		finding, findingErr := getReviewFindingRecord(
 			ctx,
 			conn,
 			input.CaseID,
 			input.FindingID,
 		)
-		if err != nil {
-			return err
+		if findingErr != nil {
+			return findingErr
 		}
 		if finding.State != ReviewFindingDropped {
 			return fmt.Errorf(
@@ -1391,11 +1385,11 @@ func (s *Store) RestoreReviewFinding(
 		if reviewCase.ActiveFindings >= reviewCase.TotalFindings {
 			return fmt.Errorf("stored review case active finding count is invalid")
 		}
-		now, err := s.currentTime()
-		if err != nil {
-			return err
+		now, clockErr := s.currentTime()
+		if clockErr != nil {
+			return clockErr
 		}
-		if _, err := conn.ExecContext(ctx, `
+		if _, execErr := conn.ExecContext(ctx, `
 			UPDATE pr_review_findings
 			SET state = ?, dropped_reason = '', dropped_at = NULL,
 			    revision = revision + 1, updated_at = ?
@@ -1404,10 +1398,10 @@ func (s *Store) RestoreReviewFinding(
 			toDBTime(now),
 			input.FindingID,
 			input.CaseID,
-		); err != nil {
-			return err
+		); execErr != nil {
+			return execErr
 		}
-		if _, err := conn.ExecContext(ctx, `
+		if _, execErr := conn.ExecContext(ctx, `
 			UPDATE pr_review_cases
 			SET status = ?, active_findings = active_findings + 1,
 			    version = version + 1, updated_at = ?, resolved_at = NULL,
@@ -1416,16 +1410,17 @@ func (s *Store) RestoreReviewFinding(
 			ReviewCaseOpen,
 			toDBTime(now),
 			input.CaseID,
-		); err != nil {
-			return err
+		); execErr != nil {
+			return execErr
 		}
-		detail, err = getReviewCaseDetailWith(ctx, conn, input.CaseID)
-		return err
+		loadedDetail, detailErr := getReviewCaseDetailWith(ctx, conn, input.CaseID)
+		detail = loadedDetail
+		return detailErr
 	})
-	if err != nil {
+	if transactionErr != nil {
 		return ReviewCaseDetail{}, fmt.Errorf(
 			"restore pull request review finding: %w",
-			s.dbError(err),
+			s.dbError(transactionErr),
 		)
 	}
 	return detail, nil
@@ -1466,15 +1461,15 @@ func (s *Store) AppendReviewMessages(
 	}
 
 	var detail ReviewCaseDetail
-	err := s.withImmediate(ctx, func(conn *sql.Conn) error {
-		reviewCase, err := requireReviewCaseVersion(
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
+		reviewCase, versionErr := requireReviewCaseVersion(
 			ctx,
 			conn,
 			input.CaseID,
 			input.ExpectedVersion,
 		)
-		if err != nil {
-			return err
+		if versionErr != nil {
+			return versionErr
 		}
 		if reviewCase.Status != ReviewCaseOpen &&
 			reviewCase.Status != ReviewCaseAllDropped {
@@ -1488,14 +1483,14 @@ func (s *Store) AppendReviewMessages(
 			storedMessageCount int64
 			storedContentBytes int64
 		)
-		if err := conn.QueryRowContext(ctx, `
+		if queryErr := conn.QueryRowContext(ctx, `
 			SELECT COUNT(*),
 			       COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0)
 			FROM pr_review_messages
 			WHERE case_id = ?`,
 			input.CaseID,
-		).Scan(&storedMessageCount, &storedContentBytes); err != nil {
-			return err
+		).Scan(&storedMessageCount, &storedContentBytes); queryErr != nil {
+			return queryErr
 		}
 		appendContentBytes := int64(0)
 		for _, message := range messages {
@@ -1523,34 +1518,34 @@ func (s *Store) AppendReviewMessages(
 			if message.FindingID == "" {
 				continue
 			}
-			if _, err := getReviewFindingRecord(
+			if _, findingErr := getReviewFindingRecord(
 				ctx,
 				conn,
 				input.CaseID,
 				message.FindingID,
-			); err != nil {
-				return err
+			); findingErr != nil {
+				return findingErr
 			}
 		}
 		var lastOrdinal int64
-		if err := conn.QueryRowContext(ctx, `
+		if queryErr := conn.QueryRowContext(ctx, `
 			SELECT COALESCE(MAX(ordinal), -1)
 			FROM pr_review_messages
 			WHERE case_id = ?`,
 			input.CaseID,
-		).Scan(&lastOrdinal); err != nil {
-			return err
+		).Scan(&lastOrdinal); queryErr != nil {
+			return queryErr
 		}
-		now, err := s.currentTime()
-		if err != nil {
-			return err
+		now, clockErr := s.currentTime()
+		if clockErr != nil {
+			return clockErr
 		}
 		for index, message := range messages {
-			messageID, err := newPrefixedID(reviewMessageIDPrefix)
-			if err != nil {
-				return err
+			messageID, idErr := newPrefixedID(reviewMessageIDPrefix)
+			if idErr != nil {
+				return idErr
 			}
-			if _, err := conn.ExecContext(ctx, `
+			if _, execErr := conn.ExecContext(ctx, `
 				INSERT INTO pr_review_messages (
 					id, case_id, ordinal, finding_id, kind, role, content,
 					created_at
@@ -1563,26 +1558,27 @@ func (s *Store) AppendReviewMessages(
 				message.Role,
 				message.Content,
 				toDBTime(now),
-			); err != nil {
-				return err
+			); execErr != nil {
+				return execErr
 			}
 		}
-		if _, err := conn.ExecContext(ctx, `
+		if _, execErr := conn.ExecContext(ctx, `
 			UPDATE pr_review_cases
 			SET version = version + 1, updated_at = ?
 			WHERE id = ?`,
 			toDBTime(now),
 			input.CaseID,
-		); err != nil {
-			return err
+		); execErr != nil {
+			return execErr
 		}
-		detail, err = getReviewCaseDetailWith(ctx, conn, input.CaseID)
-		return err
+		loadedDetail, detailErr := getReviewCaseDetailWith(ctx, conn, input.CaseID)
+		detail = loadedDetail
+		return detailErr
 	})
-	if err != nil {
+	if transactionErr != nil {
 		return ReviewCaseDetail{}, fmt.Errorf(
 			"append pull request review messages: %w",
-			s.dbError(err),
+			s.dbError(transactionErr),
 		)
 	}
 	return detail, nil
@@ -1712,22 +1708,22 @@ func (s *Store) CreateReviewSubmission(
 	); err != nil {
 		return ReviewCaseDetail{}, err
 	}
-	request, err := normalizeReviewSubmissionRequest(input.Request)
-	if err != nil {
-		return ReviewCaseDetail{}, err
+	request, normalizeErr := normalizeReviewSubmissionRequest(input.Request)
+	if normalizeErr != nil {
+		return ReviewCaseDetail{}, normalizeErr
 	}
 
 	var detail ReviewCaseDetail
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
-		existing, err := findReviewSubmissionDraft(
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
+		existing, findErr := findReviewSubmissionDraft(
 			ctx,
 			conn,
 			input.CaseID,
 			input.ExpectedVersion,
 			input.Marker,
 		)
-		if err != nil {
-			return err
+		if findErr != nil {
+			return findErr
 		}
 		if existing != nil {
 			if existing.CaseID != input.CaseID ||
@@ -1739,18 +1735,19 @@ func (s *Store) CreateReviewSubmission(
 					ErrReviewConflict,
 				)
 			}
-			detail, err = getReviewCaseDetailWith(ctx, conn, input.CaseID)
-			return err
+			loadedDetail, detailErr := getReviewCaseDetailWith(ctx, conn, input.CaseID)
+			detail = loadedDetail
+			return detailErr
 		}
 
-		reviewCase, err := requireReviewCaseVersion(
+		reviewCase, versionErr := requireReviewCaseVersion(
 			ctx,
 			conn,
 			input.CaseID,
 			input.ExpectedVersion,
 		)
-		if err != nil {
-			return err
+		if versionErr != nil {
+			return versionErr
 		}
 		if reviewCase.Status != ReviewCaseOpen {
 			return fmt.Errorf(
@@ -1764,15 +1761,15 @@ func (s *Store) CreateReviewSubmission(
 				ErrInvalidTransition,
 			)
 		}
-		now, err := s.currentTime()
-		if err != nil {
-			return err
+		now, clockErr := s.currentTime()
+		if clockErr != nil {
+			return clockErr
 		}
-		submissionID, err := newPrefixedID(reviewSubmissionIDPrefix)
-		if err != nil {
-			return err
+		submissionID, idErr := newPrefixedID(reviewSubmissionIDPrefix)
+		if idErr != nil {
+			return idErr
 		}
-		if _, err := conn.ExecContext(ctx, `
+		if _, execErr := conn.ExecContext(ctx, `
 			INSERT INTO pr_review_submissions (
 				id, case_id, draft_version, marker, status, request_json,
 				created_at, updated_at
@@ -1785,10 +1782,10 @@ func (s *Store) CreateReviewSubmission(
 			request,
 			toDBTime(now),
 			toDBTime(now),
-		); err != nil {
-			return err
+		); execErr != nil {
+			return execErr
 		}
-		if _, err := conn.ExecContext(ctx, `
+		if _, execErr := conn.ExecContext(ctx, `
 			UPDATE pr_review_cases
 			SET status = ?, version = version + 1, updated_at = ?,
 			    public_error_code = ''
@@ -1796,16 +1793,17 @@ func (s *Store) CreateReviewSubmission(
 			ReviewCaseSubmitting,
 			toDBTime(now),
 			input.CaseID,
-		); err != nil {
-			return err
+		); execErr != nil {
+			return execErr
 		}
-		detail, err = getReviewCaseDetailWith(ctx, conn, input.CaseID)
-		return err
+		loadedDetail, detailErr := getReviewCaseDetailWith(ctx, conn, input.CaseID)
+		detail = loadedDetail
+		return detailErr
 	})
-	if err != nil {
+	if transactionErr != nil {
 		return ReviewCaseDetail{}, fmt.Errorf(
 			"create pull request review submission: %w",
-			s.dbError(err),
+			s.dbError(transactionErr),
 		)
 	}
 	return detail, nil
@@ -1830,28 +1828,23 @@ func findReviewSubmissionDraft(
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
 	var existing *ReviewSubmission
 	for rows.Next() {
 		submission, scanErr := scanReviewSubmission(rows)
 		if scanErr != nil {
-			_ = rows.Close()
 			return nil, scanErr
 		}
 		if existing != nil && existing.ID != submission.ID {
-			_ = rows.Close()
 			return nil, fmt.Errorf(
 				"%w: marker and draft version identify different submissions",
 				ErrReviewConflict,
 			)
 		}
-		copy := submission
-		existing = &copy
+		submissionCopy := submission
+		existing = &submissionCopy
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 	return existing, nil
@@ -1929,21 +1922,21 @@ func (s *Store) ClaimReviewSubmissions(
 	if limit > maxReviewListItems {
 		limit = maxReviewListItems
 	}
-	now, err := s.currentTime()
-	if err != nil {
-		return nil, err
+	now, clockErr := s.currentTime()
+	if clockErr != nil {
+		return nil, clockErr
 	}
 	leaseUntil := now.Add(lease)
-	if err := validateDBTimestamp("review submission lease deadline", leaseUntil); err != nil {
-		return nil, err
+	if validationErr := validateDBTimestamp("review submission lease deadline", leaseUntil); validationErr != nil {
+		return nil, validationErr
 	}
 
 	claimed := make([]ReviewSubmission, 0, limit)
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
-		if err := expireReviewSubmissionClaims(ctx, conn, now); err != nil {
-			return err
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
+		if expireErr := expireReviewSubmissionClaims(ctx, conn, now); expireErr != nil {
+			return expireErr
 		}
-		ids, err := queryIDs(ctx, conn, `
+		ids, queryErr := queryIDs(ctx, conn, `
 			SELECT id
 			FROM pr_review_submissions
 			WHERE status = ?
@@ -1952,15 +1945,15 @@ func (s *Store) ClaimReviewSubmissions(
 			ReviewSubmissionPending,
 			limit,
 		)
-		if err != nil {
-			return err
+		if queryErr != nil {
+			return queryErr
 		}
 		for _, id := range ids {
-			token, err := newLeaseToken(workerLabel)
-			if err != nil {
-				return err
+			token, tokenErr := newLeaseToken(workerLabel)
+			if tokenErr != nil {
+				return tokenErr
 			}
-			if _, err := conn.ExecContext(ctx, `
+			if _, execErr := conn.ExecContext(ctx, `
 				UPDATE pr_review_submissions
 				SET claim_from = ?, status = ?, owner = ?, lease_until = ?,
 				    attempts = attempts + 1, updated_at = ?
@@ -1971,26 +1964,26 @@ func (s *Store) ClaimReviewSubmissions(
 				toDBTime(leaseUntil),
 				toDBTime(now),
 				id,
-			); err != nil {
-				return err
+			); execErr != nil {
+				return execErr
 			}
-			submission, err := scanReviewSubmission(conn.QueryRowContext(ctx, `
+			submission, scanErr := scanReviewSubmission(conn.QueryRowContext(ctx, `
 				SELECT `+reviewSubmissionColumns+`
 				FROM pr_review_submissions
 				WHERE id = ?`,
 				id,
 			))
-			if err != nil {
-				return err
+			if scanErr != nil {
+				return scanErr
 			}
 			claimed = append(claimed, submission)
 		}
 		return nil
 	})
-	if err != nil {
+	if transactionErr != nil {
 		return nil, fmt.Errorf(
 			"claim pull request review submissions: %w",
-			s.dbError(err),
+			s.dbError(transactionErr),
 		)
 	}
 	return claimed, nil
@@ -2014,6 +2007,7 @@ func expireReviewSubmissionClaims(
 	if err != nil {
 		return err
 	}
+	defer func() { _ = rows.Close() }()
 	type expiredClaim struct {
 		id     string
 		caseID string
@@ -2022,16 +2016,11 @@ func expireReviewSubmissionClaims(
 	for rows.Next() {
 		var claim expiredClaim
 		if err := rows.Scan(&claim.id, &claim.caseID); err != nil {
-			_ = rows.Close()
 			return err
 		}
 		expired = append(expired, claim)
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	if err := rows.Close(); err != nil {
 		return err
 	}
 	for _, claim := range expired {
@@ -2097,15 +2086,15 @@ func (s *Store) RenewReviewSubmissionLease(
 			ErrInvalidReview,
 		)
 	}
-	now, err := s.currentTime()
-	if err != nil {
-		return err
+	now, clockErr := s.currentTime()
+	if clockErr != nil {
+		return clockErr
 	}
 	leaseUntil := now.Add(lease)
-	if err := validateDBTimestamp("review submission lease deadline", leaseUntil); err != nil {
-		return err
+	if validationErr := validateDBTimestamp("review submission lease deadline", leaseUntil); validationErr != nil {
+		return validationErr
 	}
-	result, err := s.db.ExecContext(ctx, `
+	result, execErr := s.db.ExecContext(ctx, `
 		UPDATE pr_review_submissions
 		SET lease_until = ?, updated_at = ?
 		WHERE id = ? AND status = ? AND owner = ? AND lease_until > ?`,
@@ -2116,8 +2105,8 @@ func (s *Store) RenewReviewSubmissionLease(
 		leaseToken,
 		toDBTime(now),
 	)
-	if err != nil {
-		return fmt.Errorf("renew review submission lease: %w", s.dbError(err))
+	if execErr != nil {
+		return fmt.Errorf("renew review submission lease: %w", s.dbError(execErr))
 	}
 	return s.requireLeaseUpdate(ctx, result, "pr_review_submissions", id)
 }
@@ -2186,7 +2175,7 @@ func (s *Store) FinishReviewSubmission(
 	input.InternalError = s.sanitizeDetail(input.InternalError)
 
 	var detail ReviewCaseDetail
-	err := s.withImmediate(ctx, func(conn *sql.Conn) error {
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
 		now, err := s.currentTime()
 		if err != nil {
 			return err
@@ -2238,7 +2227,7 @@ func (s *Store) FinishReviewSubmission(
 				resolvedAt = toDBTime(now)
 			}
 		}
-		if _, err := conn.ExecContext(ctx, `
+		if _, execErr := conn.ExecContext(ctx, `
 			UPDATE pr_review_submissions
 			SET status = ?, claim_from = '', owner = '', lease_until = NULL,
 			    public_error_code = ?, internal_error = ?,
@@ -2253,10 +2242,10 @@ func (s *Store) FinishReviewSubmission(
 			toDBTime(now),
 			submissionSubmittedAt,
 			input.SubmissionID,
-		); err != nil {
-			return err
+		); execErr != nil {
+			return execErr
 		}
-		if _, err := conn.ExecContext(ctx, `
+		if _, execErr := conn.ExecContext(ctx, `
 			UPDATE pr_review_cases
 			SET status = ?, version = version + 1, public_error_code = ?,
 			    updated_at = ?, resolved_at = ?, submitted_at = ?
@@ -2267,16 +2256,16 @@ func (s *Store) FinishReviewSubmission(
 			resolvedAt,
 			caseSubmittedAt,
 			submission.CaseID,
-		); err != nil {
-			return err
+		); execErr != nil {
+			return execErr
 		}
 		detail, err = getReviewCaseDetailWith(ctx, conn, submission.CaseID)
 		return err
 	})
-	if err != nil {
+	if transactionErr != nil {
 		return ReviewCaseDetail{}, fmt.Errorf(
 			"finish pull request review submission: %w",
-			s.dbError(err),
+			s.dbError(transactionErr),
 		)
 	}
 	return detail, nil
