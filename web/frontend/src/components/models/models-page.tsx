@@ -1,5 +1,4 @@
 import {
-  IconDatabase,
   IconEdit,
   IconGitBranch,
   IconLoader2,
@@ -14,9 +13,7 @@ import {
   type ModelAlias,
   type ModelAliasCatalogEntry,
   type ModelInfo,
-  type ModelProviderOption,
   getModels,
-  setDefaultAccount,
   setDefaultModelAlias,
   setDefaultSelection,
 } from "@/api/models"
@@ -32,12 +29,9 @@ import {
 import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { refreshGatewayState } from "@/store/gateway"
 
-import { AddModelSheet } from "./add-model-sheet"
-import { CatalogDialog } from "./catalog-dialog"
 import { DeleteModelAliasDialog } from "./delete-model-alias-dialog"
 import { DeleteModelDialog } from "./delete-model-dialog"
-import { EditModelSheet } from "./edit-model-sheet"
-import { ModelAliasSheet } from "./model-alias-sheet"
+import { ModelAliasDialog } from "./model-alias-sheet"
 import { ModelCard } from "./model-card"
 import { ModelRouterSheet } from "./model-router-sheet"
 
@@ -47,12 +41,6 @@ function isAccountRouterModel(model: ModelInfo): boolean {
 
 function isModelRouterModel(model: ModelInfo): boolean {
   return model.provider === "model-router" || model.model_router != null
-}
-
-function isVisibleModel(model: ModelInfo): boolean {
-  return (
-    !isAccountRouterModel(model) && !model.model_name.startsWith("credential:")
-  )
 }
 
 export function ModelsPage() {
@@ -67,14 +55,8 @@ export function ModelsPage() {
   const [configRevision, setConfigRevision] = useState("")
   const [draftAccountRef, setDraftAccountRef] = useState("")
   const [draftModelName, setDraftModelName] = useState("")
-  const [providerOptions, setProviderOptions] = useState<ModelProviderOption[]>(
-    [],
-  )
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState("")
-  const [addOpen, setAddOpen] = useState(false)
-  const [catalogOpen, setCatalogOpen] = useState(false)
-  const [editingModel, setEditingModel] = useState<ModelInfo | null>(null)
   const [deletingModel, setDeletingModel] = useState<ModelInfo | null>(null)
   const [aliasOpen, setAliasOpen] = useState(false)
   const [editingAliasIndex, setEditingAliasIndex] = useState<number | null>(
@@ -111,7 +93,6 @@ export function ModelsPage() {
       setConfigRevision(data.revision ?? "")
       setDraftAccountRef(data.default_account_ref ?? "")
       setDraftModelName(data.default_model ?? "")
-      setProviderOptions(data.provider_options ?? [])
       setFetchError("")
     } catch (e) {
       setFetchError(e instanceof Error ? e.message : t("models.loadError"))
@@ -124,7 +105,10 @@ export function ModelsPage() {
     void fetchModels()
   }, [fetchModels])
 
-  const visibleModels = useMemo(() => models.filter(isVisibleModel), [models])
+  const modelRouterModels = useMemo(
+    () => models.filter(isModelRouterModel),
+    [models],
+  )
   const concreteAccountRefs = useMemo(
     () =>
       [
@@ -132,7 +116,9 @@ export function ModelsPage() {
           models
             .filter(
               (model) =>
-                !isAccountRouterModel(model) && !isModelRouterModel(model),
+                model.enabled !== false &&
+                !isAccountRouterModel(model) &&
+                !isModelRouterModel(model),
             )
             .map((model) => model.model_name.trim())
             .filter(Boolean),
@@ -253,7 +239,7 @@ export function ModelsPage() {
                 name === defaultModelName
                   ? t(
                       "models.alias.deleteDefault",
-                      "Change the default alias before deleting it.",
+                      "Change the runtime model alias before deleting it.",
                     )
                   : t("models.alias.delete", "Delete model alias")
               }
@@ -278,28 +264,38 @@ export function ModelsPage() {
               </div>
             ),
           )}
-          {Object.keys(alias.account_overrides ?? {}).length === 0 && (
-            <p className="text-muted-foreground text-xs">
-              {t("models.alias.baseForAll", "Base model for every account")}
-            </p>
-          )}
+          {(alias.disabled_accounts ?? []).map((accountRef) => (
+            <div
+              key={accountRef}
+              className="bg-muted/60 grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-1 rounded px-2 py-1 font-mono text-[11px]"
+            >
+              <span className="truncate">{accountRef}</span>
+              <span className="text-muted-foreground">→</span>
+              <span className="text-destructive truncate text-right">
+                {t("models.alias.disabled", "Disabled")}
+              </span>
+            </div>
+          ))}
+          {Object.keys(alias.account_overrides ?? {}).length === 0 &&
+            (alias.disabled_accounts ?? []).length === 0 && (
+              <p className="text-muted-foreground text-xs">
+                {t(
+                  "models.alias.baseForAll",
+                  "Default model for every account",
+                )}
+              </p>
+            )}
         </div>
       )}
     </article>
   )
 
   const handleSetDefault = async (model: ModelInfo) => {
-    const modelIsDefault = isModelRouterModel(model)
-      ? model.model_name === defaultModelName
-      : model.model_name === defaultAccountRef
-    if (modelIsDefault) return
+    if (!isModelRouterModel(model) || model.model_name === defaultModelName)
+      return
     setSettingDefaultIndex(model.index)
     try {
-      if (isModelRouterModel(model)) {
-        await setDefaultModelAlias(model.model_name)
-      } else {
-        await setDefaultAccount(model.model_name)
-      }
+      await setDefaultModelAlias(model.model_name)
       await fetchModels()
       const gateway = await refreshGatewayState({ force: true })
       showSaveSuccessOrRestartToast(
@@ -316,12 +312,8 @@ export function ModelsPage() {
   }
 
   const handleEdit = (model: ModelInfo) => {
-    if (isModelRouterModel(model)) {
-      setEditingRouter(model)
-      setRouterOpen(true)
-      return
-    }
-    setEditingModel(model)
+    setEditingRouter(model)
+    setRouterOpen(true)
   }
 
   const handleSaveDefaultSelection = async () => {
@@ -353,28 +345,10 @@ export function ModelsPage() {
           <Button
             size="sm"
             variant="outline"
-            onClick={() => setCatalogOpen(true)}
-            disabled={providerOptions.length === 0}
-          >
-            <IconDatabase className="size-4" />
-            {t("models.catalog.button")}
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
             onClick={() => setRouterOpen(true)}
           >
             <IconGitBranch className="size-4" />
             {t("models.modelRouter.button")}
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setAddOpen(true)}
-            disabled={providerOptions.length === 0}
-          >
-            <IconPlus className="size-4" />
-            {t("models.add.button")}
           </Button>
         </div>
       </PageHeader>
@@ -410,13 +384,13 @@ export function ModelsPage() {
               <div className="flex flex-col gap-4 lg:flex-row lg:items-end">
                 <div className="min-w-0 flex-1">
                   <h2 className="text-sm font-semibold">
-                    {t("models.defaultSelection.title", "Default selection")}
+                    {t("models.defaultSelection.title", "Runtime selection")}
                   </h2>
                   <p className="text-muted-foreground mt-1 text-xs">
                     {defaultAccountRef && defaultModelName
                       ? t(
                           "models.defaultSelection.current",
-                          "Current: {{account}} / {{alias}}",
+                          "Active: {{account}} / {{alias}}",
                           {
                             account: defaultAccountRef,
                             alias: defaultModelName,
@@ -424,7 +398,7 @@ export function ModelsPage() {
                         )
                       : t(
                           "models.defaultSelection.none",
-                          "No model configured. Choose both an account and a model alias.",
+                          "No runtime model configured. Choose both an account and a model alias.",
                         )}
                   </p>
                 </div>
@@ -436,7 +410,7 @@ export function ModelsPage() {
                     <SelectTrigger
                       aria-label={t(
                         "models.defaultSelection.account",
-                        "Default account",
+                        "Runtime account",
                       )}
                     >
                       <SelectValue
@@ -461,7 +435,7 @@ export function ModelsPage() {
                     <SelectTrigger
                       aria-label={t(
                         "models.defaultSelection.alias",
-                        "Default model alias",
+                        "Runtime model alias",
                       )}
                     >
                       <SelectValue
@@ -493,7 +467,7 @@ export function ModelsPage() {
                   {savingDefaultSelection && (
                     <IconLoader2 className="size-4 animate-spin" />
                   )}
-                  {t("models.defaultSelection.save", "Save default")}
+                  {t("models.defaultSelection.save", "Apply selection")}
                 </Button>
               </div>
             </section>
@@ -559,53 +533,31 @@ export function ModelsPage() {
               </section>
             )}
 
-            <section>
-              <h2 className="text-sm font-semibold">
-                {t("models.accountsTitle", "Provider accounts")}
-              </h2>
-              <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {visibleModels.map((model) => (
-                  <ModelCard
-                    key={`${model.index}-${model.model_name}`}
-                    model={model}
-                    onEdit={handleEdit}
-                    onSetDefault={(item) => void handleSetDefault(item)}
-                    onDelete={setDeletingModel}
-                    settingDefault={settingDefaultIndex === model.index}
-                    defaultChangePending={settingDefaultIndex !== null}
-                    isDefault={
-                      isModelRouterModel(model)
-                        ? model.model_name === defaultModelName
-                        : model.model_name === defaultAccountRef
-                    }
-                  />
-                ))}
-                {visibleModels.length === 0 && (
-                  <div className="text-muted-foreground py-12 text-sm">
-                    {t("models.empty", "No provider accounts configured.")}
-                  </div>
-                )}
-              </div>
-            </section>
+            {modelRouterModels.length > 0 && (
+              <section>
+                <h2 className="text-sm font-semibold">
+                  {t("models.modelRouter.sectionTitle", "Model routers")}
+                </h2>
+                <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  {modelRouterModels.map((model) => (
+                    <ModelCard
+                      key={`${model.index}-${model.model_name}`}
+                      model={model}
+                      onEdit={handleEdit}
+                      onSetDefault={(item) => void handleSetDefault(item)}
+                      onDelete={setDeletingModel}
+                      settingDefault={settingDefaultIndex === model.index}
+                      defaultChangePending={settingDefaultIndex !== null}
+                      isDefault={model.model_name === defaultModelName}
+                    />
+                  ))}
+                </div>
+              </section>
+            )}
           </div>
         )}
       </div>
 
-      <AddModelSheet
-        open={addOpen}
-        existingModelNames={models.map((item) => item.model_name)}
-        providerOptions={providerOptions}
-        onClose={() => setAddOpen(false)}
-        onSaved={fetchModels}
-      />
-      <EditModelSheet
-        open={editingModel != null}
-        model={editingModel}
-        revision={configRevision}
-        providerOptions={providerOptions}
-        onClose={() => setEditingModel(null)}
-        onSaved={fetchModels}
-      />
       <ModelRouterSheet
         open={routerOpen}
         model={editingRouter}
@@ -625,13 +577,7 @@ export function ModelsPage() {
         onClose={() => setDeletingModel(null)}
         onDeleted={fetchModels}
       />
-      <CatalogDialog
-        open={catalogOpen}
-        providerOptions={providerOptions}
-        onClose={() => setCatalogOpen(false)}
-        onModelAdded={fetchModels}
-      />
-      <ModelAliasSheet
+      <ModelAliasDialog
         open={aliasOpen}
         alias={editingAlias}
         aliasIndex={editingAliasIndex}

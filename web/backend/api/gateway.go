@@ -466,11 +466,14 @@ func computeConfigSignature(cfg *config.Config) string {
 			overrides = append(overrides, accountRef+"="+model)
 		}
 		sort.Strings(overrides)
+		disabledAccounts := append([]string(nil), alias.DisabledAccounts...)
+		sort.Strings(disabledAccounts)
 		parts = append(parts, strings.Join([]string{
 			"alias",
 			strings.TrimSpace(alias.Name),
 			strings.TrimSpace(alias.Model),
 			strings.Join(overrides, ","),
+			strings.Join(disabledAccounts, ","),
 		}, ":"))
 	}
 	modelStreamingSignatures := computeModelStreamingSignatures(cfg)

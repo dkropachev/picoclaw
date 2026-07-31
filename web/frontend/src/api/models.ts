@@ -115,6 +115,7 @@ export interface ModelAlias {
   name: string
   model: string
   account_overrides?: Record<string, string>
+  disabled_accounts?: string[]
 }
 
 export interface ModelAliasCatalogEntry {

@@ -200,7 +200,8 @@ func TestModelAliasCRUDValidatesConcreteAccountOverrides(t *testing.T) {
 		`{
 			"name":"analysis",
 			"model":"gpt-5.4-mini",
-			"account_overrides":{"openai-work":"gpt-5.4-nano"}
+			"account_overrides":{"openai-work":"gpt-5.4-nano"},
+			"disabled_accounts":["credential:github-copilot:backup"]
 		}`,
 	)
 	if update.Code != http.StatusOK {
@@ -212,6 +213,9 @@ func TestModelAliasCRUDValidatesConcreteAccountOverrides(t *testing.T) {
 	}
 	if got := cfg.ModelAliases[1].AccountOverrides["openai-work"]; got != "gpt-5.4-nano" {
 		t.Fatalf("override = %q", got)
+	}
+	if got := cfg.ModelAliases[1].DisabledAccounts; len(got) != 1 || got[0] != "credential:github-copilot:backup" {
+		t.Fatalf("disabled accounts = %#v", got)
 	}
 
 	cfg.AccountRouters = []config.AccountRouterConfig{{

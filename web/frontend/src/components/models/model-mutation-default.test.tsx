@@ -95,7 +95,9 @@ describe("atomic model default mutations", () => {
       screen.getByPlaceholderText("e.g. openai-work"),
       "openai-second",
     )
-    await user.click(screen.getByRole("switch", { name: "Default Account" }))
+    await user.click(
+      screen.getByRole("switch", { name: "Use as runtime account" }),
+    )
     await user.click(screen.getByRole("button", { name: "Add Account" }))
 
     await waitFor(() => expect(mockedAddModel).toHaveBeenCalledTimes(1))

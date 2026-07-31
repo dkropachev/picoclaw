@@ -1596,6 +1596,7 @@ async function mockLauncherApis(
           case "/api/accounts/models/fetch": {
             const body = request.postDataJSON() as {
               credential_id?: string
+              account_ref?: string
             }
             const failure = body.credential_id
               ? options.fetchModelFailures?.[body.credential_id]
@@ -1616,11 +1617,17 @@ async function mockLauncherApis(
                 total: 0,
               })
             }
+            const accountModels =
+              body.account_ref === "gpt-4o-mini"
+                ? ["gpt-4o-mini", "gpt-5.4"]
+                : body.account_ref === "gpt-4o"
+                  ? ["gpt-4o", "gpt-5.4"]
+                  : ["gpt-4o", "gpt-5.4"]
             return json(route, {
-              models: [
-                { id: "gpt-4o", owned_by: "openai" },
-                { id: "gpt-5.4", owned_by: "openai" },
-              ],
+              models: accountModels.map((id) => ({
+                id,
+                owned_by: "openai",
+              })),
               total: 2,
             })
           }
@@ -3683,17 +3690,17 @@ test("accounts page lists registered accounts and opens onboarding", async ({
   expect(errors).toEqual([])
 })
 
-test("models page exposes strict defaults and editable model aliases", async ({
+test("models page exposes explicit runtime selection and editable model aliases", async ({
   page,
 }) => {
   const errors = collectPageErrors(page)
   await gotoMockedRoute(page, "/models")
 
-  const defaultSection = page.locator("section").filter({
-    has: page.getByRole("heading", { name: "Default selection" }),
+  const runtimeSection = page.locator("section").filter({
+    has: page.getByRole("heading", { name: "Runtime selection" }),
   })
   await expect(
-    defaultSection.getByText("Current: gpt-4o-mini / code"),
+    runtimeSection.getByText("Active: gpt-4o-mini / code"),
   ).toBeVisible()
 
   const aliasSection = page.locator("section").filter({
@@ -3721,12 +3728,26 @@ test("models page exposes strict defaults and editable model aliases", async ({
   await expect(editor.getByRole("textbox").first()).toBeDisabled()
   await expect(
     editor.getByText(
-      "Overrides are allowed only for concrete accounts, never account routers.",
+      "Choose another model or disable this alias for a concrete account.",
     ),
   ).toBeVisible()
+  await editor.getByRole("combobox", { name: "Default model" }).click()
+  const sharedModel = page.getByRole("option").filter({ hasText: "gpt-5.4" })
+  await expect(sharedModel.getByText("All accounts (2)")).toBeVisible()
+  const accountSpecificModel = page.getByRole("option", {
+    name: /^gpt-4o-mini/,
+  })
+  await expect(accountSpecificModel.getByText(/Missing: gpt-4o/)).toBeVisible()
+  await page.keyboard.press("Escape")
   await expect(
     editor.getByRole("button", { name: "Add override" }),
   ).toBeEnabled()
+  await editor.getByRole("button", { name: "Add override" }).click()
+  await editor.getByRole("combobox", { name: "Override model" }).last().click()
+  await expect(
+    page.getByRole("option", { name: "Disabled for this account" }),
+  ).toBeVisible()
+  await page.keyboard.press("Escape")
   expect(errors).toEqual([])
 })
 

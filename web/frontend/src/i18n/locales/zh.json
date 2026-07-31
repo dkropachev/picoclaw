@@ -256,7 +256,7 @@
   },
   "models": {
     "description": "为 AI 服务商配置 API Key。只有已配置的模型可用于对话。",
-    "defaultChangeSuccess": "默认模型已更新。",
+    "defaultChangeSuccess": "运行时选择已更新。",
     "unsavedPrompt": "当前修改尚未保存，保存后才会写入模型配置。",
     "restartHint": "模型配置保存后需要重启服务才能生效。",
     "loadError": "加载模型列表失败",
@@ -270,27 +270,27 @@
       "unreachable": "服务不可达"
     },
     "badge": {
-      "default": "默认",
+      "default": "当前使用",
       "virtual": "虚拟"
     },
     "action": {
       "edit": "编辑 API Key",
-      "setDefault": "设为默认",
+      "setDefault": "用于运行时",
       "delete": "删除模型",
       "setDefaultDisabled": {
-        "setting": "正在设为默认...",
-        "unavailable": "无法将不可用的模型设为默认",
-        "isDefault": "该模型已是默认模型",
-        "isVirtual": "无法将虚拟模型设为默认",
+        "setting": "正在更新运行时选择...",
+        "unavailable": "不可用的账户或路由器不能用于运行时",
+        "isDefault": "已用于运行时选择",
+        "isVirtual": "此虚拟条目不能用作运行时账户",
         "unsupportedProvider": "该服务商不能设为默认聊天模型。"
       },
       "deleteDisabled": {
-        "isDefault": "无法删除默认模型"
+        "isDefault": "删除此条目前请先更改运行时选择"
       }
     },
     "defaultOnSave": {
-      "label": "默认模型",
-      "description": "保存后自动将该模型设置为默认模型。",
+      "label": "用作运行时账户",
+      "description": "保存后将此账户与当前运行时模型别名一起使用。",
       "unsupportedProvider": "该服务商可以保存在模型列表中，但不能作为默认聊天模型使用。"
     },
     "add": {

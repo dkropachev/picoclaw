@@ -189,6 +189,11 @@ func subscriptionAliasModelForAccount(
 	if alias == nil || accountProvider == "" {
 		return "", false
 	}
+	for _, disabledAccountRef := range alias.DisabledAccounts {
+		if disabledAccountRef == accountRef {
+			return "", false
+		}
+	}
 	configuredModel := alias.Model
 	if override, ok := alias.AccountOverrides[accountRef]; ok {
 		configuredModel = override

@@ -22,10 +22,16 @@ func TestModelAliasExactLookupAndResolution(t *testing.T) {
 				Provider:  "openai",
 				Enabled:   true,
 			},
+			{
+				ModelName: "account-disabled",
+				Provider:  "openai",
+				Enabled:   true,
+			},
 		},
 		ModelAliases: []ModelAliasConfig{{
-			Name:  "coding",
-			Model: "gpt-5.4",
+			Name:             "coding",
+			Model:            "gpt-5.4",
+			DisabledAccounts: []string{"account-disabled"},
 			AccountOverrides: map[string]string{
 				"account-work": "gpt-5.4-pro",
 			},
@@ -43,6 +49,10 @@ func TestModelAliasExactLookupAndResolution(t *testing.T) {
 	model, err = cfg.ResolveModelAlias("coding", "account-work")
 	require.NoError(t, err)
 	require.Equal(t, "gpt-5.4-pro", model)
+
+	_, err = cfg.ResolveModelAlias("coding", "account-disabled")
+	require.ErrorIs(t, err, ErrModelAliasDisabled)
+	require.ErrorContains(t, err, `model alias "coding" is disabled for account "account-disabled"`)
 
 	_, err = cfg.GetModelAlias("Coding")
 	require.ErrorContains(t, err, `model alias "Coding" is not configured`)
@@ -151,6 +161,19 @@ func TestValidateModelAliases(t *testing.T) {
 			},
 		},
 		{
+			name: "direct and credential accounts may be disabled",
+			cfg: &Config{
+				ModelList: []*ModelConfig{directAccount},
+				ModelAliases: []ModelAliasConfig{{
+					Name: "coding", Model: "gpt-5.4",
+					DisabledAccounts: []string{
+						"account-work",
+						"credential:github-copilot:me",
+					},
+				}},
+			},
+		},
+		{
 			name: "empty name",
 			cfg: &Config{ModelAliases: []ModelAliasConfig{{
 				Model: "gpt-5.4",
@@ -235,6 +258,28 @@ func TestValidateModelAliases(t *testing.T) {
 				AccountOverrides: map[string]string{"missing": "gpt-5.4-pro"},
 			}}},
 			wantErr: "references an unknown concrete account",
+		},
+		{
+			name: "unknown disabled account",
+			cfg: &Config{ModelAliases: []ModelAliasConfig{{
+				Name:             "coding",
+				Model:            "gpt-5.4",
+				DisabledAccounts: []string{"missing"},
+			}}},
+			wantErr: "disabled_accounts[0] references an unknown concrete account",
+		},
+		{
+			name: "account cannot be overridden and disabled",
+			cfg: &Config{
+				ModelList: []*ModelConfig{directAccount},
+				ModelAliases: []ModelAliasConfig{{
+					Name:             "coding",
+					Model:            "gpt-5.4",
+					AccountOverrides: map[string]string{"account-work": "gpt-5.4-pro"},
+					DisabledAccounts: []string{"account-work"},
+				}},
+			},
+			wantErr: "cannot both override and disable",
 		},
 		{
 			name: "override provider must match target account",

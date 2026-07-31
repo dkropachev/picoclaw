@@ -32,6 +32,10 @@ const CurrentVersion = 5
 // a configured model alias.
 var ErrNoModelConfigured = protocoltypes.ErrNoModelConfigured
 
+// ErrModelAliasDisabled is returned when an alias is explicitly unavailable
+// for the selected concrete account.
+var ErrModelAliasDisabled = errors.New("model alias disabled for account")
+
 func init() {
 	initChannel()
 }
@@ -1012,11 +1016,13 @@ type VoiceConfig struct {
 
 // ModelAliasConfig maps a stable user-facing alias to a concrete upstream
 // model. AccountOverrides can select a different concrete model for a direct
-// account, but never for an account router.
+// account, while DisabledAccounts can make the alias unavailable there. Both
+// apply only to concrete accounts, never account routers.
 type ModelAliasConfig struct {
 	Name             string            `json:"name"                        yaml:"name"`
 	Model            string            `json:"model"                       yaml:"model"`
 	AccountOverrides map[string]string `json:"account_overrides,omitempty" yaml:"account_overrides,omitempty"`
+	DisabledAccounts []string          `json:"disabled_accounts,omitempty" yaml:"disabled_accounts,omitempty"`
 }
 
 type ModelStreamingConfig struct {
@@ -2787,6 +2793,16 @@ func (c *Config) ResolveModelAlias(aliasName, concreteAccountRef string) (string
 	if err != nil {
 		return "", err
 	}
+	for _, disabledAccountRef := range alias.DisabledAccounts {
+		if disabledAccountRef == concreteAccountRef {
+			return "", fmt.Errorf(
+				"%w: model alias %q is disabled for account %q",
+				ErrModelAliasDisabled,
+				aliasName,
+				concreteAccountRef,
+			)
+		}
+	}
 	if alias.AccountOverrides != nil {
 		if model, ok := alias.AccountOverrides[concreteAccountRef]; ok {
 			if strings.TrimSpace(model) == "" {
@@ -2963,6 +2979,63 @@ func (c *Config) ValidateModelAliases() error {
 				"model_aliases[%d].account_overrides[%q] references an unknown concrete account",
 				i,
 				accountRef,
+			)
+		}
+		disabledSeen := make(map[string]struct{}, len(alias.DisabledAccounts))
+		for j, accountRef := range alias.DisabledAccounts {
+			if strings.TrimSpace(accountRef) == "" {
+				return fmt.Errorf(
+					"model_aliases[%d].disabled_accounts[%d] is empty",
+					i,
+					j,
+				)
+			}
+			if accountRef != strings.TrimSpace(accountRef) {
+				return fmt.Errorf(
+					"model_aliases[%d].disabled_accounts[%d] must be an exact account reference",
+					i,
+					j,
+				)
+			}
+			if _, duplicate := disabledSeen[accountRef]; duplicate {
+				return fmt.Errorf(
+					"model_aliases[%d].disabled_accounts contains duplicate account %q",
+					i,
+					accountRef,
+				)
+			}
+			disabledSeen[accountRef] = struct{}{}
+			if _, overridden := alias.AccountOverrides[accountRef]; overridden {
+				return fmt.Errorf(
+					"model_aliases[%d] cannot both override and disable account %q",
+					i,
+					accountRef,
+				)
+			}
+			if _, ok := accountRouters[accountRef]; ok {
+				return fmt.Errorf(
+					"model_aliases[%d].disabled_accounts[%d] must reference a concrete account, not an account router",
+					i,
+					j,
+				)
+			}
+			if _, ok := modelRouters[accountRef]; ok {
+				return fmt.Errorf(
+					"model_aliases[%d].disabled_accounts[%d] must reference a concrete account, not a model router",
+					i,
+					j,
+				)
+			}
+			if _, ok := concreteAccounts[accountRef]; ok {
+				continue
+			}
+			if _, ok := AccountRouterCredentialAccountProvider(accountRef); ok {
+				continue
+			}
+			return fmt.Errorf(
+				"model_aliases[%d].disabled_accounts[%d] references an unknown concrete account",
+				i,
+				j,
 			)
 		}
 	}

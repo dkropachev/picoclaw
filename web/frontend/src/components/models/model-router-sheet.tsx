@@ -371,16 +371,19 @@ export function ModelRouterSheet({
             </Field>
           </div>
           <SwitchCardField
-            label={t("models.modelRouter.defaultOnSave", "Default model alias")}
+            label={t(
+              "models.modelRouter.defaultOnSave",
+              "Use as runtime model alias",
+            )}
             hint={t(
               "models.modelRouter.defaultOnSaveHint",
-              "Use this router as the default alias with the current default account.",
+              "Use this router with the active runtime account.",
             )}
             checked={setAsDefault}
             onCheckedChange={setSetAsDefault}
             ariaLabel={t(
               "models.modelRouter.defaultOnSave",
-              "Default model alias",
+              "Use as runtime model alias",
             )}
           />
         </div>

@@ -412,6 +412,17 @@ func TestValidateModelSelectionsChecksAccountAndModelRouterCrossProduct(t *testi
 		`model alias "deep" with account "openai-work"`,
 	)
 
+	cfg.ModelAliases[1].DisabledAccounts = []string{"openai-work"}
+	require.NoError(t, cfg.ValidateModelSelections())
+
+	cfg.ModelAliases[1].DisabledAccounts = []string{
+		"openai-work",
+		"anthropic-work",
+	}
+	err = cfg.ValidateModelSelections()
+	require.ErrorContains(t, err, `model alias "deep" is disabled for every account`)
+
+	cfg.ModelAliases[1].DisabledAccounts = nil
 	cfg.ModelAliases[1].AccountOverrides = map[string]string{
 		"openai-work": "openai/gpt-5.4",
 	}

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -195,7 +196,7 @@ func candidatesForAccountAliases(
 	aliases = append(aliases, fallbackAliases...)
 	seen := make(map[string]bool, len(aliases))
 	out := make([]providers.FallbackCandidate, 0, len(aliases))
-	for _, alias := range aliases {
+	for aliasIndex, alias := range aliases {
 		alias = strings.TrimSpace(alias)
 		if alias == "" || seen[alias] {
 			continue
@@ -209,6 +210,9 @@ func candidatesForAccountAliases(
 			providersOut,
 		)
 		if err != nil {
+			if aliasIndex > 0 && errors.Is(err, config.ErrModelAliasDisabled) {
+				continue
+			}
 			return nil, fmt.Errorf(
 				"model alias %q is not runnable for account %q: %w",
 				alias,
