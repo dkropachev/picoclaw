@@ -233,4 +233,33 @@ describe("useChatModels", () => {
     expect(result.current.selectedModelAlias).toBe("")
     expect(setDefaultSelection).not.toHaveBeenCalled()
   })
+
+  it("uses the configured chat alias locally when the persisted alias default is empty", async () => {
+    vi.mocked(getModels).mockResolvedValue({
+      models: [
+        model({
+          model_name: "router-1",
+          provider: "router",
+          router: { name: "router-1", enabled: true },
+          is_virtual: true,
+        }),
+      ],
+      model_aliases: [
+        { name: "chat", model: "gpt-5.6-sol" },
+        { name: "code", model: "gpt-5.6-sol" },
+      ],
+      total: 1,
+      default_account_ref: "router-1",
+      default_model: "",
+      revision: "models-revision-1",
+      provider_options: [],
+    })
+
+    const { result } = renderHook(() => useChatModels({ isConnected: true }))
+
+    await waitFor(() => expect(result.current.selectedModelAlias).toBe("chat"))
+    expect(result.current.selectedAccountName).toBe("router-1")
+    expect(result.current.defaultModelName).toBe("")
+    expect(setDefaultSelection).not.toHaveBeenCalled()
+  })
 })

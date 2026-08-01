@@ -157,6 +157,7 @@ export function useChatModels({ isConnected }: UseChatModelsOptions) {
       if (defaultModelName && aliasNames.has(defaultModelName)) {
         return defaultModelName
       }
+      if (aliasNames.has("chat")) return "chat"
       return ""
     })
   }, [
