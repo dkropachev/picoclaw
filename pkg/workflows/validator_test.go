@@ -1,6 +1,7 @@
 package workflows
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -90,6 +91,7 @@ jobs:
         with:
           session: inherit
           history: read_only
+          tools: none
           cache: session
           message: ${{ event.message.text }}
       - id: answer
@@ -125,6 +127,74 @@ jobs:
 				t.Fatalf("Validate() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestValidateReadOnlyAgentRequiresNoTools(t *testing.T) {
+	workflow := parseWorkflow(t, `
+name: Exact decision
+on:
+  manual: {}
+jobs:
+  decide:
+    runs-on: picoclaw
+    steps:
+      - uses: agent/main
+        with:
+          session: inherit
+          history: read_only
+          prompt: Decide whether the user is needed.
+`)
+	err := Validate(workflow)
+	if err == nil || !strings.Contains(err.Error(), "read_only history requires tools: none") {
+		t.Fatalf("Validate() error = %v, want read_only no-tools requirement", err)
+	}
+}
+
+func TestValidateReadOnlyAgentRequiresExactCanonicalAgentID(t *testing.T) {
+	workflow := parseWorkflow(t, `
+name: Exact decision identity
+on:
+  manual: {}
+jobs:
+  decide:
+    runs-on: picoclaw
+    steps:
+      - uses: agent/Main
+        with:
+          session: inherit
+          history: read_only
+          tools: none
+          prompt: Decide.
+`)
+	err := Validate(workflow)
+	if err == nil || !strings.Contains(err.Error(), "exact canonical agent ID") {
+		t.Fatalf("Validate() error = %v, want exact agent identity failure", err)
+	}
+}
+
+func TestValidateAgentModesRejectNonStrings(t *testing.T) {
+	for _, value := range []string{"true", "null"} {
+		for _, key := range []string{"history", "cache", "session", "tools"} {
+			t.Run(key+"_"+value, func(t *testing.T) {
+				workflow := parseWorkflow(t, fmt.Sprintf(`
+name: Invalid agent option
+on:
+  manual: {}
+jobs:
+  decide:
+    runs-on: picoclaw
+    steps:
+      - uses: agent/main
+        with:
+          %s: %s
+          prompt: Decide.
+`, key, value))
+				if err := Validate(workflow); err == nil {
+					t.Fatalf("Validate() error = nil, want non-string %s=%s rejection", key, value)
+				}
+			})
+		}
 	}
 }
 

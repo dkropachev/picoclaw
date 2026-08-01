@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1245,5 +1246,261 @@ func BenchmarkGetHistory_1000(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = store.GetHistory(ctx, "bench")
+	}
+}
+
+func TestReadSessionSnapshot_AliasExactAndNoCreate(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	canonicalKey := "canonical"
+	alias := "agent:main:direct:legacy"
+	scope := json.RawMessage(`{"version":1,"agent_id":"main"}`)
+	if err := store.UpsertSessionMeta(ctx, canonicalKey, scope, []string{alias}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddMessage(ctx, canonicalKey, "user", "review context"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSummary(ctx, canonicalKey, "summary"); err != nil {
+		t.Fatal(err)
+	}
+
+	key, history, meta, found, err := store.ReadSessionSnapshot(ctx, alias)
+	if err != nil || !found {
+		t.Fatalf("ReadSessionSnapshot() = (found=%v, err=%v)", found, err)
+	}
+	if key != canonicalKey || meta.Key != canonicalKey || meta.Summary != "summary" {
+		t.Fatalf("identity/meta = (%q, %+v)", key, meta)
+	}
+	if len(history) != 1 || history[0].Content != "review context" {
+		t.Fatalf("history = %+v", history)
+	}
+	storedScope := string(meta.Scope)
+	meta.Scope[0] = 'x'
+	meta.Aliases[0] = "mutated"
+	storedMeta, err := store.GetSessionMeta(ctx, canonicalKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(storedMeta.Scope) != storedScope || storedMeta.Aliases[0] != alias {
+		t.Fatalf("stored metadata changed through snapshot: %+v", storedMeta)
+	}
+
+	before, err := os.ReadDir(store.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, missingKey := range []string{"", "   ", "missing"} {
+		snapshotKey, snapshotHistory, snapshotMeta, found, snapshotErr := store.ReadSessionSnapshot(ctx, missingKey)
+		if snapshotErr != nil || found {
+			t.Fatalf(
+				"ReadSessionSnapshot(%q) = (key=%q, history=%v, meta=%+v, found=%v, err=%v), want miss",
+				missingKey,
+				snapshotKey,
+				snapshotHistory,
+				snapshotMeta,
+				found,
+				snapshotErr,
+			)
+		}
+	}
+	after, err := os.ReadDir(store.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("missing snapshot reads created files: before=%d after=%d", len(before), len(after))
+	}
+}
+
+func TestReadSessionSnapshot_HistorySummaryMetadataAreCoherent(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const key = "coherent"
+	if err := store.AddMessage(ctx, key, "user", "0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSummary(ctx, key, "0"); err != nil {
+		t.Fatal(err)
+	}
+	lock := store.sessionLock(key)
+	lock.Lock()
+	meta, err := store.readMeta(key)
+	if err == nil {
+		meta.ThreadTitle = "0"
+		err = store.writeMeta(key, meta)
+	}
+	lock.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writerDone := make(chan error, 1)
+	go func() {
+		for version := 1; version <= 50; version++ {
+			value := fmt.Sprintf("%d", version)
+			lock := store.sessionLock(key)
+			lock.Lock()
+			meta, err := store.readMeta(key)
+			if err == nil {
+				meta.Summary = value
+				meta.ThreadTitle = value
+				meta.Count = 1
+				meta.Skip = 0
+				err = store.rewriteJSONL(key, []providers.Message{{Role: "user", Content: value}})
+			}
+			if err == nil {
+				err = store.writeMeta(key, meta)
+			}
+			lock.Unlock()
+			if err != nil {
+				writerDone <- err
+				return
+			}
+		}
+		writerDone <- nil
+	}()
+
+	for {
+		_, history, meta, found, err := store.ReadSessionSnapshot(ctx, key)
+		if err != nil || !found {
+			t.Fatalf("ReadSessionSnapshot() = (found=%v, err=%v)", found, err)
+		}
+		if len(history) != 1 || history[0].Content != meta.Summary || meta.ThreadTitle != meta.Summary {
+			t.Fatalf("torn snapshot: history=%+v meta=%+v", history, meta)
+		}
+
+		select {
+		case err := <-writerDone:
+			if err != nil {
+				t.Fatal(err)
+			}
+			return
+		default:
+		}
+	}
+}
+
+func TestReadSessionSnapshot_PropagatesStrictAliasMetadataErrors(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.UpsertSessionMeta(ctx, "canonical", nil, []string{"agent:main:direct:alias"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store.dir, "zzz-broken.meta.json"), []byte(`{"key":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	key, history, meta, found, err := store.ReadSessionSnapshot(ctx, "agent:main:direct:alias")
+	if err == nil || found || !strings.Contains(err.Error(), "decode session metadata") {
+		t.Fatalf(
+			"strict alias lookup = (key=%q, history=%v, meta=%+v, found=%v, err=%v)",
+			key,
+			history,
+			meta,
+			found,
+			err,
+		)
+	}
+}
+
+func TestReadSessionSnapshot_RejectsAmbiguousAlias(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const alias = "agent:main:direct:ambiguous"
+	for _, key := range []string{"canonical-a", "canonical-b"} {
+		if err := store.UpsertSessionMeta(ctx, key, nil, []string{alias}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	key, history, meta, found, err := store.ReadSessionSnapshot(ctx, alias)
+	if err == nil || found || !strings.Contains(err.Error(), "multiple canonical keys") {
+		t.Fatalf(
+			"ambiguous alias lookup = (key=%q, history=%v, meta=%+v, found=%v, err=%v)",
+			key,
+			history,
+			meta,
+			found,
+			err,
+		)
+	}
+}
+
+func TestReadSessionSnapshot_RejectsAliasChangedAfterResolution(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const (
+		canonicalKey = "canonical"
+		alias        = "agent:main:direct:moving"
+	)
+	if err := store.UpsertSessionMeta(ctx, canonicalKey, nil, []string{alias}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, found, err := store.resolveSessionKeyStrict(ctx, alias)
+	if err != nil || !found || resolved != canonicalKey {
+		t.Fatalf("resolveSessionKeyStrict() = (%q, %v, %v)", resolved, found, err)
+	}
+	if updateErr := store.UpsertSessionMeta(ctx, canonicalKey, nil, nil); updateErr != nil {
+		t.Fatal(updateErr)
+	}
+
+	key, history, meta, found, err := store.readResolvedSessionSnapshot(ctx, alias, resolved)
+	if err == nil || found || !strings.Contains(err.Error(), "changed during snapshot lookup") {
+		t.Fatalf(
+			"stale resolved alias lookup = (key=%q, history=%v, meta=%+v, found=%v, err=%v)",
+			key,
+			history,
+			meta,
+			found,
+			err,
+		)
+	}
+}
+
+func TestReadSessionSnapshot_RejectsOrphanHistoryFilenameCollision(t *testing.T) {
+	store := newTestStore(t)
+	const (
+		orphanKey  = "agent:main:direct:user/foo"
+		requestKey = "agent:main:direct:user_foo"
+	)
+	if store.jsonlPath(orphanKey) != store.jsonlPath(requestKey) {
+		t.Fatal("test keys must collide after filename sanitization")
+	}
+	encoded, err := json.Marshal(providers.Message{Role: "user", Content: "orphaned history"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(store.jsonlPath(orphanKey), append(encoded, '\n'), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	key, history, meta, found, err := store.ReadSessionSnapshot(context.Background(), requestKey)
+	if err == nil || found || !strings.Contains(err.Error(), "metadata is missing") {
+		t.Fatalf(
+			"orphan collision lookup = (key=%q, history=%v, meta=%+v, found=%v, err=%v)",
+			key,
+			history,
+			meta,
+			found,
+			err,
+		)
+	}
+}
+
+func TestReadSessionSnapshot_Canceled(t *testing.T) {
+	store := newTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	key, history, meta, found, err := store.ReadSessionSnapshot(ctx, "missing")
+	if err != context.Canceled || found {
+		t.Fatalf(
+			"canceled snapshot = (key=%q, history=%v, meta=%+v, found=%v, err=%v), want context.Canceled",
+			key,
+			history,
+			meta,
+			found,
+			err,
+		)
 	}
 }

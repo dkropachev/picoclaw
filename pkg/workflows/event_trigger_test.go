@@ -1028,14 +1028,14 @@ jobs:
 }
 
 func TestAgentToolsModeBumpsWorkflowCompatibility(t *testing.T) {
-	if WorkflowEngineVersion != "8" {
-		t.Fatalf("WorkflowEngineVersion = %q, want 8", WorkflowEngineVersion)
+	if WorkflowEngineVersion != "9" {
+		t.Fatalf("WorkflowEngineVersion = %q, want 9", WorkflowEngineVersion)
 	}
-	if WorkflowSchemaVersion != "3" {
-		t.Fatalf("WorkflowSchemaVersion = %q, want 3", WorkflowSchemaVersion)
+	if WorkflowSchemaVersion != "4" {
+		t.Fatalf("WorkflowSchemaVersion = %q, want 4", WorkflowSchemaVersion)
 	}
-	if ValidatorFingerprint != "picoclaw-workflow-validator-v4" {
-		t.Fatalf("ValidatorFingerprint = %q, want v4", ValidatorFingerprint)
+	if ValidatorFingerprint != "picoclaw-workflow-validator-v5" {
+		t.Fatalf("ValidatorFingerprint = %q, want v5", ValidatorFingerprint)
 	}
 
 	current := NormalizeRuntimeCompatibility(RuntimeCompatibility{PicoclawVersion: "v1.0.0"})

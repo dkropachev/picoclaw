@@ -2,14 +2,17 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/workflows"
@@ -265,15 +268,25 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	defer releaseRuntime()
 	ctx = leaseCtx
 
-	if hooksErr := r.loop.ensureHooksInitialized(ctx); hooksErr != nil {
-		return nil, hooksErr
+	historyMode := strings.ToLower(strings.TrimSpace(req.History))
+	readOnlyDecision := historyMode == "read_only"
+	if readOnlyDecision && workflowAgentToolsMode(req.Tools) != workflows.AgentToolsNone {
+		return nil, fmt.Errorf("read_only workflow agent history requires tools: none")
 	}
-	if strings.TrimSpace(req.Tools) != workflows.AgentToolsNone {
-		if mcpErr := r.loop.ensureMCPInitialized(ctx); mcpErr != nil {
-			return nil, mcpErr
+	if !readOnlyDecision {
+		if hooksErr := r.loop.ensureHooksInitialized(ctx); hooksErr != nil {
+			return nil, hooksErr
+		}
+		if strings.TrimSpace(req.Tools) != workflows.AgentToolsNone {
+			if mcpErr := r.loop.ensureMCPInitialized(ctx); mcpErr != nil {
+				return nil, mcpErr
+			}
 		}
 	}
 	agentID := strings.TrimSpace(req.AgentID)
+	if readOnlyDecision && !routing.IsCanonicalAgentID(agentID) {
+		return nil, fmt.Errorf("read_only workflow agent ID must be an exact canonical ID")
+	}
 	registry := r.loop.GetRegistry()
 	agent, ok := registry.GetAgent(agentID)
 	if !ok {
@@ -293,24 +306,61 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		return nil, fmt.Errorf("agent workflow step message is required")
 	}
 	sessionKey := strings.TrimSpace(req.Session)
-	if sessionKey == "" {
+	if sessionKey == "" && !readOnlyDecision {
 		sessionKey = "workflow:agent:" + agentID
 	}
-	historyMode := strings.ToLower(strings.TrimSpace(req.History))
+	var (
+		readOnlySnapshot *session.SessionSnapshot
+		historyRevision  string
+	)
+	if readOnlyDecision {
+		snapshot, revision, snapshotErr := workflowReadOnlySessionSnapshot(
+			ctx,
+			agent,
+			agentID,
+			sessionKey,
+		)
+		if snapshotErr != nil {
+			return nil, snapshotErr
+		}
+		readOnlySnapshot = &snapshot
+		historyRevision = revision
+		sessionKey = snapshot.Key
+	}
 	noHistory := historyMode == "none"
 	promptCacheKey, disablePromptCache := workflowPromptCacheKey(req.Cache, agentID, sessionKey)
-	var restoreHistory []providers.Message
-	var restoreSummary string
-	if historyMode == "read_only" && agent.Sessions != nil {
-		restoreHistory = cloneProviderMessages(agent.Sessions.GetHistory(sessionKey))
-		restoreSummary = agent.Sessions.GetSummary(sessionKey)
-		defer func() {
-			agent.Sessions.SetHistory(sessionKey, restoreHistory)
-			agent.Sessions.SetSummary(sessionKey, restoreSummary)
-		}()
-	}
 	inbound := workflowInboundContext(req.Delivery, agentID)
 	runOnce := func(runMessage string, noHistoryOverride bool, runOptions workflowAgentRunOptions) (string, error) {
+		if readOnlySnapshot != nil {
+			return r.loop.askSideQuestionWithOptions(
+				ctx,
+				agent,
+				&processOptions{
+					Dispatch: DispatchRequest{
+						SessionKey:     sessionKey,
+						InboundContext: &inbound,
+						SessionScope:   session.CloneScope(readOnlySnapshot.Scope),
+						UserMessage:    runMessage,
+					},
+					PromptCacheKey:          promptCacheKey,
+					ModelNameOverride:       strings.TrimSpace(runOptions.ModelName),
+					ReasoningEffortOverride: strings.TrimSpace(runOptions.ReasoningEffort),
+					DisableTools:            true,
+					DisablePromptCache:      disablePromptCache,
+				},
+				runMessage,
+				sideQuestionExecutionOptions{
+					contextSnapshot: &sideQuestionContextSnapshot{
+						history: readOnlySnapshot.History,
+						summary: readOnlySnapshot.Summary,
+					},
+					promptCacheKey:     promptCacheKey,
+					disablePromptCache: disablePromptCache,
+					skipHooks:          true,
+					rejectToolCalls:    true,
+				},
+			)
+		}
 		return r.loop.runAgentLoop(ctx, agent, processOptions{
 			Dispatch: DispatchRequest{
 				SessionKey:     sessionKey,
@@ -339,7 +389,7 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 				managedErr,
 			)
 		}
-		return r.runManagedSplit(
+		outputs, managedErr := r.runManagedSplit(
 			req,
 			agent,
 			agentID,
@@ -350,6 +400,10 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 			strategy,
 			runOnce,
 		)
+		if readOnlySnapshot != nil && outputs != nil {
+			outputs["history_revision"] = historyRevision
+		}
+		return outputs, managedErr
 	}
 	requestedRunOptions := workflowAgentRunOptions{
 		NoTools: workflowAgentToolsDisabled(req.Tools),
@@ -368,6 +422,9 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		req.MessageID,
 		req.Tools,
 	)
+	if readOnlySnapshot != nil {
+		outputs["history_revision"] = historyRevision
+	}
 	outputs["managed"] = workflowManagedMetadata(req, agent)
 	if req.Output != nil && req.Output.Enabled() {
 		structured := workflows.ValidateAgentStructuredOutput(response, req.Output)
@@ -401,6 +458,150 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		}
 	}
 	return outputs, nil
+}
+
+const maxWorkflowReadOnlySessionKeyBytes = 4096
+
+func workflowReadOnlySessionSnapshot(
+	ctx context.Context,
+	agent *AgentInstance,
+	agentID string,
+	sessionKey string,
+) (session.SessionSnapshot, string, error) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return session.SessionSnapshot{}, "", fmt.Errorf(
+			"read_only workflow agent history requires an existing session",
+		)
+	}
+	if !utf8.ValidString(sessionKey) || len(sessionKey) > maxWorkflowReadOnlySessionKeyBytes {
+		return session.SessionSnapshot{}, "", fmt.Errorf(
+			"read_only workflow agent session key is invalid",
+		)
+	}
+	if agent == nil || agent.Sessions == nil {
+		return session.SessionSnapshot{}, "", fmt.Errorf(
+			"read_only workflow agent session store is unavailable",
+		)
+	}
+	reader, ok := agent.Sessions.(session.SnapshotReader)
+	if !ok {
+		return session.SessionSnapshot{}, "", fmt.Errorf(
+			"read_only workflow agent session store does not support exact snapshots",
+		)
+	}
+	snapshot, found, err := reader.ReadSessionSnapshot(ctx, sessionKey)
+	if err != nil {
+		return session.SessionSnapshot{}, "", fmt.Errorf(
+			"read_only workflow agent session snapshot: %w",
+			err,
+		)
+	}
+	if !found || strings.TrimSpace(snapshot.Key) == "" {
+		return session.SessionSnapshot{}, "", fmt.Errorf(
+			"read_only workflow agent session was not found",
+		)
+	}
+	if ownerErr := workflowReadOnlySessionOwner(snapshot, agentID); ownerErr != nil {
+		return session.SessionSnapshot{}, "", ownerErr
+	}
+	revision, err := workflowSessionSnapshotRevision(snapshot)
+	if err != nil {
+		return session.SessionSnapshot{}, "", err
+	}
+	return snapshot, revision, nil
+}
+
+func workflowReadOnlySessionOwner(snapshot session.SessionSnapshot, agentID string) error {
+	owner := ""
+	if snapshot.Scope != nil {
+		owner = strings.TrimSpace(snapshot.Scope.AgentID)
+		if !routing.IsCanonicalAgentID(owner) {
+			return fmt.Errorf("read_only workflow agent session has invalid owner metadata")
+		}
+	} else if parsed := session.ParseLegacyAgentSessionKey(snapshot.Key); parsed != nil {
+		owner = strings.TrimSpace(parsed.AgentID)
+		if !routing.IsCanonicalAgentID(owner) {
+			return fmt.Errorf("read_only workflow agent legacy session has invalid owner")
+		}
+	}
+	if owner == "" {
+		return fmt.Errorf("read_only workflow agent session owner is unavailable")
+	}
+	if owner != agentID {
+		return fmt.Errorf("read_only workflow agent session belongs to another agent")
+	}
+	return nil
+}
+
+func workflowSessionSnapshotRevision(snapshot session.SessionSnapshot) (string, error) {
+	type snapshotFields struct {
+		Key     string                `json:"Key"`
+		History []providers.Message   `json:"History"`
+		Summary string                `json:"Summary"`
+		Scope   *session.SessionScope `json:"Scope"`
+	}
+	type toolCallInternalFields struct {
+		Name             string         `json:"name,omitempty"`
+		Arguments        map[string]any `json:"arguments,omitempty"`
+		ThoughtSignature string         `json:"thought_signature,omitempty"`
+	}
+	type contentBlockInternalFields struct {
+		PromptLayer  string `json:"prompt_layer,omitempty"`
+		PromptSlot   string `json:"prompt_slot,omitempty"`
+		PromptSource string `json:"prompt_source,omitempty"`
+	}
+	type messageInternalFields struct {
+		PromptLayer  string                       `json:"prompt_layer,omitempty"`
+		PromptSlot   string                       `json:"prompt_slot,omitempty"`
+		PromptSource string                       `json:"prompt_source,omitempty"`
+		SystemParts  []contentBlockInternalFields `json:"system_parts,omitempty"`
+		ToolCalls    []toolCallInternalFields     `json:"tool_calls,omitempty"`
+	}
+
+	internal := make([]messageInternalFields, len(snapshot.History))
+	for messageIndex, message := range snapshot.History {
+		projected := messageInternalFields{
+			PromptLayer:  message.PromptLayer,
+			PromptSlot:   message.PromptSlot,
+			PromptSource: message.PromptSource,
+			SystemParts:  make([]contentBlockInternalFields, len(message.SystemParts)),
+			ToolCalls:    make([]toolCallInternalFields, len(message.ToolCalls)),
+		}
+		for blockIndex, block := range message.SystemParts {
+			projected.SystemParts[blockIndex] = contentBlockInternalFields{
+				PromptLayer:  block.PromptLayer,
+				PromptSlot:   block.PromptSlot,
+				PromptSource: block.PromptSource,
+			}
+		}
+		for callIndex, call := range message.ToolCalls {
+			projected.ToolCalls[callIndex] = toolCallInternalFields{
+				Name:             call.Name,
+				Arguments:        call.Arguments,
+				ThoughtSignature: call.ThoughtSignature,
+			}
+		}
+		internal[messageIndex] = projected
+	}
+
+	encoded, err := json.Marshal(struct {
+		Snapshot snapshotFields          `json:"snapshot"`
+		Internal []messageInternalFields `json:"internal"`
+	}{
+		Snapshot: snapshotFields{
+			Key:     snapshot.Key,
+			History: snapshot.History,
+			Summary: snapshot.Summary,
+			Scope:   snapshot.Scope,
+		},
+		Internal: internal,
+	})
+	if err != nil {
+		return "", fmt.Errorf("read_only workflow agent snapshot is not serializable: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("sha256:%x", sum[:]), nil
 }
 
 func workflowRunStructuredAgentWithOptions(

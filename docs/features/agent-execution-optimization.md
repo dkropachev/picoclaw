@@ -15,7 +15,10 @@ outputs: child responses are validated against the same output contract,
 calibrated against a grouped baseline before the real split run, combined into
 one structured result, and persisted with diagnostics about split planning,
 calibration, child summaries, model choice, reasoning effort, token estimates,
-and estimated cost.
+and estimated cost. When the visible step uses the workflow exact read-only
+decision profile, every grouped, calibration, child, fallback, and repair call
+uses the same frozen existing-session snapshot and the result carries its
+opaque history revision.
 
 Agent execution optimization is generic. It does not know domain semantics such
 as code review, planning, data extraction, or summarization. Domain-specific
@@ -54,7 +57,9 @@ scope items, and the structured output schema.
   responsibilities as semantic hints, not workflow DAG steps; model
   optimization is allowed only when candidate price metadata is known from
   managed options or resolved concrete-model metadata; and all managed metadata is diagnostic
-  workflow output, not a separate child workflow run graph.
+  workflow output, not a separate child workflow run graph. Managed splitting
+  does not weaken an enclosing exact read-only decision profile: it cannot
+  reread or write the session and cannot enable tools for child work.
 
 ## Requirements
 
@@ -75,6 +80,7 @@ scope items, and the structured output schema.
 | `FR-AGENT-EXECUTION-OPTIMIZATION-013` | MUST | A configured candidate child alias is cheaper and absent from the agent's candidate provider map. | The runtime resolves that exact alias through the effective concrete account, creates the provider with the loop's provider factory, and stores it under the resolved provider/model key used by alias override resolution. | `agent.CandidateProviders` is initialized or extended in memory for the agent instance. | Missing aliases, missing effective accounts, or provider factory errors are returned to the caller for logging; the same account-and-alias candidate is not initialized twice. | Child alias overrides must have providers available before hidden child calls execute. |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-014` | MUST | The workflow dashboard displays a run whose step outputs contain `managed`. | The run detail view shows one optimization panel entry per managed step, including strategy, child count, calibration status, model-change status, effort-change status, estimated savings, and selected model information. | Dashboard rendering does not mutate run state. | Missing or malformed managed metadata hides the panel or displays fallback values without breaking the run detail page. | Agent execution optimization must be inspectable by operators without reading raw JSON output. |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-015` | MUST | A split contract has a passing calibration and calibration caching is enabled. | The agent instance remembers the passing calibration by a hash over strategy, model, prompt/context hash, output schema, task list, chunking options, child plan shape, scope path/hash/content/language signals, repository signals, and the effective child prompt target used by the planner. Exact matching runs calibrate aggressively at first, then only when the expanding use interval is due. When an exact key is absent, the runtime may borrow once from a trusted similar entry, create a separate provisional entry for the new key, and force verification on that key's next matching use. Verification success promotes the provisional entry with inherited confidence adjusted by similarity and split-fit score; verification failure clears inherited confidence and the key behaves like a fresh untrusted entry. Passing calibration stores a learned child prompt target based on observed child prompt sizes so later similar splits can reuse the learned target instead of a static configuration value. | `managed.calibration.status` is `trusted_cache` on exact or similar cache hits; `managed.calibration.cache` records the key, decision (`hit`, `similar_hit`, `borrowed_due`, `due`, `miss`, or `previous_not_trusted`), use count, success streak, provisional flag, borrowed source/similarity when present, split-fit score, next due use, model, language, repository, scope, task metadata, effective target, learned target, target source, and observed child prompt token statistics. | Failed or skipped calibrations are not trusted; materially different strategy, plan shape, schema, prompt, tasks, model, language, repository/scope identity, chunking, or effective target below the similarity threshold produces a cache miss. Low split-fit scores shorten the next probe interval even after successful calibration. | Proven split behavior should reduce repeated calibration token spend without blindly trusting small changes or weak split plans. |
+| `FR-AGENT-EXECUTION-OPTIMIZATION-016` | MUST | A structured or managed workflow agent request is admitted with `history: read_only`. | The runtime captures the exact existing-session snapshot before planning and reuses it for the unsplit request, grouped calibration baseline, sampled and real children, fallback, and structured-output repairs. The visible output retains its canonical `session` and opaque `history_revision` alongside structured and managed diagnostics. | No child call writes, restores, compacts, or rereads the session; no child receives tools, and provider-side mutation of one call's message graph cannot change later calls' frozen context. | A missing/corrupt/unowned session or any child tool-call response fails the visible step; an append after capture is intentionally absent from every call in that execution. | Optimization must preserve the exact evidence and authority boundary of an AI gate instead of turning one decision into several differently contextualized turns. |
 
 ## Data And State Model
 
@@ -89,6 +95,7 @@ text                         combined JSON or fallback text
 agent_id                     selected workflow agent id
 session                      session key used by the visible step
 history                      workflow agent history mode
+history_revision             opaque frozen-session revision for exact read-only decisions
 cache                        normalized workflow agent cache mode
 cache_key                    prompt cache key, if any
 message_id                   workflow/message correlation id
@@ -180,6 +187,7 @@ subscription_equivalent_model  exact alias used only for price estimation
 | Workflow YAML | `uses: agent/<id>` with `with.output` | `output: json` or an output map enables JSON extraction, schema validation, repair attempts, and `steps.<id>.outputs.structured`. | `FR-AGENT-EXECUTION-OPTIMIZATION-001`, `FR-AGENT-EXECUTION-OPTIMIZATION-010` |
 | Workflow YAML | `uses: agent/<id>` with `with.managed` | `managed` enables or configures hidden split execution only when structured output is also enabled. | `FR-AGENT-EXECUTION-OPTIMIZATION-002`, `FR-AGENT-EXECUTION-OPTIMIZATION-003` |
 | Workflow YAML | `with.scope` | A list or `{items: [...]}` supplies splittable scope items for scope and hybrid strategies. | `FR-AGENT-EXECUTION-OPTIMIZATION-004`, `FR-AGENT-EXECUTION-OPTIMIZATION-006` |
+| Workflow YAML | `history: read_only` with `tools: none` | Preserve one strict existing-session snapshot across structured repairs and every managed execution branch, returning its opaque revision. | `FR-AGENT-EXECUTION-OPTIMIZATION-016` |
 | Agent definition | `agent.Tasks` | Textual tasks are used as semantic task-splitting responsibilities and are injected into child prompts. | `FR-AGENT-EXECUTION-OPTIMIZATION-005`, `FR-AGENT-EXECUTION-OPTIMIZATION-006` |
 | Go API | `workflows.ParseAgentOutputContract(raw any)` | Parses workflow `with.output` into an `AgentOutputContract` with JSON format, schema, and repair attempts. | `FR-AGENT-EXECUTION-OPTIMIZATION-001` |
 | Go API | `workflows.ValidateAgentStructuredOutput(text, contract)` | Extracts JSON from raw agent text, validates a supported schema subset, and returns structured data plus error metadata. | `FR-AGENT-EXECUTION-OPTIMIZATION-001` |
@@ -195,7 +203,9 @@ subscription_equivalent_model  exact alias used only for price estimation
    is invoked.
 2. The agent runner builds the same base prompt used for normal workflow agent
    steps: prompt, context, scope, message, then structured-output
-   instructions.
+   instructions. For an exact read-only request it first freezes the existing
+   session once; all calls described below receive graph-detached copies of
+   that snapshot, no tools, and no live-history reread.
 3. The runner normalizes managed mode. `nil`, `false`, `off`, `none`, and an
    explicit disabled map are treated as off.
 4. `workflowManagedSplitStrategy` returns no strategy unless managed mode is on
@@ -312,6 +322,10 @@ domain-specific split/combine rules.
   side-effect safety still relies on the existing agent/tool policy layer.
 - Managed child diagnostics may contain proposed child text and structured
   output, so normal workflow run output visibility rules apply.
+- Exact read-only managed execution fails closed when its existing-session
+  snapshot cannot be captured or owned by the selected agent. Calibration,
+  fallback, child, and repair calls cannot observe an append made after that
+  capture, and a provider cannot mutate the frozen graph seen by later calls.
 
 ## Acceptance Evidence
 
@@ -324,6 +338,7 @@ domain-specific split/combine rules.
 | `FR-AGENT-EXECUTION-OPTIMIZATION-008`, `FR-AGENT-EXECUTION-OPTIMIZATION-010` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/workflows/agent_output_test.go](../../pkg/workflows/agent_output_test.go), [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go), [pkg/workflows/agent_output.go](../../pkg/workflows/agent_output.go) |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-011`, `FR-AGENT-EXECUTION-OPTIMIZATION-012`, `FR-AGENT-EXECUTION-OPTIMIZATION-013` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go), [pkg/config/model_config_test.go](../../pkg/config/model_config_test.go), [pkg/config/subscription_equivalent_model_test.go](../../pkg/config/subscription_equivalent_model_test.go) |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-014` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [web/frontend/src/components/workflows/workflows-page.tsx](../../web/frontend/src/components/workflows/workflows-page.tsx) |
+| `FR-AGENT-EXECUTION-OPTIMIZATION-016` | [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go), [pkg/session/session_store.go](../../pkg/session/session_store.go) |
 
 ## Implementation Anchors
 

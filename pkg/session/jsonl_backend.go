@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 
@@ -25,6 +26,13 @@ type metaAwareStore interface {
 
 type aliasPromotingStore interface {
 	PromoteAliasHistory(ctx context.Context, sessionKey string, scope json.RawMessage, aliases []string) (bool, error)
+}
+
+type snapshotStore interface {
+	ReadSessionSnapshot(
+		ctx context.Context,
+		sessionKey string,
+	) (canonicalKey string, history []providers.Message, meta memory.SessionMeta, found bool, err error)
 }
 
 // MetadataAwareSessionStore exposes structured session metadata operations.
@@ -149,6 +157,49 @@ func (b *JSONLBackend) GetHistory(key string) []providers.Message {
 		return []providers.Message{}
 	}
 	return msgs
+}
+
+// ReadSessionSnapshot performs a strict, non-mutating lookup. The underlying
+// JSONL store resolves aliases and reads history, summary, and metadata under
+// the canonical session lock, so callers cannot observe a torn session state.
+func (b *JSONLBackend) ReadSessionSnapshot(
+	ctx context.Context,
+	key string,
+) (SessionSnapshot, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return SessionSnapshot{}, false, err
+	}
+	if strings.TrimSpace(key) == "" {
+		return SessionSnapshot{}, false, nil
+	}
+
+	store, ok := b.store.(snapshotStore)
+	if !ok {
+		return SessionSnapshot{}, false, fmt.Errorf(
+			"session: store %T does not support coherent snapshots",
+			b.store,
+		)
+	}
+	canonicalKey, history, meta, found, err := store.ReadSessionSnapshot(ctx, key)
+	if err != nil || !found {
+		return SessionSnapshot{}, found, err
+	}
+
+	var scope *SessionScope
+	if len(meta.Scope) > 0 {
+		var decoded SessionScope
+		if err := json.Unmarshal(meta.Scope, &decoded); err != nil {
+			return SessionSnapshot{}, false, fmt.Errorf("session: decode session scope: %w", err)
+		}
+		scope = CloneScope(&decoded)
+	}
+
+	return SessionSnapshot{
+		Key:     canonicalKey,
+		History: cloneSessionMessages(history),
+		Summary: meta.Summary,
+		Scope:   scope,
+	}, true, nil
 }
 
 func (b *JSONLBackend) GetSummary(key string) string {

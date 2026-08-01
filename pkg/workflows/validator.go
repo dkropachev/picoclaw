@@ -11,6 +11,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/adhocore/gronx"
+
+	"github.com/sipeed/picoclaw/pkg/routing"
 )
 
 type ValidationError struct {
@@ -421,7 +423,11 @@ func validateSteps(path string, steps []Step) ValidationErrors {
 		}
 		errs = append(errs, validateRunContext(stepPath+".context", step.Context)...)
 		if strings.HasPrefix(uses, "agent/") {
-			errs = append(errs, validateAgentStepOptions(stepPath+".with", step.With)...)
+			errs = append(errs, validateAgentStepOptions(
+				stepPath+".with",
+				strings.TrimPrefix(uses, "agent/"),
+				step.With,
+			)...)
 		}
 		if uses == "human/task" {
 			errs = append(errs, validateHumanTaskStep(stepPath, step)...)
@@ -801,27 +807,62 @@ func workflowValueReferencesSecrets(value any) bool {
 	return false
 }
 
-func validateAgentStepOptions(path string, with map[string]any) ValidationErrors {
+func validateAgentStepOptions(path, agentID string, with map[string]any) ValidationErrors {
 	var errs ValidationErrors
 	if with == nil {
 		return nil
 	}
-	if value, ok := stringOption(with, "history"); ok && !validHistoryMode(value) {
+	history, historySet, historyString := agentStringOption(with, "history")
+	if historySet && !historyString {
+		errs = append(errs, ValidationError{Path: path + ".history", Message: "history mode must be a string"})
+	} else if historyString && !validHistoryMode(history) {
 		errs = append(errs, ValidationError{Path: path + ".history", Message: "unsupported history mode"})
 	}
-	if value, ok := stringOption(with, "cache"); ok && !validCacheMode(value) {
+	cache, cacheSet, cacheString := agentStringOption(with, "cache")
+	if cacheSet && !cacheString {
+		errs = append(errs, ValidationError{Path: path + ".cache", Message: "cache mode must be a string"})
+	} else if cacheString && !validCacheMode(cache) {
 		errs = append(errs, ValidationError{Path: path + ".cache", Message: "unsupported cache mode"})
 	}
-	if value, ok := stringOption(with, "session"); ok && !validRunSession(value) {
+	sessionMode, sessionSet, sessionString := agentStringOption(with, "session")
+	if sessionSet && !sessionString {
+		errs = append(errs, ValidationError{Path: path + ".session", Message: "session context must be a string"})
+	} else if sessionString && !validRunSession(sessionMode) {
 		errs = append(errs, ValidationError{Path: path + ".session", Message: "unsupported session context"})
 	}
+	toolsMode := AgentToolsInherit
 	if raw, exists := with["tools"]; exists {
 		value, ok := raw.(string)
-		if !ok || !validAgentToolsMode(strings.TrimSpace(value)) {
+		toolsMode = strings.TrimSpace(value)
+		if !ok || !validAgentToolsMode(toolsMode) {
 			errs = append(errs, ValidationError{Path: path + ".tools", Message: "unsupported tools mode"})
 		}
 	}
+	if history == "read_only" && toolsMode != AgentToolsNone {
+		errs = append(errs, ValidationError{
+			Path:    path + ".tools",
+			Message: "read_only history requires tools: none",
+		})
+	}
+	if history == "read_only" && !routing.IsCanonicalAgentID(strings.TrimSpace(agentID)) {
+		errs = append(errs, ValidationError{
+			Path:    strings.TrimSuffix(path, ".with") + ".uses",
+			Message: "read_only history requires an exact canonical agent ID",
+		})
+	}
 	return errs
+}
+
+func agentStringOption(values map[string]any, key string) (string, bool, bool) {
+	value, exists := values[key]
+	if !exists {
+		return "", false, true
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", true, false
+	}
+	return strings.TrimSpace(text), true, true
 }
 
 func stringOption(values map[string]any, key string) (string, bool) {
