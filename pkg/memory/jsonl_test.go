@@ -1441,8 +1441,8 @@ func TestReadSessionSnapshot_RejectsAliasChangedAfterResolution(t *testing.T) {
 	if err != nil || !found || resolved != canonicalKey {
 		t.Fatalf("resolveSessionKeyStrict() = (%q, %v, %v)", resolved, found, err)
 	}
-	if err := store.UpsertSessionMeta(ctx, canonicalKey, nil, nil); err != nil {
-		t.Fatal(err)
+	if updateErr := store.UpsertSessionMeta(ctx, canonicalKey, nil, nil); updateErr != nil {
+		t.Fatal(updateErr)
 	}
 
 	key, history, meta, found, err := store.readResolvedSessionSnapshot(ctx, alias, resolved)
@@ -1471,8 +1471,8 @@ func TestReadSessionSnapshot_RejectsOrphanHistoryFilenameCollision(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(store.jsonlPath(orphanKey), append(encoded, '\n'), 0o644); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(store.jsonlPath(orphanKey), append(encoded, '\n'), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 
 	key, history, meta, found, err := store.ReadSessionSnapshot(context.Background(), requestKey)

@@ -325,9 +325,18 @@ func TestWorkflowAgentRunnerReadOnlyRejectsMissingIdentityBeforeProvider(t *test
 
 	requests := []workflows.AgentRequest{
 		{AgentID: "main", History: "read_only", Tools: workflows.AgentToolsNone, Prompt: "decide"},
-		{AgentID: "main", Session: "agent:main:missing", History: "read_only", Tools: workflows.AgentToolsNone, Prompt: "decide"},
-		{AgentID: "Main", Session: "agent:main:review", History: "read_only", Tools: workflows.AgentToolsNone, Prompt: "decide"},
-		{AgentID: "@@@", Session: "agent:main:review", History: "read_only", Tools: workflows.AgentToolsNone, Prompt: "decide"},
+		{
+			AgentID: "main", Session: "agent:main:missing", History: "read_only",
+			Tools: workflows.AgentToolsNone, Prompt: "decide",
+		},
+		{
+			AgentID: "Main", Session: "agent:main:review", History: "read_only",
+			Tools: workflows.AgentToolsNone, Prompt: "decide",
+		},
+		{
+			AgentID: "@@@", Session: "agent:main:review", History: "read_only",
+			Tools: workflows.AgentToolsNone, Prompt: "decide",
+		},
 	}
 	for _, req := range requests {
 		if _, err := (&workflowAgentRunner{loop: loop}).RunAgent(context.Background(), req); err == nil {
@@ -497,7 +506,12 @@ func TestWorkflowAgentRunnerReadOnlyRepairReusesFrozenSnapshot(t *testing.T) {
 			t.Fatalf("provider call %d tool definitions = %d, want 0", index, call.toolCount)
 		}
 		if cacheControl := workflowFrozenCacheControl(call.messages); cacheControl != "ephemeral" {
-			t.Fatalf("provider call %d frozen cache control = %q, want ephemeral: %#v", index, cacheControl, call.messages)
+			t.Fatalf(
+				"provider call %d frozen cache control = %q, want ephemeral: %#v",
+				index,
+				cacheControl,
+				call.messages,
+			)
 		}
 	}
 	if !workflowMessagesContain(agent.Sessions.GetHistory(canonicalKey), "arrived between decision and repair") {

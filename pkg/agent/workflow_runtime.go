@@ -11,6 +11,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -501,8 +502,8 @@ func workflowReadOnlySessionSnapshot(
 			"read_only workflow agent session was not found",
 		)
 	}
-	if err := workflowReadOnlySessionOwner(snapshot, agentID); err != nil {
-		return session.SessionSnapshot{}, "", err
+	if ownerErr := workflowReadOnlySessionOwner(snapshot, agentID); ownerErr != nil {
+		return session.SessionSnapshot{}, "", ownerErr
 	}
 	revision, err := workflowSessionSnapshotRevision(snapshot)
 	if err != nil {
@@ -534,6 +535,12 @@ func workflowReadOnlySessionOwner(snapshot session.SessionSnapshot, agentID stri
 }
 
 func workflowSessionSnapshotRevision(snapshot session.SessionSnapshot) (string, error) {
+	type snapshotFields struct {
+		Key     string                `json:"Key"`
+		History []providers.Message   `json:"History"`
+		Summary string                `json:"Summary"`
+		Scope   *session.SessionScope `json:"Scope"`
+	}
 	type toolCallInternalFields struct {
 		Name             string         `json:"name,omitempty"`
 		Arguments        map[string]any `json:"arguments,omitempty"`
@@ -579,10 +586,15 @@ func workflowSessionSnapshotRevision(snapshot session.SessionSnapshot) (string, 
 	}
 
 	encoded, err := json.Marshal(struct {
-		Snapshot session.SessionSnapshot `json:"snapshot"`
+		Snapshot snapshotFields          `json:"snapshot"`
 		Internal []messageInternalFields `json:"internal"`
 	}{
-		Snapshot: snapshot,
+		Snapshot: snapshotFields{
+			Key:     snapshot.Key,
+			History: snapshot.History,
+			Summary: snapshot.Summary,
+			Scope:   snapshot.Scope,
+		},
 		Internal: internal,
 	})
 	if err != nil {
