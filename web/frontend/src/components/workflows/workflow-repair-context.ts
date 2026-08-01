@@ -58,6 +58,7 @@ function canFixDraftTestWithAI(
   return (
     !stale &&
     result.status !== "running" &&
+    result.status !== "waiting" &&
     result.status !== "succeeded" &&
     result.status !== "skipped"
   )

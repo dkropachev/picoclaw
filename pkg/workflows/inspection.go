@@ -262,6 +262,7 @@ const (
 	WorkflowDefinitionStepTool     WorkflowDefinitionStepKind = "tool"
 	WorkflowDefinitionStepMCP      WorkflowDefinitionStepKind = "mcp"
 	WorkflowDefinitionStepFunction WorkflowDefinitionStepKind = "function"
+	WorkflowDefinitionStepHuman    WorkflowDefinitionStepKind = "human"
 	WorkflowDefinitionStepUnknown  WorkflowDefinitionStepKind = "unknown"
 )
 
@@ -1276,6 +1277,8 @@ func inspectWorkflowStepTarget(
 		stepKind = WorkflowDefinitionStepMCP
 	case WorkflowDependencyKindFunction:
 		stepKind = WorkflowDefinitionStepFunction
+	case WorkflowDependencyKindHuman:
+		stepKind = WorkflowDefinitionStepHuman
 	default:
 		return WorkflowDefinitionStepUnknown, "", "", true
 	}
@@ -1307,7 +1310,7 @@ func workflowInspectionEffectKind(
 	switch kind {
 	case WorkflowDefinitionStepAgent:
 		return WorkflowDefinitionEffectModelOrDelegatedAction
-	case WorkflowDefinitionStepTool, WorkflowDefinitionStepFunction:
+	case WorkflowDefinitionStepTool, WorkflowDefinitionStepFunction, WorkflowDefinitionStepHuman:
 		return WorkflowDefinitionEffectStateChange
 	case WorkflowDefinitionStepMCP:
 		return WorkflowDefinitionEffectExternalStateChange

@@ -302,15 +302,12 @@ func normalizeSchemaMap(raw any) (map[string]any, error) {
 	if raw == nil {
 		return nil, nil
 	}
-	if m, ok := raw.(map[string]any); ok {
-		return m, nil
-	}
 	data, err := json.Marshal(raw)
 	if err != nil {
 		return nil, err
 	}
 	var out map[string]any
-	if err := json.Unmarshal(data, &out); err != nil {
+	if err := decodeJSONWithNumbers(data, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -541,15 +538,25 @@ func schemaTypeMatches(value any, expected string) bool {
 }
 
 func schemaEnumContains(raw any, value any) bool {
-	items, ok := raw.([]any)
-	if !ok {
-		return true
-	}
 	valueJSON := canonicalJSON(value)
-	for _, item := range items {
-		if canonicalJSON(item) == valueJSON {
-			return true
+	switch items := raw.(type) {
+	case []any:
+		for _, item := range items {
+			if canonicalJSON(item) == valueJSON {
+				return true
+			}
 		}
+	case []string:
+		for _, item := range items {
+			if canonicalJSON(item) == valueJSON {
+				return true
+			}
+		}
+	default:
+		// Schema admission rejects non-array enum representations. Keep the
+		// shared output validator's historical unconstrained fallback for
+		// callers that bypass admission with unrelated schema contracts.
+		return true
 	}
 	return false
 }

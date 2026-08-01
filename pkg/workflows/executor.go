@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -33,6 +34,17 @@ type Executor struct {
 	// present, the executor uses these exact parsed bytes instead of reloading
 	// definitions after admission.
 	WorkflowSnapshots map[string]*LocalWorkflowSnapshot
+	// verifyCapturedSnapshots marks snapshots captured internally by the
+	// executor's universal closure admission. Unlike externally admitted
+	// snapshots, their compatibility stamps have not already been fenced at
+	// durable create, so reusable calls verify each captured content revision.
+	verifyCapturedSnapshots bool
+	// capturedReusableErrors freezes a child-load/compatibility failure found
+	// during universal closure admission. Keeping the exact failure prevents a
+	// mutable definition from becoming executable after parent effects while
+	// preserving the established child-call failure boundary.
+	capturedReusableErrors   map[string]error
+	humanTaskClosureAdmitted bool
 	// AdmittedRunCreate wraps the durable create for a top-level run or an
 	// explicit retry (including a reusable child retry). The wrapper can hold
 	// admission locks and revalidate immutable snapshots through the create
@@ -42,6 +54,15 @@ type Executor struct {
 		*Run,
 		func() error,
 	) error
+	// AdmittedHumanTaskClaim wraps the atomic response claim so callers can
+	// fence mutable runtime policy through the durable waiting-to-running
+	// transition without retaining admission locks during continuation.
+	AdmittedHumanTaskClaim func(
+		context.Context,
+		string,
+		string,
+		func() (*Run, WorkflowHumanTask, bool, error),
+	) (*Run, WorkflowHumanTask, bool, error)
 }
 
 type RuntimeEventPublisher interface {
@@ -104,6 +125,35 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 	if validateErr := Validate(workflow); validateErr != nil {
 		return nil, validateErr
 	}
+	admittedExecutor, admissionErr := e.admitHumanTaskClosure(
+		ctx,
+		workflowRef,
+		workflow,
+		maxDepth,
+	)
+	if admissionErr != nil {
+		return nil, admissionErr
+	}
+	e = admittedExecutor
+	if strings.TrimSpace(req.ParentRunID) != "" && workflowContainsHumanTask(workflow) {
+		return nil, fmt.Errorf("%w: human/task cannot run inside a reusable workflow call", ErrHumanTaskUnsupported)
+	}
+	var execution *workflowExecutionState
+	if workflowContainsHumanTask(workflow) {
+		var executionErr error
+		execution, executionErr = newWorkflowExecutionState(workflow)
+		if executionErr != nil {
+			return nil, executionErr
+		}
+		if normalizedValidationErr := Validate(execution.Workflow); normalizedValidationErr != nil {
+			return nil, normalizedValidationErr
+		}
+		// Execute the same immutable JSON-normalized definition that is
+		// persisted for continuation. Programmatic callers therefore cannot
+		// mutate or supply typed nested schema shapes that differ between the
+		// initial segment and a resumed segment.
+		workflow = execution.Workflow
+	}
 	store := e.Store
 	if store == nil {
 		store = NewFileRunStore(e.WorkspaceDir)
@@ -142,6 +192,8 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		Steps:        make(map[string]StepExecution),
 		CreatedAt:    now,
 		UpdatedAt:    now,
+		execution:    execution,
+		humanTasks:   make(map[string]WorkflowHumanTask),
 	}
 	topLevel := req.ParentRunID == ""
 	admittedRun := topLevel || strings.TrimSpace(req.RetryOfRunID) != ""
@@ -189,8 +241,16 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		req.OnRunCreated(cloneRun(run))
 	}
 
-	outputs, runErr := e.executeWorkflow(ctx, store, run, workflow, req)
+	outputs, runErr := e.executeWorkflow(ctx, store, run, workflow, req, nil)
 	if runErr != nil {
+		if errors.Is(runErr, ErrHumanTaskConflict) ||
+			errors.Is(context.Cause(ctx), ErrHumanTaskConflict) {
+			return nil, ErrHumanTaskConflict
+		}
+		var waiting workflowWaitingError
+		if errors.As(runErr, &waiting) {
+			return e.persistWorkflowWait(store, run, outputs)
+		}
 		completedAt := time.Now().UTC()
 		if errors.Is(runErr, ErrRunCanceled) {
 			run.Status = RunStatusCanceled
@@ -235,7 +295,12 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		run.Status = RunStatusCanceled
 		run.Error = cancelErr.Error()
 		run.CompletedAt = &completedAt
-		_ = store.UpdateRun(context.Background(), run)
+		if updateErr := store.UpdateRun(context.Background(), run); updateErr != nil {
+			if errors.Is(updateErr, ErrHumanTaskConflict) {
+				return nil, ErrHumanTaskConflict
+			}
+			return nil, updateErr
+		}
 		e.appendEvent(
 			context.Background(),
 			store,
@@ -341,6 +406,349 @@ func (e *Executor) RetryCaptured(
 	})
 }
 
+// ResumeHumanTask atomically records one schema-valid human response and
+// continues the exact workflow snapshot persisted with the suspended run.
+func (e *Executor) ResumeHumanTask(
+	ctx context.Context,
+	runID string,
+	taskID string,
+	response HumanTaskResumeRequest,
+) (*RunResult, error) {
+	if e == nil {
+		return nil, fmt.Errorf("workflow executor is nil")
+	}
+	store := e.Store
+	if store == nil {
+		store = NewFileRunStore(e.WorkspaceDir)
+	}
+	taskStore, ok := store.(humanTaskStore)
+	if !ok {
+		return nil, ErrHumanTaskUnsupported
+	}
+	response.resumeLease = humanTaskResumeLease(e.DefaultTimeout)
+	response.maxConcurrent = e.MaxConcurrentRuns
+	claim := func() (*Run, WorkflowHumanTask, bool, error) {
+		return taskStore.ClaimHumanTask(ctx, runID, taskID, response)
+	}
+	var run *Run
+	var task WorkflowHumanTask
+	var duplicate bool
+	var err error
+	if e.AdmittedHumanTaskClaim != nil {
+		run, task, duplicate, err = e.AdmittedHumanTaskClaim(
+			ctx,
+			runID,
+			taskID,
+			claim,
+		)
+	} else {
+		run, task, duplicate, err = claim()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if run == nil {
+		return nil, ErrHumanTaskConflict
+	}
+	if duplicate {
+		return &RunResult{
+			RunID:   run.ID,
+			Status:  run.Status,
+			Outputs: cloneMap(run.Outputs),
+			Error:   run.Error,
+		}, nil
+	}
+	if run.execution == nil || run.execution.Workflow == nil || run.execution.Cursor == nil {
+		return nil, ErrHumanTaskConflict
+	}
+	// The response is durable once ClaimHumanTask succeeds. A browser or API
+	// client disconnect must not turn that accepted answer into a canceled run;
+	// explicit workflow cancellation remains observable through the run store.
+	ctx = context.WithoutCancel(ctx)
+	workflow := run.execution.Workflow
+	if err := Validate(workflow); err != nil {
+		return nil, fmt.Errorf("%w: persisted workflow snapshot is invalid", ErrHumanTaskConflict)
+	}
+	if e.DefaultTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, e.DefaultTimeout)
+		defer cancel()
+	}
+	ctx, cancelClaimContinuation := context.WithCancelCause(ctx)
+	defer cancelClaimContinuation(nil)
+	stopClaimHeartbeat := startHumanTaskClaimHeartbeat(
+		taskStore,
+		run.ID,
+		task.ID,
+		run.execution.Resume.Token,
+		response.resumeLease,
+		run.execution.Resume.ExpiresAt,
+		cancelClaimContinuation,
+	)
+	defer stopClaimHeartbeat()
+	e.appendEvent(
+		ctx,
+		store,
+		RunEvent{
+			Kind:   "workflow.human_task.answered",
+			RunID:  run.ID,
+			JobID:  task.JobID,
+			StepID: task.StepID,
+			Payload: map[string]any{
+				"task_id":     task.ID,
+				"input_hash":  task.InputHash,
+				"response_id": task.ResponseID,
+			},
+		},
+	)
+	cursor := *run.execution.Cursor
+	runReq := RunRequest{
+		Inputs:   cloneMap(run.Inputs),
+		Secrets:  cloneStringMap(response.Secrets),
+		Event:    cloneMap(run.Event),
+		Session:  run.Session,
+		Delivery: run.Delivery,
+	}
+	outputs, runErr := e.executeWorkflow(ctx, store, run, workflow, runReq, &cursor)
+	if errors.Is(context.Cause(ctx), ErrHumanTaskConflict) {
+		return nil, ErrHumanTaskConflict
+	}
+	if runErr != nil {
+		if errors.Is(runErr, ErrHumanTaskConflict) ||
+			errors.Is(context.Cause(ctx), ErrHumanTaskConflict) {
+			return nil, ErrHumanTaskConflict
+		}
+		var waiting workflowWaitingError
+		if errors.As(runErr, &waiting) {
+			return e.persistWorkflowWait(store, run, outputs)
+		}
+		completedAt := time.Now().UTC()
+		if errors.Is(runErr, ErrRunCanceled) {
+			run.Status = RunStatusCanceled
+			if run.CancelRequestedAt == nil {
+				run.CancelRequestedAt = &completedAt
+			}
+			if run.CancelReason == "" {
+				run.CancelReason = runErr.Error()
+			}
+		} else {
+			run.Status = RunStatusFailed
+		}
+		run.Error = runErr.Error()
+		run.Outputs = outputs
+		run.CompletedAt = &completedAt
+		if updateErr := store.UpdateRun(context.Background(), run); updateErr != nil {
+			if errors.Is(updateErr, ErrHumanTaskConflict) {
+				return nil, ErrHumanTaskConflict
+			}
+			return nil, updateErr
+		}
+		kind := "workflow.run.failed"
+		if run.Status == RunStatusCanceled {
+			kind = "workflow.run.canceled"
+		}
+		e.appendEvent(context.Background(), store, RunEvent{Kind: kind, RunID: run.ID, Message: runErr.Error()})
+		return &RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs, Error: run.Error}, runErr
+	}
+	if cancelErr := checkRunCanceled(ctx, store, run); cancelErr != nil {
+		if errors.Is(cancelErr, ErrHumanTaskConflict) {
+			return nil, ErrHumanTaskConflict
+		}
+		completedAt := time.Now().UTC()
+		run.Status = RunStatusCanceled
+		run.Error = cancelErr.Error()
+		run.CompletedAt = &completedAt
+		if updateErr := store.UpdateRun(context.Background(), run); updateErr != nil {
+			if errors.Is(updateErr, ErrHumanTaskConflict) {
+				return nil, ErrHumanTaskConflict
+			}
+			return nil, updateErr
+		}
+		return &RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs, Error: run.Error}, cancelErr
+	}
+	run.Status = RunStatusSucceeded
+	run.Outputs = outputs
+	completedAt := time.Now().UTC()
+	run.CompletedAt = &completedAt
+	if err := store.UpdateRun(ctx, run); err != nil {
+		return nil, err
+	}
+	if run.Status != RunStatusSucceeded {
+		return &RunResult{RunID: run.ID, Status: run.Status, Outputs: run.Outputs, Error: run.Error}, nil
+	}
+	e.appendEvent(ctx, store, RunEvent{
+		Kind: "workflow.run.end", RunID: run.ID, Payload: map[string]any{"outputs": outputs},
+	})
+	return &RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs}, nil
+}
+
+func startHumanTaskClaimHeartbeat(
+	store humanTaskStore,
+	runID string,
+	taskID string,
+	token string,
+	lease time.Duration,
+	expiresAt time.Time,
+	loseClaim context.CancelCauseFunc,
+) func() {
+	heartbeatCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if expiresAt.IsZero() {
+			expiresAt = time.Now().UTC().Add(lease)
+		}
+		ticker := time.NewTicker(humanTaskHeartbeatInterval(lease))
+		defer ticker.Stop()
+		timer := time.NewTimer(time.Until(expiresAt))
+		defer timer.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-timer.C:
+				if loseClaim != nil {
+					loseClaim(ErrHumanTaskConflict)
+				}
+				return
+			case <-ticker.C:
+				renewedAt := time.Now().UTC()
+				if err := store.RenewHumanTaskClaim(
+					heartbeatCtx,
+					runID,
+					taskID,
+					token,
+					lease,
+				); err != nil {
+					if errors.Is(err, ErrHumanTaskConflict) ||
+						errors.Is(err, ErrHumanTaskNotFound) ||
+						heartbeatCtx.Err() != nil {
+						if heartbeatCtx.Err() == nil && loseClaim != nil {
+							loseClaim(ErrHumanTaskConflict)
+						}
+						return
+					}
+					continue
+				}
+				expiresAt = renewedAt.Add(lease)
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(time.Until(expiresAt))
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// CancelHumanTask cancels the containing run when the named task is still
+// waiting. Answered or stale tasks are rejected rather than rewriting history.
+func (e *Executor) CancelHumanTask(
+	ctx context.Context,
+	runID string,
+	taskID string,
+	reason string,
+) (*Run, error) {
+	if e == nil {
+		return nil, fmt.Errorf("workflow executor is nil")
+	}
+	store := e.Store
+	if store == nil {
+		store = NewFileRunStore(e.WorkspaceDir)
+	}
+	taskStore, ok := store.(humanTaskStore)
+	if !ok {
+		return nil, ErrHumanTaskUnsupported
+	}
+	run, err := taskStore.CancelHumanTask(ctx, runID, taskID, reason)
+	if err == nil && run != nil && run.Status == RunStatusCanceled {
+		e.publishCanceledRuntimeEvent(ctx, store, run, run.CancelReason)
+	}
+	return run, err
+}
+
+func (e *Executor) persistWorkflowWait(
+	store RunStore,
+	run *Run,
+	outputs map[string]any,
+) (*RunResult, error) {
+	if run == nil || run.execution == nil || run.execution.Workflow == nil ||
+		run.execution.Cursor == nil {
+		return nil, ErrHumanTaskConflict
+	}
+	cursor := run.execution.Cursor
+	job, exists := run.execution.Workflow.Jobs[cursor.JobID]
+	if !exists || cursor.StepIndex < 0 || cursor.StepIndex >= len(job.Steps) {
+		return nil, ErrHumanTaskConflict
+	}
+	stepID := strings.TrimSpace(job.Steps[cursor.StepIndex].ID)
+	if stepID == "" {
+		stepID = fmt.Sprintf("step_%d", cursor.StepIndex+1)
+	}
+	taskID := humanTaskID(run.ID, cursor.JobID, stepID)
+	task, exists := run.humanTasks[taskID]
+	if !exists || task.Status != HumanTaskStatusWaiting {
+		return nil, ErrHumanTaskConflict
+	}
+
+	// Publish the task, cursor, waiting step/job, and claimable run status in
+	// one run.json replacement. Until this write completes, a concurrent task
+	// API call can observe only the preceding running checkpoint.
+	run.Status = RunStatusWaiting
+	run.Error = ""
+	run.Outputs = outputs
+	run.CompletedAt = nil
+	if err := store.UpdateRun(context.Background(), run); err != nil {
+		return nil, err
+	}
+	if run.Status != RunStatusWaiting {
+		result := &RunResult{
+			RunID:   run.ID,
+			Status:  run.Status,
+			Outputs: cloneMap(run.Outputs),
+			Error:   run.Error,
+		}
+		if run.Status == RunStatusCanceled {
+			reason := strings.TrimSpace(run.CancelReason)
+			if reason == "" {
+				reason = "cancel requested"
+			}
+			return result, fmt.Errorf("%w: %s", ErrRunCanceled, reason)
+		}
+		return result, ErrHumanTaskConflict
+	}
+	e.appendEvent(
+		context.Background(),
+		store,
+		RunEvent{
+			Kind:   "workflow.human_task.waiting",
+			RunID:  run.ID,
+			JobID:  task.JobID,
+			StepID: task.StepID,
+			Payload: map[string]any{
+				"task_id":    task.ID,
+				"input_hash": task.InputHash,
+			},
+		},
+	)
+	e.appendEvent(
+		context.Background(),
+		store,
+		RunEvent{Kind: "workflow.run.waiting", RunID: run.ID},
+	)
+	return &RunResult{
+		RunID:   run.ID,
+		Status:  RunStatusWaiting,
+		Outputs: cloneMap(outputs),
+	}, nil
+}
+
 func (e *Executor) CancelRun(ctx context.Context, runID, reason string) (*Run, error) {
 	if e == nil {
 		return nil, fmt.Errorf("workflow executor is nil")
@@ -386,6 +794,9 @@ func (e *Executor) enforceConcurrency(ctx context.Context, store RunStore) error
 }
 
 func checkRunCanceled(ctx context.Context, store RunStore, run *Run) error {
+	if errors.Is(context.Cause(ctx), ErrHumanTaskConflict) {
+		return ErrHumanTaskConflict
+	}
 	if err := ctx.Err(); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return fmt.Errorf("%w: context canceled", ErrRunCanceled)
@@ -439,6 +850,11 @@ func (e *Executor) loadWorkflow(
 		}
 		return req.Workflow, ref, nil
 	}
+	if canonical, err := CanonicalLocalRef(req.Ref); err == nil {
+		if capturedErr := e.capturedReusableErrors[canonical]; capturedErr != nil {
+			return nil, "", capturedErr
+		}
+	}
 	if len(e.WorkflowSnapshots) != 0 {
 		if snapshot, canonical, ok := e.workflowSnapshot(req.Ref); ok {
 			return snapshot.Workflow, canonical, nil
@@ -480,12 +896,220 @@ func (e *Executor) loadWorkflow(
 	return workflow, resolved.Canonical, nil
 }
 
+type executorWorkflowSnapshotLoader struct {
+	executor       *Executor
+	snapshots      map[string]*LocalWorkflowSnapshot
+	capturedErrors map[string]error
+	capture        bool
+	bytesRead      int64
+	firstError     error
+}
+
+func (l *executorWorkflowSnapshotLoader) LoadReusableWorkflow(
+	ctx context.Context,
+	ref string,
+) (*Workflow, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	canonical, err := CanonicalLocalRef(ref)
+	if err != nil {
+		l.rememberError(err)
+		return nil, err
+	}
+	if snapshot, ok := l.snapshots[canonical]; ok && snapshot != nil &&
+		snapshot.Workflow != nil && snapshot.Ref == canonical {
+		return snapshot.Workflow, nil
+	}
+	if !l.capture {
+		err = fmt.Errorf(
+			"workflow %q is outside the admitted snapshot closure",
+			canonical,
+		)
+		l.rememberError(err)
+		return nil, err
+	}
+	resolved, err := (Resolver{
+		WorkspaceDir:   l.executor.WorkspaceDir,
+		DefinitionsDir: l.executor.DefinitionsDir,
+	}).ResolveLocal(canonical)
+	if err != nil {
+		safeErr := fmt.Errorf("workflow dependency %q is unavailable", canonical)
+		l.rememberLoadError(canonical, safeErr)
+		return nil, safeErr
+	}
+	remaining := MaxWorkflowDependencyTotalBytes - l.bytesRead
+	data, err := readExecutorWorkflowDependency(resolved.Path, remaining)
+	if err != nil {
+		if errors.Is(err, ErrWorkflowDependencyAnalysisLimitExceeded) {
+			l.rememberError(ErrWorkflowDependencyAnalysisLimitExceeded)
+			return nil, ErrWorkflowDependencyAnalysisLimitExceeded
+		}
+		safeErr := fmt.Errorf("workflow dependency %q is unavailable", canonical)
+		l.rememberLoadError(canonical, safeErr)
+		return nil, safeErr
+	}
+	l.bytesRead += int64(len(data))
+	revision := workflowHashBytes(data)
+	if runtimeCompatibilityConfigured(l.executor.RuntimeCompatibility) {
+		if compatibilityErr := ensureWorkflowHashRunnable(
+			l.executor.WorkspaceDir,
+			canonical,
+			NormalizeRuntimeCompatibility(l.executor.RuntimeCompatibility),
+			revision,
+		); compatibilityErr != nil {
+			l.rememberLoadError(canonical, compatibilityErr)
+		}
+	}
+	workflow, err := Parse(data)
+	if err != nil {
+		if _, compatibilityFailed := l.capturedErrors[canonical]; !compatibilityFailed {
+			l.rememberLoadError(canonical, err)
+		}
+		return nil, err
+	}
+	l.snapshots[canonical] = &LocalWorkflowSnapshot{
+		Ref:      canonical,
+		Revision: revision,
+		Workflow: workflow,
+	}
+	return workflow, nil
+}
+
+func (l *executorWorkflowSnapshotLoader) rememberError(err error) {
+	if l != nil && l.firstError == nil {
+		l.firstError = err
+	}
+}
+
+func (l *executorWorkflowSnapshotLoader) rememberLoadError(ref string, err error) {
+	if l == nil {
+		return
+	}
+	if !l.capture {
+		l.rememberError(err)
+		return
+	}
+	if _, exists := l.capturedErrors[ref]; !exists {
+		l.capturedErrors[ref] = err
+	}
+}
+
+func readExecutorWorkflowDependency(path string, remaining int64) ([]byte, error) {
+	if remaining <= 0 {
+		return nil, ErrWorkflowDependencyAnalysisLimitExceeded
+	}
+	limit := MaxWorkflowDependencyDefinitionBytes
+	if remaining < limit {
+		limit = remaining
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, ErrWorkflowDependencyAnalysisLimitExceeded
+	}
+	return data, nil
+}
+
+func (e *Executor) admitHumanTaskClosure(
+	ctx context.Context,
+	workflowRef string,
+	workflow *Workflow,
+	maxCallDepth int,
+) (*Executor, error) {
+	if e == nil || e.humanTaskClosureAdmitted || workflow == nil ||
+		!workflowHasReusableDependency(workflow) {
+		return e, nil
+	}
+	rootRef, err := CanonicalLocalRef(workflowRef)
+	if err != nil {
+		execution, snapshotErr := newWorkflowExecutionState(workflow)
+		if snapshotErr != nil {
+			return nil, snapshotErr
+		}
+		digest := strings.TrimPrefix(execution.WorkflowRevision, "sha256:")
+		rootRef = "workflows/__inline_" + digest + ".yml"
+	}
+	snapshots := make(map[string]*LocalWorkflowSnapshot, len(e.WorkflowSnapshots)+1)
+	for ref, snapshot := range e.WorkflowSnapshots {
+		snapshots[ref] = snapshot
+	}
+	rootExecution, err := newWorkflowExecutionState(workflow)
+	if err != nil {
+		return nil, err
+	}
+	snapshots[rootRef] = &LocalWorkflowSnapshot{
+		Ref:      rootRef,
+		Revision: rootExecution.WorkflowRevision,
+		Workflow: rootExecution.Workflow,
+	}
+	loader := &executorWorkflowSnapshotLoader{
+		executor:       e,
+		snapshots:      snapshots,
+		capturedErrors: make(map[string]error),
+		capture:        len(e.WorkflowSnapshots) == 0,
+	}
+	closure, err := CheckWorkflowDependencyClosure(ctx, WorkflowDependencyCheckRequest{
+		RootRef:      rootRef,
+		RootWorkflow: rootExecution.Workflow,
+		Loader:       loader,
+		MaxCallDepth: maxCallDepth,
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, issue := range closure.Issues {
+		if issue.Code == WorkflowDependencyIssueHumanTaskReusableUnsupported {
+			return nil, fmt.Errorf(
+				"%w: human/task cannot share an admitted reusable workflow closure",
+				ErrHumanTaskUnsupported,
+			)
+		}
+	}
+	if loader.firstError != nil {
+		return nil, loader.firstError
+	}
+	for _, issue := range closure.Issues {
+		if issue.Code == WorkflowDependencyIssueAnalysisLimitExceeded {
+			return nil, ErrWorkflowDependencyAnalysisLimitExceeded
+		}
+	}
+	admitted := *e
+	admitted.WorkflowSnapshots = snapshots
+	admitted.humanTaskClosureAdmitted = true
+	if len(e.WorkflowSnapshots) == 0 {
+		admitted.verifyCapturedSnapshots = runtimeCompatibilityConfigured(e.RuntimeCompatibility)
+		admitted.capturedReusableErrors = loader.capturedErrors
+	}
+	return &admitted, nil
+}
+
+func workflowHasReusableDependency(workflow *Workflow) bool {
+	if workflow == nil {
+		return false
+	}
+	for _, job := range workflow.Jobs {
+		if strings.TrimSpace(job.Uses) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Executor) executeWorkflow(
 	ctx context.Context,
 	store RunStore,
 	run *Run,
 	workflow *Workflow,
 	req RunRequest,
+	resume *WorkflowExecutionCursor,
 ) (map[string]any, error) {
 	inputs, err := ResolveWorkflowCallInvocation(workflow.On.WorkflowCall, req.Inputs, req.Secrets)
 	if err != nil {
@@ -508,26 +1132,103 @@ func (e *Executor) executeWorkflow(
 		return nil, err
 	}
 	jobs := make(map[string]JobExecution, len(workflow.Jobs))
+	recovering := resume != nil
+	cursorReached := false
 	for _, jobID := range order {
 		if err := checkRunCanceled(ctx, store, run); err != nil {
 			return nil, err
 		}
 		job := workflow.Jobs[jobID]
-		jobExec, err := e.executeJob(ctx, store, run, jobID, job, req, execCtx, jobs)
+		startStep := 0
+		resumeJob := false
+		if recovering && jobID == resume.JobID {
+			if persisted, exists := run.Jobs[jobID]; exists &&
+				(persisted.Status == RunStatusSucceeded || persisted.Status == RunStatusSkipped) {
+				// A prior claimant may have completed the cursor job (and even
+				// later jobs) before crashing ahead of the final run update. Its
+				// durable job checkpoint is authoritative; advancing from the
+				// original human step would otherwise reject or repeat it.
+				jobs[jobID] = persisted
+				cursorReached = true
+				continue
+			}
+			startStep = resume.StepIndex
+			resumeJob = true
+			cursorReached = true
+		} else if recovering {
+			persisted, exists := run.Jobs[jobID]
+			if exists && (persisted.Status == RunStatusSucceeded || persisted.Status == RunStatusSkipped) {
+				jobs[jobID] = persisted
+				continue
+			}
+			if !cursorReached {
+				return nil, fmt.Errorf("invalid persisted workflow cursor")
+			}
+			if exists && persisted.Status == RunStatusRunning {
+				var prefixErr error
+				startStep, prefixErr = persistedWorkflowStepPrefix(run, jobID, job.Steps)
+				if prefixErr != nil {
+					return nil, prefixErr
+				}
+				resumeJob = true
+			}
+		}
+		jobExec, err := e.executeJob(
+			ctx, store, run, jobID, job, req, execCtx, jobs, startStep, resumeJob,
+		)
 		jobs[jobID] = jobExec
 		run.Jobs[jobID] = jobExec
-		if updateErr := store.UpdateRun(ctx, run); updateErr != nil {
-			return nil, updateErr
-		}
 		if err != nil {
+			var waiting workflowWaitingError
+			if errors.As(err, &waiting) {
+				return cloneMap(run.Outputs), err
+			}
+			if updateErr := store.UpdateRun(ctx, run); updateErr != nil {
+				return nil, updateErr
+			}
 			outputs, outputErr := renderWorkflowOutputs(workflow, inputs, req, execCtx, jobs)
 			if outputErr != nil {
 				return outputs, outputErr
 			}
 			return outputs, err
 		}
+		if updateErr := store.UpdateRun(ctx, run); updateErr != nil {
+			return nil, updateErr
+		}
+	}
+	if run.execution != nil {
+		run.execution.Cursor = nil
 	}
 	return renderWorkflowOutputs(workflow, inputs, req, execCtx, jobs)
+}
+
+func persistedWorkflowStepPrefix(
+	run *Run,
+	jobID string,
+	steps []Step,
+) (int, error) {
+	prefix := 0
+	gap := false
+	for index, step := range steps {
+		stepID := strings.TrimSpace(step.ID)
+		if stepID == "" {
+			stepID = fmt.Sprintf("step_%d", index+1)
+		}
+		persisted, exists := run.Steps[jobID+"/"+stepID]
+		if !exists {
+			gap = true
+			continue
+		}
+		if persisted.Status == RunStatusSucceeded || persisted.Status == RunStatusSkipped {
+			if gap {
+				return 0, fmt.Errorf("invalid persisted workflow cursor")
+			}
+			prefix++
+			continue
+		}
+		gap = true
+	}
+	return prefix, nil
 }
 
 func (e *Executor) executeJob(
@@ -539,9 +1240,22 @@ func (e *Executor) executeJob(
 	req RunRequest,
 	execCtx ExecutionContext,
 	jobs map[string]JobExecution,
+	startStep int,
+	resumeJob bool,
 ) (JobExecution, error) {
+	resumedJob := resumeJob
 	jobExec := JobExecution{ID: jobID, Status: RunStatusRunning, Outputs: make(map[string]any)}
-	e.appendEvent(ctx, store, RunEvent{Kind: "workflow.job.start", RunID: run.ID, JobID: jobID})
+	if resumedJob {
+		persisted, exists := run.Jobs[jobID]
+		if !exists || (persisted.Status != RunStatusWaiting && persisted.Status != RunStatusRunning) {
+			return JobExecution{ID: jobID, Status: RunStatusFailed}, fmt.Errorf("invalid persisted workflow cursor")
+		}
+		jobExec = persisted
+		jobExec.Status = RunStatusRunning
+		jobExec.Error = ""
+	} else {
+		e.appendEvent(ctx, store, RunEvent{Kind: "workflow.job.start", RunID: run.ID, JobID: jobID})
+	}
 	if err := checkRunCanceled(ctx, store, run); err != nil {
 		jobExec.Status = RunStatusCanceled
 		jobExec.Error = err.Error()
@@ -551,6 +1265,9 @@ func (e *Executor) executeJob(
 		depExec := jobs[dep]
 		execCtx.Needs[dep] = depExec
 		if depExec.Status != RunStatusSucceeded {
+			if resumedJob {
+				return JobExecution{ID: jobID, Status: RunStatusFailed}, fmt.Errorf("invalid persisted workflow cursor")
+			}
 			jobExec.Status = RunStatusSkipped
 			jobExec.Error = fmt.Sprintf("dependency %s did not succeed", dep)
 			e.appendEvent(
@@ -561,14 +1278,18 @@ func (e *Executor) executeJob(
 			return jobExec, fmt.Errorf("%s", jobExec.Error)
 		}
 	}
-	if ok, err := evalIf(job.If, expressionCtxFrom(execCtx, jobs)); err != nil {
-		jobExec.Status = RunStatusFailed
-		jobExec.Error = err.Error()
-		return jobExec, err
-	} else if !ok {
-		jobExec.Status = RunStatusSkipped
-		e.appendEvent(ctx, store, RunEvent{Kind: "workflow.job.end", RunID: run.ID, JobID: jobID, Message: "skipped"})
-		return jobExec, nil
+	if !resumedJob {
+		if ok, err := evalIf(job.If, expressionCtxFrom(execCtx, jobs)); err != nil {
+			jobExec.Status = RunStatusFailed
+			jobExec.Error = err.Error()
+			return jobExec, err
+		} else if !ok {
+			jobExec.Status = RunStatusSkipped
+			e.appendEvent(ctx, store, RunEvent{
+				Kind: "workflow.job.end", RunID: run.ID, JobID: jobID, Message: "skipped",
+			})
+			return jobExec, nil
+		}
 	}
 	if strings.TrimSpace(job.Uses) != "" {
 		childOutputs, childRunID, err := e.executeReusableJob(ctx, job, req, execCtx, jobs, jobID, run.ID)
@@ -622,7 +1343,71 @@ func (e *Executor) executeJob(
 		stepCtx.Needs[dep] = jobs[dep]
 	}
 	stepCtx.Steps = make(map[string]StepExecution)
-	for index, step := range job.Steps {
+	if startStep > len(job.Steps) {
+		return JobExecution{ID: jobID, Status: RunStatusFailed}, fmt.Errorf("invalid persisted workflow cursor")
+	}
+	for index := 0; index < startStep; index++ {
+		stepID := strings.TrimSpace(job.Steps[index].ID)
+		if stepID == "" {
+			stepID = fmt.Sprintf("step_%d", index+1)
+		}
+		persisted, ok := run.Steps[jobID+"/"+stepID]
+		if !ok || (persisted.Status != RunStatusSucceeded && persisted.Status != RunStatusSkipped) {
+			return JobExecution{ID: jobID, Status: RunStatusFailed}, fmt.Errorf("invalid persisted workflow cursor")
+		}
+		stepCtx.Steps[stepID] = persisted
+	}
+	for index := startStep; index < len(job.Steps); index++ {
+		step := job.Steps[index]
+		stepID := strings.TrimSpace(step.ID)
+		if stepID == "" {
+			stepID = fmt.Sprintf("step_%d", index+1)
+		}
+		if persisted, ok := run.Steps[jobID+"/"+stepID]; ok &&
+			(persisted.Status == RunStatusSucceeded || persisted.Status == RunStatusSkipped) {
+			// A resume claimant may have crashed after durably recording this
+			// step but before completing the run. Rehydrate it instead of
+			// repeating side effects when the response lease is reclaimed.
+			stepCtx.Steps[stepID] = persisted
+			continue
+		}
+		if persisted, ok := run.Steps[jobID+"/"+stepID]; ok &&
+			(persisted.Status == RunStatusFailed || persisted.Status == RunStatusCanceled) {
+			stepCtx.Steps[stepID] = persisted
+			if job.ContinueOnError {
+				jobExec.Status = RunStatusSucceeded
+				jobExec.Error = persisted.Error
+				if jobExec.Error == "" {
+					jobExec.Error = "persisted continuation step did not succeed"
+				}
+				outputs, outputErr := renderJobOutputs(job.Outputs, stepCtx, jobs)
+				if outputErr != nil {
+					outputs = map[string]any{}
+				}
+				jobExec.Outputs = outputs
+				e.appendEvent(
+					ctx,
+					store,
+					RunEvent{
+						Kind:    "workflow.job.end",
+						RunID:   run.ID,
+						JobID:   jobID,
+						Message: "continued after persisted error",
+						Payload: map[string]any{
+							"outputs": outputs,
+							"error":   jobExec.Error,
+						},
+					},
+				)
+				return jobExec, nil
+			}
+			jobExec.Status = persisted.Status
+			jobExec.Error = persisted.Error
+			if jobExec.Error == "" {
+				jobExec.Error = "persisted continuation step did not succeed"
+			}
+			return jobExec, errors.New(jobExec.Error)
+		}
 		if err := checkRunCanceled(ctx, store, run); err != nil {
 			jobExec.Status = RunStatusCanceled
 			jobExec.Error = err.Error()
@@ -633,10 +1418,16 @@ func (e *Executor) executeJob(
 			stepCtx.Steps[stepExec.ID] = stepExec
 			run.Steps[jobID+"/"+stepExec.ID] = stepExec
 		}
-		if updateErr := store.UpdateRun(ctx, run); updateErr != nil {
-			return jobExec, updateErr
-		}
 		if err != nil {
+			var waiting workflowWaitingError
+			if errors.As(err, &waiting) {
+				jobExec.Status = RunStatusWaiting
+				return jobExec, err
+			}
+			run.Jobs[jobID] = jobExec
+			if updateErr := store.UpdateRun(ctx, run); updateErr != nil {
+				return jobExec, updateErr
+			}
 			if step.ContinueOnError {
 				continue
 			}
@@ -669,6 +1460,10 @@ func (e *Executor) executeJob(
 				RunEvent{Kind: "workflow.job.failed", RunID: run.ID, JobID: jobID, Message: err.Error()},
 			)
 			return jobExec, err
+		}
+		run.Jobs[jobID] = jobExec
+		if updateErr := store.UpdateRun(ctx, run); updateErr != nil {
+			return jobExec, updateErr
 		}
 	}
 	outputs, err := renderJobOutputs(job.Outputs, stepCtx, jobs)
@@ -760,15 +1555,54 @@ func (e *Executor) executeStep(
 		)
 		return stepExec, nil
 	}
+	if strings.TrimSpace(step.Uses) == "human/task" && workflowValueReferencesSecrets(step.With) {
+		stepExec.Status = RunStatusFailed
+		stepExec.Error = "human/task values cannot reference secrets"
+		return stepExec, fmt.Errorf("%s", stepExec.Error)
+	}
 	with, err := renderMap(step.With, expressionCtxFrom(execCtx, jobs))
 	if err != nil {
 		stepExec.Status = RunStatusFailed
 		stepExec.Error = err.Error()
 		return stepExec, err
 	}
+	if strings.TrimSpace(step.Uses) == "human/task" {
+		task, taskErr := newWorkflowHumanTask(run, jobID, stepID, with)
+		if taskErr != nil {
+			stepExec.Status = RunStatusFailed
+			stepExec.Error = taskErr.Error()
+			return stepExec, taskErr
+		}
+		if run.execution == nil {
+			stepExec.Status = RunStatusFailed
+			stepExec.Error = ErrHumanTaskUnsupported.Error()
+			return stepExec, ErrHumanTaskUnsupported
+		}
+		if run.humanTasks == nil {
+			run.humanTasks = make(map[string]WorkflowHumanTask)
+		}
+		if _, exists := run.humanTasks[task.ID]; exists {
+			stepExec.Status = RunStatusFailed
+			stepExec.Error = ErrHumanTaskConflict.Error()
+			return stepExec, ErrHumanTaskConflict
+		}
+		run.humanTasks[task.ID] = task
+		run.execution.Cursor = &WorkflowExecutionCursor{JobID: jobID, StepIndex: index}
+		stepExec.Status = RunStatusWaiting
+		stepExec.Outputs = map[string]any{
+			"task_id":    task.ID,
+			"input_hash": task.InputHash,
+		}
+		return stepExec, workflowWaitingError{}
+	}
 	stepTargetCtx := execCtx
 	stepTargetCtx.JobID = jobID
 	stepTargetCtx.StepID = stepID
+	if errors.Is(context.Cause(ctx), ErrHumanTaskConflict) {
+		stepExec.Status = RunStatusFailed
+		stepExec.Error = ErrHumanTaskConflict.Error()
+		return stepExec, ErrHumanTaskConflict
+	}
 	outputs, err := e.runStepTarget(ctx, step, with, stepTargetCtx)
 	if err != nil {
 		if step.ContinueOnError {
@@ -832,8 +1666,23 @@ func (e *Executor) ensureReusableWorkflowRunnable(ctx context.Context, ref strin
 	if e == nil {
 		return nil
 	}
+	if canonical, err := CanonicalLocalRef(ref); err == nil {
+		if capturedErr := e.capturedReusableErrors[canonical]; capturedErr != nil {
+			return capturedErr
+		}
+	}
 	if len(e.WorkflowSnapshots) != 0 {
-		if _, _, ok := e.workflowSnapshot(ref); ok {
+		if snapshot, canonical, ok := e.workflowSnapshot(ref); ok {
+			if e.verifyCapturedSnapshots {
+				if err := ensureWorkflowHashRunnable(
+					e.WorkspaceDir,
+					canonical,
+					NormalizeRuntimeCompatibility(e.RuntimeCompatibility),
+					snapshot.Revision,
+				); err != nil {
+					return err
+				}
+			}
 			return nil
 		}
 		return fmt.Errorf(
@@ -1302,6 +2151,54 @@ func cloneStringMap(values map[string]string) map[string]string {
 	return out
 }
 
+func checkpointWorkflowRun(run *Run) *workflowRunCheckpoint {
+	if run == nil {
+		return nil
+	}
+	checkpoint := &workflowRunCheckpoint{
+		Inputs:  cloneMap(run.Inputs),
+		Event:   cloneMap(run.Event),
+		Outputs: cloneMap(run.Outputs),
+		Jobs:    make(map[string]JobExecution, len(run.Jobs)),
+		Steps:   make(map[string]StepExecution, len(run.Steps)),
+	}
+	for key, job := range run.Jobs {
+		job.Outputs = cloneMap(job.Outputs)
+		checkpoint.Jobs[key] = job
+	}
+	for key, step := range run.Steps {
+		step.Outputs = cloneMap(step.Outputs)
+		checkpoint.Steps[key] = step
+	}
+	return checkpoint
+}
+
+func cloneWorkflowRunCheckpoint(checkpoint *workflowRunCheckpoint) *workflowRunCheckpoint {
+	if checkpoint == nil {
+		return nil
+	}
+	run := &Run{
+		Inputs:  checkpoint.Inputs,
+		Event:   checkpoint.Event,
+		Outputs: checkpoint.Outputs,
+		Jobs:    checkpoint.Jobs,
+		Steps:   checkpoint.Steps,
+	}
+	return checkpointWorkflowRun(run)
+}
+
+func restoreWorkflowRunCheckpoint(run *Run) {
+	if run == nil || run.execution == nil || run.execution.Checkpoint == nil {
+		return
+	}
+	checkpoint := cloneWorkflowRunCheckpoint(run.execution.Checkpoint)
+	run.Inputs = checkpoint.Inputs
+	run.Event = checkpoint.Event
+	run.Outputs = checkpoint.Outputs
+	run.Jobs = checkpoint.Jobs
+	run.Steps = checkpoint.Steps
+}
+
 func cloneRun(run *Run) *Run {
 	if run == nil {
 		return nil
@@ -1323,6 +2220,25 @@ func cloneRun(run *Run) *Run {
 	for key, step := range run.Steps {
 		step.Outputs = cloneMap(step.Outputs)
 		out.Steps[key] = step
+	}
+	if run.execution != nil {
+		execution := *run.execution
+		if run.execution.Cursor != nil {
+			cursor := *run.execution.Cursor
+			execution.Cursor = &cursor
+		}
+		if run.execution.Resume != nil {
+			resume := *run.execution.Resume
+			execution.Resume = &resume
+		}
+		// Workflow snapshots are immutable after run creation.
+		execution.Workflow = run.execution.Workflow
+		execution.Checkpoint = cloneWorkflowRunCheckpoint(run.execution.Checkpoint)
+		out.execution = &execution
+	}
+	out.humanTasks = make(map[string]WorkflowHumanTask, len(run.humanTasks))
+	for key, task := range run.humanTasks {
+		out.humanTasks[key] = cloneWorkflowHumanTask(task)
 	}
 	if run.CompletedAt != nil {
 		completedAt := *run.CompletedAt

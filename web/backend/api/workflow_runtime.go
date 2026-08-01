@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	agentloop "github.com/sipeed/picoclaw/pkg/agent"
@@ -130,6 +131,12 @@ func (r *webWorkflowRuntimeRunner) ResolveWorkflowDependency(
 	}
 	if dependency.Kind == workflows.WorkflowDependencyKindReusable {
 		return workflows.WorkflowDependencyReadinessReady
+	}
+	if dependency.Kind == workflows.WorkflowDependencyKindHuman {
+		if strings.TrimSpace(dependency.Name) == "task" {
+			return workflows.WorkflowDependencyReadinessReady
+		}
+		return workflows.WorkflowDependencyReadinessNotFound
 	}
 	if dependency.Kind == workflows.WorkflowDependencyKindFunction &&
 		workflows.IsNativeFunction(dependency.Name) {

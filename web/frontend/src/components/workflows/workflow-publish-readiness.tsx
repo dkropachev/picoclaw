@@ -394,6 +394,8 @@ function structuralGuidance(code: string) {
       return 'Use "inherit" or a named secret mapping.'
     case "missing_required_secret":
       return "Map or inherit the required reusable workflow secret."
+    case "human_task_reusable_unsupported":
+      return "Keep human/task and reusable workflow calls in separate workflow closures."
     case "analysis_limit_exceeded":
       return "Reduce the reusable workflow closure or split it into smaller workflows."
     default:
@@ -412,6 +414,7 @@ function structuralCodeLabel(code: string) {
     case "input_type_mismatch":
     case "invalid_secrets":
     case "missing_required_secret":
+    case "human_task_reusable_unsupported":
     case "analysis_limit_exceeded":
       return formatCode(code)
     default:

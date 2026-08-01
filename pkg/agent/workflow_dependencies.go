@@ -28,6 +28,11 @@ func (al *AgentLoop) ResolveWorkflowDependency(
 	switch dependency.Kind {
 	case workflows.WorkflowDependencyKindReusable:
 		return workflows.WorkflowDependencyReadinessReady
+	case workflows.WorkflowDependencyKindHuman:
+		if strings.TrimSpace(dependency.Name) == "task" {
+			return workflows.WorkflowDependencyReadinessReady
+		}
+		return workflows.WorkflowDependencyReadinessNotFound
 	case workflows.WorkflowDependencyKindFunction:
 		if workflows.IsNativeFunction(dependency.Name) {
 			return workflows.WorkflowDependencyReadinessReady

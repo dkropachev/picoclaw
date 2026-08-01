@@ -124,6 +124,15 @@ func (h *Handler) registerWorkflowRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/workflows/development/discard", h.handleDiscardWorkflowDevelopment)
 	mux.HandleFunc("GET /api/workflows/runs", h.handleListWorkflowRuns)
 	mux.HandleFunc("GET /api/workflows/runs/{run_id}", h.handleGetWorkflowRun)
+	mux.HandleFunc("GET /api/workflows/runs/{run_id}/tasks", h.handleListWorkflowHumanTasks)
+	mux.HandleFunc(
+		"POST /api/workflows/runs/{run_id}/tasks/{task_id}/resume",
+		h.handleResumeWorkflowHumanTask,
+	)
+	mux.HandleFunc(
+		"POST /api/workflows/runs/{run_id}/tasks/{task_id}/cancel",
+		h.handleCancelWorkflowHumanTask,
+	)
 	mux.HandleFunc("GET /api/workflows/runs/{run_id}/events", h.handleGetWorkflowRunEvents)
 	mux.HandleFunc("GET /api/workflows/runs/{run_id}/events/stream", h.handleStreamWorkflowRunEvents)
 	mux.HandleFunc("GET /api/workflows/runs/{run_id}/graph", h.handleGetWorkflowRunGraph)
@@ -764,7 +773,7 @@ func (h *Handler) handleGetWorkflowDevelopment(w http.ResponseWriter, r *http.Re
 	payload := map[string]any{"session": session}
 	if session != nil &&
 		session.LastTest != nil &&
-		session.LastTest.Status == workflows.RunStatusRunning {
+		workflowDevelopmentTestStatusIsActive(session.LastTest.Status) {
 		reconciledSession, reconciliation := h.reconcileRunningWorkflowDevelopmentTest(
 			r.Context(),
 			workspace,
@@ -1819,7 +1828,7 @@ func (h *Handler) reconcileRunningWorkflowDevelopmentTest(
 ) (*workflows.WorkflowDevelopmentSession, *workflowDevelopmentTestReconciliation) {
 	if session == nil ||
 		session.LastTest == nil ||
-		session.LastTest.Status != workflows.RunStatusRunning ||
+		!workflowDevelopmentTestStatusIsActive(session.LastTest.Status) ||
 		strings.TrimSpace(session.LastTest.RunID) == "" {
 		return session, nil
 	}
@@ -1833,7 +1842,8 @@ func (h *Handler) reconcileRunningWorkflowDevelopmentTest(
 			Message: "the running development snapshot could not be reconciled with its durable workflow run",
 		}
 	}
-	if run.Status == workflows.RunStatusRunning {
+	if workflowDevelopmentTestStatusIsActive(run.Status) &&
+		run.Status == session.LastTest.Status {
 		return session, nil
 	}
 	result := &workflows.RunResult{
@@ -1922,11 +1932,34 @@ func cloneWorkflowMap(value map[string]any) map[string]any {
 }
 
 func (h *Handler) recordCanceledWorkflowDevelopmentRun(ctx context.Context, run *workflows.Run) {
+	_ = ctx
 	if run == nil || run.ID == "" || run.Status != workflows.RunStatusCanceled {
+		return
+	}
+	h.recordWorkflowDevelopmentRunResult(&workflows.RunResult{
+		RunID:  run.ID,
+		Status: workflows.RunStatusCanceled,
+		Error:  run.CancelReason,
+	})
+}
+
+func (h *Handler) recordWorkflowDevelopmentRunResult(result *workflows.RunResult) {
+	if result == nil || strings.TrimSpace(result.RunID) == "" {
 		return
 	}
 	workspace, err := h.workflowWorkspace()
 	if err != nil {
+		return
+	}
+	h.recordWorkflowDevelopmentRunResultInWorkspace(workspace, result)
+}
+
+func (h *Handler) recordWorkflowDevelopmentRunResultInWorkspace(
+	workspace string,
+	result *workflows.RunResult,
+) {
+	if strings.TrimSpace(workspace) == "" || result == nil ||
+		strings.TrimSpace(result.RunID) == "" {
 		return
 	}
 	h.workflowDevelopmentMu.Lock()
@@ -1935,13 +1968,9 @@ func (h *Handler) recordCanceledWorkflowDevelopmentRun(ctx context.Context, run 
 	if err != nil || session == nil || session.LastTest == nil {
 		return
 	}
-	if session.LastTest.RunID != run.ID || session.LastTest.Status != workflows.RunStatusRunning {
+	if session.LastTest.RunID != result.RunID ||
+		!workflowDevelopmentTestStatusIsActive(session.LastTest.Status) {
 		return
-	}
-	result := &workflows.RunResult{
-		RunID:  run.ID,
-		Status: workflows.RunStatusCanceled,
-		Error:  run.CancelReason,
 	}
 	_, _, recordErr := retryWorkflowDevelopmentTestRecord(
 		func() (*workflows.WorkflowDevelopmentSession, bool, error) {
@@ -1950,7 +1979,7 @@ func (h *Handler) recordCanceledWorkflowDevelopmentRun(ctx context.Context, run 
 				session.ID,
 				session.LastTest.DraftKey,
 				session.LastTest.EventID,
-				run.ID,
+				result.RunID,
 				result,
 				nil,
 			)
@@ -1959,13 +1988,17 @@ func (h *Handler) recordCanceledWorkflowDevelopmentRun(ctx context.Context, run 
 	if recordErr != nil {
 		logger.ErrorCF(
 			"workflows",
-			"failed to reconcile canceled workflow development test",
+			"failed to reconcile workflow development test after human task operation",
 			map[string]any{
-				"run_id": run.ID,
+				"run_id": result.RunID,
 				"error":  recordErr.Error(),
 			},
 		)
 	}
+}
+
+func workflowDevelopmentTestStatusIsActive(status string) bool {
+	return status == workflows.RunStatusRunning || status == workflows.RunStatusWaiting
 }
 
 func (h *Handler) tryLockWorkflowDevelopment(w http.ResponseWriter) func() {

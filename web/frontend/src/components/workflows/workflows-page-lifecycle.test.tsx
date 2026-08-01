@@ -283,45 +283,50 @@ describe("WorkflowsPage lifecycle controls", () => {
     expect(workflowMocks.retryWorkflowRun).toHaveBeenCalledTimes(1)
   })
 
-  it("cancels the dialog's exact run and renders returned audit metadata", async () => {
-    const user = userEvent.setup()
-    const running = workflowRun({
-      status: "running",
-      completed_at: undefined,
-    })
-    const canceled = workflowRun({
-      status: "canceled",
-      cancel_reason: "operator intervention",
-      cancel_requested_at: "2026-07-29T12:03:00Z",
-      completed_at: "2026-07-29T12:03:00Z",
-      updated_at: "2026-07-29T12:03:00Z",
-    })
-    workflowMocks.listWorkflowRuns.mockResolvedValue({ runs: [running] })
-    workflowMocks.getWorkflowRun.mockResolvedValue(running)
-    workflowMocks.cancelWorkflowRun.mockResolvedValue(canceled)
-    renderWorkflowsPage()
+  it.each(["running", "waiting"])(
+    "cancels the dialog's exact %s run and renders returned audit metadata",
+    async (initialStatus) => {
+      const user = userEvent.setup()
+      const running = workflowRun({
+        status: initialStatus,
+        completed_at: undefined,
+      })
+      const canceled = workflowRun({
+        status: "canceled",
+        cancel_reason: "operator intervention",
+        cancel_requested_at: "2026-07-29T12:03:00Z",
+        completed_at: "2026-07-29T12:03:00Z",
+        updated_at: "2026-07-29T12:03:00Z",
+      })
+      workflowMocks.listWorkflowRuns.mockResolvedValue({ runs: [running] })
+      workflowMocks.getWorkflowRun.mockResolvedValue(running)
+      workflowMocks.cancelWorkflowRun.mockResolvedValue(canceled)
+      renderWorkflowsPage()
 
-    await user.click(await screen.findByRole("button", { name: "Cancel" }))
-    workflowMocks.getWorkflowRun.mockResolvedValue(canceled)
-    const dialog = screen.getByRole("alertdialog")
-    expect(within(dialog).getByText(selectedRunID)).toBeVisible()
-    await user.type(
-      within(dialog).getByRole("textbox", { name: "Cancel reason" }),
-      "  operator intervention  ",
-    )
-    await user.click(within(dialog).getByRole("button", { name: "Cancel run" }))
+      await user.click(await screen.findByRole("button", { name: "Cancel" }))
+      workflowMocks.getWorkflowRun.mockResolvedValue(canceled)
+      const dialog = screen.getByRole("alertdialog")
+      expect(within(dialog).getByText(selectedRunID)).toBeVisible()
+      await user.type(
+        within(dialog).getByRole("textbox", { name: "Cancel reason" }),
+        "  operator intervention  ",
+      )
+      await user.click(
+        within(dialog).getByRole("button", { name: "Cancel run" }),
+      )
 
-    expect(workflowMocks.cancelWorkflowRun).toHaveBeenCalledWith(
-      selectedRunID,
-      "operator intervention",
-    )
-    await waitFor(() =>
-      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
-    )
-    expect(screen.getByText("Cancel requested")).toBeVisible()
-    expect(screen.getByText("Completed")).toBeVisible()
-    expect(screen.getByText("operator intervention")).toBeVisible()
-  })
+      expect(workflowMocks.cancelWorkflowRun).toHaveBeenCalledWith(
+        selectedRunID,
+        "operator intervention",
+      )
+      await waitFor(() =>
+        expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument(),
+      )
+      expect(screen.getByText("Cancel requested")).toBeVisible()
+      expect(screen.getByText("Completed")).toBeVisible()
+      expect(screen.getByText("operator intervention")).toBeVisible()
+    },
+  )
 })
 
 async function openRunPopover(user: ReturnType<typeof userEvent.setup>) {

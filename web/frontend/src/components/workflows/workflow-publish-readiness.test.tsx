@@ -61,6 +61,13 @@ describe("WorkflowPublishReadinessPanel", () => {
             dependency_kind: "reusable",
             dependency_name: "workflows/shared.yml",
           },
+          {
+            code: "human_task_reusable_unsupported",
+            workflow_ref: "workflows/review.yml",
+            path: "jobs.review.steps[0].uses",
+            dependency_kind: "human",
+            dependency_name: "task",
+          },
         ],
         dependencies: [
           {
@@ -89,11 +96,16 @@ describe("WorkflowPublishReadinessPanel", () => {
 
     const panel = screen.getByRole("region", { name: "Publish readiness" })
     expect(
-      within(panel).getByText("Structural blockers (1)"),
+      within(panel).getByText("Structural blockers (2)"),
     ).toBeInTheDocument()
     expect(
       within(panel).getByText(
         "Map the required input or add a default in the reusable workflow.",
+      ),
+    ).toBeInTheDocument()
+    expect(
+      within(panel).getByText(
+        "Keep human/task and reusable workflow calls in separate workflow closures.",
       ),
     ).toBeInTheDocument()
     expect(
