@@ -555,7 +555,7 @@ func currentWorkflowDevelopmentTestMatchesRun(
 	return current.DraftKey == draftKey &&
 		current.EventID == eventID &&
 		current.RunID == expectedRunID &&
-		current.Status == RunStatusRunning
+		workflowDevelopmentTestIsActive(current.Status)
 }
 
 // SanitizeEventBackedDraftTestOutcome returns the browser-safe snapshot used
@@ -968,7 +968,7 @@ func recordWorkflowDevelopmentTest(
 		TestedAt:          now,
 	}
 	switch status {
-	case RunStatusRunning:
+	case RunStatusRunning, RunStatusWaiting:
 		session.Status = WorkflowDevelopmentStatusTesting
 	case RunStatusSucceeded:
 		if session.Validation != nil && session.Validation.Valid {
@@ -1006,13 +1006,17 @@ func ensureNoCurrentRunningDevelopmentTest(session *WorkflowDevelopmentSession) 
 	if session == nil || session.LastTest == nil {
 		return nil
 	}
-	if session.LastTest.Status != RunStatusRunning {
+	if !workflowDevelopmentTestIsActive(session.LastTest.Status) {
 		return nil
 	}
 	if !workflowDevelopmentTestMatchesDraft(session) {
 		return nil
 	}
 	return ErrDevelopmentBusy
+}
+
+func workflowDevelopmentTestIsActive(status string) bool {
+	return status == RunStatusRunning || status == RunStatusWaiting
 }
 
 func hasCurrentSuccessfulDevelopmentTest(session *WorkflowDevelopmentSession) bool {

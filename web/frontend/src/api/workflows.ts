@@ -857,6 +857,7 @@ export type WorkflowDependencyKind =
   | "tool"
   | "mcp"
   | "function"
+  | "human"
   | "reusable"
 
 export interface WorkflowDependencyOccurrence {
@@ -876,6 +877,7 @@ export type WorkflowDependencyIssueCode =
   | "input_type_mismatch"
   | "invalid_secrets"
   | "missing_required_secret"
+  | "human_task_reusable_unsupported"
   | "analysis_limit_exceeded"
 
 export interface WorkflowDependencyIssue {

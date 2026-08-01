@@ -124,4 +124,20 @@ describe("workflowDraftTestRepairPrompt", () => {
     expect(prompt).not.toContain(attackerText)
     expect(prompt).toContain("Run ID: wr_unavailable")
   })
+
+  it("does not classify a waiting human task as a failed draft test", () => {
+    const prompt = workflowDraftTestRepairPrompt(
+      "Steer the current draft",
+      {
+        runID: "wr_waiting_for_human",
+        status: "waiting",
+        error: attackerText,
+      },
+      false,
+    )
+
+    expect(prompt).toBe("Steer the current draft")
+    expect(prompt).not.toContain(attackerText)
+    expect(prompt).not.toContain("Last draft test failed")
+  })
 })

@@ -115,6 +115,22 @@ func TestResolveWorkflowDependencyAgentsFunctionsAndTools(t *testing.T) {
 			},
 			want: workflows.WorkflowDependencyReadinessReady,
 		},
+		{
+			name: "human task primitive",
+			dependency: workflows.WorkflowDependencyOccurrence{
+				Kind: workflows.WorkflowDependencyKindHuman,
+				Name: "task",
+			},
+			want: workflows.WorkflowDependencyReadinessReady,
+		},
+		{
+			name: "unknown human primitive",
+			dependency: workflows.WorkflowDependencyOccurrence{
+				Kind: workflows.WorkflowDependencyKindHuman,
+				Name: "unknown",
+			},
+			want: workflows.WorkflowDependencyReadinessNotFound,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

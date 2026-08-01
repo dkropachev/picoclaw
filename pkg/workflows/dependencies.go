@@ -41,6 +41,8 @@ const (
 	WorkflowDependencyKindMCP WorkflowDependencyKind = "mcp"
 	// WorkflowDependencyKindFunction identifies a function/<name> step target.
 	WorkflowDependencyKindFunction WorkflowDependencyKind = "function"
+	// WorkflowDependencyKindHuman identifies the built-in human/task step.
+	WorkflowDependencyKindHuman WorkflowDependencyKind = "human"
 	// WorkflowDependencyKindReusable identifies a reusable workflow job target.
 	WorkflowDependencyKindReusable WorkflowDependencyKind = "reusable"
 )
@@ -88,6 +90,10 @@ const (
 	// WorkflowDependencyIssueAnalysisLimitExceeded means the bounded closure
 	// analysis stopped before loading or reporting additional declarations.
 	WorkflowDependencyIssueAnalysisLimitExceeded WorkflowDependencyIssueCode = "analysis_limit_exceeded"
+	// WorkflowDependencyIssueHumanTaskReusableUnsupported means a reachable
+	// reusable edge and human suspension occur in the same closure before
+	// parent/child acknowledgement propagation is supported.
+	WorkflowDependencyIssueHumanTaskReusableUnsupported WorkflowDependencyIssueCode = "human_task_reusable_unsupported"
 )
 
 // WorkflowDependencyIssue locates one structural closure failure without
@@ -295,11 +301,35 @@ func CheckWorkflowDependencyClosure(
 	if err := checker.visit(rootRef, request.RootWorkflow, 0); err != nil {
 		return WorkflowDependencyClosure{}, err
 	}
+	checker.rejectHumanTaskReusableClosure()
 	checker.checkCallDepth(rootRef, 0, make(map[string]bool))
 	sortWorkflowDependencyOccurrences(checker.report.Dependencies)
 	sortWorkflowDependencyIssues(checker.report.Issues)
 
 	return checker.report, nil
+}
+
+func (c *workflowDependencyClosureChecker) rejectHumanTaskReusableClosure() {
+	hasHumanTask := false
+	for _, dependency := range c.report.Dependencies {
+		if dependency.Kind == WorkflowDependencyKindHuman {
+			hasHumanTask = true
+			break
+		}
+	}
+	if !hasHumanTask {
+		return
+	}
+	for _, dependency := range c.report.Dependencies {
+		if dependency.Kind != WorkflowDependencyKindReusable {
+			continue
+		}
+		c.addIssue(
+			dependency,
+			WorkflowDependencyIssueHumanTaskReusableUnsupported,
+			dependency.Path,
+		)
+	}
 }
 
 // ResolveWorkflowDependencyReadiness applies dynamic runtime readiness without
@@ -637,6 +667,7 @@ func workflowStepDependency(
 		{prefix: "tool/", kind: WorkflowDependencyKindTool},
 		{prefix: "mcp/", kind: WorkflowDependencyKindMCP},
 		{prefix: "function/", kind: WorkflowDependencyKindFunction},
+		{prefix: "human/", kind: WorkflowDependencyKindHuman},
 	} {
 		if strings.HasPrefix(uses, candidate.prefix) {
 			return candidate.kind, strings.TrimSpace(strings.TrimPrefix(uses, candidate.prefix)), true

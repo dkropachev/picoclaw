@@ -20,6 +20,7 @@ import (
 
 const (
 	RunStatusRunning   = "running"
+	RunStatusWaiting   = "waiting"
 	RunStatusSucceeded = "succeeded"
 	RunStatusFailed    = "failed"
 	RunStatusCanceled  = "canceled"
@@ -59,6 +60,9 @@ type Run struct {
 	UpdatedAt         time.Time                `json:"updated_at"`
 	CompletedAt       *time.Time               `json:"completed_at,omitempty"`
 	CancelRequestedAt *time.Time               `json:"cancel_requested_at,omitempty"`
+
+	execution  *workflowExecutionState
+	humanTasks map[string]WorkflowHumanTask
 }
 
 type RunEvent struct {
@@ -146,7 +150,7 @@ func (s *FileRunStore) createRunLocked(run *Run) error {
 		return err
 	}
 	run.UpdatedAt = time.Now().UTC()
-	data, err := json.MarshalIndent(run, "", "  ")
+	data, err := marshalPersistedRun(run)
 	if err != nil {
 		return err
 	}
@@ -236,13 +240,35 @@ func (s *FileRunStore) UpdateRun(ctx context.Context, run *Run) error {
 	if mkdirErr := os.MkdirAll(dir, 0o755); mkdirErr != nil {
 		return mkdirErr
 	}
-	if existing, readErr := readRunFile(filepath.Join(dir, "run.json")); readErr == nil &&
-		isTerminalRunStatus(existing.Status) {
-		*run = *cloneRun(existing)
-		return nil
+	now := time.Now().UTC()
+	if existing, readErr := readRunFile(filepath.Join(dir, "run.json")); readErr == nil {
+		if existing.execution != nil && existing.execution.Resume != nil &&
+			existing.execution.Resume.Token != "" {
+			incomingToken := ""
+			if run.execution != nil && run.execution.Resume != nil {
+				incomingToken = run.execution.Resume.Token
+			}
+			if incomingToken != existing.execution.Resume.Token {
+				return ErrHumanTaskConflict
+			}
+		}
+		if isTerminalRunStatus(existing.Status) {
+			*run = *cloneRun(existing)
+			return nil
+		}
+		if existing.execution != nil && existing.execution.Resume != nil &&
+			existing.execution.Resume.Token != "" {
+			if !now.Before(existing.execution.Resume.ExpiresAt) {
+				return ErrHumanTaskConflict
+			}
+			if run.execution != nil && run.execution.Resume != nil &&
+				run.execution.Resume.ExpiresAt.Before(existing.execution.Resume.ExpiresAt) {
+				run.execution.Resume.ExpiresAt = existing.execution.Resume.ExpiresAt
+			}
+		}
 	}
-	run.UpdatedAt = time.Now().UTC()
-	data, err := json.MarshalIndent(run, "", "  ")
+	run.UpdatedAt = now
+	data, err := marshalPersistedRun(run)
 	if err != nil {
 		return err
 	}
@@ -260,6 +286,9 @@ func readRunFile(path string) (*Run, error) {
 	}
 	trustedEventID, trusted := trustedExternalEventRunFamily(path, run)
 	if !trusted {
+		if run.execution != nil && run.execution.Checkpoint != nil {
+			return run, nil
+		}
 		if err := restoreOrdinaryRunEventFields(run, raw); err != nil {
 			return nil, err
 		}
@@ -277,6 +306,37 @@ func readRunFile(path string) (*Run, error) {
 	return run, nil
 }
 
+func marshalPersistedRun(run *Run) ([]byte, error) {
+	if run == nil {
+		return nil, fmt.Errorf("run is required")
+	}
+	base, err := json.Marshal(run)
+	if err != nil {
+		return nil, err
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(base, &document); err != nil {
+		return nil, err
+	}
+	if run.execution != nil {
+		execution := *run.execution
+		execution.Checkpoint = checkpointWorkflowRun(run)
+		encoded, err := json.Marshal(&execution)
+		if err != nil {
+			return nil, err
+		}
+		document["execution"] = encoded
+	}
+	if len(run.humanTasks) != 0 {
+		encoded, err := json.Marshal(run.humanTasks)
+		if err != nil {
+			return nil, err
+		}
+		document["human_tasks"] = encoded
+	}
+	return json.MarshalIndent(document, "", "  ")
+}
+
 type runEventJSONFields struct {
 	event         json.RawMessage
 	inputEvent    json.RawMessage
@@ -292,6 +352,10 @@ func decodeRunWithExactEventFields(
 		return nil, runEventJSONFields{}, err
 	}
 	raw := runEventJSONFields{}
+	executionJSON := document["execution"]
+	humanTasksJSON := document["human_tasks"]
+	delete(document, "execution")
+	delete(document, "human_tasks")
 	raw.event, raw.hasEvent = document["event"]
 	if raw.hasEvent {
 		document["event"] = json.RawMessage(`{}`)
@@ -346,6 +410,21 @@ func decodeRunWithExactEventFields(
 		}
 		run.Inputs["event"] = inputEvent
 	}
+	if len(executionJSON) != 0 && string(executionJSON) != "null" {
+		var execution workflowExecutionState
+		if err := decodeJSONWithNumbers(executionJSON, &execution); err != nil {
+			return nil, runEventJSONFields{}, err
+		}
+		run.execution = &execution
+	}
+	if len(humanTasksJSON) != 0 && string(humanTasksJSON) != "null" {
+		var tasks map[string]WorkflowHumanTask
+		if err := decodeJSONWithNumbers(humanTasksJSON, &tasks); err != nil {
+			return nil, runEventJSONFields{}, err
+		}
+		run.humanTasks = tasks
+	}
+	restoreWorkflowRunCheckpoint(&run)
 	return &run, raw, nil
 }
 
@@ -647,7 +726,17 @@ func (s *FileRunStore) CancelRun(ctx context.Context, runID, reason string) (*Ru
 		run.CompletedAt = &now
 	}
 	run.UpdatedAt = now
-	data, err := json.MarshalIndent(run, "", "  ")
+	for id, task := range run.humanTasks {
+		if task.Status != HumanTaskStatusWaiting {
+			continue
+		}
+		task.Status = HumanTaskStatusCanceled
+		task.Revision++
+		task.UpdatedAt = now
+		task.CanceledAt = &now
+		run.humanTasks[id] = task
+	}
+	data, err := marshalPersistedRun(run)
 	if err != nil {
 		unlock()
 		return nil, err
@@ -716,6 +805,327 @@ func (s *FileRunStore) ListRuns(ctx context.Context) ([]Run, error) {
 	}
 	defer unlock()
 	return s.listRunsLocked(ctx)
+}
+
+func (s *FileRunStore) ListHumanTasks(
+	ctx context.Context,
+	runID string,
+) ([]WorkflowHumanTask, error) {
+	runID = strings.TrimSpace(runID)
+	run, err := s.GetRun(ctx, runID)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", ErrHumanTaskNotFound, strings.TrimSpace(runID))
+		}
+		return nil, err
+	}
+	if run.ID != runID {
+		return nil, fmt.Errorf("%w: %s", ErrHumanTaskNotFound, runID)
+	}
+	tasks := sortedWorkflowHumanTasks(run.humanTasks)
+	if run.Status == RunStatusRunning && run.execution != nil && run.execution.Resume != nil {
+		claim := run.execution.Resume
+		for index := range tasks {
+			if tasks[index].ID != claim.TaskID || tasks[index].Status != HumanTaskStatusAnswered {
+				continue
+			}
+			retryAt := claim.ExpiresAt
+			tasks[index].RetryAt = &retryAt
+			if time.Now().UTC().Before(retryAt) {
+				tasks[index].Status = HumanTaskStatusContinuing
+			} else {
+				tasks[index].Status = HumanTaskStatusRecoveryRequired
+			}
+		}
+	}
+	return tasks, nil
+}
+
+// ClaimHumanTask atomically validates and records one human response. The
+// returned duplicate flag is true only for an exact idempotent replay.
+func (s *FileRunStore) ClaimHumanTask(
+	ctx context.Context,
+	runID string,
+	taskID string,
+	req HumanTaskResumeRequest,
+) (*Run, WorkflowHumanTask, bool, error) {
+	_ = ctx
+	runID = strings.TrimSpace(runID)
+	taskID = strings.TrimSpace(taskID)
+	if runID == "" || taskID == "" {
+		return nil, WorkflowHumanTask{}, false, ErrHumanTaskNotFound
+	}
+	unlock, lockErr := s.lockRoot()
+	if lockErr != nil {
+		return nil, WorkflowHumanTask{}, false, lockErr
+	}
+	defer unlock()
+	runPath := filepath.Join(s.root, safeID(runID), "run.json")
+	run, readErr := readRunFile(runPath)
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return nil, WorkflowHumanTask{}, false, fmt.Errorf("%w: %s", ErrHumanTaskNotFound, runID)
+		}
+		return nil, WorkflowHumanTask{}, false, readErr
+	}
+	if run.ID != runID {
+		return nil, WorkflowHumanTask{}, false, ErrHumanTaskNotFound
+	}
+	task, exists := run.humanTasks[taskID]
+	if !exists || task.ID != taskID || task.RunID != run.ID {
+		return nil, WorkflowHumanTask{}, false, ErrHumanTaskNotFound
+	}
+	if task.Status == HumanTaskStatusAnswered {
+		if strings.TrimSpace(req.ResponseID) == task.ResponseID &&
+			req.InputHash == task.InputHash &&
+			canonicalJSON(req.Response) == canonicalJSON(task.Response) {
+			now := time.Now().UTC()
+			if run.Status != RunStatusRunning || run.execution == nil ||
+				run.execution.Resume == nil || run.execution.Resume.TaskID != task.ID ||
+				now.Before(run.execution.Resume.ExpiresAt) {
+				return cloneRun(run), cloneWorkflowHumanTask(task), true, nil
+			}
+			if validationErr := validateAnsweredHumanTaskCheckpoint(run, task); validationErr != nil {
+				return nil, WorkflowHumanTask{}, false, validationErr
+			}
+			if concurrencyErr := s.checkHumanTaskResumeConcurrencyLocked(
+				ctx,
+				run,
+				req.maxConcurrent,
+			); concurrencyErr != nil {
+				return nil, WorkflowHumanTask{}, false, concurrencyErr
+			}
+			lease := req.resumeLease
+			if lease <= 0 {
+				lease = humanTaskResumeLease(0)
+			}
+			run.execution.Resume = &workflowResumeClaim{
+				TaskID:     task.ID,
+				ResponseID: task.ResponseID,
+				Token:      NewRunID(),
+				ClaimedAt:  now,
+				ExpiresAt:  now.Add(lease),
+				Lease:      lease,
+			}
+			run.UpdatedAt = now
+			data, marshalErr := marshalPersistedRun(run)
+			if marshalErr != nil {
+				return nil, WorkflowHumanTask{}, false, marshalErr
+			}
+			if writeErr := fileutil.WriteFileAtomic(runPath, data, 0o600); writeErr != nil {
+				return nil, WorkflowHumanTask{}, false, writeErr
+			}
+			return cloneRun(run), cloneWorkflowHumanTask(task), false, nil
+		}
+		return nil, WorkflowHumanTask{}, false, ErrHumanTaskConflict
+	}
+	if task.Status != HumanTaskStatusWaiting || run.Status != RunStatusWaiting {
+		return nil, WorkflowHumanTask{}, false, ErrHumanTaskConflict
+	}
+	if validationErr := validateWaitingHumanTaskCheckpoint(run, task); validationErr != nil {
+		return nil, WorkflowHumanTask{}, false, validationErr
+	}
+	if concurrencyErr := s.checkHumanTaskResumeConcurrencyLocked(
+		ctx,
+		run,
+		req.maxConcurrent,
+	); concurrencyErr != nil {
+		return nil, WorkflowHumanTask{}, false, concurrencyErr
+	}
+	if validationErr := validateHumanTaskResume(task, req); validationErr != nil {
+		return nil, WorkflowHumanTask{}, false, validationErr
+	}
+	stepKey := task.JobID + "/" + task.StepID
+	step := run.Steps[stepKey]
+	now := time.Now().UTC()
+	task.Status = HumanTaskStatusAnswered
+	task.Revision++
+	task.ResponseID = strings.TrimSpace(req.ResponseID)
+	task.Response = cloneJSONValue(req.Response)
+	task.UpdatedAt = now
+	task.AnsweredAt = &now
+	run.humanTasks[task.ID] = task
+	step.Status = RunStatusSucceeded
+	step.Outputs = humanTaskStepOutputs(task)
+	step.Error = ""
+	run.Steps[stepKey] = step
+	run.execution.Cursor.StepIndex++
+	lease := req.resumeLease
+	if lease <= 0 {
+		lease = humanTaskResumeLease(0)
+	}
+	run.execution.Resume = &workflowResumeClaim{
+		TaskID:     task.ID,
+		ResponseID: task.ResponseID,
+		Token:      NewRunID(),
+		ClaimedAt:  now,
+		ExpiresAt:  now.Add(lease),
+		Lease:      lease,
+	}
+	run.Status = RunStatusRunning
+	run.Error = ""
+	run.UpdatedAt = now
+	data, marshalErr := marshalPersistedRun(run)
+	if marshalErr != nil {
+		return nil, WorkflowHumanTask{}, false, marshalErr
+	}
+	if writeErr := fileutil.WriteFileAtomic(runPath, data, 0o600); writeErr != nil {
+		return nil, WorkflowHumanTask{}, false, writeErr
+	}
+	return cloneRun(run), cloneWorkflowHumanTask(task), false, nil
+}
+
+func (s *FileRunStore) checkHumanTaskResumeConcurrencyLocked(
+	ctx context.Context,
+	run *Run,
+	maxConcurrent int,
+) error {
+	if maxConcurrent <= 0 || run.ParentRunID != "" {
+		return nil
+	}
+	runs, err := s.listRunsLocked(ctx)
+	if err != nil {
+		return err
+	}
+	running := 0
+	for _, candidate := range runs {
+		if candidate.ID != run.ID && candidate.ParentRunID == "" &&
+			candidate.Status == RunStatusRunning {
+			running++
+		}
+	}
+	if running >= maxConcurrent {
+		return fmt.Errorf(
+			"%w: %d running, max %d",
+			ErrRunConcurrencyLimit,
+			running,
+			maxConcurrent,
+		)
+	}
+	return nil
+}
+
+func (s *FileRunStore) RenewHumanTaskClaim(
+	ctx context.Context,
+	runID string,
+	taskID string,
+	token string,
+	lease time.Duration,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	runID = strings.TrimSpace(runID)
+	taskID = strings.TrimSpace(taskID)
+	token = strings.TrimSpace(token)
+	if runID == "" || taskID == "" || token == "" || lease <= 0 {
+		return ErrHumanTaskConflict
+	}
+	unlock, err := s.lockRoot()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	runPath := filepath.Join(s.root, safeID(runID), "run.json")
+	run, err := readRunFile(runPath)
+	if err != nil {
+		return err
+	}
+	if run.ID != runID {
+		return ErrHumanTaskNotFound
+	}
+	task, exists := run.humanTasks[taskID]
+	if !exists || task.Status != HumanTaskStatusAnswered ||
+		run.Status != RunStatusRunning || run.execution == nil ||
+		run.execution.Resume == nil || run.execution.Resume.TaskID != taskID ||
+		run.execution.Resume.Token != token {
+		return ErrHumanTaskConflict
+	}
+	now := time.Now().UTC()
+	if !now.Before(run.execution.Resume.ExpiresAt) {
+		return ErrHumanTaskConflict
+	}
+	nextExpiry := now.Add(lease)
+	if !nextExpiry.After(run.execution.Resume.ExpiresAt) {
+		return nil
+	}
+	run.execution.Resume.ExpiresAt = nextExpiry
+	data, err := marshalPersistedRun(run)
+	if err != nil {
+		return err
+	}
+	return fileutil.WriteFileAtomic(runPath, data, 0o600)
+}
+
+func (s *FileRunStore) CancelHumanTask(
+	ctx context.Context,
+	runID string,
+	taskID string,
+	reason string,
+) (*Run, error) {
+	reason, err := NormalizeWorkflowCancelReason(reason)
+	if err != nil {
+		return nil, err
+	}
+	runID = strings.TrimSpace(runID)
+	taskID = strings.TrimSpace(taskID)
+	if runID == "" || taskID == "" {
+		return nil, ErrHumanTaskNotFound
+	}
+	unlock, err := s.lockRoot()
+	if err != nil {
+		return nil, err
+	}
+	runPath := filepath.Join(s.root, safeID(runID), "run.json")
+	run, err := readRunFile(runPath)
+	if err != nil {
+		unlock()
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", ErrHumanTaskNotFound, runID)
+		}
+		return nil, err
+	}
+	if run.ID != runID {
+		unlock()
+		return nil, ErrHumanTaskNotFound
+	}
+	task, exists := run.humanTasks[taskID]
+	if !exists || task.ID != taskID || task.RunID != run.ID {
+		unlock()
+		return nil, ErrHumanTaskNotFound
+	}
+	if task.Status != HumanTaskStatusWaiting || run.Status != RunStatusWaiting {
+		unlock()
+		return nil, ErrHumanTaskConflict
+	}
+	now := time.Now().UTC()
+	run.Status = RunStatusCanceled
+	run.CancelReason = reason
+	run.CancelRequestedAt = &now
+	run.CompletedAt = &now
+	run.UpdatedAt = now
+	task.Status = HumanTaskStatusCanceled
+	task.Revision++
+	task.UpdatedAt = now
+	task.CanceledAt = &now
+	run.humanTasks[task.ID] = task
+	data, err := marshalPersistedRun(run)
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	if err := fileutil.WriteFileAtomic(runPath, data, 0o600); err != nil {
+		unlock()
+		return nil, err
+	}
+	unlock()
+	_ = s.AppendEvent(ctx, RunEvent{
+		Kind:    "workflow.run.canceled",
+		RunID:   run.ID,
+		Message: run.CancelReason,
+	})
+	s.cancelChildRuns(ctx, run.ID, run.CancelReason)
+	return run, nil
 }
 
 func (s *FileRunStore) listRunsLocked(ctx context.Context) ([]Run, error) {

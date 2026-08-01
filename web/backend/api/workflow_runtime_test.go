@@ -15,6 +15,31 @@ import (
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
+func TestWebWorkflowRuntimeResolvesHumanTaskWithoutInitializingAgentLoop(t *testing.T) {
+	runner := &webWorkflowRuntimeRunner{}
+	if got := runner.ResolveWorkflowDependency(
+		context.Background(),
+		workflows.WorkflowDependencyOccurrence{
+			Kind: workflows.WorkflowDependencyKindHuman,
+			Name: "task",
+		},
+	); got != workflows.WorkflowDependencyReadinessReady {
+		t.Fatalf("human/task readiness = %q, want ready", got)
+	}
+	if runner.loop != nil || runner.msgBus != nil {
+		t.Fatal("human/task readiness initialized the agent runtime")
+	}
+	if got := runner.ResolveWorkflowDependency(
+		context.Background(),
+		workflows.WorkflowDependencyOccurrence{
+			Kind: workflows.WorkflowDependencyKindHuman,
+			Name: "unknown",
+		},
+	); got != workflows.WorkflowDependencyReadinessNotFound {
+		t.Fatalf("unknown human primitive readiness = %q, want not_found", got)
+	}
+}
+
 func TestWorkflowRuntimeRunnersForConfigUseCapturedConfigAfterDiskMutation(
 	t *testing.T,
 ) {

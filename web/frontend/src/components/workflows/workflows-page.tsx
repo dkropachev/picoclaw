@@ -147,6 +147,7 @@ import {
 } from "./workflow-trigger-simulator"
 
 const terminalStatuses = new Set(["succeeded", "failed", "canceled", "skipped"])
+const activeStatuses = new Set(["running", "waiting"])
 const workflowDefinitionInspectionQueryKey = [
   "workflows",
   "definition-inspections",
@@ -583,7 +584,10 @@ export function WorkflowsPage({
   }, [queriedEvents, selectedRunID, streamedEvents, streamedRunID])
 
   useEffect(() => {
-    if (lastDraftTest?.status !== "running" || !lastDraftTest.runID) {
+    if (
+      !activeStatuses.has(lastDraftTest?.status ?? "") ||
+      !lastDraftTest?.runID
+    ) {
       return
     }
     const draftRun =
@@ -595,7 +599,8 @@ export function WorkflowsPage({
     }
     setLastDraftTest((current) => {
       if (
-        current?.status !== "running" ||
+        current == null ||
+        !activeStatuses.has(current.status) ||
         current.runID !== lastDraftTest.runID
       ) {
         return current
@@ -835,7 +840,7 @@ export function WorkflowsPage({
       session == null ||
       lastDraftTest.draftRevision == null ||
       lastDraftTest.draftRevision !== session.draft_revision)
-  const draftTestRunning = lastDraftTest?.status === "running"
+  const draftTestRunning = activeStatuses.has(lastDraftTest?.status ?? "")
   const publishTestReady = isPublishTestReady(lastDraftTest, lastDraftTestStale)
   const publishValidationState = publishValidationStatus(
     session?.validation,
@@ -1696,7 +1701,7 @@ export function WorkflowsPage({
     publishTestReady &&
     publishSessionSnapshotReady &&
     dependencyReady
-  const canCancel = selectedRun?.status === "running"
+  const canCancel = activeStatuses.has(selectedRun?.status ?? "")
   const retryCompatibilityMessage = workflowRetryReadinessMessage(
     selectedRun,
     selectedRunWorkflow,
@@ -4436,7 +4441,7 @@ function workflowPublishReadinessMessage({
   if (testResult == null) {
     return "Run a successful draft test before publishing."
   }
-  if (testResult.status === "running") {
+  if (activeStatuses.has(testResult.status)) {
     return "Wait for the draft test to finish."
   }
   if (testStale) {
@@ -4576,7 +4581,7 @@ function isPublishTestReady(result: DraftTestSnapshot | null, stale: boolean) {
 function canFixDraftTestWithAI(result: DraftTestSnapshot, stale: boolean) {
   return (
     !stale &&
-    result.status !== "running" &&
+    !activeStatuses.has(result.status) &&
     result.status !== "succeeded" &&
     result.status !== "skipped"
   )
@@ -4657,7 +4662,7 @@ function StatusBadge({ status }: { status: string }) {
     status === "validation_failed"
   const variant = destructive
     ? "default"
-    : status === "running" || status === "ready_to_publish"
+    : activeStatuses.has(status) || status === "ready_to_publish"
       ? "default"
       : status === "succeeded" || status === "valid" || status === "ready"
         ? "secondary"

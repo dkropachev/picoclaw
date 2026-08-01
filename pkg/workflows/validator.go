@@ -1,11 +1,14 @@
 package workflows
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/adhocore/gronx"
 )
@@ -52,6 +55,7 @@ func Validate(workflow *Workflow) error {
 	errs = append(errs, validateRuntimeEventTrigger("on.runtime_event", workflow.On.RuntimeEvent)...)
 	errs = append(errs, validateEventTrigger("on.event", workflow.On.Event)...)
 	errs = append(errs, validateJobs(workflow.Jobs)...)
+	errs = append(errs, validateHumanTaskWorkflow(workflow)...)
 	if len(errs) > 0 {
 		sort.SliceStable(errs, func(i, j int) bool {
 			if errs[i].Path != errs[j].Path {
@@ -419,6 +423,9 @@ func validateSteps(path string, steps []Step) ValidationErrors {
 		if strings.HasPrefix(uses, "agent/") {
 			errs = append(errs, validateAgentStepOptions(stepPath+".with", step.With)...)
 		}
+		if uses == "human/task" {
+			errs = append(errs, validateHumanTaskStep(stepPath, step)...)
+		}
 	}
 	return errs
 }
@@ -521,9 +528,274 @@ func validRunDelivery(value string) bool {
 }
 
 func validStepUses(value string) bool {
+	if value == "human/task" {
+		return true
+	}
 	for _, prefix := range []string{"agent/", "tool/", "mcp/", "function/"} {
 		if strings.HasPrefix(value, prefix) && strings.TrimSpace(strings.TrimPrefix(value, prefix)) != "" {
 			return true
+		}
+	}
+	return false
+}
+
+func validateHumanTaskWorkflow(workflow *Workflow) ValidationErrors {
+	if workflow == nil || !workflowContainsHumanTask(workflow) {
+		return nil
+	}
+	var errs ValidationErrors
+	if workflow.On.Event != nil {
+		errs = append(errs, ValidationError{
+			Path:    "on.event",
+			Message: "human/task is not supported for durable event workflows",
+		})
+	}
+	if workflow.On.WorkflowCall != nil {
+		errs = append(errs, ValidationError{
+			Path:    "on.workflow_call",
+			Message: "human/task is not supported in reusable workflow definitions",
+		})
+	}
+	for jobID, job := range workflow.Jobs {
+		if strings.TrimSpace(job.Uses) != "" {
+			errs = append(errs, ValidationError{
+				Path:    "jobs." + jobID + ".uses",
+				Message: "workflows containing human/task cannot call reusable workflows",
+			})
+		}
+	}
+	return errs
+}
+
+func workflowContainsHumanTask(workflow *Workflow) bool {
+	if workflow == nil {
+		return false
+	}
+	for _, job := range workflow.Jobs {
+		for _, step := range job.Steps {
+			if strings.TrimSpace(step.Uses) == "human/task" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func validateHumanTaskStep(path string, step Step) ValidationErrors {
+	var errs ValidationErrors
+	if step.ContinueOnError {
+		errs = append(errs, ValidationError{
+			Path:    path + ".continue-on-error",
+			Message: "human/task cannot continue on error",
+		})
+	}
+	allowed := map[string]bool{
+		"title": true, "questions": true, "response_schema": true, "input_hash": true,
+	}
+	for key, value := range step.With {
+		if !allowed[key] {
+			errs = append(errs, ValidationError{Path: path + ".with." + key, Message: "unsupported human/task option"})
+		}
+		if workflowValueReferencesSecrets(value) {
+			errs = append(errs, ValidationError{
+				Path:    path + ".with." + key,
+				Message: "human/task values cannot reference secrets",
+			})
+		}
+	}
+	title, titleExists := step.With["title"]
+	if !titleExists {
+		errs = append(errs, ValidationError{Path: path + ".with.title", Message: "title is required"})
+	} else if value, ok := title.(string); !ok {
+		errs = append(errs, ValidationError{Path: path + ".with.title", Message: "title must be a string"})
+	} else if strings.TrimSpace(value) == "" || !utf8.ValidString(value) || len(value) > MaxHumanTaskTitleBytes {
+		errs = append(errs, ValidationError{
+			Path: path + ".with.title",
+			Message: fmt.Sprintf(
+				"title must be nonblank valid UTF-8 and at most %d bytes",
+				MaxHumanTaskTitleBytes,
+			),
+		})
+	}
+	if questions, exists := step.With["questions"]; !exists || questions == nil {
+		errs = append(errs, ValidationError{Path: path + ".with.questions", Message: "questions are required"})
+	}
+	if raw, exists := step.With["response_schema"]; exists && raw != nil {
+		schema, err := normalizeSchemaMap(raw)
+		if err != nil {
+			errs = append(errs, ValidationError{
+				Path: path + ".with.response_schema", Message: "response_schema must be an object",
+			})
+		} else if err := validateHumanTaskResponseSchema(schema, 0); err != nil {
+			errs = append(errs, ValidationError{Path: path + ".with.response_schema", Message: err.Error()})
+		}
+	}
+	if raw, exists := step.With["input_hash"]; exists {
+		if value, ok := raw.(string); !ok {
+			errs = append(errs, ValidationError{
+				Path: path + ".with.input_hash", Message: "input_hash must be a string",
+			})
+		} else if !utf8.ValidString(value) || len(strings.TrimSpace(value)) > MaxHumanTaskInputHashBytes {
+			errs = append(errs, ValidationError{
+				Path: path + ".with.input_hash",
+				Message: fmt.Sprintf(
+					"input_hash must be valid UTF-8 and at most %d bytes",
+					MaxHumanTaskInputHashBytes,
+				),
+			})
+		}
+	}
+	if encoded, err := json.Marshal(step.With); err != nil || len(encoded) > MaxHumanTaskPayloadBytes {
+		errs = append(errs, ValidationError{Path: path + ".with", Message: "human/task payload is too large"})
+	}
+	return errs
+}
+
+func validateHumanTaskResponseSchema(schema map[string]any, depth int) error {
+	if depth > 32 {
+		return errors.New("response_schema exceeds maximum nesting depth")
+	}
+	allowed := map[string]bool{
+		"type": true, "enum": true, "required": true, "properties": true,
+		"additionalProperties": true, "items": true,
+	}
+	for keyword := range schema {
+		if !allowed[keyword] {
+			return fmt.Errorf("unsupported response_schema keyword %q", keyword)
+		}
+	}
+	typeName := ""
+	if rawType, exists := schema["type"]; exists {
+		value, ok := rawType.(string)
+		if !ok {
+			return errors.New("response_schema type must be a string")
+		}
+		typeName = strings.ToLower(strings.TrimSpace(value))
+		switch typeName {
+		case "object", "array", "string", "integer", "number", "boolean", "null":
+		default:
+			return fmt.Errorf("unsupported response_schema type %q", value)
+		}
+	}
+	if rawEnum, exists := schema["enum"]; exists {
+		length := 0
+		switch values := rawEnum.(type) {
+		case []any:
+			length = len(values)
+		case []string:
+			length = len(values)
+		}
+		if length == 0 {
+			return errors.New("response_schema enum must be a nonempty array")
+		}
+		if _, err := json.Marshal(rawEnum); err != nil {
+			return errors.New("response_schema enum is invalid")
+		}
+	}
+	if rawRequired, exists := schema["required"]; exists {
+		if typeName != "object" {
+			return errors.New("response_schema required needs type object")
+		}
+		var values []string
+		switch typed := rawRequired.(type) {
+		case []any:
+			values = make([]string, 0, len(typed))
+			for _, item := range typed {
+				name, ok := item.(string)
+				if !ok {
+					return errors.New("response_schema required must be an array of unique nonblank strings")
+				}
+				values = append(values, name)
+			}
+		case []string:
+			values = append([]string(nil), typed...)
+		default:
+			return errors.New("response_schema required must be an array of unique nonblank strings")
+		}
+		seen := make(map[string]bool, len(values))
+		for _, item := range values {
+			name := item
+			name = strings.TrimSpace(name)
+			if name == "" || seen[name] {
+				return errors.New("response_schema required must be an array of unique nonblank strings")
+			}
+			seen[name] = true
+		}
+	}
+	if rawProperties, exists := schema["properties"]; exists {
+		if typeName != "object" {
+			return errors.New("response_schema properties needs type object")
+		}
+		properties, err := normalizeSchemaMap(rawProperties)
+		if err != nil {
+			return errors.New("response_schema properties must be an object")
+		}
+		for name, rawChild := range properties {
+			if strings.TrimSpace(name) == "" {
+				return errors.New("response_schema property names must be nonblank")
+			}
+			child, err := normalizeSchemaMap(rawChild)
+			if err != nil {
+				return fmt.Errorf("response_schema property %q must be an object", name)
+			}
+			if err := validateHumanTaskResponseSchema(child, depth+1); err != nil {
+				return err
+			}
+		}
+	}
+	if rawAdditional, exists := schema["additionalProperties"]; exists {
+		if typeName != "object" {
+			return errors.New("response_schema additionalProperties needs type object")
+		}
+		if _, ok := rawAdditional.(bool); !ok {
+			child, err := normalizeSchemaMap(rawAdditional)
+			if err != nil {
+				return errors.New("response_schema additionalProperties must be a boolean or object")
+			}
+			if err := validateHumanTaskResponseSchema(child, depth+1); err != nil {
+				return err
+			}
+		}
+	}
+	if rawItems, exists := schema["items"]; exists {
+		if typeName != "array" {
+			return errors.New("response_schema items needs type array")
+		}
+		child, err := normalizeSchemaMap(rawItems)
+		if err != nil {
+			return errors.New("response_schema items must be an object")
+		}
+		if err := validateHumanTaskResponseSchema(child, depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func workflowValueReferencesSecrets(value any) bool {
+	switch typed := value.(type) {
+	case string:
+		for _, match := range expressionPattern.FindAllStringSubmatch(typed, -1) {
+			if len(match) <= 1 {
+				continue
+			}
+			for _, ref := range expressionReferenceTokens(match[1]) {
+				if ref == "secrets" || strings.HasPrefix(ref, "secrets.") {
+					return true
+				}
+			}
+		}
+	case map[string]any:
+		for _, item := range typed {
+			if workflowValueReferencesSecrets(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if workflowValueReferencesSecrets(item) {
+				return true
+			}
 		}
 	}
 	return false

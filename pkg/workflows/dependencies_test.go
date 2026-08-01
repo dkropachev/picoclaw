@@ -22,6 +22,7 @@ func TestExtractWorkflowDependenciesIncludesEveryDeclaredConditionalPath(t *test
 				{Uses: "tool/github.comment"},
 				{Uses: "mcp/github/issues.list"},
 				{Uses: "function/workflow.state"},
+				{Uses: "human/task"},
 				{Uses: "unsupported/ignored"},
 			},
 		},
@@ -58,6 +59,12 @@ func TestExtractWorkflowDependenciesIncludesEveryDeclaredConditionalPath(t *test
 			Name:        "workflow.state",
 			WorkflowRef: "workflows/root.yml",
 			Path:        "/jobs/steps/steps/3/uses",
+		},
+		{
+			Kind:        WorkflowDependencyKindHuman,
+			Name:        "task",
+			WorkflowRef: "workflows/root.yml",
+			Path:        "/jobs/steps/steps/4/uses",
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
