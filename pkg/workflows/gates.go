@@ -104,7 +104,7 @@ func CompileGateWorkflow(name string, specs []GateSpec, subject any) (*GateCompi
 	active := make([]GateSpec, 0, len(specs))
 	workingAgentID := ""
 	for index, spec := range specs {
-		if err := validateWorkflowGateSpec(index, spec); err != nil {
+		if err := validateWorkflowGateSpec(fmt.Sprintf("gates[%d]", index), spec); err != nil {
 			return nil, err
 		}
 		if _, exists := seen[spec.ID]; exists {
@@ -201,8 +201,7 @@ func CompileGateWorkflow(name string, specs []GateSpec, subject any) (*GateCompi
 	return compilation, nil
 }
 
-func validateWorkflowGateSpec(index int, spec GateSpec) error {
-	path := fmt.Sprintf("gates[%d]", index)
+func validateWorkflowGateSpec(path string, spec GateSpec) error {
 	if spec.ID != strings.TrimSpace(spec.ID) || !workflowGateIDPattern.MatchString(spec.ID) ||
 		len(spec.ID) > MaxWorkflowGateIDBytes {
 		return fmt.Errorf(
