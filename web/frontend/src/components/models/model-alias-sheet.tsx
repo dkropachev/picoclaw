@@ -1,4 +1,9 @@
-import { IconLoader2, IconPlus, IconTrash } from "@tabler/icons-react"
+import {
+  IconChevronDown,
+  IconLoader2,
+  IconPlus,
+  IconTrash,
+} from "@tabler/icons-react"
 import { useEffect, useMemo, useState } from "react"
 import { useTranslation } from "react-i18next"
 
@@ -11,6 +16,14 @@ import {
 import { Field } from "@/components/shared-form"
 import { Button } from "@/components/ui/button"
 import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command"
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -19,6 +32,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover"
 import {
   Select,
   SelectContent,
@@ -85,65 +103,121 @@ function ModelSelect({
   onValueChange,
 }: ModelSelectProps) {
   const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
   const displayValue = value === DISABLED_MODEL_VALUE ? disabledLabel : value
 
   return (
-    <Select value={value} onValueChange={onValueChange} disabled={disabled}>
-      <SelectTrigger className="w-full min-w-0" aria-label={ariaLabel}>
-        <span
-          className={
-            displayValue ? "truncate" : "text-muted-foreground truncate"
-          }
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          role="combobox"
+          aria-label={ariaLabel}
+          aria-expanded={open}
+          disabled={disabled}
+          className="w-full min-w-0 justify-between font-normal"
         >
-          {displayValue || placeholder}
-        </span>
-      </SelectTrigger>
-      <SelectContent position="popper" className="max-w-[min(42rem,90vw)]">
-        {allowDisabled && (
-          <SelectItem value={DISABLED_MODEL_VALUE}>
-            <span className="text-destructive">{disabledLabel}</span>
-          </SelectItem>
-        )}
-        {options.map((option) => {
-          const available = new Set(option.accountRefs)
-          const missing = allAccountRefs.filter(
-            (accountRef) => !available.has(accountRef),
-          )
-          const availability =
-            allAccountRefs.length === 0
-              ? t("models.alias.availabilityUnknown", "Availability unknown")
-              : missing.length === 0
-                ? t("models.alias.availableAll", "All accounts ({{count}})", {
-                    count: allAccountRefs.length,
-                  })
-                : option.accountRefs.length === 0
-                  ? t(
-                      "models.alias.availableNone",
-                      "Not reported by any account",
-                    )
-                  : t(
-                      "models.alias.availableSome",
-                      "Available: {{available}} · Missing: {{missing}}",
-                      {
-                        available: option.accountRefs.join(", "),
-                        missing: missing.join(", "),
-                      },
-                    )
-          return (
-            <SelectItem key={option.id} value={option.id} className="py-2">
-              <span className="flex min-w-0 flex-col items-start gap-0.5">
-                <span className="max-w-[36rem] truncate font-mono">
-                  {option.id}
-                </span>
-                <span className="text-muted-foreground max-w-[36rem] truncate text-[11px]">
-                  {availability}
-                </span>
-              </span>
-            </SelectItem>
-          )
-        })}
-      </SelectContent>
-    </Select>
+          <span
+            className={
+              displayValue ? "truncate" : "text-muted-foreground truncate"
+            }
+          >
+            {displayValue || placeholder}
+          </span>
+          <IconChevronDown className="ml-2 size-4 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        className="w-[--radix-popover-trigger-width] max-w-[min(42rem,90vw)] p-0"
+      >
+        <Command>
+          <CommandInput
+            placeholder={t("models.alias.searchModels", "Search models...")}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault()
+                setOpen(false)
+              }
+            }}
+          />
+          <CommandList>
+            <CommandEmpty>
+              {t("models.alias.noModelsFound", "No models found.")}
+            </CommandEmpty>
+            <CommandGroup>
+              {allowDisabled && (
+                <CommandItem
+                  value={DISABLED_MODEL_VALUE}
+                  keywords={[disabledLabel]}
+                  onSelect={() => {
+                    onValueChange(DISABLED_MODEL_VALUE)
+                    setOpen(false)
+                  }}
+                >
+                  <span className="text-destructive">{disabledLabel}</span>
+                </CommandItem>
+              )}
+              {options.map((option) => {
+                const available = new Set(option.accountRefs)
+                const missing = allAccountRefs.filter(
+                  (accountRef) => !available.has(accountRef),
+                )
+                const availability =
+                  allAccountRefs.length === 0
+                    ? t(
+                        "models.alias.availabilityUnknown",
+                        "Availability unknown",
+                      )
+                    : missing.length === 0
+                      ? t(
+                          "models.alias.availableAll",
+                          "All accounts ({{count}})",
+                          {
+                            count: allAccountRefs.length,
+                          },
+                        )
+                      : option.accountRefs.length === 0
+                        ? t(
+                            "models.alias.availableNone",
+                            "Not reported by any account",
+                          )
+                        : t(
+                            "models.alias.availableSome",
+                            "Available: {{available}} · Missing: {{missing}}",
+                            {
+                              available: option.accountRefs.join(", "),
+                              missing: missing.join(", "),
+                            },
+                          )
+                return (
+                  <CommandItem
+                    key={option.id}
+                    value={option.id}
+                    keywords={[option.id]}
+                    className="py-2"
+                    onSelect={() => {
+                      onValueChange(option.id)
+                      setOpen(false)
+                    }}
+                  >
+                    <span className="flex min-w-0 flex-col items-start gap-0.5">
+                      <span className="max-w-[36rem] truncate font-mono">
+                        {option.id}
+                      </span>
+                      <span className="text-muted-foreground max-w-[36rem] truncate text-[11px]">
+                        {availability}
+                      </span>
+                    </span>
+                  </CommandItem>
+                )
+              })}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
   )
 }
 
