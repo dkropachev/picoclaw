@@ -480,6 +480,72 @@ jobs:
 	}
 }
 
+func TestExecutorPassesTypedEphemeralSessionIntentWithoutInheritedKey(t *testing.T) {
+	workflow := parseWorkflow(t, `
+name: Agent session intent
+on:
+  manual: {}
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - id: ephemeral
+        uses: agent/main
+        with:
+          session: ephemeral
+          history: none
+          cache: none
+          tools: none
+          prompt: Decide without retaining state.
+      - id: named-ephemeral
+        uses: agent/main
+        with:
+          session: key:ephemeral
+          history: read_write
+          cache: session
+          prompt: Continue the persistent named session.
+`)
+	agents := &fakeAgentRunner{outputs: map[string]any{"text": "ok"}}
+	_, err := (&Executor{WorkspaceDir: t.TempDir(), Agents: agents}).Run(
+		context.Background(),
+		RunRequest{
+			Workflow:    workflow,
+			WorkflowRef: "inline",
+			Session:     "inherited-pr-chat",
+		},
+	)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(agents.requests) != 2 {
+		t.Fatalf("agent requests = %d, want 2", len(agents.requests))
+	}
+
+	ephemeral := agents.requests[0]
+	if !ephemeral.EphemeralSession {
+		t.Fatal("ephemeral request intent = false, want true")
+	}
+	if ephemeral.Session != "" {
+		t.Fatalf("ephemeral request session = %q, want no inherited key", ephemeral.Session)
+	}
+	if ephemeral.History != "none" || ephemeral.Cache != "none" || ephemeral.Tools != AgentToolsNone {
+		t.Fatalf(
+			"ephemeral request modes = history %q, cache %q, tools %q; want none/none/none",
+			ephemeral.History,
+			ephemeral.Cache,
+			ephemeral.Tools,
+		)
+	}
+
+	named := agents.requests[1]
+	if named.EphemeralSession {
+		t.Fatal("key:ephemeral request intent = true, want persistent session")
+	}
+	if named.Session != "ephemeral" {
+		t.Fatalf("key:ephemeral request session = %q, want ephemeral", named.Session)
+	}
+}
+
 func TestExecutorRunsReusableWorkflowJob(t *testing.T) {
 	workspace := t.TempDir()
 	writeWorkflowFile(t, workspace, "child.yml", `

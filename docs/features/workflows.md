@@ -71,6 +71,11 @@ primitive over one exact existing conversation by combining
 `history: read_only`, `tools: none`, and an inherited or explicit session. The
 runtime freezes that session once, performs isolated no-tool calls, and returns
 the canonical session plus an opaque history revision without adding a turn.
+An agent step can instead declare the exact `session: ephemeral`,
+`history: none`, `cache: none`, and `tools: none` profile for an isolated
+decision over only its supplied prompt, context, and scope. That profile uses a
+request-local identity without creating a session or account-router affinity,
+and exposes only a fixed ephemeral marker after the call finishes.
 
 ## Reconstruction Notes
 
@@ -79,7 +84,7 @@ the canonical session plus an opaque history revision without adding a turn.
   step-level `uses`, channel-aware delivery, and conversation session reuse.
 - Core types/functions: workflow parser, local ref resolver, validator, run
   executor, run store, human-task suspension/resume contract, trigger matcher,
-  expression evaluator, and channel
+  expression evaluator, agent-only ephemeral-session dispatch, and channel
   delivery context binding; exact-byte trigger/job inspectors and revision-
   fenced AST renderers define the structured authoring boundary.
 - Runtime ordering: resolve workflow ref, parse YAML, validate calls, schedule
@@ -92,8 +97,10 @@ the canonical session plus an opaque history revision without adding a turn.
   reusable workflows, reusable workflows are called at job level, workflow
   steps reuse existing tool/agent/MCP policy gates, classifier-style agent
   steps can use an exact frozen existing-session decision profile or set
-  `tools: none` so untrusted content cannot invoke tools, and delivery is
-  separate from session memory.
+  `tools: none` so untrusted content cannot invoke tools. The distinct
+  `session: ephemeral` profile is valid only on an agent step's direct `with`
+  options, never as a generic job/step run context or durable key, and delivery
+  is separate from session memory.
   Only one workflow development session can be active at a
   time; release/version changes force deterministic revalidation before
   published workflows can trigger or run. External-event routing is
@@ -154,6 +161,8 @@ the canonical session plus an opaque history revision without adding a turn.
 
 | `FR-WORKFLOW-042` | MUST | An `agent/<id>` step declaring `history: read_only` is an exact existing-session decision profile, not a write-then-restore turn. Validation requires a syntactically canonical agent ID, an explicit `tools: none`, and string-valued history, session, cache, and tools modes; the workflow compatibility engine/schema/validator identity changes so definitions validated under the prior permissive semantics require revalidation. Runtime requires that exact configured agent and a nonblank bounded UTF-8 session key, uses the session backend's strict snapshot capability, resolves an alias once to its canonical key, and rejects missing sessions, unavailable or noncanonical owner metadata, and owner/agent mismatch before calling a provider. One coherent deep-cloned history/summary/scope snapshot is reused by the initial request, structured-output repairs, managed children, calibration, and fallback calls. Those calls initialize neither hooks nor MCP, expose and execute no tools, reject tool-call responses, do not create/reserve/register/append/restore/compact/summarize a session, and cannot overwrite a concurrent interactive append. Cancellation propagates normally. Successful outputs contain the canonical `session` and an opaque `history_revision` derived from the exact frozen snapshot while retaining ordinary structured and managed outputs. No missing/default workflow session is synthesized for this profile. | A workflow-native AI gate needs a reviewable ordinary agent step that can consult the active PR chat exactly once without polluting it, gaining action authority, racing live work, or silently evaluating the wrong agent's conversation. |
 
+| `FR-WORKFLOW-043` | MUST | A direct `agent/<id>` step `with.session` may use the exact literal `ephemeral` only when `history`, `cache`, and `tools` are explicit string-valued `none`; generic job/step `context.session` remains limited to inherit or durable `key:` semantics, and a durable key whose resolved value is `ephemeral` remains an ordinary session. Validation and runtime both enforce the exact lowercase companion modes before provider execution, the executor conveys ephemeral intent separately from the resolved session string and clears inherited durable session authority, and the workflow compatibility engine/schema/validator identity changes. Runtime creates one cryptographically random request-local identity, uses the isolated side-question provider path for the initial call plus every structured repair, managed child, calibration, and fallback call, disables session-affine account routing, and omits inherited delivery routing context. It loads or writes no history, provider prompt-cache key/directive, session metadata, session catalog entry, summary, active turn, hook, MCP runtime, tool definition, or tool result; every provider attempt receives detached messages/options, a provider-authored tool call fails closed, and cancellation propagates. The internal identity is absent from session/account-router persistence, logs, events, and outputs. Successful ordinary and managed outputs retain the fixed `session: ephemeral` and `session_mode: ephemeral` audit markers, `history: none`, `cache: none`, an empty cache key, normal structured/managed diagnostics, and no history revision. | An isolated AI gate over supplied code, findings, or other bounded context needs ordinary workflow composition without inventing durable sessions, colliding concurrent runs, leaking a temporary routing key, or losing structured and managed execution behavior. |
+
 ## Data And State Model
 
 Workflow definitions live under `workspace/workflows/`. A local ref
@@ -204,6 +213,12 @@ Session context stores the memory key used by agent steps. An exact read-only
 agent step returns the canonical resolved key in `outputs.session` and a
 `sha256:` opaque digest of the frozen snapshot in `outputs.history_revision`;
 the snapshot itself is transient and is not added to the workflow run record.
+An ephemeral agent step has no session snapshot or durable session key. Its
+cryptographically random internal identity exists only for the live request;
+the durable step output contains the fixed `session` and `session_mode` value
+`ephemeral`, an empty prompt-cache key, and no `history_revision`. It creates no
+session-store record, session metadata, catalog entry, or account-router
+session-affinity entry.
 
 A run that can suspend additionally stores a private `execution`
 record containing the exact admitted parsed definition, its digest, the next
@@ -277,9 +292,9 @@ state until it explicitly hands rendered YAML to the existing draft lifecycle.
 
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
-| File | `workspace/workflows/*.yml`, `workspace/workflows/*.yaml` | GitHub-style workflow definitions with `on`, `jobs`, `needs`, `uses`, `with`, `if`, `outputs`, `schedule`, `runtime_event`, `event`, `workflow_call`, the exact `human/task` step primitive, and the exact existing-session agent decision profile. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016`, `FR-WORKFLOW-023` through `FR-WORKFLOW-031`, `FR-WORKFLOW-037`, `FR-WORKFLOW-041`, `FR-WORKFLOW-042` |
+| File | `workspace/workflows/*.yml`, `workspace/workflows/*.yaml` | GitHub-style workflow definitions with `on`, `jobs`, `needs`, `uses`, `with`, `if`, `outputs`, `schedule`, `runtime_event`, `event`, `workflow_call`, the exact `human/task` step primitive, the exact existing-session agent decision profile, and the agent-only ephemeral-session profile. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016`, `FR-WORKFLOW-023` through `FR-WORKFLOW-031`, `FR-WORKFLOW-037`, `FR-WORKFLOW-041` through `FR-WORKFLOW-043` |
 | File | `workspace/workflow_runs/<run_id>/run.json`, `events.jsonl` | Durable run snapshots and lifecycle events, including independent cancellation/completion fields, retry/parent relationships, optional trusted payload-free origin, and private exact workflow/cursor plus human-task state for waiting runs. | `FR-WORKFLOW-009`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-033`, `FR-WORKFLOW-041` |
-| Go API | `pkg/workflows.Parse`, `Resolver.ResolveLocal`, `Validate`, `InspectWorkflowTriggers`, `RenderWorkflowTrigger`, `InspectWorkflowJobs`, `RenderWorkflowJobs`, `InspectWorkflowDefinitionBytes`, `InspectLocalWorkflowDefinition`, `InspectBuiltInWorkflowTemplate`, `LoadRunnableLocalSnapshot`, `WithRunnableWorkflowSnapshots`, `WithFencedRunnableWorkflowSnapshots`, `WithGuardedFencedRunnableWorkflowSnapshots`, `Executor.Run`, `Executor.RetryCaptured`, `Executor.ListHumanTasks`, `Executor.ResumeHumanTask`, `Executor.CancelHumanTask`, `WorkflowHumanTask`, `HumanTaskResumeRequest`, `FileRunStore`, `RunOrigin`, `RunRequest.Origin`, `ProjectWorkflowRunForBrowserWithStore`, `ProjectEventBackedDraftRunsForBrowserWithStore`, `MatchChannelMessage`, `MatchCommandMessage`, `MatchRuntimeEvent`, `EvaluateEventTrigger`, `MatchEventTrigger`, `EventWorkflowRouter`, `EventWorkflowDispatcher`, `BuildRunGraph`, `ReloadLocal`, `ListWorkflowTemplates`, `InstallWorkflowTemplateWithCompatibility`, `CheckWorkflowDependencyClosure`, `ResolveWorkflowDependencyReadiness`, `PublishWorkflowDevelopmentFenced` | Parse GitHub-shaped YAML, normalize local reusable refs, reject unsafe refs, validate exact compatibility-stamped byte snapshots under ordered mutation guards, inspect and transactionally install local workflow templates, safely project exact published or immutable-template bytes into bounded fixed-code trigger/job/dependency/effect metadata, safely project and revision-fence all typed trigger families, and safely project or surgically revision-fence ordered jobs/actions without replacing unrelated YAML, inspect structural/runtime dependency readiness, carry one exact admitted config/root/reusable closure through durable run creation and execution, durably suspend/list/resume/cancel human tasks against the stored exact workflow, evaluate process-local and durable triggers, construct and propagate trusted payload-free external-event run origin, durably route/reconcile external-event runs, run/retry/cancel workflows, validate retained provenance ancestry for exact and batch browser projection, build run graphs, recover and atomically publish fenced development state, reload definitions, and persist run state through guarded internal roots. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016`, `FR-WORKFLOW-018`, `FR-WORKFLOW-022` through `FR-WORKFLOW-031`, `FR-WORKFLOW-033` through `FR-WORKFLOW-035`, `FR-WORKFLOW-037`, `FR-WORKFLOW-041` |
+| Go API | `pkg/workflows.Parse`, `Resolver.ResolveLocal`, `Validate`, `InspectWorkflowTriggers`, `RenderWorkflowTrigger`, `InspectWorkflowJobs`, `RenderWorkflowJobs`, `InspectWorkflowDefinitionBytes`, `InspectLocalWorkflowDefinition`, `InspectBuiltInWorkflowTemplate`, `LoadRunnableLocalSnapshot`, `WithRunnableWorkflowSnapshots`, `WithFencedRunnableWorkflowSnapshots`, `WithGuardedFencedRunnableWorkflowSnapshots`, `Executor.Run`, `Executor.RetryCaptured`, `Executor.ListHumanTasks`, `Executor.ResumeHumanTask`, `Executor.CancelHumanTask`, `WorkflowHumanTask`, `HumanTaskResumeRequest`, `AgentRequest.EphemeralSession`, `FileRunStore`, `RunOrigin`, `RunRequest.Origin`, `ProjectWorkflowRunForBrowserWithStore`, `ProjectEventBackedDraftRunsForBrowserWithStore`, `MatchChannelMessage`, `MatchCommandMessage`, `MatchRuntimeEvent`, `EvaluateEventTrigger`, `MatchEventTrigger`, `EventWorkflowRouter`, `EventWorkflowDispatcher`, `BuildRunGraph`, `ReloadLocal`, `ListWorkflowTemplates`, `InstallWorkflowTemplateWithCompatibility`, `CheckWorkflowDependencyClosure`, `ResolveWorkflowDependencyReadiness`, `PublishWorkflowDevelopmentFenced` | Parse GitHub-shaped YAML, normalize local reusable refs, reject unsafe refs, validate exact compatibility-stamped byte snapshots under ordered mutation guards, preserve ephemeral intent separately from resolved session keys, inspect and transactionally install local workflow templates, safely project exact published or immutable-template bytes into bounded fixed-code trigger/job/dependency/effect metadata, safely project and revision-fence all typed trigger families, and safely project or surgically revision-fence ordered jobs/actions without replacing unrelated YAML, inspect structural/runtime dependency readiness, carry one exact admitted config/root/reusable closure through durable run creation and execution, durably suspend/list/resume/cancel human tasks against the stored exact workflow, evaluate process-local and durable triggers, construct and propagate trusted payload-free external-event run origin, durably route/reconcile external-event runs, run/retry/cancel workflows, validate retained provenance ancestry for exact and batch browser projection, build run graphs, recover and atomically publish fenced development state, reload definitions, and persist run state through guarded internal roots. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016`, `FR-WORKFLOW-018`, `FR-WORKFLOW-022` through `FR-WORKFLOW-031`, `FR-WORKFLOW-033` through `FR-WORKFLOW-035`, `FR-WORKFLOW-037`, `FR-WORKFLOW-041`, `FR-WORKFLOW-043` |
 | Config | `workflows.*`, `tools.workflow`, `agents.*`, `model_aliases[]`, `account_routers[]`, `model_routers[]` | Independent workflow enablement and limits plus the exact account-and-alias policy inherited by agent steps; workflow-only browser writes carry the form's exact base config revision. | `FR-WORKFLOW-009`, `FR-WORKFLOW-013`, `FR-WORKFLOW-028`, `FR-WORKFLOW-039` |
 | CLI | `picoclaw workflow install/list/compatibility/revalidate/validate/reload/run/cancel/retry/status/events/graph` | Install local workflow templates, including `code-review` and `github-issue-triage`, then manage definitions, compatibility stamps, and runs through the same workflow runtime and file run store used by agent tools. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-018`, `FR-WORKFLOW-022`, `FR-WORKFLOW-025` |
 | HTTP | `/api/workflows*`, `/api/workflows/runs*`, `/api/workflows/development*`, `/api/workflows/definitions/inspect`, `/api/workflows/templates/{name}/inspect`, `/api/workflows/settings`, `/api/workflows/dependencies/check`, `/api/workflows/compatibility`, `/api/workflows/revalidate` | List, validate, reload, run, cancel, retry, inspect, stream workflow events, read run graph data, list/install/restore templates, return a non-cacheable bounded structural inspection from one exact published ref or immutable built-in template, read and revision-fence workflow settings including the independent workflow-tool flag, inspect exact published or draft dependency readiness, fresh-gate every dashboard Run/Retry with an optional dependency-revision compare-and-swap held through durable creation, validate explicit cancellation reasons while preserving omitted-reason compatibility, reject non-object cancellation bodies, return safe lifecycle/store-validated-origin projections, manage the singleton development session, safely project and revision-fence all seven typed trigger families plus ordered jobs/actions, preview a captured event through the event runtime matcher, run configured-agent YAML revisions, review effects and test active drafts manually or with a server-resolved durable event after a run record is persisted, reject draft-changing development mutations while the current draft test is still running, execute configured agent/tool/MCP workflow steps synchronously or asynchronously without an error response followed by later run creation, revision-fence and transactionally publish exact drafts, and revalidate release compatibility. Run/Retry DTOs do not accept caller origin, and internal-state path or recovery conflicts fail closed before the requested workflow operation. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-017` through `FR-WORKFLOW-019`, `FR-WORKFLOW-026` through `FR-WORKFLOW-031`, `FR-WORKFLOW-033` through `FR-WORKFLOW-035`, `FR-WORKFLOW-037` |
@@ -291,6 +306,7 @@ state until it explicitly hands rendered YAML to the existing draft lifecycle.
 | Managed agent step | `uses: agent/*` with `with.output`, `with.managed`, and optional `with.scope` | Workflow-owned output schemas are injected into the agent prompt, parsed from the response, repaired once by default, validated locally, and exposed as `structured`. Managed options choose split strategy, fixed or token-adaptive chunk sizes, calibration sample/match/cache policy, parallel child limit, alias-valued model candidates with price metadata, and effort optimization. Child runs keep the agent's account selection, are hidden from chat history by default, and publish one combined structured result plus `managed` diagnostics. | `FR-WORKFLOW-007`, `FR-WORKFLOW-009`, `FR-WORKFLOW-019`, `FR-WORKFLOW-021`, `FR-WORKFLOW-039` |
 | Agent step policy | `uses: agent/*` with `with.tools` | Omitted/`inherit` retains the selected agent's registered tools; `none` disables tools for every model request made by that step. | `FR-WORKFLOW-024` |
 | Agent decision profile | `uses: agent/<canonical-id>` with `history: read_only`, `tools: none`, and an existing session | Freeze one strictly owned existing conversation, perform isolated no-tool evaluation and repairs over that snapshot, and output its canonical session key plus opaque history revision without a conversation write. | `FR-WORKFLOW-007`, `FR-WORKFLOW-024`, `FR-WORKFLOW-042` |
+| Agent decision profile | `uses: agent/<id>` with `session: ephemeral`, `history: none`, `cache: none`, and `tools: none` | Evaluate only supplied prompt/context/scope through the isolated provider path, preserve structured and managed behavior, and expose no durable or account-affine session identity. | `FR-WORKFLOW-007`, `FR-WORKFLOW-024`, `FR-WORKFLOW-043` |
 | Local template | `workflows/github-issue-triage.yml` | Explicitly installed authenticated GitHub issue classifier plus a conditional declared MCP comment effect. | `FR-WORKFLOW-025` |
 | Tool | `workflow` | Agent-callable list, compatibility, revalidate, validate, reload, run, cancel, retry, status, graph, events, `dev_status`, `dev_start`, `dev_revise`, `dev_validate`, `dev_test`, `dev_publish`, and `dev_discard` actions. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-017`, `FR-WORKFLOW-018` |
 | Native functions | `function/workflow.state`, `function/workflow.artifact`, `function/git.inventory`, `function/git.filter` | Store/retrieve workflow-owned JSON state through the guarded internal root, write/read/list run artifacts, inventory git files by commit and blob hash inside a workspace, and apply structured include/exclude path policies to inventory output. `git.inventory` accepts a git workspace object or compatible working directory and emits file metadata plus workspace/file source references without embedding file content. `git.filter` accepts inventory files plus AI- or user-produced `includeGlobs`, `excludeGlobs`, and `selectedPaths`, supports recursive `**` globs, deterministically refreshes selected file source references for the active workspace, and does not embed file content in JSON output. Domain workflows compose these primitives for planning, reports, review scopes, and reuse decisions. | `FR-WORKFLOW-020`, `FR-WORKFLOW-031` |
@@ -329,7 +345,13 @@ state until it explicitly hands rendered YAML to the existing draft lifecycle.
    immutable snapshot and use the isolated no-hook/no-MCP/no-tool provider path
    for every initial, managed, calibration, fallback, and repair call. Return
    its canonical session and opaque snapshot revision without restoring or
-   otherwise writing live history.
+   otherwise writing live history. For a direct agent step with
+   `session: ephemeral`, first require explicit no-history, no-cache, and
+   no-tools companions, carry typed ephemeral intent instead of resolving or
+   inheriting a durable key, create one request-local random identity, and use
+   the same isolated provider path for every call. Suppress account-router
+   session affinity and expose only the fixed ephemeral audit marker after the
+   identity is discarded.
 8. For agent execution optimization steps, build child plans from declared
    scope items and textual agent `Tasks:`, calibrate grouped-vs-split output
    equivalence with a split-exercising sample, exact/similar trust cache,
@@ -597,6 +619,12 @@ conversations provide the agent step execution path and provider prompt cache
 keys. Tool execution, MCP, skills, hooks, and security policies govern side
 effects exactly as they do in normal agent turns. Runtime events expose
 workflow trigger, run, job, and step lifecycle state.
+The exact read-only profile deliberately consults Session Memory, while the
+ephemeral profile in `FR-WORKFLOW-043` deliberately bypasses it and disables
+account-router session affinity. Agent Conversations owns the stateless
+side-question execution behavior, and Agent Execution Optimization owns reuse
+of that same isolation across repairs, calibration, fallback, and managed
+children; workflows own the validated YAML mode and typed executor handoff.
 [Durable external event automation](event-automation.md) supplies normalized
 redacted GitHub/chat/email/webhook envelopes plus fenced routing/dispatch
 state. Workflows own filter validation, matching, run context, and execution;
@@ -724,6 +752,15 @@ dependency admission, tool policy, isolation, or provider authorization.
   agent. They never synthesize a default session, mutate history and restore it
   later, initialize hooks/MCP, or accept a tool-call response. A concurrent
   append remains live but is absent from the already-frozen decision prompt.
+- `session: ephemeral` is accepted only as a direct agent-step option with
+  explicit `history: none`, `cache: none`, and `tools: none`; omission, a
+  non-string value, or any other companion mode fails before provider
+  execution. Generic run context does not accept it, while `key:ephemeral`
+  remains an ordinary durable key. The runtime also rejects a malformed typed
+  request, never falls back to an inherited/default session, and rejects a
+  provider tool call. Its random identity cannot enter session storage,
+  account-router affinity, prompt cache, logs, events, or outputs, including
+  when calls are repaired, split, calibrated, retried, or canceled.
 - Missing delivery context makes message-delivery steps fail closed unless the
   step explicitly provides a channel and chat target.
 - Secrets are visible only when declared by the called workflow and are redacted
@@ -1030,10 +1067,13 @@ dependency admission, tool policy, isolation, or provider authorization.
 
 | `FR-WORKFLOW-042` | [pkg/workflows/validator.go](../../pkg/workflows/validator.go), [pkg/workflows/validator_test.go](../../pkg/workflows/validator_test.go), [pkg/workflows/compatibility.go](../../pkg/workflows/compatibility.go), [pkg/workflows/event_trigger_test.go](../../pkg/workflows/event_trigger_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go), [pkg/session/session_store.go](../../pkg/session/session_store.go), [pkg/session/manager_test.go](../../pkg/session/manager_test.go), [pkg/session/jsonl_backend_test.go](../../pkg/session/jsonl_backend_test.go), [pkg/memory/jsonl_test.go](../../pkg/memory/jsonl_test.go) |
 
+| `FR-WORKFLOW-043` | [pkg/workflows/validator.go](../../pkg/workflows/validator.go), [pkg/workflows/validator_test.go](../../pkg/workflows/validator_test.go), [pkg/workflows/context.go](../../pkg/workflows/context.go), [pkg/workflows/executor.go](../../pkg/workflows/executor.go), [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go), [pkg/workflows/compatibility.go](../../pkg/workflows/compatibility.go), [pkg/workflows/event_trigger_test.go](../../pkg/workflows/event_trigger_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
+
 ## Implementation Anchors
 
 - [pkg/config/mutation.go](../../pkg/config/mutation.go)
 - [pkg/workflows/types.go](../../pkg/workflows/types.go)
+- [pkg/workflows/context.go](../../pkg/workflows/context.go)
 - [pkg/workflows/resolver.go](../../pkg/workflows/resolver.go)
 - [pkg/workflows/validator.go](../../pkg/workflows/validator.go)
 - [pkg/workflows/executor.go](../../pkg/workflows/executor.go)
@@ -1072,6 +1112,7 @@ dependency admission, tool policy, isolation, or provider authorization.
 - [pkg/agent/workflow_authoring.go](../../pkg/agent/workflow_authoring.go)
 - [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go)
 - [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go)
+- [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go)
 - [pkg/agent/workflow_triggers.go](../../pkg/agent/workflow_triggers.go)
 - [pkg/agent/workflow_automations.go](../../pkg/agent/workflow_automations.go)
 - [pkg/agent/workflow_eventing.go](../../pkg/agent/workflow_eventing.go)

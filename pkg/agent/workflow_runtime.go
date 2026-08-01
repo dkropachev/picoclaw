@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -246,7 +247,8 @@ func (r *workflowToolRunner) deliverHandledMedia(
 }
 
 type workflowAgentRunner struct {
-	loop *AgentLoop
+	loop                   *AgentLoop
+	newEphemeralSessionKey func() string
 }
 
 type workflowAgentRunOptions struct {
@@ -268,12 +270,29 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	defer releaseRuntime()
 	ctx = leaseCtx
 
-	historyMode := strings.ToLower(strings.TrimSpace(req.History))
+	historyModeInput := strings.TrimSpace(req.History)
+	historyMode := strings.ToLower(historyModeInput)
 	readOnlyDecision := historyMode == "read_only"
+	ephemeralDecision := req.EphemeralSession
 	if readOnlyDecision && workflowAgentToolsMode(req.Tools) != workflows.AgentToolsNone {
 		return nil, fmt.Errorf("read_only workflow agent history requires tools: none")
 	}
-	if !readOnlyDecision {
+	if ephemeralDecision {
+		if historyModeInput != "none" {
+			return nil, fmt.Errorf("ephemeral workflow agent session requires history: none")
+		}
+		if strings.TrimSpace(req.Cache) != "none" {
+			return nil, fmt.Errorf("ephemeral workflow agent session requires cache: none")
+		}
+		if strings.TrimSpace(req.Tools) != workflows.AgentToolsNone {
+			return nil, fmt.Errorf("ephemeral workflow agent session requires tools: none")
+		}
+		if strings.TrimSpace(req.Session) != "" {
+			return nil, fmt.Errorf("ephemeral workflow agent session cannot use a durable session key")
+		}
+	}
+	isolatedDecision := readOnlyDecision || ephemeralDecision
+	if !isolatedDecision {
 		if hooksErr := r.loop.ensureHooksInitialized(ctx); hooksErr != nil {
 			return nil, hooksErr
 		}
@@ -306,7 +325,9 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		return nil, fmt.Errorf("agent workflow step message is required")
 	}
 	sessionKey := strings.TrimSpace(req.Session)
-	if sessionKey == "" && !readOnlyDecision {
+	if ephemeralDecision {
+		sessionKey = r.ephemeralSessionKey()
+	} else if sessionKey == "" && !readOnlyDecision {
 		sessionKey = "workflow:agent:" + agentID
 	}
 	var (
@@ -329,8 +350,37 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	}
 	noHistory := historyMode == "none"
 	promptCacheKey, disablePromptCache := workflowPromptCacheKey(req.Cache, agentID, sessionKey)
-	inbound := workflowInboundContext(req.Delivery, agentID)
+	var inbound *bus.InboundContext
+	if !ephemeralDecision {
+		value := workflowInboundContext(req.Delivery, agentID)
+		inbound = &value
+	}
 	runOnce := func(runMessage string, noHistoryOverride bool, runOptions workflowAgentRunOptions) (string, error) {
+		if ephemeralDecision {
+			return r.loop.askSideQuestionWithOptions(
+				ctx,
+				agent,
+				&processOptions{
+					Dispatch: DispatchRequest{
+						SessionKey:  sessionKey,
+						UserMessage: runMessage,
+					},
+					ModelNameOverride:       strings.TrimSpace(runOptions.ModelName),
+					ReasoningEffortOverride: strings.TrimSpace(runOptions.ReasoningEffort),
+					NoHistory:               true,
+					DisableTools:            true,
+					DisablePromptCache:      true,
+				},
+				runMessage,
+				sideQuestionExecutionOptions{
+					disablePromptCache:     true,
+					disableSessionAffinity: true,
+					detachProviderMessages: true,
+					skipHooks:              true,
+					rejectToolCalls:        true,
+				},
+			)
+		}
 		if readOnlySnapshot != nil {
 			return r.loop.askSideQuestionWithOptions(
 				ctx,
@@ -338,7 +388,7 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 				&processOptions{
 					Dispatch: DispatchRequest{
 						SessionKey:     sessionKey,
-						InboundContext: &inbound,
+						InboundContext: inbound,
 						SessionScope:   session.CloneScope(readOnlySnapshot.Scope),
 						UserMessage:    runMessage,
 					},
@@ -364,7 +414,7 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		return r.loop.runAgentLoop(ctx, agent, processOptions{
 			Dispatch: DispatchRequest{
 				SessionKey:     sessionKey,
-				InboundContext: &inbound,
+				InboundContext: inbound,
 				SessionScope:   workflowSessionScope(agentID, sessionKey, req.Delivery),
 				UserMessage:    runMessage,
 			},
@@ -381,6 +431,10 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 			DisablePromptCache:      disablePromptCache,
 		})
 	}
+	publicSessionKey := sessionKey
+	if ephemeralDecision {
+		publicSessionKey = workflows.AgentSessionEphemeral
+	}
 	if strategy := workflowManagedSplitStrategy(req, agent); strategy != "" {
 		if managedErr := r.ensureWorkflowManagedProviders(agent, req.Managed); managedErr != nil {
 			return nil, fmt.Errorf(
@@ -393,7 +447,7 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 			req,
 			agent,
 			agentID,
-			sessionKey,
+			publicSessionKey,
 			historyMode,
 			req.Cache,
 			promptCacheKey,
@@ -402,6 +456,9 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		)
 		if readOnlySnapshot != nil && outputs != nil {
 			outputs["history_revision"] = historyRevision
+		}
+		if ephemeralDecision && outputs != nil {
+			outputs["session_mode"] = workflows.AgentSessionEphemeral
 		}
 		return outputs, managedErr
 	}
@@ -415,7 +472,7 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	outputs := workflowAgentBaseOutputs(
 		response,
 		agentID,
-		sessionKey,
+		publicSessionKey,
 		historyMode,
 		req.Cache,
 		promptCacheKey,
@@ -424,6 +481,9 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	)
 	if readOnlySnapshot != nil {
 		outputs["history_revision"] = historyRevision
+	}
+	if ephemeralDecision {
+		outputs["session_mode"] = workflows.AgentSessionEphemeral
 	}
 	outputs["managed"] = workflowManagedMetadata(req, agent)
 	if req.Output != nil && req.Output.Enabled() {
@@ -458,6 +518,17 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		}
 	}
 	return outputs, nil
+}
+
+func newWorkflowEphemeralSessionKey() string {
+	return "workflow:ephemeral:" + rand.Text()
+}
+
+func (r *workflowAgentRunner) ephemeralSessionKey() string {
+	if r != nil && r.newEphemeralSessionKey != nil {
+		return r.newEphemeralSessionKey()
+	}
+	return newWorkflowEphemeralSessionKey()
 }
 
 const maxWorkflowReadOnlySessionKeyBytes = 4096
