@@ -9,19 +9,25 @@
 PicoClaw accepts a user turn, builds prompt context, selects provider
 candidates, calls an LLM, executes requested tools, streams or finalizes
 responses, and records turn state. Provider, model, CLI, and config surfaces are
-auxiliary to this capability.
+auxiliary to this capability. The loop also exposes an isolated provider-call
+profile for workflow decisions that need a frozen existing conversation as
+evidence without registering a turn, executing tools, invoking hooks, or
+writing the conversation.
 
 ## Reconstruction Notes
 
 - Similarity target: recreate an agent loop that builds prompt context, selects provider candidates, executes tool calls, and stores a final turn.
 - Core types/functions: `AgentLoop`, agent instance creation, context builder,
   pipeline setup/execute/finalize helpers, turn reservations and scoped steering,
-  message-scoped channel capabilities, provider factory, and tool registry.
+  message-scoped channel capabilities, isolated side-question execution,
+  provider factory, and tool registry.
 - Runtime ordering: normalize input, resolve route/session, build prompt, select model candidate, call provider, execute tool calls, stream/finalize response, persist history, emit runtime events.
 - Non-obvious constraints: tool iteration limits, media limits, turn profile block
   disabling, fallback candidates, child-turn concurrency, exact transient-UX
   ownership, and source-compatible channel/streaming fallbacks must stay
-  explicit.
+  explicit. An isolated workflow decision uses caller-supplied frozen context
+  rather than assembling live history again, exposes no tools, and rejects a
+  provider response that still attempts a tool call.
 
 ## Requirements
 
@@ -46,6 +52,7 @@ auxiliary to this capability.
 | `FR-AGENT-017` | MUST | Agent-owned inbound snapshots preserve process-local turn/event identity, deduplication, occurrence time, subject, conversation, safe attachment descriptors, and transport trust facts through primary turns, queued continuations, and derived outbound contexts. Mutable maps, occurrence-time pointers, and attachment slices are detached when copied, and these fields remain excluded from serialized routing context. | Asynchronous turn and delivery work must retain admission facts without aliasing caller-owned state or expanding the serialized contract. |
 | `FR-AGENT-018` | MUST | The authenticated Agent management API and responsive Agent UI project an implicit `main` policy without writing an empty config and support ordered create, inspect, edit, default-selection, and delete operations against an explicit opaque config revision. Each resource exposes an optional `account_ref`; model primary/fallback values are validated as exact aliases, except that primary may be an enabled model router. Empty per-agent values inherit defaults, and the surface preserves that inheritance versus an explicit empty fallback list. | Operators need concurrency-safe browser management of the same strict account-plus-alias policy used at runtime. |
 | `FR-AGENT-019` | MUST | The selected-agent UI exposes deep-linkable Overview, Capabilities, and Activity tabs without replacing the ordered management grid. Capabilities use a separate composite config-plus-workspace revision and preserve the exact tools all/none/selected, skills inherit/none/selected, and MCP all/none/selected states; an edit changes only requested frontmatter nodes while preserving unrelated YAML nodes, comments, ordering, and prompt body, retains unknown existing selections, and upgrades legacy `AGENTS.md` only after explicit confirmation without deleting it. Malformed, unterminated, unsafe, or unsupported-platform definition state is fail-closed and read-only. Capability and activity views use only bounded sanitized projections, retain dirty drafts across conflicts until explicit reload, report required gateway restart, and never expose a raw-file editor or persist activity cursors. | Operators need full browser control and visibility for one agent without collapsing workspace policy into global config, overwriting concurrent prompt edits, leaking runtime payloads, or discarding forward-compatible declarations. |
+| `FR-AGENT-020` | MUST | An exact read-only workflow decision invokes the selected configured agent through the isolated side-question provider path with a caller-supplied deep-cloned history and summary snapshot. It preserves normal account/model alias and fallback resolution plus explicit model and reasoning-effort overrides, but does not register or reserve an interactive turn, reassemble live context, append user/assistant/tool messages, compact or summarize the session, initialize MCP, expose tool definitions, execute tool calls, or invoke before/after LLM hooks. Structured-output repairs and managed child/fallback calls reuse that same frozen snapshot and no-tool profile. Each provider attempt receives a separately graph-detached message copy so a mutating provider or failed fallback cannot change the context observed by a later attempt or repair. Prompt caching follows the workflow's normalized cache mode, cancellation propagates, and any provider response containing tool calls fails the decision rather than entering a tool loop. | Gate evaluation must be able to consult the PR conversation without becoming another conversation turn, observing later concurrent writes, or acquiring action authority. |
 
 ## Data And State Model
 
@@ -59,7 +66,9 @@ serialize reservation, steering enqueue/dequeue, rebind, and abandonment;
 rescue markers explicitly own committed steering until a live continuation or
 competing turn takes it. Workspace capability state also retains its active
 definition source and exact composite revision independently from the global
-agent-config revision; runtime activity remains process-local and bounded.
+agent-config revision; runtime activity remains process-local and bounded. The
+frozen context used by an isolated workflow decision is request-local and is
+never installed as the live session state.
 
 ## Surface Ownership
 
@@ -125,6 +134,7 @@ Owns: EVENT agent.*
 | Go API | `interfaces.ChannelManager`, optional `MessageScopedTypingStopper`, `MessageScopedTurnUXCleaner`, `MessageScopedTurnUXRebinder`, and `MessageScopedPlaceholderSender` | Keep the legacy manager surface sufficient while allowing built-in channels to stop, clean, transfer, and create transient UX for one opaque turn identity. | `FR-AGENT-015`, `FR-AGENT-016` |
 | Go API | `interfaces.MessageBus.GetStreamer`, optional `interfaces.TurnScopedMessageBus.GetStreamerForTurn` | Use turn-scoped streaming when implemented and otherwise call the original four-argument streamer lookup. | `FR-AGENT-015`, `FR-AGENT-016` |
 | Runtime | `bus.InboundContext`, `DispatchRequest`, turn reservations, continuation targets, and outbound context derivation | Carry detached process-local event and transient-UX metadata across one turn without adding it to serialized routing context. | `FR-AGENT-015`, `FR-AGENT-017` |
+| Runtime | `AgentLoop.askSideQuestionWithOptions` frozen-context profile | Perform one no-tool, no-hook provider decision over caller-supplied history and summary without joining or mutating the interactive turn lifecycle. | `FR-AGENT-020` |
 | Events | `agent.*` | Turn, LLM, tool, steering, interrupt, subturn, and error telemetry. | `FR-AGENT-001`, `FR-AGENT-004`, `FR-AGENT-006` |
 | HTTP/UI | `/api/agents*`, `/agent/agents` | Project and mutate persistent configured agent policy with ordered results, revision fencing, explicit model fallback semantics, workspace capability CAS, sanitized live activity, deep links, and restart feedback. | `FR-AGENT-018`, `FR-AGENT-019` |
 
@@ -143,20 +153,26 @@ Owns: EVENT agent.*
    redemption before fallback observes the error. Failed verification
    suppresses another automatic reset for that exhaustion episode.
 4. For each tool-call response, validate tool availability and arguments, run hooks and registry execution, append tool results, and re-enter provider execution until done or capped.
-5. Keep the detached inbound snapshot on the reservation and real turn. After
+5. For an exact read-only workflow decision, accept the already-captured
+   history and summary instead of consulting the context manager, construct
+   the normal agent prompt and provider candidates with zero tool definitions,
+   skip hooks and interactive turn registration, reject tool-call responses,
+   and return only the isolated response. Every repair or managed call receives
+   the same frozen snapshot.
+6. Keep the detached inbound snapshot on the reservation and real turn. After
    any slow inbound preparation, recheck the session owner under the handoff
    lock; either claim the idle session or atomically enqueue and rebind
    same-chat steering to the pinned owner. Retire cross-chat transient UX
    immediately after its queue commit because the active turn cannot own that
    chat key. If a reservation is abandoned after steering commits, a bounded
    rescue continues the queue or transfers it to a competing live owner.
-6. Write final messages and summaries after the assistant response is known.
+7. Write final messages and summaries after the assistant response is known.
    Propagate the inbound snapshot to same-chat output. Once buffered delivery
    accepts output, stop only exact typing and let channel pre-send own
    reaction/placeholder cleanup; otherwise perform exact full cleanup. Use the
    optional message-scoped manager and streamer capabilities when present and
    their legacy fallbacks when absent.
-7. Before replacing provider/config state, pause new runtime admission and wait
+8. Before replacing provider/config state, pause new runtime admission and wait
    for current generation leases. Acquire before inbound trigger/routing
    decisions and transfer a retained lease to any worker waiting for a
    semaphore. Retain before launching other asynchronous workflows or spawn
@@ -164,20 +180,20 @@ Owns: EVENT agent.*
    exact config/registry identity for summarizers and gateway-owned
    scheduled/event work, remove the runtime-event subscription for the outer
    transaction, and recreate it for the final config before admission resumes.
-8. On terminal shutdown, remember Stop even if `Run` has not registered yet,
+9. On terminal shutdown, remember Stop even if `Run` has not registered yet,
    quiesce runtime producers, cancel and join the AgentLoop and its automation
    controller, and hold a permanent runtime pause until active leases reach
    zero. Only then stop channel/media dependencies and close provider, bus, and
    registry resources. A timeout leaves dependencies/resources open for
    process teardown.
-9. In Agent management, keep the ordered grid as the entry surface and put the
+10. In Agent management, keep the ordered grid as the entry surface and put the
    exact selected agent and allow-listed detail tab in the URL. A capability
    draft owns its loaded composite revision until save or explicit reload.
    Block tab, agent, route, and browser navigation while that draft is dirty;
    proceed only after the operator explicitly discards it. A revision conflict
    preserves the draft, disables another save, and requires an explicit reload
    before editing can resume.
-10. Mount activity polling only on the selected Activity tab. Poll while the
+11. Mount activity polling only on the selected Activity tab. Poll while the
     gateway and browser are online, the document is visible, and the operator
     has not paused; abort on unmount or agent change, and pause after a request
     error until explicit retry. Merge by sequence into at most 200 browser
@@ -193,12 +209,13 @@ and security policies can alter the visible tool set or execution outcome.
 Runtime events report each major step. Threads can contribute a policy prompt
 that lets the main chat become or join a thread only after configured routing
 thresholds are satisfied.
-Workflow agent steps reuse this same turn execution path, including session
-history modes, provider prompt cache keys, tool iteration limits, and final
-message persistence. Managed workflow agent steps can additionally run hidden
+Workflow agent steps normally reuse this same turn execution path, including
+provider prompt cache keys, tool iteration limits, and final message
+persistence. The exact `history: read_only` profile instead consumes Session
+Memory's immutable existing-session snapshot and the isolated decision path in
+`FR-AGENT-020`. Managed workflow agent steps can additionally run hidden
 no-history child turns with scoped prompts, per-child model and reasoning-effort
-overrides, and tool disabling while preserving the same provider resolution and
-turn-finalization path.
+overrides, and tool disabling while preserving the same provider resolution.
 Git workspaces are allocated through the registered tool during a turn and are
 released or reconciled by the shared turn-finalization path, while checkout
 inventory and retention behavior are owned by the git workspaces feature.
@@ -232,6 +249,12 @@ metadata but does not persist or reinterpret those trust facts.
   a reset.
 - Tool lookup misses produce a tool-skipped result instead of a panic.
 - Iteration limits stop repeated tool-call loops.
+- An isolated read-only decision fails before provider execution when its
+  caller cannot supply an exact existing-session snapshot. A provider-authored
+  tool call is an error even though no tool definitions were offered; it is not
+  ignored or executed. Hooks and MCP are deliberately absent from this profile,
+  and a concurrent interactive append cannot change the already-frozen prompt
+  or be overwritten when the decision finishes.
 - Media too large for configured limits is rejected before provider execution.
 - Child turns that cannot deliver results report orphan or failed status.
 - A reload waits for turns and retained asynchronous work from the old
@@ -289,6 +312,7 @@ metadata but does not persist or reinterpret those trust facts.
 | `FR-AGENT-017` | [pkg/agent/turn_context_test.go](../../pkg/agent/turn_context_test.go), [pkg/agent/agent_test.go](../../pkg/agent/agent_test.go), [pkg/agent/steering_test.go](../../pkg/agent/steering_test.go), [pkg/bus/bus_test.go](../../pkg/bus/bus_test.go) |
 | `FR-AGENT-018` | [web/backend/api/agents_test.go](../../web/backend/api/agents_test.go), [pkg/config/config_test.go](../../pkg/config/config_test.go), [web/frontend/src/api/agents.test.ts](../../web/frontend/src/api/agents.test.ts), [web/frontend/src/components/agent/agents/agents-page.test.tsx](../../web/frontend/src/components/agent/agents/agents-page.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-AGENT-019` | [web/backend/api/agent_capabilities_test.go](../../web/backend/api/agent_capabilities_test.go), [web/backend/api/agent_capabilities_cas_test.go](../../web/backend/api/agent_capabilities_cas_test.go), [web/backend/api/agent_capabilities_replace_linux_test.go](../../web/backend/api/agent_capabilities_replace_linux_test.go), [pkg/agent/activity_test.go](../../pkg/agent/activity_test.go), [web/frontend/src/api/agents.test.ts](../../web/frontend/src/api/agents.test.ts), [web/frontend/src/components/agent/agents/agent-capabilities-panel.test.tsx](../../web/frontend/src/components/agent/agents/agent-capabilities-panel.test.tsx), [web/frontend/src/components/agent/agents/agent-activity-panel.test.tsx](../../web/frontend/src/components/agent/agents/agent-activity-panel.test.tsx), [web/frontend/src/routes/agent/-agents-route.test.tsx](../../web/frontend/src/routes/agent/-agents-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
+| `FR-AGENT-020` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
 
 ## Implementation Anchors
 
@@ -298,6 +322,8 @@ metadata but does not persist or reinterpret those trust facts.
 - [pkg/agent/channel_manager_compat.go](../../pkg/agent/channel_manager_compat.go)
 - [pkg/agent/steering.go](../../pkg/agent/steering.go)
 - [pkg/agent/turn_context.go](../../pkg/agent/turn_context.go)
+- [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go)
+- [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go)
 - [pkg/agent/runtime_gate.go](../../pkg/agent/runtime_gate.go)
 - [pkg/providers/factory.go](../../pkg/providers/factory.go)
 - [web/backend/api/agents.go](../../web/backend/api/agents.go)

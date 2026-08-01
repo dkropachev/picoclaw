@@ -1,10 +1,17 @@
 package session
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
+	"time"
+
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
+
+var _ SnapshotReader = (*SessionManager)(nil)
 
 func TestSanitizeFilename(t *testing.T) {
 	tests := []struct {
@@ -110,5 +117,92 @@ func TestLoadSessions_NormalizesMissingCreatedAt(t *testing.T) {
 	}
 	if history[0].CreatedAt == nil || history[0].CreatedAt.IsZero() {
 		t.Fatalf("history[0].CreatedAt = %v, want non-zero timestamp", history[0].CreatedAt)
+	}
+}
+
+func TestSessionManagerReadSessionSnapshot_ExactDeepCopy(t *testing.T) {
+	sm := NewSessionManager("")
+	key := " exact-session "
+	createdAt := time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC)
+	cyclic := map[string]any{}
+	cyclic["self"] = cyclic
+	sm.AddFullMessage(key, providers.Message{
+		Role:      "assistant",
+		Content:   "decision context",
+		CreatedAt: &createdAt,
+		Media:     []string{"image.png"},
+		SystemParts: []providers.ContentBlock{{
+			Type:         "text",
+			Text:         "system",
+			CacheControl: &providers.CacheControl{Type: "ephemeral"},
+		}},
+		ToolCalls: []providers.ToolCall{{
+			ID:        "call-1",
+			Function:  &providers.FunctionCall{Name: "inspect", Arguments: `{}`},
+			Arguments: map[string]any{"nested": []any{map[string]any{"value": "original"}}, "cycle": cyclic},
+		}},
+	})
+	sm.SetSummary(key, "summary")
+
+	if _, found, err := sm.ReadSessionSnapshot(context.Background(), "exact-session"); err != nil || found {
+		t.Fatalf("trimmed lookup = (found=%v, err=%v), want exact-key miss", found, err)
+	}
+	snapshot, found, err := sm.ReadSessionSnapshot(context.Background(), key)
+	if err != nil || !found {
+		t.Fatalf("ReadSessionSnapshot() = (found=%v, err=%v)", found, err)
+	}
+	if snapshot.Key != key || snapshot.Summary != "summary" || len(snapshot.History) != 1 {
+		t.Fatalf("snapshot = %+v", snapshot)
+	}
+
+	originalCycle := cyclic
+	clonedCycle := snapshot.History[0].ToolCalls[0].Arguments["cycle"].(map[string]any)
+	if reflect.ValueOf(originalCycle).Pointer() == reflect.ValueOf(clonedCycle).Pointer() {
+		t.Fatal("cyclic tool arguments were not cloned")
+	}
+	if reflect.ValueOf(clonedCycle).Pointer() != reflect.ValueOf(clonedCycle["self"]).Pointer() {
+		t.Fatal("cyclic tool argument graph was not preserved")
+	}
+
+	snapshot.History[0].Content = "mutated"
+	*snapshot.History[0].CreatedAt = time.Time{}
+	snapshot.History[0].Media[0] = "mutated.png"
+	snapshot.History[0].SystemParts[0].CacheControl.Type = "mutated"
+	snapshot.History[0].ToolCalls[0].Function.Name = "mutated"
+	nested := snapshot.History[0].ToolCalls[0].Arguments["nested"].([]any)
+	nested[0].(map[string]any)["value"] = "mutated"
+
+	again, found, err := sm.ReadSessionSnapshot(context.Background(), key)
+	if err != nil || !found {
+		t.Fatalf("second ReadSessionSnapshot() = (found=%v, err=%v)", found, err)
+	}
+	message := again.History[0]
+	if message.Content != "decision context" || message.CreatedAt.IsZero() || message.Media[0] != "image.png" {
+		t.Fatalf("live message changed through snapshot: %+v", message)
+	}
+	if message.SystemParts[0].CacheControl.Type != "ephemeral" || message.ToolCalls[0].Function.Name != "inspect" {
+		t.Fatalf("live nested fields changed through snapshot: %+v", message)
+	}
+	gotNested := message.ToolCalls[0].Arguments["nested"].([]any)[0].(map[string]any)["value"]
+	if gotNested != "original" {
+		t.Fatalf("live tool arguments changed through snapshot: %v", gotNested)
+	}
+}
+
+func TestSessionManagerReadSessionSnapshot_MissingBlankAndCanceled(t *testing.T) {
+	sm := NewSessionManager("")
+	for _, key := range []string{"", "   ", "missing"} {
+		if _, found, err := sm.ReadSessionSnapshot(context.Background(), key); err != nil || found {
+			t.Fatalf("ReadSessionSnapshot(%q) = (found=%v, err=%v), want miss", key, found, err)
+		}
+	}
+	if sessions := sm.ListSessions(); len(sessions) != 0 {
+		t.Fatalf("strict reads created sessions: %v", sessions)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, found, err := sm.ReadSessionSnapshot(ctx, "missing"); err != context.Canceled || found {
+		t.Fatalf("canceled read = (found=%v, err=%v), want context.Canceled", found, err)
 	}
 }

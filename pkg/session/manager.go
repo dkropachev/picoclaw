@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -121,6 +122,38 @@ func (sm *SessionManager) GetHistory(key string) []providers.Message {
 	history := make([]providers.Message, len(session.Messages))
 	copy(history, session.Messages)
 	return history
+}
+
+// ReadSessionSnapshot returns a coherent, deep-cloned view of an existing
+// exact session key. Unlike GetOrCreate and the write methods, this strict read
+// never creates a session and does not apply fallback key semantics.
+func (sm *SessionManager) ReadSessionSnapshot(
+	ctx context.Context,
+	key string,
+) (SessionSnapshot, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return SessionSnapshot{}, false, err
+	}
+	if strings.TrimSpace(key) == "" {
+		return SessionSnapshot{}, false, nil
+	}
+
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if err := ctx.Err(); err != nil {
+		return SessionSnapshot{}, false, err
+	}
+	stored, ok := sm.sessions[key]
+	if !ok {
+		return SessionSnapshot{}, false, nil
+	}
+
+	return SessionSnapshot{
+		Key:     stored.Key,
+		History: cloneSessionMessages(stored.Messages),
+		Summary: stored.Summary,
+	}, true, nil
 }
 
 func (sm *SessionManager) GetSummary(key string) string {

@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +19,7 @@ import (
 	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
@@ -234,6 +237,430 @@ func TestWorkflowAgentRunnerWithNoToolsDoesNotInitializeMCP(t *testing.T) {
 	}
 	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
 		t.Fatalf("no-tools agent run executed MCP command: %v", statErr)
+	}
+}
+
+func TestWorkflowAgentRunnerReadOnlyUsesExactImmutableSessionSnapshot(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{`{"needs_user":false,"reason":"clear"}`}}
+	loop, agent, canonicalKey, alias := newWorkflowReadOnlyTestLoop(t, provider)
+	reader := agent.Sessions.(session.SnapshotReader)
+	before, found, err := reader.ReadSessionSnapshot(context.Background(), canonicalKey)
+	if err != nil || !found {
+		t.Fatalf("ReadSessionSnapshot() = (%#v, %v, %v), want existing snapshot", before, found, err)
+	}
+	beforeSessions := append([]string(nil), agent.Sessions.ListSessions()...)
+
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(
+		context.Background(),
+		workflows.AgentRequest{
+			AgentID: "main",
+			Prompt:  "Decide whether this needs user attention.",
+			Session: alias,
+			History: "read_only",
+			Cache:   "session",
+			Tools:   workflows.AgentToolsNone,
+			Output: &workflows.AgentOutputContract{
+				Format: "json",
+				Schema: map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []any{"needs_user", "reason"},
+					"properties": map[string]any{
+						"needs_user": map[string]any{"type": "boolean"},
+						"reason":     map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if outputs["session"] != canonicalKey {
+		t.Fatalf("session output = %#v, want canonical %q", outputs["session"], canonicalKey)
+	}
+	if revision, _ := outputs["history_revision"].(string); !strings.HasPrefix(revision, "sha256:") {
+		t.Fatalf("history_revision = %#v, want opaque sha256 revision", outputs["history_revision"])
+	}
+	if outputs["tools"] != workflows.AgentToolsNone {
+		t.Fatalf("tools output = %#v, want none", outputs["tools"])
+	}
+
+	calls := provider.snapshotCalls()
+	if len(calls) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(calls))
+	}
+	if calls[0].toolCount != 0 {
+		t.Fatalf("provider tool definitions = %d, want 0", calls[0].toolCount)
+	}
+	if calls[0].promptCacheKey != canonicalKey {
+		t.Fatalf("prompt cache key = %q, want canonical session", calls[0].promptCacheKey)
+	}
+	if !workflowMessagesContain(calls[0].messages, "existing problem context") {
+		t.Fatalf("provider prompt omitted exact session history: %#v", calls[0].messages)
+	}
+	if !workflowMessagesContain(calls[0].messages, "existing decision summary") {
+		t.Fatalf("provider prompt omitted exact session summary: %#v", calls[0].messages)
+	}
+
+	after, found, err := reader.ReadSessionSnapshot(context.Background(), canonicalKey)
+	if err != nil || !found {
+		t.Fatalf("ReadSessionSnapshot(after) = (%#v, %v, %v)", after, found, err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("source session mutated\nbefore: %#v\nafter:  %#v", before, after)
+	}
+	if afterSessions := agent.Sessions.ListSessions(); !reflect.DeepEqual(afterSessions, beforeSessions) {
+		t.Fatalf("session catalog changed: before=%v after=%v", beforeSessions, afterSessions)
+	}
+	if loop.mcp.getManager() != nil || loop.mcp.getInitErr() != nil {
+		t.Fatal("read-only decision initialized MCP")
+	}
+}
+
+func TestWorkflowAgentRunnerReadOnlyRejectsMissingIdentityBeforeProvider(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"unexpected"}}
+	loop, agent, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	beforeSessions := append([]string(nil), agent.Sessions.ListSessions()...)
+
+	requests := []workflows.AgentRequest{
+		{AgentID: "main", History: "read_only", Tools: workflows.AgentToolsNone, Prompt: "decide"},
+		{AgentID: "main", Session: "agent:main:missing", History: "read_only", Tools: workflows.AgentToolsNone, Prompt: "decide"},
+		{AgentID: "Main", Session: "agent:main:review", History: "read_only", Tools: workflows.AgentToolsNone, Prompt: "decide"},
+		{AgentID: "@@@", Session: "agent:main:review", History: "read_only", Tools: workflows.AgentToolsNone, Prompt: "decide"},
+	}
+	for _, req := range requests {
+		if _, err := (&workflowAgentRunner{loop: loop}).RunAgent(context.Background(), req); err == nil {
+			t.Fatalf("RunAgent(%#v) error = nil, want fail-closed identity error", req)
+		}
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("provider calls = %d, want 0", len(calls))
+	}
+	if afterSessions := agent.Sessions.ListSessions(); !reflect.DeepEqual(afterSessions, beforeSessions) {
+		t.Fatalf("failed lookups changed session catalog: before=%v after=%v", beforeSessions, afterSessions)
+	}
+}
+
+func TestWorkflowAgentRunnerReadOnlyRejectsOwnerMismatchAndToolCalls(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"unexpected"}}
+	loop, agent, canonicalKey, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	metadata := agent.Sessions.(session.MetadataAwareSessionStore)
+	metadata.EnsureSessionMetadata(canonicalKey, &session.SessionScope{
+		Version: session.ScopeVersionV1,
+		AgentID: "support",
+		Channel: "web",
+	}, nil)
+
+	_, err := (&workflowAgentRunner{loop: loop}).RunAgent(context.Background(), workflows.AgentRequest{
+		AgentID: "main",
+		Session: canonicalKey,
+		History: "read_only",
+		Tools:   workflows.AgentToolsNone,
+		Prompt:  "decide",
+	})
+	if err == nil || !strings.Contains(err.Error(), "belongs to another agent") {
+		t.Fatalf("owner mismatch error = %v", err)
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("owner mismatch provider calls = %d, want 0", len(calls))
+	}
+
+	metadata.EnsureSessionMetadata(canonicalKey, &session.SessionScope{
+		Version: session.ScopeVersionV1,
+		AgentID: "main",
+		Channel: "web",
+	}, nil)
+	provider.setResponses([]string{""})
+	provider.toolCall = true
+	_, err = (&workflowAgentRunner{loop: loop}).RunAgent(context.Background(), workflows.AgentRequest{
+		AgentID: "main",
+		Session: canonicalKey,
+		History: "read_only",
+		Tools:   workflows.AgentToolsNone,
+		Prompt:  "decide",
+	})
+	if err == nil || !strings.Contains(err.Error(), "returned tool calls") {
+		t.Fatalf("tool-call response error = %v", err)
+	}
+}
+
+func TestWorkflowAgentRunnerReadOnlyDoesNotClobberConcurrentAppend(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{
+		responses: []string{"decision"},
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	loop, agent, canonicalKey, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	loop.activeTurnStates.Store(canonicalKey, &turnState{sessionKey: canonicalKey})
+	defer loop.activeTurnStates.Delete(canonicalKey)
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := (&workflowAgentRunner{loop: loop}).RunAgent(context.Background(), workflows.AgentRequest{
+			AgentID: "main",
+			Session: canonicalKey,
+			History: "read_only",
+			Tools:   workflows.AgentToolsNone,
+			Prompt:  "decide",
+		})
+		errCh <- err
+	}()
+	<-provider.started
+	agent.Sessions.AddMessage(canonicalKey, "user", "legitimate concurrent append")
+	close(provider.release)
+	if err := <-errCh; err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	history := agent.Sessions.GetHistory(canonicalKey)
+	if !workflowMessagesContain(history, "legitimate concurrent append") {
+		t.Fatalf("concurrent append was lost: %#v", history)
+	}
+	calls := provider.snapshotCalls()
+	if len(calls) != 1 || workflowMessagesContain(calls[0].messages, "legitimate concurrent append") {
+		t.Fatalf("decision did not use one frozen pre-append snapshot: %#v", calls)
+	}
+}
+
+func TestWorkflowAgentRunnerReadOnlyRepairReusesFrozenSnapshot(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{
+		responses: []string{
+			"not json",
+			`{"needs_user":true,"reason":"ambiguous"}`,
+		},
+		mutateNestedInput: true,
+	}
+	loop, agent, canonicalKey, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	agent.Sessions.AddMessage(canonicalKey, "user", "inspect nested immutable context")
+	agent.Sessions.AddFullMessage(canonicalKey, providers.Message{
+		Role:    "assistant",
+		Content: "nested immutable context",
+		SystemParts: []providers.ContentBlock{{
+			Type:         "text",
+			Text:         "frozen nested block",
+			CacheControl: &providers.CacheControl{Type: "ephemeral"},
+		}},
+		ToolCalls: []providers.ToolCall{{
+			ID:        "prior-call",
+			Function:  &providers.FunctionCall{Name: "inspect", Arguments: `{}`},
+			Arguments: map[string]any{"nested": map[string]any{"marker": "original"}},
+		}},
+	})
+	agent.Sessions.AddFullMessage(canonicalKey, providers.Message{
+		Role:       "tool",
+		ToolCallID: "prior-call",
+		Content:    "inspection complete",
+	})
+	provider.afterCall = func(index int) {
+		if index == 0 {
+			agent.Sessions.AddMessage(canonicalKey, "user", "arrived between decision and repair")
+		}
+	}
+
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(
+		context.Background(),
+		workflows.AgentRequest{
+			AgentID: "main",
+			Session: canonicalKey,
+			History: "read_only",
+			Tools:   workflows.AgentToolsNone,
+			Prompt:  "decide",
+			Output: &workflows.AgentOutputContract{
+				Format:         "json",
+				RepairAttempts: 1,
+				Schema: map[string]any{
+					"type":     "object",
+					"required": []any{"needs_user", "reason"},
+					"properties": map[string]any{
+						"needs_user": map[string]any{"type": "boolean"},
+						"reason":     map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if outputs["structured_repairs"] != 1 || outputs["structured_valid"] != true {
+		t.Fatalf("structured outputs = %#v, want one valid repair", outputs)
+	}
+	calls := provider.snapshotCalls()
+	if len(calls) != 2 {
+		t.Fatalf("provider calls = %d, want initial plus repair", len(calls))
+	}
+	for index, call := range calls {
+		if workflowMessagesContain(call.messages, "arrived between decision and repair") {
+			t.Fatalf("provider call %d reread live session instead of frozen snapshot", index)
+		}
+		if call.toolCount != 0 {
+			t.Fatalf("provider call %d tool definitions = %d, want 0", index, call.toolCount)
+		}
+		if cacheControl := workflowFrozenCacheControl(call.messages); cacheControl != "ephemeral" {
+			t.Fatalf("provider call %d frozen cache control = %q, want ephemeral: %#v", index, cacheControl, call.messages)
+		}
+	}
+	if !workflowMessagesContain(agent.Sessions.GetHistory(canonicalKey), "arrived between decision and repair") {
+		t.Fatal("legitimate append between decision and repair was lost")
+	}
+}
+
+func TestWorkflowAgentRunnerReadOnlyManagedChildrenReuseFrozenSnapshot(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{
+		workflowManagedTestFindingsJSON([]string{"a"}),
+		workflowManagedTestFindingsJSON([]string{"b"}),
+	}}
+	loop, agent, canonicalKey, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	provider.afterCall = func(index int) {
+		if index == 0 {
+			agent.Sessions.AddMessage(canonicalKey, "user", "arrived between managed children")
+		}
+	}
+
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(
+		context.Background(),
+		workflows.AgentRequest{
+			AgentID: "main",
+			Session: canonicalKey,
+			History: "read_only",
+			Tools:   workflows.AgentToolsNone,
+			Prompt:  "review the assigned scope",
+			Managed: map[string]any{
+				"mode":                  "auto",
+				"max_items_per_chunk":   1,
+				"max_parallel_children": 1,
+				"calibration": map[string]any{
+					"enabled": false,
+				},
+			},
+			Scope: []any{
+				map[string]any{"id": "a"},
+				map[string]any{"id": "b"},
+			},
+			Output: workflowManagedTestOutputContract(),
+		},
+	)
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if revision, _ := outputs["history_revision"].(string); !strings.HasPrefix(revision, "sha256:") {
+		t.Fatalf("history_revision = %#v, want frozen revision", outputs["history_revision"])
+	}
+	if outputs["session"] != canonicalKey {
+		t.Fatalf("session = %#v, want canonical %q", outputs["session"], canonicalKey)
+	}
+	calls := provider.snapshotCalls()
+	if len(calls) != 2 {
+		t.Fatalf("provider calls = %d, want two managed children", len(calls))
+	}
+	for index, call := range calls {
+		if call.toolCount != 0 {
+			t.Fatalf("managed call %d tool definitions = %d, want 0", index, call.toolCount)
+		}
+		if !workflowMessagesContain(call.messages, "existing problem context") {
+			t.Fatalf("managed call %d omitted frozen history", index)
+		}
+		if workflowMessagesContain(call.messages, "arrived between managed children") {
+			t.Fatalf("managed call %d reread live history", index)
+		}
+	}
+	if !workflowMessagesContain(agent.Sessions.GetHistory(canonicalKey), "arrived between managed children") {
+		t.Fatal("append between managed children was lost")
+	}
+}
+
+func TestWorkflowAgentRunnerReadOnlyPropagatesCancellationWithoutWrites(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{
+		responses: []string{"unexpected"},
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	loop, agent, canonicalKey, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	reader := agent.Sessions.(session.SnapshotReader)
+	before, found, err := reader.ReadSessionSnapshot(context.Background(), canonicalKey)
+	if err != nil || !found {
+		t.Fatalf("ReadSessionSnapshot() = (%#v, %v, %v)", before, found, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, runErr := (&workflowAgentRunner{loop: loop}).RunAgent(ctx, workflows.AgentRequest{
+			AgentID: "main",
+			Session: canonicalKey,
+			History: "read_only",
+			Tools:   workflows.AgentToolsNone,
+			Prompt:  "decide",
+		})
+		errCh <- runErr
+	}()
+	<-provider.started
+	cancel()
+	if runErr := <-errCh; !errors.Is(runErr, context.Canceled) {
+		t.Fatalf("RunAgent() error = %v, want context.Canceled", runErr)
+	}
+	after, found, err := reader.ReadSessionSnapshot(context.Background(), canonicalKey)
+	if err != nil || !found {
+		t.Fatalf("ReadSessionSnapshot(after) = (%#v, %v, %v)", after, found, err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("canceled decision mutated source session\nbefore: %#v\nafter: %#v", before, after)
+	}
+}
+
+func TestWorkflowSessionSnapshotRevisionIncludesProviderVisibleInternalFields(t *testing.T) {
+	base := session.SessionSnapshot{
+		Key: "agent:main:direct:revision",
+		History: []providers.Message{{
+			Role:         "assistant",
+			Content:      "prior call",
+			PromptLayer:  "history",
+			PromptSlot:   "conversation",
+			PromptSource: "session",
+			SystemParts: []providers.ContentBlock{{
+				Type:         "text",
+				Text:         "policy",
+				PromptLayer:  "policy",
+				PromptSlot:   "repo",
+				PromptSource: "workspace",
+			}},
+			ToolCalls: []providers.ToolCall{{
+				ID:               "call-1",
+				Name:             "inspect-a",
+				Arguments:        map[string]any{"path": "a.go"},
+				ThoughtSignature: "signature-a",
+				Function: &providers.FunctionCall{
+					Name:      "same-json-function",
+					Arguments: `{}`,
+				},
+			}},
+		}},
+	}
+	first, err := workflowSessionSnapshotRevision(base)
+	if err != nil {
+		t.Fatalf("workflowSessionSnapshotRevision(base) error = %v", err)
+	}
+
+	changed := base
+	changed.History = session.CloneMessages(base.History)
+	changed.History[0].ToolCalls[0].Name = "inspect-b"
+	changed.History[0].ToolCalls[0].Arguments["path"] = "b.go"
+	changed.History[0].ToolCalls[0].ThoughtSignature = "signature-b"
+	changed.History[0].PromptSource = "different-session-source"
+	changed.History[0].SystemParts[0].PromptSource = "different-policy-source"
+	second, err := workflowSessionSnapshotRevision(changed)
+	if err != nil {
+		t.Fatalf("workflowSessionSnapshotRevision(changed) error = %v", err)
+	}
+	if first == second {
+		t.Fatalf("provider-visible internal field changes produced identical revision %q", first)
+	}
+
+	cyclic := map[string]any{}
+	cyclic["self"] = cyclic
+	changed.History[0].ToolCalls[0].Arguments = cyclic
+	if revision, err := workflowSessionSnapshotRevision(changed); err == nil || revision != "" {
+		t.Fatalf("cyclic snapshot revision = (%q, %v), want serialization failure", revision, err)
 	}
 }
 
@@ -1901,6 +2328,182 @@ type workflowToolsCaptureProvider struct {
 	mu         sync.Mutex
 	toolCounts []int
 	responses  []string
+}
+
+type workflowReadOnlyProviderCall struct {
+	messages       []providers.Message
+	toolCount      int
+	promptCacheKey string
+}
+
+type workflowReadOnlyCaptureProvider struct {
+	mu                sync.Mutex
+	responses         []string
+	calls             []workflowReadOnlyProviderCall
+	toolCall          bool
+	started           chan struct{}
+	release           chan struct{}
+	startOnce         sync.Once
+	afterCall         func(int)
+	mutateNestedInput bool
+}
+
+func (p *workflowReadOnlyCaptureProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	_ string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	callIndex := len(p.calls)
+	cacheKey, _ := opts["prompt_cache_key"].(string)
+	p.calls = append(p.calls, workflowReadOnlyProviderCall{
+		messages:       session.CloneMessages(messages),
+		toolCount:      len(tools),
+		promptCacheKey: cacheKey,
+	})
+	response := "decision"
+	if callIndex < len(p.responses) {
+		response = p.responses[callIndex]
+	}
+	toolCall := p.toolCall
+	started := p.started
+	release := p.release
+	afterCall := p.afterCall
+	mutateNestedInput := p.mutateNestedInput
+	p.mu.Unlock()
+	if mutateNestedInput {
+		for messageIndex := range messages {
+			for blockIndex := range messages[messageIndex].SystemParts {
+				block := &messages[messageIndex].SystemParts[blockIndex]
+				if block.CacheControl != nil {
+					block.CacheControl.Type = "provider-mutated"
+				}
+			}
+			for callIndex := range messages[messageIndex].ToolCalls {
+				nested, _ := messages[messageIndex].ToolCalls[callIndex].Arguments["nested"].(map[string]any)
+				if nested != nil {
+					nested["marker"] = "provider-mutated"
+				}
+			}
+		}
+	}
+	if afterCall != nil {
+		afterCall(callIndex)
+	}
+
+	if started != nil {
+		p.startOnce.Do(func() { close(started) })
+	}
+	if release != nil {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	result := &providers.LLMResponse{Content: response}
+	if toolCall {
+		result.ToolCalls = []providers.ToolCall{{
+			ID:   "forbidden",
+			Type: "function",
+			Function: &providers.FunctionCall{
+				Name:      "sentinel",
+				Arguments: `{}`,
+			},
+		}}
+	}
+	return result, nil
+}
+
+func (p *workflowReadOnlyCaptureProvider) snapshotCalls() []workflowReadOnlyProviderCall {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	result := make([]workflowReadOnlyProviderCall, len(p.calls))
+	for i, call := range p.calls {
+		result[i] = call
+		result[i].messages = session.CloneMessages(call.messages)
+	}
+	return result
+}
+
+func (p *workflowReadOnlyCaptureProvider) setResponses(responses []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.responses = append([]string(nil), responses...)
+	p.calls = nil
+}
+
+func newWorkflowReadOnlyTestLoop(
+	t *testing.T,
+	provider *workflowReadOnlyCaptureProvider,
+) (*AgentLoop, *AgentInstance, string, string) {
+	t.Helper()
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}}
+	messageBus := bus.NewMessageBus()
+	loop := newTestAgentLoopWithStrictModels(cfg, messageBus, provider)
+	t.Cleanup(func() {
+		loop.Close()
+		messageBus.Close()
+	})
+	loop.providerFactory = func(modelConfig *config.ModelConfig) (providers.LLMProvider, string, error) {
+		model := "workflow-read-only-test"
+		if modelConfig != nil && strings.TrimSpace(modelConfig.Model) != "" {
+			model = modelConfig.Model
+		}
+		return provider, model, nil
+	}
+	agent := loop.GetRegistry().GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("default agent is nil")
+	}
+	canonicalKey := session.BuildOpaqueSessionKey("agent:main:web:direct:review")
+	alias := "agent:main:web:direct:review"
+	metadata, ok := agent.Sessions.(session.MetadataAwareSessionStore)
+	if !ok {
+		t.Fatalf("session store %T is not metadata aware", agent.Sessions)
+	}
+	metadata.EnsureSessionMetadata(canonicalKey, &session.SessionScope{
+		Version: session.ScopeVersionV1,
+		AgentID: "main",
+		Channel: "web",
+		Dimensions: []string{
+			"chat",
+		},
+		Values: map[string]string{"chat": "review"},
+	}, []string{alias})
+	agent.Sessions.AddMessage(canonicalKey, "user", "existing problem context")
+	agent.Sessions.AddMessage(canonicalKey, "assistant", "existing analysis")
+	agent.Sessions.SetSummary(canonicalKey, "existing decision summary")
+	return loop, agent, canonicalKey, alias
+}
+
+func workflowMessagesContain(messages []providers.Message, substring string) bool {
+	for _, message := range messages {
+		if strings.Contains(message.Content, substring) {
+			return true
+		}
+		for _, block := range message.SystemParts {
+			if strings.Contains(block.Text, substring) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func workflowFrozenCacheControl(messages []providers.Message) string {
+	for _, message := range messages {
+		for _, block := range message.SystemParts {
+			if block.Text == "frozen nested block" && block.CacheControl != nil {
+				return block.CacheControl.Type
+			}
+		}
+	}
+	return ""
 }
 
 func (p *workflowToolsCaptureProvider) Chat(

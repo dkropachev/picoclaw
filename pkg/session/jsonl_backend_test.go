@@ -1,7 +1,11 @@
 package session_test
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
@@ -13,8 +17,10 @@ import (
 
 // Compile-time interface satisfaction checks.
 var (
-	_ session.SessionStore = (*session.SessionManager)(nil)
-	_ session.SessionStore = (*session.JSONLBackend)(nil)
+	_ session.SessionStore   = (*session.SessionManager)(nil)
+	_ session.SessionStore   = (*session.JSONLBackend)(nil)
+	_ session.SnapshotReader = (*session.SessionManager)(nil)
+	_ session.SnapshotReader = (*session.JSONLBackend)(nil)
 )
 
 func newBackend(t *testing.T) *session.JSONLBackend {
@@ -320,4 +326,134 @@ func TestJSONLBackend_EnsureSessionMetadata_DoesNotOverwriteNonEmptyCanonicalHis
 	if len(history) != 1 || history[0].Content != "current canonical history" {
 		t.Fatalf("canonical history overwritten: %+v", history)
 	}
+}
+
+func TestJSONLBackendReadSessionSnapshot_ResolvesAliasAndClones(t *testing.T) {
+	b := newBackend(t)
+	canonicalKey := "canonical"
+	alias := "agent:main:direct:legacy"
+	b.EnsureSessionMetadata(canonicalKey, &session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "main",
+		Channel:    "github",
+		Dimensions: []string{"repo"},
+		Values:     map[string]string{"repo": "org/repo"},
+	}, []string{alias})
+	b.AddFullMessage(alias, providers.Message{
+		Role:        "user",
+		Content:     "review this",
+		Attachments: []providers.Attachment{{Filename: "finding.json"}},
+		SystemParts: []providers.ContentBlock{{
+			Type:         "text",
+			Text:         "policy",
+			CacheControl: &providers.CacheControl{Type: "ephemeral"},
+		}},
+		ToolCalls: []providers.ToolCall{{
+			ID:       "call-1",
+			Function: &providers.FunctionCall{Name: "inspect", Arguments: `{}`},
+		}},
+	})
+	b.SetSummary(alias, "existing work")
+
+	snapshot, found, err := b.ReadSessionSnapshot(context.Background(), alias)
+	if err != nil || !found {
+		t.Fatalf("ReadSessionSnapshot() = (found=%v, err=%v)", found, err)
+	}
+	if snapshot.Key != canonicalKey || snapshot.Summary != "existing work" {
+		t.Fatalf("snapshot identity/summary = (%q, %q)", snapshot.Key, snapshot.Summary)
+	}
+	if snapshot.Scope == nil || snapshot.Scope.Values["repo"] != "org/repo" {
+		t.Fatalf("snapshot scope = %+v", snapshot.Scope)
+	}
+	if len(snapshot.History) != 1 || snapshot.History[0].Content != "review this" {
+		t.Fatalf("snapshot history = %+v", snapshot.History)
+	}
+
+	snapshot.Scope.Dimensions[0] = "mutated"
+	snapshot.Scope.Values["repo"] = "mutated"
+	snapshot.History[0].Attachments[0].Filename = "mutated"
+	snapshot.History[0].SystemParts[0].CacheControl.Type = "mutated"
+	snapshot.History[0].ToolCalls[0].Function.Name = "mutated"
+
+	again, found, err := b.ReadSessionSnapshot(context.Background(), alias)
+	if err != nil || !found {
+		t.Fatalf("second ReadSessionSnapshot() = (found=%v, err=%v)", found, err)
+	}
+	if again.Scope.Dimensions[0] != "repo" || again.Scope.Values["repo"] != "org/repo" {
+		t.Fatalf("stored scope changed through snapshot: %+v", again.Scope)
+	}
+	message := again.History[0]
+	if message.Attachments[0].Filename != "finding.json" ||
+		message.SystemParts[0].CacheControl.Type != "ephemeral" ||
+		message.ToolCalls[0].Function.Name != "inspect" {
+		t.Fatalf("stored history changed through snapshot: %+v", message)
+	}
+}
+
+func TestJSONLBackendReadSessionSnapshot_MissingBlankCanceledNoCreate(t *testing.T) {
+	b := newBackend(t)
+	for _, key := range []string{"", "  ", "missing"} {
+		if _, found, err := b.ReadSessionSnapshot(context.Background(), key); err != nil || found {
+			t.Fatalf("ReadSessionSnapshot(%q) = (found=%v, err=%v), want miss", key, found, err)
+		}
+	}
+	if sessions := b.ListSessions(); len(sessions) != 0 {
+		t.Fatalf("strict reads created sessions: %v", sessions)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, found, err := b.ReadSessionSnapshot(ctx, "missing"); err != context.Canceled || found {
+		t.Fatalf("canceled read = (found=%v, err=%v), want context.Canceled", found, err)
+	}
+}
+
+func TestJSONLBackendReadSessionSnapshot_PropagatesCorruption(t *testing.T) {
+	t.Run("metadata", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := memory.NewJSONLStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := session.NewJSONLBackend(store)
+		b.AddMessage("corrupt-meta", "user", "hello")
+		writeErr := os.WriteFile(filepath.Join(dir, "corrupt-meta.meta.json"), []byte(`{"key":`), 0o644)
+		if writeErr != nil {
+			t.Fatal(writeErr)
+		}
+
+		_, found, err := b.ReadSessionSnapshot(context.Background(), "corrupt-meta")
+		if err == nil || found || !strings.Contains(err.Error(), "decode meta") {
+			t.Fatalf("corrupt metadata read = (found=%v, err=%v)", found, err)
+		}
+	})
+
+	t.Run("history", func(t *testing.T) {
+		dir := t.TempDir()
+		store, err := memory.NewJSONLStore(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := session.NewJSONLBackend(store)
+		b.AddMessage("corrupt-history", "user", "hello")
+		path := filepath.Join(dir, "corrupt-history.jsonl")
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, writeErr := file.WriteString("not-json\n")
+		if writeErr != nil {
+			file.Close()
+			t.Fatal(writeErr)
+		}
+		closeErr := file.Close()
+		if closeErr != nil {
+			t.Fatal(closeErr)
+		}
+
+		_, found, err := b.ReadSessionSnapshot(context.Background(), "corrupt-history")
+		if err == nil || found || !strings.Contains(err.Error(), "decode jsonl line") {
+			t.Fatalf("corrupt history read = (found=%v, err=%v)", found, err)
+		}
+	})
 }

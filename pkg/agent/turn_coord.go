@@ -14,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/modelrouter"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
 
 func (al *AgentLoop) runTurn(
@@ -573,11 +574,40 @@ func (al *AgentLoop) resolveContextManager() ContextManager {
 	return cm
 }
 
+type sideQuestionContextSnapshot struct {
+	history []providers.Message
+	summary string
+}
+
+type sideQuestionExecutionOptions struct {
+	contextSnapshot    *sideQuestionContextSnapshot
+	promptCacheKey     string
+	disablePromptCache bool
+	skipHooks          bool
+	rejectToolCalls    bool
+}
+
 func (al *AgentLoop) askSideQuestion(
 	ctx context.Context,
 	agent *AgentInstance,
 	opts *processOptions,
 	question string,
+) (string, error) {
+	return al.askSideQuestionWithOptions(
+		ctx,
+		agent,
+		opts,
+		question,
+		sideQuestionExecutionOptions{},
+	)
+}
+
+func (al *AgentLoop) askSideQuestionWithOptions(
+	ctx context.Context,
+	agent *AgentInstance,
+	opts *processOptions,
+	question string,
+	execution sideQuestionExecutionOptions,
 ) (string, error) {
 	if agent == nil {
 		return "", fmt.Errorf("askSideQuestion: no agent available for /btw")
@@ -613,7 +643,10 @@ func (al *AgentLoop) askSideQuestion(
 	// Build messages with context but WITHOUT adding to session history
 	var history []providers.Message
 	var summary string
-	if opts != nil && !opts.NoHistory {
+	if execution.contextSnapshot != nil {
+		history = session.CloneMessages(execution.contextSnapshot.history)
+		summary = execution.contextSnapshot.summary
+	} else if opts != nil && !opts.NoHistory {
 		if resp, err := al.contextManager.Assemble(ctx, &AssembleRequest{
 			SessionKey: opts.SessionKey,
 			Budget:     agent.ContextWindow,
@@ -725,9 +758,15 @@ func (al *AgentLoop) askSideQuestion(
 	}
 
 	llmOpts := map[string]any{
-		"max_tokens":       agent.MaxTokens,
-		"temperature":      agent.Temperature,
-		"prompt_cache_key": agent.ID + ":btw",
+		"max_tokens":  agent.MaxTokens,
+		"temperature": agent.Temperature,
+	}
+	if !execution.disablePromptCache {
+		cacheKey := strings.TrimSpace(execution.promptCacheKey)
+		if cacheKey == "" {
+			cacheKey = agent.ID + ":btw"
+		}
+		llmOpts["prompt_cache_key"] = cacheKey
 	}
 
 	hookModelChanged := false
@@ -765,7 +804,11 @@ func (al *AgentLoop) askSideQuestion(
 				applyReasoningEffortOption(callOpts, modelCfg)
 			}
 		}
-		return provider.Chat(ctx, callMessages, nil, model, callOpts)
+		providerMessages := callMessages
+		if execution.contextSnapshot != nil {
+			providerMessages = session.CloneMessages(callMessages)
+		}
+		return provider.Chat(ctx, providerMessages, nil, model, callOpts)
 	}
 
 	turnCtx := newTurnContext(nil, nil, nil)
@@ -777,7 +820,7 @@ func (al *AgentLoop) askSideQuestion(
 		)
 	}
 	llmModel := activeModel
-	if al.hooks != nil {
+	if al.hooks != nil && !execution.skipHooks {
 		llmReq, decision := al.hooks.BeforeLLM(ctx, &LLMHookRequest{
 			Meta: HookMeta{
 				Source:      "askSideQuestion",
@@ -923,7 +966,7 @@ func (al *AgentLoop) askSideQuestion(
 	}
 
 	// Apply after_llm hooks
-	if al.hooks != nil {
+	if al.hooks != nil && !execution.skipHooks {
 		llmResp, decision := al.hooks.AfterLLM(ctx, &LLMHookResponse{
 			Meta: HookMeta{
 				Source:      "askSideQuestion",
@@ -951,6 +994,9 @@ func (al *AgentLoop) askSideQuestion(
 		resp.Reasoning = ""
 		resp.ReasoningContent = ""
 		resp.ReasoningDetails = nil
+	}
+	if execution.rejectToolCalls && len(resp.ToolCalls) > 0 {
+		return "", fmt.Errorf("read-only agent decision returned tool calls")
 	}
 
 	return sideQuestionResponseContent(resp), nil

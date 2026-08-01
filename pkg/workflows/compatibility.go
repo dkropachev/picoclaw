@@ -22,9 +22,9 @@ const (
 	WorkflowValidationStatusPendingRevalidation = "pending_revalidation"
 	WorkflowValidationStatusNeedsReview         = "needs_review"
 
-	WorkflowEngineVersion    = "8"
-	WorkflowSchemaVersion    = "3"
-	ValidatorFingerprint     = "picoclaw-workflow-validator-v4"
+	WorkflowEngineVersion    = "9"
+	WorkflowSchemaVersion    = "4"
+	ValidatorFingerprint     = "picoclaw-workflow-validator-v5"
 	compatibilityManifestDir = "workflow_validations"
 	compatibilityManifest    = "manifest.json"
 )
