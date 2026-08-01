@@ -240,7 +240,10 @@ export function ChatPage({
     handleSetAccount,
     handleSetModelAlias,
   } = useChatModels({ isConnected: isGatewayRunning })
-  const hasDefaultSelection = Boolean(defaultAccountRef && defaultModelName)
+  const hasDefaultSelection = Boolean(
+    (defaultAccountRef && defaultModelName) ||
+    (selectedAccountName && selectedModelAlias),
+  )
   const inputDisabledReason = resolveChatInputDisabledReason({
     hasDefaultSelection,
     hasSelectedModel: Boolean(selectedAccountName && selectedModelAlias),
@@ -514,7 +517,7 @@ export function ChatPage({
               ) : (
                 <ChatEmptyState
                   hasAvailableModels={hasAvailableModels}
-                  defaultModelName={defaultModelName}
+                  defaultModelName={selectedModelAlias || defaultModelName}
                   isConnected={isGatewayRunning}
                 />
               )}

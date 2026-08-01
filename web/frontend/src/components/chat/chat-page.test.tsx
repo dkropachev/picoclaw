@@ -260,4 +260,43 @@ describe("ChatPage thread context", () => {
 
     expect(screen.getByRole("textbox")).toBeEnabled()
   })
+
+  it("keeps chat enabled for a local chat-alias fallback when the persisted alias default is empty", () => {
+    vi.mocked(useChatModels).mockReturnValue({
+      defaultAccountRef: "router-1",
+      defaultModelName: "",
+      selectedAccountName: "router-1",
+      selectedModelAlias: "chat",
+      hasAvailableModels: true,
+      accountModels: [],
+      accountRouterModels: [
+        {
+          index: 0,
+          model_name: "router-1",
+          model: "",
+          api_key: "",
+          enabled: true,
+          available: true,
+          status: "available",
+          is_default: true,
+          is_virtual: true,
+          provider: "router",
+          router: { name: "router-1", enabled: true },
+        },
+      ],
+      aliasOptions: [{ name: "chat", model: "gpt-5.6-sol" }],
+      isSavingSelection: false,
+      handleSetAccount: vi.fn(),
+      handleSetModelAlias: vi.fn(),
+    })
+
+    render(
+      <Provider>
+        <ChatPage />
+      </Provider>,
+    )
+
+    expect(screen.getByRole("textbox")).toBeEnabled()
+    expect(screen.getByText("Model selector")).toBeInTheDocument()
+  })
 })
