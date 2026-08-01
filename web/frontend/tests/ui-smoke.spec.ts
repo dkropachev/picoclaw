@@ -3747,6 +3747,15 @@ test("models page exposes editable model aliases without global runtime selectio
   await expect(
     page.getByRole("option", { name: "Disabled for this account" }),
   ).toBeVisible()
+  await expect(
+    page.getByRole("option", { name: /^gpt-4o-mini All accounts/ }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("option", { name: /^gpt-5\.4 All accounts/ }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("option", { name: /^gpt-4o All accounts/ }),
+  ).toHaveCount(0)
   await page.keyboard.press("Escape")
   expect(errors).toEqual([])
 })

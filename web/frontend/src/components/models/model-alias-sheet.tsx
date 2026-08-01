@@ -501,14 +501,19 @@ export function ModelAliasDialog({
                   const selectedValue = override.disabled
                     ? DISABLED_MODEL_VALUE
                     : override.model
+                  const accountAvailability = availability.filter((item) =>
+                    item.accountRefs.includes(override.accountRef),
+                  )
                   const rowOptions =
                     override.model &&
-                    !availability.some((item) => item.id === override.model)
+                    !accountAvailability.some(
+                      (item) => item.id === override.model,
+                    )
                       ? [
-                          ...availability,
+                          ...accountAvailability,
                           { id: override.model, accountRefs: [] },
                         ].sort((a, b) => a.id.localeCompare(b.id))
-                      : availability
+                      : accountAvailability
                   return (
                     <div
                       key={`${override.accountRef}-${index}`}
@@ -519,7 +524,13 @@ export function ModelAliasDialog({
                         onValueChange={(accountRef) =>
                           setOverrides((current) =>
                             current.map((row, rowIndex) =>
-                              rowIndex === index ? { ...row, accountRef } : row,
+                              rowIndex === index
+                                ? {
+                                    ...row,
+                                    accountRef,
+                                    model: row.disabled ? row.model : "",
+                                  }
+                                : row,
                             ),
                           )
                         }
@@ -554,7 +565,7 @@ export function ModelAliasDialog({
                       <ModelSelect
                         value={selectedValue}
                         options={rowOptions}
-                        allAccountRefs={concreteAccountRefs}
+                        allAccountRefs={[override.accountRef]}
                         placeholder={t(
                           "models.alias.selectOverride",
                           "Select model or disable",
