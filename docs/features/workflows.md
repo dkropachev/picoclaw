@@ -76,6 +76,12 @@ An agent step can instead declare the exact `session: ephemeral`,
 decision over only its supplied prompt, context, and scope. That profile uses a
 request-local identity without creating a session or account-router affinity,
 and exposes only a fixed ephemeral marker after the call finishes.
+The workflow package can compile an ordered user-attention gate composition
+into those existing primitives. Working-context AI, isolated-context AI,
+deterministic, and zero gates share one bounded contract; multiple gates for the
+same decision use collect-all semantics in configured order inside one inline
+root, so a durable human response resumes at the following gate without
+replaying earlier steps.
 
 ## Reconstruction Notes
 
@@ -111,6 +117,12 @@ and exposes only a fixed ephemeral marker after the call finishes.
   consumes no active-run slot; resumption uses its persisted admitted snapshot
   rather than the current workflow file, and secrets are supplied again rather
   than persisted.
+- Gate composition is a compiler over ordinary `agent/*`, `if`, and
+  `human/task` steps, not a second execution engine. It accepts an already
+  resolved effective `[]GateSpec`; global-policy and repository-override
+  resolution is a later consumer concern. A composition containing attention
+  steps must remain one programmatically launched manual root until reusable
+  and external-event human-suspension propagation is implemented.
 
 ## Requirements
 
@@ -160,8 +172,8 @@ and exposes only a fixed ephemeral marker after the call finishes.
 | `FR-WORKFLOW-041` | MUST | A validated root workflow without a durable-external-event trigger or reusable-workflow edge in its admitted closure may use `human/task` with a bounded nonblank title, questions, optional input hash, and a recursively bounded response schema restricted to the implemented `type`, `enum`, `required`, `properties`, `additionalProperties`, and `items` subset. Execution atomically publishes a browser-hidden exact workflow/checkpoint snapshot, completed job/step outputs including exact JSON numbers, cursor, browser-safe task, and run/job/step `waiting` state in one durable replacement; the task is not claimable before that replacement. Waiting returns without retaining a goroutine or active-run slot and does not apply the ordinary execution timeout across the human delay. `Executor.ResumeHumanTask` and the authenticated task HTTP API first validate the persisted snapshot digest and exact cursor/task/step correspondence, then atomically fence enabled configuration, concurrency admission, run/task identity, task revision, input hash, schema-valid response, and a bounded idempotency ID. Exactly one caller changes the task to answered and continues the stored snapshot in a bounded context independent of the requesting connection; an identical replay observes the existing run, while stale or conflicting responses do not execute. Resume treats the cursor job as already admitted, rehydrates exact completed outputs, skips completed effects, accepts a new secrets map without copying that direct request field into durable state or HTTP responses, and may atomically publish a later task. A claimed continuation heartbeats a monotonic token-fenced lease and exposes `continuing` plus `retry_at`; renewal cannot revive an expired claim, continuation writes reject an expired or replaced token, and lease loss cancels the old context before another target. After a crashed claim lease expires it exposes `recovery_required`, allowing the exact response and secrets to be re-supplied without repeating persisted effects. Task or run cancellation atomically marks the waiting task and run canceled. Synchronous and asynchronous draft tests retain a fenced `waiting` test snapshot, block draft mutation, reconcile every later wait/resume/cancel, and repair terminal state from the durable run after restart. Waiting runs are nonterminal and are not retention-pruned; task and run browser projections omit the persisted workflow snapshot, cursor, direct resume-secret fields, and internal claim token. `human/task` secret expressions, event-triggered waits, and admitted closures containing both human suspension and reusable calls fail before execution until their acknowledgement and parent/child propagation contracts are implemented. | Human involvement must survive restarts, definition/config edits, request disconnects, and claim crashes without repeating prior effects, losing exact values, directly persisting the resume secrets map, acknowledging an external event prematurely, or allowing two responses to continue the same checkpoint. |
 
 | `FR-WORKFLOW-042` | MUST | An `agent/<id>` step declaring `history: read_only` is an exact existing-session decision profile, not a write-then-restore turn. Validation requires a syntactically canonical agent ID, an explicit `tools: none`, and string-valued history, session, cache, and tools modes; the workflow compatibility engine/schema/validator identity changes so definitions validated under the prior permissive semantics require revalidation. Runtime requires that exact configured agent and a nonblank bounded UTF-8 session key, uses the session backend's strict snapshot capability, resolves an alias once to its canonical key, and rejects missing sessions, unavailable or noncanonical owner metadata, and owner/agent mismatch before calling a provider. One coherent deep-cloned history/summary/scope snapshot is reused by the initial request, structured-output repairs, managed children, calibration, and fallback calls. Those calls initialize neither hooks nor MCP, expose and execute no tools, reject tool-call responses, do not create/reserve/register/append/restore/compact/summarize a session, and cannot overwrite a concurrent interactive append. Cancellation propagates normally. Successful outputs contain the canonical `session` and an opaque `history_revision` derived from the exact frozen snapshot while retaining ordinary structured and managed outputs. No missing/default workflow session is synthesized for this profile. | A workflow-native AI gate needs a reviewable ordinary agent step that can consult the active PR chat exactly once without polluting it, gaining action authority, racing live work, or silently evaluating the wrong agent's conversation. |
-
 | `FR-WORKFLOW-043` | MUST | A direct `agent/<id>` step `with.session` may use the exact literal `ephemeral` only when `history`, `cache`, and `tools` are explicit string-valued `none`; generic job/step `context.session` remains limited to inherit or durable `key:` semantics, and a durable key whose resolved value is `ephemeral` remains an ordinary session. Validation and runtime both enforce the exact lowercase companion modes before provider execution, the executor conveys ephemeral intent separately from the resolved session string and clears inherited durable session authority, and the workflow compatibility engine/schema/validator identity changes. Runtime creates one cryptographically random request-local identity, uses the isolated side-question provider path for the initial call plus every structured repair, managed child, calibration, and fallback call, disables session-affine account routing, and omits inherited delivery routing context. It loads or writes no history, provider prompt-cache key/directive, session metadata, session catalog entry, summary, active turn, hook, MCP runtime, tool definition, or tool result; every provider attempt receives detached messages/options, a provider-authored tool call fails closed, and cancellation propagates. The internal identity is absent from session/account-router persistence, logs, events, and outputs. Successful ordinary and managed outputs retain the fixed `session: ephemeral` and `session_mode: ephemeral` audit markers, `history: none`, `cache: none`, an empty cache key, normal structured/managed diagnostics, and no history revision. | An isolated AI gate over supplied code, findings, or other bounded context needs ordinary workflow composition without inventing durable sessions, colliding concurrent runs, leaking a temporary routing key, or losing structured and managed execution behavior. |
+| `FR-WORKFLOW-044` | MUST | `CompileGateWorkflow` accepts a bounded, ordered, already-resolved effective `[]GateSpec` with unique safe gate IDs plus one acyclic JSON subject bounded by encoded bytes, nesting depth, and node count; resolving global policies and repository-local overrides is deliberately outside this compiler. It returns either an explicit no-op for an empty/all-zero composition or a validated re-runnable programmatic manual root with one inline job. `ai_working_context` lowers to the exact canonical agent ID with literal `session: inherit`, `history: read_only`, `cache: session`, and `tools: none`, marks both that its caller must supply the existing owned session and which agent must own it, and conditionally suspends only after a strict structured `{ask_user, reason, questions}` decision. Repeated working-context gates must use that same agent because one root run inherits one session. `ai_isolated_context` applies the same strict decision contract to the supplied subject with the exact `session: ephemeral`, `history: none`, `cache: none`, and `tools: none` quartet and no delivery context. The compiled workflow contains no per-launch or durable session identity, so the same compilation can be run repeatedly or concurrently and each isolated step receives ordinary request-local ephemeral isolation. `deterministic` lowers a bounded valid-UTF-8 instance of the existing simple workflow expression grammar, restricted to paths that exist under the compiler-owned `inputs` root, directly into a conditional human task. `zero` emits no step and is only the ordered composition identity: it neither removes nor overrides another gate, and an empty/all-zero result does not normalize the unused subject. Distinct gates for the same decision may mix all four kinds; nonzero gates append in declared collect-all order, a pass never short-circuits later gates, and every gate that requests attention receives its own durable task. A waiting task uses the existing exact checkpoint so resume continues with the next gate without rerunning completed decisions. Criteria, titles, optional AI question guidance, deterministic questions, and subject are JSON-normalized and passed through whole-value input expressions so literal expression syntax in untrusted content is not evaluated a second time. Invalid kinds, IDs, syntactically invalid agent IDs, fields, expressions, missing deterministic paths, cyclic/non-JSON values, and count/text/payload/depth/node limits fail before a workflow run. Compiled gates contain no event trigger, `workflow_call`, or reusable edge and use only already-versioned workflow primitives, so adding the compiler does not change compatibility versions. | Global and repository policies need one safe compositional representation for AI consultation, isolated review, deterministic attention, no attention, and ordered mixtures without a parallel gate runtime or weakened human-suspension guarantees. |
 
 ## Data And State Model
 
@@ -219,6 +231,15 @@ the durable step output contains the fixed `session` and `session_mode` value
 `ephemeral`, an empty prompt-cache key, and no `history_revision`. It creates no
 session-store record, session metadata, catalog entry, or account-router
 session-affinity entry.
+
+A gate compilation is a reusable in-memory value containing a validated inline
+workflow, detached JSON-like inputs under `_gates` and `gate_subject`, the
+configured gate ID order, a no-op marker, whether an existing session is
+required, and the exact agent that must own it. It contains no per-launch or
+durable isolated-session identity: the exact ephemeral agent profile creates
+request-local isolation whenever the same compiled workflow is run. Once
+launched, only the ordinary workflow run, step outputs, checkpoint, and human
+tasks persist; there is no separate gate store or gate execution state.
 
 A run that can suspend additionally stores a private `execution`
 record containing the exact admitted parsed definition, its digest, the next
@@ -295,6 +316,7 @@ state until it explicitly hands rendered YAML to the existing draft lifecycle.
 | File | `workspace/workflows/*.yml`, `workspace/workflows/*.yaml` | GitHub-style workflow definitions with `on`, `jobs`, `needs`, `uses`, `with`, `if`, `outputs`, `schedule`, `runtime_event`, `event`, `workflow_call`, the exact `human/task` step primitive, the exact existing-session agent decision profile, and the agent-only ephemeral-session profile. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016`, `FR-WORKFLOW-023` through `FR-WORKFLOW-031`, `FR-WORKFLOW-037`, `FR-WORKFLOW-041` through `FR-WORKFLOW-043` |
 | File | `workspace/workflow_runs/<run_id>/run.json`, `events.jsonl` | Durable run snapshots and lifecycle events, including independent cancellation/completion fields, retry/parent relationships, optional trusted payload-free origin, and private exact workflow/cursor plus human-task state for waiting runs. | `FR-WORKFLOW-009`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-033`, `FR-WORKFLOW-041` |
 | Go API | `pkg/workflows.Parse`, `Resolver.ResolveLocal`, `Validate`, `InspectWorkflowTriggers`, `RenderWorkflowTrigger`, `InspectWorkflowJobs`, `RenderWorkflowJobs`, `InspectWorkflowDefinitionBytes`, `InspectLocalWorkflowDefinition`, `InspectBuiltInWorkflowTemplate`, `LoadRunnableLocalSnapshot`, `WithRunnableWorkflowSnapshots`, `WithFencedRunnableWorkflowSnapshots`, `WithGuardedFencedRunnableWorkflowSnapshots`, `Executor.Run`, `Executor.RetryCaptured`, `Executor.ListHumanTasks`, `Executor.ResumeHumanTask`, `Executor.CancelHumanTask`, `WorkflowHumanTask`, `HumanTaskResumeRequest`, `AgentRequest.EphemeralSession`, `FileRunStore`, `RunOrigin`, `RunRequest.Origin`, `ProjectWorkflowRunForBrowserWithStore`, `ProjectEventBackedDraftRunsForBrowserWithStore`, `MatchChannelMessage`, `MatchCommandMessage`, `MatchRuntimeEvent`, `EvaluateEventTrigger`, `MatchEventTrigger`, `EventWorkflowRouter`, `EventWorkflowDispatcher`, `BuildRunGraph`, `ReloadLocal`, `ListWorkflowTemplates`, `InstallWorkflowTemplateWithCompatibility`, `CheckWorkflowDependencyClosure`, `ResolveWorkflowDependencyReadiness`, `PublishWorkflowDevelopmentFenced` | Parse GitHub-shaped YAML, normalize local reusable refs, reject unsafe refs, validate exact compatibility-stamped byte snapshots under ordered mutation guards, preserve ephemeral intent separately from resolved session keys, inspect and transactionally install local workflow templates, safely project exact published or immutable-template bytes into bounded fixed-code trigger/job/dependency/effect metadata, safely project and revision-fence all typed trigger families, and safely project or surgically revision-fence ordered jobs/actions without replacing unrelated YAML, inspect structural/runtime dependency readiness, carry one exact admitted config/root/reusable closure through durable run creation and execution, durably suspend/list/resume/cancel human tasks against the stored exact workflow, evaluate process-local and durable triggers, construct and propagate trusted payload-free external-event run origin, durably route/reconcile external-event runs, run/retry/cancel workflows, validate retained provenance ancestry for exact and batch browser projection, build run graphs, recover and atomically publish fenced development state, reload definitions, and persist run state through guarded internal roots. | `FR-WORKFLOW-001` through `FR-WORKFLOW-016`, `FR-WORKFLOW-018`, `FR-WORKFLOW-022` through `FR-WORKFLOW-031`, `FR-WORKFLOW-033` through `FR-WORKFLOW-035`, `FR-WORKFLOW-037`, `FR-WORKFLOW-041`, `FR-WORKFLOW-043` |
+| Go API | `GateKind`, `GateSpec`, `GateCompilation`, `CompileGateWorkflow` | Compile one already-resolved effective ordered gate composition into an explicit no-op or reusable inline workflow plus detached JSON-normalized inputs, and identify whether the caller must provide an exact existing session. | `FR-WORKFLOW-044` |
 | Config | `workflows.*`, `tools.workflow`, `agents.*`, `model_aliases[]`, `account_routers[]`, `model_routers[]` | Independent workflow enablement and limits plus the exact account-and-alias policy inherited by agent steps; workflow-only browser writes carry the form's exact base config revision. | `FR-WORKFLOW-009`, `FR-WORKFLOW-013`, `FR-WORKFLOW-028`, `FR-WORKFLOW-039` |
 | CLI | `picoclaw workflow install/list/compatibility/revalidate/validate/reload/run/cancel/retry/status/events/graph` | Install local workflow templates, including `code-review` and `github-issue-triage`, then manage definitions, compatibility stamps, and runs through the same workflow runtime and file run store used by agent tools. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-018`, `FR-WORKFLOW-022`, `FR-WORKFLOW-025` |
 | HTTP | `/api/workflows*`, `/api/workflows/runs*`, `/api/workflows/development*`, `/api/workflows/definitions/inspect`, `/api/workflows/templates/{name}/inspect`, `/api/workflows/settings`, `/api/workflows/dependencies/check`, `/api/workflows/compatibility`, `/api/workflows/revalidate` | List, validate, reload, run, cancel, retry, inspect, stream workflow events, read run graph data, list/install/restore templates, return a non-cacheable bounded structural inspection from one exact published ref or immutable built-in template, read and revision-fence workflow settings including the independent workflow-tool flag, inspect exact published or draft dependency readiness, fresh-gate every dashboard Run/Retry with an optional dependency-revision compare-and-swap held through durable creation, validate explicit cancellation reasons while preserving omitted-reason compatibility, reject non-object cancellation bodies, return safe lifecycle/store-validated-origin projections, manage the singleton development session, safely project and revision-fence all seven typed trigger families plus ordered jobs/actions, preview a captured event through the event runtime matcher, run configured-agent YAML revisions, review effects and test active drafts manually or with a server-resolved durable event after a run record is persisted, reject draft-changing development mutations while the current draft test is still running, execute configured agent/tool/MCP workflow steps synchronously or asynchronously without an error response followed by later run creation, revision-fence and transactionally publish exact drafts, and revalidate release compatibility. Run/Retry DTOs do not accept caller origin, and internal-state path or recovery conflicts fail closed before the requested workflow operation. | `FR-WORKFLOW-010`, `FR-WORKFLOW-012`, `FR-WORKFLOW-015`, `FR-WORKFLOW-017` through `FR-WORKFLOW-019`, `FR-WORKFLOW-026` through `FR-WORKFLOW-031`, `FR-WORKFLOW-033` through `FR-WORKFLOW-035`, `FR-WORKFLOW-037` |
@@ -610,6 +632,28 @@ state until it explicitly hands rendered YAML to the existing draft lifecycle.
     Cancellation marks both task and run terminal before emitting lifecycle
     events. Development snapshots treat both running and waiting tests as
     active and reconcile subsequent waits or terminal outcomes.
+27. To compile user-attention gates, accept the caller's already-resolved
+    effective ordered specs, then validate their bounds and safe unique IDs.
+    Policy inheritance and repository overrides are not resolved here. Treat
+    zero gates as identities that cannot remove another gate; if none remain,
+    return a no-op without normalizing or executing the unused subject.
+    Otherwise JSON-normalize and bound the subject and per-gate inputs, then
+    append ordinary steps to one manual root job in declaration collect-all
+    order. A passing gate does not short-circuit a later gate.
+    Working-context AI inherits the caller's run session and selects the exact
+    read-only decision profile. Isolated AI selects literal
+    `session: ephemeral`, `history: none`, `cache: none`, and `tools: none`, and
+    receives no delivery context. Both require a strict boolean structured
+    decision before their conditional human task. Because ephemeral identity is
+    request-local, the same compiled workflow may be run repeatedly or
+    concurrently without recompilation or an isolated durable session key.
+    Deterministic gates validate the existing simple expression grammar, permit
+    only the compiler-owned `inputs` root, and reject paths absent from the
+    normalized input snapshot. Preflight JSON depth and node count before
+    encoding, then enforce exact encoded byte limits. Pass untrusted configured
+    values through whole input expressions so expression-looking strings are
+    not recursively rendered. Validate the completed workflow before returning
+    it; execution, waiting, and resumption then use only the ordinary runtime.
 
 ## Cross-Feature Behavior
 
@@ -659,12 +703,34 @@ only caller-supplied YAML; it does not acquire runtime authority, configuration,
 or workflow storage. Its effect-review UI is an additional deliberate-user
 boundary before the ordinary draft-test execution path, not a replacement for
 dependency admission, tool policy, isolation, or provider authorization.
+Gate compilation composes the conversation decision profile and durable human
+task owned here. Its `[]GateSpec` input is the already-resolved effective list;
+it does not yet own global-policy/repository-override resolution, PR-case
+launching, attention delivery, or chat handoff. Those consumers must pass the
+existing PR-chat session on the root run when `RequiresSession` is true, must
+short-circuit an explicit no-op without creating a workflow run, and cannot use
+a zero gate to erase another effective gate. The compiler validates canonical
+agent-ID syntax without loading configuration; ordinary readiness/admission and
+execution fail closed when that canonical agent is unavailable.
 
 ## Failure And Edge Cases
 
 - Unsafe local refs fail before parsing or execution.
 - Invalid YAML, unknown `uses` targets, unsupported input types, duplicate step
   IDs, unknown dependencies, and dependency cycles fail validation.
+- Gate compilation fails before execution for an unsupported kind, duplicate
+  or unsafe ID, noncanonical AI agent, missing or irrelevant kind-specific
+  fields, non-input or missing deterministic expression path, incomplete
+  expression delimiters, cyclic or unsupported JSON, custom JSON/text
+  marshalers, or count/text/payload/depth/node exhaustion.
+  Empty and all-zero compositions are explicit no-ops, but zero gates never
+  delete another gate from the already-resolved effective list. A
+  working-context composition still fails closed at execution when its caller
+  omits the exact existing owned session; an invalid structured AI response
+  fails its agent step instead of creating an attention decision. Isolated
+  gates use request-local ephemeral identity, so reusing one compilation does
+  not create a shared durable session. Compiled attention workflows cannot be
+  moved under `on.event`, `workflow_call`, or a reusable edge.
 - `human/task` fails admission when its title/questions/schema are missing or
   over bound, when its schema uses an unsupported or malformed keyword/type,
   when a public task field references `secrets`, when a durable external-event
@@ -1066,8 +1132,8 @@ dependency admission, tool policy, isolation, or provider authorization.
 | `FR-WORKFLOW-041` | [pkg/workflows/human_task.go](../../pkg/workflows/human_task.go), [pkg/workflows/human_task_test.go](../../pkg/workflows/human_task_test.go), [pkg/workflows/executor.go](../../pkg/workflows/executor.go), [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go), [pkg/workflows/store.go](../../pkg/workflows/store.go), [pkg/workflows/store_test.go](../../pkg/workflows/store_test.go), [pkg/workflows/validator.go](../../pkg/workflows/validator.go), [pkg/workflows/validator_test.go](../../pkg/workflows/validator_test.go), [pkg/workflows/dependencies.go](../../pkg/workflows/dependencies.go), [pkg/workflows/dependencies_test.go](../../pkg/workflows/dependencies_test.go), [pkg/workflows/development.go](../../pkg/workflows/development.go), [pkg/agent/workflow_dependencies.go](../../pkg/agent/workflow_dependencies.go), [pkg/agent/workflow_dependencies_test.go](../../pkg/agent/workflow_dependencies_test.go), [web/backend/api/workflow_runtime.go](../../web/backend/api/workflow_runtime.go), [web/backend/api/workflow_runtime_test.go](../../web/backend/api/workflow_runtime_test.go), [web/backend/api/workflows.go](../../web/backend/api/workflows.go), [web/backend/api/workflow_human_tasks.go](../../web/backend/api/workflow_human_tasks.go), [web/backend/api/workflow_human_tasks_test.go](../../web/backend/api/workflow_human_tasks_test.go), [web/frontend/src/api/workflows.ts](../../web/frontend/src/api/workflows.ts), [web/frontend/src/components/workflows/workflows-page.tsx](../../web/frontend/src/components/workflows/workflows-page.tsx), [web/frontend/src/components/workflows/workflow-repair-context.ts](../../web/frontend/src/components/workflows/workflow-repair-context.ts), [web/frontend/src/components/workflows/workflow-publish-readiness.tsx](../../web/frontend/src/components/workflows/workflow-publish-readiness.tsx) |
 
 | `FR-WORKFLOW-042` | [pkg/workflows/validator.go](../../pkg/workflows/validator.go), [pkg/workflows/validator_test.go](../../pkg/workflows/validator_test.go), [pkg/workflows/compatibility.go](../../pkg/workflows/compatibility.go), [pkg/workflows/event_trigger_test.go](../../pkg/workflows/event_trigger_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go), [pkg/session/session_store.go](../../pkg/session/session_store.go), [pkg/session/manager_test.go](../../pkg/session/manager_test.go), [pkg/session/jsonl_backend_test.go](../../pkg/session/jsonl_backend_test.go), [pkg/memory/jsonl_test.go](../../pkg/memory/jsonl_test.go) |
-
 | `FR-WORKFLOW-043` | [pkg/workflows/validator.go](../../pkg/workflows/validator.go), [pkg/workflows/validator_test.go](../../pkg/workflows/validator_test.go), [pkg/workflows/context.go](../../pkg/workflows/context.go), [pkg/workflows/executor.go](../../pkg/workflows/executor.go), [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go), [pkg/workflows/compatibility.go](../../pkg/workflows/compatibility.go), [pkg/workflows/event_trigger_test.go](../../pkg/workflows/event_trigger_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
+| `FR-WORKFLOW-044` | [pkg/workflows/gates.go](../../pkg/workflows/gates.go), [pkg/workflows/gates_test.go](../../pkg/workflows/gates_test.go), [pkg/workflows/executor.go](../../pkg/workflows/executor.go), [pkg/workflows/human_task.go](../../pkg/workflows/human_task.go), [pkg/workflows/validator.go](../../pkg/workflows/validator.go) |
 
 ## Implementation Anchors
 
@@ -1078,6 +1144,7 @@ dependency admission, tool policy, isolation, or provider authorization.
 - [pkg/workflows/validator.go](../../pkg/workflows/validator.go)
 - [pkg/workflows/executor.go](../../pkg/workflows/executor.go)
 - [pkg/workflows/human_task.go](../../pkg/workflows/human_task.go)
+- [pkg/workflows/gates.go](../../pkg/workflows/gates.go)
 - [pkg/workflows/native_functions.go](../../pkg/workflows/native_functions.go)
 - [pkg/workflows/store.go](../../pkg/workflows/store.go)
 - [pkg/workflows/development.go](../../pkg/workflows/development.go)
