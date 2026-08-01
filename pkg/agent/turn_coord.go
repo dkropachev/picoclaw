@@ -580,11 +580,13 @@ type sideQuestionContextSnapshot struct {
 }
 
 type sideQuestionExecutionOptions struct {
-	contextSnapshot    *sideQuestionContextSnapshot
-	promptCacheKey     string
-	disablePromptCache bool
-	skipHooks          bool
-	rejectToolCalls    bool
+	contextSnapshot        *sideQuestionContextSnapshot
+	promptCacheKey         string
+	disablePromptCache     bool
+	disableSessionAffinity bool
+	detachProviderMessages bool
+	skipHooks              bool
+	rejectToolCalls        bool
 }
 
 func (al *AgentLoop) askSideQuestion(
@@ -689,12 +691,19 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 		currentTurnStart = len(messages) - 1
 	}
 	messages = resolveMediaRefs(messages, al.mediaStore, maxMediaSize, currentTurnStart)
+	if execution.disablePromptCache {
+		messages = messagesWithoutPromptCacheControls(messages)
+	}
 
+	selectionSessionKey := optsSessionKey(opts)
+	if execution.disableSessionAffinity {
+		selectionSessionKey = ""
+	}
 	activeCandidates, activeModel, usedLight, activeAccountRouter, routerSelection := al.selectCandidates(
 		agent,
 		question,
 		messages,
-		optsSessionKey(opts),
+		selectionSessionKey,
 		accountrouter.SelectReasonInitial,
 	)
 	selectedModelName := sideQuestionModelName(agent, usedLight)
@@ -731,7 +740,7 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 				opts.AccountRefOverride,
 				overrideAlias,
 				overrideFallbacks,
-				opts.SessionKey,
+				selectionSessionKey,
 				accountrouter.SelectReasonInitial,
 			)
 			if !candidateSelectionHasProvider(agent, activeCandidates) {
@@ -794,18 +803,20 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 		if !forceModel || strings.TrimSpace(model) == "" {
 			model = providerModel
 		}
-		callOpts := llmOpts
+		callOpts := shallowCloneLLMOptions(llmOpts)
 		settings := thinkingSettingsFromModelConfig(modelCfg)
 		sideSuppressReasoning = shouldSuppressReasoningFor(settings)
 		if _, exists := callOpts["thinking_level"]; !exists {
 			if settings.configured || hasReasoningEffortConfig(modelCfg) {
-				callOpts = shallowCloneLLMOptions(llmOpts)
 				applyThinkingOption(callOpts, provider, settings, false, agent.ID)
 				applyReasoningEffortOption(callOpts, modelCfg)
 			}
 		}
+		if opts != nil {
+			applyReasoningEffortOverride(callOpts, opts.ReasoningEffortOverride)
+		}
 		providerMessages := callMessages
-		if execution.contextSnapshot != nil {
+		if execution.contextSnapshot != nil || execution.detachProviderMessages {
 			providerMessages = session.CloneMessages(callMessages)
 		}
 		return provider.Chat(ctx, providerMessages, nil, model, callOpts)
@@ -996,10 +1007,20 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 		resp.ReasoningDetails = nil
 	}
 	if execution.rejectToolCalls && len(resp.ToolCalls) > 0 {
-		return "", fmt.Errorf("read-only agent decision returned tool calls")
+		return "", fmt.Errorf("isolated agent decision returned tool calls")
 	}
 
 	return sideQuestionResponseContent(resp), nil
+}
+
+func messagesWithoutPromptCacheControls(messages []providers.Message) []providers.Message {
+	cloned := session.CloneMessages(messages)
+	for messageIndex := range cloned {
+		for blockIndex := range cloned[messageIndex].SystemParts {
+			cloned[messageIndex].SystemParts[blockIndex].CacheControl = nil
+		}
+	}
+	return cloned
 }
 
 func (al *AgentLoop) isolatedSideQuestionProvider(

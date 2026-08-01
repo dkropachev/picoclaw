@@ -19,6 +19,10 @@ and estimated cost. When the visible step uses the workflow exact read-only
 decision profile, every grouped, calibration, child, fallback, and repair call
 uses the same frozen existing-session snapshot and the result carries its
 opaque history revision.
+When the visible step instead uses the exact workflow ephemeral profile, every
+one of those calls reuses one request-local stateless side-question closure:
+there is no session, history, prompt cache, tool authority, or account-router
+affinity, and only the fixed ephemeral audit marker reaches the visible result.
 
 Agent execution optimization is generic. It does not know domain semantics such
 as code review, planning, data extraction, or summarization. Domain-specific
@@ -40,7 +44,9 @@ scope items, and the structured output schema.
   `workflowAgentRunner.runManagedSplit`,
   `workflowAgentRunner.runManagedSplitCalibration`,
   `workflowRunManagedChildren`, `workflowManagedRunChoice`, and
-  `workflowAgentRunner.ensureWorkflowManagedProviders`.
+  `workflowAgentRunner.ensureWorkflowManagedProviders`; the
+  `workflows.AgentRequest.EphemeralSession` handoff selects the stateless
+  request-local call profile before any of those managed branches are planned.
 - Runtime ordering: parse `with.output` and `with.managed`, build the normal
   agent message, select a split strategy only when managed mode and structured
   output are both enabled, derive child plans from scope and/or agent tasks,
@@ -59,7 +65,12 @@ scope items, and the structured output schema.
   managed options or resolved concrete-model metadata; and all managed metadata is diagnostic
   workflow output, not a separate child workflow run graph. Managed splitting
   does not weaken an enclosing exact read-only decision profile: it cannot
-  reread or write the session and cannot enable tools for child work.
+  reread or write the session and cannot enable tools for child work. It also
+  cannot weaken an enclosing ephemeral profile: every branch remains free of
+  session, history, prompt-cache, hook, MCP, tool, and account-affinity state.
+The agent-local calibration cache may retain only strategy/hash experience; it
+is distinct from workflow prompt caching and never stores an ephemeral
+identity or supplied call context.
 
 ## Requirements
 
@@ -81,6 +92,7 @@ scope items, and the structured output schema.
 | `FR-AGENT-EXECUTION-OPTIMIZATION-014` | MUST | The workflow dashboard displays a run whose step outputs contain `managed`. | The run detail view shows one optimization panel entry per managed step, including strategy, child count, calibration status, model-change status, effort-change status, estimated savings, and selected model information. | Dashboard rendering does not mutate run state. | Missing or malformed managed metadata hides the panel or displays fallback values without breaking the run detail page. | Agent execution optimization must be inspectable by operators without reading raw JSON output. |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-015` | MUST | A split contract has a passing calibration and calibration caching is enabled. | The agent instance remembers the passing calibration by a hash over strategy, model, prompt/context hash, output schema, task list, chunking options, child plan shape, scope path/hash/content/language signals, repository signals, and the effective child prompt target used by the planner. Exact matching runs calibrate aggressively at first, then only when the expanding use interval is due. When an exact key is absent, the runtime may borrow once from a trusted similar entry, create a separate provisional entry for the new key, and force verification on that key's next matching use. Verification success promotes the provisional entry with inherited confidence adjusted by similarity and split-fit score; verification failure clears inherited confidence and the key behaves like a fresh untrusted entry. Passing calibration stores a learned child prompt target based on observed child prompt sizes so later similar splits can reuse the learned target instead of a static configuration value. | `managed.calibration.status` is `trusted_cache` on exact or similar cache hits; `managed.calibration.cache` records the key, decision (`hit`, `similar_hit`, `borrowed_due`, `due`, `miss`, or `previous_not_trusted`), use count, success streak, provisional flag, borrowed source/similarity when present, split-fit score, next due use, model, language, repository, scope, task metadata, effective target, learned target, target source, and observed child prompt token statistics. | Failed or skipped calibrations are not trusted; materially different strategy, plan shape, schema, prompt, tasks, model, language, repository/scope identity, chunking, or effective target below the similarity threshold produces a cache miss. Low split-fit scores shorten the next probe interval even after successful calibration. | Proven split behavior should reduce repeated calibration token spend without blindly trusting small changes or weak split plans. |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-016` | MUST | A structured or managed workflow agent request is admitted with `history: read_only`. | The runtime captures the exact existing-session snapshot before planning and reuses it for the unsplit request, grouped calibration baseline, sampled and real children, fallback, and structured-output repairs. The visible output retains its canonical `session` and opaque `history_revision` alongside structured and managed diagnostics. | No child call writes, restores, compacts, or rereads the session; no child receives tools, and provider-side mutation of one call's message graph cannot change later calls' frozen context. | A missing/corrupt/unowned session or any child tool-call response fails the visible step; an append after capture is intentionally absent from every call in that execution. | Optimization must preserve the exact evidence and authority boundary of an AI gate instead of turning one decision into several differently contextualized turns. |
+| `FR-AGENT-EXECUTION-OPTIMIZATION-017` | MUST | A structured or managed workflow agent request is admitted with the exact `session: ephemeral`, `history: none`, `cache: none`, and `tools: none` profile. | Before planning, the runtime creates one request-local stateless side-question closure and uses it for the unsplit request, grouped calibration baseline, sampled and real children, calibration fallback, and every structured-output repair. Every call preserves ordinary account/model alias selection and explicit model/reasoning overrides but supplies no session-affinity key, history, prompt cache, hooks, MCP, or tools. The visible output retains fixed `session: ephemeral` and `session_mode: ephemeral` markers plus normal structured and managed diagnostics. | No branch creates or mutates session, history, summary, active-turn, account-router affinity, or prompt-cache state. Existing agent-local calibration strategy state and visible managed diagnostics retain their normal bounded hashes and measurements, but never the random ephemeral identity or session-like state. | Incompatible modes, a provider-authored tool call, or loss of the stateless profile in any initial, repair, calibration, child, or fallback call fails the visible step. Cancellation propagates, and the random identity is never exposed in child diagnostics, logs, events, or outputs. | Structured repair and managed optimization must not silently turn a stateless AI gate into one or more durable or account-affine conversations. |
 
 ## Data And State Model
 
@@ -93,7 +105,8 @@ Visible optimized agent step outputs may contain:
 ```text
 text                         combined JSON or fallback text
 agent_id                     selected workflow agent id
-session                      session key used by the visible step
+session                      durable session key or fixed ephemeral audit marker
+session_mode                 fixed ephemeral marker for an ephemeral request
 history                      workflow agent history mode
 history_revision             opaque frozen-session revision for exact read-only decisions
 cache                        normalized workflow agent cache mode
@@ -107,6 +120,11 @@ structured_error             validation or repair error, when present
 managed                      diagnostic object for mode/split/calibration/optimization
 managed_children             hidden child diagnostic objects, only for real split runs
 ```
+
+An ephemeral request has no durable session key or history revision and leaves
+`cache_key` empty. Its internal random identity is request-local and absent from
+the visible result, child diagnostics, managed diagnostics, and calibration
+cache; `session` and `session_mode` both contain only the literal `ephemeral`.
 
 `managed` contains:
 
@@ -188,6 +206,7 @@ subscription_equivalent_model  exact alias used only for price estimation
 | Workflow YAML | `uses: agent/<id>` with `with.managed` | `managed` enables or configures hidden split execution only when structured output is also enabled. | `FR-AGENT-EXECUTION-OPTIMIZATION-002`, `FR-AGENT-EXECUTION-OPTIMIZATION-003` |
 | Workflow YAML | `with.scope` | A list or `{items: [...]}` supplies splittable scope items for scope and hybrid strategies. | `FR-AGENT-EXECUTION-OPTIMIZATION-004`, `FR-AGENT-EXECUTION-OPTIMIZATION-006` |
 | Workflow YAML | `history: read_only` with `tools: none` | Preserve one strict existing-session snapshot across structured repairs and every managed execution branch, returning its opaque revision. | `FR-AGENT-EXECUTION-OPTIMIZATION-016` |
+| Workflow YAML | `session: ephemeral` with `history: none`, `cache: none`, and `tools: none` | Preserve one stateless no-affinity execution profile across structured repairs and every managed execution branch, returning only fixed ephemeral audit markers. | `FR-AGENT-EXECUTION-OPTIMIZATION-017` |
 | Agent definition | `agent.Tasks` | Textual tasks are used as semantic task-splitting responsibilities and are injected into child prompts. | `FR-AGENT-EXECUTION-OPTIMIZATION-005`, `FR-AGENT-EXECUTION-OPTIMIZATION-006` |
 | Go API | `workflows.ParseAgentOutputContract(raw any)` | Parses workflow `with.output` into an `AgentOutputContract` with JSON format, schema, and repair attempts. | `FR-AGENT-EXECUTION-OPTIMIZATION-001` |
 | Go API | `workflows.ValidateAgentStructuredOutput(text, contract)` | Extracts JSON from raw agent text, validates a supported schema subset, and returns structured data plus error metadata. | `FR-AGENT-EXECUTION-OPTIMIZATION-001` |
@@ -205,7 +224,10 @@ subscription_equivalent_model  exact alias used only for price estimation
    steps: prompt, context, scope, message, then structured-output
    instructions. For an exact read-only request it first freezes the existing
    session once; all calls described below receive graph-detached copies of
-   that snapshot, no tools, and no live-history reread.
+   that snapshot, no tools, and no live-history reread. For an exact ephemeral
+   request it instead creates one random request-local identity and stateless
+   side-question closure before planning; every call below has no session,
+   history, prompt cache, hooks, MCP, tools, or account-router affinity.
 3. The runner normalizes managed mode. `nil`, `false`, `off`, `none`, and an
    explicit disabled map are treated as off.
 4. `workflowManagedSplitStrategy` returns no strategy unless managed mode is on
@@ -241,7 +263,9 @@ subscription_equivalent_model  exact alias used only for price estimation
     continues with inherited confidence adjusted by similarity and split-fit
     score. The first successful uses calibrate frequently, then the interval
     doubles up to the configured cap, with low split-fit scores shortening the
-    interval.
+    interval. This agent-local strategy cache remains available to an ephemeral
+    request because it is not workflow prompt caching, but its entries never
+    contain the ephemeral identity or any session-like state.
 11. Calibration combines sample child results and compares the combined object with
     the baseline. Failed validation, child run errors, or comparison mismatch
     mark calibration failed.
@@ -259,7 +283,8 @@ subscription_equivalent_model  exact alias used only for price estimation
     `agent.CandidateProviders` so alias overrides can use the normal pipeline.
 16. Each child call suppresses chat response publishing, disables visible
     history writes, suppresses tool feedback, and tells the child not to perform
-    write actions.
+    write actions. Ephemeral children and their repairs additionally reuse the
+    same stateless closure and blank account-affinity key as the visible call.
 17. Child responses are repaired and validated independently. All children are
     allowed to finish so diagnostics are complete even when one child fails.
 18. Successful child structured outputs are combined, serialized, validated
@@ -280,6 +305,12 @@ account configuration for candidate price metadata and alias-valued
 subscription-equivalent estimates. It intentionally does
 not own workflow DAG execution, reusable workflows, workflow triggers, or
 domain-specific split/combine rules.
+The workflows feature owns admission of the exact ephemeral YAML profile and
+its fixed output markers. Agent conversations owns the stateless
+side-question call and blank account-affinity selection. This feature owns
+preserving that same profile through structured repairs, grouped calibration,
+fallback, and all managed child calls while keeping its strategy cache distinct
+from prohibited workflow prompt-cache and session state.
 
 ## Failure And Edge Cases
 
@@ -326,6 +357,12 @@ domain-specific split/combine rules.
   snapshot cannot be captured or owned by the selected agent. Calibration,
   fallback, child, and repair calls cannot observe an append made after that
   capture, and a provider cannot mutate the frozen graph seen by later calls.
+- Ephemeral managed execution fails closed when any initial, calibration,
+  fallback, child, or repair call attempts to acquire history, prompt cache,
+  tools, or session/account affinity. A provider-authored tool call is never
+  ignored or executed. Normal calibration hashes and diagnostics may persist,
+  but the request-local identity cannot enter them, child diagnostics, logs,
+  events, or visible outputs.
 
 ## Acceptance Evidence
 
@@ -339,6 +376,7 @@ domain-specific split/combine rules.
 | `FR-AGENT-EXECUTION-OPTIMIZATION-011`, `FR-AGENT-EXECUTION-OPTIMIZATION-012`, `FR-AGENT-EXECUTION-OPTIMIZATION-013` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go), [pkg/config/model_config_test.go](../../pkg/config/model_config_test.go), [pkg/config/subscription_equivalent_model_test.go](../../pkg/config/subscription_equivalent_model_test.go) |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-014` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [web/frontend/src/components/workflows/workflows-page.tsx](../../web/frontend/src/components/workflows/workflows-page.tsx) |
 | `FR-AGENT-EXECUTION-OPTIMIZATION-016` | [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go), [pkg/session/session_store.go](../../pkg/session/session_store.go) |
+| `FR-AGENT-EXECUTION-OPTIMIZATION-017` | [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
 
 ## Implementation Anchors
 
@@ -347,6 +385,7 @@ domain-specific split/combine rules.
 - [pkg/workflows/context.go](../../pkg/workflows/context.go)
 - [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go)
 - [pkg/agent/workflow_managed.go](../../pkg/agent/workflow_managed.go)
+- [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go)
 - [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go)
 - [pkg/workflows/agent_output_test.go](../../pkg/workflows/agent_output_test.go)
 - [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go)

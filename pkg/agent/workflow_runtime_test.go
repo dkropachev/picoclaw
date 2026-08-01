@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -620,6 +622,963 @@ func TestWorkflowAgentRunnerReadOnlyPropagatesCancellationWithoutWrites(t *testi
 	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("canceled decision mutated source session\nbefore: %#v\nafter: %#v", before, after)
 	}
+}
+
+func TestWorkflowAgentRunnerEphemeralIsIsolatedAndLeavesJSONLUntouched(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"isolated decision"}}
+	loop, agent, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	originalContextManager := loop.contextManager
+	contextTracker := &trackingContextManager{}
+	loop.contextManager = contextTracker
+	t.Cleanup(func() { loop.contextManager = originalContextManager })
+	if _, ok := agent.Sessions.(*session.JSONLBackend); !ok {
+		t.Fatalf("session store = %T, want real JSONL backend", agent.Sessions)
+	}
+	sessionsDir := filepath.Join(agent.Workspace, "sessions")
+	beforeCatalog := append([]string(nil), agent.Sessions.ListSessions()...)
+	beforeFiles := workflowDirectoryFileSnapshot(t, sessionsDir)
+
+	req := workflowEphemeralTestRequest("Decide without durable context.")
+	req.Delivery = workflows.Delivery{
+		Channel:          "private-review-channel",
+		ChatID:           "private-pr-chat-42",
+		TopicID:          "private-topic-7",
+		MessageID:        "private-message-9",
+		ReplyToMessageID: "private-reply-8",
+	}
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if outputs["session"] != workflows.AgentSessionEphemeral ||
+		outputs["session_mode"] != workflows.AgentSessionEphemeral {
+		t.Fatalf("session audit = %#v, want opaque ephemeral mode", outputs)
+	}
+	if outputs["history"] != "none" || outputs["cache"] != "none" ||
+		outputs["cache_key"] != "" || outputs["tools"] != workflows.AgentToolsNone {
+		t.Fatalf("isolation audit = %#v, want history/cache/tools disabled", outputs)
+	}
+
+	calls := provider.snapshotCalls()
+	if len(calls) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(calls))
+	}
+	if calls[0].toolCount != 0 {
+		t.Fatalf("provider tool definitions = %d, want 0", calls[0].toolCount)
+	}
+	if calls[0].promptCachePresent || calls[0].promptCacheKey != "" {
+		t.Fatalf("provider prompt cache = (%v, %q), want absent", calls[0].promptCachePresent, calls[0].promptCacheKey)
+	}
+	if workflowMessagesHavePromptCacheControl(calls[0].messages) {
+		t.Fatalf("provider messages retained prompt cache controls: %#v", calls[0].messages)
+	}
+	if workflowMessagesContain(calls[0].messages, "existing problem context") ||
+		workflowMessagesContain(calls[0].messages, "existing decision summary") {
+		t.Fatalf("ephemeral request loaded durable history: %#v", calls[0].messages)
+	}
+	if !workflowMessagesContain(calls[0].messages, "Decide without durable context.") {
+		t.Fatalf("provider request omitted current prompt: %#v", calls[0].messages)
+	}
+	for _, privateDeliveryValue := range []string{
+		"private-review-channel",
+		"private-pr-chat-42",
+		"private-topic-7",
+		"private-message-9",
+		"private-reply-8",
+	} {
+		if workflowMessagesContain(calls[0].messages, privateDeliveryValue) {
+			t.Fatalf("provider request leaked delivery value %q: %#v", privateDeliveryValue, calls[0].messages)
+		}
+	}
+
+	workflowAssertSessionStoreUnchanged(t, agent, sessionsDir, beforeCatalog, beforeFiles)
+	if contextTracker.assembleCalls.Load() != 0 || contextTracker.compactCalls.Load() != 0 ||
+		contextTracker.ingestCalls.Load() != 0 || contextTracker.clearCalls.Load() != 0 {
+		t.Fatalf(
+			"ephemeral context manager calls = assemble:%d compact:%d ingest:%d clear:%d, want zero",
+			contextTracker.assembleCalls.Load(),
+			contextTracker.compactCalls.Load(),
+			contextTracker.ingestCalls.Load(),
+			contextTracker.clearCalls.Load(),
+		)
+	}
+	workflowAssertNoEphemeralActiveTurn(t, loop)
+	if loop.mcp.getManager() != nil || loop.mcp.getInitErr() != nil {
+		t.Fatal("ephemeral decision initialized MCP")
+	}
+}
+
+func TestWorkflowAgentRunnerEphemeralDoesNotInitializeConfiguredHooksOrMCP(t *testing.T) {
+	const hookName = "test-workflow-ephemeral-isolation"
+	spy := &workflowEphemeralHookSpy{}
+	var factoryCalls atomic.Int64
+	if err := RegisterBuiltinHook(hookName, func(
+		context.Context,
+		config.BuiltinHookConfig,
+	) (any, error) {
+		factoryCalls.Add(1)
+		return spy, nil
+	}); err != nil {
+		t.Fatalf("RegisterBuiltinHook() error = %v", err)
+	}
+	t.Cleanup(func() { unregisterBuiltinHook(hookName) })
+
+	marker := filepath.Join(t.TempDir(), "mcp-command-started")
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}}
+	cfg.Hooks = config.HooksConfig{
+		Enabled: true,
+		Builtins: map[string]config.BuiltinHookConfig{
+			hookName: {Enabled: true},
+		},
+	}
+	cfg.Tools.MCP = config.MCPConfig{
+		ToolConfig: config.ToolConfig{Enabled: true},
+		Servers: map[string]config.MCPServerConfig{
+			"private-server": {
+				Enabled: true,
+				Command: "sh",
+				Args: []string{
+					"-c",
+					`printf started > "$1"`,
+					"workflow-ephemeral-test",
+					marker,
+				},
+			},
+		},
+	}
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"isolated"}}
+	messageBus := bus.NewMessageBus()
+	loop := newTestAgentLoopWithStrictModels(cfg, messageBus, provider)
+	t.Cleanup(func() {
+		loop.Close()
+		messageBus.Close()
+	})
+	loop.providerFactory = func(modelConfig *config.ModelConfig) (providers.LLMProvider, string, error) {
+		model := "workflow-ephemeral-test"
+		if modelConfig != nil && strings.TrimSpace(modelConfig.Model) != "" {
+			model = modelConfig.Model
+		}
+		return provider, model, nil
+	}
+
+	if _, err := (&workflowAgentRunner{loop: loop}).RunAgent(
+		context.Background(),
+		workflowEphemeralTestRequest("Do not initialize extension runtimes."),
+	); err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if factoryCalls.Load() != 0 || spy.beforeCalls.Load() != 0 || spy.afterCalls.Load() != 0 {
+		t.Fatalf(
+			"ephemeral hook calls = factory:%d before:%d after:%d, want zero",
+			factoryCalls.Load(),
+			spy.beforeCalls.Load(),
+			spy.afterCalls.Load(),
+		)
+	}
+	if loop.mcp.getManager() != nil || loop.mcp.getInitErr() != nil {
+		t.Fatal("ephemeral decision initialized MCP runtime")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("ephemeral decision executed MCP command: %v", err)
+	}
+}
+
+func TestWorkflowAgentRunnerEphemeralRepairsStructuredOutputWithoutPersistence(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{
+		"not json",
+		`{"needs_user":true,"reason":"ambiguous"}`,
+	}}
+	loop, agent, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	sessionsDir := filepath.Join(agent.Workspace, "sessions")
+	beforeCatalog := append([]string(nil), agent.Sessions.ListSessions()...)
+	beforeFiles := workflowDirectoryFileSnapshot(t, sessionsDir)
+	req := workflowEphemeralTestRequest("Decide whether the user is needed.")
+	req.Output = &workflows.AgentOutputContract{
+		Format:         "json",
+		RepairAttempts: 1,
+		Schema: map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []any{"needs_user", "reason"},
+			"properties": map[string]any{
+				"needs_user": map[string]any{"type": "boolean"},
+				"reason":     map[string]any{"type": "string"},
+			},
+		},
+	}
+
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if outputs["structured_valid"] != true || outputs["structured_repairs"] != 1 {
+		t.Fatalf("structured audit = %#v, want one successful repair", outputs)
+	}
+	structured, ok := outputs["structured"].(map[string]any)
+	if !ok || structured["needs_user"] != true || structured["reason"] != "ambiguous" {
+		t.Fatalf("structured output = %#v, want repaired decision", outputs["structured"])
+	}
+	calls := provider.snapshotCalls()
+	if len(calls) != 2 {
+		t.Fatalf("provider calls = %d, want request plus repair", len(calls))
+	}
+	for index, call := range calls {
+		if call.toolCount != 0 || call.promptCachePresent {
+			t.Fatalf("provider call %d isolation = %#v, want no tools/cache", index, call)
+		}
+		if workflowMessagesContain(call.messages, "existing problem context") {
+			t.Fatalf("provider call %d loaded durable history: %#v", index, call.messages)
+		}
+	}
+	if !workflowMessagesContain(calls[1].messages, "previous response did not satisfy") {
+		t.Fatalf("repair call omitted structured repair instruction: %#v", calls[1].messages)
+	}
+	workflowAssertSessionStoreUnchanged(t, agent, sessionsDir, beforeCatalog, beforeFiles)
+}
+
+func TestWorkflowAgentRunnerEphemeralCreatesAndClosesStatefulProviderPerCall(t *testing.T) {
+	bootstrap := &workflowReadOnlyCaptureProvider{}
+	loop, agent, _, _ := newWorkflowReadOnlyTestLoop(t, bootstrap)
+	if agent == nil {
+		t.Fatal("default agent is nil")
+	}
+	state := &workflowEphemeralStatefulProviderState{}
+	loop.providerFactory = func(*config.ModelConfig) (providers.LLMProvider, string, error) {
+		return state.newProvider(), "workflow-ephemeral-stateful", nil
+	}
+	req := workflowEphemeralTestRequest("Return structured output.")
+	req.Output = &workflows.AgentOutputContract{
+		Format:         "json",
+		RepairAttempts: 1,
+		Schema: map[string]any{
+			"type":     "object",
+			"required": []any{"ok"},
+			"properties": map[string]any{
+				"ok": map[string]any{"type": "boolean"},
+			},
+		},
+	}
+
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if outputs["structured_valid"] != true || outputs["structured_repairs"] != 1 {
+		t.Fatalf("structured output = %#v, want one successful repair", outputs)
+	}
+	created, called, closed := state.snapshot()
+	if !reflect.DeepEqual(created, []int{1, 2}) ||
+		!reflect.DeepEqual(called, []int{1, 2}) ||
+		!reflect.DeepEqual(closed, []int{1, 2}) {
+		t.Fatalf(
+			"stateful provider lifecycle = created:%v called:%v closed:%v, want distinct closed providers [1 2]",
+			created,
+			called,
+			closed,
+		)
+	}
+}
+
+func TestWorkflowAgentRunnerEphemeralRejectsProviderToolCalls(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{
+		responses: []string{"unexpected"},
+		toolCall:  true,
+	}
+	loop, agent, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	sessionsDir := filepath.Join(agent.Workspace, "sessions")
+	beforeCatalog := append([]string(nil), agent.Sessions.ListSessions()...)
+	beforeFiles := workflowDirectoryFileSnapshot(t, sessionsDir)
+
+	_, err := (&workflowAgentRunner{loop: loop}).RunAgent(
+		context.Background(),
+		workflowEphemeralTestRequest("Return a decision, never a tool call."),
+	)
+	if err == nil || !strings.Contains(err.Error(), "returned tool calls") {
+		t.Fatalf("RunAgent() error = %v, want fail-closed tool-call rejection", err)
+	}
+	calls := provider.snapshotCalls()
+	if len(calls) != 1 || calls[0].toolCount != 0 {
+		t.Fatalf("provider calls = %#v, want one call with no tool definitions", calls)
+	}
+	workflowAssertSessionStoreUnchanged(t, agent, sessionsDir, beforeCatalog, beforeFiles)
+}
+
+func TestWorkflowAgentRunnerEphemeralRejectsUnsafeRuntimeTupleBeforeProvider(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"unexpected"}}
+	loop, agent, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	sessionsDir := filepath.Join(agent.Workspace, "sessions")
+	beforeCatalog := append([]string(nil), agent.Sessions.ListSessions()...)
+	beforeFiles := workflowDirectoryFileSnapshot(t, sessionsDir)
+	tests := []struct {
+		name   string
+		mutate func(*workflows.AgentRequest)
+		want   string
+	}{
+		{
+			name: "history default",
+			mutate: func(req *workflows.AgentRequest) {
+				req.History = ""
+			},
+			want: "requires history: none",
+		},
+		{
+			name: "history read only",
+			mutate: func(req *workflows.AgentRequest) {
+				req.History = "read_only"
+			},
+			want: "requires history: none",
+		},
+		{
+			name: "history mixed case",
+			mutate: func(req *workflows.AgentRequest) {
+				req.History = "NONE"
+			},
+			want: "requires history: none",
+		},
+		{
+			name: "cache default",
+			mutate: func(req *workflows.AgentRequest) {
+				req.Cache = ""
+			},
+			want: "requires cache: none",
+		},
+		{
+			name: "cache session",
+			mutate: func(req *workflows.AgentRequest) {
+				req.Cache = "session"
+			},
+			want: "requires cache: none",
+		},
+		{
+			name: "cache mixed case",
+			mutate: func(req *workflows.AgentRequest) {
+				req.Cache = "NONE"
+			},
+			want: "requires cache: none",
+		},
+		{
+			name: "tools default",
+			mutate: func(req *workflows.AgentRequest) {
+				req.Tools = ""
+			},
+			want: "requires tools: none",
+		},
+		{
+			name: "tools inherit",
+			mutate: func(req *workflows.AgentRequest) {
+				req.Tools = workflows.AgentToolsInherit
+			},
+			want: "requires tools: none",
+		},
+		{
+			name: "tools mixed case",
+			mutate: func(req *workflows.AgentRequest) {
+				req.Tools = "NONE"
+			},
+			want: "requires tools: none",
+		},
+		{
+			name: "durable key",
+			mutate: func(req *workflows.AgentRequest) {
+				req.Session = "workflow:must-not-be-created"
+			},
+			want: "cannot use a durable session key",
+		},
+	}
+
+	runner := &workflowAgentRunner{loop: loop}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := workflowEphemeralTestRequest("Reject an unsafe tuple.")
+			tt.mutate(&req)
+			if _, err := runner.RunAgent(context.Background(), req); err == nil ||
+				!strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("RunAgent() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("provider calls = %d, want unsafe tuples rejected before provider I/O", len(calls))
+	}
+	workflowAssertSessionStoreUnchanged(t, agent, sessionsDir, beforeCatalog, beforeFiles)
+}
+
+func TestWorkflowAgentRunnerEphemeralPropagatesCancellationWithoutResidue(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{
+		responses: []string{"unexpected"},
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	loop, agent, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	sessionsDir := filepath.Join(agent.Workspace, "sessions")
+	beforeCatalog := append([]string(nil), agent.Sessions.ListSessions()...)
+	beforeFiles := workflowDirectoryFileSnapshot(t, sessionsDir)
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, runErr := (&workflowAgentRunner{loop: loop}).RunAgent(
+			ctx,
+			workflowEphemeralTestRequest("Wait for cancellation."),
+		)
+		errCh <- runErr
+	}()
+	<-provider.started
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunAgent() error = %v, want context.Canceled", err)
+	}
+	workflowAssertSessionStoreUnchanged(t, agent, sessionsDir, beforeCatalog, beforeFiles)
+	workflowAssertNoEphemeralActiveTurn(t, loop)
+}
+
+func TestWorkflowAgentRunnerEphemeralConcurrentInvocationsDoNotCollideOrPersist(t *testing.T) {
+	const workers = 12
+	provider := &workflowReadOnlyCaptureProvider{
+		release: make(chan struct{}),
+		called:  make(chan struct{}, workers),
+	}
+	loop, agent, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	sessionsDir := filepath.Join(agent.Workspace, "sessions")
+	beforeCatalog := append([]string(nil), agent.Sessions.ListSessions()...)
+	beforeFiles := workflowDirectoryFileSnapshot(t, sessionsDir)
+	type result struct {
+		outputs map[string]any
+		err     error
+	}
+	results := make(chan result, workers)
+	var keyMu sync.Mutex
+	generatedKeys := make([]string, 0, workers)
+	runner := &workflowAgentRunner{
+		loop: loop,
+		newEphemeralSessionKey: func() string {
+			key := newWorkflowEphemeralSessionKey()
+			keyMu.Lock()
+			generatedKeys = append(generatedKeys, key)
+			keyMu.Unlock()
+			return key
+		},
+	}
+	for index := range workers {
+		go func() {
+			outputs, err := runner.RunAgent(
+				context.Background(),
+				workflowEphemeralTestRequest(fmt.Sprintf("Concurrent decision %d.", index)),
+			)
+			results <- result{outputs: outputs, err: err}
+		}()
+	}
+	for range workers {
+		<-provider.called
+	}
+	calls := provider.snapshotCalls()
+	if len(calls) != workers {
+		t.Fatalf("provider calls while concurrent = %d, want %d", len(calls), workers)
+	}
+	for index, call := range calls {
+		if call.toolCount != 0 || call.promptCachePresent ||
+			workflowMessagesContain(call.messages, "existing problem context") {
+			t.Fatalf("concurrent provider call %d was not isolated: %#v", index, call)
+		}
+	}
+	close(provider.release)
+	for range workers {
+		got := <-results
+		if got.err != nil {
+			t.Fatalf("concurrent RunAgent() error = %v", got.err)
+		}
+		if got.outputs["session"] != workflows.AgentSessionEphemeral ||
+			got.outputs["session_mode"] != workflows.AgentSessionEphemeral {
+			t.Fatalf("concurrent session output = %#v, want opaque ephemeral mode", got.outputs)
+		}
+	}
+
+	keyMu.Lock()
+	actualKeys := append([]string(nil), generatedKeys...)
+	keyMu.Unlock()
+	if len(actualKeys) != workers {
+		t.Fatalf("ephemeral key generations = %d, want one per request (%d)", len(actualKeys), workers)
+	}
+	keys := make(map[string]struct{}, workers)
+	for _, key := range actualKeys {
+		if !strings.HasPrefix(key, "workflow:ephemeral:") {
+			t.Fatalf("ephemeral internal key = %q, want namespaced key", key)
+		}
+		if _, exists := keys[key]; exists {
+			t.Fatalf("duplicate ephemeral internal key %q", key)
+		}
+		keys[key] = struct{}{}
+	}
+	workflowAssertSessionStoreUnchanged(t, agent, sessionsDir, beforeCatalog, beforeFiles)
+	workflowAssertNoEphemeralActiveTurn(t, loop)
+}
+
+func TestWorkflowAgentRunnerLiteralEphemeralSessionKeyRemainsDurable(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"durable answer"}}
+	loop, agent, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(
+		context.Background(),
+		workflows.AgentRequest{
+			AgentID: "main",
+			Prompt:  "Persist this literal durable session.",
+			Session: workflows.AgentSessionEphemeral,
+			History: "inherit",
+			Cache:   "session",
+			Tools:   workflows.AgentToolsNone,
+		},
+	)
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if outputs["session"] != workflows.AgentSessionEphemeral {
+		t.Fatalf("session = %#v, want literal durable key", outputs["session"])
+	}
+	if _, exists := outputs["session_mode"]; exists {
+		t.Fatalf("literal key was misclassified as ephemeral mode: %#v", outputs)
+	}
+	history := agent.Sessions.GetHistory(workflows.AgentSessionEphemeral)
+	if !workflowMessagesContain(history, "Persist this literal durable session.") ||
+		!workflowMessagesContain(history, "durable answer") {
+		t.Fatalf("literal durable session history = %#v, want request and response", history)
+	}
+	if !workflowStringSliceContains(agent.Sessions.ListSessions(), workflows.AgentSessionEphemeral) {
+		t.Fatalf("session catalog = %#v, want literal ephemeral key", agent.Sessions.ListSessions())
+	}
+	metadata := agent.Sessions.(session.MetadataAwareSessionStore)
+	scope := metadata.GetSessionScope(workflows.AgentSessionEphemeral)
+	if scope == nil || scope.Values["workflow_session"] != workflows.AgentSessionEphemeral {
+		t.Fatalf("literal durable session scope = %#v, want persisted workflow metadata", scope)
+	}
+	files := workflowDirectoryFileSnapshot(t, filepath.Join(agent.Workspace, "sessions"))
+	if _, ok := files["ephemeral.jsonl"]; !ok {
+		t.Fatalf("session files = %#v, want ephemeral.jsonl", files)
+	}
+	if _, ok := files["ephemeral.meta.json"]; !ok {
+		t.Fatalf("session files = %#v, want ephemeral.meta.json", files)
+	}
+}
+
+func TestWorkflowAgentRunnerEphemeralDisablesAccountRouterSessionAffinity(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	cfg.Agents.Defaults.AccountRef = "decision-router"
+	cfg.Agents.Defaults.ModelName = "decision"
+	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}}
+	cfg.ModelAliases = []config.ModelAliasConfig{{Name: "decision", Model: "mock-model"}}
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "account-a",
+			Provider:  "openai",
+			Model:     "mock-model",
+			APIBase:   "http://example.invalid/v1",
+			APIKeys:   config.SimpleSecureStrings("test-key-a"),
+			Enabled:   true,
+		},
+		{
+			ModelName: "account-b",
+			Provider:  "openai",
+			Model:     "mock-model",
+			APIBase:   "http://example.invalid/v1",
+			APIKeys:   config.SimpleSecureStrings("test-key-b"),
+			Enabled:   true,
+		},
+	}
+	cfg.AccountRouters = []config.AccountRouterConfig{{
+		Name:    "decision-router",
+		Enabled: true,
+		Entry:   "pool",
+		Blocks: []config.AccountRouterBlock{{
+			ID:       "pool",
+			Type:     config.AccountRouterBlockTypeLoadBalance,
+			Accounts: []string{"account-a", "account-b"},
+			Strategy: config.AccountRouterStrategyTokensSpent,
+		}},
+	}}
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"routed decision"}}
+	messageBus := bus.NewMessageBus()
+	loop := newTestAgentLoopWithStrictModels(cfg, messageBus, provider)
+	t.Cleanup(func() {
+		loop.Close()
+		messageBus.Close()
+	})
+	loop.providerFactory = func(*config.ModelConfig) (providers.LLMProvider, string, error) {
+		return provider, "mock-model", nil
+	}
+	agent := loop.GetRegistry().GetDefaultAgent()
+	if agent == nil || agent.AccountRouter == nil {
+		t.Fatalf("account-routed agent = %#v, want active router", agent)
+	}
+	statePath := filepath.Join(workspace, "account_router_state.json")
+	beforeRouterSessions := workflowRawMessageKeySet(
+		workflowAccountRouterSessionState(t, statePath, "decision-router"),
+	)
+	beforeCatalog := append([]string(nil), agent.Sessions.ListSessions()...)
+	beforeFiles := workflowDirectoryFileSnapshot(t, filepath.Join(workspace, "sessions"))
+
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(
+		context.Background(),
+		workflowEphemeralTestRequest("Make an account-routed isolated decision."),
+	)
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if outputs["session_mode"] != workflows.AgentSessionEphemeral {
+		t.Fatalf("session mode = %#v, want ephemeral", outputs["session_mode"])
+	}
+	afterRouterSessions := workflowRawMessageKeySet(
+		workflowAccountRouterSessionState(t, statePath, "decision-router"),
+	)
+	if !reflect.DeepEqual(afterRouterSessions, beforeRouterSessions) {
+		t.Fatalf(
+			"ephemeral run changed router session affinity: before=%#v after=%#v",
+			beforeRouterSessions,
+			afterRouterSessions,
+		)
+	}
+	stateData, readErr := os.ReadFile(statePath)
+	if readErr != nil {
+		t.Fatalf("read account router state: %v", readErr)
+	}
+	if strings.Contains(string(stateData), "workflow:ephemeral:") {
+		t.Fatalf("account router state leaked internal ephemeral identity: %s", stateData)
+	}
+	workflowAssertSessionStoreUnchanged(
+		t,
+		agent,
+		filepath.Join(workspace, "sessions"),
+		beforeCatalog,
+		beforeFiles,
+	)
+}
+
+func TestWorkflowAgentRunnerEphemeralFallbackGetsDetachedMessagesAndOptions(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	cfg.Agents.Defaults.ModelName = "primary-model"
+	cfg.Agents.Defaults.ModelFallbacks = []string{"openai/fallback-model"}
+	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}}
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName: "primary-model",
+		Provider:  "openai",
+		Model:     "primary-model",
+		Enabled:   true,
+	}}
+	state := &workflowEphemeralFallbackState{}
+	messageBus := bus.NewMessageBus()
+	loop := newTestAgentLoopWithStrictModels(
+		cfg,
+		messageBus,
+		&workflowEphemeralFallbackProvider{model: "primary-model", state: state},
+	)
+	t.Cleanup(func() {
+		loop.Close()
+		messageBus.Close()
+	})
+	loop.providerFactory = func(modelConfig *config.ModelConfig) (providers.LLMProvider, string, error) {
+		model := ""
+		if modelConfig != nil {
+			_, model = providers.ExtractProtocol(modelConfig)
+		}
+		return &workflowEphemeralFallbackProvider{model: model, state: state}, model, nil
+	}
+
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(
+		context.Background(),
+		workflowEphemeralTestRequest("Use a clean fallback request."),
+	)
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if outputs["text"] != "fallback decision" {
+		t.Fatalf("text = %#v, want fallback decision", outputs["text"])
+	}
+	calls := state.snapshotCalls()
+	if len(calls) != 2 {
+		t.Fatalf("fallback provider calls = %d, want primary plus fallback", len(calls))
+	}
+	if calls[0].model != "primary-model" || calls[1].model != "fallback-model" {
+		t.Fatalf("fallback models = %#v, want primary then fallback", calls)
+	}
+	if workflowMessagesContain(calls[1].messages, "primary-provider-mutated") {
+		t.Fatalf("fallback observed primary message mutation: %#v", calls[1].messages)
+	}
+	if calls[1].promptCachePresent || calls[1].promptCacheKey != "" {
+		t.Fatalf("fallback observed primary option mutation: %#v", calls[1])
+	}
+	if workflowMessagesHavePromptCacheControl(calls[1].messages) {
+		t.Fatalf("fallback messages retained prompt cache controls: %#v", calls[1].messages)
+	}
+
+	agent := loop.GetRegistry().GetDefaultAgent()
+	if agent == nil {
+		t.Fatal("default agent is nil")
+	}
+	loop.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), nil)
+	response, err := loop.askSideQuestionWithOptions(
+		context.Background(),
+		agent,
+		&processOptions{
+			Dispatch: DispatchRequest{
+				SessionKey:  "workflow:ephemeral:test-only",
+				UserMessage: "Preserve the explicit fallback effort.",
+			},
+			ReasoningEffortOverride: "high",
+			NoHistory:               true,
+			DisableTools:            true,
+			DisablePromptCache:      true,
+		},
+		"Preserve the explicit fallback effort.",
+		sideQuestionExecutionOptions{
+			disablePromptCache:     true,
+			disableSessionAffinity: true,
+			detachProviderMessages: true,
+			skipHooks:              true,
+			rejectToolCalls:        true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("askSideQuestionWithOptions() error = %v", err)
+	}
+	if response != "fallback decision" {
+		t.Fatalf("fallback response = %q, want fallback decision", response)
+	}
+	calls = state.snapshotCalls()
+	if len(calls) != 4 {
+		t.Fatalf("provider calls after explicit override = %d, want 4", len(calls))
+	}
+	for index, call := range calls[2:] {
+		if call.reasoningEffort != "high" {
+			t.Fatalf("explicit fallback call %d reasoning_effort = %q, want high", index, call.reasoningEffort)
+		}
+	}
+}
+
+func TestWorkflowAgentRunnerEphemeralManagedCalibrationChildrenAndRepairStayIsolated(t *testing.T) {
+	var responseMu sync.Mutex
+	var repairScope []string
+	repairInjected := false
+	provider := &workflowReadOnlyCaptureProvider{}
+	provider.respond = func(_ int, messages []providers.Message) string {
+		message := workflowLatestUserMessage(messages)
+		responseMu.Lock()
+		defer responseMu.Unlock()
+		if strings.Contains(message, "previous response did not satisfy") {
+			ids := append([]string(nil), repairScope...)
+			repairScope = nil
+			return workflowManagedTestFindingsJSON(ids)
+		}
+		ids := workflowScopeIDsInMessage(message, "a", "b", "c")
+		if strings.Contains(message, "Agent execution optimization child task") &&
+			strings.Contains(message, " of 3.") && !repairInjected {
+			repairInjected = true
+			repairScope = append([]string(nil), ids...)
+			return "not json"
+		}
+		return workflowManagedTestFindingsJSON(ids)
+	}
+	loop, agent, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	sessionsDir := filepath.Join(agent.Workspace, "sessions")
+	beforeCatalog := append([]string(nil), agent.Sessions.ListSessions()...)
+	beforeFiles := workflowDirectoryFileSnapshot(t, sessionsDir)
+	req := workflowEphemeralTestRequest("Review every assigned scope item.")
+	req.Managed = map[string]any{
+		"mode":                  "auto",
+		"strategy":              "scope_split",
+		"max_items_per_chunk":   1,
+		"max_parallel_children": 1,
+		"calibration": map[string]any{
+			"enabled":       true,
+			"sample_size":   2,
+			"cache_enabled": true,
+		},
+	}
+	req.Scope = []any{
+		map[string]any{"id": "a"},
+		map[string]any{"id": "b"},
+		map[string]any{"id": "c"},
+	}
+	req.Output = workflowManagedTestOutputContract()
+
+	keyCalls := 0
+	runner := &workflowAgentRunner{
+		loop: loop,
+		newEphemeralSessionKey: func() string {
+			keyCalls++
+			return newWorkflowEphemeralSessionKey()
+		},
+	}
+	outputs, err := runner.RunAgent(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if keyCalls != 1 {
+		t.Fatalf("ephemeral key generations = %d, want one across calibration, children, and repair", keyCalls)
+	}
+	workflowAssertEphemeralManagedOutputEnvelope(t, outputs)
+	if outputs["structured_valid"] != true || outputs["structured_repairs"] != 1 {
+		t.Fatalf("managed structured audit = %#v, want valid output with one real-child repair", outputs)
+	}
+	structured, ok := outputs["structured"].(map[string]any)
+	if !ok {
+		t.Fatalf("structured output = %#v, want object", outputs["structured"])
+	}
+	findings, ok := structured["findings"].([]any)
+	if !ok || len(findings) != 3 {
+		t.Fatalf("combined findings = %#v, want three findings", structured["findings"])
+	}
+	managed := outputs["managed"].(map[string]any)
+	calibration := managed["calibration"].(map[string]any)
+	if calibration["status"] != "passed" || calibration["match"] != true ||
+		calibration["sample_scope"] != 2 || calibration["repairs"] != 0 {
+		t.Fatalf("calibration = %#v, want clean two-item pass", calibration)
+	}
+	children, ok := outputs["managed_children"].([]map[string]any)
+	if !ok || len(children) != 3 {
+		t.Fatalf("managed_children = %#v, want three real children", outputs["managed_children"])
+	}
+	repairedChildren := 0
+	for index, child := range children {
+		if child["valid"] != true || child["tools"] != workflows.AgentToolsNone {
+			t.Fatalf("managed child %d = %#v, want valid no-tools result", index, child)
+		}
+		if child["repairs"] == 1 {
+			repairedChildren++
+		} else if child["repairs"] != 0 {
+			t.Fatalf("managed child %d repairs = %#v, want 0 or 1", index, child["repairs"])
+		}
+	}
+	if repairedChildren != 1 {
+		t.Fatalf("repaired real children = %d, want 1; children=%#v", repairedChildren, children)
+	}
+
+	calls := provider.snapshotCalls()
+	workflowAssertEphemeralProviderCallsIsolated(t, calls)
+	var baselineCalls, sampledChildCalls, realChildCalls, repairCalls int
+	for _, call := range calls {
+		switch {
+		case workflowMessagesContain(call.messages, "Calibration label: grouped baseline."):
+			if call.reasoningEffort != "" {
+				t.Fatalf("calibration baseline reasoning_effort = %q, want no optimized override", call.reasoningEffort)
+			}
+			baselineCalls++
+		case workflowMessagesContain(call.messages, "previous response did not satisfy"):
+			if call.reasoningEffort != "low" {
+				t.Fatalf("managed repair reasoning_effort = %q, want low", call.reasoningEffort)
+			}
+			repairCalls++
+		case workflowMessagesContain(call.messages, "Agent execution optimization child task") &&
+			workflowMessagesContain(call.messages, " of 2."):
+			if call.reasoningEffort != "" {
+				t.Fatalf("sampled child reasoning_effort = %q, want no optimized override", call.reasoningEffort)
+			}
+			sampledChildCalls++
+		case workflowMessagesContain(call.messages, "Agent execution optimization child task") &&
+			workflowMessagesContain(call.messages, " of 3."):
+			if call.reasoningEffort != "low" {
+				t.Fatalf("real managed child reasoning_effort = %q, want low", call.reasoningEffort)
+			}
+			realChildCalls++
+		default:
+			t.Fatalf("unclassified managed provider call: %#v", call.messages)
+		}
+	}
+	if len(calls) != 7 || baselineCalls != 1 || sampledChildCalls != 2 ||
+		realChildCalls != 3 || repairCalls != 1 {
+		t.Fatalf(
+			"managed provider calls = total:%d baseline:%d sampled:%d real:%d repair:%d, want 7/1/2/3/1",
+			len(calls),
+			baselineCalls,
+			sampledChildCalls,
+			realChildCalls,
+			repairCalls,
+		)
+	}
+	workflowAssertNoInternalEphemeralIdentity(t, outputs, agent.managedCalibrationCache)
+	workflowAssertSessionStoreUnchanged(t, agent, sessionsDir, beforeCatalog, beforeFiles)
+}
+
+func TestWorkflowAgentRunnerEphemeralManagedCalibrationMismatchFallbackStaysIsolated(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{}
+	provider.respond = func(_ int, messages []providers.Message) string {
+		message := workflowLatestUserMessage(messages)
+		ids := workflowScopeIDsInMessage(message, "a", "b")
+		if strings.Contains(message, "Agent execution optimization child task") &&
+			len(ids) == 1 && ids[0] == "b" {
+			return workflowManagedTestFindingsJSON([]string{"mismatched-b"})
+		}
+		return workflowManagedTestFindingsJSON(ids)
+	}
+	loop, agent, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	sessionsDir := filepath.Join(agent.Workspace, "sessions")
+	beforeCatalog := append([]string(nil), agent.Sessions.ListSessions()...)
+	beforeFiles := workflowDirectoryFileSnapshot(t, sessionsDir)
+	req := workflowEphemeralTestRequest("Review the complete scope after calibration.")
+	req.Managed = map[string]any{
+		"mode":                  "auto",
+		"strategy":              "scope_split",
+		"max_items_per_chunk":   1,
+		"max_parallel_children": 1,
+		"calibration": map[string]any{
+			"enabled":       true,
+			"sample_size":   2,
+			"cache_enabled": false,
+		},
+	}
+	req.Scope = []any{
+		map[string]any{"id": "a"},
+		map[string]any{"id": "b"},
+	}
+	req.Output = workflowManagedTestOutputContract()
+
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	workflowAssertEphemeralManagedOutputEnvelope(t, outputs)
+	if outputs["structured_valid"] != true || outputs["structured_repairs"] != 0 {
+		t.Fatalf("fallback structured audit = %#v, want valid unrepaired output", outputs)
+	}
+	if _, exists := outputs["managed_children"]; exists {
+		t.Fatalf("real managed children ran after calibration mismatch: %#v", outputs["managed_children"])
+	}
+	structured := outputs["structured"].(map[string]any)
+	findings, ok := structured["findings"].([]any)
+	if !ok || len(findings) != 2 {
+		t.Fatalf("fallback findings = %#v, want full two-item result", structured["findings"])
+	}
+	managed := outputs["managed"].(map[string]any)
+	calibration := managed["calibration"].(map[string]any)
+	if calibration["status"] != "failed" || calibration["match"] != false ||
+		calibration["phase"] != "compare" {
+		t.Fatalf("calibration = %#v, want comparison mismatch fallback", calibration)
+	}
+
+	calls := provider.snapshotCalls()
+	workflowAssertEphemeralProviderCallsIsolated(t, calls)
+	var baselineCalls, sampledChildCalls, fallbackCalls int
+	for _, call := range calls {
+		switch {
+		case workflowMessagesContain(call.messages, "Calibration label: grouped baseline."):
+			baselineCalls++
+		case workflowMessagesContain(call.messages, "Agent execution optimization child task"):
+			sampledChildCalls++
+		default:
+			fallbackCalls++
+		}
+	}
+	if len(calls) != 4 || baselineCalls != 1 || sampledChildCalls != 2 || fallbackCalls != 1 {
+		t.Fatalf(
+			"mismatch provider calls = total:%d baseline:%d sampled:%d fallback:%d, want 4/1/2/1",
+			len(calls),
+			baselineCalls,
+			sampledChildCalls,
+			fallbackCalls,
+		)
+	}
+	workflowAssertSessionStoreUnchanged(t, agent, sessionsDir, beforeCatalog, beforeFiles)
 }
 
 func TestWorkflowSessionSnapshotRevisionIncludesProviderVisibleInternalFields(t *testing.T) {
@@ -2338,6 +3297,27 @@ type workflowManagedTestProvider struct {
 	model string
 }
 
+type workflowEphemeralHookSpy struct {
+	beforeCalls atomic.Int64
+	afterCalls  atomic.Int64
+}
+
+func (s *workflowEphemeralHookSpy) BeforeLLM(
+	_ context.Context,
+	req *LLMHookRequest,
+) (*LLMHookRequest, HookDecision, error) {
+	s.beforeCalls.Add(1)
+	return req, HookDecision{Action: HookActionContinue}, nil
+}
+
+func (s *workflowEphemeralHookSpy) AfterLLM(
+	_ context.Context,
+	response *LLMHookResponse,
+) (*LLMHookResponse, HookDecision, error) {
+	s.afterCalls.Add(1)
+	return response, HookDecision{Action: HookActionContinue}, nil
+}
+
 type workflowToolsCaptureProvider struct {
 	mu         sync.Mutex
 	toolCounts []int
@@ -2345,18 +3325,123 @@ type workflowToolsCaptureProvider struct {
 }
 
 type workflowReadOnlyProviderCall struct {
-	messages       []providers.Message
-	toolCount      int
-	promptCacheKey string
+	messages           []providers.Message
+	toolCount          int
+	promptCacheKey     string
+	promptCachePresent bool
+	reasoningEffort    string
+}
+
+type workflowEphemeralFallbackCall struct {
+	model              string
+	messages           []providers.Message
+	promptCacheKey     string
+	promptCachePresent bool
+	reasoningEffort    string
+}
+
+type workflowEphemeralFallbackState struct {
+	mu    sync.Mutex
+	calls []workflowEphemeralFallbackCall
+}
+
+func (s *workflowEphemeralFallbackState) snapshotCalls() []workflowEphemeralFallbackCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]workflowEphemeralFallbackCall(nil), s.calls...)
+}
+
+type workflowEphemeralFallbackProvider struct {
+	model string
+	state *workflowEphemeralFallbackState
+}
+
+type workflowEphemeralStatefulProviderState struct {
+	mu      sync.Mutex
+	nextID  int
+	created []int
+	called  []int
+	closed  []int
+}
+
+func (s *workflowEphemeralStatefulProviderState) newProvider() providers.LLMProvider {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	s.created = append(s.created, s.nextID)
+	return &workflowEphemeralStatefulProvider{id: s.nextID, state: s}
+}
+
+func (s *workflowEphemeralStatefulProviderState) snapshot() ([]int, []int, []int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int(nil), s.created...), append([]int(nil), s.called...), append([]int(nil), s.closed...)
+}
+
+type workflowEphemeralStatefulProvider struct {
+	id    int
+	state *workflowEphemeralStatefulProviderState
+}
+
+func (p *workflowEphemeralStatefulProvider) Chat(
+	_ context.Context,
+	_ []providers.Message,
+	_ []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	p.state.mu.Lock()
+	p.state.called = append(p.state.called, p.id)
+	p.state.mu.Unlock()
+	if p.id == 1 {
+		return &providers.LLMResponse{Content: "not json"}, nil
+	}
+	return &providers.LLMResponse{Content: `{"ok":true}`}, nil
+}
+
+func (p *workflowEphemeralStatefulProvider) Close() {
+	p.state.mu.Lock()
+	p.state.closed = append(p.state.closed, p.id)
+	p.state.mu.Unlock()
+}
+
+func (p *workflowEphemeralFallbackProvider) Chat(
+	_ context.Context,
+	messages []providers.Message,
+	_ []providers.ToolDefinition,
+	_ string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	cacheKey, cachePresent := opts["prompt_cache_key"].(string)
+	reasoningEffort, _ := opts["reasoning_effort"].(string)
+	p.state.mu.Lock()
+	p.state.calls = append(p.state.calls, workflowEphemeralFallbackCall{
+		model:              p.model,
+		messages:           session.CloneMessages(messages),
+		promptCacheKey:     cacheKey,
+		promptCachePresent: cachePresent,
+		reasoningEffort:    reasoningEffort,
+	})
+	p.state.mu.Unlock()
+	if p.model == "primary-model" {
+		if len(messages) > 0 {
+			messages[len(messages)-1].Content = "primary-provider-mutated"
+		}
+		opts["prompt_cache_key"] = "primary-provider-mutated"
+		return nil, context.DeadlineExceeded
+	}
+	return &providers.LLMResponse{Content: "fallback decision"}, nil
 }
 
 type workflowReadOnlyCaptureProvider struct {
 	mu                sync.Mutex
 	responses         []string
+	respond           func(int, []providers.Message) string
 	calls             []workflowReadOnlyProviderCall
 	toolCall          bool
 	started           chan struct{}
 	release           chan struct{}
+	called            chan struct{}
 	startOnce         sync.Once
 	afterCall         func(int)
 	mutateNestedInput bool
@@ -2371,22 +3456,37 @@ func (p *workflowReadOnlyCaptureProvider) Chat(
 ) (*providers.LLMResponse, error) {
 	p.mu.Lock()
 	callIndex := len(p.calls)
-	cacheKey, _ := opts["prompt_cache_key"].(string)
+	cacheKey, cachePresent := opts["prompt_cache_key"].(string)
+	reasoningEffort, _ := opts["reasoning_effort"].(string)
 	p.calls = append(p.calls, workflowReadOnlyProviderCall{
-		messages:       session.CloneMessages(messages),
-		toolCount:      len(tools),
-		promptCacheKey: cacheKey,
+		messages:           session.CloneMessages(messages),
+		toolCount:          len(tools),
+		promptCacheKey:     cacheKey,
+		promptCachePresent: cachePresent,
+		reasoningEffort:    reasoningEffort,
 	})
 	response := "decision"
 	if callIndex < len(p.responses) {
 		response = p.responses[callIndex]
 	}
+	respond := p.respond
 	toolCall := p.toolCall
 	started := p.started
 	release := p.release
+	called := p.called
 	afterCall := p.afterCall
 	mutateNestedInput := p.mutateNestedInput
 	p.mu.Unlock()
+	if respond != nil {
+		response = respond(callIndex, session.CloneMessages(messages))
+	}
+	if called != nil {
+		select {
+		case called <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if mutateNestedInput {
 		for messageIndex := range messages {
 			for blockIndex := range messages[messageIndex].SystemParts {
@@ -2495,6 +3595,111 @@ func newWorkflowReadOnlyTestLoop(
 	return loop, agent, canonicalKey, alias
 }
 
+func workflowEphemeralTestRequest(prompt string) workflows.AgentRequest {
+	return workflows.AgentRequest{
+		AgentID:          "main",
+		Prompt:           prompt,
+		EphemeralSession: true,
+		History:          "none",
+		Cache:            "none",
+		Tools:            workflows.AgentToolsNone,
+	}
+}
+
+func workflowDirectoryFileSnapshot(t *testing.T, directory string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatalf("read directory %q: %v", directory, err)
+	}
+	files := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			files[entry.Name()+"/"] = "<directory>"
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(directory, entry.Name()))
+		if readErr != nil {
+			t.Fatalf("read file %q: %v", entry.Name(), readErr)
+		}
+		files[entry.Name()] = string(data)
+	}
+	return files
+}
+
+func workflowAssertSessionStoreUnchanged(
+	t *testing.T,
+	agent *AgentInstance,
+	sessionsDir string,
+	wantCatalog []string,
+	wantFiles map[string]string,
+) {
+	t.Helper()
+	if got := agent.Sessions.ListSessions(); !reflect.DeepEqual(got, wantCatalog) {
+		t.Fatalf("session catalog changed: before=%#v after=%#v", wantCatalog, got)
+	}
+	if got := workflowDirectoryFileSnapshot(t, sessionsDir); !reflect.DeepEqual(got, wantFiles) {
+		t.Fatalf("session files changed:\nbefore=%#v\nafter=%#v", wantFiles, got)
+	}
+}
+
+func workflowAssertNoEphemeralActiveTurn(t *testing.T, loop *AgentLoop) {
+	t.Helper()
+	var leaked []string
+	loop.activeTurnStates.Range(func(key, _ any) bool {
+		text, _ := key.(string)
+		if strings.HasPrefix(text, "workflow:ephemeral:") {
+			leaked = append(leaked, text)
+		}
+		return true
+	})
+	if len(leaked) != 0 {
+		t.Fatalf("ephemeral active turn residue = %#v", leaked)
+	}
+}
+
+func workflowStringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func workflowAccountRouterSessionState(
+	t *testing.T,
+	statePath string,
+	routerName string,
+) map[string]json.RawMessage {
+	t.Helper()
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read account router state: %v", err)
+	}
+	var state struct {
+		Routers map[string]struct {
+			Sessions map[string]json.RawMessage `json:"sessions"`
+		} `json:"routers"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("decode account router state: %v", err)
+	}
+	router, ok := state.Routers[routerName]
+	if !ok {
+		t.Fatalf("account router state has no %q entry: %s", routerName, data)
+	}
+	return router.Sessions
+}
+
+func workflowRawMessageKeySet(values map[string]json.RawMessage) map[string]struct{} {
+	keys := make(map[string]struct{}, len(values))
+	for key := range values {
+		keys[key] = struct{}{}
+	}
+	return keys
+}
+
 func workflowMessagesContain(messages []providers.Message, substring string) bool {
 	for _, message := range messages {
 		if strings.Contains(message.Content, substring) {
@@ -2507,6 +3712,99 @@ func workflowMessagesContain(messages []providers.Message, substring string) boo
 		}
 	}
 	return false
+}
+
+func workflowMessagesHavePromptCacheControl(messages []providers.Message) bool {
+	for _, message := range messages {
+		for _, block := range message.SystemParts {
+			if block.CacheControl != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func workflowLatestUserMessage(messages []providers.Message) string {
+	for index := len(messages) - 1; index >= 0; index-- {
+		if messages[index].Role == "user" {
+			return messages[index].Content
+		}
+	}
+	if len(messages) == 0 {
+		return ""
+	}
+	return messages[len(messages)-1].Content
+}
+
+func workflowScopeIDsInMessage(message string, candidates ...string) []string {
+	ids := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		spaced := fmt.Sprintf(`"id": %q`, candidate)
+		compact := fmt.Sprintf(`"id":%q`, candidate)
+		if strings.Contains(message, spaced) || strings.Contains(message, compact) {
+			ids = append(ids, candidate)
+		}
+	}
+	return ids
+}
+
+func workflowAssertEphemeralProviderCallsIsolated(
+	t *testing.T,
+	calls []workflowReadOnlyProviderCall,
+) {
+	t.Helper()
+	if len(calls) == 0 {
+		t.Fatal("ephemeral managed execution made no provider calls")
+	}
+	for index, call := range calls {
+		if call.toolCount != 0 {
+			t.Fatalf("provider call %d tool definitions = %d, want 0", index, call.toolCount)
+		}
+		if call.promptCachePresent || call.promptCacheKey != "" {
+			t.Fatalf(
+				"provider call %d prompt cache = (%v, %q), want absent",
+				index,
+				call.promptCachePresent,
+				call.promptCacheKey,
+			)
+		}
+		if workflowMessagesHavePromptCacheControl(call.messages) {
+			t.Fatalf("provider call %d retained CacheControl: %#v", index, call.messages)
+		}
+		if workflowMessagesContain(call.messages, "existing problem context") ||
+			workflowMessagesContain(call.messages, "existing decision summary") {
+			t.Fatalf("provider call %d loaded durable history: %#v", index, call.messages)
+		}
+	}
+}
+
+func workflowAssertEphemeralManagedOutputEnvelope(t *testing.T, outputs map[string]any) {
+	t.Helper()
+	if outputs["session"] != workflows.AgentSessionEphemeral ||
+		outputs["session_mode"] != workflows.AgentSessionEphemeral {
+		t.Fatalf("managed session audit = %#v, want opaque ephemeral mode", outputs)
+	}
+	if outputs["history"] != "none" || outputs["cache"] != "none" ||
+		outputs["cache_key"] != "" || outputs["tools"] != workflows.AgentToolsNone {
+		t.Fatalf("managed isolation audit = %#v, want history/cache/tools disabled", outputs)
+	}
+	if _, exists := outputs["history_revision"]; exists {
+		t.Fatalf("ephemeral managed output exposed history_revision: %#v", outputs)
+	}
+}
+
+func workflowAssertNoInternalEphemeralIdentity(t *testing.T, values ...any) {
+	t.Helper()
+	for index, value := range values {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("serialize ephemeral audit value %d: %v", index, err)
+		}
+		if strings.Contains(string(encoded), "workflow:ephemeral:") {
+			t.Fatalf("ephemeral audit value %d leaked internal identity: %s", index, encoded)
+		}
+	}
 }
 
 func workflowFrozenCacheControl(messages []providers.Message) string {

@@ -1873,20 +1873,26 @@ func (e *Executor) runStepTarget(
 		if err != nil {
 			return nil, err
 		}
+		sessionMode := stringFromMap(with, "session")
+		sessionKey := stepSession(step.Context, with, execCtx)
+		if sessionMode == AgentSessionEphemeral {
+			sessionKey = ""
+		}
 		return e.Agents.RunAgent(ctx, AgentRequest{
-			AgentID:  strings.TrimPrefix(uses, "agent/"),
-			Message:  stringFromMap(with, "message"),
-			Prompt:   stringFromMap(with, "prompt"),
-			Context:  stringFromMap(with, "context"),
-			Session:  stepSession(step.Context, with, execCtx),
-			History:  stringFromMap(with, "history"),
-			Cache:    stringFromMap(with, "cache"),
-			Tools:    agentToolsMode(with),
-			Delivery: stepDelivery(step.Context, execCtx),
-			Inputs:   with,
-			Output:   output,
-			Managed:  with["managed"],
-			Scope:    with["scope"],
+			AgentID:          strings.TrimPrefix(uses, "agent/"),
+			Message:          stringFromMap(with, "message"),
+			Prompt:           stringFromMap(with, "prompt"),
+			Context:          stringFromMap(with, "context"),
+			Session:          sessionKey,
+			EphemeralSession: sessionMode == AgentSessionEphemeral,
+			History:          stringFromMap(with, "history"),
+			Cache:            stringFromMap(with, "cache"),
+			Tools:            agentToolsMode(with),
+			Delivery:         stepDelivery(step.Context, execCtx),
+			Inputs:           with,
+			Output:           output,
+			Managed:          with["managed"],
+			Scope:            with["scope"],
 		})
 	case strings.HasPrefix(uses, "function/"):
 		name := strings.TrimPrefix(uses, "function/")

@@ -107,6 +107,209 @@ jobs:
 	}
 }
 
+func TestValidateEphemeralAgentSessionProfile(t *testing.T) {
+	workflow := parseWorkflow(t, `
+name: Ephemeral decision
+on:
+  manual: {}
+jobs:
+  decide:
+    runs-on: picoclaw
+    steps:
+      - uses: agent/main
+        with:
+          session: ephemeral
+          history: none
+          cache: none
+          tools: none
+          prompt: Decide without retaining state.
+`)
+	if err := Validate(workflow); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestValidateEphemeralAgentSessionRequiresExactIsolationModes(t *testing.T) {
+	tests := []struct {
+		name    string
+		options string
+		want    string
+	}{
+		{
+			name:    "history_missing",
+			options: "cache: none\n          tools: none",
+			want:    "ephemeral session requires history: none",
+		},
+		{
+			name:    "history_conflicting",
+			options: "history: read_write\n          cache: none\n          tools: none",
+			want:    "ephemeral session requires history: none",
+		},
+		{
+			name:    "history_boolean",
+			options: "history: true\n          cache: none\n          tools: none",
+			want:    "history mode must be a string",
+		},
+		{
+			name:    "history_null",
+			options: "history: null\n          cache: none\n          tools: none",
+			want:    "history mode must be a string",
+		},
+		{
+			name:    "cache_missing",
+			options: "history: none\n          tools: none",
+			want:    "ephemeral session requires cache: none",
+		},
+		{
+			name:    "cache_conflicting",
+			options: "history: none\n          cache: session\n          tools: none",
+			want:    "ephemeral session requires cache: none",
+		},
+		{
+			name:    "cache_boolean",
+			options: "history: none\n          cache: true\n          tools: none",
+			want:    "cache mode must be a string",
+		},
+		{
+			name:    "cache_null",
+			options: "history: none\n          cache: null\n          tools: none",
+			want:    "cache mode must be a string",
+		},
+		{
+			name:    "tools_missing",
+			options: "history: none\n          cache: none",
+			want:    "ephemeral session requires tools: none",
+		},
+		{
+			name:    "tools_conflicting",
+			options: "history: none\n          cache: none\n          tools: inherit",
+			want:    "ephemeral session requires tools: none",
+		},
+		{
+			name:    "tools_boolean",
+			options: "history: none\n          cache: none\n          tools: true",
+			want:    "unsupported tools mode",
+		},
+		{
+			name:    "tools_null",
+			options: "history: none\n          cache: none\n          tools: null",
+			want:    "unsupported tools mode",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workflow := parseWorkflow(t, fmt.Sprintf(`
+name: Invalid ephemeral decision
+on:
+  manual: {}
+jobs:
+  decide:
+    runs-on: picoclaw
+    steps:
+      - uses: agent/main
+        with:
+          session: ephemeral
+          %s
+          prompt: Decide.
+`, test.options))
+			err := Validate(workflow)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateEphemeralSessionIsAgentStepLocal(t *testing.T) {
+	tests := []struct {
+		name     string
+		workflow string
+		want     string
+	}{
+		{
+			name: "job_context",
+			workflow: `
+name: Invalid job context
+on:
+  manual: {}
+jobs:
+  main:
+    runs-on: picoclaw
+    context:
+      session: ephemeral
+    steps:
+      - uses: tool/message
+`,
+			want: "unsupported session context",
+		},
+		{
+			name: "step_context",
+			workflow: `
+name: Invalid step context
+on:
+  manual: {}
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - uses: agent/main
+        context:
+          session: ephemeral
+        with:
+          prompt: Decide.
+`,
+			want: "unsupported session context",
+		},
+		{
+			name: "tool_step_option",
+			workflow: `
+name: Invalid tool option
+on:
+  manual: {}
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - uses: tool/message
+        with:
+          session: ephemeral
+`,
+			want: "ephemeral session is only supported for agent steps",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := Validate(parseWorkflow(t, test.workflow))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateKeyNamedEphemeralRemainsPersistentSession(t *testing.T) {
+	workflow := parseWorkflow(t, `
+name: Persistent session named ephemeral
+on:
+  manual: {}
+jobs:
+  decide:
+    runs-on: picoclaw
+    steps:
+      - uses: agent/main
+        with:
+          session: key:ephemeral
+          history: read_write
+          cache: session
+          prompt: Continue the named session.
+`)
+	if err := Validate(workflow); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestValidateAgentToolsMode(t *testing.T) {
 	for _, mode := range []string{AgentToolsInherit, AgentToolsNone} {
 		t.Run(mode, func(t *testing.T) {

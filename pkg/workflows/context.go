@@ -76,25 +76,27 @@ type AgentRunner interface {
 }
 
 const (
-	AgentToolsInherit = "inherit"
-	AgentToolsNone    = "none"
+	AgentToolsInherit     = "inherit"
+	AgentToolsNone        = "none"
+	AgentSessionEphemeral = "ephemeral"
 )
 
 type AgentRequest struct {
-	AgentID   string
-	Message   string
-	Prompt    string
-	Context   string
-	Session   string
-	History   string
-	Cache     string
-	Tools     string
-	Delivery  Delivery
-	Inputs    map[string]any
-	MessageID string
-	Output    *AgentOutputContract
-	Managed   any
-	Scope     any
+	AgentID          string
+	Message          string
+	Prompt           string
+	Context          string
+	Session          string
+	EphemeralSession bool
+	History          string
+	Cache            string
+	Tools            string
+	Delivery         Delivery
+	Inputs           map[string]any
+	MessageID        string
+	Output           *AgentOutputContract
+	Managed          any
+	Scope            any
 }
 
 type FunctionRunner interface {

@@ -428,6 +428,11 @@ func validateSteps(path string, steps []Step) ValidationErrors {
 				strings.TrimPrefix(uses, "agent/"),
 				step.With,
 			)...)
+		} else if sessionMode, exists, isString := agentStringOption(step.With, "session"); exists && isString && sessionMode == AgentSessionEphemeral {
+			errs = append(errs, ValidationError{
+				Path:    stepPath + ".with.session",
+				Message: "ephemeral session is only supported for agent steps",
+			})
 		}
 		if uses == "human/task" {
 			errs = append(errs, validateHumanTaskStep(stepPath, step)...)
@@ -827,7 +832,7 @@ func validateAgentStepOptions(path, agentID string, with map[string]any) Validat
 	sessionMode, sessionSet, sessionString := agentStringOption(with, "session")
 	if sessionSet && !sessionString {
 		errs = append(errs, ValidationError{Path: path + ".session", Message: "session context must be a string"})
-	} else if sessionString && !validRunSession(sessionMode) {
+	} else if sessionString && !validAgentSessionMode(sessionMode) {
 		errs = append(errs, ValidationError{Path: path + ".session", Message: "unsupported session context"})
 	}
 	toolsMode := AgentToolsInherit
@@ -850,7 +855,31 @@ func validateAgentStepOptions(path, agentID string, with map[string]any) Validat
 			Message: "read_only history requires an exact canonical agent ID",
 		})
 	}
+	if sessionMode == AgentSessionEphemeral {
+		if history != "none" {
+			errs = append(errs, ValidationError{
+				Path:    path + ".history",
+				Message: "ephemeral session requires history: none",
+			})
+		}
+		if cache != "none" {
+			errs = append(errs, ValidationError{
+				Path:    path + ".cache",
+				Message: "ephemeral session requires cache: none",
+			})
+		}
+		if toolsMode != AgentToolsNone {
+			errs = append(errs, ValidationError{
+				Path:    path + ".tools",
+				Message: "ephemeral session requires tools: none",
+			})
+		}
+	}
 	return errs
+}
+
+func validAgentSessionMode(value string) bool {
+	return value == AgentSessionEphemeral || validRunSession(value)
 }
 
 func agentStringOption(values map[string]any, key string) (string, bool, bool) {
