@@ -3738,6 +3738,13 @@ test("models page exposes editable model aliases without global runtime selectio
     name: /^gpt-4o-mini/,
   })
   await expect(accountSpecificModel.getByText(/Missing: gpt-4o/)).toBeVisible()
+  const defaultModelSearch = page.getByPlaceholder("Search models...")
+  await expect(defaultModelSearch).toBeFocused()
+  await page.keyboard.type("gpt-5.4")
+  await expect(defaultModelSearch).toHaveValue("gpt-5.4")
+  await expect(sharedModel).toBeVisible()
+  await expect(accountSpecificModel).toHaveCount(0)
+  await defaultModelSearch.fill("")
   await page.keyboard.press("Escape")
   await expect(
     editor.getByRole("button", { name: "Add override" }),
@@ -3751,10 +3758,20 @@ test("models page exposes editable model aliases without global runtime selectio
     page.getByRole("option", { name: /^gpt-4o-mini All accounts/ }),
   ).toBeVisible()
   await expect(
-    page.getByRole("option", { name: /^gpt-5\.4 All accounts/ }),
+    page.getByRole("option", { name: "gpt-5.4 All accounts (1)" }),
   ).toBeVisible()
   await expect(
     page.getByRole("option", { name: /^gpt-4o All accounts/ }),
+  ).toHaveCount(0)
+  const overrideModelSearch = page.getByPlaceholder("Search models...").last()
+  await expect(overrideModelSearch).toBeFocused()
+  await page.keyboard.type("gpt-5.4")
+  await expect(overrideModelSearch).toHaveValue("gpt-5.4")
+  await expect(
+    page.getByRole("option", { name: "gpt-5.4 All accounts (1)" }),
+  ).toBeVisible()
+  await expect(
+    page.getByRole("option", { name: /^gpt-4o-mini All accounts/ }),
   ).toHaveCount(0)
   await page.keyboard.press("Escape")
   expect(errors).toEqual([])

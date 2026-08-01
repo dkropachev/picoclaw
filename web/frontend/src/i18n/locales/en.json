@@ -358,6 +358,8 @@
       "loadingModels": "Loading models...",
       "selectModel": "Select a model",
       "selectOverride": "Select model or disable",
+      "searchModels": "Search models...",
+      "noModelsFound": "No models found.",
       "disableForAccount": "Disabled for this account",
       "disabled": "Disabled",
       "partialAvailability": "Some accounts did not return a model list",
