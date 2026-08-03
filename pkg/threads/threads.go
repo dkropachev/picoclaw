@@ -1,7 +1,6 @@
 package threads
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -18,7 +17,6 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/messageutil"
@@ -190,6 +188,30 @@ func NewStoreFromWorkspace(workspace string) Store {
 	}
 }
 
+func (s Store) openSessionStore() (*memory.JSONLStore, error) {
+	s = s.withDefaults()
+	return memory.NewJSONLStore(s.Dir)
+}
+
+func (s Store) canonicalSessionKey(ctx context.Context, sessionKey string) (string, error) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return "", nil
+	}
+	store, err := s.openSessionStore()
+	if err != nil {
+		return "", err
+	}
+	resolved, found, err := store.ResolveSessionKey(ctx, sessionKey)
+	if err != nil {
+		return "", err
+	}
+	if found && resolved != "" {
+		return resolved, nil
+	}
+	return sessionKey, nil
+}
+
 func (s Store) Search(opts SearchOptions) ([]Thread, error) {
 	items, err := s.list(ListOptions{IncludeDropped: opts.IncludeDropped})
 	if err != nil {
@@ -285,12 +307,12 @@ func (s Store) CreatePicoThread(ctx context.Context, cfg *config.Config, req Cre
 		return Thread{}, errors.New("threads: failed to allocate pico thread")
 	}
 
-	base := filepath.Join(s.Dir, sanitizeSessionKey(allocation.Key))
-	jsonlPath := base + ".jsonl"
-	if f, err := os.OpenFile(jsonlPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err != nil {
+	sessionStore, err := s.openSessionStore()
+	if err != nil {
 		return Thread{}, err
-	} else if closeErr := f.Close(); closeErr != nil {
-		return Thread{}, closeErr
+	}
+	if ensureErr := sessionStore.EnsureSessionHistory(ctx, allocation.Key); ensureErr != nil {
+		return Thread{}, ensureErr
 	}
 
 	rawScope, err := json.Marshal(allocation.Scope)
@@ -299,29 +321,38 @@ func (s Store) CreatePicoThread(ctx context.Context, cfg *config.Config, req Cre
 	}
 
 	now := time.Now()
-	meta, err := readMeta(base+".meta.json", allocation.Key)
-	if err != nil {
-		return Thread{}, err
-	}
-	if meta.CreatedAt.IsZero() {
-		meta.CreatedAt = now
-	}
 	sourceQuery := strings.TrimSpace(firstNonEmpty(req.SourceQuery, req.Title, "New thread"))
-	meta.UpdatedAt = now
-	meta.Key = allocation.Key
-	meta.Scope = rawScope
-	meta.Aliases = normalizeAliases(allocation.Key, allocation.Aliases)
-	meta.ThreadType = NormalizeType(firstNonEmpty(req.Type, InferType(req.Title+" "+sourceQuery)))
-	meta.ThreadTitle = truncateRunes(firstNonEmpty(req.Title, req.SourceQuery, "New thread"), 80)
-	meta.ThreadContext = MergeContext(ExtractContext(sourceQuery+" "+req.Title), req.Context)
-	meta.ThreadSourceQuery = sourceQuery
-	meta.ThreadID = allocation.SessionID
-	meta.ThreadAttachedAt = now
-	if strings.TrimSpace(meta.Summary) == "" {
-		meta.Summary = meta.ThreadTitle
-	}
-
-	if err := writeMeta(base+".meta.json", meta); err != nil {
+	var meta memory.SessionMeta
+	if err := sessionStore.UpdateSessionMeta(ctx, allocation.Key, func(current *memory.SessionMeta) error {
+		initializeSessionIdentity := current.CreatedAt.IsZero() &&
+			current.UpdatedAt.IsZero() &&
+			current.Skip == 0 &&
+			current.Count == 0 &&
+			current.HistorySlot == "" &&
+			strings.TrimSpace(current.Summary) == "" &&
+			len(current.Scope) == 0 &&
+			len(current.Aliases) == 0
+		if current.CreatedAt.IsZero() {
+			current.CreatedAt = now
+		}
+		current.UpdatedAt = now
+		current.Key = allocation.Key
+		if initializeSessionIdentity {
+			current.Scope = rawScope
+			current.Aliases = normalizeAliases(allocation.Key, allocation.Aliases)
+		}
+		current.ThreadType = NormalizeType(firstNonEmpty(req.Type, InferType(req.Title+" "+sourceQuery)))
+		current.ThreadTitle = truncateRunes(firstNonEmpty(req.Title, req.SourceQuery, "New thread"), 80)
+		current.ThreadContext = MergeContext(ExtractContext(sourceQuery+" "+req.Title), req.Context)
+		current.ThreadSourceQuery = sourceQuery
+		current.ThreadID = allocation.SessionID
+		current.ThreadAttachedAt = now
+		if initializeSessionIdentity {
+			current.Summary = current.ThreadTitle
+		}
+		meta = *current
+		return nil
+	}); err != nil {
 		return Thread{}, err
 	}
 
@@ -737,39 +768,6 @@ func contextText(context map[string]string) string {
 	return strings.Join(parts, " ")
 }
 
-func readMessages(path string, skip int) ([]providers.Message, error) {
-	f, err := os.Open(path)
-	if os.IsNotExist(err) {
-		return []providers.Message{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	messages := make([]providers.Message, 0)
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-
-	seen := 0
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		seen++
-		if seen <= skip {
-			continue
-		}
-		var msg providers.Message
-		if err := json.Unmarshal(line, &msg); err != nil {
-			continue
-		}
-		messages = append(messages, msg)
-	}
-	return messages, scanner.Err()
-}
-
 func readMeta(path, fallbackKey string) (memory.SessionMeta, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -786,14 +784,6 @@ func readMeta(path, fallbackKey string) (memory.SessionMeta, error) {
 		meta.Key = fallbackKey
 	}
 	return meta, nil
-}
-
-func writeMeta(path string, meta memory.SessionMeta) error {
-	data, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return err
-	}
-	return fileutil.WriteFileAtomic(path, data, 0o644)
 }
 
 func sessionKeyFromSanitizedBase(base string) string {

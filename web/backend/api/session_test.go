@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,6 +32,35 @@ func sessionsTestDir(t *testing.T, configPath string) string {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
 	return dir
+}
+
+func writeSessionMessageFile(t *testing.T, path string, messages ...providers.Message) {
+	t.Helper()
+
+	data := make([]byte, 0, len(messages)*128)
+	for _, message := range messages {
+		encoded, err := json.Marshal(message)
+		if err != nil {
+			t.Fatalf("Marshal(message) error = %v", err)
+		}
+		data = append(data, encoded...)
+		data = append(data, '\n')
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", filepath.Base(path), err)
+	}
+}
+
+func writeSessionMetaFile(t *testing.T, path string, meta memory.SessionMeta) {
+	t.Helper()
+
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("Marshal(meta) error = %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", filepath.Base(path), err)
+	}
 }
 
 func assertVisibleToolCallMessage(
@@ -118,6 +149,224 @@ func TestHandleListSessions_JSONLStorage(t *testing.T) {
 	}
 	if items[0].Preview != "Explain why the history API is empty after migration." {
 		t.Fatalf("items[0].Preview = %q", items[0].Preview)
+	}
+}
+
+func TestHandleSessions_UsesCommittedHistorySlot(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	dir := sessionsTestDir(t, configPath)
+	sessionKey := legacyPicoSessionPrefix + "committed-slot"
+	base := filepath.Join(dir, sanitizeSessionKey(sessionKey))
+	writeSessionMessageFile(t, base+".jsonl", providers.Message{
+		Role: "user", Content: "poisoned legacy history",
+	})
+	writeSessionMessageFile(t, base+".history-a",
+		providers.Message{Role: "user", Content: "committed active history"},
+		providers.Message{Role: "assistant", Content: "committed active reply"},
+	)
+	active, err := os.OpenFile(base+".history-a", os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("OpenFile(active slot) error = %v", err)
+	}
+	if _, err := active.WriteString("not-json\n"); err != nil {
+		_ = active.Close()
+		t.Fatalf("append corrupt active record error = %v", err)
+	}
+	if err := active.Close(); err != nil {
+		t.Fatalf("Close(active slot) error = %v", err)
+	}
+	writeSessionMessageFile(t, base+".history-b", providers.Message{
+		Role: "user", Content: "poisoned inactive history",
+	})
+	writeSessionMetaFile(t, base+".meta.json", memory.SessionMeta{
+		Key:         sessionKey,
+		Summary:     "committed summary",
+		Count:       3,
+		HistorySlot: "a",
+	})
+
+	activeTime := time.Date(2026, time.August, 2, 13, 14, 15, 0, time.UTC)
+	if err := os.Chtimes(base+".history-a", activeTime, activeTime); err != nil {
+		t.Fatalf("Chtimes(active slot) error = %v", err)
+	}
+	writeSessionMessageFile(
+		t,
+		filepath.Join(dir, sanitizeSessionKey(legacyPicoSessionPrefix+"orphan")+".history-a"),
+		providers.Message{Role: "user", Content: "orphaned slot"},
+	)
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	listRec := httptest.NewRecorder()
+	listReq := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+	mux.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body=%s", listRec.Code, listRec.Body.String())
+	}
+	var items []sessionListItem
+	if err := json.Unmarshal(listRec.Body.Bytes(), &items); err != nil {
+		t.Fatalf("Unmarshal(list) error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("list items = %#v, want only committed session", items)
+	}
+	createdAt, createdErr := time.Parse(time.RFC3339, items[0].Created)
+	updatedAt, updatedErr := time.Parse(time.RFC3339, items[0].Updated)
+	if createdErr != nil || updatedErr != nil {
+		t.Fatalf("list timestamps = (%q, %q)", items[0].Created, items[0].Updated)
+	}
+	if items[0].ID != "committed-slot" || items[0].MessageCount != 2 ||
+		items[0].Title != "committed active history" ||
+		items[0].Preview != "committed active history" ||
+		!createdAt.Equal(activeTime) || !updatedAt.Equal(activeTime) {
+		t.Fatalf("committed session list item = %#v", items[0])
+	}
+
+	detailRec := httptest.NewRecorder()
+	detailReq := httptest.NewRequest(http.MethodGet, "/api/sessions/committed-slot", nil)
+	mux.ServeHTTP(detailRec, detailReq)
+	if detailRec.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, body=%s", detailRec.Code, detailRec.Body.String())
+	}
+	var detail struct {
+		Summary  string               `json:"summary"`
+		Messages []sessionChatMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(detailRec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("Unmarshal(detail) error = %v", err)
+	}
+	if detail.Summary != "committed summary" || len(detail.Messages) != 2 ||
+		detail.Messages[0].Content != "committed active history" ||
+		detail.Messages[1].Content != "committed active reply" {
+		t.Fatalf("committed session detail = %#v", detail)
+	}
+	if strings.Contains(detailRec.Body.String(), "poisoned") ||
+		strings.Contains(listRec.Body.String(), "poisoned") ||
+		strings.Contains(listRec.Body.String(), "orphaned") {
+		t.Fatal("session API exposed legacy, inactive, or orphan slot history")
+	}
+}
+
+func TestHandleSessions_PrefersPromotedCanonicalAndDeletesOwnedShadow(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	dir := sessionsTestDir(t, configPath)
+	store, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "promoted-canonical"
+	legacyKey := "agent:reviewer:pico:work:direct:pico:" + sessionID
+	scope := session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "reviewer",
+		Channel:    "pico",
+		Account:    "work",
+		Dimensions: []string{"sender"},
+		Values:     map[string]string{"sender": "pico:" + sessionID},
+	}
+	canonicalKey := session.BuildSessionKey(scope)
+	rawScope, err := json.Marshal(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addErr := store.AddMessage(
+		context.Background(),
+		legacyKey,
+		"user",
+		"stale legacy preview",
+	); addErr != nil {
+		t.Fatal(addErr)
+	}
+	if upsertErr := store.UpsertSessionMeta(
+		context.Background(),
+		canonicalKey,
+		rawScope,
+		[]string{legacyKey},
+	); upsertErr != nil {
+		t.Fatal(upsertErr)
+	}
+	if promoted, promoteErr := store.PromoteAliasHistory(
+		context.Background(),
+		canonicalKey,
+		rawScope,
+		[]string{legacyKey},
+	); promoteErr != nil || !promoted {
+		t.Fatalf("PromoteAliasHistory() = (%v, %v)", promoted, promoteErr)
+	}
+	_, _, before, found, err := store.ReadSessionSnapshot(context.Background(), canonicalKey)
+	if err != nil || !found {
+		t.Fatalf("ReadSessionSnapshot() = (found=%v, err=%v)", found, err)
+	}
+	if err := store.ReplaceSessionSnapshot(context.Background(), memory.SessionSnapshotReplacement{
+		Key:              canonicalKey,
+		History:          []providers.Message{{Role: "user", Content: "new canonical preview"}},
+		Summary:          "new canonical summary",
+		Scope:            rawScope,
+		Aliases:          []string{legacyKey},
+		ExpectedRevision: before.Revision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	listRec := httptest.NewRecorder()
+	mux.ServeHTTP(listRec, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body=%s", listRec.Code, listRec.Body.String())
+	}
+	var items []sessionListItem
+	if err := json.Unmarshal(listRec.Body.Bytes(), &items); err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != sessionID ||
+		items[0].Preview != "new canonical preview" {
+		t.Fatalf("promoted list items = %#v", items)
+	}
+
+	detailRec := httptest.NewRecorder()
+	mux.ServeHTTP(
+		detailRec,
+		httptest.NewRequest(http.MethodGet, "/api/sessions/"+sessionID, nil),
+	)
+	if detailRec.Code != http.StatusOK ||
+		!strings.Contains(detailRec.Body.String(), "new canonical preview") ||
+		strings.Contains(detailRec.Body.String(), "stale legacy preview") {
+		t.Fatalf("promoted detail status=%d body=%s", detailRec.Code, detailRec.Body.String())
+	}
+
+	deleteRec := httptest.NewRecorder()
+	mux.ServeHTTP(
+		deleteRec,
+		httptest.NewRequest(http.MethodDelete, "/api/sessions/"+sessionID, nil),
+	)
+	if deleteRec.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d, body=%s", deleteRec.Code, deleteRec.Body.String())
+	}
+	for _, key := range []string{canonicalKey, legacyKey} {
+		if _, _, _, found, readErr := store.ReadSessionSnapshot(
+			context.Background(),
+			key,
+		); readErr != nil || found {
+			t.Fatalf("deleted key %q = (found=%v, err=%v)", key, found, readErr)
+		}
+	}
+	listAfterDelete := httptest.NewRecorder()
+	mux.ServeHTTP(listAfterDelete, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
+	if listAfterDelete.Code != http.StatusOK || listAfterDelete.Body.String() != "[]\n" {
+		t.Fatalf(
+			"list after delete status=%d body=%s",
+			listAfterDelete.Code,
+			listAfterDelete.Body.String(),
+		)
 	}
 }
 
@@ -498,6 +747,515 @@ func TestHandleSessions_JSONLScopeDiscovery(t *testing.T) {
 	mux.ServeHTTP(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusNoContent {
 		t.Fatalf("delete status = %d, want %d, body=%s", deleteRec.Code, http.StatusNoContent, deleteRec.Body.String())
+	}
+}
+
+func TestHandleSessions_StructuredNonPicoScopeCannotFallBackToPicoAlias(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	dir := sessionsTestDir(t, configPath)
+	store, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	const sessionID = "victim"
+	scope := session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "main",
+		Channel:    "slack",
+		Account:    "default",
+		Dimensions: []string{"sender"},
+		Values:     map[string]string{"sender": "pico:" + sessionID},
+	}
+	canonicalKey := session.BuildSessionKey(scope)
+	legacyLookingAlias := "agent:main:direct:pico:" + sessionID
+	rawScope, err := json.Marshal(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addErr := store.AddMessage(
+		context.Background(),
+		canonicalKey,
+		"user",
+		"private Slack history",
+	); addErr != nil {
+		t.Fatal(addErr)
+	}
+	if upsertErr := store.UpsertSessionMeta(
+		context.Background(),
+		canonicalKey,
+		rawScope,
+		[]string{legacyLookingAlias},
+	); upsertErr != nil {
+		t.Fatal(upsertErr)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	listRec := httptest.NewRecorder()
+	mux.ServeHTTP(listRec, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
+	if listRec.Code != http.StatusOK || listRec.Body.String() != "[]\n" {
+		t.Fatalf("list status=%d body=%s", listRec.Code, listRec.Body.String())
+	}
+
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(
+			rec,
+			httptest.NewRequest(method, "/api/sessions/"+sessionID, nil),
+		)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s status=%d body=%s", method, rec.Code, rec.Body.String())
+		}
+	}
+
+	_, history, _, found, err := store.ReadSessionSnapshot(
+		context.Background(),
+		canonicalKey,
+	)
+	if err != nil || !found || len(history) != 1 || history[0].Content != "private Slack history" {
+		t.Fatalf("Slack snapshot = (found=%v, history=%#v, err=%v)", found, history, err)
+	}
+}
+
+func TestHandleDeleteSession_RevalidatesOwnerAfterLookup(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	dir := sessionsTestDir(t, configPath)
+	store, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	const sessionID = "rebound-owner"
+	oldScope := session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "main",
+		Channel:    "pico",
+		Account:    "default",
+		Dimensions: []string{"sender"},
+		Values:     map[string]string{"sender": "pico:" + sessionID},
+	}
+	oldKey := session.BuildSessionKey(oldScope)
+	legacyAlias := "agent:main:direct:pico:" + sessionID
+	oldScopeJSON, err := json.Marshal(oldScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addErr := store.AddMessage(ctx, oldKey, "user", "old owner"); addErr != nil {
+		t.Fatal(addErr)
+	}
+	if upsertErr := store.UpsertSessionMeta(
+		ctx,
+		oldKey,
+		oldScopeJSON,
+		[]string{legacyAlias},
+	); upsertErr != nil {
+		t.Fatal(upsertErr)
+	}
+
+	h := NewHandler(configPath)
+	var reboundKey string
+	h.sessionDeleteAfterLookup = func() {
+		h.sessionDeleteAfterLookup = nil
+		if deleted, deleteErr := store.DeleteSession(ctx, oldKey); deleteErr != nil || !deleted {
+			t.Fatalf("replace old owner delete = (deleted=%v, err=%v)", deleted, deleteErr)
+		}
+
+		slackScope := oldScope
+		slackScope.Channel = "slack"
+		slackScopeJSON, marshalErr := json.Marshal(slackScope)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if addErr := store.AddMessage(ctx, oldKey, "user", "replacement Slack resource"); addErr != nil {
+			t.Fatal(addErr)
+		}
+		if upsertErr := store.UpsertSessionMeta(ctx, oldKey, slackScopeJSON, nil); upsertErr != nil {
+			t.Fatal(upsertErr)
+		}
+
+		newScope := oldScope
+		newScope.AgentID = "reviewer"
+		newKey := session.BuildSessionKey(newScope)
+		reboundKey = newKey
+		newScopeJSON, marshalErr := json.Marshal(newScope)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if addErr := store.AddMessage(ctx, newKey, "user", "new Pico owner"); addErr != nil {
+			t.Fatal(addErr)
+		}
+		if upsertErr := store.UpsertSessionMeta(
+			ctx,
+			newKey,
+			newScopeJSON,
+			[]string{legacyAlias},
+		); upsertErr != nil {
+			t.Fatal(upsertErr)
+		}
+	}
+
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(
+		rec,
+		httptest.NewRequest(http.MethodDelete, "/api/sessions/"+sessionID, nil),
+	)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	_, oldHistory, oldMeta, oldFound, oldErr := store.ReadSessionSnapshot(ctx, oldKey)
+	if oldErr != nil || !oldFound || len(oldHistory) != 1 ||
+		oldHistory[0].Content != "replacement Slack resource" {
+		t.Fatalf("replacement resource = (found=%v, history=%#v, err=%v)", oldFound, oldHistory, oldErr)
+	}
+	var currentOldScope session.SessionScope
+	if decodeErr := json.Unmarshal(oldMeta.Scope, &currentOldScope); decodeErr != nil ||
+		currentOldScope.Channel != "slack" {
+		t.Fatalf("replacement scope = %#v, err=%v", currentOldScope, decodeErr)
+	}
+	resolvedKey, newHistory, newMeta, newFound, newErr := store.ReadSessionSnapshot(ctx, reboundKey)
+	if newErr != nil || newFound || resolvedKey != "" || len(newHistory) != 0 || newMeta.Key != "" {
+		t.Fatalf(
+			"rebound Pico owner = (key=%q, found=%v, history=%#v, meta=%#v, err=%v), want deleted",
+			resolvedKey,
+			newFound,
+			newHistory,
+			newMeta,
+			newErr,
+		)
+	}
+	if currentRef, findErr := h.findPicoJSONLSession(ctx, dir, sessionID); !errors.Is(findErr, os.ErrNotExist) {
+		t.Fatalf("current Pico owner = %#v, err=%v", currentRef, findErr)
+	}
+}
+
+func TestHandleDeleteSession_DeletesEveryCurrentOwnerForProjectedID(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	dir := sessionsTestDir(t, configPath)
+	store, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	const sessionID = "shared-projection"
+	keys := make([]string, 0, 2)
+	aliases := make([]string, 0, 2)
+	for _, agentID := range []string{"main", "reviewer"} {
+		scope := session.SessionScope{
+			Version:    session.ScopeVersionV1,
+			AgentID:    agentID,
+			Channel:    "pico",
+			Account:    "default",
+			Dimensions: []string{"sender"},
+			Values:     map[string]string{"sender": "pico:" + sessionID},
+		}
+		key := session.BuildSessionKey(scope)
+		alias := "agent:" + agentID + ":direct:pico:" + sessionID
+		rawScope, marshalErr := json.Marshal(scope)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if addErr := store.AddMessage(ctx, key, "user", agentID+" owner"); addErr != nil {
+			t.Fatal(addErr)
+		}
+		if upsertErr := store.UpsertSessionMeta(ctx, key, rawScope, []string{alias}); upsertErr != nil {
+			t.Fatal(upsertErr)
+		}
+		keys = append(keys, key)
+		aliases = append(aliases, alias)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(
+		rec,
+		httptest.NewRequest(http.MethodDelete, "/api/sessions/"+sessionID, nil),
+	)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	for _, key := range append(keys, aliases...) {
+		_, _, _, found, readErr := store.ReadSessionSnapshot(ctx, key)
+		if readErr != nil || found {
+			t.Fatalf("deleted owner %q = (found=%v, err=%v)", key, found, readErr)
+		}
+	}
+	listRec := httptest.NewRecorder()
+	mux.ServeHTTP(listRec, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
+	if listRec.Code != http.StatusOK || listRec.Body.String() != "[]\n" {
+		t.Fatalf("list after delete status=%d body=%s", listRec.Code, listRec.Body.String())
+	}
+}
+
+func TestHandleDeleteSession_MissingSessionsDirectoryReturnsNotFound(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(
+		rec,
+		httptest.NewRequest(http.MethodDelete, "/api/sessions/unknown", nil),
+	)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("delete status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleDeleteSession_DeletesSameIDMetadataLessShadow(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	dir := sessionsTestDir(t, configPath)
+	store, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	const sessionID = "orphan-shadow"
+	scope := session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "main",
+		Channel:    "pico",
+		Account:    "default",
+		Dimensions: []string{"sender"},
+		Values:     map[string]string{"sender": "pico:" + sessionID},
+	}
+	canonicalKey := session.BuildSessionKey(scope)
+	rawScope, err := json.Marshal(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addErr := store.AddMessage(ctx, canonicalKey, "user", "canonical owner"); addErr != nil {
+		t.Fatal(addErr)
+	}
+	if upsertErr := store.UpsertSessionMeta(ctx, canonicalKey, rawScope, nil); upsertErr != nil {
+		t.Fatal(upsertErr)
+	}
+
+	shadowKey := legacyPicoSessionPrefix + sessionID
+	shadowPath := filepath.Join(dir, sanitizeSessionKey(shadowKey)+".jsonl")
+	line, err := json.Marshal(providers.Message{Role: "user", Content: "detached shadow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(shadowPath, append(line, '\n'), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	listRec := httptest.NewRecorder()
+	mux.ServeHTTP(listRec, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var items []sessionListItem
+	if decodeErr := json.Unmarshal(listRec.Body.Bytes(), &items); decodeErr != nil || len(items) != 1 {
+		t.Fatalf("deduplicated list = %#v, err=%v", items, decodeErr)
+	}
+
+	deleteRec := httptest.NewRecorder()
+	mux.ServeHTTP(
+		deleteRec,
+		httptest.NewRequest(http.MethodDelete, "/api/sessions/"+sessionID, nil),
+	)
+	if deleteRec.Code != http.StatusNoContent {
+		t.Fatalf("delete status=%d body=%s", deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, err := os.Stat(shadowPath); !os.IsNotExist(err) {
+		t.Fatalf("detached shadow stat error = %v", err)
+	}
+	resolvedKey, history, meta, found, readErr := store.ReadSessionSnapshot(ctx, canonicalKey)
+	if readErr != nil || found || resolvedKey != "" || len(history) != 0 || meta.Key != "" {
+		t.Fatalf(
+			"canonical owner = (key=%q, found=%v, history=%#v, meta=%#v, err=%v), want deleted",
+			resolvedKey,
+			found,
+			history,
+			meta,
+			readErr,
+		)
+	}
+}
+
+func TestHandleGetSession_UsesFirstReadableOwnerShownByList(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	dir := sessionsTestDir(t, configPath)
+	store, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	const sessionID = "readable-owner"
+	scopes := []session.SessionScope{
+		{
+			Version:    session.ScopeVersionV1,
+			AgentID:    "main",
+			Channel:    "pico",
+			Account:    "default",
+			Dimensions: []string{"sender"},
+			Values:     map[string]string{"sender": "pico:" + sessionID},
+		},
+		{
+			Version:    session.ScopeVersionV1,
+			AgentID:    "reviewer",
+			Channel:    "pico",
+			Account:    "default",
+			Dimensions: []string{"sender"},
+			Values:     map[string]string{"sender": "pico:" + sessionID},
+		},
+	}
+	if session.BuildSessionKey(scopes[1]) < session.BuildSessionKey(scopes[0]) {
+		scopes[0], scopes[1] = scopes[1], scopes[0]
+	}
+	for index, scope := range scopes {
+		key := session.BuildSessionKey(scope)
+		rawScope, marshalErr := json.Marshal(scope)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if index == 1 {
+			if addErr := store.AddMessage(ctx, key, "user", "readable second owner"); addErr != nil {
+				t.Fatal(addErr)
+			}
+		}
+		if upsertErr := store.UpsertSessionMeta(ctx, key, rawScope, nil); upsertErr != nil {
+			t.Fatal(upsertErr)
+		}
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	listRec := httptest.NewRecorder()
+	mux.ServeHTTP(listRec, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var items []sessionListItem
+	if decodeErr := json.Unmarshal(listRec.Body.Bytes(), &items); decodeErr != nil ||
+		len(items) != 1 || items[0].Preview != "readable second owner" {
+		t.Fatalf("list items = %#v, err=%v", items, decodeErr)
+	}
+
+	detailRec := httptest.NewRecorder()
+	mux.ServeHTTP(
+		detailRec,
+		httptest.NewRequest(http.MethodGet, "/api/sessions/"+sessionID, nil),
+	)
+	if detailRec.Code != http.StatusOK ||
+		!strings.Contains(detailRec.Body.String(), "readable second owner") {
+		t.Fatalf("detail status=%d body=%s", detailRec.Code, detailRec.Body.String())
+	}
+}
+
+func TestHandleSessions_ReadProjectionRejectsLookupReboundToSlack(t *testing.T) {
+	for _, endpoint := range []string{"list", "detail"} {
+		t.Run(endpoint, func(t *testing.T) {
+			configPath, cleanup := setupOAuthTestEnv(t)
+			defer cleanup()
+
+			dir := sessionsTestDir(t, configPath)
+			store, err := memory.NewJSONLStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			ctx := context.Background()
+
+			const sessionID = "read-rebound"
+			picoScope := session.SessionScope{
+				Version:    session.ScopeVersionV1,
+				AgentID:    "main",
+				Channel:    "pico",
+				Account:    "default",
+				Dimensions: []string{"sender"},
+				Values:     map[string]string{"sender": "pico:" + sessionID},
+			}
+			key := session.BuildSessionKey(picoScope)
+			picoScopeJSON, err := json.Marshal(picoScope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if addErr := store.AddMessage(ctx, key, "user", "old Pico history"); addErr != nil {
+				t.Fatal(addErr)
+			}
+			if upsertErr := store.UpsertSessionMeta(ctx, key, picoScopeJSON, nil); upsertErr != nil {
+				t.Fatal(upsertErr)
+			}
+
+			h := NewHandler(configPath)
+			h.sessionReadAfterLookup = func() {
+				h.sessionReadAfterLookup = nil
+				if deleted, deleteErr := store.DeleteSession(ctx, key); deleteErr != nil || !deleted {
+					t.Fatalf("replace Pico delete = (deleted=%v, err=%v)", deleted, deleteErr)
+				}
+				slackScope := picoScope
+				slackScope.Channel = "slack"
+				slackScopeJSON, marshalErr := json.Marshal(slackScope)
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
+				if addErr := store.AddMessage(
+					ctx,
+					key,
+					"user",
+					"private Slack replacement",
+				); addErr != nil {
+					t.Fatal(addErr)
+				}
+				if upsertErr := store.UpsertSessionMeta(ctx, key, slackScopeJSON, nil); upsertErr != nil {
+					t.Fatal(upsertErr)
+				}
+			}
+
+			mux := http.NewServeMux()
+			h.RegisterRoutes(mux)
+			rec := httptest.NewRecorder()
+			path := "/api/sessions"
+			if endpoint == "detail" {
+				path += "/" + sessionID
+			}
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if endpoint == "list" {
+				if rec.Code != http.StatusOK || rec.Body.String() != "[]\n" {
+					t.Fatalf("list status=%d body=%s", rec.Code, rec.Body.String())
+				}
+			} else if rec.Code != http.StatusNotFound {
+				t.Fatalf("detail status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), "private Slack replacement") {
+				t.Fatal("read projection exposed rebound Slack history")
+			}
+		})
 	}
 }
 
@@ -1589,15 +2347,30 @@ func TestHandleDeleteSession_JSONLStorage(t *testing.T) {
 	}
 
 	sessionKey := legacyPicoSessionPrefix + "delete-jsonl"
-	if err := store.AddFullMessage(nil, sessionKey, providers.Message{
+	if addErr := store.AddFullMessage(nil, sessionKey, providers.Message{
 		Role:    "user",
 		Content: "delete me",
-	}); err != nil {
-		t.Fatalf("AddFullMessage() error = %v", err)
+	}); addErr != nil {
+		t.Fatalf("AddFullMessage() error = %v", addErr)
 	}
-	if err := store.SetSummary(nil, sessionKey, "delete summary"); err != nil {
-		t.Fatalf("SetSummary() error = %v", err)
+	if summaryErr := store.SetSummary(nil, sessionKey, "delete summary"); summaryErr != nil {
+		t.Fatalf("SetSummary() error = %v", summaryErr)
 	}
+	base := filepath.Join(dir, sanitizeSessionKey(sessionKey))
+	writeSessionMessageFile(t, base+".history-a", providers.Message{
+		Role: "user", Content: "delete active slot",
+	})
+	writeSessionMessageFile(t, base+".history-b", providers.Message{
+		Role: "user", Content: "delete inactive slot",
+	})
+	meta, err := store.GetSessionMeta(nil, sessionKey)
+	if err != nil {
+		t.Fatalf("GetSessionMeta() error = %v", err)
+	}
+	meta.HistorySlot = "a"
+	meta.Skip = 0
+	meta.Count = 1
+	writeSessionMetaFile(t, base+".meta.json", meta)
 
 	h := NewHandler(configPath)
 	mux := http.NewServeMux()
@@ -1611,8 +2384,12 @@ func TestHandleDeleteSession_JSONLStorage(t *testing.T) {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusNoContent, rec.Body.String())
 	}
 
-	base := filepath.Join(dir, sanitizeSessionKey(sessionKey))
-	for _, path := range []string{base + ".jsonl", base + ".meta.json"} {
+	for _, path := range []string{
+		base + ".jsonl",
+		base + ".history-a",
+		base + ".history-b",
+		base + ".meta.json",
+	} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("expected %s to be removed, stat err = %v", path, err)
 		}
@@ -1728,6 +2505,51 @@ func TestHandleSessions_ListsLegacyJSONLWithoutMeta(t *testing.T) {
 
 	if detailRec.Code != http.StatusOK {
 		t.Fatalf("detail status = %d, want %d, body=%s", detailRec.Code, http.StatusOK, detailRec.Body.String())
+	}
+}
+
+func TestHandleSessions_MetadataLessOpaqueJSONLCanBeDeleted(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	dir := sessionsTestDir(t, configPath)
+	const sessionKey = "sk_v1_metadata-less"
+	historyPath := filepath.Join(dir, sessionKey+".jsonl")
+	line, err := json.Marshal(providers.Message{Role: "user", Content: "orphan history"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(historyPath, append(line, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	listRec := httptest.NewRecorder()
+	mux.ServeHTTP(listRec, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
+	if listRec.Code != http.StatusOK || !strings.Contains(listRec.Body.String(), sessionKey) {
+		t.Fatalf("list status=%d body=%s", listRec.Code, listRec.Body.String())
+	}
+	detailRec := httptest.NewRecorder()
+	mux.ServeHTTP(
+		detailRec,
+		httptest.NewRequest(http.MethodGet, "/api/sessions/"+sessionKey, nil),
+	)
+	if detailRec.Code != http.StatusOK || !strings.Contains(detailRec.Body.String(), "orphan history") {
+		t.Fatalf("detail status=%d body=%s", detailRec.Code, detailRec.Body.String())
+	}
+	deleteRec := httptest.NewRecorder()
+	mux.ServeHTTP(
+		deleteRec,
+		httptest.NewRequest(http.MethodDelete, "/api/sessions/"+sessionKey, nil),
+	)
+	if deleteRec.Code != http.StatusNoContent {
+		t.Fatalf("delete status=%d body=%s", deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, err := os.Stat(historyPath); !os.IsNotExist(err) {
+		t.Fatalf("deleted orphan history stat error = %v", err)
 	}
 }
 

@@ -61,16 +61,6 @@ func (s Store) handoffPath(id string) string {
 	return filepath.Join(s.HandoffsDir, sanitizeThreadID(id)+".json")
 }
 
-func (s Store) sessionMetaPath(sessionKey string) string {
-	s = s.withDefaults()
-	return filepath.Join(s.Dir, sanitizeSessionKey(sessionKey)+".meta.json")
-}
-
-func (s Store) sessionJSONLPath(sessionKey string) string {
-	s = s.withDefaults()
-	return filepath.Join(s.Dir, sanitizeSessionKey(sessionKey)+".jsonl")
-}
-
 func (s Store) readThreadMeta(id string) (ThreadMeta, error) {
 	data, err := os.ReadFile(s.threadPath(id))
 	if err != nil {
@@ -151,8 +141,24 @@ func (s Store) threadFromRegistryMeta(meta ThreadMeta) (Thread, bool) {
 		return Thread{}, false
 	}
 
-	sessionMeta, _ := readMeta(s.sessionMetaPath(meta.PrimarySessionKey), meta.PrimarySessionKey)
-	messages, _ := readMessages(s.sessionJSONLPath(meta.PrimarySessionKey), sessionMeta.Skip)
+	sessionMeta := memory.SessionMeta{}
+	messages := []providers.Message{}
+	historyModifiedAt := time.Time{}
+	if sessionStore, err := s.openSessionStore(); err == nil {
+		sessionKey := meta.PrimarySessionKey
+		if loadedMessages, loadedMeta, modifiedAt, readErr := sessionStore.ReadSessionState(
+			context.Background(),
+			sessionKey,
+		); readErr == nil {
+			messages = loadedMessages
+			sessionMeta = loadedMeta
+			historyModifiedAt = modifiedAt
+			if loadedMeta.Key != "" && loadedMeta.Key != meta.PrimarySessionKey {
+				meta.SessionKeys = uniqueStrings(append([]string{loadedMeta.Key}, meta.SessionKeys...))
+				meta.PrimarySessionKey = loadedMeta.Key
+			}
+		}
+	}
 	visible := visibleMessages(messages)
 	preview := ""
 	for _, msg := range visible {
@@ -189,9 +195,7 @@ func (s Store) threadFromRegistryMeta(meta ThreadMeta) (Thread, bool) {
 		updated = meta.CreatedAt
 	}
 	if updated.IsZero() {
-		if info, err := os.Stat(s.sessionJSONLPath(meta.PrimarySessionKey)); err == nil {
-			updated = info.ModTime()
-		}
+		updated = historyModifiedAt
 	}
 	created := meta.CreatedAt
 	if created.IsZero() {
@@ -234,6 +238,10 @@ func (s Store) CreateThread(ctx context.Context, req CreateRequest) (Thread, err
 	primarySessionKey := strings.TrimSpace(req.PrimarySessionKey)
 	if primarySessionKey == "" {
 		return Thread{}, errors.New("threads: primary session key is empty")
+	}
+	primarySessionKey, err := s.canonicalSessionKey(ctx, primarySessionKey)
+	if err != nil {
+		return Thread{}, err
 	}
 	uiSessionID := strings.TrimSpace(req.UISessionID)
 	if uiSessionID == "" {
@@ -357,8 +365,17 @@ func (s Store) AttachCurrent(ctx context.Context, req AttachRequest) (Thread, Th
 	if err != nil {
 		return Thread{}, ThreadHandoff{}, err
 	}
+	originSessionKey, err := s.canonicalSessionKey(ctx, req.SessionKey)
+	if err != nil {
+		return Thread{}, ThreadHandoff{}, err
+	}
+	primarySessionKey, err := s.canonicalSessionKey(ctx, meta.PrimarySessionKey)
+	if err != nil {
+		return Thread{}, ThreadHandoff{}, err
+	}
 	now := time.Now()
-	meta.SessionKeys = uniqueStrings(append(meta.SessionKeys, req.SessionKey))
+	meta.PrimarySessionKey = primarySessionKey
+	meta.SessionKeys = uniqueStrings(append(meta.SessionKeys, originSessionKey, primarySessionKey))
 	if req.OwnerIdentity != "" && meta.OwnerIdentity == "" {
 		meta.OwnerIdentity = req.OwnerIdentity
 	}
@@ -369,13 +386,13 @@ func (s Store) AttachCurrent(ctx context.Context, req AttachRequest) (Thread, Th
 	if err := s.writeThreadMeta(meta); err != nil {
 		return Thread{}, ThreadHandoff{}, err
 	}
-	if err := s.setSessionThreadLink(req.SessionKey, meta.ID, now); err != nil {
+	if err := s.setSessionThreadLink(originSessionKey, meta.ID, now); err != nil {
 		return Thread{}, ThreadHandoff{}, err
 	}
 
 	handoff := ThreadHandoff{
 		ID:               GenerateHandoffID(),
-		OriginSessionKey: req.SessionKey,
+		OriginSessionKey: originSessionKey,
 		OriginSessionID:  strings.TrimSpace(req.OriginSessionID),
 		TargetThreadID:   meta.ID,
 		TargetSessionID:  meta.UISessionID,
@@ -386,9 +403,9 @@ func (s Store) AttachCurrent(ctx context.Context, req AttachRequest) (Thread, Th
 	if err := s.writeHandoff(handoff); err != nil {
 		return Thread{}, ThreadHandoff{}, err
 	}
-	if handoff.Summary != "" && meta.PrimarySessionKey != req.SessionKey {
+	if handoff.Summary != "" && primarySessionKey != originSessionKey {
 		if store, err := memory.NewJSONLStore(s.Dir); err == nil {
-			_ = store.AddFullMessage(ctx, meta.PrimarySessionKey, providers.Message{
+			_ = store.AddFullMessage(ctx, primarySessionKey, providers.Message{
 				Role:    "user",
 				Content: "Continued from another session.\n\n" + handoff.Summary,
 			})
@@ -448,18 +465,19 @@ func (s Store) setSessionThreadLink(sessionKey, threadID string, attachedAt time
 	if sessionKey == "" {
 		return nil
 	}
-	meta, err := readMeta(s.sessionMetaPath(sessionKey), sessionKey)
+	sessionStore, err := s.openSessionStore()
 	if err != nil {
 		return err
 	}
-	if meta.CreatedAt.IsZero() {
-		meta.CreatedAt = attachedAt
-	}
-	meta.UpdatedAt = attachedAt
-	meta.Key = sessionKey
-	meta.ThreadID = strings.TrimSpace(threadID)
-	meta.ThreadAttachedAt = attachedAt
-	return writeMeta(s.sessionMetaPath(sessionKey), meta)
+	return sessionStore.UpdateSessionMeta(context.Background(), sessionKey, func(meta *memory.SessionMeta) error {
+		if meta.CreatedAt.IsZero() {
+			meta.CreatedAt = attachedAt
+		}
+		meta.UpdatedAt = attachedAt
+		meta.ThreadID = strings.TrimSpace(threadID)
+		meta.ThreadAttachedAt = attachedAt
+		return nil
+	})
 }
 
 func (s Store) clearSessionThreadLink(sessionKey string) error {
@@ -467,14 +485,16 @@ func (s Store) clearSessionThreadLink(sessionKey string) error {
 	if sessionKey == "" {
 		return nil
 	}
-	meta, err := readMeta(s.sessionMetaPath(sessionKey), sessionKey)
+	sessionStore, err := s.openSessionStore()
 	if err != nil {
 		return err
 	}
-	meta.ThreadID = ""
-	meta.ThreadAttachedAt = time.Time{}
-	meta.UpdatedAt = time.Now()
-	return writeMeta(s.sessionMetaPath(sessionKey), meta)
+	return sessionStore.UpdateSessionMeta(context.Background(), sessionKey, func(meta *memory.SessionMeta) error {
+		meta.ThreadID = ""
+		meta.ThreadAttachedAt = time.Time{}
+		meta.UpdatedAt = time.Now()
+		return nil
+	})
 }
 
 func (s Store) migrateSessionThreads(ctx context.Context) error {
@@ -486,15 +506,32 @@ func (s Store) migrateSessionThreads(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	sessionStore, err := s.openSessionStore()
+	if err != nil {
+		return err
+	}
+	seenCanonical := make(map[string]struct{})
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".meta.json") {
 			continue
 		}
 		base := strings.TrimSuffix(entry.Name(), ".meta.json")
-		meta, err := readMeta(filepath.Join(s.Dir, entry.Name()), sessionKeyFromSanitizedBase(base))
+		candidate, err := readMeta(filepath.Join(s.Dir, entry.Name()), sessionKeyFromSanitizedBase(base))
 		if err != nil {
 			continue
 		}
+		messages, meta, historyModifiedAt, err := sessionStore.ReadSessionState(ctx, candidate.Key)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			continue
+		}
+		canonicalKey := meta.Key
+		if _, seen := seenCanonical[canonicalKey]; seen {
+			continue
+		}
+		seenCanonical[canonicalKey] = struct{}{}
 		if !shouldMigrateSessionMeta(meta) {
 			continue
 		}
@@ -510,7 +547,7 @@ func (s Store) migrateSessionThreads(ctx context.Context) error {
 			continue
 		}
 		scope := scopeFromMeta(meta)
-		title, _ := titleAndPreview(meta, visibleMessages(mustReadMessages(s.sessionJSONLPath(meta.Key), meta.Skip)))
+		title, _ := titleAndPreview(meta, visibleMessages(messages))
 		reg := RegistrationMigrated
 		if meta.ThreadID != "" {
 			reg = RegistrationTool
@@ -536,13 +573,11 @@ func (s Store) migrateSessionThreads(ctx context.Context) error {
 			UpdatedAt:         meta.UpdatedAt,
 		}
 		if threadMeta.CreatedAt.IsZero() || threadMeta.UpdatedAt.IsZero() {
-			if info, err := os.Stat(s.sessionJSONLPath(meta.Key)); err == nil {
-				if threadMeta.CreatedAt.IsZero() {
-					threadMeta.CreatedAt = info.ModTime()
-				}
-				if threadMeta.UpdatedAt.IsZero() {
-					threadMeta.UpdatedAt = info.ModTime()
-				}
+			if threadMeta.CreatedAt.IsZero() {
+				threadMeta.CreatedAt = historyModifiedAt
+			}
+			if threadMeta.UpdatedAt.IsZero() {
+				threadMeta.UpdatedAt = historyModifiedAt
 			}
 		}
 		if err := s.writeThreadMeta(threadMeta); err != nil {
@@ -676,14 +711,6 @@ func routingAgentFromSessionKey(sessionKey string) string {
 		return parsed.AgentID
 	}
 	return ""
-}
-
-func mustReadMessages(path string, skip int) []providers.Message {
-	messages, err := readMessages(path, skip)
-	if err != nil {
-		return nil
-	}
-	return messages
 }
 
 func uniqueStrings(values []string) []string {
