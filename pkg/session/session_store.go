@@ -2,22 +2,39 @@ package session
 
 import (
 	"context"
+	"errors"
 	"reflect"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
+)
+
+var (
+	// ErrSnapshotConflict reports that a session changed after the caller read
+	// the revision supplied in SessionSnapshotReplacement.ExpectedRevision.
+	ErrSnapshotConflict = errors.New("session snapshot conflict")
+
+	// ErrSnapshotUnsupported reports that a SessionStore cannot atomically
+	// replace a complete session snapshot. Callers must not emulate replacement
+	// with the legacy fire-and-forget setters because that can expose torn state.
+	ErrSnapshotUnsupported = errors.New("session snapshot replacement unsupported")
 )
 
 // SessionSnapshot is an immutable-by-convention, point-in-time view of an
 // existing session. Key is always the canonical session key, even when the
 // lookup was made through an alias.
 //
-// Readers must return a deep copy: callers may freely mutate History and Scope
-// without changing the live session.
+// Readers must return a deep copy: callers may freely mutate History, Scope,
+// and Aliases without changing the live session.
 type SessionSnapshot struct {
 	Key     string
 	History []providers.Message
 	Summary string
 	Scope   *SessionScope
+	// Aliases contains the exact committed aliases for Key.
+	Aliases []string
+	// Revision is an opaque compare-and-swap token. It may be empty for
+	// read-only backends that do not implement SnapshotReplacer.
+	Revision string
 }
 
 // SnapshotReader is the optional, strict read API used when a caller needs an
@@ -29,6 +46,26 @@ type SessionSnapshot struct {
 // aliases return the canonical key in SessionSnapshot.Key.
 type SnapshotReader interface {
 	ReadSessionSnapshot(ctx context.Context, key string) (snapshot SessionSnapshot, found bool, err error)
+}
+
+// SessionSnapshotReplacement is one exact, compare-and-swap replacement of a
+// canonical session's visible history, summary, scope, and aliases. Key must be
+// the opaque key derived from Scope. An empty ExpectedRevision means that the
+// canonical session must not exist.
+type SessionSnapshotReplacement struct {
+	Key              string
+	History          []providers.Message
+	Summary          string
+	Scope            *SessionScope
+	Aliases          []string
+	ExpectedRevision string
+}
+
+// SnapshotReplacer is the optional atomic replacement capability. Stores that
+// do not implement it fail closed with ErrSnapshotUnsupported; replacement
+// must never be synthesized from SessionStore's individual write methods.
+type SnapshotReplacer interface {
+	ReplaceSessionSnapshot(ctx context.Context, replacement SessionSnapshotReplacement) error
 }
 
 // CloneMessages returns a graph-detached copy of session messages, including

@@ -36,6 +36,7 @@ available separately from the developer catalog.
 - Core types/functions: API handler/router, dashboard auth middleware/store, launcher config, model handlers, provider and MCP OAuth flow state, gateway process manager, startup/update/version handlers.
 - Runtime ordering: authenticate dashboard requests, load config, validate request body, mutate specific subsystem, save atomically where applicable, apply runtime side effects, return JSON.
 - Non-obvious constraints: secrets are preserved/redacted, logout is POST-only, login is rate-limited, OAuth flow state expires, feature-specific management stays outside the generic config form, and gateway logs remain inspectable after failures.
+- Testability boundary: unexported session lookup/delete callbacks on the launcher handler are inert by default and exist only to place deterministic barriers in cross-store race regressions; production session behavior remains in the feature-owned session handlers.
 
 ## Requirements
 

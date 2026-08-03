@@ -43,6 +43,8 @@ type Handler struct {
 	workflowTriggerReviewUseMu  sync.Mutex
 	workflowTriggerReviewUsed   map[[32]byte]int64
 	workflowDevelopmentTestDone func()
+	sessionReadAfterLookup      func()
+	sessionDeleteAfterLookup    func()
 	saveToolStateConfig         func(string, *config.Config, string) (string, error)
 	saveConfigIfRevision        func(string, *config.Config, string) (string, error)
 }

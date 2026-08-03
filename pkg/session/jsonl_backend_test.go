@@ -2,6 +2,8 @@ package session_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,11 +19,68 @@ import (
 
 // Compile-time interface satisfaction checks.
 var (
-	_ session.SessionStore   = (*session.SessionManager)(nil)
-	_ session.SessionStore   = (*session.JSONLBackend)(nil)
-	_ session.SnapshotReader = (*session.SessionManager)(nil)
-	_ session.SnapshotReader = (*session.JSONLBackend)(nil)
+	_ session.SessionStore     = (*session.SessionManager)(nil)
+	_ session.SessionStore     = (*session.JSONLBackend)(nil)
+	_ session.SnapshotReader   = (*session.SessionManager)(nil)
+	_ session.SnapshotReader   = (*session.JSONLBackend)(nil)
+	_ session.SnapshotReplacer = (*session.JSONLBackend)(nil)
 )
+
+type recordingSnapshotStore struct {
+	memory.Store
+	called      int
+	replacement memory.SessionSnapshotReplacement
+	returnErr   error
+	mutateInput bool
+}
+
+func (s *recordingSnapshotStore) ReplaceSessionSnapshot(
+	_ context.Context,
+	replacement memory.SessionSnapshotReplacement,
+) error {
+	s.called++
+	s.replacement = replacement
+	s.replacement.History = session.CloneMessages(replacement.History)
+	s.replacement.Scope = append(json.RawMessage(nil), replacement.Scope...)
+	s.replacement.Aliases = append([]string(nil), replacement.Aliases...)
+
+	if s.mutateInput {
+		replacement.History[0].Content = "mutated by lower store"
+		replacement.History[0].ToolCalls[0].Function.Name = "mutated"
+		replacement.History[0].ToolCalls[0].Function.Arguments = `{"mutated":true}`
+		replacement.Scope[0] = 'x'
+		replacement.Aliases[0] = "mutated"
+	}
+	return s.returnErr
+}
+
+func validSnapshotReplacement() session.SessionSnapshotReplacement {
+	scope := &session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "main",
+		Channel:    "review",
+		Account:    "default",
+		Dimensions: []string{"review", "review_version"},
+		Values: map[string]string{
+			"review":         "prc_0123456789abcdef0123456789abcdef",
+			"review_version": "1",
+		},
+	}
+	return session.SessionSnapshotReplacement{
+		Key: session.BuildSessionKey(*scope),
+		History: []providers.Message{{
+			Role:    "user",
+			Content: "review this",
+			ToolCalls: []providers.ToolCall{{
+				ID:       "call-1",
+				Function: &providers.FunctionCall{Name: "inspect", Arguments: `{"path":"main.go"}`},
+			}},
+		}},
+		Summary: "review summary",
+		Scope:   scope,
+		Aliases: []string{"review:case:prc_0123456789abcdef0123456789abcdef"},
+	}
+}
 
 func newBackend(t *testing.T) *session.JSONLBackend {
 	t.Helper()
@@ -267,6 +326,39 @@ func TestJSONLBackend_EnsureSessionMetadata_PromotesLegacyAliasHistory(t *testin
 	}
 }
 
+func TestJSONLBackend_EnsureSessionMetadata_AllowsSharedLegacyFallbacksAcrossAccounts(t *testing.T) {
+	b := newBackend(t)
+	allocations := make([]session.Allocation, 0, 2)
+	for _, account := range []string{"work", "personal"} {
+		allocation := session.AllocateRouteSession(session.AllocationInput{
+			AgentID: "main",
+			Context: bus.InboundContext{
+				Channel:  "telegram",
+				Account:  account,
+				ChatID:   "dm-42",
+				ChatType: "direct",
+				SenderID: "user-42",
+			},
+			SessionPolicy: routing.SessionPolicy{Dimensions: []string{"sender"}},
+		})
+		allocations = append(allocations, allocation)
+		b.EnsureSessionMetadata(
+			allocation.SessionKey,
+			&allocation.Scope,
+			allocation.SessionAliases,
+		)
+	}
+	if allocations[0].SessionKey == allocations[1].SessionKey {
+		t.Fatal("account-specific allocations unexpectedly share a canonical key")
+	}
+	for index, allocation := range allocations {
+		scope := b.GetSessionScope(allocation.SessionKey)
+		if scope == nil || scope.Account != allocation.Scope.Account {
+			t.Fatalf("scope %d = %+v, want account %q", index, scope, allocation.Scope.Account)
+		}
+	}
+}
+
 func TestJSONLBackend_EnsureSessionMetadata_PromotesLegacyPicoDirectAliasHistory(t *testing.T) {
 	b := newBackend(t)
 
@@ -365,12 +457,19 @@ func TestJSONLBackendReadSessionSnapshot_ResolvesAliasAndClones(t *testing.T) {
 	if snapshot.Scope == nil || snapshot.Scope.Values["repo"] != "org/repo" {
 		t.Fatalf("snapshot scope = %+v", snapshot.Scope)
 	}
+	if len(snapshot.Aliases) != 1 || snapshot.Aliases[0] != alias {
+		t.Fatalf("snapshot aliases = %v, want [%q]", snapshot.Aliases, alias)
+	}
+	if snapshot.Revision == "" {
+		t.Fatal("snapshot revision is empty")
+	}
 	if len(snapshot.History) != 1 || snapshot.History[0].Content != "review this" {
 		t.Fatalf("snapshot history = %+v", snapshot.History)
 	}
 
 	snapshot.Scope.Dimensions[0] = "mutated"
 	snapshot.Scope.Values["repo"] = "mutated"
+	snapshot.Aliases[0] = "mutated"
 	snapshot.History[0].Attachments[0].Filename = "mutated"
 	snapshot.History[0].SystemParts[0].CacheControl.Type = "mutated"
 	snapshot.History[0].ToolCalls[0].Function.Name = "mutated"
@@ -381,6 +480,9 @@ func TestJSONLBackendReadSessionSnapshot_ResolvesAliasAndClones(t *testing.T) {
 	}
 	if again.Scope.Dimensions[0] != "repo" || again.Scope.Values["repo"] != "org/repo" {
 		t.Fatalf("stored scope changed through snapshot: %+v", again.Scope)
+	}
+	if len(again.Aliases) != 1 || again.Aliases[0] != alias {
+		t.Fatalf("stored aliases changed through snapshot: %v", again.Aliases)
 	}
 	message := again.History[0]
 	if message.Attachments[0].Filename != "finding.json" ||
@@ -423,7 +525,8 @@ func TestJSONLBackendReadSessionSnapshot_PropagatesCorruption(t *testing.T) {
 		}
 
 		_, found, err := b.ReadSessionSnapshot(context.Background(), "corrupt-meta")
-		if err == nil || found || !strings.Contains(err.Error(), "decode meta") {
+		if err == nil || found || !strings.Contains(err.Error(), "decode") ||
+			!strings.Contains(err.Error(), "meta") {
 			t.Fatalf("corrupt metadata read = (found=%v, err=%v)", found, err)
 		}
 	})
@@ -456,4 +559,223 @@ func TestJSONLBackendReadSessionSnapshot_PropagatesCorruption(t *testing.T) {
 			t.Fatalf("corrupt history read = (found=%v, err=%v)", found, err)
 		}
 	})
+}
+
+func TestJSONLBackendReplaceSessionSnapshot_RoundTripAndCAS(t *testing.T) {
+	b := newBackend(t)
+	replacement := validSnapshotReplacement()
+	if err := b.ReplaceSessionSnapshot(context.Background(), replacement); err != nil {
+		t.Fatalf("ReplaceSessionSnapshot() first create: %v", err)
+	}
+
+	// Mutation after return must not affect the committed tuple.
+	replacement.History[0].Content = "mutated"
+	replacement.Scope.Values["review"] = "mutated"
+	replacement.Aliases[0] = "mutated"
+
+	snapshot, found, err := b.ReadSessionSnapshot(
+		context.Background(),
+		"review:case:prc_0123456789abcdef0123456789abcdef",
+	)
+	if err != nil || !found {
+		t.Fatalf("ReadSessionSnapshot() = (found=%v, err=%v)", found, err)
+	}
+	if snapshot.Key == "" || snapshot.History[0].Content != "review this" ||
+		snapshot.Summary != "review summary" {
+		t.Fatalf("snapshot = %+v", snapshot)
+	}
+	if snapshot.Scope == nil ||
+		snapshot.Scope.Values["review"] != "prc_0123456789abcdef0123456789abcdef" {
+		t.Fatalf("snapshot scope = %+v", snapshot.Scope)
+	}
+	if len(snapshot.Aliases) != 1 ||
+		snapshot.Aliases[0] != "review:case:prc_0123456789abcdef0123456789abcdef" {
+		t.Fatalf("snapshot aliases = %v", snapshot.Aliases)
+	}
+	if snapshot.Revision == "" {
+		t.Fatal("snapshot revision is empty")
+	}
+
+	previousRevision := snapshot.Revision
+	next := session.SessionSnapshotReplacement{
+		Key:              snapshot.Key,
+		History:          []providers.Message{{Role: "assistant", Content: "fixed"}},
+		Summary:          "updated",
+		Scope:            snapshot.Scope,
+		Aliases:          snapshot.Aliases,
+		ExpectedRevision: previousRevision,
+	}
+	if replaceErr := b.ReplaceSessionSnapshot(context.Background(), next); replaceErr != nil {
+		t.Fatalf("ReplaceSessionSnapshot() CAS: %v", replaceErr)
+	}
+
+	updated, found, err := b.ReadSessionSnapshot(context.Background(), snapshot.Key)
+	if err != nil || !found {
+		t.Fatalf("updated ReadSessionSnapshot() = (found=%v, err=%v)", found, err)
+	}
+	if updated.Revision == "" || updated.Revision == previousRevision ||
+		len(updated.History) != 1 || updated.History[0].Content != "fixed" ||
+		updated.Summary != "updated" {
+		t.Fatalf("updated snapshot = %+v", updated)
+	}
+
+	next.ExpectedRevision = previousRevision
+	if replaceErr := b.ReplaceSessionSnapshot(context.Background(), next); !errors.Is(
+		replaceErr,
+		session.ErrSnapshotConflict,
+	) {
+		t.Fatalf("stale replacement error = %v, want ErrSnapshotConflict", replaceErr)
+	}
+}
+
+func TestJSONLBackendReplaceSessionSnapshot_ClonesLowerStoreInput(t *testing.T) {
+	recording := &recordingSnapshotStore{mutateInput: true}
+	b := session.NewJSONLBackend(recording)
+	replacement := validSnapshotReplacement()
+
+	if err := b.ReplaceSessionSnapshot(context.Background(), replacement); err != nil {
+		t.Fatalf("ReplaceSessionSnapshot() error = %v", err)
+	}
+	if recording.called != 1 {
+		t.Fatalf("lower replacement calls = %d, want 1", recording.called)
+	}
+	if recording.replacement.Key != replacement.Key ||
+		recording.replacement.ExpectedRevision != replacement.ExpectedRevision ||
+		recording.replacement.History[0].Content != "review this" ||
+		recording.replacement.Aliases[0] != replacement.Aliases[0] {
+		t.Fatalf("forwarded replacement = %+v", recording.replacement)
+	}
+	var decodedScope session.SessionScope
+	if err := json.Unmarshal(recording.replacement.Scope, &decodedScope); err != nil {
+		t.Fatalf("forwarded scope is invalid: %v", err)
+	}
+	if decodedScope.Values["review"] != replacement.Scope.Values["review"] {
+		t.Fatalf("forwarded scope = %+v", decodedScope)
+	}
+
+	if replacement.History[0].Content != "review this" ||
+		replacement.History[0].ToolCalls[0].Function.Name != "inspect" ||
+		replacement.History[0].ToolCalls[0].Function.Arguments != `{"path":"main.go"}` ||
+		replacement.Scope.Values["review"] != "prc_0123456789abcdef0123456789abcdef" ||
+		replacement.Aliases[0] != "review:case:prc_0123456789abcdef0123456789abcdef" {
+		t.Fatalf("lower store mutated caller-owned replacement: %+v", replacement)
+	}
+}
+
+func TestJSONLBackendReplaceSessionSnapshot_FailsClosedWhenUnsupported(t *testing.T) {
+	lower, err := memory.NewJSONLStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lower.Close() })
+
+	// Embedding only the stable Store interface intentionally hides the
+	// concrete JSONL store's optional snapshot replacement method.
+	b := session.NewJSONLBackend(struct{ memory.Store }{Store: lower})
+	err = b.ReplaceSessionSnapshot(context.Background(), validSnapshotReplacement())
+	if !errors.Is(err, session.ErrSnapshotUnsupported) {
+		t.Fatalf("ReplaceSessionSnapshot() error = %v, want ErrSnapshotUnsupported", err)
+	}
+	if sessions := lower.ListSessions(); len(sessions) != 0 {
+		t.Fatalf("unsupported replacement used legacy write fallback: %v", sessions)
+	}
+}
+
+func TestJSONLBackendReplaceSessionSnapshot_TranslatesConflictAndCancellation(t *testing.T) {
+	t.Run("conflict", func(t *testing.T) {
+		recording := &recordingSnapshotStore{returnErr: memory.ErrSnapshotConflict}
+		b := session.NewJSONLBackend(recording)
+		err := b.ReplaceSessionSnapshot(context.Background(), validSnapshotReplacement())
+		if !errors.Is(err, session.ErrSnapshotConflict) {
+			t.Fatalf("ReplaceSessionSnapshot() error = %v, want ErrSnapshotConflict", err)
+		}
+	})
+
+	t.Run("canceled before lower call", func(t *testing.T) {
+		recording := &recordingSnapshotStore{}
+		b := session.NewJSONLBackend(recording)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := b.ReplaceSessionSnapshot(ctx, validSnapshotReplacement())
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ReplaceSessionSnapshot() error = %v, want context.Canceled", err)
+		}
+		if recording.called != 0 {
+			t.Fatalf("lower replacement calls = %d, want 0", recording.called)
+		}
+	})
+}
+
+func TestJSONLBackendReplaceSessionSnapshot_ValidatesExactBinding(t *testing.T) {
+	tests := map[string]func(*session.SessionSnapshotReplacement){
+		"blank key": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.Key = ""
+		},
+		"non-exact opaque key": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.Key = strings.ToUpper(replacement.Key)
+		},
+		"missing scope": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.Scope = nil
+		},
+		"unsupported scope version": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.Scope.Version++
+		},
+		"non-canonical owner": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.Scope.AgentID = "Main"
+		},
+		"non-canonical channel": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.Scope.Channel = "Review"
+		},
+		"non-canonical account": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.Scope.Account = "Default"
+		},
+		"duplicate dimension": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.Scope.Dimensions = append(replacement.Scope.Dimensions, "review")
+		},
+		"missing dimension value": func(replacement *session.SessionSnapshotReplacement) {
+			delete(replacement.Scope.Values, "review")
+		},
+		"unlisted semantic value": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.Scope.Values["sender"] = "spoofed-owner"
+		},
+		"key and scope mismatch": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.Scope.Values["review"] = "another-review"
+		},
+		"blank alias": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.Aliases = []string{""}
+		},
+		"padded alias": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.Aliases = []string{" padded"}
+		},
+		"canonical key alias": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.Aliases = []string{replacement.Key}
+		},
+		"duplicate alias": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.Aliases = []string{"review:case:one", "review:case:one"}
+		},
+		"transient thought": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.History = []providers.Message{{
+				Role:             "assistant",
+				ReasoningContent: "runtime thought",
+			}}
+		},
+		"runtime tool arguments": func(replacement *session.SessionSnapshotReplacement) {
+			replacement.History[0].ToolCalls[0].Arguments = map[string]any{"path": "main.go"}
+		},
+	}
+
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			recording := &recordingSnapshotStore{}
+			b := session.NewJSONLBackend(recording)
+			replacement := validSnapshotReplacement()
+			mutate(&replacement)
+			if err := b.ReplaceSessionSnapshot(context.Background(), replacement); err == nil {
+				t.Fatal("ReplaceSessionSnapshot() error = nil, want validation error")
+			}
+			if recording.called != 0 {
+				t.Fatalf("lower replacement calls = %d, want 0", recording.called)
+			}
+		})
+	}
 }
