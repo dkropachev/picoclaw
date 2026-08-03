@@ -314,11 +314,37 @@ func (s *Store) GetReviewCase(
 	if !validPrefixedHexID(id, reviewCaseIDPrefix) {
 		return ReviewCaseDetail{}, fmt.Errorf("%w: invalid review case ID", ErrInvalidReview)
 	}
-	detail, err := getReviewCaseDetailWith(ctx, s.db, id)
-	if err != nil {
-		return ReviewCaseDetail{}, s.dbError(err)
+	var detail ReviewCaseDetail
+	snapshotErr := s.withReviewReadSnapshot(ctx, func(queryer reviewQueryer) error {
+		var readErr error
+		detail, readErr = getReviewCaseDetailWith(ctx, queryer, id)
+		return readErr
+	})
+	if snapshotErr != nil {
+		return ReviewCaseDetail{}, s.dbError(snapshotErr)
 	}
 	return detail, nil
+}
+
+// withReviewReadSnapshot holds one SQLite read transaction across every query
+// that composes a review aggregate. WAL readers then observe one database
+// snapshot even when another process commits a case mutation between queries.
+func (s *Store) withReviewReadSnapshot(
+	ctx context.Context,
+	operation func(reviewQueryer) error,
+) (err error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return err
+	}
+	// Rollback is harmless after Commit and guarantees release on every early
+	// return or panic from the aggregate composer.
+	defer func() { _ = tx.Rollback() }()
+	if err = operation(tx); err != nil {
+		return err
+	}
+	err = tx.Commit()
+	return err
 }
 
 // ListReviewCases returns a newest-first stable keyset page.
