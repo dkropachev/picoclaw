@@ -40,6 +40,22 @@ func TestStoreGetDispatchMetadataUnsupported(t *testing.T) {
 	}
 }
 
+func TestStoreGetReviewCaseUnsupported(t *testing.T) {
+	t.Parallel()
+
+	var store Store
+	if _, err := store.GetReviewCase(
+		context.Background(),
+		"prc_00000000000000000000000000000000",
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf(
+			"GetReviewCase() error = %v, want %v",
+			err,
+			ErrUnsupportedPlatform,
+		)
+	}
+}
+
 func TestStoreRoutingDispatchCapabilitiesUnsupported(t *testing.T) {
 	t.Parallel()
 

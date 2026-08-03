@@ -5,6 +5,7 @@ package eventing
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -219,6 +220,114 @@ func TestStoreReviewCaptureEditAndSubmissionLifecycle(t *testing.T) {
 	} {
 		assert.NotContains(t, string(publicJSON), internalField)
 	}
+}
+
+func TestStoreReviewAggregateReadUsesOneSQLiteSnapshot(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "events.db")
+	reader, _, input := newReviewStoreFixtureAt(t, databasePath)
+	reviewCase, created, err := reader.CaptureReview(ctx, input)
+	require.NoError(t, err)
+	require.True(t, created)
+	initial, err := reader.GetReviewCase(ctx, reviewCase.ID)
+	require.NoError(t, err)
+	require.Len(t, initial.Findings, 2)
+
+	writer, err := Open(ctx, databasePath)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, writer.Close())
+	})
+
+	var before, after ReviewCaseDetail
+	err = reader.withReviewReadSnapshot(ctx, func(queryer reviewQueryer) error {
+		var readErr error
+		before, readErr = getReviewCaseDetailWith(ctx, queryer, reviewCase.ID)
+		if readErr != nil {
+			return readErr
+		}
+
+		updatedFinding := input.Draft.Findings[0]
+		updatedFinding.Title = "Bound allocation before reading"
+		_, updateErr := writer.UpdateReviewFinding(ctx, ReviewFindingUpdate{
+			CaseID:          reviewCase.ID,
+			FindingID:       initial.Findings[0].ID,
+			ExpectedVersion: reviewCase.Version,
+			Finding:         updatedFinding,
+		})
+		if updateErr != nil {
+			return updateErr
+		}
+
+		_, appendErr := writer.AppendReviewMessages(ctx, ReviewMessageAppend{
+			CaseID:          reviewCase.ID,
+			ExpectedVersion: reviewCase.Version + 1,
+			Messages: []ReviewMessageDraft{{
+				Kind:    ReviewMessageChat,
+				Role:    ReviewMessageUser,
+				Content: "Does the aggregate remain coherent?",
+			}},
+		})
+		if appendErr != nil {
+			return appendErr
+		}
+		_, submissionErr := writer.CreateReviewSubmission(ctx, ReviewSubmissionDraft{
+			CaseID:          reviewCase.ID,
+			ExpectedVersion: reviewCase.Version + 2,
+			Marker:          "picoclaw-review/" + reviewCase.ID + "/3",
+			Request:         json.RawMessage(`{"event":"COMMENT"}`),
+		})
+		if submissionErr != nil {
+			return submissionErr
+		}
+
+		after, readErr = getReviewCaseDetailWith(ctx, queryer, reviewCase.ID)
+		return readErr
+	})
+	require.NoError(t, err)
+	assert.Equal(t, reviewCase.Version, before.Case.Version)
+	assert.Empty(t, before.Messages)
+	assert.Nil(t, before.Submission)
+	assert.Equal(t, before, after)
+
+	committed, err := reader.GetReviewCase(ctx, reviewCase.ID)
+	require.NoError(t, err)
+	assert.Equal(t, reviewCase.Version+3, committed.Case.Version)
+	assert.Equal(t, ReviewCaseSubmitting, committed.Case.Status)
+	assert.Equal(t, "Bound allocation before reading", committed.Findings[0].Title)
+	require.Len(t, committed.Messages, 1)
+	assert.Equal(t, "Does the aggregate remain coherent?", committed.Messages[0].Content)
+	require.NotNil(t, committed.Submission)
+	assert.Equal(t, ReviewSubmissionPending, committed.Submission.Status)
+	assert.Equal(t, reviewCase.Version+2, committed.Submission.DraftVersion)
+}
+
+func TestStoreReviewReadSnapshotReleasesTransactionAfterPanic(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, _, input := newReviewStoreFixture(t)
+	reviewCase, created, err := store.CaptureReview(ctx, input)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_ = store.withReviewReadSnapshot(ctx, func(queryer reviewQueryer) error {
+			_, readErr := getReviewCaseDetailWith(ctx, queryer, reviewCase.ID)
+			require.NoError(t, readErr)
+			panic("stop aggregate composition")
+		})
+	}()
+	assert.Equal(t, "stop aggregate composition", recovered)
+
+	readCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	_, err = store.GetReviewCase(readCtx, reviewCase.ID)
+	require.NoError(t, err)
 }
 
 func TestStoreReviewUnknownSubmissionIsTerminalAndNeverReclaimed(t *testing.T) {
@@ -663,10 +772,18 @@ func newReviewStoreFixture(
 	t *testing.T,
 ) (*Store, *time.Time, ReviewCaptureInput) {
 	t.Helper()
+	return newReviewStoreFixtureAt(t, ":memory:")
+}
+
+func newReviewStoreFixtureAt(
+	t *testing.T,
+	databasePath string,
+) (*Store, *time.Time, ReviewCaptureInput) {
+	t.Helper()
 
 	ctx := context.Background()
 	now := time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC)
-	store, err := Open(ctx, ":memory:", WithClock(func() time.Time {
+	store, err := Open(ctx, databasePath, WithClock(func() time.Time {
 		return now
 	}))
 	require.NoError(t, err)
