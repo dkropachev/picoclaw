@@ -9,14 +9,20 @@
 PicoClaw exposes built-in tools to the agent for filesystem access, shell
 execution, web search/fetch, media delivery, hardware access, and channel
 actions. The registry presents tool schemas to providers and executes tool calls
-with context, limits, filtering, and error normalization.
+with context, limits, filtering, and error normalization. A file-backed media
+store can additionally expose an optional bounded snapshot read that detaches
+the bytes of one currently live media capability without disclosing its backing
+path.
 
 ## Reconstruction Notes
 
 - Similarity target: recreate a concurrent tool registry plus built-in tools for filesystem, exec, web, media, hardware, and channel action behavior.
-- Core types/functions: `Tool` interface, `ToolRegistry`, tool result types, filesystem tool constructors, exec session manager, web search/fetch providers, and tool schema transforms.
-- Runtime ordering: register enabled tools, export provider schemas, validate tool call args/context, enforce path/network/command policies, execute, filter result, normalize output.
-- Non-obvious constraints: response-handled tools suppress duplicate assistant text, registry must recover panics, workspace restriction and allow path patterns must be checked before file mutation.
+- Core types/functions: `Tool` interface, `ToolRegistry`, tool result types,
+  filesystem tool constructors, exec session manager, web search/fetch
+  providers, tool schema transforms, `media.SnapshotReader`, and
+  `media.Snapshot`.
+- Runtime ordering: register enabled tools, export provider schemas, validate tool call args/context, enforce path/network/command policies, execute, filter result, normalize output; when an isolated consumer requests media capture, resolve and bounded-read the live capability atomically before detaching its bytes.
+- Non-obvious constraints: response-handled tools suppress duplicate assistant text, registry must recover panics, workspace restriction and allow path patterns must be checked before file mutation, and snapshot reading is an optional capability that neither exposes a local path nor makes an expired in-memory reference durable.
 
 ## Requirements
 
@@ -39,6 +45,7 @@ with context, limits, filtering, and error normalization.
 | `FR-TOOL-015` | MUST | Agent-callable workflow `dev_publish` fails closed unless its runtime injects effective workflow enablement, definitions directory, call-depth policy, and a live dependency resolver. The gate parses and validates the exact active draft, walks reusable dependencies within fixed workflow analysis budgets, resolves production readiness, and returns an opaque revision bound to the exact draft, sorted reachable dependency bytes or absence, effective gate values, and readiness report. Publish submits the active session, draft, target pre-image, and dependency revisions to the fenced workflow publisher, which rejects a missing, blocked, stale, or changed gate result. | Agent-side publishing must enforce the same exact dependency and optimistic-concurrency fences as dashboard publishing rather than bypassing production readiness. |
 | `FR-TOOL-016` | MUST | The authenticated tool library exposes the configured workflow-tool flag independently from workflow master enablement: configured off is `disabled`, configured on while workflows are off is `blocked` with `requires_workflows`, and both on is `enabled`. The blocked switch remains checked and operable so the raw flag can be turned off, and its reason is accessibly associated. `PUT /api/tools/{name}/state` requires exactly one `application/json` media type and accepts one bounded strict JSON object with a required boolean `enabled`, rejects null/scalar/array, duplicate/unknown/trailing data, and saves an update-safe public-plus-security config snapshot only when its exact generation still matches under the shared handler and advisory mutation locks. Changing the workflow tool never implicitly changes workflow master enablement; the tool library and workflow settings refetch each other after every mutation outcome. | Browser tool state must match runtime registration without hiding a disabled prerequisite, implicitly enabling automation, or overwriting a concurrent settings or credential update. |
 | `FR-TOOL-017` | MUST | A model-backed web-search provider requires an explicit configured model alias and never substitutes a provider default. Since Gemini and Perplexity search own their API credentials rather than selecting a model account, they resolve the alias base mapping; account overrides apply only to executions with a concrete model account. | Search must use the same explicit model-selection vocabulary without pretending that a provider-owned credential is an account-router target. |
+| `FR-TOOL-018` | MUST | `FileMediaStore` implements the optional `media.SnapshotReader.ReadSnapshot(ctx, ref, maxBytes)` capability. For one currently registered canonical `media://` UUID reference and a positive caller limit, it holds lifecycle synchronization from lookup through close, opens the mapped entry without following a final symlink or blocking on a special file, verifies the opened handle is regular, and performs one bounded read whose actual bytes cannot exceed the caller limit. Unix uses no-follow plus nonblocking open and a status-change token; Windows opens the final entry itself, rejects every handle carrying the reparse-point attribute, and compares handle change time; other platforms fail closed instead of using a race-prone fallback. Success returns detached bytes and copied metadata, never the backing path or mutable store state. Missing, expired, malformed, unsafe, observably changed-size/modtime/identity/change-token, oversized, cancelled, and safe-open-unavailable captures fail with fixed redacted errors that contain no reference, path, metadata, payload, or raw operating-system error. Store registration normalizes a cleaned absolute exact lexical lifecycle key without an approximate case fold and only coalesces that key when `Lstat` reports the same captured entry identity. A `SameFile` identity found under a distinct key is retained separately and makes all such live lifecycles non-deleting, conservatively covering Windows path aliases without conflating hard-link paths. Re-registration permanently cancels older pending deletion through either the exact key or captured `SameFile` identity; final removal rechecks its token and identity under store synchronization, preserving an already replaced entry. Consequently, an earlier release cannot delete a newly registered path or race a pinned snapshot. The base `MediaStore` interface remains source-compatible, and capture does not promise recovery after release, expiry, store reconstruction, or process restart. | A session freezer needs a race-safe way to detach live capability bytes without extending ordinary temporary-media lifetime or turning local file details into model-visible diagnostics. |
 
 ## Data And State Model
 
@@ -54,7 +61,10 @@ JSON may retain numeric values as `json.Number` through schema validation and
 tool execution. Workflow-tool dependency gate snapshots are transient and bind
 exact active-draft bytes to sorted reachable definition snapshots and the
 effective readiness report; the resulting opaque revision is used only by the
-in-process publish request and repeated transaction checks.
+in-process publish request and repeated transaction checks. A `media.Snapshot`
+is a transient detached byte-and-metadata value. It has no source path, scope,
+cleanup authority, or durable media-store identity, and capturing it does not
+change reference counts or TTL state.
 
 ## Surface Ownership
 
@@ -131,6 +141,7 @@ Owns: TOOL write_file
 | Tool validation | JSON Schema `number` and `integer` arguments | Validate finite `float64` values and lossless `json.Number` values, including exact integrality without exponent expansion. | `FR-TOOL-013` |
 | Go API | `ToolRegistry.AllowsRegistration`, `ToolRegistry.GetRegistered` | Inspect effective allowlist admission and the exact registered occupant, including dormant hidden tools, before MCP registration mutates a registry. | `FR-TOOL-014` |
 | Tool | `workflow` action `dev_publish` | Evaluate exact structural and production dependency readiness, derive an opaque dependency revision, and invoke revision-fenced transactional workflow publishing. | `FR-TOOL-015` |
+| Go API | `media.SnapshotReader.ReadSnapshot(ctx, ref, maxBytes)` | Optionally return one path-free detached snapshot of a currently live `media://` capability through a bounded, no-follow, regular-file read; fixed redacted errors preserve optional-capability and temporary-lifetime semantics. | `FR-TOOL-018` |
 
 ## Algorithms And Ordering
 
@@ -179,6 +190,18 @@ Owns: TOOL write_file
     under the advisory lock. The workflow transition changes only its raw tool
     flag; its status is then resolved with workflow master enablement without
     mutating that prerequisite.
+17. For an optional file-media snapshot, validate the context, positive byte
+    limit, and exact capability form; retain the store read lock through lookup,
+    platform-safe no-follow open, handle validation, status-change-token
+    capture, bounded read, post-read token comparison, and close; then copy
+    metadata and bytes into a detached result. Normalize registrations to a
+    cleaned absolute exact lexical lifecycle key and bind each live key to its
+    first entry identity. Keep a verified same-file identity under a distinct
+    key separate and make both lifecycles non-deleting. Coordinate exact-key and
+    identity-matched registration, pending-deletion tokens, same-entry
+    revalidation, and final managed-path deletion under the store lock.
+    Classify every snapshot failure before returning a fixed redacted error, and
+    never resolve to a path for the caller.
 
 ## Cross-Feature Behavior
 
@@ -198,6 +221,10 @@ owned by the git workspaces feature.
 Channel delivery owns typing, reaction, placeholder, and stream-marker storage;
 tool execution supplies only the opaque turn identity needed for exact
 same-chat consumption.
+Session memory may consume the optional media snapshot capability to build a
+self-contained frozen set. That set's encoding, locator rewriting, limits, and
+restart behavior are owned by the session feature; this media-store capability
+only captures a reference that is live at the instant of the call.
 
 ## Failure And Edge Cases
 
@@ -222,6 +249,23 @@ same-chat consumption.
 - Invalid, oversized, or stale tool-state writes do not mutate configuration;
   a configured workflow tool whose workflow prerequisite is disabled remains
   explicitly blocked rather than appearing disabled or enabled.
+- A media snapshot rejects a blank or noncanonical reference, a nonpositive
+  limit, an unknown or concurrently expired entry, a symlink, directory, FIFO,
+  socket, device, changing-to-unsafe entry, and any stream exceeding the caller
+  limit. It returns no partial bytes.
+- `ReleaseAll` and TTL cleanup cannot remove a registered entry between
+  snapshot lookup and close. They may proceed after capture returns, while the
+  detached result remains valid. Registrations retain a cleaned absolute path,
+  so dot aliases and later working-directory changes cannot split or retarget
+  one exact lexical lifecycle. A verified same-file identity under a different
+  spelling or hard-link path disables automatic deletion for all live keys
+  rather than guessing whether they are aliases. Re-registering either the same
+  key or identity cancels an older pending final-ref deletion, including when
+  the new registration is forget-only and is itself released before that older
+  cleanup resumes. A live key whose entry identity changed rejects coalescing;
+  a replacement detected before pending removal is preserved. Capture after
+  release, expiry, store reconstruction, or restart fails closed rather than
+  searching the filesystem or guessing a stale path.
 
 ## Acceptance Evidence
 
@@ -242,6 +286,7 @@ same-chat consumption.
 | `FR-TOOL-015` | [pkg/tools/workflow_publish.go](../../pkg/tools/workflow_publish.go), [pkg/tools/workflow_publish_test.go](../../pkg/tools/workflow_publish_test.go), [pkg/workflows/development_publish_test.go](../../pkg/workflows/development_publish_test.go) |
 | `FR-TOOL-016` | [web/backend/api/tools.go](../../web/backend/api/tools.go), [web/backend/api/tools_test.go](../../web/backend/api/tools_test.go), [web/backend/api/workflow_settings_test.go](../../web/backend/api/workflow_settings_test.go), [web/frontend/src/api/tools.test.ts](../../web/frontend/src/api/tools.test.ts), [web/frontend/src/components/agent/tools/tool-library-tab.test.tsx](../../web/frontend/src/components/agent/tools/tool-library-tab.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-TOOL-017` | [pkg/config/model_selection_test.go](../../pkg/config/model_selection_test.go), [pkg/tools/integration/web_test.go](../../pkg/tools/integration/web_test.go), [web/backend/api/tools_test.go](../../web/backend/api/tools_test.go) |
+| `FR-TOOL-018` | [pkg/media/snapshot_test.go](../../pkg/media/snapshot_test.go), [pkg/media/store_test.go](../../pkg/media/store_test.go), [pkg/media/snapshot_file_unix.go](../../pkg/media/snapshot_file_unix.go), [pkg/media/snapshot_file_windows.go](../../pkg/media/snapshot_file_windows.go), [pkg/media/snapshot_file_other.go](../../pkg/media/snapshot_file_other.go) |
 
 ## Implementation Anchors
 
@@ -253,3 +298,9 @@ same-chat consumption.
 - [pkg/tools/integration/message.go](../../pkg/tools/integration/message.go)
 - [pkg/tools/spawn.go](../../pkg/tools/spawn.go)
 - [pkg/tools/workflow_publish.go](../../pkg/tools/workflow_publish.go)
+- [pkg/media/store.go](../../pkg/media/store.go)
+- [pkg/media/snapshot.go](../../pkg/media/snapshot.go)
+- [pkg/media/snapshot_file.go](../../pkg/media/snapshot_file.go)
+- [pkg/media/snapshot_file_unix.go](../../pkg/media/snapshot_file_unix.go)
+- [pkg/media/snapshot_file_windows.go](../../pkg/media/snapshot_file_windows.go)
+- [pkg/media/snapshot_file_other.go](../../pkg/media/snapshot_file_other.go)

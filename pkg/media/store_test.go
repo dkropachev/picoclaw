@@ -1,6 +1,7 @@
 package media
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -175,6 +176,368 @@ func TestReleaseAllMixedPoliciesKeepsFile(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("mixed-policy path should not be auto-deleted: %v", err)
 	}
+}
+
+func TestPendingDeletionSkippedAfterPathReregistered(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFileMediaStore()
+	path := createTempFile(t, dir, "reregistered.jpg")
+
+	oldRef, err := store.Store(path, MediaMeta{
+		Source:        "test",
+		CleanupPolicy: CleanupPolicyDeleteOnCleanup,
+	}, "old")
+	if err != nil {
+		t.Fatalf("Store(old) failed: %v", err)
+	}
+	deletion := scheduleDeletionForTest(t, store, "old", oldRef, path)
+
+	newRef, err := store.Store(path, MediaMeta{
+		Source:        "test",
+		CleanupPolicy: CleanupPolicyDeleteOnCleanup,
+	}, "new")
+	if err != nil {
+		t.Fatalf("Store(new) failed: %v", err)
+	}
+
+	if err := store.removePendingPath(deletion); err != nil {
+		t.Fatalf("removePendingPath(old) failed: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("older cleanup deleted a re-registered path: %v", err)
+	}
+	if _, err := store.Resolve(newRef); err != nil {
+		t.Fatalf("new ref should remain resolvable: %v", err)
+	}
+
+	if err := store.ReleaseAll("new"); err != nil {
+		t.Fatalf("ReleaseAll(new) failed: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("delete-on-cleanup path should be removed with its new final ref")
+	}
+}
+
+func TestPendingDeletionCancelledByReleasedForgetOnlyDotAlias(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFileMediaStore()
+	path := createTempFile(t, dir, "borrowed.txt")
+	dotAlias := filepath.Dir(path) + string(os.PathSeparator) + "." + string(os.PathSeparator) + filepath.Base(path)
+
+	oldRef, err := store.Store(path, MediaMeta{
+		Source:        "test",
+		CleanupPolicy: CleanupPolicyDeleteOnCleanup,
+	}, "old")
+	if err != nil {
+		t.Fatalf("Store(old) failed: %v", err)
+	}
+	deletion := scheduleDeletionForTest(t, store, "old", oldRef, path)
+
+	newRef, err := store.Store(dotAlias, MediaMeta{
+		Source:        "test",
+		CleanupPolicy: CleanupPolicyForgetOnly,
+	}, "borrowed")
+	if err != nil {
+		t.Fatalf("Store(borrowed) failed: %v", err)
+	}
+	resolved, err := store.Resolve(newRef)
+	if err != nil {
+		t.Fatalf("Resolve(borrowed) failed: %v", err)
+	}
+	if resolved != filepath.Clean(path) || !filepath.IsAbs(resolved) {
+		t.Fatalf("Resolve(borrowed) = %q, want canonical absolute path %q", resolved, filepath.Clean(path))
+	}
+	if err := store.ReleaseAll("borrowed"); err != nil {
+		t.Fatalf("ReleaseAll(borrowed) failed: %v", err)
+	}
+
+	// The re-registration must cancel the old deletion permanently. It is not
+	// enough to check for a live ref here because the forget-only ref has
+	// already been released.
+	if err := store.removePendingPath(deletion); err != nil {
+		t.Fatalf("removePendingPath(old) failed: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("old cleanup deleted a forget-only path: %v", err)
+	}
+}
+
+func TestDistinctSameFileKeysDisableAutomaticDeletion(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFileMediaStore()
+	path := createTempFile(t, dir, "identity-source.txt")
+	alias := filepath.Join(dir, "identity-alias.txt")
+	if err := os.Link(path, alias); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	if lifecyclePathKey(path) == lifecyclePathKey(alias) {
+		t.Fatal("test requires distinct lexical lifecycle keys")
+	}
+
+	if _, err := store.Store(path, MediaMeta{Source: "test"}, "first"); err != nil {
+		t.Fatalf("Store(first) failed: %v", err)
+	}
+	if _, err := store.Store(alias, MediaMeta{Source: "test"}, "second"); err != nil {
+		t.Fatalf("Store(second) failed: %v", err)
+	}
+
+	store.mu.RLock()
+	firstState := store.pathStates[lifecyclePathKey(path)]
+	secondState := store.pathStates[lifecyclePathKey(alias)]
+	store.mu.RUnlock()
+	if firstState.deleteEligible || secondState.deleteEligible {
+		t.Fatalf(
+			"same-file distinct-key states remained delete eligible: %#v / %#v",
+			firstState,
+			secondState,
+		)
+	}
+
+	if err := store.ReleaseAll("first"); err != nil {
+		t.Fatalf("ReleaseAll(first) failed: %v", err)
+	}
+	if err := store.ReleaseAll("second"); err != nil {
+		t.Fatalf("ReleaseAll(second) failed: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("first same-file path was deleted: %v", err)
+	}
+	if _, err := os.Stat(alias); err != nil {
+		t.Fatalf("second same-file path was deleted: %v", err)
+	}
+}
+
+func TestPendingDeletionCancelledByDistinctSameFileKey(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFileMediaStore()
+	path := createTempFile(t, dir, "pending-identity-source.txt")
+	alias := filepath.Join(dir, "pending-identity-alias.txt")
+	if err := os.Link(path, alias); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+
+	oldRef, err := store.Store(path, MediaMeta{Source: "test"}, "old")
+	if err != nil {
+		t.Fatalf("Store(old) failed: %v", err)
+	}
+	deletion := scheduleDeletionForTest(t, store, "old", oldRef, path)
+
+	if _, err := store.Store(alias, MediaMeta{
+		Source:        "test",
+		CleanupPolicy: CleanupPolicyForgetOnly,
+	}, "borrowed"); err != nil {
+		t.Fatalf("Store(alias) failed: %v", err)
+	}
+	if err := store.ReleaseAll("borrowed"); err != nil {
+		t.Fatalf("ReleaseAll(alias) failed: %v", err)
+	}
+	if err := store.removePendingPath(deletion); err != nil {
+		t.Fatalf("removePendingPath(old) failed: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("identity-matched old deletion removed its path: %v", err)
+	}
+	if _, err := os.Stat(alias); err != nil {
+		t.Fatalf("identity-matched alias disappeared: %v", err)
+	}
+}
+
+func TestStoredRelativePathDoesNotDriftAfterWorkingDirectoryChange(t *testing.T) {
+	firstDir := t.TempDir()
+	secondDir := t.TempDir()
+	const filename = "relative-media.txt"
+	originalPath := filepath.Join(firstDir, filename)
+	decoyPath := filepath.Join(secondDir, filename)
+	if err := os.WriteFile(originalPath, []byte("original"), 0o600); err != nil {
+		t.Fatalf("WriteFile(original) failed: %v", err)
+	}
+	if err := os.WriteFile(decoyPath, []byte("decoy"), 0o600); err != nil {
+		t.Fatalf("WriteFile(decoy) failed: %v", err)
+	}
+
+	t.Chdir(firstDir)
+	store := NewFileMediaStore()
+	ref, err := store.Store(filename, MediaMeta{Source: "test"}, "scope")
+	if err != nil {
+		t.Fatalf("Store(relative) failed: %v", err)
+	}
+	t.Chdir(secondDir)
+
+	resolved, err := store.Resolve(ref)
+	if err != nil {
+		t.Fatalf("Resolve(relative) failed: %v", err)
+	}
+	if resolved != originalPath || !filepath.IsAbs(resolved) {
+		t.Fatalf("Resolve(relative) = %q, want %q", resolved, originalPath)
+	}
+	snapshot, err := store.ReadSnapshot(context.Background(), ref, 64)
+	if err != nil {
+		t.Fatalf("ReadSnapshot(relative) failed: %v", err)
+	}
+	if string(snapshot.Bytes) != "original" {
+		t.Fatalf("ReadSnapshot(relative) bytes = %q, want original", snapshot.Bytes)
+	}
+	if err := store.ReleaseAll("scope"); err != nil {
+		t.Fatalf("ReleaseAll(relative) failed: %v", err)
+	}
+	if _, err := os.Stat(originalPath); !os.IsNotExist(err) {
+		t.Fatalf("original managed path still exists: %v", err)
+	}
+	if decoy, err := os.ReadFile(decoyPath); err != nil || string(decoy) != "decoy" {
+		t.Fatalf("working-directory decoy changed: %q, %v", decoy, err)
+	}
+}
+
+func TestPendingDeletionPreservesExternalReplacement(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFileMediaStore()
+	path := createTempFile(t, dir, "managed.jpg")
+
+	ref, err := store.Store(path, MediaMeta{Source: "test"}, "old")
+	if err != nil {
+		t.Fatalf("Store(old) failed: %v", err)
+	}
+	deletion := scheduleDeletionForTest(t, store, "old", ref, path)
+
+	replacementPath := filepath.Join(dir, "replacement.jpg")
+	want := []byte("external replacement")
+	err = os.WriteFile(replacementPath, want, 0o644)
+	if err != nil {
+		t.Fatalf("WriteFile(replacement) failed: %v", err)
+	}
+	err = os.Remove(path)
+	if err != nil {
+		t.Fatalf("Remove(original) failed: %v", err)
+	}
+	err = os.Rename(replacementPath, path)
+	if err != nil {
+		t.Fatalf("Rename(replacement) failed: %v", err)
+	}
+
+	err = store.removePendingPath(deletion)
+	if err != nil {
+		t.Fatalf("removePendingPath failed: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("replacement should remain: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("replacement content = %q, want %q", got, want)
+	}
+}
+
+func TestStoreRejectsLiveLifecycleKeyAfterExternalReplacement(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFileMediaStore()
+	path := createTempFile(t, dir, "live.jpg")
+	dotAlias := filepath.Dir(path) + string(os.PathSeparator) + "." + string(os.PathSeparator) + filepath.Base(path)
+
+	ref, err := store.Store(path, MediaMeta{Source: "test"}, "old")
+	if err != nil {
+		t.Fatalf("Store(old) failed: %v", err)
+	}
+
+	replacementPath := filepath.Join(dir, "replacement-live.jpg")
+	want := []byte("new external file")
+	err = os.WriteFile(replacementPath, want, 0o644)
+	if err != nil {
+		t.Fatalf("WriteFile(replacement) failed: %v", err)
+	}
+	err = os.Remove(path)
+	if err != nil {
+		t.Fatalf("Remove(original) failed: %v", err)
+	}
+	err = os.Rename(replacementPath, path)
+	if err != nil {
+		t.Fatalf("Rename(replacement) failed: %v", err)
+	}
+
+	_, err = store.Store(dotAlias, MediaMeta{Source: "test"}, "new")
+	if err == nil {
+		t.Fatal("Store should reject a live lifecycle key whose identity changed")
+	} else if !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("Store error = %q, want identity-change error", err)
+	}
+	_, err = store.Resolve(ref)
+	if err != nil {
+		t.Fatalf("failed coalescing attempt mutated old ref: %v", err)
+	}
+
+	err = store.ReleaseAll("old")
+	if err != nil {
+		t.Fatalf("ReleaseAll(old) failed: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("replacement should remain after old lifecycle release: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("replacement content = %q, want %q", got, want)
+	}
+}
+
+func TestStoreDoesNotRegisterPathDeletedWhileWaitingForLifecycleLock(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFileMediaStore()
+	path := createTempFile(t, dir, "waiting.jpg")
+
+	type storeResult struct {
+		ref string
+		err error
+	}
+	started := make(chan struct{})
+	result := make(chan storeResult, 1)
+
+	store.mu.Lock()
+	go func() {
+		close(started)
+		ref, err := store.Store(path, MediaMeta{Source: "test"}, "scope")
+		result <- storeResult{ref: ref, err: err}
+	}()
+	<-started
+
+	// Give Store an opportunity to reach the lifecycle lock. A stale Stat
+	// performed before that lock would let it register the now-deleted path.
+	time.Sleep(20 * time.Millisecond)
+	if err := os.Remove(path); err != nil {
+		store.mu.Unlock()
+		t.Fatalf("Remove failed: %v", err)
+	}
+	store.mu.Unlock()
+
+	got := <-result
+	if got.err == nil {
+		t.Fatalf("Store registered deleted path as %q", got.ref)
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	if len(store.refs) != 0 || len(store.pathStates) != 0 {
+		t.Fatal("failed Store left lifecycle mappings behind")
+	}
+}
+
+func scheduleDeletionForTest(
+	t *testing.T,
+	store *FileMediaStore,
+	scope string,
+	ref string,
+	path string,
+) pendingPathDeletion {
+	t.Helper()
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	delete(store.scopeToRefs[scope], ref)
+	if len(store.scopeToRefs[scope]) == 0 {
+		delete(store.scopeToRefs, scope)
+	}
+	deletion, ok := store.releaseRefLocked(ref, path)
+	if !ok {
+		t.Fatal("expected final ref to schedule path deletion")
+	}
+	return deletion
 }
 
 func TestMultiScopeIsolation(t *testing.T) {
