@@ -16,19 +16,27 @@ silently dropping corrupt context, or observing history and summary from
 different points in time. An optional compare-and-swap replacement capability
 publishes a complete new history, summary, scope, and alias tuple through one
 metadata commit point, so readers observe either the old session or the new
-session and never a mixture.
+session and never a mixture. A separate media-freezing capability can detach
+every provider-neutral locator in a strict snapshot into one self-contained,
+versioned frozen set and later materialize the same bytes after the live media
+store has been released or reconstructed.
 
 ## Reconstruction Notes
 
 - Similarity target: recreate scoped session allocation, canonical key generation, JSONL history backend, legacy alias promotion, and launcher history endpoints.
 - Core types/functions: `SessionScope`, `SessionSnapshot`, `SnapshotReader`,
   `SessionSnapshotReplacement`, `SnapshotReplacer`, route session allocator,
-  canonical key helpers, JSONL backend, memory store, and session API handlers.
+  canonical key helpers, JSONL backend, memory store, session API handlers,
+  `media.FreezeInputs`, `media.FrozenSet`,
+  `FreezeSessionSnapshotMedia`, and `MaterializeSessionSnapshotMedia`.
 - Runtime ordering: normalize route policy, derive dimensions, canonicalize
   identity, create metadata, promote aliases only when safe, append/read
   messages, capture strict existing-session snapshots when requested,
   compare-and-swap whole-session replacements only through a supporting
-  backend, and expose list/detail/delete from the committed history selector.
+  backend, preflight and freeze all media locators when an isolated consumer
+  requests it, materialize only from the resulting self-contained frozen set,
+  and
+  expose list/detail/delete from the committed history selector.
 - Non-obvious constraints: invalid dimensions are dropped, corrupt JSONL lines
   are skipped, existing canonical history is never overwritten by alias
   promotion, and `model_name` denotes a configured alias or model router rather
@@ -38,7 +46,11 @@ session and never a mixture.
   `HistorySlot` field is the commit selector: an empty value keeps the legacy
   `.jsonl` history active, while `a` or `b` selects exactly one bounded history
   slot. A missing or invalid selected slot is corruption and never falls back
-  to another file.
+  to another file. Media freezing is fail-closed and all-or-nothing: a
+  `media://` capability must still be live at capture, every potential locator
+  field is inspected even when another provider-neutral field currently takes
+  precedence, and restart safety begins only after a complete frozen set has
+  been obtained.
 
 ## Requirements
 
@@ -54,6 +66,7 @@ session and never a mixture.
 | `FR-SESSION-008` | MUST | An inbound Pico chat selection is the pair `account_ref` plus alias-valued `model_name`: the account reference may identify a concrete account or account router, and the model name may identify an exact configured alias or model router. Pico input normalizes and forwards both fields into turn resolution. Stored provider messages and current backend live/history projections preserve only alias-valued `model_name`; they do not persist or emit `account_ref`. Frontend live/history parsers accept an optional `account_ref` and include it in message reconciliation whenever a server supplies one, while remaining compatible with its absence. No selection field carries the resolved upstream provider model ID. | Runtime account selection and durable alias identity have different lifetimes; the wire contract must not imply persistence that the backend does not provide or leak concrete model resolution. |
 | `FR-SESSION-009` | MUST | A session backend may implement `SnapshotReader.ReadSessionSnapshot(ctx, key)` to return one deep-cloned, coherent view of an existing session's canonical key, history, summary, and scope. Blank or unknown keys return `found=false` without creating a fallback/default session. JSONL snapshots require an existing decodable metadata file with a nonblank logical key matching the canonical lookup; a history-only orphan is rejected even when filename sanitization makes another logical key collide with it. Alias lookup returns the canonical key and is strict: metadata read/decode errors, inconsistent canonical metadata, JSONL corruption, scanner errors, and cancellation are returned rather than skipped. Distinct sessions claiming the same alias are rejected, and an alias resolved before the canonical lock must still be present in the locked metadata or the read fails as changed. The canonical session lock covers the final existence check plus metadata, summary, and history read, and every returned mutable message, nested tool argument, timestamp, metadata collection, and scope is detached from live state. | A read-only AI decision must be based on an exact immutable input and must not mutate, partially recover, or alias the conversation it is evaluating. |
 | `FR-SESSION-010` | MUST | A backend may implement `SnapshotReplacer.ReplaceSessionSnapshot(ctx, replacement)` to compare-and-swap one canonical session's visible history, summary, scope, and aliases. The replacement key must be the exact opaque key derived from a canonical current-version scope: channel/account/dimensions/values are normalized, dimensions are unique, and `Values` contains exactly one nonblank canonical value per listed dimension with no unlisted semantic fields. Aliases and messages must be canonical and persistable, and `ExpectedRevision` must exactly match the opaque revision returned by a strict snapshot; an empty expected revision means the canonical session must not exist. JSONL replacement holds shared process-wide directory and session locks, rejects corrupt current state and new alias conflicts, durably writes the inactive bounded `a`/`b` history slot, checks cancellation, and atomically renames metadata that selects that slot as the sole commit point before verifying committed alias ownership. It may preserve an unchanged shared legacy fallback alias, including a main fallback, or retained promoted direct shadow already owned by the session, but may not introduce that ambiguity. Empty `HistorySlot` continues to select the legacy `.jsonl` file, while `a` and `b` select only their exact slot; invalid or missing selected slots fail closed. Strict metadata requires nonnegative `Skip`/`Count`, `Skip <= Count`, and at least `Count` physical nonempty records; a missing legacy file is valid only for an exact empty metadata tuple. Every append or rewrite rejects an encoded record that cannot be read within the shared scanner limit. Alias-aware reads and ordinary mutations retain the directory read lock from alias resolution through canonical session access; adjacent metadata mutations resolve under the directory write lock. All use compatible selector rules, so aliases cannot move between resolution and access, concurrent callers see only the complete old tuple or complete new tuple, and stale revisions conflict without a visible mutation. An observed cancellation at the check after staging history, or another error before metadata rename, leaves the old tuple visible; cancellation after that check does not undo metadata publication. Any error after metadata rename, including directory synchronization, cancellation, or alias verification, is an uncertain outcome and requires a fresh strict read before retry. The capability is optional: unsupported adapters return `ErrSnapshotUnsupported` and callers must never emulate it with individual legacy setters. This is an additive metadata/file-layout extension and does not change the scope schema or its version. | An AI-authored session rewrite must not tear history from its metadata, overwrite concurrent work, silently recover corrupt inputs, or assume a failed call was definitely uncommitted. |
+| `FR-SESSION-011` | MUST | `FreezeSessionSnapshotMedia` counts one already detached `SessionSnapshot` before cloning, rejects a 33rd nonempty locator, then deep-clones and discovers every admitted occurrence in `Message.Media[]`, `Attachment.Ref`, `Attachment.URL`, and `PromptPart.URI` without applying provider precedence. Only a canonical `media://` UUID capability or a strict `data:` locator with canonical MIME, the base64 marker, and canonical padded base64 is admitted; raw paths, `file:`, network URLs, malformed/noncanonical data, unknown schemes, and unresolved or no-longer-live media capabilities fail the whole capture without changing the source snapshot or returning a partial set. At most 16 distinct nonempty frozen assets are admitted; each decoded asset is at most 2 MiB, the sum of decoded bytes counted per occurrence is at most 3 MiB, and both materialized encoding and frozen-set JSON are at most 5 MiB. At most four `FreezeInputs` operations hold capture admission concurrently; an excess operation waits only until a slot is available or its context is cancelled before its reader is invoked. Raw filename input is at most 4 KiB before basename sanitization; the result is valid UTF-8, control-free, and at most 255 bytes. Supplied MIME is at most 127 bytes; captured MIME input is at most 1 KiB before normalization to canonical parameter-free form of at most 127 bytes. Success returns the cloned snapshot with every locator rewritten to a canonical frozen reference plus one deterministic, versioned, self-contained `FrozenSet` containing detached bytes and canonical metadata; the caller can embed that pair in durable state. `MaterializeSessionSnapshotMedia(ctx, snapshot, set)` validates count and set before cloning, strictly resolves every frozen reference, requires each provider-authoritative attachment or prompt-part metadata field to equal its bound asset metadata, and deterministically replaces all four locator surfaces with canonical padded-base64 `data:` values without consulting a live `MediaStore`; when an attachment has both fields, URL metadata is authoritative and Ref metadata remains independently bound inside its frozen identity. The snapshot/set pair survives strict frozen-set JSON marshal/unmarshal and materializes identically with an empty reconstructed media store. Unknown/duplicate/trailing frozen-set JSON members, invalid UTF-8 or unpaired surrogate strings, unsupported versions, noncanonical encodings, missing/duplicate/unused assets, invalid sizes or digests, reference/metadata mismatches, cancellation, and any bound violation fail closed through fixed redacted errors. This capability does not automatically change ordinary session persistence, provider execution, or agent history resolution, and does not guarantee that a provider consumes the materialized modality. | A delayed isolated decision needs the exact captured media bytes after restart, while every hidden or precedence-inactive locator must be validated so durable context cannot conceal a local-path/network capability or silently degrade to text-only history. |
 
 ## Data And State Model
 
@@ -75,7 +88,18 @@ JSONL state may include the legacy `{base}.jsonl`, bounded
 `SessionMeta.HistorySlot` chooses the only visible history. Empty
 `HistorySlot` preserves all existing sessions without a format or scope-version
 migration. Shared fixed-size locks coordinate independently constructed JSONL
-stores rooted at the same directory within one process.
+stores rooted at the same directory within one process. Frozen session media is
+a detached pair composed of a deep-cloned `SessionSnapshot` whose locators are
+frozen and a self-contained `media.FrozenSet`; an owning durable record may
+embed both. The set uses a strict explicit JSON version, canonical
+frozen-reference identities, deterministic asset ordering, bounded copied
+filename/content-type metadata, decoded bytes, sizes, and content digests. It
+does not retain a local path, live `media://` capability, store scope, cleanup
+policy, or `MediaStore` pointer. Re-encoding and materialization are bounded by
+the same 32-occurrence, 16-asset, 2 MiB per-asset, 3 MiB per-occurrence raw, and
+5 MiB encoded/JSON ceilings. A filename is retained only as a valid UTF-8,
+control-free, at-most-255-byte basename; a MIME value is canonical,
+parameter-free, and at most 127 bytes.
 
 ## Surface Ownership
 
@@ -84,6 +108,7 @@ Owns: CODE pkg/agent/sessions/**
 Owns: CODE pkg/agent/state/**
 Owns: CODE pkg/identity/**
 Owns: CODE pkg/memory/**
+Owns: CODE pkg/media/frozen.go
 Owns: CODE pkg/seahorse/**
 Owns: CODE pkg/session/**
 Owns: CODE pkg/state/**
@@ -96,6 +121,7 @@ Owns: CONFIG.session*
 Owns: HTTP * /api/sessions*
 Owns: TEST pkg/session/*
 Owns: TEST pkg/memory/*
+Owns: TEST pkg/media/frozen_test.go
 Owns: TEST pkg/identity/*
 Owns: TEST pkg/state/*
 Owns: TEST web/backend/api/session*
@@ -112,6 +138,8 @@ Owns: TEST web/backend/api/session*
 | Go API | `session.SnapshotReplacer.ReplaceSessionSnapshot(ctx, replacement)` | Optionally publish an exact-revision whole-session replacement atomically, or fail closed with conflict/unsupported errors. | `FR-SESSION-010` |
 | Go API | `memory.JSONLStore.ReadSessionState`, `UpdateSessionMeta`, `EnsureSessionHistory`, `DeleteSession`, and `DeleteSessionsWithAliasesMatching` | Give web/thread consumers an atomically alias-resolved tolerant projection, coordinated metadata mutation, selector-aware creation, and crash-recoverable exact/catalog-matched grouped deletion without bypassing the active slot. | `FR-SESSION-006`, `FR-SESSION-010` |
 | Go API | `session.CloneMessages(messages)` | Produce a graph-detached message copy for each isolated consumer, including pointer fields and nested/cyclic tool arguments. | `FR-SESSION-009` |
+| Go API | `media.FreezeInputs(ctx, inputs, reader)`, `media.FrozenSet.Materialize(ctx, refs)` | Atomically freeze one complete bounded locator batch into canonical references plus a self-contained strict/versioned set, then materialize only validated embedded bytes without live-store lookup. | `FR-SESSION-011` |
+| Go API | `session.FreezeSessionSnapshotMedia(ctx, snapshot, reader)`, `session.MaterializeSessionSnapshotMedia(ctx, snapshot, set)` | Deep-clone, enumerate, freeze, rewrite, strictly round-trip, and materialize every `Message.Media`, attachment ref/URL, and prompt-part URI while preserving all other snapshot state. | `FR-SESSION-011` |
 | Frontend | Logs and session history UI under `web/frontend/src/components/logs/**`, `web/frontend/src/hooks/use-session-history.ts`, and `web/frontend/src/routes/logs.tsx` | Browser history and log surfaces expose session records and follow shared frontend API, token, and dynamic-style lint rules. | `FR-SESSION-006` |
 
 ## Algorithms And Ordering
@@ -150,6 +178,28 @@ Owns: TEST web/backend/api/session*
    selector is invalid or its selected file is missing. Coordinate thread-owned
    metadata changes through the memory store so they preserve a concurrent slot
    flip.
+10. To freeze snapshot media, count all four locator surfaces before cloning
+    and stop at the 33rd; then deep-clone and enumerate the admitted locators in
+    stable message/field/index order. Preflight occurrence count,
+    locator form/length, and supplied metadata; parse only canonical UUID
+    `media://` or canonical padded-base64 `data:` inputs; acquire one of four
+    context-cancellable global capture slots; then charge decoded,
+    aggregate-occurrence, distinct-nonempty-asset, and encoded budgets while
+    capturing each distinct live capability. Basename-sanitize and bound
+    filenames and normalize MIME to bounded parameter-free canonical form.
+    Construct the canonical ordered set, rewrite every occurrence to its frozen
+    identity, validate the complete detached result, then return it without
+    mutating the input.
+11. To materialize, count locators and strictly validate the set before cloning,
+    then validate its version, shape,
+    canonical ordering, unique identities, size, digest, metadata, references,
+    and all aggregate budgets before allocating provider-neutral output. Clone
+    the supplied frozen-reference snapshot, resolve each locator from the set
+    in the same stable order, verify provider-authoritative attachment/part
+    metadata against the resolved asset, emit canonical base64 `data:` locators, verify no
+    capability locator remains, and return only the complete result. Never fall
+    back to the live media store, filesystem, network, or original locator
+    text.
 
 ## Cross-Feature Behavior
 
@@ -169,6 +219,12 @@ capability; it does not reinterpret the existing workflow `history_revision`
 fingerprint as a session CAS token. Launcher session and thread consumers use the
 metadata-selected history and coordinated mutation helpers instead of opening
 the legacy `.jsonl` file independently.
+Frozen session media reuses the tool feature's optional path-free
+`media.SnapshotReader` for capture and the security feature's no-follow,
+resource-bound, consistency-check, and redacted-failure rules. The session
+feature owns the frozen encoding and all-locator rewrite. Ordinary agent turns
+are not wired to this capability by this prerequisite change; a later runtime
+feature must opt in explicitly and preserve provider-specific message ordering.
 
 ## Failure And Edge Cases
 
@@ -241,6 +297,29 @@ the legacy `.jsonl` file independently.
 - A backend that lacks the optional lower-store replacement capability returns
   `ErrSnapshotUnsupported`; sequential `SetHistory`, `SetSummary`, or metadata
   calls are not a valid fallback.
+- Media freezing treats all locator fields as active security input even when
+  `Parts` would supersede `Media`/`Attachments` or an attachment URL would
+  supersede its ref during provider conversion. One unsupported, malformed,
+  missing, expired, or unsafe locator rejects the whole snapshot. Filename
+  paths are reduced to valid UTF-8 control-free basenames of at most 255 bytes;
+  invalid names fail, and MIME is normalized to parameter-free canonical form
+  of at most 127 bytes.
+- The 32-occurrence limit counts every nonempty locator field. The 16-asset
+  limit counts canonical distinct frozen assets. The 3 MiB aggregate counts
+  decoded bytes once per occurrence, so repeating one asset cannot amplify the
+  materialized snapshot past the aggregate bound; each distinct decoded asset
+  must be nonempty and fit 2 MiB, and the complete encoded set/JSON must fit
+  5 MiB. No more than four captures hold admission concurrently; a saturated
+  fifth capture can be cancelled without invoking its reader.
+- Freeze and materialize return no partial rewritten history or partial
+  `FrozenSet`. Cancellation, a live-store release/expiry before capture, strict
+  JSON failure, missing/duplicate/noncanonical frozen identity, digest/size or
+  metadata inconsistency, and any limit error leave every caller-owned input
+  unchanged.
+- Restart safety starts after successful freeze. A `media://` capability lost
+  before capture cannot be recovered; after capture, release, TTL cleanup, an
+  empty new `FileMediaStore`, and process restart do not affect strict JSON
+  round-trip or materialization from the returned self-contained set.
 
 ## Acceptance Evidence
 
@@ -252,11 +331,14 @@ the legacy `.jsonl` file independently.
 | `FR-SESSION-008` | [pkg/channels/pico/pico_test.go](../../pkg/channels/pico/pico_test.go), [pkg/session/jsonl_backend_test.go](../../pkg/session/jsonl_backend_test.go), [web/frontend/src/features/chat/protocol.test.ts](../../web/frontend/src/features/chat/protocol.test.ts), [web/frontend/src/features/chat/history.ts](../../web/frontend/src/features/chat/history.ts), [web/frontend/src/api/sessions.ts](../../web/frontend/src/api/sessions.ts) |
 | `FR-SESSION-009` | [pkg/session/manager_test.go](../../pkg/session/manager_test.go), [pkg/session/jsonl_backend_test.go](../../pkg/session/jsonl_backend_test.go), [pkg/memory/jsonl_test.go](../../pkg/memory/jsonl_test.go), [pkg/session/session_store.go](../../pkg/session/session_store.go), [pkg/session/manager.go](../../pkg/session/manager.go), [pkg/session/jsonl_backend.go](../../pkg/session/jsonl_backend.go), [pkg/memory/jsonl.go](../../pkg/memory/jsonl.go) |
 | `FR-SESSION-010` | [pkg/session/jsonl_backend_test.go](../../pkg/session/jsonl_backend_test.go), [pkg/memory/jsonl_test.go](../../pkg/memory/jsonl_test.go), [pkg/threads/threads_test.go](../../pkg/threads/threads_test.go), [web/backend/api/session_test.go](../../web/backend/api/session_test.go), [pkg/session/session_store.go](../../pkg/session/session_store.go), [pkg/session/jsonl_backend.go](../../pkg/session/jsonl_backend.go), [pkg/memory/jsonl.go](../../pkg/memory/jsonl.go) |
+| `FR-SESSION-011` | [pkg/media/frozen_test.go](../../pkg/media/frozen_test.go), [pkg/session/frozen_media_test.go](../../pkg/session/frozen_media_test.go) |
 
 ## Implementation Anchors
 
 - [pkg/session/allocator.go](../../pkg/session/allocator.go)
 - [pkg/session/jsonl_backend.go](../../pkg/session/jsonl_backend.go)
 - [pkg/session/session_store.go](../../pkg/session/session_store.go)
+- [pkg/session/frozen_media.go](../../pkg/session/frozen_media.go)
 - [pkg/memory/jsonl.go](../../pkg/memory/jsonl.go)
+- [pkg/media/frozen.go](../../pkg/media/frozen.go)
 - [web/backend/api/session.go](../../web/backend/api/session.go)

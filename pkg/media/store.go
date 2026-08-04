@@ -3,6 +3,7 @@ package media
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -59,8 +60,20 @@ type mediaEntry struct {
 }
 
 type pathRefState struct {
+	path           string
+	identity       os.FileInfo
 	refCount       int
 	deleteEligible bool
+}
+
+// pendingPathDeletion identifies one final-ref deletion attempt. The token
+// prevents an older cleanup pass from deleting a path after it has been
+// registered again, even if that newer ref has already been released.
+type pendingPathDeletion struct {
+	key      string
+	path     string
+	identity os.FileInfo
+	token    uint64
 }
 
 // MediaCleanerConfig configures the background TTL cleanup.
@@ -80,6 +93,9 @@ type FileMediaStore struct {
 	refToPath   map[string]string
 	pathStates  map[string]pathRefState
 
+	pendingPathDeletions map[string]pendingPathDeletion
+	nextDeletionToken    uint64
+
 	cleanerCfg MediaCleanerConfig
 	stop       chan struct{}
 	startOnce  sync.Once
@@ -90,59 +106,100 @@ type FileMediaStore struct {
 // NewFileMediaStore creates a new FileMediaStore without background cleanup.
 func NewFileMediaStore() *FileMediaStore {
 	return &FileMediaStore{
-		refs:        make(map[string]mediaEntry),
-		scopeToRefs: make(map[string]map[string]struct{}),
-		refToScope:  make(map[string]string),
-		refToPath:   make(map[string]string),
-		pathStates:  make(map[string]pathRefState),
-		nowFunc:     time.Now,
+		refs:                 make(map[string]mediaEntry),
+		scopeToRefs:          make(map[string]map[string]struct{}),
+		refToScope:           make(map[string]string),
+		refToPath:            make(map[string]string),
+		pathStates:           make(map[string]pathRefState),
+		pendingPathDeletions: make(map[string]pendingPathDeletion),
+		nowFunc:              time.Now,
 	}
 }
 
 // NewFileMediaStoreWithCleanup creates a FileMediaStore with TTL-based background cleanup.
 func NewFileMediaStoreWithCleanup(cfg MediaCleanerConfig) *FileMediaStore {
 	return &FileMediaStore{
-		refs:        make(map[string]mediaEntry),
-		scopeToRefs: make(map[string]map[string]struct{}),
-		refToScope:  make(map[string]string),
-		refToPath:   make(map[string]string),
-		pathStates:  make(map[string]pathRefState),
-		cleanerCfg:  cfg,
-		stop:        make(chan struct{}),
-		nowFunc:     time.Now,
+		refs:                 make(map[string]mediaEntry),
+		scopeToRefs:          make(map[string]map[string]struct{}),
+		refToScope:           make(map[string]string),
+		refToPath:            make(map[string]string),
+		pathStates:           make(map[string]pathRefState),
+		pendingPathDeletions: make(map[string]pendingPathDeletion),
+		cleanerCfg:           cfg,
+		stop:                 make(chan struct{}),
+		nowFunc:              time.Now,
 	}
 }
 
 // Store registers a local file under the given scope. The file must exist.
 func (s *FileMediaStore) Store(localPath string, meta MediaMeta, scope string) (string, error) {
-	if _, err := os.Stat(localPath); err != nil {
-		return "", fmt.Errorf("media store: %s: %w", localPath, err)
-	}
-
 	ref := "media://" + uuid.New().String()
 	meta.CleanupPolicy = normalizeCleanupPolicy(meta.CleanupPolicy)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.refs[ref] = mediaEntry{path: localPath, meta: meta, storedAt: s.nowFunc()}
+	// Path normalization, identity lookup, and registration must share the same
+	// lock used by final-ref deletion. Otherwise cleanup can remove the file
+	// after the check and before the ref is registered.
+	canonicalPath, err := filepath.Abs(localPath)
+	if err != nil {
+		return "", fmt.Errorf("media store: %s: %w", localPath, err)
+	}
+	canonicalPath = filepath.Clean(canonicalPath)
+	identity, err := os.Lstat(canonicalPath)
+	if err != nil {
+		return "", fmt.Errorf("media store: %s: %w", localPath, err)
+	}
+	pathKey := lifecyclePathKey(canonicalPath)
+
+	pathState := s.pathStates[pathKey]
+	if pathState.refCount > 0 {
+		// A lifecycle key may only coalesce refs to the object captured by its
+		// first live registration. An external replacement must start a later
+		// lifecycle after the old refs are gone.
+		if pathState.identity == nil || !os.SameFile(pathState.identity, identity) {
+			return "", fmt.Errorf("media store: path identity changed: %s", canonicalPath)
+		}
+		canonicalPath = pathState.path
+	}
+
+	// Distinct lexical keys can still identify one directory entry (for
+	// example Windows device-prefix, short-name, or case aliases). FileInfo
+	// does not expose a portable comparable identity key, so verify collisions
+	// with SameFile while holding the lifecycle lock. Do not coalesce distinct
+	// paths because they may instead be hard links; conservatively make every
+	// such lifecycle non-deleting.
+	identityAlias := s.disableDeletionForIdentityAliasesLocked(pathKey, identity)
+	if pathState.refCount == 0 {
+		pathState.path = canonicalPath
+		pathState.identity = identity
+		pathState.deleteEligible = meta.CleanupPolicy == CleanupPolicyDeleteOnCleanup &&
+			!identityAlias
+	}
+
+	// A successful re-registration permanently cancels older pending deletion
+	// through either this lexical key or the verified entry identity. Token
+	// validation keeps it canceled even if this ref is released before an older
+	// cleanup resumes.
+	s.cancelPendingPathDeletionsLocked(pathKey, identity)
+
+	s.refs[ref] = mediaEntry{path: canonicalPath, meta: meta, storedAt: s.nowFunc()}
 	if s.scopeToRefs[scope] == nil {
 		s.scopeToRefs[scope] = make(map[string]struct{})
 	}
 	s.scopeToRefs[scope][ref] = struct{}{}
 	s.refToScope[ref] = scope
-	s.refToPath[ref] = localPath
+	s.refToPath[ref] = canonicalPath
 
-	pathState := s.pathStates[localPath]
-	if pathState.refCount == 0 {
-		pathState.deleteEligible = meta.CleanupPolicy == CleanupPolicyDeleteOnCleanup
-	} else if meta.CleanupPolicy == CleanupPolicyForgetOnly {
-		// Be conservative: once a path is borrowed externally, never let this
-		// lifecycle auto-delete it even if store-managed refs also exist.
+	if pathState.refCount > 0 &&
+		(meta.CleanupPolicy == CleanupPolicyForgetOnly || identityAlias) {
+		// A borrowed path or ambiguous distinct-key identity makes automatic
+		// deletion unsafe for the rest of this live lifecycle.
 		pathState.deleteEligible = false
 	}
 	pathState.refCount++
-	s.pathStates[localPath] = pathState
+	s.pathStates[pathKey] = pathState
 
 	return ref, nil
 }
@@ -172,12 +229,13 @@ func (s *FileMediaStore) ResolveWithMeta(ref string) (string, MediaMeta, error) 
 }
 
 // ReleaseAll removes all files under the given scope and cleans up mappings.
-// Phase 1 (under lock): remove entries from maps.
-// Phase 2 (no lock): delete store-managed files from disk once their final
-// path ref is gone.
+// Phase 1 (under lock): remove entries from maps and schedule final-ref
+// deletions. Phase 2 validates each scheduled deletion and removes the file
+// while holding the same lock used by Store. This prevents a stale cleanup
+// pass from deleting a newly registered path.
 func (s *FileMediaStore) ReleaseAll(scope string) error {
-	// Phase 1: collect paths and remove from maps under lock
-	var paths []string
+	// Phase 1: collect deletion candidates and remove mappings under lock.
+	var deletions []pendingPathDeletion
 
 	s.mu.Lock()
 	refs, ok := s.scopeToRefs[scope]
@@ -191,18 +249,18 @@ func (s *FileMediaStore) ReleaseAll(scope string) error {
 		if entry, exists := s.refs[ref]; exists {
 			fallbackPath = entry.path
 		}
-		if removablePath, shouldDelete := s.releaseRefLocked(ref, fallbackPath); shouldDelete {
-			paths = append(paths, removablePath)
+		if deletion, shouldDelete := s.releaseRefLocked(ref, fallbackPath); shouldDelete {
+			deletions = append(deletions, deletion)
 		}
 	}
 	delete(s.scopeToRefs, scope)
 	s.mu.Unlock()
 
-	// Phase 2: delete files without holding the lock
-	for _, p := range paths {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+	// Phase 2: validate and delete each path atomically with registration.
+	for _, deletion := range deletions {
+		if err := s.removePendingPath(deletion); err != nil && !os.IsNotExist(err) {
 			logger.WarnCF("media", "release: failed to remove file", map[string]any{
-				"path":  p,
+				"path":  deletion.path,
 				"error": err.Error(),
 			})
 		}
@@ -212,8 +270,9 @@ func (s *FileMediaStore) ReleaseAll(scope string) error {
 }
 
 // CleanExpired removes all entries older than MaxAge.
-// Phase 1 (under lock): identify expired entries and remove from maps.
-// Phase 2 (no lock): delete store-managed files from disk to minimize lock contention.
+// Phase 1 (under lock): identify expired entries, remove mappings, and
+// schedule final-ref deletions. Phase 2 validates and deletes each path while
+// holding the same lock used by Store.
 func (s *FileMediaStore) CleanExpired() int {
 	if s.cleanerCfg.MaxAge <= 0 {
 		return 0
@@ -221,8 +280,9 @@ func (s *FileMediaStore) CleanExpired() int {
 
 	// Phase 1: collect expired entries under lock
 	type expiredEntry struct {
-		ref        string
-		deletePath string
+		ref      string
+		deletion pendingPathDeletion
+		remove   bool
 	}
 
 	s.mu.Lock()
@@ -241,22 +301,23 @@ func (s *FileMediaStore) CleanExpired() int {
 			}
 
 			expiredItem := expiredEntry{ref: ref}
-			if deletePath, shouldDelete := s.releaseRefLocked(ref, entry.path); shouldDelete {
-				expiredItem.deletePath = deletePath
+			if deletion, shouldDelete := s.releaseRefLocked(ref, entry.path); shouldDelete {
+				expiredItem.deletion = deletion
+				expiredItem.remove = true
 			}
 			expired = append(expired, expiredItem)
 		}
 	}
 	s.mu.Unlock()
 
-	// Phase 2: delete files without holding the lock
+	// Phase 2: validate and delete each path atomically with registration.
 	for _, e := range expired {
-		if e.deletePath == "" {
+		if !e.remove {
 			continue
 		}
-		if err := os.Remove(e.deletePath); err != nil && !os.IsNotExist(err) {
+		if err := s.removePendingPath(e.deletion); err != nil && !os.IsNotExist(err) {
 			logger.WarnCF("media", "cleanup: failed to remove file", map[string]any{
-				"path":  e.deletePath,
+				"path":  e.deletion.path,
 				"error": err.Error(),
 			})
 		}
@@ -276,7 +337,49 @@ func normalizeCleanupPolicy(policy CleanupPolicy) CleanupPolicy {
 	}
 }
 
-func (s *FileMediaStore) releaseRefLocked(ref, fallbackPath string) (string, bool) {
+// lifecyclePathKey returns the stable key used to coordinate one lexical path.
+// Store first makes the path absolute; Clean removes dot segments without
+// applying a platform-inexact case fold. Filesystem aliases are coordinated
+// separately through verified entry identity.
+func lifecyclePathKey(path string) string {
+	return filepath.Clean(path)
+}
+
+func (s *FileMediaStore) disableDeletionForIdentityAliasesLocked(
+	pathKey string,
+	identity os.FileInfo,
+) bool {
+	if identity == nil {
+		return false
+	}
+	found := false
+	for otherKey, otherState := range s.pathStates {
+		if otherKey == pathKey || otherState.refCount <= 0 ||
+			otherState.identity == nil ||
+			!os.SameFile(otherState.identity, identity) {
+			continue
+		}
+		otherState.deleteEligible = false
+		s.pathStates[otherKey] = otherState
+		found = true
+	}
+	return found
+}
+
+func (s *FileMediaStore) cancelPendingPathDeletionsLocked(
+	pathKey string,
+	identity os.FileInfo,
+) {
+	for pendingKey, pending := range s.pendingPathDeletions {
+		if pendingKey == pathKey ||
+			(identity != nil && pending.identity != nil &&
+				os.SameFile(pending.identity, identity)) {
+			delete(s.pendingPathDeletions, pendingKey)
+		}
+	}
+}
+
+func (s *FileMediaStore) releaseRefLocked(ref, fallbackPath string) (pendingPathDeletion, bool) {
 	path := fallbackPath
 	if storedPath, ok := s.refToPath[ref]; ok {
 		path = storedPath
@@ -287,21 +390,65 @@ func (s *FileMediaStore) releaseRefLocked(ref, fallbackPath string) (string, boo
 	delete(s.refToScope, ref)
 
 	if path == "" {
-		return "", false
+		return pendingPathDeletion{}, false
 	}
 
-	pathState, ok := s.pathStates[path]
+	pathKey := lifecyclePathKey(path)
+	pathState, ok := s.pathStates[pathKey]
 	if !ok {
-		return "", false
+		return pendingPathDeletion{}, false
 	}
 	if pathState.refCount <= 1 {
-		delete(s.pathStates, path)
-		return path, pathState.deleteEligible
+		delete(s.pathStates, pathKey)
+		if !pathState.deleteEligible {
+			return pendingPathDeletion{}, false
+		}
+
+		s.nextDeletionToken++
+		if s.nextDeletionToken == 0 {
+			s.nextDeletionToken++
+		}
+		deletion := pendingPathDeletion{
+			key:      pathKey,
+			path:     pathState.path,
+			identity: pathState.identity,
+			token:    s.nextDeletionToken,
+		}
+		s.pendingPathDeletions[pathKey] = deletion
+		return deletion, true
 	}
 
 	pathState.refCount--
-	s.pathStates[path] = pathState
-	return "", false
+	s.pathStates[pathKey] = pathState
+	return pendingPathDeletion{}, false
+}
+
+// removePendingPath deletes a scheduled final-ref path only if no successful
+// Store has re-referenced it since the deletion was scheduled. The path check,
+// token consumption, and filesystem removal are serialized with Store and
+// ReadSnapshot through the store lock.
+func (s *FileMediaStore) removePendingPath(deletion pendingPathDeletion) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	pending, ok := s.pendingPathDeletions[deletion.key]
+	if !ok || pending.token != deletion.token {
+		return nil
+	}
+	if state, referenced := s.pathStates[deletion.key]; referenced && state.refCount > 0 {
+		delete(s.pendingPathDeletions, deletion.key)
+		return nil
+	}
+
+	delete(s.pendingPathDeletions, deletion.key)
+	currentIdentity, err := os.Lstat(deletion.path)
+	if err != nil {
+		return err
+	}
+	if deletion.identity == nil || !os.SameFile(deletion.identity, currentIdentity) {
+		return nil
+	}
+	return os.Remove(deletion.path)
 }
 
 // Start begins the background cleanup goroutine if cleanup is enabled.

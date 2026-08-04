@@ -27,7 +27,10 @@ Schema v5 removes aliases mechanically derived from account names or concrete
 model IDs, clears their references rather than guessing replacements, and
 preserves legacy web-search mappings as explicit custom aliases instead of
 silently assigning them to a predefined semantic role. Explicit custom aliases
-and deliberately configured predefined roles are preserved.
+and deliberately configured predefined roles are preserved. Optional frozen
+session media treats every locator, decoded byte, copied metadata field, and
+serialized frozen record as bounded untrusted input; capture and
+materialization fail closed without exposing local paths or payload detail.
 
 ## Reconstruction Notes
 
@@ -37,15 +40,20 @@ and deliberately configured predefined roles are preserved.
 - Core types/functions: secure string config helpers, credential store,
   dashboard auth middleware, CSRF/logout handlers, HTTP guard, isolation runtime,
   token, OAuth response parsing, PKCE helpers, strict bounded request decoders,
-  and raw-only AST classification for structured workflow authoring.
+  raw-only AST classification for structured workflow authoring,
+  `media.SnapshotReader`, `media.FreezeInputs`, and `media.FrozenSet` validation.
 - Runtime ordering: load security config, normalize protected values, validate
   access or target, execute guarded storage/network/process operation, redact
-  sensitive output, and emit clear errors.
+  sensitive output, and emit clear errors; for frozen media, preflight the
+  complete locator graph, capture only bounded no-follow regular files, then
+  validate the complete self-contained set again before materialization.
 - Non-obvious constraints: masked secure values preserve existing secrets,
   private network denial is the default, unsupported isolation does not fall back
   to unisolated execution, generated auth tokens must remain revocable, and a
   workflow-authoring projection or acknowledgement never grants runtime
-  authority.
+  authority. A frozen-media digest is an internal consistency binding, not
+  authentication against an attacker who can replace the complete containing
+  record.
 
 ## Requirements
 
@@ -74,6 +82,7 @@ and deliberately configured predefined roles are preserved.
 | `FR-SEC-019` | MUST | Authenticated trigger simulation and confirmed draft execution strictly decode one bounded tagged JSON object and reject unknown, duplicate, trailing, null-required, invalid UTF-8, unpaired-surrogate, browser-inexact-number, over-depth, over-collection, over-string, over-YAML, or oversized input with fixed public errors. Simulation parses only the supplied exact draft plus an ID-selected protected event when applicable, shares production trigger/context helpers, and returns only fixed match/suppression codes, bounded scenario metadata, the provided secret count without names, conservative action effects, completeness, validation, and an opaque review token; it never reflects secret names or values, protected event or runtime payloads, raw YAML, delivery internals, filesystem/configuration/provider errors, credentials, or runtime authority. Both routes obtain one current-schema config and exact public-plus-security revision through a read-only snapshot; a legacy schema fails closed without migration, backup, or save, while protected-event authority comes from a bounded PID-file peek or captured process record and never performs stale-PID cleanup. The token is an HMAC under a process-local random key over length-delimited exact session and draft fences, prompt, target, YAML bytes, trigger/index, normalized typed scenario including secret values, server-derived review, exact public-plus-security config revision, and, for a protected event, a digest of the exact server-loaded redacted envelope; restart invalidates it. Payload, MAC, and nonce encodings must be canonical, MAC comparison is constant time, and the consumed identity hashes the length-delimited decoded payload and MAC so textual base64 aliases cannot bypass one-use admission. Confirmed execution rejects caller-origin, caller-effect, and sync/async controls, repeats and re-simulates the exact reviewed request, and reloads protected event state. A preflight-invalid token, request, initial session/draft fence, trigger, protected event digest, config revision, match, or review fails before runtime construction. Execution constructs only an unpruned lazy runtime; final token expiry, config, session, candidate-validation, and running-test fences repeat under the workflow/config mutation locks immediately before durable run creation or development mutation, so a concurrent final-fence failure closes the unused runtime without creating a run, writing development state, or pruning retained history. A token admits at most one durable run even when its development claim or HTTP response projection fails, and every post-create response is a bounded `202` with the run ID plus a fixed omission or degraded-reconciliation marker when the full session cannot be returned. Browser consent remains component-local, token- and exact-identity-bound, clears synchronously on any identity change, and is disabled after one confirmation. | Draft scenarios contain attacker-controlled messages, runtime metadata, event IDs, secrets, and authority-bearing actions; preview and confirmation must not become a secret/payload oracle, side-effecting matcher, stale-consent path, or forged run-origin channel. |
 | `FR-SEC-020` | MUST | Agent capability reads and mutations resolve the runtime-equivalent workspace, open bounded regular `AGENT.md` and legacy `AGENTS.md` state without following symlinks or blocking on special files, and fence exact active bytes plus the public-and-security config generation. Existing-file commits on a supported host bind the intended candidate identity and bytes, use an atomic entry exchange, validate the exact displaced file, and establish the platform durability boundary before best-effort displaced-file cleanup. Conflict recovery repeats the exchange when a newer edit races restoration so that edit returns to the canonical path; any entry that cannot safely be recovered is retained at a logged operator-visible path. Create and legacy-upgrade commits atomically require an absent current file, recheck the alternate legacy source after creation, and conditionally quarantine only the generated file on conflict. A platform without a handle-safe primitive—including Windows while `ReplaceFileW` cannot provide no-follow target binding—projects a fixed read-only issue instead of accepting a save that cannot be safe. Structured YAML-node mutation rejects normalization-unsafe, malformed, and unterminated documents, whose runtime tools, MCP, and structured tasks fail closed, and preserves unrelated nodes, comments, order, style, exact permissions, and body; legacy upgrade requires an explicit acknowledgement and leaves the legacy file untouched. Capability catalogs expose only fixed bounded fields and never paths, URLs, commands, arguments, environment, headers, auth state, credentials, or raw parser/filesystem/provider errors. Per-agent activity similarly filters a fixed typed event allowlist before its bounded queue; the gateway writes a concrete numeric address selected from the listener that actually opened, including a single-stack localhost fallback, and the launcher proxy peeks rather than repairs PID authority, rejects hostname and wildcard PID authority, sends the bearer only to loopback or a literal local-interface address through a no-proxy/no-redirect bounded client, forwards no browser credentials or headers, strictly revalidates the upstream DTO, and returns fixed local errors. | Workspace editing and live telemetry combine attacker-controlled files, runtime payloads, and process authority; management convenience must not create a symlink/FIFO escape, lost update, secret/configuration oracle, credential-forwarding path, or bearer exfiltration primitive. |
 | `FR-SEC-021` | MUST | A whole-config read-modify-write operation captures the parsed update-safe configuration and one opaque revision of the exact public JSON plus security sidecar under the shared process/advisory lock, validates a complete candidate, and saves only when that revision is still current. The revision hashes security bytes without returning them. A stale save returns `config revision mismatch`, writes neither file, and preserves the winning writer's aliases, credentials, and unrelated configuration; callers surface a reload/retry conflict instead of blindly retrying an operation whose intent may no longer be valid. Current-schema read-only snapshots never migrate or save, while update snapshots may complete the explicit legacy migration lifecycle before returning a coherent current generation. | CLI, launcher, and runtime config writers must not lose concurrent public or secret state or turn a read path into an implicit mutation. |
+| `FR-SEC-022` | MUST | Frozen-session media capture and materialization treat the complete locator batch and serialized `FrozenSet` as untrusted. They admit at most 32 locator occurrences, 16 distinct nonempty assets, 2 MiB decoded bytes per asset, 3 MiB decoded bytes counted per occurrence, and 5 MiB for both materialized encoding and frozen-set JSON. Occurrence counting happens before snapshot cloning; complete locator and supplied-metadata shape validation happens before any live read, and decoded/read/materialized bounds never trust declared lengths. At most four `FreezeInputs` calls hold capture admission concurrently; an excess caller waits only until a slot is available or its context is cancelled. A live `media://` snapshot retains store lifecycle synchronization while it safely opens and validates a regular handle and executes one bounded read: Unix uses no-follow/nonblocking open plus a status-change token, Windows rejects every handle carrying the reparse-point attribute and compares handle change time, and other platforms fail closed. Registration and final deletion use cleaned absolute exact lexical lifecycle keys without an approximate case fold. One live key coalesces only the same captured entry identity. A `SameFile` identity found under a distinct key is not coalesced because it may be a hard link; instead, all such live lifecycles become non-deleting. Re-registration permanently cancels older pending deletion through either its exact key or captured `SameFile` identity, and deletion rechecks `Lstat`/`SameFile` so an already replaced entry is preserved. These operations share store synchronization, so an old cleanup cannot delete a newly registered or read-pinned path. Only canonical frozen identities, canonical `media://` UUID capabilities, and `data:` locators with canonical parameter-free MIME plus canonical padded base64 are accepted. Raw filenames are bounded at 4 KiB before basename sanitization to valid UTF-8 without controls and at most 255 bytes; supplied MIME is at most 127 bytes and captured MIME is bounded at 1 KiB before canonicalization to at most 127 bytes. Frozen records have one supported explicit version, deterministic unique identities/order, bounded canonical metadata, exact decoded sizes, and content digests; strict decode also rejects invalid UTF-8 and unpaired JSON surrogates, and decode/use reject unknown, duplicate, missing, unused, reordered/noncanonical, trailing, digest/size-inconsistent, reference-inconsistent, or authoritative occurrence-metadata-inconsistent state before returning rewritten history. Snapshot/freeze/materialize failures use fixed bounded classification and omit locator text, local paths, filenames/content types, decoded or encoded payload bytes, and raw filesystem/JSON/base64 errors. Cancellation or any failure returns no partial snapshot, reference list, set, or materialized output and leaves caller-owned inputs unchanged. | Media locators can name private temporary files and carry attacker-sized inline content; restart-safe capture must not become a symlink/special-file read, resource-amplification path, tampered-context downgrade, or diagnostic data leak. |
 
 ## Data And State Model
 
@@ -97,7 +106,14 @@ deduplication credentials unrepresentable. Structured job/action editor
 revisions are opaque hashes of caller-supplied draft bytes, not durable
 authority. Editor inspections, operations, capability choices, and
 effect-review acknowledgements are transient request/browser state and add no
-configuration, credential, workflow, session, or run record.
+configuration, credential, workflow, session, or run record. A detached media
+snapshot and its versioned `FrozenSet` contain bounded user-supplied bytes and
+sanitized metadata, not a source path or live store authority. They may be
+sensitive durable context when an owning feature serializes them, but this
+security contract does not itself choose a persistence location, encryption,
+retention, or access-control policy. Their content-derived identities and
+digests establish internal consistency only; they do not authenticate a whole
+record controlled by a local storage attacker.
 
 ## Surface Ownership
 
@@ -147,6 +163,8 @@ Owns: TEST pkg/config/version*
 | Storage | Credential store | Provider and MCP credential CRUD, transactional refresh updates, auth/OAuth metadata, cross-process serialization on supported hosts, and optional non-secret account email metadata extracted from OAuth token responses. | `FR-SEC-002`, `FR-SEC-007`, `FR-SEC-009` |
 | Storage | `pkg/fileutil` durable path operations | Durable recursive parent creation, synced same-directory atomic replacement, and durable logical removal with POSIX directory sync or Windows write-through moves. | `FR-SEC-015` |
 | Network | Safe HTTP clients, MCP OAuth transports, and net binding helpers | Private/special-use host controls, DNS-pinned MCP OAuth discovery/token/probe/refresh requests, same-origin redirects, explicit local-development policy, and bind behavior. | `FR-SEC-005` |
+| Go API | `media.SnapshotReader.ReadSnapshot`, `media.FreezeInputs`, `media.FrozenSet.Materialize`, session frozen-media wrappers | Capture one live file capability and freeze/materialize one complete locator batch with fixed resource ceilings, strict schemes/encoding, no-follow regular-file handling, consistency validation, all-or-nothing output, and redacted errors. | `FR-SEC-022` |
+| JSON | Versioned `media.FrozenSet` serialized beside a frozen session snapshot or embedded by its owning durable record | Strictly round-trip only canonical bounded records; reject unknown, duplicate, trailing, inconsistent, or over-budget state before any locator is materialized. | `FR-SEC-022` |
 
 ## Algorithms And Ordering
 
@@ -291,6 +309,24 @@ Owns: TEST pkg/config/version*
     validate one complete candidate, and compare-and-save against that revision.
     If another writer changed either file, return the stale-revision error
     without writing or automatically replaying the requested mutation.
+19. For frozen media, enumerate and statically validate the entire locator
+    batch before capture; preflight occurrence, locator, and supplied-metadata
+    bounds, acquire one of four context-cancellable global capture slots, then
+    charge distinct-asset, decoded, aggregate-occurrence, captured metadata, and
+    encoded work while capturing. Open each live file through the platform's
+    no-follow regular-file primitive while its store mapping is pinned, and
+    compare its status-change token after the bounded read. Normalize a
+    registered path to a cleaned absolute exact lexical lifecycle key and bind
+    that live key to the first entry identity. For the same identity under a
+    distinct key, retain both paths but make both lifecycles non-deleting; on
+    re-registration, cancel older pending deletions by exact key and verified
+    identity. Before final removal, recheck that token and entry identity under
+    store synchronization; preserve a detected replacement.
+    Build a deterministic complete set only after every asset succeeds.
+    On decode or materialization, strictly validate the JSON envelope, version,
+    canonical identities/order/metadata, size, digest, reference closure, and
+    the same budgets before emitting any locator. Map all failures through the
+    fixed redacted taxonomy and discard partial internal output.
 
 ## Cross-Feature Behavior
 
@@ -352,6 +388,11 @@ credential. Runtime refresh and launcher replacement share the same
 transactional locking boundary, while MCP-specific protocol and management
 behavior remains owned by
 [MCP Integration And Discovery](mcp-integration.md).
+Frozen session media composes the tool feature's optional live-reference reader
+with the session feature's versioned set and locator rewrite. Security owns the
+safe-open, resource-bound, consistency-validation, and diagnostic-redaction
+invariants; it does not wire the capability into agent/provider execution or
+promise that a provider consumes every materialized modality.
 
 ## Failure And Edge Cases
 
@@ -454,6 +495,34 @@ behavior remains owned by
 - Unverified email is skipped by default; an explicit opt-in marks it
   unverified. Private Delta Chat blob paths and copy errors do not enter durable
   events or attachment diagnostics, and oversized files are not materialized.
+- Frozen media rejects raw paths, network/file/unknown schemes, noncanonical
+  `media://` UUID capabilities, malformed or noncanonical padded-base64 data,
+  a resulting filename basename that is invalid UTF-8, contains a control, or
+  exceeds 255 bytes, a MIME value that cannot normalize to parameter-free
+  canonical form within 127 bytes, and any locator whose live store entry is
+  absent at capture.
+  It does not search temporary directories or reuse a path from an earlier
+  process generation.
+- A mapped symlink, reparse point, directory, FIFO, socket, or device is never
+  read as frozen media. A safe open that cannot be established
+  fails with a fixed unavailable/unsafe class; it does not fall back to ordinary
+  `os.Open`, follow the entry, or wait on a special stream; non-Unix,
+  non-Windows targets fail closed.
+- Declared sizes and JSON/base64 lengths are hints only. Raw locator and
+  metadata inputs are capped before linear scans or copies. Actual decoded/read
+  bytes, repeated occurrence cost, distinct assets, metadata, and final encoded
+  form are independently charged; an empty asset, exceeding 32 locators, 16
+  assets, 2 MiB per asset, 3 MiB occurrence-weighted raw bytes, 5 MiB
+  materialized encoding, or 5 MiB frozen-set JSON returns no partial result.
+  At most four captures hold admission at once, and a saturated waiter remains
+  cancellable before its reader is invoked.
+- An unsupported version, duplicate, missing, or unused record, unknown or
+  trailing JSON field, invalid UTF-8 or unpaired surrogate, invalid canonical
+  order/identity, size/digest mismatch, dangling frozen reference, or changed
+  provider-authoritative occurrence metadata fails before output. Returned
+  snapshot, freeze, and materialization failures never echo a reference, path,
+  filename, MIME value, data-URI/base64 text, decoded bytes, or underlying
+  parser/filesystem error.
 
 ## Acceptance Evidence
 
@@ -477,6 +546,7 @@ behavior remains owned by
 | `FR-SEC-019` | [pkg/config/mutation_test.go](../../pkg/config/mutation_test.go), [pkg/workflows/trigger_simulation_test.go](../../pkg/workflows/trigger_simulation_test.go), [pkg/workflows/development_test_admission_test.go](../../pkg/workflows/development_test_admission_test.go), [web/backend/api/workflow_event_context_test.go](../../web/backend/api/workflow_event_context_test.go), [web/backend/api/workflow_trigger_simulation_test.go](../../web/backend/api/workflow_trigger_simulation_test.go), [web/frontend/src/api/workflows.test.ts](../../web/frontend/src/api/workflows.test.ts), [web/frontend/src/components/workflows/workflow-trigger-simulator.test.tsx](../../web/frontend/src/components/workflows/workflow-trigger-simulator.test.tsx), [web/frontend/src/components/workflows/workflow-draft-test-review-dialog.test.tsx](../../web/frontend/src/components/workflows/workflow-draft-test-review-dialog.test.tsx), [web/frontend/src/components/workflows/workflow-job-builder-integration.test.tsx](../../web/frontend/src/components/workflows/workflow-job-builder-integration.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-SEC-020` | [pkg/agent/definition_test.go](../../pkg/agent/definition_test.go), [web/backend/api/agent_capabilities_test.go](../../web/backend/api/agent_capabilities_test.go), [web/backend/api/agent_capabilities_cas_test.go](../../web/backend/api/agent_capabilities_cas_test.go), [web/backend/api/agent_capabilities_replace_linux_test.go](../../web/backend/api/agent_capabilities_replace_linux_test.go), [web/backend/api/agent_capabilities_request_test.go](../../web/backend/api/agent_capabilities_request_test.go), [web/backend/api/agent_capabilities_unix_test.go](../../web/backend/api/agent_capabilities_unix_test.go), [pkg/agent/activity_test.go](../../pkg/agent/activity_test.go), [pkg/gateway/agent_activity_test.go](../../pkg/gateway/agent_activity_test.go), [pkg/gateway/listen_test.go](../../pkg/gateway/listen_test.go), [web/backend/api/agent_activity_test.go](../../web/backend/api/agent_activity_test.go), [web/frontend/src/api/agents.test.ts](../../web/frontend/src/api/agents.test.ts) |
 | `FR-SEC-021` | [pkg/config/mutation_test.go](../../pkg/config/mutation_test.go), [web/backend/api/config_writer_cas_test.go](../../web/backend/api/config_writer_cas_test.go), [cmd/picoclaw/internal/auth/config_revision_test.go](../../cmd/picoclaw/internal/auth/config_revision_test.go), [cmd/picoclaw/internal/mcp/command_test.go](../../cmd/picoclaw/internal/mcp/command_test.go), [cmd/picoclaw/internal/model/command_test.go](../../cmd/picoclaw/internal/model/command_test.go) |
+| `FR-SEC-022` | [pkg/media/store_test.go](../../pkg/media/store_test.go), [pkg/media/snapshot_test.go](../../pkg/media/snapshot_test.go), [pkg/media/frozen_test.go](../../pkg/media/frozen_test.go), [pkg/media/snapshot_file_unix.go](../../pkg/media/snapshot_file_unix.go), [pkg/media/snapshot_file_windows.go](../../pkg/media/snapshot_file_windows.go), [pkg/media/snapshot_file_other.go](../../pkg/media/snapshot_file_other.go), [pkg/session/frozen_media_test.go](../../pkg/session/frozen_media_test.go) |
 
 ## Implementation Anchors
 
@@ -493,6 +563,14 @@ behavior remains owned by
 - [pkg/mcp/oauth.go](../../pkg/mcp/oauth.go)
 - [pkg/credential](../../pkg/credential)
 - [pkg/fileutil](../../pkg/fileutil)
+- [pkg/media/store.go](../../pkg/media/store.go)
+- [pkg/media/snapshot.go](../../pkg/media/snapshot.go)
+- [pkg/media/snapshot_file.go](../../pkg/media/snapshot_file.go)
+- [pkg/media/snapshot_file_unix.go](../../pkg/media/snapshot_file_unix.go)
+- [pkg/media/snapshot_file_windows.go](../../pkg/media/snapshot_file_windows.go)
+- [pkg/media/snapshot_file_other.go](../../pkg/media/snapshot_file_other.go)
+- [pkg/media/frozen.go](../../pkg/media/frozen.go)
+- [pkg/session/frozen_media.go](../../pkg/session/frozen_media.go)
 - [pkg/isolation](../../pkg/isolation)
 - [pkg/workflows/inspection.go](../../pkg/workflows/inspection.go)
 - [pkg/workflows/inspection_open_unix.go](../../pkg/workflows/inspection_open_unix.go)

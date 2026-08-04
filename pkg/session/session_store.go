@@ -123,9 +123,18 @@ func cloneSessionMessage(message providers.Message) providers.Message {
 		createdAt := *message.CreatedAt
 		cloned.CreatedAt = &createdAt
 	}
-	cloned.Media = append([]string(nil), message.Media...)
-	cloned.Attachments = append([]providers.Attachment(nil), message.Attachments...)
-	cloned.Parts = append([]providers.PromptPart(nil), message.Parts...)
+	if message.Media != nil {
+		cloned.Media = make([]string, len(message.Media))
+		copy(cloned.Media, message.Media)
+	}
+	if message.Attachments != nil {
+		cloned.Attachments = make([]providers.Attachment, len(message.Attachments))
+		copy(cloned.Attachments, message.Attachments)
+	}
+	if message.Parts != nil {
+		cloned.Parts = make([]providers.PromptPart, len(message.Parts))
+		copy(cloned.Parts, message.Parts)
+	}
 	if message.SystemParts != nil {
 		cloned.SystemParts = make([]providers.ContentBlock, len(message.SystemParts))
 		for i, block := range message.SystemParts {
