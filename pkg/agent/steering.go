@@ -473,6 +473,16 @@ func (al *AgentLoop) continueWithInboundContext(
 		return "", fmt.Errorf("no agent available for session %q", sessionKey)
 	}
 
+	if err := admitSessionMetadata(
+		ctx,
+		agent.Sessions,
+		sessionKey,
+		nil,
+		nil,
+		agent.ID,
+	); err != nil {
+		return "", fmt.Errorf("admit live session scope: %w", err)
+	}
 	var scope *session.SessionScope
 	if metaStore, ok := agent.Sessions.(session.MetadataAwareSessionStore); ok {
 		scope = metaStore.GetSessionScope(sessionKey)

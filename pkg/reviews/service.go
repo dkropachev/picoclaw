@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/eventing"
+	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
@@ -42,19 +43,24 @@ type Submitter interface {
 }
 
 type ServiceConfig struct {
-	Store           Store
-	Agent           workflows.AgentRunner
-	Submitter       Submitter
-	MaxConcurrentAI int
+	Store                        Store
+	Agent                        workflows.AgentRunner
+	AgentID                      string
+	Submitter                    Submitter
+	AcquireWorkingContextRuntime WorkingContextRuntimeAcquire
+	MaxConcurrentAI              int
 }
 
 // Service coordinates optimistic human edits, isolated AI assistance, and
 // durable creation of immutable GitHub submission work.
 type Service struct {
-	store     Store
-	agent     workflows.AgentRunner
-	submitter Submitter
-	aiSlots   chan struct{}
+	store                        Store
+	agent                        workflows.AgentRunner
+	agentID                      string
+	submitter                    Submitter
+	acquireWorkingContextRuntime WorkingContextRuntimeAcquire
+	workingContextLocks          *reviewCaseLockSet
+	aiSlots                      chan struct{}
 }
 
 func NewService(config ServiceConfig) (*Service, error) {
@@ -68,11 +74,20 @@ func NewService(config ServiceConfig) (*Service, error) {
 	if maxConcurrentAI < 0 || maxConcurrentAI > 128 {
 		return nil, errors.New("review AI concurrency must be between 1 and 128")
 	}
+	rawAgentID := config.AgentID
+	agentID := strings.TrimSpace(rawAgentID)
+	if agentID != "" &&
+		(rawAgentID != agentID || !routing.IsCanonicalAgentID(agentID)) {
+		return nil, errors.New("review AI agent ID must be an exact canonical ID")
+	}
 	return &Service{
-		store:     config.Store,
-		agent:     config.Agent,
-		submitter: config.Submitter,
-		aiSlots:   make(chan struct{}, maxConcurrentAI),
+		store:                        config.Store,
+		agent:                        config.Agent,
+		agentID:                      agentID,
+		submitter:                    config.Submitter,
+		acquireWorkingContextRuntime: config.AcquireWorkingContextRuntime,
+		workingContextLocks:          newReviewCaseLockSet(),
+		aiSlots:                      make(chan struct{}, maxConcurrentAI),
 	}, nil
 }
 
@@ -575,6 +590,7 @@ func (service *Service) runStructuredAI(
 		return "", nil, ctx.Err()
 	}
 	outputs, err := service.agent.RunAgent(ctx, workflows.AgentRequest{
+		AgentID: service.agentID,
 		Prompt:  prompt,
 		Context: reviewAIContext(detail, findingID),
 		Session: reviewAISession(detail.Case.ID, findingID),

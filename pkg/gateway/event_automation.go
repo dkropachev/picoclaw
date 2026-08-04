@@ -55,10 +55,12 @@ type eventRetentionPruner interface {
 }
 
 type eventReviewRuntime struct {
-	agent           workflows.AgentRunner
-	submitter       reviews.Submitter
-	notificationMCP workflows.ToolRunner
-	mcpArtifactRoot string
+	agent                        workflows.AgentRunner
+	agentID                      string
+	acquireWorkingContextRuntime reviews.WorkingContextRuntimeAcquire
+	submitter                    reviews.Submitter
+	notificationMCP              workflows.ToolRunner
+	mcpArtifactRoot              string
 }
 
 func setupEventAutomationService(
@@ -90,6 +92,12 @@ func setupEventAutomationService(
 	reviewRuntime := eventReviewRuntime{}
 	if agentLoop != nil {
 		reviewRuntime.agent = agent.NewWorkflowAgentRunner(agentLoop)
+		defaultAgent, err := defaultReviewRuntimeAgent(agentLoop)
+		if err != nil {
+			return nil, err
+		}
+		reviewRuntime.agentID = defaultAgent.ID
+		reviewRuntime.acquireWorkingContextRuntime = newReviewWorkingContextRuntimeAcquire(cfg, agentLoop)
 		pollNotifications := githubNotificationPollingEnabled(cfg)
 		reviewSubmission := githubReviewSubmissionReady(ctx, agentLoop)
 		if pollNotifications {
@@ -197,9 +205,11 @@ func newEventAutomationServiceWithReviews(
 	}
 
 	reviewService, err := reviews.NewService(reviews.ServiceConfig{
-		Store:     store,
-		Agent:     reviewRuntime.agent,
-		Submitter: reviewRuntime.submitter,
+		Store:                        store,
+		Agent:                        reviewRuntime.agent,
+		AgentID:                      reviewRuntime.agentID,
+		Submitter:                    reviewRuntime.submitter,
+		AcquireWorkingContextRuntime: reviewRuntime.acquireWorkingContextRuntime,
 	})
 	if err != nil {
 		return nil, errors.Join(err, store.Close())

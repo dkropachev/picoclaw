@@ -20,6 +20,7 @@ const (
 	MaxWorkflowPrivateRootValuesBytes = MaxWorkflowGateInputsBytes
 	MaxWorkflowPrivateRootBytes       = 8 << 20
 	maxPrivateSessionKeyBytes         = 4 << 10
+	maxPrivateSessionRevisionBytes    = 256
 	maxPrivateHistoryRevisionBytes    = 256
 )
 
@@ -149,6 +150,17 @@ func freezeWorkflowPrivateRoot(
 				ErrPrivateWorkflowContext,
 			)
 		}
+		// Capturers are a capability boundary, not an authority to weaken the
+		// caller's CAS fence. Check the store revision before validating or
+		// persisting any captured content. Empty remains the documented legacy
+		// unfenced mode.
+		if ref.ExpectedRevision != "" &&
+			(captured == nil || captured.Snapshot.Revision != ref.ExpectedRevision) {
+			return nil, fmt.Errorf(
+				"%w: read-only session changed before capture",
+				ErrPrivateWorkflowContext,
+			)
+		}
 		if validateErr := validateFrozenReadOnlySessionWithContext(
 			ctx,
 			captured,
@@ -199,6 +211,15 @@ func normalizePrivateReadOnlySessionRef(ref ReadOnlySessionRef) (ReadOnlySession
 		!utf8.ValidString(ref.Session) || len(ref.Session) > maxPrivateSessionKeyBytes {
 		return ReadOnlySessionRef{}, fmt.Errorf(
 			"%w: read-only session key is invalid",
+			ErrPrivateWorkflowContext,
+		)
+	}
+	if ref.ExpectedRevision != "" &&
+		(ref.ExpectedRevision != strings.TrimSpace(ref.ExpectedRevision) ||
+			!utf8.ValidString(ref.ExpectedRevision) ||
+			len(ref.ExpectedRevision) > maxPrivateSessionRevisionBytes) {
+		return ReadOnlySessionRef{}, fmt.Errorf(
+			"%w: read-only session revision is invalid",
 			ErrPrivateWorkflowContext,
 		)
 	}

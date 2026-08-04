@@ -255,15 +255,44 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				)
 				continue
 			}
+			// Route and admit before workflow-trigger handling. Trigger matching can
+			// consume the message and start durable work without entering the normal
+			// turn path, so it must not bypass protected-session ownership.
+			sessionKey, agentID, routable := al.resolveSteeringTarget(msg)
+			if routable {
+				if admissionErr := al.admitInboundMessageSession(
+					inboundCtx,
+					msg,
+					sessionKey,
+				); admissionErr != nil {
+					outboundEnqueued := al.maybePublishError(
+						inboundCtx,
+						msg.Channel,
+						msg.ChatID,
+						sessionKey,
+						admissionErr,
+						&msg.Context,
+					)
+					if al.channelManager != nil && !outboundEnqueued {
+						cleanupTurnUXForMessage(
+							inboundCtx,
+							al.channelManager,
+							msg.Channel,
+							msg.ChatID,
+							msg.Context.TurnUXID,
+						)
+					}
+					releaseInbound()
+					continue
+				}
+			}
 			if al.handleWorkflowTriggers(inboundCtx, msg) {
 				al.cleanupInboundTurnUX(inboundCtx, msg)
 				releaseInbound()
 				continue
 			}
 
-			// Resolve the session key for this message
-			sessionKey, agentID, ok := al.resolveSteeringTarget(msg)
-			if !ok {
+			if !routable {
 				// Non-routable message (e.g., system) — process immediately.
 				// Note: system messages are processed in the main goroutine,
 				// so they block the receive loop but guarantee session serialization.
@@ -296,6 +325,9 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 			unlockSessionTurn()
 			messagePrepared := false
 			if loaded {
+				// Pre-trigger admission above already fenced this fast path before
+				// active-turn lookup. Ownership cannot change afterward, and repeating
+				// admission would rewrite metadata/revision for every steering message.
 				if al.tryHandleStopCommand(inboundCtx, msg, sessionKey) {
 					releaseInbound()
 					continue
@@ -964,6 +996,16 @@ func (al *AgentLoop) runAgentLoop(
 	if err != nil {
 		return "", err
 	}
+	if admissionErr := admitSessionMetadata(
+		ctx,
+		agent.Sessions,
+		opts.Dispatch.SessionKey,
+		opts.Dispatch.SessionScope,
+		opts.Dispatch.SessionAliases,
+		agent.ID,
+	); admissionErr != nil {
+		return "", fmt.Errorf("admit live session scope: %w", admissionErr)
+	}
 
 	// Record last channel for heartbeat notifications (skip internal channels and cli)
 	if opts.Dispatch.Channel() != "" &&
@@ -978,13 +1020,6 @@ func (al *AgentLoop) runAgentLoop(
 			)
 		}
 	}
-
-	ensureSessionMetadata(
-		agent.Sessions,
-		opts.Dispatch.SessionKey,
-		opts.Dispatch.SessionScope,
-		opts.Dispatch.SessionAliases,
-	)
 
 	turnScope := al.newTurnEventScope(
 		agent.ID,

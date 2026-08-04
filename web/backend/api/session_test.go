@@ -15,6 +15,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
@@ -820,6 +821,135 @@ func TestHandleSessions_StructuredNonPicoScopeCannotFallBackToPicoAlias(t *testi
 	)
 	if err != nil || !found || len(history) != 1 || history[0].Content != "private Slack history" {
 		t.Fatalf("Slack snapshot = (found=%v, history=%#v, err=%v)", found, history, err)
+	}
+}
+
+func TestHandleSessions_AgentQualifiedReviewWorkingContextsAreHidden(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	dir := sessionsTestDir(t, configPath)
+	store, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	type hiddenReviewContext struct {
+		caseID       string
+		agentID      string
+		canonicalKey string
+		aliases      []string
+		secret       string
+	}
+	const sharedCaseID = "prc_11111111111111111111111111111111"
+	contexts := []hiddenReviewContext{
+		{
+			caseID:  sharedCaseID,
+			agentID: "main",
+			secret:  "private main-agent review transcript",
+		},
+		{
+			caseID:  sharedCaseID,
+			agentID: "reviewer",
+			secret:  "private reviewer-agent review transcript",
+		},
+	}
+	for index := range contexts {
+		hidden := &contexts[index]
+		scope := session.SessionScope{
+			Version:    session.ScopeVersionV1,
+			AgentID:    hidden.agentID,
+			Channel:    "review",
+			Account:    routing.DefaultAccountID,
+			Dimensions: []string{"review"},
+			Values: map[string]string{
+				"review": hidden.caseID,
+			},
+		}
+		hidden.canonicalKey = session.BuildSessionKey(scope)
+		stableAlias := "review:agent:" + hidden.agentID + ":case:" + hidden.caseID
+		hidden.aliases = []string{
+			stableAlias,
+			stableAlias + ":binding:" + strings.Repeat("a", 64),
+			stableAlias + ":version:7",
+		}
+		rawScope, marshalErr := json.Marshal(scope)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if addErr := store.AddMessage(ctx, hidden.canonicalKey, "user", hidden.secret); addErr != nil {
+			t.Fatal(addErr)
+		}
+		if upsertErr := store.UpsertSessionMeta(
+			ctx,
+			hidden.canonicalKey,
+			rawScope,
+			hidden.aliases,
+		); upsertErr != nil {
+			t.Fatal(upsertErr)
+		}
+	}
+
+	h := NewHandler(configPath)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	listRec := httptest.NewRecorder()
+	mux.ServeHTTP(listRec, httptest.NewRequest(http.MethodGet, "/api/sessions", nil))
+	if listRec.Code != http.StatusOK || listRec.Body.String() != "[]\n" {
+		t.Fatalf("list status=%d body=%s", listRec.Code, listRec.Body.String())
+	}
+	for _, hidden := range contexts {
+		for _, privateValue := range []string{
+			hidden.caseID,
+			hidden.canonicalKey,
+			hidden.aliases[0],
+			hidden.aliases[1],
+			hidden.aliases[2],
+			hidden.secret,
+		} {
+			if strings.Contains(listRec.Body.String(), privateValue) {
+				t.Fatalf("session list exposed %q: %s", privateValue, listRec.Body.String())
+			}
+		}
+
+		guessedIDs := append([]string{
+			hidden.caseID,
+			hidden.canonicalKey,
+		}, hidden.aliases...)
+		for _, guessedID := range guessedIDs {
+			for _, method := range []string{http.MethodGet, http.MethodDelete} {
+				rec := httptest.NewRecorder()
+				mux.ServeHTTP(rec, httptest.NewRequest(method, "/api/sessions/"+guessedID, nil))
+				if rec.Code != http.StatusNotFound {
+					t.Fatalf(
+						"%s guessed review ID %q status=%d body=%s",
+						method,
+						guessedID,
+						rec.Code,
+						rec.Body.String(),
+					)
+				}
+			}
+		}
+
+		lookups := append([]string{hidden.canonicalKey}, hidden.aliases...)
+		for _, lookup := range lookups {
+			canonicalKey, history, _, found, readErr := store.ReadSessionSnapshot(ctx, lookup)
+			if readErr != nil || !found || canonicalKey != hidden.canonicalKey ||
+				len(history) != 1 || history[0].Content != hidden.secret {
+				t.Fatalf(
+					"hidden review snapshot %q = (key=%q, found=%v, history=%#v, err=%v)",
+					lookup,
+					canonicalKey,
+					found,
+					history,
+					readErr,
+				)
+			}
+		}
 	}
 }
 

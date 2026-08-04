@@ -71,10 +71,13 @@ type PrivateRootRequest struct {
 
 // ReadOnlySessionRef selects one exact existing session owned by AgentID.
 // Session is a local capability and is never persisted outside the private
-// frozen root or emitted through workflow observations.
+// frozen root or emitted through workflow observations. ExpectedRevision, when
+// non-empty, fences capture to the exact store snapshot observed by the caller.
+// An empty ExpectedRevision preserves unfenced capture for legacy local callers.
 type ReadOnlySessionRef struct {
-	AgentID string
-	Session string
+	AgentID          string `json:"AgentID"`
+	Session          string `json:"Session"`
+	ExpectedRevision string `json:"-"`
 }
 
 // FrozenReadOnlySession is the detached evidence supplied to every matching

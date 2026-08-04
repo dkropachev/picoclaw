@@ -323,6 +323,224 @@ func TestWorkflowAgentRunnerReadOnlyUsesExactImmutableSessionSnapshot(t *testing
 	}
 }
 
+func TestWorkflowAgentRunnerPublicReadOnlyRejectsReviewScopeWhilePrivateCaptureSucceeds(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"private review decision"}}
+	loop, agent, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	runner := &workflowAgentRunner{loop: loop}
+	reviewScope := session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "main",
+		Channel:    "review",
+		Account:    "default",
+		Dimensions: []string{"review"},
+		Values:     map[string]string{"review": "case-guard"},
+	}
+	reviewKey := session.BuildSessionKey(reviewScope)
+	const reviewAlias = "review:agent:main:case:case-guard"
+	replacer, ok := agent.Sessions.(session.SnapshotReplacer)
+	if !ok {
+		t.Fatalf("session store %T does not support exact replacement", agent.Sessions)
+	}
+	if err := replacer.ReplaceSessionSnapshot(context.Background(), session.SessionSnapshotReplacement{
+		Key: reviewKey,
+		History: []providers.Message{
+			{Role: "user", Content: "private review finding"},
+			{Role: "assistant", Content: "private review analysis"},
+		},
+		Summary: "private review summary",
+		Scope:   &reviewScope,
+		Aliases: []string{reviewAlias},
+	}); err != nil {
+		t.Fatalf("seed review snapshot: %v", err)
+	}
+
+	_, err := runner.RunAgent(context.Background(), workflows.AgentRequest{
+		AgentID: "main",
+		Session: reviewAlias,
+		History: "read_only",
+		Cache:   "session",
+		Tools:   workflows.AgentToolsNone,
+		Prompt:  "Expose the review history.",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot use a review-scoped session") {
+		t.Fatalf("public review-scoped RunAgent() error = %v, want fail-closed rejection", err)
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("public rejection reached provider %d time(s), want zero", len(calls))
+	}
+
+	frozen, err := runner.CaptureReadOnlySession(context.Background(), workflows.ReadOnlySessionRef{
+		AgentID: "main",
+		Session: reviewAlias,
+	})
+	if err != nil {
+		t.Fatalf("private CaptureReadOnlySession() error = %v", err)
+	}
+	if frozen.Snapshot.Scope == nil || frozen.Snapshot.Scope.Channel != "review" {
+		t.Fatalf("captured review scope = %#v, want review", frozen.Snapshot.Scope)
+	}
+	outputs, err := runner.RunAgent(context.Background(), workflows.AgentRequest{
+		AgentID:               "main",
+		History:               "read_only",
+		Cache:                 "session",
+		Tools:                 workflows.AgentToolsNone,
+		Prompt:                "Decide from the compiler-frozen review evidence.",
+		FrozenReadOnlySession: frozen,
+	})
+	if err != nil {
+		t.Fatalf("private frozen RunAgent() error = %v", err)
+	}
+	if outputs["text"] != "private review decision" ||
+		outputs["session_mode"] != workflows.AgentSessionPrivate {
+		t.Fatalf("private frozen outputs = %#v", outputs)
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 1 {
+		t.Fatalf("private frozen provider calls = %d, want one", len(calls))
+	}
+}
+
+func TestWorkflowAgentRunnerPrivateCaptureRevisionFenceExactAndCompatible(t *testing.T) {
+	tests := []struct {
+		name   string
+		fenced bool
+	}{
+		{name: "exact revision", fenced: true},
+		{name: "empty compatibility revision"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &workflowReadOnlyCaptureProvider{responses: []string{"unexpected"}}
+			loop, agent, canonicalKey, alias := newWorkflowReadOnlyTestLoop(t, provider)
+			snapshot, found, err := agent.Sessions.(session.SnapshotReader).ReadSessionSnapshot(
+				context.Background(),
+				canonicalKey,
+			)
+			if err != nil || !found || snapshot.Revision == "" {
+				t.Fatalf("projected snapshot = (%#v, %v, %v), want revision", snapshot, found, err)
+			}
+			expected := ""
+			if test.fenced {
+				expected = snapshot.Revision
+			}
+			frozen, err := (&workflowAgentRunner{loop: loop}).CaptureReadOnlySession(
+				context.Background(),
+				workflows.ReadOnlySessionRef{
+					AgentID:          "main",
+					Session:          alias,
+					ExpectedRevision: expected,
+				},
+			)
+			if err != nil {
+				t.Fatalf("CaptureReadOnlySession() error = %v", err)
+			}
+			if frozen.Snapshot.Key != canonicalKey || frozen.Snapshot.Revision != snapshot.Revision {
+				t.Fatalf(
+					"captured snapshot identity = %#v, want %q at %q",
+					frozen.Snapshot,
+					canonicalKey,
+					snapshot.Revision,
+				)
+			}
+			if calls := provider.snapshotCalls(); len(calls) != 0 {
+				t.Fatalf("capture reached provider %d time(s), want zero", len(calls))
+			}
+		})
+	}
+}
+
+func TestWorkflowAgentRunnerPrivateCaptureRejectsMutationBeforeLiveMediaRead(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"unexpected"}}
+	loop, agent, canonicalKey, alias := newWorkflowReadOnlyTestLoop(t, provider)
+	baseMediaStore := media.NewFileMediaStore()
+	mediaPath := filepath.Join(t.TempDir(), "revision-fence.txt")
+	if err := os.WriteFile(mediaPath, []byte("revision-fenced evidence"), 0o600); err != nil {
+		t.Fatalf("write media fixture: %v", err)
+	}
+	ref, err := baseMediaStore.Store(mediaPath, media.MediaMeta{
+		Filename:      "revision-fence.txt",
+		ContentType:   "text/plain",
+		CleanupPolicy: media.CleanupPolicyForgetOnly,
+	}, "revision-fence-test")
+	if err != nil {
+		t.Fatalf("Store() error = %v", err)
+	}
+	mediaSpy := &workflowSnapshotReadSpyMediaStore{MediaStore: baseMediaStore}
+	loop.mediaStore = mediaSpy
+	agent.Sessions.AddFullMessage(canonicalKey, providers.Message{
+		Role:    "user",
+		Content: "inspect projected media",
+		Attachments: []providers.Attachment{{
+			Type:        "file",
+			Ref:         ref,
+			Filename:    "revision-fence.txt",
+			ContentType: "text/plain",
+		}},
+	})
+	projected, found, err := agent.Sessions.(session.SnapshotReader).ReadSessionSnapshot(
+		context.Background(),
+		canonicalKey,
+	)
+	if err != nil || !found || projected.Revision == "" {
+		t.Fatalf("projected snapshot = (%#v, %v, %v), want revision", projected, found, err)
+	}
+
+	// This is the bridge race: the UI projected one exact revision, then the
+	// live discussion changed before workflow admission attempted capture.
+	agent.Sessions.AddMessage(canonicalKey, "user", "mutation after projection")
+	_, captureErr := (&workflowAgentRunner{loop: loop}).CaptureReadOnlySession(
+		context.Background(),
+		workflows.ReadOnlySessionRef{
+			AgentID:          "main",
+			Session:          alias,
+			ExpectedRevision: projected.Revision,
+		},
+	)
+	if captureErr == nil {
+		t.Fatal("CaptureReadOnlySession() error = nil, want stale revision failure")
+	}
+	if got := mediaSpy.snapshotReads.Load(); got != 0 {
+		t.Fatalf("stale capture read live media %d time(s), want zero", got)
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("stale capture reached provider %d time(s), want zero", len(calls))
+	}
+}
+
+func TestWorkflowAgentRunnerPrivateCaptureRejectsMalformedRevisionBeforeSnapshotRead(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"unexpected"}}
+	loop, agent, _, alias := newWorkflowReadOnlyTestLoop(t, provider)
+	reader := agent.Sessions.(session.SnapshotReader)
+	storeSpy := &workflowSnapshotReadCountingSessionStore{
+		SessionStore: agent.Sessions,
+		reader:       reader,
+	}
+	agent.Sessions = storeSpy
+	invalid := []string{
+		" surrounded ",
+		string([]byte{0xff}),
+		strings.Repeat("r", maxWorkflowReadOnlySessionRevisionBytes+1),
+	}
+	for _, expected := range invalid {
+		_, err := (&workflowAgentRunner{loop: loop}).CaptureReadOnlySession(
+			context.Background(),
+			workflows.ReadOnlySessionRef{
+				AgentID:          "main",
+				Session:          alias,
+				ExpectedRevision: expected,
+			},
+		)
+		if err == nil {
+			t.Fatal("CaptureReadOnlySession(malformed revision) error = nil")
+		}
+	}
+	if got := storeSpy.snapshotReads.Load(); got != 0 {
+		t.Fatalf("malformed revisions read live session %d time(s), want zero", got)
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("malformed revisions reached provider %d time(s), want zero", len(calls))
+	}
+}
+
 func TestWorkflowAgentRunnerPrivateFrozenSnapshotNeverReadsOrExposesLiveSession(t *testing.T) {
 	provider := &workflowReadOnlyCaptureProvider{responses: []string{"first", "second", "third"}}
 	loop, agent, canonicalKey, alias := newWorkflowReadOnlyTestLoop(t, provider)
@@ -4101,6 +4319,34 @@ func (s *workflowNoSnapshotReadStore) ReadSessionSnapshot(
 ) (session.SessionSnapshot, bool, error) {
 	s.snapshotReads.Add(1)
 	return session.SessionSnapshot{}, false, errors.New("live snapshot read is forbidden")
+}
+
+type workflowSnapshotReadCountingSessionStore struct {
+	session.SessionStore
+	reader        session.SnapshotReader
+	snapshotReads atomic.Int64
+}
+
+func (s *workflowSnapshotReadCountingSessionStore) ReadSessionSnapshot(
+	ctx context.Context,
+	key string,
+) (session.SessionSnapshot, bool, error) {
+	s.snapshotReads.Add(1)
+	return s.reader.ReadSessionSnapshot(ctx, key)
+}
+
+type workflowSnapshotReadSpyMediaStore struct {
+	media.MediaStore
+	snapshotReads atomic.Int64
+}
+
+func (s *workflowSnapshotReadSpyMediaStore) ReadSnapshot(
+	context.Context,
+	string,
+	int64,
+) (media.Snapshot, error) {
+	s.snapshotReads.Add(1)
+	return media.Snapshot{}, errors.New("live media snapshot read is forbidden")
 }
 
 func (p *workflowReadOnlyCaptureProvider) Chat(

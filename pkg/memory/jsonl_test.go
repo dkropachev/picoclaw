@@ -498,6 +498,77 @@ func TestSessionMetaScopeAndAliasesPersist(t *testing.T) {
 	}
 }
 
+func TestAdmitSessionMeta_CanceledWhileWaitingForDirectoryLockDoesNotCommit(t *testing.T) {
+	store := newTestStore(t)
+	before := directoryFileBytes(t, store.dir)
+	beforeLock := make(chan struct{})
+	store.hooks.beforeAdmissionLock = func() { close(beforeLock) }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	directoryLock := store.directoryLock()
+	directoryLock.Lock()
+	callbackCalled := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.AdmitSessionMeta(
+			ctx,
+			"canceled-admission",
+			func(SessionMeta, bool) (SessionMetaAdmissionDecision, error) {
+				callbackCalled <- struct{}{}
+				return SessionMetaAdmissionDecision{
+					Scope:  json.RawMessage(`{"version":1}`),
+					Update: true,
+				}, nil
+			},
+		)
+		done <- err
+	}()
+	select {
+	case <-beforeLock:
+	case <-time.After(2 * time.Second):
+		directoryLock.Unlock()
+		t.Fatal("admission did not reach the blocked directory lock")
+	}
+	cancel()
+	directoryLock.Unlock()
+
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("AdmitSessionMeta() error = %v, want context.Canceled", err)
+	}
+	select {
+	case <-callbackCalled:
+		t.Fatal("canceled admission evaluated its callback")
+	default:
+	}
+	if after := directoryFileBytes(t, store.dir); !reflect.DeepEqual(after, before) {
+		t.Fatalf("canceled admission mutated disk\nbefore=%v\nafter=%v", before, after)
+	}
+}
+
+func TestAdmitSessionMeta_CanceledByDecisionDoesNotCommit(t *testing.T) {
+	store := newTestStore(t)
+	before := directoryFileBytes(t, store.dir)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	updated, err := store.AdmitSessionMeta(
+		ctx,
+		"canceled-before-commit",
+		func(SessionMeta, bool) (SessionMetaAdmissionDecision, error) {
+			cancel()
+			return SessionMetaAdmissionDecision{
+				Scope:  json.RawMessage(`{"version":1}`),
+				Update: true,
+			}, nil
+		},
+	)
+	if updated || !errors.Is(err, context.Canceled) {
+		t.Fatalf("AdmitSessionMeta() = (updated=%v, err=%v), want cancellation", updated, err)
+	}
+	if after := directoryFileBytes(t, store.dir); !reflect.DeepEqual(after, before) {
+		t.Fatalf("pre-commit cancellation mutated disk\nbefore=%v\nafter=%v", before, after)
+	}
+}
+
 func TestSessionMetaMutationsRejectNewDuplicateAliasOwnership(t *testing.T) {
 	for _, mutation := range []string{"upsert", "update"} {
 		t.Run(mutation, func(t *testing.T) {
@@ -640,6 +711,218 @@ func TestUpdateSessionMetaPreservesUntouchedLegacyAliasesWithoutCatalogScan(t *t
 	}
 	if !slices.Equal(meta.Aliases, wantAliases) || meta.ThreadTitle != "thread-owned update" {
 		t.Fatalf("updated metadata = %+v, want aliases %q", meta, wantAliases)
+	}
+}
+
+func TestStrictThreadStatePrimitivesPreserveLegacyRecoveryAndOwnership(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const (
+		canonical = "strict-thread-owner"
+		alias     = "agent:main:direct:strict-thread-shadow"
+	)
+	if err := store.AddMessage(ctx, alias, "user", "legacy shadow history"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertSessionMeta(
+		ctx,
+		canonical,
+		json.RawMessage(`{"version":1,"channel":"pico"}`),
+		[]string{alias},
+	); err != nil {
+		t.Fatal(err)
+	}
+	promoted, err := store.PromoteAliasHistory(
+		ctx,
+		canonical,
+		json.RawMessage(`{"version":1,"channel":"pico"}`),
+		[]string{alias},
+	)
+	if err != nil || !promoted {
+		t.Fatalf("PromoteAliasHistory() = (promoted=%v, err=%v)", promoted, err)
+	}
+	committedMeta, err := store.GetSessionMeta(ctx, canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committedPath, err := store.historyPath(canonical, committedMeta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(committedPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, writeErr := file.WriteString("malformed crash tail\n"); writeErr != nil {
+		file.Close()
+		t.Fatal(writeErr)
+	}
+	if closeErr := file.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+
+	key, history, meta, _, found, err := store.ReadSessionStateStrict(ctx, alias)
+	if err != nil || !found {
+		t.Fatalf("ReadSessionStateStrict() = (found=%v, err=%v)", found, err)
+	}
+	if key != canonical || len(history) != 1 || history[0].Content != "legacy shadow history" ||
+		meta.Key != canonical {
+		t.Fatalf("strict tolerant state = key=%q history=%+v meta=%+v", key, history, meta)
+	}
+
+	if writeErr := os.WriteFile(
+		store.metaPath("unrelated-corrupt"),
+		[]byte("not-json"),
+		0o644,
+	); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	called := false
+	_, _, err = store.UpdateSessionMetaStrict(
+		ctx,
+		alias,
+		func(*SessionMeta, SessionMetaMutationState) error {
+			called = true
+			return nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "decode session metadata") {
+		t.Fatalf("UpdateSessionMetaStrict(corrupt catalog) error = %v", err)
+	}
+	if called {
+		t.Fatal("strict metadata update called callback after corrupt ownership catalog")
+	}
+}
+
+func TestUpdateSessionMetaStrictInitializesLegacyHistoryCount(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const key = "strict-legacy-count"
+	data, err := encodeHistory([]providers.Message{
+		{Role: "user", Content: "one"},
+		{Role: "assistant", Content: "two"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(store.jsonlPath(key), data, 0o644); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	canonical, existed, err := store.UpdateSessionMetaStrict(
+		ctx,
+		key,
+		func(meta *SessionMeta, state SessionMetaMutationState) error {
+			if !state.SessionExists || state.MetadataExists {
+				t.Fatalf("legacy mutation state = %+v", state)
+			}
+			meta.ThreadID = "legacy-thread"
+			return nil
+		},
+	)
+	if err != nil || !existed || canonical != key {
+		t.Fatalf("UpdateSessionMetaStrict() = (%q, %v, %v)", canonical, existed, err)
+	}
+	if addErr := store.AddMessage(ctx, key, "user", "three"); addErr != nil {
+		t.Fatal(addErr)
+	}
+	_, history, meta, found, err := store.ReadSessionSnapshot(ctx, key)
+	if err != nil || !found {
+		t.Fatalf("ReadSessionSnapshot() = (found=%v, err=%v)", found, err)
+	}
+	if len(history) != 3 || meta.Count != 3 || meta.ThreadID != "legacy-thread" || meta.Revision == "" {
+		t.Fatalf("legacy strict mutation tuple = history=%+v meta=%+v", history, meta)
+	}
+	if truncateErr := store.TruncateHistory(ctx, key, 1); truncateErr != nil {
+		t.Fatal(truncateErr)
+	}
+	_, history, meta, found, err = store.ReadSessionSnapshot(ctx, key)
+	if err != nil || !found || len(history) != 1 || history[0].Content != "three" ||
+		meta.Count != 3 || meta.Skip != 2 {
+		t.Fatalf("truncated legacy tuple = found=%v history=%+v meta=%+v err=%v", found, history, meta, err)
+	}
+}
+
+func TestCompareAndSwapSessionMetaStrictRejectsBoundedMetadataRemoval(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const key = "strict-bounded-cas-removal"
+	if err := store.ReplaceSessionSnapshot(
+		ctx,
+		snapshotReplacementFor(t, key, "", "bounded", ""),
+	); err != nil {
+		t.Fatal(err)
+	}
+	_, before := readSnapshotForTest(t, store, key)
+	swapped, err := store.CompareAndSwapSessionMetaStrict(ctx, key, before, nil)
+	if swapped || err == nil || !strings.Contains(err.Error(), "bounded history") {
+		t.Fatalf("CompareAndSwapSessionMetaStrict() = (swapped=%v, err=%v)", swapped, err)
+	}
+	_, after := readSnapshotForTest(t, store, key)
+	if after.Revision != before.Revision {
+		t.Fatalf(
+			"rejected bounded metadata removal changed revision: before=%q after=%q",
+			before.Revision,
+			after.Revision,
+		)
+	}
+}
+
+func TestCompareAndDeleteEmptySessionStrictRemovesEveryArtifact(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const key = "strict-empty-session-delete"
+	var expected SessionMeta
+	_, existed, err := store.UpdateSessionMetaStrict(
+		ctx,
+		key,
+		func(meta *SessionMeta, state SessionMetaMutationState) error {
+			if state.SessionExists || state.MetadataExists {
+				t.Fatalf("new session mutation state = %+v", state)
+			}
+			meta.Summary = "temporary reservation"
+			expected = *meta
+			return nil
+		},
+	)
+	if err != nil || existed {
+		t.Fatalf("UpdateSessionMetaStrict() = (existed=%v, err=%v)", existed, err)
+	}
+	if ensureErr := store.EnsureSessionHistory(ctx, key); ensureErr != nil {
+		t.Fatal(ensureErr)
+	}
+	deleted, err := store.CompareAndDeleteEmptySessionStrict(ctx, key, expected)
+	if err != nil || !deleted {
+		t.Fatalf("CompareAndDeleteEmptySessionStrict() = (deleted=%v, err=%v)", deleted, err)
+	}
+	for _, path := range store.sessionDataPaths(key) {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("rolled-back session artifact %q stat error = %v", path, statErr)
+		}
+	}
+	if _, _, _, found, err := store.ReadSessionSnapshot(ctx, key); err != nil || found {
+		t.Fatalf("deleted snapshot = (found=%v, err=%v)", found, err)
+	}
+}
+
+func TestCompareAndDeleteEmptySessionStrictRefusesNonemptyHistory(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const key = "strict-nonempty-session-delete"
+	if err := store.AddMessage(ctx, key, "user", "must survive"); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := store.GetSessionMeta(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := store.CompareAndDeleteEmptySessionStrict(ctx, key, expected)
+	if deleted || err == nil || !strings.Contains(err.Error(), "not empty") {
+		t.Fatalf("CompareAndDeleteEmptySessionStrict() = (deleted=%v, err=%v)", deleted, err)
+	}
+	_, history, _, found, err := store.ReadSessionSnapshot(ctx, key)
+	if err != nil || !found || len(history) != 1 || history[0].Content != "must survive" {
+		t.Fatalf("preserved snapshot = (found=%v, history=%+v, err=%v)", found, history, err)
 	}
 }
 

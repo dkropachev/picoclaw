@@ -279,6 +279,14 @@ func (r *workflowAgentRunner) CaptureReadOnlySession(
 	if agentID != ref.AgentID || !routing.IsCanonicalAgentID(agentID) {
 		return nil, fmt.Errorf("read_only workflow agent ID must be an exact canonical ID")
 	}
+	// ExpectedRevision is an opaque, local CAS capability. Empty keeps the
+	// compatibility path unfenced; a supplied token must remain byte-exact.
+	if ref.ExpectedRevision != "" &&
+		(ref.ExpectedRevision != strings.TrimSpace(ref.ExpectedRevision) ||
+			!utf8.ValidString(ref.ExpectedRevision) ||
+			len(ref.ExpectedRevision) > maxWorkflowReadOnlySessionRevisionBytes) {
+		return nil, fmt.Errorf("read_only workflow agent session revision is invalid")
+	}
 	registry := r.loop.GetRegistry()
 	if registry == nil {
 		return nil, fmt.Errorf("agent registry not configured")
@@ -295,6 +303,11 @@ func (r *workflowAgentRunner) CaptureReadOnlySession(
 	)
 	if err != nil {
 		return nil, err
+	}
+	// Fence before media capture: a stale projection must not read any live
+	// media capability, reach a provider, or become durable workflow state.
+	if ref.ExpectedRevision != "" && snapshot.Revision != ref.ExpectedRevision {
+		return nil, fmt.Errorf("read_only workflow agent session changed before capture")
 	}
 	var mediaReader media.SnapshotReader
 	if reader, ok := r.loop.mediaStore.(media.SnapshotReader); ok {
@@ -427,7 +440,7 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 				agentID,
 			)
 		} else {
-			snapshot, revision, snapshotErr = workflowReadOnlySessionSnapshot(
+			snapshot, revision, snapshotErr = workflowPublicReadOnlySessionSnapshot(
 				ctx,
 				agent,
 				agentID,
@@ -668,7 +681,10 @@ func (r *workflowAgentRunner) ephemeralSessionKey() string {
 	return newWorkflowEphemeralSessionKey()
 }
 
-const maxWorkflowReadOnlySessionKeyBytes = 4096
+const (
+	maxWorkflowReadOnlySessionKeyBytes      = 4096
+	maxWorkflowReadOnlySessionRevisionBytes = 256
+)
 
 const workflowPrivateSessionIdentityDomain = "picoclaw/workflow/private-read-only-session/v1\x00"
 
@@ -740,6 +756,28 @@ func workflowPrivateSessionIdentity(agentID, historyRevision string) string {
 		workflowPrivateSessionIdentityDomain + agentID + "\x00" + historyRevision,
 	))
 	return fmt.Sprintf("workflow:private:%x", sum[:])
+}
+
+func workflowPublicReadOnlySessionSnapshot(
+	ctx context.Context,
+	agent *AgentInstance,
+	agentID string,
+	sessionKey string,
+) (session.SessionSnapshot, string, error) {
+	snapshot, revision, err := workflowReadOnlySessionSnapshot(ctx, agent, agentID, sessionKey)
+	if err != nil {
+		return session.SessionSnapshot{}, "", err
+	}
+	// Structured review history is a private compiler capability. A public
+	// history:read_only step must not turn a guessable session key or alias into
+	// a provider-visible review transcript. The compiler capture path calls the
+	// lower-level snapshot helper directly and freezes that evidence instead.
+	if isReviewSessionScope(snapshot.Scope) {
+		return session.SessionSnapshot{}, "", fmt.Errorf(
+			"public read_only workflow agent history cannot use a review-scoped session",
+		)
+	}
+	return snapshot, revision, nil
 }
 
 func workflowReadOnlySessionSnapshot(

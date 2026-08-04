@@ -37,11 +37,13 @@ const (
 )
 
 var (
-	absolutePathRE = regexp.MustCompile(`(^|[\s'"(])(/[^\s'",)]+)`)
-	repoRE         = regexp.MustCompile(`(?i)\b((?:git@|https?://)[^\s'",)]+(?:\.git)?)`)
-	branchRE       = regexp.MustCompile(`(?i)\bbranch[:\s]+([A-Za-z0-9._/\-]+)`)
-	prRE           = regexp.MustCompile(`(?i)\b(?:pr|pull request)[:\s#]+([0-9]+)`)
-	contextTokenRE = regexp.MustCompile(`(?i)\b([a-z][a-z0-9_-]*)\s*:\s*([^\s]+)`)
+	absolutePathRE    = regexp.MustCompile(`(^|[\s'"(])(/[^\s'",)]+)`)
+	repoRE            = regexp.MustCompile(`(?i)\b((?:git@|https?://)[^\s'",)]+(?:\.git)?)`)
+	branchRE          = regexp.MustCompile(`(?i)\bbranch[:\s]+([A-Za-z0-9._/\-]+)`)
+	prRE              = regexp.MustCompile(`(?i)\b(?:pr|pull request)[:\s#]+([0-9]+)`)
+	contextTokenRE    = regexp.MustCompile(`(?i)\b([a-z][a-z0-9_-]*)\s*:\s*([^\s]+)`)
+	errReviewScope    = errors.New("threads: review-scoped sessions do not accept thread metadata")
+	errSessionMissing = errors.New("threads: authoritative session does not exist")
 )
 
 type Store struct {
@@ -49,6 +51,17 @@ type Store struct {
 	Workspace   string
 	ThreadsDir  string
 	HandoffsDir string
+	testHooks   *threadStoreTestHooks
+}
+
+// threadStoreTestHooks provides deterministic scheduling points for package
+// tests. Production stores leave it nil.
+type threadStoreTestHooks struct {
+	afterCreatePreflight func()
+	afterAttachPreflight func()
+	writeThreadMeta      func(ThreadMeta) error
+	writeHandoff         func(ThreadHandoff) error
+	appendSummary        func(context.Context, string, providers.Message) error
 }
 
 type Thread struct {
@@ -198,18 +211,84 @@ func (s Store) canonicalSessionKey(ctx context.Context, sessionKey string) (stri
 	if sessionKey == "" {
 		return "", nil
 	}
-	store, err := s.openSessionStore()
+	state, err := s.readOrdinarySessionState(ctx, sessionKey, false)
 	if err != nil {
 		return "", err
 	}
-	resolved, found, err := store.ResolveSessionKey(ctx, sessionKey)
-	if err != nil {
-		return "", err
-	}
-	if found && resolved != "" {
-		return resolved, nil
+	if state.found {
+		return state.key, nil
 	}
 	return sessionKey, nil
+}
+
+type ordinarySessionState struct {
+	key               string
+	history           []providers.Message
+	meta              memory.SessionMeta
+	historyModifiedAt time.Time
+	found             bool
+}
+
+func (s Store) readOrdinarySessionState(
+	ctx context.Context,
+	sessionKey string,
+	requireExisting bool,
+) (ordinarySessionState, error) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		if requireExisting {
+			return ordinarySessionState{}, errSessionMissing
+		}
+		return ordinarySessionState{}, nil
+	}
+	store, err := s.openSessionStore()
+	if err != nil {
+		return ordinarySessionState{}, err
+	}
+	canonicalKey, history, meta, modifiedAt, found, err := store.ReadSessionStateStrict(
+		ctx,
+		sessionKey,
+	)
+	if err != nil {
+		return ordinarySessionState{}, err
+	}
+	if !found {
+		if requireExisting {
+			return ordinarySessionState{}, errSessionMissing
+		}
+		return ordinarySessionState{}, nil
+	}
+	if err := rejectReviewThreadScope(meta.Scope); err != nil {
+		return ordinarySessionState{}, err
+	}
+	return ordinarySessionState{
+		key:               canonicalKey,
+		history:           history,
+		meta:              meta,
+		historyModifiedAt: modifiedAt,
+		found:             true,
+	}, nil
+}
+
+func rejectReviewThreadScope(rawScope json.RawMessage) error {
+	if len(rawScope) == 0 {
+		return nil
+	}
+	var scope session.SessionScope
+	if err := json.Unmarshal(rawScope, &scope); err != nil {
+		return fmt.Errorf("threads: decode session scope: %w", err)
+	}
+	if strings.EqualFold(strings.TrimSpace(scope.Channel), "review") {
+		return errReviewScope
+	}
+	return nil
+}
+
+func rejectReviewThreadSessionScope(scope *session.SessionScope) error {
+	if scope != nil && strings.EqualFold(strings.TrimSpace(scope.Channel), "review") {
+		return errReviewScope
+	}
+	return nil
 }
 
 func (s Store) Search(opts SearchOptions) ([]Thread, error) {
@@ -311,9 +390,6 @@ func (s Store) CreatePicoThread(ctx context.Context, cfg *config.Config, req Cre
 	if err != nil {
 		return Thread{}, err
 	}
-	if ensureErr := sessionStore.EnsureSessionHistory(ctx, allocation.Key); ensureErr != nil {
-		return Thread{}, ensureErr
-	}
 
 	rawScope, err := json.Marshal(allocation.Scope)
 	if err != nil {
@@ -323,40 +399,66 @@ func (s Store) CreatePicoThread(ctx context.Context, cfg *config.Config, req Cre
 	now := time.Now()
 	sourceQuery := strings.TrimSpace(firstNonEmpty(req.SourceQuery, req.Title, "New thread"))
 	var meta memory.SessionMeta
-	if err := sessionStore.UpdateSessionMeta(ctx, allocation.Key, func(current *memory.SessionMeta) error {
-		initializeSessionIdentity := current.CreatedAt.IsZero() &&
-			current.UpdatedAt.IsZero() &&
-			current.Skip == 0 &&
-			current.Count == 0 &&
-			current.HistorySlot == "" &&
-			strings.TrimSpace(current.Summary) == "" &&
-			len(current.Scope) == 0 &&
-			len(current.Aliases) == 0
-		if current.CreatedAt.IsZero() {
-			current.CreatedAt = now
-		}
-		current.UpdatedAt = now
-		current.Key = allocation.Key
-		if initializeSessionIdentity {
-			current.Scope = rawScope
-			current.Aliases = normalizeAliases(allocation.Key, allocation.Aliases)
-		}
-		current.ThreadType = NormalizeType(firstNonEmpty(req.Type, InferType(req.Title+" "+sourceQuery)))
-		current.ThreadTitle = truncateRunes(firstNonEmpty(req.Title, req.SourceQuery, "New thread"), 80)
-		current.ThreadContext = MergeContext(ExtractContext(sourceQuery+" "+req.Title), req.Context)
-		current.ThreadSourceQuery = sourceQuery
-		current.ThreadID = allocation.SessionID
-		current.ThreadAttachedAt = now
-		if initializeSessionIdentity {
-			current.Summary = current.ThreadTitle
-		}
-		meta = *current
-		return nil
-	}); err != nil {
+	initialChange := &sessionThreadLinkChange{store: sessionStore}
+	canonicalKey, _, err := sessionStore.UpdateSessionMetaStrict(
+		ctx,
+		allocation.Key,
+		func(current *memory.SessionMeta, state memory.SessionMetaMutationState) error {
+			if scopeErr := rejectReviewThreadScope(current.Scope); scopeErr != nil {
+				return scopeErr
+			}
+			initialChange.before = *current
+			initialChange.sessionExisted = state.SessionExists
+			initialChange.metadataExisted = state.MetadataExists
+			initializeSessionIdentity := current.CreatedAt.IsZero() &&
+				current.UpdatedAt.IsZero() &&
+				current.Skip == 0 &&
+				current.Count == 0 &&
+				current.HistorySlot == "" &&
+				strings.TrimSpace(current.Summary) == "" &&
+				len(current.Scope) == 0 &&
+				len(current.Aliases) == 0
+			if current.CreatedAt.IsZero() {
+				current.CreatedAt = now
+			}
+			current.UpdatedAt = now
+			current.Key = allocation.Key
+			if initializeSessionIdentity {
+				current.Scope = rawScope
+				current.Aliases = normalizeAliases(allocation.Key, allocation.Aliases)
+			}
+			current.ThreadType = NormalizeType(firstNonEmpty(req.Type, InferType(req.Title+" "+sourceQuery)))
+			current.ThreadTitle = truncateRunes(firstNonEmpty(req.Title, req.SourceQuery, "New thread"), 80)
+			current.ThreadContext = MergeContext(ExtractContext(sourceQuery+" "+req.Title), req.Context)
+			current.ThreadSourceQuery = sourceQuery
+			current.ThreadID = allocation.SessionID
+			current.ThreadAttachedAt = now
+			if initializeSessionIdentity {
+				current.Summary = current.ThreadTitle
+			}
+			meta = *current
+			initialChange.after = *current
+			return nil
+		},
+	)
+	if err != nil {
 		return Thread{}, err
 	}
+	initialChange.key = canonicalKey
+	// The metadata claim above establishes ordinary ownership before creating
+	// the legacy history file used by session discovery/detail APIs. A review
+	// reservation can no longer win this key, and an empty new thread remains
+	// immediately openable even before its first message.
+	if historyErr := sessionStore.EnsureSessionHistory(ctx, allocation.Key); historyErr != nil {
+		return Thread{}, rollbackThreadOperation(
+			ctx,
+			fmt.Errorf("threads: initialize pico session history: %w", historyErr),
+			nil,
+			initialChange,
+		)
+	}
 
-	return s.CreateThread(ctx, CreateRequest{
+	thread, err := s.CreateThread(ctx, CreateRequest{
 		ID:                allocation.SessionID,
 		UISessionID:       allocation.SessionID,
 		PrimarySessionKey: allocation.Key,
@@ -369,6 +471,10 @@ func (s Store) CreatePicoThread(ctx context.Context, cfg *config.Config, req Cre
 		SourceQuery:       meta.ThreadSourceQuery,
 		Registration:      firstNonEmpty(req.Registration, RegistrationManual),
 	})
+	if err != nil {
+		return Thread{}, rollbackThreadOperation(ctx, err, nil, initialChange)
+	}
+	return thread, nil
 }
 
 func (s Store) Get(id string) (Thread, bool, error) {
@@ -778,7 +884,11 @@ func readMeta(path, fallbackKey string) (memory.SessionMeta, error) {
 	}
 	var meta memory.SessionMeta
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return memory.SessionMeta{}, err
+		return memory.SessionMeta{}, fmt.Errorf(
+			"threads: decode session metadata %s: %w",
+			filepath.Base(path),
+			err,
+		)
 	}
 	if meta.Key == "" {
 		meta.Key = fallbackKey
