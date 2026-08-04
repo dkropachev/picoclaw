@@ -601,6 +601,52 @@ func TestAttentionLauncherSanitizesTrustedPolicyAndProviderDiagnostics(t *testin
 			}
 		}
 	})
+
+	t.Run("working-context private provider", func(t *testing.T) {
+		store := newAttentionTestStore(workingContextTestDetail(serviceTestCaseID, 12))
+		backend := newWorkingContextBackend(t)
+		service := newAttentionTestService(t, store, backend, nil)
+		secret := "working-provider-token-and-private-prompt"
+		agent := &attentionTestAgent{reader: backend, runErr: errors.New(secret)}
+		workspace := t.TempDir()
+		runStore := workflows.NewFileRunStore(workspace)
+		executor := &workflows.Executor{WorkspaceDir: workspace, Store: runStore, Agents: agent}
+		policy := attentionTestPolicy("working-private-source-revision", []workflows.GateSpec{{
+			ID: "discussion", Kind: workflows.GateAIWorkingContext,
+			AgentID: "main", Criteria: "private working criteria", Title: "Discuss",
+		}})
+		launcher := newAttentionTestLauncher(
+			t,
+			service,
+			executor,
+			&attentionTestPolicySource{snapshots: []AttentionPolicySnapshot{policy}},
+		)
+
+		result, err := launcher.Launch(context.Background(), AttentionLaunchRequest{
+			CaseID: serviceTestCaseID, ExpectedCaseVersion: 12, DecisionPoint: "review.ready",
+		})
+		if result.RunID == "" || result.Status != workflows.RunStatusFailed ||
+			!errors.Is(err, workflows.ErrPrivateWorkflowFailed) ||
+			strings.Contains(err.Error(), secret) {
+			t.Fatalf("Launch() = (%#v, %v), want sanitized failed working-context run", result, err)
+		}
+		encoded, encodeErr := json.Marshal(result)
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		for _, private := range []string{secret, policy.Revision, "private working criteria"} {
+			if strings.Contains(string(encoded), private) {
+				t.Fatalf("result exposed %q: %s", private, encoded)
+			}
+		}
+		links := store.linksSnapshot()
+		persisted, getErr := runStore.GetRun(context.Background(), result.RunID)
+		if getErr != nil || persisted == nil || len(links) != 1 || links[0].RunID != result.RunID ||
+			persisted.Status != workflows.RunStatusFailed ||
+			!workflows.IsPrivateWorkflowRun(persisted) {
+			t.Fatalf("persisted failed run = (%#v, %#v, %v)", links, persisted, getErr)
+		}
+	})
 }
 
 type attentionTestStore struct {

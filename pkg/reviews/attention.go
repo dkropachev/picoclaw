@@ -270,7 +270,11 @@ func (launcher *AttentionLauncher) Launch(
 		},
 	)
 	if err != nil {
-		return AttentionLaunchResult{}, sanitizeAttentionError(ctx, err, true)
+		safeErr := sanitizeAttentionError(ctx, err, true)
+		if result.RunID != "" && result.Status != "" {
+			return result, safeErr
+		}
+		return AttentionLaunchResult{}, safeErr
 	}
 	return result, nil
 }
