@@ -167,6 +167,75 @@ jobs:
 	}
 }
 
+func TestHumanTaskResumeDetachesSecretsBeforeAdmissionClaim(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	store := NewFileRunStore(workspace)
+	var receivedSecrets map[string]string
+	registry := NewFunctionRegistry()
+	if err := registry.Register(
+		"after",
+		func(_ context.Context, _ map[string]any, exec ExecutionContext) (map[string]any, error) {
+			receivedSecrets = cloneStringMap(exec.Secrets)
+			return map[string]any{"done": true}, nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	workflow := parseWorkflow(t, `
+name: Human task secret detachment
+on:
+  manual: {}
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - id: approve
+        uses: human/task
+        with:
+          title: Review
+          questions: ["Approve?"]
+      - id: after
+        uses: function/after
+`)
+	executor := &Executor{WorkspaceDir: workspace, Store: store, Functions: registry}
+	started, err := executor.Run(ctx, RunRequest{
+		Workflow: workflow, WorkflowRef: "workflows/human-secret-detachment.yml",
+	})
+	if err != nil || started == nil || started.Status != RunStatusWaiting {
+		t.Fatalf("Run() = (%#v, %v), want waiting", started, err)
+	}
+	tasks, err := executor.ListHumanTasks(ctx, started.RunID)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("ListHumanTasks() = (%#v, %v), want one", tasks, err)
+	}
+	callerSecrets := map[string]string{}
+	executor.AdmittedHumanTaskClaim = func(
+		_ context.Context,
+		_, _ string,
+		claim func() (*Run, WorkflowHumanTask, bool, error),
+	) (*Run, WorkflowHumanTask, bool, error) {
+		callerSecrets["late"] = "late-secret-canary-6bf903"
+		return claim()
+	}
+	resumed, err := executor.ResumeHumanTask(ctx, started.RunID, tasks[0].ID, HumanTaskResumeRequest{
+		ExpectedRevision: tasks[0].Revision,
+		InputHash:        tasks[0].InputHash,
+		ResponseID:       "response-1",
+		Response:         "approved",
+		Secrets:          callerSecrets,
+	})
+	if err != nil || resumed == nil || resumed.Status != RunStatusSucceeded {
+		t.Fatalf("ResumeHumanTask() = (%#v, %v), want succeeded", resumed, err)
+	}
+	if callerSecrets["late"] == "" {
+		t.Fatal("admission hook did not mutate the caller-owned map")
+	}
+	if len(receivedSecrets) != 0 {
+		t.Fatalf("continuation observed post-entry secrets: %#v", receivedSecrets)
+	}
+}
+
 func TestHumanTaskResumeValidatesCASSchemaAndIdempotency(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()

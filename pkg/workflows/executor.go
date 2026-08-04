@@ -18,6 +18,15 @@ import (
 
 const defaultMaxCallDepth = 4
 
+var (
+	// ErrRunAdmissionConflict is the fixed, private-safe boundary returned when
+	// a durable-create admission fence no longer matches captured state.
+	ErrRunAdmissionConflict = errors.New("workflow run admission conflict")
+	// ErrRunAdmissionUnavailable is the fixed, private-safe boundary returned
+	// when durable-create admission cannot verify its captured state.
+	ErrRunAdmissionUnavailable = errors.New("workflow run admission unavailable")
+)
+
 type Executor struct {
 	WorkspaceDir         string
 	DefinitionsDir       string
@@ -88,6 +97,13 @@ type RunRequest struct {
 	WorkflowRef  string
 	RetryOfRunID string
 	CallDepth    int
+	// PrivateRoot is accepted only for the trusted in-memory workflow emitted
+	// by CompileGateWorkflow. It is frozen before durable creation and omitted
+	// from all ordinary run observations.
+	PrivateRoot *PrivateRootRequest
+	// frozenPrivateRoot is used only by retry. External callers cannot bypass
+	// capture or inject a previously frozen capability.
+	frozenPrivateRoot *frozenWorkflowRootContext
 	// OnRunPersisted runs after the durable run record is created and before
 	// lifecycle publication, user callbacks, or workflow side effects. An
 	// error fails the new run without executing the workflow.
@@ -106,6 +122,26 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 	if e == nil {
 		return nil, fmt.Errorf("workflow executor is nil")
 	}
+	// Reject a mixed private invocation before recursively cloning caller-owned
+	// public maps. A cyclic public graph must not reach generic cloning when the
+	// private contract rejects that graph without inspecting it.
+	if privateErr := validatePrivateWorkflowInvocationEnvelope(req); privateErr != nil {
+		return nil, privateErr
+	}
+	// Freeze caller-owned request graphs before admission hooks or background
+	// execution can observe a later mutation.
+	var cloneErr error
+	req, cloneErr = cloneRunRequestForExecution(req)
+	if cloneErr != nil {
+		return nil, cloneErr
+	}
+	if req.PrivateRoot != nil {
+		workflowSnapshot, snapshotErr := captureInitialPrivateWorkflow(req.Workflow)
+		if snapshotErr != nil {
+			return nil, snapshotErr
+		}
+		req.Workflow = workflowSnapshot
+	}
 	maxDepth := e.MaxCallDepth
 	if maxDepth <= 0 {
 		maxDepth = defaultMaxCallDepth
@@ -122,7 +158,13 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 	if loadErr != nil {
 		return nil, loadErr
 	}
+	if privateErr := validatePrivateWorkflowAdmission(workflow, req); privateErr != nil {
+		return nil, privateErr
+	}
 	if validateErr := Validate(workflow); validateErr != nil {
+		if req.PrivateRoot != nil || req.frozenPrivateRoot != nil {
+			return nil, ErrPrivateWorkflowContext
+		}
 		return nil, validateErr
 	}
 	admittedExecutor, admissionErr := e.admitHumanTaskClosure(
@@ -135,6 +177,23 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		return nil, admissionErr
 	}
 	e = admittedExecutor
+	var privateRoot *frozenWorkflowRootContext
+	if req.PrivateRoot != nil {
+		privateRoot, admissionErr = freezeWorkflowPrivateRoot(ctx, e.Agents, req.PrivateRoot)
+		if admissionErr != nil {
+			return nil, admissionErr
+		}
+	} else if req.frozenPrivateRoot != nil {
+		privateRoot = cloneFrozenWorkflowRootContext(req.frozenPrivateRoot)
+	}
+	if privateRoot != nil {
+		if privateErr := validatePrivateRootForWorkflow(workflow, privateRoot); privateErr != nil {
+			return nil, privateErr
+		}
+		// The unresolved local session reference has served its only purpose.
+		req.PrivateRoot = nil
+		req.frozenPrivateRoot = nil
+	}
 	if strings.TrimSpace(req.ParentRunID) != "" && workflowContainsHumanTask(workflow) {
 		return nil, fmt.Errorf("%w: human/task cannot run inside a reusable workflow call", ErrHumanTaskUnsupported)
 	}
@@ -146,6 +205,9 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 			return nil, executionErr
 		}
 		if normalizedValidationErr := Validate(execution.Workflow); normalizedValidationErr != nil {
+			if privateRoot != nil {
+				return nil, ErrPrivateWorkflowContext
+			}
 			return nil, normalizedValidationErr
 		}
 		// Execute the same immutable JSON-normalized definition that is
@@ -184,7 +246,7 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		CallerJobID:  req.CallerJobID,
 		RetryOfRunID: req.RetryOfRunID,
 		Session:      strings.TrimSpace(req.Session),
-		Delivery:     req.Delivery,
+		Delivery:     cloneDelivery(req.Delivery),
 		Event:        cloneMap(req.Event),
 		Inputs:       cloneMap(req.Inputs),
 		Outputs:      make(map[string]any),
@@ -194,6 +256,13 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		UpdatedAt:    now,
 		execution:    execution,
 		humanTasks:   make(map[string]WorkflowHumanTask),
+		privateRoot:  cloneFrozenWorkflowRootContext(privateRoot),
+	}
+	if privateRoot != nil {
+		run.ContextVisibility = WorkflowContextVisibilityPrivate
+		if bindErr := bindPrivateWorkflowRun(run); bindErr != nil {
+			return nil, ErrPrivateWorkflowContext
+		}
 	}
 	topLevel := req.ParentRunID == ""
 	admittedRun := topLevel || strings.TrimSpace(req.RetryOfRunID) != ""
@@ -210,7 +279,7 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		createErr = create()
 	}
 	if createErr != nil {
-		return nil, createErr
+		return sanitizePrivateRunOutcome(run, nil, createErr)
 	}
 	if req.OnRunPersisted != nil {
 		if persistedErr := req.OnRunPersisted(cloneRun(run)); persistedErr != nil {
@@ -225,11 +294,11 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 				store,
 				RunEvent{Kind: "workflow.run.failed", RunID: run.ID, Message: run.Error},
 			)
-			return &RunResult{
+			return sanitizePrivateRunOutcome(run, &RunResult{
 				RunID:  run.ID,
 				Status: RunStatusFailed,
 				Error:  run.Error,
-			}, fmt.Errorf("run persistence callback: %w", persistedErr)
+			}, fmt.Errorf("run persistence callback: %w", persistedErr))
 		}
 	}
 	e.appendEvent(
@@ -268,12 +337,12 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		run.CompletedAt = &completedAt
 		_ = store.UpdateRun(ctx, run)
 		if run.Status != RunStatusFailed && run.Status != RunStatusCanceled {
-			return &RunResult{
+			return sanitizePrivateRunOutcome(run, &RunResult{
 				RunID:   run.ID,
 				Status:  run.Status,
 				Outputs: run.Outputs,
 				Error:   run.Error,
-			}, nil
+			}, nil)
 		}
 		if run.Status == RunStatusCanceled {
 			e.appendEvent(
@@ -288,7 +357,11 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 				RunEvent{Kind: "workflow.run.failed", RunID: run.ID, Message: runErr.Error()},
 			)
 		}
-		return &RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs, Error: run.Error}, runErr
+		return sanitizePrivateRunOutcome(
+			run,
+			&RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs, Error: run.Error},
+			runErr,
+		)
 	}
 	if cancelErr := checkRunCanceled(ctx, store, run); cancelErr != nil {
 		completedAt := time.Now().UTC()
@@ -299,21 +372,25 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 			if errors.Is(updateErr, ErrHumanTaskConflict) {
 				return nil, ErrHumanTaskConflict
 			}
-			return nil, updateErr
+			return sanitizePrivateRunOutcome(run, nil, updateErr)
 		}
 		e.appendEvent(
 			context.Background(),
 			store,
 			RunEvent{Kind: "workflow.run.canceled", RunID: run.ID, Message: cancelErr.Error()},
 		)
-		return &RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs, Error: run.Error}, cancelErr
+		return sanitizePrivateRunOutcome(
+			run,
+			&RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs, Error: run.Error},
+			cancelErr,
+		)
 	}
 	run.Status = RunStatusSucceeded
 	run.Outputs = outputs
 	now = time.Now().UTC()
 	run.CompletedAt = &now
 	if updateErr := store.UpdateRun(ctx, run); updateErr != nil {
-		return nil, updateErr
+		return sanitizePrivateRunOutcome(run, nil, updateErr)
 	}
 	if run.Status == RunStatusCanceled {
 		reason := strings.TrimSpace(run.CancelReason)
@@ -322,27 +399,31 @@ func (e *Executor) Run(ctx context.Context, req RunRequest) (*RunResult, error) 
 		}
 		cancelErr := fmt.Errorf("%w: %s", ErrRunCanceled, reason)
 		e.publishCanceledRuntimeEvent(context.Background(), store, run, cancelErr.Error())
-		return &RunResult{
+		return sanitizePrivateRunOutcome(run, &RunResult{
 			RunID:   run.ID,
 			Status:  run.Status,
 			Outputs: run.Outputs,
 			Error:   cancelErr.Error(),
-		}, cancelErr
+		}, cancelErr)
 	}
 	if run.Status != RunStatusSucceeded {
-		return &RunResult{
+		return sanitizePrivateRunOutcome(run, &RunResult{
 			RunID:   run.ID,
 			Status:  run.Status,
 			Outputs: run.Outputs,
 			Error:   run.Error,
-		}, nil
+		}, nil)
 	}
 	e.appendEvent(
 		ctx,
 		store,
 		RunEvent{Kind: "workflow.run.end", RunID: run.ID, Payload: map[string]any{"outputs": outputs}},
 	)
-	return &RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs}, nil
+	return sanitizePrivateRunOutcome(
+		run,
+		&RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs},
+		nil,
+	)
 }
 
 func (e *Executor) createRun(ctx context.Context, store RunStore, run *Run, topLevel bool) error {
@@ -386,11 +467,32 @@ func (e *Executor) RetryCaptured(
 	if source == nil {
 		return nil, fmt.Errorf("workflow retry source is required")
 	}
-	run := cloneRun(source)
+	secrets = cloneStringMap(secrets)
 	store := e.Store
 	if store == nil {
 		store = NewFileRunStore(e.WorkspaceDir)
 	}
+	if IsPrivateWorkflowRun(source) {
+		if len(secrets) != 0 {
+			return nil, ErrPrivateWorkflowContext
+		}
+		// Validate the private root and reject prohibited public context before
+		// generic Run cloning traverses any caller-owned map.
+		if err := validateRunPrivateContext(source); err != nil {
+			return nil, ErrPrivateWorkflowContext
+		}
+		if source.execution == nil || source.execution.Workflow == nil ||
+			validatePersistedWorkflowDefinition(source.execution) != nil {
+			return nil, ErrPrivateWorkflowContext
+		}
+		return e.Run(ctx, RunRequest{
+			Workflow:          source.execution.Workflow,
+			WorkflowRef:       source.WorkflowRef,
+			RetryOfRunID:      source.ID,
+			frozenPrivateRoot: cloneFrozenWorkflowRootContext(source.privateRoot),
+		})
+	}
+	run := cloneRun(source)
 	origin, _ := trustedRunOriginWithStore(ctx, store, run)
 	return e.Run(ctx, RunRequest{
 		Ref:          run.WorkflowRef,
@@ -417,6 +519,7 @@ func (e *Executor) ResumeHumanTask(
 	if e == nil {
 		return nil, fmt.Errorf("workflow executor is nil")
 	}
+	response.Secrets = cloneStringMap(response.Secrets)
 	store := e.Store
 	if store == nil {
 		store = NewFileRunStore(e.WorkspaceDir)
@@ -424,6 +527,15 @@ func (e *Executor) ResumeHumanTask(
 	taskStore, ok := store.(humanTaskStore)
 	if !ok {
 		return nil, ErrHumanTaskUnsupported
+	}
+	if len(response.Secrets) != 0 {
+		candidate, readErr := store.GetRun(ctx, runID)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if IsPrivateWorkflowRun(candidate) {
+			return nil, ErrPrivateWorkflowContext
+		}
 	}
 	response.resumeLease = humanTaskResumeLease(e.DefaultTimeout)
 	response.maxConcurrent = e.MaxConcurrentRuns
@@ -450,13 +562,21 @@ func (e *Executor) ResumeHumanTask(
 	if run == nil {
 		return nil, ErrHumanTaskConflict
 	}
+	if IsPrivateWorkflowRun(run) {
+		if privateErr := validateRunPrivateContext(run); privateErr != nil {
+			return nil, ErrPrivateWorkflowContext
+		}
+		if len(response.Secrets) != 0 {
+			return nil, ErrPrivateWorkflowContext
+		}
+	}
 	if duplicate {
-		return &RunResult{
-			RunID:   run.ID,
-			Status:  run.Status,
-			Outputs: cloneMap(run.Outputs),
-			Error:   run.Error,
-		}, nil
+		result := &RunResult{RunID: run.ID, Status: run.Status}
+		if !IsPrivateWorkflowRun(run) {
+			result.Outputs = cloneMap(run.Outputs)
+			result.Error = run.Error
+		}
+		return sanitizePrivateRunOutcome(run, result, nil)
 	}
 	if run.execution == nil || run.execution.Workflow == nil || run.execution.Cursor == nil {
 		return nil, ErrHumanTaskConflict
@@ -541,14 +661,18 @@ func (e *Executor) ResumeHumanTask(
 			if errors.Is(updateErr, ErrHumanTaskConflict) {
 				return nil, ErrHumanTaskConflict
 			}
-			return nil, updateErr
+			return sanitizePrivateRunOutcome(run, nil, updateErr)
 		}
 		kind := "workflow.run.failed"
 		if run.Status == RunStatusCanceled {
 			kind = "workflow.run.canceled"
 		}
 		e.appendEvent(context.Background(), store, RunEvent{Kind: kind, RunID: run.ID, Message: runErr.Error()})
-		return &RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs, Error: run.Error}, runErr
+		return sanitizePrivateRunOutcome(
+			run,
+			&RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs, Error: run.Error},
+			runErr,
+		)
 	}
 	if cancelErr := checkRunCanceled(ctx, store, run); cancelErr != nil {
 		if errors.Is(cancelErr, ErrHumanTaskConflict) {
@@ -562,24 +686,34 @@ func (e *Executor) ResumeHumanTask(
 			if errors.Is(updateErr, ErrHumanTaskConflict) {
 				return nil, ErrHumanTaskConflict
 			}
-			return nil, updateErr
+			return sanitizePrivateRunOutcome(run, nil, updateErr)
 		}
-		return &RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs, Error: run.Error}, cancelErr
+		return sanitizePrivateRunOutcome(
+			run,
+			&RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs, Error: run.Error},
+			cancelErr,
+		)
 	}
 	run.Status = RunStatusSucceeded
 	run.Outputs = outputs
 	completedAt := time.Now().UTC()
 	run.CompletedAt = &completedAt
 	if err := store.UpdateRun(ctx, run); err != nil {
-		return nil, err
+		return sanitizePrivateRunOutcome(run, nil, err)
 	}
 	if run.Status != RunStatusSucceeded {
-		return &RunResult{RunID: run.ID, Status: run.Status, Outputs: run.Outputs, Error: run.Error}, nil
+		return sanitizePrivateRunOutcome(run, &RunResult{
+			RunID: run.ID, Status: run.Status, Outputs: run.Outputs, Error: run.Error,
+		}, nil)
 	}
 	e.appendEvent(ctx, store, RunEvent{
 		Kind: "workflow.run.end", RunID: run.ID, Payload: map[string]any{"outputs": outputs},
 	})
-	return &RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs}, nil
+	return sanitizePrivateRunOutcome(
+		run,
+		&RunResult{RunID: run.ID, Status: run.Status, Outputs: outputs},
+		nil,
+	)
 }
 
 func startHumanTaskClaimHeartbeat(
@@ -667,10 +801,20 @@ func (e *Executor) CancelHumanTask(
 		return nil, ErrHumanTaskUnsupported
 	}
 	run, err := taskStore.CancelHumanTask(ctx, runID, taskID, reason)
-	if err == nil && run != nil && run.Status == RunStatusCanceled {
+	if err != nil {
+		if IsPrivateWorkflowRun(run) {
+			_, err = sanitizePrivateRunOutcome(run, nil, err)
+			return nil, err
+		}
+		return run, err
+	}
+	if run != nil && run.Status == RunStatusCanceled {
 		e.publishCanceledRuntimeEvent(ctx, store, run, run.CancelReason)
 	}
-	return run, err
+	if IsPrivateWorkflowRun(run) {
+		return projectPrivateWorkflowRunForBrowser(run), nil
+	}
+	return run, nil
 }
 
 func (e *Executor) persistWorkflowWait(
@@ -705,7 +849,7 @@ func (e *Executor) persistWorkflowWait(
 	run.Outputs = outputs
 	run.CompletedAt = nil
 	if err := store.UpdateRun(context.Background(), run); err != nil {
-		return nil, err
+		return sanitizePrivateRunOutcome(run, nil, err)
 	}
 	if run.Status != RunStatusWaiting {
 		result := &RunResult{
@@ -719,9 +863,13 @@ func (e *Executor) persistWorkflowWait(
 			if reason == "" {
 				reason = "cancel requested"
 			}
-			return result, fmt.Errorf("%w: %s", ErrRunCanceled, reason)
+			return sanitizePrivateRunOutcome(
+				run,
+				result,
+				fmt.Errorf("%w: %s", ErrRunCanceled, reason),
+			)
 		}
-		return result, ErrHumanTaskConflict
+		return sanitizePrivateRunOutcome(run, result, ErrHumanTaskConflict)
 	}
 	e.appendEvent(
 		context.Background(),
@@ -742,11 +890,11 @@ func (e *Executor) persistWorkflowWait(
 		store,
 		RunEvent{Kind: "workflow.run.waiting", RunID: run.ID},
 	)
-	return &RunResult{
+	return sanitizePrivateRunOutcome(run, &RunResult{
 		RunID:   run.ID,
 		Status:  RunStatusWaiting,
 		Outputs: cloneMap(outputs),
-	}, nil
+	}, nil)
 }
 
 func (e *Executor) CancelRun(ctx context.Context, runID, reason string) (*Run, error) {
@@ -760,10 +908,20 @@ func (e *Executor) CancelRun(ctx context.Context, runID, reason string) (*Run, e
 	previous, _ := store.GetRun(ctx, runID)
 	run, err := store.CancelRun(ctx, runID, reason)
 	if err != nil {
+		privateRun := run
+		if privateRun == nil {
+			privateRun = previous
+		}
+		if IsPrivateWorkflowRun(privateRun) {
+			_, err = sanitizePrivateRunOutcome(privateRun, nil, err)
+		}
 		return nil, err
 	}
 	if run != nil && run.Status == RunStatusCanceled && (previous == nil || !isTerminalRunStatus(previous.Status)) {
 		e.publishCanceledRuntimeEvent(ctx, store, run, run.CancelReason)
+	}
+	if IsPrivateWorkflowRun(run) {
+		return projectPrivateWorkflowRunForBrowser(run), nil
 	}
 	return run, nil
 }
@@ -1126,6 +1284,12 @@ func (e *Executor) executeWorkflow(
 		WorkspaceDir: e.WorkspaceDir,
 		WorkflowRef:  run.WorkflowRef,
 		RunID:        run.ID,
+	}
+	if run.privateRoot != nil {
+		execCtx.privateValues = cloneMap(run.privateRoot.Values)
+		execCtx.frozenReadOnlySession = cloneFrozenReadOnlySession(
+			run.privateRoot.ReadOnlySession,
+		)
 	}
 	order, err := topoJobs(workflow.Jobs)
 	if err != nil {
@@ -1491,6 +1655,12 @@ func (e *Executor) executeReusableJob(
 	jobID string,
 	parentRunID string,
 ) (map[string]any, string, error) {
+	if execCtx.privateValues != nil || execCtx.frozenReadOnlySession != nil {
+		return nil, "", fmt.Errorf(
+			"%w: private root cannot cross a reusable workflow edge",
+			ErrPrivateWorkflowContext,
+		)
+	}
 	with, err := renderMap(job.With, expressionCtxFrom(execCtx, jobs))
 	if err != nil {
 		return nil, "", err
@@ -1878,22 +2048,44 @@ func (e *Executor) runStepTarget(
 		if sessionMode == AgentSessionEphemeral {
 			sessionKey = ""
 		}
-		return e.Agents.RunAgent(ctx, AgentRequest{
-			AgentID:          strings.TrimPrefix(uses, "agent/"),
-			Message:          stringFromMap(with, "message"),
-			Prompt:           stringFromMap(with, "prompt"),
-			Context:          stringFromMap(with, "context"),
-			Session:          sessionKey,
-			EphemeralSession: sessionMode == AgentSessionEphemeral,
-			History:          stringFromMap(with, "history"),
-			Cache:            stringFromMap(with, "cache"),
-			Tools:            agentToolsMode(with),
-			Delivery:         stepDelivery(step.Context, execCtx),
-			Inputs:           with,
-			Output:           output,
-			Managed:          with["managed"],
-			Scope:            with["scope"],
+		agentID := strings.TrimPrefix(uses, "agent/")
+		var frozenSession *FrozenReadOnlySession
+		if execCtx.frozenReadOnlySession != nil &&
+			strings.TrimSpace(stringFromMap(with, "history")) == "read_only" {
+			if execCtx.frozenReadOnlySession.AgentID != agentID {
+				return nil, fmt.Errorf(
+					"%w: read-only agent does not match captured session",
+					ErrPrivateWorkflowContext,
+				)
+			}
+			frozenSession = cloneFrozenReadOnlySession(execCtx.frozenReadOnlySession)
+			sessionKey = ""
+		}
+		outputs, runErr := e.Agents.RunAgent(ctx, AgentRequest{
+			AgentID:               agentID,
+			Message:               stringFromMap(with, "message"),
+			Prompt:                stringFromMap(with, "prompt"),
+			Context:               stringFromMap(with, "context"),
+			Session:               sessionKey,
+			EphemeralSession:      sessionMode == AgentSessionEphemeral,
+			History:               stringFromMap(with, "history"),
+			Cache:                 stringFromMap(with, "cache"),
+			Tools:                 agentToolsMode(with),
+			Delivery:              stepDelivery(step.Context, execCtx),
+			Inputs:                with,
+			Output:                output,
+			Managed:               with["managed"],
+			Scope:                 with["scope"],
+			PrivateContext:        execCtx.privateValues != nil || frozenSession != nil,
+			FrozenReadOnlySession: frozenSession,
 		})
+		if frozenSession != nil && outputs != nil {
+			outputs["session"] = AgentSessionPrivate
+			outputs["session_mode"] = AgentSessionPrivate
+			outputs["history_revision"] = frozenSession.HistoryRevision
+			delete(outputs, "cache_key")
+		}
+		return outputs, runErr
 	case strings.HasPrefix(uses, "function/"):
 		name := strings.TrimPrefix(uses, "function/")
 		if outputs, handled, err := RunNativeFunction(ctx, name, with, execCtx); handled {
@@ -1985,13 +2177,14 @@ func renderWorkflowOutputs(
 	}
 	out := make(map[string]any, len(workflow.On.WorkflowCall.Outputs))
 	ctx := expressionCtxFrom(ExecutionContext{
-		Inputs:   inputs,
-		Secrets:  req.Secrets,
-		Event:    req.Event,
-		Session:  req.Session,
-		Delivery: req.Delivery,
-		Steps:    execCtx.Steps,
-		Needs:    execCtx.Needs,
+		Inputs:        inputs,
+		Secrets:       req.Secrets,
+		Event:         req.Event,
+		Session:       req.Session,
+		Delivery:      req.Delivery,
+		Steps:         execCtx.Steps,
+		Needs:         execCtx.Needs,
+		privateValues: execCtx.privateValues,
 	}, jobs)
 	for name, output := range workflow.On.WorkflowCall.Outputs {
 		value, err := renderString(output.Value, ctx)
@@ -2032,6 +2225,7 @@ func validateWorkflowInputValue(name, typ string, value any) error {
 func expressionCtxFrom(execCtx ExecutionContext, jobs map[string]JobExecution) expressionContext {
 	return expressionContext{
 		Inputs:   execCtx.Inputs,
+		Private:  execCtx.privateValues,
 		Secrets:  execCtx.Secrets,
 		Event:    execCtx.Event,
 		Steps:    execCtx.Steps,
@@ -2212,8 +2406,7 @@ func cloneRun(run *Run) *Run {
 	out := *run
 	out.Origin = cloneRunOrigin(run.Origin)
 	out.ChildRunIDs = append([]string(nil), run.ChildRunIDs...)
-	out.Delivery = run.Delivery
-	out.Delivery.ReplyHandles = cloneStringMap(run.Delivery.ReplyHandles)
+	out.Delivery = cloneDelivery(run.Delivery)
 	out.Event = cloneMap(run.Event)
 	out.Inputs = cloneMap(run.Inputs)
 	out.Outputs = cloneMap(run.Outputs)
@@ -2242,6 +2435,7 @@ func cloneRun(run *Run) *Run {
 		execution.Checkpoint = cloneWorkflowRunCheckpoint(run.execution.Checkpoint)
 		out.execution = &execution
 	}
+	out.privateRoot = cloneFrozenWorkflowRootContext(run.privateRoot)
 	out.humanTasks = make(map[string]WorkflowHumanTask, len(run.humanTasks))
 	for key, task := range run.humanTasks {
 		out.humanTasks[key] = cloneWorkflowHumanTask(task)
@@ -2264,6 +2458,15 @@ func (e *Executor) appendEvent(ctx context.Context, store RunStore, event RunEve
 	if event.Time.IsZero() {
 		event.Time = time.Now().UTC()
 	}
+	if strings.TrimSpace(event.RunID) != "" {
+		run, err := store.GetRun(ctx, event.RunID)
+		if err != nil {
+			return
+		}
+		if IsPrivateWorkflowRun(run) {
+			event = sanitizePrivateWorkflowEvent(event)
+		}
+	}
 	_ = store.AppendEvent(ctx, event)
 	e.publishRuntimeEvent(ctx, store, event)
 }
@@ -2272,6 +2475,17 @@ func (e *Executor) publishRuntimeEvent(ctx context.Context, store RunStore, even
 	if e == nil || e.RuntimeEvents == nil || strings.TrimSpace(event.Kind) == "" {
 		return
 	}
+	var run *Run
+	if store != nil && strings.TrimSpace(event.RunID) != "" {
+		var err error
+		run, err = store.GetRun(ctx, event.RunID)
+		if err != nil || run == nil {
+			return
+		}
+		if IsPrivateWorkflowRun(run) {
+			event = sanitizePrivateWorkflowEvent(event)
+		}
+	}
 	evt := runtimeevents.Event{
 		Kind:     runtimeevents.Kind(event.Kind),
 		Time:     event.Time,
@@ -2279,11 +2493,11 @@ func (e *Executor) publishRuntimeEvent(ctx context.Context, store RunStore, even
 		Severity: workflowRuntimeSeverity(event.Kind),
 		Payload:  workflowRuntimePayload(event),
 	}
-	if store != nil && strings.TrimSpace(event.RunID) != "" {
-		if run, err := store.GetRun(ctx, event.RunID); err == nil && run != nil {
-			if strings.TrimSpace(run.WorkflowRef) != "" {
-				evt.Source.Name = run.WorkflowRef
-			}
+	if run != nil {
+		if strings.TrimSpace(run.WorkflowRef) != "" {
+			evt.Source.Name = run.WorkflowRef
+		}
+		if !IsPrivateWorkflowRun(run) {
 			evt.Scope = runtimeevents.Scope{
 				SessionKey: run.Session,
 				Channel:    run.Delivery.Channel,

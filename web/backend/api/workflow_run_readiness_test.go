@@ -375,6 +375,192 @@ func TestHandleRetryWorkflowRunGatesPreviousWorkflowRef(t *testing.T) {
 	assertWorkflowRunCount(t, workspace, 1)
 }
 
+func TestHandleRetryUsesCapturedPrivateGateWithoutPublishedDefinition(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	configPath := writeWorkflowDependencyTestConfig(t, workspace, true)
+	store := workflows.NewFileRunStore(workspace)
+	compilation, err := workflows.CompileGateWorkflow("Private HTTP retry", []workflows.GateSpec{{
+		ID:        "policy",
+		Kind:      workflows.GateDeterministic,
+		When:      "false",
+		Title:     "Policy",
+		Questions: []any{"Approve?"},
+	}}, map[string]any{"private": "private-http-retry-canary-a031fe"})
+	if err != nil {
+		t.Fatalf("CompileGateWorkflow() error = %v", err)
+	}
+	initial, err := (&workflows.Executor{
+		WorkspaceDir: workspace,
+		Store:        store,
+	}).Run(ctx, workflows.RunRequest{
+		Workflow:    compilation.Workflow,
+		WorkflowRef: "inline/private-http-retry",
+		PrivateRoot: compilation.PrivateRoot,
+	})
+	if err != nil || initial == nil || initial.Status != workflows.RunStatusSucceeded {
+		t.Fatalf("initial Run() = (%#v, %v), want succeeded", initial, err)
+	}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/workflows/runs/"+initial.RunID+"/retry",
+		strings.NewReader(`{}`),
+	)
+	request.SetPathValue("run_id", initial.RunID)
+	NewHandler(configPath).handleRetryWorkflowRun(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("private retry response = (%d, %q)", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "private-http-retry-canary-a031fe") {
+		t.Fatalf("private retry response leaked subject: %s", recorder.Body.String())
+	}
+	var result workflows.RunResult
+	if unmarshalErr := json.Unmarshal(recorder.Body.Bytes(), &result); unmarshalErr != nil {
+		t.Fatalf("json.Unmarshal(private retry) error = %v", unmarshalErr)
+	}
+	if result.Status != workflows.RunStatusSucceeded || result.Outputs != nil || result.Error != "" {
+		t.Fatalf("private retry result = %#v, want redacted success", result)
+	}
+	runs, err := store.ListRuns(ctx)
+	if err != nil {
+		t.Fatalf("ListRuns() error = %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("private retry runs = %#v, want two", runs)
+	}
+	foundRetry := false
+	for _, run := range runs {
+		if run.ID != initial.RunID && run.RetryOfRunID == initial.RunID {
+			foundRetry = true
+		}
+	}
+	if !foundRetry {
+		t.Fatalf("private retry runs = %#v, want exact retry linkage", runs)
+	}
+}
+
+func TestHandleRetryPrivateConfigDriftAtDurableCreateReturnsConflict(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	configPath := writeWorkflowDependencyTestConfig(t, workspace, true)
+	store := workflows.NewFileRunStore(workspace)
+	const privateCanary = "private-http-retry-drift-canary-fd9061"
+	compilation, err := workflows.CompileGateWorkflow("Private HTTP retry drift", []workflows.GateSpec{{
+		ID:        "policy",
+		Kind:      workflows.GateDeterministic,
+		When:      "false",
+		Title:     "Policy",
+		Questions: []any{"Approve?"},
+	}}, map[string]any{"private": privateCanary})
+	if err != nil {
+		t.Fatalf("CompileGateWorkflow() error = %v", err)
+	}
+	initial, err := (&workflows.Executor{
+		WorkspaceDir: workspace,
+		Store:        store,
+	}).Run(ctx, workflows.RunRequest{
+		Workflow:    compilation.Workflow,
+		WorkflowRef: "inline/private-http-retry-drift",
+		PrivateRoot: compilation.PrivateRoot,
+	})
+	if err != nil || initial == nil || initial.Status != workflows.RunStatusSucceeded {
+		t.Fatalf("initial Run() = (%#v, %v), want succeeded", initial, err)
+	}
+
+	previousRunners := newWorkflowRuntimeRunners
+	t.Cleanup(func() { newWorkflowRuntimeRunners = previousRunners })
+	var mutationErr error
+	var mutateOnce sync.Once
+	newWorkflowRuntimeRunners = func(path string) workflowRuntimeRunners {
+		mutateOnce.Do(func() {
+			cfg, loadErr := config.LoadConfigForUpdate(configPath)
+			if loadErr != nil {
+				mutationErr = loadErr
+				return
+			}
+			cfg.Workflows.MaxCallDepth = cfg.Workflows.EffectiveMaxCallDepth() + 1
+			mutationErr = config.SaveConfig(configPath, cfg)
+		})
+		return previousRunners(path)
+	}
+
+	response := postWorkflowRetry(t, NewHandler(configPath), initial.RunID, map[string]any{})
+	if mutationErr != nil {
+		t.Fatalf("config mutation error = %v", mutationErr)
+	}
+	assertWorkflowAdmissionError(
+		t,
+		response,
+		http.StatusConflict,
+		"dependency_revision_mismatch",
+	)
+	if strings.Contains(response.Body.String(), privateCanary) {
+		t.Fatalf("private retry conflict leaked subject: %s", response.Body.String())
+	}
+	assertWorkflowRunCount(t, workspace, 1)
+}
+
+func TestHandleRetryPrivateAdmissionInfrastructureFailureReturnsUnavailable(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	configPath := writeWorkflowDependencyTestConfig(t, workspace, true)
+	store := workflows.NewFileRunStore(workspace)
+	const privateCanary = "private-http-retry-unavailable-canary-89c5b2"
+	compilation, err := workflows.CompileGateWorkflow("Private HTTP retry unavailable", []workflows.GateSpec{{
+		ID:        "policy",
+		Kind:      workflows.GateDeterministic,
+		When:      "false",
+		Title:     "Policy",
+		Questions: []any{"Approve?"},
+	}}, map[string]any{"private": privateCanary})
+	if err != nil {
+		t.Fatalf("CompileGateWorkflow() error = %v", err)
+	}
+	initial, err := (&workflows.Executor{
+		WorkspaceDir: workspace,
+		Store:        store,
+	}).Run(ctx, workflows.RunRequest{
+		Workflow:    compilation.Workflow,
+		WorkflowRef: "inline/private-http-retry-unavailable",
+		PrivateRoot: compilation.PrivateRoot,
+	})
+	if err != nil || initial == nil || initial.Status != workflows.RunStatusSucceeded {
+		t.Fatalf("initial Run() = (%#v, %v), want succeeded", initial, err)
+	}
+
+	previousRunners := newWorkflowRuntimeRunners
+	t.Cleanup(func() { newWorkflowRuntimeRunners = previousRunners })
+	var mutationErr error
+	var mutateOnce sync.Once
+	newWorkflowRuntimeRunners = func(path string) workflowRuntimeRunners {
+		mutateOnce.Do(func() {
+			if removeErr := os.Remove(configPath); removeErr != nil {
+				mutationErr = removeErr
+				return
+			}
+			mutationErr = os.Mkdir(configPath, 0o700)
+		})
+		return previousRunners(path)
+	}
+
+	response := postWorkflowRetry(t, NewHandler(configPath), initial.RunID, map[string]any{})
+	if mutationErr != nil {
+		t.Fatalf("config removal error = %v", mutationErr)
+	}
+	assertWorkflowAdmissionError(
+		t,
+		response,
+		http.StatusServiceUnavailable,
+		"dependency_check_unavailable",
+	)
+	if strings.Contains(response.Body.String(), privateCanary) {
+		t.Fatalf("private retry unavailable response leaked subject: %s", response.Body.String())
+	}
+	assertWorkflowRunCount(t, workspace, 1)
+}
+
 func TestHandleRunAndRetryFenceAdmissionAtDurableCreate(t *testing.T) {
 	tests := []struct {
 		name       string

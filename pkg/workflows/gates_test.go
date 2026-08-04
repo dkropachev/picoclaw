@@ -7,6 +7,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/media"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
 
 func TestCompileGateWorkflowLowersOrderedMixedGates(t *testing.T) {
@@ -85,7 +88,8 @@ func TestCompileGateWorkflowLowersOrderedMixedGates(t *testing.T) {
 	}
 
 	deterministic := job.Steps[0]
-	if deterministic.Uses != "human/task" || deterministic.If != specs[1].When {
+	if deterministic.Uses != "human/task" ||
+		deterministic.If != "${{ private.gate_subject.risk == 'critical' }}" {
 		t.Fatalf("deterministic lowering = %#v", deterministic)
 	}
 	assertCompiledHumanTaskInputReferences(t, deterministic)
@@ -117,7 +121,7 @@ func TestCompileGateWorkflowLowersOrderedMixedGates(t *testing.T) {
 	assertGateDecisionContract(t, workingDecision.With["output"])
 	assertCompiledAIAttentionStep(t, job.Steps[4], workingDecision.ID)
 
-	// The subject and user-authored gate text belong in invocation inputs. The
+	// The subject and user-authored gate text belong in the private root. The
 	// generated workflow should refer to them instead of treating their content
 	// as another workflow expression pass.
 	isolatedScope, isolatedScopeOK := isolatedDecision.With["scope"].(map[string]any)
@@ -143,18 +147,6 @@ func TestCompiledMixedGateWorkflowWaitsAndResumesWithoutRerunningDecisions(t *te
 			`{"ask_user":false,"reason":"evidence is complete","questions":[]}`,
 			`{"ask_user":true,"reason":"the discussion leaves two safe choices","questions":["Which compatibility contract should be retained?"]}`,
 		},
-	}
-	functions := NewFunctionRegistry()
-	var afterArgs map[string]any
-	if err := functions.Register(
-		"gate-test-after",
-		func(_ context.Context, args map[string]any, _ ExecutionContext) (map[string]any, error) {
-			order = append(order, "function:after")
-			afterArgs = cloneMap(args)
-			return map[string]any{"continued": true}, nil
-		},
-	); err != nil {
-		t.Fatal(err)
 	}
 
 	specs := []GateSpec{
@@ -193,31 +185,20 @@ func TestCompiledMixedGateWorkflowWaitsAndResumesWithoutRerunningDecisions(t *te
 	if err != nil {
 		t.Fatalf("CompileGateWorkflow() error = %v", err)
 	}
-	job := compilation.Workflow.Jobs["gates"]
-	job.Steps = append(job.Steps, Step{
-		ID:   "after",
-		Uses: "function/gate-test-after",
-		With: map[string]any{
-			"response": "${{ steps.gate_working_attention.outputs.response }}",
-		},
-	})
-	compilation.Workflow.Jobs["gates"] = job
-	if validationErr := Validate(compilation.Workflow); validationErr != nil {
-		t.Fatalf("compiled executable workflow validation error = %v", validationErr)
+	compilation.PrivateRoot.ReadOnlySession = &ReadOnlySessionRef{
+		AgentID: "main",
+		Session: "agent:main:web:pr-42",
 	}
 
 	executor := &Executor{
 		WorkspaceDir: workspace,
 		Store:        store,
 		Agents:       agents,
-		Functions:    functions,
 	}
 	started, err := executor.Run(ctx, RunRequest{
 		Workflow:    compilation.Workflow,
 		WorkflowRef: "workflows/mixed-gates.yml",
-		Inputs:      compilation.Inputs,
-		Session:     "agent:main:web:pr-42",
-		Delivery:    Delivery{Channel: "slack", ChatID: "pr-42"},
+		PrivateRoot: compilation.PrivateRoot,
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -245,7 +226,7 @@ func TestCompiledMixedGateWorkflowWaitsAndResumesWithoutRerunningDecisions(t *te
 	}
 	for _, stepID := range []string{
 		"gate_isolated_decision", "gate_isolated_attention",
-		"gate_working_decision", "gate_working_attention", "after",
+		"gate_working_decision", "gate_working_attention",
 	} {
 		if _, exists := persisted.Steps["gates/"+stepID]; exists {
 			t.Fatalf("step %q ran before the first response", stepID)
@@ -271,15 +252,17 @@ func TestCompiledMixedGateWorkflowWaitsAndResumesWithoutRerunningDecisions(t *te
 		t.Fatalf("agent requests = %d, want two", len(agents.requests))
 	}
 	isolatedReq, workingReq := agents.requests[0], agents.requests[1]
-	if !isolatedReq.EphemeralSession || isolatedReq.Session != "" ||
+	if !isolatedReq.PrivateContext || !isolatedReq.EphemeralSession || isolatedReq.Session != "" ||
 		isolatedReq.History != "none" || isolatedReq.Cache != "none" ||
 		isolatedReq.Tools != AgentToolsNone ||
 		!reflect.DeepEqual(isolatedReq.Delivery, Delivery{}) {
 		t.Fatalf("isolated request = %#v", isolatedReq)
 	}
-	if workingReq.EphemeralSession ||
+	if !workingReq.PrivateContext || workingReq.EphemeralSession ||
 		workingReq.History != "read_only" || workingReq.Cache != "session" ||
-		workingReq.Tools != AgentToolsNone || workingReq.Session != "agent:main:web:pr-42" {
+		workingReq.Tools != AgentToolsNone || workingReq.Session != "" ||
+		workingReq.FrozenReadOnlySession == nil ||
+		workingReq.FrozenReadOnlySession.Snapshot.Key != "agent:main:web:pr-42" {
 		t.Fatalf("working-context request after resume = %#v", workingReq)
 	}
 	if !reflect.DeepEqual(workingReq.Delivery, Delivery{}) {
@@ -343,10 +326,6 @@ func TestCompiledMixedGateWorkflowWaitsAndResumesWithoutRerunningDecisions(t *te
 	if _, exists := persisted.Steps["gates/gate_off_attention"]; exists {
 		t.Fatal("zero gate created a persisted step")
 	}
-	if _, exists := persisted.Steps["gates/after"]; exists {
-		t.Fatal("downstream step ran before human response")
-	}
-
 	response := "retain-v1"
 	resumed, err := executor.ResumeHumanTask(ctx, started.RunID, workingTask.ID, HumanTaskResumeRequest{
 		ExpectedRevision: workingTask.Revision,
@@ -362,22 +341,18 @@ func TestCompiledMixedGateWorkflowWaitsAndResumesWithoutRerunningDecisions(t *te
 	}
 	if !reflect.DeepEqual(
 		order,
-		[]string{"agent:reviewer", "agent:main", "function:after"},
+		[]string{"agent:reviewer", "agent:main"},
 	) {
 		t.Fatalf("post-resume order = %#v; decisions were repeated or continuation misplaced", order)
 	}
 	if len(agents.requests) != 2 {
 		t.Fatalf("agent requests after resume = %d, want no reruns", len(agents.requests))
 	}
-	if afterArgs["response"] != response {
-		t.Fatalf("downstream response = %#v, want %#v", afterArgs["response"], response)
-	}
 	persisted, err = store.GetRun(ctx, started.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted.Steps["gates/gate_working_attention"].Status != RunStatusSucceeded ||
-		persisted.Steps["gates/after"].Status != RunStatusSucceeded {
+	if persisted.Steps["gates/gate_working_attention"].Status != RunStatusSucceeded {
 		t.Fatalf("resumed steps = %#v", persisted.Steps)
 	}
 }
@@ -404,7 +379,7 @@ func TestCompiledDeterministicGatesExecuteFalseThenTrueInOrder(t *testing.T) {
 	executor := &Executor{WorkspaceDir: workspace, Store: store}
 	started, err := executor.Run(ctx, RunRequest{
 		Workflow: compilation.Workflow, WorkflowRef: "workflows/deterministic-gates.yml",
-		Inputs: compilation.Inputs,
+		PrivateRoot: compilation.PrivateRoot,
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -491,7 +466,7 @@ func TestCompileGateWorkflowPreservesLiteralExpressionTextAsData(t *testing.T) {
 	result, err := executor.Run(context.Background(), RunRequest{
 		Workflow:    compilation.Workflow,
 		WorkflowRef: "workflows/literal-gate.yml",
-		Inputs:      compilation.Inputs,
+		PrivateRoot: compilation.PrivateRoot,
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -545,7 +520,7 @@ func TestCompileGateWorkflowPreservesLiteralExpressionTextAsData(t *testing.T) {
 		context.Background(),
 		RunRequest{
 			Workflow: deterministic.Workflow, WorkflowRef: "workflows/literal-deterministic-gate.yml",
-			Inputs: deterministic.Inputs,
+			PrivateRoot: deterministic.PrivateRoot,
 		},
 	)
 	if err != nil {
@@ -585,14 +560,14 @@ func TestCompileGateWorkflowNormalizesAndFreezesTypedJSONInputs(t *testing.T) {
 	subject["risk"] = "critical"
 	questions[0] = "mutated"
 
-	gotSubject := compilation.Inputs[workflowGateSubjectInput]
+	gotSubject := compilation.PrivateRoot.Values[workflowGateSubjectInput]
 	wantSubject := map[string]any{"risk": "normal"}
 	if !reflect.DeepEqual(gotSubject, wantSubject) {
 		t.Fatalf("normalized subject = %#v, want %#v", gotSubject, wantSubject)
 	}
-	gateInputs, ok := compilation.Inputs[workflowGateSpecsInput].(map[string]any)
+	gateInputs, ok := compilation.PrivateRoot.Values[workflowGateSpecsInput].(map[string]any)
 	if !ok {
-		t.Fatalf("normalized gate inputs = %#v", compilation.Inputs[workflowGateSpecsInput])
+		t.Fatalf("normalized gate inputs = %#v", compilation.PrivateRoot.Values[workflowGateSpecsInput])
 	}
 	policy, ok := gateInputs["policy"].(map[string]any)
 	if !ok || !reflect.DeepEqual(
@@ -623,7 +598,7 @@ func TestCompiledAIGateRejectsInvalidStructuredDecision(t *testing.T) {
 				context.Background(),
 				RunRequest{
 					Workflow: compilation.Workflow, WorkflowRef: "workflows/invalid-gate.yml",
-					Inputs: compilation.Inputs,
+					PrivateRoot: compilation.PrivateRoot,
 				},
 			)
 			if runErr == nil {
@@ -987,7 +962,7 @@ func TestCompileGateWorkflowAcceptsExactLimits(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CompileGateWorkflow() aggregate baseline error = %v", err)
 		}
-		encoded, err := json.Marshal(baseline.Inputs)
+		encoded, err := json.Marshal(baseline.PrivateRoot.Values)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1000,7 +975,7 @@ func TestCompileGateWorkflowAcceptsExactLimits(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CompileGateWorkflow() exact aggregate bytes error = %v", err)
 		}
-		encoded, err = json.Marshal(compilation.Inputs)
+		encoded, err = json.Marshal(compilation.PrivateRoot.Values)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1109,8 +1084,7 @@ func TestCompileGateWorkflowUsesExactEphemeralProfileAcrossCompilationsAndRuns(t
 		result, runErr := executor.Run(context.Background(), RunRequest{
 			Workflow:    compilation.Workflow,
 			WorkflowRef: fmt.Sprintf("workflows/ephemeral-gate-%d.yml", index+1),
-			Inputs:      compilation.Inputs,
-			Session:     fmt.Sprintf("inherited-pr-chat-%d", index+1),
+			PrivateRoot: compilation.PrivateRoot,
 		})
 		if runErr != nil {
 			t.Fatalf("run %d error = %v", index+1, runErr)
@@ -1156,8 +1130,7 @@ func TestCompiledEphemeralGateWorkflowCanRunConcurrently(t *testing.T) {
 			}).Run(context.Background(), RunRequest{
 				Workflow:    compilation.Workflow,
 				WorkflowRef: "workflows/concurrent-isolated-gate.yml",
-				Inputs:      compilation.Inputs,
-				Session:     fmt.Sprintf("inherited-session-%d", index),
+				PrivateRoot: compilation.PrivateRoot,
 			})
 			if runErr != nil {
 				results <- fmt.Errorf("run %d: %w", index, runErr)
@@ -1348,6 +1321,23 @@ type scriptedGateAgentRunner struct {
 	responses []string
 	requests  []AgentRequest
 	order     *[]string
+	captures  []ReadOnlySessionRef
+}
+
+func (r *scriptedGateAgentRunner) CaptureReadOnlySession(
+	_ context.Context,
+	ref ReadOnlySessionRef,
+) (*FrozenReadOnlySession, error) {
+	r.captures = append(r.captures, ref)
+	return &FrozenReadOnlySession{
+		AgentID: ref.AgentID,
+		Snapshot: session.SessionSnapshot{
+			Key:   ref.Session,
+			Scope: &session.SessionScope{AgentID: ref.AgentID},
+		},
+		HistoryRevision: "sha256:scripted-gate-snapshot",
+		FrozenMedia:     media.FrozenSet{Version: media.FrozenSetVersion},
+	}, nil
 }
 
 func (r *scriptedGateAgentRunner) RunAgent(
@@ -1438,7 +1428,7 @@ func assertGateDecisionContract(t *testing.T, raw any) {
 
 func gateValueContainsInputReference(value any) bool {
 	text, ok := value.(string)
-	return ok && strings.Contains(text, "${{ inputs.")
+	return ok && strings.Contains(text, "${{ private.")
 }
 
 func gateTestName(value string) string {

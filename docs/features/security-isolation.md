@@ -23,6 +23,13 @@ path. Current configuration also separates non-secret model aliases from
 provider accounts, validates every reachable account-and-alias combination,
 and revision-fences whole-config mutations so neither a missing model nor a
 stale writer can silently delegate behavior to a provider default.
+Compiler-generated attention workflows keep gate subjects and a pre-captured
+PR-chat snapshot in an owner-local private root. Capture replaces every
+structured media locator with an immutable reference and persists the strict
+self-contained `FrozenSet` before revision binding; generic run, event, tool,
+UI, and result surfaces expose only fixed lifecycle state and explicitly
+generated human-task questions, never that context, media, or session
+capability.
 Schema v5 removes aliases mechanically derived from account names or concrete
 model IDs, clears their references rather than guessing replacements, and
 preserves legacy web-search mappings as explicit custom aliases instead of
@@ -42,6 +49,9 @@ materialization fail closed without exposing local paths or payload detail.
   token, OAuth response parsing, PKCE helpers, strict bounded request decoders,
   raw-only AST classification for structured workflow authoring,
   `media.SnapshotReader`, `media.FreezeInputs`, and `media.FrozenSet` validation.
+- Security boundaries also include compiler-only private workflow admission,
+  integrity-bound local context and frozen-media persistence, pseudonymous
+  provider affinity, and mandatory observation projection.
 - Runtime ordering: load security config, normalize protected values, validate
   access or target, execute guarded storage/network/process operation, redact
   sensitive output, and emit clear errors; for frozen media, preflight the
@@ -83,6 +93,12 @@ materialization fail closed without exposing local paths or payload detail.
 | `FR-SEC-020` | MUST | Agent capability reads and mutations resolve the runtime-equivalent workspace, open bounded regular `AGENT.md` and legacy `AGENTS.md` state without following symlinks or blocking on special files, and fence exact active bytes plus the public-and-security config generation. Existing-file commits on a supported host bind the intended candidate identity and bytes, use an atomic entry exchange, validate the exact displaced file, and establish the platform durability boundary before best-effort displaced-file cleanup. Conflict recovery repeats the exchange when a newer edit races restoration so that edit returns to the canonical path; any entry that cannot safely be recovered is retained at a logged operator-visible path. Create and legacy-upgrade commits atomically require an absent current file, recheck the alternate legacy source after creation, and conditionally quarantine only the generated file on conflict. A platform without a handle-safe primitive—including Windows while `ReplaceFileW` cannot provide no-follow target binding—projects a fixed read-only issue instead of accepting a save that cannot be safe. Structured YAML-node mutation rejects normalization-unsafe, malformed, and unterminated documents, whose runtime tools, MCP, and structured tasks fail closed, and preserves unrelated nodes, comments, order, style, exact permissions, and body; legacy upgrade requires an explicit acknowledgement and leaves the legacy file untouched. Capability catalogs expose only fixed bounded fields and never paths, URLs, commands, arguments, environment, headers, auth state, credentials, or raw parser/filesystem/provider errors. Per-agent activity similarly filters a fixed typed event allowlist before its bounded queue; the gateway writes a concrete numeric address selected from the listener that actually opened, including a single-stack localhost fallback, and the launcher proxy peeks rather than repairs PID authority, rejects hostname and wildcard PID authority, sends the bearer only to loopback or a literal local-interface address through a no-proxy/no-redirect bounded client, forwards no browser credentials or headers, strictly revalidates the upstream DTO, and returns fixed local errors. | Workspace editing and live telemetry combine attacker-controlled files, runtime payloads, and process authority; management convenience must not create a symlink/FIFO escape, lost update, secret/configuration oracle, credential-forwarding path, or bearer exfiltration primitive. |
 | `FR-SEC-021` | MUST | A whole-config read-modify-write operation captures the parsed update-safe configuration and one opaque revision of the exact public JSON plus security sidecar under the shared process/advisory lock, validates a complete candidate, and saves only when that revision is still current. The revision hashes security bytes without returning them. A stale save returns `config revision mismatch`, writes neither file, and preserves the winning writer's aliases, credentials, and unrelated configuration; callers surface a reload/retry conflict instead of blindly retrying an operation whose intent may no longer be valid. Current-schema read-only snapshots never migrate or save, while update snapshots may complete the explicit legacy migration lifecycle before returning a coherent current generation. | CLI, launcher, and runtime config writers must not lose concurrent public or secret state or turn a read path into an implicit mutation. |
 | `FR-SEC-022` | MUST | Frozen-session media capture and materialization treat the complete locator batch and serialized `FrozenSet` as untrusted. They admit at most 32 locator occurrences, 16 distinct nonempty assets, 2 MiB decoded bytes per asset, 3 MiB decoded bytes counted per occurrence, and 5 MiB for both materialized encoding and frozen-set JSON. Occurrence counting happens before snapshot cloning; complete locator and supplied-metadata shape validation happens before any live read, and decoded/read/materialized bounds never trust declared lengths. At most four `FreezeInputs` calls hold capture admission concurrently; an excess caller waits only until a slot is available or its context is cancelled. A live `media://` snapshot retains store lifecycle synchronization while it safely opens and validates a regular handle and executes one bounded read: Unix uses no-follow/nonblocking open plus a status-change token, Windows rejects every handle carrying the reparse-point attribute and compares handle change time, and other platforms fail closed. Registration and final deletion use cleaned absolute exact lexical lifecycle keys without an approximate case fold. One live key coalesces only the same captured entry identity. A `SameFile` identity found under a distinct key is not coalesced because it may be a hard link; instead, all such live lifecycles become non-deleting. Re-registration permanently cancels older pending deletion through either its exact key or captured `SameFile` identity, and deletion rechecks `Lstat`/`SameFile` so an already replaced entry is preserved. These operations share store synchronization, so an old cleanup cannot delete a newly registered or read-pinned path. Only canonical frozen identities, canonical `media://` UUID capabilities, and `data:` locators with canonical parameter-free MIME plus canonical padded base64 are accepted. Raw filenames are bounded at 4 KiB before basename sanitization to valid UTF-8 without controls and at most 255 bytes; supplied MIME is at most 127 bytes and captured MIME is bounded at 1 KiB before canonicalization to at most 127 bytes. Frozen records have one supported explicit version, deterministic unique identities/order, bounded canonical metadata, exact decoded sizes, and content digests; strict decode also rejects invalid UTF-8 and unpaired JSON surrogates, and decode/use reject unknown, duplicate, missing, unused, reordered/noncanonical, trailing, digest/size-inconsistent, reference-inconsistent, or authoritative occurrence-metadata-inconsistent state before returning rewritten history. Snapshot/freeze/materialize failures use fixed bounded classification and omit locator text, local paths, filenames/content types, decoded or encoded payload bytes, and raw filesystem/JSON/base64 errors. Cancellation or any failure returns no partial snapshot, reference list, set, or materialized output and leaves caller-owned inputs unchanged. | Media locators can name private temporary files and carry attacker-sized inline content; restart-safe capture must not become a symlink/special-file read, resource-amplification path, tampered-context downgrade, or diagnostic data leak. |
+| `FR-SEC-023` | MUST | A compiler-private workflow context is local capability state admitted only for the exact trusted in-memory gate workflow and normalized value snapshot. Admission rejects custom JSON/text marshalers without invoking them, encodes the caller-owned workflow once, verifies the unexported compiler hash against those exact bytes, and executes only the detached workflow decoded from that same capture; serialization or post-compile workflow/value mutation cannot retain authority. An initial context cannot claim retry provenance. It is persisted before effects with an integrity revision plus a domain-separated binding over run ID, workflow reference, retry source, private-root revision, and persisted-workflow revision, and cannot mix with public inputs, event, secrets, origin, session, delivery, parent/reusable context, or arbitrary workflow targets. A separate durable owner-local marker preserves private classification if JSON visibility/root fields are removed; store reads also require the decoded ID to match both the directory key and exact requested ID. Its exact read-only session is captured before durable run creation. During that one capture, every structured media locator is replaced by an immutable frozen reference and the complete canonical versioned `FrozenSet` is strictly validated and persisted with the snapshot before the private-root revision is computed. Resume, retry, restart, managed children, repairs, and provider fallback reuse only that frozen snapshot and set: they validate the frozen revision before materializing integrity-checked embedded bytes and never reread a live session or media store. The explicit private encoding also preserves runtime-only message/system-block prompt provenance and tool-call name/arguments/thought signature exactly across wait/restart. Provider cache and account affinity use only a domain-separated agent-plus-history-revision pseudonym, never the raw key, scope, inbound delivery, locator, or materialized payload. Every private agent step carries an explicit execution marker: account-router health keeps only failure classification plus fixed error text, and side-question vision fallback suppresses raw-error runtime events. `Run.MarshalJSON` recognizes private visibility and redacts invocation context, ancestry, delivery, outputs, raw errors, job/step diagnostics, frozen references, and the embedded media set by default. Only the trusted owner-local file-store encoder may bypass that default to write the exact raw checkpoint, execution, task, and private continuation state; its strict private-root decoder rejects unknown fields and invalid frozen-media state. The unexported root remains absent from every ordinary `Run` JSON, and every HTTP, SSE, browser/development, workflow-tool, runtime-event, stored event, cancellation result, and direct-result boundary removes private state and event messages/payloads before traversing caller-controlled graphs instead of falling back to the raw record. Event append/read first classifies a readable owning run under the store lock; an orphaned or unclassifiable record fails with the fixed private-context error. Human-task resume clones secrets at entry and rejects additions again in the authoritative locked claim and returned-run boundary before consuming or continuing a private response. Wrapped public sentinel errors are canonicalized before return, including fixed `ErrRunAdmissionConflict` and `ErrRunAdmissionUnavailable` boundaries that the HTTP owner maps respectively to the existing dependency-revision-mismatch `409` and dependency-check-unavailable `503` responses without exposing internal text. Only the compiler-generated bounded human task may deliberately declassify its title/questions. A missing, corrupt, hash/revision/binding/media-mismatched, mixed-visibility, or unprojectable private record fails closed with a fixed error. | Local gate evidence and exact provider prompt construction must survive process restarts and human delays without turning generic JSON, workflow observability, provider routing, media persistence, or error handling into a PR-chat and code/findings exfiltration path. |
+
+For `FR-SEC-023`, infrastructure failure while rechecking a private durable-create
+fence is likewise reduced to a fixed admission-unavailable sentinel; the HTTP
+owner maps it to the existing dependency-check-unavailable response without
+exposing filesystem or configuration diagnostics.
 
 ## Data And State Model
 
@@ -99,7 +115,19 @@ opaque public-plus-security revision used only as compare-and-save authority.
 Workflow agent requests
 also carry an explicit inherited-or-none tool policy; declared MCP actions use
 their ordinary independently configured credentials rather than ingress signing
-secrets. The gateway PID bearer remains process-local management authority;
+secrets. A compiler-private launch carries an unexported workflow hash that is
+verified before admission. Its resulting run carries an explicit private-
+visibility marker and integrity-bound root in the owner-local run file. That
+root may contain normalized gate values and a detached read-only session
+snapshot whose structured locators are frozen references, the corresponding
+strict versioned `FrozenSet`, and an explicit representation of runtime-only
+prompt provenance and tool-call internal fields; it is not a remotely managed
+secret store. Default `Run` JSON is redacted, while only the local store bypass
+encodes exact raw continuation state. Its raw key and scope remain usable only
+for local evidence validation, while provider affinity derives from a
+domain-separated pseudonym and public observation DTOs contain neither the root
+nor frozen/materialized media or derived execution output. The gateway PID
+bearer remains process-local management authority;
 launcher sessions and owner-readable local CLI access can use it only through
 the bounded event proxy/client, and event DTO types make lease and
 deduplication credentials unrepresentable. Structured job/action editor
@@ -159,6 +187,7 @@ Owns: TEST pkg/config/version*
 | HTTP / UI | protected `/runtime/workflows/authoring/capabilities`, launcher `/api/workflows/authoring/capabilities`, `/agent/workflows` | Translate the authenticated dashboard session into one bounded live-generation catalog containing only exact targets, fixed readiness, and typed parameter shapes; the browser can search and copy a ready target but cannot invoke it from this surface. | `FR-SEC-017` |
 | HTTP / UI | `POST /api/workflows/development/jobs/inspect`, `POST /api/workflows/development/jobs/render`, `/agent/workflows` Jobs & actions/effect review | Transform only exact bounded caller-supplied YAML through a strictly decoded ordered AST projection or one revision-fenced operation; retain unsafe shapes as raw-only, keep all state in the browser/request, and require exact-identity conservative acknowledgement before the separate draft-test endpoint. | `FR-SEC-018` |
 | HTTP / UI | `POST /api/workflows/development/triggers/simulate`, `POST /api/workflows/development/test/execute`, `/agent/workflows` trigger simulator/review | Strictly bound, payload-safe simulation uses a read-only current-config/PID snapshot to produce the only server review token accepted for one exact active draft and scenario; confirmed execution uses an unpruned lazy runtime and rechecks token expiry, identity, config, match, protected-event, and effect state before durable mutation or runtime authority. | `FR-SEC-019` |
+| Workflow / HTTP / SSE / tool | Compiler-private `RunRequest.PrivateRoot`, file-run persistence, run/result/event projections, and the `workflow` tool | Admit and preserve exact owner-local gate evidence, including its rewritten snapshot and strict self-contained `FrozenSet`, while making private invocation context and derived diagnostics unrepresentable on generic observation surfaces; only a bounded generated human task is an explicit declassification. | `FR-SEC-023` |
 | Workflow / MCP | `agent/*` with `with.tools: none`; `mcp/github/add_issue_comment` | Remove tools from every classifier model path, then permit a GitHub mutation only as a declared conditional MCP step with signed-body identity and fixed output text. The GitHub MCP server and its write credential are configured explicitly and independently from ingress authentication. | `FR-SEC-013` |
 | Storage | Credential store | Provider and MCP credential CRUD, transactional refresh updates, auth/OAuth metadata, cross-process serialization on supported hosts, and optional non-secret account email metadata extracted from OAuth token responses. | `FR-SEC-002`, `FR-SEC-007`, `FR-SEC-009` |
 | Storage | `pkg/fileutil` durable path operations | Durable recursive parent creation, synced same-directory atomic replacement, and durable logical removal with POSIX directory sync or Windows write-through moves. | `FR-SEC-015` |
@@ -327,6 +356,23 @@ Owns: TEST pkg/config/version*
     canonical identities/order/metadata, size, digest, reference closure, and
     the same budgets before emitting any locator. Map all failures through the
     fixed redacted taxonomy and discard partial internal output.
+20. For a compiler-private gate, reproduce the trusted in-memory workflow's
+    compiler hash and verify its restricted shape, reject mixed public context, clone and bound the
+    values, and capture exact owned conversation evidence before creating the
+    run. Freeze every structured media locator during that capture, persist the
+    strict versioned `FrozenSet` beside the rewritten snapshot, preserve
+    runtime-only prompt/tool-call fields explicitly, and compute one immutable
+    integrity revision over that frozen representation. Resume, retry, and
+    restart validate the revision before materializing embedded media and never
+    reread the live session or media store; provider calls derive only a
+    domain-separated pseudonym.
+    At every generic run, result, event, HTTP, SSE, development, and workflow-
+    tool boundary, project by private visibility before encoding or publishing;
+    default `Run` marshaling performs that redaction even without an explicit
+    projector, while only the local store's encoder writes raw continuation.
+    If projection authority or private integrity is unavailable, return the
+    fixed failure rather than raw fallback. Present only the compiler-generated
+    bounded human task when attention is deliberately requested.
 
 ## Cross-Feature Behavior
 
@@ -350,6 +396,13 @@ Workflow definition inspection is likewise owned by the workflows feature. Its
 authenticated UI and API expose a path-free whitelist rather than source YAML,
 captured event content, authoring values, secrets, output expressions, or raw
 internal errors.
+Compiler-private gate storage and execution are likewise owned by the workflows
+feature, while Agent Conversations owns frozen-provider execution. This feature
+defines their shared non-declassification boundary: local persistence does not
+grant generic observation authority, the raw PR-chat capability cannot become
+provider cache/account identity, and a projection failure cannot fall back to a
+raw run or event. The generated human task is an explicit bounded user-facing
+handoff rather than an accidental diagnostic channel.
 Workflow-authoring capability discovery is also owned by the workflows feature.
 It reuses the process-local gateway authority and live runtime lease, reports
 only exact addressable identity, fixed readiness, and bounded typed parameter
@@ -492,6 +545,17 @@ promise that a provider consumes every materialized modality.
   and incomplete or empty projections remain conservatively effectful even
   when mixed with known targets. Closing or changing the review clears consent,
   and a final identity mismatch creates no run.
+- A caller cannot manufacture private authority by serializing a compiled
+  workflow, setting a visibility string, or attaching a private root to another
+  workflow. Mutating a compiled workflow changes its hash and fails admission.
+  Capture or integrity failure creates no executable context; an update cannot
+  strip or swap the root. Resume, retry, and restart cannot recapture newer chat
+  history, reread cleaned-up live media, lose runtime-only prompt/tool-call
+  metadata, or replace the persisted `FrozenSet`; revision and strict set
+  validation precede any materialization. Missing projection authority drops
+  private event content or returns a fixed error rather than encoding raw
+  inputs, outputs, errors, session, delivery, scope, frozen/materialized media,
+  or provider identity.
 - Unverified email is skipped by default; an explicit opt-in marks it
   unverified. Private Delta Chat blob paths and copy errors do not enter durable
   events or attachment diagnostics, and oversized files are not materialized.
@@ -547,6 +611,7 @@ promise that a provider consumes every materialized modality.
 | `FR-SEC-020` | [pkg/agent/definition_test.go](../../pkg/agent/definition_test.go), [web/backend/api/agent_capabilities_test.go](../../web/backend/api/agent_capabilities_test.go), [web/backend/api/agent_capabilities_cas_test.go](../../web/backend/api/agent_capabilities_cas_test.go), [web/backend/api/agent_capabilities_replace_linux_test.go](../../web/backend/api/agent_capabilities_replace_linux_test.go), [web/backend/api/agent_capabilities_request_test.go](../../web/backend/api/agent_capabilities_request_test.go), [web/backend/api/agent_capabilities_unix_test.go](../../web/backend/api/agent_capabilities_unix_test.go), [pkg/agent/activity_test.go](../../pkg/agent/activity_test.go), [pkg/gateway/agent_activity_test.go](../../pkg/gateway/agent_activity_test.go), [pkg/gateway/listen_test.go](../../pkg/gateway/listen_test.go), [web/backend/api/agent_activity_test.go](../../web/backend/api/agent_activity_test.go), [web/frontend/src/api/agents.test.ts](../../web/frontend/src/api/agents.test.ts) |
 | `FR-SEC-021` | [pkg/config/mutation_test.go](../../pkg/config/mutation_test.go), [web/backend/api/config_writer_cas_test.go](../../web/backend/api/config_writer_cas_test.go), [cmd/picoclaw/internal/auth/config_revision_test.go](../../cmd/picoclaw/internal/auth/config_revision_test.go), [cmd/picoclaw/internal/mcp/command_test.go](../../cmd/picoclaw/internal/mcp/command_test.go), [cmd/picoclaw/internal/model/command_test.go](../../cmd/picoclaw/internal/model/command_test.go) |
 | `FR-SEC-022` | [pkg/media/store_test.go](../../pkg/media/store_test.go), [pkg/media/snapshot_test.go](../../pkg/media/snapshot_test.go), [pkg/media/frozen_test.go](../../pkg/media/frozen_test.go), [pkg/media/snapshot_file_unix.go](../../pkg/media/snapshot_file_unix.go), [pkg/media/snapshot_file_windows.go](../../pkg/media/snapshot_file_windows.go), [pkg/media/snapshot_file_other.go](../../pkg/media/snapshot_file_other.go), [pkg/session/frozen_media_test.go](../../pkg/session/frozen_media_test.go) |
+| `FR-SEC-023` | [pkg/workflows/private_context.go](../../pkg/workflows/private_context.go), [pkg/workflows/private_session.go](../../pkg/workflows/private_session.go), [pkg/workflows/executor.go](../../pkg/workflows/executor.go), [pkg/workflows/store.go](../../pkg/workflows/store.go), [pkg/workflows/development.go](../../pkg/workflows/development.go), [pkg/workflows/gates_test.go](../../pkg/workflows/gates_test.go), [pkg/workflows/private_context_security_test.go](../../pkg/workflows/private_context_security_test.go), [pkg/workflows/private_session_test.go](../../pkg/workflows/private_session_test.go), [pkg/session/frozen_media_test.go](../../pkg/session/frozen_media_test.go), [pkg/media/frozen_test.go](../../pkg/media/frozen_test.go), [pkg/accountrouter/router.go](../../pkg/accountrouter/router.go), [pkg/accountrouter/router_test.go](../../pkg/accountrouter/router_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/tools/workflow.go](../../pkg/tools/workflow.go), [web/backend/api/workflows.go](../../web/backend/api/workflows.go), [web/backend/api/workflow_run_readiness_test.go](../../web/backend/api/workflow_run_readiness_test.go), [web/backend/api/workflow_runtime.go](../../web/backend/api/workflow_runtime.go), [web/backend/api/workflow_runtime_test.go](../../web/backend/api/workflow_runtime_test.go) |
 
 ## Implementation Anchors
 
@@ -579,6 +644,13 @@ promise that a provider consumes every materialized modality.
 - [pkg/workflows/editor_jobs.go](../../pkg/workflows/editor_jobs.go)
 - [pkg/workflows/trigger_simulation.go](../../pkg/workflows/trigger_simulation.go)
 - [pkg/workflows/development_test_admission.go](../../pkg/workflows/development_test_admission.go)
+- [pkg/workflows/context.go](../../pkg/workflows/context.go)
+- [pkg/workflows/private_context.go](../../pkg/workflows/private_context.go)
+- [pkg/workflows/private_session.go](../../pkg/workflows/private_session.go)
+- [pkg/workflows/executor.go](../../pkg/workflows/executor.go)
+- [pkg/workflows/store.go](../../pkg/workflows/store.go)
+- [pkg/accountrouter/router.go](../../pkg/accountrouter/router.go)
+- [pkg/tools/workflow.go](../../pkg/tools/workflow.go)
 - [pkg/agent/workflow_authoring.go](../../pkg/agent/workflow_authoring.go)
 - [pkg/gateway/workflow_authoring.go](../../pkg/gateway/workflow_authoring.go)
 - [web/backend/api/workflow_inspection.go](../../web/backend/api/workflow_inspection.go)

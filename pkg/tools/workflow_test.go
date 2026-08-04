@@ -248,6 +248,91 @@ jobs:
 	}
 }
 
+func TestWorkflowToolRetriesCapturedPrivateGateWithoutPublishedDefinition(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	baseStore := workflows.NewFileRunStore(workspace)
+	compilation, err := workflows.CompileGateWorkflow("Private tool retry", []workflows.GateSpec{{
+		ID:        "policy",
+		Kind:      workflows.GateDeterministic,
+		When:      "false",
+		Title:     "Policy",
+		Questions: []any{"Approve?"},
+	}}, map[string]any{"private": "private-tool-retry-canary-13a079"})
+	if err != nil {
+		t.Fatalf("CompileGateWorkflow() error = %v", err)
+	}
+	initialExecutor := &workflows.Executor{WorkspaceDir: workspace, Store: baseStore}
+	initial, err := initialExecutor.Run(ctx, workflows.RunRequest{
+		Workflow:    compilation.Workflow,
+		WorkflowRef: "inline/private-tool-retry",
+		PrivateRoot: compilation.PrivateRoot,
+	})
+	if err != nil || initial == nil || initial.Status != workflows.RunStatusSucceeded {
+		t.Fatalf("initial Run() = (%#v, %v), want succeeded", initial, err)
+	}
+	countingStore := &workflowToolSourceReadCountingStore{
+		RunStore: baseStore,
+		sourceID: initial.RunID,
+	}
+	tool := NewWorkflowTool(&workflows.Executor{
+		WorkspaceDir: workspace,
+		Store:        countingStore,
+	}, workspace)
+	result := tool.Execute(ctx, map[string]any{
+		"action": "retry",
+		"run_id": initial.RunID,
+	})
+	if result == nil || result.IsError {
+		t.Fatalf("private retry result = %#v", result)
+	}
+	if countingStore.sourceReads != 1 {
+		t.Fatalf("private retry source reads = %d, want one", countingStore.sourceReads)
+	}
+	var payload workflows.RunResult
+	if unmarshalErr := json.Unmarshal([]byte(result.ContentForLLM()), &payload); unmarshalErr != nil {
+		t.Fatalf("unmarshal private retry result: %v\n%s", unmarshalErr, result.ContentForLLM())
+	}
+	if payload.Status != workflows.RunStatusSucceeded {
+		t.Fatalf("private retry public result = %#v", payload)
+	}
+	if strings.Contains(result.ContentForLLM(), "private-tool-retry-canary-13a079") {
+		t.Fatalf("private retry result leaked subject: %s", result.ContentForLLM())
+	}
+	runs, err := baseStore.ListRuns(ctx)
+	if err != nil {
+		t.Fatalf("ListRuns() error = %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("private retry runs = %#v, want two", runs)
+	}
+	foundRetry := false
+	for _, run := range runs {
+		if run.ID != initial.RunID && run.RetryOfRunID == initial.RunID {
+			foundRetry = true
+		}
+	}
+	if !foundRetry {
+		t.Fatalf("private retry runs = %#v, want exact retry linkage", runs)
+	}
+}
+
+type workflowToolSourceReadCountingStore struct {
+	workflows.RunStore
+	sourceID    string
+	sourceReads int
+}
+
+func (s *workflowToolSourceReadCountingStore) GetRun(
+	ctx context.Context,
+	runID string,
+) (*workflows.Run, error) {
+	if runID == s.sourceID {
+		s.sourceReads++
+	}
+	return s.RunStore.GetRun(ctx, runID)
+}
+
 func TestWorkflowToolDevelopmentLifecyclePublishesValidatedWorkflow(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()

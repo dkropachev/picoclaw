@@ -23,7 +23,8 @@ selects an exact model alias.
 - Runtime ordering: validate router graph and account references, select a
   concrete account, resolve the requested alias to its base model or that
   concrete account's override, execute normal provider fallback, record
-  success/failure/usage, and persist updated route state atomically.
+  success/failure/usage, redact private-execution provider errors before state
+  persistence, and persist updated route state atomically.
 - Non-obvious constraints: routers cannot reference other routers, load balance
   does not reshuffle an active session unless context compression occurs or the
   chosen account becomes unavailable, and failed attempts must be attributed by
@@ -42,6 +43,7 @@ selects an exact model alias.
 | `FR-ACCOUNT-ROUTER-005` | MUST  | Router state persists per workspace with config hash, account health, token/request usage, block cursors, and session affinities; writes are atomic, stale sessions are pruned, removed accounts are pruned, cooldowns are reason-aware, and corrupt state files are preserved with a `.corrupt.<timestamp>` suffix before recovery.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Account health must survive restarts without pinning bad or stale state forever.                                                                                                |
 | `FR-ACCOUNT-ROUTER-006` | MUST  | Agent execution treats router names only as account-selection targets. For each selected concrete account, it resolves the independently selected exact model alias, applying a per-account override only when that override key names the concrete account. Empty aliases fail with `no model configured`; raw model IDs and provider defaults are never substituted. Initial selection, context-compression reselection, fallback accounting, `/use`, and rate limiting retain the concrete account identity. | Router behavior must compose with turns and fallbacks without owning, guessing, or defaulting a model. |
 | `FR-ACCOUNT-ROUTER-007` | MUST  | Launcher Accounts management can add, edit, list, delete, and select an account router as `account_ref` without storing API secrets or a model setting on it; invalid account references return validation errors. The Accounts page and graph editor keep account/load-balancer/branch blocks account-only. Pico Chat lists routers separately from concrete accounts and pairs either choice with an exact configured model alias from the independent model selector. | Browser setup must expose routers safely without coupling an account graph to a model or raw upstream model discovery. |
+| `FR-ACCOUNT-ROUTER-009` | MUST  | Private agent execution records provider fallback outcomes through the router's private-result path. That path preserves stable account attribution, classified failure reason, health/cooldown transitions, request/token accounting, and success recovery, but replaces every persisted upstream or wrapper error with the fixed `provider request failed` text. Ordinary non-private result recording retains its existing diagnostics. | A provider error can echo compiler-private workflow context or frozen media; router health must remain accurate without turning shared durable state into an exfiltration surface. |
 
 ## Data And State Model
 
@@ -75,7 +77,7 @@ usage, session block affinities, block cursors, and timestamps.
 | Type    | Surface                                       | Contract                                                                                                                              | Requirement IDs                                         |
 | ------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
 | Config  | `account_routers[]`                           | Router name, static account-only block graph, fallback refs, strategy, and refresh interval; no model field.                                      | `FR-ACCOUNT-ROUTER-001` through `FR-ACCOUNT-ROUTER-003` |
-| Runtime | `pkg/accountrouter`                           | Select candidates, enforce session affinity, track health/usage, persist state, and recover corrupt state.                                       | `FR-ACCOUNT-ROUTER-003` through `FR-ACCOUNT-ROUTER-005` |
+| Runtime | `pkg/accountrouter`                           | Select candidates, enforce session affinity, track health/usage, redact private provider errors, persist state, and recover corrupt state.                                       | `FR-ACCOUNT-ROUTER-003` through `FR-ACCOUNT-ROUTER-005`, `FR-ACCOUNT-ROUTER-009` |
 | Agent   | Agent model resolution and fallback execution | Select/reselect concrete accounts, resolve the exact alias for each selected account, and record results by account identity. | `FR-ACCOUNT-ROUTER-004`, `FR-ACCOUNT-ROUTER-006`        |
 | HTTP/UI | `/api/accounts/models*`, `/accounts`          | Manage account-only router graphs and select an independent model alias without persisting one on a router. | `FR-ACCOUNT-ROUTER-007`                                 |
 
@@ -103,7 +105,9 @@ usage, session block affinities, block cursors, and timestamps.
    expand either the `then` or `else` block before its fallback path.
 8. Execute provider fallback normally and record every classified failed attempt
    against the stable account identity, then mark the successful account
-   operational and increment usage.
+   operational and increment usage. When the caller marks the execution
+   private, keep those classifications and counters but replace persisted
+   provider error detail with one fixed message before writing shared state.
 9. Persist state after selection or result recording, pruning stale sessions and
    removed accounts and resetting incompatible config hashes.
 
@@ -124,6 +128,9 @@ semantics; router entries intentionally do not store API keys.
   duplicate account references are rejected after the full config is known.
 - Account status cooldowns differ by failure class: auth/billing failures stay
   unavailable longer than rate-limit or transient network failures.
+- Private fallback accounting preserves those cooldown classes while persisting
+  only the fixed private failure text; raw provider errors never enter router
+  state.
 - Accounts using the same provider and resolved alias model remain
   distinguishable by stable identity during selection and failure attribution,
   so each request uses the chosen account's credentials.
@@ -137,6 +144,7 @@ semantics; router entries intentionally do not store API keys.
 | `FR-ACCOUNT-ROUTER-003`, `FR-ACCOUNT-ROUTER-008`, `FR-ACCOUNT-ROUTER-004`, `FR-ACCOUNT-ROUTER-005` | [pkg/accountrouter/router_test.go](../../pkg/accountrouter/router_test.go)                                                                                                                                                                                                       |
 | `FR-ACCOUNT-ROUTER-006`                                                                            | [pkg/agent/account_router_test.go](../../pkg/agent/account_router_test.go), [pkg/providers/fallback_test.go](../../pkg/providers/fallback_test.go)                                                                                                                               |
 | `FR-ACCOUNT-ROUTER-007`                                                                            | [web/backend/api/models_test.go](../../web/backend/api/models_test.go), [web/frontend/src/components/models/model-card.test.tsx](../../web/frontend/src/components/models/model-card.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
+| `FR-ACCOUNT-ROUTER-009`                                                                            | [pkg/accountrouter/router_test.go](../../pkg/accountrouter/router_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go)                                                                                                                        |
 
 ## Implementation Anchors
 

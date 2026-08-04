@@ -68,16 +68,20 @@ type GateSpec struct {
 	Questions any      `json:"questions,omitempty" yaml:"questions,omitempty"`
 }
 
-// GateCompilation is a runnable inline workflow plus its frozen JSON-like
-// inputs. All-zero and empty compositions are represented as Noop and must not
-// be submitted to Executor.Run.
+// GateCompilation is a runnable inline workflow plus its private frozen root.
+// All-zero and empty compositions are represented as Noop and must not be
+// submitted to Executor.Run.
 type GateCompilation struct {
-	Workflow               *Workflow      `json:"workflow,omitempty"`
-	Inputs                 map[string]any `json:"inputs,omitempty"`
-	Noop                   bool           `json:"noop"`
-	GateIDs                []string       `json:"gate_ids"`
-	RequiresSession        bool           `json:"requires_session"`
-	RequiredSessionAgentID string         `json:"required_session_agent_id,omitempty"`
+	Workflow *Workflow `json:"workflow,omitempty"`
+	// Inputs remains source-compatible for callers compiled against the initial
+	// gate API, but is intentionally always empty. Compiler-owned policy and
+	// subject data live only in PrivateRoot.
+	Inputs                 map[string]any      `json:"-"`
+	PrivateRoot            *PrivateRootRequest `json:"-"`
+	Noop                   bool                `json:"noop"`
+	GateIDs                []string            `json:"gate_ids"`
+	RequiresSession        bool                `json:"requires_session"`
+	RequiredSessionAgentID string              `json:"required_session_agent_id,omitempty"`
 }
 
 // CompileGateWorkflow lowers an ordered gate composition into one manual,
@@ -162,7 +166,7 @@ func CompileGateWorkflow(name string, specs []GateSpec, subject any) (*GateCompi
 		}
 	}
 
-	compilation.Inputs = map[string]any{
+	privateValues := map[string]any{
 		workflowGateSpecsInput:   gateInputs,
 		workflowGateSubjectInput: normalizedSubject,
 	}
@@ -174,16 +178,22 @@ func CompileGateWorkflow(name string, specs []GateSpec, subject any) (*GateCompi
 		if conditionErr != nil {
 			return nil, fmt.Errorf("gate %q when: %w", spec.ID, conditionErr)
 		}
-		if pathErr := validateWorkflowGateConditionPaths(condition, compilation.Inputs); pathErr != nil {
+		if pathErr := validateWorkflowGateConditionPaths(condition, privateValues); pathErr != nil {
 			return nil, fmt.Errorf("gate %q when: %w", spec.ID, pathErr)
 		}
 	}
-	if encoded, encodeErr := json.Marshal(compilation.Inputs); encodeErr != nil {
+	privateValuesBytes, encodeErr := json.Marshal(privateValues)
+	if encodeErr != nil {
 		return nil, fmt.Errorf("encode gate inputs: %w", encodeErr)
-	} else if len(encoded) > MaxWorkflowGateInputsBytes {
+	}
+	if len(privateValuesBytes) > MaxWorkflowGateInputsBytes {
 		return nil, fmt.Errorf("gate inputs exceed %d bytes", MaxWorkflowGateInputsBytes)
 	}
 
+	compilation.PrivateRoot = &PrivateRootRequest{
+		Values:                privateValues,
+		privateValuesRevision: workflowHashBytes(privateValuesBytes),
+	}
 	compilation.Workflow = &Workflow{
 		Name: name,
 		On:   WorkflowTriggers{Manual: map[string]any{}},
@@ -198,6 +208,11 @@ func CompileGateWorkflow(name string, specs []GateSpec, subject any) (*GateCompi
 	if validateErr := Validate(compilation.Workflow); validateErr != nil {
 		return nil, fmt.Errorf("compiled gate workflow is invalid: %w", validateErr)
 	}
+	workflowBytes, encodeErr := json.Marshal(compilation.Workflow)
+	if encodeErr != nil {
+		return nil, fmt.Errorf("encode compiled gate workflow: %w", encodeErr)
+	}
+	compilation.Workflow.privateRootRevision = workflowHashBytes(workflowBytes)
 	return compilation, nil
 }
 
@@ -672,7 +687,7 @@ func workflowAIGateSteps(spec GateSpec, isolated bool) []Step {
 	scope := map[string]any{
 		"gate_id":  spec.ID,
 		"criteria": workflowGateInputExpression(spec.ID, "criteria"),
-		"subject":  "${{ inputs." + workflowGateSubjectInput + " }}",
+		"subject":  "${{ private." + workflowGateSubjectInput + " }}",
 	}
 	if spec.Questions != nil {
 		scope["question_guidance"] = workflowGateInputExpression(spec.ID, "questions")
@@ -716,7 +731,7 @@ func workflowDeterministicGateStep(spec GateSpec, condition string) Step {
 		ID:   workflowGateAttentionStepID(spec.ID),
 		Name: "Request attention for gate " + spec.ID,
 		Uses: "human/task",
-		If:   "${{ " + condition + " }}",
+		If:   "${{ " + lowerWorkflowGateCondition(condition) + " }}",
 		With: map[string]any{
 			"title":           workflowGateInputExpression(spec.ID, "title"),
 			"questions":       workflowGateInputExpression(spec.ID, "questions"),
@@ -750,7 +765,26 @@ func workflowGateResponseSchema() map[string]any {
 }
 
 func workflowGateInputExpression(gateID, field string) string {
-	return "${{ inputs." + workflowGateSpecsInput + "." + gateID + "." + field + " }}"
+	return "${{ private." + workflowGateSpecsInput + "." + gateID + "." + field + " }}"
+}
+
+func lowerWorkflowGateCondition(expression string) string {
+	expression = strings.TrimSpace(expression)
+	for _, operator := range []string{" == ", " != ", " >= ", " <= ", " > ", " < "} {
+		if index := strings.Index(expression, operator); index >= 0 {
+			return lowerWorkflowGateCondition(expression[:index]) + operator +
+				lowerWorkflowGateCondition(expression[index+len(operator):])
+		}
+	}
+	if strings.HasPrefix(expression, "not ") {
+		return "not " + lowerWorkflowGateCondition(
+			strings.TrimSpace(strings.TrimPrefix(expression, "not ")),
+		)
+	}
+	if strings.HasPrefix(expression, "inputs.") {
+		return "private." + strings.TrimPrefix(expression, "inputs.")
+	}
+	return expression
 }
 
 func workflowGateDecisionStepID(gateID string) string {

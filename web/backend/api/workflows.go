@@ -536,6 +536,76 @@ func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request)
 		)
 		return
 	}
+	if workflows.IsPrivateWorkflowRun(previousRun) {
+		if strings.TrimSpace(req.ExpectedDependencyRevision) != "" {
+			writeWorkflowRunDependencyError(w, errWorkflowDependencyRevisionStale)
+			return
+		}
+		cfg, _, executor, runtimeErr := h.workflowRuntimeFromConfig(
+			r.Context(),
+			admissionConfig,
+		)
+		if runtimeErr != nil {
+			writeWorkflowRunDependencyError(w, errWorkflowDependencyUnavailable)
+			return
+		}
+		defer closeWorkflowRuntime(executor)
+		if !cfg.Workflows.Enabled {
+			writeWorkflowRunDependencyError(w, errWorkflowDependenciesNotReady)
+			return
+		}
+		configFence := &workflowDependencyAdmission{
+			ConfigRevision: admissionConfigRevision,
+		}
+		executor.AdmittedRunCreate = func(
+			_ context.Context,
+			candidate *workflows.Run,
+			create func() error,
+		) error {
+			admissionErr := h.guardWorkflowDependencyAdmissionConfig(configFence, func() error {
+				if candidate == nil || !workflows.IsPrivateWorkflowRun(candidate) ||
+					candidate.WorkflowRef != previousRun.WorkflowRef ||
+					candidate.RetryOfRunID != previousRun.ID {
+					return workflows.ErrRunAdmissionConflict
+				}
+				if createErr := create(); createErr != nil {
+					return createErr
+				}
+				releaseAdmission()
+				return nil
+			})
+			if errors.Is(admissionErr, errWorkflowDependencyRevisionStale) {
+				return workflows.ErrRunAdmissionConflict
+			}
+			if errors.Is(admissionErr, workflows.ErrWorkflowSnapshotAdmissionUnavailable) {
+				return workflows.ErrRunAdmissionUnavailable
+			}
+			return admissionErr
+		}
+		result, runErr := executor.RetryCaptured(r.Context(), previousRun, req.Secrets)
+		if runErr != nil {
+			if errors.Is(runErr, workflows.ErrRunAdmissionConflict) {
+				writeWorkflowRunDependencyError(w, errWorkflowDependencyRevisionStale)
+				return
+			}
+			if errors.Is(runErr, workflows.ErrRunAdmissionUnavailable) {
+				writeWorkflowRunDependencyError(w, errWorkflowDependencyUnavailable)
+				return
+			}
+			if isWorkflowRunDependencyError(runErr) {
+				writeWorkflowRunDependencyError(w, runErr)
+				return
+			}
+			writeWorkflowJSONStatus(
+				w,
+				http.StatusBadRequest,
+				map[string]any{"result": result, "error": runErr.Error()},
+			)
+			return
+		}
+		writeWorkflowJSON(w, result)
+		return
+	}
 	admission, dependencyErr := h.requirePublishedWorkflowDependenciesReadyFromConfig(
 		r.Context(),
 		admissionConfig,
@@ -690,6 +760,7 @@ func (h *Handler) handleGetWorkflowRunEvents(w http.ResponseWriter, r *http.Requ
 			"events": workflows.ProjectWorkflowRunEventsForBrowser(
 				events,
 				workflows.IsEventBackedDraftRunFamily(r.Context(), store, run),
+				workflows.IsPrivateWorkflowRun(run),
 			),
 		},
 	)
@@ -725,7 +796,11 @@ func (h *Handler) handleStreamWorkflowRunEvents(w http.ResponseWriter, r *http.R
 		if err != nil {
 			return
 		}
-		events = workflows.ProjectWorkflowRunEventsForBrowser(events, maskDiagnostics)
+		events = workflows.ProjectWorkflowRunEventsForBrowser(
+			events,
+			maskDiagnostics,
+			workflows.IsPrivateWorkflowRun(run),
+		)
 		for ; sent < len(events); sent++ {
 			data, err := json.Marshal(events[sent])
 			if err != nil {

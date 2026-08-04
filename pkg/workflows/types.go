@@ -11,6 +11,13 @@ type Workflow struct {
 	Name string           `json:"name,omitempty" yaml:"name,omitempty"`
 	On   WorkflowTriggers `json:"on,omitempty"   yaml:"on,omitempty"`
 	Jobs map[string]Job   `json:"jobs"           yaml:"jobs"`
+
+	// privateRootRevision authenticates the exact in-memory workflow emitted by
+	// the trusted gate compiler. It is deliberately absent from YAML/JSON, so
+	// persisted or repository-authored workflows cannot opt themselves into
+	// private-root execution and a caller cannot mutate a compiled workflow
+	// before admission.
+	privateRootRevision string
 }
 
 type WorkflowTriggers struct {

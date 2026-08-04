@@ -67,6 +67,8 @@ type webWorkflowRuntimeRunner struct {
 	initializeMCP func(context.Context, *agentloop.AgentLoop) error
 }
 
+var _ workflows.ReadOnlySessionCapturer = (*webWorkflowRuntimeRunner)(nil)
+
 func (r *webWorkflowRuntimeRunner) RunAgent(ctx context.Context, req workflows.AgentRequest) (map[string]any, error) {
 	if r == nil {
 		return nil, fmt.Errorf("agent runner not configured")
@@ -77,6 +79,26 @@ func (r *webWorkflowRuntimeRunner) RunAgent(ctx context.Context, req workflows.A
 		return nil, err
 	}
 	return agentloop.NewWorkflowAgentRunner(r.loop).RunAgent(ctx, req)
+}
+
+func (r *webWorkflowRuntimeRunner) CaptureReadOnlySession(
+	ctx context.Context,
+	ref workflows.ReadOnlySessionRef,
+) (*workflows.FrozenReadOnlySession, error) {
+	if r == nil {
+		return nil, fmt.Errorf("agent runner not configured")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.ensureLoopLocked(); err != nil {
+		return nil, err
+	}
+	runner := agentloop.NewWorkflowAgentRunner(r.loop)
+	capturer, ok := runner.(workflows.ReadOnlySessionCapturer)
+	if !ok {
+		return nil, fmt.Errorf("agent runner does not support read-only session capture")
+	}
+	return capturer.CaptureReadOnlySession(ctx, ref)
 }
 
 func (r *webWorkflowRuntimeRunner) RunTool(ctx context.Context, req workflows.ToolRequest) (map[string]any, error) {

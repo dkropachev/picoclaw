@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -11,9 +12,54 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
+
+func TestWebWorkflowRuntimeForwardsReadOnlySessionCapture(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}}
+	msgBus := bus.NewMessageBus()
+	loop := agent.NewAgentLoop(cfg, msgBus, workflowRuntimeTestProvider{})
+	runner := &webWorkflowRuntimeRunner{loop: loop, msgBus: msgBus}
+	t.Cleanup(func() {
+		if err := runner.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
+
+	instance := loop.GetRegistry().GetDefaultAgent()
+	if instance == nil {
+		t.Fatal("default agent is nil")
+	}
+	key := session.BuildOpaqueSessionKey("agent:main:web:direct:private-capture")
+	metadata, ok := instance.Sessions.(session.MetadataAwareSessionStore)
+	if !ok {
+		t.Fatalf("session store %T is not metadata aware", instance.Sessions)
+	}
+	metadata.EnsureSessionMetadata(key, &session.SessionScope{
+		Version: session.ScopeVersionV1,
+		AgentID: "main",
+		Channel: "web",
+	}, []string{"agent:main:web:direct:private-capture"})
+	instance.Sessions.AddMessage(key, "user", "frozen web capture evidence")
+
+	frozen, err := runner.CaptureReadOnlySession(context.Background(), workflows.ReadOnlySessionRef{
+		AgentID: "main",
+		Session: "agent:main:web:direct:private-capture",
+	})
+	if err != nil {
+		t.Fatalf("CaptureReadOnlySession() error = %v", err)
+	}
+	if frozen == nil || frozen.AgentID != "main" || frozen.Snapshot.Key != key {
+		t.Fatalf("frozen session = %#v, want exact main/%q capture", frozen, key)
+	}
+	if !strings.HasPrefix(frozen.HistoryRevision, "sha256:") {
+		t.Fatalf("history revision = %q, want opaque sha256 revision", frozen.HistoryRevision)
+	}
+}
 
 func TestWebWorkflowRuntimeResolvesHumanTaskWithoutInitializingAgentLoop(t *testing.T) {
 	runner := &webWorkflowRuntimeRunner{}

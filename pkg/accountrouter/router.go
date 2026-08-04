@@ -3,6 +3,7 @@ package accountrouter
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"math"
@@ -23,6 +24,8 @@ const (
 	sessionStateTTL  = 30 * 24 * time.Hour
 	defaultStatePerm = 0o600
 )
+
+var errPrivateProviderRequest = errors.New("provider request failed")
 
 type SelectReason string
 
@@ -189,6 +192,25 @@ func (r *Router) Select(sessionKey string, reason SelectReason) Selection {
 }
 
 func (r *Router) RecordFallbackResult(selection Selection, result *providers.FallbackResult, err error) {
+	r.recordFallbackResult(selection, result, err, false)
+}
+
+// RecordPrivateFallbackResult updates health and usage accounting without
+// persisting provider error text that may echo private request material.
+func (r *Router) RecordPrivateFallbackResult(
+	selection Selection,
+	result *providers.FallbackResult,
+	err error,
+) {
+	r.recordFallbackResult(selection, result, err, true)
+}
+
+func (r *Router) recordFallbackResult(
+	selection Selection,
+	result *providers.FallbackResult,
+	err error,
+	private bool,
+) {
 	if r == nil || selection.RouterName == "" || selection.RouterName != r.Name {
 		return
 	}
@@ -208,7 +230,11 @@ func (r *Router) RecordFallbackResult(selection Selection, result *providers.Fal
 			if account == "" {
 				continue
 			}
-			markAccountFailure(rs, account, attempt.Reason, attempt.Error, now)
+			failureErr := attempt.Error
+			if private {
+				failureErr = errPrivateProviderRequest
+			}
+			markAccountFailure(rs, account, attempt.Reason, failureErr, now)
 		}
 		if result != nil && result.Response != nil {
 			account := selection.CandidateAccounts[result.IdentityKey]
@@ -238,7 +264,11 @@ func (r *Router) RecordFallbackResult(selection Selection, result *providers.Fal
 					continue
 				}
 				if failErr := providers.ClassifyError(err, candidate.Provider, candidate.Model); failErr != nil {
-					markAccountFailure(rs, account, failErr.Reason, err, now)
+					failureErr := err
+					if private {
+						failureErr = errPrivateProviderRequest
+					}
+					markAccountFailure(rs, account, failErr.Reason, failureErr, now)
 				}
 				break
 			}

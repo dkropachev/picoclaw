@@ -14,7 +14,12 @@ profile for workflow decisions that need a frozen existing conversation as
 evidence without registering a turn, executing tools, invoking hooks, or
 writing the conversation, plus a stateless profile that evaluates only supplied
 workflow context under a request-local identity that never becomes a session or
-account-router affinity.
+account-router affinity. Compiler-private decisions capture the exact existing
+conversation before a durable workflow run is created, freeze every structured
+media locator into a strict self-contained `FrozenSet`, and later evaluate only
+that persisted evidence under a domain-separated pseudonymous
+cache/account-affinity identity, never the raw session or live-media
+capability.
 
 ## Reconstruction Notes
 
@@ -30,7 +35,13 @@ account-router affinity.
   ownership, and source-compatible channel/streaming fallbacks must stay
   explicit. An isolated workflow decision uses caller-supplied frozen context
   rather than assembling live history again, exposes no tools, and rejects a
-  provider response that still attempts a tool call. A stateless workflow
+  provider response that still attempts a tool call. A compiler-private
+  decision additionally accepts only pre-captured owner/revision-matched
+  evidence whose complete media graph was frozen at capture, a blank
+  live-session key, and no inbound delivery or session scope. It validates the
+  frozen revision before materializing embedded bytes without a live-session or
+  media-store read, and exposes fixed private markers while preserving stable
+  pseudonymous cache and account selection for that exact snapshot. A stateless workflow
   decision additionally assembles no session context, disables prompt cache and
   session-affine account routing, and never exposes its request-local identity
   outside the call.
@@ -58,7 +69,7 @@ account-router affinity.
 | `FR-AGENT-017` | MUST | Agent-owned inbound snapshots preserve process-local turn/event identity, deduplication, occurrence time, subject, conversation, safe attachment descriptors, and transport trust facts through primary turns, queued continuations, and derived outbound contexts. Mutable maps, occurrence-time pointers, and attachment slices are detached when copied, and these fields remain excluded from serialized routing context. | Asynchronous turn and delivery work must retain admission facts without aliasing caller-owned state or expanding the serialized contract. |
 | `FR-AGENT-018` | MUST | The authenticated Agent management API and responsive Agent UI project an implicit `main` policy without writing an empty config and support ordered create, inspect, edit, default-selection, and delete operations against an explicit opaque config revision. Each resource exposes an optional `account_ref`; model primary/fallback values are validated as exact aliases, except that primary may be an enabled model router. Empty per-agent values inherit defaults, and the surface preserves that inheritance versus an explicit empty fallback list. | Operators need concurrency-safe browser management of the same strict account-plus-alias policy used at runtime. |
 | `FR-AGENT-019` | MUST | The selected-agent UI exposes deep-linkable Overview, Capabilities, and Activity tabs without replacing the ordered management grid. Capabilities use a separate composite config-plus-workspace revision and preserve the exact tools all/none/selected, skills inherit/none/selected, and MCP all/none/selected states; an edit changes only requested frontmatter nodes while preserving unrelated YAML nodes, comments, ordering, and prompt body, retains unknown existing selections, and upgrades legacy `AGENTS.md` only after explicit confirmation without deleting it. Malformed, unterminated, unsafe, or unsupported-platform definition state is fail-closed and read-only. Capability and activity views use only bounded sanitized projections, retain dirty drafts across conflicts until explicit reload, report required gateway restart, and never expose a raw-file editor or persist activity cursors. | Operators need full browser control and visibility for one agent without collapsing workspace policy into global config, overwriting concurrent prompt edits, leaking runtime payloads, or discarding forward-compatible declarations. |
-| `FR-AGENT-020` | MUST | An exact read-only workflow decision invokes the selected configured agent through the isolated side-question provider path with a caller-supplied deep-cloned history and summary snapshot. It preserves normal account/model alias and fallback resolution plus explicit model and reasoning-effort overrides, but does not register or reserve an interactive turn, reassemble live context, append user/assistant/tool messages, compact or summarize the session, initialize MCP, expose tool definitions, execute tool calls, or invoke before/after LLM hooks. Structured-output repairs and managed child/fallback calls reuse that same frozen snapshot and no-tool profile. Each provider attempt receives a separately graph-detached message copy so a mutating provider or failed fallback cannot change the context observed by a later attempt or repair. Prompt caching follows the workflow's normalized cache mode, cancellation propagates, and any provider response containing tool calls fails the decision rather than entering a tool loop. | Gate evaluation must be able to consult the PR conversation without becoming another conversation turn, observing later concurrent writes, or acquiring action authority. |
+| `FR-AGENT-020` | MUST | An exact read-only workflow decision invokes the selected configured agent through the isolated side-question provider path with one deep-cloned history/summary/scope snapshot. The ordinary profile captures a strict owner-matched existing session when the step begins. The compiler-private profile exposes `ReadOnlySessionCapturer`, which resolves the exact configured agent and strict existing session once under a runtime-use lease before durable workflow creation, then delegates complete structured-locator freezing to Session Memory using Tool Execution's optional bounded live-media snapshot capability. Capture returns a graph-detached snapshot whose locators are immutable frozen references, one canonical versioned self-contained `FrozenSet`, and an opaque history revision computed from that rewritten snapshot; private persistence strictly round-trips the set plus message/system-block prompt layer/slot/source and tool-call runtime name/arguments/thought signature. Later `RunAgent` requires that exact canonical agent, `history: read_only`, `tools: none`, a blank live session key, and a frozen snapshot whose key owner and recomputed revision—including frozen references and runtime-only fields—match. It validates that revision before asking Session Memory to materialize integrity-checked embedded bytes, and never rereads the live session or media store on initial execution, resume, retry, restart, managed execution, repair, or fallback. It removes inbound delivery and session scope, derives one stable domain-separated pseudonymous internal identity from only the agent and history revision for account routing and enabled prompt caching, uses no raw session key, media locator, or payload in either identity, and returns fixed `session: private` and `session_mode: private` markers with an empty public cache key/message ID. `cache: none` remains disabled; any other admitted private cache mode normalizes to the pseudonymous session cache. Both profiles preserve normal account/model alias and fallback resolution plus explicit model and reasoning-effort overrides, but do not register or reserve an interactive turn, append user/assistant/tool messages, compact or summarize a session, initialize MCP, expose tool definitions, execute tool calls, or invoke before/after LLM hooks. Initial calls, structured-output repairs, managed calibration/children/fallbacks, and every provider attempt reuse separately graph-detached copies of the same validated and materialized frozen evidence and no-tool profile. Every compiler-private isolated or read-only request carries an explicit private-execution marker: provider failure classification still updates account health, but shared router state stores only a fixed error, vision fallback emits no raw-error runtime event, and frozen references, sets, materialized data, and capture diagnostics remain inside the workflow's private projection. Cancellation propagates, and any provider response containing tool calls fails instead of entering a tool loop. | Gate evaluation must be able to consult one exact PR conversation revision and its captured media across waits and retries without becoming a turn, changing provider prompt provenance after restart, observing later writes, depending on temporary media lifetime, leaking the session/media capability or provider diagnostics through shared routing/event state, or acquiring action authority. |
 | `FR-AGENT-021` | MUST | A workflow ephemeral decision invokes the selected configured agent through the stateless side-question provider path with no history/summary snapshot and a cryptographically random identity scoped to that one visible agent request. Initial output, structured repairs, managed calibration, fallback, and concurrent child calls preserve ordinary account/model alias resolution plus explicit model and reasoning-effort overrides and reuse the same stateless no-history, no-prompt-cache, no-hook, no-MCP, no-tool profile. The identity is used only in request-local process options: account-router selection receives a blank affinity key, session scope and inherited delivery routing context are absent, and no interactive turn, active-turn reservation, context-manager assembly, session metadata/catalog/history/summary operation, provider prompt-cache key/directive, hook, tool definition, or tool execution is created. Every provider attempt receives detached messages and options, stateful provider instances remain isolated per call, provider-authored tool calls fail closed, and cancellation propagates. The random identity is never emitted in runtime events, logs, outputs, or account-router state; callers receive only a fixed ephemeral audit marker. | Concurrent isolated gates need normal provider selection and structured execution without colliding on a synthetic session, leaving a 30-day account-affinity record, or acquiring conversation/action authority. |
 
 ## Data And State Model
@@ -74,8 +85,21 @@ rescue markers explicitly own committed steering until a live continuation or
 competing turn takes it. Workspace capability state also retains its active
 definition source and exact composite revision independently from the global
 agent-config revision; runtime activity remains process-local and bounded. The
-frozen context used by an isolated workflow decision is request-local and is
-never installed as the live session state. A stateless workflow decision holds
+frozen context used by an isolated workflow decision is never installed as the
+live session state. An ordinary read-only call holds it for that execution; a
+compiler-private workflow may persist the detached snapshot and revision in its
+owner-local private root so a later resume or retry can supply the same
+evidence. Before that root is created, Session Memory rewrites every structured
+media locator to a frozen reference and returns the strict versioned
+self-contained `FrozenSet` persisted beside the snapshot. Its explicit private
+representation includes that set plus runtime-only prompt provenance and
+tool-call name/arguments/thought signature that ordinary session JSON
+deliberately omits. The opaque history revision binds the rewritten snapshot;
+the enclosing private-root revision also binds the strict set. The agent runner
+validates those frozen forms before materialization and retains no raw session capability in provider cache
+or account-router identity: it derives a stable domain-separated pseudonym from
+the canonical agent and opaque history revision, omits inbound/session scope,
+and emits only fixed `private` session markers. A stateless workflow decision holds
 only one request-local random identity and its supplied prompt/context/scope;
 neither the identity nor an empty synthetic session is entered into the session
 store, active-turn map, runtime-event scope, prompt cache, or account-router
@@ -145,7 +169,7 @@ Owns: EVENT agent.*
 | Go API | `interfaces.ChannelManager`, optional `MessageScopedTypingStopper`, `MessageScopedTurnUXCleaner`, `MessageScopedTurnUXRebinder`, and `MessageScopedPlaceholderSender` | Keep the legacy manager surface sufficient while allowing built-in channels to stop, clean, transfer, and create transient UX for one opaque turn identity. | `FR-AGENT-015`, `FR-AGENT-016` |
 | Go API | `interfaces.MessageBus.GetStreamer`, optional `interfaces.TurnScopedMessageBus.GetStreamerForTurn` | Use turn-scoped streaming when implemented and otherwise call the original four-argument streamer lookup. | `FR-AGENT-015`, `FR-AGENT-016` |
 | Runtime | `bus.InboundContext`, `DispatchRequest`, turn reservations, continuation targets, and outbound context derivation | Carry detached process-local event and transient-UX metadata across one turn without adding it to serialized routing context. | `FR-AGENT-015`, `FR-AGENT-017` |
-| Runtime | `AgentLoop.askSideQuestionWithOptions` frozen-context profile | Perform one no-tool, no-hook provider decision over caller-supplied history and summary without joining or mutating the interactive turn lifecycle. | `FR-AGENT-020` |
+| Runtime | `workflowAgentRunner.CaptureReadOnlySession`, `workflowAgentRunner.RunAgent`, and `AgentLoop.askSideQuestionWithOptions` frozen-context profile | Capture one strict existing-session snapshot, use Session Memory and Tool Execution primitives to freeze its complete media graph into the persisted private form, or validate/materialize that form without live rereads, then perform no-tool/no-hook provider decisions without joining or mutating the interactive turn lifecycle or exposing raw capabilities through provider identity. | `FR-AGENT-020` |
 | Runtime | `AgentLoop.askSideQuestionWithOptions` stateless profile | Perform no-history/no-cache/no-tool provider calls under one request-local identity while suppressing session-affine account routing and all durable or observable session identity. | `FR-AGENT-021` |
 | Events | `agent.*` | Turn, LLM, tool, steering, interrupt, subturn, and error telemetry. | `FR-AGENT-001`, `FR-AGENT-004`, `FR-AGENT-006` |
 | HTTP/UI | `/api/agents*`, `/agent/agents` | Project and mutate persistent configured agent policy with ordered results, revision fencing, explicit model fallback semantics, workspace capability CAS, sanitized live activity, deep links, and restart feedback. | `FR-AGENT-018`, `FR-AGENT-019` |
@@ -166,11 +190,25 @@ Owns: EVENT agent.*
    suppresses another automatic reset for that exhaustion episode.
 4. For each tool-call response, validate tool availability and arguments, run hooks and registry execution, append tool results, and re-enter provider execution until done or capped.
 5. For an exact read-only workflow decision, accept the already-captured
-   history and summary instead of consulting the context manager, construct
+   history and summary instead of consulting the context manager. For a
+   compiler-private launch, first capture and detach one strict session under a
+   runtime lease before durable creation, freeze its complete structured media
+   graph through the Session Memory helper and Tool Execution snapshot reader,
+   and persist the rewritten snapshot with its strict self-contained
+   `FrozenSet`. When execution later supplies it, preserve
+   message/system-block prompt provenance and tool-call runtime fields through
+   the workflow's explicit private encoding, validate exact agent ownership and
+   the strict set, and recompute the frozen-snapshot revision before
+   materializing embedded bytes. This path never rereads live history or media,
+   including after resume, retry, or restart. Construct
    the normal agent prompt and provider candidates with zero tool definitions,
    skip hooks and interactive turn registration, reject tool-call responses,
    and return only the isolated response. Every repair or managed call receives
-   the same frozen snapshot. For a stateless workflow decision, build the prompt
+   separately detached copies of the same validated, materialized snapshot.
+   Private calls omit inbound/session scope, use a
+   domain-separated agent-plus-revision pseudonym for enabled prompt cache and
+   account affinity, and replace raw session/cache/message identities with fixed
+   public private markers. For a stateless workflow decision, build the prompt
    without a snapshot or context-manager assembly, retain one random
    request-local identity across the visible execution, and pass a blank key to
    every account-router selection. Every initial, repair, calibration, fallback,
@@ -230,7 +268,15 @@ Workflow agent steps normally reuse this same turn execution path, including
 provider prompt cache keys, tool iteration limits, and final message
 persistence. The exact `history: read_only` profile instead consumes Session
 Memory's immutable existing-session snapshot and the isolated decision path in
-`FR-AGENT-020`. Managed workflow agent steps can additionally run hidden
+`FR-AGENT-020`. A compiler-private workflow captures that snapshot before its
+run exists and owns persistence, retry/resume reuse, and every public
+observation projection; the agent layer owns exact validation and the
+pseudonymous provider identity used by all later calls. Session Memory owns
+complete locator enumeration, frozen-reference rewriting, strict `FrozenSet`
+validation, and materialization; Tool Execution owns the optional bounded live
+`media://` snapshot reader used only during capture. The agent layer composes
+those primitives but never retains or reacquires live media authority after the
+private root exists. Managed workflow agent steps can additionally run hidden
 no-history child turns with scoped prompts, per-child model and reasoning-effort
 overrides, and tool disabling while preserving the same provider resolution.
 The `session: ephemeral` workflow profile instead uses the stateless
@@ -278,6 +324,19 @@ metadata but does not persist or reinterpret those trust facts.
   ignored or executed. Hooks and MCP are deliberately absent from this profile,
   and a concurrent interactive append cannot change the already-frozen prompt
   or be overwritten when the decision finishes.
+- A compiler-private decision also fails before provider execution for a
+  noncanonical or mismatched agent, a nonblank live session, tools other than
+  `none`, a corrupt snapshot, an owner/revision mismatch, or a missing frozen
+  value. Capture fails as one unit if any structured media locator cannot be
+  frozen; decode or execution fails if the persisted `FrozenSet`, frozen
+  reference closure, metadata, bound, or digest is invalid. Missing or changed
+  runtime-only prompt/tool-call metadata is a revision mismatch rather than a
+  lossy restart. Revision validation precedes materialization, and neither path
+  falls back to live session or media lookup after capture. Raw session key,
+  inbound delivery, session scope, frozen references/set, materialized data,
+  and raw capture errors do not enter cache/account identity, provider options,
+  shared diagnostics, or public output; cancellation and provider-tool-call
+  rejection remain normal.
 - A stateless side-question fails closed if its caller supplies incompatible
   history, cache, or tool authority; it never falls back to the selected
   agent's default session or context. Provider-authored tool calls remain
@@ -340,7 +399,7 @@ metadata but does not persist or reinterpret those trust facts.
 | `FR-AGENT-017` | [pkg/agent/turn_context_test.go](../../pkg/agent/turn_context_test.go), [pkg/agent/agent_test.go](../../pkg/agent/agent_test.go), [pkg/agent/steering_test.go](../../pkg/agent/steering_test.go), [pkg/bus/bus_test.go](../../pkg/bus/bus_test.go) |
 | `FR-AGENT-018` | [web/backend/api/agents_test.go](../../web/backend/api/agents_test.go), [pkg/config/config_test.go](../../pkg/config/config_test.go), [web/frontend/src/api/agents.test.ts](../../web/frontend/src/api/agents.test.ts), [web/frontend/src/components/agent/agents/agents-page.test.tsx](../../web/frontend/src/components/agent/agents/agents-page.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-AGENT-019` | [web/backend/api/agent_capabilities_test.go](../../web/backend/api/agent_capabilities_test.go), [web/backend/api/agent_capabilities_cas_test.go](../../web/backend/api/agent_capabilities_cas_test.go), [web/backend/api/agent_capabilities_replace_linux_test.go](../../web/backend/api/agent_capabilities_replace_linux_test.go), [pkg/agent/activity_test.go](../../pkg/agent/activity_test.go), [web/frontend/src/api/agents.test.ts](../../web/frontend/src/api/agents.test.ts), [web/frontend/src/components/agent/agents/agent-capabilities-panel.test.tsx](../../web/frontend/src/components/agent/agents/agent-capabilities-panel.test.tsx), [web/frontend/src/components/agent/agents/agent-activity-panel.test.tsx](../../web/frontend/src/components/agent/agents/agent-activity-panel.test.tsx), [web/frontend/src/routes/agent/-agents-route.test.tsx](../../web/frontend/src/routes/agent/-agents-route.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
-| `FR-AGENT-020` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
+| `FR-AGENT-020` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/workflows/private_session_test.go](../../pkg/workflows/private_session_test.go), [pkg/session/frozen_media_test.go](../../pkg/session/frozen_media_test.go), [pkg/media/frozen_test.go](../../pkg/media/frozen_test.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
 | `FR-AGENT-021` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
 
 ## Implementation Anchors

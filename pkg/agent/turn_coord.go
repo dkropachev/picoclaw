@@ -587,6 +587,7 @@ type sideQuestionExecutionOptions struct {
 	detachProviderMessages bool
 	skipHooks              bool
 	rejectToolCalls        bool
+	privateExecution       bool
 }
 
 func (al *AgentLoop) askSideQuestion(
@@ -915,16 +916,21 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 			)
 			if err != nil {
 				if activeAccountRouter != nil {
-					activeAccountRouter.RecordFallbackResult(
-						routerSelection,
-						fallbackResultFromError(err, activeCandidates...),
-						err,
-					)
+					result := fallbackResultFromError(err, activeCandidates...)
+					if execution.privateExecution {
+						activeAccountRouter.RecordPrivateFallbackResult(routerSelection, result, err)
+					} else {
+						activeAccountRouter.RecordFallbackResult(routerSelection, result, err)
+					}
 				}
 				return nil, err
 			}
 			if activeAccountRouter != nil {
-				activeAccountRouter.RecordFallbackResult(routerSelection, fbResult, nil)
+				if execution.privateExecution {
+					activeAccountRouter.RecordPrivateFallbackResult(routerSelection, fbResult, nil)
+				} else {
+					activeAccountRouter.RecordFallbackResult(routerSelection, fbResult, nil)
+				}
 			}
 			return fbResult.Response, nil
 		}
@@ -935,11 +941,12 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 		}
 		resp, err := callProvider(ctx, candidate, llmModel, hookModelChanged, callMessages)
 		if activeAccountRouter != nil {
-			activeAccountRouter.RecordFallbackResult(
-				routerSelection,
-				fallbackResultFromSingleCandidate(candidate, resp),
-				err,
-			)
+			result := fallbackResultFromSingleCandidate(candidate, resp)
+			if execution.privateExecution {
+				activeAccountRouter.RecordPrivateFallbackResult(routerSelection, result, err)
+			} else {
+				activeAccountRouter.RecordFallbackResult(routerSelection, result, err)
+			}
 		}
 		return resp, err
 	}
@@ -951,21 +958,23 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 	var err error
 	resp, err = callSideLLM(messages)
 	if err != nil && hasMediaRefs(messages) && isVisionUnsupportedError(err) {
-		al.emitEvent(
-			runtimeevents.KindAgentLLMRetry,
-			HookMeta{
-				Source:      "askSideQuestion",
-				TracePath:   "turn.llm.retry",
-				turnContext: cloneTurnContext(turnCtx),
-			},
-			LLMRetryPayload{
-				Attempt:    1,
-				MaxRetries: 1,
-				Reason:     "vision_unsupported",
-				Error:      err.Error(),
-				Backoff:    0,
-			},
-		)
+		if !execution.privateExecution {
+			al.emitEvent(
+				runtimeevents.KindAgentLLMRetry,
+				HookMeta{
+					Source:      "askSideQuestion",
+					TracePath:   "turn.llm.retry",
+					turnContext: cloneTurnContext(turnCtx),
+				},
+				LLMRetryPayload{
+					Attempt:    1,
+					MaxRetries: 1,
+					Reason:     "vision_unsupported",
+					Error:      err.Error(),
+					Backoff:    0,
+				},
+			)
+		}
 		messagesWithoutMedia := stripMessageMedia(messages)
 		resp, err = callSideLLM(messagesWithoutMedia)
 	}

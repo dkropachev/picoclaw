@@ -19,6 +19,7 @@ var (
 
 type expressionContext struct {
 	Inputs   map[string]any
+	Private  map[string]any
 	Secrets  map[string]string
 	Event    map[string]any
 	Steps    map[string]StepExecution
@@ -176,6 +177,8 @@ func lookupPath(path string, ctx expressionContext) (any, error) {
 	switch parts[0] {
 	case "inputs":
 		cur = ctx.Inputs
+	case "private":
+		cur = ctx.Private
 	case "secrets":
 		cur = stringMapAny(ctx.Secrets)
 	case "event":
