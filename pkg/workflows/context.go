@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/sipeed/picoclaw/pkg/media"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
 
 type Delivery struct {
@@ -39,6 +42,58 @@ type ExecutionContext struct {
 	RunID        string                   `json:"run_id,omitempty"`
 	JobID        string                   `json:"job_id,omitempty"`
 	StepID       string                   `json:"step_id,omitempty"`
+
+	// Private workflow-root state is intentionally unavailable to external
+	// FunctionRunner implementations. Compiler-generated steps may read values
+	// only through the private expression root, and read-only agent steps receive
+	// the separately frozen session snapshot.
+	privateValues         map[string]any
+	frozenReadOnlySession *FrozenReadOnlySession
+}
+
+// PrivateRootRequest is internal invocation context for a trusted,
+// compiler-generated workflow. Values are frozen before durable run creation
+// and never projected through ordinary Run JSON. ReadOnlySession, when set,
+// is captured exactly once before creation and reused by resume and retry.
+//
+// This is local persisted context, not a secret vault: a trusted workflow can
+// deliberately declassify a value by rendering it into a human task.
+type PrivateRootRequest struct {
+	Values          map[string]any
+	ReadOnlySession *ReadOnlySessionRef
+
+	// privateValuesRevision binds the exact normalized compiler-owned values
+	// while still allowing the caller to attach the required session reference.
+	// It is deliberately unexported so serialization cannot recreate admission
+	// authority.
+	privateValuesRevision string
+}
+
+// ReadOnlySessionRef selects one exact existing session owned by AgentID.
+// Session is a local capability and is never persisted outside the private
+// frozen root or emitted through workflow observations.
+type ReadOnlySessionRef struct {
+	AgentID string
+	Session string
+}
+
+// FrozenReadOnlySession is the detached evidence supplied to every matching
+// read-only agent step in one private workflow root.
+type FrozenReadOnlySession struct {
+	AgentID         string                  `json:"agent_id"`
+	Snapshot        session.SessionSnapshot `json:"snapshot"`
+	HistoryRevision string                  `json:"history_revision"`
+	FrozenMedia     media.FrozenSet         `json:"frozen_media"`
+}
+
+// ReadOnlySessionCapturer is the optional AgentRunner capability used during
+// private-root admission. Capture must return a graph-detached exact snapshot
+// and must not create or mutate a session.
+type ReadOnlySessionCapturer interface {
+	CaptureReadOnlySession(
+		ctx context.Context,
+		ref ReadOnlySessionRef,
+	) (*FrozenReadOnlySession, error)
 }
 
 type StepExecution struct {
@@ -79,6 +134,7 @@ const (
 	AgentToolsInherit     = "inherit"
 	AgentToolsNone        = "none"
 	AgentSessionEphemeral = "ephemeral"
+	AgentSessionPrivate   = "private"
 )
 
 type AgentRequest struct {
@@ -97,6 +153,14 @@ type AgentRequest struct {
 	Output           *AgentOutputContract
 	Managed          any
 	Scope            any
+	// PrivateContext marks an agent step whose inputs belong to a private
+	// workflow root. Runners must keep provider diagnostics out of ordinary
+	// runtime events and shared health-state error fields for this request.
+	PrivateContext bool
+	// FrozenReadOnlySession bypasses live session lookup for one private-root
+	// read-only decision. Session remains empty so its local capability key
+	// cannot enter ordinary workflow output or routing context.
+	FrozenReadOnlySession *FrozenReadOnlySession
 }
 
 type FunctionRunner interface {

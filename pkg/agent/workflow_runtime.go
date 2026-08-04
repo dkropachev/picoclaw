@@ -12,6 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
@@ -251,6 +252,8 @@ type workflowAgentRunner struct {
 	newEphemeralSessionKey func() string
 }
 
+var _ workflows.ReadOnlySessionCapturer = (*workflowAgentRunner)(nil)
+
 type workflowAgentRunOptions struct {
 	ModelName       string
 	ReasoningEffort string
@@ -258,6 +261,64 @@ type workflowAgentRunOptions struct {
 }
 
 type workflowAgentTextRunner func(message string, noHistoryOverride bool, runOptions workflowAgentRunOptions) (string, error)
+
+func (r *workflowAgentRunner) CaptureReadOnlySession(
+	ctx context.Context,
+	ref workflows.ReadOnlySessionRef,
+) (*workflows.FrozenReadOnlySession, error) {
+	if r == nil || r.loop == nil {
+		return nil, fmt.Errorf("agent loop not configured")
+	}
+	leaseCtx, releaseRuntime, err := r.loop.acquireRuntimeUse(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseRuntime()
+
+	agentID := strings.TrimSpace(ref.AgentID)
+	if agentID != ref.AgentID || !routing.IsCanonicalAgentID(agentID) {
+		return nil, fmt.Errorf("read_only workflow agent ID must be an exact canonical ID")
+	}
+	registry := r.loop.GetRegistry()
+	if registry == nil {
+		return nil, fmt.Errorf("agent registry not configured")
+	}
+	agent, ok := registry.GetAgent(agentID)
+	if !ok || agent == nil {
+		return nil, fmt.Errorf("workflow agent %q not found", agentID)
+	}
+	snapshot, _, err := workflowReadOnlySessionSnapshot(
+		leaseCtx,
+		agent,
+		agentID,
+		ref.Session,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var mediaReader media.SnapshotReader
+	if reader, ok := r.loop.mediaStore.(media.SnapshotReader); ok {
+		mediaReader = reader
+	}
+	frozenSnapshot, frozenMedia, err := session.FreezeSessionSnapshotMedia(
+		leaseCtx,
+		snapshot,
+		mediaReader,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read_only workflow agent session media capture: %w", err)
+	}
+	revision, err := workflowSessionSnapshotRevision(frozenSnapshot)
+	if err != nil {
+		return nil, err
+	}
+	return &workflows.FrozenReadOnlySession{
+		AgentID:         agentID,
+		Snapshot:        workflowCloneSessionSnapshot(frozenSnapshot),
+		HistoryRevision: revision,
+		FrozenMedia:     frozenMedia.Clone(),
+	}, nil
+}
 
 func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentRequest) (map[string]any, error) {
 	if r == nil || r.loop == nil {
@@ -274,6 +335,22 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	historyMode := strings.ToLower(historyModeInput)
 	readOnlyDecision := historyMode == "read_only"
 	ephemeralDecision := req.EphemeralSession
+	privateDecision := req.FrozenReadOnlySession != nil
+	privateExecution := req.PrivateContext || privateDecision
+	if privateDecision {
+		if historyModeInput != "read_only" {
+			return nil, fmt.Errorf("private workflow agent session requires history: read_only")
+		}
+		if strings.TrimSpace(req.Tools) != workflows.AgentToolsNone {
+			return nil, fmt.Errorf("private workflow agent session requires tools: none")
+		}
+		if strings.TrimSpace(req.Session) != "" {
+			return nil, fmt.Errorf("private workflow agent session cannot use a live session key")
+		}
+		if ephemeralDecision {
+			return nil, fmt.Errorf("private workflow agent session cannot be ephemeral")
+		}
+	}
 	if readOnlyDecision && workflowAgentToolsMode(req.Tools) != workflows.AgentToolsNone {
 		return nil, fmt.Errorf("read_only workflow agent history requires tools: none")
 	}
@@ -306,6 +383,9 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	if readOnlyDecision && !routing.IsCanonicalAgentID(agentID) {
 		return nil, fmt.Errorf("read_only workflow agent ID must be an exact canonical ID")
 	}
+	if privateDecision && agentID != req.AgentID {
+		return nil, fmt.Errorf("private workflow agent ID must be an exact canonical ID")
+	}
 	registry := r.loop.GetRegistry()
 	agent, ok := registry.GetAgent(agentID)
 	if !ok {
@@ -335,23 +415,48 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		historyRevision  string
 	)
 	if readOnlyDecision {
-		snapshot, revision, snapshotErr := workflowReadOnlySessionSnapshot(
-			ctx,
-			agent,
-			agentID,
-			sessionKey,
+		var (
+			snapshot    session.SessionSnapshot
+			revision    string
+			snapshotErr error
 		)
+		if privateDecision {
+			snapshot, revision, snapshotErr = workflowFrozenReadOnlySessionSnapshot(
+				ctx,
+				req.FrozenReadOnlySession,
+				agentID,
+			)
+		} else {
+			snapshot, revision, snapshotErr = workflowReadOnlySessionSnapshot(
+				ctx,
+				agent,
+				agentID,
+				sessionKey,
+			)
+		}
 		if snapshotErr != nil {
 			return nil, snapshotErr
 		}
 		readOnlySnapshot = &snapshot
 		historyRevision = revision
-		sessionKey = snapshot.Key
+		if privateDecision {
+			sessionKey = workflowPrivateSessionIdentity(agentID, revision)
+		} else {
+			sessionKey = snapshot.Key
+		}
 	}
 	noHistory := historyMode == "none"
 	promptCacheKey, disablePromptCache := workflowPromptCacheKey(req.Cache, agentID, sessionKey)
+	if privateDecision {
+		disablePromptCache = workflowCacheMode(req.Cache) == "none"
+		if disablePromptCache {
+			promptCacheKey = ""
+		} else {
+			promptCacheKey = sessionKey
+		}
+	}
 	var inbound *bus.InboundContext
-	if !ephemeralDecision {
+	if !ephemeralDecision && !privateDecision {
 		value := workflowInboundContext(req.Delivery, agentID)
 		inbound = &value
 	}
@@ -378,10 +483,15 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 					detachProviderMessages: true,
 					skipHooks:              true,
 					rejectToolCalls:        true,
+					privateExecution:       privateExecution,
 				},
 			)
 		}
 		if readOnlySnapshot != nil {
+			var scope *session.SessionScope
+			if !privateDecision {
+				scope = session.CloneScope(readOnlySnapshot.Scope)
+			}
 			return r.loop.askSideQuestionWithOptions(
 				ctx,
 				agent,
@@ -389,7 +499,7 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 					Dispatch: DispatchRequest{
 						SessionKey:     sessionKey,
 						InboundContext: inbound,
-						SessionScope:   session.CloneScope(readOnlySnapshot.Scope),
+						SessionScope:   scope,
 						UserMessage:    runMessage,
 					},
 					PromptCacheKey:          promptCacheKey,
@@ -408,6 +518,7 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 					disablePromptCache: disablePromptCache,
 					skipHooks:          true,
 					rejectToolCalls:    true,
+					privateExecution:   privateExecution,
 				},
 			)
 		}
@@ -432,10 +543,30 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		})
 	}
 	publicSessionKey := sessionKey
+	publicPromptCacheKey := promptCacheKey
+	publicCacheMode := req.Cache
+	publicMessageID := req.MessageID
 	if ephemeralDecision {
 		publicSessionKey = workflows.AgentSessionEphemeral
 	}
-	if strategy := workflowManagedSplitStrategy(req, agent); strategy != "" {
+	if privateDecision {
+		publicSessionKey = workflows.AgentSessionPrivate
+		publicPromptCacheKey = ""
+		if disablePromptCache {
+			publicCacheMode = "none"
+		} else {
+			publicCacheMode = "session"
+		}
+		publicMessageID = ""
+	}
+	managedReq := req
+	if privateDecision {
+		managedReq.Delivery = workflows.Delivery{}
+		managedReq.MessageID = ""
+		managedReq.Cache = publicCacheMode
+		managedReq.FrozenReadOnlySession = nil
+	}
+	if strategy := workflowManagedSplitStrategy(managedReq, agent); strategy != "" {
 		if managedErr := r.ensureWorkflowManagedProviders(agent, req.Managed); managedErr != nil {
 			return nil, fmt.Errorf(
 				"initialize managed model aliases for workflow agent %q: %w",
@@ -444,18 +575,21 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 			)
 		}
 		outputs, managedErr := r.runManagedSplit(
-			req,
+			managedReq,
 			agent,
 			agentID,
 			publicSessionKey,
 			historyMode,
-			req.Cache,
-			promptCacheKey,
+			publicCacheMode,
+			publicPromptCacheKey,
 			strategy,
 			runOnce,
 		)
 		if readOnlySnapshot != nil && outputs != nil {
 			outputs["history_revision"] = historyRevision
+		}
+		if privateDecision && outputs != nil {
+			outputs["session_mode"] = workflows.AgentSessionPrivate
 		}
 		if ephemeralDecision && outputs != nil {
 			outputs["session_mode"] = workflows.AgentSessionEphemeral
@@ -474,13 +608,16 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		agentID,
 		publicSessionKey,
 		historyMode,
-		req.Cache,
-		promptCacheKey,
-		req.MessageID,
+		publicCacheMode,
+		publicPromptCacheKey,
+		publicMessageID,
 		req.Tools,
 	)
 	if readOnlySnapshot != nil {
 		outputs["history_revision"] = historyRevision
+	}
+	if privateDecision {
+		outputs["session_mode"] = workflows.AgentSessionPrivate
 	}
 	if ephemeralDecision {
 		outputs["session_mode"] = workflows.AgentSessionEphemeral
@@ -532,6 +669,78 @@ func (r *workflowAgentRunner) ephemeralSessionKey() string {
 }
 
 const maxWorkflowReadOnlySessionKeyBytes = 4096
+
+const workflowPrivateSessionIdentityDomain = "picoclaw/workflow/private-read-only-session/v1\x00"
+
+func workflowCloneSessionSnapshot(snapshot session.SessionSnapshot) session.SessionSnapshot {
+	snapshot.History = session.CloneMessages(snapshot.History)
+	snapshot.Scope = session.CloneScope(snapshot.Scope)
+	snapshot.Aliases = append([]string(nil), snapshot.Aliases...)
+	return snapshot
+}
+
+func workflowFrozenReadOnlySessionSnapshot(
+	ctx context.Context,
+	frozen *workflows.FrozenReadOnlySession,
+	agentID string,
+) (session.SessionSnapshot, string, error) {
+	if frozen == nil {
+		return session.SessionSnapshot{}, "", fmt.Errorf(
+			"private workflow agent session snapshot is required",
+		)
+	}
+	frozenAgentID := strings.TrimSpace(frozen.AgentID)
+	if frozenAgentID != frozen.AgentID || !routing.IsCanonicalAgentID(frozenAgentID) {
+		return session.SessionSnapshot{}, "", fmt.Errorf(
+			"private workflow agent session has invalid agent identity",
+		)
+	}
+	if frozenAgentID != agentID {
+		return session.SessionSnapshot{}, "", fmt.Errorf(
+			"private workflow agent session belongs to another agent",
+		)
+	}
+	snapshot := workflowCloneSessionSnapshot(frozen.Snapshot)
+	if snapshot.Key != strings.TrimSpace(snapshot.Key) ||
+		snapshot.Key == "" ||
+		!utf8.ValidString(snapshot.Key) ||
+		len(snapshot.Key) > maxWorkflowReadOnlySessionKeyBytes {
+		return session.SessionSnapshot{}, "", fmt.Errorf(
+			"private workflow agent session key is invalid",
+		)
+	}
+	if err := workflowReadOnlySessionOwner(snapshot, agentID); err != nil {
+		return session.SessionSnapshot{}, "", err
+	}
+	revision, err := workflowSessionSnapshotRevision(snapshot)
+	if err != nil {
+		return session.SessionSnapshot{}, "", err
+	}
+	if frozen.HistoryRevision == "" || frozen.HistoryRevision != revision {
+		return session.SessionSnapshot{}, "", fmt.Errorf(
+			"private workflow agent session revision does not match its snapshot",
+		)
+	}
+	materialized, err := session.MaterializeSessionSnapshotMedia(
+		ctx,
+		snapshot,
+		frozen.FrozenMedia,
+	)
+	if err != nil {
+		return session.SessionSnapshot{}, "", fmt.Errorf(
+			"private workflow agent session media is invalid: %w",
+			err,
+		)
+	}
+	return materialized, revision, nil
+}
+
+func workflowPrivateSessionIdentity(agentID, historyRevision string) string {
+	sum := sha256.Sum256([]byte(
+		workflowPrivateSessionIdentityDomain + agentID + "\x00" + historyRevision,
+	))
+	return fmt.Sprintf("workflow:private:%x", sum[:])
+}
 
 func workflowReadOnlySessionSnapshot(
 	ctx context.Context,
@@ -614,7 +823,7 @@ func workflowSessionSnapshotRevision(snapshot session.SessionSnapshot) (string, 
 	}
 	type toolCallInternalFields struct {
 		Name             string         `json:"name,omitempty"`
-		Arguments        map[string]any `json:"arguments,omitempty"`
+		Arguments        map[string]any `json:"arguments"`
 		ThoughtSignature string         `json:"thought_signature,omitempty"`
 	}
 	type contentBlockInternalFields struct {

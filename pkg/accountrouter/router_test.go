@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,6 +123,49 @@ func TestRecordFallbackResultDoesNotDoubleCountRecordedAttempt(t *testing.T) {
 	}
 	if state.FailureCount != 1 {
 		t.Fatalf("failure_count = %d, want one recorded attempt", state.FailureCount)
+	}
+}
+
+func TestRecordPrivateFallbackResultRedactsProviderErrorAndPreservesHealth(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	router := newTestRouter(t, &config.AccountRouterConfig{
+		Enabled: true,
+		Entry:   "entry",
+		Blocks: []config.AccountRouterBlock{{
+			ID:      "entry",
+			Type:    config.AccountRouterBlockTypeAccount,
+			Account: "account-a",
+		}},
+	}, now)
+
+	selection := router.Select("", SelectReasonInitial)
+	attempted := selection.Candidates[0]
+	const privateCanary = "PRIVATE-PROVIDER-ERROR-CANARY"
+	failure := errors.New("rate limit response echoed " + privateCanary)
+	router.RecordPrivateFallbackResult(selection, &providers.FallbackResult{
+		Attempts: []providers.FallbackAttempt{{
+			Provider:    attempted.Provider,
+			Model:       attempted.Model,
+			IdentityKey: attempted.StableKey(),
+			Reason:      providers.FailoverRateLimit,
+			Error:       failure,
+		}},
+	}, failure)
+
+	state := router.store.st.Routers["router-main"].Accounts["account-a"]
+	if state == nil || state.State != "unavailable" ||
+		state.Reason != providers.FailoverRateLimit || state.FailureCount != 1 {
+		t.Fatalf("private failure health state = %#v", state)
+	}
+	if state.LastError != errPrivateProviderRequest.Error() {
+		t.Fatalf("last error = %q, want canonical private error", state.LastError)
+	}
+	data, err := os.ReadFile(router.StatePath)
+	if err != nil {
+		t.Fatalf("ReadFile(account router state) error = %v", err)
+	}
+	if strings.Contains(string(data), privateCanary) {
+		t.Fatalf("account router state contains private provider error: %s", data)
 	}
 }
 

@@ -636,6 +636,9 @@ func ProjectEventBackedDraftRunForBrowser(run *Run) *Run {
 // ProjectWorkflowRunForBrowser applies an ancestry decision already resolved
 // by the API or a batched run listing.
 func ProjectWorkflowRunForBrowser(run *Run, eventBackedDraft bool) *Run {
+	if IsPrivateWorkflowRun(run) {
+		return projectPrivateWorkflowRunForBrowser(run)
+	}
 	origin, _ := trustedRunOrigin(run)
 	return projectWorkflowRunForBrowser(run, eventBackedDraft, origin)
 }
@@ -649,6 +652,9 @@ func ProjectWorkflowRunForBrowserWithStore(
 	run *Run,
 	eventBackedDraft bool,
 ) *Run {
+	if IsPrivateWorkflowRun(run) {
+		return projectPrivateWorkflowRunForBrowser(run)
+	}
 	origin, _ := trustedRunOriginWithStore(ctx, store, run)
 	return projectWorkflowRunForBrowser(run, eventBackedDraft, origin)
 }
@@ -660,6 +666,9 @@ func projectWorkflowRunForBrowser(
 ) *Run {
 	if run == nil {
 		return nil
+	}
+	if IsPrivateWorkflowRun(run) {
+		return projectPrivateWorkflowRunForBrowser(run)
 	}
 	projected := cloneRun(run)
 	projected.Origin = cloneRunOrigin(origin)
@@ -685,6 +694,38 @@ func projectWorkflowRunForBrowser(
 		}
 	}
 	return projected
+}
+
+func projectPrivateWorkflowRunForBrowser(run *Run) *Run {
+	if run == nil {
+		return nil
+	}
+	projected := *run
+	projected.Origin = nil
+	projected.ParentRunID = ""
+	projected.ChildRunIDs = nil
+	projected.CallerJobID = ""
+	projected.Session = ""
+	projected.Delivery = Delivery{}
+	projected.Event = nil
+	projected.Inputs = nil
+	projected.Outputs = nil
+	projected.Jobs = cloneMaplessJobExecutions(run.Jobs)
+	projected.Steps = cloneMaplessStepExecutions(run.Steps)
+	projected.Error = ""
+	projected.CancelReason = ""
+	projected.execution = nil
+	projected.humanTasks = nil
+	projected.privateRoot = nil
+	if run.CompletedAt != nil {
+		completedAt := *run.CompletedAt
+		projected.CompletedAt = &completedAt
+	}
+	if run.CancelRequestedAt != nil {
+		cancelRequestedAt := *run.CancelRequestedAt
+		projected.CancelRequestedAt = &cancelRequestedAt
+	}
+	return &projected
 }
 
 // ProjectEventBackedDraftRunsForBrowser applies the same projection to a run
@@ -745,12 +786,18 @@ func projectEventBackedDraftRunsForBrowser(
 		lookups[runID] = lookupResult{err: err}
 		return nil, err
 	}
-	runPointers := make([]*Run, len(runs))
+	runPointers := make([]*Run, 0, len(runs))
 	for index := range runs {
-		runPointers[index] = &runs[index]
+		if !IsPrivateWorkflowRun(&runs[index]) {
+			runPointers = append(runPointers, &runs[index])
+		}
 	}
 	origins := trustedRunOriginsWithLookup(ctx, runPointers, lookup)
 	for index := range runs {
+		if IsPrivateWorkflowRun(&runs[index]) {
+			projected[index] = *projectPrivateWorkflowRunForBrowser(&runs[index])
+			continue
+		}
 		origin := origins[runs[index].ID]
 		masked := origin != nil &&
 			origin.Kind == RunOriginExternalEventDraftTest
@@ -902,7 +949,11 @@ func ProjectEventBackedDraftEventsForBrowser(
 	run *Run,
 	events []RunEvent,
 ) []RunEvent {
-	return ProjectWorkflowRunEventsForBrowser(events, IsEventBackedDraftRun(run))
+	return ProjectWorkflowRunEventsForBrowser(
+		events,
+		IsEventBackedDraftRun(run),
+		IsPrivateWorkflowRun(run),
+	)
 }
 
 // ProjectWorkflowRunEventsForBrowser applies a resolved ancestry decision to
@@ -910,11 +961,18 @@ func ProjectEventBackedDraftEventsForBrowser(
 func ProjectWorkflowRunEventsForBrowser(
 	events []RunEvent,
 	eventBackedDraft bool,
+	privateRun ...bool,
 ) []RunEvent {
+	private := len(privateRun) != 0 && privateRun[0]
 	projected := make([]RunEvent, len(events))
 	for index, event := range events {
-		event.Payload = cloneMap(event.Payload)
-		if eventBackedDraft {
+		if private {
+			event.Message = ""
+			event.Payload = nil
+		} else {
+			event.Payload = cloneMap(event.Payload)
+		}
+		if !private && eventBackedDraft {
 			if event.Message != "" {
 				event.Message = EventBackedDraftEventMessageDiagnostic
 			}

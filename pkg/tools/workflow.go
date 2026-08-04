@@ -205,7 +205,13 @@ func (t *WorkflowTool) cancel(ctx context.Context, runID, reason string) *ToolRe
 	if err != nil {
 		return ErrorResult(err.Error()).WithError(err)
 	}
-	return jsonToolResult(run)
+	store := t.executorStore()
+	return jsonToolResult(workflows.ProjectWorkflowRunForBrowserWithStore(
+		ctx,
+		store,
+		run,
+		workflows.IsEventBackedDraftRunFamily(ctx, store, run),
+	))
 }
 
 func (t *WorkflowTool) retry(ctx context.Context, args map[string]any) *ToolResult {
@@ -221,16 +227,18 @@ func (t *WorkflowTool) retry(ctx context.Context, args map[string]any) *ToolResu
 	if err != nil {
 		return ErrorResult(err.Error()).WithError(err)
 	}
-	if runnableErr := workflows.EnsureWorkflowRunnable(
-		ctx,
-		t.workspace,
-		previousRun.WorkflowRef,
-		t.runtime,
-		t.localOptions()...,
-	); runnableErr != nil {
-		return ErrorResult(runnableErr.Error()).WithError(runnableErr)
+	if !workflows.IsPrivateWorkflowRun(previousRun) {
+		if runnableErr := workflows.EnsureWorkflowRunnable(
+			ctx,
+			t.workspace,
+			previousRun.WorkflowRef,
+			t.runtime,
+			t.localOptions()...,
+		); runnableErr != nil {
+			return ErrorResult(runnableErr.Error()).WithError(runnableErr)
+		}
 	}
-	result, err := t.executor.Retry(ctx, runID, secrets)
+	result, err := t.executor.RetryCaptured(ctx, previousRun, secrets)
 	if err != nil {
 		return jsonErrorToolResult(result, err)
 	}
@@ -295,21 +303,37 @@ func (t *WorkflowTool) status(ctx context.Context, runID string) *ToolResult {
 	if runID == "" {
 		return ErrorResult("run_id is required")
 	}
-	run, err := t.executorStore().GetRun(ctx, runID)
+	store := t.executorStore()
+	run, err := store.GetRun(ctx, runID)
 	if err != nil {
 		return ErrorResult(err.Error()).WithError(err)
 	}
-	return jsonToolResult(run)
+	return jsonToolResult(workflows.ProjectWorkflowRunForBrowserWithStore(
+		ctx,
+		store,
+		run,
+		workflows.IsEventBackedDraftRunFamily(ctx, store, run),
+	))
 }
 
 func (t *WorkflowTool) events(ctx context.Context, runID string) *ToolResult {
 	if runID == "" {
 		return ErrorResult("run_id is required")
 	}
-	events, err := t.executorStore().Events(ctx, runID)
+	store := t.executorStore()
+	run, err := store.GetRun(ctx, runID)
 	if err != nil {
 		return ErrorResult(err.Error()).WithError(err)
 	}
+	events, err := store.Events(ctx, runID)
+	if err != nil {
+		return ErrorResult(err.Error()).WithError(err)
+	}
+	events = workflows.ProjectWorkflowRunEventsForBrowser(
+		events,
+		workflows.IsEventBackedDraftRunFamily(ctx, store, run),
+		workflows.IsPrivateWorkflowRun(run),
+	)
 	return jsonToolResult(map[string]any{"run_id": runID, "events": events})
 }
 

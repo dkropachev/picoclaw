@@ -158,7 +158,15 @@ func newWorkflowExecutionState(workflow *Workflow) (*workflowExecutionState, err
 }
 
 func validatePersistedWorkflowSnapshot(execution *workflowExecutionState) error {
-	if execution == nil || execution.Workflow == nil || execution.Cursor == nil {
+	if execution == nil || execution.Cursor == nil ||
+		validatePersistedWorkflowDefinition(execution) != nil {
+		return ErrHumanTaskConflict
+	}
+	return nil
+}
+
+func validatePersistedWorkflowDefinition(execution *workflowExecutionState) error {
+	if execution == nil || execution.Workflow == nil {
 		return ErrHumanTaskConflict
 	}
 	if err := Validate(execution.Workflow); err != nil {

@@ -2,12 +2,14 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +20,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
+	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -317,6 +320,458 @@ func TestWorkflowAgentRunnerReadOnlyUsesExactImmutableSessionSnapshot(t *testing
 	}
 	if loop.mcp.getManager() != nil || loop.mcp.getInitErr() != nil {
 		t.Fatal("read-only decision initialized MCP")
+	}
+}
+
+func TestWorkflowAgentRunnerPrivateFrozenSnapshotNeverReadsOrExposesLiveSession(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"first", "second", "third"}}
+	loop, agent, canonicalKey, alias := newWorkflowReadOnlyTestLoop(t, provider)
+	runner := &workflowAgentRunner{loop: loop}
+	frozen, err := runner.CaptureReadOnlySession(context.Background(), workflows.ReadOnlySessionRef{
+		AgentID: "main",
+		Session: alias,
+	})
+	if err != nil {
+		t.Fatalf("CaptureReadOnlySession() error = %v", err)
+	}
+	if frozen.Snapshot.Key != canonicalKey || frozen.AgentID != "main" {
+		t.Fatalf("captured identity = %#v, want main/%q", frozen, canonicalKey)
+	}
+	if revision := frozen.HistoryRevision; !strings.HasPrefix(revision, "sha256:") {
+		t.Fatalf("captured history revision = %q, want opaque sha256 revision", revision)
+	}
+	if frozen.FrozenMedia.Version != media.FrozenSetVersion ||
+		len(frozen.FrozenMedia.Assets) != 0 || len(frozen.FrozenMedia.Blobs) != 0 {
+		t.Fatalf("no-media capture set = %#v, want empty versioned frozen set", frozen.FrozenMedia)
+	}
+
+	liveStore := agent.Sessions
+	liveStore.AddMessage(canonicalKey, "user", "LIVE-SESSION-MUTATION-CANARY")
+	readSpy := &workflowNoSnapshotReadStore{SessionStore: liveStore}
+	agent.Sessions = readSpy
+	t.Cleanup(func() { agent.Sessions = liveStore })
+
+	req := workflows.AgentRequest{
+		AgentID: "main",
+		Prompt:  "Decide using only the captured evidence.",
+		History: "read_only",
+		Cache:   "session",
+		Tools:   workflows.AgentToolsNone,
+		Delivery: workflows.Delivery{
+			Channel:   "RAW-CHANNEL-CANARY",
+			ChatID:    "RAW-CHAT-CANARY",
+			MessageID: "RAW-DELIVERY-MESSAGE-CANARY",
+		},
+		MessageID:             "RAW-REQUEST-MESSAGE-CANARY",
+		FrozenReadOnlySession: frozen,
+	}
+	first, err := runner.RunAgent(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RunAgent(first) error = %v", err)
+	}
+	second, err := runner.RunAgent(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RunAgent(second) error = %v", err)
+	}
+	craftedCacheReq := req
+	craftedCacheReq.Cache = "key:" + canonicalKey
+	third, err := runner.RunAgent(context.Background(), craftedCacheReq)
+	if err != nil {
+		t.Fatalf("RunAgent(crafted cache key) error = %v", err)
+	}
+	if readSpy.snapshotReads.Load() != 0 {
+		t.Fatalf("frozen runs read live snapshot %d time(s), want zero", readSpy.snapshotReads.Load())
+	}
+	for index, outputs := range []map[string]any{first, second, third} {
+		if outputs["session"] != workflows.AgentSessionPrivate ||
+			outputs["session_mode"] != workflows.AgentSessionPrivate {
+			t.Fatalf("run %d session markers = %#v, want fixed private markers", index, outputs)
+		}
+		if outputs["history_revision"] != frozen.HistoryRevision {
+			t.Fatalf(
+				"run %d history revision = %#v, want %q",
+				index,
+				outputs["history_revision"],
+				frozen.HistoryRevision,
+			)
+		}
+		if outputs["cache_key"] != "" || outputs["message_id"] != "" {
+			t.Fatalf("run %d exposed private cache/routing identity: %#v", index, outputs)
+		}
+		encoded, marshalErr := json.Marshal(outputs)
+		if marshalErr != nil {
+			t.Fatalf("json.Marshal(outputs) error = %v", marshalErr)
+		}
+		for _, canary := range []string{
+			canonicalKey,
+			alias,
+			"RAW-CHANNEL-CANARY",
+			"RAW-CHAT-CANARY",
+			"RAW-DELIVERY-MESSAGE-CANARY",
+			"RAW-REQUEST-MESSAGE-CANARY",
+		} {
+			if strings.Contains(string(encoded), canary) {
+				t.Fatalf("run %d outputs exposed %q: %s", index, canary, encoded)
+			}
+		}
+	}
+
+	calls := provider.snapshotCalls()
+	if len(calls) != 3 {
+		t.Fatalf("provider calls = %d, want three", len(calls))
+	}
+	if calls[0].promptCacheKey == "" ||
+		calls[0].promptCacheKey != calls[1].promptCacheKey ||
+		calls[0].promptCacheKey != calls[2].promptCacheKey {
+		t.Fatalf(
+			"private prompt-cache identities = %q, %q, %q, want one stable pseudonym",
+			calls[0].promptCacheKey,
+			calls[1].promptCacheKey,
+			calls[2].promptCacheKey,
+		)
+	}
+	if !strings.HasPrefix(calls[0].promptCacheKey, "workflow:private:") {
+		t.Fatalf("private prompt-cache identity = %q, want domain marker", calls[0].promptCacheKey)
+	}
+	for index, call := range calls {
+		if !workflowMessagesContain(call.messages, "existing problem context") {
+			t.Fatalf("provider call %d omitted captured history: %#v", index, call.messages)
+		}
+		if workflowMessagesContain(call.messages, "LIVE-SESSION-MUTATION-CANARY") {
+			t.Fatalf("provider call %d observed live mutation: %#v", index, call.messages)
+		}
+		encoded, marshalErr := json.Marshal(struct {
+			Messages       []providers.Message `json:"messages"`
+			Options        map[string]any      `json:"options"`
+			PromptCacheKey string              `json:"prompt_cache_key"`
+		}{
+			Messages:       call.messages,
+			Options:        call.options,
+			PromptCacheKey: call.promptCacheKey,
+		})
+		if marshalErr != nil {
+			t.Fatalf("json.Marshal(provider call) error = %v", marshalErr)
+		}
+		for _, canary := range []string{
+			canonicalKey,
+			alias,
+			"RAW-CHANNEL-CANARY",
+			"RAW-CHAT-CANARY",
+			"RAW-DELIVERY-MESSAGE-CANARY",
+		} {
+			if strings.Contains(string(encoded), canary) {
+				t.Fatalf("provider call %d exposed %q: %s", index, canary, encoded)
+			}
+		}
+	}
+}
+
+func TestWorkflowAgentRunnerPrivateFrozenMediaSurvivesCleanupAndRestart(t *testing.T) {
+	const imageBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"private media decision"}}
+	loop, agent, canonicalKey, alias := newWorkflowReadOnlyTestLoop(t, provider)
+	store := media.NewFileMediaStore()
+	imageBytes, decodeErr := base64.StdEncoding.Strict().DecodeString(imageBase64)
+	if decodeErr != nil {
+		t.Fatalf("decode test image: %v", decodeErr)
+	}
+	imagePath := filepath.Join(t.TempDir(), "private-screenshot.png")
+	if writeErr := os.WriteFile(imagePath, imageBytes, 0o600); writeErr != nil {
+		t.Fatalf("write test image: %v", writeErr)
+	}
+	const mediaScope = "workflow-private-capture"
+	ref, storeErr := store.Store(imagePath, media.MediaMeta{
+		Filename:      "private-screenshot.png",
+		ContentType:   "image/png",
+		Source:        "test:private-workflow",
+		CleanupPolicy: media.CleanupPolicyDeleteOnCleanup,
+	}, mediaScope)
+	if storeErr != nil {
+		t.Fatalf("Store() error = %v", storeErr)
+	}
+	loop.mediaStore = store
+	agent.Sessions.SetHistory(canonicalKey, []providers.Message{{
+		Role:    "user",
+		Content: "Review the captured screenshot.",
+		Attachments: []providers.Attachment{{
+			Type:        "image",
+			Ref:         ref,
+			Filename:    "private-screenshot.png",
+			ContentType: "image/png",
+		}},
+	}})
+
+	runner := &workflowAgentRunner{loop: loop}
+	frozen, captureErr := runner.CaptureReadOnlySession(context.Background(), workflows.ReadOnlySessionRef{
+		AgentID: "main",
+		Session: alias,
+	})
+	if captureErr != nil {
+		t.Fatalf("CaptureReadOnlySession() error = %v", captureErr)
+	}
+	if validateErr := frozen.FrozenMedia.Validate(); validateErr != nil {
+		t.Fatalf("captured FrozenMedia.Validate() error = %v", validateErr)
+	}
+	if got := frozen.Snapshot.History[0].Attachments[0].Ref; !strings.HasPrefix(got, "frozen-media://sha256/") {
+		t.Fatalf("captured attachment ref = %q, want immutable frozen reference", got)
+	}
+	if strings.Contains(mustJSONForWorkflowTest(t, frozen), ref) {
+		t.Fatal("captured private session retained the live media capability")
+	}
+
+	encoded, marshalErr := json.Marshal(frozen)
+	if marshalErr != nil {
+		t.Fatalf("json.Marshal(frozen) error = %v", marshalErr)
+	}
+	var restarted workflows.FrozenReadOnlySession
+	if unmarshalErr := json.Unmarshal(encoded, &restarted); unmarshalErr != nil {
+		t.Fatalf("json.Unmarshal(frozen) error = %v", unmarshalErr)
+	}
+	if releaseErr := store.ReleaseAll(mediaScope); releaseErr != nil {
+		t.Fatalf("ReleaseAll() error = %v", releaseErr)
+	}
+	if _, statErr := os.Stat(imagePath); !os.IsNotExist(statErr) {
+		t.Fatalf("source image still exists after cleanup: %v", statErr)
+	}
+	loop.mediaStore = nil
+	agent.Sessions = &workflowNoSnapshotReadStore{SessionStore: agent.Sessions}
+
+	outputs, runErr := runner.RunAgent(context.Background(), workflows.AgentRequest{
+		AgentID:               "main",
+		Prompt:                "Decide using only the durable screenshot.",
+		History:               "read_only",
+		Cache:                 "session",
+		Tools:                 workflows.AgentToolsNone,
+		FrozenReadOnlySession: &restarted,
+	})
+	if runErr != nil {
+		t.Fatalf("RunAgent() after cleanup/restart error = %v", runErr)
+	}
+	if outputs["text"] != "private media decision" {
+		t.Fatalf("text = %#v, want private media decision", outputs["text"])
+	}
+	calls := provider.snapshotCalls()
+	if len(calls) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(calls))
+	}
+	var providerRef string
+	for _, message := range calls[0].messages {
+		for _, attachment := range message.Attachments {
+			if attachment.Filename == "private-screenshot.png" {
+				providerRef = attachment.Ref
+				if attachment.ContentType != "image/png" {
+					t.Fatalf("provider content type = %q, want image/png", attachment.ContentType)
+				}
+			}
+		}
+	}
+	if providerRef != "data:image/png;base64,"+imageBase64 {
+		t.Fatalf("provider attachment ref = %q, want canonical embedded data URI", providerRef)
+	}
+	providerCallJSON := mustJSONForWorkflowTest(t, calls[0])
+	for _, forbidden := range []string{ref, imagePath, "frozen-media://"} {
+		if strings.Contains(providerCallJSON, forbidden) {
+			t.Fatalf("provider call exposed %q: %s", forbidden, providerCallJSON)
+		}
+	}
+
+	cloneFrozen := func() *workflows.FrozenReadOnlySession {
+		return &workflows.FrozenReadOnlySession{
+			AgentID:         restarted.AgentID,
+			Snapshot:        workflowCloneSessionSnapshot(restarted.Snapshot),
+			HistoryRevision: restarted.HistoryRevision,
+			FrozenMedia:     restarted.FrozenMedia.Clone(),
+		}
+	}
+	baseRequest := func(value *workflows.FrozenReadOnlySession) workflows.AgentRequest {
+		return workflows.AgentRequest{
+			AgentID:               "main",
+			Prompt:                "reject tampered media",
+			History:               "read_only",
+			Cache:                 "session",
+			Tools:                 workflows.AgentToolsNone,
+			FrozenReadOnlySession: value,
+		}
+	}
+	tamperCases := []struct {
+		name   string
+		mutate func(*workflows.FrozenReadOnlySession)
+	}{
+		{
+			name: "set version",
+			mutate: func(value *workflows.FrozenReadOnlySession) {
+				value.FrozenMedia.Version = 0
+			},
+		},
+		{
+			name: "blob bytes",
+			mutate: func(value *workflows.FrozenReadOnlySession) {
+				value.FrozenMedia.Blobs[0].Data[0] ^= 0xff
+			},
+		},
+		{
+			name: "authoritative metadata",
+			mutate: func(value *workflows.FrozenReadOnlySession) {
+				value.Snapshot.History[0].Attachments[0].Filename = "tampered.png"
+				value.HistoryRevision, _ = workflowSessionSnapshotRevision(value.Snapshot)
+			},
+		},
+		{
+			name: "missing asset",
+			mutate: func(value *workflows.FrozenReadOnlySession) {
+				value.FrozenMedia.Assets = nil
+				value.FrozenMedia.Blobs = nil
+			},
+		},
+		{
+			name: "unknown frozen reference",
+			mutate: func(value *workflows.FrozenReadOnlySession) {
+				value.Snapshot.History[0].Attachments[0].Ref = "frozen-media://sha256/" +
+					strings.Repeat("0", 64)
+				value.HistoryRevision, _ = workflowSessionSnapshotRevision(value.Snapshot)
+			},
+		},
+		{
+			name: "unused valid asset",
+			mutate: func(value *workflows.FrozenReadOnlySession) {
+				_, extra, freezeErr := media.FreezeInputs(
+					context.Background(),
+					[]media.FreezeInput{{Locator: "data:text/plain;base64,dW51c2Vk"}},
+					nil,
+				)
+				if freezeErr != nil {
+					t.Fatalf("FreezeInputs(extra) error = %v", freezeErr)
+				}
+				value.FrozenMedia.Assets = append(value.FrozenMedia.Assets, extra.Assets...)
+				value.FrozenMedia.Blobs = append(value.FrozenMedia.Blobs, extra.Blobs...)
+				sort.Slice(value.FrozenMedia.Assets, func(i, j int) bool {
+					return value.FrozenMedia.Assets[i].ID < value.FrozenMedia.Assets[j].ID
+				})
+				sort.Slice(value.FrozenMedia.Blobs, func(i, j int) bool {
+					return value.FrozenMedia.Blobs[i].SHA256 < value.FrozenMedia.Blobs[j].SHA256
+				})
+			},
+		},
+	}
+	for _, test := range tamperCases {
+		t.Run(test.name, func(t *testing.T) {
+			provider.setResponses([]string{"unexpected"})
+			value := cloneFrozen()
+			test.mutate(value)
+			if _, runErr := runner.RunAgent(context.Background(), baseRequest(value)); runErr == nil {
+				t.Fatal("RunAgent() error = nil, want fail-closed frozen-media error")
+			}
+			if calls := provider.snapshotCalls(); len(calls) != 0 {
+				t.Fatalf("tampered media reached provider %d time(s), want zero", len(calls))
+			}
+		})
+	}
+}
+
+func TestWorkflowAgentRunnerPrivateCaptureRejectsLiveMediaWithoutSnapshotReader(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"unexpected"}}
+	loop, agent, canonicalKey, alias := newWorkflowReadOnlyTestLoop(t, provider)
+	loop.mediaStore = nil
+	agent.Sessions.SetHistory(canonicalKey, []providers.Message{{
+		Role:    "user",
+		Content: "This live capability cannot be made durable.",
+		Media:   []string{"media://550e8400-e29b-41d4-a716-446655440000"},
+	}})
+
+	if _, err := (&workflowAgentRunner{loop: loop}).CaptureReadOnlySession(
+		context.Background(),
+		workflows.ReadOnlySessionRef{AgentID: "main", Session: alias},
+	); err == nil {
+		t.Fatal("CaptureReadOnlySession() error = nil, want unavailable-media failure")
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("failed capture reached provider %d time(s), want zero", len(calls))
+	}
+}
+
+func mustJSONForWorkflowTest(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("json.Marshal(%T) error = %v", value, err)
+	}
+	return string(encoded)
+}
+
+func TestWorkflowAgentRunnerPrivateFrozenSnapshotRejectsMismatchesBeforeProvider(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"unexpected"}}
+	loop, _, _, alias := newWorkflowReadOnlyTestLoop(t, provider)
+	runner := &workflowAgentRunner{loop: loop}
+	frozen, err := runner.CaptureReadOnlySession(context.Background(), workflows.ReadOnlySessionRef{
+		AgentID: "main",
+		Session: alias,
+	})
+	if err != nil {
+		t.Fatalf("CaptureReadOnlySession() error = %v", err)
+	}
+	cloneFrozen := func() *workflows.FrozenReadOnlySession {
+		return &workflows.FrozenReadOnlySession{
+			AgentID:         frozen.AgentID,
+			Snapshot:        workflowCloneSessionSnapshot(frozen.Snapshot),
+			HistoryRevision: frozen.HistoryRevision,
+			FrozenMedia:     frozen.FrozenMedia.Clone(),
+		}
+	}
+	baseRequest := func() workflows.AgentRequest {
+		return workflows.AgentRequest{
+			AgentID:               "main",
+			Prompt:                "decide",
+			History:               "read_only",
+			Cache:                 "session",
+			Tools:                 workflows.AgentToolsNone,
+			FrozenReadOnlySession: cloneFrozen(),
+		}
+	}
+	tests := []struct {
+		name   string
+		mutate func(*workflows.AgentRequest)
+	}{
+		{name: "request agent", mutate: func(req *workflows.AgentRequest) { req.AgentID = "support" }},
+		{
+			name: "frozen agent",
+			mutate: func(req *workflows.AgentRequest) {
+				req.FrozenReadOnlySession.AgentID = "support"
+			},
+		},
+		{
+			name: "owner",
+			mutate: func(req *workflows.AgentRequest) {
+				req.FrozenReadOnlySession.Snapshot.Scope.AgentID = "support"
+			},
+		},
+		{
+			name: "revision",
+			mutate: func(req *workflows.AgentRequest) {
+				req.FrozenReadOnlySession.HistoryRevision = "sha256:stale"
+			},
+		},
+		{
+			name: "mutated evidence",
+			mutate: func(req *workflows.AgentRequest) {
+				req.FrozenReadOnlySession.Snapshot.Summary = "changed"
+			},
+		},
+		{name: "live session", mutate: func(req *workflows.AgentRequest) { req.Session = alias }},
+		{name: "history", mutate: func(req *workflows.AgentRequest) { req.History = "none" }},
+		{name: "tools", mutate: func(req *workflows.AgentRequest) { req.Tools = workflows.AgentToolsInherit }},
+		{name: "ephemeral", mutate: func(req *workflows.AgentRequest) { req.EphemeralSession = true }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := baseRequest()
+			test.mutate(&req)
+			if _, runErr := runner.RunAgent(context.Background(), req); runErr == nil {
+				t.Fatal("RunAgent() error = nil, want fail-closed private snapshot error")
+			}
+		})
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("mismatches reached provider %d time(s), want zero", len(calls))
 	}
 }
 
@@ -1253,6 +1708,156 @@ func TestWorkflowAgentRunnerEphemeralDisablesAccountRouterSessionAffinity(t *tes
 	)
 }
 
+func TestWorkflowAgentRunnerPrivateEphemeralFallbackRedactsAccountRouterErrors(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = workspace
+	cfg.Agents.Defaults.AccountRef = "decision-router"
+	cfg.Agents.Defaults.ModelName = "decision"
+	cfg.Agents.List = []config.AgentConfig{{ID: "main", Default: true}}
+	cfg.ModelAliases = []config.ModelAliasConfig{{Name: "decision", Model: "mock-model"}}
+	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "account-a",
+			Provider:  "openai",
+			Model:     "mock-model",
+			APIBase:   "http://example.invalid/v1",
+			APIKeys:   config.SimpleSecureStrings("test-key-a"),
+			Enabled:   true,
+		},
+		{
+			ModelName: "account-b",
+			Provider:  "openai",
+			Model:     "mock-model",
+			APIBase:   "http://example.invalid/v1",
+			APIKeys:   config.SimpleSecureStrings("test-key-b"),
+			Enabled:   true,
+		},
+	}
+	cfg.AccountRouters = []config.AccountRouterConfig{{
+		Name:    "decision-router",
+		Enabled: true,
+		Entry:   "primary",
+		Blocks: []config.AccountRouterBlock{
+			{
+				ID:       "primary",
+				Type:     config.AccountRouterBlockTypeAccount,
+				Account:  "account-a",
+				Fallback: "backup",
+			},
+			{
+				ID:      "backup",
+				Type:    config.AccountRouterBlockTypeAccount,
+				Account: "account-b",
+			},
+		},
+	}}
+	const privateCanary = "PRIVATE-WORKFLOW-PROVIDER-ERROR-CANARY"
+	messageBus := bus.NewMessageBus()
+	loop := newTestAgentLoopWithStrictModels(
+		cfg,
+		messageBus,
+		&workflowPrivateAccountProvider{response: "unused"},
+	)
+	t.Cleanup(func() {
+		loop.Close()
+		messageBus.Close()
+	})
+	loop.providerFactory = func(modelConfig *config.ModelConfig) (providers.LLMProvider, string, error) {
+		if modelConfig != nil && modelConfig.APIKey() == "test-key-a" {
+			return &workflowPrivateAccountProvider{
+				err: errors.New("rate limit echoed " + privateCanary),
+			}, "mock-model", nil
+		}
+		return &workflowPrivateAccountProvider{response: "private fallback decision"}, "mock-model", nil
+	}
+	agent := loop.GetRegistry().GetDefaultAgent()
+	if agent == nil || agent.AccountRouter == nil {
+		t.Fatalf("account-routed agent = %#v, want active router", agent)
+	}
+
+	req := workflowEphemeralTestRequest("Evaluate private findings with fallback.")
+	req.PrivateContext = true
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if outputs["text"] != "private fallback decision" {
+		t.Fatalf("text = %#v, want fallback decision", outputs["text"])
+	}
+	statePath := filepath.Join(workspace, "account_router_state.json")
+	stateData, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read account router state: %v", err)
+	}
+	if strings.Contains(string(stateData), privateCanary) {
+		t.Fatalf("account router state leaked private provider error: %s", stateData)
+	}
+	if !strings.Contains(string(stateData), "provider request failed") {
+		t.Fatalf("account router state omitted canonical private failure: %s", stateData)
+	}
+}
+
+func TestWorkflowAgentRunnerPrivateVisionRetrySuppressesRuntimeErrorEvent(t *testing.T) {
+	const privateCanary = "PRIVATE-VISION-ERROR-CANARY"
+	provider := &workflowReadOnlyCaptureProvider{
+		responses: []string{"", "private decision"},
+		errors: []error{fmt.Errorf(
+			"%s: no endpoints found that support image input",
+			privateCanary,
+		)},
+	}
+	loop, agent, canonicalKey, alias := newWorkflowReadOnlyTestLoop(t, provider)
+	agent.Sessions.SetHistory(canonicalKey, []providers.Message{{
+		Role:    "user",
+		Content: "Review this private screenshot.",
+		Media: []string{
+			"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+		},
+	}})
+	runner := &workflowAgentRunner{loop: loop}
+	frozen, err := runner.CaptureReadOnlySession(context.Background(), workflows.ReadOnlySessionRef{
+		AgentID: "main",
+		Session: alias,
+	})
+	if err != nil {
+		t.Fatalf("CaptureReadOnlySession() error = %v", err)
+	}
+	eventStream, closeEvents := subscribeRuntimeEventsForTest(
+		t,
+		loop,
+		8,
+		runtimeevents.KindAgentLLMRetry,
+	)
+	defer closeEvents()
+
+	outputs, err := runner.RunAgent(context.Background(), workflows.AgentRequest{
+		AgentID:               "main",
+		Prompt:                "Make a private decision.",
+		History:               "read_only",
+		Cache:                 "session",
+		Tools:                 workflows.AgentToolsNone,
+		FrozenReadOnlySession: frozen,
+	})
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if outputs["text"] != "private decision" {
+		t.Fatalf("text = %#v, want private decision", outputs["text"])
+	}
+	calls := provider.snapshotCalls()
+	if len(calls) != 2 || !hasMediaRefs(calls[0].messages) || hasMediaRefs(calls[1].messages) {
+		t.Fatalf("vision retry calls = %#v, want media then stripped media", calls)
+	}
+	if events := collectRuntimeEventStream(eventStream); len(events) != 0 {
+		encoded, marshalErr := json.Marshal(events)
+		if marshalErr != nil {
+			t.Fatalf("json.Marshal(events) error = %v", marshalErr)
+		}
+		t.Fatalf("private vision retry emitted runtime events: %s", encoded)
+	}
+}
+
 func TestWorkflowAgentRunnerEphemeralFallbackGetsDetachedMessagesAndOptions(t *testing.T) {
 	workspace := t.TempDir()
 	cfg := config.DefaultConfig()
@@ -1627,6 +2232,24 @@ func TestWorkflowSessionSnapshotRevisionIncludesProviderVisibleInternalFields(t 
 	}
 	if first == second {
 		t.Fatalf("provider-visible internal field changes produced identical revision %q", first)
+	}
+
+	nilArguments := base
+	nilArguments.History = session.CloneMessages(base.History)
+	nilArguments.History[0].ToolCalls[0].Arguments = nil
+	nilRevision, err := workflowSessionSnapshotRevision(nilArguments)
+	if err != nil {
+		t.Fatalf("workflowSessionSnapshotRevision(nil arguments) error = %v", err)
+	}
+	emptyArguments := base
+	emptyArguments.History = session.CloneMessages(base.History)
+	emptyArguments.History[0].ToolCalls[0].Arguments = map[string]any{}
+	emptyRevision, err := workflowSessionSnapshotRevision(emptyArguments)
+	if err != nil {
+		t.Fatalf("workflowSessionSnapshotRevision(empty arguments) error = %v", err)
+	}
+	if nilRevision == emptyRevision {
+		t.Fatalf("nil and empty tool arguments produced identical revision %q", nilRevision)
 	}
 
 	cyclic := map[string]any{}
@@ -3327,6 +3950,7 @@ type workflowToolsCaptureProvider struct {
 type workflowReadOnlyProviderCall struct {
 	messages           []providers.Message
 	toolCount          int
+	options            map[string]any
 	promptCacheKey     string
 	promptCachePresent bool
 	reasoningEffort    string
@@ -3436,6 +4060,7 @@ func (p *workflowEphemeralFallbackProvider) Chat(
 type workflowReadOnlyCaptureProvider struct {
 	mu                sync.Mutex
 	responses         []string
+	errors            []error
 	respond           func(int, []providers.Message) string
 	calls             []workflowReadOnlyProviderCall
 	toolCall          bool
@@ -3445,6 +4070,37 @@ type workflowReadOnlyCaptureProvider struct {
 	startOnce         sync.Once
 	afterCall         func(int)
 	mutateNestedInput bool
+}
+
+type workflowPrivateAccountProvider struct {
+	response string
+	err      error
+}
+
+func (p *workflowPrivateAccountProvider) Chat(
+	context.Context,
+	[]providers.Message,
+	[]providers.ToolDefinition,
+	string,
+	map[string]any,
+) (*providers.LLMResponse, error) {
+	if p.err != nil {
+		return nil, p.err
+	}
+	return &providers.LLMResponse{Content: p.response}, nil
+}
+
+type workflowNoSnapshotReadStore struct {
+	session.SessionStore
+	snapshotReads atomic.Int64
+}
+
+func (s *workflowNoSnapshotReadStore) ReadSessionSnapshot(
+	context.Context,
+	string,
+) (session.SessionSnapshot, bool, error) {
+	s.snapshotReads.Add(1)
+	return session.SessionSnapshot{}, false, errors.New("live snapshot read is forbidden")
 }
 
 func (p *workflowReadOnlyCaptureProvider) Chat(
@@ -3461,6 +4117,7 @@ func (p *workflowReadOnlyCaptureProvider) Chat(
 	p.calls = append(p.calls, workflowReadOnlyProviderCall{
 		messages:           session.CloneMessages(messages),
 		toolCount:          len(tools),
+		options:            cloneAnyMap(opts),
 		promptCacheKey:     cacheKey,
 		promptCachePresent: cachePresent,
 		reasoningEffort:    reasoningEffort,
@@ -3468,6 +4125,10 @@ func (p *workflowReadOnlyCaptureProvider) Chat(
 	response := "decision"
 	if callIndex < len(p.responses) {
 		response = p.responses[callIndex]
+	}
+	var responseErr error
+	if callIndex < len(p.errors) {
+		responseErr = p.errors[callIndex]
 	}
 	respond := p.respond
 	toolCall := p.toolCall
@@ -3517,6 +4178,9 @@ func (p *workflowReadOnlyCaptureProvider) Chat(
 			return nil, ctx.Err()
 		}
 	}
+	if responseErr != nil {
+		return nil, responseErr
+	}
 	result := &providers.LLMResponse{Content: response}
 	if toolCall {
 		result.ToolCalls = []providers.ToolCall{{
@@ -3538,6 +4202,7 @@ func (p *workflowReadOnlyCaptureProvider) snapshotCalls() []workflowReadOnlyProv
 	for i, call := range p.calls {
 		result[i] = call
 		result[i].messages = session.CloneMessages(call.messages)
+		result[i].options = cloneAnyMap(call.options)
 	}
 	return result
 }

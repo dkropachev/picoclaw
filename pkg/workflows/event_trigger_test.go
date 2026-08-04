@@ -1027,27 +1027,27 @@ jobs:
 	}
 }
 
-func TestEphemeralAgentSessionBumpsWorkflowCompatibility(t *testing.T) {
-	if WorkflowEngineVersion != "10" {
-		t.Fatalf("WorkflowEngineVersion = %q, want 10", WorkflowEngineVersion)
+func TestPrivateWorkflowContextBumpsWorkflowCompatibility(t *testing.T) {
+	if WorkflowEngineVersion != "11" {
+		t.Fatalf("WorkflowEngineVersion = %q, want 11", WorkflowEngineVersion)
 	}
-	if WorkflowSchemaVersion != "5" {
-		t.Fatalf("WorkflowSchemaVersion = %q, want 5", WorkflowSchemaVersion)
+	if WorkflowSchemaVersion != "6" {
+		t.Fatalf("WorkflowSchemaVersion = %q, want 6", WorkflowSchemaVersion)
 	}
-	if ValidatorFingerprint != "picoclaw-workflow-validator-v6" {
-		t.Fatalf("ValidatorFingerprint = %q, want v6", ValidatorFingerprint)
+	if ValidatorFingerprint != "picoclaw-workflow-validator-v7" {
+		t.Fatalf("ValidatorFingerprint = %q, want v7", ValidatorFingerprint)
 	}
 
 	current := NormalizeRuntimeCompatibility(RuntimeCompatibility{PicoclawVersion: "v1.0.0"})
 	oldStamp := WorkflowValidationStamp{
 		WorkflowHash:         "same-hash",
 		PicoclawVersion:      current.PicoclawVersion,
-		WorkflowEngine:       "9",
-		WorkflowSchema:       "4",
-		ValidatorFingerprint: "picoclaw-workflow-validator-v5",
+		WorkflowEngine:       "10",
+		WorkflowSchema:       "5",
+		ValidatorFingerprint: "picoclaw-workflow-validator-v6",
 	}
 	if stampMatchesRuntime(oldStamp, current, "same-hash") {
-		t.Fatal("pre-ephemeral-session compatibility stamp matched current runtime")
+		t.Fatal("pre-private-context compatibility stamp matched current runtime")
 	}
 }
 

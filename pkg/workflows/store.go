@@ -1,6 +1,7 @@
 package workflows
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,6 +43,7 @@ type Run struct {
 	ID                string                   `json:"id"`
 	WorkflowRef       string                   `json:"workflow_ref"`
 	Status            string                   `json:"status"`
+	ContextVisibility string                   `json:"context_visibility,omitempty"`
 	Origin            *RunOrigin               `json:"origin,omitempty"`
 	ParentRunID       string                   `json:"parent_run_id,omitempty"`
 	ChildRunIDs       []string                 `json:"child_run_ids,omitempty"`
@@ -61,8 +63,9 @@ type Run struct {
 	CompletedAt       *time.Time               `json:"completed_at,omitempty"`
 	CancelRequestedAt *time.Time               `json:"cancel_requested_at,omitempty"`
 
-	execution  *workflowExecutionState
-	humanTasks map[string]WorkflowHumanTask
+	execution   *workflowExecutionState
+	humanTasks  map[string]WorkflowHumanTask
+	privateRoot *frozenWorkflowRootContext
 }
 
 type RunEvent struct {
@@ -91,6 +94,11 @@ type FileRunStore struct {
 	root string
 	mu   sync.Mutex
 }
+
+const (
+	privateRunMarkerFilename = ".private-context"
+	privateRunMarkerContents = "picoclaw-private-workflow-context-v1\n"
+)
 
 var fileRunStoreLocks sync.Map
 
@@ -145,9 +153,16 @@ func (s *FileRunStore) createRunLocked(run *Run) error {
 	if strings.TrimSpace(run.ID) == "" {
 		return fmt.Errorf("run id is required")
 	}
+	if err := validateRunPrivateContext(run); err != nil {
+		return err
+	}
 	dir := filepath.Join(s.root, safeID(run.ID))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
+	}
+	markerPath := filepath.Join(dir, privateRunMarkerFilename)
+	if markerPrivate, markerErr := readPrivateRunMarker(markerPath); markerErr != nil || markerPrivate {
+		return ErrPrivateWorkflowContext
 	}
 	run.UpdatedAt = time.Now().UTC()
 	data, err := marshalPersistedRun(run)
@@ -167,6 +182,18 @@ func (s *FileRunStore) createRunLocked(run *Run) error {
 			return fmt.Errorf("%w: %s", ErrRunAlreadyExists, run.ID)
 		}
 		return err
+	}
+	if IsPrivateWorkflowRun(run) {
+		if markerErr := writeNewRunFile(markerPath, []byte(privateRunMarkerContents)); markerErr != nil {
+			// The JSON markers classify the short publication window safely.
+			// Creation succeeds only after the independent marker is durable.
+			if removeErr := os.Remove(runPath); removeErr != nil && !os.IsNotExist(removeErr) {
+				_ = syncWorkflowRunDirectory(dir)
+				return ErrPrivateWorkflowContext
+			}
+			_ = syncWorkflowRunDirectory(dir)
+			return ErrPrivateWorkflowContext
+		}
 	}
 	return nil
 }
@@ -241,7 +268,19 @@ func (s *FileRunStore) UpdateRun(ctx context.Context, run *Run) error {
 		return mkdirErr
 	}
 	now := time.Now().UTC()
-	if existing, readErr := readRunFile(filepath.Join(dir, "run.json")); readErr == nil {
+	existing, readErr := readRunFile(filepath.Join(dir, "run.json"))
+	if readErr != nil {
+		if run.privateRoot != nil || !os.IsNotExist(readErr) {
+			// An unclassifiable existing record may be private. Never replace it
+			// with caller-supplied state, recreate a missing private capability,
+			// or expose parser/path diagnostics.
+			return ErrPrivateWorkflowContext
+		}
+	}
+	if readErr == nil {
+		if privateErr := preserveFrozenRunPrivateContext(existing, run); privateErr != nil {
+			return privateErr
+		}
 		if existing.execution != nil && existing.execution.Resume != nil &&
 			existing.execution.Resume.Token != "" {
 			incomingToken := ""
@@ -275,21 +314,54 @@ func (s *FileRunStore) UpdateRun(ctx context.Context, run *Run) error {
 	return fileutil.WriteFileAtomic(filepath.Join(dir, "run.json"), data, 0o600)
 }
 
+func persistedRunDataMayBePrivate(data []byte) bool {
+	return bytes.Contains(data, []byte(`"private_context"`)) ||
+		bytes.Contains(data, []byte(`"context_visibility": "private"`)) ||
+		bytes.Contains(data, []byte(`"context_visibility":"private"`))
+}
+
 func readRunFile(path string) (*Run, error) {
+	markerPrivate, markerErr := readPrivateRunMarker(
+		filepath.Join(filepath.Dir(path), privateRunMarkerFilename),
+	)
+	if markerErr != nil {
+		return nil, ErrPrivateWorkflowContext
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if markerPrivate {
+			return nil, ErrPrivateWorkflowContext
+		}
 		return nil, err
 	}
 	run, raw, err := decodeRunWithExactEventFields(data)
 	if err != nil {
+		if markerPrivate || persistedRunDataMayBePrivate(data) {
+			return nil, ErrPrivateWorkflowContext
+		}
 		return nil, err
+	}
+	if markerPrivate != IsPrivateWorkflowRun(run) {
+		return nil, ErrPrivateWorkflowContext
+	}
+	if safeID(run.ID) != filepath.Base(filepath.Dir(path)) {
+		if !markerPrivate && !IsPrivateWorkflowRun(run) {
+			return nil, os.ErrNotExist
+		}
+		return nil, ErrPrivateWorkflowContext
 	}
 	trustedEventID, trusted := trustedExternalEventRunFamily(path, run)
 	if !trusted {
 		if run.execution != nil && run.execution.Checkpoint != nil {
+			if err := validateRunPrivateContext(run); err != nil {
+				return nil, err
+			}
 			return run, nil
 		}
 		if err := restoreOrdinaryRunEventFields(run, raw); err != nil {
+			return nil, err
+		}
+		if err := validateRunPrivateContext(run); err != nil {
 			return nil, err
 		}
 		return run, nil
@@ -303,14 +375,34 @@ func readRunFile(path string) (*Run, error) {
 			return nil, err
 		}
 	}
+	if err := validateRunPrivateContext(run); err != nil {
+		return nil, err
+	}
 	return run, nil
+}
+
+func readPrivateRunMarker(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if string(data) != privateRunMarkerContents {
+		return false, ErrPrivateWorkflowContext
+	}
+	return true, nil
 }
 
 func marshalPersistedRun(run *Run) ([]byte, error) {
 	if run == nil {
 		return nil, fmt.Errorf("run is required")
 	}
-	base, err := json.Marshal(run)
+	if err := validateRunPrivateContext(run); err != nil {
+		return nil, err
+	}
+	base, err := json.Marshal((*persistedRunJSON)(run))
 	if err != nil {
 		return nil, err
 	}
@@ -334,6 +426,13 @@ func marshalPersistedRun(run *Run) ([]byte, error) {
 		}
 		document["human_tasks"] = encoded
 	}
+	if run.privateRoot != nil {
+		encoded, err := json.Marshal(run.privateRoot)
+		if err != nil {
+			return nil, err
+		}
+		document["private_context"] = encoded
+	}
 	return json.MarshalIndent(document, "", "  ")
 }
 
@@ -354,8 +453,10 @@ func decodeRunWithExactEventFields(
 	raw := runEventJSONFields{}
 	executionJSON := document["execution"]
 	humanTasksJSON := document["human_tasks"]
+	privateContextJSON := document["private_context"]
 	delete(document, "execution")
 	delete(document, "human_tasks")
+	delete(document, "private_context")
 	raw.event, raw.hasEvent = document["event"]
 	if raw.hasEvent {
 		document["event"] = json.RawMessage(`{}`)
@@ -424,7 +525,17 @@ func decodeRunWithExactEventFields(
 		}
 		run.humanTasks = tasks
 	}
+	if len(privateContextJSON) != 0 && string(privateContextJSON) != "null" {
+		var privateRoot frozenWorkflowRootContext
+		if err := decodeStrictJSONWithNumbers(privateContextJSON, &privateRoot); err != nil {
+			return nil, runEventJSONFields{}, err
+		}
+		run.privateRoot = &privateRoot
+	}
 	restoreWorkflowRunCheckpoint(&run)
+	if err := validateRunPrivateContext(&run); err != nil {
+		return nil, runEventJSONFields{}, err
+	}
 	return &run, raw, nil
 }
 
@@ -464,8 +575,19 @@ func restoreOrdinaryRunInputEvent(
 }
 
 func decodeJSONWithNumbers(data []byte, value any) error {
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	return decodeJSONWithNumbersMode(data, value, false)
+}
+
+func decodeStrictJSONWithNumbers(data []byte, value any) error {
+	return decodeJSONWithNumbersMode(data, value, true)
+}
+
+func decodeJSONWithNumbersMode(data []byte, value any, strict bool) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
+	if strict {
+		decoder.DisallowUnknownFields()
+	}
 	if err := decoder.Decode(value); err != nil {
 		return err
 	}
@@ -700,6 +822,7 @@ func isExternalDispatchID(id string) bool {
 }
 
 func (s *FileRunStore) CancelRun(ctx context.Context, runID, reason string) (*Run, error) {
+	runID = strings.TrimSpace(runID)
 	reason, err := NormalizeWorkflowCancelReason(reason)
 	if err != nil {
 		return nil, err
@@ -713,6 +836,10 @@ func (s *FileRunStore) CancelRun(ctx context.Context, runID, reason string) (*Ru
 	if err != nil {
 		unlock()
 		return nil, err
+	}
+	if identityErr := exactStoredRunID(run, runID); identityErr != nil {
+		unlock()
+		return nil, identityErr
 	}
 	if isTerminalRunStatus(run.Status) {
 		unlock()
@@ -746,11 +873,15 @@ func (s *FileRunStore) CancelRun(ctx context.Context, runID, reason string) (*Ru
 		return nil, err
 	}
 	unlock()
-	_ = s.AppendEvent(ctx, RunEvent{
+	event := RunEvent{
 		Kind:    "workflow.run.canceled",
 		RunID:   run.ID,
 		Message: run.CancelReason,
-	})
+	}
+	if IsPrivateWorkflowRun(run) {
+		event = sanitizePrivateWorkflowEvent(event)
+	}
+	_ = s.AppendEvent(ctx, event)
 	s.cancelChildRuns(ctx, run.ID, run.CancelReason)
 	return run, nil
 }
@@ -789,12 +920,23 @@ func (s *FileRunStore) cancelChildRuns(ctx context.Context, parentRunID, reason 
 
 func (s *FileRunStore) GetRun(ctx context.Context, runID string) (*Run, error) {
 	_ = ctx
+	runID = strings.TrimSpace(runID)
 	unlock, err := s.lockRoot()
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	return readRunFile(filepath.Join(s.root, safeID(runID), "run.json"))
+	run, err := readRunFile(filepath.Join(s.root, safeID(runID), "run.json"))
+	if err != nil {
+		return nil, err
+	}
+	if run == nil || run.ID != runID {
+		if run != nil && !IsPrivateWorkflowRun(run) {
+			return nil, os.ErrNotExist
+		}
+		return nil, ErrPrivateWorkflowContext
+	}
+	return run, nil
 }
 
 func (s *FileRunStore) ListRuns(ctx context.Context) ([]Run, error) {
@@ -870,6 +1012,9 @@ func (s *FileRunStore) ClaimHumanTask(
 	}
 	if run.ID != runID {
 		return nil, WorkflowHumanTask{}, false, ErrHumanTaskNotFound
+	}
+	if IsPrivateWorkflowRun(run) && len(req.Secrets) != 0 {
+		return nil, WorkflowHumanTask{}, false, ErrPrivateWorkflowContext
 	}
 	task, exists := run.humanTasks[taskID]
 	if !exists || task.ID != taskID || task.RunID != run.ID {
@@ -1119,11 +1264,15 @@ func (s *FileRunStore) CancelHumanTask(
 		return nil, err
 	}
 	unlock()
-	_ = s.AppendEvent(ctx, RunEvent{
+	event := RunEvent{
 		Kind:    "workflow.run.canceled",
 		RunID:   run.ID,
 		Message: run.CancelReason,
-	})
+	}
+	if IsPrivateWorkflowRun(run) {
+		event = sanitizePrivateWorkflowEvent(event)
+	}
+	_ = s.AppendEvent(ctx, event)
 	s.cancelChildRuns(ctx, run.ID, run.CancelReason)
 	return run, nil
 }
@@ -1155,7 +1304,8 @@ func (s *FileRunStore) listRunsLocked(ctx context.Context) ([]Run, error) {
 
 func (s *FileRunStore) AppendEvent(ctx context.Context, event RunEvent) error {
 	_ = ctx
-	if strings.TrimSpace(event.RunID) == "" {
+	event.RunID = strings.TrimSpace(event.RunID)
+	if event.RunID == "" {
 		return fmt.Errorf("event run id is required")
 	}
 	unlock, err := s.lockRoot()
@@ -1164,7 +1314,24 @@ func (s *FileRunStore) AppendEvent(ctx context.Context, event RunEvent) error {
 	}
 	defer unlock()
 	dir := filepath.Join(s.root, safeID(event.RunID))
+	run, readErr := readRunFile(filepath.Join(dir, "run.json"))
+	if readErr != nil {
+		// Events are subordinate to an existing run record. Missing and
+		// unclassifiable records may be deleted/corrupt private runs, so there
+		// is no safe public fallback classification.
+		return ErrPrivateWorkflowContext
+	}
+	if identityErr := exactStoredRunID(run, event.RunID); identityErr != nil {
+		return identityErr
+	}
+	private := IsPrivateWorkflowRun(run)
+	if private {
+		event = sanitizePrivateWorkflowEvent(event)
+	}
 	if mkdirErr := os.MkdirAll(dir, 0o755); mkdirErr != nil {
+		if private {
+			return ErrPrivateWorkflowContext
+		}
 		return mkdirErr
 	}
 	if event.Time.IsZero() {
@@ -1172,30 +1339,61 @@ func (s *FileRunStore) AppendEvent(ctx context.Context, event RunEvent) error {
 	}
 	data, err := json.Marshal(event)
 	if err != nil {
+		if private {
+			return ErrPrivateWorkflowContext
+		}
 		return err
 	}
 	f, err := os.OpenFile(filepath.Join(dir, "events.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
+		if private {
+			return ErrPrivateWorkflowContext
+		}
 		return err
 	}
 	defer f.Close()
 	if _, err := f.Write(append(data, '\n')); err != nil {
+		if private {
+			return ErrPrivateWorkflowContext
+		}
 		return err
 	}
-	return f.Sync()
+	if err := f.Sync(); err != nil && private {
+		return ErrPrivateWorkflowContext
+	} else {
+		return err
+	}
 }
 
 func (s *FileRunStore) Events(ctx context.Context, runID string) ([]RunEvent, error) {
 	_ = ctx
+	runID = strings.TrimSpace(runID)
 	unlock, err := s.lockRoot()
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	data, err := os.ReadFile(filepath.Join(s.root, safeID(runID), "events.jsonl"))
+	dir := filepath.Join(s.root, safeID(runID))
+	run, readErr := readRunFile(filepath.Join(dir, "run.json"))
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			if _, eventErr := os.Stat(filepath.Join(dir, "events.jsonl")); os.IsNotExist(eventErr) {
+				return nil, nil
+			}
+		}
+		return nil, ErrPrivateWorkflowContext
+	}
+	if identityErr := exactStoredRunID(run, runID); identityErr != nil {
+		return nil, identityErr
+	}
+	private := IsPrivateWorkflowRun(run)
+	data, err := os.ReadFile(filepath.Join(dir, "events.jsonl"))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
+		}
+		if private {
+			return nil, ErrPrivateWorkflowContext
 		}
 		return nil, err
 	}
@@ -1222,6 +1420,9 @@ func (s *FileRunStore) Events(ctx context.Context, runID string) ([]RunEvent, er
 			}
 			event = fallback
 		}
+		if private {
+			event = sanitizePrivateWorkflowEvent(event)
+		}
 		events = append(events, event)
 	}
 	return events, nil
@@ -1229,8 +1430,9 @@ func (s *FileRunStore) Events(ctx context.Context, runID string) ([]RunEvent, er
 
 func (s *FileRunStore) DeleteRun(ctx context.Context, runID string) error {
 	_ = ctx
-	runID = safeID(runID)
-	if runID == "" || runID == "unknown" {
+	runID = strings.TrimSpace(runID)
+	key := safeID(runID)
+	if runID == "" || key == "unknown" {
 		return fmt.Errorf("run id is required")
 	}
 	unlock, err := s.lockRoot()
@@ -1238,7 +1440,28 @@ func (s *FileRunStore) DeleteRun(ctx context.Context, runID string) error {
 		return err
 	}
 	defer unlock()
-	return os.RemoveAll(filepath.Join(s.root, runID))
+	dir := filepath.Join(s.root, key)
+	run, readErr := readRunFile(filepath.Join(dir, "run.json"))
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return nil
+		}
+		return readErr
+	}
+	if identityErr := exactStoredRunID(run, runID); identityErr != nil {
+		return identityErr
+	}
+	return os.RemoveAll(dir)
+}
+
+func exactStoredRunID(run *Run, requested string) error {
+	if run != nil && run.ID == strings.TrimSpace(requested) {
+		return nil
+	}
+	if IsPrivateWorkflowRun(run) {
+		return ErrPrivateWorkflowContext
+	}
+	return os.ErrNotExist
 }
 
 func (s *FileRunStore) lockRoot() (func(), error) {
