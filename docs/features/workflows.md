@@ -854,8 +854,11 @@ exact runtime-generation lease remain held. A competing projection through
 another service using the same local runtime store that advances the session is
 rejected if it wins before the downstream exact snapshot read; an advance after
 that read cannot change the already frozen evidence. That revision fences only
-the derived session; a production launcher that requires the latest SQLite case must also
-revalidate the supplied case version at durable decision admission. The review or session browser never
+the derived session. Durable event automation's review-attention launcher
+therefore revalidates the supplied case version while atomically linking the
+derived policy decision to the create-only private run boundary; duplicate or
+unknown cross-store outcomes never re-enter gate execution. The review or
+session browser never
 supplies or discovers that key, Seahorse never indexes the review-scoped
 projection, and workflows never write it back into SQLite. The compiler
 validates canonical agent-ID syntax without loading configuration; private
