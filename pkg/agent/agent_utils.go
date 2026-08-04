@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -407,6 +408,101 @@ func ensureSessionMetadata(store session.SessionStore, key string, scope *sessio
 		return
 	}
 	metaStore.EnsureSessionMetadata(key, scope, aliases)
+}
+
+func admitSessionMetadata(
+	ctx context.Context,
+	store session.SessionStore,
+	key string,
+	scope *session.SessionScope,
+	aliases []string,
+	agentID string,
+) error {
+	if key == "" {
+		return nil
+	}
+	preserveExistingScope := scope == nil
+	if preserveExistingScope {
+		// Scope is only an absent-session fallback. Atomic admission retains any
+		// existing ordinary scope from the locked record, avoiding a transcript
+		// read and a stale read/rewrite race.
+		scope = &session.SessionScope{
+			Version:    session.ScopeVersionV1,
+			AgentID:    strings.TrimSpace(agentID),
+			Channel:    "internal",
+			Dimensions: []string{"legacy"},
+			Values:     map[string]string{"legacy": key},
+		}
+	}
+	if isReviewSessionScope(scope) {
+		return fmt.Errorf(
+			"review-scoped sessions do not accept live turns: %w",
+			session.ErrScopeAdmissionConflict,
+		)
+	}
+	if admitter, ok := store.(session.ScopeAdmitter); ok {
+		_, err := admitter.AdmitSessionScope(ctx, session.SessionScopeAdmission{
+			Key:                   key,
+			Scope:                 session.CloneScope(scope),
+			InitialAliases:        append([]string(nil), aliases...),
+			Mode:                  session.ScopeAdmissionLive,
+			PreserveExistingScope: preserveExistingScope,
+		})
+		if errors.Is(err, session.ErrScopeAdmissionConflict) {
+			return fmt.Errorf("review-scoped sessions do not accept live turns: %w", err)
+		}
+		return err
+	}
+	if _, snapshotCapable := store.(session.SnapshotReplacer); snapshotCapable {
+		return session.ErrScopeAdmissionUnsupported
+	}
+	// Compatibility stores cannot participate in protected review projection.
+	// Preserve metadata when a legacy caller supplied only a key.
+	if preserveExistingScope {
+		if metadata, ok := store.(session.MetadataAwareSessionStore); ok {
+			if existing := metadata.GetSessionScope(key); existing != nil {
+				scope = session.CloneScope(existing)
+			}
+		}
+	}
+	if isReviewSessionScope(scope) {
+		return fmt.Errorf(
+			"review-scoped sessions do not accept live turns: %w",
+			session.ErrScopeAdmissionConflict,
+		)
+	}
+	ensureSessionMetadata(store, key, scope, aliases)
+	return nil
+}
+
+func isReviewSessionScope(scope *session.SessionScope) bool {
+	return scope != nil && strings.EqualFold(strings.TrimSpace(scope.Channel), "review")
+}
+
+func isReviewScopedSession(
+	ctx context.Context,
+	store session.SessionStore,
+	sessionKey string,
+) (bool, error) {
+	if store == nil {
+		return false, nil
+	}
+	if metadata, ok := store.(session.MetadataAwareSessionStore); ok {
+		if scope := metadata.GetSessionScope(sessionKey); scope != nil {
+			return isReviewSessionScope(scope), nil
+		}
+		// GetSessionScope is a compatibility API that cannot return corruption
+		// or alias-resolution errors. Fall through to a strict snapshot when the
+		// backend supports it instead of treating an unreadable scope as ordinary.
+	}
+	if reader, ok := store.(session.SnapshotReader); ok {
+		snapshot, found, err := reader.ReadSessionSnapshot(ctx, sessionKey)
+		if err != nil {
+			return false, err
+		}
+		return found && isReviewSessionScope(snapshot.Scope), nil
+	}
+	return false, nil
 }
 
 func sleepWithContext(ctx context.Context, d time.Duration) error {

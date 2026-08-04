@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/memory"
@@ -24,6 +27,7 @@ var (
 	_ session.SnapshotReader   = (*session.SessionManager)(nil)
 	_ session.SnapshotReader   = (*session.JSONLBackend)(nil)
 	_ session.SnapshotReplacer = (*session.JSONLBackend)(nil)
+	_ session.ScopeAdmitter    = (*session.JSONLBackend)(nil)
 )
 
 type recordingSnapshotStore struct {
@@ -32,6 +36,45 @@ type recordingSnapshotStore struct {
 	replacement memory.SessionSnapshotReplacement
 	returnErr   error
 	mutateInput bool
+}
+
+type pausingAdmissionStore struct {
+	*memory.JSONLStore
+	admitted chan struct{}
+	release  chan struct{}
+	once     sync.Once
+}
+
+type preAdmissionBarrierStore struct {
+	*memory.JSONLStore
+	reached chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *preAdmissionBarrierStore) AdmitSessionMeta(
+	ctx context.Context,
+	key string,
+	admit memory.SessionMetaAdmission,
+) (bool, error) {
+	s.once.Do(func() { close(s.reached) })
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	return s.JSONLStore.AdmitSessionMeta(ctx, key, admit)
+}
+
+func (s *pausingAdmissionStore) AdmitSessionMeta(
+	ctx context.Context,
+	key string,
+	admit memory.SessionMetaAdmission,
+) (bool, error) {
+	updated, err := s.JSONLStore.AdmitSessionMeta(ctx, key, admit)
+	s.once.Do(func() { close(s.admitted) })
+	<-s.release
+	return updated, err
 }
 
 func (s *recordingSnapshotStore) ReplaceSessionSnapshot(
@@ -79,6 +122,32 @@ func validSnapshotReplacement() session.SessionSnapshotReplacement {
 		Summary: "review summary",
 		Scope:   scope,
 		Aliases: []string{"review:case:prc_0123456789abcdef0123456789abcdef"},
+	}
+}
+
+func ordinaryAdmissionScope(chatID string) *session.SessionScope {
+	return &session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "main",
+		Channel:    "github",
+		Account:    "default",
+		Dimensions: []string{"chat"},
+		Values: map[string]string{
+			"chat": chatID,
+		},
+	}
+}
+
+func reviewAdmissionScope(caseID string) *session.SessionScope {
+	return &session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    "main",
+		Channel:    "review",
+		Account:    "default",
+		Dimensions: []string{"review"},
+		Values: map[string]string{
+			"review": caseID,
+		},
 	}
 }
 
@@ -417,6 +486,633 @@ func TestJSONLBackend_EnsureSessionMetadata_DoesNotOverwriteNonEmptyCanonicalHis
 	history := b.GetHistory(canonicalKey)
 	if len(history) != 1 || history[0].Content != "current canonical history" {
 		t.Fatalf("canonical history overwritten: %+v", history)
+	}
+}
+
+func TestJSONLBackendAdmitSessionScope_RejectsSpoofedLiveReviewScope(t *testing.T) {
+	b := newBackend(t)
+	scope := reviewAdmissionScope("prc_spoofed_live")
+	key := session.BuildSessionKey(*scope)
+
+	updated, err := b.AdmitSessionScope(context.Background(), session.SessionScopeAdmission{
+		Key:            key,
+		Scope:          scope,
+		InitialAliases: []string{"review:case:prc_spoofed_live"},
+		Mode:           session.ScopeAdmissionLive,
+	})
+	if updated || !errors.Is(err, session.ErrScopeAdmissionConflict) {
+		t.Fatalf("AdmitSessionScope() = (updated=%v, err=%v), want live/review conflict", updated, err)
+	}
+	if sessions := b.ListSessions(); len(sessions) != 0 {
+		t.Fatalf("rejected live review admission created sessions: %v", sessions)
+	}
+	if _, found, readErr := b.ReadSessionSnapshot(context.Background(), key); readErr != nil || found {
+		t.Fatalf("rejected admission snapshot = (found=%v, err=%v), want absent", found, readErr)
+	}
+}
+
+func TestJSONLBackendAdmitSessionScope_ReviewReservationIsEmptyAndIdempotent(t *testing.T) {
+	b := newBackend(t)
+	scope := reviewAdmissionScope("prc_reservation")
+	key := session.BuildSessionKey(*scope)
+	aliases := []string{
+		"review:agent:main:case:prc_reservation",
+		"review:agent:main:case:prc_reservation:binding:one",
+	}
+	admission := session.SessionScopeAdmission{
+		Key:            key,
+		Scope:          scope,
+		InitialAliases: aliases,
+		Mode:           session.ScopeAdmissionReview,
+	}
+
+	updated, err := b.AdmitSessionScope(context.Background(), admission)
+	if err != nil || !updated {
+		t.Fatalf("first AdmitSessionScope() = (updated=%v, err=%v), want reservation", updated, err)
+	}
+	before, found, err := b.ReadSessionSnapshot(context.Background(), aliases[0])
+	if err != nil || !found {
+		t.Fatalf("ReadSessionSnapshot(alias) = (found=%v, err=%v)", found, err)
+	}
+	if before.Key != key || before.Revision == "" || len(before.History) != 0 || before.Summary != "" ||
+		!reflect.DeepEqual(before.Scope, scope) || !reflect.DeepEqual(before.Aliases, aliases) {
+		t.Fatalf("reserved snapshot = %+v", before)
+	}
+	if resolved := b.ResolveSessionKey(aliases[1]); resolved != key {
+		t.Fatalf("ResolveSessionKey(second alias) = %q, want %q", resolved, key)
+	}
+
+	updated, err = b.AdmitSessionScope(context.Background(), admission)
+	if err != nil || updated {
+		t.Fatalf("idempotent AdmitSessionScope() = (updated=%v, err=%v), want unchanged", updated, err)
+	}
+	after, found, err := b.ReadSessionSnapshot(context.Background(), key)
+	if err != nil || !found {
+		t.Fatalf("ReadSessionSnapshot(key) = (found=%v, err=%v)", found, err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("idempotent admission changed snapshot:\n before=%+v\n after=%+v", before, after)
+	}
+}
+
+func TestJSONLBackendAdmitSessionScope_LiveUpdatesExistingOrdinaryMetadata(t *testing.T) {
+	b := newBackend(t)
+	desiredScope := ordinaryAdmissionScope("pull:org/repo:17")
+	key := session.BuildSessionKey(*desiredScope)
+	oldAlias := "agent:main:github:legacy-review-17"
+	newAlias := "agent:main:github:pull:org/repo:17"
+	legacyScope := session.CloneScope(desiredScope)
+	legacyScope.Account = ""
+
+	b.AddMessage(key, "user", "preserve this history")
+	b.SetSummary(key, "preserve this summary")
+	b.EnsureSessionMetadata(key, legacyScope, []string{oldAlias})
+
+	updated, err := b.AdmitSessionScope(context.Background(), session.SessionScopeAdmission{
+		Key:            key,
+		Scope:          desiredScope,
+		InitialAliases: []string{newAlias},
+		Mode:           session.ScopeAdmissionLive,
+	})
+	if err != nil || !updated {
+		t.Fatalf("AdmitSessionScope() = (updated=%v, err=%v), want compatible update", updated, err)
+	}
+	snapshot, found, err := b.ReadSessionSnapshot(context.Background(), newAlias)
+	if err != nil || !found {
+		t.Fatalf("ReadSessionSnapshot(new alias) = (found=%v, err=%v)", found, err)
+	}
+	if snapshot.Key != key || !reflect.DeepEqual(snapshot.Scope, desiredScope) ||
+		!reflect.DeepEqual(snapshot.Aliases, []string{newAlias}) ||
+		len(snapshot.History) != 1 || snapshot.History[0].Content != "preserve this history" ||
+		snapshot.Summary != "preserve this summary" {
+		t.Fatalf("updated ordinary snapshot = %+v", snapshot)
+	}
+	if resolved := b.ResolveSessionKey(oldAlias); resolved != oldAlias {
+		t.Fatalf("removed alias still resolves to %q", resolved)
+	}
+}
+
+func TestJSONLBackendAdmitSessionScope_NilLiveAliasesPreserveLockedOwner(t *testing.T) {
+	for _, lookup := range []string{"canonical", "alias"} {
+		t.Run(lookup, func(t *testing.T) {
+			b := newBackend(t)
+			scope := ordinaryAdmissionScope("pull:org/repo:preserve-aliases-" + lookup)
+			key := session.BuildSessionKey(*scope)
+			aliases := []string{
+				"agent:main:github:legacy-preserve-aliases-" + lookup,
+				"agent:main:github:pull:org/repo:preserve-aliases-" + lookup,
+			}
+			b.EnsureSessionMetadata(key, scope, aliases)
+			b.AddMessage(key, "user", "keep alias-bound history")
+			before, found, err := b.ReadSessionSnapshot(context.Background(), key)
+			if err != nil || !found {
+				t.Fatalf("ReadSessionSnapshot(before) = (found=%v, err=%v)", found, err)
+			}
+			requestedKey := key
+			if lookup == "alias" {
+				requestedKey = aliases[0]
+			}
+			fallback := ordinaryAdmissionScope("different-fallback-" + lookup)
+			updated, err := b.AdmitSessionScope(context.Background(), session.SessionScopeAdmission{
+				Key:                   requestedKey,
+				Scope:                 fallback,
+				Mode:                  session.ScopeAdmissionLive,
+				PreserveExistingScope: true,
+			})
+			if err != nil || !updated {
+				t.Fatalf("AdmitSessionScope(preserve owner) = (updated=%v, err=%v)", updated, err)
+			}
+			after, found, err := b.ReadSessionSnapshot(context.Background(), aliases[0])
+			if err != nil || !found {
+				t.Fatalf("ReadSessionSnapshot(alias) = (found=%v, err=%v)", found, err)
+			}
+			if !reflect.DeepEqual(after.Scope, before.Scope) ||
+				!reflect.DeepEqual(after.Aliases, before.Aliases) ||
+				!reflect.DeepEqual(after.History, before.History) ||
+				after.Summary != before.Summary {
+				t.Fatalf("preserving admission changed owner tuple:\nbefore=%+v\nafter=%+v", before, after)
+			}
+		})
+	}
+}
+
+func TestJSONLBackendAdmitSessionScope_PreserveExistingScopeUsesFallbackWhenAbsent(t *testing.T) {
+	b := newBackend(t)
+	fallback := ordinaryAdmissionScope("pull:org/repo:absent-fallback")
+	key := session.BuildSessionKey(*fallback)
+	updated, err := b.AdmitSessionScope(context.Background(), session.SessionScopeAdmission{
+		Key:                   key,
+		Scope:                 fallback,
+		Mode:                  session.ScopeAdmissionLive,
+		PreserveExistingScope: true,
+	})
+	if err != nil || !updated {
+		t.Fatalf("AdmitSessionScope(absent fallback) = (updated=%v, err=%v)", updated, err)
+	}
+	snapshot, found, err := b.ReadSessionSnapshot(context.Background(), key)
+	if err != nil || !found || !reflect.DeepEqual(snapshot.Scope, fallback) {
+		t.Fatalf("fallback snapshot = (found=%v, snapshot=%+v, err=%v)", found, snapshot, err)
+	}
+}
+
+func TestJSONLBackendAdmitSessionScope_SnapshotsInitialAliasesBeforeLowerWait(t *testing.T) {
+	lower, err := memory.NewJSONLStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lower.Close() })
+	barrier := &preAdmissionBarrierStore{
+		JSONLStore: lower,
+		reached:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+	backend := session.NewJSONLBackend(barrier)
+	scope := ordinaryAdmissionScope("pull:org/repo:alias-snapshot")
+	key := session.BuildSessionKey(*scope)
+	aliases := []string{"agent:main:github:alias-snapshot"}
+	done := make(chan error, 1)
+	go func() {
+		_, admitErr := backend.AdmitSessionScope(context.Background(), session.SessionScopeAdmission{
+			Key:            key,
+			Scope:          scope,
+			InitialAliases: aliases,
+			Mode:           session.ScopeAdmissionLive,
+		})
+		done <- admitErr
+	}()
+	<-barrier.reached
+	aliases[0] = "agent:main:github:mutated-after-invocation"
+	close(barrier.release)
+	if waitErr := <-done; waitErr != nil {
+		t.Fatalf("AdmitSessionScope() error = %v", waitErr)
+	}
+	snapshot, found, err := backend.ReadSessionSnapshot(
+		context.Background(),
+		"agent:main:github:alias-snapshot",
+	)
+	if err != nil || !found ||
+		!reflect.DeepEqual(snapshot.Aliases, []string{"agent:main:github:alias-snapshot"}) {
+		t.Fatalf("snapshotted aliases = (found=%v, aliases=%v, err=%v)",
+			found, snapshot.Aliases, err)
+	}
+}
+
+func TestJSONLBackendAdmitSessionScope_LiveAliasAdmissionPromotesOnceAndKeepsContinuity(
+	t *testing.T,
+) {
+	dir := t.TempDir()
+	lower, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lower.Close() })
+	backend := session.NewJSONLBackend(lower)
+	desiredScope := ordinaryAdmissionScope("pull:org/repo:alias-continuity")
+	canonicalKey := session.BuildSessionKey(*desiredScope)
+	requestedAlias := "agent:main:github:legacy-alias-continuity"
+	allocationAlias := "agent:main:github:pull:org/repo:alias-continuity"
+
+	if addErr := lower.AddMessage(
+		context.Background(),
+		requestedAlias,
+		"user",
+		"legacy first",
+	); addErr != nil {
+		t.Fatal(addErr)
+	}
+	if summaryErr := lower.SetSummary(
+		context.Background(),
+		requestedAlias,
+		"legacy summary",
+	); summaryErr != nil {
+		t.Fatal(summaryErr)
+	}
+	legacyScope := session.CloneScope(desiredScope)
+	legacyScope.Account = ""
+	rawLegacyScope, err := json.Marshal(legacyScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upsertErr := lower.UpsertSessionMeta(
+		context.Background(),
+		canonicalKey,
+		rawLegacyScope,
+		[]string{requestedAlias},
+	); upsertErr != nil {
+		t.Fatal(upsertErr)
+	}
+
+	admission := session.SessionScopeAdmission{
+		Key:            requestedAlias,
+		Scope:          desiredScope,
+		InitialAliases: []string{allocationAlias},
+		Mode:           session.ScopeAdmissionLive,
+	}
+	updated, err := backend.AdmitSessionScope(context.Background(), admission)
+	if err != nil || !updated {
+		t.Fatalf("first alias admission = (updated=%v, err=%v)", updated, err)
+	}
+	first, found, err := backend.ReadSessionSnapshot(context.Background(), canonicalKey)
+	if err != nil || !found {
+		t.Fatalf("first canonical snapshot = (found=%v, err=%v)", found, err)
+	}
+	wantAliases := []string{allocationAlias, requestedAlias}
+	if len(first.History) != 1 || first.History[0].Content != "legacy first" ||
+		first.Summary != "legacy summary" || !reflect.DeepEqual(first.Scope, desiredScope) ||
+		!reflect.DeepEqual(first.Aliases, wantAliases) {
+		t.Fatalf("first promoted snapshot = %+v", first)
+	}
+	if resolved := backend.ResolveSessionKey(requestedAlias); resolved != canonicalKey {
+		t.Fatalf("requested alias resolves to %q, want %q", resolved, canonicalKey)
+	}
+
+	backend.AddMessage(requestedAlias, "assistant", "canonical second")
+	updated, err = backend.AdmitSessionScope(context.Background(), admission)
+	if err != nil || !updated {
+		t.Fatalf("second alias admission = (updated=%v, err=%v)", updated, err)
+	}
+	second, found, err := backend.ReadSessionSnapshot(context.Background(), canonicalKey)
+	if err != nil || !found {
+		t.Fatalf("second canonical snapshot = (found=%v, err=%v)", found, err)
+	}
+	if len(second.History) != 2 || second.History[0].Content != "legacy first" ||
+		second.History[1].Content != "canonical second" ||
+		second.Summary != "legacy summary" ||
+		!reflect.DeepEqual(second.Aliases, wantAliases) {
+		t.Fatalf("continuous canonical snapshot = %+v", second)
+	}
+}
+
+func TestJSONLBackendAdmitSessionScope_LiveAliasOwnershipIsClosedBeforeReturn(
+	t *testing.T,
+) {
+	dir := t.TempDir()
+	liveLower, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = liveLower.Close() })
+	reviewLower, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reviewLower.Close() })
+
+	desiredScope := ordinaryAdmissionScope("pull:org/repo:forced-race")
+	canonicalKey := session.BuildSessionKey(*desiredScope)
+	requestedAlias := "agent:main:github:legacy-forced-race"
+	allocationAlias := "agent:main:github:pull:org/repo:forced-race"
+	if addErr := liveLower.AddMessage(
+		context.Background(),
+		requestedAlias,
+		"user",
+		"legacy protected by live admission",
+	); addErr != nil {
+		t.Fatal(addErr)
+	}
+	rawScope, err := json.Marshal(desiredScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := liveLower.UpsertSessionMeta(
+		context.Background(),
+		canonicalKey,
+		rawScope,
+		[]string{requestedAlias},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	paused := &pausingAdmissionStore{
+		JSONLStore: liveLower,
+		admitted:   make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+	liveBackend := session.NewJSONLBackend(paused)
+	liveDone := make(chan error, 1)
+	go func() {
+		updated, admitErr := liveBackend.AdmitSessionScope(
+			context.Background(),
+			session.SessionScopeAdmission{
+				Key:            requestedAlias,
+				Scope:          desiredScope,
+				InitialAliases: []string{allocationAlias},
+				Mode:           session.ScopeAdmissionLive,
+			},
+		)
+		if admitErr == nil && !updated {
+			admitErr = errors.New("live admission did not update metadata")
+		}
+		liveDone <- admitErr
+	}()
+	select {
+	case <-paused.admitted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("live admission did not reach its post-transaction boundary")
+	}
+
+	reviewScope := reviewAdmissionScope("prc_forced_alias_race")
+	reviewKey := session.BuildSessionKey(*reviewScope)
+	reviewBackend := session.NewJSONLBackend(reviewLower)
+	claimed, claimErr := reviewBackend.AdmitSessionScope(
+		context.Background(),
+		session.SessionScopeAdmission{
+			Key:            reviewKey,
+			Scope:          reviewScope,
+			InitialAliases: []string{requestedAlias},
+			Mode:           session.ScopeAdmissionReview,
+		},
+	)
+	if claimed || claimErr == nil {
+		t.Fatalf("review claim during live return gap = (updated=%v, err=%v)", claimed, claimErr)
+	}
+	intermediate, found, readErr := reviewBackend.ReadSessionSnapshot(
+		context.Background(),
+		canonicalKey,
+	)
+	if readErr != nil || !found || len(intermediate.History) != 1 ||
+		intermediate.History[0].Content != "legacy protected by live admission" ||
+		!reflect.DeepEqual(intermediate.Aliases, []string{allocationAlias, requestedAlias}) {
+		t.Fatalf("atomic live tuple = (found=%v, snapshot=%+v, err=%v)", found, intermediate, readErr)
+	}
+	if _, found, readErr := reviewBackend.ReadSessionSnapshot(
+		context.Background(),
+		reviewKey,
+	); readErr != nil || found {
+		t.Fatalf("losing review session = (found=%v, err=%v)", found, readErr)
+	}
+
+	close(paused.release)
+	if err := <-liveDone; err != nil {
+		t.Fatalf("live admission error = %v", err)
+	}
+}
+
+func TestJSONLBackendAdmitSessionScope_ReviewRequiresCanonicalExactV1Binding(t *testing.T) {
+	tests := map[string]func(*session.SessionScope, *string){
+		"wrong version": func(scope *session.SessionScope, _ *string) {
+			scope.Version = session.ScopeVersionV1 + 1
+		},
+		"noncanonical owner": func(scope *session.SessionScope, _ *string) {
+			scope.AgentID = "Main"
+		},
+		"noncanonical channel": func(scope *session.SessionScope, _ *string) {
+			scope.Channel = "Review"
+		},
+		"wrong channel": func(scope *session.SessionScope, _ *string) {
+			scope.Channel = "github"
+		},
+		"noncanonical account": func(scope *session.SessionScope, _ *string) {
+			scope.Account = " DEFAULT "
+		},
+		"noncanonical dimension": func(scope *session.SessionScope, _ *string) {
+			scope.Dimensions[0] = "Review"
+		},
+		"noncanonical value": func(scope *session.SessionScope, _ *string) {
+			scope.Values["review"] = "PRC_NONCANONICAL"
+		},
+		"inexact values": func(scope *session.SessionScope, _ *string) {
+			scope.Values["extra"] = "value"
+		},
+		"mismatched key": func(_ *session.SessionScope, key *string) {
+			other := reviewAdmissionScope("prc_other_exact_key")
+			*key = session.BuildSessionKey(*other)
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			backend := newBackend(t)
+			scope := reviewAdmissionScope("prc_exact_binding")
+			key := session.BuildSessionKey(*scope)
+			mutate(scope, &key)
+
+			updated, err := backend.AdmitSessionScope(
+				context.Background(),
+				session.SessionScopeAdmission{
+					Key:   key,
+					Scope: scope,
+					Mode:  session.ScopeAdmissionReview,
+				},
+			)
+			if updated || err == nil {
+				t.Fatalf("malformed review admission = (updated=%v, err=%v)", updated, err)
+			}
+			if sessions := backend.ListSessions(); len(sessions) != 0 {
+				t.Fatalf("malformed review admission created sessions: %v", sessions)
+			}
+		})
+	}
+}
+
+func TestJSONLBackendAdmitSessionScope_ExistingReviewRejectsLiveWithoutMutation(t *testing.T) {
+	b := newBackend(t)
+	reviewScope := reviewAdmissionScope("prc_protected")
+	key := session.BuildSessionKey(*reviewScope)
+	alias := "review:agent:main:case:prc_protected"
+	if updated, err := b.AdmitSessionScope(context.Background(), session.SessionScopeAdmission{
+		Key:            key,
+		Scope:          reviewScope,
+		InitialAliases: []string{alias},
+		Mode:           session.ScopeAdmissionReview,
+	}); err != nil || !updated {
+		t.Fatalf("review reservation = (updated=%v, err=%v)", updated, err)
+	}
+	b.AddMessage(key, "user", "protected transcript")
+	b.SetSummary(key, "protected summary")
+	before, found, err := b.ReadSessionSnapshot(context.Background(), key)
+	if err != nil || !found {
+		t.Fatalf("ReadSessionSnapshot(before) = (found=%v, err=%v)", found, err)
+	}
+
+	for _, requestedKey := range []string{key, alias} {
+		updated, admitErr := b.AdmitSessionScope(context.Background(), session.SessionScopeAdmission{
+			Key:   requestedKey,
+			Scope: ordinaryAdmissionScope("attacker-selected-review-key"),
+			Mode:  session.ScopeAdmissionLive,
+		})
+		if updated || !errors.Is(admitErr, session.ErrScopeAdmissionConflict) {
+			t.Fatalf("live admission through %q = (updated=%v, err=%v), want conflict", requestedKey, updated, admitErr)
+		}
+		after, afterFound, readErr := b.ReadSessionSnapshot(context.Background(), alias)
+		if readErr != nil || !afterFound {
+			t.Fatalf("ReadSessionSnapshot(after %q) = (found=%v, err=%v)", requestedKey, afterFound, readErr)
+		}
+		if !reflect.DeepEqual(after, before) {
+			t.Fatalf(
+				"rejected live admission through %q changed protected snapshot:\n before=%+v\n after=%+v",
+				requestedKey,
+				before,
+				after,
+			)
+		}
+	}
+}
+
+func TestJSONLBackendAdmitSessionScope_FailsClosedWhenUnsupportedOrCanceled(t *testing.T) {
+	t.Run("unsupported", func(t *testing.T) {
+		lower, err := memory.NewJSONLStore(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = lower.Close() })
+		b := session.NewJSONLBackend(struct{ memory.Store }{Store: lower})
+		scope := reviewAdmissionScope("prc_unsupported")
+
+		updated, admitErr := b.AdmitSessionScope(context.Background(), session.SessionScopeAdmission{
+			Key:   session.BuildSessionKey(*scope),
+			Scope: scope,
+			Mode:  session.ScopeAdmissionReview,
+		})
+		if updated || !errors.Is(admitErr, session.ErrScopeAdmissionUnsupported) {
+			t.Fatalf("AdmitSessionScope() = (updated=%v, err=%v), want unsupported", updated, admitErr)
+		}
+		if sessions := lower.ListSessions(); len(sessions) != 0 {
+			t.Fatalf("unsupported admission mutated lower store: %v", sessions)
+		}
+	})
+
+	t.Run("canceled", func(t *testing.T) {
+		b := newBackend(t)
+		scope := reviewAdmissionScope("prc_canceled")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		updated, err := b.AdmitSessionScope(ctx, session.SessionScopeAdmission{
+			Key:   session.BuildSessionKey(*scope),
+			Scope: scope,
+			Mode:  session.ScopeAdmissionReview,
+		})
+		if updated || !errors.Is(err, context.Canceled) {
+			t.Fatalf("AdmitSessionScope() = (updated=%v, err=%v), want cancellation", updated, err)
+		}
+		if sessions := b.ListSessions(); len(sessions) != 0 {
+			t.Fatalf("canceled admission created sessions: %v", sessions)
+		}
+	})
+}
+
+func TestJSONLBackendAdmitSessionScope_TwoStoresSerializeLiveAndReviewClaims(t *testing.T) {
+	dir := t.TempDir()
+	storeA, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = storeA.Close() })
+	storeB, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = storeB.Close() })
+	backendA := session.NewJSONLBackend(storeA)
+	backendB := session.NewJSONLBackend(storeB)
+
+	type result struct {
+		mode    session.ScopeAdmissionMode
+		updated bool
+		err     error
+	}
+	for iteration := 0; iteration < 20; iteration++ {
+		caseID := fmt.Sprintf("prc_two_store_%02d", iteration)
+		reviewScope := reviewAdmissionScope(caseID)
+		ordinaryScope := ordinaryAdmissionScope("attacker:" + caseID)
+		key := session.BuildSessionKey(*reviewScope)
+		alias := "review:agent:main:case:" + caseID
+		start := make(chan struct{})
+		results := make(chan result, 2)
+
+		go func() {
+			<-start
+			updated, admitErr := backendA.AdmitSessionScope(context.Background(), session.SessionScopeAdmission{
+				Key:   key,
+				Scope: ordinaryScope,
+				Mode:  session.ScopeAdmissionLive,
+			})
+			results <- result{mode: session.ScopeAdmissionLive, updated: updated, err: admitErr}
+		}()
+		go func() {
+			<-start
+			updated, admitErr := backendB.AdmitSessionScope(context.Background(), session.SessionScopeAdmission{
+				Key:            key,
+				Scope:          reviewScope,
+				InitialAliases: []string{alias},
+				Mode:           session.ScopeAdmissionReview,
+			})
+			results <- result{mode: session.ScopeAdmissionReview, updated: updated, err: admitErr}
+		}()
+		close(start)
+
+		first := <-results
+		second := <-results
+		winner := first
+		loser := second
+		if first.err != nil || !first.updated {
+			winner, loser = second, first
+		}
+		if winner.err != nil || !winner.updated {
+			t.Fatalf("iteration %d has no winner: first=%+v second=%+v", iteration, first, second)
+		}
+		if loser.updated || !errors.Is(loser.err, session.ErrScopeAdmissionConflict) {
+			t.Fatalf("iteration %d loser = %+v, want scope conflict", iteration, loser)
+		}
+
+		snapshot, found, readErr := backendA.ReadSessionSnapshot(context.Background(), key)
+		if readErr != nil || !found {
+			t.Fatalf("iteration %d snapshot = (found=%v, err=%v)", iteration, found, readErr)
+		}
+		wantScope := ordinaryScope
+		if winner.mode == session.ScopeAdmissionReview {
+			wantScope = reviewScope
+		}
+		if snapshot.Key != key || snapshot.Revision == "" || !reflect.DeepEqual(snapshot.Scope, wantScope) {
+			t.Fatalf("iteration %d winner=%d snapshot=%+v", iteration, winner.mode, snapshot)
+		}
+		if winner.mode == session.ScopeAdmissionReview {
+			if !reflect.DeepEqual(snapshot.Aliases, []string{alias}) || backendA.ResolveSessionKey(alias) != key {
+				t.Fatalf("iteration %d review aliases = %v", iteration, snapshot.Aliases)
+			}
+		} else if len(snapshot.Aliases) != 0 {
+			t.Fatalf("iteration %d live winner aliases = %v, want none", iteration, snapshot.Aliases)
+		}
 	}
 }
 

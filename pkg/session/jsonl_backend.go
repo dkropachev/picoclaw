@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"reflect"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/memory"
@@ -29,6 +30,14 @@ type metaAwareStore interface {
 
 type aliasPromotingStore interface {
 	PromoteAliasHistory(ctx context.Context, sessionKey string, scope json.RawMessage, aliases []string) (bool, error)
+}
+
+type metaAdmittingStore interface {
+	AdmitSessionMeta(
+		ctx context.Context,
+		sessionKey string,
+		admit memory.SessionMetaAdmission,
+	) (bool, error)
 }
 
 type snapshotStore interface {
@@ -108,6 +117,163 @@ func (b *JSONLBackend) EnsureSessionMetadata(sessionKey string, scope *SessionSc
 			log.Printf("session: promote alias history: %v", err)
 		}
 	}
+}
+
+// AdmitSessionScope atomically arbitrates a normal live turn against a
+// protected review projection. The policy is evaluated by the adapter while
+// the lower JSONL store holds the same locks used by snapshot replacement.
+func (b *JSONLBackend) AdmitSessionScope(
+	ctx context.Context,
+	admission SessionScopeAdmission,
+) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if admission.Key == "" || admission.Key != strings.TrimSpace(admission.Key) ||
+		admission.Scope == nil {
+		return false, errors.New("session: scope admission is invalid")
+	}
+	if admission.Mode != ScopeAdmissionLive && admission.Mode != ScopeAdmissionReview {
+		return false, errors.New("session: scope admission mode is invalid")
+	}
+	initialAliases := append([]string(nil), admission.InitialAliases...)
+	if err := validateSessionScopeAdmissionAliases(admission.Key, initialAliases); err != nil {
+		return false, err
+	}
+	desiredScope := CloneScope(admission.Scope)
+	if admission.Mode == ScopeAdmissionLive && isReviewAdmissionScope(desiredScope) {
+		return false, ErrScopeAdmissionConflict
+	}
+	if admission.Mode == ScopeAdmissionReview {
+		if admission.PreserveExistingScope {
+			return false, errors.New(
+				"session: review scope admission cannot preserve an existing scope",
+			)
+		}
+		if err := validateReviewScopeAdmission(admission.Key, *desiredScope); err != nil {
+			return false, err
+		}
+	}
+	rawScope, err := json.Marshal(desiredScope)
+	if err != nil {
+		return false, fmt.Errorf("session: encode scope admission: %w", err)
+	}
+
+	store, ok := b.store.(metaAdmittingStore)
+	if !ok {
+		return false, fmt.Errorf("%w: store %T", ErrScopeAdmissionUnsupported, b.store)
+	}
+	updated, err := store.AdmitSessionMeta(
+		ctx,
+		admission.Key,
+		func(existing memory.SessionMeta, exists bool) (
+			memory.SessionMetaAdmissionDecision,
+			error,
+		) {
+			var currentScope *SessionScope
+			if len(existing.Scope) > 0 {
+				var decoded SessionScope
+				if decodeErr := json.Unmarshal(existing.Scope, &decoded); decodeErr != nil {
+					return memory.SessionMetaAdmissionDecision{}, fmt.Errorf(
+						"session: decode admitted scope: %w",
+						decodeErr,
+					)
+				}
+				currentScope = &decoded
+			}
+
+			switch admission.Mode {
+			case ScopeAdmissionLive:
+				if isReviewAdmissionScope(currentScope) {
+					return memory.SessionMetaAdmissionDecision{}, ErrScopeAdmissionConflict
+				}
+				aliases := initialAliases
+				// Internal continuation/system paths often know only the final key and
+				// existing scope. Nil means they have no complete replacement alias set;
+				// preserve the locked owner's aliases instead of silently removing them.
+				if aliases == nil && exists {
+					aliases = existing.Aliases
+				}
+				committedScope := rawScope
+				// A nil/inferred caller scope must not be read before acquiring the
+				// admission lock: doing so could roll a concurrent ordinary migration
+				// back. Preserve the exact locked bytes when an owner already exists.
+				if admission.PreserveExistingScope && currentScope != nil {
+					committedScope = existing.Scope
+				}
+				return memory.SessionMetaAdmissionDecision{
+					Scope:                  append(json.RawMessage(nil), committedScope...),
+					Aliases:                append([]string(nil), aliases...),
+					Update:                 true,
+					PreserveRequestedAlias: true,
+					PromoteAliasHistory:    true,
+				}, nil
+			case ScopeAdmissionReview:
+				if exists {
+					if existing.Key != admission.Key || currentScope == nil ||
+						!isReviewAdmissionScope(currentScope) ||
+						!reflect.DeepEqual(currentScope, desiredScope) {
+						return memory.SessionMetaAdmissionDecision{}, ErrScopeAdmissionConflict
+					}
+					return memory.SessionMetaAdmissionDecision{}, nil
+				}
+				return memory.SessionMetaAdmissionDecision{
+					Scope:            append(json.RawMessage(nil), rawScope...),
+					Aliases:          append([]string(nil), initialAliases...),
+					Update:           true,
+					ExclusiveAliases: true,
+				}, nil
+			default:
+				return memory.SessionMetaAdmissionDecision{}, errors.New(
+					"session: scope admission mode is invalid",
+				)
+			}
+		},
+	)
+	if err != nil {
+		return false, err
+	}
+	return updated, nil
+}
+
+func isReviewAdmissionScope(scope *SessionScope) bool {
+	return scope != nil && strings.EqualFold(strings.TrimSpace(scope.Channel), "review")
+}
+
+func validateReviewScopeAdmission(key string, scope SessionScope) error {
+	if scope.Version != ScopeVersionV1 {
+		return errors.New("session: review scope admission version is invalid")
+	}
+	if !routing.IsCanonicalAgentID(scope.AgentID) {
+		return errors.New("session: review scope admission owner is invalid")
+	}
+	if err := validateCanonicalReplacementScope(scope); err != nil {
+		return fmt.Errorf("session: review scope admission is not canonical: %w", err)
+	}
+	if scope.Channel != "review" {
+		return errors.New("session: review scope admission requires review channel")
+	}
+	if BuildSessionKey(scope) != key {
+		return errors.New("session: review scope admission key does not match its scope")
+	}
+	return nil
+}
+
+func validateSessionScopeAdmissionAliases(key string, aliases []string) error {
+	seen := make(map[string]struct{}, len(aliases))
+	for _, alias := range aliases {
+		if alias == "" || alias != strings.TrimSpace(alias) || alias == key {
+			return fmt.Errorf("session: scope admission alias %q is invalid", alias)
+		}
+		if _, exists := seen[alias]; exists {
+			return fmt.Errorf("session: scope admission alias %q is duplicated", alias)
+		}
+		seen[alias] = struct{}{}
+	}
+	return nil
 }
 
 // GetSessionScope reads structured scope metadata for a session key or alias.

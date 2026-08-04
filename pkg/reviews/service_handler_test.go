@@ -1490,6 +1490,7 @@ func newReviewTestService(
 	service, err := NewService(ServiceConfig{
 		Store:     store,
 		Agent:     agent,
+		AgentID:   "main",
 		Submitter: submitter,
 	})
 	if err != nil {
@@ -1515,7 +1516,8 @@ func assertMessageAppend(
 
 func assertIsolatedReviewAgentRequest(t *testing.T, request workflows.AgentRequest) {
 	t.Helper()
-	if request.Tools != workflows.AgentToolsNone ||
+	if request.AgentID != "main" ||
+		request.Tools != workflows.AgentToolsNone ||
 		request.History != "none" ||
 		request.Cache != "none" ||
 		request.Session != "review:"+serviceTestCaseID+":finding:"+serviceTestFindingID {
@@ -1524,6 +1526,18 @@ func assertIsolatedReviewAgentRequest(t *testing.T, request workflows.AgentReque
 	managed, ok := request.Managed.(map[string]any)
 	if !ok || !reflect.DeepEqual(managed, map[string]any{"mode": "off"}) {
 		t.Fatalf("agent managed mode = %#v", request.Managed)
+	}
+}
+
+func TestServiceRejectsNonCanonicalReviewAgentID(t *testing.T) {
+	for _, agentID := range []string{"Main", " main "} {
+		service, err := NewService(ServiceConfig{
+			Store:   &reviewServiceStore{},
+			AgentID: agentID,
+		})
+		if err == nil || service != nil || !strings.Contains(err.Error(), "exact canonical ID") {
+			t.Fatalf("NewService(%q) = (%#v, %v), want canonical agent-ID error", agentID, service, err)
+		}
 	}
 }
 

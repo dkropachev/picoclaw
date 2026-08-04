@@ -305,13 +305,24 @@ func (m *seahorseContextManager) Ingest(ctx context.Context, req *IngestRequest)
 	if req == nil {
 		return nil
 	}
-	engine, _ := m.engineForSession(req.SessionKey)
+	engine, agent := m.engineForSession(req.SessionKey)
 	if engine == nil {
 		return fmt.Errorf("seahorse ingest: no engine for session")
 	}
+	sessions := m.sessions
+	if agent != nil && agent.Sessions != nil {
+		sessions = agent.Sessions
+	}
+	excluded, err := isReviewScopedSession(ctx, sessions, req.SessionKey)
+	if err != nil {
+		return fmt.Errorf("seahorse ingest scope: %w", err)
+	}
+	if excluded {
+		return nil
+	}
 
 	msg := providerToSeahorseMessage(req.Message)
-	_, err := engine.Ingest(ctx, req.SessionKey, []seahorse.Message{msg})
+	_, err = engine.Ingest(ctx, req.SessionKey, []seahorse.Message{msg})
 	return err
 }
 
@@ -347,7 +358,33 @@ func (m *seahorseContextManager) bootstrapAgentSession(
 	if agent == nil || agent.Sessions == nil || engine == nil {
 		return
 	}
-	history := agent.Sessions.GetHistory(sessionKey)
+
+	bootstrapKey := sessionKey
+	var history []providers.Message
+	if reader, ok := agent.Sessions.(session.SnapshotReader); ok {
+		snapshot, found, err := reader.ReadSessionSnapshot(ctx, sessionKey)
+		if err != nil {
+			logger.WarnCF("seahorse", "bootstrap snapshot", map[string]any{
+				"session": sessionKey,
+				"error":   err.Error(),
+			})
+			return
+		}
+		if !found || strings.TrimSpace(snapshot.Key) == "" {
+			return
+		}
+		if isReviewSessionScope(snapshot.Scope) {
+			return
+		}
+		bootstrapKey = snapshot.Key
+		history = snapshot.History
+	} else {
+		if metadata, ok := agent.Sessions.(session.MetadataAwareSessionStore); ok &&
+			isReviewSessionScope(metadata.GetSessionScope(sessionKey)) {
+			return
+		}
+		history = agent.Sessions.GetHistory(sessionKey)
+	}
 	if len(history) == 0 {
 		return
 	}
@@ -358,9 +395,9 @@ func (m *seahorseContextManager) bootstrapAgentSession(
 		msgs[i] = providerToSeahorseMessage(h)
 	}
 
-	if err := engine.Bootstrap(ctx, sessionKey, msgs); err != nil {
+	if err := engine.Bootstrap(ctx, bootstrapKey, msgs); err != nil {
 		logger.WarnCF("seahorse", "bootstrap", map[string]any{
-			"session": sessionKey,
+			"session": bootstrapKey,
 			"error":   err.Error(),
 		})
 	}

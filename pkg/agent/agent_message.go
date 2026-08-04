@@ -175,6 +175,61 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	return al.processMessageWithPreparation(ctx, msg, false)
 }
 
+// admitInboundMessageSession fences the Run-loop fast paths that handle /stop
+// and steering without entering processMessage. Those paths must establish the
+// same atomic ordinary-session ownership as a full turn before they mutate any
+// turn, queue, command, or message-tool state.
+func (al *AgentLoop) admitInboundMessageSession(
+	ctx context.Context,
+	msg bus.InboundMessage,
+	sessionKey string,
+) error {
+	route, agent, err := al.resolveMessageRoute(msg)
+	if err != nil {
+		return err
+	}
+	allocation := al.allocateRouteSession(route, msg)
+	scopeKey := resolveScopeKey(allocation.SessionKey, msg.SessionKey)
+	originKey := strings.TrimSpace(sessionKey)
+	if originKey == "" {
+		originKey = scopeKey
+	}
+	aliases := buildSessionAliases(
+		originKey,
+		append(allocation.SessionAliases, msg.SessionKey, scopeKey)...,
+	)
+	if err := admitSessionMetadata(
+		ctx,
+		agent.Sessions,
+		originKey,
+		session.CloneScope(&allocation.Scope),
+		aliases,
+		agent.ID,
+	); err != nil {
+		return fmt.Errorf("admit live session scope: %w", err)
+	}
+
+	// Thread linkage can redirect execution after route allocation. Claim its
+	// authoritative target too, while retaining the origin claim used for turn
+	// serialization and trigger identity. A stale link to review must fail before
+	// workflow-trigger handling or inbound preparation.
+	targetKey := al.resolveAttachedThreadSession(ctx, agent, scopeKey)
+	if targetKey == "" || targetKey == originKey {
+		return nil
+	}
+	if err := admitSessionMetadata(
+		ctx,
+		agent.Sessions,
+		targetKey,
+		nil,
+		nil,
+		agent.ID,
+	); err != nil {
+		return fmt.Errorf("admit attached live session scope: %w", err)
+	}
+	return nil
+}
+
 func (al *AgentLoop) processPreparedMessage(
 	ctx context.Context,
 	msg bus.InboundMessage,
@@ -194,6 +249,65 @@ func (al *AgentLoop) processMessageWithPreparation(
 	defer releaseRuntime()
 	ctx = leaseCtx
 
+	// Route system messages to processSystemMessage
+	if msg.Channel == "system" {
+		return al.processSystemMessage(ctx, msg)
+	}
+
+	route, agent, routeErr := al.resolveMessageRoute(msg)
+	if routeErr != nil {
+		return "", routeErr
+	}
+
+	allocation := al.allocateRouteSession(route, msg)
+
+	// Resolve session key from the route allocation, while preserving explicit
+	// agent-scoped keys supplied by the caller.
+	scopeKey := resolveScopeKey(allocation.SessionKey, msg.SessionKey)
+	originKey := scopeKey
+	originAliases := buildSessionAliases(
+		originKey,
+		append(allocation.SessionAliases, msg.SessionKey, scopeKey)...,
+	)
+	if admissionErr := admitSessionMetadata(
+		ctx,
+		agent.Sessions,
+		originKey,
+		session.CloneScope(&allocation.Scope),
+		originAliases,
+		agent.ID,
+	); admissionErr != nil {
+		return "", fmt.Errorf("admit live origin session scope: %w", admissionErr)
+	}
+
+	sessionKey := al.resolveAttachedThreadSession(ctx, agent, originKey)
+	sessionScope := session.CloneScope(&allocation.Scope)
+	sessionAliases := originAliases
+	if sessionKey != originKey {
+		if admissionErr := admitSessionMetadata(
+			ctx,
+			agent.Sessions,
+			sessionKey,
+			nil,
+			nil,
+			agent.ID,
+		); admissionErr != nil {
+			return "", fmt.Errorf("admit attached live session scope: %w", admissionErr)
+		}
+		// Attached targets own their existing scope and aliases. Nil aliases mean
+		// preserve the locked set; never rewrite target identity using the origin
+		// route allocation.
+		sessionAliases = nil
+		if metadata, ok := agent.Sessions.(session.MetadataAwareSessionStore); ok {
+			sessionScope = session.CloneScope(metadata.GetSessionScope(sessionKey))
+		} else {
+			sessionScope = nil
+		}
+	}
+
+	// Audio transcription and placeholder feedback may invoke external services
+	// or mutate UX state. Run them only after the final attached-thread key has
+	// won ordinary ownership.
 	if !prepared {
 		msg = al.prepareInboundMessageForAgent(ctx, msg)
 	}
@@ -216,30 +330,6 @@ func (al *AgentLoop) processMessageWithPreparation(
 		},
 	)
 
-	// Route system messages to processSystemMessage
-	if msg.Channel == "system" {
-		return al.processSystemMessage(ctx, msg)
-	}
-
-	route, agent, routeErr := al.resolveMessageRoute(msg)
-	if routeErr != nil {
-		return "", routeErr
-	}
-
-	allocation := al.allocateRouteSession(route, msg)
-
-	// Resolve session key from the route allocation, while preserving explicit
-	// agent-scoped keys supplied by the caller.
-	scopeKey := resolveScopeKey(allocation.SessionKey, msg.SessionKey)
-	sessionKey := al.resolveAttachedThreadSession(ctx, agent, scopeKey)
-
-	// Reset message-tool state for this round so we don't skip publishing due to a previous round.
-	if tool, ok := agent.Tools.Get("message"); ok {
-		if resetter, ok := tool.(interface{ ResetSentInRound(sessionKey string) }); ok {
-			resetter.ResetSentInRound(sessionKey)
-		}
-	}
-
 	logger.InfoCF("agent", "Routed message",
 		map[string]any{
 			"agent_id":           agent.ID,
@@ -253,14 +343,11 @@ func (al *AgentLoop) processMessageWithPreparation(
 
 	opts := processOptions{
 		Dispatch: DispatchRequest{
-			SessionKey: sessionKey,
-			SessionAliases: buildSessionAliases(
-				sessionKey,
-				append(allocation.SessionAliases, msg.SessionKey, scopeKey)...,
-			),
+			SessionKey:     sessionKey,
+			SessionAliases: sessionAliases,
 			InboundContext: cloneInboundContext(&msg.Context),
 			RouteResult:    cloneResolvedRoute(&route),
-			SessionScope:   session.CloneScope(&allocation.Scope),
+			SessionScope:   sessionScope,
 			UserMessage:    msg.Content,
 			Media:          append([]string(nil), msg.Media...),
 		},
@@ -279,6 +366,14 @@ func (al *AgentLoop) processMessageWithPreparation(
 	opts, err = resolveTurnProfileOptions(al.GetConfig(), opts)
 	if err != nil {
 		return "", err
+	}
+
+	// Reset message-tool state only after session ownership is admitted, so a
+	// losing live caller has no command/tool side effects.
+	if tool, ok := agent.Tools.Get("message"); ok {
+		if resetter, ok := tool.(interface{ ResetSentInRound(sessionKey string) }); ok {
+			resetter.ResetSentInRound(sessionKey)
+		}
 	}
 
 	// context-dependent commands check their own Runtime fields and report

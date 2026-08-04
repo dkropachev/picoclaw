@@ -42,7 +42,7 @@ coordinated with session history commits.
 | `FR-THREADS-004` | SHOULD | Thread UI provides a search workspace and an open-thread chat view, thread cards route directly to `/threads/open/{thread-id}` while search lives under `/threads/search`, and all thread UI surfaces expose thread-native creation/drop actions instead of normal chat history actions. | Search, active thread work, and thread lifecycle actions are distinct user workflows. |
 | `FR-THREADS-005` | MUST | When a model/tool-created auto-switch card opens a newly created empty thread from a user request, the UI seeds that thread exactly once with the concrete requested task, using the card query or thread source query; blank UI-created threads store non-empty metadata but must not fabricate a generic first chat message. | A user asking to start a thread expects the requested work to begin there, while a blank New Thread action should not pollute the thread with generic filler. |
 | `FR-THREADS-006` | MUST | The `threads` tool and thread policy prompt are available by default only to the root/default user-facing agent, never inherited by subturn/spawn child agents, and available to non-default configured agents only when explicitly listed in that agent's `AGENT.md` tools allowlist. | Thread lifecycle changes are UI/session control-plane actions and should not be exposed to background agents accidentally. |
-| `FR-THREADS-007` | MUST | Thread discovery, migration, preview, message-count, and timestamp projection resolve a promoted legacy key to its canonical owner and read session metadata plus metadata-selected history as one directory/session-locked access, so alias ownership cannot change between resolution and projection. Empty `HistorySlot` selects legacy `.jsonl`; `a` or `b` selects only the matching bounded slot, whose modification time is returned for timestamp fallback. Invalid or missing selected slots fail closed and never fall back to legacy or inactive contents, while malformed records inside the selected file retain ordinary tolerant recovery. Thread creation initializes scope, aliases, and a default summary only for a genuinely new empty session; duplicate creation, attach, detach, registry migration, and handoff linkage resolve and mutate under the coordinated memory-store boundary and change only thread-owned `SessionMeta` fields, preserving the exact replacement-owned alias collection, scope, summary, active selector, and all other session state. | Thread surfaces and linkage writes must not show stale promoted/inactive history or clobber any field of an atomic session replacement. |
+| `FR-THREADS-007` | MUST | Thread discovery, migration, preview, message-count, and timestamp projection resolve a promoted legacy key to its canonical owner and read session metadata plus metadata-selected history as one directory/session-locked access, so alias ownership cannot change between resolution and projection. Empty `HistorySlot` selects legacy `.jsonl`; `a` or `b` selects only the matching bounded slot, whose modification time is returned for timestamp fallback. Invalid or missing selected slots fail closed and never fall back to legacy or inactive contents, while malformed records inside the selected file retain ordinary tolerant recovery. Thread creation initializes scope, aliases, and a default summary only for a genuinely new empty session; duplicate creation, attach, detach, registry migration, and handoff linkage resolve and mutate under the coordinated memory-store boundary and change only thread-owned `SessionMeta` fields, preserving the exact replacement-owned alias collection, scope, summary, active selector, and all other session state. Every create/register/attach/detach operation rejects a structured `review` origin or primary key before registry/handoff writes and rechecks inside the locked metadata callback, leaving the protected snapshot and revision unchanged. | Thread surfaces and linkage writes must not show stale promoted/inactive history, clobber an atomic replacement, or turn a guessed protected review key into an attachable ordinary thread. |
 
 ## Data And State Model
 
@@ -187,6 +187,10 @@ from the current result list.
     initialize session identity/default summary only for a genuinely new empty
     session, preserving `HistorySlot`, scope, aliases, summary, and concurrent
     session state otherwise.
+11. Before any registry, handoff, or session mutation, strictly resolve every
+    supplied origin and target-primary key and reject a structured `review`
+    scope. Recheck the same rule inside each coordinated metadata callback so a
+    concurrent review reservation cannot be attached, registered, or detached.
 
 ## Cross-Feature Behavior
 
@@ -212,6 +216,8 @@ or have its commit selector overwritten by a thread link update.
   rule requests it.
 - Lookup/navigation text cannot create, register, or attach a new thread unless
   the user explicitly asks to create one.
+- A review-scoped origin, primary session, or alias fails closed before any
+  thread registry, handoff, summary, or session metadata change.
 - Model/tool-created empty threads from a concrete user request must not remain
   blank after they open; the persisted source query is non-empty and the first
   sent prompt is the cleaned requested task. The same target session and seed

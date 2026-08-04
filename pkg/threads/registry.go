@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -93,15 +96,81 @@ func (s Store) writeThreadMeta(meta ThreadMeta) error {
 	if err := s.ensureThreadDirs(); err != nil {
 		return err
 	}
-	meta = normalizeThreadMeta(meta)
-	if meta.ID == "" {
-		return errors.New("threads: thread id is empty")
-	}
-	data, err := json.MarshalIndent(meta, "", "  ")
+	meta, data, err := marshalThreadMeta(meta)
 	if err != nil {
 		return err
 	}
+	if s.testHooks != nil && s.testHooks.writeThreadMeta != nil {
+		if err := s.testHooks.writeThreadMeta(meta); err != nil {
+			return err
+		}
+	}
 	return fileutil.WriteFileAtomic(s.threadPath(meta.ID), data, 0o644)
+}
+
+func marshalThreadMeta(meta ThreadMeta) (ThreadMeta, []byte, error) {
+	meta = normalizeThreadMeta(meta)
+	if meta.ID == "" {
+		return ThreadMeta{}, nil, errors.New("threads: thread id is empty")
+	}
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return ThreadMeta{}, nil, err
+	}
+	return meta, data, nil
+}
+
+type durableFileBackup struct {
+	path     string
+	data     []byte
+	mode     os.FileMode
+	existed  bool
+	expected []byte
+}
+
+func readDurableFileBackup(path string) (durableFileBackup, error) {
+	backup := durableFileBackup{path: path, mode: 0o644}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return backup, nil
+	}
+	if err != nil {
+		return durableFileBackup{}, err
+	}
+	backup.data = data
+	backup.existed = true
+	if info, statErr := os.Stat(path); statErr == nil {
+		backup.mode = info.Mode().Perm()
+	} else {
+		return durableFileBackup{}, statErr
+	}
+	return backup, nil
+}
+
+func (b durableFileBackup) expecting(data []byte) durableFileBackup {
+	b.expected = append([]byte(nil), data...)
+	return b
+}
+
+func (b durableFileBackup) restore() error {
+	current, err := os.ReadFile(b.path)
+	currentExists := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if currentExists == b.existed && (!currentExists || slices.Equal(current, b.data)) {
+		return nil
+	}
+	if !currentExists || b.expected == nil || !slices.Equal(current, b.expected) {
+		return errors.New("threads: artifact changed concurrently; conditional rollback refused")
+	}
+	if b.existed {
+		return fileutil.WriteFileAtomic(b.path, b.data, b.mode)
+	}
+	if err := fileutil.RemoveDurable(b.path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func (s Store) listThreadMetas() ([]ThreadMeta, error) {
@@ -140,25 +209,34 @@ func (s Store) threadFromRegistryMeta(meta ThreadMeta) (Thread, bool) {
 	if meta.ID == "" || meta.PrimarySessionKey == "" {
 		return Thread{}, false
 	}
-
-	sessionMeta := memory.SessionMeta{}
-	messages := []providers.Message{}
-	historyModifiedAt := time.Time{}
-	if sessionStore, err := s.openSessionStore(); err == nil {
-		sessionKey := meta.PrimarySessionKey
-		if loadedMessages, loadedMeta, modifiedAt, readErr := sessionStore.ReadSessionState(
-			context.Background(),
-			sessionKey,
-		); readErr == nil {
-			messages = loadedMessages
-			sessionMeta = loadedMeta
-			historyModifiedAt = modifiedAt
-			if loadedMeta.Key != "" && loadedMeta.Key != meta.PrimarySessionKey {
-				meta.SessionKeys = uniqueStrings(append([]string{loadedMeta.Key}, meta.SessionKeys...))
-				meta.PrimarySessionKey = loadedMeta.Key
-			}
-		}
+	state, err := s.readOrdinarySessionState(
+		context.Background(),
+		meta.PrimarySessionKey,
+		true,
+	)
+	if err != nil {
+		// Registry records are derived. Ownership, metadata, and scope failures
+		// hide the complete projection rather than exposing stale identifiers.
+		return Thread{}, false
 	}
+	return threadFromOrdinarySessionState(meta, state)
+}
+
+func threadFromOrdinarySessionState(
+	meta ThreadMeta,
+	state ordinarySessionState,
+) (Thread, bool) {
+	meta = normalizeThreadMeta(meta)
+	if !state.found || state.key == "" {
+		return Thread{}, false
+	}
+	if state.key != meta.PrimarySessionKey {
+		meta.SessionKeys = uniqueStrings(append([]string{state.key}, meta.SessionKeys...))
+		meta.PrimarySessionKey = state.key
+	}
+	sessionMeta := state.meta
+	messages := state.history
+	historyModifiedAt := state.historyModifiedAt
 	visible := visibleMessages(messages)
 	preview := ""
 	for _, msg := range visible {
@@ -230,7 +308,7 @@ func (s Store) threadFromRegistryMeta(meta ThreadMeta) (Thread, bool) {
 
 func (s Store) CreateThread(ctx context.Context, req CreateRequest) (Thread, error) {
 	s = s.withDefaults()
-	now := time.Now()
+	now := time.Now().UTC()
 	threadID := strings.TrimSpace(req.ID)
 	if threadID == "" {
 		threadID = GenerateSessionID()
@@ -242,6 +320,13 @@ func (s Store) CreateThread(ctx context.Context, req CreateRequest) (Thread, err
 	primarySessionKey, err := s.canonicalSessionKey(ctx, primarySessionKey)
 	if err != nil {
 		return Thread{}, err
+	}
+	if s.testHooks != nil && s.testHooks.afterCreatePreflight != nil {
+		s.testHooks.afterCreatePreflight()
+	}
+	registryBackup, err := readDurableFileBackup(s.threadPath(threadID))
+	if err != nil {
+		return Thread{}, fmt.Errorf("threads: snapshot registry before create: %w", err)
 	}
 	uiSessionID := strings.TrimSpace(req.UISessionID)
 	if uiSessionID == "" {
@@ -268,16 +353,30 @@ func (s Store) CreateThread(ctx context.Context, req CreateRequest) (Thread, err
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
+	// Claim the session under the JSONL store's directory/session locks before
+	// publishing a registry record. If review admission won after the preflight,
+	// the callback rejects it without leaving a discoverable thread behind. If
+	// this callback wins, the resulting metadata makes later review admission
+	// conflict before the registry record is published.
+	linkChange, err := s.claimSessionThreadLink(ctx, primarySessionKey, threadID, now, false)
+	if err != nil {
+		return Thread{}, err
+	}
+	primarySessionKey = linkChange.key
+	meta.PrimarySessionKey = primarySessionKey
+	meta.SessionKeys = uniqueStrings(append([]string{primarySessionKey}, meta.SessionKeys...))
+	_, registryExpected, err := marshalThreadMeta(meta)
+	if err != nil {
+		return Thread{}, rollbackThreadOperation(ctx, err, nil, linkChange)
+	}
+	registryBackup = registryBackup.expecting(registryExpected)
 	if err := s.writeThreadMeta(meta); err != nil {
-		return Thread{}, err
+		return Thread{}, rollbackThreadOperation(ctx, err, []durableFileBackup{registryBackup}, linkChange)
 	}
-	if err := s.setSessionThreadLink(primarySessionKey, threadID, now); err != nil {
-		return Thread{}, err
-	}
-	_ = ctx
 	thread, ok := s.threadFromRegistryMeta(meta)
 	if !ok {
-		return Thread{}, errors.New("threads: created thread could not be loaded")
+		err := errors.New("threads: created thread could not be loaded")
+		return Thread{}, rollbackThreadOperation(ctx, err, []durableFileBackup{registryBackup}, linkChange)
 	}
 	return thread, nil
 }
@@ -290,6 +389,16 @@ func (s Store) UpdateThread(id string, req UpdateRequest) (Thread, bool, error) 
 	if err != nil {
 		return Thread{}, false, err
 	}
+	state, err := s.readOrdinarySessionState(
+		context.Background(),
+		meta.PrimarySessionKey,
+		true,
+	)
+	if err != nil {
+		return Thread{}, false, err
+	}
+	meta.PrimarySessionKey = state.key
+	meta.SessionKeys = uniqueStrings(append([]string{state.key}, meta.SessionKeys...))
 	if strings.TrimSpace(req.Title) != "" {
 		meta.Title = truncateRunes(req.Title, 80)
 	}
@@ -306,16 +415,19 @@ func (s Store) UpdateThread(id string, req UpdateRequest) (Thread, bool, error) 
 		if *req.Discoverable {
 			meta.DroppedAt = nil
 		} else if meta.DroppedAt == nil {
-			now := time.Now()
+			now := time.Now().UTC()
 			meta.DroppedAt = &now
 		}
 	}
-	meta.UpdatedAt = time.Now()
+	meta.UpdatedAt = time.Now().UTC()
+	thread, ok := threadFromOrdinarySessionState(meta, state)
+	if !ok {
+		return Thread{}, false, errors.New("threads: updated thread could not be projected")
+	}
 	if err := s.writeThreadMeta(meta); err != nil {
 		return Thread{}, false, err
 	}
-	thread, ok := s.threadFromRegistryMeta(meta)
-	return thread, ok, nil
+	return thread, true, nil
 }
 
 func (s Store) DropThread(id string) (Thread, bool, error) {
@@ -329,6 +441,9 @@ func (s Store) DropThread(id string) (Thread, bool, error) {
 
 func (s Store) RegisterCurrent(ctx context.Context, cfg CreateRequest, scope *session.SessionScope) (Thread, error) {
 	s = s.withDefaults()
+	if err := rejectReviewThreadSessionScope(scope); err != nil {
+		return Thread{}, err
+	}
 	sessionKey := strings.TrimSpace(cfg.PrimarySessionKey)
 	if sessionKey == "" {
 		return Thread{}, errors.New("threads: current session key is empty")
@@ -355,6 +470,9 @@ func (s Store) RegisterCurrent(ctx context.Context, cfg CreateRequest, scope *se
 
 func (s Store) AttachCurrent(ctx context.Context, req AttachRequest) (Thread, ThreadHandoff, error) {
 	s = s.withDefaults()
+	if err := rejectReviewThreadSessionScope(req.Scope); err != nil {
+		return Thread{}, ThreadHandoff{}, err
+	}
 	if strings.TrimSpace(req.ThreadID) == "" {
 		return Thread{}, ThreadHandoff{}, errors.New("threads: thread id is empty")
 	}
@@ -373,9 +491,20 @@ func (s Store) AttachCurrent(ctx context.Context, req AttachRequest) (Thread, Th
 	if err != nil {
 		return Thread{}, ThreadHandoff{}, err
 	}
-	now := time.Now()
-	meta.PrimarySessionKey = primarySessionKey
-	meta.SessionKeys = uniqueStrings(append(meta.SessionKeys, originSessionKey, primarySessionKey))
+	if s.testHooks != nil && s.testHooks.afterAttachPreflight != nil {
+		s.testHooks.afterAttachPreflight()
+	}
+	// Registry targets must already be authoritative ordinary sessions. This
+	// read is repeated after the deterministic race boundary: a missing target
+	// is never synthesized and no origin/registry/handoff state changes first.
+	targetState, err := s.readOrdinarySessionState(ctx, primarySessionKey, true)
+	if err != nil {
+		return Thread{}, ThreadHandoff{}, err
+	}
+	primarySessionKey = targetState.key
+	now := time.Now().UTC()
+	meta.PrimarySessionKey = targetState.key
+	meta.SessionKeys = uniqueStrings(append(meta.SessionKeys, originSessionKey, targetState.key))
 	if req.OwnerIdentity != "" && meta.OwnerIdentity == "" {
 		meta.OwnerIdentity = req.OwnerIdentity
 	}
@@ -383,13 +512,6 @@ func (s Store) AttachCurrent(ctx context.Context, req AttachRequest) (Thread, Th
 		meta.AgentID = req.AgentID
 	}
 	meta.UpdatedAt = now
-	if err := s.writeThreadMeta(meta); err != nil {
-		return Thread{}, ThreadHandoff{}, err
-	}
-	if err := s.setSessionThreadLink(originSessionKey, meta.ID, now); err != nil {
-		return Thread{}, ThreadHandoff{}, err
-	}
-
 	handoff := ThreadHandoff{
 		ID:               GenerateHandoffID(),
 		OriginSessionKey: originSessionKey,
@@ -400,22 +522,86 @@ func (s Store) AttachCurrent(ctx context.Context, req AttachRequest) (Thread, Th
 		Summary:          strings.TrimSpace(req.Summary),
 		CreatedAt:        now,
 	}
-	if err := s.writeHandoff(handoff); err != nil {
+	projected, ok := threadFromOrdinarySessionState(meta, targetState)
+	if !ok {
+		return Thread{}, ThreadHandoff{}, errors.New("threads: attached thread could not be projected")
+	}
+	registryBackup, err := readDurableFileBackup(s.threadPath(meta.ID))
+	if err != nil {
+		return Thread{}, ThreadHandoff{}, fmt.Errorf("threads: snapshot registry before attach: %w", err)
+	}
+	handoffBackup, err := readDurableFileBackup(s.handoffPath(handoff.ID))
+	if err != nil {
+		return Thread{}, ThreadHandoff{}, fmt.Errorf("threads: snapshot handoff before attach: %w", err)
+	}
+
+	// Origin ownership is the commit guard. The strict mutation arbitrates with
+	// review admission before registry, handoff, or target history changes.
+	linkChange, err := s.claimSessionThreadLink(ctx, originSessionKey, meta.ID, now, false)
+	if err != nil {
 		return Thread{}, ThreadHandoff{}, err
 	}
+	originSessionKey = linkChange.key
+	meta.SessionKeys = uniqueStrings(append(meta.SessionKeys, originSessionKey))
+	handoff.OriginSessionKey = originSessionKey
+	_, registryExpected, err := marshalThreadMeta(meta)
+	if err != nil {
+		return Thread{}, ThreadHandoff{}, rollbackThreadOperation(
+			ctx,
+			err,
+			nil,
+			linkChange,
+		)
+	}
+	handoffExpected, err := marshalHandoff(handoff)
+	if err != nil {
+		return Thread{}, ThreadHandoff{}, rollbackThreadOperation(
+			ctx,
+			err,
+			nil,
+			linkChange,
+		)
+	}
+	registryBackup = registryBackup.expecting(registryExpected)
+	handoffBackup = handoffBackup.expecting(handoffExpected)
+	if err := s.writeThreadMeta(meta); err != nil {
+		return Thread{}, ThreadHandoff{}, rollbackThreadOperation(
+			ctx,
+			err,
+			[]durableFileBackup{registryBackup},
+			linkChange,
+		)
+	}
+	if err := s.writeHandoff(handoff); err != nil {
+		return Thread{}, ThreadHandoff{}, rollbackThreadOperation(
+			ctx,
+			err,
+			[]durableFileBackup{registryBackup, handoffBackup},
+			linkChange,
+		)
+	}
 	if handoff.Summary != "" && primarySessionKey != originSessionKey {
-		if store, err := memory.NewJSONLStore(s.Dir); err == nil {
-			_ = store.AddFullMessage(ctx, primarySessionKey, providers.Message{
-				Role:    "user",
-				Content: "Continued from another session.\n\n" + handoff.Summary,
-			})
+		message := providers.Message{
+			Role:    "user",
+			Content: "Continued from another session.\n\n" + handoff.Summary,
+		}
+		var appendErr error
+		if s.testHooks != nil && s.testHooks.appendSummary != nil {
+			appendErr = s.testHooks.appendSummary(ctx, primarySessionKey, message)
+		} else if store, openErr := memory.NewJSONLStore(s.Dir); openErr != nil {
+			appendErr = openErr
+		} else {
+			appendErr = store.AddFullMessage(ctx, primarySessionKey, message)
+		}
+		if appendErr != nil {
+			// Attach and handoff are already durable. Summary projection is an
+			// explicitly best-effort enrichment; failure cannot safely roll back a
+			// possibly committed append, so report it operationally without turning
+			// a successful attach into a partial-state error.
+			log.Printf("threads: attach %s summary projection failed: %v", handoff.ID, appendErr)
 		}
 	}
-	thread, ok := s.threadFromRegistryMeta(meta)
-	if !ok {
-		return Thread{}, ThreadHandoff{}, errors.New("threads: attached thread could not be loaded")
-	}
-	return thread, handoff, nil
+	return projected, handoff, nil
 }
 
 func (s Store) DetachCurrent(sessionKey string) error {
@@ -430,6 +616,36 @@ func (s Store) ReturnToOrigin(handoffID string) (ThreadHandoff, bool, error) {
 	if err != nil {
 		return ThreadHandoff{}, false, err
 	}
+	// Handoffs are derived pointers. Validate both authoritative endpoints on
+	// every return so stale files cannot redirect into, or reveal, a review or
+	// corrupt session after their original creation.
+	if _, stateErr := s.readOrdinarySessionState(
+		context.Background(),
+		handoff.OriginSessionKey,
+		true,
+	); stateErr != nil {
+		if errors.Is(stateErr, errSessionMissing) {
+			return ThreadHandoff{}, false, nil
+		}
+		return ThreadHandoff{}, false, stateErr
+	}
+	targetMeta, err := s.readThreadMeta(handoff.TargetThreadID)
+	if os.IsNotExist(err) {
+		return ThreadHandoff{}, false, nil
+	}
+	if err != nil {
+		return ThreadHandoff{}, false, err
+	}
+	if _, err := s.readOrdinarySessionState(
+		context.Background(),
+		targetMeta.PrimarySessionKey,
+		true,
+	); err != nil {
+		if errors.Is(err, errSessionMissing) {
+			return ThreadHandoff{}, false, nil
+		}
+		return ThreadHandoff{}, false, err
+	}
 	return handoff, true, nil
 }
 
@@ -438,14 +654,23 @@ func (s Store) writeHandoff(handoff ThreadHandoff) error {
 	if err := s.ensureThreadDirs(); err != nil {
 		return err
 	}
-	if strings.TrimSpace(handoff.ID) == "" {
-		return errors.New("threads: handoff id is empty")
-	}
-	data, err := json.MarshalIndent(handoff, "", "  ")
+	data, err := marshalHandoff(handoff)
 	if err != nil {
 		return err
 	}
+	if s.testHooks != nil && s.testHooks.writeHandoff != nil {
+		if err := s.testHooks.writeHandoff(handoff); err != nil {
+			return err
+		}
+	}
 	return fileutil.WriteFileAtomic(s.handoffPath(handoff.ID), data, 0o644)
+}
+
+func marshalHandoff(handoff ThreadHandoff) ([]byte, error) {
+	if strings.TrimSpace(handoff.ID) == "" {
+		return nil, errors.New("threads: handoff id is empty")
+	}
+	return json.MarshalIndent(handoff, "", "  ")
 }
 
 func (s Store) readHandoff(id string) (ThreadHandoff, error) {
@@ -460,24 +685,129 @@ func (s Store) readHandoff(id string) (ThreadHandoff, error) {
 	return handoff, nil
 }
 
-func (s Store) setSessionThreadLink(sessionKey, threadID string, attachedAt time.Time) error {
+type sessionThreadLinkChange struct {
+	store           *memory.JSONLStore
+	key             string
+	before          memory.SessionMeta
+	after           memory.SessionMeta
+	sessionExisted  bool
+	metadataExisted bool
+}
+
+func (c *sessionThreadLinkChange) rollback() error {
+	if c == nil || c.store == nil || c.key == "" {
+		return nil
+	}
+	var replacement *memory.SessionMeta
+	if c.metadataExisted {
+		before := c.before
+		replacement = &before
+	} else if !c.sessionExisted {
+		deleted, err := c.store.CompareAndDeleteEmptySessionStrict(
+			context.Background(),
+			c.key,
+			c.after,
+		)
+		if err != nil {
+			return fmt.Errorf("threads: roll back empty session thread link: %w", err)
+		}
+		if !deleted {
+			return errors.New(
+				"threads: roll back empty session thread link: session changed concurrently",
+			)
+		}
+		return nil
+	}
+	restored, err := c.store.CompareAndSwapSessionMetaStrict(
+		context.Background(),
+		c.key,
+		c.after,
+		replacement,
+	)
+	if err != nil {
+		return fmt.Errorf("threads: roll back session thread link: %w", err)
+	}
+	if !restored {
+		return errors.New("threads: roll back session thread link: metadata changed concurrently")
+	}
+	return nil
+}
+
+func rollbackThreadOperation(
+	_ context.Context,
+	operationErr error,
+	artifacts []durableFileBackup,
+	linkChange *sessionThreadLinkChange,
+) error {
+	errs := []error{operationErr}
+	for index := len(artifacts) - 1; index >= 0; index-- {
+		if err := artifacts[index].restore(); err != nil {
+			errs = append(errs, fmt.Errorf("threads: roll back %s: %w", artifacts[index].path, err))
+		}
+	}
+	if err := linkChange.rollback(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func (s Store) claimSessionThreadLink(
+	ctx context.Context,
+	sessionKey,
+	threadID string,
+	attachedAt time.Time,
+	requireExisting bool,
+) (*sessionThreadLinkChange, error) {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" {
-		return nil
+		return nil, errors.New("threads: session key is empty")
 	}
 	sessionStore, err := s.openSessionStore()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return sessionStore.UpdateSessionMeta(context.Background(), sessionKey, func(meta *memory.SessionMeta) error {
-		if meta.CreatedAt.IsZero() {
-			meta.CreatedAt = attachedAt
-		}
-		meta.UpdatedAt = attachedAt
-		meta.ThreadID = strings.TrimSpace(threadID)
-		meta.ThreadAttachedAt = attachedAt
+	change := &sessionThreadLinkChange{store: sessionStore}
+	canonicalKey, _, err := sessionStore.UpdateSessionMetaStrict(
+		ctx,
+		sessionKey,
+		func(meta *memory.SessionMeta, state memory.SessionMetaMutationState) error {
+			if scopeErr := rejectReviewThreadScope(meta.Scope); scopeErr != nil {
+				return scopeErr
+			}
+			if requireExisting && !state.SessionExists {
+				return errSessionMissing
+			}
+			change.before = *meta
+			change.sessionExisted = state.SessionExists
+			change.metadataExisted = state.MetadataExists
+			if meta.CreatedAt.IsZero() {
+				meta.CreatedAt = attachedAt
+			}
+			meta.UpdatedAt = attachedAt
+			meta.ThreadID = strings.TrimSpace(threadID)
+			meta.ThreadAttachedAt = attachedAt
+			change.after = *meta
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	change.key = canonicalKey
+	return change, nil
+}
+
+func (s Store) setSessionThreadLink(
+	ctx context.Context,
+	sessionKey,
+	threadID string,
+	attachedAt time.Time,
+) error {
+	if strings.TrimSpace(sessionKey) == "" {
 		return nil
-	})
+	}
+	_, err := s.claimSessionThreadLink(ctx, sessionKey, threadID, attachedAt, false)
+	return err
 }
 
 func (s Store) clearSessionThreadLink(sessionKey string) error {
@@ -489,12 +819,26 @@ func (s Store) clearSessionThreadLink(sessionKey string) error {
 	if err != nil {
 		return err
 	}
-	return sessionStore.UpdateSessionMeta(context.Background(), sessionKey, func(meta *memory.SessionMeta) error {
-		meta.ThreadID = ""
-		meta.ThreadAttachedAt = time.Time{}
-		meta.UpdatedAt = time.Now()
+	_, _, err = sessionStore.UpdateSessionMetaStrict(
+		context.Background(),
+		sessionKey,
+		func(meta *memory.SessionMeta, state memory.SessionMetaMutationState) error {
+			if scopeErr := rejectReviewThreadScope(meta.Scope); scopeErr != nil {
+				return scopeErr
+			}
+			if !state.SessionExists {
+				return errSessionMissing
+			}
+			meta.ThreadID = ""
+			meta.ThreadAttachedAt = time.Time{}
+			meta.UpdatedAt = time.Now().UTC()
+			return nil
+		},
+	)
+	if errors.Is(err, errSessionMissing) {
 		return nil
-	})
+	}
+	return err
 }
 
 func (s Store) migrateSessionThreads(ctx context.Context) error {
@@ -516,18 +860,37 @@ func (s Store) migrateSessionThreads(ctx context.Context) error {
 			continue
 		}
 		base := strings.TrimSuffix(entry.Name(), ".meta.json")
-		candidate, err := readMeta(filepath.Join(s.Dir, entry.Name()), sessionKeyFromSanitizedBase(base))
+		candidate, err := readMeta(
+			filepath.Join(s.Dir, entry.Name()),
+			sessionKeyFromSanitizedBase(base),
+		)
 		if err != nil {
-			continue
+			return err
 		}
-		messages, meta, historyModifiedAt, err := sessionStore.ReadSessionState(ctx, candidate.Key)
+		candidateKey := candidate.Key
+		canonicalKey, messages, meta, historyModifiedAt, found, err := sessionStore.ReadSessionStateStrict(
+			ctx,
+			candidateKey,
+		)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
+			return err
+		}
+		if !found {
 			continue
 		}
-		canonicalKey := meta.Key
+		// Review working contexts are private derived sessions, never threads.
+		// Skip them before consulting legacy thread fields or writing registry
+		// metadata, including when old metadata already contains those fields.
+		if scopeErr := rejectReviewThreadScope(meta.Scope); scopeErr != nil {
+			if errors.Is(scopeErr, errReviewScope) {
+				continue
+			}
+			return scopeErr
+		}
+		meta.Key = canonicalKey
 		if _, seen := seenCanonical[canonicalKey]; seen {
 			continue
 		}
@@ -543,7 +906,7 @@ func (s Store) migrateSessionThreads(ctx context.Context) error {
 		if threadID == "" {
 			threadID = GenerateSessionID()
 		}
-		if _, err := s.readThreadMeta(threadID); err == nil {
+		if _, threadErr := s.readThreadMeta(threadID); threadErr == nil {
 			continue
 		}
 		scope := scopeFromMeta(meta)
@@ -580,11 +943,38 @@ func (s Store) migrateSessionThreads(ctx context.Context) error {
 				threadMeta.UpdatedAt = historyModifiedAt
 			}
 		}
-		if err := s.writeThreadMeta(threadMeta); err != nil {
+		registryBackup, err := readDurableFileBackup(s.threadPath(threadID))
+		if err != nil {
 			return err
 		}
+		_, registryExpected, err := marshalThreadMeta(threadMeta)
+		if err != nil {
+			return err
+		}
+		registryBackup = registryBackup.expecting(registryExpected)
+		var linkChange *sessionThreadLinkChange
 		if meta.ThreadID == "" {
-			_ = s.setSessionThreadLink(meta.Key, threadID, time.Now())
+			linkChange, err = s.claimSessionThreadLink(
+				ctx,
+				meta.Key,
+				threadID,
+				time.Now().UTC(),
+				true,
+			)
+			if err != nil {
+				return err
+			}
+		}
+		if err := s.writeThreadMeta(threadMeta); err != nil {
+			if linkChange != nil {
+				return rollbackThreadOperation(
+					ctx,
+					err,
+					[]durableFileBackup{registryBackup},
+					linkChange,
+				)
+			}
+			return err
 		}
 	}
 	_ = ctx
@@ -593,6 +983,9 @@ func (s Store) migrateSessionThreads(ctx context.Context) error {
 
 func shouldMigrateSessionMeta(meta memory.SessionMeta) bool {
 	if strings.TrimSpace(meta.Key) == "" {
+		return false
+	}
+	if rejectReviewThreadScope(meta.Scope) != nil {
 		return false
 	}
 	if strings.TrimSpace(meta.ThreadID) != "" ||

@@ -14,6 +14,233 @@ import (
 	"github.com/sipeed/picoclaw/pkg/session"
 )
 
+type revisionFenceAgentRunner struct {
+	captureRevision string
+	captures        []ReadOnlySessionRef
+	agentCalls      int
+}
+
+func (r *revisionFenceAgentRunner) CaptureReadOnlySession(
+	_ context.Context,
+	ref ReadOnlySessionRef,
+) (*FrozenReadOnlySession, error) {
+	r.captures = append(r.captures, ref)
+	return &FrozenReadOnlySession{
+		AgentID: ref.AgentID,
+		Snapshot: session.SessionSnapshot{
+			Key:      session.BuildOpaqueSessionKey("agent:main:web:revision-fence"),
+			Scope:    &session.SessionScope{Version: session.ScopeVersionV1, AgentID: ref.AgentID},
+			Revision: r.captureRevision,
+		},
+		HistoryRevision: "sha256:revision-fence-fixture",
+		FrozenMedia:     media.FrozenSet{Version: media.FrozenSetVersion},
+	}, nil
+}
+
+func (r *revisionFenceAgentRunner) RunAgent(
+	_ context.Context,
+	req AgentRequest,
+) (map[string]any, error) {
+	r.agentCalls++
+	const response = `{"ask_user":false,"reason":"captured revision is sufficient","questions":[]}`
+	structured := ValidateAgentStructuredOutput(response, req.Output)
+	if !structured.Valid {
+		return nil, errors.New("revision-fence fixture produced invalid gate output")
+	}
+	return map[string]any{
+		"text":             response,
+		"structured":       structured.Structured,
+		"structured_json":  structured.RawJSON,
+		"structured_valid": true,
+	}, nil
+}
+
+func revisionFenceGateCompilation(t *testing.T) *GateCompilation {
+	t.Helper()
+	compilation, err := CompileGateWorkflow("Revision-fenced gate", []GateSpec{{
+		ID:       "discussion",
+		Kind:     GateAIWorkingContext,
+		AgentID:  "main",
+		Criteria: "Ask only when captured evidence cannot resolve the finding.",
+		Title:    "Discuss finding",
+	}}, map[string]any{"finding": "bounded"})
+	if err != nil {
+		t.Fatalf("CompileGateWorkflow() error = %v", err)
+	}
+	return compilation
+}
+
+func TestReadOnlySessionRefExpectedRevisionIsPrivateBoundedAndCloned(t *testing.T) {
+	const revision = "ssr_v1_exact_projection"
+	ref := ReadOnlySessionRef{
+		AgentID:          "main",
+		Session:          "agent:main:web:revision-fence",
+		ExpectedRevision: revision,
+	}
+	normalized, err := normalizePrivateReadOnlySessionRef(ref)
+	if err != nil || normalized != ref {
+		t.Fatalf("normalizePrivateReadOnlySessionRef() = (%#v, %v), want exact ref", normalized, err)
+	}
+	encoded, err := json.Marshal(ref)
+	if err != nil {
+		t.Fatalf("json.Marshal(ref) error = %v", err)
+	}
+	if bytes.Contains(encoded, []byte(revision)) || bytes.Contains(encoded, []byte("ExpectedRevision")) {
+		t.Fatalf("public ref JSON exposed revision capability: %s", encoded)
+	}
+
+	request := RunRequest{PrivateRoot: &PrivateRootRequest{
+		Values:          map[string]any{},
+		ReadOnlySession: &ref,
+	}}
+	cloned, err := cloneRunRequestForExecution(request)
+	if err != nil {
+		t.Fatalf("cloneRunRequestForExecution() error = %v", err)
+	}
+	if cloned.PrivateRoot == nil || cloned.PrivateRoot.ReadOnlySession == nil ||
+		*cloned.PrivateRoot.ReadOnlySession != ref ||
+		cloned.PrivateRoot.ReadOnlySession == request.PrivateRoot.ReadOnlySession {
+		t.Fatalf("cloned revision ref = %#v, want detached %#v", cloned.PrivateRoot, ref)
+	}
+
+	invalid := []string{
+		" surrounded ",
+		string([]byte{0xff}),
+		strings.Repeat("r", maxPrivateSessionRevisionBytes+1),
+	}
+	for _, candidate := range invalid {
+		t.Run("invalid", func(t *testing.T) {
+			bad := ref
+			bad.ExpectedRevision = candidate
+			if _, err := normalizePrivateReadOnlySessionRef(bad); !errors.Is(err, ErrPrivateWorkflowContext) {
+				t.Fatalf("normalize revision error = %v, want %v", err, ErrPrivateWorkflowContext)
+			}
+		})
+	}
+	compatible := ref
+	compatible.ExpectedRevision = ""
+	if got, err := normalizePrivateReadOnlySessionRef(compatible); err != nil || got != compatible {
+		t.Fatalf("empty compatibility revision = (%#v, %v), want accepted", got, err)
+	}
+}
+
+func TestPrivateRootRevisionFencePrecedesDurableCreation(t *testing.T) {
+	tests := []struct {
+		name             string
+		expected         string
+		captured         string
+		wantErr          bool
+		wantPersistedRev string
+		wantAgentCalls   int
+	}{
+		{
+			name:             "exact revision",
+			expected:         "ssr_v1_projected",
+			captured:         "ssr_v1_projected",
+			wantPersistedRev: "",
+			wantAgentCalls:   1,
+		},
+		{
+			name:             "empty compatibility fence",
+			captured:         "ssr_v1_current",
+			wantPersistedRev: "",
+			wantAgentCalls:   1,
+		},
+		{
+			name:     "stale revision",
+			expected: "ssr_v1_projected",
+			captured: "ssr_v1_mutated",
+			wantErr:  true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			store := NewFileRunStore(workspace)
+			agents := &revisionFenceAgentRunner{captureRevision: test.captured}
+			compilation := revisionFenceGateCompilation(t)
+			compilation.PrivateRoot.ReadOnlySession = &ReadOnlySessionRef{
+				AgentID:          "main",
+				Session:          "agent:main:web:revision-fence",
+				ExpectedRevision: test.expected,
+			}
+			result, runErr := (&Executor{
+				WorkspaceDir: workspace,
+				Store:        store,
+				Agents:       agents,
+			}).Run(context.Background(), RunRequest{
+				Workflow:    compilation.Workflow,
+				WorkflowRef: "inline/revision-fenced-gate",
+				PrivateRoot: compilation.PrivateRoot,
+			})
+			if test.wantErr {
+				if result != nil || !errors.Is(runErr, ErrPrivateWorkflowContext) {
+					t.Fatalf("Run() = (%#v, %v), want pre-create revision failure", result, runErr)
+				}
+				runs, listErr := store.ListRuns(context.Background())
+				if listErr != nil || len(runs) != 0 {
+					t.Fatalf("durable runs after stale capture = %#v, err %v", runs, listErr)
+				}
+			} else {
+				if runErr != nil || result == nil {
+					t.Fatalf("Run() = (%#v, %v), want captured working gate", result, runErr)
+				}
+				persisted, getErr := store.GetRun(context.Background(), result.RunID)
+				if getErr != nil || persisted.privateRoot == nil || persisted.privateRoot.ReadOnlySession == nil {
+					t.Fatalf("GetRun() = (%#v, %v), want captured private root", persisted, getErr)
+				}
+				if got := persisted.privateRoot.ReadOnlySession.Snapshot.Revision; got != test.wantPersistedRev {
+					t.Fatalf("persisted source revision = %q, want stripped %q", got, test.wantPersistedRev)
+				}
+			}
+			if len(agents.captures) != 1 || agents.captures[0].ExpectedRevision != test.expected {
+				t.Fatalf("capture refs = %#v, want exact revision %q", agents.captures, test.expected)
+			}
+			if agents.agentCalls != test.wantAgentCalls {
+				t.Fatalf("agent calls = %d, want %d", agents.agentCalls, test.wantAgentCalls)
+			}
+		})
+	}
+}
+
+func TestPrivateRootMalformedRevisionFailsBeforeCaptureOrDurableCreation(t *testing.T) {
+	invalid := []string{
+		" stale ",
+		string([]byte{0xff}),
+		strings.Repeat("r", maxPrivateSessionRevisionBytes+1),
+	}
+	for _, expected := range invalid {
+		workspace := t.TempDir()
+		store := NewFileRunStore(workspace)
+		agents := &revisionFenceAgentRunner{captureRevision: "unexpected"}
+		compilation := revisionFenceGateCompilation(t)
+		compilation.PrivateRoot.ReadOnlySession = &ReadOnlySessionRef{
+			AgentID:          "main",
+			Session:          "agent:main:web:revision-fence",
+			ExpectedRevision: expected,
+		}
+		result, runErr := (&Executor{
+			WorkspaceDir: workspace,
+			Store:        store,
+			Agents:       agents,
+		}).Run(context.Background(), RunRequest{
+			Workflow:    compilation.Workflow,
+			WorkflowRef: "inline/malformed-revision-gate",
+			PrivateRoot: compilation.PrivateRoot,
+		})
+		if result != nil || !errors.Is(runErr, ErrPrivateWorkflowContext) {
+			t.Fatalf("Run(malformed revision) = (%#v, %v), want private-context failure", result, runErr)
+		}
+		if len(agents.captures) != 0 || agents.agentCalls != 0 {
+			t.Fatalf("malformed revision invoked agents: captures=%d calls=%d", len(agents.captures), agents.agentCalls)
+		}
+		runs, listErr := store.ListRuns(context.Background())
+		if listErr != nil || len(runs) != 0 {
+			t.Fatalf("durable runs after malformed revision = %#v, err %v", runs, listErr)
+		}
+	}
+}
+
 func TestPrivateGateAdmissionRejectsPostCompileWorkflowMutation(t *testing.T) {
 	compilation, err := CompileGateWorkflow("Stamped gate", []GateSpec{{
 		ID:        "policy",

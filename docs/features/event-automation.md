@@ -64,6 +64,11 @@ protocol after confirming that the pull request still has the reviewed head.
 Ambiguous external outcomes are terminal and never blindly retried; the
 workbench lets a human reconcile them as visibly submitted or verified absent
 without making another GitHub call.
+When a review attention policy needs the PR discussion as AI working context,
+the review service lazily projects the authoritative SQLite transcript into one
+agent-owned, per-case session. That session is a derived internal view with a
+stable key across optimistic review versions; it is not exposed by review DTOs
+or browser session discovery and is excluded from Seahorse indexing.
 Durable inputs remain separate from the process-local
 [`pkg/events`](../../pkg/events) observability bus: runtime events are
 best-effort in-process signals, while external automation events and dispatch
@@ -93,7 +98,10 @@ otherwise fails before a provider request.
   `GenericWebhookConfig.Repositories`/`TargetUser`,
   `webhook.BackendConfig.ConnectorRepositories`/`ConnectorTargetUsers`, the
   connector runtime admission check, bounded GitHub resource/target projection,
-  and the event-source repository-file importer.
+  and the event-source repository-file importer. Review working context uses
+  `reviews.Service.WithWorkingContext`, `reviews.WorkingContextRuntimeAcquire`,
+  `reviews.WorkingContextRequest`, and the gateway's exact-generation agent
+  session-store resolver.
 - Runtime ordering: resolve disabled-safe config, normalize and validate an
   envelope, enforce the payload limit, redact configured fields, atomically
   insert or return the existing deduplicated event, lease and renew routing,
@@ -121,7 +129,12 @@ otherwise fails before a provider request.
   GitHub repository scope accepts all repositories; matching ignores case and
   list order; ignored delivery IDs intentionally create no deduplication state;
   target facts are routing metadata rather than authorization; and repository
-  and target-user strings remain subject to public-identity secret checks.
+  and target-user strings remain subject to public-identity secret checks. A
+  review working-context session is a hidden derived view rather than another
+  authority: its key excludes the mutable case version, its full scope and
+  history are verified after every materialization, SQLite remains the only
+  review transcript, and review-scoped sessions do not enter browser session
+  discovery or Seahorse indexing.
 
 ## Requirements
 
@@ -172,6 +185,7 @@ otherwise fails before a provider request.
 | `FR-EVENT-AUTOMATION-041` | MUST | An operator explicitly installs the built-in `github-pr-review` workflow and an authenticated GitHub `pull_request.review_requested` event targets the configured user. | The workflow acquires a workspace at the exact pull-request head, fetches the exact provider-authenticated base-repository revision, verifies both object IDs and the checked-out head, derives the merge base, and builds deterministic context-rich unified diffs only for changed production files through native `git.diff`. Each selected diff is at most 128 KiB and the aggregate is at most 512 KiB; any missing, malformed, empty, non-UTF-8, or oversized evidence fails closed before model execution. The isolated no-tools structured reviewer receives only this bounded path-relative evidence and cannot inspect the checkout or post to GitHub. A successful run may expose the reserved versioned `picoclawReviewDraft`; before acknowledging its dispatch, the event dispatcher validates and idempotently captures its summary, tests, residual risks, and zero to 200 bounded findings into the event SQLite store, bound to the exact event, dispatch, run, workflow revision, repository, pull request, and reviewed head. | One capture creates one durable review case and ordered findings. A zero-finding draft resolves immediately as `all_dropped`; otherwise the case is `open`. Reconciliation with the same immutable identity/content returns the existing case, while different content for an already captured dispatch/run conflicts. Workflows without the reserved output retain ordinary dispatch behavior. | Capture accepts only a GitHub review-request envelope whose authenticated source is either a verified webhook body or the trusted provider poller, and whose dispatch/run identity is present in the same store. Invalid schemas, revisions, paths, lines, severities, URLs, object IDs, sizes, repository identities, Git ancestry, evidence bounds, or identity mismatches fail capture or preparation and keep the dispatch retryable. Repository text and code remain untrusted model data; the review agent has no tools or GitHub write authority. | Findings must survive process failure as a human-owned draft instead of disappearing in workflow output or being posted automatically by a model. |
 | `FR-EVENT-AUTOMATION-042` | MUST | An authenticated user opens `/reviews`, filters or pages cases, selects one case, edits a finding, drops/restores it, chats about the case or a finding, or requests a rephrase. | The responsive master/detail workbench loads strict token-free projections through the launcher's same-origin `/api/reviews*` proxy. Every complete case read holds one SQLite read transaction across its case, ordered findings, ordered messages, and latest submission, so one response cannot mix rows from different optimistic versions even when another process commits between component queries. Every mutation carries the current optimistic case version. Editing replaces bounded finding fields; dropping the last active finding moves the case to `all_dropped`; restoring reopens it. Chat durably records the human message before an isolated no-tools/no-history/no-cache AI call and then records its answer. Rephrase durably records the instruction and structured suggestion but changes no finding until the user applies it through the ordinary edit path. | Findings, case versions, state, and append-only messages persist in SQLite. One case accepts at most 256 messages, each at most 64 KiB and together at most 4 MiB of content. Filters and opaque cursors mutate no durable state. A stale version returns `409` with the latest safe detail so the browser can reload without discarding the user's local text. Submitting, submitted, unknown, and stale cases are read-only; an all-dropped case remains explicitly restorable. | Browser responses and errors cannot represent raw submission requests, idempotency markers, lease tokens/owners, internal diagnostics, deduplication keys, or event payloads. Noncanonical paths/queries, repeated or unknown JSON fields, duplicate keys at any nesting depth, oversized bodies, cross-site mutations, malformed upstream JSON, redirects, and unauthorized gateway responses fail closed. AI concurrency is bounded; chat/rephrase outputs obey the same message limit, while rephrased titles are at most 8 KiB. Repository and transcript content is quoted as untrusted data. The launcher bounds review responses to 32 MiB. A read, commit, cancellation, or corruption error returns no partial aggregate. | Human review, discussion, and wording changes need one auditable surface that preserves authorship and prevents stale tabs or prompt injection from silently changing the final review. |
 | `FR-EVENT-AUTOMATION-043` | MUST | A human confirms submission of an open case with at least one active finding and the exact current version, or explicitly reconciles a terminal unknown case after checking GitHub. | The HTTP submission path atomically freezes only the active findings, summary, repository, pull number, reviewed head SHA, and a unique non-public marker into an immutable pending outbox record, moves the case to `submitting`, returns `202`, and performs no GitHub call. A leased worker first reads the pull request through the exact GitHub tool and requires its current head to equal the reviewed head; only then does it create one pending review at that commit, add each file/line finding through `add_comment_to_pending_review`, and submit the pending review once as `COMMENT` with the summary, body-only findings, and marker through `pull_request_review_write`. The workbench polls until the durable case reaches `submitted`, returns to editable `open` after a definite typed pre-write failure, or displays terminal `submission_unknown`/`stale`. | A successful worker atomically stores the external review identity/URL and resolves the case. A changed head makes the case stale before any GitHub write. Only a typed definite failure known to precede every external call records a public code and reopens the case; an ambiguous/untyped MCP result, lost/expired worker lease, or crash after claim becomes terminal unknown and is never reclaimed automatically. From that exact version, a human may record that the review was found, making the case submitted, or that it was verified absent, recording `reconciled_absent` and reopening the case. Reconciliation itself makes no GitHub call. All-dropped cases create no outbox row and make no GitHub call. | Submission validation rejects stale versions, inactive/empty drafts, malformed repository/revision/path/line/body data, unavailable exact GitHub read/write tools, marker/request mismatches, malformed or mismatched current-head reads, and a changed pull-request head before the write protocol begins. The protocol performs no retries and never deletes a pending review. Once any external call may have reached GitHub, transport/cancellation ambiguity is unknown rather than failed; restart recovery terminalizes expired claims before considering pending work. Reconciliation rejects non-unknown cases, stale versions, unknown resolutions, and attempts whose latest outbox row is not unknown. | Human confirmation must be the sole authority for external publication, and crash recovery must prefer a visible uncertain state plus explicit human reconciliation over duplicate GitHub reviews or comments. |
+| `FR-EVENT-AUTOMATION-044` | MUST | A trusted review attention-policy consumer prepares one or more `ai_working_context` gates for an exact review case and one exact canonical agent. | Each review service pins the exact live agent-runtime generation before serializing its projections by case, reloads one complete atomic case aggregate from SQLite, validates the projected case/findings/messages, atomically reserves its protected review scope, and compare-and-swaps its ordered user/assistant messages plus an empty summary into one opaque agent-owned session. The reservation uses the same process-local directory/canonical-session locks as ordinary live admission and snapshot replacement. The key is derived only from canonical owner, `review` namespace, and case ID, while exact agent-qualified identity and version aliases prevent cross-agent or cross-case rebinding. A synchronous callback receives the coherent SQLite case version, internal canonical key, exact non-empty post-CAS revision, and a bounded detached JSON-native case/finding/message-metadata subject with transcript content and the latest submission record/internal fields unrepresentable. The case lock and runtime lease remain held so the consumer can compile inside the callback and attach `ReadOnlySessionRef{AgentID, Session, ExpectedRevision}` before ordinary private workflow admission. If a competing projection through another service using the same local runtime store advances the session before downstream exact snapshot capture, capture fails closed; an advance after capture cannot change the already frozen evidence. | SQLite remains the sole authoritative review transcript. Projection replaces only the derived local session view; it never imports session writes into review messages, changes a case/finding/submission/workflow run, or adds an eventing table. A later case version may refresh the same key and advance its alias/revision. Session revision fences only the derived view and does not prove that SQLite remained unchanged after the aggregate read; a production gate launcher that requires latest-case admission must bind and revalidate the supplied case version at its durable decision/linkage boundary. The internal key, revision, aliases, and subject are absent from browser-safe review DTOs and browser session discovery. Whichever of ordinary live or protected review admission wins first owns the key; after ownership checks that may read scope metadata, the loser fails before using protected transcript content for commands, history, a provider, a context manager, a public read-only workflow, or thread linkage, and before mutating the session. Seahorse excludes review scope from startup bootstrap and live ingest. A pre-existing ordinary-session collision therefore makes projection fail closed. | Invalid projected case/finding/message data or noncanonical agent identity, an unavailable/stale runtime generation or exact agent store, a nil/unsupported snapshot or atomic-admission capability, alias/key/owner/identity conflict, admission conflict, stale CAS, any replacement error, missing or inexact post-CAS readback, non-advancing/empty revision, or non-JSON/oversized gate subject fails closed before the callback. Cancellation propagates and every case/runtime lease is released. A failed first replacement may leave only a hidden empty review reservation, which an exact retry validates and completes. Cross-process sharing of one JSONL session directory is outside this process-local bridge contract. This bridge changes no eventing or review-draft schema and composes the current workflow engine v11, run schema v6, and validator v7 contracts. | Working-context AI gates need the same durable PR discussion the user sees without making a model-owned session authoritative, exposing an internal transcript through chat discovery, contaminating long-term retrieval, racing reload, or silently consulting the wrong case or agent. |
 
 ## Data And State Model
 
@@ -344,6 +358,22 @@ rewrite its outbox request.
 Complete aggregate reads hold one SQLite snapshot from the case row through
 findings, messages, and the latest submission. A concurrent writer may commit
 in WAL mode, but that commit becomes visible only to the next aggregate read.
+
+The review working-context session is not another review record and adds no
+SQLite schema. It is a lazily rebuilt projection in the selected canonical
+agent's ordinary local session store. Its v1 scope has channel `review` and the
+single key dimension `review=<case-id>`, so the opaque key is stable for that
+case and owner across case versions. Ordered internal aliases carry the exact
+immutable case binding and current review version. An agent-qualified
+`review:agent:<agent-id>:case:<case-id>` base alias plus exact binding-digest
+and version aliases prevent the same case from
+silently moving to another owner, identity, or session while allowing distinct
+agents to own separate projections for that case. The projected history
+contains only the authoritative ordered SQLite review messages and its summary
+is always empty. Browser-safe review DTOs and browser session discovery omit
+the key, revision, aliases, and gate subject; Seahorse does not bootstrap or
+index review-scoped sessions. This projection exists only so an exact workflow
+read-only snapshot can consume it.
 
 JSON serialization emits only `[NOT_HERE]` for either secret format; the normal
 `.security.yml`, `enc://`, and `file://` secure-string paths own the actual
@@ -547,6 +577,7 @@ Owns: CODE pkg/workflows/event_trigger.go
 Owns: CODE pkg/workflows/event_dispatcher.go
 Owns: CODE pkg/agent/workflow_eventing.go
 Owns: CODE pkg/gateway/event_automation.go
+Owns: CODE pkg/gateway/review_working_context.go
 Owns: CODE pkg/gateway/event_webhook*
 Owns: CODE pkg/gateway/event_channel*
 Owns: CODE pkg/gateway/event_operator*
@@ -581,6 +612,7 @@ Owns: TEST pkg/config/events*
 Owns: TEST pkg/workflows/event_trigger_test.go
 Owns: TEST pkg/workflows/event_dispatcher_test.go
 Owns: TEST pkg/gateway/event_automation_test.go
+Owns: TEST pkg/gateway/review_working_context_test.go
 Owns: TEST pkg/gateway/event_webhook_test.go
 Owns: TEST pkg/gateway/event_channel_test.go
 Owns: TEST pkg/gateway/event_operator_test.go
@@ -623,6 +655,7 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
 | Go API | `pkg/eventing.Envelope` | Source-neutral immutable external-event input and stored representation with connector-scoped deduplication and optional replay lineage. | `FR-EVENT-AUTOMATION-002`, `FR-EVENT-AUTOMATION-004`, `FR-EVENT-AUTOMATION-010` |
 | Go API | `pkg/eventing.Inbox` / `Store` | `Inbox` defines `Insert`, `Get`, newest-first filtered keyset list, routing claim/ack/nack/dead transitions, dispatch create/get/claim/link/nack/finish/keyset-list, `Replay`, bounded `Prune`, and `Close`; `Store` is its SQLite implementation. The contract provides atomic deduplication and fresh-token fenced leases. | `FR-EVENT-AUTOMATION-002`, `FR-EVENT-AUTOMATION-004`, `FR-EVENT-AUTOMATION-006` through `FR-EVENT-AUTOMATION-011` |
 | Go API / storage | `eventing.ReviewStore`, `reviews.CaptureSink`, `reviews.Service` | Idempotent trusted workflow-draft capture, aggregate inspection, optimistic finding/message mutation, immutable submission creation, safe browser projection, and fenced durable submission delivery over schema-v3 SQLite state. | `FR-EVENT-AUTOMATION-041`, `FR-EVENT-AUTOMATION-042`, `FR-EVENT-AUTOMATION-043` |
+| Internal Go API | `reviews.Service.WithWorkingContext`, `reviews.WorkingContextRuntimeAcquire` | Under one per-case projection lock and exact runtime-generation lease, load one authoritative atomic review aggregate, compare-and-swap and strictly verify its hidden stable agent-owned session, then synchronously hand its case version, internal key, exact session revision, and detached JSON-native gate subject to a trusted consumer. | `FR-EVENT-AUTOMATION-044` |
 | Runtime | `eventing/githubpoll.Poller`, gateway notification worker | Exact-tool, bounded, read-only GitHub notification scans that enrich and admit trusted provider events through the ordinary generation-owned event store without changing provider notification state. | `FR-EVENT-AUTOMATION-040` |
 | Runtime | `reviews.SubmissionWorker`, `reviews.GitHubSubmitter` | Claim exactly one immutable submission, heartbeat its lease, verify the current PR head through the exact read tool, execute the create-pending/add-comment/submit-pending MCP protocol once only on a match, and persist stale/submitted/typed-pre-write-failed/unknown without automatic external retries. | `FR-EVENT-AUTOMATION-043` |
 | Storage | `pkg/eventing.Open` / `OpenStore`, `WithMaxPayloadBytes`, `WithClock`, `WithBusyTimeout`, `WithRedaction` | Open the embedded store with transactional `PRAGMA user_version` migration, WAL, foreign keys, busy handling, one authoritative SQLite connection, restrictive permissions, restart persistence, a one-MiB default payload limit, mandatory/custom redaction, optional exact-secret replacement, and deterministic test clocks on supported targets. | `FR-EVENT-AUTOMATION-003`, `FR-EVENT-AUTOMATION-005` through `FR-EVENT-AUTOMATION-011` |
@@ -631,7 +664,7 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
 | CLI / Workflow YAML | `picoclaw workflow install github-issue-triage` / `workflows/github-issue-triage.yml` | Explicitly install the deterministic native GitHub issue trigger, isolated structured classifier, and declared conditional GitHub comment action without changing existing configuration. | `FR-EVENT-AUTOMATION-031` |
 | CLI / Workflow YAML | `picoclaw workflow install github-pr-review` / `workflows/github-pr-review.yml`, native `git.diff` | Explicitly install the authenticated targeted review-request trigger, exact head/base-repository and merge-base verification, bounded path-relative unified-diff construction, a no-tools structured review step, and reserved durable draft output. | `FR-EVENT-AUTOMATION-041` |
 | Go API | `EvaluateEventTrigger`, `EventWorkflowRouter`, `EventWorkflowDispatcher`, `RunOrigin`, `RunRequest.Origin`, `RunRequest.OnRunPersisted`, `Executor.RetryCaptured`, `ProjectWorkflowRunForBrowserWithStore`, `ProjectEventBackedDraftRunsForBrowserWithStore`, `LoadRunnableLocalSnapshotWithRevision`, `EventContextFromEnvelope` | Produce deterministic field-level match diagnostics through the same evaluator used by routing, claim one item, compatibility-check and revision-bind the exact loaded workflow bytes, durably fan out deterministic dispatches, reject content drift or a no-longer-matching persisted event, pass the same accepted snapshot and trusted payload-free origin into execution, reconcile deterministic runs, link a newly persisted run before effects, renew long leases, retry from one authoritative source, validate every available provenance ancestor without treating pruning as forgery, safely project exact and batch trusted run provenance, and build the detached redacted workflow context shared by dispatch and event-parity draft testing. | `FR-EVENT-AUTOMATION-014` through `FR-EVENT-AUTOMATION-018`, `FR-EVENT-AUTOMATION-020`, `FR-EVENT-AUTOMATION-021`, `FR-EVENT-AUTOMATION-036`, `FR-EVENT-AUTOMATION-038` |
-| Runtime | gateway event automation service, webhook/operator/review controllers, channel admission controller, provider poller, submission worker, and launcher restart signature | Open enabled storage before readiness, initialize workflow/MCP runtime dependencies before workers, generation-fence HTTP and channel admission while transactionally draining, replacing, rolling back, and closing services/providers, and report restart-required only when the active effective event runtime changes, including semantic changes to enabled GitHub repository/target/polling scope but excluding case/order-only scope differences. | `FR-EVENT-AUTOMATION-019`, `FR-EVENT-AUTOMATION-024`, `FR-EVENT-AUTOMATION-029`, `FR-EVENT-AUTOMATION-032`, `FR-EVENT-AUTOMATION-035`, `FR-EVENT-AUTOMATION-039` through `FR-EVENT-AUTOMATION-043` |
+| Runtime | gateway event automation service, webhook/operator/review controllers, review working-context bridge, channel admission controller, provider poller, submission worker, and launcher restart signature | Open enabled storage before readiness, initialize workflow/MCP/runtime-session dependencies before workers, generation-fence HTTP, review-session projection, and channel admission while transactionally draining, replacing, rolling back, and closing services/providers, and report restart-required only when the active effective event runtime changes, including semantic changes to enabled GitHub repository/target/polling scope but excluding case/order-only scope differences. | `FR-EVENT-AUTOMATION-019`, `FR-EVENT-AUTOMATION-024`, `FR-EVENT-AUTOMATION-029`, `FR-EVENT-AUTOMATION-032`, `FR-EVENT-AUTOMATION-035`, `FR-EVENT-AUTOMATION-039` through `FR-EVENT-AUTOMATION-044` |
 | Build | `pkg/eventing` unsupported-platform implementation | Preserves the same construction surface and returns `ErrUnsupportedPlatform` without pulling SQLite into excluded targets. | `FR-EVENT-AUTOMATION-005`, `FR-EVENT-AUTOMATION-012` |
 
 ## Algorithms And Ordering
@@ -956,6 +989,35 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
     Roll back on query, cancellation, or commit failure and return no partial
     aggregate. A concurrent process may commit in WAL mode, but its whole
     mutation appears only in a later aggregate read.
+40. Before preparing a working-context gate, acquire and hold the exact
+    configured runtime generation and canonical agent store, then acquire the
+    case's in-process projection lock. Reload the complete review aggregate
+    from SQLite only after both boundaries are held. Strictly validate the
+    case, findings, message ownership/order/roles/kinds/timestamps, transcript
+    limits, and immutable repository/PR/revision identity. Derive the opaque
+    session key from only agent, `review` channel, and case ID; use an
+    agent-qualified internal case alias and reject any owner, namespace, key, or
+    immutable identity mismatch. Before replacement, atomically reserve the
+    protected review scope under the same process-local JSONL locks used by
+    ordinary live admission and snapshot replacement; a live scope that wins
+    first makes projection fail closed, while a review reservation that wins
+    first prevents live commands, history access, thread linkage, and public
+    read-only workflows from using the key. Compare-and-swap the complete
+    derived history, empty summary, scope, and aliases from the exact reserved
+    or prior snapshot revision, then read it back through the alias. Invoke the consumer
+    synchronously only after the canonical key, non-empty revision, complete
+    scope, empty summary, and every message field compare exactly. Supply that
+    exact revision and a detached JSON-native case/finding/message-metadata
+    subject while retaining the lock and runtime lease, so another projection
+    through that service and runtime reload cannot race capture. A different
+    Service using the same local runtime store that advances the session is
+    rejected if it wins before the downstream exact snapshot read; an advance
+    after that read cannot change the already frozen evidence. The session revision
+    does not fence a later SQLite-only mutation; a launcher that requires the latest
+    authoritative case must revalidate the supplied case version at durable
+    decision admission. SQLite remains
+    authoritative: later case growth refreshes this same key, and no session
+    content is ever copied back.
 
 ## Cross-Feature Behavior
 
@@ -980,6 +1042,17 @@ read-only review authority and emits a local structured draft only. Durable
 eventing owns capture and the human workbench. The separate submission worker,
 not the review model or event workflow, receives the narrow GitHub write
 authority after explicit human confirmation.
+Durable eventing also owns the PR-chat-to-session bridge required by workflow
+`ai_working_context` gates. It derives and verifies one hidden stable session
+from the SQLite-authoritative review transcript, then passes its internal key
+to the workflow root only while the case projection lock and exact agent-runtime
+generation remain held. Workflows own compilation, exact read-only snapshotting,
+AI evaluation, and any durable human-task suspension; they never make the
+derived session authoritative or copy it back into review storage. Browser
+review/session discovery and Seahorse indexing omit this internal projection.
+Because the bridge composes existing contracts rather than changing workflow
+or persisted review syntax, all current eventing, review-draft, workflow-engine,
+workflow-schema, and validator versions remain unchanged.
 The event dispatcher and server-resolved draft-test path are the only producers
 of trusted event `RunOrigin`; workflow storage validates, persists, safely
 projects, and propagates it through child/retry runs. Production provenance
@@ -1265,6 +1338,15 @@ capabilities.
   renewal, or worker crash after claim is not retried: it becomes visibly
   unknown so an operator can inspect GitHub, then explicitly mark the review
   found or verified absent without a provider call.
+- A review working-context launch never trusts a caller-supplied transcript or
+  browser-supplied session key. An absent/corrupt/unsupported session backend,
+  stale runtime generation, malformed SQLite aggregate, different owner or
+  immutable case binding, stale compare-and-swap, any replacement error,
+  missing/empty/non-advancing revision, inexact readback, or invalid bounded
+  JSON-native subject prevents the gate callback. A legitimate newer review
+  version atomically rewrites the complete derived view at the same key; direct
+  writes to that internal session are discarded on the next authoritative
+  projection and never become review chat.
 - The browser never receives the hidden submission marker, immutable request,
   lease identity, or internal error, including in conflict and failure
   responses. The launcher never forwards its authenticated user's cookie or
@@ -1311,6 +1393,7 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 | `FR-EVENT-AUTOMATION-041` | [pkg/workflows/templates_test.go](../../pkg/workflows/templates_test.go), [pkg/workflows/native_functions_test.go](../../pkg/workflows/native_functions_test.go), [pkg/workflows/event_dispatcher_test.go](../../pkg/workflows/event_dispatcher_test.go), [pkg/reviews/capture_test.go](../../pkg/reviews/capture_test.go), [pkg/eventing/review_store_sqlite_test.go](../../pkg/eventing/review_store_sqlite_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [cmd/picoclaw/internal/workflow/command_test.go](../../cmd/picoclaw/internal/workflow/command_test.go) |
 | `FR-EVENT-AUTOMATION-042` | [pkg/reviews/service_handler_test.go](../../pkg/reviews/service_handler_test.go), [pkg/eventing/review_store_sqlite_test.go](../../pkg/eventing/review_store_sqlite_test.go), [pkg/eventing/operator/reviews_delegation_test.go](../../pkg/eventing/operator/reviews_delegation_test.go), [web/backend/api/reviews_test.go](../../web/backend/api/reviews_test.go), [web/frontend/src/api/reviews.test.ts](../../web/frontend/src/api/reviews.test.ts), [web/frontend/src/components/reviews](../../web/frontend/src/components/reviews), [web/frontend/src/routes/-reviews-route.test.tsx](../../web/frontend/src/routes/-reviews-route.test.tsx) |
 | `FR-EVENT-AUTOMATION-043` | [pkg/reviews/submitter_test.go](../../pkg/reviews/submitter_test.go), [pkg/reviews/worker_test.go](../../pkg/reviews/worker_test.go), [pkg/reviews/worker_sqlite_test.go](../../pkg/reviews/worker_sqlite_test.go), [pkg/reviews/service_handler_test.go](../../pkg/reviews/service_handler_test.go), [pkg/eventing/review_store_sqlite_test.go](../../pkg/eventing/review_store_sqlite_test.go), [web/frontend/src/components/reviews](../../web/frontend/src/components/reviews) |
+| `FR-EVENT-AUTOMATION-044` | [pkg/reviews/session_bridge_test.go](../../pkg/reviews/session_bridge_test.go), [pkg/reviews/session_bridge_sqlite_test.go](../../pkg/reviews/session_bridge_sqlite_test.go), [pkg/reviews/session_bridge_integration_test.go](../../pkg/reviews/session_bridge_integration_test.go), [pkg/gateway/review_working_context_test.go](../../pkg/gateway/review_working_context_test.go), [pkg/reviews/service_handler_test.go](../../pkg/reviews/service_handler_test.go), [pkg/agent/context_seahorse_test.go](../../pkg/agent/context_seahorse_test.go), [web/backend/api/session_test.go](../../web/backend/api/session_test.go) |
 
 ## Implementation Anchors
 
@@ -1327,6 +1410,7 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 - [pkg/workflows/templates.go](../../pkg/workflows/templates.go)
 - [pkg/agent/workflow_eventing.go](../../pkg/agent/workflow_eventing.go)
 - [pkg/gateway/event_automation.go](../../pkg/gateway/event_automation.go)
+- [pkg/gateway/review_working_context.go](../../pkg/gateway/review_working_context.go)
 - [pkg/gateway/event_webhook.go](../../pkg/gateway/event_webhook.go)
 - [pkg/gateway/event_channel.go](../../pkg/gateway/event_channel.go)
 - [pkg/gateway/event_operator.go](../../pkg/gateway/event_operator.go)
@@ -1337,6 +1421,7 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 - [pkg/eventing/review_types.go](../../pkg/eventing/review_types.go)
 - [pkg/eventing/review_store_sqlite.go](../../pkg/eventing/review_store_sqlite.go)
 - [pkg/reviews](../../pkg/reviews)
+- [pkg/reviews/session_bridge.go](../../pkg/reviews/session_bridge.go)
 - [web/frontend/src/api/event-sources.ts](../../web/frontend/src/api/event-sources.ts)
 - [web/frontend/src/api/events.ts](../../web/frontend/src/api/events.ts)
 - [web/frontend/src/api/reviews.ts](../../web/frontend/src/api/reviews.ts)

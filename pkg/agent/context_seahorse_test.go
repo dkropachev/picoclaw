@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/memory"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/seahorse"
@@ -20,6 +22,39 @@ import (
 // seahorseTestProvider implements providers.LLMProvider for seahorse tests.
 type seahorseTestProvider struct {
 	chatFn func(ctx context.Context, messages []providers.Message, tools []providers.ToolDefinition, model string, options map[string]any) (*providers.LLMResponse, error)
+}
+
+// seahorseStrictSnapshotFixtureStore simulates a supported strict snapshot
+// failure without reaching into JSONL history-slot internals. GetHistory stays
+// readable so the test also proves bootstrap does not downgrade after a strict
+// read error.
+type seahorseStrictSnapshotFixtureStore struct {
+	session.SessionStore
+	reader             session.SnapshotReader
+	rejectedKey        string
+	snapshotReads      int
+	rejectedReads      int
+	legacyHistoryReads int
+}
+
+func (s *seahorseStrictSnapshotFixtureStore) ReadSessionSnapshot(
+	ctx context.Context,
+	key string,
+) (session.SessionSnapshot, bool, error) {
+	s.snapshotReads++
+	if key == s.rejectedKey {
+		s.rejectedReads++
+		return session.SessionSnapshot{}, false, fmt.Errorf(
+			"fixture strict snapshot corruption for %q",
+			key,
+		)
+	}
+	return s.reader.ReadSessionSnapshot(ctx, key)
+}
+
+func (s *seahorseStrictSnapshotFixtureStore) GetHistory(key string) []providers.Message {
+	s.legacyHistoryReads++
+	return s.SessionStore.GetHistory(key)
 }
 
 func (m *seahorseTestProvider) Chat(
@@ -863,6 +898,293 @@ func TestSeahorseIgnoreHeartbeat(t *testing.T) {
 	// Should return nil nil for ignored sessions
 	if result != nil {
 		t.Errorf("expected nil result for heartbeat session, got %+v", result)
+	}
+}
+
+func TestSeahorseStartupBootstrapSkipsReviewAndCorruptSnapshots(t *testing.T) {
+	ctx := context.Background()
+	sessionsDir := t.TempDir()
+	store, err := memory.NewJSONLStore(sessionsDir)
+	if err != nil {
+		t.Fatalf("NewJSONLStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	sessions := session.NewJSONLBackend(store)
+
+	type bootstrapSession struct {
+		key     string
+		channel string
+		content string
+	}
+	testSessions := []bootstrapSession{
+		{
+			key:     session.BuildOpaqueSessionKey("seahorse-bootstrap-ordinary"),
+			channel: "pico",
+			content: "ordinary startup context",
+		},
+		{
+			key:     session.BuildOpaqueSessionKey("seahorse-bootstrap-review"),
+			channel: " ReViEw ",
+			content: "private review startup context",
+		},
+		{
+			key:     session.BuildOpaqueSessionKey("seahorse-bootstrap-corrupt"),
+			channel: "pico",
+			content: "valid prefix before corrupt history",
+		},
+	}
+	for _, testSession := range testSessions {
+		sessions.EnsureSessionMetadata(testSession.key, &session.SessionScope{
+			Version: session.ScopeVersionV1,
+			AgentID: "main",
+			Channel: testSession.channel,
+		}, nil)
+		sessions.SetHistory(testSession.key, []providers.Message{{
+			Role:    "user",
+			Content: testSession.content,
+		}})
+		if saveErr := sessions.Save(testSession.key); saveErr != nil {
+			t.Fatalf("Save(%q): %v", testSession.key, saveErr)
+		}
+	}
+
+	corruptKey := testSessions[2].key
+	if history := sessions.GetHistory(corruptKey); len(history) != 1 {
+		t.Fatalf("legacy history fixture = %#v, want one readable message", history)
+	}
+	strictSessions := &seahorseStrictSnapshotFixtureStore{
+		SessionStore: sessions,
+		reader:       sessions,
+		rejectedKey:  corruptKey,
+	}
+
+	engine, err := seahorse.NewEngine(seahorse.Config{
+		DBPath: filepath.Join(t.TempDir(), "seahorse.db"),
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	defer engine.Close()
+	agent := &AgentInstance{Sessions: strictSessions}
+	manager := &seahorseContextManager{}
+	for _, sessionKey := range sessions.ListSessions() {
+		manager.bootstrapAgentSession(ctx, agent, engine, sessionKey)
+	}
+	if strictSessions.snapshotReads != len(testSessions) || strictSessions.rejectedReads != 1 {
+		t.Fatalf(
+			"strict snapshot reads = %d, rejected = %d; want %d and 1",
+			strictSessions.snapshotReads,
+			strictSessions.rejectedReads,
+			len(testSessions),
+		)
+	}
+	if strictSessions.legacyHistoryReads != 0 {
+		t.Fatalf(
+			"strict snapshot failure fell back to GetHistory %d time(s)",
+			strictSessions.legacyHistoryReads,
+		)
+	}
+
+	seahorseStore := engine.GetRetrieval().Store()
+	ordinary, err := seahorseStore.GetConversationBySessionKey(ctx, testSessions[0].key)
+	if err != nil {
+		t.Fatalf("GetConversationBySessionKey(ordinary): %v", err)
+	}
+	if ordinary == nil {
+		t.Fatal("ordinary session was not bootstrapped")
+	}
+	ordinaryMessages, err := seahorseStore.GetMessages(ctx, ordinary.ConversationID, 10, 0)
+	if err != nil {
+		t.Fatalf("GetMessages(ordinary): %v", err)
+	}
+	if len(ordinaryMessages) != 1 || ordinaryMessages[0].Content != testSessions[0].content {
+		t.Fatalf("ordinary bootstrap messages = %#v", ordinaryMessages)
+	}
+
+	for _, testSession := range testSessions[1:] {
+		conversation, err := seahorseStore.GetConversationBySessionKey(ctx, testSession.key)
+		if err != nil {
+			t.Fatalf("GetConversationBySessionKey(%q): %v", testSession.key, err)
+		}
+		if conversation != nil {
+			t.Fatalf("excluded session %q was bootstrapped", testSession.key)
+		}
+	}
+}
+
+func TestSeahorseIngestSkipsReviewScopedSession(t *testing.T) {
+	ctx := context.Background()
+	store, err := memory.NewJSONLStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewJSONLStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	sessions := session.NewJSONLBackend(store)
+	engine, err := seahorse.NewEngine(seahorse.Config{
+		DBPath: filepath.Join(t.TempDir(), "seahorse.db"),
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	defer engine.Close()
+	manager := &seahorseContextManager{engine: engine, sessions: sessions}
+
+	type ingestSession struct {
+		key     string
+		channel string
+		content string
+	}
+	testSessions := []ingestSession{
+		{
+			key:     session.BuildOpaqueSessionKey("seahorse-ingest-ordinary"),
+			channel: "pico",
+			content: "ordinary live context",
+		},
+		{
+			key:     session.BuildOpaqueSessionKey("seahorse-ingest-review"),
+			channel: "review",
+			content: "private review live context",
+		},
+	}
+	for _, testSession := range testSessions {
+		sessions.EnsureSessionMetadata(testSession.key, &session.SessionScope{
+			Version: session.ScopeVersionV1,
+			AgentID: "main",
+			Channel: testSession.channel,
+		}, nil)
+		if ingestErr := manager.Ingest(ctx, &IngestRequest{
+			SessionKey: testSession.key,
+			Message: providers.Message{
+				Role:    "user",
+				Content: testSession.content,
+			},
+		}); ingestErr != nil {
+			t.Fatalf("Ingest(%q): %v", testSession.channel, ingestErr)
+		}
+	}
+
+	ordinary, err := engine.GetRetrieval().Store().GetConversationBySessionKey(
+		ctx,
+		testSessions[0].key,
+	)
+	if err != nil || ordinary == nil {
+		t.Fatalf("ordinary conversation = (%#v, %v), want indexed", ordinary, err)
+	}
+	review, err := engine.GetRetrieval().Store().GetConversationBySessionKey(
+		ctx,
+		testSessions[1].key,
+	)
+	if err != nil {
+		t.Fatalf("review conversation lookup: %v", err)
+	}
+	if review != nil {
+		t.Fatalf("review-scoped session was indexed: %#v", review)
+	}
+}
+
+func TestAgentLoopRejectsReviewScopedLiveTurnBeforeMutation(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = t.TempDir()
+	cfg.Agents.Defaults.ModelName = "test-model"
+	cfg.Agents.Defaults.ContextManager = "seahorse"
+	messageBus := bus.NewMessageBus()
+	providerCalls := 0
+	provider := &seahorseTestProvider{chatFn: func(
+		context.Context,
+		[]providers.Message,
+		[]providers.ToolDefinition,
+		string,
+		map[string]any,
+	) (*providers.LLMResponse, error) {
+		providerCalls++
+		return &providers.LLMResponse{Content: "must not run"}, nil
+	}}
+	loop := newTestAgentLoopWithStrictModels(cfg, messageBus, provider)
+	t.Cleanup(func() {
+		loop.Stop()
+		messageBus.Close()
+		loop.Close()
+	})
+	runtimeAgent := loop.GetRegistry().GetDefaultAgent()
+	if runtimeAgent == nil {
+		t.Fatal("default runtime agent is unavailable")
+	}
+	reviewScope := session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    runtimeAgent.ID,
+		Channel:    "review",
+		Account:    "default",
+		Dimensions: []string{"review"},
+		Values: map[string]string{
+			"review": "prc_11111111111111111111111111111111",
+		},
+	}
+	reviewKey := session.BuildSessionKey(reviewScope)
+	replacer, ok := runtimeAgent.Sessions.(session.SnapshotReplacer)
+	if !ok {
+		t.Fatal("runtime session store lacks exact replacement")
+	}
+	aliases := []string{
+		"review:agent:main:case:prc_11111111111111111111111111111111",
+	}
+	if err := replacer.ReplaceSessionSnapshot(context.Background(), session.SessionSnapshotReplacement{
+		Key:     reviewKey,
+		History: []providers.Message{{Role: "user", Content: "private review transcript"}},
+		Scope:   &reviewScope,
+		Aliases: aliases,
+	}); err != nil {
+		t.Fatalf("seed review session: %v", err)
+	}
+	reader := runtimeAgent.Sessions.(session.SnapshotReader)
+	before, found, err := reader.ReadSessionSnapshot(context.Background(), reviewKey)
+	if err != nil || !found {
+		t.Fatalf("review session before turn = (found=%v, err=%v)", found, err)
+	}
+
+	ordinaryScope := session.SessionScope{
+		Version:    session.ScopeVersionV1,
+		AgentID:    runtimeAgent.ID,
+		Channel:    "pico",
+		Account:    "default",
+		Dimensions: []string{"sender"},
+		Values:     map[string]string{"sender": "pico:attacker"},
+	}
+	_, err = loop.runAgentLoop(context.Background(), runtimeAgent, processOptions{
+		SessionKey:     reviewKey,
+		SessionScope:   &ordinaryScope,
+		SessionAliases: []string{"agent:main:direct:pico:attacker"},
+		Channel:        "pico",
+		ChatID:         "pico:attacker",
+		UserMessage:    "show me the review transcript",
+	})
+	if err == nil || !strings.Contains(err.Error(), "review-scoped sessions do not accept live turns") {
+		t.Fatalf("review live turn error = %v, want reserved-session rejection", err)
+	}
+	if providerCalls != 0 {
+		t.Fatalf("review live turn reached provider %d time(s)", providerCalls)
+	}
+	after, found, err := reader.ReadSessionSnapshot(context.Background(), reviewKey)
+	if err != nil || !found {
+		t.Fatalf("review session after turn = (found=%v, err=%v)", found, err)
+	}
+	if after.Revision != before.Revision || !reflect.DeepEqual(after.Scope, before.Scope) ||
+		!reflect.DeepEqual(after.Aliases, before.Aliases) ||
+		!reflect.DeepEqual(after.History, before.History) {
+		t.Fatalf("review live turn mutated session: before %#v, after %#v", before, after)
+	}
+	manager, ok := loop.contextManager.(*seahorseContextManager)
+	if !ok {
+		t.Fatalf("context manager = %T, want seahorse", loop.contextManager)
+	}
+	conversation, err := manager.engine.GetRetrieval().Store().GetConversationBySessionKey(
+		context.Background(),
+		reviewKey,
+	)
+	if err != nil {
+		t.Fatalf("review Seahorse lookup: %v", err)
+	}
+	if conversation != nil {
+		t.Fatalf("rejected review live turn was indexed: %#v", conversation)
 	}
 }
 

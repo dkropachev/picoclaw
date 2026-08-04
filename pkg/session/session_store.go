@@ -17,7 +17,45 @@ var (
 	// replace a complete session snapshot. Callers must not emulate replacement
 	// with the legacy fire-and-forget setters because that can expose torn state.
 	ErrSnapshotUnsupported = errors.New("session snapshot replacement unsupported")
+
+	// ErrScopeAdmissionConflict reports that a live turn and a protected review
+	// projection attempted to own the same session key.
+	ErrScopeAdmissionConflict = errors.New("session scope admission conflict")
+
+	// ErrScopeAdmissionUnsupported reports that a snapshot-capable store cannot
+	// arbitrate structured scope ownership atomically.
+	ErrScopeAdmissionUnsupported = errors.New("session scope admission unsupported")
 )
+
+type ScopeAdmissionMode uint8
+
+const (
+	ScopeAdmissionLive ScopeAdmissionMode = iota + 1
+	ScopeAdmissionReview
+)
+
+// SessionScopeAdmission atomically establishes one structured scope before a
+// caller may read or mutate the session. Live admission may migrate ordinary
+// legacy metadata but never enters review scope; review admission reserves an
+// absent key and otherwise preserves the existing protected tuple for strict
+// binding validation.
+type SessionScopeAdmission struct {
+	Key            string
+	Scope          *SessionScope
+	InitialAliases []string
+	Mode           ScopeAdmissionMode
+	// PreserveExistingScope makes Scope an absent-session fallback for live
+	// admission. When the locked owner already has a non-review scope, the
+	// exact stored scope is retained instead of being replaced by a value read
+	// before admission.
+	PreserveExistingScope bool
+}
+
+// ScopeAdmitter is the optional atomic ownership capability shared by live
+// turns and protected review projection.
+type ScopeAdmitter interface {
+	AdmitSessionScope(ctx context.Context, admission SessionScopeAdmission) (bool, error)
+}
 
 // SessionSnapshot is an immutable-by-convention, point-in-time view of an
 // existing session. Key is always the canonical session key, even when the

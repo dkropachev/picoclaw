@@ -96,12 +96,39 @@ type SessionSnapshotReplacement struct {
 	ExpectedRevision string
 }
 
+// SessionMetaAdmissionDecision is the metadata-only result of an admission
+// policy evaluated while the store's directory and canonical-session locks are
+// held. Update=false leaves the complete session tuple unchanged.
+type SessionMetaAdmissionDecision struct {
+	Scope                  json.RawMessage
+	Aliases                []string
+	Update                 bool
+	ExclusiveAliases       bool
+	PreserveRequestedAlias bool
+	PromoteAliasHistory    bool
+}
+
+// SessionMetaAdmission decides whether one locked metadata claim is allowed.
+// The callback must be pure and must not re-enter this store.
+type SessionMetaAdmission func(
+	existing SessionMeta,
+	exists bool,
+) (SessionMetaAdmissionDecision, error)
+
+// SessionMetaMutationState distinguishes a completely missing session from a
+// legacy history-only session whose metadata will be created by a mutation.
+type SessionMetaMutationState struct {
+	SessionExists  bool
+	MetadataExists bool
+}
+
 type jsonlStoreHooks struct {
 	writeHistory        func(string, []byte, os.FileMode) error
 	writeMeta           func(string, []byte, os.FileMode) error
 	writeDeleteManifest func(string, []byte, os.FileMode) error
 	removeFile          func(string) error
 	afterResolve        func(requestedKey, canonicalKey string)
+	beforeAdmissionLock func()
 }
 
 type sessionDeleteManifest struct {
@@ -611,6 +638,101 @@ func (s *JSONLStore) ReadSessionState(
 	return history, cloneSessionMeta(meta), modifiedAt, nil
 }
 
+// ReadSessionStateStrict resolves alias ownership strictly, then returns one
+// coherent session tuple while retaining the ordinary JSONL recovery policy.
+// Unlike ReadSessionSnapshot, malformed history records are skipped. Unlike
+// ReadSessionState, unreadable, malformed, or ambiguous metadata anywhere in
+// the ownership catalog fails the lookup instead of being silently ignored.
+// Promoted aliases which retain direct compatibility history still resolve to
+// their committed alias owner.
+func (s *JSONLStore) ReadSessionStateStrict(
+	ctx context.Context,
+	sessionKey string,
+) (
+	canonicalKey string,
+	history []providers.Message,
+	meta SessionMeta,
+	modifiedAt time.Time,
+	found bool,
+	err error,
+) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if contextErr := contextError(ctx); contextErr != nil {
+		return "", nil, SessionMeta{}, time.Time{}, false, contextErr
+	}
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return "", nil, SessionMeta{}, time.Time{}, false, nil
+	}
+
+	directoryLock := s.directoryLock()
+	directoryLock.RLock()
+	defer directoryLock.RUnlock()
+	if pendingErr := s.pendingDeletionError(); pendingErr != nil {
+		return "", nil, SessionMeta{}, time.Time{}, false, pendingErr
+	}
+
+	requestedKey := sessionKey
+	canonicalKey, found, err = s.resolveSessionKeyStrictMode(ctx, requestedKey, true)
+	if err != nil || !found {
+		return canonicalKey, nil, SessionMeta{}, time.Time{}, found, err
+	}
+	lock := s.sessionLock(canonicalKey)
+	lock.Lock()
+	defer lock.Unlock()
+	if contextErr := contextError(ctx); contextErr != nil {
+		return "", nil, SessionMeta{}, time.Time{}, false, contextErr
+	}
+
+	exists, err := s.sessionExistsStrict(canonicalKey)
+	if err != nil {
+		return "", nil, SessionMeta{}, time.Time{}, false, err
+	}
+	if !exists {
+		return "", nil, SessionMeta{}, time.Time{}, false, nil
+	}
+	meta, err = s.readMeta(canonicalKey)
+	if err != nil {
+		return "", nil, SessionMeta{}, time.Time{}, false, err
+	}
+	if strings.TrimSpace(meta.Key) != canonicalKey {
+		return "", nil, SessionMeta{}, time.Time{}, false, fmt.Errorf(
+			"memory: session metadata key %q does not match canonical key %q",
+			meta.Key,
+			canonicalKey,
+		)
+	}
+	if validationErr := validateMetaOffsets(meta); validationErr != nil {
+		return "", nil, SessionMeta{}, time.Time{}, false, validationErr
+	}
+	if requestedKey != canonicalKey && !slices.Contains(meta.Aliases, requestedKey) {
+		return "", nil, SessionMeta{}, time.Time{}, false, fmt.Errorf(
+			"memory: session alias %q changed during state lookup",
+			requestedKey,
+		)
+	}
+	historyPath, err := s.committedHistoryPath(canonicalKey, meta)
+	if err != nil {
+		return "", nil, SessionMeta{}, time.Time{}, false, err
+	}
+	history, err = readMessages(historyPath, meta.Skip)
+	if err != nil {
+		return "", nil, SessionMeta{}, time.Time{}, false, err
+	}
+	if info, statErr := os.Stat(historyPath); statErr == nil {
+		modifiedAt = info.ModTime()
+	} else if !os.IsNotExist(statErr) {
+		return "", nil, SessionMeta{}, time.Time{}, false,
+			fmt.Errorf("memory: stat history: %w", statErr)
+	}
+	if contextErr := contextError(ctx); contextErr != nil {
+		return "", nil, SessionMeta{}, time.Time{}, false, contextErr
+	}
+	return canonicalKey, history, cloneSessionMeta(meta), modifiedAt, true, nil
+}
+
 // UpsertSessionMeta stores structured session metadata while preserving
 // summary/count/skip timestamps maintained by the core JSONL store.
 func (s *JSONLStore) UpsertSessionMeta(
@@ -656,6 +778,183 @@ func (s *JSONLStore) UpsertSessionMeta(
 	meta.UpdatedAt = now
 
 	return s.writeMeta(sessionKey, meta)
+}
+
+// AdmitSessionMeta evaluates and commits one metadata-only ownership decision
+// while holding the same directory and canonical-session locks as whole-
+// snapshot replacement. The policy callback runs after strict alias resolution
+// and must not re-enter the store.
+func (s *JSONLStore) AdmitSessionMeta(
+	ctx context.Context,
+	sessionKey string,
+	admit SessionMetaAdmission,
+) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if contextErr := contextError(ctx); contextErr != nil {
+		return false, contextErr
+	}
+	if sessionKey == "" || sessionKey != strings.TrimSpace(sessionKey) || admit == nil {
+		return false, errors.New("memory: session metadata admission is invalid")
+	}
+
+	directoryLock := s.directoryLock()
+	if s.hooks.beforeAdmissionLock != nil {
+		s.hooks.beforeAdmissionLock()
+	}
+	directoryLock.Lock()
+	defer directoryLock.Unlock()
+	if err := contextError(ctx); err != nil {
+		return false, err
+	}
+	if pendingErr := s.pendingDeletionError(); pendingErr != nil {
+		return false, pendingErr
+	}
+	requestedKey := sessionKey
+	// A promoted legacy alias can intentionally retain its old direct history
+	// as a compatibility shadow. Admission follows the already-committed alias
+	// owner in that case instead of treating the retained shadow as a new
+	// canonical session.
+	resolvedKey, found, err := s.resolveSessionKeyStrictMode(ctx, requestedKey, true)
+	if err != nil {
+		return false, err
+	}
+	if found {
+		sessionKey = resolvedKey
+	}
+
+	lock := s.sessionLock(sessionKey)
+	lock.Lock()
+	defer lock.Unlock()
+	if contextErr := contextError(ctx); contextErr != nil {
+		return false, contextErr
+	}
+
+	exists, err := s.sessionExistsStrict(sessionKey)
+	if err != nil {
+		return false, err
+	}
+	meta, err := s.readMeta(sessionKey)
+	if err != nil {
+		return false, err
+	}
+	if meta.Key != "" && meta.Key != sessionKey {
+		return false, fmt.Errorf(
+			"memory: session metadata key %q does not match admission key %q",
+			meta.Key,
+			sessionKey,
+		)
+	}
+	decision, err := admit(cloneSessionMeta(meta), exists)
+	if err != nil {
+		return false, err
+	}
+	if !decision.Update {
+		return false, nil
+	}
+	if _, err := canonicalSessionScopeJSON(decision.Scope); err != nil {
+		return false, err
+	}
+	existingAliases := append([]string(nil), meta.Aliases...)
+	requestedAliases := append([]string(nil), decision.Aliases...)
+	if decision.PreserveRequestedAlias && requestedKey != sessionKey &&
+		!slices.Contains(requestedAliases, requestedKey) {
+		requestedAliases = append(requestedAliases, requestedKey)
+	}
+	aliases := normalizeAliases(sessionKey, requestedAliases)
+	if len(aliases) != len(requestedAliases) {
+		return false, errors.New("memory: admitted session aliases are not canonical")
+	}
+	for index := range aliases {
+		if aliases[index] != requestedAliases[index] {
+			return false, errors.New("memory: admitted session aliases are not canonical")
+		}
+	}
+	if decision.ExclusiveAliases {
+		if _, _, err := s.validateAliasesAvailableLocked(
+			sessionKey,
+			aliases,
+			existingAliases,
+		); err != nil {
+			return false, err
+		}
+	} else if _, err := s.validateAliasOwnershipLocked(
+		sessionKey,
+		aliases,
+		existingAliases,
+		true,
+	); err != nil {
+		return false, err
+	}
+	if err := contextError(ctx); err != nil {
+		return false, err
+	}
+
+	if decision.PromoteAliasHistory {
+		promotionAliases := aliases
+		if requestedKey != sessionKey && slices.Contains(aliases, requestedKey) {
+			promotionAliases = make([]string, 0, len(aliases))
+			promotionAliases = append(promotionAliases, requestedKey)
+			for _, alias := range aliases {
+				if alias != requestedKey {
+					promotionAliases = append(promotionAliases, alias)
+				}
+			}
+		}
+		for _, alias := range promotionAliases {
+			if isMainSessionAlias(alias) {
+				continue
+			}
+			if err := contextError(ctx); err != nil {
+				return false, err
+			}
+			promoted, err := s.promoteAliasHistoryLocked(
+				ctx,
+				sessionKey,
+				alias,
+				decision.Scope,
+				aliases,
+			)
+			if err != nil {
+				return false, err
+			}
+			if promoted {
+				return true, nil
+			}
+		}
+	}
+
+	now := time.Now()
+	meta.Key = sessionKey
+	meta.Scope = cloneRawJSON(decision.Scope)
+	meta.Aliases = aliases
+	if meta.CreatedAt.IsZero() {
+		meta.CreatedAt = now
+	}
+	meta.UpdatedAt = now
+	if err := contextError(ctx); err != nil {
+		return false, err
+	}
+	if err := s.writeMeta(sessionKey, meta); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func canonicalSessionScopeJSON(raw json.RawMessage) ([]byte, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("memory: session scope admission scope is required")
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return nil, fmt.Errorf("memory: decode session scope admission: %w", err)
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		return nil, fmt.Errorf("memory: encode session scope admission: %w", err)
+	}
+	return canonical, nil
 }
 
 // UpdateSessionMeta applies a coordinated metadata mutation. It is intended
@@ -725,6 +1024,368 @@ func (s *JSONLStore) UpdateSessionMeta(
 		}
 	}
 	return s.writeMeta(sessionKey, meta)
+}
+
+// UpdateSessionMetaStrict applies a metadata mutation after strict alias and
+// catalog resolution. It uses the directory-write/session lock order shared by
+// admission and exact replacement. The callback receives whether any direct
+// session data existed before the mutation; missing legacy metadata may still
+// be initialized. Promoted direct alias shadows resolve to their committed
+// owner. No write occurs when resolution, validation, or the callback fails.
+func (s *JSONLStore) UpdateSessionMetaStrict(
+	ctx context.Context,
+	sessionKey string,
+	update func(*SessionMeta, SessionMetaMutationState) error,
+) (canonicalKey string, existed bool, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if contextErr := contextError(ctx); contextErr != nil {
+		return "", false, contextErr
+	}
+	if sessionKey == "" || sessionKey != strings.TrimSpace(sessionKey) || update == nil {
+		return "", false, errors.New("memory: strict session metadata update is invalid")
+	}
+
+	directoryLock := s.directoryLock()
+	directoryLock.Lock()
+	defer directoryLock.Unlock()
+	if contextErr := contextError(ctx); contextErr != nil {
+		return "", false, contextErr
+	}
+	if pendingErr := s.pendingDeletionError(); pendingErr != nil {
+		return "", false, pendingErr
+	}
+
+	requestedKey := sessionKey
+	resolvedKey, found, err := s.resolveSessionKeyStrictMode(ctx, requestedKey, true)
+	if err != nil {
+		return "", false, err
+	}
+	canonicalKey = requestedKey
+	if found {
+		canonicalKey = resolvedKey
+	}
+	lock := s.sessionLock(canonicalKey)
+	lock.Lock()
+	defer lock.Unlock()
+	if contextErr := contextError(ctx); contextErr != nil {
+		return "", false, contextErr
+	}
+
+	existed, err = s.sessionExistsStrict(canonicalKey)
+	if err != nil {
+		return "", false, err
+	}
+	_, metaStatErr := os.Stat(s.metaPath(canonicalKey))
+	metadataExists := metaStatErr == nil
+	if metaStatErr != nil && !os.IsNotExist(metaStatErr) {
+		return "", false, fmt.Errorf("memory: stat session metadata: %w", metaStatErr)
+	}
+	meta, err := s.readMeta(canonicalKey)
+	if err != nil {
+		return "", false, err
+	}
+	if !metadataExists && existed {
+		rawCount, _, scanErr := scanRetainedMessageLines(s.jsonlPath(canonicalKey))
+		if scanErr != nil {
+			return "", false, fmt.Errorf(
+				"memory: validate legacy history before strict metadata update: %w",
+				scanErr,
+			)
+		}
+		meta.Count = rawCount
+	}
+	if strings.TrimSpace(meta.Key) != canonicalKey {
+		return "", false, fmt.Errorf(
+			"memory: session metadata key %q does not match strict update key %q",
+			meta.Key,
+			canonicalKey,
+		)
+	}
+	if err := validateMetaOffsets(meta); err != nil {
+		return "", false, err
+	}
+	if requestedKey != canonicalKey && !slices.Contains(meta.Aliases, requestedKey) {
+		return "", false, fmt.Errorf(
+			"memory: session alias %q changed during metadata update",
+			requestedKey,
+		)
+	}
+
+	previousKey := meta.Key
+	previousSlot := meta.HistorySlot
+	previousSkip := meta.Skip
+	previousCount := meta.Count
+	previousAliases := append([]string(nil), meta.Aliases...)
+	if err := update(&meta, SessionMetaMutationState{
+		SessionExists:  existed,
+		MetadataExists: metadataExists,
+	}); err != nil {
+		return "", false, err
+	}
+	if previousKey != "" && meta.Key != previousKey {
+		return "", false, errors.New("memory: strict metadata update changed the canonical key")
+	}
+	if meta.HistorySlot != previousSlot || meta.Skip != previousSkip || meta.Count != previousCount {
+		return "", false, errors.New("memory: strict metadata update changed history-owned fields")
+	}
+	meta.Key = canonicalKey
+	meta.Scope = cloneRawJSON(meta.Scope)
+	if slices.Equal(meta.Aliases, previousAliases) {
+		meta.Aliases = append([]string(nil), previousAliases...)
+	} else {
+		meta.Aliases = normalizeAliases(canonicalKey, meta.Aliases)
+		if _, err := s.validateAliasOwnershipLocked(
+			canonicalKey,
+			meta.Aliases,
+			previousAliases,
+			true,
+		); err != nil {
+			return "", false, err
+		}
+	}
+	if err := contextError(ctx); err != nil {
+		return "", false, err
+	}
+	if err := s.writeMeta(canonicalKey, meta); err != nil {
+		return "", false, err
+	}
+	return canonicalKey, existed, nil
+}
+
+// CompareAndSwapSessionMetaStrict conditionally restores or removes metadata
+// after a coordinated adjacent-store operation fails. expected is compared by
+// its persisted JSON representation, so time monotonic data and Revision do not
+// affect the comparison. A nil replacement removes only the metadata file;
+// callers use it to restore a legacy history-only or completely absent state.
+// The compare-and-swap prevents removal after a concurrent metadata mutation.
+func (s *JSONLStore) CompareAndSwapSessionMetaStrict(
+	ctx context.Context,
+	sessionKey string,
+	expected SessionMeta,
+	replacement *SessionMeta,
+) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if contextErr := contextError(ctx); contextErr != nil {
+		return false, contextErr
+	}
+	if sessionKey == "" || sessionKey != strings.TrimSpace(sessionKey) {
+		return false, errors.New("memory: strict session metadata compare-and-swap is invalid")
+	}
+
+	directoryLock := s.directoryLock()
+	directoryLock.Lock()
+	defer directoryLock.Unlock()
+	if err := contextError(ctx); err != nil {
+		return false, err
+	}
+	if pendingErr := s.pendingDeletionError(); pendingErr != nil {
+		return false, pendingErr
+	}
+	requestedKey := sessionKey
+	canonicalKey, found, err := s.resolveSessionKeyStrictMode(ctx, requestedKey, true)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+	lock := s.sessionLock(canonicalKey)
+	lock.Lock()
+	defer lock.Unlock()
+	if contextErr := contextError(ctx); contextErr != nil {
+		return false, contextErr
+	}
+
+	current, err := s.readMetaStrict(canonicalKey)
+	if err != nil {
+		return false, err
+	}
+	if current.Key != canonicalKey {
+		return false, fmt.Errorf(
+			"memory: session metadata key %q does not match compare-and-swap key %q",
+			current.Key,
+			canonicalKey,
+		)
+	}
+	if requestedKey != canonicalKey && !slices.Contains(current.Aliases, requestedKey) {
+		return false, fmt.Errorf(
+			"memory: session alias %q changed during metadata compare-and-swap",
+			requestedKey,
+		)
+	}
+	equal, err := persistedSessionMetaEqual(current, expected)
+	if err != nil {
+		return false, err
+	}
+	if !equal {
+		return false, nil
+	}
+	if err := contextError(ctx); err != nil {
+		return false, err
+	}
+	if replacement == nil {
+		if current.HistorySlot != "" {
+			return false, errors.New(
+				"memory: cannot remove metadata selecting bounded history",
+			)
+		}
+		if err := s.hooks.removeFile(s.metaPath(canonicalKey)); err != nil {
+			return false, fmt.Errorf("memory: remove session metadata rollback: %w", err)
+		}
+		return true, nil
+	}
+
+	restored := cloneSessionMeta(*replacement)
+	if strings.TrimSpace(restored.Key) == "" {
+		restored.Key = canonicalKey
+	}
+	if restored.Key != canonicalKey {
+		return false, fmt.Errorf(
+			"memory: replacement metadata key %q does not match compare-and-swap key %q",
+			restored.Key,
+			canonicalKey,
+		)
+	}
+	if restored.HistorySlot != current.HistorySlot ||
+		restored.Skip != current.Skip || restored.Count != current.Count {
+		return false, errors.New("memory: metadata rollback changed history-owned fields")
+	}
+	if !slices.Equal(restored.Aliases, current.Aliases) {
+		if _, err := s.validateAliasOwnershipLocked(
+			canonicalKey,
+			restored.Aliases,
+			current.Aliases,
+			true,
+		); err != nil {
+			return false, err
+		}
+	}
+	if err := s.writeMeta(canonicalKey, restored); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// CompareAndDeleteEmptySessionStrict conditionally deletes a session created
+// by a failed coordinated operation. It compares the exact persisted metadata
+// and refuses to delete bounded or non-empty history. Once validated under the
+// directory/session locks, it commits deletion through the normal recoverable
+// manifest protocol so no metadata-less history artifact remains.
+func (s *JSONLStore) CompareAndDeleteEmptySessionStrict(
+	ctx context.Context,
+	sessionKey string,
+	expected SessionMeta,
+) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := contextError(ctx); err != nil {
+		return false, err
+	}
+	if sessionKey == "" || sessionKey != strings.TrimSpace(sessionKey) {
+		return false, errors.New("memory: strict empty session compare-and-delete is invalid")
+	}
+
+	directoryLock := s.directoryLock()
+	directoryLock.Lock()
+	defer directoryLock.Unlock()
+	if err := contextError(ctx); err != nil {
+		return false, err
+	}
+	if recoverErr := s.recoverPendingDeletionsLocked(); recoverErr != nil {
+		return false, recoverErr
+	}
+	requestedKey := sessionKey
+	canonicalKey, found, err := s.resolveSessionKeyStrictMode(ctx, requestedKey, true)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+
+	lock := s.sessionLock(canonicalKey)
+	lock.Lock()
+	current, err := s.readMetaStrict(canonicalKey)
+	if err != nil {
+		lock.Unlock()
+		return false, err
+	}
+	if current.Key != canonicalKey {
+		lock.Unlock()
+		return false, fmt.Errorf(
+			"memory: session metadata key %q does not match compare-and-delete key %q",
+			current.Key,
+			canonicalKey,
+		)
+	}
+	if requestedKey != canonicalKey && !slices.Contains(current.Aliases, requestedKey) {
+		lock.Unlock()
+		return false, fmt.Errorf(
+			"memory: session alias %q changed during empty session compare-and-delete",
+			requestedKey,
+		)
+	}
+	equal, err := persistedSessionMetaEqual(current, expected)
+	if err != nil {
+		lock.Unlock()
+		return false, err
+	}
+	if !equal {
+		lock.Unlock()
+		return false, nil
+	}
+	if current.HistorySlot != "" || current.Skip != 0 || current.Count != 0 {
+		lock.Unlock()
+		return false, errors.New("memory: compared session history is not empty")
+	}
+	rawCount, _, err := scanRetainedMessageLines(s.jsonlPath(canonicalKey))
+	if err != nil {
+		lock.Unlock()
+		return false, fmt.Errorf("memory: inspect compared session history: %w", err)
+	}
+	if rawCount != 0 {
+		lock.Unlock()
+		return false, errors.New("memory: compared session legacy history is not empty")
+	}
+	for _, slot := range []string{"a", "b"} {
+		if _, statErr := os.Stat(s.historySlotPath(canonicalKey, slot)); statErr == nil {
+			lock.Unlock()
+			return false, fmt.Errorf(
+				"memory: compared session has unexpected history slot %q",
+				slot,
+			)
+		} else if !os.IsNotExist(statErr) {
+			lock.Unlock()
+			return false, fmt.Errorf("memory: stat compared session history slot: %w", statErr)
+		}
+	}
+	lock.Unlock()
+
+	// The directory write lock remained held after validation, so no session
+	// operation can change the target before deleteSessionsLocked reacquires its
+	// canonical session lock and commits durable deletion intent.
+	return s.deleteSessionsLocked(ctx, []string{canonicalKey})
+}
+
+func persistedSessionMetaEqual(left, right SessionMeta) (bool, error) {
+	left = cloneSessionMeta(left)
+	right = cloneSessionMeta(right)
+	left.Revision = ""
+	right.Revision = ""
+	leftJSON, err := json.Marshal(left)
+	if err != nil {
+		return false, fmt.Errorf("memory: encode current metadata comparison: %w", err)
+	}
+	rightJSON, err := json.Marshal(right)
+	if err != nil {
+		return false, fmt.Errorf("memory: encode expected metadata comparison: %w", err)
+	}
+	return bytes.Equal(leftJSON, rightJSON), nil
 }
 
 // EnsureSessionHistory creates an empty legacy history file when a session
@@ -809,7 +1470,7 @@ func (s *JSONLStore) PromoteAliasHistory(
 			continue
 		}
 		unlock := s.lockSessionPair(sessionKey, alias)
-		promoted, err := s.promoteAliasHistoryLocked(sessionKey, alias, scope, aliases)
+		promoted, err := s.promoteAliasHistoryLocked(ctx, sessionKey, alias, scope, aliases)
 		unlock()
 		if err != nil || promoted {
 			return promoted, err
@@ -1776,6 +2437,7 @@ func (s *JSONLStore) lockSessionPair(keyA, keyB string) func() {
 }
 
 func (s *JSONLStore) promoteAliasHistoryLocked(
+	ctx context.Context,
 	sessionKey string,
 	alias string,
 	scope json.RawMessage,
@@ -1823,7 +2485,7 @@ func (s *JSONLStore) promoteAliasHistoryLocked(
 		canonicalMeta.Summary = aliasSummary
 	}
 
-	if _, err := s.commitHistoryLocked(sessionKey, canonicalMeta, aliasHistory); err != nil {
+	if _, err := s.commitHistoryLocked(ctx, sessionKey, canonicalMeta, aliasHistory); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -2252,7 +2914,7 @@ func (s *JSONLStore) SetHistory(
 		}
 	}
 
-	_, err = s.commitHistoryLocked(sessionKey, meta, history)
+	_, err = s.commitHistoryLocked(ctx, sessionKey, meta, history)
 	return err
 }
 
@@ -2293,13 +2955,14 @@ func (s *JSONLStore) Compact(
 	meta.Skip = 0
 	meta.Count = len(active)
 	meta.UpdatedAt = time.Now()
-	_, err = s.commitHistoryLocked(sessionKey, meta, active)
+	_, err = s.commitHistoryLocked(ctx, sessionKey, meta, active)
 	return err
 }
 
 // commitHistoryLocked writes a complete tuple to the inactive history slot,
 // then flips metadata. The metadata rename is the sole visibility point.
 func (s *JSONLStore) commitHistoryLocked(
+	ctx context.Context,
 	sessionKey string,
 	meta SessionMeta,
 	messages []providers.Message,
@@ -2317,6 +2980,9 @@ func (s *JSONLStore) commitHistoryLocked(
 	}
 	if err := s.hooks.writeHistory(s.historySlotPath(sessionKey, slot), data, 0o644); err != nil {
 		return SessionMeta{}, fmt.Errorf("memory: write history slot: %w", err)
+	}
+	if err := contextError(ctx); err != nil {
+		return SessionMeta{}, err
 	}
 	meta.HistorySlot = slot
 	meta.Revision = ""
