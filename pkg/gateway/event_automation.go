@@ -39,6 +39,7 @@ type eventAutomationService struct {
 	webhookBackend  *eventwebhook.Backend
 	channelBackend  *eventchannel.Backend
 	reviewService   *reviews.Service
+	reviewAttention *reviews.AttentionLauncher
 	githubPoller    *eventgithubpoll.Poller
 	cancel          context.CancelFunc
 	done            chan struct{}
@@ -59,6 +60,7 @@ type eventReviewRuntime struct {
 	agentID                      string
 	acquireWorkingContextRuntime reviews.WorkingContextRuntimeAcquire
 	submitter                    reviews.Submitter
+	attentionPolicies            reviews.AttentionPolicySource
 	notificationMCP              workflows.ToolRunner
 	mcpArtifactRoot              string
 }
@@ -203,6 +205,14 @@ func newEventAutomationServiceWithReviews(
 	if err != nil {
 		return nil, err
 	}
+	var runStore workflows.RunStore
+	if cfg.Workflows.Enabled {
+		runStore = executor.Store
+		if runStore == nil {
+			runStore = workflows.NewFileRunStore(workspace)
+			executor.Store = runStore
+		}
+	}
 
 	reviewService, err := reviews.NewService(reviews.ServiceConfig{
 		Store:                        store,
@@ -213,6 +223,17 @@ func newEventAutomationServiceWithReviews(
 	})
 	if err != nil {
 		return nil, errors.Join(err, store.Close())
+	}
+	var reviewAttention *reviews.AttentionLauncher
+	if cfg.Workflows.Enabled && reviewRuntime.attentionPolicies != nil {
+		reviewAttention, err = reviews.NewAttentionLauncher(reviews.AttentionLauncherConfig{
+			Service:  reviewService,
+			Executor: executor,
+			Policies: reviewRuntime.attentionPolicies,
+		})
+		if err != nil {
+			return nil, errors.Join(err, store.Close())
+		}
 	}
 	operatorBackend, err := eventoperator.NewBackend(eventoperator.BackendConfig{
 		Store:   store,
@@ -245,6 +266,7 @@ func newEventAutomationServiceWithReviews(
 		webhookBackend:  webhookBackend,
 		channelBackend:  channelBackend,
 		reviewService:   reviewService,
+		reviewAttention: reviewAttention,
 		githubPoller:    githubPoller,
 		done:            make(chan struct{}),
 	}
@@ -266,11 +288,6 @@ func newEventAutomationServiceWithReviews(
 	)
 
 	if cfg.Workflows.Enabled {
-		runStore := executor.Store
-		if runStore == nil {
-			runStore = workflows.NewFileRunStore(workspace)
-			executor.Store = runStore
-		}
 		router := &workflows.EventWorkflowRouter{
 			Inbox:                store,
 			WorkspaceDir:         workspace,

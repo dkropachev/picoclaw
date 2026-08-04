@@ -31,6 +31,13 @@ var (
 	ErrInvalidReview = errors.New("invalid pull request review")
 	// ErrReviewConflict reports an optimistic-version or idempotency conflict.
 	ErrReviewConflict = errors.New("pull request review conflict")
+	// ErrReviewDecisionAdmissionUncertain reports that the callback creating a
+	// workflow run completed, but SQLite could not confirm whether the durable
+	// decision-to-run link committed. Callers must reconcile the deterministic
+	// run ID before retrying the callback.
+	ErrReviewDecisionAdmissionUncertain = errors.New(
+		"pull request review decision run admission outcome is uncertain",
+	)
 )
 
 // ReviewCaseStatus is the durable lifecycle state of one captured review.
@@ -322,6 +329,29 @@ type ReviewSubmissionReconciliation struct {
 	Resolution      ReviewReconciliationResolution
 }
 
+// ReviewDecisionKey identifies one immutable gate decision for an exact
+// review-case version and trusted policy revision.
+type ReviewDecisionKey struct {
+	CaseID         string `json:"case_id"`
+	CaseVersion    int64  `json:"case_version"`
+	DecisionPoint  string `json:"decision_point"`
+	PolicyRevision string `json:"policy_revision"`
+}
+
+// ReviewDecisionRunAdmission proposes the deterministic workflow run for one
+// review decision. RunID must be stable across retries.
+type ReviewDecisionRunAdmission struct {
+	Key   ReviewDecisionKey `json:"key"`
+	RunID string            `json:"run_id"`
+}
+
+// ReviewDecisionRunLink is the durable decision-to-workflow-run binding.
+type ReviewDecisionRunLink struct {
+	Key       ReviewDecisionKey `json:"key"`
+	RunID     string            `json:"run_id"`
+	CreatedAt time.Time         `json:"created_at"`
+}
+
 // ReviewCaseStore owns captured review inspection and optimistic editing.
 type ReviewCaseStore interface {
 	CaptureReview(ctx context.Context, input ReviewCaptureInput) (ReviewCase, bool, error)
@@ -349,6 +379,23 @@ type ReviewSubmissionQueue interface {
 	) ([]ReviewSubmission, error)
 	RenewReviewSubmissionLease(ctx context.Context, submissionID, leaseToken string, lease time.Duration) error
 	FinishReviewSubmission(ctx context.Context, outcome ReviewSubmissionOutcome) (ReviewCaseDetail, error)
+}
+
+// ReviewDecisionRunStore atomically fences one external workflow-run create
+// with an exact review case and policy decision. For a historical exact retry,
+// AdmitReviewDecisionRun returns existed=true without invoking create. The
+// callback must not call back into the same Store because admission holds its
+// sole SQLite connection in a write transaction until the callback returns.
+type ReviewDecisionRunStore interface {
+	GetReviewDecisionRun(
+		ctx context.Context,
+		key ReviewDecisionKey,
+	) (ReviewDecisionRunLink, error)
+	AdmitReviewDecisionRun(
+		ctx context.Context,
+		admission ReviewDecisionRunAdmission,
+		create func(context.Context) error,
+	) (link ReviewDecisionRunLink, existed bool, err error)
 }
 
 // ReviewStore is the complete durable pull-request review boundary.

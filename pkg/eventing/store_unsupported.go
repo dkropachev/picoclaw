@@ -17,6 +17,7 @@ var _ DispatchOperatorGetter = (*Store)(nil)
 var _ RevisionRoutingDispatchCreator = (*Store)(nil)
 var _ DispatchLeaseRenewer = (*Store)(nil)
 var _ ReviewStore = (*Store)(nil)
+var _ ReviewDecisionRunStore = (*Store)(nil)
 
 func Open(context.Context, string, ...Option) (*Store, error) {
 	return nil, ErrUnsupportedPlatform
@@ -230,4 +231,19 @@ func (*Store) FinishReviewSubmission(
 	ReviewSubmissionOutcome,
 ) (ReviewCaseDetail, error) {
 	return ReviewCaseDetail{}, ErrUnsupportedPlatform
+}
+
+func (*Store) GetReviewDecisionRun(
+	context.Context,
+	ReviewDecisionKey,
+) (ReviewDecisionRunLink, error) {
+	return ReviewDecisionRunLink{}, ErrUnsupportedPlatform
+}
+
+func (*Store) AdmitReviewDecisionRun(
+	context.Context,
+	ReviewDecisionRunAdmission,
+	func(context.Context) error,
+) (ReviewDecisionRunLink, bool, error) {
+	return ReviewDecisionRunLink{}, false, ErrUnsupportedPlatform
 }
