@@ -26,9 +26,13 @@ const (
 	maxPRDevelopmentURLBytes        = 4096
 	maxPRDevelopmentFeedbackBytes   = 64 << 10
 	maxPRDevelopmentCaptureBytes    = 2 << 20
+	maxPRDevelopmentListItems       = 100
 )
 
-var _ PRDevelopmentCaseStore = (*Store)(nil)
+var (
+	_ PRDevelopmentCaseStore  = (*Store)(nil)
+	_ PRDevelopmentCaseReader = (*Store)(nil)
+)
 
 const prDevelopmentCaseColumns = `
 	id, event_id, dispatch_id, run_id, workflow_ref, workflow_revision,
@@ -213,7 +217,7 @@ func (s *Store) CapturePRDevelopmentCase(
 }
 
 // GetPRDevelopmentCase returns one exact immutable development case. It does
-// not create a list, browser, chat, checkout, or execution surface.
+// not create chat, checkout, execution, publication, or provider authority.
 func (s *Store) GetPRDevelopmentCase(
 	ctx context.Context,
 	id string,
@@ -233,6 +237,111 @@ func (s *Store) GetPRDevelopmentCase(
 		return PRDevelopmentCase{}, s.dbError(err)
 	}
 	return stored.Case, nil
+}
+
+// ListPRDevelopmentCases returns immutable captures newest first. Pagination
+// is stable because capture rows never change after insertion and the keyset
+// uses the complete required list ordering, including the unique case ID.
+func (s *Store) ListPRDevelopmentCases(
+	ctx context.Context,
+	filter PRDevelopmentCaseFilter,
+) (PRDevelopmentCasePage, error) {
+	if err := s.ready(ctx); err != nil {
+		return PRDevelopmentCasePage{}, err
+	}
+	plan, err := buildPRDevelopmentCaseListPlan(filter)
+	if err != nil {
+		return PRDevelopmentCasePage{}, err
+	}
+	cases, next, err := collectListPage(
+		ctx,
+		s,
+		plan,
+		func(scanner rowScanner) (PRDevelopmentCase, error) {
+			stored, scanErr := scanPRDevelopmentCase(scanner)
+			return stored.Case, scanErr
+		},
+		func(developmentCase PRDevelopmentCase) PRDevelopmentCaseCursor {
+			return PRDevelopmentCaseCursor{
+				UpdatedAt: developmentCase.UpdatedAt,
+				ID:        developmentCase.ID,
+			}
+		},
+		listErrorContext{
+			query:   "list pull request development cases",
+			scan:    "scan pull request development case list",
+			iterate: "iterate pull request development case list",
+		},
+	)
+	if err != nil {
+		return PRDevelopmentCasePage{}, err
+	}
+	return PRDevelopmentCasePage{Cases: cases, Next: next}, nil
+}
+
+func buildPRDevelopmentCaseListPlan(
+	filter PRDevelopmentCaseFilter,
+) (listPlan, error) {
+	filter.Repository = strings.TrimSpace(filter.Repository)
+	if filter.Repository != "" &&
+		!validPRDevelopmentRepository(filter.Repository) {
+		return listPlan{}, fmt.Errorf(
+			"%w: development-case repository filter is invalid",
+			ErrInvalidPRDevelopment,
+		)
+	}
+	if filter.PullNumber < 0 || filter.PullNumber > maxReviewPullNumber {
+		return listPlan{}, fmt.Errorf(
+			"%w: development-case pull number filter must be between 0 and %d",
+			ErrInvalidPRDevelopment,
+			maxReviewPullNumber,
+		)
+	}
+
+	var after *listPosition
+	if filter.After != nil {
+		if err := validateDBTimestamp(
+			"development-case cursor updated_at",
+			filter.After.UpdatedAt,
+		); err != nil {
+			return listPlan{}, fmt.Errorf("%w: %v", ErrInvalidPRDevelopment, err)
+		}
+		cursorID := strings.TrimSpace(filter.After.ID)
+		if !validPrefixedHexID(cursorID, prDevelopmentCaseIDPrefix) {
+			return listPlan{}, fmt.Errorf(
+				"%w: development-case cursor ID is invalid",
+				ErrInvalidPRDevelopment,
+			)
+		}
+		after = &listPosition{at: filter.After.UpdatedAt, id: cursorID}
+	}
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = defaultListLimit
+	}
+	if limit > maxPRDevelopmentListItems {
+		limit = maxPRDevelopmentListItems
+	}
+	return buildListPlan(
+		prDevelopmentCaseColumns,
+		"pr_development_cases",
+		"updated_at",
+		[]listFilter{
+			{
+				column:  "repository",
+				value:   filter.Repository,
+				enabled: filter.Repository != "",
+			},
+			{
+				column:  "pull_number",
+				value:   filter.PullNumber,
+				enabled: filter.PullNumber > 0,
+			},
+		},
+		after,
+		limit,
+	), nil
 }
 
 func findPRDevelopmentCaptureByProvenance(

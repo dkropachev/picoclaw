@@ -48,15 +48,17 @@ type Store interface {
 
 // BackendConfig contains generation-specific dependencies.
 type BackendConfig struct {
-	Store   Store
-	Reviews http.Handler
+	Store         Store
+	Reviews       http.Handler
+	PRDevelopment http.Handler
 }
 
 // Backend is an immutable operator service suitable for sharing between an
 // HTTP controller and other in-process consumers.
 type Backend struct {
-	store   Store
-	reviews http.Handler
+	store         Store
+	reviews       http.Handler
+	prDevelopment http.Handler
 }
 
 // NewBackend validates and freezes an operator backend.
@@ -65,8 +67,9 @@ func NewBackend(config BackendConfig) (*Backend, error) {
 		return nil, errors.New("event operator store is required")
 	}
 	return &Backend{
-		store:   config.Store,
-		reviews: config.Reviews,
+		store:         config.Store,
+		reviews:       config.Reviews,
+		prDevelopment: config.PRDevelopment,
 	}, nil
 }
 

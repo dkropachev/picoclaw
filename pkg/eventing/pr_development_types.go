@@ -89,9 +89,33 @@ type PRDevelopmentCase struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// PRDevelopmentCaseStore owns only immutable development-case capture in this
-// slice. Conversation, checkout, execution, publication, and provider actions
-// are intentionally separate future capabilities.
+// PRDevelopmentCaseCursor identifies one immutable position in the
+// newest-first development-case list.
+type PRDevelopmentCaseCursor struct {
+	UpdatedAt time.Time `json:"updated_at"`
+	ID        string    `json:"id"`
+}
+
+// PRDevelopmentCaseFilter selects immutable development cases in newest-first
+// keyset order. Repository matching follows the provider's case-insensitive
+// owner/repository identity, while PullNumber is an exact numeric match.
+type PRDevelopmentCaseFilter struct {
+	Repository string
+	PullNumber int64
+	After      *PRDevelopmentCaseCursor
+	Limit      int
+}
+
+// PRDevelopmentCasePage is one stable keyset-paginated development-case
+// result.
+type PRDevelopmentCasePage struct {
+	Cases []PRDevelopmentCase      `json:"cases"`
+	Next  *PRDevelopmentCaseCursor `json:"next,omitempty"`
+}
+
+// PRDevelopmentCaseStore owns immutable development-case capture and exact
+// lookup. Conversation, checkout, execution, publication, and provider actions
+// are intentionally separate capabilities.
 type PRDevelopmentCaseStore interface {
 	LookupPRDevelopmentCapture(
 		ctx context.Context,
@@ -102,4 +126,15 @@ type PRDevelopmentCaseStore interface {
 		input PRDevelopmentCaptureInput,
 	) (PRDevelopmentCase, bool, error)
 	GetPRDevelopmentCase(ctx context.Context, id string) (PRDevelopmentCase, error)
+}
+
+// PRDevelopmentCaseReader is the separate immutable workbench read boundary.
+// Keeping it distinct avoids widening the capture interface implemented by
+// existing integrations.
+type PRDevelopmentCaseReader interface {
+	GetPRDevelopmentCase(ctx context.Context, id string) (PRDevelopmentCase, error)
+	ListPRDevelopmentCases(
+		ctx context.Context,
+		filter PRDevelopmentCaseFilter,
+	) (PRDevelopmentCasePage, error)
 }

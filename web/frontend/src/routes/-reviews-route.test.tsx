@@ -12,6 +12,7 @@ import type { ReviewsRouteSearch } from "@/components/reviews/reviews-page"
 import { routeTree } from "@/routeTree.gen"
 
 const caseID = `prc_${"a".repeat(32)}`
+const developmentCaseID = `pdc_${"b".repeat(32)}`
 
 vi.mock("@/api/launcher-auth", () => ({
   getLauncherAuthStatus: vi.fn().mockResolvedValue({
@@ -37,10 +38,17 @@ vi.mock("@/components/reviews/review-attention-policies-page", () => ({
     onShowInbox,
   }: {
     onShowInbox: () => void
+    onShowDevelopment: () => void
   }) => (
     <button type="button" onClick={onShowInbox}>
       Policy editor
     </button>
+  ),
+}))
+
+vi.mock("@/components/reviews/pr-development-page", () => ({
+  PRDevelopmentPage: ({ search }: { search: ReviewsRouteSearch }) => (
+    <output data-testid="development-search">{JSON.stringify(search)}</output>
   ),
 }))
 
@@ -97,6 +105,42 @@ describe("reviews route navigation", () => {
       expect(router.state.location.search).toEqual({ view: "policies" })
     })
     expect(screen.getByRole("button", { name: "Policy editor" })).toBeVisible()
+    expect(screen.queryByTestId("reviews-search")).not.toBeInTheDocument()
+  })
+
+  it("renders development feedback with only its safe canonical route state", async () => {
+    const router = createRouter({
+      routeTree,
+      history: createMemoryHistory({
+        initialEntries: [
+          `/reviews?view=development&case=${developmentCaseID}&repository=%20octo%2Frepo%20&pull_number=84&focus=chat&questions=private&cursor=opaque`,
+        ],
+      }),
+      context: {
+        queryClient: new QueryClient({
+          defaultOptions: { queries: { retry: false } },
+        }),
+      },
+    })
+
+    render(<RouterProvider router={router} />)
+
+    await waitFor(() => {
+      expect(router.state.location.search).toEqual({
+        view: "development",
+        case: developmentCaseID,
+        repository: "octo/repo",
+        pull_number: 84,
+      })
+    })
+    expect(screen.getByTestId("development-search")).toHaveTextContent(
+      JSON.stringify({
+        view: "development",
+        case: developmentCaseID,
+        repository: "octo/repo",
+        pull_number: 84,
+      }),
+    )
     expect(screen.queryByTestId("reviews-search")).not.toBeInTheDocument()
   })
 

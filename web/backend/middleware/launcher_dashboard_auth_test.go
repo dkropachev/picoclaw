@@ -53,6 +53,8 @@ func TestLauncherDashboardAuth_AllowsPublicPaths(t *testing.T) {
 		{http.MethodPost, "/api/auth/logout", http.StatusTeapot},
 		{http.MethodGet, "/api/auth/logout", http.StatusUnauthorized},
 		{http.MethodGet, "/api/config", http.StatusUnauthorized},
+		{http.MethodGet, "/api/pr-development", http.StatusUnauthorized},
+		{http.MethodGet, "/api/pr-development/pdc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", http.StatusUnauthorized},
 		{http.MethodGet, "/pico/ws", http.StatusUnauthorized},
 	} {
 		rec := httptest.NewRecorder()

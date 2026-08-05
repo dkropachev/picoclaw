@@ -1033,6 +1033,38 @@ const reviewAttentionDetail = {
     submitted_at: "2026-07-30T12:04:01Z",
   },
 }
+const prDevelopmentCaseID = `pdc_${"7".repeat(32)}`
+const prDevelopmentSummary = {
+  id: prDevelopmentCaseID,
+  repository: "octo/repo",
+  pull_number: 84,
+  pull_url: "https://github.example.test/octo/repo/pull/84",
+  pull_author: "octocat",
+  pull_state: "open",
+  pull_draft: false,
+  pull_merged: false,
+  head_repository: "octocat/repo",
+  head_ref: "fix/provider-feedback",
+  head_sha: "d".repeat(40),
+  review_author: "reviewer",
+  submitted_review_state: "changes_requested",
+  current_review_state: "changes_requested",
+  review_submitted_at: "2026-08-05T12:00:00Z",
+  review_url:
+    "https://github.example.test/octo/repo/pull/84#pullrequestreview-7",
+  captured_at: "2026-08-05T12:00:01Z",
+} as const
+const prDevelopmentDetail = {
+  case: {
+    ...prDevelopmentSummary,
+    base_repository: "octo/repo",
+    base_ref: "main",
+    base_sha: "e".repeat(40),
+    review_commit_sha: "f".repeat(40),
+    feedback:
+      'Please keep <a href="https://private.example.test">private-link-canary</a> as provider text.',
+  },
+}
 const waitingReviewAttentionProjectionText = `{"case_version":7,"status":"waiting","can_respond":true,"turns":[{"status":"waiting","title":"Choose a safe contract","questions":{"priority":9007199254740993},"response_token":"${reviewAttentionResponseToken}"}]}`
 
 interface MockLauncherApiOptions {
@@ -2517,6 +2549,10 @@ async function mockLauncherApis(
           })
         case "/api/reviews":
           return json(route, { cases: [reviewAttentionCase] })
+        case "/api/pr-development":
+          return json(route, { cases: [prDevelopmentSummary] })
+        case `/api/pr-development/${prDevelopmentCaseID}`:
+          return json(route, prDevelopmentDetail)
         case `/api/reviews/${reviewAttentionCaseID}`:
           return json(route, reviewAttentionDetail)
         case `/api/reviews/${reviewAttentionCaseID}/attention`:
@@ -3087,6 +3123,70 @@ test("submitted review attention handoff is canonical, focused, fenced, and cont
       },
     },
   ])
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("captured PR feedback is canonical, plain text, read-only, and contained on mobile", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 375, height: 760 })
+  const errors = collectPageErrors(page)
+  const requests: Array<{ method: string; path: string }> = []
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname
+    if (path.startsWith("/api/pr-development")) {
+      requests.push({ method: request.method(), path })
+    }
+  })
+
+  await gotoMockedRoute(
+    page,
+    `/reviews?view=development&case=${prDevelopmentCaseID}&repository=%20octo%2Frepo%20&pull_number=84&focus=chat&questions=private-questions-canary&cursor=private-cursor-canary`,
+  )
+
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/reviews\\?view=development&case=${prDevelopmentCaseID}&repository=octo%2Frepo&pull_number=84$`,
+    ),
+  )
+  await expect(
+    page.getByRole("button", { name: "My PR feedback" }),
+  ).toHaveAttribute("aria-current", "page")
+  await expect(page.getByLabel("Pull request number")).toHaveValue("84")
+  const feedback = page.getByTestId("pr-development-feedback")
+  await expect(feedback).toContainText("private-link-canary")
+  await expect(
+    page.getByRole("link", { name: "private-link-canary" }),
+  ).toHaveCount(0)
+  await expect(page.locator("body")).not.toContainText(
+    "private-questions-canary",
+  )
+  await expect(page.locator("body")).not.toContainText("private-cursor-canary")
+  await expect(
+    page.getByRole("button", { name: /chat|checkout|push/i }),
+  ).toHaveCount(0)
+  await expect(page.getByRole("link", { name: /Open PR/ })).toBeVisible()
+  await expect(page.getByRole("link", { name: /Open review/ })).toBeVisible()
+  await page.getByRole("button", { name: "Back to PR feedback" }).click()
+  await expect(
+    page.getByRole("heading", { name: "Feedback on my PRs" }),
+  ).toBeVisible()
+  await page.getByRole("button", { name: new RegExp(`octo/repo #84`) }).click()
+  await expect(page.getByTestId("pr-development-feedback")).toContainText(
+    "private-link-canary",
+  )
+  expect(requests).toEqual(
+    expect.arrayContaining([
+      { method: "GET", path: "/api/pr-development" },
+      {
+        method: "GET",
+        path: `/api/pr-development/${prDevelopmentCaseID}`,
+      },
+    ]),
+  )
+  expect(requests.every(({ method }) => method === "GET")).toBe(true)
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])
