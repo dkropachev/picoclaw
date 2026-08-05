@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -119,6 +120,29 @@ func (h *reviewAttentionAPITestHarness) put(
 	)
 }
 
+func reviewAttentionDirectorySnapshot(
+	t *testing.T,
+	directory string,
+) map[string][]byte {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatalf("ReadDir(%q) error = %v", directory, err)
+	}
+	snapshot := make(map[string][]byte, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(directory, entry.Name()))
+		if readErr != nil {
+			t.Fatalf("ReadFile(%q) error = %v", entry.Name(), readErr)
+		}
+		snapshot[entry.Name()] = data
+	}
+	return snapshot
+}
+
 func completeReviewAttentionPolicy() config.ReviewAttentionConfig {
 	return config.ReviewAttentionConfig{
 		Global: map[string][]gatetypes.GateSpec{
@@ -197,6 +221,42 @@ func decodeReviewAttentionError(
 		t.Fatalf("error response decode = %v; body=%s", err, recorder.Body.String())
 	}
 	return response.Error
+}
+
+func injectConcurrentAliasBeforeReviewAttentionCAS(
+	h *Handler,
+) func() bool {
+	originalSave := h.saveReviewAttention
+	injected := false
+	h.saveReviewAttention = func(
+		path string,
+		attention config.ReviewAttentionConfig,
+		expectedRevision string,
+	) (string, error) {
+		if !injected {
+			current, revision, err := config.LoadConfigForUpdateSnapshot(path)
+			if err != nil {
+				return "", err
+			}
+			current.ModelAliases = append(
+				current.ModelAliases,
+				config.ModelAliasConfig{
+					Name:  concurrentWriterAlias,
+					Model: "openai/gpt-5.4",
+				},
+			)
+			if _, err := config.SaveConfigIfRevision(
+				path,
+				current,
+				revision,
+			); err != nil {
+				return "", err
+			}
+			injected = true
+		}
+		return originalSave(path, attention, expectedRevision)
+	}
+	return func() bool { return injected }
 }
 
 func TestReviewAttentionPoliciesGetAndPutFullReplacement(t *testing.T) {
@@ -284,6 +344,221 @@ func TestReviewAttentionPoliciesGetAndPutFullReplacement(t *testing.T) {
 		roundTrip.CatalogRevision != putResponse.CatalogRevision ||
 		!reflect.DeepEqual(roundTrip.ReviewAttentionConfig, putResponse.ReviewAttentionConfig) {
 		t.Fatalf("GET after PUT changed the policy generation: %#v", roundTrip)
+	}
+}
+
+func TestReviewAttentionPolicySavePreservesPersistedShapeAndSecurity(t *testing.T) {
+	resetGatewayTestState(t)
+	harness := newReviewAttentionAPITestHarness(t, func(cfg *config.Config) {
+		cfg.Gateway.Port = 23456
+	})
+	raw, err := os.ReadFile(harness.configPath)
+	if err != nil {
+		t.Fatalf("ReadFile(config) error = %v", err)
+	}
+	var root map[string]json.RawMessage
+	if err = json.Unmarshal(raw, &root); err != nil {
+		t.Fatalf("json.Unmarshal(config) error = %v", err)
+	}
+	var agents map[string]json.RawMessage
+	if err = json.Unmarshal(root["agents"], &agents); err != nil {
+		t.Fatalf("json.Unmarshal(agents) error = %v", err)
+	}
+	var defaults map[string]json.RawMessage
+	if err = json.Unmarshal(agents["defaults"], &defaults); err != nil {
+		t.Fatalf("json.Unmarshal(agent defaults) error = %v", err)
+	}
+	delete(defaults, "workspace")
+	agents["defaults"], err = json.Marshal(defaults)
+	if err != nil {
+		t.Fatalf("json.Marshal(agent defaults) error = %v", err)
+	}
+	root["agents"], err = json.Marshal(agents)
+	if err != nil {
+		t.Fatalf("json.Marshal(agents) error = %v", err)
+	}
+	raw, err = json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		t.Fatalf("json.MarshalIndent(config) error = %v", err)
+	}
+	if err = os.WriteFile(harness.configPath, raw, 0o600); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+	securityPath := filepath.Join(filepath.Dir(harness.configPath), ".security.yml")
+	securityBefore, err := os.ReadFile(securityPath)
+	if err != nil {
+		t.Fatalf("ReadFile(security) error = %v", err)
+	}
+	t.Setenv("PICOCLAW_GATEWAY_PORT", "34567")
+
+	_, current := harness.get(t)
+	recorder := harness.put(
+		t,
+		current.ConfigRevision,
+		completeReviewAttentionPolicy(),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	persisted, err := os.ReadFile(harness.configPath)
+	if err != nil {
+		t.Fatalf("ReadFile(saved config) error = %v", err)
+	}
+	var savedRoot map[string]json.RawMessage
+	if err = json.Unmarshal(persisted, &savedRoot); err != nil {
+		t.Fatalf("json.Unmarshal(saved config) error = %v", err)
+	}
+	var gateway struct {
+		Port int `json:"port"`
+	}
+	if err = json.Unmarshal(savedRoot["gateway"], &gateway); err != nil {
+		t.Fatalf("json.Unmarshal(saved gateway) error = %v", err)
+	}
+	if gateway.Port != 23456 {
+		t.Fatalf("persisted gateway port = %d, want disk value 23456", gateway.Port)
+	}
+	if err = json.Unmarshal(savedRoot["agents"], &agents); err != nil {
+		t.Fatalf("json.Unmarshal(saved agents) error = %v", err)
+	}
+	if err = json.Unmarshal(agents["defaults"], &defaults); err != nil {
+		t.Fatalf("json.Unmarshal(saved defaults) error = %v", err)
+	}
+	if _, persistedWorkspace := defaults["workspace"]; persistedWorkspace {
+		t.Fatal("policy PUT persisted a derived default workspace")
+	}
+	securityAfter, err := os.ReadFile(securityPath)
+	if err != nil {
+		t.Fatalf("ReadFile(saved security) error = %v", err)
+	}
+	if string(securityAfter) != string(securityBefore) {
+		t.Fatal("policy PUT rewrote the security sidecar")
+	}
+}
+
+func TestReviewAttentionPolicySaveCreatesMinimalMissingConfig(t *testing.T) {
+	resetGatewayTestState(t)
+	harness := newReviewAttentionAPITestHarness(t, nil)
+	securityPath := filepath.Join(filepath.Dir(harness.configPath), ".security.yml")
+	for _, path := range []string{harness.configPath, securityPath} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("Remove(%q) error = %v", path, err)
+		}
+	}
+	t.Setenv("PICOCLAW_GATEWAY_PORT", "34567")
+
+	_, current := harness.get(t)
+	if current.ConfigRevision != "missing" {
+		t.Fatalf("missing config revision = %q, want missing", current.ConfigRevision)
+	}
+	recorder := harness.put(
+		t,
+		current.ConfigRevision,
+		completeReviewAttentionPolicy(),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	raw, err := os.ReadFile(harness.configPath)
+	if err != nil {
+		t.Fatalf("ReadFile(config) error = %v", err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatalf("json.Unmarshal(config) error = %v", err)
+	}
+	if len(document) != 2 {
+		t.Fatalf("missing policy save materialized unrelated config: %s", raw)
+	}
+	if string(document["version"]) != strconv.Itoa(config.CurrentVersion) {
+		t.Fatalf("saved version = %s, want %d", document["version"], config.CurrentVersion)
+	}
+	if _, ok := document["reviews"]; !ok {
+		t.Fatalf("saved config has no reviews member: %s", raw)
+	}
+	if _, err := os.Stat(securityPath); !os.IsNotExist(err) {
+		t.Fatalf("missing policy save created security sidecar: %v", err)
+	}
+}
+
+func TestReviewAttentionPoliciesRejectSecuritySidecarWithoutPublicConfig(
+	t *testing.T,
+) {
+	resetGatewayTestState(t)
+	harness := newReviewAttentionAPITestHarness(t, nil)
+	securityPath := filepath.Join(filepath.Dir(harness.configPath), ".security.yml")
+	securityBefore, err := os.ReadFile(securityPath)
+	if err != nil {
+		t.Fatalf("ReadFile(security) error = %v", err)
+	}
+	if err = os.Remove(harness.configPath); err != nil {
+		t.Fatalf("Remove(config) error = %v", err)
+	}
+	revision, err := config.ConfigRevision(harness.configPath)
+	if err != nil {
+		t.Fatalf("ConfigRevision() error = %v", err)
+	}
+
+	for _, recorder := range []*httptest.ResponseRecorder{
+		harness.request(t, http.MethodGet, reviewAttentionPoliciesPath, "", nil),
+		harness.put(t, revision, completeReviewAttentionPolicy()),
+	} {
+		if recorder.Code != http.StatusInternalServerError ||
+			decodeReviewAttentionError(t, recorder) != reviewAttentionPoliciesUnavailable {
+			t.Fatalf("sidecar-only request = %d body=%s", recorder.Code, recorder.Body.String())
+		}
+	}
+	if _, err = os.Stat(harness.configPath); !os.IsNotExist(err) {
+		t.Fatalf("sidecar-only request created public config: %v", err)
+	}
+	securityAfter, err := os.ReadFile(securityPath)
+	if err != nil {
+		t.Fatalf("ReadFile(security after) error = %v", err)
+	}
+	if string(securityAfter) != string(securityBefore) {
+		t.Fatal("sidecar-only request changed security bytes")
+	}
+}
+
+func TestReviewAttentionPoliciesRejectLegacyWithoutMutation(t *testing.T) {
+	resetGatewayTestState(t)
+	harness := newReviewAttentionAPITestHarness(t, nil)
+	raw, err := os.ReadFile(harness.configPath)
+	if err != nil {
+		t.Fatalf("ReadFile(config) error = %v", err)
+	}
+	var root map[string]json.RawMessage
+	if err = json.Unmarshal(raw, &root); err != nil {
+		t.Fatalf("json.Unmarshal(config) error = %v", err)
+	}
+	root["version"] = json.RawMessage(strconv.Itoa(config.CurrentVersion - 1))
+	legacy, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		t.Fatalf("json.MarshalIndent(legacy) error = %v", err)
+	}
+	if err = os.WriteFile(harness.configPath, legacy, 0o600); err != nil {
+		t.Fatalf("WriteFile(legacy) error = %v", err)
+	}
+	revision, err := config.ConfigRevision(harness.configPath)
+	if err != nil {
+		t.Fatalf("ConfigRevision(legacy) error = %v", err)
+	}
+	directory := filepath.Dir(harness.configPath)
+	before := reviewAttentionDirectorySnapshot(t, directory)
+
+	for _, recorder := range []*httptest.ResponseRecorder{
+		harness.request(t, http.MethodGet, reviewAttentionPoliciesPath, "", nil),
+		harness.put(t, revision, config.ReviewAttentionConfig{}),
+	} {
+		if recorder.Code != http.StatusInternalServerError ||
+			decodeReviewAttentionError(t, recorder) != reviewAttentionPoliciesUnavailable {
+			t.Fatalf("legacy request = %d body=%s", recorder.Code, recorder.Body.String())
+		}
+	}
+	after := reviewAttentionDirectorySnapshot(t, directory)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("legacy policy request mutated config directory: before=%v after=%v", before, after)
 	}
 }
 
@@ -480,7 +755,7 @@ func TestReviewAttentionPoliciesUseNumberAndFenceCAS(t *testing.T) {
 	// Fetch the post-write revision, then inject a competing writer between
 	// validation and SaveConfigIfRevision. The candidate replacement must lose.
 	_, afterNumeric := harness.get(t)
-	wasInjected := injectConcurrentAliasBeforeCAS(harness.handler)
+	wasInjected := injectConcurrentAliasBeforeReviewAttentionCAS(harness.handler)
 	candidate := completeReviewAttentionPolicy()
 	conflict := harness.put(t, afterNumeric.ConfigRevision, candidate)
 	if conflict.Code != http.StatusConflict ||
