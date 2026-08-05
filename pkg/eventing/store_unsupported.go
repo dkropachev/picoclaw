@@ -18,6 +18,7 @@ var _ RevisionRoutingDispatchCreator = (*Store)(nil)
 var _ DispatchLeaseRenewer = (*Store)(nil)
 var _ ReviewStore = (*Store)(nil)
 var _ ReviewDecisionRunStore = (*Store)(nil)
+var _ ReviewAttentionTriggerQueue = (*Store)(nil)
 
 func Open(context.Context, string, ...Option) (*Store, error) {
 	return nil, ErrUnsupportedPlatform
@@ -231,6 +232,52 @@ func (*Store) FinishReviewSubmission(
 	ReviewSubmissionOutcome,
 ) (ReviewCaseDetail, error) {
 	return ReviewCaseDetail{}, ErrUnsupportedPlatform
+}
+
+func (*Store) GetReviewAttentionTrigger(
+	context.Context,
+	string,
+) (ReviewAttentionTrigger, error) {
+	return ReviewAttentionTrigger{}, ErrUnsupportedPlatform
+}
+
+func (*Store) ClaimReviewAttentionTriggers(
+	context.Context,
+	string,
+	int,
+	time.Duration,
+) ([]ReviewAttentionTrigger, error) {
+	return nil, ErrUnsupportedPlatform
+}
+
+func (*Store) RenewReviewAttentionTriggerLease(
+	context.Context,
+	string,
+	string,
+	time.Duration,
+) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Store) PinReviewAttentionTriggerPolicy(
+	context.Context,
+	ReviewAttentionPolicyPin,
+) (ReviewAttentionTrigger, error) {
+	return ReviewAttentionTrigger{}, ErrUnsupportedPlatform
+}
+
+func (*Store) ReleaseReviewAttentionTrigger(
+	context.Context,
+	ReviewAttentionTriggerRelease,
+) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Store) CompleteReviewAttentionTrigger(
+	context.Context,
+	ReviewAttentionTriggerCompletion,
+) error {
+	return ErrUnsupportedPlatform
 }
 
 func (*Store) GetReviewDecisionRun(

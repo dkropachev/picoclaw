@@ -216,6 +216,86 @@ func TestAttentionLauncherNoopHasNoSessionRunOrDecisionEffects(t *testing.T) {
 	}
 }
 
+func TestAttentionLauncherPreparedEnvelopePreservesCompilerInputLimit(t *testing.T) {
+	const gateCount = 16
+	makePolicy := func(questionBytes int) AttentionPolicySnapshot {
+		gates := make([]workflows.GateSpec, gateCount)
+		for index := range gates {
+			gates[index] = workflows.GateSpec{
+				ID:        fmt.Sprintf("gate_%02d", index),
+				Kind:      workflows.GateDeterministic,
+				When:      "false",
+				Title:     "Boundary gate",
+				Questions: strings.Repeat("q", questionBytes),
+			}
+		}
+		return attentionTestPolicy("custom-source-boundary", gates)
+	}
+
+	var boundary AttentionPolicySnapshot
+	var boundaryBytes int
+	low, high := 1, workflows.MaxWorkflowGateQuestionBytes-2
+	for low <= high {
+		questionBytes := low + (high-low)/2
+		candidate := makePolicy(questionBytes)
+		if _, err := workflows.CompileGateWorkflow(
+			reviewAttentionWorkflowName,
+			candidate.Global,
+			nil,
+		); err != nil {
+			high = questionBytes - 1
+			continue
+		}
+		resolved, err := resolveAttentionPolicy(candidate)
+		if err != nil {
+			t.Fatalf("resolve boundary policy: %v", err)
+		}
+		prepared, err := encodePreparedAttentionPolicy(resolved)
+		if err != nil {
+			t.Fatalf("encode boundary policy: %v", err)
+		}
+		if len(prepared.canonical) > workflows.MaxWorkflowGateInputsBytes {
+			boundary = candidate
+			boundaryBytes = len(prepared.canonical)
+			high = questionBytes - 1
+			continue
+		}
+		low = questionBytes + 1
+	}
+	if boundary.Revision == "" || boundaryBytes <= workflows.MaxWorkflowGateInputsBytes ||
+		boundaryBytes > maxPreparedAttentionBytes {
+		t.Fatalf(
+			"prepared boundary bytes = %d, want (%d, %d]",
+			boundaryBytes,
+			workflows.MaxWorkflowGateInputsBytes,
+			maxPreparedAttentionBytes,
+		)
+	}
+
+	detail := workingContextTestDetail(serviceTestCaseID, 12)
+	store := newAttentionTestStore(detail)
+	service := newAttentionTestService(t, store, nil, nil)
+	workspace := t.TempDir()
+	launcher := newAttentionTestLauncher(
+		t,
+		service,
+		&workflows.Executor{
+			WorkspaceDir: workspace,
+			Store:        workflows.NewFileRunStore(workspace),
+		},
+		&attentionTestPolicySource{snapshots: []AttentionPolicySnapshot{boundary}},
+	)
+	result, err := launcher.Launch(context.Background(), AttentionLaunchRequest{
+		CaseID:              detail.Case.ID,
+		ExpectedCaseVersion: detail.Case.Version,
+		DecisionPoint:       eventing.ReviewAttentionDecisionSubmitted,
+	})
+	if err != nil || result.RunID == "" || result.Status != workflows.RunStatusSucceeded ||
+		result.Noop {
+		t.Fatalf("Launch(boundary policy) = (%#v, %v)", result, err)
+	}
+}
+
 func TestAttentionLauncherNonWorkingGatesNeverProjectSession(t *testing.T) {
 	tests := []struct {
 		name       string

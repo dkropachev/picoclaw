@@ -13,6 +13,10 @@ const (
 	reviewMessageIDPrefix    = "prm_"
 	reviewSubmissionIDPrefix = "prs_"
 
+	// ReviewAttentionDecisionSubmitted is the automatic attention decision
+	// emitted for one durably submitted review occurrence.
+	ReviewAttentionDecisionSubmitted = "review.submitted"
+
 	ReviewDraftSchemaVersion = 1
 
 	// MaxReviewMessageBytes bounds one durable conversation entry by UTF-8
@@ -95,6 +99,17 @@ const (
 	ReviewSubmissionSubmitted ReviewSubmissionStatus = "submitted"
 	ReviewSubmissionUnknown   ReviewSubmissionStatus = "unknown"
 	ReviewSubmissionFailed    ReviewSubmissionStatus = "failed"
+)
+
+// ReviewAttentionTriggerStatus is the durable lifecycle of one automatic
+// attention decision occurrence.
+type ReviewAttentionTriggerStatus string
+
+const (
+	ReviewAttentionPending   ReviewAttentionTriggerStatus = "pending"
+	ReviewAttentionClaimed   ReviewAttentionTriggerStatus = "claimed"
+	ReviewAttentionDelivered ReviewAttentionTriggerStatus = "delivered"
+	ReviewAttentionNoop      ReviewAttentionTriggerStatus = "noop"
 )
 
 // ReviewDraft is the typed workflow output captured by the review sink.
@@ -220,6 +235,29 @@ type ReviewSubmission struct {
 	SubmittedAt      *time.Time             `json:"submitted_at,omitempty"`
 }
 
+// ReviewAttentionTrigger is one immutable submitted-review occurrence plus
+// its leased launch state. PinnedPolicy is an opaque canonical policy envelope
+// owned by the review attention layer; eventing stores its exact bytes without
+// importing workflow policy types.
+type ReviewAttentionTrigger struct {
+	SubmissionID   string                       `json:"submission_id"`
+	CaseID         string                       `json:"case_id"`
+	CaseVersion    int64                        `json:"case_version"`
+	DecisionPoint  string                       `json:"decision_point"`
+	Status         ReviewAttentionTriggerStatus `json:"status"`
+	LeaseToken     string                       `json:"-"`
+	LeaseUntil     *time.Time                   `json:"-"`
+	Attempts       int                          `json:"attempts"`
+	AvailableAt    time.Time                    `json:"available_at"`
+	PolicyRevision string                       `json:"-"`
+	PinnedPolicy   json.RawMessage              `json:"-"`
+	RunID          string                       `json:"-"`
+	LastError      string                       `json:"-"`
+	CreatedAt      time.Time                    `json:"created_at"`
+	UpdatedAt      time.Time                    `json:"updated_at"`
+	CompletedAt    *time.Time                   `json:"completed_at,omitempty"`
+}
+
 // ReviewCaseDetail is the complete operator-editable case aggregate.
 type ReviewCaseDetail struct {
 	Case       ReviewCase        `json:"case"`
@@ -308,6 +346,34 @@ type ReviewSubmissionOutcome struct {
 	ExternalURL      string
 }
 
+// ReviewAttentionPolicyPin immutably binds one claimed occurrence to the
+// exact trusted policy that must be reused across every launch retry.
+type ReviewAttentionPolicyPin struct {
+	SubmissionID   string
+	LeaseToken     string
+	PolicyRevision string
+	PinnedPolicy   json.RawMessage
+}
+
+// ReviewAttentionTriggerRelease returns a claimed occurrence to the queue.
+// Zero or past AvailableAt values make it immediately available. Error is
+// redacted and bounded by the store before persistence.
+type ReviewAttentionTriggerRelease struct {
+	SubmissionID string
+	LeaseToken   string
+	AvailableAt  time.Time
+	Error        string
+}
+
+// ReviewAttentionTriggerCompletion terminalizes a claimed occurrence.
+// Delivered requires a workflow RunID; Noop requires an empty RunID.
+type ReviewAttentionTriggerCompletion struct {
+	SubmissionID string
+	LeaseToken   string
+	Status       ReviewAttentionTriggerStatus
+	RunID        string
+}
+
 // ReviewReconciliationResolution is a human assertion about an ambiguous
 // external GitHub outcome.
 type ReviewReconciliationResolution string
@@ -379,6 +445,38 @@ type ReviewSubmissionQueue interface {
 	) ([]ReviewSubmission, error)
 	RenewReviewSubmissionLease(ctx context.Context, submissionID, leaseToken string, lease time.Duration) error
 	FinishReviewSubmission(ctx context.Context, outcome ReviewSubmissionOutcome) (ReviewCaseDetail, error)
+}
+
+// ReviewAttentionTriggerQueue owns automatic submitted-review attention
+// delivery. Every mutating operation is fenced by a live opaque lease.
+type ReviewAttentionTriggerQueue interface {
+	GetReviewAttentionTrigger(
+		ctx context.Context,
+		submissionID string,
+	) (ReviewAttentionTrigger, error)
+	ClaimReviewAttentionTriggers(
+		ctx context.Context,
+		workerLabel string,
+		limit int,
+		lease time.Duration,
+	) ([]ReviewAttentionTrigger, error)
+	RenewReviewAttentionTriggerLease(
+		ctx context.Context,
+		submissionID, leaseToken string,
+		lease time.Duration,
+	) error
+	PinReviewAttentionTriggerPolicy(
+		ctx context.Context,
+		input ReviewAttentionPolicyPin,
+	) (ReviewAttentionTrigger, error)
+	ReleaseReviewAttentionTrigger(
+		ctx context.Context,
+		input ReviewAttentionTriggerRelease,
+	) error
+	CompleteReviewAttentionTrigger(
+		ctx context.Context,
+		input ReviewAttentionTriggerCompletion,
+	) error
 }
 
 // ReviewDecisionRunStore atomically fences one external workflow-run create
