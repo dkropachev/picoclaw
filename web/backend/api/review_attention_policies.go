@@ -32,10 +32,11 @@ type reviewAttentionPolicyEffects struct {
 }
 
 type reviewAttentionPoliciesResponse struct {
-	config.ReviewAttentionConfig
-	CatalogRevision string                       `json:"catalog_revision"`
-	ConfigRevision  string                       `json:"config_revision"`
-	Effects         reviewAttentionPolicyEffects `json:"effects"`
+	Global          map[string][]gatetypes.GateSpec                      `json:"global"`
+	Repositories    map[string]map[string]gatetypes.RepositoryGatePolicy `json:"repositories"`
+	CatalogRevision string                                               `json:"catalog_revision"`
+	ConfigRevision  string                                               `json:"config_revision"`
+	Effects         reviewAttentionPolicyEffects                         `json:"effects"`
 }
 
 type reviewAttentionPoliciesPutRequest struct {
@@ -259,7 +260,8 @@ func decodeReviewAttentionPolicyRequest(
 	var envelope map[string]json.RawMessage
 	if err = json.Unmarshal(raw, &envelope); err != nil ||
 		explicitNullReviewAttentionCollection(envelope, "global") ||
-		explicitNullReviewAttentionCollection(envelope, "repositories") {
+		explicitNullReviewAttentionCollection(envelope, "repositories") ||
+		explicitNullReviewAttentionPolicyGates(envelope) {
 		writeReviewAPIError(
 			w,
 			http.StatusBadRequest,
@@ -299,6 +301,42 @@ func explicitNullReviewAttentionCollection(
 		if foldAgentJSONKey(key) == wanted &&
 			bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			return true
+		}
+	}
+	return false
+}
+
+func explicitNullReviewAttentionPolicyGates(
+	envelope map[string]json.RawMessage,
+) bool {
+	var repositoriesRaw json.RawMessage
+	for key, raw := range envelope {
+		if foldAgentJSONKey(key) == foldAgentJSONKey("repositories") {
+			repositoriesRaw = raw
+			break
+		}
+	}
+	if repositoriesRaw == nil {
+		return false
+	}
+
+	var repositories map[string]json.RawMessage
+	if err := json.Unmarshal(repositoriesRaw, &repositories); err != nil {
+		return false
+	}
+	for _, policiesRaw := range repositories {
+		var policies map[string]json.RawMessage
+		if err := json.Unmarshal(policiesRaw, &policies); err != nil {
+			continue
+		}
+		for _, policyRaw := range policies {
+			var policy map[string]json.RawMessage
+			if err := json.Unmarshal(policyRaw, &policy); err != nil {
+				continue
+			}
+			if explicitNullReviewAttentionCollection(policy, "gates") {
+				return true
+			}
 		}
 	}
 	return false
@@ -387,9 +425,10 @@ func writeReviewAttentionPoliciesJSON(
 		)
 	}
 	writeReviewJSON(w, http.StatusOK, reviewAttentionPoliciesResponse{
-		ReviewAttentionConfig: attention,
-		CatalogRevision:       source.CatalogRevision(),
-		ConfigRevision:        configRevision,
+		Global:          attention.Global,
+		Repositories:    attention.Repositories,
+		CatalogRevision: source.CatalogRevision(),
+		ConfigRevision:  configRevision,
 		Effects: reviewAttentionPolicyEffects{
 			GatewayEffect: agentEffectsForConfig(cfg).GatewayEffect,
 		},

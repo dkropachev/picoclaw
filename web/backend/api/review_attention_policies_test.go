@@ -209,6 +209,44 @@ func decodeReviewAttentionResponse(
 	return response
 }
 
+func reviewAttentionConfigFromResponse(
+	response reviewAttentionPoliciesResponse,
+) config.ReviewAttentionConfig {
+	return config.ReviewAttentionConfig{
+		Global:       response.Global,
+		Repositories: response.Repositories,
+	}
+}
+
+func requireReviewAttentionResponseCollections(
+	t *testing.T,
+	recorder *httptest.ResponseRecorder,
+	want config.ReviewAttentionConfig,
+) {
+	t.Helper()
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("response json.Unmarshal() error = %v; body=%s", err, recorder.Body.String())
+	}
+	for _, name := range []string{"global", "repositories"} {
+		raw, exists := envelope[name]
+		if !exists || len(raw) == 0 || raw[0] != '{' {
+			t.Fatalf("response %q collection = %s; body=%s", name, raw, recorder.Body.String())
+		}
+	}
+	response := decodeReviewAttentionResponse(t, recorder)
+	got := reviewAttentionConfigFromResponse(response)
+	if want.Global == nil {
+		want.Global = map[string][]gatetypes.GateSpec{}
+	}
+	if want.Repositories == nil {
+		want.Repositories = map[string]map[string]gatetypes.RepositoryGatePolicy{}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("response policy = %#v, want %#v", got, want)
+	}
+}
+
 func decodeReviewAttentionError(
 	t *testing.T,
 	recorder *httptest.ResponseRecorder,
@@ -286,8 +324,8 @@ func TestReviewAttentionPoliciesGetAndPutFullReplacement(t *testing.T) {
 	}
 
 	getRecorder, getResponse := harness.get(t)
-	if !reflect.DeepEqual(getResponse.ReviewAttentionConfig, old) {
-		t.Fatalf("GET policies = %#v, want %#v", getResponse.ReviewAttentionConfig, old)
+	if !reflect.DeepEqual(reviewAttentionConfigFromResponse(getResponse), old) {
+		t.Fatalf("GET policies = %#v, want %#v", reviewAttentionConfigFromResponse(getResponse), old)
 	}
 	if !strings.HasPrefix(getResponse.CatalogRevision, "sha256:") ||
 		getResponse.ConfigRevision == "" ||
@@ -315,7 +353,7 @@ func TestReviewAttentionPoliciesGetAndPutFullReplacement(t *testing.T) {
 	putResponse := decodeReviewAttentionResponse(t, putRecorder)
 	if putResponse.ConfigRevision == getResponse.ConfigRevision ||
 		putResponse.CatalogRevision == getResponse.CatalogRevision ||
-		!reflect.DeepEqual(putResponse.ReviewAttentionConfig, next) {
+		!reflect.DeepEqual(reviewAttentionConfigFromResponse(putResponse), next) {
 		t.Fatalf("PUT response = %#v", putResponse)
 	}
 	saved, _, err := config.LoadCurrentConfigSnapshot(harness.configPath)
@@ -342,7 +380,10 @@ func TestReviewAttentionPoliciesGetAndPutFullReplacement(t *testing.T) {
 	_, roundTrip := harness.get(t)
 	if roundTrip.ConfigRevision != putResponse.ConfigRevision ||
 		roundTrip.CatalogRevision != putResponse.CatalogRevision ||
-		!reflect.DeepEqual(roundTrip.ReviewAttentionConfig, putResponse.ReviewAttentionConfig) {
+		!reflect.DeepEqual(
+			reviewAttentionConfigFromResponse(roundTrip),
+			reviewAttentionConfigFromResponse(putResponse),
+		) {
 		t.Fatalf("GET after PUT changed the policy generation: %#v", roundTrip)
 	}
 }
@@ -562,6 +603,46 @@ func TestReviewAttentionPoliciesRejectLegacyWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestReviewAttentionPoliciesResponsesAlwaysIncludeCatalogCollections(t *testing.T) {
+	resetGatewayTestState(t)
+	globalOnly := config.ReviewAttentionConfig{
+		Global: map[string][]gatetypes.GateSpec{
+			"review.global": {{ID: "global", Kind: gatetypes.GateZero}},
+		},
+	}
+	repositoryOnly := config.ReviewAttentionConfig{
+		Repositories: map[string]map[string]gatetypes.RepositoryGatePolicy{
+			"Acme/Widgets": {
+				"review.repository": {Mode: gatetypes.GatePolicyDisable},
+			},
+		},
+	}
+	tests := []struct {
+		name      string
+		attention config.ReviewAttentionConfig
+	}{
+		{name: "empty", attention: config.ReviewAttentionConfig{}},
+		{name: "global only", attention: globalOnly},
+		{name: "repository only", attention: repositoryOnly},
+		{name: "global and repository", attention: completeReviewAttentionPolicy()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newReviewAttentionAPITestHarness(t, func(cfg *config.Config) {
+				cfg.Reviews.Attention = test.attention
+			})
+			getRecorder, getResponse := harness.get(t)
+			requireReviewAttentionResponseCollections(t, getRecorder, test.attention)
+
+			putRecorder := harness.put(t, getResponse.ConfigRevision, test.attention)
+			if putRecorder.Code != http.StatusOK {
+				t.Fatalf("PUT status = %d, body=%s", putRecorder.Code, putRecorder.Body.String())
+			}
+			requireReviewAttentionResponseCollections(t, putRecorder, test.attention)
+		})
+	}
+}
+
 func TestReviewAttentionPoliciesStrictEnvelopeAndRoutes(t *testing.T) {
 	resetGatewayTestState(t)
 	harness := newReviewAttentionAPITestHarness(t, nil)
@@ -613,6 +694,38 @@ func TestReviewAttentionPoliciesStrictEnvelopeAndRoutes(t *testing.T) {
 			name: "explicit repositories null", method: http.MethodPut,
 			path:    reviewAttentionPoliciesPath,
 			body:    `{"expected_config_revision":"` + current.ConfigRevision + `","repositories":null}`,
+			headers: validHeaders, want: http.StatusBadRequest,
+			wantError: reviewAttentionPolicyInvalidRequest,
+		},
+		{
+			name: "explicit inherit gates null", method: http.MethodPut,
+			path: reviewAttentionPoliciesPath,
+			body: strings.TrimSuffix(validBody, "}") +
+				`,"repositories":{"Acme/Widgets":{"review.inherit":{"mode":"inherit","gates":null}}}}`,
+			headers: validHeaders, want: http.StatusBadRequest,
+			wantError: reviewAttentionPolicyInvalidRequest,
+		},
+		{
+			name: "explicit disable gates null", method: http.MethodPut,
+			path: reviewAttentionPoliciesPath,
+			body: strings.TrimSuffix(validBody, "}") +
+				`,"repositories":{"Acme/Widgets":{"review.disable":{"mode":"disable","gates":null}}}}`,
+			headers: validHeaders, want: http.StatusBadRequest,
+			wantError: reviewAttentionPolicyInvalidRequest,
+		},
+		{
+			name: "explicit overlay gates null", method: http.MethodPut,
+			path: reviewAttentionPoliciesPath,
+			body: strings.TrimSuffix(validBody, "}") +
+				`,"repositories":{"Acme/Widgets":{"review.overlay":{"mode":"overlay","gates":null}}}}`,
+			headers: validHeaders, want: http.StatusBadRequest,
+			wantError: reviewAttentionPolicyInvalidRequest,
+		},
+		{
+			name: "explicit replace gates null", method: http.MethodPut,
+			path: reviewAttentionPoliciesPath,
+			body: strings.TrimSuffix(validBody, "}") +
+				`,"repositories":{"Acme/Widgets":{"review.replace":{"mode":"replace","gates":null}}}}`,
 			headers: validHeaders, want: http.StatusBadRequest,
 			wantError: reviewAttentionPolicyInvalidRequest,
 		},

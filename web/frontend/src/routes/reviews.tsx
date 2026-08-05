@@ -2,6 +2,7 @@ import { createFileRoute, useLocation } from "@tanstack/react-router"
 import { useCallback, useEffect, useMemo } from "react"
 
 import type { ReviewCaseStatus } from "@/api/reviews"
+import { ReviewAttentionPoliciesPage } from "@/components/reviews/review-attention-policies-page"
 import {
   ReviewsPage,
   type ReviewsRouteSearch,
@@ -20,6 +21,9 @@ const reviewStatuses = new Set<ReviewCaseStatus>([
 export function normalizeReviewsSearch(
   raw: Record<string, unknown>,
 ): ReviewsRouteSearch {
+  if (Object.hasOwn(raw, "view")) {
+    return raw.view === "policies" ? { view: "policies" } : {}
+  }
   const selectedCase =
     typeof raw.case === "string" && reviewCaseIDPattern.test(raw.case)
       ? raw.case
@@ -74,7 +78,11 @@ function ReviewsRoutePage() {
     [navigate],
   )
 
-  return <ReviewsPage search={search} onSearchChange={changeSearch} />
+  return search.view === "policies" ? (
+    <ReviewAttentionPoliciesPage onShowInbox={() => changeSearch({})} />
+  ) : (
+    <ReviewsPage search={search} onSearchChange={changeSearch} />
+  )
 }
 
 export const Route = createFileRoute("/reviews")({

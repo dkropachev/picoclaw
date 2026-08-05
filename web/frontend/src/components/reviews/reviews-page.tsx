@@ -7,6 +7,7 @@ import {
   IconRefresh,
   IconRestore,
   IconSend,
+  IconSettings,
   IconSparkles,
   IconTrash,
 } from "@tabler/icons-react"
@@ -67,6 +68,7 @@ import { cn } from "@/lib/utils"
 const REVIEW_PAGE_SIZE = 40
 
 export interface ReviewsRouteSearch {
+  view?: "policies"
   case?: string
   status?: ReviewCaseStatus
   repository?: string
@@ -161,99 +163,131 @@ export function ReviewsPage({
         </Button>
       </PageHeader>
 
-      <div className="border-border flex shrink-0 flex-col gap-2 border-y px-3 py-2 sm:flex-row sm:items-center sm:px-4">
-        <Label htmlFor="review-status-filter" className="sr-only">
-          {t("pages.reviews.filters.status", "Status")}
-        </Label>
-        <select
-          id="review-status-filter"
-          value={search.status ?? ""}
-          onChange={(event) =>
-            onSearchChange(
-              {
-                ...search,
-                status:
-                  (event.target.value as ReviewCaseStatus | "") || undefined,
-                case: undefined,
-              },
-              true,
-            )
-          }
-          className="border-input bg-background focus-visible:border-ring focus-visible:ring-ring/25 h-9 rounded-lg border px-3 text-sm outline-none focus-visible:ring-2"
+      <div
+        role="group"
+        aria-label={t("pages.reviews.views.label", "Review view")}
+        className="border-border flex shrink-0 gap-1 border-b px-3 pt-2"
+      >
+        <Button
+          type="button"
+          aria-current="page"
+          variant="secondary"
+          size="sm"
+          className="rounded-b-none"
         >
-          <option value="">
-            {t("pages.reviews.filters.all", "All states")}
-          </option>
-          {reviewCaseStatuses.map((status) => (
-            <option key={status} value={status}>
-              {reviewStatusLabel(status, t)}
-            </option>
-          ))}
-        </select>
-        <form className="flex min-w-0 flex-1 gap-2" onSubmit={applyRepository}>
-          <Label htmlFor="review-repository-filter" className="sr-only">
-            {t("pages.reviews.filters.repository", "Repository")}
-          </Label>
-          <Input
-            id="review-repository-filter"
-            value={repositoryDraft}
-            maxLength={512}
-            placeholder={t(
-              "pages.reviews.filters.repository_placeholder",
-              "owner/repository",
-            )}
-            onChange={(event) => setRepositoryDraft(event.target.value)}
-            className="max-w-md"
-          />
-          <Button type="submit" variant="outline">
-            {t("pages.reviews.filters.apply", "Apply")}
-          </Button>
-          {(search.status || search.repository) && (
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => {
-                setRepositoryDraft("")
-                onSearchChange({}, true)
-              }}
-            >
-              {t("pages.reviews.filters.reset", "Reset")}
-            </Button>
-          )}
-        </form>
+          <IconInbox className="size-4" />
+          {t("pages.reviews.views.inbox", "Review inbox")}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="rounded-b-none"
+          onClick={() => onSearchChange({ view: "policies" })}
+        >
+          <IconSettings className="size-4" />
+          {t("pages.reviews.views.policies", "Attention policies")}
+        </Button>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto p-3 lg:overflow-hidden lg:p-4">
-        <div className="flex min-h-full min-w-0 flex-col gap-3 lg:grid lg:h-full lg:min-h-0 lg:grid-cols-[minmax(300px,0.72fr)_minmax(0,1.55fr)]">
-          <ReviewCaseList
-            cases={cases}
-            selectedCaseID={search.case}
-            hiddenOnMobile={Boolean(search.case)}
-            loading={casesQuery.isPending}
-            error={casesQuery.error}
-            hasMore={Boolean(casesQuery.hasNextPage)}
-            loadingMore={casesQuery.isFetchingNextPage}
-            onSelect={(caseID) =>
-              onSearchChange({ ...search, case: caseID }, false)
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="border-border flex shrink-0 flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:items-center sm:px-4">
+          <Label htmlFor="review-status-filter" className="sr-only">
+            {t("pages.reviews.filters.status", "Status")}
+          </Label>
+          <select
+            id="review-status-filter"
+            value={search.status ?? ""}
+            onChange={(event) =>
+              onSearchChange(
+                {
+                  ...search,
+                  status:
+                    (event.target.value as ReviewCaseStatus | "") || undefined,
+                  case: undefined,
+                },
+                true,
+              )
             }
-            onRetry={() => {
-              if (casesQuery.isFetchNextPageError) {
-                void casesQuery.fetchNextPage()
-              } else {
-                void casesQuery.refetch()
+            className="border-input bg-background focus-visible:border-ring focus-visible:ring-ring/25 h-9 rounded-lg border px-3 text-sm outline-none focus-visible:ring-2"
+          >
+            <option value="">
+              {t("pages.reviews.filters.all", "All states")}
+            </option>
+            {reviewCaseStatuses.map((status) => (
+              <option key={status} value={status}>
+                {reviewStatusLabel(status, t)}
+              </option>
+            ))}
+          </select>
+          <form
+            className="flex min-w-0 flex-1 gap-2"
+            onSubmit={applyRepository}
+          >
+            <Label htmlFor="review-repository-filter" className="sr-only">
+              {t("pages.reviews.filters.repository", "Repository")}
+            </Label>
+            <Input
+              id="review-repository-filter"
+              value={repositoryDraft}
+              maxLength={512}
+              placeholder={t(
+                "pages.reviews.filters.repository_placeholder",
+                "owner/repository",
+              )}
+              onChange={(event) => setRepositoryDraft(event.target.value)}
+              className="max-w-md"
+            />
+            <Button type="submit" variant="outline">
+              {t("pages.reviews.filters.apply", "Apply")}
+            </Button>
+            {(search.status || search.repository) && (
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => {
+                  setRepositoryDraft("")
+                  onSearchChange({}, true)
+                }}
+              >
+                {t("pages.reviews.filters.reset", "Reset")}
+              </Button>
+            )}
+          </form>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-auto p-3 lg:overflow-hidden lg:p-4">
+          <div className="flex min-h-full min-w-0 flex-col gap-3 lg:grid lg:h-full lg:min-h-0 lg:grid-cols-[minmax(300px,0.72fr)_minmax(0,1.55fr)]">
+            <ReviewCaseList
+              cases={cases}
+              selectedCaseID={search.case}
+              hiddenOnMobile={Boolean(search.case)}
+              loading={casesQuery.isPending}
+              error={casesQuery.error}
+              hasMore={Boolean(casesQuery.hasNextPage)}
+              loadingMore={casesQuery.isFetchingNextPage}
+              onSelect={(caseID) =>
+                onSearchChange({ ...search, case: caseID }, false)
               }
-            }}
-            onLoadMore={() => void casesQuery.fetchNextPage()}
-          />
-          <ReviewDetailPanel
-            caseID={search.case}
-            hiddenOnMobile={!search.case}
-            onBack={() => {
-              const next = { ...search }
-              delete next.case
-              onSearchChange(next, true)
-            }}
-          />
+              onRetry={() => {
+                if (casesQuery.isFetchNextPageError) {
+                  void casesQuery.fetchNextPage()
+                } else {
+                  void casesQuery.refetch()
+                }
+              }}
+              onLoadMore={() => void casesQuery.fetchNextPage()}
+            />
+            <ReviewDetailPanel
+              caseID={search.case}
+              hiddenOnMobile={!search.case}
+              onBack={() => {
+                const next = { ...search }
+                delete next.case
+                onSearchChange(next, true)
+              }}
+            />
+          </div>
         </div>
       </div>
     </div>
