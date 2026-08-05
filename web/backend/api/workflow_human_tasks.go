@@ -25,7 +25,7 @@ type workflowHumanTaskCancelRequest struct {
 
 func (h *Handler) handleListWorkflowHumanTasks(w http.ResponseWriter, r *http.Request) {
 	setWorkflowHumanTaskResponseHeaders(w)
-	_, _, executor, err := h.workflowRuntime(r.Context())
+	_, store, executor, err := h.workflowRuntime(r.Context())
 	if err != nil {
 		writeWorkflowJSONStatus(w, http.StatusInternalServerError, map[string]any{
 			"error": "workflow_tasks_unavailable",
@@ -33,6 +33,10 @@ func (h *Handler) handleListWorkflowHumanTasks(w http.ResponseWriter, r *http.Re
 		return
 	}
 	defer closeWorkflowRuntime(executor)
+	if !workflowRunVisible(r.Context(), store, r.PathValue("run_id")) {
+		writeWorkflowHumanTaskError(w, workflows.ErrHumanTaskNotFound)
+		return
+	}
 
 	tasks, err := executor.ListHumanTasks(r.Context(), r.PathValue("run_id"))
 	if err != nil {
@@ -59,13 +63,18 @@ func (h *Handler) handleResumeWorkflowHumanTask(w http.ResponseWriter, r *http.R
 		})
 		return
 	}
+	visibilityStore := workflows.NewFileRunStore(cfg.WorkspacePath())
+	if !workflowRunVisible(r.Context(), visibilityStore, r.PathValue("run_id")) {
+		writeWorkflowHumanTaskError(w, workflows.ErrHumanTaskNotFound)
+		return
+	}
 	if !cfg.Workflows.Enabled {
 		writeWorkflowJSONStatus(w, http.StatusConflict, map[string]any{
 			"error": "workflow_tasks_disabled",
 		})
 		return
 	}
-	_, _, executor, err := h.workflowRuntimeFromConfig(r.Context(), cfg)
+	_, store, executor, err := h.workflowRuntimeFromConfig(r.Context(), cfg)
 	if err != nil {
 		writeWorkflowJSONStatus(w, http.StatusInternalServerError, map[string]any{
 			"error": "workflow_tasks_unavailable",
@@ -73,6 +82,14 @@ func (h *Handler) handleResumeWorkflowHumanTask(w http.ResponseWriter, r *http.R
 		return
 	}
 	defer closeWorkflowRuntime(executor)
+	if _, allowed := workflowRunMutationSnapshot(
+		r.Context(),
+		store,
+		r.PathValue("run_id"),
+	); !allowed {
+		writeWorkflowHumanTaskError(w, workflows.ErrHumanTaskNotFound)
+		return
+	}
 	executor.AdmittedHumanTaskClaim = func(
 		_ context.Context,
 		_ string,
@@ -136,6 +153,15 @@ func (h *Handler) handleCancelWorkflowHumanTask(w http.ResponseWriter, r *http.R
 		return
 	}
 	defer closeWorkflowRuntime(executor)
+	privacy, allowed := workflowRunMutationSnapshot(
+		r.Context(),
+		store,
+		r.PathValue("run_id"),
+	)
+	if !allowed {
+		writeWorkflowHumanTaskError(w, workflows.ErrHumanTaskNotFound)
+		return
+	}
 
 	run, err := executor.CancelHumanTask(
 		r.Context(),
@@ -153,15 +179,7 @@ func (h *Handler) handleCancelWorkflowHumanTask(w http.ResponseWriter, r *http.R
 			RunID: run.ID, Status: workflows.RunStatusCanceled, Error: run.CancelReason,
 		},
 	)
-	writeWorkflowJSON(
-		w,
-		workflows.ProjectWorkflowRunForBrowserWithStore(
-			r.Context(),
-			store,
-			run,
-			workflows.IsEventBackedDraftRunFamily(r.Context(), store, run),
-		),
-	)
+	writeWorkflowJSON(w, privacy.projectRunForBrowser(r.Context(), store, run))
 }
 
 func projectWorkflowHumanTaskRunResult(result *workflows.RunResult) *workflows.RunResult {

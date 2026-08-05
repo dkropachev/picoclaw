@@ -976,6 +976,64 @@ const channelCatalogResponse = {
 const boundaryReviewAttentionGateID = "g".repeat(64)
 const boundaryReviewAttentionRepository = `${"o".repeat(127)}/${"r".repeat(128)}`
 const reviewAttentionPoliciesResponseText = `{"global":{"review.submitted":[{"id":"ask_owner","kind":"ai_working_context","agent_id":"main","criteria":"Ask when repository-owner intent is required.","title":"Owner input may be needed","questions":{"priority":9007199254740993,"negativeZero":-0}},{"id":"independent_check","kind":"ai_isolated_context","agent_id":"reviewer","criteria":"Assess the findings independently.","title":"Independent review"},{"id":"blocking_check","kind":"deterministic","when":"inputs.review.blocking == true","title":"Blocking finding","questions":{"Foo":1,"foo":2,"__proto__":{"safe":true}}},{"id":"no_attention","kind":"zero"}]},"repositories":{"octo/repo":{"review.submitted":{"mode":"overlay","gates":[{"id":"ask_owner","kind":"zero"},{"id":"${boundaryReviewAttentionGateID}","kind":"deterministic","when":"inputs.review.repository_risk == true","title":"Repository-specific risk","questions":[{"id":"resolution"}]}]}}},"catalog_revision":"catalog-revision-smoke","config_revision":"agent-revision-1","effects":{"gateway_effect":"applied"}}`
+const reviewAttentionCaseID = `prc_${"1".repeat(32)}`
+const reviewAttentionResponseToken = `sha256:${"a".repeat(64)}`
+const reviewAttentionCase = {
+  id: reviewAttentionCaseID,
+  event_id: `ev_${"2".repeat(32)}`,
+  dispatch_id: `dsp_${"3".repeat(32)}`,
+  run_id: `wr_${"4".repeat(32)}`,
+  workflow_ref: "builtin://github-pr-review",
+  connector: "primary",
+  repository: "octo/repo",
+  pull_number: 42,
+  pull_url: "https://github.example.test/octo/repo/pull/42",
+  base_sha: "a".repeat(40),
+  head_sha: "b".repeat(40),
+  summary: "One correctness issue was submitted.",
+  tests: ["go test ./..."],
+  residual_risks: [],
+  status: "submitted",
+  version: 7,
+  active_findings: 1,
+  total_findings: 1,
+  created_at: "2026-07-30T12:00:00Z",
+  updated_at: "2026-07-30T12:04:01Z",
+  submitted_at: "2026-07-30T12:04:01Z",
+}
+const reviewAttentionDetail = {
+  case: reviewAttentionCase,
+  findings: [
+    {
+      id: `prf_${"5".repeat(32)}`,
+      case_id: reviewAttentionCaseID,
+      ordinal: 0,
+      state: "active",
+      severity: "high",
+      title: "Preserve optimistic concurrency",
+      file: "pkg/store.go",
+      line: 72,
+      message: "This write can replace newer state.",
+      revision: 1,
+      created_at: "2026-07-30T12:00:00Z",
+      updated_at: "2026-07-30T12:00:00Z",
+    },
+  ],
+  messages: [],
+  submission: {
+    id: `prs_${"6".repeat(32)}`,
+    case_id: reviewAttentionCaseID,
+    draft_version: 6,
+    status: "submitted",
+    attempts: 1,
+    external_review_id: "9876",
+    external_url: reviewAttentionCase.pull_url,
+    created_at: "2026-07-30T12:04:00Z",
+    updated_at: "2026-07-30T12:04:01Z",
+    submitted_at: "2026-07-30T12:04:01Z",
+  },
+}
+const waitingReviewAttentionProjectionText = `{"case_version":7,"status":"waiting","can_respond":true,"turns":[{"status":"waiting","title":"Choose a safe contract","questions":{"priority":9007199254740993},"response_token":"${reviewAttentionResponseToken}"}]}`
 
 interface MockLauncherApiOptions {
   agentActivityRequests?: Array<{ method: string; path: string }>
@@ -997,6 +1055,11 @@ interface MockLauncherApiOptions {
   nullableWorkflowPayloads?: boolean
   oauthProviders?: unknown[]
   reviewAttentionPolicyPutGate?: Promise<void>
+  reviewAttentionResponseRequests?: Array<{
+    method: string
+    path: string
+    body: unknown
+  }>
   statefulAgents?: boolean
   statefulMCP?: boolean
   gatewayRunning?: boolean
@@ -1059,6 +1122,8 @@ async function mockLauncherApis(
   let currentReviewAttentionConfigRevision = "agent-revision-1"
   let currentReviewAttentionPoliciesResponse =
     reviewAttentionPoliciesResponseText
+  let currentReviewAttentionProjectionText =
+    waitingReviewAttentionProjectionText
   let currentAgents: AgentInfo[] = [
     {
       id: "main",
@@ -1601,6 +1666,24 @@ async function mockLauncherApis(
 
       if (method === "POST") {
         switch (path) {
+          case `/api/reviews/${reviewAttentionCaseID}/attention/respond`: {
+            const body = request.postDataJSON() as {
+              expected_case_version: number
+              response_token: string
+              response: string
+            }
+            options.reviewAttentionResponseRequests?.push({
+              method,
+              path,
+              body,
+            })
+            currentReviewAttentionProjectionText = `{"case_version":7,"status":"completed","can_respond":false,"turns":[{"status":"answered","title":"Choose a safe contract","questions":{"priority":9007199254740993},"response":${JSON.stringify(body.response)}}]}`
+            return route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: currentReviewAttentionProjectionText,
+            })
+          }
           case "/api/accounts/models/fetch": {
             const body = request.postDataJSON() as {
               credential_id?: string
@@ -2432,6 +2515,16 @@ async function mockLauncherApis(
             contentType: "application/json",
             body: currentReviewAttentionPoliciesResponse,
           })
+        case "/api/reviews":
+          return json(route, { cases: [reviewAttentionCase] })
+        case `/api/reviews/${reviewAttentionCaseID}`:
+          return json(route, reviewAttentionDetail)
+        case `/api/reviews/${reviewAttentionCaseID}/attention`:
+          return route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: currentReviewAttentionProjectionText,
+          })
         case "/api/events":
           return json(route, { events: [eventResponse] })
         case "/api/events/dispatches":
@@ -2940,6 +3033,65 @@ for (const routePath of smokeRoutes) {
   })
 }
 
+test("submitted review attention handoff is canonical, focused, fenced, and contained", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const responseRequests: Array<{
+    method: string
+    path: string
+    body: unknown
+  }> = []
+  await gotoMockedRoute(
+    page,
+    `/reviews?case=${reviewAttentionCaseID}&focus=chat&status=submitted&repository=octo%2Frepo&cursor=private-cursor-canary&run=private-run-canary&task=private-task-canary&questions=private-questions-canary`,
+    { reviewAttentionResponseRequests: responseRequests },
+  )
+
+  await expect(page).toHaveURL(
+    new RegExp(`/reviews\\?case=${reviewAttentionCaseID}&focus=chat$`),
+  )
+  await expect(
+    page.getByRole("heading", { name: "Review conversation" }),
+  ).toBeVisible()
+  const ordinaryChat = page.getByRole("textbox", {
+    name: "Message",
+    exact: true,
+  })
+  await expect(ordinaryChat).toBeDisabled()
+  const response = page.getByLabel("Reply to the AI attention request")
+  await expect(response).toBeVisible()
+  await expect(response).toBeFocused()
+  await expect(page.getByText('{"priority":9007199254740993}')).toBeVisible()
+  await expect(page.locator("body")).not.toContainText("private-run-canary")
+  await expect(page.locator("body")).not.toContainText("private-task-canary")
+  await expect(page.locator("body")).not.toContainText(
+    "private-questions-canary",
+  )
+
+  await response.fill("Keep v1")
+  await page.getByRole("button", { name: "Send attention reply" }).click()
+
+  await expect(
+    page.getByText("The attention conversation is complete."),
+  ).toBeVisible()
+  await expect(page.getByText("Keep v1", { exact: true })).toBeVisible()
+  expect(responseRequests).toEqual([
+    {
+      method: "POST",
+      path: `/api/reviews/${reviewAttentionCaseID}/attention/respond`,
+      body: {
+        expected_case_version: 7,
+        response_token: reviewAttentionResponseToken,
+        response: "Keep v1",
+      },
+    },
+  ])
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
 test("review attention policy route is inert, accessible, and contained on desktop and mobile", async ({
   page,
 }) => {
@@ -3040,7 +3192,7 @@ test("review attention policy protects dirty navigation and boundary identities 
     }),
   ).toBe(true)
 
-  await page.getByRole("button", { name: "Review inbox" }).click()
+  await page.getByRole("button", { name: "Review inbox", exact: true }).click()
   const firstNavigation = page.getByRole("alertdialog", {
     name: "Discard unsaved policy changes?",
   })
@@ -3081,7 +3233,7 @@ test("review attention policy protects dirty navigation and boundary identities 
   await expect(validationAlert).toContainText(boundaryReviewAttentionRepository)
   await expectNoHorizontalOverflow(page)
 
-  await page.getByRole("button", { name: "Review inbox" }).click()
+  await page.getByRole("button", { name: "Review inbox", exact: true }).click()
   const secondNavigation = page.getByRole("alertdialog", {
     name: "Discard unsaved policy changes?",
   })
@@ -3090,7 +3242,7 @@ test("review attention policy protects dirty navigation and boundary identities 
     .getByRole("button", { name: "Discard changes" })
     .click()
   await expect(
-    page.getByRole("button", { name: "Review inbox" }),
+    page.getByRole("button", { name: "Review inbox", exact: true }),
   ).toHaveAttribute("aria-current", "page")
   expect(
     await page.evaluate(() => {
@@ -3119,7 +3271,7 @@ test("review attention policy fences navigation until an in-flight save settles"
   await page.getByRole("button", { name: "Save policies" }).click()
   await expect(page.getByRole("button", { name: "Saving…" })).toBeDisabled()
   await expect(
-    page.getByRole("button", { name: "Review inbox" }),
+    page.getByRole("button", { name: "Review inbox", exact: true }),
   ).toBeDisabled()
 
   const services = page.getByRole("button", { name: "Services", exact: true })

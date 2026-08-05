@@ -44,6 +44,12 @@ trusted configuration before private effects, and every retry strictly
 validates the same bytes rather than granting a database row or reviewed
 checkout fresh policy authority. Only the gate engine's deliberately generated
 bounded human task may declassify configured questions.
+The case-owned browser attention bridge extends that deliberate
+declassification only with fixed lifecycle state, answered text, and at most
+one opaque actionable response fence. The launcher replaces browser authority
+before reaching the protected gateway; every private identifier and diagnostic
+remains server-side, and exact reserved attention runs are absent from generic
+workflow observation and mutation surfaces.
 Schema v5 removes aliases mechanically derived from account names or concrete
 model IDs, clears their references rather than guessing replacements, and
 preserves legacy web-search mappings as explicit custom aliases instead of
@@ -65,7 +71,8 @@ materialization fail closed without exposing local paths or payload detail.
   `media.SnapshotReader`, `media.FreezeInputs`, and `media.FrozenSet` validation.
 - Security boundaries also include compiler-only private workflow admission,
   integrity-bound local context and frozen-media persistence, pseudonymous
-  provider affinity, and mandatory observation projection.
+  provider affinity, mandatory observation projection, and the case-owned
+  attention response fence plus generic-workflow suppression boundary.
 - Runtime ordering: load security config, normalize protected values, validate
   access or target, execute guarded storage/network/process operation, redact
   sensitive output, and emit clear errors; for frozen media, preflight the
@@ -84,6 +91,10 @@ materialization fail closed without exposing local paths or payload detail.
   outgoing-review trigger pin is separate owner-local capability state: it is
   never browser-projected or logged, and corruption fails before private
   session, model, function, human-task, or run admission.
+  An attention response token is not a task identifier: it is a scoped digest
+  over the exact server-loaded case-to-waiting-task chain, is issued only while
+  that one task is actionable, remains memory-only in the browser, and grants no
+  generic workflow or review-case mutation authority.
 
 ## Requirements
 
@@ -114,6 +125,7 @@ materialization fail closed without exposing local paths or payload detail.
 | `FR-SEC-021` | MUST | A whole-config read-modify-write operation captures the parsed update-safe configuration and one opaque revision of the exact public JSON plus security sidecar under the shared process/advisory lock, validates a complete candidate, and saves only when that revision is still current. The revision hashes security bytes without returning them. A stale save returns `config revision mismatch`, writes neither file, and preserves the winning writer's aliases, credentials, and unrelated configuration; callers surface a reload/retry conflict instead of blindly retrying an operation whose intent may no longer be valid. Current-schema read-only snapshots never migrate or save, while update snapshots may complete the explicit legacy migration lifecycle before returning a coherent current generation. A scoped review-attention replacement uses the same combined revision but raw-patches only `reviews.attention` in the public JSON: it never serializes environment/default-derived state, rewrites the security sidecar, or migrates a legacy read. The authenticated review-attention UI holds one memory-only lossless draft from one captured revision, rejects malformed or numerically lossy projections before hydration, sends at most one full replacement for an explicit save, and never automatically retries, rebases, persists the draft in the browser, or turns validation/preview into execution authority. | CLI, launcher, runtime, and browser config writers must not lose concurrent public or secret state, persist ambient runtime state through an unrelated scoped save, corrupt arbitrary JSON numbers, retain trusted policy in a less protected store, or turn a read/edit path into implicit mutation or execution. |
 | `FR-SEC-022` | MUST | Frozen-session media capture and materialization treat the complete locator batch and serialized `FrozenSet` as untrusted. They admit at most 32 locator occurrences, 16 distinct nonempty assets, 2 MiB decoded bytes per asset, 3 MiB decoded bytes counted per occurrence, and 5 MiB for both materialized encoding and frozen-set JSON. Occurrence counting happens before snapshot cloning; complete locator and supplied-metadata shape validation happens before any live read, and decoded/read/materialized bounds never trust declared lengths. At most four `FreezeInputs` calls hold capture admission concurrently; an excess caller waits only until a slot is available or its context is cancelled. A live `media://` snapshot retains store lifecycle synchronization while it safely opens and validates a regular handle and executes one bounded read: Unix uses no-follow/nonblocking open plus a status-change token, Windows rejects every handle carrying the reparse-point attribute and compares handle change time, and other platforms fail closed. Registration and final deletion use cleaned absolute exact lexical lifecycle keys without an approximate case fold. One live key coalesces only the same captured entry identity. A `SameFile` identity found under a distinct key is not coalesced because it may be a hard link; instead, all such live lifecycles become non-deleting. Re-registration permanently cancels older pending deletion through either its exact key or captured `SameFile` identity, and deletion rechecks `Lstat`/`SameFile` so an already replaced entry is preserved. These operations share store synchronization, so an old cleanup cannot delete a newly registered or read-pinned path. Only canonical frozen identities, canonical `media://` UUID capabilities, and `data:` locators with canonical parameter-free MIME plus canonical padded base64 are accepted. Raw filenames are bounded at 4 KiB before basename sanitization to valid UTF-8 without controls and at most 255 bytes; supplied MIME is at most 127 bytes and captured MIME is bounded at 1 KiB before canonicalization to at most 127 bytes. Frozen records have one supported explicit version, deterministic unique identities/order, bounded canonical metadata, exact decoded sizes, and content digests; strict decode also rejects invalid UTF-8 and unpaired JSON surrogates, and decode/use reject unknown, duplicate, missing, unused, reordered/noncanonical, trailing, digest/size-inconsistent, reference-inconsistent, or authoritative occurrence-metadata-inconsistent state before returning rewritten history. Snapshot/freeze/materialize failures use fixed bounded classification and omit locator text, local paths, filenames/content types, decoded or encoded payload bytes, and raw filesystem/JSON/base64 errors. Cancellation or any failure returns no partial snapshot, reference list, set, or materialized output and leaves caller-owned inputs unchanged. | Media locators can name private temporary files and carry attacker-sized inline content; restart-safe capture must not become a symlink/special-file read, resource-amplification path, tampered-context downgrade, or diagnostic data leak. |
 | `FR-SEC-023` | MUST | A compiler-private workflow context is local capability state admitted only for the exact trusted in-memory gate workflow and normalized value snapshot. Admission rejects custom JSON/text marshalers without invoking them, encodes the caller-owned workflow once, verifies the unexported compiler hash against those exact bytes, and executes only the detached workflow decoded from that same capture; serialization or post-compile workflow/value mutation cannot retain authority. An initial context cannot claim retry provenance. It is persisted before effects with an integrity revision plus a domain-separated binding over run ID, workflow reference, retry source, private-root revision, and persisted-workflow revision, and cannot mix with public inputs, event, secrets, origin, session, delivery, parent/reusable context, or arbitrary workflow targets. A separate durable owner-local marker preserves private classification if JSON visibility/root fields are removed; store reads also require the decoded ID to match both the directory key and exact requested ID. Its exact read-only session is captured before durable run creation. During that one capture, every structured media locator is replaced by an immutable frozen reference and the complete canonical versioned `FrozenSet` is strictly validated and persisted with the snapshot before the private-root revision is computed. Resume, retry, restart, managed children, repairs, and provider fallback reuse only that frozen snapshot and set: they validate the frozen revision before materializing integrity-checked embedded bytes and never reread a live session or media store. The explicit private encoding also preserves runtime-only message/system-block prompt provenance and tool-call name/arguments/thought signature exactly across wait/restart. Provider cache and account affinity use only a domain-separated agent-plus-history-revision pseudonym, never the raw key, scope, inbound delivery, locator, or materialized payload. Every private agent step carries an explicit execution marker: account-router health keeps only failure classification plus fixed error text, and side-question vision fallback suppresses raw-error runtime events. `Run.MarshalJSON` recognizes private visibility and redacts invocation context, ancestry, delivery, outputs, raw errors, job/step diagnostics, frozen references, and the embedded media set by default. Only the trusted owner-local file-store encoder may bypass that default to write the exact raw checkpoint, execution, task, and private continuation state; its strict private-root decoder rejects unknown fields and invalid frozen-media state. The unexported root remains absent from every ordinary `Run` JSON, and every HTTP, SSE, browser/development, workflow-tool, runtime-event, stored event, cancellation result, and direct-result boundary removes private state and event messages/payloads before traversing caller-controlled graphs instead of falling back to the raw record. Event append/read first classifies a readable owning run under the store lock; an orphaned or unclassifiable record fails with the fixed private-context error. Human-task resume clones secrets at entry and rejects additions again in the authoritative locked claim and returned-run boundary before consuming or continuing a private response. Wrapped public sentinel errors are canonicalized before return, including fixed `ErrRunAdmissionConflict` and `ErrRunAdmissionUnavailable` boundaries that the HTTP owner maps respectively to the existing dependency-revision-mismatch `409` and dependency-check-unavailable `503` responses without exposing internal text. Only the compiler-generated bounded human task may deliberately declassify its title/questions. A missing, corrupt, hash/revision/binding/media-mismatched, mixed-visibility, or unprojectable private record fails closed with a fixed error. | Local gate evidence and exact provider prompt construction must survive process restarts and human delays without turning generic JSON, workflow observability, provider routing, media persistence, or error handling into a PR-chat and code/findings exfiltration path. |
+| `FR-SEC-024` | MUST | The authenticated browser may access review attention only through exact case-owned projection and response routes after the launcher replaces all browser authority with the managed gateway's process bearer on one same-origin, no-proxy, no-redirect, strictly bounded JSON request. The launcher peeks PID metadata without cleanup, attachment, migration, process inspection, or health probing and requires a valid nonzero port plus a numeric loopback or literal current local-interface address; hostname, wildcard/unspecified, multicast or remote numeric, and incomplete authority fail with fixed unavailability before the bearer is put on a request. A valid non-submitted case short-circuits to `none` without reading an occurrence or run. Submitted projection validates the latest submission and trigger first: historical trigger absence is `none`; pending/claimed accept only coherent absent pin state or a strictly decoded canonical pin with matching recomputed revision and read no run; no-op requires a canonical all-zero pin, no run, and terminal completion; only delivered requires a canonical active pin, terminal completion, deterministic run ID, exact decision link, and stable bounded run/task snapshot. Before declassification, every task's exact title, questions, and response schema must re-hash to its stored input hash. The DTO exposes only the positive case version, fixed aggregate status, `can_respond`, configured title/questions, public turn status including non-actionable `canceled`, and a durably accepted response for answered/continuing/recovery state. At most one current actionable waiting or recovery turn receives an opaque lowercase SHA-256 fence, absent whenever `can_respond` is false or the turn is continuing, answered, or canceled. The fence is a domain-separated length-prefixed digest over the exact server-loaded case/version, submission, decision, policy revision, run, task, original waiting revision, and input hash; the server accepts no private linkage and derives a separate response ID from the fence plus normalized bounded answer. Exact persisted replay or lost-response recovery is idempotent, while stale, old, cross-case, cross-task, or altered answers conflict. GET, navigation, polling, and failure mutate nothing; POST may change only the exact private task/run continuation and never review, event, policy, repository, provider, or GitHub state. Private IDs/revisions, session, policy body, task/run/workflow identity, input hashes, trigger lease/retry state, process bearer, and raw stored/upstream errors are unrepresentable in the DTO, route, browser storage, and fixed errors. The canonical URL contains only `case` and `focus=chat`. Generic workflow surfaces suppress exact reserved-reference runs; visible ordinary runs scrub direct hidden parent/caller, retry, child, and origin-root references; graphs omit hidden nodes and incident edges; and cancel/retry/task mutations return not found for the entire normalized transitive parent/child/retry component. Production web and CLI retention preserve every exact reserved-reference run regardless of terminal age while ordinary related runs keep normal retention. With workflows disabled, the bridge is deliberately read-only even if given an executor: waiting/recovery has no fence, no new answer is consumed, exact persisted replay remains projection-only, and exact-reserved task resume returns not found before disabled-runtime disclosure. This outgoing-review declassification grants no inbound own-PR feedback or generic workflow authority. | A necessary human handoff must resume one provably current private gate without turning the browser, URL, launcher proxy, generic workflow APIs, replay, retention, or error handling into a capability-confusion or private-context exfiltration path. |
 
 For `FR-SEC-021`, the review-attention agent companion is a separate
 identity-only read boundary. `GET /api/reviews/attention-agents` requires the
@@ -130,12 +142,15 @@ For `FR-SEC-023`, an automatic outgoing-review occurrence stores at most one
 3-MiB canonical effective-policy pin inside the owner-local event database.
 Only a generation-fenced worker may create that pin from the trusted policy
 source, and it must do so under the current opaque lease before any private
-effect. Every subsequent worker treats the bytes as untrusted persisted state:
+effect. Every subsequent worker and the browser bridge treat the bytes as
+untrusted persisted state:
 strictly decode one versioned envelope, revalidate the detached resolution,
 recompute its decision digest, and require its independent stored revision to
-match before session projection or workflow admission. A terminal trigger is
-invalid without that exact pin/revision; delivered additionally requires a
-canonical private run ID, while noop forbids one. Trigger rows, policy bytes,
+match before session projection, workflow admission, or browser projection.
+Pin presence must match `policy_revision`; pending/claimed may legitimately be
+pre-pin, no-op requires an all-zero effective policy and forbids a run, and
+delivered requires an active effective policy plus a canonical private run ID.
+Both terminal states require completion. Trigger rows, policy bytes,
 lease identity/deadline, retry detail, and run linkage have no HTTP, browser,
 event, log, or generic workflow projection. Errors are bounded and sanitized;
 the automatic path invokes no repository or provider write, and only the
@@ -146,6 +161,12 @@ For `FR-SEC-023`, infrastructure failure while rechecking a private durable-crea
 fence is likewise reduced to a fixed admission-unavailable sentinel; the HTTP
 owner maps it to the existing dependency-check-unavailable response without
 exposing filesystem or configuration diagnostics.
+
+For `FR-SEC-024`, `sha256:` identifies only the opaque response-fence format;
+the digest input and all of its private components remain server-side. A fence
+is emitted only for the sole actionable current task and is replaced by a fresh
+authoritative projection after response. It is never a bearer for generic run
+inspection, task lookup, or review-case mutation.
 
 ## Data And State Model
 
@@ -189,6 +210,10 @@ security contract does not itself choose a persistence location, encryption,
 retention, or access-control policy. Their content-derived identities and
 digests establish internal consistency only; they do not authenticate a whole
 record controlled by a local storage attacker.
+The attention response fence, response ID, browser draft, and focused route add
+no security store. The first two are derived from existing owner-local state,
+the draft is memory-only, and route state carries only public case selection and
+the fixed focus affordance.
 
 ## Surface Ownership
 
@@ -236,6 +261,7 @@ Owns: TEST pkg/config/version*
 | HTTP / UI | `POST /api/workflows/development/triggers/simulate`, `POST /api/workflows/development/test/execute`, `/agent/workflows` trigger simulator/review | Strictly bound, payload-safe simulation uses a read-only current-config/PID snapshot to produce the only server review token accepted for one exact active draft and scenario; confirmed execution uses an unpruned lazy runtime and rechecks token expiry, identity, config, match, protected-event, and effect state before durable mutation or runtime authority. | `FR-SEC-019` |
 | Workflow / HTTP / SSE / tool | Compiler-private `RunRequest.PrivateRoot`, file-run persistence, run/result/event projections, and the `workflow` tool | Admit and preserve exact owner-local gate evidence, including its rewritten snapshot and strict self-contained `FrozenSet`, while making private invocation context and derived diagnostics unrepresentable on generic observation surfaces; only a bounded generated human task is an explicit declassification. | `FR-SEC-023` |
 | Storage / runtime | `pr_review_attention_triggers`, `eventing.ReviewAttentionTriggerQueue`, `reviews.AttentionTriggerWorker` | Keep one bounded canonical effective-policy pin and fresh lease authority owner-local; create the pin only from a trusted generation before effects, strictly revalidate it on every retry, expose no trigger state publicly, and invoke only the private gate launcher without repository or provider write authority. | `FR-SEC-023` |
+| HTTP / UI / workflow | Protected and launcher case-owned review-attention GET/response routes, `/reviews?case={case}&focus=chat`, and generic workflow observation/mutation routes | Peek and numeric-local-validate gateway authority without process/PID side effects; validate the trigger-status-specific case authority and task payload hash; project only bounded deliberate declassification plus at most one opaque actionable fence; resume only through server-resolved identity with exact recovery; retain response state in memory; suppress exact reserved runs; scrub hidden relationships from ordinary reads/graphs; fence the transitive relationship component from mutation; and preserve reserved replay authority from ordinary retention. | `FR-SEC-024` |
 | Config / HTTP / UI | `reviews.attention`, `GET` and `PUT /api/reviews/attention-policies`, `/reviews?view=policies` | Keep gate authority in operator-owned configuration outside reviewed checkouts; expose only bounded non-secret policy plus opaque revisions/effect status, parse and serialize arbitrary question JSON losslessly, and retain the editable projection only in memory. Replace it only through one explicit strict same-origin public-plus-security compare-and-swap that raw-patches only persisted `reviews.attention`, preserves unrelated persisted values and numeric tokens, and leaves security state byte-identical; a conflict retains the local draft for explicit reload/discard and never retries or rebases automatically. Route state contains only the fixed policy-view selector, and editing, validation, effective preview, reload, and discard grant no workflow or provider authority. Broad config GET omits this subresource; broad PUT accepts only an empty compatibility placeholder, broad PATCH rejects the field, and both preserve its exact value during unrelated updates. | `FR-SEC-021` |
 | HTTP | `GET /api/reviews/attention-agents` | Project only one fixed-256 page of canonical configured identity and default metadata, fenced by one strong policy-generation `If-Match` plus an optional canonical offset; broader agent configuration and all security state remain outside the DTO. | `FR-SEC-021` |
 | Workflow / MCP | `agent/*` with `with.tools: none`; `mcp/github/add_issue_comment` | Remove tools from every classifier model path, then permit a GitHub mutation only as a declared conditional MCP step with signed-body identity and fixed output text. The GitHub MCP server and its write credential are configured explicitly and independently from ingress authentication. | `FR-SEC-013` |
@@ -437,6 +463,30 @@ Owns: TEST pkg/config/version*
     strictly decode, validate, and re-hash the stored pin; a mismatch fails
     before session or run work. Retain the pin across retry and expose neither
     it nor lease, error, or linked-run state through public projections or logs.
+21. For browser attention, authenticate first and replace browser authority at
+    the launcher. Peek PID metadata without lifecycle effects and require an
+    explicit nonzero port plus numeric loopback or literal current local-interface
+    host before constructing a bearer request. On the protected gateway, validate
+    the submitted case, immutable submission, and trigger first; branch historical,
+    pending/claimed, no-op, and delivered state as specified by `FR-SEC-024`, and
+    only for delivered load the exact decision link, private run, and stable task
+    chain. Recompute each task payload hash before declassifying fixed state,
+    configured questions, or an accepted response. Derive a length-prefixed domain-separated
+    SHA-256 fence only for the sole current actionable waiting/recovery task; do
+    not issue it when runtime resume is unavailable. For POST, reject all
+    caller-supplied private linkage, recompute the fence from server state,
+    derive a separate response ID from it and the normalized answer, resume the
+    exact loaded task, and reproject so exact persisted replay recovers without
+    accepting changed text. Keep the fence/draft out of route and persistent
+    browser state. Independently classify the exact reserved workflow reference
+    before every generic list, detail, events, SSE, graph, task, resume, cancel,
+    or retry operation and return omission/not-found instead of raw fallback.
+    Scrub direct hidden relationships and graph nodes/edges from visible ordinary
+    reads, and deny mutation for the entire normalized transitive parent/child/retry
+    component. Preserve exact reserved-reference runs from production web/CLI
+    retention. With workflows disabled use no executor, expose no new response
+    authority, keep exact replay read-only, and classify reserved resume before
+    returning disabled state.
 
 ## Cross-Feature Behavior
 
@@ -488,6 +538,16 @@ grants model, tool, workflow, repository, provider, or GitHub authority. Event
 automation also owns the outgoing submitted-review occurrence and its worker;
 security requires its persisted policy pin and lease state to remain local,
 strictly revalidated, and unavailable to browser or generic workflow surfaces.
+The case-owned attention handoff is the only additional browser
+declassification: event automation owns its authoritative chain and lifecycle,
+launcher management owns same-origin authority replacement and canonical focus,
+and workflows own private task continuation. Security requires the opaque fence
+to authorize only one current task, exact replay to remain idempotent, all
+private identity and diagnostics to stay unrepresentable, the exact reserved
+run to remain absent from generic workflow routes and ordinary retention, direct
+hidden relationships to be scrubbed, and transitive relationship components to
+be mutation-fenced. This outgoing-review bridge
+does not establish an inbound own-PR feedback/development-case contract.
 Git workspace configuration and tool enablement reuse the same config
 normalization and defaulting path, while checkout retention, dirty preservation,
 and workspace inventory security boundaries are owned by the git workspaces
@@ -542,6 +602,28 @@ promise that a provider consumes every materialized modality.
   discard cannot launch a gate or workflow, call a model or tool, create a
   review action, write a repository, emit an event, or mutate a provider or
   GitHub resource.
+- Submitted projection validates status-specific authority: historical absence
+  is `none`, pending/claimed require no run, no-op requires a canonical all-zero
+  pin/no run, and delivered requires a canonical active pin/link/run/task chain
+  whose displayed payload matches its input hash. Malformed required state fails
+  without raw fallback. Disabled runtime is read-only and may show waiting or
+  recovery lifecycle but exposes neither `can_respond` nor a response fence;
+  exact persisted replay remains idempotent and reserved resume returns 404 first.
+- Noncanonical attention paths or queries, cross-site POST, malformed or
+  oversized JSON, missing/zero-port, hostname, wildcard/unspecified, multicast
+  or remote PID authority, redirect, proxy use, timeout, invalid upstream
+  content type/body, stale/cross-case/cross-task fence, and altered replay fail
+  without mutating a review case or consuming another task. An exact answer
+  already persisted before continuation/transport failure recovers through its
+  separate response ID and authoritative reprojection.
+- Attention URLs, DTOs, browser storage, and fixed errors cannot contain process
+  authority, private run/task/workflow/session/policy identity or revision,
+  input hashes, trigger lease/retry state, or raw stored/upstream errors. Generic
+  workflow routes suppress exact reserved attention references before any
+  observation or mutation, including malformed impostors. Ordinary projections
+  and graphs scrub direct hidden relationships; the normalized transitive
+  parent/child/retry component is denied mutation; and production web/CLI
+  retention preserves exact reserved-reference runs for restart replay.
 - Concurrent atomic writes do not fail due to temporary filename collisions.
 - Concurrent auth-store writers preserve unrelated credentials; on hosts with
   OS file locking, a stale OAuth refresh cannot overwrite a credential replaced
@@ -697,6 +779,7 @@ promise that a provider consumes every materialized modality.
 | `FR-SEC-021` | [pkg/config/mutation_test.go](../../pkg/config/mutation_test.go), [web/backend/api/config_writer_cas_test.go](../../web/backend/api/config_writer_cas_test.go), [web/backend/api/review_attention_policies_test.go](../../web/backend/api/review_attention_policies_test.go), [web/backend/api/review_attention_agents_test.go](../../web/backend/api/review_attention_agents_test.go), [cmd/picoclaw/internal/auth/config_revision_test.go](../../cmd/picoclaw/internal/auth/config_revision_test.go), [cmd/picoclaw/internal/mcp/command_test.go](../../cmd/picoclaw/internal/mcp/command_test.go), [cmd/picoclaw/internal/model/command_test.go](../../cmd/picoclaw/internal/model/command_test.go), [web/frontend/src/api/review-attention-agents.test.ts](../../web/frontend/src/api/review-attention-agents.test.ts), [web/frontend/src/api/review-attention-json.test.ts](../../web/frontend/src/api/review-attention-json.test.ts), [web/frontend/src/api/review-attention-policies.test.ts](../../web/frontend/src/api/review-attention-policies.test.ts), [web/frontend/src/components/reviews/review-attention-policy-model.test.ts](../../web/frontend/src/components/reviews/review-attention-policy-model.test.ts), [web/frontend/src/components/reviews/review-attention-policies-page.test.tsx](../../web/frontend/src/components/reviews/review-attention-policies-page.test.tsx), [web/frontend/src/components/reviews/reviews-page.test.tsx](../../web/frontend/src/components/reviews/reviews-page.test.tsx), [web/frontend/src/routes/-reviews.test.ts](../../web/frontend/src/routes/-reviews.test.ts) |
 | `FR-SEC-022` | [pkg/media/store_test.go](../../pkg/media/store_test.go), [pkg/media/snapshot_test.go](../../pkg/media/snapshot_test.go), [pkg/media/frozen_test.go](../../pkg/media/frozen_test.go), [pkg/media/snapshot_file_unix.go](../../pkg/media/snapshot_file_unix.go), [pkg/media/snapshot_file_windows.go](../../pkg/media/snapshot_file_windows.go), [pkg/media/snapshot_file_other.go](../../pkg/media/snapshot_file_other.go), [pkg/session/frozen_media_test.go](../../pkg/session/frozen_media_test.go) |
 | `FR-SEC-023` | [pkg/workflows/private_context.go](../../pkg/workflows/private_context.go), [pkg/workflows/private_session.go](../../pkg/workflows/private_session.go), [pkg/workflows/executor.go](../../pkg/workflows/executor.go), [pkg/workflows/store.go](../../pkg/workflows/store.go), [pkg/workflows/development.go](../../pkg/workflows/development.go), [pkg/workflows/gates_test.go](../../pkg/workflows/gates_test.go), [pkg/workflows/private_context_security_test.go](../../pkg/workflows/private_context_security_test.go), [pkg/workflows/private_session_test.go](../../pkg/workflows/private_session_test.go), [pkg/session/frozen_media_test.go](../../pkg/session/frozen_media_test.go), [pkg/media/frozen_test.go](../../pkg/media/frozen_test.go), [pkg/accountrouter/router.go](../../pkg/accountrouter/router.go), [pkg/accountrouter/router_test.go](../../pkg/accountrouter/router_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/tools/workflow.go](../../pkg/tools/workflow.go), [pkg/reviews/attention_test.go](../../pkg/reviews/attention_test.go), [pkg/eventing/review_decision_run_sqlite_test.go](../../pkg/eventing/review_decision_run_sqlite_test.go), [pkg/eventing/review_attention_trigger_sqlite_test.go](../../pkg/eventing/review_attention_trigger_sqlite_test.go), [pkg/gateway/review_attention_trigger_test.go](../../pkg/gateway/review_attention_trigger_test.go), [web/backend/api/workflows.go](../../web/backend/api/workflows.go), [web/backend/api/workflow_run_readiness_test.go](../../web/backend/api/workflow_run_readiness_test.go), [web/backend/api/workflow_runtime.go](../../web/backend/api/workflow_runtime.go), [web/backend/api/workflow_runtime_test.go](../../web/backend/api/workflow_runtime_test.go) |
+| `FR-SEC-024` | [pkg/reviews/attention_bridge.go](../../pkg/reviews/attention_bridge.go), [pkg/reviews/attention_bridge_test.go](../../pkg/reviews/attention_bridge_test.go), [pkg/reviews/attention_bridge_sqlite_test.go](../../pkg/reviews/attention_bridge_sqlite_test.go), [pkg/reviews/workflow_retention.go](../../pkg/reviews/workflow_retention.go), [pkg/gateway/review_attention_bridge_test.go](../../pkg/gateway/review_attention_bridge_test.go), [web/backend/api/reviews_test.go](../../web/backend/api/reviews_test.go), [web/backend/api/agent_activity.go](../../web/backend/api/agent_activity.go), [web/backend/api/workflow_attention_privacy.go](../../web/backend/api/workflow_attention_privacy.go), [web/backend/api/review_attention_workflow_suppression_test.go](../../web/backend/api/review_attention_workflow_suppression_test.go), [cmd/picoclaw/internal/workflow/retention_test.go](../../cmd/picoclaw/internal/workflow/retention_test.go), [web/frontend/src/api/review-attention.test.ts](../../web/frontend/src/api/review-attention.test.ts), [web/frontend/src/components/reviews/reviews-page.test.tsx](../../web/frontend/src/components/reviews/reviews-page.test.tsx), [web/frontend/src/routes/-reviews-route.test.tsx](../../web/frontend/src/routes/-reviews-route.test.tsx), [web/frontend/src/routes/-reviews.test.ts](../../web/frontend/src/routes/-reviews.test.ts) |
 
 ## Implementation Anchors
 
@@ -709,6 +792,7 @@ promise that a provider consumes every materialized modality.
 - [web/backend/api/config.go](../../web/backend/api/config.go)
 - [web/backend/api/review_attention_policies.go](../../web/backend/api/review_attention_policies.go)
 - [web/frontend/src/api/review-attention-json.ts](../../web/frontend/src/api/review-attention-json.ts)
+- [web/frontend/src/api/review-attention.ts](../../web/frontend/src/api/review-attention.ts)
 - [web/frontend/src/components/reviews](../../web/frontend/src/components/reviews)
 - [pkg/auth/oauth.go](../../pkg/auth/oauth.go)
 - [pkg/auth/store.go](../../pkg/auth/store.go)
@@ -737,6 +821,7 @@ promise that a provider consumes every materialized modality.
 - [pkg/workflows/private_session.go](../../pkg/workflows/private_session.go)
 - [pkg/workflows/executor.go](../../pkg/workflows/executor.go)
 - [pkg/workflows/store.go](../../pkg/workflows/store.go)
+- [pkg/reviews/attention_bridge.go](../../pkg/reviews/attention_bridge.go)
 - [pkg/accountrouter/router.go](../../pkg/accountrouter/router.go)
 - [pkg/tools/workflow.go](../../pkg/tools/workflow.go)
 - [pkg/agent/workflow_authoring.go](../../pkg/agent/workflow_authoring.go)
@@ -746,6 +831,8 @@ promise that a provider consumes every materialized modality.
 - [web/backend/api/workflow_jobs_editor.go](../../web/backend/api/workflow_jobs_editor.go)
 - [web/backend/api/workflow_event_context.go](../../web/backend/api/workflow_event_context.go)
 - [web/backend/api/workflows.go](../../web/backend/api/workflows.go)
+- [web/backend/api/reviews.go](../../web/backend/api/reviews.go)
+- [web/backend/api/workflow_human_tasks.go](../../web/backend/api/workflow_human_tasks.go)
 - [web/backend/api/workflow_trigger_simulation.go](../../web/backend/api/workflow_trigger_simulation.go)
 - [web/frontend/src/components/workflows/workflow-capability-catalog.tsx](../../web/frontend/src/components/workflows/workflow-capability-catalog.tsx)
 - [web/frontend/src/components/workflows/workflow-job-editor.tsx](../../web/frontend/src/components/workflows/workflow-job-editor.tsx)

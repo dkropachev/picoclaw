@@ -1,8 +1,23 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, waitFor, within } from "@testing-library/react"
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import { StrictMode } from "react"
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
+import {
+  ReviewAttentionAPIError,
+  type ReviewAttentionProjection,
+  getReviewAttention,
+  respondToReviewAttention,
+} from "@/api/review-attention"
+import { parseExactJSON } from "@/api/review-attention-json"
 import {
   ReviewAPIError,
   type ReviewCaseDetail,
@@ -22,6 +37,16 @@ import {
   type ReviewsRouteSearch,
 } from "@/components/reviews/reviews-page"
 import { SidebarProvider } from "@/components/ui/sidebar"
+
+vi.mock("@/api/review-attention", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("@/api/review-attention")>()
+  return {
+    ...original,
+    getReviewAttention: vi.fn(),
+    respondToReviewAttention: vi.fn(),
+  }
+})
 
 vi.mock("@/api/reviews", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/api/reviews")>()
@@ -95,6 +120,64 @@ const detail: ReviewCaseDetail = {
   messages: [],
 }
 
+const responseToken = `sha256:${"a".repeat(64)}`
+const submittedDetail: ReviewCaseDetail = {
+  ...detail,
+  case: {
+    ...reviewCase,
+    status: "submitted",
+    version: 7,
+    submitted_at: "2026-07-30T12:04:01Z",
+  },
+  submission: {
+    id: ids.submission,
+    case_id: ids.case,
+    draft_version: 3,
+    status: "submitted",
+    attempts: 1,
+    external_review_id: "9876",
+    external_url: reviewCase.pull_url,
+    created_at: "2026-07-30T12:04:00Z",
+    updated_at: "2026-07-30T12:04:01Z",
+    submitted_at: "2026-07-30T12:04:01Z",
+  },
+}
+
+function waitingAttention(
+  overrides: Partial<ReviewAttentionProjection> = {},
+): ReviewAttentionProjection {
+  return {
+    case_version: 7,
+    status: "waiting",
+    can_respond: true,
+    turns: [
+      {
+        status: "waiting",
+        title: "Choose a safe contract",
+        questions: parseExactJSON('{"priority":9007199254740993}'),
+        response_token: responseToken,
+      },
+    ],
+    ...overrides,
+  }
+}
+
+function answeredAttention(response: string): ReviewAttentionProjection {
+  return {
+    case_version: 7,
+    status: "completed",
+    can_respond: false,
+    turns: [
+      {
+        status: "answered",
+        title: "Choose a safe contract",
+        questions: parseExactJSON('{"priority":9007199254740993}'),
+        response,
+      },
+    ],
+  }
+}
+
 describe("ReviewsPage", () => {
   beforeAll(() => {
     Object.defineProperty(window, "matchMedia", {
@@ -110,6 +193,21 @@ describe("ReviewsPage", () => {
         dispatchEvent: vi.fn(),
       })),
     })
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn(),
+    })
+    Object.defineProperty(window, "requestAnimationFrame", {
+      configurable: true,
+      value: (callback: FrameRequestCallback) => {
+        callback(0)
+        return 1
+      },
+    })
+    Object.defineProperty(window, "cancelAnimationFrame", {
+      configurable: true,
+      value: vi.fn(),
+    })
   })
 
   beforeEach(() => {
@@ -122,6 +220,8 @@ describe("ReviewsPage", () => {
     vi.mocked(restoreReviewFinding).mockReset()
     vi.mocked(submitReview).mockReset()
     vi.mocked(updateReviewFinding).mockReset()
+    vi.mocked(getReviewAttention).mockReset()
+    vi.mocked(respondToReviewAttention).mockReset()
 
     vi.mocked(listReviews).mockResolvedValue({ cases: [reviewCase] })
     vi.mocked(getReview).mockResolvedValue(detail)
@@ -143,6 +243,353 @@ describe("ReviewsPage", () => {
       await screen.findByRole("button", { name: "Attention policies" }),
     )
     expect(onSearchChange).toHaveBeenCalledWith({ view: "policies" })
+  })
+
+  it("hands a submitted review into the attention chat and sends one fenced reply", async () => {
+    vi.mocked(getReview).mockResolvedValue(submittedDetail)
+    vi.mocked(getReviewAttention).mockResolvedValue(waitingAttention())
+    vi.mocked(respondToReviewAttention).mockResolvedValue(
+      answeredAttention("Keep v1"),
+    )
+    const user = userEvent.setup()
+    renderReviews({ case: ids.case, focus: "chat" })
+
+    const response = await screen.findByLabelText(
+      "Reply to the AI attention request",
+    )
+    expect(screen.getByLabelText("Message")).toBeDisabled()
+    expect(screen.getByText('{"priority":9007199254740993}')).toBeVisible()
+    await waitFor(() => expect(response).toHaveFocus())
+
+    await user.type(response, "Keep v1")
+    await user.click(
+      screen.getByRole("button", { name: "Send attention reply" }),
+    )
+
+    await waitFor(() => {
+      expect(respondToReviewAttention).toHaveBeenCalledWith(
+        ids.case,
+        7,
+        responseToken,
+        "Keep v1",
+      )
+    })
+    expect(
+      await screen.findByText("The attention conversation is complete."),
+    ).toBeVisible()
+    expect(
+      screen.queryByLabelText("Reply to the AI attention request"),
+    ).not.toBeInTheDocument()
+  })
+
+  it("special-renders only the exact AI envelope without hiding custom question fields", async () => {
+    vi.mocked(getReview).mockResolvedValue(submittedDetail)
+    vi.mocked(getReviewAttention).mockResolvedValue(
+      waitingAttention({
+        turns: [
+          {
+            status: "answered",
+            title: "Confirm AI scope",
+            questions: parseExactJSON(
+              '{"gate_id":"scope","reason":"A choice is required.","questions":["Keep the bounded scope?"]}',
+            ),
+            response: "Keep it bounded.",
+          },
+          {
+            status: "waiting",
+            title: "Confirm custom data",
+            questions: parseExactJSON(
+              '{"reason":"Choose one.","questions":["Which one?"],"choices":["safe","fast"]}',
+            ),
+            response_token: responseToken,
+          },
+        ],
+      }),
+    )
+
+    renderReviews({ case: ids.case, focus: "chat" })
+
+    expect(await screen.findByText("Gate scope")).toBeVisible()
+    expect(screen.getByText("A choice is required.")).toBeVisible()
+    expect(screen.getByText("Keep the bounded scope?")).toBeVisible()
+    expect(
+      screen.getByText(
+        '{"reason":"Choose one.","questions":["Which one?"],"choices":["safe","fast"]}',
+      ),
+    ).toBeVisible()
+  })
+
+  it("preserves an attention draft across a conflict refetch", async () => {
+    const nextToken = `sha256:${"b".repeat(64)}`
+    const latest = waitingAttention({
+      case_version: 8,
+      turns: [
+        {
+          status: "waiting",
+          title: "Choose the updated contract",
+          questions: parseExactJSON('["Keep v2?"]'),
+          response_token: nextToken,
+        },
+      ],
+    })
+    vi.mocked(getReview).mockResolvedValue(submittedDetail)
+    vi.mocked(getReviewAttention)
+      .mockResolvedValueOnce(waitingAttention())
+      .mockResolvedValue(latest)
+    vi.mocked(respondToReviewAttention).mockRejectedValue(
+      new ReviewAttentionAPIError("review_attention_conflict", 409),
+    )
+    const user = userEvent.setup()
+    renderReviews({ case: ids.case, focus: "chat" })
+
+    const response = await screen.findByLabelText(
+      "Reply to the AI attention request",
+    )
+    await user.type(response, "Preserve this local answer")
+    await user.click(
+      screen.getByRole("button", { name: "Send attention reply" }),
+    )
+
+    expect(
+      await screen.findByText(
+        "This attention request changed. The latest state was loaded and your reply is preserved.",
+      ),
+    ).toBeVisible()
+    await waitFor(() => expect(getReviewAttention).toHaveBeenCalledTimes(2))
+    expect(
+      screen.getByLabelText("Reply to the AI attention request"),
+    ).toHaveValue("Preserve this local answer")
+    expect(screen.getByText("Choose the updated contract")).toBeVisible()
+  })
+
+  it("clears a lost-response error when the authoritative refetch contains the reply", async () => {
+    vi.mocked(getReview).mockResolvedValue(submittedDetail)
+    vi.mocked(getReviewAttention)
+      .mockResolvedValueOnce(waitingAttention())
+      .mockResolvedValue(answeredAttention("Keep v1"))
+    vi.mocked(respondToReviewAttention).mockRejectedValue(
+      new TypeError("transport closed after response"),
+    )
+    const user = userEvent.setup()
+    renderReviews({ case: ids.case, focus: "chat" })
+
+    const response = await screen.findByLabelText(
+      "Reply to the AI attention request",
+    )
+    await user.type(response, "Keep v1")
+    await user.click(
+      screen.getByRole("button", { name: "Send attention reply" }),
+    )
+
+    expect(
+      await screen.findByText("The attention conversation is complete."),
+    ).toBeVisible()
+    expect(
+      screen.queryByText(
+        "The reply could not be sent. The latest state was loaded and your text is preserved.",
+      ),
+    ).not.toBeInTheDocument()
+  })
+
+  it("reports the UTF-8 response bound before submitting multibyte text", async () => {
+    vi.mocked(getReview).mockResolvedValue(submittedDetail)
+    vi.mocked(getReviewAttention).mockResolvedValue(waitingAttention())
+    renderReviews({ case: ids.case, focus: "chat" })
+
+    const response = await screen.findByLabelText(
+      "Reply to the AI attention request",
+    )
+    fireEvent.change(response, { target: { value: "界".repeat(11_000) } })
+
+    expect(response).toHaveAttribute("aria-invalid", "true")
+    expect(screen.getByText("33000 / 32768 UTF-8 bytes")).toBeVisible()
+    expect(
+      screen.getByRole("button", { name: "Send attention reply" }),
+    ).toBeDisabled()
+    expect(respondToReviewAttention).not.toHaveBeenCalled()
+  })
+
+  it("polls a runtime-disabled waiting turn until it becomes actionable", async () => {
+    const disabledWaiting = waitingAttention({
+      can_respond: false,
+      turns: [
+        {
+          status: "waiting",
+          title: "Choose a safe contract",
+          questions: parseExactJSON("[]"),
+        },
+      ],
+    })
+    vi.mocked(getReview).mockResolvedValue(submittedDetail)
+    vi.mocked(getReviewAttention)
+      .mockResolvedValueOnce(disabledWaiting)
+      .mockResolvedValue(waitingAttention())
+    renderReviews({ case: ids.case, focus: "chat" })
+    await waitFor(() => expect(getReviewAttention).toHaveBeenCalledTimes(1))
+    expect(
+      screen.queryByLabelText("Reply to the AI attention request"),
+    ).not.toBeInTheDocument()
+
+    await waitFor(
+      () => {
+        expect(getReviewAttention).toHaveBeenCalledTimes(2)
+      },
+      { timeout: 2500 },
+    )
+    expect(
+      screen.getByLabelText("Reply to the AI attention request"),
+    ).toBeVisible()
+
+    await new Promise((resolve) => window.setTimeout(resolve, 1700))
+    expect(getReviewAttention).toHaveBeenCalledTimes(2)
+  })
+
+  it("focuses a cached attention request after the Strict Mode effect restart", async () => {
+    vi.mocked(getReview).mockResolvedValue(submittedDetail)
+    vi.mocked(getReviewAttention).mockResolvedValue(waitingAttention())
+    const callbacks = new Map<number, FrameRequestCallback>()
+    const canceled = new Set<number>()
+    let nextFrame = 0
+    const requestFrame = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback) => {
+        nextFrame++
+        callbacks.set(nextFrame, callback)
+        return nextFrame
+      })
+    const cancelFrame = vi
+      .spyOn(window, "cancelAnimationFrame")
+      .mockImplementation((frame) => {
+        canceled.add(frame)
+      })
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    queryClient.setQueryData(["reviews", "detail", ids.case], submittedDetail)
+    queryClient.setQueryData(
+      ["reviews", "attention", ids.case],
+      waitingAttention(),
+    )
+
+    try {
+      render(
+        <StrictMode>
+          <QueryClientProvider client={queryClient}>
+            <SidebarProvider>
+              <ReviewsPage
+                search={{ case: ids.case, focus: "chat" }}
+                onSearchChange={vi.fn()}
+              />
+            </SidebarProvider>
+          </QueryClientProvider>
+        </StrictMode>,
+      )
+      const response = await screen.findByLabelText(
+        "Reply to the AI attention request",
+      )
+      act(() => {
+        for (const [frame, callback] of callbacks) {
+          if (!canceled.has(frame)) {
+            callback(0)
+          }
+        }
+      })
+      expect(response).toHaveFocus()
+    } finally {
+      requestFrame.mockRestore()
+      cancelFrame.mockRestore()
+    }
+  })
+
+  it("does not carry a conversation draft into another cached case", async () => {
+    const secondCaseID = `prc_${"9".repeat(32)}`
+    const secondDetail: ReviewCaseDetail = {
+      ...detail,
+      case: {
+        ...reviewCase,
+        id: secondCaseID,
+        repository: "octo/other",
+        pull_number: 43,
+        pull_url: "https://github.com/octo/other/pull/43",
+      },
+      findings: [],
+    }
+    const user = userEvent.setup()
+    const rendered = renderReviews({ case: ids.case }, vi.fn(), [
+      detail,
+      secondDetail,
+    ])
+
+    const firstDraft = await screen.findByLabelText("Message")
+    await user.type(firstDraft, "This belongs only to case one")
+    expect(firstDraft).toHaveValue("This belongs only to case one")
+
+    rendered.rerenderReviews({ case: secondCaseID })
+    expect(await screen.findByText("octo/other #43")).toBeVisible()
+    expect(screen.getByLabelText("Message")).toHaveValue("")
+  })
+
+  it("retries a saved recovery response and renders canceled failures read-only", async () => {
+    const recovery: ReviewAttentionProjection = {
+      case_version: 7,
+      status: "recovery_required",
+      can_respond: true,
+      turns: [
+        {
+          status: "recovery_required",
+          title: "Choose a safe contract",
+          questions: parseExactJSON('["Keep v1?"]'),
+          response: "Keep v1",
+          response_token: responseToken,
+        },
+      ],
+    }
+    vi.mocked(getReview).mockResolvedValue(submittedDetail)
+    vi.mocked(getReviewAttention).mockResolvedValue(recovery)
+    vi.mocked(respondToReviewAttention).mockResolvedValue(
+      answeredAttention("Keep v1"),
+    )
+    const user = userEvent.setup()
+    const rendered = renderReviews({ case: ids.case, focus: "chat" })
+
+    const retry = await screen.findByRole("button", {
+      name: "Retry continuation",
+    })
+    await user.click(retry)
+    await waitFor(() => {
+      expect(respondToReviewAttention).toHaveBeenCalledWith(
+        ids.case,
+        7,
+        responseToken,
+        "Keep v1",
+      )
+    })
+
+    rendered.unmount()
+    vi.mocked(getReviewAttention).mockResolvedValue({
+      case_version: 7,
+      status: "failed",
+      can_respond: false,
+      turns: [
+        {
+          status: "canceled",
+          title: "Choose a safe contract",
+          questions: parseExactJSON("[]"),
+        },
+      ],
+    })
+    renderReviews({ case: ids.case, focus: "chat" })
+
+    expect(await screen.findByText("Canceled")).toBeVisible()
+    expect(
+      screen.getByText("The attention check could not be completed."),
+    ).toBeVisible()
+    expect(
+      screen.queryByLabelText("Reply to the AI attention request"),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole("button", { name: "Retry continuation" }),
+    ).not.toBeInTheDocument()
   })
 
   it("loads the inbox and saves the complete human-edited finding", async () => {
@@ -531,6 +978,7 @@ describe("ReviewsPage", () => {
 function renderReviews(
   search: ReviewsRouteSearch = { case: ids.case },
   onSearchChange = vi.fn(),
+  seededDetails: ReviewCaseDetail[] = [],
 ) {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -538,11 +986,23 @@ function renderReviews(
       mutations: { retry: false },
     },
   })
-  return render(
+  for (const seededDetail of seededDetails) {
+    queryClient.setQueryData(
+      ["reviews", "detail", seededDetail.case.id],
+      seededDetail,
+    )
+  }
+  const view = (nextSearch: ReviewsRouteSearch) => (
     <QueryClientProvider client={queryClient}>
       <SidebarProvider>
-        <ReviewsPage search={search} onSearchChange={onSearchChange} />
+        <ReviewsPage search={nextSearch} onSearchChange={onSearchChange} />
       </SidebarProvider>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   )
+  const rendered = render(view(search))
+  return {
+    ...rendered,
+    rerenderReviews: (nextSearch: ReviewsRouteSearch) =>
+      rendered.rerender(view(nextSearch)),
+  }
 }

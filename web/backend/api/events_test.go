@@ -829,14 +829,19 @@ func installEventProxyStubs(
 ) {
 	t.Helper()
 	origPIDData := eventGatewayPIDData
+	origReviewPIDData := reviewGatewayPIDData
 	origReadOnlyPIDData := workflowEventReadOnlyGatewayPIDData
 	origDo := eventGatewayDo
 	t.Cleanup(func() {
 		eventGatewayPIDData = origPIDData
+		reviewGatewayPIDData = origReviewPIDData
 		workflowEventReadOnlyGatewayPIDData = origReadOnlyPIDData
 		eventGatewayDo = origDo
 	})
 	eventGatewayPIDData = func(_ *Handler, _ *config.Config) *ppid.PidFileData {
+		return testEventPIDData()
+	}
+	reviewGatewayPIDData = func() *ppid.PidFileData {
 		return testEventPIDData()
 	}
 	workflowEventReadOnlyGatewayPIDData = func(

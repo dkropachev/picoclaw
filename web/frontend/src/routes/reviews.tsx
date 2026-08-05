@@ -28,6 +28,9 @@ export function normalizeReviewsSearch(
     typeof raw.case === "string" && reviewCaseIDPattern.test(raw.case)
       ? raw.case
       : undefined
+  if (selectedCase && raw.focus === "chat") {
+    return { case: selectedCase, focus: "chat" }
+  }
   const status =
     typeof raw.status === "string" &&
     reviewStatuses.has(raw.status as ReviewCaseStatus)
@@ -59,6 +62,9 @@ function ReviewsRoutePage() {
   const locationSearch = useLocation({
     select: (location) => location.search,
   })
+  const locationHash = useLocation({
+    select: (location) => location.hash,
+  })
   const navigate = Route.useNavigate()
   const search = useMemo(
     () => normalizeReviewsSearch({ ...locationSearch }),
@@ -66,14 +72,17 @@ function ReviewsRoutePage() {
   )
 
   useEffect(() => {
-    if (!reviewsSearchIsCanonical({ ...locationSearch }, search)) {
-      void navigate({ search, replace: true })
+    if (
+      locationHash !== "" ||
+      !reviewsSearchIsCanonical({ ...locationSearch }, search)
+    ) {
+      void navigate({ search, hash: "", replace: true })
     }
-  }, [locationSearch, navigate, search])
+  }, [locationHash, locationSearch, navigate, search])
 
   const changeSearch = useCallback(
     (next: ReviewsRouteSearch, replace = false) => {
-      void navigate({ search: next, replace })
+      void navigate({ search: next, hash: "", replace })
     },
     [navigate],
   )

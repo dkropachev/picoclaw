@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/config"
+	ppid "github.com/sipeed/picoclaw/pkg/pid"
 )
 
 const (
@@ -49,6 +50,13 @@ var reviewListQueryContract = map[string]reviewQueryValidator{
 		"cursor",
 		reviewProxyCursorMaxBytes,
 	),
+}
+
+var reviewGatewayPIDData = func() *ppid.PidFileData {
+	// Review reads must not attach to a process, probe health, or clean stale
+	// metadata. The explicit local-host validation below decides whether the
+	// peeked connection authority is safe to receive the process bearer.
+	return ppid.PeekPidFile(globalConfigDir())
 }
 
 func (h *Handler) registerReviewRoutes(mux *http.ServeMux) {
@@ -123,6 +131,18 @@ func (h *Handler) handleReviewSubtree(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(segments) == 1:
 		h.handleReviewGet(w, r, caseID)
+	case len(segments) == 2 && segments[1] == "attention":
+		h.handleReviewAttentionGet(w, r, caseID)
+	case len(segments) == 3 &&
+		segments[1] == "attention" &&
+		segments[2] == "respond":
+		h.handleReviewMutation(
+			w,
+			r,
+			http.MethodPost,
+			"/runtime/eventing/reviews/"+caseID+"/attention/respond",
+			reviewGatewayAIRequestTimeout,
+		)
 	case len(segments) == 2 && segments[1] == "chat":
 		h.handleReviewMutation(
 			w,
@@ -180,6 +200,29 @@ func (h *Handler) handleReviewSubtree(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeReviewAPIError(w, http.StatusNotFound, "not found")
 	}
+}
+
+func (h *Handler) handleReviewAttentionGet(
+	w http.ResponseWriter,
+	r *http.Request,
+	caseID string,
+) {
+	if !requireReviewMethod(w, r, http.MethodGet) {
+		return
+	}
+	if r.URL.RawQuery != "" {
+		writeReviewAPIError(w, http.StatusBadRequest, "invalid review request")
+		return
+	}
+	h.proxyReviewGateway(
+		w,
+		r,
+		http.MethodGet,
+		"/runtime/eventing/reviews/"+caseID+"/attention",
+		"",
+		nil,
+		reviewGatewayRequestTimeout,
+	)
 }
 
 func (h *Handler) handleReviewGet(
@@ -465,8 +508,12 @@ func (h *Handler) proxyReviewGateway(
 	if loaded, err := config.LoadConfig(h.configPath); err == nil {
 		cfg = loaded
 	}
-	pidData := eventGatewayPIDData(h, cfg)
-	if !validEventGatewayPIDData(pidData) {
+	pidData := reviewGatewayPIDData()
+	// Review routes forward a process bearer. Require the PID record to name
+	// an explicit numeric local address before constructing the upstream URL;
+	// accepting a hostname, wildcard, or remote address could exfiltrate that
+	// bearer if the record were stale or corrupted.
+	if !validAgentActivityPIDData(pidData) {
 		writeReviewAPIError(
 			w,
 			http.StatusServiceUnavailable,

@@ -28,7 +28,8 @@ const (
 
 // Handler exposes one immutable Service generation over strict JSON routes.
 type Handler struct {
-	Service *Service
+	Service   *Service
+	Attention *AttentionBridge
 }
 
 func (handler *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
@@ -80,6 +81,19 @@ func (handler *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) 
 		return
 	}
 	switch {
+	case len(segments) == 2 && segments[1] == "attention":
+		if request.Method != http.MethodGet {
+			writeReviewMethod(w, http.MethodGet)
+			return
+		}
+		handler.getAttention(w, request, caseID)
+	case len(segments) == 3 &&
+		segments[1] == "attention" && segments[2] == "respond":
+		if request.Method != http.MethodPost {
+			writeReviewMethod(w, http.MethodPost)
+			return
+		}
+		handler.respondAttention(w, request, caseID)
 	case len(segments) == 2 && segments[1] == "chat":
 		if request.Method != http.MethodPost {
 			writeReviewMethod(w, http.MethodPost)
@@ -126,6 +140,57 @@ func (handler *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) 
 	default:
 		writeReviewError(w, http.StatusNotFound, "not found", nil)
 	}
+}
+
+func (handler *Handler) getAttention(
+	w http.ResponseWriter,
+	request *http.Request,
+	caseID string,
+) {
+	if handler.Attention == nil {
+		writeReviewOperationError(w, handler.Service, caseID, ErrUnavailable)
+		return
+	}
+	view, err := handler.Attention.Project(request.Context(), caseID)
+	if err != nil {
+		writeReviewOperationError(w, handler.Service, caseID, err)
+		return
+	}
+	writeReviewJSON(w, http.StatusOK, view)
+}
+
+func (handler *Handler) respondAttention(
+	w http.ResponseWriter,
+	request *http.Request,
+	caseID string,
+) {
+	if handler.Attention == nil {
+		writeReviewOperationError(w, handler.Service, caseID, ErrUnavailable)
+		return
+	}
+	var body struct {
+		ExpectedCaseVersion int64  `json:"expected_case_version"`
+		ResponseToken       string `json:"response_token"`
+		Response            string `json:"response"`
+	}
+	if err := decodeReviewBody(w, request, &body); err != nil {
+		writeReviewBodyError(w, err)
+		return
+	}
+	view, err := handler.Attention.Respond(
+		request.Context(),
+		AttentionResponseRequest{
+			CaseID:              caseID,
+			ExpectedCaseVersion: body.ExpectedCaseVersion,
+			ResponseToken:       body.ResponseToken,
+			Response:            body.Response,
+		},
+	)
+	if err != nil {
+		writeReviewOperationError(w, handler.Service, caseID, err)
+		return
+	}
+	writeReviewJSON(w, http.StatusOK, view)
 }
 
 func (handler *Handler) list(w http.ResponseWriter, request *http.Request) {

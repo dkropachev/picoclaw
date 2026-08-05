@@ -12,6 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/reviews"
 	"github.com/sipeed/picoclaw/pkg/tools"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
@@ -36,7 +37,11 @@ func workflowRunStore(ctx context.Context) (*workflows.FileRunStore, error) {
 	store := workflows.NewFileRunStore(cfg.WorkspacePath())
 	days := cfg.Workflows.EffectiveRetentionDays()
 	if days > 0 {
-		if _, err := store.PruneTerminalRuns(ctx, time.Now().UTC().AddDate(0, 0, -days)); err != nil {
+		if _, err := reviews.PruneTerminalWorkflowRunsExceptAttention(
+			ctx,
+			store,
+			time.Now().UTC().AddDate(0, 0, -days),
+		); err != nil {
 			return nil, err
 		}
 	}
