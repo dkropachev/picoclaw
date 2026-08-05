@@ -159,6 +159,113 @@ func TestLoadCurrentConfigSnapshotMissingUsesDefaultsWithoutConfigFiles(
 	}
 }
 
+func TestLoadCurrentConfigForUpdateSnapshotIfRevisionComparesBeforeParsing(
+	t *testing.T,
+) {
+	tests := []struct {
+		name             string
+		withSecurity     bool
+		mutateWinner     func(*testing.T, string)
+		currentErrorText string
+	}{
+		{
+			name: "malformed public winner",
+			mutateWinner: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+					t.Fatalf("WriteFile(malformed public) error = %v", err)
+				}
+			},
+			currentErrorText: "syntax error",
+		},
+		{
+			name: "legacy public winner",
+			mutateWinner: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(
+					path,
+					[]byte(`{"version":`+strconv.Itoa(CurrentVersion-1)+`}`),
+					0o600,
+				); err != nil {
+					t.Fatalf("WriteFile(legacy public) error = %v", err)
+				}
+			},
+			currentErrorText: ErrConfigMigrationRequired.Error(),
+		},
+		{
+			name:         "malformed security winner",
+			withSecurity: true,
+			mutateWinner: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(securityPath(path), []byte(":\n"), 0o600); err != nil {
+					t.Fatalf("WriteFile(malformed security) error = %v", err)
+				}
+			},
+			currentErrorText: "parse security config",
+		},
+		{
+			name:         "orphaned security winner",
+			withSecurity: true,
+			mutateWinner: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("Remove(public) error = %v", err)
+				}
+			},
+			currentErrorText: "without public config",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			cfg := DefaultConfig()
+			cfg.Workflows.Enabled = true
+			if err := SaveConfig(path, cfg); err != nil {
+				t.Fatalf("SaveConfig() error = %v", err)
+			}
+			if test.withSecurity {
+				if err := os.WriteFile(securityPath(path), []byte("{}\n"), 0o600); err != nil {
+					t.Fatalf("WriteFile(initial security) error = %v", err)
+				}
+			}
+			staleRevision, err := ConfigRevision(path)
+			if err != nil {
+				t.Fatalf("ConfigRevision(stale) error = %v", err)
+			}
+			loaded, loadedRevision, err := LoadCurrentConfigForUpdateSnapshotIfRevision(
+				path,
+				staleRevision,
+			)
+			if err != nil || loaded == nil || !loaded.Workflows.Enabled ||
+				loadedRevision != staleRevision {
+				t.Fatalf("matching snapshot = (%#v, %q, %v)", loaded, loadedRevision, err)
+			}
+
+			test.mutateWinner(t, path)
+			winnerRevision, err := ConfigRevision(path)
+			if err != nil {
+				t.Fatalf("ConfigRevision(winner) error = %v", err)
+			}
+			if winnerRevision == staleRevision {
+				t.Fatal("winner mutation did not change revision")
+			}
+			if _, _, err = LoadCurrentConfigForUpdateSnapshotIfRevision(
+				path,
+				staleRevision,
+			); !errors.Is(err, ErrConfigRevisionMismatch) {
+				t.Fatalf("stale snapshot error = %v", err)
+			}
+			if _, _, err = LoadCurrentConfigForUpdateSnapshotIfRevision(
+				path,
+				winnerRevision,
+			); err == nil || !strings.Contains(err.Error(), test.currentErrorText) {
+				t.Fatalf("current invalid snapshot error = %v", err)
+			}
+		})
+	}
+}
+
 func TestCurrentConfigSnapshotsRejectSecuritySidecarWithoutPublicConfig(
 	t *testing.T,
 ) {

@@ -76,7 +76,7 @@ func LoadConfigSnapshot(path string) (*Config, string, error) {
 // backing up, or saving configuration. Legacy schemas fail closed with
 // ErrConfigMigrationRequired.
 func LoadCurrentConfigSnapshot(path string) (*Config, string, error) {
-	return loadCurrentConfigSnapshot(path, true)
+	return loadCurrentConfigSnapshot(path, true, nil)
 }
 
 // LoadCurrentConfigForUpdateSnapshot atomically loads a current-schema
@@ -87,18 +87,37 @@ func LoadCurrentConfigSnapshot(path string) (*Config, string, error) {
 // derived defaults may be present in the returned validation view; callers
 // that must preserve the persisted representation must use a scoped raw saver.
 func LoadCurrentConfigForUpdateSnapshot(path string) (*Config, string, error) {
-	return loadCurrentConfigSnapshot(path, false)
+	return loadCurrentConfigSnapshot(path, false, nil)
+}
+
+// LoadCurrentConfigForUpdateSnapshotIfRevision atomically compares the exact
+// public-plus-security revision before parsing a current-schema management
+// view. Comparing first ensures an older caller observes a revision mismatch
+// even when the winning generation is malformed or requires migration.
+func LoadCurrentConfigForUpdateSnapshotIfRevision(
+	path string,
+	expectedRevision string,
+) (*Config, string, error) {
+	return loadCurrentConfigSnapshot(path, false, &expectedRevision)
 }
 
 func loadCurrentConfigSnapshot(
 	path string,
 	validateEventIngressRuntime bool,
+	expectedRevision *string,
 ) (*Config, string, error) {
 	unlock, err := lockConfigMutation(path)
 	if err != nil {
 		return nil, "", err
 	}
 	defer unlock()
+	revision, err := ConfigRevision(path)
+	if err != nil {
+		return nil, "", err
+	}
+	if expectedRevision != nil && revision != *expectedRevision {
+		return nil, "", ErrConfigRevisionMismatch
+	}
 	if err = validateConfigSnapshotPresence(path); err != nil {
 		return nil, "", err
 	}
@@ -110,10 +129,6 @@ func loadCurrentConfigSnapshot(
 		return nil, "", ErrConfigMigrationRequired
 	}
 	cfg, err := loadConfigWithOptions(path, validateEventIngressRuntime)
-	if err != nil {
-		return nil, "", err
-	}
-	revision, err := ConfigRevision(path)
 	if err != nil {
 		return nil, "", err
 	}
