@@ -632,6 +632,12 @@ func computeEventIngressSignature(cfg *config.Config) string {
 		workflowDispatch.MaxConcurrentRuns = cfg.Workflows.EffectiveMaxConcurrentRuns()
 		workflowDispatch.DefaultTimeout = cfg.Workflows.EffectiveDefaultTimeout()
 		workflowDispatch.MaxCallDepth = cfg.Workflows.EffectiveMaxCallDepth()
+		attentionPolicies, err := newReviewAttentionPolicySource(cfg)
+		if err != nil {
+			workflowDispatch.AttentionCatalogRevision = "<invalid>"
+		} else {
+			workflowDispatch.AttentionCatalogRevision = attentionPolicies.CatalogRevision()
+		}
 	}
 	webhooks := make(map[string]eventWebhookSignature)
 	for name, webhook := range effective.Webhooks {
@@ -685,12 +691,13 @@ type eventWebhookSignature struct {
 }
 
 type eventWorkflowDispatchSignature struct {
-	Enabled           bool          `json:"enabled"`
-	Workspace         string        `json:"workspace,omitempty"`
-	DefinitionsDir    string        `json:"definitions_dir,omitempty"`
-	MaxConcurrentRuns int           `json:"max_concurrent_runs,omitempty"`
-	DefaultTimeout    time.Duration `json:"default_timeout,omitempty"`
-	MaxCallDepth      int           `json:"max_call_depth,omitempty"`
+	Enabled                  bool          `json:"enabled"`
+	Workspace                string        `json:"workspace,omitempty"`
+	DefinitionsDir           string        `json:"definitions_dir,omitempty"`
+	MaxConcurrentRuns        int           `json:"max_concurrent_runs,omitempty"`
+	DefaultTimeout           time.Duration `json:"default_timeout,omitempty"`
+	MaxCallDepth             int           `json:"max_call_depth,omitempty"`
+	AttentionCatalogRevision string        `json:"attention_catalog_revision,omitempty"`
 }
 
 func canonicalGitHubRepositories(repositories []string) []string {

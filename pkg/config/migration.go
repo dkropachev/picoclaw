@@ -40,6 +40,7 @@ type legacyDiagnosticConfig struct {
 	ModelRouters   ModelRouterList        `json:"model_routers,omitempty"`
 	Gateway        GatewayConfig          `json:"gateway,omitempty"`
 	Events         EventsConfig           `json:"events,omitempty"`
+	Reviews        ReviewsConfig          `json:"reviews,omitempty"`
 	Workflows      WorkflowsConfig        `json:"workflows,omitempty"`
 	GitWorkspaces  GitWorkspacesConfig    `json:"git_workspaces,omitempty"`
 	Hooks          HooksConfig            `json:"hooks,omitempty"`
@@ -192,6 +193,9 @@ func compareInt(v any, expected int) bool {
 		return val == expected
 	case float64:
 		return val == float64(expected)
+	case json.Number:
+		parsed, err := val.Int64()
+		return err == nil && parsed == int64(expected)
 	case nil:
 		return expected == 0
 	default:
@@ -675,6 +679,17 @@ func migrateV4ToV5(m map[string]any) error {
 	m["model_aliases"] = retained
 	migrationRewriteModelAliasReferences(m, rewrites)
 	m["version"] = 5
+	return nil
+}
+
+// migrateV5ToV6 introduces trusted review-attention policy persistence. The
+// shape is additive, so migration only advances the version and deliberately
+// preserves any already-present policy maps, including empty policies.
+func migrateV5ToV6(m map[string]any) error {
+	if !compareInt(m["version"], 5) {
+		return fmt.Errorf("migrateV5ToV6: expected version 5, got %v", m["version"])
+	}
+	m["version"] = 6
 	return nil
 }
 

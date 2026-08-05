@@ -64,6 +64,23 @@ PicoClaw uses a schema versioning system for `config.json` to ensure smooth upgr
 - **Auto-migration**: V4 configurations are backed up and migrated
   deterministically.
 
+### Version 6
+
+- **Introduction**: Trusted pull-request review attention policies.
+- **Changes**:
+  - Added top-level `reviews.attention.global`, keyed by canonical decision
+    point.
+  - Added `reviews.attention.repositories`, keyed by exact GitHub
+    `owner/repo`, with repository-local inherit, overlay, replace, or disable
+    policy.
+  - Gate policy uses the same working-context AI, isolated AI,
+    deterministic, and zero gate types consumed by workflow compilation.
+  - Repository identities, decision points, collections, and encoded policy
+    size are bounded and validated before use or persistence.
+- **Auto-migration**: V5 configurations are backed up and migrated with a
+  version-only transformation. Any already-present policy maps, including
+  explicit empty decision or repository policies, are preserved semantically.
+
 ## How It Works
 
 ### Automatic Migration
@@ -81,12 +98,13 @@ The `version` field in `config.json` indicates the schema version:
 - `1`: Previous version (will be auto-migrated to V2 on load)
 - `2`: Previous version (will be auto-migrated to V3 on load)
 - `3`: Previous version (will be auto-migrated to V4 on load)
-- `4`: Previous version (will be auto-migrated to V5 on load)
-- `5`: Current version
+- `4`: Previous version (will be migrated incrementally to V6 on load)
+- `5`: Previous version (will be auto-migrated to V6 on load)
+- `6`: Current version
 
 ```json
 {
-  "version": 5,
+  "version": 6,
   "agents": {...},
   ...
 }
@@ -101,8 +119,8 @@ When making breaking changes to the config schema:
 Create a new struct for the new version if the structure changes significantly:
 
 ```go
-// ConfigV5 represents version 5 config structure
-type ConfigV5 struct {
+// ConfigV6 represents version 6 config structure
+type ConfigV6 struct {
     Version   int             `json:"version"`
     Agents    AgentsConfig    `json:"agents"`
     // ... other fields with new structure
@@ -112,25 +130,25 @@ type ConfigV5 struct {
 ### Step 2: Update Current Config Version
 
 ```go
-const CurrentVersion = 5  // Increment this
+const CurrentVersion = 6  // Increment this
 ```
 
 ### Step 3: Add a Loader Function
 
 ```go
-// loadConfigV5 loads a version 5 config
-func loadConfigV5(data []byte) (*Config, error) {
+// loadConfigV6 loads a version 6 config
+func loadConfigV6(data []byte) (*Config, error) {
     cfg := DefaultConfig()
 
-    // Parse to ConfigV5 struct
-    var v5 ConfigV5
-    if err := json.Unmarshal(data, &v5); err != nil {
+    // Parse to ConfigV6 struct
+    var v6 ConfigV6
+    if err := json.Unmarshal(data, &v6); err != nil {
         return nil, err
     }
 
     // Convert to current Config
-    cfg.Version = v5.Version
-    cfg.Agents = v5.Agents
+    cfg.Version = v6.Version
+    cfg.Agents = v6.Agents
     // ... map other fields
 
     return cfg, nil
@@ -140,10 +158,10 @@ func loadConfigV5(data []byte) (*Config, error) {
 ### Step 4: Add Migration Logic
 
 ```go
-func (c *configV4) Migrate() (*Config, error) {
-    // Apply V4→V5 structural changes here
+func (c *configV5) Migrate() (*Config, error) {
+    // Apply V5→V6 structural changes here
     migrated := &c.Config
-    migrated.Version = 5
+    migrated.Version = 6
     // Apply structural changes
     return migrated, nil
 }
@@ -168,6 +186,8 @@ func LoadConfig(path string) (*Config, error) {
         cfg, err = loadConfigV4(data)
     case 5:
         cfg, err = loadConfigV5(data)
+    case 6:
+        cfg, err = loadConfigV6(data)
     default:
         return nil, fmt.Errorf("unsupported config version: %d", versionInfo.Version)
     }
@@ -181,22 +201,21 @@ func LoadConfig(path string) (*Config, error) {
 Create a test in `config_migration_test.go`:
 
 ```go
-func TestMigrateV4ToV5(t *testing.T) {
-    // Create a version 5 config
-    v5Config := Config{
-        Version: 5,
-        // ... set up test data
+func TestMigrateV5ToV6(t *testing.T) {
+    // Create a version 5 configuration map
+    v5Config := map[string]any{
+        "version": 5,
+        // ... set up data that must be preserved
     }
 
     // Apply migration
-    migrated, err := v4Config.Migrate()
-    if err != nil {
+    if err := migrateV5ToV6(v5Config); err != nil {
         t.Fatalf("Migration failed: %v", err)
     }
 
     // Verify version is updated
-    if migrated.Version != 4 {
-        t.Errorf("Expected version 4, got %d", migrated.Version)
+    if v5Config["version"] != 6 {
+        t.Errorf("Expected version 6, got %v", v5Config["version"])
     }
 
     // Verify data is preserved/transformed correctly

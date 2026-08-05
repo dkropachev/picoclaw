@@ -610,7 +610,7 @@ func decodeStrictWorkflowJobsRequest(
 		return false
 	}
 	if !utf8.Valid(raw) ||
-		!validWorkflowJobsJSONUnicodeScalars(raw) ||
+		!validJSONUnicodeScalars(raw) ||
 		rejectDuplicateWorkflowJobsJSONKeys(raw) != nil ||
 		!workflowJobsRawHasExactFields(raw, allowedFields) ||
 		decodeWorkflowJobsJSON(raw, destination, true) != nil {
@@ -620,7 +620,7 @@ func decodeStrictWorkflowJobsRequest(
 	return true
 }
 
-func validWorkflowJobsJSONUnicodeScalars(raw []byte) bool {
+func validJSONUnicodeScalars(raw []byte) bool {
 	inString := false
 	for index := 0; index < len(raw); index++ {
 		switch {
@@ -640,7 +640,7 @@ func validWorkflowJobsJSONUnicodeScalars(raw []byte) bool {
 				index++
 				continue
 			}
-			codeUnit, ok := workflowJobsJSONHexCodeUnit(raw[index+2:])
+			codeUnit, ok := jsonHexCodeUnit(raw[index+2:])
 			if !ok {
 				return false
 			}
@@ -652,7 +652,7 @@ func validWorkflowJobsJSONUnicodeScalars(raw []byte) bool {
 					raw[index+2] != 'u' {
 					return false
 				}
-				low, lowOK := workflowJobsJSONHexCodeUnit(raw[index+3:])
+				low, lowOK := jsonHexCodeUnit(raw[index+3:])
 				if !lowOK || low < 0xdc00 || low > 0xdfff {
 					return false
 				}
@@ -665,7 +665,7 @@ func validWorkflowJobsJSONUnicodeScalars(raw []byte) bool {
 	return !inString
 }
 
-func workflowJobsJSONHexCodeUnit(raw []byte) (uint16, bool) {
+func jsonHexCodeUnit(raw []byte) (uint16, bool) {
 	if len(raw) < 4 {
 		return 0, false
 	}

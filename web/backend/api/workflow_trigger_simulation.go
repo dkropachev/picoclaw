@@ -819,7 +819,7 @@ func decodeWorkflowTriggerScenarioAllowed(
 	destination any,
 ) error {
 	if !utf8.Valid(raw) ||
-		!validWorkflowJobsJSONUnicodeScalars(raw) ||
+		!validJSONUnicodeScalars(raw) ||
 		rejectDuplicateWorkflowJobsJSONKeys(raw) != nil {
 		return errWorkflowTriggerSimulationRequest
 	}
@@ -1478,7 +1478,7 @@ func decodeWorkflowTriggerSimulationRequest(
 	}
 	members, membersErr := workflowJobsJSONObjectMembers(raw)
 	if !utf8.Valid(raw) ||
-		!validWorkflowJobsJSONUnicodeScalars(raw) ||
+		!validJSONUnicodeScalars(raw) ||
 		validateWorkflowTriggerJSONBounds(raw) != nil ||
 		rejectDuplicateWorkflowJobsJSONKeys(raw) != nil ||
 		membersErr != nil ||
