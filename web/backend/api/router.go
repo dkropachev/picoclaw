@@ -47,6 +47,11 @@ type Handler struct {
 	sessionDeleteAfterLookup    func()
 	saveToolStateConfig         func(string, *config.Config, string) (string, error)
 	saveConfigIfRevision        func(string, *config.Config, string) (string, error)
+	saveReviewAttention         func(
+		string,
+		config.ReviewAttentionConfig,
+		string,
+	) (string, error)
 }
 
 // NewHandler creates an instance of the API handler.
@@ -66,6 +71,7 @@ func NewHandler(configPath string) *Handler {
 		workflowTriggerReviewUsed:  make(map[[32]byte]int64),
 		saveToolStateConfig:        config.SaveConfigIfRevision,
 		saveConfigIfRevision:       config.SaveConfigIfRevision,
+		saveReviewAttention:        config.SaveReviewAttentionIfRevision,
 	}
 }
 

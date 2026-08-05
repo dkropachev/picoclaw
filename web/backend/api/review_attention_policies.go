@@ -63,7 +63,7 @@ func (h *Handler) handleGetReviewAttentionPolicies(
 	h.configMutationMu.Lock()
 	defer h.configMutationMu.Unlock()
 
-	cfg, revision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
+	cfg, revision, err := config.LoadCurrentConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		writeReviewAPIError(
 			w,
@@ -126,7 +126,7 @@ func (h *Handler) handlePutReviewAttentionPolicies(
 	h.configMutationMu.Lock()
 	defer h.configMutationMu.Unlock()
 
-	cfg, currentRevision, err := config.LoadConfigForUpdateSnapshot(h.configPath)
+	cfg, currentRevision, err := config.LoadCurrentConfigForUpdateSnapshot(h.configPath)
 	if err != nil {
 		writeReviewAPIError(
 			w,
@@ -155,9 +155,9 @@ func (h *Handler) handlePutReviewAttentionPolicies(
 		return
 	}
 
-	revision, err := h.saveConfigIfRevision(
+	revision, err := h.saveReviewAttention(
 		h.configPath,
-		cfg,
+		request.ReviewAttentionConfig,
 		currentRevision,
 	)
 	if errors.Is(err, config.ErrConfigRevisionMismatch) {
