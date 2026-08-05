@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/eventing"
@@ -64,8 +65,13 @@ type githubTeamPayload struct {
 }
 
 type githubRefPayload struct {
-	Ref string `json:"ref"`
-	SHA string `json:"sha"`
+	Ref        string                     `json:"ref"`
+	SHA        string                     `json:"sha"`
+	Repository githubRefRepositoryPayload `json:"repo"`
+}
+
+type githubRefRepositoryPayload struct {
+	FullName string `json:"full_name"`
 }
 
 type githubPullRequestPayload struct {
@@ -96,10 +102,14 @@ type githubCommentPayload struct {
 }
 
 type githubReviewPayload struct {
-	HTMLURL string            `json:"html_url"`
-	Body    string            `json:"body"`
-	User    githubUserPayload `json:"user"`
-	State   string            `json:"state"`
+	ID          json.RawMessage   `json:"id"`
+	NodeID      string            `json:"node_id"`
+	HTMLURL     string            `json:"html_url"`
+	Body        string            `json:"body"`
+	User        githubUserPayload `json:"user"`
+	State       string            `json:"state"`
+	CommitID    string            `json:"commit_id"`
+	SubmittedAt string            `json:"submitted_at"`
 }
 
 func githubAuthenticationHeaders(
@@ -260,16 +270,25 @@ func githubResourceAttributes(
 	values := make(map[string]string)
 	var mentionText []string
 	var targetReasons []string
+	var pullRequestAuthor string
+	var pullRequestAuthorCanonical bool
+	var reviewAuthor string
+	var reviewAuthorCanonical bool
+	var reviewFeedbackMetadataCanonical bool
 
 	var pullRequest githubPullRequestPayload
 	if decodeGitHubProjection(fields["pull_request"], &pullRequest) {
+		pullRequestAuthor = pullRequest.User.Login
+		pullRequestAuthorCanonical = validGitHubTargetUser(pullRequestAuthor)
 		values["pull_request_number"] = githubDatabaseID(pullRequest.Number)
 		values["pull_request_url"] = pullRequest.HTMLURL
-		values["pull_request_author"] = pullRequest.User.Login
+		values["pull_request_author"] = pullRequestAuthor
 		values["pull_request_head_ref"] = pullRequest.Head.Ref
 		values["pull_request_head_sha"] = pullRequest.Head.SHA
+		values["pull_request_head_repository"] = pullRequest.Head.Repository.FullName
 		values["pull_request_base_ref"] = pullRequest.Base.Ref
 		values["pull_request_base_sha"] = pullRequest.Base.SHA
+		values["pull_request_base_repository"] = pullRequest.Base.Repository.FullName
 		values["pull_request_draft"] = githubBool(pullRequest.Draft)
 		mentionText = append(mentionText, pullRequest.Title, pullRequest.Body)
 		if githubUsersContain(pullRequest.RequestedReviewers, targetUser) {
@@ -297,9 +316,28 @@ func githubResourceAttributes(
 
 	var review githubReviewPayload
 	if decodeGitHubProjection(fields["review"], &review) {
+		reviewAuthor = review.User.Login
+		reviewAuthorCanonical = validGitHubReviewAuthor(reviewAuthor)
+		reviewID, reviewIDCanonical := canonicalGitHubDatabaseID(review.ID)
+		reviewNodeID, reviewNodeIDCanonical := canonicalGitHubNodeID(review.NodeID)
+		_, reviewStateCanonical := canonicalGitHubReviewState(review.State)
+		reviewCommitSHA, reviewCommitCanonical := canonicalGitHubCommitSHA(review.CommitID)
+		reviewSubmittedAt, reviewTimestampCanonical := canonicalGitHubTimestamp(
+			review.SubmittedAt,
+		)
+		reviewFeedbackMetadataCanonical = reviewIDCanonical &&
+			reviewNodeIDCanonical &&
+			reviewStateCanonical &&
+			reviewCommitCanonical &&
+			reviewTimestampCanonical
+
+		values["review_id"] = reviewID
+		values["review_node_id"] = reviewNodeID
 		values["review_url"] = review.HTMLURL
-		values["review_author"] = review.User.Login
+		values["review_author"] = reviewAuthor
 		values["review_state"] = strings.ToLower(review.State)
+		values["review_commit_sha"] = reviewCommitSHA
+		values["review_submitted_at"] = reviewSubmittedAt
 		mentionText = append(mentionText, review.Body)
 	}
 
@@ -331,6 +369,21 @@ func githubResourceAttributes(
 
 	targetUser = strings.TrimSpace(targetUser)
 	if targetUser != "" {
+		pullRequestAuthorIsTarget := pullRequestAuthorCanonical &&
+			strings.EqualFold(pullRequestAuthor, targetUser)
+		reviewAuthorIsTarget := reviewAuthorCanonical &&
+			strings.EqualFold(reviewAuthor, targetUser)
+		values["pull_request_author_is_target"] = githubBoolean(
+			pullRequestAuthorIsTarget,
+		)
+		values["review_author_is_target"] = githubBoolean(reviewAuthorIsTarget)
+		if eventType == "pull_request_review.submitted" &&
+			pullRequestAuthorIsTarget &&
+			reviewAuthorCanonical &&
+			!strings.EqualFold(reviewAuthor, pullRequestAuthor) &&
+			reviewFeedbackMetadataCanonical {
+			targetReasons = append(targetReasons, "review_feedback")
+		}
 		for _, text := range mentionText {
 			if githubTextMentionsUser(text, targetUser) {
 				targetReasons = append(targetReasons, "mention")
@@ -346,6 +399,85 @@ func githubResourceAttributes(
 		}
 	}
 	return values
+}
+
+func canonicalGitHubDatabaseID(raw json.RawMessage) (string, bool) {
+	value := githubDatabaseID(raw)
+	if value == "" || value == "0" || len(value) > 1 && value[0] == '0' {
+		return "", false
+	}
+	return value, true
+}
+
+func canonicalGitHubReviewState(value string) (string, bool) {
+	switch value {
+	case "approved", "changes_requested", "commented":
+		return value, true
+	default:
+		return "", false
+	}
+}
+
+func canonicalGitHubNodeID(value string) (string, bool) {
+	value = githubStableID(value)
+	if value == "" {
+		return "", false
+	}
+	for _, char := range []byte(value) {
+		if char >= 'a' && char <= 'z' ||
+			char >= 'A' && char <= 'Z' ||
+			char >= '0' && char <= '9' ||
+			char == '_' ||
+			char == '-' ||
+			char == '+' ||
+			char == '/' ||
+			char == '=' {
+			continue
+		}
+		return "", false
+	}
+	return value, true
+}
+
+func validGitHubReviewAuthor(value string) bool {
+	if validGitHubTargetUser(value) {
+		return true
+	}
+	base, bot := strings.CutSuffix(value, "[bot]")
+	return bot && validGitHubTargetUser(base)
+}
+
+func canonicalGitHubCommitSHA(value string) (string, bool) {
+	if len(value) != 40 && len(value) != 64 {
+		return "", false
+	}
+	for _, char := range []byte(value) {
+		if char >= '0' && char <= '9' || char >= 'a' && char <= 'f' {
+			continue
+		}
+		return "", false
+	}
+	return value, true
+}
+
+func canonicalGitHubTimestamp(value string) (string, bool) {
+	if value == "" ||
+		len(value) > maxGitHubAttributeValueBytes ||
+		value != strings.TrimSpace(value) {
+		return "", false
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return "", false
+	}
+	return parsed.UTC().Format(time.RFC3339Nano), true
+}
+
+func githubBoolean(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
 }
 
 func decodeGitHubProjection(raw json.RawMessage, destination any) bool {

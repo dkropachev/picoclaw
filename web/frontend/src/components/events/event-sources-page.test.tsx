@@ -170,6 +170,11 @@ describe("EventSourcesPage", () => {
     const user = userEvent.setup()
 
     const targetUser = await screen.findByLabelText("GitHub user to notify")
+    expect(
+      screen.getByText(
+        "Used to mark review requests, assignments, and @mentions that target you. Native webhook deliveries also mark submitted feedback from other reviewers on pull requests you authored. Webhook targeting is routing metadata only.",
+      ),
+    ).toBeInTheDocument()
     await user.clear(targetUser)
     await user.type(targetUser, "scylla-reviewer")
     await user.click(

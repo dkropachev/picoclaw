@@ -942,7 +942,7 @@ function WebhookSourceEditor({
               <FieldDescription id={`${prefix}-target-user-hint`}>
                 {t(
                   "pages.event_sources.webhooks.github_target_user_hint",
-                  "Used to mark review requests, assignments, and @mentions that target you.",
+                  "Used to mark review requests, assignments, and @mentions that target you. Native webhook deliveries also mark submitted feedback from other reviewers on pull requests you authored. Webhook targeting is routing metadata only.",
                 )}
               </FieldDescription>
               <FieldError id={`${prefix}-target-user-error`}>

@@ -927,6 +927,232 @@ func TestConfiguredGitHubScopeReachesGatewayAdmission(t *testing.T) {
 	}
 }
 
+func TestConfiguredGitHubOwnPRReviewFeedbackReachesGatewayAdmission(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := eventAutomationTestConfig(
+		workspace,
+		filepath.Join(workspace, "eventing", "events.db"),
+		true,
+		false,
+	)
+	secret := gatewayGitHubWebhookSecret('r')
+	configureGatewayGitHubWebhook(cfg, secret)
+	webhookConfig := cfg.Events.Ingress.Webhooks[gatewayGitHubConnector]
+	webhookConfig.Repositories = []string{"acme/project"}
+	webhookConfig.TargetUser = "Review-User"
+	cfg.Events.Ingress.Webhooks[gatewayGitHubConnector] = webhookConfig
+
+	service, err := setupEventAutomationService(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatalf("setupEventAutomationService() error = %v", err)
+	}
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := service.Close(closeCtx); closeErr != nil {
+			t.Errorf("event automation Close() error = %v", closeErr)
+		}
+	})
+
+	controller := eventwebhook.NewController()
+	generation, err := controller.Activate(service.webhookBackend)
+	if err != nil {
+		t.Fatalf("Activate() error = %v", err)
+	}
+	t.Cleanup(func() {
+		drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if drainErr := controller.Deactivate(drainCtx, generation); drainErr != nil {
+			t.Errorf("Deactivate() error = %v", drainErr)
+		}
+	})
+
+	const reviewCommitSHA = "0123456789abcdef0123456789abcdef01234567"
+	reviewFeedbackTrigger := &workflows.EventTrigger{
+		Sources: workflows.StringList{"github"},
+		Types:   workflows.StringList{"pull_request_review.submitted"},
+		Attributes: map[string]workflows.StringList{
+			"body_authenticated":            {"true"},
+			"target_reason":                 {"*review_feedback*"},
+			"pull_request_author_is_target": {"true"},
+			"review_author_is_target":       {"false"},
+		},
+	}
+	for _, test := range []struct {
+		name                       string
+		prAuthor                   string
+		reviewAuthor               string
+		reviewBody                 string
+		wantPRAuthorIsTarget       string
+		wantReviewAuthorIsTarget   string
+		wantTargetsUser            string
+		wantTargetReason           string
+		wantReviewFeedbackWorkflow bool
+	}{
+		{
+			name:                       "external feedback on configured user's PR",
+			prAuthor:                   "review-user",
+			reviewAuthor:               "maintainer-1",
+			reviewBody:                 "@Review-User please adjust the retry boundary.",
+			wantPRAuthorIsTarget:       "true",
+			wantReviewAuthorIsTarget:   "false",
+			wantTargetsUser:            "true",
+			wantTargetReason:           "review_feedback,mention",
+			wantReviewFeedbackWorkflow: true,
+		},
+		{
+			name:                     "review of another author's PR",
+			prAuthor:                 "other-user",
+			reviewAuthor:             "maintainer-1",
+			wantPRAuthorIsTarget:     "false",
+			wantReviewAuthorIsTarget: "false",
+			wantTargetsUser:          "false",
+		},
+		{
+			name:                     "configured user's self review",
+			prAuthor:                 "Review-User",
+			reviewAuthor:             "review-user",
+			wantPRAuthorIsTarget:     "true",
+			wantReviewAuthorIsTarget: "true",
+			wantTargetsUser:          "false",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reviewBody := test.reviewBody
+			if reviewBody == "" {
+				reviewBody = "Please adjust the retry boundary."
+			}
+			deliveryID := "gateway-own-pr-review-" + strings.NewReplacer(
+				" ", "-",
+				"'", "",
+			).Replace(test.name)
+			body := fmt.Sprintf(`{
+				"action":"submitted",
+				"repository":{
+					"full_name":"acme/project",
+					"name":"project",
+					"owner":{"login":"acme"}
+				},
+				"pull_request":{
+					"number":73,
+					"html_url":"https://github.com/acme/project/pull/73",
+					"title":"Repair retry behavior",
+					"body":"No direct mention.",
+					"draft":false,
+					"user":{"login":%q},
+					"head":{
+						"ref":"repair/retries",
+						"sha":%q,
+						"repo":{"full_name":"review-user/project-fork"}
+					},
+					"base":{
+						"ref":"main",
+						"sha":"abcdef0123456789abcdef0123456789abcdef01",
+						"repo":{"full_name":"acme/project"}
+					}
+				},
+				"review":{
+					"id":501,
+					"node_id":"PRR_node_501",
+					"html_url":"https://github.com/acme/project/pull/73#pullrequestreview-501",
+					"body":%q,
+					"user":{"login":%q},
+					"state":"changes_requested",
+					"commit_id":%q,
+					"submitted_at":"2026-08-05T08:34:56-04:00"
+				}
+			}`,
+				test.prAuthor,
+				reviewCommitSHA,
+				reviewBody,
+				test.reviewAuthor,
+				reviewCommitSHA,
+			)
+			response := performGatewayWebhookHandler(
+				controller,
+				gatewayGitHubSignedRequest(
+					t,
+					eventwebhook.RoutePrefix+gatewayGitHubConnector,
+					secret,
+					deliveryID,
+					"pull_request_review",
+					body,
+				),
+			)
+			if response.Code != http.StatusAccepted {
+				t.Fatalf(
+					"GitHub review delivery status = %d, want %d: %s",
+					response.Code,
+					http.StatusAccepted,
+					response.Body.String(),
+				)
+			}
+			var accepted struct {
+				EventID  string `json:"event_id"`
+				Inserted bool   `json:"inserted"`
+				Ignored  bool   `json:"ignored"`
+			}
+			if decodeErr := json.Unmarshal(response.Body.Bytes(), &accepted); decodeErr != nil {
+				t.Fatalf("Unmarshal(accepted response) error = %v", decodeErr)
+			}
+			if accepted.EventID == "" || !accepted.Inserted || accepted.Ignored {
+				t.Fatalf("GitHub review response = %#v, want inserted event", accepted)
+			}
+
+			stored, getErr := service.store.Get(context.Background(), accepted.EventID)
+			if getErr != nil {
+				t.Fatalf("Get(review event) error = %v", getErr)
+			}
+			if stored.Envelope.Source != "github" ||
+				stored.Envelope.Connector != gatewayGitHubConnector ||
+				stored.Envelope.Type != "pull_request_review.submitted" ||
+				stored.Envelope.DedupeKey != deliveryID {
+				t.Fatalf("stored GitHub review identity = %#v", stored.Envelope)
+			}
+			for key, want := range map[string]string{
+				"body_authenticated":            "true",
+				"repository_full_name":          "acme/project",
+				"pull_request_author":           test.prAuthor,
+				"pull_request_author_is_target": test.wantPRAuthorIsTarget,
+				"pull_request_head_repository":  "review-user/project-fork",
+				"pull_request_base_repository":  "acme/project",
+				"review_id":                     "501",
+				"review_node_id":                "PRR_node_501",
+				"review_author":                 test.reviewAuthor,
+				"review_author_is_target":       test.wantReviewAuthorIsTarget,
+				"review_state":                  "changes_requested",
+				"review_commit_sha":             reviewCommitSHA,
+				"review_submitted_at":           "2026-08-05T12:34:56Z",
+				"target_user":                   "review-user",
+				"targets_user":                  test.wantTargetsUser,
+				"target_reason":                 test.wantTargetReason,
+			} {
+				if got := stored.Envelope.Attributes[key]; got != want {
+					t.Fatalf("GitHub review attribute %q = %q, want %q", key, got, want)
+				}
+			}
+			if test.wantTargetReason == "" {
+				if _, exists := stored.Envelope.Attributes["target_reason"]; exists {
+					t.Fatalf(
+						"GitHub review target_reason is present for non-feedback event: %#v",
+						stored.Envelope.Attributes,
+					)
+				}
+			}
+			if got := workflows.MatchEventTrigger(
+				reviewFeedbackTrigger,
+				stored.Envelope,
+			); got != test.wantReviewFeedbackWorkflow {
+				t.Fatalf(
+					"MatchEventTrigger(stored review) = %v, want %v",
+					got,
+					test.wantReviewFeedbackWorkflow,
+				)
+			}
+		})
+	}
+}
+
 func TestEventGitHubWebhookDeliveryRunsIsolatedTriageAndDeclaredComment(t *testing.T) {
 	workspace := t.TempDir()
 	cfg := eventAutomationTestConfig(

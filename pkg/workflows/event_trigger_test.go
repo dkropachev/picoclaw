@@ -648,6 +648,108 @@ func TestMatchEventTriggerCombinesFieldsAndAlternatives(t *testing.T) {
 	}
 }
 
+func TestMatchEventTriggerSelectsOwnPRExternalReviewFeedback(t *testing.T) {
+	workflow := parseWorkflow(t, `
+name: Own PR review feedback
+on:
+  event:
+    sources: github
+    types: pull_request_review.submitted
+    attributes:
+      body_authenticated: "true"
+      target_reason: "*review_feedback*"
+      pull_request_author_is_target: "true"
+      review_author_is_target: "false"
+jobs:
+  main:
+    runs-on: picoclaw
+    steps:
+      - uses: tool/message
+`)
+	if err := Validate(workflow); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	for _, test := range []struct {
+		name       string
+		attributes map[string]string
+		want       bool
+		mismatch   string
+	}{
+		{
+			name: "external review is the sole target reason",
+			attributes: map[string]string{
+				"body_authenticated":            "true",
+				"target_reason":                 "review_feedback",
+				"pull_request_author_is_target": "true",
+				"review_author_is_target":       "false",
+			},
+			want: true,
+		},
+		{
+			name: "external review coexists with a mention",
+			attributes: map[string]string{
+				"body_authenticated":            "true",
+				"target_reason":                 "review_feedback,mention",
+				"pull_request_author_is_target": "true",
+				"review_author_is_target":       "false",
+			},
+			want: true,
+		},
+		{
+			name: "review targets another author's PR",
+			attributes: map[string]string{
+				"body_authenticated":            "true",
+				"targets_user":                  "false",
+				"pull_request_author_is_target": "false",
+				"review_author_is_target":       "false",
+			},
+			mismatch: "on.event.attributes.pull_request_author_is_target",
+		},
+		{
+			name: "configured user reviews their own PR",
+			attributes: map[string]string{
+				"body_authenticated":            "true",
+				"targets_user":                  "false",
+				"pull_request_author_is_target": "true",
+				"review_author_is_target":       "true",
+			},
+			mismatch: "on.event.attributes.review_author_is_target",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			event := eventing.Envelope{
+				Source:     "github",
+				Type:       "pull_request_review.submitted",
+				Attributes: test.attributes,
+			}
+			if got := WorkflowMatchesEvent(workflow, event); got != test.want {
+				t.Fatalf("WorkflowMatchesEvent() = %v, want %v", got, test.want)
+			}
+
+			result, err := EvaluateEventTrigger(workflow.On.Event, event)
+			if err != nil {
+				t.Fatalf("EvaluateEventTrigger() error = %v", err)
+			}
+			if result.Matched != test.want {
+				t.Fatalf("EvaluateEventTrigger().Matched = %v, want %v", result.Matched, test.want)
+			}
+			if test.mismatch == "" {
+				return
+			}
+			for _, check := range result.Checks {
+				if check.Path == test.mismatch {
+					if !check.Present || check.Matched {
+						t.Fatalf("%s check = %#v, want present mismatch", test.mismatch, check)
+					}
+					return
+				}
+			}
+			t.Fatalf("match checks do not contain %q: %#v", test.mismatch, result.Checks)
+		})
+	}
+}
+
 func TestEvaluateEventTriggerReturnsDeterministicRuntimeChecks(t *testing.T) {
 	trigger := &EventTrigger{
 		Sources:    StringList{"git*"},

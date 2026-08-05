@@ -574,6 +574,388 @@ func TestGitHubRepositoryScopeAndReviewTargetMetadata(t *testing.T) {
 	assert.Equal(t, "requested_reviewer", input.Attributes["target_reason"])
 }
 
+func TestGitHubSubmittedReviewTargetsOwnPullRequestFeedback(t *testing.T) {
+	t.Parallel()
+	store := newMemoryInserter()
+	controller, _ := newScopedGitHubTestController(
+		t,
+		store,
+		[]string{"scylladb/gocql"},
+		"review-user",
+	)
+	payload := validGitHubReviewFeedbackPayload(
+		"submitted",
+		"Review-User",
+		"independent-reviewer",
+	)
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+	response := performRequest(
+		controller,
+		githubSignedRequest(
+			githubTestSecret,
+			"pull_request_review",
+			"own-pr-review-feedback",
+			string(body),
+		),
+	)
+	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
+
+	inputs := store.recordedInputs()
+	require.Len(t, inputs, 1)
+	input := inputs[0]
+	assert.Equal(t, "pull_request_review.submitted", input.Type)
+	assert.Equal(t, "contributor/gocql", input.Attributes["pull_request_head_repository"])
+	assert.Equal(t, "scylladb/gocql", input.Attributes["pull_request_base_repository"])
+	assert.Equal(t, "701", input.Attributes["review_id"])
+	assert.Equal(t, "PRR_kwDOReview701", input.Attributes["review_node_id"])
+	assert.Equal(t, strings.Repeat("a", 40), input.Attributes["review_commit_sha"])
+	assert.Equal(t, "2026-08-05T14:30:00Z", input.Attributes["review_submitted_at"])
+	assert.Equal(t, "changes_requested", input.Attributes["review_state"])
+	assert.Equal(t, "true", input.Attributes["pull_request_author_is_target"])
+	assert.Equal(t, "false", input.Attributes["review_author_is_target"])
+	assert.Equal(t, "true", input.Attributes["targets_user"])
+	assert.Equal(t, "review_feedback", input.Attributes["target_reason"])
+}
+
+func TestGitHubSubmittedReviewFeedbackCoexistsWithMention(t *testing.T) {
+	t.Parallel()
+	store := newMemoryInserter()
+	controller, _ := newScopedGitHubTestController(
+		t,
+		store,
+		[]string{"scylladb/gocql"},
+		"review-user",
+	)
+	payload := validGitHubReviewFeedbackPayload(
+		"submitted",
+		"review-user",
+		"independent-reviewer",
+	)
+	review := payload["review"].(map[string]any)
+	review["state"] = "approved"
+	review["body"] = "@Review-User please check this. @review-user"
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+	response := performRequest(
+		controller,
+		githubSignedRequest(
+			githubTestSecret,
+			"pull_request_review",
+			"own-pr-feedback-mention",
+			string(body),
+		),
+	)
+	require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
+
+	inputs := store.recordedInputs()
+	require.Len(t, inputs, 1)
+	assert.Equal(t, "true", inputs[0].Attributes["targets_user"])
+	assert.Equal(
+		t,
+		"review_feedback,mention",
+		inputs[0].Attributes["target_reason"],
+	)
+}
+
+func TestGitHubReviewFeedbackRequiresCanonicalSubmittedReview(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		event          string
+		action         string
+		pullAuthor     string
+		reviewAuthor   string
+		mutate         func(map[string]any)
+		withoutTarget  bool
+		wantReason     bool
+		wantPullFlag   string
+		wantReviewFlag string
+	}{
+		{
+			name:         "canonical 64 character commit",
+			action:       "submitted",
+			pullAuthor:   "review-user",
+			reviewAuthor: "reviewer",
+			mutate: func(review map[string]any) {
+				review["state"] = "commented"
+				review["commit_id"] = strings.Repeat("b", 64)
+			},
+			wantReason:     true,
+			wantPullFlag:   "true",
+			wantReviewFlag: "false",
+		},
+		{
+			name:           "canonical GitHub App bot reviewer",
+			action:         "submitted",
+			pullAuthor:     "review-user",
+			reviewAuthor:   "dependabot-reviewer[bot]",
+			wantReason:     true,
+			wantPullFlag:   "true",
+			wantReviewFlag: "false",
+		},
+		{
+			name:           "different pull request author",
+			action:         "submitted",
+			pullAuthor:     "somebody-else",
+			reviewAuthor:   "reviewer",
+			wantPullFlag:   "false",
+			wantReviewFlag: "false",
+		},
+		{
+			name:           "self review",
+			action:         "submitted",
+			pullAuthor:     "review-user",
+			reviewAuthor:   "Review-User",
+			wantPullFlag:   "true",
+			wantReviewFlag: "true",
+		},
+		{
+			name:           "missing review author",
+			action:         "submitted",
+			pullAuthor:     "review-user",
+			reviewAuthor:   "",
+			wantPullFlag:   "true",
+			wantReviewFlag: "false",
+		},
+		{
+			name:           "malformed review author",
+			action:         "submitted",
+			pullAuthor:     "review-user",
+			reviewAuthor:   " reviewer ",
+			wantPullFlag:   "true",
+			wantReviewFlag: "false",
+		},
+		{
+			name:           "malformed GitHub App bot reviewer",
+			action:         "submitted",
+			pullAuthor:     "review-user",
+			reviewAuthor:   "dependabot[Bot]",
+			wantPullFlag:   "true",
+			wantReviewFlag: "false",
+		},
+		{
+			name:           "malformed pull request author",
+			action:         "submitted",
+			pullAuthor:     " review-user ",
+			reviewAuthor:   "reviewer",
+			wantPullFlag:   "false",
+			wantReviewFlag: "false",
+		},
+		{
+			name:         "missing review id",
+			action:       "submitted",
+			pullAuthor:   "review-user",
+			reviewAuthor: "reviewer",
+			mutate: func(review map[string]any) {
+				delete(review, "id")
+			},
+			wantPullFlag:   "true",
+			wantReviewFlag: "false",
+		},
+		{
+			name:         "noncanonical review id",
+			action:       "submitted",
+			pullAuthor:   "review-user",
+			reviewAuthor: "reviewer",
+			mutate: func(review map[string]any) {
+				review["id"] = "00701"
+			},
+			wantPullFlag:   "true",
+			wantReviewFlag: "false",
+		},
+		{
+			name:         "missing review node id",
+			action:       "submitted",
+			pullAuthor:   "review-user",
+			reviewAuthor: "reviewer",
+			mutate: func(review map[string]any) {
+				delete(review, "node_id")
+			},
+			wantPullFlag:   "true",
+			wantReviewFlag: "false",
+		},
+		{
+			name:         "malformed review node id",
+			action:       "submitted",
+			pullAuthor:   "review-user",
+			reviewAuthor: "reviewer",
+			mutate: func(review map[string]any) {
+				review["node_id"] = " PRR_kwDOReview701 "
+			},
+			wantPullFlag:   "true",
+			wantReviewFlag: "false",
+		},
+		{
+			name:         "review node id with unsupported punctuation",
+			action:       "submitted",
+			pullAuthor:   "review-user",
+			reviewAuthor: "reviewer",
+			mutate: func(review map[string]any) {
+				review["node_id"] = "PRR:Review701"
+			},
+			wantPullFlag:   "true",
+			wantReviewFlag: "false",
+		},
+		{
+			name:         "unsupported state",
+			action:       "submitted",
+			pullAuthor:   "review-user",
+			reviewAuthor: "reviewer",
+			mutate: func(review map[string]any) {
+				review["state"] = "dismissed"
+			},
+			wantPullFlag:   "true",
+			wantReviewFlag: "false",
+		},
+		{
+			name:         "noncanonical commit",
+			action:       "submitted",
+			pullAuthor:   "review-user",
+			reviewAuthor: "reviewer",
+			mutate: func(review map[string]any) {
+				review["commit_id"] = strings.Repeat("A", 40)
+			},
+			wantPullFlag:   "true",
+			wantReviewFlag: "false",
+		},
+		{
+			name:         "malformed timestamp",
+			action:       "submitted",
+			pullAuthor:   "review-user",
+			reviewAuthor: "reviewer",
+			mutate: func(review map[string]any) {
+				review["submitted_at"] = "not-a-timestamp"
+			},
+			wantPullFlag:   "true",
+			wantReviewFlag: "false",
+		},
+		{
+			name:           "non-submitted action",
+			action:         "edited",
+			pullAuthor:     "review-user",
+			reviewAuthor:   "reviewer",
+			wantPullFlag:   "true",
+			wantReviewFlag: "false",
+		},
+		{
+			name:           "different event hint",
+			event:          "pull_request",
+			action:         "submitted",
+			pullAuthor:     "review-user",
+			reviewAuthor:   "reviewer",
+			wantPullFlag:   "true",
+			wantReviewFlag: "false",
+		},
+		{
+			name:           "target is not configured",
+			action:         "submitted",
+			pullAuthor:     "review-user",
+			reviewAuthor:   "reviewer",
+			withoutTarget:  true,
+			wantPullFlag:   "",
+			wantReviewFlag: "",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			store := newMemoryInserter()
+			targetUser := "review-user"
+			if test.withoutTarget {
+				targetUser = ""
+			}
+			controller, _ := newScopedGitHubTestController(
+				t,
+				store,
+				[]string{"scylladb/gocql"},
+				targetUser,
+			)
+			payload := validGitHubReviewFeedbackPayload(
+				test.action,
+				test.pullAuthor,
+				test.reviewAuthor,
+			)
+			if test.mutate != nil {
+				test.mutate(payload["review"].(map[string]any))
+			}
+			body, err := json.Marshal(payload)
+			require.NoError(t, err)
+			event := test.event
+			if event == "" {
+				event = "pull_request_review"
+			}
+			response := performRequest(
+				controller,
+				githubSignedRequest(
+					githubTestSecret,
+					event,
+					"review-feedback-"+strings.ReplaceAll(test.name, " ", "-"),
+					string(body),
+				),
+			)
+			require.Equal(
+				t,
+				http.StatusAccepted,
+				response.Code,
+				response.Body.String(),
+			)
+			inputs := store.recordedInputs()
+			require.Len(t, inputs, 1)
+			attributes := inputs[0].Attributes
+			assert.Equal(t, test.wantPullFlag, attributes["pull_request_author_is_target"])
+			assert.Equal(t, test.wantReviewFlag, attributes["review_author_is_target"])
+			if test.wantReason {
+				assert.Equal(t, "true", attributes["targets_user"])
+				assert.Equal(t, "review_feedback", attributes["target_reason"])
+			} else if test.withoutTarget {
+				assert.Empty(t, attributes["targets_user"])
+				assert.Empty(t, attributes["target_reason"])
+			} else {
+				assert.Equal(t, "false", attributes["targets_user"])
+				assert.Empty(t, attributes["target_reason"])
+			}
+		})
+	}
+}
+
+func validGitHubReviewFeedbackPayload(
+	action string,
+	pullAuthor string,
+	reviewAuthor string,
+) map[string]any {
+	return map[string]any{
+		"action": action,
+		"repository": map[string]any{
+			"full_name": "scylladb/gocql",
+		},
+		"pull_request": map[string]any{
+			"number": 42,
+			"user":   map[string]any{"login": pullAuthor},
+			"head": map[string]any{
+				"ref":  "feedback",
+				"sha":  strings.Repeat("a", 40),
+				"repo": map[string]any{"full_name": "contributor/gocql"},
+			},
+			"base": map[string]any{
+				"ref":  "main",
+				"sha":  strings.Repeat("b", 40),
+				"repo": map[string]any{"full_name": "scylladb/gocql"},
+			},
+		},
+		"review": map[string]any{
+			"id":           701,
+			"node_id":      "PRR_kwDOReview701",
+			"html_url":     "https://github.com/scylladb/gocql/pull/42#pullrequestreview-701",
+			"body":         "Please adjust the retry boundary.",
+			"user":         map[string]any{"login": reviewAuthor},
+			"state":        "changes_requested",
+			"commit_id":    strings.Repeat("a", 40),
+			"submitted_at": "2026-08-05T10:30:00-04:00",
+		},
+	}
+}
+
 func TestGitHubRepositoryScopeAcknowledgesUnwatchedDeliveryWithoutPersisting(t *testing.T) {
 	t.Parallel()
 	store := newMemoryInserter()
@@ -779,6 +1161,24 @@ func TestGitHubOptionalProjectionIsBounded(t *testing.T) {
 			"node_id":   strings.Repeat("repository-stable-id", 100),
 			"full_name": strings.Repeat("界", maxGitHubEntityFieldBytes),
 		},
+		"pull_request": map[string]any{
+			"head": map[string]any{
+				"repo": map[string]any{
+					"full_name": strings.Repeat("界", maxGitHubAttributeValueBytes),
+				},
+			},
+			"base": map[string]any{
+				"repo": map[string]any{
+					"full_name": strings.Repeat("base", maxGitHubAttributeValueBytes),
+				},
+			},
+		},
+		"review": map[string]any{
+			"id":           json.Number(strings.Repeat("9", maxGitHubEntityFieldBytes+1)),
+			"node_id":      strings.Repeat("review-node", maxGitHubEntityFieldBytes),
+			"commit_id":    strings.Repeat("c", maxGitHubAttributeValueBytes+1),
+			"submitted_at": strings.Repeat("2", maxGitHubAttributeValueBytes+1),
+		},
 	})
 	require.NoError(t, err)
 	response := performRequest(
@@ -803,6 +1203,24 @@ func TestGitHubOptionalProjectionIsBounded(t *testing.T) {
 	assert.LessOrEqual(t, len(inputs[0].Actor.Attributes["url"]), maxGitHubAttributeValueBytes)
 	assert.LessOrEqual(t, len(inputs[0].Subject.Name), maxGitHubEntityFieldBytes)
 	assert.True(t, utf8.ValidString(inputs[0].Subject.Name))
+	assert.Empty(t, inputs[0].Attributes["review_id"])
+	assert.Empty(t, inputs[0].Attributes["review_node_id"])
+	assert.Empty(t, inputs[0].Attributes["review_submitted_at"])
+	assert.Empty(t, inputs[0].Attributes["review_commit_sha"])
+	assert.LessOrEqual(
+		t,
+		len(inputs[0].Attributes["pull_request_head_repository"]),
+		maxGitHubAttributeValueBytes,
+	)
+	assert.True(
+		t,
+		utf8.ValidString(inputs[0].Attributes["pull_request_head_repository"]),
+	)
+	assert.Len(
+		t,
+		inputs[0].Attributes["pull_request_base_repository"],
+		maxGitHubAttributeValueBytes,
+	)
 }
 
 func TestGitHubRejectsMalformedSemanticPayload(t *testing.T) {
