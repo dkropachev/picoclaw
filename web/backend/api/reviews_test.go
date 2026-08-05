@@ -6,9 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	ppid "github.com/sipeed/picoclaw/pkg/pid"
 )
 
 const (
@@ -102,6 +106,23 @@ func TestReviewRoutesProxyExactContractWithPrivateBearer(t *testing.T) {
 			path:         "/api/reviews/" + testReviewCaseID,
 			upstreamPath: "/runtime/eventing/reviews/" + testReviewCaseID,
 			timeout:      reviewGatewayRequestTimeout,
+		},
+		{
+			name:         "get attention",
+			method:       http.MethodGet,
+			path:         "/api/reviews/" + testReviewCaseID + "/attention",
+			upstreamPath: "/runtime/eventing/reviews/" + testReviewCaseID + "/attention",
+			timeout:      reviewGatewayRequestTimeout,
+		},
+		{
+			name:   "respond to attention",
+			method: http.MethodPost,
+			path:   "/api/reviews/" + testReviewCaseID + "/attention/respond",
+			body: `{"expected_case_version":12,"response_token":"sha256:` +
+				strings.Repeat("a", 64) + `","response":"retain v1"}`,
+			upstreamPath: "/runtime/eventing/reviews/" + testReviewCaseID +
+				"/attention/respond",
+			timeout: reviewGatewayAIRequestTimeout,
 		},
 		{
 			name:   "edit finding",
@@ -292,6 +313,7 @@ func TestReviewRoutesRejectNoncanonicalPathsQueriesAndMethods(t *testing.T) {
 		"/api/reviews/prc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		"/api/reviews/%70rc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"/api/reviews/" + testReviewCaseID + "?detail=true",
+		"/api/reviews/" + testReviewCaseID + "/attention?run_id=private",
 		"/api/reviews?unknown=value",
 		"/api/reviews?status=",
 		"/api/reviews?status=OPEN",
@@ -357,6 +379,16 @@ func TestReviewRoutesRejectNoncanonicalPathsQueriesAndMethods(t *testing.T) {
 		{http.MethodPost, "/api/reviews/" + testReviewCaseID, http.MethodGet},
 		{
 			http.MethodPost,
+			"/api/reviews/" + testReviewCaseID + "/attention",
+			http.MethodGet,
+		},
+		{
+			http.MethodGet,
+			"/api/reviews/" + testReviewCaseID + "/attention/respond",
+			http.MethodPost,
+		},
+		{
+			http.MethodPost,
 			"/api/reviews/" + testReviewCaseID +
 				"/findings/" + testReviewFindingID,
 			http.MethodPatch,
@@ -398,6 +430,203 @@ func TestReviewRoutesRejectNoncanonicalPathsQueriesAndMethods(t *testing.T) {
 	}
 	if upstreamCalls != 0 {
 		t.Fatalf("invalid requests made %d upstream calls", upstreamCalls)
+	}
+}
+
+func TestReviewProxyRejectsNonlocalOrIncompleteGatewayPIDData(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	tests := []struct {
+		name   string
+		mutate func(*ppid.PidFileData)
+	}{
+		{
+			name: "hostname",
+			mutate: func(pidData *ppid.PidFileData) {
+				pidData.Host = "example.com"
+			},
+		},
+		{
+			name: "remote numeric address",
+			mutate: func(pidData *ppid.PidFileData) {
+				pidData.Host = "8.8.8.8"
+			},
+		},
+		{
+			name: "IPv4 wildcard",
+			mutate: func(pidData *ppid.PidFileData) {
+				pidData.Host = "0.0.0.0"
+			},
+		},
+		{
+			name: "IPv6 wildcard",
+			mutate: func(pidData *ppid.PidFileData) {
+				pidData.Host = "::"
+			},
+		},
+		{
+			name: "missing host",
+			mutate: func(pidData *ppid.PidFileData) {
+				pidData.Host = ""
+			},
+		},
+		{
+			name: "missing port",
+			mutate: func(pidData *ppid.PidFileData) {
+				pidData.Port = 0
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			pidData := testEventPIDData()
+			test.mutate(pidData)
+			upstreamCalls := 0
+			installEventProxyStubs(
+				t,
+				func(*http.Request, time.Duration) (*http.Response, error) {
+					upstreamCalls++
+					return eventUpstreamResponse(http.StatusOK, `{"ok":true}`), nil
+				},
+			)
+			reviewGatewayPIDData = func() *ppid.PidFileData {
+				return cloneEventGatewayPIDData(pidData)
+			}
+
+			mux := http.NewServeMux()
+			NewHandler(configPath).RegisterRoutes(mux)
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(
+				recorder,
+				httptest.NewRequest(
+					http.MethodGet,
+					"/api/reviews/"+testReviewCaseID,
+					nil,
+				),
+			)
+
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf(
+					"status = %d, want 503, body=%s",
+					recorder.Code,
+					recorder.Body.String(),
+				)
+			}
+			if upstreamCalls != 0 {
+				t.Fatalf("upstream calls = %d, want 0", upstreamCalls)
+			}
+			if recorder.Body.String() != "{\"error\":\"review gateway unavailable\"}\n" {
+				t.Fatalf("body = %q", recorder.Body.String())
+			}
+			if strings.Contains(recorder.Body.String(), pidData.Token) {
+				t.Fatal("gateway bearer leaked in error response")
+			}
+		})
+	}
+}
+
+func TestReviewProxyPeeksGatewayPIDWithoutLifecycleSideEffects(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	if err := os.MkdirAll(globalConfigDir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pidPath := filepath.Join(globalConfigDir(), ".picoclaw.pid")
+
+	originalReviewPIDData := reviewGatewayPIDData
+	originalEventPIDData := eventGatewayPIDData
+	originalGatewayDo := eventGatewayDo
+	originalProcessMatcher := gatewayProcessMatcher
+	originalHealthGet := gatewayHealthGet
+	t.Cleanup(func() {
+		reviewGatewayPIDData = originalReviewPIDData
+		eventGatewayPIDData = originalEventPIDData
+		eventGatewayDo = originalGatewayDo
+		gatewayProcessMatcher = originalProcessMatcher
+		gatewayHealthGet = originalHealthGet
+	})
+	reviewGatewayPIDData = func() *ppid.PidFileData {
+		return ppid.PeekPidFile(globalConfigDir())
+	}
+	// Any use of the event lifecycle reader would panic and fail the test.
+	eventGatewayPIDData = nil
+	processChecks := 0
+	healthChecks := 0
+	upstreamCalls := 0
+	gatewayProcessMatcher = func(int) (bool, bool) {
+		processChecks++
+		return false, true
+	}
+	gatewayHealthGet = func(string, time.Duration) (*http.Response, error) {
+		healthChecks++
+		return nil, errors.New("unexpected health probe")
+	}
+	eventGatewayDo = func(*http.Request, time.Duration) (*http.Response, error) {
+		upstreamCalls++
+		return nil, errors.New("connection refused")
+	}
+
+	tests := []struct {
+		name              string
+		contents          string
+		wantUpstreamCalls int
+	}{
+		{
+			name:              "invalid metadata",
+			contents:          `{"pid":`,
+			wantUpstreamCalls: 0,
+		},
+		{
+			name: "dead process metadata",
+			contents: `{"pid":2147483647,"token":"gateway-pid-token",` +
+				`"version":"test","port":18790,"host":"127.0.0.1"}`,
+			wantUpstreamCalls: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := os.WriteFile(pidPath, []byte(test.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(pidPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			callsBefore := upstreamCalls
+			mux := http.NewServeMux()
+			NewHandler(configPath).RegisterRoutes(mux)
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(
+				recorder,
+				httptest.NewRequest(
+					http.MethodGet,
+					"/api/reviews/"+testReviewCaseID+"/attention",
+					nil,
+				),
+			)
+			if recorder.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+			}
+			if got := upstreamCalls - callsBefore; got != test.wantUpstreamCalls {
+				t.Fatalf("upstream calls = %d, want %d", got, test.wantUpstreamCalls)
+			}
+			after, err := os.ReadFile(pidPath)
+			if err != nil {
+				t.Fatalf("PID metadata was removed: %v", err)
+			}
+			if string(after) != string(before) {
+				t.Fatalf("PID metadata changed: before=%q after=%q", before, after)
+			}
+		})
+	}
+	if processChecks != 0 || healthChecks != 0 {
+		t.Fatalf(
+			"review PID peek performed lifecycle checks: process=%d health=%d",
+			processChecks,
+			healthChecks,
+		)
 	}
 }
 

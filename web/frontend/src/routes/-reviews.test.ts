@@ -8,21 +8,18 @@ import {
 const caseID = `prc_${"a".repeat(32)}`
 
 describe("reviews route search", () => {
-  it("keeps only the safe human navigation state", () => {
+  it("canonicalizes a chat handoff to only its public case and focus", () => {
     expect(
       normalizeReviewsSearch({
         case: caseID,
+        focus: "chat",
         status: "submission_unknown",
         repository: " octo/repo ",
         cursor: "server-owned",
         instruction: "never in the URL",
         error: "never in the URL",
       }),
-    ).toEqual({
-      case: caseID,
-      status: "submission_unknown",
-      repository: "octo/repo",
-    })
+    ).toEqual({ case: caseID, focus: "chat" })
   })
 
   it("uses one canonical policy view without retaining inbox or private state", () => {
@@ -30,6 +27,7 @@ describe("reviews route search", () => {
       normalizeReviewsSearch({
         view: "policies",
         case: caseID,
+        focus: "chat",
         repository: "octo/repo",
         decision: "review.submitted",
         questions: "private",
@@ -55,10 +53,35 @@ describe("reviews route search", () => {
     expect(
       normalizeReviewsSearch({
         case: `prc_${"A".repeat(32)}`,
+        focus: ["chat"],
         status: "pending",
         repository: ["octo/repo"],
       }),
     ).toEqual({})
+    expect(
+      normalizeReviewsSearch({
+        case: [caseID, caseID],
+        focus: ["chat", "chat"],
+        status: ["submitted", "submitted"],
+        repository: ["octo/repo", "octo/repo"],
+      }),
+    ).toEqual({})
+  })
+
+  it("keeps only the fixed chat focus paired with one valid case", () => {
+    expect(normalizeReviewsSearch({ case: caseID, focus: "chat" })).toEqual({
+      case: caseID,
+      focus: "chat",
+    })
+    for (const raw of [
+      { focus: "chat" },
+      { case: caseID, focus: "attention" },
+      { case: caseID, focus: ["chat"] },
+    ]) {
+      expect(normalizeReviewsSearch(raw)).toEqual(
+        raw.case === caseID ? { case: caseID } : {},
+      )
+    }
   })
 
   it("bounds the repository filter by UTF-8 bytes", () => {
@@ -78,9 +101,15 @@ describe("reviews route search", () => {
     ).toBe(false)
     expect(
       reviewsSearchIsCanonical(
-        { case: caseID, status: "open" },
-        { case: caseID, status: "open" },
+        { case: caseID, focus: "chat" },
+        { case: caseID, focus: "chat" },
       ),
     ).toBe(true)
+    expect(
+      reviewsSearchIsCanonical(
+        { case: caseID, focus: "chat", status: "open" },
+        { case: caseID, focus: "chat" },
+      ),
+    ).toBe(false)
   })
 })

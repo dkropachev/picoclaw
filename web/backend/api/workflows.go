@@ -16,6 +16,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/reviews"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
@@ -480,21 +481,22 @@ func (h *Handler) handleCancelWorkflowRun(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer closeWorkflowRuntime(executor)
+	privacy, allowed := workflowRunMutationSnapshot(
+		r.Context(),
+		store,
+		r.PathValue("run_id"),
+	)
+	if !allowed {
+		writeWorkflowRunNotFound(w)
+		return
+	}
 	run, err := executor.CancelRun(r.Context(), r.PathValue("run_id"), reason)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 	h.recordCanceledWorkflowDevelopmentRun(r.Context(), run)
-	writeWorkflowJSON(
-		w,
-		workflows.ProjectWorkflowRunForBrowserWithStore(
-			r.Context(),
-			store,
-			run,
-			workflows.IsEventBackedDraftRunFamily(r.Context(), store, run),
-		),
-	)
+	writeWorkflowJSON(w, privacy.projectRunForBrowser(r.Context(), store, run))
 }
 
 func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request) {
@@ -525,7 +527,19 @@ func (h *Handler) handleRetryWorkflowRun(w http.ResponseWriter, r *http.Request)
 	}
 	previousRun, err := store.GetRun(r.Context(), r.PathValue("run_id"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeWorkflowRunNotFound(w)
+		return
+	}
+	if reviews.IsAttentionWorkflowRun(previousRun) {
+		writeWorkflowRunNotFound(w)
+		return
+	}
+	if _, allowed := workflowRunMutationSnapshot(
+		r.Context(),
+		store,
+		previousRun.ID,
+	); !allowed {
+		writeWorkflowRunNotFound(w)
 		return
 	}
 	if workflows.IsEventBackedDraftRunFamily(r.Context(), store, previousRun) {
@@ -702,10 +716,11 @@ func (h *Handler) handleListWorkflowRuns(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	privacy := newWorkflowRunPrivacySnapshot(runs)
 	writeWorkflowJSON(
 		w,
 		map[string]any{
-			"runs": workflows.ProjectEventBackedDraftRunsForBrowserWithStore(
+			"runs": privacy.projectRunsForBrowser(
 				r.Context(),
 				store,
 				runs,
@@ -721,19 +736,21 @@ func (h *Handler) handleGetWorkflowRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	run, err := store.GetRun(r.Context(), r.PathValue("run_id"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	if err != nil || reviews.IsAttentionWorkflowRun(run) {
+		writeWorkflowRunNotFound(w)
 		return
 	}
-	writeWorkflowJSON(
-		w,
-		workflows.ProjectWorkflowRunForBrowserWithStore(
-			r.Context(),
-			store,
-			run,
-			workflows.IsEventBackedDraftRunFamily(r.Context(), store, run),
-		),
-	)
+	privacy, err := loadWorkflowRunPrivacySnapshot(r.Context(), store)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	projected := privacy.projectRunForBrowser(r.Context(), store, run)
+	if projected == nil {
+		writeWorkflowRunNotFound(w)
+		return
+	}
+	writeWorkflowJSON(w, projected)
 }
 
 func (h *Handler) handleGetWorkflowRunEvents(w http.ResponseWriter, r *http.Request) {
@@ -744,8 +761,8 @@ func (h *Handler) handleGetWorkflowRunEvents(w http.ResponseWriter, r *http.Requ
 	}
 	runID := r.PathValue("run_id")
 	run, err := store.GetRun(r.Context(), runID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	if err != nil || reviews.IsAttentionWorkflowRun(run) {
+		writeWorkflowRunNotFound(w)
 		return
 	}
 	events, err := store.Events(r.Context(), runID)
@@ -774,11 +791,10 @@ func (h *Handler) handleStreamWorkflowRunEvents(w http.ResponseWriter, r *http.R
 	}
 	runID := r.PathValue("run_id")
 	run, err := store.GetRun(r.Context(), runID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+	if err != nil || reviews.IsAttentionWorkflowRun(run) {
+		writeWorkflowRunNotFound(w)
 		return
 	}
-	maskDiagnostics := workflows.IsEventBackedDraftRunFamily(r.Context(), store, run)
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming is not supported", http.StatusInternalServerError)
@@ -792,6 +808,16 @@ func (h *Handler) handleStreamWorkflowRunEvents(w http.ResponseWriter, r *http.R
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
+		current, currentErr := store.GetRun(r.Context(), runID)
+		if currentErr != nil || reviews.IsAttentionWorkflowRun(current) {
+			return
+		}
+		run = current
+		maskDiagnostics := workflows.IsEventBackedDraftRunFamily(
+			r.Context(),
+			store,
+			run,
+		)
 		events, err := store.Events(r.Context(), runID)
 		if err != nil {
 			return
@@ -826,12 +852,86 @@ func (h *Handler) handleGetWorkflowRunGraph(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if !workflowRunVisible(r.Context(), store, r.PathValue("run_id")) {
+		writeWorkflowRunNotFound(w)
+		return
+	}
 	graph, err := workflows.BuildRunGraph(r.Context(), store, r.PathValue("run_id"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	privacy, err := loadWorkflowRunPrivacySnapshot(r.Context(), store)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	graph = projectWorkflowRunGraphWithoutAttention(graph, privacy)
 	writeWorkflowJSON(w, graph)
+}
+
+func projectWorkflowRunGraphWithoutAttention(
+	graph *workflows.RunGraph,
+	privacy *workflowRunPrivacySnapshot,
+) *workflows.RunGraph {
+	if graph == nil {
+		return nil
+	}
+	hidden := make(map[string]struct{})
+	if privacy != nil {
+		for runID := range privacy.hiddenIDs {
+			hidden[runID] = struct{}{}
+		}
+	}
+	for _, node := range graph.Nodes {
+		if reviews.IsAttentionWorkflowRun(&workflows.Run{WorkflowRef: node.WorkflowRef}) {
+			hidden[strings.TrimSpace(node.ID)] = struct{}{}
+		}
+	}
+	nodes := make([]workflows.RunGraphNode, 0, len(graph.Nodes))
+	for _, node := range graph.Nodes {
+		if _, omit := hidden[strings.TrimSpace(node.ID)]; omit {
+			continue
+		}
+		if _, omit := hidden[strings.TrimSpace(node.ParentRunID)]; omit {
+			node.ParentRunID = ""
+			node.CallerJobID = ""
+		}
+		if _, omit := hidden[strings.TrimSpace(node.RetryOfRunID)]; omit {
+			node.RetryOfRunID = ""
+		}
+		nodes = append(nodes, node)
+	}
+	edges := make([]workflows.RunGraphEdge, 0, len(graph.Edges))
+	for _, edge := range graph.Edges {
+		if _, omit := hidden[strings.TrimSpace(edge.From)]; omit {
+			continue
+		}
+		if _, omit := hidden[strings.TrimSpace(edge.To)]; omit {
+			continue
+		}
+		edges = append(edges, edge)
+	}
+	projected := *graph
+	projected.Nodes = nodes
+	projected.Edges = edges
+	return &projected
+}
+
+func workflowRunVisible(
+	ctx context.Context,
+	store workflows.RunStore,
+	runID string,
+) bool {
+	if store == nil {
+		return false
+	}
+	run, err := store.GetRun(ctx, runID)
+	return err == nil && !reviews.IsAttentionWorkflowRun(run)
+}
+
+func writeWorkflowRunNotFound(w http.ResponseWriter) {
+	http.Error(w, "workflow run not found", http.StatusNotFound)
 }
 
 func (h *Handler) handleGetWorkflowDevelopment(w http.ResponseWriter, r *http.Request) {
@@ -1383,7 +1483,11 @@ func pruneWorkflowRunStore(ctx context.Context, cfg *config.Config, store workfl
 	if days <= 0 {
 		return nil
 	}
-	_, err := store.PruneTerminalRuns(ctx, time.Now().UTC().AddDate(0, 0, -days))
+	_, err := reviews.PruneTerminalWorkflowRunsExceptAttention(
+		ctx,
+		store,
+		time.Now().UTC().AddDate(0, 0, -days),
+	)
 	return err
 }
 

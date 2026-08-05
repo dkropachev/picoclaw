@@ -11,6 +11,8 @@ import { describe, expect, it, vi } from "vitest"
 import type { ReviewsRouteSearch } from "@/components/reviews/reviews-page"
 import { routeTree } from "@/routeTree.gen"
 
+const caseID = `prc_${"a".repeat(32)}`
+
 vi.mock("@/api/launcher-auth", () => ({
   getLauncherAuthStatus: vi.fn().mockResolvedValue({
     authenticated: true,
@@ -96,5 +98,34 @@ describe("reviews route navigation", () => {
     })
     expect(screen.getByRole("button", { name: "Policy editor" })).toBeVisible()
     expect(screen.queryByTestId("reviews-search")).not.toBeInTheDocument()
+  })
+
+  it("keeps the fixed case-owned chat handoff and scrubs private attention state", async () => {
+    const router = createRouter({
+      routeTree,
+      history: createMemoryHistory({
+        initialEntries: [
+          `/reviews?case=${caseID}&focus=chat&status=submitted&repository=octo%2Frepo&cursor=opaque&run=private&task=private&policy_revision=opaque&questions=secret#run=private-fragment`,
+        ],
+      }),
+      context: {
+        queryClient: new QueryClient({
+          defaultOptions: { queries: { retry: false } },
+        }),
+      },
+    })
+
+    render(<RouterProvider router={router} />)
+
+    await waitFor(() => {
+      expect(router.state.location.search).toEqual({
+        case: caseID,
+        focus: "chat",
+      })
+      expect(router.state.location.hash).toBe("")
+    })
+    expect(screen.getByTestId("reviews-search")).toHaveTextContent(
+      JSON.stringify({ case: caseID, focus: "chat" }),
+    )
   })
 })

@@ -40,6 +40,7 @@ type eventAutomationService struct {
 	channelBackend  *eventchannel.Backend
 	reviewService   *reviews.Service
 	reviewAttention *reviews.AttentionLauncher
+	reviewBridge    *reviews.AttentionBridge
 	githubPoller    *eventgithubpoll.Poller
 	cancel          context.CancelFunc
 	done            chan struct{}
@@ -223,11 +224,11 @@ func newEventAutomationServiceWithReviews(
 	if err != nil {
 		return nil, err
 	}
-	var runStore workflows.RunStore
+	var runStore workflows.RunStore = workflows.NewFileRunStore(workspace)
 	if cfg.Workflows.Enabled {
-		runStore = executor.Store
-		if runStore == nil {
-			runStore = workflows.NewFileRunStore(workspace)
+		if executor.Store != nil {
+			runStore = executor.Store
+		} else {
 			executor.Store = runStore
 		}
 	}
@@ -253,9 +254,24 @@ func newEventAutomationServiceWithReviews(
 			return nil, errors.Join(err, store.Close())
 		}
 	}
+	var reviewBridgeExecutor *workflows.Executor
+	if cfg.Workflows.Enabled {
+		reviewBridgeExecutor = executor
+	}
+	reviewBridge, err := reviews.NewAttentionBridge(reviews.AttentionBridgeConfig{
+		Service:  reviewService,
+		Executor: reviewBridgeExecutor,
+		RunStore: runStore,
+	})
+	if err != nil {
+		return nil, errors.Join(err, store.Close())
+	}
 	operatorBackend, err := eventoperator.NewBackend(eventoperator.BackendConfig{
-		Store:   store,
-		Reviews: &reviews.Handler{Service: reviewService},
+		Store: store,
+		Reviews: &reviews.Handler{
+			Service:   reviewService,
+			Attention: reviewBridge,
+		},
 	})
 	if err != nil {
 		return nil, errors.Join(err, store.Close())
@@ -285,6 +301,7 @@ func newEventAutomationServiceWithReviews(
 		channelBackend:  channelBackend,
 		reviewService:   reviewService,
 		reviewAttention: reviewAttention,
+		reviewBridge:    reviewBridge,
 		githubPoller:    githubPoller,
 		done:            make(chan struct{}),
 	}
