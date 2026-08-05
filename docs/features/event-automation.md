@@ -725,6 +725,7 @@ Owns: CODE web/backend/api/review_attention_agents.go
 Owns: CODE web/frontend/src/api/event-sources.ts
 Owns: CODE web/frontend/src/api/events.ts
 Owns: CODE web/frontend/src/api/reviews.ts
+Owns: CODE web/frontend/src/api/review-attention.ts
 Owns: CODE web/frontend/src/api/review-attention-*.ts
 Owns: CODE web/frontend/src/components/events/**
 Owns: CODE web/frontend/src/components/reviews/**
@@ -770,6 +771,7 @@ Owns: TEST web/frontend/src/api/events.test.ts
 Owns: TEST web/frontend/src/components/events/event-sources-page.test.tsx
 Owns: TEST web/frontend/src/components/events/*
 Owns: TEST web/frontend/src/api/reviews.test.ts
+Owns: TEST web/frontend/src/api/review-attention.test.ts
 Owns: TEST web/frontend/src/api/review-attention-*.test.ts
 Owns: TEST web/frontend/src/components/reviews/*
 Owns: TEST web/frontend/src/routes/-reviews*
