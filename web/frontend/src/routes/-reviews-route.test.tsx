@@ -30,6 +30,18 @@ vi.mock("@/components/reviews/reviews-page", () => ({
   ),
 }))
 
+vi.mock("@/components/reviews/review-attention-policies-page", () => ({
+  ReviewAttentionPoliciesPage: ({
+    onShowInbox,
+  }: {
+    onShowInbox: () => void
+  }) => (
+    <button type="button" onClick={onShowInbox}>
+      Policy editor
+    </button>
+  ),
+}))
+
 vi.mock("@/features/chat/controller", () => ({
   initializeChatStore: vi.fn(),
 }))
@@ -60,5 +72,29 @@ describe("reviews route navigation", () => {
     expect(screen.getByTestId("reviews-search")).toHaveTextContent(
       JSON.stringify({ repository: "octo/repo" }),
     )
+  })
+
+  it("renders the policy editor and removes every non-view query value", async () => {
+    const router = createRouter({
+      routeTree,
+      history: createMemoryHistory({
+        initialEntries: [
+          "/reviews?view=policies&case=private&questions=secret&revision=opaque",
+        ],
+      }),
+      context: {
+        queryClient: new QueryClient({
+          defaultOptions: { queries: { retry: false } },
+        }),
+      },
+    })
+
+    render(<RouterProvider router={router} />)
+
+    await waitFor(() => {
+      expect(router.state.location.search).toEqual({ view: "policies" })
+    })
+    expect(screen.getByRole("button", { name: "Policy editor" })).toBeVisible()
+    expect(screen.queryByTestId("reviews-search")).not.toBeInTheDocument()
   })
 })

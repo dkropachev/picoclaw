@@ -973,6 +973,10 @@ const channelCatalogResponse = {
   ],
 }
 
+const boundaryReviewAttentionGateID = "g".repeat(64)
+const boundaryReviewAttentionRepository = `${"o".repeat(127)}/${"r".repeat(128)}`
+const reviewAttentionPoliciesResponseText = `{"global":{"review.submitted":[{"id":"ask_owner","kind":"ai_working_context","agent_id":"main","criteria":"Ask when repository-owner intent is required.","title":"Owner input may be needed","questions":{"priority":9007199254740993,"negativeZero":-0}},{"id":"independent_check","kind":"ai_isolated_context","agent_id":"reviewer","criteria":"Assess the findings independently.","title":"Independent review"},{"id":"blocking_check","kind":"deterministic","when":"inputs.review.blocking == true","title":"Blocking finding","questions":{"Foo":1,"foo":2,"__proto__":{"safe":true}}},{"id":"no_attention","kind":"zero"}]},"repositories":{"octo/repo":{"review.submitted":{"mode":"overlay","gates":[{"id":"ask_owner","kind":"zero"},{"id":"${boundaryReviewAttentionGateID}","kind":"deterministic","when":"inputs.review.repository_risk == true","title":"Repository-specific risk","questions":[{"id":"resolution"}]}]}}},"catalog_revision":"catalog-revision-smoke","config_revision":"agent-revision-1","effects":{"gateway_effect":"applied"}}`
+
 interface MockLauncherApiOptions {
   agentActivityRequests?: Array<{ method: string; path: string }>
   agentCapabilityRequests?: Array<{
@@ -992,6 +996,7 @@ interface MockLauncherApiOptions {
   modelResponse?: unknown
   nullableWorkflowPayloads?: boolean
   oauthProviders?: unknown[]
+  reviewAttentionPolicyPutGate?: Promise<void>
   statefulAgents?: boolean
   statefulMCP?: boolean
   gatewayRunning?: boolean
@@ -1051,6 +1056,9 @@ async function mockLauncherApis(
   let currentAgentRevision = 1
   let currentCapabilityRevision = 1
   let currentDefaultAgentID = "main"
+  let currentReviewAttentionConfigRevision = "agent-revision-1"
+  let currentReviewAttentionPoliciesResponse =
+    reviewAttentionPoliciesResponseText
   let currentAgents: AgentInfo[] = [
     {
       id: "main",
@@ -2267,6 +2275,24 @@ async function mockLauncherApis(
         }
       }
 
+      if (path === "/api/reviews/attention-policies" && method === "PUT") {
+        await options.reviewAttentionPolicyPutGate
+        const body = request.postData()
+        const prefix = `{"expected_config_revision":${JSON.stringify(currentReviewAttentionConfigRevision)},`
+        expect(body).not.toBeNull()
+        expect(body?.startsWith(prefix)).toBe(true)
+        expect(body).toContain("9007199254740993")
+        expect(body).toContain('"negativeZero":-0')
+        const catalog = body!.slice(prefix.length, -1)
+        currentReviewAttentionConfigRevision = "agent-revision-2"
+        currentReviewAttentionPoliciesResponse = `{${catalog},"catalog_revision":"catalog-revision-smoke-2","config_revision":"${currentReviewAttentionConfigRevision}","effects":{"gateway_effect":"applied"}}`
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: currentReviewAttentionPoliciesResponse,
+        })
+      }
+
       if (method !== "GET") {
         return json(route, { status: "ok" })
       }
@@ -2390,6 +2416,22 @@ async function mockLauncherApis(
           return json(route, gitWorkspaceResponse)
         case "/api/agents":
           return json(route, currentAgentsResponse())
+        case "/api/reviews/attention-agents":
+          expect(url.search).toBe("")
+          expect(await request.headerValue("If-Match")).toBe(
+            `"${currentReviewAttentionConfigRevision}"`,
+          )
+          return json(route, {
+            agents: currentAgents.map(({ id, name }) => ({ id, name })),
+            default_agent_id: currentDefaultAgentID,
+            config_revision: currentReviewAttentionConfigRevision,
+          })
+        case "/api/reviews/attention-policies":
+          return route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: currentReviewAttentionPoliciesResponse,
+          })
         case "/api/events":
           return json(route, { events: [eventResponse] })
         case "/api/events/dispatches":
@@ -2897,6 +2939,209 @@ for (const routePath of smokeRoutes) {
     expect(errors).toEqual([])
   })
 }
+
+test("review attention policy route is inert, accessible, and contained on desktop and mobile", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page)
+  const reviewRequests: Array<{
+    path: string
+    method: string
+    body: string | null
+  }> = []
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname
+    if (path.startsWith("/api/reviews")) {
+      reviewRequests.push({
+        path,
+        method: request.method(),
+        body: request.postData(),
+      })
+    }
+  })
+
+  await gotoMockedRoute(
+    page,
+    "/reviews?view=policies&case=private&questions=secret&revision=opaque",
+  )
+
+  await expect(page).toHaveURL(/\/reviews\?view=policies$/)
+  await expect(
+    page.getByRole("button", { name: "Attention policies" }),
+  ).toHaveAttribute("aria-current", "page")
+  await expect(
+    page.getByText("Policies do not trigger automatically yet"),
+  ).toBeVisible()
+  expect(
+    await page
+      .getByLabel("Gate type")
+      .evaluateAll((fields) =>
+        fields.map((field) => (field as HTMLSelectElement).value),
+      ),
+  ).toEqual([
+    "ai_working_context",
+    "ai_isolated_context",
+    "deterministic",
+    "zero",
+  ])
+
+  await page.getByRole("button", { name: /octo\/repo/ }).click()
+  await expect(page.getByLabel("Override mode")).toHaveValue("overlay")
+  await expect(page.getByText("Effective repository policy")).toBeVisible()
+
+  await page.waitForTimeout(250)
+  expect(reviewRequests.length).toBeGreaterThan(0)
+  expect(reviewRequests).toEqual(
+    expect.arrayContaining([
+      {
+        path: "/api/reviews/attention-policies",
+        method: "GET",
+        body: null,
+      },
+      {
+        path: "/api/reviews/attention-agents",
+        method: "GET",
+        body: null,
+      },
+    ]),
+  )
+  expect(
+    reviewRequests.every(
+      ({ path, method, body }) =>
+        (path === "/api/reviews/attention-policies" ||
+          path === "/api/reviews/attention-agents") &&
+        method === "GET" &&
+        body === null,
+    ),
+  ).toBe(true)
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("review attention policy protects dirty navigation and boundary identities at 320px", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 320, height: 720 })
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(page, "/reviews?view=policies")
+
+  await page.getByRole("button", { name: /octo\/repo/ }).click()
+  await expect(page.getByText(boundaryReviewAttentionGateID)).toBeVisible()
+  await expectNoHorizontalOverflow(page)
+
+  const title = page.getByLabel("Attention title").first()
+  await title.fill("Keep this memory-only policy draft")
+  expect(
+    await page.evaluate(() => {
+      const event = new Event("beforeunload", { cancelable: true })
+      window.dispatchEvent(event)
+      return event.defaultPrevented
+    }),
+  ).toBe(true)
+
+  await page.getByRole("button", { name: "Review inbox" }).click()
+  const firstNavigation = page.getByRole("alertdialog", {
+    name: "Discard unsaved policy changes?",
+  })
+  await expect(firstNavigation).toBeVisible()
+  await firstNavigation.getByRole("button", { name: "Keep editing" }).click()
+  await expect(page).toHaveURL(/\/reviews\?view=policies$/)
+  await expect(title).toHaveValue("Keep this memory-only policy draft")
+
+  await page.getByRole("button", { name: "Add repository" }).click()
+  await page
+    .getByRole("textbox", { name: "Repository", exact: true })
+    .fill(boundaryReviewAttentionRepository)
+  await page
+    .getByRole("button", { name: "Add decision policy" })
+    .first()
+    .click()
+  const boundaryPolicy = page.getByRole("article", {
+    name: "Decision policy 1",
+  })
+  await boundaryPolicy
+    .getByRole("textbox", { name: "Decision point" })
+    .fill("review.submitted")
+  await boundaryPolicy.getByLabel("Override mode").selectOption("overlay")
+  await boundaryPolicy.getByRole("textbox", { name: "Gate ID" }).fill("local")
+  await boundaryPolicy
+    .getByLabel("Gate type")
+    .selectOption("ai_working_context")
+  await boundaryPolicy.getByLabel("AI agent").selectOption("reviewer")
+  await boundaryPolicy
+    .getByRole("textbox", { name: "Attention title" })
+    .fill("Repository owner input")
+  await boundaryPolicy
+    .getByRole("textbox", { name: "What AI should look for" })
+    .fill("Ask when repository intent cannot be inferred safely.")
+  const validationAlert = page
+    .getByRole("alert")
+    .filter({ hasText: "Fix policy errors before saving." })
+  await expect(validationAlert).toContainText(boundaryReviewAttentionRepository)
+  await expectNoHorizontalOverflow(page)
+
+  await page.getByRole("button", { name: "Review inbox" }).click()
+  const secondNavigation = page.getByRole("alertdialog", {
+    name: "Discard unsaved policy changes?",
+  })
+  await expect(secondNavigation).toBeVisible()
+  await secondNavigation
+    .getByRole("button", { name: "Discard changes" })
+    .click()
+  await expect(
+    page.getByRole("button", { name: "Review inbox" }),
+  ).toHaveAttribute("aria-current", "page")
+  expect(
+    await page.evaluate(() => {
+      const event = new Event("beforeunload", { cancelable: true })
+      window.dispatchEvent(event)
+      return event.defaultPrevented
+    }),
+  ).toBe(false)
+  expect(errors).toEqual([])
+})
+
+test("review attention policy fences navigation until an in-flight save settles", async ({
+  page,
+}) => {
+  let releasePut!: () => void
+  const putGate = new Promise<void>((resolve) => {
+    releasePut = resolve
+  })
+  const errors = collectPageErrors(page)
+  await gotoMockedRoute(page, "/reviews?view=policies", {
+    reviewAttentionPolicyPutGate: putGate,
+  })
+
+  const title = page.getByLabel("Attention title").first()
+  await title.fill("Persist before leaving")
+  await page.getByRole("button", { name: "Save policies" }).click()
+  await expect(page.getByRole("button", { name: "Saving…" })).toBeDisabled()
+  await expect(
+    page.getByRole("button", { name: "Review inbox" }),
+  ).toBeDisabled()
+
+  const services = page.getByRole("button", { name: "Services", exact: true })
+  if (!(await services.isVisible())) {
+    await page.getByRole("button", { name: "Toggle Sidebar" }).first().click()
+  }
+  await services.click()
+  await page.getByRole("link", { name: "Models", exact: true }).click()
+  const navigation = page.getByRole("alertdialog", {
+    name: "Discard unsaved policy changes?",
+  })
+  await expect(navigation).toBeVisible()
+  await expect(
+    navigation.getByRole("button", { name: "Discard changes" }),
+  ).toBeDisabled()
+  await expect(page).toHaveURL(/\/reviews\?view=policies$/)
+
+  releasePut()
+  await expect(page).toHaveURL(/\/models$/)
+  await expect(navigation).toBeHidden()
+  expect(errors).toEqual([])
+})
 
 test("agent management keeps configured policy editing safe on mobile", async ({
   page,

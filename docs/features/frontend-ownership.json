@@ -91,6 +91,7 @@
       "patterns": [
         "web/frontend/src/api/event-sources.ts",
         "web/frontend/src/api/events.ts",
+        "web/frontend/src/api/review-attention-*.ts",
         "web/frontend/src/api/reviews.ts",
         "web/frontend/src/components/events/**",
         "web/frontend/src/components/reviews/**",

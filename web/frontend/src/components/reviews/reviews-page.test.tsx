@@ -127,6 +127,24 @@ describe("ReviewsPage", () => {
     vi.mocked(getReview).mockResolvedValue(detail)
   })
 
+  it("opens the policy view without leaking the selected review into its URL state", async () => {
+    const onSearchChange = vi.fn()
+    const user = userEvent.setup()
+    renderReviews(
+      {
+        case: ids.case,
+        status: "open",
+        repository: "octo/repo",
+      },
+      onSearchChange,
+    )
+
+    await user.click(
+      await screen.findByRole("button", { name: "Attention policies" }),
+    )
+    expect(onSearchChange).toHaveBeenCalledWith({ view: "policies" })
+  })
+
   it("loads the inbox and saves the complete human-edited finding", async () => {
     const savedFinding: ReviewFinding = {
       ...finding,

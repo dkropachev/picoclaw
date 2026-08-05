@@ -25,6 +25,32 @@ describe("reviews route search", () => {
     })
   })
 
+  it("uses one canonical policy view without retaining inbox or private state", () => {
+    expect(
+      normalizeReviewsSearch({
+        view: "policies",
+        case: caseID,
+        repository: "octo/repo",
+        decision: "review.submitted",
+        questions: "private",
+        revision: "opaque",
+      }),
+    ).toEqual({ view: "policies" })
+  })
+
+  it("canonicalizes every present invalid or repeated view to the empty inbox URL", () => {
+    for (const view of [["policies"], "unknown", "", null, undefined]) {
+      expect(
+        normalizeReviewsSearch({
+          view,
+          case: caseID,
+          status: "open",
+          repository: "octo/repo",
+        }),
+      ).toEqual({})
+    }
+  })
+
   it("rejects malformed identifiers, repeated values, and unknown states", () => {
     expect(
       normalizeReviewsSearch({
