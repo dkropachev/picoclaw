@@ -93,7 +93,10 @@ same-ID replacements, appends new repository gates in order, supports exact
 replace and disable modes, and returns provenance for later configuration and
 simulation surfaces. A same-ID repository zero is a policy tombstone, but it
 remains a zero entry in the effective list and therefore does not add a second
-runtime mechanism.
+runtime mechanism. Durable event automation persists review-attention policy in
+operator-owned PicoClaw configuration and supplies only the already-selected
+layers to this resolver; neither workflow execution nor a checked-out PR
+repository can author or weaken that catalog.
 
 ## Reconstruction Notes
 
@@ -835,7 +838,10 @@ Gate policy resolution owns only the deterministic combination of one global
 list and one already-selected trusted repository policy. It does not own
 repository identity, persistence, PR-case launching, attention delivery, or
 chat handoff, and policy authority must never come from the PR head being
-judged. At that resolution boundary a same-ID repository zero may replace an
+judged. Durable event automation's config-v6 catalog and revision-fenced
+management API own persistence, canonical repository selection, configured
+agent preflight, and immutable catalog/selection revisions. At the resolver
+boundary a same-ID repository zero may replace an
 inherited gate at its stable slot. Gate compilation then composes the
 conversation decision profile and durable human task owned here from only the
 already-resolved effective `[]GateSpec`; within that list a zero cannot erase a

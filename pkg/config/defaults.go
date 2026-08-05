@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/sipeed/picoclaw/pkg"
+	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
 
 // DefaultConfig returns the default configuration for PicoClaw.
@@ -77,6 +78,12 @@ func DefaultConfig() *Config {
 			// when a caller asks for EffectiveEventIngressConfig.
 			Ingress: EventIngressConfig{
 				Enabled: false,
+			},
+		},
+		Reviews: ReviewsConfig{
+			Attention: ReviewAttentionConfig{
+				Global:       make(map[string][]gatetypes.GateSpec),
+				Repositories: make(map[string]map[string]gatetypes.RepositoryGatePolicy),
 			},
 		},
 		Workflows: WorkflowsConfig{

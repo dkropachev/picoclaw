@@ -32,7 +32,8 @@ func (h *Handler) applyRuntimeLogLevel() {
 	logger.SetLevelFromString(config.ResolveGatewayLogLevel(h.configPath))
 }
 
-// handleGetConfig returns the complete system configuration.
+// handleGetConfig returns the broad public system configuration. Dedicated
+// revision-fenced subresources such as review-attention policy are omitted.
 //
 //	GET /api/config
 func (h *Handler) handleGetConfig(w http.ResponseWriter, r *http.Request) {
@@ -59,13 +60,35 @@ func (h *Handler) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	projection, err := publicConfigProjection(cfg)
+	if err != nil {
+		http.Error(w, "Failed to project config safely", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(cfg); err != nil {
+	if err = json.NewEncoder(w).Encode(projection); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 	}
 }
 
-// handleUpdateConfig updates the complete system configuration.
+func publicConfigProjection(cfg *config.Config) (map[string]json.RawMessage, error) {
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var projection map[string]json.RawMessage
+	if err = json.Unmarshal(encoded, &projection); err != nil {
+		return nil, err
+	}
+	// Review-attention policy has its own strict, revision-fenced API. Keeping
+	// it out of the broad config document prevents lossy generic map decoding
+	// and makes that dedicated endpoint the only ordinary authoring surface.
+	delete(projection, "reviews")
+	return projection, nil
+}
+
+// handleUpdateConfig updates the broad system configuration while preserving
+// dedicated revision-fenced subresources.
 //
 //	PUT /api/config
 func (h *Handler) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +105,15 @@ func (h *Handler) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	var raw map[string]any
 	if err = json.Unmarshal(body, &raw); err != nil {
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+		return
+	}
+	if containsReviewAttentionConfigField(raw) &&
+		!containsOnlyEmptyReviewAttentionConfig(raw) {
+		http.Error(
+			w,
+			"reviews is managed through /api/reviews/attention-policies",
+			http.StatusBadRequest,
+		)
 		return
 	}
 	if err = normalizeChannelArrayFields(raw); err != nil {
@@ -113,6 +145,7 @@ func (h *Handler) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Failed to load existing config: %v", err), http.StatusInternalServerError)
 		return
 	}
+	cfg.Reviews = existingCfg.Reviews
 	err = cfg.SecurityCopyFromForUpdate(h.configPath)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to apply security config: %v", err), http.StatusInternalServerError)
@@ -189,6 +222,14 @@ func (h *Handler) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
 		return
 	}
+	if containsReviewAttentionConfigField(patch) {
+		http.Error(
+			w,
+			"reviews is managed through /api/reviews/attention-policies",
+			http.StatusBadRequest,
+		)
+		return
+	}
 
 	// Load existing config and marshal to a map for merging
 	cfg, expectedRevision, err := loadStableWorkflowSettingsConfig(h.configPath)
@@ -207,6 +248,7 @@ func (h *Handler) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to parse current config", http.StatusInternalServerError)
 		return
 	}
+	delete(base, "reviews")
 
 	// Recursively merge patch into base
 	mergeMap(base, patch)
@@ -241,6 +283,7 @@ func (h *Handler) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Merged config is invalid: %v", err), http.StatusBadRequest)
 		return
 	}
+	newCfg.Reviews = cfg.Reviews
 	newCfg.Session.ApplyDmScope()
 	newCfg.Session.DeriveDmScope()
 
@@ -284,6 +327,54 @@ func (h *Handler) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func containsReviewAttentionConfigField(values map[string]any) bool {
+	for key := range values {
+		if strings.EqualFold(key, "reviews") {
+			return true
+		}
+	}
+	return false
+}
+
+func containsOnlyEmptyReviewAttentionConfig(values map[string]any) bool {
+	found := false
+	for key, value := range values {
+		if !strings.EqualFold(key, "reviews") {
+			continue
+		}
+		found = true
+		reviews, ok := value.(map[string]any)
+		if !ok {
+			return false
+		}
+		for reviewsKey, reviewsValue := range reviews {
+			if !strings.EqualFold(reviewsKey, "attention") ||
+				!emptyReviewAttentionValue(reviewsValue) {
+				return false
+			}
+		}
+	}
+	return found
+}
+
+func emptyReviewAttentionValue(value any) bool {
+	attention, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	for key, collection := range attention {
+		if !strings.EqualFold(key, "global") &&
+			!strings.EqualFold(key, "repositories") {
+			return false
+		}
+		entries, isObject := collection.(map[string]any)
+		if !isObject || len(entries) != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // handleResetConfig resets the configuration to factory defaults.
@@ -405,6 +496,9 @@ func validateConfig(cfg *config.Config) []string {
 		cfg.SensitiveDataValues()...,
 	); err != nil {
 		errs = append(errs, fmt.Sprintf("events.ingress.channels: %v", err))
+	}
+	if _, err := validateReviewAttentionPolicyConfiguration(cfg); err != nil {
+		errs = append(errs, fmt.Sprintf("reviews.attention: %v", err))
 	}
 
 	// Gateway port range

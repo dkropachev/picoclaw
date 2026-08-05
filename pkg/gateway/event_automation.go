@@ -73,6 +73,17 @@ func setupEventAutomationService(
 	if cfg == nil || !cfg.Events.Ingress.Enabled {
 		return nil, nil
 	}
+	var attentionPolicies reviews.AttentionPolicySource
+	if cfg.Workflows.Enabled {
+		configured, err := configuredReviewAttentionPolicySource(cfg)
+		if err != nil {
+			return nil, err
+		}
+		if err = validateConfiguredReviewAttentionAgents(configured, agentLoop); err != nil {
+			return nil, err
+		}
+		attentionPolicies = configured
+	}
 	var executor *workflows.Executor
 	var runtimeEvents runtimeevents.Bus
 	if agentLoop != nil {
@@ -91,7 +102,7 @@ func setupEventAutomationService(
 			return agentLoop.AcquireRuntimeGeneration(workerCtx, cfg)
 		}
 	}
-	reviewRuntime := eventReviewRuntime{}
+	reviewRuntime := eventReviewRuntime{attentionPolicies: attentionPolicies}
 	if agentLoop != nil {
 		reviewRuntime.agent = agent.NewWorkflowAgentRunner(agentLoop)
 		defaultAgent, err := defaultReviewRuntimeAgent(agentLoop)
@@ -198,6 +209,13 @@ func newEventAutomationServiceWithReviews(
 	}
 	if cfg.Workflows.Enabled && executor == nil {
 		return nil, fmt.Errorf("workflow executor is required when event workflows are enabled")
+	}
+	if cfg.Workflows.Enabled && reviewRuntime.attentionPolicies == nil {
+		configured, policyErr := configuredReviewAttentionPolicySource(cfg)
+		if policyErr != nil {
+			return nil, policyErr
+		}
+		reviewRuntime.attentionPolicies = configured
 	}
 
 	workspace := cfg.WorkspacePath()
@@ -453,6 +471,13 @@ func validateEventAutomationRuntime(
 		return nil
 	}
 	if cfg.Workflows.Enabled {
+		attentionPolicies, err := configuredReviewAttentionPolicySource(cfg)
+		if err != nil {
+			return err
+		}
+		if err = validateConfiguredReviewAttentionAgents(attentionPolicies, agentLoop); err != nil {
+			return err
+		}
 		if _, err := agent.NewEventWorkflowExecutor(ctx, agentLoop); err != nil {
 			return fmt.Errorf("initialize event workflow runtime: %w", err)
 		}

@@ -12,28 +12,30 @@ import (
 	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/routing"
+	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
 )
 
 // GateKind selects how one user-attention decision is evaluated. Gates compile
 // to ordinary workflow steps; the executor has no gate-specific runtime path.
-type GateKind string
+type GateKind = gatetypes.GateKind
 
 const (
-	GateAIWorkingContext  GateKind = "ai_working_context"
-	GateAIIsolatedContext GateKind = "ai_isolated_context"
-	GateDeterministic     GateKind = "deterministic"
-	GateZero              GateKind = "zero"
+	GateAIWorkingContext  = gatetypes.GateAIWorkingContext
+	GateAIIsolatedContext = gatetypes.GateAIIsolatedContext
+	GateDeterministic     = gatetypes.GateDeterministic
+	GateZero              = gatetypes.GateZero
 
-	MaxWorkflowGateCount          = 64
-	MaxWorkflowGateIDBytes        = 64
-	MaxWorkflowGateNameBytes      = 4 << 10
-	MaxWorkflowGateCriteriaBytes  = 16 << 10
-	MaxWorkflowGateConditionBytes = 4 << 10
-	MaxWorkflowGateQuestionBytes  = 128 << 10
-	MaxWorkflowGateSubjectBytes   = 1 << 20
-	MaxWorkflowGateInputsBytes    = 2 << 20
-	MaxWorkflowGateJSONDepth      = 64
-	MaxWorkflowGateJSONNodes      = 100_000
+	MaxWorkflowGateCount          = gatetypes.MaxWorkflowGateCount
+	MaxWorkflowGateIDBytes        = gatetypes.MaxWorkflowGateIDBytes
+	MaxWorkflowGateNameBytes      = gatetypes.MaxWorkflowGateNameBytes
+	MaxWorkflowGateTitleBytes     = gatetypes.MaxWorkflowGateTitleBytes
+	MaxWorkflowGateCriteriaBytes  = gatetypes.MaxWorkflowGateCriteriaBytes
+	MaxWorkflowGateConditionBytes = gatetypes.MaxWorkflowGateConditionBytes
+	MaxWorkflowGateQuestionBytes  = gatetypes.MaxWorkflowGateQuestionBytes
+	MaxWorkflowGateSubjectBytes   = gatetypes.MaxWorkflowGateSubjectBytes
+	MaxWorkflowGateInputsBytes    = gatetypes.MaxWorkflowGateInputsBytes
+	MaxWorkflowGateJSONDepth      = gatetypes.MaxWorkflowGateJSONDepth
+	MaxWorkflowGateJSONNodes      = gatetypes.MaxWorkflowGateJSONNodes
 )
 
 const (
@@ -54,19 +56,7 @@ var (
 )
 
 // GateSpec describes one gate in an ordered composition.
-//
-// AI gates require AgentID, Criteria, and Title. Questions is optional guidance
-// for the model. Deterministic gates require When, Title, and Questions. A zero
-// gate is the composition identity and accepts no behavior fields.
-type GateSpec struct {
-	ID        string   `json:"id"                  yaml:"id"`
-	Kind      GateKind `json:"kind"                yaml:"kind"`
-	AgentID   string   `json:"agent_id,omitempty"  yaml:"agent_id,omitempty"`
-	Criteria  string   `json:"criteria,omitempty"  yaml:"criteria,omitempty"`
-	When      string   `json:"when,omitempty"      yaml:"when,omitempty"`
-	Title     string   `json:"title,omitempty"     yaml:"title,omitempty"`
-	Questions any      `json:"questions,omitempty" yaml:"questions,omitempty"`
-}
+type GateSpec = gatetypes.GateSpec
 
 // GateCompilation is a runnable inline workflow plus its private frozen root.
 // All-zero and empty compositions are represented as Noop and must not be
@@ -276,11 +266,11 @@ func validateWorkflowGateSpec(path string, spec GateSpec) error {
 }
 
 func validateWorkflowGateTitle(path, value string) error {
-	if strings.TrimSpace(value) == "" || !utf8.ValidString(value) || len(value) > MaxHumanTaskTitleBytes {
+	if strings.TrimSpace(value) == "" || !utf8.ValidString(value) || len(value) > MaxWorkflowGateTitleBytes {
 		return fmt.Errorf(
 			"%s must be nonblank valid UTF-8 and at most %d bytes",
 			path,
-			MaxHumanTaskTitleBytes,
+			MaxWorkflowGateTitleBytes,
 		)
 	}
 	return nil

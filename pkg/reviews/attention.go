@@ -282,10 +282,7 @@ func (launcher *AttentionLauncher) Launch(
 func validateAttentionLaunchRequest(request AttentionLaunchRequest) error {
 	if !validWorkingContextPrefixedHexID(request.CaseID, "prc_") ||
 		request.ExpectedCaseVersion <= 0 ||
-		request.DecisionPoint != strings.TrimSpace(request.DecisionPoint) ||
-		!utf8.ValidString(request.DecisionPoint) ||
-		len(request.DecisionPoint) > maxAttentionDecisionBytes ||
-		!attentionDecisionPattern.MatchString(request.DecisionPoint) {
+		!validAttentionDecisionPoint(request.DecisionPoint) {
 		return ErrInvalidRequest
 	}
 	return nil

@@ -1,25 +1,26 @@
 package workflows
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/sipeed/picoclaw/pkg/workflows/gatetypes"
+)
 
 // GatePolicyMode selects how one repository policy combines with the global
 // policy for the same decision point.
-type GatePolicyMode string
+type GatePolicyMode = gatetypes.GatePolicyMode
 
 const (
-	GatePolicyInherit GatePolicyMode = "inherit"
-	GatePolicyOverlay GatePolicyMode = "overlay"
-	GatePolicyReplace GatePolicyMode = "replace"
-	GatePolicyDisable GatePolicyMode = "disable"
+	GatePolicyInherit = gatetypes.GatePolicyInherit
+	GatePolicyOverlay = gatetypes.GatePolicyOverlay
+	GatePolicyReplace = gatetypes.GatePolicyReplace
+	GatePolicyDisable = gatetypes.GatePolicyDisable
 )
 
 // RepositoryGatePolicy is one already-selected repository override. Policy
 // persistence and trusted repository lookup are deliberately outside this
 // resolver.
-type RepositoryGatePolicy struct {
-	Mode  GatePolicyMode `json:"mode"`
-	Gates []GateSpec     `json:"gates,omitempty"`
-}
+type RepositoryGatePolicy = gatetypes.RepositoryGatePolicy
 
 // GatePolicyResolutionAction explains how one effective gate was selected.
 type GatePolicyResolutionAction string

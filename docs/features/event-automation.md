@@ -75,9 +75,13 @@ ordered mix of working-context AI, isolated AI, deterministic, and zero gates,
 and admit at most one private workflow run. A SQLite decision-to-run link and
 the workflow run's create-only store boundary are joined inside the same
 admission callback, so concurrent or restarted callers converge on the already
-linked run before any model, function, or human task can execute. This is an
-internal composition seam only; automatic review-event triggering, persisted
-policy configuration, and browser controls remain separate later stages.
+linked run before any model, function, or human task can execute. Trusted
+operator configuration now persists those policies globally with explicit
+repository-local inherit, overlay, replace, or disable overrides. The active
+gateway generation resolves an immutable case-insensitive repository catalog,
+validates every referenced agent, and exposes a strict revision-fenced
+management API. Automatic review-event triggering and the visual policy editor
+remain separate later stages.
 Durable inputs remain separate from the process-local
 [`pkg/events`](../../pkg/events) observability bus: runtime events are
 best-effort in-process signals, while external automation events and dispatch
@@ -112,7 +116,10 @@ otherwise fails before a provider request.
   `reviews.WorkingContextRequest`, and the gateway's exact-generation agent
   session-store resolver. Review attention launch additionally uses
   `reviews.AttentionLauncher`, its lease-scoped `AttentionPolicySource`, and
-  `eventing.ReviewDecisionRunStore`.
+  `eventing.ReviewDecisionRunStore`. Persisted attention policy additionally
+  uses `config.ReviewsConfig`, `config.ReviewAttentionConfig`,
+  `reviews.ConfigAttentionPolicySource`, and the authenticated
+  `/api/reviews/attention-policies` configuration projection.
 - Runtime ordering: resolve disabled-safe config, normalize and validate an
   envelope, enforce the payload limit, redact configured fields, atomically
   insert or return the existing deduplicated event, lease and renew routing,
@@ -145,7 +152,10 @@ otherwise fails before a provider request.
   authority: its key excludes the mutable case version, its full scope and
   history are verified after every materialization, SQLite remains the only
   review transcript, and review-scoped sessions do not enter browser session
-  discovery or Seahorse indexing.
+  discovery or Seahorse indexing. Review-attention policy authority comes only
+  from the operator-owned PicoClaw configuration, never from the checked-out PR
+  repository; repository identity is selected from the authoritative case and
+  compared without case, while case-colliding configured keys are invalid.
 
 ## Requirements
 
@@ -198,6 +208,7 @@ otherwise fails before a provider request.
 | `FR-EVENT-AUTOMATION-043` | MUST | A human confirms submission of an open case with at least one active finding and the exact current version, or explicitly reconciles a terminal unknown case after checking GitHub. | The HTTP submission path atomically freezes only the active findings, summary, repository, pull number, reviewed head SHA, and a unique non-public marker into an immutable pending outbox record, moves the case to `submitting`, returns `202`, and performs no GitHub call. A leased worker first reads the pull request through the exact GitHub tool and requires its current head to equal the reviewed head; only then does it create one pending review at that commit, add each file/line finding through `add_comment_to_pending_review`, and submit the pending review once as `COMMENT` with the summary, body-only findings, and marker through `pull_request_review_write`. The workbench polls until the durable case reaches `submitted`, returns to editable `open` after a definite typed pre-write failure, or displays terminal `submission_unknown`/`stale`. | A successful worker atomically stores the external review identity/URL and resolves the case. A changed head makes the case stale before any GitHub write. Only a typed definite failure known to precede every external call records a public code and reopens the case; an ambiguous/untyped MCP result, lost/expired worker lease, or crash after claim becomes terminal unknown and is never reclaimed automatically. From that exact version, a human may record that the review was found, making the case submitted, or that it was verified absent, recording `reconciled_absent` and reopening the case. Reconciliation itself makes no GitHub call. All-dropped cases create no outbox row and make no GitHub call. | Submission validation rejects stale versions, inactive/empty drafts, malformed repository/revision/path/line/body data, unavailable exact GitHub read/write tools, marker/request mismatches, malformed or mismatched current-head reads, and a changed pull-request head before the write protocol begins. The protocol performs no retries and never deletes a pending review. Once any external call may have reached GitHub, transport/cancellation ambiguity is unknown rather than failed; restart recovery terminalizes expired claims before considering pending work. Reconciliation rejects non-unknown cases, stale versions, unknown resolutions, and attempts whose latest outbox row is not unknown. | Human confirmation must be the sole authority for external publication, and crash recovery must prefer a visible uncertain state plus explicit human reconciliation over duplicate GitHub reviews or comments. |
 | `FR-EVENT-AUTOMATION-044` | MUST | A trusted review attention-policy consumer prepares one or more `ai_working_context` gates for an exact review case and one exact canonical agent. | Each review service pins the exact live agent-runtime generation before serializing its projections by case, reloads one complete atomic case aggregate from SQLite, validates the projected case/findings/messages, atomically reserves its protected review scope, and compare-and-swaps its ordered user/assistant messages plus an empty summary into one opaque agent-owned session. The reservation uses the same process-local directory/canonical-session locks as ordinary live admission and snapshot replacement. The key is derived only from canonical owner, `review` namespace, and case ID, while exact agent-qualified identity and version aliases prevent cross-agent or cross-case rebinding. A synchronous callback receives the coherent SQLite case version, internal canonical key, exact non-empty post-CAS revision, and a bounded detached JSON-native case/finding/message-metadata subject with transcript content and the latest submission record/internal fields unrepresentable. The case lock and runtime lease remain held so the consumer can compile inside the callback and attach `ReadOnlySessionRef{AgentID, Session, ExpectedRevision}` before ordinary private workflow admission. If a competing projection through another service using the same local runtime store advances the session before downstream exact snapshot capture, capture fails closed; an advance after capture cannot change the already frozen evidence. | SQLite remains the sole authoritative review transcript. Projection replaces only the derived local session view; it never imports session writes into review messages, changes a case/finding/submission/workflow run, or adds an eventing table. A later case version may refresh the same key and advance its alias/revision. Session revision fences only the derived view and does not prove that SQLite remained unchanged after the aggregate read; a production gate launcher that requires latest-case admission must bind and revalidate the supplied case version at its durable decision/linkage boundary. The internal key, revision, aliases, and subject are absent from browser-safe review DTOs and browser session discovery. Whichever of ordinary live or protected review admission wins first owns the key; after ownership checks that may read scope metadata, the loser fails before using protected transcript content for commands, history, a provider, a context manager, a public read-only workflow, or thread linkage, and before mutating the session. Seahorse excludes review scope from startup bootstrap and live ingest. A pre-existing ordinary-session collision therefore makes projection fail closed. | Invalid projected case/finding/message data or noncanonical agent identity, an unavailable/stale runtime generation or exact agent store, a nil/unsupported snapshot or atomic-admission capability, alias/key/owner/identity conflict, admission conflict, stale CAS, any replacement error, missing or inexact post-CAS readback, non-advancing/empty revision, or non-JSON/oversized gate subject fails closed before the callback. Cancellation propagates and every case/runtime lease is released. A failed first replacement may leave only a hidden empty review reservation, which an exact retry validates and completes. Cross-process sharing of one JSONL session directory is outside this process-local bridge contract. This bridge changes no eventing or review-draft schema and composes the current workflow engine v11, run schema v6, and validator v7 contracts. | Working-context AI gates need the same durable PR discussion the user sees without making a model-owned session authoritative, exposing an internal transcript through chat discovery, contaminating long-term retrieval, racing reload, or silently consulting the wrong case or agent. |
 | `FR-EVENT-AUTOMATION-045` | MUST | A trusted in-process consumer requests the attention decision for one exact review case version and bounded decision point while a trusted policy source holds one stable repository-selected global-plus-local policy snapshot. | The launcher resolves the policy through the ordinary workflow resolver and compiles every effective working-context AI, isolated-context AI, deterministic, and zero gate in configured collect-all order. A true all-zero result returns without projecting a session, inserting a decision link, creating a run, or invoking any gate. An active working-context composition projects the authoritative review transcript under `FR-EVENT-AUTOMATION-044` and attaches its exact agent, opaque session key, and expected revision only to the private root; a composition without a working-context gate reads the same bounded aggregate subject directly and attaches no session capability. A canonical digest over the trusted source revision and detached effective policy becomes the durable policy revision. The exact case ID/version, decision point, and derived policy revision deterministically identify one private run. During the executor's pre-effect durable-create admission, one immediate SQLite transaction returns an existing link or verifies the case version, inserts the decision-to-run link, and invokes the create-only workflow-run callback before committing. Concurrent and restarted exact requests therefore return the one matching linked private run and execute no duplicate model, function, or human task. | Schema-v4 event storage adds only the immutable `(case_id, case_version, decision_point, policy_revision) -> run_id` link; the file run store remains workflow status and human-task authority. Launching does not mutate review cases, findings, messages, submissions, events, dispatches, provider state, policy configuration, or GitHub. Waiting human gates remain durable through the ordinary workflow resume path. Policy persistence, automatic submitted-review triggering, HTTP/CLI/UI launch, and attention navigation are explicitly outside this internal stage. SQLite and the file run store are not a distributed transaction: process failure after durable run creation but before link commit may leave one unlinked private run that has executed no step; an exact retry detects the deterministic run record and fails unavailable rather than executing or replacing it. | Noncanonical identities, invalid or changing policy snapshots, invalid effective gates, stale/corrupt review aggregates, stale case or session revisions, wrong executor candidate shape, a missing/corrupt/mismatched linked run, storage uncertainty, runtime reload, or cancellation fails closed through fixed private-safe conflict/unavailable/cancellation boundaries. The trusted policy lease, review lock, and runtime lease are always released. Public requests cannot supply policy, repository, subject, run identity, session identity, or revision. Browser-safe run results, serialized runs, events, logs, and errors omit the policy body, review subject/transcript, session key/revision, and private diagnostics. | Durable review attention must reuse the configurable workflow gate engine without allowing duplicate delivery, mutable policy or review data, or private PR discussion to escape into generic workflow surfaces. |
+| `FR-EVENT-AUTOMATION-046` | MUST | An authenticated operator reads or replaces the complete review-attention catalog, or an enabled event/workflow gateway generation starts or reloads with that catalog. | Config schema v6 stores bounded `reviews.attention.global` decision-point gate lists and `reviews.attention.repositories[owner/repo]` decision-point overrides. The complete catalog contains at most 8,192 policies and at most 8,192 gates; each repository contains at most 128 decision points. Each override explicitly selects `inherit`, `overlay`, `replace`, or `disable`; effective policies use the ordinary workflow resolver and may contain any validated ordered mix of the four gate kinds. One immutable trusted source case-folds repository lookup, rejects case-colliding configured keys, deep-detaches every returned snapshot, publishes a canonical SHA-256 whole-catalog revision, and derives each selected revision from only the canonical repository, decision point, and selected global/local layers so unrelated policy edits do not retarget an admitted decision. Every configured AI gate names an exact configured agent, and every working-context agent has a session store, before the active gateway generation opens event storage. Exact authenticated `GET` and same-origin `PUT /api/reviews/attention-policies` expose only the policy catalog, its catalog revision, the opaque complete-config revision, and gateway effect status. `PUT` is a strict full replacement fenced by `expected_config_revision`; it validates the complete candidate and saves through the shared config compare-and-swap boundary. | A successful replacement mutates only operator-owned PicoClaw configuration; it does not write into any checked-out repository, review case, transcript, decision link, workflow run, event, provider, or GitHub resource. Config migration from v5 is additive and preserves an already present preview catalog. Policy changes participate in the gateway restart signature only while event ingress and workflows are both active; inactive policy edits remain runtime-inert. The source and management read are immutable projections, while a save preserves every unrelated public and security configuration value from the exact loaded revision. | Null or malformed collections, invalid/case-colliding repositories, noncanonical decision/gate/agent IDs, unknown modes or gate kinds, duplicate gates, invalid effective overlays, incompatible working-context agents, non-JSON questions, missing configured agents, excessive count/depth/size, unsupported content type/encoding/charset, invalid UTF-8, duplicate/unknown/trailing JSON, oversized bodies, missing/stale revisions, cross-site mutation, load/save uncertainty, or runtime generation drift fails closed through fixed safe errors. A stale save returns conflict and never retries against newer configuration. Repository policy authority can never be loaded from the PR head being evaluated. Automatic submitted-review triggering, a browser policy editor, attention navigation, and user-facing launch remain outside this stage. | Global defaults and repository exceptions need durable operator control without allowing reviewed code, stale browser state, an unrelated policy edit, or a partially initialized runtime to change who can stop or steer development. |
 
 ## Data And State Model
 
@@ -378,6 +389,37 @@ immutable historical idempotency links. Admission of a new row requires the
 case still to have that exact version, while an existing exact row remains
 readable after the case advances. The table stores no policy body, repository,
 gate subject, transcript, session capability, model output, or workflow status.
+
+Config schema v6 adds the non-secret operator-owned `reviews.attention`
+catalog. `global` maps at most 128 canonical decision points to ordered gate
+lists. `repositories` maps at most 1,024 case-insensitively unique, trimmed
+`owner/repo` identities of at most 256 bytes to decision-point overrides. The
+complete catalog contains at most 8,192 gate entries and at most 1 MiB of
+canonical JSON. A global list is an array rather than null. A repository entry
+and its decision map are objects rather than null. Override mode is explicit:
+`inherit` and `disable` carry no gates, while `overlay` and `replace` carry a
+nonempty validated gate list. Every gate uses the same shared workflow bounds
+and JSON-compatible `questions` contract. Persistence validates every stored
+layer; the trusted source additionally validates every effective
+global-plus-repository composition before API save or active runtime use.
+The broad `/api/config` projection omits `reviews`; its `PUT` accepts only an
+empty backward-compatible placeholder, its `PATCH` rejects that field, and
+both preserve the exact existing catalog across unrelated updates. The
+dedicated replacement request permits that complete 1 MiB catalog plus a
+fixed 64 KiB envelope allowance for its config revision and JSON field names;
+the allowance cannot increase the catalog accepted by configuration or the
+runtime source.
+
+The immutable runtime source owns two revisions. `CatalogRevision` hashes a
+domain-tagged canonical ordering of the entire detached catalog with repository
+case normalized. A selected snapshot hashes a different domain-tagged value
+containing only the normalized authoritative case repository, exact decision
+point, selected global list, and selected local override. Thus case/order-only
+catalog changes are revision-stable, an unrelated repository or decision edit
+changes the catalog generation without changing an already selected decision,
+and a selected-layer change deterministically changes future decision identity.
+An absent decision is a valid no-op selection rather than an unavailable
+policy source.
 
 The review working-context session is not another review record and adds no
 SQLite schema. It is a lazily rebuilt projection in the selected canonical
@@ -592,11 +634,13 @@ Owns: CODE pkg/eventing/channelmessage/**
 Owns: CODE pkg/reviews/**
 Owns: CODE pkg/config/config.go
 Owns: CODE pkg/config/events.go
+Owns: CODE pkg/config/reviews.go
 Owns: CODE pkg/config/defaults.go
 Owns: CODE pkg/workflows/event_trigger.go
 Owns: CODE pkg/workflows/event_dispatcher.go
 Owns: CODE pkg/agent/workflow_eventing.go
 Owns: CODE pkg/gateway/event_automation.go
+Owns: CODE pkg/gateway/review_attention_policy.go
 Owns: CODE pkg/gateway/review_working_context.go
 Owns: CODE pkg/gateway/event_webhook*
 Owns: CODE pkg/gateway/event_channel*
@@ -605,6 +649,7 @@ Owns: CODE cmd/picoclaw/internal/events/**
 Owns: CODE web/backend/api/config.go
 Owns: CODE web/backend/api/events.go
 Owns: CODE web/backend/api/reviews.go
+Owns: CODE web/backend/api/review_attention_policies.go
 Owns: CODE web/frontend/src/api/event-sources.ts
 Owns: CODE web/frontend/src/api/events.ts
 Owns: CODE web/frontend/src/api/reviews.ts
@@ -617,18 +662,22 @@ Owns: CONFIG.events
 Owns: CONFIG.events.ingress*
 Owns: CONFIG.events.ingress.webhooks*
 Owns: CONFIG.events.ingress.channels*
+Owns: CONFIG.reviews
+Owns: CONFIG.reviews.attention*
 Owns: HTTP POST /webhooks/events/*
 Owns: HTTP GET /runtime/eventing/*
 Owns: HTTP POST /runtime/eventing/events/*/replay
 Owns: HTTP /runtime/eventing/reviews*
 Owns: HTTP /api/events*
 Owns: HTTP /api/reviews*
+Owns: HTTP /api/reviews/attention-policies
 Owns: CLI cmd/picoclaw/internal/events/*
 Owns: TEST pkg/eventing/*
 Owns: TEST pkg/eventing/webhook/*
 Owns: TEST pkg/eventing/channelmessage/*
 Owns: TEST pkg/reviews/*
 Owns: TEST pkg/config/events*
+Owns: TEST pkg/config/reviews*
 Owns: TEST pkg/workflows/event_trigger_test.go
 Owns: TEST pkg/workflows/event_dispatcher_test.go
 Owns: TEST pkg/gateway/event_automation_test.go
@@ -641,6 +690,7 @@ Owns: TEST web/backend/api/config_test.go
 Owns: TEST web/backend/api/config_event_channel_test.go
 Owns: TEST web/backend/api/events_test.go
 Owns: TEST web/backend/api/reviews_test.go
+Owns: TEST web/backend/api/review_attention_policies_test.go
 Owns: TEST web/frontend/src/api/event-sources.test.ts
 Owns: TEST web/frontend/src/api/events.test.ts
 Owns: TEST web/frontend/src/components/events/event-sources-page.test.tsx
@@ -658,10 +708,12 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
 | Config | `events.ingress.database_path`, `retention_days`, `max_payload_bytes`, `redact_fields` | Resolve a safe workspace database default while preserving explicit policy values used by store construction and ingest/retention calls. | `FR-EVENT-AUTOMATION-001`, `FR-EVENT-AUTOMATION-003`, `FR-EVENT-AUTOMATION-011`, `FR-EVENT-AUTOMATION-035` |
 | Config | `events.ingress.webhooks.<connector>` | Opt-in connector name, enablement, `standard`/`github` format, securely persisted format-specific secret, and GitHub-only repository allowlist, target user, and notification-polling switch; omitted format remains Standard Webhooks and an empty GitHub repository list accepts all. Enabled values are validated before storage or route construction and passed to durable exact-secret redaction. A GitHub poll-only connector may omit its signing secret and therefore receives no webhook route. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-024`, `FR-EVENT-AUTOMATION-030`, `FR-EVENT-AUTOMATION-035`, `FR-EVENT-AUTOMATION-039`, `FR-EVENT-AUTOMATION-040` |
 | Config | `events.ingress.channels.<channel-instance>` | Opt-in source and mirror/event-only mode for one existing enabled channel instance, with Delta Chat email defaults and enabled-load/API validation. | `FR-EVENT-AUTOMATION-025`, `FR-EVENT-AUTOMATION-035` |
-| HTTP | `GET /api/config`, `PUT /api/config`, `PATCH /api/config` | The authenticated update-safe read projection masks configured webhook secrets, round-trips public GitHub repository/target scope, permits repair of unresolved references/dependencies, and opaquely refuses any public event identity containing a configured sensitive value. Omitted or `[NOT_HERE]` webhook secrets preserve the current secure value; an explicit valid secret rotates it, an explicit empty value can clear only a disabled connector, GitHub scope fields use ordinary merge-patch replace/null-clear semantics, and a null map value removes the connector and its security overlay. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-024`, `FR-EVENT-AUTOMATION-035`, `FR-EVENT-AUTOMATION-039` |
+| Config | `reviews.attention.global`, `reviews.attention.repositories.<owner/repo>` | Persist bounded operator-owned decision-point gate lists plus explicit repository inherit/overlay/replace/disable overrides; reviewed repositories cannot supply or weaken this policy. | `FR-EVENT-AUTOMATION-045`, `FR-EVENT-AUTOMATION-046` |
+| HTTP | `GET /api/config`, `PUT /api/config`, `PATCH /api/config` | The authenticated update-safe read projection masks configured webhook secrets, round-trips public GitHub repository/target scope, permits repair of unresolved references/dependencies, and opaquely refuses any public event identity containing a configured sensitive value. It omits the dedicated `reviews` policy subresource; broad PUT accepts only an empty compatibility placeholder, broad PATCH rejects that field, and both preserve the exact catalog during unrelated updates. Omitted or `[NOT_HERE]` webhook secrets preserve the current secure value; an explicit valid secret rotates it, an explicit empty value can clear only a disabled connector, GitHub scope fields use ordinary merge-patch replace/null-clear semantics, and a null map value removes the connector and its security overlay. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-024`, `FR-EVENT-AUTOMATION-035`, `FR-EVENT-AUTOMATION-039`, `FR-EVENT-AUTOMATION-046` |
 | HTTP | `POST /webhooks/events/{connector}` | Strict, bounded format-selected Standard Webhooks or native GitHub authentication and normalization with durable admitted `202`/duplicate `200` acknowledgement, authenticated GitHub repository-scope `202` ignore without an event ID, and retry-safe error statuses. | `FR-EVENT-AUTOMATION-022`, `FR-EVENT-AUTOMATION-023`, `FR-EVENT-AUTOMATION-030`, `FR-EVENT-AUTOMATION-039` |
 | HTTP | `/runtime/eventing/*`, launcher `/api/events*` proxy | PID-bearer-protected, generation-fenced event/dispatch list and exact token-free metadata inspection, exact opt-in payload text, explicit additive replay, and an internal atomic redacted workflow-context read; the launcher substitutes its authenticated session boundary without forwarding browser credentials and exposes workflow context only through bounded match/test operations. | `FR-EVENT-AUTOMATION-032`, `FR-EVENT-AUTOMATION-033`, `FR-EVENT-AUTOMATION-036`, `FR-EVENT-AUTOMATION-037` |
 | HTTP | `/runtime/eventing/reviews*`, launcher `/api/reviews*` proxy | Protected safe case list/detail, optimistic finding edit/drop/restore, bounded durable chat/rephrase, explicit submission, and human-only unknown-outcome reconciliation routes. The launcher validates canonical routes/query/body/origin, injects only the local gateway bearer, blocks redirects, bounds ordinary/AI timeouts and review responses to 32 MiB, and preserves safe upstream status/JSON without forwarding browser authorization. | `FR-EVENT-AUTOMATION-042`, `FR-EVENT-AUTOMATION-043` |
+| HTTP | `GET`, `PUT /api/reviews/attention-policies` | Authenticated bounded policy-only projection and same-origin strict full replacement, fenced by the opaque complete-config revision and returning canonical catalog revision plus current gateway effect. | `FR-EVENT-AUTOMATION-046` |
 | HTTP | `/api/workflows/development/triggers/*`, `/api/workflows/development/event-trigger/*`, `/api/workflows/development/test`, `/api/workflows/definitions/inspect`, `/api/workflows/templates/{name}/inspect`, `/api/workflows/runs*` | Stateless server-parsed generic trigger projection/revision with event-specific compatibility and match routes, deterministic metadata-only event preview, event-ID-only draft-test context resolved through the protected live gateway, path-free inspection of declared event filters/actions/possible effects without source or captured payload values, and safe workflow run projection whose origin is validated against every retained parent/retry ancestor while respecting independent pruning boundaries. Browser request DTOs cannot supply origin. | `FR-EVENT-AUTOMATION-036`, `FR-EVENT-AUTOMATION-038` |
 | CLI | `picoclaw events list|get|payload|dispatches|replay` | Call the live protected gateway using the local PID credential, print bounded projected JSON, emit an explicitly requested payload's validated object bytes exactly, and require `--yes` before a non-retried replay. | `FR-EVENT-AUTOMATION-032`, `FR-EVENT-AUTOMATION-033` |
 | Frontend | authenticated `/events` dashboard route | Responsive URL-bound event and global dispatch master/detail inspection, exact ID/ref-only event/dispatch/workflow/run relationship links, selected-event dispatch history, explicit exact-text payload reveal, and warned non-retried replay through launcher-owned authenticated endpoints. Related workflow run pages return links only from validated origin. | `FR-EVENT-AUTOMATION-034`, `FR-EVENT-AUTOMATION-037`, `FR-EVENT-AUTOMATION-038` |
@@ -677,6 +729,7 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
 | Go API / storage | `eventing.ReviewStore`, `reviews.CaptureSink`, `reviews.Service` | Idempotent trusted workflow-draft capture, aggregate inspection, optimistic finding/message mutation, immutable submission creation, safe browser projection, and fenced durable submission delivery over the review tables introduced through schema v3. | `FR-EVENT-AUTOMATION-041`, `FR-EVENT-AUTOMATION-042`, `FR-EVENT-AUTOMATION-043` |
 | Internal Go API | `reviews.Service.WithWorkingContext`, `reviews.WorkingContextRuntimeAcquire` | Under one per-case projection lock and exact runtime-generation lease, load one authoritative atomic review aggregate, compare-and-swap and strictly verify its hidden stable agent-owned session, then synchronously hand its case version, internal key, exact session revision, and detached JSON-native gate subject to a trusted consumer. | `FR-EVENT-AUTOMATION-044` |
 | Internal Go API / storage | `reviews.AttentionLauncher`, `reviews.AttentionPolicySource`, `eventing.ReviewDecisionRunStore` | Hold one trusted policy generation while resolving a repository overlay, bind its digest to an exact review decision, compile ordinary workflow gates, and atomically fence the exact case version plus immutable decision-to-private-run link through durable run creation. | `FR-EVENT-AUTOMATION-045` |
+| Internal Go API | `reviews.ConfigAttentionPolicySource` | Validate and detach the operator catalog, case-fold trusted repository selection, expose stable full-catalog and selection-scoped revisions, and enumerate configured AI/working-context agents for runtime preflight. | `FR-EVENT-AUTOMATION-046` |
 | Runtime | `eventing/githubpoll.Poller`, gateway notification worker | Exact-tool, bounded, read-only GitHub notification scans that enrich and admit trusted provider events through the ordinary generation-owned event store without changing provider notification state. | `FR-EVENT-AUTOMATION-040` |
 | Runtime | `reviews.SubmissionWorker`, `reviews.GitHubSubmitter` | Claim exactly one immutable submission, heartbeat its lease, verify the current PR head through the exact read tool, execute the create-pending/add-comment/submit-pending MCP protocol once only on a match, and persist stale/submitted/typed-pre-write-failed/unknown without automatic external retries. | `FR-EVENT-AUTOMATION-043` |
 | Storage | `pkg/eventing.Open` / `OpenStore`, `WithMaxPayloadBytes`, `WithClock`, `WithBusyTimeout`, `WithRedaction` | Open the embedded store with transactional `PRAGMA user_version` migration, WAL, foreign keys, busy handling, one authoritative SQLite connection, restrictive permissions, restart persistence, a one-MiB default payload limit, mandatory/custom redaction, optional exact-secret replacement, and deterministic test clocks on supported targets. | `FR-EVENT-AUTOMATION-003`, `FR-EVENT-AUTOMATION-005` through `FR-EVENT-AUTOMATION-011` |
@@ -685,7 +738,7 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
 | CLI / Workflow YAML | `picoclaw workflow install github-issue-triage` / `workflows/github-issue-triage.yml` | Explicitly install the deterministic native GitHub issue trigger, isolated structured classifier, and declared conditional GitHub comment action without changing existing configuration. | `FR-EVENT-AUTOMATION-031` |
 | CLI / Workflow YAML | `picoclaw workflow install github-pr-review` / `workflows/github-pr-review.yml`, native `git.diff` | Explicitly install the authenticated targeted review-request trigger, exact head/base-repository and merge-base verification, bounded path-relative unified-diff construction, a no-tools structured review step, and reserved durable draft output. | `FR-EVENT-AUTOMATION-041` |
 | Go API | `EvaluateEventTrigger`, `EventWorkflowRouter`, `EventWorkflowDispatcher`, `RunOrigin`, `RunRequest.Origin`, `RunRequest.OnRunPersisted`, `Executor.RetryCaptured`, `ProjectWorkflowRunForBrowserWithStore`, `ProjectEventBackedDraftRunsForBrowserWithStore`, `LoadRunnableLocalSnapshotWithRevision`, `EventContextFromEnvelope` | Produce deterministic field-level match diagnostics through the same evaluator used by routing, claim one item, compatibility-check and revision-bind the exact loaded workflow bytes, durably fan out deterministic dispatches, reject content drift or a no-longer-matching persisted event, pass the same accepted snapshot and trusted payload-free origin into execution, reconcile deterministic runs, link a newly persisted run before effects, renew long leases, retry from one authoritative source, validate every available provenance ancestor without treating pruning as forgery, safely project exact and batch trusted run provenance, and build the detached redacted workflow context shared by dispatch and event-parity draft testing. | `FR-EVENT-AUTOMATION-014` through `FR-EVENT-AUTOMATION-018`, `FR-EVENT-AUTOMATION-020`, `FR-EVENT-AUTOMATION-021`, `FR-EVENT-AUTOMATION-036`, `FR-EVENT-AUTOMATION-038` |
-| Runtime | gateway event automation service, webhook/operator/review controllers, review working-context bridge and attention launcher, channel admission controller, provider poller, submission worker, and launcher restart signature | Open enabled storage before readiness, initialize workflow/MCP/runtime-session dependencies before workers, generation-fence HTTP, review-session projection, trusted attention policy, and channel admission while transactionally draining, replacing, rolling back, and closing services/providers, and report restart-required only when the active effective event runtime changes, including semantic changes to enabled GitHub repository/target/polling scope but excluding case/order-only scope differences. | `FR-EVENT-AUTOMATION-019`, `FR-EVENT-AUTOMATION-024`, `FR-EVENT-AUTOMATION-029`, `FR-EVENT-AUTOMATION-032`, `FR-EVENT-AUTOMATION-035`, `FR-EVENT-AUTOMATION-039` through `FR-EVENT-AUTOMATION-045` |
+| Runtime | gateway event automation service, webhook/operator/review controllers, review working-context bridge and attention launcher, channel admission controller, provider poller, submission worker, and launcher restart signature | Open enabled storage only after attention-policy/agent preflight, initialize workflow/MCP/runtime-session dependencies before workers, generation-fence HTTP, review-session projection, trusted attention policy, and channel admission while transactionally draining, replacing, rolling back, and closing services/providers, and report restart-required only when the active effective event runtime changes, including semantic changes to enabled GitHub repository/target/polling/policy scope but excluding case/order-only scope differences. | `FR-EVENT-AUTOMATION-019`, `FR-EVENT-AUTOMATION-024`, `FR-EVENT-AUTOMATION-029`, `FR-EVENT-AUTOMATION-032`, `FR-EVENT-AUTOMATION-035`, `FR-EVENT-AUTOMATION-039` through `FR-EVENT-AUTOMATION-046` |
 | Build | `pkg/eventing` unsupported-platform implementation | Preserves the same construction surface and returns `ErrUnsupportedPlatform` without pulling SQLite into excluded targets. | `FR-EVENT-AUTOMATION-005`, `FR-EVENT-AUTOMATION-012` |
 
 ## Algorithms And Ordering
@@ -1057,6 +1110,22 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
     effects become reachable. Reconcile only an exact linked private run. A run
     found without its link is an unknown cross-store outcome and is never
     executed or replaced automatically.
+42. To materialize one trusted policy generation, validate and JSON-detach the
+    complete operator catalog, normalize configured repository keys to lower
+    case while rejecting collisions, validate every local layer against its
+    selected global layer, and preflight all AI agents plus working-context
+    session stores before opening event storage. Canonically sort decision and
+    repository maps to derive the whole-catalog revision. During selection,
+    hash only the domain tag, lower-cased authoritative case repository, exact
+    decision point, and detached selected layers, then invoke the consumer
+    synchronously with another detached snapshot. The management `GET` loads
+    one stable update snapshot under the shared mutation lock. `PUT` strictly
+    decodes one bounded full replacement, requires its exact config revision,
+    validates policy and configured-agent semantics, rechecks and saves through
+    the shared cross-process compare-and-swap, and returns the newly loaded
+    catalog/revisions without exposing unrelated configuration. Include the
+    catalog revision in the launcher runtime signature only when both ingress
+    and workflows are active.
 
 ## Cross-Feature Behavior
 
@@ -1076,7 +1145,9 @@ The same workflow feature owns gate policy resolution, compilation, private
 evidence capture, isolated AI, deterministic checks, and human-task resume;
 event automation owns review repository selection, policy-generation and case
 fences, decision/run idempotency, and the protected PR-chat projection used by
-working-context gates.
+working-context gates. The persisted catalog remains PicoClaw operator
+configuration outside every reviewed checkout; repository-local means a
+trusted `owner/repo` selector in that catalog, not a file controlled by the PR.
 GitHub `targets_user` and `target_reason` attributes may participate in the same
 deterministic `on.event` filters, but they grant no GitHub identity, review,
 comment, tool, or MCP authority; any action remains an explicitly declared
@@ -1400,6 +1471,14 @@ capabilities.
   treated as an unknown, non-executable private orphan and blocks automatic
   replacement. Policy, case, session, or candidate drift maps to fixed safe
   admission errors without exposing the review transcript or policy body.
+- Attention-policy configuration never trusts a repository checkout or request
+  path as policy authority. Invalid effective overlays, case-colliding
+  repository keys, unavailable configured agents, missing working-context
+  session stores, or an over-bound catalog fail before active event storage is
+  opened. The dedicated API returns only fixed policy/config conflict errors;
+  a stale or cross-site replacement writes neither public JSON nor the security
+  sidecar, and an unrelated catalog edit cannot change the selected revision of
+  an already linked decision.
 - The browser never receives the hidden submission marker, immutable request,
   lease identity, or internal error, including in conflict and failure
   responses. The launcher never forwards its authenticated user's cookie or
@@ -1448,6 +1527,7 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 | `FR-EVENT-AUTOMATION-043` | [pkg/reviews/submitter_test.go](../../pkg/reviews/submitter_test.go), [pkg/reviews/worker_test.go](../../pkg/reviews/worker_test.go), [pkg/reviews/worker_sqlite_test.go](../../pkg/reviews/worker_sqlite_test.go), [pkg/reviews/service_handler_test.go](../../pkg/reviews/service_handler_test.go), [pkg/eventing/review_store_sqlite_test.go](../../pkg/eventing/review_store_sqlite_test.go), [web/frontend/src/components/reviews](../../web/frontend/src/components/reviews) |
 | `FR-EVENT-AUTOMATION-044` | [pkg/reviews/session_bridge_test.go](../../pkg/reviews/session_bridge_test.go), [pkg/reviews/session_bridge_sqlite_test.go](../../pkg/reviews/session_bridge_sqlite_test.go), [pkg/reviews/session_bridge_integration_test.go](../../pkg/reviews/session_bridge_integration_test.go), [pkg/gateway/review_working_context_test.go](../../pkg/gateway/review_working_context_test.go), [pkg/reviews/service_handler_test.go](../../pkg/reviews/service_handler_test.go), [pkg/agent/context_seahorse_test.go](../../pkg/agent/context_seahorse_test.go), [web/backend/api/session_test.go](../../web/backend/api/session_test.go) |
 | `FR-EVENT-AUTOMATION-045` | [pkg/eventing/review_decision_run_sqlite_test.go](../../pkg/eventing/review_decision_run_sqlite_test.go), [pkg/eventing/store_schema_test.go](../../pkg/eventing/store_schema_test.go), [pkg/reviews/attention_test.go](../../pkg/reviews/attention_test.go), [pkg/reviews/attention_sqlite_test.go](../../pkg/reviews/attention_sqlite_test.go), [pkg/reviews/session_bridge_integration_test.go](../../pkg/reviews/session_bridge_integration_test.go), [pkg/gateway/review_attention_test.go](../../pkg/gateway/review_attention_test.go) |
+| `FR-EVENT-AUTOMATION-046` | [pkg/config/reviews_test.go](../../pkg/config/reviews_test.go), [pkg/config/migration_test.go](../../pkg/config/migration_test.go), [pkg/reviews/attention_config_test.go](../../pkg/reviews/attention_config_test.go), [pkg/gateway/review_attention_test.go](../../pkg/gateway/review_attention_test.go), [web/backend/api/review_attention_policies_test.go](../../web/backend/api/review_attention_policies_test.go), [web/backend/api/gateway_test.go](../../web/backend/api/gateway_test.go) |
 
 ## Implementation Anchors
 
@@ -1457,6 +1537,7 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 - [pkg/eventing/store_sqlite.go](../../pkg/eventing/store_sqlite.go)
 - [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go)
 - [pkg/config/events.go](../../pkg/config/events.go)
+- [pkg/config/reviews.go](../../pkg/config/reviews.go)
 - [pkg/workflows/event_trigger.go](../../pkg/workflows/event_trigger.go)
 - [pkg/workflows/event_dispatcher.go](../../pkg/workflows/event_dispatcher.go)
 - [pkg/workflows/origin.go](../../pkg/workflows/origin.go)
@@ -1465,6 +1546,7 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 - [pkg/agent/workflow_eventing.go](../../pkg/agent/workflow_eventing.go)
 - [pkg/gateway/event_automation.go](../../pkg/gateway/event_automation.go)
 - [pkg/gateway/review_working_context.go](../../pkg/gateway/review_working_context.go)
+- [pkg/gateway/review_attention_policy.go](../../pkg/gateway/review_attention_policy.go)
 - [pkg/gateway/event_webhook.go](../../pkg/gateway/event_webhook.go)
 - [pkg/gateway/event_channel.go](../../pkg/gateway/event_channel.go)
 - [pkg/gateway/event_operator.go](../../pkg/gateway/event_operator.go)
@@ -1478,6 +1560,7 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 - [pkg/reviews](../../pkg/reviews)
 - [pkg/reviews/session_bridge.go](../../pkg/reviews/session_bridge.go)
 - [pkg/reviews/attention.go](../../pkg/reviews/attention.go)
+- [pkg/reviews/attention_config.go](../../pkg/reviews/attention_config.go)
 - [web/frontend/src/api/event-sources.ts](../../web/frontend/src/api/event-sources.ts)
 - [web/frontend/src/api/events.ts](../../web/frontend/src/api/events.ts)
 - [web/frontend/src/api/reviews.ts](../../web/frontend/src/api/reviews.ts)
@@ -1491,5 +1574,6 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 - [web/backend/api/config.go](../../web/backend/api/config.go)
 - [web/backend/api/events.go](../../web/backend/api/events.go)
 - [web/backend/api/reviews.go](../../web/backend/api/reviews.go)
+- [web/backend/api/review_attention_policies.go](../../web/backend/api/review_attention_policies.go)
 - [web/backend/api/workflow_editor.go](../../web/backend/api/workflow_editor.go)
 - [web/backend/api/workflow_event_context.go](../../web/backend/api/workflow_event_context.go)

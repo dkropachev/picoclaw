@@ -1071,9 +1071,26 @@ func decodeAgentRequestWithMaxBytes(
 }
 
 func rejectDuplicateAgentJSONKeys(raw []byte) error {
+	return rejectDuplicateJSONKeys(raw, 32, nil)
+}
+
+type exactJSONKeySubtree func(path []string, foldedKey string) bool
+
+func rejectDuplicateJSONKeys(
+	raw []byte,
+	maximumDepth int,
+	exactSubtree exactJSONKeySubtree,
+) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
-	if err := consumeUniqueAgentJSONValue(decoder, 0); err != nil {
+	if err := consumeUniqueJSONValue(
+		decoder,
+		0,
+		maximumDepth,
+		false,
+		nil,
+		exactSubtree,
+	); err != nil {
 		return err
 	}
 	var trailing any
@@ -1086,8 +1103,15 @@ func rejectDuplicateAgentJSONKeys(raw []byte) error {
 	return nil
 }
 
-func consumeUniqueAgentJSONValue(decoder *json.Decoder, depth int) error {
-	if depth > 32 {
+func consumeUniqueJSONValue(
+	decoder *json.Decoder,
+	depth int,
+	maximumDepth int,
+	exactKeys bool,
+	path []string,
+	exactSubtree exactJSONKeySubtree,
+) error {
+	if depth > maximumDepth {
 		return errors.New("JSON nesting exceeds limit")
 	}
 	token, err := decoder.Token()
@@ -1110,12 +1134,27 @@ func consumeUniqueAgentJSONValue(decoder *json.Decoder, depth int) error {
 			if !ok {
 				return errors.New("object key must be a string")
 			}
+			comparisonKey := key
 			foldedKey := foldAgentJSONKey(key)
-			if _, duplicate := seen[foldedKey]; duplicate {
-				return errors.New("duplicate object key")
+			if !exactKeys {
+				comparisonKey = foldedKey
 			}
-			seen[foldedKey] = struct{}{}
-			if err = consumeUniqueAgentJSONValue(decoder, depth+1); err != nil {
+			if _, duplicate := seen[comparisonKey]; duplicate {
+				return fmt.Errorf("duplicate object key %q at %v", key, path)
+			}
+			seen[comparisonKey] = struct{}{}
+			childExactKeys := exactKeys
+			if exactSubtree != nil && exactSubtree(path, foldedKey) {
+				childExactKeys = true
+			}
+			if err = consumeUniqueJSONValue(
+				decoder,
+				depth+1,
+				maximumDepth,
+				childExactKeys,
+				append(path, key),
+				exactSubtree,
+			); err != nil {
 				return err
 			}
 		}
@@ -1125,7 +1164,14 @@ func consumeUniqueAgentJSONValue(decoder *json.Decoder, depth int) error {
 		}
 	case '[':
 		for decoder.More() {
-			if err = consumeUniqueAgentJSONValue(decoder, depth+1); err != nil {
+			if err = consumeUniqueJSONValue(
+				decoder,
+				depth+1,
+				maximumDepth,
+				exactKeys,
+				append(path, "[]"),
+				exactSubtree,
+			); err != nil {
 				return err
 			}
 		}

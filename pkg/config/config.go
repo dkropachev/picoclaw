@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +27,7 @@ import (
 var rrCounter atomic.Uint64
 
 // CurrentVersion is the latest config schema version
-const CurrentVersion = 5
+const CurrentVersion = 6
 
 // ErrNoModelConfigured is returned when model resolution is requested without
 // a configured model alias.
@@ -59,6 +60,7 @@ type Config struct {
 	ModelRouters ModelRouterList `json:"model_routers"       yaml:"model_routers"`
 	Gateway      GatewayConfig   `json:"gateway"             yaml:"-"`
 	Events       EventsConfig    `json:"events,omitempty"    yaml:"events,omitempty"`
+	Reviews      ReviewsConfig   `json:"reviews,omitempty"   yaml:"-"`
 	Workflows    WorkflowsConfig `json:"workflows,omitempty" yaml:"-"`
 	// GitWorkspaces controls the inventory of local git checkouts reused by agent sessions.
 	GitWorkspaces GitWorkspacesConfig `json:"git_workspaces,omitempty" yaml:"-"`
@@ -2262,6 +2264,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V4→V5 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV5ToV6(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V5→V6 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -2281,7 +2287,8 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 
 		migratedFrom = versionInfo.Version
 	case 1:
-		// V1→V5 migration: infer Enabled, migrate channels, and introduce semantic model aliases.
+		// V1→V6 migration: infer Enabled, migrate channels, introduce semantic
+		// model aliases, and admit trusted review-attention policy storage.
 		logger.InfoF(
 			"config migrate start",
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
@@ -2322,6 +2329,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V4→V5 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV5ToV6(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V5→V6 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -2341,7 +2352,8 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 
 		migratedFrom = versionInfo.Version
 	case 2:
-		// V2→V5 migration: migrate channels and introduce semantic model aliases.
+		// V2→V6 migration: migrate channels, introduce semantic model aliases,
+		// and admit trusted review-attention policy storage.
 		logger.InfoF(
 			"config migrate start",
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
@@ -2376,6 +2388,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V4→V5 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV5ToV6(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V5→V6 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -2395,7 +2411,8 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 
 		migratedFrom = versionInfo.Version
 	case 3:
-		// V3→V5 migration: separate account selection and normalize semantic aliases.
+		// V3→V6 migration: separate account selection, normalize semantic
+		// aliases, and admit trusted review-attention policy storage.
 		logger.InfoF(
 			"config migrate start",
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
@@ -2426,6 +2443,10 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V4→V5 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV5ToV6(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V5→V6 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -2442,7 +2463,8 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		}
 		migratedFrom = versionInfo.Version
 	case 4:
-		// V4→V5 migration: remove mechanically generated account/model aliases.
+		// V4→V6 migration: remove mechanically generated account/model aliases,
+		// then admit trusted review-attention policy storage.
 		logger.InfoF(
 			"config migrate start",
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
@@ -2455,6 +2477,9 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		if migrateErr := migrateV4ToV5(m); migrateErr != nil {
 			return nil, fmt.Errorf("V4→V5 migration failed: %w", migrateErr)
 		}
+		if migrateErr := migrateV5ToV6(m); migrateErr != nil {
+			return nil, fmt.Errorf("V5→V6 migration failed: %w", migrateErr)
+		}
 		var migrated []byte
 		migrated, err = json.Marshal(m)
 		if err != nil {
@@ -2463,6 +2488,40 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 		cfg, err = loadConfig(migrated)
 		if err != nil {
 			return nil, err
+		}
+		if err = MakeBackup(path); err != nil {
+			return nil, err
+		}
+		migratedFrom = versionInfo.Version
+	case 5:
+		// V5→V6 is additive and preserves any preview review-attention policy.
+		logger.InfoF(
+			"config migrate start",
+			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
+		)
+		var m map[string]any
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.UseNumber()
+		if err = decoder.Decode(&m); err != nil {
+			return nil, wrapJSONError(data, err, "config.json")
+		}
+		if migrateErr := migrateV5ToV6(m); migrateErr != nil {
+			return nil, fmt.Errorf("V5→V6 migration failed: %w", migrateErr)
+		}
+		var migrated []byte
+		migrated, err = json.Marshal(m)
+		if err != nil {
+			return nil, err
+		}
+		cfg, err = loadConfig(migrated)
+		if err != nil {
+			return nil, err
+		}
+		// V5 was the current schema before this additive migration, so preserve
+		// its existing security-overlay load semantics while advancing to V6.
+		secPath := securityPath(path)
+		if err = loadSecurityConfig(cfg, secPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("failed to load security config: %w", err)
 		}
 		if err = MakeBackup(path); err != nil {
 			return nil, err
@@ -2527,6 +2586,9 @@ func loadConfigWithOptions(path string, validateEventIngressRuntime bool) (*Conf
 	}
 	if err = cfg.ValidateTurnProfile(); err != nil {
 		return nil, err
+	}
+	if err = cfg.Reviews.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid reviews config: %w", err)
 	}
 	cfg.Tools.Adaptation = cfg.Tools.Adaptation.Normalized()
 	cfg.Gateway.Host, err = resolveGatewayHostFromEnv(gatewayHostBeforeEnv)
@@ -2705,6 +2767,12 @@ func SaveConfig(path string, cfg *Config) error {
 }
 
 func saveConfigUnlocked(path string, cfg *Config) error {
+	if cfg == nil {
+		return errors.New("config is required")
+	}
+	if err := cfg.Reviews.Validate(); err != nil {
+		return fmt.Errorf("invalid reviews config: %w", err)
+	}
 	if err := cfg.Events.Ingress.ValidatePublicIdentities(
 		cfg.SensitiveDataValues()...,
 	); err != nil {

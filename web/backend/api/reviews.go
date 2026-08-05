@@ -52,6 +52,20 @@ var reviewListQueryContract = map[string]reviewQueryValidator{
 }
 
 func (h *Handler) registerReviewRoutes(mux *http.ServeMux) {
+	mux.HandleFunc(
+		"GET /api/reviews/attention-policies",
+		h.handleGetReviewAttentionPolicies,
+	)
+	mux.HandleFunc(
+		"PUT /api/reviews/attention-policies",
+		h.handlePutReviewAttentionPolicies,
+	)
+	// Keep an exact method fallback ahead of the case subtree. Without it,
+	// unsupported methods would be interpreted as malformed review-case IDs.
+	mux.HandleFunc(
+		"/api/reviews/attention-policies",
+		h.handleReviewAttentionPoliciesMethodNotAllowed,
+	)
 	mux.HandleFunc("/api/reviews", h.handleReviewList)
 	mux.HandleFunc("/api/reviews/", h.handleReviewSubtree)
 }
