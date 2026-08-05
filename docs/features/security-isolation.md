@@ -38,6 +38,12 @@ sidecar bytes nor runtime/session authority. The browser policy editor keeps
 that projection only in one memory-resident lossless draft, never delegates
 arbitrary question numbers to JavaScript numeric coercion, and cannot launch a
 gate, workflow, model, tool, review action, or repository mutation.
+An automatic outgoing-review attention occurrence keeps its effective policy
+pin and worker fencing state owner-local. The worker establishes that pin from
+trusted configuration before private effects, and every retry strictly
+validates the same bytes rather than granting a database row or reviewed
+checkout fresh policy authority. Only the gate engine's deliberately generated
+bounded human task may declassify configured questions.
 Schema v5 removes aliases mechanically derived from account names or concrete
 model IDs, clears their references rather than guessing replacements, and
 preserves legacy web-search mappings as explicit custom aliases instead of
@@ -74,7 +80,10 @@ materialization fail closed without exposing local paths or payload detail.
   record. A review-attention editor draft is memory-only capability-bearing
   configuration: it preserves accepted JSON number tokens exactly, never
   automatically rebases or retries a stale save, and gains no execution
-  authority from previewing or validating an effective policy.
+  authority from previewing or validating an effective policy. A durable
+  outgoing-review trigger pin is separate owner-local capability state: it is
+  never browser-projected or logged, and corruption fails before private
+  session, model, function, human-task, or run admission.
 
 ## Requirements
 
@@ -116,6 +125,22 @@ skills, subagents, runtime effects, security bytes, local paths, and raw errors
 are unrepresentable. Current-schema loading is inert; stale, legacy, orphaned
 security, invalid agent, malformed header/query, and noncanonical route states
 fail closed without migration, backup, public write, or security-sidecar write.
+
+For `FR-SEC-023`, an automatic outgoing-review occurrence stores at most one
+3-MiB canonical effective-policy pin inside the owner-local event database.
+Only a generation-fenced worker may create that pin from the trusted policy
+source, and it must do so under the current opaque lease before any private
+effect. Every subsequent worker treats the bytes as untrusted persisted state:
+strictly decode one versioned envelope, revalidate the detached resolution,
+recompute its decision digest, and require its independent stored revision to
+match before session projection or workflow admission. A terminal trigger is
+invalid without that exact pin/revision; delivered additionally requires a
+canonical private run ID, while noop forbids one. Trigger rows, policy bytes,
+lease identity/deadline, retry detail, and run linkage have no HTTP, browser,
+event, log, or generic workflow projection. Errors are bounded and sanitized;
+the automatic path invokes no repository or provider write, and only the
+compiler-generated human task deliberately exposes bounded configured
+questions.
 
 For `FR-SEC-023`, infrastructure failure while rechecking a private durable-create
 fence is likewise reduced to a fixed admission-unavailable sentinel; the HTTP
@@ -210,6 +235,7 @@ Owns: TEST pkg/config/version*
 | HTTP / UI | `POST /api/workflows/development/jobs/inspect`, `POST /api/workflows/development/jobs/render`, `/agent/workflows` Jobs & actions/effect review | Transform only exact bounded caller-supplied YAML through a strictly decoded ordered AST projection or one revision-fenced operation; retain unsafe shapes as raw-only, keep all state in the browser/request, and require exact-identity conservative acknowledgement before the separate draft-test endpoint. | `FR-SEC-018` |
 | HTTP / UI | `POST /api/workflows/development/triggers/simulate`, `POST /api/workflows/development/test/execute`, `/agent/workflows` trigger simulator/review | Strictly bound, payload-safe simulation uses a read-only current-config/PID snapshot to produce the only server review token accepted for one exact active draft and scenario; confirmed execution uses an unpruned lazy runtime and rechecks token expiry, identity, config, match, protected-event, and effect state before durable mutation or runtime authority. | `FR-SEC-019` |
 | Workflow / HTTP / SSE / tool | Compiler-private `RunRequest.PrivateRoot`, file-run persistence, run/result/event projections, and the `workflow` tool | Admit and preserve exact owner-local gate evidence, including its rewritten snapshot and strict self-contained `FrozenSet`, while making private invocation context and derived diagnostics unrepresentable on generic observation surfaces; only a bounded generated human task is an explicit declassification. | `FR-SEC-023` |
+| Storage / runtime | `pr_review_attention_triggers`, `eventing.ReviewAttentionTriggerQueue`, `reviews.AttentionTriggerWorker` | Keep one bounded canonical effective-policy pin and fresh lease authority owner-local; create the pin only from a trusted generation before effects, strictly revalidate it on every retry, expose no trigger state publicly, and invoke only the private gate launcher without repository or provider write authority. | `FR-SEC-023` |
 | Config / HTTP / UI | `reviews.attention`, `GET` and `PUT /api/reviews/attention-policies`, `/reviews?view=policies` | Keep gate authority in operator-owned configuration outside reviewed checkouts; expose only bounded non-secret policy plus opaque revisions/effect status, parse and serialize arbitrary question JSON losslessly, and retain the editable projection only in memory. Replace it only through one explicit strict same-origin public-plus-security compare-and-swap that raw-patches only persisted `reviews.attention`, preserves unrelated persisted values and numeric tokens, and leaves security state byte-identical; a conflict retains the local draft for explicit reload/discard and never retries or rebases automatically. Route state contains only the fixed policy-view selector, and editing, validation, effective preview, reload, and discard grant no workflow or provider authority. Broad config GET omits this subresource; broad PUT accepts only an empty compatibility placeholder, broad PATCH rejects the field, and both preserve its exact value during unrelated updates. | `FR-SEC-021` |
 | HTTP | `GET /api/reviews/attention-agents` | Project only one fixed-256 page of canonical configured identity and default metadata, fenced by one strong policy-generation `If-Match` plus an optional canonical offset; broader agent configuration and all security state remain outside the DTO. | `FR-SEC-021` |
 | Workflow / MCP | `agent/*` with `with.tools: none`; `mcp/github/add_issue_comment` | Remove tools from every classifier model path, then permit a GitHub mutation only as a declared conditional MCP step with signed-body identity and fixed output text. The GitHub MCP server and its write credential are configured explicitly and independently from ingress authentication. | `FR-SEC-013` |
@@ -404,6 +430,13 @@ Owns: TEST pkg/config/version*
     If projection authority or private integrity is unavailable, return the
     fixed failure rather than raw fallback. Present only the compiler-generated
     bounded human task when attention is deliberately requested.
+    For automatic outgoing-review attention, commit only the occurrence beside
+    the submitted transition. Under the current worker lease and runtime
+    generation, resolve the first successful trusted policy capture and persist
+    its bounded canonical envelope before private effects. On every attempt,
+    strictly decode, validate, and re-hash the stored pin; a mismatch fails
+    before session or run work. Retain the pin across retry and expose neither
+    it nor lease, error, or linked-run state through public projections or logs.
 
 ## Cross-Feature Behavior
 
@@ -451,7 +484,10 @@ registration and discoverability. Security owns the editor's lossless
 projection, memory-only retention, exact captured-revision save fence, and
 non-execution boundary. A reviewed repository cannot supply or override this
 operator catalog, and neither an effective-policy preview nor an agent choice
-grants model, tool, workflow, repository, provider, or GitHub authority.
+grants model, tool, workflow, repository, provider, or GitHub authority. Event
+automation also owns the outgoing submitted-review occurrence and its worker;
+security requires its persisted policy pin and lease state to remain local,
+strictly revalidated, and unavailable to browser or generic workflow surfaces.
 Git workspace configuration and tool enablement reuse the same config
 normalization and defaulting path, while checkout retention, dirty preservation,
 and workspace inventory security boundaries are owned by the git workspaces
@@ -660,7 +696,7 @@ promise that a provider consumes every materialized modality.
 | `FR-SEC-020` | [pkg/agent/definition_test.go](../../pkg/agent/definition_test.go), [web/backend/api/agent_capabilities_test.go](../../web/backend/api/agent_capabilities_test.go), [web/backend/api/agent_capabilities_cas_test.go](../../web/backend/api/agent_capabilities_cas_test.go), [web/backend/api/agent_capabilities_replace_linux_test.go](../../web/backend/api/agent_capabilities_replace_linux_test.go), [web/backend/api/agent_capabilities_request_test.go](../../web/backend/api/agent_capabilities_request_test.go), [web/backend/api/agent_capabilities_unix_test.go](../../web/backend/api/agent_capabilities_unix_test.go), [pkg/agent/activity_test.go](../../pkg/agent/activity_test.go), [pkg/gateway/agent_activity_test.go](../../pkg/gateway/agent_activity_test.go), [pkg/gateway/listen_test.go](../../pkg/gateway/listen_test.go), [web/backend/api/agent_activity_test.go](../../web/backend/api/agent_activity_test.go), [web/frontend/src/api/agents.test.ts](../../web/frontend/src/api/agents.test.ts) |
 | `FR-SEC-021` | [pkg/config/mutation_test.go](../../pkg/config/mutation_test.go), [web/backend/api/config_writer_cas_test.go](../../web/backend/api/config_writer_cas_test.go), [web/backend/api/review_attention_policies_test.go](../../web/backend/api/review_attention_policies_test.go), [web/backend/api/review_attention_agents_test.go](../../web/backend/api/review_attention_agents_test.go), [cmd/picoclaw/internal/auth/config_revision_test.go](../../cmd/picoclaw/internal/auth/config_revision_test.go), [cmd/picoclaw/internal/mcp/command_test.go](../../cmd/picoclaw/internal/mcp/command_test.go), [cmd/picoclaw/internal/model/command_test.go](../../cmd/picoclaw/internal/model/command_test.go), [web/frontend/src/api/review-attention-agents.test.ts](../../web/frontend/src/api/review-attention-agents.test.ts), [web/frontend/src/api/review-attention-json.test.ts](../../web/frontend/src/api/review-attention-json.test.ts), [web/frontend/src/api/review-attention-policies.test.ts](../../web/frontend/src/api/review-attention-policies.test.ts), [web/frontend/src/components/reviews/review-attention-policy-model.test.ts](../../web/frontend/src/components/reviews/review-attention-policy-model.test.ts), [web/frontend/src/components/reviews/review-attention-policies-page.test.tsx](../../web/frontend/src/components/reviews/review-attention-policies-page.test.tsx), [web/frontend/src/components/reviews/reviews-page.test.tsx](../../web/frontend/src/components/reviews/reviews-page.test.tsx), [web/frontend/src/routes/-reviews.test.ts](../../web/frontend/src/routes/-reviews.test.ts) |
 | `FR-SEC-022` | [pkg/media/store_test.go](../../pkg/media/store_test.go), [pkg/media/snapshot_test.go](../../pkg/media/snapshot_test.go), [pkg/media/frozen_test.go](../../pkg/media/frozen_test.go), [pkg/media/snapshot_file_unix.go](../../pkg/media/snapshot_file_unix.go), [pkg/media/snapshot_file_windows.go](../../pkg/media/snapshot_file_windows.go), [pkg/media/snapshot_file_other.go](../../pkg/media/snapshot_file_other.go), [pkg/session/frozen_media_test.go](../../pkg/session/frozen_media_test.go) |
-| `FR-SEC-023` | [pkg/workflows/private_context.go](../../pkg/workflows/private_context.go), [pkg/workflows/private_session.go](../../pkg/workflows/private_session.go), [pkg/workflows/executor.go](../../pkg/workflows/executor.go), [pkg/workflows/store.go](../../pkg/workflows/store.go), [pkg/workflows/development.go](../../pkg/workflows/development.go), [pkg/workflows/gates_test.go](../../pkg/workflows/gates_test.go), [pkg/workflows/private_context_security_test.go](../../pkg/workflows/private_context_security_test.go), [pkg/workflows/private_session_test.go](../../pkg/workflows/private_session_test.go), [pkg/session/frozen_media_test.go](../../pkg/session/frozen_media_test.go), [pkg/media/frozen_test.go](../../pkg/media/frozen_test.go), [pkg/accountrouter/router.go](../../pkg/accountrouter/router.go), [pkg/accountrouter/router_test.go](../../pkg/accountrouter/router_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/tools/workflow.go](../../pkg/tools/workflow.go), [pkg/reviews/attention_test.go](../../pkg/reviews/attention_test.go), [pkg/eventing/review_decision_run_sqlite_test.go](../../pkg/eventing/review_decision_run_sqlite_test.go), [web/backend/api/workflows.go](../../web/backend/api/workflows.go), [web/backend/api/workflow_run_readiness_test.go](../../web/backend/api/workflow_run_readiness_test.go), [web/backend/api/workflow_runtime.go](../../web/backend/api/workflow_runtime.go), [web/backend/api/workflow_runtime_test.go](../../web/backend/api/workflow_runtime_test.go) |
+| `FR-SEC-023` | [pkg/workflows/private_context.go](../../pkg/workflows/private_context.go), [pkg/workflows/private_session.go](../../pkg/workflows/private_session.go), [pkg/workflows/executor.go](../../pkg/workflows/executor.go), [pkg/workflows/store.go](../../pkg/workflows/store.go), [pkg/workflows/development.go](../../pkg/workflows/development.go), [pkg/workflows/gates_test.go](../../pkg/workflows/gates_test.go), [pkg/workflows/private_context_security_test.go](../../pkg/workflows/private_context_security_test.go), [pkg/workflows/private_session_test.go](../../pkg/workflows/private_session_test.go), [pkg/session/frozen_media_test.go](../../pkg/session/frozen_media_test.go), [pkg/media/frozen_test.go](../../pkg/media/frozen_test.go), [pkg/accountrouter/router.go](../../pkg/accountrouter/router.go), [pkg/accountrouter/router_test.go](../../pkg/accountrouter/router_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/tools/workflow.go](../../pkg/tools/workflow.go), [pkg/reviews/attention_test.go](../../pkg/reviews/attention_test.go), [pkg/eventing/review_decision_run_sqlite_test.go](../../pkg/eventing/review_decision_run_sqlite_test.go), [pkg/eventing/review_attention_trigger_sqlite_test.go](../../pkg/eventing/review_attention_trigger_sqlite_test.go), [pkg/gateway/review_attention_trigger_test.go](../../pkg/gateway/review_attention_trigger_test.go), [web/backend/api/workflows.go](../../web/backend/api/workflows.go), [web/backend/api/workflow_run_readiness_test.go](../../web/backend/api/workflow_run_readiness_test.go), [web/backend/api/workflow_runtime.go](../../web/backend/api/workflow_runtime.go), [web/backend/api/workflow_runtime_test.go](../../web/backend/api/workflow_runtime_test.go) |
 
 ## Implementation Anchors
 

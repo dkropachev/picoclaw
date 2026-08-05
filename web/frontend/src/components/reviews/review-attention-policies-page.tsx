@@ -853,12 +853,12 @@ export function ReviewAttentionPoliciesPage({
               <ConfigChangeNotice
                 kind="save"
                 title={t(
-                  "pages.reviews.policies.inactive_title",
-                  "Policies do not trigger automatically yet",
+                  "pages.reviews.policies.automatic_title",
+                  "Outgoing submitted reviews trigger attention",
                 )}
                 description={t(
-                  "pages.reviews.policies.inactive_description",
-                  "This editor changes trusted gate configuration only. It does not run a gate, call a model, modify a repository, or publish to GitHub.",
+                  "pages.reviews.policies.automatic_description",
+                  "When a PicoClaw workbench review reaches submitted, its review.submitted policy is queued and runs when the attention runtime is active. Editing here never runs a gate, calls a model, modifies a repository, or publishes to GitHub.",
                 )}
               />
               {snapshot.effects.gateway_effect === "restart_required" && (

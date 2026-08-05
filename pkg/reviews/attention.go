@@ -1,11 +1,13 @@
 package reviews
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -19,6 +21,12 @@ const (
 	reviewAttentionWorkflowRef  = "inline/review-attention-gates/v1"
 	maxAttentionDecisionBytes   = 128
 	maxAttentionRevisionBytes   = 256
+	preparedAttentionPolicyV1   = 1
+	// A prepared envelope contains the effective gate inputs plus stable
+	// provenance, source identity, and its decision digest. Keep that wrapper
+	// independently bounded without reducing the workflow compiler's existing
+	// 2 MiB input contract for custom trusted policy sources.
+	maxPreparedAttentionBytes = workflows.MaxWorkflowGateInputsBytes + (1 << 20)
 )
 
 var attentionDecisionPattern = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,127}$`)
@@ -99,6 +107,25 @@ type resolvedAttentionPolicy struct {
 	resolution       *workflows.GatePolicyResolution
 }
 
+// preparedAttentionPolicy is the package-private authority used by the
+// durable trigger worker. Its canonical envelope can be persisted before any
+// model, session, or workflow-run effect and later decoded into the exact same
+// detached policy after a crash or configuration reload.
+//
+// Keeping this type and the prepared launch entry point private prevents an
+// HTTP/API caller from supplying effective gates or a policy revision. The
+// normal Launch method can still only capture policy from AttentionPolicySource.
+type preparedAttentionPolicy struct {
+	canonical []byte
+}
+
+type preparedAttentionPolicyEnvelope struct {
+	Version          int                             `json:"version"`
+	SourceRevision   string                          `json:"source_revision"`
+	DecisionRevision string                          `json:"decision_revision"`
+	Resolution       *workflows.GatePolicyResolution `json:"resolution"`
+}
+
 var errAttentionPolicyChanged = errors.New("review attention policy changed")
 
 func NewAttentionLauncher(config AttentionLauncherConfig) (*AttentionLauncher, error) {
@@ -133,8 +160,72 @@ func (launcher *AttentionLauncher) Launch(
 	ctx context.Context,
 	request AttentionLaunchRequest,
 ) (AttentionLaunchResult, error) {
-	if launcher == nil || launcher.service == nil || launcher.executor == nil ||
-		launcher.policies == nil || launcher.decisions == nil || launcher.runs == nil {
+	prepared, err := launcher.capturePreparedAttentionPolicy(ctx, request, false)
+	if err != nil {
+		return AttentionLaunchResult{}, err
+	}
+	return launcher.launchPreparedAttentionPolicy(ctx, request, prepared, true)
+}
+
+// prepareAttentionPolicy captures policy only through the trusted source and
+// returns its canonical package-private envelope. The trigger worker persists
+// canonical before it calls launchPreparedAttentionPolicy.
+func (launcher *AttentionLauncher) prepareAttentionPolicy(
+	ctx context.Context,
+	request AttentionLaunchRequest,
+) (preparedAttentionPolicy, error) {
+	return launcher.capturePreparedAttentionPolicy(ctx, request, true)
+}
+
+func (launcher *AttentionLauncher) capturePreparedAttentionPolicy(
+	ctx context.Context,
+	request AttentionLaunchRequest,
+	requireCurrentVersion bool,
+) (preparedAttentionPolicy, error) {
+	if !launcher.available() {
+		return preparedAttentionPolicy{}, ErrUnavailable
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validateAttentionLaunchRequest(request); err != nil {
+		return preparedAttentionPolicy{}, err
+	}
+	detail, err := launcher.service.store.GetReviewCase(ctx, request.CaseID)
+	if err != nil {
+		return preparedAttentionPolicy{}, sanitizeAttentionError(ctx, err, false)
+	}
+	if validationErr := validateWorkingContextDetail(request.CaseID, detail); validationErr != nil {
+		return preparedAttentionPolicy{}, ErrUnavailable
+	}
+	if requireCurrentVersion && detail.Case.Version != request.ExpectedCaseVersion {
+		return preparedAttentionPolicy{}, workflows.ErrRunAdmissionConflict
+	}
+	policy, err := launcher.capturePolicy(ctx, AttentionPolicySelector{
+		Repository:    detail.Case.Repository,
+		DecisionPoint: request.DecisionPoint,
+	})
+	if err != nil {
+		return preparedAttentionPolicy{}, sanitizeAttentionError(ctx, err, false)
+	}
+	prepared, err := encodePreparedAttentionPolicy(policy)
+	if err != nil {
+		return preparedAttentionPolicy{}, ErrUnavailable
+	}
+	return prepared, nil
+}
+
+// launchPreparedAttentionPolicy is deliberately package-private. Durable
+// trigger delivery passes revalidateLive=false because the canonical snapshot
+// was already pinned under the trigger lease. Normal Launch passes true and
+// retains the live policy fence at decision-run admission.
+func (launcher *AttentionLauncher) launchPreparedAttentionPolicy(
+	ctx context.Context,
+	request AttentionLaunchRequest,
+	prepared preparedAttentionPolicy,
+	revalidateLive bool,
+) (AttentionLaunchResult, error) {
+	if !launcher.available() {
 		return AttentionLaunchResult{}, ErrUnavailable
 	}
 	if ctx == nil {
@@ -143,7 +234,10 @@ func (launcher *AttentionLauncher) Launch(
 	if err := validateAttentionLaunchRequest(request); err != nil {
 		return AttentionLaunchResult{}, err
 	}
-
+	policy, err := decodePreparedAttentionPolicy(prepared.canonical)
+	if err != nil {
+		return AttentionLaunchResult{}, ErrUnavailable
+	}
 	detail, err := launcher.service.store.GetReviewCase(ctx, request.CaseID)
 	if err != nil {
 		return AttentionLaunchResult{}, sanitizeAttentionError(ctx, err, false)
@@ -154,10 +248,6 @@ func (launcher *AttentionLauncher) Launch(
 	selector := AttentionPolicySelector{
 		Repository:    detail.Case.Repository,
 		DecisionPoint: request.DecisionPoint,
-	}
-	policy, err := launcher.capturePolicy(ctx, selector)
-	if err != nil {
-		return AttentionLaunchResult{}, sanitizeAttentionError(ctx, err, false)
 	}
 	key := eventing.ReviewDecisionKey{
 		CaseID:         request.CaseID,
@@ -223,6 +313,7 @@ func (launcher *AttentionLauncher) Launch(
 			ctx,
 			selector,
 			policy,
+			revalidateLive,
 			key,
 			runID,
 			baseResult,
@@ -261,6 +352,7 @@ func (launcher *AttentionLauncher) Launch(
 				runtimeCtx,
 				selector,
 				policy,
+				revalidateLive,
 				key,
 				runID,
 				baseResult,
@@ -277,6 +369,11 @@ func (launcher *AttentionLauncher) Launch(
 		return AttentionLaunchResult{}, safeErr
 	}
 	return result, nil
+}
+
+func (launcher *AttentionLauncher) available() bool {
+	return launcher != nil && launcher.service != nil && launcher.executor != nil &&
+		launcher.policies != nil && launcher.decisions != nil && launcher.runs != nil
 }
 
 func validateAttentionLaunchRequest(request AttentionLaunchRequest) error {
@@ -335,32 +432,174 @@ func (launcher *AttentionLauncher) capturePolicy(
 func resolveAttentionPolicy(
 	snapshot AttentionPolicySnapshot,
 ) (resolvedAttentionPolicy, error) {
-	if snapshot.Revision == "" || snapshot.Revision != strings.TrimSpace(snapshot.Revision) ||
-		!utf8.ValidString(snapshot.Revision) || len(snapshot.Revision) > maxAttentionRevisionBytes {
+	if !validAttentionSourceRevision(snapshot.Revision) {
 		return resolvedAttentionPolicy{}, errors.New("invalid attention policy revision")
 	}
 	resolution, err := workflows.ResolveGatePolicy(snapshot.Global, snapshot.Repository)
 	if err != nil {
 		return resolvedAttentionPolicy{}, err
 	}
+	decisionRevision, err := attentionPolicyDecisionRevision(snapshot.Revision, resolution)
+	if err != nil {
+		return resolvedAttentionPolicy{}, err
+	}
+	return resolvedAttentionPolicy{
+		sourceRevision:   snapshot.Revision,
+		decisionRevision: decisionRevision,
+		resolution:       resolution,
+	}, nil
+}
+
+func attentionPolicyDecisionRevision(
+	sourceRevision string,
+	resolution *workflows.GatePolicyResolution,
+) (string, error) {
+	if !validAttentionSourceRevision(sourceRevision) || resolution == nil {
+		return "", errors.New("invalid attention policy")
+	}
 	canonical, err := json.Marshal(struct {
 		Version    int                             `json:"version"`
 		Revision   string                          `json:"source_revision"`
 		Resolution *workflows.GatePolicyResolution `json:"resolution"`
 	}{
-		Version:    1,
-		Revision:   snapshot.Revision,
+		Version:    preparedAttentionPolicyV1,
+		Revision:   sourceRevision,
 		Resolution: resolution,
 	})
 	if err != nil {
-		return resolvedAttentionPolicy{}, err
+		return "", err
 	}
 	digest := sha256.Sum256(canonical)
+	return "sha256:" + hex.EncodeToString(digest[:]), nil
+}
+
+func encodePreparedAttentionPolicy(
+	policy resolvedAttentionPolicy,
+) (preparedAttentionPolicy, error) {
+	decisionRevision, err := attentionPolicyDecisionRevision(
+		policy.sourceRevision,
+		policy.resolution,
+	)
+	if err != nil || decisionRevision != policy.decisionRevision ||
+		validatePreparedAttentionResolution(policy.resolution) != nil {
+		return preparedAttentionPolicy{}, errors.New("invalid prepared attention policy")
+	}
+	canonical, err := json.Marshal(preparedAttentionPolicyEnvelope{
+		Version:          preparedAttentionPolicyV1,
+		SourceRevision:   policy.sourceRevision,
+		DecisionRevision: policy.decisionRevision,
+		Resolution:       policy.resolution,
+	})
+	if err != nil || len(canonical) == 0 || len(canonical) > maxPreparedAttentionBytes {
+		return preparedAttentionPolicy{}, errors.New("invalid prepared attention policy")
+	}
+	return preparedAttentionPolicy{canonical: canonical}, nil
+}
+
+func decodePreparedAttentionPolicy(raw []byte) (resolvedAttentionPolicy, error) {
+	if len(raw) == 0 || len(raw) > maxPreparedAttentionBytes ||
+		!bytes.Equal(raw, bytes.TrimSpace(raw)) {
+		return resolvedAttentionPolicy{}, errors.New("invalid prepared attention policy")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	decoder.UseNumber()
+	var envelope preparedAttentionPolicyEnvelope
+	if err := decoder.Decode(&envelope); err != nil {
+		return resolvedAttentionPolicy{}, errors.New("invalid prepared attention policy")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return resolvedAttentionPolicy{}, errors.New("invalid prepared attention policy")
+	}
+	if envelope.Version != preparedAttentionPolicyV1 ||
+		!validAttentionSourceRevision(envelope.SourceRevision) ||
+		validatePreparedAttentionResolution(envelope.Resolution) != nil {
+		return resolvedAttentionPolicy{}, errors.New("invalid prepared attention policy")
+	}
+	decisionRevision, err := attentionPolicyDecisionRevision(
+		envelope.SourceRevision,
+		envelope.Resolution,
+	)
+	if err != nil || envelope.DecisionRevision != decisionRevision {
+		return resolvedAttentionPolicy{}, errors.New("invalid prepared attention policy")
+	}
+	canonical, err := json.Marshal(envelope)
+	if err != nil || !bytes.Equal(raw, canonical) {
+		return resolvedAttentionPolicy{}, errors.New("invalid prepared attention policy")
+	}
 	return resolvedAttentionPolicy{
-		sourceRevision:   snapshot.Revision,
-		decisionRevision: "sha256:" + hex.EncodeToString(digest[:]),
-		resolution:       resolution,
+		sourceRevision:   envelope.SourceRevision,
+		decisionRevision: envelope.DecisionRevision,
+		resolution:       envelope.Resolution,
 	}, nil
+}
+
+func validAttentionSourceRevision(revision string) bool {
+	return revision != "" && revision == strings.TrimSpace(revision) &&
+		utf8.ValidString(revision) && len(revision) <= maxAttentionRevisionBytes
+}
+
+func validatePreparedAttentionResolution(resolution *workflows.GatePolicyResolution) error {
+	if resolution == nil || len(resolution.Effective) > workflows.MaxWorkflowGateCount ||
+		len(resolution.Entries) != len(resolution.Effective) {
+		return errors.New("invalid attention policy resolution")
+	}
+	if _, err := workflows.ResolveGatePolicy(resolution.Effective, nil); err != nil {
+		return err
+	}
+	switch resolution.Mode {
+	case workflows.GatePolicyInherit, workflows.GatePolicyOverlay,
+		workflows.GatePolicyReplace, workflows.GatePolicyDisable:
+	default:
+		return errors.New("invalid attention policy resolution mode")
+	}
+	if resolution.Mode == workflows.GatePolicyDisable && len(resolution.Effective) != 0 {
+		return errors.New("disabled attention policy is not empty")
+	}
+	for index, entry := range resolution.Entries {
+		if entry.ID != resolution.Effective[index].ID || entry.EffectivePosition != index+1 ||
+			entry.GlobalPosition < 0 || entry.GlobalPosition > workflows.MaxWorkflowGateCount ||
+			entry.RepositoryPosition < 0 ||
+			entry.RepositoryPosition > workflows.MaxWorkflowGateCount {
+			return errors.New("invalid attention policy resolution entry")
+		}
+		switch resolution.Mode {
+		case workflows.GatePolicyInherit:
+			if entry.Action != workflows.GatePolicyResolutionInherited ||
+				entry.GlobalPosition != index+1 || entry.RepositoryPosition != 0 {
+				return errors.New("invalid inherited attention policy entry")
+			}
+		case workflows.GatePolicyReplace:
+			if entry.Action != workflows.GatePolicyResolutionSelected ||
+				entry.GlobalPosition != 0 || entry.RepositoryPosition != index+1 {
+				return errors.New("invalid replacement attention policy entry")
+			}
+		case workflows.GatePolicyOverlay:
+			switch entry.Action {
+			case workflows.GatePolicyResolutionInherited:
+				if entry.GlobalPosition == 0 || entry.RepositoryPosition != 0 {
+					return errors.New("invalid overlaid attention policy entry")
+				}
+			case workflows.GatePolicyResolutionReplaced:
+				if entry.GlobalPosition == 0 || entry.RepositoryPosition == 0 {
+					return errors.New("invalid overlaid attention policy entry")
+				}
+			case workflows.GatePolicyResolutionTombstoned:
+				if entry.GlobalPosition == 0 || entry.RepositoryPosition == 0 ||
+					resolution.Effective[index].Kind != workflows.GateZero {
+					return errors.New("invalid overlaid attention policy entry")
+				}
+			case workflows.GatePolicyResolutionAppended:
+				if entry.GlobalPosition != 0 || entry.RepositoryPosition == 0 {
+					return errors.New("invalid overlaid attention policy entry")
+				}
+			default:
+				return errors.New("invalid overlaid attention policy action")
+			}
+		}
+	}
+	return nil
 }
 
 func attentionPolicyIsNoop(specs []workflows.GateSpec) bool {
@@ -452,6 +691,7 @@ func (launcher *AttentionLauncher) launchCompilation(
 	ctx context.Context,
 	selector AttentionPolicySelector,
 	policy resolvedAttentionPolicy,
+	revalidateLive bool,
 	key eventing.ReviewDecisionKey,
 	runID string,
 	baseResult AttentionLaunchResult,
@@ -473,84 +713,92 @@ func (launcher *AttentionLauncher) launchCompilation(
 		if !validAttentionAdmissionCandidate(candidate, runID) {
 			return workflows.ErrRunAdmissionConflict
 		}
+		admit := func(admitCtx context.Context) error {
+			link, existed, admitErr := launcher.decisions.AdmitReviewDecisionRun(
+				admitCtx,
+				eventing.ReviewDecisionRunAdmission{Key: key, RunID: runID},
+				func(createCtx context.Context) error {
+					createCalls := 0
+					var durableCreateErr error
+					checkedCreate := func() error {
+						createCalls++
+						if createCalls != 1 {
+							durableCreateErr = workflows.ErrRunAdmissionUnavailable
+							return durableCreateErr
+						}
+						durableCreateErr = create()
+						return durableCreateErr
+					}
+					var createErr error
+					if baseAdmission != nil {
+						createErr = baseAdmission(createCtx, candidate, checkedCreate)
+					} else {
+						createErr = checkedCreate()
+					}
+					if createErr != nil {
+						return createErr
+					}
+					if durableCreateErr != nil {
+						return durableCreateErr
+					}
+					if createCalls != 1 {
+						return workflows.ErrRunAdmissionUnavailable
+					}
+					return nil
+				},
+			)
+			if admitErr != nil {
+				return admitErr
+			}
+			if existed {
+				linked := link
+				duplicate = &linked
+				// Executor must not execute the duplicate in-memory candidate.
+				return workflows.ErrRunAdmissionConflict
+			}
+			if link.Key != key || link.RunID != runID {
+				return ErrUnavailable
+			}
+			return nil
+		}
+
 		called := 0
 		var callbackErr error
-		policyErr := launcher.policies.WithReviewAttentionPolicy(
-			admissionCtx,
-			selector,
-			func(policyCtx context.Context, snapshot AttentionPolicySnapshot) error {
-				called++
-				if called != 1 || policyCtx == nil {
-					callbackErr = ErrUnavailable
+		var policyErr error
+		if revalidateLive {
+			policyErr = launcher.policies.WithReviewAttentionPolicy(
+				admissionCtx,
+				selector,
+				func(policyCtx context.Context, snapshot AttentionPolicySnapshot) error {
+					called++
+					if called != 1 || policyCtx == nil {
+						callbackErr = ErrUnavailable
+						return callbackErr
+					}
+					if contextErr := policyCtx.Err(); contextErr != nil {
+						callbackErr = contextErr
+						return callbackErr
+					}
+					current, resolveErr := resolveAttentionPolicy(snapshot)
+					if resolveErr != nil {
+						callbackErr = ErrUnavailable
+						return callbackErr
+					}
+					if current.sourceRevision != policy.sourceRevision ||
+						current.decisionRevision != policy.decisionRevision {
+						callbackErr = errAttentionPolicyChanged
+						return callbackErr
+					}
+					callbackErr = admit(policyCtx)
 					return callbackErr
-				}
-				if contextErr := policyCtx.Err(); contextErr != nil {
-					callbackErr = contextErr
-					return callbackErr
-				}
-				current, resolveErr := resolveAttentionPolicy(snapshot)
-				if resolveErr != nil {
-					callbackErr = ErrUnavailable
-					return callbackErr
-				}
-				if current.sourceRevision != policy.sourceRevision ||
-					current.decisionRevision != policy.decisionRevision {
-					callbackErr = errAttentionPolicyChanged
-					return callbackErr
-				}
-				link, existed, admitErr := launcher.decisions.AdmitReviewDecisionRun(
-					policyCtx,
-					eventing.ReviewDecisionRunAdmission{Key: key, RunID: runID},
-					func(createCtx context.Context) error {
-						createCalls := 0
-						var durableCreateErr error
-						checkedCreate := func() error {
-							createCalls++
-							if createCalls != 1 {
-								durableCreateErr = workflows.ErrRunAdmissionUnavailable
-								return durableCreateErr
-							}
-							durableCreateErr = create()
-							return durableCreateErr
-						}
-						var createErr error
-						if baseAdmission != nil {
-							createErr = baseAdmission(createCtx, candidate, checkedCreate)
-						} else {
-							createErr = checkedCreate()
-						}
-						if createErr != nil {
-							return createErr
-						}
-						if durableCreateErr != nil {
-							return durableCreateErr
-						}
-						if createCalls != 1 {
-							return workflows.ErrRunAdmissionUnavailable
-						}
-						return nil
-					},
-				)
-				if admitErr != nil {
-					callbackErr = admitErr
-					return callbackErr
-				}
-				if existed {
-					linked := link
-					duplicate = &linked
-					// Executor must not execute the duplicate in-memory candidate.
-					callbackErr = workflows.ErrRunAdmissionConflict
-					return callbackErr
-				}
-				if link.Key != key || link.RunID != runID {
-					callbackErr = ErrUnavailable
-					return callbackErr
-				}
-				return nil
-			},
-		)
-		if callbackErr != nil {
-			policyErr = callbackErr
+				},
+			)
+			if callbackErr != nil {
+				policyErr = callbackErr
+			}
+		} else {
+			policyErr = admit(admissionCtx)
+			called = 1
 		}
 		if policyErr != nil {
 			switch {

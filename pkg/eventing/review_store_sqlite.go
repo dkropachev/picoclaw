@@ -2285,6 +2285,18 @@ func (s *Store) FinishReviewSubmission(
 		); execErr != nil {
 			return execErr
 		}
+		if input.Status == ReviewSubmissionSubmitted {
+			if enqueueErr := enqueueReviewAttentionTrigger(
+				ctx,
+				conn,
+				input.SubmissionID,
+				submission.CaseID,
+				reviewCase.Version+1,
+				now,
+			); enqueueErr != nil {
+				return enqueueErr
+			}
+		}
 		detail, err = getReviewCaseDetailWith(ctx, conn, submission.CaseID)
 		return err
 	})
@@ -2425,6 +2437,18 @@ func (s *Store) ReconcileReviewSubmission(
 				"%w: review case changed during reconciliation",
 				ErrReviewConflict,
 			)
+		}
+		if input.Resolution == ReviewReconciliationSubmitted {
+			if enqueueErr := enqueueReviewAttentionTrigger(
+				ctx,
+				conn,
+				submission.ID,
+				input.CaseID,
+				input.ExpectedVersion+1,
+				now,
+			); enqueueErr != nil {
+				return enqueueErr
+			}
 		}
 		detail, err = getReviewCaseDetailWith(ctx, conn, input.CaseID)
 		return err

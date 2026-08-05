@@ -2970,7 +2970,7 @@ test("review attention policy route is inert, accessible, and contained on deskt
     page.getByRole("button", { name: "Attention policies" }),
   ).toHaveAttribute("aria-current", "page")
   await expect(
-    page.getByText("Policies do not trigger automatically yet"),
+    page.getByText("Outgoing submitted reviews trigger attention"),
   ).toBeVisible()
   expect(
     await page

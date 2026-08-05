@@ -353,6 +353,20 @@ func newEventAutomationServiceWithReviews(
 			withEventAutomationRuntime(acquireRuntime, submitter.ProcessOne),
 		)
 	}
+	if reviewAttention != nil {
+		attention := &reviews.AttentionTriggerWorker{
+			Queue:       store,
+			Launcher:    reviewAttention,
+			WorkerLabel: "gateway-review-attention",
+		}
+		workers.Add(1)
+		go runEventAutomationWorker(
+			workerCtx,
+			&workers,
+			"review attention",
+			withEventAutomationRuntime(acquireRuntime, attention.ProcessOne),
+		)
+	}
 	if githubPoller != nil {
 		workers.Add(1)
 		go runGitHubNotificationPollWorker(

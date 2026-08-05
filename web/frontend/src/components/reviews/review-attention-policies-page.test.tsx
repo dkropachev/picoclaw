@@ -118,11 +118,11 @@ describe("ReviewAttentionPoliciesPage", () => {
     await act(async () => resolvePolicies(mixedSnapshot()))
 
     expect(
-      await screen.findByText("Policies do not trigger automatically yet"),
+      await screen.findByText("Outgoing submitted reviews trigger attention"),
     ).toBeVisible()
     expect(
       screen.getByText(
-        "This editor changes trusted gate configuration only. It does not run a gate, call a model, modify a repository, or publish to GitHub.",
+        "When a PicoClaw workbench review reaches submitted, its review.submitted policy is queued and runs when the attention runtime is active. Editing here never runs a gate, calls a model, modifies a repository, or publishes to GitHub.",
       ),
     ).toBeVisible()
     await waitFor(() => expect(getReviewAttentionAgents).toHaveBeenCalledOnce())

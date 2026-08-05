@@ -295,6 +295,17 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 	if err = validateSchemaV4(ctx, conn); err != nil {
 		return fmt.Errorf("validate eventing schema v4: %w", err)
 	}
+	if version < 5 {
+		if _, err = conn.ExecContext(ctx, schemaV5); err != nil {
+			return fmt.Errorf("create eventing schema v5: %w", err)
+		}
+		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 5"); err != nil {
+			return fmt.Errorf("record eventing schema v5: %w", err)
+		}
+	}
+	if err = validateSchemaV5(ctx, conn); err != nil {
+		return fmt.Errorf("validate eventing schema v5: %w", err)
+	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit eventing migration: %w", err)
 	}
