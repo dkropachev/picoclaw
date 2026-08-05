@@ -19,6 +19,7 @@ var _ DispatchLeaseRenewer = (*Store)(nil)
 var _ ReviewStore = (*Store)(nil)
 var _ ReviewDecisionRunStore = (*Store)(nil)
 var _ ReviewAttentionTriggerQueue = (*Store)(nil)
+var _ PRDevelopmentCaseStore = (*Store)(nil)
 
 func Open(context.Context, string, ...Option) (*Store, error) {
 	return nil, ErrUnsupportedPlatform
@@ -146,6 +147,27 @@ func (*Store) Replay(context.Context, string) (InsertResult, error) {
 
 func (*Store) Prune(context.Context, time.Time, int) (int64, error) {
 	return 0, ErrUnsupportedPlatform
+}
+
+func (*Store) LookupPRDevelopmentCapture(
+	context.Context,
+	PRDevelopmentCaptureIdentity,
+) (PRDevelopmentCase, bool, error) {
+	return PRDevelopmentCase{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) CapturePRDevelopmentCase(
+	context.Context,
+	PRDevelopmentCaptureInput,
+) (PRDevelopmentCase, bool, error) {
+	return PRDevelopmentCase{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) GetPRDevelopmentCase(
+	context.Context,
+	string,
+) (PRDevelopmentCase, error) {
+	return PRDevelopmentCase{}, ErrUnsupportedPlatform
 }
 
 func (*Store) CaptureReview(

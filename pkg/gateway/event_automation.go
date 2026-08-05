@@ -19,6 +19,7 @@ import (
 	eventwebhook "github.com/sipeed/picoclaw/pkg/eventing/webhook"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/prdevelopment"
 	"github.com/sipeed/picoclaw/pkg/reviews"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
@@ -66,6 +67,18 @@ type eventReviewRuntime struct {
 	mcpArtifactRoot              string
 }
 
+func newEventReviewRuntime(
+	cfg *config.Config,
+	agentLoop *agent.AgentLoop,
+	attentionPolicies reviews.AttentionPolicySource,
+) eventReviewRuntime {
+	runtime := eventReviewRuntime{attentionPolicies: attentionPolicies}
+	if agentLoop != nil {
+		runtime.mcpArtifactRoot = githubMCPArtifactRoot(cfg, agentLoop)
+	}
+	return runtime
+}
+
 func setupEventAutomationService(
 	ctx context.Context,
 	cfg *config.Config,
@@ -103,7 +116,7 @@ func setupEventAutomationService(
 			return agentLoop.AcquireRuntimeGeneration(workerCtx, cfg)
 		}
 	}
-	reviewRuntime := eventReviewRuntime{attentionPolicies: attentionPolicies}
+	reviewRuntime := newEventReviewRuntime(cfg, agentLoop, attentionPolicies)
 	if agentLoop != nil {
 		reviewRuntime.agent = agent.NewWorkflowAgentRunner(agentLoop)
 		defaultAgent, err := defaultReviewRuntimeAgent(agentLoop)
@@ -339,7 +352,19 @@ func newEventAutomationServiceWithReviews(
 			DefinitionsDir:       executor.DefinitionsDir,
 			RuntimeCompatibility: executor.RuntimeCompatibility,
 			WorkerLabel:          "gateway-workflow-dispatcher",
-			ReviewSink:           &reviews.CaptureSink{Store: store},
+			SucceededRunSink: workflows.SucceededEventRunSinkFanout{
+				&reviews.CaptureSink{Store: store},
+				&prdevelopment.CaptureSink{
+					Store: store,
+					Verifier: &prdevelopment.GitHubVerifier{
+						Runner: executor.Tools,
+						ArtifactRoot: effectiveGitHubMCPArtifactRoot(
+							cfg,
+							reviewRuntime.mcpArtifactRoot,
+						),
+					},
+				},
+			},
 		}
 
 		workers.Add(2)

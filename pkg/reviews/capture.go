@@ -39,7 +39,7 @@ type ReviewCapturer interface {
 	) (eventing.ReviewCase, bool, error)
 }
 
-// CaptureSink implements workflows.EventReviewSink over the durable event
+// CaptureSink implements workflows.SucceededEventRunSink over the durable event
 // store. A workflow without the reserved output is deliberately ignored.
 type CaptureSink struct {
 	Store ReviewCapturer
@@ -216,4 +216,4 @@ func validGitObjectID(value string) bool {
 	return true
 }
 
-var _ workflows.EventReviewSink = (*CaptureSink)(nil)
+var _ workflows.SucceededEventRunSink = (*CaptureSink)(nil)

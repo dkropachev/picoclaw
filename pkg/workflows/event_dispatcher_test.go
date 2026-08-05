@@ -653,9 +653,9 @@ func TestEventWorkflowDispatcherCapturesReviewBeforeFinishingDispatch(t *testing
 			return &RunResult{RunID: req.RunID, Status: RunStatusSucceeded}, nil
 		},
 	}
-	sink := &recordingEventReviewSink{store: fixture.store}
+	sink := &recordingSucceededEventRunSink{store: fixture.store}
 	dispatcher := fixture.dispatcher(executor)
-	dispatcher.ReviewSink = sink
+	dispatcher.SucceededRunSink = sink
 
 	processed, err := dispatcher.ProcessOne(context.Background())
 	if err != nil || !processed {
@@ -692,7 +692,7 @@ func TestEventWorkflowDispatcherRetriesWhenReviewCaptureFails(t *testing.T) {
 		},
 	}
 	dispatcher := fixture.dispatcher(executor)
-	dispatcher.ReviewSink = &recordingEventReviewSink{
+	dispatcher.SucceededRunSink = &recordingSucceededEventRunSink{
 		store: fixture.store,
 		err:   errEventTestReviewCapture,
 	}
@@ -709,6 +709,138 @@ func TestEventWorkflowDispatcherRetriesWhenReviewCaptureFails(t *testing.T) {
 	if pending.Status != eventing.DispatchPending ||
 		!strings.Contains(pending.LastError, errEventTestReviewCapture.Error()) {
 		t.Fatalf("dispatch after capture failure = %#v, want pending retry", pending)
+	}
+}
+
+func TestEventWorkflowDispatcherRetriesCompleteSinkFanoutWithoutRerunningWorkflow(
+	t *testing.T,
+) {
+	fixture := newEventDispatchFixture(t, "dispatcher-sink-fanout-retry")
+	executor := &recordingEventExecutor{
+		run: func(_ context.Context, req RunRequest) (*RunResult, error) {
+			createAndLinkEventTestRun(t, req, fixture.runStore, &Run{
+				ID:          req.RunID,
+				WorkflowRef: req.WorkflowRef,
+				Status:      RunStatusSucceeded,
+			})
+			return &RunResult{RunID: req.RunID, Status: RunStatusSucceeded}, nil
+		},
+	}
+	first := &recordingSucceededEventRunSink{store: fixture.store}
+	second := &recordingSucceededEventRunSink{
+		store: fixture.store,
+		err:   errEventTestReviewCapture,
+	}
+	dispatcher := fixture.dispatcher(executor)
+	dispatcher.SucceededRunSink = SucceededEventRunSinkFanout{first, second}
+
+	processed, err := dispatcher.ProcessOne(context.Background())
+	if !processed || !errors.Is(err, errEventTestReviewCapture) {
+		t.Fatalf("first ProcessOne() = %v, %v, want second-sink failure", processed, err)
+	}
+	if first.calls != 1 || second.calls != 1 {
+		t.Fatalf("first fanout calls = %d, %d, want 1, 1", first.calls, second.calls)
+	}
+	if pending := fixture.getDispatch(t); pending.Status != eventing.DispatchPending {
+		t.Fatalf("dispatch after second-sink failure = %#v, want pending", pending)
+	}
+
+	second.err = nil
+	fixture.clock.Advance(time.Second)
+	processed, err = dispatcher.ProcessOne(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("second ProcessOne() = %v, %v, want successful reconciliation", processed, err)
+	}
+	if first.calls != 2 || second.calls != 2 {
+		t.Fatalf("retried fanout calls = %d, %d, want 2, 2", first.calls, second.calls)
+	}
+	if len(executor.Requests()) != 1 {
+		t.Fatalf("executor requests = %d, want no workflow rerun", len(executor.Requests()))
+	}
+	if finished := fixture.getDispatch(t); finished.Status != eventing.DispatchSucceeded {
+		t.Fatalf("dispatch after complete fanout = %#v, want succeeded", finished)
+	}
+}
+
+func TestSucceededEventRunSinkFanoutInvokesInOrderAndStopsOnFailure(t *testing.T) {
+	var order []string
+	injected := errors.New("injected second sink failure")
+	first := &orderedSucceededEventRunSink{name: "first", order: &order}
+	second := &orderedSucceededEventRunSink{
+		name: "second", order: &order, err: injected,
+	}
+	third := &orderedSucceededEventRunSink{name: "third", order: &order}
+	fanout := SucceededEventRunSinkFanout{first, nil, second, third}
+
+	err := fanout.CaptureSucceededEventRun(
+		context.Background(),
+		eventing.Envelope{ID: "ev_00112233445566778899aabbccddeeff"},
+		eventing.Dispatch{ID: "dsp_00112233445566778899aabbccddeeff"},
+		&Run{ID: "wr_00112233445566778899aabbccddeeff"},
+	)
+	if !errors.Is(err, injected) {
+		t.Fatalf("fanout error = %v, want injected failure", err)
+	}
+	if got, want := strings.Join(order, ","), "first,second"; got != want {
+		t.Fatalf("fanout order = %q, want %q", got, want)
+	}
+	if first.calls != 1 || second.calls != 1 || third.calls != 0 {
+		t.Fatalf(
+			"fanout calls = first:%d second:%d third:%d, want 1,1,0",
+			first.calls,
+			second.calls,
+			third.calls,
+		)
+	}
+}
+
+func TestSucceededEventRunSinkFanoutDeepClonesTypedContainers(t *testing.T) {
+	leaseUntil := time.Date(2026, time.August, 5, 18, 0, 0, 0, time.UTC)
+	raw := json.RawMessage(`{"trusted":true}`)
+	first := succeededEventRunSinkFunc(func(
+		_ context.Context,
+		event eventing.Envelope,
+		dispatch eventing.Dispatch,
+		run *Run,
+	) error {
+		event.Attributes["trusted"] = "changed"
+		*dispatch.LeaseUntil = dispatch.LeaseUntil.Add(time.Hour)
+		run.Outputs["strings"].([]string)[0] = "changed"
+		run.Outputs["string_map"].(map[string]string)["trusted"] = "changed"
+		run.Outputs["bytes"].([]byte)[0] = 9
+		run.Outputs["raw"].(json.RawMessage)[2] = 'x'
+		return nil
+	})
+	second := succeededEventRunSinkFunc(func(
+		_ context.Context,
+		event eventing.Envelope,
+		dispatch eventing.Dispatch,
+		run *Run,
+	) error {
+		if event.Attributes["trusted"] != "true" ||
+			dispatch.LeaseUntil == nil || !dispatch.LeaseUntil.Equal(leaseUntil) ||
+			run.Outputs["strings"].([]string)[0] != "original" ||
+			run.Outputs["string_map"].(map[string]string)["trusted"] != "true" ||
+			run.Outputs["bytes"].([]byte)[0] != 1 ||
+			string(run.Outputs["raw"].(json.RawMessage)) != string(raw) {
+			t.Fatalf("second sink observed a container mutation: event=%#v dispatch=%#v run=%#v", event, dispatch, run)
+		}
+		return nil
+	})
+	fanout := SucceededEventRunSinkFanout{first, second}
+	err := fanout.CaptureSucceededEventRun(
+		context.Background(),
+		eventing.Envelope{Attributes: map[string]string{"trusted": "true"}},
+		eventing.Dispatch{LeaseUntil: &leaseUntil},
+		&Run{Outputs: map[string]any{
+			"strings":    []string{"original"},
+			"string_map": map[string]string{"trusted": "true"},
+			"bytes":      []byte{1, 2, 3},
+			"raw":        raw,
+		}},
+	)
+	if err != nil {
+		t.Fatalf("CaptureSucceededEventRun() error = %v", err)
 	}
 }
 
@@ -1861,7 +1993,7 @@ type eventDispatchFixture struct {
 	runStore  *FileRunStore
 }
 
-type recordingEventReviewSink struct {
+type recordingSucceededEventRunSink struct {
 	store           *eventing.Store
 	err             error
 	calls           int
@@ -1871,7 +2003,41 @@ type recordingEventReviewSink struct {
 	statusAtCapture eventing.DispatchStatus
 }
 
-func (s *recordingEventReviewSink) CaptureSucceededEventRun(
+type orderedSucceededEventRunSink struct {
+	name  string
+	order *[]string
+	err   error
+	calls int
+}
+
+type succeededEventRunSinkFunc func(
+	context.Context,
+	eventing.Envelope,
+	eventing.Dispatch,
+	*Run,
+) error
+
+func (capture succeededEventRunSinkFunc) CaptureSucceededEventRun(
+	ctx context.Context,
+	event eventing.Envelope,
+	dispatch eventing.Dispatch,
+	run *Run,
+) error {
+	return capture(ctx, event, dispatch, run)
+}
+
+func (s *orderedSucceededEventRunSink) CaptureSucceededEventRun(
+	context.Context,
+	eventing.Envelope,
+	eventing.Dispatch,
+	*Run,
+) error {
+	s.calls++
+	*s.order = append(*s.order, s.name)
+	return s.err
+}
+
+func (s *recordingSucceededEventRunSink) CaptureSucceededEventRun(
 	ctx context.Context,
 	envelope eventing.Envelope,
 	dispatch eventing.Dispatch,

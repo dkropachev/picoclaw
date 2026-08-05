@@ -50,6 +50,14 @@ one opaque actionable response fence. The launcher replaces browser authority
 before reaching the protected gateway; every private identifier and diagnostic
 remains server-side, and exact reserved attention runs are absent from generic
 workflow observation and mutation surfaces.
+Incoming feedback on the configured user's own PR has a separate read-only
+capture boundary. Exact-body webhook authentication and a bounded provider
+re-read can bind one review database ID, author, state, commit, time, URL, and
+current PR/fork/head snapshot, but they do not make the review body trusted
+instructions or grant model, checkout, repository, or GitHub-write authority.
+The current GitHub MCP review result omits the webhook node ID and its comment
+result omits a parent review database ID, so capture preserves the former only
+as trigger evidence and claims no inline comment-to-review association.
 Schema v5 removes aliases mechanically derived from account names or concrete
 model IDs, clears their references rather than guessing replacements, and
 preserves legacy web-search mappings as explicit custom aliases instead of
@@ -72,7 +80,10 @@ materialization fail closed without exposing local paths or payload detail.
 - Security boundaries also include compiler-only private workflow admission,
   integrity-bound local context and frozen-media persistence, pseudonymous
   provider affinity, mandatory observation projection, and the case-owned
-  attention response fence plus generic-workflow suppression boundary.
+  attention response fence plus generic-workflow suppression boundary. The
+  own-PR intake boundary additionally includes exact signed-routing validation,
+  a generation-fenced read-only GitHub provider snapshot, strict bounded JSON
+  or confined regular-file artifact consumption, and immutable local capture.
 - Runtime ordering: load security config, normalize protected values, validate
   access or target, execute guarded storage/network/process operation, redact
   sensitive output, and emit clear errors; for frozen media, preflight the
@@ -91,6 +102,10 @@ materialization fail closed without exposing local paths or payload detail.
   outgoing-review trigger pin is separate owner-local capability state: it is
   never browser-projected or logged, and corruption fails before private
   session, model, function, human-task, or run admission.
+  A provider-verified own-PR case is still data, not authority: review text is
+  never interpreted during capture, the workflow marker is only explicit local
+  opt-in, and every future checkout or provider action must establish its own
+  current authority rather than inheriting trust from either record.
   An attention response token is not a task identifier: it is a scoped digest
   over the exact server-loaded case-to-waiting-task chain, is issued only while
   that one task is actionable, remains memory-only in the browser, and grants no
@@ -254,6 +269,7 @@ Owns: TEST pkg/config/version*
 | Config | `events.ingress.webhooks.*.{format,secret}` | JSON-owned `standard`/`github` format plus masked JSON and secure-YAML merge/preservation for the corresponding per-connector secret, without security-only connector resurrection. | `FR-SEC-010`, `FR-SEC-012` |
 | HTTP | `GET /api/config`, `PUT /api/config`, `PATCH /api/config` | Management reads expose `[NOT_HERE]`; omitted or masked webhook secrets preserve the current value, and a concrete replacement rotates it through the same secure persistence path. | `FR-SEC-010` |
 | HTTP | `POST /webhooks/events/{connector}` with `format: github` | Exact-body HMAC-SHA256 authentication, bounded parsing, explicit unauthenticated-header metadata, and durable delivery-ID deduplication behind trusted TLS. | `FR-SEC-012` |
+| Workflow / MCP / storage | `github-pr-development`, `prdevelopment.GitHubVerifier`, `pr_development_cases` | Treat the signed review projection and provider-returned body as untrusted data; use only exact generation-fenced read calls and bounded strict JSON from an inline result or confined artifact to bind review-level identity and current PR/fork/head facts; retain the webhook node ID as trigger evidence only; and grant no model, inline-comment association, checkout, repository mutation, or provider-write authority. | `FR-SEC-012` |
 | HTTP / CLI | protected `/runtime/eventing/*`, launcher `/api/events*`, `picoclaw events *` | Translate authenticated launcher or owner-local PID authority into bounded live-gateway operator calls without exposing PID credentials, lease tokens, deduplication keys, or automatically fetched payloads. | `FR-SEC-014` |
 | HTTP / UI | `/api/workflows/definitions/inspect`, `/api/workflows/templates/{name}/inspect`, `/agent/workflows` | Return and render one non-cacheable, fixed-code, bounded structural projection without exposing definition source, sensitive values, source paths, event payloads, or raw internal errors. | `FR-SEC-016` |
 | HTTP / UI | protected `/runtime/workflows/authoring/capabilities`, launcher `/api/workflows/authoring/capabilities`, `/agent/workflows` | Translate the authenticated dashboard session into one bounded live-generation catalog containing only exact targets, fixed readiness, and typed parameter shapes; the browser can search and copy a ready target but cannot invoke it from this surface. | `FR-SEC-017` |
@@ -323,6 +339,12 @@ Owns: TEST pkg/config/version*
     Treat the signed GitHub body projection as untrusted data, validate the
     required enum/enum/boolean result locally, and only then evaluate the
     separately declared MCP action using signed-body identity and fixed text.
+    For own-PR development intake, treat the installed workflow output only as
+    an opt-in marker, strictly validate the complete signed routing identity,
+    consume only bounded exact JSON from the generation-fenced read-only GitHub
+    tool, and compare exposed provider fields before immutable capture. Never
+    infer the missing provider review node or inline-comment parent identity,
+    and never pass review feedback to a model or action in this capture stage.
 12. Wrap the live event operator controller in the gateway's existing
     constant-time PID bearer check. The launcher validates its dashboard
     session and affirmative same-origin replay metadata, allow-lists the path
@@ -548,6 +570,15 @@ run to remain absent from generic workflow routes and ordinary retention, direct
 hidden relationships to be scrubbed, and transitive relationship components to
 be mutation-fenced. This outgoing-review bridge
 does not establish an inbound own-PR feedback/development-case contract.
+Event automation's separate own-PR development-capture contract establishes
+only immutable provider-verified review-level intake. Workflows own its
+explicit installed read-only trigger/action/output and ordered idempotent sink
+handoff. Security requires the webhook and provider bodies to remain untrusted
+data, the provider read to bind only the exposed database identity and current
+PR/review facts, the trigger node ID never to be relabelled provider-verified,
+and absent parent-review identity on inline comments never to be guessed. This
+stage provides no browser/API/CLI chat, gate, model, checkout, edit, push,
+merge, acknowledgement, or GitHub action authority.
 Git workspace configuration and tool enablement reuse the same config
 normalization and defaulting path, while checkout retention, dirty preservation,
 and workspace inventory security boundaries are owned by the git workspaces
@@ -657,6 +688,12 @@ promise that a provider consumes every materialized modality.
   repository text trusted instructions. Unsupported no-tool modes fail
   validation; classifier output that fails its enum/boolean contract cannot
   invoke a hidden fallback action.
+- A valid signature or successful provider read likewise does not make own-PR
+  review feedback instructions or development authority. Missing, duplicate,
+  trailing, malformed, deep, or oversized provider data; an unsafe confined
+  artifact; exact review/PR mismatch; or bounded review-scan exhaustion fails
+  before case creation. Provider omission of review node and inline parent
+  identity is preserved as a stated limitation rather than guessed linkage.
 - Installing the issue-triage template never enables ingress or MCP. The
   declared GitHub action fails normally when its explicitly enabled,
   non-deferred MCP capability or separate write credential is unavailable; it
@@ -767,7 +804,7 @@ promise that a provider consumes every materialized modality.
 | `FR-SEC-009` | [pkg/auth/oauth_test.go](../../pkg/auth/oauth_test.go), [web/backend/api/oauth_test.go](../../web/backend/api/oauth_test.go) |
 | `FR-SEC-010` | [pkg/config/events_test.go](../../pkg/config/events_test.go), [pkg/config/events_secret_identity_test.go](../../pkg/config/events_secret_identity_test.go), [pkg/eventing/webhook/controller_test.go](../../pkg/eventing/webhook/controller_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [web/backend/api/config_test.go](../../web/backend/api/config_test.go), [web/backend/api/config_event_webhook_deferred_test.go](../../web/backend/api/config_event_webhook_deferred_test.go) |
 | `FR-SEC-011` | [pkg/config/events_channels_test.go](../../pkg/config/events_channels_test.go), [pkg/eventing/channelmessage/backend_test.go](../../pkg/eventing/channelmessage/backend_test.go), [pkg/channels/deltachat/deltachat_test.go](../../pkg/channels/deltachat/deltachat_test.go), [pkg/gateway/event_channel_test.go](../../pkg/gateway/event_channel_test.go) |
-| `FR-SEC-012` | [pkg/config/events_webhook_format_test.go](../../pkg/config/events_webhook_format_test.go), [pkg/eventing/webhook/github_test.go](../../pkg/eventing/webhook/github_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go) |
+| `FR-SEC-012` | [pkg/config/events_webhook_format_test.go](../../pkg/config/events_webhook_format_test.go), [pkg/eventing/webhook/github_test.go](../../pkg/eventing/webhook/github_test.go), [pkg/eventing/webhook/handler_store_test.go](../../pkg/eventing/webhook/handler_store_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [pkg/prdevelopment/capture_test.go](../../pkg/prdevelopment/capture_test.go), [pkg/gateway/pr_development_capture_test.go](../../pkg/gateway/pr_development_capture_test.go) |
 | `FR-SEC-013` | [pkg/workflows/validator_test.go](../../pkg/workflows/validator_test.go), [pkg/workflows/executor_test.go](../../pkg/workflows/executor_test.go), [pkg/workflows/agent_output_test.go](../../pkg/workflows/agent_output_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/workflows/templates_test.go](../../pkg/workflows/templates_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go) |
 | `FR-SEC-014` | [pkg/health/server_test.go](../../pkg/health/server_test.go), [pkg/eventing/operator](../../pkg/eventing/operator), [pkg/gateway/event_operator_test.go](../../pkg/gateway/event_operator_test.go), [web/backend/api/events_test.go](../../web/backend/api/events_test.go), [cmd/picoclaw/internal/events](../../cmd/picoclaw/internal/events) |
 | `FR-SEC-015` | [pkg/fileutil/file_test.go](../../pkg/fileutil/file_test.go), [pkg/fileutil/durable.go](../../pkg/fileutil/durable.go), [pkg/fileutil/durable_unix.go](../../pkg/fileutil/durable_unix.go), [pkg/fileutil/durable_windows.go](../../pkg/fileutil/durable_windows.go) |
@@ -789,6 +826,8 @@ promise that a provider consumes every materialized modality.
 - [pkg/config/model_selection_compatibility.go](../../pkg/config/model_selection_compatibility.go)
 - [pkg/config/mutation.go](../../pkg/config/mutation.go)
 - [pkg/config/events.go](../../pkg/config/events.go)
+- [pkg/prdevelopment/capture.go](../../pkg/prdevelopment/capture.go)
+- [pkg/prdevelopment/github.go](../../pkg/prdevelopment/github.go)
 - [web/backend/api/config.go](../../web/backend/api/config.go)
 - [web/backend/api/review_attention_policies.go](../../web/backend/api/review_attention_policies.go)
 - [web/frontend/src/api/review-attention-json.ts](../../web/frontend/src/api/review-attention-json.ts)
