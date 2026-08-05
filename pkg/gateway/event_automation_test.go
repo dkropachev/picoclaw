@@ -79,8 +79,15 @@ func TestGitHubMCPConsumersUseExplicitDefaultAgentWorkspace(t *testing.T) {
 		t.Fatalf("githubMCPArtifactRoot() = %q, want %q", gotRoot, wantRoot)
 	}
 
+	runtime := newEventReviewRuntime(cfg, agentLoop, nil)
+	if runtime.mcpArtifactRoot != wantRoot {
+		t.Fatalf(
+			"initial review runtime artifact root = %q, want %q",
+			runtime.mcpArtifactRoot,
+			wantRoot,
+		)
+	}
 	runner := &gatewayNotificationPollRunner{}
-	runtime := eventReviewRuntime{}
 	configureGitHubMCPReviewRuntime(&runtime, runner, gotRoot, true, true)
 	if runtime.notificationMCP == nil || runtime.mcpArtifactRoot != wantRoot {
 		t.Fatalf("notification runtime = %#v, want custom artifact root", runtime)

@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/eventing"
 )
 
 func TestInstallCodeReviewWorkflowWritesValidLocalDefinition(t *testing.T) {
@@ -29,6 +31,156 @@ func TestInstallGitHubPRReviewWorkflowWritesValidLocalDefinition(t *testing.T) {
 		GitHubPRReviewWorkflowRef,
 		InstallGitHubPRReviewWorkflow,
 	)
+}
+
+func TestInstallGitHubPRDevelopmentWorkflowWritesValidLocalDefinition(t *testing.T) {
+	testInstallWorkflowTemplate(
+		t,
+		GitHubPRDevelopmentWorkflowRef,
+		InstallGitHubPRDevelopmentWorkflow,
+	)
+}
+
+func TestGitHubPRDevelopmentWorkflowCapturesOnlyAuthenticatedOwnPRFeedback(
+	t *testing.T,
+) {
+	workflow := parseWorkflow(t, GitHubPRDevelopmentWorkflowYAML)
+	trigger := workflow.On.Event
+	if trigger == nil ||
+		!reflect.DeepEqual(trigger.Sources, StringList{"github"}) ||
+		!reflect.DeepEqual(
+			trigger.Types,
+			StringList{"pull_request_review.submitted"},
+		) {
+		t.Fatalf("event trigger = %#v, want GitHub submitted review", trigger)
+	}
+	wantAttributes := map[string]StringList{
+		"source_authenticated":          {"true"},
+		"body_authenticated":            {"true"},
+		"targets_user":                  {"true"},
+		"pull_request_author_is_target": {"true"},
+		"review_author_is_target":       {"false"},
+		"target_reason":                 {"*review_feedback*"},
+	}
+	if !reflect.DeepEqual(trigger.Attributes, wantAttributes) {
+		t.Fatalf("event attributes = %#v, want %#v", trigger.Attributes, wantAttributes)
+	}
+	matching := eventing.Envelope{
+		Source: "github",
+		Type:   "pull_request_review.submitted",
+		Attributes: map[string]string{
+			"source_authenticated":          "true",
+			"body_authenticated":            "true",
+			"targets_user":                  "true",
+			"pull_request_author_is_target": "true",
+			"review_author_is_target":       "false",
+			"target_reason":                 "requested_reviewer,review_feedback",
+		},
+	}
+	if !WorkflowMatchesEvent(workflow, matching) {
+		t.Fatalf("workflow did not match authenticated own-PR feedback: %#v", matching)
+	}
+	for name, mutate := range map[string]func(*eventing.Envelope){
+		"wrong event": func(value *eventing.Envelope) {
+			value.Type = "pull_request_review.edited"
+		},
+		"untrusted body": func(value *eventing.Envelope) {
+			value.Attributes["body_authenticated"] = "false"
+		},
+		"not targeted": func(value *eventing.Envelope) {
+			value.Attributes["targets_user"] = "false"
+		},
+		"another author": func(value *eventing.Envelope) {
+			value.Attributes["pull_request_author_is_target"] = "false"
+		},
+		"self review": func(value *eventing.Envelope) {
+			value.Attributes["review_author_is_target"] = "true"
+		},
+		"unrelated target reason": func(value *eventing.Envelope) {
+			value.Attributes["target_reason"] = "mention"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := matching.Clone()
+			mutate(&candidate)
+			if WorkflowMatchesEvent(workflow, candidate) {
+				t.Fatalf("workflow matched excluded event: %#v", candidate)
+			}
+		})
+	}
+	if workflow.On.WorkflowCall == nil ||
+		workflow.On.WorkflowCall.Outputs["picoclawDevelopmentCapture"].Value != "v1" {
+		t.Fatalf("workflow outputs = %#v, want exact v1 capture marker", workflow.On.WorkflowCall)
+	}
+	job, ok := workflow.Jobs["capture"]
+	if !ok || len(job.Steps) != 1 {
+		t.Fatalf("capture job = %#v, want one read-only step", job)
+	}
+	step := job.Steps[0]
+	if step.Uses != "mcp/github/pull_request_read" ||
+		step.With["method"] != "get" ||
+		step.With["owner"] != "${{ event.payload.repository.owner.login }}" ||
+		step.With["repo"] != "${{ event.payload.repository.name }}" ||
+		step.With["pullNumber"] != "${{ event.payload.pull_request.number }}" {
+		t.Fatalf("capture step = %#v, want exact read-only pull request call", step)
+	}
+
+	toolRunner := &githubPRDevelopmentToolRunner{}
+	result, err := (&Executor{
+		WorkspaceDir: t.TempDir(),
+		Tools:        toolRunner,
+	}).Run(context.Background(), RunRequest{
+		Workflow:    workflow,
+		WorkflowRef: GitHubPRDevelopmentWorkflowRef,
+		Event: map[string]any{
+			"id": "ev_00112233445566778899aabbccddeeff",
+			"payload": map[string]any{
+				"repository": map[string]any{
+					"owner": map[string]any{"login": "octo-org"},
+					"name":  "octo-repo",
+				},
+				"pull_request": map[string]any{"number": json.Number("42")},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run(GitHub PR development) error = %v", err)
+	}
+	if result.Status != RunStatusSucceeded ||
+		result.Outputs["picoclawDevelopmentCapture"] != "v1" {
+		t.Fatalf("development result = %#v, want successful exact v1 marker", result)
+	}
+	if len(toolRunner.requests) != 1 {
+		t.Fatalf("tool requests = %#v, want one read-only GitHub call", toolRunner.requests)
+	}
+	request := toolRunner.requests[0]
+	if request.Name != "mcp_github_pull_request_read" ||
+		!request.MCP ||
+		request.MCPServer != "github" ||
+		request.MCPTool != "pull_request_read" ||
+		request.Args["method"] != "get" ||
+		request.Args["owner"] != "octo-org" ||
+		request.Args["repo"] != "octo-repo" ||
+		fmt.Sprint(request.Args["pullNumber"]) != "42" {
+		t.Fatalf("tool request = %#v, want exact read-only pull request request", request)
+	}
+}
+
+type githubPRDevelopmentToolRunner struct {
+	requests []ToolRequest
+}
+
+func (r *githubPRDevelopmentToolRunner) RunTool(
+	_ context.Context,
+	req ToolRequest,
+) (map[string]any, error) {
+	r.requests = append(r.requests, req)
+	return map[string]any{
+		"number":   req.Args["pullNumber"],
+		"owner":    req.Args["owner"],
+		"repo":     req.Args["repo"],
+		"readOnly": true,
+	}, nil
 }
 
 func testInstallWorkflowTemplate(

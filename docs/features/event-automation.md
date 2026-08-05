@@ -60,6 +60,17 @@ filter to select inbound review feedback without asking a model to interpret
 the raw payload. This is routing metadata only: it creates no development case,
 checkout, model call, edit, push, merge, or GitHub action.
 
+After an operator explicitly installs `github-pr-development`, that ordinary
+workflow can opt a successful matching run into a separate read-only capture
+boundary with the reserved `picoclawDevelopmentCapture: v1` output. Before the
+dispatch is acknowledged, the gateway independently re-reads the exact review
+database ID and current pull request through the generation-fenced GitHub MCP
+reader, then stores one immutable review-level development case with the
+current base/head repository, ref, and commit facts. The review body remains
+untrusted feedback, not instructions or authority. This capture stage exposes
+no UI, PR chat, gate, checkout, model call, edit, commit, push, merge, or GitHub
+write action.
+
 An explicitly installed PR-review workflow turns targeted authenticated review
 requests into structured local drafts. Review cases, editable/droppable
 findings, append-only chat/rephrase history, and an immutable submission outbox
@@ -146,7 +157,10 @@ otherwise fails before a provider request.
   policy-pin/launch boundary. Browser attention handoff uses
   `reviews.AttentionBridge`, its case-owned GET/response methods, the protected
   review handler subroutes, and a strict lossless frontend client rendered in
-  the existing review conversation card.
+  the existing review conversation card. Own-PR development capture uses
+  `prdevelopment.CaptureSink`, `prdevelopment.GitHubVerifier`,
+  `eventing.PRDevelopmentCaseStore`, and the workflow dispatcher's ordered
+  `SucceededEventRunSinkFanout`.
 - Runtime ordering: resolve disabled-safe config, normalize and validate an
   envelope, enforce the payload limit, redact configured fields, atomically
   insert or return the existing deduplicated event, lease and renew routing,
@@ -158,7 +172,13 @@ otherwise fails before a provider request.
   compare signed `repository.full_name` against the immutable normalized
   allowlist, acknowledge a miss without insertion, derive own-PR submitted
   feedback only from the authenticated body plus configured target, and only
-  then redact and insert an admitted projection.
+  then redact and insert an admitted projection. For an explicitly opted-in
+  successful development-capture run, reconcile an existing immutable capture
+  first; otherwise bind the exact event/dispatch/run/workflow provenance,
+  re-read the pull request and bounded review pages through the exact read-only
+  GitHub tool, verify the signed review occurrence against that provider view,
+  persist the provider-current pull/fork/head snapshot and review-level
+  feedback, and only then acknowledge the dispatch.
 - Non-obvious constraints: deduplication is scoped by source and connector;
   duplicate input never replaces the first stored payload; lease ownership is
   fenced against stale workers; stale routing cannot authorize a dispatch;
@@ -178,7 +198,12 @@ otherwise fails before a provider request.
   header remains an unsigned routing hint even though the action and projected
   resource identity come from the authenticated body; notification polling
   does not claim submitted-review parity; and repository and target-user
-  strings remain subject to public-identity secret checks. A
+  strings remain subject to public-identity secret checks. GitHub MCP's current
+  `get_reviews` projection does not expose the webhook review node ID, so that
+  node ID remains authenticated trigger evidence rather than provider-verified
+  identity. Its current review-comment projection does not expose a parent
+  review database ID, so inline comment-to-review association is outside this
+  review-level capture contract. A
   review working-context session is a hidden derived view rather than another
   authority: its key excludes the mutable case version, its full scope and
   history are verified after every materialization, SQLite remains the only
@@ -248,7 +273,8 @@ otherwise fails before a provider request.
 | `FR-EVENT-AUTOMATION-047` | MUST | An authenticated operator selects the canonical policy view of `/reviews`, creates, renames, or removes global or repository decision policies, creates, reorders, or removes gates, changes an override mode, edits one gate, saves the complete catalog, reloads authoritative state, or navigates away with unsaved changes. | The responsive accessible editor reads only `GET /api/reviews/attention-policies` plus the bounded agent catalog, keeps one memory-only draft, and exposes structured controls for global decisions, repository identity, `inherit`/`overlay`/`replace`/`disable`, ordered repeated working-context AI, isolated-context AI, deterministic, and zero gates. AI controls select an exact configured agent and edit criteria, title, and optional JSON question guidance; deterministic controls edit the existing expression, title, and required JSON questions; zero exposes no behavior fields. Repository policies show the effective ordered composition computed with the ordinary replacement-by-gate-ID overlay rule. Strict local projection and validation enforce the server's identity, collection, gate, text, effective-composition, JSON depth/node/byte, and complete-catalog bounds before save. The lossless JSON parser/stringifier retains every accepted number token—including integers beyond `Number.MAX_SAFE_INTEGER`—plus case-distinct and special object keys across GET, untouched draft state, question editing, and PUT. | The default inbox URL omits `view`; the policy view uses only `view=policies` and never places a policy, question, repository, decision, revision, error, or agent catalog in route state, browser storage, logs, or toast text. Background refetch never overwrites a dirty draft. Save sends one non-retried full replacement with the exact captured config revision; success rehydrates from the returned authoritative catalog/revisions and reports applied versus restart-required effect. A `409` or newly observed revision keeps the draft and exposes explicit reload/discard; navigation and before-unload are blocked until the operator discards, reloads, or saves. Editing, preview, refresh, and discard create no review case, chat message, decision link, workflow run, model/tool call, repository write, event, provider action, or GitHub mutation. The editor accurately explains that only an outgoing PicoClaw workbench review reaching `submitted` triggers its `review.submitted` policy; policy editing itself never launches a decision. | Malformed, unknown, duplicate, trailing, over-bound, unsafe-Unicode, or numerically lossy responses fail as unavailable instead of partially populating the form. Duplicate/case-colliding repositories, duplicate decisions or gate IDs, invalid effective overlays, incompatible working-context agents, missing agents, malformed or null required questions, and unsupported expression/text/size state produce actionable local errors and disable save. A failed or stale save retains all local text and never rebases or retries against a newer revision; an explicit reload is the only destructive conflict action and requires confirmation while dirty. Delayed reads and saves cannot replace a newer hydrated generation. Empty/error/loading states, long identities, many policies, keyboard navigation, and narrow widths remain operable. | Operators need one safe visual place to configure every approved gate type and mixture without raw config editing, numeric corruption, stale-tab overwrite, accidental execution, or leaking policy authority into reviewed repositories or browser persistence. |
 | `FR-EVENT-AUTOMATION-048` | MUST | The outgoing PicoClaw review workbench atomically transitions a currently claimed pending submission to `submitted`, or a human reconciles that submission's terminal unknown outcome as `submitted`, in an open current-schema event store; an attention-capable workflow runtime may become active then or later. | The same SQLite transaction that commits the post-transition case version inserts exactly one durable `review.submitted` attention occurrence for that immutable submission and case decision, regardless of whether workflows are currently enabled. Once an attention runtime is active, its generation-fenced worker claims the occurrence under a fresh expiring lease. Before any session projection, model, function, human task, or run effect, the first successful policy capture resolves the trusted current repository-selected policy, canonically encodes its source revision, complete detached resolution, and decision digest, and pins those exact bytes to the live claim. The worker then strictly decodes and re-hashes only that pin and launches the exact case/version/decision through the ordinary private attention launcher. | Schema v5 adds a submission-bound trigger row with pending/claimed/delivered/noop state, availability, attempts, a fresh opaque lease identity and deadline, one immutable pinned policy and digest, bounded sanitized retry detail, and an optional validated private run ID. A successful launch records `delivered` even when its durable run is already terminal; an all-zero policy records `noop` without a decision link or run. Both terminal outcomes clear lease state and are never reclaimed. The trigger path changes no review content, submitted outcome, event, dispatch, provider notification, policy configuration, checked-out repository, or GitHub resource. | Non-submitted completion, failed/unknown submission, and absent reconciliation create no occurrence. Schema migration does not synthesize triggers for submissions already recorded as submitted under v4. Duplicate completion/reconciliation cannot add a second row. Capture, strict pin validation, pre-admission launch, storage, cancellation, or runtime-generation failure releases a still-live claim to bounded backoff without discarding its immutable pin; stale, expired, or foreign lease tokens cannot renew, pin, release, or complete it. Before a successful pin, a retry may select the then-current trusted policy; afterward no retry or reload consults live policy. A crash after launch but before completion reuses the same decision key and run ID, while a no-op retry reevaluates the same effect-free pin, so both converge without duplicated model or human work. This occurrence is only PicoClaw's outgoing workbench submission; inbound third-party `pull_request_review.submitted` events and own-PR development cases are outside this contract. This trigger stage itself adds no HTTP, CLI, attention-navigation, or generic workflow-task surface; `FR-EVENT-AUTOMATION-049` separately composes its browser handoff without exposing a generic workflow surface. | A durable submission must not lose its attention decision in a finish-to-launch crash window, fork that decision after policy drift, or confuse reviewing another contributor's PR with reacting to feedback on the user's own PR. |
 | `FR-EVENT-AUTOMATION-049` | MUST | An authenticated user reads or polls `GET /api/reviews/{case}/attention`, follows the canonical `/reviews?case={case}&focus=chat` handoff, or submits `POST /api/reviews/{case}/attention/respond` with exactly the projected case version, opaque response token, and one normalized response; a generic workflow observation or mutation surface or production workflow-retention pass encounters a run with the exact reserved `inline/review-attention-gates/v1` reference. | The gateway returns `none` immediately for a valid non-submitted case without reading an attention occurrence or workflow run. For every submitted case it validates the authoritative latest submission and trigger first. A historical submitted case with no v5 trigger projects `none`. Pending or claimed state accepts only a coherent absent pin pair or a strictly decoded canonical pin whose recomputed decision revision equals `policy_revision`, then projects `queued` or `processing` without reading a decision link or run. No-op requires a canonical pinned all-zero effective policy, no run, and terminal completion, then projects `not_required` without reading a link or run. Only delivered state requires a canonical pinned active policy, terminal completion, the deterministic canonical run ID, exact decision link, and a stable bounded run/task snapshot. Every projected task's exact title, questions, and response schema are canonically re-hashed and must equal its stored input hash before any prompt or fence is exposed. The public DTO contains only `case_version`, aggregate `none`/`queued`/`processing`/`waiting`/`continuing`/`recovery_required`/`completed`/`not_required`/`failed` status, `can_respond`, and bounded turns with public `answered`/`waiting`/`continuing`/`recovery_required`/`canceled` status, configured title/questions, and the durably accepted response for answered, continuing, or recovery state; a canceled turn is non-actionable and contributes to aggregate `failed`. Exactly one current actionable waiting or recovery turn may set `can_respond` and receive an opaque lowercase `sha256:` response fence; the token is absent whenever `can_respond` is false and is never issued for continuing, answered, or canceled turns. The fence is a domain-separated, length-prefixed digest over the exact server-loaded case/version, submission, decision, policy revision, run, task, original waiting revision, and input hash. Response handling resolves every private identity server-side, derives a separate response ID from the fence plus the bounded normalized response, resumes the exact task, and returns the authoritative projection. The existing review conversation card renders status/history/questions and the in-memory response editor; `focus=chat` scrolls and focuses only after the selected conversation is rendered and the URL carries no token or private state. Every exact reserved attention run, including malformed impostors, is omitted or not found on generic workflow list/detail/events/SSE/graph/task/resume/cancel/retry routes. Visible ordinary runs have direct hidden `parent_run_id` plus `caller_job_id`, `retry_of_run_id`, matching `child_run_ids`, and an origin whose root is hidden scrubbed; graphs omit hidden nodes and incident edges. Cancel, retry, task resume, and task cancel return not found for every ordinary run transitively connected to a hidden run through normalized parent/child/retry relationships, preventing cascade mutation while leaving scrubbed ordinary reads available. Production launcher and CLI workflow retention preserve every exact reserved-reference run regardless of terminal age because case projection and exact replay depend on it after restart; related ordinary runs retain normal retention. With event ingress active but workflows disabled, the bridge uses the file run store with no executor even if one was injected: existing lifecycle remains readable, waiting/recovery has `can_respond=false` and no fence, no new answer is consumed, exact already-persisted replay stays projection-only and idempotent, and generic exact-reserved task resume returns not found before the workflow-disabled/runtime branch. | GET, polling, navigation, rendering, and failed validation mutate nothing. A valid response changes only the private human task and its run continuation; it never changes the review case/version, finding, message, submission, event, trigger, decision, policy, repository, provider, or GitHub. Exact persisted replay or lost-response recovery is idempotent and reprojects the current state, while an altered response or stale, old, cross-case, or cross-task fence conflicts. No schema is added because the view is reconstructed from existing owner-local state. | A noncanonical route/query/body, malformed or status-inconsistent trigger/pin/task/projection, stale case version, oversized response, invalid fence, altered replay, or continuation failure returns fixed bounded conflict/unavailable errors without partial authority. Missing/corrupt decision linkage or run/task state is an error only for a delivered occurrence; historical absence and valid pre-delivery/no-op branches retain the projections above. If the exact response persisted before continuation or transport failed, retry recovers by exact response ID and reprojects without consuming a second answer. Private IDs and revisions, session, policy body, task/run/workflow identity, input hashes, trigger lease/retry state, and raw stored/runtime errors are never projected or accepted from the browser. The launcher requires an explicit nonzero port and numeric loopback or literal current local-interface PID host; hostname, wildcard/unspecified, multicast or remote numeric address, incomplete authority, redirects, and proxy use fail before the process bearer is put on a request. This outgoing-review handoff makes no inbound own-PR feedback/development-case claim. | The user must be brought back to the exact PR discussion when a gate needs judgment, be able to steer that one private continuation safely, and never gain a side channel into generic workflow authority or internal review automation state. |
-| `FR-EVENT-AUTOMATION-050` | MUST | A native GitHub webhook connector has a non-empty configured `target_user`, its exact request body passes HMAC-SHA256 verification, and the unsigned `X-GitHub-Event` routing hint plus the body action select `pull_request_review.submitted`. | The normalized envelope projects bounded pull-request base/head repository identity, existing bounded review author/URL/state metadata, canonical review database ID, node ID, commit SHA and UTC submitted time, plus explicit lowercase-string booleans `pull_request_author_is_target` and `review_author_is_target`. When the configured target case-insensitively matches the body-authenticated pull-request author, the body-authenticated reviewer is a different canonical human or GitHub App `[bot]` login, both review IDs are canonical, state is `approved`, `changes_requested`, or `commented`, commit identity is lowercase 40- or 64-hex, and submitted time parses and canonicalizes to UTC, the ordinary deduplicated target projection adds `review_feedback` and sets `targets_user` to `true`. Existing requested-reviewer, assignee, and mention reasons remain ordered, deduplicated, and independently selectable. An ordinary `on.event` workflow may match these explicit attributes without inspecting payload text or invoking a model; because `target_reason` is a comma-separated set, membership selectors use a pattern such as `*review_feedback*` and continue to match when `mention` coexists. | Only the ordinary already-redacted event envelope and its existing routing lifecycle are inserted. This projection adds no schema, development case, workflow definition or run, checkout, session, model/tool call, attention decision, edit, commit, push, merge, provider acknowledgement, or GitHub mutation. The event-source target-user hint describes authored-PR feedback and labels webhook targeting as routing metadata only. | Missing/malformed pull-request, reviewer, review ID/node/state/commit/submitted-time identity; another author's PR; a self-review; another action or event hint; absent target configuration; and notification-poller input do not add `review_feedback`. They may retain other independently valid target reasons. The event header is not covered by GitHub's body HMAC and therefore remains a routing hint; every later development-case or action boundary must re-read and bind the exact review, pull request, fork/head, and current provider state rather than treating these attributes as GitHub authority. Repository scoping, payload limits, redaction, secret-identity rejection, and connector-scoped delivery deduplication still apply before or during ordinary admission. | Submitted feedback on the user's own PR must become deterministically routable through the existing workflow engine without hard-coded usernames, model inference, self-review loops, or premature repository/GitHub authority. |
+| `FR-EVENT-AUTOMATION-050` | MUST | A native GitHub webhook connector has a non-empty configured `target_user`, its exact request body passes HMAC-SHA256 verification, and the unsigned `X-GitHub-Event` routing hint plus the body action select `pull_request_review.submitted`. | The normalized envelope projects bounded pull-request base/head repository identity, existing bounded review author/URL/state metadata, canonical review database ID, node ID, commit SHA and UTC submitted time, plus explicit lowercase-string booleans `pull_request_author_is_target` and `review_author_is_target`. When the configured target case-insensitively matches the body-authenticated pull-request author, the body-authenticated reviewer is a different canonical human or GitHub App `[bot]` login, both review IDs are canonical, state is `approved`, `changes_requested`, or `commented`, commit identity is lowercase 40- or 64-hex, and submitted time parses and canonicalizes to UTC, the ordinary deduplicated target projection adds `review_feedback` and sets `targets_user` to `true`. Existing requested-reviewer, assignee, and mention reasons remain ordered, deduplicated, and independently selectable. An ordinary `on.event` workflow may match these explicit attributes without inspecting payload text or invoking a model; because `target_reason` is a comma-separated set, membership selectors use a pattern such as `*review_feedback*` and continue to match when `mention` coexists. | Only the ordinary already-redacted event envelope and its existing routing lifecycle are inserted. This projection adds no schema, development case, workflow definition or run, checkout, session, model/tool call, attention decision, edit, commit, push, merge, provider acknowledgement, or GitHub mutation. The event-source target-user hint describes authored-PR feedback and labels webhook targeting as routing metadata only. | Missing/malformed pull-request, reviewer, review ID/node/state/commit/submitted-time identity; another author's PR; a self-review; another action or event hint; absent target configuration; and notification-poller input do not add `review_feedback`. They may retain other independently valid target reasons. The event header is not covered by GitHub's body HMAC and therefore remains a routing hint. `FR-EVENT-AUTOMATION-051` owns the first provider-verified development-case capture boundary; every later checkout or action boundary must independently re-read the exact review, pull request, fork/head, and current provider state rather than treating these attributes or that capture as GitHub write authority. Repository scoping, payload limits, redaction, secret-identity rejection, and connector-scoped delivery deduplication still apply before or during ordinary admission. | Submitted feedback on the user's own PR must become deterministically routable through the existing workflow engine without hard-coded usernames, model inference, self-review loops, or premature repository/GitHub authority. |
+| `FR-EVENT-AUTOMATION-051` | MUST | The exact explicitly installed `workflows/github-pr-development.yml` run succeeds for a body-authenticated GitHub `pull_request_review.submitted` envelope targeted as another reviewer's feedback on the configured user's own PR, and exposes the exact reserved string output `picoclawDevelopmentCapture: v1`. | Before dispatch acknowledgement, the successful-run sink validates the immutable event, dispatch, run, workflow ref/revision, connector, own-PR target facts, review database ID/node ID/author/state/commit/submitted-time/URL, and exact successful-run relationship. It then calls only the generation-fenced read-only GitHub `pull_request_read` tool: `get` verifies the current pull-request number, HTTPS URL, author/target, open-or-closed/draft/merged state, base repository/ref/SHA, and current head repository/ref/SHA including a fork; bounded `get_reviews` pages select the exact canonical review database ID and verify its author, event state or provider-current `dismissed` state, commit SHA, submitted instant, HTTPS URL, and at most 64-KiB valid-UTF-8 body. The webhook node ID is retained as authenticated trigger evidence only because `get_reviews` does not expose it. | One immutable `pdc_` development case records exact capture provenance, provider-current pull/base/head facts, the submitted and current review states, review-level feedback, and timestamps in the event store. Lookup by immutable event/dispatch/run/workflow identity makes reconciliation of that exact capture idempotent before another provider read. Dispatch ID and run ID are independently unique: an explicit replay admitted as a new dispatch/run creates a distinct independently verified case even when connector and review ID match, while a collision in which an existing dispatch or run carries changed identity or content conflicts. The workflow and sink create no review-workbench case, conversation, attention decision, gate, session, checkout, model/tool-authored action, edit, commit, push, merge, provider acknowledgement, or GitHub mutation. | A missing marker leaves ordinary successful-dispatch behavior unchanged. A wrong marker/ref, unauthenticated or non-own-PR event, identity mismatch, missing exact MCP read tool, malformed/duplicate/trailing/deep/oversized provider JSON, non-regular or escaping exact-result artifact, absent or duplicate exact review, provider mismatch, or more than five 100-review pages fails before case creation and keeps dispatch reconciliation retryable. Provider result bytes are bounded to 32 MiB in aggregate. The current MCP comment projection does not expose a parent review database ID, so inline review-comment association is outside this review-level contract; later development actions must re-read their own current authority. | The first own-PR feedback milestone needs durable, reconstructible, provider-bound local intake without pretending that a signed trigger, untrusted review text, or successful read-only workflow already authorizes development or publication. |
 
 For `FR-EVENT-AUTOMATION-046`, configured-agent discovery is the exact
 authenticated `GET /api/reviews/attention-agents` companion resource. It
@@ -281,6 +307,14 @@ deduplicated `target_reason` value, not a durable development-case identity.
 Review ID, node ID, commit, submitted time, and base/head repository projections
 remain bounded routing evidence inside the already-redacted event; they add no
 table, lease, provider credential, checkout reference, or write capability.
+
+Only the explicit FR-051 successful-run capture boundary may promote that
+routing evidence into a `PRDevelopmentCase`. The case retains the original
+event/dispatch/run/workflow provenance, provider-current pull and base/head
+facts, submitted and current review states, the review-level feedback body,
+the trigger node ID with its routing-only classification, and capture times.
+It is deliberately separate from outgoing `pr_review_cases` and has no finding,
+message, submission, gate, workspace, branch-action, or provider-action state.
 
 Envelope text is valid UTF-8 and byte-bounded: source is at most 128 bytes;
 connector and event type are each at most 256; the deduplication key is at most
@@ -466,6 +500,23 @@ change conflicts. The table contains no review transcript, gate subject,
 session capability, model output, provider credential, or GitHub authority and
 has no browser projection. The additive v4-to-v5 migration creates no row for a
 submission whose submitted transition already happened under the old schema.
+
+Schema v6 adds `pr_development_cases`. Each `pdc_` row owns one immutable
+provider-verified capture and its exact accepted event, dispatch, run, workflow
+revision, and connector provenance. Dispatch ID and run ID are independently
+unique. A replay admitted under a new dispatch and run creates a distinct case,
+including when it refers to the same connector and provider review. The row stores current
+pull open/closed, draft/merged, base and fork/head repository/ref/SHA facts;
+review database ID, routing-only trigger node ID, author, submitted and current
+state, commit, time, HTTPS URL and bounded feedback; a capture hash; and
+created/updated times. The hash covers the normalized provenance and provider
+domain content. An exact dispatch/run provenance lookup returns the committed
+case before another mutable provider read; repeating that exact capture
+converges only when the full hash is equal, and any mixed identity or changed
+content conflicts.
+Newest-first and repository/pull indexes support future owner-local consumers,
+and ordinary inbox pruning retains an event referenced by one of these cases,
+but this slice exposes no list, HTTP, CLI, or browser surface.
 
 The case-owned attention view adds no storage or review-case field. It is
 reconstructed from the submitted aggregate, trigger and decision linkage, and
@@ -726,6 +777,7 @@ Owns: CODE pkg/eventing/**
 Owns: CODE pkg/eventing/webhook/**
 Owns: CODE pkg/eventing/channelmessage/**
 Owns: CODE pkg/reviews/**
+Owns: CODE pkg/prdevelopment/**
 Owns: CODE pkg/config/config.go
 Owns: CODE pkg/config/events.go
 Owns: CODE pkg/config/reviews.go
@@ -773,11 +825,13 @@ Owns: TEST pkg/eventing/*
 Owns: TEST pkg/eventing/webhook/*
 Owns: TEST pkg/eventing/channelmessage/*
 Owns: TEST pkg/reviews/*
+Owns: TEST pkg/prdevelopment/*
 Owns: TEST pkg/config/events*
 Owns: TEST pkg/config/reviews*
 Owns: TEST pkg/workflows/event_trigger_test.go
 Owns: TEST pkg/workflows/event_dispatcher_test.go
 Owns: TEST pkg/gateway/event_automation_test.go
+Owns: TEST pkg/gateway/pr_development_capture_test.go
 Owns: TEST pkg/gateway/review_working_context_test.go
 Owns: TEST pkg/gateway/event_webhook_test.go
 Owns: TEST pkg/gateway/event_channel_test.go
@@ -829,6 +883,7 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
 | Go API | `pkg/eventing.Envelope` | Source-neutral immutable external-event input and stored representation with connector-scoped deduplication and optional replay lineage. | `FR-EVENT-AUTOMATION-002`, `FR-EVENT-AUTOMATION-004`, `FR-EVENT-AUTOMATION-010` |
 | Go API | `pkg/eventing.Inbox` / `Store` | `Inbox` defines `Insert`, `Get`, newest-first filtered keyset list, routing claim/ack/nack/dead transitions, dispatch create/get/claim/link/nack/finish/keyset-list, `Replay`, bounded `Prune`, and `Close`; `Store` is its SQLite implementation. The contract provides atomic deduplication and fresh-token fenced leases. | `FR-EVENT-AUTOMATION-002`, `FR-EVENT-AUTOMATION-004`, `FR-EVENT-AUTOMATION-006` through `FR-EVENT-AUTOMATION-011` |
 | Go API / storage | `eventing.ReviewStore`, `reviews.CaptureSink`, `reviews.Service` | Idempotent trusted workflow-draft capture, aggregate inspection, optimistic finding/message mutation, immutable submission creation, safe browser projection, fenced durable submission delivery over the review tables introduced through schema v3, and transactional outgoing-submission attention occurrence creation. | `FR-EVENT-AUTOMATION-041`, `FR-EVENT-AUTOMATION-042`, `FR-EVENT-AUTOMATION-043`, `FR-EVENT-AUTOMATION-048` |
+| Internal Go API / storage | `prdevelopment.CaptureSink`, `prdevelopment.GitHubVerifier`, `eventing.PRDevelopmentCaseStore` | Recognize only the exact installed own-PR workflow's versioned opt-in output, reconcile immutable capture provenance, independently bind the exact signed review occurrence to a bounded current GitHub PR/review snapshot, and idempotently persist a review-level local development case before dispatch acknowledgement. | `FR-EVENT-AUTOMATION-051` |
 | Internal Go API | `reviews.Service.WithWorkingContext`, `reviews.WorkingContextRuntimeAcquire` | Under one per-case projection lock and exact runtime-generation lease, load one authoritative atomic review aggregate, compare-and-swap and strictly verify its hidden stable agent-owned session, then synchronously hand its case version, internal key, exact session revision, and detached JSON-native gate subject to a trusted consumer. | `FR-EVENT-AUTOMATION-044` |
 | Internal Go API / storage | `reviews.AttentionLauncher`, `reviews.AttentionPolicySource`, `eventing.ReviewDecisionRunStore` | Hold one trusted policy generation while resolving a repository overlay, bind its digest to an exact review decision, compile ordinary workflow gates, and atomically fence the exact case version plus immutable decision-to-private-run link through durable run creation. | `FR-EVENT-AUTOMATION-045` |
 | Internal Go API / storage | `eventing.ReviewAttentionTriggerQueue`, `reviews.AttentionTriggerWorker` | Transactionally record the outgoing submitted-review occurrence, claim/renew it with fresh lease fencing, pin one canonical trusted effective policy before effects, retry pre-admission failure with bounded detail, and finish as one exact private run delivery or effect-free no-op. | `FR-EVENT-AUTOMATION-048` |
@@ -841,9 +896,10 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
 | Workflow YAML | `on.event` | Typed source/connector/type/entity/attribute filters with scalar/list syntax, explicit non-empty validation, anchored globs, and deterministic case rules. | `FR-EVENT-AUTOMATION-013`, `FR-EVENT-AUTOMATION-021` |
 | CLI / Workflow YAML | `picoclaw workflow install github-issue-triage` / `workflows/github-issue-triage.yml` | Explicitly install the deterministic native GitHub issue trigger, isolated structured classifier, and declared conditional GitHub comment action without changing existing configuration. | `FR-EVENT-AUTOMATION-031` |
 | CLI / Workflow YAML | `picoclaw workflow install github-pr-review` / `workflows/github-pr-review.yml`, native `git.diff` | Explicitly install the authenticated targeted review-request trigger, exact head/base-repository and merge-base verification, bounded path-relative unified-diff construction, a no-tools structured review step, and reserved durable draft output. | `FR-EVENT-AUTOMATION-041` |
+| CLI / Workflow YAML | `picoclaw workflow install github-pr-development` / `workflows/github-pr-development.yml` | Explicitly install the authenticated own-PR submitted-review trigger and read-only current-PR step whose versioned successful-run marker opts into provider-verified durable capture. | `FR-EVENT-AUTOMATION-051` |
 | Go API | `EvaluateEventTrigger`, `EventWorkflowRouter`, `EventWorkflowDispatcher`, `RunOrigin`, `RunRequest.Origin`, `RunRequest.OnRunPersisted`, `Executor.RetryCaptured`, `ProjectWorkflowRunForBrowserWithStore`, `ProjectEventBackedDraftRunsForBrowserWithStore`, `LoadRunnableLocalSnapshotWithRevision`, `EventContextFromEnvelope` | Produce deterministic field-level match diagnostics through the same evaluator used by routing, claim one item, compatibility-check and revision-bind the exact loaded workflow bytes, durably fan out deterministic dispatches, reject content drift or a no-longer-matching persisted event, pass the same accepted snapshot and trusted payload-free origin into execution, reconcile deterministic runs, link a newly persisted run before effects, renew long leases, retry from one authoritative source, validate every available provenance ancestor without treating pruning as forgery, safely project exact and batch trusted run provenance, and build the detached redacted workflow context shared by dispatch and event-parity draft testing. | `FR-EVENT-AUTOMATION-014` through `FR-EVENT-AUTOMATION-018`, `FR-EVENT-AUTOMATION-020`, `FR-EVENT-AUTOMATION-021`, `FR-EVENT-AUTOMATION-036`, `FR-EVENT-AUTOMATION-038` |
-| Runtime | gateway event automation service, webhook/operator/review controllers, review working-context bridge, attention launcher and browser bridge, channel admission controller, provider poller, submission and attention-trigger workers, and launcher restart signature | Open enabled storage only after attention-policy/agent preflight, initialize workflow/MCP/runtime-session dependencies before workers, generation-fence HTTP, review-session projection, trusted attention policy, outgoing-submission attention launch and response, and channel admission while transactionally draining, replacing, rolling back, and closing services/providers, and report restart-required only when the active effective event runtime changes, including semantic changes to enabled GitHub repository/target/polling/policy scope but excluding case/order-only scope differences. | `FR-EVENT-AUTOMATION-019`, `FR-EVENT-AUTOMATION-024`, `FR-EVENT-AUTOMATION-029`, `FR-EVENT-AUTOMATION-032`, `FR-EVENT-AUTOMATION-035`, `FR-EVENT-AUTOMATION-039` through `FR-EVENT-AUTOMATION-050` |
-| Build | `pkg/eventing` unsupported-platform implementation | Preserves the same construction surface and returns `ErrUnsupportedPlatform` without pulling SQLite into excluded targets. | `FR-EVENT-AUTOMATION-005`, `FR-EVENT-AUTOMATION-012` |
+| Runtime | gateway event automation service, webhook/operator/review controllers, review working-context bridge, attention launcher and browser bridge, channel admission controller, provider poller, submission and attention-trigger workers, own-PR capture sink, and launcher restart signature | Open enabled storage only after attention-policy/agent preflight, initialize workflow/MCP/runtime-session dependencies before workers, generation-fence HTTP, review-session projection, trusted attention policy, outgoing-submission attention launch and response, provider-verified own-PR capture, and channel admission while transactionally draining, replacing, rolling back, and closing services/providers, and report restart-required only when the active effective event runtime changes, including semantic changes to enabled GitHub repository/target/polling/policy scope but excluding case/order-only scope differences. | `FR-EVENT-AUTOMATION-019`, `FR-EVENT-AUTOMATION-024`, `FR-EVENT-AUTOMATION-029`, `FR-EVENT-AUTOMATION-032`, `FR-EVENT-AUTOMATION-035`, `FR-EVENT-AUTOMATION-039` through `FR-EVENT-AUTOMATION-051` |
+| Build | `pkg/eventing` unsupported-platform implementation | Preserves the same construction and development-case store surface and returns `ErrUnsupportedPlatform` without pulling SQLite into excluded targets. | `FR-EVENT-AUTOMATION-005`, `FR-EVENT-AUTOMATION-012`, `FR-EVENT-AUTOMATION-051` |
 
 ## Algorithms And Ordering
 
@@ -898,8 +954,9 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
     path.
 11. Retain by selecting only records older than the cutoff whose routing and all
     dispatch work is terminal and which are not referenced by a retained replay,
-    ordering oldest first, capping work at the requested maximum, and cascading
-    deletion to terminal dispatch rows.
+    outgoing review case, or own-PR development case, ordering oldest first,
+    capping work at the requested maximum, and cascading deletion to terminal
+    dispatch rows.
 12. List events and dispatches newest first with stable timestamp-plus-ID keyset
     cursors. Use 50 rows when a list limit is omitted and cap list, claim, and
     prune batches at 500 rows.
@@ -1140,7 +1197,16 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
     review-request source, bind it to the dispatch/run/workflow/repository/
     revision identity already held by the store, and idempotently insert the
     case and ordered findings before acknowledging the dispatch. Ignore runs
-    without that output.
+    without that output. Invoke successful-run capture sinks in declared order
+    before dispatch acknowledgement. For the exact installed own-PR development
+    workflow's `v1` marker, first reconcile an existing immutable capture; then
+    validate the complete signed routing identity, read the current PR, scan up
+    to five 100-item review pages, and when all five are full issue one one-item
+    next-page overflow probe through the exact GitHub read tool. Select and bind
+    the review database ID and atomically create the provider-verified
+    review-level development case. A sink failure keeps dispatch reconciliation
+    retryable; each sink must therefore converge idempotently when a later sink
+    or acknowledgement fails.
 35. Apply human finding edits, drops/restores, and message appends in immediate
     SQLite transactions that first compare the exact case version and allowed
     lifecycle. Record a chat/rephrase user message before running the isolated
@@ -1329,9 +1395,9 @@ worker applies `review.submitted` only after PicoClaw's outgoing workbench
 submission is final. The case-owned browser bridge may then navigate to the
 canonical focused PR chat, project only the validated attention lifecycle, and
 resume one exact fenced human task; it does not provide a generic manual launch
-surface. Incoming third-party review feedback on the user's own PR requires a
-different event-to-development-case contract and is not inferred from this
-outgoing submission occurrence or its browser handoff.
+surface. `FR-EVENT-AUTOMATION-051` owns the distinct inbound third-party
+review-feedback-to-development-case contract; it is never inferred from this
+outgoing submission occurrence, review workbench, or browser handoff.
 GitHub `targets_user` and `target_reason` attributes may participate in the same
 deterministic `on.event` filters, but they grant no GitHub identity, review,
 comment, tool, or MCP authority; any action remains an explicitly declared
@@ -1339,10 +1405,15 @@ workflow step under the existing policy.
 The native-webhook-only `review_feedback` reason likewise establishes only that
 the authenticated body describes a complete submitted review from another user
 on a PR whose author matches local `target_user`. The unsigned GitHub event
-header still supplies part of the event-type routing hint. A future own-PR
-development case must re-read and fence the exact review, fork/head, and current
-provider state; it cannot promote these envelope attributes into checkout,
-push, or merge authority. Notification polling does not synthesize this reason.
+header still supplies part of the event-type routing hint. The explicitly
+installed `github-pr-development` workflow and its successful-run sink re-read
+and fence the exact review database ID plus current pull request, fork/head, and
+provider state before creating one local review-level case. Because the current
+MCP review projection omits the webhook node ID, that value remains trigger
+evidence; because its comment projection omits a parent review database ID,
+inline comment association is not claimed. Neither the event nor captured case
+is checkout, push, merge, or GitHub-write authority. Notification polling does
+not synthesize this reason.
 The explicitly installed PR-review template is different: its agent has
 read-only review authority and emits a local structured draft only. Durable
 eventing owns capture and the human workbench. The separate submission worker,
@@ -1535,6 +1606,18 @@ capabilities.
   `review_feedback` are workflow-routing facts, not proof that a branch is
   current or that PicoClaw may read, edit, push, comment, or merge it. The
   normalizer creates no development case or execution as a side effect.
+- Own-PR development capture accepts only the exact installed workflow ref and
+  exact `v1` marker after a successful run. Marker absence is an ordinary
+  successful run; an invalid marker, provenance mismatch, unavailable exact
+  read tool, provider mismatch, bounded-scan exhaustion, malformed result, or
+  unsafe exact-result artifact creates no case and leaves dispatch
+  reconciliation retryable. An already captured immutable identity returns
+  before another mutable provider read.
+- Review feedback is bounded untrusted data even after provider verification.
+  The review database ID, author, state, commit, time, and URL can be bound at
+  review level, but the current MCP response cannot bind inline comments to
+  that review and cannot independently verify its webhook node ID. Capture
+  therefore grants no model, checkout, repository, or provider-write authority.
 - Reload and shutdown reject new webhook requests with retryable `503` before
   draining admitted inserts. A drain timeout leaves the store open for a later
   retry; a provisional candidate never acknowledges into its database.
@@ -1777,6 +1860,7 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 | `FR-EVENT-AUTOMATION-048` | [pkg/eventing/review_attention_trigger_sqlite_test.go](../../pkg/eventing/review_attention_trigger_sqlite_test.go), [pkg/eventing/store_schema_test.go](../../pkg/eventing/store_schema_test.go), [pkg/reviews/attention_test.go](../../pkg/reviews/attention_test.go), [pkg/reviews/attention_trigger_worker_test.go](../../pkg/reviews/attention_trigger_worker_test.go), [pkg/reviews/attention_trigger_worker_sqlite_test.go](../../pkg/reviews/attention_trigger_worker_sqlite_test.go), [pkg/gateway/review_attention_trigger_test.go](../../pkg/gateway/review_attention_trigger_test.go), [web/frontend/src/components/reviews/review-attention-policies-page.test.tsx](../../web/frontend/src/components/reviews/review-attention-policies-page.test.tsx) |
 | `FR-EVENT-AUTOMATION-049` | [pkg/reviews/attention_bridge.go](../../pkg/reviews/attention_bridge.go), [pkg/reviews/attention_bridge_test.go](../../pkg/reviews/attention_bridge_test.go), [pkg/reviews/attention_bridge_sqlite_test.go](../../pkg/reviews/attention_bridge_sqlite_test.go), [pkg/reviews/workflow_retention.go](../../pkg/reviews/workflow_retention.go), [pkg/gateway/review_attention_bridge_test.go](../../pkg/gateway/review_attention_bridge_test.go), [web/backend/api/reviews_test.go](../../web/backend/api/reviews_test.go), [web/backend/api/workflow_attention_privacy.go](../../web/backend/api/workflow_attention_privacy.go), [web/backend/api/review_attention_workflow_suppression_test.go](../../web/backend/api/review_attention_workflow_suppression_test.go), [cmd/picoclaw/internal/workflow/helpers.go](../../cmd/picoclaw/internal/workflow/helpers.go), [cmd/picoclaw/internal/workflow/retention_test.go](../../cmd/picoclaw/internal/workflow/retention_test.go), [web/frontend/src/api/review-attention.test.ts](../../web/frontend/src/api/review-attention.test.ts), [web/frontend/src/components/reviews/reviews-page.test.tsx](../../web/frontend/src/components/reviews/reviews-page.test.tsx), [web/frontend/src/routes/-reviews-route.test.tsx](../../web/frontend/src/routes/-reviews-route.test.tsx), [web/frontend/src/routes/-reviews.test.ts](../../web/frontend/src/routes/-reviews.test.ts), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-EVENT-AUTOMATION-050` | [pkg/eventing/webhook/github.go](../../pkg/eventing/webhook/github.go), [pkg/eventing/webhook/github_test.go](../../pkg/eventing/webhook/github_test.go), [pkg/gateway/event_webhook_test.go](../../pkg/gateway/event_webhook_test.go), [pkg/workflows/event_trigger_test.go](../../pkg/workflows/event_trigger_test.go), [web/frontend/src/components/events/event-sources-page.tsx](../../web/frontend/src/components/events/event-sources-page.tsx), [web/frontend/src/components/events/event-sources-page.test.tsx](../../web/frontend/src/components/events/event-sources-page.test.tsx) |
+| `FR-EVENT-AUTOMATION-051` | [pkg/prdevelopment/capture.go](../../pkg/prdevelopment/capture.go), [pkg/prdevelopment/github.go](../../pkg/prdevelopment/github.go), [pkg/prdevelopment/capture_test.go](../../pkg/prdevelopment/capture_test.go), [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_schema_sqlite.go](../../pkg/eventing/pr_development_schema_sqlite.go), [pkg/eventing/pr_development_store_sqlite.go](../../pkg/eventing/pr_development_store_sqlite.go), [pkg/eventing/pr_development_store_sqlite_test.go](../../pkg/eventing/pr_development_store_sqlite_test.go), [pkg/eventing/store_schema_test.go](../../pkg/eventing/store_schema_test.go), [pkg/workflows/templates_test.go](../../pkg/workflows/templates_test.go), [pkg/workflows/event_dispatcher_test.go](../../pkg/workflows/event_dispatcher_test.go), [pkg/gateway/pr_development_capture_test.go](../../pkg/gateway/pr_development_capture_test.go), [cmd/picoclaw/internal/workflow/command_test.go](../../cmd/picoclaw/internal/workflow/command_test.go) |
 
 ## Implementation Anchors
 
@@ -1785,7 +1869,12 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 - [pkg/eventing/store_types.go](../../pkg/eventing/store_types.go)
 - [pkg/eventing/store_sqlite.go](../../pkg/eventing/store_sqlite.go)
 - [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go)
+- [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go)
+- [pkg/eventing/pr_development_schema_sqlite.go](../../pkg/eventing/pr_development_schema_sqlite.go)
+- [pkg/eventing/pr_development_store_sqlite.go](../../pkg/eventing/pr_development_store_sqlite.go)
 - [pkg/eventing/webhook/github.go](../../pkg/eventing/webhook/github.go)
+- [pkg/prdevelopment/capture.go](../../pkg/prdevelopment/capture.go)
+- [pkg/prdevelopment/github.go](../../pkg/prdevelopment/github.go)
 - [pkg/config/events.go](../../pkg/config/events.go)
 - [pkg/config/reviews.go](../../pkg/config/reviews.go)
 - [pkg/workflows/event_trigger.go](../../pkg/workflows/event_trigger.go)

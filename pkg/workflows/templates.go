@@ -13,12 +13,14 @@ import (
 )
 
 const (
-	CodeReviewWorkflowName        = "code-review"
-	CodeReviewWorkflowRef         = "workflows/code-review.yml"
-	GitHubIssueTriageWorkflowName = "github-issue-triage"
-	GitHubIssueTriageWorkflowRef  = "workflows/github-issue-triage.yml"
-	GitHubPRReviewWorkflowName    = "github-pr-review"
-	GitHubPRReviewWorkflowRef     = "workflows/github-pr-review.yml"
+	CodeReviewWorkflowName          = "code-review"
+	CodeReviewWorkflowRef           = "workflows/code-review.yml"
+	GitHubIssueTriageWorkflowName   = "github-issue-triage"
+	GitHubIssueTriageWorkflowRef    = "workflows/github-issue-triage.yml"
+	GitHubPRReviewWorkflowName      = "github-pr-review"
+	GitHubPRReviewWorkflowRef       = "workflows/github-pr-review.yml"
+	GitHubPRDevelopmentWorkflowName = "github-pr-development"
+	GitHubPRDevelopmentWorkflowRef  = "workflows/github-pr-development.yml"
 )
 
 const GitHubIssueTriageWorkflowYAML = `name: GitHub Issue Triage
@@ -225,6 +227,41 @@ jobs:
         uses: tool/git_workspace
         with:
           action: release
+`
+
+// GitHubPRDevelopmentWorkflowYAML is an opt-in, read-only handoff from one
+// authenticated review of the configured user's pull request to the durable
+// successful-event-run capture boundary. The capture sink independently
+// verifies provider state before it creates durable development intake.
+const GitHubPRDevelopmentWorkflowYAML = `name: GitHub Pull Request Development
+on:
+  event:
+    sources: github
+    types: pull_request_review.submitted
+    attributes:
+      source_authenticated: "true"
+      body_authenticated: "true"
+      targets_user: "true"
+      pull_request_author_is_target: "true"
+      review_author_is_target: "false"
+      target_reason: "*review_feedback*"
+  workflow_call:
+    outputs:
+      picoclawDevelopmentCapture:
+        value: v1
+jobs:
+  capture:
+    name: Verify current pull-request state for local development
+    runs-on: picoclaw
+    steps:
+      - id: read_pull_request
+        name: Read the current pull request without mutation
+        uses: mcp/github/pull_request_read
+        with:
+          method: get
+          owner: ${{ event.payload.repository.owner.login }}
+          repo: ${{ event.payload.repository.name }}
+          pullNumber: ${{ event.payload.pull_request.number }}
 `
 
 const CodeReviewWorkflowYAML = `name: Code Review
@@ -577,6 +614,11 @@ var builtInWorkflowTemplateRegistry = []builtInWorkflowTemplate{
 		ref:  GitHubPRReviewWorkflowRef,
 		raw:  GitHubPRReviewWorkflowYAML,
 	},
+	{
+		name: GitHubPRDevelopmentWorkflowName,
+		ref:  GitHubPRDevelopmentWorkflowRef,
+		raw:  GitHubPRDevelopmentWorkflowYAML,
+	},
 }
 
 func findBuiltInWorkflowTemplate(name string) (builtInWorkflowTemplate, bool) {
@@ -638,6 +680,23 @@ func InstallGitHubPRReviewWorkflow(
 		GitHubPRReviewWorkflowName,
 		GitHubPRReviewWorkflowRef,
 		GitHubPRReviewWorkflowYAML,
+		overwrite,
+		opts...,
+	)
+}
+
+func InstallGitHubPRDevelopmentWorkflow(
+	ctx context.Context,
+	workspace string,
+	overwrite bool,
+	opts ...LocalOption,
+) (*InstalledWorkflowTemplate, error) {
+	return installWorkflowTemplate(
+		ctx,
+		workspace,
+		GitHubPRDevelopmentWorkflowName,
+		GitHubPRDevelopmentWorkflowRef,
+		GitHubPRDevelopmentWorkflowYAML,
 		overwrite,
 		opts...,
 	)

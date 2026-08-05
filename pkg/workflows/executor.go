@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -2328,12 +2329,20 @@ func cloneJSONValue(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		return cloneMap(typed)
+	case map[string]string:
+		return cloneStringMap(typed)
 	case []any:
 		out := make([]any, len(typed))
 		for index, item := range typed {
 			out[index] = cloneJSONValue(item)
 		}
 		return out
+	case []string:
+		return append([]string(nil), typed...)
+	case json.RawMessage:
+		return append(json.RawMessage(nil), typed...)
+	case []byte:
+		return append([]byte(nil), typed...)
 	default:
 		// JSON scalar values, including json.Number, are immutable.
 		return value
