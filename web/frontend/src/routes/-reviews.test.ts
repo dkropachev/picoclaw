@@ -6,6 +6,7 @@ import {
 } from "@/routes/reviews"
 
 const caseID = `prc_${"a".repeat(32)}`
+const developmentCaseID = `pdc_${"b".repeat(32)}`
 
 describe("reviews route search", () => {
   it("canonicalizes a chat handoff to only its public case and focus", () => {
@@ -34,6 +35,43 @@ describe("reviews route search", () => {
         revision: "opaque",
       }),
     ).toEqual({ view: "policies" })
+  })
+
+  it("keeps only safe development selection and repository state", () => {
+    expect(
+      normalizeReviewsSearch({
+        view: "development",
+        case: developmentCaseID,
+        repository: " octo/repo ",
+        pull_number: 84,
+        focus: "chat",
+        questions: "private",
+        cursor: "opaque",
+      }),
+    ).toEqual({
+      view: "development",
+      case: developmentCaseID,
+      repository: "octo/repo",
+      pull_number: 84,
+    })
+
+    expect(
+      normalizeReviewsSearch({
+        view: "development",
+        case: caseID,
+        repository: "octo/repo with space",
+        pull_number: "01",
+      }),
+    ).toEqual({ view: "development" })
+
+    for (const pullNumber of [0, -1, 2_147_483_648, 1.5, "01", [84]]) {
+      expect(
+        normalizeReviewsSearch({
+          view: "development",
+          pull_number: pullNumber,
+        }),
+      ).toEqual({ view: "development" })
+    }
   })
 
   it("canonicalizes every present invalid or repeated view to the empty inbox URL", () => {

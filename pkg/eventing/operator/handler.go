@@ -41,6 +41,7 @@ const (
 	routeDispatch
 	routeReplay
 	routeReviews
+	routePRDevelopment
 )
 
 type operatorRoute struct {
@@ -145,6 +146,12 @@ func (backend *Backend) serveHTTP(
 			return
 		}
 		backend.reviews.ServeHTTP(w, request)
+	case routePRDevelopment:
+		if backend.prDevelopment == nil {
+			writeOperatorStatus(w, http.StatusNotFound)
+			return
+		}
+		backend.prDevelopment.ServeHTTP(w, request)
 	default:
 		writeOperatorStatus(w, http.StatusNotFound)
 	}
@@ -167,6 +174,10 @@ func routeFromRequest(request *http.Request) operatorRoute {
 	if path == RoutePrefix+"reviews" ||
 		strings.HasPrefix(path, RoutePrefix+"reviews/") {
 		return operatorRoute{kind: routeReviews}
+	}
+	if path == RoutePrefix+"pr-development" ||
+		strings.HasPrefix(path, RoutePrefix+"pr-development/") {
+		return operatorRoute{kind: routePRDevelopment}
 	}
 	if strings.HasPrefix(path, RoutePrefix+"dispatches/") {
 		segments := strings.Split(

@@ -661,12 +661,13 @@ func main() {
 
 	// Frontend Embedded Assets
 	registerEmbedRoutes(mux)
+	canonicalPathMux := api.GuardPRDevelopmentCanonicalPaths(mux)
 
 	accessControlledMux, err := middleware.IPAllowlist(middleware.IPAllowlistConfig{
 		AllowedCIDRs:         launcherCfg.AllowedCIDRs,
 		AllowLocalhostBypass: launcherCfg.AllowLocalhostBypass,
 		TrustedProxyCIDRs:    launcherCfg.TrustedProxyCIDRs,
-	}, mux)
+	}, canonicalPathMux)
 	if err != nil {
 		logger.Fatalf("Invalid allowed CIDR configuration: %v", err)
 	}

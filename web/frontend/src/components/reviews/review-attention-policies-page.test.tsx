@@ -1189,7 +1189,10 @@ function renderPage(onShowInbox = vi.fn()) {
   const view = render(
     <QueryClientProvider client={client}>
       <SidebarProvider>
-        <ReviewAttentionPoliciesPage onShowInbox={onShowInbox} />
+        <ReviewAttentionPoliciesPage
+          onShowInbox={onShowInbox}
+          onShowDevelopment={vi.fn()}
+        />
       </SidebarProvider>
     </QueryClientProvider>,
   )

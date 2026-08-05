@@ -6,7 +6,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +103,257 @@ func TestStorePRDevelopmentCaptureExplicitReplayCreatesDistinctCase(t *testing.T
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.Equal(t, second.ID, secondLookup.ID)
+}
+
+func TestStoreListPRDevelopmentCasesUsesStableNewestFirstKeysetAndExactFilters(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, clock, input := newPRDevelopmentStoreFixture(t, ":memory:")
+	first := capturePRDevelopmentListCase(
+		t,
+		store,
+		input,
+		"",
+		"acme/project",
+		42,
+	)
+	second := capturePRDevelopmentListCase(
+		t,
+		store,
+		input,
+		"delivery-development-list-second",
+		"ACME/PROJECT",
+		43,
+	)
+	// The first two rows deliberately share a timestamp. Their random IDs are
+	// the required deterministic tie-breaker for every page boundary.
+	require.Equal(t, first.UpdatedAt, second.UpdatedAt)
+
+	*clock = clock.Add(time.Minute)
+	third := capturePRDevelopmentListCase(
+		t,
+		store,
+		input,
+		"delivery-development-list-third",
+		"other/widgets",
+		7,
+	)
+	*clock = clock.Add(time.Minute)
+	fourth := capturePRDevelopmentListCase(
+		t,
+		store,
+		input,
+		"delivery-development-list-fourth",
+		"acme/project",
+		42,
+	)
+
+	want := []PRDevelopmentCase{first, second, third, fourth}
+	sort.Slice(want, func(left, right int) bool {
+		if want[left].UpdatedAt.Equal(want[right].UpdatedAt) {
+			return want[left].ID > want[right].ID
+		}
+		return want[left].UpdatedAt.After(want[right].UpdatedAt)
+	})
+
+	page, err := store.ListPRDevelopmentCases(ctx, PRDevelopmentCaseFilter{Limit: 3})
+	require.NoError(t, err)
+	require.Len(t, page.Cases, 3)
+	assert.Equal(t, want[:3], page.Cases)
+	require.NotNil(t, page.Next)
+	assert.Equal(t, want[2].UpdatedAt, page.Next.UpdatedAt)
+	assert.Equal(t, want[2].ID, page.Next.ID)
+
+	next, err := store.ListPRDevelopmentCases(ctx, PRDevelopmentCaseFilter{
+		Limit: 3,
+		After: page.Next,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, want[3:], next.Cases)
+	assert.Nil(t, next.Next)
+
+	repository, err := store.ListPRDevelopmentCases(ctx, PRDevelopmentCaseFilter{
+		Repository: "Acme/Project",
+	})
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		filterPRDevelopmentListCases(want, func(candidate PRDevelopmentCase) bool {
+			return strings.EqualFold(candidate.Repository, "acme/project")
+		}),
+		repository.Cases,
+	)
+	assert.Nil(t, repository.Next)
+
+	pull, err := store.ListPRDevelopmentCases(ctx, PRDevelopmentCaseFilter{
+		PullNumber: 42,
+	})
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		filterPRDevelopmentListCases(want, func(candidate PRDevelopmentCase) bool {
+			return candidate.PullNumber == 42
+		}),
+		pull.Cases,
+	)
+
+	exact, err := store.ListPRDevelopmentCases(ctx, PRDevelopmentCaseFilter{
+		Repository: "other/widgets",
+		PullNumber: 7,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []PRDevelopmentCase{third}, exact.Cases)
+	assert.Nil(t, exact.Next)
+
+	missing, err := store.ListPRDevelopmentCases(ctx, PRDevelopmentCaseFilter{
+		Repository: "other/widgets",
+		PullNumber: 42,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, missing.Cases)
+	assert.Nil(t, missing.Next)
+}
+
+func TestBuildPRDevelopmentCaseListPlanValidatesFiltersCursorAndBounds(t *testing.T) {
+	t.Parallel()
+
+	validCursor := &PRDevelopmentCaseCursor{
+		UpdatedAt: time.Date(2026, time.August, 5, 16, 0, 0, 0, time.UTC),
+		ID:        "pdc_0123456789abcdef0123456789abcdef",
+	}
+	for _, test := range []struct {
+		name   string
+		filter PRDevelopmentCaseFilter
+	}{
+		{
+			name:   "repository missing owner",
+			filter: PRDevelopmentCaseFilter{Repository: "project"},
+		},
+		{
+			name:   "repository has a third segment",
+			filter: PRDevelopmentCaseFilter{Repository: "acme/team/project"},
+		},
+		{
+			name:   "repository contains invalid UTF-8",
+			filter: PRDevelopmentCaseFilter{Repository: string([]byte{0xff})},
+		},
+		{
+			name:   "negative pull number",
+			filter: PRDevelopmentCaseFilter{PullNumber: -1},
+		},
+		{
+			name:   "pull number exceeds provider range",
+			filter: PRDevelopmentCaseFilter{PullNumber: maxReviewPullNumber + 1},
+		},
+		{
+			name: "cursor timestamp missing",
+			filter: PRDevelopmentCaseFilter{After: &PRDevelopmentCaseCursor{
+				ID: validCursor.ID,
+			}},
+		},
+		{
+			name: "cursor timestamp is outside durable range",
+			filter: PRDevelopmentCaseFilter{After: &PRDevelopmentCaseCursor{
+				UpdatedAt: time.Date(3000, time.January, 1, 0, 0, 0, 0, time.UTC),
+				ID:        validCursor.ID,
+			}},
+		},
+		{
+			name: "cursor ID has wrong prefix",
+			filter: PRDevelopmentCaseFilter{After: &PRDevelopmentCaseCursor{
+				UpdatedAt: validCursor.UpdatedAt,
+				ID:        "prc_0123456789abcdef0123456789abcdef",
+			}},
+		},
+		{
+			name: "cursor ID is noncanonical",
+			filter: PRDevelopmentCaseFilter{After: &PRDevelopmentCaseCursor{
+				UpdatedAt: validCursor.UpdatedAt,
+				ID:        "pdc_0123456789ABCDEF0123456789ABCDEF",
+			}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			plan, err := buildPRDevelopmentCaseListPlan(test.filter)
+			assert.ErrorIs(t, err, ErrInvalidPRDevelopment)
+			assert.Equal(t, listPlan{}, plan)
+		})
+	}
+
+	for _, test := range []struct {
+		name      string
+		requested int
+		want      int
+	}{
+		{name: "omitted", requested: 0, want: defaultListLimit},
+		{name: "negative defaults", requested: -1, want: defaultListLimit},
+		{name: "explicit", requested: 7, want: 7},
+		{
+			name:      "capped",
+			requested: maxPRDevelopmentListItems + 1,
+			want:      maxPRDevelopmentListItems,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			plan, err := buildPRDevelopmentCaseListPlan(PRDevelopmentCaseFilter{
+				Repository: " acme/project ",
+				PullNumber: 42,
+				After:      validCursor,
+				Limit:      test.requested,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, test.want, plan.limit)
+			require.NotEmpty(t, plan.args)
+			assert.Equal(t, test.want+1, plan.args[len(plan.args)-1])
+			assert.Contains(t, plan.query, "repository = ?")
+			assert.Contains(t, plan.query, "pull_number = ?")
+			assert.Contains(t, plan.query, "updated_at < ?")
+			assert.Contains(t, plan.query, "ORDER BY updated_at DESC, id DESC")
+			assert.Equal(t, "acme/project", plan.args[0])
+		})
+	}
+}
+
+func TestStoreListPRDevelopmentCasesValidatesEveryStoredCapture(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, _, input := newPRDevelopmentStoreFixture(t, ":memory:")
+	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, input)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	_, err = store.db.Exec(
+		`UPDATE pr_development_cases SET feedback = ? WHERE id = ?`,
+		"tampered provider feedback",
+		developmentCase.ID,
+	)
+	require.NoError(t, err)
+
+	page, err := store.ListPRDevelopmentCases(ctx, PRDevelopmentCaseFilter{})
+	assert.Error(t, err)
+	assert.Empty(t, page.Cases)
+	assert.Nil(t, page.Next)
+	assert.Contains(t, err.Error(), "capture hash is invalid")
+}
+
+func TestStoreListPRDevelopmentCasesHonorsContextAndClosedStore(t *testing.T) {
+	t.Parallel()
+
+	store, _, _ := newPRDevelopmentStoreFixture(t, ":memory:")
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := store.ListPRDevelopmentCases(canceled, PRDevelopmentCaseFilter{})
+	assert.ErrorIs(t, err, context.Canceled)
+
+	require.NoError(t, store.Close())
+	_, err = store.ListPRDevelopmentCases(context.Background(), PRDevelopmentCaseFilter{})
+	assert.ErrorIs(t, err, ErrClosed)
 }
 
 func TestStorePRDevelopmentCaptureRejectsChangedExactRetry(t *testing.T) {
@@ -591,6 +844,61 @@ func validPRDevelopmentInputForTest() PRDevelopmentCaptureInput {
 		ReviewURL: "https://github.com/acme/project/pull/42#pullrequestreview-501",
 		Feedback:  "  Preserve provider feedback exactly.\n",
 	}
+}
+
+func capturePRDevelopmentListCase(
+	t *testing.T,
+	store *Store,
+	base PRDevelopmentCaptureInput,
+	deliveryID, repository string,
+	pullNumber int64,
+) PRDevelopmentCase {
+	t.Helper()
+
+	input := base
+	if deliveryID != "" {
+		input.PRDevelopmentCaptureIdentity = addPRDevelopmentDispatch(
+			t,
+			store,
+			deliveryID,
+			base.WorkflowRef,
+			base.WorkflowRevision,
+		)
+	}
+	input.Repository = repository
+	input.BaseRepository = repository
+	input.PullNumber = pullNumber
+	input.PullURL = fmt.Sprintf(
+		"https://github.com/%s/pull/%d",
+		repository,
+		pullNumber,
+	)
+	input.ReviewURL = fmt.Sprintf(
+		"https://github.com/%s/pull/%d#pullrequestreview-%s",
+		repository,
+		pullNumber,
+		input.ReviewID,
+	)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		context.Background(),
+		input,
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	return developmentCase
+}
+
+func filterPRDevelopmentListCases(
+	cases []PRDevelopmentCase,
+	keep func(PRDevelopmentCase) bool,
+) []PRDevelopmentCase {
+	filtered := make([]PRDevelopmentCase, 0, len(cases))
+	for _, developmentCase := range cases {
+		if keep(developmentCase) {
+			filtered = append(filtered, developmentCase)
+		}
+	}
+	return filtered
 }
 
 func installEventingSchemaThroughV5(t *testing.T, db *sql.DB) {

@@ -2,11 +2,9 @@ import {
   IconArrowDown,
   IconArrowUp,
   IconDeviceFloppy,
-  IconInbox,
   IconLoader2,
   IconPlus,
   IconRefresh,
-  IconSettings,
   IconTrash,
 } from "@tabler/icons-react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
@@ -56,6 +54,7 @@ import {
   reviewAttentionPolicyDraftFromCatalog,
   validateReviewAttentionPolicyDraft,
 } from "@/components/reviews/review-attention-policy-model"
+import { ReviewWorkbenchTabs } from "@/components/reviews/review-workbench-tabs"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -95,8 +94,10 @@ interface PendingModeChange {
 
 export function ReviewAttentionPoliciesPage({
   onShowInbox,
+  onShowDevelopment,
 }: {
   onShowInbox: () => void
+  onShowDevelopment: () => void
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -706,6 +707,7 @@ export function ReviewAttentionPoliciesPage({
       return (
         <PolicyPageState
           onShowInbox={onShowInbox}
+          onShowDevelopment={onShowDevelopment}
           title={t(
             initialAgentHydrationFailed
               ? "pages.reviews.policies.hydration_error"
@@ -744,6 +746,7 @@ export function ReviewAttentionPoliciesPage({
     return (
       <PolicyPageState
         onShowInbox={onShowInbox}
+        onShowDevelopment={onShowDevelopment}
         title={t(
           "pages.reviews.policies.loading",
           "Loading review attention policies…",
@@ -814,33 +817,17 @@ export function ReviewAttentionPoliciesPage({
         </Button>
       </PageHeader>
 
-      <div
-        role="group"
-        aria-label={t("pages.reviews.views.label", "Review view")}
-        className="border-border flex shrink-0 gap-1 border-b px-3 pt-2"
-      >
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="rounded-b-none"
-          onClick={onShowInbox}
-          disabled={editorBusy}
-        >
-          <IconInbox className="size-4" />
-          {t("pages.reviews.views.inbox", "Review inbox")}
-        </Button>
-        <Button
-          type="button"
-          aria-current="page"
-          variant="secondary"
-          size="sm"
-          className="rounded-b-none"
-        >
-          <IconSettings className="size-4" />
-          {t("pages.reviews.views.policies", "Attention policies")}
-        </Button>
-      </div>
+      <ReviewWorkbenchTabs
+        active="policies"
+        navigationDisabled={editorBusy}
+        onChange={(view) => {
+          if (view === "inbox") {
+            onShowInbox()
+          } else if (view === "development") {
+            onShowDevelopment()
+          }
+        }}
+      />
 
       <form
         id="review-attention-policy-form"
@@ -2192,42 +2179,28 @@ function PolicyPageState({
   loading = false,
   action,
   onShowInbox,
+  onShowDevelopment,
 }: {
   title: string
   loading?: boolean
   action?: ReactNode
   onShowInbox: () => void
+  onShowDevelopment: () => void
 }) {
   const { t } = useTranslation()
   return (
     <div className="bg-background flex h-full min-h-0 flex-col">
       <PageHeader title={t("pages.reviews.title", "Pull request reviews")} />
-      <div
-        role="group"
-        aria-label={t("pages.reviews.views.label", "Review view")}
-        className="border-border flex shrink-0 gap-1 border-b px-3 pt-2"
-      >
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="rounded-b-none"
-          onClick={onShowInbox}
-        >
-          <IconInbox className="size-4" />
-          {t("pages.reviews.views.inbox", "Review inbox")}
-        </Button>
-        <Button
-          type="button"
-          aria-current="page"
-          variant="secondary"
-          size="sm"
-          className="rounded-b-none"
-        >
-          <IconSettings className="size-4" />
-          {t("pages.reviews.views.policies", "Attention policies")}
-        </Button>
-      </div>
+      <ReviewWorkbenchTabs
+        active="policies"
+        onChange={(view) => {
+          if (view === "inbox") {
+            onShowInbox()
+          } else if (view === "development") {
+            onShowDevelopment()
+          }
+        }}
+      />
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
         {loading && (
           <IconLoader2 className="text-muted-foreground size-6 animate-spin" />

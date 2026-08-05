@@ -20,6 +20,7 @@ var _ ReviewStore = (*Store)(nil)
 var _ ReviewDecisionRunStore = (*Store)(nil)
 var _ ReviewAttentionTriggerQueue = (*Store)(nil)
 var _ PRDevelopmentCaseStore = (*Store)(nil)
+var _ PRDevelopmentCaseReader = (*Store)(nil)
 
 func Open(context.Context, string, ...Option) (*Store, error) {
 	return nil, ErrUnsupportedPlatform
@@ -168,6 +169,13 @@ func (*Store) GetPRDevelopmentCase(
 	string,
 ) (PRDevelopmentCase, error) {
 	return PRDevelopmentCase{}, ErrUnsupportedPlatform
+}
+
+func (*Store) ListPRDevelopmentCases(
+	context.Context,
+	PRDevelopmentCaseFilter,
+) (PRDevelopmentCasePage, error) {
+	return PRDevelopmentCasePage{}, ErrUnsupportedPlatform
 }
 
 func (*Store) CaptureReview(

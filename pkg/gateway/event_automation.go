@@ -40,6 +40,7 @@ type eventAutomationService struct {
 	webhookBackend  *eventwebhook.Backend
 	channelBackend  *eventchannel.Backend
 	reviewService   *reviews.Service
+	prDevelopment   *prdevelopment.Service
 	reviewAttention *reviews.AttentionLauncher
 	reviewBridge    *reviews.AttentionBridge
 	githubPoller    *eventgithubpoll.Poller
@@ -256,6 +257,10 @@ func newEventAutomationServiceWithReviews(
 	if err != nil {
 		return nil, errors.Join(err, store.Close())
 	}
+	prDevelopmentService, err := prdevelopment.NewService(store)
+	if err != nil {
+		return nil, errors.Join(err, store.Close())
+	}
 	var reviewAttention *reviews.AttentionLauncher
 	if cfg.Workflows.Enabled && reviewRuntime.attentionPolicies != nil {
 		reviewAttention, err = reviews.NewAttentionLauncher(reviews.AttentionLauncherConfig{
@@ -285,6 +290,9 @@ func newEventAutomationServiceWithReviews(
 			Service:   reviewService,
 			Attention: reviewBridge,
 		},
+		PRDevelopment: &prdevelopment.Handler{
+			Service: prDevelopmentService,
+		},
 	})
 	if err != nil {
 		return nil, errors.Join(err, store.Close())
@@ -313,6 +321,7 @@ func newEventAutomationServiceWithReviews(
 		webhookBackend:  webhookBackend,
 		channelBackend:  channelBackend,
 		reviewService:   reviewService,
+		prDevelopment:   prDevelopmentService,
 		reviewAttention: reviewAttention,
 		reviewBridge:    reviewBridge,
 		githubPoller:    githubPoller,

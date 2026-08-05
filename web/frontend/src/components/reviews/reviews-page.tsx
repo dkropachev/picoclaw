@@ -7,7 +7,6 @@ import {
   IconRefresh,
   IconRestore,
   IconSend,
-  IconSettings,
   IconSparkles,
   IconTrash,
 } from "@tabler/icons-react"
@@ -63,6 +62,7 @@ import {
   updateReviewFinding,
 } from "@/api/reviews"
 import { PageHeader } from "@/components/page-header"
+import { ReviewWorkbenchTabs } from "@/components/reviews/review-workbench-tabs"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -83,11 +83,12 @@ import { cn } from "@/lib/utils"
 const REVIEW_PAGE_SIZE = 40
 
 export interface ReviewsRouteSearch {
-  view?: "policies"
+  view?: "development" | "policies"
   case?: string
   focus?: "chat"
   status?: ReviewCaseStatus
   repository?: string
+  pull_number?: number
 }
 
 export function ReviewsPage({
@@ -180,32 +181,16 @@ export function ReviewsPage({
         </Button>
       </PageHeader>
 
-      <div
-        role="group"
-        aria-label={t("pages.reviews.views.label", "Review view")}
-        className="border-border flex shrink-0 gap-1 border-b px-3 pt-2"
-      >
-        <Button
-          type="button"
-          aria-current="page"
-          variant="secondary"
-          size="sm"
-          className="rounded-b-none"
-        >
-          <IconInbox className="size-4" />
-          {t("pages.reviews.views.inbox", "Review inbox")}
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="rounded-b-none"
-          onClick={() => onSearchChange({ view: "policies" })}
-        >
-          <IconSettings className="size-4" />
-          {t("pages.reviews.views.policies", "Attention policies")}
-        </Button>
-      </div>
+      <ReviewWorkbenchTabs
+        active="inbox"
+        onChange={(view) => {
+          if (view === "development") {
+            onSearchChange({ view: "development" })
+          } else if (view === "policies") {
+            onSearchChange({ view: "policies" })
+          }
+        }}
+      />
 
       <div className="flex min-h-0 flex-1 flex-col">
         <div className="border-border flex shrink-0 flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:items-center sm:px-4">

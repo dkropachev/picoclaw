@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/eventing"
+	eventoperator "github.com/sipeed/picoclaw/pkg/eventing/operator"
 	eventwebhook "github.com/sipeed/picoclaw/pkg/eventing/webhook"
+	"github.com/sipeed/picoclaw/pkg/prdevelopment"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
@@ -167,6 +169,100 @@ func TestGitHubOwnPRFeedbackWorkflowCapturesProviderVerifiedDevelopmentCase(
 	}
 	if getCalls != 2 || reviewCalls != 1 {
 		t.Fatalf("provider call counts: get=%d reviews=%d", getCalls, reviewCalls)
+	}
+
+	operatorController := eventoperator.NewController()
+	operatorGeneration, err := operatorController.Activate(service.operatorBackend)
+	if err != nil {
+		t.Fatalf("activate operator generation: %v", err)
+	}
+	t.Cleanup(func() {
+		drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if drainErr := operatorController.Deactivate(
+			drainCtx,
+			operatorGeneration,
+		); drainErr != nil {
+			t.Errorf("deactivate operator generation: %v", drainErr)
+		}
+	})
+
+	listResponse := httptest.NewRecorder()
+	operatorController.ServeHTTP(
+		listResponse,
+		httptest.NewRequest(
+			http.MethodGet,
+			prdevelopment.RuntimeRoutePrefix+"?repository=acme%2Fproject&pull_number=42",
+			nil,
+		),
+	)
+	if listResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"development list status = %d, body=%s",
+			listResponse.Code,
+			listResponse.Body.String(),
+		)
+	}
+	var page prdevelopment.Page
+	if err = json.Unmarshal(listResponse.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode development page: %v", err)
+	}
+	if len(page.Cases) != 1 || page.Cases[0].ID != developmentCase.ID {
+		t.Fatalf("development page = %#v", page)
+	}
+
+	detailResponse := httptest.NewRecorder()
+	operatorController.ServeHTTP(
+		detailResponse,
+		httptest.NewRequest(
+			http.MethodGet,
+			prdevelopment.RuntimeRoutePrefix+"/"+developmentCase.ID,
+			nil,
+		),
+	)
+	if detailResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"development detail status = %d, body=%s",
+			detailResponse.Code,
+			detailResponse.Body.String(),
+		)
+	}
+	var detail prdevelopment.Detail
+	if err = json.Unmarshal(detailResponse.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode development detail: %v", err)
+	}
+	if detail.Case.ID != developmentCase.ID ||
+		detail.Case.Feedback != reviewBody ||
+		detail.Case.HeadSHA != developmentCase.HeadSHA {
+		t.Fatalf("development detail = %#v", detail)
+	}
+	for _, private := range []string{
+		accepted.EventID,
+		dispatch.ID,
+		run.ID,
+		developmentCase.WorkflowRef,
+		developmentCase.TriggerReviewNodeID,
+	} {
+		if strings.Contains(detailResponse.Body.String(), private) {
+			t.Fatalf("private capture provenance leaked: %q", private)
+		}
+	}
+	for _, privateField := range []string{
+		`"event_id"`,
+		`"dispatch_id"`,
+		`"run_id"`,
+		`"workflow_ref"`,
+		`"connector"`,
+		`"target_user"`,
+		`"review_id"`,
+		`"trigger_review_node_id"`,
+	} {
+		if strings.Contains(detailResponse.Body.String(), privateField) {
+			t.Fatalf("private capture field leaked: %s", privateField)
+		}
+	}
+	if afterReads := tools.snapshot(); len(afterReads) != len(calls) {
+		t.Fatalf("read-only workbench caused provider calls: %#v", afterReads)
 	}
 }
 
