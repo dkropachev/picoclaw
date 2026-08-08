@@ -6,13 +6,36 @@ import (
 	"time"
 )
 
-const prDevelopmentCaseIDPrefix = "pdc_"
+const (
+	prDevelopmentCaseIDPrefix    = "pdc_"
+	prDevelopmentMessageIDPrefix = "pdm_"
+
+	// MaxPRDevelopmentMessageBytes bounds one durable conversation message by
+	// UTF-8 bytes after trimming.
+	MaxPRDevelopmentMessageBytes = 64 << 10
+	// MaxPRDevelopmentMessagesPerCase keeps one development-case transcript
+	// finite while allowing 128 human/assistant exchanges.
+	MaxPRDevelopmentMessagesPerCase = 256
+	// MaxPRDevelopmentTranscriptBytes bounds the sum of durable message content
+	// for one development case.
+	MaxPRDevelopmentTranscriptBytes = 4 << 20
+)
 
 var (
 	// ErrInvalidPRDevelopment reports malformed development-case capture input.
 	ErrInvalidPRDevelopment = errors.New("invalid pull request development case")
 	// ErrPRDevelopmentConflict reports an immutable capture or provenance conflict.
 	ErrPRDevelopmentConflict = errors.New("pull request development case conflict")
+	// ErrPRDevelopmentConversationConflict reports a stale optimistic
+	// conversation version.
+	ErrPRDevelopmentConversationConflict = errors.New(
+		"pull request development conversation conflict",
+	)
+	// ErrPRDevelopmentConversationCapacity reports that a transcript cannot
+	// accept another otherwise-valid message within its durable bounds.
+	ErrPRDevelopmentConversationCapacity = errors.New(
+		"pull request development conversation capacity exceeded",
+	)
 )
 
 // PRDevelopmentPullState is the provider-verified current pull-request state.
@@ -113,6 +136,43 @@ type PRDevelopmentCasePage struct {
 	Next  *PRDevelopmentCaseCursor `json:"next,omitempty"`
 }
 
+// PRDevelopmentMessageRole identifies the author side of one append-only
+// development-case conversation message.
+type PRDevelopmentMessageRole string
+
+const (
+	PRDevelopmentMessageUser      PRDevelopmentMessageRole = "user"
+	PRDevelopmentMessageAssistant PRDevelopmentMessageRole = "assistant"
+)
+
+// PRDevelopmentMessage is one append-only development-case conversation
+// entry. Ordinals are zero-based and contiguous within a case.
+type PRDevelopmentMessage struct {
+	ID        string                   `json:"id"`
+	CaseID    string                   `json:"case_id"`
+	Ordinal   int                      `json:"ordinal"`
+	Role      PRDevelopmentMessageRole `json:"role"`
+	Content   string                   `json:"content"`
+	CreatedAt time.Time                `json:"created_at"`
+}
+
+// PRDevelopmentConversation is the complete bounded transcript for one
+// immutable development case. Version is exactly len(Messages).
+type PRDevelopmentConversation struct {
+	CaseID   string                 `json:"case_id"`
+	Version  int64                  `json:"version"`
+	Messages []PRDevelopmentMessage `json:"messages"`
+}
+
+// PRDevelopmentMessageAppend appends one message under an optimistic
+// transcript version. ExpectedVersion starts at zero for an empty transcript.
+type PRDevelopmentMessageAppend struct {
+	CaseID          string
+	ExpectedVersion int64
+	Role            PRDevelopmentMessageRole
+	Content         string
+}
+
 // PRDevelopmentCaseStore owns immutable development-case capture and exact
 // lookup. Conversation, checkout, execution, publication, and provider actions
 // are intentionally separate capabilities.
@@ -137,4 +197,18 @@ type PRDevelopmentCaseReader interface {
 		ctx context.Context,
 		filter PRDevelopmentCaseFilter,
 	) (PRDevelopmentCasePage, error)
+}
+
+// PRDevelopmentConversationStore owns only the bounded append-only
+// conversation beside an immutable development case. It grants no capture,
+// repository, execution, publication, or provider authority.
+type PRDevelopmentConversationStore interface {
+	GetPRDevelopmentConversation(
+		ctx context.Context,
+		caseID string,
+	) (PRDevelopmentConversation, error)
+	AppendPRDevelopmentMessage(
+		ctx context.Context,
+		input PRDevelopmentMessageAppend,
+	) (PRDevelopmentConversation, error)
 }

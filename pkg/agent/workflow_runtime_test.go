@@ -1381,6 +1381,218 @@ func TestWorkflowAgentRunnerEphemeralIsIsolatedAndLeavesJSONLUntouched(t *testin
 	}
 }
 
+func TestWorkflowAgentRunnerIsolatedSystemPromptReplacesAllDefaultContext(t *testing.T) {
+	const (
+		isolatedSystemPrompt = "PR development assistant. Use only the supplied case transcript."
+		isolatedUserContext  = `{"case_id":"prdev:owner/repo:42","messages":[{"role":"user","content":"Fix the race."}]}`
+	)
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"isolated answer"}}
+	loop, agent, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+
+	canaries := map[string]string{
+		"AGENTS.md":                          "WORKSPACE-BOOTSTRAP-CANARY",
+		"IDENTITY.md":                        "WORKSPACE-IDENTITY-CANARY",
+		filepath.Join("memory", "MEMORY.md"): "WORKSPACE-MEMORY-CANARY",
+		filepath.Join("skills", "isolation-canary", "SKILL.md"): "---\n" +
+			"name: isolation-canary\n" +
+			"description: WORKSPACE-SKILL-CANARY\n" +
+			"---\n\nWORKSPACE-SKILL-BODY-CANARY\n",
+	}
+	for relativePath, contents := range canaries {
+		path := filepath.Join(agent.Workspace, relativePath)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create canary directory for %q: %v", relativePath, err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write canary %q: %v", relativePath, err)
+		}
+	}
+
+	agent.ContextBuilder.systemPromptMutex.RLock()
+	cacheBefore := agent.ContextBuilder.cachedSystemPrompt
+	agent.ContextBuilder.systemPromptMutex.RUnlock()
+	if cacheBefore != "" {
+		t.Fatalf("local system prompt cache was populated before isolated run: %q", cacheBefore)
+	}
+
+	req := workflowEphemeralTestRequest("")
+	req.Context = isolatedUserContext
+	req.PrivateContext = true
+	req.IsolatedSystemPrompt = isolatedSystemPrompt
+	outputs, err := (&workflowAgentRunner{loop: loop}).RunAgent(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RunAgent() error = %v", err)
+	}
+	if outputs["text"] != "isolated answer" {
+		t.Fatalf("text = %#v, want isolated answer", outputs["text"])
+	}
+
+	calls := provider.snapshotCalls()
+	if len(calls) != 1 {
+		t.Fatalf("provider calls = %d, want 1", len(calls))
+	}
+	call := calls[0]
+	if call.toolCount != 0 {
+		t.Fatalf("provider tool definitions = %d, want 0", call.toolCount)
+	}
+	if call.promptCachePresent || call.promptCacheKey != "" {
+		t.Fatalf(
+			"provider prompt cache = (%v, %q), want absent",
+			call.promptCachePresent,
+			call.promptCacheKey,
+		)
+	}
+	if workflowMessagesHavePromptCacheControl(call.messages) {
+		t.Fatalf("provider messages retained prompt cache controls: %#v", call.messages)
+	}
+	if len(call.messages) != 2 {
+		t.Fatalf("provider messages = %#v, want exactly system and user", call.messages)
+	}
+	systemMessage := call.messages[0]
+	if systemMessage.Role != "system" || systemMessage.Content != isolatedSystemPrompt {
+		t.Fatalf("system message = %#v, want exact isolated prompt", systemMessage)
+	}
+	if len(systemMessage.SystemParts) != 1 ||
+		systemMessage.SystemParts[0].Text != isolatedSystemPrompt {
+		t.Fatalf("system message parts = %#v, want exact isolated prompt", systemMessage.SystemParts)
+	}
+	userMessage := call.messages[1]
+	if userMessage.Role != "user" || userMessage.Content != isolatedUserContext {
+		t.Fatalf("user message = %#v, want exact supplied context", userMessage)
+	}
+
+	for _, forbidden := range []string{
+		agent.Workspace,
+		"WORKSPACE-BOOTSTRAP-CANARY",
+		"WORKSPACE-IDENTITY-CANARY",
+		"WORKSPACE-MEMORY-CANARY",
+		"WORKSPACE-SKILL-CANARY",
+		"WORKSPACE-SKILL-BODY-CANARY",
+		"existing problem context",
+		"existing decision summary",
+		"You are picoclaw",
+		"## Current Time",
+		"## Runtime",
+	} {
+		if workflowMessagesContain(call.messages, forbidden) {
+			t.Fatalf("isolated provider request leaked %q: %#v", forbidden, call.messages)
+		}
+	}
+
+	agent.ContextBuilder.systemPromptMutex.RLock()
+	cacheAfter := agent.ContextBuilder.cachedSystemPrompt
+	agent.ContextBuilder.systemPromptMutex.RUnlock()
+	if cacheAfter != "" {
+		t.Fatalf("isolated run populated local system prompt cache: %q", cacheAfter)
+	}
+}
+
+func TestWorkflowAgentRunnerIsolatedSystemPromptRejectsBroaderAuthority(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"unexpected"}}
+	loop, testAgent, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	if testAgent == nil {
+		t.Fatal("test agent is nil")
+	}
+	tests := []struct {
+		name   string
+		mutate func(*workflows.AgentRequest)
+	}{
+		{
+			name: "public context",
+			mutate: func(req *workflows.AgentRequest) {
+				req.PrivateContext = false
+			},
+		},
+		{
+			name: "durable execution",
+			mutate: func(req *workflows.AgentRequest) {
+				req.EphemeralSession = false
+			},
+		},
+		{
+			name: "delivery context",
+			mutate: func(req *workflows.AgentRequest) {
+				req.Delivery.Channel = "web"
+			},
+		},
+		{
+			name: "delivery reply handles",
+			mutate: func(req *workflows.AgentRequest) {
+				req.Delivery.ReplyHandles = map[string]string{"review": "private"}
+			},
+		},
+		{
+			name: "message identity",
+			mutate: func(req *workflows.AgentRequest) {
+				req.MessageID = "message-42"
+			},
+		},
+		{
+			name: "managed scope",
+			mutate: func(req *workflows.AgentRequest) {
+				req.Scope = []any{"finding-1"}
+			},
+		},
+		{
+			name: "managed execution",
+			mutate: func(req *workflows.AgentRequest) {
+				req.Managed = map[string]any{"mode": "auto"}
+			},
+		},
+	}
+
+	runner := &workflowAgentRunner{loop: loop}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := workflowEphemeralTestRequest("private context")
+			req.PrivateContext = true
+			req.IsolatedSystemPrompt = "trusted isolated system prompt"
+			tt.mutate(&req)
+			if _, err := runner.RunAgent(context.Background(), req); err == nil ||
+				!strings.Contains(err.Error(), "private ephemeral single-run request") {
+				t.Fatalf("RunAgent() error = %v, want isolated authority rejection", err)
+			}
+		})
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("provider calls = %d, want rejected before provider I/O", len(calls))
+	}
+}
+
+func TestWorkflowAgentRunnerIsolatedSystemPromptRejectsInvalidText(t *testing.T) {
+	provider := &workflowReadOnlyCaptureProvider{responses: []string{"unexpected"}}
+	loop, testAgent, _, _ := newWorkflowReadOnlyTestLoop(t, provider)
+	if testAgent == nil {
+		t.Fatal("test agent is nil")
+	}
+	tests := []struct {
+		name   string
+		prompt string
+	}{
+		{name: "leading whitespace", prompt: " trusted prompt"},
+		{name: "trailing whitespace", prompt: "trusted prompt\n"},
+		{name: "nul", prompt: "trusted\x00prompt"},
+		{name: "invalid utf8", prompt: string([]byte{'t', 0xff, 'x'})},
+		{name: "too large", prompt: strings.Repeat("x", maxWorkflowIsolatedSystemPromptBytes+1)},
+	}
+
+	runner := &workflowAgentRunner{loop: loop}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := workflowEphemeralTestRequest("private context")
+			req.PrivateContext = true
+			req.IsolatedSystemPrompt = tt.prompt
+			if _, err := runner.RunAgent(context.Background(), req); err == nil ||
+				!strings.Contains(err.Error(), "system prompt is invalid") {
+				t.Fatalf("RunAgent() error = %v, want isolated prompt validation rejection", err)
+			}
+		})
+	}
+	if calls := provider.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("provider calls = %d, want rejected before provider I/O", len(calls))
+	}
+}
+
 func TestWorkflowAgentRunnerEphemeralDoesNotInitializeConfiguredHooksOrMCP(t *testing.T) {
 	const hookName = "test-workflow-ephemeral-isolation"
 	spy := &workflowEphemeralHookSpy{}

@@ -601,32 +601,58 @@ func TestStoreMigratesV5ToPRDevelopmentSchema(t *testing.T) {
 func TestStorePRDevelopmentMigrationValidationFailureRollsBack(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "migration-v6-pr-development-rollback.db")
-	db := openSchemaTestDB(t, path)
-	installEventingSchemaThroughV5(t, db)
 	malformed := strings.Replace(
 		schemaV6PRDevelopmentCasesTable,
 		"'approved', 'changes_requested', 'commented'",
 		"'approved', 'changes_requested', 'commented', 'pending'",
 		1,
 	)
-	_, err := db.Exec(malformed)
+	assertPRDevelopmentMigrationValidationRollsBack(
+		t,
+		5,
+		installEventingSchemaThroughV5,
+		malformed,
+		"validate eventing schema v6",
+		"index",
+		"pr_development_cases_list",
+	)
+}
+
+func assertPRDevelopmentMigrationValidationRollsBack(
+	t *testing.T,
+	currentVersion int,
+	installPrevious func(*testing.T, *sql.DB),
+	malformedSchema string,
+	wantError string,
+	wantRolledBackObjectType string,
+	wantRolledBackObjectName string,
+) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "pr-development-migration-rollback.db")
+	db := openSchemaTestDB(t, path)
+	installPrevious(t, db)
+	_, err := db.Exec(malformedSchema)
 	require.NoError(t, err)
-	setSchemaTestVersion(t, db, 5)
+	setSchemaTestVersion(t, db, currentVersion)
 	require.NoError(t, db.Close())
 
 	store, err := Open(context.Background(), path)
 	require.Error(t, err)
 	assert.Nil(t, store)
 	assert.ErrorIs(t, err, ErrSchemaInvalid)
-	assert.Contains(t, err.Error(), "validate eventing schema v6")
+	assert.Contains(t, err.Error(), wantError)
 
 	db = openSchemaTestDB(t, path)
 	defer db.Close()
 	var version int
 	require.NoError(t, db.QueryRow(`PRAGMA user_version`).Scan(&version))
-	assert.Equal(t, 5, version)
-	assert.False(t, schemaObjectExists(t, db, "index", "pr_development_cases_list"))
+	assert.Equal(t, currentVersion, version)
+	assert.False(t, schemaObjectExists(
+		t,
+		db,
+		wantRolledBackObjectType,
+		wantRolledBackObjectName,
+	))
 }
 
 func TestStoreRejectsCurrentPRDevelopmentSchemaMissingObjects(t *testing.T) {

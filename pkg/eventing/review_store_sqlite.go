@@ -57,10 +57,9 @@ const reviewSubmissionColumns = `
 	lease_until, attempts, request_json, public_error_code, internal_error,
 	external_review_id, external_url, created_at, updated_at, submitted_at`
 
-type reviewQueryer interface {
-	rowQueryer
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-}
+// reviewQueryer preserves the review-store test/helper vocabulary while the
+// shared row/rows contract prevents duplicate interface definitions.
+type reviewQueryer = rowsQueryer
 
 // CaptureReview idempotently persists a typed workflow review draft. Both the
 // dispatch and run identity are unique capture keys. A retry with different
@@ -315,7 +314,7 @@ func (s *Store) GetReviewCase(
 		return ReviewCaseDetail{}, fmt.Errorf("%w: invalid review case ID", ErrInvalidReview)
 	}
 	var detail ReviewCaseDetail
-	snapshotErr := s.withReviewReadSnapshot(ctx, func(queryer reviewQueryer) error {
+	snapshotErr := s.withReviewReadSnapshot(ctx, func(queryer rowsQueryer) error {
 		var readErr error
 		detail, readErr = getReviewCaseDetailWith(ctx, queryer, id)
 		return readErr
@@ -331,7 +330,7 @@ func (s *Store) GetReviewCase(
 // snapshot even when another process commits a case mutation between queries.
 func (s *Store) withReviewReadSnapshot(
 	ctx context.Context,
-	operation func(reviewQueryer) error,
+	operation func(rowsQueryer) error,
 ) (err error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
@@ -474,7 +473,7 @@ func getReviewCaseRecord(
 
 func getReviewCaseDetailWith(
 	ctx context.Context,
-	queryer reviewQueryer,
+	queryer rowsQueryer,
 	id string,
 ) (ReviewCaseDetail, error) {
 	reviewCase, err := getReviewCaseRecord(ctx, queryer, id)
@@ -503,7 +502,7 @@ func getReviewCaseDetailWith(
 
 func queryReviewFindings(
 	ctx context.Context,
-	queryer reviewQueryer,
+	queryer rowsQueryer,
 	caseID string,
 ) ([]ReviewFinding, error) {
 	rows, err := queryer.QueryContext(ctx, `
@@ -533,7 +532,7 @@ func queryReviewFindings(
 
 func queryReviewMessages(
 	ctx context.Context,
-	queryer reviewQueryer,
+	queryer rowsQueryer,
 	caseID string,
 ) ([]ReviewMessage, error) {
 	rows, err := queryer.QueryContext(ctx, `
@@ -1837,7 +1836,7 @@ func (s *Store) CreateReviewSubmission(
 
 func findReviewSubmissionDraft(
 	ctx context.Context,
-	queryer reviewQueryer,
+	queryer rowsQueryer,
 	caseID string,
 	draftVersion int64,
 	marker string,

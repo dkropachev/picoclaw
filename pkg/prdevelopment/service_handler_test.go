@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,13 +17,16 @@ import (
 const testDevelopmentCaseID = "pdc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 type fakeReader struct {
-	page       eventing.PRDevelopmentCasePage
-	detail     eventing.PRDevelopmentCase
-	listFilter eventing.PRDevelopmentCaseFilter
-	listErr    error
-	getErr     error
-	listCalls  int
-	getCalls   int
+	page              eventing.PRDevelopmentCasePage
+	detail            eventing.PRDevelopmentCase
+	conversation      eventing.PRDevelopmentConversation
+	listFilter        eventing.PRDevelopmentCaseFilter
+	listErr           error
+	getErr            error
+	listCalls         int
+	getCalls          int
+	conversationCalls int
+	appendCalls       []eventing.PRDevelopmentMessageAppend
 }
 
 func (reader *fakeReader) ListPRDevelopmentCases(
@@ -45,6 +49,45 @@ func (reader *fakeReader) GetPRDevelopmentCase(
 	return reader.detail, reader.getErr
 }
 
+func (reader *fakeReader) GetPRDevelopmentConversation(
+	_ context.Context,
+	caseID string,
+) (eventing.PRDevelopmentConversation, error) {
+	reader.conversationCalls++
+	if caseID != testDevelopmentCaseID {
+		return eventing.PRDevelopmentConversation{}, eventing.ErrNotFound
+	}
+	conversation := reader.conversation
+	if conversation.CaseID == "" {
+		conversation.CaseID = caseID
+	}
+	return conversation, nil
+}
+
+func (reader *fakeReader) AppendPRDevelopmentMessage(
+	_ context.Context,
+	input eventing.PRDevelopmentMessageAppend,
+) (eventing.PRDevelopmentConversation, error) {
+	reader.appendCalls = append(reader.appendCalls, input)
+	if input.CaseID != testDevelopmentCaseID ||
+		input.ExpectedVersion != reader.conversation.Version {
+		return eventing.PRDevelopmentConversation{},
+			eventing.ErrPRDevelopmentConversationConflict
+	}
+	message := eventing.PRDevelopmentMessage{
+		ID:        fmt.Sprintf("pdm_%032x", len(reader.conversation.Messages)+1),
+		CaseID:    input.CaseID,
+		Ordinal:   len(reader.conversation.Messages),
+		Role:      input.Role,
+		Content:   strings.TrimSpace(input.Content),
+		CreatedAt: time.Date(2026, 8, 5, 13, len(reader.conversation.Messages), 0, 0, time.UTC),
+	}
+	reader.conversation.CaseID = input.CaseID
+	reader.conversation.Messages = append(reader.conversation.Messages, message)
+	reader.conversation.Version++
+	return reader.conversation, nil
+}
+
 func TestServiceProjectsOnlyBrowserSafeCapturedSnapshot(t *testing.T) {
 	captured := testCapturedDevelopmentCase()
 	next := eventing.PRDevelopmentCaseCursor{
@@ -58,7 +101,7 @@ func TestServiceProjectsOnlyBrowserSafeCapturedSnapshot(t *testing.T) {
 		},
 		detail: captured,
 	}
-	service, err := NewService(reader)
+	service, err := NewService(ServiceConfig{Store: reader})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -185,7 +228,7 @@ func TestCaseCursorAcceptsValidUnixEpochPosition(t *testing.T) {
 
 func TestServiceRejectsOutOfDomainFiltersBeforeReader(t *testing.T) {
 	reader := &fakeReader{}
-	service, err := NewService(reader)
+	service, err := NewService(ServiceConfig{Store: reader})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -218,7 +261,7 @@ func TestHandlerServesExactReadOnlyRoutesAndPlainFeedback(t *testing.T) {
 		},
 		detail: captured,
 	}
-	service, err := NewService(reader)
+	service, err := NewService(ServiceConfig{Store: reader})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -258,7 +301,7 @@ func TestHandlerServesExactReadOnlyRoutesAndPlainFeedback(t *testing.T) {
 
 func TestHandlerRejectsMalformedOrMutableRequestsWithoutStoreCalls(t *testing.T) {
 	reader := &fakeReader{detail: testCapturedDevelopmentCase()}
-	service, err := NewService(reader)
+	service, err := NewService(ServiceConfig{Store: reader})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -275,7 +318,7 @@ func TestHandlerRejectsMalformedOrMutableRequestsWithoutStoreCalls(t *testing.T)
 		{http.MethodGet, RuntimeRoutePrefix + "/", http.StatusBadRequest},
 		{http.MethodGet, RuntimeRoutePrefix + "/pdc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", http.StatusBadRequest},
 		{http.MethodGet, RuntimeRoutePrefix + "/%70dc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", http.StatusBadRequest},
-		{http.MethodGet, RuntimeRoutePrefix + "/" + testDevelopmentCaseID + "/chat", http.StatusBadRequest},
+		{http.MethodGet, RuntimeRoutePrefix + "/" + testDevelopmentCaseID + "/chat", http.StatusMethodNotAllowed},
 		{http.MethodGet, RuntimeRoutePrefix + "/" + testDevelopmentCaseID + "?private=1", http.StatusBadRequest},
 		{http.MethodGet, RuntimeRoutePrefix + "?unknown=x", http.StatusBadRequest},
 		{http.MethodGet, RuntimeRoutePrefix + "?repository=octo", http.StatusBadRequest},
@@ -336,7 +379,7 @@ func TestHandlerMapsSafeErrors(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			reader := &fakeReader{detail: testCapturedDevelopmentCase(), getErr: test.err}
-			service, err := NewService(reader)
+			service, err := NewService(ServiceConfig{Store: reader})
 			if err != nil {
 				t.Fatalf("NewService() error = %v", err)
 			}
@@ -357,7 +400,7 @@ func TestHandlerMapsSafeErrors(t *testing.T) {
 
 func TestHandlerRejectsNonIdentityOrAmbiguousReadEncoding(t *testing.T) {
 	reader := &fakeReader{detail: testCapturedDevelopmentCase()}
-	service, err := NewService(reader)
+	service, err := NewService(ServiceConfig{Store: reader})
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}

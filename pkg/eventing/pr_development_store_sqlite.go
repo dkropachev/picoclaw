@@ -199,6 +199,15 @@ func (s *Store) CapturePRDevelopmentCase(
 		); execErr != nil {
 			return execErr
 		}
+		if _, execErr := conn.ExecContext(ctx, `
+			INSERT INTO pr_development_conversations (
+				case_id, version, content_bytes, transcript_digest
+			) VALUES (?, 0, 0, ?)`,
+			caseID,
+			emptyPRDevelopmentTranscriptDigest(),
+		); execErr != nil {
+			return execErr
+		}
 		stored, getErr := getPRDevelopmentCaseRecord(ctx, conn, caseID)
 		if getErr != nil {
 			return getErr

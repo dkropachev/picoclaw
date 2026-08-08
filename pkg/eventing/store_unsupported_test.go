@@ -56,6 +56,32 @@ func TestStoreGetReviewCaseUnsupported(t *testing.T) {
 	}
 }
 
+func TestStorePRDevelopmentConversationUnsupported(t *testing.T) {
+	t.Parallel()
+
+	var store Store
+	if _, err := store.GetPRDevelopmentConversation(
+		context.Background(),
+		"pdc_00000000000000000000000000000000",
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf(
+			"GetPRDevelopmentConversation() error = %v, want %v",
+			err,
+			ErrUnsupportedPlatform,
+		)
+	}
+	if _, err := store.AppendPRDevelopmentMessage(
+		context.Background(),
+		PRDevelopmentMessageAppend{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf(
+			"AppendPRDevelopmentMessage() error = %v, want %v",
+			err,
+			ErrUnsupportedPlatform,
+		)
+	}
+}
+
 func TestStoreRoutingDispatchCapabilitiesUnsupported(t *testing.T) {
 	t.Parallel()
 

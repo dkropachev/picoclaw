@@ -210,7 +210,7 @@ func (h *Handler) handleReviewAttentionGet(
 	if !requireReviewMethod(w, r, http.MethodGet) {
 		return
 	}
-	if r.URL.RawQuery != "" {
+	if r.URL.RawQuery != "" || r.URL.ForceQuery {
 		writeReviewAPIError(w, http.StatusBadRequest, "invalid review request")
 		return
 	}
@@ -255,6 +255,17 @@ func (h *Handler) handleReviewMutation(
 	upstreamPath string,
 	timeout time.Duration,
 ) {
+	h.handleReviewMutationValidated(w, r, method, upstreamPath, timeout, nil)
+}
+
+func (h *Handler) handleReviewMutationValidated(
+	w http.ResponseWriter,
+	r *http.Request,
+	method string,
+	upstreamPath string,
+	timeout time.Duration,
+	validate func(*http.Request, []byte) error,
+) {
 	if !requireReviewMethod(w, r, method) {
 		return
 	}
@@ -293,6 +304,14 @@ func (h *Handler) handleReviewMutation(
 			w,
 			http.StatusBadRequest,
 			"review request body must contain one JSON value",
+		)
+		return
+	}
+	if validate != nil && validate(r, body) != nil {
+		writeReviewAPIError(
+			w,
+			http.StatusBadRequest,
+			"invalid review request",
 		)
 		return
 	}
@@ -475,6 +494,7 @@ func validOperatorReviewFindingID(value string) bool {
 func canonicalReviewRequestPath(r *http.Request) bool {
 	return r != nil &&
 		r.URL != nil &&
+		!r.URL.ForceQuery &&
 		r.URL.Fragment == "" &&
 		r.URL.EscapedPath() == r.URL.Path
 }
