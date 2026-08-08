@@ -10,17 +10,20 @@ import (
 // Store is unavailable on targets unsupported by modernc SQLite.
 type Store struct{}
 
-var _ Inbox = (*Store)(nil)
-var _ EventOperatorReader = (*Store)(nil)
-var _ DispatchOperatorReader = (*Store)(nil)
-var _ DispatchOperatorGetter = (*Store)(nil)
-var _ RevisionRoutingDispatchCreator = (*Store)(nil)
-var _ DispatchLeaseRenewer = (*Store)(nil)
-var _ ReviewStore = (*Store)(nil)
-var _ ReviewDecisionRunStore = (*Store)(nil)
-var _ ReviewAttentionTriggerQueue = (*Store)(nil)
-var _ PRDevelopmentCaseStore = (*Store)(nil)
-var _ PRDevelopmentCaseReader = (*Store)(nil)
+var (
+	_ Inbox                          = (*Store)(nil)
+	_ EventOperatorReader            = (*Store)(nil)
+	_ DispatchOperatorReader         = (*Store)(nil)
+	_ DispatchOperatorGetter         = (*Store)(nil)
+	_ RevisionRoutingDispatchCreator = (*Store)(nil)
+	_ DispatchLeaseRenewer           = (*Store)(nil)
+	_ ReviewStore                    = (*Store)(nil)
+	_ ReviewDecisionRunStore         = (*Store)(nil)
+	_ ReviewAttentionTriggerQueue    = (*Store)(nil)
+	_ PRDevelopmentCaseStore         = (*Store)(nil)
+	_ PRDevelopmentCaseReader        = (*Store)(nil)
+	_ PRDevelopmentConversationStore = (*Store)(nil)
+)
 
 func Open(context.Context, string, ...Option) (*Store, error) {
 	return nil, ErrUnsupportedPlatform
@@ -176,6 +179,20 @@ func (*Store) ListPRDevelopmentCases(
 	PRDevelopmentCaseFilter,
 ) (PRDevelopmentCasePage, error) {
 	return PRDevelopmentCasePage{}, ErrUnsupportedPlatform
+}
+
+func (*Store) GetPRDevelopmentConversation(
+	context.Context,
+	string,
+) (PRDevelopmentConversation, error) {
+	return PRDevelopmentConversation{}, ErrUnsupportedPlatform
+}
+
+func (*Store) AppendPRDevelopmentMessage(
+	context.Context,
+	PRDevelopmentMessageAppend,
+) (PRDevelopmentConversation, error) {
+	return PRDevelopmentConversation{}, ErrUnsupportedPlatform
 }
 
 func (*Store) CaptureReview(

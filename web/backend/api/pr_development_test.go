@@ -130,7 +130,6 @@ func TestPRDevelopmentRoutesRejectMalformedOrMutableRequests(t *testing.T) {
 		prDevelopmentAPIPath + "/not-a-case",
 		prDevelopmentAPIPath + "/pdc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		prDevelopmentAPIPath + "/%70dc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		prDevelopmentAPIPath + "/" + testPRDevelopmentCaseID + "/chat",
 		prDevelopmentAPIPath + "/" + testPRDevelopmentCaseID + "?private=1",
 		prDevelopmentAPIPath + "?unknown=value",
 		prDevelopmentAPIPath + "?repository=octo",
@@ -153,6 +152,16 @@ func TestPRDevelopmentRoutesRejectMalformedOrMutableRequests(t *testing.T) {
 			t.Fatalf("%s was not marked no-store", path)
 		}
 	}
+	for _, target := range []string{
+		prDevelopmentAPIPath + "/" + testPRDevelopmentCaseID + "/unknown",
+		prDevelopmentAPIPath + "/" + testPRDevelopmentCaseID + "/chat/extra",
+	} {
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, body=%s", target, recorder.Code, recorder.Body.String())
+		}
+	}
 
 	for _, path := range []string{
 		prDevelopmentAPIPath,
@@ -168,8 +177,394 @@ func TestPRDevelopmentRoutesRejectMalformedOrMutableRequests(t *testing.T) {
 			}
 		}
 	}
+	for _, method := range []string{http.MethodGet, http.MethodPatch, http.MethodDelete} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(
+			method,
+			prDevelopmentAPIPath+"/"+testPRDevelopmentCaseID+"/chat",
+			nil,
+		)
+		mux.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusMethodNotAllowed ||
+			recorder.Header().Get("Allow") != http.MethodPost {
+			t.Fatalf("%s chat = %d %#v", method, recorder.Code, recorder.Header())
+		}
+	}
 	if upstreamCalls != 0 {
 		t.Fatalf("invalid requests reached upstream %d time(s)", upstreamCalls)
+	}
+}
+
+func TestPRDevelopmentChatProxiesOneHardenedMutation(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	type capturedRequest struct {
+		method        string
+		path          string
+		body          string
+		timeout       time.Duration
+		authorization string
+		contentType   string
+		cookie        string
+		browserHeader string
+	}
+	var captured capturedRequest
+	installEventProxyStubs(
+		t,
+		func(request *http.Request, timeout time.Duration) (*http.Response, error) {
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatalf("read upstream body: %v", err)
+			}
+			captured = capturedRequest{
+				method:        request.Method,
+				path:          request.URL.Path,
+				body:          string(body),
+				timeout:       timeout,
+				authorization: request.Header.Get("Authorization"),
+				contentType:   request.Header.Get("Content-Type"),
+				cookie:        request.Header.Get("Cookie"),
+				browserHeader: request.Header.Get("X-Browser-Only"),
+			}
+			return eventUpstreamResponse(
+				http.StatusOK,
+				`{"case":{"id":"`+testPRDevelopmentCaseID+`"},"conversation_version":0,"messages":[]}`,
+			), nil
+		},
+	)
+	mux := http.NewServeMux()
+	NewHandler(configPath).RegisterRoutes(mux)
+
+	body := `{"expected_version":0,"content":"Discuss the retry path."}`
+	request := httptest.NewRequest(
+		http.MethodPost,
+		prDevelopmentAPIPath+"/"+testPRDevelopmentCaseID+"/chat",
+		strings.NewReader(body),
+	)
+	request.Header.Set("Content-Type", "application/json; charset=utf-8")
+	request.Header.Set("Content-Encoding", "identity")
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	request.Header.Set("Authorization", "Bearer browser-token")
+	request.Header.Set("Cookie", "launcher=browser-secret")
+	request.Header.Set("X-Browser-Only", "do-not-forward")
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("Cache-Control") != "no-store" ||
+		recorder.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("response headers = %#v", recorder.Header())
+	}
+	if captured.method != http.MethodPost ||
+		captured.path != prDevelopmentRuntimePath+"/"+testPRDevelopmentCaseID+"/chat" ||
+		captured.body != body ||
+		captured.timeout != reviewGatewayAIRequestTimeout ||
+		captured.authorization != "Bearer gateway-pid-token" ||
+		captured.contentType != "application/json" ||
+		captured.cookie != "" ||
+		captured.browserHeader != "" {
+		t.Fatalf("upstream = %#v", captured)
+	}
+}
+
+func TestPRDevelopmentChatRejectsUnsafeMutationBeforeProxy(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	upstreamCalls := 0
+	installEventProxyStubs(
+		t,
+		func(*http.Request, time.Duration) (*http.Response, error) {
+			upstreamCalls++
+			return eventUpstreamResponse(http.StatusOK, `{}`), nil
+		},
+	)
+	mux := http.NewServeMux()
+	NewHandler(configPath).RegisterRoutes(mux)
+	chatPath := prDevelopmentAPIPath + "/" + testPRDevelopmentCaseID + "/chat"
+
+	tests := []struct {
+		name        string
+		target      string
+		body        string
+		contentType string
+		fetchSite   string
+		origin      string
+		encoding    []string
+		streamed    bool
+		wantStatus  int
+	}{
+		{
+			name: "missing same origin evidence", target: chatPath, body: `{}`,
+			contentType: "application/json", wantStatus: http.StatusForbidden,
+		},
+		{
+			name:        "cross site",
+			target:      chatPath,
+			body:        `{}`,
+			contentType: "application/json",
+			fetchSite:   "cross-site",
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:        "foreign origin",
+			target:      chatPath,
+			body:        `{}`,
+			contentType: "application/json",
+			origin:      "https://evil.example",
+			wantStatus:  http.StatusForbidden,
+		},
+		{
+			name:        "query",
+			target:      chatPath + "?private=1",
+			body:        `{}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "bare query",
+			target:      chatPath + "?",
+			body:        `{}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:       "missing media type",
+			target:     chatPath,
+			body:       `{}`,
+			fetchSite:  "same-origin",
+			wantStatus: http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "wrong media type",
+			target:      chatPath,
+			body:        `{}`,
+			contentType: "text/plain",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "compressed",
+			target:      chatPath,
+			body:        `{}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			encoding:    []string{"gzip"},
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "ambiguous encoding",
+			target:      chatPath,
+			body:        `{}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			encoding:    []string{"identity", "identity"},
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "empty body",
+			target:      chatPath,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "malformed JSON",
+			target:      chatPath,
+			body:        `{`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "two JSON values",
+			target:      chatPath,
+			body:        `{} {}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "duplicate field",
+			target:      chatPath,
+			body:        `{"expected_version":0,"content":"one","content":"two"}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "case folded duplicate",
+			target:      chatPath,
+			body:        `{"expected_version":0,"content":"one","Content":"two"}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "case folded aliases",
+			target:      chatPath,
+			body:        `{"Expected_Version":0,"CONTENT":"one"}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "unknown field",
+			target:      chatPath,
+			body:        `{"expected_version":0,"content":"one","tools":true}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "fractional version",
+			target:      chatPath,
+			body:        `{"expected_version":0.5,"content":"one"}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "negative version",
+			target:      chatPath,
+			body:        `{"expected_version":-1,"content":"one"}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "version above capacity",
+			target:      chatPath,
+			body:        `{"expected_version":257,"content":"one"}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "maximum int64 version",
+			target:      chatPath,
+			body:        `{"expected_version":9223372036854775807,"content":"one"}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "blank content",
+			target:      chatPath,
+			body:        `{"expected_version":0,"content":"  "}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "NUL content",
+			target:      chatPath,
+			body:        `{"expected_version":0,"content":"bad\u0000value"}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "oversized content",
+			target:      chatPath,
+			body:        `{"expected_version":0,"content":"` + strings.Repeat("x", prDevelopmentChatBytes+1) + `"}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "unpaired surrogate",
+			target:      chatPath,
+			body:        `{"expected_version":0,"content":"\uD800"}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "invalid UTF-8",
+			target:      chatPath,
+			body:        string([]byte{'{', '"', 0xff, '"', ':', '0', '}'}),
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:   "excessive depth",
+			target: chatPath,
+			body: `{"expected_version":0,"content":"one","nested":` + strings.Repeat(
+				"[",
+				prDevelopmentChatDepth+1,
+			) + `0` + strings.Repeat(
+				"]",
+				prDevelopmentChatDepth+1,
+			) + `}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "streamed",
+			target:      chatPath,
+			body:        `{"expected_version":0,"content":"one"}`,
+			contentType: "application/json",
+			fetchSite:   "same-origin",
+			streamed:    true,
+			wantStatus:  http.StatusBadRequest,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(
+				http.MethodPost,
+				test.target,
+				strings.NewReader(test.body),
+			)
+			if test.contentType != "" {
+				request.Header.Set("Content-Type", test.contentType)
+			}
+			if test.fetchSite != "" {
+				request.Header.Set("Sec-Fetch-Site", test.fetchSite)
+			}
+			if test.origin != "" {
+				request.Header.Set("Origin", test.origin)
+			}
+			if test.encoding != nil {
+				request.Header["Content-Encoding"] = test.encoding
+			}
+			if test.streamed {
+				request.ContentLength = -1
+				request.TransferEncoding = []string{"chunked"}
+			}
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(recorder, request)
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d, body=%s", recorder.Code, test.wantStatus, recorder.Body.String())
+			}
+			if recorder.Header().Get("Cache-Control") != "no-store" ||
+				recorder.Header().Get("X-Content-Type-Options") != "nosniff" {
+				t.Fatalf("headers = %#v", recorder.Header())
+			}
+		})
+	}
+
+	oversized := httptest.NewRequest(
+		http.MethodPost,
+		chatPath,
+		strings.NewReader(`"`+strings.Repeat("a", reviewProxyRequestMaxBytes)+`"`),
+	)
+	oversized.Header.Set("Content-Type", "application/json")
+	oversized.Header.Set("Sec-Fetch-Site", "same-origin")
+	oversizedRecorder := httptest.NewRecorder()
+	mux.ServeHTTP(oversizedRecorder, oversized)
+	if oversizedRecorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized status = %d, body=%s", oversizedRecorder.Code, oversizedRecorder.Body.String())
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("unsafe mutations reached upstream %d time(s)", upstreamCalls)
 	}
 }
 

@@ -629,6 +629,8 @@ func installSchemaV1ForTest(t *testing.T, db *sql.DB) {
 	require.NoError(t, err)
 	_, err = db.Exec(schemaV6)
 	require.NoError(t, err)
+	_, err = db.Exec(schemaV7)
+	require.NoError(t, err)
 	setSchemaTestVersion(t, db, schemaVersion)
 }
 

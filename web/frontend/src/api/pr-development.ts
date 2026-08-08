@@ -6,6 +6,15 @@ export type PRDevelopmentReviewState =
   | "changes_requested"
   | "commented"
   | "dismissed"
+export type PRDevelopmentMessageRole = "user" | "assistant"
+
+export interface PRDevelopmentMessage {
+  id: string
+  ordinal: number
+  role: PRDevelopmentMessageRole
+  content: string
+  created_at: string
+}
 
 export interface PRDevelopmentCaseSummary {
   id: string
@@ -42,6 +51,8 @@ export interface PRDevelopmentCasePage {
 
 export interface PRDevelopmentCaseDetail {
   case: PRDevelopmentCase
+  conversation_version: number
+  messages: PRDevelopmentMessage[]
 }
 
 export interface PRDevelopmentListParams {
@@ -53,21 +64,28 @@ export interface PRDevelopmentListParams {
 
 export class PRDevelopmentAPIError extends Error {
   readonly status: number
+  readonly detail?: PRDevelopmentCaseDetail
 
-  constructor(message: string, status: number) {
+  constructor(
+    message: string,
+    status: number,
+    detail?: PRDevelopmentCaseDetail,
+  ) {
     super(message)
     this.name = "PRDevelopmentAPIError"
     this.status = status
+    this.detail = detail
   }
 }
 
 const MALFORMED_RESPONSE_MESSAGE =
   "The PR development service returned a malformed response."
 const CASE_ID_PATTERN = /^pdc_[0-9a-f]{32}$/
+const MESSAGE_ID_PATTERN = /^pdm_[0-9a-f]{32}$/
 const GIT_OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 const RFC3339_PATTERN =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|([+-])(\d{2}):(\d{2}))$/
 const MAXIMUM_CASES = 100
 const MAXIMUM_CURSOR_BYTES = 1024
 const MAXIMUM_PULL_NUMBER = 2_147_483_647
@@ -76,7 +94,22 @@ const MAXIMUM_LOGIN_BYTES = 128
 const MAXIMUM_REF_BYTES = 1024
 const MAXIMUM_URL_BYTES = 4096
 const MAXIMUM_FEEDBACK_BYTES = 64 << 10
-const MAXIMUM_ERROR_BYTES = 64 << 10
+export const MAXIMUM_PR_DEVELOPMENT_CHAT_BYTES = 32 << 10
+const MAXIMUM_MESSAGE_BYTES = 64 << 10
+const MAXIMUM_MESSAGES = 256
+const MAXIMUM_TRANSCRIPT_BYTES = 4 << 20
+// Safe conflict/model-failure responses may carry the complete transcript so
+// the UI can recover authoritative state. Match the launcher's bounded JSON
+// response ceiling, including JSON-escaping headroom.
+const MAXIMUM_ERROR_BYTES = 32 << 20
+const GO_LEADING_SPACE = /^\p{White_Space}+/u
+const GO_TRAILING_SPACE = /\p{White_Space}+$/u
+
+// Match Go strings.TrimSpace exactly so client success binding compares the
+// canonical content actually committed by the runtime.
+export function normalizePRDevelopmentChatContent(value: string): string {
+  return value.replace(GO_LEADING_SPACE, "").replace(GO_TRAILING_SPACE, "")
+}
 
 const pullStates = new Set<PRDevelopmentPullState>(["open", "closed"])
 const submittedReviewStates = new Set<
@@ -88,6 +121,7 @@ const currentReviewStates = new Set<PRDevelopmentReviewState>([
   "commented",
   "dismissed",
 ])
+const messageRoles = new Set<PRDevelopmentMessageRole>(["user", "assistant"])
 const summaryKeys = new Set([
   "id",
   "repository",
@@ -115,6 +149,8 @@ const detailCaseKeys = new Set([
   "review_commit_sha",
   "feedback",
 ])
+const detailKeys = new Set(["case", "conversation_version", "messages"])
+const messageKeys = new Set(["id", "ordinal", "role", "content", "created_at"])
 
 export async function listPRDevelopmentCases(
   input: PRDevelopmentListParams = {},
@@ -151,16 +187,62 @@ export async function listPRDevelopmentCases(
 export async function getPRDevelopmentCase(
   caseID: string,
 ): Promise<PRDevelopmentCaseDetail> {
+  if (!CASE_ID_PATTERN.test(caseID)) {
+    throw new PRDevelopmentAPIError("Invalid development case.", 400)
+  }
   const body = await responseBody(
     await launcherFetch(
       `/api/pr-development/${encodeURIComponent(caseID)}`,
       undefined,
     ),
   )
-  if (!isRecord(body) || !onlyKeys(body, new Set(["case"]))) {
+  return parseDetail(body, { caseID })
+}
+
+export async function chatAboutPRDevelopmentCase(
+  caseID: string,
+  expectedVersion: number,
+  content: string,
+): Promise<PRDevelopmentCaseDetail> {
+  const normalizedContent = normalizePRDevelopmentChatContent(content)
+  if (
+    !CASE_ID_PATTERN.test(caseID) ||
+    !Number.isSafeInteger(expectedVersion) ||
+    expectedVersion < 0 ||
+    expectedVersion > MAXIMUM_MESSAGES ||
+    !isBoundedCanonicalText(
+      normalizedContent,
+      MAXIMUM_PR_DEVELOPMENT_CHAT_BYTES,
+    )
+  ) {
+    throw new PRDevelopmentAPIError("Invalid development chat message.", 400)
+  }
+  const body = await responseBody(
+    await launcherFetch(
+      `/api/pr-development/${encodeURIComponent(caseID)}/chat`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_version: expectedVersion,
+          content: normalizedContent,
+        }),
+      },
+    ),
+    { caseID, minimumVersion: expectedVersion },
+  )
+  const detail = parseDetail(body, { caseID })
+  const userMessage = detail.messages[expectedVersion]
+  const assistantMessage = detail.messages[expectedVersion + 1]
+  if (
+    detail.conversation_version !== expectedVersion + 2 ||
+    userMessage?.role !== "user" ||
+    userMessage.content !== normalizedContent ||
+    assistantMessage?.role !== "assistant"
+  ) {
     throw malformedResponse()
   }
-  return { case: parseCase(body.case) }
+  return detail
 }
 
 function parseSummary(value: unknown): PRDevelopmentCaseSummary {
@@ -243,9 +325,83 @@ function parseCase(value: unknown): PRDevelopmentCase {
   }
 }
 
-async function responseBody(response: Response): Promise<unknown> {
+function parseDetail(
+  value: unknown,
+  binding?: { caseID: string; minimumVersion?: number },
+): PRDevelopmentCaseDetail {
+  if (
+    !isRecord(value) ||
+    !onlyKeys(value, detailKeys) ||
+    !Number.isSafeInteger(value.conversation_version) ||
+    (value.conversation_version as number) < 0 ||
+    (value.conversation_version as number) > MAXIMUM_MESSAGES
+  ) {
+    throw malformedResponse()
+  }
+  const conversationVersion = value.conversation_version as number
+  const developmentCase = parseCase(value.case)
+  if (
+    binding !== undefined &&
+    (developmentCase.id !== binding.caseID ||
+      (binding.minimumVersion !== undefined &&
+        conversationVersion < binding.minimumVersion))
+  ) {
+    throw malformedResponse()
+  }
+  return {
+    case: developmentCase,
+    conversation_version: conversationVersion,
+    messages: parseMessages(value.messages, conversationVersion),
+  }
+}
+
+function parseMessages(
+  value: unknown,
+  conversationVersion: unknown,
+): PRDevelopmentMessage[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > MAXIMUM_MESSAGES ||
+    conversationVersion !== value.length
+  ) {
+    throw malformedResponse()
+  }
+  const ids = new Set<string>()
+  let transcriptBytes = 0
+  return value.map((message, ordinal) => {
+    if (
+      !isRecord(message) ||
+      !onlyKeys(message, messageKeys) ||
+      !isPattern(message.id, MESSAGE_ID_PATTERN) ||
+      ids.has(message.id) ||
+      message.ordinal !== ordinal ||
+      !isSetMember(message.role, messageRoles) ||
+      !isBoundedCanonicalText(message.content, MAXIMUM_MESSAGE_BYTES) ||
+      !isTimestamp(message.created_at)
+    ) {
+      throw malformedResponse()
+    }
+    ids.add(message.id)
+    transcriptBytes += byteLength(message.content)
+    if (transcriptBytes > MAXIMUM_TRANSCRIPT_BYTES) {
+      throw malformedResponse()
+    }
+    return {
+      id: message.id,
+      ordinal,
+      role: message.role,
+      content: message.content,
+      created_at: message.created_at,
+    }
+  })
+}
+
+async function responseBody(
+  response: Response,
+  errorBinding?: { caseID: string; minimumVersion?: number },
+): Promise<unknown> {
   if (!response.ok) {
-    throw await errorFromResponse(response)
+    throw await errorFromResponse(response, errorBinding)
   }
   try {
     return (await response.json()) as unknown
@@ -256,6 +412,7 @@ async function responseBody(response: Response): Promise<unknown> {
 
 async function errorFromResponse(
   response: Response,
+  binding?: { caseID: string; minimumVersion?: number },
 ): Promise<PRDevelopmentAPIError> {
   let body: unknown
   try {
@@ -275,10 +432,30 @@ async function errorFromResponse(
   }
   if (
     isRecord(body) &&
-    onlyKeys(body, new Set(["error"])) &&
+    onlyKeys(body, new Set(["error", "detail"])) &&
     isBoundedCanonicalText(body.error, 1024)
   ) {
-    return new PRDevelopmentAPIError(body.error, response.status)
+    if (body.detail === undefined) {
+      return new PRDevelopmentAPIError(body.error, response.status)
+    }
+    if (binding === undefined) {
+      return new PRDevelopmentAPIError(
+        "PR development is unavailable.",
+        response.status,
+      )
+    }
+    try {
+      return new PRDevelopmentAPIError(
+        body.error,
+        response.status,
+        parseDetail(body.detail, binding),
+      )
+    } catch {
+      return new PRDevelopmentAPIError(
+        "PR development is unavailable.",
+        response.status,
+      )
+    }
   }
   return new PRDevelopmentAPIError(
     "PR development is unavailable.",
@@ -348,7 +525,7 @@ function isBoundedCanonicalText(
   return (
     typeof value === "string" &&
     value !== "" &&
-    value === value.trim() &&
+    value === normalizePRDevelopmentChatContent(value) &&
     !value.includes("\0") &&
     isWellFormedUnicode(value) &&
     byteLength(value) <= maximumBytes
@@ -363,7 +540,7 @@ function isOptionalBoundedText(
     value === undefined ||
     (typeof value === "string" &&
       value !== "" &&
-      value === value.trim() &&
+      value === normalizePRDevelopmentChatContent(value) &&
       !value.includes("\0") &&
       isWellFormedUnicode(value) &&
       byteLength(value) <= maximumBytes)
@@ -379,12 +556,51 @@ function isFeedback(value: unknown): value is string {
 }
 
 function isTimestamp(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value === "" ||
+    value !== normalizePRDevelopmentChatContent(value) ||
+    !isWellFormedUnicode(value)
+  ) {
+    return false
+  }
+  const match = RFC3339_PATTERN.exec(value)
+  if (match == null) return false
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6])
+  const offsetHour = match[8] === undefined ? 0 : Number(match[8])
+  const offsetMinute = match[9] === undefined ? 0 : Number(match[9])
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const daysInMonth = [
+    0,
+    31,
+    leapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ]
   return (
-    typeof value === "string" &&
-    value !== "" &&
-    value === value.trim() &&
-    isWellFormedUnicode(value) &&
-    RFC3339_PATTERN.test(value) &&
+    year > 0 &&
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= daysInMonth[month] &&
+    hour <= 23 &&
+    minute <= 59 &&
+    second <= 59 &&
+    offsetHour <= 23 &&
+    offsetMinute <= 59 &&
     Number.isFinite(Date.parse(value))
   )
 }
@@ -392,7 +608,7 @@ function isTimestamp(value: unknown): value is string {
 function isAbsoluteHTTPSURL(value: unknown): value is string {
   if (
     typeof value !== "string" ||
-    value !== value.trim() ||
+    value !== normalizePRDevelopmentChatContent(value) ||
     value.includes("\0") ||
     !isWellFormedUnicode(value) ||
     byteLength(value) > MAXIMUM_URL_BYTES

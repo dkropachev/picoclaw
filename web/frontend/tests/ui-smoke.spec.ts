@@ -1064,6 +1064,14 @@ const prDevelopmentDetail = {
     feedback:
       'Please keep <a href="https://private.example.test">private-link-canary</a> as provider text.',
   },
+  conversation_version: 0,
+  messages: [] as Array<{
+    id: string
+    ordinal: number
+    role: "user" | "assistant"
+    content: string
+    created_at: string
+  }>,
 }
 const waitingReviewAttentionProjectionText = `{"case_version":7,"status":"waiting","can_respond":true,"turns":[{"status":"waiting","title":"Choose a safe contract","questions":{"priority":9007199254740993},"response_token":"${reviewAttentionResponseToken}"}]}`
 
@@ -1088,6 +1096,11 @@ interface MockLauncherApiOptions {
   oauthProviders?: unknown[]
   reviewAttentionPolicyPutGate?: Promise<void>
   reviewAttentionResponseRequests?: Array<{
+    method: string
+    path: string
+    body: unknown
+  }>
+  prDevelopmentChatRequests?: Array<{
     method: string
     path: string
     body: unknown
@@ -1156,6 +1169,7 @@ async function mockLauncherApis(
     reviewAttentionPoliciesResponseText
   let currentReviewAttentionProjectionText =
     waitingReviewAttentionProjectionText
+  let currentPRDevelopmentDetail = structuredClone(prDevelopmentDetail)
   let currentAgents: AgentInfo[] = [
     {
       id: "main",
@@ -1698,6 +1712,38 @@ async function mockLauncherApis(
 
       if (method === "POST") {
         switch (path) {
+          case `/api/pr-development/${prDevelopmentCaseID}/chat`: {
+            const body = request.postDataJSON() as {
+              expected_version: number
+              content: string
+            }
+            options.prDevelopmentChatRequests?.push({ method, path, body })
+            expect(body.expected_version).toBe(
+              currentPRDevelopmentDetail.conversation_version,
+            )
+            currentPRDevelopmentDetail = {
+              ...currentPRDevelopmentDetail,
+              conversation_version: 2,
+              messages: [
+                {
+                  id: `pdm_${"8".repeat(32)}`,
+                  ordinal: 0,
+                  role: "user",
+                  content: body.content,
+                  created_at: "2026-08-05T12:01:00Z",
+                },
+                {
+                  id: `pdm_${"9".repeat(32)}`,
+                  ordinal: 1,
+                  role: "assistant",
+                  content:
+                    "<script>private-ai-canary</script> Start with a local reproduction.",
+                  created_at: "2026-08-05T12:01:01Z",
+                },
+              ],
+            }
+            return json(route, currentPRDevelopmentDetail)
+          }
           case `/api/reviews/${reviewAttentionCaseID}/attention/respond`: {
             const body = request.postDataJSON() as {
               expected_case_version: number
@@ -2552,7 +2598,7 @@ async function mockLauncherApis(
         case "/api/pr-development":
           return json(route, { cases: [prDevelopmentSummary] })
         case `/api/pr-development/${prDevelopmentCaseID}`:
-          return json(route, prDevelopmentDetail)
+          return json(route, currentPRDevelopmentDetail)
         case `/api/reviews/${reviewAttentionCaseID}`:
           return json(route, reviewAttentionDetail)
         case `/api/reviews/${reviewAttentionCaseID}/attention`:
@@ -3128,12 +3174,14 @@ test("submitted review attention handoff is canonical, focused, fenced, and cont
   expect(errors).toEqual([])
 })
 
-test("captured PR feedback is canonical, plain text, read-only, and contained on mobile", async ({
+test("captured PR feedback and advisory AI chat are canonical, plain text, and contained on mobile", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 375, height: 760 })
   const errors = collectPageErrors(page)
   const requests: Array<{ method: string; path: string }> = []
+  const chatRequests: Array<{ method: string; path: string; body: unknown }> =
+    []
   page.on("request", (request) => {
     const path = new URL(request.url()).pathname
     if (path.startsWith("/api/pr-development")) {
@@ -3144,6 +3192,7 @@ test("captured PR feedback is canonical, plain text, read-only, and contained on
   await gotoMockedRoute(
     page,
     `/reviews?view=development&case=${prDevelopmentCaseID}&repository=%20octo%2Frepo%20&pull_number=84&focus=chat&questions=private-questions-canary&cursor=private-cursor-canary`,
+    { prDevelopmentChatRequests: chatRequests },
   )
 
   await expect(page).toHaveURL(
@@ -3164,11 +3213,29 @@ test("captured PR feedback is canonical, plain text, read-only, and contained on
     "private-questions-canary",
   )
   await expect(page.locator("body")).not.toContainText("private-cursor-canary")
+  await expect(page.getByText(/cannot inspect a checkout/i)).toBeVisible()
   await expect(
-    page.getByRole("button", { name: /chat|checkout|push/i }),
+    page.getByRole("button", { name: /checkout|push/i }),
   ).toHaveCount(0)
   await expect(page.getByRole("link", { name: /Open PR/ })).toBeVisible()
   await expect(page.getByRole("link", { name: /Open review/ })).toBeVisible()
+  await page
+    .getByLabel("Message AI about this feedback")
+    .fill("Explain the safe next step.")
+  await page.getByRole("button", { name: "Send" }).click()
+  const assistantMessage = page.getByTestId("pr-development-message-1")
+  await expect(assistantMessage).toContainText("private-ai-canary")
+  await expect(assistantMessage.locator("script")).toHaveCount(0)
+  expect(chatRequests).toEqual([
+    {
+      method: "POST",
+      path: `/api/pr-development/${prDevelopmentCaseID}/chat`,
+      body: {
+        expected_version: 0,
+        content: "Explain the safe next step.",
+      },
+    },
+  ])
   await page.getByRole("button", { name: "Back to PR feedback" }).click()
   await expect(
     page.getByRole("heading", { name: "Feedback on my PRs" }),
@@ -3184,9 +3251,12 @@ test("captured PR feedback is canonical, plain text, read-only, and contained on
         method: "GET",
         path: `/api/pr-development/${prDevelopmentCaseID}`,
       },
+      {
+        method: "POST",
+        path: `/api/pr-development/${prDevelopmentCaseID}/chat`,
+      },
     ]),
   )
-  expect(requests.every(({ method }) => method === "GET")).toBe(true)
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])

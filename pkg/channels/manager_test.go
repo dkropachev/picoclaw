@@ -365,6 +365,23 @@ func TestManagerRegisterHTTPRouteLifecycle(t *testing.T) {
 	}
 }
 
+func TestManagerSharedHTTPWriteTimeoutCoversProtectedAIBudget(t *testing.T) {
+	m := newTestManager()
+	m.SetupHTTPServer("127.0.0.1:0", nil)
+
+	if m.httpServer == nil {
+		t.Fatal("SetupHTTPServer() did not create a server")
+	}
+	if m.httpServer.WriteTimeout != sharedHTTPWriteTimeout ||
+		m.httpServer.WriteTimeout <= 120*time.Second {
+		t.Fatalf(
+			"shared WriteTimeout = %s, want %s and greater than 120s",
+			m.httpServer.WriteTimeout,
+			sharedHTTPWriteTimeout,
+		)
+	}
+}
+
 func TestManagerRegisterHTTPRouteDoesNotReplaceHealthRoute(t *testing.T) {
 	m := newTestManager()
 	healthServer := health.NewServer("127.0.0.1", 0, "")

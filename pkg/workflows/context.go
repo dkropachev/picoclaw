@@ -160,6 +160,11 @@ type AgentRequest struct {
 	// workflow root. Runners must keep provider diagnostics out of ordinary
 	// runtime events and shared health-state error fields for this request.
 	PrivateContext bool
+	// IsolatedSystemPrompt replaces the configured agent's default system,
+	// bootstrap, memory, skill, contributor, and dynamic context for one trusted
+	// private ephemeral request. The workflow runner rejects it on every broader
+	// session or authority profile.
+	IsolatedSystemPrompt string
 	// FrozenReadOnlySession bypasses live session lookup for one private-root
 	// read-only decision. Session remains empty so its local capability key
 	// cannot enter ordinary workflow output or routing context.

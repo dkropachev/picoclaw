@@ -125,6 +125,12 @@ func promptBuildRequestForProcessOptions(
 		req.SuppressSkillContext = true
 		req.ToolUseFallback = hasCallableTools
 	}
+	if opts.SuppressDefaultContext {
+		req.SuppressDefaultSystemPrompt = true
+		req.SuppressSkillContext = true
+		req.SuppressToolUseRule = true
+		req.ToolUseFallback = false
+	}
 	if profile.Enabled && !hasCallableTools {
 		req.SuppressToolUseRule = true
 	}

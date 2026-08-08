@@ -260,6 +260,8 @@ type workflowAgentRunOptions struct {
 	NoTools         bool
 }
 
+const maxWorkflowIsolatedSystemPromptBytes = 64 << 10
+
 type workflowAgentTextRunner func(message string, noHistoryOverride bool, runOptions workflowAgentRunOptions) (string, error)
 
 func (r *workflowAgentRunner) CaptureReadOnlySession(
@@ -350,6 +352,13 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 	ephemeralDecision := req.EphemeralSession
 	privateDecision := req.FrozenReadOnlySession != nil
 	privateExecution := req.PrivateContext || privateDecision
+	isolatedSystemPrompt := strings.TrimSpace(req.IsolatedSystemPrompt)
+	if isolatedSystemPrompt != req.IsolatedSystemPrompt ||
+		!utf8.ValidString(isolatedSystemPrompt) ||
+		strings.ContainsRune(isolatedSystemPrompt, '\x00') ||
+		len(isolatedSystemPrompt) > maxWorkflowIsolatedSystemPromptBytes {
+		return nil, fmt.Errorf("isolated workflow system prompt is invalid")
+	}
 	if privateDecision {
 		if historyModeInput != "read_only" {
 			return nil, fmt.Errorf("private workflow agent session requires history: read_only")
@@ -379,6 +388,15 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		}
 		if strings.TrimSpace(req.Session) != "" {
 			return nil, fmt.Errorf("ephemeral workflow agent session cannot use a durable session key")
+		}
+	}
+	if isolatedSystemPrompt != "" {
+		if !ephemeralDecision || !req.PrivateContext || privateDecision ||
+			!workflowAgentDeliveryEmpty(req.Delivery) || req.MessageID != "" ||
+			req.Scope != nil || workflowManagedMode(req.Managed) != "off" {
+			return nil, fmt.Errorf(
+				"isolated workflow system prompt requires a private ephemeral single-run request",
+			)
 		}
 	}
 	isolatedDecision := readOnlyDecision || ephemeralDecision
@@ -488,6 +506,8 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 					NoHistory:               true,
 					DisableTools:            true,
 					DisablePromptCache:      true,
+					SystemPromptOverride:    isolatedSystemPrompt,
+					SuppressDefaultContext:  isolatedSystemPrompt != "",
 				},
 				runMessage,
 				sideQuestionExecutionOptions{
@@ -668,6 +688,13 @@ func (r *workflowAgentRunner) RunAgent(ctx context.Context, req workflows.AgentR
 		}
 	}
 	return outputs, nil
+}
+
+func workflowAgentDeliveryEmpty(delivery workflows.Delivery) bool {
+	return delivery.Channel == "" && delivery.ChatID == "" &&
+		delivery.TopicID == "" && delivery.ThreadTS == "" &&
+		delivery.MessageID == "" && delivery.ReplyToMessageID == "" &&
+		len(delivery.ReplyHandles) == 0
 }
 
 func newWorkflowEphemeralSessionKey() string {

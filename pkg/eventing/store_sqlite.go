@@ -317,6 +317,25 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 	if err = validateSchemaV6(ctx, conn); err != nil {
 		return fmt.Errorf("validate eventing schema v6: %w", err)
 	}
+	if version < 7 {
+		if _, err = conn.ExecContext(ctx, schemaV7); err != nil {
+			return fmt.Errorf("create eventing schema v7: %w", err)
+		}
+		if err = validateSchemaV7(ctx, conn); err != nil {
+			return fmt.Errorf("validate eventing schema v7: %w", err)
+		}
+		if err = backfillPRDevelopmentConversations(ctx, conn); err != nil {
+			return fmt.Errorf(
+				"backfill eventing schema v7 conversations: %w",
+				err,
+			)
+		}
+		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 7"); err != nil {
+			return fmt.Errorf("record eventing schema v7: %w", err)
+		}
+	} else if err = validateSchemaV7(ctx, conn); err != nil {
+		return fmt.Errorf("validate eventing schema v7: %w", err)
+	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit eventing migration: %w", err)
 	}
@@ -1132,6 +1151,11 @@ const eventMetadataColumns = `
 
 type rowQueryer interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+type rowsQueryer interface {
+	rowQueryer
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 func (s *Store) getWith(ctx context.Context, queryer rowQueryer, query string, args ...any) (StoredEvent, error) {

@@ -257,7 +257,11 @@ func newEventAutomationServiceWithReviews(
 	if err != nil {
 		return nil, errors.Join(err, store.Close())
 	}
-	prDevelopmentService, err := prdevelopment.NewService(store)
+	prDevelopmentService, err := prdevelopment.NewService(prdevelopment.ServiceConfig{
+		Store:   store,
+		Agent:   reviewRuntime.agent,
+		AgentID: reviewRuntime.agentID,
+	})
 	if err != nil {
 		return nil, errors.Join(err, store.Close())
 	}

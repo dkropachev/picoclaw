@@ -3,10 +3,13 @@ import {
   IconExternalLink,
   IconGitBranch,
   IconGitPullRequest,
+  IconMessageCircle,
   IconRefresh,
+  IconSend,
 } from "@tabler/icons-react"
 import {
   useInfiniteQuery,
+  useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query"
@@ -21,12 +24,18 @@ import {
 import { useTranslation } from "react-i18next"
 
 import {
+  MAXIMUM_PR_DEVELOPMENT_CHAT_BYTES,
+  PRDevelopmentAPIError,
   type PRDevelopmentCase,
+  type PRDevelopmentCaseDetail,
   type PRDevelopmentCasePage,
   type PRDevelopmentCaseSummary,
+  type PRDevelopmentMessage,
   type PRDevelopmentReviewState,
+  chatAboutPRDevelopmentCase,
   getPRDevelopmentCase,
   listPRDevelopmentCases,
+  normalizePRDevelopmentChatContent,
 } from "@/api/pr-development"
 import { PageHeader } from "@/components/page-header"
 import { ReviewWorkbenchTabs } from "@/components/reviews/review-workbench-tabs"
@@ -35,6 +44,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 
 const DEVELOPMENT_PAGE_SIZE = 40
@@ -50,6 +60,7 @@ export function PRDevelopmentPage({
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const wideLayout = useWideDevelopmentLayout()
+  const restoreFocusCaseRef = useRef<string | null>(null)
   const [repositoryDraft, setRepositoryDraft] = useState(
     search.repository ?? "",
   )
@@ -97,6 +108,18 @@ export function PRDevelopmentPage({
     }
   }, [cases, onSearchChange, search, wideLayout])
 
+  useEffect(() => {
+    const caseID = restoreFocusCaseRef.current
+    if (search.case || caseID == null) return
+    const button = document.querySelector<HTMLButtonElement>(
+      `button[data-pr-development-case-id="${caseID}"]`,
+    )
+    if (button) {
+      restoreFocusCaseRef.current = null
+      button.focus()
+    }
+  }, [cases, search.case])
+
   const refresh = async () => {
     await queryClient.invalidateQueries({ queryKey: ["pr-development"] })
   }
@@ -132,7 +155,7 @@ export function PRDevelopmentPage({
           <Badge variant="secondary">
             {t(
               "pages.reviews.development.badge",
-              "Read-only captured feedback",
+              "Captured feedback · advisory AI",
             )}
           </Badge>
         }
@@ -248,7 +271,9 @@ export function PRDevelopmentPage({
             <DevelopmentDetailPanel
               caseID={search.case}
               hiddenOnMobile={!search.case}
+              focusOnOpen={!wideLayout}
               onBack={() => {
+                restoreFocusCaseRef.current = search.case ?? null
                 const next = { ...search }
                 delete next.case
                 onSearchChange(next, true)
@@ -352,6 +377,7 @@ function DevelopmentCaseList({
                 <button
                   type="button"
                   key={developmentCase.id}
+                  data-pr-development-case-id={developmentCase.id}
                   aria-current={selected ? "true" : undefined}
                   onClick={() => onSelect(developmentCase.id)}
                   className={cn(
@@ -428,22 +454,56 @@ function DevelopmentCaseList({
   )
 }
 
+function retainNewestPRDevelopmentDetail(
+  previous: unknown,
+  incoming: unknown,
+): unknown {
+  const previousDetail = previous as PRDevelopmentCaseDetail | undefined
+  const incomingDetail = incoming as PRDevelopmentCaseDetail | undefined
+  if (
+    previousDetail != null &&
+    incomingDetail != null &&
+    previousDetail.case.id === incomingDetail.case.id &&
+    previousDetail.conversation_version >= incomingDetail.conversation_version
+  ) {
+    return previous
+  }
+  return incoming
+}
+
 function DevelopmentDetailPanel({
   caseID,
   hiddenOnMobile,
+  focusOnOpen,
   onBack,
 }: {
   caseID?: string
   hiddenOnMobile: boolean
+  focusOnOpen: boolean
   onBack: () => void
 }) {
   const { t } = useTranslation()
+  const backButtonRef = useRef<HTMLButtonElement>(null)
+  const focusedCaseRef = useRef<string | null>(null)
   const detailQuery = useQuery({
     queryKey: ["pr-development", "detail", caseID],
     queryFn: () => getPRDevelopmentCase(caseID ?? ""),
     enabled: Boolean(caseID),
+    structuralSharing: retainNewestPRDevelopmentDetail,
   })
-  const developmentCase = detailQuery.data?.case
+  const detail = detailQuery.data
+  const developmentCase = detail?.case
+
+  useEffect(() => {
+    if (!caseID) {
+      focusedCaseRef.current = null
+      return
+    }
+    if (focusOnOpen && focusedCaseRef.current !== caseID) {
+      focusedCaseRef.current = caseID
+      backButtonRef.current?.focus()
+    }
+  }, [caseID, focusOnOpen])
 
   return (
     <section
@@ -459,6 +519,7 @@ function DevelopmentDetailPanel({
       <div className="border-border flex min-h-12 shrink-0 items-center gap-2 border-b px-3 py-2">
         {caseID ? (
           <Button
+            ref={backButtonRef}
             type="button"
             variant="ghost"
             size="icon-sm"
@@ -532,13 +593,17 @@ function DevelopmentDetailPanel({
               "Loading feedback detail…",
             )}
           </DevelopmentMessage>
+        ) : detail ? (
+          <DevelopmentCaseDetail
+            detail={detail}
+            refreshError={detailQuery.isRefetchError ? detailQuery.error : null}
+            onRetryRefresh={() => void detailQuery.refetch()}
+          />
         ) : detailQuery.error ? (
           <DevelopmentError
             error={detailQuery.error}
             onRetry={() => void detailQuery.refetch()}
           />
-        ) : developmentCase ? (
-          <DevelopmentCaseDetail developmentCase={developmentCase} />
         ) : null}
       </div>
     </section>
@@ -546,17 +611,33 @@ function DevelopmentDetailPanel({
 }
 
 function DevelopmentCaseDetail({
-  developmentCase,
+  detail,
+  refreshError,
+  onRetryRefresh,
 }: {
-  developmentCase: PRDevelopmentCase
+  detail: PRDevelopmentCaseDetail
+  refreshError: unknown
+  onRetryRefresh: () => void
 }) {
   const { t } = useTranslation()
+  const developmentCase = detail.case
   const forked =
     developmentCase.head_repository.toLowerCase() !==
     developmentCase.base_repository.toLowerCase()
 
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
+      <div aria-live="polite" aria-atomic="true">
+        {refreshError ? (
+          <div className="border-destructive/40 bg-destructive/5 rounded-md border">
+            <DevelopmentError
+              compact
+              error={refreshError}
+              onRetry={onRetryRefresh}
+            />
+          </div>
+        ) : null}
+      </div>
       <p className="text-muted-foreground text-xs font-medium">
         {t("pages.reviews.development.state_at_capture", "State at capture")}
       </p>
@@ -603,6 +684,8 @@ function DevelopmentCaseDetail({
             )}
         </div>
       </section>
+
+      <DevelopmentConversation key={developmentCase.id} detail={detail} />
 
       <section className="border-border rounded-lg border p-4">
         <div className="flex items-center gap-2">
@@ -677,6 +760,342 @@ function DevelopmentCaseDetail({
         </dl>
       </section>
     </div>
+  )
+}
+
+function DevelopmentConversation({
+  detail,
+}: {
+  detail: PRDevelopmentCaseDetail
+}) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [draft, setDraft] = useState("")
+  const [failedMessageCommitted, setFailedMessageCommitted] = useState(false)
+  const [restoreFocusAfterRetry, setRestoreFocusAfterRetry] = useState(false)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
+  const [uncertainSubmission, setUncertainSubmission] = useState<{
+    expectedVersion: number
+    content: string
+  } | null>(null)
+  const developmentCase = detail.case
+  const detailQueryKey = [
+    "pr-development",
+    "detail",
+    developmentCase.id,
+  ] as const
+  const normalizedDraft = normalizePRDevelopmentChatContent(draft)
+  const draftBytes = new TextEncoder().encode(normalizedDraft).byteLength
+  const draftInvalid =
+    normalizedDraft === "" ||
+    normalizedDraft.includes("\0") ||
+    draftBytes > MAXIMUM_PR_DEVELOPMENT_CHAT_BYTES
+  const uncertainMessageCommitted =
+    uncertainSubmission != null &&
+    conversationContainsSubmittedMessage(detail, uncertainSubmission)
+  const uncertainTurnCompleted =
+    uncertainSubmission != null &&
+    conversationContainsCompletedTurn(detail, uncertainSubmission)
+  const messageWasCommitted =
+    failedMessageCommitted || uncertainMessageCommitted
+  const updateConversation = (incoming: PRDevelopmentCaseDetail) => {
+    queryClient.setQueryData<PRDevelopmentCaseDetail>(
+      detailQueryKey,
+      (current) =>
+        current?.case.id === incoming.case.id &&
+        current.conversation_version >= incoming.conversation_version
+          ? current
+          : incoming,
+    )
+  }
+
+  const chatMutation = useMutation({
+    mutationFn: ({
+      content,
+      expectedVersion,
+    }: {
+      content: string
+      expectedVersion: number
+    }) =>
+      chatAboutPRDevelopmentCase(developmentCase.id, expectedVersion, content),
+    retry: false,
+    onMutate: () => {
+      setFailedMessageCommitted(false)
+    },
+    onSuccess: (updatedDetail) => {
+      updateConversation(updatedDetail)
+      setUncertainSubmission(null)
+      setDraft("")
+    },
+    onError: (error, submitted) => {
+      if (error instanceof PRDevelopmentAPIError && error.detail) {
+        updateConversation(error.detail)
+        const committed = conversationContainsSubmittedMessage(
+          error.detail,
+          submitted,
+        )
+        setFailedMessageCommitted(committed)
+        if (committed) {
+          setUncertainSubmission(submitted)
+          setDraft("")
+        } else if (error.status === 409) {
+          setUncertainSubmission(null)
+        } else {
+          setUncertainSubmission(submitted)
+        }
+      } else {
+        setUncertainSubmission(submitted)
+      }
+    },
+  })
+  const resetChatMutation = chatMutation.reset
+
+  useEffect(() => {
+    if (uncertainSubmission == null || !uncertainMessageCommitted) {
+      return
+    }
+    setUncertainSubmission(null)
+    setFailedMessageCommitted(!uncertainTurnCompleted)
+    setDraft((current) =>
+      normalizePRDevelopmentChatContent(current) === uncertainSubmission.content
+        ? ""
+        : current,
+    )
+    if (uncertainTurnCompleted) {
+      resetChatMutation()
+    }
+  }, [
+    resetChatMutation,
+    uncertainMessageCommitted,
+    uncertainSubmission,
+    uncertainTurnCompleted,
+  ])
+
+  useEffect(() => {
+    if (chatMutation.isPending || !restoreFocusAfterRetry) {
+      return
+    }
+    setRestoreFocusAfterRetry(false)
+    composerRef.current?.focus()
+  }, [chatMutation.isPending, restoreFocusAfterRetry])
+
+  const send = (event?: FormEvent) => {
+    event?.preventDefault()
+    if (
+      chatMutation.isPending ||
+      draftInvalid ||
+      (messageWasCommitted && uncertainSubmission?.content === normalizedDraft)
+    ) {
+      return
+    }
+    chatMutation.mutate({
+      content: normalizedDraft,
+      expectedVersion: detail.conversation_version,
+    })
+  }
+
+  return (
+    <section className="border-border rounded-lg border p-4">
+      <div className="flex items-center gap-2">
+        <IconMessageCircle className="text-muted-foreground size-4" />
+        <h3 className="text-sm font-semibold">
+          {t("pages.reviews.development.chat_title", "Discuss with AI")}
+        </h3>
+      </div>
+      <p className="text-muted-foreground mt-1 text-xs">
+        {t(
+          "pages.reviews.development.chat_advisory",
+          "AI advice is based on this captured snapshot and conversation. It cannot inspect a checkout, read current GitHub state, edit code, run checks, or push changes.",
+        )}
+      </p>
+
+      {detail.messages.length === 0 ? (
+        <p className="text-muted-foreground bg-muted/30 mt-3 rounded-md p-3 text-sm">
+          {t(
+            "pages.reviews.development.chat_empty",
+            "Ask about the reviewer’s feedback or discuss how to approach it.",
+          )}
+        </p>
+      ) : null}
+      <div
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions text"
+        aria-atomic="false"
+        aria-busy={chatMutation.isPending}
+        aria-label={t(
+          "pages.reviews.development.chat_history",
+          "Development conversation",
+        )}
+        className={cn(
+          "flex flex-col gap-2",
+          detail.messages.length === 0 ? "sr-only" : "mt-3",
+        )}
+      >
+        <ol className="flex flex-col gap-2">
+          {detail.messages.map((message) => (
+            <DevelopmentConversationMessage
+              key={message.id}
+              message={message}
+            />
+          ))}
+        </ol>
+      </div>
+
+      <form className="mt-4 flex flex-col gap-2" onSubmit={send}>
+        <Label htmlFor={`development-chat-${developmentCase.id}`}>
+          {t(
+            "pages.reviews.development.chat_message",
+            "Message AI about this feedback",
+          )}
+        </Label>
+        <Textarea
+          ref={composerRef}
+          id={`development-chat-${developmentCase.id}`}
+          value={draft}
+          rows={3}
+          aria-invalid={
+            normalizedDraft !== "" &&
+            (draftBytes > MAXIMUM_PR_DEVELOPMENT_CHAT_BYTES ||
+              normalizedDraft.includes("\0"))
+          }
+          placeholder={t(
+            "pages.reviews.development.chat_placeholder",
+            "Ask a question or steer the discussion…",
+          )}
+          onChange={(event) => setDraft(event.target.value)}
+          disabled={chatMutation.isPending}
+        />
+        {draftBytes > MAXIMUM_PR_DEVELOPMENT_CHAT_BYTES ? (
+          <p className="text-destructive text-xs" role="alert">
+            {t(
+              "pages.reviews.development.chat_too_large",
+              "The message must be at most 32 KiB.",
+            )}
+          </p>
+        ) : null}
+        {(chatMutation.isError ||
+          (chatMutation.isPending && restoreFocusAfterRetry)) &&
+        !uncertainTurnCompleted ? (
+          <div
+            className="border-destructive/40 bg-destructive/5 flex flex-wrap items-center gap-2 rounded-md border p-2"
+            role="alert"
+          >
+            <p className="text-destructive min-w-0 flex-1 text-xs">
+              {messageWasCommitted
+                ? t(
+                    "pages.reviews.development.chat_saved_response_failed",
+                    "Your message was saved, but the AI response could not be completed. Reload before deciding whether to send a new message.",
+                  )
+                : chatMutation.error instanceof Error
+                  ? chatMutation.error.message
+                  : t(
+                      "pages.reviews.development.chat_error",
+                      "The AI response could not be completed.",
+                    )}
+            </p>
+            {!messageWasCommitted ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={draftInvalid || chatMutation.isPending}
+                onClick={() => {
+                  setRestoreFocusAfterRetry(true)
+                  send()
+                }}
+              >
+                {chatMutation.isPending
+                  ? t("pages.reviews.development.chat_sending", "Sending…")
+                  : t("pages.reviews.retry", "Retry")}
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                void queryClient.invalidateQueries({ queryKey: detailQueryKey })
+              }}
+            >
+              {t(
+                "pages.reviews.development.chat_reload",
+                "Reload conversation",
+              )}
+            </Button>
+          </div>
+        ) : null}
+        <div className="flex justify-end">
+          <Button
+            type="submit"
+            disabled={draftInvalid || chatMutation.isPending}
+          >
+            <IconSend className="size-4" />
+            {chatMutation.isPending
+              ? t("pages.reviews.development.chat_sending", "Sending…")
+              : t("pages.reviews.development.chat_send", "Send")}
+          </Button>
+        </div>
+      </form>
+    </section>
+  )
+}
+
+function conversationContainsSubmittedMessage(
+  detail: PRDevelopmentCaseDetail,
+  submitted: { expectedVersion: number; content: string },
+): boolean {
+  const message = detail.messages[submitted.expectedVersion]
+  return (
+    detail.conversation_version > submitted.expectedVersion &&
+    message?.role === "user" &&
+    message.content === submitted.content
+  )
+}
+
+function conversationContainsCompletedTurn(
+  detail: PRDevelopmentCaseDetail,
+  submitted: { expectedVersion: number; content: string },
+): boolean {
+  const assistant = detail.messages[submitted.expectedVersion + 1]
+  return (
+    conversationContainsSubmittedMessage(detail, submitted) &&
+    detail.conversation_version > submitted.expectedVersion + 1 &&
+    assistant?.role === "assistant"
+  )
+}
+
+function DevelopmentConversationMessage({
+  message,
+}: {
+  message: PRDevelopmentMessage
+}) {
+  const { t } = useTranslation()
+  const fromUser = message.role === "user"
+  return (
+    <li
+      className={cn(
+        "border-border min-w-0 rounded-md border p-3",
+        fromUser ? "bg-muted/50" : "bg-card",
+      )}
+    >
+      <div className="flex items-center justify-between gap-2 text-xs">
+        <span className="font-medium">
+          {fromUser
+            ? t("pages.reviews.development.chat_user", "You")
+            : t("pages.reviews.development.chat_assistant", "AI")}
+        </span>
+        <time className="text-muted-foreground" dateTime={message.created_at}>
+          {formatDate(message.created_at)}
+        </time>
+      </div>
+      <div
+        data-testid={`pr-development-message-${message.ordinal}`}
+        className="mt-2 text-sm break-words whitespace-pre-wrap"
+      >
+        {message.content}
+      </div>
+    </li>
   )
 }
 

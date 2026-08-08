@@ -51,7 +51,7 @@ capability.
 | ID | Level | Requirement | Rationale |
 | --- | --- | --- | --- |
 | `FR-AGENT-001` | MUST | A turn starts from normalized input and creates a scoped runtime context containing agent, session, channel, chat, sender, turn ID, and media metadata when available. | Downstream tools, events, and persistence need stable context. |
-| `FR-AGENT-002` | MUST | Prompt construction includes configured identity, workspace instructions, memory, session history, skills, and tool definitions unless the turn profile disables a block. | Current behavior depends on composable prompt contributors. |
+| `FR-AGENT-002` | MUST | Prompt construction includes configured identity, workspace instructions, memory, session history, skills, tool-use guidance, and tool definitions unless the turn profile disables a block. A separately admitted isolated turn may set the internal `SuppressDefaultContext` process option only through its owning execution profile. Prompt construction then retains the explicit system overlay while suppressing the configured/default system prompt and its bootstrap, workspace, identity, memory, skill, contributor, current-time, and dynamic-runtime blocks; it also suppresses the tool-use rule without enabling the tool fallback. Combined with that profile's no-history, no-tools, and no-cache controls, the provider sees only the exact explicit system overlay and supplied user content. | Ordinary turns depend on composable prompt contributors, while a narrowly authorized isolated model call must not inherit ambient agent/workspace instructions merely because it reuses the same prompt builder. |
 | `FR-AGENT-003` | MUST | Every execution selection consists of an `account_ref` and an exact model alias. Per-agent empty fields inherit the corresponding agent defaults; primary may name an enabled model router, while fallbacks name exact aliases only. Account routers first select a concrete account, model routers select an alias, and the alias then resolves to its default concrete model or a per-concrete-account override. Alias configuration may explicitly disable an alias for a concrete account: direct use fails clearly, account-router candidate construction excludes that pair, and a fallback disabled for one account does not prevent its other aliases from running. Override and disabled-account keys may never name account routers. Empty aliases fail before provider/network setup with `no model configured`; unknown aliases, raw model IDs, fuzzy model-list matches, and provider defaults are never substituted. Retries and fallbacks preserve the selected concrete account identity. | Multi-provider behavior must be explicit and reproducible, with account choice independent from model choice. |
 | `FR-AGENT-004` | MUST | LLM responses with tool calls execute registered tools until the configured maximum tool iterations is reached or no tool calls remain. | Prevents unbounded loops while preserving agent tool use. |
 | `FR-AGENT-005` | MUST | Tool execution errors are returned to the model or user in normalized error text without panicking the turn loop. | Tool failures are normal runtime outcomes. |
@@ -179,6 +179,12 @@ Owns: EVENT agent.*
 
 1. Build an `InboundContext` and resolve the route/session before prompt work.
 2. Resolve prompt contributors and turn profile decisions before provider calls.
+   For an already-admitted isolated process profile, carry its exact explicit
+   system overlay and set `SuppressDefaultContext`; suppress default system,
+   workspace/bootstrap, identity, memory, skills, contributors, tool-use rule,
+   time, and runtime blocks without creating a tool fallback. The owning
+   no-history/no-tools/no-cache path must therefore serialize exactly that
+   system overlay and the supplied user content, with no prompt-cache control.
 3. Resolve the effective `account_ref` and exact alias. Expand an account
    router to concrete account candidates, evaluate any model router to an
    alias, resolve that alias separately for each concrete account, and only
@@ -396,7 +402,7 @@ metadata but does not persist or reinterpret those trust facts.
 
 | Requirement IDs | Evidence |
 | --- | --- |
-| `FR-AGENT-001`, `FR-AGENT-002`, `FR-AGENT-006`, `FR-AGENT-008` | [pkg/agent/context_test.go](../../pkg/agent/context_test.go), [pkg/agent/pipeline_streaming_test.go](../../pkg/agent/pipeline_streaming_test.go), [pkg/agent/thinking_test.go](../../pkg/agent/thinking_test.go) |
+| `FR-AGENT-001`, `FR-AGENT-002`, `FR-AGENT-006`, `FR-AGENT-008` | [pkg/agent/agent.go](../../pkg/agent/agent.go), [pkg/agent/prompt_turn.go](../../pkg/agent/prompt_turn.go), [pkg/agent/context_test.go](../../pkg/agent/context_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/pipeline_streaming_test.go](../../pkg/agent/pipeline_streaming_test.go), [pkg/agent/thinking_test.go](../../pkg/agent/thinking_test.go) |
 | `FR-AGENT-003` | [pkg/agent/model_resolution_test.go](../../pkg/agent/model_resolution_test.go), [pkg/agent/account_router_test.go](../../pkg/agent/account_router_test.go), [pkg/config/voice_selection_test.go](../../pkg/config/voice_selection_test.go), [pkg/providers/factory_test.go](../../pkg/providers/factory_test.go), [pkg/providers/fallback_test.go](../../pkg/providers/fallback_test.go), [pkg/providers/oauth/codex_provider_test.go](../../pkg/providers/oauth/codex_provider_test.go) |
 | `FR-AGENT-004`, `FR-AGENT-005` | [pkg/agent/pipeline_execute_test.go](../../pkg/agent/pipeline_execute_test.go), [pkg/agent/error_format_test.go](../../pkg/agent/error_format_test.go), [pkg/tools/registry_test.go](../../pkg/tools/registry_test.go) |
 | `FR-AGENT-007` | [pkg/agent/subturn_test.go](../../pkg/agent/subturn_test.go), [pkg/tools/subagent_tool_test.go](../../pkg/tools/subagent_tool_test.go), [pkg/tools/spawn_status_test.go](../../pkg/tools/spawn_status_test.go) |
@@ -420,6 +426,7 @@ metadata but does not persist or reinterpret those trust facts.
 - [pkg/agent/pipeline.go](../../pkg/agent/pipeline.go)
 - [pkg/agent/instance.go](../../pkg/agent/instance.go)
 - [pkg/agent/agent.go](../../pkg/agent/agent.go)
+- [pkg/agent/prompt_turn.go](../../pkg/agent/prompt_turn.go)
 - [pkg/agent/context_seahorse.go](../../pkg/agent/context_seahorse.go)
 - [pkg/agent/channel_manager_compat.go](../../pkg/agent/channel_manager_compat.go)
 - [pkg/agent/steering.go](../../pkg/agent/steering.go)

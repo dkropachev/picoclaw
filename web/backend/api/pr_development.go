@@ -1,13 +1,17 @@
 package api
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/prdevelopment"
 )
@@ -15,6 +19,8 @@ import (
 const (
 	prDevelopmentAPIPath     = "/api/pr-development"
 	prDevelopmentRuntimePath = "/runtime/eventing/pr-development"
+	prDevelopmentChatBytes   = 32 << 10
+	prDevelopmentChatDepth   = 16
 )
 
 var prDevelopmentListQueryContract = map[string]reviewQueryValidator{
@@ -131,31 +137,101 @@ func (h *Handler) handlePRDevelopmentList(w http.ResponseWriter, r *http.Request
 }
 
 func (h *Handler) handlePRDevelopmentDetail(w http.ResponseWriter, r *http.Request) {
-	if !requireReviewMethod(w, r, http.MethodGet) {
-		return
-	}
-	if invalidPRDevelopmentReadBody(r) {
+	if !canonicalReviewRequestPath(r) {
 		writeReviewAPIError(w, http.StatusBadRequest, "invalid development request")
 		return
 	}
-	if !canonicalReviewRequestPath(r) || r.URL.RawQuery != "" {
+	segments := strings.Split(r.URL.Path[len(prDevelopmentAPIPath)+1:], "/")
+	if len(segments) == 0 {
 		writeReviewAPIError(w, http.StatusBadRequest, "invalid development request")
 		return
 	}
-	caseID := r.URL.Path[len(prDevelopmentAPIPath)+1:]
+	caseID := segments[0]
 	if !validOperatorPrefixedID(caseID, "pdc_") {
 		writeReviewAPIError(w, http.StatusBadRequest, "invalid development request")
 		return
 	}
-	h.proxyReviewGateway(
-		w,
-		r,
-		http.MethodGet,
-		prDevelopmentRuntimePath+"/"+caseID,
-		"",
-		nil,
-		reviewGatewayRequestTimeout,
-	)
+	switch {
+	case len(segments) == 1:
+		if !requireReviewMethod(w, r, http.MethodGet) {
+			return
+		}
+		if invalidPRDevelopmentReadBody(r) ||
+			r.URL.RawQuery != "" || r.URL.ForceQuery {
+			writeReviewAPIError(w, http.StatusBadRequest, "invalid development request")
+			return
+		}
+		h.proxyReviewGateway(
+			w,
+			r,
+			http.MethodGet,
+			prDevelopmentRuntimePath+"/"+caseID,
+			"",
+			nil,
+			reviewGatewayRequestTimeout,
+		)
+	case len(segments) == 2 && segments[1] == "chat":
+		h.handleReviewMutationValidated(
+			w,
+			r,
+			http.MethodPost,
+			prDevelopmentRuntimePath+"/"+caseID+"/chat",
+			reviewGatewayAIRequestTimeout,
+			validatePRDevelopmentChatMutation,
+		)
+	default:
+		writeReviewAPIError(w, http.StatusNotFound, "not found")
+	}
+}
+
+func validatePRDevelopmentChatMutation(r *http.Request, raw []byte) error {
+	if r == nil || r.ContentLength < 0 || len(r.TransferEncoding) != 0 ||
+		len(raw) == 0 || !utf8.Valid(raw) || !validJSONUnicodeScalars(raw) ||
+		rejectDuplicateJSONKeys(raw, prDevelopmentChatDepth, nil) != nil ||
+		validateExactPRDevelopmentChatFields(raw) != nil {
+		return errors.New("invalid development chat request")
+	}
+	var body struct {
+		ExpectedVersion *int64  `json:"expected_version"`
+		Content         *string `json:"content"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		return err
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("development chat contains trailing JSON")
+		}
+		return err
+	}
+	if body.ExpectedVersion == nil || *body.ExpectedVersion < 0 ||
+		*body.ExpectedVersion > int64(prdevelopment.MaximumConversationVersion) ||
+		body.Content == nil {
+		return errors.New("development chat fields are invalid")
+	}
+	content := strings.TrimSpace(*body.Content)
+	if content == "" || !utf8.ValidString(content) ||
+		strings.ContainsRune(content, '\x00') || len(content) > prDevelopmentChatBytes {
+		return errors.New("development chat content is invalid")
+	}
+	return nil
+}
+
+func validateExactPRDevelopmentChatFields(raw []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || len(fields) != 2 {
+		return errors.New("development chat fields are invalid")
+	}
+	if _, ok := fields["expected_version"]; !ok {
+		return errors.New("development chat fields are invalid")
+	}
+	if _, ok := fields["content"]; !ok {
+		return errors.New("development chat fields are invalid")
+	}
+	return nil
 }
 
 func invalidPRDevelopmentReadBody(r *http.Request) bool {
