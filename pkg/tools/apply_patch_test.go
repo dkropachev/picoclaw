@@ -122,3 +122,36 @@ func TestApplyPatchTool_RespectsUpdatePermission(t *testing.T) {
 		t.Fatalf("content changed to %q", string(content))
 	}
 }
+
+func TestApplyPatchToolPathGuardChecksCompletePatchBeforeMutation(t *testing.T) {
+	workspace := t.TempDir()
+	allowed := filepath.Join(workspace, "allowed.txt")
+	if err := os.WriteFile(allowed, []byte("before\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	tool := NewApplyPatchToolWithPathGuard(
+		workspace,
+		true,
+		func(path string) error {
+			if path == "denied.txt" {
+				return context.Canceled
+			}
+			return nil
+		},
+	)
+	result := tool.Execute(context.Background(), map[string]any{
+		"patch": "*** Begin Patch\n" +
+			"*** Update File: allowed.txt\n@@\n-before\n+after\n" +
+			"*** Add File: denied.txt\n+forbidden\n*** End Patch",
+	})
+	if !result.IsError || !strings.Contains(result.ForLLM, "denied.txt") {
+		t.Fatalf("Execute() = %#v, want denied path", result)
+	}
+	content, err := os.ReadFile(allowed)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(content) != "before\n" {
+		t.Fatalf("allowed file changed before late guard failure: %q", content)
+	}
+}

@@ -20,6 +20,10 @@ func ToolChatID(ctx context.Context) string {
 	return toolshared.ToolChatID(ctx)
 }
 
+func ToolLogDetailsSuppressed(ctx context.Context) bool {
+	return toolshared.ToolLogDetailsSuppressed(ctx)
+}
+
 func ErrorResult(message string) *ToolResult {
 	return toolshared.ErrorResult(message)
 }

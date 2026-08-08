@@ -52,6 +52,7 @@ var (
 	ctxKeyAgentID          = &toolCtxKey{"agentID"}
 	ctxKeySessionKey       = &toolCtxKey{"sessionKey"}
 	ctxKeySessionScope     = &toolCtxKey{"sessionScope"}
+	ctxKeySuppressLogData  = &toolCtxKey{"suppressLogData"}
 )
 
 // WithToolContext returns a child context carrying channel and chatID.
@@ -59,6 +60,22 @@ func WithToolContext(ctx context.Context, channel, chatID string) context.Contex
 	ctx = context.WithValue(ctx, ctxKeyChannel, channel)
 	ctx = context.WithValue(ctx, ctxKeyChatID, chatID)
 	return ctx
+}
+
+// WithToolLogDetailsSuppressed marks a narrow execution profile in which tool
+// implementations must not log argument- or result-derived values.
+func WithToolLogDetailsSuppressed(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ctxKeySuppressLogData, true)
+}
+
+// ToolLogDetailsSuppressed reports whether argument- and result-derived log
+// values must be omitted for this execution.
+func ToolLogDetailsSuppressed(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	value, _ := ctx.Value(ctxKeySuppressLogData).(bool)
+	return value
 }
 
 // WithToolTopicContext returns a child context carrying a platform topic/thread ID.

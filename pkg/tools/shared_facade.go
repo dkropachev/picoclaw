@@ -42,6 +42,14 @@ func WithToolContext(ctx context.Context, channel, chatID string) context.Contex
 	return toolshared.WithToolContext(ctx, channel, chatID)
 }
 
+func WithToolLogDetailsSuppressed(ctx context.Context) context.Context {
+	return toolshared.WithToolLogDetailsSuppressed(ctx)
+}
+
+func ToolLogDetailsSuppressed(ctx context.Context) bool {
+	return toolshared.ToolLogDetailsSuppressed(ctx)
+}
+
 func WithToolTopicContext(ctx context.Context, topicID string) context.Context {
 	return toolshared.WithToolTopicContext(ctx, topicID)
 }

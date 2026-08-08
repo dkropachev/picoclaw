@@ -19,7 +19,9 @@ conversation before a durable workflow run is created, freeze every structured
 media locator into a strict self-contained `FrozenSet`, and later evaluate only
 that persisted evidence under a domain-separated pseudonymous
 cache/account-affinity identity, never the raw session or live-media
-capability.
+capability. A controller-only local-repair profile can also run one fresh,
+bounded model/tool loop inside an already pinned checkout without inheriting
+an interactive agent, session, workflow, prompt, or ambient tool surface.
 
 ## Reconstruction Notes
 
@@ -44,7 +46,10 @@ capability.
   pseudonymous cache and account selection for that exact snapshot. A stateless workflow
   decision additionally assembles no session context, disables prompt cache and
   session-affine account routing, and never exposes its request-local identity
-  outside the call.
+  outside the call. Local repair instead receives one concrete provider/model
+  and one exact workspace pin from its trusted controller, exposes only four
+  confined file tools, serializes provider use, and leaves the pin held for the
+  controller's later verification and disposition.
 
 ## Requirements
 
@@ -72,6 +77,7 @@ capability.
 | `FR-AGENT-020` | MUST | An exact read-only workflow decision invokes the selected configured agent through the isolated side-question provider path with one deep-cloned history/summary/scope snapshot. The ordinary profile captures a strict owner-matched existing session when the step begins. The compiler-private profile exposes `ReadOnlySessionCapturer`, which resolves the exact configured agent and strict existing session once under a runtime-use lease before durable workflow creation, verifies any caller-supplied expected store revision before live-media capture, then delegates complete structured-locator freezing to Session Memory using Tool Execution's optional bounded live-media snapshot capability. Capture returns a graph-detached snapshot whose locators are immutable frozen references, one canonical versioned self-contained `FrozenSet`, and an opaque history revision computed from that rewritten snapshot; private persistence strictly round-trips the set plus message/system-block prompt layer/slot/source and tool-call runtime name/arguments/thought signature. Later `RunAgent` requires that exact canonical agent, `history: read_only`, `tools: none`, a blank live session key, and a frozen snapshot whose key owner and recomputed revision—including frozen references and runtime-only fields—match. It validates that revision before asking Session Memory to materialize integrity-checked embedded bytes, and never rereads the live session or media store on initial execution, resume, retry, restart, managed execution, repair, or fallback. It removes inbound delivery and session scope, derives one stable domain-separated pseudonymous internal identity from only the agent and history revision for account routing and enabled prompt caching, uses no raw session key, media locator, or payload in either identity, and returns fixed `session: private` and `session_mode: private` markers with an empty public cache key/message ID. `cache: none` remains disabled; any other admitted private cache mode normalizes to the pseudonymous session cache. When an existing session is already structured as `review`, live-turn admission rejects it before metadata, history, provider, or context-manager mutation, and Seahorse excludes it from both startup bootstrap and live ingest. The paired atomic admission contract in `FR-AGENT-022` arbitrates deterministic-key ownership before ordinary session use. Both profiles preserve normal account/model alias and fallback resolution plus explicit model and reasoning-effort overrides, but do not register or reserve an interactive turn, append user/assistant/tool messages, compact or summarize a session, initialize MCP, expose tool definitions, execute tool calls, or invoke before/after LLM hooks. Initial calls, structured-output repairs, managed calibration/children/fallbacks, and every provider attempt reuse separately graph-detached copies of the same validated and materialized frozen evidence and no-tool profile. Every compiler-private isolated or read-only request carries an explicit private-execution marker: provider failure classification still updates account health, but shared router state stores only a fixed error, vision fallback emits no raw-error runtime event, and frozen references, sets, materialized data, and capture diagnostics remain inside the workflow's private projection. Cancellation propagates, and any provider response containing tool calls fails instead of entering a tool loop. | Gate evaluation must be able to consult one exact PR conversation revision and its captured media across waits and retries without becoming a turn, changing provider prompt provenance after restart, observing later writes, depending on temporary media lifetime, leaking the session/media capability or provider diagnostics through shared routing/event state, or acquiring action authority. |
 | `FR-AGENT-021` | MUST | A workflow ephemeral decision invokes the selected configured agent through the stateless side-question provider path with no history/summary snapshot and a cryptographically random identity scoped to that one visible agent request. Initial output, structured repairs, managed calibration, fallback, and concurrent child calls preserve ordinary account/model alias resolution plus explicit model and reasoning-effort overrides and reuse the same stateless no-history, no-prompt-cache, no-hook, no-MCP, no-tool profile. The identity is used only in request-local process options: account-router selection receives a blank affinity key, session scope and inherited delivery routing context are absent, and no interactive turn, active-turn reservation, context-manager assembly, session metadata/catalog/history/summary operation, provider prompt-cache key/directive, hook, tool definition, or tool execution is created. Every provider attempt receives detached messages and options, stateful provider instances remain isolated per call, provider-authored tool calls fail closed, and cancellation propagates. The random identity is never emitted in runtime events, logs, outputs, or account-router state; callers receive only a fixed ephemeral audit marker. | Concurrent isolated gates need normal provider selection and structured execution without colliding on a synthetic session, leaving a 30-day account-affinity record, or acquiring conversation/action authority. |
 | `FR-AGENT-022` | MUST | Every ordinary live message atomically admits its final structured session scope before command handling or turn execution. Live admission rejects both an existing and a caller-requested `review` scope, while protected review projection uses the paired review admission mode; whichever wins ownership prevents the other from using protected transcript content, invoking a provider for it, or mutating that key. Existing review sessions are also rejected immediately after final key resolution, before message-tool reset, asynchronous `/stop`, steering continuation, `/clear`, `/btw`, `/context`, metadata, history, provider, or context-manager access, and the direct turn boundary repeats admission for callers that bypass message routing. A replacement-capable path without a usable ordinary scope fails closed instead of bypassing ownership admission. Public workflow `history: read_only` rejects review scope, while compiler-private frozen gate capture remains allowed. Review sessions are excluded from Seahorse startup/live ingest; startup filtering uses the strict snapshot and deliberately skips an unreadable or ambiguous session instead of falling back to tolerant history without proven ownership. Unsupported atomic admission fails closed for replacement-capable stores, while legacy stores incapable of review projection retain compatibility. | A protected PR transcript must not become an ordinary chat because a command bypasses the turn loop, a projection lands between check and metadata write, an inbound caller spoofs the review channel, or a public read-only workflow targets its key. |
+| `FR-AGENT-023` | MUST | A trusted PR-development controller can invoke `LocalRepairRunner` with one exact manager-issued checkout pin, one concrete provider/model, bounded untrusted instructions and context, and fixed iteration/output limits. The runner reacquires and validates that exact still-locked workspace before any provider call, creates a fresh isolated model loop with no agent instance, session/history, account routing, fallback, prompt cache, hooks, MCP, workflow, shell, network, Git, CI, commit, push, or release authority, and exposes only confined `read_file`, `list_dir`, `edit_file`, and guarded `apply_patch` tools. Provider calls are serialized per runner; tool calls run sequentially in response order; malformed, oversized, conflicting, nil, or panic-derived provider data fails closed; cancellation is checked before each provider and tool boundary. One unconditional bounded detached postflight revalidates the pin and heartbeat after every outcome, while the runner never releases it and returns only bounded sanitized content, iteration count, and workspace identity. | Repair may edit the exact locally verified checkout, but it must not inherit ambient agent authority, leak checkout paths through diagnostics, race another repair on the same reservation, or advance the PR lifecycle itself. |
 
 ## Data And State Model
 
@@ -104,7 +110,11 @@ and emits only fixed `private` session markers. A stateless workflow decision ho
 only one request-local random identity and its supplied prompt/context/scope;
 neither the identity nor an empty synthetic session is entered into the session
 store, active-turn map, runtime-event scope, prompt cache, or account-router
-session map.
+session map. A local repair run likewise creates no conversation or account
+state. Its transient state is limited to the exact checkout reservation,
+bounded provider messages, four-tool registry, iteration counter, and sanitized
+result; ordinary repository content mutations remain inside the still-held
+workspace pin.
 
 ## Surface Ownership
 
@@ -172,6 +182,7 @@ Owns: EVENT agent.*
 | Runtime | `bus.InboundContext`, `DispatchRequest`, turn reservations, continuation targets, and outbound context derivation | Carry detached process-local event and transient-UX metadata across one turn without adding it to serialized routing context. | `FR-AGENT-015`, `FR-AGENT-017` |
 | Runtime | `workflowAgentRunner.CaptureReadOnlySession`, `workflowAgentRunner.RunAgent`, and `AgentLoop.askSideQuestionWithOptions` frozen-context profile | Capture one strict existing-session snapshot, use Session Memory and Tool Execution primitives to freeze its complete media graph into the persisted private form, or validate/materialize that form without live rereads, then perform no-tool/no-hook provider decisions without joining or mutating the interactive turn lifecycle or exposing raw capabilities through provider identity. | `FR-AGENT-020` |
 | Runtime | `AgentLoop.askSideQuestionWithOptions` stateless profile | Perform no-history/no-cache/no-tool provider calls under one request-local identity while suppressing session-affine account routing and all durable or observable session identity. | `FR-AGENT-021` |
+| Go API | `LocalRepairRunner.Run` | Run a fresh controller-only, concrete-provider repair loop against one exact held checkout reservation with only four confined file tools and detached postflight validation. | `FR-AGENT-023` |
 | Events | `agent.*` | Turn, LLM, tool, steering, interrupt, subturn, and error telemetry. | `FR-AGENT-001`, `FR-AGENT-004`, `FR-AGENT-006` |
 | HTTP/UI | `/api/agents*`, `/agent/agents` | Project and mutate persistent configured agent policy with ordered results, revision fencing, explicit model fallback semantics, workspace capability CAS, sanitized live activity, deep links, and restart feedback. | `FR-AGENT-018`, `FR-AGENT-019` |
 
@@ -270,6 +281,13 @@ Owns: EVENT agent.*
     rows, apply severity switches only as a presentation filter, and surface
     recorder reset, truncation, and each drop counter without persisting the
     cursor.
+12. For controller-only local repair, acquire and validate the exact pinned
+    checkout before constructing any model-visible state, register only the
+    confined read/list/edit/patch tools, and run provider calls serially with
+    response-order tool execution. Check cancellation at every provider/tool
+    boundary, bound and sanitize every projection, then always run one detached
+    bounded pin-and-heartbeat postflight. Keep the reservation locked so the
+    controller alone can reverify the PR and choose the next lifecycle action.
 
 ## Cross-Feature Behavior
 
@@ -303,6 +321,11 @@ optimization owns preservation of this profile across managed and repair calls.
 Git workspaces are allocated through the registered tool during a turn and are
 released or reconciled by the shared turn-finalization path, while checkout
 inventory and retention behavior are owned by the git workspaces feature.
+The PR-development controller is the sole caller of the distinct local-repair
+profile in `FR-AGENT-023`: Git Workspaces owns reservation identity and
+postflight truth, Tool Execution owns the sequential/suppressed loop and
+confined primitives, and Security owns the authority boundary. The agent layer
+does not interpret review state or perform commit, push, CI, or merge actions.
 Account routers plug into the account-selection step: the turn loop expands the
 router to concrete candidates, can reselect after context compression, and
 records fallback outcomes without changing provider prompt serialization.
@@ -333,6 +356,12 @@ metadata but does not persist or reinterpret those trust facts.
   a reset.
 - Tool lookup misses produce a tool-skipped result instead of a panic.
 - Iteration limits stop repeated tool-call loops.
+- Local repair fails before its first provider call when its request, concrete
+  provider/model, limits, or exact workspace pin is invalid. A provider panic,
+  nil response, conflicting tool-call encoding, malformed or oversized
+  arguments, confinement failure, cancellation, or postflight mismatch ends
+  the run without fallback or implicit release; edits already completed remain
+  in the locked checkout for controller inspection.
 - An isolated read-only decision fails before provider execution when its
   caller cannot supply an exact existing-session snapshot. A provider-authored
   tool call is an error even though no tool definitions were offered; it is not
@@ -420,6 +449,7 @@ metadata but does not persist or reinterpret those trust facts.
 | `FR-AGENT-020` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/context_seahorse_test.go](../../pkg/agent/context_seahorse_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/workflows/private_session_test.go](../../pkg/workflows/private_session_test.go), [pkg/session/frozen_media_test.go](../../pkg/session/frozen_media_test.go), [pkg/media/frozen_test.go](../../pkg/media/frozen_test.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
 | `FR-AGENT-021` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
 | `FR-AGENT-022` | [pkg/agent/agent_message_review_test.go](../../pkg/agent/agent_message_review_test.go), [pkg/agent/agent_scope_admission_race_test.go](../../pkg/agent/agent_scope_admission_race_test.go), [pkg/agent/context_seahorse_test.go](../../pkg/agent/context_seahorse_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/agent_message.go](../../pkg/agent/agent_message.go), [pkg/agent/agent.go](../../pkg/agent/agent.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go) |
+| `FR-AGENT-023` | [pkg/agent/local_repair_test.go](../../pkg/agent/local_repair_test.go), [pkg/agent/local_repair.go](../../pkg/agent/local_repair.go), [pkg/tools/toolloop_test.go](../../pkg/tools/toolloop_test.go), [pkg/tools/apply_patch_test.go](../../pkg/tools/apply_patch_test.go) |
 
 ## Implementation Anchors
 
@@ -433,6 +463,7 @@ metadata but does not persist or reinterpret those trust facts.
 - [pkg/agent/turn_context.go](../../pkg/agent/turn_context.go)
 - [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go)
 - [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go)
+- [pkg/agent/local_repair.go](../../pkg/agent/local_repair.go)
 - [pkg/agent/runtime_gate.go](../../pkg/agent/runtime_gate.go)
 - [pkg/providers/factory.go](../../pkg/providers/factory.go)
 - [web/backend/api/agents.go](../../web/backend/api/agents.go)

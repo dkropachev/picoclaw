@@ -12,7 +12,9 @@ actions. The registry presents tool schemas to providers and executes tool calls
 with context, limits, filtering, and error normalization. A file-backed media
 store can additionally expose an optional bounded snapshot read that detaches
 the bytes of one currently live media capability without disclosing its backing
-path.
+path. Trusted callers can opt one otherwise generic tool loop into sequential
+response-order execution and private diagnostic suppression, and can construct
+an `apply_patch` tool whose complete path set is guarded before mutation.
 
 ## Reconstruction Notes
 
@@ -20,9 +22,10 @@ path.
 - Core types/functions: `Tool` interface, `ToolRegistry`, tool result types,
   filesystem tool constructors, exec session manager, web search/fetch
   providers, tool schema transforms, `media.SnapshotReader`, and
-  `media.Snapshot`.
+  `media.Snapshot`, plus suppression-aware `ToolLoopConfig` and guarded patch
+  construction.
 - Runtime ordering: register enabled tools, export provider schemas, validate tool call args/context, enforce path/network/command policies, execute, filter result, normalize output; when an isolated consumer requests media capture, resolve and bounded-read the live capability atomically before detaching its bytes.
-- Non-obvious constraints: response-handled tools suppress duplicate assistant text, registry must recover panics, workspace restriction and allow path patterns must be checked before file mutation, and snapshot reading is an optional capability that neither exposes a local path nor makes an expired in-memory reference durable.
+- Non-obvious constraints: response-handled tools suppress duplicate assistant text, registry must recover panics, workspace restriction and allow path patterns must be checked before file mutation, and snapshot reading is an optional capability that neither exposes a local path nor makes an expired in-memory reference durable. Sequential execution and argument suppression are explicit per-loop options whose zero values preserve existing behavior; guarded patches validate every source and move destination before operation one.
 
 ## Requirements
 
@@ -46,6 +49,7 @@ path.
 | `FR-TOOL-016` | MUST | The authenticated tool library exposes the configured workflow-tool flag independently from workflow master enablement: configured off is `disabled`, configured on while workflows are off is `blocked` with `requires_workflows`, and both on is `enabled`. The blocked switch remains checked and operable so the raw flag can be turned off, and its reason is accessibly associated. `PUT /api/tools/{name}/state` requires exactly one `application/json` media type and accepts one bounded strict JSON object with a required boolean `enabled`, rejects null/scalar/array, duplicate/unknown/trailing data, and saves an update-safe public-plus-security config snapshot only when its exact generation still matches under the shared handler and advisory mutation locks. Changing the workflow tool never implicitly changes workflow master enablement; the tool library and workflow settings refetch each other after every mutation outcome. | Browser tool state must match runtime registration without hiding a disabled prerequisite, implicitly enabling automation, or overwriting a concurrent settings or credential update. |
 | `FR-TOOL-017` | MUST | A model-backed web-search provider requires an explicit configured model alias and never substitutes a provider default. Since Gemini and Perplexity search own their API credentials rather than selecting a model account, they resolve the alias base mapping; account overrides apply only to executions with a concrete model account. | Search must use the same explicit model-selection vocabulary without pretending that a provider-owned credential is an account-router target. |
 | `FR-TOOL-018` | MUST | `FileMediaStore` implements the optional `media.SnapshotReader.ReadSnapshot(ctx, ref, maxBytes)` capability. For one currently registered canonical `media://` UUID reference and a positive caller limit, it holds lifecycle synchronization from lookup through close, opens the mapped entry without following a final symlink or blocking on a special file, verifies the opened handle is regular, and performs one bounded read whose actual bytes cannot exceed the caller limit. Unix uses no-follow plus nonblocking open and a status-change token; Windows opens the final entry itself, rejects every handle carrying the reparse-point attribute, and compares handle change time; other platforms fail closed instead of using a race-prone fallback. Success returns detached bytes and copied metadata, never the backing path or mutable store state. Missing, expired, malformed, unsafe, observably changed-size/modtime/identity/change-token, oversized, cancelled, and safe-open-unavailable captures fail with fixed redacted errors that contain no reference, path, metadata, payload, or raw operating-system error. Store registration normalizes a cleaned absolute exact lexical lifecycle key without an approximate case fold and only coalesces that key when `Lstat` reports the same captured entry identity. A `SameFile` identity found under a distinct key is retained separately and makes all such live lifecycles non-deleting, conservatively covering Windows path aliases without conflating hard-link paths. Re-registration permanently cancels older pending deletion through either the exact key or captured `SameFile` identity; final removal rechecks its token and identity under store synchronization, preserving an already replaced entry. Consequently, an earlier release cannot delete a newly registered path or race a pinned snapshot. The base `MediaStore` interface remains source-compatible, and capture does not promise recovery after release, expiry, store reconstruction, or process restart. | A session freezer needs a race-safe way to detach live capability bytes without extending ordinary temporary-media lifetime or turning local file details into model-visible diagnostics. |
+| `FR-TOOL-019` | MUST | A `ToolLoopConfig` caller may independently request response-order sequential tool execution and suppression of tool arguments and result-derived detail in process logs; both options default off. Sequential mode executes one model-authored call at a time in declared order, preserves thought signatures and call/result identifiers in provider follow-up messages, stops at cancellation boundaries, and normalizes nil or panic-derived results without concurrent sibling execution. Suppression propagates through registry execution into shared filesystem helpers so tool names and coarse outcomes remain observable while raw arguments, paths, validation detail, panic detail, and result/error content do not. `NewApplyPatchToolWithPathGuard` additionally parses the whole patch and validates every source path and move destination before its first operation, while the ordinary constructor retains existing behavior. | Narrow repair controllers need reusable tool primitives that preserve deterministic edit ordering and diagnostics without leaking confined checkout details or allowing a later patch operation to bypass preflight. |
 
 ## Data And State Model
 
@@ -65,6 +69,10 @@ in-process publish request and repeated transaction checks. A `media.Snapshot`
 is a transient detached byte-and-metadata value. It has no source path, scope,
 cleanup authority, or durable media-store identity, and capturing it does not
 change reference counts or TTL state.
+Sequential and suppression flags are request-local loop configuration and add no
+persistent state. The suppression marker exists only in the execution context;
+the optional patch guard is bound to one constructed tool instance and receives
+canonical operation paths before any patch mutation begins.
 
 ## Surface Ownership
 
@@ -142,6 +150,7 @@ Owns: TOOL write_file
 | Go API | `ToolRegistry.AllowsRegistration`, `ToolRegistry.GetRegistered` | Inspect effective allowlist admission and the exact registered occupant, including dormant hidden tools, before MCP registration mutates a registry. | `FR-TOOL-014` |
 | Tool | `workflow` action `dev_publish` | Evaluate exact structural and production dependency readiness, derive an opaque dependency revision, and invoke revision-fenced transactional workflow publishing. | `FR-TOOL-015` |
 | Go API | `media.SnapshotReader.ReadSnapshot(ctx, ref, maxBytes)` | Optionally return one path-free detached snapshot of a currently live `media://` capability through a bounded, no-follow, regular-file read; fixed redacted errors preserve optional-capability and temporary-lifetime semantics. | `FR-TOOL-018` |
+| Go API | `ToolLoopConfig.SequentialToolCalls`, `ToolLoopConfig.SuppressToolArguments`, `NewApplyPatchToolWithPathGuard` | Opt a trusted caller into response-order execution, private tool diagnostics, and whole-patch path preflight without changing ordinary loop or patch defaults. | `FR-TOOL-019` |
 
 ## Algorithms And Ordering
 
@@ -202,6 +211,13 @@ Owns: TOOL write_file
     revalidation, and final managed-path deletion under the store lock.
     Classify every snapshot failure before returning a fixed redacted error, and
     never resolve to a path for the caller.
+18. When a caller selects the confined loop profile, preserve model response
+    order and execute each tool call only after the previous result completes.
+    Carry a private suppression marker through registry and nested filesystem
+    helpers so logs retain only tool identity and coarse outcome. For a guarded
+    patch, parse all operations and validate every source and move destination
+    before applying operation one; return the first rejection without partial
+    patch execution.
 
 ## Cross-Feature Behavior
 
@@ -225,12 +241,23 @@ Session memory may consume the optional media snapshot capability to build a
 self-contained frozen set. That set's encoding, locator rewriting, limits, and
 restart behavior are owned by the session feature; this media-store capability
 only captures a reference that is live at the instant of the call.
+PR Development composes the optional sequential, suppression, and guarded-patch
+primitives for controller-only local repair. It owns checkout confinement and
+lifecycle policy; these generic primitives do not grant workspace, Git,
+provider, commit, push, CI, or merge authority.
 
 ## Failure And Edge Cases
 
 - Missing required tool args return tool errors.
 - Panics inside a tool are recovered by the registry.
 - Nil tool results are normalized.
+- Sequential mode stops before the next call when its context is canceled and
+  never schedules sibling calls concurrently. Suppression also covers invalid
+  arguments, panics, nested filesystem debug logs, and result-derived errors;
+  callers receive the normal bounded tool result while logs retain no raw
+  arguments or result content.
+- A guarded patch rejects an invalid source or move destination before applying
+  its first operation. Guard failure does not fall back to unguarded patching.
 - Denied commands and path violations never execute the requested side effect.
 - Web providers fail over only according to configured provider behavior.
 - Spawn admission failure returns synchronously and launches no goroutine;
@@ -287,6 +314,7 @@ only captures a reference that is live at the instant of the call.
 | `FR-TOOL-016` | [web/backend/api/tools.go](../../web/backend/api/tools.go), [web/backend/api/tools_test.go](../../web/backend/api/tools_test.go), [web/backend/api/workflow_settings_test.go](../../web/backend/api/workflow_settings_test.go), [web/frontend/src/api/tools.test.ts](../../web/frontend/src/api/tools.test.ts), [web/frontend/src/components/agent/tools/tool-library-tab.test.tsx](../../web/frontend/src/components/agent/tools/tool-library-tab.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-TOOL-017` | [pkg/config/model_selection_test.go](../../pkg/config/model_selection_test.go), [pkg/tools/integration/web_test.go](../../pkg/tools/integration/web_test.go), [web/backend/api/tools_test.go](../../web/backend/api/tools_test.go) |
 | `FR-TOOL-018` | [pkg/media/snapshot_test.go](../../pkg/media/snapshot_test.go), [pkg/media/store_test.go](../../pkg/media/store_test.go), [pkg/media/snapshot_file_unix.go](../../pkg/media/snapshot_file_unix.go), [pkg/media/snapshot_file_windows.go](../../pkg/media/snapshot_file_windows.go), [pkg/media/snapshot_file_other.go](../../pkg/media/snapshot_file_other.go) |
+| `FR-TOOL-019` | [pkg/tools/toolloop_test.go](../../pkg/tools/toolloop_test.go), [pkg/tools/registry_test.go](../../pkg/tools/registry_test.go), [pkg/tools/apply_patch_test.go](../../pkg/tools/apply_patch_test.go), [pkg/agent/local_repair_test.go](../../pkg/agent/local_repair_test.go) |
 
 ## Implementation Anchors
 
@@ -294,6 +322,8 @@ only captures a reference that is live at the instant of the call.
 - [pkg/tools/fs](../../pkg/tools/fs)
 - [pkg/tools/integration/web.go](../../pkg/tools/integration/web.go)
 - [pkg/tools/shared/base.go](../../pkg/tools/shared/base.go)
+- [pkg/tools/toolloop.go](../../pkg/tools/toolloop.go)
+- [pkg/tools/apply_patch.go](../../pkg/tools/apply_patch.go)
 - [pkg/tools/validate.go](../../pkg/tools/validate.go)
 - [pkg/tools/integration/message.go](../../pkg/tools/integration/message.go)
 - [pkg/tools/spawn.go](../../pkg/tools/spawn.go)

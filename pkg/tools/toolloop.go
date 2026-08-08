@@ -25,6 +25,15 @@ type ToolLoopConfig struct {
 	Tools         *ToolRegistry
 	MaxIterations int
 	LLMOptions    map[string]any
+	// SequentialToolCalls executes one model-authored tool call at a time in
+	// response order. The default remains parallel execution for existing
+	// read-oriented callers; mutation-capable controllers should enable this so
+	// one response cannot race two writes against the same state.
+	SequentialToolCalls bool
+	// SuppressToolArguments keeps model-authored arguments and result-derived
+	// error details out of loop, registry, and suppression-aware tool logs. Tool
+	// names, counts, and timings remain observable.
+	SuppressToolArguments bool
 
 	// MediaResolver resolves media:// refs in messages before each LLM call.
 	// This is optional and is mainly used by subagent legacy fallback execution
@@ -46,10 +55,16 @@ func RunToolLoop(
 	messages []providers.Message,
 	channel, chatID string,
 ) (*ToolLoopResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	iteration := 0
 	var finalContent string
 
 	for iteration < config.MaxIterations {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		iteration++
 
 		logger.DebugCF("toolloop", "LLM iteration",
@@ -91,12 +106,18 @@ func RunToolLoop(
 		}
 		response, err := config.Provider.Chat(ctx, callMessages, providerToolDefs, config.Model, llmOpts)
 		if err != nil {
-			logger.ErrorCF("toolloop", "LLM call failed",
-				map[string]any{
-					"iteration": iteration,
-					"error":     err.Error(),
-				})
+			fields := map[string]any{"iteration": iteration}
+			if !config.SuppressToolArguments {
+				fields["error"] = err.Error()
+			}
+			logger.ErrorCF("toolloop", "LLM call failed", fields)
 			return nil, fmt.Errorf("LLM call failed: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if response == nil {
+			return nil, fmt.Errorf("LLM call returned no response")
 		}
 
 		// 4. If no tool calls, we're done
@@ -129,8 +150,9 @@ func RunToolLoop(
 
 		// 6. Build assistant message with tool calls
 		assistantMsg := providers.Message{
-			Role:    "assistant",
-			Content: response.Content,
+			Role:             "assistant",
+			Content:          response.Content,
+			ReasoningContent: response.ReasoningContent,
 		}
 		for _, tc := range normalizedToolCalls {
 			argumentsJSON, err := json.Marshal(tc.Arguments)
@@ -138,46 +160,56 @@ func RunToolLoop(
 				logger.Warnf("toolloop: failed to marshal tool call arguments for %s: %v", tc.Name, err)
 				argumentsJSON = []byte("{}")
 			}
+			functionThoughtSignature := tc.ThoughtSignature
+			if tc.Function != nil && tc.Function.ThoughtSignature != "" {
+				functionThoughtSignature = tc.Function.ThoughtSignature
+			}
 			assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, providers.ToolCall{
 				ID:        tc.ID,
 				Type:      "function",
 				Name:      tc.Name,
 				Arguments: tc.Arguments,
 				Function: &providers.FunctionCall{
-					Name:      tc.Name,
-					Arguments: string(argumentsJSON),
+					Name:             tc.Name,
+					Arguments:        string(argumentsJSON),
+					ThoughtSignature: functionThoughtSignature,
 				},
+				ThoughtSignature: tc.ThoughtSignature,
+				ExtraContent:     cloneToolLoopExtraContent(tc.ExtraContent),
 			})
 		}
 		messages = append(messages, assistantMsg)
 
-		// 7. Execute tool calls in parallel
+		// 7. Execute tool calls. Most existing callers benefit from parallel
+		// execution, while mutation-capable controllers opt into response-order
+		// serialization through SequentialToolCalls.
 		type indexedResult struct {
 			result *ToolResult
 			tc     providers.ToolCall
 		}
 
 		results := make([]indexedResult, len(normalizedToolCalls))
-		var wg sync.WaitGroup
-
-		for i, tc := range normalizedToolCalls {
+		execute := func(i int, tc providers.ToolCall) {
 			results[i].tc = tc
-
-			wg.Add(1)
-			go func(idx int, tc providers.ToolCall) {
-				defer wg.Done()
-				defer func() {
-					if r := recover(); r != nil {
-						logger.ErrorCF("toolloop", "tool execution goroutine panic recovered",
-							map[string]any{
-								"tool":  tc.Name,
-								"panic": fmt.Sprintf("%v", r),
-								"stack": string(debug.Stack()),
-							})
-						results[idx].result = ErrorResult(fmt.Sprintf("internal panic in tool %s", tc.Name))
+			defer func() {
+				if r := recover(); r != nil {
+					fields := map[string]any{"tool": tc.Name}
+					if !config.SuppressToolArguments {
+						fields["panic"] = fmt.Sprintf("%v", r)
+						fields["stack"] = string(debug.Stack())
 					}
-				}()
+					logger.ErrorCF("toolloop", "tool execution panic recovered", fields)
+					results[i].result = ErrorResult(fmt.Sprintf("internal panic in tool %s", tc.Name))
+				}
+			}()
 
+			if config.SuppressToolArguments {
+				logger.InfoCF("toolloop", fmt.Sprintf("Tool call: %s", tc.Name),
+					map[string]any{
+						"tool":      tc.Name,
+						"iteration": iteration,
+					})
+			} else {
 				argsJSON, _ := json.Marshal(tc.Arguments)
 				argsPreview := utils.Truncate(string(argsJSON), 200)
 				logger.InfoCF("toolloop", fmt.Sprintf("Tool call: %s(%s)", tc.Name, argsPreview),
@@ -185,17 +217,44 @@ func RunToolLoop(
 						"tool":      tc.Name,
 						"iteration": iteration,
 					})
+			}
 
-				var toolResult *ToolResult
-				if config.Tools != nil {
-					toolResult = config.Tools.ExecuteWithContext(ctx, tc.Name, tc.Arguments, channel, chatID, nil)
-				} else {
-					toolResult = ErrorResult("No tools available")
-				}
-				results[idx].result = toolResult
-			}(i, tc)
+			if config.Tools != nil {
+				results[i].result = config.Tools.executeWithContext(
+					ctx,
+					tc.Name,
+					tc.Arguments,
+					channel,
+					chatID,
+					nil,
+					config.SuppressToolArguments,
+				)
+			} else {
+				results[i].result = ErrorResult("No tools available")
+			}
+			if results[i].result == nil {
+				results[i].result = ErrorResult(fmt.Sprintf("tool %s returned no result", tc.Name))
+			}
 		}
-		wg.Wait()
+
+		if config.SequentialToolCalls {
+			for i, tc := range normalizedToolCalls {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				execute(i, tc)
+			}
+		} else {
+			var wg sync.WaitGroup
+			for i, tc := range normalizedToolCalls {
+				wg.Add(1)
+				go func(idx int, call providers.ToolCall) {
+					defer wg.Done()
+					execute(idx, call)
+				}(i, tc)
+			}
+			wg.Wait()
+		}
 
 		// Append results in original order
 		for _, r := range results {
@@ -212,9 +271,27 @@ func RunToolLoop(
 			messages = append(messages, toolMsg)
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	return &ToolLoopResult{
 		Content:    finalContent,
 		Iterations: iteration,
 	}, nil
+}
+
+func cloneToolLoopExtraContent(value *providers.ExtraContent) *providers.ExtraContent {
+	if value == nil {
+		return nil
+	}
+	cloned := &providers.ExtraContent{
+		ToolFeedbackExplanation: value.ToolFeedbackExplanation,
+	}
+	if value.Google != nil {
+		cloned.Google = &providers.GoogleExtra{
+			ThoughtSignature: value.Google.ThoughtSignature,
+		}
+	}
+	return cloned
 }

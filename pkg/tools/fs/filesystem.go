@@ -523,12 +523,14 @@ func (t *ReadFileTool) Execute(ctx context.Context, args map[string]any) *ToolRe
 		header += "\n[END OF FILE - no further content.]"
 	}
 
-	logger.DebugCF("tool", "ReadFileTool execution completed successfully",
-		map[string]any{
-			"path":       path,
-			"bytes_read": len(data),
-			"has_more":   hasMore,
-		})
+	readFields := map[string]any{
+		"bytes_read": len(data),
+		"has_more":   hasMore,
+	}
+	if !ToolLogDetailsSuppressed(ctx) {
+		readFields["path"] = path
+	}
+	logger.DebugCF("tool", "ReadFileTool execution completed successfully", readFields)
 
 	return NewToolResult(header + "\n\n" + string(data))
 }
@@ -694,15 +696,17 @@ func (t *ReadFileLinesTool) Execute(ctx context.Context, args map[string]any) *T
 		header += "\n[END OF FILE - no further content.]"
 	}
 
-	logger.DebugCF("tool", "ReadFileTool execution completed successfully",
-		map[string]any{
-			"path":              path,
-			"lines_read":        linesRead,
-			"file_bytes_read":   fileBytesRead,
-			"output_bytes_read": outputBytesRead,
-			"truncated":         byteBudgetTruncated,
-			"tool":              t.Name(),
-		})
+	readFields := map[string]any{
+		"lines_read":        linesRead,
+		"file_bytes_read":   fileBytesRead,
+		"output_bytes_read": outputBytesRead,
+		"truncated":         byteBudgetTruncated,
+		"tool":              t.Name(),
+	}
+	if !ToolLogDetailsSuppressed(ctx) {
+		readFields["path"] = path
+	}
+	logger.DebugCF("tool", "ReadFileTool execution completed successfully", readFields)
 
 	return NewToolResult(header + "\n\n" + content.String())
 }

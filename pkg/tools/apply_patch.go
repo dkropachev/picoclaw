@@ -15,10 +15,33 @@ type ApplyPatchTool struct {
 	allowPaths  []*regexp.Regexp
 	allowCreate bool
 	allowUpdate bool
+	pathGuard   func(string) error
 }
 
 func NewApplyPatchTool(workspace string, restrict bool, allowPaths ...[]*regexp.Regexp) *ApplyPatchTool {
 	return NewApplyPatchToolWithPermissions(workspace, restrict, true, true, allowPaths...)
+}
+
+// NewApplyPatchToolWithPathGuard creates an apply-patch tool whose caller-owned
+// guard validates every source and move destination after the complete patch
+// parses and before the first operation mutates the filesystem. It is intended
+// for narrow controller runtimes that impose a stricter boundary than the
+// ordinary workspace restriction (for example, denying Git control paths).
+func NewApplyPatchToolWithPathGuard(
+	workspace string,
+	restrict bool,
+	pathGuard func(string) error,
+	allowPaths ...[]*regexp.Regexp,
+) *ApplyPatchTool {
+	tool := NewApplyPatchToolWithPermissions(
+		workspace,
+		restrict,
+		true,
+		true,
+		allowPaths...,
+	)
+	tool.pathGuard = pathGuard
+	return tool
 }
 
 func NewApplyPatchToolWithPermissions(
@@ -73,6 +96,22 @@ func (t *ApplyPatchTool) Execute(_ context.Context, args map[string]any) *ToolRe
 	}
 	if len(ops) == 0 {
 		return ErrorResult("patch contains no file operations")
+	}
+	if t.pathGuard != nil {
+		for _, op := range ops {
+			if err := t.pathGuard(op.path); err != nil {
+				return ErrorResult(fmt.Sprintf("patch path %q is denied: %v", op.path, err))
+			}
+			if op.moveTo != "" {
+				if err := t.pathGuard(op.moveTo); err != nil {
+					return ErrorResult(fmt.Sprintf(
+						"patch move path %q is denied: %v",
+						op.moveTo,
+						err,
+					))
+				}
+			}
+		}
 	}
 
 	var summaries []string

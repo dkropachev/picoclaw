@@ -3,10 +3,16 @@ package prdevelopment
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,12 +21,14 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/sipeed/picoclaw/pkg/eventing"
 	picomcp "github.com/sipeed/picoclaw/pkg/mcp"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
 const (
 	defaultGitHubMCPServer = "github"
+	defaultGitHubWebOrigin = "https://github.com"
 	pullRequestReadTool    = "pull_request_read"
 
 	providerReviewsPerPage = 100
@@ -36,6 +44,25 @@ const (
 	maxProviderJSONTokens     = 1 << 20
 	maxProviderReviewBody     = 64 << 10
 	maxProviderRefBytes       = 1024
+
+	providerReviewDigestDomain = "picoclaw-pr-development-review-v1"
+)
+
+var (
+	errGitHubProviderEvidenceMismatch = errors.New(
+		"GitHub provider identity or evidence does not match",
+	)
+
+	// ErrGitHubCaseNotActionable reports a durable case whose current pull
+	// request or exact review can no longer accept development work.
+	ErrGitHubCaseNotActionable = errors.New(
+		"GitHub pull request development case is not actionable",
+	)
+	// ErrGitHubCaseDrift reports a durable case whose immutable provider
+	// identity or captured review evidence no longer matches GitHub.
+	ErrGitHubCaseDrift = errors.New(
+		"GitHub pull request development case changed",
+	)
 )
 
 // GitHubVerifier independently re-reads the current PR and exact review via
@@ -44,6 +71,11 @@ type GitHubVerifier struct {
 	Runner       workflows.ToolRunner
 	Server       string
 	ArtifactRoot string
+	// WebOrigin is the canonical GitHub web origin used by VerifyCase to bind
+	// pull, review, and credential-free clone URLs. Verify retains the capture
+	// contract's existing provider checks. An empty value defaults to github.com;
+	// GitHub Enterprise development callers must provide their exact HTTPS origin.
+	WebOrigin string
 }
 
 // VerifiedFeedback is the bounded provider snapshot admitted to durable
@@ -69,6 +101,26 @@ type VerifiedFeedback struct {
 	ReviewSubmittedAt  time.Time
 	ReviewURL          string
 	Feedback           string
+
+	// headCloneURL is retained only for the trusted VerifyCase controller.
+	// The durable capture path deliberately does not persist or expose it.
+	headCloneURL string
+}
+
+// VerifiedCase is the bounded current provider observation a trusted local
+// development controller may pass to the exact pinned-checkout boundary. It
+// contains no credential, filesystem path, model, provider-write, or browser
+// capability.
+type VerifiedCase struct {
+	CaseID             string
+	Repository         string
+	PullNumber         int64
+	HeadRepository     string
+	HeadRef            string
+	HeadSHA            string
+	HeadCloneURL       string
+	CurrentReviewState eventing.PRDevelopmentReviewState
+	ReviewDigest       string
 }
 
 type providerPullRequest struct {
@@ -90,6 +142,7 @@ type providerPullRequestRef struct {
 
 type providerPullRequestRepo struct {
 	FullName string `json:"full_name"`
+	CloneURL string `json:"clone_url"`
 }
 
 type providerUser struct {
@@ -115,6 +168,9 @@ func (v *GitHubVerifier) Verify(
 ) (VerifiedFeedback, error) {
 	if v == nil || v.Runner == nil {
 		return VerifiedFeedback{}, errors.New("GitHub verifier runner is required")
+	}
+	if ctx == nil {
+		return VerifiedFeedback{}, errors.New("GitHub verifier context is required")
 	}
 	if err := ctx.Err(); err != nil {
 		return VerifiedFeedback{}, err
@@ -256,7 +312,9 @@ func (v *GitHubVerifier) Verify(
 		}
 	}
 	if matched == nil {
-		return VerifiedFeedback{}, errors.New("exact GitHub review was not found within the bounded scan")
+		return VerifiedFeedback{}, providerEvidenceMismatch(
+			"exact GitHub review was not found within the bounded scan",
+		)
 	}
 	if err := verifyProviderReview(evidence, *matched); err != nil {
 		return VerifiedFeedback{}, err
@@ -271,22 +329,355 @@ func (v *GitHubVerifier) Verify(
 	return verified, nil
 }
 
+// VerifyCase independently refreshes one store-validated durable case for a
+// trusted local development controller. Mutable head facts are refreshed, but
+// the pull target and exact captured review remain immutable fences. Draft pull
+// requests remain actionable because they may still receive repair commits.
+// This method performs read-only provider calls and grants no checkout or
+// provider-write authority by itself.
+func (v *GitHubVerifier) VerifyCase(
+	ctx context.Context,
+	stored eventing.PRDevelopmentCase,
+) (VerifiedCase, error) {
+	if ctx == nil {
+		return VerifiedCase{}, errors.New("GitHub case verifier context is required")
+	}
+	evidence, err := routingEvidenceForStoredCase(stored)
+	if err != nil {
+		return VerifiedCase{}, err
+	}
+	if v == nil {
+		return VerifiedCase{}, errors.New("GitHub verifier is required")
+	}
+	webOrigin, err := canonicalGitHubWebOrigin(v.WebOrigin)
+	if err != nil {
+		return VerifiedCase{}, fmt.Errorf("GitHub verifier web origin is invalid: %w", err)
+	}
+	if urlErr := verifyRoutingEvidenceURLs(evidence, webOrigin); urlErr != nil {
+		if errors.Is(urlErr, errGitHubProviderEvidenceMismatch) {
+			return VerifiedCase{}, fmt.Errorf("%w: %v", ErrGitHubCaseDrift, urlErr)
+		}
+		return VerifiedCase{}, urlErr
+	}
+	verified, err := v.Verify(ctx, evidence)
+	if err != nil {
+		if errors.Is(err, errGitHubProviderEvidenceMismatch) {
+			return VerifiedCase{}, fmt.Errorf(
+				"%w: %v",
+				ErrGitHubCaseDrift,
+				err,
+			)
+		}
+		return VerifiedCase{}, fmt.Errorf("verify current GitHub case: %w", err)
+	}
+	if verified.PullState != "open" || verified.PullMerged {
+		return VerifiedCase{}, ErrGitHubCaseNotActionable
+	}
+	if verified.CurrentReviewState != string(stored.SubmittedReviewState) {
+		return VerifiedCase{}, ErrGitHubCaseNotActionable
+	}
+	if !strings.EqualFold(verified.BaseRepository, stored.BaseRepository) ||
+		verified.BaseRef != stored.BaseRef {
+		return VerifiedCase{}, fmt.Errorf(
+			"%w: pull request target changed",
+			ErrGitHubCaseDrift,
+		)
+	}
+	headCloneURL, err := verifiedHeadCloneURL(
+		verified.headCloneURL,
+		webOrigin,
+		verified.HeadRepository,
+	)
+	if err != nil {
+		return VerifiedCase{}, fmt.Errorf(
+			"%w: head clone endpoint is invalid",
+			ErrGitHubCaseDrift,
+		)
+	}
+	liveDigest := reviewSnapshotDigest(
+		verified.Repository,
+		int64(verified.PullNumber),
+		verified.ReviewID,
+		verified.ReviewAuthor,
+		verified.CurrentReviewState,
+		verified.ReviewCommitSHA,
+		verified.ReviewSubmittedAt,
+		verified.ReviewURL,
+		verified.Feedback,
+	)
+	capturedDigest := reviewSnapshotDigest(
+		stored.Repository,
+		stored.PullNumber,
+		stored.ReviewID,
+		stored.ReviewAuthor,
+		string(stored.SubmittedReviewState),
+		stored.ReviewCommitSHA,
+		stored.ReviewSubmittedAt,
+		stored.ReviewURL,
+		stored.Feedback,
+	)
+	if liveDigest != capturedDigest {
+		return VerifiedCase{}, fmt.Errorf(
+			"%w: captured review evidence changed",
+			ErrGitHubCaseDrift,
+		)
+	}
+	return VerifiedCase{
+		CaseID:         stored.ID,
+		Repository:     verified.Repository,
+		PullNumber:     int64(verified.PullNumber),
+		HeadRepository: verified.HeadRepository,
+		HeadRef:        verified.HeadRef,
+		HeadSHA:        verified.HeadSHA,
+		HeadCloneURL:   headCloneURL,
+		CurrentReviewState: eventing.PRDevelopmentReviewState(
+			verified.CurrentReviewState,
+		),
+		ReviewDigest: liveDigest,
+	}, nil
+}
+
+func routingEvidenceForStoredCase(
+	stored eventing.PRDevelopmentCase,
+) (RoutingEvidence, error) {
+	if !validCaseID(stored.ID) ||
+		stored.PullNumber <= 0 || stored.PullNumber > MaximumPullNumber ||
+		(stored.PullState != eventing.PRDevelopmentPullOpen &&
+			stored.PullState != eventing.PRDevelopmentPullClosed) ||
+		(stored.PullMerged &&
+			(stored.PullState != eventing.PRDevelopmentPullClosed || stored.PullDraft)) ||
+		!validProviderRepositoryIdentity(stored.Repository) ||
+		!validProviderRepositoryIdentity(stored.BaseRepository) ||
+		!strings.EqualFold(stored.Repository, stored.BaseRepository) ||
+		!validProviderRepositoryIdentity(stored.HeadRepository) ||
+		!validHTTPSURL(stored.PullURL) ||
+		!validGitHubUser(stored.PullAuthor, false) ||
+		!validGitHubUser(stored.TargetUser, false) ||
+		!strings.EqualFold(stored.PullAuthor, stored.TargetUser) ||
+		!databaseIDPattern.MatchString(stored.ReviewID) ||
+		!validNodeID(stored.TriggerReviewNodeID) ||
+		!validGitHubUser(stored.ReviewAuthor, true) ||
+		strings.EqualFold(stored.ReviewAuthor, stored.TargetUser) ||
+		!validReviewState(string(stored.SubmittedReviewState)) ||
+		!validObjectID(stored.ReviewCommitSHA) ||
+		stored.ReviewSubmittedAt.IsZero() ||
+		!validHTTPSURLWithFragment(stored.ReviewURL) ||
+		len(stored.Feedback) > maxProviderReviewBody ||
+		!utf8.ValidString(stored.Feedback) ||
+		!validStoredGitRef(stored.BaseRef) || !validObjectID(stored.BaseSHA) ||
+		!validStoredGitRef(stored.HeadRef) || !validObjectID(stored.HeadSHA) {
+		return RoutingEvidence{}, fmt.Errorf(
+			"%w: durable case identity is invalid",
+			ErrGitHubCaseDrift,
+		)
+	}
+	reviewID, err := strconv.ParseInt(stored.ReviewID, 10, 64)
+	if err != nil || reviewID <= 0 || strconv.FormatInt(reviewID, 10) != stored.ReviewID {
+		return RoutingEvidence{}, fmt.Errorf(
+			"%w: durable review identity is invalid",
+			ErrGitHubCaseDrift,
+		)
+	}
+	_, reviewOffset := stored.ReviewSubmittedAt.Zone()
+	if reviewOffset != 0 {
+		return RoutingEvidence{}, fmt.Errorf(
+			"%w: durable review time is invalid",
+			ErrGitHubCaseDrift,
+		)
+	}
+	if stored.CurrentReviewState != stored.SubmittedReviewState {
+		return RoutingEvidence{}, ErrGitHubCaseNotActionable
+	}
+	if stored.PullMerged {
+		return RoutingEvidence{}, ErrGitHubCaseNotActionable
+	}
+	return RoutingEvidence{
+		Repository:        stored.Repository,
+		PullNumber:        int(stored.PullNumber),
+		PullURL:           stored.PullURL,
+		PullAuthor:        stored.PullAuthor,
+		TargetUser:        stored.TargetUser,
+		ReviewID:          stored.ReviewID,
+		ReviewNodeID:      stored.TriggerReviewNodeID,
+		ReviewURL:         stored.ReviewURL,
+		ReviewAuthor:      stored.ReviewAuthor,
+		ReviewState:       string(stored.SubmittedReviewState),
+		ReviewCommitSHA:   stored.ReviewCommitSHA,
+		ReviewSubmittedAt: stored.ReviewSubmittedAt,
+	}, nil
+}
+
+func canonicalGitHubWebOrigin(configured string) (string, error) {
+	if configured == "" {
+		return defaultGitHubWebOrigin, nil
+	}
+	if len(configured) > 4096 || !utf8.ValidString(configured) ||
+		configured != strings.TrimSpace(configured) {
+		return "", errors.New("web origin is not canonical text")
+	}
+	parsed, err := url.Parse(configured)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+		parsed.Opaque != "" || parsed.User != nil || parsed.Path != "" ||
+		parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery ||
+		parsed.Fragment != "" || parsed.Host != strings.ToLower(parsed.Host) ||
+		strings.HasSuffix(parsed.Host, ":") {
+		return "", errors.New("web origin must be one lowercase canonical HTTPS origin")
+	}
+	hostname := parsed.Hostname()
+	if !validGitHubWebHostname(hostname) {
+		return "", errors.New("web origin hostname is invalid")
+	}
+	if port := parsed.Port(); port != "" {
+		value, parseErr := strconv.Atoi(port)
+		if parseErr != nil || value < 1 || value > 65535 || value == 443 {
+			return "", errors.New("web origin port is not canonical")
+		}
+	}
+	return configured, nil
+}
+
+func validGitHubWebHostname(hostname string) bool {
+	if hostname == "" {
+		return false
+	}
+	if strings.Contains(hostname, ":") {
+		return net.ParseIP(hostname) != nil
+	}
+	if len(hostname) > 253 || strings.HasPrefix(hostname, ".") ||
+		strings.HasSuffix(hostname, ".") {
+		return false
+	}
+	for _, label := range strings.Split(hostname, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' ||
+			label[len(label)-1] == '-' {
+			return false
+		}
+		for _, char := range []byte(label) {
+			if char >= 'a' && char <= 'z' || char >= '0' && char <= '9' ||
+				char == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func verifyRoutingEvidenceURLs(evidence RoutingEvidence, webOrigin string) error {
+	if !validProviderRepositoryIdentity(evidence.Repository) ||
+		evidence.PullNumber <= 0 || int64(evidence.PullNumber) > MaximumPullNumber {
+		return errors.New("GitHub routing evidence repository or pull number is invalid")
+	}
+	reviewID, err := strconv.ParseInt(evidence.ReviewID, 10, 64)
+	if err != nil || reviewID <= 0 || strconv.FormatInt(reviewID, 10) != evidence.ReviewID {
+		return errors.New("GitHub routing evidence review ID is invalid")
+	}
+	pull, err := url.Parse(evidence.PullURL)
+	if err != nil || pull.Opaque != "" || pull.User != nil || pull.RawPath != "" ||
+		pull.RawQuery != "" || pull.ForceQuery || pull.Fragment != "" {
+		return providerEvidenceMismatch("GitHub pull request URL is not canonical")
+	}
+	origin, err := url.Parse(webOrigin)
+	if err != nil || pull.Scheme != origin.Scheme || pull.Host != origin.Host {
+		return providerEvidenceMismatch("GitHub pull request URL is not on the configured web origin")
+	}
+	segments := strings.Split(strings.TrimPrefix(pull.Path, "/"), "/")
+	if len(segments) != 4 ||
+		!strings.EqualFold(segments[0]+"/"+segments[1], evidence.Repository) ||
+		segments[2] != "pull" || segments[3] != strconv.Itoa(evidence.PullNumber) ||
+		pull.Path != "/"+strings.Join(segments, "/") {
+		return providerEvidenceMismatch("GitHub pull request URL is not canonical")
+	}
+	if evidence.ReviewURL != evidence.PullURL+"#pullrequestreview-"+evidence.ReviewID {
+		return providerEvidenceMismatch("GitHub review URL is not canonical")
+	}
+	return nil
+}
+
+func verifiedHeadCloneURL(raw, webOrigin, headRepository string) (string, error) {
+	if !validProviderRepositoryIdentity(headRepository) || webOrigin == "" {
+		return "", errors.New("clone endpoint identity is invalid")
+	}
+	expected := webOrigin + "/" + headRepository + ".git"
+	if raw != expected {
+		return "", errors.New("clone URL is not canonical for the configured web origin")
+	}
+	return expected, nil
+}
+
+func validProviderRepositoryIdentity(value string) bool {
+	if len(value) > MaximumRepositoryBytes || !repositoryPattern.MatchString(value) {
+		return false
+	}
+	owner, repository, found := strings.Cut(value, "/")
+	return found && owner != "." && owner != ".." &&
+		repository != "." && repository != ".."
+}
+
+func providerEvidenceMismatch(message string) error {
+	return fmt.Errorf("%w: %s", errGitHubProviderEvidenceMismatch, message)
+}
+
+func reviewSnapshotDigest(
+	repository string,
+	pullNumber int64,
+	reviewID, reviewAuthor, reviewState, reviewCommitSHA string,
+	reviewSubmittedAt time.Time,
+	reviewURL, feedback string,
+) string {
+	digest := sha256.New()
+	for _, part := range []string{
+		providerReviewDigestDomain,
+		strings.ToLower(repository),
+		strconv.FormatInt(pullNumber, 10),
+		reviewID,
+		strings.ToLower(reviewAuthor),
+		strings.ToLower(reviewState),
+		reviewCommitSHA,
+		reviewSubmittedAt.UTC().Format(time.RFC3339Nano),
+		reviewURL,
+		feedback,
+	} {
+		writeProviderReviewDigestPart(digest, part)
+	}
+	return "sha256:" + hex.EncodeToString(digest.Sum(nil))
+}
+
+func writeProviderReviewDigestPart(digest hash.Hash, value string) {
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(value)))
+	_, _ = digest.Write(length[:])
+	_, _ = digest.Write([]byte(value))
+}
+
 func verifyProviderPullRequest(
 	evidence RoutingEvidence,
 	pull providerPullRequest,
 ) (VerifiedFeedback, error) {
-	if pull.Number != evidence.PullNumber || pull.HTMLURL != evidence.PullURL ||
-		!validHTTPSURL(pull.HTMLURL) {
-		return VerifiedFeedback{}, errors.New("GitHub pull request identity does not match the event")
+	if pull.Number != evidence.PullNumber {
+		return VerifiedFeedback{}, providerEvidenceMismatch(
+			"GitHub pull request number does not match the event",
+		)
+	}
+	if !validHTTPSURL(pull.HTMLURL) {
+		return VerifiedFeedback{}, errors.New("GitHub pull request URL is invalid")
+	}
+	if pull.HTMLURL != evidence.PullURL {
+		return VerifiedFeedback{}, providerEvidenceMismatch(
+			"GitHub pull request URL does not match the event",
+		)
 	}
 	if pull.Draft == nil || pull.Merged == nil {
 		return VerifiedFeedback{}, errors.New("GitHub pull request draft or merged state is incomplete")
 	}
-	if pull.User == nil ||
-		!validGitHubUser(pull.User.Login, false) ||
-		!strings.EqualFold(pull.User.Login, evidence.PullAuthor) ||
+	if pull.User == nil || !validGitHubUser(pull.User.Login, false) {
+		return VerifiedFeedback{}, errors.New("GitHub pull request author is invalid")
+	}
+	if !strings.EqualFold(pull.User.Login, evidence.PullAuthor) ||
 		!strings.EqualFold(pull.User.Login, evidence.TargetUser) {
-		return VerifiedFeedback{}, errors.New("GitHub pull request author does not match the target")
+		return VerifiedFeedback{}, providerEvidenceMismatch(
+			"GitHub pull request author does not match the target",
+		)
 	}
 	state := strings.ToLower(pull.State)
 	if state != "open" && state != "closed" {
@@ -296,10 +687,14 @@ func verifyProviderPullRequest(
 		!validProviderRef(*pull.Head) || !validProviderRef(*pull.Base) {
 		return VerifiedFeedback{}, errors.New("GitHub pull request branch identity is incomplete")
 	}
-	if !repositoryPattern.MatchString(pull.Base.Repo.FullName) ||
-		!strings.EqualFold(pull.Base.Repo.FullName, evidence.Repository) ||
-		!repositoryPattern.MatchString(pull.Head.Repo.FullName) {
+	if !validProviderRepositoryIdentity(pull.Base.Repo.FullName) ||
+		!validProviderRepositoryIdentity(pull.Head.Repo.FullName) {
 		return VerifiedFeedback{}, errors.New("GitHub pull request repository identity is invalid")
+	}
+	if !strings.EqualFold(pull.Base.Repo.FullName, evidence.Repository) {
+		return VerifiedFeedback{}, providerEvidenceMismatch(
+			"GitHub pull request repository does not match the event",
+		)
 	}
 	return VerifiedFeedback{
 		Repository:     pull.Base.Repo.FullName,
@@ -315,33 +710,52 @@ func verifyProviderPullRequest(
 		HeadRepository: pull.Head.Repo.FullName,
 		HeadRef:        pull.Head.Ref,
 		HeadSHA:        pull.Head.SHA,
+		headCloneURL:   pull.Head.Repo.CloneURL,
 	}, nil
 }
 
 func verifyProviderReview(evidence RoutingEvidence, review providerReview) error {
 	id, err := canonicalProviderDatabaseID(review.ID)
-	if err != nil || id != evidence.ReviewID {
-		return errors.New("GitHub review ID does not match the event")
+	if err != nil {
+		return errors.New("GitHub review ID is invalid")
 	}
-	if review.User == nil ||
-		!validGitHubUser(review.User.Login, true) ||
-		!strings.EqualFold(review.User.Login, evidence.ReviewAuthor) ||
+	if id != evidence.ReviewID {
+		return providerEvidenceMismatch("GitHub review ID does not match the event")
+	}
+	if review.User == nil || !validGitHubUser(review.User.Login, true) {
+		return errors.New("GitHub review author is invalid")
+	}
+	if !strings.EqualFold(review.User.Login, evidence.ReviewAuthor) ||
 		strings.EqualFold(review.User.Login, evidence.TargetUser) {
-		return errors.New("GitHub review author does not match the event")
+		return providerEvidenceMismatch("GitHub review author does not match the event")
 	}
 	state := strings.ToLower(review.State)
-	if state != evidence.ReviewState && state != "dismissed" {
-		return errors.New("GitHub review state does not match the event")
+	if !validReviewState(state) && state != "dismissed" {
+		return errors.New("GitHub review state is invalid")
 	}
-	if !validObjectID(review.CommitID) || review.CommitID != evidence.ReviewCommitSHA {
-		return errors.New("GitHub review commit does not match the event")
+	if state != evidence.ReviewState && state != "dismissed" {
+		return providerEvidenceMismatch("GitHub review state does not match the event")
+	}
+	if !validObjectID(review.CommitID) {
+		return errors.New("GitHub review commit is invalid")
+	}
+	if review.CommitID != evidence.ReviewCommitSHA {
+		return providerEvidenceMismatch("GitHub review commit does not match the event")
 	}
 	submittedAt, err := time.Parse(time.RFC3339Nano, review.SubmittedAt)
-	if err != nil || !submittedAt.Equal(evidence.ReviewSubmittedAt) {
-		return errors.New("GitHub review submission time does not match the event")
+	if err != nil {
+		return errors.New("GitHub review submission time is invalid")
 	}
-	if !validHTTPSURLWithFragment(review.HTMLURL) || review.HTMLURL != evidence.ReviewURL {
-		return errors.New("GitHub review URL does not match the event")
+	if !submittedAt.Equal(evidence.ReviewSubmittedAt) {
+		return providerEvidenceMismatch(
+			"GitHub review submission time does not match the event",
+		)
+	}
+	if !validHTTPSURLWithFragment(review.HTMLURL) {
+		return errors.New("GitHub review URL is invalid")
+	}
+	if review.HTMLURL != evidence.ReviewURL {
+		return providerEvidenceMismatch("GitHub review URL does not match the event")
 	}
 	if len(review.Body) > maxProviderReviewBody || !utf8.ValidString(review.Body) {
 		return errors.New("GitHub review body is invalid or too large")
@@ -357,6 +771,28 @@ func validProviderRef(ref providerPullRequestRef) bool {
 	}
 	for _, char := range ref.Ref {
 		if unicode.IsControl(char) || unicode.Is(unicode.Cf, char) {
+			return false
+		}
+	}
+	return true
+}
+
+func validStoredGitRef(value string) bool {
+	if value == "" || len(value) > maxProviderRefBytes ||
+		value != strings.TrimSpace(value) || value == "@" ||
+		strings.HasPrefix(value, "/") || strings.HasSuffix(value, "/") ||
+		strings.Contains(value, "//") || strings.Contains(value, "..") ||
+		strings.Contains(value, "@{") || !utf8.ValidString(value) {
+		return false
+	}
+	for _, char := range []byte(value) {
+		if char <= ' ' || char == 0x7f || strings.ContainsRune("~^:?*[\\", rune(char)) {
+			return false
+		}
+	}
+	for _, component := range strings.Split(value, "/") {
+		if component == "" || strings.HasPrefix(component, ".") ||
+			strings.HasSuffix(component, ".") || strings.HasSuffix(component, ".lock") {
 			return false
 		}
 	}
