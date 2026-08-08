@@ -99,9 +99,73 @@ func (handler *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) 
 			return
 		}
 		handler.chat(w, request, caseID)
+	case len(segments) == 2 && segments[1] == "repair":
+		if request.Method != http.MethodPost {
+			writeMethod(w, http.MethodPost)
+			return
+		}
+		handler.repair(w, request, caseID)
 	default:
 		writeError(w, http.StatusNotFound, "not found")
 	}
+}
+
+func (handler *Handler) repair(
+	w http.ResponseWriter,
+	request *http.Request,
+	caseID string,
+) {
+	if hasChatBrowserProvenance(request.Header) {
+		writeError(w, http.StatusForbidden, "cross-site development repair request rejected")
+		return
+	}
+	var body struct {
+		ExpectedConversationVersion *int64  `json:"expected_conversation_version"`
+		ExpectedRepairRevision      *int64  `json:"expected_repair_revision"`
+		RequestID                   *string `json:"request_id"`
+		Instruction                 *string `json:"instruction"`
+	}
+	if err := decodeRepairBody(w, request, &body); err != nil {
+		var maximum *http.MaxBytesError
+		switch {
+		case errors.As(err, &maximum):
+			writeError(w, http.StatusRequestEntityTooLarge, "development repair request is too large")
+		case errors.Is(err, errInvalidChatMediaType):
+			writeError(w, http.StatusUnsupportedMediaType, "development repair requires JSON with identity encoding")
+		default:
+			writeError(w, http.StatusBadRequest, "invalid development repair request")
+		}
+		return
+	}
+	if body.ExpectedConversationVersion == nil ||
+		body.ExpectedRepairRevision == nil || body.RequestID == nil ||
+		body.Instruction == nil {
+		writeError(w, http.StatusBadRequest, "invalid development repair request")
+		return
+	}
+	detail, err := handler.Service.Repair(request.Context(), RepairRequest{
+		CaseID:                      caseID,
+		ExpectedConversationVersion: *body.ExpectedConversationVersion,
+		ExpectedRepairRevision:      *body.ExpectedRepairRevision,
+		RequestID:                   *body.RequestID,
+		Instruction:                 *body.Instruction,
+	})
+	if err != nil {
+		var latest *Detail
+		if !errors.Is(err, ErrInvalidRequest) &&
+			!errors.Is(err, eventing.ErrInvalidPRDevelopment) &&
+			!errors.Is(err, eventing.ErrInvalidPRDevelopmentRepair) &&
+			!errors.Is(err, eventing.ErrNotFound) {
+			latestCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if current, getErr := handler.Service.Get(latestCtx, caseID); getErr == nil {
+				latest = &current
+			}
+		}
+		writeOperationError(w, err, latest)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, detail)
 }
 
 func invalidReadRequest(request *http.Request) bool {
@@ -219,9 +283,36 @@ func decodeChatBody(
 	request *http.Request,
 	target any,
 ) error {
+	return decodeDevelopmentMutationBody(
+		w,
+		request,
+		target,
+		validateExactChatJSONFields,
+	)
+}
+
+func decodeRepairBody(
+	w http.ResponseWriter,
+	request *http.Request,
+	target any,
+) error {
+	return decodeDevelopmentMutationBody(
+		w,
+		request,
+		target,
+		validateExactRepairJSONFields,
+	)
+}
+
+func decodeDevelopmentMutationBody(
+	w http.ResponseWriter,
+	request *http.Request,
+	target any,
+	validateFields func([]byte) error,
+) error {
 	if request == nil || request.Body == nil ||
 		!chatJSONContentType(request.Header) ||
-		!identityReadEncoding(request.Header) {
+		!identityReadEncoding(request.Header) || validateFields == nil {
 		return errInvalidChatMediaType
 	}
 	if request.ContentLength <= 0 || len(request.TransferEncoding) != 0 {
@@ -237,7 +328,7 @@ func decodeChatBody(
 	if len(raw) == 0 || !utf8.Valid(raw) ||
 		validateProviderJSONStringEncoding(raw) != nil ||
 		rejectDuplicateChatJSONKeys(raw) != nil ||
-		validateExactChatJSONFields(raw) != nil {
+		validateFields(raw) != nil {
 		return ErrInvalidRequest
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -251,6 +342,24 @@ func decodeChatBody(
 			return ErrInvalidRequest
 		}
 		return err
+	}
+	return nil
+}
+
+func validateExactRepairJSONFields(raw []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || len(fields) != 4 {
+		return ErrInvalidRequest
+	}
+	for _, name := range []string{
+		"expected_conversation_version",
+		"expected_repair_revision",
+		"request_id",
+		"instruction",
+	} {
+		if _, ok := fields[name]; !ok {
+			return ErrInvalidRequest
+		}
 	}
 	return nil
 }
@@ -420,8 +529,14 @@ func writeOperationError(w http.ResponseWriter, err error, latest *Detail) {
 		status, message = http.StatusConflict, "development conversation changed; reload before retrying"
 	case errors.Is(err, eventing.ErrPRDevelopmentConversationCapacity):
 		status, message = http.StatusConflict, "development conversation has reached its limit"
+	case errors.Is(err, eventing.ErrPRDevelopmentRepairConflict),
+		errors.Is(err, eventing.ErrPRDevelopmentRepairActive):
+		status, message = http.StatusConflict, "development repair changed; reload before retrying"
+	case errors.Is(err, eventing.ErrPRDevelopmentRepairCapacity):
+		status, message = http.StatusConflict, "development repair has reached its limit"
 	case errors.Is(err, ErrInvalidRequest),
-		errors.Is(err, eventing.ErrInvalidPRDevelopment):
+		errors.Is(err, eventing.ErrInvalidPRDevelopment),
+		errors.Is(err, eventing.ErrInvalidPRDevelopmentRepair):
 		status, message = http.StatusBadRequest, "invalid development workbench request"
 	case errors.Is(err, ErrUnavailable):
 		status, message = http.StatusServiceUnavailable, "development workbench unavailable"

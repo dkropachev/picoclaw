@@ -3,11 +3,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import { launcherFetch } from "@/api/http"
 import {
   MAXIMUM_PR_DEVELOPMENT_CHAT_BYTES,
+  MAXIMUM_PR_DEVELOPMENT_REPAIR_INSTRUCTION_BYTES,
   PRDevelopmentAPIError,
   chatAboutPRDevelopmentCase,
+  createPRDevelopmentRepairRequestID,
   getPRDevelopmentCase,
   listPRDevelopmentCases,
   normalizePRDevelopmentChatContent,
+  startPRDevelopmentRepair,
 } from "@/api/pr-development"
 
 vi.mock("@/api/http", () => ({
@@ -62,6 +65,33 @@ const detail = {
       created_at: "2026-08-05T12:01:01Z",
     },
   ],
+  repair_available: true,
+  repair_revision: 0,
+} as const
+const repairRequestID = `prq_${"6".repeat(32)}`
+const repairInstruction = "Apply the reviewer feedback locally."
+const repairDetail = {
+  ...detail,
+  repair_revision: 1,
+  repair_session: {
+    id: `pds_${"7".repeat(32)}`,
+    revision: 1,
+    agent_id: "main",
+    head_repository: "octocat/repo",
+    head_ref: "fix/review-feedback",
+    head_sha: "d".repeat(40),
+    attempts: [
+      {
+        id: `pdr_${"8".repeat(32)}`,
+        ordinal: 0,
+        status: "queued",
+        conversation_version: 2,
+        instruction: repairInstruction,
+        created_at: "2026-08-05T12:03:00Z",
+        updated_at: "2026-08-05T12:03:00Z",
+      },
+    ],
+  },
 } as const
 const submittedChatContent = "Explain the retry path."
 const chatDetail = {
@@ -151,6 +181,482 @@ describe("PR development API", () => {
     )
   })
 
+  it("starts one version-fenced local repair and accepts only 202", async () => {
+    mockedLauncherFetch.mockResolvedValue(jsonResponse(repairDetail, 202))
+
+    await expect(
+      startPRDevelopmentRepair(caseID, {
+        expectedConversationVersion: 2,
+        expectedRepairRevision: 0,
+        expectedAttemptOrdinal: 0,
+        requestID: repairRequestID,
+        instruction: `  ${repairInstruction}  `,
+      }),
+    ).resolves.toEqual(repairDetail)
+    expect(mockedLauncherFetch).toHaveBeenCalledWith(
+      `/api/pr-development/${caseID}/repair`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_conversation_version: 2,
+          expected_repair_revision: 0,
+          request_id: repairRequestID,
+          instruction: repairInstruction,
+        }),
+      },
+    )
+
+    mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(repairDetail))
+    await expect(
+      startPRDevelopmentRepair(caseID, {
+        expectedConversationVersion: 2,
+        expectedRepairRevision: 0,
+        expectedAttemptOrdinal: 0,
+        requestID: repairRequestID,
+        instruction: repairInstruction,
+      }),
+    ).rejects.toMatchObject({ status: 502 })
+  })
+
+  it("binds an idempotent repair replay to its exact original ordinal", async () => {
+    const replayedDetail = {
+      ...repairDetail,
+      repair_revision: 2,
+      repair_session: {
+        ...repairDetail.repair_session,
+        revision: 2,
+        head_repository: "octocat/repo",
+        head_ref: "fix/review-feedback",
+        head_sha: "d".repeat(40),
+        attempts: [
+          {
+            ...repairDetail.repair_session.attempts[0],
+            status: "completed",
+            summary: "The original repair completed locally.",
+            updated_at: "2026-08-05T12:04:00Z",
+          },
+          {
+            id: `pdr_${"9".repeat(32)}`,
+            ordinal: 1,
+            status: "queued",
+            conversation_version: 2,
+            instruction: "Apply a later follow-up locally.",
+            created_at: "2026-08-05T12:05:00Z",
+            updated_at: "2026-08-05T12:05:00Z",
+          },
+        ],
+      },
+    } as const
+    mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(replayedDetail, 202))
+
+    await expect(
+      startPRDevelopmentRepair(caseID, {
+        expectedConversationVersion: 2,
+        expectedRepairRevision: 0,
+        expectedAttemptOrdinal: 0,
+        requestID: repairRequestID,
+        instruction: repairInstruction,
+      }),
+    ).resolves.toEqual(replayedDetail)
+
+    mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(replayedDetail, 202))
+    await expect(
+      startPRDevelopmentRepair(caseID, {
+        expectedConversationVersion: 2,
+        expectedRepairRevision: 1,
+        expectedAttemptOrdinal: 1,
+        requestID: repairRequestID,
+        instruction: repairInstruction,
+      }),
+    ).rejects.toMatchObject({ status: 502 })
+  })
+
+  it("sends a full-history suffix fence and preserves authoritative capacity detail", async () => {
+    const capacityDetail = {
+      ...repairDetail,
+      repair_revision: 64,
+      repair_session: {
+        ...repairDetail.repair_session,
+        revision: 64,
+        attempts: Array.from({ length: 64 }, (_, ordinal) => ({
+          ...repairDetail.repair_session.attempts[0],
+          id: `pdr_${ordinal.toString(16).padStart(32, "0")}`,
+          ordinal,
+          status: "completed" as const,
+          instruction: `Completed local repair ${ordinal + 1}.`,
+          summary: `Local repair ${ordinal + 1} completed.`,
+          updated_at: "2026-08-05T12:04:00Z",
+        })),
+      },
+    }
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse(
+        { error: "repair attempt capacity reached", detail: capacityDetail },
+        409,
+      ),
+    )
+
+    await expect(
+      startPRDevelopmentRepair(caseID, {
+        expectedConversationVersion: 2,
+        expectedRepairRevision: 64,
+        expectedAttemptOrdinal: 64,
+        requestID: repairRequestID,
+        instruction: repairInstruction,
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: "repair attempt capacity reached",
+      detail: capacityDetail,
+    })
+    expect(mockedLauncherFetch).toHaveBeenCalledWith(
+      `/api/pr-development/${caseID}/repair`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expected_conversation_version: 2,
+          expected_repair_revision: 64,
+          request_id: repairRequestID,
+          instruction: repairInstruction,
+        }),
+      },
+    )
+  })
+
+  it("generates opaque repair request IDs with secure browser randomness", () => {
+    const first = createPRDevelopmentRepairRequestID()
+    const second = createPRDevelopmentRepairRequestID()
+    expect(first).toMatch(/^prq_[0-9a-f]{32}$/)
+    expect(second).toMatch(/^prq_[0-9a-f]{32}$/)
+    expect(second).not.toBe(first)
+  })
+
+  it("parses bounded repair history, terminal outcomes, and a pinned head", async () => {
+    const historyDetail = {
+      ...repairDetail,
+      repair_revision: 7,
+      repair_session: {
+        ...repairDetail.repair_session,
+        revision: 7,
+        attempts: [
+          {
+            ...repairDetail.repair_session.attempts[0],
+            status: "completed",
+            summary: '<script>alert("summary")</script> stayed plain.',
+            updated_at: "2026-08-05T12:04:00Z",
+          },
+          {
+            id: `pdr_${"9".repeat(32)}`,
+            ordinal: 1,
+            status: "failed",
+            conversation_version: 2,
+            instruction: "Try the narrowed repair.",
+            summary: "Partial local edits may remain.",
+            error_code: "repair_failed",
+            created_at: "2026-08-05T12:05:00Z",
+            updated_at: "2026-08-05T12:06:00Z",
+          },
+        ],
+      },
+    } as const
+    mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(historyDetail))
+
+    await expect(getPRDevelopmentCase(caseID)).resolves.toEqual(historyDetail)
+  })
+
+  it("accepts repair instruction and summary at the exact 4 KiB boundary", async () => {
+    const boundaryText = "x".repeat(4 << 10)
+    const boundaryDetail = {
+      ...repairDetail,
+      repair_session: {
+        ...repairDetail.repair_session,
+        attempts: [
+          {
+            ...repairDetail.repair_session.attempts[0],
+            status: "completed",
+            instruction: boundaryText,
+            summary: boundaryText,
+            updated_at: "2026-08-05T12:04:00Z",
+          },
+        ],
+      },
+    } as const
+    mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(boundaryDetail))
+
+    await expect(getPRDevelopmentCase(caseID)).resolves.toEqual(boundaryDetail)
+  })
+
+  it("requires a complete public pin for recovery-required repairs", async () => {
+    const unpinnedRecoveryDetail = {
+      ...repairDetail,
+      repair_session: {
+        ...repairDetail.repair_session,
+        head_repository: undefined,
+        head_ref: undefined,
+        head_sha: undefined,
+        attempts: [
+          {
+            ...repairDetail.repair_session.attempts[0],
+            status: "recovery_required",
+            summary: "Partial local edits may exist.",
+            error_code: "recovery_required",
+          },
+        ],
+      },
+    } as const
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse(unpinnedRecoveryDetail),
+    )
+
+    await expect(getPRDevelopmentCase(caseID)).rejects.toMatchObject({
+      status: 502,
+    })
+  })
+
+  it("rejects unsafe or inconsistent repair projections", async () => {
+    const completedAttempt = {
+      ...repairDetail.repair_session.attempts[0],
+      status: "completed",
+      summary: "Local edits are ready for review.",
+      updated_at: "2026-08-05T12:04:00Z",
+    } as const
+    const failedAttempt = {
+      ...completedAttempt,
+      status: "failed",
+      error_code: "repair_failed",
+    } as const
+    const invalidDetails: unknown[] = [
+      { ...detail, repair_revision: 1 },
+      { ...detail, repair_revision: 1025 },
+      {
+        ...detail,
+        repair_available: true,
+        repair_unavailable_reason: "runtime_unavailable",
+      },
+      { ...detail, repair_available: false },
+      {
+        ...repairDetail,
+        repair_session: { ...repairDetail.repair_session, revision: 2 },
+      },
+      {
+        ...repairDetail,
+        repair_session: {
+          ...repairDetail.repair_session,
+          checkout_path: "/private/worktree",
+        },
+      },
+      {
+        ...repairDetail,
+        repair_session: {
+          ...repairDetail.repair_session,
+          agent_id: "Main Agent",
+        },
+      },
+      {
+        ...repairDetail,
+        repair_session: {
+          ...repairDetail.repair_session,
+          head_ref: undefined,
+        },
+      },
+      {
+        ...repairDetail,
+        repair_session: {
+          ...repairDetail.repair_session,
+          head_repository: undefined,
+          head_ref: undefined,
+          head_sha: undefined,
+          attempts: [
+            { ...repairDetail.repair_session.attempts[0], status: "running" },
+          ],
+        },
+      },
+      {
+        ...repairDetail,
+        conversation_version: 2,
+        repair_session: {
+          ...repairDetail.repair_session,
+          attempts: [
+            {
+              ...completedAttempt,
+              conversation_version: 2,
+            },
+            {
+              ...completedAttempt,
+              id: `pdr_${"b".repeat(32)}`,
+              ordinal: 1,
+              conversation_version: 1,
+              created_at: "2026-08-05T12:05:00Z",
+              updated_at: "2026-08-05T12:06:00Z",
+            },
+          ],
+        },
+      },
+      {
+        ...repairDetail,
+        repair_session: {
+          ...repairDetail.repair_session,
+          attempts: [{ ...completedAttempt, summary: undefined }],
+        },
+      },
+      {
+        ...repairDetail,
+        repair_session: {
+          ...repairDetail.repair_session,
+          attempts: [
+            {
+              ...completedAttempt,
+              summary: "x".repeat((4 << 10) + 1),
+            },
+          ],
+        },
+      },
+      {
+        ...repairDetail,
+        repair_session: {
+          ...repairDetail.repair_session,
+          attempts: [
+            {
+              ...repairDetail.repair_session.attempts[0],
+              instruction: "x".repeat((4 << 10) + 1),
+            },
+          ],
+        },
+      },
+      {
+        ...repairDetail,
+        repair_session: {
+          ...repairDetail.repair_session,
+          attempts: [{ ...failedAttempt, summary: undefined }],
+        },
+      },
+      {
+        ...repairDetail,
+        repair_session: {
+          ...repairDetail.repair_session,
+          attempts: [
+            {
+              ...failedAttempt,
+              status: "recovery_required",
+              error_code: "repair_failed",
+            },
+          ],
+        },
+      },
+      {
+        ...repairDetail,
+        repair_session: {
+          ...repairDetail.repair_session,
+          attempts: [
+            {
+              ...repairDetail.repair_session.attempts[0],
+              updated_at: "2026-08-05T12:02:59Z",
+            },
+          ],
+        },
+      },
+      {
+        ...repairDetail,
+        repair_session: {
+          ...repairDetail.repair_session,
+          attempts: [
+            {
+              ...repairDetail.repair_session.attempts[0],
+              conversation_version: 3,
+            },
+          ],
+        },
+      },
+      {
+        ...repairDetail,
+        repair_session: {
+          ...repairDetail.repair_session,
+          attempts: [
+            repairDetail.repair_session.attempts[0],
+            {
+              ...completedAttempt,
+              id: `pdr_${"a".repeat(32)}`,
+              ordinal: 1,
+            },
+          ],
+        },
+      },
+      {
+        ...repairDetail,
+        repair_session: {
+          ...repairDetail.repair_session,
+          attempts: [{ ...completedAttempt, private_tool_args: "secret" }],
+        },
+      },
+      {
+        ...repairDetail,
+        repair_session: {
+          ...repairDetail.repair_session,
+          attempts: Array.from({ length: 65 }, (_, ordinal) => ({
+            ...completedAttempt,
+            id: `pdr_${ordinal.toString(16).padStart(32, "0")}`,
+            ordinal,
+          })),
+        },
+      },
+    ]
+
+    for (const invalid of invalidDetails) {
+      mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(invalid))
+      await expect(getPRDevelopmentCase(caseID)).rejects.toMatchObject({
+        status: 502,
+      })
+    }
+  })
+
+  it("binds repair success and authoritative error detail to both versions", async () => {
+    mockedLauncherFetch
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            ...repairDetail,
+            repair_revision: 0,
+            repair_session: undefined,
+          },
+          202,
+        ),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            error: "repair changed; reload before retrying",
+            detail: repairDetail,
+          },
+          409,
+        ),
+      )
+
+    await expect(
+      startPRDevelopmentRepair(caseID, {
+        expectedConversationVersion: 2,
+        expectedRepairRevision: 0,
+        expectedAttemptOrdinal: 0,
+        requestID: repairRequestID,
+        instruction: repairInstruction,
+      }),
+    ).rejects.toMatchObject({ status: 502 })
+    await expect(
+      startPRDevelopmentRepair(caseID, {
+        expectedConversationVersion: 2,
+        expectedRepairRevision: 0,
+        expectedAttemptOrdinal: 0,
+        requestID: repairRequestID,
+        instruction: repairInstruction,
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: "repair changed; reload before retrying",
+      detail: repairDetail,
+    })
+  })
+
   it("matches Go whitespace canonicalization without stripping a BOM", () => {
     expect(
       normalizePRDevelopmentChatContent("\u0085  explain this \u0085"),
@@ -188,6 +694,60 @@ describe("PR development API", () => {
     ] as const) {
       await expect(
         chatAboutPRDevelopmentCase(id, version, content),
+      ).rejects.toMatchObject({ status: 400 })
+    }
+    expect(mockedLauncherFetch).not.toHaveBeenCalled()
+  })
+
+  it("rejects invalid local repair input before making a request", async () => {
+    for (const input of [
+      {
+        expectedConversationVersion: -1,
+        expectedRepairRevision: 0,
+        expectedAttemptOrdinal: 0,
+        requestID: repairRequestID,
+        instruction: repairInstruction,
+      },
+      {
+        expectedConversationVersion: 2,
+        expectedRepairRevision: 1025,
+        expectedAttemptOrdinal: 0,
+        requestID: repairRequestID,
+        instruction: repairInstruction,
+      },
+      {
+        expectedConversationVersion: 2,
+        expectedRepairRevision: 0,
+        expectedAttemptOrdinal: 65,
+        requestID: repairRequestID,
+        instruction: repairInstruction,
+      },
+      {
+        expectedConversationVersion: 2,
+        expectedRepairRevision: 0,
+        expectedAttemptOrdinal: 0,
+        requestID: "prq_not-random",
+        instruction: repairInstruction,
+      },
+      {
+        expectedConversationVersion: 2,
+        expectedRepairRevision: 0,
+        expectedAttemptOrdinal: 0,
+        requestID: repairRequestID,
+        instruction: "   ",
+      },
+      {
+        expectedConversationVersion: 2,
+        expectedRepairRevision: 0,
+        expectedAttemptOrdinal: 0,
+        requestID: repairRequestID,
+        instruction: "x".repeat(
+          MAXIMUM_PR_DEVELOPMENT_REPAIR_INSTRUCTION_BYTES + 1,
+        ),
+      },
+    ]) {
+      await expect(
+        startPRDevelopmentRepair(caseID, input),
       ).rejects.toMatchObject({ status: 400 })
     }
     expect(mockedLauncherFetch).not.toHaveBeenCalled()
@@ -393,6 +953,9 @@ describe("PR development API", () => {
           created_at: "2026-08-05T12:04:00Z",
         },
       ],
+      repair_available: false,
+      repair_unavailable_reason: "runtime_unavailable",
+      repair_revision: 0,
     } as const
     mockedLauncherFetch.mockResolvedValueOnce(
       jsonResponse(

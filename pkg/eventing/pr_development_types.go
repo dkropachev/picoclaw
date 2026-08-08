@@ -7,8 +7,11 @@ import (
 )
 
 const (
-	prDevelopmentCaseIDPrefix    = "pdc_"
-	prDevelopmentMessageIDPrefix = "pdm_"
+	prDevelopmentCaseIDPrefix            = "pdc_"
+	prDevelopmentMessageIDPrefix         = "pdm_"
+	prDevelopmentRepairSessionIDPrefix   = "pds_"
+	prDevelopmentRepairAttemptIDPrefix   = "pdr_"
+	prDevelopmentRepairReservationPrefix = "pdrk_"
 
 	// MaxPRDevelopmentMessageBytes bounds one durable conversation message by
 	// UTF-8 bytes after trimming.
@@ -19,6 +22,30 @@ const (
 	// MaxPRDevelopmentTranscriptBytes bounds the sum of durable message content
 	// for one development case.
 	MaxPRDevelopmentTranscriptBytes = 4 << 20
+
+	// MaxPRDevelopmentRepairAttempts keeps one durable local-development
+	// session finite. A completed or failed attempt remains immutable evidence
+	// when a user explicitly admits another attempt.
+	MaxPRDevelopmentRepairAttempts = 64
+	// MaxPRDevelopmentRepairVersion bounds browser-visible lifecycle transitions.
+	// Admission and claim reserve enough remaining revisions to reach a terminal
+	// outcome; safe preparing-lease reclaims rotate only private lease state.
+	MaxPRDevelopmentRepairVersion = 1024
+	// MaxPRDevelopmentRepairInstructionBytes bounds one durable, browser-visible
+	// local repair instruction independently of the generic runner's larger input.
+	MaxPRDevelopmentRepairInstructionBytes = 4 << 10
+	// MaxPRDevelopmentRepairSummaryBytes bounds one durable, browser-visible
+	// local repair outcome independently of the generic runner's larger answer.
+	MaxPRDevelopmentRepairSummaryBytes = 4 << 10
+	// MaxPRDevelopmentRepairIterations matches the largest supported isolated
+	// local repair loop configuration.
+	MaxPRDevelopmentRepairIterations = 128
+	// MaxPRDevelopmentRepairAgentIDBytes is the canonical runtime agent-ID
+	// boundary. IDs must additionally match [a-z0-9][a-z0-9_-]*.
+	MaxPRDevelopmentRepairAgentIDBytes = 64
+	// MaxPRDevelopmentRepairIdempotencyBytes bounds a caller-controlled private
+	// admission marker.
+	MaxPRDevelopmentRepairIdempotencyBytes = 256
 )
 
 var (
@@ -35,6 +62,26 @@ var (
 	// accept another otherwise-valid message within its durable bounds.
 	ErrPRDevelopmentConversationCapacity = errors.New(
 		"pull request development conversation capacity exceeded",
+	)
+	// ErrInvalidPRDevelopmentRepair reports malformed repair admission or
+	// lifecycle input.
+	ErrInvalidPRDevelopmentRepair = errors.New(
+		"invalid pull request development repair",
+	)
+	// ErrPRDevelopmentRepairConflict reports a stale repair version, a changed
+	// idempotency binding, or an immutable pin conflict.
+	ErrPRDevelopmentRepairConflict = errors.New(
+		"pull request development repair conflict",
+	)
+	// ErrPRDevelopmentRepairActive reports that the singleton session already
+	// has queued or leased work.
+	ErrPRDevelopmentRepairActive = errors.New(
+		"pull request development repair is already active",
+	)
+	// ErrPRDevelopmentRepairCapacity reports that the singleton session has
+	// reached its append-only attempt limit.
+	ErrPRDevelopmentRepairCapacity = errors.New(
+		"pull request development repair attempt capacity exceeded",
 	)
 )
 
@@ -173,6 +220,146 @@ type PRDevelopmentMessageAppend struct {
 	Content         string
 }
 
+// PRDevelopmentRepairStatus is the durable lifecycle of one local repair
+// attempt. A running lease that expires is terminalized as recovery_required;
+// it is never executed again automatically because local edits may exist.
+type PRDevelopmentRepairStatus string
+
+const (
+	PRDevelopmentRepairQueued           PRDevelopmentRepairStatus = "queued"
+	PRDevelopmentRepairPreparing        PRDevelopmentRepairStatus = "preparing"
+	PRDevelopmentRepairRunning          PRDevelopmentRepairStatus = "running"
+	PRDevelopmentRepairCompleted        PRDevelopmentRepairStatus = "completed"
+	PRDevelopmentRepairFailed           PRDevelopmentRepairStatus = "failed"
+	PRDevelopmentRepairRecoveryRequired PRDevelopmentRepairStatus = "recovery_required"
+)
+
+// PRDevelopmentRepairErrorCode is a bounded browser-safe outcome category.
+// Detailed provider, model, checkout, and filesystem errors remain private.
+type PRDevelopmentRepairErrorCode string
+
+const (
+	PRDevelopmentRepairErrorProviderChanged      PRDevelopmentRepairErrorCode = "provider_changed"
+	PRDevelopmentRepairErrorNotActionable        PRDevelopmentRepairErrorCode = "not_actionable"
+	PRDevelopmentRepairErrorRuntimeUnavailable   PRDevelopmentRepairErrorCode = "runtime_unavailable"
+	PRDevelopmentRepairErrorWorkspaceUnavailable PRDevelopmentRepairErrorCode = "workspace_unavailable"
+	PRDevelopmentRepairErrorRepairFailed         PRDevelopmentRepairErrorCode = "repair_failed"
+	PRDevelopmentRepairErrorRecoveryRequired     PRDevelopmentRepairErrorCode = "recovery_required"
+	PRDevelopmentRepairErrorInternal             PRDevelopmentRepairErrorCode = "internal_error"
+)
+
+// PRDevelopmentRepairAttempt is one append-only user-authorized repair
+// attempt. Lease and idempotency credentials are intentionally omitted from
+// JSON so a trusted worker can share the same type without exposing authority
+// through browser projections.
+type PRDevelopmentRepairAttempt struct {
+	ID                    string                       `json:"id"`
+	SessionID             string                       `json:"session_id"`
+	Ordinal               int                          `json:"ordinal"`
+	ExpectedRepairVersion int64                        `json:"expected_repair_version"`
+	ConversationVersion   int64                        `json:"conversation_version"`
+	IdempotencyKey        string                       `json:"-"`
+	Instruction           string                       `json:"instruction"`
+	Status                PRDevelopmentRepairStatus    `json:"status"`
+	LeaseOwner            string                       `json:"-"`
+	LeaseToken            string                       `json:"-"`
+	LeaseUntil            *time.Time                   `json:"-"`
+	Claims                int                          `json:"claims"`
+	Summary               string                       `json:"summary,omitempty"`
+	ErrorCode             PRDevelopmentRepairErrorCode `json:"error_code,omitempty"`
+	InternalError         string                       `json:"-"`
+	Iterations            int                          `json:"iterations"`
+	CreatedAt             time.Time                    `json:"created_at"`
+	UpdatedAt             time.Time                    `json:"updated_at"`
+}
+
+// PRDevelopmentRepairSession is the singleton local checkout reservation for
+// one immutable development case. The verified provider pin is all-or-none
+// and immutable after first persistence. CloneURL, ReviewDigest, and
+// ReservationKey remain controller-private.
+type PRDevelopmentRepairSession struct {
+	ID             string                       `json:"id"`
+	CaseID         string                       `json:"case_id"`
+	Version        int64                        `json:"version"`
+	AgentID        string                       `json:"agent_id"`
+	HeadRepository string                       `json:"head_repository,omitempty"`
+	HeadRef        string                       `json:"head_ref,omitempty"`
+	HeadSHA        string                       `json:"head_sha,omitempty"`
+	CloneURL       string                       `json:"-"`
+	ReviewDigest   string                       `json:"-"`
+	ReservationKey string                       `json:"-"`
+	WorkspaceID    string                       `json:"workspace_id,omitempty"`
+	Attempts       []PRDevelopmentRepairAttempt `json:"attempts"`
+	CreatedAt      time.Time                    `json:"created_at"`
+	UpdatedAt      time.Time                    `json:"updated_at"`
+}
+
+// PRDevelopmentWorkbench is one atomic read snapshot of the immutable case,
+// bounded conversation, and optional singleton repair session.
+type PRDevelopmentWorkbench struct {
+	Case          PRDevelopmentCase           `json:"case"`
+	Conversation  PRDevelopmentConversation   `json:"conversation"`
+	RepairSession *PRDevelopmentRepairSession `json:"repair_session,omitempty"`
+}
+
+// PRDevelopmentRepairAdmit atomically fences both mutable workbench versions
+// before creating one queued attempt. ExpectedRepairVersion is zero before a
+// session exists.
+type PRDevelopmentRepairAdmit struct {
+	CaseID                      string
+	ExpectedConversationVersion int64
+	ExpectedRepairVersion       int64
+	IdempotencyKey              string
+	AgentID                     string
+	Instruction                 string
+}
+
+// PRDevelopmentRepairClaimRequest leases at most one oldest queued or safely
+// reclaimable preparing attempt.
+type PRDevelopmentRepairClaimRequest struct {
+	WorkerLabel string
+	Lease       time.Duration
+}
+
+// PRDevelopmentRepairPin stores the exact provider-observed source and review
+// evidence under a live preparing lease. Repeating the same pin is idempotent;
+// changing any field is a conflict.
+type PRDevelopmentRepairPin struct {
+	AttemptID      string
+	LeaseToken     string
+	HeadRepository string
+	HeadRef        string
+	HeadSHA        string
+	CloneURL       string
+	ReviewDigest   string
+}
+
+// PRDevelopmentRepairBegin advances a live preparing attempt to running and
+// atomically refreshes its lease for the execution window. The isolated runner
+// reveals its opaque workspace ID only after acquisition, so that optional ID
+// is persisted with the terminal outcome instead.
+type PRDevelopmentRepairBegin struct {
+	AttemptID  string
+	LeaseToken string
+	Lease      time.Duration
+}
+
+// PRDevelopmentRepairOutcome records one terminal result under a live lease.
+// Failed is the safe pre-execution outcome from preparing. Completed and
+// recovery_required are post-execution outcomes valid only from running.
+// Completed requires a stable opaque workspace ID; recovery_required keeps it
+// optional because workspace acquisition itself can become ambiguous.
+type PRDevelopmentRepairOutcome struct {
+	AttemptID     string
+	LeaseToken    string
+	Status        PRDevelopmentRepairStatus
+	Summary       string
+	ErrorCode     PRDevelopmentRepairErrorCode
+	InternalError string
+	Iterations    int
+	WorkspaceID   string
+}
+
 // PRDevelopmentCaseStore owns immutable development-case capture and exact
 // lookup. Conversation, checkout, execution, publication, and provider actions
 // are intentionally separate capabilities.
@@ -211,4 +398,47 @@ type PRDevelopmentConversationStore interface {
 		ctx context.Context,
 		input PRDevelopmentMessageAppend,
 	) (PRDevelopmentConversation, error)
+}
+
+// PRDevelopmentWorkbenchReader provides one cross-table SQLite snapshot for
+// browser/controller reads without granting mutation authority.
+type PRDevelopmentWorkbenchReader interface {
+	GetPRDevelopmentWorkbench(
+		ctx context.Context,
+		caseID string,
+	) (PRDevelopmentWorkbench, error)
+}
+
+// PRDevelopmentRepairAdmitter owns only user-authorized, version-fenced
+// attempt admission.
+type PRDevelopmentRepairAdmitter interface {
+	AdmitPRDevelopmentRepair(
+		ctx context.Context,
+		input PRDevelopmentRepairAdmit,
+	) (PRDevelopmentWorkbench, bool, error)
+}
+
+// PRDevelopmentRepairQueue owns the private leased worker lifecycle.
+type PRDevelopmentRepairQueue interface {
+	ClaimPRDevelopmentRepair(
+		ctx context.Context,
+		input PRDevelopmentRepairClaimRequest,
+	) (PRDevelopmentRepairSession, bool, error)
+	RenewPRDevelopmentRepairLease(
+		ctx context.Context,
+		attemptID, leaseToken string,
+		lease time.Duration,
+	) error
+	PinPRDevelopmentRepairSession(
+		ctx context.Context,
+		input PRDevelopmentRepairPin,
+	) (PRDevelopmentRepairSession, error)
+	BeginPRDevelopmentRepair(
+		ctx context.Context,
+		input PRDevelopmentRepairBegin,
+	) (PRDevelopmentRepairSession, error)
+	FinishPRDevelopmentRepair(
+		ctx context.Context,
+		input PRDevelopmentRepairOutcome,
+	) (PRDevelopmentRepairSession, error)
 }

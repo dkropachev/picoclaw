@@ -12,6 +12,7 @@ import type {
   MCPServer,
   MCPServerInput,
 } from "../src/api/mcp"
+import type { PRDevelopmentCaseDetail } from "../src/api/pr-development"
 
 const smokeRoutes = [
   "/",
@@ -1072,7 +1073,9 @@ const prDevelopmentDetail = {
     content: string
     created_at: string
   }>,
-}
+  repair_available: true,
+  repair_revision: 0,
+} satisfies PRDevelopmentCaseDetail
 const waitingReviewAttentionProjectionText = `{"case_version":7,"status":"waiting","can_respond":true,"turns":[{"status":"waiting","title":"Choose a safe contract","questions":{"priority":9007199254740993},"response_token":"${reviewAttentionResponseToken}"}]}`
 
 interface MockLauncherApiOptions {
@@ -1105,6 +1108,12 @@ interface MockLauncherApiOptions {
     path: string
     body: unknown
   }>
+  prDevelopmentRepairRequests?: Array<{
+    method: string
+    path: string
+    body: unknown
+  }>
+  prDevelopmentRepairCompletionGate?: Promise<void>
   statefulAgents?: boolean
   statefulMCP?: boolean
   gatewayRunning?: boolean
@@ -1169,7 +1178,9 @@ async function mockLauncherApis(
     reviewAttentionPoliciesResponseText
   let currentReviewAttentionProjectionText =
     waitingReviewAttentionProjectionText
-  let currentPRDevelopmentDetail = structuredClone(prDevelopmentDetail)
+  let currentPRDevelopmentDetail: PRDevelopmentCaseDetail =
+    structuredClone(prDevelopmentDetail)
+  let completingPRDevelopmentRepair = false
   let currentAgents: AgentInfo[] = [
     {
       id: "main",
@@ -1712,6 +1723,52 @@ async function mockLauncherApis(
 
       if (method === "POST") {
         switch (path) {
+          case `/api/pr-development/${prDevelopmentCaseID}/repair`: {
+            const body = request.postDataJSON() as {
+              expected_conversation_version: number
+              expected_repair_revision: number
+              request_id: string
+              instruction: string
+            }
+            expect(Object.keys(body).sort()).toEqual([
+              "expected_conversation_version",
+              "expected_repair_revision",
+              "instruction",
+              "request_id",
+            ])
+            expect(body.expected_conversation_version).toBe(
+              currentPRDevelopmentDetail.conversation_version,
+            )
+            expect(body.expected_repair_revision).toBe(
+              currentPRDevelopmentDetail.repair_revision,
+            )
+            expect(body.request_id).toMatch(/^prq_[0-9a-f]{32}$/)
+            options.prDevelopmentRepairRequests?.push({ method, path, body })
+
+            const repairRevision =
+              currentPRDevelopmentDetail.repair_revision + 1
+            currentPRDevelopmentDetail = {
+              ...currentPRDevelopmentDetail,
+              repair_revision: repairRevision,
+              repair_session: {
+                id: `pds_${"a".repeat(32)}`,
+                revision: repairRevision,
+                agent_id: "main",
+                attempts: [
+                  {
+                    id: `pdr_${"b".repeat(32)}`,
+                    ordinal: 0,
+                    status: "queued",
+                    conversation_version: body.expected_conversation_version,
+                    instruction: body.instruction,
+                    created_at: "2026-08-05T12:03:00Z",
+                    updated_at: "2026-08-05T12:03:00Z",
+                  },
+                ],
+              },
+            }
+            return json(route, currentPRDevelopmentDetail, 202)
+          }
           case `/api/pr-development/${prDevelopmentCaseID}/chat`: {
             const body = request.postDataJSON() as {
               expected_version: number
@@ -2597,8 +2654,40 @@ async function mockLauncherApis(
           return json(route, { cases: [reviewAttentionCase] })
         case "/api/pr-development":
           return json(route, { cases: [prDevelopmentSummary] })
-        case `/api/pr-development/${prDevelopmentCaseID}`:
+        case `/api/pr-development/${prDevelopmentCaseID}`: {
+          const repairSession = currentPRDevelopmentDetail.repair_session
+          const latestAttempt = repairSession?.attempts.at(-1)
+          if (
+            repairSession != null &&
+            latestAttempt?.status === "queued" &&
+            options.prDevelopmentRepairCompletionGate != null &&
+            !completingPRDevelopmentRepair
+          ) {
+            completingPRDevelopmentRepair = true
+            await options.prDevelopmentRepairCompletionGate
+            const repairRevision =
+              currentPRDevelopmentDetail.repair_revision + 1
+            currentPRDevelopmentDetail = {
+              ...currentPRDevelopmentDetail,
+              repair_revision: repairRevision,
+              repair_session: {
+                ...repairSession,
+                revision: repairRevision,
+                head_repository: "octocat/repo",
+                head_ref: "fix/provider-feedback",
+                head_sha: "1".repeat(40),
+                attempts: repairSession.attempts.map((attempt) => ({
+                  ...attempt,
+                  status: "completed",
+                  summary:
+                    '<img src=x onerror="private-summary-handler"> repair-summary-canary',
+                  updated_at: "2026-08-05T12:04:00Z",
+                })),
+              },
+            }
+          }
           return json(route, currentPRDevelopmentDetail)
+        }
         case `/api/reviews/${reviewAttentionCaseID}`:
           return json(route, reviewAttentionDetail)
         case `/api/reviews/${reviewAttentionCaseID}/attention`:
@@ -3257,6 +3346,87 @@ test("captured PR feedback and advisory AI chat are canonical, plain text, and c
       },
     ]),
   )
+  await expectNoHorizontalOverflow(page)
+  await expectNoSeriousA11yViolations(page)
+  expect(errors).toEqual([])
+})
+
+test("local PR repair is explicitly confirmed, exactly fenced, plain text, and contained", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "desktop",
+    "desktop PR repair smoke coverage",
+  )
+  const errors = collectPageErrors(page)
+  const repairRequests: NonNullable<
+    MockLauncherApiOptions["prDevelopmentRepairRequests"]
+  > = []
+  let releaseRepairCompletion!: () => void
+  const repairCompletionGate = new Promise<void>((resolve) => {
+    releaseRepairCompletion = resolve
+  })
+  const repairInstruction =
+    "Apply <script>repair-instruction-canary</script> in the local checkout."
+  const repairSummary =
+    '<img src=x onerror="private-summary-handler"> repair-summary-canary'
+
+  await gotoMockedRoute(
+    page,
+    `/reviews?view=development&case=${prDevelopmentCaseID}`,
+    {
+      prDevelopmentRepairRequests: repairRequests,
+      prDevelopmentRepairCompletionGate: repairCompletionGate,
+    },
+  )
+
+  await page
+    .getByLabel("Local repair instruction")
+    .fill(`  ${repairInstruction}  `)
+  await page.getByRole("button", { name: "Start local repair" }).click()
+
+  const confirmation = page.getByRole("alertdialog")
+  await expect(confirmation).toBeVisible()
+  await expect(confirmation).toContainText("pinned local copy")
+  await expect(confirmation).toContainText(
+    "local, unreviewed, untested, uncommitted, and unpushed",
+  )
+  await expect(confirmation).toContainText("Nothing will be changed on GitHub.")
+  await confirmation.getByRole("button", { name: "Start local repair" }).click()
+
+  await expect(
+    page.getByRole("status").filter({ hasText: "Queued" }),
+  ).toBeVisible()
+  const attemptCard = page
+    .locator("li")
+    .filter({ hasText: "Attempt 1" })
+    .filter({ hasText: repairInstruction })
+  await expect(attemptCard).toBeVisible()
+  await expect(attemptCard.locator("script")).toHaveCount(0)
+  expect(repairRequests).toEqual([
+    {
+      method: "POST",
+      path: `/api/pr-development/${prDevelopmentCaseID}/repair`,
+      body: {
+        expected_conversation_version: 0,
+        expected_repair_revision: 0,
+        request_id: expect.stringMatching(/^prq_[0-9a-f]{32}$/),
+        instruction: repairInstruction,
+      },
+    },
+  ])
+
+  releaseRepairCompletion()
+  await expect(page.getByText(repairSummary, { exact: true })).toBeVisible({
+    timeout: 5_000,
+  })
+  await expect(
+    page.getByRole("status").filter({
+      hasText: "Local edits are ready for review",
+    }),
+  ).toBeVisible()
+  await expect(attemptCard.locator("img")).toHaveCount(0)
+  await expect(page.getByText("Pinned head")).toBeVisible()
   await expectNoHorizontalOverflow(page)
   await expectNoSeriousA11yViolations(page)
   expect(errors).toEqual([])

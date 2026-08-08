@@ -20,6 +20,7 @@ const (
 	prDevelopmentAPIPath     = "/api/pr-development"
 	prDevelopmentRuntimePath = "/runtime/eventing/pr-development"
 	prDevelopmentChatBytes   = 32 << 10
+	prDevelopmentRepairBytes = prdevelopment.MaximumRepairInstructionBytes
 	prDevelopmentChatDepth   = 16
 )
 
@@ -179,9 +180,80 @@ func (h *Handler) handlePRDevelopmentDetail(w http.ResponseWriter, r *http.Reque
 			reviewGatewayAIRequestTimeout,
 			validatePRDevelopmentChatMutation,
 		)
+	case len(segments) == 2 && segments[1] == "repair":
+		h.handleReviewMutationValidated(
+			w,
+			r,
+			http.MethodPost,
+			prDevelopmentRuntimePath+"/"+caseID+"/repair",
+			reviewGatewayRequestTimeout,
+			validatePRDevelopmentRepairMutation,
+		)
 	default:
 		writeReviewAPIError(w, http.StatusNotFound, "not found")
 	}
+}
+
+func validatePRDevelopmentRepairMutation(r *http.Request, raw []byte) error {
+	if r == nil || r.ContentLength < 0 || len(r.TransferEncoding) != 0 ||
+		len(raw) == 0 || !utf8.Valid(raw) || !validJSONUnicodeScalars(raw) ||
+		rejectDuplicateJSONKeys(raw, prDevelopmentChatDepth, nil) != nil ||
+		validateExactPRDevelopmentRepairFields(raw) != nil {
+		return errors.New("invalid development repair request")
+	}
+	var body struct {
+		ExpectedConversationVersion *int64  `json:"expected_conversation_version"`
+		ExpectedRepairRevision      *int64  `json:"expected_repair_revision"`
+		RequestID                   *string `json:"request_id"`
+		Instruction                 *string `json:"instruction"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		return err
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("development repair contains trailing JSON")
+		}
+		return err
+	}
+	if body.ExpectedConversationVersion == nil ||
+		*body.ExpectedConversationVersion < 0 ||
+		*body.ExpectedConversationVersion > int64(prdevelopment.MaximumConversationVersion) ||
+		body.ExpectedRepairRevision == nil ||
+		*body.ExpectedRepairRevision < 0 ||
+		*body.ExpectedRepairRevision > int64(prdevelopment.MaximumRepairRevision) ||
+		body.RequestID == nil || !validOperatorPrefixedID(*body.RequestID, "prq_") ||
+		body.Instruction == nil {
+		return errors.New("development repair fields are invalid")
+	}
+	instruction := strings.TrimSpace(*body.Instruction)
+	if instruction == "" || !utf8.ValidString(instruction) ||
+		strings.ContainsRune(instruction, '\x00') ||
+		len(instruction) > prDevelopmentRepairBytes {
+		return errors.New("development repair instruction is invalid")
+	}
+	return nil
+}
+
+func validateExactPRDevelopmentRepairFields(raw []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || len(fields) != 4 {
+		return errors.New("development repair fields are invalid")
+	}
+	for _, name := range []string{
+		"expected_conversation_version",
+		"expected_repair_revision",
+		"request_id",
+		"instruction",
+	} {
+		if _, ok := fields[name]; !ok {
+			return errors.New("development repair fields are invalid")
+		}
+	}
+	return nil
 }
 
 func validatePRDevelopmentChatMutation(r *http.Request, raw []byte) error {

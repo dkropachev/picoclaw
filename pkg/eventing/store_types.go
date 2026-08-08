@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const schemaVersion = 7
+const schemaVersion = 8
 
 const (
 	maxWorkflowRefLength      = 1024
