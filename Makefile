@@ -414,6 +414,7 @@ feature-inventory:
 ## test-featuretools: Run focused tests for feature governance helpers
 test-featuretools:
 	@$(GO) test -tags featuretools ./scripts/featuretools_lib.go ./scripts/feature_delta_guard.go ./scripts/featuretools_lib_test.go
+	@$(GO) test -tags featuretools ./scripts/coverage_delta.go ./scripts/featuretools_lib.go ./scripts/coverage_delta_test.go
 
 ## lint-features: Check feature requirements and surface ownership
 lint-features:

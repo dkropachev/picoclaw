@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -36,6 +37,11 @@ type coverageBlock struct {
 	EndLine    int
 	Statements int
 	Covered    bool
+}
+
+type goCachePaths struct {
+	Build   string `json:"GOCACHE"`
+	Modules string `json:"GOMODCACHE"`
 }
 
 type coveragePlan struct {
@@ -386,11 +392,21 @@ func coverageForRef(
 		_ = gitRun(root, "worktree", "remove", "--force", worktree)
 	}()
 
-	if err := runGoGenerate(worktree, label, ref); err != nil {
+	coverageHome := filepath.Join(tmpDir, label+"-picoclaw-home")
+	if err := os.MkdirAll(coverageHome, 0o700); err != nil {
+		return coverageProfile{}, fmt.Errorf("create %s coverage home: %w", label, err)
+	}
+	goCaches, err := resolveGoCachePaths(root, os.Environ())
+	if err != nil {
+		return coverageProfile{}, err
+	}
+	environment := coverageEnvironment(os.Environ(), coverageHome, goCaches)
+
+	if err := runGoGenerate(worktree, label, ref, environment); err != nil {
 		return coverageProfile{}, err
 	}
 
-	packages, err := listGoPackages(worktree, tags)
+	packages, err := listGoPackages(worktree, tags, environment)
 	if err != nil {
 		return coverageProfile{}, err
 	}
@@ -404,7 +420,16 @@ func coverageForRef(
 	}
 
 	profilePath := filepath.Join(tmpDir, label+".cover.out")
-	profile, err := runGoCoverage(worktree, label, ref, tags, profilePath, coverImports, testImports)
+	profile, err := runGoCoverage(
+		worktree,
+		label,
+		ref,
+		tags,
+		profilePath,
+		coverImports,
+		testImports,
+		environment,
+	)
 	if err != nil {
 		return coverageProfile{}, err
 	}
@@ -417,6 +442,7 @@ func coverageForRef(
 			tags,
 			coverImports,
 			plan.IntegrationSuites,
+			environment,
 		)
 		if err != nil {
 			return coverageProfile{}, err
@@ -430,6 +456,7 @@ func coverageForRef(
 func runGoCoverage(
 	worktree, label, ref, tags, profilePath string,
 	coverImports, testImports []string,
+	environment []string,
 ) (coverageProfile, error) {
 	args := []string{"test", "-buildvcs=false"}
 	if tags != "" {
@@ -442,7 +469,7 @@ func runGoCoverage(
 	args = append(args, testImports...)
 	cmd := exec.Command("go", args...)
 	cmd.Dir = worktree
-	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=auto")
+	cmd.Env = append([]string(nil), environment...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return coverageProfile{}, fmt.Errorf("go coverage for %s (%s): %w\n%s", label, ref, err, trimCommandOutput(out))
@@ -459,7 +486,10 @@ func runGoCoverage(
 	return profile, nil
 }
 
-func runIntegrationCoverage(worktree, label, ref, tags string, coverImports, suites []string) (coverageProfile, error) {
+func runIntegrationCoverage(
+	worktree, label, ref, tags string,
+	coverImports, suites, environment []string,
+) (coverageProfile, error) {
 	coverDir := filepath.Join(worktree, ".coverage", "integration-"+label)
 	if err := os.MkdirAll(coverDir, 0o755); err != nil {
 		return coverageProfile{}, fmt.Errorf("create integration coverage dir: %w", err)
@@ -468,8 +498,7 @@ func runIntegrationCoverage(worktree, label, ref, tags string, coverImports, sui
 	args := append([]string{filepath.Join(worktree, "scripts", "run-integration-tests.sh")}, suites...)
 	cmd := exec.Command("bash", args...)
 	cmd.Dir = worktree
-	cmd.Env = append(os.Environ(),
-		"GOTOOLCHAIN=auto",
+	cmd.Env = append(append([]string(nil), environment...),
 		"INTEGRATION_COVERPKG="+strings.Join(coverImports, ","),
 		"INTEGRATION_COVERPROFILE_DIR=/workspace/.coverage/integration-"+label,
 	)
@@ -512,7 +541,7 @@ func runIntegrationCoverage(worktree, label, ref, tags string, coverImports, sui
 	return profile, nil
 }
 
-func listGoPackages(root, tags string) (map[string]listedPackage, error) {
+func listGoPackages(root, tags string, environment []string) (map[string]listedPackage, error) {
 	args := []string{"list", "-json", "-buildvcs=false"}
 	if tags != "" {
 		args = append(args, "-tags", tags)
@@ -520,7 +549,7 @@ func listGoPackages(root, tags string) (map[string]listedPackage, error) {
 	args = append(args, "./...")
 	cmd := exec.Command("go", args...)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=auto")
+	cmd.Env = append([]string(nil), environment...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -571,15 +600,63 @@ func importPathsForDirs(packages map[string]listedPackage, dirs []string) []stri
 	return imports
 }
 
-func runGoGenerate(worktree, label, ref string) error {
+func runGoGenerate(worktree, label, ref string, environment []string) error {
 	cmd := exec.Command("go", "generate", "./...")
 	cmd.Dir = worktree
-	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=auto")
+	cmd.Env = append([]string(nil), environment...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("go generate for %s (%s): %w\n%s", label, ref, err, trimCommandOutput(out))
 	}
 	return nil
+}
+
+func resolveGoCachePaths(root string, environment []string) (goCachePaths, error) {
+	cmd := exec.Command("go", "env", "-json", "GOCACHE", "GOMODCACHE")
+	cmd.Dir = root
+	cmd.Env = make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok && strings.EqualFold(name, "GOTOOLCHAIN") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
+	cmd.Env = append(cmd.Env, "GOTOOLCHAIN=auto")
+	output, err := cmd.Output()
+	if err != nil {
+		return goCachePaths{}, fmt.Errorf("resolve Go cache paths: %w", err)
+	}
+	var paths goCachePaths
+	if err := json.Unmarshal(output, &paths); err != nil {
+		return goCachePaths{}, fmt.Errorf("decode Go cache paths: %w", err)
+	}
+	if strings.TrimSpace(paths.Build) == "" || strings.TrimSpace(paths.Modules) == "" {
+		return goCachePaths{}, errors.New("go cache paths are incomplete")
+	}
+	return paths, nil
+}
+
+func coverageEnvironment(base []string, home string, caches goCachePaths) []string {
+	environment := make([]string, 0, len(base)+5)
+	for _, entry := range base {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok && (strings.EqualFold(name, "HOME") ||
+			strings.EqualFold(name, "PICOCLAW_HOME") ||
+			strings.EqualFold(name, "GOCACHE") ||
+			strings.EqualFold(name, "GOMODCACHE") ||
+			strings.EqualFold(name, "GOTOOLCHAIN")) {
+			continue
+		}
+		environment = append(environment, entry)
+	}
+	return append(environment,
+		"HOME="+home,
+		"PICOCLAW_HOME=",
+		"GOCACHE="+caches.Build,
+		"GOMODCACHE="+caches.Modules,
+		"GOTOOLCHAIN=auto",
+	)
 }
 
 func resolveGitRef(root, ref string) (string, error) {
