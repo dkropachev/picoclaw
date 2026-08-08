@@ -312,11 +312,33 @@ func (r *ToolRegistry) ExecuteWithContext(
 	channel, chatID string,
 	asyncCallback AsyncCallback,
 ) *ToolResult {
-	logger.InfoCF("tool", "Tool execution started",
-		map[string]any{
-			"tool": name,
-			"args": args,
-		})
+	return r.executeWithContext(
+		ctx,
+		name,
+		args,
+		channel,
+		chatID,
+		asyncCallback,
+		false,
+	)
+}
+
+// executeWithContext keeps ordinary registry logging unchanged while allowing
+// narrow controller loops to suppress all model-authored or result-derived
+// values. The tool name and timing remain observable in that profile.
+func (r *ToolRegistry) executeWithContext(
+	ctx context.Context,
+	name string,
+	args map[string]any,
+	channel, chatID string,
+	asyncCallback AsyncCallback,
+	suppressLogDetails bool,
+) *ToolResult {
+	startFields := map[string]any{"tool": name}
+	if !suppressLogDetails {
+		startFields["args"] = args
+	}
+	logger.InfoCF("tool", "Tool execution started", startFields)
 
 	tool, ok := r.Get(name)
 	if !ok {
@@ -331,8 +353,11 @@ func (r *ToolRegistry) ExecuteWithContext(
 
 	// Validate arguments against the tool's declared schema.
 	if err := validateToolArgs(tool.Parameters(), args); err != nil {
-		logger.WarnCF("tool", "Tool argument validation failed",
-			map[string]any{"tool": name, "error": err.Error()})
+		fields := map[string]any{"tool": name}
+		if !suppressLogDetails {
+			fields["error"] = err.Error()
+		}
+		logger.WarnCF("tool", "Tool argument validation failed", fields)
 		return ErrorResult(fmt.Sprintf("invalid arguments for tool %q: %s", name, err)).
 			WithError(fmt.Errorf("argument validation failed: %w", err))
 	}
@@ -340,6 +365,9 @@ func (r *ToolRegistry) ExecuteWithContext(
 	// Inject channel/chatID into ctx so tools read them via ToolChannel(ctx)/ToolChatID(ctx).
 	// Always inject — tools validate what they require.
 	ctx = WithToolContext(ctx, channel, chatID)
+	if suppressLogDetails {
+		ctx = WithToolLogDetailsSuppressed(ctx)
+	}
 
 	// If tool implements AsyncExecutor and callback is provided, use ExecuteAsync.
 	// The callback is a call parameter, not mutable state on the tool instance.
@@ -351,13 +379,14 @@ func (r *ToolRegistry) ExecuteWithContext(
 	func() {
 		defer func() {
 			if re := recover(); re != nil {
-				logger.RecoverPanicNoExit(re)
-				errMsg := fmt.Sprintf("Tool '%s' crashed with panic: %v", name, re)
-				logger.ErrorCF("tool", "Tool execution panic recovered",
-					map[string]any{
-						"tool":  name,
-						"panic": fmt.Sprintf("%v", re),
-					})
+				errMsg := fmt.Sprintf("Tool '%s' crashed", name)
+				fields := map[string]any{"tool": name}
+				if !suppressLogDetails {
+					logger.RecoverPanicNoExit(re)
+					errMsg = fmt.Sprintf("Tool '%s' crashed with panic: %v", name, re)
+					fields["panic"] = fmt.Sprintf("%v", re)
+				}
+				logger.ErrorCF("tool", "Tool execution panic recovered", fields)
 				result = &ToolResult{
 					ForLLM:  errMsg,
 					ForUser: errMsg,
@@ -394,12 +423,14 @@ func (r *ToolRegistry) ExecuteWithContext(
 
 	// Log based on result type
 	if result.IsError {
-		logger.ErrorCF("tool", "Tool execution failed",
-			map[string]any{
-				"tool":     name,
-				"duration": duration.Milliseconds(),
-				"error":    result.ForLLM,
-			})
+		fields := map[string]any{
+			"tool":     name,
+			"duration": duration.Milliseconds(),
+		}
+		if !suppressLogDetails {
+			fields["error"] = result.ForLLM
+		}
+		logger.ErrorCF("tool", "Tool execution failed", fields)
 	} else if result.Async {
 		logger.InfoCF("tool", "Tool started (async)",
 			map[string]any{

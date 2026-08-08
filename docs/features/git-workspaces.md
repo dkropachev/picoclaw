@@ -158,7 +158,12 @@ management owns shared config editing patterns, while this feature owns the git
 workspace fields and dashboard behavior. Trusted development controllers may
 call `AcquirePinned` and `ReleasePinned` directly, but neither tool registration
 nor the launcher API/frontend may translate an agent or browser request into
-those operations.
+those operations. The controller-only local repair runner receives an
+`AcquirePinned`-only interface and an exact request, never a raw path or
+`ReleasePinned`; it acquires a fresh exact pin or heartbeats the matching pin
+before model access, then reacquires it as postflight so this feature revalidates
+repository, ancestry, and Git control-plane state while the separate security
+contract confines ordinary content edits.
 
 ## Failure And Edge Cases
 
