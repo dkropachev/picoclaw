@@ -1,6 +1,8 @@
 package api
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -8,9 +10,118 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/eventing"
+	"github.com/sipeed/picoclaw/pkg/prdevelopment"
 )
 
 const testPRDevelopmentCaseID = "pdc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func TestPRDevelopmentMaximumEscapedDetailFitsLauncherResponseBound(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.August, 8, 12, 0, 0, 0, time.UTC)
+	messageContent := strings.Repeat(
+		"<",
+		eventing.MaxPRDevelopmentTranscriptBytes/eventing.MaxPRDevelopmentMessagesPerCase,
+	)
+	messages := make([]prdevelopment.Message, eventing.MaxPRDevelopmentMessagesPerCase)
+	for index := range messages {
+		messages[index] = prdevelopment.Message{
+			ID:        fmt.Sprintf("pdm_%032x", index+1),
+			Ordinal:   index,
+			Role:      eventing.PRDevelopmentMessageAssistant,
+			Content:   messageContent,
+			CreatedAt: now,
+		}
+	}
+	repairText := strings.Repeat("<", eventing.MaxPRDevelopmentRepairInstructionBytes)
+	attempts := make([]prdevelopment.RepairAttempt, eventing.MaxPRDevelopmentRepairAttempts)
+	for index := range attempts {
+		attempts[index] = prdevelopment.RepairAttempt{
+			ID:                  fmt.Sprintf("pdr_%032x", index+1),
+			Ordinal:             index,
+			Status:              eventing.PRDevelopmentRepairRecoveryRequired,
+			ConversationVersion: eventing.MaxPRDevelopmentMessagesPerCase,
+			Instruction:         repairText,
+			Summary:             repairText,
+			ErrorCode:           eventing.PRDevelopmentRepairErrorRecoveryRequired,
+			CreatedAt:           now,
+			UpdatedAt:           now,
+		}
+	}
+	repository := "a/" + strings.Repeat("a", prdevelopment.MaximumRepositoryBytes-2)
+	maximumURL := func(suffix string) string {
+		const maximumURLBytes = 4096
+		prefix := "https://example.com/"
+		return prefix + strings.Repeat(suffix, maximumURLBytes-len(prefix))
+	}
+	maximumRef := strings.Repeat("<", 1024)
+	maximumSHA := strings.Repeat("a", 64)
+	detail := prdevelopment.Detail{
+		Case: prdevelopment.CaseDetail{
+			CaseSummary: prdevelopment.CaseSummary{
+				ID:                   testPRDevelopmentCaseID,
+				Repository:           repository,
+				PullNumber:           prdevelopment.MaximumPullNumber,
+				PullURL:              maximumURL("a"),
+				PullAuthor:           strings.Repeat("a", 128),
+				PullState:            eventing.PRDevelopmentPullOpen,
+				HeadRepository:       repository,
+				HeadRef:              maximumRef,
+				HeadSHA:              maximumSHA,
+				ReviewAuthor:         strings.Repeat("a", 128),
+				SubmittedReviewState: eventing.PRDevelopmentReviewChangesRequested,
+				CurrentReviewState:   eventing.PRDevelopmentReviewChangesRequested,
+				ReviewSubmittedAt:    now,
+				ReviewURL:            maximumURL("b"),
+				CapturedAt:           now,
+			},
+			BaseRepository:  repository,
+			BaseRef:         maximumRef,
+			BaseSHA:         maximumSHA,
+			ReviewCommitSHA: maximumSHA,
+			Feedback:        strings.Repeat("<", 64<<10),
+		},
+		ConversationVersion:     eventing.MaxPRDevelopmentMessagesPerCase,
+		Messages:                messages,
+		RepairUnavailableReason: "runtime_unavailable",
+		RepairRevision:          eventing.MaxPRDevelopmentRepairVersion,
+		RepairSession: &prdevelopment.RepairSession{
+			ID:             "pds_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			Revision:       eventing.MaxPRDevelopmentRepairVersion,
+			AgentID:        strings.Repeat("a", eventing.MaxPRDevelopmentRepairAgentIDBytes),
+			HeadRepository: repository,
+			HeadRef:        maximumRef,
+			HeadSHA:        maximumSHA,
+			Attempts:       attempts,
+		},
+	}
+	errorResponse := struct {
+		Error  string                `json:"error"`
+		Detail *prdevelopment.Detail `json:"detail,omitempty"`
+	}{
+		Error:  "development conversation changed; reload before retrying",
+		Detail: &detail,
+	}
+	for name, value := range map[string]any{
+		"detail":        detail,
+		"error wrapper": errorResponse,
+	} {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("json.Marshal(%s) error = %v", name, err)
+		}
+		if len(encoded)+1 > reviewProxyResponseMaxBytes {
+			t.Fatalf(
+				"maximum escaped %s response = %d bytes, launcher limit = %d",
+				name,
+				len(encoded)+1,
+				reviewProxyResponseMaxBytes,
+			)
+		}
+	}
+}
 
 func TestPRDevelopmentRoutesProxyExactReadOnlyContract(t *testing.T) {
 	configPath, cleanup := setupOAuthTestEnv(t)
@@ -267,6 +378,185 @@ func TestPRDevelopmentChatProxiesOneHardenedMutation(t *testing.T) {
 		captured.cookie != "" ||
 		captured.browserHeader != "" {
 		t.Fatalf("upstream = %#v", captured)
+	}
+}
+
+func TestPRDevelopmentRepairProxiesOneHardenedAdmission(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	type capturedRequest struct {
+		method        string
+		path          string
+		body          string
+		timeout       time.Duration
+		authorization string
+		contentType   string
+		cookie        string
+		browserHeader string
+	}
+	var captured capturedRequest
+	installEventProxyStubs(
+		t,
+		func(request *http.Request, timeout time.Duration) (*http.Response, error) {
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatalf("read upstream body: %v", err)
+			}
+			captured = capturedRequest{
+				method:        request.Method,
+				path:          request.URL.Path,
+				body:          string(body),
+				timeout:       timeout,
+				authorization: request.Header.Get("Authorization"),
+				contentType:   request.Header.Get("Content-Type"),
+				cookie:        request.Header.Get("Cookie"),
+				browserHeader: request.Header.Get("X-Browser-Only"),
+			}
+			return eventUpstreamResponse(http.StatusAccepted, `{"repair_revision":1}`), nil
+		},
+	)
+	mux := http.NewServeMux()
+	NewHandler(configPath).RegisterRoutes(mux)
+
+	body := `{"expected_conversation_version":2,"expected_repair_revision":0,"request_id":"prq_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","instruction":"Address the review feedback."}`
+	request := httptest.NewRequest(
+		http.MethodPost,
+		prDevelopmentAPIPath+"/"+testPRDevelopmentCaseID+"/repair",
+		strings.NewReader(body),
+	)
+	request.Header.Set("Content-Type", "application/json; charset=utf-8")
+	request.Header.Set("Content-Encoding", "identity")
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	request.Header.Set("Authorization", "Bearer browser-token")
+	request.Header.Set("Cookie", "launcher=browser-secret")
+	request.Header.Set("X-Browser-Only", "do-not-forward")
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("Cache-Control") != "no-store" ||
+		recorder.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("response headers = %#v", recorder.Header())
+	}
+	if captured.method != http.MethodPost ||
+		captured.path != prDevelopmentRuntimePath+"/"+testPRDevelopmentCaseID+"/repair" ||
+		captured.body != body ||
+		captured.timeout != reviewGatewayRequestTimeout ||
+		captured.authorization != "Bearer gateway-pid-token" ||
+		captured.contentType != "application/json" ||
+		captured.cookie != "" ||
+		captured.browserHeader != "" {
+		t.Fatalf("upstream = %#v", captured)
+	}
+}
+
+func TestPRDevelopmentRepairRejectsInvalidAdmissionBeforeProxy(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	upstreamCalls := 0
+	installEventProxyStubs(
+		t,
+		func(*http.Request, time.Duration) (*http.Response, error) {
+			upstreamCalls++
+			return eventUpstreamResponse(http.StatusAccepted, `{}`), nil
+		},
+	)
+	mux := http.NewServeMux()
+	NewHandler(configPath).RegisterRoutes(mux)
+	repairPath := prDevelopmentAPIPath + "/" + testPRDevelopmentCaseID + "/repair"
+	valid := `{"expected_conversation_version":0,"expected_repair_revision":0,"request_id":"prq_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","instruction":"Fix it."}`
+	tests := []struct {
+		name       string
+		target     string
+		body       string
+		fetchSite  string
+		wantStatus int
+	}{
+		{
+			name: "missing provenance", target: repairPath, body: valid,
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "query", target: repairPath + "?x=1", body: valid,
+			fetchSite: "same-origin", wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "unknown field", target: repairPath,
+			body:      strings.TrimSuffix(valid, "}") + `,"extra":true}`,
+			fetchSite: "same-origin", wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "duplicate field", target: repairPath,
+			body: strings.Replace(
+				valid, `"instruction":`, `"instruction":"first","instruction":`, 1,
+			),
+			fetchSite: "same-origin", wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "bad request id", target: repairPath,
+			body: strings.Replace(
+				valid,
+				"prq_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				"prq_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+				1,
+			),
+			fetchSite: "same-origin", wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "stale conversation range", target: repairPath,
+			body: strings.Replace(
+				valid,
+				`"expected_conversation_version":0`,
+				`"expected_conversation_version":257`,
+				1,
+			),
+			fetchSite: "same-origin", wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "negative repair revision", target: repairPath,
+			body: strings.Replace(
+				valid,
+				`"expected_repair_revision":0`,
+				`"expected_repair_revision":-1`,
+				1,
+			),
+			fetchSite: "same-origin", wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "blank instruction", target: repairPath,
+			body:      strings.Replace(valid, "Fix it.", " ", 1),
+			fetchSite: "same-origin", wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "oversized instruction", target: repairPath,
+			body: strings.Replace(
+				valid,
+				"Fix it.",
+				strings.Repeat("a", prDevelopmentRepairBytes+1),
+				1,
+			),
+			fetchSite: "same-origin", wantStatus: http.StatusBadRequest,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, test.target, strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			if test.fetchSite != "" {
+				request.Header.Set("Sec-Fetch-Site", test.fetchSite)
+			}
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(recorder, request)
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d, body=%s", recorder.Code, test.wantStatus, recorder.Body.String())
+			}
+		})
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("invalid requests reached upstream %d time(s)", upstreamCalls)
 	}
 }
 

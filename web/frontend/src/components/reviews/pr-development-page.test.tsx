@@ -1,16 +1,19 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, waitFor } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { useState } from "react"
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
+  MAXIMUM_PR_DEVELOPMENT_REPAIR_INSTRUCTION_BYTES,
   PRDevelopmentAPIError,
   type PRDevelopmentCase,
   type PRDevelopmentCaseDetail,
   chatAboutPRDevelopmentCase,
+  createPRDevelopmentRepairRequestID,
   getPRDevelopmentCase,
   listPRDevelopmentCases,
+  startPRDevelopmentRepair,
 } from "@/api/pr-development"
 import { PRDevelopmentPage } from "@/components/reviews/pr-development-page"
 import { SidebarProvider } from "@/components/ui/sidebar"
@@ -20,14 +23,18 @@ vi.mock("@/api/pr-development", async (importOriginal) => {
   return {
     ...actual,
     chatAboutPRDevelopmentCase: vi.fn(),
+    createPRDevelopmentRepairRequestID: vi.fn(),
     getPRDevelopmentCase: vi.fn(),
     listPRDevelopmentCases: vi.fn(),
+    startPRDevelopmentRepair: vi.fn(),
   }
 })
 
 const mockedList = vi.mocked(listPRDevelopmentCases)
 const mockedGet = vi.mocked(getPRDevelopmentCase)
 const mockedChat = vi.mocked(chatAboutPRDevelopmentCase)
+const mockedRepairRequestID = vi.mocked(createPRDevelopmentRepairRequestID)
+const mockedStartRepair = vi.mocked(startPRDevelopmentRepair)
 const caseID = `pdc_${"1".repeat(32)}`
 const replayCaseID = `pdc_${"2".repeat(32)}`
 const summary = {
@@ -78,6 +85,86 @@ const detail = {
       created_at: "2026-08-05T12:01:01Z",
     },
   ],
+  repair_available: true,
+  repair_revision: 0,
+} satisfies PRDevelopmentCaseDetail
+const repairInstruction =
+  'Apply <script>alert("instruction")</script> safely in the local copy.'
+const queuedRepairDetail = {
+  ...detail,
+  repair_revision: 1,
+  repair_session: {
+    id: `pds_${"6".repeat(32)}`,
+    revision: 1,
+    agent_id: "main",
+    attempts: [
+      {
+        id: `pdr_${"7".repeat(32)}`,
+        ordinal: 0,
+        status: "queued",
+        conversation_version: 2,
+        instruction: repairInstruction,
+        created_at: "2026-08-05T12:03:00Z",
+        updated_at: "2026-08-05T12:03:00Z",
+      },
+    ],
+  },
+} satisfies PRDevelopmentCaseDetail
+const runningRepairDetail = {
+  ...queuedRepairDetail,
+  repair_revision: 3,
+  repair_session: {
+    ...queuedRepairDetail.repair_session,
+    revision: 3,
+    head_repository: "octocat/repo",
+    head_ref: "fix/review-feedback",
+    head_sha: "d".repeat(40),
+    attempts: [
+      {
+        ...queuedRepairDetail.repair_session.attempts[0],
+        status: "running",
+        updated_at: "2026-08-05T12:04:00Z",
+      },
+    ],
+  },
+} satisfies PRDevelopmentCaseDetail
+const completedRepairDetail = {
+  ...runningRepairDetail,
+  repair_revision: 4,
+  repair_session: {
+    ...runningRepairDetail.repair_session,
+    revision: 4,
+    attempts: [
+      {
+        ...runningRepairDetail.repair_session.attempts[0],
+        status: "completed",
+        summary: '<img src=x onerror="alert(1)"> Local edits are ready.',
+        updated_at: "2026-08-05T12:05:00Z",
+      },
+    ],
+  },
+} satisfies PRDevelopmentCaseDetail
+const recoveryRequiredRepairDetail = {
+  ...completedRepairDetail,
+  repair_revision: 6,
+  repair_session: {
+    ...completedRepairDetail.repair_session,
+    revision: 6,
+    attempts: [
+      completedRepairDetail.repair_session.attempts[0],
+      {
+        id: `pdr_${"8".repeat(32)}`,
+        ordinal: 1,
+        status: "recovery_required",
+        conversation_version: 2,
+        instruction: "Continue after inspecting the partial edits.",
+        summary: "The process stopped after writing one local file.",
+        error_code: "recovery_required",
+        created_at: "2026-08-05T12:06:00Z",
+        updated_at: "2026-08-05T12:07:00Z",
+      },
+    ],
+  },
 } satisfies PRDevelopmentCaseDetail
 const replaySummary = { ...summary, id: replayCaseID } as const
 
@@ -103,6 +190,9 @@ describe("PR development page", () => {
     mockedList.mockReset()
     mockedGet.mockReset()
     mockedChat.mockReset()
+    mockedRepairRequestID.mockReset()
+    mockedStartRepair.mockReset()
+    mockedRepairRequestID.mockReturnValue(`prq_${"5".repeat(32)}`)
     mockedList.mockResolvedValue({
       cases: [summary, summary, replaySummary],
     })
@@ -148,9 +238,577 @@ describe("PR development page", () => {
     expect(screen.queryByRole("button", { name: /checkout|push/i })).toBeNull()
   })
 
+  it("confirms and starts one explicit local repair with a fenced request", async () => {
+    mockedStartRepair.mockResolvedValue(queuedRepairDetail)
+    const user = userEvent.setup()
+    renderPage({ view: "development", case: caseID })
+
+    const instruction = await screen.findByLabelText("Local repair instruction")
+    await user.type(instruction, `  ${repairInstruction}  `)
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+
+    expect(mockedStartRepair).not.toHaveBeenCalled()
+    expect(screen.getByRole("alertdialog")).toHaveTextContent(
+      /local, unreviewed, untested, uncommitted, and unpushed/i,
+    )
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+
+    await waitFor(() =>
+      expect(mockedStartRepair).toHaveBeenCalledWith(caseID, {
+        expectedConversationVersion: 2,
+        expectedRepairRevision: 0,
+        expectedAttemptOrdinal: 0,
+        requestID: `prq_${"5".repeat(32)}`,
+        instruction: repairInstruction,
+      }),
+    )
+    expect(mockedRepairRequestID).toHaveBeenCalledTimes(1)
+    expect((await screen.findAllByText("Queued"))[0]).toBeVisible()
+    const renderedInstruction = screen.getByText(repairInstruction)
+    expect(renderedInstruction.querySelector("script")).toBeNull()
+    expect(instruction).toHaveValue("")
+    expect(instruction).toBeDisabled()
+  })
+
+  it("blocks a local repair instruction larger than 4 KiB", async () => {
+    renderPage({ view: "development", case: caseID })
+
+    const instruction = await screen.findByLabelText("Local repair instruction")
+    fireEvent.change(instruction, {
+      target: {
+        value: "x".repeat(MAXIMUM_PR_DEVELOPMENT_REPAIR_INSTRUCTION_BYTES + 1),
+      },
+    })
+
+    expect(
+      screen.getByText("The instruction must be at most 4 KiB."),
+    ).toBeVisible()
+    expect(
+      screen.getByRole("button", { name: "Start local repair" }),
+    ).toBeDisabled()
+  })
+
+  it("reuses the same opaque request ID when an ambiguous start is retried", async () => {
+    mockedStartRepair
+      .mockRejectedValueOnce(new Error("repair response was interrupted"))
+      .mockResolvedValueOnce(queuedRepairDetail)
+    const user = userEvent.setup()
+    renderPage({ view: "development", case: caseID })
+
+    const instruction = await screen.findByLabelText("Local repair instruction")
+    await user.type(instruction, repairInstruction)
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+    expect(
+      await screen.findByText("repair response was interrupted"),
+    ).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "Retry start" }))
+
+    await waitFor(() => expect(mockedStartRepair).toHaveBeenCalledTimes(2))
+    expect(mockedStartRepair.mock.calls[1]).toEqual(
+      mockedStartRepair.mock.calls[0],
+    )
+    expect(mockedRepairRequestID).toHaveBeenCalledTimes(1)
+  })
+
+  it("preserves the draft and retry identity at full repair-history capacity", async () => {
+    const capacityDetail = {
+      ...completedRepairDetail,
+      repair_revision: 64,
+      repair_session: {
+        ...completedRepairDetail.repair_session,
+        revision: 64,
+        attempts: Array.from({ length: 64 }, (_, ordinal) => ({
+          ...completedRepairDetail.repair_session.attempts[0],
+          id: `pdr_${ordinal.toString(16).padStart(32, "0")}`,
+          ordinal,
+          status: "completed" as const,
+          instruction: `Completed local repair ${ordinal + 1}.`,
+          summary: `Local repair ${ordinal + 1} completed.`,
+        })),
+      },
+    } satisfies PRDevelopmentCaseDetail
+    mockedGet.mockResolvedValue(capacityDetail)
+    mockedStartRepair.mockRejectedValue(
+      new PRDevelopmentAPIError(
+        "repair attempt capacity reached",
+        409,
+        capacityDetail,
+      ),
+    )
+    const user = userEvent.setup()
+    renderPage({ view: "development", case: caseID })
+
+    const instruction = await screen.findByLabelText("Local repair instruction")
+    await user.type(instruction, repairInstruction)
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+
+    expect(
+      await screen.findByText("repair attempt capacity reached"),
+    ).toBeVisible()
+    expect(instruction).toHaveValue(repairInstruction)
+    expect(mockedStartRepair).toHaveBeenCalledWith(caseID, {
+      expectedConversationVersion: 2,
+      expectedRepairRevision: 64,
+      expectedAttemptOrdinal: 64,
+      requestID: `prq_${"5".repeat(32)}`,
+      instruction: repairInstruction,
+    })
+
+    await user.click(screen.getByRole("button", { name: "Retry start" }))
+    await waitFor(() => expect(mockedStartRepair).toHaveBeenCalledTimes(2))
+    expect(mockedStartRepair.mock.calls[1]).toEqual(
+      mockedStartRepair.mock.calls[0],
+    )
+    expect(mockedRepairRequestID).toHaveBeenCalledTimes(1)
+  })
+
+  it("preserves a newer ambiguous intent when older identical work precedes another-tab work", async () => {
+    const otherTabDetail: PRDevelopmentCaseDetail = {
+      ...completedRepairDetail,
+      repair_revision: 6,
+      repair_session: {
+        ...completedRepairDetail.repair_session,
+        revision: 6,
+        attempts: [
+          completedRepairDetail.repair_session.attempts[0],
+          {
+            id: `pdr_${"9".repeat(32)}`,
+            ordinal: 1,
+            status: "completed",
+            conversation_version: 2,
+            instruction: "An unrelated repair from another tab.",
+            summary: "The unrelated local repair completed.",
+            created_at: "2026-08-05T12:06:00Z",
+            updated_at: "2026-08-05T12:07:00Z",
+          },
+        ],
+      },
+    }
+    mockedGet.mockResolvedValue(completedRepairDetail)
+    mockedStartRepair
+      .mockRejectedValueOnce(new Error("repair response was interrupted"))
+      .mockRejectedValueOnce(new Error("repair remains conflicted"))
+    const client = newTestQueryClient()
+    const user = userEvent.setup()
+    renderPage({ view: "development", case: caseID }, vi.fn(), client)
+
+    const instruction = await screen.findByLabelText("Local repair instruction")
+    await user.type(instruction, repairInstruction)
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+    expect(
+      await screen.findByText("repair response was interrupted"),
+    ).toBeVisible()
+    expect(mockedStartRepair.mock.calls[0]?.[1]).toMatchObject({
+      expectedRepairRevision: 4,
+      expectedAttemptOrdinal: 1,
+    })
+
+    client.setQueryData(
+      ["pr-development", "detail", caseID] as const,
+      otherTabDetail,
+    )
+    expect(
+      await screen.findByText(/Repair history changed in another tab/i),
+    ).toBeVisible()
+    expect(instruction).toHaveValue(repairInstruction)
+    await user.click(screen.getByRole("button", { name: "Retry start" }))
+
+    await waitFor(() => expect(mockedStartRepair).toHaveBeenCalledTimes(2))
+    expect(mockedStartRepair.mock.calls[1]).toEqual(
+      mockedStartRepair.mock.calls[0],
+    )
+    expect(mockedRepairRequestID).toHaveBeenCalledTimes(1)
+  })
+
+  it("reconciles an ambiguous start only when the exact expected ordinal appears", async () => {
+    const exactCommittedDetail: PRDevelopmentCaseDetail = {
+      ...completedRepairDetail,
+      repair_revision: 5,
+      repair_session: {
+        ...completedRepairDetail.repair_session,
+        revision: 5,
+        attempts: [
+          completedRepairDetail.repair_session.attempts[0],
+          {
+            id: `pdr_${"9".repeat(32)}`,
+            ordinal: 1,
+            status: "queued",
+            conversation_version: 2,
+            instruction: repairInstruction,
+            created_at: "2026-08-05T12:06:00Z",
+            updated_at: "2026-08-05T12:06:00Z",
+          },
+        ],
+      },
+    }
+    mockedGet.mockResolvedValue(completedRepairDetail)
+    mockedStartRepair.mockRejectedValueOnce(
+      new Error("repair response was interrupted"),
+    )
+    const client = newTestQueryClient()
+    const user = userEvent.setup()
+    renderPage({ view: "development", case: caseID }, vi.fn(), client)
+
+    const instruction = await screen.findByLabelText("Local repair instruction")
+    await user.type(instruction, repairInstruction)
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+    expect(
+      await screen.findByText("repair response was interrupted"),
+    ).toBeVisible()
+
+    client.setQueryData(
+      ["pr-development", "detail", caseID] as const,
+      exactCommittedDetail,
+    )
+
+    await waitFor(() => expect(instruction).toHaveValue(""))
+    expect(screen.queryByRole("button", { name: "Retry start" })).toBeNull()
+    expect(mockedStartRepair).toHaveBeenCalledTimes(1)
+    expect(mockedRepairRequestID).toHaveBeenCalledTimes(1)
+  })
+
+  it("lets mutation detail disable repair and blocks an unavailable retry", async () => {
+    const unavailableDetail: PRDevelopmentCaseDetail = {
+      ...detail,
+      repair_available: false,
+      repair_unavailable_reason: "runtime_unavailable",
+    }
+    mockedStartRepair.mockRejectedValue(
+      new PRDevelopmentAPIError(
+        "development workbench unavailable",
+        503,
+        unavailableDetail,
+      ),
+    )
+    const user = userEvent.setup()
+    renderPage({ view: "development", case: caseID })
+
+    const instruction = await screen.findByLabelText("Local repair instruction")
+    await user.type(instruction, repairInstruction)
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+
+    expect(
+      await screen.findByText("development workbench unavailable"),
+    ).toBeVisible()
+    expect(
+      screen.getByText(/required repair dependencies are unavailable/i),
+    ).toBeVisible()
+    expect(instruction).toBeDisabled()
+    expect(screen.getByRole("button", { name: "Retry start" })).toBeDisabled()
+    expect(
+      screen.getByRole("button", { name: "Start local repair" }),
+    ).toBeDisabled()
+  })
+
+  it("preserves independent local repair drafts for each selected case", async () => {
+    const replayDevelopmentCase: PRDevelopmentCase = {
+      ...developmentCase,
+      id: replayCaseID,
+    }
+    const replayDetail: PRDevelopmentCaseDetail = {
+      ...detail,
+      case: replayDevelopmentCase,
+    }
+    mockedGet.mockImplementation(async (id) =>
+      id === replayCaseID ? replayDetail : detail,
+    )
+    const client = newTestQueryClient()
+    function RepairDraftHarness() {
+      const [selectedCase, setSelectedCase] = useState(caseID)
+      return (
+        <>
+          <button type="button" onClick={() => setSelectedCase(caseID)}>
+            Select first repair
+          </button>
+          <button type="button" onClick={() => setSelectedCase(replayCaseID)}>
+            Select replay repair
+          </button>
+          <PRDevelopmentPage
+            search={{ view: "development", case: selectedCase }}
+            onSearchChange={(next) => {
+              if (next.case) setSelectedCase(next.case)
+            }}
+          />
+        </>
+      )
+    }
+    const user = userEvent.setup()
+    render(
+      <QueryClientProvider client={client}>
+        <SidebarProvider>
+          <RepairDraftHarness />
+        </SidebarProvider>
+      </QueryClientProvider>,
+    )
+
+    let instruction = await screen.findByLabelText("Local repair instruction")
+    await user.type(instruction, "First-case local repair draft.")
+    await user.click(
+      screen.getByRole("button", { name: "Select replay repair" }),
+    )
+    instruction = await screen.findByLabelText("Local repair instruction")
+    expect(instruction).toHaveValue("")
+    await user.type(instruction, "Replay-case local repair draft.")
+
+    await user.click(
+      screen.getByRole("button", { name: "Select first repair" }),
+    )
+    expect(
+      await screen.findByLabelText("Local repair instruction"),
+    ).toHaveValue("First-case local repair draft.")
+    await user.click(
+      screen.getByRole("button", { name: "Select replay repair" }),
+    )
+    expect(
+      await screen.findByLabelText("Local repair instruction"),
+    ).toHaveValue("Replay-case local repair draft.")
+  })
+
+  it("polls only an active repair and announces its terminal result", async () => {
+    mockedGet
+      .mockResolvedValueOnce(runningRepairDetail)
+      .mockResolvedValueOnce(completedRepairDetail)
+    renderPage({ view: "development", case: caseID })
+
+    const status = await screen.findByRole("status")
+    expect(status).toHaveAttribute("aria-live", "polite")
+    expect(status).toHaveTextContent(/AI is editing the pinned local copy/i)
+    expect(screen.getByLabelText("Local repair instruction")).toBeDisabled()
+
+    await waitFor(
+      () =>
+        expect(status).toHaveTextContent(/Local edits are ready for review/i),
+      { timeout: 3500 },
+    )
+    expect(mockedGet).toHaveBeenCalledTimes(2)
+    const summary = screen.getByText(
+      '<img src=x onerror="alert(1)"> Local edits are ready.',
+    )
+    expect(summary.querySelector("img")).toBeNull()
+    expect(screen.getByText("Outcome summary")).toBeVisible()
+  })
+
+  it("describes preparing without claiming that the workspace is pinned", async () => {
+    const preparingDetail: PRDevelopmentCaseDetail = {
+      ...queuedRepairDetail,
+      repair_revision: 2,
+      repair_session: {
+        ...queuedRepairDetail.repair_session,
+        revision: 2,
+        attempts: [
+          {
+            ...queuedRepairDetail.repair_session.attempts[0],
+            status: "preparing",
+            updated_at: "2026-08-05T12:03:30Z",
+          },
+        ],
+      },
+    }
+    mockedGet.mockResolvedValue(preparingDetail)
+    renderPage({ view: "development", case: caseID })
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      /Current PR state is being verified before local editing starts/i,
+    )
+    expect(
+      screen.queryByText(/pinned local copy is being prepared/i),
+    ).toBeNull()
+  })
+
+  it("keeps unavailable repair history visible in newest-first order", async () => {
+    const unavailableHistory: PRDevelopmentCaseDetail = {
+      ...recoveryRequiredRepairDetail,
+      repair_available: false,
+      repair_unavailable_reason: "runtime_unavailable",
+    }
+    mockedGet.mockResolvedValue(unavailableHistory)
+    renderPage({ view: "development", case: caseID })
+
+    expect(
+      await screen.findByText(/required repair dependencies are unavailable/i),
+    ).toBeVisible()
+    expect(screen.getByLabelText("Local repair instruction")).toBeDisabled()
+    expect(
+      screen.getByRole("button", { name: "Continue local repair" }),
+    ).toBeDisabled()
+    const attempts = screen.getAllByText(/Attempt [12]/)
+    expect(attempts.map((node) => node.textContent)).toEqual([
+      "Attempt 2",
+      "Attempt 1",
+    ])
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /Partial local edits may already exist/i,
+    )
+    expect(
+      screen.getByText(/inspect and preserve them before continuing/i),
+    ).toBeVisible()
+  })
+
+  it("warns how to preserve partial edits before continuing recovery", async () => {
+    mockedGet.mockResolvedValue(recoveryRequiredRepairDetail)
+    const user = userEvent.setup()
+    renderPage({ view: "development", case: caseID })
+
+    const instruction = await screen.findByLabelText("Local repair instruction")
+    expect(instruction).toBeEnabled()
+    expect(
+      screen.getByText(/Tell AI to inspect and preserve them/i),
+    ).toBeVisible()
+    await user.type(
+      instruction,
+      "Inspect and preserve the partial edits, then finish the repair.",
+    )
+    await user.click(
+      screen.getByRole("button", { name: "Continue local repair" }),
+    )
+
+    expect(mockedStartRepair).not.toHaveBeenCalled()
+    expect(screen.getByRole("alertdialog")).toHaveTextContent(
+      /Partial edits may exist in the same pinned local workspace/i,
+    )
+    expect(screen.getByRole("alertdialog")).toHaveTextContent(
+      /inspect and preserve them before continuing/i,
+    )
+  })
+
+  it("merges conversation and repair revisions without regressing either", async () => {
+    const client = newTestQueryClient()
+    renderPage({ view: "development", case: caseID }, vi.fn(), client)
+    await screen.findByLabelText("Local repair instruction")
+    const queryKey = ["pr-development", "detail", caseID] as const
+
+    client.setQueryData(queryKey, queuedRepairDetail)
+    const newerConversation: PRDevelopmentCaseDetail = {
+      ...detail,
+      conversation_version: 3,
+      messages: [
+        ...detail.messages,
+        {
+          id: `pdm_${"9".repeat(32)}`,
+          ordinal: 2,
+          role: "user",
+          content: "Keep this newer conversation turn.",
+          created_at: "2026-08-05T12:08:00Z",
+        },
+      ],
+    }
+    client.setQueryData(queryKey, newerConversation)
+    client.setQueryData(queryKey, {
+      ...runningRepairDetail,
+      conversation_version: 2,
+      messages: detail.messages,
+    })
+
+    await waitFor(() => {
+      const merged = client.getQueryData<PRDevelopmentCaseDetail>(queryKey)
+      expect(merged?.conversation_version).toBe(3)
+      expect(merged?.messages.at(-1)?.content).toBe(
+        "Keep this newer conversation turn.",
+      )
+      expect(merged?.repair_revision).toBe(3)
+      expect(merged?.repair_session?.attempts.at(-1)?.status).toBe("running")
+    })
+  })
+
+  it("takes repair capability from an authoritative equal-version reload", async () => {
+    const unavailableDetail: PRDevelopmentCaseDetail = {
+      ...detail,
+      repair_available: false,
+      repair_unavailable_reason: "runtime_unavailable",
+    }
+    mockedGet
+      .mockResolvedValueOnce(detail)
+      .mockResolvedValueOnce(unavailableDetail)
+      .mockResolvedValueOnce(detail)
+    const user = userEvent.setup()
+    renderPage({ view: "development", case: caseID })
+
+    const instruction = await screen.findByLabelText("Local repair instruction")
+    expect(instruction).toBeEnabled()
+    await user.click(screen.getByRole("button", { name: "Reload status" }))
+    expect(
+      await screen.findByText(/required repair dependencies are unavailable/i),
+    ).toBeVisible()
+    expect(instruction).toBeDisabled()
+
+    await user.click(screen.getByRole("button", { name: "Reload status" }))
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/required repair dependencies are unavailable/i),
+      ).toBeNull(),
+    )
+    expect(instruction).toBeEnabled()
+  })
+
+  it("does not let a stale chat response restore repair capability", async () => {
+    const unavailableDetail: PRDevelopmentCaseDetail = {
+      ...detail,
+      repair_available: false,
+      repair_unavailable_reason: "runtime_unavailable",
+    }
+    const chatDetail: PRDevelopmentCaseDetail = {
+      ...detail,
+      conversation_version: 4,
+      messages: [
+        ...detail.messages,
+        {
+          id: `pdm_${"5".repeat(32)}`,
+          ordinal: 2,
+          role: "user",
+          content: "Keep the fresh capability.",
+          created_at: "2026-08-05T12:08:00Z",
+        },
+        {
+          id: `pdm_${"6".repeat(32)}`,
+          ordinal: 3,
+          role: "assistant",
+          content: "Capability stayed authoritative.",
+          created_at: "2026-08-05T12:08:01Z",
+        },
+      ],
+      repair_available: true,
+    }
+    let resolveChat: ((value: PRDevelopmentCaseDetail) => void) | undefined
+    mockedChat.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveChat = resolve
+        }),
+    )
+    const client = newTestQueryClient()
+    const user = userEvent.setup()
+    renderPage({ view: "development", case: caseID }, vi.fn(), client)
+
+    const composer = await screen.findByLabelText(
+      "Message AI about this feedback",
+    )
+    await user.type(composer, "Keep the fresh capability.")
+    await user.click(screen.getByRole("button", { name: "Send" }))
+    await waitFor(() => expect(mockedChat).toHaveBeenCalledTimes(1))
+
+    const queryKey = ["pr-development", "detail", caseID] as const
+    client.setQueryData(queryKey, unavailableDetail)
+    resolveChat?.(chatDetail)
+
+    await waitFor(() => {
+      const cached = client.getQueryData<PRDevelopmentCaseDetail>(queryKey)
+      expect(cached?.conversation_version).toBe(4)
+      expect(cached?.repair_available).toBe(false)
+      expect(cached?.repair_unavailable_reason).toBe("runtime_unavailable")
+    })
+    expect(
+      await screen.findByText(/required repair dependencies are unavailable/i),
+    ).toBeVisible()
+  })
+
   it("sends one version-fenced message and updates the conversation cache", async () => {
     const updatedDetail: PRDevelopmentCaseDetail = {
-      case: developmentCase,
+      ...detail,
       conversation_version: 4,
       messages: [
         ...detail.messages,
@@ -169,6 +827,8 @@ describe("PR development page", () => {
           created_at: "2026-08-05T12:02:01Z",
         },
       ],
+      repair_available: true,
+      repair_revision: 0,
     }
     mockedChat.mockResolvedValue(updatedDetail)
     const user = userEvent.setup()
@@ -197,7 +857,7 @@ describe("PR development page", () => {
 
   it("does not let a delayed reload overwrite a newer chat result", async () => {
     const updatedDetail: PRDevelopmentCaseDetail = {
-      case: developmentCase,
+      ...detail,
       conversation_version: 4,
       messages: [
         ...detail.messages,
@@ -249,7 +909,7 @@ describe("PR development page", () => {
     expect(screen.getByText("Newer answer survives.")).toBeVisible()
   })
 
-  it("disables duplicate sends while the advisory response is pending", async () => {
+  it("locks both chat and repair while the advisory response is pending", async () => {
     let resolveChat: ((detail: PRDevelopmentCaseDetail) => void) | undefined
     mockedChat.mockImplementation(
       () =>
@@ -263,15 +923,204 @@ describe("PR development page", () => {
     const composer = await screen.findByLabelText(
       "Message AI about this feedback",
     )
+    const instruction = screen.getByLabelText("Local repair instruction")
+    await user.type(instruction, "Keep this repair draft while chat runs.")
     await user.type(composer, "Explain this.")
+    expect(
+      screen.getByRole("button", { name: "Start local repair" }),
+    ).toBeEnabled()
     await user.click(screen.getByRole("button", { name: "Send" }))
     expect(screen.getByRole("button", { name: "Sending…" })).toBeDisabled()
     expect(composer).toBeDisabled()
+    expect(instruction).toBeDisabled()
+    expect(
+      screen.getByRole("button", { name: "Start local repair" }),
+    ).toBeDisabled()
     expect(mockedChat).toHaveBeenCalledTimes(1)
 
     resolveChat?.(detail)
     await waitFor(() => expect(composer).toBeEnabled())
+    expect(instruction).toBeEnabled()
+    expect(
+      screen.getByRole("button", { name: "Start local repair" }),
+    ).toBeEnabled()
     expect(screen.queryByRole("button", { name: "Sending…" })).toBeNull()
+    expect(mockedChat).toHaveBeenCalledTimes(1)
+  })
+
+  it("locks both repair and chat while a local repair start is pending", async () => {
+    let resolveRepair: ((detail: PRDevelopmentCaseDetail) => void) | undefined
+    mockedStartRepair.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveRepair = resolve
+        }),
+    )
+    const user = userEvent.setup()
+    renderPage({ view: "development", case: caseID })
+
+    const instruction = await screen.findByLabelText("Local repair instruction")
+    const composer = screen.getByLabelText("Message AI about this feedback")
+    await user.type(instruction, repairInstruction)
+    await user.type(composer, "Keep this chat draft while repair starts.")
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+
+    await waitFor(() => expect(mockedStartRepair).toHaveBeenCalledTimes(1))
+    expect(instruction).toBeDisabled()
+    expect(composer).toBeDisabled()
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled()
+
+    resolveRepair?.(queuedRepairDetail)
+    await waitFor(() => expect(composer).toBeEnabled())
+    expect(composer).toHaveValue("Keep this chat draft while repair starts.")
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled()
+  })
+
+  it("keeps a same-case local repair locked when navigation remounts it", async () => {
+    const replayDevelopmentCase: PRDevelopmentCase = {
+      ...developmentCase,
+      id: replayCaseID,
+    }
+    const replayDetail: PRDevelopmentCaseDetail = {
+      case: replayDevelopmentCase,
+      conversation_version: 0,
+      messages: [],
+      repair_available: true,
+      repair_revision: 0,
+    }
+    mockedGet.mockImplementation(async (id) =>
+      id === replayCaseID ? replayDetail : detail,
+    )
+    let resolveRepair: ((value: PRDevelopmentCaseDetail) => void) | undefined
+    mockedStartRepair.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveRepair = resolve
+        }),
+    )
+    const client = newTestQueryClient()
+    const page = (selectedCase: string) => (
+      <QueryClientProvider client={client}>
+        <SidebarProvider>
+          <PRDevelopmentPage
+            search={{ view: "development", case: selectedCase }}
+            onSearchChange={vi.fn()}
+          />
+        </SidebarProvider>
+      </QueryClientProvider>
+    )
+    const user = userEvent.setup()
+    const rendered = render(page(caseID))
+
+    const instruction = await screen.findByLabelText("Local repair instruction")
+    await user.type(instruction, repairInstruction)
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+    await user.click(screen.getByRole("button", { name: "Start local repair" }))
+    await waitFor(() => expect(mockedStartRepair).toHaveBeenCalledTimes(1))
+
+    rendered.rerender(page(replayCaseID))
+    await screen.findByLabelText("Local repair instruction")
+    rendered.rerender(page(caseID))
+
+    const remountedInstruction = await screen.findByLabelText(
+      "Local repair instruction",
+    )
+    expect(remountedInstruction).toHaveValue(repairInstruction)
+    expect(remountedInstruction).toBeDisabled()
+    expect(screen.getByRole("button", { name: "Starting…" })).toBeDisabled()
+    expect(mockedStartRepair).toHaveBeenCalledTimes(1)
+
+    resolveRepair?.(queuedRepairDetail)
+    await waitFor(() =>
+      expect(screen.getAllByText("Queued").length).toBeGreaterThan(0),
+    )
+    expect(mockedStartRepair).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps a same-case advisory chat locked when navigation remounts it", async () => {
+    const replayDevelopmentCase: PRDevelopmentCase = {
+      ...developmentCase,
+      id: replayCaseID,
+    }
+    const replayDetail: PRDevelopmentCaseDetail = {
+      case: replayDevelopmentCase,
+      conversation_version: 0,
+      messages: [],
+      repair_available: true,
+      repair_revision: 0,
+    }
+    const updatedDetail: PRDevelopmentCaseDetail = {
+      ...detail,
+      conversation_version: 4,
+      messages: [
+        ...detail.messages,
+        {
+          id: `pdm_${"a".repeat(32)}`,
+          ordinal: 2,
+          role: "user",
+          content: "Keep this request singular.",
+          created_at: "2026-08-05T12:02:00Z",
+        },
+        {
+          id: `pdm_${"b".repeat(32)}`,
+          ordinal: 3,
+          role: "assistant",
+          content: "Only one advisory request ran.",
+          created_at: "2026-08-05T12:02:01Z",
+        },
+      ],
+    }
+    mockedGet.mockImplementation(async (id) =>
+      id === replayCaseID ? replayDetail : detail,
+    )
+    let resolveChat: ((value: PRDevelopmentCaseDetail) => void) | undefined
+    mockedChat.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveChat = resolve
+        }),
+    )
+    const client = newTestQueryClient()
+    const page = (selectedCase: string) => (
+      <QueryClientProvider client={client}>
+        <SidebarProvider>
+          <PRDevelopmentPage
+            search={{ view: "development", case: selectedCase }}
+            onSearchChange={vi.fn()}
+          />
+        </SidebarProvider>
+      </QueryClientProvider>
+    )
+    const user = userEvent.setup()
+    const rendered = render(page(caseID))
+
+    const composer = await screen.findByLabelText(
+      "Message AI about this feedback",
+    )
+    await user.type(composer, "Keep this request singular.")
+    await user.click(screen.getByRole("button", { name: "Send" }))
+    await waitFor(() => expect(mockedChat).toHaveBeenCalledTimes(1))
+
+    rendered.rerender(page(replayCaseID))
+    await screen.findByLabelText("Message AI about this feedback")
+    rendered.rerender(page(caseID))
+
+    const remountedComposer = await screen.findByLabelText(
+      "Message AI about this feedback",
+    )
+    expect(remountedComposer).toBeDisabled()
+    expect(screen.getByRole("button", { name: "Sending…" })).toBeDisabled()
+    expect(
+      screen.getByRole("log", { name: "Development conversation" }),
+    ).toHaveAttribute("aria-busy", "true")
+    expect(mockedChat).toHaveBeenCalledTimes(1)
+
+    resolveChat?.(updatedDetail)
+    expect(
+      await screen.findByText("Only one advisory request ran."),
+    ).toBeVisible()
+    await waitFor(() => expect(remountedComposer).toBeEnabled())
     expect(mockedChat).toHaveBeenCalledTimes(1)
   })
 
@@ -284,6 +1133,8 @@ describe("PR development page", () => {
       case: replayDevelopmentCase,
       conversation_version: 0,
       messages: [],
+      repair_available: true,
+      repair_revision: 0,
     }
     const firstUpdatedDetail: PRDevelopmentCaseDetail = {
       ...detail,
@@ -457,7 +1308,7 @@ describe("PR development page", () => {
 
   it("adopts a committed human message after model failure without offering a duplicate retry", async () => {
     const committedDetail: PRDevelopmentCaseDetail = {
-      case: developmentCase,
+      ...detail,
       conversation_version: 3,
       messages: [
         ...detail.messages,
@@ -499,7 +1350,7 @@ describe("PR development page", () => {
 
   it("recognizes an ambiguously failed message after an authoritative reload", async () => {
     const committedDetail: PRDevelopmentCaseDetail = {
-      case: developmentCase,
+      ...detail,
       conversation_version: 3,
       messages: [
         ...detail.messages,
@@ -543,7 +1394,7 @@ describe("PR development page", () => {
 
   it("adopts a fully completed ambiguous turn without reporting AI failure", async () => {
     const completedDetail: PRDevelopmentCaseDetail = {
-      case: developmentCase,
+      ...detail,
       conversation_version: 4,
       messages: [
         ...detail.messages,
@@ -594,7 +1445,7 @@ describe("PR development page", () => {
 
   it("hydrates safe conflict detail and offers retry and refetch without losing the draft", async () => {
     const recoveredDetail: PRDevelopmentCaseDetail = {
-      case: developmentCase,
+      ...detail,
       conversation_version: 3,
       messages: [
         ...detail.messages,

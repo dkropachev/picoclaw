@@ -29,6 +29,35 @@ type fakeReader struct {
 	appendCalls       []eventing.PRDevelopmentMessageAppend
 }
 
+type fakeRepairStore struct {
+	*fakeReader
+	workbench      eventing.PRDevelopmentWorkbench
+	admit          eventing.PRDevelopmentRepairAdmit
+	admitErr       error
+	workbenchCalls int
+	admitCalls     int
+}
+
+func (store *fakeRepairStore) GetPRDevelopmentWorkbench(
+	_ context.Context,
+	caseID string,
+) (eventing.PRDevelopmentWorkbench, error) {
+	store.workbenchCalls++
+	if caseID != testDevelopmentCaseID {
+		return eventing.PRDevelopmentWorkbench{}, eventing.ErrNotFound
+	}
+	return store.workbench, nil
+}
+
+func (store *fakeRepairStore) AdmitPRDevelopmentRepair(
+	_ context.Context,
+	input eventing.PRDevelopmentRepairAdmit,
+) (eventing.PRDevelopmentWorkbench, bool, error) {
+	store.admitCalls++
+	store.admit = input
+	return store.workbench, store.admitErr == nil, store.admitErr
+}
+
 func (reader *fakeReader) ListPRDevelopmentCases(
 	_ context.Context,
 	filter eventing.PRDevelopmentCaseFilter,
@@ -168,6 +197,425 @@ func TestServiceProjectsOnlyBrowserSafeCapturedSnapshot(t *testing.T) {
 		if strings.Contains(string(raw), secret) {
 			t.Fatalf("safe projection leaked %q in %s", secret, raw)
 		}
+	}
+}
+
+func TestRepairAdmissionProjectsOnlyBrowserSafeLifecycle(t *testing.T) {
+	now := time.Date(2026, 8, 8, 13, 0, 0, 0, time.UTC)
+	captured := testCapturedDevelopmentCase()
+	attempt := eventing.PRDevelopmentRepairAttempt{
+		ID:                  "pdr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		SessionID:           "pds_cccccccccccccccccccccccccccccccc",
+		Ordinal:             0,
+		ConversationVersion: 0,
+		IdempotencyKey:      "prq_dddddddddddddddddddddddddddddddd",
+		Instruction:         "Address the review feedback.",
+		Status:              eventing.PRDevelopmentRepairQueued,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+	session := eventing.PRDevelopmentRepairSession{
+		ID:             attempt.SessionID,
+		CaseID:         captured.ID,
+		Version:        1,
+		AgentID:        "main",
+		ReservationKey: "private-reservation-capability",
+		Attempts:       []eventing.PRDevelopmentRepairAttempt{attempt},
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	store := &fakeRepairStore{
+		fakeReader: &fakeReader{detail: captured},
+		workbench: eventing.PRDevelopmentWorkbench{
+			Case: captured,
+			Conversation: eventing.PRDevelopmentConversation{
+				CaseID: captured.ID, Messages: []eventing.PRDevelopmentMessage{},
+			},
+			RepairSession: &session,
+		},
+	}
+	service, err := NewService(ServiceConfig{
+		Store:         store,
+		RepairStore:   store,
+		RepairEnabled: true,
+		RepairAgentReady: func(string) bool {
+			return true
+		},
+		AgentID: "main",
+	})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	detail, err := service.Repair(context.Background(), RepairRequest{
+		CaseID: testDevelopmentCaseID, ExpectedConversationVersion: 0,
+		ExpectedRepairRevision: 0,
+		RequestID:              attempt.IdempotencyKey,
+		Instruction:            "  Address the review feedback.  ",
+	})
+	if err != nil {
+		t.Fatalf("Repair() error = %v", err)
+	}
+	if !detail.RepairAvailable || detail.RepairRevision != 1 ||
+		detail.RepairSession == nil || detail.RepairSession.ID != session.ID ||
+		len(detail.RepairSession.Attempts) != 1 {
+		t.Fatalf("detail = %#v", detail)
+	}
+	if store.admit.Instruction != attempt.Instruction ||
+		store.admit.IdempotencyKey != attempt.IdempotencyKey ||
+		store.admit.AgentID != "main" {
+		t.Fatalf("admit = %#v", store.admit)
+	}
+	raw, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatalf("Marshal(detail) error = %v", err)
+	}
+	for _, private := range []string{
+		attempt.IdempotencyKey,
+		session.ReservationKey,
+		"lease-token-private",
+		"clone-private",
+		"review-digest-private",
+		"provider-private",
+		"model-private",
+	} {
+		if strings.Contains(string(raw), private) {
+			t.Fatalf("safe repair projection leaked %q in %s", private, raw)
+		}
+	}
+
+	handler := &Handler{Service: service}
+	body := `{"expected_conversation_version":0,"expected_repair_revision":0,"request_id":"` +
+		attempt.IdempotencyKey + `","instruction":"Address the review feedback."}`
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		RuntimeRoutePrefix+"/"+testDevelopmentCaseID+"/repair",
+		strings.NewReader(body),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("repair status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"repair_revision":1`) ||
+		strings.Contains(recorder.Body.String(), session.ReservationKey) {
+		t.Fatalf("repair body = %s", recorder.Body.String())
+	}
+}
+
+func TestRepairKeepsSessionAgentWhenConfiguredDefaultChanges(t *testing.T) {
+	now := time.Date(2026, 8, 8, 13, 0, 0, 0, time.UTC)
+	captured := testCapturedDevelopmentCase()
+	attempt := eventing.PRDevelopmentRepairAttempt{
+		ID:                  "pdr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		SessionID:           "pds_cccccccccccccccccccccccccccccccc",
+		Ordinal:             0,
+		ConversationVersion: 0,
+		Instruction:         "Address the review feedback.",
+		Status:              eventing.PRDevelopmentRepairQueued,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+	session := eventing.PRDevelopmentRepairSession{
+		ID:             attempt.SessionID,
+		CaseID:         captured.ID,
+		Version:        1,
+		AgentID:        "repairer",
+		ReservationKey: "private-reservation-capability",
+		Attempts:       []eventing.PRDevelopmentRepairAttempt{attempt},
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	store := &fakeRepairStore{
+		fakeReader: &fakeReader{detail: captured},
+		workbench: eventing.PRDevelopmentWorkbench{
+			Case: captured,
+			Conversation: eventing.PRDevelopmentConversation{
+				CaseID: captured.ID, Messages: []eventing.PRDevelopmentMessage{},
+			},
+			RepairSession: &session,
+		},
+	}
+	ready := true
+	var readinessAgents []string
+	service, err := NewService(ServiceConfig{
+		Store:         store,
+		RepairStore:   store,
+		RepairEnabled: true,
+		RepairAgentReady: func(agentID string) bool {
+			readinessAgents = append(readinessAgents, agentID)
+			return ready && agentID == "repairer"
+		},
+		AgentID: "replacement",
+	})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	detail, err := service.Get(context.Background(), captured.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if !detail.RepairAvailable || detail.RepairSession == nil ||
+		detail.RepairSession.AgentID != "repairer" {
+		t.Fatalf("detail after default-agent change = %#v", detail)
+	}
+	if len(readinessAgents) != 1 || readinessAgents[0] != "repairer" {
+		t.Fatalf("readiness agents = %#v, want pinned repairer", readinessAgents)
+	}
+
+	_, err = service.Repair(context.Background(), RepairRequest{
+		CaseID:                      captured.ID,
+		ExpectedConversationVersion: 0,
+		ExpectedRepairRevision:      1,
+		RequestID:                   "prq_dddddddddddddddddddddddddddddddd",
+		Instruction:                 "Continue with the pinned repair agent.",
+	})
+	if err != nil {
+		t.Fatalf("Repair() error = %v", err)
+	}
+	if store.admitCalls != 1 || store.admit.AgentID != "repairer" {
+		t.Fatalf("repair admission = %#v / %d calls", store.admit, store.admitCalls)
+	}
+
+	ready = false
+	detail, err = service.Get(context.Background(), captured.ID)
+	if err != nil {
+		t.Fatalf("Get(unavailable pinned agent) error = %v", err)
+	}
+	if detail.RepairAvailable || detail.RepairUnavailableReason != "runtime_unavailable" {
+		t.Fatalf("unavailable pinned-agent detail = %#v", detail)
+	}
+	_, err = service.Repair(context.Background(), RepairRequest{
+		CaseID:                      captured.ID,
+		ExpectedConversationVersion: 0,
+		ExpectedRepairRevision:      1,
+		RequestID:                   "prq_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		Instruction:                 "This must not be admitted.",
+	})
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Repair(unavailable pinned agent) error = %v", err)
+	}
+	if store.admitCalls != 1 {
+		t.Fatalf("repair admissions after unavailable agent = %d, want 1", store.admitCalls)
+	}
+}
+
+func TestProjectRepairSessionRejectsPartialPrivatePinAndNonmonotonicHistory(t *testing.T) {
+	now := time.Date(2026, 8, 8, 13, 0, 0, 0, time.UTC)
+	attempt := eventing.PRDevelopmentRepairAttempt{
+		ID:                  "pdr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		SessionID:           "pds_cccccccccccccccccccccccccccccccc",
+		Ordinal:             0,
+		ConversationVersion: 0,
+		Instruction:         "Address the review feedback.",
+		Status:              eventing.PRDevelopmentRepairQueued,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+	session := eventing.PRDevelopmentRepairSession{
+		ID:             attempt.SessionID,
+		CaseID:         testDevelopmentCaseID,
+		Version:        1,
+		AgentID:        "main",
+		ReservationKey: "private-reservation-capability",
+		Attempts:       []eventing.PRDevelopmentRepairAttempt{attempt},
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+
+	partial := session
+	partial.CloneURL = "https://github.com/octo/fork.git"
+	if _, err := projectRepairSession(testDevelopmentCaseID, 0, partial); err == nil {
+		t.Fatal("projectRepairSession(partial private pin) error = nil")
+	}
+
+	for _, status := range []eventing.PRDevelopmentRepairStatus{
+		eventing.PRDevelopmentRepairRunning,
+		eventing.PRDevelopmentRepairRecoveryRequired,
+	} {
+		executable := session
+		executable.Attempts = append([]eventing.PRDevelopmentRepairAttempt(nil), session.Attempts...)
+		executable.Attempts[0].Status = status
+		if status == eventing.PRDevelopmentRepairRecoveryRequired {
+			executable.Attempts[0].Summary = "Execution ownership became ambiguous."
+			executable.Attempts[0].ErrorCode = eventing.PRDevelopmentRepairErrorRecoveryRequired
+		}
+		if _, err := projectRepairSession(testDevelopmentCaseID, 0, executable); err == nil {
+			t.Fatalf("projectRepairSession(unpinned %s) error = nil", status)
+		}
+	}
+
+	completedWithoutWorkspace := session
+	completedWithoutWorkspace.HeadRepository = "octo/fork"
+	completedWithoutWorkspace.HeadRef = "feature"
+	completedWithoutWorkspace.HeadSHA = strings.Repeat("a", 40)
+	completedWithoutWorkspace.CloneURL = "https://github.com/octo/fork.git"
+	completedWithoutWorkspace.ReviewDigest = "sha256:" + strings.Repeat("b", 64)
+	completedWithoutWorkspace.Attempts = append(
+		[]eventing.PRDevelopmentRepairAttempt(nil),
+		session.Attempts...,
+	)
+	completedWithoutWorkspace.Attempts[0].Status = eventing.PRDevelopmentRepairCompleted
+	completedWithoutWorkspace.Attempts[0].Summary = "Applied the requested repair."
+	completedWithoutWorkspace.Attempts[0].Iterations = 1
+	if _, err := projectRepairSession(
+		testDevelopmentCaseID,
+		0,
+		completedWithoutWorkspace,
+	); err == nil {
+		t.Fatal("projectRepairSession(completed without workspace) error = nil")
+	}
+
+	second := attempt
+	second.ID = "pdr_dddddddddddddddddddddddddddddddd"
+	second.Ordinal = 1
+	second.Status = eventing.PRDevelopmentRepairFailed
+	second.ErrorCode = eventing.PRDevelopmentRepairErrorInternal
+	second.Summary = "Stopped safely."
+	second.CreatedAt = now.Add(-time.Second)
+	second.UpdatedAt = now
+	first := attempt
+	first.Status = eventing.PRDevelopmentRepairFailed
+	first.ErrorCode = eventing.PRDevelopmentRepairErrorInternal
+	first.Summary = "Stopped safely."
+	nonmonotonic := session
+	nonmonotonic.Version = 2
+	nonmonotonic.Attempts = []eventing.PRDevelopmentRepairAttempt{first, second}
+	if _, err := projectRepairSession(testDevelopmentCaseID, 0, nonmonotonic); err == nil {
+		t.Fatal("projectRepairSession(nonmonotonic history) error = nil")
+	}
+
+	duplicate := nonmonotonic
+	duplicate.Attempts = append(
+		[]eventing.PRDevelopmentRepairAttempt(nil),
+		nonmonotonic.Attempts...,
+	)
+	duplicate.Attempts[1].ID = duplicate.Attempts[0].ID
+	duplicate.Attempts[1].CreatedAt = duplicate.Attempts[0].CreatedAt
+	if _, err := projectRepairSession(testDevelopmentCaseID, 0, duplicate); err == nil {
+		t.Fatal("projectRepairSession(duplicate attempt ID) error = nil")
+	}
+
+	decreasingConversation := duplicate
+	decreasingConversation.Attempts = append(
+		[]eventing.PRDevelopmentRepairAttempt(nil),
+		duplicate.Attempts...,
+	)
+	decreasingConversation.Attempts[1].ID = "pdr_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	decreasingConversation.Attempts[0].ConversationVersion = 2
+	decreasingConversation.Attempts[1].ConversationVersion = 1
+	if _, err := projectRepairSession(
+		testDevelopmentCaseID,
+		2,
+		decreasingConversation,
+	); err == nil {
+		t.Fatal("projectRepairSession(decreasing conversation history) error = nil")
+	}
+}
+
+func TestRepairHandlerRejectsUnsafeRequestsBeforeAdmission(t *testing.T) {
+	captured := testCapturedDevelopmentCase()
+	store := &fakeRepairStore{
+		fakeReader: &fakeReader{detail: captured},
+		workbench: eventing.PRDevelopmentWorkbench{
+			Case: captured,
+			Conversation: eventing.PRDevelopmentConversation{
+				CaseID: captured.ID, Messages: []eventing.PRDevelopmentMessage{},
+			},
+		},
+	}
+	service, err := NewService(ServiceConfig{
+		Store:         store,
+		RepairStore:   store,
+		RepairEnabled: true,
+		RepairAgentReady: func(string) bool {
+			return true
+		},
+		AgentID: "main",
+	})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	handler := &Handler{Service: service}
+	path := RuntimeRoutePrefix + "/" + testDevelopmentCaseID + "/repair"
+	valid := `{"expected_conversation_version":0,"expected_repair_revision":0,"request_id":"prq_dddddddddddddddddddddddddddddddd","instruction":"Fix it."}`
+	tests := []struct {
+		name       string
+		target     string
+		body       string
+		header     string
+		wantStatus int
+	}{
+		{name: "query", target: path + "?x=1", body: valid, wantStatus: http.StatusBadRequest},
+		{
+			name: "browser origin", target: path, body: valid,
+			header: "Origin", wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "browser referer", target: path, body: valid,
+			header: "Referer", wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "unknown", target: path,
+			body:       strings.TrimSuffix(valid, "}") + `,"extra":true}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "duplicate", target: path,
+			body: strings.Replace(
+				valid, `"instruction":`, `"instruction":"first","instruction":`, 1,
+			),
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "case alias",
+			target: RuntimeRoutePrefix +
+				"/%70dc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/repair",
+			body: valid, wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "bad request id", target: path,
+			body: strings.Replace(
+				valid,
+				"prq_dddddddddddddddddddddddddddddddd",
+				"prq_DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+				1,
+			),
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "blank instruction", target: path,
+			body:       strings.Replace(valid, "Fix it.", " ", 1),
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "oversized instruction", target: path,
+			body: strings.Replace(
+				valid,
+				"Fix it.",
+				strings.Repeat("a", MaximumRepairInstructionBytes+1),
+				1,
+			),
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, test.target, strings.NewReader(test.body))
+			request.Header.Set("Content-Type", "application/json")
+			if test.header != "" {
+				request.Header.Set(test.header, "https://launcher.example")
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d, body=%s", recorder.Code, test.wantStatus, recorder.Body.String())
+			}
+		})
+	}
+	if store.admit.CaseID != "" {
+		t.Fatalf("unsafe request reached admission: %#v", store.admit)
 	}
 }
 
@@ -319,6 +767,7 @@ func TestHandlerRejectsMalformedOrMutableRequestsWithoutStoreCalls(t *testing.T)
 		{http.MethodGet, RuntimeRoutePrefix + "/pdc_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", http.StatusBadRequest},
 		{http.MethodGet, RuntimeRoutePrefix + "/%70dc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", http.StatusBadRequest},
 		{http.MethodGet, RuntimeRoutePrefix + "/" + testDevelopmentCaseID + "/chat", http.StatusMethodNotAllowed},
+		{http.MethodGet, RuntimeRoutePrefix + "/" + testDevelopmentCaseID + "/repair", http.StatusMethodNotAllowed},
 		{http.MethodGet, RuntimeRoutePrefix + "/" + testDevelopmentCaseID + "?private=1", http.StatusBadRequest},
 		{http.MethodGet, RuntimeRoutePrefix + "?unknown=x", http.StatusBadRequest},
 		{http.MethodGet, RuntimeRoutePrefix + "?repository=octo", http.StatusBadRequest},

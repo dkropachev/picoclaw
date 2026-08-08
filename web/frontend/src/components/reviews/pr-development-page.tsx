@@ -6,6 +6,7 @@ import {
   IconMessageCircle,
   IconRefresh,
   IconSend,
+  IconTool,
 } from "@tabler/icons-react"
 import {
   useInfiniteQuery,
@@ -16,6 +17,7 @@ import {
 import {
   type FormEvent,
   type UIEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -25,21 +27,36 @@ import { useTranslation } from "react-i18next"
 
 import {
   MAXIMUM_PR_DEVELOPMENT_CHAT_BYTES,
+  MAXIMUM_PR_DEVELOPMENT_REPAIR_INSTRUCTION_BYTES,
   PRDevelopmentAPIError,
   type PRDevelopmentCase,
   type PRDevelopmentCaseDetail,
   type PRDevelopmentCasePage,
   type PRDevelopmentCaseSummary,
   type PRDevelopmentMessage,
+  type PRDevelopmentRepairAttempt,
+  type PRDevelopmentRepairStatus,
   type PRDevelopmentReviewState,
   chatAboutPRDevelopmentCase,
+  createPRDevelopmentRepairRequestID,
   getPRDevelopmentCase,
   listPRDevelopmentCases,
   normalizePRDevelopmentChatContent,
+  startPRDevelopmentRepair,
 } from "@/api/pr-development"
 import { PageHeader } from "@/components/page-header"
 import { ReviewWorkbenchTabs } from "@/components/reviews/review-workbench-tabs"
 import type { ReviewsRouteSearch } from "@/components/reviews/reviews-page"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -155,7 +172,7 @@ export function PRDevelopmentPage({
           <Badge variant="secondary">
             {t(
               "pages.reviews.development.badge",
-              "Captured feedback · advisory AI",
+              "Captured feedback · AI workbench",
             )}
           </Badge>
         }
@@ -460,15 +477,63 @@ function retainNewestPRDevelopmentDetail(
 ): unknown {
   const previousDetail = previous as PRDevelopmentCaseDetail | undefined
   const incomingDetail = incoming as PRDevelopmentCaseDetail | undefined
-  if (
-    previousDetail != null &&
-    incomingDetail != null &&
-    previousDetail.case.id === incomingDetail.case.id &&
-    previousDetail.conversation_version >= incomingDetail.conversation_version
-  ) {
+  if (previousDetail == null || incomingDetail == null) return incoming
+  return mergePRDevelopmentDetail(previousDetail, incomingDetail, {
+    capabilityFreshness: "authoritative",
+  })
+}
+
+function mergePRDevelopmentDetail(
+  previous: PRDevelopmentCaseDetail,
+  incoming: PRDevelopmentCaseDetail,
+  options: { capabilityFreshness: "authoritative" | "downgrade-only" },
+): PRDevelopmentCaseDetail {
+  if (previous.case.id !== incoming.case.id) return incoming
+  const conversationAdvanced =
+    incoming.conversation_version > previous.conversation_version
+  const repairAdvanced = incoming.repair_revision > previous.repair_revision
+  const capabilitySource =
+    options.capabilityFreshness === "authoritative" ||
+    (previous.repair_available && !incoming.repair_available)
+      ? incoming
+      : previous
+  const capabilityChanged =
+    capabilitySource.repair_available !== previous.repair_available ||
+    capabilitySource.repair_unavailable_reason !==
+      previous.repair_unavailable_reason
+  if (!conversationAdvanced && !repairAdvanced && !capabilityChanged) {
     return previous
   }
-  return incoming
+
+  const conversationSource = conversationAdvanced ? incoming : previous
+  const repairSource = repairAdvanced ? incoming : previous
+  return {
+    case: incoming.case,
+    conversation_version: conversationSource.conversation_version,
+    messages: conversationSource.messages,
+    repair_available: capabilitySource.repair_available,
+    ...(capabilitySource.repair_unavailable_reason === undefined
+      ? {}
+      : {
+          repair_unavailable_reason: capabilitySource.repair_unavailable_reason,
+        }),
+    repair_revision: repairSource.repair_revision,
+    ...(repairSource.repair_session === undefined
+      ? {}
+      : { repair_session: repairSource.repair_session }),
+  }
+}
+
+type DevelopmentMutationKind = "repair" | "chat"
+
+interface DevelopmentMutationState {
+  repair: boolean
+  chat: boolean
+}
+
+const idleDevelopmentMutationState: DevelopmentMutationState = {
+  repair: false,
+  chat: false,
 }
 
 function DevelopmentDetailPanel({
@@ -485,11 +550,56 @@ function DevelopmentDetailPanel({
   const { t } = useTranslation()
   const backButtonRef = useRef<HTMLButtonElement>(null)
   const focusedCaseRef = useRef<string | null>(null)
+  const [repairDrafts, setRepairDrafts] = useState(
+    () => new Map<string, string>(),
+  )
+  const [repairIntents, setRepairIntents] = useState(
+    () => new Map<string, RepairStartIntent>(),
+  )
+  const [mutationStates, setMutationStates] = useState(
+    () => new Map<string, DevelopmentMutationState>(),
+  )
+  const rememberRepairDraft = useCallback((id: string, value: string) => {
+    setRepairDrafts((current) => {
+      const next = new Map(current)
+      if (value === "") next.delete(id)
+      else next.set(id, value)
+      return next
+    })
+  }, [])
+  const rememberRepairIntent = useCallback(
+    (id: string, value: RepairStartIntent | null) => {
+      setRepairIntents((current) => {
+        const next = new Map(current)
+        if (value == null) next.delete(id)
+        else next.set(id, value)
+        return next
+      })
+    },
+    [],
+  )
+  const rememberMutationPending = useCallback(
+    (id: string, kind: DevelopmentMutationKind, pending: boolean) => {
+      setMutationStates((current) => {
+        const currentState = current.get(id) ?? idleDevelopmentMutationState
+        if (currentState[kind] === pending) return current
+
+        const nextState = { ...currentState, [kind]: pending }
+        const next = new Map(current)
+        if (!nextState.repair && !nextState.chat) next.delete(id)
+        else next.set(id, nextState)
+        return next
+      })
+    },
+    [],
+  )
   const detailQuery = useQuery({
     queryKey: ["pr-development", "detail", caseID],
     queryFn: () => getPRDevelopmentCase(caseID ?? ""),
     enabled: Boolean(caseID),
     structuralSharing: retainNewestPRDevelopmentDetail,
+    refetchInterval: (query) =>
+      hasActiveRepairAttempt(query.state.data) ? 2000 : false,
   })
   const detail = detailQuery.data
   const developmentCase = detail?.case
@@ -597,6 +707,15 @@ function DevelopmentDetailPanel({
           <DevelopmentCaseDetail
             detail={detail}
             refreshError={detailQuery.isRefetchError ? detailQuery.error : null}
+            refreshing={detailQuery.isFetching}
+            repairDraft={repairDrafts.get(detail.case.id) ?? ""}
+            repairIntent={repairIntents.get(detail.case.id) ?? null}
+            mutationState={
+              mutationStates.get(detail.case.id) ?? idleDevelopmentMutationState
+            }
+            onRememberRepairDraft={rememberRepairDraft}
+            onRememberRepairIntent={rememberRepairIntent}
+            onRememberMutationPending={rememberMutationPending}
             onRetryRefresh={() => void detailQuery.refetch()}
           />
         ) : detailQuery.error ? (
@@ -613,10 +732,31 @@ function DevelopmentDetailPanel({
 function DevelopmentCaseDetail({
   detail,
   refreshError,
+  refreshing,
+  repairDraft,
+  repairIntent,
+  mutationState,
+  onRememberRepairDraft,
+  onRememberRepairIntent,
+  onRememberMutationPending,
   onRetryRefresh,
 }: {
   detail: PRDevelopmentCaseDetail
   refreshError: unknown
+  refreshing: boolean
+  repairDraft: string
+  repairIntent: RepairStartIntent | null
+  mutationState: DevelopmentMutationState
+  onRememberRepairDraft: (caseID: string, value: string) => void
+  onRememberRepairIntent: (
+    caseID: string,
+    value: RepairStartIntent | null,
+  ) => void
+  onRememberMutationPending: (
+    caseID: string,
+    kind: DevelopmentMutationKind,
+    pending: boolean,
+  ) => void
   onRetryRefresh: () => void
 }) {
   const { t } = useTranslation()
@@ -685,7 +825,27 @@ function DevelopmentCaseDetail({
         </div>
       </section>
 
-      <DevelopmentConversation key={developmentCase.id} detail={detail} />
+      <DevelopmentLocalRepair
+        key={`repair-${developmentCase.id}`}
+        detail={detail}
+        refreshing={refreshing}
+        storedDraft={repairDraft}
+        storedIntent={repairIntent}
+        mutationPending={mutationState.repair}
+        otherMutationPending={mutationState.chat}
+        onRememberDraft={onRememberRepairDraft}
+        onRememberIntent={onRememberRepairIntent}
+        onRememberMutationPending={onRememberMutationPending}
+        onReload={onRetryRefresh}
+      />
+
+      <DevelopmentConversation
+        key={`chat-${developmentCase.id}`}
+        detail={detail}
+        mutationPending={mutationState.chat}
+        otherMutationPending={mutationState.repair}
+        onRememberMutationPending={onRememberMutationPending}
+      />
 
       <section className="border-border rounded-lg border p-4">
         <div className="flex items-center gap-2">
@@ -763,10 +923,539 @@ function DevelopmentCaseDetail({
   )
 }
 
-function DevelopmentConversation({
+interface RepairStartIntent {
+  expectedConversationVersion: number
+  expectedRepairRevision: number
+  expectedAttemptOrdinal: number
+  requestID: string
+  instruction: string
+}
+
+function DevelopmentLocalRepair({
   detail,
+  refreshing,
+  storedDraft,
+  storedIntent,
+  mutationPending,
+  otherMutationPending,
+  onRememberDraft,
+  onRememberIntent,
+  onRememberMutationPending,
+  onReload,
 }: {
   detail: PRDevelopmentCaseDetail
+  refreshing: boolean
+  storedDraft: string
+  storedIntent: RepairStartIntent | null
+  mutationPending: boolean
+  otherMutationPending: boolean
+  onRememberDraft: (caseID: string, value: string) => void
+  onRememberIntent: (caseID: string, value: RepairStartIntent | null) => void
+  onRememberMutationPending: (
+    caseID: string,
+    kind: DevelopmentMutationKind,
+    pending: boolean,
+  ) => void
+  onReload: () => void
+}) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [draft, setDraft] = useState(storedDraft)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [intent, setIntentState] = useState<RepairStartIntent | null>(
+    storedIntent,
+  )
+  const [localError, setLocalError] = useState<string>()
+  const developmentCase = detail.case
+  const detailQueryKey = [
+    "pr-development",
+    "detail",
+    developmentCase.id,
+  ] as const
+  const normalizedDraft = normalizePRDevelopmentChatContent(draft)
+  const draftBytes = new TextEncoder().encode(normalizedDraft).byteLength
+  const draftInvalid =
+    normalizedDraft === "" ||
+    normalizedDraft.includes("\0") ||
+    draftBytes > MAXIMUM_PR_DEVELOPMENT_REPAIR_INSTRUCTION_BYTES
+  const latestAttempt = detail.repair_session?.attempts.at(-1)
+  const repairActive = isActiveRepairStatus(latestAttempt?.status)
+  const recoveryRequired = latestAttempt?.status === "recovery_required"
+  const rememberIntent = useCallback(
+    (next: RepairStartIntent | null) => {
+      setIntentState(next)
+      onRememberIntent(developmentCase.id, next)
+    },
+    [developmentCase.id, onRememberIntent],
+  )
+
+  const updateDetail = (incoming: PRDevelopmentCaseDetail) => {
+    queryClient.setQueryData<PRDevelopmentCaseDetail>(
+      detailQueryKey,
+      (current) =>
+        current == null
+          ? incoming
+          : mergePRDevelopmentDetail(current, incoming, {
+              capabilityFreshness: "downgrade-only",
+            }),
+    )
+  }
+
+  const repairMutation = useMutation({
+    mutationFn: (submitted: RepairStartIntent) =>
+      startPRDevelopmentRepair(developmentCase.id, submitted),
+    retry: false,
+    onMutate: () => {
+      onRememberMutationPending(developmentCase.id, "repair", true)
+      setLocalError(undefined)
+    },
+    onSuccess: (updatedDetail) => {
+      updateDetail(updatedDetail)
+      rememberIntent(null)
+      onRememberDraft(developmentCase.id, "")
+      setDraft("")
+    },
+    onError: (error) => {
+      if (error instanceof PRDevelopmentAPIError && error.detail) {
+        updateDetail(error.detail)
+      }
+    },
+    onSettled: () => {
+      onRememberMutationPending(developmentCase.id, "repair", false)
+    },
+  })
+  const resetRepairMutation = repairMutation.reset
+  const repairPending = mutationPending || repairMutation.isPending
+
+  useEffect(() => {
+    if (
+      intent == null ||
+      detail.repair_revision <= intent.expectedRepairRevision
+    ) {
+      return
+    }
+    const matchingAttempt =
+      detail.repair_session?.attempts[intent.expectedAttemptOrdinal]
+    if (
+      matchingAttempt?.conversation_version !==
+        intent.expectedConversationVersion ||
+      matchingAttempt.instruction !== intent.instruction
+    ) {
+      setLocalError(
+        t(
+          "pages.reviews.development.repair_history_changed",
+          "Repair history changed in another tab. Your draft and retry identity were preserved; review the latest history before retrying.",
+        ),
+      )
+      return
+    }
+    rememberIntent(null)
+    setDraft((current) => {
+      if (normalizePRDevelopmentChatContent(current) !== intent.instruction) {
+        return current
+      }
+      onRememberDraft(developmentCase.id, "")
+      return ""
+    })
+    resetRepairMutation()
+  }, [
+    detail.repair_revision,
+    detail.repair_session?.attempts,
+    developmentCase.id,
+    intent,
+    rememberIntent,
+    onRememberDraft,
+    resetRepairMutation,
+    t,
+  ])
+
+  const confirmStart = () => {
+    if (
+      draftInvalid ||
+      repairActive ||
+      repairPending ||
+      otherMutationPending ||
+      !detail.repair_available
+    ) {
+      return
+    }
+    let submitted = intent
+    if (submitted == null || submitted.instruction !== normalizedDraft) {
+      try {
+        submitted = {
+          expectedConversationVersion: detail.conversation_version,
+          expectedRepairRevision: detail.repair_revision,
+          expectedAttemptOrdinal: detail.repair_session?.attempts.length ?? 0,
+          requestID: createPRDevelopmentRepairRequestID(),
+          instruction: normalizedDraft,
+        }
+      } catch (error) {
+        setLocalError(
+          error instanceof Error
+            ? error.message
+            : t(
+                "pages.reviews.development.repair_start_error",
+                "The local repair could not be started.",
+              ),
+        )
+        setConfirmOpen(false)
+        return
+      }
+      rememberIntent(submitted)
+    }
+    setConfirmOpen(false)
+    repairMutation.mutate(submitted)
+  }
+
+  const retryStart = () => {
+    if (
+      intent == null ||
+      repairActive ||
+      repairPending ||
+      otherMutationPending ||
+      !detail.repair_available
+    ) {
+      return
+    }
+    repairMutation.mutate(intent)
+  }
+
+  return (
+    <section className="border-border rounded-lg border p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <IconTool className="text-muted-foreground size-4" />
+            <h3 className="text-sm font-semibold">
+              {t("pages.reviews.development.repair_title", "Local development")}
+            </h3>
+          </div>
+          <p className="text-muted-foreground mt-1 text-xs">
+            {t(
+              "pages.reviews.development.repair_help",
+              "Ask AI to edit a pinned local copy of this PR. Changes stay local until later review, checks, commit, and push steps are available.",
+            )}
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={refreshing}
+          onClick={onReload}
+        >
+          <IconRefresh className={cn("size-4", refreshing && "animate-spin")} />
+          {t("pages.reviews.development.repair_reload", "Reload status")}
+        </Button>
+      </div>
+
+      <div
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="bg-muted/30 mt-3 rounded-md px-3 py-2 text-sm"
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant={repairStatusBadgeVariant(latestAttempt?.status)}>
+            {repairStatusLabel(latestAttempt?.status)}
+          </Badge>
+          <span>{repairStatusDescription(latestAttempt?.status)}</span>
+        </div>
+      </div>
+
+      {detail.repair_session?.head_sha ? (
+        <div className="border-border mt-3 rounded-md border px-3 py-2 text-xs">
+          <p className="text-muted-foreground">
+            {t("pages.reviews.development.repair_pinned_head", "Pinned head")}
+          </p>
+          <p className="mt-1 font-mono break-all">
+            {detail.repair_session.head_repository}:
+            {detail.repair_session.head_ref} · {detail.repair_session.head_sha}
+          </p>
+          <p className="text-muted-foreground mt-1">
+            {t("pages.reviews.development.repair_agent", "Agent {{agent}}", {
+              agent: detail.repair_session.agent_id,
+            })}
+          </p>
+        </div>
+      ) : detail.repair_session ? (
+        <p className="text-muted-foreground mt-3 text-xs">
+          {t("pages.reviews.development.repair_agent", "Agent {{agent}}", {
+            agent: detail.repair_session.agent_id,
+          })}
+        </p>
+      ) : null}
+
+      {!detail.repair_available ? (
+        <p className="border-border bg-muted/30 mt-3 rounded-md border px-3 py-2 text-xs">
+          {t(
+            "pages.reviews.development.repair_unavailable",
+            "Starting a new local repair is unavailable because one or more required repair dependencies are unavailable. Existing history remains visible.",
+          )}
+        </p>
+      ) : null}
+
+      {recoveryRequired ? (
+        <p className="border-destructive/40 bg-destructive/5 mt-3 rounded-md border px-3 py-2 text-xs">
+          {t(
+            "pages.reviews.development.repair_recovery_warning",
+            "Partial local edits may already exist. Tell AI to inspect and preserve them before making further changes.",
+          )}
+        </p>
+      ) : null}
+
+      <div className="mt-4 flex flex-col gap-2">
+        <Label htmlFor={`development-repair-${developmentCase.id}`}>
+          {t(
+            "pages.reviews.development.repair_instruction",
+            "Local repair instruction",
+          )}
+        </Label>
+        <Textarea
+          id={`development-repair-${developmentCase.id}`}
+          value={draft}
+          rows={4}
+          aria-invalid={
+            normalizedDraft !== "" &&
+            (draftBytes > MAXIMUM_PR_DEVELOPMENT_REPAIR_INSTRUCTION_BYTES ||
+              normalizedDraft.includes("\0"))
+          }
+          placeholder={t(
+            "pages.reviews.development.repair_placeholder",
+            "Describe what the AI should change in the local checkout…",
+          )}
+          disabled={
+            repairPending ||
+            otherMutationPending ||
+            repairActive ||
+            !detail.repair_available
+          }
+          onChange={(event) => {
+            const next = event.target.value
+            setDraft(next)
+            onRememberDraft(developmentCase.id, next)
+            setLocalError(undefined)
+            if (
+              intent != null &&
+              normalizePRDevelopmentChatContent(next) !== intent.instruction
+            ) {
+              rememberIntent(null)
+              resetRepairMutation()
+            }
+          }}
+        />
+        {draftBytes > MAXIMUM_PR_DEVELOPMENT_REPAIR_INSTRUCTION_BYTES ? (
+          <p className="text-destructive text-xs" role="alert">
+            {t(
+              "pages.reviews.development.repair_too_large",
+              "The instruction must be at most 4 KiB.",
+            )}
+          </p>
+        ) : null}
+        {localError || repairMutation.isError ? (
+          <div
+            className="border-destructive/40 bg-destructive/5 flex flex-wrap items-center gap-2 rounded-md border p-2"
+            role="alert"
+          >
+            <p className="text-destructive min-w-0 flex-1 text-xs">
+              {localError ??
+                (repairMutation.error instanceof Error
+                  ? repairMutation.error.message
+                  : t(
+                      "pages.reviews.development.repair_start_error",
+                      "The local repair could not be started.",
+                    ))}
+            </p>
+            {intent != null ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={
+                  repairPending ||
+                  otherMutationPending ||
+                  repairActive ||
+                  !detail.repair_available
+                }
+                onClick={retryStart}
+              >
+                {repairPending
+                  ? t("pages.reviews.development.repair_starting", "Starting…")
+                  : t(
+                      "pages.reviews.development.repair_retry_start",
+                      "Retry start",
+                    )}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="flex justify-end">
+          <Button
+            type="button"
+            disabled={
+              draftInvalid ||
+              repairPending ||
+              otherMutationPending ||
+              repairActive ||
+              !detail.repair_available
+            }
+            onClick={() => setConfirmOpen(true)}
+          >
+            <IconTool className="size-4" />
+            {repairPending
+              ? t("pages.reviews.development.repair_starting", "Starting…")
+              : recoveryRequired
+                ? t(
+                    "pages.reviews.development.repair_continue",
+                    "Continue local repair",
+                  )
+                : t(
+                    "pages.reviews.development.repair_start",
+                    "Start local repair",
+                  )}
+          </Button>
+        </div>
+      </div>
+
+      {detail.repair_session?.attempts.length ? (
+        <div className="mt-5">
+          <h4 className="text-sm font-medium">
+            {t("pages.reviews.development.repair_history", "Repair history")}
+          </h4>
+          <ol className="mt-2 flex flex-col gap-2">
+            {[...detail.repair_session.attempts].reverse().map((attempt) => (
+              <RepairAttemptCard key={attempt.id} attempt={attempt} />
+            ))}
+          </ol>
+        </div>
+      ) : null}
+
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {recoveryRequired
+                ? t(
+                    "pages.reviews.development.repair_recovery_confirm_title",
+                    "Continue from this recovery-required repair?",
+                  )
+                : t(
+                    "pages.reviews.development.repair_confirm_title",
+                    "Start this local repair?",
+                  )}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {recoveryRequired
+                ? t(
+                    "pages.reviews.development.repair_recovery_confirm_description",
+                    "Partial edits may exist in the same pinned local workspace. Your new instruction should tell AI to inspect and preserve them before continuing. Changes remain local, unreviewed, untested, uncommitted, and unpushed. Nothing will be changed on GitHub.",
+                  )
+                : t(
+                    "pages.reviews.development.repair_confirm_description",
+                    "AI will edit a pinned local copy of the PR using this instruction. Those edits are local, unreviewed, untested, uncommitted, and unpushed. Nothing will be changed on GitHub.",
+                  )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={repairPending}>
+              {t("pages.reviews.development.repair_cancel", "Cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={
+                draftInvalid ||
+                repairPending ||
+                otherMutationPending ||
+                repairActive ||
+                !detail.repair_available
+              }
+              onClick={(event) => {
+                event.preventDefault()
+                confirmStart()
+              }}
+            >
+              {repairPending
+                ? t("pages.reviews.development.repair_starting", "Starting…")
+                : recoveryRequired
+                  ? t(
+                      "pages.reviews.development.repair_continue",
+                      "Continue local repair",
+                    )
+                  : t(
+                      "pages.reviews.development.repair_confirm",
+                      "Start local repair",
+                    )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </section>
+  )
+}
+
+function RepairAttemptCard({
+  attempt,
+}: {
+  attempt: PRDevelopmentRepairAttempt
+}) {
+  const { t } = useTranslation()
+  return (
+    <li className="border-border min-w-0 rounded-md border p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-medium">
+            {t(
+              "pages.reviews.development.repair_attempt",
+              "Attempt {{number}}",
+              { number: attempt.ordinal + 1 },
+            )}
+          </span>
+          <Badge variant={repairStatusBadgeVariant(attempt.status)}>
+            {repairStatusLabel(attempt.status)}
+          </Badge>
+        </div>
+        <time
+          className="text-muted-foreground text-xs"
+          dateTime={attempt.updated_at}
+        >
+          {formatDate(attempt.updated_at)}
+        </time>
+      </div>
+      <p className="mt-2 text-sm break-words whitespace-pre-wrap">
+        {attempt.instruction}
+      </p>
+      {attempt.summary ? (
+        <div className="bg-muted/30 mt-2 rounded-md p-2">
+          <p className="text-muted-foreground text-xs font-medium">
+            {t("pages.reviews.development.repair_summary", "Outcome summary")}
+          </p>
+          <p className="mt-1 text-sm break-words whitespace-pre-wrap">
+            {attempt.summary}
+          </p>
+        </div>
+      ) : null}
+      {attempt.error_code ? (
+        <p className="text-destructive mt-2 text-xs">
+          {repairErrorLabel(attempt.error_code)}
+        </p>
+      ) : null}
+    </li>
+  )
+}
+
+function DevelopmentConversation({
+  detail,
+  mutationPending,
+  otherMutationPending,
+  onRememberMutationPending,
+}: {
+  detail: PRDevelopmentCaseDetail
+  mutationPending: boolean
+  otherMutationPending: boolean
+  onRememberMutationPending: (
+    caseID: string,
+    kind: DevelopmentMutationKind,
+    pending: boolean,
+  ) => void
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -802,10 +1491,11 @@ function DevelopmentConversation({
     queryClient.setQueryData<PRDevelopmentCaseDetail>(
       detailQueryKey,
       (current) =>
-        current?.case.id === incoming.case.id &&
-        current.conversation_version >= incoming.conversation_version
-          ? current
-          : incoming,
+        current == null
+          ? incoming
+          : mergePRDevelopmentDetail(current, incoming, {
+              capabilityFreshness: "downgrade-only",
+            }),
     )
   }
 
@@ -820,6 +1510,7 @@ function DevelopmentConversation({
       chatAboutPRDevelopmentCase(developmentCase.id, expectedVersion, content),
     retry: false,
     onMutate: () => {
+      onRememberMutationPending(developmentCase.id, "chat", true)
       setFailedMessageCommitted(false)
     },
     onSuccess: (updatedDetail) => {
@@ -847,8 +1538,12 @@ function DevelopmentConversation({
         setUncertainSubmission(submitted)
       }
     },
+    onSettled: () => {
+      onRememberMutationPending(developmentCase.id, "chat", false)
+    },
   })
   const resetChatMutation = chatMutation.reset
+  const chatPending = mutationPending || chatMutation.isPending
 
   useEffect(() => {
     if (uncertainSubmission == null || !uncertainMessageCommitted) {
@@ -872,17 +1567,18 @@ function DevelopmentConversation({
   ])
 
   useEffect(() => {
-    if (chatMutation.isPending || !restoreFocusAfterRetry) {
+    if (chatPending || !restoreFocusAfterRetry) {
       return
     }
     setRestoreFocusAfterRetry(false)
     composerRef.current?.focus()
-  }, [chatMutation.isPending, restoreFocusAfterRetry])
+  }, [chatPending, restoreFocusAfterRetry])
 
   const send = (event?: FormEvent) => {
     event?.preventDefault()
     if (
-      chatMutation.isPending ||
+      chatPending ||
+      otherMutationPending ||
       draftInvalid ||
       (messageWasCommitted && uncertainSubmission?.content === normalizedDraft)
     ) {
@@ -922,7 +1618,7 @@ function DevelopmentConversation({
         aria-live="polite"
         aria-relevant="additions text"
         aria-atomic="false"
-        aria-busy={chatMutation.isPending}
+        aria-busy={chatPending}
         aria-label={t(
           "pages.reviews.development.chat_history",
           "Development conversation",
@@ -964,7 +1660,7 @@ function DevelopmentConversation({
             "Ask a question or steer the discussion…",
           )}
           onChange={(event) => setDraft(event.target.value)}
-          disabled={chatMutation.isPending}
+          disabled={chatPending || otherMutationPending}
         />
         {draftBytes > MAXIMUM_PR_DEVELOPMENT_CHAT_BYTES ? (
           <p className="text-destructive text-xs" role="alert">
@@ -974,8 +1670,7 @@ function DevelopmentConversation({
             )}
           </p>
         ) : null}
-        {(chatMutation.isError ||
-          (chatMutation.isPending && restoreFocusAfterRetry)) &&
+        {(chatMutation.isError || (chatPending && restoreFocusAfterRetry)) &&
         !uncertainTurnCompleted ? (
           <div
             className="border-destructive/40 bg-destructive/5 flex flex-wrap items-center gap-2 rounded-md border p-2"
@@ -999,13 +1694,13 @@ function DevelopmentConversation({
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={draftInvalid || chatMutation.isPending}
+                disabled={draftInvalid || chatPending || otherMutationPending}
                 onClick={() => {
                   setRestoreFocusAfterRetry(true)
                   send()
                 }}
               >
-                {chatMutation.isPending
+                {chatPending
                   ? t("pages.reviews.development.chat_sending", "Sending…")
                   : t("pages.reviews.retry", "Retry")}
               </Button>
@@ -1028,10 +1723,10 @@ function DevelopmentConversation({
         <div className="flex justify-end">
           <Button
             type="submit"
-            disabled={draftInvalid || chatMutation.isPending}
+            disabled={draftInvalid || chatPending || otherMutationPending}
           >
             <IconSend className="size-4" />
-            {chatMutation.isPending
+            {chatPending
               ? t("pages.reviews.development.chat_sending", "Sending…")
               : t("pages.reviews.development.chat_send", "Send")}
           </Button>
@@ -1200,6 +1895,91 @@ function formatDate(value: string): string {
 
 function shortSHA(value: string): string {
   return value.slice(0, 8)
+}
+
+function hasActiveRepairAttempt(
+  detail: PRDevelopmentCaseDetail | undefined,
+): boolean {
+  return isActiveRepairStatus(detail?.repair_session?.attempts.at(-1)?.status)
+}
+
+function isActiveRepairStatus(
+  status: PRDevelopmentRepairStatus | undefined,
+): boolean {
+  return status === "queued" || status === "preparing" || status === "running"
+}
+
+function repairStatusLabel(
+  status: PRDevelopmentRepairStatus | undefined,
+): string {
+  switch (status) {
+    case undefined:
+      return "Not started"
+    case "queued":
+      return "Queued"
+    case "preparing":
+      return "Preparing"
+    case "running":
+      return "Running"
+    case "completed":
+      return "Completed"
+    case "failed":
+      return "Failed"
+    case "recovery_required":
+      return "Recovery required"
+  }
+}
+
+function repairStatusDescription(
+  status: PRDevelopmentRepairStatus | undefined,
+): string {
+  switch (status) {
+    case undefined:
+      return "No local repair has been started."
+    case "queued":
+      return "The local repair is waiting to start."
+    case "preparing":
+      return "Current PR state is being verified before local editing starts."
+    case "running":
+      return "AI is editing the pinned local copy."
+    case "completed":
+      return "Local edits are ready for review; they are not tested, committed, or pushed."
+    case "failed":
+      return "The repair stopped before AI editing began."
+    case "recovery_required":
+      return "Recovery is required. Partial local edits may already exist in the pinned workspace."
+  }
+}
+
+function repairStatusBadgeVariant(
+  status: PRDevelopmentRepairStatus | undefined,
+): "outline" | "secondary" | "destructive" {
+  if (status === "completed") return "secondary"
+  if (status === "failed" || status === "recovery_required") {
+    return "destructive"
+  }
+  return "outline"
+}
+
+function repairErrorLabel(
+  code: NonNullable<PRDevelopmentRepairAttempt["error_code"]>,
+): string {
+  switch (code) {
+    case "provider_changed":
+      return "The pull request provider state changed before repair could continue."
+    case "not_actionable":
+      return "The captured feedback is no longer actionable."
+    case "runtime_unavailable":
+      return "The repair runtime is unavailable."
+    case "workspace_unavailable":
+      return "The pinned local workspace is unavailable."
+    case "repair_failed":
+      return "The AI repair could not be completed."
+    case "recovery_required":
+      return "Partial local edits may exist. Use an explicit instruction to inspect and preserve them before continuing."
+    case "internal_error":
+      return "The local repair stopped because of an internal error."
+  }
 }
 
 function useWideDevelopmentLayout(): boolean {

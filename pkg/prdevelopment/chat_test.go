@@ -358,6 +358,65 @@ func TestDevelopmentAIContextBoundsWorstCaseValidTranscript(t *testing.T) {
 	}
 }
 
+func TestDevelopmentAIContextIncludesOnlySafeRepairSummary(t *testing.T) {
+	captured := testCapturedDevelopmentCase()
+	now := time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC)
+	session := &eventing.PRDevelopmentRepairSession{
+		ID:             "pds_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		CaseID:         captured.ID,
+		Version:        5,
+		AgentID:        "main",
+		HeadRepository: "fork/repo",
+		HeadRef:        "feature",
+		HeadSHA:        strings.Repeat("a", 40),
+		CloneURL:       "https://credential-private.example/fork/repo.git",
+		ReviewDigest:   "review-digest-private",
+		ReservationKey: "reservation-private",
+		WorkspaceID:    "workspace-private",
+		Attempts: []eventing.PRDevelopmentRepairAttempt{{
+			ID:            "pdr_cccccccccccccccccccccccccccccccc",
+			SessionID:     "pds_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			Instruction:   "Address the retry race.",
+			Status:        eventing.PRDevelopmentRepairCompleted,
+			Summary:       "Updated the retry state machine.",
+			Iterations:    2,
+			InternalError: "provider-private-error",
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		}},
+	}
+	encoded, err := developmentAIContextWithRepair(
+		captured,
+		eventing.PRDevelopmentConversation{
+			CaseID: captured.ID, Messages: []eventing.PRDevelopmentMessage{},
+		},
+		session,
+	)
+	if err != nil {
+		t.Fatalf("developmentAIContextWithRepair() error = %v", err)
+	}
+	for _, safe := range []string{
+		"Address the retry race.",
+		"Updated the retry state machine.",
+		"fork/repo",
+	} {
+		if !strings.Contains(encoded, safe) {
+			t.Fatalf("context omitted safe repair value %q: %s", safe, encoded)
+		}
+	}
+	for _, private := range []string{
+		session.CloneURL,
+		session.ReviewDigest,
+		session.ReservationKey,
+		session.WorkspaceID,
+		session.Attempts[0].InternalError,
+	} {
+		if strings.Contains(encoded, private) {
+			t.Fatalf("context leaked private repair value %q: %s", private, encoded)
+		}
+	}
+}
+
 func TestServiceChatKeepsUserMessageWhenAIFails(t *testing.T) {
 	store := newDevelopmentChatStore()
 	agent := &developmentChatAgent{

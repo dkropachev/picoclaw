@@ -23,6 +23,9 @@ var (
 	_ PRDevelopmentCaseStore         = (*Store)(nil)
 	_ PRDevelopmentCaseReader        = (*Store)(nil)
 	_ PRDevelopmentConversationStore = (*Store)(nil)
+	_ PRDevelopmentWorkbenchReader   = (*Store)(nil)
+	_ PRDevelopmentRepairAdmitter    = (*Store)(nil)
+	_ PRDevelopmentRepairQueue       = (*Store)(nil)
 )
 
 func Open(context.Context, string, ...Option) (*Store, error) {
@@ -193,6 +196,57 @@ func (*Store) AppendPRDevelopmentMessage(
 	PRDevelopmentMessageAppend,
 ) (PRDevelopmentConversation, error) {
 	return PRDevelopmentConversation{}, ErrUnsupportedPlatform
+}
+
+func (*Store) GetPRDevelopmentWorkbench(
+	context.Context,
+	string,
+) (PRDevelopmentWorkbench, error) {
+	return PRDevelopmentWorkbench{}, ErrUnsupportedPlatform
+}
+
+func (*Store) AdmitPRDevelopmentRepair(
+	context.Context,
+	PRDevelopmentRepairAdmit,
+) (PRDevelopmentWorkbench, bool, error) {
+	return PRDevelopmentWorkbench{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) ClaimPRDevelopmentRepair(
+	context.Context,
+	PRDevelopmentRepairClaimRequest,
+) (PRDevelopmentRepairSession, bool, error) {
+	return PRDevelopmentRepairSession{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) RenewPRDevelopmentRepairLease(
+	context.Context,
+	string,
+	string,
+	time.Duration,
+) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Store) PinPRDevelopmentRepairSession(
+	context.Context,
+	PRDevelopmentRepairPin,
+) (PRDevelopmentRepairSession, error) {
+	return PRDevelopmentRepairSession{}, ErrUnsupportedPlatform
+}
+
+func (*Store) BeginPRDevelopmentRepair(
+	context.Context,
+	PRDevelopmentRepairBegin,
+) (PRDevelopmentRepairSession, error) {
+	return PRDevelopmentRepairSession{}, ErrUnsupportedPlatform
+}
+
+func (*Store) FinishPRDevelopmentRepair(
+	context.Context,
+	PRDevelopmentRepairOutcome,
+) (PRDevelopmentRepairSession, error) {
+	return PRDevelopmentRepairSession{}, ErrUnsupportedPlatform
 }
 
 func (*Store) CaptureReview(

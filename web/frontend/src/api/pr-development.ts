@@ -7,6 +7,21 @@ export type PRDevelopmentReviewState =
   | "commented"
   | "dismissed"
 export type PRDevelopmentMessageRole = "user" | "assistant"
+export type PRDevelopmentRepairStatus =
+  | "queued"
+  | "preparing"
+  | "running"
+  | "completed"
+  | "failed"
+  | "recovery_required"
+export type PRDevelopmentRepairErrorCode =
+  | "provider_changed"
+  | "not_actionable"
+  | "runtime_unavailable"
+  | "workspace_unavailable"
+  | "repair_failed"
+  | "recovery_required"
+  | "internal_error"
 
 export interface PRDevelopmentMessage {
   id: string
@@ -49,10 +64,36 @@ export interface PRDevelopmentCasePage {
   next_cursor?: string
 }
 
+export interface PRDevelopmentRepairAttempt {
+  id: string
+  ordinal: number
+  status: PRDevelopmentRepairStatus
+  conversation_version: number
+  instruction: string
+  summary?: string
+  error_code?: PRDevelopmentRepairErrorCode
+  created_at: string
+  updated_at: string
+}
+
+export interface PRDevelopmentRepairSession {
+  id: string
+  revision: number
+  agent_id: string
+  head_repository?: string
+  head_ref?: string
+  head_sha?: string
+  attempts: PRDevelopmentRepairAttempt[]
+}
+
 export interface PRDevelopmentCaseDetail {
   case: PRDevelopmentCase
   conversation_version: number
   messages: PRDevelopmentMessage[]
+  repair_available: boolean
+  repair_unavailable_reason?: "runtime_unavailable"
+  repair_revision: number
+  repair_session?: PRDevelopmentRepairSession
 }
 
 export interface PRDevelopmentListParams {
@@ -60,6 +101,14 @@ export interface PRDevelopmentListParams {
   pull_number?: number
   limit?: number
   cursor?: string
+}
+
+export interface StartPRDevelopmentRepairInput {
+  expectedConversationVersion: number
+  expectedRepairRevision: number
+  expectedAttemptOrdinal: number
+  requestID: string
+  instruction: string
 }
 
 export class PRDevelopmentAPIError extends Error {
@@ -82,6 +131,10 @@ const MALFORMED_RESPONSE_MESSAGE =
   "The PR development service returned a malformed response."
 const CASE_ID_PATTERN = /^pdc_[0-9a-f]{32}$/
 const MESSAGE_ID_PATTERN = /^pdm_[0-9a-f]{32}$/
+const REPAIR_SESSION_ID_PATTERN = /^pds_[0-9a-f]{32}$/
+const REPAIR_ATTEMPT_ID_PATTERN = /^pdr_[0-9a-f]{32}$/
+const REPAIR_REQUEST_ID_PATTERN = /^prq_[0-9a-f]{32}$/
+const AGENT_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/
 const GIT_OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 const RFC3339_PATTERN =
@@ -95,8 +148,12 @@ const MAXIMUM_REF_BYTES = 1024
 const MAXIMUM_URL_BYTES = 4096
 const MAXIMUM_FEEDBACK_BYTES = 64 << 10
 export const MAXIMUM_PR_DEVELOPMENT_CHAT_BYTES = 32 << 10
+export const MAXIMUM_PR_DEVELOPMENT_REPAIR_INSTRUCTION_BYTES = 4 << 10
 const MAXIMUM_MESSAGE_BYTES = 64 << 10
+const MAXIMUM_REPAIR_SUMMARY_BYTES = 4 << 10
 const MAXIMUM_MESSAGES = 256
+const MAXIMUM_REPAIR_REVISION = 1024
+const MAXIMUM_REPAIR_ATTEMPTS = 64
 const MAXIMUM_TRANSCRIPT_BYTES = 4 << 20
 // Safe conflict/model-failure responses may carry the complete transcript so
 // the UI can recover authoritative state. Match the launcher's bounded JSON
@@ -122,6 +179,23 @@ const currentReviewStates = new Set<PRDevelopmentReviewState>([
   "dismissed",
 ])
 const messageRoles = new Set<PRDevelopmentMessageRole>(["user", "assistant"])
+const repairStatuses = new Set<PRDevelopmentRepairStatus>([
+  "queued",
+  "preparing",
+  "running",
+  "completed",
+  "failed",
+  "recovery_required",
+])
+const repairErrorCodes = new Set<PRDevelopmentRepairErrorCode>([
+  "provider_changed",
+  "not_actionable",
+  "runtime_unavailable",
+  "workspace_unavailable",
+  "repair_failed",
+  "recovery_required",
+  "internal_error",
+])
 const summaryKeys = new Set([
   "id",
   "repository",
@@ -149,8 +223,36 @@ const detailCaseKeys = new Set([
   "review_commit_sha",
   "feedback",
 ])
-const detailKeys = new Set(["case", "conversation_version", "messages"])
+const detailKeys = new Set([
+  "case",
+  "conversation_version",
+  "messages",
+  "repair_available",
+  "repair_unavailable_reason",
+  "repair_revision",
+  "repair_session",
+])
 const messageKeys = new Set(["id", "ordinal", "role", "content", "created_at"])
+const repairSessionKeys = new Set([
+  "id",
+  "revision",
+  "agent_id",
+  "head_repository",
+  "head_ref",
+  "head_sha",
+  "attempts",
+])
+const repairAttemptKeys = new Set([
+  "id",
+  "ordinal",
+  "status",
+  "conversation_version",
+  "instruction",
+  "summary",
+  "error_code",
+  "created_at",
+  "updated_at",
+])
 
 export async function listPRDevelopmentCases(
   input: PRDevelopmentListParams = {},
@@ -229,7 +331,7 @@ export async function chatAboutPRDevelopmentCase(
         }),
       },
     ),
-    { caseID, minimumVersion: expectedVersion },
+    { caseID, minimumConversationVersion: expectedVersion },
   )
   const detail = parseDetail(body, { caseID })
   const userMessage = detail.messages[expectedVersion]
@@ -239,6 +341,75 @@ export async function chatAboutPRDevelopmentCase(
     userMessage?.role !== "user" ||
     userMessage.content !== normalizedContent ||
     assistantMessage?.role !== "assistant"
+  ) {
+    throw malformedResponse()
+  }
+  return detail
+}
+
+export function createPRDevelopmentRepairRequestID(): string {
+  const webCrypto = globalThis.crypto
+  if (webCrypto == null || typeof webCrypto.getRandomValues !== "function") {
+    throw new PRDevelopmentAPIError(
+      "Secure random generation is unavailable.",
+      503,
+    )
+  }
+  const bytes = webCrypto.getRandomValues(new Uint8Array(16))
+  return `prq_${Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("")}`
+}
+
+export async function startPRDevelopmentRepair(
+  caseID: string,
+  input: StartPRDevelopmentRepairInput,
+): Promise<PRDevelopmentCaseDetail> {
+  const instruction = normalizePRDevelopmentChatContent(input.instruction)
+  if (
+    !CASE_ID_PATTERN.test(caseID) ||
+    !isConversationVersion(input.expectedConversationVersion) ||
+    !isRepairRevision(input.expectedRepairRevision) ||
+    !isExpectedRepairAttemptOrdinal(input.expectedAttemptOrdinal) ||
+    !REPAIR_REQUEST_ID_PATTERN.test(input.requestID) ||
+    !isBoundedCanonicalText(
+      instruction,
+      MAXIMUM_PR_DEVELOPMENT_REPAIR_INSTRUCTION_BYTES,
+    )
+  ) {
+    throw new PRDevelopmentAPIError("Invalid local repair request.", 400)
+  }
+
+  const response = await launcherFetch(
+    `/api/pr-development/${encodeURIComponent(caseID)}/repair`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        expected_conversation_version: input.expectedConversationVersion,
+        expected_repair_revision: input.expectedRepairRevision,
+        request_id: input.requestID,
+        instruction,
+      }),
+    },
+  )
+  const body = await responseBody(response, {
+    caseID,
+    minimumConversationVersion: input.expectedConversationVersion,
+    minimumRepairRevision: input.expectedRepairRevision,
+  })
+  if (response.status !== 202) {
+    throw malformedResponse()
+  }
+  const detail = parseDetail(body, { caseID })
+  const matchingAttempt =
+    detail.repair_session?.attempts[input.expectedAttemptOrdinal]
+  if (
+    detail.conversation_version < input.expectedConversationVersion ||
+    detail.repair_revision <= input.expectedRepairRevision ||
+    matchingAttempt?.conversation_version !==
+      input.expectedConversationVersion ||
+    matchingAttempt.instruction !== instruction
   ) {
     throw malformedResponse()
   }
@@ -327,32 +498,204 @@ function parseCase(value: unknown): PRDevelopmentCase {
 
 function parseDetail(
   value: unknown,
-  binding?: { caseID: string; minimumVersion?: number },
+  binding?: {
+    caseID: string
+    minimumConversationVersion?: number
+    minimumRepairRevision?: number
+  },
 ): PRDevelopmentCaseDetail {
   if (
     !isRecord(value) ||
     !onlyKeys(value, detailKeys) ||
-    !Number.isSafeInteger(value.conversation_version) ||
-    (value.conversation_version as number) < 0 ||
-    (value.conversation_version as number) > MAXIMUM_MESSAGES
+    !isConversationVersion(value.conversation_version) ||
+    typeof value.repair_available !== "boolean" ||
+    !isRepairRevision(value.repair_revision) ||
+    (value.repair_unavailable_reason !== undefined &&
+      value.repair_unavailable_reason !== "runtime_unavailable") ||
+    (value.repair_available && value.repair_unavailable_reason !== undefined) ||
+    (!value.repair_available &&
+      value.repair_unavailable_reason !== "runtime_unavailable")
   ) {
     throw malformedResponse()
   }
   const conversationVersion = value.conversation_version as number
+  const repairRevision = value.repair_revision as number
   const developmentCase = parseCase(value.case)
   if (
     binding !== undefined &&
     (developmentCase.id !== binding.caseID ||
-      (binding.minimumVersion !== undefined &&
-        conversationVersion < binding.minimumVersion))
+      (binding.minimumConversationVersion !== undefined &&
+        conversationVersion < binding.minimumConversationVersion) ||
+      (binding.minimumRepairRevision !== undefined &&
+        repairRevision < binding.minimumRepairRevision))
   ) {
     throw malformedResponse()
   }
+  const repairSession = parseRepairSession(
+    value.repair_session,
+    repairRevision,
+    conversationVersion,
+  )
   return {
     case: developmentCase,
     conversation_version: conversationVersion,
     messages: parseMessages(value.messages, conversationVersion),
+    repair_available: value.repair_available,
+    ...(value.repair_unavailable_reason === undefined
+      ? {}
+      : { repair_unavailable_reason: value.repair_unavailable_reason }),
+    repair_revision: repairRevision,
+    ...(repairSession === undefined ? {} : { repair_session: repairSession }),
   }
+}
+
+function parseRepairSession(
+  value: unknown,
+  repairRevision: number,
+  conversationVersion: number,
+): PRDevelopmentRepairSession | undefined {
+  if (value === undefined) {
+    if (repairRevision !== 0) throw malformedResponse()
+    return undefined
+  }
+  if (
+    !isRecord(value) ||
+    !onlyKeys(value, repairSessionKeys) ||
+    !isPattern(value.id, REPAIR_SESSION_ID_PATTERN) ||
+    value.revision !== repairRevision ||
+    repairRevision === 0 ||
+    !isPattern(value.agent_id, AGENT_ID_PATTERN) ||
+    !Array.isArray(value.attempts) ||
+    value.attempts.length === 0 ||
+    value.attempts.length > MAXIMUM_REPAIR_ATTEMPTS
+  ) {
+    throw malformedResponse()
+  }
+  const pinnedValues = [value.head_repository, value.head_ref, value.head_sha]
+  const pinned = pinnedValues.every((item) => item !== undefined)
+  if (
+    (!pinned && pinnedValues.some((item) => item !== undefined)) ||
+    (pinned &&
+      (!isRepository(value.head_repository) ||
+        !isBoundedCanonicalText(value.head_ref, MAXIMUM_REF_BYTES) ||
+        !isPattern(value.head_sha, GIT_OID_PATTERN)))
+  ) {
+    throw malformedResponse()
+  }
+
+  const attempts = parseRepairAttempts(value.attempts, conversationVersion)
+  if (
+    !pinned &&
+    attempts.some(
+      (attempt) =>
+        attempt.status === "running" ||
+        attempt.status === "completed" ||
+        attempt.status === "recovery_required",
+    )
+  ) {
+    throw malformedResponse()
+  }
+  return {
+    id: value.id,
+    revision: repairRevision,
+    agent_id: value.agent_id,
+    ...(pinned
+      ? {
+          head_repository: value.head_repository as string,
+          head_ref: value.head_ref as string,
+          head_sha: value.head_sha as string,
+        }
+      : {}),
+    attempts,
+  }
+}
+
+function parseRepairAttempts(
+  attempts: unknown[],
+  detailConversationVersion: number,
+): PRDevelopmentRepairAttempt[] {
+  const ids = new Set<string>()
+  let previousCreatedAt = ""
+  let previousConversationVersion = 0
+  return attempts.map((attempt, ordinal) => {
+    if (
+      !isRecord(attempt) ||
+      !onlyKeys(attempt, repairAttemptKeys) ||
+      !isPattern(attempt.id, REPAIR_ATTEMPT_ID_PATTERN) ||
+      ids.has(attempt.id) ||
+      attempt.ordinal !== ordinal ||
+      !isSetMember(attempt.status, repairStatuses) ||
+      !isConversationVersion(attempt.conversation_version) ||
+      attempt.conversation_version > detailConversationVersion ||
+      (ordinal > 0 &&
+        attempt.conversation_version < previousConversationVersion) ||
+      !isBoundedCanonicalText(
+        attempt.instruction,
+        MAXIMUM_PR_DEVELOPMENT_REPAIR_INSTRUCTION_BYTES,
+      ) ||
+      !isOptionalBoundedText(attempt.summary, MAXIMUM_REPAIR_SUMMARY_BYTES) ||
+      (attempt.error_code !== undefined &&
+        !isSetMember(attempt.error_code, repairErrorCodes)) ||
+      !isTimestamp(attempt.created_at) ||
+      !isTimestamp(attempt.updated_at) ||
+      Date.parse(attempt.updated_at) < Date.parse(attempt.created_at) ||
+      (previousCreatedAt !== "" &&
+        Date.parse(attempt.created_at) < Date.parse(previousCreatedAt)) ||
+      (ordinal < attempts.length - 1 &&
+        !isTerminalRepairStatus(attempt.status)) ||
+      !hasValidRepairOutcome(attempt)
+    ) {
+      throw malformedResponse()
+    }
+    ids.add(attempt.id)
+    previousCreatedAt = attempt.created_at
+    previousConversationVersion = attempt.conversation_version
+    return {
+      id: attempt.id,
+      ordinal,
+      status: attempt.status,
+      conversation_version: attempt.conversation_version,
+      instruction: attempt.instruction,
+      ...(attempt.summary === undefined ? {} : { summary: attempt.summary }),
+      ...(attempt.error_code === undefined
+        ? {}
+        : { error_code: attempt.error_code }),
+      created_at: attempt.created_at,
+      updated_at: attempt.updated_at,
+    }
+  })
+}
+
+function hasValidRepairOutcome(attempt: Record<string, unknown>): boolean {
+  switch (attempt.status) {
+    case "queued":
+    case "preparing":
+    case "running":
+      return attempt.summary === undefined && attempt.error_code === undefined
+    case "completed":
+      return attempt.summary !== undefined && attempt.error_code === undefined
+    case "failed":
+      return (
+        attempt.summary !== undefined &&
+        attempt.error_code !== undefined &&
+        attempt.error_code !== "recovery_required"
+      )
+    case "recovery_required":
+      return (
+        attempt.summary !== undefined &&
+        attempt.error_code === "recovery_required"
+      )
+    default:
+      return false
+  }
+}
+
+function isTerminalRepairStatus(status: PRDevelopmentRepairStatus): boolean {
+  return (
+    status === "completed" ||
+    status === "failed" ||
+    status === "recovery_required"
+  )
 }
 
 function parseMessages(
@@ -398,7 +741,11 @@ function parseMessages(
 
 async function responseBody(
   response: Response,
-  errorBinding?: { caseID: string; minimumVersion?: number },
+  errorBinding?: {
+    caseID: string
+    minimumConversationVersion?: number
+    minimumRepairRevision?: number
+  },
 ): Promise<unknown> {
   if (!response.ok) {
     throw await errorFromResponse(response, errorBinding)
@@ -412,7 +759,11 @@ async function responseBody(
 
 async function errorFromResponse(
   response: Response,
-  binding?: { caseID: string; minimumVersion?: number },
+  binding?: {
+    caseID: string
+    minimumConversationVersion?: number
+    minimumRepairRevision?: number
+  },
 ): Promise<PRDevelopmentAPIError> {
   let body: unknown
   try {
@@ -504,6 +855,33 @@ function isPullNumber(value: unknown): value is number {
     Number.isSafeInteger(value) &&
     (value as number) > 0 &&
     (value as number) <= MAXIMUM_PULL_NUMBER
+  )
+}
+
+function isConversationVersion(value: unknown): value is number {
+  return (
+    Number.isSafeInteger(value) &&
+    (value as number) >= 0 &&
+    (value as number) <= MAXIMUM_MESSAGES
+  )
+}
+
+function isRepairRevision(value: unknown): value is number {
+  return (
+    Number.isSafeInteger(value) &&
+    (value as number) >= 0 &&
+    (value as number) <= MAXIMUM_REPAIR_REVISION
+  )
+}
+
+function isExpectedRepairAttemptOrdinal(value: unknown): value is number {
+  // This fences the pre-admission history suffix, so a full 64-attempt
+  // history legitimately has next ordinal 64 even though no parsed response
+  // may contain an attempt at that ordinal.
+  return (
+    Number.isSafeInteger(value) &&
+    (value as number) >= 0 &&
+    (value as number) <= MAXIMUM_REPAIR_ATTEMPTS
   )
 }
 

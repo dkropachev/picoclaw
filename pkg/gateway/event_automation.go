@@ -54,6 +54,13 @@ type eventAutomationService struct {
 
 type eventAutomationRuntimeAcquire func(context.Context) (context.Context, func(), error)
 
+type prDevelopmentRepairReadiness interface {
+	ResolveWorkflowDependency(
+		ctx context.Context,
+		occurrence workflows.WorkflowDependencyOccurrence,
+	) workflows.WorkflowDependencyReadinessCode
+}
+
 type eventRetentionPruner interface {
 	Prune(ctx context.Context, before time.Time, limit int) (int64, error)
 }
@@ -61,6 +68,9 @@ type eventRetentionPruner interface {
 type eventReviewRuntime struct {
 	agent                        workflows.AgentRunner
 	agentID                      string
+	repairAgentReady             func(agentID string) bool
+	repairVerifier               prdevelopment.RepairCaseVerifier
+	repairRuntime                prdevelopment.RepairRuntimeFactory
 	acquireWorkingContextRuntime reviews.WorkingContextRuntimeAcquire
 	submitter                    reviews.Submitter
 	attentionPolicies            reviews.AttentionPolicySource
@@ -126,6 +136,22 @@ func setupEventAutomationService(
 		}
 		reviewRuntime.agentID = defaultAgent.ID
 		reviewRuntime.acquireWorkingContextRuntime = newReviewWorkingContextRuntimeAcquire(cfg, agentLoop)
+		if executor != nil && githubPRDevelopmentRepairReady(ctx, agentLoop) {
+			reviewRuntime.repairAgentReady = agentLoop.ControllerLocalRepairReady
+			reviewRuntime.repairVerifier = &prdevelopment.GitHubVerifier{
+				Runner: executor.Tools,
+				ArtifactRoot: effectiveGitHubMCPArtifactRoot(
+					cfg,
+					reviewRuntime.mcpArtifactRoot,
+				),
+			}
+			reviewRuntime.repairRuntime = func(
+				agentID string,
+				routingText string,
+			) (prdevelopment.LocalRepairExecutor, error) {
+				return agentLoop.NewControllerLocalRepairRunner(agentID, routingText)
+			}
+		}
 		pollNotifications := githubNotificationPollingEnabled(cfg)
 		reviewSubmission := githubReviewSubmissionReady(ctx, agentLoop)
 		if pollNotifications {
@@ -258,9 +284,13 @@ func newEventAutomationServiceWithReviews(
 		return nil, errors.Join(err, store.Close())
 	}
 	prDevelopmentService, err := prdevelopment.NewService(prdevelopment.ServiceConfig{
-		Store:   store,
-		Agent:   reviewRuntime.agent,
-		AgentID: reviewRuntime.agentID,
+		Store:       store,
+		RepairStore: store,
+		RepairEnabled: reviewRuntime.repairVerifier != nil &&
+			reviewRuntime.repairRuntime != nil && reviewRuntime.repairAgentReady != nil,
+		RepairAgentReady: reviewRuntime.repairAgentReady,
+		Agent:            reviewRuntime.agent,
+		AgentID:          reviewRuntime.agentID,
 	})
 	if err != nil {
 		return nil, errors.Join(err, store.Close())
@@ -408,6 +438,24 @@ func newEventAutomationServiceWithReviews(
 			withEventAutomationRuntime(acquireRuntime, submitter.ProcessOne),
 		)
 	}
+	// The durable repair queue is reconciled even when execution dependencies
+	// are unavailable. In that mode queued/preparing work is safely terminalized
+	// as runtime_unavailable, and expired running ownership is still surfaced as
+	// recovery_required. RepairAvailable above remains false, so no new work is
+	// admitted through the public service.
+	repair := &prdevelopment.RepairWorker{
+		Queue:       store,
+		Verifier:    reviewRuntime.repairVerifier,
+		Runtime:     reviewRuntime.repairRuntime,
+		WorkerLabel: "gateway-pr-development-repair",
+	}
+	workers.Add(1)
+	go runEventAutomationWorker(
+		workerCtx,
+		&workers,
+		"PR development repair",
+		withEventAutomationRuntime(acquireRuntime, repair.ProcessOne),
+	)
 	if reviewAttention != nil {
 		attention := &reviews.AttentionTriggerWorker{
 			Queue:       store,
@@ -450,6 +498,35 @@ func githubReviewSubmissionReady(
 	) workflows.WorkflowDependencyReadinessCode {
 		return agentLoop.ResolveWorkflowDependency(ctx, occurrence)
 	})
+}
+
+func githubPRDevelopmentRepairReady(
+	ctx context.Context,
+	runtime prDevelopmentRepairReadiness,
+) bool {
+	if runtime == nil {
+		return false
+	}
+	return githubPRDevelopmentRepairToolsReady(func(
+		occurrence workflows.WorkflowDependencyOccurrence,
+	) workflows.WorkflowDependencyReadinessCode {
+		return runtime.ResolveWorkflowDependency(ctx, occurrence)
+	})
+}
+
+func githubPRDevelopmentRepairToolsReady(
+	resolve func(
+		workflows.WorkflowDependencyOccurrence,
+	) workflows.WorkflowDependencyReadinessCode,
+) bool {
+	if resolve == nil {
+		return false
+	}
+	return resolve(workflows.WorkflowDependencyOccurrence{
+		Kind: workflows.WorkflowDependencyKindMCP,
+		Name: reviews.DefaultGitHubMCPServer + "/" +
+			reviews.GitHubPullRequestReadTool,
+	}) == workflows.WorkflowDependencyReadinessReady
 }
 
 func githubReviewSubmissionToolsReady(
