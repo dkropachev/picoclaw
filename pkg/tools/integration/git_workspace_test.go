@@ -3,6 +3,7 @@ package integrationtools
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/sipeed/picoclaw/pkg/gitworkspace"
@@ -83,6 +84,37 @@ func TestGitWorkspaceToolReleaseUsesSessionContext(t *testing.T) {
 	}
 	if len(payload.Released) != 1 || payload.Released[0].ID != "gw-test" {
 		t.Fatalf("released payload = %+v", payload.Released)
+	}
+}
+
+func TestGitWorkspaceToolDoesNotExposePinnedControllerOperations(t *testing.T) {
+	manager := &fakeGitWorkspaceManager{}
+	tool := NewGitWorkspaceTool(manager)
+	properties, ok := tool.Parameters()["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("tool properties are unavailable")
+	}
+	action, ok := properties["action"].(map[string]any)
+	if !ok {
+		t.Fatal("tool action schema is unavailable")
+	}
+	actions, ok := action["enum"].([]string)
+	if !ok {
+		t.Fatal("tool action enum is unavailable")
+	}
+	for _, forbidden := range []string{"acquire_pinned", "release_pinned"} {
+		if slices.Contains(actions, forbidden) {
+			t.Fatalf("controller-only action %q appears in tool schema", forbidden)
+		}
+	}
+	for _, forbidden := range []string{"expected_commit", "reservation_key", "source_ref"} {
+		if _, found := properties[forbidden]; found {
+			t.Fatalf("controller-only property %q appears in tool schema", forbidden)
+		}
+	}
+	result := tool.Execute(context.Background(), map[string]any{"action": "acquire_pinned"})
+	if !result.IsError || manager.acquireReq.Repository != "" {
+		t.Fatalf("controller-only tool execution result = %#v, acquire = %#v", result, manager.acquireReq)
 	}
 }
 
