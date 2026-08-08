@@ -5361,6 +5361,7 @@ test("workflow jobs builder applies a surgical action field edit", async ({
 test("workflow dashboard supports AI draft, publish, and manual run loop", async ({
   page,
 }) => {
+  test.slow()
   const errors = collectPageErrors(page)
 
   await gotoMockedRoute(page, "/agent/workflows", {

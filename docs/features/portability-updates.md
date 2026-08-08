@@ -16,7 +16,7 @@ compatible with low-cost hardware.
   release/update asset selection, retrying downloads, and benchmark tooling.
 - Core types/functions: Makefile build targets, release workflow matrix,
   launcher build scripts, updater package, update API handler, Docker build
-  workflow, and memory benchmark command.
+  workflow, cross-ref coverage isolation, and memory benchmark command.
 - Runtime ordering: select platform and architecture, build or locate the
   matching artifact, validate names and prerequisites, retry transient update
   downloads, then report explicit status.
@@ -31,7 +31,7 @@ compatible with low-cost hardware.
 | `FR-PORT-001` | MUST | Makefile builds produce core binaries for supported Linux, Darwin, Windows, ARM, MIPS, RISC-V, and LoongArch targets. | Portability is a project-level promise. |
 | `FR-PORT-002` | MUST | Launcher builds include frontend assets and backend binary packaging for supported desktop targets. | Web UI distribution must be reproducible. |
 | `FR-PORT-003` | MUST | Updater downloads release assets, validates target platform naming, retries transient HTTP failures, and reports clear status. | Updates must be safe and diagnosable. |
-| `FR-PORT-004` | SHOULD | Docker and release workflows keep dependency setup explicit for Go, Node, pnpm, QEMU, and GoReleaser. | CI/release builds must be repeatable. |
+| `FR-PORT-004` | SHOULD | Docker and release workflows keep dependency setup explicit for Go, Node, pnpm, QEMU, and GoReleaser. Coverage-delta execution clears inherited `PICOCLAW_HOME` and gives each compared Git ref a distinct fallback `HOME` for generation, package discovery, Go tests, and integration suites. | CI/release builds must be repeatable, state created by one ref must not alter or deadlock another ref's tests, and tests that intentionally override `HOME` must retain fallback-home semantics. |
 | `FR-PORT-005` | SHOULD | Memory benchmark tools measure ingestion/evaluation behavior without affecting runtime packages. | Low-resource goals need measurable support. |
 
 ## Data And State Model
@@ -54,6 +54,7 @@ Owns: CODE scripts/lint-features.go
 Owns: TEST pkg/updater/*
 Owns: TEST cmd/membench/*
 Owns: TEST integration/*
+Owns: TEST scripts/coverage_delta_test.go *
 Owns: TEST scripts/portability_requirements_test.go *
 
 ## Auxiliary Interfaces
@@ -78,6 +79,9 @@ Owns: TEST scripts/portability_requirements_test.go *
    clear final status.
 5. Memory benchmark commands load fixtures, run ingestion/evaluation paths,
    record metrics, and avoid importing benchmark behavior into runtime packages.
+6. Coverage-delta creates separate temporary runtime homes for the base and head
+   worktrees, clears inherited `PICOCLAW_HOME`, and replaces inherited `HOME`
+   before executing code from either ref.
 
 ## Cross-Feature Behavior
 
@@ -93,17 +97,20 @@ credentialed release publishing.
 - HTTP 5xx or timeout paths retry before failure.
 - Unsupported platform/arch does not select a wrong binary.
 - Android and WhatsApp-native variants remain build-tag controlled.
+- Coverage comparison does not reuse launcher or test state across refs, even
+  when the two revisions use incompatible lock-file or state formats.
 
 ## Acceptance Evidence
 
 | Requirement IDs | Evidence |
 | --- | --- |
-| `FR-PORT-001`, `FR-PORT-002`, `FR-PORT-004` | [scripts/portability_requirements_test.go](../../scripts/portability_requirements_test.go), [Makefile](../../Makefile), [web/Makefile](../../web/Makefile), [.github/workflows](../../.github/workflows) |
+| `FR-PORT-001`, `FR-PORT-002`, `FR-PORT-004` | [scripts/portability_requirements_test.go](../../scripts/portability_requirements_test.go), [scripts/coverage_delta_test.go](../../scripts/coverage_delta_test.go), [Makefile](../../Makefile), [web/Makefile](../../web/Makefile), [.github/workflows](../../.github/workflows) |
 | `FR-PORT-003` | [pkg/updater/updater_test.go](../../pkg/updater/updater_test.go), [web/backend/api/update.go](../../web/backend/api/update.go) |
 | `FR-PORT-005` | [cmd/membench](../../cmd/membench) |
 
 ## Implementation Anchors
 
 - [Makefile](../../Makefile)
+- [scripts/coverage_delta.go](../../scripts/coverage_delta.go)
 - [pkg/updater/updater.go](../../pkg/updater/updater.go)
 - [.github/workflows/release.yml](../../.github/workflows/release.yml)
