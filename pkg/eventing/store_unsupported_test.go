@@ -156,6 +156,36 @@ func TestStorePRDevelopmentControllerUnsupported(t *testing.T) {
 	); !errors.Is(err, ErrUnsupportedPlatform) {
 		t.Fatalf("RenewPRDevelopmentControllerLease() error = %v, want %v", err, ErrUnsupportedPlatform)
 	}
+	if _, _, err := store.PreparePRDevelopmentControllerOperation(
+		ctx,
+		PRDevelopmentControllerOperationPrepare{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("PreparePRDevelopmentControllerOperation() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if _, _, err := store.FinalizePRDevelopmentControllerOperation(
+		ctx,
+		PRDevelopmentControllerOperationFinalize{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("FinalizePRDevelopmentControllerOperation() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if _, _, err := store.ClaimPRDevelopmentControllerOperationRecovery(
+		ctx,
+		PRDevelopmentControllerOperationRecoveryClaim{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("ClaimPRDevelopmentControllerOperationRecovery() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if err := store.RenewPRDevelopmentControllerOperationRecovery(
+		ctx,
+		PRDevelopmentControllerOperationRecoveryRenew{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("RenewPRDevelopmentControllerOperationRecovery() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if _, _, err := store.FinalizePRDevelopmentControllerOperationRecovery(
+		ctx,
+		PRDevelopmentControllerOperationRecoveryFinalize{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("FinalizePRDevelopmentControllerOperationRecovery() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
 	if _, _, err := store.ClaimPRDevelopmentControllerRecovery(
 		ctx,
 		PRDevelopmentControllerRecoveryClaim{},

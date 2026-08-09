@@ -4,6 +4,7 @@ package eventing
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -14,6 +15,61 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func insertPRDevelopmentRecoveryIntentForTest(
+	ctx context.Context,
+	statement *sql.Stmt,
+	intent *PRDevelopmentControllerRecoveryIntent,
+) error {
+	_, err := statement.ExecContext(
+		ctx,
+		intent.ID,
+		intent.ControllerID,
+		intent.AttemptID,
+		intent.Ordinal,
+		intent.RecoveryRevision,
+		intent.Mode,
+		intent.Status,
+		intent.AgentID,
+		intent.WorkspaceID,
+		intent.LineID,
+		intent.SourceCloneURL,
+		intent.SourceRef,
+		intent.SourceCommit,
+		intent.SourceTree,
+		intent.LineVersion,
+		intent.MutationEpoch,
+		intent.TipCommit,
+		intent.Tree,
+		intent.PreviousReservationKey,
+		intent.ReplacementReservationKey,
+		intent.PreviousReservationDigest,
+		intent.ReplacementReservationDigest,
+		intent.ExpiredControllerRevision,
+		intent.ExpiredLeaseEpoch,
+		intent.ExpiredLeaseTokenDigest,
+		intent.PreviousHash,
+		intent.IntentHash,
+		intent.ClaimID,
+		intent.ClaimOwner,
+		intent.ClaimToken,
+		nil,
+		intent.ClaimEpoch,
+		intent.Claims,
+		intent.RotationResultHash,
+		intent.RecoveryClaimTokenDigest,
+		intent.NewMutationLeaseEpoch,
+		intent.NewMutationLeaseTokenDigest,
+		toDBTime(*intent.NewMutationLeaseUntil),
+		intent.FinalRevision,
+		intent.FinalHash,
+		toDBTime(intent.CreatedAt),
+		toDBTime(*intent.ClaimedAt),
+		toDBTime(*intent.FinalizedAt),
+		toDBTime(intent.UpdatedAt),
+	)
+	return err
+}
 
 func TestStorePRDevelopmentControllerRecoveryRotatesAuthorityAndReplaysExactly(
 	t *testing.T,
@@ -868,53 +924,7 @@ func TestStorePRDevelopmentControllerRecoveryCapacityRejectsBeforeMutation(t *te
 			intent.FinalRevision,
 			*intent.FinalizedAt,
 		)
-		_, err = statement.ExecContext(
-			ctx,
-			intent.ID,
-			intent.ControllerID,
-			intent.AttemptID,
-			intent.Ordinal,
-			intent.RecoveryRevision,
-			intent.Mode,
-			intent.Status,
-			intent.AgentID,
-			intent.WorkspaceID,
-			intent.LineID,
-			intent.SourceCloneURL,
-			intent.SourceRef,
-			intent.SourceCommit,
-			intent.SourceTree,
-			intent.LineVersion,
-			intent.MutationEpoch,
-			intent.TipCommit,
-			intent.Tree,
-			intent.PreviousReservationKey,
-			intent.ReplacementReservationKey,
-			intent.PreviousReservationDigest,
-			intent.ReplacementReservationDigest,
-			intent.ExpiredControllerRevision,
-			intent.ExpiredLeaseEpoch,
-			intent.ExpiredLeaseTokenDigest,
-			intent.PreviousHash,
-			intent.IntentHash,
-			intent.ClaimID,
-			intent.ClaimOwner,
-			intent.ClaimToken,
-			nil,
-			intent.ClaimEpoch,
-			intent.Claims,
-			intent.RotationResultHash,
-			intent.RecoveryClaimTokenDigest,
-			intent.NewMutationLeaseEpoch,
-			intent.NewMutationLeaseTokenDigest,
-			toDBTime(*intent.NewMutationLeaseUntil),
-			intent.FinalRevision,
-			intent.FinalHash,
-			toDBTime(intent.CreatedAt),
-			toDBTime(*intent.ClaimedAt),
-			toDBTime(*intent.FinalizedAt),
-			toDBTime(intent.UpdatedAt),
-		)
+		err = insertPRDevelopmentRecoveryIntentForTest(ctx, statement, &intent)
 		require.NoError(t, err, "seed finalized recovery ordinal %d", ordinal)
 	}
 	require.NoError(t, tx.Commit())

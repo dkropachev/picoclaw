@@ -323,11 +323,14 @@ func (s *Store) ClaimPRDevelopmentControllerRecovery(
 		}
 		var duplicate int
 		if queryErr := conn.QueryRowContext(ctx, `
-			SELECT COUNT(*)
-			FROM pr_development_controller_recovery_intents
-			WHERE claim_id = ? AND id <> ?`,
+			SELECT
+				(SELECT COUNT(*) FROM pr_development_controller_recovery_intents
+				 WHERE claim_id = ? AND id <> ?) +
+				(SELECT COUNT(*) FROM pr_development_controller_operation_intents
+				 WHERE claim_id = ?)`,
 			normalized.ClaimID,
 			intent.ID,
+			normalized.ClaimID,
 		).Scan(&duplicate); queryErr != nil {
 			return queryErr
 		}
@@ -1041,8 +1044,22 @@ func validatePRDevelopmentControllerRecoveryChain(
 		previousFinalizedAt time.Time
 	)
 	latestIntentByAttempt := make(map[string]PRDevelopmentControllerRecoveryIntent)
+	linkedOperations := make(map[string]PRDevelopmentControllerOperation)
 	for ordinal := range intents {
 		intent := intents[ordinal]
+		linkedOperation, linked, linkedErr := loadPRDevelopmentControllerOperationByRecoveryID(ctx, queryer, intent.ID)
+		if linkedErr != nil {
+			return stats, linkedErr
+		}
+		if linked {
+			if linkedErr := validateLinkedPRDevelopmentOperationRecoveryAudit(
+				intent,
+				linkedOperation,
+			); linkedErr != nil {
+				return stats, linkedErr
+			}
+			linkedOperations[intent.ID] = linkedOperation
+		}
 		if _, owned := attemptOrdinals[intent.AttemptID]; !owned ||
 			intent.ControllerID != controller.ID || intent.Ordinal != ordinal ||
 			intent.AgentID != controller.AgentID || intent.LineID != controller.LineID ||
@@ -1056,8 +1073,14 @@ func validatePRDevelopmentControllerRecoveryChain(
 			return stats, errors.New("stored controller recovery chain is invalid")
 		}
 		priorIntent, hasPriorIntent := latestIntentByAttempt[intent.AttemptID]
+		var expectedRecoveryRevision int64
 		if hasPriorIntent {
-			expectedRecoveryRevision := priorIntent.FinalRevision + 1
+			expectedRecoveryRevision = priorIntent.FinalRevision + 1
+			if priorOperation, priorLinked := linkedOperations[priorIntent.ID]; priorLinked && (priorOperation.Kind ==
+				PRDevelopmentControllerOperationAdopt ||
+				priorOperation.Kind == PRDevelopmentControllerOperationResume) {
+				expectedRecoveryRevision++
+			}
 			if priorIntent.Mode == PRDevelopmentControllerRecoveryUnbound &&
 				intent.Mode == PRDevelopmentControllerRecoveryBound {
 				expectedRecoveryRevision++
@@ -1068,8 +1091,7 @@ func validatePRDevelopmentControllerRecoveryChain(
 					"stored controller recovery cannot become unbound",
 				)
 			}
-			if priorIntent.Status != PRDevelopmentControllerRecoveryFinalized ||
-				intent.RecoveryRevision != expectedRecoveryRevision {
+			if priorIntent.Status != PRDevelopmentControllerRecoveryFinalized {
 				return stats, errors.New(
 					"stored controller recovery revision succession is unreachable",
 				)
@@ -1085,7 +1107,7 @@ func validatePRDevelopmentControllerRecoveryChain(
 				candidateCopy := candidate
 				priorFence = &candidateCopy
 			}
-			expectedRecoveryRevision := int64(2)
+			expectedRecoveryRevision = 2
 			expectedLeaseEpoch := int64(1)
 			if priorFence == nil {
 				if intent.Mode == PRDevelopmentControllerRecoveryBound {
@@ -1101,12 +1123,29 @@ func validatePRDevelopmentControllerRecoveryChain(
 				expectedRecoveryRevision = priorFence.ReviewControllerRevision + 4
 				expectedLeaseEpoch = priorFence.ReviewLeaseEpoch + 1
 			}
-			if intent.RecoveryRevision != expectedRecoveryRevision ||
-				intent.ExpiredLeaseEpoch != expectedLeaseEpoch {
+			if intent.ExpiredLeaseEpoch != expectedLeaseEpoch {
 				return stats, errors.New(
 					"stored first recovery revision or lease proof is unreachable",
 				)
 			}
+		}
+		// Recovering Adopt or Resume consumes the line-transition revision in
+		// the operation finalization, after this linked v12 audit is finalized.
+		// Subtract that current transition only after both the initial and
+		// successor v12 formulas have accounted for their predecessor state.
+		if linked && (linkedOperation.Kind == PRDevelopmentControllerOperationAdopt ||
+			linkedOperation.Kind == PRDevelopmentControllerOperationResume) {
+			expectedRecoveryRevision--
+		}
+		if intent.RecoveryRevision != expectedRecoveryRevision {
+			if !hasPriorIntent {
+				return stats, errors.New(
+					"stored first recovery revision or lease proof is unreachable",
+				)
+			}
+			return stats, errors.New(
+				"stored controller recovery revision succession is unreachable",
+			)
 		}
 		previousDigest := intent.PreviousReservationDigest
 		if repairOwner, reserved := repairReservationOwners[previousDigest]; reserved &&
@@ -1288,17 +1327,50 @@ func validatePRDevelopmentControllerRecoveryChain(
 		latestIntentByAttempt[intent.AttemptID] = intent
 		previousCreatedAt = intent.CreatedAt
 	}
+	activeOperation, operationFound, err := loadActivePRDevelopmentControllerOperation(
+		ctx,
+		queryer,
+		controller.ID,
+	)
+	if err != nil {
+		return stats, err
+	}
+	var activeOperationPointer *PRDevelopmentControllerOperation
+	if operationFound {
+		activeOperationPointer = &activeOperation
+	}
 	if err := validatePRDevelopmentActiveReservationRecoveryHistory(
 		ctx,
 		queryer,
 		controller,
 		intents,
 		stats.active,
+		activeOperationPointer,
 	); err != nil {
 		return stats, err
 	}
 	if controller.Phase == PRDevelopmentControllerRecoveryRequired {
-		if stats.active == nil {
+		if stats.active != nil && activeOperationPointer != nil {
+			return stats, errors.New(
+				"stored recovery-required controller has competing recovery owners",
+			)
+		}
+		if activeOperationPointer != nil {
+			operation := *activeOperationPointer
+			if (operation.Status != PRDevelopmentControllerOperationRecoveryPending &&
+				operation.Status != PRDevelopmentControllerOperationRecoveryClaimed) ||
+				operation.RecoveryRevision != controller.Revision ||
+				operation.AttemptID != controller.CurrentAttemptID ||
+				operation.ExpiredLeaseEpoch != controller.LeaseEpoch ||
+				operation.MutationReservationDigest != prDevelopmentMutationReservationDigest(
+					controller.MutationReservationKey,
+				) || operation.RecoveryStagedAt == nil ||
+				!operation.RecoveryStagedAt.Equal(controller.UpdatedAt) {
+				return stats, errors.New(
+					"stored active operation recovery differs from controller state",
+				)
+			}
+		} else if stats.active == nil {
 			if len(intents) != 0 {
 				return stats, errors.New(
 					"stored recovery-required controller lost its active intent",
@@ -1307,32 +1379,35 @@ func validatePRDevelopmentControllerRecoveryChain(
 			// A v11 recovery row has no trustworthy expired-token proof. It
 			// remains readable for operators but Claim refuses to recover it.
 			return stats, nil
+		} else {
+			active := *stats.active
+			if active.RecoveryRevision != controller.Revision ||
+				active.AttemptID != controller.CurrentAttemptID ||
+				active.ExpiredLeaseEpoch != controller.LeaseEpoch ||
+				active.PreviousReservationKey != controller.MutationReservationKey ||
+				active.CreatedAt != controller.UpdatedAt {
+				return stats, errors.New(
+					"stored active controller recovery differs from controller state",
+				)
+			}
+			if (active.Mode == PRDevelopmentControllerRecoveryUnbound &&
+				controller.WorkspaceID != "") ||
+				(active.Mode == PRDevelopmentControllerRecoveryBound &&
+					(controller.WorkspaceID != active.WorkspaceID ||
+						controller.LineVersion != active.LineVersion ||
+						controller.MutationEpoch != active.MutationEpoch ||
+						controller.TipCommit != active.TipCommit ||
+						controller.Tree != active.Tree)) {
+				return stats, errors.New(
+					"stored active recovery mode differs from controller line state",
+				)
+			}
 		}
-		active := *stats.active
-		if active.RecoveryRevision != controller.Revision ||
-			active.AttemptID != controller.CurrentAttemptID ||
-			active.ExpiredLeaseEpoch != controller.LeaseEpoch ||
-			active.PreviousReservationKey != controller.MutationReservationKey ||
-			active.CreatedAt != controller.UpdatedAt {
-			return stats, errors.New(
-				"stored active controller recovery differs from controller state",
-			)
-		}
-		if (active.Mode == PRDevelopmentControllerRecoveryUnbound &&
-			controller.WorkspaceID != "") ||
-			(active.Mode == PRDevelopmentControllerRecoveryBound &&
-				(controller.WorkspaceID != active.WorkspaceID ||
-					controller.LineVersion != active.LineVersion ||
-					controller.MutationEpoch != active.MutationEpoch ||
-					controller.TipCommit != active.TipCommit ||
-					controller.Tree != active.Tree)) {
-			return stats, errors.New(
-				"stored active recovery mode differs from controller line state",
-			)
-		}
-	} else if stats.active != nil {
+	} else if stats.active != nil || (activeOperationPointer != nil &&
+		(activeOperationPointer.Status == PRDevelopmentControllerOperationRecoveryPending ||
+			activeOperationPointer.Status == PRDevelopmentControllerOperationRecoveryClaimed)) {
 		return stats, errors.New(
-			"stored controller outside recovery has an unresolved recovery intent",
+			"stored controller outside recovery has an unresolved recovery owner",
 		)
 	}
 	if controller.Phase == PRDevelopmentControllerMutation {
@@ -1401,6 +1476,7 @@ func validatePRDevelopmentActiveReservationRecoveryHistory(
 	controller PRDevelopmentController,
 	intents []PRDevelopmentControllerRecoveryIntent,
 	active *PRDevelopmentControllerRecoveryIntent,
+	activeOperation *PRDevelopmentControllerOperation,
 ) error {
 	if controller.MutationReservationKey == "" {
 		return nil
@@ -1481,7 +1557,39 @@ func validatePRDevelopmentActiveReservationRecoveryHistory(
 			)
 		}
 	case PRDevelopmentControllerRecoveryRequired:
-		if active == nil || active.AttemptID != controller.CurrentAttemptID ||
+		if active == nil {
+			if activeOperation == nil ||
+				(activeOperation.Status != PRDevelopmentControllerOperationRecoveryPending &&
+					activeOperation.Status != PRDevelopmentControllerOperationRecoveryClaimed) ||
+				activeOperation.AttemptID != controller.CurrentAttemptID ||
+				activeOperation.MutationReservationDigest != digest {
+				return errors.New(
+					"stored recovery controller reservation has no active owner",
+				)
+			}
+			var latest *PRDevelopmentControllerRecoveryIntent
+			for index := len(intents) - 1; index >= 0; index-- {
+				candidate := intents[index]
+				if candidate.AttemptID == controller.CurrentAttemptID &&
+					candidate.Status == PRDevelopmentControllerRecoveryFinalized {
+					candidateCopy := candidate
+					latest = &candidateCopy
+					break
+				}
+			}
+			if latest == nil || latest.ReplacementReservationDigest != digest ||
+				len(matches) != 1 ||
+				matches[0].attemptID != latest.AttemptID ||
+				matches[0].ordinal != latest.Ordinal ||
+				matches[0].status != PRDevelopmentControllerRecoveryFinalized ||
+				matches[0].matchesPrevious || !matches[0].matchesReplacement {
+				return errors.New(
+					"stored operation recovery reactivates stale authority",
+				)
+			}
+			break
+		}
+		if activeOperation != nil || active.AttemptID != controller.CurrentAttemptID ||
 			active.PreviousReservationDigest != digest {
 			return errors.New(
 				"stored recovery controller reservation is not its active predecessor",
@@ -1507,6 +1615,71 @@ func validatePRDevelopmentActiveReservationRecoveryHistory(
 		return errors.New(
 			"stored controller reservation has recovery history outside mutation",
 		)
+	}
+	return nil
+}
+
+func validateLinkedPRDevelopmentOperationRecoveryAudit(
+	intent PRDevelopmentControllerRecoveryIntent,
+	operation PRDevelopmentControllerOperation,
+) error {
+	if operation.Status != PRDevelopmentControllerOperationFinalized ||
+		operation.Kind == PRDevelopmentControllerOperationPark ||
+		operation.RecoveryStagedAt == nil || operation.ClaimedAt == nil ||
+		operation.FinalizedAt == nil || operation.NewMutationLeaseUntil == nil ||
+		operation.RecoveryID != intent.ID ||
+		operation.ControllerID != intent.ControllerID ||
+		operation.AttemptID != intent.AttemptID ||
+		operation.AgentID != intent.AgentID || operation.WorkspaceID != intent.WorkspaceID ||
+		operation.LineID != intent.LineID ||
+		operation.SourceCloneURL != intent.SourceCloneURL ||
+		operation.SourceRef != intent.SourceRef ||
+		operation.SourceCommit != intent.SourceCommit ||
+		operation.SourceTree != intent.SourceTree ||
+		operation.MutationReservationDigest != intent.PreviousReservationDigest ||
+		operation.ReplacementReservationDigest != intent.ReplacementReservationDigest ||
+		operation.RecoveryRevision != intent.RecoveryRevision ||
+		operation.ExpiredControllerRevision != intent.ExpiredControllerRevision ||
+		operation.ExpiredLeaseEpoch != intent.ExpiredLeaseEpoch ||
+		operation.ExpiredLeaseTokenDigest != intent.ExpiredLeaseTokenDigest ||
+		operation.ClaimID != intent.ClaimID || operation.ClaimOwner != intent.ClaimOwner ||
+		operation.ClaimEpoch != intent.ClaimEpoch || operation.Claims != intent.Claims ||
+		operation.RotationResultHash != intent.RotationResultHash ||
+		operation.RecoveryClaimTokenDigest != intent.RecoveryClaimTokenDigest ||
+		operation.NewMutationLeaseEpoch != intent.NewMutationLeaseEpoch ||
+		operation.NewMutationLeaseTokenDigest != intent.NewMutationLeaseTokenDigest ||
+		operation.RecoveryStagedAt.UTC() != intent.CreatedAt.UTC() ||
+		operation.ClaimedAt.UTC() != intent.ClaimedAt.UTC() ||
+		operation.FinalizedAt.UTC() != intent.FinalizedAt.UTC() ||
+		!operation.NewMutationLeaseUntil.Equal(*intent.NewMutationLeaseUntil) {
+		return errors.New(
+			"stored finalized recovery audit differs from its owning operation",
+		)
+	}
+	expectedOperationRevision := intent.FinalRevision
+	if operation.Kind == PRDevelopmentControllerOperationAdopt ||
+		operation.Kind == PRDevelopmentControllerOperationResume {
+		expectedOperationRevision++
+	}
+	if operation.FinalControllerRevision != expectedOperationRevision {
+		return errors.New(
+			"stored finalized recovery audit has an unreachable controller revision",
+		)
+	}
+	if operation.Kind == PRDevelopmentControllerOperationAdopt ||
+		operation.Kind == PRDevelopmentControllerOperationResume {
+		if intent.LineVersion != operation.Result.Version ||
+			intent.MutationEpoch != operation.Result.MutationEpoch ||
+			intent.TipCommit != operation.Result.Tip ||
+			intent.Tree != operation.Result.Tree {
+			return errors.New(
+				"stored line-transition recovery audit has a changed result fence",
+			)
+		}
+	} else if intent.LineVersion != operation.LineVersion ||
+		intent.MutationEpoch != operation.MutationEpoch ||
+		intent.TipCommit != operation.TipCommit || intent.Tree != operation.Tree {
+		return errors.New("stored Commit recovery audit has a changed rotation fence")
 	}
 	return nil
 }

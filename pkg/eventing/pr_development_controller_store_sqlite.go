@@ -16,8 +16,9 @@ import (
 )
 
 var (
-	_ PRDevelopmentControllerReader = (*Store)(nil)
-	_ PRDevelopmentControllerStore  = (*Store)(nil)
+	_ PRDevelopmentControllerReader         = (*Store)(nil)
+	_ PRDevelopmentControllerStore          = (*Store)(nil)
+	_ PRDevelopmentControllerOperationStore = (*Store)(nil)
 
 	errInvalidStoredPRDevelopmentController = errors.New(
 		"invalid stored pull request development controller",
@@ -453,6 +454,28 @@ func (s *Store) BindPRDevelopmentControllerLine(
 		if !found {
 			return sql.ErrNoRows
 		}
+		if activeErr := requireNoActivePRDevelopmentControllerOperation(
+			ctx,
+			conn,
+			current.ID,
+		); activeErr != nil {
+			return activeErr
+		}
+		var operationCount int
+		if countErr := conn.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM pr_development_controller_operation_intents
+			WHERE controller_id = ?`,
+			current.ID,
+		).Scan(&operationCount); countErr != nil {
+			return countErr
+		}
+		if operationCount != 0 {
+			return fmt.Errorf(
+				"%w: controller operation history owns all later line transitions",
+				ErrPRDevelopmentControllerConflict,
+			)
+		}
 		if pinErr := requirePRDevelopmentControllerOwnerPin(
 			ctx,
 			conn,
@@ -731,6 +754,29 @@ func (s *Store) RecordPRDevelopmentAttemptReviewFence(
 		}
 		if !found {
 			return sql.ErrNoRows
+		}
+		if activeErr := requireNoActivePRDevelopmentControllerOperation(
+			ctx,
+			conn,
+			controller.ID,
+		); activeErr != nil {
+			return activeErr
+		}
+		var operationCount int
+		if countErr := conn.QueryRowContext(ctx, `
+			SELECT COUNT(*)
+			FROM pr_development_controller_operation_intents
+			WHERE controller_id = ? AND attempt_id = ?`,
+			controller.ID,
+			normalized.AttemptID,
+		).Scan(&operationCount); countErr != nil {
+			return countErr
+		}
+		if operationCount != 0 {
+			return fmt.Errorf(
+				"%w: an operation-owned attempt must be fenced by its Park operation",
+				ErrPRDevelopmentControllerConflict,
+			)
 		}
 		completionHighWater, completionErr := requireCompletedPRDevelopmentControllerAttempt(
 			ctx,
@@ -1870,8 +1916,28 @@ func expirePRDevelopmentMutationLease(
 	controller PRDevelopmentController,
 	now time.Time,
 ) error {
-	requiredHeadroom := int64(4) // expire, finalize, park, review finish
-	if controller.WorkspaceID == "" {
+	operation, hasOperation, err := loadActivePRDevelopmentControllerOperation(
+		ctx,
+		conn,
+		controller.ID,
+	)
+	if err != nil {
+		return err
+	}
+	requiredHeadroom := int64(4) // expire, finalize, Park, review finish
+	if hasOperation {
+		switch operation.Kind {
+		case PRDevelopmentControllerOperationAdopt,
+			PRDevelopmentControllerOperationResume:
+			requiredHeadroom = 5 // expire, recover, bind, Park, review finish
+		case PRDevelopmentControllerOperationPark:
+			requiredHeadroom = 2 // expiry/recovered Park, review finish
+		case PRDevelopmentControllerOperationCommit:
+			// The default exactly covers expire, recover, Park, and review finish.
+		default:
+			return errors.New("active controller operation has an unknown kind")
+		}
+	} else if controller.WorkspaceID == "" {
 		requiredHeadroom++ // first retained-line bind
 	}
 	if controller.Revision > MaxPRDevelopmentControllerRevision-requiredHeadroom {
@@ -1880,14 +1946,25 @@ func expirePRDevelopmentMutationLease(
 			ErrPRDevelopmentControllerConflict,
 		)
 	}
-	_, err := insertPRDevelopmentRecoveryIntentForExpiry(
-		ctx,
-		conn,
-		controller,
-		now,
-	)
-	if err != nil {
-		return err
+	if hasOperation {
+		if stageErr := stagePRDevelopmentControllerOperationRecoveryForExpiry(
+			ctx,
+			conn,
+			controller,
+			operation,
+			now,
+		); stageErr != nil {
+			return stageErr
+		}
+	} else {
+		if _, stageErr := insertPRDevelopmentRecoveryIntentForExpiry(
+			ctx,
+			conn,
+			controller,
+			now,
+		); stageErr != nil {
+			return stageErr
+		}
 	}
 	result, err := conn.ExecContext(ctx, `
 		UPDATE pr_development_thread_controllers
@@ -1926,8 +2003,12 @@ func newUniquePRDevelopmentMutationReservation(
 				(SELECT COUNT(*) FROM pr_development_attempt_review_fences
 				 WHERE mutation_reservation_digest = ?) +
 				(SELECT COUNT(*) FROM pr_development_controller_recovery_intents
-				 WHERE previous_reservation_digest = ? OR replacement_reservation_digest = ?)`,
+				 WHERE previous_reservation_digest = ? OR replacement_reservation_digest = ?) +
+				(SELECT COUNT(*) FROM pr_development_controller_operation_intents
+				 WHERE mutation_reservation_digest = ? OR replacement_reservation_digest = ?)`,
 			reservation,
+			digest,
+			digest,
 			digest,
 			digest,
 			digest,
@@ -1965,8 +2046,12 @@ func requireFreshPRDevelopmentMutationReservation(
 			(SELECT COUNT(*) FROM pr_development_attempt_review_fences
 			 WHERE mutation_reservation_digest = ?) +
 			(SELECT COUNT(*) FROM pr_development_controller_recovery_intents
-			 WHERE previous_reservation_digest = ? OR replacement_reservation_digest = ?)`,
+			 WHERE previous_reservation_digest = ? OR replacement_reservation_digest = ?) +
+			(SELECT COUNT(*) FROM pr_development_controller_operation_intents
+			 WHERE mutation_reservation_digest = ? OR replacement_reservation_digest = ?)`,
 		reservation,
+		digest,
+		digest,
 		digest,
 		digest,
 		digest,
@@ -2381,6 +2466,17 @@ func validatePRDevelopmentControllerAggregate(
 	}
 	if len(fences) != controller.FenceCount {
 		return errors.New("stored controller fence count differs from its rows")
+	}
+	if operationErr := validatePRDevelopmentControllerOperationChain(
+		ctx,
+		queryer,
+		controller,
+		session,
+		fences,
+		attemptOrdinals,
+		attemptCreatedAt,
+	); operationErr != nil {
+		return operationErr
 	}
 	recoveryStats, err := validatePRDevelopmentControllerRecoveryChain(
 		ctx,
