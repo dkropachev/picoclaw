@@ -78,7 +78,10 @@ func TestProjectDevelopmentProviderThreadOmitsWholeReviewsWithoutTruncatingFeedb
 	if provider.IncludedCases != 3 || provider.OmittedCases != 1 {
 		t.Fatalf("provider counts = %+v", provider)
 	}
-	if want := []developmentOrdinalRange{{First: 3, Last: 3}}; !equalDevelopmentOrdinalRanges(provider.OmittedRanges, want) {
+	if want := []developmentOrdinalRange{{First: 3, Last: 3}}; !equalDevelopmentOrdinalRanges(
+		provider.OmittedRanges,
+		want,
+	) {
 		t.Fatalf("omitted ranges = %+v, want %+v", provider.OmittedRanges, want)
 	}
 	wantFeedback := []string{

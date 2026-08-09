@@ -138,13 +138,12 @@ func (s *Store) AppendPRDevelopmentLedgerAttempt(
 		changed bool
 	)
 	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
-		thread, binding, controller, fence, ledger, loadErr :=
-			loadPRDevelopmentLedgerAppendState(
-				ctx,
-				conn,
-				normalized.CaseID,
-				normalized.AttemptID,
-			)
+		thread, binding, controller, fence, ledger, loadErr := loadPRDevelopmentLedgerAppendState(
+			ctx,
+			conn,
+			normalized.CaseID,
+			normalized.AttemptID,
+		)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -273,13 +272,12 @@ func (s *Store) AppendPRDevelopmentLedgerReview(
 		changed bool
 	)
 	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
-		thread, binding, controller, fence, ledger, loadErr :=
-			loadPRDevelopmentLedgerAppendState(
-				ctx,
-				conn,
-				normalized.CaseID,
-				normalized.AttemptID,
-			)
+		thread, binding, controller, fence, ledger, loadErr := loadPRDevelopmentLedgerAppendState(
+			ctx,
+			conn,
+			normalized.CaseID,
+			normalized.AttemptID,
+		)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -874,6 +872,7 @@ func loadPRDevelopmentLedgerEntries(
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	stored := make([]storedPRDevelopmentLedgerEntry, 0)
 	for rows.Next() {
 		item, scanErr := scanPRDevelopmentLedgerEntry(rows)
@@ -915,6 +914,7 @@ func loadPRDevelopmentLedgerEntries(
 	if err != nil {
 		return nil, err
 	}
+	defer findings.Close()
 	for findings.Next() {
 		var (
 			entryID string
@@ -955,9 +955,9 @@ func loadPRDevelopmentLedgerEntries(
 			value := int(line.Int64)
 			finding.Line = &value
 		}
-		if err := validatePRDevelopmentLedgerFinding(finding); err != nil {
+		if validationErr := validatePRDevelopmentLedgerFinding(finding); validationErr != nil {
 			_ = findings.Close()
-			return nil, wrapInvalidStoredPRDevelopmentLedger(err)
+			return nil, wrapInvalidStoredPRDevelopmentLedger(validationErr)
 		}
 		entries[index].Findings = append(entries[index].Findings, finding)
 	}
