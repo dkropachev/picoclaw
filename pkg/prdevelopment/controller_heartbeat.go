@@ -78,6 +78,20 @@ func (heartbeat *controllerHeartbeat) SetController(
 	heartbeat.mu.Unlock()
 }
 
+// ClearController stops future mutation renewals immediately before Park.
+// The already-issued lease remains usable for the bounded prepared Park, while
+// the orchestration claim continues to heartbeat through atomic finalization.
+// This prevents a renewal racing the successful transition to review_pending
+// from being misreported as lost mutation authority.
+func (heartbeat *controllerHeartbeat) ClearController() {
+	if heartbeat == nil {
+		return
+	}
+	heartbeat.mu.Lock()
+	heartbeat.controller = controllerHeartbeatLease{}
+	heartbeat.mu.Unlock()
+}
+
 func (heartbeat *controllerHeartbeat) Stop() error {
 	if heartbeat == nil {
 		return nil

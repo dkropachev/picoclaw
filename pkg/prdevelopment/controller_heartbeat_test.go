@@ -148,3 +148,32 @@ func TestControllerHeartbeatDoesNotRenewControllerBeforeAcquisition(t *testing.T
 		t.Fatalf("renewal counts = orchestration %d, controller %d", len(store.orchestration), len(store.controllers))
 	}
 }
+
+func TestControllerHeartbeatStopsControllerRenewalAfterClear(t *testing.T) {
+	t.Parallel()
+	store := &controllerHeartbeatStoreFake{}
+	_, heartbeat := startControllerHeartbeat(
+		context.Background(),
+		store,
+		"pdr_0123456789abcdef0123456789abcdef",
+		"claim-token",
+		3*time.Second,
+	)
+	heartbeat.SetController(eventing.PRDevelopmentController{
+		ID:         "pctl_0123456789abcdef0123456789abcdef",
+		LeaseToken: "controller-token",
+		LeaseEpoch: 1,
+	})
+	heartbeat.ClearController()
+	if err := heartbeat.renew(context.Background()); err != nil {
+		t.Fatalf("renew() error = %v", err)
+	}
+	if err := heartbeat.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.orchestration) == 0 || len(store.controllers) != 0 {
+		t.Fatalf("renewal counts = orchestration %d, controller %d", len(store.orchestration), len(store.controllers))
+	}
+}
