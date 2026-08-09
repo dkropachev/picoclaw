@@ -954,20 +954,9 @@ func TestManagerReleasePinnedRejectsPreferSymlinkRefsBeforeDirtyPreservation(t *
 	); unsetErr != nil {
 		t.Fatal(unsetErr)
 	}
-	stats, statsErr := fixture.manager.Stats(ctx)
-	if statsErr != nil {
-		t.Fatal(statsErr)
-	}
-	var retained *WorkspaceInfo
-	for index := range stats.Workspaces {
-		if stats.Workspaces[index].ID == fixture.workspace.ID {
-			retained = &stats.Workspaces[index]
-			break
-		}
-	}
-	if retained == nil || retained.LockedBy == nil ||
-		retained.LockedBy.SessionKey != fixture.pin.ReservationKey {
-		t.Fatalf("workspace lock after rejected release = %#v", retained)
+	retained := workspaceRecordForTest(t, fixture.manager, fixture.workspace.ID)
+	if retained.LockedBy == nil || retained.LockedBy.SessionKey != fixture.pin.ReservationKey {
+		t.Fatalf("workspace lock after rejected release = %#v", retained.LockedBy)
 	}
 }
 

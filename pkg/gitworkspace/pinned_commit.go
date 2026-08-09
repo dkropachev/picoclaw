@@ -133,10 +133,50 @@ func (m *Manager) WithPinnedOperation(
 		return err
 	}
 	defer release()
+	if err := m.rejectSealedPinnedOperation(ctx, request.ReservationKey); err != nil {
+		return err
+	}
 	if inherited {
 		return run(ctx)
 	}
 	return run(context.WithValue(ctx, pinnedOperationContextKey{}, token))
+}
+
+func (m *Manager) rejectSealedPinnedOperation(
+	ctx context.Context,
+	reservationKey string,
+) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	unlock, err := m.lockInventory(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	state, err := m.loadLocked()
+	if err != nil {
+		return err
+	}
+	reservationHash := developmentLineReservationHash(reservationKey)
+	for _, line := range state.DevelopmentLines {
+		if line == nil {
+			continue
+		}
+		if line.PendingParkSet && line.MutationReservationHash == reservationHash {
+			return fmt.Errorf(
+				"%w: mutation reservation is sealed by a pending park",
+				ErrPinnedLineConflict,
+			)
+		}
+		if developmentLineReservationRetired(line, reservationHash) &&
+			line.MutationReservationHash != reservationHash {
+			return fmt.Errorf(
+				"%w: mutation reservation was retired by a development line",
+				ErrPinnedLineConflict,
+			)
+		}
+	}
+	return nil
 }
 
 func (m *Manager) acquirePinnedOperation(
@@ -149,10 +189,9 @@ func (m *Manager) acquirePinnedOperation(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if reservationKey == "" || reservationKey != strings.TrimSpace(reservationKey) ||
-		containsPinnedControlCharacter(reservationKey) {
+	if !validPinnedOperationIdentity(reservationKey, 256) {
 		return nil, false, nil, errors.New(
-			"pinned reservation key must be exact and non-empty",
+			"pinned reservation key must be an exact bounded identity",
 		)
 	}
 	if err := m.validateRoot(); err != nil {
@@ -231,6 +270,12 @@ func (m *Manager) SnapshotPinnedCandidate(
 	state, err := m.loadLocked()
 	if err != nil {
 		return PinnedCandidate{}, err
+	}
+	if pendingErr := rejectPendingDevelopmentLineReservation(
+		state,
+		request.Pin.ReservationKey,
+	); pendingErr != nil {
+		return PinnedCandidate{}, pendingErr
 	}
 	environment, cleanup, err := m.newPinnedGitEnvironment()
 	if err != nil {
@@ -331,6 +376,12 @@ func (m *Manager) CommitPinned(
 	state, err := m.loadLocked()
 	if err != nil {
 		return PinnedCommitResult{}, err
+	}
+	if pendingErr := rejectPendingDevelopmentLineReservation(
+		state,
+		request.Pin.ReservationKey,
+	); pendingErr != nil {
+		return PinnedCommitResult{}, pendingErr
 	}
 	environment, cleanup, err := m.newPinnedGitEnvironment()
 	if err != nil {
@@ -575,11 +626,13 @@ func validatePinnedAcquireRequest(
 	request PinnedAcquireRequest,
 ) (string, error) {
 	repositoryInput := strings.TrimSpace(request.Repository)
-	if repositoryInput == "" || repositoryInput != request.Repository ||
+	if repositoryInput == "" || len(repositoryInput) > 4<<10 ||
+		repositoryInput != request.Repository ||
 		containsPinnedControlCharacter(repositoryInput) {
 		return "", errors.New("pinned repository must be exact and non-empty")
 	}
-	if request.SourceRef == "" || request.SourceRef != strings.TrimSpace(request.SourceRef) ||
+	if request.SourceRef == "" || len(request.SourceRef) > 4<<10 ||
+		request.SourceRef != strings.TrimSpace(request.SourceRef) ||
 		!validPinnedSourceRef(ctx, request.SourceRef) {
 		return "", errors.New("pinned source ref is invalid")
 	}
@@ -587,13 +640,10 @@ func validatePinnedAcquireRequest(
 		!validPinnedCommit(request.ExpectedCommit) {
 		return "", errors.New("pinned expected commit is invalid")
 	}
-	if request.ReservationKey == "" ||
-		request.ReservationKey != strings.TrimSpace(request.ReservationKey) ||
-		containsPinnedControlCharacter(request.ReservationKey) {
-		return "", errors.New("pinned reservation key must be exact and non-empty")
+	if !validPinnedOperationIdentity(request.ReservationKey, 256) {
+		return "", errors.New("pinned reservation key must be an exact bounded identity")
 	}
-	if request.AgentID == "" || request.AgentID != strings.TrimSpace(request.AgentID) ||
-		containsPinnedControlCharacter(request.AgentID) {
+	if !validPinnedOperationIdentity(request.AgentID, 256) {
 		return "", errors.New("pinned agent ID must be exact and non-empty")
 	}
 	repository, err := normalizeRepository(repositoryInput)
@@ -1226,6 +1276,7 @@ type boundedPinnedWriter struct {
 	limit    int
 	written  int
 	overflow bool
+	cancel   context.CancelFunc
 }
 
 func (writer *boundedPinnedWriter) Write(value []byte) (int, error) {
@@ -1240,6 +1291,9 @@ func (writer *boundedPinnedWriter) Write(value []byte) (int, error) {
 	}
 	if len(value) > remaining {
 		writer.overflow = true
+		if writer.cancel != nil {
+			writer.cancel()
+		}
 	}
 	return len(value), nil
 }
@@ -1283,15 +1337,22 @@ func runPinnedGitPlumbingTo(
 	if maximumOutput < 1 {
 		maximumOutput = maxPinnedCommitGitOutputBytes
 	}
-	command := exec.CommandContext(ctx, "git", args...)
+	commandCtx, cancelCommand := context.WithCancel(ctx)
+	defer cancelCommand()
+	command := exec.CommandContext(commandCtx, "git", args...)
 	command.Dir = directory
 	command.Env = pinnedPlumbingEnvironment(environment)
 	command.Stdin = input
 	var errorsOutput bytes.Buffer
-	boundedOutput := &boundedPinnedWriter{writer: output, limit: maximumOutput}
+	boundedOutput := &boundedPinnedWriter{
+		writer: output,
+		limit:  maximumOutput,
+		cancel: cancelCommand,
+	}
 	boundedError := &boundedPinnedWriter{
 		writer: &errorsOutput,
 		limit:  maxPinnedCommitGitErrorBytes,
+		cancel: cancelCommand,
 	}
 	command.Stdout = boundedOutput
 	command.Stderr = boundedError
