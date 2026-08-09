@@ -223,7 +223,11 @@ func TestManagerPreviewPinnedLineReviewRejectsOversizedDiffBeforePark(t *testing
 		line.Version != fixture.lease.Version || workspace == nil || workspace.LockedBy == nil {
 		t.Fatalf("oversized preview changed park state: line %#v, workspace %#v", line, workspace)
 	}
-	if retained := testGitCommit(t, fixture.workspace.Path, "refs/heads/"+line.Branch); retained != request.PreviousTip {
+	if retained := testGitCommit(
+		t,
+		fixture.workspace.Path,
+		"refs/heads/"+line.Branch,
+	); retained != request.PreviousTip {
 		t.Fatalf("oversized preview advanced retained ref to %q", retained)
 	}
 }

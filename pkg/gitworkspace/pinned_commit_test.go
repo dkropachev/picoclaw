@@ -738,9 +738,9 @@ func TestManagerSnapshotPinnedValidationCandidateAllowsExactNoChanges(t *testing
 		!validLowerHex(candidate.CandidateDigest, sha256.Size*2) {
 		t.Fatalf("SnapshotPinnedValidationCandidate() = %#v", candidate)
 	}
-	if _, err := fixture.manager.SnapshotPinnedCandidate(ctx, request); err == nil ||
-		!errors.Is(err, ErrPinnedCommitConflict) {
-		t.Fatalf("SnapshotPinnedCandidate(clean) error = %v", err)
+	if _, snapshotErr := fixture.manager.SnapshotPinnedCandidate(ctx, request); snapshotErr == nil ||
+		!errors.Is(snapshotErr, ErrPinnedCommitConflict) {
+		t.Fatalf("SnapshotPinnedCandidate(clean) error = %v", snapshotErr)
 	}
 
 	if writeErr := os.WriteFile(

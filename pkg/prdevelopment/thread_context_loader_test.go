@@ -543,8 +543,7 @@ func (store *threadContextLoaderStore) AppendPRDevelopmentLedgerCheckpoint(
 		store.snapshot.Ledger.Checkpoints,
 		checkpoint,
 	)
-	store.snapshot.Ledger.LatestCheckpoint =
-		&store.snapshot.Ledger.Checkpoints[len(store.snapshot.Ledger.Checkpoints)-1]
+	store.snapshot.Ledger.LatestCheckpoint = &store.snapshot.Ledger.Checkpoints[len(store.snapshot.Ledger.Checkpoints)-1]
 	return checkpoint, true, nil
 }
 

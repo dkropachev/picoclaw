@@ -653,7 +653,9 @@ func TestRepairHandlerMapsControllerOwnershipConflictsSafely(t *testing.T) {
 			request := httptest.NewRequest(
 				http.MethodPost,
 				RuntimeRoutePrefix+"/"+testDevelopmentCaseID+"/repair",
-				strings.NewReader(`{"expected_conversation_version":0,"expected_repair_revision":0,"request_id":"prq_dddddddddddddddddddddddddddddddd","instruction":"Fix it."}`),
+				strings.NewReader(
+					`{"expected_conversation_version":0,"expected_repair_revision":0,"request_id":"prq_dddddddddddddddddddddddddddddddd","instruction":"Fix it."}`,
+				),
 			)
 			request.Header.Set("Content-Type", "application/json")
 			recorder := httptest.NewRecorder()

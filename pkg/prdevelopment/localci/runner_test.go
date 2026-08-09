@@ -116,16 +116,16 @@ func TestRunnerRunPinnedRequiresExplicitExactNoChangeEvidence(t *testing.T) {
 	}
 	changedDeclaredClean := fixture.validation
 	changedDeclaredClean.NoChanges = true
-	if _, err := runner.RunPinned(ctx, fixture.manager, PinnedRunRequest{
+	if _, runErr := runner.RunPinned(ctx, fixture.manager, PinnedRunRequest{
 		AttestationID: "lcatt_changed_declared_clean",
 		OwnerID:       "attempt_owner",
 		Candidate:     changedDeclaredClean,
-	}); err == nil || !errors.Is(err, gitworkspace.ErrPinnedCommitConflict) {
-		t.Fatalf("RunPinned(changed declared clean) error = %v", err)
+	}); runErr == nil || !errors.Is(runErr, gitworkspace.ErrPinnedCommitConflict) {
+		t.Fatalf("RunPinned(changed declared clean) error = %v", runErr)
 	}
 
-	if err := os.Remove(filepath.Join(fixture.workspace, "repair.txt")); err != nil {
-		t.Fatal(err)
+	if removeErr := os.Remove(filepath.Join(fixture.workspace, "repair.txt")); removeErr != nil {
+		t.Fatal(removeErr)
 	}
 	candidate, err := fixture.manager.SnapshotPinnedValidationCandidate(
 		ctx,
@@ -144,12 +144,12 @@ func TestRunnerRunPinnedRequiresExplicitExactNoChangeEvidence(t *testing.T) {
 		ExpectedTree:            candidate.Tree,
 		ExpectedCandidateDigest: candidate.CandidateDigest,
 	}
-	if _, err := runner.RunPinned(ctx, fixture.manager, PinnedRunRequest{
+	if _, runErr := runner.RunPinned(ctx, fixture.manager, PinnedRunRequest{
 		AttestationID: "lcatt_no_change_implicit",
 		OwnerID:       "attempt_owner",
 		Candidate:     validation,
-	}); err == nil || !errors.Is(err, gitworkspace.ErrPinnedCommitConflict) {
-		t.Fatalf("RunPinned(implicit no-change) error = %v", err)
+	}); runErr == nil || !errors.Is(runErr, gitworkspace.ErrPinnedCommitConflict) {
+		t.Fatalf("RunPinned(implicit no-change) error = %v", runErr)
 	}
 	validation.NoChanges = true
 	result, err := runner.RunPinned(ctx, fixture.manager, PinnedRunRequest{
