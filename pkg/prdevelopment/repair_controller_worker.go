@@ -14,7 +14,15 @@ import (
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
 
-const defaultRepairControllerWorkerLabel = "gateway-pr-development-controller"
+const (
+	defaultRepairControllerWorkerLabel = "gateway-pr-development-controller"
+
+	// MinimumRepairControllerLease keeps the first heartbeat at or before one
+	// third of the lease even though controllerHeartbeat deliberately floors
+	// its ticker at one second. Shorter leases are rejected instead of risking
+	// expiration before a delayed first renewal.
+	MinimumRepairControllerLease = 3 * time.Second
+)
 
 // RepairControllerWorkspaceFactory resolves the concrete Git manager owned by
 // the caller's current runtime generation. The caller must keep that generation
@@ -33,7 +41,9 @@ type RepairControllerWorkerConfig struct {
 	ContextAgent       workflows.AgentRunner
 	ContextCompactorID string
 	WorkerLabel        string
-	LeaseDuration      time.Duration
+	// LeaseDuration defaults to five minutes. A nonzero value must be at least
+	// MinimumRepairControllerLease.
+	LeaseDuration time.Duration
 }
 
 type repairControllerStateStore interface {
@@ -147,8 +157,11 @@ func NewRepairControllerWorker(
 	if label != config.WorkerLabel && config.WorkerLabel != "" {
 		return nil, errors.New("repair controller worker label must be exact")
 	}
-	lease := config.LeaseDuration
-	if lease <= 0 {
+	lease, err := normalizeRepairControllerLease(config.LeaseDuration)
+	if err != nil {
+		return nil, err
+	}
+	if lease == 0 {
 		lease = defaultRepairLease
 	}
 	dependencies := repairControllerWorkerDependencies{
@@ -210,16 +223,42 @@ func newRepairControllerWorkerWithDependencies(
 	if dependencies.workerLabel == "" {
 		dependencies.workerLabel = defaultRepairControllerWorkerLabel
 	}
-	if dependencies.lease <= 0 {
+	lease, err := normalizeRepairControllerLease(dependencies.lease)
+	if err != nil {
+		return nil, err
+	}
+	if lease == 0 {
 		dependencies.lease = defaultRepairLease
+	} else {
+		dependencies.lease = lease
 	}
 	return &RepairControllerWorker{repairControllerWorkerDependencies: dependencies}, nil
+}
+
+func normalizeRepairControllerLease(lease time.Duration) (time.Duration, error) {
+	if lease == 0 {
+		return 0, nil
+	}
+	if lease < MinimumRepairControllerLease {
+		return 0, fmt.Errorf(
+			"repair controller lease must be zero or at least %s",
+			MinimumRepairControllerLease,
+		)
+	}
+	return lease, nil
 }
 
 // ProcessOne claims and processes at most one provider-thread attempt.
 func (worker *RepairControllerWorker) ProcessOne(ctx context.Context) (bool, error) {
 	if worker == nil || worker.store == nil {
 		return false, ErrUnavailable
+	}
+	if worker.lease < MinimumRepairControllerLease {
+		return false, fmt.Errorf(
+			"%w: repair controller lease is below %s",
+			ErrUnavailable,
+			MinimumRepairControllerLease,
+		)
 	}
 	if ctx == nil {
 		ctx = context.Background()

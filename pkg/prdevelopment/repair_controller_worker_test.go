@@ -724,6 +724,55 @@ func TestRepairControllerWorkerNoWork(t *testing.T) {
 	}
 }
 
+func TestRepairControllerWorkerLeaseBoundary(t *testing.T) {
+	tests := []struct {
+		name      string
+		lease     time.Duration
+		want      time.Duration
+		wantError bool
+	}{
+		{name: "default", lease: 0, want: defaultRepairLease},
+		{name: "minimum", lease: MinimumRepairControllerLease, want: MinimumRepairControllerLease},
+		{name: "below minimum", lease: MinimumRepairControllerLease - time.Nanosecond, wantError: true},
+		{name: "negative", lease: -time.Second, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			worker, err := NewRepairControllerWorker(RepairControllerWorkerConfig{
+				Store:         new(eventing.Store),
+				LeaseDuration: test.lease,
+			})
+			if test.wantError {
+				if err == nil || worker != nil {
+					t.Fatalf("NewRepairControllerWorker() = %#v, %v, want error", worker, err)
+				}
+				return
+			}
+			gotLease := time.Duration(0)
+			if worker != nil {
+				gotLease = worker.lease
+			}
+			if err != nil || worker == nil || gotLease != test.want {
+				t.Fatalf("NewRepairControllerWorker() = %#v, %v, lease = %v, want %v",
+					worker, err, gotLease, test.want)
+			}
+		})
+	}
+}
+
+func TestRepairControllerWorkerRejectsInvalidLeaseBeforeClaim(t *testing.T) {
+	store := &repairControllerWorkerStoreFake{}
+	worker := &RepairControllerWorker{repairControllerWorkerDependencies: repairControllerWorkerDependencies{
+		store: store,
+		lease: MinimumRepairControllerLease - time.Nanosecond,
+	}}
+	processed, err := worker.ProcessOne(context.Background())
+	if processed || !errors.Is(err, ErrUnavailable) || store.claimCalls != 0 {
+		t.Fatalf("ProcessOne() = %v, %v, claims = %d, want rejected before claim",
+			processed, err, store.claimCalls)
+	}
+}
+
 func TestRepairControllerWorkerChangedNoChangeAndNonGreen(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1017,7 +1066,7 @@ func TestRepairControllerWorkerHeartbeatLossCancelsModel(t *testing.T) {
 	)
 	fixture.store.renewErr = errors.New("claim lost")
 	fixture.executor.waitForCancel = true
-	fixture.worker.lease = 30 * time.Millisecond
+	fixture.worker.lease = MinimumRepairControllerLease
 	processed, err := fixture.worker.ProcessOne(context.Background())
 	if !processed || err == nil || !strings.Contains(err.Error(), "claim lost") {
 		t.Fatalf("ProcessOne() = %v, %v, want heartbeat loss", processed, err)
