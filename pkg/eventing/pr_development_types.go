@@ -13,6 +13,9 @@ const (
 	prDevelopmentRepairSessionIDPrefix   = "pds_"
 	prDevelopmentRepairAttemptIDPrefix   = "pdr_"
 	prDevelopmentRepairReservationPrefix = "pdrk_"
+	prDevelopmentControllerIDPrefix      = "pctl_"
+	prDevelopmentLineIDPrefix            = "pdln_"
+	prDevelopmentControllerKeyPrefix     = "pdck_"
 
 	// MaxPRDevelopmentMessageBytes bounds one durable conversation message by
 	// UTF-8 bytes after trimming.
@@ -50,6 +53,16 @@ const (
 	// MaxPRDevelopmentRepairIdempotencyBytes bounds a caller-controlled private
 	// admission marker.
 	MaxPRDevelopmentRepairIdempotencyBytes = 256
+	// MaxPRDevelopmentControllerRevision bounds material controller state
+	// transitions independently of private lease renewals and safe review
+	// reclaims.
+	MaxPRDevelopmentControllerRevision = 65_536
+	// MaxPRDevelopmentControllerFences matches the retained development-line
+	// version bound. One parked attempt contributes at most one immutable fence.
+	MaxPRDevelopmentControllerFences = 8_192
+	// MaxPRDevelopmentControllerIdentityBytes bounds private controller, line,
+	// lease-owner, and intent identities.
+	MaxPRDevelopmentControllerIdentityBytes = 256
 )
 
 var (
@@ -91,6 +104,26 @@ var (
 	// reached its append-only attempt limit.
 	ErrPRDevelopmentRepairCapacity = errors.New(
 		"pull request development repair attempt capacity exceeded",
+	)
+	// ErrInvalidPRDevelopmentController reports malformed controller lease,
+	// line-binding, or review-fence input.
+	ErrInvalidPRDevelopmentController = errors.New(
+		"invalid pull request development controller",
+	)
+	// ErrPRDevelopmentControllerConflict reports stale, cross-thread, changed,
+	// or corrupt controller evidence.
+	ErrPRDevelopmentControllerConflict = errors.New(
+		"pull request development controller conflict",
+	)
+	// ErrPRDevelopmentControllerActive reports a live or unresolved operation
+	// that excludes another mutation or review owner.
+	ErrPRDevelopmentControllerActive = errors.New(
+		"pull request development controller is active",
+	)
+	// ErrPRDevelopmentControllerRecoveryRequired reports an expired mutation
+	// owner whose filesystem effects cannot be reclaimed automatically.
+	ErrPRDevelopmentControllerRecoveryRequired = errors.New(
+		"pull request development controller requires recovery",
 	)
 )
 
@@ -440,6 +473,177 @@ type PRDevelopmentRepairOutcome struct {
 	WorkspaceID   string
 }
 
+// PRDevelopmentControllerPhase is the private lifecycle of the one retained
+// development line owned by a provider-verified pull-request thread. A stable
+// owner is not itself a lease: idle, review-pending, ready, and recovery states
+// retain the line without granting a worker mutation authority.
+type PRDevelopmentControllerPhase string
+
+const (
+	PRDevelopmentControllerIdle             PRDevelopmentControllerPhase = "idle"
+	PRDevelopmentControllerMutation         PRDevelopmentControllerPhase = "mutation"
+	PRDevelopmentControllerReviewPending    PRDevelopmentControllerPhase = "review_pending"
+	PRDevelopmentControllerReview           PRDevelopmentControllerPhase = "review"
+	PRDevelopmentControllerReady            PRDevelopmentControllerPhase = "ready"
+	PRDevelopmentControllerRecoveryRequired PRDevelopmentControllerPhase = "recovery_required"
+)
+
+// PRDevelopmentControllerLeaseKind separates an exclusive filesystem
+// mutation lease from a reservation-free immutable-review lease.
+type PRDevelopmentControllerLeaseKind string
+
+const (
+	PRDevelopmentControllerMutationLease PRDevelopmentControllerLeaseKind = "mutation"
+	PRDevelopmentControllerReviewLease   PRDevelopmentControllerLeaseKind = "review"
+)
+
+// PRDevelopmentController is controller-private durable state. Every field is
+// deliberately excluded from JSON so reusing this type cannot expose provider
+// pins, retained-line identity, worker credentials, or the mutation bearer in
+// a browser projection.
+type PRDevelopmentController struct {
+	ID                     string                           `json:"-"`
+	ThreadID               string                           `json:"-"`
+	OwnerSessionID         string                           `json:"-"`
+	AgentID                string                           `json:"-"`
+	Revision               int64                            `json:"-"`
+	Phase                  PRDevelopmentControllerPhase     `json:"-"`
+	LineID                 string                           `json:"-"`
+	WorkspaceID            string                           `json:"-"`
+	SourceCloneURL         string                           `json:"-"`
+	SourceRef              string                           `json:"-"`
+	SourceCommit           string                           `json:"-"`
+	SourceTree             string                           `json:"-"`
+	LineVersion            int64                            `json:"-"`
+	MutationEpoch          int64                            `json:"-"`
+	TipCommit              string                           `json:"-"`
+	Tree                   string                           `json:"-"`
+	CurrentAttemptID       string                           `json:"-"`
+	LeaseKind              PRDevelopmentControllerLeaseKind `json:"-"`
+	LeaseOwner             string                           `json:"-"`
+	LeaseToken             string                           `json:"-"`
+	LeaseUntil             *time.Time                       `json:"-"`
+	LeaseEpoch             int64                            `json:"-"`
+	Claims                 int                              `json:"-"`
+	MutationReservationKey string                           `json:"-"`
+	FenceCount             int                              `json:"-"`
+	FencesDigest           string                           `json:"-"`
+	CreatedAt              time.Time                        `json:"-"`
+	UpdatedAt              time.Time                        `json:"-"`
+}
+
+// PRDevelopmentAttemptReviewFence is one immutable, ordered parked-line
+// projection. It binds the reservation-free local review digest to the exact
+// line version, park epoch/intent, base, tip, and tree for one repair attempt.
+type PRDevelopmentAttemptReviewFence struct {
+	AttemptID        string `json:"-"`
+	ControllerID     string `json:"-"`
+	ThreadID         string `json:"-"`
+	LineID           string `json:"-"`
+	Ordinal          int    `json:"-"`
+	LineVersion      int64  `json:"-"`
+	MutationEpoch    int64  `json:"-"`
+	ParkIntentID     string `json:"-"`
+	BaseCommit       string `json:"-"`
+	TipCommit        string `json:"-"`
+	Tree             string `json:"-"`
+	NoChanges        bool   `json:"-"`
+	LineReviewDigest string `json:"-"`
+	// MutationReservationDigest retains non-authorizing evidence that the raw
+	// filesystem bearer retired by this fence is never issued again.
+	MutationReservationDigest  string     `json:"-"`
+	MutationLeaseEpoch         int64      `json:"-"`
+	MutationLeaseTokenDigest   string     `json:"-"`
+	MutationControllerRevision int64      `json:"-"`
+	ReviewLeaseEpoch           int64      `json:"-"`
+	ReviewLeaseTokenDigest     string     `json:"-"`
+	ReviewControllerRevision   int64      `json:"-"`
+	PreviousHash               string     `json:"-"`
+	FenceHash                  string     `json:"-"`
+	CreatedAt                  time.Time  `json:"-"`
+	ReviewedAt                 *time.Time `json:"-"`
+}
+
+// PRDevelopmentControllerAcquire claims the selected case's provider thread
+// for the latest attempt in its immutable owner session. ExpectedRevision is
+// zero only when creating the controller and its stable line identity.
+type PRDevelopmentControllerAcquire struct {
+	CaseID           string                           `json:"-"`
+	AttemptID        string                           `json:"-"`
+	ExpectedRevision int64                            `json:"-"`
+	Kind             PRDevelopmentControllerLeaseKind `json:"-"`
+	WorkerLabel      string                           `json:"-"`
+	Lease            time.Duration                    `json:"-"`
+}
+
+// PRDevelopmentControllerLease returns the complete private controller and,
+// for review ownership, the exact pending immutable fence. MutationReservationKey
+// is populated only for a mutation lease.
+type PRDevelopmentControllerLease struct {
+	Controller  PRDevelopmentController          `json:"-"`
+	ReviewFence *PRDevelopmentAttemptReviewFence `json:"-"`
+	Created     bool                             `json:"-"`
+	Reclaimed   bool                             `json:"-"`
+}
+
+// PRDevelopmentControllerRenew extends only the exact live lease epoch/token.
+type PRDevelopmentControllerRenew struct {
+	ControllerID string        `json:"-"`
+	AttemptID    string        `json:"-"`
+	LeaseToken   string        `json:"-"`
+	LeaseEpoch   int64         `json:"-"`
+	Lease        time.Duration `json:"-"`
+}
+
+// PRDevelopmentControllerLineBind records the exact AdoptPinnedLine or
+// ResumePinnedLine result under a live mutation lease. Source fields become an
+// immutable all-or-none binding on first adoption.
+type PRDevelopmentControllerLineBind struct {
+	ControllerID     string `json:"-"`
+	AttemptID        string `json:"-"`
+	ExpectedRevision int64  `json:"-"`
+	LeaseToken       string `json:"-"`
+	LeaseEpoch       int64  `json:"-"`
+	WorkspaceID      string `json:"-"`
+	SourceCloneURL   string `json:"-"`
+	SourceRef        string `json:"-"`
+	SourceCommit     string `json:"-"`
+	SourceTree       string `json:"-"`
+	LineVersion      int64  `json:"-"`
+	MutationEpoch    int64  `json:"-"`
+	TipCommit        string `json:"-"`
+	Tree             string `json:"-"`
+}
+
+// PRDevelopmentAttemptReviewFenceRecord atomically records the exact parked
+// review snapshot, retires the controller's raw mutation bearer, and releases
+// its mutation lease into review_pending.
+type PRDevelopmentAttemptReviewFenceRecord struct {
+	ControllerID     string `json:"-"`
+	AttemptID        string `json:"-"`
+	ExpectedRevision int64  `json:"-"`
+	LeaseToken       string `json:"-"`
+	LeaseEpoch       int64  `json:"-"`
+	LineVersion      int64  `json:"-"`
+	MutationEpoch    int64  `json:"-"`
+	ParkIntentID     string `json:"-"`
+	BaseCommit       string `json:"-"`
+	TipCommit        string `json:"-"`
+	Tree             string `json:"-"`
+	NoChanges        bool   `json:"-"`
+	LineReviewDigest string `json:"-"`
+}
+
+// PRDevelopmentControllerReviewTransition completes a live immutable review
+// or releases it back to review_pending without granting mutation authority.
+type PRDevelopmentControllerReviewTransition struct {
+	ControllerID     string `json:"-"`
+	AttemptID        string `json:"-"`
+	ExpectedRevision int64  `json:"-"`
+	LeaseToken       string `json:"-"`
+	LeaseEpoch       int64  `json:"-"`
+}
+
 // PRDevelopmentCaseStore owns immutable development-case capture and exact
 // lookup. Conversation, checkout, execution, publication, and provider actions
 // are intentionally separate capabilities.
@@ -531,4 +735,44 @@ type PRDevelopmentRepairQueue interface {
 		ctx context.Context,
 		input PRDevelopmentRepairOutcome,
 	) (PRDevelopmentRepairSession, error)
+}
+
+// PRDevelopmentControllerReader resolves one private stable thread owner and
+// validates its complete immutable review-fence chain without granting a lease.
+type PRDevelopmentControllerReader interface {
+	GetPRDevelopmentControllerForCase(
+		ctx context.Context,
+		caseID string,
+	) (PRDevelopmentController, error)
+}
+
+// PRDevelopmentControllerStore owns only the private controller lease, exact
+// retained-line binding, and immutable parked review fences. It runs no model,
+// Git, CI, filesystem, workflow, provider, or publication effect.
+type PRDevelopmentControllerStore interface {
+	PRDevelopmentControllerReader
+	AcquirePRDevelopmentControllerLease(
+		ctx context.Context,
+		input PRDevelopmentControllerAcquire,
+	) (PRDevelopmentControllerLease, bool, error)
+	RenewPRDevelopmentControllerLease(
+		ctx context.Context,
+		input PRDevelopmentControllerRenew,
+	) error
+	BindPRDevelopmentControllerLine(
+		ctx context.Context,
+		input PRDevelopmentControllerLineBind,
+	) (PRDevelopmentController, bool, error)
+	RecordPRDevelopmentAttemptReviewFence(
+		ctx context.Context,
+		input PRDevelopmentAttemptReviewFenceRecord,
+	) (PRDevelopmentAttemptReviewFence, bool, error)
+	FinishPRDevelopmentControllerReview(
+		ctx context.Context,
+		input PRDevelopmentControllerReviewTransition,
+	) (PRDevelopmentController, bool, error)
+	ReleasePRDevelopmentControllerReview(
+		ctx context.Context,
+		input PRDevelopmentControllerReviewTransition,
+	) (PRDevelopmentController, error)
 }

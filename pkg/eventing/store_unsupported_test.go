@@ -133,6 +133,55 @@ func TestStorePRDevelopmentRepairUnsupported(t *testing.T) {
 	}
 }
 
+func TestStorePRDevelopmentControllerUnsupported(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	var store Store
+	if _, err := store.GetPRDevelopmentControllerForCase(
+		ctx,
+		"pdc_00000000000000000000000000000000",
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("GetPRDevelopmentControllerForCase() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if _, _, err := store.AcquirePRDevelopmentControllerLease(
+		ctx,
+		PRDevelopmentControllerAcquire{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("AcquirePRDevelopmentControllerLease() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if err := store.RenewPRDevelopmentControllerLease(
+		ctx,
+		PRDevelopmentControllerRenew{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("RenewPRDevelopmentControllerLease() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if _, _, err := store.BindPRDevelopmentControllerLine(
+		ctx,
+		PRDevelopmentControllerLineBind{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("BindPRDevelopmentControllerLine() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if _, _, err := store.RecordPRDevelopmentAttemptReviewFence(
+		ctx,
+		PRDevelopmentAttemptReviewFenceRecord{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("RecordPRDevelopmentAttemptReviewFence() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if _, _, err := store.FinishPRDevelopmentControllerReview(
+		ctx,
+		PRDevelopmentControllerReviewTransition{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("FinishPRDevelopmentControllerReview() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if _, err := store.ReleasePRDevelopmentControllerReview(
+		ctx,
+		PRDevelopmentControllerReviewTransition{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("ReleasePRDevelopmentControllerReview() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+}
+
 func TestStoreRoutingDispatchCapabilitiesUnsupported(t *testing.T) {
 	t.Parallel()
 
