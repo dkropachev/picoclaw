@@ -14,10 +14,12 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/eventing"
+	"github.com/sipeed/picoclaw/pkg/gitworkspace"
 	"github.com/sipeed/picoclaw/pkg/prdevelopment"
+	"github.com/sipeed/picoclaw/pkg/prdevelopment/localci"
 )
 
-func TestPRDevelopmentRepairWorkerUsesPinnedAgentAfterDefaultChanges(
+func TestPRDevelopmentControllerWorkerHoldsGenerationAndPinnedAgentProjection(
 	t *testing.T,
 ) {
 	workspace := t.TempDir()
@@ -32,10 +34,13 @@ func TestPRDevelopmentRepairWorkerUsesPinnedAgentAfterDefaultChanges(
 	msgBus := bus.NewMessageBus()
 	provider := &orderedShutdownProvider{closed: make(chan struct{})}
 	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider)
-	runner := newGatewayBlockingRepairRunner()
+	controllerEntered := make(chan struct{})
+	controllerRelease := make(chan struct{})
+	var controllerEnterOnce sync.Once
+	var controllerReleaseOnce sync.Once
 	var service *eventAutomationService
 	t.Cleanup(func() {
-		runner.unblock()
+		controllerReleaseOnce.Do(func() { close(controllerRelease) })
 		if service != nil {
 			closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -47,8 +52,8 @@ func TestPRDevelopmentRepairWorkerUsesPinnedAgentAfterDefaultChanges(
 		agentLoop.Close()
 	})
 
-	runtimeArgs := make(chan [2]string, 1)
 	reviewRuntime := eventReviewRuntime{
+		agent:   agent.NewWorkflowAgentRunner(agentLoop),
 		agentID: "replacement",
 		repairAgentReady: func(agentID string) bool {
 			return agentID == "main"
@@ -68,8 +73,23 @@ func TestPRDevelopmentRepairWorkerUsesPinnedAgentAfterDefaultChanges(
 			agentID string,
 			routingText string,
 		) (prdevelopment.LocalRepairExecutor, error) {
-			runtimeArgs <- [2]string{agentID, routingText}
-			return runner, nil
+			return newGatewayBlockingRepairRunner(), nil
+		},
+		repairWorkspaces: func() (*gitworkspace.Manager, error) {
+			return nil, nil
+		},
+		repairLocalCI: &prDevelopmentLocalCIRuntime{runner: &localci.Runner{}},
+		repairControllerProcess: func(ctx context.Context) (bool, error) {
+			processed := false
+			controllerEnterOnce.Do(func() {
+				processed = true
+				close(controllerEntered)
+				select {
+				case <-controllerRelease:
+				case <-ctx.Done():
+				}
+			})
+			return processed, ctx.Err()
 		},
 	}
 	acquireRuntime := func(ctx context.Context) (context.Context, func(), error) {
@@ -89,17 +109,9 @@ func TestPRDevelopmentRepairWorkerUsesPinnedAgentAfterDefaultChanges(
 	}
 
 	select {
-	case <-runner.entered:
+	case <-controllerEntered:
 	case <-time.After(3 * time.Second):
-		t.Fatal("wired repair worker did not invoke the local repair runner")
-	}
-	select {
-	case got := <-runtimeArgs:
-		if got != [2]string{"main", "Apply the requested bounded retry fix."} {
-			t.Fatalf("repair runtime args = %#v", got)
-		}
-	default:
-		t.Fatal("repair runtime factory was not called")
+		t.Fatal("wired controller worker did not enter its runtime generation")
 	}
 	detail, err := service.prDevelopment.Get(context.Background(), caseID)
 	if err != nil {
@@ -130,7 +142,7 @@ func TestPRDevelopmentRepairWorkerUsesPinnedAgentAfterDefaultChanges(
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	runner.unblock()
+	controllerReleaseOnce.Do(func() { close(controllerRelease) })
 	var paused pauseResult
 	select {
 	case paused = <-pauseResults:
@@ -154,17 +166,13 @@ func TestPRDevelopmentRepairWorkerUsesPinnedAgentAfterDefaultChanges(
 		t.Fatalf("GetPRDevelopmentWorkbench() error = %v", err)
 	}
 	if workbench.RepairSession == nil || len(workbench.RepairSession.Attempts) != 1 ||
-		workbench.RepairSession.Attempts[0].Status != eventing.PRDevelopmentRepairCompleted {
-		t.Fatalf("repair workbench = %#v, want one completed attempt", workbench)
-	}
-	request := runner.snapshotRequest()
-	if request.Pin.AgentID != "main" || request.Pin.Repository == "" ||
-		request.Instruction != "Apply the requested bounded retry fix." {
-		t.Fatalf("local repair request = %#v", request)
+		workbench.RepairSession.AgentID != "main" ||
+		workbench.RepairSession.Attempts[0].Status != eventing.PRDevelopmentRepairQueued {
+		t.Fatalf("repair workbench = %#v, want queued attempt on pinned main agent", workbench)
 	}
 }
 
-func TestPRDevelopmentRepairWorkerReconcilesWhenRuntimeUnavailable(t *testing.T) {
+func TestPRDevelopmentControllerWorkerReconcilesWhenRuntimeUnavailable(t *testing.T) {
 	workspace := t.TempDir()
 	cfg := eventAutomationTestConfig(
 		workspace,
@@ -238,12 +246,11 @@ func (verifier gatewayRepairVerifier) VerifyCase(
 }
 
 type gatewayBlockingRepairRunner struct {
-	entered     chan struct{}
-	release     chan struct{}
-	enterOnce   sync.Once
-	releaseOnce sync.Once
-	mu          sync.Mutex
-	request     agent.LocalRepairRequest
+	entered   chan struct{}
+	release   chan struct{}
+	enterOnce sync.Once
+	mu        sync.Mutex
+	request   agent.LocalRepairRequest
 }
 
 func newGatewayBlockingRepairRunner() *gatewayBlockingRepairRunner {
@@ -271,16 +278,6 @@ func (runner *gatewayBlockingRepairRunner) Run(
 	case <-ctx.Done():
 		return agent.LocalRepairResult{}, ctx.Err()
 	}
-}
-
-func (runner *gatewayBlockingRepairRunner) unblock() {
-	runner.releaseOnce.Do(func() { close(runner.release) })
-}
-
-func (runner *gatewayBlockingRepairRunner) snapshotRequest() agent.LocalRepairRequest {
-	runner.mu.Lock()
-	defer runner.mu.Unlock()
-	return runner.request
 }
 
 func seedGatewayPRDevelopmentRepair(
