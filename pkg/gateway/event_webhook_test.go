@@ -1029,17 +1029,19 @@ func TestConfiguredGitHubOwnPRReviewFeedbackReachesGatewayAdmission(t *testing.T
 			body := fmt.Sprintf(`{
 				"action":"submitted",
 				"repository":{
+					"id":901,
 					"full_name":"acme/project",
 					"name":"project",
 					"owner":{"login":"acme"}
 				},
 				"pull_request":{
+					"id":4201,
 					"number":73,
 					"html_url":"https://github.com/acme/project/pull/73",
 					"title":"Repair retry behavior",
 					"body":"No direct mention.",
 					"draft":false,
-					"user":{"login":%q},
+					"user":{"id":81,"login":%q},
 					"head":{
 						"ref":"repair/retries",
 						"sha":%q,

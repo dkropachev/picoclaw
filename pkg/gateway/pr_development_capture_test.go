@@ -131,6 +131,14 @@ func TestGitHubOwnPRFeedbackWorkflowCapturesProviderVerifiedDevelopmentCase(
 	developmentCase, exists, err := service.store.LookupPRDevelopmentCapture(
 		context.Background(),
 		identity,
+		&eventing.PRDevelopmentThreadIdentity{
+			Provider:       "github",
+			ProviderOrigin: "https://github.com",
+			PullAuthorID:   "81",
+			RepositoryID:   "901",
+			PullRequestID:  "4201",
+			PullNumber:     42,
+		},
 	)
 	if err != nil || !exists {
 		t.Fatalf("LookupPRDevelopmentCapture() = %#v, %v, %v", developmentCase, exists, err)
@@ -291,7 +299,7 @@ func (r *gatewayPRDevelopmentToolRunner) RunTool(
 			"draft":    false,
 			"merged":   false,
 			"html_url": "https://github.com/acme/project/pull/42",
-			"user":     map[string]any{"login": "review-user"},
+			"user":     map[string]any{"id": 81, "login": "review-user"},
 			"head": map[string]any{
 				"ref":  "fix/race",
 				"sha":  strings.Repeat("3", 40),
@@ -337,12 +345,13 @@ func gatewayOwnPRFeedbackBody(t *testing.T) string {
 	value := map[string]any{
 		"action": "submitted",
 		"pull_request": map[string]any{
+			"id":       4201,
 			"number":   42,
 			"html_url": "https://github.com/acme/project/pull/42",
 			"title":    "Fix the race",
 			"body":     "Untrusted pull request text",
 			"draft":    false,
-			"user":     map[string]any{"login": "review-user"},
+			"user":     map[string]any{"id": 81, "login": "review-user"},
 			"head": map[string]any{
 				"ref":  "fix/race",
 				"sha":  strings.Repeat("2", 40),

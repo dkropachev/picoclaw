@@ -349,6 +349,22 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 	} else if err = validateSchemaV8(ctx, conn); err != nil {
 		return fmt.Errorf("validate eventing schema v8: %w", err)
 	}
+	if version < 9 {
+		if _, err = conn.ExecContext(ctx, schemaV9); err != nil {
+			return fmt.Errorf("create eventing schema v9: %w", err)
+		}
+		if err = validateSchemaV9(ctx, conn); err != nil {
+			return fmt.Errorf("validate eventing schema v9: %w", err)
+		}
+		if err = backfillPRDevelopmentThreads(ctx, conn); err != nil {
+			return fmt.Errorf("backfill eventing schema v9 threads: %w", err)
+		}
+		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 9"); err != nil {
+			return fmt.Errorf("record eventing schema v9: %w", err)
+		}
+	} else if err = validateSchemaV9(ctx, conn); err != nil {
+		return fmt.Errorf("validate eventing schema v9: %w", err)
+	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit eventing migration: %w", err)
 	}

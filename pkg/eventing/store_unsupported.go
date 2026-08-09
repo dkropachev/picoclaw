@@ -22,6 +22,7 @@ var (
 	_ ReviewAttentionTriggerQueue    = (*Store)(nil)
 	_ PRDevelopmentCaseStore         = (*Store)(nil)
 	_ PRDevelopmentCaseReader        = (*Store)(nil)
+	_ PRDevelopmentThreadReader      = (*Store)(nil)
 	_ PRDevelopmentConversationStore = (*Store)(nil)
 	_ PRDevelopmentWorkbenchReader   = (*Store)(nil)
 	_ PRDevelopmentRepairAdmitter    = (*Store)(nil)
@@ -159,15 +160,23 @@ func (*Store) Prune(context.Context, time.Time, int) (int64, error) {
 func (*Store) LookupPRDevelopmentCapture(
 	context.Context,
 	PRDevelopmentCaptureIdentity,
+	*PRDevelopmentThreadIdentity,
 ) (PRDevelopmentCase, bool, error) {
 	return PRDevelopmentCase{}, false, ErrUnsupportedPlatform
 }
 
 func (*Store) CapturePRDevelopmentCase(
 	context.Context,
-	PRDevelopmentCaptureInput,
+	PRDevelopmentCaptureRequest,
 ) (PRDevelopmentCase, bool, error) {
 	return PRDevelopmentCase{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) GetPRDevelopmentThreadForCase(
+	context.Context,
+	string,
+) (PRDevelopmentThread, error) {
+	return PRDevelopmentThread{}, ErrUnsupportedPlatform
 }
 
 func (*Store) GetPRDevelopmentCase(

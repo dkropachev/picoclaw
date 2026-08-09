@@ -24,6 +24,7 @@ type RepairCaseVerifier interface {
 	VerifyCase(
 		ctx context.Context,
 		stored eventing.PRDevelopmentCase,
+		expected *eventing.PRDevelopmentThreadIdentity,
 	) (VerifiedCase, error)
 }
 
@@ -173,7 +174,23 @@ func (worker *RepairWorker) processClaim(
 		)
 	}
 
-	verified, err := worker.Verifier.VerifyCase(workCtx, workbench.Case)
+	expectedThread, err := repairThreadIdentity(workbench.Thread, session.CaseID)
+	if err != nil {
+		return worker.finishPreparation(
+			ctx,
+			attempt,
+			stopHeartbeat,
+			&heartbeatStopped,
+			eventing.PRDevelopmentRepairErrorInternal,
+			"Local repair could not start because its durable thread identity is invalid.",
+			err,
+		)
+	}
+	verified, err := worker.Verifier.VerifyCase(
+		workCtx,
+		workbench.Case,
+		expectedThread,
+	)
 	if err != nil {
 		if parentErr := ctx.Err(); parentErr != nil {
 			// Verification is read-only. Parent shutdown must leave this preparing
@@ -333,6 +350,38 @@ func (worker *RepairWorker) processClaim(
 		result.Iterations,
 		result.WorkspaceID,
 	)
+}
+
+func repairThreadIdentity(
+	thread *eventing.PRDevelopmentThreadBinding,
+	caseID string,
+) (*eventing.PRDevelopmentThreadIdentity, error) {
+	if thread == nil || strings.TrimSpace(thread.ID) == "" ||
+		thread.CaseCount < 1 || thread.Case.Ordinal < 0 ||
+		thread.Case.Ordinal >= thread.CaseCount || thread.Case.CaseID != caseID {
+		return nil, errors.New("durable local repair thread is missing or incomplete")
+	}
+	switch thread.Kind {
+	case eventing.PRDevelopmentThreadLegacy:
+		if thread.LegacyCaseID != caseID || thread.CaseCount != 1 ||
+			thread.Case.Ordinal != 0 {
+			return nil, errors.New("durable legacy repair thread is invalid")
+		}
+		return nil, nil
+	case eventing.PRDevelopmentThreadProvider:
+		identity := thread.Identity
+		if identity.Provider != "github" ||
+			strings.TrimSpace(identity.ProviderOrigin) == "" ||
+			strings.TrimSpace(identity.PullAuthorID) == "" ||
+			strings.TrimSpace(identity.RepositoryID) == "" ||
+			strings.TrimSpace(identity.PullRequestID) == "" ||
+			identity.PullNumber <= 0 {
+			return nil, errors.New("durable provider repair thread is invalid")
+		}
+		return &identity, nil
+	default:
+		return nil, errors.New("durable local repair thread kind is invalid")
+	}
 }
 
 func (worker *RepairWorker) finishPreparation(

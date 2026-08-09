@@ -7,8 +7,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
+	"net/url"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -26,12 +29,16 @@ func TestStorePRDevelopmentCaptureLookupAndExactIdempotency(t *testing.T) {
 	before, found, err := store.LookupPRDevelopmentCapture(
 		ctx,
 		input.PRDevelopmentCaptureIdentity,
+		validPRDevelopmentThreadForLookupTest(input),
 	)
 	require.NoError(t, err)
 	assert.False(t, found)
 	assert.Equal(t, PRDevelopmentCase{}, before)
 
-	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, input)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(input),
+	)
 	require.NoError(t, err)
 	assert.True(t, created)
 	assert.True(t, validPrefixedHexID(developmentCase.ID, prDevelopmentCaseIDPrefix))
@@ -41,7 +48,10 @@ func TestStorePRDevelopmentCaptureLookupAndExactIdempotency(t *testing.T) {
 	assert.Equal(t, "  Preserve provider feedback exactly.\n", developmentCase.Feedback)
 
 	*clock = clock.Add(time.Hour)
-	retry, created, err := store.CapturePRDevelopmentCase(ctx, input)
+	retry, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(input),
+	)
 	require.NoError(t, err)
 	assert.False(t, created)
 	assert.Equal(t, developmentCase, retry)
@@ -49,6 +59,7 @@ func TestStorePRDevelopmentCaptureLookupAndExactIdempotency(t *testing.T) {
 	lookup, found, err := store.LookupPRDevelopmentCapture(
 		ctx,
 		input.PRDevelopmentCaptureIdentity,
+		validPRDevelopmentThreadForLookupTest(input),
 	)
 	require.NoError(t, err)
 	assert.True(t, found)
@@ -68,7 +79,10 @@ func TestStorePRDevelopmentCaptureExplicitReplayCreatesDistinctCase(t *testing.T
 
 	ctx := context.Background()
 	store, clock, input := newPRDevelopmentStoreFixture(t, ":memory:")
-	first, created, err := store.CapturePRDevelopmentCase(ctx, input)
+	first, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(input),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 
@@ -81,7 +95,10 @@ func TestStorePRDevelopmentCaptureExplicitReplayCreatesDistinctCase(t *testing.T
 		input.WorkflowRef,
 		input.WorkflowRevision,
 	)
-	second, created, err := store.CapturePRDevelopmentCase(ctx, replay)
+	second, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(replay),
+	)
 	require.NoError(t, err)
 	assert.True(t, created)
 	assert.NotEqual(t, first.ID, second.ID)
@@ -92,6 +109,7 @@ func TestStorePRDevelopmentCaptureExplicitReplayCreatesDistinctCase(t *testing.T
 	firstLookup, found, err := store.LookupPRDevelopmentCapture(
 		ctx,
 		input.PRDevelopmentCaptureIdentity,
+		validPRDevelopmentThreadForLookupTest(input),
 	)
 	require.NoError(t, err)
 	assert.True(t, found)
@@ -99,6 +117,7 @@ func TestStorePRDevelopmentCaptureExplicitReplayCreatesDistinctCase(t *testing.T
 	secondLookup, found, err := store.LookupPRDevelopmentCapture(
 		ctx,
 		replay.PRDevelopmentCaptureIdentity,
+		validPRDevelopmentThreadForLookupTest(replay),
 	)
 	require.NoError(t, err)
 	assert.True(t, found)
@@ -324,7 +343,10 @@ func TestStoreListPRDevelopmentCasesValidatesEveryStoredCapture(t *testing.T) {
 
 	ctx := context.Background()
 	store, _, input := newPRDevelopmentStoreFixture(t, ":memory:")
-	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, input)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(input),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 
@@ -380,13 +402,19 @@ func TestStorePRDevelopmentCaptureRejectsChangedExactRetry(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			store, _, input := newPRDevelopmentStoreFixture(t, ":memory:")
-			_, created, err := store.CapturePRDevelopmentCase(ctx, input)
+			_, created, err := store.CapturePRDevelopmentCase(
+				ctx,
+				validPRDevelopmentRequestForTest(input),
+			)
 			require.NoError(t, err)
 			require.True(t, created)
 
 			changed := input
 			test.mutate(&changed)
-			_, created, captureErr := store.CapturePRDevelopmentCase(ctx, changed)
+			_, created, captureErr := store.CapturePRDevelopmentCase(
+				ctx,
+				validPRDevelopmentRequestForTest(changed),
+			)
 			assert.False(t, created)
 			assert.ErrorIs(t, captureErr, ErrPRDevelopmentConflict)
 		})
@@ -438,12 +466,19 @@ func TestStorePRDevelopmentCaptureVerifiesDispatchProvenance(t *testing.T) {
 			identity := input.PRDevelopmentCaptureIdentity
 			test.mutate(&identity)
 
-			_, found, lookupErr := store.LookupPRDevelopmentCapture(ctx, identity)
+			_, found, lookupErr := store.LookupPRDevelopmentCapture(
+				ctx,
+				identity,
+				validPRDevelopmentThreadForLookupTest(input),
+			)
 			assert.False(t, found)
 			assert.ErrorIs(t, lookupErr, ErrPRDevelopmentConflict)
 
 			input.PRDevelopmentCaptureIdentity = identity
-			_, created, captureErr := store.CapturePRDevelopmentCase(ctx, input)
+			_, created, captureErr := store.CapturePRDevelopmentCase(
+				ctx,
+				validPRDevelopmentRequestForTest(input),
+			)
 			assert.False(t, created)
 			assert.ErrorIs(t, captureErr, ErrPRDevelopmentConflict)
 		})
@@ -457,6 +492,7 @@ func TestStorePRDevelopmentCaptureVerifiesDispatchProvenance(t *testing.T) {
 		_, found, err := store.LookupPRDevelopmentCapture(
 			ctx,
 			input.PRDevelopmentCaptureIdentity,
+			validPRDevelopmentThreadForLookupTest(input),
 		)
 		assert.False(t, found)
 		assert.ErrorIs(t, err, ErrNotFound)
@@ -710,7 +746,10 @@ func TestStorePruneRetainsEventsReferencedByPRDevelopmentCases(t *testing.T) {
 
 	ctx := context.Background()
 	store, clock, input := newPRDevelopmentStoreFixture(t, ":memory:")
-	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, input)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(input),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 
@@ -872,6 +911,53 @@ func validPRDevelopmentInputForTest() PRDevelopmentCaptureInput {
 	}
 }
 
+func validPRDevelopmentRequestForTest(
+	input PRDevelopmentCaptureInput,
+) PRDevelopmentCaptureRequest {
+	parsed, _ := url.Parse(input.PullURL)
+	return PRDevelopmentCaptureRequest{
+		Case: input,
+		Thread: PRDevelopmentThreadIdentity{
+			Provider:       "github",
+			ProviderOrigin: parsed.Scheme + "://" + parsed.Host,
+			PullAuthorID: prDevelopmentDecimalIDForTest(
+				"author",
+				strings.ToLower(input.PullAuthor),
+			),
+			RepositoryID: prDevelopmentDecimalIDForTest(
+				"repository",
+				strings.ToLower(input.Repository),
+			),
+			PullRequestID: prDevelopmentDecimalIDForTest(
+				"pull",
+				strings.ToLower(input.Repository),
+				strconv.FormatInt(input.PullNumber, 10),
+			),
+			PullNumber: input.PullNumber,
+		},
+	}
+}
+
+func validPRDevelopmentThreadForLookupTest(
+	input PRDevelopmentCaptureInput,
+) *PRDevelopmentThreadIdentity {
+	identity := validPRDevelopmentRequestForTest(input).Thread
+	return &identity
+}
+
+func prDevelopmentDecimalIDForTest(parts ...string) string {
+	digest := fnv.New64a()
+	for _, part := range parts {
+		_, _ = digest.Write([]byte(part))
+		_, _ = digest.Write([]byte{0})
+	}
+	value := digest.Sum64() & (^uint64(0) >> 1)
+	if value == 0 {
+		value = 1
+	}
+	return strconv.FormatUint(value, 10)
+}
+
 func capturePRDevelopmentListCase(
 	t *testing.T,
 	store *Store,
@@ -907,7 +993,7 @@ func capturePRDevelopmentListCase(
 	)
 	developmentCase, created, err := store.CapturePRDevelopmentCase(
 		context.Background(),
-		input,
+		validPRDevelopmentRequestForTest(input),
 	)
 	require.NoError(t, err)
 	require.True(t, created)

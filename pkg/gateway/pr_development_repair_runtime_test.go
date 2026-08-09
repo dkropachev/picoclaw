@@ -232,6 +232,7 @@ type gatewayRepairVerifier struct {
 func (verifier gatewayRepairVerifier) VerifyCase(
 	context.Context,
 	eventing.PRDevelopmentCase,
+	*eventing.PRDevelopmentThreadIdentity,
 ) (prdevelopment.VerifiedCase, error) {
 	return verifier.verified, nil
 }
@@ -368,7 +369,20 @@ func seedGatewayPRDevelopmentRepair(
 			"#pullrequestreview-501",
 		Feedback: "Please fix the retry race.",
 	}
-	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, captured)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		eventing.PRDevelopmentCaptureRequest{
+			Case: captured,
+			Thread: eventing.PRDevelopmentThreadIdentity{
+				Provider:       "github",
+				ProviderOrigin: "https://github.com",
+				PullAuthorID:   "1001",
+				RepositoryID:   "2001",
+				PullRequestID:  "3001",
+				PullNumber:     captured.PullNumber,
+			},
+		},
+	)
 	if err != nil || !created {
 		t.Fatalf("CapturePRDevelopmentCase() = %#v, %v, %v", developmentCase, created, err)
 	}

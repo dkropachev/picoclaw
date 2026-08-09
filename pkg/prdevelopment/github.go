@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -71,16 +71,17 @@ type GitHubVerifier struct {
 	Runner       workflows.ToolRunner
 	Server       string
 	ArtifactRoot string
-	// WebOrigin is the canonical GitHub web origin used by VerifyCase to bind
-	// pull, review, and credential-free clone URLs. Verify retains the capture
-	// contract's existing provider checks. An empty value defaults to github.com;
-	// GitHub Enterprise development callers must provide their exact HTTPS origin.
+	// WebOrigin is the optional canonical GitHub web-origin fence. Capture and
+	// isolated legacy verification default an empty value to github.com. A
+	// provider-bound VerifyCase instead uses its durable verified origin and, when
+	// WebOrigin is nonempty, requires an exact match.
 	WebOrigin string
 }
 
 // VerifiedFeedback is the bounded provider snapshot admitted to durable
 // capture. It contains no checkout, credential, or provider-write capability.
 type VerifiedFeedback struct {
+	ThreadIdentity     eventing.PRDevelopmentThreadIdentity `json:"-"`
 	Repository         string
 	PullNumber         int
 	PullURL            string
@@ -146,7 +147,8 @@ type providerPullRequestRepo struct {
 }
 
 type providerUser struct {
-	Login string `json:"login"`
+	Login string      `json:"login"`
+	ID    json.Number `json:"id"`
 }
 
 type providerReview struct {
@@ -166,6 +168,25 @@ func (v *GitHubVerifier) Verify(
 	ctx context.Context,
 	evidence RoutingEvidence,
 ) (VerifiedFeedback, error) {
+	if v == nil {
+		return VerifiedFeedback{}, errors.New("GitHub verifier is required")
+	}
+	webOrigin, err := canonicalGitHubWebOrigin(v.WebOrigin)
+	if err != nil {
+		return VerifiedFeedback{}, fmt.Errorf(
+			"GitHub verifier web origin is invalid: %w",
+			err,
+		)
+	}
+	return v.verify(ctx, evidence, webOrigin, true)
+}
+
+func (v *GitHubVerifier) verify(
+	ctx context.Context,
+	evidence RoutingEvidence,
+	webOrigin string,
+	requireThreadIdentity bool,
+) (VerifiedFeedback, error) {
 	if v == nil || v.Runner == nil {
 		return VerifiedFeedback{}, errors.New("GitHub verifier runner is required")
 	}
@@ -174,6 +195,14 @@ func (v *GitHubVerifier) Verify(
 	}
 	if err := ctx.Err(); err != nil {
 		return VerifiedFeedback{}, err
+	}
+	if err := verifyRoutingEvidenceURLs(evidence, webOrigin); err != nil {
+		return VerifiedFeedback{}, err
+	}
+	if requireThreadIdentity && !validRoutingThreadIdentity(evidence, webOrigin) {
+		return VerifiedFeedback{}, errors.New(
+			"GitHub routing evidence thread identity is invalid",
+		)
 	}
 	owner, repo, ok := strings.Cut(evidence.Repository, "/")
 	if !ok || owner == "" || repo == "" {
@@ -202,9 +231,23 @@ func (v *GitHubVerifier) Verify(
 	if decodeErr := decodeProviderJSON(pullRaw, &pull); decodeErr != nil {
 		return VerifiedFeedback{}, fmt.Errorf("decode pull request: %w", decodeErr)
 	}
-	verified, err := verifyProviderPullRequest(evidence, pull)
+	verified, err := verifyProviderPullRequest(
+		evidence,
+		pull,
+		requireThreadIdentity,
+	)
 	if err != nil {
 		return VerifiedFeedback{}, err
+	}
+	if requireThreadIdentity {
+		verified.ThreadIdentity = eventing.PRDevelopmentThreadIdentity{
+			Provider:       "github",
+			ProviderOrigin: webOrigin,
+			PullAuthorID:   evidence.PullAuthorID,
+			RepositoryID:   evidence.RepositoryID,
+			PullRequestID:  evidence.PullRequestID,
+			PullNumber:     int64(evidence.PullNumber),
+		}
 	}
 
 	var (
@@ -338,20 +381,44 @@ func (v *GitHubVerifier) Verify(
 func (v *GitHubVerifier) VerifyCase(
 	ctx context.Context,
 	stored eventing.PRDevelopmentCase,
+	expected *eventing.PRDevelopmentThreadIdentity,
 ) (VerifiedCase, error) {
 	if ctx == nil {
 		return VerifiedCase{}, errors.New("GitHub case verifier context is required")
 	}
-	evidence, err := routingEvidenceForStoredCase(stored)
+	evidence, err := routingEvidenceForStoredCase(stored, expected)
 	if err != nil {
 		return VerifiedCase{}, err
 	}
 	if v == nil {
 		return VerifiedCase{}, errors.New("GitHub verifier is required")
 	}
-	webOrigin, err := canonicalGitHubWebOrigin(v.WebOrigin)
-	if err != nil {
-		return VerifiedCase{}, fmt.Errorf("GitHub verifier web origin is invalid: %w", err)
+	var webOrigin string
+	if expected != nil {
+		webOrigin = expected.ProviderOrigin
+		if v.WebOrigin != "" {
+			configuredOrigin, originErr := canonicalGitHubWebOrigin(v.WebOrigin)
+			if originErr != nil {
+				return VerifiedCase{}, fmt.Errorf(
+					"GitHub verifier web origin is invalid: %w",
+					originErr,
+				)
+			}
+			if configuredOrigin != webOrigin {
+				return VerifiedCase{}, fmt.Errorf(
+					"%w: provider origin does not match the configured GitHub origin",
+					ErrGitHubCaseDrift,
+				)
+			}
+		}
+	} else {
+		webOrigin, err = canonicalGitHubWebOrigin(v.WebOrigin)
+		if err != nil {
+			return VerifiedCase{}, fmt.Errorf(
+				"GitHub verifier web origin is invalid: %w",
+				err,
+			)
+		}
 	}
 	if urlErr := verifyRoutingEvidenceURLs(evidence, webOrigin); urlErr != nil {
 		if errors.Is(urlErr, errGitHubProviderEvidenceMismatch) {
@@ -359,7 +426,7 @@ func (v *GitHubVerifier) VerifyCase(
 		}
 		return VerifiedCase{}, urlErr
 	}
-	verified, err := v.Verify(ctx, evidence)
+	verified, err := v.verify(ctx, evidence, webOrigin, expected != nil)
 	if err != nil {
 		if errors.Is(err, errGitHubProviderEvidenceMismatch) {
 			return VerifiedCase{}, fmt.Errorf(
@@ -439,6 +506,7 @@ func (v *GitHubVerifier) VerifyCase(
 
 func routingEvidenceForStoredCase(
 	stored eventing.PRDevelopmentCase,
+	expected *eventing.PRDevelopmentThreadIdentity,
 ) (RoutingEvidence, error) {
 	if !validCaseID(stored.ID) ||
 		stored.PullNumber <= 0 || stored.PullNumber > MaximumPullNumber ||
@@ -491,7 +559,7 @@ func routingEvidenceForStoredCase(
 	if stored.PullMerged {
 		return RoutingEvidence{}, ErrGitHubCaseNotActionable
 	}
-	return RoutingEvidence{
+	evidence := RoutingEvidence{
 		Repository:        stored.Repository,
 		PullNumber:        int(stored.PullNumber),
 		PullURL:           stored.PullURL,
@@ -504,7 +572,30 @@ func routingEvidenceForStoredCase(
 		ReviewState:       string(stored.SubmittedReviewState),
 		ReviewCommitSHA:   stored.ReviewCommitSHA,
 		ReviewSubmittedAt: stored.ReviewSubmittedAt,
-	}, nil
+	}
+	if expected == nil {
+		return evidence, nil
+	}
+	providerOrigin, originErr := canonicalGitHubWebOrigin(expected.ProviderOrigin)
+	if expected.Provider != "github" || originErr != nil ||
+		providerOrigin != expected.ProviderOrigin ||
+		expected.PullNumber != stored.PullNumber ||
+		expected.PullNumber <= 0 || expected.PullNumber > MaximumPullNumber {
+		return RoutingEvidence{}, fmt.Errorf(
+			"%w: durable thread identity is invalid",
+			ErrGitHubCaseDrift,
+		)
+	}
+	evidence.PullAuthorID = expected.PullAuthorID
+	evidence.RepositoryID = expected.RepositoryID
+	evidence.PullRequestID = expected.PullRequestID
+	if !validRoutingThreadIdentity(evidence, expected.ProviderOrigin) {
+		return RoutingEvidence{}, fmt.Errorf(
+			"%w: durable thread identity is invalid",
+			ErrGitHubCaseDrift,
+		)
+	}
+	return evidence, nil
 }
 
 func canonicalGitHubWebOrigin(configured string) (string, error) {
@@ -520,7 +611,7 @@ func canonicalGitHubWebOrigin(configured string) (string, error) {
 		parsed.Opaque != "" || parsed.User != nil || parsed.Path != "" ||
 		parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery ||
 		parsed.Fragment != "" || parsed.Host != strings.ToLower(parsed.Host) ||
-		strings.HasSuffix(parsed.Host, ":") {
+		parsed.String() != configured || strings.HasSuffix(parsed.Host, ":") {
 		return "", errors.New("web origin must be one lowercase canonical HTTPS origin")
 	}
 	hostname := parsed.Hostname()
@@ -529,7 +620,8 @@ func canonicalGitHubWebOrigin(configured string) (string, error) {
 	}
 	if port := parsed.Port(); port != "" {
 		value, parseErr := strconv.Atoi(port)
-		if parseErr != nil || value < 1 || value > 65535 || value == 443 {
+		if parseErr != nil || value < 1 || value > 65535 || value == 443 ||
+			strconv.Itoa(value) != port {
 			return "", errors.New("web origin port is not canonical")
 		}
 	}
@@ -540,8 +632,12 @@ func validGitHubWebHostname(hostname string) bool {
 	if hostname == "" {
 		return false
 	}
-	if strings.Contains(hostname, ":") {
-		return net.ParseIP(hostname) != nil
+	if address, err := netip.ParseAddr(hostname); err == nil {
+		return address.Zone() == "" && !address.Is4In6() &&
+			address.String() == hostname
+	}
+	if strings.Contains(hostname, ":") || looksLikeNoncanonicalIPAddress(hostname) {
+		return false
 	}
 	if len(hostname) > 253 || strings.HasPrefix(hostname, ".") ||
 		strings.HasSuffix(hostname, ".") {
@@ -555,6 +651,34 @@ func validGitHubWebHostname(hostname string) bool {
 		for _, char := range []byte(label) {
 			if char >= 'a' && char <= 'z' || char >= '0' && char <= '9' ||
 				char == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func looksLikeNoncanonicalIPAddress(hostname string) bool {
+	// Some system resolvers accept inet_aton decimal, octal, and 0x-prefixed
+	// components as IPv4 literals even though netip correctly rejects them.
+	for _, component := range strings.Split(hostname, ".") {
+		if component == "" {
+			return true
+		}
+		digits := component
+		hexadecimal := strings.HasPrefix(component, "0x")
+		if hexadecimal {
+			digits = component[2:]
+			if digits == "" {
+				return false
+			}
+		}
+		for _, character := range []byte(digits) {
+			if character >= '0' && character <= '9' {
+				continue
+			}
+			if hexadecimal && character >= 'a' && character <= 'f' {
 				continue
 			}
 			return false
@@ -592,6 +716,26 @@ func verifyRoutingEvidenceURLs(evidence RoutingEvidence, webOrigin string) error
 		return providerEvidenceMismatch("GitHub review URL is not canonical")
 	}
 	return nil
+}
+
+func validRoutingThreadIdentity(
+	evidence RoutingEvidence,
+	webOrigin string,
+) bool {
+	if webOrigin == "" || evidence.PullNumber <= 0 ||
+		int64(evidence.PullNumber) > MaximumPullNumber {
+		return false
+	}
+	for _, id := range []string{
+		evidence.PullAuthorID,
+		evidence.RepositoryID,
+		evidence.PullRequestID,
+	} {
+		if _, err := captureProviderDatabaseID(id); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func verifiedHeadCloneURL(raw, webOrigin, headRepository string) (string, error) {
@@ -653,6 +797,7 @@ func writeProviderReviewDigestPart(digest hash.Hash, value string) {
 func verifyProviderPullRequest(
 	evidence RoutingEvidence,
 	pull providerPullRequest,
+	requireThreadIdentity bool,
 ) (VerifiedFeedback, error) {
 	if pull.Number != evidence.PullNumber {
 		return VerifiedFeedback{}, providerEvidenceMismatch(
@@ -678,6 +823,19 @@ func verifyProviderPullRequest(
 		return VerifiedFeedback{}, providerEvidenceMismatch(
 			"GitHub pull request author does not match the target",
 		)
+	}
+	if requireThreadIdentity {
+		pullAuthorID, err := canonicalProviderDatabaseID(pull.User.ID)
+		if err != nil {
+			return VerifiedFeedback{}, errors.New(
+				"GitHub pull request author provider ID is invalid",
+			)
+		}
+		if pullAuthorID != evidence.PullAuthorID {
+			return VerifiedFeedback{}, providerEvidenceMismatch(
+				"GitHub pull request author provider ID does not match the event",
+			)
+		}
 	}
 	state := strings.ToLower(pull.State)
 	if state != "open" && state != "closed" {

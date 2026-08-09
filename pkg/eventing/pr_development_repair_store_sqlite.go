@@ -865,6 +865,10 @@ func loadPRDevelopmentWorkbench(
 	if err != nil {
 		return PRDevelopmentWorkbench{}, err
 	}
+	thread, err := loadPRDevelopmentThreadBindingForCase(ctx, queryer, caseID)
+	if err != nil {
+		return PRDevelopmentWorkbench{}, err
+	}
 	conversation, err := loadPRDevelopmentConversation(ctx, queryer, caseID)
 	if err != nil {
 		return PRDevelopmentWorkbench{}, err
@@ -884,6 +888,7 @@ func loadPRDevelopmentWorkbench(
 	}
 	workbench := PRDevelopmentWorkbench{
 		Case:         storedCase.Case,
+		Thread:       &thread,
 		Conversation: conversation.Conversation,
 	}
 	if found {

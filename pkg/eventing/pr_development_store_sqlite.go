@@ -48,12 +48,15 @@ type storedPRDevelopmentCase struct {
 	CaptureHash string
 }
 
-// LookupPRDevelopmentCapture checks exact durable provenance before a caller
-// repeats a provider read. A missing case is not an error; malformed or
-// mismatched provenance is.
+// LookupPRDevelopmentCapture checks exact durable provenance and its complete
+// integrity-checked provider-thread binding before a caller repeats a provider
+// read. A missing case is not an error; malformed, missing, corrupt, or
+// mismatched binding state is. An isolated migration-created legacy binding is
+// accepted so an already committed pre-identity capture remains retryable.
 func (s *Store) LookupPRDevelopmentCapture(
 	ctx context.Context,
 	identity PRDevelopmentCaptureIdentity,
+	expectedThread *PRDevelopmentThreadIdentity,
 ) (PRDevelopmentCase, bool, error) {
 	if err := s.ready(ctx); err != nil {
 		return PRDevelopmentCase{}, false, err
@@ -62,29 +65,108 @@ func (s *Store) LookupPRDevelopmentCapture(
 	if err != nil {
 		return PRDevelopmentCase{}, false, err
 	}
-	if err = verifyPRDevelopmentDispatch(ctx, s.db, normalized); err != nil {
-		return PRDevelopmentCase{}, false, fmt.Errorf(
-			"lookup pull request development capture: %w",
-			s.dbError(err),
+	var normalizedThread *PRDevelopmentThreadIdentity
+	if expectedThread != nil {
+		normalized, normalizeErr := normalizePRDevelopmentThreadIdentity(
+			*expectedThread,
+			expectedThread.PullNumber,
+			"",
 		)
+		if normalizeErr != nil {
+			return PRDevelopmentCase{}, false, normalizeErr
+		}
+		normalizedThread = &normalized
 	}
-	stored, found, err := findPRDevelopmentCaptureByProvenance(ctx, s.db, normalized)
+
+	var (
+		developmentCase PRDevelopmentCase
+		found           bool
+	)
+	err = s.withPRDevelopmentConversationReadSnapshot(
+		ctx,
+		func(queryer rowsQueryer) error {
+			if verifyErr := verifyPRDevelopmentDispatch(
+				ctx,
+				queryer,
+				normalized,
+			); verifyErr != nil {
+				return verifyErr
+			}
+			stored, exists, findErr := findPRDevelopmentCaptureByProvenance(
+				ctx,
+				queryer,
+				normalized,
+			)
+			if findErr != nil {
+				return findErr
+			}
+			if !exists {
+				return nil
+			}
+			if prDevelopmentCaseIdentity(stored.Case) != normalized {
+				return fmt.Errorf(
+					"%w: dispatch or run provenance differs",
+					ErrPRDevelopmentConflict,
+				)
+			}
+			if normalizedThread != nil {
+				caseThread, normalizeErr := normalizePRDevelopmentThreadIdentity(
+					*normalizedThread,
+					stored.Case.PullNumber,
+					stored.Case.PullURL,
+				)
+				if normalizeErr != nil || caseThread != *normalizedThread {
+					return fmt.Errorf(
+						"%w: capture does not match the expected provider thread",
+						ErrPRDevelopmentConflict,
+					)
+				}
+			}
+			binding, bindingErr := loadPRDevelopmentThreadBindingForCase(
+				ctx,
+				queryer,
+				stored.Case.ID,
+			)
+			if bindingErr != nil {
+				return bindingErr
+			}
+			switch binding.Kind {
+			case PRDevelopmentThreadProvider:
+				if normalizedThread == nil || binding.Identity != *normalizedThread {
+					return fmt.Errorf(
+						"%w: capture is bound to a different provider thread",
+						ErrPRDevelopmentConflict,
+					)
+				}
+			case PRDevelopmentThreadLegacy:
+				if normalizedThread != nil {
+					return fmt.Errorf(
+						"%w: legacy capture cannot claim a provider thread",
+						ErrPRDevelopmentConflict,
+					)
+				}
+				// Schema-v9 migration deliberately isolated every pre-v9 case in
+				// one legacy thread. Its binding loader proves ordinal-zero
+				// singleton membership, allowing an in-flight old event to
+				// reconcile without inventing unavailable provider IDs.
+			default:
+				return fmt.Errorf(
+					"%w: capture has an unsupported thread binding",
+					ErrPRDevelopmentConflict,
+				)
+			}
+			developmentCase = stored.Case
+			found = true
+			return nil
+		},
+	)
 	if err != nil {
 		return PRDevelopmentCase{}, false, fmt.Errorf(
 			"lookup pull request development capture: %w",
 			s.dbError(err),
 		)
 	}
-	if !found {
-		return PRDevelopmentCase{}, false, nil
-	}
-	if prDevelopmentCaseIdentity(stored.Case) != normalized {
-		return PRDevelopmentCase{}, false, fmt.Errorf(
-			"lookup pull request development capture: %w: dispatch or run provenance differs",
-			ErrPRDevelopmentConflict,
-		)
-	}
-	return stored.Case, true, nil
+	return developmentCase, found, nil
 }
 
 // CapturePRDevelopmentCase atomically persists one provider-verified review
@@ -92,12 +174,20 @@ func (s *Store) LookupPRDevelopmentCapture(
 // the complete normalized provenance and provider content remain identical.
 func (s *Store) CapturePRDevelopmentCase(
 	ctx context.Context,
-	input PRDevelopmentCaptureInput,
+	input PRDevelopmentCaptureRequest,
 ) (PRDevelopmentCase, bool, error) {
 	if err := s.ready(ctx); err != nil {
 		return PRDevelopmentCase{}, false, err
 	}
-	normalized, err := normalizePRDevelopmentCapture(input)
+	normalized, err := normalizePRDevelopmentCapture(input.Case)
+	if err != nil {
+		return PRDevelopmentCase{}, false, err
+	}
+	threadIdentity, err := normalizePRDevelopmentThreadIdentity(
+		input.Thread,
+		normalized.PullNumber,
+		normalized.PullURL,
+	)
 	if err != nil {
 		return PRDevelopmentCase{}, false, err
 	}
@@ -136,6 +226,21 @@ func (s *Store) CapturePRDevelopmentCase(
 					ErrPRDevelopmentConflict,
 				)
 			}
+			thread, threadErr := loadPRDevelopmentThreadBindingForCase(
+				ctx,
+				conn,
+				existing.Case.ID,
+			)
+			if threadErr != nil {
+				return threadErr
+			}
+			if thread.Kind != PRDevelopmentThreadProvider ||
+				thread.Identity != threadIdentity {
+				return fmt.Errorf(
+					"%w: dispatch or run is bound to a different thread",
+					ErrPRDevelopmentConflict,
+				)
+			}
 			developmentCase = existing.Case
 			return nil
 		}
@@ -147,6 +252,17 @@ func (s *Store) CapturePRDevelopmentCase(
 		caseID, idErr := newPrefixedID(prDevelopmentCaseIDPrefix)
 		if idErr != nil {
 			return idErr
+		}
+		threadID, link, threadErr := preparePRDevelopmentProviderThreadLink(
+			ctx,
+			conn,
+			threadIdentity,
+			caseID,
+			captureHash,
+			now,
+		)
+		if threadErr != nil {
+			return threadErr
 		}
 		if _, execErr := conn.ExecContext(ctx, `
 			INSERT INTO pr_development_cases (
@@ -196,6 +312,20 @@ func (s *Store) CapturePRDevelopmentCase(
 			captureHash,
 			toDBTime(now),
 			toDBTime(now),
+		); execErr != nil {
+			return execErr
+		}
+		if _, execErr := conn.ExecContext(ctx, `
+			INSERT INTO pr_development_thread_cases (
+				case_id, thread_id, ordinal, linked_at,
+				previous_hash, link_hash
+			) VALUES (?, ?, ?, ?, ?, ?)`,
+			caseID,
+			threadID,
+			link.Ordinal,
+			toDBTime(link.LinkedAt),
+			link.PreviousHash,
+			link.LinkHash,
 		); execErr != nil {
 			return execErr
 		}
