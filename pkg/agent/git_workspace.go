@@ -10,6 +10,11 @@ import (
 
 type gitWorkspaceManager interface {
 	Acquire(ctx context.Context, req gitworkspace.AcquireRequest) (gitworkspace.WorkspaceInfo, error)
+	WithPinnedOperation(
+		ctx context.Context,
+		req gitworkspace.PinnedAcquireRequest,
+		run func(context.Context) error,
+	) error
 	AcquirePinned(ctx context.Context, req gitworkspace.PinnedAcquireRequest) (gitworkspace.WorkspaceInfo, error)
 	ReleaseSession(ctx context.Context, req gitworkspace.ReleaseRequest) ([]gitworkspace.WorkspaceInfo, error)
 	Stats(ctx context.Context) (gitworkspace.Stats, error)

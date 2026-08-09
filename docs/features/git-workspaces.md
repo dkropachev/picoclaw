@@ -20,7 +20,9 @@ that stronger acquisition primitive to an agent tool.
   `inventory.json` file and checkout subdirectories.
 - Core types/functions: `gitworkspace.Manager`, `Options`, acquire/release/stat
   request/result structs, `PinnedAcquireRequest`, `PinnedReleaseRequest`,
-  `Manager.AcquirePinned`, `Manager.ReleasePinned`, `NewGitWorkspaceTool`, API
+  `PinnedCandidateRequest`, `PinnedCommitRequest`, `Manager.AcquirePinned`,
+  `Manager.WithPinnedOperation`, `Manager.SnapshotPinnedCandidate`,
+  `Manager.CommitPinned`, `Manager.ReleasePinned`, `NewGitWorkspaceTool`, API
   routes under `/api/git-workspaces`, and frontend API/page components.
 - Runtime ordering: load config, construct the manager, acquire and lock before
   repository work, or have a trusted controller validate and publish a fresh
@@ -52,6 +54,7 @@ that stronger acquisition primitive to an agent tool.
 | `FR-GITWS-009` | MUST | Agent tool call `git_workspace`. | Actions acquire, list/status, release, clean ignored, drop, and reconcile map to manager operations and return JSON. | Mutating actions persist through the manager. | Missing manager or invalid action returns tool errors. | Agents need a first-class path to allocate reusable checkouts. |
 | `FR-GITWS-010` | MUST | Launcher API calls and frontend dashboard interactions. | API returns JSON stats/results; UI shows inventory/history/limits without long root paths in the summary metrics, displays normalized SSH remotes for legacy HTTPS rows when safe, exposes SSH remotes through a compact copy marker, labels the checkout branch column as current branch, shows compact checkout paths with a full-path copy action, and exposes refresh, maintain, clean, and drop actions. | Cleanup/drop/reconcile mutate through API helpers only. | API config/load errors return HTTP errors; UI disables clean/drop on locked workspaces. | Users need visibility and manual controls for local checkouts. |
 | `FR-GITWS-011` | MUST | A trusted controller calls `Manager.AcquirePinned` with an exact repository, source branch, expected commit, opaque reservation key, and agent identity, then eventually calls `Manager.ReleasePinned` with that reservation and agent identity. | The manager returns a locked, detached checkout whose fetched source branch resolves to the exact lowercase 40- or 64-hex expected commit. A first acquisition uses a fresh isolated clone prepared and verified in an unpublished staging directory, atomically publishes it at its inventory-derived path, and only then records ownership; a matching same-reservation call heartbeats the existing checkout without fetching, checking out, cleaning, or resetting agent work. Generic `ReleaseSession` skips pinned reservations, while explicit pinned release preserves work and unlocks it. | Inventory durably records repository identity, pinned source ref, pinned commit, reservation/agent lock identity, heartbeat, and history. Pinned release preserves any clean descendant commit or dirty work on a unique create-only reservation branch before unlocking. All inventory access is serialized by a context-aware kernel advisory lock whose persistent legacy path fences out older directory-lock binaries. | Missing, whitespace-aliased, malformed, or noncanonical input fails before allocation. Repository/ref/commit/reservation/agent mismatches, an origin that is not one exact raw remote or has redirected push configuration, an escaped or symlink-substituted manager, checkout, or Git-internal path, a non-descendant `HEAD`, replacement/graft/sparse/index-hiding state, injected Git configuration, unpreservable dirty state, or another control-plane deviation fails closed without resetting work or adopting a generic reusable checkout. A failed/crashed staging attempt is never inventory-owned or reused. Pinned acquire/release are available only as Go controller APIs: they are not HTTP/frontend actions and are not registered as `git_workspace` tool actions. | A development controller must bind local code to provider-verified PR identity while preserving subsequent agent work and withholding checkout and lifecycle authority from untrusted model calls. |
+| `FR-GITWS-012` | MUST | A trusted controller snapshots one exact locked pinned checkout, stores the returned parent/tree/candidate digest as validation evidence, then calls `Manager.CommitPinned` with that evidence, an immutable `pdcmt_` intent, a canonical bounded message, and a stored UTC whole-second authored time. | `SnapshotPinnedCandidate` builds an all-worktree candidate from tracked plus nonignored untracked content through a private temporary index and returns only opaque workspace identity, exact parent/tree, a domain-separated raw-diff digest, and bounded changed-file count. `CommitPinned` recomputes the candidate, creates one deterministic one-parent commit object whose message binds a domain-separated digest of the intent and whose identity/time are fixed, verifies its raw object, compare-and-swaps detached `HEAD`, repairs only the real index, and proves the checkout clean. An exact retry after a crash between completed Git subprocesses recognizes the same deterministic object at `HEAD`, repairs an interrupted index update, and returns `already_applied`; a proven commit with later worktree drift returns the commit evidence plus an explicit recovery error. | Candidate snapshots may add unreachable content-addressed Git objects but do not change `HEAD`, the real index, ordinary files, inventory ownership, branches, remotes, or provider state. A successful commit changes only local Git objects, detached `HEAD`, its bounded exclusive local reflog, and the real index. A hash-keyed kernel advisory operation lock serializes repair, snapshot, commit, and pinned release for the reservation across processes; its callback-derived context composes atomic manager calls without re-locking and expires when the callback returns, and the edit-only repair runner holds it for its complete preflight/model/postflight interval. | Missing or stale workspace/pin/parent/tree/digest/intent/time evidence, empty changes, attached or unexpected `HEAD`, a dirty real index before first application, merge/rebase/sequencer state, changed gitlinks, unsafe ref-storage/symlink-ref configuration, nonexclusive appendable reflogs, excessive/invalid Git output, origin/path/control-plane drift, compare-and-swap loss, cancellation, workspace drift, or a stale lock left by termination inside a Git subprocess fails closed. Stale Git locks require explicit operator recovery and are never deleted automatically. Git plumbing uses no shell, hook, signing, editor, pager, prompt, system/global config, replacement object, or lazy fetch. Commit, snapshot, and operation-lock capabilities remain controller-only Go APIs and perform no validation command, push, branch update, merge, release, HTTP action, or agent-tool action. | Every validated repair needs a local, content-addressed commit anchor that reconciles completed-subprocess crash boundaries without turning model completion or ambient Git configuration into publication authority. |
 
 ## Data And State Model
 
@@ -102,7 +105,7 @@ Owns: TOOL git_workspace
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Config | `git_workspaces.*`, `tools.git_workspace.enabled` | Defines root, limits, retention delays, and tool enablement. | `FR-GITWS-001`, `FR-GITWS-009` |
-| Go API | `(*gitworkspace.Manager).AcquirePinned(context.Context, gitworkspace.PinnedAcquireRequest)`, `(*gitworkspace.Manager).ReleasePinned(context.Context, gitworkspace.PinnedReleaseRequest)` | Controller-only exact acquisition binds repository, source branch, expected commit, opaque reservation, and agent identity to a fresh isolated checkout or a non-resetting heartbeat; explicit release safely preserves and unlocks only that reservation. | `FR-GITWS-011` |
+| Go API | `(*gitworkspace.Manager).AcquirePinned`, `WithPinnedOperation`, `SnapshotPinnedCandidate`, `CommitPinned`, and `ReleasePinned` | Controller-only exact acquisition binds repository, source branch, expected commit, opaque reservation, and agent identity; the callback-scoped operation lock serializes trusted filesystem work while its derived context safely composes the atomic manager methods; snapshot/commit bind validated ordinary content to one deterministic local descendant; explicit release safely preserves and unlocks only that reservation. | `FR-GITWS-011`, `FR-GITWS-012` |
 | Tool | `git_workspace` | Agent-callable generic acquire/list/status/release/clean/drop/reconcile operations with JSON results. It has no pinned acquire/release actions, cannot supply pinned identity fields, and generic release skips pinned reservations. | `FR-GITWS-002` through `FR-GITWS-009`, `FR-GITWS-011` |
 | HTTP | `/api/git-workspaces*` | Launcher-authenticated inventory, reconcile, cleanup, and drop endpoints. | `FR-GITWS-005` through `FR-GITWS-010` |
 | Frontend | Git Workspaces dashboard and config fields | Browser inventory/maintenance surface and limit configuration. | `FR-GITWS-001`, `FR-GITWS-010` |
@@ -141,9 +144,20 @@ Owns: TOOL git_workspace
    contents when present, verify the checkout became clean, then unlock. Never
    overwrite an existing preservation ref, discard a pinned descendant, or
    unlock dirty state that Git cannot stage.
-8. For stats, walk checkout paths for total bytes and use git ignored status to
+8. Before trusted repair filesystem work, acquire the reservation-derived
+   cross-process operation lock, then acquire inventory locks only inside
+   manager calls. To snapshot a candidate, require detached `HEAD`, an ordinary
+   operation-free checkout, and a real index equal to `HEAD`; seed a private
+   index from that parent, add all worktree changes, reject an empty diff or
+   changed gitlink, write the candidate tree, and hash the exact raw diff.
+9. To commit stored validation evidence, recreate and verify the deterministic
+   commit object before compare-and-swapping detached `HEAD`. If `HEAD` already
+   names that exact object, reconcile the real index and prove cleanliness. If
+   content drifted after the commit became visible, preserve the commit fact and
+   fail recovery-required without changing ordinary files.
+10. For stats, walk checkout paths for total bytes and use git ignored status to
    find ignored roots without double-counting nested paths.
-9. Reconcile skips locked workspaces, cleans old ignored files first, drops
+11. Reconcile skips locked workspaces, cleans old ignored files first, drops
    aged workspaces second, then drops oldest unlocked workspaces until total
    active size is within the configured limit.
 
@@ -159,9 +173,10 @@ workspace fields and dashboard behavior. Trusted development controllers may
 call `AcquirePinned` and `ReleasePinned` directly, but neither tool registration
 nor the launcher API/frontend may translate an agent or browser request into
 those operations. The controller-only local repair runner receives an
-`AcquirePinned`-only interface and an exact request, never a raw path or
-`ReleasePinned`; it acquires a fresh exact pin or heartbeats the matching pin
-before model access, then reacquires it as postflight so this feature revalidates
+acquire-plus-operation-lock interface and an exact request, never release,
+snapshot, commit, or publication capability; it locks the reservation, acquires
+a fresh exact pin or heartbeats the matching pin before model access, then
+reacquires it as postflight so this feature revalidates
 repository, ancestry, and Git control-plane state while the separate security
 contract confines ordinary content edits.
 
@@ -203,11 +218,13 @@ contract confines ordinary content edits.
 | `FR-GITWS-008` | [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
 | `FR-GITWS-009` | [pkg/tools/integration/git_workspace_test.go](../../pkg/tools/integration/git_workspace_test.go) |
 | `FR-GITWS-010` | [web/backend/api/git_workspaces_test.go](../../web/backend/api/git_workspaces_test.go), [web/frontend/src/api/git-workspaces.test.ts](../../web/frontend/src/api/git-workspaces.test.ts), [web/frontend/src/components/agent/git-workspaces/git-workspaces-page.test.tsx](../../web/frontend/src/components/agent/git-workspaces/git-workspaces-page.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
-| `FR-GITWS-011` | [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go), [pkg/tools/integration/git_workspace_test.go](../../pkg/tools/integration/git_workspace_test.go) |
+| `FR-GITWS-011` | [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go), [pkg/gitworkspace/pinned_commit_test.go](../../pkg/gitworkspace/pinned_commit_test.go), [pkg/tools/integration/git_workspace_test.go](../../pkg/tools/integration/git_workspace_test.go) |
+| `FR-GITWS-012` | [pkg/gitworkspace/pinned_commit_test.go](../../pkg/gitworkspace/pinned_commit_test.go), [pkg/agent/local_repair_test.go](../../pkg/agent/local_repair_test.go), [pkg/tools/integration/git_workspace_test.go](../../pkg/tools/integration/git_workspace_test.go) |
 
 ## Implementation Anchors
 
 - [pkg/gitworkspace/manager.go](../../pkg/gitworkspace/manager.go)
+- [pkg/gitworkspace/pinned_commit.go](../../pkg/gitworkspace/pinned_commit.go)
 - [pkg/gitworkspace/inventory_lock_unix.go](../../pkg/gitworkspace/inventory_lock_unix.go)
 - [pkg/gitworkspace/inventory_lock_windows.go](../../pkg/gitworkspace/inventory_lock_windows.go)
 - [pkg/agent/git_workspace.go](../../pkg/agent/git_workspace.go)

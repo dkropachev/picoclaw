@@ -18,11 +18,63 @@ import (
 )
 
 type localRepairTestAcquirer struct {
-	mu        sync.Mutex
-	workspace gitworkspace.WorkspaceInfo
-	errors    map[int]error
-	transform func(int, gitworkspace.WorkspaceInfo) gitworkspace.WorkspaceInfo
-	calls     []gitworkspace.PinnedAcquireRequest
+	mu                 sync.Mutex
+	workspace          gitworkspace.WorkspaceInfo
+	errors             map[int]error
+	transform          func(int, gitworkspace.WorkspaceInfo) gitworkspace.WorkspaceInfo
+	calls              []gitworkspace.PinnedAcquireRequest
+	lockHeld           bool
+	operationOnce      sync.Once
+	operationSlot      chan struct{}
+	operationContended chan struct{}
+}
+
+type localRepairTestOperationContextKey struct{}
+
+func (acquirer *localRepairTestAcquirer) WithPinnedOperation(
+	ctx context.Context,
+	_ gitworkspace.PinnedAcquireRequest,
+	run func(context.Context) error,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if run == nil {
+		return errors.New("test pinned operation callback is required")
+	}
+	inherited, _ := ctx.Value(localRepairTestOperationContextKey{}).(*localRepairTestAcquirer)
+	if inherited == acquirer {
+		return run(ctx)
+	}
+	acquirer.operationOnce.Do(func() {
+		acquirer.operationSlot = make(chan struct{}, 1)
+		acquirer.operationSlot <- struct{}{}
+	})
+	select {
+	case <-acquirer.operationSlot:
+	default:
+		if acquirer.operationContended != nil {
+			select {
+			case acquirer.operationContended <- struct{}{}:
+			default:
+			}
+		}
+		select {
+		case <-acquirer.operationSlot:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	acquirer.mu.Lock()
+	acquirer.lockHeld = true
+	acquirer.mu.Unlock()
+	defer func() {
+		acquirer.mu.Lock()
+		acquirer.lockHeld = false
+		acquirer.mu.Unlock()
+		acquirer.operationSlot <- struct{}{}
+	}()
+	return run(context.WithValue(ctx, localRepairTestOperationContextKey{}, acquirer))
 }
 
 func (acquirer *localRepairTestAcquirer) AcquirePinned(
@@ -30,6 +82,12 @@ func (acquirer *localRepairTestAcquirer) AcquirePinned(
 	request gitworkspace.PinnedAcquireRequest,
 ) (gitworkspace.WorkspaceInfo, error) {
 	acquirer.mu.Lock()
+	if !acquirer.lockHeld {
+		acquirer.mu.Unlock()
+		return gitworkspace.WorkspaceInfo{}, errors.New(
+			"test pinned workspace acquired outside its operation lock",
+		)
+	}
 	acquirer.calls = append(acquirer.calls, request)
 	call := len(acquirer.calls)
 	workspace := cloneLocalRepairTestWorkspace(acquirer.workspace)
@@ -372,6 +430,87 @@ func TestLocalRepairRunnerSerializesReservationAcrossRepositoryAliases(t *testin
 	}
 	if len(acquirer.Calls()) != 4 {
 		t.Fatalf("AcquirePinned() calls = %d, want two preflights and postflights", len(acquirer.Calls()))
+	}
+}
+
+func TestLocalRepairRunnerComposesInsidePinnedOperationWithoutLockInversion(t *testing.T) {
+	pin, workspace, _ := newLocalRepairTestWorkspace(t)
+	pin.ReservationKey = "repair-test-lock-order"
+	workspace.LockedBy.SessionKey = pin.ReservationKey
+	contended := make(chan struct{}, 1)
+	acquirer := &localRepairTestAcquirer{
+		workspace:          workspace,
+		operationContended: contended,
+	}
+	provider := &localRepairTestProvider{}
+	runner := newLocalRepairTestRunner(t, acquirer, provider, 2)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	outerEntered := make(chan struct{})
+	startNested := make(chan struct{})
+	outerDone := make(chan error, 1)
+	go func() {
+		outerDone <- acquirer.WithPinnedOperation(
+			ctx,
+			pin,
+			func(operationContext context.Context) error {
+				close(outerEntered)
+				select {
+				case <-startNested:
+				case <-operationContext.Done():
+					return operationContext.Err()
+				}
+				result, err := runner.Run(
+					operationContext,
+					localRepairTestRunRequest(pin),
+				)
+				if err == nil && result.Content != "done" {
+					return errors.New("nested repair returned unexpected content")
+				}
+				return err
+			},
+		)
+	}()
+	select {
+	case <-outerEntered:
+	case <-time.After(time.Second):
+		t.Fatal("outer pinned operation did not start")
+	}
+
+	type runOutcome struct {
+		result LocalRepairResult
+		err    error
+	}
+	ordinaryDone := make(chan runOutcome, 1)
+	go func() {
+		result, err := runner.Run(ctx, localRepairTestRunRequest(pin))
+		ordinaryDone <- runOutcome{result: result, err: err}
+	}()
+	select {
+	case <-contended:
+	case <-time.After(time.Second):
+		t.Fatal("ordinary repair did not wait on the outer pinned operation")
+	}
+	close(startNested)
+
+	select {
+	case err := <-outerDone:
+		if err != nil {
+			t.Fatalf("nested repair under pinned operation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("nested repair deadlocked behind the ordinary repair")
+	}
+	select {
+	case outcome := <-ordinaryDone:
+		if outcome.err != nil || outcome.result.Content != "done" {
+			t.Fatalf("ordinary repair outcome = %#v, error = %v", outcome.result, outcome.err)
+		}
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("ordinary repair did not resume after the outer operation")
 	}
 }
 

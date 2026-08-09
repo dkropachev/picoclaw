@@ -63,9 +63,15 @@ var (
 )
 
 // PinnedWorkspaceAcquirer is the only repository-lifecycle capability admitted
-// to LocalRepairRunner. The runner can create or heartbeat one exact pin but
-// cannot release, reset, clean, publish, or otherwise manage a checkout.
+// to LocalRepairRunner. The runner can serialize, create, or heartbeat one
+// exact pin but cannot snapshot, commit, release, reset, clean, publish, or
+// otherwise manage a checkout.
 type PinnedWorkspaceAcquirer interface {
+	WithPinnedOperation(
+		ctx context.Context,
+		request gitworkspace.PinnedAcquireRequest,
+		run func(context.Context) error,
+	) error
 	AcquirePinned(
 		ctx context.Context,
 		request gitworkspace.PinnedAcquireRequest,
@@ -175,12 +181,38 @@ func (runner *LocalRepairRunner) Run(
 		return LocalRepairResult{}, fmt.Errorf("%w: context is invalid", ErrLocalRepairInvalid)
 	}
 
-	releasePin, err := sharedLocalRepairPins.acquire(ctx, localRepairPinKey(request.Pin))
-	if err != nil {
-		return LocalRepairResult{}, err
+	operationErr := runner.workspaces.WithPinnedOperation(
+		ctx,
+		request.Pin,
+		func(operationContext context.Context) error {
+			releasePin, lockErr := sharedLocalRepairPins.acquire(
+				operationContext,
+				localRepairPinKey(request.Pin),
+			)
+			if lockErr != nil {
+				return lockErr
+			}
+			defer releasePin()
+			result, returnErr = runner.runPinned(
+				operationContext,
+				request,
+				instruction,
+				contextText,
+			)
+			return returnErr
+		},
+	)
+	if operationErr != nil {
+		return result, operationErr
 	}
-	defer releasePin()
+	return result, nil
+}
 
+func (runner *LocalRepairRunner) runPinned(
+	ctx context.Context,
+	request LocalRepairRequest,
+	instruction, contextText string,
+) (result LocalRepairResult, returnErr error) {
 	before, err := runner.workspaces.AcquirePinned(ctx, request.Pin)
 	if err != nil {
 		return LocalRepairResult{}, fmt.Errorf("%w: acquire: %v", ErrLocalRepairPin, err)

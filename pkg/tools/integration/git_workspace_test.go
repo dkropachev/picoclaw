@@ -102,7 +102,13 @@ func TestGitWorkspaceToolDoesNotExposePinnedControllerOperations(t *testing.T) {
 	if !ok {
 		t.Fatal("tool action enum is unavailable")
 	}
-	for _, forbidden := range []string{"acquire_pinned", "release_pinned"} {
+	for _, forbidden := range []string{
+		"acquire_pinned",
+		"lock_pinned",
+		"snapshot_pinned",
+		"commit_pinned",
+		"release_pinned",
+	} {
 		if slices.Contains(actions, forbidden) {
 			t.Fatalf("controller-only action %q appears in tool schema", forbidden)
 		}
