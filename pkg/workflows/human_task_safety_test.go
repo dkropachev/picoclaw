@@ -763,7 +763,10 @@ jobs:
 		InputHash:        task.InputHash,
 		ResponseID:       "live-response",
 		Response:         true,
-		resumeLease:      250 * time.Millisecond,
+		// Coverage runs can pause instrumented test goroutines for hundreds of
+		// milliseconds. Keep enough scheduling slack while still observing the
+		// claim after its original expiry below.
+		resumeLease: 2 * time.Second,
 	}
 	claimed, claimedTask, duplicate, err := store.ClaimHumanTask(
 		ctx,
@@ -823,7 +826,7 @@ jobs:
 		t.Fatalf("initial continuing projection=%#v err=%v", projected, err)
 	}
 	initialExpiry := *projected[0].RetryAt
-	wait := time.Until(initialExpiry) + 175*time.Millisecond
+	wait := time.Until(initialExpiry) + 25*time.Millisecond
 	if wait > 0 {
 		time.Sleep(wait)
 	}

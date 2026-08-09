@@ -311,6 +311,119 @@ func TestStoreMigratesV11ToEmptyPRDevelopmentControllerRecoverySchema(t *testing
 	assert.Zero(t, count, "v12 migration must not manufacture recovery authority")
 }
 
+func TestStoreMigratesV12ToEmptyPRDevelopmentControllerOperationSchema(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "migration-v12-controller-operation.db")
+	db := openSchemaTestDB(t, path)
+	for _, schema := range []string{
+		schemaV1,
+		schemaV2,
+		schemaV3,
+		schemaV4,
+		schemaV5,
+		schemaV6,
+		schemaV7,
+		schemaV8,
+		schemaV9,
+		schemaV10,
+		schemaV11,
+		schemaV12,
+	} {
+		_, err := db.Exec(schema)
+		require.NoError(t, err)
+	}
+	setSchemaTestVersion(t, db, 12)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.NoError(t, err)
+	defer store.Close()
+
+	var version int
+	require.NoError(t, store.db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, schemaVersion, version)
+	for _, object := range []struct {
+		kind string
+		name string
+	}{
+		{"table", "pr_development_controller_operation_intents"},
+		{"index", "pr_development_controller_operation_active"},
+		{"index", "pr_development_controller_operation_effect"},
+		{"index", "pr_development_controller_operation_recovery"},
+		{"index", "pr_development_controller_operation_replacement_key"},
+		{"index", "pr_development_controller_operation_replacement_digest"},
+		{"index", "pr_development_controller_operation_claim"},
+		{"index", "pr_development_controller_operation_claimable"},
+	} {
+		assert.True(t, schemaObjectExists(t, store.db, object.kind, object.name))
+	}
+	var count int
+	require.NoError(t, store.db.QueryRow(`
+		SELECT COUNT(*) FROM pr_development_controller_operation_intents`,
+	).Scan(&count))
+	assert.Zero(t, count, "v13 migration must not manufacture operation authority")
+}
+
+func TestStorePRDevelopmentControllerOperationMigrationValidationRollsBack(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "migration-v13-operation-rollback.db")
+	db := openSchemaTestDB(t, path)
+	for _, schema := range []string{
+		schemaV1,
+		schemaV2,
+		schemaV3,
+		schemaV4,
+		schemaV5,
+		schemaV6,
+		schemaV7,
+		schemaV8,
+		schemaV9,
+		schemaV10,
+		schemaV11,
+		schemaV12,
+	} {
+		_, err := db.Exec(schema)
+		require.NoError(t, err)
+	}
+	malformed := strings.Replace(
+		schemaV13PRDevelopmentControllerOperationIntentsTable,
+		"ordinal INTEGER NOT NULL CHECK (ordinal >= 0 AND ordinal < 24576),",
+		"ordinal INTEGER NOT NULL CHECK (ordinal >= 0 AND ordinal <= 24576),",
+		1,
+	)
+	require.NotEqual(t, schemaV13PRDevelopmentControllerOperationIntentsTable, malformed)
+	_, err := db.Exec(malformed)
+	require.NoError(t, err)
+	setSchemaTestVersion(t, db, 12)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorIs(t, err, ErrSchemaInvalid)
+	assert.Contains(t, err.Error(), "validate eventing schema v13")
+
+	db = openSchemaTestDB(t, path)
+	defer db.Close()
+	var version int
+	require.NoError(t, db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, 12, version)
+	assert.True(t, schemaObjectExists(
+		t,
+		db,
+		"table",
+		"pr_development_controller_operation_intents",
+	))
+	assert.False(t, schemaObjectExists(
+		t,
+		db,
+		"index",
+		"pr_development_controller_operation_active",
+	), "indexes created in the failed v13 migration must roll back")
+}
+
 func TestStorePRDevelopmentControllerRecoveryMigrationValidationRollsBack(t *testing.T) {
 	t.Parallel()
 
@@ -1019,6 +1132,8 @@ func installSchemaV1ForTest(t *testing.T, db *sql.DB) {
 	_, err = db.Exec(schemaV11)
 	require.NoError(t, err)
 	_, err = db.Exec(schemaV12)
+	require.NoError(t, err)
+	_, err = db.Exec(schemaV13)
 	require.NoError(t, err)
 	setSchemaTestVersion(t, db, schemaVersion)
 }

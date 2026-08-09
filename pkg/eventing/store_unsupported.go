@@ -11,27 +11,28 @@ import (
 type Store struct{}
 
 var (
-	_ Inbox                          = (*Store)(nil)
-	_ EventOperatorReader            = (*Store)(nil)
-	_ DispatchOperatorReader         = (*Store)(nil)
-	_ DispatchOperatorGetter         = (*Store)(nil)
-	_ RevisionRoutingDispatchCreator = (*Store)(nil)
-	_ DispatchLeaseRenewer           = (*Store)(nil)
-	_ ReviewStore                    = (*Store)(nil)
-	_ ReviewDecisionRunStore         = (*Store)(nil)
-	_ ReviewAttentionTriggerQueue    = (*Store)(nil)
-	_ PRDevelopmentCaseStore         = (*Store)(nil)
-	_ PRDevelopmentCaseReader        = (*Store)(nil)
-	_ PRDevelopmentThreadReader      = (*Store)(nil)
-	_ PRDevelopmentConversationStore = (*Store)(nil)
-	_ PRDevelopmentWorkbenchReader   = (*Store)(nil)
-	_ PRDevelopmentRepairAdmitter    = (*Store)(nil)
-	_ PRDevelopmentRepairQueue       = (*Store)(nil)
-	_ PRDevelopmentControllerReader  = (*Store)(nil)
-	_ PRDevelopmentControllerStore   = (*Store)(nil)
-	_ PRDevelopmentLedgerReader      = (*Store)(nil)
-	_ PRDevelopmentLedgerStore       = (*Store)(nil)
-	_ PRDevelopmentContextReader     = (*Store)(nil)
+	_ Inbox                                 = (*Store)(nil)
+	_ EventOperatorReader                   = (*Store)(nil)
+	_ DispatchOperatorReader                = (*Store)(nil)
+	_ DispatchOperatorGetter                = (*Store)(nil)
+	_ RevisionRoutingDispatchCreator        = (*Store)(nil)
+	_ DispatchLeaseRenewer                  = (*Store)(nil)
+	_ ReviewStore                           = (*Store)(nil)
+	_ ReviewDecisionRunStore                = (*Store)(nil)
+	_ ReviewAttentionTriggerQueue           = (*Store)(nil)
+	_ PRDevelopmentCaseStore                = (*Store)(nil)
+	_ PRDevelopmentCaseReader               = (*Store)(nil)
+	_ PRDevelopmentThreadReader             = (*Store)(nil)
+	_ PRDevelopmentConversationStore        = (*Store)(nil)
+	_ PRDevelopmentWorkbenchReader          = (*Store)(nil)
+	_ PRDevelopmentRepairAdmitter           = (*Store)(nil)
+	_ PRDevelopmentRepairQueue              = (*Store)(nil)
+	_ PRDevelopmentControllerReader         = (*Store)(nil)
+	_ PRDevelopmentControllerStore          = (*Store)(nil)
+	_ PRDevelopmentControllerOperationStore = (*Store)(nil)
+	_ PRDevelopmentLedgerReader             = (*Store)(nil)
+	_ PRDevelopmentLedgerStore              = (*Store)(nil)
+	_ PRDevelopmentContextReader            = (*Store)(nil)
 )
 
 func Open(context.Context, string, ...Option) (*Store, error) {
@@ -282,6 +283,41 @@ func (*Store) RenewPRDevelopmentControllerLease(
 	PRDevelopmentControllerRenew,
 ) error {
 	return ErrUnsupportedPlatform
+}
+
+func (*Store) PreparePRDevelopmentControllerOperation(
+	context.Context,
+	PRDevelopmentControllerOperationPrepare,
+) (PRDevelopmentControllerOperation, bool, error) {
+	return PRDevelopmentControllerOperation{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) FinalizePRDevelopmentControllerOperation(
+	context.Context,
+	PRDevelopmentControllerOperationFinalize,
+) (PRDevelopmentControllerOperationTransition, bool, error) {
+	return PRDevelopmentControllerOperationTransition{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) ClaimPRDevelopmentControllerOperationRecovery(
+	context.Context,
+	PRDevelopmentControllerOperationRecoveryClaim,
+) (PRDevelopmentControllerOperationRecoveryLease, bool, error) {
+	return PRDevelopmentControllerOperationRecoveryLease{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) RenewPRDevelopmentControllerOperationRecovery(
+	context.Context,
+	PRDevelopmentControllerOperationRecoveryRenew,
+) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Store) FinalizePRDevelopmentControllerOperationRecovery(
+	context.Context,
+	PRDevelopmentControllerOperationRecoveryFinalize,
+) (PRDevelopmentControllerOperationTransition, bool, error) {
+	return PRDevelopmentControllerOperationTransition{}, false, ErrUnsupportedPlatform
 }
 
 func (*Store) ClaimPRDevelopmentControllerRecovery(

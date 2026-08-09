@@ -508,6 +508,31 @@ func TestPRDevelopmentControllerTypesAreJSONPrivate(t *testing.T) {
 				MutationLeaseTokenDigest: sentinel,
 			},
 		},
+		PRDevelopmentControllerOperationRequest{Repository: sentinel},
+		PRDevelopmentControllerOperationResult{WorkspaceID: sentinel},
+		PRDevelopmentControllerOperation{
+			ReplacementReservationKey: sentinel,
+			ClaimToken:                sentinel,
+			RequestJSON:               []byte(sentinel),
+			ResultJSON:                []byte(sentinel),
+		},
+		PRDevelopmentControllerOperationTransition{
+			Controller: PRDevelopmentController{LeaseToken: sentinel},
+			Operation: PRDevelopmentControllerOperation{
+				ReplacementReservationKey: sentinel,
+			},
+		},
+		PRDevelopmentControllerOperationPrepare{LeaseToken: sentinel},
+		PRDevelopmentControllerOperationFinalize{LeaseToken: sentinel},
+		PRDevelopmentControllerOperationRecoveryClaim{WorkerLabel: sentinel},
+		PRDevelopmentControllerOperationRecoveryLease{
+			Controller: PRDevelopmentController{LeaseToken: sentinel},
+			Operation: PRDevelopmentControllerOperation{
+				ReplacementReservationKey: sentinel,
+			},
+		},
+		PRDevelopmentControllerOperationRecoveryRenew{ClaimToken: sentinel},
+		PRDevelopmentControllerOperationRecoveryFinalize{ClaimToken: sentinel},
 	}
 	for _, value := range values {
 		encoded, err := json.Marshal(value)

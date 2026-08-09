@@ -52,7 +52,10 @@ type PinnedReservationRotationResult struct {
 
 // pinnedReservationRotationRecord is a private, append-only inventory chain.
 // Reservation values are one-way fingerprints; the only retained bearer is
-// the currently active WorkspaceRecord lock.
+// the currently active WorkspaceRecord lock. PreviousReservationHash normally
+// identifies the replaced workspace lock. A parked-line resume recovery may
+// instead revoke an exact caller-issued bearer that lost its external lease
+// before it reached this inventory.
 type pinnedReservationRotationRecord struct {
 	IntentID                   string    `json:"intent_id"`
 	WorkspaceID                string    `json:"workspace_id"`
@@ -335,21 +338,12 @@ func replayPinnedReservationRotation(
 	request PinnedReservationRotationRequest,
 	repository string,
 ) (PinnedReservationRotationResult, error) {
-	previousHash := developmentLineReservationHash(request.Pin.ReservationKey)
-	replacementHash := developmentLineReservationHash(request.ReplacementReservationKey)
-	if record.WorkspaceID != request.WorkspaceID || record.LineID != request.LineID ||
-		record.RepoID != repoID(repository) || record.SourceRef != request.Pin.SourceRef ||
-		record.SourceCommit != request.Pin.ExpectedCommit ||
-		record.Version != request.ExpectedVersion ||
-		record.MutationEpoch != request.ExpectedMutationEpoch ||
-		record.Tip != request.ExpectedTip || record.Tree != request.ExpectedTree ||
-		record.PreviousReservationHash != previousHash ||
-		record.ReplacementReservationHash != replacementHash ||
-		record.AgentID != request.Pin.AgentID {
-		return PinnedReservationRotationResult{}, fmt.Errorf(
-			"%w: reservation rotation replay changed",
-			ErrPinnedLineConflict,
-		)
+	if matchErr := matchPinnedReservationRotationRecord(
+		record,
+		request,
+		repository,
+	); matchErr != nil {
+		return PinnedReservationRotationResult{}, matchErr
 	}
 	workspace := state.Workspaces[record.WorkspaceID]
 	if workspace == nil || workspace.DroppedAt != nil ||
@@ -387,6 +381,30 @@ func replayPinnedReservationRotation(
 		}
 	}
 	return pinnedReservationRotationResult(record, true), nil
+}
+
+func matchPinnedReservationRotationRecord(
+	record pinnedReservationRotationRecord,
+	request PinnedReservationRotationRequest,
+	repository string,
+) error {
+	previousHash := developmentLineReservationHash(request.Pin.ReservationKey)
+	replacementHash := developmentLineReservationHash(request.ReplacementReservationKey)
+	if record.WorkspaceID != request.WorkspaceID || record.LineID != request.LineID ||
+		record.RepoID != repoID(repository) || record.SourceRef != request.Pin.SourceRef ||
+		record.SourceCommit != request.Pin.ExpectedCommit ||
+		record.Version != request.ExpectedVersion ||
+		record.MutationEpoch != request.ExpectedMutationEpoch ||
+		record.Tip != request.ExpectedTip || record.Tree != request.ExpectedTree ||
+		record.PreviousReservationHash != previousHash ||
+		record.ReplacementReservationHash != replacementHash ||
+		record.AgentID != request.Pin.AgentID {
+		return fmt.Errorf(
+			"%w: reservation rotation replay changed",
+			ErrPinnedLineConflict,
+		)
+	}
+	return nil
 }
 
 func pinnedReservationRotationResult(

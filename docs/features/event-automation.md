@@ -118,6 +118,18 @@ over repository content, and serializes model-authored mutations. This
 foundation creates no development-session, browser, gate, test, Git, commit,
 push, merge, or provider-write surface; those remain later controller stages.
 
+The private PR-development controller now has a write-ahead boundary for every
+retained-line `Adopt`, `Resume`, `Commit`, and `Park` effect. One schema-v13
+operation row owns the exact request, result, and any reclaimable recovery
+claim, so an expired in-flight effect never becomes an untraceable Git
+ambiguity or a second pending schema-v12 recovery. Adopt and Resume recovery
+use the Git-workspace composite old-to-fresh reservation transitions, Commit
+rotates before exact deterministic replay, and Park exactly replays the old
+bearer that it retires. Park finalization is also the single atomic SQLite
+boundary that completes a queued attempt, advances its session, records the
+review fence, removes mutation authority, and enters `review_pending`; the
+parked branch remains available for the later reservation-free AI review.
+
 An explicitly installed PR-review workflow turns targeted authenticated review
 requests into structured local drafts. Review cases, editable/droppable
 findings, append-only chat/rephrase history, and an immutable submission outbox
@@ -212,6 +224,12 @@ otherwise fails before a provider request.
   newest-first/repository indexes, exact generation-owned runtime handlers, a
   launcher authority-replacing proxy, and the canonical development view under
   `/reviews`.
+  Retained-line effect recovery additionally uses the narrow
+  `eventing.PRDevelopmentControllerOperationStore`, private schema-v13
+  `pr_development_controller_operation_intents`, and Git-workspace
+  `RecoverPinnedLineAdoptReservation` /
+  `RecoverPinnedLineResumeReservation` composites; it introduces no generic
+  operation executor.
 - Runtime ordering: resolve disabled-safe config, normalize and validate an
   envelope, enforce the payload limit, redact configured fields, atomically
   insert or return the existing deduplicated event, lease and renew routing,
@@ -230,6 +248,12 @@ otherwise fails before a provider request.
   GitHub tool, verify the signed review occurrence against that provider view,
   persist the provider-current pull/fork/head snapshot and review-level
   feedback, and only then acknowledge the dispatch.
+  Before any controller-owned retained-line Adopt, Resume, Commit, or Park,
+  prepare its exact schema-v13 operation; after the external Git result,
+  finalize only that result. If its mutation lease expires, claim recovery on
+  that same operation, reconcile its kind-specific Git effect, and finalize
+  through the claim. Park finalization atomically performs every local database
+  terminal transition before a reservation-free review can be claimed.
 - Non-obvious constraints: deduplication is scoped by source and connector;
   duplicate input never replaces the first stored payload; lease ownership is
   fenced against stale workers; stale routing cannot authorize a dispatch;
@@ -273,6 +297,12 @@ otherwise fails before a provider request.
   a domain-separated digest over the exact server-loaded case-to-task chain,
   not caller-supplied linkage authority, and the review route contains only a
   canonical case ID plus the fixed `focus=chat` affordance.
+  An active schema-v13 operation is the sole live recovery claim for its
+  expired effect: it never stages a pending schema-v12 intent, although
+  Adopt/Resume/Commit recovery finalization appends linked already-finalized
+  v12 evidence for audit continuity. Recovery claims authorize only exact
+  reconciliation, never general mutation, and Park never receives a
+  replacement bearer.
 
 ## Requirements
 
@@ -340,19 +370,28 @@ otherwise fails before a provider request.
 | `FR-EVENT-AUTOMATION-058` | MUST | Schema-v10 code opens a schema-v9 eventing database, or a trusted future PR-development controller calls `eventing.PRDevelopmentControllerStore` for the latest queued or completed repair attempt in one provider-verified thread with an existing pinned retained-workspace baseline. | Schema v10 adds at most one private `pctl_` controller and stable `pdln_` retained-line identity per verified `pdt_` thread, immutably bound to one owner repair session, canonical agent, and exact existing workspace/clone/ref/commit pin. First creation atomically transfers that session out of the legacy claim queue and, after store-wide collision and unique-owner checks, inherits the exact `pdrk_` reservation already locking its pinned workspace; every later mutation receives a globally fresh `pdck_` reservation. Expected revision and reserved headroom fence every material transition; exact live token, deadline, monotonic epoch, and non-regressing time fence every state-changing lease write. First Adopt or later Resume must bind the complete exact line result, and Resume durably advances mutation epoch before Park evidence is accepted. Only the completed latest owner attempt may append its next exact park/version/epoch/intent/base/tip/tree/no-change/review-digest fence. That transaction globally retires the reservation digest, hash-chains the parked and authenticated retired-mutation proof, removes usable mutation authority, and enters `review_pending`. A distinct reservation-free review lease may then claim only that fence; Finish folds authenticated review-completion proof into the final tail hash and enters `ready`, Release returns the unreviewed fence to `review_pending`, and only an expired review lease may rotate safely. Complete reads validate owner/pin and initial-reservation equality, phase/lease shape, exact reachable revision/epoch relations, source/line state, completed fence ownership and causal order, two-stage contiguous hashes/versions, no-change tree preservation, and store-wide active/retired reservation non-reuse. | Migration creates only empty tables and validated indexes. The APIs perform no filesystem, Git, model, AI-review, CI, workflow, commit, push, merge, HTTP/UI, or provider effect. Creation changes private queue eligibility by suppressing legacy claims for the owner; this is durable storage ownership transfer, not worker execution. This slice has no controller-aware transition that completes a newly admitted queued attempt, so it does not claim that legacy dirty work can be adopted or that a new queued attempt can complete; the later worker must adopt a clean pinned line before mutation. Reader snapshots validate the complete private aggregate but redact both the lease token and raw mutation reservation. The parked Git-workspace line remains retained after mutation authority is retired, but this store neither creates nor inspects it. | Legacy/malformed identity, duplicate reservation ownership, a sibling or unpinned owner, disallowed/non-latest/cross-session attempt, stale revision, insufficient exit headroom, foreign/expired token, skipped or changed binding, unfinished attempt, duplicate/gapped/changed fence, reservation reuse, impossible no-change tree, noncausal or unreachable proof, or corrupt high-water/hash state fails closed without another lease or partial evidence. An exact current operation that encounters an eventing-recoverable mutation expiration—unbound in eventing, or bound at its active mutation epoch—durably enters `recovery_required` and preserves its bearer in private storage; stale callers and read-only Get neither transition state nor receive that bearer. An expired review lease alone may be reclaimed for the same immutable fence. RecordFence and FinishReview authenticate exact retries with hash-bound retired token proofs; an exact committed Bind retry is no-write only after monotonic-time and live-deadline validation, while an expired retry enters recovery, while Acquire and ReviewRelease do not replay retired authority. No storage phase, including `ready`, proves an AI review, deterministic validation, CI, commit, or publication ran. | A later attempt ledger needs one crash-fenced owner and immutable handoff from exclusive mutation to separate review without holding edit authority across model context, silently rerunning ambiguous filesystem work, or prematurely wiring any worker or product surface. |
 | `FR-EVENT-AUTOMATION-059` | MUST | Schema-v11 code opens a schema-v10 eventing database, or a trusted future controller records the post-validation account or completes a reservation-free local review for one exact parked attempt fence in a provider-verified thread. | Schema v11 adds private append-only attempt/review entries and structured review findings. Absolute sequence `2*n` is fence `n`'s attempt account and `2*n+1` its review; the first post-upgrade attempt may anchor at an existing unreviewed parked fence without fabricating earlier logs. Attempt append derives commit, tree, no-change, owner case ordinal, and pre-review fence hash from validated controller state and accepts only a bounded concise description plus exact CI plan/result SHA-256 digests. Review append requires the immediately preceding attempt account and exact live reservation-free review lease, then atomically finalizes that fence and controller into `ready` while storing one bounded `passed`, `changes_required`, or `attention_required` result and at most 128 structured findings bound to the final fence hash. Both chains use domain-separated length-prefixed hashes, exact authenticated replay is no-write, changed replay conflicts, and complete reads revalidate thread/session/controller/fence ownership, order, timestamps, evidence, findings, and every hash. A checkpoint may advance only over a later review entry whose exact chain digest matches; it records a bounded derived summary and compactor/prompt revision proof while retaining every raw entry, finding, and older checkpoint. One atomic context snapshot binds the selected case ordinal, complete thread high-water, and ledger. The pure v2 projection includes the selected plus newest provider reviews in thread-ordinal order, the latest checkpoint plus every raw suffix entry, and newest conversation messages; it labels all content untrusted, reports exact omissions, never substrings feedback or drops a raw suffix entry, and stays within independent provider, ledger, count, and 512-KiB total limits. | Migration creates only empty validated tables and does not infer evidence for old fences. Older already-reviewed fences may be skipped by anchoring at a later newly parked fence, but neither a new attempt account nor a review result can be backfilled onto an already-reviewed fence. Appends and checkpoints mutate only owner-local SQLite; the projection is side-effect free. This slice does not discover or run CI, commit, park, review with a model, compact with a model, alter the legacy worker/chat path, invoke a gate, touch Git/filesystem, expose HTTP/UI, publish, push, merge, acknowledge feedback, or call a provider. CI digests authenticate later structured evidence but do not themselves run or prove a command outside the future controller transaction. | Legacy threads, cross-thread/case/session attempts, missing fences, review-before-attempt, foreign/stale/expired review authority, independently finished fences without their atomic review account, gaps, changed replay, nonadvancing/even checkpoint boundaries, wrong source digest, malformed outcomes/findings/OIDs/digests/timestamps, oversized uncompacted suffixes, and SQL-valid cross-table/hash corruption fail closed. Optional old provider reviews and oldest chat messages may be omitted deterministically with exact ranges/counts; mandatory selected review or ledger evidence that cannot fit returns a typed compaction-required error. All storage/controller identifiers, hashes, CI digests, compactor identity, provider provenance, lease/reservation/workspace/source data, and raw diagnostics remain outside the model JSON and every browser/public surface. | Each completed attempt must carry a durable concise account, commit and validation binding, followed in causal order by its immutable AI review; when that history grows, model context must use verifiable logical compaction without erasing audit evidence or relying on provider prompt-cache retention. |
 | `FR-EVENT-AUTOMATION-060` | MUST | Schema-v12 code opens a schema-v11 database, or an exact controller operation discovers that an eventing-recoverable mutation lease expired (unbound in eventing, or bound at its active mutation epoch). | In the same immediate transaction as `recovery_required`, schema v12 appends one bounded hash-chained `pdri_` recovery intent that binds the old bearer and its digest, one globally fresh replacement bearer and digest, expired revision/lease-token proof, source/workspace and optional exact bound-line fence, and a caller-durable rotation identity. A separate recovery claim may be acquired, renewed, exactly replayed, or safely reclaimed after expiry because its sole permitted external effect is the exact idempotent reservation transfer. After `RotatePinnedReservation` returns the matching fence and proof, exact finalization atomically changes the controller old-to-fresh bearer, restores `mutation`, advances revision and lease epoch once, issues a fresh mutation token/deadline, records hash-bound final proof including that issued deadline, and erases both raw keys from the finalized intent. Complete reads validate the intent/final hash chain, at most one active intent, causal digest and issued-deadline transitions, exact controller revision/epoch accounting, and global active/created/revoked/park-retired reservation nonreuse. | Migration creates only empty validated recovery storage. A pre-v12 `recovery_required` controller has no trustworthy expired-token or fresh-bearer evidence and remains visible but deliberately unclaimable; no migration guesses it. Ordinary controller acquisition still rejects every recovery state. Claim writes never grant mutation authority, and finalization does not change line version, mutation epoch, tip, tree, refs, index, worktree, or ordinary files. The APIs run no Git themselves and expose no model, CI, workflow/gate, provider, HTTP/UI, publication, push, merge, or acknowledgement surface. | Missing legacy evidence, stale revision, live foreign claim, expired claim/token, mismatched rotation result, changed controller/source/workspace/line fence, reused reservation, gapped/corrupt intent chain, insufficient exit headroom, or an already re-expired finalized lease fails closed. Pending/already-applied commit or park ambiguity is not reconciled by this slice and remains `recovery_required` for the durable intent protocol in the next requirement. Exact finalization replay is no-write only while its immediate resulting mutation state, including the originally issued deadline, is unchanged. | Recovery must preserve unknown local edits while permanently fencing the crashed worker's known bearer; a database-only lease replacement would let two controllers mutate the retained checkout. |
+| `FR-EVENT-AUTOMATION-061` | MUST | Schema-v13 code opens a schema-v12 database; a trusted controller prepares one exact retained-line `Adopt`, `Resume`, `Commit`, or `Park` effect under the live mutation lease for the exact owner attempt; or that prepared operation's mutation lease expires before its result is finalized. | Schema v13 adds private hash-chained `pr_development_controller_operation_intents`; operation identity, order, and request are immutable after prepare, while only fenced lifecycle and append-once result/proof fields may advance. At most one operation per controller is unfinished; each caller-durable operation identity hash-binds its kind, controller/attempt/revision/lease, source/workspace/line snapshot, exact Git request bytes, mutation-reservation digest, previous operation hash, and later exact result bytes and final proof. Prepare commits before the external effect; exact live prepare/finalize replay is no-write, while changed replay conflicts. An expired operation enters its own renewable/reclaimable recovery state and is the sole live recovery claim: no pending schema-v12 recovery row is created. Adopt recovery calls `RecoverPinnedLineAdoptReservation` and Resume recovery calls `RecoverPinnedLineResumeReservation`; both retain canonical old/fresh locks throughout convergence and replacement. A pre-effect Adopt durably revokes old and installs fresh before the second durable save creates or reconciles the line, so replay can complete the recorded intermediate state; a post-effect Adopt first verifies the exact line and Git state before replacing authority. Commit recovery rotates old to fresh and then calls deterministic `CommitPinned` with fresh under the same recovery claim. Park recovery exactly replays `ParkPinnedLine` with old, which retires it, and never stages fresh mutation authority. Recovery finalization for Adopt, Resume, or Commit atomically appends linked already-finalized schema-v12 evidence for audit continuity, but only the schema-v13 row owns the live claim. Complete reads validate operation ordering and hashes, controller and attempt causality, exact request/result shape, claim fencing, raw-key erasure, and store-wide reservation nonreuse. | Migration creates only empty validated operation storage. A migrated, already-bound live v12 mutation may establish the sole initial v13 high-water with Commit then Park or with a no-change Park; every later attempt still begins with Resume, and legacy Bind/Fence cannot bypass an established operation history. Normal Adopt/Resume finalization binds the exact line result; Commit finalization records only its exact verified commit result while the controller line remains mutating until Park; their recovery finalization installs the fresh bearer under a new mutation lease and erases staged raw keys. Normal or recovered Park finalization is one immediate transaction that finalizes the operation, appends the exact attempt-review fence, retires and removes mutation authority, enters `review_pending`, and, for a queued owner attempt, records its bounded completion summary/iterations/workspace, clears active attempt ownership, and increments the repair-session version once. An owner attempt that was already completed before controller adoption remains byte-for-byte unchanged and does not receive another session bump. These store methods execute no Git themselves. | A missing prepare, wrong operation order or kind, concurrent unfinished operation, legacy transition after operation ownership, legacy recovery row without operation evidence, stale controller/revision/lease/claim, request or result drift, cross-controller/attempt/workspace evidence, dirty or drifted Git result, reused bearer, corrupt/gapped hashes, insufficient capacity/headroom, or partial Park terminal tuple fails closed without guessing or granting mutation authority. Exact retries require the complete immediate resulting state; a stale crashed worker cannot finalize after recovery rotates or retires its bearer. This slice does not discover/run/cache CI, execute a model or edit loop, append the schema-v11 attempt/review ledger, perform AI review, evaluate attention gates, expose HTTP/UI, contact a provider, publish, push, merge, or acknowledge review feedback. | Write-ahead operation identity plus effect-specific exact replay closes every crash window between SQLite and retained-line Git while keeping the branch after mutation authority is released and making the queued-attempt-to-review handoff indivisible. |
 
 For `FR-EVENT-AUTOMATION-058`, an exact committed Bind retry is no-write only
 after the same non-regressing-time and live-deadline checks as other mutation
 operations. It is not replayable after expiry; an expired post-Bind retry enters
-the schema-v12 recovery path. For `FR-EVENT-AUTOMATION-060`, a recoverable bound
-expiry starts only after Bind has durably established
-`mutation_epoch == line_version + 1`. An expiry after a later lease acquisition
-but before Resume/Bind has advanced that epoch fails closed without staging a
-rotation. An unbound intent is finalizable only while the Git workspace is still
-unadopted. A crash between Git Adopt and eventing Bind, or between Git Resume and
-eventing Bind, leaves deliberately ambiguous cross-store evidence; this slice
-does not guess or rotate it. Durable Adopt/Resume, commit, and park intents in
-the following reconciliation slice must resolve those boundaries first.
+the schema-v12 recovery path only when no schema-v13 operation is active. For
+`FR-EVENT-AUTOMATION-060`, a recoverable bound expiry starts only after Bind has
+durably established `mutation_epoch == line_version + 1`; an unbound intent is
+finalizable only while the Git workspace is still unadopted. A pre-v13 crash
+between Git Adopt/Resume and eventing Bind remains deliberately ambiguous and
+is never relabeled as a safe rotation. `FR-EVENT-AUTOMATION-061` prevents that
+ambiguity for every newly prepared effect: while its operation is unfinished,
+expiry changes and claims the operation row itself, and no pending v12 row may
+compete. The mandatory v12 row linked during Adopt/Resume/Commit recovery is
+inserted only in already-finalized audit form after the composite or rotated
+effect has been proven.
+
+For `FR-EVENT-AUTOMATION-061`, a caller-durable operation ID is exactly
+`pdop_` plus 32 lowercase hexadecimal characters. Canonical request and result
+evidence are each limited to 32 KiB, and one controller retains at most three
+operations per possible line fence: 24,576 rows total. Capacity and required
+controller-revision headroom are proven before prepare or recovery staging.
 
 For `FR-EVENT-AUTOMATION-051`, absent provider IDs fail creation of a new
 capture. The sole compatibility exception is an exact pre-identity retry whose
@@ -744,6 +783,28 @@ failure occurs before another bearer is staged. A migrated legacy
 `recovery_required` controller has no row and remains deliberately
 unrecoverable rather than receiving synthesized authority.
 
+Schema v13 adds controller-private
+`pr_development_controller_operation_intents`. Operation identities, ordering,
+requests, and hash links are append-only and contiguous per controller, with at
+most one non-final row; only its fenced lifecycle and append-once result/proof
+fields may advance. Each row retains a
+canonical exact union of the Adopt/Resume/Commit/Park request, its request hash,
+the prepared controller/attempt/source/line and mutation-lease fence, the
+current reservation digest, previous/intent hash, and—only after success—the
+canonical result, result hash, final controller revision/phase/fence, and final
+hash. While recovery is unresolved the same row owns its status, recovery and
+claim identities, epochs/deadlines, expired lease proof, and, except for Park,
+one globally fresh replacement bearer; raw old authority remains on the
+controller and any staged replacement is erased at finalization. It never owns
+a second pending schema-v12 claim. A recovered Adopt/Resume/Commit links an
+already-finalized v12 evidence row without making that row actionable. Park has
+no replacement and atomically joins operation finalization to repair-attempt
+completion when queued, session-version advancement, immutable review-fence
+append, reservation retirement, and `review_pending`. A pre-controller already
+completed attempt is unchanged. Migration creates no operation or inferred Git
+evidence, and complete aggregate reads validate every operation and cross-table
+high-water/hash/reservation invariant before returning private state.
+
 The case-owned attention view adds no storage or review-case field. It is
 reconstructed from the submitted aggregate, trigger and decision linkage, and
 private workflow task journal on every read or response. Its opaque response
@@ -1129,6 +1190,7 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
 | Internal Go API / storage | `eventing.PRDevelopmentControllerReader`, `eventing.PRDevelopmentControllerStore`, private schema-v10 controller and attempt-review-fence tables | Own one stable verified-thread controller and retained-line identity, inherit the first pinned-workspace reservation then issue fresh reservations for later resumes, fence mutation and reservation-free review with distinct leases, redact bearer authority from Reader snapshots, bind exact caller-supplied line evidence, atomically retire mutation authority before publishing one chained review fence, finalize its review-proof hash, safely reclaim review only, and mark an expired mutation owner for recovery without invoking any worker or local/provider effect. | `FR-EVENT-AUTOMATION-058` |
 | Internal Go API / storage | `eventing.PRDevelopmentLedgerStore`, `eventing.PRDevelopmentContextReader`, private schema-v11 ledger tables, `prdevelopment` thread-context projector | Append exact post-validation attempt accounts, atomically finalize lease-authenticated local reviews with their exact outcomes in fence order, retain structured findings and raw audit rows, append only digest-bound logical checkpoints, atomically snapshot thread/ledger high-water, and build one bounded ordinal-ordered untrusted context without running any model, Git, CI, filesystem, or provider effect. | `FR-EVENT-AUTOMATION-059` |
 | Internal Go API / storage | `eventing.PRDevelopmentControllerStore`, private schema-v12 recovery-intent storage | Atomically bind each expired mutation to old-to-fresh reservation evidence, lease and reclaim only its exact idempotent transfer, then authenticate the matching transfer result while installing a fresh mutation lease and erasing staged bearer copies. | `FR-EVENT-AUTOMATION-060` |
+| Internal Go API / storage | `eventing.PRDevelopmentControllerOperationStore`, private schema-v13 `pr_development_controller_operation_intents`; Git-workspace `RecoverPinnedLineAdoptReservation`, `RecoverPinnedLineResumeReservation`, `RotatePinnedReservation`, `CommitPinned`, and `ParkPinnedLine` effects invoked separately by the trusted controller | Prepare and hash-bind one exact Adopt/Resume/Commit/Park request before Git; finalize only its exact result; lease recovery on the operation itself; reconcile Adopt/Resume by composite old-to-fresh transition, Commit by old-to-fresh rotation followed by exact commit, and Park by exact old-bearer replay; then atomically install or retire authority. Park additionally completes a queued attempt and records its review handoff in the same transaction. The exported interface is a narrow local capability, not a generic executor. | `FR-EVENT-AUTOMATION-061` |
 | Go API / storage | `eventing.PRDevelopmentCaseStore`, `prdevelopment` read service and handler | List immutable development cases by exact repository/pull filters with a newest-first `(updated_at, id)` keyset cursor, load one exact case, and project bounded public summary/detail DTOs without capture provenance or action authority. | `FR-EVENT-AUTOMATION-052` |
 | Go API / storage | `eventing.PRDevelopmentConversationStore`, `prdevelopment` chat service and handler | Atomically create/backfill a two-table conversation, validate its contiguous count, byte high-water, and rolling canonical digest on every read/append, and leave capture ordering untouched. After store reads, a process-wide same-case lock and per-service AI admission reject stale state or insufficient complete-turn capacity before appending the human; every later failure preserves that row, and only a fresh handler reload may declassify partial authoritative detail. The model request uses one isolated advisory prompt over explicit bounded captured evidence and transcript. | `FR-EVENT-AUTOMATION-053` |
 | Internal Go API | `prdevelopment.GitHubVerifier.VerifyCase`, `agent.LocalRepairRunner`, `gitworkspace.Manager.AcquirePinned` | Independently refresh one immutable case into actionable current provider/head authority, then lend an already-resolved concrete model only four guarded repository-content tools over the exact controller pin with serialized mutations and unconditional pin postflight. | `FR-EVENT-AUTOMATION-054` |
@@ -1755,6 +1817,35 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
     erasing staged raw keys. Do not recover a legacy row, pending park, changed
     fence, or re-expired result, and execute no Git, filesystem, worker, model,
     CI, workflow, provider, UI, or publication effect in these store methods.
+54. When opening schema v12, create and structurally validate empty schema-v13
+    operation storage before advancing `user_version`; synthesize no operation
+    for an old controller or recovery row. Under one live exact mutation lease,
+    validate the complete controller, owner attempt, line, prior operation
+    chain, kind-specific request, and required exit headroom, then append one
+    caller-identified pending operation before any Git call. Permit only the
+    causal Adopt-or-Resume, optional Commit when content changed, then Park
+    order for that attempt; an explicit no-change Park skips Commit. As the
+    sole migration prefix, an empty operation chain whose live v12 controller
+    is already bound at its active mutation epoch may start with Commit or
+    no-change Park; later attempts cannot skip Resume. On a live
+    exact result, finalize Adopt/Resume into their line binding, record Commit's
+    exact result without parking the mutating line, or finalize Park by
+    atomically retiring the bearer, finalizing the operation, appending the
+    review fence, entering
+    `review_pending`, and—only when the owner attempt is still queued—recording
+    its completion, clearing active ownership, and advancing the session once.
+    Preserve an already completed legacy owner attempt exactly. If the mutation
+    lease expires while an operation is pending, transition and claim that same
+    row under its own renewable/reclaimable recovery lease; do not create a
+    pending v12 row. While continuously owning that claim, have the controller
+    separately call the Git composite Adopt/Resume old-to-fresh recovery,
+    rotate old-to-fresh then exact Commit for Commit, or exact old-bearer Park
+    for Park. Finalize only the matching result and current claim; install fresh
+    mutation authority for Adopt/Resume/Commit, retire it for Park, erase staged
+    raw keys, and add linked already-finalized v12 audit evidence for
+    the first three kinds. Exact complete replay is no-write; changed or
+    non-immediate replay fails closed. Store methods execute no Git, model, CI,
+    workflow, provider, UI, or publication effect.
 
 ## Cross-Feature Behavior
 
@@ -1865,11 +1956,25 @@ review-complete prefix and never rewrite or delete raw evidence. The v2 context
 projector is not yet called by chat or repair execution: the controller-aware
 worker will load it only after the later handoff, CI, commit, and park contracts
 exist, and a later review worker will supply the structured review result.
-`FR-EVENT-AUTOMATION-060` closes only the expired-bearer transfer seam. The
-eventing store stages and authenticates the exact recovery intent, while the
-controller must separately call the Git-workspace rotation API and map its
-result back into finalization. No recovery worker is wired yet, and commit/park
-effect ambiguity intentionally remains for the next durable intent slice.
+`FR-EVENT-AUTOMATION-060` remains the expired-bearer transfer seam only when no
+schema-v13 operation is active. `FR-EVENT-AUTOMATION-061` owns the later
+write-ahead operation identity, request/result chain, operation-local recovery
+claim, and atomic cross-table finalization. [Git workspaces](git-workspaces.md)
+owns the exact filesystem effects and reservation inventory: composite
+Adopt/Resume old-to-fresh recovery, rotation plus deterministic Commit, and
+old-bearer Park. A trusted controller must keep the operation-recovery claim
+live while it invokes those effects and must submit their exact result back to
+eventing; neither store layer calls Git. These primitives close effect
+ambiguity but do not yet wire a recovery worker, edit loop, validator, reviewer,
+gate, or publisher.
+
+| Concern | Owning slice | Explicit boundary after schema v13 |
+| --- | --- | --- |
+| Durable Adopt/Resume/Commit/Park request, exact-result finalization, operation-local recovery claim, and atomic Park database handoff | `#118` / `FR-EVENT-AUTOMATION-061` | Implemented entirely as private controller storage plus controller-only Git effects; no model, CI, UI, or provider action. |
+| Local CI discovery, sandboxed execution, result/cache identity, and cache invalidation | `#119` | Not inferred from a commit or operation result and not executed by schema-v13 store methods. |
+| Repair-attempt orchestration, model edit loop, operational schema-v11 ledger append/checkpoint use, and recovery-worker scheduling | `#120` | Must consume the v13 prepare/finalize protocol; it cannot replace it with an in-memory sequence. |
+| Reservation-free AI review and structured findings over the parked immutable fence | `#121` | Starts only after atomic Park finalization has removed mutation authority and entered `review_pending`; the retained branch stays. |
+| User-attention gates, PR-chat steering/UI, provider refresh/write, push/publication, acknowledgement, and merge | `#122+` | Receives no authority from a local operation, completed attempt, ledger row, or review outcome without its own later policy and provider fences. |
 The explicitly installed PR-review template is different: its agent has
 read-only review authority and emits a local structured draft only. Durable
 eventing owns capture and the human workbench. The separate submission worker,
@@ -2283,6 +2388,18 @@ capabilities.
   lease identity, or internal error, including in conflict and failure
   responses. The launcher never forwards its authenticated user's cookie or
   authorization value to the gateway.
+- A crash before schema-v13 prepare has no authorized Git effect. A crash after
+  prepare but before exact finalization leaves that operation—not a new v12
+  row—as the sole reclaimable recovery unit. Adopt/Resume recovery holds the
+  old-to-fresh composite boundary, Commit recovery rotates before exact replay,
+  and Park recovery replays and retires only old; a stale worker therefore has
+  no valid bearer with which to race the recovered effect.
+- A failed Park database transaction cannot expose `review_pending`, a fence,
+  or a completed queued attempt independently. All remain in their prior state
+  with the operation unresolved; an exact retry or recovery claim must prove
+  the Git Park result before the complete terminal tuple can commit. The parked
+  branch remains retained after success even though its mutation reservation is
+  gone.
 
 GitHub protocol references: [validating webhook
 deliveries](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries),
@@ -2342,6 +2459,7 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 | `FR-EVENT-AUTOMATION-058` | [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_controller_schema_sqlite.go](../../pkg/eventing/pr_development_controller_schema_sqlite.go), [pkg/eventing/store_sqlite.go](../../pkg/eventing/store_sqlite.go), [pkg/eventing/store_types.go](../../pkg/eventing/store_types.go), [pkg/eventing/store_schema_test.go](../../pkg/eventing/store_schema_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go), [pkg/eventing/store_unsupported_test.go](../../pkg/eventing/store_unsupported_test.go) |
 | `FR-EVENT-AUTOMATION-059` | [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_ledger_schema_sqlite.go](../../pkg/eventing/pr_development_ledger_schema_sqlite.go), [pkg/eventing/pr_development_ledger_store_sqlite.go](../../pkg/eventing/pr_development_ledger_store_sqlite.go), [pkg/eventing/pr_development_ledger_store_sqlite_test.go](../../pkg/eventing/pr_development_ledger_store_sqlite_test.go), [pkg/eventing/store_schema_test.go](../../pkg/eventing/store_schema_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go), [pkg/eventing/store_unsupported_test.go](../../pkg/eventing/store_unsupported_test.go), [pkg/prdevelopment/thread_context.go](../../pkg/prdevelopment/thread_context.go), [pkg/prdevelopment/thread_context_test.go](../../pkg/prdevelopment/thread_context_test.go) |
 | `FR-EVENT-AUTOMATION-060` | [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_recovery_schema_sqlite.go](../../pkg/eventing/pr_development_recovery_schema_sqlite.go), [pkg/eventing/pr_development_recovery_store_sqlite.go](../../pkg/eventing/pr_development_recovery_store_sqlite.go), [pkg/eventing/pr_development_controller_store_sqlite.go](../../pkg/eventing/pr_development_controller_store_sqlite.go), [pkg/eventing/pr_development_recovery_store_sqlite_test.go](../../pkg/eventing/pr_development_recovery_store_sqlite_test.go), [pkg/eventing/store_sqlite.go](../../pkg/eventing/store_sqlite.go), [pkg/eventing/store_types.go](../../pkg/eventing/store_types.go), [pkg/eventing/store_schema_test.go](../../pkg/eventing/store_schema_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go), [pkg/eventing/store_unsupported_test.go](../../pkg/eventing/store_unsupported_test.go), [pkg/gitworkspace/pinned_reservation_rotation.go](../../pkg/gitworkspace/pinned_reservation_rotation.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go) |
+| `FR-EVENT-AUTOMATION-061` | [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_operation_schema_sqlite.go](../../pkg/eventing/pr_development_operation_schema_sqlite.go), [pkg/eventing/pr_development_operation_codec_sqlite.go](../../pkg/eventing/pr_development_operation_codec_sqlite.go), [pkg/eventing/pr_development_operation_store_sqlite.go](../../pkg/eventing/pr_development_operation_store_sqlite.go), [pkg/eventing/pr_development_operation_recovery_store_sqlite.go](../../pkg/eventing/pr_development_operation_recovery_store_sqlite.go), [pkg/eventing/pr_development_operation_validation_sqlite.go](../../pkg/eventing/pr_development_operation_validation_sqlite.go), [pkg/eventing/pr_development_operation_store_sqlite_test.go](../../pkg/eventing/pr_development_operation_store_sqlite_test.go), [pkg/eventing/pr_development_controller_store_sqlite.go](../../pkg/eventing/pr_development_controller_store_sqlite.go), [pkg/eventing/pr_development_controller_store_sqlite_test.go](../../pkg/eventing/pr_development_controller_store_sqlite_test.go), [pkg/eventing/pr_development_recovery_store_sqlite.go](../../pkg/eventing/pr_development_recovery_store_sqlite.go), [pkg/eventing/store_sqlite.go](../../pkg/eventing/store_sqlite.go), [pkg/eventing/store_types.go](../../pkg/eventing/store_types.go), [pkg/eventing/store_schema_test.go](../../pkg/eventing/store_schema_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go), [pkg/eventing/store_unsupported_test.go](../../pkg/eventing/store_unsupported_test.go), [pkg/gitworkspace/pinned_line_recovery.go](../../pkg/gitworkspace/pinned_line_recovery.go), [pkg/gitworkspace/pinned_line_recovery_test.go](../../pkg/gitworkspace/pinned_line_recovery_test.go), [pkg/gitworkspace/pinned_reservation_rotation.go](../../pkg/gitworkspace/pinned_reservation_rotation.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go), [pkg/gitworkspace/development_line.go](../../pkg/gitworkspace/development_line.go), [pkg/gitworkspace/development_line_test.go](../../pkg/gitworkspace/development_line_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go), [pkg/gitworkspace/pinned_commit.go](../../pkg/gitworkspace/pinned_commit.go), [pkg/gitworkspace/pinned_commit_test.go](../../pkg/gitworkspace/pinned_commit_test.go) |
 
 Additional `FR-EVENT-AUTOMATION-057` acceptance anchors are
 [pkg/eventing/store_types.go](../../pkg/eventing/store_types.go),

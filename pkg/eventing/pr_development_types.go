@@ -17,6 +17,9 @@ const (
 	prDevelopmentLineIDPrefix             = "pdln_"
 	prDevelopmentControllerKeyPrefix      = "pdck_"
 	prDevelopmentRecoveryIntentIDPrefix   = "pdri_"
+	prDevelopmentOperationIDPrefix        = "pdop_"
+	prDevelopmentCommitIntentIDPrefix     = "pdcmt_"
+	prDevelopmentParkIntentIDPrefix       = "pdlnpark_"
 	prDevelopmentLedgerEntryIDPrefix      = "pdle_"
 	prDevelopmentLedgerCheckpointIDPrefix = "pdlc_"
 
@@ -67,6 +70,17 @@ const (
 	// Git reservation-rotation history. Expiration fails before staging an
 	// intent that the workspace inventory could not retain.
 	MaxPRDevelopmentControllerRecoveries = 8_192
+	// MaxPRDevelopmentControllerOperations permits Adopt/Resume, Commit, and
+	// Park evidence for every retained-line version. Operation rows have their
+	// own claim epochs and do not consume controller revisions merely by being
+	// prepared or reclaimed.
+	MaxPRDevelopmentControllerOperations = MaxPRDevelopmentControllerFences * 3
+	// MaxPRDevelopmentOperationRequestBytes and
+	// MaxPRDevelopmentOperationResultBytes bound the canonical private effect
+	// evidence stored for one operation. Review diff text is deliberately not
+	// retained here; it is re-snapshotted by the reservation-free review lease.
+	MaxPRDevelopmentOperationRequestBytes = 32 << 10
+	MaxPRDevelopmentOperationResultBytes  = 32 << 10
 	// MaxPRDevelopmentControllerIdentityBytes bounds private controller, line,
 	// lease-owner, and intent identities.
 	MaxPRDevelopmentControllerIdentityBytes = 256
@@ -818,6 +832,251 @@ type PRDevelopmentControllerRecoveryFinalize struct {
 	Lease            time.Duration                                 `json:"-"`
 }
 
+// PRDevelopmentControllerOperationKind identifies the exact local Git effect
+// fenced by one durable operation. Adopt and Resume bind a line, Commit
+// materializes one validated candidate, and Park releases mutation authority
+// while recording the immutable review fence and completed attempt.
+type PRDevelopmentControllerOperationKind string
+
+const (
+	PRDevelopmentControllerOperationAdopt  PRDevelopmentControllerOperationKind = "adopt"
+	PRDevelopmentControllerOperationResume PRDevelopmentControllerOperationKind = "resume"
+	PRDevelopmentControllerOperationCommit PRDevelopmentControllerOperationKind = "commit"
+	PRDevelopmentControllerOperationPark   PRDevelopmentControllerOperationKind = "park"
+)
+
+// PRDevelopmentControllerOperationStatus is the operation-owned recovery
+// lifecycle. An expired operation never manufactures a pending legacy
+// controller-recovery row: its own recovery_pending/recovery_claimed states
+// retain the exact effect and reservation-rotation evidence until finalization.
+type PRDevelopmentControllerOperationStatus string
+
+const (
+	PRDevelopmentControllerOperationPending         PRDevelopmentControllerOperationStatus = "pending"
+	PRDevelopmentControllerOperationRecoveryPending PRDevelopmentControllerOperationStatus = "recovery_pending"
+	PRDevelopmentControllerOperationRecoveryClaimed PRDevelopmentControllerOperationStatus = "recovery_claimed"
+	PRDevelopmentControllerOperationFinalized       PRDevelopmentControllerOperationStatus = "finalized"
+)
+
+// PRDevelopmentControllerOperationRequest is a private, flat union of the
+// exact gitworkspace AdoptPinnedLine, ResumePinnedLine, CommitPinned, and
+// ParkPinnedLine requests. Fields unused by Kind remain zero. Park also carries
+// the bounded attempt completion that is committed atomically with its review
+// fence; the raw origin mutation reservation remains only on the controller.
+type PRDevelopmentControllerOperationRequest struct {
+	Repository           string    `json:"-"`
+	SourceRef            string    `json:"-"`
+	SourceCommit         string    `json:"-"`
+	AgentID              string    `json:"-"`
+	WorkspaceID          string    `json:"-"`
+	LineID               string    `json:"-"`
+	ExpectedTree         string    `json:"-"`
+	ExpectedVersion      int64     `json:"-"`
+	ExpectedEpoch        int64     `json:"-"`
+	ExpectedTip          string    `json:"-"`
+	EffectIntentID       string    `json:"-"`
+	ExpectedParent       string    `json:"-"`
+	CandidateDigest      string    `json:"-"`
+	CommitMessage        string    `json:"-"`
+	AuthoredAt           time.Time `json:"-"`
+	MutationEpoch        int64     `json:"-"`
+	PreviousTip          string    `json:"-"`
+	Tip                  string    `json:"-"`
+	Tree                 string    `json:"-"`
+	NoChanges            bool      `json:"-"`
+	CompletionSummary    string    `json:"-"`
+	CompletionIterations int       `json:"-"`
+}
+
+// PRDevelopmentControllerOperationResult is the private, flat durable result
+// union. Replay booleans are operational only; content-addressed fields must be
+// identical for first execution and exact replay. A Park result carries only
+// bounded review identity and digest evidence. Changed paths and diff text are
+// intentionally re-snapshotted by the later reservation-free review lease.
+type PRDevelopmentControllerOperationResult struct {
+	WorkspaceID    string `json:"-"`
+	Version        int64  `json:"-"`
+	MutationEpoch  int64  `json:"-"`
+	PreviousTip    string `json:"-"`
+	Tip            string `json:"-"`
+	Tree           string `json:"-"`
+	NoChanges      bool   `json:"-"`
+	WorkspaceClean bool   `json:"-"`
+	AlreadyOwned   bool   `json:"-"`
+	AlreadyApplied bool   `json:"-"`
+	AlreadyParked  bool   `json:"-"`
+
+	IntentID        string `json:"-"`
+	ParentCommit    string `json:"-"`
+	CandidateDigest string `json:"-"`
+	Commit          string `json:"-"`
+	ChangedFiles    int    `json:"-"`
+
+	ReviewVersion       int64  `json:"-"`
+	ReviewMutationEpoch int64  `json:"-"`
+	ReviewParkIntentID  string `json:"-"`
+	ReviewBaseCommit    string `json:"-"`
+	ReviewCommit        string `json:"-"`
+	ReviewTree          string `json:"-"`
+	ReviewDigest        string `json:"-"`
+}
+
+// PRDevelopmentControllerOperation is private append-only effect evidence.
+// The controller remains authoritative for the origin mutation bearer; the
+// operation retains only its digest. A raw replacement bearer is available
+// only while recovery is unresolved and is erased on finalization.
+type PRDevelopmentControllerOperation struct {
+	ID                         string                                  `json:"-"`
+	ControllerID               string                                  `json:"-"`
+	AttemptID                  string                                  `json:"-"`
+	Ordinal                    int                                     `json:"-"`
+	Kind                       PRDevelopmentControllerOperationKind    `json:"-"`
+	Status                     PRDevelopmentControllerOperationStatus  `json:"-"`
+	PreparedControllerRevision int64                                   `json:"-"`
+	AgentID                    string                                  `json:"-"`
+	WorkspaceID                string                                  `json:"-"`
+	LineID                     string                                  `json:"-"`
+	SourceCloneURL             string                                  `json:"-"`
+	SourceRef                  string                                  `json:"-"`
+	SourceCommit               string                                  `json:"-"`
+	SourceTree                 string                                  `json:"-"`
+	LineVersion                int64                                   `json:"-"`
+	MutationEpoch              int64                                   `json:"-"`
+	TipCommit                  string                                  `json:"-"`
+	Tree                       string                                  `json:"-"`
+	MutationReservationDigest  string                                  `json:"-"`
+	MutationLeaseEpoch         int64                                   `json:"-"`
+	MutationLeaseTokenDigest   string                                  `json:"-"`
+	EffectIntentID             string                                  `json:"-"`
+	Request                    PRDevelopmentControllerOperationRequest `json:"-"`
+	RequestJSON                []byte                                  `json:"-"`
+	RequestHash                string                                  `json:"-"`
+	PreviousHash               string                                  `json:"-"`
+	IntentHash                 string                                  `json:"-"`
+
+	RecoveryID                   string     `json:"-"`
+	ReplacementReservationKey    string     `json:"-"`
+	ReplacementReservationDigest string     `json:"-"`
+	RecoveryRevision             int64      `json:"-"`
+	ExpiredControllerRevision    int64      `json:"-"`
+	ExpiredLeaseEpoch            int64      `json:"-"`
+	ExpiredLeaseTokenDigest      string     `json:"-"`
+	RecoveryLeaseUntil           *time.Time `json:"-"`
+	RecoveryStagedAt             *time.Time `json:"-"`
+	RecoveryHash                 string     `json:"-"`
+	ClaimID                      string     `json:"-"`
+	ClaimOwner                   string     `json:"-"`
+	ClaimToken                   string     `json:"-"`
+	ClaimUntil                   *time.Time `json:"-"`
+	ClaimEpoch                   int64      `json:"-"`
+	Claims                       int        `json:"-"`
+	ClaimedAt                    *time.Time `json:"-"`
+	RotationResultHash           string     `json:"-"`
+	RecoveryClaimTokenDigest     string     `json:"-"`
+	NewMutationLeaseEpoch        int64      `json:"-"`
+	NewMutationLeaseTokenDigest  string     `json:"-"`
+	NewMutationLeaseUntil        *time.Time `json:"-"`
+
+	Result                   PRDevelopmentControllerOperationResult `json:"-"`
+	ResultJSON               []byte                                 `json:"-"`
+	ResultHash               string                                 `json:"-"`
+	StageAuthorizationDigest string                                 `json:"-"`
+	FinalControllerRevision  int64                                  `json:"-"`
+	FinalControllerPhase     PRDevelopmentControllerPhase           `json:"-"`
+	FinalFenceHash           string                                 `json:"-"`
+	FinalHash                string                                 `json:"-"`
+	CreatedAt                time.Time                              `json:"-"`
+	FinalizedAt              *time.Time                             `json:"-"`
+	UpdatedAt                time.Time                              `json:"-"`
+}
+
+// PRDevelopmentControllerOperationTransition returns the complete private
+// controller authority resulting from finalization together with the durable
+// operation and, for Park, its immutable review fence.
+type PRDevelopmentControllerOperationTransition struct {
+	Controller PRDevelopmentController          `json:"-"`
+	Operation  PRDevelopmentControllerOperation `json:"-"`
+	Fence      *PRDevelopmentAttemptReviewFence `json:"-"`
+}
+
+// PRDevelopmentControllerOperationPrepare durably stages one exact Git effect
+// under the current live mutation lease. OperationID is caller-supplied so a
+// lost successful response can be replayed without changing effect identity.
+type PRDevelopmentControllerOperationPrepare struct {
+	OperationID      string                                  `json:"-"`
+	ControllerID     string                                  `json:"-"`
+	AttemptID        string                                  `json:"-"`
+	ExpectedRevision int64                                   `json:"-"`
+	LeaseToken       string                                  `json:"-"`
+	LeaseEpoch       int64                                   `json:"-"`
+	Kind             PRDevelopmentControllerOperationKind    `json:"-"`
+	Request          PRDevelopmentControllerOperationRequest `json:"-"`
+}
+
+// PRDevelopmentControllerOperationFinalize records one exact successful Git
+// result under the same live mutation lease used to prepare it.
+type PRDevelopmentControllerOperationFinalize struct {
+	ControllerID     string                                 `json:"-"`
+	AttemptID        string                                 `json:"-"`
+	OperationID      string                                 `json:"-"`
+	ExpectedRevision int64                                  `json:"-"`
+	LeaseToken       string                                 `json:"-"`
+	LeaseEpoch       int64                                  `json:"-"`
+	Result           PRDevelopmentControllerOperationResult `json:"-"`
+}
+
+// PRDevelopmentControllerOperationRecoveryClaim acquires one unresolved
+// operation after its mutation lease expired. ClaimID is caller-durable.
+type PRDevelopmentControllerOperationRecoveryClaim struct {
+	CaseID           string        `json:"-"`
+	AttemptID        string        `json:"-"`
+	OperationID      string        `json:"-"`
+	ExpectedRevision int64         `json:"-"`
+	ClaimID          string        `json:"-"`
+	WorkerLabel      string        `json:"-"`
+	Lease            time.Duration `json:"-"`
+}
+
+// PRDevelopmentControllerOperationRecoveryLease carries the exact unresolved
+// operation and any raw old/replacement bearers inside the trusted worker
+// boundary. Park recovery intentionally has no RecoveryID or replacement.
+type PRDevelopmentControllerOperationRecoveryLease struct {
+	Controller PRDevelopmentController          `json:"-"`
+	Operation  PRDevelopmentControllerOperation `json:"-"`
+	Reclaimed  bool                             `json:"-"`
+}
+
+// PRDevelopmentControllerOperationRecoveryRenew extends only the exact live
+// operation-recovery claim and never grants mutation authority itself.
+type PRDevelopmentControllerOperationRecoveryRenew struct {
+	ControllerID string        `json:"-"`
+	AttemptID    string        `json:"-"`
+	OperationID  string        `json:"-"`
+	RecoveryID   string        `json:"-"`
+	ClaimID      string        `json:"-"`
+	ClaimToken   string        `json:"-"`
+	ClaimEpoch   int64         `json:"-"`
+	Lease        time.Duration `json:"-"`
+}
+
+// PRDevelopmentControllerOperationRecoveryFinalize consumes the exact live
+// claim after reconciling the Git effect. Adopt, Resume, and Commit supply the
+// durable reservation-rotation result and receive a fresh mutation lease;
+// Park supplies a zero rotation and ends in review_pending without a bearer.
+type PRDevelopmentControllerOperationRecoveryFinalize struct {
+	ControllerID     string                                        `json:"-"`
+	AttemptID        string                                        `json:"-"`
+	OperationID      string                                        `json:"-"`
+	RecoveryID       string                                        `json:"-"`
+	ExpectedRevision int64                                         `json:"-"`
+	ClaimID          string                                        `json:"-"`
+	ClaimToken       string                                        `json:"-"`
+	ClaimEpoch       int64                                         `json:"-"`
+	Rotation         PRDevelopmentControllerRecoveryRotationResult `json:"-"`
+	Result           PRDevelopmentControllerOperationResult        `json:"-"`
+	Lease            time.Duration                                 `json:"-"`
+}
+
 // PRDevelopmentLedgerEntryKind alternates one completed mutation account with
 // its reservation-free local review. Ordinal 2*n is the mutation account for
 // fence n and ordinal 2*n+1 is its review.
@@ -1098,6 +1357,32 @@ type PRDevelopmentControllerStore interface {
 		ctx context.Context,
 		input PRDevelopmentControllerReviewTransition,
 	) (PRDevelopmentController, error)
+}
+
+// PRDevelopmentControllerOperationStore owns only the schema-v13 write-ahead
+// operation and operation-local recovery lifecycle. It is separate from the
+// base controller interface so callers can depend on the narrower capability.
+type PRDevelopmentControllerOperationStore interface {
+	PreparePRDevelopmentControllerOperation(
+		ctx context.Context,
+		input PRDevelopmentControllerOperationPrepare,
+	) (PRDevelopmentControllerOperation, bool, error)
+	FinalizePRDevelopmentControllerOperation(
+		ctx context.Context,
+		input PRDevelopmentControllerOperationFinalize,
+	) (PRDevelopmentControllerOperationTransition, bool, error)
+	ClaimPRDevelopmentControllerOperationRecovery(
+		ctx context.Context,
+		input PRDevelopmentControllerOperationRecoveryClaim,
+	) (PRDevelopmentControllerOperationRecoveryLease, bool, error)
+	RenewPRDevelopmentControllerOperationRecovery(
+		ctx context.Context,
+		input PRDevelopmentControllerOperationRecoveryRenew,
+	) error
+	FinalizePRDevelopmentControllerOperationRecovery(
+		ctx context.Context,
+		input PRDevelopmentControllerOperationRecoveryFinalize,
+	) (PRDevelopmentControllerOperationTransition, bool, error)
 }
 
 // PRDevelopmentLedgerReader returns one complete private, integrity-checked
