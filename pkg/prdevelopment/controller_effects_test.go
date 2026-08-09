@@ -180,7 +180,13 @@ func TestControllerEffectRunnerAdoptCommitAndParkExactOrder(t *testing.T) {
 		}
 		return preview, nil
 	}
-	fence, err := fixture.runner.Park(context.Background(), committed, "Repair complete.", 2)
+	fence, err := fixture.runner.Park(
+		context.Background(),
+		committed,
+		"Repair complete.",
+		2,
+		func() { fixture.calls = append(fixture.calls, "barrier:terminal") },
+	)
 	if err != nil {
 		t.Fatalf("Park() error = %v", err)
 	}
@@ -191,7 +197,8 @@ func TestControllerEffectRunnerAdoptCommitAndParkExactOrder(t *testing.T) {
 	wantCalls := []string{
 		"prepare:adopt", "git:adopt", "finalize:adopt",
 		"prepare:commit", "git:commit", "finalize:commit",
-		"git:preview", "prepare:park", "git:park", "git:snapshot", "finalize:park",
+		"git:preview", "prepare:park", "git:park", "git:snapshot",
+		"barrier:terminal", "finalize:park",
 	}
 	if !slices.Equal(fixture.calls, wantCalls) {
 		t.Fatalf("calls = %#v, want %#v", fixture.calls, wantCalls)
@@ -207,7 +214,7 @@ func TestControllerEffectRunnerAdoptCommitAndParkExactOrder(t *testing.T) {
 		t.Fatalf("json.Marshal(runner) = %s, %v", encoded, err)
 	}
 	beforeReplay := len(fixture.calls)
-	replayed, err := fixture.runner.Park(context.Background(), committed, "Repair complete.", 2)
+	replayed, err := fixture.runner.Park(context.Background(), committed, "Repair complete.", 2, nil)
 	if err != nil || replayed.FenceHash != fence.FenceHash || len(fixture.calls) != beforeReplay {
 		t.Fatalf("terminal Park replay = %#v, %v; calls = %#v", replayed, err, fixture.calls)
 	}
@@ -244,7 +251,7 @@ func TestControllerEffectRunnerNoChangeSkipsCommitAndParksExactTip(t *testing.T)
 	fixture.git.snapshot = func(request gitworkspace.PinnedLineReviewRequest) (gitworkspace.PinnedLineReviewSnapshot, error) {
 		return preview, nil
 	}
-	fence, err := fixture.runner.Park(context.Background(), noChange, "No changes required.", 1)
+	fence, err := fixture.runner.Park(context.Background(), noChange, "No changes required.", 1, nil)
 	if err != nil {
 		t.Fatalf("Park(no-change) error = %v", err)
 	}
@@ -278,12 +285,22 @@ func TestControllerEffectRunnerPreviewFailureDoesNotPrepareOrPark(t *testing.T) 
 	fixture.git.preview = func(gitworkspace.PinnedLineParkRequest) (gitworkspace.PinnedLineReviewSnapshot, error) {
 		return gitworkspace.PinnedLineReviewSnapshot{}, previewFailure
 	}
-	_, err = fixture.runner.Park(context.Background(), noChange, "No changes required.", 1)
+	barriers := 0
+	_, err = fixture.runner.Park(
+		context.Background(),
+		noChange,
+		"No changes required.",
+		1,
+		func() { barriers++ },
+	)
 	if !errors.Is(err, previewFailure) {
 		t.Fatalf("Park() error = %v, want %v", err, previewFailure)
 	}
 	if !slices.Equal(fixture.calls, []string{"git:preview"}) {
 		t.Fatalf("calls after preview failure = %#v", fixture.calls)
+	}
+	if barriers != 0 {
+		t.Fatalf("terminal barrier calls after preview failure = %d", barriers)
 	}
 	if fixture.runner.reservation == "" || fixture.runner.controller.MutationReservationKey == "" {
 		t.Fatal("preview failure retired mutation authority")
@@ -321,11 +338,11 @@ func TestControllerEffectRunnerParkReplayReusesPreparedIntentAndPreview(t *testi
 		return preview, nil
 	}
 	fixture.journal.failFinalize[eventing.PRDevelopmentControllerOperationPark] = 1
-	_, err = fixture.runner.Park(context.Background(), noChange, "No changes required.", 1)
+	_, err = fixture.runner.Park(context.Background(), noChange, "No changes required.", 1, nil)
 	if err == nil {
 		t.Fatal("first Park() error = nil")
 	}
-	fence, err := fixture.runner.Park(context.Background(), noChange, "No changes required.", 1)
+	fence, err := fixture.runner.Park(context.Background(), noChange, "No changes required.", 1, nil)
 	if err != nil || fence.LineReviewDigest != reviewDigest {
 		t.Fatalf("replayed Park() = %#v, %v", fence, err)
 	}
@@ -360,7 +377,7 @@ func TestControllerEffectRunnerRejectsNoncanonicalParkBeforeEffect(t *testing.T)
 	fixture.journal.mutatePrepared = func(operation *eventing.PRDevelopmentControllerOperation) {
 		operation.Request.Tree = strings.Repeat("f", 40)
 	}
-	_, err = fixture.runner.Park(context.Background(), noChange, "No changes required.", 1)
+	_, err = fixture.runner.Park(context.Background(), noChange, "No changes required.", 1, nil)
 	if !errors.Is(err, errControllerEffectConflict) {
 		t.Fatalf("Park(noncanonical) error = %v", err)
 	}

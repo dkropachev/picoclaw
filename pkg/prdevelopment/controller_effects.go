@@ -409,6 +409,7 @@ func (runner *controllerEffectRunner) Park(
 	commit controllerCommitOutcome,
 	summary string,
 	iterations int,
+	beforeFinalize func(),
 ) (eventing.PRDevelopmentAttemptReviewFence, error) {
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
@@ -508,6 +509,12 @@ func (runner *controllerEffectRunner) Park(
 		ReviewCommit:        snapshot.Commit,
 		ReviewTree:          snapshot.Tree,
 		ReviewDigest:        snapshot.ReviewDigest,
+	}
+	// Keep both durable leases alive through all potentially slow Git and
+	// review-snapshot work. The caller's barrier drains renewal I/O only at the
+	// final atomic store boundary, where Finalize retires both authorities.
+	if beforeFinalize != nil {
+		beforeFinalize()
 	}
 	transition, err := runner.finalize(ctx, operation, result)
 	if err != nil {

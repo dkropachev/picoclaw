@@ -11,11 +11,15 @@ import (
 )
 
 type controllerHeartbeatStoreFake struct {
-	mu               sync.Mutex
-	orchestration    []eventing.PRDevelopmentRepairOrchestrationRenew
-	controllers      []eventing.PRDevelopmentControllerRenew
-	orchestrationErr error
-	controllerErr    error
+	mu                   sync.Mutex
+	orchestration        []eventing.PRDevelopmentRepairOrchestrationRenew
+	controllers          []eventing.PRDevelopmentControllerRenew
+	orchestrationErr     error
+	controllerErr        error
+	orchestrationEntered chan<- struct{}
+	orchestrationRelease <-chan struct{}
+	controllerEntered    chan<- struct{}
+	controllerRelease    <-chan struct{}
 }
 
 func (store *controllerHeartbeatStoreFake) RenewPRDevelopmentRepairOrchestration(
@@ -23,9 +27,18 @@ func (store *controllerHeartbeatStoreFake) RenewPRDevelopmentRepairOrchestration
 	input eventing.PRDevelopmentRepairOrchestrationRenew,
 ) error {
 	store.mu.Lock()
-	defer store.mu.Unlock()
 	store.orchestration = append(store.orchestration, input)
-	return store.orchestrationErr
+	err := store.orchestrationErr
+	entered := store.orchestrationEntered
+	release := store.orchestrationRelease
+	store.mu.Unlock()
+	if entered != nil {
+		entered <- struct{}{}
+	}
+	if release != nil {
+		<-release
+	}
+	return err
 }
 
 func (store *controllerHeartbeatStoreFake) RenewPRDevelopmentControllerLease(
@@ -33,9 +46,18 @@ func (store *controllerHeartbeatStoreFake) RenewPRDevelopmentControllerLease(
 	input eventing.PRDevelopmentControllerRenew,
 ) error {
 	store.mu.Lock()
-	defer store.mu.Unlock()
 	store.controllers = append(store.controllers, input)
-	return store.controllerErr
+	err := store.controllerErr
+	entered := store.controllerEntered
+	release := store.controllerRelease
+	store.mu.Unlock()
+	if entered != nil {
+		entered <- struct{}{}
+	}
+	if release != nil {
+		<-release
+	}
+	return err
 }
 
 func TestControllerHeartbeatRenewsClaimThenMutationLease(t *testing.T) {
@@ -149,7 +171,7 @@ func TestControllerHeartbeatDoesNotRenewControllerBeforeAcquisition(t *testing.T
 	}
 }
 
-func TestControllerHeartbeatStopsControllerRenewalAfterClear(t *testing.T) {
+func TestControllerHeartbeatStopsAllRenewalAfterTerminalBarrier(t *testing.T) {
 	t.Parallel()
 	store := &controllerHeartbeatStoreFake{}
 	_, heartbeat := startControllerHeartbeat(
@@ -164,7 +186,7 @@ func TestControllerHeartbeatStopsControllerRenewalAfterClear(t *testing.T) {
 		LeaseToken: "controller-token",
 		LeaseEpoch: 1,
 	})
-	heartbeat.ClearController()
+	heartbeat.BeginTerminal()
 	if err := heartbeat.renew(context.Background()); err != nil {
 		t.Fatalf("renew() error = %v", err)
 	}
@@ -173,7 +195,159 @@ func TestControllerHeartbeatStopsControllerRenewalAfterClear(t *testing.T) {
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if len(store.orchestration) == 0 || len(store.controllers) != 0 {
+	if len(store.orchestration) != 0 || len(store.controllers) != 0 {
 		t.Fatalf("renewal counts = orchestration %d, controller %d", len(store.orchestration), len(store.controllers))
+	}
+}
+
+func TestControllerHeartbeatTerminalBarrierDrainsOrchestrationRenewal(t *testing.T) {
+	stale := errors.New("stale orchestration lease error")
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	store := &controllerHeartbeatStoreFake{
+		orchestrationErr:     stale,
+		orchestrationEntered: entered,
+		orchestrationRelease: release,
+	}
+	workCtx, heartbeat := startControllerHeartbeat(
+		context.Background(),
+		store,
+		"pdr_0123456789abcdef0123456789abcdef",
+		"claim-token",
+		3*time.Hour,
+	)
+	heartbeat.SetController(eventing.PRDevelopmentController{
+		ID:         "pctl_0123456789abcdef0123456789abcdef",
+		LeaseToken: "controller-token",
+		LeaseEpoch: 1,
+	})
+
+	renewed := make(chan error, 1)
+	go func() { renewed <- heartbeat.renew(workCtx) }()
+	requireHeartbeatSignal(t, entered, "orchestration renewal did not start")
+	barrierDone := make(chan struct{})
+	go func() {
+		heartbeat.BeginTerminal()
+		close(barrierDone)
+	}()
+	requireHeartbeatTerminalIntent(t, heartbeat)
+	select {
+	case <-barrierDone:
+		t.Fatal("terminal barrier returned before orchestration renewal drained")
+	default:
+	}
+	close(release)
+	requireHeartbeatRenewal(t, renewed)
+	requireHeartbeatSignal(t, barrierDone, "terminal barrier did not return")
+	assertTerminalHeartbeat(t, workCtx, heartbeat, store, 1, 0)
+}
+
+func TestControllerHeartbeatTerminalBarrierDrainsControllerRenewal(t *testing.T) {
+	stale := errors.New("stale controller lease error")
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	store := &controllerHeartbeatStoreFake{
+		controllerErr:     stale,
+		controllerEntered: entered,
+		controllerRelease: release,
+	}
+	workCtx, heartbeat := startControllerHeartbeat(
+		context.Background(),
+		store,
+		"pdr_0123456789abcdef0123456789abcdef",
+		"claim-token",
+		3*time.Hour,
+	)
+	heartbeat.SetController(eventing.PRDevelopmentController{
+		ID:         "pctl_0123456789abcdef0123456789abcdef",
+		LeaseToken: "controller-token",
+		LeaseEpoch: 1,
+	})
+
+	renewed := make(chan error, 1)
+	go func() { renewed <- heartbeat.renew(workCtx) }()
+	requireHeartbeatSignal(t, entered, "controller renewal did not start")
+	barrierDone := make(chan struct{})
+	go func() {
+		heartbeat.BeginTerminal()
+		close(barrierDone)
+	}()
+	requireHeartbeatTerminalIntent(t, heartbeat)
+	select {
+	case <-barrierDone:
+		t.Fatal("terminal barrier returned before controller renewal drained")
+	default:
+	}
+	close(release)
+	requireHeartbeatRenewal(t, renewed)
+	requireHeartbeatSignal(t, barrierDone, "terminal barrier did not return")
+	assertTerminalHeartbeat(t, workCtx, heartbeat, store, 1, 1)
+}
+
+func assertTerminalHeartbeat(
+	t *testing.T,
+	workCtx context.Context,
+	heartbeat *controllerHeartbeat,
+	store *controllerHeartbeatStoreFake,
+	wantOrchestration, wantController int,
+) {
+	t.Helper()
+	if workCtx.Err() != nil {
+		t.Fatalf("terminal barrier canceled work context: %v", workCtx.Err())
+	}
+	if err := heartbeat.renew(workCtx); err != nil {
+		t.Fatalf("post-barrier renew() error = %v", err)
+	}
+	store.mu.Lock()
+	orchestrationCount := len(store.orchestration)
+	controllerCount := len(store.controllers)
+	store.mu.Unlock()
+	if orchestrationCount != wantOrchestration || controllerCount != wantController {
+		t.Fatalf(
+			"post-barrier renewal counts = orchestration %d, controller %d; want %d, %d",
+			orchestrationCount,
+			controllerCount,
+			wantOrchestration,
+			wantController,
+		)
+	}
+	if err := heartbeat.Stop(); err != nil {
+		t.Fatalf("Stop() reported stale renewal error = %v", err)
+	}
+}
+
+func requireHeartbeatRenewal(t *testing.T, renewed <-chan error) {
+	t.Helper()
+	select {
+	case err := <-renewed:
+		if err != nil {
+			t.Fatalf("renew() reported stale error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("renewal did not finish")
+	}
+}
+
+func requireHeartbeatSignal(t *testing.T, signal <-chan struct{}, message string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(5 * time.Second):
+		t.Fatal(message)
+	}
+}
+
+func requireHeartbeatTerminalIntent(t *testing.T, heartbeat *controllerHeartbeat) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for !heartbeat.terminal.Load() {
+		select {
+		case <-deadline.C:
+			t.Fatal("terminal barrier did not publish its intent")
+		case <-ticker.C:
+		}
 	}
 }

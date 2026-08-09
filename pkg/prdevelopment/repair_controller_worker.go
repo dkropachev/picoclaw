@@ -93,6 +93,7 @@ type repairControllerEffects interface {
 		controllerCommitOutcome,
 		string,
 		int,
+		func(),
 	) (eventing.PRDevelopmentAttemptReviewFence, error)
 }
 
@@ -586,8 +587,13 @@ func (worker *RepairControllerWorker) processClaim(
 	if err != nil {
 		return err
 	}
-	heartbeat.ClearController()
-	_, err = effects.Park(ctx, commit, run.Summary, run.Iterations)
+	_, err = effects.Park(
+		ctx,
+		commit,
+		run.Summary,
+		run.Iterations,
+		heartbeat.BeginTerminal,
+	)
 	return err
 }
 

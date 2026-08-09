@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sipeed/picoclaw/pkg/eventing"
@@ -41,6 +42,7 @@ type controllerHeartbeat struct {
 
 	mu         sync.RWMutex
 	controller controllerHeartbeatLease
+	terminal   atomic.Bool
 }
 
 func startControllerHeartbeat(
@@ -70,23 +72,29 @@ func (heartbeat *controllerHeartbeat) SetController(
 		return
 	}
 	heartbeat.mu.Lock()
-	heartbeat.controller = controllerHeartbeatLease{
-		ControllerID: controller.ID,
-		LeaseToken:   controller.LeaseToken,
-		LeaseEpoch:   controller.LeaseEpoch,
+	if !heartbeat.terminal.Load() {
+		heartbeat.controller = controllerHeartbeatLease{
+			ControllerID: controller.ID,
+			LeaseToken:   controller.LeaseToken,
+			LeaseEpoch:   controller.LeaseEpoch,
+		}
 	}
 	heartbeat.mu.Unlock()
 }
 
-// ClearController stops future mutation renewals immediately before Park.
-// The already-issued lease remains usable for the bounded prepared Park, while
-// the orchestration claim continues to heartbeat through atomic finalization.
-// This prevents a renewal racing the successful transition to review_pending
-// from being misreported as lost mutation authority.
-func (heartbeat *controllerHeartbeat) ClearController() {
+// BeginTerminal pauses future claim and mutation renewals and drains any
+// renewal already in flight. It deliberately leaves the work context usable so
+// the caller can perform the atomic terminal store transition after the
+// barrier. Errors from a renewal overtaken by this barrier are stale and are
+// therefore suppressed.
+func (heartbeat *controllerHeartbeat) BeginTerminal() {
 	if heartbeat == nil {
 		return
 	}
+	// Publish the terminal intent before waiting for the write lock. An
+	// in-flight renewal can then suppress a stale lease error while this lock
+	// waits for its read-side critical section to drain.
+	heartbeat.terminal.Store(true)
 	heartbeat.mu.Lock()
 	heartbeat.controller = controllerHeartbeatLease{}
 	heartbeat.mu.Unlock()
@@ -123,11 +131,17 @@ func (heartbeat *controllerHeartbeat) run(ctx context.Context) {
 				if ctx.Err() != nil {
 					return
 				}
+				heartbeat.mu.RLock()
+				if heartbeat.terminal.Load() {
+					heartbeat.mu.RUnlock()
+					continue
+				}
 				select {
 				case heartbeat.errs <- err:
 				default:
 				}
 				heartbeat.cancel()
+				heartbeat.mu.RUnlock()
 				return
 			}
 		}
@@ -135,6 +149,11 @@ func (heartbeat *controllerHeartbeat) run(ctx context.Context) {
 }
 
 func (heartbeat *controllerHeartbeat) renew(ctx context.Context) error {
+	heartbeat.mu.RLock()
+	defer heartbeat.mu.RUnlock()
+	if heartbeat.terminal.Load() {
+		return nil
+	}
 	if err := heartbeat.store.RenewPRDevelopmentRepairOrchestration(
 		ctx,
 		eventing.PRDevelopmentRepairOrchestrationRenew{
@@ -143,11 +162,15 @@ func (heartbeat *controllerHeartbeat) renew(ctx context.Context) error {
 			Lease:      heartbeat.lease,
 		},
 	); err != nil {
+		if heartbeat.terminal.Load() {
+			return nil
+		}
 		return fmt.Errorf("renew repair orchestration claim: %w", err)
 	}
-	heartbeat.mu.RLock()
+	if heartbeat.terminal.Load() {
+		return nil
+	}
 	controller := heartbeat.controller
-	heartbeat.mu.RUnlock()
 	if controller.ControllerID == "" {
 		return nil
 	}
@@ -161,6 +184,9 @@ func (heartbeat *controllerHeartbeat) renew(ctx context.Context) error {
 			Lease:        heartbeat.lease,
 		},
 	); err != nil {
+		if heartbeat.terminal.Load() {
+			return nil
+		}
 		return fmt.Errorf("renew repair controller lease: %w", err)
 	}
 	return nil

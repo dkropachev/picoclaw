@@ -458,7 +458,11 @@ func (effects *repairControllerEffectsFake) Park(
 	_ controllerCommitOutcome,
 	summary string,
 	iterations int,
+	beforeFinalize func(),
 ) (eventing.PRDevelopmentAttemptReviewFence, error) {
+	if beforeFinalize != nil {
+		beforeFinalize()
+	}
 	effects.parks++
 	effects.parkSummary = summary
 	effects.parkIterations = iterations
