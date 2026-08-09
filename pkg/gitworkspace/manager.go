@@ -16,19 +16,25 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 )
 
 const (
-	stateVersion                    = 1
+	stateVersion                    = 2
 	historyLimit                    = 1000
 	inventoryLockFile               = "inventory.lock"
 	maxPinnedGitMetadataEntries     = 1_000_000
 	maxPinnedGitPackMetadataEntries = 100_000
+)
+
+var errLegacyPinnedWorkspaceMigration = errors.New(
+	"git workspace inventory requires version-1 cleanup before upgrade",
 )
 
 type Options struct {
@@ -95,20 +101,21 @@ type LockInfo struct {
 }
 
 type WorkspaceRecord struct {
-	ID              string     `json:"id"`
-	RepoID          string     `json:"repo_id"`
-	RemoteURL       string     `json:"remote_url"`
-	Ref             string     `json:"ref,omitempty"`
-	PinnedSourceRef string     `json:"pinned_source_ref,omitempty"`
-	PinnedCommit    string     `json:"pinned_commit,omitempty"`
-	Path            string     `json:"path"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	LastWorkAt      time.Time  `json:"last_work_at,omitempty"`
-	LastCleanedAt   time.Time  `json:"last_cleaned_at,omitempty"`
-	PreservedBranch string     `json:"preserved_branch,omitempty"`
-	LockedBy        *LockInfo  `json:"locked_by,omitempty"`
-	DroppedAt       *time.Time `json:"dropped_at,omitempty"`
+	ID                string     `json:"id"`
+	RepoID            string     `json:"repo_id"`
+	RemoteURL         string     `json:"remote_url"`
+	Ref               string     `json:"ref,omitempty"`
+	PinnedSourceRef   string     `json:"pinned_source_ref,omitempty"`
+	PinnedCommit      string     `json:"pinned_commit,omitempty"`
+	Path              string     `json:"path"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	LastWorkAt        time.Time  `json:"last_work_at,omitempty"`
+	LastCleanedAt     time.Time  `json:"last_cleaned_at,omitempty"`
+	PreservedBranch   string     `json:"preserved_branch,omitempty"`
+	DevelopmentLineID string     `json:"development_line_id,omitempty"`
+	LockedBy          *LockInfo  `json:"locked_by,omitempty"`
+	DroppedAt         *time.Time `json:"dropped_at,omitempty"`
 }
 
 type HistoryEntry struct {
@@ -182,10 +189,83 @@ type ReconcileResult struct {
 }
 
 type storeState struct {
-	Version      int                          `json:"version"`
-	Repositories map[string]*RepositoryRecord `json:"repositories"`
-	Workspaces   map[string]*WorkspaceRecord  `json:"workspaces"`
-	History      []HistoryEntry               `json:"history,omitempty"`
+	Version                int                               `json:"version"`
+	Repositories           map[string]*RepositoryRecord      `json:"repositories"`
+	Workspaces             map[string]*WorkspaceRecord       `json:"workspaces"`
+	DevelopmentLines       map[string]*developmentLineRecord `json:"development_lines,omitempty"`
+	History                []HistoryEntry                    `json:"history,omitempty"`
+	DevelopmentLineHistory []HistoryEntry                    `json:"development_line_history,omitempty"`
+}
+
+// Version 2 and later use a string discriminator on disk. Version-1 binaries
+// decode this field as an int, so they fail before rewriting an inventory that
+// contains controller-owned development lines. Numeric versions remain
+// accepted only for the legacy version-0/version-1 migration path.
+func (state storeState) MarshalJSON() ([]byte, error) {
+	type inventoryWire struct {
+		Version                string                            `json:"version"`
+		Repositories           map[string]*RepositoryRecord      `json:"repositories"`
+		Workspaces             map[string]*WorkspaceRecord       `json:"workspaces"`
+		DevelopmentLines       map[string]*developmentLineRecord `json:"development_lines,omitempty"`
+		History                []HistoryEntry                    `json:"history,omitempty"`
+		DevelopmentLineHistory []HistoryEntry                    `json:"development_line_history,omitempty"`
+	}
+	return json.Marshal(inventoryWire{
+		Version:                strconv.Itoa(state.Version),
+		Repositories:           state.Repositories,
+		Workspaces:             state.Workspaces,
+		DevelopmentLines:       state.DevelopmentLines,
+		History:                state.History,
+		DevelopmentLineHistory: state.DevelopmentLineHistory,
+	})
+}
+
+func (state *storeState) UnmarshalJSON(data []byte) error {
+	if state == nil {
+		return errors.New("git workspace inventory target is nil")
+	}
+	type inventoryWire struct {
+		Version                json.RawMessage                   `json:"version"`
+		Repositories           map[string]*RepositoryRecord      `json:"repositories"`
+		Workspaces             map[string]*WorkspaceRecord       `json:"workspaces"`
+		DevelopmentLines       map[string]*developmentLineRecord `json:"development_lines,omitempty"`
+		History                []HistoryEntry                    `json:"history,omitempty"`
+		DevelopmentLineHistory []HistoryEntry                    `json:"development_line_history,omitempty"`
+	}
+	var wire inventoryWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	version := 0
+	if len(wire.Version) > 0 {
+		if wire.Version[0] == '"' {
+			var tagged string
+			if err := json.Unmarshal(wire.Version, &tagged); err != nil {
+				return fmt.Errorf("decode tagged inventory version: %w", err)
+			}
+			parsed, err := strconv.Atoi(tagged)
+			if err != nil || parsed < 2 || tagged != strconv.Itoa(parsed) {
+				return errors.New("git workspace inventory version tag is invalid")
+			}
+			version = parsed
+		} else {
+			if err := json.Unmarshal(wire.Version, &version); err != nil {
+				return fmt.Errorf("decode legacy inventory version: %w", err)
+			}
+			if version > 1 {
+				return errors.New(
+					"git workspace inventory version 2 or later must use its rollback fence",
+				)
+			}
+		}
+	}
+	state.Version = version
+	state.Repositories = wire.Repositories
+	state.Workspaces = wire.Workspaces
+	state.DevelopmentLines = wire.DevelopmentLines
+	state.History = wire.History
+	state.DevelopmentLineHistory = wire.DevelopmentLineHistory
+	return nil
 }
 
 func NewManager(opts Options) (*Manager, error) {
@@ -371,6 +451,23 @@ func (m *Manager) AcquirePinned(
 	if err != nil {
 		return WorkspaceInfo{}, err
 	}
+	reservationHash := developmentLineReservationHash(reservationKey)
+	for _, line := range st.DevelopmentLines {
+		if line == nil {
+			continue
+		}
+		if line.PendingParkSet && line.MutationReservationHash == reservationHash {
+			return WorkspaceInfo{}, errors.New(
+				"pinned reservation is sealed by a pending development line park",
+			)
+		}
+		if developmentLineReservationRetired(line, reservationHash) &&
+			line.MutationReservationHash != reservationHash {
+			return WorkspaceInfo{}, errors.New(
+				"pinned reservation was released from a development line",
+			)
+		}
+	}
 	pinnedEnvironment, cleanupPinnedEnvironment, err := m.newPinnedGitEnvironment()
 	if err != nil {
 		return WorkspaceInfo{}, err
@@ -500,12 +597,12 @@ func (m *Manager) ReleasePinned(
 	}
 	reservationKey := strings.TrimSpace(req.ReservationKey)
 	agentID := strings.TrimSpace(req.AgentID)
-	if reservationKey == "" || reservationKey != req.ReservationKey ||
-		containsPinnedControlCharacter(reservationKey) {
-		return nil, errors.New("pinned reservation key must be exact and non-empty")
+	if reservationKey != req.ReservationKey ||
+		!validPinnedOperationIdentity(reservationKey, 256) {
+		return nil, errors.New("pinned reservation key must be an exact bounded identity")
 	}
-	if agentID == "" || agentID != req.AgentID || containsPinnedControlCharacter(agentID) {
-		return nil, errors.New("pinned release agent ID must be exact and non-empty")
+	if agentID != req.AgentID || !validPinnedOperationIdentity(agentID, 256) {
+		return nil, errors.New("pinned release agent ID must be an exact bounded identity")
 	}
 	_, _, releaseOperation, err := m.acquirePinnedOperation(ctx, reservationKey)
 	if err != nil {
@@ -533,6 +630,15 @@ func (m *Manager) releaseReservations(
 		return nil, err
 	}
 	if pinned {
+		reservationHash := developmentLineReservationHash(reservationKey)
+		for _, line := range st.DevelopmentLines {
+			if line != nil && (line.MutationReservationHash == reservationHash ||
+				developmentLineReservationRetired(line, reservationHash)) {
+				return nil, errors.New(
+					"development line reservation must be parked through its controller boundary",
+				)
+			}
+		}
 		matchingReservations := 0
 		for _, workspace := range st.Workspaces {
 			if workspace == nil || workspace.LockedBy == nil ||
@@ -558,6 +664,9 @@ func (m *Manager) releaseReservations(
 	var released []*WorkspaceRecord
 	for _, ws := range st.Workspaces {
 		if ws == nil || ws.LockedBy == nil || ws.LockedBy.SessionKey != reservationKey {
+			continue
+		}
+		if !pinned && ws.DevelopmentLineID != "" {
 			continue
 		}
 		workspaceIsPinned := ws.PinnedSourceRef != "" || ws.PinnedCommit != ""
@@ -656,7 +765,7 @@ func (m *Manager) CleanupIgnored(ctx context.Context, workspaceID string) (Clean
 		return CleanupResult{}, err
 	}
 	ws := st.Workspaces[workspaceID]
-	if ws == nil || ws.DroppedAt != nil {
+	if ws == nil || ws.DroppedAt != nil || controllerPrivateWorkspace(ws) {
 		return CleanupResult{}, fmt.Errorf("git workspace %q not found", workspaceID)
 	}
 	if ws.LockedBy != nil {
@@ -716,7 +825,7 @@ func (m *Manager) Drop(ctx context.Context, workspaceID string) (WorkspaceInfo, 
 		return WorkspaceInfo{}, err
 	}
 	ws := st.Workspaces[workspaceID]
-	if ws == nil || ws.DroppedAt != nil {
+	if ws == nil || ws.DroppedAt != nil || controllerPrivateWorkspace(ws) {
 		return WorkspaceInfo{}, fmt.Errorf("git workspace %q not found", workspaceID)
 	}
 	if ws.LockedBy != nil {
@@ -757,7 +866,8 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileResult, error) {
 
 	workspaceList := sortedWorkspaceRecords(st.Workspaces)
 	for _, ws := range workspaceList {
-		if ws == nil || ws.DroppedAt != nil || ws.LockedBy != nil || ws.LastWorkAt.IsZero() {
+		if ws == nil || ws.DroppedAt != nil || ws.LockedBy != nil ||
+			controllerPrivateWorkspace(ws) || ws.LastWorkAt.IsZero() {
 			continue
 		}
 		if m.opts.IgnoredCleanupDelay > 0 && now.Sub(ws.LastWorkAt) >= m.opts.IgnoredCleanupDelay {
@@ -784,7 +894,8 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileResult, error) {
 	}
 
 	for _, ws := range workspaceList {
-		if ws == nil || ws.DroppedAt != nil || ws.LockedBy != nil || ws.LastWorkAt.IsZero() {
+		if ws == nil || ws.DroppedAt != nil || ws.LockedBy != nil ||
+			controllerPrivateWorkspace(ws) || ws.LastWorkAt.IsZero() {
 			continue
 		}
 		if m.opts.DropDelay > 0 && now.Sub(ws.LastWorkAt) >= m.opts.DropDelay {
@@ -801,7 +912,8 @@ func (m *Manager) Reconcile(ctx context.Context) (ReconcileResult, error) {
 	}
 	if m.opts.MaxTotalSizeBytes > 0 && stats.TotalSizeBytes > m.opts.MaxTotalSizeBytes {
 		for _, ws := range workspaceList {
-			if ws == nil || ws.DroppedAt != nil || ws.LockedBy != nil {
+			if ws == nil || ws.DroppedAt != nil || ws.LockedBy != nil ||
+				controllerPrivateWorkspace(ws) {
 				continue
 			}
 			if dropErr := m.dropWorkspaceLocked(ctx, st, ws, "auto_drop_size"); dropErr != nil {
@@ -852,9 +964,10 @@ func (m *Manager) lockInventory(ctx context.Context) (func(), error) {
 
 func (m *Manager) loadLocked() (*storeState, error) {
 	st := &storeState{
-		Version:      stateVersion,
-		Repositories: map[string]*RepositoryRecord{},
-		Workspaces:   map[string]*WorkspaceRecord{},
+		Version:          stateVersion,
+		Repositories:     map[string]*RepositoryRecord{},
+		Workspaces:       map[string]*WorkspaceRecord{},
+		DevelopmentLines: map[string]*developmentLineRecord{},
 	}
 	data, err := os.ReadFile(m.statePath())
 	if err != nil {
@@ -875,10 +988,111 @@ func (m *Manager) loadLocked() (*storeState, error) {
 	if st.Workspaces == nil {
 		st.Workspaces = map[string]*WorkspaceRecord{}
 	}
-	if st.Version == 0 {
+	if st.DevelopmentLines == nil {
+		st.DevelopmentLines = map[string]*developmentLineRecord{}
+	}
+	if st.Version < 0 || st.Version > stateVersion {
+		return nil, fmt.Errorf("unsupported git workspace inventory version %d", st.Version)
+	}
+	if st.Version == 0 || st.Version == 1 {
+		if len(st.DevelopmentLines) != 0 || len(st.DevelopmentLineHistory) != 0 {
+			return nil, errors.New(
+				"legacy numeric inventory contains rollback-fenced controller state",
+			)
+		}
+		if migrationErr := m.migrateLegacyPinnedWorkspaces(st); migrationErr != nil {
+			return nil, migrationErr
+		}
 		st.Version = stateVersion
 	}
+	partitionDevelopmentLineHistory(st)
+	if err := validateDevelopmentLineInventory(st); err != nil {
+		return nil, err
+	}
 	return st, nil
+}
+
+func (m *Manager) migrateLegacyPinnedWorkspaces(st *storeState) error {
+	if m == nil || st == nil {
+		return errLegacyPinnedWorkspaceMigration
+	}
+	if rootErr := m.validatePinnedCheckoutRoot(); rootErr != nil {
+		return errLegacyPinnedWorkspaceMigration
+	}
+	legacyIDs := make([]string, 0)
+	for oldID, workspace := range st.Workspaces {
+		if workspace == nil ||
+			(workspace.PinnedSourceRef == "" && workspace.PinnedCommit == "") {
+			continue
+		}
+		if workspace.PinnedSourceRef != "" && workspace.PinnedCommit != "" &&
+			validControllerPinnedWorkspaceID(workspace.RepoID, workspace.ID) {
+			continue
+		}
+		legacyIDs = append(legacyIDs, oldID)
+	}
+	sort.Strings(legacyIDs)
+	for _, oldID := range legacyIDs {
+		workspace := st.Workspaces[oldID]
+		if workspace == nil {
+			return errLegacyPinnedWorkspaceMigration
+		}
+		repository := st.Repositories[workspace.RepoID]
+		if workspace.ID != oldID || workspace.PinnedSourceRef == "" ||
+			workspace.PinnedCommit == "" ||
+			len(workspace.PinnedSourceRef) > 4<<10 ||
+			workspace.PinnedSourceRef != strings.TrimSpace(workspace.PinnedSourceRef) ||
+			!utf8.ValidString(workspace.PinnedSourceRef) ||
+			containsPinnedControlCharacter(workspace.PinnedSourceRef) ||
+			workspace.Ref != workspace.PinnedSourceRef ||
+			!validPinnedCommit(workspace.PinnedCommit) ||
+			!validLegacyPinnedWorkspaceID(workspace.RepoID, workspace.ID) ||
+			workspace.RepoID != repoID(workspace.RemoteURL) || repository == nil ||
+			repository.ID != workspace.RepoID ||
+			repository.RemoteURL != workspace.RemoteURL {
+			return errLegacyPinnedWorkspaceMigration
+		}
+		workspaceIDCount := 0
+		for _, workspaceID := range repository.WorkspaceIDs {
+			if workspaceID == oldID {
+				workspaceIDCount++
+			}
+		}
+		if workspaceIDCount != 1 {
+			return errLegacyPinnedWorkspaceMigration
+		}
+		if workspace.DroppedAt == nil || workspace.LockedBy != nil {
+			return errLegacyPinnedWorkspaceMigration
+		}
+		expectedPath := filepath.Join(
+			m.checkoutRoot,
+			safePathName(workspace.RemoteURL)+"-"+workspace.ID,
+		)
+		if workspace.Path != expectedPath {
+			return errLegacyPinnedWorkspaceMigration
+		}
+		if _, statErr := os.Lstat(expectedPath); !os.IsNotExist(statErr) {
+			return errLegacyPinnedWorkspaceMigration
+		}
+		publicHistory := st.History[:0]
+		for _, entry := range st.History {
+			if entry.WorkspaceID == oldID {
+				st.DevelopmentLineHistory = append(st.DevelopmentLineHistory, entry)
+				continue
+			}
+			publicHistory = append(publicHistory, entry)
+		}
+		st.History = publicHistory
+		delete(st.Workspaces, oldID)
+		workspaceIDs := repository.WorkspaceIDs[:0]
+		for _, workspaceID := range repository.WorkspaceIDs {
+			if workspaceID != oldID {
+				workspaceIDs = append(workspaceIDs, workspaceID)
+			}
+		}
+		repository.WorkspaceIDs = workspaceIDs
+	}
+	return nil
 }
 
 func (m *Manager) saveLocked(st *storeState) error {
@@ -888,9 +1102,16 @@ func (m *Manager) saveLocked(st *storeState) error {
 	if err := m.validateRoot(); err != nil {
 		return err
 	}
+	partitionDevelopmentLineHistory(st)
+	if err := validateDevelopmentLineInventory(st); err != nil {
+		return err
+	}
 	st.Version = stateVersion
 	if len(st.History) > historyLimit {
 		st.History = st.History[len(st.History)-historyLimit:]
+	}
+	if len(st.DevelopmentLineHistory) > historyLimit {
+		st.DevelopmentLineHistory = st.DevelopmentLineHistory[len(st.DevelopmentLineHistory)-historyLimit:]
 	}
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
@@ -910,6 +1131,9 @@ func (m *Manager) findSessionWorkspaceLocked(
 		if ws == nil || ws.RepoID != repoID || ws.DroppedAt != nil || ws.LockedBy == nil {
 			continue
 		}
+		if controllerPrivateWorkspace(ws) {
+			continue
+		}
 		if ws.LockedBy.SessionKey == sessionKey {
 			return ws
 		}
@@ -922,7 +1146,7 @@ func (m *Manager) findReusableWorkspaceLocked(st *storeState, repoID, ref string
 		if ws == nil || ws.RepoID != repoID || ws.DroppedAt != nil || ws.LockedBy != nil {
 			continue
 		}
-		if ws.PinnedSourceRef != "" || ws.PinnedCommit != "" {
+		if controllerPrivateWorkspace(ws) {
 			continue
 		}
 		if ref == "" || ws.Ref == "" || ws.Ref == ref {
@@ -951,6 +1175,31 @@ func findPinnedReservationWorkspaceLocked(
 	return found, false
 }
 
+func validControllerPinnedWorkspaceID(repositoryID, workspaceID string) bool {
+	base := repositoryID + "-pinned"
+	if workspaceID == base {
+		return true
+	}
+	suffix, found := strings.CutPrefix(workspaceID, base+"-")
+	if !found {
+		return false
+	}
+	number, err := strconv.Atoi(suffix)
+	return err == nil && number >= 2 && suffix == strconv.Itoa(number)
+}
+
+func validLegacyPinnedWorkspaceID(repositoryID, workspaceID string) bool {
+	if workspaceID == repositoryID {
+		return true
+	}
+	suffix, found := strings.CutPrefix(workspaceID, repositoryID+"-")
+	if !found {
+		return false
+	}
+	number, err := strconv.Atoi(suffix)
+	return err == nil && number >= 2 && suffix == strconv.Itoa(number)
+}
+
 func (m *Manager) createPinnedWorkspaceLocked(
 	ctx context.Context,
 	st *storeState,
@@ -965,7 +1214,7 @@ func (m *Manager) createPinnedWorkspaceLocked(
 	if err := m.validatePinnedCheckoutRoot(); err != nil {
 		return nil, err
 	}
-	idBase := repository.ID
+	idBase := repository.ID + "-pinned"
 	id := idBase
 	for suffix := 2; ; suffix++ {
 		if _, exists := st.Workspaces[id]; !exists {
@@ -1850,6 +2099,11 @@ func unsafePinnedGitConfigKey(key string) bool {
 		"core.commitgraph",
 		"core.alternaterefscommand",
 		"core.prefersymlinkrefs",
+		"core.bigfilethreshold",
+		"core.quotepath",
+		"core.fsync",
+		"core.fsyncmethod",
+		"core.fsyncobjectfiles",
 		"extensions.worktreeconfig",
 		"extensions.refstorage",
 		"extensions.partialclone",
@@ -1864,6 +2118,7 @@ func unsafePinnedGitConfigKey(key string) bool {
 		"include.",
 		"includeif.",
 		"url.",
+		"diff.",
 		"filter.",
 		"credential.",
 		"protocol.",
@@ -1939,6 +2194,11 @@ func validPinnedCommit(commit string) bool {
 	return true
 }
 
+func controllerPrivateWorkspace(workspace *WorkspaceRecord) bool {
+	return workspace != nil && (workspace.DevelopmentLineID != "" ||
+		workspace.PinnedSourceRef != "" || workspace.PinnedCommit != "")
+}
+
 func (m *Manager) createWorkspaceLocked(
 	ctx context.Context,
 	st *storeState,
@@ -1993,6 +2253,9 @@ func (m *Manager) dropWorkspaceLocked(
 	ws *WorkspaceRecord,
 	action string,
 ) error {
+	if controllerPrivateWorkspace(ws) {
+		return errors.New("controller-private git workspace cannot be dropped")
+	}
 	now := m.now().UTC()
 	branch, changed, err := m.preserveWorkspaceLocked(ctx, ws, "", now)
 	if err != nil {
@@ -2096,7 +2359,15 @@ func (m *Manager) preserveWorkspaceLocked(
 	if sessionKey == "" && ws.LockedBy != nil {
 		sessionKey = ws.LockedBy.SessionKey
 	}
-	branchBase := "picoclaw/session/" + safeBranchSegment(sessionKey)
+	branchSegment := safeBranchSegment(sessionKey)
+	if pinnedPreservation {
+		digest := sha256.Sum256(append(
+			[]byte("picoclaw-pinned-preservation-branch-v1\x00"),
+			[]byte(sessionKey)...,
+		))
+		branchSegment = "pinned-" + hex.EncodeToString(digest[:20])
+	}
+	branchBase := "picoclaw/session/" + branchSegment
 	branchBase += "/" + now.Format("20060102-150405")
 	if rootErr := m.validateRoot(); rootErr != nil {
 		return "", false, rootErr
@@ -2156,7 +2427,7 @@ func (m *Manager) preserveWorkspaceLocked(
 		return "", false, checkoutErr
 	}
 	message := "Preserve PicoClaw workspace changes"
-	if sessionKey != "" {
+	if sessionKey != "" && !pinnedPreservation {
 		message += "\n\nSession: " + sessionKey
 	}
 	if _, commitErr := run(
@@ -2243,7 +2514,8 @@ func ensurePinnedRealDirectoryComponents(base string, components ...string) (str
 			strings.ContainsAny(component, `/\\`) {
 			return "", errors.New("pinned Git metadata directory component is invalid")
 		}
-		current = filepath.Join(current, component)
+		parent := current
+		current = filepath.Join(parent, component)
 		info, err = os.Lstat(current)
 		if os.IsNotExist(err) {
 			if mkdirErr := os.Mkdir(current, 0o700); mkdirErr != nil {
@@ -2256,6 +2528,9 @@ func ensurePinnedRealDirectoryComponents(base string, components ...string) (str
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return "", fmt.Errorf("pinned Git metadata directory %s is not real", component)
+		}
+		if syncErr := fileutil.SyncDirectory(parent); syncErr != nil {
+			return "", syncErr
 		}
 	}
 	return current, nil
@@ -2296,24 +2571,25 @@ func (m *Manager) statsLocked(ctx context.Context, st *storeState) (Stats, error
 		MaxTotalSizeBytes:          m.opts.MaxTotalSizeBytes,
 		IgnoredCleanupDelaySeconds: int64(m.opts.IgnoredCleanupDelay.Seconds()),
 		DropDelaySeconds:           int64(m.opts.DropDelay.Seconds()),
-		History:                    append([]HistoryEntry(nil), st.History...),
 	}
-	repoStats := map[string]*RepositoryInfo{}
-	for id, repo := range st.Repositories {
-		if repo == nil {
+	controllerWorkspaces := make(map[string]struct{})
+	for _, workspace := range st.Workspaces {
+		if controllerPrivateWorkspace(workspace) {
+			controllerWorkspaces[workspace.ID] = struct{}{}
+		}
+	}
+	for _, entry := range st.History {
+		if _, private := controllerWorkspaces[entry.WorkspaceID]; private ||
+			strings.HasPrefix(entry.Action, "development_line_") ||
+			strings.HasPrefix(entry.Action, "pinned_") {
 			continue
 		}
-		repoStats[id] = &RepositoryInfo{
-			ID:          repo.ID,
-			RemoteURL:   repo.RemoteURL,
-			FirstSeenAt: repo.FirstSeenAt,
-			LastSeenAt:  repo.LastSeenAt,
-			LastWorkAt:  repo.LastWorkAt,
-		}
+		stats.History = append(stats.History, entry)
 	}
+	repoStats := map[string]*RepositoryInfo{}
 
 	for _, ws := range sortedWorkspaceRecords(st.Workspaces) {
-		if ws == nil {
+		if ws == nil || controllerPrivateWorkspace(ws) {
 			continue
 		}
 		info, err := m.workspaceInfo(ctx, ws)
@@ -2331,8 +2607,25 @@ func (m *Manager) statsLocked(ctx context.Context, st *storeState) (Stats, error
 		}
 		repoInfo := repoStats[ws.RepoID]
 		if repoInfo == nil {
-			repoInfo = &RepositoryInfo{ID: ws.RepoID, RemoteURL: ws.RemoteURL}
+			repoInfo = &RepositoryInfo{
+				ID:          ws.RepoID,
+				RemoteURL:   ws.RemoteURL,
+				FirstSeenAt: ws.CreatedAt,
+				LastSeenAt:  ws.UpdatedAt,
+				LastWorkAt:  ws.LastWorkAt,
+			}
 			repoStats[ws.RepoID] = repoInfo
+		} else {
+			if repoInfo.FirstSeenAt.IsZero() ||
+				(!ws.CreatedAt.IsZero() && ws.CreatedAt.Before(repoInfo.FirstSeenAt)) {
+				repoInfo.FirstSeenAt = ws.CreatedAt
+			}
+			if ws.UpdatedAt.After(repoInfo.LastSeenAt) {
+				repoInfo.LastSeenAt = ws.UpdatedAt
+			}
+			if ws.LastWorkAt.After(repoInfo.LastWorkAt) {
+				repoInfo.LastWorkAt = ws.LastWorkAt
+			}
 		}
 		if info.DroppedAt == nil {
 			repoInfo.WorkspaceCount++
@@ -2482,10 +2775,90 @@ func (m *Manager) addHistoryLocked(
 		AgentID:     strings.TrimSpace(agentID),
 		Detail:      strings.TrimSpace(detail),
 	}
+	if developmentLineHistoryEntry(st, entry) {
+		entry = sanitizeControllerHistoryEntry(entry)
+		st.DevelopmentLineHistory = append(st.DevelopmentLineHistory, entry)
+		if len(st.DevelopmentLineHistory) > historyLimit {
+			st.DevelopmentLineHistory = st.DevelopmentLineHistory[len(st.DevelopmentLineHistory)-historyLimit:]
+		}
+		return
+	}
 	st.History = append(st.History, entry)
 	if len(st.History) > historyLimit {
 		st.History = st.History[len(st.History)-historyLimit:]
 	}
+}
+
+func partitionDevelopmentLineHistory(st *storeState) {
+	if st == nil {
+		return
+	}
+	for index := range st.DevelopmentLineHistory {
+		st.DevelopmentLineHistory[index] = sanitizeControllerHistoryEntry(
+			st.DevelopmentLineHistory[index],
+		)
+	}
+	if len(st.History) == 0 {
+		return
+	}
+	publicHistory := make([]HistoryEntry, 0, len(st.History))
+	for _, entry := range st.History {
+		if developmentLineHistoryEntry(st, entry) {
+			st.DevelopmentLineHistory = append(
+				st.DevelopmentLineHistory,
+				sanitizeControllerHistoryEntry(entry),
+			)
+			continue
+		}
+		publicHistory = append(publicHistory, entry)
+	}
+	st.History = publicHistory
+	if len(st.DevelopmentLineHistory) > historyLimit {
+		st.DevelopmentLineHistory = st.DevelopmentLineHistory[len(st.DevelopmentLineHistory)-historyLimit:]
+	}
+}
+
+func sanitizeControllerHistoryEntry(entry HistoryEntry) HistoryEntry {
+	reservation := entry.SessionKey
+	entry.SessionKey = ""
+	entry.AgentID = ""
+	if reservation != "" {
+		entry.Detail = strings.ReplaceAll(
+			entry.Detail,
+			reservation,
+			"[controller-reservation]",
+		)
+	}
+	entry.ID = shortID(fmt.Sprintf(
+		"controller-history:%s:%s:%s:%s:%d",
+		entry.Action,
+		entry.RepoID,
+		entry.WorkspaceID,
+		entry.Detail,
+		entry.Time.UnixNano(),
+	))
+	return entry
+}
+
+func developmentLineHistoryEntry(st *storeState, entry HistoryEntry) bool {
+	if strings.HasPrefix(entry.Action, "development_line_") ||
+		strings.HasPrefix(entry.Action, "pinned_") {
+		return true
+	}
+	if st == nil || entry.WorkspaceID == "" {
+		return false
+	}
+	workspace := st.Workspaces[entry.WorkspaceID]
+	if workspace != nil && (workspace.DevelopmentLineID != "" ||
+		workspace.PinnedSourceRef != "" || workspace.PinnedCommit != "") {
+		return true
+	}
+	for _, line := range st.DevelopmentLines {
+		if line != nil && line.WorkspaceID == entry.WorkspaceID {
+			return true
+		}
+	}
+	return false
 }
 
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {
