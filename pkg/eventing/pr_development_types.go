@@ -7,15 +7,17 @@ import (
 )
 
 const (
-	prDevelopmentCaseIDPrefix            = "pdc_"
-	prDevelopmentThreadIDPrefix          = "pdt_"
-	prDevelopmentMessageIDPrefix         = "pdm_"
-	prDevelopmentRepairSessionIDPrefix   = "pds_"
-	prDevelopmentRepairAttemptIDPrefix   = "pdr_"
-	prDevelopmentRepairReservationPrefix = "pdrk_"
-	prDevelopmentControllerIDPrefix      = "pctl_"
-	prDevelopmentLineIDPrefix            = "pdln_"
-	prDevelopmentControllerKeyPrefix     = "pdck_"
+	prDevelopmentCaseIDPrefix             = "pdc_"
+	prDevelopmentThreadIDPrefix           = "pdt_"
+	prDevelopmentMessageIDPrefix          = "pdm_"
+	prDevelopmentRepairSessionIDPrefix    = "pds_"
+	prDevelopmentRepairAttemptIDPrefix    = "pdr_"
+	prDevelopmentRepairReservationPrefix  = "pdrk_"
+	prDevelopmentControllerIDPrefix       = "pctl_"
+	prDevelopmentLineIDPrefix             = "pdln_"
+	prDevelopmentControllerKeyPrefix      = "pdck_"
+	prDevelopmentLedgerEntryIDPrefix      = "pdle_"
+	prDevelopmentLedgerCheckpointIDPrefix = "pdlc_"
 
 	// MaxPRDevelopmentMessageBytes bounds one durable conversation message by
 	// UTF-8 bytes after trimming.
@@ -63,6 +65,20 @@ const (
 	// MaxPRDevelopmentControllerIdentityBytes bounds private controller, line,
 	// lease-owner, and intent identities.
 	MaxPRDevelopmentControllerIdentityBytes = 256
+	// MaxPRDevelopmentLedgerEntries reserves exactly one mutation-log and one
+	// local-review record for every retained-line fence.
+	MaxPRDevelopmentLedgerEntries = MaxPRDevelopmentControllerFences * 2
+	// MaxPRDevelopmentLedgerSummaryBytes keeps each attempt and review account
+	// concise enough to carry into the next model context.
+	MaxPRDevelopmentLedgerSummaryBytes = 4 << 10
+	// MaxPRDevelopmentLedgerReviewFindings bounds one structured local review.
+	MaxPRDevelopmentLedgerReviewFindings = 128
+	// MaxPRDevelopmentLedgerReviewBytes bounds the aggregate UTF-8 review
+	// finding payload independently of its per-field schema limits.
+	MaxPRDevelopmentLedgerReviewBytes = 64 << 10
+	// MaxPRDevelopmentLedgerCheckpointSummaryBytes bounds one logical
+	// compaction summary. Raw ledger records are never removed.
+	MaxPRDevelopmentLedgerCheckpointSummaryBytes = 32 << 10
 )
 
 var (
@@ -124,6 +140,21 @@ var (
 	// owner whose filesystem effects cannot be reclaimed automatically.
 	ErrPRDevelopmentControllerRecoveryRequired = errors.New(
 		"pull request development controller requires recovery",
+	)
+	// ErrInvalidPRDevelopmentLedger reports malformed append or compaction
+	// input.
+	ErrInvalidPRDevelopmentLedger = errors.New(
+		"invalid pull request development ledger",
+	)
+	// ErrPRDevelopmentLedgerConflict reports changed replay, causal-order, or
+	// integrity-chain disagreement.
+	ErrPRDevelopmentLedgerConflict = errors.New(
+		"pull request development ledger conflict",
+	)
+	// ErrPRDevelopmentLedgerCapacity reports exhausted entry or checkpoint
+	// capacity.
+	ErrPRDevelopmentLedgerCapacity = errors.New(
+		"pull request development ledger capacity exceeded",
 	)
 )
 
@@ -644,6 +675,143 @@ type PRDevelopmentControllerReviewTransition struct {
 	LeaseEpoch       int64  `json:"-"`
 }
 
+// PRDevelopmentLedgerEntryKind alternates one completed mutation account with
+// its reservation-free local review. Ordinal 2*n is the mutation account for
+// fence n and ordinal 2*n+1 is its review.
+type PRDevelopmentLedgerEntryKind string
+
+const (
+	PRDevelopmentLedgerAttempt PRDevelopmentLedgerEntryKind = "attempt"
+	PRDevelopmentLedgerReview  PRDevelopmentLedgerEntryKind = "review"
+)
+
+// PRDevelopmentLedgerReviewOutcome is the bounded result of reviewing an
+// immutable parked candidate. Review execution and retries are owned by a
+// later worker; this value is only durable evidence.
+type PRDevelopmentLedgerReviewOutcome string
+
+const (
+	PRDevelopmentLedgerReviewPassed            PRDevelopmentLedgerReviewOutcome = "passed"
+	PRDevelopmentLedgerReviewChangesRequired   PRDevelopmentLedgerReviewOutcome = "changes_required"
+	PRDevelopmentLedgerReviewAttentionRequired PRDevelopmentLedgerReviewOutcome = "attention_required"
+)
+
+// PRDevelopmentLedgerReviewFinding is one structured, immutable local-review
+// finding. All fields remain controller-private and are treated as untrusted
+// quoted data when projected into a later model context.
+type PRDevelopmentLedgerReviewFinding struct {
+	Severity       ReviewSeverity `json:"-"`
+	Title          string         `json:"-"`
+	File           string         `json:"-"`
+	Line           *int           `json:"-"`
+	Message        string         `json:"-"`
+	Evidence       string         `json:"-"`
+	Impact         string         `json:"-"`
+	Recommendation string         `json:"-"`
+	Validation     string         `json:"-"`
+}
+
+// PRDevelopmentLedgerEntry is one append-only, hash-chained mutation or
+// review account. Attempt-only and review-only fields are validated as
+// mutually exclusive. The complete type is private to trusted local workers.
+type PRDevelopmentLedgerEntry struct {
+	ID             string                             `json:"-"`
+	ThreadID       string                             `json:"-"`
+	Ordinal        int                                `json:"-"`
+	Kind           PRDevelopmentLedgerEntryKind       `json:"-"`
+	AttemptID      string                             `json:"-"`
+	FenceOrdinal   int                                `json:"-"`
+	CaseID         string                             `json:"-"`
+	CaseOrdinal    int                                `json:"-"`
+	Commit         string                             `json:"-"`
+	Tree           string                             `json:"-"`
+	NoChanges      bool                               `json:"-"`
+	Summary        string                             `json:"-"`
+	CIPlanDigest   string                             `json:"-"`
+	CIResultDigest string                             `json:"-"`
+	ReviewOutcome  PRDevelopmentLedgerReviewOutcome   `json:"-"`
+	Findings       []PRDevelopmentLedgerReviewFinding `json:"-"`
+	FenceHash      string                             `json:"-"`
+	PreviousHash   string                             `json:"-"`
+	EntryHash      string                             `json:"-"`
+	CreatedAt      time.Time                          `json:"-"`
+}
+
+// PRDevelopmentLedgerCheckpoint is a logical model-context compaction over an
+// exact, fully reviewed contiguous prefix. SourceDigest is the covered entry's
+// chain hash. Raw entries and earlier checkpoints remain immutable.
+type PRDevelopmentLedgerCheckpoint struct {
+	ID             string    `json:"-"`
+	ThreadID       string    `json:"-"`
+	Generation     int       `json:"-"`
+	ThroughOrdinal int       `json:"-"`
+	SourceDigest   string    `json:"-"`
+	Summary        string    `json:"-"`
+	CompactorID    string    `json:"-"`
+	PromptDigest   string    `json:"-"`
+	PreviousHash   string    `json:"-"`
+	CheckpointHash string    `json:"-"`
+	CreatedAt      time.Time `json:"-"`
+}
+
+// PRDevelopmentLedger is one complete integrity-checked private thread
+// ledger. LatestCheckpoint is nil before the first logical compaction.
+type PRDevelopmentLedger struct {
+	ThreadID          string                          `json:"-"`
+	Entries           []PRDevelopmentLedgerEntry      `json:"-"`
+	Checkpoints       []PRDevelopmentLedgerCheckpoint `json:"-"`
+	EntriesDigest     string                          `json:"-"`
+	CheckpointsDigest string                          `json:"-"`
+	LatestCheckpoint  *PRDevelopmentLedgerCheckpoint  `json:"-"`
+}
+
+// PRDevelopmentContextSnapshot atomically binds one selected immutable case
+// position to the complete provider thread and its integrity-checked ledger.
+// Case payloads remain separately loadable immutable records.
+type PRDevelopmentContextSnapshot struct {
+	SelectedOrdinal int                 `json:"-"`
+	Thread          PRDevelopmentThread `json:"-"`
+	Ledger          PRDevelopmentLedger `json:"-"`
+}
+
+// PRDevelopmentLedgerAttemptAppend records the concise account for one
+// completed, validated, deterministically committed and parked candidate. The
+// commit/tree/no-change and fence proof are derived from controller storage.
+type PRDevelopmentLedgerAttemptAppend struct {
+	CaseID         string `json:"-"`
+	AttemptID      string `json:"-"`
+	Summary        string `json:"-"`
+	CIPlanDigest   string `json:"-"`
+	CIResultDigest string `json:"-"`
+}
+
+// PRDevelopmentLedgerReviewAppend atomically records one local review for the
+// exact immutable fence and finishes the live reservation-free review lease.
+// It cannot be appended before its attempt account. The private lease proof is
+// retained only as a digest in the completed fence.
+type PRDevelopmentLedgerReviewAppend struct {
+	CaseID           string                             `json:"-"`
+	AttemptID        string                             `json:"-"`
+	ControllerID     string                             `json:"-"`
+	ExpectedRevision int64                              `json:"-"`
+	LeaseToken       string                             `json:"-"`
+	LeaseEpoch       int64                              `json:"-"`
+	Summary          string                             `json:"-"`
+	Outcome          PRDevelopmentLedgerReviewOutcome   `json:"-"`
+	Findings         []PRDevelopmentLedgerReviewFinding `json:"-"`
+}
+
+// PRDevelopmentLedgerCheckpointAppend records a derived compaction of an
+// exact reviewed prefix. The store independently verifies SourceDigest.
+type PRDevelopmentLedgerCheckpointAppend struct {
+	CaseID         string `json:"-"`
+	ThroughOrdinal int    `json:"-"`
+	SourceDigest   string `json:"-"`
+	Summary        string `json:"-"`
+	CompactorID    string `json:"-"`
+	PromptDigest   string `json:"-"`
+}
+
 // PRDevelopmentCaseStore owns immutable development-case capture and exact
 // lookup. Conversation, checkout, execution, publication, and provider actions
 // are intentionally separate capabilities.
@@ -775,4 +943,41 @@ type PRDevelopmentControllerStore interface {
 		ctx context.Context,
 		input PRDevelopmentControllerReviewTransition,
 	) (PRDevelopmentController, error)
+}
+
+// PRDevelopmentLedgerReader returns one complete private, integrity-checked
+// attempt/review ledger for the selected provider-verified thread.
+type PRDevelopmentLedgerReader interface {
+	GetPRDevelopmentLedgerForCase(
+		ctx context.Context,
+		caseID string,
+	) (PRDevelopmentLedger, error)
+}
+
+// PRDevelopmentContextReader captures the thread high-water and ledger in one
+// read transaction for deterministic later model-context construction.
+type PRDevelopmentContextReader interface {
+	GetPRDevelopmentContextSnapshot(
+		ctx context.Context,
+		caseID string,
+	) (PRDevelopmentContextSnapshot, error)
+}
+
+// PRDevelopmentLedgerStore owns only append-only post-effect accounts and
+// logical compaction checkpoints. It runs no model, Git, CI, filesystem,
+// workflow, provider, publication, or destructive compaction effect.
+type PRDevelopmentLedgerStore interface {
+	PRDevelopmentLedgerReader
+	AppendPRDevelopmentLedgerAttempt(
+		ctx context.Context,
+		input PRDevelopmentLedgerAttemptAppend,
+	) (PRDevelopmentLedgerEntry, bool, error)
+	AppendPRDevelopmentLedgerReview(
+		ctx context.Context,
+		input PRDevelopmentLedgerReviewAppend,
+	) (PRDevelopmentLedgerEntry, bool, error)
+	AppendPRDevelopmentLedgerCheckpoint(
+		ctx context.Context,
+		input PRDevelopmentLedgerCheckpointAppend,
+	) (PRDevelopmentLedgerCheckpoint, bool, error)
 }

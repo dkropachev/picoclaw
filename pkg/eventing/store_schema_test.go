@@ -217,6 +217,145 @@ func TestStoreMigratesV9ToEmptyPRDevelopmentControllerSchema(t *testing.T) {
 	}
 }
 
+func TestStoreMigratesV10ToEmptyPRDevelopmentLedgerSchema(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "migration-v10-ledger.db")
+	db := openSchemaTestDB(t, path)
+	for _, schema := range []string{
+		schemaV1,
+		schemaV2,
+		schemaV3,
+		schemaV4,
+		schemaV5,
+		schemaV6,
+		schemaV7,
+		schemaV8,
+		schemaV9,
+		schemaV10,
+	} {
+		_, err := db.Exec(schema)
+		require.NoError(t, err)
+	}
+	setSchemaTestVersion(t, db, 10)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.NoError(t, err)
+	defer store.Close()
+
+	var version int
+	require.NoError(t, store.db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, schemaVersion, version)
+	for _, table := range []string{
+		"pr_development_ledger_entries",
+		"pr_development_ledger_review_findings",
+		"pr_development_ledger_checkpoints",
+	} {
+		assert.True(t, schemaObjectExists(t, store.db, "table", table))
+
+		var count int
+		require.NoError(t, store.db.QueryRow(`SELECT COUNT(*) FROM `+table).Scan(&count))
+		assert.Zero(t, count, "v11 migration must not manufacture ledger state")
+	}
+}
+
+func TestStorePRDevelopmentLedgerMigrationValidationRollsBack(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "migration-v11-ledger-rollback.db")
+	db := openSchemaTestDB(t, path)
+	for _, schema := range []string{
+		schemaV1,
+		schemaV2,
+		schemaV3,
+		schemaV4,
+		schemaV5,
+		schemaV6,
+		schemaV7,
+		schemaV8,
+		schemaV9,
+		schemaV10,
+	} {
+		_, err := db.Exec(schema)
+		require.NoError(t, err)
+	}
+	malformedLedgerEntries := strings.Replace(
+		schemaV11PRDevelopmentLedgerEntriesTable,
+		"ordinal INTEGER NOT NULL CHECK (ordinal >= 0 AND ordinal < 16384),",
+		"ordinal INTEGER NOT NULL CHECK (ordinal >= 0 AND ordinal <= 16384),",
+		1,
+	)
+	require.NotEqual(t, schemaV11PRDevelopmentLedgerEntriesTable, malformedLedgerEntries)
+	_, err := db.Exec(malformedLedgerEntries)
+	require.NoError(t, err)
+	setSchemaTestVersion(t, db, 10)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorIs(t, err, ErrSchemaInvalid)
+	assert.Contains(t, err.Error(), "validate eventing schema v11")
+
+	db = openSchemaTestDB(t, path)
+	defer db.Close()
+	var version int
+	require.NoError(t, db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, 10, version)
+	assert.True(t, schemaObjectExists(
+		t,
+		db,
+		"table",
+		"pr_development_ledger_entries",
+	), "the preexisting malformed table must survive migration rollback")
+	for _, table := range []string{
+		"pr_development_ledger_review_findings",
+		"pr_development_ledger_checkpoints",
+	} {
+		assert.False(
+			t,
+			schemaObjectExists(t, db, "table", table),
+			"objects created inside the failed v11 migration must roll back",
+		)
+	}
+}
+
+func TestStoreRejectsMalformedCurrentPRDevelopmentLedgerSchema(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "malformed-current-ledger.db")
+	db := openSchemaTestDB(t, path)
+	installSchemaV1ForTest(t, db)
+	_, err := db.Exec(`DROP TABLE pr_development_ledger_checkpoints`)
+	require.NoError(t, err)
+	malformedCheckpoints := strings.Replace(
+		schemaV11PRDevelopmentLedgerCheckpointsTable,
+		"generation INTEGER NOT NULL CHECK (generation >= 0 AND generation < 8192),",
+		"generation INTEGER NOT NULL CHECK (generation >= 0 AND generation <= 8192),",
+		1,
+	)
+	require.NotEqual(t, schemaV11PRDevelopmentLedgerCheckpointsTable, malformedCheckpoints)
+	_, err = db.Exec(malformedCheckpoints)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorIs(t, err, ErrSchemaInvalid)
+	assert.Contains(t, err.Error(), "validate eventing schema v11")
+	var validationErr *schemaValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, "pr_development_ledger_checkpoints", validationErr.object)
+
+	db = openSchemaTestDB(t, path)
+	defer db.Close()
+	var version int
+	require.NoError(t, db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, schemaVersion, version)
+}
+
 func TestStorePRDevelopmentControllerMigrationValidationRollsBack(t *testing.T) {
 	t.Parallel()
 
@@ -767,6 +906,8 @@ func installSchemaV1ForTest(t *testing.T, db *sql.DB) {
 	_, err = db.Exec(schemaV9)
 	require.NoError(t, err)
 	_, err = db.Exec(schemaV10)
+	require.NoError(t, err)
+	_, err = db.Exec(schemaV11)
 	require.NoError(t, err)
 	setSchemaTestVersion(t, db, schemaVersion)
 }
