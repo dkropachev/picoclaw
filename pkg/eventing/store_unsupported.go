@@ -284,6 +284,27 @@ func (*Store) RenewPRDevelopmentControllerLease(
 	return ErrUnsupportedPlatform
 }
 
+func (*Store) ClaimPRDevelopmentControllerRecovery(
+	context.Context,
+	PRDevelopmentControllerRecoveryClaim,
+) (PRDevelopmentControllerRecoveryLease, bool, error) {
+	return PRDevelopmentControllerRecoveryLease{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) RenewPRDevelopmentControllerRecovery(
+	context.Context,
+	PRDevelopmentControllerRecoveryRenew,
+) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Store) FinalizePRDevelopmentControllerRecovery(
+	context.Context,
+	PRDevelopmentControllerRecoveryFinalize,
+) (PRDevelopmentController, bool, error) {
+	return PRDevelopmentController{}, false, ErrUnsupportedPlatform
+}
+
 func (*Store) BindPRDevelopmentControllerLine(
 	context.Context,
 	PRDevelopmentControllerLineBind,

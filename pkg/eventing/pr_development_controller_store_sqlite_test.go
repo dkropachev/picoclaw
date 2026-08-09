@@ -91,11 +91,14 @@ func TestStorePRDevelopmentControllerLifecycleRetainsLineAndSeparatesReview(t *t
 	assert.Equal(t, int64(1), bound.MutationEpoch)
 	boundAt := *clock
 	*clock = clock.Add(-time.Minute)
+	_, changed, err = store.BindPRDevelopmentControllerLine(ctx, bind)
+	assert.ErrorIs(t, err, ErrInvalidPRDevelopmentController)
+	assert.False(t, changed)
+	*clock = boundAt
 	replayedBound, changed, err := store.BindPRDevelopmentControllerLine(ctx, bind)
 	require.NoError(t, err)
 	assert.False(t, changed)
 	assert.Equal(t, bound, replayedBound)
-	*clock = boundAt
 
 	record := PRDevelopmentAttemptReviewFenceRecord{
 		ControllerID:     bound.ID,
@@ -1259,6 +1262,204 @@ func TestStorePRDevelopmentControllerExpiredMutationOperationsRequireRecovery(t 
 		)
 	})
 
+	t.Run("unauthorized bind cannot expire", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		store, clock, capture := newPRDevelopmentStoreFixture(t, ":memory:")
+		developmentCase, created, err := store.CapturePRDevelopmentCase(
+			ctx,
+			validPRDevelopmentRequestForTest(capture),
+		)
+		require.NoError(t, err)
+		require.True(t, created)
+		completed := completePRDevelopmentRepairForControllerTest(
+			t,
+			store,
+			developmentCase.ID,
+		)
+		attempt := completed.Attempts[len(completed.Attempts)-1]
+		mutation, acquired, err := store.AcquirePRDevelopmentControllerLease(
+			ctx,
+			PRDevelopmentControllerAcquire{
+				CaseID:           developmentCase.ID,
+				AttemptID:        attempt.ID,
+				ExpectedRevision: 0,
+				Kind:             PRDevelopmentControllerMutationLease,
+				WorkerLabel:      "unauthorized-expiring-bind",
+				Lease:            time.Minute,
+			},
+		)
+		require.NoError(t, err)
+		require.True(t, acquired)
+		bind := PRDevelopmentControllerLineBind{
+			ControllerID:     mutation.Controller.ID,
+			AttemptID:        attempt.ID,
+			ExpectedRevision: mutation.Controller.Revision,
+			LeaseToken:       mutation.Controller.LeaseToken,
+			LeaseEpoch:       mutation.Controller.LeaseEpoch,
+			WorkspaceID:      completed.WorkspaceID,
+			SourceCloneURL:   completed.CloneURL,
+			SourceRef:        completed.HeadRef,
+			SourceCommit:     completed.HeadSHA,
+			SourceTree:       strings.Repeat("b", 40),
+			LineVersion:      0,
+			MutationEpoch:    1,
+			TipCommit:        completed.HeadSHA,
+			Tree:             strings.Repeat("b", 40),
+		}
+		*clock = clock.Add(2 * time.Minute)
+		for _, test := range []struct {
+			name   string
+			mutate func(*PRDevelopmentControllerLineBind)
+		}{
+			{
+				name: "foreign token",
+				mutate: func(input *PRDevelopmentControllerLineBind) {
+					input.LeaseToken = "lease_foreign"
+				},
+			},
+			{
+				name: "wrong revision",
+				mutate: func(input *PRDevelopmentControllerLineBind) {
+					input.ExpectedRevision++
+				},
+			},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				input := bind
+				test.mutate(&input)
+				_, changed, bindErr := store.BindPRDevelopmentControllerLine(ctx, input)
+				assert.ErrorIs(t, bindErr, ErrPRDevelopmentControllerConflict)
+				assert.NotErrorIs(t, bindErr, ErrPRDevelopmentControllerRecoveryRequired)
+				assert.False(t, changed)
+				unchanged, loadErr := store.GetPRDevelopmentControllerForCase(
+					ctx,
+					developmentCase.ID,
+				)
+				require.NoError(t, loadErr)
+				assert.Equal(t, PRDevelopmentControllerMutation, unchanged.Phase)
+				assert.Equal(t, mutation.Controller.Revision, unchanged.Revision)
+				assert.Equal(
+					t,
+					mutation.Controller.MutationReservationKey,
+					rawPRDevelopmentControllerReservationForTest(t, store, unchanged.ID),
+				)
+				var intentCount int
+				require.NoError(t, store.db.QueryRowContext(ctx, `
+					SELECT COUNT(*) FROM pr_development_controller_recovery_intents`,
+				).Scan(&intentCount))
+				assert.Zero(t, intentCount)
+			})
+		}
+	})
+
+	t.Run("exact bind replay", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		store, clock, capture := newPRDevelopmentStoreFixture(t, ":memory:")
+		developmentCase, created, err := store.CapturePRDevelopmentCase(
+			ctx,
+			validPRDevelopmentRequestForTest(capture),
+		)
+		require.NoError(t, err)
+		require.True(t, created)
+		completed := completePRDevelopmentRepairForControllerTest(
+			t,
+			store,
+			developmentCase.ID,
+		)
+		fixture := bindPRDevelopmentControllerForTest(
+			t,
+			store,
+			developmentCase.ID,
+			completed,
+		)
+		attempt := completed.Attempts[len(completed.Attempts)-1]
+		*clock = clock.Add(2 * time.Minute)
+		replayed, changed, err := store.BindPRDevelopmentControllerLine(
+			ctx,
+			PRDevelopmentControllerLineBind{
+				ControllerID:     fixture.Mutation.Controller.ID,
+				AttemptID:        attempt.ID,
+				ExpectedRevision: fixture.Mutation.Controller.Revision,
+				LeaseToken:       fixture.Mutation.Controller.LeaseToken,
+				LeaseEpoch:       fixture.Mutation.Controller.LeaseEpoch,
+				WorkspaceID:      completed.WorkspaceID,
+				SourceCloneURL:   completed.CloneURL,
+				SourceRef:        completed.HeadRef,
+				SourceCommit:     completed.HeadSHA,
+				SourceTree:       strings.Repeat("b", 40),
+				LineVersion:      0,
+				MutationEpoch:    1,
+				TipCommit:        completed.HeadSHA,
+				Tree:             strings.Repeat("b", 40),
+			},
+		)
+		assert.ErrorIs(t, err, ErrPRDevelopmentControllerRecoveryRequired)
+		assert.False(t, changed)
+		assert.Equal(t, PRDevelopmentController{}, replayed)
+		recovery, err := store.GetPRDevelopmentControllerForCase(ctx, developmentCase.ID)
+		require.NoError(t, err)
+		assert.Equal(t, PRDevelopmentControllerRecoveryRequired, recovery.Phase)
+		assert.Empty(t, recovery.MutationReservationKey)
+		assert.Equal(
+			t,
+			fixture.Bound.MutationReservationKey,
+			rawPRDevelopmentControllerReservationForTest(t, store, recovery.ID),
+		)
+	})
+
+	t.Run("unauthorized renew cannot expire", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		store, clock, capture := newPRDevelopmentStoreFixture(t, ":memory:")
+		developmentCase, created, err := store.CapturePRDevelopmentCase(
+			ctx,
+			validPRDevelopmentRequestForTest(capture),
+		)
+		require.NoError(t, err)
+		require.True(t, created)
+		completed := completePRDevelopmentRepairForControllerTest(
+			t,
+			store,
+			developmentCase.ID,
+		)
+		fixture := bindPRDevelopmentControllerForTest(
+			t,
+			store,
+			developmentCase.ID,
+			completed,
+		)
+		attempt := completed.Attempts[len(completed.Attempts)-1]
+		*clock = clock.Add(2 * time.Minute)
+		err = store.RenewPRDevelopmentControllerLease(
+			ctx,
+			PRDevelopmentControllerRenew{
+				ControllerID: fixture.Bound.ID,
+				AttemptID:    attempt.ID,
+				LeaseToken:   "lease_foreign",
+				LeaseEpoch:   fixture.Bound.LeaseEpoch,
+				Lease:        time.Minute,
+			},
+		)
+		assert.ErrorIs(t, err, ErrPRDevelopmentControllerConflict)
+		assert.NotErrorIs(t, err, ErrPRDevelopmentControllerRecoveryRequired)
+		unchanged, err := store.GetPRDevelopmentControllerForCase(ctx, developmentCase.ID)
+		require.NoError(t, err)
+		assert.Equal(t, PRDevelopmentControllerMutation, unchanged.Phase)
+		assert.Equal(t, fixture.Bound.Revision, unchanged.Revision)
+		assert.Equal(
+			t,
+			fixture.Bound.MutationReservationKey,
+			rawPRDevelopmentControllerReservationForTest(t, store, unchanged.ID),
+		)
+		var intentCount int
+		require.NoError(t, store.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM pr_development_controller_recovery_intents`,
+		).Scan(&intentCount))
+		assert.Zero(t, intentCount)
+	})
+
 	t.Run("record fence", func(t *testing.T) {
 		t.Parallel()
 		ctx := context.Background()
@@ -1282,22 +1483,37 @@ func TestStorePRDevelopmentControllerExpiredMutationOperationsRequireRecovery(t 
 		)
 		attempt := completed.Attempts[len(completed.Attempts)-1]
 		*clock = clock.Add(2 * time.Minute)
-		_, changed, err := store.RecordPRDevelopmentAttemptReviewFence(
+		record := PRDevelopmentAttemptReviewFenceRecord{
+			ControllerID:     fixture.Bound.ID,
+			AttemptID:        attempt.ID,
+			ExpectedRevision: fixture.Bound.Revision,
+			LeaseToken:       fixture.Bound.LeaseToken,
+			LeaseEpoch:       fixture.Bound.LeaseEpoch,
+			LineVersion:      1,
+			MutationEpoch:    1,
+			ParkIntentID:     "expired-park",
+			BaseCommit:       completed.HeadSHA,
+			TipCommit:        strings.Repeat("c", 40),
+			Tree:             strings.Repeat("d", 40),
+			LineReviewDigest: strings.Repeat("e", 64),
+		}
+		foreign := record
+		foreign.LeaseToken = "lease_foreign"
+		_, changed, err := store.RecordPRDevelopmentAttemptReviewFence(ctx, foreign)
+		assert.ErrorIs(t, err, ErrPRDevelopmentControllerConflict)
+		assert.NotErrorIs(t, err, ErrPRDevelopmentControllerRecoveryRequired)
+		assert.False(t, changed)
+		unchanged, err := store.GetPRDevelopmentControllerForCase(ctx, developmentCase.ID)
+		require.NoError(t, err)
+		assert.Equal(t, PRDevelopmentControllerMutation, unchanged.Phase)
+		var intents int
+		require.NoError(t, store.db.QueryRow(`
+			SELECT COUNT(*) FROM pr_development_controller_recovery_intents`).Scan(&intents))
+		assert.Zero(t, intents)
+
+		_, changed, err = store.RecordPRDevelopmentAttemptReviewFence(
 			ctx,
-			PRDevelopmentAttemptReviewFenceRecord{
-				ControllerID:     fixture.Bound.ID,
-				AttemptID:        attempt.ID,
-				ExpectedRevision: fixture.Bound.Revision,
-				LeaseToken:       fixture.Bound.LeaseToken,
-				LeaseEpoch:       fixture.Bound.LeaseEpoch,
-				LineVersion:      1,
-				MutationEpoch:    1,
-				ParkIntentID:     "expired-park",
-				BaseCommit:       completed.HeadSHA,
-				TipCommit:        strings.Repeat("c", 40),
-				Tree:             strings.Repeat("d", 40),
-				LineReviewDigest: strings.Repeat("e", 64),
-			},
+			record,
 		)
 		assert.ErrorIs(t, err, ErrPRDevelopmentControllerRecoveryRequired)
 		assert.False(t, changed)

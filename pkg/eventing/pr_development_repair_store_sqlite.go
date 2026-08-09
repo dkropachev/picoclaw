@@ -157,7 +157,8 @@ func (s *Store) AdmitPRDevelopmentRepair(
 				return ErrPRDevelopmentControllerActive
 			}
 			if controller.LineVersion >= MaxPRDevelopmentControllerFences ||
-				controller.Revision > MaxPRDevelopmentControllerRevision-4 {
+				controller.Revision > MaxPRDevelopmentControllerRevision-
+					prDevelopmentControllerMutationRevisionReserve {
 				return fmt.Errorf(
 					"%w: controller has insufficient attempt-transition headroom",
 					ErrPRDevelopmentRepairCapacity,

@@ -39,9 +39,10 @@ const (
 		review_lease_epoch, review_lease_token_digest, review_controller_revision,
 		previous_hash, fence_hash, created_at, reviewed_at`
 
-	prDevelopmentControllerLeaseTokenBytes = 128
-	prDevelopmentControllerCloneURLBytes   = 4096
-	prDevelopmentControllerRefBytes        = 1024
+	prDevelopmentControllerLeaseTokenBytes               = 128
+	prDevelopmentControllerCloneURLBytes                 = 4096
+	prDevelopmentControllerRefBytes                      = 1024
+	prDevelopmentControllerMutationRevisionReserve int64 = 6
 )
 
 // GetPRDevelopmentControllerForCase resolves the selected case's provider
@@ -106,8 +107,8 @@ func (s *Store) GetPRDevelopmentControllerForCase(
 
 // AcquirePRDevelopmentControllerLease acquires either the exclusive raw
 // workspace mutation bearer or a reservation-free immutable-review lease.
-// Expired mutation authority is fenced into recovery_required and is never
-// automatically transferred to another worker.
+// Eventing-recoverable expired mutation authority is fenced into
+// recovery_required and is never automatically transferred to another worker.
 func (s *Store) AcquirePRDevelopmentControllerLease(
 	ctx context.Context,
 	input PRDevelopmentControllerAcquire,
@@ -300,8 +301,9 @@ func (s *Store) AcquirePRDevelopmentControllerLease(
 }
 
 // RenewPRDevelopmentControllerLease extends only the exact still-live lease.
-// An expired mutation lease is durably converted to recovery_required while an
-// expired review lease must be safely reclaimed through Acquire.
+// An eventing-recoverable expired mutation lease is durably converted to
+// recovery_required while an expired review lease must be safely reclaimed
+// through Acquire.
 func (s *Store) RenewPRDevelopmentControllerLease(
 	ctx context.Context,
 	input PRDevelopmentControllerRenew,
@@ -350,6 +352,15 @@ func (s *Store) RenewPRDevelopmentControllerLease(
 		}
 		if controller.Phase == PRDevelopmentControllerMutation &&
 			controller.LeaseUntil != nil && !controller.LeaseUntil.After(now) {
+			if controller.LeaseKind != PRDevelopmentControllerMutationLease ||
+				controller.CurrentAttemptID != normalized.AttemptID ||
+				controller.LeaseToken != normalized.LeaseToken ||
+				controller.LeaseEpoch != normalized.LeaseEpoch {
+				return fmt.Errorf(
+					"%w: expired renewal does not hold the exact current mutation lease",
+					ErrPRDevelopmentControllerConflict,
+				)
+			}
 			if expireErr := expirePRDevelopmentMutationLease(
 				ctx,
 				conn,
@@ -453,19 +464,6 @@ func (s *Store) BindPRDevelopmentControllerLine(
 		); pinErr != nil {
 			return pinErr
 		}
-		if current.WorkspaceID != "" &&
-			equalPRDevelopmentControllerLineBindingExceptEpoch(current, normalized) &&
-			current.MutationEpoch == normalized.MutationEpoch &&
-			normalized.MutationEpoch == current.LineVersion+1 &&
-			current.Phase == PRDevelopmentControllerMutation &&
-			current.LeaseKind == PRDevelopmentControllerMutationLease &&
-			current.LeaseToken == normalized.LeaseToken &&
-			current.LeaseEpoch == normalized.LeaseEpoch &&
-			current.Revision >= normalized.ExpectedRevision &&
-			current.Revision <= normalized.ExpectedRevision+1 {
-			controller = current
-			return nil
-		}
 		attemptHighWater, highWaterErr := loadPRDevelopmentControllerAttemptHighWater(
 			ctx,
 			conn,
@@ -484,8 +482,29 @@ func (s *Store) BindPRDevelopmentControllerLine(
 		); timeErr != nil {
 			return timeErr
 		}
+		exactReplay := current.WorkspaceID != "" &&
+			equalPRDevelopmentControllerLineBindingExceptEpoch(current, normalized) &&
+			current.MutationEpoch == normalized.MutationEpoch &&
+			normalized.MutationEpoch == current.LineVersion+1 &&
+			current.Phase == PRDevelopmentControllerMutation &&
+			current.LeaseKind == PRDevelopmentControllerMutationLease &&
+			current.LeaseToken == normalized.LeaseToken &&
+			current.LeaseEpoch == normalized.LeaseEpoch &&
+			current.Revision >= normalized.ExpectedRevision &&
+			current.Revision <= normalized.ExpectedRevision+1
 		if current.Phase == PRDevelopmentControllerMutation &&
 			current.LeaseUntil != nil && !current.LeaseUntil.After(now) {
+			exactCurrentCaller := current.LeaseKind == PRDevelopmentControllerMutationLease &&
+				current.CurrentAttemptID == normalized.AttemptID &&
+				current.LeaseToken == normalized.LeaseToken &&
+				current.LeaseEpoch == normalized.LeaseEpoch &&
+				current.Revision == normalized.ExpectedRevision
+			if !exactCurrentCaller && !exactReplay {
+				return fmt.Errorf(
+					"%w: expired mutation operation does not hold the exact current lease and revision",
+					ErrPRDevelopmentControllerConflict,
+				)
+			}
 			if expireErr := expirePRDevelopmentMutationLease(
 				ctx,
 				conn,
@@ -495,6 +514,10 @@ func (s *Store) BindPRDevelopmentControllerLine(
 				return expireErr
 			}
 			recoveryRequired = true
+			return nil
+		}
+		if exactReplay && current.LeaseUntil != nil && current.LeaseUntil.After(now) {
+			controller = current
 			return nil
 		}
 		if leaseErr := requireLivePRDevelopmentControllerLease(
@@ -730,6 +753,16 @@ func (s *Store) RecordPRDevelopmentAttemptReviewFence(
 		}
 		if controller.Phase == PRDevelopmentControllerMutation &&
 			controller.LeaseUntil != nil && !controller.LeaseUntil.After(now) {
+			if controller.LeaseKind != PRDevelopmentControllerMutationLease ||
+				controller.CurrentAttemptID != normalized.AttemptID ||
+				controller.LeaseToken != normalized.LeaseToken ||
+				controller.LeaseEpoch != normalized.LeaseEpoch ||
+				controller.Revision != normalized.ExpectedRevision {
+				return fmt.Errorf(
+					"%w: expired fence operation does not hold the exact current lease and revision",
+					ErrPRDevelopmentControllerConflict,
+				)
+			}
 			if expireErr := expirePRDevelopmentMutationLease(
 				ctx,
 				conn,
@@ -1660,7 +1693,8 @@ func acquirePRDevelopmentMutationLease(
 		return PRDevelopmentController{}, ErrPRDevelopmentControllerActive
 	}
 	if controller.LineVersion >= MaxPRDevelopmentControllerFences ||
-		controller.Revision > MaxPRDevelopmentControllerRevision-4 ||
+		controller.Revision > MaxPRDevelopmentControllerRevision-
+			prDevelopmentControllerMutationRevisionReserve ||
 		controller.LeaseEpoch == int64(^uint64(0)>>1) {
 		return PRDevelopmentController{}, fmt.Errorf(
 			"%w: controller mutation capacity exhausted",
@@ -1836,11 +1870,24 @@ func expirePRDevelopmentMutationLease(
 	controller PRDevelopmentController,
 	now time.Time,
 ) error {
-	if controller.Revision >= MaxPRDevelopmentControllerRevision {
+	requiredHeadroom := int64(4) // expire, finalize, park, review finish
+	if controller.WorkspaceID == "" {
+		requiredHeadroom++ // first retained-line bind
+	}
+	if controller.Revision > MaxPRDevelopmentControllerRevision-requiredHeadroom {
 		return fmt.Errorf(
-			"%w: expired mutation has no recovery revision headroom",
+			"%w: expired mutation has no recovery/finalization revision headroom",
 			ErrPRDevelopmentControllerConflict,
 		)
+	}
+	_, err := insertPRDevelopmentRecoveryIntentForExpiry(
+		ctx,
+		conn,
+		controller,
+		now,
+	)
+	if err != nil {
+		return err
 	}
 	result, err := conn.ExecContext(ctx, `
 		UPDATE pr_development_thread_controllers
@@ -1848,11 +1895,12 @@ func expirePRDevelopmentMutationLease(
 			lease_kind = '', lease_owner = '', lease_token = '', lease_until = NULL,
 			updated_at = ?
 		WHERE id = ? AND revision = ? AND phase = 'mutation' AND
-			lease_until <= ? AND mutation_reservation_key <> ''`,
+			lease_until <= ? AND mutation_reservation_key = ?`,
 		toDBTime(now),
 		controller.ID,
 		controller.Revision,
 		toDBTime(now),
+		controller.MutationReservationKey,
 	)
 	if err != nil {
 		return err
@@ -1876,8 +1924,12 @@ func newUniquePRDevelopmentMutationReservation(
 				(SELECT COUNT(*) FROM pr_development_thread_controllers
 				 WHERE mutation_reservation_key = ?) +
 				(SELECT COUNT(*) FROM pr_development_attempt_review_fences
-				 WHERE mutation_reservation_digest = ?)`,
+				 WHERE mutation_reservation_digest = ?) +
+				(SELECT COUNT(*) FROM pr_development_controller_recovery_intents
+				 WHERE previous_reservation_digest = ? OR replacement_reservation_digest = ?)`,
 			reservation,
+			digest,
+			digest,
 			digest,
 		).Scan(&collisions); queryErr != nil {
 			return "", queryErr
@@ -1911,8 +1963,12 @@ func requireFreshPRDevelopmentMutationReservation(
 			(SELECT COUNT(*) FROM pr_development_thread_controllers
 			 WHERE mutation_reservation_key = ?) +
 			(SELECT COUNT(*) FROM pr_development_attempt_review_fences
-			 WHERE mutation_reservation_digest = ?)`,
+			 WHERE mutation_reservation_digest = ?) +
+			(SELECT COUNT(*) FROM pr_development_controller_recovery_intents
+			 WHERE previous_reservation_digest = ? OR replacement_reservation_digest = ?)`,
 		reservation,
+		digest,
+		digest,
 		digest,
 	).Scan(&collisions); err != nil {
 		return err
@@ -2208,10 +2264,36 @@ func validatePRDevelopmentControllerAggregate(
 	if controller.MutationReservationKey != "" {
 		if controller.FenceCount == 0 {
 			if controller.LineVersion != 0 ||
-				controller.MutationReservationKey != session.ReservationKey ||
 				(controller.Phase != PRDevelopmentControllerMutation &&
 					controller.Phase != PRDevelopmentControllerRecoveryRequired) {
 				return errors.New("stored initial controller reservation is invalid")
+			}
+			if controller.MutationReservationKey != session.ReservationKey {
+				if !validPrefixedHexID(
+					controller.MutationReservationKey,
+					prDevelopmentControllerKeyPrefix,
+				) {
+					return errors.New("stored initial controller reservation is invalid")
+				}
+				var recoveryMatches int
+				digest := prDevelopmentMutationReservationDigest(
+					controller.MutationReservationKey,
+				)
+				if queryErr := queryer.QueryRowContext(ctx, `
+					SELECT COUNT(*)
+					FROM pr_development_controller_recovery_intents
+					WHERE controller_id = ? AND
+						((status <> 'finalized' AND previous_reservation_key = ?) OR
+						 (status = 'finalized' AND replacement_reservation_digest = ?))`,
+					controller.ID,
+					controller.MutationReservationKey,
+					digest,
+				).Scan(&recoveryMatches); queryErr != nil {
+					return queryErr
+				}
+				if recoveryMatches < 1 || recoveryMatches > 2 {
+					return errors.New("stored initial controller reservation has no recovery intent")
+				}
 			}
 		} else if !validPrefixedHexID(
 			controller.MutationReservationKey,
@@ -2300,6 +2382,17 @@ func validatePRDevelopmentControllerAggregate(
 	if len(fences) != controller.FenceCount {
 		return errors.New("stored controller fence count differs from its rows")
 	}
+	recoveryStats, err := validatePRDevelopmentControllerRecoveryChain(
+		ctx,
+		queryer,
+		controller,
+		session,
+		fences,
+		attemptOrdinals,
+	)
+	if err != nil {
+		return err
+	}
 	previousHash := emptyPRDevelopmentReviewFencesDigest()
 	previousTip := controller.SourceCommit
 	previousTree := controller.SourceTree
@@ -2334,16 +2427,38 @@ func validatePRDevelopmentControllerAggregate(
 			(!previousReviewedAt.IsZero() && fence.CreatedAt.Before(previousReviewedAt)) {
 			return errors.New("stored controller fence chain is invalid")
 		}
-		if (ordinal == 0 &&
-			(fence.MutationControllerRevision != 2 || fence.MutationLeaseEpoch != 1)) ||
-			(ordinal > 0 &&
-				(fence.MutationControllerRevision != previousControllerRevision+3 ||
-					fence.MutationLeaseEpoch != previousLeaseEpoch+1)) {
+		attemptRecoveries := recoveryStats.finalizedByAttempt[fence.AttemptID]
+		expectedMutationRevision := int64(2 + 2*attemptRecoveries)
+		expectedMutationLeaseEpoch := int64(1 + attemptRecoveries)
+		if ordinal > 0 {
+			expectedMutationRevision = previousControllerRevision + 3 +
+				int64(2*attemptRecoveries)
+			expectedMutationLeaseEpoch = previousLeaseEpoch + 1 +
+				int64(attemptRecoveries)
+		}
+		if fence.MutationControllerRevision != expectedMutationRevision ||
+			fence.MutationLeaseEpoch != expectedMutationLeaseEpoch {
 			return errors.New("stored controller fence mutation proof is unreachable")
 		}
 		if ordinal == 0 && fence.MutationReservationDigest !=
 			prDevelopmentMutationReservationDigest(session.ReservationKey) {
-			return errors.New("stored first controller fence did not retire the owner reservation")
+			var recoveryMatches int
+			if queryErr := queryer.QueryRowContext(ctx, `
+				SELECT COUNT(*)
+				FROM pr_development_controller_recovery_intents
+				WHERE controller_id = ? AND attempt_id = ? AND status = 'finalized' AND
+					replacement_reservation_digest = ?`,
+				controller.ID,
+				fence.AttemptID,
+				fence.MutationReservationDigest,
+			).Scan(&recoveryMatches); queryErr != nil {
+				return queryErr
+			}
+			if recoveryMatches != 1 {
+				return errors.New(
+					"stored first controller fence did not retire the owner reservation or its recovered successor",
+				)
+			}
 		}
 		if ordinal < len(fences)-1 && fence.ReviewedAt == nil {
 			return errors.New("stored non-tail controller fence is not reviewed")
@@ -2376,17 +2491,25 @@ func validatePRDevelopmentControllerAggregate(
 			return errors.New("stored controller without fences has a nonzero version")
 		}
 		bound := controller.WorkspaceID != ""
+		finalizedRecoveries := recoveryStats.finalizedByAttempt[controller.CurrentAttemptID]
+		expectedLeaseEpoch := int64(1 + finalizedRecoveries)
+		expectedMutationRevision := int64(1 + 2*finalizedRecoveries)
+		if bound {
+			expectedMutationRevision++
+		}
 		switch controller.Phase {
 		case PRDevelopmentControllerMutation:
-			if controller.LeaseEpoch != 1 ||
-				(!bound && (controller.Revision != 1 || controller.MutationEpoch != 0)) ||
-				(bound && (controller.Revision != 2 || controller.MutationEpoch != 1)) {
+			if controller.LeaseEpoch != expectedLeaseEpoch ||
+				controller.Revision != expectedMutationRevision ||
+				(!bound && controller.MutationEpoch != 0) ||
+				(bound && controller.MutationEpoch != 1) {
 				return errors.New("stored initial mutation controller high-water state is invalid")
 			}
 		case PRDevelopmentControllerRecoveryRequired:
-			if controller.LeaseEpoch != 1 ||
-				(!bound && (controller.Revision != 2 || controller.MutationEpoch != 0)) ||
-				(bound && (controller.Revision != 3 || controller.MutationEpoch != 1)) {
+			if controller.LeaseEpoch != expectedLeaseEpoch ||
+				controller.Revision != expectedMutationRevision+1 ||
+				(!bound && controller.MutationEpoch != 0) ||
+				(bound && controller.MutationEpoch != 1) {
 				return errors.New("stored initial recovery controller high-water state is invalid")
 			}
 		default:
@@ -2431,14 +2554,23 @@ func validatePRDevelopmentControllerAggregate(
 		}
 		return nil
 	}
-	if controller.CurrentAttemptID == latest.AttemptID ||
-		controller.LeaseEpoch != latest.ReviewLeaseEpoch+1 ||
-		latest.ReviewControllerRevision > MaxPRDevelopmentControllerRevision-5 {
+	if controller.CurrentAttemptID == latest.AttemptID {
 		return errors.New("stored post-review controller attempt or lease epoch is invalid")
+	}
+	if latest.ReviewControllerRevision > MaxPRDevelopmentControllerRevision-5 {
+		return errors.New(
+			"stored post-review controller exceeds the legacy revision ceiling",
+		)
+	}
+	finalizedRecoveries := recoveryStats.finalizedByAttempt[controller.CurrentAttemptID]
+	expectedLeaseEpoch := latest.ReviewLeaseEpoch + 1 + int64(finalizedRecoveries)
+	if controller.LeaseEpoch != expectedLeaseEpoch {
+		return errors.New("stored post-review controller recovery lease epoch is invalid")
 	}
 	switch controller.Phase {
 	case PRDevelopmentControllerMutation:
-		expectedRevision := latest.ReviewControllerRevision + 2
+		expectedRevision := latest.ReviewControllerRevision + 2 +
+			int64(2*finalizedRecoveries)
 		if controller.MutationEpoch == controller.LineVersion+1 {
 			expectedRevision++
 		}
@@ -2446,7 +2578,8 @@ func validatePRDevelopmentControllerAggregate(
 			return errors.New("stored resumed mutation controller revision is invalid")
 		}
 	case PRDevelopmentControllerRecoveryRequired:
-		expectedRevision := latest.ReviewControllerRevision + 3
+		expectedRevision := latest.ReviewControllerRevision + 3 +
+			int64(2*finalizedRecoveries)
 		if controller.MutationEpoch == controller.LineVersion+1 {
 			expectedRevision++
 		}

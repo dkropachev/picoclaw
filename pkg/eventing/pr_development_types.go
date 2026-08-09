@@ -16,6 +16,7 @@ const (
 	prDevelopmentControllerIDPrefix       = "pctl_"
 	prDevelopmentLineIDPrefix             = "pdln_"
 	prDevelopmentControllerKeyPrefix      = "pdck_"
+	prDevelopmentRecoveryIntentIDPrefix   = "pdri_"
 	prDevelopmentLedgerEntryIDPrefix      = "pdle_"
 	prDevelopmentLedgerCheckpointIDPrefix = "pdlc_"
 
@@ -62,6 +63,10 @@ const (
 	// MaxPRDevelopmentControllerFences matches the retained development-line
 	// version bound. One parked attempt contributes at most one immutable fence.
 	MaxPRDevelopmentControllerFences = 8_192
+	// MaxPRDevelopmentControllerRecoveries matches the bounded per-workspace
+	// Git reservation-rotation history. Expiration fails before staging an
+	// intent that the workspace inventory could not retain.
+	MaxPRDevelopmentControllerRecoveries = 8_192
 	// MaxPRDevelopmentControllerIdentityBytes bounds private controller, line,
 	// lease-owner, and intent identities.
 	MaxPRDevelopmentControllerIdentityBytes = 256
@@ -675,6 +680,144 @@ type PRDevelopmentControllerReviewTransition struct {
 	LeaseEpoch       int64  `json:"-"`
 }
 
+// PRDevelopmentControllerRecoveryMode records whether eventing had no durable
+// line binding or had a retained line at its active mutation fence when the
+// lease expired. Unbound does not prove Git adoption has not already happened.
+type PRDevelopmentControllerRecoveryMode string
+
+const (
+	PRDevelopmentControllerRecoveryUnbound PRDevelopmentControllerRecoveryMode = "unbound"
+	PRDevelopmentControllerRecoveryBound   PRDevelopmentControllerRecoveryMode = "bound"
+)
+
+// PRDevelopmentControllerRecoveryStatus is the durable, exactly replayable
+// reservation-rotation lifecycle. Rotation is the only filesystem effect;
+// the eventing store only records and fences its result.
+type PRDevelopmentControllerRecoveryStatus string
+
+const (
+	PRDevelopmentControllerRecoveryPending   PRDevelopmentControllerRecoveryStatus = "pending"
+	PRDevelopmentControllerRecoveryClaimed   PRDevelopmentControllerRecoveryStatus = "claimed"
+	PRDevelopmentControllerRecoveryFinalized PRDevelopmentControllerRecoveryStatus = "finalized"
+)
+
+// PRDevelopmentControllerRecoveryIntent is the private hash-chained evidence
+// created atomically when an eventing-recoverable mutation lease expires.
+// Recoverable means eventing-unbound or bound at its active mutation epoch.
+// Raw reservation bearers exist only while recovery is unresolved and are
+// erased when it finalizes.
+type PRDevelopmentControllerRecoveryIntent struct {
+	ID                           string                                `json:"-"`
+	ControllerID                 string                                `json:"-"`
+	AttemptID                    string                                `json:"-"`
+	Ordinal                      int                                   `json:"-"`
+	RecoveryRevision             int64                                 `json:"-"`
+	Mode                         PRDevelopmentControllerRecoveryMode   `json:"-"`
+	Status                       PRDevelopmentControllerRecoveryStatus `json:"-"`
+	AgentID                      string                                `json:"-"`
+	WorkspaceID                  string                                `json:"-"`
+	LineID                       string                                `json:"-"`
+	SourceCloneURL               string                                `json:"-"`
+	SourceRef                    string                                `json:"-"`
+	SourceCommit                 string                                `json:"-"`
+	SourceTree                   string                                `json:"-"`
+	LineVersion                  int64                                 `json:"-"`
+	MutationEpoch                int64                                 `json:"-"`
+	TipCommit                    string                                `json:"-"`
+	Tree                         string                                `json:"-"`
+	PreviousReservationKey       string                                `json:"-"`
+	ReplacementReservationKey    string                                `json:"-"`
+	PreviousReservationDigest    string                                `json:"-"`
+	ReplacementReservationDigest string                                `json:"-"`
+	ExpiredControllerRevision    int64                                 `json:"-"`
+	ExpiredLeaseEpoch            int64                                 `json:"-"`
+	ExpiredLeaseTokenDigest      string                                `json:"-"`
+	PreviousHash                 string                                `json:"-"`
+	IntentHash                   string                                `json:"-"`
+	ClaimID                      string                                `json:"-"`
+	ClaimOwner                   string                                `json:"-"`
+	ClaimToken                   string                                `json:"-"`
+	ClaimUntil                   *time.Time                            `json:"-"`
+	ClaimEpoch                   int64                                 `json:"-"`
+	Claims                       int                                   `json:"-"`
+	RotationResultHash           string                                `json:"-"`
+	RecoveryClaimTokenDigest     string                                `json:"-"`
+	NewMutationLeaseEpoch        int64                                 `json:"-"`
+	NewMutationLeaseTokenDigest  string                                `json:"-"`
+	NewMutationLeaseUntil        *time.Time                            `json:"-"`
+	FinalRevision                int64                                 `json:"-"`
+	FinalHash                    string                                `json:"-"`
+	CreatedAt                    time.Time                             `json:"-"`
+	ClaimedAt                    *time.Time                            `json:"-"`
+	FinalizedAt                  *time.Time                            `json:"-"`
+	UpdatedAt                    time.Time                             `json:"-"`
+}
+
+// PRDevelopmentControllerRecoveryClaim acquires one exact recovery intent.
+// ClaimID is caller-durable so a lost successful response can be replayed
+// without rotating the recovery claim token.
+type PRDevelopmentControllerRecoveryClaim struct {
+	CaseID           string        `json:"-"`
+	AttemptID        string        `json:"-"`
+	ExpectedRevision int64         `json:"-"`
+	ClaimID          string        `json:"-"`
+	WorkerLabel      string        `json:"-"`
+	Lease            time.Duration `json:"-"`
+}
+
+// PRDevelopmentControllerRecoveryLease carries both raw reservation bearers
+// and the recovery-claim credential. It must remain inside the trusted local
+// controller/worker boundary. Intent.AgentID is the unchanged Git ownership
+// identity on both sides of rotation; Intent.ClaimOwner is only the eventing
+// worker lease owner and must never replace it.
+type PRDevelopmentControllerRecoveryLease struct {
+	Controller PRDevelopmentController               `json:"-"`
+	Intent     PRDevelopmentControllerRecoveryIntent `json:"-"`
+	Reclaimed  bool                                  `json:"-"`
+}
+
+// PRDevelopmentControllerRecoveryRenew extends only the exact live recovery
+// claim. It never changes controller revision or mutation authority.
+type PRDevelopmentControllerRecoveryRenew struct {
+	ControllerID string        `json:"-"`
+	AttemptID    string        `json:"-"`
+	RecoveryID   string        `json:"-"`
+	ClaimID      string        `json:"-"`
+	ClaimToken   string        `json:"-"`
+	ClaimEpoch   int64         `json:"-"`
+	Lease        time.Duration `json:"-"`
+}
+
+// PRDevelopmentControllerRecoveryRotationResult mirrors the non-authorizing
+// result of gitworkspace.Manager.RotatePinnedReservation. AlreadyRotated is
+// operational information only; the other fields form the durable result
+// fence and are identical for first execution and exact replay.
+type PRDevelopmentControllerRecoveryRotationResult struct {
+	WorkspaceID    string `json:"-"`
+	Bound          bool   `json:"-"`
+	Version        int64  `json:"-"`
+	MutationEpoch  int64  `json:"-"`
+	Tip            string `json:"-"`
+	Tree           string `json:"-"`
+	RotationHash   string `json:"-"`
+	AlreadyRotated bool   `json:"-"`
+}
+
+// PRDevelopmentControllerRecoveryFinalize consumes the exact live recovery
+// claim and matching reservation-rotation result, then grants a fresh
+// mutation lease under the replacement bearer.
+type PRDevelopmentControllerRecoveryFinalize struct {
+	ControllerID     string                                        `json:"-"`
+	AttemptID        string                                        `json:"-"`
+	RecoveryID       string                                        `json:"-"`
+	ExpectedRevision int64                                         `json:"-"`
+	ClaimID          string                                        `json:"-"`
+	ClaimToken       string                                        `json:"-"`
+	ClaimEpoch       int64                                         `json:"-"`
+	Rotation         PRDevelopmentControllerRecoveryRotationResult `json:"-"`
+	Lease            time.Duration                                 `json:"-"`
+}
+
 // PRDevelopmentLedgerEntryKind alternates one completed mutation account with
 // its reservation-free local review. Ordinal 2*n is the mutation account for
 // fence n and ordinal 2*n+1 is its review.
@@ -927,6 +1070,18 @@ type PRDevelopmentControllerStore interface {
 		ctx context.Context,
 		input PRDevelopmentControllerRenew,
 	) error
+	ClaimPRDevelopmentControllerRecovery(
+		ctx context.Context,
+		input PRDevelopmentControllerRecoveryClaim,
+	) (PRDevelopmentControllerRecoveryLease, bool, error)
+	RenewPRDevelopmentControllerRecovery(
+		ctx context.Context,
+		input PRDevelopmentControllerRecoveryRenew,
+	) error
+	FinalizePRDevelopmentControllerRecovery(
+		ctx context.Context,
+		input PRDevelopmentControllerRecoveryFinalize,
+	) (PRDevelopmentController, bool, error)
 	BindPRDevelopmentControllerLine(
 		ctx context.Context,
 		input PRDevelopmentControllerLineBind,
