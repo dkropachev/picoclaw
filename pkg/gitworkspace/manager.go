@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -23,9 +24,11 @@ import (
 )
 
 const (
-	stateVersion      = 1
-	historyLimit      = 1000
-	inventoryLockFile = "inventory.lock"
+	stateVersion                    = 1
+	historyLimit                    = 1000
+	inventoryLockFile               = "inventory.lock"
+	maxPinnedGitMetadataEntries     = 1_000_000
+	maxPinnedGitPackMetadataEntries = 100_000
 )
 
 type Options struct {
@@ -347,32 +350,14 @@ func (m *Manager) AcquirePinned(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	repoInput := strings.TrimSpace(req.Repository)
-	sourceRef := strings.TrimSpace(req.SourceRef)
-	expectedCommit := strings.TrimSpace(req.ExpectedCommit)
-	reservationKey := strings.TrimSpace(req.ReservationKey)
-	agentID := strings.TrimSpace(req.AgentID)
-	if repoInput == "" || repoInput != req.Repository ||
-		containsPinnedControlCharacter(repoInput) {
-		return WorkspaceInfo{}, errors.New("pinned repository must be exact and non-empty")
-	}
-	if sourceRef == "" || sourceRef != req.SourceRef || !validPinnedSourceRef(ctx, sourceRef) {
-		return WorkspaceInfo{}, errors.New("pinned source ref is invalid")
-	}
-	if expectedCommit != req.ExpectedCommit || !validPinnedCommit(expectedCommit) {
-		return WorkspaceInfo{}, errors.New("pinned expected commit is invalid")
-	}
-	if reservationKey == "" || reservationKey != req.ReservationKey ||
-		containsPinnedControlCharacter(reservationKey) {
-		return WorkspaceInfo{}, errors.New("pinned reservation key must be exact and non-empty")
-	}
-	if agentID == "" || agentID != req.AgentID || containsPinnedControlCharacter(agentID) {
-		return WorkspaceInfo{}, errors.New("pinned agent ID must be exact and non-empty")
-	}
-	repo, err := normalizeRepository(repoInput)
+	repo, err := validatePinnedAcquireRequest(ctx, req)
 	if err != nil {
 		return WorkspaceInfo{}, err
 	}
+	sourceRef := req.SourceRef
+	expectedCommit := req.ExpectedCommit
+	reservationKey := req.ReservationKey
+	agentID := req.AgentID
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -522,6 +507,11 @@ func (m *Manager) ReleasePinned(
 	if agentID == "" || agentID != req.AgentID || containsPinnedControlCharacter(agentID) {
 		return nil, errors.New("pinned release agent ID must be exact and non-empty")
 	}
+	_, _, releaseOperation, err := m.acquirePinnedOperation(ctx, reservationKey)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseOperation()
 	return m.releaseReservations(ctx, reservationKey, agentID, true)
 }
 
@@ -1361,6 +1351,7 @@ func validatePinnedCheckoutPath(
 		return errors.New("pinned workspace git metadata is not a real directory")
 	}
 	if layoutErr := verifyPinnedGitMetadataLayout(
+		ctx,
 		filepath.Join(workspacePath, ".git"),
 		requireIndex,
 	); layoutErr != nil {
@@ -1398,7 +1389,14 @@ func validatePinnedCheckoutPath(
 	return nil
 }
 
-func verifyPinnedGitMetadataLayout(gitDirectory string, requireIndex bool) error {
+func verifyPinnedGitMetadataLayout(
+	ctx context.Context,
+	gitDirectory string,
+	requireIndex bool,
+) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	requiredFiles := []string{"HEAD", "config"}
 	if requireIndex {
 		requiredFiles = append(requiredFiles, "index")
@@ -1435,20 +1433,170 @@ func verifyPinnedGitMetadataLayout(gitDirectory string, requireIndex bool) error
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect pinned Git packed-refs: %w", err)
 	}
-	packEntries, err := os.ReadDir(filepath.Join(gitDirectory, "objects", "pack"))
-	if err != nil {
-		return fmt.Errorf("inspect pinned Git pack entries: %w", err)
+	if err := verifyPinnedPackDirectory(
+		ctx,
+		filepath.Join(gitDirectory, "objects", "pack"),
+		false,
+	); err != nil {
+		return err
 	}
-	for _, entry := range packEntries {
-		info, err := os.Lstat(filepath.Join(gitDirectory, "objects", "pack", entry.Name()))
-		if err != nil {
-			return fmt.Errorf("inspect pinned Git pack entry %s: %w", entry.Name(), err)
+	if err := verifyPinnedLooseObjectLayout(ctx, gitDirectory); err != nil {
+		return err
+	}
+	logsPath := filepath.Join(gitDirectory, "logs")
+	if logsInfo, err := os.Lstat(logsPath); err == nil {
+		if logsInfo.Mode()&os.ModeSymlink != 0 || !logsInfo.IsDir() {
+			return errors.New("pinned Git logs path is not a real directory")
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("pinned Git pack entry %s is a symlink", entry.Name())
+		headLogPath := filepath.Join(logsPath, "HEAD")
+		if headInfo, headErr := os.Lstat(headLogPath); headErr == nil {
+			if headInfo.Mode()&os.ModeSymlink != 0 || !headInfo.Mode().IsRegular() ||
+				!pinnedMetadataFileHasSingleLink(headLogPath, headInfo) {
+				return errors.New("pinned Git HEAD log is not an exclusive real file")
+			}
+		} else if !os.IsNotExist(headErr) {
+			return fmt.Errorf("inspect pinned Git HEAD log: %w", headErr)
 		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect pinned Git logs path: %w", err)
 	}
 	return nil
+}
+
+func verifyPinnedLooseObjectLayout(ctx context.Context, gitDirectory string) error {
+	objectsPath := filepath.Join(gitDirectory, "objects")
+	directory, err := os.Open(objectsPath)
+	if err != nil {
+		return fmt.Errorf("inspect pinned Git object directory: %w", err)
+	}
+	defer directory.Close()
+	remaining := maxPinnedGitMetadataEntries
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		entries, readErr := directory.ReadDir(256)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return fmt.Errorf("inspect pinned Git object directory: %w", readErr)
+		}
+		for _, entry := range entries {
+			remaining--
+			if remaining < 0 {
+				return errors.New("pinned Git loose-object metadata exceeds its limit")
+			}
+			name := entry.Name()
+			if name == "info" || name == "pack" {
+				continue
+			}
+			path := filepath.Join(objectsPath, name)
+			info, statErr := os.Lstat(path)
+			if statErr != nil {
+				return fmt.Errorf("inspect pinned Git object fanout %s: %w", name, statErr)
+			}
+			if len(name) != 2 || !validLowerHex(name, 2) ||
+				info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				return fmt.Errorf("pinned Git object fanout %s is invalid", name)
+			}
+			if fanoutErr := verifyPinnedLooseObjectFanout(
+				ctx,
+				path,
+				name,
+				&remaining,
+			); fanoutErr != nil {
+				return fanoutErr
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+	}
+}
+
+func verifyPinnedLooseObjectFanout(
+	ctx context.Context,
+	path, name string,
+	remaining *int,
+) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("inspect pinned Git loose objects in %s: %w", name, err)
+	}
+	defer directory.Close()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		objects, readErr := directory.ReadDir(256)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return fmt.Errorf("inspect pinned Git loose objects in %s: %w", name, readErr)
+		}
+		for _, object := range objects {
+			*remaining--
+			if *remaining < 0 {
+				return errors.New("pinned Git loose-object metadata exceeds its limit")
+			}
+			objectInfo, objectErr := os.Lstat(filepath.Join(path, object.Name()))
+			if objectErr != nil {
+				return fmt.Errorf(
+					"inspect pinned Git loose object %s/%s: %w",
+					name,
+					object.Name(),
+					objectErr,
+				)
+			}
+			if objectInfo.Mode()&os.ModeSymlink != 0 || !objectInfo.Mode().IsRegular() {
+				return fmt.Errorf(
+					"pinned Git loose object %s/%s is not a real file",
+					name,
+					object.Name(),
+				)
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+	}
+}
+
+func verifyPinnedPackDirectory(
+	ctx context.Context,
+	path string,
+	rejectPromisor bool,
+) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("inspect pinned Git pack directory: %w", err)
+	}
+	defer directory.Close()
+	remaining := maxPinnedGitPackMetadataEntries
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		entries, readErr := directory.ReadDir(256)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return fmt.Errorf("inspect pinned Git pack directory: %w", readErr)
+		}
+		for _, entry := range entries {
+			remaining--
+			if remaining < 0 {
+				return errors.New("pinned Git pack metadata exceeds its limit")
+			}
+			info, statErr := os.Lstat(filepath.Join(path, entry.Name()))
+			if statErr != nil {
+				return fmt.Errorf("inspect pinned Git pack entry %s: %w", entry.Name(), statErr)
+			}
+			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				return fmt.Errorf("pinned Git pack entry %s is not a real file", entry.Name())
+			}
+			if rejectPromisor && strings.HasSuffix(strings.ToLower(entry.Name()), ".promisor") {
+				return errors.New("pinned workspace uses partial-clone promisor objects")
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+	}
 }
 
 func verifyPinnedOrigin(
@@ -1576,26 +1724,15 @@ func runPinnedGit(
 	environment []string,
 	args ...string,
 ) (string, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if environment == nil {
-		environment = pinnedGitEnvironment(os.DevNull, os.DevNull)
-	}
-	command := exec.CommandContext(ctx, "git", args...)
-	if directory != "" {
-		command.Dir = directory
-	}
-	command.Env = append([]string(nil), environment...)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		message := strings.TrimSpace(string(output))
-		if message == "" {
-			message = err.Error()
-		}
-		return "", fmt.Errorf("git %s failed: %s", strings.Join(args, " "), message)
-	}
-	return string(output), nil
+	output, err := runPinnedGitPlumbing(
+		ctx,
+		directory,
+		environment,
+		nil,
+		maxPinnedControlGitOutputBytes,
+		args...,
+	)
+	return string(output), err
 }
 
 func verifyPinnedGitControlPlane(
@@ -1626,14 +1763,12 @@ func verifyPinnedGitControlPlane(
 	if err := verifyPinnedExcludeFile(filepath.Join(gitDirectory, "info", "exclude")); err != nil {
 		return err
 	}
-	packEntries, err := os.ReadDir(filepath.Join(gitDirectory, "objects", "pack"))
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("inspect pinned Git pack directory: %w", err)
-	}
-	for _, entry := range packEntries {
-		if strings.HasSuffix(strings.ToLower(entry.Name()), ".promisor") {
-			return errors.New("pinned workspace uses partial-clone promisor objects")
-		}
+	if err := verifyPinnedPackDirectory(
+		ctx,
+		filepath.Join(gitDirectory, "objects", "pack"),
+		true,
+	); err != nil {
+		return err
 	}
 	replacements, err := runPinnedGit(
 		ctx,
@@ -1714,7 +1849,9 @@ func unsafePinnedGitConfigKey(key string) bool {
 		"core.excludesfile",
 		"core.commitgraph",
 		"core.alternaterefscommand",
+		"core.prefersymlinkrefs",
 		"extensions.worktreeconfig",
+		"extensions.refstorage",
 		"extensions.partialclone",
 		"fetch.recursesubmodules",
 		"submodule.recurse",
@@ -1898,6 +2035,7 @@ func (m *Manager) preserveWorkspaceLocked(
 		return runGit(ctx, ws.Path, args...)
 	}
 	var cleanupEnvironment func()
+	pinnedPreservation := false
 	preserveDescendant := false
 	if ws.PinnedSourceRef != "" || ws.PinnedCommit != "" {
 		if ws.PinnedSourceRef == "" || ws.PinnedCommit == "" ||
@@ -1910,6 +2048,7 @@ func (m *Manager) preserveWorkspaceLocked(
 		}
 		cleanupEnvironment = cleanup
 		defer cleanupEnvironment()
+		pinnedPreservation = true
 		if pathErr := m.validatePinnedWorkspacePath(ctx, ws, environment); pathErr != nil {
 			return "", false, pathErr
 		}
@@ -1972,6 +2111,11 @@ func (m *Manager) preserveWorkspaceLocked(
 		if branchErr != nil {
 			return "", false, branchErr
 		}
+		if pinnedPreservation {
+			if layoutErr := preparePinnedPreservationRefLayout(ws.Path, branch); layoutErr != nil {
+				return "", false, layoutErr
+			}
+		}
 		if _, branchErr := run(
 			"-c",
 			"core.hooksPath="+hooksPath,
@@ -1996,6 +2140,11 @@ func (m *Manager) preserveWorkspaceLocked(
 	branch, branchErr := nextPreservationBranch(run, branchBase)
 	if branchErr != nil {
 		return "", false, branchErr
+	}
+	if pinnedPreservation {
+		if layoutErr := preparePinnedPreservationRefLayout(ws.Path, branch); layoutErr != nil {
+			return "", false, layoutErr
+		}
 	}
 	if _, checkoutErr := run(
 		"-c",
@@ -2029,6 +2178,87 @@ func (m *Manager) preserveWorkspaceLocked(
 		return "", false, errors.New("workspace remains dirty after preservation commit")
 	}
 	return branch, true, nil
+}
+
+func preparePinnedPreservationRefLayout(workspacePath, branch string) error {
+	const prefix = "picoclaw/session/"
+	if !strings.HasPrefix(branch, prefix) {
+		return errors.New("pinned preservation branch is outside its reserved namespace")
+	}
+	components := strings.Split(branch, "/")
+	if len(components) < 4 {
+		return errors.New("pinned preservation branch is invalid")
+	}
+	for _, component := range components {
+		if component == "" || component == "." || component == ".." ||
+			strings.ContainsAny(component, `/\\`) {
+			return errors.New("pinned preservation branch is invalid")
+		}
+	}
+	gitDirectory := filepath.Join(workspacePath, ".git")
+	refParent, err := ensurePinnedRealDirectoryComponents(
+		gitDirectory,
+		append([]string{"refs", "heads"}, components[:len(components)-1]...)...,
+	)
+	if err != nil {
+		return fmt.Errorf("prepare pinned preservation ref: %w", err)
+	}
+	refPath := filepath.Join(refParent, components[len(components)-1])
+	if _, statErr := os.Lstat(refPath); statErr == nil {
+		return errors.New("pinned preservation ref destination already exists")
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("inspect pinned preservation ref destination: %w", statErr)
+	}
+
+	logParent, err := ensurePinnedRealDirectoryComponents(
+		gitDirectory,
+		append(
+			[]string{"logs", "refs", "heads"},
+			components[:len(components)-1]...,
+		)...,
+	)
+	if err != nil {
+		return fmt.Errorf("prepare pinned preservation reflog: %w", err)
+	}
+	logPath := filepath.Join(logParent, components[len(components)-1])
+	if _, statErr := os.Lstat(logPath); statErr == nil {
+		return errors.New("pinned preservation reflog destination already exists")
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("inspect pinned preservation reflog destination: %w", statErr)
+	}
+	return nil
+}
+
+func ensurePinnedRealDirectoryComponents(base string, components ...string) (string, error) {
+	info, err := os.Lstat(base)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", errors.New("pinned Git metadata root is not a real directory")
+	}
+	current := base
+	for _, component := range components {
+		if component == "" || component == "." || component == ".." ||
+			strings.ContainsAny(component, `/\\`) {
+			return "", errors.New("pinned Git metadata directory component is invalid")
+		}
+		current = filepath.Join(current, component)
+		info, err = os.Lstat(current)
+		if os.IsNotExist(err) {
+			if mkdirErr := os.Mkdir(current, 0o700); mkdirErr != nil {
+				return "", mkdirErr
+			}
+			info, err = os.Lstat(current)
+		}
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", fmt.Errorf("pinned Git metadata directory %s is not real", component)
+		}
+	}
+	return current, nil
 }
 
 func nextPreservationBranch(
