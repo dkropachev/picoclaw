@@ -27,6 +27,8 @@ var (
 	_ PRDevelopmentWorkbenchReader   = (*Store)(nil)
 	_ PRDevelopmentRepairAdmitter    = (*Store)(nil)
 	_ PRDevelopmentRepairQueue       = (*Store)(nil)
+	_ PRDevelopmentControllerReader  = (*Store)(nil)
+	_ PRDevelopmentControllerStore   = (*Store)(nil)
 )
 
 func Open(context.Context, string, ...Option) (*Store, error) {
@@ -256,6 +258,55 @@ func (*Store) FinishPRDevelopmentRepair(
 	PRDevelopmentRepairOutcome,
 ) (PRDevelopmentRepairSession, error) {
 	return PRDevelopmentRepairSession{}, ErrUnsupportedPlatform
+}
+
+func (*Store) GetPRDevelopmentControllerForCase(
+	context.Context,
+	string,
+) (PRDevelopmentController, error) {
+	return PRDevelopmentController{}, ErrUnsupportedPlatform
+}
+
+func (*Store) AcquirePRDevelopmentControllerLease(
+	context.Context,
+	PRDevelopmentControllerAcquire,
+) (PRDevelopmentControllerLease, bool, error) {
+	return PRDevelopmentControllerLease{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) RenewPRDevelopmentControllerLease(
+	context.Context,
+	PRDevelopmentControllerRenew,
+) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Store) BindPRDevelopmentControllerLine(
+	context.Context,
+	PRDevelopmentControllerLineBind,
+) (PRDevelopmentController, bool, error) {
+	return PRDevelopmentController{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) RecordPRDevelopmentAttemptReviewFence(
+	context.Context,
+	PRDevelopmentAttemptReviewFenceRecord,
+) (PRDevelopmentAttemptReviewFence, bool, error) {
+	return PRDevelopmentAttemptReviewFence{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) FinishPRDevelopmentControllerReview(
+	context.Context,
+	PRDevelopmentControllerReviewTransition,
+) (PRDevelopmentController, bool, error) {
+	return PRDevelopmentController{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) ReleasePRDevelopmentControllerReview(
+	context.Context,
+	PRDevelopmentControllerReviewTransition,
+) (PRDevelopmentController, error) {
+	return PRDevelopmentController{}, ErrUnsupportedPlatform
 }
 
 func (*Store) CaptureReview(

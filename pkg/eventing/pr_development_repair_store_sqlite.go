@@ -134,6 +134,36 @@ func (s *Store) AdmitPRDevelopmentRepair(
 				current.Conversation.Version,
 			)
 		}
+		if current.Thread == nil {
+			return errors.New("stored pull request development case has no thread binding")
+		}
+		controller, controlled, controllerErr := loadPRDevelopmentControllerAggregate(
+			ctx,
+			conn,
+			current.Thread.ID,
+		)
+		if controllerErr != nil {
+			return controllerErr
+		}
+		if controlled {
+			if current.RepairSession == nil ||
+				current.RepairSession.ID != controller.OwnerSessionID {
+				return fmt.Errorf(
+					"%w: provider thread repair attempts belong to its controller owner",
+					ErrPRDevelopmentControllerConflict,
+				)
+			}
+			if controller.Phase != PRDevelopmentControllerReady {
+				return ErrPRDevelopmentControllerActive
+			}
+			if controller.LineVersion >= MaxPRDevelopmentControllerFences ||
+				controller.Revision > MaxPRDevelopmentControllerRevision-4 {
+				return fmt.Errorf(
+					"%w: controller has insufficient attempt-transition headroom",
+					ErrPRDevelopmentRepairCapacity,
+				)
+			}
+		}
 
 		now, clockErr := s.currentTime()
 		if clockErr != nil {
@@ -391,7 +421,11 @@ func collectPRDevelopmentRepairClaimCandidates(
 		FROM pr_development_repair_attempts AS attempt
 		JOIN pr_development_repair_sessions AS session
 		  ON session.id = attempt.session_id
-		WHERE session.claim_suppressed = 0 AND session.version >= 1 AND (
+		WHERE session.claim_suppressed = 0 AND session.version >= 1
+		  AND NOT EXISTS (
+			SELECT 1 FROM pr_development_thread_controllers AS controller
+			WHERE controller.owner_session_id = session.id
+		  ) AND (
 			(attempt.status = ? AND (
 				(session.head_repository = '' AND session.version <= ?) OR
 				(session.head_repository <> '' AND session.version <= ?)
@@ -911,7 +945,7 @@ func insertPRDevelopmentRepairSession(
 	if err != nil {
 		return err
 	}
-	reservationKey, err := newPrefixedID(prDevelopmentRepairReservationPrefix)
+	reservationKey, err := newUniquePRDevelopmentRepairReservation(ctx, conn)
 	if err != nil {
 		return err
 	}
@@ -944,6 +978,43 @@ func insertPRDevelopmentRepairSession(
 		toDBTime(now),
 	)
 	return err
+}
+
+func newUniquePRDevelopmentRepairReservation(
+	ctx context.Context,
+	queryer rowsQueryer,
+) (string, error) {
+	for attempt := 0; attempt < 8; attempt++ {
+		reservation, err := newPrefixedID(prDevelopmentRepairReservationPrefix)
+		if err != nil {
+			return "", err
+		}
+		owners, err := countPRDevelopmentRepairReservationOwners(
+			ctx,
+			queryer,
+			reservation,
+		)
+		if err != nil {
+			return "", err
+		}
+		if owners == 0 {
+			return reservation, nil
+		}
+	}
+	return "", errors.New("generate unique pull request development repair reservation")
+}
+
+func countPRDevelopmentRepairReservationOwners(
+	ctx context.Context,
+	queryer rowQueryer,
+	reservation string,
+) (int, error) {
+	var owners int
+	err := queryer.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM pr_development_repair_sessions
+		WHERE reservation_key = ?`, reservation).Scan(&owners)
+	return owners, err
 }
 
 func appendPRDevelopmentRepairAttempt(
@@ -1009,6 +1080,11 @@ func expireRunningPRDevelopmentRepairs(
 		  ON session.id = attempt.session_id
 		WHERE attempt.status = ? AND attempt.lease_until <= ?
 		  AND session.head_repository <> ''
+		  AND session.claim_suppressed = 0
+		  AND NOT EXISTS (
+			SELECT 1 FROM pr_development_thread_controllers AS controller
+			WHERE controller.owner_session_id = session.id
+		  )
 		  AND session.version >= 1 AND session.version < ?
 		ORDER BY attempt.created_at, attempt.id
 		LIMIT ?`,

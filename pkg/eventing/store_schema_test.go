@@ -167,6 +167,137 @@ func TestStoreMigratesV2ToReviewSchema(t *testing.T) {
 	}
 }
 
+func TestStoreMigratesV9ToEmptyPRDevelopmentControllerSchema(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "migration-v9-controller.db")
+	db := openSchemaTestDB(t, path)
+	for _, schema := range []string{
+		schemaV1,
+		schemaV2,
+		schemaV3,
+		schemaV4,
+		schemaV5,
+		schemaV6,
+		schemaV7,
+		schemaV8,
+		schemaV9,
+	} {
+		_, err := db.Exec(schema)
+		require.NoError(t, err)
+	}
+	setSchemaTestVersion(t, db, 9)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.NoError(t, err)
+	defer store.Close()
+	var version int
+	require.NoError(t, store.db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, schemaVersion, version)
+	for _, object := range []struct {
+		kind string
+		name string
+	}{
+		{"table", "pr_development_thread_controllers"},
+		{"table", "pr_development_attempt_review_fences"},
+		{"index", "pr_development_thread_controllers_workspace"},
+		{"index", "pr_development_thread_controllers_reservation"},
+		{"index", "pr_development_thread_controllers_lease"},
+	} {
+		assert.True(t, schemaObjectExists(t, store.db, object.kind, object.name))
+	}
+	for _, table := range []string{
+		"pr_development_thread_controllers",
+		"pr_development_attempt_review_fences",
+	} {
+		var count int
+		require.NoError(t, store.db.QueryRow(`SELECT COUNT(*) FROM `+table).Scan(&count))
+		assert.Zero(t, count, "v10 migration must not manufacture controller state")
+	}
+}
+
+func TestStorePRDevelopmentControllerMigrationValidationRollsBack(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "migration-v10-controller-rollback.db")
+	db := openSchemaTestDB(t, path)
+	for _, schema := range []string{
+		schemaV1,
+		schemaV2,
+		schemaV3,
+		schemaV4,
+		schemaV5,
+		schemaV6,
+		schemaV7,
+		schemaV8,
+		schemaV9,
+	} {
+		_, err := db.Exec(schema)
+		require.NoError(t, err)
+	}
+	_, err := db.Exec(`
+		CREATE TABLE pr_development_thread_controllers (
+			id TEXT PRIMARY KEY,
+			thread_id TEXT NOT NULL UNIQUE,
+			owner_session_id TEXT NOT NULL UNIQUE,
+			line_id TEXT NOT NULL UNIQUE,
+			workspace_id TEXT NOT NULL DEFAULT '',
+			mutation_reservation_key TEXT NOT NULL DEFAULT '',
+			phase TEXT NOT NULL,
+			lease_until INTEGER,
+			updated_at INTEGER NOT NULL,
+			UNIQUE(id, thread_id, line_id)
+		)`)
+	require.NoError(t, err)
+	setSchemaTestVersion(t, db, 9)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorIs(t, err, ErrSchemaInvalid)
+	assert.Contains(t, err.Error(), "validate eventing schema v10")
+
+	db = openSchemaTestDB(t, path)
+	defer db.Close()
+	var version int
+	require.NoError(t, db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, 9, version)
+	assert.False(t, schemaObjectExists(
+		t,
+		db,
+		"table",
+		"pr_development_attempt_review_fences",
+	), "objects created inside the failed v10 migration must roll back")
+	assert.False(t, schemaObjectExists(
+		t,
+		db,
+		"index",
+		"pr_development_thread_controllers_lease",
+	))
+}
+
+func TestStoreRejectsCurrentControllerSchemaMissingReservationIndex(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "missing-controller-reservation-index.db")
+	db := openSchemaTestDB(t, path)
+	installSchemaV1ForTest(t, db)
+	_, err := db.Exec(`DROP INDEX pr_development_thread_controllers_reservation`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorIs(t, err, ErrSchemaInvalid)
+	assert.Contains(t, err.Error(), "validate eventing schema v10")
+	var validationErr *schemaValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, "pr_development_thread_controllers_reservation", validationErr.object)
+}
+
 func TestStoreReviewMigrationValidationFailureRollsBackVersion(t *testing.T) {
 	t.Parallel()
 
@@ -634,6 +765,8 @@ func installSchemaV1ForTest(t *testing.T, db *sql.DB) {
 	_, err = db.Exec(schemaV8)
 	require.NoError(t, err)
 	_, err = db.Exec(schemaV9)
+	require.NoError(t, err)
+	_, err = db.Exec(schemaV10)
 	require.NoError(t, err)
 	setSchemaTestVersion(t, db, schemaVersion)
 }
