@@ -257,7 +257,9 @@ func (store *repairControllerWorkerStoreFake) FinalizePRDevelopmentControllerOpe
 	context.Context,
 	eventing.PRDevelopmentControllerOperationFinalize,
 ) (eventing.PRDevelopmentControllerOperationTransition, bool, error) {
-	return eventing.PRDevelopmentControllerOperationTransition{}, false, errors.New("unexpected real effect journal call")
+	return eventing.PRDevelopmentControllerOperationTransition{}, false, errors.New(
+		"unexpected real effect journal call",
+	)
 }
 
 type repairControllerContextLoaderFake struct {
@@ -911,7 +913,8 @@ func TestRepairControllerWorkerReleaseFailureLeavesBootstrapReclaimable(t *testi
 	if !processed || err == nil {
 		t.Fatalf("ProcessOne() = %v, %v, want release error", processed, err)
 	}
-	if len(fixture.store.failures) != 0 || fixture.store.run.Phase != eventing.PRDevelopmentRepairOrchestrationBootstrap {
+	if len(fixture.store.failures) != 0 ||
+		fixture.store.run.Phase != eventing.PRDevelopmentRepairOrchestrationBootstrap {
 		t.Fatalf("release failure terminalized Bootstrap: failures=%d phase=%q",
 			len(fixture.store.failures), fixture.store.run.Phase)
 	}
