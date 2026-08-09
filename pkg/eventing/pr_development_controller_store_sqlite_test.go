@@ -264,7 +264,7 @@ func TestStorePRDevelopmentControllerLifecycleRetainsLineAndSeparatesReview(t *t
 	require.True(t, admitted)
 	require.NotNil(t, next.RepairSession)
 	nextAttempt := next.RepairSession.Attempts[len(next.RepairSession.Attempts)-1]
-	_, found, err := store.ClaimPRDevelopmentRepair(
+	_, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "legacy-worker", Lease: time.Minute},
 	)
@@ -596,7 +596,7 @@ func TestStorePRDevelopmentControllerRejectsLegacyAndSiblingOwnership(t *testing
 			"legacy-active",
 			0,
 		)
-		claimed, found, err := store.ClaimPRDevelopmentRepair(
+		claimed, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 			ctx,
 			PRDevelopmentRepairClaimRequest{WorkerLabel: "legacy", Lease: time.Minute},
 		)
@@ -672,7 +672,7 @@ func TestStorePRDevelopmentControllerRejectsLegacyAndSiblingOwnership(t *testing
 		require.NoError(t, err, "all provider-thread cases resolve the same private controller")
 	})
 
-	t.Run("sibling session before controller", func(t *testing.T) {
+	t.Run("sibling admission before controller", func(t *testing.T) {
 		t.Parallel()
 		ctx := context.Background()
 		store, clock, capture := newPRDevelopmentStoreFixture(t, ":memory:")
@@ -691,7 +691,16 @@ func TestStorePRDevelopmentControllerRejectsLegacyAndSiblingOwnership(t *testing
 			"602",
 		)
 		completed := completePRDevelopmentRepairForControllerTest(t, store, ownerCase.ID)
-		_ = admitPRDevelopmentRepairForTest(t, store, siblingCase.ID, "sibling-first", 0)
+		_, admitted, err := store.AdmitPRDevelopmentRepair(
+			ctx,
+			PRDevelopmentRepairAdmit{
+				CaseID: siblingCase.ID, ExpectedConversationVersion: 0,
+				ExpectedRepairVersion: 0, IdempotencyKey: "sibling-first",
+				AgentID: "main", Instruction: "Do not create a second thread owner.",
+			},
+		)
+		assert.ErrorIs(t, err, ErrPRDevelopmentRepairConflict)
+		assert.False(t, admitted)
 		attempt := completed.Attempts[len(completed.Attempts)-1]
 		_, acquired, err := store.AcquirePRDevelopmentControllerLease(
 			ctx,
@@ -704,8 +713,8 @@ func TestStorePRDevelopmentControllerRejectsLegacyAndSiblingOwnership(t *testing
 				Lease:            time.Minute,
 			},
 		)
-		assert.ErrorIs(t, err, ErrPRDevelopmentControllerConflict)
-		assert.False(t, acquired)
+		require.NoError(t, err)
+		assert.True(t, acquired)
 	})
 }
 
@@ -1757,7 +1766,7 @@ func completePRDevelopmentRepairForControllerTest(
 	ctx := context.Background()
 	workbench := admitPRDevelopmentRepairForTest(t, store, caseID, "controller-attempt-1", 0)
 	require.NotNil(t, workbench.RepairSession)
-	claimed, found, err := store.ClaimPRDevelopmentRepair(
+	claimed, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "legacy-worker", Lease: time.Minute},
 	)

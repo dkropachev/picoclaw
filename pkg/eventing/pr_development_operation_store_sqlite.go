@@ -677,6 +677,17 @@ func (s *Store) PreparePRDevelopmentControllerOperation(
 				ErrPRDevelopmentControllerConflict,
 			)
 		}
+		if orchestrationErr := preflightPRDevelopmentRepairOrchestrationOperation(
+			ctx,
+			conn,
+			controller,
+			relation,
+			operations,
+			normalized.Kind,
+			expectedRequest,
+		); orchestrationErr != nil {
+			return orchestrationErr
+		}
 
 		if existing, exists, existingErr := loadPRDevelopmentControllerOperationByID(
 			ctx, conn, normalized.OperationID,
@@ -2007,6 +2018,17 @@ func finalizePRDevelopmentParkOperation(
 	}
 	if rowErr := requireOnePRDevelopmentControllerRow(controllerResult); rowErr != nil {
 		return PRDevelopmentAttemptReviewFence{}, rowErr
+	}
+	if orchestrationErr := finalizePRDevelopmentRepairOrchestrationPark(
+		ctx,
+		conn,
+		controller,
+		operation,
+		result,
+		fence,
+		now,
+	); orchestrationErr != nil {
+		return PRDevelopmentAttemptReviewFence{}, orchestrationErr
 	}
 	return fence, nil
 }

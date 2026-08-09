@@ -715,6 +715,24 @@ func (s *Store) FinalizePRDevelopmentControllerRecovery(
 		if rowErr := requireOnePRDevelopmentControllerRow(controllerResult); rowErr != nil {
 			return rowErr
 		}
+		if _, orchestrationErr := terminalizePRDevelopmentRepairOrchestrationAfterRecovery(
+			ctx,
+			conn,
+			intent.AttemptID,
+			prDevelopmentRepairOrchestrationMutationFence{
+				controllerID:     intent.ControllerID,
+				controllerRev:    intent.ExpiredControllerRevision,
+				lineID:           intent.LineID,
+				lineVersion:      intent.LineVersion,
+				mutationEpoch:    intent.MutationEpoch,
+				leaseEpoch:       intent.ExpiredLeaseEpoch,
+				leaseTokenDigest: intent.ExpiredLeaseTokenDigest,
+				reservationHash:  intent.PreviousReservationDigest,
+			},
+			now,
+		); orchestrationErr != nil {
+			return orchestrationErr
+		}
 		loaded, loadedFound, reloadErr := loadPRDevelopmentControllerAggregateByID(
 			ctx, conn, current.ID,
 		)

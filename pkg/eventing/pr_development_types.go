@@ -140,6 +140,16 @@ var (
 	ErrPRDevelopmentRepairCapacity = errors.New(
 		"pull request development repair attempt capacity exceeded",
 	)
+	// ErrInvalidPRDevelopmentOrchestration reports malformed trusted-worker
+	// checkpoint, claim, model-result, or local-CI evidence.
+	ErrInvalidPRDevelopmentOrchestration = errors.New(
+		"invalid pull request development repair orchestration",
+	)
+	// ErrPRDevelopmentOrchestrationConflict reports a changed replay or a
+	// checkpoint that no longer owns its exact durable/controller fence.
+	ErrPRDevelopmentOrchestrationConflict = errors.New(
+		"pull request development repair orchestration conflict",
+	)
 	// ErrInvalidPRDevelopmentController reports malformed controller lease,
 	// line-binding, or review-fence input.
 	ErrInvalidPRDevelopmentController = errors.New(
@@ -521,6 +531,233 @@ type PRDevelopmentRepairOutcome struct {
 	InternalError string
 	Iterations    int
 	WorkspaceID   string
+}
+
+// PRDevelopmentRepairOrchestrationPhase is the private lifecycle that keeps a
+// public attempt queued until its validated candidate is atomically Parked.
+// Editing is deliberately the only non-reclaimable phase because an expired
+// model invocation may have changed the retained checkout.
+type PRDevelopmentRepairOrchestrationPhase string
+
+const (
+	PRDevelopmentRepairOrchestrationBootstrap        PRDevelopmentRepairOrchestrationPhase = "bootstrap"
+	PRDevelopmentRepairOrchestrationEditing          PRDevelopmentRepairOrchestrationPhase = "editing"
+	PRDevelopmentRepairOrchestrationEdited           PRDevelopmentRepairOrchestrationPhase = "edited"
+	PRDevelopmentRepairOrchestrationValidated        PRDevelopmentRepairOrchestrationPhase = "validated"
+	PRDevelopmentRepairOrchestrationCompleted        PRDevelopmentRepairOrchestrationPhase = "completed"
+	PRDevelopmentRepairOrchestrationFailed           PRDevelopmentRepairOrchestrationPhase = "failed"
+	PRDevelopmentRepairOrchestrationRecoveryRequired PRDevelopmentRepairOrchestrationPhase = "recovery_required"
+)
+
+// PRDevelopmentCIStatus is the exact terminal result of a bounded local-CI
+// execution with a valid persisted attestation. Only passed is green; every
+// other status remains truthful durable evidence for later gates.
+type PRDevelopmentCIStatus string
+
+const (
+	PRDevelopmentCIPassed                 PRDevelopmentCIStatus = "passed"
+	PRDevelopmentCIFailed                 PRDevelopmentCIStatus = "failed"
+	PRDevelopmentCIIncomplete             PRDevelopmentCIStatus = "incomplete"
+	PRDevelopmentCIPlanChanged            PRDevelopmentCIStatus = "plan_changed"
+	PRDevelopmentCITimedOut               PRDevelopmentCIStatus = "timed_out"
+	PRDevelopmentCICanceled               PRDevelopmentCIStatus = "canceled"
+	PRDevelopmentCIOutputLimitExceeded    PRDevelopmentCIStatus = "output_limit_exceeded"
+	PRDevelopmentCIEnvironmentUnavailable PRDevelopmentCIStatus = "environment_unavailable"
+	PRDevelopmentCIInfrastructureError    PRDevelopmentCIStatus = "infrastructure_error"
+)
+
+// PRDevelopmentRepairValidationReceipt is immutable, hash-bound evidence for
+// the exact edited candidate and terminal local-CI execution accepted before
+// Commit/Park. All fields are trusted-worker private.
+type PRDevelopmentRepairValidationReceipt struct {
+	ControllerID              string                `json:"-"`
+	WorkspaceID               string                `json:"-"`
+	ModelControllerRevision   int64                 `json:"-"`
+	ModelLineID               string                `json:"-"`
+	ModelLineVersion          int64                 `json:"-"`
+	ModelMutationEpoch        int64                 `json:"-"`
+	ModelMutationLeaseEpoch   int64                 `json:"-"`
+	ModelLeaseTokenDigest     string                `json:"-"`
+	ModelReservationDigest    string                `json:"-"`
+	ContextDigest             string                `json:"-"`
+	PromptDigest              string                `json:"-"`
+	LineID                    string                `json:"-"`
+	ControllerRevision        int64                 `json:"-"`
+	LineVersion               int64                 `json:"-"`
+	MutationEpoch             int64                 `json:"-"`
+	MutationLeaseEpoch        int64                 `json:"-"`
+	MutationLeaseTokenDigest  string                `json:"-"`
+	MutationReservationDigest string                `json:"-"`
+	ParentCommit              string                `json:"-"`
+	ParentTree                string                `json:"-"`
+	CandidateTree             string                `json:"-"`
+	CandidateDigest           string                `json:"-"`
+	ChangedFiles              int                   `json:"-"`
+	NoChanges                 bool                  `json:"-"`
+	CIStatus                  PRDevelopmentCIStatus `json:"-"`
+	CIAttestationID           string                `json:"-"`
+	CIAttestationDigest       string                `json:"-"`
+	CIResultKey               string                `json:"-"`
+	CIEffectivePlanDigest     string                `json:"-"`
+	CIExecutionDigest         string                `json:"-"`
+	ModelResultDigest         string                `json:"-"`
+	ModelSummary              string                `json:"-"`
+	ModelIterations           int                   `json:"-"`
+	ReceiptHash               string                `json:"-"`
+	CreatedAt                 time.Time             `json:"-"`
+}
+
+// PRDevelopmentRepairOrchestration is the durable trusted-worker checkpoint.
+// Raw claim authority is omitted from JSON and is blanked by read-only Get;
+// it is returned only by Claim and Renew rotates no authority.
+type PRDevelopmentRepairOrchestration struct {
+	AttemptID               string                                `json:"-"`
+	SessionID               string                                `json:"-"`
+	CaseID                  string                                `json:"-"`
+	ThreadID                string                                `json:"-"`
+	AgentID                 string                                `json:"-"`
+	Instruction             string                                `json:"-"`
+	Phase                   PRDevelopmentRepairOrchestrationPhase `json:"-"`
+	ClaimOwner              string                                `json:"-"`
+	ClaimToken              string                                `json:"-"`
+	ClaimUntil              *time.Time                            `json:"-"`
+	ClaimEpoch              int64                                 `json:"-"`
+	Claims                  int                                   `json:"-"`
+	HeadRepository          string                                `json:"-"`
+	HeadRef                 string                                `json:"-"`
+	HeadSHA                 string                                `json:"-"`
+	CloneURL                string                                `json:"-"`
+	ReviewDigest            string                                `json:"-"`
+	WorkspaceID             string                                `json:"-"`
+	SourceTree              string                                `json:"-"`
+	ControllerID            string                                `json:"-"`
+	ModelControllerRevision int64                                 `json:"-"`
+	ModelLineID             string                                `json:"-"`
+	ModelLineVersion        int64                                 `json:"-"`
+	ModelMutationEpoch      int64                                 `json:"-"`
+	ModelMutationLeaseEpoch int64                                 `json:"-"`
+	ModelLeaseTokenDigest   string                                `json:"-"`
+	ModelReservationDigest  string                                `json:"-"`
+	ContextDigest           string                                `json:"-"`
+	PromptDigest            string                                `json:"-"`
+	ModelResultDigest       string                                `json:"-"`
+	Summary                 string                                `json:"-"`
+	Iterations              int                                   `json:"-"`
+	Validation              *PRDevelopmentRepairValidationReceipt `json:"-"`
+	ParkOperationID         string                                `json:"-"`
+	LedgerEntryID           string                                `json:"-"`
+	FenceHash               string                                `json:"-"`
+	FailedClaimTokenDigest  string                                `json:"-"`
+	CreatedAt               time.Time                             `json:"-"`
+	ModelStartedAt          *time.Time                            `json:"-"`
+	ModelCompletedAt        *time.Time                            `json:"-"`
+	ValidatedAt             *time.Time                            `json:"-"`
+	CompletedAt             *time.Time                            `json:"-"`
+	FailedAt                *time.Time                            `json:"-"`
+	RecoveryRequiredAt      *time.Time                            `json:"-"`
+	UpdatedAt               time.Time                             `json:"-"`
+}
+
+// PRDevelopmentRepairOrchestrationClaim claims the oldest provider-thread
+// queued attempt, or safely reclaims bootstrap/edited/validated work.
+type PRDevelopmentRepairOrchestrationClaim struct {
+	WorkerLabel string        `json:"-"`
+	Lease       time.Duration `json:"-"`
+}
+
+// PRDevelopmentRepairOrchestrationRenew extends the exact live claim.
+type PRDevelopmentRepairOrchestrationRenew struct {
+	AttemptID  string        `json:"-"`
+	ClaimToken string        `json:"-"`
+	Lease      time.Duration `json:"-"`
+}
+
+// PRDevelopmentRepairOrchestrationPin atomically persists or exactly replays
+// the provider pin plus freshly acquired workspace/source-tree baseline.
+type PRDevelopmentRepairOrchestrationPin struct {
+	AttemptID      string `json:"-"`
+	ClaimToken     string `json:"-"`
+	HeadRepository string `json:"-"`
+	HeadRef        string `json:"-"`
+	HeadSHA        string `json:"-"`
+	CloneURL       string `json:"-"`
+	ReviewDigest   string `json:"-"`
+	WorkspaceID    string `json:"-"`
+	SourceTree     string `json:"-"`
+}
+
+// PRDevelopmentRepairOrchestrationControllerAcquire is the narrow exception
+// that lets the exact live orchestration claim create/acquire mutation control
+// after it has already suppressed the legacy queue.
+type PRDevelopmentRepairOrchestrationControllerAcquire struct {
+	CaseID           string        `json:"-"`
+	AttemptID        string        `json:"-"`
+	ClaimToken       string        `json:"-"`
+	ExpectedRevision int64         `json:"-"`
+	WorkerLabel      string        `json:"-"`
+	Lease            time.Duration `json:"-"`
+}
+
+// PRDevelopmentRepairOrchestrationModelStart binds the exact model context
+// immediately before the potentially mutating edit invocation.
+type PRDevelopmentRepairOrchestrationModelStart struct {
+	AttemptID          string `json:"-"`
+	ClaimToken         string `json:"-"`
+	ControllerID       string `json:"-"`
+	ControllerRevision int64  `json:"-"`
+	MutationLeaseToken string `json:"-"`
+	MutationLeaseEpoch int64  `json:"-"`
+	ContextDigest      string `json:"-"`
+	PromptDigest       string `json:"-"`
+}
+
+// PRDevelopmentRepairOrchestrationModelComplete stores the bounded model
+// outcome under the same exact live claim and controller lease.
+type PRDevelopmentRepairOrchestrationModelComplete struct {
+	AttemptID          string `json:"-"`
+	ClaimToken         string `json:"-"`
+	ControllerID       string `json:"-"`
+	ControllerRevision int64  `json:"-"`
+	MutationLeaseToken string `json:"-"`
+	MutationLeaseEpoch int64  `json:"-"`
+	ModelResultDigest  string `json:"-"`
+	Summary            string `json:"-"`
+	Iterations         int    `json:"-"`
+}
+
+// PRDevelopmentRepairOrchestrationValidation stores an immutable local-CI
+// receipt. Lease and reservation digests are derived from the exact current
+// controller instead of accepted from the caller.
+type PRDevelopmentRepairOrchestrationValidation struct {
+	AttemptID             string                `json:"-"`
+	ClaimToken            string                `json:"-"`
+	ControllerID          string                `json:"-"`
+	ControllerRevision    int64                 `json:"-"`
+	MutationLeaseToken    string                `json:"-"`
+	MutationLeaseEpoch    int64                 `json:"-"`
+	ParentCommit          string                `json:"-"`
+	ParentTree            string                `json:"-"`
+	CandidateTree         string                `json:"-"`
+	CandidateDigest       string                `json:"-"`
+	ChangedFiles          int                   `json:"-"`
+	NoChanges             bool                  `json:"-"`
+	CIStatus              PRDevelopmentCIStatus `json:"-"`
+	CIAttestationID       string                `json:"-"`
+	CIAttestationDigest   string                `json:"-"`
+	CIResultKey           string                `json:"-"`
+	CIEffectivePlanDigest string                `json:"-"`
+	CIExecutionDigest     string                `json:"-"`
+}
+
+// PRDevelopmentRepairOrchestrationFail safely terminalizes an unpinned
+// bootstrap before this attempt acquires mutation/model authority. A retained
+// Ready controller from an earlier attempt remains reserved and suppressed.
+type PRDevelopmentRepairOrchestrationFail struct {
+	AttemptID     string                       `json:"-"`
+	ClaimToken    string                       `json:"-"`
+	Summary       string                       `json:"-"`
+	ErrorCode     PRDevelopmentRepairErrorCode `json:"-"`
+	InternalError string                       `json:"-"`
 }
 
 // PRDevelopmentControllerPhase is the private lifecycle of the one retained
@@ -1117,26 +1354,30 @@ type PRDevelopmentLedgerReviewFinding struct {
 // review account. Attempt-only and review-only fields are validated as
 // mutually exclusive. The complete type is private to trusted local workers.
 type PRDevelopmentLedgerEntry struct {
-	ID             string                             `json:"-"`
-	ThreadID       string                             `json:"-"`
-	Ordinal        int                                `json:"-"`
-	Kind           PRDevelopmentLedgerEntryKind       `json:"-"`
-	AttemptID      string                             `json:"-"`
-	FenceOrdinal   int                                `json:"-"`
-	CaseID         string                             `json:"-"`
-	CaseOrdinal    int                                `json:"-"`
-	Commit         string                             `json:"-"`
-	Tree           string                             `json:"-"`
-	NoChanges      bool                               `json:"-"`
-	Summary        string                             `json:"-"`
-	CIPlanDigest   string                             `json:"-"`
-	CIResultDigest string                             `json:"-"`
-	ReviewOutcome  PRDevelopmentLedgerReviewOutcome   `json:"-"`
-	Findings       []PRDevelopmentLedgerReviewFinding `json:"-"`
-	FenceHash      string                             `json:"-"`
-	PreviousHash   string                             `json:"-"`
-	EntryHash      string                             `json:"-"`
-	CreatedAt      time.Time                          `json:"-"`
+	ID             string                       `json:"-"`
+	ThreadID       string                       `json:"-"`
+	Ordinal        int                          `json:"-"`
+	Kind           PRDevelopmentLedgerEntryKind `json:"-"`
+	AttemptID      string                       `json:"-"`
+	FenceOrdinal   int                          `json:"-"`
+	CaseID         string                       `json:"-"`
+	CaseOrdinal    int                          `json:"-"`
+	Commit         string                       `json:"-"`
+	Tree           string                       `json:"-"`
+	NoChanges      bool                         `json:"-"`
+	Summary        string                       `json:"-"`
+	CIPlanDigest   string                       `json:"-"`
+	CIResultDigest string                       `json:"-"`
+	// CIStatus is derived from the v14 orchestration receipt. Legacy attempt
+	// entries predate status storage and are projected as passed.
+	CIStatus      PRDevelopmentCIStatus `json:"-"`
+	ciStatusBound bool
+	ReviewOutcome PRDevelopmentLedgerReviewOutcome   `json:"-"`
+	Findings      []PRDevelopmentLedgerReviewFinding `json:"-"`
+	FenceHash     string                             `json:"-"`
+	PreviousHash  string                             `json:"-"`
+	EntryHash     string                             `json:"-"`
+	CreatedAt     time.Time                          `json:"-"`
 }
 
 // PRDevelopmentLedgerCheckpoint is a logical model-context compaction over an
@@ -1305,6 +1546,47 @@ type PRDevelopmentRepairQueue interface {
 		ctx context.Context,
 		input PRDevelopmentRepairOutcome,
 	) (PRDevelopmentRepairSession, error)
+}
+
+// PRDevelopmentRepairOrchestrationStore owns the durable trusted-worker
+// checkpoints between provider verification and atomic Park-to-ledger handoff.
+type PRDevelopmentRepairOrchestrationStore interface {
+	ClaimPRDevelopmentRepairOrchestration(
+		ctx context.Context,
+		input PRDevelopmentRepairOrchestrationClaim,
+	) (PRDevelopmentRepairOrchestration, bool, error)
+	RenewPRDevelopmentRepairOrchestration(
+		ctx context.Context,
+		input PRDevelopmentRepairOrchestrationRenew,
+	) error
+	GetPRDevelopmentRepairOrchestration(
+		ctx context.Context,
+		attemptID string,
+	) (PRDevelopmentRepairOrchestration, error)
+	PinPRDevelopmentRepairOrchestration(
+		ctx context.Context,
+		input PRDevelopmentRepairOrchestrationPin,
+	) (PRDevelopmentRepairOrchestration, bool, error)
+	AcquirePRDevelopmentRepairOrchestrationController(
+		ctx context.Context,
+		input PRDevelopmentRepairOrchestrationControllerAcquire,
+	) (PRDevelopmentControllerLease, bool, error)
+	StartPRDevelopmentRepairOrchestrationModel(
+		ctx context.Context,
+		input PRDevelopmentRepairOrchestrationModelStart,
+	) (PRDevelopmentRepairOrchestration, bool, error)
+	CompletePRDevelopmentRepairOrchestrationModel(
+		ctx context.Context,
+		input PRDevelopmentRepairOrchestrationModelComplete,
+	) (PRDevelopmentRepairOrchestration, bool, error)
+	RecordPRDevelopmentRepairOrchestrationValidation(
+		ctx context.Context,
+		input PRDevelopmentRepairOrchestrationValidation,
+	) (PRDevelopmentRepairOrchestration, bool, error)
+	FailPRDevelopmentRepairOrchestration(
+		ctx context.Context,
+		input PRDevelopmentRepairOrchestrationFail,
+	) (PRDevelopmentRepairOrchestration, bool, error)
 }
 
 // PRDevelopmentControllerReader resolves one private stable thread owner and
