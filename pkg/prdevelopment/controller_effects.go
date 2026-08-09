@@ -617,9 +617,11 @@ func (runner *controllerEffectRunner) requirePreparedOperation(
 	operationID string,
 	request eventing.PRDevelopmentControllerOperationRequest,
 ) error {
+	statusCurrent := operation.Status == eventing.PRDevelopmentControllerOperationPending ||
+		runner.isFinalizedCommitPrepareReplay(operation, kind)
 	if operation.ID != operationID || operation.ControllerID != runner.controller.ID ||
 		operation.AttemptID != runner.source.attemptID || operation.Kind != kind ||
-		operation.Status != eventing.PRDevelopmentControllerOperationPending ||
+		!statusCurrent ||
 		operation.PreparedControllerRevision != runner.controller.Revision ||
 		operation.AgentID != runner.source.agentID ||
 		operation.WorkspaceID != runner.source.workspaceID ||
@@ -639,6 +641,36 @@ func (runner *controllerEffectRunner) requirePreparedOperation(
 		)
 	}
 	return nil
+}
+
+func (runner *controllerEffectRunner) isFinalizedCommitPrepareReplay(
+	operation eventing.PRDevelopmentControllerOperation,
+	kind eventing.PRDevelopmentControllerOperationKind,
+) bool {
+	result := operation.Result
+	return kind == eventing.PRDevelopmentControllerOperationCommit &&
+		operation.Status == eventing.PRDevelopmentControllerOperationFinalized &&
+		operation.RecoveryStagedAt == nil &&
+		operation.FinalizedAt != nil &&
+		operation.FinalControllerRevision == operation.PreparedControllerRevision &&
+		operation.FinalControllerPhase == eventing.PRDevelopmentControllerMutation &&
+		operation.FinalFenceHash == "" &&
+		validControllerSHA256(operation.ResultHash) &&
+		validControllerSHA256(operation.FinalHash) &&
+		operation.SourceTree == runner.controller.SourceTree &&
+		operation.LineVersion == runner.controller.LineVersion &&
+		operation.MutationEpoch == runner.controller.MutationEpoch &&
+		operation.TipCommit == runner.controller.TipCommit &&
+		operation.Tree == runner.controller.Tree &&
+		result.WorkspaceID == operation.WorkspaceID &&
+		result.IntentID == operation.Request.EffectIntentID &&
+		result.ParentCommit == operation.Request.ExpectedParent &&
+		result.Tree == operation.Request.ExpectedTree &&
+		result.CandidateDigest == operation.Request.CandidateDigest &&
+		validObjectID(result.Commit) && result.Commit != result.ParentCommit &&
+		len(result.Commit) == len(result.ParentCommit) &&
+		result.ChangedFiles > 0 && result.WorkspaceClean &&
+		!result.AlreadyOwned && !result.AlreadyApplied && !result.AlreadyParked
 }
 
 func (runner *controllerEffectRunner) pinForOperation(

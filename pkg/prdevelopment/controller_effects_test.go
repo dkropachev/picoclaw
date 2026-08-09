@@ -80,12 +80,13 @@ func newControllerEffectTestFixture(
 	}
 	fixture := &controllerEffectTestFixture{session: session, controller: controller}
 	fixture.journal = &fakeControllerEffectJournal{
-		t:            t,
-		calls:        &fixture.calls,
-		session:      session,
-		controller:   controller,
-		operations:   make(map[string]eventing.PRDevelopmentControllerOperation),
-		failFinalize: make(map[eventing.PRDevelopmentControllerOperationKind]int),
+		t:                    t,
+		calls:                &fixture.calls,
+		session:              session,
+		controller:           controller,
+		operations:           make(map[string]eventing.PRDevelopmentControllerOperation),
+		failFinalize:         make(map[eventing.PRDevelopmentControllerOperationKind]int),
+		loseFinalizeResponse: make(map[eventing.PRDevelopmentControllerOperationKind]int),
 	}
 	fixture.git = &fakeControllerGitBackend{t: t, calls: &fixture.calls}
 	runner, err := newControllerEffectRunnerWithBackend(
@@ -217,6 +218,82 @@ func TestControllerEffectRunnerAdoptCommitAndParkExactOrder(t *testing.T) {
 	replayed, err := fixture.runner.Park(context.Background(), committed, "Repair complete.", 2, nil)
 	if err != nil || replayed.FenceHash != fence.FenceHash || len(fixture.calls) != beforeReplay {
 		t.Fatalf("terminal Park replay = %#v, %v; calls = %#v", replayed, err, fixture.calls)
+	}
+}
+
+func TestControllerEffectRunnerReplaysFinalizedCommitAfterLostResponse(t *testing.T) {
+	t.Parallel()
+	fixture := newControllerEffectTestFixture(t, 0, 1, true)
+	candidate := gitworkspace.PinnedCandidate{
+		WorkspaceID:     fixture.session.WorkspaceID,
+		ParentCommit:    fixture.controller.TipCommit,
+		Tree:            strings.Repeat("6", 40),
+		CandidateDigest: strings.Repeat("8", 64),
+		ChangedFiles:    2,
+	}
+	commit := strings.Repeat("7", 40)
+	commitCalls := 0
+	fixture.git.commit = func(
+		request gitworkspace.PinnedCommitRequest,
+	) (gitworkspace.PinnedCommitResult, error) {
+		commitCalls++
+		requireTestPin(t, request.Pin, fixture.session, fixture.controller)
+		return gitworkspace.PinnedCommitResult{
+			WorkspaceID:     fixture.session.WorkspaceID,
+			IntentID:        request.IntentID,
+			ParentCommit:    request.ExpectedParent,
+			Tree:            request.ExpectedTree,
+			CandidateDigest: request.ExpectedCandidateDigest,
+			Commit:          commit,
+			ChangedFiles:    candidate.ChangedFiles,
+			WorkspaceClean:  true,
+			AlreadyApplied:  commitCalls > 1,
+		}, nil
+	}
+	fixture.journal.loseFinalizeResponse[eventing.PRDevelopmentControllerOperationCommit] = 1
+	_, err := fixture.runner.CommitCandidate(
+		context.Background(), candidate, "Apply the focused repair",
+	)
+	if err == nil {
+		t.Fatal("CommitCandidate() lost response error = nil")
+	}
+	operationID := fixture.runner.identities.CommitOperation
+	durable := fixture.journal.operations[operationID]
+	if durable.Status != eventing.PRDevelopmentControllerOperationFinalized {
+		t.Fatalf("lost-response operation = %#v", durable)
+	}
+	wantLostCalls := []string{"prepare:commit", "git:commit", "finalize:commit"}
+	if !slices.Equal(fixture.calls, wantLostCalls) {
+		t.Fatalf("lost-response calls = %#v, want %#v", fixture.calls, wantLostCalls)
+	}
+
+	fixture.calls = nil
+	restarted, err := newControllerEffectRunnerWithBackend(
+		fixture.journal,
+		fixture.git,
+		fixture.session,
+		eventing.PRDevelopmentControllerLease{Controller: fixture.journal.controller},
+	)
+	if err != nil {
+		t.Fatalf("restart controller effect runner: %v", err)
+	}
+	fixture.runner = restarted
+	replayed, err := restarted.CommitCandidate(
+		context.Background(), candidate, "Apply the focused repair",
+	)
+	if err != nil {
+		t.Fatalf("CommitCandidate() exact replay error = %v", err)
+	}
+	if !replayed.changed || replayed.commit != commit || commitCalls != 2 {
+		t.Fatalf("CommitCandidate() exact replay = %#v; Git calls = %d", replayed, commitCalls)
+	}
+	replayedDurable := fixture.journal.operations[operationID]
+	if replayedDurable.FinalHash != durable.FinalHash || replayedDurable.Result != durable.Result {
+		t.Fatalf("exact replay rewrote durable Commit: %#v", replayedDurable)
+	}
+	wantCalls := []string{"prepare:commit", "git:commit", "finalize:commit"}
+	if !slices.Equal(fixture.calls, wantCalls) {
+		t.Fatalf("restart replay calls = %#v, want %#v", fixture.calls, wantCalls)
 	}
 }
 
@@ -419,13 +496,14 @@ func TestControllerEffectRunnerResumeUsesFreshControllerReservation(t *testing.T
 }
 
 type fakeControllerEffectJournal struct {
-	t              *testing.T
-	calls          *[]string
-	session        eventing.PRDevelopmentRepairSession
-	controller     eventing.PRDevelopmentController
-	operations     map[string]eventing.PRDevelopmentControllerOperation
-	failFinalize   map[eventing.PRDevelopmentControllerOperationKind]int
-	mutatePrepared func(*eventing.PRDevelopmentControllerOperation)
+	t                    *testing.T
+	calls                *[]string
+	session              eventing.PRDevelopmentRepairSession
+	controller           eventing.PRDevelopmentController
+	operations           map[string]eventing.PRDevelopmentControllerOperation
+	failFinalize         map[eventing.PRDevelopmentControllerOperationKind]int
+	loseFinalizeResponse map[eventing.PRDevelopmentControllerOperationKind]int
+	mutatePrepared       func(*eventing.PRDevelopmentControllerOperation)
 }
 
 func (journal *fakeControllerEffectJournal) PreparePRDevelopmentControllerOperation(
@@ -490,6 +568,17 @@ func (journal *fakeControllerEffectJournal) FinalizePRDevelopmentControllerOpera
 	durable.AlreadyOwned = false
 	durable.AlreadyApplied = false
 	durable.AlreadyParked = false
+	if operation.Status == eventing.PRDevelopmentControllerOperationFinalized {
+		if operation.Kind != eventing.PRDevelopmentControllerOperationCommit ||
+			operation.Result != durable {
+			return eventing.PRDevelopmentControllerOperationTransition{}, false,
+				errors.New("changed finalized operation replay")
+		}
+		return eventing.PRDevelopmentControllerOperationTransition{
+			Controller: journal.controller,
+			Operation:  operation,
+		}, false, nil
+	}
 	operation.Status = eventing.PRDevelopmentControllerOperationFinalized
 	operation.Result = durable
 	controller := journal.controller
@@ -542,8 +631,19 @@ func (journal *fakeControllerEffectJournal) FinalizePRDevelopmentControllerOpera
 	default:
 		journal.t.Fatalf("unexpected operation kind %q", operation.Kind)
 	}
+	finalizedAt := journal.session.UpdatedAt
+	operation.FinalizedAt = &finalizedAt
+	operation.FinalControllerRevision = controller.Revision
+	operation.FinalControllerPhase = controller.Phase
+	operation.ResultHash = strings.Repeat("d", 64)
+	operation.FinalHash = strings.Repeat("e", 64)
 	journal.controller = controller
 	journal.operations[operation.ID] = operation
+	if journal.loseFinalizeResponse[operation.Kind] > 0 {
+		journal.loseFinalizeResponse[operation.Kind]--
+		return eventing.PRDevelopmentControllerOperationTransition{}, false,
+			errors.New("injected lost finalization response")
+	}
 	return eventing.PRDevelopmentControllerOperationTransition{
 		Controller: controller,
 		Operation:  operation,

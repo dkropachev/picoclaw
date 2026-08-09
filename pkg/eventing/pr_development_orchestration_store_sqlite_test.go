@@ -1042,6 +1042,117 @@ func TestStorePRDevelopmentRepairOrchestrationCommitRequiresValidatedCandidate(t
 	assert.Equal(t, validated.Validation.CIStatus, ledger.Entries[0].CIStatus)
 }
 
+func TestStorePRDevelopmentRepairOrchestrationCommitReplayAfterLeaseExtension(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	fixture := newPRDevelopmentOrchestrationFixture(t)
+	run := startAndCompletePRDevelopmentOrchestrationForTest(t, fixture)
+	validation := validPRDevelopmentOrchestrationValidationForTest(fixture)
+	validation.CandidateTree = strings.Repeat("c", len(fixture.Lease.Controller.Tree))
+	validation.CandidateDigest = strings.Repeat("d", 64)
+	validation.ChangedFiles = 2
+	validation.NoChanges = false
+	_, changed, err := fixture.Operation.Store.RecordPRDevelopmentRepairOrchestrationValidation(
+		ctx, validation,
+	)
+	require.NoError(t, err)
+	require.True(t, changed)
+	operation, result, committed := commitOperationForTest(
+		t, fixture.Operation, fixture.Lease, 983,
+	)
+	require.NotNil(t, committed.Operation.FinalizedAt)
+
+	require.NoError(t, fixture.Operation.Store.RenewPRDevelopmentControllerLease(
+		ctx,
+		PRDevelopmentControllerRenew{
+			ControllerID: committed.Controller.ID,
+			AttemptID:    operation.AttemptID,
+			LeaseToken:   committed.Controller.LeaseToken,
+			LeaseEpoch:   committed.Controller.LeaseEpoch,
+			Lease:        10 * time.Minute,
+		},
+	))
+	require.NotNil(t, run.ClaimUntil)
+	*fixture.Operation.Clock = run.ClaimUntil.Add(time.Second)
+	reclaimed, claimed, err := fixture.Operation.Store.ClaimPRDevelopmentRepairOrchestration(
+		ctx,
+		PRDevelopmentRepairOrchestrationClaim{
+			WorkerLabel: "orchestration-worker",
+			Lease:       10 * time.Minute,
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	extended, acquired, err := fixture.Operation.Store.AcquirePRDevelopmentRepairOrchestrationController(
+		ctx,
+		PRDevelopmentRepairOrchestrationControllerAcquire{
+			CaseID:           fixture.Operation.Case.ID,
+			AttemptID:        run.AttemptID,
+			ClaimToken:       reclaimed.ClaimToken,
+			ExpectedRevision: committed.Controller.Revision,
+			WorkerLabel:      "orchestration-worker",
+			Lease:            10 * time.Minute,
+		},
+	)
+	require.NoError(t, err)
+	assert.False(t, acquired, "exact replay must not rotate controller authority")
+	assert.Equal(t, committed.Controller.LeaseToken, extended.Controller.LeaseToken)
+	assert.Equal(t, committed.Controller.LeaseEpoch, extended.Controller.LeaseEpoch)
+	assert.Equal(t, committed.Controller.Revision, extended.Controller.Revision)
+	assert.True(t, extended.Controller.UpdatedAt.After(*committed.Operation.FinalizedAt))
+	reprepared, changed, err := fixture.Operation.Store.PreparePRDevelopmentControllerOperation(
+		ctx,
+		PRDevelopmentControllerOperationPrepare{
+			OperationID:      operation.ID,
+			ControllerID:     operation.ControllerID,
+			AttemptID:        operation.AttemptID,
+			ExpectedRevision: operation.PreparedControllerRevision,
+			LeaseToken:       extended.Controller.LeaseToken,
+			LeaseEpoch:       operation.MutationLeaseEpoch,
+			Kind:             operation.Kind,
+			Request:          operation.Request,
+		},
+	)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Equal(t, PRDevelopmentControllerOperationFinalized, reprepared.Status)
+	assert.Equal(t, committed.Operation.FinalHash, reprepared.FinalHash)
+	assert.Equal(t, committed.Operation.Result, reprepared.Result)
+
+	replayed, changed, err := fixture.Operation.Store.FinalizePRDevelopmentControllerOperation(
+		ctx,
+		PRDevelopmentControllerOperationFinalize{
+			ControllerID:     operation.ControllerID,
+			AttemptID:        operation.AttemptID,
+			OperationID:      operation.ID,
+			ExpectedRevision: operation.PreparedControllerRevision,
+			LeaseToken:       extended.Controller.LeaseToken,
+			LeaseEpoch:       operation.MutationLeaseEpoch,
+			Result:           result,
+		},
+	)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Equal(t, committed.Operation.FinalHash, replayed.Operation.FinalHash)
+
+	_, _, parked := parkOperationForTest(
+		t,
+		fixture.Operation,
+		operationLeaseFromTransition(replayed),
+		[]PRDevelopmentControllerOperation{replayed.Operation},
+		run.Summary,
+		run.Iterations,
+		984,
+	)
+	require.NotNil(t, parked.Fence)
+	completed, err := fixture.Operation.Store.GetPRDevelopmentRepairOrchestration(
+		ctx, run.AttemptID,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, PRDevelopmentRepairOrchestrationCompleted, completed.Phase)
+	assert.Equal(t, parked.Fence.FenceHash, completed.FenceHash)
+}
+
 func TestStorePRDevelopmentRepairOrchestrationParkAtomicallyCompletesLedger(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
