@@ -619,6 +619,53 @@ func TestRepairHandlerRejectsUnsafeRequestsBeforeAdmission(t *testing.T) {
 	}
 }
 
+func TestRepairHandlerMapsControllerOwnershipConflictsSafely(t *testing.T) {
+	tests := []error{
+		eventing.ErrPRDevelopmentControllerConflict,
+		eventing.ErrPRDevelopmentControllerActive,
+	}
+	for _, storeErr := range tests {
+		t.Run(storeErr.Error(), func(t *testing.T) {
+			captured := testCapturedDevelopmentCase()
+			store := &fakeRepairStore{
+				fakeReader: &fakeReader{detail: captured},
+				workbench: eventing.PRDevelopmentWorkbench{
+					Case: captured,
+					Conversation: eventing.PRDevelopmentConversation{
+						CaseID:   captured.ID,
+						Messages: []eventing.PRDevelopmentMessage{},
+					},
+				},
+				admitErr: storeErr,
+			}
+			service, err := NewService(ServiceConfig{
+				Store:         store,
+				RepairStore:   store,
+				RepairEnabled: true,
+				RepairAgentReady: func(string) bool {
+					return true
+				},
+				AgentID: "main",
+			})
+			if err != nil {
+				t.Fatalf("NewService() error = %v", err)
+			}
+			request := httptest.NewRequest(
+				http.MethodPost,
+				RuntimeRoutePrefix+"/"+testDevelopmentCaseID+"/repair",
+				strings.NewReader(`{"expected_conversation_version":0,"expected_repair_revision":0,"request_id":"prq_dddddddddddddddddddddddddddddddd","instruction":"Fix it."}`),
+			)
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			(&Handler{Service: service}).ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusConflict ||
+				!strings.Contains(recorder.Body.String(), "development repair changed") {
+				t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestCaseCursorBindsFiltersAndRejectsNoncanonicalValues(t *testing.T) {
 	cursor := eventing.PRDevelopmentCaseCursor{
 		UpdatedAt: time.Date(2026, 8, 5, 12, 30, 0, 123, time.UTC),
