@@ -888,6 +888,8 @@ func adversarialMakePinnedWorkspaceLegacy(
 	}
 	workspace.ID = oldID
 	workspace.Path = oldPath
+	workspace.PinnedReservationRotationCount = 0
+	workspace.PinnedReservationRotationTailHash = ""
 	state.Workspaces[oldID] = workspace
 	if repository := state.Repositories[workspace.RepoID]; repository != nil {
 		for index, candidate := range repository.WorkspaceIDs {

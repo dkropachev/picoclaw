@@ -1140,7 +1140,7 @@ func validateDevelopmentLineInventory(state *storeState) error {
 			return errors.New("git workspace has an orphaned development line owner")
 		}
 	}
-	return nil
+	return validatePinnedReservationRotationInventory(state)
 }
 
 func validatePinnedLineAdoptRequest(
@@ -1355,6 +1355,12 @@ func requireFreshPinnedLineReservation(
 		)
 	}
 	reservationHash := developmentLineReservationHash(reservation)
+	if pinnedReservationRotationHashUsed(state, reservationHash) {
+		return fmt.Errorf(
+			"%w: mutation reservation was already used by a reservation rotation",
+			ErrPinnedLineConflict,
+		)
+	}
 	for _, line := range state.DevelopmentLines {
 		if line == nil {
 			continue

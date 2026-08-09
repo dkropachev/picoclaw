@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	stateVersion                    = 2
+	stateVersion                    = 3
 	historyLimit                    = 1000
 	inventoryLockFile               = "inventory.lock"
 	maxPinnedGitMetadataEntries     = 1_000_000
@@ -101,21 +101,23 @@ type LockInfo struct {
 }
 
 type WorkspaceRecord struct {
-	ID                string     `json:"id"`
-	RepoID            string     `json:"repo_id"`
-	RemoteURL         string     `json:"remote_url"`
-	Ref               string     `json:"ref,omitempty"`
-	PinnedSourceRef   string     `json:"pinned_source_ref,omitempty"`
-	PinnedCommit      string     `json:"pinned_commit,omitempty"`
-	Path              string     `json:"path"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
-	LastWorkAt        time.Time  `json:"last_work_at,omitempty"`
-	LastCleanedAt     time.Time  `json:"last_cleaned_at,omitempty"`
-	PreservedBranch   string     `json:"preserved_branch,omitempty"`
-	DevelopmentLineID string     `json:"development_line_id,omitempty"`
-	LockedBy          *LockInfo  `json:"locked_by,omitempty"`
-	DroppedAt         *time.Time `json:"dropped_at,omitempty"`
+	ID                                string     `json:"id"`
+	RepoID                            string     `json:"repo_id"`
+	RemoteURL                         string     `json:"remote_url"`
+	Ref                               string     `json:"ref,omitempty"`
+	PinnedSourceRef                   string     `json:"pinned_source_ref,omitempty"`
+	PinnedCommit                      string     `json:"pinned_commit,omitempty"`
+	Path                              string     `json:"path"`
+	CreatedAt                         time.Time  `json:"created_at"`
+	UpdatedAt                         time.Time  `json:"updated_at"`
+	LastWorkAt                        time.Time  `json:"last_work_at,omitempty"`
+	LastCleanedAt                     time.Time  `json:"last_cleaned_at,omitempty"`
+	PreservedBranch                   string     `json:"preserved_branch,omitempty"`
+	DevelopmentLineID                 string     `json:"development_line_id,omitempty"`
+	PinnedReservationRotationCount    int        `json:"pinned_reservation_rotation_count"`
+	PinnedReservationRotationTailHash string     `json:"pinned_reservation_rotation_tail_hash"`
+	LockedBy                          *LockInfo  `json:"locked_by,omitempty"`
+	DroppedAt                         *time.Time `json:"dropped_at,omitempty"`
 }
 
 type HistoryEntry struct {
@@ -189,34 +191,39 @@ type ReconcileResult struct {
 }
 
 type storeState struct {
-	Version                int                               `json:"version"`
-	Repositories           map[string]*RepositoryRecord      `json:"repositories"`
-	Workspaces             map[string]*WorkspaceRecord       `json:"workspaces"`
-	DevelopmentLines       map[string]*developmentLineRecord `json:"development_lines,omitempty"`
-	History                []HistoryEntry                    `json:"history,omitempty"`
-	DevelopmentLineHistory []HistoryEntry                    `json:"development_line_history,omitempty"`
+	Version                    int                                          `json:"version"`
+	Repositories               map[string]*RepositoryRecord                 `json:"repositories"`
+	Workspaces                 map[string]*WorkspaceRecord                  `json:"workspaces"`
+	DevelopmentLines           map[string]*developmentLineRecord            `json:"development_lines,omitempty"`
+	PinnedReservationRotations map[string][]pinnedReservationRotationRecord `json:"pinned_reservation_rotations,omitempty"`
+	History                    []HistoryEntry                               `json:"history,omitempty"`
+	DevelopmentLineHistory     []HistoryEntry                               `json:"development_line_history,omitempty"`
 }
 
-// Version 2 and later use a string discriminator on disk. Version-1 binaries
+// Version 2 and later use a string discriminator on disk. Older binaries
 // decode this field as an int, so they fail before rewriting an inventory that
-// contains controller-owned development lines. Numeric versions remain
+// contains rollback-fenced controller state. A version-2 binary parses the
+// version-3 string but rejects it against its compiled maximum before it can
+// ignore and rewrite reservation-rotation evidence. Numeric versions remain
 // accepted only for the legacy version-0/version-1 migration path.
 func (state storeState) MarshalJSON() ([]byte, error) {
 	type inventoryWire struct {
-		Version                string                            `json:"version"`
-		Repositories           map[string]*RepositoryRecord      `json:"repositories"`
-		Workspaces             map[string]*WorkspaceRecord       `json:"workspaces"`
-		DevelopmentLines       map[string]*developmentLineRecord `json:"development_lines,omitempty"`
-		History                []HistoryEntry                    `json:"history,omitempty"`
-		DevelopmentLineHistory []HistoryEntry                    `json:"development_line_history,omitempty"`
+		Version                    string                                       `json:"version"`
+		Repositories               map[string]*RepositoryRecord                 `json:"repositories"`
+		Workspaces                 map[string]*WorkspaceRecord                  `json:"workspaces"`
+		DevelopmentLines           map[string]*developmentLineRecord            `json:"development_lines,omitempty"`
+		PinnedReservationRotations map[string][]pinnedReservationRotationRecord `json:"pinned_reservation_rotations,omitempty"`
+		History                    []HistoryEntry                               `json:"history,omitempty"`
+		DevelopmentLineHistory     []HistoryEntry                               `json:"development_line_history,omitempty"`
 	}
 	return json.Marshal(inventoryWire{
-		Version:                strconv.Itoa(state.Version),
-		Repositories:           state.Repositories,
-		Workspaces:             state.Workspaces,
-		DevelopmentLines:       state.DevelopmentLines,
-		History:                state.History,
-		DevelopmentLineHistory: state.DevelopmentLineHistory,
+		Version:                    strconv.Itoa(state.Version),
+		Repositories:               state.Repositories,
+		Workspaces:                 state.Workspaces,
+		DevelopmentLines:           state.DevelopmentLines,
+		PinnedReservationRotations: state.PinnedReservationRotations,
+		History:                    state.History,
+		DevelopmentLineHistory:     state.DevelopmentLineHistory,
 	})
 }
 
@@ -225,12 +232,13 @@ func (state *storeState) UnmarshalJSON(data []byte) error {
 		return errors.New("git workspace inventory target is nil")
 	}
 	type inventoryWire struct {
-		Version                json.RawMessage                   `json:"version"`
-		Repositories           map[string]*RepositoryRecord      `json:"repositories"`
-		Workspaces             map[string]*WorkspaceRecord       `json:"workspaces"`
-		DevelopmentLines       map[string]*developmentLineRecord `json:"development_lines,omitempty"`
-		History                []HistoryEntry                    `json:"history,omitempty"`
-		DevelopmentLineHistory []HistoryEntry                    `json:"development_line_history,omitempty"`
+		Version                    json.RawMessage                              `json:"version"`
+		Repositories               map[string]*RepositoryRecord                 `json:"repositories"`
+		Workspaces                 map[string]*WorkspaceRecord                  `json:"workspaces"`
+		DevelopmentLines           map[string]*developmentLineRecord            `json:"development_lines,omitempty"`
+		PinnedReservationRotations map[string][]pinnedReservationRotationRecord `json:"pinned_reservation_rotations,omitempty"`
+		History                    []HistoryEntry                               `json:"history,omitempty"`
+		DevelopmentLineHistory     []HistoryEntry                               `json:"development_line_history,omitempty"`
 	}
 	var wire inventoryWire
 	if err := json.Unmarshal(data, &wire); err != nil {
@@ -263,6 +271,7 @@ func (state *storeState) UnmarshalJSON(data []byte) error {
 	state.Repositories = wire.Repositories
 	state.Workspaces = wire.Workspaces
 	state.DevelopmentLines = wire.DevelopmentLines
+	state.PinnedReservationRotations = wire.PinnedReservationRotations
 	state.History = wire.History
 	state.DevelopmentLineHistory = wire.DevelopmentLineHistory
 	return nil
@@ -452,6 +461,16 @@ func (m *Manager) AcquirePinned(
 		return WorkspaceInfo{}, err
 	}
 	reservationHash := developmentLineReservationHash(reservationKey)
+	owned, duplicate := findPinnedReservationWorkspaceLocked(st, reservationKey)
+	if duplicate {
+		return WorkspaceInfo{}, errors.New("pinned reservation owns multiple git workspaces")
+	}
+	if pinnedReservationRotationRevoked(st, reservationHash) ||
+		(pinnedReservationRotationHashUsed(st, reservationHash) && owned == nil) {
+		return WorkspaceInfo{}, errors.New(
+			"pinned reservation was released by a reservation rotation",
+		)
+	}
 	for _, line := range st.DevelopmentLines {
 		if line == nil {
 			continue
@@ -476,10 +495,6 @@ func (m *Manager) AcquirePinned(
 	now := m.now().UTC()
 	repositoryID := repoID(repo)
 
-	owned, duplicate := findPinnedReservationWorkspaceLocked(st, reservationKey)
-	if duplicate {
-		return WorkspaceInfo{}, errors.New("pinned reservation owns multiple git workspaces")
-	}
 	if owned != nil {
 		if owned.RepoID != repositoryID || owned.RemoteURL != repo ||
 			owned.Ref != sourceRef || owned.PinnedSourceRef != sourceRef ||
@@ -631,6 +646,13 @@ func (m *Manager) releaseReservations(
 	}
 	if pinned {
 		reservationHash := developmentLineReservationHash(reservationKey)
+		owned, duplicate := findPinnedReservationWorkspaceLocked(st, reservationKey)
+		if duplicate || pinnedReservationRotationRevoked(st, reservationHash) ||
+			(pinnedReservationRotationHashUsed(st, reservationHash) && owned == nil) {
+			return nil, errors.New(
+				"pinned reservation was revoked by a reservation rotation",
+			)
+		}
 		for _, line := range st.DevelopmentLines {
 			if line != nil && (line.MutationReservationHash == reservationHash ||
 				developmentLineReservationRetired(line, reservationHash)) {
@@ -964,10 +986,11 @@ func (m *Manager) lockInventory(ctx context.Context) (func(), error) {
 
 func (m *Manager) loadLocked() (*storeState, error) {
 	st := &storeState{
-		Version:          stateVersion,
-		Repositories:     map[string]*RepositoryRecord{},
-		Workspaces:       map[string]*WorkspaceRecord{},
-		DevelopmentLines: map[string]*developmentLineRecord{},
+		Version:                    stateVersion,
+		Repositories:               map[string]*RepositoryRecord{},
+		Workspaces:                 map[string]*WorkspaceRecord{},
+		DevelopmentLines:           map[string]*developmentLineRecord{},
+		PinnedReservationRotations: map[string][]pinnedReservationRotationRecord{},
 	}
 	data, err := os.ReadFile(m.statePath())
 	if err != nil {
@@ -991,8 +1014,21 @@ func (m *Manager) loadLocked() (*storeState, error) {
 	if st.DevelopmentLines == nil {
 		st.DevelopmentLines = map[string]*developmentLineRecord{}
 	}
-	if st.Version < 0 || st.Version > stateVersion {
-		return nil, fmt.Errorf("unsupported git workspace inventory version %d", st.Version)
+	if st.PinnedReservationRotations == nil {
+		st.PinnedReservationRotations = map[string][]pinnedReservationRotationRecord{}
+	}
+	if versionErr := validateGitWorkspaceInventoryVersion(st.Version, stateVersion); versionErr != nil {
+		return nil, versionErr
+	}
+	if st.Version < 3 && len(st.PinnedReservationRotations) != 0 {
+		return nil, errors.New(
+			"pre-version-3 inventory contains rollback-fenced reservation rotations",
+		)
+	}
+	if st.Version < 3 && hasPinnedReservationRotationAnchors(st) {
+		return nil, errors.New(
+			"pre-version-3 inventory contains rollback-fenced reservation rotation anchors",
+		)
 	}
 	if st.Version == 0 || st.Version == 1 {
 		if len(st.DevelopmentLines) != 0 || len(st.DevelopmentLineHistory) != 0 {
@@ -1003,13 +1039,23 @@ func (m *Manager) loadLocked() (*storeState, error) {
 		if migrationErr := m.migrateLegacyPinnedWorkspaces(st); migrationErr != nil {
 			return nil, migrationErr
 		}
-		st.Version = stateVersion
 	}
+	if st.Version < 3 {
+		initializePinnedReservationRotationAnchors(st)
+	}
+	st.Version = stateVersion
 	partitionDevelopmentLineHistory(st)
 	if err := validateDevelopmentLineInventory(st); err != nil {
 		return nil, err
 	}
 	return st, nil
+}
+
+func validateGitWorkspaceInventoryVersion(version, maximum int) error {
+	if version < 0 || version > maximum {
+		return fmt.Errorf("unsupported git workspace inventory version %d", version)
+	}
+	return nil
 }
 
 func (m *Manager) migrateLegacyPinnedWorkspaces(st *storeState) error {
@@ -1250,15 +1296,16 @@ func (m *Manager) createPinnedWorkspaceLocked(
 		return nil, fmt.Errorf("clone pinned git workspace: %w", err)
 	}
 	workspace := &WorkspaceRecord{
-		ID:              id,
-		RepoID:          repository.ID,
-		RemoteURL:       remoteURL,
-		Ref:             sourceRef,
-		PinnedSourceRef: sourceRef,
-		PinnedCommit:    expectedCommit,
-		Path:            stagedPath,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		ID:                                id,
+		RepoID:                            repository.ID,
+		RemoteURL:                         remoteURL,
+		Ref:                               sourceRef,
+		PinnedSourceRef:                   sourceRef,
+		PinnedCommit:                      expectedCommit,
+		Path:                              stagedPath,
+		CreatedAt:                         now,
+		UpdatedAt:                         now,
+		PinnedReservationRotationTailHash: emptyPinnedReservationRotationDigest(),
 	}
 	if err := m.preparePinnedWorkspace(
 		ctx,

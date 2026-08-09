@@ -158,6 +158,14 @@ func (m *Manager) rejectSealedPinnedOperation(
 		return err
 	}
 	reservationHash := developmentLineReservationHash(reservationKey)
+	workspace, duplicate := findPinnedReservationWorkspaceLocked(state, reservationKey)
+	if duplicate || pinnedReservationRotationRevoked(state, reservationHash) ||
+		(pinnedReservationRotationHashUsed(state, reservationHash) && workspace == nil) {
+		return fmt.Errorf(
+			"%w: mutation reservation was revoked by a reservation rotation",
+			ErrPinnedLineConflict,
+		)
+	}
 	for _, line := range state.DevelopmentLines {
 		if line == nil {
 			continue
@@ -197,10 +205,7 @@ func (m *Manager) acquirePinnedOperation(
 	if err := m.validateRoot(); err != nil {
 		return nil, false, nil, err
 	}
-	digest := sha256.Sum256(append(
-		[]byte("picoclaw-pinned-operation-lock-v1\x00"),
-		[]byte(reservationKey)...,
-	))
+	digest := pinnedOperationLockDigest(reservationKey)
 	if existing, ok := ctx.Value(pinnedOperationContextKey{}).(*pinnedOperationToken); ok &&
 		existing != nil && existing.active.Load() {
 		if existing.root != m.rootDir || existing.reservation != digest {
@@ -232,6 +237,13 @@ func (m *Manager) acquirePinnedOperation(
 		})
 	}
 	return token, false, release, nil
+}
+
+func pinnedOperationLockDigest(reservationKey string) [sha256.Size]byte {
+	return sha256.Sum256(append(
+		[]byte("picoclaw-pinned-operation-lock-v1\x00"),
+		[]byte(reservationKey)...,
+	))
 }
 
 // SnapshotPinnedCandidate builds a content-addressed candidate through a

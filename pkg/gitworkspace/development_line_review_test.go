@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -474,23 +475,36 @@ func TestManagerPinnedDevelopmentLineParkIsTerminalOutsideOuterOperation(t *test
 	}
 }
 
-func TestManagerInventoryVersionTwoFencesVersionOneDecoder(t *testing.T) {
+func TestManagerInventoryVersionThreeFencesOlderDecoders(t *testing.T) {
 	fixture := newPinnedCommitTestFixture(t, "pr-development/version-fence")
 	data, err := os.ReadFile(filepath.Join(fixture.manager.RootDir(), "inventory.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `"version": "2"`) {
-		t.Fatalf("inventory lacks tagged version-2 fence: %s", data)
+	if !strings.Contains(string(data), `"version": "3"`) {
+		t.Fatalf("inventory lacks tagged version-3 fence: %s", data)
 	}
 	var legacy struct {
 		Version int `json:"version"`
 	}
-	if err := json.Unmarshal(data, &legacy); err == nil {
-		t.Fatal("version-1 numeric decoder accepted version-2 inventory")
+	if decodeErr := json.Unmarshal(data, &legacy); decodeErr == nil {
+		t.Fatal("version-1 numeric decoder accepted version-3 inventory")
+	}
+	var versionTwo struct {
+		Version string `json:"version"`
+	}
+	if decodeErr := json.Unmarshal(data, &versionTwo); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	parsed, err := strconv.Atoi(versionTwo.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateGitWorkspaceInventoryVersion(parsed, 2); err == nil {
+		t.Fatal("version-2 decoder accepted version-3 inventory")
 	}
 	if _, err := fixture.manager.Stats(context.Background()); err != nil {
-		t.Fatalf("version-2 manager failed to reload tagged inventory: %v", err)
+		t.Fatalf("version-3 manager failed to reload tagged inventory: %v", err)
 	}
 }
 
