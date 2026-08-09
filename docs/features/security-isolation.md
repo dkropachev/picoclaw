@@ -116,6 +116,23 @@ retaining the private branch for a separate reservation-free review. Operation,
 request/result, claim, bearer, checkout, ref, commit, fence, and repair-session
 evidence remain structurally absent from public, browser, model, generic
 workspace, workflow, tool, log, provider, and stats surfaces.
+Local-CI validation is a separate mandatory security domain over exact
+controller-owned candidate evidence. Git Workspaces materializes the immutable
+pre-attempt parent and current candidate as bounded `.git`-free disposable
+roots and a complete SHA-256 manifest; discovery reads both but executes
+nothing. An explicit local plan is authoritative; otherwise a bounded
+repository-native quick profile precedes supported GitHub workflow fallback,
+and a multi-executable GitHub job is rejected because accepted steps run in
+independent fresh sandboxes. Required steps run only in the Linux Bubblewrap
+backend after a user-systemd cgroup-v2 supervisor handshake, with a clean
+allowlisted environment, explicit controller-provided read-only offline
+dependencies, no network or ambient credentials, bounded filesystems and
+process/output/time resources, and complete cleanup. Missing support or an
+offline dependency fails closed; there is no host or generic-isolation
+fallback. Exact-manifest discovery records and execution evidence persist, but
+production success reuse is disabled until mutable host toolchains and
+dependency mounts have complete immutable manifests. None of that evidence
+grants controller, Git, workflow, model, provider, UI, or publication authority.
 Schema v5 removes aliases mechanically derived from account names or concrete
 model IDs, clears their references rather than guessing replacements, and
 preserves legacy web-search mappings as explicit custom aliases instead of
@@ -128,8 +145,9 @@ materialization fail closed without exposing local paths or payload detail.
 ## Reconstruction Notes
 
 - Similarity target: recreate secret-preserving config behavior, credential
-  store CRUD, dashboard auth controls, HTTP guard checks, and optional process
-  isolation with fail-closed setup.
+  store CRUD, dashboard auth controls, HTTP guard checks, optional process
+  isolation with fail-closed setup, and the mandatory fail-closed local-CI
+  sandbox and exact-success evidence cache.
 - Core types/functions: secure string config helpers, credential store,
   dashboard auth middleware, CSRF/logout handlers, HTTP guard, isolation runtime,
   token, OAuth response parsing, PKCE helpers, strict bounded request decoders,
@@ -138,7 +156,11 @@ materialization fail closed without exposing local paths or payload detail.
   and controller-only `gitworkspace.Manager.AdoptPinnedLine`,
   `ResumePinnedLine`, `ParkPinnedLine`, `SnapshotPinnedLineReview`,
   `RecoverPinnedLineAdoptReservation`, and
-  `RecoverPinnedLineResumeReservation`.
+  `RecoverPinnedLineResumeReservation`; local validation additionally uses
+  `pkg/prdevelopment/localci` and
+  `gitworkspace.Manager.WithPinnedCandidateValidationRoots` with
+  `PinnedCandidateValidationRequest`, `PinnedCandidateValidationRoots`, and
+  `PinnedTreeManifest`.
 - Security boundaries also include compiler-only private workflow admission,
   integrity-bound local context and frozen-media persistence, pseudonymous
   provider affinity, mandatory observation projection, and the case-owned
@@ -154,7 +176,12 @@ materialization fail closed without exposing local paths or payload detail.
   The operation-recovery boundary additionally keeps schema-v13 request/result
   evidence, live claims, and staged replacement authority inside the existing
   controller store, while the Git composites hold old and fresh reservation
-  locks continuously across convergence and revocation.
+  locks continuously across convergence and revocation. The local-CI boundary
+  keeps exact parent/candidate roots, their complete manifest, repository-owned
+  definitions, exact-manifest discovery index, Bubblewrap processes,
+  user-systemd/cgroup-v2 supervision, output, environment identity, and evidence
+  material outside retained checkouts and every model, workflow, browser,
+  provider, eventing, and generic workspace surface.
 - Runtime ordering: load security config, normalize protected values, validate
   access or target, execute guarded storage/network/process operation, redact
   sensitive output, and emit clear errors; for frozen media, preflight the
@@ -167,7 +194,18 @@ materialization fail closed without exposing local paths or payload detail.
   controller effects, commit the exact private operation before Git and
   finalize only its exact result; after expiry, claim that operation, perform
   only its kind-specific reconciliation while renewing the claim, and atomically
-  install fresh authority or retire old before any later review access.
+  install fresh authority or retire old before any later review access. For
+  local CI, materialize and hash both exact snapshots under the reservation
+  operation lock, discover both without execution using authoritative explicit,
+  native-quick-profile, then supported GitHub fallback precedence, and reject
+  definition drift or stateful multi-executable GitHub jobs. Reuse discovery
+  only under the exact two manifests and implementation versions, resolve and
+  bind the trusted environment, require controller-provided offline dependency
+  mounts, complete the Bubblewrap plus user-systemd/cgroup-v2 handshake, run
+  every required step in a fresh dedicated sandbox, revalidate the candidate,
+  clean up, and only then return canonical persistent evidence. Do not reuse a
+  passing production result while any toolchain or dependency mount lacks a
+  complete immutable manifest.
 - Non-obvious constraints: masked secure values preserve existing secrets,
   private network denial is the default, unsupported isolation does not fall back
   to unisolated execution, generated auth tokens must remain revocable, and a
@@ -213,6 +251,16 @@ materialization fail closed without exposing local paths or payload detail.
   bearers through ordinary controller reads. Mandatory linked v12 evidence for a
   recovered Adopt, Resume, or Commit is already finalized audit material; Park
   creates no replacement bearer or mutation capability for review.
+  Local-CI isolation is mandatory and non-substitutable: an unavailable backend
+  is a failed validation, never permission to run on the host. Repository
+  content cannot supply inherited environment, credentials, network, writable
+  dependency/evidence state, or a retained checkout. Persistent discovery
+  matches the exact parent/candidate manifests and implementation versions.
+  Future passing-result reuse must additionally match the complete candidate/
+  manifest/plan/environment/toolchain/sandbox/platform identity and an immutable
+  toolchain/dependency manifest; the mutable-host production backend disables
+  it. Definition drift is always incomplete, while dependency-only drift changes
+  environment identity.
 
 ## Requirements
 
@@ -255,6 +303,7 @@ materialization fail closed without exposing local paths or payload detail.
 | `FR-SEC-033` | MUST | Schema-v11 PR-development ledger storage is a private evidence and review-terminalization capability. It accepts an attempt account only for an exact validated unreviewed controller fence and derives its owner case ordinal, commit/tree/no-change tuple, and mutation-stage fence hash rather than trusting caller copies. It accepts the paired structured review only immediately after that attempt and under the exact live reservation-free review lease; one transaction finalizes the authenticated fence/controller proof and appends the exact outcome/findings, so an independently finished fence without its ledger row cannot be backfilled. Absolute attempt/review ordinals preserve controller fence order, while the first post-upgrade row may authenticate an unreviewed parked fence without migration backfill and older reviewed fences may be skipped. Every free-form value is bounded UTF-8, every Git/digest value is canonical, review finding count and aggregate bytes are capped, timestamps are nonregressing, rows and findings are immutable, exact authenticated retries are no-write, and changed or out-of-order replay conflicts. Complete reads hold one snapshot while revalidating provider thread membership, owner session/case, controller/fence chain, attempt/review alternation and pairing, stage-specific fence hashes, timestamps, structured findings, and domain-separated entry/checkpoint hash chains. Logical compaction can only append a summary over an exact later fully reviewed prefix digest; it never deletes or updates raw entries, findings, or old checkpoints. The private context snapshot atomically binds the selected ordinal, complete thread high-water, and ledger. Its pure model projection excludes every local ID, provenance value, controller/lease/reservation/workspace/source field, internal diagnostic, hash, and CI digest; it labels included review/code/history text untrusted, orders only by authenticated ordinals, never substrings feedback or drops a mandatory ledger suffix record, and deterministically reports optional omissions. Oversized mandatory history requires compaction instead of prompt/provider caching or silent truncation. Migration creates empty tables only. No ledger API or projector executes Git/filesystem, CI, a model/reviewer/compactor, a workflow/gate, HTTP/UI, provider access, publication, push, merge, or acknowledgement, and the current chat/repair worker remains unwired. | Durable attempt memory and compaction must not let caller-supplied commit claims, prompt-cache eviction, review text, migration guesses, silent truncation, hash-chain corruption, or a storage row become execution authority, erase audit history, leak private controller state, or falsely prove that CI/review/publication occurred. |
 | `FR-SEC-034` | MUST | Pinned mutation recovery is a two-capability protocol between schema-v12 controller storage and the controller-only Git-workspace reservation rotator. An eventing-recoverable expiration atomically quarantines the old raw bearer and binds one globally fresh replacement, exact source/workspace and optional bound-line fence, expired lease-token digest, and hash-chained intent before any external effect. Only a separately token/deadline/epoch-fenced recovery claimant may receive that tuple; its lease is reclaimable solely because the permitted effect is the exact idempotent old-to-fresh rotation. The Git manager takes both reservation operation locks in canonical hash order, requires the old lock and fresh global nonuse, durably revokes the old hash, swaps the workspace and bound-line ownership atomically, and changes no code, Git ref, index, worktree, branch, object, or remote. Store finalization requires the exact still-live claim and matching rotation fence/proof, then installs the fresh controller bearer under a newly issued mutation lease, records non-authorizing hash-bound final proof including the issued deadline, and erases both staged raw-key copies. All new Go fields are structurally JSON-private; ordinary controller reads, generic workspace stats/tools/maintenance, models, workflows, HTTP, UI, logs, and providers receive neither bearer, claim, intent, checkout, ref, nor rotation history. Legacy recovery without v12 proof, pending park, stale/changed replay, reused reservation, corrupt chain, or re-expired final state fails closed. Neither side reconciles commit/park ambiguity or grants CI, model, gate, provider-write, publication, push, or merge authority. | An expired worker must lose usable filesystem authority without sacrificing unknown local work, and a recovery claimant or storage migration must not turn staged bearer material, guessed history, idempotent transfer, or a database row into broader code or publication authority. |
 | `FR-SEC-035` | MUST | Only a trusted PR-development controller may use the schema-v13 operation boundary or the controller-only Git reconciliation methods. Before any exact retained-line Adopt, Resume, Commit, or Park effect, it must durably prepare one private hash-bound operation under the exact live mutation lease; at most one operation per controller may remain unfinished, and finalize accepts only the unchanged kind/request/result and immediate controller/attempt/line state. If that lease expires, the operation itself transitions to a separately token/deadline/epoch-fenced renewable/reclaimable claim and remains the sole live recovery authority; no pending schema-v12 row may be created. Adopt recovery through `RecoverPinnedLineAdoptReservation` and Resume recovery through `RecoverPinnedLineResumeReservation` acquire old and fresh reservation locks in canonical hash order and retain both through exact line convergence, inventory-v3 old-to-fresh ownership replacement, durable revocation, and result proof, closing the stale-bearer interval without adding an inventory version or history family. Commit recovery, under the continuously live operation claim, first uses exact old-to-fresh rotation and then deterministic `CommitPinned` with fresh. Park recovery uses only exact `ParkPinnedLine` replay with old, permanently retires it, and creates no replacement mutation bearer. Recovery finalization for Adopt/Resume/Commit appends linked already-finalized schema-v12 audit evidence, but that row is never pending, claimable, or authoritative. Park finalization atomically finalizes the operation, completes and version-advances an exact queued attempt when applicable, appends the immutable review fence, clears active attempt and mutation authority, and enters `review_pending`; a pre-controller completed attempt is unchanged and the private branch stays retained for a later reservation-free reviewer. An empty migrated v12 operation chain may hand off one already-bound live mutation directly to initial Commit/Park, while any established v13 history exclusively owns later Bind/Fence transitions. All operation/request/result/claim/recovery/bearer/controller/attempt/session/fence/path/ref evidence is structurally `json:"-"` and absent from ordinary Reader results, generic workspace tools/stats/maintenance, models, workflows, HTTP/UI/browser storage, logs, provider requests, and public errors. Missing preparation, wrong ordering, changed replay, stale claim, cross-owner evidence, dirty/drifted Git, reused reservation, partial Park state, corrupt chain, or inadequate headroom fails closed without a second effect or broader capability. Store methods execute no Git, and neither side discovers or runs CI, invokes a model/reviewer/gate, contacts a provider, publishes, pushes, merges, or acknowledges feedback. | Write-ahead effect identity and continuously fenced, least-authority reconciliation must make every SQLite/Git crash boundary recoverable without ever letting the expired worker, operation row, recovery claimant, retained branch, or atomic review handoff become a general edit, observation, or publication capability. |
+| `FR-SEC-036` | MUST | Only a trusted local-development controller may request local-CI discovery or execution. Under the exact reservation-derived operation lock, Git Workspaces must revalidate the controller pin, exact pre-attempt parent, and current candidate evidence and materialize bounded disposable parent/candidate roots with no `.git`, symlink escape, special file, retained-checkout path, or lifecycle capability. One canonical full SHA-256 manifest binds every materialized candidate path, mode, type, size, and content to the exact parent/tree/candidate identities. Discovery reads only bounded supported definition and dependency files from both roots and executes no repository content. Exactly one `.picoclaw/ci.yml` or `.picoclaw/ci.yaml` is authoritative when present; otherwise a bounded repository-native quick profile precedes supported pull-request GitHub workflow fallback. Every accepted executable step runs in an independent fresh sandbox, so a GitHub job with multiple executable steps is incomplete `stateful_job_unsupported` rather than silently losing shared job state. Discovery produces a deterministic versioned nonempty ordered plan. Any definition or semantic-plan change is incomplete `plan_changed` and cannot execute or pass; dependency-only change alters the environment/result identity. Every required step must run only in the mandatory Linux Bubblewrap sandbox after a successful user-systemd cgroup-v2 supervisor handshake that proves delegated process and memory controls, never through host execution or fallback to the optional generic isolation runtime. The sandbox receives a clean allowlisted environment, trusted identified host toolchains, explicit controller-provided read-only offline dependency mounts, the disposable candidate plus bounded scratch/output filesystems, and no retained checkout or Git directory, inherited credential/config/locale/proxy/agent/provider state, network, sibling workspace, event database, or writable evidence store. Per-step and aggregate time/output/process limits are mandatory; cancellation or limit exhaustion terminates the complete cgroup process tree, and cleanup plus exact candidate postflight precede any `passed` result. Canonical result evidence binds the complete manifest, Git candidate, plan/policy/discovery, environment/toolchain/dependency, sandbox backend/profile, platform/architecture, and every required step/output digest. Owner-local immutable discovery records are indexed only by the exact parent/candidate manifests and discovery/plan versions, and execution evidence persists. Reusable result entries are permitted only for an unexpired, strictly decoded and re-hashed exact success under a complete immutable identity; production reuse is currently disabled because mutable host toolchains and dependency mounts lack complete immutable manifests. No prefix/fallback match or failed, canceled, incomplete, drifted, exhausted, cleanup-failed, or sandbox-unavailable result is green or reusable. Materialized roots and proven-quiescent scratch/process state are removed before return; inability to prove cgroup quiescence is non-green and leaves only quarantined owner-local scratch for operator cleanup. Discovery, execution, evidence lookup, and persistence create no model/controller/attempt/ledger/commit/park/branch/review/workflow/gate/provider/HTTP/UI/acknowledgement/publication/push/merge effect or authority. Missing or unsupported Bubblewrap/systemd/cgroup support or environment/toolchain; missing controller-provided mount or executable (`environment_unavailable`); a step discovering absent package contents (`failed`); stale or cross-workspace evidence; malformed/over-bound material; manifest drift; zero/incomplete plan; corrupt evidence; timeout/output/process-tree failure; cancellation; postflight; or cleanup fails closed. Dependency provisioning/downloading is outside this slice and must be wired later. | Repository-controlled CI definitions and dependencies must produce reproducible local evidence without becoming an ambient host-execution, credential/network exfiltration, retained-checkout tampering, cache-confusion, false-green, or publication capability. |
 
 For `FR-SEC-032` and `FR-SEC-034`, exact Bind replay first proves a
 non-regressing clock and live mutation deadline; it never returns raw authority
@@ -502,6 +551,31 @@ no reader can observe only part of that handoff. The private Git branch remains
 retained, but review receives only its later exact-object bounded projection and
 never the retired edit bearer.
 
+Local-CI state is separate owner-local evidence rather than security,
+controller, eventing, workflow, session, model, or browser state. Parent and
+candidate materialization roots are transient and private; `PinnedTreeManifest`
+canonically binds every entry's path, mode, type, size, and SHA-256 content
+identity to the exact candidate. The versioned plan separately binds bounded
+definition and dependency inputs, ordered required steps, exact invocation,
+working directories, environment requirements, and limits. Explicit local-plan
+authority suppresses inference; without it, native quick profiles precede the
+supported GitHub fallback, and multi-executable GitHub jobs are rejected because
+their shared state cannot survive fresh per-step sandboxes. Definition changes
+produce incomplete `plan_changed`; dependency-only changes produce a different
+environment/result identity. The resolved plan graph persists only under its
+exact parent/candidate manifests and discovery/plan versions. Execution evidence
+binds that manifest and Git candidate to exact plan, environment, trusted
+toolchain/dependency, Bubblewrap plus systemd/cgroup-v2 sandbox, platform,
+per-step status, and output digests. It persists owner-locally and is neither
+mounted writable nor addressable from the sandbox. Passing-result reuse is
+disabled in production until host toolchains and controller-provided read-only
+dependency mounts have complete immutable manifests. Disposable roots, scratch
+space, and processes are removed after cgroup quiescence is proven; inability
+to prove it is non-green and quarantines only the owner-local scratch for
+operator cleanup. None of these records contains a secret, raw ambient
+environment, retained-checkout path, reservation, controller lease, provider
+credential, or publication capability.
+
 ## Surface Ownership
 
 Owns: CODE pkg/auth/**
@@ -560,6 +634,7 @@ Owns: TEST pkg/config/version*
 | Private storage / controller Go API | `eventing.PRDevelopmentControllerReader`, `eventing.PRDevelopmentControllerStore`, schema-v10 controller and attempt-review-fence tables | Transfer one verified-thread pinned owner and its exact first workspace reservation from legacy claims to one private retained line; issue fresh reservations for later resumes; fence mutation and reservation-free review separately; redact lease and reservation bearers from Reader snapshots; require completed-attempt and exact Resume evidence; retire mutation authority before immutable review; hash-bind review completion; validate complete reachable chained evidence; safely reclaim review only; and convert an expired mutation encountered by an exact current operation to explicit recovery without exposing or executing local, model, CI, workflow, or provider capability. | `FR-SEC-032` |
 | Private storage / controller Go API | `eventing.PRDevelopmentControllerStore`, schema-v12 recovery intents, `gitworkspace.Manager.RotatePinnedReservation`, inventory-v3 rotation records | Quarantine an expired bearer, lease only its exact idempotent old-to-fresh transfer, permanently revoke the old workspace/line owner, and install the fresh bearer under a new mutation lease while keeping all authority and evidence outside generic/public/model surfaces. | `FR-SEC-034` |
 | Private storage / controller Go API | `eventing.PRDevelopmentControllerOperationStore`, schema-v13 `pr_development_controller_operation_intents`; controller-only `gitworkspace.Manager.RecoverPinnedLineAdoptReservation`, `RecoverPinnedLineResumeReservation`, `RotatePinnedReservation`, `CommitPinned`, and `ParkPinnedLine` | Write-ahead fence each exact effect; keep operation recovery separate from general mutation; hold old/fresh locks continuously for composite line recovery; rotate before Commit; replay-and-retire old for Park; and atomically remove edit authority before reservation-free review, while structurally withholding every capability and proof from untrusted or generic surfaces. | `FR-SEC-035` |
+| Controller Go API / process | `pkg/prdevelopment/localci/**`; `gitworkspace.Manager.WithPinnedCandidateValidationRoots`, `PinnedCandidateValidationRequest`, `PinnedCandidateValidationRoots`, and `PinnedTreeManifest` | Revalidate and materialize exact `.git`-free parent/candidate evidence under the reservation lock; enforce explicit-plan, native-quick-profile, then GitHub-fallback discovery precedence and persist the exact-manifest plan graph; reject stateful multi-command fallback jobs; and run all required fresh steps only in the mandatory no-network Bubblewrap sandbox under user-systemd/cgroup-v2 supervision with explicit controller-provided offline dependencies. Persist full-identity evidence, while disabling production passing-result reuse for mutable host inputs, without exposing host or repository-lifecycle authority. | `FR-SEC-036` |
 | Config / HTTP / UI | `reviews.attention`, `GET` and `PUT /api/reviews/attention-policies`, `/reviews?view=policies` | Keep gate authority in operator-owned configuration outside reviewed checkouts; expose only bounded non-secret policy plus opaque revisions/effect status, parse and serialize arbitrary question JSON losslessly, and retain the editable projection only in memory. Replace it only through one explicit strict same-origin public-plus-security compare-and-swap that raw-patches only persisted `reviews.attention`, preserves unrelated persisted values and numeric tokens, and leaves security state byte-identical; a conflict retains the local draft for explicit reload/discard and never retries or rebases automatically. Route state contains only the fixed policy-view selector, and editing, validation, effective preview, reload, and discard grant no workflow or provider authority. Broad config GET omits this subresource; broad PUT accepts only an empty compatibility placeholder, broad PATCH rejects the field, and both preserve its exact value during unrelated updates. | `FR-SEC-021` |
 | HTTP | `GET /api/reviews/attention-agents` | Project only one fixed-256 page of canonical configured identity and default metadata, fenced by one strong policy-generation `If-Match` plus an optional canonical offset; broader agent configuration and all security state remain outside the DTO. | `FR-SEC-021` |
 | Workflow / MCP | `agent/*` with `with.tools: none`; `mcp/github/add_issue_comment` | Remove tools from every classifier model path, then permit a GitHub mutation only as a declared conditional MCP step with signed-body identity and fixed output text. The GitHub MCP server and its write credential are configured explicitly and independently from ingress authentication. | `FR-SEC-013` |
@@ -915,6 +990,38 @@ Owns: TEST pkg/config/version*
     claimable. Reject every changed, stale, cross-owner, partial, dirty,
     corrupt, or non-immediate replay without effect, fallback, or
     declassification.
+29. For local-CI validation, first keep the exact reservation-derived operation
+    lock while Git Workspaces revalidates the supplied pin, pre-attempt parent,
+    and candidate evidence; materialize separate bounded `.git`-free roots and
+    compute the full canonical SHA-256 manifest. Discover supported definitions
+    and dependencies from both roots without process execution. Let exactly one
+    explicit local plan suppress all inference; otherwise prefer a bounded
+    repository-native quick profile and consult supported pull-request GitHub
+    workflows only when no native step exists. Reject a GitHub job with multiple
+    executable steps because each accepted step intentionally receives fresh
+    filesystem/process state. Canonically order and digest a nonempty required-
+    step plan; on any definition or semantic change, return incomplete
+    `plan_changed` without execution. Bind a dependency-only change into a fresh
+    environment/result identity. Persist or retrieve discovery only by the
+    exact parent/candidate manifests and discovery/plan versions. Require
+    Bubblewrap and a successful user-systemd cgroup-v2 supervision probe, then
+    expose only the disposable candidate, bounded scratch/output filesystems,
+    trusted identified host toolchains, explicit controller-provided read-only
+    offline dependencies, and a clean allowlisted environment. Deny network,
+    `.git`, the retained checkout, ambient credentials/config, provider/agent
+    sockets, sibling workspaces, event storage, and writable evidence access.
+    Execute every required step in deterministic order within per-step and total
+    time/output/process limits; on cancellation or exhaustion, terminate the
+    complete cgroup process tree. Revalidate the candidate fence and remove roots
+    and proven-quiescent processes/scratch; if quiescence cannot be proven,
+    return non-green and quarantine the owner-local scratch for operator cleanup.
+    Persist only canonical evidence. Do not promote or reuse a passing production
+    result while mutable toolchains or dependency mounts lack complete immutable
+    manifests. A missing backend, environment, toolchain, mount, or executable;
+    a command failure caused by missing package contents; failed postflight or
+    cleanup; or any failed/incomplete required result fails closed without
+    downloading, host fallback, or any model, controller, ledger, Git-lifecycle,
+    workflow, provider, UI, or publication effect.
 
 ## Cross-Feature Behavior
 
@@ -1031,11 +1138,25 @@ the crash-safe local effect/capability seam. Event automation owns the private
 request/result/claim chain and atomic Park database tuple; Git workspaces owns
 inventory-v3, canonical old/fresh locking, exact line convergence, commit, and
 park effects. The current slice does not wire the worker that composes them.
-Local CI discovery/sandbox/cache remains `#119`, repair and ledger orchestration
-remains `#120`, reservation-free AI review remains `#121`, and attention UI,
-gates, provider refresh/write, push/publication, and merge remain `#122+`.
+Local-CI discovery/sandbox/evidence is implemented by `#119` through this
+requirement and the Event Automation local-CI contract. Git Workspaces owns exact
+parent/candidate materialization, the reservation lock, and canonical manifest;
+Event Automation owns deterministic precedence, persistent exact-manifest
+discovery, and evidence identity; Security owns the mandatory disposable
+no-network Bubblewrap plus user-systemd/cgroup-v2 boundary and its non-fallback
+behavior. The controller supplies already-provisioned read-only offline
+dependency mounts; downloading or hydration is not part of `#119`, so missing
+inputs remain non-green until a later integration provides them. Execution
+evidence persists, while production exact-success result reuse stays disabled
+until toolchains and dependencies have complete immutable manifests. Generic
+workflow primitives supply only a reusable step/DAG model: this validator does
+not invoke the workflow executor or create a run, task, private context, event,
+dispatch, or gate. Repair and ledger orchestration remains `#120`, reservation-
+free AI review remains `#121`, and attention UI, gates, provider refresh/write,
+push/publication, and merge remain `#122+`.
 None may infer its authority or successful outcome from a v13 operation,
-completed repair row, retained branch, or `review_pending` phase alone.
+completed repair row, retained branch, local-CI discovery/execution evidence, or
+`review_pending` phase alone.
 Git workspace configuration and tool enablement reuse the same config
 normalization and defaulting path, while checkout retention, dirty preservation,
 and workspace inventory security boundaries are owned by the git workspaces
@@ -1147,6 +1268,38 @@ promise that a provider consumes every materialized modality.
   prove exact Git Park replay under old, after which one transaction retires
   mutation authority while retaining the branch. The later reviewer can claim
   only its separate reservation-free lease and exact-object projection.
+- Local-CI discovery cannot turn repository definitions into host execution.
+  No required step, unsupported/incomplete definition, or any definition or
+  semantic-plan change is non-green `plan_changed` and executes nothing.
+  Dependency-only drift changes environment/result identity and invalidates a
+  prior success even when the required step definition remains stable. An
+  explicit plan is authoritative; otherwise native quick profiles precede
+  GitHub fallback. A fallback GitHub job with multiple executable steps is
+  rejected because the validator cannot preserve shared state across its fresh
+  step sandboxes. Discovery persistence matches only the exact parent/candidate
+  manifests and discovery/plan versions.
+- Missing or unsupported local-CI sandbox support is a failed validation, not
+  permission to use the host or generic optional isolation. The Linux backend
+  requires Bubblewrap and a successful user-systemd delegated cgroup-v2
+  supervisor handshake. Repository steps receive no `.git`, retained checkout,
+  ambient credential/configuration, network, provider/agent socket, sibling
+  workspace, event database, or writable evidence store. Timeout, output
+  exhaustion, cancellation, surviving process descendants, candidate drift,
+  failed postflight, or cleanup prevents success. If cgroup quiescence cannot
+  be proven, the owner-local execution scratch is quarantined for operator
+  cleanup rather than being unsafely deleted.
+- Dependency mounts are explicit controller-provided read-only offline inputs.
+  Local CI neither downloads nor provisions them; a missing required mount or
+  executable is non-green `environment_unavailable`, while a command that
+  discovers absent package contents may instead be non-green `failed`. A later
+  integration must supply either before validation can pass.
+- A malformed, failed, incomplete, digest-mismatched, or identity-mismatched
+  local-CI evidence record never declassifies output or returns green. Exact
+  matching covers the complete candidate and manifest, plan and policy,
+  environment/toolchain/dependencies, sandbox/platform, required step set, and
+  output/result digests. Production result promotion/reuse is disabled while
+  host toolchains or dependency mounts remain mutable; a future immutable
+  backend still permits no prefix, partial, or fallback reuse.
 - Concurrent atomic writes do not fail due to temporary filename collisions.
 - Concurrent auth-store writers preserve unrelated credentials; on hosts with
   OS file locking, a stale OAuth refresh cannot overwrite a credential replaced
@@ -1330,6 +1483,7 @@ promise that a provider consumes every materialized modality.
 | `FR-SEC-033` | [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_ledger_schema_sqlite.go](../../pkg/eventing/pr_development_ledger_schema_sqlite.go), [pkg/eventing/pr_development_ledger_store_sqlite.go](../../pkg/eventing/pr_development_ledger_store_sqlite.go), [pkg/eventing/pr_development_ledger_store_sqlite_test.go](../../pkg/eventing/pr_development_ledger_store_sqlite_test.go), [pkg/eventing/store_schema_test.go](../../pkg/eventing/store_schema_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go), [pkg/eventing/store_unsupported_test.go](../../pkg/eventing/store_unsupported_test.go), [pkg/prdevelopment/thread_context.go](../../pkg/prdevelopment/thread_context.go), [pkg/prdevelopment/thread_context_test.go](../../pkg/prdevelopment/thread_context_test.go) |
 | `FR-SEC-034` | [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_recovery_schema_sqlite.go](../../pkg/eventing/pr_development_recovery_schema_sqlite.go), [pkg/eventing/pr_development_recovery_store_sqlite.go](../../pkg/eventing/pr_development_recovery_store_sqlite.go), [pkg/eventing/pr_development_controller_store_sqlite.go](../../pkg/eventing/pr_development_controller_store_sqlite.go), [pkg/eventing/pr_development_recovery_store_sqlite_test.go](../../pkg/eventing/pr_development_recovery_store_sqlite_test.go), [pkg/eventing/store_sqlite.go](../../pkg/eventing/store_sqlite.go), [pkg/eventing/store_types.go](../../pkg/eventing/store_types.go), [pkg/eventing/store_schema_test.go](../../pkg/eventing/store_schema_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go), [pkg/eventing/store_unsupported_test.go](../../pkg/eventing/store_unsupported_test.go), [pkg/gitworkspace/pinned_reservation_rotation.go](../../pkg/gitworkspace/pinned_reservation_rotation.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go), [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
 | `FR-SEC-035` | [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_operation_schema_sqlite.go](../../pkg/eventing/pr_development_operation_schema_sqlite.go), [pkg/eventing/pr_development_operation_codec_sqlite.go](../../pkg/eventing/pr_development_operation_codec_sqlite.go), [pkg/eventing/pr_development_operation_store_sqlite.go](../../pkg/eventing/pr_development_operation_store_sqlite.go), [pkg/eventing/pr_development_operation_recovery_store_sqlite.go](../../pkg/eventing/pr_development_operation_recovery_store_sqlite.go), [pkg/eventing/pr_development_operation_validation_sqlite.go](../../pkg/eventing/pr_development_operation_validation_sqlite.go), [pkg/eventing/pr_development_operation_store_sqlite_test.go](../../pkg/eventing/pr_development_operation_store_sqlite_test.go), [pkg/eventing/pr_development_controller_store_sqlite.go](../../pkg/eventing/pr_development_controller_store_sqlite.go), [pkg/eventing/pr_development_controller_store_sqlite_test.go](../../pkg/eventing/pr_development_controller_store_sqlite_test.go), [pkg/eventing/pr_development_recovery_store_sqlite.go](../../pkg/eventing/pr_development_recovery_store_sqlite.go), [pkg/eventing/store_sqlite.go](../../pkg/eventing/store_sqlite.go), [pkg/eventing/store_types.go](../../pkg/eventing/store_types.go), [pkg/eventing/store_schema_test.go](../../pkg/eventing/store_schema_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go), [pkg/eventing/store_unsupported_test.go](../../pkg/eventing/store_unsupported_test.go), [pkg/gitworkspace/pinned_line_recovery.go](../../pkg/gitworkspace/pinned_line_recovery.go), [pkg/gitworkspace/pinned_line_recovery_test.go](../../pkg/gitworkspace/pinned_line_recovery_test.go), [pkg/gitworkspace/pinned_reservation_rotation.go](../../pkg/gitworkspace/pinned_reservation_rotation.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go), [pkg/gitworkspace/development_line.go](../../pkg/gitworkspace/development_line.go), [pkg/gitworkspace/development_line_test.go](../../pkg/gitworkspace/development_line_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go), [pkg/gitworkspace/pinned_commit.go](../../pkg/gitworkspace/pinned_commit.go), [pkg/gitworkspace/pinned_commit_test.go](../../pkg/gitworkspace/pinned_commit_test.go), [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
+| `FR-SEC-036` | [pkg/prdevelopment/localci](../../pkg/prdevelopment/localci), [pkg/gitworkspace/pinned_validation_roots.go](../../pkg/gitworkspace/pinned_validation_roots.go), [pkg/gitworkspace/pinned_validation_roots_test.go](../../pkg/gitworkspace/pinned_validation_roots_test.go) |
 
 Additional `FR-SEC-030` acceptance anchors are
 [pkg/eventing/store_types.go](../../pkg/eventing/store_types.go),
@@ -1360,6 +1514,7 @@ validation in
 - [pkg/prdevelopment/service.go](../../pkg/prdevelopment/service.go)
 - [pkg/prdevelopment/handler.go](../../pkg/prdevelopment/handler.go)
 - [pkg/prdevelopment/thread_context.go](../../pkg/prdevelopment/thread_context.go)
+- [pkg/prdevelopment/localci](../../pkg/prdevelopment/localci)
 - [pkg/eventing/pr_development_conversation_schema_sqlite.go](../../pkg/eventing/pr_development_conversation_schema_sqlite.go)
 - [pkg/eventing/pr_development_ledger_schema_sqlite.go](../../pkg/eventing/pr_development_ledger_schema_sqlite.go)
 - [pkg/eventing/pr_development_ledger_store_sqlite.go](../../pkg/eventing/pr_development_ledger_store_sqlite.go)
@@ -1375,6 +1530,7 @@ validation in
 - [pkg/tools/apply_patch.go](../../pkg/tools/apply_patch.go)
 - [pkg/gitworkspace/manager.go](../../pkg/gitworkspace/manager.go)
 - [pkg/gitworkspace/development_line.go](../../pkg/gitworkspace/development_line.go)
+- [pkg/gitworkspace/pinned_validation_roots.go](../../pkg/gitworkspace/pinned_validation_roots.go)
 - [pkg/channels/manager.go](../../pkg/channels/manager.go)
 - [web/backend/api/pr_development.go](../../web/backend/api/pr_development.go)
 - [web/backend/main.go](../../web/backend/main.go)
