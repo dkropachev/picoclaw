@@ -29,6 +29,9 @@ var (
 	_ PRDevelopmentRepairQueue       = (*Store)(nil)
 	_ PRDevelopmentControllerReader  = (*Store)(nil)
 	_ PRDevelopmentControllerStore   = (*Store)(nil)
+	_ PRDevelopmentLedgerReader      = (*Store)(nil)
+	_ PRDevelopmentLedgerStore       = (*Store)(nil)
+	_ PRDevelopmentContextReader     = (*Store)(nil)
 )
 
 func Open(context.Context, string, ...Option) (*Store, error) {
@@ -307,6 +310,41 @@ func (*Store) ReleasePRDevelopmentControllerReview(
 	PRDevelopmentControllerReviewTransition,
 ) (PRDevelopmentController, error) {
 	return PRDevelopmentController{}, ErrUnsupportedPlatform
+}
+
+func (*Store) GetPRDevelopmentLedgerForCase(
+	context.Context,
+	string,
+) (PRDevelopmentLedger, error) {
+	return PRDevelopmentLedger{}, ErrUnsupportedPlatform
+}
+
+func (*Store) GetPRDevelopmentContextSnapshot(
+	context.Context,
+	string,
+) (PRDevelopmentContextSnapshot, error) {
+	return PRDevelopmentContextSnapshot{}, ErrUnsupportedPlatform
+}
+
+func (*Store) AppendPRDevelopmentLedgerAttempt(
+	context.Context,
+	PRDevelopmentLedgerAttemptAppend,
+) (PRDevelopmentLedgerEntry, bool, error) {
+	return PRDevelopmentLedgerEntry{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) AppendPRDevelopmentLedgerReview(
+	context.Context,
+	PRDevelopmentLedgerReviewAppend,
+) (PRDevelopmentLedgerEntry, bool, error) {
+	return PRDevelopmentLedgerEntry{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) AppendPRDevelopmentLedgerCheckpoint(
+	context.Context,
+	PRDevelopmentLedgerCheckpointAppend,
+) (PRDevelopmentLedgerCheckpoint, bool, error) {
+	return PRDevelopmentLedgerCheckpoint{}, false, ErrUnsupportedPlatform
 }
 
 func (*Store) CaptureReview(

@@ -182,6 +182,43 @@ func TestStorePRDevelopmentControllerUnsupported(t *testing.T) {
 	}
 }
 
+func TestStorePRDevelopmentLedgerUnsupported(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	var store Store
+	if _, err := store.GetPRDevelopmentLedgerForCase(
+		ctx,
+		"pdc_00000000000000000000000000000000",
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("GetPRDevelopmentLedgerForCase() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if _, err := store.GetPRDevelopmentContextSnapshot(
+		ctx,
+		"pdc_00000000000000000000000000000000",
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("GetPRDevelopmentContextSnapshot() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if _, _, err := store.AppendPRDevelopmentLedgerAttempt(
+		ctx,
+		PRDevelopmentLedgerAttemptAppend{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("AppendPRDevelopmentLedgerAttempt() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if _, _, err := store.AppendPRDevelopmentLedgerReview(
+		ctx,
+		PRDevelopmentLedgerReviewAppend{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("AppendPRDevelopmentLedgerReview() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if _, _, err := store.AppendPRDevelopmentLedgerCheckpoint(
+		ctx,
+		PRDevelopmentLedgerCheckpointAppend{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("AppendPRDevelopmentLedgerCheckpoint() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+}
+
 func TestStoreRoutingDispatchCapabilitiesUnsupported(t *testing.T) {
 	t.Parallel()
 
