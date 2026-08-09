@@ -12,12 +12,12 @@ import (
 
 type controllerHeartbeatStore interface {
 	RenewPRDevelopmentRepairOrchestration(
-		context.Context,
-		eventing.PRDevelopmentRepairOrchestrationRenew,
+		ctx context.Context,
+		input eventing.PRDevelopmentRepairOrchestrationRenew,
 	) error
 	RenewPRDevelopmentControllerLease(
-		context.Context,
-		eventing.PRDevelopmentControllerRenew,
+		ctx context.Context,
+		input eventing.PRDevelopmentControllerRenew,
 	) error
 }
 

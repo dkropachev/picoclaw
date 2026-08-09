@@ -1892,10 +1892,10 @@ func finalizePRDevelopmentRepairOrchestrationPark(
 			ErrPRDevelopmentOrchestrationConflict,
 		)
 	}
-	if err := preflightPRDevelopmentRepairOrchestrationLedger(
+	if preflightErr := preflightPRDevelopmentRepairOrchestrationLedger(
 		ctx, conn, controller.ThreadID, fence.Ordinal,
-	); err != nil {
-		return err
+	); preflightErr != nil {
+		return preflightErr
 	}
 	var caseOrdinal int64
 	if queryErr := conn.QueryRowContext(ctx, `
@@ -1996,18 +1996,17 @@ func expireEditingPRDevelopmentRepairOrchestrations(
 	if err != nil {
 		return err
 	}
+	defer func() { _ = rows.Close() }()
 	type expired struct{ attemptID, sessionID string }
 	items := make([]expired, 0)
 	for rows.Next() {
 		var item expired
 		if scanErr := rows.Scan(&item.attemptID, &item.sessionID); scanErr != nil {
-			_ = rows.Close()
 			return scanErr
 		}
 		items = append(items, item)
 	}
 	if rowsErr := rows.Err(); rowsErr != nil {
-		_ = rows.Close()
 		return rowsErr
 	}
 	if closeErr := rows.Close(); closeErr != nil {
@@ -2146,29 +2145,6 @@ func loadExactPRDevelopmentRepairOrchestrationController(
 		)
 	}
 	return controller, nil
-}
-
-func requirePRDevelopmentRepairOrchestrationController(
-	ctx context.Context,
-	queryer rowsQueryer,
-	orchestration PRDevelopmentRepairOrchestration,
-	controllerID string,
-	revision int64,
-	leaseToken string,
-	leaseEpoch int64,
-	now time.Time,
-) error {
-	_, err := loadExactPRDevelopmentRepairOrchestrationController(
-		ctx,
-		queryer,
-		orchestration,
-		controllerID,
-		revision,
-		leaseToken,
-		leaseEpoch,
-		now,
-	)
-	return err
 }
 
 func normalizePRDevelopmentRepairOrchestrationValidation(

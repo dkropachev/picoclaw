@@ -256,7 +256,6 @@ func TestStorePRDevelopmentRepairConcurrentSiblingAdmissionHasOneWinner(t *testi
 	ready.Add(2)
 	start := make(chan struct{})
 	for index, caseID := range []string{first.ID, second.ID} {
-		index, caseID := index, caseID
 		go func() {
 			ready.Done()
 			<-start

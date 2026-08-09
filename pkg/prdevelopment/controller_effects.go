@@ -22,12 +22,12 @@ var errControllerEffectConflict = errors.New(
 // its own authority.
 type controllerOperationJournal interface {
 	PreparePRDevelopmentControllerOperation(
-		context.Context,
-		eventing.PRDevelopmentControllerOperationPrepare,
+		ctx context.Context,
+		input eventing.PRDevelopmentControllerOperationPrepare,
 	) (eventing.PRDevelopmentControllerOperation, bool, error)
 	FinalizePRDevelopmentControllerOperation(
-		context.Context,
-		eventing.PRDevelopmentControllerOperationFinalize,
+		ctx context.Context,
+		input eventing.PRDevelopmentControllerOperationFinalize,
 	) (eventing.PRDevelopmentControllerOperationTransition, bool, error)
 }
 
@@ -36,28 +36,28 @@ type controllerOperationJournal interface {
 // *gitworkspace.Manager through newControllerEffectRunner.
 type controllerGitBackend interface {
 	AdoptPinnedLine(
-		context.Context,
-		gitworkspace.PinnedLineAdoptRequest,
+		ctx context.Context,
+		request gitworkspace.PinnedLineAdoptRequest,
 	) (gitworkspace.PinnedLineLease, error)
 	ResumePinnedLine(
-		context.Context,
-		gitworkspace.PinnedLineResumeRequest,
+		ctx context.Context,
+		request gitworkspace.PinnedLineResumeRequest,
 	) (gitworkspace.PinnedLineLease, error)
 	CommitPinned(
-		context.Context,
-		gitworkspace.PinnedCommitRequest,
+		ctx context.Context,
+		request gitworkspace.PinnedCommitRequest,
 	) (gitworkspace.PinnedCommitResult, error)
 	PreviewPinnedLineReview(
-		context.Context,
-		gitworkspace.PinnedLineParkRequest,
+		ctx context.Context,
+		request gitworkspace.PinnedLineParkRequest,
 	) (gitworkspace.PinnedLineReviewSnapshot, error)
 	ParkPinnedLine(
-		context.Context,
-		gitworkspace.PinnedLineParkRequest,
+		ctx context.Context,
+		request gitworkspace.PinnedLineParkRequest,
 	) (gitworkspace.PinnedLineParkResult, error)
 	SnapshotPinnedLineReview(
-		context.Context,
-		gitworkspace.PinnedLineReviewRequest,
+		ctx context.Context,
+		request gitworkspace.PinnedLineReviewRequest,
 	) (gitworkspace.PinnedLineReviewSnapshot, error)
 }
 

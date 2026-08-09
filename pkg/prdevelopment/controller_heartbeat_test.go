@@ -201,55 +201,33 @@ func TestControllerHeartbeatStopsAllRenewalAfterTerminalBarrier(t *testing.T) {
 }
 
 func TestControllerHeartbeatTerminalBarrierDrainsOrchestrationRenewal(t *testing.T) {
-	stale := errors.New("stale orchestration lease error")
-	entered := make(chan struct{}, 1)
-	release := make(chan struct{})
-	store := &controllerHeartbeatStoreFake{
-		orchestrationErr:     stale,
-		orchestrationEntered: entered,
-		orchestrationRelease: release,
-	}
-	workCtx, heartbeat := startControllerHeartbeat(
-		context.Background(),
-		store,
-		"pdr_0123456789abcdef0123456789abcdef",
-		"claim-token",
-		3*time.Hour,
-	)
-	heartbeat.SetController(eventing.PRDevelopmentController{
-		ID:         "pctl_0123456789abcdef0123456789abcdef",
-		LeaseToken: "controller-token",
-		LeaseEpoch: 1,
-	})
-
-	renewed := make(chan error, 1)
-	go func() { renewed <- heartbeat.renew(workCtx) }()
-	requireHeartbeatSignal(t, entered, "orchestration renewal did not start")
-	barrierDone := make(chan struct{})
-	go func() {
-		heartbeat.BeginTerminal()
-		close(barrierDone)
-	}()
-	requireHeartbeatTerminalIntent(t, heartbeat)
-	select {
-	case <-barrierDone:
-		t.Fatal("terminal barrier returned before orchestration renewal drained")
-	default:
-	}
-	close(release)
-	requireHeartbeatRenewal(t, renewed)
-	requireHeartbeatSignal(t, barrierDone, "terminal barrier did not return")
-	assertTerminalHeartbeat(t, workCtx, heartbeat, store, 1, 0)
+	testControllerHeartbeatTerminalBarrierDrainsRenewal(t, false)
 }
 
 func TestControllerHeartbeatTerminalBarrierDrainsControllerRenewal(t *testing.T) {
-	stale := errors.New("stale controller lease error")
+	testControllerHeartbeatTerminalBarrierDrainsRenewal(t, true)
+}
+
+func testControllerHeartbeatTerminalBarrierDrainsRenewal(
+	t *testing.T,
+	controllerRenewal bool,
+) {
+	t.Helper()
+	renewalName := "orchestration"
+	wantController := 0
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	store := &controllerHeartbeatStoreFake{
-		controllerErr:     stale,
-		controllerEntered: entered,
-		controllerRelease: release,
+	store := &controllerHeartbeatStoreFake{}
+	if controllerRenewal {
+		renewalName = "controller"
+		wantController = 1
+		store.controllerErr = errors.New("stale controller lease error")
+		store.controllerEntered = entered
+		store.controllerRelease = release
+	} else {
+		store.orchestrationErr = errors.New("stale orchestration lease error")
+		store.orchestrationEntered = entered
+		store.orchestrationRelease = release
 	}
 	workCtx, heartbeat := startControllerHeartbeat(
 		context.Background(),
@@ -266,7 +244,7 @@ func TestControllerHeartbeatTerminalBarrierDrainsControllerRenewal(t *testing.T)
 
 	renewed := make(chan error, 1)
 	go func() { renewed <- heartbeat.renew(workCtx) }()
-	requireHeartbeatSignal(t, entered, "controller renewal did not start")
+	requireHeartbeatSignal(t, entered, renewalName+" renewal did not start")
 	barrierDone := make(chan struct{})
 	go func() {
 		heartbeat.BeginTerminal()
@@ -275,13 +253,13 @@ func TestControllerHeartbeatTerminalBarrierDrainsControllerRenewal(t *testing.T)
 	requireHeartbeatTerminalIntent(t, heartbeat)
 	select {
 	case <-barrierDone:
-		t.Fatal("terminal barrier returned before controller renewal drained")
+		t.Fatalf("terminal barrier returned before %s renewal drained", renewalName)
 	default:
 	}
 	close(release)
 	requireHeartbeatRenewal(t, renewed)
 	requireHeartbeatSignal(t, barrierDone, "terminal barrier did not return")
-	assertTerminalHeartbeat(t, workCtx, heartbeat, store, 1, 1)
+	assertTerminalHeartbeat(t, workCtx, heartbeat, store, 1, wantController)
 }
 
 func assertTerminalHeartbeat(

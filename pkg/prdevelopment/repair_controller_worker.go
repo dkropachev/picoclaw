@@ -54,54 +54,54 @@ type repairControllerStateStore interface {
 }
 
 type repairControllerContextLoader interface {
-	Load(context.Context, string, int64) (string, error)
+	Load(ctx context.Context, caseID string, conversationVersion int64) (string, error)
 }
 
 type repairControllerWorkspace interface {
 	AcquirePinned(
-		context.Context,
-		gitworkspace.PinnedAcquireRequest,
+		ctx context.Context,
+		request gitworkspace.PinnedAcquireRequest,
 	) (gitworkspace.WorkspaceInfo, error)
 	ReleasePinned(
-		context.Context,
-		gitworkspace.PinnedReleaseRequest,
+		ctx context.Context,
+		request gitworkspace.PinnedReleaseRequest,
 	) ([]gitworkspace.WorkspaceInfo, error)
 	SnapshotPinnedValidationCandidate(
-		context.Context,
-		gitworkspace.PinnedCandidateRequest,
+		ctx context.Context,
+		request gitworkspace.PinnedCandidateRequest,
 	) (gitworkspace.PinnedCandidate, error)
 }
 
 type repairControllerLocalCI interface {
 	RunPinned(
-		context.Context,
-		repairControllerWorkspace,
-		localci.PinnedRunRequest,
+		ctx context.Context,
+		workspace repairControllerWorkspace,
+		request localci.PinnedRunRequest,
 	) (localci.RunResult, error)
 }
 
 type repairControllerEffects interface {
-	Adopt(context.Context, string) (controllerLineState, error)
-	Resume(context.Context) (controllerLineState, error)
+	Adopt(ctx context.Context, expectedSourceTree string) (controllerLineState, error)
+	Resume(ctx context.Context) (controllerLineState, error)
 	CommitCandidate(
-		context.Context,
-		gitworkspace.PinnedCandidate,
-		string,
+		ctx context.Context,
+		candidate gitworkspace.PinnedCandidate,
+		message string,
 	) (controllerCommitOutcome, error)
 	Park(
-		context.Context,
-		controllerCommitOutcome,
-		string,
-		int,
-		func(),
+		ctx context.Context,
+		commit controllerCommitOutcome,
+		summary string,
+		iterations int,
+		terminal func(),
 	) (eventing.PRDevelopmentAttemptReviewFence, error)
 }
 
 type repairControllerEffectFactory func(
-	controllerOperationJournal,
-	repairControllerWorkspace,
-	eventing.PRDevelopmentRepairSession,
-	eventing.PRDevelopmentControllerLease,
+	journal controllerOperationJournal,
+	workspace repairControllerWorkspace,
+	session eventing.PRDevelopmentRepairSession,
+	lease eventing.PRDevelopmentControllerLease,
 ) (repairControllerEffects, error)
 
 type repairControllerWorkerDependencies struct {
@@ -783,11 +783,15 @@ func (worker *RepairControllerWorker) pinBaseline(
 			run.HeadSHA != verified.HeadSHA || run.CloneURL != verified.HeadCloneURL ||
 			run.ReviewDigest != verified.ReviewDigest || run.WorkspaceID == "" ||
 			run.SourceTree == "" || session.WorkspaceID != run.WorkspaceID {
-			return run, session, repairControllerBaselineDurable, errors.New("durable orchestration provider/workspace pin changed")
+			return run, session, repairControllerBaselineDurable, errors.New(
+				"durable orchestration provider/workspace pin changed",
+			)
 		}
 		if controllerFound && controller.WorkspaceID != "" &&
 			(controller.WorkspaceID != run.WorkspaceID || controller.SourceTree != run.SourceTree) {
-			return run, session, repairControllerBaselineDurable, errors.New("durable orchestration pin differs from retained line")
+			return run, session, repairControllerBaselineDurable, errors.New(
+				"durable orchestration pin differs from retained line",
+			)
 		}
 		if !controllerFound {
 			pinned, err := workspace.AcquirePinned(ctx, repairControllerPin(session, session.ReservationKey))
@@ -795,7 +799,9 @@ func (worker *RepairControllerWorker) pinBaseline(
 				return run, session, repairControllerBaselineDurable, err
 			}
 			if pinned.ID != run.WorkspaceID {
-				return run, session, repairControllerBaselineDurable, errors.New("reacquired initial workspace identity changed")
+				return run, session, repairControllerBaselineDurable, errors.New(
+					"reacquired initial workspace identity changed",
+				)
 			}
 			candidate, snapshotErr := workspace.SnapshotPinnedValidationCandidate(
 				ctx,
@@ -818,7 +824,9 @@ func (worker *RepairControllerWorker) pinBaseline(
 	}
 	if controllerFound {
 		if controller.WorkspaceID == "" || controller.SourceTree == "" {
-			return run, session, repairControllerBaselineDurable, errors.New("unbound controller has no persisted orchestration pin")
+			return run, session, repairControllerBaselineDurable, errors.New(
+				"unbound controller has no persisted orchestration pin",
+			)
 		}
 		pinned, _, err := worker.store.PinPRDevelopmentRepairOrchestration(
 			ctx,
@@ -865,7 +873,9 @@ func (worker *RepairControllerWorker) pinBaseline(
 	}
 	if candidate.WorkspaceID != pinned.ID || candidate.ParentCommit != verified.HeadSHA ||
 		candidate.ChangedFiles != 0 || candidate.Tree == "" {
-		return run, session, repairControllerBaselineAcquiredUnpinned, errors.New("initial pinned workspace is not the exact clean provider tip")
+		return run, session, repairControllerBaselineAcquiredUnpinned, errors.New(
+			"initial pinned workspace is not the exact clean provider tip",
+		)
 	}
 	pinnedRun, _, err := worker.store.PinPRDevelopmentRepairOrchestration(
 		ctx,
@@ -1049,31 +1059,10 @@ func validatedRepairControllerCandidate(
 	fence repairControllerLineFence,
 ) (gitworkspace.PinnedCandidate, error) {
 	receipt := run.Validation
-	if receipt == nil || receipt.ControllerID != fence.controllerID ||
-		receipt.WorkspaceID != fence.workspaceID || receipt.ControllerRevision != fence.revision ||
-		receipt.LineID != fence.lineID || receipt.LineVersion != fence.lineVersion ||
-		receipt.MutationEpoch != fence.mutationEpoch ||
-		receipt.MutationLeaseEpoch != fence.leaseEpoch || receipt.ParentCommit != fence.tip ||
-		receipt.ParentTree != fence.tree || receipt.ModelResultDigest != run.ModelResultDigest ||
-		receipt.ModelControllerRevision != run.ModelControllerRevision ||
-		receipt.ModelLineID != run.ModelLineID ||
-		receipt.ModelLineVersion != run.ModelLineVersion ||
-		receipt.ModelMutationEpoch != run.ModelMutationEpoch ||
-		receipt.ModelMutationLeaseEpoch != run.ModelMutationLeaseEpoch ||
-		receipt.ModelLeaseTokenDigest != run.ModelLeaseTokenDigest ||
-		receipt.ModelReservationDigest != run.ModelReservationDigest ||
-		receipt.ContextDigest != run.ContextDigest || receipt.PromptDigest != run.PromptDigest ||
-		receipt.ModelSummary != run.Summary || receipt.ModelIterations != run.Iterations ||
-		!validControllerSHA256(receipt.ModelLeaseTokenDigest) ||
-		!validControllerSHA256(receipt.ModelReservationDigest) ||
-		!validControllerSHA256(receipt.MutationLeaseTokenDigest) ||
-		!validControllerSHA256(receipt.MutationReservationDigest) ||
-		!validControllerSHA256(receipt.ReceiptHash) ||
-		!validControllerSHA256(receipt.CIAttestationDigest) ||
-		!validControllerSHA256(receipt.CIResultKey) ||
-		!validControllerSHA256(receipt.CIEffectivePlanDigest) ||
-		!validControllerSHA256(receipt.CIExecutionDigest) {
-		return gitworkspace.PinnedCandidate{}, errors.New("validated repair checkpoint differs from the active controller")
+	if receipt == nil || !equalRepairControllerValidationFence(receipt, run, fence) {
+		return gitworkspace.PinnedCandidate{}, errors.New(
+			"validated repair checkpoint differs from the active controller",
+		)
 	}
 	candidate := gitworkspace.PinnedCandidate{
 		WorkspaceID:     receipt.WorkspaceID,
@@ -1110,16 +1099,12 @@ func validateRepairControllerCandidate(
 	return nil
 }
 
-func equalRepairControllerValidationReceipt(
+func equalRepairControllerValidationFence(
+	receipt *eventing.PRDevelopmentRepairValidationReceipt,
 	run eventing.PRDevelopmentRepairOrchestration,
 	fence repairControllerLineFence,
-	candidate gitworkspace.PinnedCandidate,
-	status eventing.PRDevelopmentCIStatus,
-	ciResult localci.RunResult,
 ) bool {
-	receipt := run.Validation
-	return receipt != nil &&
-		receipt.ControllerID == fence.controllerID &&
+	return receipt.ControllerID == fence.controllerID &&
 		receipt.WorkspaceID == fence.workspaceID &&
 		receipt.ModelControllerRevision == run.ModelControllerRevision &&
 		receipt.ModelLineID == run.ModelLineID &&
@@ -1135,8 +1120,33 @@ func equalRepairControllerValidationReceipt(
 		receipt.LineVersion == fence.lineVersion &&
 		receipt.MutationEpoch == fence.mutationEpoch &&
 		receipt.MutationLeaseEpoch == fence.leaseEpoch &&
-		receipt.ParentCommit == candidate.ParentCommit &&
+		receipt.ParentCommit == fence.tip &&
 		receipt.ParentTree == fence.tree &&
+		receipt.ModelResultDigest == run.ModelResultDigest &&
+		receipt.ModelSummary == run.Summary &&
+		receipt.ModelIterations == run.Iterations &&
+		validControllerSHA256(receipt.ModelLeaseTokenDigest) &&
+		validControllerSHA256(receipt.ModelReservationDigest) &&
+		validControllerSHA256(receipt.MutationLeaseTokenDigest) &&
+		validControllerSHA256(receipt.MutationReservationDigest) &&
+		validControllerSHA256(receipt.ReceiptHash) &&
+		validControllerSHA256(receipt.CIAttestationDigest) &&
+		validControllerSHA256(receipt.CIResultKey) &&
+		validControllerSHA256(receipt.CIEffectivePlanDigest) &&
+		validControllerSHA256(receipt.CIExecutionDigest)
+}
+
+func equalRepairControllerValidationReceipt(
+	run eventing.PRDevelopmentRepairOrchestration,
+	fence repairControllerLineFence,
+	candidate gitworkspace.PinnedCandidate,
+	status eventing.PRDevelopmentCIStatus,
+	ciResult localci.RunResult,
+) bool {
+	receipt := run.Validation
+	return receipt != nil &&
+		equalRepairControllerValidationFence(receipt, run, fence) &&
+		receipt.ParentCommit == candidate.ParentCommit &&
 		receipt.CandidateTree == candidate.Tree &&
 		receipt.CandidateDigest == candidate.CandidateDigest &&
 		receipt.ChangedFiles == candidate.ChangedFiles &&
@@ -1146,15 +1156,7 @@ func equalRepairControllerValidationReceipt(
 		receipt.CIAttestationDigest == ciResult.Attestation.Digest &&
 		receipt.CIResultKey == ciResult.Execution.ResultKey &&
 		receipt.CIEffectivePlanDigest == ciResult.Plan.Effective.Digest &&
-		receipt.CIExecutionDigest == ciResult.Execution.Digest &&
-		receipt.ModelResultDigest == run.ModelResultDigest &&
-		receipt.ModelSummary == run.Summary &&
-		receipt.ModelIterations == run.Iterations &&
-		validControllerSHA256(receipt.ModelLeaseTokenDigest) &&
-		validControllerSHA256(receipt.ModelReservationDigest) &&
-		validControllerSHA256(receipt.MutationLeaseTokenDigest) &&
-		validControllerSHA256(receipt.MutationReservationDigest) &&
-		validControllerSHA256(receipt.ReceiptHash)
+		receipt.CIExecutionDigest == ciResult.Execution.Digest
 }
 
 func validRepairControllerCIStatus(status eventing.PRDevelopmentCIStatus) bool {

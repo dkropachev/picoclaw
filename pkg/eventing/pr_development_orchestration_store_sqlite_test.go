@@ -159,13 +159,13 @@ func startAndCompletePRDevelopmentOrchestrationForTest(
 	t.Helper()
 	ctx := context.Background()
 	start := validPRDevelopmentOrchestrationModelStartForTest(fixture)
-	run, changed, err := fixture.Operation.Store.StartPRDevelopmentRepairOrchestrationModel(
+	_, changed, err := fixture.Operation.Store.StartPRDevelopmentRepairOrchestrationModel(
 		ctx, start,
 	)
 	require.NoError(t, err)
 	require.True(t, changed)
 	complete := validPRDevelopmentOrchestrationModelCompleteForTest(fixture)
-	run, changed, err = fixture.Operation.Store.CompletePRDevelopmentRepairOrchestrationModel(
+	run, changed, err := fixture.Operation.Store.CompletePRDevelopmentRepairOrchestrationModel(
 		ctx, complete,
 	)
 	require.NoError(t, err)
@@ -861,6 +861,7 @@ func TestStorePRDevelopmentRepairOrchestrationModelReplayAndPhaseFencing(t *test
 }
 
 func TestStorePRDevelopmentRepairOrchestrationAcceptsEveryLocalCIStatus(t *testing.T) {
+	t.Parallel()
 	statuses := []PRDevelopmentCIStatus{
 		PRDevelopmentCIPassed,
 		PRDevelopmentCIFailed,
@@ -873,7 +874,6 @@ func TestStorePRDevelopmentRepairOrchestrationAcceptsEveryLocalCIStatus(t *testi
 		PRDevelopmentCIInfrastructureError,
 	}
 	for _, status := range statuses {
-		status := status
 		t.Run(string(status), func(t *testing.T) {
 			t.Parallel()
 			fixture := newPRDevelopmentOrchestrationFixture(t)
