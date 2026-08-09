@@ -547,6 +547,10 @@ func TestStoreV14MigrationRoutesExactReadyControllerOwnerToOrchestration(t *test
 		t, store, developmentCase.ID, completed,
 	)
 	require.Equal(t, PRDevelopmentControllerReady, ready.Phase)
+	var legacyLedgerEntries int
+	require.NoError(t, store.db.QueryRow(`
+		SELECT COUNT(*) FROM pr_development_ledger_entries`).Scan(&legacyLedgerEntries))
+	require.Zero(t, legacyLedgerEntries)
 	_, err = store.db.Exec(`
 		DELETE FROM pr_development_repair_orchestration_cohorts WHERE session_id = ?`,
 		completed.ID,
@@ -638,6 +642,50 @@ func TestStoreV14MigrationRoutesExactReadyControllerOwnerToOrchestration(t *test
 		},
 	)
 	assert.Equal(t, lease.Controller.MutationEpoch+1, resumed.Controller.MutationEpoch)
+	orchestrationFixture := &prDevelopmentOrchestrationFixture{
+		Operation: operationFixture, Run: run, Lease: operationLeaseFromTransition(resumed),
+	}
+	run = startAndCompletePRDevelopmentOrchestrationForTest(t, orchestrationFixture)
+	validated, changed, err := migrated.RecordPRDevelopmentRepairOrchestrationValidation(
+		ctx, validPRDevelopmentOrchestrationValidationForTest(orchestrationFixture),
+	)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.NotNil(t, validated.Validation)
+	_, _, parked := parkOperationForTest(
+		t,
+		operationFixture,
+		orchestrationFixture.Lease,
+		nil,
+		run.Summary,
+		run.Iterations,
+		815,
+	)
+	require.NotNil(t, parked.Fence)
+	assert.Equal(t, 1, parked.Fence.Ordinal)
+	completedRun, err := migrated.GetPRDevelopmentRepairOrchestration(ctx, run.AttemptID)
+	require.NoError(t, err)
+	assert.Equal(t, PRDevelopmentRepairOrchestrationCompleted, completedRun.Phase)
+	ledger, err := migrated.GetPRDevelopmentLedgerForCase(ctx, developmentCase.ID)
+	require.NoError(t, err)
+	require.Len(t, ledger.Entries, 1)
+	assert.Equal(t, 2, ledger.Entries[0].Ordinal)
+	assert.Equal(t, emptyPRDevelopmentLedgerEntriesDigest(), ledger.Entries[0].PreviousHash)
+	assert.Equal(t, completedRun.LedgerEntryID, ledger.Entries[0].ID)
+	dummyEarlier := ledger.Entries[0]
+	dummyEarlier.ID = prDevelopmentLedgerEntryIDPrefix + strings.Repeat("f", 32)
+	dummyEarlier.Ordinal = 0
+	dummyEarlier.AttemptID = completed.Attempts[0].ID
+	dummyEarlier.FenceOrdinal = 0
+	dummyEarlier.FenceHash = strings.Repeat("a", 64)
+	dummyEarlier.PreviousHash = emptyPRDevelopmentLedgerEntriesDigest()
+	dummyEarlier.EntryHash = strings.Repeat("b", 64)
+	require.NoError(t, migrated.withImmediate(ctx, func(conn *sql.Conn) error {
+		return insertPRDevelopmentLedgerEntry(ctx, conn, dummyEarlier)
+	}))
+	_, err = migrated.GetPRDevelopmentRepairOrchestration(ctx, run.AttemptID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ledger predecessor is missing")
 }
 
 func TestStorePRDevelopmentRepairOrchestrationMigrationValidationRollsBack(t *testing.T) {

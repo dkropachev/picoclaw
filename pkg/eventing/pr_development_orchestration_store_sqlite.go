@@ -2508,13 +2508,31 @@ func validateCompletedPRDevelopmentRepairOrchestrationAggregate(
 	}
 	previousHash := emptyPRDevelopmentLedgerEntriesDigest()
 	if entry.Ordinal > 0 {
-		if err := queryer.QueryRowContext(ctx, `
+		predecessorErr := queryer.QueryRowContext(ctx, `
 			SELECT entry_hash FROM pr_development_ledger_entries
 			WHERE thread_id = ? AND ordinal = ?`,
 			orchestration.ThreadID,
 			entry.Ordinal-1,
-		).Scan(&previousHash); err != nil {
-			return err
+		).Scan(&previousHash)
+		if errors.Is(predecessorErr, sql.ErrNoRows) {
+			var earlierEntries int
+			if err := queryer.QueryRowContext(ctx, `
+				SELECT COUNT(*) FROM pr_development_ledger_entries
+				WHERE thread_id = ? AND ordinal < ?`,
+				orchestration.ThreadID,
+				entry.Ordinal,
+			).Scan(&earlierEntries); err != nil {
+				return err
+			}
+			if earlierEntries != 0 {
+				return errors.New("completed orchestration ledger predecessor is missing")
+			}
+			// A migrated controller may already have review fences while its
+			// pre-ledger history is empty. Its first v14 account is anchored at
+			// that fence-derived nonzero ordinal and starts from the empty digest.
+			previousHash = emptyPRDevelopmentLedgerEntriesDigest()
+		} else if predecessorErr != nil {
+			return predecessorErr
 		}
 	}
 	if storedEntry.findingCount != 0 || entry.ThreadID != orchestration.ThreadID ||
