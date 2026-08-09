@@ -13,10 +13,12 @@ and ignored-file size, and exposes cleanup/drop controls through the agent tool,
 launcher API, and frontend dashboard. Trusted controllers can instead request a
 fresh checkout pinned to one exact source branch and commit without exposing
 that stronger acquisition primitive to an agent tool. A controller can retain
-that checkout as one private development line, park its exact committed tip
-while releasing the mutation reservation, resume it under a fresh reservation,
-and snapshot a bounded exact-commit review without exposing the retained line
-through generic workspace surfaces.
+that checkout as one private development line, preflight the exact bounded
+review that a proposed park would expose, park its committed or proven
+no-change tip while releasing the mutation reservation but retaining the
+private branch, resume it under a fresh reservation, and snapshot the same
+object-addressed review without exposing the retained line through generic
+workspace surfaces.
 When a durable controller intent makes an expired Adopt or Resume recoverable,
 two controller-only composite methods retain the old and fresh reservation
 operation locks across the line transition and authority replacement. They
@@ -24,8 +26,10 @@ reuse inventory version 3's rotation chain so the stale bearer cannot regain
 ownership in a replay-to-rotation gap. While mutation authority remains live,
 a controller can also lend exact parent and candidate Git trees as bounded,
 `.git`-free disposable roots to one local-validation callback without exposing
-the retained checkout. The callback receives the canonical normalized
-repository identity, never the caller's raw repository spelling.
+the retained checkout. This validation projection can explicitly prove either
+ordinary changes or exact parent-tree equality without authorizing an empty
+commit. The callback receives the canonical normalized repository identity,
+never the caller's raw repository spelling.
 
 ## Reconstruction Notes
 
@@ -35,13 +39,14 @@ repository identity, never the caller's raw repository spelling.
   request/result structs, `PinnedAcquireRequest`, `PinnedReleaseRequest`,
   `PinnedCandidateRequest`, `PinnedCommitRequest`, `Manager.AcquirePinned`,
   `Manager.WithPinnedOperation`, `Manager.SnapshotPinnedCandidate`,
-  `Manager.CommitPinned`, `Manager.ReleasePinned`,
+  `Manager.SnapshotPinnedValidationCandidate`, `Manager.CommitPinned`,
+  `Manager.ReleasePinned`,
   `PinnedCandidateValidationRequest`,
   `Manager.WithPinnedCandidateValidationRoots`, `PinnedLineAdoptRequest`,
   `PinnedLineResumeRequest`, `PinnedLineParkRequest`,
   `PinnedLineReviewRequest`, `Manager.AdoptPinnedLine`,
   `Manager.ResumePinnedLine`, `Manager.ParkPinnedLine`,
-  `Manager.SnapshotPinnedLineReview`,
+  `Manager.PreviewPinnedLineReview`, `Manager.SnapshotPinnedLineReview`,
   `Manager.RecoverPinnedLineAdoptReservation`,
   `Manager.RecoverPinnedLineResumeReservation`, `NewGitWorkspaceTool`, API routes under
   `/api/git-workspaces`, and frontend API/page components.
@@ -49,8 +54,10 @@ repository identity, never the caller's raw repository spelling.
   repository work, or have a trusted controller validate and publish a fresh
   exact pinned checkout; heartbeat an owned pin without resetting work; either
   release ordinary pinned state through preservation or adopt it as a private
-  line, validate and commit one mutation, advance and park the retained ref
-  before releasing the reservation, review the parked exact commit, and resume
+  line, snapshot and validate either changed or exact no-change evidence,
+  deterministically commit only changed evidence, preflight the bounded review,
+  advance and park the retained ref, release the reservation while retaining
+  the branch, and compare the parked review with its preflight before resuming
   only from its complete version/epoch/tip/tree fence; after an expired
   write-ahead Adopt or Resume, hold both reservation locks while reconciling
   the intended transition and replacing the stale bearer; then reconcile generic
@@ -70,15 +77,20 @@ repository identity, never the caller's raw repository spelling.
   generic stats, quota, HTTP, frontend, or tool projections. A later
   controller-owned storage lifecycle must account for all pinned storage,
   including released acquisitions that were never adopted into a line,
-  separately. A parked review is object-addressed and reservation-free, while a
-  mutation requires one exact fresh line epoch and reservation.
+  separately. A proposed-park preview is object-addressed but requires and
+  retains the exact active mutation reservation; a parked review is
+  object-addressed and reservation-free while its private branch remains, and
+  another mutation requires one exact fresh line epoch and reservation.
   Ordinary rotation requires the old bearer to own the Git workspace. Composite
   Resume recovery also handles the causally distinct pre-Resume state in which
   eventing issued the old bearer but Git never installed it; the same
   inventory-v3 rotation evidence permanently revokes it. Disposable validation
   roots contain only bounded object-addressed ordinary tree content; their
   paths exist only during the controller callback, are omitted from serialized
-  evidence, and never disclose or copy the retained `.git` directory.
+  evidence, and never disclose or copy the retained `.git` directory. An exact
+  no-change declaration materializes separate parent and candidate roots for
+  the same proven tree; it is validation evidence only and never relaxes the
+  strict no-empty-commit boundary.
 
 ## Requirements
 
@@ -95,11 +107,39 @@ repository identity, never the caller's raw repository spelling.
 | `FR-GITWS-009` | MUST | Agent tool call `git_workspace`. | Actions acquire, list/status, release, clean ignored, drop, and reconcile map to generic manager operations and return JSON. | Mutating actions persist through the manager. | Missing manager or invalid action returns a tool error; a guessed controller-pinned workspace is indistinguishable from missing, and no pinned or line action exists. | Agents need a first-class path to allocate reusable checkouts without receiving controller authority. |
 | `FR-GITWS-010` | MUST | Launcher API calls and frontend dashboard interactions. | API returns JSON stats/results; UI shows inventory/history/limits without long root paths in the summary metrics, displays normalized SSH remotes for legacy HTTPS rows when safe, exposes SSH remotes through a compact copy marker, labels the checkout branch column as current branch, shows compact checkout paths with a full-path copy action, and exposes refresh, maintain, clean, and drop actions. | Cleanup/drop/reconcile mutate through API helpers only. | API config/load errors return HTTP errors; UI disables clean/drop on locked workspaces. | Users need visibility and manual controls for local checkouts. |
 | `FR-GITWS-011` | MUST | A trusted controller calls `Manager.AcquirePinned` with an exact repository, source branch, expected commit, opaque reservation key, and agent identity. Unless the checkout is adopted into a retained line under `FR-GITWS-013`, it eventually calls `Manager.ReleasePinned` with that reservation and agent identity. | The manager returns a locked, detached checkout whose fetched source branch resolves to the exact lowercase 40- or 64-hex expected commit. A first acquisition uses a fresh isolated clone prepared and verified in an unpublished staging directory, atomically publishes it at its inventory-derived path in the controller-only `repoID-pinned[-N]` namespace, and only then records ownership; a matching same-reservation call heartbeats the existing checkout without fetching, checking out, cleaning, or resetting agent work. Generic `ReleaseSession` skips pinned reservations, while explicit ordinary pinned release preserves work and unlocks it. | Inventory durably records repository identity, pinned source ref, pinned commit, reservation/agent lock identity, heartbeat, and independently retained private history. From first acquisition, every pinned checkout, repository-only rollup, path, lock, ID, count, byte total, and history entry is absent from generic stats/list/quota surfaces; generic session lookup/reuse/release and reconciliation skip it, and cleanup/drop of its guessed ID returns the ordinary not-found result even after ordinary pinned release. Ordinary pinned release preserves any clean descendant commit or dirty work on a unique create-only reservation branch before unlocking. All inventory access is serialized by a context-aware kernel advisory lock whose persistent legacy path fences out older directory-lock binaries. | Missing, whitespace-aliased, malformed, or noncanonical input fails before allocation. Repository/ref/commit/reservation/agent mismatches, an origin that is not one exact raw remote or has redirected push configuration, an escaped or symlink-substituted manager, checkout, or Git-internal path, a non-descendant `HEAD`, replacement/graft/sparse/index-hiding state, injected Git configuration, unpreservable dirty state, or another control-plane deviation fails closed without resetting work or adopting a generic reusable checkout. A failed/crashed staging attempt is never inventory-owned or reused. Pinned acquire/release are available only as Go controller APIs: they are not HTTP/frontend actions and are not registered as `git_workspace` tool actions. A retained-line reservation must use its separate park boundary and is rejected by ordinary pinned release. | A development controller must bind local code to provider-verified PR identity while preserving subsequent agent work and withholding checkout and lifecycle authority from untrusted model calls. |
-| `FR-GITWS-012` | MUST | A trusted controller snapshots one exact locked pinned checkout, stores the returned parent/tree/candidate digest as validation evidence, then calls `Manager.CommitPinned` with that evidence, an immutable `pdcmt_` intent, a canonical bounded message, and a stored UTC whole-second authored time. | `SnapshotPinnedCandidate` builds an all-worktree candidate from tracked plus nonignored untracked content through a private temporary index and returns only opaque workspace identity, exact parent/tree, a domain-separated raw-diff digest, and bounded changed-file count. `CommitPinned` recomputes the candidate, creates one deterministic one-parent commit object whose message binds a domain-separated digest of the intent and whose identity/time are fixed, verifies its raw object, compare-and-swaps detached `HEAD`, repairs only the real index, and proves the checkout clean. An exact retry after a crash between completed Git subprocesses recognizes the same deterministic object at `HEAD`, repairs an interrupted index update, and returns `already_applied`; a proven commit with later worktree drift returns the commit evidence plus an explicit recovery error. | Candidate snapshots may add unreachable content-addressed Git objects but do not change `HEAD`, the real index, ordinary files, inventory ownership, branches, remotes, or provider state. A successful commit changes only local Git objects, detached `HEAD`, its bounded exclusive local reflog, and the real index. A hash-keyed kernel advisory operation lock serializes repair, snapshot, commit, and pinned release for the reservation across processes; its callback-derived context composes atomic manager calls without re-locking and expires when the callback returns, and the edit-only repair runner holds it for its complete preflight/model/postflight interval. | Missing or stale workspace/pin/parent/tree/digest/intent/time evidence, empty changes, attached or unexpected `HEAD`, a dirty real index before first application, merge/rebase/sequencer state, changed gitlinks, unsafe ref-storage/symlink-ref configuration, nonexclusive appendable reflogs, excessive/invalid Git output, origin/path/control-plane drift, compare-and-swap loss, cancellation, workspace drift, or a stale lock left by termination inside a Git subprocess fails closed. Stale Git locks require explicit operator recovery and are never deleted automatically. Git plumbing uses no shell, hook, signing, editor, pager, prompt, system/global config, replacement object, or lazy fetch. Commit, snapshot, and operation-lock capabilities remain controller-only Go APIs and perform no validation command, push, branch update, merge, release, HTTP action, or agent-tool action. | Every validated repair needs a local, content-addressed commit anchor that reconciles completed-subprocess crash boundaries without turning model completion or ambient Git configuration into publication authority. |
-| `FR-GITWS-013` | MUST | A trusted controller calls `Manager.AdoptPinnedLine` for one freshly acquired clean exact pin using a caller-durable opaque line ID, workspace ID, and source tree; after local work it calls `Manager.ParkPinnedLine` with the complete expected version, mutation epoch, previous tip, new tip/tree, and caller-durable intent or an explicit no-change fact. A later mutation calls `Manager.ResumePinnedLine` with a fresh reservation plus the complete parked fence, while a local review calls `Manager.SnapshotPinnedLineReview` with the exact parked version, prior tip, current tip, and tree. | Adopt and resume return only opaque workspace, version, mutation epoch, tip, tree, and replay evidence while retaining or installing the exact mutation reservation. Park runs only after any outer mutation operation has returned, compare-and-swaps a stable private `picoclaw/development/...` branch ref to either one direct-child clean commit or the unchanged tip, proves the exact tree and cleanliness, then returns the next version and exact previous-tip/tip/tree/replay/no-change evidence only after the workspace reservation is cleared. Review requires the line to remain parked and returns its exact version, park epoch/intent, base commit, tip commit, tree, at most 1,000 bounded canonical changed paths, an at-most-512-KiB valid-UTF-8 LF-canonical unified diff, and a domain-separated digest over that complete projection without acquiring a mutation reservation. | String-tagged inventory version 2 adds a private line map, workspace-owner link, and independently retained private history while fencing numeric-version rollback. Fresh pinned controller workspaces use a disjoint `repoID-pinned[-N]` identity namespace, and adoption rejects a legacy pinned checkout from the generic numeric namespace so hidden lines cannot influence visible workspace suffixes. Each line binds one repository, original source ref/commit, deterministic internal branch, exact tip/tree, version, monotonically increasing mutation epoch, parked-or-mutating state, timestamps, a domain-separated current reservation hash while mutating, the complete never-reusable retired reservation-hash history, a write-ahead pending-park tuple, and complete last-park replay evidence without storing the current reservation bearer in the line record. Adopt creates or reconciles the create-only line ref and owner while retaining the initial lock and moves that workspace's prior history into the private retention domain. Resume atomically transitions one parked line to mutating, increments its epoch, and installs the fresh workspace lock without fetching, recloning, cleaning, resetting, or moving `HEAD`. Park durably records its exact intent before advancing and reference-fsyncing the exclusive loose ref without dereferencing it and with reflog creation disabled, then records replay evidence and clears the lock; an explicit no-change park leaves the ref and tip unchanged while still advancing the line version. Retained line workspaces, repository-only rollups, independently capped history, counts, bytes, and activity-derived repository timestamps are omitted from generic stats/list/quota output, and the checkout is excluded from generic reuse, cleanup, release, drop, and reconciliation; direct generic cleanup/drop of a guessed private ID returns the same not-found result as an absent workspace. A later controller-owned storage lifecycle must account for and retire retained storage separately. | Every request requires exact untrimmed bounded identities and matching repository/source/workspace/agent, SHA width, line version, epoch, tip, tree, state, lock, exclusive canonical direct loose ref, absent ref lock/reflog, detached clean checkout, origin, ancestry, and control plane. Stale, partial, cross-line, reused-reservation, changed, attached, dirty, multi-parent, nondirect-child, symbolic/dereferenced/packed-only/ref-layout, symlink, unsafe fsync/diff/output configuration, replacement, oversized-output, or cancellation evidence fails closed without adopting a different workspace, resetting files, or releasing the mutation lock. Exact adopt/resume retries return the same lease; an exact park retry reconciles a ref-ahead/inventory-behind completed Git effect only from its matching write-ahead tuple and returns the same parked result, while changed intent conflicts. Generic `ReleasePinned` rejects a line reservation, every retired line reservation remains unusable, and a pending park also seals the outer operation callback. Review holds inventory serialization through preflight, bounded object reads, and postflight; both Git's fail-closed attribute-source option and its environment are pinned to the exact tip, local `diff.*` and output-changing configuration is rejected, and malformed, control-bearing, noncanonical, excessive, non-UTF-8, bare-CR, or NUL-bearing review output fails without returning a partial snapshot. These APIs remain controller-only Go surfaces and perform no fetch, hook, shell, validation command, model/tool/workflow/HTTP/frontend action, push, merge, provider call, or publication. | Multiple local repair attempts need one retained, crash-reconcilable commit line that releases exclusive edit ownership between attempts and supports immutable local review without letting generic workspace maintenance, live worktree drift, or untrusted callers discard, replace, or control it. |
+| `FR-GITWS-012` | MUST | A trusted controller snapshots one exact locked pinned checkout for validation and, only when ordinary content changed, commits the same parent/tree/digest evidence with an immutable `pdcmt_` intent, canonical bounded message, and stored UTC whole-second authored time. | `SnapshotPinnedValidationCandidate` builds the all-worktree projection through a private temporary index and returns opaque workspace identity, exact parent/tree, domain-separated raw-diff digest, and bounded changed-file count; an exact clean worktree is represented by zero changed files and the parent tree. `SnapshotPinnedCandidate` returns the identical projection for changed content but remains strict against no-change. `CommitPinned` recomputes changed evidence, creates and verifies one deterministic one-parent commit whose fixed identity/time/message bind the intent, compare-and-swaps detached `HEAD`, repairs only the real index, and proves cleanliness. Exact completed-subprocess replay recognizes the same object at `HEAD` and returns `already_applied`; proven commit plus later worktree drift returns the commit evidence with an explicit recovery error. | Candidate snapshots may add unreachable content-addressed Git objects but change no `HEAD`, real index, ordinary file, inventory ownership, branch, remote, or provider state. A successful changed commit alters only local objects, detached `HEAD`, its bounded exclusive reflog, and the real index. A hash-keyed kernel advisory operation lock serializes repair, snapshot, commit, and pinned release across processes and safely composes nested manager calls through its callback context. No-change validation changes no commit or ref. | Missing or stale workspace/pin/parent/tree/digest/intent/time evidence, an empty strict snapshot or commit, attached or unexpected `HEAD`, dirty real index, merge/rebase/sequencer state, changed gitlink, unsafe ref storage, nonexclusive reflog, excessive/invalid output, origin/path/control-plane drift, compare-and-swap loss, cancellation, workspace drift, or a stale Git lock fails closed. Stale locks require explicit operator recovery. Plumbing uses no shell, hook, signing, editor, pager, prompt, ambient config, replacement object, or lazy fetch. These controller-only APIs run no validation command and grant no push, branch publication, merge, release, HTTP, or agent-tool authority. | Every attempt needs immutable local validation evidence, while only changed evidence needs a deterministic commit anchor; a truthful no-change attempt must not invent an empty commit. |
+| `FR-GITWS-013` | MUST | A trusted controller adopts one fresh exact pin as a private line; while its mutation reservation is live it may call `Manager.PreviewPinnedLineReview` with the complete proposed Park request, then after local work calls `Manager.ParkPinnedLine` with that unchanged request. It may call `Manager.SnapshotPinnedLineReview` against the complete parked fence, and a later mutation calls `Manager.ResumePinnedLine` with a fresh reservation and that fence. | Adopt/resume return opaque line fences while retaining/installing the exact mutation reservation. Preview validates the proposed direct-child commit or explicit no-change tip and returns the prospective next-version bounded review—exact version, park epoch/intent, base/tip/tree, at most 1,000 canonical paths, at most 512 KiB of valid-UTF-8 LF-canonical unified diff, and a digest—without mutation or reservation release. Park runs only after an outer mutation operation returns, compare-and-swaps and fsyncs the stable private `picoclaw/development/...` ref, proves tip/tree/cleanliness, advances the version, and clears the workspace reservation while retaining the private branch/fence. Parked review is reservation-free and, for the same proposal, equals the preview completely. | String-tagged inventory version 2 privately retains the line/workspace link, source, deterministic branch, exact tip/tree, version/epoch, parked/mutating state, reservation hash/history, pending-Park tuple, replay evidence, and capped history. Preview changes none of them. Adopt creates/reconciles the create-only line ref; Resume installs a fresh lock and increments the epoch without moving files, `HEAD`, or refs. Park write-aheads its intent, advances the exclusive loose no-reflog ref for a changed tip, records replay evidence, retires the reservation, and leaves a no-change ref/tip untouched while still advancing the version. All retained-line identities, storage, and activity remain excluded from generic reuse, stats, quota, maintenance, tools, HTTP, and frontend. | Every request requires exact bounded identities and matching repository/source/workspace/agent, SHA width, line version/epoch/tip/tree/state/lock, exclusive safe ref layout, detached clean checkout, origin, ancestry, and control plane. Preview additionally fails closed before Park on a consumed intent, pending Park, invalid advancement, or bounded-review failure and returns nothing partial without releasing authority. Exact adopt/resume/Park retries reconcile only the same intent; stale, partial, cross-line, reused-reservation, dirty, attached, multi-parent, nondirect-child, unsafe-ref/config/output, oversized, encoding, path, replacement, or cancellation evidence conflicts. Generic release cannot release a line. These controller-only APIs perform no fetch, model/tool/workflow/HTTP/frontend, CI, provider, push, merge, or publication action. | Multiple attempts need one retained crash-reconcilable branch, bounded immutable review before and after Park, and no exclusive edit ownership while review or user discussion is pending. |
 | `FR-GITWS-014` | MUST | After an exclusive PR-development mutation lease expires, a trusted recovery controller calls `Manager.RotatePinnedReservation` with one caller-durable intent, the exact old and fresh reservation bearers, stable existing agent, workspace, source pin, and either the exact unbound-pin fence or the complete bound mutating-line version/epoch/tip/tree fence. | The manager waits for both reservation operation locks in canonical hash order, then atomically changes only the matching workspace reservation and, when bound, its matching line reservation hash; the logical Git agent remains unchanged and cannot be selected by the recovery worker. It returns the exact opaque workspace/line fence, a domain-separated rotation proof, and replay status. An exact retry recognizes only the latest still-active replacement and performs no write. | String-tagged inventory version 3 retains a bounded append-only, domain-separated hash chain of old-to-fresh rotation records. The old reservation is permanently revoked, the fresh reservation becomes the sole active bearer, and causal rotations may continue `A -> B -> C` without adding entries to the park-only retired-reservation sequence. The complete rotation history participates in inventory validation and global reservation nonreuse. No ref, `HEAD`, index, worktree, object, branch, remote, or filesystem content is changed. | Unbound and bound modes are disjoint. Missing, reused, aliased, partial, cross-workspace, cross-line, noncurrent, pending-park, parked, changed source/version/epoch/tip/tree, noncanonical lock order, malformed chain, duplicate hash, rollback to version 2, or replay after later progress fails closed. The API is controller-only and has no tool, workflow, model, HTTP, UI, CI, provider, commit, park, push, merge, or publication surface. | A crashed worker still knows its old bearer; durable recovery must revoke that bearer before a replacement controller can safely continue the same local checkout without resetting or discarding its work. |
 | `FR-GITWS-015` | MUST | A trusted recovery controller has one caller-durable schema-v13 Adopt or Resume operation intent and calls `Manager.RecoverPinnedLineAdoptReservation` or `Manager.RecoverPinnedLineResumeReservation` with its exact old and globally fresh reservation bearers, stable agent, workspace/source/line identity, intended line fence, and rotation identity. | The manager acquires both reservation operation locks in canonical hash order and retains them across the complete transition. For a pre-effect Adopt it first durably records the unbound old-to-fresh rotation, revokes old, installs fresh as workspace owner, and then creates or exactly reconciles the retained line in a second durable save; replay completes that intermediate state. For a post-effect Adopt it first verifies the exact retained line and Git state, then records the bound rotation and replaces old with fresh. Resume accepts either the exact parked pre-Resume fence where old was never installed or the exact already-resumed fence owned by old, and converges both to that mutating fence owned only by fresh. Each method returns the same opaque line fence and inventory-v3 rotation proof on first execution and exact latest replay. | The existing inventory-v3 rotation chain, count, tail anchor, global nonreuse checks, and workspace/line records durably revoke old and install fresh in one controller operation while the canonical locks remain continuously held. Adopt may create or reconcile only its deterministic private source ref; Resume moves no ref. Neither method changes `HEAD`, index, worktree, ordinary content, source pin, tip, tree, line version, remote, or logical agent. No new inventory version or parallel recovery history is introduced. | Missing, reused, aliased, partial, cross-intent/workspace/line, dirty, attached, changed source/version/epoch/tip/tree/ref/control-plane, pending-park, later-progress, noncanonical-lock, or corrupt rotation evidence fails closed. A different old-owner operation cannot enter between transition validation and revocation; after success every use of old conflicts. Exact replay is accepted only for the latest matching fresh owner and record. The methods are controller-only and expose no model, tool, workflow, HTTP/UI, CI, commit, park, provider, push, merge, or publication capability. | A durable operation intent makes Adopt and Resume repeatable, but only one composite Git boundary can close the stale-bearer race between replaying the line transition and revoking the crashed worker's authority. |
-| `FR-GITWS-016` | MUST | While one exact mutation reservation remains live, a trusted controller calls `Manager.WithPinnedCandidateValidationRoots` with the complete pin, workspace ID, candidate parent/tree/digest evidence, and one callback. | Under the reservation operation lock, the manager revalidates exact inventory identity, detached `HEAD`, real index, parent, recomputed candidate, origin, ancestry, and Git control plane; materializes the parent and candidate object trees into separate private disposable `.git`-free roots; and supplies their canonical normalized repository identity, roots, and `PinnedTreeManifest` evidence to the callback. Each manifest is a domain-separated full SHA-256 projection of the exact tree and every canonically ordered leaf path, Git mode, materialized type, size, and full SHA-256 content digest. After callback entry, a bounded detached descriptor-confined postflight re-enumerates both roots, checks path identity/type/mode/change/link state, reconstructs both manifests, and fails closed on drift before cleanup. The roots are then removed and a second bounded detached postflight revalidates the same retained candidate and control plane even after callback failure or cancellation. | The callback treats both roots as immutable inputs. Only private temporary roots and unreachable content-addressed Git objects produced while recomputing the candidate may change; no inventory, reservation, `HEAD`, real index, retained ordinary file, ref, branch, remote, provider, workflow, cache, or publication state changes. Root paths are omitted from JSON evidence and exist only for the callback; the normalized repository is JSON evidence, and no reservation bearer is returned. | Missing, malformed, stale, cross-workspace, empty, changed, dirty-index, attached, operation-in-progress, locked, control-plane-drifted, excessive, invalid-UTF-8, noncanonical, absolute, traversal, `.git`-aliased, case-colliding, added, removed, renamed, replaced, hard-linked, swapped, raced, mode/content-drifted, special-file, gitlink, unsafe-symlink, output-write, cancellation, cleanup, or postflight state fails closed without invoking or successfully returning from the callback as applicable. Git and filesystem reads are bounded; regular-file opens are rooted, no-follow, and nonblocking where the platform supports those flags. Git tree reads use direct `ls-tree` and `cat-file` object plumbing with no checkout, archive attribute filter, shell, hook, prompt, pager, ambient configuration, replacement object, or lazy fetch. The method is a controller-only Go API with no tool, model, workflow, HTTP/UI, commit, park, release, provider, push, merge, or publication surface. | Local validation must run against immutable exact content without giving repository-controlled commands the retained checkout, its Git authority, sibling state, or a stale candidate that changed while validation was running. |
+| `FR-GITWS-016` | MUST | While one exact mutation reservation remains live, a trusted controller calls `Manager.WithPinnedCandidateValidationRoots` with the complete pin, workspace ID, candidate parent/tree/digest evidence, an exact `NoChanges` declaration, and one callback. | Under the reservation operation lock, the manager revalidates inventory identity, detached `HEAD`, real index, parent, recomputed candidate, origin, ancestry, and control plane; requires `NoChanges` to equal candidate-tree/parent-tree equality; materializes the exact object trees into separate private disposable `.git`-free parent and candidate roots, including two separate roots for one no-change tree; and supplies their canonical repository identity and full-SHA-256 `PinnedTreeManifest` evidence to the callback. It descriptor-confined postflights both roots, removes them, then revalidates the same retained candidate/control plane even after callback failure or cancellation before releasing the operation lock. | The callback treats both roots as immutable. Only private temporary roots and unreachable content-addressed objects may change; inventory, reservation, `HEAD`, real index, retained files, ref, branch, remote, provider, workflow, cache, and publication state do not. Root paths exist only during the callback and are omitted from JSON; normalized repository and manifests are evidence, while no reservation bearer is returned. | Missing, malformed, stale, cross-workspace, changed/no-change declaration mismatch, dirty index, attached or operation-in-progress state, control-plane drift, excessive or unsafe tree/path/blob/symlink content, invalid UTF-8, alias/collision/traversal, added/removed/renamed/replaced/hard-linked/swapped/raced/mode/content drift, special file, gitlink, callback write, cancellation, cleanup, or either postflight failure fails closed without successful evidence. Reads are bounded and rooted/no-follow/nonblocking where supported; direct `ls-tree`/`cat-file` plumbing uses no checkout, archive filter, shell, hook, prompt, pager, ambient config, replacement object, or lazy fetch. This controller-only API grants no tool, model, workflow, HTTP/UI, commit, Park, release, provider, push, merge, or publication authority. | Local validation must see immutable exact changed or no-change content without receiving the retained checkout, Git authority, sibling state, or stale evidence. |
+
+Event Automation's durable repair-controller composition extends these requirements only
+through the following Git Workspaces primitives; it grants this feature no CI,
+ledger, model, provider, or publication authority:
+
+- Within `FR-GITWS-012`, `SnapshotPinnedValidationCandidate` MUST return the
+  same immutable parent/tree/digest projection as `SnapshotPinnedCandidate` for
+  changed content, but MUST also admit an exact clean worktree as zero changed
+  files whose candidate tree equals the parent tree. The digest still binds the
+  exact parent and tree. `SnapshotPinnedCandidate` and `CommitPinned` remain
+  strict: neither admits nor creates an empty commit.
+- Within `FR-GITWS-013`, `PreviewPinnedLineReview` MUST validate one complete
+  proposed Park fence while its exact mutation reservation remains live, read
+  the same bounded canonical paths and diff used by parked review, revalidate
+  the proposal after those reads, and return the prospective next-version
+  review projection. It MUST NOT update the ref, inventory, `HEAD`, index,
+  worktree, pending-Park state, or reservation. For the same successful Park
+  request and exact post-Park snapshot, the complete preview and parked review
+  projections MUST be equal, including their digest. Park alone retires the
+  mutation reservation while the private branch and parked fence remain; an
+  explicit no-change preview has no paths and an empty diff.
+- Within `FR-GITWS-016`, `PinnedCandidateValidationRequest.NoChanges` MUST
+  equal the recomputed parent-tree/candidate-tree equality. Both a false claim
+  over clean content and a true claim over changed content fail before the
+  callback. A true exact claim MUST still materialize separate disposable
+  parent and candidate roots for that same tree and keep the reservation
+  operation lock through callback, root postflight, cleanup, and retained-state
+  postflight.
 
 Controller storage lifecycle debt is deliberate and bounded at this layer:
 ordinary pins remain private after `ReleasePinned`, even when never adopted, so
@@ -201,11 +241,11 @@ Owns: TOOL git_workspace
 | Type | Surface | Contract | Requirement IDs |
 | --- | --- | --- | --- |
 | Config | `git_workspaces.*`, `tools.git_workspace.enabled` | Defines root, limits, retention delays, and tool enablement. | `FR-GITWS-001`, `FR-GITWS-009` |
-| Go API | `(*gitworkspace.Manager).AcquirePinned`, `WithPinnedOperation`, `SnapshotPinnedCandidate`, `CommitPinned`, and `ReleasePinned` | Controller-only exact acquisition binds repository, source branch, expected commit, opaque reservation, and agent identity; the callback-scoped operation lock serializes trusted filesystem work while its derived context safely composes the atomic manager methods; snapshot/commit bind validated ordinary content to one deterministic local descendant; explicit release safely preserves and unlocks only that reservation. | `FR-GITWS-011`, `FR-GITWS-012` |
-| Controller Go API | `(*gitworkspace.Manager).AdoptPinnedLine`, `ResumePinnedLine`, `ParkPinnedLine`, and `SnapshotPinnedLineReview` plus the corresponding exact request/result structs | Retain one original exact pin under a private line, version-fence each fresh mutation reservation, atomically advance and park one direct-child commit or explicit no-change tip before releasing that reservation, and return one bounded object-addressed exact-SHA review snapshot while parked. Results expose no checkout path, internal branch, or reservation bearer. | `FR-GITWS-013` |
+| Go API | `(*gitworkspace.Manager).AcquirePinned`, `WithPinnedOperation`, `SnapshotPinnedCandidate`, `SnapshotPinnedValidationCandidate`, `CommitPinned`, and `ReleasePinned` | Controller-only exact acquisition binds repository, source branch, expected commit, opaque reservation, and agent identity; the callback-scoped operation lock serializes trusted filesystem work while its derived context safely composes the atomic manager methods; strict snapshot/commit bind changed ordinary content to one deterministic local descendant, while the validation snapshot can prove exact no-change evidence without authorizing an empty commit; explicit release safely preserves and unlocks only that reservation. | `FR-GITWS-011`, `FR-GITWS-012` |
+| Controller Go API | `(*gitworkspace.Manager).AdoptPinnedLine`, `ResumePinnedLine`, `PreviewPinnedLineReview`, `ParkPinnedLine`, and `SnapshotPinnedLineReview` plus the corresponding exact request/result structs | Retain one original exact pin under a private line, version-fence each fresh mutation reservation, preflight the exact bounded review projection without mutating or releasing it, atomically advance and park one direct-child commit or explicit no-change tip while retaining the branch and releasing that reservation, and return the equal object-addressed exact-SHA review snapshot while parked. Results expose no checkout path, internal branch, or reservation bearer. | `FR-GITWS-013` |
 | Controller Go API | `(*gitworkspace.Manager).RotatePinnedReservation` and its exact request/result structs | Atomically revoke one expired pinned mutation bearer and install one globally fresh bearer against an exact unbound pin or bound mutating-line fence, retaining an idempotent hash-chained proof without changing repository content or refs. | `FR-GITWS-014` |
 | Controller Go API | `(*gitworkspace.Manager).RecoverPinnedLineAdoptReservation`, `RecoverPinnedLineResumeReservation`, and their exact request/result structs | Under canonical old-plus-fresh operation locking, reconcile one write-ahead Adopt or Resume and converge its Git inventory authority to the globally fresh bearer while reusing the inventory-v3 rotation proof and changing no ordinary content. | `FR-GITWS-015` |
-| Controller Go API | `(*gitworkspace.Manager).WithPinnedCandidateValidationRoots`, `PinnedCandidateValidationRequest`, `PinnedCandidateValidationRoots`, and `PinnedTreeManifest` | Under one live mutation reservation, revalidate the exact candidate; lend its canonical normalized repository, bounded private `.git`-free parent/candidate roots, and full-SHA-256 manifests to one read-only callback; exact-postflight the disposable roots before removing them; then detached-postflight the retained candidate/control plane. | `FR-GITWS-016` |
+| Controller Go API | `(*gitworkspace.Manager).WithPinnedCandidateValidationRoots`, `PinnedCandidateValidationRequest`, `PinnedCandidateValidationRoots`, and `PinnedTreeManifest` | Under one live mutation reservation, revalidate the exact changed/no-change declaration and candidate; lend its canonical normalized repository, separate bounded private `.git`-free parent/candidate roots, and full-SHA-256 manifests to one read-only callback; exact-postflight the disposable roots before removing them; then detached-postflight the retained candidate/control plane. | `FR-GITWS-016` |
 | Tool | `git_workspace` | Agent-callable generic acquire/list/status/release/clean/drop/reconcile operations with JSON results. It has no pinned, line, rotation, or composite-recovery action, cannot supply pinned or line identity fields, generic release skips ordinary pinned reservations, every pinned workspace/repository/history/ID/path/lock/count/byte projection is absent from acquisition onward, and maintenance treats guessed pinned IDs as missing. | `FR-GITWS-002` through `FR-GITWS-009`, `FR-GITWS-011`, `FR-GITWS-013` through `FR-GITWS-015` |
 | HTTP | `/api/git-workspaces*` | Launcher-authenticated inventory, reconcile, cleanup, and drop endpoints. | `FR-GITWS-005` through `FR-GITWS-010` |
 | Frontend | Git Workspaces dashboard and config fields | Browser inventory/maintenance surface and limit configuration. | `FR-GITWS-001`, `FR-GITWS-010` |
@@ -255,24 +295,33 @@ Owns: TOOL git_workspace
    cross-process operation lock, then acquire inventory locks only inside
    manager calls. To snapshot a candidate, require detached `HEAD`, an ordinary
    operation-free checkout, and a real index equal to `HEAD`; seed a private
-   index from that parent, add all worktree changes, reject an empty diff or
-   changed gitlink, write the candidate tree, and hash the exact raw diff.
+   index from that parent, add all worktree changes, reject a changed gitlink,
+   write the candidate tree, and hash the exact raw diff. The strict snapshot
+   rejects an empty diff; the validation snapshot instead returns zero changed
+   files, the exact parent tree, and its still-parent-bound digest so local
+   validation can attest a no-change attempt without creating a commit.
 10. To commit stored validation evidence, recreate and verify the deterministic
    commit object before compare-and-swapping detached `HEAD`. If `HEAD` already
    names that exact object, reconcile the real index and prove cleanliness. If
    content drifted after the commit became visible, preserve the commit fact and
    fail recovery-required without changing ordinary files.
-11. To park a mutating line, validate the complete source/workspace/agent,
-    version, mutation epoch, reservation hash, previous tip, new tip/tree, and
-    clean detached checkout. Require either the unchanged tip for an explicit
-    no-change park or exactly one commit whose sole parent is the previous tip.
-    Refuse to park inside a still-live outer mutation operation. Durably store
-    the exact pending tuple, compare-and-swap and reference-fsync the stable
-    exclusive loose ref without creating a branch reflog, reconcile an
-    ambiguous completed ref update under a bounded detached postflight,
-    re-prove ref layout/tip/tree/cleanliness,
-    then atomically advance the version, store complete caller-intent replay
-    evidence, mark the line parked, and clear the workspace lock.
+11. Before parking, a trusted controller may preview the same complete Park
+    request under its live reservation operation lock. Revalidate the mutating
+    line, source/workspace/agent, version, epoch, reservation, previous tip,
+    proposed direct-child-or-no-change tip/tree, retained ref, clean detached
+    checkout, and consumable intent before and after reading the bounded paths
+    and canonical diff. Construct the prospective next-version review metadata
+    without changing any Git or inventory fact and without releasing the
+    reservation. To park, repeat the exact fence checks, refuse a still-live
+    outer mutation operation, durably store the pending tuple, compare-and-swap
+    and reference-fsync the stable exclusive loose ref without a branch reflog,
+    reconcile an ambiguous completed ref update under a bounded detached
+    postflight, and re-prove ref layout/tip/tree/cleanliness. Then atomically
+    advance the version, store complete caller-intent replay evidence, mark the
+    line parked, and clear only the workspace mutation lock; retain the private
+    line and branch. Event Automation's durable repair controller snapshots that parked fence and
+    requires complete equality with the preview before accepting its own
+    terminal transaction.
 12. To review a parked line, hold manager and inventory serialization without a
     mutation reservation; bind the request to the exact current version, last
     previous tip, tip, and tree; revalidate the retained workspace, ref, origin,
@@ -283,7 +332,9 @@ Owns: TOOL git_workspace
     configuration disabled. Re-prove the parked state after both reads,
     canonicalize CRLF to LF, bind the exact line version, park intent/epoch,
     base/tip/tree, paths, and diff in a domain-separated digest, and return
-    nothing partial on limit, encoding, path, or state failure.
+    nothing partial on limit, encoding, path, or state failure. The shared
+    object-reader and projection constructor make an unchanged proposed Park
+    preview and this exact post-Park snapshot structurally equal.
 13. To resume a parked line, take the fresh reservation operation lock and
     require the complete prior version/epoch/tip/tree and original source
     identity. Revalidate the retained unlocked workspace and exact ref without
@@ -313,15 +364,18 @@ Owns: TOOL git_workspace
     operation.
 16. To lend a candidate for local validation, hold its reservation operation
     lock; re-prove exact pin/workspace/control-plane, detached parent, clean real
-    index, and recomputed tree/digest; enumerate only exact tree objects through
-    bounded `ls-tree`; reject unsafe paths, case collisions, unsupported modes,
-    gitlinks, and unsafe symlinks; stream each blob through bounded `cat-file`
-    into fd-confined private parent/candidate roots while hashing full content;
-    create validated symlinks last; snapshot every materialized path; invoke one
-    read-only callback with the canonical repository; detached-postflight both
-    roots against their manifests, identities, modes, change metadata, and link
-    state; remove all roots; then re-prove the same retained candidate under a
-    second detached bounded postflight.
+    index, and recomputed tree/digest; require the caller's no-change declaration
+    to exactly match candidate-tree/parent-tree equality; enumerate only exact
+    tree objects through bounded `ls-tree`; reject unsafe paths, case collisions,
+    unsupported modes, gitlinks, and unsafe symlinks; stream each blob through
+    bounded `cat-file` into separate fd-confined private parent/candidate roots
+    while hashing full content, including two roots for the same exact
+    no-change tree; create validated symlinks last; snapshot every materialized
+    path; invoke one read-only callback with the canonical repository;
+    detached-postflight both roots against their manifests, identities, modes,
+    change metadata, and link state; remove all roots; then re-prove the same
+    retained candidate under a second detached bounded postflight before
+    releasing the operation lock.
 17. For stats, skip every controller-pinned workspace before inspecting its path or
     building repository rollups. Walk only generic checkout paths for total
     bytes and use Git ignored status to find generic ignored roots without
@@ -353,31 +407,45 @@ reacquires it as postflight so this feature revalidates
 repository, ancestry, and Git control-plane state while the separate security
 contract confines ordinary content edits.
 
-A trusted orchestration layer may separately compose pinned acquisition,
-development-line adoption, candidate validation and commit, parking, immutable
-review, and later resume. This feature owns only the retained checkout/ref and
-exact fencing primitives: it does not make the current case-scoped repair worker
-call them, persist attempt-ledger state, run CI, interpret a review, or publish a
-commit. When a schema-v13 operation intent authorizes recovery, Event Automation
-owns its claim and cross-store ordering; this feature owns only the two
-composite Adopt/Resume transitions and their inventory-v3 revocation proof. A
-model, workflow, generic tool, launcher route, and browser cannot discover a
-line identity/ref/checkout or invoke it. The security contract additionally
-constrains the bounded review projection and makes repository paths and
-lifecycle authority unrepresentable outside the trusted controller.
+The Event Automation durable-repair feature delta is composition only. Its trusted
+repair controller uses the validation snapshot for changed or exact no-change
+evidence, lends the exact disposable roots to local CI, deterministically
+commits only changed evidence, previews the complete bounded Park review, Parks
+and thereby releases mutation ownership while retaining the private branch,
+then requires the exact reservation-free parked snapshot to equal that preview
+before its atomic ledger/finalization boundary. A non-green but valid CI receipt
+does not alter these Git primitives: changed evidence still receives its
+deterministic local commit, and both changed and no-change attempts can Park.
+The next edit must Resume under a fresh reservation; reservation-free review
+uses only the retained parked fence and objects.
+
+Git Workspaces owns only the retained checkout/ref, disposable materialization,
+commit, review projection, and exact fencing primitives. Event Automation owns
+worker claims and leases, attempt-ledger and CI evidence, effect journaling,
+cross-store ordering, preview-versus-post-Park comparison, review state, and any
+later recovery or publication decision. When a schema-v13 operation intent
+authorizes recovery, Event Automation owns its claim and ordering while this
+feature owns only the two composite Adopt/Resume transitions and their
+inventory-v3 revocation proof. A model, workflow, generic tool, launcher route,
+and browser cannot discover a line identity/ref/checkout or invoke it. The
+security contract additionally constrains the bounded review projection and
+makes repository paths and lifecycle authority unrepresentable outside the
+trusted controller.
 
 Local CI may consume `WithPinnedCandidateValidationRoots` only as a synchronous
 controller capability. Git Workspaces owns exact preflight/postflight fencing,
 object-only materialization, manifests, and root cleanup; Event Automation owns
 discovery, sandbox execution, plan/result/cache identity, and later consumption
-of successful evidence. Neither side may persist a disposable path, execute a
+of exact terminal attested evidence. Neither side may persist a disposable path, execute a
 repository command in the retained checkout, or treat the callback as commit,
 park, release, provider, or publication authority.
 Local CI must use the returned canonical `Repository`, not the raw repository
 field from the request. Its sandbox must make both lent roots read-only, deny
 mount and rename escape authority, and quiesce callback descendants before
-return; the exact postflight is a final-state/race detector, not a substitute
-for that execution boundary.
+return. For no-change validation it must still consume both separate roots and
+must verify that their exact tree identities agree with the explicit
+declaration. The exact postflight is a final-state/race detector, not a
+substitute for that execution boundary.
 
 ## Failure And Edge Cases
 
@@ -414,6 +482,11 @@ for that execution boundary.
   must be exactly one one-parent child of the prior line tip. An explicit
   no-change park must keep the exact tip but still durably records the attempt
   boundary and releases the mutation reservation.
+- A proposed-Park preview applies the same advancement, review-size, encoding,
+  path, ref-layout, workspace, and reservation fences before Park. Failure
+  returns no partial projection, creates no pending Park, advances no ref or
+  version, and leaves the exact mutation reservation live. A no-change preview
+  is still digest-bound even though its changed paths and diff are empty.
 - Park is terminal with respect to mutation authority: it rejects a callback-
   inherited operation context, so the old edit scope must return before the
   reservation can be cleared and a later attempt can resume.
@@ -428,6 +501,12 @@ for that execution boundary.
   configuration, or retained-ref/worktree drift are hard failures with no
   partial review result. CRLF diff lines are returned in canonical LF form and
   Git attributes come only from the exact reviewed tip.
+- `SnapshotPinnedValidationCandidate` admits a clean candidate only as explicit
+  zero-change evidence; the ordinary candidate snapshot and `CommitPinned`
+  continue to reject it. Candidate validation roots reject either direction of
+  a changed/no-change declaration mismatch before lending a path. In the exact
+  no-change case the two root paths remain distinct even though their manifests
+  describe the same tree.
 - Candidate validation rejects a leaf count, total path bytes, individual path,
   tree listing, blob, symlink target, or aggregate tree content beyond its
   fixed bound. It accepts only regular nonexecutable/executable blobs and safe
@@ -475,10 +554,10 @@ for that execution boundary.
 | `FR-GITWS-010` | [web/backend/api/git_workspaces_test.go](../../web/backend/api/git_workspaces_test.go), [web/frontend/src/api/git-workspaces.test.ts](../../web/frontend/src/api/git-workspaces.test.ts), [web/frontend/src/components/agent/git-workspaces/git-workspaces-page.test.tsx](../../web/frontend/src/components/agent/git-workspaces/git-workspaces-page.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-GITWS-011` | [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go), [pkg/gitworkspace/pinned_commit_test.go](../../pkg/gitworkspace/pinned_commit_test.go), [pkg/tools/integration/git_workspace_test.go](../../pkg/tools/integration/git_workspace_test.go) |
 | `FR-GITWS-012` | [pkg/gitworkspace/pinned_commit_test.go](../../pkg/gitworkspace/pinned_commit_test.go), [pkg/agent/local_repair_test.go](../../pkg/agent/local_repair_test.go), [pkg/tools/integration/git_workspace_test.go](../../pkg/tools/integration/git_workspace_test.go) |
-| `FR-GITWS-013` | [pkg/gitworkspace/development_line_test.go](../../pkg/gitworkspace/development_line_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go), [pkg/gitworkspace/development_line_review_test.go](../../pkg/gitworkspace/development_line_review_test.go), [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
+| `FR-GITWS-013` | [pkg/gitworkspace/development_line_test.go](../../pkg/gitworkspace/development_line_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go), [pkg/gitworkspace/development_line_review_test.go](../../pkg/gitworkspace/development_line_review_test.go), [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go), [pkg/prdevelopment/controller_effects_test.go](../../pkg/prdevelopment/controller_effects_test.go) |
 | `FR-GITWS-014` | [pkg/gitworkspace/pinned_reservation_rotation.go](../../pkg/gitworkspace/pinned_reservation_rotation.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go), [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
 | `FR-GITWS-015` | [pkg/gitworkspace/pinned_line_recovery.go](../../pkg/gitworkspace/pinned_line_recovery.go), [pkg/gitworkspace/pinned_line_recovery_test.go](../../pkg/gitworkspace/pinned_line_recovery_test.go), [pkg/gitworkspace/pinned_reservation_rotation.go](../../pkg/gitworkspace/pinned_reservation_rotation.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go), [pkg/gitworkspace/development_line_test.go](../../pkg/gitworkspace/development_line_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go) |
-| `FR-GITWS-016` | [pkg/gitworkspace/pinned_validation_roots.go](../../pkg/gitworkspace/pinned_validation_roots.go), [pkg/gitworkspace/pinned_validation_roots_test.go](../../pkg/gitworkspace/pinned_validation_roots_test.go) |
+| `FR-GITWS-016` | [pkg/gitworkspace/pinned_validation_roots.go](../../pkg/gitworkspace/pinned_validation_roots.go), [pkg/gitworkspace/pinned_validation_roots_test.go](../../pkg/gitworkspace/pinned_validation_roots_test.go), [pkg/prdevelopment/localci/runner_test.go](../../pkg/prdevelopment/localci/runner_test.go) |
 
 ## Implementation Anchors
 
