@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,10 +16,13 @@ import (
 )
 
 const (
-	testBaseSHA   = "1111111111111111111111111111111111111111"
-	testEventHead = "2222222222222222222222222222222222222222"
-	testHeadSHA   = "3333333333333333333333333333333333333333"
-	testReviewSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testBaseSHA      = "1111111111111111111111111111111111111111"
+	testEventHead    = "2222222222222222222222222222222222222222"
+	testHeadSHA      = "3333333333333333333333333333333333333333"
+	testReviewSHA    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testRepositoryID = "1001"
+	testPullID       = "2002"
+	testPullAuthorID = "3003"
 )
 
 func TestCaptureSinkPersistsProviderVerifiedFeedbackAndReconcilesBeforeReread(
@@ -47,7 +51,8 @@ func TestCaptureSinkPersistsProviderVerifiedFeedbackAndReconcilesBeforeReread(
 	if len(store.inputs) != 1 {
 		t.Fatalf("capture inputs = %d, want 1", len(store.inputs))
 	}
-	input := store.inputs[0]
+	request := store.inputs[0]
+	input := request.Case
 	if input.Repository != "ScyllaDB/PicoClaw" ||
 		input.PullNumber != 42 ||
 		input.PullAuthor != "Review-User" ||
@@ -62,8 +67,30 @@ func TestCaptureSinkPersistsProviderVerifiedFeedbackAndReconcilesBeforeReread(
 		input.Feedback != "Fix the race." {
 		t.Fatalf("capture input = %#v", input)
 	}
+	if request.Thread != (eventing.PRDevelopmentThreadIdentity{
+		Provider:       "github",
+		ProviderOrigin: "https://github.com",
+		PullAuthorID:   testPullAuthorID,
+		RepositoryID:   testRepositoryID,
+		PullRequestID:  testPullID,
+		PullNumber:     42,
+	}) {
+		t.Fatalf("thread identity = %#v", request.Thread)
+	}
 	if len(runner.requests) != 2 {
 		t.Fatalf("provider requests = %d, want 2", len(runner.requests))
+	}
+	wantThread := eventing.PRDevelopmentThreadIdentity{
+		Provider:       "github",
+		ProviderOrigin: "https://github.com",
+		PullAuthorID:   testPullAuthorID,
+		RepositoryID:   testRepositoryID,
+		PullRequestID:  testPullID,
+		PullNumber:     42,
+	}
+	if len(store.lookupThreads) != 1 || store.lookupThreads[0] == nil ||
+		*store.lookupThreads[0] != wantThread {
+		t.Fatalf("lookup thread identities = %#v, want %#v", store.lookupThreads, wantThread)
 	}
 	assertReadRequest(t, runner.requests[0], "get", 0)
 	assertReadRequest(t, runner.requests[1], "get_reviews", 1)
@@ -85,6 +112,161 @@ func TestCaptureSinkPersistsProviderVerifiedFeedbackAndReconcilesBeforeReread(
 			len(store.inputs),
 		)
 	}
+	if len(store.lookupThreads) != 2 || store.lookupThreads[1] == nil ||
+		*store.lookupThreads[1] != wantThread {
+		t.Fatalf("retry lookup thread identities = %#v, want %#v", store.lookupThreads, wantThread)
+	}
+}
+
+func TestCaptureSinkReconcilesPreIdentityLegacyRetryWithoutProviderRead(
+	t *testing.T,
+) {
+	t.Parallel()
+	event, dispatch, run := validCaptureOccurrence()
+	delete(event.Attributes, "repository_database_id")
+	delete(event.Attributes, "pull_request_id")
+	delete(event.Attributes, "pull_request_author_id")
+	// Schema v8 admitted broad HTTPS URL shapes. Exact legacy provenance must
+	// reconcile before schema-v9 canonical-origin rules are applied.
+	event.Attributes["pull_request_url"] = "https://github.enterprise.example:443/acme/project/pull/42"
+	store := &captureStore{lookupExists: true}
+	runner := &captureToolRunner{responses: []string{
+		providerPullJSON("OPEN", testHeadSHA),
+	}}
+	err := (&CaptureSink{
+		Store: store,
+		Verifier: &GitHubVerifier{
+			Runner:    runner,
+			WebOrigin: "://invalid-current-config",
+		},
+	}).CaptureSucceededEventRun(context.Background(), event, dispatch, run)
+	if err != nil {
+		t.Fatalf("CaptureSucceededEventRun() error = %v", err)
+	}
+	if len(store.lookupThreads) != 1 || store.lookupThreads[0] != nil {
+		t.Fatalf("legacy retry lookup identities = %#v, want one nil identity", store.lookupThreads)
+	}
+	if len(runner.requests) != 0 || len(store.inputs) != 0 {
+		t.Fatalf(
+			"legacy retry performed effects: requests=%d captures=%d",
+			len(runner.requests),
+			len(store.inputs),
+		)
+	}
+}
+
+func TestCaptureSinkCommittedRetryIgnoresVerifierOriginConfigurationDrift(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, configuredOrigin := range []string{
+		"https://github.enterprise.example",
+		"://invalid-current-config",
+	} {
+		t.Run(configuredOrigin, func(t *testing.T) {
+			t.Parallel()
+			event, dispatch, run := validCaptureOccurrence()
+			store := &captureStore{lookupExists: true}
+			runner := &captureToolRunner{responses: []string{
+				providerPullJSON("OPEN", testHeadSHA),
+			}}
+			err := (&CaptureSink{
+				Store: store,
+				Verifier: &GitHubVerifier{
+					Runner:    runner,
+					WebOrigin: configuredOrigin,
+				},
+			}).CaptureSucceededEventRun(context.Background(), event, dispatch, run)
+			if err != nil {
+				t.Fatalf("CaptureSucceededEventRun() error = %v", err)
+			}
+			if len(store.lookupThreads) != 1 || store.lookupThreads[0] == nil ||
+				store.lookupThreads[0].ProviderOrigin != "https://github.com" {
+				t.Fatalf("retry lookup identities = %#v", store.lookupThreads)
+			}
+			if len(runner.requests) != 0 || len(store.inputs) != 0 {
+				t.Fatalf(
+					"configuration-drift retry performed effects: requests=%d captures=%d",
+					len(runner.requests),
+					len(store.inputs),
+				)
+			}
+		})
+	}
+}
+
+func TestCaptureSinkDoesNotCreateCaseFromPreIdentityRoutingEvidence(t *testing.T) {
+	t.Parallel()
+	event, dispatch, run := validCaptureOccurrence()
+	delete(event.Attributes, "repository_database_id")
+	delete(event.Attributes, "pull_request_id")
+	delete(event.Attributes, "pull_request_author_id")
+	store := &captureStore{}
+	runner := &captureToolRunner{responses: []string{
+		providerPullJSON("OPEN", testHeadSHA),
+	}}
+	err := (&CaptureSink{
+		Store:    store,
+		Verifier: &GitHubVerifier{Runner: runner},
+	}).CaptureSucceededEventRun(context.Background(), event, dispatch, run)
+	if err == nil || !strings.Contains(err.Error(), "provider IDs are required") {
+		t.Fatalf("CaptureSucceededEventRun() error = %v", err)
+	}
+	if len(runner.requests) != 0 || len(store.inputs) != 0 {
+		t.Fatalf(
+			"pre-identity miss performed effects: requests=%d captures=%d",
+			len(runner.requests),
+			len(store.inputs),
+		)
+	}
+}
+
+func TestCaptureSinkFailsClosedBeforeProviderReadWhenRetryBindingIsInvalid(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "wrong binding",
+			err: fmt.Errorf(
+				"%w: capture is bound to a different provider thread",
+				eventing.ErrPRDevelopmentConflict,
+			),
+		},
+		{name: "missing binding", err: errors.New("stored capture has no thread")},
+		{name: "corrupt binding", err: errors.New("stored thread binding hash is invalid")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			event, dispatch, run := validCaptureOccurrence()
+			store := &captureStore{lookupErr: test.err}
+			runner := &captureToolRunner{responses: []string{
+				providerPullJSON("OPEN", testHeadSHA),
+			}}
+			err := (&CaptureSink{
+				Store:    store,
+				Verifier: &GitHubVerifier{Runner: runner},
+			}).CaptureSucceededEventRun(
+				context.Background(),
+				event,
+				dispatch,
+				run,
+			)
+			if err == nil || !strings.Contains(err.Error(), "reconcile PR development capture") {
+				t.Fatalf("CaptureSucceededEventRun() error = %v", err)
+			}
+			if len(runner.requests) != 0 || len(store.inputs) != 0 {
+				t.Fatalf(
+					"invalid retry binding performed effects: requests=%d captures=%d",
+					len(runner.requests),
+					len(store.inputs),
+				)
+			}
+		})
+	}
 }
 
 func TestCaptureSinkAcceptsDismissedCurrentReviewAndAdvancedHead(t *testing.T) {
@@ -101,7 +283,7 @@ func TestCaptureSinkAcceptsDismissedCurrentReviewAndAdvancedHead(t *testing.T) {
 	}).CaptureSucceededEventRun(context.Background(), event, dispatch, run); err != nil {
 		t.Fatalf("CaptureSucceededEventRun() error = %v", err)
 	}
-	input := store.inputs[0]
+	input := store.inputs[0].Case
 	if input.CurrentReviewState != "dismissed" || input.HeadSHA != testHeadSHA ||
 		input.HeadSHA == event.Attributes["pull_request_head_sha"] {
 		t.Fatalf("capture input = %#v", input)
@@ -147,6 +329,24 @@ func TestCaptureSinkRequiresExactMarkerAndAuthenticatedRouting(t *testing.T) {
 			},
 		},
 		{
+			name: "repository provider ID",
+			mutate: func(event *eventing.Envelope, _ *workflows.Run) {
+				event.Attributes["repository_database_id"] = "01001"
+			},
+		},
+		{
+			name: "pull request provider ID",
+			mutate: func(event *eventing.Envelope, _ *workflows.Run) {
+				delete(event.Attributes, "pull_request_id")
+			},
+		},
+		{
+			name: "pull author provider ID",
+			mutate: func(event *eventing.Envelope, _ *workflows.Run) {
+				event.Attributes["pull_request_author_id"] = "0"
+			},
+		},
+		{
 			name: "installed workflow ref",
 			mutate: func(_ *eventing.Envelope, run *workflows.Run) {
 				run.WorkflowRef = "workflows/copied.yml"
@@ -177,6 +377,31 @@ func TestCaptureSinkRequiresExactMarkerAndAuthenticatedRouting(t *testing.T) {
 				t.Fatalf("invalid admission performed effects: %#v %#v", runner.requests, store.inputs)
 			}
 		})
+	}
+}
+
+func TestGitHubVerifierRejectsSignedPullAuthorProviderIDMismatch(t *testing.T) {
+	t.Parallel()
+	var pull map[string]any
+	if err := json.Unmarshal([]byte(providerPullJSON("OPEN", testHeadSHA)), &pull); err != nil {
+		t.Fatal(err)
+	}
+	pull["user"].(map[string]any)["id"] = 9999
+	raw, err := json.Marshal(pull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &captureToolRunner{responses: []string{string(raw)}}
+	_, err = (&GitHubVerifier{Runner: runner}).Verify(
+		context.Background(),
+		validRoutingEvidence(),
+	)
+	if err == nil || !errors.Is(err, errGitHubProviderEvidenceMismatch) ||
+		!strings.Contains(err.Error(), "author provider ID") {
+		t.Fatalf("Verify() error = %v, want author provider ID mismatch", err)
+	}
+	if len(runner.requests) != 1 {
+		t.Fatalf("provider requests = %d, want pull read only", len(runner.requests))
 	}
 }
 
@@ -421,20 +646,29 @@ func TestGitHubVerifierRejectsDuplicateJSONAndConfinesArtifacts(t *testing.T) {
 }
 
 type captureStore struct {
-	lookupExists bool
-	inputs       []eventing.PRDevelopmentCaptureInput
+	lookupExists  bool
+	lookupErr     error
+	lookupThreads []*eventing.PRDevelopmentThreadIdentity
+	inputs        []eventing.PRDevelopmentCaptureRequest
 }
 
 func (s *captureStore) LookupPRDevelopmentCapture(
 	_ context.Context,
 	_ eventing.PRDevelopmentCaptureIdentity,
+	expectedThread *eventing.PRDevelopmentThreadIdentity,
 ) (eventing.PRDevelopmentCase, bool, error) {
-	return eventing.PRDevelopmentCase{}, s.lookupExists, nil
+	var recorded *eventing.PRDevelopmentThreadIdentity
+	if expectedThread != nil {
+		threadCopy := *expectedThread
+		recorded = &threadCopy
+	}
+	s.lookupThreads = append(s.lookupThreads, recorded)
+	return eventing.PRDevelopmentCase{}, s.lookupExists, s.lookupErr
 }
 
 func (s *captureStore) CapturePRDevelopmentCase(
 	_ context.Context,
-	input eventing.PRDevelopmentCaptureInput,
+	input eventing.PRDevelopmentCaptureRequest,
 ) (eventing.PRDevelopmentCase, bool, error) {
 	s.inputs = append(s.inputs, input)
 	return eventing.PRDevelopmentCase{}, true, nil
@@ -474,9 +708,12 @@ func validCaptureOccurrence() (eventing.Envelope, eventing.Dispatch, *workflows.
 			"pull_request_author_is_target": "true",
 			"review_author_is_target":       "false",
 			"repository_full_name":          evidence.Repository,
+			"repository_database_id":        evidence.RepositoryID,
 			"pull_request_number":           "42",
+			"pull_request_id":               evidence.PullRequestID,
 			"pull_request_url":              evidence.PullURL,
 			"pull_request_author":           evidence.PullAuthor,
+			"pull_request_author_id":        evidence.PullAuthorID,
 			"pull_request_head_sha":         testEventHead,
 			"target_user":                   evidence.TargetUser,
 			"review_id":                     evidence.ReviewID,
@@ -509,9 +746,12 @@ func validCaptureOccurrence() (eventing.Envelope, eventing.Dispatch, *workflows.
 func validRoutingEvidence() RoutingEvidence {
 	return RoutingEvidence{
 		Repository:        "ScyllaDB/PicoClaw",
+		RepositoryID:      testRepositoryID,
 		PullNumber:        42,
+		PullRequestID:     testPullID,
 		PullURL:           "https://github.com/ScyllaDB/PicoClaw/pull/42",
 		PullAuthor:        "Review-User",
+		PullAuthorID:      testPullAuthorID,
 		TargetUser:        "review-user",
 		ReviewID:          "701",
 		ReviewNodeID:      "PRR_kwDOReview701",
@@ -530,7 +770,10 @@ func providerPullJSON(state, headSHA string) string {
 		"draft":    false,
 		"merged":   state == "CLOSED",
 		"html_url": "https://github.com/ScyllaDB/PicoClaw/pull/42",
-		"user":     map[string]any{"login": "Review-User"},
+		"user": map[string]any{
+			"login": "Review-User",
+			"id":    json.Number(testPullAuthorID),
+		},
 		"head": map[string]any{
 			"ref":  "feat/fix-race",
 			"sha":  headSHA,

@@ -34,6 +34,7 @@ func TestGitHubVerifierVerifyCaseRefreshesExactMutableHead(t *testing.T) {
 	verified, err := (&GitHubVerifier{Runner: runner}).VerifyCase(
 		context.Background(),
 		stored,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("VerifyCase() error = %v", err)
@@ -55,6 +56,73 @@ func TestGitHubVerifierVerifyCaseRefreshesExactMutableHead(t *testing.T) {
 	}
 	assertReadRequest(t, runner.requests[0], "get", 0)
 	assertReadRequest(t, runner.requests[1], "get_reviews", 1)
+}
+
+func TestGitHubVerifierVerifyCaseBindsProviderThreadIdentity(t *testing.T) {
+	t.Parallel()
+	stored := validStoredGitHubCase()
+	thread := validGitHubThreadIdentity()
+	runner := &captureToolRunner{responses: []string{
+		providerCasePullJSON(t, func(map[string]any) {}),
+		providerReviewsJSON(providerReviewValue(
+			"CHANGES_REQUESTED",
+			stored.Feedback,
+		)),
+	}}
+	if _, err := (&GitHubVerifier{Runner: runner}).VerifyCase(
+		context.Background(),
+		stored,
+		&thread,
+	); err != nil {
+		t.Fatalf("VerifyCase() error = %v", err)
+	}
+
+	thread.PullAuthorID = "9999"
+	runner = &captureToolRunner{responses: []string{
+		providerCasePullJSON(t, func(map[string]any) {}),
+	}}
+	_, err := (&GitHubVerifier{Runner: runner}).VerifyCase(
+		context.Background(),
+		stored,
+		&thread,
+	)
+	if !errors.Is(err, ErrGitHubCaseDrift) ||
+		!strings.Contains(err.Error(), "author provider ID") {
+		t.Fatalf("VerifyCase() error = %v, want provider identity drift", err)
+	}
+}
+
+func TestGitHubVerifierVerifyCaseRejectsInvalidThreadIdentityBeforeProviderRead(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, mutate := range []func(*eventing.PRDevelopmentThreadIdentity){
+		func(thread *eventing.PRDevelopmentThreadIdentity) { thread.Provider = "gitlab" },
+		func(thread *eventing.PRDevelopmentThreadIdentity) {
+			thread.ProviderOrigin = "https://GHE.example.test"
+		},
+		func(thread *eventing.PRDevelopmentThreadIdentity) {
+			thread.ProviderOrigin = "https://ghe.example.test"
+		},
+		func(thread *eventing.PRDevelopmentThreadIdentity) { thread.RepositoryID = "0" },
+		func(thread *eventing.PRDevelopmentThreadIdentity) { thread.PullRequestID = "02002" },
+		func(thread *eventing.PRDevelopmentThreadIdentity) { thread.PullNumber = 43 },
+	} {
+		thread := validGitHubThreadIdentity()
+		mutate(&thread)
+		runner := &captureToolRunner{}
+		_, err := (&GitHubVerifier{Runner: runner}).VerifyCase(
+			context.Background(),
+			validStoredGitHubCase(),
+			&thread,
+		)
+		if !errors.Is(err, ErrGitHubCaseDrift) {
+			t.Fatalf("VerifyCase() error = %v, want durable identity drift", err)
+		}
+		if len(runner.requests) != 0 {
+			t.Fatalf("invalid thread identity caused %d provider calls", len(runner.requests))
+		}
+	}
 }
 
 func TestGitHubVerifierVerifyCaseRejectsNonActionableProviderState(t *testing.T) {
@@ -99,6 +167,7 @@ func TestGitHubVerifierVerifyCaseRejectsNonActionableProviderState(t *testing.T)
 			_, err := (&GitHubVerifier{Runner: runner}).VerifyCase(
 				context.Background(),
 				stored,
+				nil,
 			)
 			if !errors.Is(err, ErrGitHubCaseNotActionable) {
 				t.Fatalf("VerifyCase() error = %v, want non-actionable", err)
@@ -140,6 +209,7 @@ func TestGitHubVerifierVerifyCaseRejectsCapturedEvidenceDrift(t *testing.T) {
 			_, err := (&GitHubVerifier{Runner: runner}).VerifyCase(
 				context.Background(),
 				stored,
+				nil,
 			)
 			if !errors.Is(err, ErrGitHubCaseDrift) {
 				t.Fatalf("VerifyCase() error = %v, want drift", err)
@@ -206,6 +276,7 @@ func TestGitHubVerifierVerifyCaseClassifiesProviderIdentityDrift(t *testing.T) {
 			_, err := (&GitHubVerifier{Runner: runner}).VerifyCase(
 				context.Background(),
 				stored,
+				nil,
 			)
 			if !errors.Is(err, ErrGitHubCaseDrift) {
 				t.Fatalf("VerifyCase() error = %v, want classified drift", err)
@@ -222,6 +293,7 @@ func TestGitHubVerifierVerifyCaseDoesNotClassifyOperationalFailureAsDrift(t *tes
 		_, err := (&GitHubVerifier{Runner: runner}).VerifyCase(
 			context.Background(),
 			validStoredGitHubCase(),
+			nil,
 		)
 		if err == nil || errors.Is(err, ErrGitHubCaseDrift) {
 			t.Fatalf("VerifyCase() error = %v, want non-drift provider failure", err)
@@ -235,6 +307,7 @@ func TestGitHubVerifierVerifyCaseDoesNotClassifyOperationalFailureAsDrift(t *tes
 		_, err := (&GitHubVerifier{Runner: runner}).VerifyCase(
 			ctx,
 			validStoredGitHubCase(),
+			nil,
 		)
 		if !errors.Is(err, context.Canceled) || errors.Is(err, ErrGitHubCaseDrift) {
 			t.Fatalf("VerifyCase() error = %v, want cancellation only", err)
@@ -278,6 +351,7 @@ func TestGitHubVerifierVerifyCaseRejectsAmbiguousCloneEndpoint(t *testing.T) {
 			_, err := (&GitHubVerifier{Runner: runner}).VerifyCase(
 				context.Background(),
 				stored,
+				nil,
 			)
 			if !errors.Is(err, ErrGitHubCaseDrift) {
 				t.Fatalf("VerifyCase() error = %v, want clone-endpoint drift", err)
@@ -335,6 +409,7 @@ func TestGitHubVerifierVerifyCaseBindsCanonicalURLsToWebOrigin(t *testing.T) {
 			_, err := (&GitHubVerifier{Runner: runner}).VerifyCase(
 				context.Background(),
 				stored,
+				nil,
 			)
 			if !errors.Is(err, ErrGitHubCaseDrift) {
 				t.Fatalf("VerifyCase() error = %v, want canonical-URL drift", err)
@@ -366,12 +441,103 @@ func TestGitHubVerifierVerifyCaseSupportsExplicitGitHubEnterpriseOrigin(t *testi
 	verified, err := (&GitHubVerifier{
 		Runner:    runner,
 		WebOrigin: webOrigin,
-	}).VerifyCase(context.Background(), stored)
+	}).VerifyCase(context.Background(), stored, nil)
 	if err != nil {
 		t.Fatalf("VerifyCase() error = %v", err)
 	}
 	if verified.HeadCloneURL != webOrigin+"/contributor/PicoClaw.git" {
 		t.Fatalf("head clone URL = %q", verified.HeadCloneURL)
+	}
+}
+
+func TestGitHubVerifierVerifyCaseUsesDurableProviderThreadOrigin(t *testing.T) {
+	t.Parallel()
+
+	const webOrigin = "https://ghe.example.test:8443"
+	for _, test := range []struct {
+		name             string
+		configuredOrigin string
+		wantDrift        bool
+	}{
+		{name: "omitted configuration"},
+		{name: "matching configuration", configuredOrigin: webOrigin},
+		{
+			name:             "mismatching configuration",
+			configuredOrigin: "https://other-ghe.example.test",
+			wantDrift:        true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			stored := validStoredGitHubCase()
+			stored.PullURL = webOrigin + "/ScyllaDB/PicoClaw/pull/42"
+			stored.ReviewURL = stored.PullURL + "#pullrequestreview-701"
+			thread := validGitHubThreadIdentity()
+			thread.ProviderOrigin = webOrigin
+			pull := providerCasePullJSON(t, func(value map[string]any) {
+				value["html_url"] = stored.PullURL
+				providerCasePullHeadRepository(value)["clone_url"] = webOrigin + "/contributor/PicoClaw.git"
+			})
+			review := providerReviewValue("CHANGES_REQUESTED", stored.Feedback)
+			review["html_url"] = stored.ReviewURL
+			runner := &captureToolRunner{responses: []string{
+				pull,
+				providerReviewsJSON(review),
+			}}
+			verified, err := (&GitHubVerifier{
+				Runner:    runner,
+				WebOrigin: test.configuredOrigin,
+			}).VerifyCase(context.Background(), stored, &thread)
+			if test.wantDrift {
+				if !errors.Is(err, ErrGitHubCaseDrift) || len(runner.requests) != 0 {
+					t.Fatalf(
+						"VerifyCase() = %#v, %v, calls=%d, want pre-read origin drift",
+						verified,
+						err,
+						len(runner.requests),
+					)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("VerifyCase() error = %v", err)
+			}
+			if verified.HeadCloneURL != webOrigin+"/contributor/PicoClaw.git" ||
+				len(runner.requests) != 2 {
+				t.Fatalf(
+					"VerifyCase() = %#v, calls=%d",
+					verified,
+					len(runner.requests),
+				)
+			}
+		})
+	}
+}
+
+func TestGitHubVerifierCaptureSupportsExplicitGitHubEnterpriseOrigin(t *testing.T) {
+	t.Parallel()
+	const webOrigin = "https://ghe.example.test:8443"
+	evidence := validRoutingEvidence()
+	evidence.PullURL = webOrigin + "/ScyllaDB/PicoClaw/pull/42"
+	evidence.ReviewURL = evidence.PullURL + "#pullrequestreview-701"
+	pull := providerCasePullJSON(t, func(value map[string]any) {
+		value["html_url"] = evidence.PullURL
+	})
+	review := providerReviewValue("CHANGES_REQUESTED", "feedback")
+	review["html_url"] = evidence.ReviewURL
+	runner := &captureToolRunner{responses: []string{
+		pull,
+		providerReviewsJSON(review),
+	}}
+	verified, err := (&GitHubVerifier{
+		Runner:    runner,
+		WebOrigin: webOrigin,
+	}).Verify(context.Background(), evidence)
+	if err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if verified.ThreadIdentity.ProviderOrigin != webOrigin {
+		t.Fatalf("thread identity = %#v", verified.ThreadIdentity)
 	}
 }
 
@@ -382,8 +548,16 @@ func TestGitHubVerifierVerifyCaseRejectsNoncanonicalWebOriginAsConfiguration(t *
 		"https://ghe.example.test/",
 		"https://ghe.example.test/path",
 		"https://ghe.example.test:443",
+		"https://ghe.example.test:08443",
 		"https://user@ghe.example.test",
 		"https://ghe.example.test?api=v3",
+		"https://ghe.example.test#",
+		"https://[0:0:0:0:0:0:0:1]",
+		"https://[::ffff:127.0.0.1]",
+		"https://127.000.000.001",
+		"https://0x7f000001",
+		"https://0x7f.1",
+		"https://127.0.0x0.1",
 	} {
 		t.Run(webOrigin, func(t *testing.T) {
 			t.Parallel()
@@ -391,7 +565,7 @@ func TestGitHubVerifierVerifyCaseRejectsNoncanonicalWebOriginAsConfiguration(t *
 			_, err := (&GitHubVerifier{
 				Runner:    runner,
 				WebOrigin: webOrigin,
-			}).VerifyCase(context.Background(), validStoredGitHubCase())
+			}).VerifyCase(context.Background(), validStoredGitHubCase(), nil)
 			if err == nil || errors.Is(err, ErrGitHubCaseDrift) {
 				t.Fatalf("VerifyCase() error = %v, want configuration failure", err)
 			}
@@ -402,21 +576,71 @@ func TestGitHubVerifierVerifyCaseRejectsNoncanonicalWebOriginAsConfiguration(t *
 	}
 }
 
-func TestGitHubVerifierWebOriginDoesNotChangeCaptureVerification(t *testing.T) {
+func TestGitHubVerifierCaptureRequiresCanonicalWebOrigin(t *testing.T) {
 	t.Parallel()
-	runner := &captureToolRunner{responses: []string{
-		providerPullJSON("OPEN", testHeadSHA),
-		providerReviewsJSON(providerReviewValue("CHANGES_REQUESTED", "feedback")),
-	}}
-	verified, err := (&GitHubVerifier{
+	runner := &captureToolRunner{}
+	_, err := (&GitHubVerifier{
 		Runner:    runner,
 		WebOrigin: "not a development web origin",
 	}).Verify(context.Background(), validRoutingEvidence())
-	if err != nil {
-		t.Fatalf("Verify() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "web origin") {
+		t.Fatalf("Verify() error = %v, want web-origin configuration failure", err)
 	}
-	if verified.Feedback != "feedback" {
-		t.Fatalf("Verify() feedback = %q", verified.Feedback)
+	if len(runner.requests) != 0 {
+		t.Fatalf("invalid web origin caused %d provider calls", len(runner.requests))
+	}
+}
+
+func TestGitHubVerifierCaptureBindsCanonicalURLsToWebOrigin(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		mutate func(*RoutingEvidence)
+	}{
+		{
+			name: "different origin",
+			mutate: func(evidence *RoutingEvidence) {
+				evidence.PullURL = "https://ghe.example.test/ScyllaDB/PicoClaw/pull/42"
+				evidence.ReviewURL = evidence.PullURL + "#pullrequestreview-701"
+			},
+		},
+		{
+			name: "pull query",
+			mutate: func(evidence *RoutingEvidence) {
+				evidence.PullURL += "?view=files"
+				evidence.ReviewURL = evidence.PullURL + "#pullrequestreview-701"
+			},
+		},
+		{
+			name: "encoded repository",
+			mutate: func(evidence *RoutingEvidence) {
+				evidence.PullURL = "https://github.com/ScyllaDB/%50icoClaw/pull/42"
+				evidence.ReviewURL = evidence.PullURL + "#pullrequestreview-701"
+			},
+		},
+		{
+			name: "wrong review fragment",
+			mutate: func(evidence *RoutingEvidence) {
+				evidence.ReviewURL = evidence.PullURL + "#discussion_r701"
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			evidence := validRoutingEvidence()
+			test.mutate(&evidence)
+			runner := &captureToolRunner{}
+			_, err := (&GitHubVerifier{Runner: runner}).Verify(
+				context.Background(),
+				evidence,
+			)
+			if !errors.Is(err, errGitHubProviderEvidenceMismatch) {
+				t.Fatalf("Verify() error = %v, want canonical URL mismatch", err)
+			}
+			if len(runner.requests) != 0 {
+				t.Fatalf("invalid provider URL caused %d provider calls", len(runner.requests))
+			}
+		})
 	}
 }
 
@@ -507,6 +731,7 @@ func TestGitHubVerifierVerifyCaseRejectsInvalidStoredCaseBeforeProviderRead(t *t
 			_, err := (&GitHubVerifier{Runner: runner}).VerifyCase(
 				context.Background(),
 				stored,
+				nil,
 			)
 			if !errors.Is(err, test.want) {
 				t.Fatalf("VerifyCase() error = %v, want %v", err, test.want)
@@ -521,7 +746,11 @@ func TestGitHubVerifierVerifyCaseRejectsInvalidStoredCaseBeforeProviderRead(t *t
 func TestGitHubVerifierVerifyCaseRequiresContextWithoutProviderRead(t *testing.T) {
 	t.Parallel()
 	runner := &captureToolRunner{}
-	_, err := (&GitHubVerifier{Runner: runner}).VerifyCase(nil, validStoredGitHubCase())
+	_, err := (&GitHubVerifier{Runner: runner}).VerifyCase(
+		nil,
+		validStoredGitHubCase(),
+		nil,
+	)
 	if err == nil || !strings.Contains(err.Error(), "context") {
 		t.Fatalf("VerifyCase(nil) error = %v", err)
 	}
@@ -557,6 +786,17 @@ func validStoredGitHubCase() eventing.PRDevelopmentCase {
 			ReviewURL:            evidence.ReviewURL,
 			Feedback:             "Fix the race.",
 		},
+	}
+}
+
+func validGitHubThreadIdentity() eventing.PRDevelopmentThreadIdentity {
+	return eventing.PRDevelopmentThreadIdentity{
+		Provider:       "github",
+		ProviderOrigin: "https://github.com",
+		PullAuthorID:   testPullAuthorID,
+		RepositoryID:   testRepositoryID,
+		PullRequestID:  testPullID,
+		PullNumber:     42,
 	}
 }
 

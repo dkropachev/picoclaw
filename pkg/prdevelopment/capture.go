@@ -36,10 +36,11 @@ type CaseCapturer interface {
 	LookupPRDevelopmentCapture(
 		ctx context.Context,
 		identity eventing.PRDevelopmentCaptureIdentity,
+		expectedThread *eventing.PRDevelopmentThreadIdentity,
 	) (eventing.PRDevelopmentCase, bool, error)
 	CapturePRDevelopmentCase(
 		ctx context.Context,
-		input eventing.PRDevelopmentCaptureInput,
+		input eventing.PRDevelopmentCaptureRequest,
 	) (eventing.PRDevelopmentCase, bool, error)
 }
 
@@ -85,51 +86,87 @@ func (s *CaptureSink) CaptureSucceededEventRun(
 		WorkflowRevision: dispatch.WorkflowRevision,
 		Connector:        envelope.Connector,
 	}
+	if evidence.RepositoryID == "" {
+		if _, exists, lookupErr := s.Store.LookupPRDevelopmentCapture(
+			ctx,
+			identity,
+			nil,
+		); lookupErr != nil {
+			return fmt.Errorf("reconcile PR development capture: %w", lookupErr)
+		} else if exists {
+			return nil
+		}
+		return errors.New(
+			"PR development provider IDs are required for a new capture",
+		)
+	}
+	routingOrigin, expectedThread, err := captureExpectedThreadIdentity(evidence)
+	if err != nil {
+		return fmt.Errorf("derive PR development thread identity: %w", err)
+	}
 	if _, exists, lookupErr := s.Store.LookupPRDevelopmentCapture(
 		ctx,
 		identity,
+		&expectedThread,
 	); lookupErr != nil {
 		return fmt.Errorf("reconcile PR development capture: %w", lookupErr)
 	} else if exists {
 		return nil
 	}
+	configuredOrigin, err := canonicalGitHubWebOrigin(s.Verifier.WebOrigin)
+	if err != nil {
+		return fmt.Errorf("GitHub verifier web origin is invalid: %w", err)
+	}
+	if configuredOrigin != routingOrigin {
+		return errors.New(
+			"GitHub verifier web origin differs from authenticated routing",
+		)
+	}
 	verified, err := s.Verifier.Verify(ctx, evidence)
 	if err != nil {
 		return fmt.Errorf("verify GitHub PR feedback: %w", err)
 	}
+	if verified.ThreadIdentity != expectedThread {
+		return errors.New(
+			"verified GitHub PR thread identity differs from authenticated routing",
+		)
+	}
 	_, _, err = s.Store.CapturePRDevelopmentCase(
 		ctx,
-		eventing.PRDevelopmentCaptureInput{
-			PRDevelopmentCaptureIdentity: identity,
-			Repository:                   verified.Repository,
-			PullNumber:                   int64(verified.PullNumber),
-			PullURL:                      verified.PullURL,
-			PullAuthor:                   verified.PullAuthor,
-			TargetUser:                   evidence.TargetUser,
-			PullState: eventing.PRDevelopmentPullState(
-				verified.PullState,
-			),
-			PullDraft:           verified.PullDraft,
-			PullMerged:          verified.PullMerged,
-			BaseRepository:      verified.BaseRepository,
-			BaseRef:             verified.BaseRef,
-			BaseSHA:             verified.BaseSHA,
-			HeadRepository:      verified.HeadRepository,
-			HeadRef:             verified.HeadRef,
-			HeadSHA:             verified.HeadSHA,
-			ReviewID:            verified.ReviewID,
-			TriggerReviewNodeID: evidence.ReviewNodeID,
-			ReviewAuthor:        verified.ReviewAuthor,
-			SubmittedReviewState: eventing.PRDevelopmentReviewState(
-				evidence.ReviewState,
-			),
-			CurrentReviewState: eventing.PRDevelopmentReviewState(
-				verified.CurrentReviewState,
-			),
-			ReviewCommitSHA:   verified.ReviewCommitSHA,
-			ReviewSubmittedAt: verified.ReviewSubmittedAt,
-			ReviewURL:         verified.ReviewURL,
-			Feedback:          verified.Feedback,
+		eventing.PRDevelopmentCaptureRequest{
+			Thread: verified.ThreadIdentity,
+			Case: eventing.PRDevelopmentCaptureInput{
+				PRDevelopmentCaptureIdentity: identity,
+				Repository:                   verified.Repository,
+				PullNumber:                   int64(verified.PullNumber),
+				PullURL:                      verified.PullURL,
+				PullAuthor:                   verified.PullAuthor,
+				TargetUser:                   evidence.TargetUser,
+				PullState: eventing.PRDevelopmentPullState(
+					verified.PullState,
+				),
+				PullDraft:           verified.PullDraft,
+				PullMerged:          verified.PullMerged,
+				BaseRepository:      verified.BaseRepository,
+				BaseRef:             verified.BaseRef,
+				BaseSHA:             verified.BaseSHA,
+				HeadRepository:      verified.HeadRepository,
+				HeadRef:             verified.HeadRef,
+				HeadSHA:             verified.HeadSHA,
+				ReviewID:            verified.ReviewID,
+				TriggerReviewNodeID: evidence.ReviewNodeID,
+				ReviewAuthor:        verified.ReviewAuthor,
+				SubmittedReviewState: eventing.PRDevelopmentReviewState(
+					evidence.ReviewState,
+				),
+				CurrentReviewState: eventing.PRDevelopmentReviewState(
+					verified.CurrentReviewState,
+				),
+				ReviewCommitSHA:   verified.ReviewCommitSHA,
+				ReviewSubmittedAt: verified.ReviewSubmittedAt,
+				ReviewURL:         verified.ReviewURL,
+				Feedback:          verified.Feedback,
+			},
 		},
 	)
 	if err != nil {
@@ -138,14 +175,64 @@ func (s *CaptureSink) CaptureSucceededEventRun(
 	return nil
 }
 
-// RoutingEvidence is the bounded signed-routing identity that a provider read
-// must independently confirm. ReviewNodeID is retained only as routing
-// evidence because GitHub MCP's get_reviews projection does not expose it.
+// captureExpectedThreadIdentity derives the retry reconciliation key and
+// canonical provider origin from authenticated routing evidence carrying the
+// complete current provider-identity contract. Pre-identity legacy routing is
+// reconciled by exact provenance before this stricter parser is called.
+func captureExpectedThreadIdentity(
+	evidence RoutingEvidence,
+) (string, eventing.PRDevelopmentThreadIdentity, error) {
+	pull, err := url.Parse(evidence.PullURL)
+	if err != nil {
+		return "", eventing.PRDevelopmentThreadIdentity{}, errors.New(
+			"GitHub pull request URL is invalid",
+		)
+	}
+	providerOrigin := pull.Scheme + "://" + pull.Host
+	canonicalOrigin, err := canonicalGitHubWebOrigin(providerOrigin)
+	if err != nil {
+		return "", eventing.PRDevelopmentThreadIdentity{}, fmt.Errorf(
+			"GitHub routing origin is invalid: %w",
+			err,
+		)
+	}
+	if canonicalOrigin != providerOrigin {
+		return "", eventing.PRDevelopmentThreadIdentity{}, errors.New(
+			"GitHub routing origin is not canonical",
+		)
+	}
+	if err = verifyRoutingEvidenceURLs(evidence, providerOrigin); err != nil {
+		return "", eventing.PRDevelopmentThreadIdentity{}, err
+	}
+	if !validRoutingThreadIdentity(evidence, providerOrigin) {
+		return "", eventing.PRDevelopmentThreadIdentity{}, errors.New(
+			"GitHub routing evidence thread identity is invalid",
+		)
+	}
+	return providerOrigin, eventing.PRDevelopmentThreadIdentity{
+		Provider:       "github",
+		ProviderOrigin: providerOrigin,
+		PullAuthorID:   evidence.PullAuthorID,
+		RepositoryID:   evidence.RepositoryID,
+		PullRequestID:  evidence.PullRequestID,
+		PullNumber:     int64(evidence.PullNumber),
+	}, nil
+}
+
+// RoutingEvidence is the bounded HMAC-authenticated routing identity that a
+// provider read cross-binds to current aliases, URLs, and pull number. The
+// current GitHub MCP projection independently confirms PullAuthorID, but does
+// not expose RepositoryID, PullRequestID, or ReviewNodeID for another exact
+// comparison. The three thread IDs are all absent only on authenticated
+// records admitted before that routing contract existed.
 type RoutingEvidence struct {
 	Repository        string
+	RepositoryID      string
 	PullNumber        int
+	PullRequestID     string
 	PullURL           string
 	PullAuthor        string
+	PullAuthorID      string
 	TargetUser        string
 	ReviewID          string
 	ReviewNodeID      string
@@ -207,6 +294,33 @@ func captureRoutingEvidence(
 		return RoutingEvidence{}, errors.New("PR development pull URL is invalid")
 	}
 	pullAuthor := envelope.Attributes["pull_request_author"]
+	repositoryID := envelope.Attributes["repository_database_id"]
+	pullRequestID := envelope.Attributes["pull_request_id"]
+	pullAuthorID := envelope.Attributes["pull_request_author_id"]
+	providerIDsPresent := repositoryID != "" || pullRequestID != "" || pullAuthorID != ""
+	if providerIDsPresent &&
+		(repositoryID == "" || pullRequestID == "" || pullAuthorID == "") {
+		return RoutingEvidence{}, errors.New(
+			"PR development provider thread IDs must be present together",
+		)
+	}
+	if providerIDsPresent {
+		if repositoryID, err = captureProviderDatabaseID(repositoryID); err != nil {
+			return RoutingEvidence{}, errors.New(
+				"PR development repository provider ID is invalid",
+			)
+		}
+		if pullRequestID, err = captureProviderDatabaseID(pullRequestID); err != nil {
+			return RoutingEvidence{}, errors.New(
+				"PR development pull request provider ID is invalid",
+			)
+		}
+		if pullAuthorID, err = captureProviderDatabaseID(pullAuthorID); err != nil {
+			return RoutingEvidence{}, errors.New(
+				"PR development pull request author provider ID is invalid",
+			)
+		}
+	}
 	targetUser := envelope.Attributes["target_user"]
 	reviewAuthor := envelope.Attributes["review_author"]
 	if !validGitHubUser(pullAuthor, false) ||
@@ -250,9 +364,12 @@ func captureRoutingEvidence(
 	}
 	return RoutingEvidence{
 		Repository:        repository,
+		RepositoryID:      repositoryID,
 		PullNumber:        pullNumber,
+		PullRequestID:     pullRequestID,
 		PullURL:           pullURL,
 		PullAuthor:        pullAuthor,
+		PullAuthorID:      pullAuthorID,
 		TargetUser:        targetUser,
 		ReviewID:          reviewID,
 		ReviewNodeID:      reviewNodeID,
@@ -262,6 +379,15 @@ func captureRoutingEvidence(
 		ReviewCommitSHA:   reviewCommit,
 		ReviewSubmittedAt: submittedAt.UTC(),
 	}, nil
+}
+
+func captureProviderDatabaseID(value string) (string, error) {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if !databaseIDPattern.MatchString(value) || err != nil || parsed <= 0 ||
+		strconv.FormatInt(parsed, 10) != value {
+		return "", errors.New("provider database ID is invalid")
+	}
+	return value, nil
 }
 
 func containsTargetReason(value, target string) bool {

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -56,7 +57,8 @@ type githubRepositoryPayload struct {
 }
 
 type githubUserPayload struct {
-	Login string `json:"login"`
+	Login string          `json:"login"`
+	ID    json.RawMessage `json:"id"`
 }
 
 type githubTeamPayload struct {
@@ -75,6 +77,7 @@ type githubRefRepositoryPayload struct {
 }
 
 type githubPullRequestPayload struct {
+	ID                 json.RawMessage     `json:"id"`
 	Number             json.RawMessage     `json:"number"`
 	HTMLURL            string              `json:"html_url"`
 	Title              string              `json:"title"`
@@ -181,18 +184,20 @@ func decodeGitHubAdmissionRequest(
 
 	actor := githubActor(fields["sender"])
 	subject, repositoryAttributes := githubSubject(fields["repository"])
+	repositoryDatabaseID, _ := githubRepositoryDatabaseID(fields["repository"])
 	attributeValues := map[string]string{
-		"body_authenticated":    githubAuthenticatedBodyValue,
-		"source_authenticated":  githubAuthenticatedBodyValue,
-		"headers_authenticated": githubUnauthenticatedHeadValue,
-		"signature_algorithm":   githubSignatureAlgorithm,
-		"repository_id":         repositoryAttributes["id"],
-		"repository_full_name":  repositoryAttributes["full_name"],
-		"repository_url":        repositoryAttributes["url"],
-		"repository_owner":      repositoryAttributes["owner"],
-		"repository_visibility": repositoryAttributes["visibility"],
-		"repository_private":    repositoryAttributes["private"],
-		"repository_branch":     repositoryAttributes["default_branch"],
+		"body_authenticated":     githubAuthenticatedBodyValue,
+		"source_authenticated":   githubAuthenticatedBodyValue,
+		"headers_authenticated":  githubUnauthenticatedHeadValue,
+		"signature_algorithm":    githubSignatureAlgorithm,
+		"repository_id":          repositoryAttributes["id"],
+		"repository_database_id": repositoryDatabaseID,
+		"repository_full_name":   repositoryAttributes["full_name"],
+		"repository_url":         repositoryAttributes["url"],
+		"repository_owner":       repositoryAttributes["owner"],
+		"repository_visibility":  repositoryAttributes["visibility"],
+		"repository_private":     repositoryAttributes["private"],
+		"repository_branch":      repositoryAttributes["default_branch"],
 	}
 	for key, value := range githubResourceAttributes(fields, eventType, targetUser) {
 		attributeValues[key] = value
@@ -275,11 +280,23 @@ func githubResourceAttributes(
 	var reviewAuthor string
 	var reviewAuthorCanonical bool
 	var reviewFeedbackMetadataCanonical bool
+	_, repositoryIdentityCanonical := githubRepositoryDatabaseID(fields["repository"])
+	var pullRequestIdentityCanonical bool
 
 	var pullRequest githubPullRequestPayload
 	if decodeGitHubProjection(fields["pull_request"], &pullRequest) {
+		pullRequestID, pullRequestIDCanonical := canonicalGitHubDatabaseID(
+			pullRequest.ID,
+		)
+		pullRequestAuthorID, pullRequestAuthorIDCanonical := canonicalGitHubDatabaseID(
+			pullRequest.User.ID,
+		)
+		pullRequestIdentityCanonical = repositoryIdentityCanonical &&
+			pullRequestIDCanonical && pullRequestAuthorIDCanonical
 		pullRequestAuthor = pullRequest.User.Login
 		pullRequestAuthorCanonical = validGitHubTargetUser(pullRequestAuthor)
+		values["pull_request_id"] = pullRequestID
+		values["pull_request_author_id"] = pullRequestAuthorID
 		values["pull_request_number"] = githubDatabaseID(pullRequest.Number)
 		values["pull_request_url"] = pullRequest.HTMLURL
 		values["pull_request_author"] = pullRequestAuthor
@@ -381,7 +398,8 @@ func githubResourceAttributes(
 			pullRequestAuthorIsTarget &&
 			reviewAuthorCanonical &&
 			!strings.EqualFold(reviewAuthor, pullRequestAuthor) &&
-			reviewFeedbackMetadataCanonical {
+			reviewFeedbackMetadataCanonical &&
+			pullRequestIdentityCanonical {
 			targetReasons = append(targetReasons, "review_feedback")
 		}
 		for _, text := range mentionText {
@@ -403,10 +421,19 @@ func githubResourceAttributes(
 
 func canonicalGitHubDatabaseID(raw json.RawMessage) (string, bool) {
 	value := githubDatabaseID(raw)
-	if value == "" || value == "0" || len(value) > 1 && value[0] == '0' {
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 || strconv.FormatInt(parsed, 10) != value {
 		return "", false
 	}
 	return value, true
+}
+
+func githubRepositoryDatabaseID(raw json.RawMessage) (string, bool) {
+	var repository githubRepositoryPayload
+	if !decodeGitHubProjection(raw, &repository) {
+		return "", false
+	}
+	return canonicalGitHubDatabaseID(repository.ID)
 }
 
 func canonicalGitHubReviewState(value string) (string, bool) {

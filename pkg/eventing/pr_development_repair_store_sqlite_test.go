@@ -22,7 +22,10 @@ func TestStorePRDevelopmentRepairAdmissionWorkbenchAndIdempotency(t *testing.T) 
 
 	ctx := context.Background()
 	store, _, capture := newPRDevelopmentStoreFixture(t, ":memory:")
-	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, capture)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(capture),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 	conversation, err := store.AppendPRDevelopmentMessage(
@@ -122,7 +125,10 @@ func TestStorePRDevelopmentRepairConcurrentAdmissionFencesBothStores(t *testing.
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "repair-concurrent.db")
 	first, clock, capture := newPRDevelopmentStoreFixture(t, path)
-	developmentCase, created, err := first.CapturePRDevelopmentCase(ctx, capture)
+	developmentCase, created, err := first.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(capture),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 	second, err := Open(ctx, path, WithClock(func() time.Time { return *clock }))
@@ -188,7 +194,10 @@ func TestStorePRDevelopmentRepairClaimSamplesLeaseAfterWriterContention(t *testi
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "repair-claim-contention.db")
 	store, clock, capture := newPRDevelopmentStoreFixture(t, path)
-	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, capture)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(capture),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 	admitted := admitPRDevelopmentRepairForTest(t, store, developmentCase.ID, "contention", 0)
@@ -271,7 +280,10 @@ func TestStorePRDevelopmentRepairClaimRefreshesLeaseAtOwnershipWrite(t *testing.
 
 	ctx := context.Background()
 	store, clock, capture := newPRDevelopmentStoreFixture(t, ":memory:")
-	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, capture)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(capture),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 	admitted := admitPRDevelopmentRepairForTest(t, store, developmentCase.ID, "fresh-claim", 0)
@@ -310,7 +322,10 @@ func TestStorePRDevelopmentRepairClaimSkipsInvalidOldestAggregate(t *testing.T) 
 
 	ctx := context.Background()
 	store, clock, capture := newPRDevelopmentStoreFixture(t, ":memory:")
-	oldestCase, created, err := store.CapturePRDevelopmentCase(ctx, capture)
+	oldestCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(capture),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 	oldest := admitPRDevelopmentRepairForTest(t, store, oldestCase.ID, "invalid-oldest", 0)
@@ -382,7 +397,10 @@ func TestStorePRDevelopmentRepairClaimDoesNotSuppressOperationalLoadErrors(t *te
 
 	ctx := context.Background()
 	store, _, capture := newPRDevelopmentStoreFixture(t, ":memory:")
-	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, capture)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(capture),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 	workbench := admitPRDevelopmentRepairForTest(t, store, developmentCase.ID, "scan-error", 0)
@@ -423,7 +441,10 @@ func TestStorePRDevelopmentRepairClaimSuppressionMakesBoundedProgress(t *testing
 		if index == 0 {
 			var created bool
 			var captureErr error
-			developmentCase, created, captureErr = store.CapturePRDevelopmentCase(ctx, capture)
+			developmentCase, created, captureErr = store.CapturePRDevelopmentCase(
+				ctx,
+				validPRDevelopmentRequestForTest(capture),
+			)
 			require.NoError(t, captureErr)
 			require.True(t, created)
 		} else {
@@ -492,7 +513,10 @@ func TestStorePRDevelopmentRepairPreparingReclaimAndRunningExpiry(t *testing.T) 
 
 	ctx := context.Background()
 	store, clock, capture := newPRDevelopmentStoreFixture(t, ":memory:")
-	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, capture)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(capture),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 	workbench := admitPRDevelopmentRepairForTest(t, store, developmentCase.ID, "expiry", 0)
@@ -607,7 +631,10 @@ func TestStorePRDevelopmentRepairRunningExpiryMakesBoundedProgress(t *testing.T)
 		if index == 0 {
 			var created bool
 			var captureErr error
-			developmentCase, created, captureErr = store.CapturePRDevelopmentCase(ctx, capture)
+			developmentCase, created, captureErr = store.CapturePRDevelopmentCase(
+				ctx,
+				validPRDevelopmentRequestForTest(capture),
+			)
 			require.NoError(t, captureErr)
 			require.True(t, created)
 		} else {
@@ -689,7 +716,10 @@ func TestStorePRDevelopmentRepairBeginAndFinishFences(t *testing.T) {
 
 	ctx := context.Background()
 	store, _, capture := newPRDevelopmentStoreFixture(t, ":memory:")
-	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, capture)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(capture),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 	admitted := admitPRDevelopmentRepairForTest(t, store, developmentCase.ID, "finish", 0)
@@ -882,7 +912,10 @@ func TestStorePRDevelopmentRepairBeginRefreshesExecutionLease(t *testing.T) {
 
 	ctx := context.Background()
 	store, clock, capture := newPRDevelopmentStoreFixture(t, ":memory:")
-	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, capture)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(capture),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 	admitted := admitPRDevelopmentRepairForTest(t, store, developmentCase.ID, "refresh", 0)
@@ -951,7 +984,10 @@ func TestStorePRDevelopmentRepairRenewCannotShortenConcurrentBeginLease(t *testi
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "repair-renew-begin.db")
 	store, clock, capture := newPRDevelopmentStoreFixture(t, path)
-	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, capture)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(capture),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 	admitted := admitPRDevelopmentRepairForTest(t, store, developmentCase.ID, "renew-begin", 0)
@@ -1044,7 +1080,10 @@ func TestStorePRDevelopmentRepairAttemptAndVersionBoundsAreAtomic(t *testing.T) 
 
 	ctx := context.Background()
 	store, _, capture := newPRDevelopmentStoreFixture(t, ":memory:")
-	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, capture)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(capture),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 
@@ -1099,7 +1138,10 @@ func TestStorePRDevelopmentRepairAttemptAndVersionBoundsAreAtomic(t *testing.T) 
 	assert.Equal(t, version, unchanged.RepairSession.Version)
 
 	otherStore, _, otherCapture := newPRDevelopmentStoreFixture(t, ":memory:")
-	otherCase, created, err := otherStore.CapturePRDevelopmentCase(ctx, otherCapture)
+	otherCase, created, err := otherStore.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(otherCapture),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 	limited := admitPRDevelopmentRepairForTest(t, otherStore, otherCase.ID, "version", 0)
@@ -1144,7 +1186,10 @@ func TestStorePRDevelopmentRepairRevisionHeadroomAndCappedExpiryIsolation(t *tes
 
 	ctx := context.Background()
 	store, clock, capture := newPRDevelopmentStoreFixture(t, ":memory:")
-	firstCase, created, err := store.CapturePRDevelopmentCase(ctx, capture)
+	firstCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(capture),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 	first := admitPRDevelopmentRepairForTest(t, store, firstCase.ID, "headroom-first", 0)

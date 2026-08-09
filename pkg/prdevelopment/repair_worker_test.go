@@ -111,6 +111,7 @@ type repairWorkerCancelVerifier struct {
 func (verifier *repairWorkerCancelVerifier) VerifyCase(
 	ctx context.Context,
 	_ eventing.PRDevelopmentCase,
+	_ *eventing.PRDevelopmentThreadIdentity,
 ) (VerifiedCase, error) {
 	close(verifier.entered)
 	<-ctx.Done()
@@ -120,6 +121,7 @@ func (verifier *repairWorkerCancelVerifier) VerifyCase(
 func (verifier *repairWorkerVerifierFake) VerifyCase(
 	context.Context,
 	eventing.PRDevelopmentCase,
+	*eventing.PRDevelopmentThreadIdentity,
 ) (VerifiedCase, error) {
 	verifier.calls++
 	return verifier.result, verifier.err
@@ -506,10 +508,24 @@ func newRepairWorkerQueueFake() *repairWorkerQueueFake {
 		UpdatedAt:      now,
 	}
 	copySession := cloneRepairWorkerSession(session)
+	thread := eventing.PRDevelopmentThreadBinding{
+		ID:           "pdt_dddddddddddddddddddddddddddddddd",
+		Kind:         eventing.PRDevelopmentThreadLegacy,
+		LegacyCaseID: session.CaseID,
+		CaseCount:    1,
+		Case: eventing.PRDevelopmentThreadCaseLink{
+			CaseID:   session.CaseID,
+			Ordinal:  0,
+			LinkedAt: now,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
 	return &repairWorkerQueueFake{
 		session: session,
 		workbench: eventing.PRDevelopmentWorkbench{
-			Case: eventing.PRDevelopmentCase{ID: session.CaseID},
+			Case:   eventing.PRDevelopmentCase{ID: session.CaseID},
+			Thread: &thread,
 			Conversation: eventing.PRDevelopmentConversation{
 				CaseID: session.CaseID, Messages: []eventing.PRDevelopmentMessage{},
 			},
@@ -529,6 +545,92 @@ func repairWorkerVerifiedCase() VerifiedCase {
 	}
 }
 
+func TestRepairThreadIdentitySelectsOnlyTheBoundCase(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 8, 9, 1, 0, 0, 0, time.UTC)
+	caseID := "pdc_cccccccccccccccccccccccccccccccc"
+	providerIdentity := eventing.PRDevelopmentThreadIdentity{
+		Provider:       "github",
+		ProviderOrigin: "https://github.com",
+		PullAuthorID:   "1001",
+		RepositoryID:   "2001",
+		PullRequestID:  "3001",
+		PullNumber:     42,
+	}
+	for _, test := range []struct {
+		name   string
+		thread *eventing.PRDevelopmentThreadBinding
+		want   *eventing.PRDevelopmentThreadIdentity
+		ok     bool
+	}{
+		{
+			name: "provider",
+			thread: &eventing.PRDevelopmentThreadBinding{
+				ID:        "pdt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				Kind:      eventing.PRDevelopmentThreadProvider,
+				Identity:  providerIdentity,
+				CaseCount: 2,
+				Case: eventing.PRDevelopmentThreadCaseLink{
+					CaseID: caseID, Ordinal: 1, LinkedAt: now,
+				},
+			},
+			want: &providerIdentity,
+			ok:   true,
+		},
+		{
+			name: "legacy",
+			thread: &eventing.PRDevelopmentThreadBinding{
+				ID:           "pdt_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				Kind:         eventing.PRDevelopmentThreadLegacy,
+				LegacyCaseID: caseID,
+				CaseCount:    1,
+				Case: eventing.PRDevelopmentThreadCaseLink{
+					CaseID: caseID, Ordinal: 0, LinkedAt: now,
+				},
+			},
+			ok: true,
+		},
+		{
+			name: "cross case",
+			thread: &eventing.PRDevelopmentThreadBinding{
+				ID:        "pdt_dddddddddddddddddddddddddddddddd",
+				Kind:      eventing.PRDevelopmentThreadProvider,
+				Identity:  providerIdentity,
+				CaseCount: 1,
+				Case: eventing.PRDevelopmentThreadCaseLink{
+					CaseID: "pdc_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", Ordinal: 0,
+				},
+			},
+		},
+		{
+			name: "invalid ordinal",
+			thread: &eventing.PRDevelopmentThreadBinding{
+				ID:        "pdt_ffffffffffffffffffffffffffffffff",
+				Kind:      eventing.PRDevelopmentThreadProvider,
+				Identity:  providerIdentity,
+				CaseCount: 1,
+				Case: eventing.PRDevelopmentThreadCaseLink{
+					CaseID: caseID, Ordinal: 1,
+				},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := repairThreadIdentity(test.thread, caseID)
+			if test.ok {
+				if err != nil || !reflect.DeepEqual(got, test.want) {
+					t.Fatalf("repairThreadIdentity() = %#v, %v, want %#v", got, err, test.want)
+				}
+				return
+			}
+			if err == nil || got != nil {
+				t.Fatalf("repairThreadIdentity() = %#v, %v, want failure", got, err)
+			}
+		})
+	}
+}
+
 func cloneRepairWorkerSession(
 	session eventing.PRDevelopmentRepairSession,
 ) eventing.PRDevelopmentRepairSession {
@@ -539,6 +641,10 @@ func cloneRepairWorkerSession(
 func cloneRepairWorkerWorkbench(
 	workbench eventing.PRDevelopmentWorkbench,
 ) eventing.PRDevelopmentWorkbench {
+	if workbench.Thread != nil {
+		thread := *workbench.Thread
+		workbench.Thread = &thread
+	}
 	workbench.Conversation.Messages = append(
 		[]eventing.PRDevelopmentMessage(nil),
 		workbench.Conversation.Messages...,

@@ -22,7 +22,10 @@ func TestStorePRDevelopmentConversationAppendGetAndImmutableOrdering(t *testing.
 
 	ctx := context.Background()
 	store, clock, input := newPRDevelopmentStoreFixture(t, ":memory:")
-	first, created, err := store.CapturePRDevelopmentCase(ctx, input)
+	first, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(input),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 	assertPRDevelopmentConversationState(
@@ -50,7 +53,10 @@ func TestStorePRDevelopmentConversationAppendGetAndImmutableOrdering(t *testing.
 		input.WorkflowRef,
 		input.WorkflowRevision,
 	)
-	second, created, err := store.CapturePRDevelopmentCase(ctx, secondInput)
+	second, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(secondInput),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 
@@ -124,7 +130,10 @@ func TestStorePRDevelopmentConversationOptimisticConflictIsAtomic(t *testing.T) 
 
 	ctx := context.Background()
 	store, _, input := newPRDevelopmentStoreFixture(t, ":memory:")
-	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, input)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(input),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 
@@ -170,7 +179,10 @@ func TestStorePRDevelopmentCaptureConversationStateFailureIsAtomic(t *testing.T)
 		END`)
 	require.NoError(t, err)
 
-	_, created, err := store.CapturePRDevelopmentCase(ctx, input)
+	_, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(input),
+	)
 	require.Error(t, err)
 	assert.False(t, created)
 
@@ -188,7 +200,10 @@ func TestStorePRDevelopmentCaptureConversationStateFailureIsAtomic(t *testing.T)
 func TestStorePRDevelopmentConversationValidatesInputsAndMissingCases(t *testing.T) {
 	ctx := context.Background()
 	store, _, input := newPRDevelopmentStoreFixture(t, ":memory:")
-	developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, input)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(input),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 
@@ -251,7 +266,10 @@ func TestStorePRDevelopmentConversationExactLimits(t *testing.T) {
 	t.Run("message count", func(t *testing.T) {
 		ctx := context.Background()
 		store, _, input := newPRDevelopmentStoreFixture(t, ":memory:")
-		developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, input)
+		developmentCase, created, err := store.CapturePRDevelopmentCase(
+			ctx,
+			validPRDevelopmentRequestForTest(input),
+		)
 		require.NoError(t, err)
 		require.True(t, created)
 
@@ -288,7 +306,10 @@ func TestStorePRDevelopmentConversationExactLimits(t *testing.T) {
 	t.Run("UTF-8 message and transcript bytes", func(t *testing.T) {
 		ctx := context.Background()
 		store, _, input := newPRDevelopmentStoreFixture(t, ":memory:")
-		developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, input)
+		developmentCase, created, err := store.CapturePRDevelopmentCase(
+			ctx,
+			validPRDevelopmentRequestForTest(input),
+		)
 		require.NoError(t, err)
 		require.True(t, created)
 
@@ -337,7 +358,10 @@ func TestStorePRDevelopmentConversationConcurrentWritersFenceVersion(t *testing.
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "conversation-concurrency.db")
 	first, clock, input := newPRDevelopmentStoreFixture(t, path)
-	developmentCase, created, err := first.CapturePRDevelopmentCase(ctx, input)
+	developmentCase, created, err := first.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(input),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 	second, err := Open(ctx, path, WithClock(func() time.Time { return *clock }))
@@ -594,7 +618,10 @@ func TestStorePRDevelopmentConversationRejectsStoredCorruption(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			store, _, input := newPRDevelopmentStoreFixture(t, ":memory:")
-			developmentCase, created, err := store.CapturePRDevelopmentCase(ctx, input)
+			developmentCase, created, err := store.CapturePRDevelopmentCase(
+				ctx,
+				validPRDevelopmentRequestForTest(input),
+			)
 			require.NoError(t, err)
 			require.True(t, created)
 			conversation, err := store.AppendPRDevelopmentMessage(
@@ -645,7 +672,7 @@ func TestStorePRDevelopmentConversationHonorsContextAndClosedStore(t *testing.T)
 	store, _, input := newPRDevelopmentStoreFixture(t, ":memory:")
 	developmentCase, created, err := store.CapturePRDevelopmentCase(
 		context.Background(),
-		input,
+		validPRDevelopmentRequestForTest(input),
 	)
 	require.NoError(t, err)
 	require.True(t, created)
@@ -713,12 +740,19 @@ func TestStoreMigratesV6BackfillsExistingPRDevelopmentConversationState(
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "migration-v6-existing-development-case.db")
 	legacyStore, _, input := newPRDevelopmentStoreFixture(t, path)
-	developmentCase, created, err := legacyStore.CapturePRDevelopmentCase(ctx, input)
+	developmentCase, created, err := legacyStore.CapturePRDevelopmentCase(
+		ctx,
+		validPRDevelopmentRequestForTest(input),
+	)
 	require.NoError(t, err)
 	require.True(t, created)
 	require.NoError(t, legacyStore.Close())
 
 	db := openSchemaTestDB(t, path)
+	_, err = db.Exec(`DROP TABLE pr_development_thread_cases`)
+	require.NoError(t, err)
+	_, err = db.Exec(`DROP TABLE pr_development_threads`)
+	require.NoError(t, err)
 	_, err = db.Exec(`DROP TABLE pr_development_messages`)
 	require.NoError(t, err)
 	_, err = db.Exec(`DROP TABLE pr_development_conversations`)

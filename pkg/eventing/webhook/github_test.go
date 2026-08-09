@@ -607,6 +607,9 @@ func TestGitHubSubmittedReviewTargetsOwnPullRequestFeedback(t *testing.T) {
 	assert.Equal(t, "pull_request_review.submitted", input.Type)
 	assert.Equal(t, "contributor/gocql", input.Attributes["pull_request_head_repository"])
 	assert.Equal(t, "scylladb/gocql", input.Attributes["pull_request_base_repository"])
+	assert.Equal(t, "1001", input.Attributes["repository_database_id"])
+	assert.Equal(t, "2002", input.Attributes["pull_request_id"])
+	assert.Equal(t, "3003", input.Attributes["pull_request_author_id"])
 	assert.Equal(t, "701", input.Attributes["review_id"])
 	assert.Equal(t, "PRR_kwDOReview701", input.Attributes["review_node_id"])
 	assert.Equal(t, strings.Repeat("a", 40), input.Attributes["review_commit_sha"])
@@ -616,6 +619,163 @@ func TestGitHubSubmittedReviewTargetsOwnPullRequestFeedback(t *testing.T) {
 	assert.Equal(t, "false", input.Attributes["review_author_is_target"])
 	assert.Equal(t, "true", input.Attributes["targets_user"])
 	assert.Equal(t, "review_feedback", input.Attributes["target_reason"])
+}
+
+func TestGitHubReviewFeedbackRequiresCanonicalThreadIdentity(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+		field  string
+	}{
+		{
+			name: "missing repository ID",
+			mutate: func(payload map[string]any) {
+				delete(payload["repository"].(map[string]any), "id")
+			},
+			field: "repository_database_id",
+		},
+		{
+			name: "noncanonical repository ID",
+			mutate: func(payload map[string]any) {
+				payload["repository"].(map[string]any)["id"] = "01001"
+			},
+			field: "repository_database_id",
+		},
+		{
+			name: "out of range repository ID",
+			mutate: func(payload map[string]any) {
+				payload["repository"].(map[string]any)["id"] = json.Number(
+					"9223372036854775808",
+				)
+			},
+			field: "repository_database_id",
+		},
+		{
+			name: "missing pull request ID",
+			mutate: func(payload map[string]any) {
+				delete(payload["pull_request"].(map[string]any), "id")
+			},
+			field: "pull_request_id",
+		},
+		{
+			name: "zero pull request ID",
+			mutate: func(payload map[string]any) {
+				payload["pull_request"].(map[string]any)["id"] = 0
+			},
+			field: "pull_request_id",
+		},
+		{
+			name: "out of range pull request ID",
+			mutate: func(payload map[string]any) {
+				payload["pull_request"].(map[string]any)["id"] = json.Number(
+					"9223372036854775808",
+				)
+			},
+			field: "pull_request_id",
+		},
+		{
+			name: "missing pull author ID",
+			mutate: func(payload map[string]any) {
+				pull := payload["pull_request"].(map[string]any)
+				delete(pull["user"].(map[string]any), "id")
+			},
+			field: "pull_request_author_id",
+		},
+		{
+			name: "noncanonical pull author ID",
+			mutate: func(payload map[string]any) {
+				pull := payload["pull_request"].(map[string]any)
+				pull["user"].(map[string]any)["id"] = "03003"
+			},
+			field: "pull_request_author_id",
+		},
+		{
+			name: "out of range pull author ID",
+			mutate: func(payload map[string]any) {
+				pull := payload["pull_request"].(map[string]any)
+				pull["user"].(map[string]any)["id"] = json.Number(
+					"9223372036854775808",
+				)
+			},
+			field: "pull_request_author_id",
+		},
+		{
+			name: "out of range review ID",
+			mutate: func(payload map[string]any) {
+				payload["review"].(map[string]any)["id"] = json.Number(
+					"9223372036854775808",
+				)
+			},
+			field: "review_id",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			store := newMemoryInserter()
+			controller, _ := newScopedGitHubTestController(
+				t,
+				store,
+				[]string{"scylladb/gocql"},
+				"review-user",
+			)
+			payload := validGitHubReviewFeedbackPayload(
+				"submitted",
+				"review-user",
+				"reviewer",
+			)
+			test.mutate(payload)
+			body, err := json.Marshal(payload)
+			require.NoError(t, err)
+			response := performRequest(
+				controller,
+				githubSignedRequest(
+					githubTestSecret,
+					"pull_request_review",
+					"invalid-thread-"+strings.ReplaceAll(test.name, " ", "-"),
+					string(body),
+				),
+			)
+			require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
+			inputs := store.recordedInputs()
+			require.Len(t, inputs, 1)
+			assert.Equal(t, "false", inputs[0].Attributes["targets_user"])
+			assert.Empty(t, inputs[0].Attributes["target_reason"])
+			assert.Empty(t, inputs[0].Attributes[test.field])
+		})
+	}
+}
+
+func TestCanonicalGitHubDatabaseIDPositiveInt64Boundaries(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		raw  json.RawMessage
+		want string
+		ok   bool
+	}{
+		{name: "minimum", raw: json.RawMessage("1"), want: "1", ok: true},
+		{
+			name: "maximum",
+			raw:  json.RawMessage("9223372036854775807"),
+			want: "9223372036854775807",
+			ok:   true,
+		},
+		{name: "zero", raw: json.RawMessage("0")},
+		{name: "leading zero", raw: json.RawMessage("01")},
+		{name: "overflow", raw: json.RawMessage("9223372036854775808")},
+		{name: "twenty digits", raw: json.RawMessage("10000000000000000000")},
+		{name: "negative", raw: json.RawMessage("-1")},
+		{name: "fraction", raw: json.RawMessage("1.0")},
+		{name: "string", raw: json.RawMessage(`"1"`)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := canonicalGitHubDatabaseID(test.raw)
+			assert.Equal(t, test.ok, ok)
+			assert.Equal(t, test.want, got)
+		})
+	}
 }
 
 func TestGitHubSubmittedReviewFeedbackCoexistsWithMention(t *testing.T) {
@@ -927,11 +1087,16 @@ func validGitHubReviewFeedbackPayload(
 	return map[string]any{
 		"action": action,
 		"repository": map[string]any{
+			"id":        1001,
 			"full_name": "scylladb/gocql",
 		},
 		"pull_request": map[string]any{
+			"id":     2002,
 			"number": 42,
-			"user":   map[string]any{"login": pullAuthor},
+			"user": map[string]any{
+				"login": pullAuthor,
+				"id":    3003,
+			},
 			"head": map[string]any{
 				"ref":  "feedback",
 				"sha":  strings.Repeat("a", 40),

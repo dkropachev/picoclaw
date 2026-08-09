@@ -8,6 +8,7 @@ import (
 
 const (
 	prDevelopmentCaseIDPrefix            = "pdc_"
+	prDevelopmentThreadIDPrefix          = "pdt_"
 	prDevelopmentMessageIDPrefix         = "pdm_"
 	prDevelopmentRepairSessionIDPrefix   = "pds_"
 	prDevelopmentRepairAttemptIDPrefix   = "pdr_"
@@ -22,6 +23,9 @@ const (
 	// MaxPRDevelopmentTranscriptBytes bounds the sum of durable message content
 	// for one development case.
 	MaxPRDevelopmentTranscriptBytes = 4 << 20
+	// MaxPRDevelopmentThreadCases bounds immutable review occurrences carried
+	// by one provider-verified pull-request thread.
+	MaxPRDevelopmentThreadCases = 8192
 
 	// MaxPRDevelopmentRepairAttempts keeps one durable local-development
 	// session finite. A completed or failed attempt remains immutable evidence
@@ -62,6 +66,11 @@ var (
 	// accept another otherwise-valid message within its durable bounds.
 	ErrPRDevelopmentConversationCapacity = errors.New(
 		"pull request development conversation capacity exceeded",
+	)
+	// ErrPRDevelopmentThreadCapacity reports that a provider thread cannot
+	// accept another immutable review occurrence within its durable bound.
+	ErrPRDevelopmentThreadCapacity = errors.New(
+		"pull request development thread capacity exceeded",
 	)
 	// ErrInvalidPRDevelopmentRepair reports malformed repair admission or
 	// lifecycle input.
@@ -147,6 +156,76 @@ type PRDevelopmentCaptureInput struct {
 	ReviewSubmittedAt    time.Time                `json:"review_submitted_at"`
 	ReviewURL            string                   `json:"review_url"`
 	Feedback             string                   `json:"feedback"`
+}
+
+// PRDevelopmentThreadKind distinguishes provider-verified pull identity from
+// one-case legacy isolation created during the schema-v9 migration.
+type PRDevelopmentThreadKind string
+
+const (
+	PRDevelopmentThreadProvider PRDevelopmentThreadKind = "provider"
+	PRDevelopmentThreadLegacy   PRDevelopmentThreadKind = "legacy"
+)
+
+// PRDevelopmentThreadIdentity is the immutable provider identity of one pull
+// request. These provider object IDs are controller evidence and never belong
+// in browser projections.
+type PRDevelopmentThreadIdentity struct {
+	Provider       string `json:"-"`
+	ProviderOrigin string `json:"-"`
+	PullAuthorID   string `json:"-"`
+	RepositoryID   string `json:"-"`
+	PullRequestID  string `json:"-"`
+	PullNumber     int64  `json:"-"`
+}
+
+// PRDevelopmentCaptureRequest atomically binds one immutable review capture
+// to its authenticated and current-provider-cross-bound pull-request identity.
+type PRDevelopmentCaptureRequest struct {
+	Case   PRDevelopmentCaptureInput   `json:"-"`
+	Thread PRDevelopmentThreadIdentity `json:"-"`
+}
+
+// PRDevelopmentThreadCaseLink is one immutable position in a thread's
+// database-assigned, contiguous capture order. Hash-chain fields remain store
+// private and are checked by GetPRDevelopmentThreadForCase.
+type PRDevelopmentThreadCaseLink struct {
+	CaseID       string    `json:"-"`
+	Ordinal      int       `json:"-"`
+	LinkedAt     time.Time `json:"-"`
+	PreviousHash string    `json:"-"`
+	LinkHash     string    `json:"-"`
+}
+
+// PRDevelopmentThread is the complete integrity-checked provider or isolated
+// legacy thread. Identity is zero for legacy threads.
+type PRDevelopmentThread struct {
+	ID           string                        `json:"-"`
+	Kind         PRDevelopmentThreadKind       `json:"-"`
+	Identity     PRDevelopmentThreadIdentity   `json:"-"`
+	LegacyCaseID string                        `json:"-"`
+	CaseCount    int                           `json:"-"`
+	IdentityHash string                        `json:"-"`
+	CasesDigest  string                        `json:"-"`
+	Cases        []PRDevelopmentThreadCaseLink `json:"-"`
+	CreatedAt    time.Time                     `json:"-"`
+	UpdatedAt    time.Time                     `json:"-"`
+}
+
+// PRDevelopmentThreadBinding is the narrow integrity-checked thread header and
+// selected case link carried by an ordinary case workbench. It neither
+// enumerates sibling memberships nor loads sibling case payloads.
+type PRDevelopmentThreadBinding struct {
+	ID           string                      `json:"-"`
+	Kind         PRDevelopmentThreadKind     `json:"-"`
+	Identity     PRDevelopmentThreadIdentity `json:"-"`
+	LegacyCaseID string                      `json:"-"`
+	CaseCount    int                         `json:"-"`
+	IdentityHash string                      `json:"-"`
+	CasesDigest  string                      `json:"-"`
+	Case         PRDevelopmentThreadCaseLink `json:"-"`
+	CreatedAt    time.Time                   `json:"-"`
+	UpdatedAt    time.Time                   `json:"-"`
 }
 
 // PRDevelopmentCase is one immutable provider review occurrence captured by
@@ -298,6 +377,7 @@ type PRDevelopmentRepairSession struct {
 // bounded conversation, and optional singleton repair session.
 type PRDevelopmentWorkbench struct {
 	Case          PRDevelopmentCase           `json:"case"`
+	Thread        *PRDevelopmentThreadBinding `json:"-"`
 	Conversation  PRDevelopmentConversation   `json:"conversation"`
 	RepairSession *PRDevelopmentRepairSession `json:"repair_session,omitempty"`
 }
@@ -367,12 +447,22 @@ type PRDevelopmentCaseStore interface {
 	LookupPRDevelopmentCapture(
 		ctx context.Context,
 		identity PRDevelopmentCaptureIdentity,
+		expectedThread *PRDevelopmentThreadIdentity,
 	) (PRDevelopmentCase, bool, error)
 	CapturePRDevelopmentCase(
 		ctx context.Context,
-		input PRDevelopmentCaptureInput,
+		input PRDevelopmentCaptureRequest,
 	) (PRDevelopmentCase, bool, error)
 	GetPRDevelopmentCase(ctx context.Context, id string) (PRDevelopmentCase, error)
+}
+
+// PRDevelopmentThreadReader returns the complete integrity-checked thread for
+// one immutable development case without granting capture or mutation.
+type PRDevelopmentThreadReader interface {
+	GetPRDevelopmentThreadForCase(
+		ctx context.Context,
+		caseID string,
+	) (PRDevelopmentThread, error)
 }
 
 // PRDevelopmentCaseReader is the separate immutable workbench read boundary.
