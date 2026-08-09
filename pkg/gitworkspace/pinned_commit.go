@@ -253,6 +253,26 @@ func (m *Manager) SnapshotPinnedCandidate(
 	ctx context.Context,
 	request PinnedCandidateRequest,
 ) (PinnedCandidate, error) {
+	return m.snapshotPinnedCandidate(ctx, request, false)
+}
+
+// SnapshotPinnedValidationCandidate builds the same immutable evidence as
+// SnapshotPinnedCandidate, but explicitly permits a clean worktree. A clean
+// snapshot has zero ChangedFiles and a Tree equal to ParentCommit's tree; its
+// CandidateDigest still binds the exact parent commit and tree. CommitPinned
+// remains strict and will not create an empty commit from this evidence.
+func (m *Manager) SnapshotPinnedValidationCandidate(
+	ctx context.Context,
+	request PinnedCandidateRequest,
+) (PinnedCandidate, error) {
+	return m.snapshotPinnedCandidate(ctx, request, true)
+}
+
+func (m *Manager) snapshotPinnedCandidate(
+	ctx context.Context,
+	request PinnedCandidateRequest,
+	allowNoChanges bool,
+) (PinnedCandidate, error) {
 	if m == nil {
 		return PinnedCandidate{}, errors.New("git workspace manager is not configured")
 	}
@@ -337,7 +357,7 @@ func (m *Manager) SnapshotPinnedCandidate(
 	if err != nil {
 		return PinnedCandidate{}, err
 	}
-	if candidate.Tree == candidate.parentTree {
+	if candidate.Tree == candidate.parentTree && !allowNoChanges {
 		return PinnedCandidate{}, fmt.Errorf(
 			"%w: pinned candidate contains no ordinary changes",
 			ErrPinnedCommitConflict,

@@ -3,6 +3,7 @@ package gitworkspace
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"os"
 	"path/filepath"
@@ -716,6 +717,50 @@ func TestManagerPinnedCommitRejectsNoChanges(t *testing.T) {
 		AuthoredAt:              pinnedCommitTestTime(),
 	})
 	assertPinnedCommitConflict(t, err, "no ordinary changes")
+}
+
+func TestManagerSnapshotPinnedValidationCandidateAllowsExactNoChanges(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPinnedCommitTestFixture(t, "pr-development/validation-no-change")
+	request := PinnedCandidateRequest{
+		Pin:         fixture.pin,
+		WorkspaceID: fixture.workspace.ID,
+	}
+	parentTree := testGitObject(t, fixture.workspace.Path, "rev-parse", "HEAD^{tree}")
+
+	candidate, err := fixture.manager.SnapshotPinnedValidationCandidate(ctx, request)
+	if err != nil {
+		t.Fatalf("SnapshotPinnedValidationCandidate() error = %v", err)
+	}
+	if candidate.WorkspaceID != fixture.workspace.ID ||
+		candidate.ParentCommit != fixture.pin.ExpectedCommit ||
+		candidate.Tree != parentTree || candidate.ChangedFiles != 0 ||
+		!validLowerHex(candidate.CandidateDigest, sha256.Size*2) {
+		t.Fatalf("SnapshotPinnedValidationCandidate() = %#v", candidate)
+	}
+	if _, err := fixture.manager.SnapshotPinnedCandidate(ctx, request); err == nil ||
+		!errors.Is(err, ErrPinnedCommitConflict) {
+		t.Fatalf("SnapshotPinnedCandidate(clean) error = %v", err)
+	}
+
+	if writeErr := os.WriteFile(
+		filepath.Join(fixture.workspace.Path, "changed.txt"),
+		[]byte("changed\n"),
+		0o644,
+	); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	strict, err := fixture.manager.SnapshotPinnedCandidate(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validation, err := fixture.manager.SnapshotPinnedValidationCandidate(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strict != validation {
+		t.Fatalf("changed candidate evidence differs: strict %#v, validation %#v", strict, validation)
+	}
 }
 
 func TestManagerCommitPinnedIgnoresHooksSigningAndEditorPoisoning(t *testing.T) {
