@@ -1035,7 +1035,8 @@ const reviewAttentionDetail = {
   },
 }
 const prDevelopmentCaseID = `pdc_${"7".repeat(32)}`
-const prDevelopmentSummary = {
+const prDevelopmentAttentionResponseToken = `sha256:${"b".repeat(64)}`
+const prDevelopmentCaseBase = {
   id: prDevelopmentCaseID,
   repository: "octo/repo",
   pull_number: 84,
@@ -1055,9 +1056,13 @@ const prDevelopmentSummary = {
     "https://github.example.test/octo/repo/pull/84#pullrequestreview-7",
   captured_at: "2026-08-05T12:00:01Z",
 } as const
+const prDevelopmentSummary = {
+  ...prDevelopmentCaseBase,
+  attention_required: true,
+} as const
 const prDevelopmentDetail = {
   case: {
-    ...prDevelopmentSummary,
+    ...prDevelopmentCaseBase,
     base_repository: "octo/repo",
     base_ref: "main",
     base_sha: "e".repeat(40),
@@ -1077,6 +1082,7 @@ const prDevelopmentDetail = {
   repair_revision: 0,
 } satisfies PRDevelopmentCaseDetail
 const waitingReviewAttentionProjectionText = `{"case_version":7,"status":"waiting","can_respond":true,"turns":[{"status":"waiting","title":"Choose a safe contract","questions":{"priority":9007199254740993},"response_token":"${reviewAttentionResponseToken}"}]}`
+const waitingPRDevelopmentAttentionProjectionText = `{"case_version":0,"status":"waiting","can_respond":true,"turns":[{"status":"waiting","title":"Choose how to address the review","questions":{"gate_id":"owner_input","reason":"The repair direction is ambiguous.","questions":["Preserve compatibility?"]},"response_token":"${prDevelopmentAttentionResponseToken}"}]}`
 
 interface MockLauncherApiOptions {
   agentActivityRequests?: Array<{ method: string; path: string }>
@@ -1104,6 +1110,11 @@ interface MockLauncherApiOptions {
     body: unknown
   }>
   prDevelopmentChatRequests?: Array<{
+    method: string
+    path: string
+    body: unknown
+  }>
+  prDevelopmentAttentionResponseRequests?: Array<{
     method: string
     path: string
     body: unknown
@@ -1180,6 +1191,8 @@ async function mockLauncherApis(
     waitingReviewAttentionProjectionText
   let currentPRDevelopmentDetail: PRDevelopmentCaseDetail =
     structuredClone(prDevelopmentDetail)
+  let currentPRDevelopmentAttentionProjectionText =
+    waitingPRDevelopmentAttentionProjectionText
   let completingPRDevelopmentRepair = false
   let currentAgents: AgentInfo[] = [
     {
@@ -1800,6 +1813,24 @@ async function mockLauncherApis(
               ],
             }
             return json(route, currentPRDevelopmentDetail)
+          }
+          case `/api/pr-development/${prDevelopmentCaseID}/attention/respond`: {
+            const body = request.postDataJSON() as {
+              expected_case_version: number
+              response_token: string
+              response: string
+            }
+            options.prDevelopmentAttentionResponseRequests?.push({
+              method,
+              path,
+              body,
+            })
+            currentPRDevelopmentAttentionProjectionText = `{"case_version":0,"status":"completed","can_respond":false,"turns":[{"status":"answered","title":"Choose how to address the review","questions":["Preserve compatibility?"],"response":${JSON.stringify(body.response)}}]}`
+            return route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: currentPRDevelopmentAttentionProjectionText,
+            })
           }
           case `/api/reviews/${reviewAttentionCaseID}/attention/respond`: {
             const body = request.postDataJSON() as {
@@ -2688,6 +2719,12 @@ async function mockLauncherApis(
           }
           return json(route, currentPRDevelopmentDetail)
         }
+        case `/api/pr-development/${prDevelopmentCaseID}/attention`:
+          return route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: currentPRDevelopmentAttentionProjectionText,
+          })
         case `/api/reviews/${reviewAttentionCaseID}`:
           return json(route, reviewAttentionDetail)
         case `/api/reviews/${reviewAttentionCaseID}/attention`:
@@ -3271,6 +3308,11 @@ test("captured PR feedback and advisory AI chat are canonical, plain text, and c
   const requests: Array<{ method: string; path: string }> = []
   const chatRequests: Array<{ method: string; path: string; body: unknown }> =
     []
+  const attentionResponseRequests: Array<{
+    method: string
+    path: string
+    body: unknown
+  }> = []
   page.on("request", (request) => {
     const path = new URL(request.url()).pathname
     if (path.startsWith("/api/pr-development")) {
@@ -3281,18 +3323,21 @@ test("captured PR feedback and advisory AI chat are canonical, plain text, and c
   await gotoMockedRoute(
     page,
     `/reviews?view=development&case=${prDevelopmentCaseID}&repository=%20octo%2Frepo%20&pull_number=84&focus=chat&questions=private-questions-canary&cursor=private-cursor-canary`,
-    { prDevelopmentChatRequests: chatRequests },
+    {
+      prDevelopmentChatRequests: chatRequests,
+      prDevelopmentAttentionResponseRequests: attentionResponseRequests,
+    },
   )
 
   await expect(page).toHaveURL(
     new RegExp(
-      `/reviews\\?view=development&case=${prDevelopmentCaseID}&repository=octo%2Frepo&pull_number=84$`,
+      `/reviews\\?view=development&case=${prDevelopmentCaseID}&focus=chat$`,
     ),
   )
   await expect(
     page.getByRole("button", { name: "My PR feedback" }),
   ).toHaveAttribute("aria-current", "page")
-  await expect(page.getByLabel("Pull request number")).toHaveValue("84")
+  await expect(page.getByLabel("Pull request number")).toHaveValue("")
   const feedback = page.getByTestId("pr-development-feedback")
   await expect(feedback).toContainText("private-link-canary")
   await expect(
@@ -3303,6 +3348,25 @@ test("captured PR feedback and advisory AI chat are canonical, plain text, and c
   )
   await expect(page.locator("body")).not.toContainText("private-cursor-canary")
   await expect(page.getByText(/cannot inspect a checkout/i)).toBeVisible()
+  const attentionResponse = page.getByLabel("Reply to the AI attention request")
+  await expect(attentionResponse).toBeFocused()
+  await expect(page.getByText("Gate owner_input")).toBeVisible()
+  await attentionResponse.fill("Preserve compatibility")
+  await page.getByRole("button", { name: "Send attention reply" }).click()
+  await expect(
+    page.getByText("The attention conversation is complete."),
+  ).toBeVisible()
+  expect(attentionResponseRequests).toEqual([
+    {
+      method: "POST",
+      path: `/api/pr-development/${prDevelopmentCaseID}/attention/respond`,
+      body: {
+        expected_case_version: 0,
+        response_token: prDevelopmentAttentionResponseToken,
+        response: "Preserve compatibility",
+      },
+    },
+  ])
   await expect(
     page.getByRole("button", { name: /checkout|push/i }),
   ).toHaveCount(0)
@@ -3329,7 +3393,13 @@ test("captured PR feedback and advisory AI chat are canonical, plain text, and c
   await expect(
     page.getByRole("heading", { name: "Feedback on my PRs" }),
   ).toBeVisible()
+  await expect(page.getByText("AI attention")).toBeVisible()
   await page.getByRole("button", { name: new RegExp(`octo/repo #84`) }).click()
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/reviews\\?view=development&case=${prDevelopmentCaseID}&focus=chat$`,
+    ),
+  )
   await expect(page.getByTestId("pr-development-feedback")).toContainText(
     "private-link-canary",
   )
@@ -3343,6 +3413,10 @@ test("captured PR feedback and advisory AI chat are canonical, plain text, and c
       {
         method: "POST",
         path: `/api/pr-development/${prDevelopmentCaseID}/chat`,
+      },
+      {
+        method: "GET",
+        path: `/api/pr-development/${prDevelopmentCaseID}/attention`,
       },
     ]),
   )
@@ -3461,9 +3535,7 @@ test("review attention policy route is inert, accessible, and contained on deskt
   await expect(
     page.getByRole("button", { name: "Attention policies" }),
   ).toHaveAttribute("aria-current", "page")
-  await expect(
-    page.getByText("Outgoing submitted reviews trigger attention"),
-  ).toBeVisible()
+  await expect(page.getByText("Review events trigger attention")).toBeVisible()
   expect(
     await page
       .getByLabel("Gate type")
@@ -3552,9 +3624,7 @@ test("review attention policy protects dirty navigation and boundary identities 
   const boundaryPolicy = page.getByRole("article", {
     name: "Decision policy 1",
   })
-  await boundaryPolicy
-    .getByRole("textbox", { name: "Decision point" })
-    .fill("review.submitted")
+  await boundaryPolicy.getByLabel("Decision point").fill("review.submitted")
   await boundaryPolicy.getByLabel("Override mode").selectOption("overlay")
   await boundaryPolicy.getByRole("textbox", { name: "Gate ID" }).fill("local")
   await boundaryPolicy

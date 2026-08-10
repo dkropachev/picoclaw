@@ -1503,6 +1503,8 @@ func installSchemaV1ForTest(t *testing.T, db *sql.DB) {
 	require.NoError(t, err)
 	_, err = db.Exec(schemaV15)
 	require.NoError(t, err)
+	_, err = db.Exec(schemaV16)
+	require.NoError(t, err)
 	setSchemaTestVersion(t, db, schemaVersion)
 }
 
@@ -1517,6 +1519,10 @@ func installSchemaTextForTest(t *testing.T, db *sql.DB, schema string) {
 func setSchemaTestVersion(t *testing.T, db *sql.DB, version int) {
 	t.Helper()
 
+	if version < 16 {
+		_, err := db.Exec(`DROP TABLE IF EXISTS pr_development_attention_triggers`)
+		require.NoError(t, err)
+	}
 	if version < 15 {
 		_, err := db.Exec(`DROP TABLE IF EXISTS pr_development_attention_decision_runs`)
 		require.NoError(t, err)

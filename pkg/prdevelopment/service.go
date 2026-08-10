@@ -155,8 +155,9 @@ type ListRequest struct {
 	Cursor     string
 }
 
-// CaseSummary is the complete list projection. Provider state and SHAs are
-// snapshots captured at CapturedAt; they are never current authority.
+// CaseSummary is the immutable captured-case projection shared by list and
+// detail responses. Provider state and SHAs are snapshots captured at
+// CapturedAt; they are never current authority.
 type CaseSummary struct {
 	ID                   string                            `json:"id"`
 	Repository           string                            `json:"repository"`
@@ -175,6 +176,15 @@ type CaseSummary struct {
 	ReviewSubmittedAt    time.Time                         `json:"review_submitted_at"`
 	ReviewURL            string                            `json:"review_url"`
 	CapturedAt           time.Time                         `json:"captured_at"`
+}
+
+// CaseListSummary adds the only mutable list hint to the immutable captured
+// snapshot. Keeping it list-only prevents a detail read from silently
+// reporting a default false value without performing the authoritative
+// attention projection.
+type CaseListSummary struct {
+	CaseSummary
+	AttentionRequired bool `json:"attention_required"`
 }
 
 // CaseDetail adds only the captured evidence needed by the local workbench.
@@ -201,8 +211,8 @@ type Message struct {
 }
 
 type Page struct {
-	Cases      []CaseSummary `json:"cases"`
-	NextCursor string        `json:"next_cursor,omitempty"`
+	Cases      []CaseListSummary `json:"cases"`
+	NextCursor string            `json:"next_cursor,omitempty"`
 }
 
 type Detail struct {
@@ -283,9 +293,9 @@ func (service *Service) List(ctx context.Context, request ListRequest) (Page, er
 	if err != nil {
 		return Page{}, err
 	}
-	page := Page{Cases: make([]CaseSummary, len(stored.Cases))}
+	page := Page{Cases: make([]CaseListSummary, len(stored.Cases))}
 	for index := range stored.Cases {
-		page.Cases[index] = projectCaseSummary(stored.Cases[index])
+		page.Cases[index] = projectCaseListSummary(stored.Cases[index])
 	}
 	if stored.Next != nil {
 		page.NextCursor, err = encodeCaseCursor(*stored.Next, filter)
@@ -1135,6 +1145,15 @@ func projectCaseSummary(stored eventing.PRDevelopmentCase) CaseSummary {
 		ReviewSubmittedAt:    stored.ReviewSubmittedAt,
 		ReviewURL:            stored.ReviewURL,
 		CapturedAt:           stored.CreatedAt,
+	}
+}
+
+func projectCaseListSummary(
+	stored eventing.PRDevelopmentCaseListItem,
+) CaseListSummary {
+	return CaseListSummary{
+		CaseSummary:       projectCaseSummary(stored.PRDevelopmentCase),
+		AttentionRequired: stored.AttentionRequired,
 	}
 }
 

@@ -190,12 +190,24 @@ func (s *Store) AdmitPRDevelopmentAttentionDecisionRun(
 		if normalizeErr != nil {
 			return normalizeErr
 		}
-		current, loadErr := loadCurrentPRDevelopmentAttentionSnapshot(
+		current, loadErr := loadAnchoredPRDevelopmentAttentionSnapshot(
 			ctx,
 			conn,
-			key.CaseID,
+			prDevelopmentAttentionOccurrenceAnchor{
+				CaseID:              key.CaseID,
+				ReviewEntryID:       key.ReviewEntryID,
+				ReviewEntryHash:     key.ReviewEntryHash,
+				ConversationVersion: key.ConversationVersion,
+				TranscriptDigest:    expected.TranscriptDigest,
+			},
 		)
 		if loadErr != nil {
+			if errors.Is(loadErr, ErrPRDevelopmentAttentionSuperseded) {
+				return fmt.Errorf(
+					"%w: attention subject was superseded before admission",
+					ErrPRDevelopmentAttentionConflict,
+				)
+			}
 			return loadErr
 		}
 		if current.HighWater != expected {
@@ -385,10 +397,46 @@ func validateHistoricalPRDevelopmentAttentionDecisionRun(
 	return nil
 }
 
+type prDevelopmentAttentionOccurrenceAnchor struct {
+	CaseID              string
+	ReviewEntryID       string
+	ReviewEntryHash     string
+	ConversationVersion int64
+	TranscriptDigest    string
+}
+
 func loadCurrentPRDevelopmentAttentionSnapshot(
 	ctx context.Context,
 	queryer rowsQueryer,
 	caseID string,
+) (PRDevelopmentAttentionSnapshot, error) {
+	return loadPRDevelopmentAttentionSnapshot(ctx, queryer, caseID, nil)
+}
+
+func loadAnchoredPRDevelopmentAttentionSnapshot(
+	ctx context.Context,
+	queryer rowsQueryer,
+	anchor prDevelopmentAttentionOccurrenceAnchor,
+) (PRDevelopmentAttentionSnapshot, error) {
+	if !validPrefixedHexID(anchor.CaseID, prDevelopmentCaseIDPrefix) ||
+		!validPrefixedHexID(anchor.ReviewEntryID, prDevelopmentLedgerEntryIDPrefix) ||
+		!validPRDevelopmentHex(anchor.ReviewEntryHash, 64) ||
+		anchor.ConversationVersion < 0 ||
+		anchor.ConversationVersion > MaxPRDevelopmentMessagesPerCase ||
+		!validPRDevelopmentHex(anchor.TranscriptDigest, 64) {
+		return PRDevelopmentAttentionSnapshot{}, fmt.Errorf(
+			"%w: invalid automatic attention occurrence anchor",
+			ErrInvalidPRDevelopmentAttentionTrigger,
+		)
+	}
+	return loadPRDevelopmentAttentionSnapshot(ctx, queryer, anchor.CaseID, &anchor)
+}
+
+func loadPRDevelopmentAttentionSnapshot(
+	ctx context.Context,
+	queryer rowsQueryer,
+	caseID string,
+	anchor *prDevelopmentAttentionOccurrenceAnchor,
 ) (PRDevelopmentAttentionSnapshot, error) {
 	storedCase, err := getPRDevelopmentCaseRecord(ctx, queryer, caseID)
 	if err != nil {
@@ -397,6 +445,34 @@ func loadCurrentPRDevelopmentAttentionSnapshot(
 	conversation, err := loadPRDevelopmentConversation(ctx, queryer, caseID)
 	if err != nil {
 		return PRDevelopmentAttentionSnapshot{}, err
+	}
+	if anchor != nil {
+		if conversation.Conversation.Version < anchor.ConversationVersion ||
+			len(conversation.Conversation.Messages) < int(anchor.ConversationVersion) {
+			return PRDevelopmentAttentionSnapshot{}, fmt.Errorf(
+				"%w: captured conversation prefix is unavailable",
+				ErrPRDevelopmentAttentionTriggerConflict,
+			)
+		}
+		prefixDigest := emptyPRDevelopmentTranscriptDigest()
+		for _, message := range conversation.Conversation.Messages[:anchor.ConversationVersion] {
+			prefixDigest, err = extendPRDevelopmentTranscriptDigest(prefixDigest, message)
+			if err != nil {
+				return PRDevelopmentAttentionSnapshot{}, err
+			}
+		}
+		if prefixDigest != anchor.TranscriptDigest {
+			return PRDevelopmentAttentionSnapshot{}, fmt.Errorf(
+				"%w: captured conversation prefix changed",
+				ErrPRDevelopmentAttentionTriggerConflict,
+			)
+		}
+		conversation.Conversation.Messages = append(
+			[]PRDevelopmentMessage(nil),
+			conversation.Conversation.Messages[:anchor.ConversationVersion]...,
+		)
+		conversation.Conversation.Version = anchor.ConversationVersion
+		conversation.TranscriptDigest = prefixDigest
 	}
 	thread, err := loadPRDevelopmentThreadForCase(ctx, queryer, caseID)
 	if err != nil {
@@ -443,13 +519,31 @@ func loadCurrentPRDevelopmentAttentionSnapshot(
 	if err != nil {
 		return PRDevelopmentAttentionSnapshot{}, err
 	}
-	if owner.CaseID != caseID || len(owner.Attempts) == 0 {
+	if owner.CaseID != caseID {
+		if anchor != nil {
+			return PRDevelopmentAttentionSnapshot{}, fmt.Errorf(
+				"%w: a later provider-thread case owns the controller",
+				ErrPRDevelopmentAttentionSuperseded,
+			)
+		}
+		return PRDevelopmentAttentionSnapshot{}, fmt.Errorf(
+			"%w: selected case does not own the completed controller attempt",
+			ErrPRDevelopmentAttentionConflict,
+		)
+	}
+	if len(owner.Attempts) == 0 {
 		return PRDevelopmentAttentionSnapshot{}, fmt.Errorf(
 			"%w: selected case does not own the completed controller attempt",
 			ErrPRDevelopmentAttentionConflict,
 		)
 	}
 	targetAttempt := owner.Attempts[len(owner.Attempts)-1]
+	if anchor != nil && targetAttempt.ID != controller.CurrentAttemptID {
+		return PRDevelopmentAttentionSnapshot{}, fmt.Errorf(
+			"%w: a later repair attempt replaced the automatic attention occurrence",
+			ErrPRDevelopmentAttentionSuperseded,
+		)
+	}
 	if targetAttempt.Status != PRDevelopmentRepairCompleted ||
 		targetAttempt.ID != controller.CurrentAttemptID ||
 		targetAttempt.LeaseOwner != "" || targetAttempt.LeaseToken != "" ||
@@ -480,6 +574,13 @@ func loadCurrentPRDevelopmentAttentionSnapshot(
 		)
 	}
 	reviewEntry := ledger.Entries[len(ledger.Entries)-1]
+	if anchor != nil && (reviewEntry.ID != anchor.ReviewEntryID ||
+		reviewEntry.EntryHash != anchor.ReviewEntryHash) {
+		return PRDevelopmentAttentionSnapshot{}, fmt.Errorf(
+			"%w: a later development review replaced the automatic attention occurrence",
+			ErrPRDevelopmentAttentionSuperseded,
+		)
+	}
 	if reviewEntry.Kind != PRDevelopmentLedgerReview ||
 		reviewEntry.ReviewOutcome != PRDevelopmentLedgerReviewAttentionRequired ||
 		reviewEntry.AttemptID != targetAttempt.ID || reviewEntry.CaseID != caseID ||

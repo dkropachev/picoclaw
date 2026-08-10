@@ -105,6 +105,10 @@ type attentionRuntimeUse func(
 	session.SessionStore,
 ) error
 
+type attentionRuntimeSnapshotRefresh func(
+	context.Context,
+) (eventing.PRDevelopmentAttentionSnapshot, error)
+
 func newAttentionContextLoader(
 	store attentionContextStore,
 	evidence AttentionEvidenceStore,
@@ -218,8 +222,52 @@ func (loader *attentionContextLoader) withRuntimeContext(
 	agentID string,
 	use attentionRuntimeUse,
 ) error {
+	return loader.withRuntimeContextRefresh(
+		ctx,
+		expected,
+		agentID,
+		func(refreshCtx context.Context) (eventing.PRDevelopmentAttentionSnapshot, error) {
+			current, err := loader.store.GetPRDevelopmentAttentionSnapshot(
+				refreshCtx,
+				expected.Case.ID,
+			)
+			if err != nil {
+				return eventing.PRDevelopmentAttentionSnapshot{}, attentionContextFailure(
+					refreshCtx,
+					"revalidate attention snapshot",
+					err,
+				)
+			}
+			return current, nil
+		},
+		use,
+	)
+}
+
+// withAnchoredRuntimeContext preserves the immutable occurrence snapshot even
+// when later conversation messages exist. Its caller-supplied refresh runs
+// inside the runtime generation and per-case lock; the automatic trigger queue
+// therefore rejects a superseded occurrence before Git/session projection.
+func (loader *attentionContextLoader) withAnchoredRuntimeContext(
+	ctx context.Context,
+	expected eventing.PRDevelopmentAttentionSnapshot,
+	agentID string,
+	refresh attentionRuntimeSnapshotRefresh,
+	use attentionRuntimeUse,
+) error {
+	return loader.withRuntimeContextRefresh(ctx, expected, agentID, refresh, use)
+}
+
+func (loader *attentionContextLoader) withRuntimeContextRefresh(
+	ctx context.Context,
+	expected eventing.PRDevelopmentAttentionSnapshot,
+	agentID string,
+	refresh attentionRuntimeSnapshotRefresh,
+	use attentionRuntimeUse,
+) error {
 	if loader == nil || loader.store == nil || loader.acquireRuntime == nil ||
-		loader.locks == nil || use == nil || !routing.IsCanonicalAgentID(agentID) ||
+		loader.locks == nil || refresh == nil || use == nil ||
+		!routing.IsCanonicalAgentID(agentID) ||
 		agentID != expected.Controller.AgentID || agentID != expected.OwnerSession.AgentID {
 		return ErrUnavailable
 	}
@@ -252,14 +300,11 @@ func (loader *attentionContextLoader) withRuntimeContext(
 		return err
 	}
 	defer releaseCase()
-	current, err := loader.store.GetPRDevelopmentAttentionSnapshot(
-		runtimeCtx,
-		expected.Case.ID,
-	)
+	current, err := refresh(runtimeCtx)
 	if err != nil {
-		return attentionContextFailure(runtimeCtx, "revalidate attention snapshot", err)
+		return err
 	}
-	if !reflect.DeepEqual(current.HighWater, expected.HighWater) {
+	if !reflect.DeepEqual(current, expected) {
 		return workflows.ErrRunAdmissionConflict
 	}
 	if err = validateAttentionSnapshot(current); err != nil {

@@ -23,6 +23,10 @@ var ErrAttentionSubjectTooLarge = errors.New(
 	"pull request development attention subject exceeds the workflow gate limit",
 )
 
+var errPinnedAttentionSubjectDrift = errors.New(
+	"pinned pull request development attention subject is no longer reconstructable",
+)
+
 var prDevelopmentAttentionDecisionPattern = regexp.MustCompile(
 	`^[a-z][a-z0-9._-]{0,127}$`,
 )
@@ -77,6 +81,13 @@ type AttentionLaunchResult struct {
 	Status              string `json:"status,omitempty"`
 	Existing            bool   `json:"existing,omitempty"`
 	Noop                bool   `json:"noop,omitempty"`
+}
+
+// preparedAttentionPolicy is the exact canonical policy envelope persisted by
+// an automatic trigger. Keeping it opaque prevents worker code from
+// reconstructing or partially trusting policy fields.
+type preparedAttentionPolicy struct {
+	canonical []byte
 }
 
 func NewAttentionLauncher(config AttentionLauncherConfig) (*AttentionLauncher, error) {
@@ -201,6 +212,8 @@ func (launcher *AttentionLauncher) Launch(
 				policy,
 				current,
 				rawStore,
+				"",
+				true,
 			)
 			return launchErr
 		},
@@ -211,6 +224,380 @@ func (launcher *AttentionLauncher) Launch(
 	return result, nil
 }
 
+func (launcher *AttentionLauncher) available() bool {
+	return launcher != nil && launcher.store != nil && launcher.executor != nil &&
+		launcher.runs != nil && launcher.policies != nil && launcher.context != nil
+}
+
+// prepareAttentionTriggerPolicy captures only trusted configured policy for
+// the exact occurrence snapshot. Subject construction is deliberately a later
+// stage so the canonical policy can be pinned before any Git/session/model
+// effect.
+func (launcher *AttentionLauncher) prepareAttentionTriggerPolicy(
+	ctx context.Context,
+	trigger eventing.PRDevelopmentAttentionTrigger,
+	snapshot eventing.PRDevelopmentAttentionSnapshot,
+) (preparedAttentionPolicy, error) {
+	if !launcher.available() {
+		return preparedAttentionPolicy{}, ErrUnavailable
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := validateAttentionTriggerSnapshotAnchor(trigger, snapshot); err != nil {
+		return preparedAttentionPolicy{}, err
+	}
+	prepared, err := sharedattention.PreparePolicy(
+		ctx,
+		launcher.policies,
+		sharedattention.PolicySelector{
+			Repository:    snapshot.Case.Repository,
+			DecisionPoint: trigger.DecisionPoint,
+		},
+	)
+	if err != nil {
+		return preparedAttentionPolicy{}, sanitizeAttentionLaunchError(ctx, err)
+	}
+	return preparedAttentionPolicy{canonical: prepared.Canonical()}, nil
+}
+
+func decodePreparedAttentionPolicy(
+	prepared preparedAttentionPolicy,
+) (sharedattention.PreparedPolicy, error) {
+	policy, err := sharedattention.DecodePreparedPolicy(prepared.canonical)
+	if err != nil || len(policy.Canonical()) == 0 || policy.DecisionRevision() == "" {
+		return sharedattention.PreparedPolicy{}, ErrUnavailable
+	}
+	return policy, nil
+}
+
+// findPinnedAttentionTrigger resolves zero-only policy and historical exact
+// workflow links from immutable trigger fields alone. It must run before any
+// occurrence snapshot or local context reload on every pinned retry.
+func (launcher *AttentionLauncher) findPinnedAttentionTrigger(
+	ctx context.Context,
+	trigger eventing.PRDevelopmentAttentionTrigger,
+	prepared preparedAttentionPolicy,
+) (AttentionLaunchResult, bool, error) {
+	if !launcher.available() {
+		return AttentionLaunchResult{}, false, ErrUnavailable
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	policy, err := decodePreparedAttentionPolicy(prepared)
+	if err != nil || policy.DecisionRevision() != trigger.PolicyRevision ||
+		validateAttentionTriggerIdentity(trigger) != nil {
+		return AttentionLaunchResult{}, false, ErrUnavailable
+	}
+	base := attentionLaunchResultForTrigger(trigger)
+	if policy.IsNoop() {
+		if trigger.SubjectRevision != "" {
+			return AttentionLaunchResult{}, false, ErrUnavailable
+		}
+		compilation, compileErr := workflows.CompileGateWorkflow(
+			sharedattention.WorkflowName,
+			policy.EffectiveGates(),
+			nil,
+		)
+		if compileErr != nil || compilation == nil || !compilation.Noop ||
+			compilation.Workflow != nil || compilation.PrivateRoot != nil {
+			return AttentionLaunchResult{}, false, ErrUnavailable
+		}
+		base.Noop = true
+		return base, true, nil
+	}
+	if !validAttentionRevision(trigger.SubjectRevision) {
+		return AttentionLaunchResult{}, false, ErrUnavailable
+	}
+	key := attentionDecisionKeyForTrigger(trigger)
+	runner, canonicalKey, runnerErr := launcher.privateAttentionRunner(
+		key,
+		eventing.PRDevelopmentAttentionHighWater{},
+	)
+	if runnerErr != nil {
+		return AttentionLaunchResult{}, false, runnerErr
+	}
+	existing, found, findErr := runner.FindExisting(ctx, canonicalKey)
+	if findErr != nil {
+		return AttentionLaunchResult{}, false, sanitizeAttentionLaunchError(ctx, findErr)
+	}
+	if !found {
+		return AttentionLaunchResult{}, false, nil
+	}
+	return projectAttentionLaunchResult(base, existing), true, nil
+}
+
+// prepareAttentionTriggerSubject computes the exact active-policy subject
+// revision without projecting a working session or invoking a workflow/model.
+func (launcher *AttentionLauncher) prepareAttentionTriggerSubject(
+	ctx context.Context,
+	trigger eventing.PRDevelopmentAttentionTrigger,
+	snapshot eventing.PRDevelopmentAttentionSnapshot,
+	prepared preparedAttentionPolicy,
+	refresh attentionRuntimeSnapshotRefresh,
+) (string, error) {
+	if !launcher.available() {
+		return "", ErrUnavailable
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	policy, err := decodePreparedAttentionPolicy(prepared)
+	if err != nil || policy.DecisionRevision() != trigger.PolicyRevision ||
+		policy.IsNoop() || trigger.SubjectRevision != "" {
+		return "", ErrUnavailable
+	}
+	if err = validateAttentionTriggerSnapshotAnchor(trigger, snapshot); err != nil {
+		return "", err
+	}
+	if err = validateAttentionWorkingAgent(policy, snapshot); err != nil {
+		return "", err
+	}
+	if launcher.acquireRuntime == nil {
+		return "", ErrUnavailable
+	}
+	var subjectRevision string
+	err = launcher.context.withAnchoredRuntimeContext(
+		ctx,
+		snapshot,
+		snapshot.Controller.AgentID,
+		refresh,
+		func(
+			runtimeCtx context.Context,
+			current eventing.PRDevelopmentAttentionSnapshot,
+			_ session.SessionStore,
+		) error {
+			loaded, loadErr := launcher.context.load(runtimeCtx, current)
+			if loadErr != nil {
+				return loadErr
+			}
+			subjectRevision = loaded.subjectRevision
+			return nil
+		},
+	)
+	if err != nil {
+		return "", sanitizeAttentionLaunchError(ctx, err)
+	}
+	if !validAttentionRevision(subjectRevision) {
+		return "", ErrUnavailable
+	}
+	return subjectRevision, nil
+}
+
+// launchPinnedAttentionTrigger launches a fully pinned occurrence. Historical
+// lookup happens first; only a genuinely new active decision reloads and
+// revalidates the anchored subject.
+func (launcher *AttentionLauncher) launchPinnedAttentionTrigger(
+	ctx context.Context,
+	trigger eventing.PRDevelopmentAttentionTrigger,
+	snapshot eventing.PRDevelopmentAttentionSnapshot,
+	prepared preparedAttentionPolicy,
+	refresh attentionRuntimeSnapshotRefresh,
+) (AttentionLaunchResult, error) {
+	if existing, found, err := launcher.findPinnedAttentionTrigger(
+		ctx,
+		trigger,
+		prepared,
+	); err != nil || found {
+		return existing, err
+	}
+	policy, err := decodePreparedAttentionPolicy(prepared)
+	if err != nil || policy.IsNoop() ||
+		policy.DecisionRevision() != trigger.PolicyRevision ||
+		!validAttentionRevision(trigger.SubjectRevision) {
+		return AttentionLaunchResult{}, ErrUnavailable
+	}
+	if err = validateAttentionTriggerSnapshotAnchor(trigger, snapshot); err != nil {
+		return AttentionLaunchResult{}, err
+	}
+	if err = validateAttentionWorkingAgent(policy, snapshot); err != nil {
+		return AttentionLaunchResult{}, err
+	}
+	if launcher.acquireRuntime == nil {
+		return AttentionLaunchResult{}, ErrUnavailable
+	}
+	request := AttentionLaunchRequest{
+		CaseID:        trigger.CaseID,
+		DecisionPoint: trigger.DecisionPoint,
+	}
+	selector := sharedattention.PolicySelector{
+		Repository:    snapshot.Case.Repository,
+		DecisionPoint: trigger.DecisionPoint,
+	}
+	base := attentionLaunchResultForTrigger(trigger)
+	var result AttentionLaunchResult
+	err = launcher.context.withAnchoredRuntimeContext(
+		ctx,
+		snapshot,
+		snapshot.Controller.AgentID,
+		refresh,
+		func(
+			runtimeCtx context.Context,
+			current eventing.PRDevelopmentAttentionSnapshot,
+			rawStore session.SessionStore,
+		) error {
+			var launchErr error
+			result, launchErr = launcher.launchPreparedAttention(
+				runtimeCtx,
+				base,
+				request,
+				selector,
+				policy,
+				current,
+				rawStore,
+				trigger.SubjectRevision,
+				false,
+			)
+			return launchErr
+		},
+	)
+	if err != nil {
+		return result, sanitizeAttentionLaunchError(ctx, err)
+	}
+	return result, nil
+}
+
+func (launcher *AttentionLauncher) privateAttentionRunner(
+	key eventing.PRDevelopmentAttentionDecisionKey,
+	highWater eventing.PRDevelopmentAttentionHighWater,
+) (*sharedattention.PrivateRunner, string, error) {
+	canonicalKey, err := canonicalPRDevelopmentAttentionDecisionKey(key)
+	if err != nil {
+		return nil, "", ErrUnavailable
+	}
+	runID, err := sharedattention.RunIDForDecisionKey(canonicalKey)
+	if err != nil {
+		return nil, "", ErrUnavailable
+	}
+	binding := &prDevelopmentAttentionDecisionBinding{
+		store:         launcher.store,
+		key:           key,
+		highWater:     highWater,
+		canonicalKey:  canonicalKey,
+		expectedRunID: runID,
+	}
+	runner, err := sharedattention.NewPrivateRunner(sharedattention.PrivateRunnerConfig{
+		Executor:  launcher.executor,
+		Runs:      launcher.runs,
+		Policies:  launcher.policies,
+		Decisions: binding,
+	})
+	if err != nil {
+		return nil, "", ErrUnavailable
+	}
+	return runner, canonicalKey, nil
+}
+
+func validateAttentionWorkingAgent(
+	policy sharedattention.PreparedPolicy,
+	snapshot eventing.PRDevelopmentAttentionSnapshot,
+) error {
+	for _, gate := range policy.EffectiveGates() {
+		if gate.Kind == workflows.GateAIWorkingContext &&
+			(gate.AgentID != snapshot.Controller.AgentID ||
+				gate.AgentID != snapshot.OwnerSession.AgentID) {
+			return eventing.ErrInvalidPRDevelopmentAttentionTrigger
+		}
+	}
+	return nil
+}
+
+// validatePinnedAttentionCompilation classifies immutable policy/subject
+// composition failures before the shared runner can enter admission. The
+// runner recompiles the same canonical inputs, but every later ambiguous
+// create boundary is then represented by its dedicated uncertainty sentinel.
+func validatePinnedAttentionCompilation(
+	policy sharedattention.PreparedPolicy,
+	subject map[string]any,
+) error {
+	compilation, err := workflows.CompileGateWorkflow(
+		sharedattention.WorkflowName,
+		policy.EffectiveGates(),
+		subject,
+	)
+	if err != nil || compilation == nil || compilation.Noop ||
+		compilation.Workflow == nil || compilation.PrivateRoot == nil {
+		return eventing.ErrInvalidPRDevelopmentAttentionTrigger
+	}
+	workingAgentID := policy.WorkingContextAgentID()
+	if workingAgentID == "" {
+		if compilation.RequiresSession || compilation.RequiredSessionAgentID != "" {
+			return eventing.ErrInvalidPRDevelopmentAttentionTrigger
+		}
+		return nil
+	}
+	if !compilation.RequiresSession ||
+		compilation.RequiredSessionAgentID != workingAgentID {
+		return eventing.ErrInvalidPRDevelopmentAttentionTrigger
+	}
+	return nil
+}
+
+func validateAttentionTriggerSnapshotAnchor(
+	trigger eventing.PRDevelopmentAttentionTrigger,
+	snapshot eventing.PRDevelopmentAttentionSnapshot,
+) error {
+	if validateAttentionTriggerIdentity(trigger) != nil ||
+		validateAttentionSnapshot(snapshot) != nil ||
+		trigger.CaseID != snapshot.Case.ID ||
+		trigger.ReviewEntryID != snapshot.ReviewEntry.ID ||
+		trigger.ReviewEntryHash != snapshot.ReviewEntry.EntryHash ||
+		trigger.ConversationVersion != snapshot.Conversation.Version ||
+		trigger.TranscriptDigest != snapshot.HighWater.TranscriptDigest {
+		return ErrUnavailable
+	}
+	return nil
+}
+
+func validateAttentionTriggerIdentity(
+	trigger eventing.PRDevelopmentAttentionTrigger,
+) error {
+	if !validCaseID(trigger.CaseID) ||
+		!validDevelopmentID(trigger.ReviewEntryID, "pdle_") ||
+		!validControllerSHA256(trigger.ReviewEntryHash) ||
+		trigger.ConversationVersion < 0 ||
+		!validControllerSHA256(trigger.TranscriptDigest) ||
+		trigger.DecisionPoint != strings.TrimSpace(trigger.DecisionPoint) ||
+		len(trigger.DecisionPoint) > maximumAttentionDecisionPointBytes ||
+		!prDevelopmentAttentionDecisionPattern.MatchString(trigger.DecisionPoint) {
+		return ErrUnavailable
+	}
+	return nil
+}
+
+func validAttentionRevision(value string) bool {
+	return strings.HasPrefix(value, "sha256:") &&
+		validControllerSHA256(strings.TrimPrefix(value, "sha256:"))
+}
+
+func attentionDecisionKeyForTrigger(
+	trigger eventing.PRDevelopmentAttentionTrigger,
+) eventing.PRDevelopmentAttentionDecisionKey {
+	return eventing.PRDevelopmentAttentionDecisionKey{
+		CaseID:              trigger.CaseID,
+		ReviewEntryID:       trigger.ReviewEntryID,
+		ReviewEntryHash:     trigger.ReviewEntryHash,
+		ConversationVersion: trigger.ConversationVersion,
+		SubjectRevision:     trigger.SubjectRevision,
+		DecisionPoint:       trigger.DecisionPoint,
+		PolicyRevision:      trigger.PolicyRevision,
+	}
+}
+
+func attentionLaunchResultForTrigger(
+	trigger eventing.PRDevelopmentAttentionTrigger,
+) AttentionLaunchResult {
+	return AttentionLaunchResult{
+		CaseID:              trigger.CaseID,
+		ReviewEntryID:       trigger.ReviewEntryID,
+		ConversationVersion: trigger.ConversationVersion,
+		DecisionPoint:       trigger.DecisionPoint,
+		PolicyRevision:      trigger.PolicyRevision,
+		SubjectRevision:     trigger.SubjectRevision,
+	}
+}
+
 func (launcher *AttentionLauncher) launchPreparedAttention(
 	ctx context.Context,
 	base AttentionLaunchResult,
@@ -219,11 +606,22 @@ func (launcher *AttentionLauncher) launchPreparedAttention(
 	policy sharedattention.PreparedPolicy,
 	snapshot eventing.PRDevelopmentAttentionSnapshot,
 	rawStore session.SessionStore,
+	expectedSubjectRevision string,
+	revalidateLive bool,
 ) (AttentionLaunchResult, error) {
 	workingAgentID := policy.WorkingContextAgentID()
 	loaded, err := launcher.context.load(ctx, snapshot)
 	if err != nil {
 		return AttentionLaunchResult{}, fmt.Errorf("load exact attention context: %w", err)
+	}
+	if expectedSubjectRevision != "" &&
+		loaded.subjectRevision != expectedSubjectRevision {
+		return AttentionLaunchResult{}, errPinnedAttentionSubjectDrift
+	}
+	if expectedSubjectRevision != "" {
+		if err = validatePinnedAttentionCompilation(policy, loaded.subject); err != nil {
+			return AttentionLaunchResult{}, err
+		}
 	}
 	base.SubjectRevision = loaded.subjectRevision
 	key := eventing.PRDevelopmentAttentionDecisionKey{
@@ -273,7 +671,7 @@ func (launcher *AttentionLauncher) launchPreparedAttention(
 			DecisionKey:     canonicalKey,
 			Policy:          policy,
 			Selector:        selector,
-			RevalidateLive:  true,
+			RevalidateLive:  revalidateLive,
 			Subject:         loaded.subject,
 			ReadOnlySession: readOnly,
 		})
@@ -375,7 +773,7 @@ func (binding *prDevelopmentAttentionDecisionBinding) Find(
 	}
 	if link.Key != binding.key || link.RunID != binding.expectedRunID ||
 		link.CreatedAt.IsZero() {
-		return "", false, workflows.ErrRunAdmissionUnavailable
+		return "", false, sharedattention.ErrPrivateRunAdmissionUncertain
 	}
 	return link.RunID, true, nil
 }
@@ -475,6 +873,12 @@ func sanitizeAttentionLaunchError(ctx context.Context, err error) error {
 		return ErrAttentionSubjectTooLarge
 	case errors.Is(err, ErrAIContextCompactionRequired):
 		return ErrAIContextCompactionRequired
+	case errors.Is(err, errPinnedAttentionSubjectDrift):
+		return errPinnedAttentionSubjectDrift
+	case errors.Is(err, eventing.ErrInvalidPRDevelopmentAttentionTrigger):
+		return eventing.ErrInvalidPRDevelopmentAttentionTrigger
+	case errors.Is(err, eventing.ErrPRDevelopmentAttentionSuperseded):
+		return eventing.ErrPRDevelopmentAttentionSuperseded
 	default:
 		return ErrUnavailable
 	}

@@ -43,6 +43,89 @@ const prDevelopmentCaseColumns = `
 	review_commit_sha, review_submitted_at, review_url, feedback,
 	created_at, updated_at, capture_hash`
 
+// prDevelopmentCaseAttentionRequiredColumn is the one coarse mutable list
+// projection. It intentionally stays inside the list query: the browser sees
+// only a boolean, while trigger identity, lifecycle, policy, workflow-run, and
+// lease state remain private. The relational checks mirror the authoritative
+// current attention snapshot without loading the private workflow store.
+const prDevelopmentCaseAttentionRequiredColumn = `
+	CASE WHEN EXISTS (
+		SELECT 1
+		FROM pr_development_thread_cases AS membership
+		JOIN pr_development_threads AS development_thread
+		  ON development_thread.id = membership.thread_id
+		 AND development_thread.identity_kind = 'provider'
+		JOIN pr_development_thread_controllers AS controller
+		  ON controller.thread_id = membership.thread_id
+		JOIN pr_development_repair_sessions AS owner_session
+		  ON owner_session.id = controller.owner_session_id
+		 AND owner_session.case_id = membership.case_id
+		JOIN pr_development_repair_attempts AS attempt
+		  ON attempt.id = controller.current_attempt_id
+		 AND attempt.session_id = owner_session.id
+		JOIN pr_development_ledger_entries AS review
+		  ON review.thread_id = membership.thread_id
+		 AND review.ordinal = (
+			SELECT MAX(tail.ordinal)
+			FROM pr_development_ledger_entries AS tail
+			WHERE tail.thread_id = membership.thread_id
+		 )
+		JOIN pr_development_attempt_review_fences AS fence
+		  ON fence.attempt_id = attempt.id
+		 AND fence.controller_id = controller.id
+		 AND fence.thread_id = membership.thread_id
+		JOIN pr_development_attention_triggers AS attention
+		  ON attention.review_entry_id = review.id
+		 AND attention.review_entry_hash = review.entry_hash
+		 AND attention.case_id = membership.case_id
+		JOIN pr_development_conversations AS conversation
+		  ON conversation.case_id = membership.case_id
+		 AND conversation.version >= attention.conversation_version
+		WHERE membership.case_id = pr_development_cases.id
+		  AND review.kind = 'review'
+		  AND review.case_id = membership.case_id
+		  AND review.case_ordinal = membership.ordinal
+		  AND review.attempt_id = attempt.id
+		  AND review.fence_ordinal = fence.ordinal
+		  AND review.fence_hash = fence.fence_hash
+		  AND review.review_outcome = 'attention_required'
+		  AND attention.decision_point = 'pr_development.review_attention_required'
+		  AND attention.status IN ('pending', 'claimed', 'delivered')
+		  AND controller.phase = 'ready'
+		  AND controller.lease_kind = ''
+		  AND controller.lease_owner = ''
+		  AND controller.lease_token = ''
+		  AND controller.lease_until IS NULL
+		  AND controller.mutation_reservation_key = ''
+		  AND controller.fence_count = fence.ordinal + 1
+		  AND controller.fences_digest = fence.fence_hash
+		  AND controller.line_version = fence.line_version
+		  AND attempt.status = 'completed'
+		  AND attempt.lease_owner = ''
+		  AND attempt.lease_token = ''
+		  AND attempt.lease_until IS NULL
+		  AND attempt.ordinal = (
+			SELECT MAX(owner_attempt.ordinal)
+			FROM pr_development_repair_attempts AS owner_attempt
+			WHERE owner_attempt.session_id = owner_session.id
+		  )
+		  AND fence.reviewed_at IS NOT NULL
+		  AND (
+			attention.status <> 'delivered' OR EXISTS (
+				SELECT 1
+				FROM pr_development_attention_decision_runs AS decision_run
+				WHERE decision_run.case_id = attention.case_id
+				  AND decision_run.review_entry_id = attention.review_entry_id
+				  AND decision_run.review_entry_hash = attention.review_entry_hash
+				  AND decision_run.conversation_version = attention.conversation_version
+				  AND decision_run.subject_revision = attention.subject_revision
+				  AND decision_run.decision_point = attention.decision_point
+				  AND decision_run.policy_revision = attention.policy_revision
+				  AND decision_run.run_id = attention.run_id
+			)
+		  )
+	) THEN 1 ELSE 0 END`
+
 type storedPRDevelopmentCase struct {
 	Case        PRDevelopmentCase
 	CaptureHash string
@@ -396,14 +479,13 @@ func (s *Store) ListPRDevelopmentCases(
 		ctx,
 		s,
 		plan,
-		func(scanner rowScanner) (PRDevelopmentCase, error) {
-			stored, scanErr := scanPRDevelopmentCase(scanner)
-			return stored.Case, scanErr
+		func(scanner rowScanner) (PRDevelopmentCaseListItem, error) {
+			return scanPRDevelopmentCaseListItem(scanner)
 		},
-		func(developmentCase PRDevelopmentCase) PRDevelopmentCaseCursor {
+		func(item PRDevelopmentCaseListItem) PRDevelopmentCaseCursor {
 			return PRDevelopmentCaseCursor{
-				UpdatedAt: developmentCase.UpdatedAt,
-				ID:        developmentCase.ID,
+				UpdatedAt: item.UpdatedAt,
+				ID:        item.ID,
 			}
 		},
 		listErrorContext{
@@ -463,7 +545,7 @@ func buildPRDevelopmentCaseListPlan(
 		limit = maxPRDevelopmentListItems
 	}
 	return buildListPlan(
-		prDevelopmentCaseColumns,
+		prDevelopmentCaseColumns+", "+prDevelopmentCaseAttentionRequiredColumn,
 		"pr_development_cases",
 		"updated_at",
 		[]listFilter{
@@ -561,6 +643,32 @@ func getPRDevelopmentCaseRecord(
 }
 
 func scanPRDevelopmentCase(scanner rowScanner) (storedPRDevelopmentCase, error) {
+	return scanPRDevelopmentCaseWithTrailing(scanner)
+}
+
+func scanPRDevelopmentCaseListItem(
+	scanner rowScanner,
+) (PRDevelopmentCaseListItem, error) {
+	var attentionRequired int64
+	stored, err := scanPRDevelopmentCaseWithTrailing(scanner, &attentionRequired)
+	if err != nil {
+		return PRDevelopmentCaseListItem{}, err
+	}
+	if attentionRequired != 0 && attentionRequired != 1 {
+		return PRDevelopmentCaseListItem{}, errors.New(
+			"stored development attention-required projection is invalid",
+		)
+	}
+	return PRDevelopmentCaseListItem{
+		PRDevelopmentCase: stored.Case,
+		AttentionRequired: attentionRequired == 1,
+	}, nil
+}
+
+func scanPRDevelopmentCaseWithTrailing(
+	scanner rowScanner,
+	trailing ...any,
+) (storedPRDevelopmentCase, error) {
 	var (
 		stored                storedPRDevelopmentCase
 		pullNumber            int64
@@ -568,7 +676,8 @@ func scanPRDevelopmentCase(scanner rowScanner) (storedPRDevelopmentCase, error) 
 		reviewSubmittedAt     int64
 		createdAt, updatedAt  int64
 	)
-	err := scanner.Scan(
+	destinations := make([]any, 0, 33+len(trailing))
+	destinations = append(destinations,
 		&stored.Case.ID,
 		&stored.Case.EventID,
 		&stored.Case.DispatchID,
@@ -603,6 +712,8 @@ func scanPRDevelopmentCase(scanner rowScanner) (storedPRDevelopmentCase, error) 
 		&updatedAt,
 		&stored.CaptureHash,
 	)
+	destinations = append(destinations, trailing...)
+	err := scanner.Scan(destinations...)
 	if err != nil {
 		return storedPRDevelopmentCase{}, err
 	}

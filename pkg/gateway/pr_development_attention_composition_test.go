@@ -56,6 +56,9 @@ func TestSetupEventAutomationComposesProductionPRAttentionLauncher(t *testing.T)
 	if service == nil || service.prDevelopmentAttention == nil {
 		t.Fatal("workflow-enabled production service omitted PR-development attention launcher")
 	}
+	if service.prDevelopmentBridge == nil {
+		t.Fatal("production service omitted PR-development attention chat bridge")
+	}
 	if service.prLocalCI == nil || service.prLocalCI.evidence == nil {
 		t.Fatal("PR-development attention launcher has no local CI evidence runtime")
 	}
@@ -127,6 +130,9 @@ func TestEventAutomationPRAttentionLauncherIsInertAndWorkflowGated(t *testing.T)
 			if got := service.prDevelopmentAttention != nil; got != test.wantLauncher {
 				t.Fatalf("PR attention launcher configured = %t, want %t", got, test.wantLauncher)
 			}
+			if service.prDevelopmentBridge == nil {
+				t.Fatal("PR attention projection bridge must remain available read-only")
+			}
 			if !test.workflowsEnabled && service.prLocalCI != nil {
 				t.Fatal("workflow-disabled attention composition opened local CI evidence")
 			}
@@ -143,6 +149,79 @@ func TestEventAutomationPRAttentionLauncherIsInertAndWorkflowGated(t *testing.T)
 				)
 			}
 		})
+	}
+}
+
+func TestEventAutomationPRAttentionWorkerUsesGenerationAndDrains(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := eventAutomationTestConfig(
+		workspace,
+		filepath.Join(workspace, "eventing", "events.db"),
+		true,
+		true,
+	)
+	policies, err := reviews.NewConfigAttentionPolicySource(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type runtimeMarker struct{}
+	entered := make(chan struct{})
+	exited := make(chan struct{})
+	runtime := eventReviewRuntime{
+		attentionPolicies:              policies,
+		prDevelopmentAttentionPolicies: policies,
+		prDevelopmentAttentionWorkspaces: func() (
+			prdevelopment.AttentionReviewWorkspace,
+			error,
+		) {
+			return nil, errors.New("attention process seam must not read Git")
+		},
+		acquirePRDevelopmentAttentionRuntime: func(
+			ctx context.Context,
+			_ string,
+		) (context.Context, session.SessionStore, func(), error) {
+			return ctx, nil, func() {}, errors.New(
+				"attention process seam must not acquire its inner runtime",
+			)
+		},
+		prDevelopmentAttentionProcess: func(ctx context.Context) (bool, error) {
+			if marker, _ := ctx.Value(runtimeMarker{}).(bool); !marker {
+				return false, errors.New("attention worker has no runtime generation")
+			}
+			close(entered)
+			<-ctx.Done()
+			close(exited)
+			return false, ctx.Err()
+		},
+	}
+	acquire := func(ctx context.Context) (context.Context, func(), error) {
+		return context.WithValue(ctx, runtimeMarker{}, true), func() {}, nil
+	}
+	service, err := newEventAutomationServiceWithReviews(
+		context.Background(),
+		cfg,
+		&workflows.Executor{WorkspaceDir: workspace},
+		nil,
+		acquire,
+		runtime,
+	)
+	if err != nil {
+		t.Fatalf("newEventAutomationServiceWithReviews() error = %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("PR-development attention worker did not enter its runtime generation")
+	}
+	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err = service.Close(closeCtx); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	select {
+	case <-exited:
+	default:
+		t.Fatal("Close() returned before the PR-development attention worker joined")
 	}
 }
 

@@ -29,18 +29,10 @@ import { useTranslation } from "react-i18next"
 import {
   REVIEW_ATTENTION_RESPONSE_MAXIMUM_BYTES,
   ReviewAttentionAPIError,
-  type ReviewAttentionProjection,
-  type ReviewAttentionStatus,
-  type ReviewAttentionTurn,
   getReviewAttention,
   respondToReviewAttention,
 } from "@/api/review-attention"
-import {
-  type ExactJSONValue,
-  isExactJSONObject,
-  stringifyExactJSON,
-  trimGoSpace,
-} from "@/api/review-attention-json"
+import { trimGoSpace } from "@/api/review-attention-json"
 import {
   ReviewAPIError,
   type ReviewCase,
@@ -62,6 +54,13 @@ import {
   updateReviewFinding,
 } from "@/api/reviews"
 import { PageHeader } from "@/components/page-header"
+import { AttentionConversation } from "@/components/reviews/attention-conversation"
+import {
+  attentionProjectionContainsResponse,
+  attentionProjectionIsVisible,
+  attentionProjectionPollInterval,
+  findActionableAttentionTurn,
+} from "@/components/reviews/attention-conversation-model"
 import { ReviewWorkbenchTabs } from "@/components/reviews/review-workbench-tabs"
 import {
   AlertDialog,
@@ -1514,7 +1513,7 @@ function ReviewConversation({
     enabled: attentionEnabled,
     retry: false,
     refetchInterval: (query) =>
-      attentionProjectionPolls(query.state.data) ? 1500 : false,
+      attentionProjectionPollInterval(query.state.data),
   })
   const attention = attentionQuery.data
   const actionableTurn = findActionableAttentionTurn(attention)
@@ -1652,13 +1651,14 @@ function ReviewConversation({
         <Badge variant="outline">{detail.messages.length}</Badge>
       </div>
       {showAttention ? (
-        <ReviewAttentionConversation
+        <AttentionConversation
           projection={attention}
           loading={attentionQuery.isPending}
           loadError={attentionQuery.error}
           actionError={attentionError}
           response={attentionResponse}
           pending={attentionPending}
+          maximumResponseBytes={REVIEW_ATTENTION_RESPONSE_MAXIMUM_BYTES}
           attentionInputRef={attentionInputRef}
           recoveryButtonRef={recoveryButtonRef}
           onResponseChange={setAttentionResponse}
@@ -1783,297 +1783,6 @@ function ReviewConversation({
         ) : null}
       </form>
     </section>
-  )
-}
-
-function ReviewAttentionConversation({
-  projection,
-  loading,
-  loadError,
-  actionError,
-  response,
-  pending,
-  attentionInputRef,
-  recoveryButtonRef,
-  onResponseChange,
-  onSubmit,
-  onRetryLoad,
-  onRetryContinuation,
-}: {
-  projection?: ReviewAttentionProjection
-  loading: boolean
-  loadError: unknown
-  actionError?: string
-  response: string
-  pending: boolean
-  attentionInputRef: React.RefObject<HTMLTextAreaElement | null>
-  recoveryButtonRef: React.RefObject<HTMLButtonElement | null>
-  onResponseChange: (response: string) => void
-  onSubmit: (event: FormEvent) => void
-  onRetryLoad: () => void
-  onRetryContinuation: () => void
-}) {
-  const { t } = useTranslation()
-  const actionable = findActionableAttentionTurn(projection)
-  const waiting = actionable?.status === "waiting"
-  const recoveryRequired = actionable?.status === "recovery_required"
-  const normalizedResponse = trimGoSpace(response)
-  const responseBytes = utf8ByteLength(normalizedResponse)
-  const responseTooLarge =
-    responseBytes > REVIEW_ATTENTION_RESPONSE_MAXIMUM_BYTES
-  const responseHelpID = "review-attention-response-help"
-
-  return (
-    <div
-      className="border-border bg-muted/20 mt-3 rounded-lg border p-3"
-      aria-labelledby="review-attention-conversation-heading"
-    >
-      <div className="flex items-center gap-2">
-        <IconSparkles className="text-muted-foreground size-4" />
-        <h4
-          id="review-attention-conversation-heading"
-          className="text-sm font-medium"
-        >
-          {t("pages.reviews.attention.title", "AI attention")}
-        </h4>
-        {projection?.turns.length ? (
-          <Badge variant="outline">{projection.turns.length}</Badge>
-        ) : null}
-      </div>
-
-      {loading ? (
-        <p className="text-muted-foreground mt-3 text-sm" role="status">
-          {t(
-            "pages.reviews.attention.loading",
-            "Checking for an attention request…",
-          )}
-        </p>
-      ) : loadError ? (
-        <div className="mt-3 grid justify-items-start gap-2" role="alert">
-          <p className="text-destructive text-sm">
-            {t(
-              "pages.reviews.attention.load_error",
-              "AI attention is temporarily unavailable.",
-            )}
-          </p>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={onRetryLoad}
-          >
-            {t("pages.reviews.retry", "Retry")}
-          </Button>
-        </div>
-      ) : projection ? (
-        <>
-          {projection.turns.length > 0 ? (
-            <div className="mt-3 grid gap-3">
-              {projection.turns.map((turn, index) => (
-                <article
-                  key={`${index}-${turn.title}`}
-                  aria-label={t(
-                    "pages.reviews.attention.turn",
-                    "Attention turn {{number}}",
-                    { number: index + 1 },
-                  )}
-                  className="grid gap-2"
-                >
-                  <div className="bg-muted mr-auto max-w-[95%] rounded-lg px-3 py-2 text-sm">
-                    <div className="mb-1 flex flex-wrap items-center gap-2 text-[11px] opacity-70">
-                      <span>
-                        {t("pages.reviews.chat.assistant", "Assistant")}
-                      </span>
-                      <span>·</span>
-                      <span>{attentionTurnStatusLabel(turn.status, t)}</span>
-                    </div>
-                    <p className="font-medium whitespace-pre-wrap">
-                      {turn.title}
-                    </p>
-                    <ReviewAttentionQuestions questions={turn.questions} />
-                  </div>
-                  {turn.response !== undefined ? (
-                    <div className="bg-primary text-primary-foreground ml-auto max-w-[95%] rounded-lg px-3 py-2 text-sm">
-                      <div className="mb-1 text-[11px] opacity-70">
-                        {t("pages.reviews.chat.you", "You")}
-                      </div>
-                      <p className="whitespace-pre-wrap">{turn.response}</p>
-                    </div>
-                  ) : null}
-                </article>
-              ))}
-            </div>
-          ) : null}
-
-          <p
-            className="text-muted-foreground mt-3 text-xs"
-            role="status"
-            aria-live="polite"
-          >
-            {attentionStatusLabel(projection.status, t)}
-          </p>
-
-          {actionError ? (
-            <p className="text-destructive mt-2 text-sm" role="alert">
-              {actionError}
-            </p>
-          ) : null}
-
-          {waiting && projection.can_respond ? (
-            <form className="mt-3 grid gap-2" onSubmit={onSubmit}>
-              <Label
-                htmlFor="review-attention-response"
-                className="text-xs font-medium"
-              >
-                {t(
-                  "pages.reviews.attention.response",
-                  "Reply to the AI attention request",
-                )}
-              </Label>
-              <div className="flex min-w-0 items-end gap-2">
-                <Textarea
-                  ref={attentionInputRef}
-                  id="review-attention-response"
-                  value={response}
-                  maxLength={REVIEW_ATTENTION_RESPONSE_MAXIMUM_BYTES}
-                  disabled={pending}
-                  aria-invalid={responseTooLarge}
-                  aria-describedby={responseHelpID}
-                  className="min-h-20 flex-1"
-                  placeholder={t(
-                    "pages.reviews.attention.response_placeholder",
-                    "Explain what should happen next…",
-                  )}
-                  onChange={(event) => onResponseChange(event.target.value)}
-                />
-                <Button
-                  type="submit"
-                  size="icon"
-                  disabled={
-                    pending || normalizedResponse === "" || responseTooLarge
-                  }
-                  aria-label={t(
-                    "pages.reviews.attention.send",
-                    "Send attention reply",
-                  )}
-                >
-                  <IconSend />
-                </Button>
-              </div>
-              <p
-                id={responseHelpID}
-                className={cn(
-                  "text-xs",
-                  responseTooLarge
-                    ? "text-destructive"
-                    : "text-muted-foreground",
-                )}
-              >
-                {t(
-                  "pages.reviews.attention.response_bytes",
-                  "{{bytes}} / {{maximum}} UTF-8 bytes",
-                  {
-                    bytes: responseBytes,
-                    maximum: REVIEW_ATTENTION_RESPONSE_MAXIMUM_BYTES,
-                  },
-                )}
-              </p>
-            </form>
-          ) : null}
-
-          {recoveryRequired && projection.can_respond ? (
-            <div className="mt-3 grid justify-items-start gap-2">
-              <p className="text-muted-foreground text-xs">
-                {t(
-                  "pages.reviews.attention.recovery_help",
-                  "Your reply is saved. Retry the interrupted continuation without changing it.",
-                )}
-              </p>
-              <Button
-                ref={recoveryButtonRef}
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={pending}
-                onClick={onRetryContinuation}
-              >
-                {pending
-                  ? t(
-                      "pages.reviews.attention.retrying_continuation",
-                      "Retrying…",
-                    )
-                  : t(
-                      "pages.reviews.attention.retry_continuation",
-                      "Retry continuation",
-                    )}
-              </Button>
-            </div>
-          ) : null}
-        </>
-      ) : null}
-    </div>
-  )
-}
-
-function ReviewAttentionQuestions({
-  questions,
-}: {
-  questions: ExactJSONValue
-}) {
-  const { t } = useTranslation()
-  const aiQuestions = projectedAIQuestions(questions)
-  if (aiQuestions) {
-    return (
-      <div className="text-muted-foreground mt-2 grid gap-2">
-        <p className="text-xs font-medium">
-          {t("pages.reviews.attention.gate", "Gate {{id}}", {
-            id: aiQuestions.gateID,
-          })}
-        </p>
-        {aiQuestions.reason ? (
-          <p className="whitespace-pre-wrap">{aiQuestions.reason}</p>
-        ) : null}
-        {aiQuestions.questions.length > 0 ? (
-          <ul className="list-disc space-y-1 pl-5">
-            {aiQuestions.questions.map((question, index) => (
-              <li key={`${index}-${question}`} className="whitespace-pre-wrap">
-                {question}
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </div>
-    )
-  }
-  if (typeof questions === "string") {
-    return (
-      <p className="text-muted-foreground mt-2 whitespace-pre-wrap">
-        {questions}
-      </p>
-    )
-  }
-  if (
-    Array.isArray(questions) &&
-    questions.every((question) => typeof question === "string")
-  ) {
-    return questions.length > 0 ? (
-      <ul className="text-muted-foreground mt-2 list-disc space-y-1 pl-5">
-        {questions.map((question, index) => (
-          <li key={`${index}-${question}`} className="whitespace-pre-wrap">
-            {question}
-          </li>
-        ))}
-      </ul>
-    ) : null
-  }
-  return (
-    <pre className="border-border bg-background text-muted-foreground mt-2 max-h-56 overflow-auto rounded border p-2 text-xs break-all whitespace-pre-wrap">
-      {stringifyExactJSON(questions, {
-        maximumBytes: 256 << 10,
-        maximumDepth: 64,
-        maximumNodes: 100_000,
-      })}
-    </pre>
   )
 }
 
@@ -2300,153 +2009,8 @@ function reviewSearchWithoutFocus(
   return next
 }
 
-function attentionProjectionPolls(
-  projection?: ReviewAttentionProjection,
-): boolean {
-  const status = projection?.status
-  return (
-    status === "queued" ||
-    status === "processing" ||
-    status === "continuing" ||
-    ((status === "waiting" || status === "recovery_required") &&
-      projection?.can_respond === false)
-  )
-}
-
-function attentionProjectionIsVisible(
-  projection?: ReviewAttentionProjection,
-): boolean {
-  return Boolean(
-    projection &&
-    (projection.turns.length > 0 ||
-      (projection.status !== "none" && projection.status !== "not_required")),
-  )
-}
-
-function findActionableAttentionTurn(
-  projection?: ReviewAttentionProjection,
-): ReviewAttentionTurn | undefined {
-  if (!projection?.can_respond) {
-    return undefined
-  }
-  return [...projection.turns]
-    .reverse()
-    .find(
-      (turn) =>
-        Boolean(turn.response_token) &&
-        (turn.status === "waiting" || turn.status === "recovery_required"),
-    )
-}
-
-function projectedAIQuestions(
-  questions: ExactJSONValue,
-): { gateID: string; reason: string; questions: string[] } | undefined {
-  if (!isExactJSONObject(questions)) {
-    return undefined
-  }
-  const keys = Object.keys(questions)
-  if (
-    keys.length !== 3 ||
-    !Object.hasOwn(questions, "gate_id") ||
-    !Object.hasOwn(questions, "reason") ||
-    !Object.hasOwn(questions, "questions") ||
-    typeof questions.gate_id !== "string" ||
-    questions.gate_id === "" ||
-    typeof questions.reason !== "string"
-  ) {
-    return undefined
-  }
-  const prompts = questions.questions
-  if (
-    !Array.isArray(prompts) ||
-    !prompts.every((prompt) => typeof prompt === "string")
-  ) {
-    return undefined
-  }
-  return {
-    gateID: questions.gate_id,
-    reason: questions.reason,
-    questions: prompts,
-  }
-}
-
-function attentionProjectionContainsResponse(
-  projection: ReviewAttentionProjection | undefined,
-  turnIndex: number,
-  response: string,
-  originalStatus: ReviewAttentionTurn["status"],
-): boolean {
-  const turn = projection?.turns[turnIndex]
-  return (
-    turn?.response === response &&
-    (originalStatus === "waiting" || turn.status !== "recovery_required")
-  )
-}
-
 function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength
-}
-
-function attentionTurnStatusLabel(
-  status: ReviewAttentionTurn["status"],
-  t: Translate,
-): string {
-  const labels: Record<ReviewAttentionTurn["status"], string> = {
-    answered: t("pages.reviews.attention.turn_answered", "Answered"),
-    waiting: t("pages.reviews.attention.turn_waiting", "Waiting for you"),
-    continuing: t("pages.reviews.attention.turn_continuing", "Continuing"),
-    recovery_required: t(
-      "pages.reviews.attention.turn_recovery",
-      "Retry required",
-    ),
-    canceled: t("pages.reviews.attention.turn_canceled", "Canceled"),
-  }
-  return labels[status]
-}
-
-function attentionStatusLabel(
-  status: ReviewAttentionStatus,
-  t: Translate,
-): string {
-  const labels: Record<ReviewAttentionStatus, string> = {
-    none: t(
-      "pages.reviews.attention.status_none",
-      "No attention request exists for this review.",
-    ),
-    queued: t(
-      "pages.reviews.attention.status_queued",
-      "The attention check is queued.",
-    ),
-    processing: t(
-      "pages.reviews.attention.status_processing",
-      "AI is checking whether your attention is needed…",
-    ),
-    waiting: t(
-      "pages.reviews.attention.status_waiting",
-      "AI is waiting for your reply.",
-    ),
-    continuing: t(
-      "pages.reviews.attention.status_continuing",
-      "Continuing with your saved reply…",
-    ),
-    recovery_required: t(
-      "pages.reviews.attention.status_recovery",
-      "Your reply is saved, but continuation needs an explicit retry.",
-    ),
-    completed: t(
-      "pages.reviews.attention.status_completed",
-      "The attention conversation is complete.",
-    ),
-    not_required: t(
-      "pages.reviews.attention.status_not_required",
-      "AI confirmed that your attention is not required.",
-    ),
-    failed: t(
-      "pages.reviews.attention.status_failed",
-      "The attention check could not be completed.",
-    ),
-  }
-  return labels[status]
 }
 
 function reviewAttentionErrorMessage(error: unknown, t: Translate): string {

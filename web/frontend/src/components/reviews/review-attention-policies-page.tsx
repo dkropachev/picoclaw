@@ -77,6 +77,18 @@ import { refreshGatewayState } from "@/store/gateway"
 const policyQueryKey = ["reviews", "attention-policies"] as const
 const agentQueryKey = ["reviews", "attention-policy-agents"] as const
 const policyEditorPageSize = 8
+const knownAttentionDecisionPoints = [
+  {
+    value: "review.submitted",
+    labelKey: "pages.reviews.policies.decision_review_submitted",
+    label: "Outgoing review submitted",
+  },
+  {
+    value: "pr_development.review_attention_required",
+    labelKey: "pages.reviews.policies.decision_pr_development_attention",
+    label: "My PR development review needs attention",
+  },
+] as const
 
 function agentPageQueryKey(configRevision: string, cursor: string | undefined) {
   return [...agentQueryKey, configRevision, cursor ?? "first"] as const
@@ -841,11 +853,11 @@ export function ReviewAttentionPoliciesPage({
                 kind="save"
                 title={t(
                   "pages.reviews.policies.automatic_title",
-                  "Outgoing submitted reviews trigger attention",
+                  "Review events trigger attention",
                 )}
                 description={t(
                   "pages.reviews.policies.automatic_description",
-                  "When a PicoClaw workbench review reaches submitted, its review.submitted policy is queued and runs when the attention runtime is active. Editing here never runs a gate, calls a model, modifies a repository, or publishes to GitHub.",
+                  "Use review.submitted for reviews you send and pr_development.review_attention_required for reviewer feedback on your PRs. Matching policies are queued and run when the attention runtime is active. Editing here never runs a gate, calls a model, modifies a repository, or publishes to GitHub.",
                 )}
               />
               {snapshot.effects.gateway_effect === "restart_required" && (
@@ -1534,6 +1546,7 @@ function PolicyEditorCard({
                 : `${policy.editorKey}-decision-error`
             }
             value={policy.decisionPoint}
+            list={`${policy.editorKey}-decision-presets`}
             onChange={(event) =>
               onChange({ ...policy, decisionPoint: event.target.value })
             }
@@ -1541,6 +1554,21 @@ function PolicyEditorCard({
             spellCheck={false}
             autoComplete="off"
           />
+          <datalist id={`${policy.editorKey}-decision-presets`}>
+            {knownAttentionDecisionPoints.map((decisionPoint) => (
+              <option
+                key={decisionPoint.value}
+                value={decisionPoint.value}
+                label={t(decisionPoint.labelKey, decisionPoint.label)}
+              />
+            ))}
+          </datalist>
+          <p className="text-muted-foreground mt-1 text-xs">
+            {t(
+              "pages.reviews.policies.decision_point_help",
+              "Choose a known review event or enter a custom workflow decision point.",
+            )}
+          </p>
           <ReviewAttentionFieldIssue
             id={`${policy.editorKey}-decision-error`}
             issue={decisionPointIssue}

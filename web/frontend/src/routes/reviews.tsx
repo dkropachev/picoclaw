@@ -30,6 +30,9 @@ export function normalizeReviewsSearch(
         typeof raw.case === "string" && developmentCaseIDPattern.test(raw.case)
           ? raw.case
           : undefined
+      if (selectedCase && raw.focus === "chat") {
+        return { view: "development", case: selectedCase, focus: "chat" }
+      }
       const repository = optionalRepository(raw.repository)
       const pullNumber = optionalPullNumber(raw.pull_number)
       return {

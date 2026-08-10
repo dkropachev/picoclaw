@@ -31,7 +31,7 @@ export interface PRDevelopmentMessage {
   created_at: string
 }
 
-export interface PRDevelopmentCaseSummary {
+interface PRDevelopmentCaseBaseSummary {
   id: string
   repository: string
   pull_number: number
@@ -51,7 +51,11 @@ export interface PRDevelopmentCaseSummary {
   captured_at: string
 }
 
-export interface PRDevelopmentCase extends PRDevelopmentCaseSummary {
+export interface PRDevelopmentCaseSummary extends PRDevelopmentCaseBaseSummary {
+  attention_required: boolean
+}
+
+export interface PRDevelopmentCase extends PRDevelopmentCaseBaseSummary {
   base_repository: string
   base_ref: string
   base_sha: string
@@ -196,7 +200,7 @@ const repairErrorCodes = new Set<PRDevelopmentRepairErrorCode>([
   "recovery_required",
   "internal_error",
 ])
-const summaryKeys = new Set([
+const baseSummaryKeys = new Set([
   "id",
   "repository",
   "pull_number",
@@ -215,8 +219,9 @@ const summaryKeys = new Set([
   "review_url",
   "captured_at",
 ])
+const listSummaryKeys = new Set([...baseSummaryKeys, "attention_required"])
 const detailCaseKeys = new Set([
-  ...summaryKeys,
+  ...baseSummaryKeys,
   "base_repository",
   "base_ref",
   "base_sha",
@@ -417,15 +422,22 @@ export async function startPRDevelopmentRepair(
 }
 
 function parseSummary(value: unknown): PRDevelopmentCaseSummary {
-  if (!isRecord(value) || !onlyKeys(value, summaryKeys)) {
+  if (
+    !isRecord(value) ||
+    !onlyKeys(value, listSummaryKeys) ||
+    typeof value.attention_required !== "boolean"
+  ) {
     throw malformedResponse()
   }
-  return parseSummaryRecord(value)
+  return {
+    ...parseBaseSummaryRecord(value),
+    attention_required: value.attention_required,
+  }
 }
 
-function parseSummaryRecord(
+function parseBaseSummaryRecord(
   value: Record<string, unknown>,
-): PRDevelopmentCaseSummary {
+): PRDevelopmentCaseBaseSummary {
   if (
     !isPattern(value.id, CASE_ID_PATTERN) ||
     !isRepository(value.repository) ||
@@ -475,7 +487,7 @@ function parseCase(value: unknown): PRDevelopmentCase {
   if (!isRecord(value) || !onlyKeys(value, detailCaseKeys)) {
     throw malformedResponse()
   }
-  const summary = parseSummaryRecord(value)
+  const summary = parseBaseSummaryRecord(value)
   if (
     !isRepository(value.base_repository) ||
     value.base_repository.toLowerCase() !== summary.repository.toLowerCase() ||

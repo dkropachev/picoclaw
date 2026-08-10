@@ -129,10 +129,11 @@ func NewAttentionLauncher(config AttentionLauncherConfig) (*AttentionLauncher, e
 	}
 	policyAdapter := reviewAttentionPolicyAdapter{source: config.Policies}
 	shared, err := sharedattention.NewPrivateRunner(sharedattention.PrivateRunnerConfig{
-		Executor:  config.Executor,
-		Runs:      runs,
-		Policies:  policyAdapter,
-		Decisions: reviewAttentionDecisionBinding{store: decisions},
+		Executor:                         config.Executor,
+		Runs:                             runs,
+		Policies:                         policyAdapter,
+		Decisions:                        reviewAttentionDecisionBinding{store: decisions},
+		ProjectLinkedAdmissionQuarantine: true,
 	})
 	if err != nil {
 		return nil, errors.New("review attention workflow runner is unavailable")
@@ -258,7 +259,13 @@ func (launcher *AttentionLauncher) launchPreparedAttentionPolicy(
 	}
 
 	if existing, found, lookupErr := launcher.shared.FindExisting(ctx, decisionKey); lookupErr != nil {
-		return AttentionLaunchResult{}, sanitizeAttentionError(ctx, lookupErr, false)
+		// An exact unlinked deterministic run can be either an orphan or a
+		// concurrent create-before-link window. Continue only to ordinary
+		// serialized admission: PrivateRunner.Launch converges the live creator
+		// and quarantines a true orphan without executing a second workflow.
+		if !errors.Is(lookupErr, sharedattention.ErrPrivateRunAdmissionUncertain) {
+			return AttentionLaunchResult{}, sanitizeAttentionError(ctx, lookupErr, false)
+		}
 	} else if found {
 		return attentionResultForShared(baseResult, existing), nil
 	}
@@ -425,10 +432,6 @@ func attentionRunID(key eventing.ReviewDecisionKey) (string, error) {
 
 func reviewAttentionDecisionKey(key eventing.ReviewDecisionKey) (string, error) {
 	return sharedattention.CanonicalDecisionKey(key)
-}
-
-func validAttentionRun(run *workflows.Run, runID string) bool {
-	return sharedattention.ValidPrivateRun(run, runID)
 }
 
 func attentionResultForShared(

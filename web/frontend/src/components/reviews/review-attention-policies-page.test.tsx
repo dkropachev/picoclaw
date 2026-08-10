@@ -118,13 +118,26 @@ describe("ReviewAttentionPoliciesPage", () => {
     await act(async () => resolvePolicies(mixedSnapshot()))
 
     expect(
-      await screen.findByText("Outgoing submitted reviews trigger attention"),
+      await screen.findByText("Review events trigger attention"),
     ).toBeVisible()
     expect(
       screen.getByText(
-        "When a PicoClaw workbench review reaches submitted, its review.submitted policy is queued and runs when the attention runtime is active. Editing here never runs a gate, calls a model, modifies a repository, or publishes to GitHub.",
+        "Use review.submitted for reviews you send and pr_development.review_attention_required for reviewer feedback on your PRs. Matching policies are queued and run when the attention runtime is active. Editing here never runs a gate, calls a model, modifies a repository, or publishes to GitHub.",
       ),
     ).toBeVisible()
+    const decisionPoint = screen.getAllByLabelText("Decision point")[0]
+    const presets = document.getElementById(
+      decisionPoint.getAttribute("list") ?? "",
+    )
+    const presetOptions = Array.from(presets?.querySelectorAll("option") ?? [])
+    expect(presetOptions.map((option) => option.value)).toEqual([
+      "review.submitted",
+      "pr_development.review_attention_required",
+    ])
+    expect(presetOptions.map((option) => option.label)).toEqual([
+      "Outgoing review submitted",
+      "My PR development review needs attention",
+    ])
     await waitFor(() => expect(getReviewAttentionAgents).toHaveBeenCalledOnce())
     const initialAgentRequest = vi.mocked(getReviewAttentionAgents).mock
       .calls[0][0]

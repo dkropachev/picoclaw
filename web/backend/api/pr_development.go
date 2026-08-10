@@ -180,6 +180,34 @@ func (h *Handler) handlePRDevelopmentDetail(w http.ResponseWriter, r *http.Reque
 			reviewGatewayAIRequestTimeout,
 			validatePRDevelopmentChatMutation,
 		)
+	case len(segments) == 2 && segments[1] == "attention":
+		if !requireReviewMethod(w, r, http.MethodGet) {
+			return
+		}
+		if invalidPRDevelopmentReadBody(r) ||
+			r.URL.RawQuery != "" || r.URL.ForceQuery {
+			writeReviewAPIError(w, http.StatusBadRequest, "invalid development request")
+			return
+		}
+		h.proxyReviewGateway(
+			w,
+			r,
+			http.MethodGet,
+			prDevelopmentRuntimePath+"/"+caseID+"/attention",
+			"",
+			nil,
+			reviewGatewayRequestTimeout,
+		)
+	case len(segments) == 3 && segments[1] == "attention" &&
+		segments[2] == "respond":
+		h.handleReviewMutationValidated(
+			w,
+			r,
+			http.MethodPost,
+			prDevelopmentRuntimePath+"/"+caseID+"/attention/respond",
+			reviewGatewayAIRequestTimeout,
+			validatePRDevelopmentAttentionResponse,
+		)
 	case len(segments) == 2 && segments[1] == "repair":
 		h.handleReviewMutationValidated(
 			w,
@@ -192,6 +220,77 @@ func (h *Handler) handlePRDevelopmentDetail(w http.ResponseWriter, r *http.Reque
 	default:
 		writeReviewAPIError(w, http.StatusNotFound, "not found")
 	}
+}
+
+func validatePRDevelopmentAttentionResponse(r *http.Request, raw []byte) error {
+	if r == nil || r.ContentLength < 0 || len(r.TransferEncoding) != 0 ||
+		len(raw) == 0 || !utf8.Valid(raw) || !validJSONUnicodeScalars(raw) ||
+		rejectDuplicateJSONKeys(raw, prDevelopmentChatDepth, nil) != nil ||
+		validateExactPRDevelopmentAttentionResponseFields(raw) != nil {
+		return errors.New("invalid development attention response")
+	}
+	var body struct {
+		ExpectedCaseVersion *int64  `json:"expected_case_version"`
+		ResponseToken       *string `json:"response_token"`
+		Response            *string `json:"response"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		return err
+	}
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("development attention response contains trailing JSON")
+		}
+		return err
+	}
+	if body.ExpectedCaseVersion == nil || *body.ExpectedCaseVersion < 0 ||
+		*body.ExpectedCaseVersion > int64(prdevelopment.MaximumConversationVersion) ||
+		body.ResponseToken == nil || !validPRDevelopmentAttentionResponseToken(
+		*body.ResponseToken,
+	) || body.Response == nil {
+		return errors.New("development attention response fields are invalid")
+	}
+	response := strings.TrimSpace(*body.Response)
+	if response == "" || response != *body.Response || !utf8.ValidString(response) ||
+		strings.ContainsRune(response, '\x00') || len(response) > prDevelopmentChatBytes {
+		return errors.New("development attention response is invalid")
+	}
+	return nil
+}
+
+func validateExactPRDevelopmentAttentionResponseFields(raw []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || len(fields) != 3 {
+		return errors.New("development attention response fields are invalid")
+	}
+	for _, name := range []string{
+		"expected_case_version",
+		"response_token",
+		"response",
+	} {
+		if _, ok := fields[name]; !ok {
+			return errors.New("development attention response fields are invalid")
+		}
+	}
+	return nil
+}
+
+func validPRDevelopmentAttentionResponseToken(value string) bool {
+	const prefix = "sha256:"
+	if len(value) != len(prefix)+64 || !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	for _, character := range value[len(prefix):] {
+		if character < '0' || character > '9' {
+			if character < 'a' || character > 'f' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validatePRDevelopmentRepairMutation(r *http.Request, raw []byte) error {

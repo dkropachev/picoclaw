@@ -47,6 +47,7 @@ type eventAutomationService struct {
 	reviewAttention        *reviews.AttentionLauncher
 	prDevelopmentAttention *prdevelopment.AttentionLauncher
 	reviewBridge           *reviews.AttentionBridge
+	prDevelopmentBridge    *prdevelopment.AttentionBridge
 	githubPoller           *eventgithubpoll.Poller
 	prLocalCI              *prDevelopmentLocalCIRuntime
 	cancel                 context.CancelFunc
@@ -86,6 +87,7 @@ type eventReviewRuntime struct {
 	prDevelopmentAttentionPolicies       sharedattention.PolicySource
 	prDevelopmentAttentionWorkspaces     prdevelopment.AttentionReviewWorkspaceFactory
 	acquirePRDevelopmentAttentionRuntime prdevelopment.AttentionContextRuntimeAcquire
+	prDevelopmentAttentionProcess        func(context.Context) (bool, error)
 	submitter                            reviews.Submitter
 	attentionPolicies                    reviews.AttentionPolicySource
 	notificationMCP                      workflows.ToolRunner
@@ -431,6 +433,16 @@ func newEventAutomationServiceWithReviews(
 	if err != nil {
 		return nil, closeSetup(err)
 	}
+	prDevelopmentBridge, err := prdevelopment.NewAttentionBridge(
+		prdevelopment.AttentionBridgeConfig{
+			Service:  prDevelopmentService,
+			Executor: reviewBridgeExecutor,
+			RunStore: runStore,
+		},
+	)
+	if err != nil {
+		return nil, closeSetup(err)
+	}
 	operatorBackend, err := eventoperator.NewBackend(eventoperator.BackendConfig{
 		Store: store,
 		Reviews: &reviews.Handler{
@@ -438,7 +450,8 @@ func newEventAutomationServiceWithReviews(
 			Attention: reviewBridge,
 		},
 		PRDevelopment: &prdevelopment.Handler{
-			Service: prDevelopmentService,
+			Service:   prDevelopmentService,
+			Attention: prDevelopmentBridge,
 		},
 	})
 	if err != nil {
@@ -518,6 +531,7 @@ func newEventAutomationServiceWithReviews(
 		reviewAttention:        reviewAttention,
 		prDevelopmentAttention: prDevelopmentAttention,
 		reviewBridge:           reviewBridge,
+		prDevelopmentBridge:    prDevelopmentBridge,
 		githubPoller:           githubPoller,
 		prLocalCI:              prLocalCI,
 		done:                   make(chan struct{}),
@@ -647,6 +661,24 @@ func newEventAutomationServiceWithReviews(
 			&workers,
 			"review attention",
 			withEventAutomationRuntime(acquireRuntime, attention.ProcessOne),
+		)
+	}
+	if prDevelopmentAttention != nil {
+		attention := &prdevelopment.AttentionTriggerWorker{
+			Queue:       store,
+			Launcher:    prDevelopmentAttention,
+			WorkerLabel: "gateway-pr-development-attention",
+		}
+		attentionProcess := attention.ProcessOne
+		if reviewRuntime.prDevelopmentAttentionProcess != nil {
+			attentionProcess = reviewRuntime.prDevelopmentAttentionProcess
+		}
+		workers.Add(1)
+		go runEventAutomationWorker(
+			workerCtx,
+			&workers,
+			"PR development attention",
+			withEventAutomationRuntime(acquireRuntime, attentionProcess),
 		)
 	}
 	if githubPoller != nil {

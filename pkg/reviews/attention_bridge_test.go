@@ -283,7 +283,8 @@ func TestAttentionBridgeContinuingAndRecoveryAuthority(t *testing.T) {
 		release := make(chan struct{})
 		var releaseOnce sync.Once
 		defer releaseOnce.Do(func() { close(release) })
-		fixture.bridge.executor.AdmittedHumanTaskClaim = func(
+		blockingExecutor := *fixture.executor
+		blockingExecutor.AdmittedHumanTaskClaim = func(
 			_ context.Context,
 			_, _ string,
 			claim func() (*workflows.Run, workflows.WorkflowHumanTask, bool, error),
@@ -294,6 +295,12 @@ func TestAttentionBridgeContinuingAndRecoveryAuthority(t *testing.T) {
 				<-release
 			}
 			return run, task, duplicate, claimErr
+		}
+		fixture.bridge, err = NewAttentionBridge(AttentionBridgeConfig{
+			Service: fixture.service, Executor: &blockingExecutor, RunStore: fixture.runStore,
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
 		result := make(chan error, 1)
 		go func() {

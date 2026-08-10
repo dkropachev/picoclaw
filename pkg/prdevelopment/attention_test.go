@@ -712,20 +712,26 @@ func (fixture *attentionRuntimeFixture) launcher(
 }
 
 type attentionRuntimeStore struct {
-	mu         sync.Mutex
-	snapshot   eventing.PRDevelopmentAttentionSnapshot
-	cases      map[string]eventing.PRDevelopmentCase
-	links      map[eventing.PRDevelopmentAttentionDecisionKey]eventing.PRDevelopmentAttentionDecisionRunLink
-	findCalls  atomic.Int32
-	admitCalls atomic.Int32
+	mu            sync.Mutex
+	snapshot      eventing.PRDevelopmentAttentionSnapshot
+	snapshotErr   error
+	cases         map[string]eventing.PRDevelopmentCase
+	links         map[eventing.PRDevelopmentAttentionDecisionKey]eventing.PRDevelopmentAttentionDecisionRunLink
+	snapshotCalls atomic.Int32
+	findCalls     atomic.Int32
+	admitCalls    atomic.Int32
 }
 
 func (store *attentionRuntimeStore) GetPRDevelopmentAttentionSnapshot(
 	context.Context,
 	string,
 ) (eventing.PRDevelopmentAttentionSnapshot, error) {
+	store.snapshotCalls.Add(1)
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if store.snapshotErr != nil {
+		return eventing.PRDevelopmentAttentionSnapshot{}, store.snapshotErr
+	}
 	return store.snapshot, nil
 }
 

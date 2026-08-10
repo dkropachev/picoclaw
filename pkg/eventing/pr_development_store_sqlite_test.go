@@ -181,7 +181,7 @@ func TestStoreListPRDevelopmentCasesUsesStableNewestFirstKeysetAndExactFilters(
 	page, err := store.ListPRDevelopmentCases(ctx, PRDevelopmentCaseFilter{Limit: 3})
 	require.NoError(t, err)
 	require.Len(t, page.Cases, 3)
-	assert.Equal(t, want[:3], page.Cases)
+	assert.Equal(t, want[:3], listedPRDevelopmentCases(page.Cases))
 	require.NotNil(t, page.Next)
 	assert.Equal(t, want[2].UpdatedAt, page.Next.UpdatedAt)
 	assert.Equal(t, want[2].ID, page.Next.ID)
@@ -191,7 +191,7 @@ func TestStoreListPRDevelopmentCasesUsesStableNewestFirstKeysetAndExactFilters(
 		After: page.Next,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, want[3:], next.Cases)
+	assert.Equal(t, want[3:], listedPRDevelopmentCases(next.Cases))
 	assert.Nil(t, next.Next)
 
 	repository, err := store.ListPRDevelopmentCases(ctx, PRDevelopmentCaseFilter{
@@ -203,7 +203,7 @@ func TestStoreListPRDevelopmentCasesUsesStableNewestFirstKeysetAndExactFilters(
 		filterPRDevelopmentListCases(want, func(candidate PRDevelopmentCase) bool {
 			return strings.EqualFold(candidate.Repository, "acme/project")
 		}),
-		repository.Cases,
+		listedPRDevelopmentCases(repository.Cases),
 	)
 	assert.Nil(t, repository.Next)
 
@@ -216,7 +216,7 @@ func TestStoreListPRDevelopmentCasesUsesStableNewestFirstKeysetAndExactFilters(
 		filterPRDevelopmentListCases(want, func(candidate PRDevelopmentCase) bool {
 			return candidate.PullNumber == 42
 		}),
-		pull.Cases,
+		listedPRDevelopmentCases(pull.Cases),
 	)
 
 	exact, err := store.ListPRDevelopmentCases(ctx, PRDevelopmentCaseFilter{
@@ -224,7 +224,7 @@ func TestStoreListPRDevelopmentCasesUsesStableNewestFirstKeysetAndExactFilters(
 		PullNumber: 7,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []PRDevelopmentCase{third}, exact.Cases)
+	assert.Equal(t, []PRDevelopmentCase{third}, listedPRDevelopmentCases(exact.Cases))
 	assert.Nil(t, exact.Next)
 
 	missing, err := store.ListPRDevelopmentCases(ctx, PRDevelopmentCaseFilter{
@@ -234,6 +234,131 @@ func TestStoreListPRDevelopmentCasesUsesStableNewestFirstKeysetAndExactFilters(
 	require.NoError(t, err)
 	assert.Empty(t, missing.Cases)
 	assert.Nil(t, missing.Next)
+}
+
+func TestStoreListPRDevelopmentCasesProjectsOnlyAuthoritativeCurrentAttention(
+	t *testing.T,
+) {
+	t.Run("historical absence", func(t *testing.T) {
+		store, snapshot := newPRDevelopmentAttentionFixture(t)
+		result, err := store.db.Exec(
+			`DELETE FROM pr_development_attention_triggers WHERE case_id = ?`,
+			snapshot.Case.ID,
+		)
+		require.NoError(t, err)
+		rows, err := result.RowsAffected()
+		require.NoError(t, err)
+		require.Equal(t, int64(1), rows)
+		assertListedPRDevelopmentAttention(t, store, snapshot.Case.ID, false)
+	})
+
+	for _, status := range []PRDevelopmentAttentionTriggerStatus{
+		PRDevelopmentAttentionTriggerPending,
+		PRDevelopmentAttentionTriggerClaimed,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			store, snapshot := newPRDevelopmentAttentionFixture(t)
+			if status == PRDevelopmentAttentionTriggerClaimed {
+				claimOnePRDevelopmentAttentionTrigger(t, store, "list-claimed-worker")
+			}
+			assertListedPRDevelopmentAttention(t, store, snapshot.Case.ID, true)
+		})
+	}
+
+	t.Run("delivered", func(t *testing.T) {
+		store, snapshot := newPRDevelopmentAttentionFixture(t)
+		trigger := claimOnePRDevelopmentAttentionTrigger(t, store, "list-delivery-worker")
+		pinActivePRDevelopmentAttentionTrigger(t, store, trigger, snapshot)
+		runID := "wr_" + strings.Repeat("d", 32)
+		_, existed, err := store.AdmitPRDevelopmentAttentionDecisionRun(
+			context.Background(),
+			testPRDevelopmentAttentionAdmission(snapshot, runID),
+			func(context.Context) error { return nil },
+		)
+		require.NoError(t, err)
+		require.False(t, existed)
+		require.NoError(t, store.CompletePRDevelopmentAttentionTrigger(
+			context.Background(),
+			PRDevelopmentAttentionTriggerCompletion{
+				ReviewEntryID: trigger.ReviewEntryID,
+				LeaseToken:    trigger.LeaseToken,
+				Status:        PRDevelopmentAttentionTriggerDelivered,
+				RunID:         runID,
+			},
+		))
+		assertListedPRDevelopmentAttention(t, store, snapshot.Case.ID, true)
+		result, err := store.db.Exec(
+			`DELETE FROM pr_development_attention_decision_runs WHERE run_id = ?`,
+			runID,
+		)
+		require.NoError(t, err)
+		rows, err := result.RowsAffected()
+		require.NoError(t, err)
+		require.Equal(t, int64(1), rows)
+		assertListedPRDevelopmentAttention(t, store, snapshot.Case.ID, false)
+	})
+
+	t.Run("terminal non-attention states", func(t *testing.T) {
+		for _, status := range []PRDevelopmentAttentionTriggerStatus{
+			PRDevelopmentAttentionTriggerNoop,
+			PRDevelopmentAttentionTriggerSuperseded,
+			PRDevelopmentAttentionTriggerRecoveryRequired,
+			PRDevelopmentAttentionTriggerFailed,
+		} {
+			t.Run(string(status), func(t *testing.T) {
+				store, snapshot := newPRDevelopmentAttentionFixture(t)
+				trigger := claimOnePRDevelopmentAttentionTrigger(
+					t,
+					store,
+					"list-terminal-"+string(status),
+				)
+				switch status {
+				case PRDevelopmentAttentionTriggerNoop:
+					pinPolicyOnlyPRDevelopmentAttentionTrigger(t, store, trigger, snapshot)
+				case PRDevelopmentAttentionTriggerRecoveryRequired:
+					pinActivePRDevelopmentAttentionTrigger(t, store, trigger, snapshot)
+				}
+				completion := PRDevelopmentAttentionTriggerCompletion{
+					ReviewEntryID: trigger.ReviewEntryID,
+					LeaseToken:    trigger.LeaseToken,
+					Status:        status,
+				}
+				if status != PRDevelopmentAttentionTriggerNoop {
+					completion.Error = "bounded list projection test failure"
+				}
+				require.NoError(t, store.CompletePRDevelopmentAttentionTrigger(
+					context.Background(),
+					completion,
+				))
+				assertListedPRDevelopmentAttention(t, store, snapshot.Case.ID, false)
+			})
+		}
+	})
+
+	t.Run("later repair supersedes pending occurrence", func(t *testing.T) {
+		fixture, snapshot := newPRDevelopmentAttentionOrchestrationFixtureAt(t, ":memory:")
+		store := fixture.Operation.Store
+		assertListedPRDevelopmentAttention(t, store, snapshot.Case.ID, true)
+		workbench, err := store.GetPRDevelopmentWorkbench(
+			context.Background(),
+			snapshot.Case.ID,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, workbench.RepairSession)
+		_, _, err = store.AdmitPRDevelopmentRepair(
+			context.Background(),
+			PRDevelopmentRepairAdmit{
+				CaseID:                      snapshot.Case.ID,
+				ExpectedConversationVersion: workbench.Conversation.Version,
+				ExpectedRepairVersion:       workbench.RepairSession.Version,
+				IdempotencyKey:              "list-superseding-repair",
+				AgentID:                     fixture.Operation.Session.AgentID,
+				Instruction:                 "Continue after the attention review.",
+			},
+		)
+		require.NoError(t, err)
+		assertListedPRDevelopmentAttention(t, store, snapshot.Case.ID, false)
+	})
 }
 
 func TestBuildPRDevelopmentCaseListPlanValidatesFiltersCursorAndBounds(t *testing.T) {
@@ -1011,6 +1136,37 @@ func filterPRDevelopmentListCases(
 		}
 	}
 	return filtered
+}
+
+func listedPRDevelopmentCases(
+	items []PRDevelopmentCaseListItem,
+) []PRDevelopmentCase {
+	cases := make([]PRDevelopmentCase, len(items))
+	for index := range items {
+		cases[index] = items[index].PRDevelopmentCase
+	}
+	return cases
+}
+
+func assertListedPRDevelopmentAttention(
+	t *testing.T,
+	store *Store,
+	caseID string,
+	want bool,
+) {
+	t.Helper()
+	page, err := store.ListPRDevelopmentCases(
+		context.Background(),
+		PRDevelopmentCaseFilter{Limit: maxPRDevelopmentListItems},
+	)
+	require.NoError(t, err)
+	for _, item := range page.Cases {
+		if item.ID == caseID {
+			assert.Equal(t, want, item.AttentionRequired)
+			return
+		}
+	}
+	t.Fatalf("development case %q is absent from list %#v", caseID, page.Cases)
 }
 
 func installEventingSchemaThroughV5(t *testing.T, db *sql.DB) {
