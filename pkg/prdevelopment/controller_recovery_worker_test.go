@@ -15,18 +15,22 @@ import (
 )
 
 type fakeControllerRecoveryStore struct {
-	stage             func(context.Context, int) (int, error)
-	next              func(context.Context) (eventing.PRDevelopmentControllerRecoveryCandidate, bool, error)
-	nextSuspension    func(context.Context) (eventing.PRDevelopmentControllerSuspensionWorkCandidate, bool, error)
-	claimSuspension   func(context.Context, eventing.PRDevelopmentControllerSuspensionClaim) (eventing.PRDevelopmentControllerSuspensionLease, bool, error)
-	renewSuspension   func(context.Context, eventing.PRDevelopmentControllerSuspensionRenew) error
-	finishSuspension  func(context.Context, eventing.PRDevelopmentControllerSuspensionFinalize) (eventing.PRDevelopmentControllerSuspensionTransition, bool, error)
-	claimReservation  func(context.Context, eventing.PRDevelopmentControllerRecoveryClaim) (eventing.PRDevelopmentControllerRecoveryLease, bool, error)
-	renewReservation  func(context.Context, eventing.PRDevelopmentControllerRecoveryRenew) error
-	finishReservation func(context.Context, eventing.PRDevelopmentControllerRecoveryFinalize) (eventing.PRDevelopmentController, bool, error)
-	claimOperation    func(context.Context, eventing.PRDevelopmentControllerOperationRecoveryClaim) (eventing.PRDevelopmentControllerOperationRecoveryLease, bool, error)
-	renewOperation    func(context.Context, eventing.PRDevelopmentControllerOperationRecoveryRenew) error
-	finishOperation   func(context.Context, eventing.PRDevelopmentControllerOperationRecoveryFinalize) (eventing.PRDevelopmentControllerOperationTransition, bool, error)
+	stage                func(context.Context, int) (int, error)
+	next                 func(context.Context) (eventing.PRDevelopmentControllerRecoveryCandidate, bool, error)
+	nextSuspension       func(context.Context) (eventing.PRDevelopmentControllerSuspensionWorkCandidate, bool, error)
+	claimSuspension      func(context.Context, eventing.PRDevelopmentControllerSuspensionClaim) (eventing.PRDevelopmentControllerSuspensionLease, bool, error)
+	renewSuspension      func(context.Context, eventing.PRDevelopmentControllerSuspensionRenew) error
+	finishSuspension     func(context.Context, eventing.PRDevelopmentControllerSuspensionFinalize) (eventing.PRDevelopmentControllerSuspensionTransition, bool, error)
+	nextResumeRecovery   func(context.Context) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryCandidate, bool, error)
+	claimResumeRecovery  func(context.Context, eventing.PRDevelopmentControllerSuspendedResumeRecoveryClaim) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease, bool, error)
+	renewResumeRecovery  func(context.Context, eventing.PRDevelopmentControllerSuspendedResumeRecoveryRenew) error
+	finishResumeRecovery func(context.Context, eventing.PRDevelopmentControllerSuspendedResumeRecoveryFinalize) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryTransition, bool, error)
+	claimReservation     func(context.Context, eventing.PRDevelopmentControllerRecoveryClaim) (eventing.PRDevelopmentControllerRecoveryLease, bool, error)
+	renewReservation     func(context.Context, eventing.PRDevelopmentControllerRecoveryRenew) error
+	finishReservation    func(context.Context, eventing.PRDevelopmentControllerRecoveryFinalize) (eventing.PRDevelopmentController, bool, error)
+	claimOperation       func(context.Context, eventing.PRDevelopmentControllerOperationRecoveryClaim) (eventing.PRDevelopmentControllerOperationRecoveryLease, bool, error)
+	renewOperation       func(context.Context, eventing.PRDevelopmentControllerOperationRecoveryRenew) error
+	finishOperation      func(context.Context, eventing.PRDevelopmentControllerOperationRecoveryFinalize) (eventing.PRDevelopmentControllerOperationTransition, bool, error)
 }
 
 func (store *fakeControllerRecoveryStore) StageExpiredPRDevelopmentControllerRecoveries(
@@ -88,6 +92,47 @@ func (store *fakeControllerRecoveryStore) FinalizePRDevelopmentControllerSuspens
 			errors.New("unexpected controller suspension finalization")
 	}
 	return store.finishSuspension(ctx, input)
+}
+
+func (store *fakeControllerRecoveryStore) NextPRDevelopmentControllerSuspendedResumeRecovery(
+	ctx context.Context,
+) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryCandidate, bool, error) {
+	if store.nextResumeRecovery == nil {
+		return eventing.PRDevelopmentControllerSuspendedResumeRecoveryCandidate{}, false, nil
+	}
+	return store.nextResumeRecovery(ctx)
+}
+
+func (store *fakeControllerRecoveryStore) ClaimPRDevelopmentControllerSuspendedResumeRecovery(
+	ctx context.Context,
+	input eventing.PRDevelopmentControllerSuspendedResumeRecoveryClaim,
+) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease, bool, error) {
+	if store.claimResumeRecovery == nil {
+		return eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease{}, false,
+			errors.New("unexpected suspended resume recovery claim")
+	}
+	return store.claimResumeRecovery(ctx, input)
+}
+
+func (store *fakeControllerRecoveryStore) RenewPRDevelopmentControllerSuspendedResumeRecovery(
+	ctx context.Context,
+	input eventing.PRDevelopmentControllerSuspendedResumeRecoveryRenew,
+) error {
+	if store.renewResumeRecovery == nil {
+		return nil
+	}
+	return store.renewResumeRecovery(ctx, input)
+}
+
+func (store *fakeControllerRecoveryStore) FinalizePRDevelopmentControllerSuspendedResumeRecovery(
+	ctx context.Context,
+	input eventing.PRDevelopmentControllerSuspendedResumeRecoveryFinalize,
+) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryTransition, bool, error) {
+	if store.finishResumeRecovery == nil {
+		return eventing.PRDevelopmentControllerSuspendedResumeRecoveryTransition{}, false,
+			errors.New("unexpected suspended resume recovery finalization")
+	}
+	return store.finishResumeRecovery(ctx, input)
 }
 
 func (store *fakeControllerRecoveryStore) ClaimPRDevelopmentControllerRecovery(
@@ -155,14 +200,26 @@ func (store *fakeControllerRecoveryStore) FinalizePRDevelopmentControllerOperati
 }
 
 type fakeControllerRecoveryGit struct {
-	suspend       func(context.Context, gitworkspace.PinnedLineSuspendRequest) (gitworkspace.PinnedLineSuspendResult, error)
-	suspendCommit func(context.Context, gitworkspace.PinnedLineCommitSuspensionRequest) (gitworkspace.PinnedLineSuspendResult, error)
-	rotate        func(context.Context, gitworkspace.PinnedReservationRotationRequest) (gitworkspace.PinnedReservationRotationResult, error)
-	adopt         func(context.Context, gitworkspace.PinnedLineAdoptRecoveryRequest) (gitworkspace.PinnedLineReservationRecoveryResult, error)
-	resume        func(context.Context, gitworkspace.PinnedLineResumeRecoveryRequest) (gitworkspace.PinnedLineReservationRecoveryResult, error)
-	commit        func(context.Context, gitworkspace.PinnedCommitRequest) (gitworkspace.PinnedCommitResult, error)
-	park          func(context.Context, gitworkspace.PinnedLineParkRequest) (gitworkspace.PinnedLineParkResult, error)
-	snapshot      func(context.Context, gitworkspace.PinnedLineReviewRequest) (gitworkspace.PinnedLineReviewSnapshot, error)
+	resumeSuspended func(context.Context, gitworkspace.PinnedLineSuspendedResumeRequest) (gitworkspace.PinnedLineSuspendedResumeResult, error)
+	suspend         func(context.Context, gitworkspace.PinnedLineSuspendRequest) (gitworkspace.PinnedLineSuspendResult, error)
+	suspendCommit   func(context.Context, gitworkspace.PinnedLineCommitSuspensionRequest) (gitworkspace.PinnedLineSuspendResult, error)
+	rotate          func(context.Context, gitworkspace.PinnedReservationRotationRequest) (gitworkspace.PinnedReservationRotationResult, error)
+	adopt           func(context.Context, gitworkspace.PinnedLineAdoptRecoveryRequest) (gitworkspace.PinnedLineReservationRecoveryResult, error)
+	resume          func(context.Context, gitworkspace.PinnedLineResumeRecoveryRequest) (gitworkspace.PinnedLineReservationRecoveryResult, error)
+	commit          func(context.Context, gitworkspace.PinnedCommitRequest) (gitworkspace.PinnedCommitResult, error)
+	park            func(context.Context, gitworkspace.PinnedLineParkRequest) (gitworkspace.PinnedLineParkResult, error)
+	snapshot        func(context.Context, gitworkspace.PinnedLineReviewRequest) (gitworkspace.PinnedLineReviewSnapshot, error)
+}
+
+func (git *fakeControllerRecoveryGit) ResumeSuspendedPinnedLine(
+	ctx context.Context,
+	request gitworkspace.PinnedLineSuspendedResumeRequest,
+) (gitworkspace.PinnedLineSuspendedResumeResult, error) {
+	if git.resumeSuspended == nil {
+		return gitworkspace.PinnedLineSuspendedResumeResult{},
+			errors.New("unexpected suspended resume recovery")
+	}
+	return git.resumeSuspended(ctx, request)
 }
 
 func (git *fakeControllerRecoveryGit) SuspendPinnedLine(
@@ -557,6 +614,527 @@ func TestControllerRecoveryWorkerSuspensionPriority(t *testing.T) {
 	})
 }
 
+func TestControllerRecoveryWorkerSuspendedResumeRecoveryPriority(t *testing.T) {
+	t.Parallel()
+
+	candidate, _, _ := suspendedResumeRecoveryFixture()
+	t.Run("expired resume precedes recovery staging", func(t *testing.T) {
+		t.Parallel()
+		claimErr := errors.New("stop after expired resume priority claim")
+		order := make([]string, 0, 3)
+		store := &fakeControllerRecoveryStore{
+			nextSuspension: func(context.Context) (
+				eventing.PRDevelopmentControllerSuspensionWorkCandidate,
+				bool,
+				error,
+			) {
+				order = append(order, "suspension")
+				return eventing.PRDevelopmentControllerSuspensionWorkCandidate{}, false, nil
+			},
+			nextResumeRecovery: func(context.Context) (
+				eventing.PRDevelopmentControllerSuspendedResumeRecoveryCandidate,
+				bool,
+				error,
+			) {
+				order = append(order, "resume recovery")
+				return candidate, true, nil
+			},
+			claimResumeRecovery: func(
+				context.Context,
+				eventing.PRDevelopmentControllerSuspendedResumeRecoveryClaim,
+			) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease, bool, error) {
+				order = append(order, "claim resume recovery")
+				return eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease{}, false,
+					claimErr
+			},
+			stage: func(context.Context, int) (int, error) {
+				order = append(order, "stage")
+				return 0, nil
+			},
+		}
+		worker := mustControllerRecoveryWorker(t, store, func() (controllerRecoveryGit, error) {
+			return &fakeControllerRecoveryGit{}, nil
+		})
+
+		processed, err := worker.ProcessOne(context.Background())
+		require.False(t, processed)
+		require.ErrorIs(t, err, claimErr)
+		assert.Equal(t, []string{
+			"suspension",
+			"resume recovery",
+			"claim resume recovery",
+		}, order)
+	})
+
+	t.Run("empty scans preserve the complete order", func(t *testing.T) {
+		t.Parallel()
+		order := make([]string, 0, 5)
+		store := &fakeControllerRecoveryStore{
+			nextSuspension: func(context.Context) (
+				eventing.PRDevelopmentControllerSuspensionWorkCandidate,
+				bool,
+				error,
+			) {
+				order = append(order, "suspension")
+				return eventing.PRDevelopmentControllerSuspensionWorkCandidate{}, false, nil
+			},
+			nextResumeRecovery: func(context.Context) (
+				eventing.PRDevelopmentControllerSuspendedResumeRecoveryCandidate,
+				bool,
+				error,
+			) {
+				order = append(order, "resume recovery")
+				return eventing.PRDevelopmentControllerSuspendedResumeRecoveryCandidate{}, false, nil
+			},
+			stage: func(context.Context, int) (int, error) {
+				order = append(order, "stage")
+				return 0, nil
+			},
+			next: func(context.Context) (
+				eventing.PRDevelopmentControllerRecoveryCandidate,
+				bool,
+				error,
+			) {
+				order = append(order, "recovery")
+				return eventing.PRDevelopmentControllerRecoveryCandidate{}, false, nil
+			},
+		}
+		worker := mustControllerRecoveryWorker(t, store, func() (controllerRecoveryGit, error) {
+			return &fakeControllerRecoveryGit{}, nil
+		})
+
+		processed, err := worker.ProcessOne(context.Background())
+		require.NoError(t, err)
+		require.False(t, processed)
+		assert.Equal(t, []string{
+			"suspension",
+			"resume recovery",
+			"stage",
+			"suspension",
+			"recovery",
+		}, order)
+	})
+}
+
+func TestControllerRecoveryWorkerResumesFinalizesAndSuspendsInOneCall(t *testing.T) {
+	t.Parallel()
+
+	candidate, controller, resume := suspendedResumeRecoveryFixture()
+	order := make([]string, 0, 6)
+	var (
+		claimInput        eventing.PRDevelopmentControllerSuspendedResumeRecoveryClaim
+		resumeRenewInput  eventing.PRDevelopmentControllerSuspendedResumeRecoveryRenew
+		resumeFinishInput eventing.PRDevelopmentControllerSuspendedResumeRecoveryFinalize
+		childRenewInput   eventing.PRDevelopmentControllerSuspensionRenew
+		childFinishInput  eventing.PRDevelopmentControllerSuspensionFinalize
+		child             eventing.PRDevelopmentControllerSuspension
+	)
+	store := &fakeControllerRecoveryStore{
+		nextResumeRecovery: func(context.Context) (
+			eventing.PRDevelopmentControllerSuspendedResumeRecoveryCandidate,
+			bool,
+			error,
+		) {
+			return candidate, true, nil
+		},
+		claimResumeRecovery: func(
+			_ context.Context,
+			input eventing.PRDevelopmentControllerSuspendedResumeRecoveryClaim,
+		) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease, bool, error) {
+			claimInput = input
+			resume = claimedSuspendedResumeRecovery(resume, input)
+			return eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease{
+				Controller: controller,
+				Suspension: resume,
+				Reclaimed:  true,
+			}, true, nil
+		},
+		renewResumeRecovery: func(
+			_ context.Context,
+			input eventing.PRDevelopmentControllerSuspendedResumeRecoveryRenew,
+		) error {
+			order = append(order, "renew resume")
+			resumeRenewInput = input
+			return nil
+		},
+		finishResumeRecovery: func(
+			_ context.Context,
+			input eventing.PRDevelopmentControllerSuspendedResumeRecoveryFinalize,
+		) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryTransition, bool, error) {
+			order = append(order, "finalize resume")
+			resumeFinishInput = input
+			transition := suspendedResumeRecoveryTransition(controller, resume, input.Result)
+			renewedChildDeadline := transition.NextSuspension.SuspendClaimUntil.Add(time.Minute)
+			transition.NextSuspension.SuspendClaimUntil = &renewedChildDeadline
+			child = transition.NextSuspension
+			return transition, true, nil
+		},
+		renewSuspension: func(
+			_ context.Context,
+			input eventing.PRDevelopmentControllerSuspensionRenew,
+		) error {
+			order = append(order, "renew child")
+			childRenewInput = input
+			return nil
+		},
+		finishSuspension: func(
+			_ context.Context,
+			input eventing.PRDevelopmentControllerSuspensionFinalize,
+		) (eventing.PRDevelopmentControllerSuspensionTransition, bool, error) {
+			order = append(order, "finalize child")
+			childFinishInput = input
+			intermediate := suspendedResumeRecoveryTransition(
+				controller,
+				resume,
+				resumeFinishInput.Result,
+			).Controller
+			return suspendedControllerTransition(intermediate, child, input.Result), true, nil
+		},
+	}
+	resumeResult := suspendedResumeRecoveryGitResult(resume, false)
+	git := &fakeControllerRecoveryGit{
+		resumeSuspended: func(
+			_ context.Context,
+			_ gitworkspace.PinnedLineSuspendedResumeRequest,
+		) (gitworkspace.PinnedLineSuspendedResumeResult, error) {
+			order = append(order, "resume Git")
+			return resumeResult, nil
+		},
+		suspend: func(
+			_ context.Context,
+			_ gitworkspace.PinnedLineSuspendRequest,
+		) (gitworkspace.PinnedLineSuspendResult, error) {
+			order = append(order, "suspend Git")
+			return controllerSuspensionGitResult(child, false), nil
+		},
+	}
+	worker := mustControllerRecoveryWorker(t, store, func() (controllerRecoveryGit, error) {
+		return git, nil
+	})
+
+	processed, err := worker.ProcessOne(context.Background())
+	require.NoError(t, err)
+	require.True(t, processed)
+	assert.Equal(t, []string{
+		"resume Git",
+		"renew resume",
+		"finalize resume",
+		"suspend Git",
+		"renew child",
+		"finalize child",
+	}, order)
+	assert.Equal(t, candidate.CaseID, claimInput.CaseID)
+	assert.Equal(
+		t,
+		controllerSuspendedResumeRecoveryClaimID(worker.workerLabel, candidate),
+		claimInput.ClaimID,
+	)
+	assert.Equal(t, resume.ResumeClaimToken, resumeRenewInput.ClaimToken)
+	assert.Equal(t, resume.ResumeClaimToken, resumeFinishInput.ClaimToken)
+	assert.Equal(t, child.SuspendClaimToken, childRenewInput.ClaimToken)
+	assert.Equal(t, child.SuspendClaimToken, childFinishInput.ClaimToken)
+}
+
+func TestControllerRecoveryWorkerSuspendedResumeTerminalReplaySkipsChildGit(t *testing.T) {
+	t.Parallel()
+
+	candidate, controller, resume := suspendedResumeRecoveryFixture()
+	resumeCalls := 0
+	childCalls := 0
+	store := &fakeControllerRecoveryStore{
+		nextResumeRecovery: func(context.Context) (
+			eventing.PRDevelopmentControllerSuspendedResumeRecoveryCandidate,
+			bool,
+			error,
+		) {
+			return candidate, true, nil
+		},
+		claimResumeRecovery: func(
+			_ context.Context,
+			input eventing.PRDevelopmentControllerSuspendedResumeRecoveryClaim,
+		) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease, bool, error) {
+			resume = claimedSuspendedResumeRecovery(resume, input)
+			return eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease{
+				Controller: controller,
+				Suspension: resume,
+				Reclaimed:  true,
+			}, false, nil
+		},
+		finishResumeRecovery: func(
+			_ context.Context,
+			input eventing.PRDevelopmentControllerSuspendedResumeRecoveryFinalize,
+		) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryTransition, bool, error) {
+			transition := suspendedResumeRecoveryTransition(controller, resume, input.Result)
+			childResult := controllerSuspensionGitResult(transition.NextSuspension, true)
+			mapped, err := mapControllerSuspensionResult(transition.NextSuspension, childResult)
+			require.NoError(t, err)
+			terminal := suspendedControllerTransition(
+				transition.Controller,
+				transition.NextSuspension,
+				mapped,
+			)
+			transition.Controller = terminal.Controller
+			transition.NextSuspension = terminal.Suspension
+			return transition, false, nil
+		},
+	}
+	git := &fakeControllerRecoveryGit{
+		resumeSuspended: func(
+			_ context.Context,
+			_ gitworkspace.PinnedLineSuspendedResumeRequest,
+		) (gitworkspace.PinnedLineSuspendedResumeResult, error) {
+			resumeCalls++
+			return suspendedResumeRecoveryGitResult(resume, true), nil
+		},
+		suspend: func(
+			context.Context,
+			gitworkspace.PinnedLineSuspendRequest,
+		) (gitworkspace.PinnedLineSuspendResult, error) {
+			childCalls++
+			return gitworkspace.PinnedLineSuspendResult{}, errors.New("duplicate child Git")
+		},
+	}
+	worker := mustControllerRecoveryWorker(t, store, func() (controllerRecoveryGit, error) {
+		return git, nil
+	})
+
+	processed, err := worker.ProcessOne(context.Background())
+	require.NoError(t, err)
+	require.True(t, processed)
+	assert.Equal(t, 1, resumeCalls)
+	assert.Zero(t, childCalls)
+}
+
+func TestControllerRecoveryWorkerSuspendedResumeTerminalReplayAcceptsOrdinaryReclaim(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	candidate, controller, resume := suspendedResumeRecoveryFixture()
+	childCalls := 0
+	store := &fakeControllerRecoveryStore{
+		nextResumeRecovery: func(context.Context) (
+			eventing.PRDevelopmentControllerSuspendedResumeRecoveryCandidate,
+			bool,
+			error,
+		) {
+			return candidate, true, nil
+		},
+		claimResumeRecovery: func(
+			_ context.Context,
+			input eventing.PRDevelopmentControllerSuspendedResumeRecoveryClaim,
+		) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease, bool, error) {
+			resume = claimedSuspendedResumeRecovery(resume, input)
+			return eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease{
+				Controller: controller,
+				Suspension: resume,
+				Reclaimed:  true,
+			}, false, nil
+		},
+		finishResumeRecovery: func(
+			_ context.Context,
+			input eventing.PRDevelopmentControllerSuspendedResumeRecoveryFinalize,
+		) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryTransition, bool, error) {
+			transition := suspendedResumeRecoveryTransition(controller, resume, input.Result)
+			reclaimedAt := transition.NextSuspension.CreatedAt.Add(time.Minute)
+			reclaimedUntil := reclaimedAt.Add(time.Hour)
+			transition.NextSuspension.SuspendClaimID = "pdsc_ordinary_reclaimed_child"
+			transition.NextSuspension.SuspendClaimOwner = "ordinary-suspension-worker"
+			transition.NextSuspension.SuspendClaimToken = "ordinary-reclaimed-child-token"
+			transition.NextSuspension.SuspendClaimUntil = &reclaimedUntil
+			transition.NextSuspension.SuspendClaimEpoch++
+			transition.NextSuspension.SuspendClaims++
+			transition.NextSuspension.SuspendClaimedAt = &reclaimedAt
+			childResult := controllerSuspensionGitResult(transition.NextSuspension, true)
+			mapped, err := mapControllerSuspensionResult(transition.NextSuspension, childResult)
+			require.NoError(t, err)
+			terminal := suspendedControllerTransition(
+				transition.Controller,
+				transition.NextSuspension,
+				mapped,
+			)
+			transition.Controller = terminal.Controller
+			transition.NextSuspension = terminal.Suspension
+			return transition, false, nil
+		},
+	}
+	git := &fakeControllerRecoveryGit{
+		resumeSuspended: func(
+			_ context.Context,
+			_ gitworkspace.PinnedLineSuspendedResumeRequest,
+		) (gitworkspace.PinnedLineSuspendedResumeResult, error) {
+			return suspendedResumeRecoveryGitResult(resume, true), nil
+		},
+		suspend: func(
+			context.Context,
+			gitworkspace.PinnedLineSuspendRequest,
+		) (gitworkspace.PinnedLineSuspendResult, error) {
+			childCalls++
+			return gitworkspace.PinnedLineSuspendResult{}, errors.New("duplicate child Git")
+		},
+	}
+	worker := mustControllerRecoveryWorker(t, store, func() (controllerRecoveryGit, error) {
+		return git, nil
+	})
+
+	processed, err := worker.ProcessOne(context.Background())
+	require.NoError(t, err)
+	require.True(t, processed)
+	assert.Zero(t, childCalls)
+}
+
+func TestControllerRecoveryWorkerSuspendedResumeTerminalBindsCandidateEvidence(t *testing.T) {
+	t.Parallel()
+
+	_, controller, resume := suspendedResumeRecoveryFixture()
+	resume = claimedSuspendedResumeRecovery(
+		resume,
+		eventing.PRDevelopmentControllerSuspendedResumeRecoveryClaim{
+			ClaimID:     "pdsrrc_test_claim",
+			WorkerLabel: "controller-recovery-test",
+		},
+	)
+	result := suspendedResumeRecoveryGitResult(resume, true)
+	transition := suspendedResumeRecoveryTransition(
+		controller,
+		resume,
+		eventing.PRDevelopmentControllerSuspendedResumeResult{
+			WorkspaceID:      result.WorkspaceID,
+			Version:          result.Version,
+			MutationEpoch:    result.MutationEpoch,
+			Tip:              result.Tip,
+			Tree:             result.Tree,
+			CandidateTree:    result.CandidateTree,
+			CandidateDigest:  result.CandidateDigest,
+			ChangedFileCount: result.ChangedFileCount,
+			SuspensionHash:   result.SuspensionHash,
+			RotationHash:     result.RotationHash,
+		},
+	)
+	childResult := controllerSuspensionGitResult(transition.NextSuspension, true)
+	mapped, err := mapControllerSuspensionResult(transition.NextSuspension, childResult)
+	require.NoError(t, err)
+	terminal := suspendedControllerTransition(
+		transition.Controller,
+		transition.NextSuspension,
+		mapped,
+	)
+	transition.Controller = terminal.Controller
+	transition.NextSuspension = terminal.Suspension
+	transition.NextSuspension.SuspendResult.CandidateDigest = testDigest("0")
+
+	err = validateControllerSuspendedResumeRecoveryTerminalChild(transition, resume)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "retained candidate evidence")
+}
+
+func TestControllerRecoveryWorkerSuspendedResumeClaimLossCannotFinalize(t *testing.T) {
+	t.Parallel()
+
+	candidate, controller, baseResume := suspendedResumeRecoveryFixture()
+	claimErr := errors.New("resume recovery claim lost")
+	tests := []struct {
+		name          string
+		claimFails    bool
+		renewFails    bool
+		finalizeFails bool
+		wantGit       bool
+	}{
+		{name: "claim error", claimFails: true},
+		{name: "post-Git claim loss", renewFails: true, wantGit: true},
+		{name: "finalization error", finalizeFails: true, wantGit: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			resume := baseResume
+			gitCalls := 0
+			finalizeCalls := 0
+			childCalls := 0
+			store := &fakeControllerRecoveryStore{
+				nextResumeRecovery: func(context.Context) (
+					eventing.PRDevelopmentControllerSuspendedResumeRecoveryCandidate,
+					bool,
+					error,
+				) {
+					return candidate, true, nil
+				},
+				claimResumeRecovery: func(
+					_ context.Context,
+					input eventing.PRDevelopmentControllerSuspendedResumeRecoveryClaim,
+				) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease, bool, error) {
+					if test.claimFails {
+						return eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease{},
+							false,
+							claimErr
+					}
+					resume = claimedSuspendedResumeRecovery(resume, input)
+					return eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease{
+						Controller: controller,
+						Suspension: resume,
+						Reclaimed:  true,
+					}, true, nil
+				},
+				renewResumeRecovery: func(
+					context.Context,
+					eventing.PRDevelopmentControllerSuspendedResumeRecoveryRenew,
+				) error {
+					if test.renewFails {
+						return claimErr
+					}
+					return nil
+				},
+				finishResumeRecovery: func(
+					_ context.Context,
+					input eventing.PRDevelopmentControllerSuspendedResumeRecoveryFinalize,
+				) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryTransition, bool, error) {
+					finalizeCalls++
+					if test.finalizeFails {
+						return eventing.PRDevelopmentControllerSuspendedResumeRecoveryTransition{},
+							false,
+							claimErr
+					}
+					return suspendedResumeRecoveryTransition(controller, resume, input.Result),
+						true,
+						nil
+				},
+			}
+			git := &fakeControllerRecoveryGit{
+				resumeSuspended: func(
+					_ context.Context,
+					_ gitworkspace.PinnedLineSuspendedResumeRequest,
+				) (gitworkspace.PinnedLineSuspendedResumeResult, error) {
+					gitCalls++
+					return suspendedResumeRecoveryGitResult(resume, false), nil
+				},
+				suspend: func(
+					context.Context,
+					gitworkspace.PinnedLineSuspendRequest,
+				) (gitworkspace.PinnedLineSuspendResult, error) {
+					childCalls++
+					return gitworkspace.PinnedLineSuspendResult{}, nil
+				},
+			}
+			worker := mustControllerRecoveryWorker(t, store, func() (controllerRecoveryGit, error) {
+				return git, nil
+			})
+
+			processed, err := worker.ProcessOne(context.Background())
+			require.ErrorIs(t, err, claimErr)
+			assert.Equal(t, test.wantGit, gitCalls == 1)
+			if test.claimFails {
+				assert.False(t, processed)
+			} else {
+				assert.True(t, processed)
+			}
+			if test.renewFails {
+				assert.Zero(t, finalizeCalls)
+			}
+			assert.Zero(t, childCalls)
+		})
+	}
+}
+
 func TestControllerRecoveryWorkerSuspensionClaimLossCancelsGit(t *testing.T) {
 	t.Parallel()
 
@@ -762,13 +1340,31 @@ func TestControllerRecoveryWorkerRotatesBoundReservationIntoSuspensionPending(t 
 	t.Parallel()
 
 	candidate, controller, intent := reservationRecoveryFixture()
+	pendingController := suspensionPendingController(controller)
+	childCandidate, child := controllerRecoverySuspensionFixture(
+		pendingController,
+		intent.ReplacementReservationKey,
+		intent.ID,
+	)
 	var (
 		claimInput    eventing.PRDevelopmentControllerRecoveryClaim
 		rotateRequest gitworkspace.PinnedReservationRotationRequest
 		finalInput    eventing.PRDevelopmentControllerRecoveryFinalize
+		handoffReady  bool
+		order         []string
 	)
 	store := &fakeControllerRecoveryStore{
 		stage: func(context.Context, int) (int, error) { return 1, nil },
+		nextSuspension: func(context.Context) (
+			eventing.PRDevelopmentControllerSuspensionWorkCandidate,
+			bool,
+			error,
+		) {
+			if !handoffReady {
+				return eventing.PRDevelopmentControllerSuspensionWorkCandidate{}, false, nil
+			}
+			return childCandidate, true, nil
+		},
 		next: func(context.Context) (eventing.PRDevelopmentControllerRecoveryCandidate, bool, error) {
 			return candidate, true, nil
 		},
@@ -788,8 +1384,27 @@ func TestControllerRecoveryWorkerRotatesBoundReservationIntoSuspensionPending(t 
 			_ context.Context,
 			input eventing.PRDevelopmentControllerRecoveryFinalize,
 		) (eventing.PRDevelopmentController, bool, error) {
+			order = append(order, "finalize recovery")
 			finalInput = input
-			return suspensionPendingController(controller), true, nil
+			handoffReady = true
+			return pendingController, true, nil
+		},
+		claimSuspension: func(
+			_ context.Context,
+			input eventing.PRDevelopmentControllerSuspensionClaim,
+		) (eventing.PRDevelopmentControllerSuspensionLease, bool, error) {
+			child = claimedControllerSuspension(child, input)
+			return eventing.PRDevelopmentControllerSuspensionLease{
+				Controller: pendingController,
+				Suspension: child,
+			}, true, nil
+		},
+		finishSuspension: func(
+			_ context.Context,
+			input eventing.PRDevelopmentControllerSuspensionFinalize,
+		) (eventing.PRDevelopmentControllerSuspensionTransition, bool, error) {
+			order = append(order, "finalize suspension")
+			return suspendedControllerTransition(pendingController, child, input.Result), true, nil
 		},
 	}
 	git := &fakeControllerRecoveryGit{
@@ -797,6 +1412,7 @@ func TestControllerRecoveryWorkerRotatesBoundReservationIntoSuspensionPending(t 
 			_ context.Context,
 			request gitworkspace.PinnedReservationRotationRequest,
 		) (gitworkspace.PinnedReservationRotationResult, error) {
+			order = append(order, "rotate Git")
 			rotateRequest = request
 			return gitworkspace.PinnedReservationRotationResult{
 				WorkspaceID:    intent.WorkspaceID,
@@ -809,6 +1425,13 @@ func TestControllerRecoveryWorkerRotatesBoundReservationIntoSuspensionPending(t 
 				AlreadyRotated: true,
 			}, nil
 		},
+		suspend: func(
+			_ context.Context,
+			_ gitworkspace.PinnedLineSuspendRequest,
+		) (gitworkspace.PinnedLineSuspendResult, error) {
+			order = append(order, "suspend Git")
+			return controllerSuspensionGitResult(child, false), nil
+		},
 	}
 	worker := mustControllerRecoveryWorker(t, store, func() (controllerRecoveryGit, error) {
 		return git, nil
@@ -817,6 +1440,12 @@ func TestControllerRecoveryWorkerRotatesBoundReservationIntoSuspensionPending(t 
 	processed, err := worker.ProcessOne(context.Background())
 	require.NoError(t, err)
 	require.True(t, processed)
+	assert.Equal(t, []string{
+		"rotate Git",
+		"finalize recovery",
+		"suspend Git",
+		"finalize suspension",
+	}, order)
 
 	assert.Equal(t, candidate.CaseID, claimInput.CaseID)
 	assert.Equal(t, candidate.AttemptID, claimInput.AttemptID)
@@ -834,6 +1463,88 @@ func TestControllerRecoveryWorkerRotatesBoundReservationIntoSuspensionPending(t 
 	assert.Equal(t, testDigest("7"), finalInput.Rotation.RotationHash)
 	assert.True(t, finalInput.Rotation.AlreadyRotated)
 	assert.Equal(t, worker.lease, finalInput.Lease)
+}
+
+func TestControllerRecoveryWorkerRequiresExactPostRecoverySuspensionHandoff(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		candidate   bool
+		wrongSource bool
+		wantError   string
+	}{
+		{
+			name:      "missing handoff",
+			wantError: "no executable suspension handoff",
+		},
+		{
+			name:        "different source handoff",
+			candidate:   true,
+			wrongSource: true,
+			wantError:   "different handoff",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			candidate, controller, intent := reservationRecoveryFixture()
+			pending := suspensionPendingController(controller)
+			handoffCandidate, _ := controllerRecoverySuspensionFixture(
+				pending,
+				intent.ReplacementReservationKey,
+				intent.ID,
+			)
+			if test.wrongSource {
+				handoffCandidate.SourceKind =
+					eventing.PRDevelopmentControllerSuspensionSourceOperationRecovery
+			}
+			scans := 0
+			claimedChild := false
+			store := reservationRecoveryStore(candidate, controller, intent)
+			store.finishReservation = func(
+				context.Context,
+				eventing.PRDevelopmentControllerRecoveryFinalize,
+			) (eventing.PRDevelopmentController, bool, error) {
+				return pending, true, nil
+			}
+			store.nextSuspension = func(context.Context) (
+				eventing.PRDevelopmentControllerSuspensionWorkCandidate,
+				bool,
+				error,
+			) {
+				scans++
+				if scans < 3 || !test.candidate {
+					return eventing.PRDevelopmentControllerSuspensionWorkCandidate{}, false, nil
+				}
+				return handoffCandidate, true, nil
+			}
+			store.claimSuspension = func(
+				context.Context,
+				eventing.PRDevelopmentControllerSuspensionClaim,
+			) (eventing.PRDevelopmentControllerSuspensionLease, bool, error) {
+				claimedChild = true
+				return eventing.PRDevelopmentControllerSuspensionLease{}, false, nil
+			}
+			git := &fakeControllerRecoveryGit{
+				rotate: func(
+					context.Context,
+					gitworkspace.PinnedReservationRotationRequest,
+				) (gitworkspace.PinnedReservationRotationResult, error) {
+					return reservationRotationResult(intent), nil
+				},
+			}
+			worker := mustControllerRecoveryWorker(t, store, func() (controllerRecoveryGit, error) {
+				return git, nil
+			})
+
+			processed, err := worker.ProcessOne(context.Background())
+			require.True(t, processed)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), test.wantError)
+			assert.False(t, claimedChild)
+		})
+	}
 }
 
 func TestControllerRecoveryWorkerRecoversAdoptAndResume(t *testing.T) {
@@ -1424,6 +2135,14 @@ func reservationRecoveryFixture() (
 		PreviousReservationKey:    controller.MutationReservationKey,
 		ReplacementReservationKey: "fresh-reservation",
 	}
+	controller.SourceCloneURL = intent.SourceCloneURL
+	controller.SourceRef = intent.SourceRef
+	controller.SourceCommit = intent.SourceCommit
+	controller.SourceTree = intent.SourceTree
+	controller.LineVersion = intent.LineVersion
+	controller.MutationEpoch = intent.MutationEpoch
+	controller.TipCommit = intent.TipCommit
+	controller.Tree = intent.Tree
 	candidate := eventing.PRDevelopmentControllerRecoveryCandidate{
 		Kind:             eventing.PRDevelopmentControllerRecoveryWorkReservation,
 		CaseID:           "case-one",
@@ -1474,7 +2193,7 @@ func reservationRecoveryStore(
 		context.Context,
 		eventing.PRDevelopmentControllerRecoveryFinalize,
 	) (eventing.PRDevelopmentController, bool, error) {
-		return suspensionPendingController(controller), true, nil
+		return suspendedRecoveryController(controller), false, nil
 	}
 	return store
 }
@@ -1647,9 +2366,18 @@ func suspendedOperationTransition(
 ) eventing.PRDevelopmentControllerOperationTransition {
 	operation.Status = eventing.PRDevelopmentControllerOperationFinalized
 	return eventing.PRDevelopmentControllerOperationTransition{
-		Controller: suspensionPendingController(controller),
+		Controller: suspendedRecoveryController(controller),
 		Operation:  operation,
 	}
+}
+
+func suspendedRecoveryController(
+	controller eventing.PRDevelopmentController,
+) eventing.PRDevelopmentController {
+	controller = suspensionPendingController(controller)
+	controller.Phase = eventing.PRDevelopmentControllerSuspended
+	controller.Revision++
+	return controller
 }
 
 func parkedOperationTransition(
@@ -1688,6 +2416,371 @@ func testObjectID(character string) string {
 
 func testDigest(character string) string {
 	return strings.Repeat(character, 64)
+}
+
+func suspendedResumeRecoveryFixture() (
+	eventing.PRDevelopmentControllerSuspendedResumeRecoveryCandidate,
+	eventing.PRDevelopmentController,
+	eventing.PRDevelopmentControllerSuspension,
+) {
+	now := time.Now().UTC()
+	createdAt := now.Add(-2 * time.Hour)
+	suspendedAt := now.Add(-time.Hour)
+	preparedAt := now.Add(-30 * time.Minute)
+	claimUntil := now.Add(time.Hour)
+	controller := eventing.PRDevelopmentController{
+		ID:               "controller-resume-recovery",
+		ThreadID:         "thread-resume-recovery",
+		OwnerSessionID:   "session-resume-recovery",
+		AgentID:          "agent-resume-recovery",
+		Revision:         12,
+		Phase:            eventing.PRDevelopmentControllerSuspended,
+		LineID:           "line-resume-recovery",
+		WorkspaceID:      "workspace-resume-recovery",
+		SourceCloneURL:   "https://example.test/owner/resume-recovery.git",
+		SourceRef:        "refs/pull/5/head",
+		SourceCommit:     testObjectID("1"),
+		SourceTree:       testObjectID("2"),
+		LineVersion:      3,
+		MutationEpoch:    4,
+		TipCommit:        testObjectID("3"),
+		Tree:             testObjectID("4"),
+		LeaseEpoch:       5,
+		CurrentAttemptID: "attempt-resume-recovery",
+		UpdatedAt:        preparedAt,
+	}
+	suspension := eventing.PRDevelopmentControllerSuspension{
+		ID:                          "pdsi_resume_recovery",
+		ControllerID:                controller.ID,
+		ThreadID:                    controller.ThreadID,
+		OwnerSessionID:              controller.OwnerSessionID,
+		AttemptID:                   "attempt-before-resume-recovery",
+		Ordinal:                     2,
+		SourceKind:                  eventing.PRDevelopmentControllerSuspensionSourceControllerRecovery,
+		SourceRecoveryID:            "pdri_resume_recovery_source",
+		SourceFinalRevision:         9,
+		SourceFinalHash:             testDigest("1"),
+		Mode:                        eventing.PRDevelopmentControllerSuspensionCandidate,
+		Status:                      eventing.PRDevelopmentControllerSuspensionStatusResumeClaimed,
+		AgentID:                     controller.AgentID,
+		WorkspaceID:                 controller.WorkspaceID,
+		LineID:                      controller.LineID,
+		SourceCloneURL:              controller.SourceCloneURL,
+		SourceRef:                   controller.SourceRef,
+		SourceCommit:                controller.SourceCommit,
+		SourceTree:                  controller.SourceTree,
+		LineVersion:                 controller.LineVersion,
+		MutationEpoch:               controller.MutationEpoch,
+		TipCommit:                   controller.TipCommit,
+		Tree:                        controller.Tree,
+		SuspensionReservationDigest: testDigest("2"),
+		MutationLeaseEpoch:          4,
+		MutationLeaseTokenDigest:    testDigest("3"),
+		SuspendIntentID:             "pdsi_resume_recovery",
+		SuspendRequestJSON:          []byte(`{"version":1,"mode":"suspend"}`),
+		SuspendRequestHash:          testDigest("4"),
+		PreviousHash:                testDigest("5"),
+		IntentHash:                  testDigest("6"),
+		SuspendClaimID:              "pdsc_previous_suspension_claim",
+		SuspendClaimOwner:           "previous-suspension-worker",
+		SuspendClaimEpoch:           1,
+		SuspendClaims:               1,
+		SuspendClaimedAt:            &createdAt,
+		SuspendClaimTokenDigest:     testDigest("7"),
+		SuspendResult: eventing.PRDevelopmentControllerSuspensionResult{
+			WorkspaceID:      controller.WorkspaceID,
+			Version:          controller.LineVersion,
+			MutationEpoch:    controller.MutationEpoch,
+			Tip:              controller.TipCommit,
+			Tree:             controller.Tree,
+			CandidateTree:    testObjectID("5"),
+			CandidateDigest:  testDigest("8"),
+			ChangedFileCount: 2,
+			SuspensionHash:   testDigest("9"),
+		},
+		SuspendResultJSON:       []byte(`{"version":1,"result":"suspended"}`),
+		SuspendResultHash:       testDigest("a"),
+		FinalSuspensionRevision: controller.Revision - 1,
+		SuspensionFinalHash:     testDigest("b"),
+		SuspendedAt:             &suspendedAt,
+		ResumeAttemptID:         controller.CurrentAttemptID,
+		ResumeIntentID:          "pdsri_resume_recovery",
+		ResumeReservationKey:    "resume-recovery-reservation-secret",
+		ResumeReservationDigest: controllerRecoveryReservationDigest(
+			"resume-recovery-reservation-secret",
+		),
+		ResumeRequestJSON: []byte(`{"version":1,"mode":"resume"}`),
+		ResumeRequestHash: testDigest("d"),
+		ResumeIntentHash:  testDigest("e"),
+		ResumePreparedAt:  &preparedAt,
+		ResumeClaimID:     "pdsrc_expired_resume_claim",
+		ResumeClaimOwner:  "expired-resume-worker",
+		ResumeClaimToken:  "expired-resume-claim-token",
+		ResumeClaimUntil:  &claimUntil,
+		ResumeClaimEpoch:  1,
+		ResumeClaims:      1,
+		ResumeClaimedAt:   &preparedAt,
+		CreatedAt:         createdAt,
+		UpdatedAt:         preparedAt,
+	}
+	suspension.SuspendRequest = eventing.PRDevelopmentControllerSuspensionRequest{
+		Repository:            suspension.SourceCloneURL,
+		SourceRef:             suspension.SourceRef,
+		SourceCommit:          suspension.SourceCommit,
+		AgentID:               suspension.AgentID,
+		WorkspaceID:           suspension.WorkspaceID,
+		LineID:                suspension.LineID,
+		IntentID:              suspension.SuspendIntentID,
+		ExpectedVersion:       suspension.LineVersion,
+		ExpectedMutationEpoch: suspension.MutationEpoch,
+		ExpectedTip:           suspension.TipCommit,
+		ExpectedTree:          suspension.Tree,
+	}
+	suspension.ResumeRequest = eventing.PRDevelopmentControllerSuspendedResumeRequest{
+		Repository:            suspension.SourceCloneURL,
+		SourceRef:             suspension.SourceRef,
+		SourceCommit:          suspension.SourceCommit,
+		ReservationKey:        suspension.ResumeReservationKey,
+		AgentID:               suspension.AgentID,
+		WorkspaceID:           suspension.WorkspaceID,
+		LineID:                suspension.LineID,
+		IntentID:              suspension.ResumeIntentID,
+		ExpectedVersion:       suspension.LineVersion,
+		ExpectedMutationEpoch: suspension.MutationEpoch,
+		ExpectedTip:           suspension.TipCommit,
+		ExpectedTree:          suspension.Tree,
+		SuspensionHash:        suspension.SuspendResult.SuspensionHash,
+		CandidateTree:         suspension.SuspendResult.CandidateTree,
+		CandidateDigest:       suspension.SuspendResult.CandidateDigest,
+		ChangedFileCount:      suspension.SuspendResult.ChangedFileCount,
+	}
+	return eventing.PRDevelopmentControllerSuspendedResumeRecoveryCandidate{
+		CaseID:           "case-resume-recovery",
+		SuspensionID:     suspension.ID,
+		ControllerID:     controller.ID,
+		AttemptID:        controller.CurrentAttemptID,
+		ExpectedRevision: controller.Revision,
+		AvailableAt:      now.Add(-time.Minute),
+	}, controller, suspension
+}
+
+func claimedSuspendedResumeRecovery(
+	suspension eventing.PRDevelopmentControllerSuspension,
+	input eventing.PRDevelopmentControllerSuspendedResumeRecoveryClaim,
+) eventing.PRDevelopmentControllerSuspension {
+	now := time.Now().UTC()
+	deadline := now.Add(time.Hour)
+	suspension.ResumeClaimID = input.ClaimID
+	suspension.ResumeClaimOwner = input.WorkerLabel
+	suspension.ResumeClaimToken = "resume-recovery-claim-token-secret"
+	suspension.ResumeClaimUntil = &deadline
+	suspension.ResumeClaimEpoch++
+	suspension.ResumeClaims++
+	suspension.ResumeClaimedAt = &now
+	suspension.UpdatedAt = now
+	return suspension
+}
+
+func suspendedResumeRecoveryGitResult(
+	suspension eventing.PRDevelopmentControllerSuspension,
+	replayed bool,
+) gitworkspace.PinnedLineSuspendedResumeResult {
+	request := suspension.ResumeRequest
+	return gitworkspace.PinnedLineSuspendedResumeResult{
+		WorkspaceID:      request.WorkspaceID,
+		Version:          request.ExpectedVersion,
+		MutationEpoch:    request.ExpectedMutationEpoch,
+		Tip:              request.ExpectedTip,
+		Tree:             request.ExpectedTree,
+		CandidateTree:    request.CandidateTree,
+		CandidateDigest:  request.CandidateDigest,
+		ChangedFileCount: request.ChangedFileCount,
+		SuspensionHash:   request.SuspensionHash,
+		RotationHash:     testDigest("f"),
+		AlreadyResumed:   replayed,
+	}
+}
+
+func suspendedResumeRecoveryTransition(
+	controller eventing.PRDevelopmentController,
+	claimed eventing.PRDevelopmentControllerSuspension,
+	result eventing.PRDevelopmentControllerSuspendedResumeResult,
+) eventing.PRDevelopmentControllerSuspendedResumeRecoveryTransition {
+	now := time.Now().UTC()
+	result.AlreadyResumed = false
+	resumed := claimed
+	resumed.Status = eventing.PRDevelopmentControllerSuspensionStatusResumed
+	resumed.ResumeReservationKey = ""
+	resumed.ResumeRequest.ReservationKey = ""
+	resumed.ResumeClaimToken = ""
+	resumed.ResumeClaimUntil = nil
+	resumed.ResumeClaimTokenDigest = controllerRecoverySuspensionTokenDigest(
+		"picoclaw-pr-development-controller-suspension-resume-claim-token-v1\x00",
+		claimed.ResumeClaimToken,
+	)
+	resumed.ResumeResult = result
+	resumed.ResumeResultJSON = []byte(`{"version":1,"result":"resumed"}`)
+	resumed.ResumeResultHash = testDigest("2")
+	resumed.NewMutationLeaseEpoch = controller.LeaseEpoch
+	resumed.NewMutationLeaseTokenDigest = controllerRecoverySuspensionTokenDigest(
+		"picoclaw-pr-development-controller-suspended-resume-recovery-handoff-v1\x00",
+		claimed.ResumeClaimToken,
+	)
+	resumed.NewMutationLeaseUntil = claimed.ResumeClaimUntil
+	resumed.FinalResumeRevision = controller.Revision
+	resumed.ResumeFinalHash = testDigest("4")
+	resumed.ResumedAt = &now
+	resumed.UpdatedAt = now
+
+	controller.Revision++
+	controller.Phase = eventing.PRDevelopmentControllerSuspensionPending
+	controller.WorkspaceID = result.WorkspaceID
+	controller.LineVersion = result.Version
+	controller.MutationEpoch = result.MutationEpoch
+	controller.TipCommit = result.Tip
+	controller.Tree = result.Tree
+	controller.LeaseKind = ""
+	controller.LeaseOwner = ""
+	controller.LeaseToken = ""
+	controller.LeaseUntil = nil
+	controller.MutationReservationKey = ""
+	controller.UpdatedAt = now
+
+	child := eventing.PRDevelopmentControllerSuspension{
+		ID:                          "pdsi_resume_recovery_child",
+		ControllerID:                controller.ID,
+		ThreadID:                    controller.ThreadID,
+		OwnerSessionID:              controller.OwnerSessionID,
+		AttemptID:                   controller.CurrentAttemptID,
+		Ordinal:                     resumed.Ordinal + 1,
+		SourceKind:                  eventing.PRDevelopmentControllerSuspensionSourceSuspendedResumeRecovery,
+		SourceRecoveryID:            resumed.ID,
+		SourceFinalRevision:         resumed.FinalResumeRevision,
+		SourceFinalHash:             resumed.ResumeFinalHash,
+		Mode:                        eventing.PRDevelopmentControllerSuspensionCandidate,
+		Status:                      eventing.PRDevelopmentControllerSuspensionStatusSuspendClaimed,
+		AgentID:                     controller.AgentID,
+		WorkspaceID:                 result.WorkspaceID,
+		LineID:                      controller.LineID,
+		SourceCloneURL:              controller.SourceCloneURL,
+		SourceRef:                   controller.SourceRef,
+		SourceCommit:                controller.SourceCommit,
+		SourceTree:                  controller.SourceTree,
+		LineVersion:                 result.Version,
+		MutationEpoch:               result.MutationEpoch,
+		TipCommit:                   result.Tip,
+		Tree:                        result.Tree,
+		SuspensionReservationKey:    claimed.ResumeReservationKey,
+		SuspensionReservationDigest: resumed.ResumeReservationDigest,
+		MutationLeaseEpoch:          resumed.NewMutationLeaseEpoch,
+		MutationLeaseTokenDigest:    resumed.NewMutationLeaseTokenDigest,
+		SuspendIntentID:             "pdsi_resume_recovery_child",
+		SuspendRequestJSON:          []byte(`{"version":1,"mode":"suspend"}`),
+		SuspendRequestHash:          testDigest("5"),
+		PreviousHash:                resumed.ResumeFinalHash,
+		IntentHash:                  testDigest("6"),
+		SuspendClaimID: controllerSuspendedResumeRecoveryChildClaimID(
+			resumed.ID,
+			resumed.ResumeClaimID,
+		),
+		SuspendClaimOwner: resumed.ResumeClaimOwner,
+		SuspendClaimToken: claimed.ResumeClaimToken,
+		SuspendClaimUntil: resumed.NewMutationLeaseUntil,
+		SuspendClaimEpoch: resumed.ResumeClaimEpoch,
+		SuspendClaims:     int(resumed.ResumeClaimEpoch),
+		SuspendClaimedAt:  &now,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
+	child.SuspendRequest = eventing.PRDevelopmentControllerSuspensionRequest{
+		Repository:            child.SourceCloneURL,
+		SourceRef:             child.SourceRef,
+		SourceCommit:          child.SourceCommit,
+		ReservationKey:        child.SuspensionReservationKey,
+		AgentID:               child.AgentID,
+		WorkspaceID:           child.WorkspaceID,
+		LineID:                child.LineID,
+		IntentID:              child.ID,
+		ExpectedVersion:       child.LineVersion,
+		ExpectedMutationEpoch: child.MutationEpoch,
+		ExpectedTip:           child.TipCommit,
+		ExpectedTree:          child.Tree,
+	}
+	return eventing.PRDevelopmentControllerSuspendedResumeRecoveryTransition{
+		Controller:     controller,
+		Resumed:        resumed,
+		NextSuspension: child,
+	}
+}
+
+func controllerRecoverySuspensionFixture(
+	controller eventing.PRDevelopmentController,
+	reservation, sourceRecoveryID string,
+) (
+	eventing.PRDevelopmentControllerSuspensionWorkCandidate,
+	eventing.PRDevelopmentControllerSuspension,
+) {
+	now := time.Now().UTC()
+	suspension := eventing.PRDevelopmentControllerSuspension{
+		ID:                          "pdsi_controller_recovery_handoff",
+		ControllerID:                controller.ID,
+		ThreadID:                    controller.ThreadID,
+		OwnerSessionID:              controller.OwnerSessionID,
+		AttemptID:                   controller.CurrentAttemptID,
+		Ordinal:                     1,
+		SourceKind:                  eventing.PRDevelopmentControllerSuspensionSourceControllerRecovery,
+		SourceRecoveryID:            sourceRecoveryID,
+		SourceFinalRevision:         controller.Revision - 1,
+		SourceFinalHash:             testDigest("1"),
+		Mode:                        eventing.PRDevelopmentControllerSuspensionCandidate,
+		Status:                      eventing.PRDevelopmentControllerSuspensionStatusSuspendPending,
+		AgentID:                     controller.AgentID,
+		WorkspaceID:                 controller.WorkspaceID,
+		LineID:                      controller.LineID,
+		SourceCloneURL:              controller.SourceCloneURL,
+		SourceRef:                   controller.SourceRef,
+		SourceCommit:                controller.SourceCommit,
+		SourceTree:                  controller.SourceTree,
+		LineVersion:                 controller.LineVersion,
+		MutationEpoch:               controller.MutationEpoch,
+		TipCommit:                   controller.TipCommit,
+		Tree:                        controller.Tree,
+		SuspensionReservationKey:    reservation,
+		SuspensionReservationDigest: controllerRecoveryReservationDigest(reservation),
+		MutationLeaseEpoch:          controller.LeaseEpoch,
+		MutationLeaseTokenDigest:    testDigest("2"),
+		SuspendIntentID:             "pdsi_controller_recovery_handoff",
+		SuspendRequestJSON:          []byte(`{"version":1,"mode":"suspend"}`),
+		SuspendRequestHash:          testDigest("3"),
+		PreviousHash:                testDigest("4"),
+		IntentHash:                  testDigest("5"),
+		CreatedAt:                   now,
+		UpdatedAt:                   now,
+	}
+	suspension.SuspendRequest = eventing.PRDevelopmentControllerSuspensionRequest{
+		Repository:            suspension.SourceCloneURL,
+		SourceRef:             suspension.SourceRef,
+		SourceCommit:          suspension.SourceCommit,
+		ReservationKey:        suspension.SuspensionReservationKey,
+		AgentID:               suspension.AgentID,
+		WorkspaceID:           suspension.WorkspaceID,
+		LineID:                suspension.LineID,
+		IntentID:              suspension.ID,
+		ExpectedVersion:       suspension.LineVersion,
+		ExpectedMutationEpoch: suspension.MutationEpoch,
+		ExpectedTip:           suspension.TipCommit,
+		ExpectedTree:          suspension.Tree,
+	}
+	return eventing.PRDevelopmentControllerSuspensionWorkCandidate{
+		CaseID:           "case-one",
+		SuspensionID:     suspension.ID,
+		ControllerID:     suspension.ControllerID,
+		AttemptID:        suspension.AttemptID,
+		SourceKind:       suspension.SourceKind,
+		Mode:             suspension.Mode,
+		ExpectedRevision: controller.Revision,
+		AvailableAt:      now,
+	}, suspension
 }
 
 func controllerSuspensionFixture(
@@ -1843,12 +2936,16 @@ func suspendedControllerTransition(
 	controller.LeaseUntil = nil
 	controller.MutationReservationKey = ""
 	controller.UpdatedAt = now
+	claimToken := claimed.SuspendClaimToken
 	claimed.Status = eventing.PRDevelopmentControllerSuspensionStatusSuspended
 	claimed.SuspensionReservationKey = ""
 	claimed.SuspendRequest.ReservationKey = ""
 	claimed.SuspendClaimToken = ""
 	claimed.SuspendClaimUntil = nil
-	claimed.SuspendClaimTokenDigest = testDigest("a")
+	claimed.SuspendClaimTokenDigest = controllerRecoverySuspensionTokenDigest(
+		"picoclaw-pr-development-controller-suspension-claim-token-v1\x00",
+		claimToken,
+	)
 	result.AlreadySuspended = false
 	claimed.SuspendResult = result
 	claimed.SuspendResultJSON = []byte(`{"version":1,"result":"suspended"}`)
