@@ -95,16 +95,30 @@ func (s *Store) acquirePRDevelopmentControllerSuspendedResume(
 	changed := false
 	switch suspension.Status {
 	case PRDevelopmentControllerSuspensionStatusSuspended:
+		sameAttemptRecovery, sameAttemptErr :=
+			isPRDevelopmentSuspendedResumeRecoveryContinuation(
+				ctx,
+				conn,
+				suspension,
+				relation.Attempt.ID,
+			)
+		if sameAttemptErr != nil {
+			return PRDevelopmentControllerSuspendedResumeLease{}, false, sameAttemptErr
+		}
 		if controller.Revision != acquire.ExpectedRevision ||
 			controller.Revision != suspension.FinalSuspensionRevision ||
 			controller.CurrentAttemptID != suspension.AttemptID ||
-			relation.Attempt.ID == suspension.AttemptID ||
-			controller.Revision > MaxPRDevelopmentControllerRevision-
-				prDevelopmentControllerMutationRevisionReserve {
+			(relation.Attempt.ID == suspension.AttemptID && !sameAttemptRecovery) {
 			return PRDevelopmentControllerSuspendedResumeLease{}, false, fmt.Errorf(
 				"%w: suspended controller cannot prepare this attempt",
 				ErrPRDevelopmentControllerConflict,
 			)
+		}
+		if capacityErr := requirePRDevelopmentSuspendedResumeRecoveryCapacity(
+			controller,
+			suspension,
+		); capacityErr != nil {
+			return PRDevelopmentControllerSuspendedResumeLease{}, false, capacityErr
 		}
 		reservation, reservationErr := newUniquePRDevelopmentMutationReservation(
 			ctx,
@@ -283,6 +297,66 @@ func (s *Store) acquirePRDevelopmentControllerSuspendedResume(
 		Suspension: loadedSuspension,
 		Reclaimed:  false,
 	}, changed, nil
+}
+
+func isPRDevelopmentSuspendedResumeRecoveryContinuation(
+	ctx context.Context,
+	queryer rowsQueryer,
+	suspension PRDevelopmentControllerSuspension,
+	attemptID string,
+) (bool, error) {
+	if suspension.AttemptID != attemptID || suspension.SourceKind !=
+		PRDevelopmentControllerSuspensionSourceSuspendedResumeRecovery {
+		return false, nil
+	}
+	resumed, found, err := loadPRDevelopmentControllerSuspensionByID(
+		ctx,
+		queryer,
+		suspension.SourceRecoveryID,
+	)
+	if err != nil {
+		return false, err
+	}
+	if !found || resumed.ResumeAttemptID != attemptID {
+		return false, fmt.Errorf(
+			"%w: suspended-resume recovery continuation lost its exact source",
+			ErrPRDevelopmentControllerConflict,
+		)
+	}
+	if err = validatePRDevelopmentControllerSuspendedResumeRecoverySourceLink(
+		resumed,
+		suspension,
+	); err != nil {
+		return false, fmt.Errorf(
+			"%w: suspended-resume recovery continuation source changed: %v",
+			ErrPRDevelopmentControllerConflict,
+			err,
+		)
+	}
+	return true, nil
+}
+
+// A normal resume can become crash-ambiguous after Git has installed its fresh
+// bearer. Reserve enough durable history to append the recovery-only child,
+// finalize its suspension, and still retain the ordinary controller mutation
+// headroom before minting that bearer.
+func requirePRDevelopmentSuspendedResumeRecoveryCapacity(
+	controller PRDevelopmentController,
+	suspension PRDevelopmentControllerSuspension,
+) error {
+	const recoveryRevisionReserve int64 = 3
+	revisionReserve := prDevelopmentControllerMutationRevisionReserve
+	if revisionReserve < recoveryRevisionReserve {
+		revisionReserve = recoveryRevisionReserve
+	}
+	if suspension.Ordinal >= MaxPRDevelopmentControllerFences-1 ||
+		controller.Revision > MaxPRDevelopmentControllerRevision-revisionReserve {
+		return fmt.Errorf(
+			"%w: suspended resume has no recovery history capacity",
+			ErrPRDevelopmentControllerConflict,
+		)
+	}
+	return nil
 }
 
 // RenewPRDevelopmentControllerSuspendedResume extends only one exact live

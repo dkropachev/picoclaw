@@ -4,11 +4,83 @@ package eventing
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestRecoveryScannerQueryUsesStableGlobalSourceOrder(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	for _, statement := range []string{
+		`CREATE TABLE pr_development_repair_sessions (id TEXT, case_id TEXT)`,
+		`CREATE TABLE pr_development_repair_attempts (id TEXT, session_id TEXT)`,
+		`CREATE TABLE pr_development_controller_operation_intents (
+			id TEXT, controller_id TEXT, attempt_id TEXT, recovery_id TEXT,
+			recovery_revision INTEGER, recovery_staged_at INTEGER,
+			status TEXT, claim_until INTEGER
+		)`,
+		`CREATE TABLE pr_development_controller_recovery_intents (
+			id TEXT, controller_id TEXT, attempt_id TEXT, recovery_revision INTEGER,
+			created_at INTEGER, mode TEXT, status TEXT, claim_until INTEGER
+		)`,
+		`INSERT INTO pr_development_repair_sessions VALUES
+			('session-old', 'case-old'), ('session-new', 'case-new')`,
+		`INSERT INTO pr_development_repair_attempts VALUES
+			('attempt-old', 'session-old'), ('attempt-new', 'session-new')`,
+		`INSERT INTO pr_development_controller_recovery_intents VALUES
+			('recovery-old', 'controller-old', 'attempt-old', 3,
+			 100, 'bound', 'pending', NULL)`,
+		`INSERT INTO pr_development_controller_operation_intents VALUES
+			('operation-new', 'controller-new', 'attempt-new', 'recovery-new', 7,
+			 200, 'recovery_pending', NULL)`,
+	} {
+		_, err = db.Exec(statement)
+		require.NoError(t, err)
+	}
+
+	scanKind := func(now int64) (string, int64) {
+		t.Helper()
+		var kind, caseID, controllerID, attemptID, recoveryID, operationID string
+		var revision, availableAt int64
+		err = db.QueryRow(
+			prDevelopmentNextRecoveryQuery,
+			now,
+			now,
+		).Scan(
+			&kind,
+			&caseID,
+			&controllerID,
+			&attemptID,
+			&recoveryID,
+			&operationID,
+			&revision,
+			&availableAt,
+		)
+		require.NoError(t, err)
+		return kind, availableAt
+	}
+
+	kind, availableAt := scanKind(300)
+	require.Equal(t, string(PRDevelopmentControllerRecoveryWorkReservation), kind)
+	require.EqualValues(t, 100, availableAt)
+	_, err = db.Exec(`UPDATE pr_development_controller_recovery_intents
+		SET status = 'claimed', claim_until = 250 WHERE id = 'recovery-old'`)
+	require.NoError(t, err)
+	kind, availableAt = scanKind(300)
+	require.Equal(t, string(PRDevelopmentControllerRecoveryWorkReservation), kind)
+	require.EqualValues(t, 250, availableAt,
+		"a mutable reclaim deadline must not change stable source priority")
+	_, err = db.Exec(`UPDATE pr_development_controller_recovery_intents
+		SET claim_until = 400 WHERE id = 'recovery-old'`)
+	require.NoError(t, err)
+	kind, availableAt = scanKind(300)
+	require.Equal(t, string(PRDevelopmentControllerRecoveryWorkOperation), kind)
+	require.EqualValues(t, 200, availableAt)
+}
 
 func TestStoreRecoveryScannerStagesAndFindsBoundReservationRecovery(t *testing.T) {
 	t.Parallel()

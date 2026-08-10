@@ -103,10 +103,23 @@ func (s *Store) ClaimPRDevelopmentRepairOrchestration(
 
 		var existingAttemptID string
 		queryErr := conn.QueryRowContext(ctx, `
-			SELECT attempt_id
-			FROM pr_development_repair_orchestrations
-			WHERE phase IN ('bootstrap', 'edited', 'validated') AND claim_until <= ?
-			ORDER BY created_at, attempt_id
+			SELECT orchestration.attempt_id
+			FROM pr_development_repair_orchestrations AS orchestration
+			WHERE orchestration.phase IN ('bootstrap', 'edited', 'validated') AND
+			      orchestration.claim_until <= ? AND
+			      NOT EXISTS (
+				      SELECT 1
+				      FROM pr_development_controller_suspensions AS suspensions
+				      WHERE suspensions.resume_attempt_id = orchestration.attempt_id AND
+				            suspensions.status = 'resume_claimed'
+			      ) AND
+			      NOT EXISTS (
+				      SELECT 1
+				      FROM pr_development_controller_suspensions AS suspensions
+				      WHERE suspensions.attempt_id = orchestration.attempt_id AND
+				            suspensions.status IN ('suspend_pending', 'suspend_claimed')
+			      )
+			ORDER BY orchestration.created_at, orchestration.attempt_id
 			LIMIT 1`,
 			toDBTime(now),
 		).Scan(&existingAttemptID)
@@ -120,7 +133,21 @@ func (s *Store) ClaimPRDevelopmentRepairOrchestration(
 					claim_epoch = claim_epoch + 1, claims = claims + 1,
 					updated_at = ?
 				WHERE attempt_id = ? AND phase IN ('bootstrap', 'edited', 'validated')
-					AND claim_until <= ?`,
+					AND claim_until <= ? AND
+					NOT EXISTS (
+						SELECT 1
+						FROM pr_development_controller_suspensions AS suspensions
+						WHERE suspensions.resume_attempt_id =
+							pr_development_repair_orchestrations.attempt_id AND
+							suspensions.status = 'resume_claimed'
+					) AND
+					NOT EXISTS (
+						SELECT 1
+						FROM pr_development_controller_suspensions AS suspensions
+						WHERE suspensions.attempt_id =
+							pr_development_repair_orchestrations.attempt_id AND
+							suspensions.status IN ('suspend_pending', 'suspend_claimed')
+					)`,
 				worker,
 				token,
 				toDBTime(deadline),

@@ -257,6 +257,36 @@ func TestStorePRDevelopmentSuspendedResumeRecoveryClaimReclaimFinalizeAndReplay(
 	loaded, err := fixture.Store.GetPRDevelopmentControllerForCase(ctx, fixture.Case.ID)
 	require.NoError(t, err)
 	assert.Equal(t, PRDevelopmentControllerSuspended, loaded.Phase)
+
+	continuedRun, claimed, err := fixture.Store.ClaimPRDevelopmentRepairOrchestration(
+		ctx,
+		PRDevelopmentRepairOrchestrationClaim{
+			WorkerLabel: "continued-resume-worker",
+			Lease:       5 * time.Minute,
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	assert.Equal(t, fixture.Attempt.ID, continuedRun.AttemptID)
+	continued, changed, err := fixture.Store.
+		AcquirePRDevelopmentRepairOrchestrationController(
+			ctx,
+			PRDevelopmentRepairOrchestrationControllerAcquire{
+				CaseID:           fixture.Case.ID,
+				AttemptID:        fixture.Attempt.ID,
+				ClaimToken:       continuedRun.ClaimToken,
+				ExpectedRevision: suspended.Controller.Revision,
+				WorkerLabel:      "continued-resume-worker",
+				Lease:            5 * time.Minute,
+			},
+		)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.NotNil(t, continued.SuspendedResume)
+	assert.Equal(t, suspended.Suspension.ID,
+		continued.SuspendedResume.Suspension.ID)
+	assert.Equal(t, fixture.Attempt.ID,
+		continued.SuspendedResume.Suspension.ResumeAttemptID)
 }
 
 func TestStorePRDevelopmentSuspendedResumeRecoveryWaitsForParentExpiry(

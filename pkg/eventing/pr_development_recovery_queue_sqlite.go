@@ -9,7 +9,49 @@ import (
 	"fmt"
 )
 
-const maxPRDevelopmentRecoveryStageBatch = 32
+const (
+	maxPRDevelopmentRecoveryStageBatch = 32
+	prDevelopmentNextRecoveryQuery     = `
+		SELECT kind, case_id, controller_id, attempt_id, recovery_id,
+		       operation_id, expected_revision, available_at
+		FROM (
+			SELECT 'operation_recovery' AS kind, sessions.case_id AS case_id,
+			       operations.controller_id AS controller_id,
+			       operations.attempt_id AS attempt_id,
+			       operations.recovery_id AS recovery_id,
+			       operations.id AS operation_id,
+			       operations.recovery_revision AS expected_revision,
+			       COALESCE(operations.claim_until, operations.recovery_staged_at) AS available_at,
+			       operations.recovery_staged_at AS source_position
+			FROM pr_development_controller_operation_intents AS operations
+			JOIN pr_development_repair_attempts AS attempts
+			  ON attempts.id = operations.attempt_id
+			JOIN pr_development_repair_sessions AS sessions
+			  ON sessions.id = attempts.session_id
+			WHERE operations.status = 'recovery_pending' OR
+			      (operations.status = 'recovery_claimed' AND
+			       operations.claim_until <= ?)
+			UNION ALL
+			SELECT 'reservation_recovery' AS kind, sessions.case_id AS case_id,
+			       recoveries.controller_id AS controller_id,
+			       recoveries.attempt_id AS attempt_id,
+			       recoveries.id AS recovery_id,
+			       '' AS operation_id,
+			       recoveries.recovery_revision AS expected_revision,
+			       COALESCE(recoveries.claim_until, recoveries.created_at) AS available_at,
+			       recoveries.created_at AS source_position
+			FROM pr_development_controller_recovery_intents AS recoveries
+			JOIN pr_development_repair_attempts AS attempts
+			  ON attempts.id = recoveries.attempt_id
+			JOIN pr_development_repair_sessions AS sessions
+			  ON sessions.id = attempts.session_id
+			WHERE recoveries.mode = 'bound' AND
+			      (recoveries.status = 'pending' OR
+			       (recoveries.status = 'claimed' AND recoveries.claim_until <= ?))
+		)
+		ORDER BY source_position, recovery_id, operation_id, kind
+		LIMIT 1`
+)
 
 var _ PRDevelopmentControllerRecoveryScanner = (*Store)(nil)
 
@@ -100,8 +142,8 @@ func (s *Store) StageExpiredPRDevelopmentControllerRecoveries(
 }
 
 // NextPRDevelopmentControllerRecovery returns the oldest currently claimable
-// exact recovery pointer. V13 operation recovery has precedence over the v12
-// fallback, and the unsafe legacy v12-unbound state is intentionally excluded.
+// exact recovery pointer. All eligible bound sources share one stable creation
+// order; the unsafe legacy v12-unbound state is intentionally excluded.
 // The returned pointer carries no claim token or reservation bearer.
 func (s *Store) NextPRDevelopmentControllerRecovery(
 	ctx context.Context,
@@ -121,46 +163,7 @@ func (s *Store) NextPRDevelopmentControllerRecovery(
 			if clockErr != nil {
 				return clockErr
 			}
-			return queryer.QueryRowContext(ctx, `
-				SELECT kind, case_id, controller_id, attempt_id, recovery_id,
-				       operation_id, expected_revision, available_at
-				FROM (
-					SELECT 'operation_recovery' AS kind, sessions.case_id AS case_id,
-					       operations.controller_id AS controller_id,
-					       operations.attempt_id AS attempt_id,
-					       operations.recovery_id AS recovery_id,
-					       operations.id AS operation_id,
-					       operations.recovery_revision AS expected_revision,
-					       COALESCE(operations.claim_until, operations.recovery_staged_at) AS available_at,
-					       0 AS priority
-					FROM pr_development_controller_operation_intents AS operations
-					JOIN pr_development_repair_attempts AS attempts
-					  ON attempts.id = operations.attempt_id
-					JOIN pr_development_repair_sessions AS sessions
-					  ON sessions.id = attempts.session_id
-					WHERE operations.status = 'recovery_pending' OR
-					      (operations.status = 'recovery_claimed' AND
-					       operations.claim_until <= ?)
-					UNION ALL
-					SELECT 'reservation_recovery' AS kind, sessions.case_id AS case_id,
-					       recoveries.controller_id AS controller_id,
-					       recoveries.attempt_id AS attempt_id,
-					       recoveries.id AS recovery_id,
-					       '' AS operation_id,
-					       recoveries.recovery_revision AS expected_revision,
-					       COALESCE(recoveries.claim_until, recoveries.created_at) AS available_at,
-					       1 AS priority
-					FROM pr_development_controller_recovery_intents AS recoveries
-					JOIN pr_development_repair_attempts AS attempts
-					  ON attempts.id = recoveries.attempt_id
-					JOIN pr_development_repair_sessions AS sessions
-					  ON sessions.id = attempts.session_id
-					WHERE recoveries.mode = 'bound' AND
-					      (recoveries.status = 'pending' OR
-					       (recoveries.status = 'claimed' AND recoveries.claim_until <= ?))
-				)
-				ORDER BY priority, available_at, recovery_id, operation_id
-				LIMIT 1`,
+			return queryer.QueryRowContext(ctx, prDevelopmentNextRecoveryQuery,
 				toDBTime(now),
 				toDBTime(now),
 			).Scan(

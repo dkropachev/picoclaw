@@ -318,7 +318,7 @@ func TestStorePRDevelopmentControllerSuspendedResumeCannotOutliveOrchestration(
 	assert.ErrorIs(t, err, ErrStaleLease)
 	assert.False(t, changed)
 
-	reclaimedRun, claimed, err := fixture.Store.ClaimPRDevelopmentRepairOrchestration(
+	_, claimed, err := fixture.Store.ClaimPRDevelopmentRepairOrchestration(
 		ctx,
 		PRDevelopmentRepairOrchestrationClaim{
 			WorkerLabel: "suspended-resume-worker",
@@ -326,17 +326,13 @@ func TestStorePRDevelopmentControllerSuspendedResumeCannotOutliveOrchestration(
 		},
 	)
 	require.NoError(t, err)
-	require.True(t, claimed)
-	assert.Equal(t, fixture.Attempt.ID, reclaimedRun.AttemptID)
-	assert.NotEqual(t, fixture.Run.ClaimToken, reclaimedRun.ClaimToken)
-	acquire.ClaimToken = reclaimedRun.ClaimToken
-	acquire.ExpectedRevision = resume.Controller.Revision
-	_, changed, err = fixture.Store.AcquirePRDevelopmentRepairOrchestrationController(
-		ctx,
-		acquire,
-	)
-	assert.ErrorIs(t, err, ErrPRDevelopmentControllerRecoveryRequired)
-	assert.False(t, changed)
+	assert.False(t, claimed, "ordinary scheduling must yield to resume recovery")
+	candidate, found, err := fixture.Store.
+		NextPRDevelopmentControllerSuspendedResumeRecovery(ctx)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, resume.Suspension.ID, candidate.SuspensionID)
+	assert.Equal(t, fixture.Attempt.ID, candidate.AttemptID)
 	loaded, found, err := loadPRDevelopmentControllerSuspensionByID(
 		ctx,
 		fixture.Store.db,
@@ -347,6 +343,31 @@ func TestStorePRDevelopmentControllerSuspendedResumeCannotOutliveOrchestration(
 	assert.Equal(t, PRDevelopmentControllerSuspensionStatusResumeClaimed, loaded.Status)
 	assert.Equal(t, resume.Suspension.ResumeReservationKey, loaded.ResumeReservationKey)
 	assert.Equal(t, resume.Suspension.ResumeClaimToken, loaded.ResumeClaimToken)
+}
+
+func TestStorePRDevelopmentControllerSuspendedResumeReservesRecoveryChainSlot(
+	t *testing.T,
+) {
+	controller := PRDevelopmentController{
+		Revision: MaxPRDevelopmentControllerRevision -
+			prDevelopmentControllerMutationRevisionReserve,
+	}
+	suspension := PRDevelopmentControllerSuspension{
+		Ordinal: MaxPRDevelopmentControllerFences - 2,
+	}
+	require.NoError(t, requirePRDevelopmentSuspendedResumeRecoveryCapacity(
+		controller,
+		suspension,
+	))
+
+	suspension.Ordinal++
+	err := requirePRDevelopmentSuspendedResumeRecoveryCapacity(controller, suspension)
+	assert.ErrorIs(t, err, ErrPRDevelopmentControllerConflict)
+
+	suspension.Ordinal--
+	controller.Revision++
+	err = requirePRDevelopmentSuspendedResumeRecoveryCapacity(controller, suspension)
+	assert.ErrorIs(t, err, ErrPRDevelopmentControllerConflict)
 }
 
 func suspendedResumeResultForTest(

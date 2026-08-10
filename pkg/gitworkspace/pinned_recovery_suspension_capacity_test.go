@@ -188,6 +188,48 @@ func TestManagerRotatePinnedReservationSuspensionCapacity(t *testing.T) {
 	assertPinnedRecoveryCapacityInventoryUnchanged(t, fixture.manager, before)
 }
 
+func TestManagerResumeSuspendedPinnedLineReservesRecoveryCapacity(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPinnedLineTestFixture(t, "pr-development/suspended-resume-capacity-old")
+	installPinnedRecoveryRotationHistory(
+		t,
+		fixture.manager,
+		fixture.workspace.ID,
+		pinnedLineTestID,
+		fixture.lease.Version,
+		fixture.lease.MutationEpoch,
+		fixture.lease.Tip,
+		fixture.lease.Tree,
+		fixture.pin.ReservationKey,
+		fixture.pin.AgentID,
+		maxPinnedReservationRotations-1,
+		true,
+	)
+	suspended, err := fixture.manager.SuspendPinnedLine(
+		ctx,
+		suspensionAPITestSuspendRequest(
+			fixture,
+			"pdlnsuspend_resume_capacity",
+		),
+	)
+	if err != nil {
+		t.Fatalf("SuspendPinnedLine() error = %v", err)
+	}
+	before := readPinnedRecoveryCapacityInventory(t, fixture.manager)
+	request := suspensionAPITestResumeRequest(
+		fixture,
+		suspended,
+		"pr-development/suspended-resume-capacity-fresh",
+		"pdlnresume_capacity_rejected",
+	)
+	if _, err = fixture.manager.ResumeSuspendedPinnedLine(ctx, request); err == nil ||
+		!errors.Is(err, ErrPinnedLineConflict) ||
+		!strings.Contains(err.Error(), "suspended-resume rotation capacity") {
+		t.Fatalf("ResumeSuspendedPinnedLine() capacity error = %v", err)
+	}
+	assertPinnedRecoveryCapacityInventoryUnchanged(t, fixture.manager, before)
+}
+
 func TestPinnedRecoverySuspensionCapacityRequiresBoundAvailableLine(t *testing.T) {
 	fixture := newPinnedCommitTestFixture(t, "pr-development/rotation-capacity-unbound")
 	request := unboundPinnedReservationRotationRequest(
