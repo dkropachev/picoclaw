@@ -216,13 +216,46 @@ type Page struct {
 }
 
 type Detail struct {
-	Case                    CaseDetail     `json:"case"`
-	ConversationVersion     int64          `json:"conversation_version"`
-	Messages                []Message      `json:"messages"`
-	RepairAvailable         bool           `json:"repair_available"`
-	RepairUnavailableReason string         `json:"repair_unavailable_reason,omitempty"`
-	RepairRevision          int64          `json:"repair_revision"`
-	RepairSession           *RepairSession `json:"repair_session,omitempty"`
+	Case                    CaseDetail        `json:"case"`
+	ConversationVersion     int64             `json:"conversation_version"`
+	Messages                []Message         `json:"messages"`
+	RepairAvailable         bool              `json:"repair_available"`
+	RepairUnavailableReason string            `json:"repair_unavailable_reason,omitempty"`
+	RepairRevision          int64             `json:"repair_revision"`
+	RepairSession           *RepairSession    `json:"repair_session,omitempty"`
+	LocalDevelopment        *LocalDevelopment `json:"local_development,omitempty"`
+}
+
+// LocalDevelopmentReviewStatus is the browser-safe lifecycle of the exact
+// latest repair attempt's immutable local review evidence.
+type LocalDevelopmentReviewStatus string
+
+const (
+	LocalDevelopmentReviewNotStarted LocalDevelopmentReviewStatus = "not_started"
+	LocalDevelopmentReviewPending    LocalDevelopmentReviewStatus = "pending"
+	LocalDevelopmentReviewCompleted  LocalDevelopmentReviewStatus = "completed"
+)
+
+// LocalDevelopment is a bounded, non-authorizing projection of the latest
+// public repair attempt and its exact durable local CI/review evidence. It
+// deliberately cannot represent a lease, retained workspace or line, raw
+// finding, provider write, push, or publication authority.
+type LocalDevelopment struct {
+	AttemptID          string                                    `json:"attempt_id"`
+	AttemptOrdinal     int                                       `json:"attempt_ordinal"`
+	AttemptStatus      eventing.PRDevelopmentRepairStatus        `json:"attempt_status"`
+	Summary            string                                    `json:"summary,omitempty"`
+	CommitSHA          string                                    `json:"commit_sha,omitempty"`
+	NoChanges          bool                                      `json:"no_changes"`
+	CIStatus           eventing.PRDevelopmentCIStatus            `json:"ci_status,omitempty"`
+	CIPlanDigest       string                                    `json:"ci_plan_digest,omitempty"`
+	CIResultDigest     string                                    `json:"ci_result_digest,omitempty"`
+	ReviewStatus       LocalDevelopmentReviewStatus              `json:"review_status"`
+	ReviewOutcome      eventing.PRDevelopmentLedgerReviewOutcome `json:"review_outcome,omitempty"`
+	ReviewSummary      string                                    `json:"review_summary,omitempty"`
+	ReviewFindingCount int                                       `json:"review_finding_count"`
+	LocalReady         bool                                      `json:"local_ready"`
+	UpdatedAt          time.Time                                 `json:"updated_at"`
 }
 
 type RepairAttempt struct {
@@ -334,7 +367,7 @@ func (service *Service) Get(ctx context.Context, caseID string) (Detail, error) 
 	if err = validateConversation(caseID, conversation); err != nil {
 		return Detail{}, err
 	}
-	return service.projectDetail(stored, conversation, nil)
+	return service.projectDetail(stored, conversation, nil, nil)
 }
 
 // Repair admits one explicit local-edit instruction. The request returns as
@@ -451,6 +484,7 @@ func (service *Service) Chat(ctx context.Context, request ChatRequest) (Detail, 
 		captured      eventing.PRDevelopmentCase
 		current       eventing.PRDevelopmentConversation
 		repairSession *eventing.PRDevelopmentRepairSession
+		localEvidence *eventing.PRDevelopmentLocalEvidenceSnapshot
 	)
 	if service.repairStore != nil && !isNilServiceValue(service.repairStore) {
 		workbench, loadErr := service.repairStore.GetPRDevelopmentWorkbench(ctx, caseID)
@@ -460,6 +494,7 @@ func (service *Service) Chat(ctx context.Context, request ChatRequest) (Detail, 
 		captured = workbench.Case
 		current = workbench.Conversation
 		repairSession = workbench.RepairSession
+		localEvidence = workbench.LocalEvidence
 	} else {
 		captured, err = service.store.GetPRDevelopmentCase(ctx, caseID)
 		if err != nil {
@@ -508,7 +543,12 @@ func (service *Service) Chat(ctx context.Context, request ChatRequest) (Detail, 
 	if err = validateConversation(caseID, conversation); err != nil {
 		return Detail{}, err
 	}
-	partial, err := service.projectDetail(captured, conversation, repairSession)
+	partial, err := service.projectDetail(
+		captured,
+		conversation,
+		repairSession,
+		localEvidence,
+	)
 	if err != nil {
 		return Detail{}, err
 	}
@@ -541,7 +581,7 @@ func (service *Service) Chat(ctx context.Context, request ChatRequest) (Detail, 
 	if err = validateConversation(caseID, conversation); err != nil {
 		return partial, err
 	}
-	return service.projectDetail(captured, conversation, repairSession)
+	return service.projectDetail(captured, conversation, repairSession, localEvidence)
 }
 
 func (service *Service) runAI(
@@ -824,6 +864,7 @@ func (service *Service) projectWorkbench(
 		workbench.Case,
 		workbench.Conversation,
 		workbench.RepairSession,
+		workbench.LocalEvidence,
 	)
 }
 
@@ -831,6 +872,7 @@ func (service *Service) projectDetail(
 	captured eventing.PRDevelopmentCase,
 	conversation eventing.PRDevelopmentConversation,
 	repairSession *eventing.PRDevelopmentRepairSession,
+	localEvidence *eventing.PRDevelopmentLocalEvidenceSnapshot,
 ) (Detail, error) {
 	messages := make([]Message, len(conversation.Messages))
 	for index, stored := range conversation.Messages {
@@ -848,6 +890,12 @@ func (service *Service) projectDetail(
 		Messages:            messages,
 	}
 	if repairSession == nil {
+		if localEvidence != nil {
+			return Detail{}, fmt.Errorf(
+				"%w: local development evidence has no repair session",
+				ErrUnavailable,
+			)
+		}
 		detail.RepairAvailable = service.repairAvailableForAgent(service.agentID)
 		if !detail.RepairAvailable {
 			detail.RepairUnavailableReason = "runtime_unavailable"
@@ -864,6 +912,14 @@ func (service *Service) projectDetail(
 	}
 	detail.RepairRevision = projected.Revision
 	detail.RepairSession = &projected
+	detail.LocalDevelopment, err = projectLocalDevelopment(
+		captured.ID,
+		*repairSession,
+		localEvidence,
+	)
+	if err != nil {
+		return Detail{}, err
+	}
 	detail.RepairAvailable = service.repairAvailableForAgent(projected.AgentID)
 	if !detail.RepairAvailable {
 		detail.RepairUnavailableReason = "runtime_unavailable"
@@ -973,6 +1029,235 @@ func projectRepairSession(
 		)
 	}
 	return projected, nil
+}
+
+func projectLocalDevelopment(
+	caseID string,
+	session eventing.PRDevelopmentRepairSession,
+	snapshot *eventing.PRDevelopmentLocalEvidenceSnapshot,
+) (*LocalDevelopment, error) {
+	if len(session.Attempts) == 0 {
+		return nil, nil
+	}
+	latest := session.Attempts[len(session.Attempts)-1]
+	projected := &LocalDevelopment{
+		AttemptID:          latest.ID,
+		AttemptOrdinal:     latest.Ordinal,
+		AttemptStatus:      latest.Status,
+		Summary:            latest.Summary,
+		ReviewStatus:       LocalDevelopmentReviewNotStarted,
+		ReviewFindingCount: 0,
+		UpdatedAt:          latest.UpdatedAt,
+	}
+	if snapshot == nil {
+		return projected, nil
+	}
+	if !validDevelopmentID(snapshot.Ledger.ThreadID, "pdt_") {
+		return nil, fmt.Errorf(
+			"%w: local development ledger binding is invalid",
+			ErrUnavailable,
+		)
+	}
+	if snapshot.Controller != nil &&
+		snapshot.Controller.ThreadID != snapshot.Ledger.ThreadID {
+		return nil, fmt.Errorf(
+			"%w: local development controller binding is invalid",
+			ErrUnavailable,
+		)
+	}
+
+	attemptIndex := -1
+	reviewIndex := -1
+	for index, entry := range snapshot.Ledger.Entries {
+		if entry.AttemptID != latest.ID {
+			continue
+		}
+		switch entry.Kind {
+		case eventing.PRDevelopmentLedgerAttempt:
+			if attemptIndex >= 0 {
+				return nil, fmt.Errorf(
+					"%w: local development attempt evidence is duplicated",
+					ErrUnavailable,
+				)
+			}
+			attemptIndex = index
+		case eventing.PRDevelopmentLedgerReview:
+			if reviewIndex >= 0 {
+				return nil, fmt.Errorf(
+					"%w: local development review evidence is duplicated",
+					ErrUnavailable,
+				)
+			}
+			reviewIndex = index
+		default:
+			return nil, fmt.Errorf(
+				"%w: local development ledger kind is invalid",
+				ErrUnavailable,
+			)
+		}
+	}
+	if attemptIndex < 0 {
+		if reviewIndex >= 0 {
+			return nil, fmt.Errorf(
+				"%w: local development review has no attempt evidence",
+				ErrUnavailable,
+			)
+		}
+		if snapshot.Orchestration != nil {
+			return nil, fmt.Errorf(
+				"%w: local development orchestration has no latest attempt evidence",
+				ErrUnavailable,
+			)
+		}
+		return projected, nil
+	}
+	// Pre-v14 ledgers may contain an attempt account without the exact durable
+	// orchestration receipt that now proves its CI status. The ledger loader
+	// preserves those rows with a compatibility default, but that default must
+	// never cross this browser boundary as current green evidence.
+	if snapshot.Orchestration == nil {
+		return projected, nil
+	}
+	if latest.Status != eventing.PRDevelopmentRepairCompleted ||
+		snapshot.Controller == nil {
+		return nil, fmt.Errorf(
+			"%w: local development attempt evidence is not terminally bound",
+			ErrUnavailable,
+		)
+	}
+	attempt := snapshot.Ledger.Entries[attemptIndex]
+	orchestration := snapshot.Orchestration
+	if orchestration.AttemptID != latest.ID || orchestration.SessionID != session.ID ||
+		orchestration.CaseID != caseID ||
+		orchestration.ThreadID != snapshot.Ledger.ThreadID ||
+		orchestration.ControllerID != snapshot.Controller.ID ||
+		orchestration.Phase != eventing.PRDevelopmentRepairOrchestrationCompleted ||
+		orchestration.LedgerEntryID != attempt.ID ||
+		orchestration.Summary != latest.Summary || orchestration.Validation == nil {
+		return nil, fmt.Errorf(
+			"%w: local development orchestration evidence is invalid",
+			ErrUnavailable,
+		)
+	}
+	receipt := orchestration.Validation
+	if attempt.CaseID != caseID || attempt.Summary != latest.Summary ||
+		attempt.CreatedAt.IsZero() || attempt.CreatedAt.Before(latest.CreatedAt) ||
+		!validObjectID(attempt.Commit) || !validObjectID(attempt.Tree) ||
+		len(attempt.Commit) != len(attempt.Tree) ||
+		!validControllerSHA256(attempt.CIPlanDigest) ||
+		!validControllerSHA256(attempt.CIResultDigest) ||
+		!validLocalDevelopmentCIStatus(attempt.CIStatus) ||
+		receipt.CIStatus != attempt.CIStatus ||
+		receipt.CIEffectivePlanDigest != attempt.CIPlanDigest ||
+		receipt.CIExecutionDigest != attempt.CIResultDigest ||
+		receipt.CandidateTree != attempt.Tree || receipt.NoChanges != attempt.NoChanges {
+		return nil, fmt.Errorf(
+			"%w: local development attempt evidence is invalid",
+			ErrUnavailable,
+		)
+	}
+	controller := snapshot.Controller
+	if controller.OwnerSessionID != session.ID ||
+		controller.CurrentAttemptID != latest.ID {
+		return nil, fmt.Errorf(
+			"%w: local development attempt is not current",
+			ErrUnavailable,
+		)
+	}
+	projected.CommitSHA = attempt.Commit
+	projected.NoChanges = attempt.NoChanges
+	projected.CIStatus = attempt.CIStatus
+	projected.CIPlanDigest = attempt.CIPlanDigest
+	projected.CIResultDigest = attempt.CIResultDigest
+	projected.ReviewStatus = LocalDevelopmentReviewPending
+	if attempt.CreatedAt.After(projected.UpdatedAt) {
+		projected.UpdatedAt = attempt.CreatedAt
+	}
+
+	if reviewIndex < 0 {
+		if (controller.Phase != eventing.PRDevelopmentControllerReviewPending &&
+			controller.Phase != eventing.PRDevelopmentControllerReview) ||
+			controller.MutationReservationKey != "" {
+			return nil, fmt.Errorf(
+				"%w: local development review is not reservation-free pending",
+				ErrUnavailable,
+			)
+		}
+		return projected, nil
+	}
+	if reviewIndex != attemptIndex+1 {
+		return nil, fmt.Errorf(
+			"%w: local development review is not paired with its attempt",
+			ErrUnavailable,
+		)
+	}
+	review := snapshot.Ledger.Entries[reviewIndex]
+	if review.CaseID != caseID || review.Ordinal != attempt.Ordinal+1 ||
+		review.FenceOrdinal != attempt.FenceOrdinal ||
+		review.CreatedAt.IsZero() || review.CreatedAt.Before(attempt.CreatedAt) ||
+		!validLocalDevelopmentReviewOutcome(review.ReviewOutcome) ||
+		!validLocalDevelopmentReviewSummary(review.Summary) ||
+		len(review.Findings) > eventing.MaxPRDevelopmentLedgerReviewFindings ||
+		(review.ReviewOutcome == eventing.PRDevelopmentLedgerReviewPassed &&
+			(len(review.Findings) != 0 ||
+				attempt.CIStatus != eventing.PRDevelopmentCIPassed)) ||
+		(review.ReviewOutcome == eventing.PRDevelopmentLedgerReviewChangesRequired &&
+			len(review.Findings) == 0) ||
+		controller.Phase != eventing.PRDevelopmentControllerReady ||
+		controller.LeaseKind != "" || controller.LeaseOwner != "" ||
+		controller.LeaseToken != "" || controller.LeaseUntil != nil ||
+		controller.MutationReservationKey != "" {
+		return nil, fmt.Errorf(
+			"%w: local development review evidence is invalid",
+			ErrUnavailable,
+		)
+	}
+	projected.ReviewStatus = LocalDevelopmentReviewCompleted
+	projected.ReviewOutcome = review.ReviewOutcome
+	projected.ReviewSummary = review.Summary
+	projected.ReviewFindingCount = len(review.Findings)
+	projected.LocalReady = attempt.CIStatus == eventing.PRDevelopmentCIPassed &&
+		review.ReviewOutcome == eventing.PRDevelopmentLedgerReviewPassed
+	if review.CreatedAt.After(projected.UpdatedAt) {
+		projected.UpdatedAt = review.CreatedAt
+	}
+	return projected, nil
+}
+
+func validLocalDevelopmentCIStatus(status eventing.PRDevelopmentCIStatus) bool {
+	switch status {
+	case eventing.PRDevelopmentCIPassed,
+		eventing.PRDevelopmentCIFailed,
+		eventing.PRDevelopmentCIIncomplete,
+		eventing.PRDevelopmentCIPlanChanged,
+		eventing.PRDevelopmentCITimedOut,
+		eventing.PRDevelopmentCICanceled,
+		eventing.PRDevelopmentCIOutputLimitExceeded,
+		eventing.PRDevelopmentCIEnvironmentUnavailable,
+		eventing.PRDevelopmentCIInfrastructureError:
+		return true
+	default:
+		return false
+	}
+}
+
+func validLocalDevelopmentReviewOutcome(
+	outcome eventing.PRDevelopmentLedgerReviewOutcome,
+) bool {
+	switch outcome {
+	case eventing.PRDevelopmentLedgerReviewPassed,
+		eventing.PRDevelopmentLedgerReviewChangesRequired,
+		eventing.PRDevelopmentLedgerReviewAttentionRequired:
+		return true
+	default:
+		return false
+	}
+}
+
+func validLocalDevelopmentReviewSummary(summary string) bool {
+	return summary != "" && summary == strings.TrimSpace(summary) &&
+		utf8.ValidString(summary) && strings.IndexByte(summary, 0) < 0 &&
+		len(summary) <= eventing.MaxPRDevelopmentLedgerSummaryBytes
 }
 
 func validateRepairAttempt(

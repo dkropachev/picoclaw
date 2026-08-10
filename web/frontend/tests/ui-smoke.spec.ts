@@ -1779,6 +1779,16 @@ async function mockLauncherApis(
                   },
                 ],
               },
+              local_development: {
+                attempt_id: `pdr_${"b".repeat(32)}`,
+                attempt_ordinal: 0,
+                attempt_status: "queued",
+                no_changes: false,
+                review_status: "not_started",
+                review_finding_count: 0,
+                local_ready: false,
+                updated_at: "2026-08-05T12:03:00Z",
+              },
             }
             return json(route, currentPRDevelopmentDetail, 202)
           }
@@ -2715,6 +2725,22 @@ async function mockLauncherApis(
                   updated_at: "2026-08-05T12:04:00Z",
                 })),
               },
+              local_development: {
+                attempt_id: latestAttempt.id,
+                attempt_ordinal: latestAttempt.ordinal,
+                attempt_status: "completed",
+                summary:
+                  '<img src=x onerror="private-summary-handler"> repair-summary-canary',
+                commit_sha: "2".repeat(40),
+                no_changes: false,
+                ci_status: "passed",
+                ci_plan_digest: "3".repeat(64),
+                ci_result_digest: "4".repeat(64),
+                review_status: "pending",
+                review_finding_count: 0,
+                local_ready: false,
+                updated_at: "2026-08-05T12:04:00Z",
+              },
             }
           }
           return json(route, currentPRDevelopmentDetail)
@@ -3463,7 +3489,7 @@ test("local PR repair is explicitly confirmed, exactly fenced, plain text, and c
   await expect(confirmation).toBeVisible()
   await expect(confirmation).toContainText("pinned local copy")
   await expect(confirmation).toContainText(
-    "local, unreviewed, untested, uncommitted, and unpushed",
+    "run discovered local checks, record a commit when files changed, and review the result",
   )
   await expect(confirmation).toContainText("Nothing will be changed on GitHub.")
   await confirmation.getByRole("button", { name: "Start local repair" }).click()
@@ -3496,9 +3522,23 @@ test("local PR repair is explicitly confirmed, exactly fenced, plain text, and c
   })
   await expect(
     page.getByRole("status").filter({
-      hasText: "Local edits are ready for review",
+      hasText: "AI review pending",
     }),
   ).toBeVisible()
+  await expect(page.getByTestId("local-development-status")).toContainText(
+    "Recorded 22222222",
+  )
+  await expect(
+    page.getByTestId("local-development-status").getByText("Local CI"),
+  ).toBeVisible()
+  await expect(
+    page
+      .getByTestId("local-development-status")
+      .getByText("Passed", { exact: true }),
+  ).toBeVisible()
+  await expect(page.getByTestId("local-development-status")).toContainText(
+    "does not mean changes were pushed",
+  )
   await expect(attemptCard.locator("img")).toHaveCount(0)
   await expect(page.getByText("Pinned head")).toBeVisible()
   await expectNoHorizontalOverflow(page)

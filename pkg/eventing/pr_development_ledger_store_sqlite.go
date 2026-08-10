@@ -1128,115 +1128,353 @@ func loadPRDevelopmentLedgerAggregate(
 	return ledger, nil
 }
 
+// loadPRDevelopmentWorkbenchLocalEvidence keeps the selected-case read on one
+// SQLite snapshot while preserving complete ledger integrity validation. It
+// validates the controller once and correlates every retained orchestration
+// receipt in one bounded batch instead of reloading the controller and running
+// one orchestration aggregate query graph per historical attempt.
+func loadPRDevelopmentWorkbenchLocalEvidence(
+	ctx context.Context,
+	queryer rowsQueryer,
+	binding PRDevelopmentThreadBinding,
+	session PRDevelopmentRepairSession,
+) (PRDevelopmentLocalEvidenceSnapshot, error) {
+	thread, err := loadPRDevelopmentThread(ctx, queryer, binding.ID)
+	if err != nil {
+		return PRDevelopmentLocalEvidenceSnapshot{}, err
+	}
+	if binding.Kind != PRDevelopmentThreadProvider || thread.Kind != binding.Kind {
+		return PRDevelopmentLocalEvidenceSnapshot{}, wrapInvalidStoredPRDevelopmentLedger(
+			errors.New("stored local evidence thread is invalid"),
+		)
+	}
+	controller, controlled, err := loadPRDevelopmentControllerAggregate(
+		ctx,
+		queryer,
+		thread.ID,
+	)
+	if err != nil {
+		return PRDevelopmentLocalEvidenceSnapshot{}, err
+	}
+	entries, findingCounts, err := loadPRDevelopmentLedgerEntriesBase(
+		ctx,
+		queryer,
+		thread.ID,
+	)
+	if err != nil {
+		return PRDevelopmentLocalEvidenceSnapshot{}, err
+	}
+	for index := range entries {
+		if entries[index].Kind == PRDevelopmentLedgerAttempt {
+			// Pre-v14 attempt accounts did not persist CI status. Preserve the
+			// private compatibility value while keeping ciStatusBound false.
+			entries[index].CIStatus = PRDevelopmentCIPassed
+		}
+	}
+	checkpoints, err := loadPRDevelopmentLedgerCheckpoints(ctx, queryer, thread.ID)
+	if err != nil {
+		return PRDevelopmentLocalEvidenceSnapshot{}, err
+	}
+
+	selectedLatestCompletedAttemptID := ""
+	if len(session.Attempts) != 0 {
+		latest := session.Attempts[len(session.Attempts)-1]
+		if latest.Status == PRDevelopmentRepairCompleted {
+			selectedLatestCompletedAttemptID = latest.ID
+		}
+	}
+	owner := session
+	selectedOwnsController := controlled && controller.OwnerSessionID == session.ID
+	if controlled && !selectedOwnsController {
+		owner, err = loadPRDevelopmentRepairSessionByID(
+			ctx,
+			queryer,
+			controller.OwnerSessionID,
+		)
+		if err != nil {
+			return PRDevelopmentLocalEvidenceSnapshot{}, err
+		}
+	}
+	latestEvidenceAttemptID := ""
+	if selectedOwnsController {
+		latestEvidenceAttemptID = selectedLatestCompletedAttemptID
+	} else if selectedLatestCompletedAttemptID != "" {
+		if !controlled {
+			_, orchestrated, loadErr := loadPRDevelopmentRepairOrchestration(
+				ctx,
+				queryer,
+				selectedLatestCompletedAttemptID,
+			)
+			if loadErr != nil {
+				return PRDevelopmentLocalEvidenceSnapshot{}, loadErr
+			}
+			if orchestrated {
+				return PRDevelopmentLocalEvidenceSnapshot{}, wrapInvalidStoredPRDevelopmentLedger(
+					errors.New("completed local evidence orchestration has no controller"),
+				)
+			}
+		} else {
+			var orchestrated int
+			if queryErr := queryer.QueryRowContext(ctx, `
+				SELECT EXISTS (
+					SELECT 1
+					FROM pr_development_repair_orchestrations
+					WHERE attempt_id = ?
+				)`, selectedLatestCompletedAttemptID).Scan(&orchestrated); queryErr != nil {
+				return PRDevelopmentLocalEvidenceSnapshot{}, queryErr
+			}
+			if orchestrated != 0 {
+				return PRDevelopmentLocalEvidenceSnapshot{}, wrapInvalidStoredPRDevelopmentLedger(
+					errors.New("completed local evidence orchestration has a foreign controller owner"),
+				)
+			}
+		}
+	}
+	orchestrations := make(map[string]PRDevelopmentRepairOrchestration)
+	var fences []PRDevelopmentAttemptReviewFence
+	if controlled {
+		fences, err = loadPRDevelopmentReviewFences(ctx, queryer, controller.ID)
+		if err != nil {
+			return PRDevelopmentLocalEvidenceSnapshot{}, err
+		}
+		orchestrations, err = bindPRDevelopmentWorkbenchLedgerOrchestrations(
+			ctx,
+			queryer,
+			thread,
+			controller,
+			owner,
+			fences,
+			entries,
+			findingCounts,
+		)
+		if err != nil {
+			return PRDevelopmentLocalEvidenceSnapshot{}, wrapInvalidStoredPRDevelopmentLedger(err)
+		}
+		if latestEvidenceAttemptID != "" {
+			if _, found := orchestrations[latestEvidenceAttemptID]; !found {
+				_, orchestrated, loadErr := loadPRDevelopmentRepairOrchestration(
+					ctx,
+					queryer,
+					latestEvidenceAttemptID,
+				)
+				if loadErr != nil {
+					return PRDevelopmentLocalEvidenceSnapshot{}, loadErr
+				}
+				if orchestrated {
+					return PRDevelopmentLocalEvidenceSnapshot{}, wrapInvalidStoredPRDevelopmentLedger(
+						errors.New("completed local evidence orchestration is outside its ledger"),
+					)
+				}
+			}
+		}
+	}
+	if err := validateLoadedPRDevelopmentLedgerEntries(entries, findingCounts); err != nil {
+		return PRDevelopmentLocalEvidenceSnapshot{}, err
+	}
+	ledger := PRDevelopmentLedger{
+		ThreadID:          thread.ID,
+		Entries:           entries,
+		Checkpoints:       checkpoints,
+		EntriesDigest:     emptyPRDevelopmentLedgerEntriesDigest(),
+		CheckpointsDigest: emptyPRDevelopmentLedgerCheckpointsDigest(),
+	}
+	if len(entries) != 0 {
+		ledger.EntriesDigest = entries[len(entries)-1].EntryHash
+	}
+	if len(checkpoints) != 0 {
+		ledger.CheckpointsDigest = checkpoints[len(checkpoints)-1].CheckpointHash
+		ledger.LatestCheckpoint = &ledger.Checkpoints[len(ledger.Checkpoints)-1]
+	}
+	if len(entries) != 0 || len(checkpoints) != 0 {
+		if !controlled {
+			return PRDevelopmentLocalEvidenceSnapshot{}, wrapInvalidStoredPRDevelopmentLedger(
+				errors.New("stored ledger has no development controller"),
+			)
+		}
+		if err := validatePRDevelopmentLedgerAggregateSnapshot(
+			thread,
+			controller,
+			owner,
+			fences,
+			ledger,
+		); err != nil {
+			return PRDevelopmentLocalEvidenceSnapshot{}, err
+		}
+	}
+	snapshot := PRDevelopmentLocalEvidenceSnapshot{Ledger: ledger}
+	if controlled {
+		snapshot.Controller = &controller
+	}
+	if latestEvidenceAttemptID != "" {
+		if orchestration, found := orchestrations[latestEvidenceAttemptID]; found {
+			snapshot.Orchestration = &orchestration
+		}
+	}
+	return snapshot, nil
+}
+
+func bindPRDevelopmentWorkbenchLedgerOrchestrations(
+	ctx context.Context,
+	queryer rowsQueryer,
+	thread PRDevelopmentThread,
+	controller PRDevelopmentController,
+	session PRDevelopmentRepairSession,
+	fences []PRDevelopmentAttemptReviewFence,
+	entries []PRDevelopmentLedgerEntry,
+	findingCounts []int,
+) (map[string]PRDevelopmentRepairOrchestration, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT `+prDevelopmentRepairOrchestrationColumns+`
+		FROM pr_development_ledger_entries AS entry
+		JOIN pr_development_repair_orchestrations AS orchestration
+			ON orchestration.attempt_id = entry.attempt_id
+		JOIN pr_development_repair_attempts AS attempt
+			ON attempt.id = orchestration.attempt_id
+		JOIN pr_development_repair_sessions AS session
+			ON session.id = orchestration.session_id
+		WHERE entry.thread_id = ? AND entry.kind = 'attempt'
+		ORDER BY entry.ordinal`,
+		thread.ID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	orchestrations := make(map[string]PRDevelopmentRepairOrchestration)
+	ordered := make([]PRDevelopmentRepairOrchestration, 0)
+	for rows.Next() {
+		orchestration, scanErr := scanPRDevelopmentRepairOrchestration(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		if validationErr := validateStoredPRDevelopmentRepairOrchestration(
+			orchestration,
+		); validationErr != nil {
+			return nil, fmt.Errorf(
+				"invalid stored pull request development repair orchestration: %w",
+				validationErr,
+			)
+		}
+		if _, duplicated := orchestrations[orchestration.AttemptID]; duplicated {
+			return nil, errors.New("stored repair orchestration attempt is duplicated")
+		}
+		orchestrations[orchestration.AttemptID] = orchestration
+		ordered = append(ordered, orchestration)
+		if len(ordered) > MaxPRDevelopmentRepairAttempts {
+			return nil, errors.New("stored repair orchestration batch is too large")
+		}
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, rowsErr
+	}
+	if len(ordered) == 0 {
+		return orchestrations, nil
+	}
+	operations, err := loadPRDevelopmentControllerOperations(ctx, queryer, controller.ID)
+	if err != nil {
+		return nil, err
+	}
+	operationsByID := make(map[string]PRDevelopmentControllerOperation, len(operations))
+	for _, operation := range operations {
+		operationsByID[operation.ID] = operation
+	}
+	fencesByAttempt := make(map[string]PRDevelopmentAttemptReviewFence, len(fences))
+	for _, fence := range fences {
+		fencesByAttempt[fence.AttemptID] = fence
+	}
+	entryIndexes := make(map[string]int, len(entries)/2+1)
+	for index := range entries {
+		if entries[index].Kind == PRDevelopmentLedgerAttempt {
+			entryIndexes[entries[index].AttemptID] = index
+		}
+	}
+	var suppressed int
+	if err := queryer.QueryRowContext(ctx, `
+		SELECT claim_suppressed
+		FROM pr_development_repair_sessions
+		WHERE id = ?`, session.ID).Scan(&suppressed); err != nil {
+		return nil, err
+	}
+	for _, orchestration := range ordered {
+		attempt := findPRDevelopmentRepairAttempt(&session, orchestration.AttemptID)
+		if attempt == nil || session.ID != orchestration.SessionID ||
+			session.CaseID != orchestration.CaseID || session.AgentID != orchestration.AgentID ||
+			attempt.Instruction != orchestration.Instruction ||
+			thread.Kind != PRDevelopmentThreadProvider || thread.ID != orchestration.ThreadID ||
+			controller.OwnerSessionID != session.ID || controller.ThreadID != thread.ID {
+			return nil, errors.New(
+				"orchestration attempt/session/case/thread ownership is invalid",
+			)
+		}
+		if orchestration.HeadRepository != "" &&
+			(session.HeadRepository != orchestration.HeadRepository ||
+				session.HeadRef != orchestration.HeadRef ||
+				session.HeadSHA != orchestration.HeadSHA ||
+				session.CloneURL != orchestration.CloneURL ||
+				session.ReviewDigest != orchestration.ReviewDigest ||
+				session.WorkspaceID != orchestration.WorkspaceID) {
+			return nil, errors.New("orchestration baseline differs from its owner session")
+		}
+		if orchestration.Phase != PRDevelopmentRepairOrchestrationCompleted ||
+			attempt.Status != PRDevelopmentRepairCompleted || attempt.Claims < 1 ||
+			attempt.Summary != orchestration.Summary ||
+			attempt.Iterations != orchestration.Iterations || suppressed != 1 {
+			return nil, errors.New("completed orchestration public attempt fence is invalid")
+		}
+		operation, operationFound := operationsByID[orchestration.ParkOperationID]
+		fence, fenceFound := fencesByAttempt[orchestration.AttemptID]
+		entryIndex, entryFound := entryIndexes[orchestration.AttemptID]
+		if !operationFound || !fenceFound || !entryFound ||
+			entryIndex < 0 || entryIndex >= len(findingCounts) {
+			return nil, errors.New("completed orchestration aggregate evidence is missing")
+		}
+		caseOrdinal := -1
+		for _, link := range thread.Cases {
+			if link.CaseID == orchestration.CaseID {
+				caseOrdinal = link.Ordinal
+				break
+			}
+		}
+		if caseOrdinal < 0 {
+			return nil, errors.New("completed orchestration case is outside its thread")
+		}
+		previousHash := emptyPRDevelopmentLedgerEntriesDigest()
+		if entryIndex > 0 {
+			previousHash = entries[entryIndex-1].EntryHash
+		}
+		if err := validateCompletedPRDevelopmentRepairOrchestrationSnapshot(
+			orchestration,
+			operation,
+			fence,
+			storedPRDevelopmentLedgerEntry{
+				entry:        entries[entryIndex],
+				findingCount: findingCounts[entryIndex],
+			},
+			int64(caseOrdinal),
+			previousHash,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"invalid stored completed pull request development repair orchestration: %w",
+				err,
+			)
+		}
+		entries[entryIndex].CIStatus = orchestration.Validation.CIStatus
+		entries[entryIndex].ciStatusBound = true
+	}
+	return orchestrations, nil
+}
+
 func loadPRDevelopmentLedgerEntries(
 	ctx context.Context,
 	queryer rowsQueryer,
 	threadID string,
 ) ([]PRDevelopmentLedgerEntry, error) {
-	rows, err := queryer.QueryContext(ctx, `
-		SELECT `+prDevelopmentLedgerEntryColumns+`
-		FROM pr_development_ledger_entries
-		WHERE thread_id = ?
-		ORDER BY ordinal`,
+	entries, findingCounts, err := loadPRDevelopmentLedgerEntriesBase(
+		ctx,
+		queryer,
 		threadID,
 	)
 	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	stored := make([]storedPRDevelopmentLedgerEntry, 0)
-	for rows.Next() {
-		item, scanErr := scanPRDevelopmentLedgerEntry(rows)
-		if scanErr != nil {
-			_ = rows.Close()
-			return nil, scanErr
-		}
-		stored = append(stored, item)
-		if len(stored) > MaxPRDevelopmentLedgerEntries {
-			_ = rows.Close()
-			return nil, wrapInvalidStoredPRDevelopmentLedger(
-				errors.New("stored ledger has too many entries"),
-			)
-		}
-	}
-	if err = rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, err
-	}
-	if err = rows.Close(); err != nil {
-		return nil, err
-	}
-	entries := make([]PRDevelopmentLedgerEntry, len(stored))
-	entryIndexes := make(map[string]int, len(stored))
-	for index := range stored {
-		entries[index] = stored[index].entry
-		entryIndexes[entries[index].ID] = index
-	}
-	findings, err := queryer.QueryContext(ctx, `
-		SELECT finding.entry_id, finding.ordinal, finding.severity, finding.title,
-			finding.file, finding.line, finding.message, finding.evidence,
-			finding.impact, finding.recommendation, finding.validation
-		FROM pr_development_ledger_review_findings AS finding
-		JOIN pr_development_ledger_entries AS entry ON entry.id = finding.entry_id
-		WHERE entry.thread_id = ?
-		ORDER BY entry.ordinal, finding.ordinal`,
-		threadID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer findings.Close()
-	for findings.Next() {
-		var (
-			entryID string
-			ordinal int64
-			finding PRDevelopmentLedgerReviewFinding
-			line    sql.NullInt64
-		)
-		if scanErr := findings.Scan(
-			&entryID,
-			&ordinal,
-			&finding.Severity,
-			&finding.Title,
-			&finding.File,
-			&line,
-			&finding.Message,
-			&finding.Evidence,
-			&finding.Impact,
-			&finding.Recommendation,
-			&finding.Validation,
-		); scanErr != nil {
-			_ = findings.Close()
-			return nil, scanErr
-		}
-		index, found := entryIndexes[entryID]
-		if !found || ordinal != int64(len(entries[index].Findings)) {
-			_ = findings.Close()
-			return nil, wrapInvalidStoredPRDevelopmentLedger(
-				errors.New("stored review finding order is invalid"),
-			)
-		}
-		if line.Valid {
-			if line.Int64 < 1 || line.Int64 > 1<<31-1 {
-				_ = findings.Close()
-				return nil, wrapInvalidStoredPRDevelopmentLedger(
-					errors.New("stored review finding line is invalid"),
-				)
-			}
-			value := int(line.Int64)
-			finding.Line = &value
-		}
-		if validationErr := validatePRDevelopmentLedgerFinding(finding); validationErr != nil {
-			_ = findings.Close()
-			return nil, wrapInvalidStoredPRDevelopmentLedger(validationErr)
-		}
-		entries[index].Findings = append(entries[index].Findings, finding)
-	}
-	if err = findings.Err(); err != nil {
-		_ = findings.Close()
-		return nil, err
-	}
-	if err = findings.Close(); err != nil {
 		return nil, err
 	}
 	for index := range entries {
@@ -1262,17 +1500,150 @@ func loadPRDevelopmentLedgerEntries(
 			}
 		}
 	}
+	if err := validateLoadedPRDevelopmentLedgerEntries(entries, findingCounts); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func loadPRDevelopmentLedgerEntriesBase(
+	ctx context.Context,
+	queryer rowsQueryer,
+	threadID string,
+) ([]PRDevelopmentLedgerEntry, []int, error) {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT `+prDevelopmentLedgerEntryColumns+`
+		FROM pr_development_ledger_entries
+		WHERE thread_id = ?
+		ORDER BY ordinal`,
+		threadID,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	stored := make([]storedPRDevelopmentLedgerEntry, 0)
+	for rows.Next() {
+		item, scanErr := scanPRDevelopmentLedgerEntry(rows)
+		if scanErr != nil {
+			_ = rows.Close()
+			return nil, nil, scanErr
+		}
+		stored = append(stored, item)
+		if len(stored) > MaxPRDevelopmentLedgerEntries {
+			_ = rows.Close()
+			return nil, nil, wrapInvalidStoredPRDevelopmentLedger(
+				errors.New("stored ledger has too many entries"),
+			)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, nil, err
+	}
+	if err = rows.Close(); err != nil {
+		return nil, nil, err
+	}
+	entries := make([]PRDevelopmentLedgerEntry, len(stored))
+	entryIndexes := make(map[string]int, len(stored))
+	for index := range stored {
+		entries[index] = stored[index].entry
+		entryIndexes[entries[index].ID] = index
+	}
+	findings, err := queryer.QueryContext(ctx, `
+		SELECT finding.entry_id, finding.ordinal, finding.severity, finding.title,
+			finding.file, finding.line, finding.message, finding.evidence,
+			finding.impact, finding.recommendation, finding.validation
+		FROM pr_development_ledger_review_findings AS finding
+		JOIN pr_development_ledger_entries AS entry ON entry.id = finding.entry_id
+		WHERE entry.thread_id = ?
+		ORDER BY entry.ordinal, finding.ordinal`,
+		threadID,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer findings.Close()
+	for findings.Next() {
+		var (
+			entryID string
+			ordinal int64
+			finding PRDevelopmentLedgerReviewFinding
+			line    sql.NullInt64
+		)
+		if scanErr := findings.Scan(
+			&entryID,
+			&ordinal,
+			&finding.Severity,
+			&finding.Title,
+			&finding.File,
+			&line,
+			&finding.Message,
+			&finding.Evidence,
+			&finding.Impact,
+			&finding.Recommendation,
+			&finding.Validation,
+		); scanErr != nil {
+			_ = findings.Close()
+			return nil, nil, scanErr
+		}
+		index, found := entryIndexes[entryID]
+		if !found || ordinal != int64(len(entries[index].Findings)) {
+			_ = findings.Close()
+			return nil, nil, wrapInvalidStoredPRDevelopmentLedger(
+				errors.New("stored review finding order is invalid"),
+			)
+		}
+		if line.Valid {
+			if line.Int64 < 1 || line.Int64 > 1<<31-1 {
+				_ = findings.Close()
+				return nil, nil, wrapInvalidStoredPRDevelopmentLedger(
+					errors.New("stored review finding line is invalid"),
+				)
+			}
+			value := int(line.Int64)
+			finding.Line = &value
+		}
+		if validationErr := validatePRDevelopmentLedgerFinding(finding); validationErr != nil {
+			_ = findings.Close()
+			return nil, nil, wrapInvalidStoredPRDevelopmentLedger(validationErr)
+		}
+		entries[index].Findings = append(entries[index].Findings, finding)
+	}
+	if err = findings.Err(); err != nil {
+		_ = findings.Close()
+		return nil, nil, err
+	}
+	if err = findings.Close(); err != nil {
+		return nil, nil, err
+	}
+	findingCounts := make([]int, len(stored))
+	for index := range stored {
+		findingCounts[index] = stored[index].findingCount
+	}
+	return entries, findingCounts, nil
+}
+
+func validateLoadedPRDevelopmentLedgerEntries(
+	entries []PRDevelopmentLedgerEntry,
+	findingCounts []int,
+) error {
+	if len(entries) != len(findingCounts) {
+		return wrapInvalidStoredPRDevelopmentLedger(
+			errors.New("stored ledger entry accounting is invalid"),
+		)
+	}
 	for index := range entries {
-		if len(entries[index].Findings) != stored[index].findingCount {
-			return nil, wrapInvalidStoredPRDevelopmentLedger(
+		if len(entries[index].Findings) != findingCounts[index] {
+			return wrapInvalidStoredPRDevelopmentLedger(
 				errors.New("stored review finding count is invalid"),
 			)
 		}
 		if err := validateStoredPRDevelopmentLedgerEntry(entries[index]); err != nil {
-			return nil, wrapInvalidStoredPRDevelopmentLedger(err)
+			return wrapInvalidStoredPRDevelopmentLedger(err)
 		}
 	}
-	return entries, nil
+	return nil
 }
 
 func scanPRDevelopmentLedgerEntry(
@@ -1407,6 +1778,30 @@ func validatePRDevelopmentLedgerAggregate(
 	controller PRDevelopmentController,
 	ledger PRDevelopmentLedger,
 ) error {
+	owner, err := loadPRDevelopmentRepairSessionByID(ctx, queryer, controller.OwnerSessionID)
+	if err != nil {
+		return err
+	}
+	fences, err := loadPRDevelopmentReviewFences(ctx, queryer, controller.ID)
+	if err != nil {
+		return err
+	}
+	return validatePRDevelopmentLedgerAggregateSnapshot(
+		thread,
+		controller,
+		owner,
+		fences,
+		ledger,
+	)
+}
+
+func validatePRDevelopmentLedgerAggregateSnapshot(
+	thread PRDevelopmentThread,
+	controller PRDevelopmentController,
+	owner PRDevelopmentRepairSession,
+	fences []PRDevelopmentAttemptReviewFence,
+	ledger PRDevelopmentLedger,
+) error {
 	if thread.Kind != PRDevelopmentThreadProvider || ledger.ThreadID != thread.ID ||
 		controller.ThreadID != thread.ID {
 		return wrapInvalidStoredPRDevelopmentLedger(
@@ -1423,10 +1818,6 @@ func validatePRDevelopmentLedgerAggregate(
 		}
 		return nil
 	}
-	owner, err := loadPRDevelopmentRepairSessionByID(ctx, queryer, controller.OwnerSessionID)
-	if err != nil {
-		return err
-	}
 	ownerCaseOrdinal := -1
 	for _, link := range thread.Cases {
 		if link.CaseID == owner.CaseID {
@@ -1438,10 +1829,6 @@ func validatePRDevelopmentLedgerAggregate(
 		return wrapInvalidStoredPRDevelopmentLedger(
 			errors.New("stored ledger owner case is outside its thread"),
 		)
-	}
-	fences, err := loadPRDevelopmentReviewFences(ctx, queryer, controller.ID)
-	if err != nil {
-		return err
 	}
 	baseFenceOrdinal := ledger.Entries[0].FenceOrdinal
 	if baseFenceOrdinal < 0 || baseFenceOrdinal >= len(fences) ||

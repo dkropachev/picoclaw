@@ -5,6 +5,8 @@ import {
   MAXIMUM_PR_DEVELOPMENT_CHAT_BYTES,
   MAXIMUM_PR_DEVELOPMENT_REPAIR_INSTRUCTION_BYTES,
   PRDevelopmentAPIError,
+  type PRDevelopmentLocalDevelopment,
+  type PRDevelopmentRepairAttempt,
   chatAboutPRDevelopmentCase,
   createPRDevelopmentRepairRequestID,
   getPRDevelopmentCase,
@@ -74,6 +76,27 @@ const detail = {
 } as const
 const repairRequestID = `prq_${"6".repeat(32)}`
 const repairInstruction = "Apply the reviewer feedback locally."
+function localDevelopmentFor(
+  attempt: Pick<
+    PRDevelopmentRepairAttempt,
+    "id" | "ordinal" | "status" | "summary" | "updated_at"
+  >,
+  overrides: Partial<PRDevelopmentLocalDevelopment> = {},
+): PRDevelopmentLocalDevelopment {
+  return {
+    attempt_id: attempt.id,
+    attempt_ordinal: attempt.ordinal,
+    attempt_status: attempt.status,
+    ...(attempt.summary === undefined ? {} : { summary: attempt.summary }),
+    no_changes: false,
+    review_status: "not_started",
+    review_finding_count: 0,
+    local_ready: false,
+    updated_at: attempt.updated_at,
+    ...overrides,
+  }
+}
+
 const repairDetail = {
   ...detail,
   repair_revision: 1,
@@ -96,6 +119,49 @@ const repairDetail = {
       },
     ],
   },
+  local_development: localDevelopmentFor({
+    id: `pdr_${"8".repeat(32)}`,
+    ordinal: 0,
+    status: "queued",
+    updated_at: "2026-08-05T12:03:00Z",
+  }),
+} as const
+const reviewedRepairDetail = {
+  ...repairDetail,
+  repair_revision: 4,
+  repair_session: {
+    ...repairDetail.repair_session,
+    revision: 4,
+    attempts: [
+      {
+        ...repairDetail.repair_session.attempts[0],
+        status: "completed",
+        summary: "Applied the retry-path fix and added coverage.",
+        updated_at: "2026-08-05T12:04:00Z",
+      },
+    ],
+  },
+  local_development: localDevelopmentFor(
+    {
+      id: `pdr_${"8".repeat(32)}`,
+      ordinal: 0,
+      status: "completed",
+      summary: "Applied the retry-path fix and added coverage.",
+      updated_at: "2026-08-05T12:04:00Z",
+    },
+    {
+      commit_sha: "d".repeat(40),
+      ci_status: "passed",
+      ci_plan_digest: "e".repeat(64),
+      ci_result_digest: "f".repeat(64),
+      review_status: "completed",
+      review_outcome: "passed",
+      review_summary: "The local change is focused and fully covered.",
+      review_finding_count: 0,
+      local_ready: true,
+      updated_at: "2026-08-05T12:05:00Z",
+    },
+  ),
 } as const
 const submittedChatContent = "Explain the retry path."
 const chatDetail = {
@@ -251,6 +317,12 @@ describe("PR development API", () => {
           },
         ],
       },
+      local_development: localDevelopmentFor({
+        id: `pdr_${"9".repeat(32)}`,
+        ordinal: 1,
+        status: "queued",
+        updated_at: "2026-08-05T12:05:00Z",
+      }),
     } as const
     mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(replayedDetail, 202))
 
@@ -293,6 +365,22 @@ describe("PR development API", () => {
           updated_at: "2026-08-05T12:04:00Z",
         })),
       },
+      local_development: localDevelopmentFor(
+        {
+          id: `pdr_${"3f".padStart(32, "0")}`,
+          ordinal: 63,
+          status: "completed",
+          summary: "Local repair 64 completed.",
+          updated_at: "2026-08-05T12:04:00Z",
+        },
+        {
+          commit_sha: "d".repeat(40),
+          ci_status: "passed",
+          ci_plan_digest: "e".repeat(64),
+          ci_result_digest: "f".repeat(64),
+          review_status: "pending",
+        },
+      ),
     }
     mockedLauncherFetch.mockResolvedValueOnce(
       jsonResponse(
@@ -364,10 +452,125 @@ describe("PR development API", () => {
           },
         ],
       },
+      local_development: localDevelopmentFor({
+        id: `pdr_${"9".repeat(32)}`,
+        ordinal: 1,
+        status: "failed",
+        summary: "Partial local edits may remain.",
+        updated_at: "2026-08-05T12:06:00Z",
+      }),
     } as const
     mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(historyDetail))
 
     await expect(getPRDevelopmentCase(caseID)).resolves.toEqual(historyDetail)
+  })
+
+  it("parses exact local CI, commit, and completed AI-review evidence", async () => {
+    mockedLauncherFetch.mockResolvedValueOnce(
+      jsonResponse(reviewedRepairDetail),
+    )
+
+    await expect(getPRDevelopmentCase(caseID)).resolves.toEqual(
+      reviewedRepairDetail,
+    )
+  })
+
+  it("rejects missing, private, partial, or inconsistent local evidence", async () => {
+    const evidence = reviewedRepairDetail.local_development
+    const invalidDetails: unknown[] = [
+      { ...reviewedRepairDetail, local_development: undefined },
+      {
+        ...detail,
+        local_development: evidence,
+      },
+      {
+        ...reviewedRepairDetail,
+        local_development: { ...evidence, operation_id: "private-operation" },
+      },
+      {
+        ...reviewedRepairDetail,
+        local_development: {
+          ...evidence,
+          attempt_id: `pdr_${"9".repeat(32)}`,
+        },
+      },
+      {
+        ...reviewedRepairDetail,
+        local_development: { ...evidence, commit_sha: undefined },
+      },
+      {
+        ...reviewedRepairDetail,
+        local_development: { ...evidence, ci_plan_digest: "A".repeat(64) },
+      },
+      {
+        ...reviewedRepairDetail,
+        local_development: {
+          ...evidence,
+          review_status: "pending",
+        },
+      },
+      {
+        ...reviewedRepairDetail,
+        local_development: {
+          ...evidence,
+          review_outcome: "changes_required",
+          review_finding_count: 0,
+          local_ready: false,
+        },
+      },
+      {
+        ...reviewedRepairDetail,
+        local_development: {
+          ...evidence,
+          ci_status: "failed",
+          local_ready: true,
+        },
+      },
+      {
+        ...reviewedRepairDetail,
+        local_development: {
+          ...evidence,
+          ci_status: "failed",
+          local_ready: false,
+        },
+      },
+      {
+        ...reviewedRepairDetail,
+        local_development: {
+          ...evidence,
+          local_ready: false,
+        },
+      },
+      {
+        ...reviewedRepairDetail,
+        local_development: {
+          ...evidence,
+          review_finding_count: 129,
+          local_ready: false,
+        },
+      },
+      {
+        ...reviewedRepairDetail,
+        local_development: {
+          ...evidence,
+          updated_at: "2026-08-05T12:03:59Z",
+        },
+      },
+      {
+        ...repairDetail,
+        local_development: {
+          ...repairDetail.local_development,
+          no_changes: true,
+        },
+      },
+    ]
+
+    for (const invalid of invalidDetails) {
+      mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(invalid))
+      await expect(getPRDevelopmentCase(caseID)).rejects.toMatchObject({
+        status: 502,
+      })
+    }
   })
 
   it("accepts repair instruction and summary at the exact 4 KiB boundary", async () => {
@@ -386,6 +589,22 @@ describe("PR development API", () => {
           },
         ],
       },
+      local_development: localDevelopmentFor(
+        {
+          id: `pdr_${"8".repeat(32)}`,
+          ordinal: 0,
+          status: "completed",
+          summary: boundaryText,
+          updated_at: "2026-08-05T12:04:00Z",
+        },
+        {
+          commit_sha: "d".repeat(40),
+          ci_status: "passed",
+          ci_plan_digest: "e".repeat(64),
+          ci_result_digest: "f".repeat(64),
+          review_status: "pending",
+        },
+      ),
     } as const
     mockedLauncherFetch.mockResolvedValueOnce(jsonResponse(boundaryDetail))
 

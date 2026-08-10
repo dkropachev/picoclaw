@@ -13,8 +13,8 @@ func pinnedValidationNodeChangeToken(info fs.FileInfo) pinnedValidationChangeTok
 		return pinnedValidationChangeToken{}
 	}
 	return pinnedValidationChangeToken{
-		seconds: stat.Ctim.Sec,
-		nanos:   stat.Ctim.Nsec,
+		seconds: pinnedValidationTimePart(stat.Ctim.Sec),
+		nanos:   pinnedValidationTimePart(stat.Ctim.Nsec),
 		valid:   true,
 	}
 }

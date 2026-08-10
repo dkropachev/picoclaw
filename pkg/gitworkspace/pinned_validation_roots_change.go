@@ -6,6 +6,10 @@ type pinnedValidationChangeToken struct {
 	valid   bool
 }
 
+func pinnedValidationTimePart[T ~int | ~int32 | ~int64](value T) int64 {
+	return int64(value)
+}
+
 func (token pinnedValidationChangeToken) equal(other pinnedValidationChangeToken) bool {
 	if !token.valid || !other.valid {
 		return !token.valid && !other.valid

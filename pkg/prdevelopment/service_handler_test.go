@@ -183,6 +183,9 @@ func TestServiceProjectsOnlyBrowserSafeCapturedSnapshot(t *testing.T) {
 		detail.Case.ReviewCommitSHA != captured.ReviewCommitSHA {
 		t.Fatalf("detail = %#v", detail)
 	}
+	if detail.LocalDevelopment != nil {
+		t.Fatalf("local development without a repair session = %#v", detail.LocalDevelopment)
+	}
 	raw, err := json.Marshal(detail)
 	if err != nil {
 		t.Fatalf("Marshal(detail) error = %v", err)
@@ -201,6 +204,241 @@ func TestServiceProjectsOnlyBrowserSafeCapturedSnapshot(t *testing.T) {
 		if strings.Contains(string(raw), secret) {
 			t.Fatalf("safe projection leaked %q in %s", secret, raw)
 		}
+	}
+}
+
+func TestServiceProjectsBoundedLatestLocalDevelopmentEvidence(t *testing.T) {
+	workbench := completedLocalDevelopmentWorkbenchForTest()
+	store := &fakeRepairStore{
+		fakeReader: &fakeReader{detail: workbench.Case},
+		workbench:  workbench,
+	}
+	service, err := NewService(ServiceConfig{Store: store, RepairStore: store})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	detail, err := service.Get(context.Background(), testDevelopmentCaseID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	local := detail.LocalDevelopment
+	if local == nil || local.AttemptID != workbench.RepairSession.Attempts[0].ID ||
+		local.AttemptOrdinal != 0 ||
+		local.AttemptStatus != eventing.PRDevelopmentRepairCompleted ||
+		local.Summary != "Applied the requested repair." ||
+		local.CommitSHA != strings.Repeat("e", 40) || local.NoChanges ||
+		local.CIStatus != eventing.PRDevelopmentCIPassed ||
+		local.CIPlanDigest != strings.Repeat("c", 64) ||
+		local.CIResultDigest != strings.Repeat("d", 64) ||
+		local.ReviewStatus != LocalDevelopmentReviewCompleted ||
+		local.ReviewOutcome != eventing.PRDevelopmentLedgerReviewPassed ||
+		local.ReviewSummary != "No local issues found." ||
+		local.ReviewFindingCount != 0 || !local.LocalReady ||
+		!local.UpdatedAt.Equal(time.Date(2026, 8, 9, 12, 3, 0, 0, time.UTC)) {
+		t.Fatalf("local development = %#v", local)
+	}
+
+	handler := &Handler{Service: service}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodGet,
+		RuntimeRoutePrefix+"/"+testDevelopmentCaseID,
+		nil,
+	)
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	for _, private := range []string{
+		"controller-private",
+		"workspace-private",
+		"line-private",
+		"reservation-private",
+		"attestation-private",
+		"internal/source/ref",
+		strings.Repeat("9", 40),
+	} {
+		if strings.Contains(recorder.Body.String(), private) {
+			t.Fatalf("local development response leaked %q in %s", private, recorder.Body.String())
+		}
+	}
+	var decoded Detail
+	if err = json.Unmarshal(recorder.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("Unmarshal(response) error = %v", err)
+	}
+	if decoded.LocalDevelopment == nil || !decoded.LocalDevelopment.LocalReady {
+		t.Fatalf("decoded local development = %#v", decoded.LocalDevelopment)
+	}
+}
+
+func TestServiceLocalDevelopmentPendingAndLegacyUnboundEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		mutate           func(*eventing.PRDevelopmentWorkbench)
+		wantReviewStatus LocalDevelopmentReviewStatus
+		wantCommit       bool
+		privateCanaries  []string
+	}{
+		{
+			name: "pending exact review",
+			mutate: func(workbench *eventing.PRDevelopmentWorkbench) {
+				workbench.LocalEvidence.Ledger.Entries = workbench.LocalEvidence.Ledger.Entries[:1]
+				workbench.LocalEvidence.Controller.Phase = eventing.PRDevelopmentControllerReviewPending
+			},
+			wantReviewStatus: LocalDevelopmentReviewPending,
+			wantCommit:       true,
+		},
+		{
+			name: "claimed exact review",
+			mutate: func(workbench *eventing.PRDevelopmentWorkbench) {
+				workbench.LocalEvidence.Ledger.Entries = workbench.LocalEvidence.Ledger.Entries[:1]
+				controller := workbench.LocalEvidence.Controller
+				controller.Phase = eventing.PRDevelopmentControllerReview
+				controller.LeaseKind = eventing.PRDevelopmentControllerReviewLease
+				controller.LeaseOwner = "review-worker-private"
+				controller.LeaseToken = "review-lease-private"
+				deadline := time.Date(2026, 8, 9, 12, 10, 0, 0, time.UTC)
+				controller.LeaseUntil = &deadline
+			},
+			wantReviewStatus: LocalDevelopmentReviewPending,
+			wantCommit:       true,
+			privateCanaries: []string{
+				"review-worker-private",
+				"review-lease-private",
+				"2026-08-09T12:10:00Z",
+			},
+		},
+		{
+			name: "legacy ledger has no exact CI receipt",
+			mutate: func(workbench *eventing.PRDevelopmentWorkbench) {
+				workbench.LocalEvidence.Orchestration = nil
+			},
+			wantReviewStatus: LocalDevelopmentReviewNotStarted,
+			wantCommit:       false,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workbench := completedLocalDevelopmentWorkbenchForTest()
+			test.mutate(&workbench)
+			store := &fakeRepairStore{
+				fakeReader: &fakeReader{detail: workbench.Case},
+				workbench:  workbench,
+			}
+			service, err := NewService(ServiceConfig{Store: store, RepairStore: store})
+			if err != nil {
+				t.Fatalf("NewService() error = %v", err)
+			}
+			detail, err := service.Get(context.Background(), testDevelopmentCaseID)
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			local := detail.LocalDevelopment
+			if local == nil || local.ReviewStatus != test.wantReviewStatus ||
+				local.LocalReady || (local.CommitSHA != "") != test.wantCommit {
+				t.Fatalf("local development = %#v", local)
+			}
+			if !test.wantCommit &&
+				(local.CIStatus != "" || local.CIPlanDigest != "" ||
+					local.CIResultDigest != "" || local.ReviewOutcome != "" ||
+					local.ReviewSummary != "" || local.ReviewFindingCount != 0) {
+				t.Fatalf("unbound legacy evidence became authoritative = %#v", local)
+			}
+			raw, marshalErr := json.Marshal(detail)
+			if marshalErr != nil {
+				t.Fatalf("Marshal(detail) error = %v", marshalErr)
+			}
+			for _, private := range test.privateCanaries {
+				if strings.Contains(string(raw), private) {
+					t.Fatalf("pending local development leaked %q in %s", private, raw)
+				}
+			}
+		})
+	}
+}
+
+func TestServiceRejectsMismatchedLocalDevelopmentReceipt(t *testing.T) {
+	workbench := completedLocalDevelopmentWorkbenchForTest()
+	workbench.LocalEvidence.Orchestration.Validation.CIExecutionDigest = strings.Repeat("f", 64)
+	store := &fakeRepairStore{
+		fakeReader: &fakeReader{detail: workbench.Case},
+		workbench:  workbench,
+	}
+	service, err := NewService(ServiceConfig{Store: store, RepairStore: store})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	if _, err = service.Get(context.Background(), testDevelopmentCaseID); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Get(mismatched receipt) error = %v", err)
+	}
+}
+
+func TestServiceRejectsPassedLocalReviewOverNonGreenCI(t *testing.T) {
+	workbench := completedLocalDevelopmentWorkbenchForTest()
+	workbench.LocalEvidence.Ledger.Entries[0].CIStatus = eventing.PRDevelopmentCIFailed
+	workbench.LocalEvidence.Orchestration.Validation.CIStatus = eventing.PRDevelopmentCIFailed
+	store := &fakeRepairStore{
+		fakeReader: &fakeReader{detail: workbench.Case},
+		workbench:  workbench,
+	}
+	service, err := NewService(ServiceConfig{Store: store, RepairStore: store})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	if _, err = service.Get(context.Background(), testDevelopmentCaseID); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Get(passed review over non-green CI) error = %v", err)
+	}
+}
+
+func TestServiceRejectsUnboundLatestLocalDevelopmentOrchestration(t *testing.T) {
+	workbench := completedLocalDevelopmentWorkbenchForTest()
+	workbench.LocalEvidence.Ledger.Entries = nil
+	store := &fakeRepairStore{
+		fakeReader: &fakeReader{detail: workbench.Case},
+		workbench:  workbench,
+	}
+	service, err := NewService(ServiceConfig{Store: store, RepairStore: store})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	if _, err = service.Get(context.Background(), testDevelopmentCaseID); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Get(unbound orchestration) error = %v", err)
+	}
+}
+
+func TestServiceRejectsAuthorizingReadyLocalDevelopmentController(t *testing.T) {
+	workbench := completedLocalDevelopmentWorkbenchForTest()
+	workbench.LocalEvidence.Controller.LeaseKind = eventing.PRDevelopmentControllerMutationLease
+	workbench.LocalEvidence.Controller.LeaseOwner = "worker-private"
+	workbench.LocalEvidence.Controller.LeaseToken = "lease-private"
+	workbench.LocalEvidence.Controller.MutationReservationKey = "reservation-private"
+	deadline := time.Date(2026, 8, 9, 12, 10, 0, 0, time.UTC)
+	workbench.LocalEvidence.Controller.LeaseUntil = &deadline
+	store := &fakeRepairStore{
+		fakeReader: &fakeReader{detail: workbench.Case},
+		workbench:  workbench,
+	}
+	service, err := NewService(ServiceConfig{Store: store, RepairStore: store})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	if _, err = service.Get(context.Background(), testDevelopmentCaseID); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Get(authorizing ready controller) error = %v", err)
+	}
+}
+
+func TestServiceRejectsReadyControllerWithoutPairedLocalReview(t *testing.T) {
+	workbench := completedLocalDevelopmentWorkbenchForTest()
+	workbench.LocalEvidence.Ledger.Entries = workbench.LocalEvidence.Ledger.Entries[:1]
+	store := &fakeRepairStore{
+		fakeReader: &fakeReader{detail: workbench.Case},
+		workbench:  workbench,
+	}
+	service, err := NewService(ServiceConfig{Store: store, RepairStore: store})
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	if _, err = service.Get(context.Background(), testDevelopmentCaseID); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Get(ready without review) error = %v", err)
 	}
 }
 
@@ -933,6 +1171,126 @@ func TestHandlerRejectsNonIdentityOrAmbiguousReadEncoding(t *testing.T) {
 	}
 	if reader.listCalls != 0 || reader.getCalls != 0 {
 		t.Fatalf("encoded reads reached store: list=%d get=%d", reader.listCalls, reader.getCalls)
+	}
+}
+
+func completedLocalDevelopmentWorkbenchForTest() eventing.PRDevelopmentWorkbench {
+	startedAt := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	completedAt := startedAt.Add(time.Minute)
+	attemptEntryAt := startedAt.Add(2 * time.Minute)
+	reviewEntryAt := startedAt.Add(3 * time.Minute)
+	threadID := "pdt_11111111111111111111111111111111"
+	sessionID := "pds_22222222222222222222222222222222"
+	attemptID := "pdr_33333333333333333333333333333333"
+	attemptEntryID := "pdle_44444444444444444444444444444444"
+	planDigest := strings.Repeat("c", 64)
+	resultDigest := strings.Repeat("d", 64)
+	tree := strings.Repeat("9", 40)
+	summary := "Applied the requested repair."
+	attempt := eventing.PRDevelopmentRepairAttempt{
+		ID:                  attemptID,
+		SessionID:           sessionID,
+		Ordinal:             0,
+		ConversationVersion: 0,
+		Instruction:         "Address the review feedback.",
+		Status:              eventing.PRDevelopmentRepairCompleted,
+		Claims:              1,
+		Summary:             summary,
+		Iterations:          1,
+		CreatedAt:           startedAt,
+		UpdatedAt:           completedAt,
+	}
+	session := eventing.PRDevelopmentRepairSession{
+		ID:             sessionID,
+		CaseID:         testDevelopmentCaseID,
+		Version:        1,
+		AgentID:        "main",
+		HeadRepository: "fork/repo",
+		HeadRef:        "fix-boundary",
+		HeadSHA:        strings.Repeat("a", 40),
+		CloneURL:       "workspace-private",
+		ReviewDigest:   "attestation-private",
+		ReservationKey: "reservation-private",
+		WorkspaceID:    "workspace-private",
+		Attempts:       []eventing.PRDevelopmentRepairAttempt{attempt},
+		CreatedAt:      startedAt,
+		UpdatedAt:      completedAt,
+	}
+	controller := eventing.PRDevelopmentController{
+		ID:               "controller-private",
+		ThreadID:         threadID,
+		OwnerSessionID:   sessionID,
+		Phase:            eventing.PRDevelopmentControllerReady,
+		LineID:           "line-private",
+		WorkspaceID:      "workspace-private",
+		SourceRef:        "internal/source/ref",
+		CurrentAttemptID: attemptID,
+	}
+	validation := &eventing.PRDevelopmentRepairValidationReceipt{
+		ControllerID:          controller.ID,
+		WorkspaceID:           controller.WorkspaceID,
+		CandidateTree:         tree,
+		NoChanges:             false,
+		CIStatus:              eventing.PRDevelopmentCIPassed,
+		CIAttestationID:       "attestation-private",
+		CIEffectivePlanDigest: planDigest,
+		CIExecutionDigest:     resultDigest,
+	}
+	orchestration := eventing.PRDevelopmentRepairOrchestration{
+		AttemptID:     attemptID,
+		SessionID:     sessionID,
+		CaseID:        testDevelopmentCaseID,
+		ThreadID:      threadID,
+		ControllerID:  controller.ID,
+		Phase:         eventing.PRDevelopmentRepairOrchestrationCompleted,
+		Summary:       summary,
+		Validation:    validation,
+		LedgerEntryID: attemptEntryID,
+	}
+	ledger := eventing.PRDevelopmentLedger{
+		ThreadID: threadID,
+		Entries: []eventing.PRDevelopmentLedgerEntry{
+			{
+				ID:             attemptEntryID,
+				ThreadID:       threadID,
+				Ordinal:        0,
+				Kind:           eventing.PRDevelopmentLedgerAttempt,
+				AttemptID:      attemptID,
+				FenceOrdinal:   0,
+				CaseID:         testDevelopmentCaseID,
+				Commit:         strings.Repeat("e", 40),
+				Tree:           tree,
+				Summary:        summary,
+				CIPlanDigest:   planDigest,
+				CIResultDigest: resultDigest,
+				CIStatus:       eventing.PRDevelopmentCIPassed,
+				CreatedAt:      attemptEntryAt,
+			},
+			{
+				ID:            "pdle_55555555555555555555555555555555",
+				ThreadID:      threadID,
+				Ordinal:       1,
+				Kind:          eventing.PRDevelopmentLedgerReview,
+				AttemptID:     attemptID,
+				FenceOrdinal:  0,
+				CaseID:        testDevelopmentCaseID,
+				Summary:       "No local issues found.",
+				ReviewOutcome: eventing.PRDevelopmentLedgerReviewPassed,
+				CreatedAt:     reviewEntryAt,
+			},
+		},
+	}
+	return eventing.PRDevelopmentWorkbench{
+		Case: testCapturedDevelopmentCase(),
+		Conversation: eventing.PRDevelopmentConversation{
+			CaseID: testDevelopmentCaseID,
+		},
+		RepairSession: &session,
+		LocalEvidence: &eventing.PRDevelopmentLocalEvidenceSnapshot{
+			Controller:    &controller,
+			Orchestration: &orchestration,
+			Ledger:        ledger,
+		},
 	}
 }
 
