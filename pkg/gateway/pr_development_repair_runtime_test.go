@@ -5,6 +5,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -58,6 +59,230 @@ func TestPRDevelopmentPendingReviewRuntimeNeedsNeitherProviderMCPNorSandbox(t *t
 
 	if service.prLocalCI == nil || service.prLocalCI.evidence == nil {
 		t.Fatal("local review evidence runtime was not composed without provider MCP")
+	}
+}
+
+func TestPRDevelopmentRecoveryRunsWithoutProviderModelOrReviewComposition(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := eventAutomationTestConfig(
+		workspace,
+		workspace+"/eventing/events.db",
+		true,
+		false,
+	)
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	recoveryProcess := func(context.Context) (bool, error) {
+		enterOnce.Do(func() { close(entered) })
+		return false, nil
+	}
+	service, err := newEventAutomationServiceWithReviews(
+		context.Background(),
+		cfg,
+		nil,
+		nil,
+		nil,
+		eventReviewRuntime{recoveryProcess: recoveryProcess},
+	)
+	if err != nil {
+		t.Fatalf("newEventAutomationServiceWithReviews() error = %v", err)
+	}
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := service.Close(closeCtx); closeErr != nil {
+			t.Errorf("event automation Close() error = %v", closeErr)
+		}
+	})
+
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("recovery worker did not run without provider/model/review composition")
+	}
+}
+
+func TestPRDevelopmentRecoveryWorkerHoldsRuntimeGenerationAcrossReload(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := eventAutomationTestConfig(
+		workspace,
+		workspace+"/eventing/events.db",
+		true,
+		false,
+	)
+	msgBus := bus.NewMessageBus()
+	provider := &orderedShutdownProvider{closed: make(chan struct{})}
+	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider)
+	entered := make(chan struct{})
+	releaseProcess := make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	reviewRuntime := newEventReviewRuntime(cfg, agentLoop, nil)
+	if reviewRuntime.recoveryWorkspaces == nil {
+		msgBus.Close()
+		agentLoop.Close()
+		t.Fatal("controller recovery workspace factory was gated on unrelated readiness")
+	}
+	reviewRuntime.recoveryProcess = func(ctx context.Context) (bool, error) {
+		enterOnce.Do(func() {
+			close(entered)
+			select {
+			case <-releaseProcess:
+			case <-ctx.Done():
+			}
+		})
+		return false, ctx.Err()
+	}
+	acquireRuntime := func(ctx context.Context) (context.Context, func(), error) {
+		return agentLoop.AcquireRuntimeGeneration(ctx, cfg)
+	}
+	service, err := newEventAutomationServiceWithReviews(
+		context.Background(),
+		cfg,
+		nil,
+		nil,
+		acquireRuntime,
+		reviewRuntime,
+	)
+	if err != nil {
+		msgBus.Close()
+		agentLoop.Close()
+		t.Fatalf("newEventAutomationServiceWithReviews() error = %v", err)
+	}
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseProcess) })
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := service.Close(closeCtx); closeErr != nil {
+			t.Errorf("event automation Close() error = %v", closeErr)
+		}
+		msgBus.Close()
+		agentLoop.Close()
+	})
+
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("recovery worker did not enter its runtime generation")
+	}
+	type pauseResult struct {
+		resume func()
+		err    error
+	}
+	pauseResults := make(chan pauseResult, 1)
+	pauseCtx, cancelPause := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelPause()
+	go func() {
+		resume, pauseErr := agentLoop.PauseRuntimeForReload(pauseCtx)
+		pauseResults <- pauseResult{resume: resume, err: pauseErr}
+	}()
+	select {
+	case paused := <-pauseResults:
+		if paused.resume != nil {
+			paused.resume()
+		}
+		t.Fatalf("runtime reload pause returned while recovery was running: %v", paused.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	releaseOnce.Do(func() { close(releaseProcess) })
+	select {
+	case paused := <-pauseResults:
+		if paused.err != nil || paused.resume == nil {
+			t.Fatalf(
+				"PauseRuntimeForReload() has resume = %t, error = %v",
+				paused.resume != nil,
+				paused.err,
+			)
+		}
+		paused.resume()
+	case <-time.After(3 * time.Second):
+		t.Fatal("runtime reload pause did not complete after recovery returned")
+	}
+}
+
+func TestPRDevelopmentRecoveryWorkerJoinsBeforeEventStoreClose(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := eventAutomationTestConfig(
+		workspace,
+		workspace+"/eventing/events.db",
+		true,
+		false,
+	)
+	entered := make(chan struct{})
+	canceled := make(chan struct{})
+	releaseProcess := make(chan struct{})
+	var enterOnce, cancelOnce, releaseOnce sync.Once
+	recoveryProcess := func(ctx context.Context) (bool, error) {
+		enterOnce.Do(func() {
+			close(entered)
+			<-ctx.Done()
+			cancelOnce.Do(func() { close(canceled) })
+			<-releaseProcess
+		})
+		return false, ctx.Err()
+	}
+	service, err := newEventAutomationServiceWithReviews(
+		context.Background(),
+		cfg,
+		nil,
+		nil,
+		nil,
+		eventReviewRuntime{recoveryProcess: recoveryProcess},
+	)
+	if err != nil {
+		t.Fatalf("newEventAutomationServiceWithReviews() error = %v", err)
+	}
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseProcess) })
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if closeErr := service.Close(closeCtx); closeErr != nil {
+			t.Errorf("event automation Close() error = %v", closeErr)
+		}
+	})
+
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("recovery worker did not start")
+	}
+	closeDone := make(chan error, 1)
+	go func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		closeDone <- service.Close(closeCtx)
+	}()
+	select {
+	case <-canceled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close() did not cancel the recovery worker")
+	}
+	select {
+	case closeErr := <-closeDone:
+		t.Fatalf("Close() returned before recovery joined: %v", closeErr)
+	default:
+	}
+	if _, listErr := service.store.List(
+		context.Background(),
+		eventing.EventFilter{Limit: 1},
+	); listErr != nil {
+		t.Fatalf("event store closed before recovery joined: %v", listErr)
+	}
+
+	releaseOnce.Do(func() { close(releaseProcess) })
+	select {
+	case closeErr := <-closeDone:
+		if closeErr != nil {
+			t.Fatalf("Close() error = %v", closeErr)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close() did not return after recovery joined")
+	}
+	if _, listErr := service.store.List(
+		context.Background(),
+		eventing.EventFilter{Limit: 1},
+	); !errors.Is(listErr, eventing.ErrClosed) {
+		t.Fatalf("event store after Close() error = %v, want ErrClosed", listErr)
 	}
 }
 
