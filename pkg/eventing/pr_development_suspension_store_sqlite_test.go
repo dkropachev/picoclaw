@@ -166,7 +166,7 @@ func TestStorePRDevelopmentControllerSuspensionClaimReclaimFinalizeAndReplay(
 	assert.Equal(t, first.Suspension.SuspendClaimToken, firstReplay.Suspension.SuspendClaimToken)
 
 	*fixture.Clock = first.Suspension.SuspendClaimUntil.Add(time.Second)
-	candidate, found, err = fixture.Store.NextPRDevelopmentControllerSuspension(ctx)
+	_, found, err = fixture.Store.NextPRDevelopmentControllerSuspension(ctx)
 	require.NoError(t, err)
 	require.True(t, found)
 	secondInput := firstInput

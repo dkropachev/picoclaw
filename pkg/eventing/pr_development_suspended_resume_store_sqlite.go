@@ -68,11 +68,11 @@ func (s *Store) acquirePRDevelopmentControllerSuspendedResume(
 			ErrPRDevelopmentControllerConflict,
 		)
 	}
-	if err := requireNonRegressingPRDevelopmentControllerTime(
+	if timeErr := requireNonRegressingPRDevelopmentControllerTime(
 		now,
 		maxPRDevelopmentControllerTime(controller.UpdatedAt, suspension.UpdatedAt),
-	); err != nil {
-		return PRDevelopmentControllerSuspendedResumeLease{}, false, err
+	); timeErr != nil {
+		return PRDevelopmentControllerSuspendedResumeLease{}, false, timeErr
 	}
 
 	if orchestration.AttemptID != relation.Attempt.ID ||
@@ -95,13 +95,12 @@ func (s *Store) acquirePRDevelopmentControllerSuspendedResume(
 	changed := false
 	switch suspension.Status {
 	case PRDevelopmentControllerSuspensionStatusSuspended:
-		sameAttemptRecovery, sameAttemptErr :=
-			isPRDevelopmentSuspendedResumeRecoveryContinuation(
-				ctx,
-				conn,
-				suspension,
-				relation.Attempt.ID,
-			)
+		sameAttemptRecovery, sameAttemptErr := isPRDevelopmentSuspendedResumeRecoveryContinuation(
+			ctx,
+			conn,
+			suspension,
+			relation.Attempt.ID,
+		)
 		if sameAttemptErr != nil {
 			return PRDevelopmentControllerSuspendedResumeLease{}, false, sameAttemptErr
 		}
@@ -150,8 +149,7 @@ func (s *Store) acquirePRDevelopmentControllerSuspendedResume(
 			CandidateDigest:       suspension.SuspendResult.CandidateDigest,
 			ChangedFileCount:      suspension.SuspendResult.ChangedFileCount,
 		}
-		requestJSON, requestHash, encodeErr :=
-			encodePRDevelopmentControllerSuspendedResumeRequest(request)
+		requestJSON, requestHash, encodeErr := encodePRDevelopmentControllerSuspendedResumeRequest(request)
 		if encodeErr != nil {
 			return PRDevelopmentControllerSuspendedResumeLease{}, false, encodeErr
 		}

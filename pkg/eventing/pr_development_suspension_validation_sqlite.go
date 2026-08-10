@@ -73,8 +73,8 @@ func validatePRDevelopmentControllerSuspensionChain(
 					"stored resumed controller suspension exceeds controller high-water",
 				)
 			}
-			copy := suspension
-			stats.latestResumed = &copy
+			suspensionCopy := suspension
+			stats.latestResumed = &suspensionCopy
 			continue
 		}
 		if index != len(suspensions)-1 || stats.active != nil {
@@ -82,8 +82,8 @@ func validatePRDevelopmentControllerSuspensionChain(
 				"stored active controller suspension is not the chain tail",
 			)
 		}
-		copy := suspension
-		stats.active = &copy
+		suspensionCopy := suspension
+		stats.active = &suspensionCopy
 	}
 	if stats.active == nil {
 		if controller.Phase == PRDevelopmentControllerSuspensionPending ||

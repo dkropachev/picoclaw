@@ -104,30 +104,25 @@ func loadPRDevelopmentControllerOperations(
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	operations := make([]PRDevelopmentControllerOperation, 0)
-	previousHash := emptyPRDevelopmentOperationDigest()
-	for rows.Next() {
-		operation, scanErr := scanPRDevelopmentControllerOperation(rows)
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		if operation.Ordinal != len(operations) || operation.PreviousHash != previousHash {
-			return nil, errors.New("stored controller operation chain is not contiguous")
-		}
-		if len(operations) > 0 &&
-			operations[len(operations)-1].Status != PRDevelopmentControllerOperationFinalized {
-			return nil, errors.New("stored controller operation has an unresolved predecessor")
-		}
-		operations = append(operations, operation)
-		if len(operations) > MaxPRDevelopmentControllerOperations {
-			return nil, errors.New("stored controller has too many operations")
-		}
-		previousHash = operation.FinalHash
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return operations, nil
+	return scanPRDevelopmentControllerChainRows(
+		rows,
+		prDevelopmentControllerChainSpec[PRDevelopmentControllerOperation]{
+			initialHash: emptyPRDevelopmentOperationDigest(),
+			maximum:     MaxPRDevelopmentControllerOperations,
+			scan:        scanPRDevelopmentControllerOperation,
+			link: func(operation PRDevelopmentControllerOperation) prDevelopmentControllerChainLink {
+				return prDevelopmentControllerChainLink{
+					ordinal:      operation.Ordinal,
+					previousHash: operation.PreviousHash,
+					finalHash:    operation.FinalHash,
+					resolved:     operation.Status == PRDevelopmentControllerOperationFinalized,
+				}
+			},
+			discontinuousText: "stored controller operation chain is not contiguous",
+			unresolvedText:    "stored controller operation has an unresolved predecessor",
+			capacityText:      "stored controller has too many operations",
+		},
+	)
 }
 
 func scanPRDevelopmentControllerOperation(

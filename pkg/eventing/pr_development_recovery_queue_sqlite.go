@@ -91,17 +91,16 @@ func (s *Store) StageExpiredPRDevelopmentControllerRecoveries(
 		if queryErr != nil {
 			return queryErr
 		}
+		defer func() { _ = rows.Close() }()
 		controllerIDs := make([]string, 0, limit)
 		for rows.Next() {
 			var controllerID string
 			if scanErr := rows.Scan(&controllerID); scanErr != nil {
-				_ = rows.Close()
 				return scanErr
 			}
 			controllerIDs = append(controllerIDs, controllerID)
 		}
 		if rowsErr := rows.Err(); rowsErr != nil {
-			_ = rows.Close()
 			return rowsErr
 		}
 		if closeErr := rows.Close(); closeErr != nil {

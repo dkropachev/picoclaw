@@ -771,17 +771,16 @@ func (s *Store) AcquirePRDevelopmentRepairOrchestrationController(
 						ErrPRDevelopmentOrchestrationConflict,
 					)
 				}
-				resume, resumeChanged, resumeErr :=
-					s.acquirePRDevelopmentControllerSuspendedResume(
-						ctx,
-						conn,
-						relation,
-						controller,
-						normalized,
-						orchestration,
-						now,
-						deadline,
-					)
+				resume, resumeChanged, resumeErr := s.acquirePRDevelopmentControllerSuspendedResume(
+					ctx,
+					conn,
+					relation,
+					controller,
+					normalized,
+					orchestration,
+					now,
+					deadline,
+				)
 				if resumeErr != nil {
 					return resumeErr
 				}

@@ -110,15 +110,15 @@ func (s *Store) ClaimPRDevelopmentControllerSuspendedResumeRecovery(
 	if err := s.ready(ctx); err != nil {
 		return PRDevelopmentControllerSuspendedResumeRecoveryLease{}, false, err
 	}
-	normalized, err := normalizePRDevelopmentControllerSuspendedResumeRecoveryClaim(input)
-	if err != nil {
-		return PRDevelopmentControllerSuspendedResumeRecoveryLease{}, false, err
+	normalized, normalizeErr := normalizePRDevelopmentControllerSuspendedResumeRecoveryClaim(input)
+	if normalizeErr != nil {
+		return PRDevelopmentControllerSuspendedResumeRecoveryLease{}, false, normalizeErr
 	}
 	var (
 		lease   PRDevelopmentControllerSuspendedResumeRecoveryLease
 		changed bool
 	)
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
 		relation, err := loadPRDevelopmentControllerAttemptRelation(
 			ctx,
 			conn,
@@ -128,15 +128,14 @@ func (s *Store) ClaimPRDevelopmentControllerSuspendedResumeRecovery(
 		if err != nil {
 			return err
 		}
-		suspension, controller, err :=
-			loadCurrentPRDevelopmentSuspendedResumeRecovery(
-				ctx,
-				conn,
-				normalized.SuspensionID,
-				normalized.ControllerID,
-				normalized.AttemptID,
-				normalized.ExpectedRevision,
-			)
+		suspension, controller, err := loadCurrentPRDevelopmentSuspendedResumeRecovery(
+			ctx,
+			conn,
+			normalized.SuspensionID,
+			normalized.ControllerID,
+			normalized.AttemptID,
+			normalized.ExpectedRevision,
+		)
 		if err != nil {
 			return err
 		}
@@ -292,11 +291,11 @@ func (s *Store) ClaimPRDevelopmentControllerSuspendedResumeRecovery(
 		changed = true
 		return nil
 	})
-	if err != nil {
+	if transactionErr != nil {
 		return PRDevelopmentControllerSuspendedResumeRecoveryLease{}, false,
 			fmt.Errorf(
 				"claim pull request development suspended resume recovery: %w",
-				s.dbError(err),
+				s.dbError(transactionErr),
 			)
 	}
 	return lease, changed, nil
@@ -311,20 +310,19 @@ func (s *Store) RenewPRDevelopmentControllerSuspendedResumeRecovery(
 	if err := s.ready(ctx); err != nil {
 		return err
 	}
-	normalized, err := normalizePRDevelopmentControllerSuspendedResumeRecoveryRenew(input)
-	if err != nil {
-		return err
+	normalized, normalizeErr := normalizePRDevelopmentControllerSuspendedResumeRecoveryRenew(input)
+	if normalizeErr != nil {
+		return normalizeErr
 	}
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
-		suspension, controller, err :=
-			loadCurrentPRDevelopmentSuspendedResumeRecovery(
-				ctx,
-				conn,
-				normalized.SuspensionID,
-				normalized.ControllerID,
-				normalized.AttemptID,
-				0,
-			)
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
+		suspension, controller, err := loadCurrentPRDevelopmentSuspendedResumeRecovery(
+			ctx,
+			conn,
+			normalized.SuspensionID,
+			normalized.ControllerID,
+			normalized.AttemptID,
+			0,
+		)
 		if err != nil {
 			return err
 		}
@@ -371,10 +369,10 @@ func (s *Store) RenewPRDevelopmentControllerSuspendedResumeRecovery(
 		}
 		return nil
 	})
-	if err != nil {
+	if transactionErr != nil {
 		return fmt.Errorf(
 			"renew pull request development suspended resume recovery: %w",
-			s.dbError(err),
+			s.dbError(transactionErr),
 		)
 	}
 	return nil
@@ -390,21 +388,21 @@ func (s *Store) FinalizePRDevelopmentControllerSuspendedResumeRecovery(
 	if err := s.ready(ctx); err != nil {
 		return PRDevelopmentControllerSuspendedResumeRecoveryTransition{}, false, err
 	}
-	normalized, err := normalizePRDevelopmentControllerSuspendedResumeRecoveryFinalize(input)
-	if err != nil {
-		return PRDevelopmentControllerSuspendedResumeRecoveryTransition{}, false, err
+	normalized, normalizeErr := normalizePRDevelopmentControllerSuspendedResumeRecoveryFinalize(input)
+	if normalizeErr != nil {
+		return PRDevelopmentControllerSuspendedResumeRecoveryTransition{}, false, normalizeErr
 	}
-	resultJSON, resultHash, err := encodePRDevelopmentControllerSuspendedResumeResult(
+	resultJSON, resultHash, encodeErr := encodePRDevelopmentControllerSuspendedResumeResult(
 		normalized.Result,
 	)
-	if err != nil {
-		return PRDevelopmentControllerSuspendedResumeRecoveryTransition{}, false, err
+	if encodeErr != nil {
+		return PRDevelopmentControllerSuspendedResumeRecoveryTransition{}, false, encodeErr
 	}
 	var (
 		transition PRDevelopmentControllerSuspendedResumeRecoveryTransition
 		changed    bool
 	)
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
 		suspension, found, err := loadPRDevelopmentControllerSuspensionByID(
 			ctx,
 			conn,
@@ -524,8 +522,7 @@ func (s *Store) FinalizePRDevelopmentControllerSuspendedResumeRecovery(
 		suspension.FinalResumeRevision = controller.Revision
 		suspension.ResumedAt = &now
 		suspension.UpdatedAt = now
-		suspension.ResumeFinalHash =
-			hashPRDevelopmentControllerSuspensionResumeFinal(suspension)
+		suspension.ResumeFinalHash = hashPRDevelopmentControllerSuspensionResumeFinal(suspension)
 		rowResult, err := conn.ExecContext(ctx, `
 			UPDATE pr_development_controller_suspensions
 			SET status = 'resumed', resume_reservation_key = '',
@@ -647,11 +644,11 @@ func (s *Store) FinalizePRDevelopmentControllerSuspendedResumeRecovery(
 		changed = true
 		return nil
 	})
-	if err != nil {
+	if transactionErr != nil {
 		return PRDevelopmentControllerSuspendedResumeRecoveryTransition{}, false,
 			fmt.Errorf(
 				"finalize pull request development suspended resume recovery: %w",
-				s.dbError(err),
+				s.dbError(transactionErr),
 			)
 	}
 	return transition, changed, nil

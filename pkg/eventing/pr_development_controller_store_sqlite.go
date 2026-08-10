@@ -2649,8 +2649,8 @@ func validatePRDevelopmentControllerAggregate(
 	}
 	var latestFence *PRDevelopmentAttemptReviewFence
 	if len(fences) != 0 {
-		copy := fences[len(fences)-1]
-		latestFence = &copy
+		fenceCopy := fences[len(fences)-1]
+		latestFence = &fenceCopy
 	}
 	if resumed, resumeErr := validatePRDevelopmentControllerResumedAuthority(
 		controller,

@@ -182,15 +182,15 @@ func (s *Store) ClaimPRDevelopmentControllerSuspension(
 	if err := s.ready(ctx); err != nil {
 		return PRDevelopmentControllerSuspensionLease{}, false, err
 	}
-	normalized, err := normalizePRDevelopmentControllerSuspensionClaim(input)
-	if err != nil {
-		return PRDevelopmentControllerSuspensionLease{}, false, err
+	normalized, normalizeErr := normalizePRDevelopmentControllerSuspensionClaim(input)
+	if normalizeErr != nil {
+		return PRDevelopmentControllerSuspensionLease{}, false, normalizeErr
 	}
 	var (
 		lease   PRDevelopmentControllerSuspensionLease
 		changed bool
 	)
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
 		relation, err := loadPRDevelopmentControllerAttemptRelation(
 			ctx,
 			conn,
@@ -368,10 +368,10 @@ func (s *Store) ClaimPRDevelopmentControllerSuspension(
 		changed = true
 		return nil
 	})
-	if err != nil {
+	if transactionErr != nil {
 		return PRDevelopmentControllerSuspensionLease{}, false, fmt.Errorf(
 			"claim pull request development controller suspension: %w",
-			s.dbError(err),
+			s.dbError(transactionErr),
 		)
 	}
 	return lease, changed, nil
@@ -386,11 +386,11 @@ func (s *Store) RenewPRDevelopmentControllerSuspension(
 	if err := s.ready(ctx); err != nil {
 		return err
 	}
-	normalized, err := normalizePRDevelopmentControllerSuspensionRenew(input)
-	if err != nil {
-		return err
+	normalized, normalizeErr := normalizePRDevelopmentControllerSuspensionRenew(input)
+	if normalizeErr != nil {
+		return normalizeErr
 	}
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
 		suspension, found, err := loadPRDevelopmentControllerSuspensionByID(
 			ctx,
 			conn,
@@ -465,10 +465,10 @@ func (s *Store) RenewPRDevelopmentControllerSuspension(
 		}
 		return nil
 	})
-	if err != nil {
+	if transactionErr != nil {
 		return fmt.Errorf(
 			"renew pull request development controller suspension: %w",
-			s.dbError(err),
+			s.dbError(transactionErr),
 		)
 	}
 	return nil
@@ -484,15 +484,15 @@ func (s *Store) FinalizePRDevelopmentControllerSuspension(
 	if err := s.ready(ctx); err != nil {
 		return PRDevelopmentControllerSuspensionTransition{}, false, err
 	}
-	normalized, err := normalizePRDevelopmentControllerSuspensionFinalize(input)
-	if err != nil {
-		return PRDevelopmentControllerSuspensionTransition{}, false, err
+	normalized, normalizeErr := normalizePRDevelopmentControllerSuspensionFinalize(input)
+	if normalizeErr != nil {
+		return PRDevelopmentControllerSuspensionTransition{}, false, normalizeErr
 	}
 	var (
 		transition PRDevelopmentControllerSuspensionTransition
 		changed    bool
 	)
-	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
+	transactionErr := s.withImmediate(ctx, func(conn *sql.Conn) error {
 		suspension, found, err := loadPRDevelopmentControllerSuspensionByID(
 			ctx,
 			conn,
@@ -540,9 +540,9 @@ func (s *Store) FinalizePRDevelopmentControllerSuspension(
 			normalized.ClaimToken,
 		)
 		if suspension.Status == PRDevelopmentControllerSuspensionStatusSuspended {
-			now, err := s.currentTime()
-			if err != nil {
-				return err
+			now, clockErr := s.currentTime()
+			if clockErr != nil {
+				return clockErr
 			}
 			if err = requireNonRegressingPRDevelopmentControllerTime(
 				now,
@@ -704,10 +704,10 @@ func (s *Store) FinalizePRDevelopmentControllerSuspension(
 		changed = true
 		return nil
 	})
-	if err != nil {
+	if transactionErr != nil {
 		return PRDevelopmentControllerSuspensionTransition{}, false, fmt.Errorf(
 			"finalize pull request development controller suspension: %w",
-			s.dbError(err),
+			s.dbError(transactionErr),
 		)
 	}
 	return transition, changed, nil
@@ -785,30 +785,26 @@ func loadPRDevelopmentControllerSuspensions(
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	suspensions := make([]PRDevelopmentControllerSuspension, 0)
-	previousHash := emptyPRDevelopmentControllerSuspensionDigest()
-	for rows.Next() {
-		suspension, scanErr := scanPRDevelopmentControllerSuspension(rows)
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		if suspension.Ordinal != len(suspensions) || suspension.PreviousHash != previousHash {
-			return nil, errors.New("stored controller suspension chain is not contiguous")
-		}
-		if len(suspensions) > 0 &&
-			suspensions[len(suspensions)-1].Status != PRDevelopmentControllerSuspensionStatusResumed {
-			return nil, errors.New("stored controller suspension has an unresolved predecessor")
-		}
-		suspensions = append(suspensions, suspension)
-		if len(suspensions) > MaxPRDevelopmentControllerFences {
-			return nil, errors.New("stored controller has too many suspensions")
-		}
-		previousHash = suspension.ResumeFinalHash
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return suspensions, nil
+	return scanPRDevelopmentControllerChainRows(
+		rows,
+		prDevelopmentControllerChainSpec[PRDevelopmentControllerSuspension]{
+			initialHash: emptyPRDevelopmentControllerSuspensionDigest(),
+			maximum:     MaxPRDevelopmentControllerFences,
+			scan:        scanPRDevelopmentControllerSuspension,
+			link: func(suspension PRDevelopmentControllerSuspension) prDevelopmentControllerChainLink {
+				return prDevelopmentControllerChainLink{
+					ordinal:      suspension.Ordinal,
+					previousHash: suspension.PreviousHash,
+					finalHash:    suspension.ResumeFinalHash,
+					resolved: suspension.Status ==
+						PRDevelopmentControllerSuspensionStatusResumed,
+				}
+			},
+			discontinuousText: "stored controller suspension chain is not contiguous",
+			unresolvedText:    "stored controller suspension has an unresolved predecessor",
+			capacityText:      "stored controller has too many suspensions",
+		},
+	)
 }
 
 func scanPRDevelopmentControllerSuspension(
@@ -1095,13 +1091,13 @@ func stagePRDevelopmentControllerSuspension(
 		}
 		return PRDevelopmentControllerSuspension{}, err
 	}
-	if err := requirePRDevelopmentControllerSuspensionStageSource(
+	if sourceErr := requirePRDevelopmentControllerSuspensionStageSource(
 		controller,
 		input,
 		source,
 		now,
-	); err != nil {
-		return PRDevelopmentControllerSuspension{}, err
+	); sourceErr != nil {
+		return PRDevelopmentControllerSuspension{}, sourceErr
 	}
 	suspensions, err := loadPRDevelopmentControllerSuspensions(
 		ctx,

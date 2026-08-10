@@ -114,13 +114,12 @@ func validatePRDevelopmentControllerOperationChain(
 		if operation.Status == PRDevelopmentControllerOperationFinalized {
 			if operation.Kind == PRDevelopmentControllerOperationCommit &&
 				!operation.Result.WorkspaceClean {
-				suspension, found, loadErr :=
-					loadPRDevelopmentControllerSuspensionBySource(
-						ctx,
-						queryer,
-						PRDevelopmentControllerSuspensionSourceOperationRecovery,
-						operation.RecoveryID,
-					)
+				suspension, found, loadErr := loadPRDevelopmentControllerSuspensionBySource(
+					ctx,
+					queryer,
+					PRDevelopmentControllerSuspensionSourceOperationRecovery,
+					operation.RecoveryID,
+				)
 				if loadErr != nil {
 					return loadErr
 				}
