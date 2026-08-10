@@ -25,7 +25,12 @@ an interactive agent, session, workflow, prompt, or ambient tool surface. For
 durable PR-repair orchestration, the agent layer additionally exposes only an
 opaque identity of that exact fixed prompt and the concrete production
 workspace manager already installed in the loop; neither bridge is
-model-facing or makes trusted controller lifecycle authority public.
+model-facing or makes trusted controller lifecycle authority public. A
+separate controller-only local-review profile resolves the same immutable
+session agent under the caller's runtime-generation lease and evaluates only a
+bounded detached parked-candidate context. It uses one fresh no-tools,
+no-history, no-cache, no-affinity private request and returns only a strict
+structured outcome and findings, with no repository or lifecycle capability.
 
 ## Reconstruction Notes
 
@@ -36,7 +41,9 @@ model-facing or makes trusted controller lifecycle authority public.
   frozen and stateless side-question profiles, provider factory, and tool
   registry. Controller-only integration points are
   `ControllerLocalRepairPromptDigest` and
-  `AgentLoop.ControllerGitWorkspaceManager`.
+  `AgentLoop.ControllerGitWorkspaceManager`, plus
+  `ControllerLocalReviewPromptDigest`, `AgentLoop.ControllerLocalReviewReady`,
+  and `AgentLoop.NewControllerLocalReviewRunner`.
 - Runtime ordering: normalize input, resolve route/session, build prompt, select model candidate, call provider, execute tool calls, stream/finalize response, persist history, emit runtime events.
 - Non-obvious constraints: tool iteration limits, media limits, turn profile block
   disabling, fallback candidates, child-turn concurrency, exact transient-UX
@@ -61,7 +68,9 @@ model-facing or makes trusted controller lifecycle authority public.
   not generalized: under its own runtime-generation lease the trusted
   controller may obtain only the concrete production workspace manager already
   installed in the loop, while nil, typed-nil, and alternate interface
-  implementations fail closed.
+  implementations fail closed. Local review instead receives only caller-built
+  bounded immutable context, uses a fresh provider instance with detached
+  messages, and rejects every tool call or malformed structured outcome.
 
 ## Requirements
 
@@ -90,6 +99,7 @@ model-facing or makes trusted controller lifecycle authority public.
 | `FR-AGENT-021` | MUST | A workflow ephemeral decision invokes the selected configured agent through the stateless side-question provider path with no history/summary snapshot and a cryptographically random identity scoped to that one visible agent request. Initial output, structured repairs, managed calibration, fallback, and concurrent child calls preserve ordinary account/model alias resolution plus explicit model and reasoning-effort overrides and reuse the same stateless no-history, no-prompt-cache, no-hook, no-MCP, no-tool profile. The identity is used only in request-local process options: account-router selection receives a blank affinity key, session scope and inherited delivery routing context are absent, and no interactive turn, active-turn reservation, context-manager assembly, session metadata/catalog/history/summary operation, provider prompt-cache key/directive, hook, tool definition, or tool execution is created. Every provider attempt receives detached messages and options, stateful provider instances remain isolated per call, provider-authored tool calls fail closed, and cancellation propagates. The random identity is never emitted in runtime events, logs, outputs, or account-router state; callers receive only a fixed ephemeral audit marker. | Concurrent isolated gates need normal provider selection and structured execution without colliding on a synthetic session, leaving a 30-day account-affinity record, or acquiring conversation/action authority. |
 | `FR-AGENT-022` | MUST | Every ordinary live message atomically admits its final structured session scope before command handling or turn execution. Live admission rejects both an existing and a caller-requested `review` scope, while protected review projection uses the paired review admission mode; whichever wins ownership prevents the other from using protected transcript content, invoking a provider for it, or mutating that key. Existing review sessions are also rejected immediately after final key resolution, before message-tool reset, asynchronous `/stop`, steering continuation, `/clear`, `/btw`, `/context`, metadata, history, provider, or context-manager access, and the direct turn boundary repeats admission for callers that bypass message routing. A replacement-capable path without a usable ordinary scope fails closed instead of bypassing ownership admission. Public workflow `history: read_only` rejects review scope, while compiler-private frozen gate capture remains allowed. Review sessions are excluded from Seahorse startup/live ingest; startup filtering uses the strict snapshot and deliberately skips an unreadable or ambiguous session instead of falling back to tolerant history without proven ownership. Unsupported atomic admission fails closed for replacement-capable stores, while legacy stores incapable of review projection retain compatibility. | A protected PR transcript must not become an ordinary chat because a command bypasses the turn loop, a projection lands between check and metadata write, an inbound caller spoofs the review channel, or a public read-only workflow targets its key. |
 | `FR-AGENT-023` | MUST | Under an exact runtime-generation lease, its paused construction boundary, or a generation-owned readiness admission that is drained before reload pause, `AgentLoop.ControllerLocalRepairReady` requires one exact canonical current agent and reports ready only when its configuration, pinned-workspace manager, limits, and at least one concrete provider/model are usable; it may resolve concrete provider instances but never invokes one or selects an account in a way that creates session affinity. While a trusted PR-development controller holds the exact runtime-generation lease, `AgentLoop.ControllerGitWorkspaceManager` returns only the concrete production `gitworkspace.Manager` already installed in the loop and fails closed for nil, typed-nil, or alternate interface implementations; it does not acquire or retain the lease and is not a model, tool, or workflow extension point. Under that same caller-held lease, `AgentLoop.NewControllerLocalRepairRunner` repeats the exact current-agent and dependency checks, selects from only bounded untrusted routing text with no history and blank session affinity, binds the first resolved concrete provider/model without a fallback chain, and returns identity-safe errors. Before model execution, trusted orchestration may record `ControllerLocalRepairPromptDigest`, the deterministic domain-separated SHA-256 identity of the exact isolated system prompt; this evidence surface exposes neither prompt text nor model capability. The controller can then invoke `LocalRepairRunner` with one exact manager-issued checkout pin, bounded untrusted instructions and context, and fixed iteration/output limits. The runner acquires the reservation-derived cross-process Git-workspace operation lock before checkout access and retains it across exact acquisition, every provider/tool edit, and detached postflight; pinned snapshot, commit, and release use the same lock order. Under that lock it reacquires and validates the exact still-locked workspace before any provider call, creates a fresh isolated model loop with no agent instance, session/history, account routing, fallback, prompt cache, hooks, MCP, workflow, shell, network, Git, CI, commit, push, or release authority, and exposes only confined `read_file`, `list_dir`, `edit_file`, and guarded `apply_patch` tools. Provider calls are serialized per runner; tool calls run sequentially in response order; malformed, oversized, conflicting, nil, or panic-derived provider data fails closed; cancellation is checked before each provider and tool boundary. One unconditional bounded detached postflight revalidates the pin and heartbeat after every outcome, while the runner never releases it and returns only bounded sanitized content, iteration count, and workspace identity. | Repair may edit the exact locally verified checkout, but readiness and controller bridge access alone invoke no model and repair must not inherit ambient agent authority, leak the fixed prompt or checkout/provider identity through diagnostics, create account affinity, race another process, commit, or release on the same reservation, execute fallback intent, or advance the PR lifecycle itself. |
+| `FR-AGENT-024` | MUST | Under the caller's exact runtime-generation lease or drained generation-owned readiness admission, `AgentLoop.ControllerLocalReviewReady` accepts only one canonical current agent with valid limits and at least one usable concrete provider/model; readiness invokes no model and creates no affinity. `AgentLoop.NewControllerLocalReviewRunner` repeats that identity/readiness check and retains only the exact current agent instance. `ControllerLocalReviewPromptDigest` returns only the domain-separated SHA-256 identity of the fixed isolated prompt. `ControllerLocalReviewRunner.Run` accepts one trimmed bounded controller-built immutable context and performs one fresh private request with detached messages, a random request-local identity, suppressed default/workspace/runtime context, no history, prompt cache, session affinity, hooks, MCP, workflow runtime, tools, or tool fallback. Each run obtains a fresh provider instance, rejects provider-authored tool calls, exposes no session/cache/message identity, and strictly decodes only bounded `passed`, `changes_required`, or `attention_required` with bounded structured findings; pass requires zero findings and changes-required at least one. Cancellation propagates, while provider/configuration/parser failures collapse to fixed safe errors without raw response, prompt, model, account, provider, or context data. | Local review must reuse the session's configured model policy without becoming an interactive turn, consulting ambient history, retaining prompt-cache or routing identity, observing the repository, executing a tool, or gaining any controller, GitHub/provider-object, mutation, gate, publication, push, merge, or acknowledgement authority. |
 
 ## Data And State Model
 
@@ -126,7 +136,9 @@ session map. A local repair run likewise creates no conversation or account
 state. Its transient state is limited to the exact checkout reservation,
 bounded provider messages, four-tool registry, iteration counter, and sanitized
 result; ordinary repository content mutations remain inside the still-held
-workspace pin.
+workspace pin. A local review run likewise creates no conversation, cache,
+affinity, hook, workflow, MCP, or tool state; only its bounded request and
+normalized structured result survive at the caller-owned durable boundary.
 
 ## Surface Ownership
 
@@ -195,6 +207,7 @@ Owns: EVENT agent.*
 | Runtime | `workflowAgentRunner.CaptureReadOnlySession`, `workflowAgentRunner.RunAgent`, and `AgentLoop.askSideQuestionWithOptions` frozen-context profile | Capture one strict existing-session snapshot, use Session Memory and Tool Execution primitives to freeze its complete media graph into the persisted private form, or validate/materialize that form without live rereads, then perform no-tool/no-hook provider decisions without joining or mutating the interactive turn lifecycle or exposing raw capabilities through provider identity. | `FR-AGENT-020` |
 | Runtime | `AgentLoop.askSideQuestionWithOptions` stateless profile | Perform no-history/no-cache/no-tool provider calls under one request-local identity while suppressing session-affine account routing and all durable or observable session identity. | `FR-AGENT-021` |
 | Go API | `AgentLoop.ControllerLocalRepairReady`, `AgentLoop.ControllerGitWorkspaceManager`, `ControllerLocalRepairPromptDigest`, `AgentLoop.NewControllerLocalRepairRunner`, `LocalRepairRunner.Run` | Under a caller-held runtime-generation lease, paused construction boundary, or drained generation-owned readiness admission, verify one exact agent has a concrete repair target without a provider call or affinity; expose only the installed concrete production workspace manager and an opaque domain-separated identity of the exact fixed repair prompt for trusted orchestration; under the lease, resolve untrusted routing text with no history and blank account affinity to the first concrete model/provider only, then run a fresh controller-only repair loop against one exact held checkout reservation with four confined file tools and detached postflight validation. The bridges acquire no lease and add no model-facing, workflow-extension, or public authority; the concrete manager remains a trusted-controller-only lifecycle capability. | `FR-AGENT-023` |
+| Go API | `AgentLoop.ControllerLocalReviewReady`, `ControllerLocalReviewPromptDigest`, `AgentLoop.NewControllerLocalReviewRunner`, `ControllerLocalReviewRunner.Run` | Under a caller-held runtime-generation lease or drained readiness admission, verify and retain only the exact current session agent, identify the fixed prompt without exposing it, and run one fresh private no-tools/no-history/no-cache/no-affinity structured review over caller-built bounded immutable context. Return only normalized outcome/findings or fixed safe errors, with no repository or lifecycle authority. | `FR-AGENT-024` |
 | Events | `agent.*` | Turn, LLM, tool, steering, interrupt, subturn, and error telemetry. | `FR-AGENT-001`, `FR-AGENT-004`, `FR-AGENT-006` |
 | HTTP/UI | `/api/agents*`, `/agent/agents` | Project and mutate persistent configured agent policy with ordered results, revision fencing, explicit model fallback semantics, workspace capability CAS, sanitized live activity, deep links, and restart feedback. | `FR-AGENT-018`, `FR-AGENT-019` |
 
@@ -304,6 +317,16 @@ Owns: EVENT agent.*
     projection, then always run one detached bounded pin-and-heartbeat
     postflight. Keep the reservation locked so the controller alone can
     reverify the PR and choose the next lifecycle action.
+13. For controller-only local review, keep the caller's exact runtime-generation
+    lease, resolve the immutable session agent, and reject stale or unusable
+    configuration before any provider call. Build a fresh private side-question
+    request from only the fixed review system prompt and bounded caller context;
+    suppress default context, history, cache, affinity, hooks, MCP, workflows,
+    and tools, detach every message/options graph, and use a fresh provider
+    instance. Reject tool calls and strictly parse one bounded structured
+    outcome/findings payload. Return only normalized values or fixed safe errors;
+    never create a turn, session record, cache key, event identity, repository
+    capability, or lifecycle action.
 
 ## Cross-Feature Behavior
 
@@ -351,6 +374,13 @@ manager accessor retains no runtime lease and rejects alternate implementations;
 the digest exposes no prompt text or execution capability. Neither surface is
 available to the model or expands the agent layer into interpreting review state
 or performing commit, push, CI, merge, or publication actions.
+The PR-development review worker separately uses `FR-AGENT-024` under the same
+outer runtime-generation fence. Event Automation owns durable orchestration,
+CI/snapshot verification, review-lease renewal, outcome mapping, ledger
+terminalization, and any next-attempt admission. The agent layer owns only the
+fresh isolated provider call and strict structured decoding; it receives no
+workspace handle, lease, provider-object state, gate policy, or publication
+capability.
 Account routers plug into the account-selection step: the turn loop expands the
 router to concrete candidates, can reselect after context compression, and
 records fallback outcomes without changing provider prompt serialization.
@@ -392,6 +422,13 @@ metadata but does not persist or reinterpret those trust facts.
   test or extension supplied only another interface implementation. It never
   falls back to exposing that alternate implementation, and callers remain
   responsible for retaining the runtime-generation lease across use.
+- Local review fails before or during its sole provider request for a stale or
+  invalid agent generation, missing concrete model, blank/oversized context,
+  provider construction/cancellation/failure, tool call, malformed JSON,
+  unknown outcome/severity, invalid field bounds, passing findings, or a
+  changes-required result without findings. It returns no partial result or raw
+  provider/configuration/context diagnostic and never falls back to an ordinary
+  turn, history, cache, tools, hooks, MCP, workflows, or another agent.
 - An isolated read-only decision fails before provider execution when its
   caller cannot supply an exact existing-session snapshot. A provider-authored
   tool call is an error even though no tool definitions were offered; it is not
@@ -480,6 +517,7 @@ metadata but does not persist or reinterpret those trust facts.
 | `FR-AGENT-021` | [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go), [pkg/agent/turn_coord.go](../../pkg/agent/turn_coord.go) |
 | `FR-AGENT-022` | [pkg/agent/agent_message_review_test.go](../../pkg/agent/agent_message_review_test.go), [pkg/agent/agent_scope_admission_race_test.go](../../pkg/agent/agent_scope_admission_race_test.go), [pkg/agent/context_seahorse_test.go](../../pkg/agent/context_seahorse_test.go), [pkg/agent/workflow_runtime_test.go](../../pkg/agent/workflow_runtime_test.go), [pkg/agent/agent_message.go](../../pkg/agent/agent_message.go), [pkg/agent/agent.go](../../pkg/agent/agent.go), [pkg/agent/workflow_runtime.go](../../pkg/agent/workflow_runtime.go) |
 | `FR-AGENT-023` | [pkg/agent/local_repair_test.go](../../pkg/agent/local_repair_test.go), [pkg/agent/local_repair_prompt_test.go](../../pkg/agent/local_repair_prompt_test.go), [pkg/agent/local_repair.go](../../pkg/agent/local_repair.go), [pkg/agent/local_repair_factory.go](../../pkg/agent/local_repair_factory.go), [pkg/agent/local_repair_factory_test.go](../../pkg/agent/local_repair_factory_test.go), [pkg/agent/git_workspace.go](../../pkg/agent/git_workspace.go), [pkg/agent/git_workspace_controller_test.go](../../pkg/agent/git_workspace_controller_test.go), [pkg/tools/toolloop_test.go](../../pkg/tools/toolloop_test.go), [pkg/tools/apply_patch_test.go](../../pkg/tools/apply_patch_test.go) |
+| `FR-AGENT-024` | [pkg/agent/controller_local_review.go](../../pkg/agent/controller_local_review.go), [pkg/agent/controller_local_review_test.go](../../pkg/agent/controller_local_review_test.go), [pkg/prdevelopment/review_worker_test.go](../../pkg/prdevelopment/review_worker_test.go), [pkg/gateway/pr_development_repair_runtime_test.go](../../pkg/gateway/pr_development_repair_runtime_test.go) |
 
 ## Implementation Anchors
 
@@ -487,6 +525,7 @@ metadata but does not persist or reinterpret those trust facts.
 - [pkg/agent/instance.go](../../pkg/agent/instance.go)
 - [pkg/agent/agent.go](../../pkg/agent/agent.go)
 - [pkg/agent/prompt_turn.go](../../pkg/agent/prompt_turn.go)
+- [pkg/agent/controller_local_review.go](../../pkg/agent/controller_local_review.go)
 - [pkg/agent/context_seahorse.go](../../pkg/agent/context_seahorse.go)
 - [pkg/agent/channel_manager_compat.go](../../pkg/agent/channel_manager_compat.go)
 - [pkg/agent/steering.go](../../pkg/agent/steering.go)
