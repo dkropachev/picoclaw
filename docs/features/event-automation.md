@@ -2387,8 +2387,10 @@ live while it invokes those effects and must submit their exact result back to
 eventing; neither store layer calls Git. These primitives do not invoke Git
 themselves. `FR-EVENT-AUTOMATION-063` wires the normal edit loop and validation
 consumer; `FR-EVENT-AUTOMATION-064` wires the isolated AI reviewer. An
-operation-recovery worker, attention gates, and publisher remain separate later
-slices.
+inventory-v4 retained-line suspension/resume boundary is the separate `#125a`
+Git prerequisite for releasing reconciled but idle mutation authority. The
+generation-owned operation-recovery worker that composes it remains `#125b`;
+provider publication remains later still.
 
 `FR-EVENT-AUTOMATION-062` is the separate local-CI evidence primitive. [Git
 workspaces](git-workspaces.md) owns exact parent/candidate materialization, the
@@ -2420,7 +2422,8 @@ review, provider access, or publication.
 | Shared attention policy/runtime, durable PR-development decision admission, exact local context, and inert gateway composition | `#122` / `FR-EVENT-AUTOMATION-065` | Reuses ordinary mixed workflow gates and the existing global/repository policy catalog, but launches only from an explicit trusted local call and grants no trigger, response, repair, provider, publication, or browser authority. |
 | Automatic attention triggering and PR-chat steering/UI | `#123` / `FR-EVENT-AUTOMATION-066` | Adds a schema-v16 occurrence, mixed-gate worker, private response bridge, and case-owned browser panel; the open workbench polls a coarse list marker every five seconds and selects flagged cases through canonical chat focus. This is in-app discovery, not an out-of-band notification, and answering changes only the private task and grants no code or provider authority. |
 | Read-only selected-case local-development evidence projection | `#124` / `FR-EVENT-AUTOMATION-067` / the Security Isolation local-evidence contract | Adds no schema or mutation: one atomic workbench snapshot declassifies only bounded latest-attempt, exact candidate, terminal CI, reservation-free review, and derived local-readiness evidence. It exposes no raw evidence or private lifecycle capability, and local readiness is not provider or publication authority. |
-| Generation-owned recovery execution for ambiguous prepared Adopt/Resume/Commit/Park effects | `#125` | Remains a separate later worker over the existing schema-v12/v13 recovery capabilities; neither the read projection nor its `local_ready` value may claim, rotate, replay, finalize, or reconcile an operation. |
+| Reservation-free suspended retained-line state and exact candidate resume, including prepared-Commit ambiguity | `#125a` / the Git Workspaces and Security Isolation suspension contracts | Adds only the controller-private Git boundary: an exact current reservation may be retired while its checkout/ref and bounded ordinary candidate remain. Commit recovery records the deterministic child's `PreparedTree` and applied/unapplied state separately from the current `CandidateTree`; an unapplied child requires exact candidate equality, while an applied child may retain later post-prepare edits. Later exact resume normalizes only the known prepared control plane, uses a globally fresh bearer, and preserves the candidate files. Suspension is neither Park/review nor CI/readiness/publication evidence and does not scan, claim, or finalize an eventing operation. |
+| Generation-owned recovery execution for ambiguous prepared Adopt/Resume/Commit/Park effects | `#125b` | Remains the separate worker over existing schema-v12/v13 claims and the `#125a` Git boundary. It must persist/replay each exact old-to-fresh recovery result before retiring the resulting idle bearer into suspension; Park still replays and retires old directly. Neither the selected-case read projection nor its `local_ready` value may claim, rotate, replay, suspend, resume, finalize, or reconcile an operation. |
 | Provider refresh/write, push/publication, acknowledgement, and merge | `#126+` | Receives no authority from the schema-v15 decision link, schema-v16 occurrence, private workflow run, completed attempt, ledger row, gate answer, review outcome, or browser-visible local-readiness value without its own later provider and publication fences. |
 
 The explicitly installed PR-review template is different: its agent has

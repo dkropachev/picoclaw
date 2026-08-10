@@ -18,7 +18,11 @@ review that a proposed park would expose, park its committed or proven
 no-change tip while releasing the mutation reservation but retaining the
 private branch, resume it under a fresh reservation, and snapshot the same
 object-addressed review without exposing the retained line through generic
-workspace surfaces.
+workspace surfaces. It can also suspend an exact retained candidate without a
+commit or review fence, retire the current reservation while keeping the
+private ref and checkout, record whether an ambiguous prepared Commit already
+advanced detached `HEAD`, and later resume the same ordinary content under a
+fresh reservation.
 When a durable controller intent makes an expired Adopt or Resume recoverable,
 two controller-only composite methods retain the old and fresh reservation
 operation locks across the line transition and authority replacement. They
@@ -48,7 +52,11 @@ never the caller's raw repository spelling.
   `Manager.ResumePinnedLine`, `Manager.ParkPinnedLine`,
   `Manager.PreviewPinnedLineReview`, `Manager.SnapshotPinnedLineReview`,
   `Manager.RecoverPinnedLineAdoptReservation`,
-  `Manager.RecoverPinnedLineResumeReservation`, `NewGitWorkspaceTool`, API routes under
+  `Manager.RecoverPinnedLineResumeReservation`, `PinnedLineSuspendRequest`,
+  `PinnedLineSuspendResult`, `PinnedLineCommitSuspensionRequest`,
+  `PinnedLineSuspendedResumeRequest`, `PinnedLineSuspendedResumeResult`,
+  `Manager.SuspendPinnedLine`, `Manager.SuspendPinnedLineCommitRecovery`,
+  `Manager.ResumeSuspendedPinnedLine`, `NewGitWorkspaceTool`, API routes under
   `/api/git-workspaces`, and frontend API/page components.
 - Runtime ordering: load config, construct the manager, acquire and lock before
   repository work, or have a trusted controller validate and publish a fresh
@@ -61,7 +69,12 @@ never the caller's raw repository spelling.
   only from its complete version/epoch/tip/tree fence; after an expired
   write-ahead Adopt or Resume, hold both reservation locks while reconciling
   the intended transition and replacing the stale bearer; then reconcile generic
-  ignored-file cleanup and aged/oversized checkout drops.
+  ignored-file cleanup and aged/oversized checkout drops. When a recovered
+  mutation has no active repair owner, snapshot its exact ordinary candidate,
+  durably suspend the retained line while retiring the current reservation,
+  and later normalize any exact prepared-Commit child back to the retained
+  parent before resuming the unchanged candidate under one globally fresh
+  reservation.
 - Non-obvious constraints: locked workspaces are never cleaned or dropped;
   dirty changes must be committed before unlock/drop; ignored-file size must
   include ignored files and directories, not only tracked git state. Pinned
@@ -90,7 +103,13 @@ never the caller's raw repository spelling.
   evidence, and never disclose or copy the retained `.git` directory. An exact
   no-change declaration materializes separate parent and candidate roots for
   the same proven tree; it is validation evidence only and never relaxes the
-  strict no-empty-commit boundary.
+  strict no-empty-commit boundary. A suspended line is neither parked nor
+  mutating: it retains its private ref, checkout, and ordinary candidate but no
+  reservation. Suspension does not create a commit, Park fence, review, CI, or
+  readiness fact. Prepared-Commit recovery records whether the deterministic
+  child is already `HEAD` without advancing the retained ref; exact resume
+  converts that child back into ordinary candidate files over the retained
+  parent before granting fresh mutation authority.
 
 ## Requirements
 
@@ -112,6 +131,7 @@ never the caller's raw repository spelling.
 | `FR-GITWS-014` | MUST | After an exclusive PR-development mutation lease expires, a trusted recovery controller calls `Manager.RotatePinnedReservation` with one caller-durable intent, the exact old and fresh reservation bearers, stable existing agent, workspace, source pin, and either the exact unbound-pin fence or the complete bound mutating-line version/epoch/tip/tree fence. | The manager waits for both reservation operation locks in canonical hash order, then atomically changes only the matching workspace reservation and, when bound, its matching line reservation hash; the logical Git agent remains unchanged and cannot be selected by the recovery worker. It returns the exact opaque workspace/line fence, a domain-separated rotation proof, and replay status. An exact retry recognizes only the latest still-active replacement and performs no write. | String-tagged inventory version 3 retains a bounded append-only, domain-separated hash chain of old-to-fresh rotation records. The old reservation is permanently revoked, the fresh reservation becomes the sole active bearer, and causal rotations may continue `A -> B -> C` without adding entries to the park-only retired-reservation sequence. The complete rotation history participates in inventory validation and global reservation nonreuse. No ref, `HEAD`, index, worktree, object, branch, remote, or filesystem content is changed. | Unbound and bound modes are disjoint. Missing, reused, aliased, partial, cross-workspace, cross-line, noncurrent, pending-park, parked, changed source/version/epoch/tip/tree, noncanonical lock order, malformed chain, duplicate hash, rollback to version 2, or replay after later progress fails closed. The API is controller-only and has no tool, workflow, model, HTTP, UI, CI, provider, commit, park, push, merge, or publication surface. | A crashed worker still knows its old bearer; durable recovery must revoke that bearer before a replacement controller can safely continue the same local checkout without resetting or discarding its work. |
 | `FR-GITWS-015` | MUST | A trusted recovery controller has one caller-durable schema-v13 Adopt or Resume operation intent and calls `Manager.RecoverPinnedLineAdoptReservation` or `Manager.RecoverPinnedLineResumeReservation` with its exact old and globally fresh reservation bearers, stable agent, workspace/source/line identity, intended line fence, and rotation identity. | The manager acquires both reservation operation locks in canonical hash order and retains them across the complete transition. For a pre-effect Adopt it first durably records the unbound old-to-fresh rotation, revokes old, installs fresh as workspace owner, and then creates or exactly reconciles the retained line in a second durable save; replay completes that intermediate state. For a post-effect Adopt it first verifies the exact retained line and Git state, then records the bound rotation and replaces old with fresh. Resume accepts either the exact parked pre-Resume fence where old was never installed or the exact already-resumed fence owned by old, and converges both to that mutating fence owned only by fresh. Each method returns the same opaque line fence and inventory-v3 rotation proof on first execution and exact latest replay. | The existing inventory-v3 rotation chain, count, tail anchor, global nonreuse checks, and workspace/line records durably revoke old and install fresh in one controller operation while the canonical locks remain continuously held. Adopt may create or reconcile only its deterministic private source ref; Resume moves no ref. Neither method changes `HEAD`, index, worktree, ordinary content, source pin, tip, tree, line version, remote, or logical agent. No new inventory version or parallel recovery history is introduced. | Missing, reused, aliased, partial, cross-intent/workspace/line, dirty, attached, changed source/version/epoch/tip/tree/ref/control-plane, pending-park, later-progress, noncanonical-lock, or corrupt rotation evidence fails closed. A different old-owner operation cannot enter between transition validation and revocation; after success every use of old conflicts. Exact replay is accepted only for the latest matching fresh owner and record. The methods are controller-only and expose no model, tool, workflow, HTTP/UI, CI, commit, park, provider, push, merge, or publication capability. | A durable operation intent makes Adopt and Resume repeatable, but only one composite Git boundary can close the stale-bearer race between replaying the line transition and revoking the crashed worker's authority. |
 | `FR-GITWS-016` | MUST | While one exact mutation reservation remains live, a trusted controller calls `Manager.WithPinnedCandidateValidationRoots` with the complete pin, workspace ID, candidate parent/tree/digest evidence, an exact `NoChanges` declaration, and one callback. | Under the reservation operation lock, the manager revalidates inventory identity, detached `HEAD`, real index, parent, recomputed candidate, origin, ancestry, and control plane; requires `NoChanges` to equal candidate-tree/parent-tree equality; materializes the exact object trees into separate private disposable `.git`-free parent and candidate roots, including two separate roots for one no-change tree; and supplies their canonical repository identity and full-SHA-256 `PinnedTreeManifest` evidence to the callback. It descriptor-confined postflights both roots, removes them, then revalidates the same retained candidate/control plane even after callback failure or cancellation before releasing the operation lock. | The callback treats both roots as immutable. Only private temporary roots and unreachable content-addressed objects may change; inventory, reservation, `HEAD`, real index, retained files, ref, branch, remote, provider, workflow, cache, and publication state do not. Root paths exist only during the callback and are omitted from JSON; normalized repository and manifests are evidence, while no reservation bearer is returned. | Missing, malformed, stale, cross-workspace, changed/no-change declaration mismatch, dirty index, attached or operation-in-progress state, control-plane drift, excessive or unsafe tree/path/blob/symlink content, invalid UTF-8, alias/collision/traversal, added/removed/renamed/replaced/hard-linked/swapped/raced/mode/content drift, special file, gitlink, callback write, cancellation, cleanup, or either postflight failure fails closed without successful evidence. Reads are bounded and rooted/no-follow/nonblocking where supported; direct `ls-tree`/`cat-file` plumbing uses no checkout, archive filter, shell, hook, prompt, pager, ambient config, replacement object, or lazy fetch. This controller-only API grants no tool, model, workflow, HTTP/UI, commit, Park, release, provider, push, merge, or publication authority. | Local validation must see immutable exact changed or no-change content without receiving the retained checkout, Git authority, sibling state, or stale evidence. |
+| `FR-GITWS-017` | MUST | A trusted controller with one exact live mutating-line reservation and caller-durable suspension intent calls `Manager.SuspendPinnedLine`; when the unfinished effect is one exact prepared Commit it instead calls `Manager.SuspendPinnedLineCommitRecovery` with that complete immutable Commit request. A later controller calls `Manager.ResumeSuspendedPinnedLine` with the complete suspension fence and one globally fresh reservation. | Ordinary suspension revalidates the exact line/ref/workspace and snapshots all tracked and nonignored untracked ordinary content into bounded `CandidateTree`, domain-separated digest, and changed-file count evidence relative to the retained line tip, admitting exact no-change. Commit-recovery suspension deterministically reconstructs and verifies the prepared commit, accepts `HEAD` only at its retained expected parent or that exact direct child, records the child identity, its exact `PreparedTree`, and whether it was already applied, and independently snapshots the current ordinary `CandidateTree` without applying a missing commit, moving the retained ref, or discarding post-effect files. `PreparedTree` is the deterministic prepared child's tree; while the child is unapplied, `CandidateTree` must equal it, and only an applied child may retain later ordinary edits in a differing current `CandidateTree`. Both return one opaque exact suspension fence after clearing mutation ownership. Resume requires the latest matching fence; if the prepared child was applied, it compare-and-swaps detached `HEAD` and repairs only the real index from `PreparedTree` or the retained-parent tree back to that parent while preserving every ordinary candidate file, then re-snapshots exact `CandidateTree` equality before installing the fresh reservation and returning the unchanged line version/mutation-epoch/tip/tree. | String-tagged inventory version 4 adds private `suspended` line state and a bounded append-only suspension-record collection. Each line anchors its exact record count and domain-separated empty-or-tail hash; every record hash-binds mode (`candidate` or `commit_recovery`), intent and request hash, workspace/line/repository/source identity, unchanged line version/epoch/tip/tree, retired reservation hash and agent, `CandidateTree`/digest/count, optional prepared commit plus its distinct `PreparedTree` and applied bit, prior hash, and time. Suspend atomically appends that record, clears the workspace lock and line mutation owner, and leaves the checkout, private no-reflog ref, retained tip/tree/version/epoch, `HEAD`, real index, and ordinary files otherwise unchanged. Resume retains the append-only record, changes only an exactly necessary detached-`HEAD` compare-and-swap and index reset, marks the line mutating and installs the fresh workspace/line owner without changing the already-issued mutation epoch; it changes no ordinary file, retained ref, line version/tip/tree, remote, or provider state. Version-3 migration creates only zero-count empty anchors and no suspension fact, while a version-3 decoder rejects version 4 before rewrite. | A suspended line has no live reservation, pending Park, review snapshot, or generic release/maintenance eligibility and cannot be treated as parked, locally ready, reviewed, or publishable. Missing, malformed, reused, aliased, partial, nonlatest, cross-workspace/line/source/agent, stale version/epoch/tip/tree, changed ref/origin/control plane, unsafe or unexpected `HEAD`/index, merge/rebase/sequencer/Git-lock state, changed gitlink, excessive candidate, corrupt count/hash chain, rollback, later progress, candidate drift, prepared-commit/`PreparedTree` mismatch, or compare-and-swap ambiguity fails closed without clearing or installing authority or rewriting ordinary files. An exact Suspend retry matches only the current tail and re-proves its filesystem form before no-write replay; an exact Resume retry matches only the same latest record and still-current fresh owner. All methods are controller-only, run sanitized bounded Git plumbing without shell, hook, signing, prompt, ambient config, replacement object, lazy fetch, or network, and expose no tool/model/workflow/HTTP/UI/CI/review/provider/push/merge/publication capability. | Idle or recovery-required work must release exclusive edit ownership without losing a branch, applied prepared commit, or partial ordinary content, and must resume exactly without fabricating a WIP commit, Park/review fence, green gate, or publication authority. |
 
 Event Automation's durable repair-controller composition extends these requirements only
 through the following Git Workspaces primitives; it grants this feature no CI,
@@ -140,6 +160,15 @@ ledger, model, provider, or publication authority:
   parent and candidate roots for that same tree and keep the reservation
   operation lock through callback, root postflight, cleanup, and retained-state
   postflight.
+- Within `FR-GITWS-017`, a controller may call `SuspendPinnedLine` only after
+  any required Adopt/Resume old-to-fresh recovery has durably converged, or call
+  `SuspendPinnedLineCommitRecovery` only after the prepared Commit's old bearer
+  has been durably rotated to the exact live replacement. Each preceding
+  recovery primitive keeps old and fresh locks continuously through its own
+  convergence and revocation; suspension separately holds the still-current
+  replacement lock through candidate capture and durable retirement. A crash
+  between those primitives is resolved by exact recovery replay followed by
+  exact suspension replay, never by an unfenced reset or guessed WIP commit.
 
 Controller storage lifecycle debt is deliberate and bounded at this layer:
 ordinary pins remain private after `ReleasePinned`, even when never adopted, so
@@ -154,15 +183,16 @@ The manager root contains `inventory.json`, the persistent kernel-lock target
 workspace records, generic refs, optional pinned source refs and commits, lock
 metadata, preserved branch names, drop timestamps, and independently bounded
 generic and controller-private event histories.
-Inventory version 3 uses a canonical string-valued version discriminator. It
-retains version 2's private development-line map and one
+Inventory version 4 uses a canonical string-valued version discriminator. It
+retains version 3's private development-line map, reservation-rotation chain,
+and one
 optional line-owner ID on its retained workspace. A line record binds its
 opaque identity to exactly one workspace/repository, original source ref and
 commit, deterministic internal `picoclaw/development/...` branch, current
-tip/tree, version, mutation epoch, parked-or-mutating state, timestamps, hashed
+tip/tree, version, mutation epoch, parked/mutating/suspended state, timestamps, hashed
 current mutation reservation, complete retired-reservation history, one exact
 pending-park write-ahead tuple, and complete last-park replay evidence. Version
-3 additionally stores a bounded append-only reservation-rotation chain per
+3 introduced a bounded append-only reservation-rotation chain per
 pinned workspace. Each record binds its caller-durable intent, exact unbound or
 bound line fence, old and fresh reservation hashes, prior record hash, and
 result hash. The chain retains at most 8,192 records, matching schema-v12
@@ -175,6 +205,25 @@ sequence. Schema-v13 composite Adopt/Resume recovery reuses this same bound
 record and its count/tail anchors: the record can prove old-to-fresh revocation
 whether Resume first installed old or atomically installed fresh from the exact
 parked predecessor. It does not add another inventory collection or version.
+Version 4 additionally stores at most 8,192 append-only suspension records per
+line. The line's independent exact count plus domain-separated empty-or-tail
+hash makes deletion, truncation, reordering, or replacement invalid even when
+the optional record collection is absent or altered. Each record binds its
+candidate or commit-recovery mode; caller intent and canonical request hash;
+workspace, line, repository, source, agent, version, mutation epoch, retained
+ref tip/tree; newly retired reservation hash; final ordinary candidate
+tree/digest/changed-file count; optional deterministic prepared-commit identity,
+its distinct prepared tree, and applied bit; prior record hash; and suspension
+time. The prepared tree is exactly the tree named by the deterministic child.
+The candidate tree is independently captured from current ordinary content over
+the retained parent. It must equal the prepared tree while the child remains
+unapplied, but may differ when ordinary edits followed an applied child. The latest record is
+the complete fence for `suspended` state. That state requires an unlocked
+workspace, no mutation owner or pending Park, the unchanged private ref at the
+recorded retained tip, and exact candidate evidence; a prepared commit may be
+detached `HEAD` while the private ref and line tip remain at its parent. Every
+suspension-retired hash participates in the same store-wide reservation
+nonreuse validation as active, Park-retired, and rotation bearers.
 The active reservation bearer remains
 only in the ordinary live workspace lock. Private
 line records and every controller-pinned workspace from acquisition, their
@@ -188,9 +237,12 @@ tombstone is purged only after its canonical managed path is proven absent and
 its history is moved private, while any live legacy pin requires release and
 drop with a version-1 binary before upgrade. The public error is deliberately
 neutral. A version-2 inventory upgrades without inventing a rotation record;
-the string discriminator makes a version-2 decoder reject version 3 before it
-can rewrite the new state. A newer version, orphaned/multiply owned workspace, inconsistent
-parked/mutating lock, incomplete replay tuple, or malformed line/ref identity
+the string discriminator makes an older decoder reject newer inventory before
+it can rewrite private evidence. A quiescent version-3 inventory upgrades to
+version 4 by installing only zero-count domain-separated empty suspension
+anchors; it invents no suspended state or record. A newer version,
+orphaned/multiply owned workspace, inconsistent parked/mutating/suspended lock,
+incomplete replay tuple, corrupt suspension anchor/chain, or malformed line/ref identity
 fails closed on load.
 The advisory file lock coordinates manager instances and its ownership is
 released by the kernel after process exit. Reusing the legacy directory-lock
@@ -246,7 +298,8 @@ Owns: TOOL git_workspace
 | Controller Go API | `(*gitworkspace.Manager).RotatePinnedReservation` and its exact request/result structs | Atomically revoke one expired pinned mutation bearer and install one globally fresh bearer against an exact unbound pin or bound mutating-line fence, retaining an idempotent hash-chained proof without changing repository content or refs. | `FR-GITWS-014` |
 | Controller Go API | `(*gitworkspace.Manager).RecoverPinnedLineAdoptReservation`, `RecoverPinnedLineResumeReservation`, and their exact request/result structs | Under canonical old-plus-fresh operation locking, reconcile one write-ahead Adopt or Resume and converge its Git inventory authority to the globally fresh bearer while reusing the inventory-v3 rotation proof and changing no ordinary content. | `FR-GITWS-015` |
 | Controller Go API | `(*gitworkspace.Manager).WithPinnedCandidateValidationRoots`, `PinnedCandidateValidationRequest`, `PinnedCandidateValidationRoots`, and `PinnedTreeManifest` | Under one live mutation reservation, revalidate the exact changed/no-change declaration and candidate; lend its canonical normalized repository, separate bounded private `.git`-free parent/candidate roots, and full-SHA-256 manifests to one read-only callback; exact-postflight the disposable roots before removing them; then detached-postflight the retained candidate/control plane. | `FR-GITWS-016` |
-| Tool | `git_workspace` | Agent-callable generic acquire/list/status/release/clean/drop/reconcile operations with JSON results. It has no pinned, line, rotation, or composite-recovery action, cannot supply pinned or line identity fields, generic release skips ordinary pinned reservations, every pinned workspace/repository/history/ID/path/lock/count/byte projection is absent from acquisition onward, and maintenance treats guessed pinned IDs as missing. | `FR-GITWS-002` through `FR-GITWS-009`, `FR-GITWS-011`, `FR-GITWS-013` through `FR-GITWS-015` |
+| Controller Go API | `(*gitworkspace.Manager).SuspendPinnedLine`, `SuspendPinnedLineCommitRecovery`, and `ResumeSuspendedPinnedLine` plus `PinnedLineSuspendRequest`/`Result`, `PinnedLineCommitSuspensionRequest`, and `PinnedLineSuspendedResumeRequest`/`Result` | Snapshot one exact ordinary candidate and retire its live reservation into private hash-chained `suspended` state; distinguish an unapplied prepared Commit from its exact applied deterministic child without moving the retained ref; and later normalize that child back to the retained parent while preserving candidate files before installing one globally fresh mutation reservation. | `FR-GITWS-017` |
+| Tool | `git_workspace` | Agent-callable generic acquire/list/status/release/clean/drop/reconcile operations with JSON results. It has no pinned, line, rotation, composite-recovery, suspension, or suspended-resume action, cannot supply pinned or line identity fields, generic release skips ordinary pinned reservations, every pinned workspace/repository/history/ID/path/lock/count/byte projection is absent from acquisition onward, and maintenance treats guessed pinned IDs as missing. | `FR-GITWS-002` through `FR-GITWS-009`, `FR-GITWS-011`, `FR-GITWS-013` through `FR-GITWS-015`, `FR-GITWS-017` |
 | HTTP | `/api/git-workspaces*` | Launcher-authenticated inventory, reconcile, cleanup, and drop endpoints. | `FR-GITWS-005` through `FR-GITWS-010` |
 | Frontend | Git Workspaces dashboard and config fields | Browser inventory/maintenance surface and limit configuration. | `FR-GITWS-001`, `FR-GITWS-010` |
 
@@ -376,11 +429,47 @@ Owns: TOOL git_workspace
     change metadata, and link state; remove all roots; then re-prove the same
     retained candidate under a second detached bounded postflight before
     releasing the operation lock.
-17. For stats, skip every controller-pinned workspace before inspecting its path or
+17. To suspend an ordinary mutating line, hold its exact reservation operation
+    lock through inventory serialization and durable retirement. Re-prove the
+    current workspace/line/source/agent/version/epoch/tip/tree owner, unchanged
+    private ref, detached parent `HEAD`, real index at that parent, no pending
+    Git or Park operation, and the complete safe control plane. Build an
+    all-worktree private-index candidate relative to the retained tip, admitting
+    exact no-change; append the next per-line hash-chained candidate-mode record;
+    atomically mark the line suspended and clear both workspace and line
+    mutation ownership; then postflight the same ref, `HEAD`, index, and
+    candidate before returning its opaque fence. For prepared-Commit suspension,
+    additionally recreate and verify the deterministic direct child from the
+    complete immutable Commit request. Accept only detached `HEAD` at the
+    retained expected parent or that exact child, plus only the corresponding
+    safe index transition; record the child, its exact prepared tree, and
+    applied bit, and independently snapshot the final ordinary candidate
+    relative to the retained parent. An unapplied child requires exact
+    candidate/prepared-tree equality; an applied child retains later ordinary
+    edits even when the current candidate differs. Do not apply a
+    missing child, move the private ref, normalize an applied child, rewrite an
+    ordinary file, or construct a review/CI/readiness fence. Exact current-tail
+    replay is no-write only after re-proving the recorded filesystem form.
+18. To resume a suspended line, acquire the globally fresh reservation
+    operation lock and revalidate the exact latest suspension record, its
+    count/tail anchors, global bearer nonuse, private ref, repository/control
+    plane, and recorded candidate. For an unapplied or ordinary suspension,
+    require detached `HEAD` and the real index at the retained parent. For an
+    applied prepared Commit, accept either its exact child state or the
+    crash-reconcilable exact parent state; compare-and-swap detached `HEAD` from
+    child to parent when necessary and reset only the real index to the parent,
+    never the worktree. Rebuild the ordinary candidate over that parent and
+    require exact tree/digest/count equality before atomically installing the
+    fresh workspace/line owner and marking the line mutating. Preserve the
+    already-issued mutation epoch, private ref, line version/tip/tree, suspension
+    history, and ordinary files. Only an exact latest fresh-owner replay is
+    no-write; any intermediate ambiguity outside the two proven states fails
+    closed.
+19. For stats, skip every controller-pinned workspace before inspecting its path or
     building repository rollups. Walk only generic checkout paths for total
     bytes and use Git ignored status to find generic ignored roots without
     double-counting nested paths.
-18. Reconcile skips locked and controller-pinned workspaces, cleans old generic
+20. Reconcile skips locked and controller-pinned workspaces, cleans old generic
     ignored files first, drops aged generic workspaces second, then drops oldest
     unlocked generic workspaces until total active size is within the configured
     limit. Pinned state remains structurally absent from generic stats and quota
@@ -436,6 +525,22 @@ security contract additionally constrains the bounded review projection and
 makes repository paths and lifecycle authority unrepresentable outside the
 trusted controller.
 
+The suspension primitive is the Git-boundary prerequisite for Event
+Automation's later generation-owned recovery worker, not that worker itself.
+After the worker has durably reconciled Adopt or Resume to one exact fresh
+owner, or rotated the old Commit owner to fresh, it may invoke the matching
+suspension method; the old-to-fresh primitive remains continuously locked
+through its own revocation, and suspension separately keeps the exact current
+reservation locked until it is retired. A crash between calls leaves a durable,
+idempotently replayable fresh owner rather than a guessed suspension. Event
+Automation must persist and order those results before treating the controller
+as reservation-free. Git Workspaces neither scans nor claims an operation and
+does not change its database lifecycle. A later repair must establish separate
+eventing authority and call `ResumeSuspendedPinnedLine` with a globally fresh
+bearer; the suspension record alone is not a queued attempt, review fence,
+passed CI, AI decision, attention request, local-ready state, or publication
+grant.
+
 Local CI may consume `WithPinnedCandidateValidationRoots` only as a synchronous
 controller capability. Git Workspaces owns exact preflight/postflight fencing,
 object-only materialization, manifests, and root cleanup; Event Automation owns
@@ -464,6 +569,21 @@ substitute for that execution boundary.
 - A pinned same-reservation retry is a heartbeat, not reconciliation: identity or
   control-plane drift returns an error, and local files, index state, and `HEAD`
   are not reset to the original pin.
+- Suspension rejects a parked or unbound line, a pending Park, an expired or
+  mismatched current bearer, a generic workspace, and every `HEAD` other than
+  the retained parent or the exact deterministic prepared-Commit child allowed
+  by the selected method. Failure preserves the existing reservation and
+  ordinary files and appends no partial record.
+- A suspended line remains retained and private but cannot be reviewed as
+  parked, heartbeated as mutating, released generically, cleaned, dropped,
+  reconciled, or counted through generic inventory. Missing or altered
+  suspension records/count/tail anchors, candidate drift, or an externally
+  moved private ref/`HEAD` fails before a resume can install fresh authority.
+- Suspended resume may move only an exact applied prepared child back to its
+  recorded retained parent and reset only the real index. A crash may leave
+  either of those two exact detached states for replay; an unrelated commit,
+  staged-only content, compare-and-swap loss, candidate mismatch, or ordinary
+  file rewrite fails closed instead of resetting, cleaning, or guessing.
 - Generic release ignores pinned reservations. Explicit pinned release fails
   rather than preserving from an unrelated `HEAD` or unlocking dirty state that
   cannot be staged; clean descendant commits and preservable dirty changes
@@ -538,8 +658,8 @@ substitute for that execution boundary.
   presence, and relies on kernel lock ownership so a crashed process cannot
   permanently strand the inventory.
 - The persistent `inventory.lock` file fences directory-lock binaries, while
-  the string-valued version-3 discriminator makes a version-2 decoder fail
-  before it can erase rotation evidence. Upgrades must still be
+  the string-valued version-4 discriminator makes every older decoder fail
+  before it can erase rotation or suspension evidence. Upgrades must still be
   quiescent; rollback and mixed-version operation are unsupported.
 
 ## Acceptance Evidence
@@ -562,6 +682,7 @@ substitute for that execution boundary.
 | `FR-GITWS-014` | [pkg/gitworkspace/pinned_reservation_rotation.go](../../pkg/gitworkspace/pinned_reservation_rotation.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go), [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
 | `FR-GITWS-015` | [pkg/gitworkspace/pinned_line_recovery.go](../../pkg/gitworkspace/pinned_line_recovery.go), [pkg/gitworkspace/pinned_line_recovery_test.go](../../pkg/gitworkspace/pinned_line_recovery_test.go), [pkg/gitworkspace/pinned_reservation_rotation.go](../../pkg/gitworkspace/pinned_reservation_rotation.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go), [pkg/gitworkspace/development_line_test.go](../../pkg/gitworkspace/development_line_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go) |
 | `FR-GITWS-016` | [pkg/gitworkspace/pinned_validation_roots.go](../../pkg/gitworkspace/pinned_validation_roots.go), [pkg/gitworkspace/pinned_validation_roots_change.go](../../pkg/gitworkspace/pinned_validation_roots_change.go), [pkg/gitworkspace/pinned_validation_roots_change_ctim.go](../../pkg/gitworkspace/pinned_validation_roots_change_ctim.go), [pkg/gitworkspace/pinned_validation_roots_test.go](../../pkg/gitworkspace/pinned_validation_roots_test.go), [pkg/prdevelopment/localci/runner_test.go](../../pkg/prdevelopment/localci/runner_test.go) |
+| `FR-GITWS-017` | [pkg/gitworkspace/development_line_suspension.go](../../pkg/gitworkspace/development_line_suspension.go), [pkg/gitworkspace/development_line_suspension_api.go](../../pkg/gitworkspace/development_line_suspension_api.go), [pkg/gitworkspace/development_line_suspension_test.go](../../pkg/gitworkspace/development_line_suspension_test.go), [pkg/gitworkspace/development_line_suspension_api_test.go](../../pkg/gitworkspace/development_line_suspension_api_test.go), [pkg/gitworkspace/development_line_suspension_matrix_test.go](../../pkg/gitworkspace/development_line_suspension_matrix_test.go), [pkg/gitworkspace/development_line_suspension_adversarial_test.go](../../pkg/gitworkspace/development_line_suspension_adversarial_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go), [pkg/gitworkspace/pinned_commit_test.go](../../pkg/gitworkspace/pinned_commit_test.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go), [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
 
 ## Implementation Anchors
 
@@ -569,6 +690,8 @@ substitute for that execution boundary.
 - [pkg/gitworkspace/pinned_commit.go](../../pkg/gitworkspace/pinned_commit.go)
 - [pkg/gitworkspace/pinned_validation_roots.go](../../pkg/gitworkspace/pinned_validation_roots.go)
 - [pkg/gitworkspace/development_line.go](../../pkg/gitworkspace/development_line.go)
+- [pkg/gitworkspace/development_line_suspension.go](../../pkg/gitworkspace/development_line_suspension.go)
+- [pkg/gitworkspace/development_line_suspension_api.go](../../pkg/gitworkspace/development_line_suspension_api.go)
 - [pkg/gitworkspace/pinned_reservation_rotation.go](../../pkg/gitworkspace/pinned_reservation_rotation.go)
 - [pkg/gitworkspace/inventory_lock_unix.go](../../pkg/gitworkspace/inventory_lock_unix.go)
 - [pkg/gitworkspace/inventory_lock_windows.go](../../pkg/gitworkspace/inventory_lock_windows.go)

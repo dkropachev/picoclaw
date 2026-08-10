@@ -595,6 +595,7 @@ func (m *Manager) completePinnedLineAdoptRecoveryLocked(
 		State:                   developmentLineMutating,
 		MutationReservationHash: replacementHash,
 		MutationAgentID:         freshPin.AgentID,
+		SuspensionTailHash:      emptyDevelopmentLineSuspensionDigest(),
 		CreatedAt:               now,
 		UpdatedAt:               now,
 	}

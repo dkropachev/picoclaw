@@ -67,6 +67,7 @@ type pinnedReservationRotationRecord struct {
 	MutationEpoch              int64     `json:"mutation_epoch"`
 	Tip                        string    `json:"tip,omitempty"`
 	Tree                       string    `json:"tree,omitempty"`
+	SuspensionHash             string    `json:"suspension_hash,omitempty"`
 	PreviousReservationHash    string    `json:"previous_reservation_hash"`
 	ReplacementReservationHash string    `json:"replacement_reservation_hash"`
 	AgentID                    string    `json:"agent_id"`
@@ -396,6 +397,7 @@ func matchPinnedReservationRotationRecord(
 		record.Version != request.ExpectedVersion ||
 		record.MutationEpoch != request.ExpectedMutationEpoch ||
 		record.Tip != request.ExpectedTip || record.Tree != request.ExpectedTree ||
+		record.SuspensionHash != "" ||
 		record.PreviousReservationHash != previousHash ||
 		record.ReplacementReservationHash != replacementHash ||
 		record.AgentID != request.Pin.AgentID {
@@ -510,8 +512,8 @@ func emptyPinnedReservationRotationDigest() string {
 
 func pinnedReservationRotationRecordDigest(record pinnedReservationRotationRecord) string {
 	digest := sha256.New()
-	_, _ = digest.Write([]byte("picoclaw-pinned-reservation-rotation-record-v1\x00"))
-	for _, value := range []string{
+	domain := "picoclaw-pinned-reservation-rotation-record-v1\x00"
+	values := []string{
 		record.IntentID,
 		record.WorkspaceID,
 		record.LineID,
@@ -522,12 +524,20 @@ func pinnedReservationRotationRecordDigest(record pinnedReservationRotationRecor
 		strconv.FormatInt(record.MutationEpoch, 10),
 		record.Tip,
 		record.Tree,
+	}
+	if record.SuspensionHash != "" {
+		domain = "picoclaw-pinned-reservation-rotation-record-v2\x00"
+		values = append(values, record.SuspensionHash)
+	}
+	values = append(values,
 		record.PreviousReservationHash,
 		record.ReplacementReservationHash,
 		record.AgentID,
 		record.PreviousRecordHash,
 		record.RotatedAt.UTC().Format(time.RFC3339Nano),
-	} {
+	)
+	_, _ = digest.Write([]byte(domain))
+	for _, value := range values {
 		writePinnedReservationRotationHashField(digest, value)
 	}
 	return hex.EncodeToString(digest.Sum(nil))
@@ -543,6 +553,11 @@ func writePinnedReservationRotationHashField(digest hash.Hash, value string) {
 type pinnedReservationRotationOccurrence struct {
 	workspaceID string
 	index       int
+}
+
+type pinnedReservationSuspensionOccurrence struct {
+	lineID string
+	index  int
 }
 
 func validatePinnedReservationRotationInventory(state *storeState) error {
@@ -589,6 +604,10 @@ func validatePinnedReservationRotationInventory(state *storeState) error {
 	}
 	activeLineReservations := make(map[string][]string)
 	retiredReservations := make(map[string][]string)
+	suspendedReservations := make(map[string][]string)
+	suspensionsByHash := make(map[string]pinnedReservationSuspensionOccurrence)
+	suspensionIntents := make(map[string]pinnedReservationSuspensionOccurrence)
+	suspensionRequests := make(map[string]pinnedReservationSuspensionOccurrence)
 	for lineID, line := range state.DevelopmentLines {
 		if line == nil {
 			continue
@@ -605,11 +624,34 @@ func validatePinnedReservationRotationInventory(state *storeState) error {
 				lineID,
 			)
 		}
+		for index, suspension := range line.Suspensions {
+			suspendedReservations[suspension.RetiredReservationHash] = append(
+				suspendedReservations[suspension.RetiredReservationHash],
+				lineID,
+			)
+			if _, duplicate := suspensionsByHash[suspension.RecordHash]; duplicate {
+				return errors.New("git workspace development line suspension hash was reused")
+			}
+			occurrence := pinnedReservationSuspensionOccurrence{
+				lineID: lineID,
+				index:  index,
+			}
+			if _, duplicate := suspensionIntents[suspension.IntentID]; duplicate {
+				return errors.New("git workspace development line suspension intent was reused")
+			}
+			if _, duplicate := suspensionRequests[suspension.RequestHash]; duplicate {
+				return errors.New("git workspace development line suspension request was reused")
+			}
+			suspensionsByHash[suspension.RecordHash] = occurrence
+			suspensionIntents[suspension.IntentID] = occurrence
+			suspensionRequests[suspension.RequestHash] = occurrence
+		}
 	}
 
 	intents := make(map[string]pinnedReservationRotationOccurrence)
 	previousReservations := make(map[string]pinnedReservationRotationOccurrence)
 	replacementReservations := make(map[string]pinnedReservationRotationOccurrence)
+	suspensionConsumers := make(map[string]pinnedReservationRotationOccurrence)
 	workspaceIDs := make([]string, 0, len(state.PinnedReservationRotations))
 	for workspaceID := range state.PinnedReservationRotations {
 		workspaceIDs = append(workspaceIDs, workspaceID)
@@ -639,6 +681,8 @@ func validatePinnedReservationRotationInventory(state *storeState) error {
 				!validLowerHex(record.PreviousReservationHash, sha256.Size*2) ||
 				!validLowerHex(record.ReplacementReservationHash, sha256.Size*2) ||
 				record.PreviousReservationHash == record.ReplacementReservationHash ||
+				(record.SuspensionHash != "" &&
+					!validLowerHex(record.SuspensionHash, sha256.Size*2)) ||
 				!validPinnedOperationIdentity(record.AgentID, 256) ||
 				record.PreviousRecordHash != previousRecordHash ||
 				!validLowerHex(record.RecordHash, sha256.Size*2) ||
@@ -649,6 +693,9 @@ func validatePinnedReservationRotationInventory(state *storeState) error {
 			}
 			if _, exists := intents[record.IntentID]; exists {
 				return errors.New("git workspace reservation rotation intent was reused")
+			}
+			if _, exists := suspensionIntents[record.IntentID]; exists {
+				return errors.New("git workspace lifecycle intent was reused")
 			}
 			intents[record.IntentID] = occurrence
 			if _, exists := previousReservations[record.PreviousReservationHash]; exists {
@@ -662,7 +709,7 @@ func validatePinnedReservationRotationInventory(state *storeState) error {
 
 			if record.LineID == "" {
 				if record.Version != 0 || record.MutationEpoch != 0 ||
-					record.Tip != "" || record.Tree != "" {
+					record.Tip != "" || record.Tree != "" || record.SuspensionHash != "" {
 					return errors.New("unbound git workspace reservation rotation has line evidence")
 				}
 			} else {
@@ -681,9 +728,56 @@ func validatePinnedReservationRotationInventory(state *storeState) error {
 					len(record.Tree) != len(record.SourceCommit) ||
 					(line.State == developmentLineParked && record.Version >= line.Version) ||
 					(line.State == developmentLineMutating && record.Version == line.Version &&
+						(record.Tip != line.Tip || record.Tree != line.Tree)) ||
+					(line.State == developmentLineSuspended && record.Version == line.Version &&
 						(record.Tip != line.Tip || record.Tree != line.Tree)) {
 					return errors.New("bound git workspace reservation rotation fence is invalid")
 				}
+			}
+			if record.SuspensionHash == "" {
+				if len(suspendedReservations[record.PreviousReservationHash]) != 0 {
+					return errors.New(
+						"suspended git workspace reservation rotation is missing its fence",
+					)
+				}
+			} else {
+				suspensionOccurrence, exists := suspensionsByHash[record.SuspensionHash]
+				if !exists {
+					return errors.New("git workspace reservation rotation suspension is missing")
+				}
+				suspensionLine := state.DevelopmentLines[suspensionOccurrence.lineID]
+				if suspensionLine == nil || suspensionOccurrence.index < 0 ||
+					suspensionOccurrence.index >= len(suspensionLine.Suspensions) {
+					return errors.New("git workspace reservation rotation suspension owner is invalid")
+				}
+				suspension := suspensionLine.Suspensions[suspensionOccurrence.index]
+				if record.LineID != suspension.LineID ||
+					record.WorkspaceID != suspension.WorkspaceID ||
+					record.RepoID != suspension.RepoID ||
+					record.SourceRef != suspension.SourceRef ||
+					record.SourceCommit != suspension.SourceCommit ||
+					record.Version != suspension.Version ||
+					record.MutationEpoch != suspension.MutationEpoch ||
+					record.Tip != suspension.Tip || record.Tree != suspension.Tree ||
+					record.AgentID != suspension.AgentID ||
+					record.PreviousReservationHash != suspension.RetiredReservationHash ||
+					record.RotatedAt.Before(suspension.SuspendedAt) ||
+					record.RotatedAt.After(suspensionLine.UpdatedAt) {
+					return errors.New("git workspace reservation rotation suspension fence changed")
+				}
+				nextSuspensionIndex := suspensionOccurrence.index + 1
+				if nextSuspensionIndex < len(suspensionLine.Suspensions) &&
+					record.RotatedAt.After(
+						suspensionLine.Suspensions[nextSuspensionIndex].SuspendedAt,
+					) {
+					return errors.New(
+						"git workspace reservation rotation crossed a later suspension",
+					)
+				}
+				if _, duplicate := suspensionConsumers[record.SuspensionHash]; duplicate {
+					return errors.New("git workspace development line suspension was resumed twice")
+				}
+				suspensionConsumers[record.SuspensionHash] = occurrence
 			}
 
 			if previousRecord != nil {
@@ -736,12 +830,20 @@ func validatePinnedReservationRotationInventory(state *storeState) error {
 		if len(retiredReservations[reservationHash]) != 0 {
 			return errors.New("revoked git workspace reservation was later retired")
 		}
+		rotations := state.PinnedReservationRotations[previous.workspaceID]
+		record := rotations[previous.index]
+		if owners := suspendedReservations[reservationHash]; len(owners) != 0 {
+			if len(owners) != 1 || record.SuspensionHash == "" {
+				return errors.New("revoked git workspace reservation suspension is ambiguous")
+			}
+		} else if record.SuspensionHash != "" {
+			return errors.New("git workspace reservation rotation has a false suspension fence")
+		}
 		if replacement, exists := replacementReservations[reservationHash]; exists {
 			if replacement.workspaceID != previous.workspaceID ||
 				replacement.index+1 != previous.index {
 				return errors.New("git workspace reservation was reused across rotation chains")
 			}
-			rotations := state.PinnedReservationRotations[previous.workspaceID]
 			if !pinnedReservationRotationContinues(
 				rotations[replacement.index],
 				rotations[previous.index],
@@ -750,11 +852,30 @@ func validatePinnedReservationRotationInventory(state *storeState) error {
 			}
 		}
 	}
+	for suspensionHash, suspensionOccurrence := range suspensionsByHash {
+		line := state.DevelopmentLines[suspensionOccurrence.lineID]
+		if line == nil || suspensionOccurrence.index < 0 ||
+			suspensionOccurrence.index >= len(line.Suspensions) {
+			return errors.New("git workspace development line suspension owner is invalid")
+		}
+		currentTail := line.SuspensionTailHash == suspensionHash
+		_, consumed := suspensionConsumers[suspensionHash]
+		if consumed {
+			if currentTail && line.State == developmentLineSuspended {
+				return errors.New("suspended git workspace development line was already resumed")
+			}
+			continue
+		}
+		if !currentTail || line.State != developmentLineSuspended {
+			return errors.New("git workspace development line suspension was not resumed causally")
+		}
+	}
 	return validatePinnedReservationRotationReplacementOwners(
 		state,
 		activeReservations,
 		activeLineReservations,
 		retiredReservations,
+		suspendedReservations,
 		previousReservations,
 		replacementReservations,
 	)
@@ -787,7 +908,7 @@ func initializePinnedReservationRotationAnchors(state *storeState) {
 
 func validatePinnedReservationRotationReplacementOwners(
 	state *storeState,
-	activeWorkspaces, activeLines, retiredLines map[string][]string,
+	activeWorkspaces, activeLines, retiredLines, suspendedLines map[string][]string,
 	previous, replacements map[string]pinnedReservationRotationOccurrence,
 ) error {
 	for reservationHash, occurrence := range replacements {
@@ -810,6 +931,7 @@ func validatePinnedReservationRotationReplacementOwners(
 		expectedActiveWorkspace := ""
 		expectedActiveLine := ""
 		expectedRetiredLine := ""
+		expectedSuspendedLine := ""
 		lineID := record.LineID
 		epoch := record.MutationEpoch
 		if lineID == "" && workspace.DevelopmentLineID == "" {
@@ -825,7 +947,11 @@ func validatePinnedReservationRotationReplacementOwners(
 			if line == nil || line.WorkspaceID != workspace.ID {
 				return errors.New("git workspace reservation rotation replacement line is invalid")
 			}
-			if line.State == developmentLineMutating && line.MutationEpoch == epoch {
+			if developmentLineSuspensionReservationRetired(line, reservationHash) {
+				expectedSuspendedLine = line.ID
+			} else if developmentLineParkReservationRetired(line, reservationHash) {
+				expectedRetiredLine = line.ID
+			} else if line.State == developmentLineMutating && line.MutationEpoch == epoch {
 				expectedActiveWorkspace = workspace.ID
 				expectedActiveLine = line.ID
 			} else {
@@ -841,6 +967,9 @@ func validatePinnedReservationRotationReplacementOwners(
 		) || !exactPinnedReservationRotationOwners(
 			retiredLines[reservationHash],
 			expectedRetiredLine,
+		) || !exactPinnedReservationRotationOwners(
+			suspendedLines[reservationHash],
+			expectedSuspendedLine,
 		) {
 			return errors.New(
 				"git workspace reservation rotation replacement has an unrelated owner",
@@ -902,7 +1031,8 @@ func validatePinnedReservationRotationTail(
 	if line == nil || line.WorkspaceID != workspace.ID || epoch < 1 {
 		return errors.New("git workspace reservation rotation tail line is invalid")
 	}
-	if line.State == developmentLineMutating && line.MutationEpoch == epoch {
+	if line.State == developmentLineMutating && line.MutationEpoch == epoch &&
+		line.MutationReservationHash == record.ReplacementReservationHash {
 		if workspace.LockedBy == nil ||
 			developmentLineReservationHash(workspace.LockedBy.SessionKey) !=
 				record.ReplacementReservationHash ||
@@ -914,8 +1044,17 @@ func validatePinnedReservationRotationTail(
 		return nil
 	}
 	retiredIndex := epoch - 1
-	if retiredIndex < 0 || retiredIndex >= int64(len(line.RetiredReservationHashes)) ||
-		line.RetiredReservationHashes[retiredIndex] != record.ReplacementReservationHash {
+	retiredByPark := retiredIndex >= 0 &&
+		retiredIndex < int64(len(line.RetiredReservationHashes)) &&
+		line.RetiredReservationHashes[retiredIndex] == record.ReplacementReservationHash
+	retiredBySuspension := developmentLineSuspensionRetiredAt(
+		line,
+		record.ReplacementReservationHash,
+		record.Version,
+		record.MutationEpoch,
+		record.AgentID,
+	)
+	if !retiredByPark && !retiredBySuspension {
 		return errors.New("git workspace reservation rotation tail was not retired causally")
 	}
 	return nil

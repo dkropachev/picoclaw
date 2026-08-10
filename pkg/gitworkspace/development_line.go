@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	developmentLineParked   = "parked"
-	developmentLineMutating = "mutating"
+	developmentLineParked    = "parked"
+	developmentLineMutating  = "mutating"
+	developmentLineSuspended = "suspended"
 
 	maxDevelopmentLineIdentityBytes = 256
 	maxDevelopmentLineReviewFiles   = 1_000
@@ -45,40 +46,43 @@ var (
 // fences a short-lived edit lease without retaining its bearer value in the
 // line record; WorkspaceRecord.LockedBy remains the authoritative live owner.
 type developmentLineRecord struct {
-	ID                         string    `json:"id"`
-	WorkspaceID                string    `json:"workspace_id"`
-	RepoID                     string    `json:"repo_id"`
-	SourceRef                  string    `json:"source_ref"`
-	SourceCommit               string    `json:"source_commit"`
-	Branch                     string    `json:"branch"`
-	Tip                        string    `json:"tip"`
-	Tree                       string    `json:"tree"`
-	Version                    int64     `json:"version"`
-	MutationEpoch              int64     `json:"mutation_epoch"`
-	State                      string    `json:"state"`
-	MutationReservationHash    string    `json:"mutation_reservation_hash,omitempty"`
-	MutationAgentID            string    `json:"mutation_agent_id,omitempty"`
-	RetiredReservationHashes   []string  `json:"retired_reservation_hashes,omitempty"`
-	PendingParkSet             bool      `json:"pending_park_set,omitempty"`
-	PendingParkIntentID        string    `json:"pending_park_intent_id,omitempty"`
-	PendingParkReservationHash string    `json:"pending_park_reservation_hash,omitempty"`
-	PendingParkAgentID         string    `json:"pending_park_agent_id,omitempty"`
-	PendingParkEpoch           int64     `json:"pending_park_epoch,omitempty"`
-	PendingParkExpectedVersion int64     `json:"pending_park_expected_version,omitempty"`
-	PendingParkPreviousTip     string    `json:"pending_park_previous_tip,omitempty"`
-	PendingParkTip             string    `json:"pending_park_tip,omitempty"`
-	PendingParkTree            string    `json:"pending_park_tree,omitempty"`
-	PendingParkNoChanges       bool      `json:"pending_park_no_changes,omitempty"`
-	LastParkIntentID           string    `json:"last_park_intent_id,omitempty"`
-	LastParkReservationHash    string    `json:"last_park_reservation_hash,omitempty"`
-	LastParkAgentID            string    `json:"last_park_agent_id,omitempty"`
-	LastParkEpoch              int64     `json:"last_park_epoch,omitempty"`
-	LastParkExpectedVersion    int64     `json:"last_park_expected_version,omitempty"`
-	LastParkPreviousTip        string    `json:"last_park_previous_tip,omitempty"`
-	LastParkTip                string    `json:"last_park_tip,omitempty"`
-	LastParkTree               string    `json:"last_park_tree,omitempty"`
-	CreatedAt                  time.Time `json:"created_at"`
-	UpdatedAt                  time.Time `json:"updated_at"`
+	ID                         string                            `json:"id"`
+	WorkspaceID                string                            `json:"workspace_id"`
+	RepoID                     string                            `json:"repo_id"`
+	SourceRef                  string                            `json:"source_ref"`
+	SourceCommit               string                            `json:"source_commit"`
+	Branch                     string                            `json:"branch"`
+	Tip                        string                            `json:"tip"`
+	Tree                       string                            `json:"tree"`
+	Version                    int64                             `json:"version"`
+	MutationEpoch              int64                             `json:"mutation_epoch"`
+	State                      string                            `json:"state"`
+	MutationReservationHash    string                            `json:"mutation_reservation_hash,omitempty"`
+	MutationAgentID            string                            `json:"mutation_agent_id,omitempty"`
+	RetiredReservationHashes   []string                          `json:"retired_reservation_hashes,omitempty"`
+	SuspensionCount            int                               `json:"suspension_count"`
+	SuspensionTailHash         string                            `json:"suspension_tail_hash"`
+	Suspensions                []developmentLineSuspensionRecord `json:"suspensions,omitempty"`
+	PendingParkSet             bool                              `json:"pending_park_set,omitempty"`
+	PendingParkIntentID        string                            `json:"pending_park_intent_id,omitempty"`
+	PendingParkReservationHash string                            `json:"pending_park_reservation_hash,omitempty"`
+	PendingParkAgentID         string                            `json:"pending_park_agent_id,omitempty"`
+	PendingParkEpoch           int64                             `json:"pending_park_epoch,omitempty"`
+	PendingParkExpectedVersion int64                             `json:"pending_park_expected_version,omitempty"`
+	PendingParkPreviousTip     string                            `json:"pending_park_previous_tip,omitempty"`
+	PendingParkTip             string                            `json:"pending_park_tip,omitempty"`
+	PendingParkTree            string                            `json:"pending_park_tree,omitempty"`
+	PendingParkNoChanges       bool                              `json:"pending_park_no_changes,omitempty"`
+	LastParkIntentID           string                            `json:"last_park_intent_id,omitempty"`
+	LastParkReservationHash    string                            `json:"last_park_reservation_hash,omitempty"`
+	LastParkAgentID            string                            `json:"last_park_agent_id,omitempty"`
+	LastParkEpoch              int64                             `json:"last_park_epoch,omitempty"`
+	LastParkExpectedVersion    int64                             `json:"last_park_expected_version,omitempty"`
+	LastParkPreviousTip        string                            `json:"last_park_previous_tip,omitempty"`
+	LastParkTip                string                            `json:"last_park_tip,omitempty"`
+	LastParkTree               string                            `json:"last_park_tree,omitempty"`
+	CreatedAt                  time.Time                         `json:"created_at"`
+	UpdatedAt                  time.Time                         `json:"updated_at"`
 }
 
 // PinnedLineAdoptRequest converts one freshly acquired, clean pinned checkout
@@ -313,6 +317,7 @@ func (m *Manager) AdoptPinnedLine(
 		State:                   developmentLineMutating,
 		MutationReservationHash: reservationHash,
 		MutationAgentID:         request.Pin.AgentID,
+		SuspensionTailHash:      emptyDevelopmentLineSuspensionDigest(),
 		CreatedAt:               now,
 		UpdatedAt:               now,
 	}
@@ -1179,6 +1184,13 @@ func validateDevelopmentLineInventory(state *storeState) error {
 				return errors.New("development line reservation owner is not exclusive")
 			}
 			reservationOwners[line.MutationReservationHash] = line.ID
+		case developmentLineSuspended:
+			if line.Version >= maxDevelopmentLineReservations ||
+				line.MutationEpoch != line.Version+1 || workspace.LockedBy != nil ||
+				line.MutationReservationHash != "" || line.MutationAgentID != "" ||
+				line.PendingParkSet {
+				return errors.New("suspended git workspace development line is still reserved")
+			}
 		default:
 			return errors.New("git workspace development line state is invalid")
 		}
@@ -1258,6 +1270,14 @@ func validateDevelopmentLineInventory(state *storeState) error {
 		if line.MutationReservationHash != "" &&
 			developmentLineReservationRetired(line, line.MutationReservationHash) {
 			return errors.New("git workspace development line reused a retired reservation")
+		}
+		if suspensionErr := validateDevelopmentLineSuspensions(
+			line,
+			workspace,
+			pinnedReservationOwners,
+			reservationOwners,
+		); suspensionErr != nil {
+			return suspensionErr
 		}
 	}
 	for workspaceID, workspace := range state.Workspaces {
@@ -2034,8 +2054,34 @@ func developmentLineReservationRetired(
 	if line == nil || reservationHash == "" {
 		return false
 	}
+	return developmentLineParkReservationRetired(line, reservationHash) ||
+		developmentLineSuspensionReservationRetired(line, reservationHash)
+}
+
+func developmentLineParkReservationRetired(
+	line *developmentLineRecord,
+	reservationHash string,
+) bool {
+	if line == nil || reservationHash == "" {
+		return false
+	}
 	for _, retired := range line.RetiredReservationHashes {
 		if retired == reservationHash {
+			return true
+		}
+	}
+	return false
+}
+
+func developmentLineSuspensionReservationRetired(
+	line *developmentLineRecord,
+	reservationHash string,
+) bool {
+	if line == nil || reservationHash == "" {
+		return false
+	}
+	for _, suspension := range line.Suspensions {
+		if suspension.RetiredReservationHash == reservationHash {
 			return true
 		}
 	}

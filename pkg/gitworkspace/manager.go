@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	stateVersion                    = 3
+	stateVersion                    = 4
 	historyLimit                    = 1000
 	inventoryLockFile               = "inventory.lock"
 	maxPinnedGitMetadataEntries     = 1_000_000
@@ -204,8 +204,10 @@ type storeState struct {
 // decode this field as an int, so they fail before rewriting an inventory that
 // contains rollback-fenced controller state. A version-2 binary parses the
 // version-3 string but rejects it against its compiled maximum before it can
-// ignore and rewrite reservation-rotation evidence. Numeric versions remain
-// accepted only for the legacy version-0/version-1 migration path.
+// ignore and rewrite reservation-rotation evidence. A version-3 binary likewise
+// rejects version 4 before it can discard suspended-line evidence. Numeric
+// versions remain accepted only for the legacy version-0/version-1 migration
+// path.
 func (state storeState) MarshalJSON() ([]byte, error) {
 	type inventoryWire struct {
 		Version                    string                                       `json:"version"`
@@ -1030,6 +1032,11 @@ func (m *Manager) loadLocked() (*storeState, error) {
 			"pre-version-3 inventory contains rollback-fenced reservation rotation anchors",
 		)
 	}
+	if st.Version < 4 && hasDevelopmentLineSuspensionEvidence(st) {
+		return nil, errors.New(
+			"pre-version-4 inventory contains rollback-fenced development line suspension evidence",
+		)
+	}
 	if st.Version == 0 || st.Version == 1 {
 		if len(st.DevelopmentLines) != 0 || len(st.DevelopmentLineHistory) != 0 {
 			return nil, errors.New(
@@ -1042,6 +1049,9 @@ func (m *Manager) loadLocked() (*storeState, error) {
 	}
 	if st.Version < 3 {
 		initializePinnedReservationRotationAnchors(st)
+	}
+	if st.Version < 4 {
+		initializeDevelopmentLineSuspensionAnchors(st)
 	}
 	st.Version = stateVersion
 	partitionDevelopmentLineHistory(st)
