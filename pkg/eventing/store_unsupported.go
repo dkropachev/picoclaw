@@ -43,6 +43,11 @@ var (
 	_ PRDevelopmentAttentionTriggerQueue                  = (*Store)(nil)
 	_ PRDevelopmentAttentionTriggerCaseReader             = (*Store)(nil)
 	_ PRDevelopmentAttentionDecisionRunStore              = (*Store)(nil)
+	_ PRDevelopmentPublicationReader                      = (*Store)(nil)
+	_ PRDevelopmentPublicationQueue                       = (*Store)(nil)
+	_ PRDevelopmentPublicationPushJournal                 = (*Store)(nil)
+	_ PRDevelopmentPublicationOutcomeReconciler           = (*Store)(nil)
+	_ PRDevelopmentPublicationDecisionRunStore            = (*Store)(nil)
 )
 
 func Open(context.Context, string, ...Option) (*Store, error) {
@@ -811,4 +816,124 @@ func (*Store) AdmitPRDevelopmentAttentionDecisionRun(
 	func(context.Context) error,
 ) (PRDevelopmentAttentionDecisionRunLink, bool, error) {
 	return PRDevelopmentAttentionDecisionRunLink{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) GetPRDevelopmentPublication(
+	context.Context,
+	string,
+) (PRDevelopmentPublication, error) {
+	return PRDevelopmentPublication{}, ErrUnsupportedPlatform
+}
+
+func (*Store) GetPRDevelopmentPublicationForReview(
+	context.Context,
+	string,
+) (PRDevelopmentPublication, error) {
+	return PRDevelopmentPublication{}, ErrUnsupportedPlatform
+}
+
+func (*Store) ClaimPRDevelopmentPublications(
+	context.Context,
+	PRDevelopmentPublicationClaimRequest,
+) ([]PRDevelopmentPublication, error) {
+	return nil, ErrUnsupportedPlatform
+}
+
+func (*Store) RenewPRDevelopmentPublication(
+	context.Context,
+	PRDevelopmentPublicationRenew,
+) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Store) RenewPRDevelopmentPublicationPush(
+	context.Context,
+	PRDevelopmentPublicationRenew,
+) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Store) PinPRDevelopmentPublicationPolicy(
+	context.Context,
+	PRDevelopmentPublicationPolicyPin,
+) (PRDevelopmentPublication, bool, error) {
+	return PRDevelopmentPublication{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) PinPRDevelopmentPublicationSubject(
+	context.Context,
+	PRDevelopmentPublicationSubjectPin,
+) (PRDevelopmentPublication, bool, error) {
+	return PRDevelopmentPublication{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) PinPRDevelopmentPublicationProvider(
+	context.Context,
+	PRDevelopmentPublicationProviderPin,
+) (PRDevelopmentPublication, bool, error) {
+	return PRDevelopmentPublication{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) ReleasePRDevelopmentPublicationGateWait(
+	context.Context,
+	PRDevelopmentPublicationGateWait,
+) (PRDevelopmentPublication, bool, error) {
+	return PRDevelopmentPublication{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) MarkPRDevelopmentPublicationPushReady(
+	context.Context,
+	PRDevelopmentPublicationMarkPushReady,
+) (PRDevelopmentPublication, bool, error) {
+	return PRDevelopmentPublication{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) CompletePRDevelopmentPublicationPrestart(
+	context.Context,
+	PRDevelopmentPublicationPrestartCompletion,
+) (PRDevelopmentPublication, bool, error) {
+	return PRDevelopmentPublication{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) StartPRDevelopmentPublicationPush(
+	context.Context,
+	PRDevelopmentPublicationPushStart,
+) (PRDevelopmentPublication, bool, error) {
+	return PRDevelopmentPublication{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) FinalizePRDevelopmentPublicationPush(
+	context.Context,
+	PRDevelopmentPublicationPushFinalize,
+) (PRDevelopmentPublication, bool, error) {
+	return PRDevelopmentPublication{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) ExpirePRDevelopmentPublicationPushes(
+	context.Context,
+	int,
+) ([]PRDevelopmentPublication, error) {
+	return nil, ErrUnsupportedPlatform
+}
+
+func (*Store) ReconcilePRDevelopmentPublicationOutcome(
+	context.Context,
+	PRDevelopmentPublicationOutcomeReconciliation,
+) (PRDevelopmentPublication, bool, error) {
+	return PRDevelopmentPublication{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) GetPRDevelopmentPublicationDecisionRun(
+	context.Context,
+	PRDevelopmentPublicationDecisionKey,
+) (PRDevelopmentPublicationDecisionRunLink, error) {
+	return PRDevelopmentPublicationDecisionRunLink{}, ErrUnsupportedPlatform
+}
+
+func (*Store) AdmitPRDevelopmentPublicationDecisionRun(
+	context.Context,
+	PRDevelopmentPublicationDecisionRunAdmission,
+	func(context.Context) error,
+) (PRDevelopmentPublicationDecisionRunLink, bool, error) {
+	return PRDevelopmentPublicationDecisionRunLink{}, false, ErrUnsupportedPlatform
 }

@@ -520,7 +520,15 @@ func migrateSchemaV17(ctx context.Context, conn *sql.Conn) error {
 }
 
 func validateSchemaV17(ctx context.Context, conn *sql.Conn) error {
-	if err := validateSchemaV10ForVersion(ctx, conn, true); err != nil {
+	return validateSchemaV17ForVersion(ctx, conn, false)
+}
+
+func validateSchemaV17ForVersion(
+	ctx context.Context,
+	conn *sql.Conn,
+	publicationV18 bool,
+) error {
+	if err := validateSchemaV10ForVersion(ctx, conn, true, publicationV18); err != nil {
 		return err
 	}
 	binary := func(name string) schemaIndexColumn {

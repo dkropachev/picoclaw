@@ -4,7 +4,9 @@ package eventing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -437,5 +439,206 @@ func TestStorePRDevelopmentAttentionUnsupported(t *testing.T) {
 		func(context.Context) error { return nil },
 	); !errors.Is(err, ErrUnsupportedPlatform) {
 		t.Fatalf("AdmitPRDevelopmentAttentionDecisionRun() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+}
+
+func TestStorePRDevelopmentPublicationUnsupported(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	var store Store
+	assertUnsupported := func(name string, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrUnsupportedPlatform) {
+			t.Fatalf("%s error = %v, want %v", name, err, ErrUnsupportedPlatform)
+		}
+	}
+	assertPublication := func(
+		name string,
+		publication PRDevelopmentPublication,
+		changed bool,
+		err error,
+	) {
+		t.Helper()
+		assertUnsupported(name, err)
+		if !reflect.DeepEqual(publication, PRDevelopmentPublication{}) {
+			t.Fatalf("%s publication = %#v, want zero value", name, publication)
+		}
+		if changed {
+			t.Fatalf("%s changed = true, want false", name)
+		}
+	}
+
+	publication, err := store.GetPRDevelopmentPublication(ctx, "publication")
+	assertPublication("GetPRDevelopmentPublication()", publication, false, err)
+	publication, err = store.GetPRDevelopmentPublicationForReview(ctx, "review")
+	assertPublication(
+		"GetPRDevelopmentPublicationForReview()",
+		publication,
+		false,
+		err,
+	)
+	publications, err := store.ClaimPRDevelopmentPublications(
+		ctx,
+		PRDevelopmentPublicationClaimRequest{},
+	)
+	assertUnsupported("ClaimPRDevelopmentPublications()", err)
+	if publications != nil {
+		t.Fatalf("ClaimPRDevelopmentPublications() = %#v, want nil", publications)
+	}
+	assertUnsupported(
+		"RenewPRDevelopmentPublication()",
+		store.RenewPRDevelopmentPublication(ctx, PRDevelopmentPublicationRenew{}),
+	)
+	assertUnsupported(
+		"RenewPRDevelopmentPublicationPush()",
+		store.RenewPRDevelopmentPublicationPush(ctx, PRDevelopmentPublicationRenew{}),
+	)
+	publication, changed, err := store.PinPRDevelopmentPublicationPolicy(
+		ctx,
+		PRDevelopmentPublicationPolicyPin{},
+	)
+	assertPublication("PinPRDevelopmentPublicationPolicy()", publication, changed, err)
+	publication, changed, err = store.PinPRDevelopmentPublicationSubject(
+		ctx,
+		PRDevelopmentPublicationSubjectPin{},
+	)
+	assertPublication("PinPRDevelopmentPublicationSubject()", publication, changed, err)
+	publication, changed, err = store.PinPRDevelopmentPublicationProvider(
+		ctx,
+		PRDevelopmentPublicationProviderPin{},
+	)
+	assertPublication("PinPRDevelopmentPublicationProvider()", publication, changed, err)
+	publication, changed, err = store.ReleasePRDevelopmentPublicationGateWait(
+		ctx,
+		PRDevelopmentPublicationGateWait{},
+	)
+	assertPublication(
+		"ReleasePRDevelopmentPublicationGateWait()",
+		publication,
+		changed,
+		err,
+	)
+	publication, changed, err = store.MarkPRDevelopmentPublicationPushReady(
+		ctx,
+		PRDevelopmentPublicationMarkPushReady{},
+	)
+	assertPublication(
+		"MarkPRDevelopmentPublicationPushReady()",
+		publication,
+		changed,
+		err,
+	)
+	publication, changed, err = store.CompletePRDevelopmentPublicationPrestart(
+		ctx,
+		PRDevelopmentPublicationPrestartCompletion{},
+	)
+	assertPublication(
+		"CompletePRDevelopmentPublicationPrestart()",
+		publication,
+		changed,
+		err,
+	)
+	publication, changed, err = store.StartPRDevelopmentPublicationPush(
+		ctx,
+		PRDevelopmentPublicationPushStart{},
+	)
+	assertPublication("StartPRDevelopmentPublicationPush()", publication, changed, err)
+	publication, changed, err = store.FinalizePRDevelopmentPublicationPush(
+		ctx,
+		PRDevelopmentPublicationPushFinalize{},
+	)
+	assertPublication(
+		"FinalizePRDevelopmentPublicationPush()",
+		publication,
+		changed,
+		err,
+	)
+	publications, err = store.ExpirePRDevelopmentPublicationPushes(ctx, 1)
+	assertUnsupported("ExpirePRDevelopmentPublicationPushes()", err)
+	if publications != nil {
+		t.Fatalf(
+			"ExpirePRDevelopmentPublicationPushes() = %#v, want nil",
+			publications,
+		)
+	}
+	publication, changed, err = store.ReconcilePRDevelopmentPublicationOutcome(
+		ctx,
+		PRDevelopmentPublicationOutcomeReconciliation{},
+	)
+	assertPublication(
+		"ReconcilePRDevelopmentPublicationOutcome()",
+		publication,
+		changed,
+		err,
+	)
+	link, err := store.GetPRDevelopmentPublicationDecisionRun(
+		ctx,
+		PRDevelopmentPublicationDecisionKey{},
+	)
+	assertUnsupported("GetPRDevelopmentPublicationDecisionRun()", err)
+	if !reflect.DeepEqual(link, PRDevelopmentPublicationDecisionRunLink{}) {
+		t.Fatalf(
+			"GetPRDevelopmentPublicationDecisionRun() = %#v, want zero value",
+			link,
+		)
+	}
+	createCalled := false
+	link, existed, err := store.AdmitPRDevelopmentPublicationDecisionRun(
+		ctx,
+		PRDevelopmentPublicationDecisionRunAdmission{},
+		func(context.Context) error {
+			createCalled = true
+			return nil
+		},
+	)
+	assertUnsupported("AdmitPRDevelopmentPublicationDecisionRun()", err)
+	if !reflect.DeepEqual(link, PRDevelopmentPublicationDecisionRunLink{}) {
+		t.Fatalf(
+			"AdmitPRDevelopmentPublicationDecisionRun() = %#v, want zero value",
+			link,
+		)
+	}
+	if existed {
+		t.Fatal("AdmitPRDevelopmentPublicationDecisionRun() existed = true, want false")
+	}
+	if createCalled {
+		t.Fatal("AdmitPRDevelopmentPublicationDecisionRun() invoked create callback")
+	}
+}
+
+func TestPRDevelopmentPublicationUnsupportedSurfaceIsJSONPrivate(t *testing.T) {
+	t.Parallel()
+
+	const sentinel = "private-publication-sentinel"
+	values := []any{
+		PRDevelopmentPublication{ID: sentinel},
+		PRDevelopmentPublicationProviderObservation{Repository: sentinel},
+		PRDevelopmentPublicationRemoteObservation{Repository: sentinel},
+		PRDevelopmentPublicationPushRequest{Repository: sentinel},
+		PRDevelopmentPublicationPushResult{WorkspaceID: sentinel},
+		PRDevelopmentPublicationClaimRequest{WorkerLabel: sentinel},
+		PRDevelopmentPublicationRenew{PublicationID: sentinel},
+		PRDevelopmentPublicationPolicyPin{PublicationID: sentinel},
+		PRDevelopmentPublicationSubjectPin{PublicationID: sentinel},
+		PRDevelopmentPublicationProviderPin{PublicationID: sentinel},
+		PRDevelopmentPublicationGateWait{PublicationID: sentinel},
+		PRDevelopmentPublicationMarkPushReady{PublicationID: sentinel},
+		PRDevelopmentPublicationPrestartCompletion{PublicationID: sentinel},
+		PRDevelopmentPublicationPushStart{PublicationID: sentinel},
+		PRDevelopmentPublicationPushFinalize{PublicationID: sentinel},
+		PRDevelopmentPublicationOutcomeReconciliation{PublicationID: sentinel},
+		PRDevelopmentPublicationDecisionKey{PublicationID: sentinel},
+		PRDevelopmentPublicationDecisionRunAdmission{RunID: sentinel},
+		PRDevelopmentPublicationDecisionRunLink{RunID: sentinel},
+	}
+	for _, value := range values {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("json.Marshal(%T) error = %v", value, err)
+		}
+		if string(encoded) != `{}` {
+			t.Fatalf("json.Marshal(%T) = %s, want {}", value, encoded)
+		}
 	}
 }

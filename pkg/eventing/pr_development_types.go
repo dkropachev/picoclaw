@@ -24,6 +24,7 @@ const (
 	prDevelopmentParkIntentIDPrefix       = "pdlnpark_"
 	prDevelopmentLedgerEntryIDPrefix      = "pdle_"
 	prDevelopmentLedgerCheckpointIDPrefix = "pdlc_"
+	prDevelopmentPublicationIDPrefix      = "pdpub_"
 
 	// MaxPRDevelopmentMessageBytes bounds one durable conversation message by
 	// UTF-8 bytes after trimming.
@@ -100,11 +101,26 @@ const (
 	// MaxPRDevelopmentLedgerCheckpointSummaryBytes bounds one logical
 	// compaction summary. Raw ledger records are never removed.
 	MaxPRDevelopmentLedgerCheckpointSummaryBytes = 32 << 10
+	// MaxPRDevelopmentPublicationPolicyBytes bounds one canonical private policy.
+	MaxPRDevelopmentPublicationPolicyBytes = 4 << 20
+	// MaxPRDevelopmentPublicationSubjectBytes bounds one canonical gate subject.
+	MaxPRDevelopmentPublicationSubjectBytes = 2 << 20
+	// MaxPRDevelopmentPublicationProviderBytes bounds one exact provider fence.
+	MaxPRDevelopmentPublicationProviderBytes = 32 << 10
+	// MaxPRDevelopmentPublicationRequestBytes bounds one exact Git-effect request.
+	MaxPRDevelopmentPublicationRequestBytes = 32 << 10
+	// MaxPRDevelopmentPublicationResultBytes bounds one exact Git-effect result.
+	MaxPRDevelopmentPublicationResultBytes = 32 << 10
+	// MaxPRDevelopmentPublicationErrorBytes bounds private sanitized error detail.
+	MaxPRDevelopmentPublicationErrorBytes = 16 << 10
 
 	// PRDevelopmentAttentionDecisionReviewRequired is the one automatic
 	// attention decision emitted when the local review worker cannot safely
 	// continue without a configured gate decision.
 	PRDevelopmentAttentionDecisionReviewRequired = "pr_development.review_attention_required"
+	// PRDevelopmentPublicationDecisionBeforePush is the fixed gate-policy point
+	// for publishing one exact locally reviewed candidate.
+	PRDevelopmentPublicationDecisionBeforePush = "pr_development.before_push"
 )
 
 var (
@@ -223,6 +239,27 @@ var (
 	// decision run. Historical exact linked-run replay remains separately valid.
 	ErrPRDevelopmentAttentionSuperseded = errors.New(
 		"pull request development attention trigger was superseded",
+	)
+	// ErrInvalidPRDevelopmentPublication reports malformed publication identity,
+	// claim, pin, effect request, result, or terminal input.
+	ErrInvalidPRDevelopmentPublication = errors.New(
+		"invalid pull request development publication",
+	)
+	// ErrPRDevelopmentPublicationConflict reports changed local/provider evidence,
+	// a non-exact replay, or a transition that lost its durable fence.
+	ErrPRDevelopmentPublicationConflict = errors.New(
+		"pull request development publication conflict",
+	)
+	// ErrPRDevelopmentPublicationSuperseded reports that the exact passed review
+	// is no longer the current locally publishable tail.
+	ErrPRDevelopmentPublicationSuperseded = errors.New(
+		"pull request development publication was superseded",
+	)
+	// ErrPRDevelopmentPublicationAdmissionUncertain reports that deterministic,
+	// replayable workflow creation completed but its durable decision link was not
+	// confirmed. Automatic callers must not invoke creation again.
+	ErrPRDevelopmentPublicationAdmissionUncertain = errors.New(
+		"pull request development publication decision admission is uncertain",
 	)
 )
 
@@ -1878,6 +1915,336 @@ type PRDevelopmentAttentionDecisionRunLink struct {
 	CreatedAt time.Time                         `json:"-"`
 }
 
+// PRDevelopmentPublicationStatus is the durable publication-journal lifecycle.
+// Claimed is a renewable scheduling state whose ClaimFrom identifies the safe
+// pre-effect phase. PushStarted is the only state that may correspond to an
+// in-flight external Git effect and is never automatically reclaimed.
+type PRDevelopmentPublicationStatus string
+
+const (
+	PRDevelopmentPublicationPending          PRDevelopmentPublicationStatus = "pending"
+	PRDevelopmentPublicationClaimed          PRDevelopmentPublicationStatus = "claimed"
+	PRDevelopmentPublicationGateWaiting      PRDevelopmentPublicationStatus = "gate_waiting"
+	PRDevelopmentPublicationPushReady        PRDevelopmentPublicationStatus = "push_ready"
+	PRDevelopmentPublicationPushStarted      PRDevelopmentPublicationStatus = "push_started"
+	PRDevelopmentPublicationPublished        PRDevelopmentPublicationStatus = "published"
+	PRDevelopmentPublicationConflict         PRDevelopmentPublicationStatus = "conflict"
+	PRDevelopmentPublicationSuperseded       PRDevelopmentPublicationStatus = "superseded"
+	PRDevelopmentPublicationFailed           PRDevelopmentPublicationStatus = "failed"
+	PRDevelopmentPublicationRecoveryRequired PRDevelopmentPublicationStatus = "recovery_required"
+	PRDevelopmentPublicationOutcomeUnknown   PRDevelopmentPublicationStatus = "outcome_unknown"
+)
+
+// PRDevelopmentPublicationErrorCode is a bounded non-secret terminal reason.
+// LastErrorDetail remains private and sanitized independently.
+type PRDevelopmentPublicationErrorCode string
+
+const (
+	PRDevelopmentPublicationErrorProviderChanged    PRDevelopmentPublicationErrorCode = "provider_changed"
+	PRDevelopmentPublicationErrorLocalEvidence      PRDevelopmentPublicationErrorCode = "local_evidence_changed"
+	PRDevelopmentPublicationErrorGateFailed         PRDevelopmentPublicationErrorCode = "gate_failed"
+	PRDevelopmentPublicationErrorRuntimeUnavailable PRDevelopmentPublicationErrorCode = "runtime_unavailable"
+	PRDevelopmentPublicationErrorPushConflict       PRDevelopmentPublicationErrorCode = "push_conflict"
+	PRDevelopmentPublicationErrorPushFailed         PRDevelopmentPublicationErrorCode = "push_failed"
+	PRDevelopmentPublicationErrorSuperseded         PRDevelopmentPublicationErrorCode = "superseded"
+	PRDevelopmentPublicationErrorRecoveryRequired   PRDevelopmentPublicationErrorCode = "recovery_required"
+	PRDevelopmentPublicationErrorOutcomeUnknown     PRDevelopmentPublicationErrorCode = "outcome_unknown"
+	PRDevelopmentPublicationErrorInternal           PRDevelopmentPublicationErrorCode = "internal"
+)
+
+// PRDevelopmentPublicationPushDisposition mirrors only the three proven
+// outcomes of the controller-private parked-line compare-and-swap primitive.
+type PRDevelopmentPublicationPushDisposition string
+
+const (
+	PRDevelopmentPublicationPushApplied        PRDevelopmentPublicationPushDisposition = "applied"
+	PRDevelopmentPublicationPushAlreadyCurrent PRDevelopmentPublicationPushDisposition = "already_current"
+	PRDevelopmentPublicationPushReconciled     PRDevelopmentPublicationPushDisposition = "reconciled"
+)
+
+// PRDevelopmentPublicationProviderObservation is the bounded provider snapshot
+// used as the expected remote-tip fence. ObservedAt is stored separately so a
+// fresh observation of identical facts preserves the canonical observation hash.
+type PRDevelopmentPublicationProviderObservation struct {
+	Repository         string                   `json:"-"`
+	PullNumber         int64                    `json:"-"`
+	HeadRepository     string                   `json:"-"`
+	HeadRef            string                   `json:"-"`
+	HeadSHA            string                   `json:"-"`
+	HeadCloneURL       string                   `json:"-"`
+	CurrentReviewState PRDevelopmentReviewState `json:"-"`
+	ReviewDigest       string                   `json:"-"`
+}
+
+// PRDevelopmentPublicationRemoteObservation is a minimal, fresh, read-only
+// provider observation used only to reconcile an outcome-unknown push. It is
+// deliberately independent of the mutable review occurrence: a review may be
+// edited or dismissed after the durable push request was written.
+type PRDevelopmentPublicationRemoteObservation struct {
+	Repository     string `json:"-"`
+	PullNumber     int64  `json:"-"`
+	HeadRepository string `json:"-"`
+	HeadRef        string `json:"-"`
+	HeadSHA        string `json:"-"`
+}
+
+// PRDevelopmentPublicationPushRequest is the complete durable private request
+// for one exact PushPinnedLine call. Callers convert it to the Git-workspace DTO
+// only after StartPRDevelopmentPublicationPush returns newlyStarted=true.
+type PRDevelopmentPublicationPushRequest struct {
+	Repository            string `json:"-"`
+	SourceRef             string `json:"-"`
+	ExpectedSourceCommit  string `json:"-"`
+	WorkspaceID           string `json:"-"`
+	LineID                string `json:"-"`
+	ExpectedVersion       int64  `json:"-"`
+	ExpectedMutationEpoch int64  `json:"-"`
+	ExpectedParkIntentID  string `json:"-"`
+	ExpectedBase          string `json:"-"`
+	ExpectedTip           string `json:"-"`
+	ExpectedTree          string `json:"-"`
+	ExpectedRemoteTip     string `json:"-"`
+}
+
+// PRDevelopmentPublicationPushResult is the bounded exact proven result of one
+// parked-line push. LocalDrift is journaled separately because the remote effect
+// can be proven even when retained-checkout postflight fails.
+type PRDevelopmentPublicationPushResult struct {
+	WorkspaceID       string                                  `json:"-"`
+	Version           int64                                   `json:"-"`
+	MutationEpoch     int64                                   `json:"-"`
+	ParkIntentID      string                                  `json:"-"`
+	BaseCommit        string                                  `json:"-"`
+	Tip               string                                  `json:"-"`
+	Tree              string                                  `json:"-"`
+	RemoteRef         string                                  `json:"-"`
+	ExpectedRemoteTip string                                  `json:"-"`
+	RemoteTip         string                                  `json:"-"`
+	Disposition       PRDevelopmentPublicationPushDisposition `json:"-"`
+	WorkspaceClean    bool                                    `json:"-"`
+}
+
+// PRDevelopmentPublication is one all-private write-ahead journal record for an
+// exact passed local-review occurrence. Raw policy, subject, provider, request,
+// result, lease, and diagnostics must never be reused as a browser DTO.
+type PRDevelopmentPublication struct {
+	ID                       string                                `json:"-"`
+	CaseID                   string                                `json:"-"`
+	ThreadID                 string                                `json:"-"`
+	ControllerID             string                                `json:"-"`
+	ControllerRevision       int64                                 `json:"-"`
+	OwnerSessionID           string                                `json:"-"`
+	AttemptID                string                                `json:"-"`
+	FenceOrdinal             int                                   `json:"-"`
+	FenceHash                string                                `json:"-"`
+	AttemptLedgerEntryID     string                                `json:"-"`
+	AttemptLedgerEntryKind   PRDevelopmentLedgerEntryKind          `json:"-"`
+	AttemptLedgerEntryHash   string                                `json:"-"`
+	ReviewLedgerEntryID      string                                `json:"-"`
+	ReviewLedgerEntryKind    PRDevelopmentLedgerEntryKind          `json:"-"`
+	ReviewLedgerEntryHash    string                                `json:"-"`
+	ReviewOutcome            PRDevelopmentLedgerReviewOutcome      `json:"-"`
+	OrchestrationPhase       PRDevelopmentRepairOrchestrationPhase `json:"-"`
+	OrchestrationReceiptHash string                                `json:"-"`
+	CIStatus                 PRDevelopmentCIStatus                 `json:"-"`
+	CIPlanDigest             string                                `json:"-"`
+	CIResultDigest           string                                `json:"-"`
+	WorkspaceID              string                                `json:"-"`
+	LineID                   string                                `json:"-"`
+	SourceCloneURL           string                                `json:"-"`
+	SourceRef                string                                `json:"-"`
+	SourceCommit             string                                `json:"-"`
+	SourceTree               string                                `json:"-"`
+	LineVersion              int64                                 `json:"-"`
+	MutationEpoch            int64                                 `json:"-"`
+	ParkIntentID             string                                `json:"-"`
+	BaseCommit               string                                `json:"-"`
+	TipCommit                string                                `json:"-"`
+	Tree                     string                                `json:"-"`
+	NoChanges                bool                                  `json:"-"`
+
+	PolicyRevision                string                                      `json:"-"`
+	PinnedPolicy                  json.RawMessage                             `json:"-"`
+	PinnedPolicyHash              string                                      `json:"-"`
+	SubjectRevision               string                                      `json:"-"`
+	PinnedSubject                 json.RawMessage                             `json:"-"`
+	PinnedSubjectHash             string                                      `json:"-"`
+	ProviderObservation           PRDevelopmentPublicationProviderObservation `json:"-"`
+	ProviderObservationJSON       json.RawMessage                             `json:"-"`
+	ProviderObservationHash       string                                      `json:"-"`
+	ProviderPinnedAt              *time.Time                                  `json:"-"`
+	ProviderObservedAt            *time.Time                                  `json:"-"`
+	ReconciliationObservation     PRDevelopmentPublicationRemoteObservation   `json:"-"`
+	ReconciliationObservationJSON json.RawMessage                             `json:"-"`
+	ReconciliationObservationHash string                                      `json:"-"`
+	ReconciliationObservedAt      *time.Time                                  `json:"-"`
+	ExpectedRemoteTip             string                                      `json:"-"`
+	DecisionRunID                 string                                      `json:"-"`
+	PushRequest                   PRDevelopmentPublicationPushRequest         `json:"-"`
+	PushRequestJSON               json.RawMessage                             `json:"-"`
+	PushRequestHash               string                                      `json:"-"`
+	PushResult                    PRDevelopmentPublicationPushResult          `json:"-"`
+	PushResultJSON                json.RawMessage                             `json:"-"`
+	PushResultHash                string                                      `json:"-"`
+	PushDisposition               PRDevelopmentPublicationPushDisposition     `json:"-"`
+	WorkspaceClean                bool                                        `json:"-"`
+	LocalDrift                    bool                                        `json:"-"`
+
+	Status          PRDevelopmentPublicationStatus    `json:"-"`
+	ClaimFrom       PRDevelopmentPublicationStatus    `json:"-"`
+	ClaimOwner      string                            `json:"-"`
+	ClaimToken      string                            `json:"-"`
+	ClaimUntil      *time.Time                        `json:"-"`
+	ClaimEpoch      int64                             `json:"-"`
+	Claims          int                               `json:"-"`
+	ClaimedAt       *time.Time                        `json:"-"`
+	AvailableAt     time.Time                         `json:"-"`
+	Attempts        int                               `json:"-"`
+	LastErrorCode   PRDevelopmentPublicationErrorCode `json:"-"`
+	LastErrorDetail string                            `json:"-"`
+	CreatedAt       time.Time                         `json:"-"`
+	UpdatedAt       time.Time                         `json:"-"`
+	EffectStartedAt *time.Time                        `json:"-"`
+	CompletedAt     *time.Time                        `json:"-"`
+}
+
+// PRDevelopmentPublicationClaimRequest claims bounded due pre-start work.
+type PRDevelopmentPublicationClaimRequest struct {
+	WorkerLabel string        `json:"-"`
+	Limit       int           `json:"-"`
+	Lease       time.Duration `json:"-"`
+}
+
+// PRDevelopmentPublicationRenew extends exactly one live claim through the
+// phase-specific Queue or PushJournal renewal method.
+type PRDevelopmentPublicationRenew struct {
+	PublicationID string        `json:"-"`
+	ClaimToken    string        `json:"-"`
+	ClaimEpoch    int64         `json:"-"`
+	Lease         time.Duration `json:"-"`
+}
+
+// PRDevelopmentPublicationPolicyPin freezes one canonical prepared policy.
+type PRDevelopmentPublicationPolicyPin struct {
+	PublicationID  string          `json:"-"`
+	ClaimToken     string          `json:"-"`
+	ClaimEpoch     int64           `json:"-"`
+	PolicyRevision string          `json:"-"`
+	PinnedPolicy   json.RawMessage `json:"-"`
+}
+
+// PRDevelopmentPublicationSubjectPin freezes the exact canonical private gate
+// subject and its semantic revision after policy selection.
+type PRDevelopmentPublicationSubjectPin struct {
+	PublicationID   string          `json:"-"`
+	ClaimToken      string          `json:"-"`
+	ClaimEpoch      int64           `json:"-"`
+	PolicyRevision  string          `json:"-"`
+	SubjectRevision string          `json:"-"`
+	PinnedSubject   json.RawMessage `json:"-"`
+}
+
+// PRDevelopmentPublicationProviderPin freezes exact current provider facts.
+type PRDevelopmentPublicationProviderPin struct {
+	PublicationID string                                      `json:"-"`
+	ClaimToken    string                                      `json:"-"`
+	ClaimEpoch    int64                                       `json:"-"`
+	Observation   PRDevelopmentPublicationProviderObservation `json:"-"`
+	ObservedAt    time.Time                                   `json:"-"`
+}
+
+// PRDevelopmentPublicationGateWait releases scheduling ownership while the
+// durable private workflow waits for user input. The parked branch remains.
+type PRDevelopmentPublicationGateWait struct {
+	PublicationID string    `json:"-"`
+	ClaimToken    string    `json:"-"`
+	ClaimEpoch    int64     `json:"-"`
+	DecisionRunID string    `json:"-"`
+	AvailableAt   time.Time `json:"-"`
+}
+
+// PRDevelopmentPublicationMarkPushReady records a completed/no-op gate and releases
+// its pre-start claim before a fresh push-start claim is acquired.
+type PRDevelopmentPublicationMarkPushReady struct {
+	PublicationID string `json:"-"`
+	ClaimToken    string `json:"-"`
+	ClaimEpoch    int64  `json:"-"`
+	DecisionRunID string `json:"-"`
+}
+
+// PRDevelopmentPublicationPrestartCompletion terminalizes a claimed publication
+// before any Git effect. Status is conflict, superseded, failed, or
+// recovery_required.
+type PRDevelopmentPublicationPrestartCompletion struct {
+	PublicationID string                            `json:"-"`
+	ClaimToken    string                            `json:"-"`
+	ClaimEpoch    int64                             `json:"-"`
+	Status        PRDevelopmentPublicationStatus    `json:"-"`
+	ErrorCode     PRDevelopmentPublicationErrorCode `json:"-"`
+	InternalError string                            `json:"-"`
+}
+
+// PRDevelopmentPublicationPushStart atomically revalidates the exact local
+// evidence and fresh provider pin, then persists the full canonical request
+// before any caller may invoke Git.
+type PRDevelopmentPublicationPushStart struct {
+	PublicationID string                                      `json:"-"`
+	ClaimToken    string                                      `json:"-"`
+	ClaimEpoch    int64                                       `json:"-"`
+	Observation   PRDevelopmentPublicationProviderObservation `json:"-"`
+	ObservedAt    time.Time                                   `json:"-"`
+	Request       PRDevelopmentPublicationPushRequest         `json:"-"`
+}
+
+// PRDevelopmentPublicationPushFinalize records one exact proven result or one
+// terminal non-success after PushStarted. RequestHash prevents a result from
+// being applied to any other durable effect intent.
+type PRDevelopmentPublicationPushFinalize struct {
+	PublicationID string                             `json:"-"`
+	ClaimToken    string                             `json:"-"`
+	ClaimEpoch    int64                              `json:"-"`
+	RequestHash   string                             `json:"-"`
+	Status        PRDevelopmentPublicationStatus     `json:"-"`
+	Result        PRDevelopmentPublicationPushResult `json:"-"`
+	LocalDrift    bool                               `json:"-"`
+	ErrorCode     PRDevelopmentPublicationErrorCode  `json:"-"`
+	InternalError string                             `json:"-"`
+}
+
+// PRDevelopmentPublicationOutcomeReconciliation records a fresh read-only
+// provider observation proving that an outcome-unknown request reached its exact
+// expected tip. It grants no claim and can never reopen or retry the Git effect.
+type PRDevelopmentPublicationOutcomeReconciliation struct {
+	PublicationID string                                    `json:"-"`
+	RequestHash   string                                    `json:"-"`
+	Observation   PRDevelopmentPublicationRemoteObservation `json:"-"`
+	ObservedAt    time.Time                                 `json:"-"`
+	Result        PRDevelopmentPublicationPushResult        `json:"-"`
+}
+
+// PRDevelopmentPublicationDecisionKey identifies one immutable gate decision.
+// Mutable claim/controller revisions are deliberately excluded.
+type PRDevelopmentPublicationDecisionKey struct {
+	PublicationID           string `json:"-"`
+	ReviewLedgerEntryID     string `json:"-"`
+	ReviewLedgerEntryHash   string `json:"-"`
+	PolicyRevision          string `json:"-"`
+	SubjectRevision         string `json:"-"`
+	ProviderObservationHash string `json:"-"`
+}
+
+type PRDevelopmentPublicationDecisionRunAdmission struct {
+	Key        PRDevelopmentPublicationDecisionKey `json:"-"`
+	RunID      string                              `json:"-"`
+	ClaimToken string                              `json:"-"`
+	ClaimEpoch int64                               `json:"-"`
+}
+
+type PRDevelopmentPublicationDecisionRunLink struct {
+	Key   PRDevelopmentPublicationDecisionKey `json:"-"`
+	RunID string                              `json:"-"`
+}
+
 // PRDevelopmentLedgerAttemptAppend records the concise account for one
 // completed, validated, deterministically committed and parked candidate. The
 // commit/tree/no-change and fence proof are derived from controller storage.
@@ -1912,6 +2279,7 @@ type PRDevelopmentReviewCompletion struct {
 	Entry       PRDevelopmentLedgerEntry    `json:"-"`
 	Controller  PRDevelopmentController     `json:"-"`
 	NextAttempt *PRDevelopmentRepairAttempt `json:"-"`
+	Publication *PRDevelopmentPublication   `json:"-"`
 }
 
 // PRDevelopmentLedgerCheckpointAppend records a derived compaction of an
@@ -2240,6 +2608,112 @@ type PRDevelopmentAttentionDecisionRunStore interface {
 		admission PRDevelopmentAttentionDecisionRunAdmission,
 		create func(context.Context) error,
 	) (link PRDevelopmentAttentionDecisionRunLink, existed bool, err error)
+}
+
+// PRDevelopmentPublicationReader exposes exact private journal lookup without
+// granting scheduling, workflow-admission, provider, Git, or finalization power.
+type PRDevelopmentPublicationReader interface {
+	GetPRDevelopmentPublication(
+		ctx context.Context,
+		publicationID string,
+	) (PRDevelopmentPublication, error)
+	GetPRDevelopmentPublicationForReview(
+		ctx context.Context,
+		reviewLedgerEntryID string,
+	) (PRDevelopmentPublication, error)
+}
+
+// PRDevelopmentPublicationQueue owns only pre-effect scheduling and pinning. It
+// performs no workflow, provider, model, Git, or retry effect itself.
+type PRDevelopmentPublicationQueue interface {
+	PRDevelopmentPublicationReader
+	ClaimPRDevelopmentPublications(
+		ctx context.Context,
+		input PRDevelopmentPublicationClaimRequest,
+	) ([]PRDevelopmentPublication, error)
+	RenewPRDevelopmentPublication(
+		ctx context.Context,
+		input PRDevelopmentPublicationRenew,
+	) error
+	PinPRDevelopmentPublicationPolicy(
+		ctx context.Context,
+		input PRDevelopmentPublicationPolicyPin,
+	) (PRDevelopmentPublication, bool, error)
+	PinPRDevelopmentPublicationSubject(
+		ctx context.Context,
+		input PRDevelopmentPublicationSubjectPin,
+	) (PRDevelopmentPublication, bool, error)
+	PinPRDevelopmentPublicationProvider(
+		ctx context.Context,
+		input PRDevelopmentPublicationProviderPin,
+	) (PRDevelopmentPublication, bool, error)
+	ReleasePRDevelopmentPublicationGateWait(
+		ctx context.Context,
+		input PRDevelopmentPublicationGateWait,
+	) (PRDevelopmentPublication, bool, error)
+	MarkPRDevelopmentPublicationPushReady(
+		ctx context.Context,
+		input PRDevelopmentPublicationMarkPushReady,
+	) (PRDevelopmentPublication, bool, error)
+	CompletePRDevelopmentPublicationPrestart(
+		ctx context.Context,
+		input PRDevelopmentPublicationPrestartCompletion,
+	) (PRDevelopmentPublication, bool, error)
+}
+
+// PRDevelopmentPublicationPushJournal owns only started-claim renewal,
+// write-ahead push admission, and exact post-effect finalization. Callers receive
+// no gate scheduling or outcome-unknown reconciliation authority through this
+// interface.
+type PRDevelopmentPublicationPushJournal interface {
+	PRDevelopmentPublicationReader
+	RenewPRDevelopmentPublicationPush(
+		ctx context.Context,
+		input PRDevelopmentPublicationRenew,
+	) error
+	StartPRDevelopmentPublicationPush(
+		ctx context.Context,
+		input PRDevelopmentPublicationPushStart,
+	) (publication PRDevelopmentPublication, newlyStarted bool, err error)
+	FinalizePRDevelopmentPublicationPush(
+		ctx context.Context,
+		input PRDevelopmentPublicationPushFinalize,
+	) (publication PRDevelopmentPublication, newlyFinalized bool, err error)
+}
+
+// PRDevelopmentPublicationOutcomeReconciler owns expiry of abandoned started
+// effects and head-only reconciliation. It cannot start or retry a Git effect.
+type PRDevelopmentPublicationOutcomeReconciler interface {
+	PRDevelopmentPublicationReader
+	ExpirePRDevelopmentPublicationPushes(
+		ctx context.Context,
+		limit int,
+	) ([]PRDevelopmentPublication, error)
+	ReconcilePRDevelopmentPublicationOutcome(
+		ctx context.Context,
+		input PRDevelopmentPublicationOutcomeReconciliation,
+	) (publication PRDevelopmentPublication, newlyReconciled bool, err error)
+}
+
+// PRDevelopmentPublicationDecisionRunStore atomically binds one exact pinned
+// publication decision to a deterministic private workflow run. RunID creation
+// must be idempotent and replayable. Historical replay returns before
+// current-state checks and never invokes create again. A non-nil callback error
+// must guarantee that no external run was created; a nil callback result followed
+// by uncertain SQLite commit returns ErrPRDevelopmentPublicationAdmissionUncertain
+// and forbids automatic create retry. The callback must not call back into the
+// same Store because admission holds its sole SQLite connection in a write
+// transaction until the callback returns.
+type PRDevelopmentPublicationDecisionRunStore interface {
+	GetPRDevelopmentPublicationDecisionRun(
+		ctx context.Context,
+		key PRDevelopmentPublicationDecisionKey,
+	) (PRDevelopmentPublicationDecisionRunLink, error)
+	AdmitPRDevelopmentPublicationDecisionRun(
+		ctx context.Context,
+		admission PRDevelopmentPublicationDecisionRunAdmission,
+		create func(context.Context) error,
+	) (link PRDevelopmentPublicationDecisionRunLink, existed bool, err error)
 }
 
 // PRDevelopmentLedgerStore owns only append-only post-effect accounts and

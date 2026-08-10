@@ -112,8 +112,9 @@ bounded snapshot and recent transcript, has no runtime history or cache, and
 cannot inspect a checkout or act on GitHub. Conversation versions and messages
 are independent of the immutable capture, so chatting neither reorders the
 inbox nor turns historical provider facts into current authority. Attention
-gates, checkout, editing, validation, publication, and merge remain later
-explicit stages.
+gates, checkout, editing, validation, and the effect-free publication journal
+remain separate explicit stages; provider publication execution,
+acknowledgement, and merge remain later.
 
 The first local-development execution primitive remains internal. A trusted
 controller can independently refresh one captured case through the same bounded
@@ -181,8 +182,9 @@ findings complete the fence and ledger atomically; `changes_required` also
 queues exactly one later repair attempt at the then-current conversation
 version. Attention gates and browser steering are independently implemented.
 The controller-only exact retained-line push prerequisite now exists, while
-durable provider refresh/publication, acknowledgement, and merge remain later
-independently fenced stages.
+schema-v18 supplies only durable publication admission and journaling. Fresh
+provider observation, gate/push runtime composition, acknowledgement, and merge
+remain later independently fenced stages.
 
 Schema v17 adds the provider-independent recovery executor for an expired
 prepared local effect. It claims or reclaims eligible bound v12/v13 recovery
@@ -196,6 +198,22 @@ continue the preserved candidate. Both phases are locally not ready and grant
 no review, attention, provider, push, publication, acknowledgement, or merge
 authority. Legacy unbound v12 recovery stays untouched until a separately
 approved idempotent retirement policy exists.
+
+Schema v18 adds the all-private publication journal without enabling a
+publisher. The same transaction that accepts an exact green `passed` local
+review appends one `pending` publication occurrence containing the immutable
+controller, orchestration, CI, ledger, and parked-line evidence that earned it;
+migration never backfills older reviews. The store can lease pre-effect work,
+pin one exact operator policy, gate subject, provider observation, and private
+decision-run link, release scheduling ownership while a human gate waits, and
+write-ahead one complete `PushPinnedLine` request immediately before a future
+caller could perform that effect. Only `push_started` briefly excludes a new
+controller mutation; every earlier phase keeps the retained branch parked and
+reservation-free, and a later repair may supersede stale publication work. An
+expired `push_started` record becomes `outcome_unknown` and can be resolved only
+from independently proven read-only remote evidence, never by automatically
+repeating the push. This slice runs no gate, model, provider read/write, Git,
+gateway, or worker and defines no review-acknowledgement or merge behavior.
 
 An explicitly installed PR-review workflow turns targeted authenticated review
 requests into structured local drafts. Review cases, editable/droppable
@@ -318,6 +336,15 @@ otherwise fails before a provider request.
   and the exact Git-workspace rotation, composite recovery, Commit, Park,
   suspension, and suspended-resume methods. These names describe the required
   capability split rather than a generic operation executor.
+  Publication durability additionally uses the private
+  `eventing.PRDevelopmentPublicationReader`,
+  `eventing.PRDevelopmentPublicationQueue`,
+  `eventing.PRDevelopmentPublicationPushJournal`,
+  `eventing.PRDevelopmentPublicationOutcomeReconciler`, and
+  `eventing.PRDevelopmentPublicationDecisionRunStore`; schema-v18
+  `pr_development_publications`; and the atomic passed-review enqueue seam. It
+  deliberately adds no publisher, provider adapter, gate launcher, Git adapter,
+  gateway composition, or worker.
 - Runtime ordering: resolve disabled-safe config, normalize and validate an
   envelope, enforce the payload limit, redact configured fields, atomically
   insert or return the existing deduplicated event, lease and renew routing,
@@ -376,6 +403,19 @@ otherwise fails before a provider request.
   uses its existing direct terminal transaction. Before any later repair model,
   prepare an exact fresh suspended-resume intent, replay Git resume, and
   atomically install the sole new mutation owner.
+  On an exact green passed-review completion, append its review ledger row,
+  finish the fence/controller, and create one publication occurrence in the
+  same immediate transaction. Pre-effect claims may pin immutable policy,
+  subject, provider, and decision-run facts and may release ownership into
+  `gate_waiting` or `push_ready`. Immediately before any later caller could push,
+  atomically revalidate the complete local high-water and fresh provider pin,
+  persist the canonical push request, and enter `push_started`; serialize that
+  transition against controller mutation. Journal an exact proven terminal
+  result, or convert expired started work to `outcome_unknown`; accept only a
+  distinct minimal fresh read-only remote-head proof of the desired tip for
+  later reconciliation, without rechecking or replacing the original review
+  pin, and never
+  schedule another push from unknown state.
 - Non-obvious constraints: deduplication is scoped by source and connector;
   duplicate input never replaces the first stored payload; lease ownership is
   fenced against stale workers; stale routing cannot authorize a dispatch;
@@ -454,7 +494,15 @@ otherwise fails before a provider request.
   A schema-v12 row lacking an exact bound-line fence is never selected by this
   worker because release of a successfully rotated unbound bearer is not an
   idempotent lost-response protocol. `suspension_pending` and `suspended` are
-  always locally not ready, and publication remains separately authorized.
+  always locally not ready. Publication claims are likewise scheduling-only:
+  pending, claimed, `gate_waiting`, and `push_ready` never reserve the checkout
+  or freeze later repair. Only `push_started` is a short mutation-exclusion
+  fence, and its expiry is terminal uncertainty rather than retry authority.
+  Policy, subject, provider, request, result, decision, claim, and diagnostic
+  bytes remain private. A publication row, gate result, passed review, or
+  browser-visible `local_ready` never supplies a provider/Git capability, and
+  this foundation deliberately leaves acknowledgement and merge semantics
+  undefined.
 
 ## Requirements
 
@@ -531,6 +579,7 @@ otherwise fails before a provider request.
 | `FR-EVENT-AUTOMATION-066` | MUST | Schema-v16 code completes an exact reservation-free local review as `attention_required`, a generation-owned attention worker observes its durable occurrence, or an authenticated user opens or answers the selected case's attention conversation. | The same immediate transaction that appends the review entry and makes its controller ready inserts exactly one occurrence bound to the immutable review ID/hash and transaction-current conversation version/digest. Migration creates no occurrence for historical reviews. The worker claims one due occurrence under a renewable scheduling-only lease, captures the existing `reviews.attention` global-plus-repository policy for fixed decision point `pr_development.review_attention_required`, canonically pins that policy and the active subject revision before session, model, workflow-run, or human-task effects, and launches through the ordinary mixed workflow-gate engine. Exact retry reuses the immutable pin and resolves an already-linked deterministic run before consulting later mutable state. An all-zero policy completes `noop` without a run; a later causally superseding development state, irrecoverable admission uncertainty, or immutable bounded-subject failure completes a distinct terminal state rather than retrying forever. The claim and runtime generation end after delivery or terminalization, while the retained branch remains reservation-free. | The protected runtime and authenticated launcher expose only exact GET `/pr-development/{case}/attention` and POST `/pr-development/{case}/attention/respond` operations. They validate the authoritative case, current review occurrence, canonical policy pin, subject identity, decision link, private run, and stable human-task chain before returning only case version, bounded public lifecycle, response availability, configured titles/questions, accepted answers, and one opaque fence for the sole actionable turn. POST accepts only that fence, the exact case version, and one normalized bounded answer; server-loaded private identities derive an idempotent response ID and resume the ordinary workflow task. The authenticated case-list projection adds only a coarse `attention_required` boolean: it is true exactly while the authoritative current review still requires attention and its current occurrence is pending, claimed, or delivered, and false for absent, superseded, no-op, recovery, or failed occurrences. While the development view is open, the workbench polls that list every five seconds, marks flagged rows as `AI attention`, and selecting one replaces the route with canonical `view=development&case={pdc_...}&focus=chat` navigation; it then polls the selected conversation projection and renders its ordered turns beside the existing case chat. This is in-app discovery only and makes no out-of-band, provider, email, or channel-notification claim. The existing policy editor continues to own arbitrary decision points and ordered global/repository inherit, overlay, replace, disable, and repeated-gate configuration; it offers this decision point as a known preset without creating another policy tree. | Missing or corrupt occurrence/pin/link/run/task state, stale or cross-case fences, later-attempt ambiguity, policy or subject drift, oversized evidence/answer, malformed routes or JSON, runtime reload, cancellation, or uncertain admission fails closed through bounded statuses and fixed errors. GET, list or conversation polling, navigation, zero/no-op, and failed validation mutate no case, chat, repair, controller, branch, repository, provider, workflow, or notification state. A valid response changes only the private human task and continuation; it does not itself append PR chat, schedule a repair, acquire mutation authority, call a provider, push, publish, acknowledge, merge, or delete the retained branch. | A configured gate must reliably surface the exact local PR discussion in the workbench, preserve every ordered question and answer across restart, and allow steering through the existing chat/repair controls without turning attention delivery or its browser token into code or provider authority. |
 | `FR-EVENT-AUTOMATION-067` | MUST | An authenticated user reads the exact detail of a selected PR-development case, whether or not its atomic workbench contains a repair session or attempt. | The existing one-snapshot workbench read integrity-loads the selected case, bounded conversation, optional repair session, verified provider thread, complete controller aggregate, and ledger before constructing a dedicated optional `local_development` DTO field by field. Live or otherwise incomplete lifecycle comes only from the latest public repair attempt; only when that attempt is completed does the snapshot load its exact orchestration for completed-evidence validation, and commit/CI/review declassification requires that orchestration itself to be completed and receipt-bound. The object is omitted when there is no repair session or attempt. Otherwise it exposes only the latest attempt's already-public opaque `attempt_id`, `attempt_ordinal`, fixed `attempt_status`, bounded `summary`, and `updated_at`. Before an exact completed orchestration, validation receipt, and bound immutable attempt-ledger entry exist, `commit_sha`, `ci_status`, `ci_plan_digest`, and `ci_result_digest` are absent, `no_changes` is false, `review_status` is `not_started`, `review_outcome` and `review_summary` are absent, and `review_finding_count` is zero. Once that complete exact linkage exists, its candidate commit and no-change fact, terminal local-CI status, and canonical opaque CI plan/result fingerprints are present; `review_status` is `pending` with no outcome/summary and zero findings until the immediately paired reservation-free review entry exists, then `completed` with its fixed outcome, bounded summary, and exact bounded finding count. | This projection adds no schema version, table, index, migration, backfill, or mutation. `local_ready` is derived as true only when the latest public attempt is `completed`, its exact completed orchestration and receipt bind the attempt entry whose `ci_status` is `passed`, its immediately paired review records `passed`, and the loaded controller is owned by that repair session, points at that attempt, and is in reservation-free `ready`; every other representable state is false. Reading performs no repair admission, model, local-CI, Git, workspace, branch, controller, ledger, workflow/gate, provider, publication, acknowledgement, or merge effect. | Ordinary progressive absence is represented only by the omission and status rules above. In particular, a live incomplete orchestration is neither required nor exposed, and a legacy or otherwise unbound ledger entry whose compatibility read defaults CI to passed exposes no commit, CI, or review evidence, remains `not_started`, and can never make `local_ready` true. A missing or future conversation binding, invalid thread/session/controller/orchestration/receipt/attempt/ledger relation, noncontiguous or corrupt evidence, cross-case or nonlatest association, invalid lifecycle/CI/review value, malformed commit/fingerprint/timestamp, or over-bound text/count fails the entire authoritative detail read through its existing fixed unavailable boundary rather than returning a partial or stale local snapshot. The DTO cannot represent a workspace or checkout, internal Git ref, thread/controller/ledger/orchestration identity or hash, lease/reservation/claim/worker field, credential/provider-write capability, raw finding, raw CI plan/step/output/error/attestation, or internal diagnostic. The commit is local candidate identity only; the two fingerprints are equality-only evidence labels; `local_ready` is never repair, provider-refresh, push, publication, acknowledgement, or merge authority. | Users need an honest current view of what happened locally and whether the exact candidate cleared CI and review, without exposing the private evidence graph or mistaking local readiness for permission to change code or GitHub. |
 | `FR-EVENT-AUTOMATION-068` | MUST | Schema-v17 code opens a schema-v16 event store; the generation-owned PR-development recovery worker observes the oldest due bound schema-v12 recovery or schema-v13 Adopt/Resume/Commit/Park operation recovery, including one whose recovery claim expired; or a later repair orchestration owns a queued attempt for a controller whose retained line is `suspended`. | Migration adds the private schema-v17 suspension handoff and suspended-resume records and extends the controller with `suspension_pending` and `suspended` phases without synthesizing a row or Git result. The provider-independent worker claims or expired-claim-reclaims one eligible recovery under a fresh renewable scheduling token while holding the exact active event-runtime generation. A bound schema-v12 intent and a schema-v13 Commit first call exact `RotatePinnedReservation`; Commit then calls the prepared exact deterministic `CommitPinned` with the fresh bearer. Schema-v13 Adopt and Resume call their exact old-to-fresh composite recovery methods. Before any of those non-Park paths may call Git suspension, one immediate transaction authenticates the live recovery claim and append-once persists the canonical recovery result, rotation proof, exact line fence, fresh-bearer digest and raw fresh bearer, a distinct caller-durable suspension intent, and, for Commit, the complete prepared request plus exact `CommitPinned` result; it erases obsolete raw old-bearer copies, issues no mutation lease, and enters `suspension_pending`. Exact replay returns that same checkpoint without another Git recovery effect. The worker then calls `SuspendPinnedLine` for bound-v12, Adopt, or Resume, or `SuspendPinnedLineCommitRecovery` for Commit, and atomically finalizes only the matching suspension evidence into `suspended`. Park instead exactly calls `ParkPinnedLine` with old, snapshots the resulting parked line, and uses the existing atomic schema-v13 Park finalization directly; it creates no replacement bearer, suspension checkpoint, or suspended phase. | A completed non-Park suspension retains the exact workspace/source/line/version/epoch/tip/tree and candidate/optional prepared-Commit evidence, terminalizes its source recovery through the schema-v17 handoff, clears every mutation/review/recovery lease, and erases every raw old/fresh/claim copy from the recovery and handoff rows; only non-authorizing digests and hash-linked exact results remain. The controller has no usable reservation and cannot be selected for model, CI, review, attention, or publication work. Before any later repair model or compactor call, the repair orchestration must atomically prepare one exact suspended-resume record under its live scheduling claim with the latest suspension fence, one globally fresh raw bearer, its digest, and a caller-durable resume intent; call exact `ResumeSuspendedPinnedLine`; then atomically authenticate its exact result, install that bearer as the controller's sole live mutation reservation under a fresh mutation lease, consume and erase the staged raw resume copy, and continue the same queued attempt. A crash before or after the Git resume replays only that durable intent and cannot start a model until eventing finalization proves the exact mutation owner. If that resume claim expires before handoff, the recovery worker exact-replays the same resume, atomically finalizes its intermediate proof while appending a new `suspended_resume_recovery` suspension checkpoint that alone receives the fresh bearer, and runs ordinary exact suspension; the controller therefore returns to bearer-free `suspended` instead of leaving idle mutation ownership or starting a model. Workbench projection treats `suspension_pending` and `suspended` as `local_ready=false`. | Selection is deterministic and bounded; stale generation, lost/expired/replaced claim, changed result, checkpoint, suspension, resume, controller revision, attempt, line, source, candidate, prepared Commit, bearer, or intent fails without another effect or authority grant. Recovery preflights enough rotation and suspension/resume history capacity before old-to-fresh mutation so it cannot create a fresh owner that cannot be suspended and later resumed. Schema-v12 intents without a complete bound-line fence are deliberately excluded from automatic claim, reclaim, rotation, release, and migration; they remain unchanged in `recovery_required` and locally not ready until a separately approved idempotent unbound-retirement policy safely defines response-loss replay. Reload and shutdown cancel, drain, and join the worker before closing its generation's manager/store; it requires neither GitHub/provider-object readiness nor any model, workflow, gate, browser, push, publication, acknowledgement, or merge capability. | Ambiguous local effects need an always-on, crash-replayable path that preserves unknown work yet releases edit ownership, without converting a recovery claimant, transient replacement bearer, suspended branch, green historical evidence, or later resume into model or provider authority. |
+| `FR-EVENT-AUTOMATION-069` | MUST | Schema-v18 code opens a schema-v17 event store; one exact reservation-free local review completes as `passed`; or a trusted future publisher invokes a private publication-store transition with its exact current claim and immutable inputs. | Migration creates empty private publication storage and supporting exact-evidence indexes without backfill or inferred work. In the same immediate transaction that appends the passed review, finalizes its fence, and enters controller `ready`, the store creates exactly one unique, idempotently replayable exact `pending` publication occurrence with a fresh opaque ID only when the exact completed orchestration receipt binds green persisted CI, the attempt-ledger entry immediately precedes the passed review entry, no later attempt exists, and the controller/source/workspace/retained-line version, mutation epoch, Park intent, base, tip, tree, and no-change facts all agree. The returned review completion includes that record. The queue can claim or safely expired-claim-reclaim only due pre-effect `pending`, `gate_waiting`, or `push_ready` work with fresh owner/token/deadline/epoch fencing; renew an exact live pre-effect claim; and create-once pin canonical policy, private gate subject, and caller-supplied provider observation. The separate decision-run store atomically binds one semantic decision key to one deterministic private workflow run through a callback whose deterministic RunID creation is idempotent and replayable. A non-nil callback error guarantees that no external run was created; a nil callback return followed by SQLite commit uncertainty returns `ErrPRDevelopmentPublicationAdmissionUncertain`, so an automatic caller must not invoke create again and may only use an explicit exact pre-start terminalization or recovery path. It can release the claim into reservation-free `gate_waiting`, advance completed/no-op gating into `push_ready`, or terminalize pre-start work as `conflict`, `superseded`, `failed`, or `recovery_required`. Immediately before a later caller could invoke Git, `StartPRDevelopmentPublicationPush` authenticates the exact claim, revalidates the complete transaction-current local evidence and absence of later work, requires a provider observation obtained strictly after the current claim and immutable pin and no more than five minutes old whose canonical facts are byte-identical to that pin, refreshes only the observed instant, persists and hashes the full canonical `PushPinnedLine` request, and enters `push_started` as the sole publication state that excludes controller mutation. The push journal alone can renew that exact live started claim while the effect remains in flight. Exact proven `applied`, `already_current`, or `reconciled` results may finalize `published`, preserving a separately flagged local postflight drift; an exact compare-and-swap loss becomes `conflict`; and an unproven post-start result or expired started claim becomes execution-terminal and non-reclaimable `outcome_unknown`. A later trusted caller may resolve unknown to published only by supplying a distinct, independently obtained, minimal read-only remote-head observation whose instant is strictly after unknown completion and no more than five minutes old and whose current tip equals the immutable desired tip; reconciliation neither overwrites the original provider/review pin nor requires that review to remain unchanged. Observing expected, another tip, absence, or unavailability is inconclusive and never calls or schedules push. | The scheduling graph is `pending | gate_waiting | push_ready -> claimed(claim_from=origin)`: a pending claim may enter `gate_waiting`, `push_ready`, or a pre-effect terminal state; a gate-waiting claim may return to waiting, enter push-ready, or terminalize; and only a push-ready claim may enter `push_started`. Started work may become `published`, `conflict`, `failed`, `recovery_required`, or execution-terminal `outcome_unknown`; unknown has only the separately evidenced `published` reconciliation edge. The policy tuple and subject tuple are each internally all-or-none, allowing a progressive policy-only pin before the subject; their canonical bytes and hashes and the provider facts are immutable, while only the provider observed instant may refresh at Start; expected remote tip and push request are immutable before effect; result and disposition exist only for proven publication. Ordinary `pending`, `claimed`, `gate_waiting`, and `push_ready` states hold no controller mutation lease or Git reservation and do not block repair. Mutation acquisition and `push_started` admission serialize in SQLite so exactly one wins; a later repair makes stale publication evidence supersedable rather than freezing the branch. All DTO fields and canonical policy/subject/provider/request/result bytes, hashes, claim values, decision IDs, and diagnostics remain private. The store executes no workflow, gate, model, provider, Git, gateway, HTTP/UI, acknowledgement, merge, or worker effect. | Any non-passed review, non-green or compatibility-default CI, absent or nonadjacent ledger pair, unfinished orchestration, stale controller/fence/source/line, queued or later attempt, malformed/cross-record/over-bound input, changed immutable pin, stale claim, decision mismatch, or current-state drift fails closed without a partial review/publication transition or effect. Exact committed replay returns the existing occurrence or transition; opening v17 creates no occurrence for historical passed reviews. Expired pre-effect work may receive a fresh claim, but expired `push_started` is never reclaimed or reinvoked. A failed atomic occurrence insert rolls back review, fence, controller, and ledger completion together. Outcome reconciliation treats desired-tip equality only as proof of the current result, not proof that a prior call was or was not applied across remote OID ABA. No publication state implies review acknowledgement or merge, whose user-facing actions and policies remain explicitly undefined and unimplemented. | Publication needs one crash-reconstructible authority and effect journal built from exact local evidence, while human waits, retries, later repairs, process loss, and uncertain remote outcomes must not create a stale push, duplicate effect, long-lived checkout lock, or accidental acknowledgement/merge policy. |
 
 Within `FR-EVENT-AUTOMATION-063`, “before controller/model authority” means
 strictly before the first durable Pin invocation. No release is required when
@@ -1129,6 +1178,45 @@ reservation, and erases the staged row copy. Exact replay after the transaction
 recognizes only that immediate mutation owner and result. No context compactor,
 edit model, CI, review, or gate may start while the resume record is pending.
 
+Schema v18 adds one controller-private `pr_development_publications` table.
+Each `pdpub_` row is unique for its exact passed review-ledger occurrence and
+immutably binds case/thread/controller/owner session; attempt and completed
+orchestration receipt; adjacent attempt/review ledger IDs and hashes; review
+fence ordinal/hash; green CI plan/result digests; source repository/ref/original
+commit/tree; and the complete workspace/line/version/mutation-epoch/Park/base/
+tip/tree/no-change tuple. Supporting composite indexes let foreign keys bind the
+same fence, receipt, and typed ledger hashes rather than only their mutable
+parents. Migration creates no row; only the passed-review completion transaction
+may append the first occurrence.
+
+Progressive private fields create-once pin canonical policy and subject bytes
+with source revisions and hashes, immutable caller-supplied provider facts with
+their first `ProviderPinnedAt` instant and latest `ProviderObservedAt` instant,
+the expected remote tip, a deterministic decision-run ID, the canonical full
+push request, and an exact proven result. Start may refresh only
+`ProviderObservedAt`; it cannot rewrite the provider facts or their original pin
+instant. Lifecycle fields retain
+`status`, the pre-claim `claim_from`, fresh scheduling owner/token/deadline/epoch,
+claim and attempt counts, availability, bounded sanitized error code/detail,
+and effect/completion timestamps. `pending`, `claimed`, `gate_waiting`, and
+`push_ready` carry no mutation reservation. A partial unique controller index
+permits at most one `push_started` row and is paired with controller mutation
+admission so neither a new mutation nor push start can pass the other inside an
+immediate transaction. Terminal proven publication retains `applied`,
+`already_current`, or `reconciled` plus local-cleanliness/drift evidence;
+unproved started work retains `outcome_unknown` without reusable effect
+authority. Its optional reconciliation evidence is a distinct minimal
+repository/pull/head-repository/head-ref/current-tip/observed-at record and
+hash. Reconciliation preserves the original `outcome_unknown` completion
+instant, neither replaces the original provider/review pin, nor carries review
+state. No field has a JSON
+projection, and credentials, raw provider/Git
+output, runtime/system prompts, model responses, workflow-private roots or
+sessions, raw conversation, credentials, checkout paths, or raw errors are not
+stored. Configured gate criteria/questions inside the bounded policy pin and
+the bounded canonical gate-subject envelope are the only workflow inputs the
+journal deliberately retains.
+
 Local-CI evidence adds no eventing schema. Git Workspaces transiently
 materializes the exact pre-attempt parent and candidate into separate private
 roots that contain no `.git` directory and exist only for one callback. A
@@ -1551,6 +1639,11 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
 | Internal Go API | `pkg/prdevelopment/localci/**`; `gitworkspace.Manager.WithPinnedCandidateValidationRoots`, `PinnedCandidateValidationRequest`, `PinnedCandidateValidationRoots`, and `PinnedTreeManifest` | Materialize the exact pre-attempt parent and current candidate as bounded `.git`-free disposable roots under the reservation operation lock; apply authoritative-explicit, native-quick-profile, then GitHub-fallback discovery precedence; persist the exact-manifest plan graph; reject plan-definition drift and stateful multi-command GitHub jobs; run every required step only through the mandatory Bubblewrap plus user-systemd/cgroup-v2 local sandbox with controller-provided offline dependencies; and persist exact hash-bound evidence. Production passing-result reuse remains disabled for mutable host inputs. | `FR-EVENT-AUTOMATION-062` |
 | Internal Go API / storage / runtime | `eventing.PRDevelopmentRepairOrchestrationStore`, private schema-v14 orchestration storage, `prdevelopment` controller worker/context compactor/effect runner, and the gateway-owned local-CI runtime | Directly claim provider-thread attempts, bind provider/workspace/model/candidate/CI evidence through restart-safe checkpoints, compact only reviewed ledger prefixes, run the edit and exact local validation under one renewable mutation owner, deterministically commit changed candidates, and atomically Park into the fence, attempt ledger, completed public attempt, released reservation, and retained `review_pending` line. | `FR-EVENT-AUTOMATION-063` |
 | Internal Go API / storage / runtime | `eventing.PRDevelopmentReviewQueue`, `Store.ClaimPRDevelopmentReview`, `Store.CompletePRDevelopmentReview`, `prdevelopment.ReviewWorker`, `agent.ControllerLocalReviewRunner`, and the gateway generation-owned review runtime | Claim or safely reclaim only the exact oldest completed parked fence without mutation or GitHub/provider-object authority; revalidate the durable orchestration, local-CI evidence, ordered context, and parked snapshot; run one fresh no-tools/no-history/no-cache exact-agent structured review; and atomically append its result, finish the fence into `ready`, and queue exactly one current-conversation repair only for `changes_required`. | `FR-EVENT-AUTOMATION-064` |
+| Private storage / Go API | `eventing.PRDevelopmentPublicationReader`; `Store.GetPRDevelopmentPublication` and `GetPRDevelopmentPublicationForReview` | Return one integrity-validated all-private journal record by publication or exact review occurrence without granting scheduling, decision, provider, push-start/finalization, expiry, or reconciliation power. | `FR-EVENT-AUTOMATION-069` |
+| Private storage / Go API | `eventing.PRDevelopmentPublicationQueue`; `Store.ClaimPRDevelopmentPublications`, `RenewPRDevelopmentPublication`, `PinPRDevelopmentPublicationPolicy`, `PinPRDevelopmentPublicationSubject`, `PinPRDevelopmentPublicationProvider`, `ReleasePRDevelopmentPublicationGateWait`, `MarkPRDevelopmentPublicationPushReady`, and `CompletePRDevelopmentPublicationPrestart` | Own only renewable pre-effect `claimed` scheduling, immutable policy/subject/provider pins, reservation-free wait/readiness, and exact pre-start terminalization. `CompletePRDevelopmentReview` remains the sole atomic occurrence-admission seam and returns its private publication. Queue authority cannot renew `push_started`, start/finalize/reconcile push, or invoke a gate, model, workflow, provider, Git, gateway, worker, acknowledgement, or merge effect. | `FR-EVENT-AUTOMATION-069` |
+| Private storage / Go API | `eventing.PRDevelopmentPublicationPushJournal`; `Store.RenewPRDevelopmentPublicationPush`, `StartPRDevelopmentPublicationPush`, and `FinalizePRDevelopmentPublicationPush` | Own only exact live `push_started` renewal, the transactionally revalidated write-ahead effect boundary, and exact request-hash/result finalization. It cannot renew or claim pre-effect work and obtains no provider/Git capability; a caller may invoke an external effect only after separately receiving a newly started journal record. | `FR-EVENT-AUTOMATION-069` |
+| Private storage / Go API | `eventing.PRDevelopmentPublicationOutcomeReconciler`; `Store.ExpirePRDevelopmentPublicationPushes` and `ReconcilePRDevelopmentPublicationOutcome` with `PRDevelopmentPublicationOutcomeReconciliation` and distinct minimal `PRDevelopmentPublicationRemoteObservation` | Convert expired started work to non-reclaimable unknown and record read-only reconciliation only when a separately obtained fresh head observation proves the desired tip. This capability cannot claim work, invoke push, or require/overwrite the original review-bearing provider observation. | `FR-EVENT-AUTOMATION-069` |
+| Private storage / Go API | `eventing.PRDevelopmentPublicationDecisionRunStore`; `Store.GetPRDevelopmentPublicationDecisionRun` and `AdmitPRDevelopmentPublicationDecisionRun` | Create-once bind one immutable semantic decision key to one deterministic private run through the callback transaction. RunID creation must be idempotent and replayable; a non-nil callback error guarantees no external run was created. A nil return followed by commit uncertainty returns `ErrPRDevelopmentPublicationAdmissionUncertain`; automatic callers must not invoke create again and may use only an explicit exact pre-start terminalization or recovery path. | `FR-EVENT-AUTOMATION-069` |
 | Go API / storage | `eventing.PRDevelopmentCaseStore`, `prdevelopment` read service and handler | List immutable development cases by exact repository/pull filters with a newest-first `(updated_at, id)` keyset cursor, load one exact case, and project bounded public summary/detail DTOs without capture provenance or action authority. | `FR-EVENT-AUTOMATION-052` |
 | Go API / storage / HTTP / UI | `eventing.PRDevelopmentWorkbench.LocalEvidence`, `prdevelopment.Detail.local_development`, the protected and launcher selected-case detail GETs, and the PR-development local-status card | Extend the existing atomic workbench snapshot with private controller/orchestration/ledger evidence, then declassify only the latest public attempt lifecycle, exact candidate/no-change fact, terminal CI status and opaque fingerprints, reservation-free review status/outcome/summary/count, and strictly derived local readiness. The browser strictly cross-binds the object to the latest public attempt, retains only monotonically newer memory state, polls while repair or review remains active, renders bounded evidence plus an explicit local-only notice, and receives no route, schema, write, raw evidence, or action authority. | `FR-EVENT-AUTOMATION-067` |
 | Go API / storage | `eventing.PRDevelopmentConversationStore`, `prdevelopment` chat service and handler | Atomically create/backfill a two-table conversation, validate its contiguous count, byte high-water, and rolling canonical digest on every read/append, and leave capture ordering untouched. After store reads, a process-wide same-case lock and per-service AI admission reject stale state or insufficient complete-turn capacity before appending the human; every later failure preserves that row, and only a fresh handler reload may declassify partial authoritative detail. The model request uses one isolated advisory prompt over explicit bounded captured evidence and transcript. | `FR-EVENT-AUTOMATION-053` |
@@ -1574,7 +1667,7 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
 | CLI / Workflow YAML | `picoclaw workflow install github-pr-development` / `workflows/github-pr-development.yml` | Explicitly install the authenticated own-PR submitted-review trigger and read-only current-PR step whose versioned successful-run marker opts into provider-verified durable capture. | `FR-EVENT-AUTOMATION-051` |
 | Go API | `EvaluateEventTrigger`, `EventWorkflowRouter`, `EventWorkflowDispatcher`, `RunOrigin`, `RunRequest.Origin`, `RunRequest.OnRunPersisted`, `Executor.RetryCaptured`, `ProjectWorkflowRunForBrowserWithStore`, `ProjectEventBackedDraftRunsForBrowserWithStore`, `LoadRunnableLocalSnapshotWithRevision`, `EventContextFromEnvelope` | Produce deterministic field-level match diagnostics through the same evaluator used by routing, claim one item, compatibility-check and revision-bind the exact loaded workflow bytes, durably fan out deterministic dispatches, reject content drift or a no-longer-matching persisted event, pass the same accepted snapshot and trusted payload-free origin into execution, reconcile deterministic runs, link a newly persisted run before effects, renew long leases, retry from one authoritative source, validate every available provenance ancestor without treating pruning as forgery, safely project exact and batch trusted run provenance, and build the detached redacted workflow context shared by dispatch and event-parity draft testing. | `FR-EVENT-AUTOMATION-014` through `FR-EVENT-AUTOMATION-018`, `FR-EVENT-AUTOMATION-020`, `FR-EVENT-AUTOMATION-021`, `FR-EVENT-AUTOMATION-036`, `FR-EVENT-AUTOMATION-038` |
 | Runtime | gateway event automation service, webhook/operator/review/development controllers, review working-context bridge, attention launcher and browser bridge, channel admission controller, provider poller, submission and attention-trigger workers, own-PR capture sink, and launcher restart signature | Open enabled storage only after attention-policy/agent preflight, initialize workflow/MCP/runtime-session dependencies before workers, generation-fence HTTP and advisory development chat, review-session projection, trusted attention policy, outgoing-submission attention launch and response, provider-verified own-PR capture and safe projection, and channel admission while transactionally draining, replacing, rolling back, and closing services/providers, and report restart-required only when the active effective event runtime changes, including semantic changes to enabled GitHub repository/target/polling/policy scope but excluding case/order-only scope differences. | `FR-EVENT-AUTOMATION-019`, `FR-EVENT-AUTOMATION-024`, `FR-EVENT-AUTOMATION-029`, `FR-EVENT-AUTOMATION-032`, `FR-EVENT-AUTOMATION-035`, `FR-EVENT-AUTOMATION-039` through `FR-EVENT-AUTOMATION-053` |
-| Build | `pkg/eventing` unsupported-platform implementation | Preserves the same construction and development-case capture/read/conversation store surface and returns `ErrUnsupportedPlatform` without pulling SQLite into excluded targets. | `FR-EVENT-AUTOMATION-005`, `FR-EVENT-AUTOMATION-012`, `FR-EVENT-AUTOMATION-051` through `FR-EVENT-AUTOMATION-053` |
+| Build | `pkg/eventing` unsupported-platform implementation | Preserves the same construction, development-case capture/read/conversation, and private publication-store surface and returns `ErrUnsupportedPlatform` without pulling SQLite into excluded targets. | `FR-EVENT-AUTOMATION-005`, `FR-EVENT-AUTOMATION-012`, `FR-EVENT-AUTOMATION-051` through `FR-EVENT-AUTOMATION-053`, `FR-EVENT-AUTOMATION-069` |
 
 ## Algorithms And Ordering
 
@@ -2412,6 +2505,58 @@ Owns: TEST web/frontend/tests/ui-smoke.spec.ts
     shutdown, cancel, drain, and join the generation-wrapped worker before
     closing its Git manager or event store; provider/model readiness is not a
     worker dependency.
+59. When opening schema v17, transactionally create the empty schema-v18
+    publication journal, its exact-evidence supporting indexes, lifecycle
+    checks, unique passed-review occurrence, unique nonempty decision-run
+    binding, and one-controller `push_started` exclusion before advancing
+    `user_version`; do not scan or backfill historical reviews. During one exact
+    `passed` review completion, after validating the completed orchestration,
+    green non-compatibility CI receipt, adjacent immutable attempt/review ledger
+    pair, latest attempt, ready reservation-free controller, and complete parked
+    fence, append the review and publication occurrence in the same immediate
+    transaction. Exact replay returns the same occurrence; any occurrence error
+    rolls back the complete review/fence/controller/ledger mutation.
+
+    Claim due `pending`, `gate_waiting`, or `push_ready` in stable order under a
+    fresh scheduling token, epoch, and deadline. The Queue renews only that live
+    pre-effect `claimed` lease. Reclaim only an expired
+    pre-effect `claim_from`; the distinct outcome reconciler scans expired
+    `push_started` work into `outcome_unknown` without returning it for effect
+    execution. Create-once pin
+    canonical policy then subject and provider evidence, preserving the first
+    provider-pin instant separately from the latest identical observation
+    instant refreshed at push start; exact replay compares hashes and any change
+    conflicts. The separate DecisionRunStore binds a semantic key over
+    publication, review, policy, subject, and provider observation to one
+    deterministic private run in the same transaction as its create callback.
+    RunID creation must be idempotent and replayable; a non-nil callback error
+    guarantees that no external run was created. A nil return followed by commit
+    uncertainty returns `ErrPRDevelopmentPublicationAdmissionUncertain`;
+    automatic callers must not invoke create again and may use only an explicit
+    exact pre-start terminalization or recovery transition. Release the
+    scheduling claim while the run waits for a human, or record completed/no-op
+    gating as `push_ready`; neither state owns a controller mutation lease or
+    blocks a later repair.
+
+    Under one immediate transaction, authenticate a fresh push-ready claim,
+    reload the complete local high-water, reject later repair or evidence drift,
+    require a fresh exact provider observation, persist and hash the complete
+    pinned-line request, and enter `push_started`. Controller mutation admission
+    must check the same journal while serialized, so mutation and start cannot
+    both win. Only after that committed return may a separately implemented
+    trusted caller invoke the exact Git primitive. While it remains in flight,
+    only the PushJournal can extend the exact live `push_started` lease; Queue
+    renewal rejects it. Finalize only the same claim, epoch, and request hash:
+    persist a canonical proven result as `published`,
+    retain proven publication plus local drift separately, map exact CAS loss to
+    `conflict`, and map unproved post-start state to `outcome_unknown`. A future
+    read-only reconciler may finalize unknown only from a distinct minimal fresh
+    remote-head observation whose current tip equals desired; it preserves the
+    original unknown-completion instant and neither reloads nor overwrites the
+    original review-bearing provider pin. Every other
+    observation remains unknown and never
+    re-enters `push_ready`. This algorithm itself invokes no workflow, model,
+    provider, Git, gateway, worker, acknowledgement, or merge action.
 
 ## Cross-Feature Behavior
 
@@ -2560,12 +2705,18 @@ remain excluded pending a separately approved idempotent retirement contract.
 Git Workspaces requirement 018 and Security Isolation requirement 042 supply
 only the `#126a` controller-only exact
 parked one-ref remote-tip compare-and-swap primitive. Event Automation does not
-call it, persist a push intent or result, acquire transport authority, refresh
-provider state, alter `local_ready`, acknowledge a review, or merge in this
-slice. Event Automation requirement 069 is reserved for the `#126b+` durable
-composition, whose provider refresh, local-evidence admission, write-ahead
-publication journal/worker, uncertain-outcome handling, acknowledgement, and
-merge fences require a separate requirement and acceptance evidence.
+call it, acquire transport authority, refresh provider state, alter
+`local_ready`, acknowledge a review, or merge in this slice. Event Automation
+requirement 069 and Security Isolation requirement 043 now own the `#126b1`
+eventing-only schema-v18 admission and write-ahead journal: the exact passed
+review creates its occurrence, later trusted inputs may be pinned, and push
+start/result/unknown state can be fenced, but no component currently supplies
+those inputs or invokes an effect. The later `#126b2` composition must own a
+fresh provider observer, gate launcher/response bridge, generation-owned
+publisher, exact `PushPinnedLine` adapter, and read-only unknown-outcome
+reconciliation. Review acknowledgement and merge remain further separate
+features whose concrete user-facing actions and policy have not been chosen;
+the journal deliberately does not guess them.
 
 `FR-EVENT-AUTOMATION-062` is the separate local-CI evidence primitive. [Git
 workspaces](git-workspaces.md) owns exact parent/candidate materialization, the
@@ -2600,7 +2751,9 @@ review, provider access, or publication.
 | Reservation-free suspended retained-line state and exact candidate resume, including prepared-Commit ambiguity | `#125a` / the Git Workspaces and Security Isolation suspension contracts | Adds only the controller-private Git boundary: an exact current reservation may be retired while its checkout/ref and bounded ordinary candidate remain. Commit recovery records the deterministic child's `PreparedTree` and applied/unapplied state separately from the current `CandidateTree`; an unapplied child requires exact candidate equality, while an applied child may retain later post-prepare edits. Later exact resume normalizes only the known prepared control plane, uses a globally fresh bearer, and preserves the candidate files. Suspension is neither Park/review nor CI/readiness/publication evidence and does not scan, claim, or finalize an eventing operation. |
 | Generation-owned recovery execution for ambiguous prepared Adopt/Resume/Commit/Park effects | `#125b` / `FR-EVENT-AUTOMATION-068` / schema-v17 security contract | Adds the schema-v17 `suspension_pending`/`suspended` handoff, renewable oldest-work claim/reclaim, and provider-independent gateway worker over eligible bound schema-v12/v13 recovery. Each non-Park exact Git result is durable before suspension; Commit is Rotate plus exact `CommitPinned` followed by commit-recovery suspension, while Park replays and retires old directly. A later queued attempt durably resumes the exact suspended candidate before any model. Staged bearers are erased at authority transitions, both phases force `local_ready=false`, and legacy unbound v12 rows remain safely excluded pending a separate idempotent retirement policy. |
 | Retained-line exact remote-tip CAS push primitive | `#126a` / Git Workspaces 018 / Security Isolation 042 | Implemented only as a controller Go API over one exact parked reservation-free line and its stored source branch. It persists no eventing state, performs no provider refresh or publication admission, and leaves the line parked. |
-| Durable provider refresh, write-ahead publication journal/worker, uncertain-outcome resolution, acknowledgement, and merge | `#126b+` / Event Automation 069 (reserved) | Not implemented in this slice. It receives no authority from a schema-v15 decision link, schema-v16 occurrence, private workflow run, completed attempt, ledger row, gate answer, review outcome, primitive push result, or browser-visible `local_ready` without its own later provider, evidence-admission, journal, retry/reconciliation, acknowledgement, and merge fences. |
+| Durable publication admission, private mixed-gate/provider pins, write-ahead push journal, terminal uncertainty, and mutation/start exclusion | `#126b1` / `FR-EVENT-AUTOMATION-069` / Security Isolation 043 | Implemented as schema-v18 private eventing state only. Passed-review admission is atomic and exact; pre-effect scheduling remains reservation-free; Queue and PushJournal renew only their respective pre-effect and started claims; only `push_started` excludes mutation; unknown never returns to execution. No provider, gate, workflow, model, Git, gateway, or worker effect is composed. |
+| Fresh provider observation, mixed-gate execution/PR-chat bridge, generation-owned push worker and adapter, and read-only unknown reconciliation | `#126b2` / later requirement | Not implemented. It must consume the schema-v18 store through distinct least-authority interfaces and receives no authority merely from a schema-v15/16 decision, private workflow run, completed attempt, ledger row, gate answer, review outcome, primitive push result, or browser-visible `local_ready`. |
+| Provider review acknowledgement and pull-request merge | Later separately approved slices | Not implemented. The provider action meant by acknowledgement and the merge enablement/method/policy are intentionally undefined pending user choice; neither is inferred from publication success. |
 
 The explicitly installed PR-review template is different: its agent has
 read-only review authority and emits a local structured draft only. Durable
@@ -3127,6 +3280,28 @@ capabilities.
   remains durable; otherwise expiry permits the unchanged fence to be reclaimed
   and reviewed again. Reload and shutdown drain the generation-wrapped reviewer
   before its evidence or event store closes.
+- A passed review and its schema-v18 publication occurrence are one atomic
+  database effect. Missing green receipt binding, ledger adjacency, latest
+  attempt, or exact controller/fence/source/line evidence rejects both; a
+  trigger, storage, or insert failure cannot leave a finished review with
+  no corresponding occurrence. Migration and replay never manufacture an
+  occurrence for a passed review completed under an older schema.
+- Publication scheduling is deliberately nonexclusive before push start. An
+  expired claim from `pending`, `gate_waiting`, or `push_ready` may be reclaimed
+  with a new token/epoch, while waiting releases its claim entirely. These
+  states cannot block a new repair; changed high-water causes the old occurrence
+  to become `superseded`. Conversely, `push_started` and controller mutation are
+  transactionally exclusive, so exactly one may cross its admission boundary.
+- Once `push_started` may represent an external effect, expiry or missing proof
+  becomes `outcome_unknown`, never another push claim. Only a separately
+  supplied current remote observation equal to the immutable desired tip may
+  record reconciled publication; expected, another tip, missing, or unavailable
+  evidence remains unknown because remote OID ABA cannot prove no prior effect.
+- The schema-v18 store performs no model, gate, workflow, provider, Git,
+  gateway, or worker call and projects none of its state to HTTP/UI. Publication
+  success does not acknowledge the submitted review or merge the pull request;
+  both behaviors remain unimplemented until their user-visible meaning and
+  policy are chosen explicitly.
 
 GitHub protocol references: [validating webhook
 deliveries](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries),
@@ -3194,6 +3369,7 @@ schemas](https://docs.github.com/en/webhooks/webhook-events-and-payloads).
 | `FR-EVENT-AUTOMATION-066` | [pkg/eventing/pr_development_attention_trigger_store_sqlite_test.go](../../pkg/eventing/pr_development_attention_trigger_store_sqlite_test.go), [pkg/eventing/pr_development_store_sqlite_test.go](../../pkg/eventing/pr_development_store_sqlite_test.go), [pkg/attention/private_run_test.go](../../pkg/attention/private_run_test.go), [pkg/attention/conversation_test.go](../../pkg/attention/conversation_test.go), [pkg/prdevelopment/attention_test.go](../../pkg/prdevelopment/attention_test.go), [pkg/prdevelopment/attention_trigger_worker_test.go](../../pkg/prdevelopment/attention_trigger_worker_test.go), [pkg/prdevelopment/attention_bridge_test.go](../../pkg/prdevelopment/attention_bridge_test.go), [pkg/prdevelopment/service_handler_test.go](../../pkg/prdevelopment/service_handler_test.go), [pkg/gateway/pr_development_attention_composition_test.go](../../pkg/gateway/pr_development_attention_composition_test.go), [web/backend/api/pr_development_test.go](../../web/backend/api/pr_development_test.go), [web/frontend/src/api/pr-development.test.ts](../../web/frontend/src/api/pr-development.test.ts), [web/frontend/src/api/pr-development-attention.test.ts](../../web/frontend/src/api/pr-development-attention.test.ts), [web/frontend/src/components/reviews/attention-conversation.test.tsx](../../web/frontend/src/components/reviews/attention-conversation.test.tsx), [web/frontend/src/components/reviews/pr-development-page.test.tsx](../../web/frontend/src/components/reviews/pr-development-page.test.tsx), [web/frontend/src/routes/-reviews-route.test.tsx](../../web/frontend/src/routes/-reviews-route.test.tsx), [web/frontend/src/routes/-reviews.test.ts](../../web/frontend/src/routes/-reviews.test.ts), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-EVENT-AUTOMATION-067` | [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_repair_store_sqlite.go](../../pkg/eventing/pr_development_repair_store_sqlite.go), [pkg/eventing/pr_development_ledger_store_sqlite.go](../../pkg/eventing/pr_development_ledger_store_sqlite.go), [pkg/eventing/pr_development_orchestration_store_sqlite.go](../../pkg/eventing/pr_development_orchestration_store_sqlite.go), [pkg/eventing/pr_development_review_store_sqlite_test.go](../../pkg/eventing/pr_development_review_store_sqlite_test.go), [pkg/prdevelopment/service.go](../../pkg/prdevelopment/service.go), [pkg/prdevelopment/service_handler_test.go](../../pkg/prdevelopment/service_handler_test.go), [web/frontend/src/api/pr-development.ts](../../web/frontend/src/api/pr-development.ts), [web/frontend/src/api/pr-development.test.ts](../../web/frontend/src/api/pr-development.test.ts), [web/frontend/src/components/reviews/pr-development-page.tsx](../../web/frontend/src/components/reviews/pr-development-page.tsx), [web/frontend/src/components/reviews/pr-development-page.test.tsx](../../web/frontend/src/components/reviews/pr-development-page.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-EVENT-AUTOMATION-068` | [pkg/eventing/pr_development_suspension_store_sqlite_test.go](../../pkg/eventing/pr_development_suspension_store_sqlite_test.go), [pkg/eventing/pr_development_suspended_resume_store_sqlite_test.go](../../pkg/eventing/pr_development_suspended_resume_store_sqlite_test.go), [pkg/eventing/pr_development_suspended_resume_recovery_store_sqlite_test.go](../../pkg/eventing/pr_development_suspended_resume_recovery_store_sqlite_test.go), [pkg/eventing/pr_development_recovery_queue_sqlite_test.go](../../pkg/eventing/pr_development_recovery_queue_sqlite_test.go), [pkg/gitworkspace/pinned_recovery_suspension_capacity_test.go](../../pkg/gitworkspace/pinned_recovery_suspension_capacity_test.go), [pkg/prdevelopment/controller_recovery_worker_test.go](../../pkg/prdevelopment/controller_recovery_worker_test.go), [pkg/prdevelopment/repair_controller_worker_test.go](../../pkg/prdevelopment/repair_controller_worker_test.go), [pkg/gateway/pr_development_repair_runtime_test.go](../../pkg/gateway/pr_development_repair_runtime_test.go) |
+| `FR-EVENT-AUTOMATION-069` | [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_publication_schema_sqlite.go](../../pkg/eventing/pr_development_publication_schema_sqlite.go), [pkg/eventing/pr_development_publication_store_sqlite.go](../../pkg/eventing/pr_development_publication_store_sqlite.go), [pkg/eventing/pr_development_publication_store_sqlite_test.go](../../pkg/eventing/pr_development_publication_store_sqlite_test.go), [pkg/eventing/pr_development_publication_renewal_store_sqlite_test.go](../../pkg/eventing/pr_development_publication_renewal_store_sqlite_test.go), [pkg/eventing/pr_development_publication_admission_store_sqlite.go](../../pkg/eventing/pr_development_publication_admission_store_sqlite.go), [pkg/eventing/pr_development_publication_admission_store_sqlite_test.go](../../pkg/eventing/pr_development_publication_admission_store_sqlite_test.go), [pkg/eventing/pr_development_ledger_store_sqlite.go](../../pkg/eventing/pr_development_ledger_store_sqlite.go), [pkg/eventing/pr_development_review_store_sqlite_test.go](../../pkg/eventing/pr_development_review_store_sqlite_test.go), [pkg/eventing/pr_development_controller_store_sqlite.go](../../pkg/eventing/pr_development_controller_store_sqlite.go), [pkg/eventing/pr_development_controller_store_sqlite_test.go](../../pkg/eventing/pr_development_controller_store_sqlite_test.go), [pkg/eventing/pr_development_orchestration_store_sqlite.go](../../pkg/eventing/pr_development_orchestration_store_sqlite.go), [pkg/eventing/store_sqlite.go](../../pkg/eventing/store_sqlite.go), [pkg/eventing/store_types.go](../../pkg/eventing/store_types.go), [pkg/eventing/store_schema_test.go](../../pkg/eventing/store_schema_test.go), [pkg/eventing/store_unsupported.go](../../pkg/eventing/store_unsupported.go), [pkg/eventing/store_unsupported_test.go](../../pkg/eventing/store_unsupported_test.go) |
 
 Additional `FR-EVENT-AUTOMATION-063` implementation and acceptance anchors are
 [pkg/agent/local_repair.go](../../pkg/agent/local_repair.go),
@@ -3236,6 +3412,9 @@ fence aggregate validation in
 - [pkg/eventing/pr_development_ledger_schema_sqlite.go](../../pkg/eventing/pr_development_ledger_schema_sqlite.go)
 - [pkg/eventing/pr_development_ledger_store_sqlite.go](../../pkg/eventing/pr_development_ledger_store_sqlite.go)
 - [pkg/eventing/pr_development_review_store_sqlite.go](../../pkg/eventing/pr_development_review_store_sqlite.go)
+- [pkg/eventing/pr_development_publication_schema_sqlite.go](../../pkg/eventing/pr_development_publication_schema_sqlite.go)
+- [pkg/eventing/pr_development_publication_admission_store_sqlite.go](../../pkg/eventing/pr_development_publication_admission_store_sqlite.go)
+- [pkg/eventing/pr_development_publication_store_sqlite.go](../../pkg/eventing/pr_development_publication_store_sqlite.go)
 - [pkg/eventing/pr_development_orchestration_schema_sqlite.go](../../pkg/eventing/pr_development_orchestration_schema_sqlite.go)
 - [pkg/eventing/pr_development_orchestration_store_sqlite.go](../../pkg/eventing/pr_development_orchestration_store_sqlite.go)
 - [pkg/eventing/pr_development_attention_schema_sqlite.go](../../pkg/eventing/pr_development_attention_schema_sqlite.go)

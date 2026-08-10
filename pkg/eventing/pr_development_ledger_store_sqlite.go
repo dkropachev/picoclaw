@@ -288,8 +288,9 @@ func (s *Store) appendPRDevelopmentLedgerReview(
 		return PRDevelopmentReviewCompletion{}, false, err
 	}
 	var (
-		completion PRDevelopmentReviewCompletion
-		changed    bool
+		completion    PRDevelopmentReviewCompletion
+		orchestration PRDevelopmentRepairOrchestration
+		changed       bool
 	)
 	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
 		thread, binding, controller, fence, ledger, loadErr := loadPRDevelopmentLedgerAppendState(
@@ -302,7 +303,7 @@ func (s *Store) appendPRDevelopmentLedgerReview(
 			return loadErr
 		}
 		if enqueueChanges {
-			orchestration, found, orchestrationErr := loadPRDevelopmentRepairOrchestration(
+			loadedOrchestration, found, orchestrationErr := loadPRDevelopmentRepairOrchestration(
 				ctx,
 				conn,
 				normalized.AttemptID,
@@ -310,24 +311,25 @@ func (s *Store) appendPRDevelopmentLedgerReview(
 			if orchestrationErr != nil {
 				return orchestrationErr
 			}
-			if !found || orchestration.Phase != PRDevelopmentRepairOrchestrationCompleted ||
-				orchestration.ControllerID != controller.ID ||
-				orchestration.SessionID != controller.OwnerSessionID ||
-				orchestration.CaseID != normalized.CaseID ||
-				orchestration.ThreadID != controller.ThreadID ||
-				orchestration.Validation == nil {
+			if !found || loadedOrchestration.Phase != PRDevelopmentRepairOrchestrationCompleted ||
+				loadedOrchestration.ControllerID != controller.ID ||
+				loadedOrchestration.SessionID != controller.OwnerSessionID ||
+				loadedOrchestration.CaseID != normalized.CaseID ||
+				loadedOrchestration.ThreadID != controller.ThreadID ||
+				loadedOrchestration.Validation == nil {
 				return fmt.Errorf(
 					"%w: review completion has no exact completed orchestration receipt",
 					ErrPRDevelopmentLedgerConflict,
 				)
 			}
 			if normalized.Outcome == PRDevelopmentLedgerReviewPassed &&
-				orchestration.Validation.CIStatus != PRDevelopmentCIPassed {
+				loadedOrchestration.Validation.CIStatus != PRDevelopmentCIPassed {
 				return fmt.Errorf(
 					"%w: passed review requires a passed local-CI receipt",
 					ErrPRDevelopmentLedgerConflict,
 				)
 			}
+			orchestration = loadedOrchestration
 		}
 		expectedOrdinal := fence.Ordinal*2 + 1
 		candidate := PRDevelopmentLedgerEntry{
@@ -388,11 +390,28 @@ func (s *Store) appendPRDevelopmentLedgerReview(
 						return retryErr
 					}
 					completion.NextAttempt = next
+					if normalized.Outcome == PRDevelopmentLedgerReviewPassed {
+						publication, publicationErr := loadOptionalPRDevelopmentPublicationForReview(
+							ctx,
+							conn,
+							existing.ID,
+						)
+						if publicationErr != nil {
+							return publicationErr
+						}
+						completion.Publication = publication
+					}
 				}
 				return nil
 			}
 			return fmt.Errorf(
 				"%w: changed review-account replay",
+				ErrPRDevelopmentLedgerConflict,
+			)
+		}
+		if !enqueueChanges && normalized.Outcome == PRDevelopmentLedgerReviewPassed {
+			return fmt.Errorf(
+				"%w: new passed review must use atomic review completion",
 				ErrPRDevelopmentLedgerConflict,
 			)
 		}
@@ -593,6 +612,28 @@ func (s *Store) appendPRDevelopmentLedgerReview(
 			ledger,
 		); validateErr != nil {
 			return validateErr
+		}
+		if enqueueChanges && normalized.Outcome == PRDevelopmentLedgerReviewPassed {
+			if len(ledger.Entries) < 2 {
+				return fmt.Errorf(
+					"%w: passed review lost its adjacent attempt account",
+					ErrPRDevelopmentPublicationConflict,
+				)
+			}
+			publication, publicationErr := enqueuePRDevelopmentPublication(
+				ctx,
+				conn,
+				controller,
+				fence,
+				ledger.Entries[len(ledger.Entries)-2],
+				candidate,
+				orchestration,
+				now,
+			)
+			if publicationErr != nil {
+				return publicationErr
+			}
+			completion.Publication = &publication
 		}
 		if enqueueChanges &&
 			normalized.Outcome == PRDevelopmentLedgerReviewAttentionRequired {

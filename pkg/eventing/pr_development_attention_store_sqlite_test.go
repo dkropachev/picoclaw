@@ -744,9 +744,7 @@ func TestStorePRDevelopmentAttentionHistoricalReplaySurvivesLaterReviewedFence(
 		fixture.Operation.Attempt.ID,
 		reviewLease.Controller,
 	)
-	reviewInput.Summary = "The later immutable fence passed local review."
-	reviewInput.Outcome = PRDevelopmentLedgerReviewPassed
-	reviewInput.Findings = nil
+	reviewInput.Summary = "The later immutable fence required another repair."
 	_, changed, err = store.AppendPRDevelopmentLedgerReview(
 		context.Background(),
 		reviewInput,
