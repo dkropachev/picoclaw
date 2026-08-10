@@ -213,11 +213,14 @@ func TestStorePRDevelopmentControllerRecoveryRotatesAuthorityAndReplaysExactly(
 	recovered, changed, err := store.FinalizePRDevelopmentControllerRecovery(ctx, finalize)
 	require.NoError(t, err)
 	require.True(t, changed)
-	assert.Equal(t, PRDevelopmentControllerMutation, recovered.Phase)
-	assert.Equal(t, recovery.Revision+1, recovered.Revision)
-	assert.Equal(t, claim.Intent.ReplacementReservationKey, recovered.MutationReservationKey)
+	assert.Equal(t, PRDevelopmentControllerSuspensionPending, recovered.Phase)
+	assert.Equal(t, recovery.Revision+2, recovered.Revision)
+	assert.Empty(t, recovered.MutationReservationKey)
+	assert.Empty(t, recovered.LeaseKind)
+	assert.Empty(t, recovered.LeaseOwner)
+	assert.Empty(t, recovered.LeaseToken)
+	assert.Nil(t, recovered.LeaseUntil)
 	assert.Equal(t, fixture.Bound.LeaseEpoch+1, recovered.LeaseEpoch)
-	assert.NotEqual(t, fixture.Bound.LeaseToken, recovered.LeaseToken)
 
 	finalizedIntent, found, err := loadPRDevelopmentRecoveryIntentByID(
 		ctx,
@@ -232,181 +235,81 @@ func TestStorePRDevelopmentControllerRecoveryRotatesAuthorityAndReplaysExactly(
 	assert.Empty(t, finalizedIntent.ClaimToken)
 	assert.NotEmpty(t, finalizedIntent.FinalHash)
 
-	replayed, changed, err := store.FinalizePRDevelopmentControllerRecovery(ctx, finalize)
-	require.NoError(t, err)
-	assert.False(t, changed)
-	assert.Equal(t, recovered, replayed)
-	require.NoError(t, store.RenewPRDevelopmentControllerLease(
+	suspension, found, err := loadPRDevelopmentControllerSuspensionBySource(
 		ctx,
-		PRDevelopmentControllerRenew{
-			ControllerID: recovered.ID,
-			AttemptID:    attempt.ID,
-			LeaseToken:   recovered.LeaseToken,
-			LeaseEpoch:   recovered.LeaseEpoch,
-			Lease:        2 * time.Minute,
-		},
-	))
-	sameClockProgress, err := store.GetPRDevelopmentControllerForCase(
-		ctx,
-		developmentCase.ID,
+		store.db,
+		PRDevelopmentControllerSuspensionSourceControllerRecovery,
+		finalizedIntent.ID,
 	)
 	require.NoError(t, err)
-	assert.Equal(t, recovered.UpdatedAt, sameClockProgress.UpdatedAt)
-	require.NotNil(t, recovered.LeaseUntil)
-	require.NotNil(t, sameClockProgress.LeaseUntil)
-	assert.True(t, sameClockProgress.LeaseUntil.After(*recovered.LeaseUntil))
-	leakedAfterSameClockRenew, changed, err := store.FinalizePRDevelopmentControllerRecovery(
-		ctx,
-		finalize,
-	)
-	assert.ErrorIs(t, err, ErrPRDevelopmentControllerConflict)
-	assert.False(t, changed)
-	assert.Empty(t, leakedAfterSameClockRenew.MutationReservationKey)
-	require.NotNil(t, finalizedIntent.NewMutationLeaseUntil)
-	earlyRecoveredDeadline := finalizedIntent.NewMutationLeaseUntil.Add(-time.Second)
-	_, err = store.db.ExecContext(ctx, `
-		UPDATE pr_development_thread_controllers
-		SET lease_until = ?
-		WHERE id = ?`, toDBTime(earlyRecoveredDeadline), recovered.ID)
-	require.NoError(t, err)
-	_, err = store.GetPRDevelopmentControllerForCase(ctx, developmentCase.ID)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "replacement authority")
-	_, err = store.db.ExecContext(ctx, `
-		UPDATE pr_development_thread_controllers
-		SET lease_until = ?
-		WHERE id = ?`, toDBTime(*sameClockProgress.LeaseUntil), recovered.ID)
-	require.NoError(t, err)
-	changedRotation := finalize
-	changedRotation.Rotation.RotationHash = strings.Repeat("6", 64)
-	_, changed, err = store.FinalizePRDevelopmentControllerRecovery(
-		ctx,
-		changedRotation,
-	)
-	assert.ErrorIs(t, err, ErrPRDevelopmentControllerConflict)
-	assert.False(t, changed)
-	_, err = store.db.ExecContext(ctx, `
-		UPDATE pr_development_thread_controllers
-		SET lease_owner = 'drifted-recovery-owner'
-		WHERE id = ?`, recovered.ID)
-	require.NoError(t, err)
-	leaked, changed, err := store.FinalizePRDevelopmentControllerRecovery(ctx, finalize)
-	require.Error(t, err)
-	assert.False(t, changed)
-	assert.Empty(t, leaked.MutationReservationKey)
-	_, err = store.db.ExecContext(ctx, `
-		UPDATE pr_development_thread_controllers
-		SET lease_owner = ?
-		WHERE id = ?`, claim.Intent.ClaimOwner, recovered.ID)
-	require.NoError(t, err)
-	_, err = store.db.ExecContext(ctx, `
-		UPDATE pr_development_thread_controllers
-		SET mutation_reservation_key = ?
-		WHERE id = ?`, claim.Intent.PreviousReservationKey, recovered.ID)
-	require.NoError(t, err)
-	_, err = store.GetPRDevelopmentControllerForCase(ctx, developmentCase.ID)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "latest recovered authority")
-	_, err = store.db.ExecContext(ctx, `
-		UPDATE pr_development_thread_controllers
-		SET mutation_reservation_key = ?
-		WHERE id = ?`, recovered.MutationReservationKey, recovered.ID)
-	require.NoError(t, err)
-	_, err = store.GetPRDevelopmentControllerForCase(ctx, developmentCase.ID)
-	require.NoError(t, err)
-	*clock = clock.Add(time.Second)
-	require.NoError(t, store.RenewPRDevelopmentControllerLease(
-		ctx,
-		PRDevelopmentControllerRenew{
-			ControllerID: recovered.ID,
-			AttemptID:    attempt.ID,
-			LeaseToken:   recovered.LeaseToken,
-			LeaseEpoch:   recovered.LeaseEpoch,
-			Lease:        time.Minute,
-		},
-	))
-	_, changed, err = store.FinalizePRDevelopmentControllerRecovery(ctx, finalize)
-	assert.ErrorIs(t, err, ErrPRDevelopmentControllerConflict)
-	assert.False(t, changed)
+	require.True(t, found)
+	assert.Equal(t, PRDevelopmentControllerSuspensionStatusSuspendPending, suspension.Status)
+	assert.Equal(t, finalizedIntent.FinalRevision, suspension.SourceFinalRevision)
+	assert.Equal(t, finalizedIntent.FinalHash, suspension.SourceFinalHash)
+	assert.Equal(t, claim.Intent.ReplacementReservationKey, suspension.SuspensionReservationKey)
+	assert.Equal(t, claim.Intent.ReplacementReservationKey, suspension.SuspendRequest.ReservationKey)
+	assert.Equal(t, finalizedIntent.ReplacementReservationDigest, suspension.SuspensionReservationDigest)
 
-	_, changed, err = store.BindPRDevelopmentControllerLine(
-		ctx,
-		PRDevelopmentControllerLineBind{
-			ControllerID:     recovered.ID,
-			AttemptID:        attempt.ID,
-			ExpectedRevision: fixture.Bound.Revision,
-			LeaseToken:       fixture.Bound.LeaseToken,
-			LeaseEpoch:       fixture.Bound.LeaseEpoch,
-			WorkspaceID:      recovered.WorkspaceID,
-			SourceCloneURL:   recovered.SourceCloneURL,
-			SourceRef:        recovered.SourceRef,
-			SourceCommit:     recovered.SourceCommit,
-			SourceTree:       recovered.SourceTree,
-			LineVersion:      recovered.LineVersion,
-			MutationEpoch:    recovered.MutationEpoch,
-			TipCommit:        recovered.TipCommit,
-			Tree:             recovered.Tree,
-		},
-	)
-	assert.ErrorIs(t, err, ErrPRDevelopmentControllerConflict)
+	pendingReplay, changed, err := store.FinalizePRDevelopmentControllerRecovery(ctx, finalize)
+	require.NoError(t, err)
 	assert.False(t, changed)
+	assert.Equal(t, recovered, pendingReplay)
 
-	fence, changed, err := store.RecordPRDevelopmentAttemptReviewFence(
+	suspensionLease, changed, err := store.ClaimPRDevelopmentControllerSuspension(
 		ctx,
-		PRDevelopmentAttemptReviewFenceRecord{
+		PRDevelopmentControllerSuspensionClaim{
+			CaseID:           developmentCase.ID,
+			SuspensionID:     suspension.ID,
 			ControllerID:     recovered.ID,
 			AttemptID:        attempt.ID,
 			ExpectedRevision: recovered.Revision,
-			LeaseToken:       recovered.LeaseToken,
-			LeaseEpoch:       recovered.LeaseEpoch,
-			LineVersion:      1,
-			MutationEpoch:    1,
-			ParkIntentID:     "park-after-recovery",
-			BaseCommit:       recovered.TipCommit,
-			TipCommit:        strings.Repeat("c", 40),
-			Tree:             strings.Repeat("d", 40),
-			LineReviewDigest: strings.Repeat("e", 64),
+			ClaimID:          "bound-recovery-suspension-claim",
+			WorkerLabel:      "bound-recovery-suspension-worker",
+			Lease:            time.Minute,
 		},
 	)
 	require.NoError(t, err)
 	require.True(t, changed)
-	assert.Equal(t, finalizedIntent.ReplacementReservationDigest, fence.MutationReservationDigest)
-
-	_, changed, err = store.FinalizePRDevelopmentControllerRecovery(ctx, finalize)
-	assert.ErrorIs(t, err, ErrPRDevelopmentControllerConflict)
+	assert.Equal(t, PRDevelopmentControllerSuspensionStatusSuspendClaimed, suspensionLease.Suspension.Status)
+	claimedReplay, changed, err := store.FinalizePRDevelopmentControllerRecovery(ctx, finalize)
+	require.NoError(t, err)
 	assert.False(t, changed)
+	assert.Equal(t, recovered, claimedReplay)
 
-	tampered := finalizedIntent
-	tampered.RecoveryRevision--
-	tampered.ExpiredControllerRevision--
-	tampered.FinalRevision--
-	tampered.IntentHash = hashPRDevelopmentRecoveryIntent(tampered)
-	tampered.FinalHash = hashPRDevelopmentRecoveryFinal(
-		tampered,
-		tampered.RotationResultHash,
-		tampered.RecoveryClaimTokenDigest,
-		tampered.NewMutationLeaseEpoch,
-		tampered.NewMutationLeaseTokenDigest,
-		*tampered.NewMutationLeaseUntil,
-		tampered.FinalRevision,
-		*tampered.FinalizedAt,
-	)
-	_, err = store.db.ExecContext(ctx, `
-		UPDATE pr_development_controller_recovery_intents
-		SET recovery_revision = ?, expired_controller_revision = ?, final_revision = ?,
-			intent_hash = ?, final_hash = ?
-		WHERE id = ?`,
-		tampered.RecoveryRevision,
-		tampered.ExpiredControllerRevision,
-		tampered.FinalRevision,
-		tampered.IntentHash,
-		tampered.FinalHash,
-		tampered.ID,
+	suspensionResult := PRDevelopmentControllerSuspensionResult{
+		WorkspaceID:      suspension.WorkspaceID,
+		Version:          suspension.LineVersion,
+		MutationEpoch:    suspension.MutationEpoch,
+		Tip:              suspension.TipCommit,
+		Tree:             suspension.Tree,
+		CandidateTree:    strings.Repeat("a", len(suspension.SourceCommit)),
+		CandidateDigest:  strings.Repeat("b", 64),
+		ChangedFileCount: 1,
+		SuspensionHash:   strings.Repeat("c", 64),
+	}
+	suspended, changed, err := store.FinalizePRDevelopmentControllerSuspension(
+		ctx,
+		PRDevelopmentControllerSuspensionFinalize{
+			SuspensionID:     suspension.ID,
+			ControllerID:     recovered.ID,
+			AttemptID:        attempt.ID,
+			ExpectedRevision: recovered.Revision,
+			ClaimID:          suspensionLease.Suspension.SuspendClaimID,
+			ClaimToken:       suspensionLease.Suspension.SuspendClaimToken,
+			ClaimEpoch:       suspensionLease.Suspension.SuspendClaimEpoch,
+			Result:           suspensionResult,
+		},
 	)
 	require.NoError(t, err)
-	_, err = store.GetPRDevelopmentControllerForCase(ctx, developmentCase.ID)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "first recovery revision")
+	require.True(t, changed)
+	assert.Equal(t, PRDevelopmentControllerSuspended, suspended.Controller.Phase)
+	assert.Equal(t, recovered.Revision+1, suspended.Controller.Revision)
+	assert.Empty(t, suspended.Suspension.SuspensionReservationKey)
+	assert.Empty(t, suspended.Suspension.SuspendRequest.ReservationKey)
+	suspendedReplay, changed, err := store.FinalizePRDevelopmentControllerRecovery(ctx, finalize)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Equal(t, suspended.Controller, suspendedReplay)
 }
 
 func TestStorePRDevelopmentControllerRecoveryClaimReclaimsExpiredExactIntent(t *testing.T) {
@@ -585,7 +488,7 @@ func TestStorePRDevelopmentControllerRecoveryUnboundFinalizesAndBinds(t *testing
 	assert.Equal(t, completed.WorkspaceID, bound.WorkspaceID)
 }
 
-func TestStorePRDevelopmentControllerRecoveryExpiredFinalizeReplayStartsNextIntent(
+func TestStorePRDevelopmentControllerRecoveryFinalizeReplayRemainsSuspensionPending(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -651,39 +554,17 @@ func TestStorePRDevelopmentControllerRecoveryExpiredFinalizeReplayStartsNextInte
 	require.NoError(t, err)
 	require.True(t, changed)
 	*clock = clock.Add(2 * time.Minute)
-	_, changed, err = store.FinalizePRDevelopmentControllerRecovery(ctx, finalize)
-	require.ErrorIs(t, err, ErrPRDevelopmentControllerRecoveryRequired)
-	assert.False(t, changed)
-	secondRecovery, err := store.GetPRDevelopmentControllerForCase(ctx, developmentCase.ID)
+	replayed, changed, err := store.FinalizePRDevelopmentControllerRecovery(ctx, finalize)
 	require.NoError(t, err)
-	assert.Equal(t, PRDevelopmentControllerRecoveryRequired, secondRecovery.Phase)
-	assert.Equal(t, firstRecovered.Revision+1, secondRecovery.Revision)
+	assert.False(t, changed)
+	assert.Equal(t, firstRecovered, replayed)
+	stillPending, err := store.GetPRDevelopmentControllerForCase(ctx, developmentCase.ID)
+	require.NoError(t, err)
+	assert.Equal(t, PRDevelopmentControllerSuspensionPending, stillPending.Phase)
+	assert.Equal(t, firstRecovered.Revision, stillPending.Revision)
 	intents, err := loadPRDevelopmentRecoveryIntents(ctx, store.db, firstRecovered.ID)
 	require.NoError(t, err)
-	require.Len(t, intents, 2)
-	require.NotNil(t, intents[0].NewMutationLeaseUntil)
-	earlySuccessorCreation := intents[0].NewMutationLeaseUntil.Add(-time.Second)
-	intents[1].CreatedAt = earlySuccessorCreation
-	intents[1].UpdatedAt = earlySuccessorCreation
-	intents[1].IntentHash = hashPRDevelopmentRecoveryIntent(intents[1])
-	_, err = store.db.ExecContext(ctx, `
-		UPDATE pr_development_controller_recovery_intents
-		SET created_at = ?, updated_at = ?, intent_hash = ?
-		WHERE id = ?`,
-		toDBTime(earlySuccessorCreation),
-		toDBTime(earlySuccessorCreation),
-		intents[1].IntentHash,
-		intents[1].ID,
-	)
-	require.NoError(t, err)
-	_, err = store.db.ExecContext(ctx, `
-		UPDATE pr_development_thread_controllers
-		SET updated_at = ?
-		WHERE id = ?`, toDBTime(earlySuccessorCreation), firstRecovered.ID)
-	require.NoError(t, err)
-	_, err = store.GetPRDevelopmentControllerForCase(ctx, developmentCase.ID)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "lease deadline succession")
+	require.Len(t, intents, 1)
 }
 
 func TestStorePRDevelopmentControllerRecoveryRejectsExpiredPreResumeMutation(t *testing.T) {
@@ -1046,25 +927,7 @@ func TestStorePRDevelopmentControllerRecoveryRejectsCrossControllerAuthorityReus
 		},
 	)
 	require.NoError(t, err)
-	_, changed, err := store.RecordPRDevelopmentAttemptReviewFence(
-		ctx,
-		PRDevelopmentAttemptReviewFenceRecord{
-			ControllerID:     firstRecovered.ID,
-			AttemptID:        firstAttempt.ID,
-			ExpectedRevision: firstRecovered.Revision,
-			LeaseToken:       firstRecovered.LeaseToken,
-			LeaseEpoch:       firstRecovered.LeaseEpoch,
-			LineVersion:      1,
-			MutationEpoch:    1,
-			ParkIntentID:     "cross-controller-park",
-			BaseCommit:       firstRecovered.TipCommit,
-			TipCommit:        strings.Repeat("c", 40),
-			Tree:             strings.Repeat("d", 40),
-			LineReviewDigest: strings.Repeat("e", 64),
-		},
-	)
-	require.NoError(t, err)
-	require.True(t, changed)
+	assert.Equal(t, PRDevelopmentControllerSuspensionPending, firstRecovered.Phase)
 
 	secondCase := capturePRDevelopmentListCase(
 		t,

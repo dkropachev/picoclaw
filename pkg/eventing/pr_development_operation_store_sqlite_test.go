@@ -1016,7 +1016,7 @@ func recoverPreparedPRDevelopmentOperationForTest(
 	return transition
 }
 
-func TestStorePRDevelopmentControllerOperationRecoveryChainsTwiceOnSameAttempt(
+func TestStorePRDevelopmentControllerOperationRecoveryTerminatesAtSuspension(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -1031,60 +1031,29 @@ func TestStorePRDevelopmentControllerOperationRecoveryChainsTwiceOnSameAttempt(
 		"same-attempt-adopt-recovery",
 	)
 	fixture := preparedAdopt.Fixture
-	commitLease := operationLeaseFromTransition(adopted)
-	candidateTree := strings.Repeat("3", len(commitLease.Controller.TipCommit))
-	request := operationBaseRequest(fixture, commitLease.Controller)
-	request.ExpectedTree = candidateTree
-	request.EffectIntentID = operationEffectID("pdcmt_", 201)
-	request.ExpectedParent = commitLease.Controller.TipCommit
-	request.CandidateDigest = strings.Repeat("4", 64)
-	request.CommitMessage = "Recover a second operation on the same attempt"
-	request.AuthoredAt = fixture.Clock.UTC().Truncate(time.Second)
-	commit := prepareOperationForTest(
-		t,
-		fixture,
-		commitLease,
-		PRDevelopmentControllerOperationCommit,
-		fixture.operationID(),
-		request,
+	assert.Equal(t, PRDevelopmentControllerSuspensionPending, adopted.Controller.Phase)
+	assert.Empty(t, adopted.Controller.MutationReservationKey)
+	assert.Empty(t, adopted.Controller.LeaseToken)
+	suspension, found, err := loadPRDevelopmentControllerSuspensionBySource(
+		ctx,
+		fixture.Store.db,
+		PRDevelopmentControllerSuspensionSourceOperationRecovery,
+		adopted.Operation.RecoveryID,
 	)
-	commitResult := PRDevelopmentControllerOperationResult{
-		WorkspaceID:     fixture.Session.WorkspaceID,
-		Tree:            candidateTree,
-		WorkspaceClean:  true,
-		IntentID:        request.EffectIntentID,
-		ParentCommit:    request.ExpectedParent,
-		CandidateDigest: request.CandidateDigest,
-		Commit:          strings.Repeat("5", len(commitLease.Controller.TipCommit)),
-		ChangedFiles:    3,
-	}
-	committed := recoverPreparedPRDevelopmentOperationForTest(
-		t,
-		preparedPRDevelopmentOperationRecovery{
-			Fixture:   fixture,
-			Lease:     commitLease,
-			Operation: commit,
-			Result:    commitResult,
-		},
-		"same-attempt-commit-recovery",
-	)
-	assert.Equal(t, PRDevelopmentControllerMutation, committed.Controller.Phase)
-	assert.Equal(t, adopted.Controller.LeaseEpoch+1, committed.Controller.LeaseEpoch)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, adopted.Operation.ID, suspension.SourceOperationID)
+	assert.Equal(t, PRDevelopmentControllerSuspensionStatusSuspendPending, suspension.Status)
 
 	intents, err := loadPRDevelopmentRecoveryIntents(
 		ctx,
 		fixture.Store.db,
-		committed.Controller.ID,
+		adopted.Controller.ID,
 	)
 	require.NoError(t, err)
-	require.Len(t, intents, 2)
+	require.Len(t, intents, 1)
 	assert.Equal(t, preparedAdopt.Operation.AttemptID, intents[0].AttemptID)
-	assert.Equal(t, preparedAdopt.Operation.AttemptID, intents[1].AttemptID)
 	assert.Equal(t, adopted.Operation.RecoveryID, intents[0].ID)
-	assert.Equal(t, committed.Operation.RecoveryID, intents[1].ID)
-	assert.Equal(t, intents[0].ReplacementReservationDigest, intents[1].PreviousReservationDigest)
-	assert.Equal(t, intents[0].NewMutationLeaseEpoch, intents[1].ExpiredLeaseEpoch)
-	assert.Equal(t, intents[0].NewMutationLeaseTokenDigest, intents[1].ExpiredLeaseTokenDigest)
 	_, err = fixture.Store.GetPRDevelopmentControllerForCase(ctx, fixture.Case.ID)
 	require.NoError(t, err)
 }
@@ -1748,7 +1717,7 @@ func TestStorePRDevelopmentControllerOperationCommitAdvancesHighWaterBeforeParkA
 	assert.Equal(t, parked.Controller.TipCommit, loaded.TipCommit)
 }
 
-func TestStorePRDevelopmentControllerExpiredParkUsesTwoRevisionHeadroom(
+func TestStorePRDevelopmentControllerBoundRecoveryReservesSuspensionHeadroom(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -1935,75 +1904,19 @@ func TestStorePRDevelopmentControllerExpiredParkUsesTwoRevisionHeadroom(
 	)
 	require.NoError(t, err)
 	require.True(t, changed)
-	require.Equal(t, int64(MaxPRDevelopmentControllerRevision)-2, recovered.Revision)
-
-	parkRequest := operationBaseRequest(fixture, recovered)
-	parkRequest.EffectIntentID = operationEffectID("pdlnpark_", 602)
-	parkRequest.ExpectedVersion = recovered.LineVersion
-	parkRequest.MutationEpoch = recovered.MutationEpoch
-	parkRequest.PreviousTip = recovered.TipCommit
-	parkRequest.Tip = recovered.TipCommit
-	parkRequest.Tree = recovered.Tree
-	parkRequest.NoChanges = true
-	parkRequest.CompletionSummary = operationTestSummary
-	parkRequest.CompletionIterations = operationTestIterations
-	park := prepareOperationForTest(
-		t,
-		fixture,
-		PRDevelopmentControllerLease{Controller: recovered},
-		PRDevelopmentControllerOperationPark,
-		fixture.operationID(),
-		parkRequest,
-	)
-	parkResult := PRDevelopmentControllerOperationResult{
-		WorkspaceID:         fixture.Session.WorkspaceID,
-		Version:             parkRequest.ExpectedVersion + 1,
-		MutationEpoch:       parkRequest.MutationEpoch,
-		PreviousTip:         parkRequest.PreviousTip,
-		Tip:                 parkRequest.Tip,
-		Tree:                parkRequest.Tree,
-		NoChanges:           true,
-		WorkspaceClean:      true,
-		ReviewVersion:       parkRequest.ExpectedVersion + 1,
-		ReviewMutationEpoch: parkRequest.MutationEpoch,
-		ReviewParkIntentID:  parkRequest.EffectIntentID,
-		ReviewBaseCommit:    parkRequest.PreviousTip,
-		ReviewCommit:        parkRequest.Tip,
-		ReviewTree:          parkRequest.Tree,
-		ReviewDigest:        strings.Repeat("8", 64),
-	}
-	require.NotNil(t, recovered.LeaseUntil)
-	*fixture.Clock = recovered.LeaseUntil.Add(time.Second)
-	_, changed, err = fixture.Store.FinalizePRDevelopmentControllerOperation(
-		ctx,
-		PRDevelopmentControllerOperationFinalize{
-			ControllerID:     park.ControllerID,
-			AttemptID:        park.AttemptID,
-			OperationID:      park.ID,
-			ExpectedRevision: park.PreparedControllerRevision,
-			LeaseToken:       recovered.LeaseToken,
-			LeaseEpoch:       park.MutationLeaseEpoch,
-			Result:           parkResult,
-		},
-	)
-	require.ErrorIs(t, err, ErrPRDevelopmentControllerRecoveryRequired)
-	require.False(t, changed)
-	quarantined, err := fixture.Store.GetPRDevelopmentControllerForCase(
-		ctx,
-		fixture.Case.ID,
-	)
-	require.NoError(t, err)
-	assert.Equal(t, PRDevelopmentControllerRecoveryRequired, quarantined.Phase)
-	assert.Equal(t, int64(MaxPRDevelopmentControllerRevision)-1, quarantined.Revision)
-	staged, found, err := loadPRDevelopmentControllerOperationByID(
+	require.Equal(t, int64(MaxPRDevelopmentControllerRevision)-1, recovered.Revision)
+	require.Equal(t, PRDevelopmentControllerSuspensionPending, recovered.Phase)
+	require.Empty(t, recovered.MutationReservationKey)
+	suspension, found, err := loadPRDevelopmentControllerSuspensionBySource(
 		ctx,
 		fixture.Store.db,
-		park.ID,
+		PRDevelopmentControllerSuspensionSourceControllerRecovery,
+		legacyClaim.Intent.ID,
 	)
 	require.NoError(t, err)
 	require.True(t, found)
-	assert.Equal(t, PRDevelopmentControllerOperationRecoveryPending, staged.Status)
-	assert.Equal(t, int64(MaxPRDevelopmentControllerRevision)-1, staged.RecoveryRevision)
+	assert.Equal(t, int64(MaxPRDevelopmentControllerRevision)-2, suspension.SourceFinalRevision)
+	assert.Equal(t, recovered.Revision, suspension.SourceFinalRevision+1)
 }
 
 func TestStorePRDevelopmentControllerOperationRecoveryByKind(t *testing.T) {
@@ -2092,6 +2005,9 @@ func TestStorePRDevelopmentControllerOperationRecoveryByKind(t *testing.T) {
 			if test.kind != PRDevelopmentControllerOperationPark {
 				finalize.Lease = time.Minute
 			}
+			if test.kind == PRDevelopmentControllerOperationCommit {
+				finalize.Result.WorkspaceClean = false
+			}
 			transition, changed, err := prepared.Fixture.Store.FinalizePRDevelopmentControllerOperationRecovery(
 				ctx,
 				finalize,
@@ -2106,9 +2022,29 @@ func TestStorePRDevelopmentControllerOperationRecoveryByKind(t *testing.T) {
 				assert.Empty(t, transition.Controller.MutationReservationKey)
 				require.NotNil(t, transition.Fence)
 			} else {
-				assert.Equal(t, PRDevelopmentControllerMutation, transition.Controller.Phase)
-				assert.NotEmpty(t, transition.Controller.MutationReservationKey)
+				assert.Equal(t, PRDevelopmentControllerSuspensionPending, transition.Controller.Phase)
+				assert.Empty(t, transition.Controller.MutationReservationKey)
+				assert.Empty(t, transition.Controller.LeaseToken)
 				assert.Nil(t, transition.Fence)
+				suspension, found, loadErr := loadPRDevelopmentControllerSuspensionBySource(
+					ctx,
+					prepared.Fixture.Store.db,
+					PRDevelopmentControllerSuspensionSourceOperationRecovery,
+					transition.Operation.RecoveryID,
+				)
+				require.NoError(t, loadErr)
+				require.True(t, found)
+				assert.Equal(t, transition.Operation.ID, suspension.SourceOperationID)
+				assert.Equal(t, transition.Operation.FinalHash, suspension.SourceFinalHash)
+				assert.Equal(t, transition.Operation.FinalControllerRevision, suspension.SourceFinalRevision)
+				assert.Equal(t, PRDevelopmentControllerSuspensionStatusSuspendPending, suspension.Status)
+				assert.NotEmpty(t, suspension.SuspensionReservationKey)
+				if test.kind == PRDevelopmentControllerOperationCommit {
+					assert.Equal(t, PRDevelopmentControllerSuspensionCommitRecovery, suspension.Mode)
+					assert.False(t, transition.Operation.Result.WorkspaceClean)
+				} else {
+					assert.Equal(t, PRDevelopmentControllerSuspensionCandidate, suspension.Mode)
+				}
 			}
 
 			require.NoError(t, prepared.Fixture.Store.db.QueryRowContext(ctx, `
@@ -2143,6 +2079,7 @@ func TestStorePRDevelopmentControllerOperationRecoveryByKind(t *testing.T) {
 			require.NoError(t, err)
 			assert.False(t, changed)
 			assert.Equal(t, transition.Operation.FinalHash, replayed.Operation.FinalHash)
+			assert.Equal(t, transition.Controller, replayed.Controller)
 		})
 	}
 }
@@ -2491,7 +2428,16 @@ func TestStorePRDevelopmentControllerOperationRecoveryRejectsForeignReplacementA
 	)
 	require.NoError(t, err)
 	require.True(t, changed)
-	foreignReservationKey := secondRecovered.MutationReservationKey
+	assert.Equal(t, PRDevelopmentControllerSuspensionPending, secondRecovered.Phase)
+	secondSuspension, found, err := loadPRDevelopmentControllerSuspensionBySource(
+		ctx,
+		prepared.Fixture.Store.db,
+		PRDevelopmentControllerSuspensionSourceControllerRecovery,
+		secondClaim.Intent.ID,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	foreignReservationKey := secondSuspension.SuspensionReservationKey
 	require.True(t, validPrefixedHexID(foreignReservationKey, prDevelopmentControllerKeyPrefix))
 
 	tampered, found, err := loadPRDevelopmentControllerOperationByID(

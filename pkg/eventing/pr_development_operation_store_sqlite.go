@@ -348,8 +348,11 @@ func validateStoredPRDevelopmentControllerOperation(
 		return err
 	}
 	if operation.Status == PRDevelopmentControllerOperationFinalized {
-		normalized, err := normalizePRDevelopmentControllerOperationResult(
-			operation.Kind, operation, operation.Result,
+		normalized, err := normalizePRDevelopmentControllerOperationResultForRecovery(
+			operation.Kind,
+			operation,
+			operation.Result,
+			operation.RecoveryStagedAt != nil,
 		)
 		if err != nil {
 			return fmt.Errorf("stored controller operation result shape is invalid: %w", err)
@@ -1567,6 +1570,20 @@ func normalizePRDevelopmentControllerOperationResult(
 	operation PRDevelopmentControllerOperation,
 	provided PRDevelopmentControllerOperationResult,
 ) (PRDevelopmentControllerOperationResult, error) {
+	return normalizePRDevelopmentControllerOperationResultForRecovery(
+		kind,
+		operation,
+		provided,
+		false,
+	)
+}
+
+func normalizePRDevelopmentControllerOperationResultForRecovery(
+	kind PRDevelopmentControllerOperationKind,
+	operation PRDevelopmentControllerOperation,
+	provided PRDevelopmentControllerOperationResult,
+	allowCommitWorkspaceDrift bool,
+) (PRDevelopmentControllerOperationResult, error) {
 	// Replay markers are deliberately operational and do not enter durable
 	// equality or hashes.
 	provided.AlreadyOwned = false
@@ -1607,7 +1624,7 @@ func normalizePRDevelopmentControllerOperationResult(
 			) || provided.Commit == provided.ParentCommit ||
 			provided.ChangedFiles < 1 ||
 			provided.ChangedFiles > prDevelopmentOperationChangedFilesMax ||
-			!provided.WorkspaceClean {
+			(!allowCommitWorkspaceDrift && !provided.WorkspaceClean) {
 			return PRDevelopmentControllerOperationResult{}, fmt.Errorf(
 				"%w: Commit result does not prove the exact clean candidate",
 				ErrPRDevelopmentControllerConflict,
@@ -1616,7 +1633,7 @@ func normalizePRDevelopmentControllerOperationResult(
 		expected = PRDevelopmentControllerOperationResult{
 			WorkspaceID:     operation.WorkspaceID,
 			Tree:            operation.Request.ExpectedTree,
-			WorkspaceClean:  true,
+			WorkspaceClean:  provided.WorkspaceClean,
 			IntentID:        operation.Request.EffectIntentID,
 			ParentCommit:    operation.Request.ExpectedParent,
 			CandidateDigest: operation.Request.CandidateDigest,

@@ -487,7 +487,9 @@ func (s *Store) RenewPRDevelopmentControllerRecovery(
 }
 
 // FinalizePRDevelopmentControllerRecovery fences an exact successful
-// reservation rotation and restores mutation authority with new credentials.
+// reservation rotation. Legacy unbound recovery restores mutation authority;
+// bound recovery immediately transfers its fresh authority into the durable
+// suspension lifecycle in the same transaction.
 func (s *Store) FinalizePRDevelopmentControllerRecovery(
 	ctx context.Context,
 	input PRDevelopmentControllerRecoveryFinalize,
@@ -549,7 +551,43 @@ func (s *Store) FinalizePRDevelopmentControllerRecovery(
 			}
 			if intent.RotationResultHash != rotationHash ||
 				intent.RecoveryClaimTokenDigest != claimDigest ||
-				current.Revision != intent.FinalRevision ||
+				intent.FinalizedAt == nil {
+				return fmt.Errorf(
+					"%w: finalized recovery replay is bound to different proof",
+					ErrPRDevelopmentControllerConflict,
+				)
+			}
+			if intent.Mode == PRDevelopmentControllerRecoveryBound {
+				if _, stageErr := stagePRDevelopmentControllerSuspension(
+					ctx,
+					conn,
+					stagePRDevelopmentControllerSuspensionInput{
+						ControllerID:        intent.ControllerID,
+						AttemptID:           intent.AttemptID,
+						SourceKind:          PRDevelopmentControllerSuspensionSourceControllerRecovery,
+						SourceRecoveryID:    intent.ID,
+						SourceFinalRevision: intent.FinalRevision,
+						SourceFinalHash:     intent.FinalHash,
+					},
+					now,
+				); stageErr != nil {
+					return stageErr
+				}
+				reloaded, reloadedFound, reloadErr := loadPRDevelopmentControllerAggregateByID(
+					ctx,
+					conn,
+					current.ID,
+				)
+				if reloadErr != nil {
+					return reloadErr
+				}
+				if !reloadedFound {
+					return errors.New("suspended recovery controller disappeared")
+				}
+				controller = reloaded
+				return nil
+			}
+			if current.Revision != intent.FinalRevision ||
 				current.Phase != PRDevelopmentControllerMutation ||
 				current.CurrentAttemptID != intent.AttemptID ||
 				current.LeaseOwner != intent.ClaimOwner ||
@@ -562,7 +600,7 @@ func (s *Store) FinalizePRDevelopmentControllerRecovery(
 				!current.LeaseUntil.Equal(*intent.NewMutationLeaseUntil) ||
 				prDevelopmentMutationReservationDigest(
 					current.MutationReservationKey,
-				) != intent.ReplacementReservationDigest || intent.FinalizedAt == nil {
+				) != intent.ReplacementReservationDigest {
 				return fmt.Errorf(
 					"%w: finalized recovery replay is no longer current",
 					ErrPRDevelopmentControllerConflict,
@@ -714,6 +752,23 @@ func (s *Store) FinalizePRDevelopmentControllerRecovery(
 		}
 		if rowErr := requireOnePRDevelopmentControllerRow(controllerResult); rowErr != nil {
 			return rowErr
+		}
+		if intent.Mode == PRDevelopmentControllerRecoveryBound {
+			if _, stageErr := stagePRDevelopmentControllerSuspension(
+				ctx,
+				conn,
+				stagePRDevelopmentControllerSuspensionInput{
+					ControllerID:        intent.ControllerID,
+					AttemptID:           intent.AttemptID,
+					SourceKind:          PRDevelopmentControllerSuspensionSourceControllerRecovery,
+					SourceRecoveryID:    intent.ID,
+					SourceFinalRevision: finalRevision,
+					SourceFinalHash:     finalHash,
+				},
+				now,
+			); stageErr != nil {
+				return stageErr
+			}
 		}
 		if _, orchestrationErr := terminalizePRDevelopmentRepairOrchestrationAfterRecovery(
 			ctx,

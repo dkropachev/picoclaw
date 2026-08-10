@@ -2521,6 +2521,16 @@ func validatePRDevelopmentControllerAggregate(
 	if err != nil {
 		return err
 	}
+	suspensionStats, err := validatePRDevelopmentControllerSuspensionChain(
+		ctx,
+		queryer,
+		controller,
+		session,
+		attemptOrdinals,
+	)
+	if err != nil {
+		return err
+	}
 	previousHash := emptyPRDevelopmentReviewFencesDigest()
 	previousTip := controller.SourceCommit
 	previousTree := controller.SourceTree
@@ -2610,6 +2620,39 @@ func validatePRDevelopmentControllerAggregate(
 			previousReviewedAt = *fence.ReviewedAt
 		}
 		previousCreatedAt = fence.CreatedAt
+	}
+	if suspensionStats.active != nil {
+		if err := validatePRDevelopmentControllerSuspensionFenceHighWater(
+			controller,
+			fences,
+			previousControllerRevision,
+			previousLeaseEpoch,
+		); err != nil {
+			return err
+		}
+		return nil
+	}
+	var latestFence *PRDevelopmentAttemptReviewFence
+	if len(fences) != 0 {
+		copy := fences[len(fences)-1]
+		latestFence = &copy
+	}
+	if resumed, resumeErr := validatePRDevelopmentControllerResumedAuthority(
+		controller,
+		latestFence,
+		suspensionStats.latestResumed,
+	); resumeErr != nil {
+		return resumeErr
+	} else if resumed {
+		if err := validatePRDevelopmentControllerSuspensionFenceHighWater(
+			controller,
+			fences,
+			previousControllerRevision,
+			previousLeaseEpoch,
+		); err != nil {
+			return err
+		}
+		return nil
 	}
 	if len(fences) == 0 {
 		if controller.FencesDigest != emptyPRDevelopmentReviewFencesDigest() {

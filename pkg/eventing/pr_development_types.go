@@ -1136,8 +1136,9 @@ type PRDevelopmentControllerRecoveryRotationResult struct {
 }
 
 // PRDevelopmentControllerRecoveryFinalize consumes the exact live recovery
-// claim and matching reservation-rotation result, then grants a fresh
-// mutation lease under the replacement bearer.
+// claim and matching reservation-rotation result. Legacy unbound recovery
+// grants a fresh mutation lease; bound recovery transfers that fresh authority
+// into the durable suspension lifecycle before returning.
 type PRDevelopmentControllerRecoveryFinalize struct {
 	ControllerID     string                                        `json:"-"`
 	AttemptID        string                                        `json:"-"`
@@ -1574,8 +1575,8 @@ type PRDevelopmentControllerOperationRecoveryRenew struct {
 
 // PRDevelopmentControllerOperationRecoveryFinalize consumes the exact live
 // claim after reconciling the Git effect. Adopt, Resume, and Commit supply the
-// durable reservation-rotation result and receive a fresh mutation lease;
-// Park supplies a zero rotation and ends in review_pending without a bearer.
+// durable reservation-rotation result and transfer the fresh authority into
+// suspension; Park supplies a zero rotation and enters review_pending.
 type PRDevelopmentControllerOperationRecoveryFinalize struct {
 	ControllerID     string                                        `json:"-"`
 	AttemptID        string                                        `json:"-"`

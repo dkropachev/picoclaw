@@ -477,9 +477,10 @@ func (s *Store) RenewPRDevelopmentControllerOperationRecovery(
 }
 
 // FinalizePRDevelopmentControllerOperationRecovery records the exact
-// reconciled Git result. Adopt, Resume, and Commit install the precommitted
-// fresh reservation under a new mutation lease. Park retires the old bearer
-// and atomically enters reservation-free review without issuing a replacement.
+// reconciled Git result. Adopt, Resume, and Commit prove their intermediate
+// fresh mutation authority and immediately transfer it to durable suspension
+// in the same transaction. Park retires the old bearer and atomically enters
+// reservation-free review without issuing a replacement.
 func (s *Store) FinalizePRDevelopmentControllerOperationRecovery(
 	ctx context.Context,
 	input PRDevelopmentControllerOperationRecoveryFinalize,
@@ -494,7 +495,6 @@ func (s *Store) FinalizePRDevelopmentControllerOperationRecovery(
 	var (
 		transition PRDevelopmentControllerOperationTransition
 		changed    bool
-		reexpired  bool
 	)
 	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
 		operation, found, operationLoadErr := loadPRDevelopmentControllerOperationByID(
@@ -519,10 +519,11 @@ func (s *Store) FinalizePRDevelopmentControllerOperationRecovery(
 				ErrPRDevelopmentControllerConflict,
 			)
 		}
-		result, resultNormalizeErr := normalizePRDevelopmentControllerOperationResult(
+		result, resultNormalizeErr := normalizePRDevelopmentControllerOperationResultForRecovery(
 			operation.Kind,
 			operation,
 			normalized.Result,
+			true,
 		)
 		if resultNormalizeErr != nil {
 			return resultNormalizeErr
@@ -613,19 +614,48 @@ func (s *Store) FinalizePRDevelopmentControllerOperationRecovery(
 					ErrPRDevelopmentControllerConflict,
 				)
 			}
-			fence, expired, replayErr := requireImmediatePRDevelopmentOperationRecoveryReplay(
+			if operation.Kind != PRDevelopmentControllerOperationPark {
+				if _, stageErr := stagePRDevelopmentControllerSuspension(
+					ctx,
+					conn,
+					stagePRDevelopmentControllerSuspensionInput{
+						ControllerID:        operation.ControllerID,
+						AttemptID:           operation.AttemptID,
+						SourceKind:          PRDevelopmentControllerSuspensionSourceOperationRecovery,
+						SourceRecoveryID:    operation.RecoveryID,
+						SourceOperationID:   operation.ID,
+						SourceFinalRevision: operation.FinalControllerRevision,
+						SourceFinalHash:     operation.FinalHash,
+					},
+					now,
+				); stageErr != nil {
+					return stageErr
+				}
+				reloaded, reloadedFound, reloadErr := loadPRDevelopmentControllerAggregateByID(
+					ctx,
+					conn,
+					controller.ID,
+				)
+				if reloadErr != nil {
+					return reloadErr
+				}
+				if !reloadedFound {
+					return errors.New("suspended operation controller disappeared")
+				}
+				transition = PRDevelopmentControllerOperationTransition{
+					Controller: reloaded,
+					Operation:  operation,
+				}
+				return nil
+			}
+			fence, replayErr := requireImmediatePRDevelopmentParkRecoveryReplay(
 				ctx,
 				conn,
 				controller,
 				operation,
-				now,
 			)
 			if replayErr != nil {
 				return replayErr
-			}
-			if expired {
-				reexpired = true
-				return nil
 			}
 			transition = PRDevelopmentControllerOperationTransition{
 				Controller: controller,
@@ -820,6 +850,24 @@ func (s *Store) FinalizePRDevelopmentControllerOperationRecovery(
 		if rowCountErr := requireOnePRDevelopmentControllerRow(updateResult); rowCountErr != nil {
 			return rowCountErr
 		}
+		if operation.Kind != PRDevelopmentControllerOperationPark {
+			if _, stageErr := stagePRDevelopmentControllerSuspension(
+				ctx,
+				conn,
+				stagePRDevelopmentControllerSuspensionInput{
+					ControllerID:        operation.ControllerID,
+					AttemptID:           operation.AttemptID,
+					SourceKind:          PRDevelopmentControllerSuspensionSourceOperationRecovery,
+					SourceRecoveryID:    operation.RecoveryID,
+					SourceOperationID:   operation.ID,
+					SourceFinalRevision: operation.FinalControllerRevision,
+					SourceFinalHash:     operation.FinalHash,
+				},
+				now,
+			); stageErr != nil {
+				return stageErr
+			}
+		}
 		loadedOperation, found, loadedOperationErr := loadPRDevelopmentControllerOperationByID(
 			ctx,
 			conn,
@@ -854,12 +902,6 @@ func (s *Store) FinalizePRDevelopmentControllerOperationRecovery(
 		return PRDevelopmentControllerOperationTransition{}, false, fmt.Errorf(
 			"finalize pull request development controller operation recovery: %w",
 			s.dbError(err),
-		)
-	}
-	if reexpired {
-		return PRDevelopmentControllerOperationTransition{}, false, fmt.Errorf(
-			"finalize pull request development controller operation recovery: %w",
-			ErrPRDevelopmentControllerRecoveryRequired,
 		)
 	}
 	return transition, changed, nil
@@ -935,71 +977,45 @@ func finalizeRecoveredPRDevelopmentMutationOperation(
 	return requireOnePRDevelopmentControllerRow(updateResult)
 }
 
-func requireImmediatePRDevelopmentOperationRecoveryReplay(
+func requireImmediatePRDevelopmentParkRecoveryReplay(
 	ctx context.Context,
 	conn *sql.Conn,
 	controller PRDevelopmentController,
 	operation PRDevelopmentControllerOperation,
-	now time.Time,
-) (*PRDevelopmentAttemptReviewFence, bool, error) {
+) (*PRDevelopmentAttemptReviewFence, error) {
 	if operation.FinalizedAt == nil ||
 		controller.Revision != operation.FinalControllerRevision ||
 		controller.Phase != operation.FinalControllerPhase ||
 		controller.CurrentAttemptID != operation.AttemptID ||
 		!controller.UpdatedAt.Equal(*operation.FinalizedAt) {
-		return nil, false, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"%w: finalized operation recovery is no longer immediate",
 			ErrPRDevelopmentControllerConflict,
 		)
 	}
-	if operation.Kind == PRDevelopmentControllerOperationPark {
-		if controller.LeaseKind != "" || controller.LeaseToken != "" ||
-			controller.LeaseUntil != nil || controller.MutationReservationKey != "" {
-			return nil, false, fmt.Errorf(
-				"%w: finalized Park recovery retained mutation authority",
-				ErrPRDevelopmentControllerConflict,
-			)
-		}
-		fence, found, err := loadPRDevelopmentReviewFenceByAttempt(
-			ctx,
-			conn,
-			operation.AttemptID,
-		)
-		if err != nil {
-			return nil, false, err
-		}
-		if !found || fence.FenceHash != operation.FinalFenceHash {
-			return nil, false, fmt.Errorf(
-				"%w: finalized Park recovery lost its review fence",
-				ErrPRDevelopmentControllerConflict,
-			)
-		}
-		return &fence, false, nil
-	}
-	if controller.LeaseKind != PRDevelopmentControllerMutationLease ||
-		controller.LeaseOwner != operation.ClaimOwner ||
-		controller.LeaseEpoch != operation.NewMutationLeaseEpoch ||
-		controller.LeaseUntil == nil || operation.NewMutationLeaseUntil == nil ||
-		!controller.LeaseUntil.Equal(*operation.NewMutationLeaseUntil) ||
-		prDevelopmentLeaseTokenDigest(
-			PRDevelopmentControllerMutationLease,
-			controller.LeaseToken,
-		) != operation.NewMutationLeaseTokenDigest ||
-		prDevelopmentMutationReservationDigest(
-			controller.MutationReservationKey,
-		) != operation.ReplacementReservationDigest {
-		return nil, false, fmt.Errorf(
-			"%w: finalized operation recovery authority changed",
+	if operation.Kind != PRDevelopmentControllerOperationPark ||
+		controller.LeaseKind != "" || controller.LeaseToken != "" ||
+		controller.LeaseUntil != nil || controller.MutationReservationKey != "" {
+		return nil, fmt.Errorf(
+			"%w: finalized Park recovery retained mutation authority",
 			ErrPRDevelopmentControllerConflict,
 		)
 	}
-	if !controller.LeaseUntil.After(now) {
-		if err := expirePRDevelopmentMutationLease(ctx, conn, controller, now); err != nil {
-			return nil, false, err
-		}
-		return nil, true, nil
+	fence, found, err := loadPRDevelopmentReviewFenceByAttempt(
+		ctx,
+		conn,
+		operation.AttemptID,
+	)
+	if err != nil {
+		return nil, err
 	}
-	return nil, false, nil
+	if !found || fence.FenceHash != operation.FinalFenceHash {
+		return nil, fmt.Errorf(
+			"%w: finalized Park recovery lost its review fence",
+			ErrPRDevelopmentControllerConflict,
+		)
+	}
+	return &fence, nil
 }
 
 func nullablePRDevelopmentOperationTime(value *time.Time) any {
