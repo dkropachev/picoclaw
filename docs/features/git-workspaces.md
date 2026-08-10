@@ -196,9 +196,10 @@ ledger, model, provider, or publication authority:
 `FR-GITWS-018` is not yet invoked by Event Automation. It supplies only the
 exact parked-line remote compare-and-swap effect. Event Automation requirement
 069 now owns an effect-free schema-v18 local-evidence admission and write-ahead
-publication journal, including terminal uncertainty, but no provider observer,
-gate runtime, transport authority, adapter, or worker supplies the primitive's
-request yet. Any review acknowledgement or merge behavior remains separately
+publication journal, including terminal uncertainty. Event Automation
+requirement 070 supplies narrow read-only provider observations, but no gate
+runtime, transport authority, adapter, or worker consumes them or supplies the
+primitive's request yet. Any review acknowledgement or merge behavior remains separately
 undefined and is never inferred from the journal or this primitive.
 
 Controller storage lifecycle debt is deliberate and bounded at this layer:
