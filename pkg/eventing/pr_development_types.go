@@ -2108,6 +2108,27 @@ type PRDevelopmentPublication struct {
 	CompletedAt     *time.Time                        `json:"-"`
 }
 
+// PRDevelopmentPublicationGateContextSnapshot is one rich, atomic read of the
+// exact passed-review candidate owned by a live initial publication claim. It
+// contains only local durable evidence; publication-claim and repair-session
+// scheduling bearers are redacted, and no raw conversation is copied into the
+// publication journal.
+type PRDevelopmentPublicationGateContextSnapshot struct {
+	Publication      PRDevelopmentPublication         `json:"-"`
+	SelectedOrdinal  int                              `json:"-"`
+	TranscriptDigest string                           `json:"-"`
+	Case             PRDevelopmentCase                `json:"-"`
+	Thread           PRDevelopmentThread              `json:"-"`
+	Conversation     PRDevelopmentConversation        `json:"-"`
+	OwnerSession     PRDevelopmentRepairSession       `json:"-"`
+	Controller       PRDevelopmentController          `json:"-"`
+	Fence            PRDevelopmentAttemptReviewFence  `json:"-"`
+	Orchestration    PRDevelopmentRepairOrchestration `json:"-"`
+	Ledger           PRDevelopmentLedger              `json:"-"`
+	AttemptEntry     PRDevelopmentLedgerEntry         `json:"-"`
+	ReviewEntry      PRDevelopmentLedgerEntry         `json:"-"`
+}
+
 // PRDevelopmentPublicationClaimRequest claims bounded due pre-start work.
 type PRDevelopmentPublicationClaimRequest struct {
 	WorkerLabel string        `json:"-"`
@@ -2136,12 +2157,14 @@ type PRDevelopmentPublicationPolicyPin struct {
 // PRDevelopmentPublicationSubjectPin freezes the exact canonical private gate
 // subject and its semantic revision after policy selection.
 type PRDevelopmentPublicationSubjectPin struct {
-	PublicationID   string          `json:"-"`
-	ClaimToken      string          `json:"-"`
-	ClaimEpoch      int64           `json:"-"`
-	PolicyRevision  string          `json:"-"`
-	SubjectRevision string          `json:"-"`
-	PinnedSubject   json.RawMessage `json:"-"`
+	PublicationID               string          `json:"-"`
+	ClaimToken                  string          `json:"-"`
+	ClaimEpoch                  int64           `json:"-"`
+	PolicyRevision              string          `json:"-"`
+	SubjectRevision             string          `json:"-"`
+	PinnedSubject               json.RawMessage `json:"-"`
+	ExpectedConversationVersion int64           `json:"-"`
+	ExpectedTranscriptDigest    string          `json:"-"`
 }
 
 // PRDevelopmentPublicationProviderPin freezes exact current provider facts.
@@ -2621,6 +2644,18 @@ type PRDevelopmentPublicationReader interface {
 		ctx context.Context,
 		reviewLedgerEntryID string,
 	) (PRDevelopmentPublication, error)
+}
+
+// PRDevelopmentPublicationGateContextSnapshotReader atomically captures the
+// complete local gate subject under one exact live initial publication claim.
+// It grants no provider, workflow, model, Git, filesystem, or mutation power.
+type PRDevelopmentPublicationGateContextSnapshotReader interface {
+	GetClaimedPRDevelopmentPublicationGateContextSnapshot(
+		ctx context.Context,
+		publicationID string,
+		claimToken string,
+		claimEpoch int64,
+	) (PRDevelopmentPublicationGateContextSnapshot, error)
 }
 
 // PRDevelopmentPublicationQueue owns only pre-effect scheduling and pinning. It

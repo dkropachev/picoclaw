@@ -478,6 +478,22 @@ func TestStorePRDevelopmentPublicationUnsupported(t *testing.T) {
 		false,
 		err,
 	)
+	snapshot, err := store.GetClaimedPRDevelopmentPublicationGateContextSnapshot(
+		ctx,
+		"publication",
+		"claim",
+		1,
+	)
+	assertUnsupported(
+		"GetClaimedPRDevelopmentPublicationGateContextSnapshot()",
+		err,
+	)
+	if !reflect.DeepEqual(snapshot, PRDevelopmentPublicationGateContextSnapshot{}) {
+		t.Fatalf(
+			"GetClaimedPRDevelopmentPublicationGateContextSnapshot() = %#v, want zero value",
+			snapshot,
+		)
+	}
 	publications, err := store.ClaimPRDevelopmentPublications(
 		ctx,
 		PRDevelopmentPublicationClaimRequest{},
@@ -613,6 +629,9 @@ func TestPRDevelopmentPublicationUnsupportedSurfaceIsJSONPrivate(t *testing.T) {
 	const sentinel = "private-publication-sentinel"
 	values := []any{
 		PRDevelopmentPublication{ID: sentinel},
+		PRDevelopmentPublicationGateContextSnapshot{
+			TranscriptDigest: sentinel,
+		},
 		PRDevelopmentPublicationProviderObservation{Repository: sentinel},
 		PRDevelopmentPublicationRemoteObservation{Repository: sentinel},
 		PRDevelopmentPublicationPushRequest{Repository: sentinel},
