@@ -22,6 +22,24 @@ export type PRDevelopmentRepairErrorCode =
   | "repair_failed"
   | "recovery_required"
   | "internal_error"
+export type PRDevelopmentCIStatus =
+  | "passed"
+  | "failed"
+  | "incomplete"
+  | "plan_changed"
+  | "timed_out"
+  | "canceled"
+  | "output_limit_exceeded"
+  | "environment_unavailable"
+  | "infrastructure_error"
+export type PRDevelopmentLocalReviewStatus =
+  | "not_started"
+  | "pending"
+  | "completed"
+export type PRDevelopmentLocalReviewOutcome =
+  | "passed"
+  | "changes_required"
+  | "attention_required"
 
 export interface PRDevelopmentMessage {
   id: string
@@ -90,6 +108,24 @@ export interface PRDevelopmentRepairSession {
   attempts: PRDevelopmentRepairAttempt[]
 }
 
+export interface PRDevelopmentLocalDevelopment {
+  attempt_id: string
+  attempt_ordinal: number
+  attempt_status: PRDevelopmentRepairStatus
+  summary?: string
+  commit_sha?: string
+  no_changes: boolean
+  ci_status?: PRDevelopmentCIStatus
+  ci_plan_digest?: string
+  ci_result_digest?: string
+  review_status: PRDevelopmentLocalReviewStatus
+  review_outcome?: PRDevelopmentLocalReviewOutcome
+  review_summary?: string
+  review_finding_count: number
+  local_ready: boolean
+  updated_at: string
+}
+
 export interface PRDevelopmentCaseDetail {
   case: PRDevelopmentCase
   conversation_version: number
@@ -98,6 +134,7 @@ export interface PRDevelopmentCaseDetail {
   repair_unavailable_reason?: "runtime_unavailable"
   repair_revision: number
   repair_session?: PRDevelopmentRepairSession
+  local_development?: PRDevelopmentLocalDevelopment
 }
 
 export interface PRDevelopmentListParams {
@@ -140,6 +177,7 @@ const REPAIR_ATTEMPT_ID_PATTERN = /^pdr_[0-9a-f]{32}$/
 const REPAIR_REQUEST_ID_PATTERN = /^prq_[0-9a-f]{32}$/
 const AGENT_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/
 const GIT_OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+const SHA256_DIGEST_PATTERN = /^[0-9a-f]{64}$/
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 const RFC3339_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|([+-])(\d{2}):(\d{2}))$/
@@ -158,6 +196,7 @@ const MAXIMUM_REPAIR_SUMMARY_BYTES = 4 << 10
 const MAXIMUM_MESSAGES = 256
 const MAXIMUM_REPAIR_REVISION = 1024
 const MAXIMUM_REPAIR_ATTEMPTS = 64
+const MAXIMUM_REVIEW_FINDINGS = 128
 const MAXIMUM_TRANSCRIPT_BYTES = 4 << 20
 // Safe conflict/model-failure responses may carry the complete transcript so
 // the UI can recover authoritative state. Match the launcher's bounded JSON
@@ -200,6 +239,27 @@ const repairErrorCodes = new Set<PRDevelopmentRepairErrorCode>([
   "recovery_required",
   "internal_error",
 ])
+const ciStatuses = new Set<PRDevelopmentCIStatus>([
+  "passed",
+  "failed",
+  "incomplete",
+  "plan_changed",
+  "timed_out",
+  "canceled",
+  "output_limit_exceeded",
+  "environment_unavailable",
+  "infrastructure_error",
+])
+const localReviewStatuses = new Set<PRDevelopmentLocalReviewStatus>([
+  "not_started",
+  "pending",
+  "completed",
+])
+const localReviewOutcomes = new Set<PRDevelopmentLocalReviewOutcome>([
+  "passed",
+  "changes_required",
+  "attention_required",
+])
 const baseSummaryKeys = new Set([
   "id",
   "repository",
@@ -236,6 +296,7 @@ const detailKeys = new Set([
   "repair_unavailable_reason",
   "repair_revision",
   "repair_session",
+  "local_development",
 ])
 const messageKeys = new Set(["id", "ordinal", "role", "content", "created_at"])
 const repairSessionKeys = new Set([
@@ -256,6 +317,23 @@ const repairAttemptKeys = new Set([
   "summary",
   "error_code",
   "created_at",
+  "updated_at",
+])
+const localDevelopmentKeys = new Set([
+  "attempt_id",
+  "attempt_ordinal",
+  "attempt_status",
+  "summary",
+  "commit_sha",
+  "no_changes",
+  "ci_status",
+  "ci_plan_digest",
+  "ci_result_digest",
+  "review_status",
+  "review_outcome",
+  "review_summary",
+  "review_finding_count",
+  "local_ready",
   "updated_at",
 ])
 
@@ -548,6 +626,10 @@ function parseDetail(
     repairRevision,
     conversationVersion,
   )
+  const localDevelopment = parseLocalDevelopment(
+    value.local_development,
+    repairSession,
+  )
   return {
     case: developmentCase,
     conversation_version: conversationVersion,
@@ -558,6 +640,9 @@ function parseDetail(
       : { repair_unavailable_reason: value.repair_unavailable_reason }),
     repair_revision: repairRevision,
     ...(repairSession === undefined ? {} : { repair_session: repairSession }),
+    ...(localDevelopment === undefined
+      ? {}
+      : { local_development: localDevelopment }),
   }
 }
 
@@ -708,6 +793,111 @@ function isTerminalRepairStatus(status: PRDevelopmentRepairStatus): boolean {
     status === "failed" ||
     status === "recovery_required"
   )
+}
+
+function parseLocalDevelopment(
+  value: unknown,
+  repairSession: PRDevelopmentRepairSession | undefined,
+): PRDevelopmentLocalDevelopment | undefined {
+  if (repairSession === undefined) {
+    if (value !== undefined) throw malformedResponse()
+    return undefined
+  }
+  const attempt = repairSession.attempts.at(-1)
+  if (
+    attempt === undefined ||
+    !isRecord(value) ||
+    !onlyKeys(value, localDevelopmentKeys) ||
+    value.attempt_id !== attempt.id ||
+    value.attempt_ordinal !== attempt.ordinal ||
+    value.attempt_status !== attempt.status ||
+    value.summary !== attempt.summary ||
+    typeof value.no_changes !== "boolean" ||
+    !isSetMember(value.review_status, localReviewStatuses) ||
+    !Number.isSafeInteger(value.review_finding_count) ||
+    (value.review_finding_count as number) < 0 ||
+    (value.review_finding_count as number) > MAXIMUM_REVIEW_FINDINGS ||
+    typeof value.local_ready !== "boolean" ||
+    !isTimestamp(value.updated_at) ||
+    Date.parse(value.updated_at) < Date.parse(attempt.updated_at) ||
+    !isOptionalBoundedText(value.review_summary, MAXIMUM_REPAIR_SUMMARY_BYTES)
+  ) {
+    throw malformedResponse()
+  }
+
+  const ciValues = [
+    value.commit_sha,
+    value.ci_status,
+    value.ci_plan_digest,
+    value.ci_result_digest,
+  ]
+  const hasCI = ciValues.every((item) => item !== undefined)
+  if (
+    (!hasCI && ciValues.some((item) => item !== undefined)) ||
+    (hasCI &&
+      (!isPattern(value.commit_sha, GIT_OID_PATTERN) ||
+        !isSetMember(value.ci_status, ciStatuses) ||
+        !isPattern(value.ci_plan_digest, SHA256_DIGEST_PATTERN) ||
+        !isPattern(value.ci_result_digest, SHA256_DIGEST_PATTERN))) ||
+    (!hasCI && value.no_changes) ||
+    (hasCI && attempt.status !== "completed") ||
+    (value.review_status === "not_started" && hasCI) ||
+    (value.review_status !== "not_started" && !hasCI)
+  ) {
+    throw malformedResponse()
+  }
+
+  const reviewCompleted = value.review_status === "completed"
+  const derivedLocalReady =
+    value.ci_status === "passed" &&
+    reviewCompleted &&
+    value.review_outcome === "passed"
+  if (
+    (reviewCompleted &&
+      (!isSetMember(value.review_outcome, localReviewOutcomes) ||
+        !isBoundedCanonicalText(
+          value.review_summary,
+          MAXIMUM_REPAIR_SUMMARY_BYTES,
+        ))) ||
+    (!reviewCompleted &&
+      (value.review_outcome !== undefined ||
+        value.review_summary !== undefined ||
+        value.review_finding_count !== 0)) ||
+    (value.review_outcome === "passed" && value.review_finding_count !== 0) ||
+    (value.review_outcome === "passed" && value.ci_status !== "passed") ||
+    (value.review_outcome === "changes_required" &&
+      value.review_finding_count === 0) ||
+    value.local_ready !== derivedLocalReady
+  ) {
+    throw malformedResponse()
+  }
+
+  return {
+    attempt_id: attempt.id,
+    attempt_ordinal: attempt.ordinal,
+    attempt_status: attempt.status,
+    ...(attempt.summary === undefined ? {} : { summary: attempt.summary }),
+    ...(hasCI
+      ? {
+          commit_sha: value.commit_sha as string,
+          ci_status: value.ci_status as PRDevelopmentCIStatus,
+          ci_plan_digest: value.ci_plan_digest as string,
+          ci_result_digest: value.ci_result_digest as string,
+        }
+      : {}),
+    no_changes: value.no_changes,
+    review_status: value.review_status,
+    ...(reviewCompleted
+      ? {
+          review_outcome:
+            value.review_outcome as PRDevelopmentLocalReviewOutcome,
+          review_summary: value.review_summary as string,
+        }
+      : {}),
+    review_finding_count: value.review_finding_count as number,
+    local_ready: value.local_ready,
+    updated_at: value.updated_at,
+  }
 }
 
 function parseMessages(

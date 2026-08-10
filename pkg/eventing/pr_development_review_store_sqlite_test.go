@@ -4,6 +4,7 @@ package eventing
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -327,6 +328,252 @@ func TestStoreCompletePRDevelopmentReviewPassedRequiresPassedCI(t *testing.T) {
 	assert.True(t, changed)
 	assert.Nil(t, completion.NextAttempt)
 	assert.Equal(t, PRDevelopmentControllerReady, completion.Controller.Phase)
+}
+
+func TestStoreWorkbenchLoadsExactPrivateLocalEvidenceSnapshot(t *testing.T) {
+	t.Parallel()
+
+	fixture, _ := newCompletedPRDevelopmentAIReviewFixture(t, PRDevelopmentCIPassed)
+	ctx := context.Background()
+	lease := claimCompletedPRDevelopmentAIReviewFixture(t, fixture)
+	input := validPRDevelopmentAIReviewCompletionForTest(
+		lease,
+		PRDevelopmentLedgerReviewPassed,
+	)
+	completion, changed, err := fixture.Operation.Store.CompletePRDevelopmentReview(
+		ctx,
+		input,
+	)
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	workbench, err := fixture.Operation.Store.GetPRDevelopmentWorkbench(ctx, lease.CaseID)
+	require.NoError(t, err)
+	require.NotNil(t, workbench.RepairSession)
+	require.NotNil(t, workbench.LocalEvidence)
+	require.NotNil(t, workbench.LocalEvidence.Controller)
+	require.NotNil(t, workbench.LocalEvidence.Orchestration)
+	require.Len(t, workbench.LocalEvidence.Ledger.Entries, 2)
+	latest := workbench.RepairSession.Attempts[len(workbench.RepairSession.Attempts)-1]
+	attempt := workbench.LocalEvidence.Ledger.Entries[0]
+	review := workbench.LocalEvidence.Ledger.Entries[1]
+	assert.Equal(t, latest.ID, attempt.AttemptID)
+	assert.Equal(t, completion.Entry.ID, review.ID)
+	assert.Equal(t, PRDevelopmentLedgerReviewPassed, review.ReviewOutcome)
+	assert.Equal(t, latest.ID, workbench.LocalEvidence.Controller.CurrentAttemptID)
+	assert.Equal(t, PRDevelopmentControllerReady, workbench.LocalEvidence.Controller.Phase)
+	assert.Equal(t, latest.ID, workbench.LocalEvidence.Orchestration.AttemptID)
+	assert.Equal(t, attempt.ID, workbench.LocalEvidence.Orchestration.LedgerEntryID)
+	require.NotNil(t, workbench.LocalEvidence.Orchestration.Validation)
+	assert.Equal(
+		t,
+		attempt.CIStatus,
+		workbench.LocalEvidence.Orchestration.Validation.CIStatus,
+	)
+	assert.Equal(
+		t,
+		attempt.CIPlanDigest,
+		workbench.LocalEvidence.Orchestration.Validation.CIEffectivePlanDigest,
+	)
+	assert.Equal(
+		t,
+		attempt.CIResultDigest,
+		workbench.LocalEvidence.Orchestration.Validation.CIExecutionDigest,
+	)
+}
+
+func TestStoreWorkbenchBatchesAndIntegrityChecksFullLocalEvidenceHistory(t *testing.T) {
+	t.Parallel()
+
+	fixture, _ := newCompletedPRDevelopmentAIReviewFixture(t, PRDevelopmentCIPassed)
+	ctx := context.Background()
+	firstLease := claimCompletedPRDevelopmentAIReviewFixture(t, fixture)
+	firstCompletion, changed, err := fixture.Operation.Store.CompletePRDevelopmentReview(
+		ctx,
+		validPRDevelopmentAIReviewCompletionForTest(
+			firstLease,
+			PRDevelopmentLedgerReviewChangesRequired,
+		),
+	)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.NotNil(t, firstCompletion.NextAttempt)
+	firstAttemptID := firstLease.Fence.AttemptID
+
+	workbench, err := fixture.Operation.Store.GetPRDevelopmentWorkbench(
+		ctx,
+		firstLease.CaseID,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, workbench.RepairSession)
+	fixture.Operation.Session = *workbench.RepairSession
+	fixture.Operation.Attempt = fixture.Operation.Session.Attempts[len(
+		fixture.Operation.Session.Attempts,
+	)-1]
+	secondRun, claimed, err := fixture.Operation.Store.ClaimPRDevelopmentRepairOrchestration(
+		ctx,
+		PRDevelopmentRepairOrchestrationClaim{
+			WorkerLabel: "batched-evidence-worker",
+			Lease:       time.Minute,
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.Equal(t, fixture.Operation.Attempt.ID, secondRun.AttemptID)
+	secondRun, changed, err = fixture.Operation.Store.PinPRDevelopmentRepairOrchestration(
+		ctx,
+		PRDevelopmentRepairOrchestrationPin{
+			AttemptID:      secondRun.AttemptID,
+			ClaimToken:     secondRun.ClaimToken,
+			HeadRepository: fixture.Operation.Session.HeadRepository,
+			HeadRef:        fixture.Operation.Session.HeadRef,
+			HeadSHA:        fixture.Operation.Session.HeadSHA,
+			CloneURL:       fixture.Operation.Session.CloneURL,
+			ReviewDigest:   fixture.Operation.Session.ReviewDigest,
+			WorkspaceID:    fixture.Operation.Session.WorkspaceID,
+			SourceTree:     firstCompletion.Controller.SourceTree,
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, changed)
+	secondLease, acquired, err := fixture.Operation.Store.
+		AcquirePRDevelopmentRepairOrchestrationController(
+			ctx,
+			PRDevelopmentRepairOrchestrationControllerAcquire{
+				CaseID:           firstLease.CaseID,
+				AttemptID:        secondRun.AttemptID,
+				ClaimToken:       secondRun.ClaimToken,
+				ExpectedRevision: firstCompletion.Controller.Revision,
+				WorkerLabel:      "batched-evidence-worker",
+				Lease:            time.Minute,
+			},
+		)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	fixture.Operation.Mutation = secondLease
+	fixture.Operation.SourceTree = firstCompletion.Controller.SourceTree
+	resumeRequest := operationBaseRequest(fixture.Operation, secondLease.Controller)
+	resumeRequest.ExpectedVersion = secondLease.Controller.LineVersion
+	resumeRequest.ExpectedEpoch = secondLease.Controller.MutationEpoch
+	resumeRequest.ExpectedTip = secondLease.Controller.TipCommit
+	resumeRequest.ExpectedTree = secondLease.Controller.Tree
+	resume := prepareOperationForTest(
+		t,
+		fixture.Operation,
+		secondLease,
+		PRDevelopmentControllerOperationResume,
+		fixture.Operation.operationID(),
+		resumeRequest,
+	)
+	resumed := finalizeOperationForTest(
+		t,
+		fixture.Operation,
+		secondLease,
+		resume,
+		PRDevelopmentControllerOperationResult{
+			WorkspaceID:   fixture.Operation.Session.WorkspaceID,
+			Version:       secondLease.Controller.LineVersion,
+			MutationEpoch: secondLease.Controller.MutationEpoch + 1,
+			Tip:           secondLease.Controller.TipCommit,
+			Tree:          secondLease.Controller.Tree,
+		},
+	)
+	fixture.Run = secondRun
+	fixture.Lease = operationLeaseFromTransition(resumed)
+	secondRun = startAndCompletePRDevelopmentOrchestrationForTest(t, fixture)
+	validation := validPRDevelopmentOrchestrationValidationForTest(fixture)
+	validation.CIStatus = PRDevelopmentCIPassed
+	_, changed, err = fixture.Operation.Store.RecordPRDevelopmentRepairOrchestrationValidation(
+		ctx,
+		validation,
+	)
+	require.NoError(t, err)
+	require.True(t, changed)
+	_, _, parked := parkOperationForTest(
+		t,
+		fixture.Operation,
+		fixture.Lease,
+		nil,
+		secondRun.Summary,
+		secondRun.Iterations,
+		1902,
+	)
+	require.NotNil(t, parked.Fence)
+	secondReviewLease := claimCompletedPRDevelopmentAIReviewFixture(t, fixture)
+	_, changed, err = fixture.Operation.Store.CompletePRDevelopmentReview(
+		ctx,
+		validPRDevelopmentAIReviewCompletionForTest(
+			secondReviewLease,
+			PRDevelopmentLedgerReviewPassed,
+		),
+	)
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	workbench, err = fixture.Operation.Store.GetPRDevelopmentWorkbench(ctx, firstLease.CaseID)
+	require.NoError(t, err)
+	require.NotNil(t, workbench.Thread)
+	require.NotNil(t, workbench.RepairSession)
+	require.NotNil(t, workbench.LocalEvidence)
+	require.NotNil(t, workbench.LocalEvidence.Orchestration)
+	require.Len(t, workbench.LocalEvidence.Ledger.Entries, 4)
+	assert.Equal(t, firstAttemptID, workbench.LocalEvidence.Ledger.Entries[0].AttemptID)
+	assert.Equal(t, secondRun.AttemptID, workbench.LocalEvidence.Ledger.Entries[2].AttemptID)
+	assert.Equal(t, secondRun.AttemptID, workbench.LocalEvidence.Orchestration.AttemptID)
+	audit := &prDevelopmentWorkbenchEvidenceQueryAudit{
+		rowsQueryer: fixture.Operation.Store.db,
+	}
+	_, err = loadPRDevelopmentWorkbenchLocalEvidence(
+		ctx,
+		audit,
+		*workbench.Thread,
+		*workbench.RepairSession,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, audit.orchestrationBatchQueries)
+	assert.Zero(t, audit.orchestrationPointQueries)
+	assert.Equal(t, 1, audit.controllerThreadQueries)
+
+	_, err = fixture.Operation.Store.db.Exec(`
+		UPDATE pr_development_repair_orchestrations
+		SET ci_status = 'failed'
+		WHERE attempt_id = ?`, firstAttemptID)
+	require.NoError(t, err)
+	_, err = fixture.Operation.Store.GetPRDevelopmentWorkbench(ctx, firstLease.CaseID)
+	assert.Error(t, err, "a corrupt historical receipt must still fail the selected-case read")
+}
+
+type prDevelopmentWorkbenchEvidenceQueryAudit struct {
+	rowsQueryer
+	orchestrationBatchQueries int
+	orchestrationPointQueries int
+	controllerThreadQueries   int
+}
+
+func (audit *prDevelopmentWorkbenchEvidenceQueryAudit) QueryContext(
+	ctx context.Context,
+	query string,
+	args ...any,
+) (*sql.Rows, error) {
+	if strings.Contains(query, "pr_development_repair_orchestrations AS orchestration") {
+		audit.orchestrationBatchQueries++
+	}
+	return audit.rowsQueryer.QueryContext(ctx, query, args...)
+}
+
+func (audit *prDevelopmentWorkbenchEvidenceQueryAudit) QueryRowContext(
+	ctx context.Context,
+	query string,
+	args ...any,
+) *sql.Row {
+	if strings.Contains(query, "pr_development_repair_orchestrations AS orchestration") {
+		audit.orchestrationPointQueries++
+	}
+	if strings.Contains(query, "FROM pr_development_thread_controllers") &&
+		strings.Contains(query, "WHERE thread_id = ?") {
+		audit.controllerThreadQueries++
+	}
+	return audit.rowsQueryer.QueryRowContext(ctx, query, args...)
 }
 
 func newCompletedPRDevelopmentAIReviewFixture(

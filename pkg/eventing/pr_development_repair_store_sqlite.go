@@ -1082,6 +1082,18 @@ func loadPRDevelopmentWorkbench(
 	}
 	if found {
 		workbench.RepairSession = &session
+		if thread.Kind == PRDevelopmentThreadProvider {
+			localEvidence, loadErr := loadPRDevelopmentWorkbenchLocalEvidence(
+				ctx,
+				queryer,
+				thread,
+				session,
+			)
+			if loadErr != nil {
+				return PRDevelopmentWorkbench{}, loadErr
+			}
+			workbench.LocalEvidence = &localEvidence
+		}
 	}
 	return workbench, nil
 }

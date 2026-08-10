@@ -29,10 +29,12 @@ import {
   MAXIMUM_PR_DEVELOPMENT_CHAT_BYTES,
   MAXIMUM_PR_DEVELOPMENT_REPAIR_INSTRUCTION_BYTES,
   PRDevelopmentAPIError,
+  type PRDevelopmentCIStatus,
   type PRDevelopmentCase,
   type PRDevelopmentCaseDetail,
   type PRDevelopmentCasePage,
   type PRDevelopmentCaseSummary,
+  type PRDevelopmentLocalDevelopment,
   type PRDevelopmentMessage,
   type PRDevelopmentRepairAttempt,
   type PRDevelopmentRepairStatus,
@@ -532,6 +534,10 @@ function mergePRDevelopmentDetail(
   const conversationAdvanced =
     incoming.conversation_version > previous.conversation_version
   const repairAdvanced = incoming.repair_revision > previous.repair_revision
+  const localDevelopmentAdvanced = isNewerLocalDevelopment(
+    previous.local_development,
+    incoming.local_development,
+  )
   const capabilitySource =
     options.capabilityFreshness === "authoritative" ||
     (previous.repair_available && !incoming.repair_available)
@@ -541,12 +547,19 @@ function mergePRDevelopmentDetail(
     capabilitySource.repair_available !== previous.repair_available ||
     capabilitySource.repair_unavailable_reason !==
       previous.repair_unavailable_reason
-  if (!conversationAdvanced && !repairAdvanced && !capabilityChanged) {
+  if (
+    !conversationAdvanced &&
+    !repairAdvanced &&
+    !localDevelopmentAdvanced &&
+    !capabilityChanged
+  ) {
     return previous
   }
 
   const conversationSource = conversationAdvanced ? incoming : previous
   const repairSource = repairAdvanced ? incoming : previous
+  const localDevelopmentSource =
+    repairAdvanced || localDevelopmentAdvanced ? incoming : previous
   return {
     case: incoming.case,
     conversation_version: conversationSource.conversation_version,
@@ -561,6 +574,39 @@ function mergePRDevelopmentDetail(
     ...(repairSource.repair_session === undefined
       ? {}
       : { repair_session: repairSource.repair_session }),
+    ...(localDevelopmentSource.local_development === undefined
+      ? {}
+      : { local_development: localDevelopmentSource.local_development }),
+  }
+}
+
+function isNewerLocalDevelopment(
+  previous: PRDevelopmentLocalDevelopment | undefined,
+  incoming: PRDevelopmentLocalDevelopment | undefined,
+): boolean {
+  if (incoming === undefined) return false
+  if (previous === undefined) return true
+  if (incoming.attempt_ordinal !== previous.attempt_ordinal) {
+    return incoming.attempt_ordinal > previous.attempt_ordinal
+  }
+  const incomingStage = localDevelopmentEvidenceStage(incoming)
+  const previousStage = localDevelopmentEvidenceStage(previous)
+  if (incomingStage !== previousStage) return incomingStage > previousStage
+  const incomingTime = Date.parse(incoming.updated_at)
+  const previousTime = Date.parse(previous.updated_at)
+  return incomingTime > previousTime
+}
+
+function localDevelopmentEvidenceStage(
+  evidence: PRDevelopmentLocalDevelopment,
+): number {
+  switch (evidence.review_status) {
+    case "not_started":
+      return 0
+    case "pending":
+      return 1
+    case "completed":
+      return 2
   }
 }
 
@@ -644,7 +690,7 @@ function DevelopmentDetailPanel({
     enabled: Boolean(caseID),
     structuralSharing: retainNewestPRDevelopmentDetail,
     refetchInterval: (query) =>
-      hasActiveRepairAttempt(query.state.data) ? 2000 : false,
+      shouldPollLocalDevelopment(query.state.data) ? 2000 : false,
   })
   const detail = detailQuery.data
   const developmentCase = detail?.case
@@ -1182,7 +1228,7 @@ function DevelopmentLocalRepair({
           <p className="text-muted-foreground mt-1 text-xs">
             {t(
               "pages.reviews.development.repair_help",
-              "Ask AI to edit a pinned local copy of this PR. Changes stay local until later review, checks, commit, and push steps are available.",
+              "Ask AI to edit a pinned local copy, run discovered local checks, record the exact commit, and review the result. This page does not push changes.",
             )}
           </p>
         </div>
@@ -1198,19 +1244,23 @@ function DevelopmentLocalRepair({
         </Button>
       </div>
 
-      <div
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-        className="bg-muted/30 mt-3 rounded-md px-3 py-2 text-sm"
-      >
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant={repairStatusBadgeVariant(latestAttempt?.status)}>
-            {repairStatusLabel(latestAttempt?.status)}
-          </Badge>
-          <span>{repairStatusDescription(latestAttempt?.status)}</span>
+      {detail.local_development ? (
+        <LocalDevelopmentStatusCard evidence={detail.local_development} />
+      ) : (
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="bg-muted/30 mt-3 rounded-md px-3 py-2 text-sm"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={repairStatusBadgeVariant(latestAttempt?.status)}>
+              {repairStatusLabel(latestAttempt?.status)}
+            </Badge>
+            <span>{repairStatusDescription(latestAttempt?.status)}</span>
+          </div>
         </div>
-      </div>
+      )}
 
       {detail.repair_session?.head_sha ? (
         <div className="border-border mt-3 rounded-md border px-3 py-2 text-xs">
@@ -1371,7 +1421,13 @@ function DevelopmentLocalRepair({
           <h4 className="text-sm font-medium">
             {t("pages.reviews.development.repair_history", "Repair history")}
           </h4>
-          <ol className="mt-2 flex flex-col gap-2">
+          <ol
+            aria-label={t(
+              "pages.reviews.development.repair_history",
+              "Repair history",
+            )}
+            className="mt-2 flex flex-col gap-2"
+          >
             {[...detail.repair_session.attempts].reverse().map((attempt) => (
               <RepairAttemptCard key={attempt.id} attempt={attempt} />
             ))}
@@ -1397,11 +1453,11 @@ function DevelopmentLocalRepair({
               {recoveryRequired
                 ? t(
                     "pages.reviews.development.repair_recovery_confirm_description",
-                    "Partial edits may exist in the same pinned local workspace. Your new instruction should tell AI to inspect and preserve them before continuing. Changes remain local, unreviewed, untested, uncommitted, and unpushed. Nothing will be changed on GitHub.",
+                    "Partial edits may exist in the same pinned local workspace. Tell AI to inspect and preserve them before continuing. The attempt will then run local checks, record a commit when files changed, and receive AI review. Nothing will be changed on GitHub.",
                   )
                 : t(
                     "pages.reviews.development.repair_confirm_description",
-                    "AI will edit a pinned local copy of the PR using this instruction. Those edits are local, unreviewed, untested, uncommitted, and unpushed. Nothing will be changed on GitHub.",
+                    "AI will edit a pinned local copy using this instruction, run discovered local checks, record a commit when files changed, and review the result. Nothing will be changed on GitHub.",
                   )}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -1438,6 +1494,131 @@ function DevelopmentLocalRepair({
         </AlertDialogContent>
       </AlertDialog>
     </section>
+  )
+}
+
+function LocalDevelopmentStatusCard({
+  evidence,
+}: {
+  evidence: PRDevelopmentLocalDevelopment
+}) {
+  const { t } = useTranslation()
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      data-testid="local-development-status"
+      className="border-border bg-muted/30 mt-3 rounded-md border p-3"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-sm font-medium">
+            {t(
+              "pages.reviews.development.local_status",
+              "Local development status",
+            )}
+          </p>
+          <Badge variant={localDevelopmentBadgeVariant(evidence)}>
+            {localDevelopmentLabel(evidence)}
+          </Badge>
+        </div>
+        <time
+          className="text-muted-foreground text-xs"
+          dateTime={evidence.updated_at}
+        >
+          {formatDate(evidence.updated_at)}
+        </time>
+      </div>
+
+      <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-3">
+        <div>
+          <dt className="text-muted-foreground text-xs">
+            {t("pages.reviews.development.local_attempt", "Latest attempt")}
+          </dt>
+          <dd className="mt-1 flex flex-wrap items-center gap-2">
+            <span>
+              {t(
+                "pages.reviews.development.repair_attempt",
+                "Attempt {{number}}",
+                { number: evidence.attempt_ordinal + 1 },
+              )}
+            </span>
+            <Badge variant={repairStatusBadgeVariant(evidence.attempt_status)}>
+              {repairStatusLabel(evidence.attempt_status)}
+            </Badge>
+          </dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground text-xs">
+            {t("pages.reviews.development.local_commit", "Local commit")}
+          </dt>
+          <dd className="mt-1">
+            {localCommitLabel(evidence)}
+            {evidence.commit_sha ? (
+              <code className="ml-1 font-mono" title={evidence.commit_sha}>
+                {" "}
+                {shortSHA(evidence.commit_sha)}
+              </code>
+            ) : null}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-muted-foreground text-xs">
+            {t("pages.reviews.development.local_ci", "Local CI")}
+          </dt>
+          <dd className="mt-1">
+            <Badge variant={ciStatusBadgeVariant(evidence.ci_status)}>
+              {ciStatusLabel(evidence.ci_status)}
+            </Badge>
+          </dd>
+        </div>
+        <div className="sm:col-span-3">
+          <dt className="text-muted-foreground text-xs">
+            {t("pages.reviews.development.local_ai_review", "AI review")}
+          </dt>
+          <dd className="mt-1 flex flex-wrap items-center gap-2">
+            <Badge variant={localReviewBadgeVariant(evidence)}>
+              {localReviewLabel(evidence)}
+            </Badge>
+            {evidence.review_finding_count > 0 ? (
+              <span className="text-muted-foreground text-xs">
+                {t(
+                  "pages.reviews.development.local_findings",
+                  "{{count}} finding(s)",
+                  { count: evidence.review_finding_count },
+                )}
+              </span>
+            ) : null}
+          </dd>
+        </div>
+      </dl>
+
+      {evidence.review_summary ? (
+        <p className="mt-2 text-sm break-words whitespace-pre-wrap">
+          {evidence.review_summary}
+        </p>
+      ) : null}
+      {evidence.ci_plan_digest && evidence.ci_result_digest ? (
+        <p className="text-muted-foreground mt-2 text-xs">
+          {t(
+            "pages.reviews.development.local_ci_evidence",
+            "CI evidence: plan {{plan}} · result {{result}}",
+            {
+              plan: shortSHA(evidence.ci_plan_digest),
+              result: shortSHA(evidence.ci_result_digest),
+            },
+          )}
+        </p>
+      ) : null}
+      <p className="text-muted-foreground mt-2 text-xs">
+        {localDevelopmentDescription(evidence)}{" "}
+        {t(
+          "pages.reviews.development.local_only_notice",
+          "This status covers local work only; it does not mean changes were pushed.",
+        )}
+      </p>
+    </div>
   )
 }
 
@@ -2105,10 +2286,15 @@ function shortSHA(value: string): string {
   return value.slice(0, 8)
 }
 
-function hasActiveRepairAttempt(
+function shouldPollLocalDevelopment(
   detail: PRDevelopmentCaseDetail | undefined,
 ): boolean {
-  return isActiveRepairStatus(detail?.repair_session?.attempts.at(-1)?.status)
+  const evidence = detail?.local_development
+  return (
+    isActiveRepairStatus(detail?.repair_session?.attempts.at(-1)?.status) ||
+    (evidence?.attempt_status === "completed" &&
+      evidence.review_status === "pending")
+  )
 }
 
 function isActiveRepairStatus(
@@ -2151,7 +2337,7 @@ function repairStatusDescription(
     case "running":
       return "AI is editing the pinned local copy."
     case "completed":
-      return "Local edits are ready for review; they are not tested, committed, or pushed."
+      return "The local attempt completed, but bound commit, CI, and AI-review evidence is not available."
     case "failed":
       return "The repair stopped before AI editing began."
     case "recovery_required":
@@ -2167,6 +2353,121 @@ function repairStatusBadgeVariant(
     return "destructive"
   }
   return "outline"
+}
+
+function localDevelopmentLabel(
+  evidence: PRDevelopmentLocalDevelopment,
+): string {
+  if (evidence.local_ready) return "Ready locally"
+  if (evidence.review_outcome === "attention_required") {
+    return "Needs your attention"
+  }
+  if (evidence.review_outcome === "changes_required") {
+    return "Changes required"
+  }
+  if (evidence.ci_status && evidence.ci_status !== "passed") {
+    return "Local checks not green"
+  }
+  if (evidence.review_status === "pending") return "AI review pending"
+  return repairStatusLabel(evidence.attempt_status)
+}
+
+function localDevelopmentBadgeVariant(
+  evidence: PRDevelopmentLocalDevelopment,
+): "default" | "outline" | "secondary" | "destructive" {
+  if (evidence.local_ready) return "default"
+  if (
+    evidence.review_outcome === "changes_required" ||
+    (evidence.ci_status !== undefined && evidence.ci_status !== "passed") ||
+    evidence.attempt_status === "failed" ||
+    evidence.attempt_status === "recovery_required"
+  ) {
+    return "destructive"
+  }
+  if (evidence.review_outcome === "attention_required") return "secondary"
+  return "outline"
+}
+
+function localCommitLabel(evidence: PRDevelopmentLocalDevelopment): string {
+  if (!evidence.commit_sha) return "Evidence unavailable"
+  return evidence.no_changes ? "No file changes · retained" : "Recorded"
+}
+
+function ciStatusLabel(status: PRDevelopmentCIStatus | undefined): string {
+  switch (status) {
+    case undefined:
+      return "Evidence unavailable"
+    case "passed":
+      return "Passed"
+    case "failed":
+      return "Failed"
+    case "incomplete":
+      return "Incomplete"
+    case "plan_changed":
+      return "Plan changed"
+    case "timed_out":
+      return "Timed out"
+    case "canceled":
+      return "Canceled"
+    case "output_limit_exceeded":
+      return "Output limit exceeded"
+    case "environment_unavailable":
+      return "Environment unavailable"
+    case "infrastructure_error":
+      return "Infrastructure error"
+  }
+}
+
+function ciStatusBadgeVariant(
+  status: PRDevelopmentCIStatus | undefined,
+): "outline" | "secondary" | "destructive" {
+  if (status === "passed") return "secondary"
+  if (status !== undefined) return "destructive"
+  return "outline"
+}
+
+function localReviewLabel(evidence: PRDevelopmentLocalDevelopment): string {
+  if (evidence.review_status === "not_started") return "Not started"
+  if (evidence.review_status === "pending") return "Pending"
+  switch (evidence.review_outcome) {
+    case "passed":
+      return "Passed"
+    case "changes_required":
+      return "Changes required"
+    case "attention_required":
+      return "Needs attention"
+    case undefined:
+      return "Completed"
+  }
+}
+
+function localReviewBadgeVariant(
+  evidence: PRDevelopmentLocalDevelopment,
+): "outline" | "secondary" | "destructive" {
+  if (evidence.review_outcome === "passed") return "secondary"
+  if (evidence.review_outcome === "changes_required") return "destructive"
+  return "outline"
+}
+
+function localDevelopmentDescription(
+  evidence: PRDevelopmentLocalDevelopment,
+): string {
+  if (evidence.local_ready) {
+    return "Local CI and AI review passed for this exact commit."
+  }
+  if (evidence.review_outcome === "attention_required") {
+    return "AI review needs your direction in the PR chat."
+  }
+  if (evidence.review_outcome === "changes_required") {
+    return "AI review requested another local repair."
+  }
+  if (evidence.ci_status && evidence.ci_status !== "passed") {
+    return "The recorded local checks are not green."
+  }
+  if (evidence.review_status === "pending") {
+    return "The committed local candidate is waiting for AI review."
+  }
+  return repairStatusDescription(evidence.attempt_status)
 }
 
 function repairErrorLabel(

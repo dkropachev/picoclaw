@@ -1,5 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { useState } from "react"
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
@@ -132,6 +139,16 @@ const queuedRepairDetail = {
       },
     ],
   },
+  local_development: {
+    attempt_id: `pdr_${"7".repeat(32)}`,
+    attempt_ordinal: 0,
+    attempt_status: "queued",
+    no_changes: false,
+    review_status: "not_started",
+    review_finding_count: 0,
+    local_ready: false,
+    updated_at: "2026-08-05T12:03:00Z",
+  },
 } satisfies PRDevelopmentCaseDetail
 const runningRepairDetail = {
   ...queuedRepairDetail,
@@ -150,6 +167,11 @@ const runningRepairDetail = {
       },
     ],
   },
+  local_development: {
+    ...queuedRepairDetail.local_development,
+    attempt_status: "running",
+    updated_at: "2026-08-05T12:04:00Z",
+  },
 } satisfies PRDevelopmentCaseDetail
 const completedRepairDetail = {
   ...runningRepairDetail,
@@ -165,6 +187,33 @@ const completedRepairDetail = {
         updated_at: "2026-08-05T12:05:00Z",
       },
     ],
+  },
+  local_development: {
+    ...runningRepairDetail.local_development,
+    attempt_status: "completed",
+    summary: '<img src=x onerror="alert(1)"> Local edits are ready.',
+    commit_sha: "e".repeat(40),
+    no_changes: false,
+    ci_status: "passed",
+    ci_plan_digest: "a".repeat(64),
+    ci_result_digest: "b".repeat(64),
+    review_status: "pending",
+    updated_at: "2026-08-05T12:05:00Z",
+  },
+} satisfies PRDevelopmentCaseDetail
+const reviewedRepairDetail = {
+  ...completedRepairDetail,
+  local_development: {
+    ...completedRepairDetail.local_development,
+    review_status: "completed",
+    review_outcome: "passed",
+    review_summary:
+      '<script>alert("review")</script> The exact local candidate passed review.',
+    review_finding_count: 0,
+    local_ready: true,
+    // Equal timestamps exercise the evidence-stage tie-breaker used when a
+    // durable store clock does not advance between attempt and review writes.
+    updated_at: completedRepairDetail.local_development.updated_at,
   },
 } satisfies PRDevelopmentCaseDetail
 const recoveryRequiredRepairDetail = {
@@ -187,6 +236,17 @@ const recoveryRequiredRepairDetail = {
         updated_at: "2026-08-05T12:07:00Z",
       },
     ],
+  },
+  local_development: {
+    attempt_id: `pdr_${"8".repeat(32)}`,
+    attempt_ordinal: 1,
+    attempt_status: "recovery_required",
+    summary: "The process stopped after writing one local file.",
+    no_changes: false,
+    review_status: "not_started",
+    review_finding_count: 0,
+    local_ready: false,
+    updated_at: "2026-08-05T12:07:00Z",
   },
 } satisfies PRDevelopmentCaseDetail
 const replaySummary = { ...summary, id: replayCaseID } as const
@@ -381,7 +441,7 @@ describe("PR development page", () => {
 
     expect(mockedStartRepair).not.toHaveBeenCalled()
     expect(screen.getByRole("alertdialog")).toHaveTextContent(
-      /local, unreviewed, untested, uncommitted, and unpushed/i,
+      /run discovered local checks, record a commit when files changed, and review the result/i,
     )
     await user.click(screen.getByRole("button", { name: "Start local repair" }))
 
@@ -701,10 +761,11 @@ describe("PR development page", () => {
     ).toHaveValue("Replay-case local repair draft.")
   })
 
-  it("polls only an active repair and announces its terminal result", async () => {
+  it("polls through local repair and pending AI review without losing evidence", async () => {
     mockedGet
       .mockResolvedValueOnce(runningRepairDetail)
       .mockResolvedValueOnce(completedRepairDetail)
+      .mockResolvedValueOnce(reviewedRepairDetail)
     renderPage({ view: "development", case: caseID })
 
     const status = await screen.findByRole("status")
@@ -712,17 +773,97 @@ describe("PR development page", () => {
     expect(status).toHaveTextContent(/AI is editing the pinned local copy/i)
     expect(screen.getByLabelText("Local repair instruction")).toBeDisabled()
 
-    await waitFor(
-      () =>
-        expect(status).toHaveTextContent(/Local edits are ready for review/i),
-      { timeout: 3500 },
-    )
-    expect(mockedGet).toHaveBeenCalledTimes(2)
+    await waitFor(() => expect(status).toHaveTextContent(/Ready locally/i), {
+      timeout: 6000,
+    })
+    expect(mockedGet).toHaveBeenCalledTimes(3)
     const summary = screen.getByText(
       '<img src=x onerror="alert(1)"> Local edits are ready.',
     )
     expect(summary.querySelector("img")).toBeNull()
     expect(screen.getByText("Outcome summary")).toBeVisible()
+  })
+
+  it("does not poll a legacy completed attempt without bound review evidence", async () => {
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+    })
+    try {
+      const legacyCompletedDetail: PRDevelopmentCaseDetail = {
+        ...completedRepairDetail,
+        local_development: {
+          attempt_id: `pdr_${"7".repeat(32)}`,
+          attempt_ordinal: 0,
+          attempt_status: "completed",
+          summary: '<img src=x onerror="alert(1)"> Local edits are ready.',
+          no_changes: false,
+          review_status: "not_started",
+          review_finding_count: 0,
+          local_ready: false,
+          updated_at: "2026-08-05T12:05:00Z",
+        },
+      }
+      mockedGet.mockResolvedValue(legacyCompletedDetail)
+
+      renderPage({ view: "development", case: caseID })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1)
+      })
+
+      expect(mockedGet).toHaveBeenCalledTimes(1)
+      const status = screen.getByTestId("local-development-status")
+      expect(status).toHaveTextContent(/Local commit\s*Evidence unavailable/)
+      expect(status).toHaveTextContent(/Local CI\s*Evidence unavailable/)
+      expect(status).toHaveTextContent(/AI review\s*Not started/)
+      expect(status).toHaveTextContent(
+        /bound commit, CI, and AI-review evidence is not available/i,
+      )
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_000)
+      })
+      expect(mockedGet).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("shows exact local commit, CI, and AI-review evidence without implying push", async () => {
+    mockedGet.mockResolvedValue(reviewedRepairDetail)
+    renderPage({ view: "development", case: caseID })
+
+    const status = await screen.findByTestId("local-development-status")
+    expect(status).toHaveTextContent("Local development status")
+    expect(status).toHaveTextContent("Ready locally")
+    expect(status).toHaveTextContent("Attempt 1")
+    expect(status).toHaveTextContent(/Recorded eeeeeeee/)
+    expect(status).toHaveTextContent(/Local CI\s*Passed/)
+    expect(status).toHaveTextContent(/AI review\s*Passed/)
+    expect(status).toHaveTextContent(/plan aaaaaaaa · result bbbbbbbb/)
+    expect(status).toHaveTextContent(/does not mean changes were pushed/i)
+    const reviewSummary = screen.getByText(
+      '<script>alert("review")</script> The exact local candidate passed review.',
+    )
+    expect(reviewSummary.querySelector("script")).toBeNull()
+  })
+
+  it("shows no-change and attention outcomes truthfully", async () => {
+    mockedGet.mockResolvedValue({
+      ...reviewedRepairDetail,
+      local_development: {
+        ...reviewedRepairDetail.local_development,
+        no_changes: true,
+        review_outcome: "attention_required",
+        review_summary: "Please choose whether compatibility should be kept.",
+        local_ready: false,
+      },
+    })
+    renderPage({ view: "development", case: caseID })
+
+    const status = await screen.findByTestId("local-development-status")
+    expect(status).toHaveTextContent(/No file changes · retained eeeeeeee/)
+    expect(status).toHaveTextContent("Needs your attention")
+    expect(status).toHaveTextContent(/needs your direction in the PR chat/i)
   })
 
   it("describes preparing without claiming that the workspace is pinned", async () => {
@@ -739,6 +880,11 @@ describe("PR development page", () => {
             updated_at: "2026-08-05T12:03:30Z",
           },
         ],
+      },
+      local_development: {
+        ...queuedRepairDetail.local_development,
+        attempt_status: "preparing",
+        updated_at: "2026-08-05T12:03:30Z",
       },
     }
     mockedGet.mockResolvedValue(preparingDetail)
@@ -768,7 +914,9 @@ describe("PR development page", () => {
     expect(
       screen.getByRole("button", { name: "Continue local repair" }),
     ).toBeDisabled()
-    const attempts = screen.getAllByText(/Attempt [12]/)
+    const attempts = within(
+      screen.getByRole("list", { name: "Repair history" }),
+    ).getAllByText(/Attempt [12]/)
     expect(attempts.map((node) => node.textContent)).toEqual([
       "Attempt 2",
       "Attempt 1",
@@ -845,6 +993,32 @@ describe("PR development page", () => {
       expect(merged?.repair_revision).toBe(3)
       expect(merged?.repair_session?.attempts.at(-1)?.status).toBe("running")
     })
+  })
+
+  it("does not regress completed local review evidence with a later timestamp", async () => {
+    const client = newTestQueryClient()
+    renderPage({ view: "development", case: caseID }, vi.fn(), client)
+    await screen.findByLabelText("Local repair instruction")
+    const queryKey = ["pr-development", "detail", caseID] as const
+
+    client.setQueryData(queryKey, reviewedRepairDetail)
+    client.setQueryData(queryKey, {
+      ...completedRepairDetail,
+      local_development: {
+        ...completedRepairDetail.local_development,
+        updated_at: "2026-08-05T12:06:00Z",
+      },
+    })
+
+    await waitFor(() => {
+      const cached = client.getQueryData<PRDevelopmentCaseDetail>(queryKey)
+      expect(cached?.local_development).toEqual(
+        reviewedRepairDetail.local_development,
+      )
+    })
+    expect(screen.getByTestId("local-development-status")).toHaveTextContent(
+      "Ready locally",
+    )
   })
 
   it("takes repair capability from an authoritative equal-version reload", async () => {

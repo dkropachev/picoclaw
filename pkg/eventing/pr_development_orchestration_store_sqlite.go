@@ -2424,44 +2424,20 @@ func validateCompletedPRDevelopmentRepairOrchestrationAggregate(
 	queryer rowsQueryer,
 	orchestration PRDevelopmentRepairOrchestration,
 ) error {
-	if orchestration.Validation == nil {
-		return errors.New("completed orchestration has no receipt")
-	}
-	receipt := *orchestration.Validation
-	operation, found, err := loadPRDevelopmentControllerOperationByID(
+	operation, operationFound, err := loadPRDevelopmentControllerOperationByID(
 		ctx, queryer, orchestration.ParkOperationID,
 	)
 	if err != nil {
 		return err
 	}
-	if !found || operation.Kind != PRDevelopmentControllerOperationPark ||
-		operation.Status != PRDevelopmentControllerOperationFinalized ||
-		operation.ControllerID != orchestration.ControllerID ||
-		operation.AttemptID != orchestration.AttemptID ||
-		operation.FinalFenceHash != orchestration.FenceHash ||
-		operation.Request.CompletionSummary != orchestration.Summary ||
-		operation.Request.CompletionIterations != orchestration.Iterations ||
-		operation.Result.Tree != receipt.CandidateTree ||
-		operation.Result.NoChanges != receipt.NoChanges {
-		return errors.New("completed orchestration Park operation is not exact")
+	if !operationFound {
+		return errors.New("completed orchestration Park operation is missing")
 	}
 	fence, found, err := loadPRDevelopmentReviewFenceByAttempt(
 		ctx, queryer, orchestration.AttemptID,
 	)
 	if err != nil {
 		return err
-	}
-	mutationStageFenceHash := mutationStagePRDevelopmentReviewFenceHash(fence)
-	if !found || fence.ControllerID != orchestration.ControllerID ||
-		fence.ThreadID != orchestration.ThreadID ||
-		mutationStageFenceHash != orchestration.FenceHash ||
-		fence.TipCommit != operation.Result.Tip || fence.Tree != receipt.CandidateTree ||
-		fence.NoChanges != receipt.NoChanges ||
-		fence.MutationControllerRevision != receipt.ControllerRevision ||
-		fence.MutationLeaseEpoch != receipt.MutationLeaseEpoch ||
-		fence.MutationLeaseTokenDigest != receipt.MutationLeaseTokenDigest ||
-		fence.MutationReservationDigest != receipt.MutationReservationDigest {
-		return errors.New("completed orchestration review fence is not exact")
 	}
 	storedEntry, err := scanPRDevelopmentLedgerEntry(queryer.QueryRowContext(ctx, `
 		SELECT `+prDevelopmentLedgerEntryColumns+`
@@ -2471,8 +2447,6 @@ func validateCompletedPRDevelopmentRepairOrchestrationAggregate(
 		return err
 	}
 	entry := storedEntry.entry
-	entry.CIStatus = receipt.CIStatus
-	entry.ciStatusBound = true
 	var caseOrdinal int64
 	if err := queryer.QueryRowContext(ctx, `
 		SELECT ordinal FROM pr_development_thread_cases
@@ -2511,7 +2485,59 @@ func validateCompletedPRDevelopmentRepairOrchestrationAggregate(
 			return predecessorErr
 		}
 	}
+	if !found {
+		return errors.New("completed orchestration review fence is missing")
+	}
+	return validateCompletedPRDevelopmentRepairOrchestrationSnapshot(
+		orchestration,
+		operation,
+		fence,
+		storedEntry,
+		caseOrdinal,
+		previousHash,
+	)
+}
+
+func validateCompletedPRDevelopmentRepairOrchestrationSnapshot(
+	orchestration PRDevelopmentRepairOrchestration,
+	operation PRDevelopmentControllerOperation,
+	fence PRDevelopmentAttemptReviewFence,
+	storedEntry storedPRDevelopmentLedgerEntry,
+	caseOrdinal int64,
+	previousHash string,
+) error {
+	if orchestration.Validation == nil {
+		return errors.New("completed orchestration has no receipt")
+	}
+	receipt := *orchestration.Validation
+	if operation.Kind != PRDevelopmentControllerOperationPark ||
+		operation.Status != PRDevelopmentControllerOperationFinalized ||
+		operation.ControllerID != orchestration.ControllerID ||
+		operation.AttemptID != orchestration.AttemptID ||
+		operation.FinalFenceHash != orchestration.FenceHash ||
+		operation.Request.CompletionSummary != orchestration.Summary ||
+		operation.Request.CompletionIterations != orchestration.Iterations ||
+		operation.Result.Tree != receipt.CandidateTree ||
+		operation.Result.NoChanges != receipt.NoChanges {
+		return errors.New("completed orchestration Park operation is not exact")
+	}
+	mutationStageFenceHash := mutationStagePRDevelopmentReviewFenceHash(fence)
+	if fence.ControllerID != orchestration.ControllerID ||
+		fence.ThreadID != orchestration.ThreadID ||
+		mutationStageFenceHash != orchestration.FenceHash ||
+		fence.TipCommit != operation.Result.Tip || fence.Tree != receipt.CandidateTree ||
+		fence.NoChanges != receipt.NoChanges ||
+		fence.MutationControllerRevision != receipt.ControllerRevision ||
+		fence.MutationLeaseEpoch != receipt.MutationLeaseEpoch ||
+		fence.MutationLeaseTokenDigest != receipt.MutationLeaseTokenDigest ||
+		fence.MutationReservationDigest != receipt.MutationReservationDigest {
+		return errors.New("completed orchestration review fence is not exact")
+	}
+	entry := storedEntry.entry
+	entry.CIStatus = receipt.CIStatus
+	entry.ciStatusBound = true
 	if storedEntry.findingCount != 0 || entry.ThreadID != orchestration.ThreadID ||
+		entry.ID != orchestration.LedgerEntryID ||
 		entry.AttemptID != orchestration.AttemptID || entry.Kind != PRDevelopmentLedgerAttempt ||
 		entry.Ordinal != fence.Ordinal*2 || entry.FenceOrdinal != fence.Ordinal ||
 		entry.CaseID != orchestration.CaseID || int64(entry.CaseOrdinal) != caseOrdinal ||

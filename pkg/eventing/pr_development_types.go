@@ -513,13 +513,26 @@ type PRDevelopmentRepairSession struct {
 	UpdatedAt      time.Time                    `json:"updated_at"`
 }
 
+// PRDevelopmentLocalEvidenceSnapshot is the private, integrity-checked source
+// used to project bounded local-development evidence for one workbench. It
+// intentionally keeps the controller and full thread ledger outside JSON so
+// browser DTOs cannot accidentally inherit retained-line identity, lease
+// authority, findings, or sibling-case history.
+type PRDevelopmentLocalEvidenceSnapshot struct {
+	Controller    *PRDevelopmentController          `json:"-"`
+	Orchestration *PRDevelopmentRepairOrchestration `json:"-"`
+	Ledger        PRDevelopmentLedger               `json:"-"`
+}
+
 // PRDevelopmentWorkbench is one atomic read snapshot of the immutable case,
-// bounded conversation, and optional singleton repair session.
+// bounded conversation, optional singleton repair session, and its optional
+// private local-development evidence source.
 type PRDevelopmentWorkbench struct {
-	Case          PRDevelopmentCase           `json:"case"`
-	Thread        *PRDevelopmentThreadBinding `json:"-"`
-	Conversation  PRDevelopmentConversation   `json:"conversation"`
-	RepairSession *PRDevelopmentRepairSession `json:"repair_session,omitempty"`
+	Case          PRDevelopmentCase                   `json:"case"`
+	Thread        *PRDevelopmentThreadBinding         `json:"-"`
+	Conversation  PRDevelopmentConversation           `json:"conversation"`
+	RepairSession *PRDevelopmentRepairSession         `json:"repair_session,omitempty"`
+	LocalEvidence *PRDevelopmentLocalEvidenceSnapshot `json:"-"`
 }
 
 // PRDevelopmentRepairAdmit atomically fences both mutable workbench versions
