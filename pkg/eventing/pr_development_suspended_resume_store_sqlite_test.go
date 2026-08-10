@@ -368,6 +368,11 @@ func TestStorePRDevelopmentControllerSuspendedResumeReservesRecoveryChainSlot(
 	controller.Revision++
 	err = requirePRDevelopmentSuspendedResumeRecoveryCapacity(controller, suspension)
 	assert.ErrorIs(t, err, ErrPRDevelopmentControllerConflict)
+
+	controller.Revision--
+	controller.LeaseEpoch = int64(^uint64(0) >> 1)
+	err = requirePRDevelopmentSuspendedResumeRecoveryCapacity(controller, suspension)
+	assert.ErrorIs(t, err, ErrPRDevelopmentControllerConflict)
 }
 
 func suspendedResumeResultForTest(

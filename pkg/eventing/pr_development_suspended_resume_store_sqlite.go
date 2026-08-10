@@ -350,6 +350,7 @@ func requirePRDevelopmentSuspendedResumeRecoveryCapacity(
 		revisionReserve = recoveryRevisionReserve
 	}
 	if suspension.Ordinal >= MaxPRDevelopmentControllerFences-1 ||
+		controller.LeaseEpoch == int64(^uint64(0)>>1) ||
 		controller.Revision > MaxPRDevelopmentControllerRevision-revisionReserve {
 		return fmt.Errorf(
 			"%w: suspended resume has no recovery history capacity",
