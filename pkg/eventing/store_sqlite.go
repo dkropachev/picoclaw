@@ -375,7 +375,12 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 10"); err != nil {
 			return fmt.Errorf("record eventing schema v10: %w", err)
 		}
-	} else if err = validateSchemaV10ForVersion(ctx, conn, version >= 17); err != nil {
+	} else if err = validateSchemaV10ForVersion(
+		ctx,
+		conn,
+		version >= 17,
+		version >= 18,
+	); err != nil {
 		return fmt.Errorf("validate eventing schema v10: %w", err)
 	}
 	if version < 11 {
@@ -427,7 +432,7 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 14"); err != nil {
 			return fmt.Errorf("record eventing schema v14: %w", err)
 		}
-	} else if err = validateSchemaV14(ctx, conn); err != nil {
+	} else if err = validateSchemaV14ForVersion(ctx, conn, version >= 18); err != nil {
 		return fmt.Errorf("validate eventing schema v14: %w", err)
 	}
 	if version < 15 {
@@ -466,8 +471,21 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 17"); err != nil {
 			return fmt.Errorf("record eventing schema v17: %w", err)
 		}
-	} else if err = validateSchemaV17(ctx, conn); err != nil {
+	} else if err = validateSchemaV17ForVersion(ctx, conn, version >= 18); err != nil {
 		return fmt.Errorf("validate eventing schema v17: %w", err)
+	}
+	if version < 18 {
+		if _, err = conn.ExecContext(ctx, schemaV18); err != nil {
+			return fmt.Errorf("create eventing schema v18: %w", err)
+		}
+		if err = validateSchemaV18(ctx, conn); err != nil {
+			return fmt.Errorf("validate eventing schema v18: %w", err)
+		}
+		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 18"); err != nil {
+			return fmt.Errorf("record eventing schema v18: %w", err)
+		}
+	} else if err = validateSchemaV18(ctx, conn); err != nil {
+		return fmt.Errorf("validate eventing schema v18: %w", err)
 	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit eventing migration: %w", err)
@@ -2424,16 +2442,20 @@ func (s *Store) withImmediate(ctx context.Context, operation func(*sql.Conn) err
 	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return err
 	}
+	committed := false
 	defer func() {
-		if err != nil {
+		if !committed {
 			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
 	if err = operation(conn); err != nil {
 		return err
 	}
-	_, err = conn.ExecContext(ctx, "COMMIT")
-	return err
+	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func marshalEnvelopeParts(event Envelope) ([]byte, []byte, []byte, error) {

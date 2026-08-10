@@ -193,11 +193,13 @@ ledger, model, provider, or publication authority:
   between those primitives is resolved by exact recovery replay followed by
   exact suspension replay, never by an unfenced reset or guessed WIP commit.
 
-`FR-GITWS-018` is not yet consumed by Event Automation. It supplies only the
-exact parked-line remote compare-and-swap effect. A later publisher must own its
-separate provider refresh, local-evidence admission, transport authority,
-write-ahead publication record, uncertain-outcome handling, and any review
-acknowledgement or merge decision before calling this primitive.
+`FR-GITWS-018` is not yet invoked by Event Automation. It supplies only the
+exact parked-line remote compare-and-swap effect. Event Automation requirement
+069 now owns an effect-free schema-v18 local-evidence admission and write-ahead
+publication journal, including terminal uncertainty, but no provider observer,
+gate runtime, transport authority, adapter, or worker supplies the primitive's
+request yet. Any review acknowledgement or merge behavior remains separately
+undefined and is never inferred from the journal or this primitive.
 
 Controller storage lifecycle debt is deliberate and bounded at this layer:
 ordinary pins remain private after `ReleasePinned`, even when never adopted, so
@@ -298,8 +300,9 @@ reservation bearers are not.
 Pinned-line push adds no inventory field, record, history entry, version, or
 configuration. Its request and result are transient controller values, and an
 observed or updated remote tip does not rewrite the retained source commit or
-mark the local line as durably published. Any later durable publication journal
-belongs to its orchestration owner rather than this inventory.
+mark the local line as durably published. The schema-v18 durable publication
+journal belongs to Event Automation rather than this inventory and still cannot
+invoke this primitive by itself.
 
 ## Surface Ownership
 

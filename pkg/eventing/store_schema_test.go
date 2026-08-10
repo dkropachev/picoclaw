@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -410,7 +411,7 @@ func TestStoreMigratesV16ControllersByteExactlyWithPopulatedForeignKeys(t *testi
 
 	var version, suspensions, migratedFences, migratedOperations int
 	require.NoError(t, migrated.db.QueryRow(`PRAGMA user_version`).Scan(&version))
-	assert.Equal(t, 17, version)
+	assert.Equal(t, schemaVersion, version)
 	require.NoError(t, migrated.db.QueryRow(`
 		SELECT COUNT(*) FROM pr_development_controller_suspensions`,
 	).Scan(&suspensions))
@@ -456,14 +457,158 @@ func TestStoreMigratesEmptyV16WithoutInferringSuspensions(t *testing.T) {
 	assertNoForeignKeyViolationsForSchemaTest(t, store.db)
 }
 
-func TestStoreV17RejectsFutureVersionWithoutTouchingV16Layout(t *testing.T) {
+func TestStoreMigratesEmptyV17ToEmptyPublicationJournal(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "future-v18-v16-layout.db")
+	path := filepath.Join(t.TempDir(), "migration-v17-publication-empty.db")
 	db := openSchemaTestDB(t, path)
-	installSchemaV1ForTest(t, db)
-	setSchemaTestVersion(t, db, 16)
-	_, err := db.Exec(`PRAGMA user_version = 18`)
+	installSchemaThroughV17ForTest(t, db)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+
+	var version, publications int
+	require.NoError(t, store.db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, schemaVersion, version)
+	require.NoError(t, store.db.QueryRow(
+		`SELECT COUNT(*) FROM pr_development_publications`,
+	).Scan(&publications))
+	assert.Zero(t, publications, "v18 must not invent publication work")
+	for _, object := range []struct {
+		kind string
+		name string
+	}{
+		{"table", "pr_development_publications"},
+		{"index", "pr_development_attempt_review_fences_publication"},
+		{"index", "pr_development_repair_orchestration_publication"},
+		{"index", "pr_development_publications_occurrence"},
+		{"index", "pr_development_publications_decision_run"},
+		{"index", "pr_development_publications_push_started"},
+		{"index", "pr_development_publications_claimable"},
+	} {
+		assert.True(t, schemaObjectExists(t, store.db, object.kind, object.name), object.name)
+	}
+	assertNoForeignKeyViolationsForSchemaTest(t, store.db)
+}
+
+func TestStoreMigratesPopulatedV17WithoutBackfillingPublicationJournal(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "migration-v17-publication-populated.db")
+	store, publication, replayInput := newPassedPRDevelopmentPublicationForSchemaTest(t, path)
+
+	parentTables := []string{
+		"pr_development_thread_controllers",
+		"pr_development_attempt_review_fences",
+		"pr_development_repair_orchestrations",
+		"pr_development_ledger_entries",
+	}
+	controllersBefore := readControllerRowsForSchemaTest(t, store.db)
+	require.NotEmpty(t, controllersBefore)
+	before := make(map[string]int, len(parentTables))
+	for _, table := range parentTables {
+		var count int
+		require.NoError(t, store.db.QueryRow(`SELECT COUNT(*) FROM `+table).Scan(&count))
+		require.Positive(t, count, table)
+		before[table] = count
+	}
+	var admittedPublications int
+	require.NoError(t, store.db.QueryRow(
+		`SELECT COUNT(*) FROM pr_development_publications WHERE id = ?`, publication.ID,
+	).Scan(&admittedPublications))
+	require.Equal(t, 1, admittedPublications, "the historical evidence must be publication-eligible")
+	require.NoError(t, store.Close())
+
+	db := openSchemaTestDB(t, path)
+	setSchemaTestVersion(t, db, 17)
+	assert.False(t, schemaObjectExists(t, db, "table", "pr_development_publications"))
+	require.NoError(t, db.Close())
+
+	migrated, err := Open(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, migrated.Close()) })
+	assert.Equal(
+		t,
+		controllersBefore,
+		readControllerRowsForSchemaTest(t, migrated.db),
+		"v18 must preserve every controller SQLite value",
+	)
+	for _, table := range parentTables {
+		var after int
+		require.NoError(t, migrated.db.QueryRow(`SELECT COUNT(*) FROM `+table).Scan(&after))
+		assert.Equal(t, before[table], after, table)
+	}
+	for _, proof := range []struct {
+		query string
+		args  []any
+	}{
+		{
+			query: `SELECT 1 FROM pr_development_thread_controllers
+				WHERE id = ? AND thread_id = ? AND line_id = ?`,
+			args: []any{publication.ControllerID, publication.ThreadID, publication.LineID},
+		},
+		{
+			query: `SELECT 1 FROM pr_development_attempt_review_fences
+				WHERE attempt_id = ? AND controller_id = ? AND ordinal = ? AND fence_hash = ?`,
+			args: []any{
+				publication.AttemptID, publication.ControllerID,
+				publication.FenceOrdinal, publication.FenceHash,
+			},
+		},
+		{
+			query: `SELECT 1 FROM pr_development_repair_orchestrations
+				WHERE attempt_id = ? AND receipt_hash = ?`,
+			args: []any{publication.AttemptID, publication.OrchestrationReceiptHash},
+		},
+		{
+			query: `SELECT 1 FROM pr_development_ledger_entries
+				WHERE id = ? AND kind = ? AND entry_hash = ?`,
+			args: []any{
+				publication.AttemptLedgerEntryID, publication.AttemptLedgerEntryKind,
+				publication.AttemptLedgerEntryHash,
+			},
+		},
+		{
+			query: `SELECT 1 FROM pr_development_ledger_entries
+				WHERE id = ? AND kind = ? AND entry_hash = ?`,
+			args: []any{
+				publication.ReviewLedgerEntryID, publication.ReviewLedgerEntryKind,
+				publication.ReviewLedgerEntryHash,
+			},
+		},
+	} {
+		var one int
+		require.NoError(t, migrated.db.QueryRow(proof.query, proof.args...).Scan(&one))
+		assert.Equal(t, 1, one)
+	}
+	legacyReplay, changed, err := migrated.AppendPRDevelopmentLedgerReview(
+		ctx,
+		replayInput,
+	)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Equal(t, publication.ReviewLedgerEntryID, legacyReplay.ID)
+	assert.Equal(t, publication.ReviewLedgerEntryHash, legacyReplay.EntryHash)
+	replayed, changed, err := migrated.CompletePRDevelopmentReview(ctx, replayInput)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	assert.Nil(t, replayed.Publication, "historical passed reviews must never be backfilled")
+	var publications int
+	require.NoError(t, migrated.db.QueryRow(
+		`SELECT COUNT(*) FROM pr_development_publications`,
+	).Scan(&publications))
+	assert.Zero(t, publications, "migration cannot infer publication eligibility")
+	assertNoForeignKeyViolationsForSchemaTest(t, migrated.db)
+}
+
+func TestStoreV18RejectsFutureVersionWithoutTouchingV17Layout(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "future-v19-v17-layout.db")
+	db := openSchemaTestDB(t, path)
+	installSchemaThroughV17ForTest(t, db)
+	_, err := db.Exec(`PRAGMA user_version = 19`)
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
@@ -476,12 +621,21 @@ func TestStoreV17RejectsFutureVersionWithoutTouchingV16Layout(t *testing.T) {
 	defer db.Close()
 	var version int
 	require.NoError(t, db.QueryRow(`PRAGMA user_version`).Scan(&version))
-	assert.Equal(t, 18, version)
-	assert.False(t, schemaObjectExists(
+	assert.Equal(t, 19, version)
+	assert.True(t, schemaObjectExists(
 		t, db, "table", "pr_development_controller_suspensions",
-	), "future-version fencing must occur before v17 DDL")
+	), "the untouched fixture must remain a true v17 layout")
+	assert.False(t, schemaObjectExists(
+		t, db, "table", "pr_development_publications",
+	), "future-version fencing must occur before v18 DDL")
+	assert.False(t, schemaObjectExists(
+		t, db, "index", "pr_development_attempt_review_fences_publication",
+	))
+	assert.False(t, schemaObjectExists(
+		t, db, "index", "pr_development_repair_orchestration_publication",
+	))
 	require.NoError(t, validateControllerTableForSchemaTest(
-		context.Background(), db, schemaV10PRDevelopmentControllersTable,
+		context.Background(), db, schemaV17PRDevelopmentControllersTable,
 	))
 }
 
@@ -523,6 +677,49 @@ func TestStoreV17MigrationFailureRollsBackControllerRebuild(t *testing.T) {
 	assert.False(t, schemaObjectExists(
 		t, db, "index", "pr_development_controller_suspensions_active",
 	), "v17 indexes created after the controller rebuild must roll back")
+}
+
+func TestStoreV18MigrationValidationFailureRollsBackPublicationIndexes(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "migration-v18-publication-rollback.db")
+	db := openSchemaTestDB(t, path)
+	installSchemaThroughV17ForTest(t, db)
+	malformed := strings.Replace(
+		schemaV18PRDevelopmentPublicationsTable,
+		"attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts IN (0, 1))",
+		"attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts > 0)",
+		1,
+	)
+	require.NotEqual(t, schemaV18PRDevelopmentPublicationsTable, malformed)
+	_, err := db.Exec(malformed)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorIs(t, err, ErrSchemaInvalid)
+	assert.Contains(t, err.Error(), "schema v18")
+
+	db = openSchemaTestDB(t, path)
+	defer db.Close()
+	var version int
+	require.NoError(t, db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, 17, version)
+	assert.True(t, schemaObjectExists(
+		t, db, "table", "pr_development_publications",
+	), "the preexisting malformed table must survive rollback")
+	for _, index := range []string{
+		"pr_development_attempt_review_fences_publication",
+		"pr_development_repair_orchestration_publication",
+		"pr_development_publications_occurrence",
+		"pr_development_publications_decision_run",
+		"pr_development_publications_push_started",
+		"pr_development_publications_claimable",
+	} {
+		assert.False(t, schemaObjectExists(t, db, "index", index), index)
+	}
 }
 
 func TestPRDevelopmentControllerSuspensionTypesAreJSONPrivate(t *testing.T) {
@@ -1130,6 +1327,606 @@ func TestStoreRejectsMalformedCurrentPRDevelopmentLedgerSchema(t *testing.T) {
 	assert.Equal(t, schemaVersion, version)
 }
 
+func TestStoreRejectsMalformedCurrentPRDevelopmentPublicationSchema(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "malformed-current-publication.db")
+	db := openSchemaTestDB(t, path)
+	installSchemaV1ForTest(t, db)
+	_, err := db.Exec(`DROP TABLE pr_development_publications`)
+	require.NoError(t, err)
+	malformed := strings.Replace(
+		schemaV18PRDevelopmentPublicationsTable,
+		"provider_observation_json BLOB NOT NULL DEFAULT X'' CHECK (",
+		"provider_observation_json TEXT NOT NULL DEFAULT '' CHECK (",
+		1,
+	)
+	require.NotEqual(t, schemaV18PRDevelopmentPublicationsTable, malformed)
+	_, err = db.Exec(malformed)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorIs(t, err, ErrSchemaInvalid)
+	assert.Contains(t, err.Error(), "validate eventing schema v18")
+	var validationErr *schemaValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, "pr_development_publications", validationErr.object)
+}
+
+func TestStoreRejectsCurrentPRDevelopmentPublicationMissingExactIndex(t *testing.T) {
+	t.Parallel()
+
+	indexes := []string{
+		"pr_development_attempt_review_fences_publication",
+		"pr_development_repair_orchestration_publication",
+		"pr_development_publications_occurrence",
+		"pr_development_publications_decision_run",
+		"pr_development_publications_push_started",
+		"pr_development_publications_claimable",
+	}
+	for _, index := range indexes {
+		t.Run(index, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "missing-publication-index.db")
+			db := openSchemaTestDB(t, path)
+			installSchemaV1ForTest(t, db)
+			_, err := db.Exec(`DROP INDEX "` + index + `"`)
+			require.NoError(t, err)
+			require.NoError(t, db.Close())
+
+			store, err := Open(context.Background(), path)
+			require.Error(t, err)
+			assert.Nil(t, store)
+			assert.ErrorIs(t, err, ErrSchemaInvalid)
+			var validationErr *schemaValidationError
+			require.ErrorAs(t, err, &validationErr)
+			assert.Equal(t, index, validationErr.object)
+		})
+	}
+}
+
+func TestStoreRejectsCurrentPRDevelopmentPublicationWrongPartialFence(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "wrong-publication-push-fence.db")
+	db := openSchemaTestDB(t, path)
+	installSchemaV1ForTest(t, db)
+	_, err := db.Exec(`DROP INDEX pr_development_publications_push_started`)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE UNIQUE INDEX pr_development_publications_push_started
+		ON pr_development_publications(controller_id) WHERE status = 'push_ready'`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorIs(t, err, ErrSchemaInvalid)
+	var validationErr *schemaValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, "pr_development_publications_push_started", validationErr.object)
+	assert.Contains(t, validationErr.problem, "definition differs")
+}
+
+func TestPRDevelopmentPublicationSchemaUsesExactCompositeForeignKeys(t *testing.T) {
+	t.Parallel()
+
+	db := openSchemaTestDB(t, filepath.Join(t.TempDir(), "publication-foreign-keys.db"))
+	defer db.Close()
+	installSchemaV1ForTest(t, db)
+
+	type foreignKeyColumn struct {
+		sequence int
+		from     string
+		to       string
+	}
+	type foreignKeyGroup struct {
+		table   string
+		columns []foreignKeyColumn
+	}
+	rows, err := db.Query(`PRAGMA foreign_key_list('pr_development_publications')`)
+	require.NoError(t, err)
+	defer rows.Close()
+	groups := make(map[int]foreignKeyGroup)
+	for rows.Next() {
+		var (
+			id, sequence                  int
+			table, from, to               string
+			onUpdate, onDelete, matchMode string
+		)
+		require.NoError(t, rows.Scan(
+			&id, &sequence, &table, &from, &to, &onUpdate, &onDelete, &matchMode,
+		))
+		assert.Equal(t, "NO ACTION", onUpdate)
+		assert.Equal(t, "RESTRICT", onDelete)
+		assert.Equal(t, "NONE", matchMode)
+		group := groups[id]
+		if group.table == "" {
+			group.table = table
+		}
+		require.Equal(t, group.table, table)
+		group.columns = append(group.columns, foreignKeyColumn{
+			sequence: sequence,
+			from:     from,
+			to:       to,
+		})
+		groups[id] = group
+	}
+	require.NoError(t, rows.Err())
+
+	actual := make([]string, 0, len(groups))
+	for _, group := range groups {
+		sort.Slice(group.columns, func(i, j int) bool {
+			return group.columns[i].sequence < group.columns[j].sequence
+		})
+		value := group.table + ":"
+		for index, column := range group.columns {
+			if index != 0 {
+				value += ","
+			}
+			value += column.from + "->" + column.to
+		}
+		actual = append(actual, value)
+	}
+	sort.Strings(actual)
+	expected := []string{
+		"pr_development_attempt_review_fences:attempt_id->attempt_id,controller_id->controller_id,fence_ordinal->ordinal,fence_hash->fence_hash",
+		"pr_development_cases:case_id->id",
+		"pr_development_ledger_entries:attempt_ledger_entry_id->id,attempt_ledger_entry_kind->kind,attempt_ledger_entry_hash->entry_hash",
+		"pr_development_ledger_entries:review_ledger_entry_id->id,review_ledger_entry_kind->kind,review_ledger_entry_hash->entry_hash",
+		"pr_development_repair_attempts:attempt_id->id",
+		"pr_development_repair_orchestrations:attempt_id->attempt_id,orchestration_receipt_hash->receipt_hash",
+		"pr_development_repair_sessions:owner_session_id->id",
+		"pr_development_thread_controllers:controller_id->id,thread_id->thread_id,line_id->line_id",
+		"pr_development_threads:thread_id->id",
+	}
+	sort.Strings(expected)
+	assert.Equal(t, expected, actual)
+}
+
+func TestPRDevelopmentPublicationCompositeForeignKeysRejectCrossEvidence(t *testing.T) {
+	t.Parallel()
+
+	wrongHash := func(current string) string {
+		candidate := strings.Repeat("f", 64)
+		if candidate == current {
+			candidate = strings.Repeat("e", 64)
+		}
+		return candidate
+	}
+	tests := []struct {
+		name   string
+		column string
+		value  func(PRDevelopmentPublication) any
+	}{
+		{
+			name:   "controller line",
+			column: "line_id",
+			value:  func(PRDevelopmentPublication) any { return "line_missing" },
+		},
+		{
+			name:   "review fence",
+			column: "fence_hash",
+			value: func(publication PRDevelopmentPublication) any {
+				return wrongHash(publication.FenceHash)
+			},
+		},
+		{
+			name:   "orchestration receipt",
+			column: "orchestration_receipt_hash",
+			value: func(publication PRDevelopmentPublication) any {
+				return wrongHash(publication.OrchestrationReceiptHash)
+			},
+		},
+		{
+			name:   "attempt ledger proof",
+			column: "attempt_ledger_entry_hash",
+			value: func(publication PRDevelopmentPublication) any {
+				return wrongHash(publication.AttemptLedgerEntryHash)
+			},
+		},
+		{
+			name:   "review ledger proof",
+			column: "review_ledger_entry_hash",
+			value: func(publication PRDevelopmentPublication) any {
+				return wrongHash(publication.ReviewLedgerEntryHash)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			store, publication, _ := newPassedPRDevelopmentPublicationForSchemaTest(
+				t,
+				":memory:",
+			)
+			_, err := store.db.Exec(
+				`UPDATE pr_development_publications SET `+test.column+` = ? WHERE id = ?`,
+				test.value(publication),
+				publication.ID,
+			)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "FOREIGN KEY constraint failed")
+		})
+	}
+}
+
+func TestPRDevelopmentPublicationOccurrenceIsUniqueByGlobalReviewEntry(t *testing.T) {
+	t.Parallel()
+
+	store, publication, _ := newPassedPRDevelopmentPublicationForSchemaTest(t, ":memory:")
+	identity := addPRDevelopmentDispatch(
+		t,
+		store,
+		"delivery-publication-duplicate-review",
+		"workflows/own-pr-feedback.yml",
+		"revision-publication-duplicate-review",
+	)
+	input := validPRDevelopmentInputForTest()
+	input.PRDevelopmentCaptureIdentity = identity
+	secondCase, created, err := store.CapturePRDevelopmentCase(
+		context.Background(),
+		validPRDevelopmentRequestForTest(input),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	require.NotEqual(t, publication.CaseID, secondCase.ID)
+
+	rows, err := store.db.Query(`PRAGMA table_info(pr_development_publications)`)
+	require.NoError(t, err)
+	defer rows.Close()
+	selectExpressions := make([]string, 0, 80)
+	arguments := make([]any, 0, 3)
+	for rows.Next() {
+		var (
+			columnID, notNull, primaryKey int
+			name, columnType              string
+			defaultValue                  sql.NullString
+		)
+		require.NoError(t, rows.Scan(
+			&columnID,
+			&name,
+			&columnType,
+			&notNull,
+			&defaultValue,
+			&primaryKey,
+		))
+		switch name {
+		case "id":
+			newID, idErr := newPrefixedID(prDevelopmentPublicationIDPrefix)
+			require.NoError(t, idErr)
+			selectExpressions = append(selectExpressions, "?")
+			arguments = append(arguments, newID)
+		case "case_id":
+			selectExpressions = append(selectExpressions, "?")
+			arguments = append(arguments, secondCase.ID)
+		default:
+			selectExpressions = append(
+				selectExpressions,
+				`"`+strings.ReplaceAll(name, `"`, `""`)+`"`,
+			)
+		}
+	}
+	require.NoError(t, rows.Err())
+	require.NotEmpty(t, selectExpressions)
+	arguments = append(arguments, publication.ID)
+	_, err = store.db.Exec(
+		`INSERT INTO pr_development_publications SELECT `+
+			strings.Join(selectExpressions, ", ")+
+			` FROM pr_development_publications WHERE id = ?`,
+		arguments...,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UNIQUE constraint failed")
+	assert.Contains(t, err.Error(), "review_ledger_entry_id")
+
+	var count int
+	require.NoError(t, store.db.QueryRow(`
+		SELECT COUNT(*) FROM pr_development_publications
+		WHERE review_ledger_entry_id = ?`,
+		publication.ReviewLedgerEntryID,
+	).Scan(&count))
+	assert.Equal(t, 1, count)
+}
+
+func TestPRDevelopmentPublicationSchemaEnforcesProgressiveGatePins(t *testing.T) {
+	t.Parallel()
+
+	store, publication, _ := newPassedPRDevelopmentPublicationForSchemaTest(t, ":memory:")
+	policyRevision := "sha256:" + strings.Repeat("a", 64)
+	subjectRevision := "sha256:" + strings.Repeat("b", 64)
+	policyHash := strings.Repeat("c", 64)
+	subjectHash := strings.Repeat("d", 64)
+	providerHash := strings.Repeat("e", 64)
+	createdAt := toDBTime(publication.CreatedAt)
+
+	_, err := store.db.Exec(`UPDATE pr_development_publications
+		SET subject_revision = ?, pinned_subject_json = ?, pinned_subject_hash = ?
+		WHERE id = ?`, subjectRevision, []byte(`{}`), subjectHash, publication.ID)
+	require.Error(t, err, "a subject cannot exist before its policy")
+
+	_, err = store.db.Exec(`UPDATE pr_development_publications
+		SET policy_revision = ?, pinned_policy_json = ?, pinned_policy_hash = ?
+		WHERE id = ?`, policyRevision, []byte(`{}`), policyHash, publication.ID)
+	require.NoError(t, err, "the policy-only progressive state must be durable")
+
+	_, err = store.db.Exec(`UPDATE pr_development_publications
+		SET status = 'gate_waiting', decision_run_id = ? WHERE id = ?`,
+		"wr_"+strings.Repeat("1", 32), publication.ID)
+	require.Error(t, err, "a gate cannot wait before subject/provider evidence exists")
+
+	_, err = store.db.Exec(`UPDATE pr_development_publications
+		SET subject_revision = ?, pinned_subject_json = ?, pinned_subject_hash = ?
+		WHERE id = ?`, subjectRevision, []byte(`{}`), subjectHash, publication.ID)
+	require.NoError(t, err)
+	_, err = store.db.Exec(`UPDATE pr_development_publications
+		SET status = 'gate_waiting', decision_run_id = ? WHERE id = ?`,
+		"wr_"+strings.Repeat("1", 32), publication.ID)
+	require.Error(t, err, "the decision identity must include provider evidence")
+
+	_, err = store.db.Exec(`UPDATE pr_development_publications SET
+		provider_observation_json = ?, provider_observation_hash = ?,
+		provider_pinned_at = ?, provider_observed_at = ? WHERE id = ?`,
+		[]byte(`{}`), providerHash, createdAt+1, createdAt+1, publication.ID)
+	require.Error(t, err, "provider evidence cannot postdate the row high-water")
+
+	_, err = store.db.Exec(`UPDATE pr_development_publications SET
+		provider_observation_json = ?, provider_observation_hash = ?,
+		provider_pinned_at = ?, provider_observed_at = ? WHERE id = ?`,
+		[]byte(`{}`), providerHash, createdAt, createdAt, publication.ID)
+	require.NoError(t, err)
+	_, err = store.db.Exec(`UPDATE pr_development_publications
+		SET provider_observed_at = ? WHERE id = ?`,
+		createdAt+1, publication.ID)
+	require.Error(t, err, "the latest provider time cannot advance before push start")
+	_, err = store.db.Exec(`UPDATE pr_development_publications
+		SET provider_pinned_at = ?, provider_observed_at = ? WHERE id = ?`,
+		createdAt+1, createdAt, publication.ID)
+	require.Error(t, err, "the latest provider time cannot predate its immutable pin")
+	_, err = store.db.Exec(`UPDATE pr_development_publications
+		SET status = 'gate_waiting' WHERE id = ?`, publication.ID)
+	require.Error(t, err, "gate-waiting must bind one decision run")
+
+	decisionRunID := "wr_" + strings.Repeat("2", 32)
+	_, err = store.db.Exec(`UPDATE pr_development_publications SET
+		status = 'gate_waiting', decision_run_id = ? WHERE id = ?`,
+		decisionRunID, publication.ID)
+	require.NoError(t, err)
+
+	_, err = store.db.Exec(`UPDATE pr_development_publications SET
+		status = 'claimed', claim_from = 'gate_waiting', claim_owner = 'schema-worker',
+		claim_token = 'schema-claim', claim_until = ?, claim_epoch = 1, claims = 1,
+		claimed_at = ? WHERE id = ?`,
+		createdAt+int64(time.Hour), createdAt+1, publication.ID)
+	require.Error(t, err, "claim evidence cannot postdate the row high-water")
+
+	_, err = store.db.Exec(`UPDATE pr_development_publications SET
+		status = 'claimed', claim_from = 'gate_waiting', claim_owner = 'schema-worker',
+		claim_token = 'schema-claim', claim_until = ?, claim_epoch = 1, claims = 1,
+		claimed_at = ? WHERE id = ?`,
+		createdAt+int64(time.Hour), createdAt, publication.ID)
+	require.NoError(t, err, "ordinary gate claims remain a scheduling state")
+
+	_, err = store.db.Exec(`UPDATE pr_development_publications SET
+		status = 'gate_waiting', claim_from = '', claim_owner = '', claim_token = '',
+		claim_until = NULL WHERE id = ?`, publication.ID)
+	require.NoError(t, err, "gate waiting releases the reservation while retaining history")
+}
+
+func TestPRDevelopmentPublicationSchemaAcceptsOnlyCoherentEffectShapes(t *testing.T) {
+	t.Parallel()
+
+	type effectShape struct {
+		name             string
+		status           string
+		terminal         bool
+		request          bool
+		effect           bool
+		claim            bool
+		result           bool
+		directReconciled bool
+		reconciled       bool
+		reconcileAtEnd   bool
+		errorCode        string
+		wantViolation    bool
+	}
+	shapes := []effectShape{
+		{
+			name: "conflict before effect", status: "conflict", terminal: true,
+			errorCode: "provider_changed",
+		},
+		{
+			name: "failed before effect", status: "failed", terminal: true,
+			errorCode: "runtime_unavailable",
+		},
+		{
+			name: "recovery before effect", status: "recovery_required", terminal: true,
+			errorCode: "recovery_required",
+		},
+		{
+			name: "superseded before effect", status: "superseded", terminal: true,
+			errorCode: "superseded",
+		},
+		{
+			name: "conflict after effect", status: "conflict", terminal: true,
+			request: true, effect: true, errorCode: "push_conflict",
+		},
+		{
+			name: "failed after effect", status: "failed", terminal: true,
+			request: true, effect: true, errorCode: "push_failed",
+		},
+		{
+			name: "recovery after effect", status: "recovery_required", terminal: true,
+			request: true, effect: true, errorCode: "recovery_required",
+		},
+		{name: "push in flight", status: "push_started", request: true, effect: true, claim: true},
+		{
+			name: "outcome unknown", status: "outcome_unknown", terminal: true,
+			request: true, effect: true, errorCode: "outcome_unknown",
+		},
+		{name: "published", status: "published", terminal: true, request: true, effect: true, result: true},
+		{
+			name: "published direct reconciled", status: "published", terminal: true,
+			request: true, effect: true, result: true, directReconciled: true,
+		},
+		{
+			name: "published after reconciliation", status: "published", terminal: true,
+			request: true, effect: true, result: true, reconciled: true,
+		},
+		{
+			name: "reconciliation at unknown completion", status: "published", terminal: true,
+			request: true, effect: true, result: true, reconciled: true,
+			reconcileAtEnd: true, wantViolation: true,
+		},
+		{
+			name: "superseded after effect", status: "superseded", terminal: true,
+			request: true, effect: true, errorCode: "superseded", wantViolation: true,
+		},
+		{
+			name: "superseded with unknown code", status: "superseded", terminal: true,
+			errorCode: "outcome_unknown", wantViolation: true,
+		},
+		{
+			name: "unknown with internal code", status: "outcome_unknown", terminal: true,
+			request: true, effect: true, errorCode: "internal", wantViolation: true,
+		},
+		{
+			name: "post-effect gate failure", status: "failed", terminal: true,
+			request: true, effect: true, errorCode: "gate_failed", wantViolation: true,
+		},
+		{
+			name: "push without its live claim", status: "push_started",
+			request: true, effect: true, wantViolation: true,
+		},
+		{
+			name: "published without result", status: "published", terminal: true,
+			request: true, effect: true, wantViolation: true,
+		},
+		{name: "terminal without error code", status: "failed", terminal: true, wantViolation: true},
+		{
+			name: "request without effect marker", status: "conflict", terminal: true,
+			request: true, errorCode: "push_conflict", wantViolation: true,
+		},
+	}
+
+	for _, shape := range shapes {
+		t.Run(shape.name, func(t *testing.T) {
+			t.Parallel()
+
+			store, publication, _ := newPassedPRDevelopmentPublicationForSchemaTest(
+				t,
+				":memory:",
+			)
+			createdAt := toDBTime(publication.CreatedAt)
+			_, err := store.db.Exec(`UPDATE pr_development_publications SET
+				policy_revision = ?, pinned_policy_json = ?, pinned_policy_hash = ?,
+				subject_revision = ?, pinned_subject_json = ?, pinned_subject_hash = ?,
+				provider_observation_json = ?, provider_observation_hash = ?,
+				provider_pinned_at = ?, provider_observed_at = ? WHERE id = ?`,
+				"sha256:"+strings.Repeat("a", 64), []byte(`{}`), strings.Repeat("b", 64),
+				"sha256:"+strings.Repeat("c", 64), []byte(`{}`), strings.Repeat("d", 64),
+				[]byte(`{}`), strings.Repeat("e", 64), createdAt, createdAt, publication.ID,
+			)
+			require.NoError(t, err)
+
+			tx, err := store.db.Begin()
+			require.NoError(t, err)
+			defer tx.Rollback()
+
+			var (
+				claimFrom, claimOwner, claimToken string
+				claimUntil, claimedAt             any
+				claimEpoch, claims, attempts      int
+				expectedRemoteTip                 string
+				requestJSON                       []byte
+				requestHash                       string
+				resultJSON                        []byte
+				resultHash, disposition           string
+				workspaceClean                    int
+				reconciliationJSON                []byte
+				reconciliationHash                string
+				reconciliationObservedAt          any
+				effectStartedAt, completedAt      any
+				updatedAt                         = createdAt
+				errorDetail                       string
+			)
+			requestJSON = []byte{}
+			resultJSON = []byte{}
+			reconciliationJSON = []byte{}
+			if shape.claim {
+				claimFrom, claimOwner, claimToken = "push_ready", "schema-worker", "schema-push"
+				claimUntil, claimedAt = createdAt+int64(time.Hour), createdAt
+				claimEpoch, claims = 1, 1
+			}
+			if shape.request {
+				expectedRemoteTip = publication.TipCommit
+				requestJSON = []byte(`{}`)
+				requestHash = strings.Repeat("1", 64)
+			}
+			if shape.effect {
+				effectStartedAt = createdAt
+				attempts = 1
+			}
+			if shape.result {
+				resultJSON = []byte(`{}`)
+				resultHash = strings.Repeat("2", 64)
+				disposition = "applied"
+				workspaceClean = 1
+			}
+			if shape.directReconciled {
+				disposition = "reconciled"
+			}
+			if shape.reconciled {
+				reconciliationJSON = []byte(`{}`)
+				reconciliationHash = strings.Repeat("3", 64)
+				reconciliationObservedAt = createdAt + 1
+				updatedAt = createdAt + 1
+				disposition = "reconciled"
+			}
+			if shape.reconcileAtEnd {
+				reconciliationObservedAt = createdAt
+			}
+			if shape.terminal {
+				completedAt = createdAt
+			}
+			if shape.errorCode != "" {
+				errorDetail = "schema lifecycle test"
+			}
+
+			_, err = tx.Exec(`UPDATE pr_development_publications SET
+				status = ?, claim_from = ?, claim_owner = ?, claim_token = ?,
+				claim_until = ?, claim_epoch = ?, claims = ?, claimed_at = ?,
+				attempts = ?,
+				expected_remote_tip = ?, push_request_json = ?, push_request_hash = ?,
+				push_result_json = ?, push_result_hash = ?, push_disposition = ?,
+				workspace_clean = ?, local_drift = 0,
+				reconciliation_observation_json = ?,
+				reconciliation_observation_hash = ?, reconciliation_observed_at = ?,
+				last_error_code = ?, last_error_detail = ?, effect_started_at = ?,
+				completed_at = ?, updated_at = ? WHERE id = ?`,
+				shape.status, claimFrom, claimOwner, claimToken,
+				claimUntil, claimEpoch, claims, claimedAt,
+				attempts,
+				expectedRemoteTip, requestJSON, requestHash,
+				resultJSON, resultHash, disposition, workspaceClean,
+				reconciliationJSON, reconciliationHash, reconciliationObservedAt,
+				shape.errorCode, errorDetail, effectStartedAt, completedAt, updatedAt,
+				publication.ID,
+			)
+			if shape.wantViolation {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestStorePRDevelopmentControllerMigrationValidationRollsBack(t *testing.T) {
 	t.Parallel()
 
@@ -1658,7 +2455,48 @@ func openSchemaTestDB(t *testing.T, path string) *sql.DB {
 	return db
 }
 
+func newPassedPRDevelopmentPublicationForSchemaTest(
+	t *testing.T,
+	databasePath string,
+) (*Store, PRDevelopmentPublication, PRDevelopmentLedgerReviewAppend) {
+	t.Helper()
+
+	store, clock, capture := newPRDevelopmentStoreFixture(t, databasePath)
+	fixture := newPRDevelopmentAIReviewOrchestrationOnStore(
+		t,
+		store,
+		clock,
+		capture,
+		"schema-v18-passed-attempt",
+		"gw-schema-v18-passed-line",
+		1800,
+	)
+	completePRDevelopmentAIReviewFixture(t, fixture, PRDevelopmentCIPassed, 9801)
+	lease := claimCompletedPRDevelopmentAIReviewFixture(t, fixture)
+	input := validPRDevelopmentAIReviewCompletionForTest(
+		lease,
+		PRDevelopmentLedgerReviewPassed,
+	)
+	completion, changed, err := store.CompletePRDevelopmentReview(
+		context.Background(),
+		input,
+	)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.NotNil(t, completion.Publication)
+	return store, *completion.Publication, input
+}
+
 func installSchemaV1ForTest(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	installSchemaThroughV17ForTest(t, db)
+	_, err := db.Exec(schemaV18)
+	require.NoError(t, err)
+	setSchemaTestVersion(t, db, schemaVersion)
+}
+
+func installSchemaThroughV17ForTest(t *testing.T, db *sql.DB) {
 	t.Helper()
 
 	_, err := db.Exec(schemaV1)
@@ -1694,7 +2532,7 @@ func installSchemaV1ForTest(t *testing.T, db *sql.DB) {
 	_, err = db.Exec(schemaV16)
 	require.NoError(t, err)
 	installSchemaV17ForTest(t, db)
-	setSchemaTestVersion(t, db, schemaVersion)
+	setSchemaTestVersion(t, db, 17)
 }
 
 func installSchemaV17ForTest(t *testing.T, db *sql.DB) {
@@ -1723,6 +2561,14 @@ func installSchemaTextForTest(t *testing.T, db *sql.DB, schema string) {
 func setSchemaTestVersion(t *testing.T, db *sql.DB, version int) {
 	t.Helper()
 
+	if version < 18 {
+		_, err := db.Exec(`DROP TABLE IF EXISTS pr_development_publications`)
+		require.NoError(t, err)
+		_, err = db.Exec(`DROP INDEX IF EXISTS pr_development_attempt_review_fences_publication`)
+		require.NoError(t, err)
+		_, err = db.Exec(`DROP INDEX IF EXISTS pr_development_repair_orchestration_publication`)
+		require.NoError(t, err)
+	}
 	if version < 17 && schemaObjectExists(
 		t,
 		db,

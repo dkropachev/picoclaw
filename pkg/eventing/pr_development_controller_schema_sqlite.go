@@ -155,13 +155,14 @@ const (
 )
 
 func validateSchemaV10(ctx context.Context, conn *sql.Conn) error {
-	return validateSchemaV10ForVersion(ctx, conn, false)
+	return validateSchemaV10ForVersion(ctx, conn, false, false)
 }
 
 func validateSchemaV10ForVersion(
 	ctx context.Context,
 	conn *sql.Conn,
 	controllerV17 bool,
+	publicationV18 bool,
 ) error {
 	binary := func(name string) schemaIndexColumn {
 		return schemaIndexColumn{name: name, collation: "BINARY"}
@@ -200,28 +201,39 @@ func validateSchemaV10ForVersion(
 	}); err != nil {
 		return err
 	}
-	if err := validateSchemaTable(ctx, conn, schemaTableSpec{
-		name:      "pr_development_attempt_review_fences",
-		createSQL: schemaV10PRDevelopmentReviewFencesTable,
-		uniqueIndexes: []schemaUniqueIndexSpec{
-			{origin: "pk", columns: []schemaIndexColumn{binary("attempt_id")}},
-			{
-				origin:  "u",
-				columns: []schemaIndexColumn{binary("controller_id"), binary("ordinal")},
-			},
-			{
-				origin:  "u",
-				columns: []schemaIndexColumn{binary("thread_id"), binary("line_version")},
-			},
-			{
-				origin:  "u",
-				columns: []schemaIndexColumn{binary("controller_id"), binary("park_intent_id")},
-			},
-			{
-				origin:  "u",
-				columns: []schemaIndexColumn{binary("mutation_reservation_digest")},
-			},
+	reviewFenceIndexes := []schemaUniqueIndexSpec{
+		{origin: "pk", columns: []schemaIndexColumn{binary("attempt_id")}},
+		{
+			origin:  "u",
+			columns: []schemaIndexColumn{binary("controller_id"), binary("ordinal")},
 		},
+		{
+			origin:  "u",
+			columns: []schemaIndexColumn{binary("thread_id"), binary("line_version")},
+		},
+		{
+			origin:  "u",
+			columns: []schemaIndexColumn{binary("controller_id"), binary("park_intent_id")},
+		},
+		{
+			origin:  "u",
+			columns: []schemaIndexColumn{binary("mutation_reservation_digest")},
+		},
+	}
+	if publicationV18 {
+		reviewFenceIndexes = append(reviewFenceIndexes, schemaUniqueIndexSpec{
+			name:   "pr_development_attempt_review_fences_publication",
+			origin: "c",
+			columns: []schemaIndexColumn{
+				binary("attempt_id"), binary("controller_id"),
+				binary("ordinal"), binary("fence_hash"),
+			},
+		})
+	}
+	if err := validateSchemaTable(ctx, conn, schemaTableSpec{
+		name:          "pr_development_attempt_review_fences",
+		createSQL:     schemaV10PRDevelopmentReviewFencesTable,
+		uniqueIndexes: reviewFenceIndexes,
 	}); err != nil {
 		return err
 	}

@@ -215,6 +215,14 @@ const (
 )
 
 func validateSchemaV14(ctx context.Context, conn *sql.Conn) error {
+	return validateSchemaV14ForVersion(ctx, conn, false)
+}
+
+func validateSchemaV14ForVersion(
+	ctx context.Context,
+	conn *sql.Conn,
+	publicationV18 bool,
+) error {
 	binary := func(name string) schemaIndexColumn {
 		return schemaIndexColumn{name: name, collation: "BINARY"}
 	}
@@ -228,24 +236,34 @@ func validateSchemaV14(ctx context.Context, conn *sql.Conn) error {
 	}); err != nil {
 		return err
 	}
-	if err := validateSchemaTable(ctx, conn, schemaTableSpec{
-		name:      "pr_development_repair_orchestrations",
-		createSQL: schemaV14PRDevelopmentRepairOrchestrationsTable,
-		uniqueIndexes: []schemaUniqueIndexSpec{
-			{origin: "pk", columns: []schemaIndexColumn{binary("attempt_id")}},
-			{
-				name: "pr_development_repair_orchestration_receipt", origin: "c", partial: true,
-				columns: []schemaIndexColumn{binary("receipt_hash")},
-			},
-			{
-				name: "pr_development_repair_orchestration_park", origin: "c", partial: true,
-				columns: []schemaIndexColumn{binary("park_operation_id")},
-			},
-			{
-				name: "pr_development_repair_orchestration_ledger", origin: "c", partial: true,
-				columns: []schemaIndexColumn{binary("ledger_entry_id")},
-			},
+	orchestrationIndexes := []schemaUniqueIndexSpec{
+		{origin: "pk", columns: []schemaIndexColumn{binary("attempt_id")}},
+		{
+			name: "pr_development_repair_orchestration_receipt", origin: "c", partial: true,
+			columns: []schemaIndexColumn{binary("receipt_hash")},
 		},
+		{
+			name: "pr_development_repair_orchestration_park", origin: "c", partial: true,
+			columns: []schemaIndexColumn{binary("park_operation_id")},
+		},
+		{
+			name: "pr_development_repair_orchestration_ledger", origin: "c", partial: true,
+			columns: []schemaIndexColumn{binary("ledger_entry_id")},
+		},
+	}
+	if publicationV18 {
+		orchestrationIndexes = append(orchestrationIndexes, schemaUniqueIndexSpec{
+			name:   "pr_development_repair_orchestration_publication",
+			origin: "c",
+			columns: []schemaIndexColumn{
+				binary("attempt_id"), binary("receipt_hash"),
+			},
+		})
+	}
+	if err := validateSchemaTable(ctx, conn, schemaTableSpec{
+		name:          "pr_development_repair_orchestrations",
+		createSQL:     schemaV14PRDevelopmentRepairOrchestrationsTable,
+		uniqueIndexes: orchestrationIndexes,
 	}); err != nil {
 		return err
 	}

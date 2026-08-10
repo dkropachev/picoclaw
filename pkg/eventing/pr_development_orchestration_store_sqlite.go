@@ -199,6 +199,12 @@ func (s *Store) ClaimPRDevelopmentRepairOrchestration(
 						FROM pr_development_thread_controllers AS retained
 						WHERE retained.owner_session_id = session.id
 						  AND retained.thread_id = thread.id AND retained.phase = 'ready'
+						  AND NOT EXISTS (
+							SELECT 1
+							FROM pr_development_publications AS publication
+							WHERE publication.controller_id = retained.id
+							  AND publication.status = 'push_started'
+						  )
 					)
 				)
 				AND (

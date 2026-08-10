@@ -1756,6 +1756,18 @@ func acquirePRDevelopmentMutationLease(
 		controller.Phase != PRDevelopmentControllerReady {
 		return PRDevelopmentController{}, ErrPRDevelopmentControllerActive
 	}
+	// The publication worker holds no controller lease while it evaluates gates
+	// or waits for a user. Only the narrow, durable push_started interval fences
+	// a new local mutation. Both transitions run under BEGIN IMMEDIATE, so either
+	// the mutation wins and invalidates publication high-water evidence, or the
+	// publication wins and this acquisition is rejected before local Git work.
+	if err := requireNoStartedPRDevelopmentPublication(
+		ctx,
+		conn,
+		controller.ID,
+	); err != nil {
+		return PRDevelopmentController{}, err
+	}
 	if controller.LineVersion >= MaxPRDevelopmentControllerFences ||
 		controller.Revision > MaxPRDevelopmentControllerRevision-
 			prDevelopmentControllerMutationRevisionReserve ||
@@ -1831,6 +1843,31 @@ func acquirePRDevelopmentMutationLease(
 		)
 	}
 	return updated, nil
+}
+
+func requireNoStartedPRDevelopmentPublication(
+	ctx context.Context,
+	queryer rowQueryer,
+	controllerID string,
+) error {
+	var exists int
+	err := queryer.QueryRowContext(ctx, `
+		SELECT 1
+		FROM pr_development_publications
+		WHERE controller_id = ? AND status = 'push_started'
+		LIMIT 1`,
+		controllerID,
+	).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf(
+		"%w: controller has a publication push in progress",
+		ErrPRDevelopmentControllerActive,
+	)
 }
 
 func acquirePRDevelopmentReviewLease(
