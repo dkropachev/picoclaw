@@ -50,6 +50,7 @@ type repairControllerStateStore interface {
 	eventing.PRDevelopmentWorkbenchReader
 	eventing.PRDevelopmentRepairOrchestrationStore
 	eventing.PRDevelopmentControllerReader
+	eventing.PRDevelopmentControllerSuspendedResumeStore
 	controllerHeartbeatStore
 }
 
@@ -70,6 +71,10 @@ type repairControllerWorkspace interface {
 		ctx context.Context,
 		request gitworkspace.PinnedCandidateRequest,
 	) (gitworkspace.PinnedCandidate, error)
+	ResumeSuspendedPinnedLine(
+		ctx context.Context,
+		request gitworkspace.PinnedLineSuspendedResumeRequest,
+	) (gitworkspace.PinnedLineSuspendedResumeResult, error)
 }
 
 type repairControllerLocalCI interface {
@@ -345,31 +350,10 @@ func (worker *RepairControllerWorker) processClaim(
 	}
 	contextDigest := run.ContextDigest
 	promptDigest := run.PromptDigest
-	if run.Phase == eventing.PRDevelopmentRepairOrchestrationBootstrap {
-		loader, loaderErr := worker.context(claim.session.AgentID)
-		if loaderErr != nil || isNilServiceValue(loader) {
-			if loaderErr == nil {
-				loaderErr = errors.New("thread context loader factory returned no loader")
-			}
-			return worker.failBootstrapIfSafe(ctx, run, nil, "",
-				eventing.PRDevelopmentRepairErrorRuntimeUnavailable,
-				"The configured local repair runtime is unavailable.", loaderErr)
-		}
-		claim.context, err = loader.Load(
-			ctx,
-			claim.session.CaseID,
-			claim.attempt.ConversationVersion,
-		)
-		if err != nil {
-			return worker.failBootstrapIfSafe(ctx, run, nil, "",
-				eventing.PRDevelopmentRepairErrorInternal,
-				"Local repair could not prepare its bounded repository context.", err)
-		}
-		contextDigest = controllerContextDigest(claim.context)
-		promptDigest = agent.ControllerLocalRepairPromptDigest()
-	} else if !validControllerSHA256(contextDigest) ||
-		!validControllerSHA256(promptDigest) ||
-		!validControllerSHA256(run.ModelResultDigest) {
+	if run.Phase != eventing.PRDevelopmentRepairOrchestrationBootstrap &&
+		(!validControllerSHA256(contextDigest) ||
+			!validControllerSHA256(promptDigest) ||
+			!validControllerSHA256(run.ModelResultDigest)) {
 		return errors.New("durable repair model checkpoint digests are incomplete")
 	}
 	expectedThread, err := repairThreadIdentity(
@@ -410,16 +394,42 @@ func (worker *RepairControllerWorker) processClaim(
 	}
 
 	var runner LocalRepairExecutor
-	if run.Phase == eventing.PRDevelopmentRepairOrchestrationBootstrap {
-		runner, err = worker.runtime(claim.session.AgentID, claim.attempt.Instruction)
-		if err != nil || isNilServiceValue(runner) {
-			if err == nil {
-				err = errors.New("local repair runtime factory returned no runner")
+	prepareBootstrapModel := func() (
+		eventing.PRDevelopmentRepairErrorCode,
+		string,
+		error,
+	) {
+		loader, loaderErr := worker.context(claim.session.AgentID)
+		if loaderErr != nil || isNilServiceValue(loader) {
+			if loaderErr == nil {
+				loaderErr = errors.New("thread context loader factory returned no loader")
 			}
-			return worker.failBootstrapIfSafe(ctx, run, nil, "",
-				eventing.PRDevelopmentRepairErrorRuntimeUnavailable,
-				"The configured local repair runtime is unavailable.", err)
+			return eventing.PRDevelopmentRepairErrorRuntimeUnavailable,
+				"The configured local repair runtime is unavailable.", loaderErr
 		}
+		claim.context, loaderErr = loader.Load(
+			ctx,
+			claim.session.CaseID,
+			claim.attempt.ConversationVersion,
+		)
+		if loaderErr != nil {
+			return eventing.PRDevelopmentRepairErrorInternal,
+				"Local repair could not prepare its bounded repository context.", loaderErr
+		}
+		contextDigest = controllerContextDigest(claim.context)
+		promptDigest = agent.ControllerLocalRepairPromptDigest()
+		runner, loaderErr = worker.runtime(
+			claim.session.AgentID,
+			claim.attempt.Instruction,
+		)
+		if loaderErr != nil || isNilServiceValue(runner) {
+			if loaderErr == nil {
+				loaderErr = errors.New("local repair runtime factory returned no runner")
+			}
+			return eventing.PRDevelopmentRepairErrorRuntimeUnavailable,
+				"The configured local repair runtime is unavailable.", loaderErr
+		}
+		return "", "", nil
 	}
 	workspace, err := worker.workspaces()
 	if err != nil || isNilServiceValue(workspace) {
@@ -481,7 +491,67 @@ func (worker *RepairControllerWorker) processClaim(
 		// lost response. Never terminalize or release across that ambiguity.
 		return fmt.Errorf("acquire retained development controller: %w", err)
 	}
-	if err = validateRepairControllerLease(claim, run, priorController, controllerFound, controllerLease); err != nil {
+	resumedSuspended := false
+	if controllerLease.SuspendedResume != nil {
+		resumeLease := *controllerLease.SuspendedResume
+		if err = validateRepairControllerSuspendedResumeLease(
+			claim,
+			run,
+			priorController,
+			controllerFound,
+			controllerLease,
+		); err != nil {
+			return err
+		}
+		heartbeat.SetSuspendedResume(resumeLease)
+		resumeResult, resumeErr := resumeSuspendedController(ctx, workspace, resumeLease)
+		if resumeErr != nil {
+			return resumeErr
+		}
+		// Refresh the parent and child claims once after Git so the following
+		// atomic finalization starts with a full, parent-capped lease window.
+		// The write-side transition barrier below drains this renewal and any
+		// ticker renewal before consuming the child claim.
+		if err = heartbeat.renew(ctx); err != nil {
+			return fmt.Errorf("refresh suspended resume claim before finalization: %w", err)
+		}
+		// Stop renewing the consumed resume claim, but keep the surrounding
+		// orchestration claim alive while the store installs its replacement
+		// mutation lease.
+		heartbeat.BeginResumeTransition()
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		controllerLease, _, err = worker.store.FinalizePRDevelopmentControllerSuspendedResume(
+			ctx,
+			eventing.PRDevelopmentControllerSuspendedResumeFinalize{
+				ControllerID:            resumeLease.Controller.ID,
+				AttemptID:               claim.attempt.ID,
+				SuspensionID:            resumeLease.Suspension.ID,
+				ExpectedRevision:        resumeLease.Controller.Revision,
+				OrchestrationClaimToken: run.ClaimToken,
+				ClaimID:                 resumeLease.Suspension.ResumeClaimID,
+				ClaimToken:              resumeLease.Suspension.ResumeClaimToken,
+				ClaimEpoch:              resumeLease.Suspension.ResumeClaimEpoch,
+				Result:                  resumeResult,
+				Lease:                   worker.lease,
+			},
+		)
+		if err != nil {
+			// Git may already have resumed the line. Leave the durable claim for
+			// exact replay/recovery; never retry Git from an invented request.
+			return fmt.Errorf("finalize suspended retained development line: %w", err)
+		}
+		resumedSuspended = true
+	}
+	if err = validateRepairControllerLease(
+		claim,
+		run,
+		priorController,
+		controllerFound,
+		resumedSuspended,
+		controllerLease,
+	); err != nil {
 		return err
 	}
 	heartbeat.SetController(controllerLease.Controller)
@@ -495,6 +565,15 @@ func (worker *RepairControllerWorker) processClaim(
 	line, err := establishRepairControllerLine(ctx, effects, controllerLease.Controller, run.SourceTree)
 	if err != nil {
 		return err
+	}
+	if run.Phase == eventing.PRDevelopmentRepairOrchestrationBootstrap {
+		_, _, prepareErr := prepareBootstrapModel()
+		if prepareErr != nil {
+			// Mutation ownership is now durable (whether newly adopted, resumed
+			// from Ready, or restored from Suspended). Leave it reclaimable;
+			// terminalizing bootstrap here would cross a Git/store boundary.
+			return fmt.Errorf("prepare model after retained line acquisition: %w", prepareErr)
+		}
 	}
 	fence := repairControllerLineFence{
 		controllerID:  controllerLease.Controller.ID,
@@ -748,6 +827,21 @@ func (worker *RepairControllerWorker) loadController(
 			return eventing.PRDevelopmentController{}, false,
 				errors.New("live mutation controller belongs to another attempt")
 		}
+	case eventing.PRDevelopmentControllerSuspended:
+		if controller.LeaseKind != "" || controller.LeaseToken != "" ||
+			controller.LeaseUntil != nil || controller.MutationReservationKey != "" {
+			return eventing.PRDevelopmentController{}, false,
+				errors.New("suspended controller unexpectedly retains mutation authority")
+		}
+		if controller.CurrentAttemptID == claim.attempt.ID {
+			if claim.run.ControllerID != controller.ID {
+				return eventing.PRDevelopmentController{}, false,
+					errors.New("prepared suspended resume is not bound to this orchestration")
+			}
+		} else if claim.run.ControllerID != "" {
+			return eventing.PRDevelopmentController{}, false,
+				errors.New("suspended controller belongs to a different prepared attempt")
+		}
 	default:
 		return eventing.PRDevelopmentController{}, false,
 			fmt.Errorf("retained controller phase %q cannot start repair", controller.Phase)
@@ -908,10 +1002,11 @@ func validateRepairControllerLease(
 	run eventing.PRDevelopmentRepairOrchestration,
 	prior eventing.PRDevelopmentController,
 	priorFound bool,
+	resumedSuspended bool,
 	lease eventing.PRDevelopmentControllerLease,
 ) error {
 	controller := lease.Controller
-	if lease.ReviewFence != nil || controller.ID == "" ||
+	if lease.ReviewFence != nil || lease.SuspendedResume != nil || controller.ID == "" ||
 		controller.ThreadID != run.ThreadID || controller.OwnerSessionID != claim.session.ID ||
 		controller.AgentID != claim.session.AgentID || controller.CurrentAttemptID != run.AttemptID ||
 		controller.Phase != eventing.PRDevelopmentControllerMutation ||
@@ -926,6 +1021,10 @@ func validateRepairControllerLease(
 	if priorFound && controller.ID != prior.ID {
 		return errors.New("acquired a different retained controller")
 	}
+	if priorFound && prior.Phase == eventing.PRDevelopmentControllerSuspended &&
+		!resumedSuspended {
+		return errors.New("suspended retained controller bypassed exact resume")
+	}
 	if controller.WorkspaceID != "" &&
 		(controller.WorkspaceID != run.WorkspaceID ||
 			controller.WorkspaceID != claim.session.WorkspaceID ||
@@ -937,6 +1036,63 @@ func validateRepairControllerLease(
 			(controller.MutationEpoch != controller.LineVersion &&
 				controller.MutationEpoch != controller.LineVersion+1)) {
 		return errors.New("acquired repair controller source or line fence changed")
+	}
+	return nil
+}
+
+func validateRepairControllerSuspendedResumeLease(
+	claim repairControllerClaim,
+	run eventing.PRDevelopmentRepairOrchestration,
+	prior eventing.PRDevelopmentController,
+	priorFound bool,
+	lease eventing.PRDevelopmentControllerLease,
+) error {
+	if lease.ReviewFence != nil || lease.SuspendedResume == nil {
+		return errors.New("acquired suspended resume lease is missing")
+	}
+	resume := *lease.SuspendedResume
+	controller := lease.Controller
+	resumeController := resume.Controller
+	suspension := resume.Suspension
+	if controller.ID == "" || controller != resumeController ||
+		controller.ID != suspension.ControllerID || controller.ThreadID != run.ThreadID ||
+		controller.OwnerSessionID != claim.session.ID ||
+		controller.AgentID != claim.session.AgentID ||
+		controller.CurrentAttemptID != claim.attempt.ID ||
+		controller.Phase != eventing.PRDevelopmentControllerSuspended ||
+		controller.LeaseKind != "" || controller.LeaseToken != "" ||
+		controller.LeaseUntil != nil || controller.MutationReservationKey != "" ||
+		suspension.Status != eventing.PRDevelopmentControllerSuspensionStatusResumeClaimed ||
+		suspension.ResumeAttemptID != claim.attempt.ID ||
+		suspension.ResumeClaimID == "" || suspension.ResumeClaimToken == "" ||
+		suspension.ResumeClaimEpoch < 1 || suspension.ResumeClaimUntil == nil ||
+		suspension.ResumeReservationKey == "" {
+		return errors.New("acquired suspended resume lease is incomplete or changed")
+	}
+	if run.ControllerID != "" && controller.ID != run.ControllerID {
+		return errors.New("acquired suspended resume controller identity changed")
+	}
+	if priorFound {
+		if controller.ID != prior.ID || prior.Phase != eventing.PRDevelopmentControllerSuspended ||
+			(controller.Revision != prior.Revision && controller.Revision != prior.Revision+1) {
+			return errors.New("acquired a different suspended retained controller")
+		}
+	}
+	if controller.WorkspaceID == "" || controller.WorkspaceID != run.WorkspaceID ||
+		controller.WorkspaceID != claim.session.WorkspaceID ||
+		controller.SourceCloneURL != run.CloneURL || controller.SourceRef != run.HeadRef ||
+		controller.SourceCommit != run.HeadSHA || controller.SourceTree != run.SourceTree ||
+		controller.LineID == "" || controller.TipCommit == "" || controller.Tree == "" ||
+		controller.WorkspaceID != suspension.WorkspaceID ||
+		controller.LineID != suspension.LineID ||
+		controller.SourceCloneURL != suspension.SourceCloneURL ||
+		controller.SourceRef != suspension.SourceRef ||
+		controller.SourceCommit != suspension.SourceCommit ||
+		controller.SourceTree != suspension.SourceTree ||
+		controller.LineVersion != suspension.LineVersion ||
+		controller.MutationEpoch != suspension.MutationEpoch ||
+		controller.TipCommit != suspension.TipCommit || controller.Tree != suspension.Tree {
+		return errors.New("acquired suspended resume source or line fence changed")
 	}
 	return nil
 }

@@ -47,8 +47,10 @@ type repairControllerWorkerStoreFake struct {
 	claimCalls      int
 	renewCalls      int
 	controllerRenew int
+	resumeRenew     int
 	pinCalls        []eventing.PRDevelopmentRepairOrchestrationPin
 	acquireCalls    []eventing.PRDevelopmentRepairOrchestrationControllerAcquire
+	resumeFinalizes []eventing.PRDevelopmentControllerSuspendedResumeFinalize
 	starts          []eventing.PRDevelopmentRepairOrchestrationModelStart
 	completes       []eventing.PRDevelopmentRepairOrchestrationModelComplete
 	validations     []eventing.PRDevelopmentRepairOrchestrationValidation
@@ -58,6 +60,9 @@ type repairControllerWorkerStoreFake struct {
 	acquireErr         error
 	renewErr           error
 	controllerRenewErr error
+	resumeRenewErr     error
+	resumeFinalizeErr  error
+	resumeFinalLease   eventing.PRDevelopmentControllerLease
 	events             *[]string
 }
 
@@ -246,6 +251,32 @@ func (store *repairControllerWorkerStoreFake) RenewPRDevelopmentControllerLease(
 	return store.controllerRenewErr
 }
 
+func (store *repairControllerWorkerStoreFake) RenewPRDevelopmentControllerSuspendedResume(
+	context.Context,
+	eventing.PRDevelopmentControllerSuspendedResumeRenew,
+) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.resumeRenew++
+	return store.resumeRenewErr
+}
+
+func (store *repairControllerWorkerStoreFake) FinalizePRDevelopmentControllerSuspendedResume(
+	_ context.Context,
+	input eventing.PRDevelopmentControllerSuspendedResumeFinalize,
+) (eventing.PRDevelopmentControllerLease, bool, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.resumeFinalizes = append(store.resumeFinalizes, input)
+	if store.events != nil {
+		*store.events = append(*store.events, "resume-finalize")
+	}
+	if store.resumeFinalizeErr != nil {
+		return eventing.PRDevelopmentControllerLease{}, false, store.resumeFinalizeErr
+	}
+	return store.resumeFinalLease, true, nil
+}
+
 func (store *repairControllerWorkerStoreFake) PreparePRDevelopmentControllerOperation(
 	context.Context,
 	eventing.PRDevelopmentControllerOperationPrepare,
@@ -263,8 +294,9 @@ func (store *repairControllerWorkerStoreFake) FinalizePRDevelopmentControllerOpe
 }
 
 type repairControllerContextLoaderFake struct {
-	text  string
-	calls int
+	text   string
+	calls  int
+	events *[]string
 }
 
 func (loader *repairControllerContextLoaderFake) Load(
@@ -273,6 +305,9 @@ func (loader *repairControllerContextLoaderFake) Load(
 	int64,
 ) (string, error) {
 	loader.calls++
+	if loader.events != nil {
+		*loader.events = append(*loader.events, "context")
+	}
 	return loader.text, nil
 }
 
@@ -297,6 +332,7 @@ type repairControllerExecutorFake struct {
 	request       agent.LocalRepairRequest
 	calls         int
 	waitForCancel bool
+	events        *[]string
 }
 
 func (executor *repairControllerExecutorFake) Run(
@@ -305,6 +341,9 @@ func (executor *repairControllerExecutorFake) Run(
 ) (agent.LocalRepairResult, error) {
 	executor.calls++
 	executor.request = request
+	if executor.events != nil {
+		*executor.events = append(*executor.events, "model")
+	}
 	if executor.waitForCancel {
 		<-ctx.Done()
 		return agent.LocalRepairResult{}, ctx.Err()
@@ -322,6 +361,9 @@ type repairControllerWorkspaceFake struct {
 	acquireHook      func()
 	snapshotErr      error
 	releaseErr       error
+	resumeRequests   []gitworkspace.PinnedLineSuspendedResumeRequest
+	resumeResults    []gitworkspace.PinnedLineSuspendedResumeResult
+	resumeErr        error
 	events           *[]string
 }
 
@@ -360,6 +402,27 @@ func (workspace *repairControllerWorkspaceFake) SnapshotPinnedValidationCandidat
 	}
 	result := workspace.snapshots[0]
 	workspace.snapshots = workspace.snapshots[1:]
+	return result, nil
+}
+
+func (workspace *repairControllerWorkspaceFake) ResumeSuspendedPinnedLine(
+	_ context.Context,
+	request gitworkspace.PinnedLineSuspendedResumeRequest,
+) (gitworkspace.PinnedLineSuspendedResumeResult, error) {
+	workspace.resumeRequests = append(workspace.resumeRequests, request)
+	if workspace.events != nil {
+		*workspace.events = append(*workspace.events, "resume-git")
+	}
+	if workspace.resumeErr != nil {
+		return gitworkspace.PinnedLineSuspendedResumeResult{}, workspace.resumeErr
+	}
+	if len(workspace.resumeResults) == 0 {
+		return gitworkspace.PinnedLineSuspendedResumeResult{}, errors.New(
+			"unexpected suspended resume",
+		)
+	}
+	result := workspace.resumeResults[0]
+	workspace.resumeResults = workspace.resumeResults[1:]
 	return result, nil
 }
 
@@ -827,6 +890,270 @@ func TestRepairControllerWorkerChangedNoChangeAndNonGreen(t *testing.T) {
 				t.Fatalf("runtime agents = %#v, want pinned-agent", got)
 			}
 		})
+	}
+}
+
+func TestRepairControllerWorkerResumesSuspendedLineBeforeModel(t *testing.T) {
+	fixture := newRepairControllerWorkerFixture(
+		t,
+		eventing.PRDevelopmentRepairOrchestrationBootstrap,
+		false,
+		localci.StatusPassed,
+	)
+	now := time.Now().UTC()
+	claimUntil := now.Add(time.Hour)
+	resumeReservation := "pdck_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	suspensionHash := controllerWorkerDigest("a")
+	candidateDigest := controllerWorkerDigest("4")
+	prior := eventing.PRDevelopmentController{
+		ID:               controllerWorkerControllerID,
+		ThreadID:         controllerWorkerThreadID,
+		OwnerSessionID:   controllerWorkerSessionID,
+		AgentID:          "pinned-agent",
+		Revision:         4,
+		Phase:            eventing.PRDevelopmentControllerSuspended,
+		WorkspaceID:      "workspace-1",
+		LineID:           controllerWorkerLineID,
+		CurrentAttemptID: "pdr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		SourceCloneURL:   "https://github.com/owner/repo.git",
+		SourceRef:        "feature",
+		SourceCommit:     controllerWorkerHead,
+		SourceTree:       controllerWorkerSourceTree,
+		LineVersion:      0,
+		MutationEpoch:    1,
+		TipCommit:        controllerWorkerHead,
+		Tree:             controllerWorkerSourceTree,
+		LeaseEpoch:       1,
+	}
+	prepared := prior
+	prepared.Revision++
+	prepared.CurrentAttemptID = controllerWorkerAttemptID
+	suspension := eventing.PRDevelopmentControllerSuspension{
+		ID:                      "pdsi_cccccccccccccccccccccccccccccccc",
+		ControllerID:            controllerWorkerControllerID,
+		ThreadID:                controllerWorkerThreadID,
+		OwnerSessionID:          controllerWorkerSessionID,
+		AttemptID:               prior.CurrentAttemptID,
+		Status:                  eventing.PRDevelopmentControllerSuspensionStatusResumeClaimed,
+		AgentID:                 "pinned-agent",
+		WorkspaceID:             "workspace-1",
+		LineID:                  controllerWorkerLineID,
+		SourceCloneURL:          prior.SourceCloneURL,
+		SourceRef:               prior.SourceRef,
+		SourceCommit:            prior.SourceCommit,
+		SourceTree:              prior.SourceTree,
+		LineVersion:             prior.LineVersion,
+		MutationEpoch:           prior.MutationEpoch,
+		TipCommit:               prior.TipCommit,
+		Tree:                    prior.Tree,
+		FinalSuspensionRevision: prior.Revision,
+		ResumeAttemptID:         controllerWorkerAttemptID,
+		ResumeIntentID:          "pdsri_dddddddddddddddddddddddddddddddd",
+		ResumeReservationKey:    resumeReservation,
+		ResumeClaimID:           "pdsrc_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		ResumeClaimToken:        "resume-claim-token",
+		ResumeClaimUntil:        &claimUntil,
+		ResumeClaimEpoch:        2,
+		SuspendResult: eventing.PRDevelopmentControllerSuspensionResult{
+			WorkspaceID:      "workspace-1",
+			Version:          prior.LineVersion,
+			MutationEpoch:    prior.MutationEpoch,
+			Tip:              prior.TipCommit,
+			Tree:             prior.Tree,
+			CandidateTree:    controllerWorkerSourceTree,
+			CandidateDigest:  candidateDigest,
+			ChangedFileCount: 0,
+			SuspensionHash:   suspensionHash,
+		},
+	}
+	suspension.ResumeRequest = eventing.PRDevelopmentControllerSuspendedResumeRequest{
+		Repository:            prior.SourceCloneURL,
+		SourceRef:             prior.SourceRef,
+		SourceCommit:          prior.SourceCommit,
+		ReservationKey:        resumeReservation,
+		AgentID:               prior.AgentID,
+		WorkspaceID:           prior.WorkspaceID,
+		LineID:                prior.LineID,
+		IntentID:              suspension.ResumeIntentID,
+		ExpectedVersion:       prior.LineVersion,
+		ExpectedMutationEpoch: prior.MutationEpoch,
+		ExpectedTip:           prior.TipCommit,
+		ExpectedTree:          prior.Tree,
+		SuspensionHash:        suspensionHash,
+		CandidateTree:         suspension.SuspendResult.CandidateTree,
+		CandidateDigest:       candidateDigest,
+		ChangedFileCount:      0,
+	}
+	fixture.store.controller = prior
+	fixture.store.controllerErr = nil
+	fixture.store.lease = eventing.PRDevelopmentControllerLease{
+		Controller: prepared,
+		SuspendedResume: &eventing.PRDevelopmentControllerSuspendedResumeLease{
+			Controller: prepared,
+			Suspension: suspension,
+		},
+	}
+	resumed := prepared
+	resumed.Revision++
+	resumed.Phase = eventing.PRDevelopmentControllerMutation
+	resumed.LeaseKind = eventing.PRDevelopmentControllerMutationLease
+	resumed.LeaseToken = controllerWorkerLeaseToken
+	resumed.LeaseUntil = &claimUntil
+	resumed.LeaseEpoch++
+	resumed.MutationReservationKey = resumeReservation
+	fixture.store.resumeFinalLease = eventing.PRDevelopmentControllerLease{Controller: resumed}
+	fixture.effects.line.Revision = resumed.Revision
+	fixture.effects.line.MutationEpoch = resumed.MutationEpoch
+	fixture.workspace.resumeResults = []gitworkspace.PinnedLineSuspendedResumeResult{{
+		WorkspaceID:      prior.WorkspaceID,
+		Version:          prior.LineVersion,
+		MutationEpoch:    prior.MutationEpoch,
+		Tip:              prior.TipCommit,
+		Tree:             prior.Tree,
+		CandidateTree:    suspension.SuspendResult.CandidateTree,
+		CandidateDigest:  candidateDigest,
+		ChangedFileCount: 0,
+		SuspensionHash:   suspensionHash,
+		RotationHash:     controllerWorkerDigest("b"),
+	}}
+	session := fixture.store.workbench.RepairSession
+	session.HeadRepository = "owner/repo"
+	session.HeadRef = prior.SourceRef
+	session.HeadSHA = prior.SourceCommit
+	session.CloneURL = prior.SourceCloneURL
+	session.ReviewDigest = controllerWorkerDigest("e")
+	session.WorkspaceID = prior.WorkspaceID
+	events := []string{}
+	fixture.store.events = &events
+	fixture.workspace.events = &events
+	fixture.context.events = &events
+	fixture.executor.events = &events
+
+	processed, err := fixture.worker.ProcessOne(context.Background())
+	if err != nil || !processed {
+		t.Fatalf("ProcessOne() = %v, %v, want true, nil", processed, err)
+	}
+	if got := strings.Join(events[:4], ","); got != "resume-git,resume-finalize,context,model" {
+		t.Fatalf("resume/model order = %q", got)
+	}
+	if len(fixture.workspace.resumeRequests) != 1 ||
+		len(fixture.store.resumeFinalizes) != 1 || fixture.executor.calls != 1 {
+		t.Fatalf(
+			"resume flow counts = git %d, finalize %d, model %d",
+			len(fixture.workspace.resumeRequests), len(fixture.store.resumeFinalizes),
+			fixture.executor.calls,
+		)
+	}
+	if fixture.effects.adopts != 0 || fixture.effects.resumes != 0 {
+		t.Fatalf("ordinary line effects ran after suspended resume: adopt %d, resume %d",
+			fixture.effects.adopts, fixture.effects.resumes)
+	}
+	if got := fixture.executor.request.Pin.ReservationKey; got != resumeReservation {
+		t.Fatalf("model reservation = %q, want resumed %q", got, resumeReservation)
+	}
+	finalize := fixture.store.resumeFinalizes[0]
+	if finalize.ExpectedRevision != prepared.Revision ||
+		finalize.OrchestrationClaimToken != fixture.store.run.ClaimToken ||
+		finalize.ClaimToken != suspension.ResumeClaimToken ||
+		finalize.Result.RotationHash != controllerWorkerDigest("b") {
+		t.Fatalf("resume finalization = %#v", finalize)
+	}
+}
+
+func TestValidateRepairControllerLeaseRejectsSuspendedResumeBypass(t *testing.T) {
+	claim := repairControllerClaim{
+		session: eventing.PRDevelopmentRepairSession{
+			ID:          controllerWorkerSessionID,
+			AgentID:     "pinned-agent",
+			WorkspaceID: "workspace-1",
+		},
+		attempt: eventing.PRDevelopmentRepairAttempt{ID: controllerWorkerAttemptID},
+	}
+	run := eventing.PRDevelopmentRepairOrchestration{
+		AttemptID:   controllerWorkerAttemptID,
+		ThreadID:    controllerWorkerThreadID,
+		WorkspaceID: "workspace-1",
+		CloneURL:    "https://github.com/owner/repo.git",
+		HeadRef:     "feature",
+		HeadSHA:     controllerWorkerHead,
+		SourceTree:  controllerWorkerSourceTree,
+	}
+	prior := eventing.PRDevelopmentController{
+		ID:       controllerWorkerControllerID,
+		Phase:    eventing.PRDevelopmentControllerSuspended,
+		Revision: 4,
+	}
+	controller := eventing.PRDevelopmentController{
+		ID:                     controllerWorkerControllerID,
+		ThreadID:               controllerWorkerThreadID,
+		OwnerSessionID:         controllerWorkerSessionID,
+		AgentID:                "pinned-agent",
+		Revision:               6,
+		Phase:                  eventing.PRDevelopmentControllerMutation,
+		CurrentAttemptID:       controllerWorkerAttemptID,
+		LeaseKind:              eventing.PRDevelopmentControllerMutationLease,
+		LeaseToken:             controllerWorkerLeaseToken,
+		LeaseEpoch:             2,
+		MutationReservationKey: controllerWorkerRotatedKey,
+		WorkspaceID:            "workspace-1",
+		SourceCloneURL:         run.CloneURL,
+		SourceRef:              run.HeadRef,
+		SourceCommit:           run.HeadSHA,
+		SourceTree:             run.SourceTree,
+		LineID:                 controllerWorkerLineID,
+		LineVersion:            0,
+		MutationEpoch:          1,
+		TipCommit:              controllerWorkerHead,
+		Tree:                   controllerWorkerSourceTree,
+	}
+	lease := eventing.PRDevelopmentControllerLease{Controller: controller}
+	err := validateRepairControllerLease(claim, run, prior, true, false, lease)
+	if err == nil || !strings.Contains(err.Error(), "bypassed exact resume") {
+		t.Fatalf("validateRepairControllerLease() error = %v, want resume bypass", err)
+	}
+	if err = validateRepairControllerLease(claim, run, prior, true, true, lease); err != nil {
+		t.Fatalf("validateRepairControllerLease() after exact resume error = %v", err)
+	}
+}
+
+func TestValidateRepairControllerSuspendedResumeRejectsNestedControllerDrift(t *testing.T) {
+	outer := eventing.PRDevelopmentController{
+		ID:               controllerWorkerControllerID,
+		ThreadID:         controllerWorkerThreadID,
+		OwnerSessionID:   controllerWorkerSessionID,
+		AgentID:          "pinned-agent",
+		Revision:         5,
+		Phase:            eventing.PRDevelopmentControllerSuspended,
+		CurrentAttemptID: controllerWorkerAttemptID,
+	}
+	nested := outer
+	nested.Revision++
+	err := validateRepairControllerSuspendedResumeLease(
+		repairControllerClaim{
+			session: eventing.PRDevelopmentRepairSession{
+				ID:      controllerWorkerSessionID,
+				AgentID: "pinned-agent",
+			},
+			attempt: eventing.PRDevelopmentRepairAttempt{ID: controllerWorkerAttemptID},
+		},
+		eventing.PRDevelopmentRepairOrchestration{
+			AttemptID: controllerWorkerAttemptID,
+			ThreadID:  controllerWorkerThreadID,
+		},
+		outer,
+		true,
+		eventing.PRDevelopmentControllerLease{
+			Controller: outer,
+			SuspendedResume: &eventing.PRDevelopmentControllerSuspendedResumeLease{
+				Controller: nested,
+				Suspension: eventing.PRDevelopmentControllerSuspension{
+					ControllerID: controllerWorkerControllerID,
+				},
+			},
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "incomplete or changed") {
+		t.Fatalf("validateRepairControllerSuspendedResumeLease() error = %v, want drift", err)
 	}
 }
 
