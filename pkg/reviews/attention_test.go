@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	sharedattention "github.com/sipeed/picoclaw/pkg/attention"
 	"github.com/sipeed/picoclaw/pkg/eventing"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/session"
@@ -528,6 +529,29 @@ func TestAttentionLauncherRejectsBaseAdmissionThatDoesNotCreate(t *testing.T) {
 	}
 }
 
+func TestAttentionAdmissionUncertaintyRetainsCompatibilityAndOutranksCancellation(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	sanitized := sanitizeAttentionError(
+		ctx,
+		fmt.Errorf(
+			"%w: %w",
+			sharedattention.ErrPrivateRunAdmissionUncertain,
+			context.Canceled,
+		),
+		true,
+	)
+	if !errors.Is(sanitized, sharedattention.ErrPrivateRunAdmissionUncertain) ||
+		!errors.Is(sanitized, workflows.ErrRunAdmissionUnavailable) ||
+		errors.Is(sanitized, context.Canceled) {
+		t.Fatalf("sanitized uncertainty = %v", sanitized)
+	}
+}
+
 func TestAttentionLauncherConcurrentCreateBeforeLinkCommitConverges(t *testing.T) {
 	store := newAttentionTestStore(workingContextTestDetail(serviceTestCaseID, 12))
 	created := make(chan struct{})
@@ -588,18 +612,17 @@ func TestAttentionLauncherConcurrentCreateBeforeLinkCommitConverges(t *testing.T
 	close(releaseCommit)
 	firstOutcome := <-firstDone
 	secondOutcome := <-secondDone
-	if firstOutcome.err != nil || secondOutcome.err != nil {
-		t.Fatalf("concurrent errors = %v, %v", firstOutcome.err, secondOutcome.err)
-	}
-	if firstOutcome.result.RunID == "" ||
-		firstOutcome.result.RunID != secondOutcome.result.RunID {
-		t.Fatalf("concurrent results = %#v, %#v", firstOutcome.result, secondOutcome.result)
-	}
-	if firstOutcome.result.Existing == secondOutcome.result.Existing {
-		t.Fatalf(
-			"existing flags = %v and %v, want exactly one",
-			firstOutcome.result.Existing,
-			secondOutcome.result.Existing,
+	secondUncertain := secondOutcome.result == (AttentionLaunchResult{}) &&
+		errors.Is(secondOutcome.err, sharedattention.ErrPrivateRunAdmissionUncertain) &&
+		errors.Is(secondOutcome.err, workflows.ErrRunAdmissionUnavailable)
+	secondStable := secondOutcome.err == nil && secondOutcome.result.Existing &&
+		secondOutcome.result.RunID == firstOutcome.result.RunID &&
+		secondOutcome.result.Status == workflows.RunStatusSucceeded
+	if firstOutcome.err != nil || firstOutcome.result.RunID == "" ||
+		firstOutcome.result.Existing || (!secondUncertain && !secondStable) {
+		t.Fatalf("concurrent outcomes = (%#v, %v), (%#v, %v)",
+			firstOutcome.result, firstOutcome.err,
+			secondOutcome.result, secondOutcome.err,
 		)
 	}
 	requests, _ := agent.observations()
@@ -611,6 +634,20 @@ func TestAttentionLauncherConcurrentCreateBeforeLinkCommitConverges(t *testing.T
 			"concurrent effects requests=%d links=%d runs=%#v err=%v",
 			len(requests), len(links), runs, listErr,
 		)
+	}
+	// Running is deliberately not projected as a successful duplicate because
+	// a synchronous launcher may have crashed. Once the live owner reaches a
+	// stable terminal state, exact replay converges without another model call.
+	replayed, replayErr := second.Launch(context.Background(), request)
+	if replayErr != nil || !replayed.Existing ||
+		replayed.RunID != firstOutcome.result.RunID ||
+		replayed.Status != workflows.RunStatusSucceeded {
+		t.Fatalf("stable replay = (%#v, %v)", replayed, replayErr)
+	}
+	replayedRequests, _ := agent.observations()
+	if len(replayedRequests) != 1 || store.admissionCount() != 2 {
+		t.Fatalf("stable replay effects requests=%d admissions=%d",
+			len(replayedRequests), store.admissionCount())
 	}
 }
 

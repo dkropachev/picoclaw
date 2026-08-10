@@ -185,6 +185,22 @@ var (
 	ErrPRDevelopmentLedgerCapacity = errors.New(
 		"pull request development ledger capacity exceeded",
 	)
+	// ErrInvalidPRDevelopmentAttention reports a malformed attention snapshot,
+	// semantic decision key, or deterministic workflow-run binding.
+	ErrInvalidPRDevelopmentAttention = errors.New(
+		"invalid pull request development attention decision",
+	)
+	// ErrPRDevelopmentAttentionConflict reports a stale subject snapshot, a
+	// changed semantic-key replay, or a workflow run already bound elsewhere.
+	ErrPRDevelopmentAttentionConflict = errors.New(
+		"pull request development attention decision conflict",
+	)
+	// ErrPRDevelopmentAttentionAdmissionUncertain reports that the external
+	// workflow create callback completed but SQLite could not confirm whether
+	// the corresponding durable decision-run link committed.
+	ErrPRDevelopmentAttentionAdmissionUncertain = errors.New(
+		"pull request development attention decision run admission outcome is uncertain",
+	)
 )
 
 // PRDevelopmentPullState is the provider-verified current pull-request state.
@@ -1434,6 +1450,89 @@ type PRDevelopmentContextSnapshot struct {
 	Ledger          PRDevelopmentLedger `json:"-"`
 }
 
+// PRDevelopmentAttentionHighWater is the compact, durable audit fence for one
+// exact attention subject. It intentionally includes mutable aggregate
+// revisions and integrity digests while keeping ControllerRevision and
+// OwnerSessionVersion out of semantic decision identity.
+type PRDevelopmentAttentionHighWater struct {
+	CaseID                  string `json:"-"`
+	SelectedOrdinal         int    `json:"-"`
+	ConversationVersion     int64  `json:"-"`
+	TranscriptDigest        string `json:"-"`
+	ThreadID                string `json:"-"`
+	ThreadCaseCount         int    `json:"-"`
+	ThreadCasesDigest       string `json:"-"`
+	LedgerEntryCount        int    `json:"-"`
+	LedgerEntriesDigest     string `json:"-"`
+	LedgerCheckpointCount   int    `json:"-"`
+	LedgerCheckpointsDigest string `json:"-"`
+	ReviewEntryID           string `json:"-"`
+	ReviewEntryOrdinal      int    `json:"-"`
+	ReviewEntryHash         string `json:"-"`
+	AttemptID               string `json:"-"`
+	AttemptOrdinal          int    `json:"-"`
+	FenceOrdinal            int    `json:"-"`
+	FenceHash               string `json:"-"`
+	ControllerID            string `json:"-"`
+	ControllerRevision      int64  `json:"-"`
+	ControllerLineVersion   int64  `json:"-"`
+	ControllerFenceCount    int    `json:"-"`
+	ControllerFencesDigest  string `json:"-"`
+	OwnerSessionID          string `json:"-"`
+	OwnerSessionVersion     int64  `json:"-"`
+	OwnerAttemptCount       int    `json:"-"`
+}
+
+// PRDevelopmentAttentionSnapshot is one rich, atomic SQLite read of the exact
+// attention-required review subject. Full case, conversation, ledger, and
+// controller evidence lets a trusted launcher build the private workflow
+// subject without racing independent reads. HighWater is the compact portion
+// callers must return unchanged during decision-run admission.
+type PRDevelopmentAttentionSnapshot struct {
+	Case         PRDevelopmentCase               `json:"-"`
+	Thread       PRDevelopmentThread             `json:"-"`
+	Conversation PRDevelopmentConversation       `json:"-"`
+	OwnerSession PRDevelopmentRepairSession      `json:"-"`
+	Controller   PRDevelopmentController         `json:"-"`
+	Fence        PRDevelopmentAttemptReviewFence `json:"-"`
+	Ledger       PRDevelopmentLedger             `json:"-"`
+	ReviewEntry  PRDevelopmentLedgerEntry        `json:"-"`
+	HighWater    PRDevelopmentAttentionHighWater `json:"-"`
+}
+
+// PRDevelopmentAttentionDecisionKey is the semantic identity of one exact
+// attention decision. SubjectRevision and PolicyRevision are canonical
+// lowercase SHA-256 revisions supplied by trusted workflow preparation.
+// Controller and repair-session revisions are deliberately not identity.
+type PRDevelopmentAttentionDecisionKey struct {
+	CaseID              string `json:"-"`
+	ReviewEntryID       string `json:"-"`
+	ReviewEntryHash     string `json:"-"`
+	ConversationVersion int64  `json:"-"`
+	SubjectRevision     string `json:"-"`
+	DecisionPoint       string `json:"-"`
+	PolicyRevision      string `json:"-"`
+}
+
+// PRDevelopmentAttentionDecisionRunAdmission proposes the deterministic
+// workflow run for one semantic decision and returns the exact high-water read
+// by GetPRDevelopmentAttentionSnapshot as an admission fence.
+type PRDevelopmentAttentionDecisionRunAdmission struct {
+	Key      PRDevelopmentAttentionDecisionKey `json:"-"`
+	Snapshot PRDevelopmentAttentionHighWater   `json:"-"`
+	RunID    string                            `json:"-"`
+}
+
+// PRDevelopmentAttentionDecisionRunLink is the durable binding from one exact
+// attention decision to its external workflow run, including the high-water
+// state admitted for audit and historical exact replay.
+type PRDevelopmentAttentionDecisionRunLink struct {
+	Key       PRDevelopmentAttentionDecisionKey `json:"-"`
+	Snapshot  PRDevelopmentAttentionHighWater   `json:"-"`
+	RunID     string                            `json:"-"`
+	CreatedAt time.Time                         `json:"-"`
+}
+
 // PRDevelopmentLedgerAttemptAppend records the concise account for one
 // completed, validated, deterministically committed and parked candidate. The
 // commit/tree/no-change and fence proof are derived from controller storage.
@@ -1709,6 +1808,34 @@ type PRDevelopmentContextReader interface {
 		ctx context.Context,
 		caseID string,
 	) (PRDevelopmentContextSnapshot, error)
+}
+
+// PRDevelopmentAttentionSnapshotReader captures every subject component and
+// its integrity high-water in one read transaction. It grants no workflow,
+// model, Git, provider, filesystem, or controller mutation authority.
+type PRDevelopmentAttentionSnapshotReader interface {
+	GetPRDevelopmentAttentionSnapshot(
+		ctx context.Context,
+		caseID string,
+	) (PRDevelopmentAttentionSnapshot, error)
+}
+
+// PRDevelopmentAttentionDecisionRunStore atomically fences one external
+// workflow-run create with an exact attention-required review snapshot. An
+// exact historical retry returns existed=true before checking current mutable
+// state and never invokes create. The callback must not call back into the same
+// Store because admission holds its sole SQLite connection in a write
+// transaction until the callback returns.
+type PRDevelopmentAttentionDecisionRunStore interface {
+	GetPRDevelopmentAttentionDecisionRun(
+		ctx context.Context,
+		key PRDevelopmentAttentionDecisionKey,
+	) (PRDevelopmentAttentionDecisionRunLink, error)
+	AdmitPRDevelopmentAttentionDecisionRun(
+		ctx context.Context,
+		admission PRDevelopmentAttentionDecisionRunAdmission,
+		create func(context.Context) error,
+	) (link PRDevelopmentAttentionDecisionRunLink, existed bool, err error)
 }
 
 // PRDevelopmentLedgerStore owns only append-only post-effect accounts and
