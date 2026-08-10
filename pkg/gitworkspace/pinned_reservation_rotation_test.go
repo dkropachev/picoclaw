@@ -644,8 +644,8 @@ func TestManagerPinnedReservationRotationMigratesVersionTwoAndRejectsRollback(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `"version": "3"`) {
-		t.Fatalf("migrated inventory lacks version-3 fence: %s", data)
+	if !strings.Contains(string(data), `"version": "4"`) {
+		t.Fatalf("migrated inventory lacks version-4 fence: %s", data)
 	}
 
 	rollback := adversarialCloneInventory(t, fixture.manager)

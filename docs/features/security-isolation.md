@@ -136,6 +136,18 @@ immutable fence. Operation,
 request/result, claim, bearer, checkout, ref, commit, fence, and repair-session
 evidence remain structurally absent from public, browser, model, generic
 workspace, workflow, tool, log, provider, and stats surfaces.
+When recovery or another idle handoff has no active repair owner, the separate
+inventory-v4 suspension boundary snapshots the exact ordinary candidate and
+retires its edit reservation while preserving the checkout and private ref.
+Prepared-Commit suspension records the deterministic child's exact prepared
+tree and whether that child already became detached `HEAD` without treating it
+as the retained/ref tip. An unapplied prepared request still requires that
+exact candidate; only an applied child may retain later post-prepare edits in
+the independently captured current candidate tree. Exact later
+resume normalizes only that known child and the real index back to the retained
+parent, preserves every candidate file, and installs a globally fresh bearer at
+the unchanged attempt epoch. Suspended state is neither parked nor reviewable
+and is absent from all generic and user-facing surfaces.
 Local-CI validation is a separate mandatory security domain over exact
 controller-owned candidate evidence. Git Workspaces materializes the immutable
 pre-attempt parent and current candidate as bounded `.git`-free disposable
@@ -176,7 +188,8 @@ materialization fail closed without exposing local paths or payload detail.
   and controller-only `gitworkspace.Manager.AdoptPinnedLine`,
   `ResumePinnedLine`, `ParkPinnedLine`, `SnapshotPinnedLineReview`,
   `RecoverPinnedLineAdoptReservation`, and
-  `RecoverPinnedLineResumeReservation`; local validation additionally uses
+  `RecoverPinnedLineResumeReservation`, plus `SuspendPinnedLine`,
+  `SuspendPinnedLineCommitRecovery`, and `ResumeSuspendedPinnedLine`; local validation additionally uses
   `pkg/prdevelopment/localci` and
   `gitworkspace.Manager.WithPinnedCandidateValidationRoots` with
   `PinnedCandidateValidationRequest`, `PinnedCandidateValidationRoots`, and
@@ -196,7 +209,11 @@ materialization fail closed without exposing local paths or payload detail.
   The operation-recovery boundary additionally keeps schema-v13 request/result
   evidence, live claims, and staged replacement authority inside the existing
   controller store, while the Git composites hold old and fresh reservation
-  locks continuously across convergence and revocation. The local-CI boundary
+  locks continuously across convergence and revocation. The suspension boundary
+  keeps its exact candidate, prepared-commit outcome, retired-bearer hash, and
+  replay anchors private; releases both workspace and line ownership; and
+  permits only an exact fresh resume without making suspension a parked review
+  or readiness fact. The local-CI boundary
   keeps exact parent/candidate roots, their complete manifest, repository-owned
   definitions, exact-manifest discovery index, Bubblewrap processes,
   user-systemd/cgroup-v2 supervision, output, environment identity, and evidence
@@ -215,6 +232,10 @@ materialization fail closed without exposing local paths or payload detail.
   finalize only its exact result; after expiry, claim that operation, perform
   only its kind-specific reconciliation while renewing the claim, and atomically
   install fresh authority or retire old before any later review access. For
+  suspension, exact-snapshot the current candidate under its live reservation,
+  hash-chain and retire that bearer atomically, then on a later fresh resume
+  normalize only an exact prepared child/parent transition without touching
+  ordinary files before reinstalling ownership. For
   local CI, materialize and hash both exact snapshots under the reservation
   operation lock, discover both without execution using authoritative explicit,
   native-quick-profile, then supported GitHub fallback precedence, and reject
@@ -327,6 +348,7 @@ materialization fail closed without exposing local paths or payload detail.
 | `FR-SEC-037` | MUST | The PR-development attention launcher may observe only one integrity-checked reservation-free `attention_required` review snapshot and the already-persisted commit-addressed CI and retained-line review evidence. | The schema-v15 decision table and rich snapshot are owner-local private capabilities. The model-visible subject labels repository, provider, diff, CI, ledger, review, and conversation metadata as untrusted; it excludes controller/session/workspace/lease/reservation authority, provider credentials and object IDs, event/workflow provenance, storage hashes, attestation identities, raw internal errors, and conversation content. The complete exact conversation is copied only into a stable protected review-scoped session owned by the immutable repair agent, compare-and-swap fenced to the snapshot transcript, hidden from ordinary session discovery, and frozen once into the private workflow root. Isolated gates get no session/history/cache/tools; deterministic and zero gates invoke no model. | The runtime-generation lease and per-case projection lock cover session admission/replacement and synchronous private-root capture, but neither is held while a human task waits. Durable decision identity binds semantic evidence and policy rather than a live lease, controller revision, or session CAS token. Gate launch is read-only with respect to PR development: it acquires no mutation/review lease, changes no retained branch or controller, and grants no Git/provider/workflow caller access beyond the private decision run. | Stale or changed high-water evidence, cross-agent session scope, alias collision, rollback, CAS conflict, incomplete private capture, malformed policy/run, oversized mandatory evidence, or any attempt to turn a gate result into chat, repair, push, publication, acknowledgement, or merge authority fails closed. Raw ledger/conversation rows and the branch remain; compaction is logical and cannot summarize away the target attempt/review pair. | Asking for attention must not leak lifecycle capabilities into models or UI, freeze an idle branch, couple a human wait to a runtime lease, or let a workflow result mutate or publish code without a separately fenced later action. |
 | `FR-SEC-038` | MUST | Automatic PR-development attention may add only one owner-local occurrence beside an exact `attention_required` ledger completion, lease only its delivery schedule, pin one canonical configured policy plus immutable subject identity, and expose one case-owned browser conversation after validating the complete occurrence-to-task chain. | Every trigger, lease, retry, policy, subject, run, task, controller, session, ledger, CI, Git, and integrity field is structurally private. The worker receives no mutation reservation or provider-write capability and releases its scheduling/runtime leases before a human wait. Working-context session projection remains hidden and exact-prefix fenced; isolated gates receive no history/cache/tools. The public DTO can represent only case version, bounded status, configured title/questions, accepted plain-text response, and an opaque response fence for exactly one waiting or recovery turn. The launcher replaces browser authority with the process bearer only for canonical same-origin requests; the protected handler rejects browser provenance. Tokens contain no decodable identity and are never placed in a URL, log, browser storage, generic workflow surface, or model prompt. | Response processing reloads and revalidates the case, current occurrence, canonical pin, subject/run decision link, private workflow reference, stable run/task snapshot, task payload hash, original waiting revision, and response fence before deriving a separate idempotent response identity. Exact accepted replay only reprojects authoritative state. A response may resume that task and nothing else; chat and repair remain separate explicit case operations, and provider refresh, branch mutation, push, publication, acknowledgement, merge, and deletion require later independently fenced capabilities. Generic workflow observation, task, retry, cancel, and retention paths continue to hide and preserve every exact private attention run. | A stale, cross-case, altered, duplicated, malformed, oversized, noncanonical, superseded, corrupt, or runtime-disabled request fails closed without partial authority or raw diagnostics. Trigger recovery states never cause an automatic second model/run, and no waiting task retains the occurrence lease, runtime generation, controller lease, or mutation reservation. | Bringing a user into an AI-mediated PR discussion must not reveal private orchestration identities, convert a browser token into general workflow access, keep code locked while waiting, or make answering a question equivalent to authorizing code or provider effects. |
 | `FR-SEC-039` | MUST | An authenticated user reads the exact selected-case PR-development detail through the existing protected runtime and launcher GET boundary. | One SQLite snapshot integrity-validates the exact case, conversation, repair session and latest public attempt, verified provider thread, complete controller aggregate, and ledger before a dedicated field-by-field DTO may deliberately declassify at most one optional `local_development` object. Live or otherwise incomplete lifecycle is derived only from the public attempt. For a completed public attempt, the snapshot additionally loads its exact orchestration; commit/CI/review fields remain absent unless that orchestration proves completed and binds its validation receipt to the exact attempt-ledger entry. The DTO can represent only `attempt_id`, `attempt_ordinal`, `attempt_status`, bounded `summary`, exact local `commit_sha`, `no_changes`, terminal `ci_status`, canonical lowercase 64-hex equality-only `ci_plan_digest` and `ci_result_digest`, `review_status` (`not_started`, `pending`, or `completed`), fixed `review_outcome`, bounded `review_summary`, bounded `review_finding_count`, derived `local_ready`, and `updated_at`, under Event Automation's progressive omission contract. The opaque `pdr_` attempt identity is already public; the commit is candidate content identity, not a ref; and the two CI fingerprints reveal no plan, command, output, environment, attestation, or reusable cache authority. | The private source aggregate and all controller, orchestration, and ledger members remain structurally excluded from JSON. The read adds no route, schema, table, index, migration, backfill, or mutation; changes no database, browser, workspace, repository, branch, provider, run, or task state; invokes no model, CI, Git, or workflow; and grants no repair, reservation, provider refresh/write, push, publication, acknowledgement, merge, or deletion capability. `local_ready` is only a read-derived statement about the exact local candidate's passed CI, passed paired review, and matching reservation-free ready controller; it is neither a bearer nor a publication decision. | No live incomplete orchestration is required or exposed. Commit/CI/review fields require the exact completed orchestration-to-receipt-to-attempt-ledger linkage: a legacy or otherwise unbound ledger row whose compatibility loader defaults CI to passed remains `not_started` and can never make `local_ready` true. Invalid, cross-case, duplicated, nonlatest, unpaired, terminality-inconsistent, malformed, over-bound, or corrupt evidence fails the complete detail read with a fixed public error instead of partial fallback. The DTO cannot represent a workspace/checkout or internal Git ref; thread, controller, ledger, fence, checkpoint, orchestration, operation, run, task, or workflow identity/hash; source/tree/candidate/manifest/receipt/attestation/internal digest; lease, reservation, claim, worker, epoch, credential, provider-object, or provider-write field; raw finding; raw CI plan, step, command, path, output, error, or diagnostic; or sibling-case history. | Showing local progress must not turn private controller evidence, compatibility defaults, raw review/CI data, or a convenient green badge into an exfiltration channel or authority to mutate code or a provider. |
+| `FR-SEC-040` | MUST | Only a trusted local-development controller may call `Manager.SuspendPinnedLine`, `Manager.SuspendPinnedLineCommitRecovery`, or `Manager.ResumeSuspendedPinnedLine`. Every call accepts exact canonical repository/source/workspace/line/agent/version/epoch/tip/tree identity, one caller-durable bounded intent, and either the current raw mutation bearer or one globally fresh resume bearer; commit-recovery additionally requires the complete immutable prepared `CommitPinned` request. Under the reservation-derived cross-process operation lock and inventory lock, suspend revalidates manager-owned nonsymlink paths, raw origin, source ancestry, exclusive no-reflog private ref, detached `HEAD`, real index, absence of merge/rebase/sequencer/Git-lock and pending-Park state, and all existing replacement/graft/sparse/config/control-plane exclusions. A manager-private temporary index captures all tracked and nonignored untracked ordinary content relative to the retained parent, rejects changed gitlinks and bounded-output overflow, and persists only `CandidateTree`/digest/count plus hashed identity. Commit-recovery recreates and byte-verifies the deterministic prepared child, hash-binds that child and its exact `PreparedTree`, accepts only the exact parent or child `HEAD`, records whether the child was applied, and never applies a missing commit, moves the retained ref, or discards later ordinary content. `CandidateTree` is independently captured from current ordinary content over the retained parent; it must equal `PreparedTree` while the child remains unapplied, and only an applied child may retain later ordinary edits in a differing candidate. One atomic inventory-v4 save appends a domain-separated per-line count/tail-anchored suspension record, permanently retires the current reservation hash, marks the line `suspended`, and clears workspace/line ownership while leaving the checkout, ref, ordinary files, and line version/tip/tree/epoch retained. Resume verifies the exact latest record and `CandidateTree` under a globally unused fresh bearer; for an applied child it verifies the prepared commit/tree pair, compare-and-swaps detached `HEAD` back to the retained parent, and resets only the real index from the prepared or parent tree to the retained parent while leaving worktree files byte-preserved, accepts only that exact crash-reconcilable child-or-parent transition, re-snapshots `CandidateTree` equality, then installs the fresh owner without changing the already-issued mutation epoch. Every Git subprocess is bounded direct argv with separately drained output, clean environment, hooks/signing/editor/pager/prompt disabled, no shell, network, fetch, replacement object, lazy fetch, or system/global/ambient configuration. Raw bearers exist only in live workspace locks and controller call memory; suspension records contain only domain-separated hashes and participate in store-wide nonreuse. Records, anchors, candidate/commit evidence, paths, refs, hashes, agent/intent identity, timestamps, and replay state are private inventory with no JSON/model/workflow/tool/log/stats/quota/HTTP/UI/provider projection. A suspended line is neither parked nor locally ready and grants no CI, review, attention, publication, push, merge, acknowledgement, release, cleanup, or deletion capability. Malformed, stale, cross-owner, reused, partial, nonlatest, corrupt, over-bound, unsafe-index/`HEAD`, changed ref/candidate control plane, prepared-commit/`PreparedTree` mismatch, rollback, compare-and-swap ambiguity, or later progress fails closed without partial record, authority transfer, ordinary-file rewrite, WIP commit, review fence, or fallback reset/clone. | Recovery and idle handoff must revoke edit authority while preserving exact unknown local work, and prepared-Commit ambiguity must not become data loss, a duplicate or fabricated commit, a generic observation channel, a false green/review state, or remote publication authority. |
 
 For `FR-SEC-025` and `FR-SEC-038`, the strict list DTO alone may add the
 required boolean `attention_required`. It is true only for the authoritative
@@ -535,6 +557,26 @@ parked review snapshot is transient bounded untrusted data tied to one exact
 base/tip/tree; it carries no path, ref, reservation, or manager lifecycle
 capability and creates no durable security state.
 
+Suspended retained-line state remains in that same private Git inventory and
+is deliberately distinct from parked review state. Inventory version 4 retains
+an append-only per-line suspension history whose exact count and
+domain-separated empty-or-tail digest are anchored on the line. Records contain
+only hashed request/reservation identity and exact source, line, retained
+parent, current `CandidateTree`, prepared-commit identity and distinct
+`PreparedTree`, applied outcome, and replay evidence; the raw bearer
+is erased when the workspace and line owner are cleared. The checkout and
+private ref remain controller-owned. `PreparedTree` is the exact deterministic
+child tree, whereas `CandidateTree` is the independently captured current
+ordinary-content tree over the retained parent. It must equal the prepared tree
+while the child is unapplied, but may differ after edits to an applied child. An applied prepared
+child may remain detached `HEAD` while the ref and line tip stay at its parent. The line is
+reservation-free but has no Park/review fence. A fresh exact resume may
+normalize that known child and only the real index to the retained parent while
+preserving ordinary files, then restore ownership at the already-issued
+mutation epoch. Suspension adds no security, eventing, workflow, session,
+model, browser, generic inventory, or provider record and is not a readiness or
+publication fact.
+
 Schema-v10 eventing controller storage is the later explicit trusted owner of
 the retained-line lifecycle; it does not make Git-workspace inventory public.
 Its private controller row may durably duplicate the raw reservation bearer
@@ -667,6 +709,7 @@ Owns: TEST pkg/config/version*
 | Private storage / controller Go API | `eventing.PRDevelopmentControllerStore`, schema-v12 recovery intents, `gitworkspace.Manager.RotatePinnedReservation`, inventory-v3 rotation records | Quarantine an expired bearer, lease only its exact idempotent old-to-fresh transfer, permanently revoke the old workspace/line owner, and install the fresh bearer under a new mutation lease while keeping all authority and evidence outside generic/public/model surfaces. | `FR-SEC-034` |
 | Private storage / controller Go API | `eventing.PRDevelopmentControllerOperationStore`, schema-v13 `pr_development_controller_operation_intents`; controller-only `gitworkspace.Manager.RecoverPinnedLineAdoptReservation`, `RecoverPinnedLineResumeReservation`, `RotatePinnedReservation`, `CommitPinned`, and `ParkPinnedLine` | Write-ahead fence each exact effect; keep operation recovery separate from general mutation; hold old/fresh locks continuously for composite line recovery; rotate before Commit; replay-and-retire old for Park; and atomically remove edit authority before reservation-free review, while structurally withholding every capability and proof from untrusted or generic surfaces. | `FR-SEC-035` |
 | Controller Go API / process | `pkg/prdevelopment/localci/**`; `gitworkspace.Manager.WithPinnedCandidateValidationRoots`, `PinnedCandidateValidationRequest`, `PinnedCandidateValidationRoots`, and `PinnedTreeManifest` | Revalidate and materialize exact `.git`-free parent/candidate evidence under the reservation lock; enforce explicit-plan, native-quick-profile, then GitHub-fallback discovery precedence and persist the exact-manifest plan graph; reject stateful multi-command fallback jobs; and run all required fresh steps only in the mandatory no-network Bubblewrap sandbox under user-systemd/cgroup-v2 supervision with explicit controller-provided offline dependencies. Persist full-identity evidence, while disabling production passing-result reuse for mutable host inputs, without exposing host or repository-lifecycle authority. | `FR-SEC-036` |
+| Controller Go API / private Git inventory | `gitworkspace.Manager.SuspendPinnedLine`, `SuspendPinnedLineCommitRecovery`, `ResumeSuspendedPinnedLine`, and inventory-v4 suspension records/anchors | Under exact operation and inventory locking, snapshot bounded ordinary candidate evidence, distinguish the exact applied/unapplied prepared-Commit state, hash-chain and retire the current bearer into nonreviewable private suspension, and resume only the same candidate under a globally fresh bearer while preserving files and withholding every generic/model/browser/provider capability. | `FR-SEC-040` |
 | Config / HTTP / UI | `reviews.attention`, `GET` and `PUT /api/reviews/attention-policies`, `/reviews?view=policies` | Keep gate authority in operator-owned configuration outside reviewed checkouts; expose only bounded non-secret policy plus opaque revisions/effect status, parse and serialize arbitrary question JSON losslessly, and retain the editable projection only in memory. Replace it only through one explicit strict same-origin public-plus-security compare-and-swap that raw-patches only persisted `reviews.attention`, preserves unrelated persisted values and numeric tokens, and leaves security state byte-identical; a conflict retains the local draft for explicit reload/discard and never retries or rebases automatically. Route state contains only the fixed policy-view selector, and editing, validation, effective preview, reload, and discard grant no workflow or provider authority. Broad config GET omits this subresource; broad PUT accepts only an empty compatibility placeholder, broad PATCH rejects the field, and both preserve its exact value during unrelated updates. | `FR-SEC-021` |
 | HTTP | `GET /api/reviews/attention-agents` | Project only one fixed-256 page of canonical configured identity and default metadata, fenced by one strong policy-generation `If-Match` plus an optional canonical offset; broader agent configuration and all security state remain outside the DTO. | `FR-SEC-021` |
 | Workflow / MCP | `agent/*` with `with.tools: none`; `mcp/github/add_issue_comment` | Remove tools from every classifier model path, then permit a GitHub mutation only as a declared conditional MCP step with signed-body identity and fixed output text. The GitHub MCP server and its write credential are configured explicitly and independently from ingress authentication. | `FR-SEC-013` |
@@ -1054,6 +1097,27 @@ Owns: TEST pkg/config/version*
     cleanup; or any failed/incomplete required result fails closed without
     downloading, host fallback, or any model, controller, ledger, Git-lifecycle,
     workflow, provider, UI, or publication effect.
+30. For retained-line suspension, require the exact current reservation-derived
+    operation lock, private line fence, caller-durable request, and safe Git
+    control plane before reading ordinary content. Build candidate evidence
+    through a manager-private index and bounded sanitized plumbing. For
+    prepared Commit, recreate and verify the deterministic child, accept only
+    the exact retained parent or that child as detached `HEAD`, and bind the
+    child to its exact prepared tree plus the applied bit without applying a
+    missing child. Independently bind current candidate evidence over the
+    retained parent; require exact prepared-tree candidate equality before an
+    unapplied child and permit divergence only for retained edits after an
+    applied child. Append and anchor the complete
+    hashed suspension record in the same inventory save that retires the bearer
+    and clears both owners; expose no record or raw bearer. For resume, require a
+    globally fresh bearer and the exact current tail, re-prove candidate/ref and
+    private ownership, normalize only an applied exact child and the real index
+    to the retained parent without updating the worktree, re-prove candidate
+    equality, then install that bearer at the unchanged version and mutation
+    epoch. Treat the child-to-parent intermediate as replayable only for this
+    exact resume. Reject all other drift or ambiguity without reset, checkout,
+    clone, WIP commit, Park/review fence, CI/model/workflow/UI/provider effect,
+    or generic declassification.
 
 ## Cross-Feature Behavior
 
@@ -1170,6 +1234,17 @@ the crash-safe local effect/capability seam. Event automation owns the private
 request/result/claim chain and atomic Park database tuple; Git workspaces owns
 inventory-v3, canonical old/fresh locking, exact line convergence, commit, and
 park effects. The current slice does not wire the worker that composes them.
+Inventory-v4 suspension is the separate Git-boundary prerequisite for that
+worker. It may consume only one already-converged current mutation bearer at a
+time: old-to-fresh Adopt/Resume recovery or Commit rotation owns its exact
+dual-lock revocation first, and suspension then owns exact candidate capture and
+fresh-bearer retirement. A crash between them remains an exact replayable fresh
+owner, not permission to guess, reset, commit, Park, or publish. Event
+automation must separately persist and reconcile that ordering and later issue
+another globally fresh bearer before a new repair can resume the same
+candidate. Neither a suspension fence nor its reservation-free state may enter
+a model, generic workspace surface, browser local-status projection, review
+worker, attention gate, or provider publication decision.
 Local-CI discovery/sandbox/evidence is implemented by `#119` through this
 requirement and the Event Automation local-CI contract. Git Workspaces owns exact
 parent/candidate materialization, the reservation lock, and canonical manifest;
@@ -1295,6 +1370,13 @@ promise that a provider consumes every materialized modality.
   Commit cannot run before recovery rotation, and Park cannot mint a fresh
   bearer; stale or cross-kind callers therefore fail instead of racing a second
   effect.
+- Suspension cannot convert an arbitrary detached commit, staged-only state,
+  changed private ref, malformed or truncated hash chain, reused bearer,
+  candidate drift, or partial Commit evidence into reservation-free success.
+  Resume recognizes only the latest exact candidate and the two
+  crash-reconcilable prepared-child/retained-parent control-plane states; it
+  never resets the worktree, deletes untracked files, creates a WIP commit,
+  advances a ref or epoch, or exposes a review/local-ready/publication fact.
 - A Park database failure publishes neither a partially completed queued
   attempt nor a review fence/phase without the others. Recovery must first
   prove exact Git Park replay under old, after which one transaction retires
@@ -1521,6 +1603,7 @@ promise that a provider consumes every materialized modality.
 | `FR-SEC-037` | [pkg/attention/private_run_test.go](../../pkg/attention/private_run_test.go), [pkg/eventing/pr_development_attention_store_sqlite_test.go](../../pkg/eventing/pr_development_attention_store_sqlite_test.go), [pkg/prdevelopment/attention_test.go](../../pkg/prdevelopment/attention_test.go), [pkg/gateway/pr_development_attention_composition_test.go](../../pkg/gateway/pr_development_attention_composition_test.go), [pkg/workflows/private_session_test.go](../../pkg/workflows/private_session_test.go) |
 | `FR-SEC-038` | [pkg/eventing/pr_development_attention_trigger_store_sqlite_test.go](../../pkg/eventing/pr_development_attention_trigger_store_sqlite_test.go), [pkg/eventing/pr_development_store_sqlite_test.go](../../pkg/eventing/pr_development_store_sqlite_test.go), [pkg/attention/private_run_test.go](../../pkg/attention/private_run_test.go), [pkg/attention/conversation_test.go](../../pkg/attention/conversation_test.go), [pkg/prdevelopment/attention_trigger_worker_test.go](../../pkg/prdevelopment/attention_trigger_worker_test.go), [pkg/prdevelopment/attention_bridge_test.go](../../pkg/prdevelopment/attention_bridge_test.go), [pkg/prdevelopment/service_handler_test.go](../../pkg/prdevelopment/service_handler_test.go), [pkg/gateway/pr_development_attention_composition_test.go](../../pkg/gateway/pr_development_attention_composition_test.go), [web/backend/api/pr_development_test.go](../../web/backend/api/pr_development_test.go), [web/frontend/src/api/pr-development.test.ts](../../web/frontend/src/api/pr-development.test.ts), [web/frontend/src/api/pr-development-attention.test.ts](../../web/frontend/src/api/pr-development-attention.test.ts), [web/frontend/src/components/reviews/attention-conversation.test.tsx](../../web/frontend/src/components/reviews/attention-conversation.test.tsx), [web/frontend/src/components/reviews/pr-development-page.test.tsx](../../web/frontend/src/components/reviews/pr-development-page.test.tsx), [web/frontend/src/routes/-reviews-route.test.tsx](../../web/frontend/src/routes/-reviews-route.test.tsx), [web/frontend/src/routes/-reviews.test.ts](../../web/frontend/src/routes/-reviews.test.ts), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-SEC-039` | [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_repair_store_sqlite.go](../../pkg/eventing/pr_development_repair_store_sqlite.go), [pkg/eventing/pr_development_ledger_store_sqlite.go](../../pkg/eventing/pr_development_ledger_store_sqlite.go), [pkg/eventing/pr_development_orchestration_store_sqlite.go](../../pkg/eventing/pr_development_orchestration_store_sqlite.go), [pkg/eventing/pr_development_review_store_sqlite_test.go](../../pkg/eventing/pr_development_review_store_sqlite_test.go), [pkg/prdevelopment/service.go](../../pkg/prdevelopment/service.go), [pkg/prdevelopment/service_handler_test.go](../../pkg/prdevelopment/service_handler_test.go), [web/frontend/src/api/pr-development.ts](../../web/frontend/src/api/pr-development.ts), [web/frontend/src/api/pr-development.test.ts](../../web/frontend/src/api/pr-development.test.ts), [web/frontend/src/components/reviews/pr-development-page.tsx](../../web/frontend/src/components/reviews/pr-development-page.tsx), [web/frontend/src/components/reviews/pr-development-page.test.tsx](../../web/frontend/src/components/reviews/pr-development-page.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
+| `FR-SEC-040` | [pkg/gitworkspace/development_line_suspension.go](../../pkg/gitworkspace/development_line_suspension.go), [pkg/gitworkspace/development_line_suspension_api.go](../../pkg/gitworkspace/development_line_suspension_api.go), [pkg/gitworkspace/development_line_suspension_test.go](../../pkg/gitworkspace/development_line_suspension_test.go), [pkg/gitworkspace/development_line_suspension_api_test.go](../../pkg/gitworkspace/development_line_suspension_api_test.go), [pkg/gitworkspace/development_line_suspension_matrix_test.go](../../pkg/gitworkspace/development_line_suspension_matrix_test.go), [pkg/gitworkspace/development_line_suspension_adversarial_test.go](../../pkg/gitworkspace/development_line_suspension_adversarial_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go), [pkg/gitworkspace/pinned_commit.go](../../pkg/gitworkspace/pinned_commit.go), [pkg/gitworkspace/pinned_commit_test.go](../../pkg/gitworkspace/pinned_commit_test.go), [pkg/gitworkspace/pinned_reservation_rotation.go](../../pkg/gitworkspace/pinned_reservation_rotation.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go), [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
 
 Additional `FR-SEC-030` acceptance anchors are
 [pkg/eventing/store_types.go](../../pkg/eventing/store_types.go),
@@ -1574,6 +1657,8 @@ validation in
 - [pkg/tools/apply_patch.go](../../pkg/tools/apply_patch.go)
 - [pkg/gitworkspace/manager.go](../../pkg/gitworkspace/manager.go)
 - [pkg/gitworkspace/development_line.go](../../pkg/gitworkspace/development_line.go)
+- [pkg/gitworkspace/development_line_suspension.go](../../pkg/gitworkspace/development_line_suspension.go)
+- [pkg/gitworkspace/development_line_suspension_api.go](../../pkg/gitworkspace/development_line_suspension_api.go)
 - [pkg/gitworkspace/pinned_validation_roots.go](../../pkg/gitworkspace/pinned_validation_roots.go)
 - [pkg/channels/manager.go](../../pkg/channels/manager.go)
 - [pkg/attention](../../pkg/attention)
