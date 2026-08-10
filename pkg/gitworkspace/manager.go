@@ -53,6 +53,11 @@ type Manager struct {
 	opts             Options
 	now              func() time.Time
 	mu               sync.Mutex
+
+	// pinnedLinePushTransport is an internal transport seam for hermetic tests.
+	// Production constructors leave it nil, so push targets remain the exact
+	// canonical SCP repository stored in inventory.
+	pinnedLinePushTransport func(repository string) (string, error)
 }
 
 type AcquireRequest struct {
