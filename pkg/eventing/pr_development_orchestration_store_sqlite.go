@@ -733,37 +733,67 @@ func (s *Store) AcquirePRDevelopmentRepairOrchestrationController(
 				lease.Controller = controller
 				return nil
 			}
-			if controller.Phase != PRDevelopmentControllerReady ||
-				controller.WorkspaceID != orchestration.WorkspaceID ||
-				controller.SourceCloneURL != orchestration.CloneURL ||
-				controller.SourceRef != orchestration.HeadRef ||
-				controller.SourceCommit != orchestration.HeadSHA ||
-				controller.SourceTree != orchestration.SourceTree {
-				return fmt.Errorf(
-					"%w: only the exact retained Ready line may be resumed",
-					ErrPRDevelopmentOrchestrationConflict,
+			if controller.Phase == PRDevelopmentControllerSuspended {
+				if controller.WorkspaceID != orchestration.WorkspaceID ||
+					controller.SourceCloneURL != orchestration.CloneURL ||
+					controller.SourceRef != orchestration.HeadRef ||
+					controller.SourceCommit != orchestration.HeadSHA ||
+					controller.SourceTree != orchestration.SourceTree {
+					return fmt.Errorf(
+						"%w: suspended line differs from its exact orchestration pin",
+						ErrPRDevelopmentOrchestrationConflict,
+					)
+				}
+				resume, resumeChanged, resumeErr :=
+					s.acquirePRDevelopmentControllerSuspendedResume(
+						ctx,
+						conn,
+						relation,
+						controller,
+						normalized,
+						orchestration,
+						now,
+						deadline,
+					)
+				if resumeErr != nil {
+					return resumeErr
+				}
+				lease.Controller = resume.Controller
+				lease.SuspendedResume = &resume
+				changed = resumeChanged
+			} else {
+				if controller.Phase != PRDevelopmentControllerReady ||
+					controller.WorkspaceID != orchestration.WorkspaceID ||
+					controller.SourceCloneURL != orchestration.CloneURL ||
+					controller.SourceRef != orchestration.HeadRef ||
+					controller.SourceCommit != orchestration.HeadSHA ||
+					controller.SourceTree != orchestration.SourceTree {
+					return fmt.Errorf(
+						"%w: only the exact retained Ready or Suspended line may be resumed",
+						ErrPRDevelopmentOrchestrationConflict,
+					)
+				}
+				if controller.Revision != normalized.ExpectedRevision {
+					return fmt.Errorf(
+						"%w: expected revision %d, current revision %d",
+						ErrPRDevelopmentControllerConflict,
+						normalized.ExpectedRevision,
+						controller.Revision,
+					)
+				}
+				updated, acquireErr := acquirePRDevelopmentMutationLease(
+					ctx, conn, controller, normalized, now, deadline,
 				)
+				if errors.Is(acquireErr, ErrPRDevelopmentControllerRecoveryRequired) {
+					recoveryRequired = true
+					return nil
+				}
+				if acquireErr != nil {
+					return acquireErr
+				}
+				lease.Controller = updated
+				changed = true
 			}
-			if controller.Revision != normalized.ExpectedRevision {
-				return fmt.Errorf(
-					"%w: expected revision %d, current revision %d",
-					ErrPRDevelopmentControllerConflict,
-					normalized.ExpectedRevision,
-					controller.Revision,
-				)
-			}
-			updated, acquireErr := acquirePRDevelopmentMutationLease(
-				ctx, conn, controller, normalized, now, deadline,
-			)
-			if errors.Is(acquireErr, ErrPRDevelopmentControllerRecoveryRequired) {
-				recoveryRequired = true
-				return nil
-			}
-			if acquireErr != nil {
-				return acquireErr
-			}
-			lease.Controller = updated
-			changed = true
 		}
 		if orchestration.ControllerID != "" &&
 			orchestration.ControllerID != lease.Controller.ID {
@@ -2391,7 +2421,9 @@ func validatePRDevelopmentRepairOrchestrationRelation(
 			if !found || controller.ThreadID != orchestration.ThreadID ||
 				controller.OwnerSessionID != orchestration.SessionID ||
 				controller.CurrentAttemptID != orchestration.AttemptID ||
-				controller.Phase != PRDevelopmentControllerMutation {
+				(controller.Phase != PRDevelopmentControllerMutation &&
+					(controller.Phase != PRDevelopmentControllerSuspended ||
+						orchestration.Phase != PRDevelopmentRepairOrchestrationBootstrap)) {
 				return errors.New("live orchestration controller ownership is invalid")
 			}
 			if orchestration.Phase != PRDevelopmentRepairOrchestrationBootstrap &&

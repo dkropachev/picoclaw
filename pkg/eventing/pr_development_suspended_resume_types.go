@@ -17,28 +17,33 @@ type PRDevelopmentControllerSuspendedResumeLease struct {
 // PRDevelopmentControllerSuspendedResumeRenew extends only the exact live
 // resume claim. It cannot change the controller or replacement reservation.
 type PRDevelopmentControllerSuspendedResumeRenew struct {
-	ControllerID string        `json:"-"`
-	AttemptID    string        `json:"-"`
-	SuspensionID string        `json:"-"`
-	ClaimID      string        `json:"-"`
-	ClaimToken   string        `json:"-"`
-	ClaimEpoch   int64         `json:"-"`
-	Lease        time.Duration `json:"-"`
+	ControllerID            string        `json:"-"`
+	AttemptID               string        `json:"-"`
+	SuspensionID            string        `json:"-"`
+	OrchestrationClaimToken string        `json:"-"`
+	ClaimID                 string        `json:"-"`
+	ClaimToken              string        `json:"-"`
+	ClaimEpoch              int64         `json:"-"`
+	Lease                   time.Duration `json:"-"`
 }
 
 // PRDevelopmentControllerSuspendedResumeFinalize consumes an exact live
 // resume claim only after Git proves the retained candidate was restored
 // under the precommitted globally fresh reservation.
 type PRDevelopmentControllerSuspendedResumeFinalize struct {
-	ControllerID     string                                       `json:"-"`
-	AttemptID        string                                       `json:"-"`
-	SuspensionID     string                                       `json:"-"`
-	ExpectedRevision int64                                        `json:"-"`
-	ClaimID          string                                       `json:"-"`
-	ClaimToken       string                                       `json:"-"`
-	ClaimEpoch       int64                                        `json:"-"`
-	Result           PRDevelopmentControllerSuspendedResumeResult `json:"-"`
-	Lease            time.Duration                                `json:"-"`
+	ControllerID     string `json:"-"`
+	AttemptID        string `json:"-"`
+	SuspensionID     string `json:"-"`
+	ExpectedRevision int64  `json:"-"`
+	// OrchestrationClaimToken proves that the repair scheduler which prepared
+	// this resume still owns the exact queued attempt. A resume claim alone can
+	// never install mutation/model authority.
+	OrchestrationClaimToken string                                       `json:"-"`
+	ClaimID                 string                                       `json:"-"`
+	ClaimToken              string                                       `json:"-"`
+	ClaimEpoch              int64                                        `json:"-"`
+	Result                  PRDevelopmentControllerSuspendedResumeResult `json:"-"`
+	Lease                   time.Duration                                `json:"-"`
 }
 
 // PRDevelopmentControllerSuspendedResumeStore owns the private store half of

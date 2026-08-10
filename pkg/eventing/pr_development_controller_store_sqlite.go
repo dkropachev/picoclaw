@@ -2392,6 +2392,7 @@ func validatePRDevelopmentControllerAggregate(
 					return errors.New("stored initial controller reservation is invalid")
 				}
 				var recoveryMatches int
+				var resumedMatches int
 				digest := prDevelopmentMutationReservationDigest(
 					controller.MutationReservationKey,
 				)
@@ -2407,7 +2408,21 @@ func validatePRDevelopmentControllerAggregate(
 				).Scan(&recoveryMatches); queryErr != nil {
 					return queryErr
 				}
-				if recoveryMatches < 1 || recoveryMatches > 2 {
+				if queryErr := queryer.QueryRowContext(ctx, `
+					SELECT COUNT(*)
+					FROM pr_development_controller_suspensions
+					WHERE controller_id = ? AND status = 'resumed' AND
+						resume_reservation_digest = ? AND
+						final_resume_revision = ?`,
+					controller.ID,
+					digest,
+					controller.Revision,
+				).Scan(&resumedMatches); queryErr != nil {
+					return queryErr
+				}
+				validRecovery := recoveryMatches >= 1 && recoveryMatches <= 2
+				validResume := resumedMatches == 1
+				if validRecovery == validResume {
 					return errors.New("stored initial controller reservation has no recovery intent")
 				}
 			}
