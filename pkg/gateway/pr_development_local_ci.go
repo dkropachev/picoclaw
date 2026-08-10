@@ -23,20 +23,9 @@ type prDevelopmentLocalCIRuntime struct {
 func newPRDevelopmentLocalCIRuntime(
 	cfg *config.Config,
 ) (*prDevelopmentLocalCIRuntime, error) {
-	if cfg == nil || !cfg.Events.Ingress.Enabled {
-		return nil, errors.New("PR development local CI requires event ingress")
-	}
-	ingress := config.EffectiveEventIngressConfig(cfg, cfg.WorkspacePath())
-	stateRoot := filepath.Join(
-		filepath.Dir(ingress.DatabasePath),
-		prDevelopmentLocalCIDirectory,
-	)
-	temporaryRoot := filepath.Join(stateRoot, "tmp")
-	evidenceRoot := filepath.Join(stateRoot, "evidence")
-	for _, directory := range []string{stateRoot, temporaryRoot, evidenceRoot} {
-		if err := ensurePrivatePRDevelopmentDirectory(directory); err != nil {
-			return nil, err
-		}
+	temporaryRoot, evidenceRoot, err := preparePRDevelopmentLocalCIState(cfg)
+	if err != nil {
+		return nil, err
 	}
 	evidence, err := localci.OpenFileEvidenceStore(evidenceRoot)
 	if err != nil {
@@ -59,6 +48,44 @@ func newPRDevelopmentLocalCIRuntime(
 		},
 		evidence: evidence,
 	}, nil
+}
+
+// newPRDevelopmentLocalCIEvidenceRuntime opens only the durable evidence side
+// of local CI. A parked review consumes already-persisted evidence and must not
+// depend on the current host having a usable mutation-time sandbox.
+func newPRDevelopmentLocalCIEvidenceRuntime(
+	cfg *config.Config,
+) (*prDevelopmentLocalCIRuntime, error) {
+	_, evidenceRoot, err := preparePRDevelopmentLocalCIState(cfg)
+	if err != nil {
+		return nil, err
+	}
+	evidence, err := localci.OpenFileEvidenceStore(evidenceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("open PR development local CI evidence: %w", err)
+	}
+	return &prDevelopmentLocalCIRuntime{evidence: evidence}, nil
+}
+
+func preparePRDevelopmentLocalCIState(
+	cfg *config.Config,
+) (string, string, error) {
+	if cfg == nil || !cfg.Events.Ingress.Enabled {
+		return "", "", errors.New("PR development local CI requires event ingress")
+	}
+	ingress := config.EffectiveEventIngressConfig(cfg, cfg.WorkspacePath())
+	stateRoot := filepath.Join(
+		filepath.Dir(ingress.DatabasePath),
+		prDevelopmentLocalCIDirectory,
+	)
+	temporaryRoot := filepath.Join(stateRoot, "tmp")
+	evidenceRoot := filepath.Join(stateRoot, "evidence")
+	for _, directory := range []string{stateRoot, temporaryRoot, evidenceRoot} {
+		if err := ensurePrivatePRDevelopmentDirectory(directory); err != nil {
+			return "", "", err
+		}
+	}
+	return temporaryRoot, evidenceRoot, nil
 }
 
 func ensurePrivatePRDevelopmentDirectory(path string) error {

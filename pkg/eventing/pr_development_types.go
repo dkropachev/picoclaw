@@ -931,6 +931,23 @@ type PRDevelopmentControllerReviewTransition struct {
 	LeaseEpoch       int64  `json:"-"`
 }
 
+// PRDevelopmentReviewClaimRequest leases at most one oldest eligible parked
+// candidate for reservation-free immutable review.
+type PRDevelopmentReviewClaimRequest struct {
+	WorkerLabel string        `json:"-"`
+	Lease       time.Duration `json:"-"`
+}
+
+// PRDevelopmentReviewLease binds one background claim to its owning case,
+// exact controller lease, and immutable parked fence. It never carries a
+// mutation reservation.
+type PRDevelopmentReviewLease struct {
+	CaseID     string                          `json:"-"`
+	Controller PRDevelopmentController         `json:"-"`
+	Fence      PRDevelopmentAttemptReviewFence `json:"-"`
+	Reclaimed  bool                            `json:"-"`
+}
+
 // PRDevelopmentControllerRecoveryMode records whether eventing had no durable
 // line binding or had a retained line at its active mutation fence when the
 // lease expired. Unbound does not prove Git adoption has not already happened.
@@ -1444,6 +1461,15 @@ type PRDevelopmentLedgerReviewAppend struct {
 	Findings         []PRDevelopmentLedgerReviewFinding `json:"-"`
 }
 
+// PRDevelopmentReviewCompletion is the atomic durable result of one local AI
+// review. NextAttempt is populated only for changes_required and is the exact
+// deterministic retry admitted in the same transaction.
+type PRDevelopmentReviewCompletion struct {
+	Entry       PRDevelopmentLedgerEntry    `json:"-"`
+	Controller  PRDevelopmentController     `json:"-"`
+	NextAttempt *PRDevelopmentRepairAttempt `json:"-"`
+}
+
 // PRDevelopmentLedgerCheckpointAppend records a derived compaction of an
 // exact reviewed prefix. The store independently verifies SourceDigest.
 type PRDevelopmentLedgerCheckpointAppend struct {
@@ -1702,4 +1728,18 @@ type PRDevelopmentLedgerStore interface {
 		ctx context.Context,
 		input PRDevelopmentLedgerCheckpointAppend,
 	) (PRDevelopmentLedgerCheckpoint, bool, error)
+}
+
+// PRDevelopmentReviewQueue owns background reservation-free review claim and
+// atomic completion scheduling. Renewal and explicit release reuse the exact
+// controller lease methods on PRDevelopmentControllerStore.
+type PRDevelopmentReviewQueue interface {
+	ClaimPRDevelopmentReview(
+		ctx context.Context,
+		input PRDevelopmentReviewClaimRequest,
+	) (PRDevelopmentReviewLease, bool, error)
+	CompletePRDevelopmentReview(
+		ctx context.Context,
+		input PRDevelopmentLedgerReviewAppend,
+	) (PRDevelopmentReviewCompletion, bool, error)
 }

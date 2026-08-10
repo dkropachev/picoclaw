@@ -77,6 +77,9 @@ type eventReviewRuntime struct {
 	repairWorkspaces             prdevelopment.RepairControllerWorkspaceFactory
 	repairLocalCI                *prDevelopmentLocalCIRuntime
 	repairControllerProcess      func(context.Context) (bool, error)
+	reviewRuntime                prdevelopment.ReviewRuntimeFactory
+	reviewWorkspaces             prdevelopment.ReviewControllerWorkspaceFactory
+	reviewProcess                func(context.Context) (bool, error)
 	acquireWorkingContextRuntime reviews.WorkingContextRuntimeAcquire
 	submitter                    reviews.Submitter
 	attentionPolicies            reviews.AttentionPolicySource
@@ -142,8 +145,20 @@ func setupEventAutomationService(
 		}
 		reviewRuntime.agentID = defaultAgent.ID
 		reviewRuntime.acquireWorkingContextRuntime = newReviewWorkingContextRuntimeAcquire(cfg, agentLoop)
+		// A parked candidate is reviewed entirely from durable local evidence and
+		// its retained branch. Keep this composition independent of provider MCP
+		// readiness so an already-pending review can finish during an outage.
+		reviewRuntime.reviewRuntime = func(
+			agentID string,
+		) (prdevelopment.LocalReviewExecutor, error) {
+			return agentLoop.NewControllerLocalReviewRunner(agentID)
+		}
+		reviewRuntime.reviewWorkspaces = agentLoop.ControllerGitWorkspaceManager
 		if executor != nil && githubPRDevelopmentRepairReady(ctx, agentLoop) {
-			reviewRuntime.repairAgentReady = agentLoop.ControllerLocalRepairReady
+			reviewRuntime.repairAgentReady = combinedPRDevelopmentAgentReadiness(
+				agentLoop.ControllerLocalRepairReady,
+				agentLoop.ControllerLocalReviewReady,
+			)
 			reviewRuntime.repairVerifier = &prdevelopment.GitHubVerifier{
 				Runner: executor.Tools,
 				ArtifactRoot: effectiveGitHubMCPArtifactRoot(
@@ -277,13 +292,26 @@ func newEventAutomationServiceWithReviews(
 		reviewRuntime.repairAgentReady != nil &&
 		reviewRuntime.repairWorkspaces != nil &&
 		reviewRuntime.agent != nil && reviewRuntime.agentID != ""
-	if prLocalCI == nil && controllerRuntimeReady {
+	reviewRuntimeConfigured := reviewRuntime.reviewRuntime != nil &&
+		reviewRuntime.reviewWorkspaces != nil && reviewRuntime.agent != nil
+	if prLocalCI == nil && (controllerRuntimeReady || reviewRuntimeConfigured) {
 		prLocalCI, err = newPRDevelopmentLocalCIRuntime(cfg)
 		if err != nil {
 			logger.WarnCF("eventing", "PR development local CI is unavailable", map[string]any{
 				"error": err.Error(),
 			})
 			prLocalCI = nil
+			if reviewRuntimeConfigured {
+				prLocalCI, err = newPRDevelopmentLocalCIEvidenceRuntime(cfg)
+				if err != nil {
+					logger.WarnCF(
+						"eventing",
+						"PR development local review evidence is unavailable",
+						map[string]any{"error": err.Error()},
+					)
+					prLocalCI = nil
+				}
+			}
 		}
 	}
 	closeSetup := func(setupErr error) error {
@@ -312,7 +340,10 @@ func newEventAutomationServiceWithReviews(
 	if err != nil {
 		return nil, closeSetup(err)
 	}
-	repairEnabled := controllerRuntimeReady && prLocalCI != nil && prLocalCI.runner != nil
+	reviewRuntimeReady := reviewRuntimeConfigured && prLocalCI != nil &&
+		prLocalCI.evidence != nil
+	repairEnabled := controllerRuntimeReady && reviewRuntimeReady &&
+		prLocalCI.runner != nil
 	prDevelopmentService, err := prdevelopment.NewService(prdevelopment.ServiceConfig{
 		Store:            store,
 		RepairStore:      store,
@@ -399,6 +430,29 @@ func newEventAutomationServiceWithReviews(
 	repairControllerProcess := repairController.ProcessOne
 	if reviewRuntime.repairControllerProcess != nil {
 		repairControllerProcess = reviewRuntime.repairControllerProcess
+	}
+	var localReviewProcess func(context.Context) (bool, error)
+	if reviewRuntime.reviewProcess != nil {
+		// This seam is intentionally process-shaped: tests can prove generation
+		// and shutdown ownership without supplying production storage or model
+		// implementations.
+		localReviewProcess = reviewRuntime.reviewProcess
+	} else if reviewRuntimeReady {
+		localReview, reviewErr := prdevelopment.NewReviewWorker(
+			prdevelopment.ReviewWorkerConfig{
+				Store:              store,
+				Workspaces:         reviewRuntime.reviewWorkspaces,
+				Evidence:           prLocalCI.evidence,
+				ContextAgent:       reviewRuntime.agent,
+				ContextCompactorID: prDevelopmentContextCompactorID,
+				Runtime:            reviewRuntime.reviewRuntime,
+				WorkerLabel:        "gateway-pr-development-review",
+			},
+		)
+		if reviewErr != nil {
+			return nil, closeSetup(reviewErr)
+		}
+		localReviewProcess = localReview.ProcessOne
 	}
 
 	service := &eventAutomationService{
@@ -501,6 +555,15 @@ func newEventAutomationServiceWithReviews(
 		"PR development controller",
 		withEventAutomationRuntime(acquireRuntime, repairControllerProcess),
 	)
+	if localReviewProcess != nil {
+		workers.Add(1)
+		go runEventAutomationWorker(
+			workerCtx,
+			&workers,
+			"PR development review",
+			withEventAutomationRuntime(acquireRuntime, localReviewProcess),
+		)
+	}
 
 	// The legacy queue remains active only for isolated legacy threads and
 	// pre-v14 preparation compatibility. It still reconciles unavailable and
@@ -546,6 +609,18 @@ func newEventAutomationServiceWithReviews(
 		close(service.done)
 	}()
 	return service, nil
+}
+
+func combinedPRDevelopmentAgentReadiness(
+	repairReady func(string) bool,
+	reviewReady func(string) bool,
+) func(string) bool {
+	if repairReady == nil || reviewReady == nil {
+		return nil
+	}
+	return func(agentID string) bool {
+		return repairReady(agentID) && reviewReady(agentID)
+	}
 }
 
 func githubReviewSubmissionReady(
