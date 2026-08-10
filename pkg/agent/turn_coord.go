@@ -587,6 +587,7 @@ type sideQuestionExecutionOptions struct {
 	detachProviderMessages bool
 	skipHooks              bool
 	rejectToolCalls        bool
+	requireResponseContent bool
 	privateExecution       bool
 }
 
@@ -1017,6 +1018,9 @@ func (al *AgentLoop) askSideQuestionWithOptions(
 	}
 	if execution.rejectToolCalls && len(resp.ToolCalls) > 0 {
 		return "", fmt.Errorf("isolated agent decision returned tool calls")
+	}
+	if execution.requireResponseContent {
+		return resp.Content, nil
 	}
 
 	return sideQuestionResponseContent(resp), nil
