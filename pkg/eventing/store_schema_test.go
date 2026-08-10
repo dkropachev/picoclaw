@@ -540,6 +540,11 @@ func TestPRDevelopmentControllerSuspensionTypesAreJSONPrivate(t *testing.T) {
 				Repository: sentinel,
 			},
 		},
+		PRDevelopmentControllerSuspendedResumeLease{
+			Controller: PRDevelopmentController{ID: sentinel},
+		},
+		PRDevelopmentControllerSuspendedResumeRenew{ControllerID: sentinel},
+		PRDevelopmentControllerSuspendedResumeFinalize{ControllerID: sentinel},
 	}
 	for _, value := range values {
 		encoded, err := json.Marshal(value)

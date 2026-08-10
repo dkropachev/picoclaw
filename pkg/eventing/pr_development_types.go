@@ -930,10 +930,11 @@ type PRDevelopmentControllerAcquire struct {
 // for review ownership, the exact pending immutable fence. MutationReservationKey
 // is populated only for a mutation lease.
 type PRDevelopmentControllerLease struct {
-	Controller  PRDevelopmentController          `json:"-"`
-	ReviewFence *PRDevelopmentAttemptReviewFence `json:"-"`
-	Created     bool                             `json:"-"`
-	Reclaimed   bool                             `json:"-"`
+	Controller      PRDevelopmentController                      `json:"-"`
+	ReviewFence     *PRDevelopmentAttemptReviewFence             `json:"-"`
+	SuspendedResume *PRDevelopmentControllerSuspendedResumeLease `json:"-"`
+	Created         bool                                         `json:"-"`
+	Reclaimed       bool                                         `json:"-"`
 }
 
 // PRDevelopmentControllerRenew extends only the exact live lease epoch/token.

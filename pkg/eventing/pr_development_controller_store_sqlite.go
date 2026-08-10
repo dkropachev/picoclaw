@@ -2023,8 +2023,12 @@ func newUniquePRDevelopmentMutationReservation(
 				(SELECT COUNT(*) FROM pr_development_controller_recovery_intents
 				 WHERE previous_reservation_digest = ? OR replacement_reservation_digest = ?) +
 				(SELECT COUNT(*) FROM pr_development_controller_operation_intents
-				 WHERE mutation_reservation_digest = ? OR replacement_reservation_digest = ?)`,
+				 WHERE mutation_reservation_digest = ? OR replacement_reservation_digest = ?) +
+				(SELECT COUNT(*) FROM pr_development_controller_suspensions
+				 WHERE suspension_reservation_digest = ? OR resume_reservation_digest = ?)`,
 			reservation,
+			digest,
+			digest,
 			digest,
 			digest,
 			digest,
@@ -2066,8 +2070,12 @@ func requireFreshPRDevelopmentMutationReservation(
 			(SELECT COUNT(*) FROM pr_development_controller_recovery_intents
 			 WHERE previous_reservation_digest = ? OR replacement_reservation_digest = ?) +
 			(SELECT COUNT(*) FROM pr_development_controller_operation_intents
-			 WHERE mutation_reservation_digest = ? OR replacement_reservation_digest = ?)`,
+			 WHERE mutation_reservation_digest = ? OR replacement_reservation_digest = ?) +
+			(SELECT COUNT(*) FROM pr_development_controller_suspensions
+			 WHERE suspension_reservation_digest = ? OR resume_reservation_digest = ?)`,
 		reservation,
+		digest,
+		digest,
 		digest,
 		digest,
 		digest,
@@ -2330,6 +2338,11 @@ func validateStoredPRDevelopmentController(
 	case PRDevelopmentControllerRecoveryRequired:
 		if controller.CurrentAttemptID == "" || leased || !hasReservation {
 			return errors.New("stored recovery-required controller is invalid")
+		}
+	case PRDevelopmentControllerSuspensionPending,
+		PRDevelopmentControllerSuspended:
+		if !bound || controller.CurrentAttemptID == "" || leased || hasReservation {
+			return errors.New("stored suspended controller is invalid")
 		}
 	default:
 		return errors.New("stored controller phase is invalid")
