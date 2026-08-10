@@ -179,8 +179,10 @@ thread context, and exact parked Git snapshot before one fresh isolated
 no-tools/no-history/no-cache model review. Its strict structured outcome and
 findings complete the fence and ledger atomically; `changes_required` also
 queues exactly one later repair attempt at the then-current conversation
-version. Gates, user attention, provider publication, acknowledgement, and
-merge remain later independently fenced stages.
+version. Attention gates and browser steering are independently implemented.
+The controller-only exact retained-line push prerequisite now exists, while
+durable provider refresh/publication, acknowledgement, and merge remain later
+independently fenced stages.
 
 Schema v17 adds the provider-independent recovery executor for an expired
 prepared local effect. It claims or reclaims eligible bound v12/v13 recovery
@@ -2555,7 +2557,15 @@ issue another model-capable mutation lease. Park continues through the existing
 direct atomic Park finalization. A later queued attempt must durably prepare and
 exactly replay suspended resume before any model call. Legacy unbound v12 rows
 remain excluded pending a separately approved idempotent retirement contract.
-Provider refresh, publication, acknowledgement, and merge remain later still.
+Git Workspaces requirement 018 and Security Isolation requirement 042 supply
+only the `#126a` controller-only exact
+parked one-ref remote-tip compare-and-swap primitive. Event Automation does not
+call it, persist a push intent or result, acquire transport authority, refresh
+provider state, alter `local_ready`, acknowledge a review, or merge in this
+slice. Event Automation requirement 069 is reserved for the `#126b+` durable
+composition, whose provider refresh, local-evidence admission, write-ahead
+publication journal/worker, uncertain-outcome handling, acknowledgement, and
+merge fences require a separate requirement and acceptance evidence.
 
 `FR-EVENT-AUTOMATION-062` is the separate local-CI evidence primitive. [Git
 workspaces](git-workspaces.md) owns exact parent/candidate materialization, the
@@ -2589,7 +2599,8 @@ review, provider access, or publication.
 | Read-only selected-case local-development evidence projection | `#124` / `FR-EVENT-AUTOMATION-067` / the Security Isolation local-evidence contract | Adds no schema or mutation: one atomic workbench snapshot declassifies only bounded latest-attempt, exact candidate, terminal CI, reservation-free review, and derived local-readiness evidence. It exposes no raw evidence or private lifecycle capability, and local readiness is not provider or publication authority. |
 | Reservation-free suspended retained-line state and exact candidate resume, including prepared-Commit ambiguity | `#125a` / the Git Workspaces and Security Isolation suspension contracts | Adds only the controller-private Git boundary: an exact current reservation may be retired while its checkout/ref and bounded ordinary candidate remain. Commit recovery records the deterministic child's `PreparedTree` and applied/unapplied state separately from the current `CandidateTree`; an unapplied child requires exact candidate equality, while an applied child may retain later post-prepare edits. Later exact resume normalizes only the known prepared control plane, uses a globally fresh bearer, and preserves the candidate files. Suspension is neither Park/review nor CI/readiness/publication evidence and does not scan, claim, or finalize an eventing operation. |
 | Generation-owned recovery execution for ambiguous prepared Adopt/Resume/Commit/Park effects | `#125b` / `FR-EVENT-AUTOMATION-068` / schema-v17 security contract | Adds the schema-v17 `suspension_pending`/`suspended` handoff, renewable oldest-work claim/reclaim, and provider-independent gateway worker over eligible bound schema-v12/v13 recovery. Each non-Park exact Git result is durable before suspension; Commit is Rotate plus exact `CommitPinned` followed by commit-recovery suspension, while Park replays and retires old directly. A later queued attempt durably resumes the exact suspended candidate before any model. Staged bearers are erased at authority transitions, both phases force `local_ready=false`, and legacy unbound v12 rows remain safely excluded pending a separate idempotent retirement policy. |
-| Provider refresh/write, push/publication, acknowledgement, and merge | `#126+` | Receives no authority from the schema-v15 decision link, schema-v16 occurrence, private workflow run, completed attempt, ledger row, gate answer, review outcome, or browser-visible local-readiness value without its own later provider and publication fences. |
+| Retained-line exact remote-tip CAS push primitive | `#126a` / Git Workspaces 018 / Security Isolation 042 | Implemented only as a controller Go API over one exact parked reservation-free line and its stored source branch. It persists no eventing state, performs no provider refresh or publication admission, and leaves the line parked. |
+| Durable provider refresh, write-ahead publication journal/worker, uncertain-outcome resolution, acknowledgement, and merge | `#126b+` / Event Automation 069 (reserved) | Not implemented in this slice. It receives no authority from a schema-v15 decision link, schema-v16 occurrence, private workflow run, completed attempt, ledger row, gate answer, review outcome, primitive push result, or browser-visible `local_ready` without its own later provider, evidence-admission, journal, retry/reconciliation, acknowledgement, and merge fences. |
 
 The explicitly installed PR-review template is different: its agent has
 read-only review authority and emits a local structured draft only. Durable
