@@ -536,21 +536,21 @@ security contract additionally constrains the bounded review projection and
 makes repository paths and lifecycle authority unrepresentable outside the
 trusted controller.
 
-The suspension primitive is the Git-boundary prerequisite for Event
-Automation's later generation-owned recovery worker, not that worker itself.
-After the worker has durably reconciled Adopt or Resume to one exact fresh
-owner, or rotated the old Commit owner to fresh, it may invoke the matching
+The suspension primitive is the Git boundary consumed by Event Automation's
+schema-v17 generation-owned recovery worker, not the worker itself. After that
+worker has durably reconciled Adopt or Resume to one exact
+fresh owner, or rotated and exactly replayed a prepared Commit under fresh, it
+must persist the complete recovery result before invoking the matching
 suspension method; the old-to-fresh primitive remains continuously locked
 through its own revocation, and suspension separately keeps the exact current
 reservation locked until it is retired. A crash between calls leaves a durable,
-idempotently replayable fresh owner rather than a guessed suspension. Event
-Automation must persist and order those results before treating the controller
-as reservation-free. Git Workspaces neither scans nor claims an operation and
-does not change its database lifecycle. A later repair must establish separate
-eventing authority and call `ResumeSuspendedPinnedLine` with a globally fresh
-bearer; the suspension record alone is not a queued attempt, review fence,
-passed CI, AI decision, attention request, local-ready state, or publication
-grant.
+idempotently replayable fresh owner plus the eventing `suspension_pending`
+checkpoint rather than a guessed suspension. Git Workspaces neither scans nor
+claims an operation and does not change its database lifecycle. A later repair
+must first persist separate eventing resume authority and then call
+`ResumeSuspendedPinnedLine` with its globally fresh bearer before model work;
+the suspension record alone is not a queued attempt, review fence, passed CI,
+AI decision, attention request, local-ready state, or publication grant.
 
 Local CI may consume `WithPinnedCandidateValidationRoots` only as a synchronous
 controller capability. Git Workspaces owns exact preflight/postflight fencing,
