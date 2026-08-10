@@ -91,6 +91,7 @@ func (runner *Runner) RunPinned(
 			}
 			called = true
 			if roots.CandidateManifest.Tree != request.Candidate.ExpectedTree ||
+				(roots.ParentManifest.Tree == roots.CandidateManifest.Tree) != request.Candidate.NoChanges ||
 				!validObjectID(roots.ParentManifest.Tree) ||
 				!validDigest(roots.ParentManifest.Digest) ||
 				!validDigest(roots.CandidateManifest.Digest) ||

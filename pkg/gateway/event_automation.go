@@ -20,6 +20,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/prdevelopment"
+	"github.com/sipeed/picoclaw/pkg/prdevelopment/localci"
 	"github.com/sipeed/picoclaw/pkg/reviews"
 	"github.com/sipeed/picoclaw/pkg/workflows"
 )
@@ -28,6 +29,7 @@ const (
 	eventRetentionMaintenanceInterval = 6 * time.Hour
 	eventRetentionPruneBatchSize      = 500
 	eventRetentionMaxBatchesPerCycle  = 20
+	prDevelopmentContextCompactorID   = "gateway-pr-development-ledger-compactor-v1"
 	// Signed Unix nanoseconds span 213,503 complete UTC days. A longer
 	// retention period cannot expire any timestamp representable by the event
 	// store and must be handled before time.AddDate can overflow internally.
@@ -44,6 +46,7 @@ type eventAutomationService struct {
 	reviewAttention *reviews.AttentionLauncher
 	reviewBridge    *reviews.AttentionBridge
 	githubPoller    *eventgithubpoll.Poller
+	prLocalCI       *prDevelopmentLocalCIRuntime
 	cancel          context.CancelFunc
 	done            chan struct{}
 
@@ -71,6 +74,9 @@ type eventReviewRuntime struct {
 	repairAgentReady             func(agentID string) bool
 	repairVerifier               prdevelopment.RepairCaseVerifier
 	repairRuntime                prdevelopment.RepairRuntimeFactory
+	repairWorkspaces             prdevelopment.RepairControllerWorkspaceFactory
+	repairLocalCI                *prDevelopmentLocalCIRuntime
+	repairControllerProcess      func(context.Context) (bool, error)
 	acquireWorkingContextRuntime reviews.WorkingContextRuntimeAcquire
 	submitter                    reviews.Submitter
 	attentionPolicies            reviews.AttentionPolicySource
@@ -151,6 +157,7 @@ func setupEventAutomationService(
 			) (prdevelopment.LocalRepairExecutor, error) {
 				return agentLoop.NewControllerLocalRepairRunner(agentID, routingText)
 			}
+			reviewRuntime.repairWorkspaces = agentLoop.ControllerGitWorkspaceManager
 		}
 		pollNotifications := githubNotificationPollingEnabled(cfg)
 		reviewSubmission := githubReviewSubmissionReady(ctx, agentLoop)
@@ -264,6 +271,28 @@ func newEventAutomationServiceWithReviews(
 	if err != nil {
 		return nil, err
 	}
+	prLocalCI := reviewRuntime.repairLocalCI
+	controllerRuntimeReady := reviewRuntime.repairVerifier != nil &&
+		reviewRuntime.repairRuntime != nil &&
+		reviewRuntime.repairAgentReady != nil &&
+		reviewRuntime.repairWorkspaces != nil &&
+		reviewRuntime.agent != nil && reviewRuntime.agentID != ""
+	if prLocalCI == nil && controllerRuntimeReady {
+		prLocalCI, err = newPRDevelopmentLocalCIRuntime(cfg)
+		if err != nil {
+			logger.WarnCF("eventing", "PR development local CI is unavailable", map[string]any{
+				"error": err.Error(),
+			})
+			prLocalCI = nil
+		}
+	}
+	closeSetup := func(setupErr error) error {
+		var ciErr error
+		if prLocalCI != nil {
+			ciErr = prLocalCI.Close()
+		}
+		return errors.Join(setupErr, ciErr, store.Close())
+	}
 	var runStore workflows.RunStore = workflows.NewFileRunStore(workspace)
 	if cfg.Workflows.Enabled {
 		if executor.Store != nil {
@@ -281,19 +310,19 @@ func newEventAutomationServiceWithReviews(
 		AcquireWorkingContextRuntime: reviewRuntime.acquireWorkingContextRuntime,
 	})
 	if err != nil {
-		return nil, errors.Join(err, store.Close())
+		return nil, closeSetup(err)
 	}
+	repairEnabled := controllerRuntimeReady && prLocalCI != nil && prLocalCI.runner != nil
 	prDevelopmentService, err := prdevelopment.NewService(prdevelopment.ServiceConfig{
-		Store:       store,
-		RepairStore: store,
-		RepairEnabled: reviewRuntime.repairVerifier != nil &&
-			reviewRuntime.repairRuntime != nil && reviewRuntime.repairAgentReady != nil,
+		Store:            store,
+		RepairStore:      store,
+		RepairEnabled:    repairEnabled,
 		RepairAgentReady: reviewRuntime.repairAgentReady,
 		Agent:            reviewRuntime.agent,
 		AgentID:          reviewRuntime.agentID,
 	})
 	if err != nil {
-		return nil, errors.Join(err, store.Close())
+		return nil, closeSetup(err)
 	}
 	var reviewAttention *reviews.AttentionLauncher
 	if cfg.Workflows.Enabled && reviewRuntime.attentionPolicies != nil {
@@ -303,7 +332,7 @@ func newEventAutomationServiceWithReviews(
 			Policies: reviewRuntime.attentionPolicies,
 		})
 		if err != nil {
-			return nil, errors.Join(err, store.Close())
+			return nil, closeSetup(err)
 		}
 	}
 	var reviewBridgeExecutor *workflows.Executor
@@ -316,7 +345,7 @@ func newEventAutomationServiceWithReviews(
 		RunStore: runStore,
 	})
 	if err != nil {
-		return nil, errors.Join(err, store.Close())
+		return nil, closeSetup(err)
 	}
 	operatorBackend, err := eventoperator.NewBackend(eventoperator.BackendConfig{
 		Store: store,
@@ -329,15 +358,15 @@ func newEventAutomationServiceWithReviews(
 		},
 	})
 	if err != nil {
-		return nil, errors.Join(err, store.Close())
+		return nil, closeSetup(err)
 	}
 	webhookBackend, err := newEventWebhookBackend(cfg, store)
 	if err != nil {
-		return nil, errors.Join(err, store.Close())
+		return nil, closeSetup(err)
 	}
 	channelBackend, err := newEventChannelBackend(cfg, store)
 	if err != nil {
-		return nil, errors.Join(err, store.Close())
+		return nil, closeSetup(err)
 	}
 	githubPoller, err := newGitHubNotificationPoller(
 		cfg,
@@ -346,7 +375,30 @@ func newEventAutomationServiceWithReviews(
 		reviewRuntime.mcpArtifactRoot,
 	)
 	if err != nil {
-		return nil, errors.Join(err, store.Close())
+		return nil, closeSetup(err)
+	}
+	var localCIRunner *localci.Runner
+	if prLocalCI != nil {
+		localCIRunner = prLocalCI.runner
+	}
+	repairController, err := prdevelopment.NewRepairControllerWorker(
+		prdevelopment.RepairControllerWorkerConfig{
+			Store:              store,
+			Verifier:           reviewRuntime.repairVerifier,
+			Runtime:            reviewRuntime.repairRuntime,
+			Workspaces:         reviewRuntime.repairWorkspaces,
+			LocalCI:            localCIRunner,
+			ContextAgent:       reviewRuntime.agent,
+			ContextCompactorID: prDevelopmentContextCompactorID,
+			WorkerLabel:        "gateway-pr-development-controller",
+		},
+	)
+	if err != nil {
+		return nil, closeSetup(err)
+	}
+	repairControllerProcess := repairController.ProcessOne
+	if reviewRuntime.repairControllerProcess != nil {
+		repairControllerProcess = reviewRuntime.repairControllerProcess
 	}
 
 	service := &eventAutomationService{
@@ -359,6 +411,7 @@ func newEventAutomationServiceWithReviews(
 		reviewAttention: reviewAttention,
 		reviewBridge:    reviewBridge,
 		githubPoller:    githubPoller,
+		prLocalCI:       prLocalCI,
 		done:            make(chan struct{}),
 	}
 
@@ -438,11 +491,20 @@ func newEventAutomationServiceWithReviews(
 			withEventAutomationRuntime(acquireRuntime, submitter.ProcessOne),
 		)
 	}
-	// The durable repair queue is reconciled even when execution dependencies
-	// are unavailable. In that mode queued/preparing work is safely terminalized
-	// as runtime_unavailable, and expired running ownership is still surfaced as
-	// recovery_required. RepairAvailable above remains false, so no new work is
-	// admitted through the public service.
+	// Provider-verified threads use the controller lifecycle even when one of
+	// its execution dependencies is unavailable. A fresh unpinned Bootstrap can
+	// then fail safely instead of being stranded behind queue suppression.
+	workers.Add(1)
+	go runEventAutomationWorker(
+		workerCtx,
+		&workers,
+		"PR development controller",
+		withEventAutomationRuntime(acquireRuntime, repairControllerProcess),
+	)
+
+	// The legacy queue remains active only for isolated legacy threads and
+	// pre-v14 preparation compatibility. It still reconciles unavailable and
+	// expired legacy work without racing a provider-thread controller claim.
 	repair := &prdevelopment.RepairWorker{
 		Queue:       store,
 		Verifier:    reviewRuntime.repairVerifier,
@@ -1121,7 +1183,11 @@ func (s *eventAutomationService) Close(ctx context.Context) error {
 		return ctx.Err()
 	}
 	s.closeOnce.Do(func() {
-		s.closeErr = s.store.Close()
+		var ciErr error
+		if s.prLocalCI != nil {
+			ciErr = s.prLocalCI.Close()
+		}
+		s.closeErr = errors.Join(ciErr, s.store.Close())
 	})
 	return s.closeErr
 }

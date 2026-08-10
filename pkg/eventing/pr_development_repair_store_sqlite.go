@@ -165,6 +165,36 @@ func (s *Store) AdmitPRDevelopmentRepair(
 				)
 			}
 		}
+		markOrchestrationCohort := false
+		if current.Thread.Kind == PRDevelopmentThreadProvider {
+			if current.RepairSession == nil {
+				if ownerErr := requireExclusivePRDevelopmentRepairSessionOwner(
+					ctx, conn, current.Thread.ID, "",
+				); ownerErr != nil {
+					return ownerErr
+				}
+				markOrchestrationCohort = true
+			} else {
+				cohortThreadID, cohort, cohortErr := loadPRDevelopmentRepairOrchestrationCohort(
+					ctx, conn, current.RepairSession.ID,
+				)
+				if cohortErr != nil {
+					return cohortErr
+				}
+				if cohort {
+					if cohortThreadID != current.Thread.ID {
+						return errors.New(
+							"stored repair orchestration cohort has a foreign provider thread",
+						)
+					}
+					if ownerErr := requireExclusivePRDevelopmentRepairSessionOwner(
+						ctx, conn, current.Thread.ID, current.RepairSession.ID,
+					); ownerErr != nil {
+						return ownerErr
+					}
+				}
+			}
+		}
 
 		now, clockErr := s.currentTime()
 		if clockErr != nil {
@@ -178,13 +208,21 @@ func (s *Store) AdmitPRDevelopmentRepair(
 					normalized.ExpectedRepairVersion,
 				)
 			}
-			if createErr := insertPRDevelopmentRepairSession(
+			sessionID, createErr := insertPRDevelopmentRepairSession(
 				ctx,
 				conn,
 				normalized,
 				now,
-			); createErr != nil {
+			)
+			if createErr != nil {
 				return createErr
+			}
+			if markOrchestrationCohort {
+				if cohortErr := insertPRDevelopmentRepairOrchestrationCohort(
+					ctx, conn, sessionID, current.Thread.ID,
+				); cohortErr != nil {
+					return cohortErr
+				}
 			}
 		} else {
 			session := current.RepairSession
@@ -246,6 +284,93 @@ func (s *Store) AdmitPRDevelopmentRepair(
 	return workbench, admitted, nil
 }
 
+func requireExclusivePRDevelopmentRepairSessionOwner(
+	ctx context.Context,
+	queryer rowsQueryer,
+	threadID, selectedSessionID string,
+) error {
+	rows, err := queryer.QueryContext(ctx, `
+		SELECT session.id
+		FROM pr_development_repair_sessions AS session
+		JOIN pr_development_thread_cases AS membership
+		  ON membership.case_id = session.case_id
+		WHERE membership.thread_id = ?
+		ORDER BY session.id
+		LIMIT 2`, threadID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	owners := make([]string, 0, 2)
+	for rows.Next() {
+		var owner string
+		if scanErr := rows.Scan(&owner); scanErr != nil {
+			return scanErr
+		}
+		owners = append(owners, owner)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return rowsErr
+	}
+	if len(owners) == 0 || len(owners) == 1 && owners[0] == selectedSessionID {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: provider-thread repair session already belongs to another case",
+		ErrPRDevelopmentRepairConflict,
+	)
+}
+
+func loadPRDevelopmentRepairOrchestrationCohort(
+	ctx context.Context,
+	queryer rowQueryer,
+	sessionID string,
+) (string, bool, error) {
+	var threadID string
+	err := queryer.QueryRowContext(ctx, `
+		SELECT thread_id
+		FROM pr_development_repair_orchestration_cohorts
+		WHERE session_id = ?`, sessionID).Scan(&threadID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return threadID, true, nil
+}
+
+func isPRDevelopmentRepairOrchestrationEligible(
+	ctx context.Context,
+	queryer rowQueryer,
+	sessionID, threadID string,
+) (bool, error) {
+	var eligible int
+	err := queryer.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM pr_development_repair_orchestration_cohorts
+			WHERE session_id = ? AND thread_id = ?
+		) OR EXISTS (
+			SELECT 1 FROM pr_development_thread_controllers
+			WHERE owner_session_id = ? AND thread_id = ?
+		)`, sessionID, threadID, sessionID, threadID).Scan(&eligible)
+	if err != nil {
+		return false, err
+	}
+	return eligible == 1, nil
+}
+
+func insertPRDevelopmentRepairOrchestrationCohort(
+	ctx context.Context,
+	conn *sql.Conn,
+	sessionID, threadID string,
+) error {
+	_, err := conn.ExecContext(ctx, `
+		INSERT INTO pr_development_repair_orchestration_cohorts (session_id, thread_id)
+		VALUES (?, ?)`, sessionID, threadID)
+	return err
+}
+
 // ClaimPRDevelopmentRepair terminalizes a bounded batch of expired running
 // attempts first, then examines a bounded batch and leases at most one queued
 // or expired-preparing attempt. Preparing is safe to reclaim because no local
@@ -253,6 +378,19 @@ func (s *Store) AdmitPRDevelopmentRepair(
 func (s *Store) ClaimPRDevelopmentRepair(
 	ctx context.Context,
 	input PRDevelopmentRepairClaimRequest,
+) (PRDevelopmentRepairSession, bool, error) {
+	return s.claimPRDevelopmentRepair(ctx, input, false)
+}
+
+// claimPRDevelopmentRepair keeps the legacy attempt state-machine mechanics
+// independently testable. The public scanner excludes queued provider work
+// only when its session was explicitly enrolled in the v14 orchestration
+// cohort; migrated provider sessions and all of their later attempts remain
+// wholly legacy-owned. Any expired Preparing attempt may still be drained.
+func (s *Store) claimPRDevelopmentRepair(
+	ctx context.Context,
+	input PRDevelopmentRepairClaimRequest,
+	includeProviderThreads bool,
 ) (PRDevelopmentRepairSession, bool, error) {
 	if err := s.ready(ctx); err != nil {
 		return PRDevelopmentRepairSession{}, false, err
@@ -285,6 +423,7 @@ func (s *Store) ClaimPRDevelopmentRepair(
 			ctx,
 			conn,
 			scanNow,
+			includeProviderThreads,
 		)
 		if candidateErr != nil {
 			return candidateErr
@@ -416,6 +555,7 @@ func collectPRDevelopmentRepairClaimCandidates(
 	ctx context.Context,
 	conn *sql.Conn,
 	now time.Time,
+	includeProviderThreads bool,
 ) ([]prDevelopmentRepairClaimCandidate, error) {
 	rows, err := conn.QueryContext(ctx, `
 		SELECT attempt.id, session.id, attempt.status
@@ -423,6 +563,18 @@ func collectPRDevelopmentRepairClaimCandidates(
 		JOIN pr_development_repair_sessions AS session
 		  ON session.id = attempt.session_id
 		WHERE session.claim_suppressed = 0 AND session.version >= 1
+		  AND (? OR attempt.status = ? OR NOT EXISTS (
+			SELECT 1
+			FROM pr_development_thread_cases AS membership
+			JOIN pr_development_threads AS thread
+			  ON thread.id = membership.thread_id
+			WHERE membership.case_id = session.case_id
+			  AND thread.identity_kind = 'provider'
+		  ) OR NOT EXISTS (
+			SELECT 1
+			FROM pr_development_repair_orchestration_cohorts AS cohort
+			WHERE cohort.session_id = session.id
+		  ))
 		  AND NOT EXISTS (
 			SELECT 1 FROM pr_development_thread_controllers AS controller
 			WHERE controller.owner_session_id = session.id
@@ -438,6 +590,8 @@ func collectPRDevelopmentRepairClaimCandidates(
 		)
 		ORDER BY attempt.created_at, attempt.id
 		LIMIT ?`,
+		includeProviderThreads,
+		PRDevelopmentRepairPreparing,
 		PRDevelopmentRepairQueued,
 		MaxPRDevelopmentRepairVersion-prDevelopmentRepairUnpinnedQueuedTransitions,
 		MaxPRDevelopmentRepairVersion-prDevelopmentRepairPinnedQueuedTransitions,
@@ -937,18 +1091,18 @@ func insertPRDevelopmentRepairSession(
 	conn *sql.Conn,
 	input PRDevelopmentRepairAdmit,
 	now time.Time,
-) error {
+) (string, error) {
 	sessionID, err := newPrefixedID(prDevelopmentRepairSessionIDPrefix)
 	if err != nil {
-		return err
+		return "", err
 	}
 	attemptID, err := newPrefixedID(prDevelopmentRepairAttemptIDPrefix)
 	if err != nil {
-		return err
+		return "", err
 	}
 	reservationKey, err := newUniquePRDevelopmentRepairReservation(ctx, conn)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if _, insertErr := conn.ExecContext(ctx, `
 		INSERT INTO pr_development_repair_sessions (
@@ -961,7 +1115,7 @@ func insertPRDevelopmentRepairSession(
 		toDBTime(now),
 		toDBTime(now),
 	); insertErr != nil {
-		return insertErr
+		return "", insertErr
 	}
 	_, err = conn.ExecContext(ctx, `
 		INSERT INTO pr_development_repair_attempts (
@@ -978,7 +1132,7 @@ func insertPRDevelopmentRepairSession(
 		toDBTime(now),
 		toDBTime(now),
 	)
-	return err
+	return sessionID, err
 }
 
 func newUniquePRDevelopmentRepairReservation(

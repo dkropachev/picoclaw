@@ -62,6 +62,18 @@ var (
 	sharedLocalRepairPins = newLocalRepairLockSet()
 )
 
+// ControllerLocalRepairPromptDigest identifies the exact isolated system
+// prompt enforced by LocalRepairRunner. It exposes no prompt text or model
+// capability; trusted orchestration stores the digest before model execution
+// so a durable attempt is bound to the prompt contract that produced it.
+func ControllerLocalRepairPromptDigest() string {
+	digest := sha256.Sum256(append(
+		[]byte("picoclaw-local-repair-prompt-digest-v1\x00"),
+		[]byte(localRepairSystemPrompt)...,
+	))
+	return fmt.Sprintf("%x", digest[:])
+}
+
 // PinnedWorkspaceAcquirer is the only repository-lifecycle capability admitted
 // to LocalRepairRunner. The runner can serialize, create, or heartbeat one
 // exact pin but cannot snapshot, commit, release, reset, clean, publish, or

@@ -530,7 +530,9 @@ func writeOperationError(w http.ResponseWriter, err error, latest *Detail) {
 	case errors.Is(err, eventing.ErrPRDevelopmentConversationCapacity):
 		status, message = http.StatusConflict, "development conversation has reached its limit"
 	case errors.Is(err, eventing.ErrPRDevelopmentRepairConflict),
-		errors.Is(err, eventing.ErrPRDevelopmentRepairActive):
+		errors.Is(err, eventing.ErrPRDevelopmentRepairActive),
+		errors.Is(err, eventing.ErrPRDevelopmentControllerConflict),
+		errors.Is(err, eventing.ErrPRDevelopmentControllerActive):
 		status, message = http.StatusConflict, "development repair changed; reload before retrying"
 	case errors.Is(err, eventing.ErrPRDevelopmentRepairCapacity):
 		status, message = http.StatusConflict, "development repair has reached its limit"

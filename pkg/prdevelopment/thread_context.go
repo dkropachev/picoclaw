@@ -421,10 +421,22 @@ func projectDevelopmentLedger(
 			Description:      entry.Summary,
 		}
 		if entry.Kind == eventing.PRDevelopmentLedgerAttempt {
+			if !validDevelopmentLedgerCIStatus(entry.CIStatus) {
+				return developmentLedgerContext{}, fmt.Errorf(
+					"%w: ledger attempt CI status is invalid",
+					ErrUnavailable,
+				)
+			}
 			projected.CommitSHA = entry.Commit
 			projected.NoChanges = entry.NoChanges
-			projected.ValidationStatus = "passed"
+			projected.ValidationStatus = string(entry.CIStatus)
 		} else {
+			if entry.CIStatus != "" {
+				return developmentLedgerContext{}, fmt.Errorf(
+					"%w: ledger review CI status is invalid",
+					ErrUnavailable,
+				)
+			}
 			projected.ReviewOutcome = entry.ReviewOutcome
 			projected.Findings = make(
 				[]developmentLedgerFindingContext,
@@ -466,4 +478,21 @@ func projectDevelopmentLedger(
 		)
 	}
 	return projected, nil
+}
+
+func validDevelopmentLedgerCIStatus(status eventing.PRDevelopmentCIStatus) bool {
+	switch status {
+	case eventing.PRDevelopmentCIPassed,
+		eventing.PRDevelopmentCIFailed,
+		eventing.PRDevelopmentCIIncomplete,
+		eventing.PRDevelopmentCIPlanChanged,
+		eventing.PRDevelopmentCITimedOut,
+		eventing.PRDevelopmentCICanceled,
+		eventing.PRDevelopmentCIOutputLimitExceeded,
+		eventing.PRDevelopmentCIEnvironmentUnavailable,
+		eventing.PRDevelopmentCIInfrastructureError:
+		return true
+	default:
+		return false
+	}
 }

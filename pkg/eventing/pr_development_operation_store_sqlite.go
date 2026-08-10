@@ -677,16 +677,30 @@ func (s *Store) PreparePRDevelopmentControllerOperation(
 				ErrPRDevelopmentControllerConflict,
 			)
 		}
+		if orchestrationErr := preflightPRDevelopmentRepairOrchestrationOperation(
+			ctx,
+			conn,
+			controller,
+			relation,
+			operations,
+			normalized.Kind,
+			expectedRequest,
+		); orchestrationErr != nil {
+			return orchestrationErr
+		}
 
 		if existing, exists, existingErr := loadPRDevelopmentControllerOperationByID(
 			ctx, conn, normalized.OperationID,
 		); existingErr != nil {
 			return existingErr
 		} else if exists {
+			finalizedCommitReplay := existing.Kind == PRDevelopmentControllerOperationCommit &&
+				existing.Status == PRDevelopmentControllerOperationFinalized
 			if existing.ControllerID != controller.ID ||
 				existing.AttemptID != normalized.AttemptID ||
 				existing.Kind != normalized.Kind ||
-				existing.Status != PRDevelopmentControllerOperationPending ||
+				(existing.Status != PRDevelopmentControllerOperationPending &&
+					!finalizedCommitReplay) ||
 				existing.PreparedControllerRevision != normalized.ExpectedRevision ||
 				existing.MutationLeaseEpoch != normalized.LeaseEpoch ||
 				existing.MutationLeaseTokenDigest != prDevelopmentLeaseTokenDigest(
@@ -697,6 +711,18 @@ func (s *Store) PreparePRDevelopmentControllerOperation(
 					"%w: operation ID is bound to different or non-current evidence",
 					ErrPRDevelopmentControllerConflict,
 				)
+			}
+			if finalizedCommitReplay {
+				_, expired, replayErr := requireImmediatePRDevelopmentOperationReplay(
+					ctx, conn, controller, existing, normalized.LeaseToken, now,
+				)
+				if replayErr != nil {
+					return replayErr
+				}
+				if expired {
+					recoveryRequired = true
+					return nil
+				}
 			}
 			operation = existing
 			return nil
@@ -2008,6 +2034,17 @@ func finalizePRDevelopmentParkOperation(
 	if rowErr := requireOnePRDevelopmentControllerRow(controllerResult); rowErr != nil {
 		return PRDevelopmentAttemptReviewFence{}, rowErr
 	}
+	if orchestrationErr := finalizePRDevelopmentRepairOrchestrationPark(
+		ctx,
+		conn,
+		controller,
+		operation,
+		result,
+		fence,
+		now,
+	); orchestrationErr != nil {
+		return PRDevelopmentAttemptReviewFence{}, orchestrationErr
+	}
 	return fence, nil
 }
 
@@ -2019,13 +2056,16 @@ func requireImmediatePRDevelopmentOperationReplay(
 	leaseToken string,
 	now time.Time,
 ) (*PRDevelopmentAttemptReviewFence, bool, error) {
+	heartbeatTolerantCommit := operation.Kind == PRDevelopmentControllerOperationCommit &&
+		operation.RecoveryStagedAt == nil
 	if operation.FinalizedAt == nil ||
 		controller.Revision != operation.FinalControllerRevision ||
 		controller.Phase != operation.FinalControllerPhase ||
 		controller.CurrentAttemptID != operation.AttemptID ||
-		!controller.UpdatedAt.Equal(*operation.FinalizedAt) {
+		controller.UpdatedAt.Before(*operation.FinalizedAt) ||
+		(!heartbeatTolerantCommit && !controller.UpdatedAt.Equal(*operation.FinalizedAt)) {
 		return nil, false, fmt.Errorf(
-			"%w: finalized operation replay is no longer immediate",
+			"%w: finalized operation replay is no longer controller-current",
 			ErrPRDevelopmentControllerConflict,
 		)
 	}
@@ -2058,6 +2098,28 @@ func requireImmediatePRDevelopmentOperationReplay(
 		) != operation.MutationReservationDigest {
 		return nil, false, fmt.Errorf(
 			"%w: finalized operation replay lost its mutation fence",
+			ErrPRDevelopmentControllerConflict,
+		)
+	}
+	if operation.Kind == PRDevelopmentControllerOperationCommit &&
+		(controller.AgentID != operation.AgentID ||
+			controller.WorkspaceID != operation.WorkspaceID ||
+			controller.LineID != operation.LineID ||
+			controller.SourceCloneURL != operation.SourceCloneURL ||
+			controller.SourceRef != operation.SourceRef ||
+			controller.SourceCommit != operation.SourceCommit ||
+			controller.SourceTree != operation.SourceTree ||
+			controller.LineVersion != operation.LineVersion ||
+			controller.MutationEpoch != operation.MutationEpoch ||
+			controller.TipCommit != operation.TipCommit ||
+			controller.Tree != operation.Tree ||
+			operation.Result.WorkspaceID != controller.WorkspaceID ||
+			operation.Result.ParentCommit != controller.TipCommit ||
+			operation.Result.Tree != operation.Request.ExpectedTree ||
+			operation.Result.CandidateDigest != operation.Request.CandidateDigest ||
+			operation.Result.IntentID != operation.Request.EffectIntentID) {
+		return nil, false, fmt.Errorf(
+			"%w: finalized Commit replay changed its line or result evidence",
 			ErrPRDevelopmentControllerConflict,
 		)
 	}

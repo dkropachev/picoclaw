@@ -794,6 +794,179 @@ func (m *Manager) ParkPinnedLine(
 	return pinnedLineParkResult(line, false, request.NoChanges), nil
 }
 
+// PreviewPinnedLineReview validates one proposed park and returns the exact
+// bounded review snapshot that it will expose after ParkPinnedLine succeeds.
+// It holds (but never releases) the mutation reservation and does not update a
+// ref, inventory record, worktree file, or Git index. It may run inside an
+// existing WithPinnedOperation callback.
+func (m *Manager) PreviewPinnedLineReview(
+	ctx context.Context,
+	request PinnedLineParkRequest,
+) (PinnedLineReviewSnapshot, error) {
+	if m == nil {
+		return PinnedLineReviewSnapshot{}, errors.New(
+			"git workspace manager is not configured",
+		)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	repository, validationErr := validatePinnedLineParkRequest(ctx, request)
+	if validationErr != nil {
+		return PinnedLineReviewSnapshot{}, validationErr
+	}
+	reviewCtx, cancelReview := context.WithTimeout(ctx, developmentLineReviewTimeout)
+	defer cancelReview()
+	ctx = reviewCtx
+	_, _, releaseOperation, operationErr := m.acquirePinnedOperation(
+		ctx,
+		request.Pin.ReservationKey,
+	)
+	if operationErr != nil {
+		return PinnedLineReviewSnapshot{}, operationErr
+	}
+	defer releaseOperation()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	unlockInventory, lockErr := m.lockInventory(ctx)
+	if lockErr != nil {
+		return PinnedLineReviewSnapshot{}, lockErr
+	}
+	defer unlockInventory()
+	state, loadErr := m.loadLocked()
+	if loadErr != nil {
+		return PinnedLineReviewSnapshot{}, loadErr
+	}
+	line := state.DevelopmentLines[request.LineID]
+	reservationHash := developmentLineReservationHash(request.Pin.ReservationKey)
+	if line == nil || line.State != developmentLineMutating || line.PendingParkSet ||
+		line.Version != request.ExpectedVersion ||
+		line.MutationEpoch != request.MutationEpoch ||
+		line.MutationReservationHash != reservationHash ||
+		line.MutationAgentID != request.Pin.AgentID ||
+		line.Tip != request.PreviousTip {
+		return PinnedLineReviewSnapshot{}, fmt.Errorf(
+			"%w: development line preview fence changed",
+			ErrPinnedLineConflict,
+		)
+	}
+	if len(line.RetiredReservationHashes) >= maxDevelopmentLineReservations ||
+		line.LastParkIntentID == request.IntentID {
+		return PinnedLineReviewSnapshot{}, fmt.Errorf(
+			"%w: proposed park cannot be consumed",
+			ErrPinnedLineConflict,
+		)
+	}
+	if matchErr := matchPinnedLineSource(
+		line,
+		request.Pin,
+		request.WorkspaceID,
+		repository,
+	); matchErr != nil {
+		return PinnedLineReviewSnapshot{}, matchErr
+	}
+	environment, cleanup, environmentErr := m.newPinnedGitEnvironment()
+	if environmentErr != nil {
+		return PinnedLineReviewSnapshot{}, environmentErr
+	}
+	defer cleanup()
+
+	verifyProposedPark := func() (*WorkspaceRecord, error) {
+		workspace, workspaceErr := m.pinnedWorkspaceForOperation(
+			ctx,
+			state,
+			request.Pin,
+			request.WorkspaceID,
+			repository,
+			environment,
+		)
+		if workspaceErr != nil {
+			return nil, fmt.Errorf("%w: %v", ErrPinnedLineConflict, workspaceErr)
+		}
+		if workspace.DevelopmentLineID != request.LineID {
+			return nil, fmt.Errorf(
+				"%w: workspace line owner changed",
+				ErrPinnedLineConflict,
+			)
+		}
+		if verifyErr := verifyPinnedLineCommitState(
+			ctx,
+			workspace,
+			request.Tip,
+			request.Tree,
+			environment,
+		); verifyErr != nil {
+			return nil, verifyErr
+		}
+		if advanceErr := verifyPinnedLineAdvance(
+			ctx,
+			workspace.Path,
+			request.PreviousTip,
+			request.Tip,
+			request.NoChanges,
+			environment,
+		); advanceErr != nil {
+			return nil, advanceErr
+		}
+		if layoutErr := validateDevelopmentLineRefLayout(
+			workspace.Path,
+			line.Branch,
+			false,
+		); layoutErr != nil {
+			return nil, errors.Join(ErrPinnedLineConflict, layoutErr)
+		}
+		current, found, inspectErr := inspectDevelopmentLineRef(
+			ctx,
+			workspace.Path,
+			line.Branch,
+			environment,
+		)
+		if inspectErr != nil || !found || current != request.PreviousTip {
+			if inspectErr == nil {
+				inspectErr = errors.New("development line ref changed before preview")
+			}
+			return nil, errors.Join(ErrPinnedLineConflict, inspectErr)
+		}
+		return workspace, nil
+	}
+	workspace, verifyErr := verifyProposedPark()
+	if verifyErr != nil {
+		return PinnedLineReviewSnapshot{}, verifyErr
+	}
+	paths, canonicalDiff, reviewErr := readPinnedLineReview(
+		ctx,
+		workspace.Path,
+		request.PreviousTip,
+		request.Tip,
+		environment,
+	)
+	if reviewErr != nil {
+		return PinnedLineReviewSnapshot{}, reviewErr
+	}
+	if _, verifyErr = verifyProposedPark(); verifyErr != nil {
+		return PinnedLineReviewSnapshot{}, verifyErr
+	}
+
+	prospective := *line
+	prospective.Version = line.Version + 1
+	prospective.LastParkIntentID = request.IntentID
+	prospective.LastParkEpoch = request.MutationEpoch
+	prospective.LastParkPreviousTip = request.PreviousTip
+	prospective.LastParkTip = request.Tip
+	prospective.LastParkTree = request.Tree
+	prospective.Tip = request.Tip
+	prospective.Tree = request.Tree
+	return newPinnedLineReviewSnapshot(
+		&prospective,
+		request.PreviousTip,
+		request.Tip,
+		request.Tree,
+		paths,
+		canonicalDiff,
+	), nil
+}
+
 // SnapshotPinnedLineReview returns one bounded unified diff from the previous
 // parked tip to the exact current parked commit. It reads Git objects only and
 // grants no worktree, process, network, or lifecycle capability to the caller.
@@ -860,52 +1033,15 @@ func (m *Manager) SnapshotPinnedLineReview(
 	); verifyErr != nil {
 		return PinnedLineReviewSnapshot{}, verifyErr
 	}
-	reviewEnvironment := append(
-		append([]string(nil), environment...),
-		"GIT_ATTR_SOURCE="+request.ExpectedTip,
-	)
-	paths, pathsErr := developmentLineChangedPaths(
+	paths, canonicalDiff, reviewErr := readPinnedLineReview(
 		ctx,
 		workspace.Path,
 		request.ExpectedBase,
 		request.ExpectedTip,
-		reviewEnvironment,
+		environment,
 	)
-	if pathsErr != nil {
-		return PinnedLineReviewSnapshot{}, pathsErr
-	}
-	diff, diffErr := runPinnedGitPlumbing(
-		ctx,
-		workspace.Path,
-		reviewEnvironment,
-		nil,
-		maxDevelopmentLineDiffBytes,
-		"--attr-source="+request.ExpectedTip,
-		"diff",
-		"--text",
-		"--no-ext-diff",
-		"--no-textconv",
-		"--no-renames",
-		"--full-index",
-		"--no-color",
-		"--src-prefix=a/",
-		"--dst-prefix=b/",
-		request.ExpectedBase,
-		request.ExpectedTip,
-		"--",
-	)
-	if diffErr != nil {
-		return PinnedLineReviewSnapshot{}, fmt.Errorf(
-			"read pinned development line diff: %w",
-			diffErr,
-		)
-	}
-	canonicalDiff, valid := canonicalDevelopmentLineReviewText(diff)
-	if !valid {
-		return PinnedLineReviewSnapshot{}, fmt.Errorf(
-			"%w: development line diff is not valid UTF-8 text",
-			ErrPinnedLineConflict,
-		)
+	if reviewErr != nil {
+		return PinnedLineReviewSnapshot{}, reviewErr
 	}
 	if verifyErr := m.verifyDevelopmentLineParkedWorkspace(
 		ctx,
@@ -918,21 +1054,14 @@ func (m *Manager) SnapshotPinnedLineReview(
 	); verifyErr != nil {
 		return PinnedLineReviewSnapshot{}, verifyErr
 	}
-	return PinnedLineReviewSnapshot{
-		Version:       line.Version,
-		MutationEpoch: line.LastParkEpoch,
-		ParkIntentID:  line.LastParkIntentID,
-		BaseCommit:    request.ExpectedBase,
-		Commit:        request.ExpectedTip,
-		Tree:          request.ExpectedTree,
-		ChangedPaths:  paths,
-		UnifiedDiff:   string(canonicalDiff),
-		ReviewDigest: developmentLineReviewDigest(
-			line,
-			paths,
-			canonicalDiff,
-		),
-	}, nil
+	return newPinnedLineReviewSnapshot(
+		line,
+		request.ExpectedBase,
+		request.ExpectedTip,
+		request.ExpectedTree,
+		paths,
+		canonicalDiff,
+	), nil
 }
 
 func validateDevelopmentLineInventory(state *storeState) error {
@@ -1958,6 +2087,80 @@ func pinnedLineParkResult(
 		NoChanges:      noChanges,
 		AlreadyParked:  replay,
 		WorkspaceClean: true,
+	}
+}
+
+func readPinnedLineReview(
+	ctx context.Context,
+	directory, base, tip string,
+	environment []string,
+) ([]string, []byte, error) {
+	reviewEnvironment := append(
+		append([]string(nil), environment...),
+		"GIT_ATTR_SOURCE="+tip,
+	)
+	paths, pathsErr := developmentLineChangedPaths(
+		ctx,
+		directory,
+		base,
+		tip,
+		reviewEnvironment,
+	)
+	if pathsErr != nil {
+		return nil, nil, pathsErr
+	}
+	diff, diffErr := runPinnedGitPlumbing(
+		ctx,
+		directory,
+		reviewEnvironment,
+		nil,
+		maxDevelopmentLineDiffBytes,
+		"--attr-source="+tip,
+		"diff",
+		"--text",
+		"--no-ext-diff",
+		"--no-textconv",
+		"--no-renames",
+		"--full-index",
+		"--no-color",
+		"--src-prefix=a/",
+		"--dst-prefix=b/",
+		base,
+		tip,
+		"--",
+	)
+	if diffErr != nil {
+		return nil, nil, fmt.Errorf(
+			"read pinned development line diff: %w",
+			diffErr,
+		)
+	}
+	canonicalDiff, valid := canonicalDevelopmentLineReviewText(diff)
+	if !valid {
+		return nil, nil, fmt.Errorf(
+			"%w: development line diff is not valid UTF-8 text",
+			ErrPinnedLineConflict,
+		)
+	}
+	return paths, canonicalDiff, nil
+}
+
+func newPinnedLineReviewSnapshot(
+	line *developmentLineRecord,
+	base, tip, tree string,
+	paths []string,
+	diff []byte,
+) PinnedLineReviewSnapshot {
+	return PinnedLineReviewSnapshot{
+		Version:       line.Version,
+		MutationEpoch: line.LastParkEpoch,
+		ParkIntentID:  line.LastParkIntentID,
+		BaseCommit:    base,
+		Commit:        tip,
+		Tree:          tree,
+		ChangedPaths:  paths,
+		UnifiedDiff:   string(diff),
+		ReviewDigest:  developmentLineReviewDigest(line, paths, diff),
 	}
 }
 

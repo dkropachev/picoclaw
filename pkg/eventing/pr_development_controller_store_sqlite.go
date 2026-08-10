@@ -190,6 +190,7 @@ func (s *Store) AcquirePRDevelopmentControllerLease(
 				normalized,
 				now,
 				deadline,
+				false,
 			)
 			if createErr != nil {
 				return createErr
@@ -1629,6 +1630,7 @@ func insertLeasedPRDevelopmentController(
 	relation prDevelopmentControllerAttemptRelation,
 	input PRDevelopmentControllerAcquire,
 	now, deadline time.Time,
+	alreadySuppressed bool,
 ) (PRDevelopmentController, error) {
 	reservation := relation.Session.ReservationKey
 	if err := requireFreshPRDevelopmentMutationReservation(
@@ -1638,21 +1640,37 @@ func insertLeasedPRDevelopmentController(
 	); err != nil {
 		return PRDevelopmentController{}, err
 	}
-	suppressed, err := conn.ExecContext(ctx, `
-		UPDATE pr_development_repair_sessions
-		SET claim_suppressed = 1
-		WHERE id = ? AND claim_suppressed = 0`,
-		relation.Session.ID,
-	)
-	if err != nil {
-		return PRDevelopmentController{}, err
-	}
-	if rowErr := requireOnePRDevelopmentControllerRow(suppressed); rowErr != nil {
-		return PRDevelopmentController{}, fmt.Errorf(
-			"%w: owner session cannot transfer legacy queue ownership: %v",
-			ErrPRDevelopmentControllerConflict,
-			rowErr,
+	if alreadySuppressed {
+		var suppressed int
+		if err := conn.QueryRowContext(ctx, `
+			SELECT claim_suppressed
+			FROM pr_development_repair_sessions
+			WHERE id = ?`, relation.Session.ID).Scan(&suppressed); err != nil {
+			return PRDevelopmentController{}, err
+		}
+		if suppressed != 1 {
+			return PRDevelopmentController{}, fmt.Errorf(
+				"%w: orchestration owner did not suppress the legacy queue",
+				ErrPRDevelopmentControllerConflict,
+			)
+		}
+	} else {
+		suppressed, err := conn.ExecContext(ctx, `
+			UPDATE pr_development_repair_sessions
+			SET claim_suppressed = 1
+			WHERE id = ? AND claim_suppressed = 0`,
+			relation.Session.ID,
 		)
+		if err != nil {
+			return PRDevelopmentController{}, err
+		}
+		if rowErr := requireOnePRDevelopmentControllerRow(suppressed); rowErr != nil {
+			return PRDevelopmentController{}, fmt.Errorf(
+				"%w: owner session cannot transfer legacy queue ownership: %v",
+				ErrPRDevelopmentControllerConflict,
+				rowErr,
+			)
+		}
 	}
 	controllerID, err := newPrefixedID(prDevelopmentControllerIDPrefix)
 	if err != nil {

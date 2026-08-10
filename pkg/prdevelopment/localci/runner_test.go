@@ -102,6 +102,72 @@ func TestRunnerRunPinnedBindsManagerEvidence(t *testing.T) {
 	}
 }
 
+func TestRunnerRunPinnedRequiresExplicitExactNoChangeEvidence(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPinnedRunnerFixture(t, "run-pinned-no-change")
+	store, err := OpenFileEvidenceStore(filepath.Join(t.TempDir(), "evidence"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := Runner{
+		Sandbox:           &fakeSandbox{environment: strings.Repeat("c", 64)},
+		Store:             store,
+		allowTestBackends: true,
+	}
+	changedDeclaredClean := fixture.validation
+	changedDeclaredClean.NoChanges = true
+	if _, runErr := runner.RunPinned(ctx, fixture.manager, PinnedRunRequest{
+		AttestationID: "lcatt_changed_declared_clean",
+		OwnerID:       "attempt_owner",
+		Candidate:     changedDeclaredClean,
+	}); runErr == nil || !errors.Is(runErr, gitworkspace.ErrPinnedCommitConflict) {
+		t.Fatalf("RunPinned(changed declared clean) error = %v", runErr)
+	}
+
+	if removeErr := os.Remove(filepath.Join(fixture.workspace, "repair.txt")); removeErr != nil {
+		t.Fatal(removeErr)
+	}
+	candidate, err := fixture.manager.SnapshotPinnedValidationCandidate(
+		ctx,
+		gitworkspace.PinnedCandidateRequest{
+			Pin:         fixture.validation.Pin,
+			WorkspaceID: fixture.validation.WorkspaceID,
+		},
+	)
+	if err != nil {
+		t.Fatalf("SnapshotPinnedValidationCandidate() error = %v", err)
+	}
+	validation := gitworkspace.PinnedCandidateValidationRequest{
+		Pin:                     fixture.validation.Pin,
+		WorkspaceID:             fixture.validation.WorkspaceID,
+		ExpectedParent:          candidate.ParentCommit,
+		ExpectedTree:            candidate.Tree,
+		ExpectedCandidateDigest: candidate.CandidateDigest,
+	}
+	if _, runErr := runner.RunPinned(ctx, fixture.manager, PinnedRunRequest{
+		AttestationID: "lcatt_no_change_implicit",
+		OwnerID:       "attempt_owner",
+		Candidate:     validation,
+	}); runErr == nil || !errors.Is(runErr, gitworkspace.ErrPinnedCommitConflict) {
+		t.Fatalf("RunPinned(implicit no-change) error = %v", runErr)
+	}
+	validation.NoChanges = true
+	result, err := runner.RunPinned(ctx, fixture.manager, PinnedRunRequest{
+		AttestationID: "lcatt_no_change_explicit",
+		OwnerID:       "attempt_owner",
+		Candidate:     validation,
+	})
+	if err != nil {
+		t.Fatalf("RunPinned(explicit no-change) error = %v", err)
+	}
+	if candidate.ChangedFiles != 0 || result.Execution.Status != StatusPassed ||
+		result.Execution.Evidence.Tree != candidate.Tree ||
+		result.Execution.Evidence.ParentManifestDigest !=
+			result.Execution.Evidence.CandidateManifestDigest {
+		t.Fatalf("RunPinned(explicit no-change) result = %#v, candidate = %#v", result, candidate)
+	}
+}
+
 func TestRunnerRunPinnedRejectsNonProductionSandbox(t *testing.T) {
 	fixture := newPinnedRunnerFixture(t, "run-pinned-fake-rejected")
 	store, err := OpenFileEvidenceStore(filepath.Join(t.TempDir(), "evidence"))

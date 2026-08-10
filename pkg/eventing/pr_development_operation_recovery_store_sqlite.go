@@ -739,6 +739,24 @@ func (s *Store) FinalizePRDevelopmentControllerOperationRecovery(
 			); operationFinalizeErr != nil {
 				return operationFinalizeErr
 			}
+			if _, orchestrationErr := terminalizePRDevelopmentRepairOrchestrationAfterRecovery(
+				ctx,
+				conn,
+				operation.AttemptID,
+				prDevelopmentRepairOrchestrationMutationFence{
+					controllerID:     operation.ControllerID,
+					controllerRev:    operation.PreparedControllerRevision,
+					lineID:           operation.LineID,
+					lineVersion:      operation.LineVersion,
+					mutationEpoch:    operation.MutationEpoch,
+					leaseEpoch:       operation.MutationLeaseEpoch,
+					leaseTokenDigest: operation.MutationLeaseTokenDigest,
+					reservationHash:  operation.MutationReservationDigest,
+				},
+				now,
+			); orchestrationErr != nil {
+				return orchestrationErr
+			}
 		}
 
 		operation.Status = PRDevelopmentControllerOperationFinalized

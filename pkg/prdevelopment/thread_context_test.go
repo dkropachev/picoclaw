@@ -429,10 +429,14 @@ func threadContextLedgerEntries(count int, summary string) []eventing.PRDevelopm
 			CaseOrdinal:   0,
 			Commit:        commit,
 			Summary:       summary,
+			CIStatus:      eventing.PRDevelopmentCIPassed,
 			ReviewOutcome: outcome,
 			EntryHash:     fmt.Sprintf("entry-hash-%03d", ordinal),
 			CreatedAt:     base.Add(-time.Duration(ordinal) * time.Minute),
 		})
+		if kind == eventing.PRDevelopmentLedgerReview {
+			entries[len(entries)-1].CIStatus = ""
+		}
 	}
 	return entries
 }

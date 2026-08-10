@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -363,6 +364,369 @@ func TestStoreMigratesV12ToEmptyPRDevelopmentControllerOperationSchema(t *testin
 		SELECT COUNT(*) FROM pr_development_controller_operation_intents`,
 	).Scan(&count))
 	assert.Zero(t, count, "v13 migration must not manufacture operation authority")
+}
+
+func TestStoreMigratesV13ToEmptyPRDevelopmentRepairOrchestrationSchema(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "migration-v13-orchestration.db")
+	db := openSchemaTestDB(t, path)
+	for _, schema := range []string{
+		schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaV7,
+		schemaV8, schemaV9, schemaV10, schemaV11, schemaV12, schemaV13,
+	} {
+		_, err := db.Exec(schema)
+		require.NoError(t, err)
+	}
+	setSchemaTestVersion(t, db, 13)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.NoError(t, err)
+	defer store.Close()
+	var version int
+	require.NoError(t, store.db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, schemaVersion, version)
+	for _, object := range []struct{ kind, name string }{
+		{"table", "pr_development_repair_orchestration_cohorts"},
+		{"table", "pr_development_repair_orchestrations"},
+		{"index", "pr_development_repair_orchestration_claimable"},
+		{"index", "pr_development_repair_orchestration_receipt"},
+		{"index", "pr_development_repair_orchestration_park"},
+		{"index", "pr_development_repair_orchestration_ledger"},
+	} {
+		assert.True(t, schemaObjectExists(t, store.db, object.kind, object.name))
+	}
+	var count int
+	require.NoError(t, store.db.QueryRow(`
+		SELECT COUNT(*) FROM pr_development_repair_orchestrations`).Scan(&count))
+	assert.Zero(t, count, "v14 migration must not manufacture orchestration state")
+	require.NoError(t, store.db.QueryRow(`
+		SELECT COUNT(*) FROM pr_development_repair_orchestration_cohorts`).Scan(&count))
+	assert.Zero(t, count, "v14 migration must not guess legacy cohort ownership")
+}
+
+func TestStoreV14MigrationGrandfathersMultipleProviderThreadRepairSessionOwners(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "migration-v14-duplicate-thread-owner.db")
+	store, clock, capture := newPRDevelopmentStoreFixture(t, path)
+	first, created, err := store.CapturePRDevelopmentCase(
+		ctx, validPRDevelopmentRequestForTest(capture),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	second := captureAdditionalPRDevelopmentThreadCase(
+		t, store, clock, capture, "delivery-v13-duplicate-thread-owner", "814",
+	)
+	owned, admitted, err := store.AdmitPRDevelopmentRepair(ctx, PRDevelopmentRepairAdmit{
+		CaseID: first.ID, ExpectedConversationVersion: 0, ExpectedRepairVersion: 0,
+		IdempotencyKey: "existing-v13-owner", AgentID: "main",
+		Instruction: "Existing provider-thread repair owner.",
+	})
+	require.NoError(t, err)
+	require.True(t, admitted)
+	require.NotNil(t, owned.RepairSession)
+
+	// Simulate a pre-v14 database that admitted a second case in the same
+	// provider thread before the one-owner invariant existed.
+	err = store.withImmediate(ctx, func(conn *sql.Conn) error {
+		now, clockErr := store.currentTime()
+		if clockErr != nil {
+			return clockErr
+		}
+		_, insertErr := insertPRDevelopmentRepairSession(ctx, conn, PRDevelopmentRepairAdmit{
+			CaseID: second.ID, ExpectedConversationVersion: 0, ExpectedRepairVersion: 0,
+			IdempotencyKey: "conflicting-v13-owner", AgentID: "main",
+			Instruction: "Conflicting provider-thread repair owner.",
+		}, now)
+		return insertErr
+	})
+	require.NoError(t, err)
+	var sessions int
+	require.NoError(t, store.db.QueryRow(`
+		SELECT COUNT(*) FROM pr_development_repair_sessions`).Scan(&sessions))
+	require.Equal(t, 2, sessions)
+	_, err = store.db.Exec(`DROP TABLE pr_development_repair_orchestrations`)
+	require.NoError(t, err)
+	_, err = store.db.Exec(`DROP TABLE pr_development_repair_orchestration_cohorts`)
+	require.NoError(t, err)
+	setSchemaTestVersion(t, store.db, 13)
+
+	migrated, err := Open(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, migrated.Close()) })
+	var version int
+	require.NoError(t, migrated.db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, schemaVersion, version)
+	var cohorts int
+	require.NoError(t, migrated.db.QueryRow(`
+		SELECT COUNT(*) FROM pr_development_repair_orchestration_cohorts`).Scan(&cohorts))
+	assert.Zero(t, cohorts, "migrated sibling owners must remain in the legacy cohort")
+	legacy, claimed, err := migrated.ClaimPRDevelopmentRepair(
+		ctx, PRDevelopmentRepairClaimRequest{WorkerLabel: "legacy-v13", Lease: time.Minute},
+	)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NotEmpty(t, legacy.Attempts)
+	_, claimed, err = migrated.ClaimPRDevelopmentRepairOrchestration(
+		ctx, PRDevelopmentRepairOrchestrationClaim{WorkerLabel: "v14", Lease: time.Minute},
+	)
+	require.NoError(t, err)
+	assert.False(t, claimed, "unmarked migrated owners must not enter orchestration")
+}
+
+func TestStoreV14MigrationKeepsPinnedProviderSessionAndLaterAttemptLegacyOwned(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "migration-v14-pinned-legacy-owner.db")
+	store, _, capture := newPRDevelopmentStoreFixture(t, path)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx, validPRDevelopmentRequestForTest(capture),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	completed := completePRDevelopmentRepairForControllerTest(
+		t, store, developmentCase.ID,
+	)
+	require.NotEmpty(t, completed.HeadRepository)
+	require.NotEmpty(t, completed.WorkspaceID)
+	_, err = store.db.Exec(`
+		DELETE FROM pr_development_repair_orchestration_cohorts WHERE session_id = ?`,
+		completed.ID,
+	)
+	require.NoError(t, err)
+	queued, admitted, err := store.AdmitPRDevelopmentRepair(ctx, PRDevelopmentRepairAdmit{
+		CaseID: developmentCase.ID, ExpectedConversationVersion: 0,
+		ExpectedRepairVersion: completed.Version,
+		IdempotencyKey:        "legacy-pinned-later-attempt", AgentID: "main",
+		Instruction: "Continue the legacy-owned retained workspace repair.",
+	})
+	require.NoError(t, err)
+	require.True(t, admitted)
+	require.NotNil(t, queued.RepairSession)
+	require.Len(t, queued.RepairSession.Attempts, 2)
+	queuedAttemptID := queued.RepairSession.Attempts[1].ID
+	_, err = store.db.Exec(`DROP TABLE pr_development_repair_orchestrations`)
+	require.NoError(t, err)
+	_, err = store.db.Exec(`DROP TABLE pr_development_repair_orchestration_cohorts`)
+	require.NoError(t, err)
+	setSchemaTestVersion(t, store.db, 13)
+
+	migrated, err := Open(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, migrated.Close()) })
+	legacy, claimed, err := migrated.ClaimPRDevelopmentRepair(
+		ctx, PRDevelopmentRepairClaimRequest{WorkerLabel: "legacy-pinned", Lease: time.Minute},
+	)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	legacyAttempt := activePRDevelopmentRepairAttempt(&legacy)
+	require.NotNil(t, legacyAttempt)
+	assert.Equal(t, queuedAttemptID, legacyAttempt.ID)
+	_, claimed, err = migrated.ClaimPRDevelopmentRepairOrchestration(
+		ctx, PRDevelopmentRepairOrchestrationClaim{WorkerLabel: "v14", Lease: time.Minute},
+	)
+	require.NoError(t, err)
+	assert.False(t, claimed)
+}
+
+func TestStoreV14MigrationRoutesExactReadyControllerOwnerToOrchestration(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "migration-v14-ready-controller-owner.db")
+	store, _, capture := newPRDevelopmentStoreFixture(t, path)
+	developmentCase, created, err := store.CapturePRDevelopmentCase(
+		ctx, validPRDevelopmentRequestForTest(capture),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	completed := completePRDevelopmentRepairForControllerTest(
+		t, store, developmentCase.ID,
+	)
+	_, ready := finishPRDevelopmentControllerReviewForTest(
+		t, store, developmentCase.ID, completed,
+	)
+	require.Equal(t, PRDevelopmentControllerReady, ready.Phase)
+	var legacyLedgerEntries int
+	require.NoError(t, store.db.QueryRow(`
+		SELECT COUNT(*) FROM pr_development_ledger_entries`).Scan(&legacyLedgerEntries))
+	require.Zero(t, legacyLedgerEntries)
+	_, err = store.db.Exec(`
+		DELETE FROM pr_development_repair_orchestration_cohorts WHERE session_id = ?`,
+		completed.ID,
+	)
+	require.NoError(t, err)
+	_, err = store.db.Exec(`DROP TABLE pr_development_repair_orchestrations`)
+	require.NoError(t, err)
+	_, err = store.db.Exec(`DROP TABLE pr_development_repair_orchestration_cohorts`)
+	require.NoError(t, err)
+	setSchemaTestVersion(t, store.db, 13)
+
+	migrated, err := Open(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, migrated.Close()) })
+	workbench, admitted, err := migrated.AdmitPRDevelopmentRepair(ctx, PRDevelopmentRepairAdmit{
+		CaseID: developmentCase.ID, ExpectedConversationVersion: 0,
+		ExpectedRepairVersion: completed.Version,
+		IdempotencyKey:        "ready-controller-later-attempt", AgentID: "main",
+		Instruction: "Continue from the exact retained controller line.",
+	})
+	require.NoError(t, err)
+	require.True(t, admitted)
+	require.NotNil(t, workbench.RepairSession)
+	require.Len(t, workbench.RepairSession.Attempts, 2)
+	queuedAttemptID := workbench.RepairSession.Attempts[1].ID
+	var cohorts int
+	require.NoError(t, migrated.db.QueryRow(`
+		SELECT COUNT(*) FROM pr_development_repair_orchestration_cohorts`).Scan(&cohorts))
+	assert.Zero(t, cohorts, "retained controller evidence is eligibility, not guessed cohort data")
+	_, claimed, err := migrated.ClaimPRDevelopmentRepair(
+		ctx, PRDevelopmentRepairClaimRequest{WorkerLabel: "legacy", Lease: time.Minute},
+	)
+	require.NoError(t, err)
+	assert.False(t, claimed)
+	run, claimed, err := migrated.ClaimPRDevelopmentRepairOrchestration(
+		ctx, PRDevelopmentRepairOrchestrationClaim{WorkerLabel: "v14", Lease: time.Minute},
+	)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	assert.Equal(t, queuedAttemptID, run.AttemptID)
+	run, pinned, err := migrated.PinPRDevelopmentRepairOrchestration(
+		ctx,
+		PRDevelopmentRepairOrchestrationPin{
+			AttemptID: run.AttemptID, ClaimToken: run.ClaimToken,
+			HeadRepository: completed.HeadRepository, HeadRef: completed.HeadRef,
+			HeadSHA: completed.HeadSHA, CloneURL: completed.CloneURL,
+			ReviewDigest: completed.ReviewDigest, WorkspaceID: completed.WorkspaceID,
+			SourceTree: ready.SourceTree,
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, pinned)
+	lease, acquired, err := migrated.AcquirePRDevelopmentRepairOrchestrationController(
+		ctx,
+		PRDevelopmentRepairOrchestrationControllerAcquire{
+			CaseID: developmentCase.ID, AttemptID: run.AttemptID,
+			ClaimToken: run.ClaimToken, ExpectedRevision: ready.Revision,
+			WorkerLabel: "v14-ready-owner", Lease: time.Minute,
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	loaded, err := migrated.GetPRDevelopmentWorkbench(ctx, developmentCase.ID)
+	require.NoError(t, err)
+	require.NotNil(t, loaded.RepairSession)
+	operationFixture := &prDevelopmentOperationFixture{
+		Store: migrated, Case: developmentCase, Session: *loaded.RepairSession,
+		Attempt:  loaded.RepairSession.Attempts[len(loaded.RepairSession.Attempts)-1],
+		Mutation: lease, SourceTree: ready.SourceTree, NextID: 814,
+	}
+	request := operationBaseRequest(operationFixture, lease.Controller)
+	request.ExpectedVersion = lease.Controller.LineVersion
+	request.ExpectedEpoch = lease.Controller.MutationEpoch
+	request.ExpectedTip = lease.Controller.TipCommit
+	request.ExpectedTree = lease.Controller.Tree
+	resume := prepareOperationForTest(
+		t, operationFixture, lease, PRDevelopmentControllerOperationResume,
+		operationFixture.operationID(), request,
+	)
+	resumed := finalizeOperationForTest(
+		t,
+		operationFixture,
+		lease,
+		resume,
+		PRDevelopmentControllerOperationResult{
+			WorkspaceID: completed.WorkspaceID, Version: lease.Controller.LineVersion,
+			MutationEpoch: lease.Controller.MutationEpoch + 1,
+			Tip:           lease.Controller.TipCommit, Tree: lease.Controller.Tree,
+		},
+	)
+	assert.Equal(t, lease.Controller.MutationEpoch+1, resumed.Controller.MutationEpoch)
+	orchestrationFixture := &prDevelopmentOrchestrationFixture{
+		Operation: operationFixture, Run: run, Lease: operationLeaseFromTransition(resumed),
+	}
+	run = startAndCompletePRDevelopmentOrchestrationForTest(t, orchestrationFixture)
+	validated, changed, err := migrated.RecordPRDevelopmentRepairOrchestrationValidation(
+		ctx, validPRDevelopmentOrchestrationValidationForTest(orchestrationFixture),
+	)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.NotNil(t, validated.Validation)
+	_, _, parked := parkOperationForTest(
+		t,
+		operationFixture,
+		orchestrationFixture.Lease,
+		nil,
+		run.Summary,
+		run.Iterations,
+		815,
+	)
+	require.NotNil(t, parked.Fence)
+	assert.Equal(t, 1, parked.Fence.Ordinal)
+	completedRun, err := migrated.GetPRDevelopmentRepairOrchestration(ctx, run.AttemptID)
+	require.NoError(t, err)
+	assert.Equal(t, PRDevelopmentRepairOrchestrationCompleted, completedRun.Phase)
+	ledger, err := migrated.GetPRDevelopmentLedgerForCase(ctx, developmentCase.ID)
+	require.NoError(t, err)
+	require.Len(t, ledger.Entries, 1)
+	assert.Equal(t, 2, ledger.Entries[0].Ordinal)
+	assert.Equal(t, emptyPRDevelopmentLedgerEntriesDigest(), ledger.Entries[0].PreviousHash)
+	assert.Equal(t, completedRun.LedgerEntryID, ledger.Entries[0].ID)
+	dummyEarlier := ledger.Entries[0]
+	dummyEarlier.ID = prDevelopmentLedgerEntryIDPrefix + strings.Repeat("f", 32)
+	dummyEarlier.Ordinal = 0
+	dummyEarlier.AttemptID = completed.Attempts[0].ID
+	dummyEarlier.FenceOrdinal = 0
+	dummyEarlier.FenceHash = strings.Repeat("a", 64)
+	dummyEarlier.PreviousHash = emptyPRDevelopmentLedgerEntriesDigest()
+	dummyEarlier.EntryHash = strings.Repeat("b", 64)
+	require.NoError(t, migrated.withImmediate(ctx, func(conn *sql.Conn) error {
+		return insertPRDevelopmentLedgerEntry(ctx, conn, dummyEarlier)
+	}))
+	_, err = migrated.GetPRDevelopmentRepairOrchestration(ctx, run.AttemptID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ledger predecessor is missing")
+}
+
+func TestStorePRDevelopmentRepairOrchestrationMigrationValidationRollsBack(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "migration-v14-orchestration-rollback.db")
+	db := openSchemaTestDB(t, path)
+	for _, schema := range []string{
+		schemaV1, schemaV2, schemaV3, schemaV4, schemaV5, schemaV6, schemaV7,
+		schemaV8, schemaV9, schemaV10, schemaV11, schemaV12, schemaV13,
+	} {
+		_, err := db.Exec(schema)
+		require.NoError(t, err)
+	}
+	malformed := strings.Replace(
+		schemaV14PRDevelopmentRepairOrchestrationsTable,
+		"changed_files >= 0 AND changed_files <= 10000",
+		"changed_files >= 0 AND changed_files <= 10001",
+		1,
+	)
+	require.NotEqual(t, schemaV14PRDevelopmentRepairOrchestrationsTable, malformed)
+	_, err := db.Exec(malformed)
+	require.NoError(t, err)
+	setSchemaTestVersion(t, db, 13)
+	require.NoError(t, db.Close())
+
+	store, err := Open(context.Background(), path)
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.ErrorIs(t, err, ErrSchemaInvalid)
+	assert.Contains(t, err.Error(), "validate eventing schema v14")
+	db = openSchemaTestDB(t, path)
+	defer db.Close()
+	var version int
+	require.NoError(t, db.QueryRow(`PRAGMA user_version`).Scan(&version))
+	assert.Equal(t, 13, version)
+	assert.True(t, schemaObjectExists(
+		t, db, "table", "pr_development_repair_orchestrations",
+	))
+	assert.False(t, schemaObjectExists(
+		t, db, "index", "pr_development_repair_orchestration_claimable",
+	), "v14 indexes created during failed validation must roll back")
 }
 
 func TestStorePRDevelopmentControllerOperationMigrationValidationRollsBack(t *testing.T) {
@@ -1134,6 +1498,8 @@ func installSchemaV1ForTest(t *testing.T, db *sql.DB) {
 	_, err = db.Exec(schemaV12)
 	require.NoError(t, err)
 	_, err = db.Exec(schemaV13)
+	require.NoError(t, err)
+	_, err = db.Exec(schemaV14)
 	require.NoError(t, err)
 	setSchemaTestVersion(t, db, schemaVersion)
 }

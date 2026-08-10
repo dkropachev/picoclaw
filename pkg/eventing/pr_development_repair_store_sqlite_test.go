@@ -17,6 +17,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func (s *Store) claimPRDevelopmentRepairIncludingProviderForTest(
+	ctx context.Context,
+	input PRDevelopmentRepairClaimRequest,
+) (PRDevelopmentRepairSession, bool, error) {
+	return s.claimPRDevelopmentRepair(ctx, input, true)
+}
+
 func TestStorePRDevelopmentRepairAdmissionWorkbenchAndIdempotency(t *testing.T) {
 	t.Parallel()
 
@@ -79,7 +86,7 @@ func TestStorePRDevelopmentRepairAdmissionWorkbenchAndIdempotency(t *testing.T) 
 	assert.Equal(t, PRDevelopmentRepairQueued, attempt.Status)
 	assert.Zero(t, attempt.Claims)
 
-	claimed, found, err := store.ClaimPRDevelopmentRepair(
+	claimed, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "worker-a", Lease: time.Minute},
 	)
@@ -188,6 +195,105 @@ func TestStorePRDevelopmentRepairConcurrentAdmissionFencesBothStores(t *testing.
 	require.Len(t, loaded.RepairSession.Attempts, 1)
 }
 
+func TestStorePRDevelopmentRepairProviderThreadHasOneSessionOwner(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, clock, capture := newPRDevelopmentStoreFixture(t, ":memory:")
+	first, created, err := store.CapturePRDevelopmentCase(
+		ctx, validPRDevelopmentRequestForTest(capture),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	second := captureAdditionalPRDevelopmentThreadCase(
+		t, store, clock, capture, "delivery-session-owner-second", "801",
+	)
+	input := PRDevelopmentRepairAdmit{
+		CaseID: first.ID, ExpectedConversationVersion: 0, ExpectedRepairVersion: 0,
+		IdempotencyKey: "thread-owner", AgentID: "main",
+		Instruction: "Own the retained provider-thread line.",
+	}
+	owned, admitted, err := store.AdmitPRDevelopmentRepair(ctx, input)
+	require.NoError(t, err)
+	require.True(t, admitted)
+	require.NotNil(t, owned.RepairSession)
+	replayed, admitted, err := store.AdmitPRDevelopmentRepair(ctx, input)
+	require.NoError(t, err)
+	assert.False(t, admitted)
+	assert.Equal(t, owned.RepairSession.ID, replayed.RepairSession.ID)
+	foreign := input
+	foreign.CaseID = second.ID
+	foreign.IdempotencyKey = "foreign-thread-owner"
+	_, admitted, err = store.AdmitPRDevelopmentRepair(ctx, foreign)
+	assert.ErrorIs(t, err, ErrPRDevelopmentRepairConflict)
+	assert.False(t, admitted)
+	run, claimed, err := store.ClaimPRDevelopmentRepairOrchestration(
+		ctx,
+		PRDevelopmentRepairOrchestrationClaim{WorkerLabel: "owner-worker", Lease: time.Minute},
+	)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	assert.Equal(t, owned.RepairSession.Attempts[0].ID, run.AttemptID)
+}
+
+func TestStorePRDevelopmentRepairConcurrentSiblingAdmissionHasOneWinner(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, clock, capture := newPRDevelopmentStoreFixture(t, ":memory:")
+	first, created, err := store.CapturePRDevelopmentCase(
+		ctx, validPRDevelopmentRequestForTest(capture),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	second := captureAdditionalPRDevelopmentThreadCase(
+		t, store, clock, capture, "delivery-concurrent-owner-second", "802",
+	)
+	type result struct {
+		admitted bool
+		err      error
+	}
+	results := make(chan result, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	start := make(chan struct{})
+	for index, caseID := range []string{first.ID, second.ID} {
+		go func() {
+			ready.Done()
+			<-start
+			_, admitted, admitErr := store.AdmitPRDevelopmentRepair(
+				ctx,
+				PRDevelopmentRepairAdmit{
+					CaseID: caseID, ExpectedConversationVersion: 0,
+					ExpectedRepairVersion: 0,
+					IdempotencyKey:        fmt.Sprintf("concurrent-owner-%d", index),
+					AgentID:               "main", Instruction: "Race for the one thread owner.",
+				},
+			)
+			results <- result{admitted: admitted, err: admitErr}
+		}()
+	}
+	ready.Wait()
+	close(start)
+	firstResult, secondResult := <-results, <-results
+	close(results)
+	wins := 0
+	conflicts := 0
+	for _, candidate := range []result{firstResult, secondResult} {
+		if candidate.admitted {
+			require.NoError(t, candidate.err)
+			wins++
+		} else {
+			assert.ErrorIs(t, candidate.err, ErrPRDevelopmentRepairConflict)
+			conflicts++
+		}
+	}
+	assert.Equal(t, 1, wins)
+	assert.Equal(t, 1, conflicts)
+	var sessions int
+	require.NoError(t, store.db.QueryRow(`
+		SELECT COUNT(*) FROM pr_development_repair_sessions`).Scan(&sessions))
+	assert.Equal(t, 1, sessions)
+}
+
 func TestStorePRDevelopmentRepairClaimSamplesLeaseAfterWriterContention(t *testing.T) {
 	t.Parallel()
 
@@ -241,7 +347,7 @@ func TestStorePRDevelopmentRepairClaimSamplesLeaseAfterWriterContention(t *testi
 	}
 	claimDone := make(chan claimResult, 1)
 	go func() {
-		session, found, claimErr := store.ClaimPRDevelopmentRepair(
+		session, found, claimErr := store.claimPRDevelopmentRepairIncludingProviderForTest(
 			ctx,
 			PRDevelopmentRepairClaimRequest{
 				WorkerLabel: "contended-worker",
@@ -299,7 +405,7 @@ func TestStorePRDevelopmentRepairClaimRefreshesLeaseAtOwnershipWrite(t *testing.
 		}
 		return claimNow
 	}
-	claimed, found, err := store.ClaimPRDevelopmentRepair(
+	claimed, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{
 			WorkerLabel: "fresh-claim-worker",
@@ -354,7 +460,7 @@ func TestStorePRDevelopmentRepairClaimSkipsInvalidOldestAggregate(t *testing.T) 
 	_, err = store.GetPRDevelopmentWorkbench(ctx, oldestCase.ID)
 	assert.ErrorIs(t, err, errInvalidStoredPRDevelopmentRepair)
 
-	claimed, found, err := store.ClaimPRDevelopmentRepair(
+	claimed, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "valid-worker", Lease: time.Minute},
 	)
@@ -416,7 +522,7 @@ func TestStorePRDevelopmentRepairClaimDoesNotSuppressOperationalLoadErrors(t *te
 		workbench.RepairSession.ID,
 	)
 	require.NoError(t, err)
-	_, found, err := store.ClaimPRDevelopmentRepair(
+	_, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "worker", Lease: time.Minute},
 	)
@@ -484,7 +590,7 @@ func TestStorePRDevelopmentRepairClaimSuppressionMakesBoundedProgress(t *testing
 	valid := admitPRDevelopmentRepairForTest(t, store, validCase.ID, "valid-after-batch", 0)
 	require.NotNil(t, valid.RepairSession)
 
-	none, found, err := store.ClaimPRDevelopmentRepair(
+	none, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "suppressor", Lease: time.Minute},
 	)
@@ -499,7 +605,7 @@ func TestStorePRDevelopmentRepairClaimSuppressionMakesBoundedProgress(t *testing
 	require.NoError(t, err)
 	assert.Equal(t, maxPRDevelopmentRepairClaimCandidates, suppressed)
 
-	claimed, found, err := store.ClaimPRDevelopmentRepair(
+	claimed, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "next-worker", Lease: time.Minute},
 	)
@@ -521,7 +627,7 @@ func TestStorePRDevelopmentRepairPreparingReclaimAndRunningExpiry(t *testing.T) 
 	require.True(t, created)
 	workbench := admitPRDevelopmentRepairForTest(t, store, developmentCase.ID, "expiry", 0)
 
-	first, found, err := store.ClaimPRDevelopmentRepair(
+	first, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "worker-a", Lease: time.Minute},
 	)
@@ -548,7 +654,7 @@ func TestStorePRDevelopmentRepairPreparingReclaimAndRunningExpiry(t *testing.T) 
 	assert.Equal(t, firstUpdatedAt, afterRenew.RepairSession.Attempts[0].UpdatedAt)
 
 	*clock = (*clock).Add(2 * time.Minute)
-	reclaimed, found, err := store.ClaimPRDevelopmentRepair(
+	reclaimed, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "worker-b", Lease: time.Minute},
 	)
@@ -589,7 +695,7 @@ func TestStorePRDevelopmentRepairPreparingReclaimAndRunningExpiry(t *testing.T) 
 	assert.Equal(t, PRDevelopmentRepairRunning, running.Attempts[0].Status)
 
 	*clock = (*clock).Add(2 * time.Minute)
-	none, found, err := store.ClaimPRDevelopmentRepair(
+	none, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "worker-c", Lease: time.Minute},
 	)
@@ -608,7 +714,7 @@ func TestStorePRDevelopmentRepairPreparingReclaimAndRunningExpiry(t *testing.T) 
 	assert.Nil(t, recovery.LeaseUntil)
 	assert.Empty(t, recovery.LeaseToken)
 
-	_, found, err = store.ClaimPRDevelopmentRepair(
+	_, found, err = store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "worker-d", Lease: time.Minute},
 	)
@@ -655,7 +761,7 @@ func TestStorePRDevelopmentRepairRunningExpiryMakesBoundedProgress(t *testing.T)
 			0,
 		)
 		require.NotNil(t, workbench.RepairSession)
-		claimed, found, claimErr := store.ClaimPRDevelopmentRepair(
+		claimed, found, claimErr := store.claimPRDevelopmentRepairIncludingProviderForTest(
 			ctx,
 			PRDevelopmentRepairClaimRequest{WorkerLabel: "worker", Lease: time.Minute},
 		)
@@ -678,7 +784,7 @@ func TestStorePRDevelopmentRepairRunningExpiryMakesBoundedProgress(t *testing.T)
 	}
 
 	*clock = (*clock).Add(2 * time.Minute)
-	_, found, err := store.ClaimPRDevelopmentRepair(
+	_, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "reaper", Lease: time.Minute},
 	)
@@ -697,7 +803,7 @@ func TestStorePRDevelopmentRepairRunningExpiryMakesBoundedProgress(t *testing.T)
 	assert.Equal(t, maxPRDevelopmentRepairClaimCandidates, recovered)
 	assert.Equal(t, 1, running)
 
-	_, found, err = store.ClaimPRDevelopmentRepair(
+	_, found, err = store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "reaper", Lease: time.Minute},
 	)
@@ -724,7 +830,7 @@ func TestStorePRDevelopmentRepairBeginAndFinishFences(t *testing.T) {
 	require.True(t, created)
 	admitted := admitPRDevelopmentRepairForTest(t, store, developmentCase.ID, "finish", 0)
 	require.NotNil(t, admitted.RepairSession)
-	claimed, found, err := store.ClaimPRDevelopmentRepair(
+	claimed, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "worker", Lease: time.Minute},
 	)
@@ -839,7 +945,7 @@ func TestStorePRDevelopmentRepairBeginAndFinishFences(t *testing.T) {
 		completed.Version,
 	)
 	require.NotNil(t, secondWorkbench.RepairSession)
-	secondClaim, found, err := store.ClaimPRDevelopmentRepair(
+	secondClaim, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "worker", Lease: time.Minute},
 	)
@@ -920,7 +1026,7 @@ func TestStorePRDevelopmentRepairBeginRefreshesExecutionLease(t *testing.T) {
 	require.True(t, created)
 	admitted := admitPRDevelopmentRepairForTest(t, store, developmentCase.ID, "refresh", 0)
 	require.NotNil(t, admitted.RepairSession)
-	claimed, found, err := store.ClaimPRDevelopmentRepair(
+	claimed, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "worker", Lease: time.Minute},
 	)
@@ -965,7 +1071,7 @@ func TestStorePRDevelopmentRepairBeginRefreshesExecutionLease(t *testing.T) {
 	// Passing the original claim deadline must not let another claimant expire
 	// execution now protected by the refreshed running lease.
 	*clock = originalLeaseUntil.Add(time.Nanosecond)
-	none, found, err := store.ClaimPRDevelopmentRepair(
+	none, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "other-worker", Lease: time.Minute},
 	)
@@ -992,7 +1098,7 @@ func TestStorePRDevelopmentRepairRenewCannotShortenConcurrentBeginLease(t *testi
 	require.True(t, created)
 	admitted := admitPRDevelopmentRepairForTest(t, store, developmentCase.ID, "renew-begin", 0)
 	require.NotNil(t, admitted.RepairSession)
-	claimed, found, err := store.ClaimPRDevelopmentRepair(
+	claimed, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "worker", Lease: 10 * time.Minute},
 	)
@@ -1097,7 +1203,7 @@ func TestStorePRDevelopmentRepairAttemptAndVersionBoundsAreAtomic(t *testing.T) 
 			version,
 		)
 		require.NotNil(t, workbench.RepairSession)
-		claimed, found, claimErr := store.ClaimPRDevelopmentRepair(
+		claimed, found, claimErr := store.claimPRDevelopmentRepairIncludingProviderForTest(
 			ctx,
 			PRDevelopmentRepairClaimRequest{WorkerLabel: "capacity", Lease: time.Minute},
 		)
@@ -1164,7 +1270,7 @@ func TestStorePRDevelopmentRepairAttemptAndVersionBoundsAreAtomic(t *testing.T) 
 	)
 	next := admitPRDevelopmentRepairForTest(t, otherStore, nextCase.ID, "next-version", 0)
 	require.NotNil(t, next.RepairSession)
-	claimed, found, err := otherStore.ClaimPRDevelopmentRepair(
+	claimed, found, err := otherStore.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "bounded", Lease: time.Minute},
 	)
@@ -1197,7 +1303,7 @@ func TestStorePRDevelopmentRepairRevisionHeadroomAndCappedExpiryIsolation(t *tes
 
 	// A terminal unpinned session must reserve append, claim, pin, begin, and
 	// finish before accepting another attempt.
-	claimed, found, err := store.ClaimPRDevelopmentRepair(
+	claimed, found, err := store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "headroom", Lease: time.Minute},
 	)
@@ -1275,7 +1381,7 @@ func TestStorePRDevelopmentRepairRevisionHeadroomAndCappedExpiryIsolation(t *tes
 	)
 	second := admitPRDevelopmentRepairForTest(t, store, secondCase.ID, "headroom-second", 0)
 	require.NotNil(t, second.RepairSession)
-	claimed, found, err = store.ClaimPRDevelopmentRepair(
+	claimed, found, err = store.claimPRDevelopmentRepairIncludingProviderForTest(
 		ctx,
 		PRDevelopmentRepairClaimRequest{WorkerLabel: "next-worker", Lease: time.Minute},
 	)

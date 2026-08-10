@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -66,6 +67,168 @@ func TestManagerPinnedDevelopmentLineReviewCanonicalizesCRLF(t *testing.T) {
 	})
 	if err != nil || replayed.ReviewDigest != review.ReviewDigest {
 		t.Fatalf("replayed review digest = %q, %v; want %q", replayed.ReviewDigest, err, review.ReviewDigest)
+	}
+}
+
+func TestManagerPreviewPinnedLineReviewMatchesParkedSnapshot(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPinnedLineTestFixture(t, "pr-development/line-review-preview")
+	commit := fixture.commitChange(
+		t,
+		"preview.txt",
+		"previewed repair\n",
+		"pdcmt_99999999999999999999999999999999",
+		"Preview repair subject",
+		time.Date(2026, 8, 9, 19, 0, 0, 0, time.UTC),
+	)
+	request := PinnedLineParkRequest{
+		Pin:             fixture.pin,
+		WorkspaceID:     fixture.workspace.ID,
+		LineID:          pinnedLineTestID,
+		IntentID:        "pdlnpark_review_preview",
+		ExpectedVersion: fixture.lease.Version,
+		MutationEpoch:   fixture.lease.MutationEpoch,
+		PreviousTip:     fixture.lease.Tip,
+		Tip:             commit.Commit,
+		Tree:            commit.Tree,
+	}
+	stateBefore := developmentLineStateForTest(t, fixture.manager)
+	branch := stateBefore.DevelopmentLines[pinnedLineTestID].Branch
+	refBefore := testGitCommit(t, fixture.workspace.Path, "refs/heads/"+branch)
+
+	var preview PinnedLineReviewSnapshot
+	if err := fixture.manager.WithPinnedOperation(
+		ctx,
+		fixture.pin,
+		func(operationCtx context.Context) error {
+			var previewErr error
+			preview, previewErr = fixture.manager.PreviewPinnedLineReview(
+				operationCtx,
+				request,
+			)
+			if previewErr != nil {
+				return previewErr
+			}
+			workspace := workspaceRecordForTest(t, fixture.manager, fixture.workspace.ID)
+			if workspace.LockedBy == nil ||
+				workspace.LockedBy.SessionKey != fixture.pin.ReservationKey {
+				t.Fatalf("preview released reservation: %#v", workspace)
+			}
+			return nil
+		},
+	); err != nil {
+		t.Fatalf("PreviewPinnedLineReview() error = %v", err)
+	}
+	stateAfter := developmentLineStateForTest(t, fixture.manager)
+	lineAfter := stateAfter.DevelopmentLines[pinnedLineTestID]
+	if lineAfter.State != developmentLineMutating || lineAfter.Version != fixture.lease.Version ||
+		lineAfter.PendingParkSet || lineAfter.LastParkIntentID != "" ||
+		stateAfter.Workspaces[fixture.workspace.ID].LockedBy == nil {
+		t.Fatalf("preview mutated line inventory: %#v", lineAfter)
+	}
+	if refAfter := testGitCommit(t, fixture.workspace.Path, "refs/heads/"+branch); refAfter != refBefore {
+		t.Fatalf("preview advanced retained ref from %q to %q", refBefore, refAfter)
+	}
+
+	parked, err := fixture.manager.ParkPinnedLine(ctx, request)
+	if err != nil {
+		t.Fatalf("ParkPinnedLine() error = %v", err)
+	}
+	snapshot, err := fixture.manager.SnapshotPinnedLineReview(ctx, PinnedLineReviewRequest{
+		LineID:          pinnedLineTestID,
+		ExpectedVersion: parked.Version,
+		ExpectedBase:    parked.PreviousTip,
+		ExpectedTip:     parked.Tip,
+		ExpectedTree:    parked.Tree,
+	})
+	if err != nil {
+		t.Fatalf("SnapshotPinnedLineReview() error = %v", err)
+	}
+	if !reflect.DeepEqual(preview, snapshot) {
+		t.Fatalf("preview = %#v; parked snapshot = %#v", preview, snapshot)
+	}
+}
+
+func TestManagerPreviewPinnedLineReviewMatchesNoChangePark(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPinnedLineTestFixture(t, "pr-development/line-review-preview-no-change")
+	request := PinnedLineParkRequest{
+		Pin:             fixture.pin,
+		WorkspaceID:     fixture.workspace.ID,
+		LineID:          pinnedLineTestID,
+		IntentID:        "pdlnpark_review_preview_no_change",
+		ExpectedVersion: fixture.lease.Version,
+		MutationEpoch:   fixture.lease.MutationEpoch,
+		PreviousTip:     fixture.lease.Tip,
+		Tip:             fixture.lease.Tip,
+		Tree:            fixture.lease.Tree,
+		NoChanges:       true,
+	}
+	preview, err := fixture.manager.PreviewPinnedLineReview(ctx, request)
+	if err != nil {
+		t.Fatalf("PreviewPinnedLineReview(no-change) error = %v", err)
+	}
+	if len(preview.ChangedPaths) != 0 || preview.UnifiedDiff != "" {
+		t.Fatalf("no-change preview = %#v", preview)
+	}
+	parked, err := fixture.manager.ParkPinnedLine(ctx, request)
+	if err != nil {
+		t.Fatalf("ParkPinnedLine(no-change) error = %v", err)
+	}
+	snapshot, err := fixture.manager.SnapshotPinnedLineReview(ctx, PinnedLineReviewRequest{
+		LineID:          pinnedLineTestID,
+		ExpectedVersion: parked.Version,
+		ExpectedBase:    parked.PreviousTip,
+		ExpectedTip:     parked.Tip,
+		ExpectedTree:    parked.Tree,
+	})
+	if err != nil {
+		t.Fatalf("SnapshotPinnedLineReview(no-change) error = %v", err)
+	}
+	if !reflect.DeepEqual(preview, snapshot) {
+		t.Fatalf("no-change preview = %#v; parked snapshot = %#v", preview, snapshot)
+	}
+}
+
+func TestManagerPreviewPinnedLineReviewRejectsOversizedDiffBeforePark(t *testing.T) {
+	ctx := context.Background()
+	fixture := newPinnedLineTestFixture(t, "pr-development/line-review-preview-oversized")
+	commit := fixture.commitChange(
+		t,
+		"oversized.txt",
+		strings.Repeat("review overflow line\n", 32_000),
+		"pdcmt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"Create oversized review subject",
+		time.Date(2026, 8, 9, 20, 0, 0, 0, time.UTC),
+	)
+	request := PinnedLineParkRequest{
+		Pin:             fixture.pin,
+		WorkspaceID:     fixture.workspace.ID,
+		LineID:          pinnedLineTestID,
+		IntentID:        "pdlnpark_review_preview_oversized",
+		ExpectedVersion: fixture.lease.Version,
+		MutationEpoch:   fixture.lease.MutationEpoch,
+		PreviousTip:     fixture.lease.Tip,
+		Tip:             commit.Commit,
+		Tree:            commit.Tree,
+	}
+	if _, err := fixture.manager.PreviewPinnedLineReview(ctx, request); err == nil ||
+		!strings.Contains(err.Error(), "output exceeded") {
+		t.Fatalf("PreviewPinnedLineReview(oversized) error = %v", err)
+	}
+	state := developmentLineStateForTest(t, fixture.manager)
+	line := state.DevelopmentLines[pinnedLineTestID]
+	workspace := state.Workspaces[fixture.workspace.ID]
+	if line == nil || line.State != developmentLineMutating || line.PendingParkSet ||
+		line.Version != fixture.lease.Version || workspace == nil || workspace.LockedBy == nil {
+		t.Fatalf("oversized preview changed park state: line %#v, workspace %#v", line, workspace)
+	}
+	if retained := testGitCommit(
+		t,
+		fixture.workspace.Path,
+		"refs/heads/"+line.Branch,
+	); retained != request.PreviousTip {
+		t.Fatalf("oversized preview advanced retained ref to %q", retained)
 	}
 }
 

@@ -166,6 +166,7 @@ func (s *Store) AppendPRDevelopmentLedgerAttempt(
 			Summary:        normalized.Summary,
 			CIPlanDigest:   normalized.CIPlanDigest,
 			CIResultDigest: normalized.CIResultDigest,
+			CIStatus:       PRDevelopmentCIPassed,
 			FenceHash:      mutationStagePRDevelopmentReviewFenceHash(fence),
 		}
 		baseOrdinal := expectedOrdinal
@@ -969,6 +970,29 @@ func loadPRDevelopmentLedgerEntries(
 		return nil, err
 	}
 	for index := range entries {
+		if entries[index].Kind == PRDevelopmentLedgerAttempt {
+			entries[index].CIStatus = PRDevelopmentCIPassed
+			orchestration, found, loadErr := loadPRDevelopmentRepairOrchestration(
+				ctx, queryer, entries[index].AttemptID,
+			)
+			if loadErr != nil {
+				return nil, wrapInvalidStoredPRDevelopmentLedger(loadErr)
+			}
+			if found {
+				if orchestration.Phase != PRDevelopmentRepairOrchestrationCompleted ||
+					orchestration.LedgerEntryID != entries[index].ID ||
+					orchestration.Validation == nil ||
+					!validPRDevelopmentCIStatus(orchestration.Validation.CIStatus) {
+					return nil, wrapInvalidStoredPRDevelopmentLedger(
+						errors.New("stored attempt orchestration linkage is invalid"),
+					)
+				}
+				entries[index].CIStatus = orchestration.Validation.CIStatus
+				entries[index].ciStatusBound = true
+			}
+		}
+	}
+	for index := range entries {
 		if len(entries[index].Findings) != stored[index].findingCount {
 			return nil, wrapInvalidStoredPRDevelopmentLedger(
 				errors.New("stored review finding count is invalid"),
@@ -1274,12 +1298,14 @@ func validateStoredPRDevelopmentLedgerEntry(entry PRDevelopmentLedgerEntry) erro
 		if entry.Ordinal%2 != 0 || !validSameWidthPRDevelopmentOIDs(entry.Commit, entry.Tree) ||
 			!validPRDevelopmentHex(entry.CIPlanDigest, sha256.Size*2) ||
 			!validPRDevelopmentHex(entry.CIResultDigest, sha256.Size*2) ||
+			!validPRDevelopmentCIStatus(entry.CIStatus) ||
 			entry.ReviewOutcome != "" || len(entry.Findings) != 0 {
 			return errors.New("stored attempt ledger shape is invalid")
 		}
 	case PRDevelopmentLedgerReview:
 		if entry.Ordinal%2 != 1 || entry.Commit != "" || entry.Tree != "" ||
 			entry.CIPlanDigest != "" || entry.CIResultDigest != "" ||
+			entry.CIStatus != "" ||
 			!validPRDevelopmentLedgerReviewOutcome(entry.ReviewOutcome) ||
 			len(entry.Findings) > MaxPRDevelopmentLedgerReviewFindings ||
 			(entry.ReviewOutcome == PRDevelopmentLedgerReviewPassed && len(entry.Findings) != 0) ||
@@ -1527,11 +1553,15 @@ func emptyPRDevelopmentLedgerCheckpointsDigest() string {
 
 func hashPRDevelopmentLedgerEntry(entry PRDevelopmentLedgerEntry) string {
 	digest := sha256.New()
+	domain := "picoclaw-pr-development-ledger-entry-v1"
+	if entry.ciStatusBound {
+		domain = "picoclaw-pr-development-ledger-entry-v2"
+	}
 	writePRDevelopmentLedgerHashField(
 		digest,
-		"picoclaw-pr-development-ledger-entry-v1",
+		domain,
 	)
-	for _, value := range []string{
+	values := []string{
 		entry.ID,
 		entry.ThreadID,
 		fmt.Sprintf("%d", entry.Ordinal),
@@ -1546,12 +1576,18 @@ func hashPRDevelopmentLedgerEntry(entry PRDevelopmentLedgerEntry) string {
 		entry.Summary,
 		entry.CIPlanDigest,
 		entry.CIResultDigest,
+	}
+	if entry.ciStatusBound {
+		values = append(values, string(entry.CIStatus))
+	}
+	values = append(values,
 		string(entry.ReviewOutcome),
 		fmt.Sprintf("%d", len(entry.Findings)),
 		entry.FenceHash,
 		entry.PreviousHash,
 		fmt.Sprintf("%d", toDBTime(entry.CreatedAt)),
-	} {
+	)
+	for _, value := range values {
 		writePRDevelopmentLedgerHashField(digest, value)
 	}
 	for ordinal, finding := range entry.Findings {

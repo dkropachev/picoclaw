@@ -47,6 +47,10 @@ type PinnedCandidateValidationRequest struct {
 	ExpectedParent          string
 	ExpectedTree            string
 	ExpectedCandidateDigest string
+	// NoChanges explicitly declares that ExpectedTree is exactly the parent
+	// commit's tree. The manager proves that equality before lending roots;
+	// false retains the historical requirement for at least one change.
+	NoChanges bool
 }
 
 // PinnedTreeManifest is canonical evidence for every leaf in one Git tree.
@@ -282,10 +286,16 @@ func (m *Manager) snapshotPinnedCandidateValidationState(
 	if err != nil {
 		return pinnedCandidateValidationSnapshot{}, err
 	}
-	if candidate.Tree == candidate.parentTree {
+	noChanges := candidate.Tree == candidate.parentTree
+	if noChanges != request.NoChanges {
+		description := "pinned validation candidate contains no ordinary changes"
+		if request.NoChanges {
+			description = "pinned validation candidate contains ordinary changes"
+		}
 		return pinnedCandidateValidationSnapshot{}, fmt.Errorf(
-			"%w: pinned validation candidate contains no ordinary changes",
+			"%w: %s",
 			ErrPinnedCommitConflict,
+			description,
 		)
 	}
 	if candidate.Tree != request.ExpectedTree ||

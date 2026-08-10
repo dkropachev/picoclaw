@@ -133,6 +133,52 @@ func TestStorePRDevelopmentRepairUnsupported(t *testing.T) {
 	}
 }
 
+func TestStorePRDevelopmentRepairOrchestrationUnsupported(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var store Store
+	assertUnsupported := func(name string, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrUnsupportedPlatform) {
+			t.Fatalf("%s error = %v, want %v", name, err, ErrUnsupportedPlatform)
+		}
+	}
+	_, _, err := store.ClaimPRDevelopmentRepairOrchestration(
+		ctx, PRDevelopmentRepairOrchestrationClaim{},
+	)
+	assertUnsupported("ClaimPRDevelopmentRepairOrchestration()", err)
+	assertUnsupported("RenewPRDevelopmentRepairOrchestration()",
+		store.RenewPRDevelopmentRepairOrchestration(
+			ctx, PRDevelopmentRepairOrchestrationRenew{},
+		))
+	_, err = store.GetPRDevelopmentRepairOrchestration(ctx, "attempt")
+	assertUnsupported("GetPRDevelopmentRepairOrchestration()", err)
+	_, _, err = store.PinPRDevelopmentRepairOrchestration(
+		ctx, PRDevelopmentRepairOrchestrationPin{},
+	)
+	assertUnsupported("PinPRDevelopmentRepairOrchestration()", err)
+	_, _, err = store.AcquirePRDevelopmentRepairOrchestrationController(
+		ctx, PRDevelopmentRepairOrchestrationControllerAcquire{},
+	)
+	assertUnsupported("AcquirePRDevelopmentRepairOrchestrationController()", err)
+	_, _, err = store.StartPRDevelopmentRepairOrchestrationModel(
+		ctx, PRDevelopmentRepairOrchestrationModelStart{},
+	)
+	assertUnsupported("StartPRDevelopmentRepairOrchestrationModel()", err)
+	_, _, err = store.CompletePRDevelopmentRepairOrchestrationModel(
+		ctx, PRDevelopmentRepairOrchestrationModelComplete{},
+	)
+	assertUnsupported("CompletePRDevelopmentRepairOrchestrationModel()", err)
+	_, _, err = store.RecordPRDevelopmentRepairOrchestrationValidation(
+		ctx, PRDevelopmentRepairOrchestrationValidation{},
+	)
+	assertUnsupported("RecordPRDevelopmentRepairOrchestrationValidation()", err)
+	_, _, err = store.FailPRDevelopmentRepairOrchestration(
+		ctx, PRDevelopmentRepairOrchestrationFail{},
+	)
+	assertUnsupported("FailPRDevelopmentRepairOrchestration()", err)
+}
+
 func TestStorePRDevelopmentControllerUnsupported(t *testing.T) {
 	t.Parallel()
 

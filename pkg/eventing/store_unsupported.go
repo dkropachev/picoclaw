@@ -27,6 +27,7 @@ var (
 	_ PRDevelopmentWorkbenchReader          = (*Store)(nil)
 	_ PRDevelopmentRepairAdmitter           = (*Store)(nil)
 	_ PRDevelopmentRepairQueue              = (*Store)(nil)
+	_ PRDevelopmentRepairOrchestrationStore = (*Store)(nil)
 	_ PRDevelopmentControllerReader         = (*Store)(nil)
 	_ PRDevelopmentControllerStore          = (*Store)(nil)
 	_ PRDevelopmentControllerOperationStore = (*Store)(nil)
@@ -262,6 +263,69 @@ func (*Store) FinishPRDevelopmentRepair(
 	PRDevelopmentRepairOutcome,
 ) (PRDevelopmentRepairSession, error) {
 	return PRDevelopmentRepairSession{}, ErrUnsupportedPlatform
+}
+
+func (*Store) ClaimPRDevelopmentRepairOrchestration(
+	context.Context,
+	PRDevelopmentRepairOrchestrationClaim,
+) (PRDevelopmentRepairOrchestration, bool, error) {
+	return PRDevelopmentRepairOrchestration{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) RenewPRDevelopmentRepairOrchestration(
+	context.Context,
+	PRDevelopmentRepairOrchestrationRenew,
+) error {
+	return ErrUnsupportedPlatform
+}
+
+func (*Store) GetPRDevelopmentRepairOrchestration(
+	context.Context,
+	string,
+) (PRDevelopmentRepairOrchestration, error) {
+	return PRDevelopmentRepairOrchestration{}, ErrUnsupportedPlatform
+}
+
+func (*Store) PinPRDevelopmentRepairOrchestration(
+	context.Context,
+	PRDevelopmentRepairOrchestrationPin,
+) (PRDevelopmentRepairOrchestration, bool, error) {
+	return PRDevelopmentRepairOrchestration{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) AcquirePRDevelopmentRepairOrchestrationController(
+	context.Context,
+	PRDevelopmentRepairOrchestrationControllerAcquire,
+) (PRDevelopmentControllerLease, bool, error) {
+	return PRDevelopmentControllerLease{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) StartPRDevelopmentRepairOrchestrationModel(
+	context.Context,
+	PRDevelopmentRepairOrchestrationModelStart,
+) (PRDevelopmentRepairOrchestration, bool, error) {
+	return PRDevelopmentRepairOrchestration{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) CompletePRDevelopmentRepairOrchestrationModel(
+	context.Context,
+	PRDevelopmentRepairOrchestrationModelComplete,
+) (PRDevelopmentRepairOrchestration, bool, error) {
+	return PRDevelopmentRepairOrchestration{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) RecordPRDevelopmentRepairOrchestrationValidation(
+	context.Context,
+	PRDevelopmentRepairOrchestrationValidation,
+) (PRDevelopmentRepairOrchestration, bool, error) {
+	return PRDevelopmentRepairOrchestration{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) FailPRDevelopmentRepairOrchestration(
+	context.Context,
+	PRDevelopmentRepairOrchestrationFail,
+) (PRDevelopmentRepairOrchestration, bool, error) {
+	return PRDevelopmentRepairOrchestration{}, false, ErrUnsupportedPlatform
 }
 
 func (*Store) GetPRDevelopmentControllerForCase(
