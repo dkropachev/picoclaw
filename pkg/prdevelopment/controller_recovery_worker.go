@@ -668,6 +668,24 @@ func (worker *ControllerRecoveryWorker) processSuspendedResumeRecovery(
 					); err != nil {
 						return err
 					}
+					child := childLease.Suspension
+					if err := worker.store.RenewPRDevelopmentControllerSuspension(
+						finalizeCtx,
+						eventing.PRDevelopmentControllerSuspensionRenew{
+							SuspensionID: child.ID,
+							ControllerID: child.ControllerID,
+							AttemptID:    child.AttemptID,
+							ClaimID:      child.SuspendClaimID,
+							ClaimToken:   child.SuspendClaimToken,
+							ClaimEpoch:   child.SuspendClaimEpoch,
+							Lease:        worker.lease,
+						},
+					); err != nil {
+						return fmt.Errorf(
+							"renew transferred controller suspension claim before Git: %w",
+							err,
+						)
+					}
 					return worker.processSuspension(finalizeCtx, childLease)
 
 				case eventing.PRDevelopmentControllerSuspensionStatusSuspended:
@@ -1812,6 +1830,7 @@ func validateControllerSuspendedResumeRecoveryTerminalChild(
 		suspensionResult.CandidateTree != resumeResult.CandidateTree ||
 		suspensionResult.CandidateDigest != resumeResult.CandidateDigest ||
 		suspensionResult.ChangedFileCount != resumeResult.ChangedFileCount ||
+		!validControllerSHA256(suspensionResult.SuspensionHash) ||
 		suspensionResult.PreparedCommit != "" || suspensionResult.PreparedTree != "" ||
 		suspensionResult.PreparedCommitApplied || suspensionResult.AlreadySuspended {
 		return errors.New("suspended resume recovery terminal child changed retained candidate evidence")

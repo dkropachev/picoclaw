@@ -819,6 +819,7 @@ func TestControllerRecoveryWorkerResumesFinalizesAndSuspendsInOneCall(t *testing
 		"resume Git",
 		"renew resume",
 		"finalize resume",
+		"renew child",
 		"suspend Git",
 		"renew child",
 		"finalize child",
@@ -833,6 +834,93 @@ func TestControllerRecoveryWorkerResumesFinalizesAndSuspendsInOneCall(t *testing
 	assert.Equal(t, resume.ResumeClaimToken, resumeFinishInput.ClaimToken)
 	assert.Equal(t, child.SuspendClaimToken, childRenewInput.ClaimToken)
 	assert.Equal(t, child.SuspendClaimToken, childFinishInput.ClaimToken)
+}
+
+func TestControllerRecoveryWorkerRenewsTransferredChildBeforeGit(t *testing.T) {
+	t.Parallel()
+
+	candidate, controller, resume := suspendedResumeRecoveryFixture()
+	var (
+		child          eventing.PRDevelopmentControllerSuspension
+		renewed        eventing.PRDevelopmentControllerSuspensionRenew
+		childGitCalls  int
+		childFinalized bool
+	)
+	store := &fakeControllerRecoveryStore{
+		nextResumeRecovery: func(context.Context) (
+			eventing.PRDevelopmentControllerSuspendedResumeRecoveryCandidate,
+			bool,
+			error,
+		) {
+			return candidate, true, nil
+		},
+		claimResumeRecovery: func(
+			_ context.Context,
+			input eventing.PRDevelopmentControllerSuspendedResumeRecoveryClaim,
+		) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease, bool, error) {
+			resume = claimedSuspendedResumeRecovery(resume, input)
+			expired := time.Now().Add(-time.Minute).UTC()
+			resume.ResumeClaimUntil = &expired
+			return eventing.PRDevelopmentControllerSuspendedResumeRecoveryLease{
+				Controller: controller,
+				Suspension: resume,
+				Reclaimed:  true,
+			}, false, nil
+		},
+		finishResumeRecovery: func(
+			_ context.Context,
+			input eventing.PRDevelopmentControllerSuspendedResumeRecoveryFinalize,
+		) (eventing.PRDevelopmentControllerSuspendedResumeRecoveryTransition, bool, error) {
+			transition := suspendedResumeRecoveryTransition(controller, resume, input.Result)
+			child = transition.NextSuspension
+			return transition, false, nil
+		},
+		renewSuspension: func(
+			_ context.Context,
+			input eventing.PRDevelopmentControllerSuspensionRenew,
+		) error {
+			renewed = input
+			return eventing.ErrStaleLease
+		},
+		finishSuspension: func(
+			context.Context,
+			eventing.PRDevelopmentControllerSuspensionFinalize,
+		) (eventing.PRDevelopmentControllerSuspensionTransition, bool, error) {
+			childFinalized = true
+			return eventing.PRDevelopmentControllerSuspensionTransition{}, false, nil
+		},
+	}
+	git := &fakeControllerRecoveryGit{
+		resumeSuspended: func(
+			_ context.Context,
+			_ gitworkspace.PinnedLineSuspendedResumeRequest,
+		) (gitworkspace.PinnedLineSuspendedResumeResult, error) {
+			return suspendedResumeRecoveryGitResult(resume, true), nil
+		},
+		suspend: func(
+			context.Context,
+			gitworkspace.PinnedLineSuspendRequest,
+		) (gitworkspace.PinnedLineSuspendResult, error) {
+			childGitCalls++
+			return gitworkspace.PinnedLineSuspendResult{}, nil
+		},
+	}
+	worker := mustControllerRecoveryWorker(t, store, func() (controllerRecoveryGit, error) {
+		return git, nil
+	})
+
+	processed, err := worker.ProcessOne(context.Background())
+	require.True(t, processed)
+	require.ErrorIs(t, err, eventing.ErrStaleLease)
+	assert.Zero(t, childGitCalls)
+	assert.False(t, childFinalized)
+	assert.Equal(t, child.ID, renewed.SuspensionID)
+	assert.Equal(t, child.ControllerID, renewed.ControllerID)
+	assert.Equal(t, child.AttemptID, renewed.AttemptID)
+	assert.Equal(t, child.SuspendClaimID, renewed.ClaimID)
+	assert.Equal(t, child.SuspendClaimToken, renewed.ClaimToken)
+	assert.Equal(t, child.SuspendClaimEpoch, renewed.ClaimEpoch)
+	assert.Equal(t, worker.lease, renewed.Lease)
 }
 
 func TestControllerRecoveryWorkerSuspendedResumeTerminalReplaySkipsChildGit(t *testing.T) {
@@ -1023,6 +1111,13 @@ func TestControllerRecoveryWorkerSuspendedResumeTerminalBindsCandidateEvidence(t
 	transition.NextSuspension = terminal.Suspension
 	transition.NextSuspension.SuspendResult.CandidateDigest = testDigest("0")
 
+	err = validateControllerSuspendedResumeRecoveryTerminalChild(transition, resume)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "retained candidate evidence")
+
+	transition.NextSuspension.SuspendResult.CandidateDigest =
+		transition.Resumed.ResumeResult.CandidateDigest
+	transition.NextSuspension.SuspendResult.SuspensionHash = "malformed"
 	err = validateControllerSuspendedResumeRecoveryTerminalChild(transition, resume)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "retained candidate evidence")
