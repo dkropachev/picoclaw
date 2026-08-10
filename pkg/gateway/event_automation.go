@@ -80,6 +80,8 @@ type eventReviewRuntime struct {
 	repairWorkspaces                     prdevelopment.RepairControllerWorkspaceFactory
 	repairLocalCI                        *prDevelopmentLocalCIRuntime
 	repairControllerProcess              func(context.Context) (bool, error)
+	recoveryWorkspaces                   prdevelopment.ControllerRecoveryWorkspaceFactory
+	recoveryProcess                      func(context.Context) (bool, error)
 	reviewRuntime                        prdevelopment.ReviewRuntimeFactory
 	reviewWorkspaces                     prdevelopment.ReviewControllerWorkspaceFactory
 	reviewProcess                        func(context.Context) (bool, error)
@@ -105,6 +107,10 @@ func newEventReviewRuntime(
 	}
 	if agentLoop != nil {
 		runtime.mcpArtifactRoot = githubMCPArtifactRoot(cfg, agentLoop)
+		// Recovery owns only provider-independent, replayable local Git effects.
+		// Always compose it when a runtime generation can resolve the controller
+		// workspace manager, regardless of model, provider, CI, or review readiness.
+		runtime.recoveryWorkspaces = agentLoop.ControllerGitWorkspaceManager
 	}
 	return runtime
 }
@@ -497,6 +503,24 @@ func newEventAutomationServiceWithReviews(
 	if reviewRuntime.repairControllerProcess != nil {
 		repairControllerProcess = reviewRuntime.repairControllerProcess
 	}
+	var recoveryProcess func(context.Context) (bool, error)
+	if reviewRuntime.recoveryProcess != nil {
+		// This process-shaped seam verifies generation and shutdown ownership
+		// without weakening the production worker's narrow store/Git boundary.
+		recoveryProcess = reviewRuntime.recoveryProcess
+	} else if reviewRuntime.recoveryWorkspaces != nil {
+		recoveryWorker, recoveryErr := prdevelopment.NewControllerRecoveryWorker(
+			prdevelopment.ControllerRecoveryWorkerConfig{
+				Store:       store,
+				Workspaces:  reviewRuntime.recoveryWorkspaces,
+				WorkerLabel: "gateway-pr-development-recovery",
+			},
+		)
+		if recoveryErr != nil {
+			return nil, closeSetup(recoveryErr)
+		}
+		recoveryProcess = recoveryWorker.ProcessOne
+	}
 	var localReviewProcess func(context.Context) (bool, error)
 	if reviewRuntime.reviewProcess != nil {
 		// This seam is intentionally process-shaped: tests can prove generation
@@ -611,6 +635,17 @@ func newEventAutomationServiceWithReviews(
 			&workers,
 			"review submitter",
 			withEventAutomationRuntime(acquireRuntime, submitter.ProcessOne),
+		)
+	}
+	// Recovery is a separate provider-independent loop so ambiguous local work
+	// is retired even when ordinary controller composition is unavailable.
+	if recoveryProcess != nil {
+		workers.Add(1)
+		go runEventAutomationWorker(
+			workerCtx,
+			&workers,
+			"PR development recovery",
+			withEventAutomationRuntime(acquireRuntime, recoveryProcess),
 		)
 	}
 	// Provider-verified threads use the controller lifecycle even when one of

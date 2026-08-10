@@ -103,10 +103,23 @@ func (s *Store) ClaimPRDevelopmentRepairOrchestration(
 
 		var existingAttemptID string
 		queryErr := conn.QueryRowContext(ctx, `
-			SELECT attempt_id
-			FROM pr_development_repair_orchestrations
-			WHERE phase IN ('bootstrap', 'edited', 'validated') AND claim_until <= ?
-			ORDER BY created_at, attempt_id
+			SELECT orchestration.attempt_id
+			FROM pr_development_repair_orchestrations AS orchestration
+			WHERE orchestration.phase IN ('bootstrap', 'edited', 'validated') AND
+			      orchestration.claim_until <= ? AND
+			      NOT EXISTS (
+				      SELECT 1
+				      FROM pr_development_controller_suspensions AS suspensions
+				      WHERE suspensions.resume_attempt_id = orchestration.attempt_id AND
+				            suspensions.status = 'resume_claimed'
+			      ) AND
+			      NOT EXISTS (
+				      SELECT 1
+				      FROM pr_development_controller_suspensions AS suspensions
+				      WHERE suspensions.attempt_id = orchestration.attempt_id AND
+				            suspensions.status IN ('suspend_pending', 'suspend_claimed')
+			      )
+			ORDER BY orchestration.created_at, orchestration.attempt_id
 			LIMIT 1`,
 			toDBTime(now),
 		).Scan(&existingAttemptID)
@@ -120,7 +133,21 @@ func (s *Store) ClaimPRDevelopmentRepairOrchestration(
 					claim_epoch = claim_epoch + 1, claims = claims + 1,
 					updated_at = ?
 				WHERE attempt_id = ? AND phase IN ('bootstrap', 'edited', 'validated')
-					AND claim_until <= ?`,
+					AND claim_until <= ? AND
+					NOT EXISTS (
+						SELECT 1
+						FROM pr_development_controller_suspensions AS suspensions
+						WHERE suspensions.resume_attempt_id =
+							pr_development_repair_orchestrations.attempt_id AND
+							suspensions.status = 'resume_claimed'
+					) AND
+					NOT EXISTS (
+						SELECT 1
+						FROM pr_development_controller_suspensions AS suspensions
+						WHERE suspensions.attempt_id =
+							pr_development_repair_orchestrations.attempt_id AND
+							suspensions.status IN ('suspend_pending', 'suspend_claimed')
+					)`,
 				worker,
 				token,
 				toDBTime(deadline),
@@ -733,37 +760,66 @@ func (s *Store) AcquirePRDevelopmentRepairOrchestrationController(
 				lease.Controller = controller
 				return nil
 			}
-			if controller.Phase != PRDevelopmentControllerReady ||
-				controller.WorkspaceID != orchestration.WorkspaceID ||
-				controller.SourceCloneURL != orchestration.CloneURL ||
-				controller.SourceRef != orchestration.HeadRef ||
-				controller.SourceCommit != orchestration.HeadSHA ||
-				controller.SourceTree != orchestration.SourceTree {
-				return fmt.Errorf(
-					"%w: only the exact retained Ready line may be resumed",
-					ErrPRDevelopmentOrchestrationConflict,
+			if controller.Phase == PRDevelopmentControllerSuspended {
+				if controller.WorkspaceID != orchestration.WorkspaceID ||
+					controller.SourceCloneURL != orchestration.CloneURL ||
+					controller.SourceRef != orchestration.HeadRef ||
+					controller.SourceCommit != orchestration.HeadSHA ||
+					controller.SourceTree != orchestration.SourceTree {
+					return fmt.Errorf(
+						"%w: suspended line differs from its exact orchestration pin",
+						ErrPRDevelopmentOrchestrationConflict,
+					)
+				}
+				resume, resumeChanged, resumeErr := s.acquirePRDevelopmentControllerSuspendedResume(
+					ctx,
+					conn,
+					relation,
+					controller,
+					normalized,
+					orchestration,
+					now,
+					deadline,
 				)
-			}
-			if controller.Revision != normalized.ExpectedRevision {
-				return fmt.Errorf(
-					"%w: expected revision %d, current revision %d",
-					ErrPRDevelopmentControllerConflict,
-					normalized.ExpectedRevision,
-					controller.Revision,
+				if resumeErr != nil {
+					return resumeErr
+				}
+				lease.Controller = resume.Controller
+				lease.SuspendedResume = &resume
+				changed = resumeChanged
+			} else {
+				if controller.Phase != PRDevelopmentControllerReady ||
+					controller.WorkspaceID != orchestration.WorkspaceID ||
+					controller.SourceCloneURL != orchestration.CloneURL ||
+					controller.SourceRef != orchestration.HeadRef ||
+					controller.SourceCommit != orchestration.HeadSHA ||
+					controller.SourceTree != orchestration.SourceTree {
+					return fmt.Errorf(
+						"%w: only the exact retained Ready or Suspended line may be resumed",
+						ErrPRDevelopmentOrchestrationConflict,
+					)
+				}
+				if controller.Revision != normalized.ExpectedRevision {
+					return fmt.Errorf(
+						"%w: expected revision %d, current revision %d",
+						ErrPRDevelopmentControllerConflict,
+						normalized.ExpectedRevision,
+						controller.Revision,
+					)
+				}
+				updated, acquireErr := acquirePRDevelopmentMutationLease(
+					ctx, conn, controller, normalized, now, deadline,
 				)
+				if errors.Is(acquireErr, ErrPRDevelopmentControllerRecoveryRequired) {
+					recoveryRequired = true
+					return nil
+				}
+				if acquireErr != nil {
+					return acquireErr
+				}
+				lease.Controller = updated
+				changed = true
 			}
-			updated, acquireErr := acquirePRDevelopmentMutationLease(
-				ctx, conn, controller, normalized, now, deadline,
-			)
-			if errors.Is(acquireErr, ErrPRDevelopmentControllerRecoveryRequired) {
-				recoveryRequired = true
-				return nil
-			}
-			if acquireErr != nil {
-				return acquireErr
-			}
-			lease.Controller = updated
-			changed = true
 		}
 		if orchestration.ControllerID != "" &&
 			orchestration.ControllerID != lease.Controller.ID {
@@ -2391,7 +2447,9 @@ func validatePRDevelopmentRepairOrchestrationRelation(
 			if !found || controller.ThreadID != orchestration.ThreadID ||
 				controller.OwnerSessionID != orchestration.SessionID ||
 				controller.CurrentAttemptID != orchestration.AttemptID ||
-				controller.Phase != PRDevelopmentControllerMutation {
+				(controller.Phase != PRDevelopmentControllerMutation &&
+					(controller.Phase != PRDevelopmentControllerSuspended ||
+						orchestration.Phase != PRDevelopmentRepairOrchestrationBootstrap)) {
 				return errors.New("live orchestration controller ownership is invalid")
 			}
 			if orchestration.Phase != PRDevelopmentRepairOrchestrationBootstrap &&

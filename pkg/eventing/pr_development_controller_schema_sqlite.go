@@ -155,12 +155,24 @@ const (
 )
 
 func validateSchemaV10(ctx context.Context, conn *sql.Conn) error {
+	return validateSchemaV10ForVersion(ctx, conn, false)
+}
+
+func validateSchemaV10ForVersion(
+	ctx context.Context,
+	conn *sql.Conn,
+	controllerV17 bool,
+) error {
 	binary := func(name string) schemaIndexColumn {
 		return schemaIndexColumn{name: name, collation: "BINARY"}
 	}
+	controllerTable := schemaV10PRDevelopmentControllersTable
+	if controllerV17 {
+		controllerTable = schemaV17PRDevelopmentControllersTable
+	}
 	if err := validateSchemaTable(ctx, conn, schemaTableSpec{
 		name:      "pr_development_thread_controllers",
-		createSQL: schemaV10PRDevelopmentControllersTable,
+		createSQL: controllerTable,
 		uniqueIndexes: []schemaUniqueIndexSpec{
 			{origin: "pk", columns: []schemaIndexColumn{binary("id")}},
 			{origin: "u", columns: []schemaIndexColumn{binary("thread_id")}},

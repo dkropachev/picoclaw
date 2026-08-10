@@ -641,8 +641,7 @@ func TestStoreMigratesV15WithoutSynthesizingDevelopmentAttentionTriggers(
 	db := openSchemaTestDB(t, path)
 	_, err := db.Exec(`DROP TABLE pr_development_attention_triggers`)
 	require.NoError(t, err)
-	_, err = db.Exec(`PRAGMA user_version = 15`)
-	require.NoError(t, err)
+	setSchemaTestVersion(t, db, 15)
 	require.NoError(t, db.Close())
 
 	store, err := Open(context.Background(), path)
@@ -674,6 +673,7 @@ func TestStorePRDevelopmentAttentionTriggerSchemaV16ValidationRollsBack(
 	db := openSchemaTestDB(t, seedPath)
 	_, err := db.Exec(`DROP TABLE pr_development_attention_triggers`)
 	require.NoError(t, err)
+	setSchemaTestVersion(t, db, 15)
 	_, err = db.Exec(`CREATE TABLE pr_development_attention_triggers (
 		review_entry_id TEXT PRIMARY KEY,
 		status TEXT NOT NULL,
@@ -681,8 +681,6 @@ func TestStorePRDevelopmentAttentionTriggerSchemaV16ValidationRollsBack(
 		lease_until INTEGER,
 		created_at INTEGER NOT NULL
 	)`)
-	require.NoError(t, err)
-	_, err = db.Exec(`PRAGMA user_version = 15`)
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 

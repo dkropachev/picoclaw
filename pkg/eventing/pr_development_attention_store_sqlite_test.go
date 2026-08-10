@@ -867,6 +867,7 @@ func TestStorePRDevelopmentAttentionSchemaV15ValidationRollsBackMigration(
 		_, err := db.Exec(schema)
 		require.NoError(t, err)
 	}
+	setSchemaTestVersion(t, db, 14)
 	malformed := strings.Replace(
 		schemaV15PRDevelopmentAttentionDecisionRunsTable,
 		"length(CAST(decision_point AS BLOB)) <= 128",
@@ -875,8 +876,6 @@ func TestStorePRDevelopmentAttentionSchemaV15ValidationRollsBackMigration(
 	)
 	require.NotEqual(t, schemaV15PRDevelopmentAttentionDecisionRunsTable, malformed)
 	_, err := db.Exec(malformed)
-	require.NoError(t, err)
-	_, err = db.Exec(`PRAGMA user_version = 14`)
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 

@@ -160,6 +160,17 @@ ledger, model, provider, or publication authority:
   parent and candidate roots for that same tree and keep the reservation
   operation lock through callback, root postflight, cleanup, and retained-state
   postflight.
+- Within `FR-GITWS-014` and `FR-GITWS-015`, a recovery controller that will
+  next suspend the recovered line MUST set the controller-private
+  `RequireSuspensionCapacity` request flag. A new guarded rotation requires an
+  available suspension-record slot on the target line and enough rotation
+  history for both that recovery and one later `ResumeSuspendedPinnedLine`;
+  exact replay counts the already-recorded recovery only once and therefore
+  requires just the later resume slot. A guarded direct rotation MUST be bound;
+  pre-effect Adopt may name its not-yet-created target because that deterministic
+  line starts with an empty suspension history. Capacity rejection writes
+  nothing. The flag is not rotation evidence, changes no record hash, and its
+  false default preserves existing rotation and recovery behavior.
 - Within `FR-GITWS-017`, a controller may call `SuspendPinnedLine` only after
   any required Adopt/Resume old-to-fresh recovery has durably converged, or call
   `SuspendPinnedLineCommitRecovery` only after the prepared Commit's old bearer
@@ -525,21 +536,21 @@ security contract additionally constrains the bounded review projection and
 makes repository paths and lifecycle authority unrepresentable outside the
 trusted controller.
 
-The suspension primitive is the Git-boundary prerequisite for Event
-Automation's later generation-owned recovery worker, not that worker itself.
-After the worker has durably reconciled Adopt or Resume to one exact fresh
-owner, or rotated the old Commit owner to fresh, it may invoke the matching
+The suspension primitive is the Git boundary consumed by Event Automation's
+schema-v17 generation-owned recovery worker, not the worker itself. After that
+worker has durably reconciled Adopt or Resume to one exact
+fresh owner, or rotated and exactly replayed a prepared Commit under fresh, it
+must persist the complete recovery result before invoking the matching
 suspension method; the old-to-fresh primitive remains continuously locked
 through its own revocation, and suspension separately keeps the exact current
 reservation locked until it is retired. A crash between calls leaves a durable,
-idempotently replayable fresh owner rather than a guessed suspension. Event
-Automation must persist and order those results before treating the controller
-as reservation-free. Git Workspaces neither scans nor claims an operation and
-does not change its database lifecycle. A later repair must establish separate
-eventing authority and call `ResumeSuspendedPinnedLine` with a globally fresh
-bearer; the suspension record alone is not a queued attempt, review fence,
-passed CI, AI decision, attention request, local-ready state, or publication
-grant.
+idempotently replayable fresh owner plus the eventing `suspension_pending`
+checkpoint rather than a guessed suspension. Git Workspaces neither scans nor
+claims an operation and does not change its database lifecycle. A later repair
+must first persist separate eventing resume authority and then call
+`ResumeSuspendedPinnedLine` with its globally fresh bearer before model work;
+the suspension record alone is not a queued attempt, review fence, passed CI,
+AI decision, attention request, local-ready state, or publication grant.
 
 Local CI may consume `WithPinnedCandidateValidationRoots` only as a synchronous
 controller capability. Git Workspaces owns exact preflight/postflight fencing,
@@ -679,8 +690,8 @@ substitute for that execution boundary.
 | `FR-GITWS-011` | [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go), [pkg/gitworkspace/pinned_commit_test.go](../../pkg/gitworkspace/pinned_commit_test.go), [pkg/tools/integration/git_workspace_test.go](../../pkg/tools/integration/git_workspace_test.go) |
 | `FR-GITWS-012` | [pkg/gitworkspace/pinned_commit_test.go](../../pkg/gitworkspace/pinned_commit_test.go), [pkg/agent/local_repair_test.go](../../pkg/agent/local_repair_test.go), [pkg/tools/integration/git_workspace_test.go](../../pkg/tools/integration/git_workspace_test.go) |
 | `FR-GITWS-013` | [pkg/gitworkspace/development_line_test.go](../../pkg/gitworkspace/development_line_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go), [pkg/gitworkspace/development_line_review_test.go](../../pkg/gitworkspace/development_line_review_test.go), [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go), [pkg/prdevelopment/controller_effects_test.go](../../pkg/prdevelopment/controller_effects_test.go), [pkg/prdevelopment/review_worker_test.go](../../pkg/prdevelopment/review_worker_test.go) |
-| `FR-GITWS-014` | [pkg/gitworkspace/pinned_reservation_rotation.go](../../pkg/gitworkspace/pinned_reservation_rotation.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go), [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
-| `FR-GITWS-015` | [pkg/gitworkspace/pinned_line_recovery.go](../../pkg/gitworkspace/pinned_line_recovery.go), [pkg/gitworkspace/pinned_line_recovery_test.go](../../pkg/gitworkspace/pinned_line_recovery_test.go), [pkg/gitworkspace/pinned_reservation_rotation.go](../../pkg/gitworkspace/pinned_reservation_rotation.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go), [pkg/gitworkspace/development_line_test.go](../../pkg/gitworkspace/development_line_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go) |
+| `FR-GITWS-014` | [pkg/gitworkspace/pinned_reservation_rotation.go](../../pkg/gitworkspace/pinned_reservation_rotation.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go), [pkg/gitworkspace/pinned_recovery_suspension_capacity_test.go](../../pkg/gitworkspace/pinned_recovery_suspension_capacity_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go), [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
+| `FR-GITWS-015` | [pkg/gitworkspace/pinned_line_recovery.go](../../pkg/gitworkspace/pinned_line_recovery.go), [pkg/gitworkspace/pinned_line_recovery_test.go](../../pkg/gitworkspace/pinned_line_recovery_test.go), [pkg/gitworkspace/pinned_recovery_suspension_capacity_test.go](../../pkg/gitworkspace/pinned_recovery_suspension_capacity_test.go), [pkg/gitworkspace/pinned_reservation_rotation.go](../../pkg/gitworkspace/pinned_reservation_rotation.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go), [pkg/gitworkspace/development_line_test.go](../../pkg/gitworkspace/development_line_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go) |
 | `FR-GITWS-016` | [pkg/gitworkspace/pinned_validation_roots.go](../../pkg/gitworkspace/pinned_validation_roots.go), [pkg/gitworkspace/pinned_validation_roots_change.go](../../pkg/gitworkspace/pinned_validation_roots_change.go), [pkg/gitworkspace/pinned_validation_roots_change_ctim.go](../../pkg/gitworkspace/pinned_validation_roots_change_ctim.go), [pkg/gitworkspace/pinned_validation_roots_test.go](../../pkg/gitworkspace/pinned_validation_roots_test.go), [pkg/prdevelopment/localci/runner_test.go](../../pkg/prdevelopment/localci/runner_test.go) |
 | `FR-GITWS-017` | [pkg/gitworkspace/development_line_suspension.go](../../pkg/gitworkspace/development_line_suspension.go), [pkg/gitworkspace/development_line_suspension_api.go](../../pkg/gitworkspace/development_line_suspension_api.go), [pkg/gitworkspace/development_line_suspension_test.go](../../pkg/gitworkspace/development_line_suspension_test.go), [pkg/gitworkspace/development_line_suspension_api_test.go](../../pkg/gitworkspace/development_line_suspension_api_test.go), [pkg/gitworkspace/development_line_suspension_matrix_test.go](../../pkg/gitworkspace/development_line_suspension_matrix_test.go), [pkg/gitworkspace/development_line_suspension_adversarial_test.go](../../pkg/gitworkspace/development_line_suspension_adversarial_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go), [pkg/gitworkspace/pinned_commit_test.go](../../pkg/gitworkspace/pinned_commit_test.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go), [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
 

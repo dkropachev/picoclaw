@@ -1060,6 +1060,19 @@ func (m *Manager) ResumeSuspendedPinnedLine(
 			ErrPinnedLineConflict,
 		)
 	}
+	// A lost scheduling owner after this resume may leave Git ahead of its
+	// eventing finalization. Preserve one rotation for that exact recovery's
+	// later resume and one suspension record for immediately retiring the fresh
+	// bearer again before installing it.
+	if capacityErr := requirePinnedRecoverySuspensionCapacity(
+		state,
+		request.WorkspaceID,
+		request.LineID,
+		false,
+		false,
+	); capacityErr != nil {
+		return PinnedLineSuspendedResumeResult{}, capacityErr
+	}
 	if freshErr := requireFreshPinnedLineReservation(
 		state,
 		line.ID,

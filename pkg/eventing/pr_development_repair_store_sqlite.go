@@ -153,7 +153,8 @@ func (s *Store) AdmitPRDevelopmentRepair(
 					ErrPRDevelopmentControllerConflict,
 				)
 			}
-			if controller.Phase != PRDevelopmentControllerReady {
+			if controller.Phase != PRDevelopmentControllerReady &&
+				controller.Phase != PRDevelopmentControllerSuspended {
 				return ErrPRDevelopmentControllerActive
 			}
 			if controller.LineVersion >= MaxPRDevelopmentControllerFences ||

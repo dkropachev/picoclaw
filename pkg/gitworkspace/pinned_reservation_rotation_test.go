@@ -23,6 +23,7 @@ func TestPinnedReservationRotationJSONIsPrivate(t *testing.T) {
 		WorkspaceID:               "private-workspace",
 		IntentID:                  "private-intent",
 		ReplacementReservationKey: "private-new-bearer",
+		RequireSuspensionCapacity: true,
 		LineID:                    "private-line",
 		ExpectedVersion:           7,
 		ExpectedMutationEpoch:     8,

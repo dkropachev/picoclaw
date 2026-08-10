@@ -112,6 +112,27 @@ func validatePRDevelopmentControllerOperationChain(
 		}
 		currentKinds = append(currentKinds, operation.Kind)
 		if operation.Status == PRDevelopmentControllerOperationFinalized {
+			if operation.Kind == PRDevelopmentControllerOperationCommit &&
+				!operation.Result.WorkspaceClean {
+				suspension, found, loadErr := loadPRDevelopmentControllerSuspensionBySource(
+					ctx,
+					queryer,
+					PRDevelopmentControllerSuspensionSourceOperationRecovery,
+					operation.RecoveryID,
+				)
+				if loadErr != nil {
+					return loadErr
+				}
+				if !found ||
+					suspension.SourceOperationID != operation.ID ||
+					suspension.SourceFinalRevision != operation.FinalControllerRevision ||
+					suspension.SourceFinalHash != operation.FinalHash ||
+					suspension.Mode != PRDevelopmentControllerSuspensionCommitRecovery {
+					return errors.New(
+						"stored dirty recovered Commit has no exact suspension handoff",
+					)
+				}
+			}
 			finalizedByAttempt[operation.AttemptID] = append(
 				finalizedByAttempt[operation.AttemptID],
 				operation,
@@ -222,7 +243,9 @@ func validateActivePRDevelopmentOperationReplacementFresh(
 			 WHERE previous_reservation_digest = ? OR replacement_reservation_digest = ?) +
 			(SELECT COUNT(*) FROM pr_development_controller_operation_intents
 			 WHERE id <> ? AND (mutation_reservation_digest = ? OR
-				replacement_reservation_digest = ? OR replacement_reservation_key = ?))`,
+				replacement_reservation_digest = ? OR replacement_reservation_key = ?)) +
+			(SELECT COUNT(*) FROM pr_development_controller_suspensions
+			 WHERE suspension_reservation_digest = ? OR resume_reservation_digest = ?)`,
 		operation.ReplacementReservationKey,
 		operation.ReplacementReservationKey,
 		operation.ReplacementReservationDigest,
@@ -232,6 +255,8 @@ func validateActivePRDevelopmentOperationReplacementFresh(
 		operation.ReplacementReservationDigest,
 		operation.ReplacementReservationDigest,
 		operation.ReplacementReservationKey,
+		operation.ReplacementReservationDigest,
+		operation.ReplacementReservationDigest,
 	).Scan(&collisions); err != nil {
 		return err
 	}

@@ -148,6 +148,16 @@ resume normalizes only that known child and the real index back to the retained
 parent, preserves every candidate file, and installs a globally fresh bearer at
 the unchanged attempt epoch. Suspended state is neither parked nor reviewable
 and is absent from all generic and user-facing surfaces.
+Schema-v17 recovery composition makes that boundary operational without
+granting recovery a model-capable mutation interval. One generation-owned,
+provider-independent worker may claim only eligible bound durable recovery,
+checkpoint its exact kind-specific Git result before suspension, and erase all
+raw recovery authority when the controller becomes `suspended`. Commit remains
+the exact prepared Rotate-plus-`CommitPinned` effect before commit-recovery
+suspension; Park directly retires old through its atomic review handoff. A later
+repair persists and replays one fresh exact resume before any model request.
+Legacy unbound v12 rows are deliberately untouched until an idempotent
+retirement protocol is separately reviewed.
 Local-CI validation is a separate mandatory security domain over exact
 controller-owned candidate evidence. Git Workspaces materializes the immutable
 pre-attempt parent and current candidate as bounded `.git`-free disposable
@@ -189,7 +199,10 @@ materialization fail closed without exposing local paths or payload detail.
   `ResumePinnedLine`, `ParkPinnedLine`, `SnapshotPinnedLineReview`,
   `RecoverPinnedLineAdoptReservation`, and
   `RecoverPinnedLineResumeReservation`, plus `SuspendPinnedLine`,
-  `SuspendPinnedLineCommitRecovery`, and `ResumeSuspendedPinnedLine`; local validation additionally uses
+  `SuspendPinnedLineCommitRecovery`, and `ResumeSuspendedPinnedLine`;
+  schema-v17 composition additionally uses the narrow tagged recovery-work,
+  suspension-checkpoint/finalize, and suspended-resume prepare/finalize
+  capabilities plus the generation-owned recovery worker; local validation additionally uses
   `pkg/prdevelopment/localci` and
   `gitworkspace.Manager.WithPinnedCandidateValidationRoots` with
   `PinnedCandidateValidationRequest`, `PinnedCandidateValidationRoots`, and
@@ -232,10 +245,13 @@ materialization fail closed without exposing local paths or payload detail.
   finalize only its exact result; after expiry, claim that operation, perform
   only its kind-specific reconciliation while renewing the claim, and atomically
   install fresh authority or retire old before any later review access. For
-  suspension, exact-snapshot the current candidate under its live reservation,
-  hash-chain and retire that bearer atomically, then on a later fresh resume
-  normalize only an exact prepared child/parent transition without touching
-  ordinary files before reinstalling ownership. For
+  automated non-Park recovery, checkpoint the exact reconciliation result and
+  enter `suspension_pending` before Git suspension, then exact-snapshot the
+  current candidate under the fresh reservation and atomically retire that
+  bearer into `suspended`. Park instead retires old directly. On a later queued
+  attempt, persist one fresh resume bearer and intent before Git, normalize only
+  an exact prepared child/parent transition without touching ordinary files,
+  and install the sole mutation owner before any model. For
   local CI, materialize and hash both exact snapshots under the reservation
   operation lock, discover both without execution using authoritative explicit,
   native-quick-profile, then supported GitHub fallback precedence, and reject
@@ -281,7 +297,11 @@ materialization fail closed without exposing local paths or payload detail.
   plain-text answers are not evidence that a repository or provider was
   inspected. Draft, transcript, mutation, and ambiguous-response recovery may
   live in the keyed UI component and query cache but never in browser
-  persistence.
+  persistence. Recovery scheduling is likewise not mutation authority:
+  `suspension_pending` may retain one raw fresh bearer only for its exact live
+  claim, `suspended` retains none, and both remain non-ready and invisible.
+  Legacy unbound v12 recovery is excluded from automatic processing because a
+  lost successful release response lacks an approved exact replay proof.
   An attention response token is not a task identifier: it is a scoped digest
   over the exact server-loaded case-to-waiting-task chain, is issued only while
   that one task is actionable, remains memory-only in the browser, and grants no
@@ -349,6 +369,7 @@ materialization fail closed without exposing local paths or payload detail.
 | `FR-SEC-038` | MUST | Automatic PR-development attention may add only one owner-local occurrence beside an exact `attention_required` ledger completion, lease only its delivery schedule, pin one canonical configured policy plus immutable subject identity, and expose one case-owned browser conversation after validating the complete occurrence-to-task chain. | Every trigger, lease, retry, policy, subject, run, task, controller, session, ledger, CI, Git, and integrity field is structurally private. The worker receives no mutation reservation or provider-write capability and releases its scheduling/runtime leases before a human wait. Working-context session projection remains hidden and exact-prefix fenced; isolated gates receive no history/cache/tools. The public DTO can represent only case version, bounded status, configured title/questions, accepted plain-text response, and an opaque response fence for exactly one waiting or recovery turn. The launcher replaces browser authority with the process bearer only for canonical same-origin requests; the protected handler rejects browser provenance. Tokens contain no decodable identity and are never placed in a URL, log, browser storage, generic workflow surface, or model prompt. | Response processing reloads and revalidates the case, current occurrence, canonical pin, subject/run decision link, private workflow reference, stable run/task snapshot, task payload hash, original waiting revision, and response fence before deriving a separate idempotent response identity. Exact accepted replay only reprojects authoritative state. A response may resume that task and nothing else; chat and repair remain separate explicit case operations, and provider refresh, branch mutation, push, publication, acknowledgement, merge, and deletion require later independently fenced capabilities. Generic workflow observation, task, retry, cancel, and retention paths continue to hide and preserve every exact private attention run. | A stale, cross-case, altered, duplicated, malformed, oversized, noncanonical, superseded, corrupt, or runtime-disabled request fails closed without partial authority or raw diagnostics. Trigger recovery states never cause an automatic second model/run, and no waiting task retains the occurrence lease, runtime generation, controller lease, or mutation reservation. | Bringing a user into an AI-mediated PR discussion must not reveal private orchestration identities, convert a browser token into general workflow access, keep code locked while waiting, or make answering a question equivalent to authorizing code or provider effects. |
 | `FR-SEC-039` | MUST | An authenticated user reads the exact selected-case PR-development detail through the existing protected runtime and launcher GET boundary. | One SQLite snapshot integrity-validates the exact case, conversation, repair session and latest public attempt, verified provider thread, complete controller aggregate, and ledger before a dedicated field-by-field DTO may deliberately declassify at most one optional `local_development` object. Live or otherwise incomplete lifecycle is derived only from the public attempt. For a completed public attempt, the snapshot additionally loads its exact orchestration; commit/CI/review fields remain absent unless that orchestration proves completed and binds its validation receipt to the exact attempt-ledger entry. The DTO can represent only `attempt_id`, `attempt_ordinal`, `attempt_status`, bounded `summary`, exact local `commit_sha`, `no_changes`, terminal `ci_status`, canonical lowercase 64-hex equality-only `ci_plan_digest` and `ci_result_digest`, `review_status` (`not_started`, `pending`, or `completed`), fixed `review_outcome`, bounded `review_summary`, bounded `review_finding_count`, derived `local_ready`, and `updated_at`, under Event Automation's progressive omission contract. The opaque `pdr_` attempt identity is already public; the commit is candidate content identity, not a ref; and the two CI fingerprints reveal no plan, command, output, environment, attestation, or reusable cache authority. | The private source aggregate and all controller, orchestration, and ledger members remain structurally excluded from JSON. The read adds no route, schema, table, index, migration, backfill, or mutation; changes no database, browser, workspace, repository, branch, provider, run, or task state; invokes no model, CI, Git, or workflow; and grants no repair, reservation, provider refresh/write, push, publication, acknowledgement, merge, or deletion capability. `local_ready` is only a read-derived statement about the exact local candidate's passed CI, passed paired review, and matching reservation-free ready controller; it is neither a bearer nor a publication decision. | No live incomplete orchestration is required or exposed. Commit/CI/review fields require the exact completed orchestration-to-receipt-to-attempt-ledger linkage: a legacy or otherwise unbound ledger row whose compatibility loader defaults CI to passed remains `not_started` and can never make `local_ready` true. Invalid, cross-case, duplicated, nonlatest, unpaired, terminality-inconsistent, malformed, over-bound, or corrupt evidence fails the complete detail read with a fixed public error instead of partial fallback. The DTO cannot represent a workspace/checkout or internal Git ref; thread, controller, ledger, fence, checkpoint, orchestration, operation, run, task, or workflow identity/hash; source/tree/candidate/manifest/receipt/attestation/internal digest; lease, reservation, claim, worker, epoch, credential, provider-object, or provider-write field; raw finding; raw CI plan, step, command, path, output, error, or diagnostic; or sibling-case history. | Showing local progress must not turn private controller evidence, compatibility defaults, raw review/CI data, or a convenient green badge into an exfiltration channel or authority to mutate code or a provider. |
 | `FR-SEC-040` | MUST | Only a trusted local-development controller may call `Manager.SuspendPinnedLine`, `Manager.SuspendPinnedLineCommitRecovery`, or `Manager.ResumeSuspendedPinnedLine`. Every call accepts exact canonical repository/source/workspace/line/agent/version/epoch/tip/tree identity, one caller-durable bounded intent, and either the current raw mutation bearer or one globally fresh resume bearer; commit-recovery additionally requires the complete immutable prepared `CommitPinned` request. Under the reservation-derived cross-process operation lock and inventory lock, suspend revalidates manager-owned nonsymlink paths, raw origin, source ancestry, exclusive no-reflog private ref, detached `HEAD`, real index, absence of merge/rebase/sequencer/Git-lock and pending-Park state, and all existing replacement/graft/sparse/config/control-plane exclusions. A manager-private temporary index captures all tracked and nonignored untracked ordinary content relative to the retained parent, rejects changed gitlinks and bounded-output overflow, and persists only `CandidateTree`/digest/count plus hashed identity. Commit-recovery recreates and byte-verifies the deterministic prepared child, hash-binds that child and its exact `PreparedTree`, accepts only the exact parent or child `HEAD`, records whether the child was applied, and never applies a missing commit, moves the retained ref, or discards later ordinary content. `CandidateTree` is independently captured from current ordinary content over the retained parent; it must equal `PreparedTree` while the child remains unapplied, and only an applied child may retain later ordinary edits in a differing candidate. One atomic inventory-v4 save appends a domain-separated per-line count/tail-anchored suspension record, permanently retires the current reservation hash, marks the line `suspended`, and clears workspace/line ownership while leaving the checkout, ref, ordinary files, and line version/tip/tree/epoch retained. Resume verifies the exact latest record and `CandidateTree` under a globally unused fresh bearer; for an applied child it verifies the prepared commit/tree pair, compare-and-swaps detached `HEAD` back to the retained parent, and resets only the real index from the prepared or parent tree to the retained parent while leaving worktree files byte-preserved, accepts only that exact crash-reconcilable child-or-parent transition, re-snapshots `CandidateTree` equality, then installs the fresh owner without changing the already-issued mutation epoch. Every Git subprocess is bounded direct argv with separately drained output, clean environment, hooks/signing/editor/pager/prompt disabled, no shell, network, fetch, replacement object, lazy fetch, or system/global/ambient configuration. Raw bearers exist only in live workspace locks and controller call memory; suspension records contain only domain-separated hashes and participate in store-wide nonreuse. Records, anchors, candidate/commit evidence, paths, refs, hashes, agent/intent identity, timestamps, and replay state are private inventory with no JSON/model/workflow/tool/log/stats/quota/HTTP/UI/provider projection. A suspended line is neither parked nor locally ready and grants no CI, review, attention, publication, push, merge, acknowledgement, release, cleanup, or deletion capability. Malformed, stale, cross-owner, reused, partial, nonlatest, corrupt, over-bound, unsafe-index/`HEAD`, changed ref/candidate control plane, prepared-commit/`PreparedTree` mismatch, rollback, compare-and-swap ambiguity, or later progress fails closed without partial record, authority transfer, ordinary-file rewrite, WIP commit, review fence, or fallback reset/clone. | Recovery and idle handoff must revoke edit authority while preserving exact unknown local work, and prepared-Commit ambiguity must not become data loss, a duplicate or fabricated commit, a generic observation channel, a false green/review state, or remote publication authority. |
+| `FR-SEC-041` | MUST | Only the generation-owned PR-development recovery worker may claim or reclaim an eligible bound schema-v12 or schema-v13 recovery and compose it with schema-v17 suspension handoff; only the later repair controller holding the exact queued-orchestration scheduling claim may prepare and complete a suspended resume. Recovery scheduling authority, event-runtime generation ownership, Git mutation authority, and any later model/provider authority are distinct capabilities. | The worker receives only one exact private recovery claim and its kind-specific request. Adopt and Resume use the exact continuously locked old-to-fresh composites; bound-v12 and Commit use exact old-to-fresh rotation, with Commit then invoking only the prepared deterministic `CommitPinned` request; Park invokes only exact old-bearer `ParkPinnedLine` and its parked snapshot. For every non-Park effect, eventing must durably authenticate and checkpoint the complete exact recovery/rotation result before suspension, retain only the fresh raw bearer needed by the current renewable claim, issue no mutation lease, and expose no model-capable interval. Ordinary recovered lines call exact candidate suspension; Commit calls prepared-Commit recovery suspension so applied/unapplied child state and later ordinary content remain distinct and preserved. Finalization validates the exact suspension result, removes every raw old/fresh/claim copy, clears all authority, and leaves only a private hash-bound `suspended` retained line. Park bypasses suspension and reaches only its existing atomic reservation-free review handoff. | A later queued repair must persist one exact latest-suspension resume intent and globally unused bearer before Git, replay `ResumeSuspendedPinnedLine` after any crash, and atomically move that sole bearer into the live controller mutation lease before any context-compaction or edit model request. The staged resume copy is erased at that transition. If the scheduling owner disappears after a resume may have reached Git, only the generation-owned recovery worker may reclaim the expired resume, exact-replay it, atomically append a hash-linked `suspended_resume_recovery` handoff that receives the fresh bearer, and suspend again before releasing its claim; it never inherits model authority. `suspension_pending`, `suspended`, their checkpoint/result/candidate/prepared-Commit evidence, recovery and resume claims, raw or hashed bearers, paths, refs, controller/attempt/orchestration identities, and diagnostics remain structurally absent from JSON, browser/model/workflow/tool/provider inputs, generic workspace surfaces, logs, stats, and errors. Both phases are never parked, reviewed, locally ready, attention-ready, publishable, or cleanup/release eligible. | A stale generation or claim, altered exact result, cross-controller or cross-line evidence, reused bearer/intent, inadequate rotation/suspension/resume capacity, candidate or prepared-Commit drift, partial raw-key erasure, or ambiguous eventing finalization fails closed without a second Git effect, model call, reset, release, review fence, or provider action. Automatic selection must never claim, reclaim, rotate, or release a schema-v12 recovery without a complete bound-line fence; such legacy unbound state remains unchanged and non-ready until a separately reviewed idempotent retirement protocol covers lost responses and proves stale-bearer revocation. Worker construction and readiness are independent of GitHub/provider objects and model availability, and reload/shutdown drains the exact runtime generation before manager or store closure. | Recovery must minimize the lifetime and audience of raw mutation bearers, preserve crash-ambiguous local work exactly, and prove authority retirement before any AI can observe or continue the retained candidate. |
 
 For `FR-SEC-025` and `FR-SEC-038`, the strict list DTO alone may add the
 required boolean `attention_required`. It is true only for the authoritative
@@ -385,6 +406,17 @@ retain it or a later fresh controller bearer only for a live or
 recovery-required mutation, must remove usable bearer state before
 `review_pending`, and redacts it from Reader and every generic or untrusted
 surface.
+
+`FR-SEC-041` is the schema-v17 controller-private exception during automatic
+recovery. After exact non-Park reconciliation, the controller itself holds no
+mutation bearer: the one fresh raw value exists only in the
+`suspension_pending` handoff for its live recovery claim and is erased when
+`suspended`. A later raw resume value exists only in its exact prepared row
+until it becomes the controller's sole live mutation reservation. The worker
+therefore does not use the older v12/v13 finalizer that immediately reissues a
+model-capable mutation lease. Park still uses the old-bearer terminal path.
+Neither schema phase may satisfy `FR-SEC-039` local readiness, and automatic
+processing never treats an unbound legacy v12 row as an idempotent release.
 
 For `FR-SEC-030`, full-identity retry applies to provider-verified threads. A
 migrated pre-v9 retry instead proves the same isolated case, ordinal-zero link,
@@ -624,6 +656,24 @@ no reader can observe only part of that handoff. The private Git branch remains
 retained, but review receives only its later exact-object bounded projection and
 never the retired edit bearer.
 
+Schema-v17 eventing suspension handoffs stay inside the same owner-local
+capability boundary. `suspension_pending` contains no controller mutation lease
+or bearer; only its exact live recovery claim may retrieve the one fresh raw
+bearer from the checkpoint row long enough to invoke suspension. The checkpoint
+hash-binds its v12/v13 source, kind, exact recovery/rotation result, line fence,
+suspension intent, and, for Commit, prepared request plus deterministic commit
+result. Every raw old copy and duplicate fresh copy is erased when that row is
+committed. Final suspension erases the remaining fresh bearer and recovery
+claim and changes the controller to `suspended`, whose eventing row and Git
+inventory record retain only non-authorizing exact evidence. A separate
+suspended-resume row may temporarily hold one globally fresh bearer only after
+binding it to the latest suspension and a live queued-attempt orchestration
+claim; successful exact finalization moves that bearer into the sole controller
+mutation owner and erases the staged copy. These rows and both controller phases
+are absent from all public/model/generic surfaces and are always locally not
+ready. Unbound legacy v12 rows are neither migrated nor touched by the automatic
+worker because no approved idempotent retirement evidence exists for them.
+
 Local-CI state is separate owner-local evidence rather than security,
 controller, eventing, workflow, session, model, or browser state. Parent and
 candidate materialization roots are transient and private; `PinnedTreeManifest`
@@ -710,6 +760,7 @@ Owns: TEST pkg/config/version*
 | Private storage / controller Go API | `eventing.PRDevelopmentControllerOperationStore`, schema-v13 `pr_development_controller_operation_intents`; controller-only `gitworkspace.Manager.RecoverPinnedLineAdoptReservation`, `RecoverPinnedLineResumeReservation`, `RotatePinnedReservation`, `CommitPinned`, and `ParkPinnedLine` | Write-ahead fence each exact effect; keep operation recovery separate from general mutation; hold old/fresh locks continuously for composite line recovery; rotate before Commit; replay-and-retire old for Park; and atomically remove edit authority before reservation-free review, while structurally withholding every capability and proof from untrusted or generic surfaces. | `FR-SEC-035` |
 | Controller Go API / process | `pkg/prdevelopment/localci/**`; `gitworkspace.Manager.WithPinnedCandidateValidationRoots`, `PinnedCandidateValidationRequest`, `PinnedCandidateValidationRoots`, and `PinnedTreeManifest` | Revalidate and materialize exact `.git`-free parent/candidate evidence under the reservation lock; enforce explicit-plan, native-quick-profile, then GitHub-fallback discovery precedence and persist the exact-manifest plan graph; reject stateful multi-command fallback jobs; and run all required fresh steps only in the mandatory no-network Bubblewrap sandbox under user-systemd/cgroup-v2 supervision with explicit controller-provided offline dependencies. Persist full-identity evidence, while disabling production passing-result reuse for mutable host inputs, without exposing host or repository-lifecycle authority. | `FR-SEC-036` |
 | Controller Go API / private Git inventory | `gitworkspace.Manager.SuspendPinnedLine`, `SuspendPinnedLineCommitRecovery`, `ResumeSuspendedPinnedLine`, and inventory-v4 suspension records/anchors | Under exact operation and inventory locking, snapshot bounded ordinary candidate evidence, distinguish the exact applied/unapplied prepared-Commit state, hash-chain and retire the current bearer into nonreviewable private suspension, and resume only the same candidate under a globally fresh bearer while preserving files and withholding every generic/model/browser/provider capability. | `FR-SEC-040` |
+| Private storage / controller Go API / runtime | Schema-v17 suspension handoff and suspended-resume records, the tagged eventing recovery-work store, generation-owned PR-development recovery worker, and controller-only exact Git recovery/suspension methods | Separate scheduling, Git, mutation, model, and provider capabilities; persist exact non-Park recovery evidence before suspension; retain at most one claim-scoped fresh bearer during `suspension_pending`; erase all recovery authority at `suspended`; directly retire Park; and durably replay one fresh exact resume into the sole mutation owner before model access. Keep both phases and all proofs private/non-ready, and exclude unbound v12 recovery pending an approved idempotent retirement contract. | `FR-SEC-041` |
 | Config / HTTP / UI | `reviews.attention`, `GET` and `PUT /api/reviews/attention-policies`, `/reviews?view=policies` | Keep gate authority in operator-owned configuration outside reviewed checkouts; expose only bounded non-secret policy plus opaque revisions/effect status, parse and serialize arbitrary question JSON losslessly, and retain the editable projection only in memory. Replace it only through one explicit strict same-origin public-plus-security compare-and-swap that raw-patches only persisted `reviews.attention`, preserves unrelated persisted values and numeric tokens, and leaves security state byte-identical; a conflict retains the local draft for explicit reload/discard and never retries or rebases automatically. Route state contains only the fixed policy-view selector, and editing, validation, effective preview, reload, and discard grant no workflow or provider authority. Broad config GET omits this subresource; broad PUT accepts only an empty compatibility placeholder, broad PATCH rejects the field, and both preserve its exact value during unrelated updates. | `FR-SEC-021` |
 | HTTP | `GET /api/reviews/attention-agents` | Project only one fixed-256 page of canonical configured identity and default metadata, fenced by one strong policy-generation `If-Match` plus an optional canonical offset; broader agent configuration and all security state remain outside the DTO. | `FR-SEC-021` |
 | Workflow / MCP | `agent/*` with `with.tools: none`; `mcp/github/add_issue_comment` | Remove tools from every classifier model path, then permit a GitHub mutation only as a declared conditional MCP step with signed-body identity and fixed output text. The GitHub MCP server and its write credential are configured explicitly and independently from ingress authentication. | `FR-SEC-013` |
@@ -1118,6 +1169,32 @@ Owns: TEST pkg/config/version*
     exact resume. Reject all other drift or ambiguity without reset, checkout,
     clone, WIP commit, Park/review fence, CI/model/workflow/UI/provider effect,
     or generic declassification.
+31. For schema-v17 recovery composition, acquire one exact event-runtime
+    generation and one renewable tagged bound-v12/v13 recovery claim without a
+    provider or model capability. Preflight history capacity before replacement
+    rotation. Execute only the claim's exact kind: composite old-to-fresh Adopt
+    or Resume; old-to-fresh rotation for bound v12; rotation followed by the
+    immutable deterministic `CommitPinned` request for Commit; or old-only Park.
+    Send Park directly to its existing atomic reservation-free handoff. For
+    every other kind, persist and hash-bind the complete exact Git result before
+    suspension, erase every raw old and duplicate fresh copy, issue no mutation
+    lease, and let only the current recovery claim obtain the sole fresh bearer
+    from `suspension_pending`. Call ordinary suspension for bound-v12,
+    Adopt/Resume and prepared-Commit recovery suspension for Commit. Validate
+    the exact result and candidate before atomically erasing the remaining
+    bearer/claim and entering private `suspended`. On a later queued attempt,
+    persist one globally unused bearer and exact resume intent under that
+    attempt's scheduling claim, replay only the candidate-preserving Git resume,
+    and atomically install the sole controller mutation owner before any
+    compactor or edit model. Treat every crash boundary as exact replay of its
+    last durable checkpoint, never as release, reset, clone, Park substitution,
+    or a second model/effect. Do not select or mutate an unbound legacy v12 row
+    until a separately approved idempotent retirement policy proves lost-response
+    replay and stale-bearer revocation. Keep both phases, all raw/digested
+    authority and evidence, and all errors outside JSON, logs, generic
+    workspaces, models, workflows, browsers, providers, and local-readiness
+    projection. Drain the generation and claim heartbeat before manager/store
+    shutdown.
 
 ## Cross-Feature Behavior
 
@@ -1233,18 +1310,22 @@ Schema-v13 operation storage and Git-workspace composite recovery close only
 the crash-safe local effect/capability seam. Event automation owns the private
 request/result/claim chain and atomic Park database tuple; Git workspaces owns
 inventory-v3, canonical old/fresh locking, exact line convergence, commit, and
-park effects. The current slice does not wire the worker that composes them.
-Inventory-v4 suspension is the separate Git-boundary prerequisite for that
-worker. It may consume only one already-converged current mutation bearer at a
-time: old-to-fresh Adopt/Resume recovery or Commit rotation owns its exact
-dual-lock revocation first, and suspension then owns exact candidate capture and
-fresh-bearer retirement. A crash between them remains an exact replayable fresh
-owner, not permission to guess, reset, commit, Park, or publish. Event
-automation must separately persist and reconcile that ordering and later issue
-another globally fresh bearer before a new repair can resume the same
-candidate. Neither a suspension fence nor its reservation-free state may enter
-a model, generic workspace surface, browser local-status projection, review
-worker, attention gate, or provider publication decision.
+park effects. The schema-v17 event-automation contract and `FR-SEC-041` compose them through a
+generation-owned provider-independent worker and schema-v17 handoff.
+Inventory-v4 suspension may consume only one already-converged current mutation
+bearer at a time: old-to-fresh Adopt/Resume recovery or Commit rotation plus
+exact deterministic Commit owns its revocation/effect first, eventing durably
+checkpoints that exact result, and suspension then owns candidate capture and
+fresh-bearer retirement. A crash between them remains an exact replayable
+`suspension_pending` owner, not permission to guess, reset, commit, Park, or
+publish. Park bypasses suspension and retires old through its existing atomic
+review handoff. Before a later model call, Event Automation must persist a
+globally fresh resume bearer and exact intent, replay the candidate-preserving
+Git resume, and atomically install the sole mutation owner. Neither phase,
+checkpoint, suspension fence, nor reservation-free state may enter a model,
+generic workspace surface, browser local-status projection, review worker,
+attention gate, or provider publication decision; legacy unbound v12 recovery
+is excluded until a separately approved idempotent retirement protocol exists.
 Local-CI discovery/sandbox/evidence is implemented by `#119` through this
 requirement and the Event Automation local-CI contract. Git Workspaces owns exact
 parent/candidate materialization, the reservation lock, and canonical manifest;
@@ -1259,8 +1340,9 @@ until toolchains and dependencies have complete immutable manifests. Generic
 workflow primitives supply only a reusable step/DAG model: this validator does
 not invoke the workflow executor or create a run, task, private context, event,
 dispatch, or gate. Repair and ledger orchestration is implemented by `#120`,
-and the reservation-free AI review is implemented by `#121`; attention UI,
-gates, provider refresh/write, push/publication, and merge remain `#122+`.
+the reservation-free AI review by `#121`, attention and read projection by
+`#122` through `#124`, and suspended recovery composition by `#125b`;
+provider refresh/write, push/publication, and merge remain later work.
 None may infer its authority or successful outcome from a v13 operation,
 completed repair row, retained branch, local-CI discovery/execution evidence, or
 `review_pending` phase alone.
@@ -1370,6 +1452,17 @@ promise that a provider consumes every materialized modality.
   Commit cannot run before recovery rotation, and Park cannot mint a fresh
   bearer; stale or cross-kind callers therefore fail instead of racing a second
   effect.
+- Schema-v17 automatic recovery never exposes the post-recovery fresh bearer as
+  a controller mutation lease. Before its durable checkpoint only the exact Git
+  recovery may replay; while `suspension_pending` only the current recovery
+  claim may retrieve the sole fresh copy for exact suspension; at `suspended`
+  no raw recovery bearer or claim remains. Corrupt or partial erasure fails
+  aggregate validation and cannot fall back to model-capable mutation.
+- Legacy unbound v12 recovery is not automatic cleanup authority. The worker
+  skips pending and expired-claimed rows without a bound-line fence and never
+  calls rotation or release for them; the private recovery remains non-ready
+  until a separately reviewed idempotent retirement protocol proves exact
+  lost-response replay and permanent stale-bearer revocation.
 - Suspension cannot convert an arbitrary detached commit, staged-only state,
   changed private ref, malformed or truncated hash chain, reused bearer,
   candidate drift, or partial Commit evidence into reservation-free success.
@@ -1377,6 +1470,12 @@ promise that a provider consumes every materialized modality.
   crash-reconcilable prepared-child/retained-parent control-plane states; it
   never resets the worktree, deletes untracked files, creates a WIP commit,
   advances a ref or epoch, or exposes a review/local-ready/publication fact.
+- Suspended resume is write-ahead and attempt-specific. A fresh bearer is staged
+  only under the queued orchestration claim and exact latest suspension; no
+  compactor or edit model may run until Git resume and eventing finalization
+  install it as the sole owner. A stale attempt, changed candidate, lost
+  generation, or ambiguous response replays the same intent or stops without
+  another bearer, reset, release, model, review, or provider effect.
 - A Park database failure publishes neither a partially completed queued
   attempt nor a review fence/phase without the others. Recovery must first
   prove exact Git Park replay under old, after which one transaction retires
@@ -1604,6 +1703,7 @@ promise that a provider consumes every materialized modality.
 | `FR-SEC-038` | [pkg/eventing/pr_development_attention_trigger_store_sqlite_test.go](../../pkg/eventing/pr_development_attention_trigger_store_sqlite_test.go), [pkg/eventing/pr_development_store_sqlite_test.go](../../pkg/eventing/pr_development_store_sqlite_test.go), [pkg/attention/private_run_test.go](../../pkg/attention/private_run_test.go), [pkg/attention/conversation_test.go](../../pkg/attention/conversation_test.go), [pkg/prdevelopment/attention_trigger_worker_test.go](../../pkg/prdevelopment/attention_trigger_worker_test.go), [pkg/prdevelopment/attention_bridge_test.go](../../pkg/prdevelopment/attention_bridge_test.go), [pkg/prdevelopment/service_handler_test.go](../../pkg/prdevelopment/service_handler_test.go), [pkg/gateway/pr_development_attention_composition_test.go](../../pkg/gateway/pr_development_attention_composition_test.go), [web/backend/api/pr_development_test.go](../../web/backend/api/pr_development_test.go), [web/frontend/src/api/pr-development.test.ts](../../web/frontend/src/api/pr-development.test.ts), [web/frontend/src/api/pr-development-attention.test.ts](../../web/frontend/src/api/pr-development-attention.test.ts), [web/frontend/src/components/reviews/attention-conversation.test.tsx](../../web/frontend/src/components/reviews/attention-conversation.test.tsx), [web/frontend/src/components/reviews/pr-development-page.test.tsx](../../web/frontend/src/components/reviews/pr-development-page.test.tsx), [web/frontend/src/routes/-reviews-route.test.tsx](../../web/frontend/src/routes/-reviews-route.test.tsx), [web/frontend/src/routes/-reviews.test.ts](../../web/frontend/src/routes/-reviews.test.ts), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-SEC-039` | [pkg/eventing/pr_development_types.go](../../pkg/eventing/pr_development_types.go), [pkg/eventing/pr_development_repair_store_sqlite.go](../../pkg/eventing/pr_development_repair_store_sqlite.go), [pkg/eventing/pr_development_ledger_store_sqlite.go](../../pkg/eventing/pr_development_ledger_store_sqlite.go), [pkg/eventing/pr_development_orchestration_store_sqlite.go](../../pkg/eventing/pr_development_orchestration_store_sqlite.go), [pkg/eventing/pr_development_review_store_sqlite_test.go](../../pkg/eventing/pr_development_review_store_sqlite_test.go), [pkg/prdevelopment/service.go](../../pkg/prdevelopment/service.go), [pkg/prdevelopment/service_handler_test.go](../../pkg/prdevelopment/service_handler_test.go), [web/frontend/src/api/pr-development.ts](../../web/frontend/src/api/pr-development.ts), [web/frontend/src/api/pr-development.test.ts](../../web/frontend/src/api/pr-development.test.ts), [web/frontend/src/components/reviews/pr-development-page.tsx](../../web/frontend/src/components/reviews/pr-development-page.tsx), [web/frontend/src/components/reviews/pr-development-page.test.tsx](../../web/frontend/src/components/reviews/pr-development-page.test.tsx), [web/frontend/tests/ui-smoke.spec.ts](../../web/frontend/tests/ui-smoke.spec.ts) |
 | `FR-SEC-040` | [pkg/gitworkspace/development_line_suspension.go](../../pkg/gitworkspace/development_line_suspension.go), [pkg/gitworkspace/development_line_suspension_api.go](../../pkg/gitworkspace/development_line_suspension_api.go), [pkg/gitworkspace/development_line_suspension_test.go](../../pkg/gitworkspace/development_line_suspension_test.go), [pkg/gitworkspace/development_line_suspension_api_test.go](../../pkg/gitworkspace/development_line_suspension_api_test.go), [pkg/gitworkspace/development_line_suspension_matrix_test.go](../../pkg/gitworkspace/development_line_suspension_matrix_test.go), [pkg/gitworkspace/development_line_suspension_adversarial_test.go](../../pkg/gitworkspace/development_line_suspension_adversarial_test.go), [pkg/gitworkspace/development_line_adversarial_test.go](../../pkg/gitworkspace/development_line_adversarial_test.go), [pkg/gitworkspace/pinned_commit.go](../../pkg/gitworkspace/pinned_commit.go), [pkg/gitworkspace/pinned_commit_test.go](../../pkg/gitworkspace/pinned_commit_test.go), [pkg/gitworkspace/pinned_reservation_rotation.go](../../pkg/gitworkspace/pinned_reservation_rotation.go), [pkg/gitworkspace/pinned_reservation_rotation_test.go](../../pkg/gitworkspace/pinned_reservation_rotation_test.go), [pkg/gitworkspace/manager_test.go](../../pkg/gitworkspace/manager_test.go) |
+| `FR-SEC-041` | [pkg/eventing/pr_development_suspension_store_sqlite_test.go](../../pkg/eventing/pr_development_suspension_store_sqlite_test.go), [pkg/eventing/pr_development_suspended_resume_store_sqlite_test.go](../../pkg/eventing/pr_development_suspended_resume_store_sqlite_test.go), [pkg/eventing/pr_development_suspended_resume_recovery_store_sqlite_test.go](../../pkg/eventing/pr_development_suspended_resume_recovery_store_sqlite_test.go), [pkg/eventing/pr_development_recovery_queue_sqlite_test.go](../../pkg/eventing/pr_development_recovery_queue_sqlite_test.go), [pkg/gitworkspace/pinned_recovery_suspension_capacity_test.go](../../pkg/gitworkspace/pinned_recovery_suspension_capacity_test.go), [pkg/prdevelopment/controller_recovery_worker_test.go](../../pkg/prdevelopment/controller_recovery_worker_test.go), [pkg/prdevelopment/repair_controller_worker_test.go](../../pkg/prdevelopment/repair_controller_worker_test.go), [pkg/gateway/pr_development_repair_runtime_test.go](../../pkg/gateway/pr_development_repair_runtime_test.go) |
 
 Additional `FR-SEC-030` acceptance anchors are
 [pkg/eventing/store_types.go](../../pkg/eventing/store_types.go),

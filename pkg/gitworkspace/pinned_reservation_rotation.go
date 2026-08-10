@@ -23,12 +23,15 @@ const maxPinnedReservationRotations = 8_192
 // IntentID and the replacement bearer must be stored durably by the caller
 // before invocation so an ambiguous inventory write can be replayed exactly.
 // The replacement inherits Pin.AgentID; recovery workers cannot replace the
-// stable logical controller identity.
+// stable logical controller identity. RequireSuspensionCapacity is an optional
+// controller-private guard for bound recoveries that will immediately suspend:
+// it preserves one later suspended-resume rotation slot.
 type PinnedReservationRotationRequest struct {
 	Pin                       PinnedAcquireRequest `json:"-"`
 	WorkspaceID               string               `json:"-"`
 	IntentID                  string               `json:"-"`
 	ReplacementReservationKey string               `json:"-"`
+	RequireSuspensionCapacity bool                 `json:"-"`
 	LineID                    string               `json:"-"`
 	ExpectedVersion           int64                `json:"-"`
 	ExpectedMutationEpoch     int64                `json:"-"`
@@ -201,6 +204,17 @@ func (m *Manager) RotatePinnedReservation(
 			)
 		}
 	}
+	if request.RequireSuspensionCapacity {
+		if capacityErr := requirePinnedRecoverySuspensionCapacity(
+			state,
+			request.WorkspaceID,
+			request.LineID,
+			false,
+			false,
+		); capacityErr != nil {
+			return PinnedReservationRotationResult{}, capacityErr
+		}
+	}
 
 	now := m.now().UTC()
 	previousRecordHash := emptyPinnedReservationRotationDigest()
@@ -266,6 +280,12 @@ func validatePinnedReservationRotationRequest(
 		)
 	}
 	if request.LineID == "" {
+		if request.RequireSuspensionCapacity {
+			return "", fmt.Errorf(
+				"%w: suspension capacity requires a bound development line",
+				ErrPinnedLineInvalid,
+			)
+		}
 		if request.ExpectedVersion != 0 || request.ExpectedMutationEpoch != 0 ||
 			request.ExpectedTip != "" || request.ExpectedTree != "" {
 			return "", fmt.Errorf(
@@ -381,7 +401,58 @@ func replayPinnedReservationRotation(
 			)
 		}
 	}
+	if request.RequireSuspensionCapacity {
+		if capacityErr := requirePinnedRecoverySuspensionCapacity(
+			state,
+			request.WorkspaceID,
+			request.LineID,
+			true,
+			false,
+		); capacityErr != nil {
+			return PinnedReservationRotationResult{}, capacityErr
+		}
+	}
 	return pinnedReservationRotationResult(record, true), nil
+}
+
+func requirePinnedRecoverySuspensionCapacity(
+	state *storeState,
+	workspaceID, lineID string,
+	recoveryRotationRecorded, allowMissingLine bool,
+) error {
+	if state == nil {
+		return fmt.Errorf(
+			"%w: recovery suspension capacity inventory is unavailable",
+			ErrPinnedLineConflict,
+		)
+	}
+	maximumRotationCount := maxPinnedReservationRotations - 2
+	if recoveryRotationRecorded {
+		maximumRotationCount++
+	}
+	if len(state.PinnedReservationRotations[workspaceID]) > maximumRotationCount {
+		return fmt.Errorf(
+			"%w: recovery has no suspended-resume rotation capacity",
+			ErrPinnedLineConflict,
+		)
+	}
+	line := state.DevelopmentLines[lineID]
+	if line == nil {
+		if allowMissingLine {
+			return nil
+		}
+		return fmt.Errorf(
+			"%w: recovery suspension target line is unavailable",
+			ErrPinnedLineConflict,
+		)
+	}
+	if line.SuspensionCount >= maxDevelopmentLineReservations {
+		return fmt.Errorf(
+			"%w: recovery has no development-line suspension capacity",
+			ErrPinnedLineConflict,
+		)
+	}
+	return nil
 }
 
 func matchPinnedReservationRotationRecord(

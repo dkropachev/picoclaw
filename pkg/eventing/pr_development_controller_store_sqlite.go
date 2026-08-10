@@ -2023,8 +2023,12 @@ func newUniquePRDevelopmentMutationReservation(
 				(SELECT COUNT(*) FROM pr_development_controller_recovery_intents
 				 WHERE previous_reservation_digest = ? OR replacement_reservation_digest = ?) +
 				(SELECT COUNT(*) FROM pr_development_controller_operation_intents
-				 WHERE mutation_reservation_digest = ? OR replacement_reservation_digest = ?)`,
+				 WHERE mutation_reservation_digest = ? OR replacement_reservation_digest = ?) +
+				(SELECT COUNT(*) FROM pr_development_controller_suspensions
+				 WHERE suspension_reservation_digest = ? OR resume_reservation_digest = ?)`,
 			reservation,
+			digest,
+			digest,
 			digest,
 			digest,
 			digest,
@@ -2066,8 +2070,12 @@ func requireFreshPRDevelopmentMutationReservation(
 			(SELECT COUNT(*) FROM pr_development_controller_recovery_intents
 			 WHERE previous_reservation_digest = ? OR replacement_reservation_digest = ?) +
 			(SELECT COUNT(*) FROM pr_development_controller_operation_intents
-			 WHERE mutation_reservation_digest = ? OR replacement_reservation_digest = ?)`,
+			 WHERE mutation_reservation_digest = ? OR replacement_reservation_digest = ?) +
+			(SELECT COUNT(*) FROM pr_development_controller_suspensions
+			 WHERE suspension_reservation_digest = ? OR resume_reservation_digest = ?)`,
 		reservation,
+		digest,
+		digest,
 		digest,
 		digest,
 		digest,
@@ -2331,6 +2339,11 @@ func validateStoredPRDevelopmentController(
 		if controller.CurrentAttemptID == "" || leased || !hasReservation {
 			return errors.New("stored recovery-required controller is invalid")
 		}
+	case PRDevelopmentControllerSuspensionPending,
+		PRDevelopmentControllerSuspended:
+		if !bound || controller.CurrentAttemptID == "" || leased || hasReservation {
+			return errors.New("stored suspended controller is invalid")
+		}
 	default:
 		return errors.New("stored controller phase is invalid")
 	}
@@ -2379,6 +2392,7 @@ func validatePRDevelopmentControllerAggregate(
 					return errors.New("stored initial controller reservation is invalid")
 				}
 				var recoveryMatches int
+				var resumedMatches int
 				digest := prDevelopmentMutationReservationDigest(
 					controller.MutationReservationKey,
 				)
@@ -2394,7 +2408,21 @@ func validatePRDevelopmentControllerAggregate(
 				).Scan(&recoveryMatches); queryErr != nil {
 					return queryErr
 				}
-				if recoveryMatches < 1 || recoveryMatches > 2 {
+				if queryErr := queryer.QueryRowContext(ctx, `
+					SELECT COUNT(*)
+					FROM pr_development_controller_suspensions
+					WHERE controller_id = ? AND status = 'resumed' AND
+						resume_reservation_digest = ? AND
+						final_resume_revision = ?`,
+					controller.ID,
+					digest,
+					controller.Revision,
+				).Scan(&resumedMatches); queryErr != nil {
+					return queryErr
+				}
+				validRecovery := recoveryMatches >= 1 && recoveryMatches <= 2
+				validResume := resumedMatches == 1
+				if validRecovery == validResume {
 					return errors.New("stored initial controller reservation has no recovery intent")
 				}
 			}
@@ -2471,6 +2499,7 @@ func validatePRDevelopmentControllerAggregate(
 			return errors.New("stored controller current attempt belongs to another session")
 		}
 		if controller.Phase != PRDevelopmentControllerReady &&
+			controller.Phase != PRDevelopmentControllerSuspended &&
 			controller.CurrentAttemptID != session.Attempts[len(session.Attempts)-1].ID {
 			return errors.New("stored active controller attempt is not owner-session latest")
 		}
@@ -2502,6 +2531,16 @@ func validatePRDevelopmentControllerAggregate(
 		controller,
 		session,
 		fences,
+		attemptOrdinals,
+	)
+	if err != nil {
+		return err
+	}
+	suspensionStats, err := validatePRDevelopmentControllerSuspensionChain(
+		ctx,
+		queryer,
+		controller,
+		session,
 		attemptOrdinals,
 	)
 	if err != nil {
@@ -2596,6 +2635,39 @@ func validatePRDevelopmentControllerAggregate(
 			previousReviewedAt = *fence.ReviewedAt
 		}
 		previousCreatedAt = fence.CreatedAt
+	}
+	if suspensionStats.active != nil {
+		if err := validatePRDevelopmentControllerSuspensionFenceHighWater(
+			controller,
+			fences,
+			previousControllerRevision,
+			previousLeaseEpoch,
+		); err != nil {
+			return err
+		}
+		return nil
+	}
+	var latestFence *PRDevelopmentAttemptReviewFence
+	if len(fences) != 0 {
+		fenceCopy := fences[len(fences)-1]
+		latestFence = &fenceCopy
+	}
+	if resumed, resumeErr := validatePRDevelopmentControllerResumedAuthority(
+		controller,
+		latestFence,
+		suspensionStats.latestResumed,
+	); resumeErr != nil {
+		return resumeErr
+	} else if resumed {
+		if err := validatePRDevelopmentControllerSuspensionFenceHighWater(
+			controller,
+			fences,
+			previousControllerRevision,
+			previousLeaseEpoch,
+		); err != nil {
+			return err
+		}
+		return nil
 	}
 	if len(fences) == 0 {
 		if controller.FencesDigest != emptyPRDevelopmentReviewFencesDigest() {

@@ -1291,9 +1291,9 @@ func TestStorePRDevelopmentRepairOrchestrationRecoveredCommitTerminalizesOldFenc
 	)
 	require.NoError(t, err)
 	require.True(t, changed)
-	assert.Equal(t, PRDevelopmentControllerMutation, transition.Controller.Phase)
-	assert.NotEmpty(t, transition.Controller.LeaseToken)
-	assert.NotEmpty(t, transition.Controller.MutationReservationKey)
+	assert.Equal(t, PRDevelopmentControllerSuspensionPending, transition.Controller.Phase)
+	assert.Empty(t, transition.Controller.LeaseToken)
+	assert.Empty(t, transition.Controller.MutationReservationKey)
 	assert.Equal(t, PRDevelopmentControllerOperationFinalized, transition.Operation.Status)
 	recovery, err := fixture.Operation.Store.GetPRDevelopmentRepairOrchestration(
 		ctx, run.AttemptID,
@@ -1378,8 +1378,9 @@ func TestStorePRDevelopmentRepairOrchestrationRecoveredLeaseTerminalizesEditedFe
 	)
 	require.NoError(t, err)
 	require.True(t, changed)
-	assert.Equal(t, PRDevelopmentControllerMutation, recoveredController.Phase)
-	assert.NotEmpty(t, recoveredController.LeaseToken)
+	assert.Equal(t, PRDevelopmentControllerSuspensionPending, recoveredController.Phase)
+	assert.Empty(t, recoveredController.LeaseToken)
+	assert.Empty(t, recoveredController.MutationReservationKey)
 	recovery, err := fixture.Operation.Store.GetPRDevelopmentRepairOrchestration(
 		ctx, run.AttemptID,
 	)

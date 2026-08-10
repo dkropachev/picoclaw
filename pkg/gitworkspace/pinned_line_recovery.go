@@ -10,20 +10,25 @@ import (
 // PinnedLineAdoptRecoveryRequest reconciles an expired mutation lease across
 // the exact before/after states of AdoptPinnedLine. Adopt authenticates the old
 // reservation. IntentID and the replacement reservation must be durable before
-// invocation.
+// invocation. RequireSuspensionCapacity preserves capacity for an immediately
+// following suspension and its later resume.
 type PinnedLineAdoptRecoveryRequest struct {
 	Adopt                     PinnedLineAdoptRequest `json:"-"`
 	IntentID                  string                 `json:"-"`
 	ReplacementReservationKey string                 `json:"-"`
+	RequireSuspensionCapacity bool                   `json:"-"`
 }
 
 // PinnedLineResumeRecoveryRequest reconciles an expired mutation lease across
 // the exact before/after states of ResumePinnedLine. Resume authenticates the
 // issued old reservation, which may not have reached Git inventory yet.
+// RequireSuspensionCapacity preserves capacity for an immediately following
+// suspension and its later resume.
 type PinnedLineResumeRecoveryRequest struct {
 	Resume                    PinnedLineResumeRequest `json:"-"`
 	IntentID                  string                  `json:"-"`
 	ReplacementReservationKey string                  `json:"-"`
+	RequireSuspensionCapacity bool                    `json:"-"`
 }
 
 // PinnedLineReservationRecoveryResult binds one recovered line to the stable
@@ -93,6 +98,17 @@ func (m *Manager) RecoverPinnedLineAdoptReservation(
 				repository,
 			); matchErr != nil {
 				return PinnedLineReservationRecoveryResult{}, matchErr
+			}
+			if request.RequireSuspensionCapacity {
+				if capacityErr := requirePinnedRecoverySuspensionCapacity(
+					state,
+					request.Adopt.WorkspaceID,
+					request.Adopt.LineID,
+					true,
+					true,
+				); capacityErr != nil {
+					return PinnedLineReservationRecoveryResult{}, capacityErr
+				}
 			}
 			return m.completePinnedLineAdoptRecoveryLocked(
 				ctx,
@@ -173,6 +189,17 @@ func (m *Manager) RecoverPinnedLineAdoptReservation(
 	}
 
 	if workspace.DevelopmentLineID == "" {
+		if request.RequireSuspensionCapacity {
+			if capacityErr := requirePinnedRecoverySuspensionCapacity(
+				state,
+				request.Adopt.WorkspaceID,
+				request.Adopt.LineID,
+				false,
+				true,
+			); capacityErr != nil {
+				return PinnedLineReservationRecoveryResult{}, capacityErr
+			}
+		}
 		now := m.now().UTC()
 		record, recordErr := appendPinnedLineRecoveryRotation(
 			state,
@@ -721,6 +748,7 @@ func pinnedLineAdoptRecoveryRotationRequest(
 		ReplacementReservationKey: request.ReplacementReservationKey,
 	}
 	if bound {
+		rotation.RequireSuspensionCapacity = request.RequireSuspensionCapacity
 		rotation.LineID = request.Adopt.LineID
 		rotation.ExpectedMutationEpoch = 1
 		rotation.ExpectedTip = request.Adopt.Pin.ExpectedCommit
@@ -737,6 +765,7 @@ func pinnedLineResumeRecoveryRotationRequest(
 		WorkspaceID:               request.Resume.WorkspaceID,
 		IntentID:                  request.IntentID,
 		ReplacementReservationKey: request.ReplacementReservationKey,
+		RequireSuspensionCapacity: request.RequireSuspensionCapacity,
 		LineID:                    request.Resume.LineID,
 		ExpectedVersion:           request.Resume.ExpectedVersion,
 		ExpectedMutationEpoch:     request.Resume.ExpectedEpoch + 1,
@@ -759,6 +788,17 @@ func appendPinnedLineRecoveryRotation(
 		)
 	}
 	rotations := state.PinnedReservationRotations[workspace.ID]
+	if request.RequireSuspensionCapacity {
+		if capacityErr := requirePinnedRecoverySuspensionCapacity(
+			state,
+			workspace.ID,
+			request.LineID,
+			false,
+			false,
+		); capacityErr != nil {
+			return pinnedReservationRotationRecord{}, capacityErr
+		}
+	}
 	if len(rotations) >= maxPinnedReservationRotations {
 		return pinnedReservationRotationRecord{}, fmt.Errorf(
 			"%w: reservation rotation history is full",

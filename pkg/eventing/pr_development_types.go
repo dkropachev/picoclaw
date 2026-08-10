@@ -19,6 +19,7 @@ const (
 	prDevelopmentControllerKeyPrefix      = "pdck_"
 	prDevelopmentRecoveryIntentIDPrefix   = "pdri_"
 	prDevelopmentOperationIDPrefix        = "pdop_"
+	prDevelopmentSuspensionIDPrefix       = "pdsi_"
 	prDevelopmentCommitIntentIDPrefix     = "pdcmt_"
 	prDevelopmentParkIntentIDPrefix       = "pdlnpark_"
 	prDevelopmentLedgerEntryIDPrefix      = "pdle_"
@@ -827,12 +828,14 @@ type PRDevelopmentRepairOrchestrationFail struct {
 type PRDevelopmentControllerPhase string
 
 const (
-	PRDevelopmentControllerIdle             PRDevelopmentControllerPhase = "idle"
-	PRDevelopmentControllerMutation         PRDevelopmentControllerPhase = "mutation"
-	PRDevelopmentControllerReviewPending    PRDevelopmentControllerPhase = "review_pending"
-	PRDevelopmentControllerReview           PRDevelopmentControllerPhase = "review"
-	PRDevelopmentControllerReady            PRDevelopmentControllerPhase = "ready"
-	PRDevelopmentControllerRecoveryRequired PRDevelopmentControllerPhase = "recovery_required"
+	PRDevelopmentControllerIdle              PRDevelopmentControllerPhase = "idle"
+	PRDevelopmentControllerMutation          PRDevelopmentControllerPhase = "mutation"
+	PRDevelopmentControllerReviewPending     PRDevelopmentControllerPhase = "review_pending"
+	PRDevelopmentControllerReview            PRDevelopmentControllerPhase = "review"
+	PRDevelopmentControllerReady             PRDevelopmentControllerPhase = "ready"
+	PRDevelopmentControllerRecoveryRequired  PRDevelopmentControllerPhase = "recovery_required"
+	PRDevelopmentControllerSuspensionPending PRDevelopmentControllerPhase = "suspension_pending"
+	PRDevelopmentControllerSuspended         PRDevelopmentControllerPhase = "suspended"
 )
 
 // PRDevelopmentControllerLeaseKind separates an exclusive filesystem
@@ -927,10 +930,11 @@ type PRDevelopmentControllerAcquire struct {
 // for review ownership, the exact pending immutable fence. MutationReservationKey
 // is populated only for a mutation lease.
 type PRDevelopmentControllerLease struct {
-	Controller  PRDevelopmentController          `json:"-"`
-	ReviewFence *PRDevelopmentAttemptReviewFence `json:"-"`
-	Created     bool                             `json:"-"`
-	Reclaimed   bool                             `json:"-"`
+	Controller      PRDevelopmentController                      `json:"-"`
+	ReviewFence     *PRDevelopmentAttemptReviewFence             `json:"-"`
+	SuspendedResume *PRDevelopmentControllerSuspendedResumeLease `json:"-"`
+	Created         bool                                         `json:"-"`
+	Reclaimed       bool                                         `json:"-"`
 }
 
 // PRDevelopmentControllerRenew extends only the exact live lease epoch/token.
@@ -1132,8 +1136,9 @@ type PRDevelopmentControllerRecoveryRotationResult struct {
 }
 
 // PRDevelopmentControllerRecoveryFinalize consumes the exact live recovery
-// claim and matching reservation-rotation result, then grants a fresh
-// mutation lease under the replacement bearer.
+// claim and matching reservation-rotation result. Legacy unbound recovery
+// grants a fresh mutation lease; bound recovery transfers that fresh authority
+// into the durable suspension lifecycle before returning.
 type PRDevelopmentControllerRecoveryFinalize struct {
 	ControllerID     string                                        `json:"-"`
 	AttemptID        string                                        `json:"-"`
@@ -1144,6 +1149,201 @@ type PRDevelopmentControllerRecoveryFinalize struct {
 	ClaimEpoch       int64                                         `json:"-"`
 	Rotation         PRDevelopmentControllerRecoveryRotationResult `json:"-"`
 	Lease            time.Duration                                 `json:"-"`
+}
+
+// PRDevelopmentControllerSuspensionSourceKind identifies the already-final
+// recovery record that caused a retained, bound line to relinquish mutation
+// authority. Legacy unbound controller recovery can never form this source.
+type PRDevelopmentControllerSuspensionSourceKind string
+
+const (
+	PRDevelopmentControllerSuspensionSourceControllerRecovery      PRDevelopmentControllerSuspensionSourceKind = "controller_recovery"
+	PRDevelopmentControllerSuspensionSourceOperationRecovery       PRDevelopmentControllerSuspensionSourceKind = "operation_recovery"
+	PRDevelopmentControllerSuspensionSourceSuspendedResumeRecovery PRDevelopmentControllerSuspensionSourceKind = "suspended_resume_recovery"
+)
+
+// PRDevelopmentControllerSuspensionMode selects the deterministic Git
+// reconciliation needed before a retained line becomes reservation-free.
+type PRDevelopmentControllerSuspensionMode string
+
+const (
+	PRDevelopmentControllerSuspensionCandidate      PRDevelopmentControllerSuspensionMode = "candidate"
+	PRDevelopmentControllerSuspensionCommitRecovery PRDevelopmentControllerSuspensionMode = "commit_recovery"
+)
+
+// PRDevelopmentControllerSuspensionStatus is one append-only suspension and
+// later explicit-resume lifecycle. A suspended row remains active until its
+// exact retained candidate has been resumed under a fresh reservation.
+type PRDevelopmentControllerSuspensionStatus string
+
+const (
+	PRDevelopmentControllerSuspensionStatusSuspendPending PRDevelopmentControllerSuspensionStatus = "suspend_pending"
+	PRDevelopmentControllerSuspensionStatusSuspendClaimed PRDevelopmentControllerSuspensionStatus = "suspend_claimed"
+	PRDevelopmentControllerSuspensionStatusSuspended      PRDevelopmentControllerSuspensionStatus = "suspended"
+	PRDevelopmentControllerSuspensionStatusResumePending  PRDevelopmentControllerSuspensionStatus = "resume_pending"
+	PRDevelopmentControllerSuspensionStatusResumeClaimed  PRDevelopmentControllerSuspensionStatus = "resume_claimed"
+	PRDevelopmentControllerSuspensionStatusResumed        PRDevelopmentControllerSuspensionStatus = "resumed"
+)
+
+// PRDevelopmentControllerSuspensionRequest is the exact private input to
+// SuspendPinnedLine or, for commit recovery, SuspendPinnedLineCommitRecovery.
+type PRDevelopmentControllerSuspensionRequest struct {
+	Repository            string    `json:"-"`
+	SourceRef             string    `json:"-"`
+	SourceCommit          string    `json:"-"`
+	ReservationKey        string    `json:"-"`
+	AgentID               string    `json:"-"`
+	WorkspaceID           string    `json:"-"`
+	LineID                string    `json:"-"`
+	IntentID              string    `json:"-"`
+	ExpectedVersion       int64     `json:"-"`
+	ExpectedMutationEpoch int64     `json:"-"`
+	ExpectedTip           string    `json:"-"`
+	ExpectedTree          string    `json:"-"`
+	CommitIntentID        string    `json:"-"`
+	CommitExpectedParent  string    `json:"-"`
+	CommitExpectedTree    string    `json:"-"`
+	CommitCandidateDigest string    `json:"-"`
+	CommitMessage         string    `json:"-"`
+	CommitAuthoredAt      time.Time `json:"-"`
+}
+
+// PRDevelopmentControllerSuspensionResult is content-addressed evidence from
+// Git after the retained candidate has become reservation-free.
+type PRDevelopmentControllerSuspensionResult struct {
+	WorkspaceID           string `json:"-"`
+	Version               int64  `json:"-"`
+	MutationEpoch         int64  `json:"-"`
+	Tip                   string `json:"-"`
+	Tree                  string `json:"-"`
+	CandidateTree         string `json:"-"`
+	CandidateDigest       string `json:"-"`
+	ChangedFileCount      int    `json:"-"`
+	SuspensionHash        string `json:"-"`
+	PreparedCommit        string `json:"-"`
+	PreparedTree          string `json:"-"`
+	PreparedCommitApplied bool   `json:"-"`
+	AlreadySuspended      bool   `json:"-"`
+}
+
+// PRDevelopmentControllerSuspendedResumeRequest is the exact private input
+// that restores one suspended candidate under a globally fresh reservation.
+type PRDevelopmentControllerSuspendedResumeRequest struct {
+	Repository            string `json:"-"`
+	SourceRef             string `json:"-"`
+	SourceCommit          string `json:"-"`
+	ReservationKey        string `json:"-"`
+	AgentID               string `json:"-"`
+	WorkspaceID           string `json:"-"`
+	LineID                string `json:"-"`
+	IntentID              string `json:"-"`
+	ExpectedVersion       int64  `json:"-"`
+	ExpectedMutationEpoch int64  `json:"-"`
+	ExpectedTip           string `json:"-"`
+	ExpectedTree          string `json:"-"`
+	SuspensionHash        string `json:"-"`
+	CandidateTree         string `json:"-"`
+	CandidateDigest       string `json:"-"`
+	ChangedFileCount      int    `json:"-"`
+}
+
+// PRDevelopmentControllerSuspendedResumeResult binds restored mutation
+// ownership to both the immutable suspension and fresh reservation rotation.
+type PRDevelopmentControllerSuspendedResumeResult struct {
+	WorkspaceID      string `json:"-"`
+	Version          int64  `json:"-"`
+	MutationEpoch    int64  `json:"-"`
+	Tip              string `json:"-"`
+	Tree             string `json:"-"`
+	CandidateTree    string `json:"-"`
+	CandidateDigest  string `json:"-"`
+	ChangedFileCount int    `json:"-"`
+	SuspensionHash   string `json:"-"`
+	RotationHash     string `json:"-"`
+	AlreadyResumed   bool   `json:"-"`
+}
+
+// PRDevelopmentControllerSuspension is private append-only evidence for one
+// recovery-triggered suspension and a possible later explicit resume. Raw
+// reservation and claim bearers exist only in their unfinished states.
+type PRDevelopmentControllerSuspension struct {
+	ID                          string                                        `json:"-"`
+	ControllerID                string                                        `json:"-"`
+	ThreadID                    string                                        `json:"-"`
+	OwnerSessionID              string                                        `json:"-"`
+	AttemptID                   string                                        `json:"-"`
+	Ordinal                     int                                           `json:"-"`
+	SourceKind                  PRDevelopmentControllerSuspensionSourceKind   `json:"-"`
+	SourceRecoveryID            string                                        `json:"-"`
+	SourceOperationID           string                                        `json:"-"`
+	SourceOperationKind         PRDevelopmentControllerOperationKind          `json:"-"`
+	SourceFinalRevision         int64                                         `json:"-"`
+	SourceFinalHash             string                                        `json:"-"`
+	Mode                        PRDevelopmentControllerSuspensionMode         `json:"-"`
+	Status                      PRDevelopmentControllerSuspensionStatus       `json:"-"`
+	AgentID                     string                                        `json:"-"`
+	WorkspaceID                 string                                        `json:"-"`
+	LineID                      string                                        `json:"-"`
+	SourceCloneURL              string                                        `json:"-"`
+	SourceRef                   string                                        `json:"-"`
+	SourceCommit                string                                        `json:"-"`
+	SourceTree                  string                                        `json:"-"`
+	LineVersion                 int64                                         `json:"-"`
+	MutationEpoch               int64                                         `json:"-"`
+	TipCommit                   string                                        `json:"-"`
+	Tree                        string                                        `json:"-"`
+	SuspensionReservationKey    string                                        `json:"-"`
+	SuspensionReservationDigest string                                        `json:"-"`
+	MutationLeaseEpoch          int64                                         `json:"-"`
+	MutationLeaseTokenDigest    string                                        `json:"-"`
+	SuspendIntentID             string                                        `json:"-"`
+	SuspendRequest              PRDevelopmentControllerSuspensionRequest      `json:"-"`
+	SuspendRequestJSON          []byte                                        `json:"-"`
+	SuspendRequestHash          string                                        `json:"-"`
+	PreviousHash                string                                        `json:"-"`
+	IntentHash                  string                                        `json:"-"`
+	SuspendClaimID              string                                        `json:"-"`
+	SuspendClaimOwner           string                                        `json:"-"`
+	SuspendClaimToken           string                                        `json:"-"`
+	SuspendClaimUntil           *time.Time                                    `json:"-"`
+	SuspendClaimEpoch           int64                                         `json:"-"`
+	SuspendClaims               int                                           `json:"-"`
+	SuspendClaimedAt            *time.Time                                    `json:"-"`
+	SuspendClaimTokenDigest     string                                        `json:"-"`
+	SuspendResult               PRDevelopmentControllerSuspensionResult       `json:"-"`
+	SuspendResultJSON           []byte                                        `json:"-"`
+	SuspendResultHash           string                                        `json:"-"`
+	FinalSuspensionRevision     int64                                         `json:"-"`
+	SuspensionFinalHash         string                                        `json:"-"`
+	SuspendedAt                 *time.Time                                    `json:"-"`
+	ResumeAttemptID             string                                        `json:"-"`
+	ResumeIntentID              string                                        `json:"-"`
+	ResumeReservationKey        string                                        `json:"-"`
+	ResumeReservationDigest     string                                        `json:"-"`
+	ResumeRequest               PRDevelopmentControllerSuspendedResumeRequest `json:"-"`
+	ResumeRequestJSON           []byte                                        `json:"-"`
+	ResumeRequestHash           string                                        `json:"-"`
+	ResumeIntentHash            string                                        `json:"-"`
+	ResumePreparedAt            *time.Time                                    `json:"-"`
+	ResumeClaimID               string                                        `json:"-"`
+	ResumeClaimOwner            string                                        `json:"-"`
+	ResumeClaimToken            string                                        `json:"-"`
+	ResumeClaimUntil            *time.Time                                    `json:"-"`
+	ResumeClaimEpoch            int64                                         `json:"-"`
+	ResumeClaims                int                                           `json:"-"`
+	ResumeClaimedAt             *time.Time                                    `json:"-"`
+	ResumeClaimTokenDigest      string                                        `json:"-"`
+	ResumeResult                PRDevelopmentControllerSuspendedResumeResult  `json:"-"`
+	ResumeResultJSON            []byte                                        `json:"-"`
+	ResumeResultHash            string                                        `json:"-"`
+	NewMutationLeaseEpoch       int64                                         `json:"-"`
+	NewMutationLeaseTokenDigest string                                        `json:"-"`
+	NewMutationLeaseUntil       *time.Time                                    `json:"-"`
+	FinalResumeRevision         int64                                         `json:"-"`
+	ResumeFinalHash             string                                        `json:"-"`
+	ResumedAt                   *time.Time                                    `json:"-"`
+	CreatedAt                   time.Time                                     `json:"-"`
+	UpdatedAt                   time.Time                                     `json:"-"`
 }
 
 // PRDevelopmentControllerOperationKind identifies the exact local Git effect
@@ -1375,8 +1575,8 @@ type PRDevelopmentControllerOperationRecoveryRenew struct {
 
 // PRDevelopmentControllerOperationRecoveryFinalize consumes the exact live
 // claim after reconciling the Git effect. Adopt, Resume, and Commit supply the
-// durable reservation-rotation result and receive a fresh mutation lease;
-// Park supplies a zero rotation and ends in review_pending without a bearer.
+// durable reservation-rotation result and transfer the fresh authority into
+// suspension; Park supplies a zero rotation and enters review_pending.
 type PRDevelopmentControllerOperationRecoveryFinalize struct {
 	ControllerID     string                                        `json:"-"`
 	AttemptID        string                                        `json:"-"`
