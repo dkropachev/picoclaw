@@ -20,6 +20,8 @@ const (
 	defaultControllerRecoveryWorkerLabel = "gateway-pr-development-recovery"
 	controllerRecoveryStageBatch         = 32
 	controllerRecoveryClaimIDPrefix      = "pdrc_"
+	controllerSuspensionClaimIDPrefix    = "pdsc_"
+	controllerSuspensionChangedFilesMax  = 10_000
 )
 
 // ControllerRecoveryWorkspaceFactory resolves the Git manager owned by the
@@ -41,6 +43,7 @@ type ControllerRecoveryWorkerConfig struct {
 
 type controllerRecoveryStore interface {
 	eventing.PRDevelopmentControllerRecoveryScanner
+	eventing.PRDevelopmentControllerSuspensionExecutionStore
 	ClaimPRDevelopmentControllerRecovery(
 		ctx context.Context,
 		input eventing.PRDevelopmentControllerRecoveryClaim,
@@ -71,6 +74,14 @@ type controllerRecoveryStore interface {
 // to reconcile an expired controller operation. In particular, it cannot
 // acquire or release a generic workspace and has no remote operation.
 type controllerRecoveryGit interface {
+	SuspendPinnedLine(
+		ctx context.Context,
+		request gitworkspace.PinnedLineSuspendRequest,
+	) (gitworkspace.PinnedLineSuspendResult, error)
+	SuspendPinnedLineCommitRecovery(
+		ctx context.Context,
+		request gitworkspace.PinnedLineCommitSuspensionRequest,
+	) (gitworkspace.PinnedLineSuspendResult, error)
 	RotatePinnedReservation(
 		ctx context.Context,
 		request gitworkspace.PinnedReservationRotationRequest,
@@ -110,9 +121,10 @@ type controllerRecoveryWorkerDependencies struct {
 	heartbeatInterval func(time.Duration) time.Duration
 }
 
-// ControllerRecoveryWorker reconciles at most one oldest exact recovery per
-// call. Every non-Park effect is finalized into suspension_pending; Park moves
-// directly to the existing reservation-free review handoff.
+// ControllerRecoveryWorker reconciles at most one durable suspension or exact
+// recovery per call. Every non-Park recovery is finalized into
+// suspension_pending; Park moves directly to the existing reservation-free
+// review handoff.
 type ControllerRecoveryWorker struct {
 	controllerRecoveryWorkerDependencies
 }
@@ -189,10 +201,11 @@ func newControllerRecoveryWorkerWithDependencies(
 	}, nil
 }
 
-// ProcessOne stages a bounded prefix of expired mutation leases and processes
-// at most one exact oldest claimable recovery. A claimed recovery is never
-// released on failure: its idempotent Git effect remains reclaimable after the
-// scheduling lease expires.
+// ProcessOne processes an already-durable suspension before it can stage or
+// claim another recovery. If staging atomically creates a suspension handoff,
+// the second suspension scan consumes that handoff before any other recovery.
+// A claim is never released on failure: its idempotent Git effect remains
+// reclaimable after the scheduling lease expires.
 func (worker *ControllerRecoveryWorker) ProcessOne(ctx context.Context) (bool, error) {
 	if worker == nil || worker.store == nil || isNilServiceValue(worker.store) ||
 		worker.workspaces == nil {
@@ -208,11 +221,19 @@ func (worker *ControllerRecoveryWorker) ProcessOne(ctx context.Context) (bool, e
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	processed, found, err := worker.processNextSuspension(ctx)
+	if found || err != nil {
+		return processed, err
+	}
 	if _, err := worker.store.StageExpiredPRDevelopmentControllerRecoveries(
 		ctx,
 		controllerRecoveryStageBatch,
 	); err != nil {
 		return false, fmt.Errorf("stage expired controller recoveries: %w", err)
+	}
+	processed, found, err = worker.processNextSuspension(ctx)
+	if found || err != nil {
+		return processed, err
 	}
 	candidate, found, err := worker.store.NextPRDevelopmentControllerRecovery(ctx)
 	if err != nil {
@@ -283,6 +304,47 @@ func (worker *ControllerRecoveryWorker) ProcessOne(ctx context.Context) (bool, e
 	}
 }
 
+func (worker *ControllerRecoveryWorker) processNextSuspension(
+	ctx context.Context,
+) (processed, found bool, err error) {
+	candidate, found, err := worker.store.NextPRDevelopmentControllerSuspension(ctx)
+	if err != nil {
+		return false, false, fmt.Errorf("scan controller suspensions: %w", err)
+	}
+	if !found {
+		return false, false, nil
+	}
+	if err = validateControllerSuspensionCandidate(candidate); err != nil {
+		return false, true, err
+	}
+	claimID := controllerSuspensionClaimID(worker.workerLabel, candidate)
+	lease, _, err := worker.store.ClaimPRDevelopmentControllerSuspension(
+		ctx,
+		eventing.PRDevelopmentControllerSuspensionClaim{
+			CaseID:           candidate.CaseID,
+			SuspensionID:     candidate.SuspensionID,
+			ControllerID:     candidate.ControllerID,
+			AttemptID:        candidate.AttemptID,
+			ExpectedRevision: candidate.ExpectedRevision,
+			ClaimID:          claimID,
+			WorkerLabel:      worker.workerLabel,
+			Lease:            worker.lease,
+		},
+	)
+	if err != nil {
+		return false, true, fmt.Errorf("claim controller suspension: %w", err)
+	}
+	if err = validateControllerSuspensionLease(
+		candidate,
+		claimID,
+		worker.workerLabel,
+		lease,
+	); err != nil {
+		return true, true, err
+	}
+	return true, true, worker.processSuspension(ctx, lease)
+}
+
 type controllerRecoveryExecute func(
 	context.Context,
 	controllerRecoveryGit,
@@ -316,6 +378,15 @@ func (worker *ControllerRecoveryWorker) processClaim(
 			heartbeat.Stop(),
 		)
 	}
+	// Refresh the exact scheduling claim after the potentially long Git effect.
+	// Finalization then starts with a full lease window; the terminal barrier
+	// below still drains any ticker renewal that was already in flight.
+	if renewErr := renew(workCtx, worker.lease); renewErr != nil {
+		return errors.Join(
+			fmt.Errorf("renew controller recovery claim before finalization: %w", renewErr),
+			heartbeat.Stop(),
+		)
+	}
 
 	// Fence renewals before the atomic store transition. The work context stays
 	// usable, while an overtaken stale-renewal error is suppressed.
@@ -327,6 +398,191 @@ func (worker *ControllerRecoveryWorker) processClaim(
 	}
 	finalizeErr := finalize(ctx)
 	return errors.Join(finalizeErr, heartbeat.Stop())
+}
+
+func (worker *ControllerRecoveryWorker) processSuspension(
+	ctx context.Context,
+	lease eventing.PRDevelopmentControllerSuspensionLease,
+) error {
+	suspension := lease.Suspension
+	return worker.processClaim(
+		ctx,
+		func(renewCtx context.Context, duration time.Duration) error {
+			return worker.store.RenewPRDevelopmentControllerSuspension(
+				renewCtx,
+				eventing.PRDevelopmentControllerSuspensionRenew{
+					SuspensionID: suspension.ID,
+					ControllerID: suspension.ControllerID,
+					AttemptID:    suspension.AttemptID,
+					ClaimID:      suspension.SuspendClaimID,
+					ClaimToken:   suspension.SuspendClaimToken,
+					ClaimEpoch:   suspension.SuspendClaimEpoch,
+					Lease:        duration,
+				},
+			)
+		},
+		func(
+			effectCtx context.Context,
+			workspace controllerRecoveryGit,
+		) (func(context.Context) error, error) {
+			result, effectErr := executeControllerSuspension(
+				effectCtx,
+				workspace,
+				suspension,
+			)
+			if effectErr != nil {
+				return nil, effectErr
+			}
+			return func(finalizeCtx context.Context) error {
+				transition, _, finalizeErr := worker.store.FinalizePRDevelopmentControllerSuspension(
+					finalizeCtx,
+					eventing.PRDevelopmentControllerSuspensionFinalize{
+						SuspensionID:     suspension.ID,
+						ControllerID:     suspension.ControllerID,
+						AttemptID:        suspension.AttemptID,
+						ExpectedRevision: lease.Controller.Revision,
+						ClaimID:          suspension.SuspendClaimID,
+						ClaimToken:       suspension.SuspendClaimToken,
+						ClaimEpoch:       suspension.SuspendClaimEpoch,
+						Result:           result,
+					},
+				)
+				if finalizeErr != nil {
+					return fmt.Errorf("finalize controller suspension: %w", finalizeErr)
+				}
+				return validateControllerSuspendedTransition(
+					transition,
+					suspension,
+					result,
+				)
+			}, nil
+		},
+	)
+}
+
+func executeControllerSuspension(
+	ctx context.Context,
+	workspace controllerRecoveryGit,
+	suspension eventing.PRDevelopmentControllerSuspension,
+) (eventing.PRDevelopmentControllerSuspensionResult, error) {
+	request := suspension.SuspendRequest
+	pin := gitworkspace.PinnedAcquireRequest{
+		Repository:     request.Repository,
+		SourceRef:      request.SourceRef,
+		ExpectedCommit: request.SourceCommit,
+		ReservationKey: request.ReservationKey,
+		AgentID:        request.AgentID,
+	}
+	suspendRequest := gitworkspace.PinnedLineSuspendRequest{
+		Pin:                   pin,
+		WorkspaceID:           request.WorkspaceID,
+		LineID:                request.LineID,
+		IntentID:              request.IntentID,
+		ExpectedVersion:       request.ExpectedVersion,
+		ExpectedMutationEpoch: request.ExpectedMutationEpoch,
+		ExpectedTip:           request.ExpectedTip,
+		ExpectedTree:          request.ExpectedTree,
+	}
+	var (
+		suspended gitworkspace.PinnedLineSuspendResult
+		err       error
+	)
+	switch suspension.Mode {
+	case eventing.PRDevelopmentControllerSuspensionCandidate:
+		suspended, err = workspace.SuspendPinnedLine(ctx, suspendRequest)
+	case eventing.PRDevelopmentControllerSuspensionCommitRecovery:
+		suspended, err = workspace.SuspendPinnedLineCommitRecovery(
+			ctx,
+			gitworkspace.PinnedLineCommitSuspensionRequest{
+				Suspend: suspendRequest,
+				Commit: gitworkspace.PinnedCommitRequest{
+					Pin:                     pin,
+					WorkspaceID:             request.WorkspaceID,
+					IntentID:                request.CommitIntentID,
+					ExpectedParent:          request.CommitExpectedParent,
+					ExpectedTree:            request.CommitExpectedTree,
+					ExpectedCandidateDigest: request.CommitCandidateDigest,
+					Message:                 request.CommitMessage,
+					AuthoredAt:              request.CommitAuthoredAt,
+				},
+			},
+		)
+	default:
+		return eventing.PRDevelopmentControllerSuspensionResult{}, fmt.Errorf(
+			"%w: unknown controller suspension mode",
+			ErrUnavailable,
+		)
+	}
+	if err != nil {
+		return eventing.PRDevelopmentControllerSuspensionResult{}, fmt.Errorf(
+			"suspend recovered controller line: %w",
+			err,
+		)
+	}
+	return mapControllerSuspensionResult(suspension, suspended)
+}
+
+func mapControllerSuspensionResult(
+	suspension eventing.PRDevelopmentControllerSuspension,
+	result gitworkspace.PinnedLineSuspendResult,
+) (eventing.PRDevelopmentControllerSuspensionResult, error) {
+	request := suspension.SuspendRequest
+	if result.WorkspaceID != request.WorkspaceID ||
+		result.Version != request.ExpectedVersion ||
+		result.MutationEpoch != request.ExpectedMutationEpoch ||
+		result.Tip != request.ExpectedTip || result.Tree != request.ExpectedTree ||
+		!sameControllerObjectIDWidth(request.SourceCommit, result.CandidateTree) ||
+		!validControllerSHA256(result.CandidateDigest) ||
+		result.ChangedFileCount < 0 ||
+		result.ChangedFileCount > controllerSuspensionChangedFilesMax ||
+		!validControllerSHA256(result.SuspensionHash) {
+		return eventing.PRDevelopmentControllerSuspensionResult{}, errors.New(
+			"controller suspension returned changed line evidence",
+		)
+	}
+	switch suspension.Mode {
+	case eventing.PRDevelopmentControllerSuspensionCandidate:
+		if result.PreparedCommit != "" || result.PreparedTree != "" ||
+			result.PreparedCommitApplied {
+			return eventing.PRDevelopmentControllerSuspensionResult{}, errors.New(
+				"candidate suspension returned prepared Commit evidence",
+			)
+		}
+	case eventing.PRDevelopmentControllerSuspensionCommitRecovery:
+		if !sameControllerObjectIDWidth(
+			request.SourceCommit,
+			result.PreparedCommit,
+			result.PreparedTree,
+		) || result.PreparedCommit == request.CommitExpectedParent ||
+			result.PreparedTree != request.CommitExpectedTree ||
+			(!result.PreparedCommitApplied &&
+				(result.CandidateTree != request.CommitExpectedTree ||
+					result.CandidateDigest != request.CommitCandidateDigest)) {
+			return eventing.PRDevelopmentControllerSuspensionResult{}, errors.New(
+				"Commit recovery suspension returned changed prepared evidence",
+			)
+		}
+	default:
+		return eventing.PRDevelopmentControllerSuspensionResult{}, fmt.Errorf(
+			"%w: unknown controller suspension mode",
+			ErrUnavailable,
+		)
+	}
+	return eventing.PRDevelopmentControllerSuspensionResult{
+		WorkspaceID:           result.WorkspaceID,
+		Version:               result.Version,
+		MutationEpoch:         result.MutationEpoch,
+		Tip:                   result.Tip,
+		Tree:                  result.Tree,
+		CandidateTree:         result.CandidateTree,
+		CandidateDigest:       result.CandidateDigest,
+		ChangedFileCount:      result.ChangedFileCount,
+		SuspensionHash:        result.SuspensionHash,
+		PreparedCommit:        result.PreparedCommit,
+		PreparedTree:          result.PreparedTree,
+		PreparedCommitApplied: result.PreparedCommitApplied,
+		AlreadySuspended:      result.AlreadySuspended,
+	}, nil
 }
 
 func (worker *ControllerRecoveryWorker) processReservationRecovery(
@@ -923,6 +1179,284 @@ func validateRecoveredControllerParkSnapshot(
 	return nil
 }
 
+func validateControllerSuspensionCandidate(
+	candidate eventing.PRDevelopmentControllerSuspensionWorkCandidate,
+) error {
+	if candidate.CaseID == "" || candidate.CaseID != strings.TrimSpace(candidate.CaseID) ||
+		candidate.SuspensionID == "" ||
+		candidate.SuspensionID != strings.TrimSpace(candidate.SuspensionID) ||
+		candidate.ControllerID == "" ||
+		candidate.ControllerID != strings.TrimSpace(candidate.ControllerID) ||
+		candidate.AttemptID == "" || candidate.AttemptID != strings.TrimSpace(candidate.AttemptID) ||
+		candidate.ExpectedRevision < 2 {
+		return fmt.Errorf("%w: controller suspension candidate is incomplete", ErrUnavailable)
+	}
+	switch candidate.SourceKind {
+	case eventing.PRDevelopmentControllerSuspensionSourceControllerRecovery,
+		eventing.PRDevelopmentControllerSuspensionSourceSuspendedResumeRecovery:
+		if candidate.Mode != eventing.PRDevelopmentControllerSuspensionCandidate {
+			return fmt.Errorf("%w: controller suspension candidate mode is invalid", ErrUnavailable)
+		}
+	case eventing.PRDevelopmentControllerSuspensionSourceOperationRecovery:
+		if candidate.Mode != eventing.PRDevelopmentControllerSuspensionCandidate &&
+			candidate.Mode != eventing.PRDevelopmentControllerSuspensionCommitRecovery {
+			return fmt.Errorf("%w: operation suspension candidate mode is invalid", ErrUnavailable)
+		}
+	default:
+		return fmt.Errorf("%w: controller suspension source is invalid", ErrUnavailable)
+	}
+	return nil
+}
+
+func validateControllerSuspensionLease(
+	candidate eventing.PRDevelopmentControllerSuspensionWorkCandidate,
+	claimID, workerLabel string,
+	lease eventing.PRDevelopmentControllerSuspensionLease,
+) error {
+	controller, suspension := lease.Controller, lease.Suspension
+	request := suspension.SuspendRequest
+	if controller.ID != candidate.ControllerID ||
+		controller.CurrentAttemptID != candidate.AttemptID ||
+		controller.Revision != candidate.ExpectedRevision ||
+		controller.Phase != eventing.PRDevelopmentControllerSuspensionPending ||
+		controller.LeaseKind != "" || controller.LeaseOwner != "" ||
+		controller.LeaseToken != "" || controller.LeaseUntil != nil ||
+		controller.MutationReservationKey != "" ||
+		suspension.ID != candidate.SuspensionID ||
+		suspension.ControllerID != candidate.ControllerID ||
+		suspension.AttemptID != candidate.AttemptID ||
+		suspension.SourceKind != candidate.SourceKind || suspension.Mode != candidate.Mode ||
+		suspension.SourceFinalRevision+1 != candidate.ExpectedRevision ||
+		suspension.Status != eventing.PRDevelopmentControllerSuspensionStatusSuspendClaimed ||
+		suspension.SuspendClaimID != claimID ||
+		suspension.SuspendClaimOwner != workerLabel ||
+		suspension.SuspendClaimToken == "" || suspension.SuspendClaimUntil == nil ||
+		suspension.SuspendClaimedAt == nil || suspension.SuspendClaimEpoch < 1 ||
+		suspension.SuspendClaims < 1 || int64(suspension.SuspendClaims) != suspension.SuspendClaimEpoch ||
+		suspension.SuspendClaimTokenDigest != "" ||
+		suspension.SuspensionReservationKey == "" ||
+		request.ReservationKey != suspension.SuspensionReservationKey ||
+		suspension.SuspendIntentID != suspension.ID || request.IntentID != suspension.ID {
+		return errors.New("controller suspension claim returned changed authority")
+	}
+	if controller.ThreadID != suspension.ThreadID ||
+		controller.OwnerSessionID != suspension.OwnerSessionID ||
+		controller.AgentID != suspension.AgentID ||
+		controller.WorkspaceID != suspension.WorkspaceID || controller.LineID != suspension.LineID ||
+		controller.SourceCloneURL != suspension.SourceCloneURL ||
+		controller.SourceRef != suspension.SourceRef ||
+		controller.SourceCommit != suspension.SourceCommit ||
+		controller.SourceTree != suspension.SourceTree ||
+		controller.LineVersion != suspension.LineVersion ||
+		controller.MutationEpoch != suspension.MutationEpoch ||
+		controller.TipCommit != suspension.TipCommit || controller.Tree != suspension.Tree {
+		return errors.New("controller suspension claim changed its retained line fence")
+	}
+	if request.Repository != suspension.SourceCloneURL ||
+		request.SourceRef != suspension.SourceRef || request.SourceCommit != suspension.SourceCommit ||
+		request.AgentID != suspension.AgentID || request.WorkspaceID != suspension.WorkspaceID ||
+		request.LineID != suspension.LineID ||
+		request.ExpectedVersion != suspension.LineVersion ||
+		request.ExpectedMutationEpoch != suspension.MutationEpoch ||
+		request.ExpectedTip != suspension.TipCommit || request.ExpectedTree != suspension.Tree ||
+		suspension.MutationEpoch != suspension.LineVersion+1 ||
+		!sameControllerObjectIDWidth(
+			suspension.SourceCommit,
+			suspension.SourceTree,
+			suspension.TipCommit,
+			suspension.Tree,
+		) {
+		return errors.New("controller suspension request changed its durable line fence")
+	}
+	if strings.Contains(
+		string(suspension.SuspendRequestJSON),
+		suspension.SuspensionReservationKey,
+	) {
+		return errors.New("controller suspension request blob contains a raw reservation bearer")
+	}
+	if err := validateControllerSuspensionSource(suspension); err != nil {
+		return err
+	}
+	if suspension.Mode == eventing.PRDevelopmentControllerSuspensionCandidate {
+		if request.CommitIntentID != "" || request.CommitExpectedParent != "" ||
+			request.CommitExpectedTree != "" || request.CommitCandidateDigest != "" ||
+			request.CommitMessage != "" || !request.CommitAuthoredAt.IsZero() {
+			return errors.New("candidate suspension claim contains Commit authority")
+		}
+	} else if request.CommitIntentID == "" ||
+		request.CommitExpectedParent != suspension.TipCommit ||
+		!sameControllerObjectIDWidth(
+			suspension.SourceCommit,
+			request.CommitExpectedParent,
+			request.CommitExpectedTree,
+		) || request.CommitExpectedTree == suspension.Tree ||
+		!validControllerSHA256(request.CommitCandidateDigest) ||
+		request.CommitMessage == "" || request.CommitAuthoredAt.IsZero() {
+		return errors.New("Commit recovery suspension claim changed its prepared request")
+	}
+	if suspension.FinalSuspensionRevision != 0 || suspension.SuspendedAt != nil ||
+		suspension.SuspensionFinalHash != "" || suspension.SuspendResultHash != "" ||
+		len(suspension.SuspendResultJSON) != 0 ||
+		suspension.SuspendResult != (eventing.PRDevelopmentControllerSuspensionResult{}) ||
+		controllerSuspensionHasResumeEvidence(suspension) {
+		return errors.New("controller suspension claim contains premature terminal authority")
+	}
+	return nil
+}
+
+func validateControllerSuspensionSource(
+	suspension eventing.PRDevelopmentControllerSuspension,
+) error {
+	switch suspension.SourceKind {
+	case eventing.PRDevelopmentControllerSuspensionSourceControllerRecovery:
+		if suspension.SourceRecoveryID == "" || suspension.SourceOperationID != "" ||
+			suspension.SourceOperationKind != "" ||
+			suspension.Mode != eventing.PRDevelopmentControllerSuspensionCandidate {
+			return errors.New("controller recovery suspension claim has a changed source")
+		}
+	case eventing.PRDevelopmentControllerSuspensionSourceOperationRecovery:
+		if suspension.SourceRecoveryID == "" || suspension.SourceOperationID == "" {
+			return errors.New("operation recovery suspension claim has an incomplete source")
+		}
+		switch suspension.SourceOperationKind {
+		case eventing.PRDevelopmentControllerOperationAdopt,
+			eventing.PRDevelopmentControllerOperationResume:
+			if suspension.Mode != eventing.PRDevelopmentControllerSuspensionCandidate {
+				return errors.New("line recovery suspension claim has a changed mode")
+			}
+		case eventing.PRDevelopmentControllerOperationCommit:
+			if suspension.Mode != eventing.PRDevelopmentControllerSuspensionCommitRecovery {
+				return errors.New("Commit recovery suspension claim has a changed mode")
+			}
+		default:
+			return errors.New("operation recovery suspension claim has an invalid source kind")
+		}
+	case eventing.PRDevelopmentControllerSuspensionSourceSuspendedResumeRecovery:
+		if suspension.SourceRecoveryID == "" || suspension.SourceOperationID != "" ||
+			suspension.SourceOperationKind != "" ||
+			suspension.Mode != eventing.PRDevelopmentControllerSuspensionCandidate {
+			return errors.New("suspended-resume recovery suspension claim has a changed source")
+		}
+	default:
+		return errors.New("controller suspension claim has an invalid source")
+	}
+	return nil
+}
+
+func controllerSuspensionHasResumeEvidence(
+	suspension eventing.PRDevelopmentControllerSuspension,
+) bool {
+	return suspension.ResumeAttemptID != "" || suspension.ResumeIntentID != "" ||
+		suspension.ResumeReservationKey != "" || suspension.ResumeReservationDigest != "" ||
+		suspension.ResumeRequest != (eventing.PRDevelopmentControllerSuspendedResumeRequest{}) ||
+		len(suspension.ResumeRequestJSON) != 0 || suspension.ResumeRequestHash != "" ||
+		suspension.ResumeIntentHash != "" || suspension.ResumePreparedAt != nil ||
+		suspension.ResumeClaimID != "" || suspension.ResumeClaimOwner != "" ||
+		suspension.ResumeClaimToken != "" || suspension.ResumeClaimUntil != nil ||
+		suspension.ResumeClaimEpoch != 0 || suspension.ResumeClaims != 0 ||
+		suspension.ResumeClaimedAt != nil || suspension.ResumeClaimTokenDigest != "" ||
+		suspension.ResumeResult != (eventing.PRDevelopmentControllerSuspendedResumeResult{}) ||
+		len(suspension.ResumeResultJSON) != 0 || suspension.ResumeResultHash != "" ||
+		suspension.NewMutationLeaseEpoch != 0 || suspension.NewMutationLeaseTokenDigest != "" ||
+		suspension.NewMutationLeaseUntil != nil || suspension.FinalResumeRevision != 0 ||
+		suspension.ResumeFinalHash != "" || suspension.ResumedAt != nil
+}
+
+func sameControllerOptionalTime(left, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.Equal(*right)
+}
+
+func validateControllerSuspendedTransition(
+	transition eventing.PRDevelopmentControllerSuspensionTransition,
+	claimed eventing.PRDevelopmentControllerSuspension,
+	result eventing.PRDevelopmentControllerSuspensionResult,
+) error {
+	controller, suspension := transition.Controller, transition.Suspension
+	if controller.ID != claimed.ControllerID ||
+		controller.CurrentAttemptID != claimed.AttemptID ||
+		controller.Revision != claimed.SourceFinalRevision+2 ||
+		controller.Phase != eventing.PRDevelopmentControllerSuspended ||
+		controller.ThreadID != claimed.ThreadID ||
+		controller.OwnerSessionID != claimed.OwnerSessionID ||
+		controller.AgentID != claimed.AgentID || controller.WorkspaceID != claimed.WorkspaceID ||
+		controller.LineID != claimed.LineID || controller.SourceCloneURL != claimed.SourceCloneURL ||
+		controller.SourceRef != claimed.SourceRef || controller.SourceCommit != claimed.SourceCommit ||
+		controller.SourceTree != claimed.SourceTree || controller.LineVersion != claimed.LineVersion ||
+		controller.MutationEpoch != claimed.MutationEpoch ||
+		controller.TipCommit != claimed.TipCommit || controller.Tree != claimed.Tree ||
+		controller.LeaseKind != "" || controller.LeaseOwner != "" ||
+		controller.LeaseToken != "" || controller.LeaseUntil != nil ||
+		controller.MutationReservationKey != "" {
+		return errors.New("controller suspension did not return a bearer-free suspended controller")
+	}
+	if suspension.ID != claimed.ID || suspension.ControllerID != claimed.ControllerID ||
+		suspension.ThreadID != claimed.ThreadID ||
+		suspension.OwnerSessionID != claimed.OwnerSessionID ||
+		suspension.AttemptID != claimed.AttemptID || suspension.Ordinal != claimed.Ordinal ||
+		suspension.SourceKind != claimed.SourceKind ||
+		suspension.SourceRecoveryID != claimed.SourceRecoveryID ||
+		suspension.SourceOperationID != claimed.SourceOperationID ||
+		suspension.SourceOperationKind != claimed.SourceOperationKind ||
+		suspension.SourceFinalRevision != claimed.SourceFinalRevision ||
+		suspension.SourceFinalHash != claimed.SourceFinalHash ||
+		suspension.Mode != claimed.Mode ||
+		suspension.Status != eventing.PRDevelopmentControllerSuspensionStatusSuspended ||
+		suspension.SuspendIntentID != claimed.SuspendIntentID ||
+		suspension.SuspendClaimID != claimed.SuspendClaimID ||
+		suspension.SuspendClaimOwner != claimed.SuspendClaimOwner ||
+		suspension.SuspendClaimEpoch != claimed.SuspendClaimEpoch ||
+		suspension.SuspendClaims != claimed.SuspendClaims ||
+		!sameControllerOptionalTime(suspension.SuspendClaimedAt, claimed.SuspendClaimedAt) ||
+		suspension.FinalSuspensionRevision != controller.Revision ||
+		suspension.SuspendedAt == nil || !suspension.CreatedAt.Equal(claimed.CreatedAt) ||
+		!suspension.UpdatedAt.Equal(*suspension.SuspendedAt) ||
+		!controller.UpdatedAt.Equal(*suspension.SuspendedAt) {
+		return errors.New("controller suspension finalization returned changed durable identity")
+	}
+	if suspension.AgentID != claimed.AgentID || suspension.WorkspaceID != claimed.WorkspaceID ||
+		suspension.LineID != claimed.LineID || suspension.SourceCloneURL != claimed.SourceCloneURL ||
+		suspension.SourceRef != claimed.SourceRef || suspension.SourceCommit != claimed.SourceCommit ||
+		suspension.SourceTree != claimed.SourceTree || suspension.LineVersion != claimed.LineVersion ||
+		suspension.MutationEpoch != claimed.MutationEpoch || suspension.TipCommit != claimed.TipCommit ||
+		suspension.Tree != claimed.Tree ||
+		suspension.SuspensionReservationDigest != claimed.SuspensionReservationDigest ||
+		suspension.MutationLeaseEpoch != claimed.MutationLeaseEpoch ||
+		suspension.MutationLeaseTokenDigest != claimed.MutationLeaseTokenDigest ||
+		suspension.SuspendRequestHash != claimed.SuspendRequestHash ||
+		suspension.PreviousHash != claimed.PreviousHash || suspension.IntentHash != claimed.IntentHash ||
+		string(suspension.SuspendRequestJSON) != string(claimed.SuspendRequestJSON) {
+		return errors.New("controller suspension finalization changed its retained line proof")
+	}
+	expectedRequest := claimed.SuspendRequest
+	expectedRequest.ReservationKey = ""
+	expectedResult := result
+	expectedResult.AlreadySuspended = false
+	if suspension.SuspensionReservationKey != "" ||
+		suspension.SuspendRequest != expectedRequest ||
+		suspension.SuspendClaimToken != "" || suspension.SuspendClaimUntil != nil ||
+		!validControllerSHA256(suspension.SuspendClaimTokenDigest) ||
+		suspension.SuspendResult != expectedResult || len(suspension.SuspendResultJSON) == 0 ||
+		!validControllerSHA256(suspension.SuspendResultHash) ||
+		!validControllerSHA256(suspension.SuspensionFinalHash) ||
+		controllerSuspensionHasResumeEvidence(suspension) {
+		return errors.New("controller suspension finalization retained bearer authority")
+	}
+	for _, bearer := range []string{
+		claimed.SuspensionReservationKey,
+		claimed.SuspendClaimToken,
+	} {
+		if bearer != "" &&
+			(strings.Contains(string(suspension.SuspendRequestJSON), bearer) ||
+				strings.Contains(string(suspension.SuspendResultJSON), bearer)) {
+			return errors.New("controller suspension finalization serialized a raw bearer")
+		}
+	}
+	return nil
+}
+
 func validateControllerRecoveryCandidate(
 	candidate eventing.PRDevelopmentControllerRecoveryCandidate,
 ) error {
@@ -1069,6 +1603,28 @@ func controllerRecoveryClaimID(
 		_, _ = digest.Write([]byte{0})
 	}
 	return controllerRecoveryClaimIDPrefix + hex.EncodeToString(digest.Sum(nil)[:16])
+}
+
+func controllerSuspensionClaimID(
+	workerLabel string,
+	candidate eventing.PRDevelopmentControllerSuspensionWorkCandidate,
+) string {
+	digest := sha256.New()
+	_, _ = digest.Write([]byte("picoclaw-pr-development-controller-suspension-claim-v1\x00"))
+	for _, value := range []string{
+		workerLabel,
+		candidate.CaseID,
+		candidate.SuspensionID,
+		candidate.ControllerID,
+		candidate.AttemptID,
+		string(candidate.SourceKind),
+		string(candidate.Mode),
+		strconv.FormatInt(candidate.ExpectedRevision, 10),
+	} {
+		_, _ = digest.Write([]byte(value))
+		_, _ = digest.Write([]byte{0})
+	}
+	return controllerSuspensionClaimIDPrefix + hex.EncodeToString(digest.Sum(nil)[:16])
 }
 
 type controllerRecoveryHeartbeat struct {
