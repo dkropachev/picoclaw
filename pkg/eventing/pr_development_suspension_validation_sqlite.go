@@ -150,9 +150,23 @@ func validatePRDevelopmentControllerSuspensionSourceLink(
 ) error {
 	if suspension.SourceKind ==
 		PRDevelopmentControllerSuspensionSourceSuspendedResumeRecovery {
-		// The dedicated expired-resume recovery row is authenticated by its
-		// own store before this source kind can be staged.
-		return nil
+		resumed, found, err := loadPRDevelopmentControllerSuspensionByID(
+			ctx,
+			queryer,
+			suspension.SourceRecoveryID,
+		)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errors.New(
+				"stored suspended-resume recovery handoff has no source",
+			)
+		}
+		return validatePRDevelopmentControllerSuspendedResumeRecoverySourceLink(
+			resumed,
+			suspension,
+		)
 	}
 	source, err := loadPRDevelopmentControllerSuspensionStageSource(
 		ctx,

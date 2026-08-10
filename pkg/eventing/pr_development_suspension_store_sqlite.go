@@ -2041,10 +2041,25 @@ func requirePRDevelopmentControllerSuspensionResultSource(
 			)
 		}
 	case PRDevelopmentControllerSuspensionSourceSuspendedResumeRecovery:
-		return fmt.Errorf(
-			"%w: suspended-resume recovery source validation is not implemented",
-			ErrPRDevelopmentControllerConflict,
+		resumed, found, err := loadPRDevelopmentControllerSuspensionByID(
+			ctx,
+			queryer,
+			suspension.SourceRecoveryID,
 		)
+		if err != nil {
+			return err
+		}
+		if !found || validatePRDevelopmentControllerSuspendedResumeRecoverySourceLink(
+			resumed,
+			suspension,
+		) != nil || result.CandidateTree != resumed.ResumeResult.CandidateTree ||
+			result.CandidateDigest != resumed.ResumeResult.CandidateDigest ||
+			result.ChangedFileCount != resumed.ResumeResult.ChangedFileCount {
+			return fmt.Errorf(
+				"%w: suspended-resume recovery suspension differs from its source",
+				ErrPRDevelopmentControllerConflict,
+			)
+		}
 	default:
 		return fmt.Errorf(
 			"%w: controller suspension source kind is invalid",
