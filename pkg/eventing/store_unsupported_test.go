@@ -305,6 +305,18 @@ func TestStorePRDevelopmentLedgerUnsupported(t *testing.T) {
 	); !errors.Is(err, ErrUnsupportedPlatform) {
 		t.Fatalf("AppendPRDevelopmentLedgerReview() error = %v, want %v", err, ErrUnsupportedPlatform)
 	}
+	if _, _, err := store.ClaimPRDevelopmentReview(
+		ctx,
+		PRDevelopmentReviewClaimRequest{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("ClaimPRDevelopmentReview() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
+	if _, _, err := store.CompletePRDevelopmentReview(
+		ctx,
+		PRDevelopmentLedgerReviewAppend{},
+	); !errors.Is(err, ErrUnsupportedPlatform) {
+		t.Fatalf("CompletePRDevelopmentReview() error = %v, want %v", err, ErrUnsupportedPlatform)
+	}
 	if _, _, err := store.AppendPRDevelopmentLedgerCheckpoint(
 		ctx,
 		PRDevelopmentLedgerCheckpointAppend{},

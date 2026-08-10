@@ -33,6 +33,7 @@ var (
 	_ PRDevelopmentControllerOperationStore = (*Store)(nil)
 	_ PRDevelopmentLedgerReader             = (*Store)(nil)
 	_ PRDevelopmentLedgerStore              = (*Store)(nil)
+	_ PRDevelopmentReviewQueue              = (*Store)(nil)
 	_ PRDevelopmentContextReader            = (*Store)(nil)
 )
 
@@ -459,6 +460,20 @@ func (*Store) AppendPRDevelopmentLedgerReview(
 	PRDevelopmentLedgerReviewAppend,
 ) (PRDevelopmentLedgerEntry, bool, error) {
 	return PRDevelopmentLedgerEntry{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) ClaimPRDevelopmentReview(
+	context.Context,
+	PRDevelopmentReviewClaimRequest,
+) (PRDevelopmentReviewLease, bool, error) {
+	return PRDevelopmentReviewLease{}, false, ErrUnsupportedPlatform
+}
+
+func (*Store) CompletePRDevelopmentReview(
+	context.Context,
+	PRDevelopmentLedgerReviewAppend,
+) (PRDevelopmentReviewCompletion, bool, error) {
+	return PRDevelopmentReviewCompletion{}, false, ErrUnsupportedPlatform
 }
 
 func (*Store) AppendPRDevelopmentLedgerCheckpoint(

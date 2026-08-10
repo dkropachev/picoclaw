@@ -261,16 +261,35 @@ func (s *Store) AppendPRDevelopmentLedgerReview(
 	ctx context.Context,
 	input PRDevelopmentLedgerReviewAppend,
 ) (PRDevelopmentLedgerEntry, bool, error) {
+	completion, changed, err := s.appendPRDevelopmentLedgerReview(ctx, input, false)
+	return completion.Entry, changed, err
+}
+
+// CompletePRDevelopmentReview atomically appends the exact structured review,
+// finishes its reservation-free controller lease into ready, and admits one
+// deterministic next repair attempt only for changes_required.
+func (s *Store) CompletePRDevelopmentReview(
+	ctx context.Context,
+	input PRDevelopmentLedgerReviewAppend,
+) (PRDevelopmentReviewCompletion, bool, error) {
+	return s.appendPRDevelopmentLedgerReview(ctx, input, true)
+}
+
+func (s *Store) appendPRDevelopmentLedgerReview(
+	ctx context.Context,
+	input PRDevelopmentLedgerReviewAppend,
+	enqueueChanges bool,
+) (PRDevelopmentReviewCompletion, bool, error) {
 	if err := s.ready(ctx); err != nil {
-		return PRDevelopmentLedgerEntry{}, false, err
+		return PRDevelopmentReviewCompletion{}, false, err
 	}
 	normalized, err := normalizePRDevelopmentLedgerReviewAppend(input)
 	if err != nil {
-		return PRDevelopmentLedgerEntry{}, false, err
+		return PRDevelopmentReviewCompletion{}, false, err
 	}
 	var (
-		entry   PRDevelopmentLedgerEntry
-		changed bool
+		completion PRDevelopmentReviewCompletion
+		changed    bool
 	)
 	err = s.withImmediate(ctx, func(conn *sql.Conn) error {
 		thread, binding, controller, fence, ledger, loadErr := loadPRDevelopmentLedgerAppendState(
@@ -281,6 +300,34 @@ func (s *Store) AppendPRDevelopmentLedgerReview(
 		)
 		if loadErr != nil {
 			return loadErr
+		}
+		if enqueueChanges {
+			orchestration, found, orchestrationErr := loadPRDevelopmentRepairOrchestration(
+				ctx,
+				conn,
+				normalized.AttemptID,
+			)
+			if orchestrationErr != nil {
+				return orchestrationErr
+			}
+			if !found || orchestration.Phase != PRDevelopmentRepairOrchestrationCompleted ||
+				orchestration.ControllerID != controller.ID ||
+				orchestration.SessionID != controller.OwnerSessionID ||
+				orchestration.CaseID != normalized.CaseID ||
+				orchestration.ThreadID != controller.ThreadID ||
+				orchestration.Validation == nil {
+				return fmt.Errorf(
+					"%w: review completion has no exact completed orchestration receipt",
+					ErrPRDevelopmentLedgerConflict,
+				)
+			}
+			if normalized.Outcome == PRDevelopmentLedgerReviewPassed &&
+				orchestration.Validation.CIStatus != PRDevelopmentCIPassed {
+				return fmt.Errorf(
+					"%w: passed review requires a passed local-CI receipt",
+					ErrPRDevelopmentLedgerConflict,
+				)
+			}
 		}
 		expectedOrdinal := fence.Ordinal*2 + 1
 		candidate := PRDevelopmentLedgerEntry{
@@ -327,7 +374,21 @@ func (s *Store) AppendPRDevelopmentLedgerReview(
 			candidate.FenceHash = fence.FenceHash
 			existing := ledger.Entries[entryIndex]
 			if equalPRDevelopmentLedgerEntryIntent(existing, candidate) {
-				entry = existing
+				completion.Entry = existing
+				completion.Controller = redactPRDevelopmentControllerAuthority(controller)
+				if enqueueChanges {
+					next, retryErr := loadExactPRDevelopmentReviewRetry(
+						ctx,
+						conn,
+						controller.OwnerSessionID,
+						fence,
+						normalized.Outcome,
+					)
+					if retryErr != nil {
+						return retryErr
+					}
+					completion.NextAttempt = next
+				}
 				return nil
 			}
 			return fmt.Errorf(
@@ -400,6 +461,28 @@ func (s *Store) AppendPRDevelopmentLedgerReview(
 				ErrInvalidPRDevelopmentLedger,
 			)
 		}
+		var retryPlan *prDevelopmentReviewRetryPlan
+		if enqueueChanges {
+			if normalized.Outcome == PRDevelopmentLedgerReviewChangesRequired {
+				planned, planErr := preparePRDevelopmentReviewRetry(
+					ctx,
+					conn,
+					controller,
+					fence,
+				)
+				if planErr != nil {
+					return planErr
+				}
+				retryPlan = &planned
+			} else if retryErr := requireNoPRDevelopmentReviewRetry(
+				ctx,
+				conn,
+				controller.OwnerSessionID,
+				fence.AttemptID,
+			); retryErr != nil {
+				return retryErr
+			}
+		}
 		candidate.ID, err = newPrefixedID(prDevelopmentLedgerEntryIDPrefix)
 		if err != nil {
 			return err
@@ -461,6 +544,34 @@ func (s *Store) AppendPRDevelopmentLedgerReview(
 		if insertErr := insertPRDevelopmentLedgerEntry(ctx, conn, candidate); insertErr != nil {
 			return insertErr
 		}
+		if retryPlan != nil {
+			if appendErr := appendPRDevelopmentRepairAttempt(
+				ctx,
+				conn,
+				&retryPlan.Session,
+				retryPlan.Admission,
+				now,
+			); appendErr != nil {
+				return appendErr
+			}
+			nextSession, loadSessionErr := loadPRDevelopmentRepairSessionByID(
+				ctx,
+				conn,
+				retryPlan.Session.ID,
+			)
+			if loadSessionErr != nil {
+				return loadSessionErr
+			}
+			next, found := findPRDevelopmentRepairIdempotency(
+				&nextSession,
+				retryPlan.Admission.IdempotencyKey,
+			)
+			if !found {
+				return errors.New("admitted review repair retry disappeared")
+			}
+			cloned := next
+			completion.NextAttempt = &cloned
+		}
 		ledger.Entries = append(ledger.Entries, candidate)
 		ledger.EntriesDigest = candidate.EntryHash
 		controller, found, loadErr := loadPRDevelopmentControllerAggregateByID(
@@ -483,17 +594,156 @@ func (s *Store) AppendPRDevelopmentLedgerReview(
 		); validateErr != nil {
 			return validateErr
 		}
-		entry = candidate
+		completion.Entry = candidate
+		completion.Controller = redactPRDevelopmentControllerAuthority(controller)
 		changed = true
 		return nil
 	})
 	if err != nil {
-		return PRDevelopmentLedgerEntry{}, false, fmt.Errorf(
+		return PRDevelopmentReviewCompletion{}, false, fmt.Errorf(
 			"append pull request development review ledger entry: %w",
 			s.dbError(err),
 		)
 	}
-	return entry, changed, nil
+	return completion, changed, nil
+}
+
+func redactPRDevelopmentControllerAuthority(
+	controller PRDevelopmentController,
+) PRDevelopmentController {
+	controller.LeaseToken = ""
+	controller.MutationReservationKey = ""
+	return controller
+}
+
+type prDevelopmentReviewRetryPlan struct {
+	Session   PRDevelopmentRepairSession
+	Admission PRDevelopmentRepairAdmit
+}
+
+func preparePRDevelopmentReviewRetry(
+	ctx context.Context,
+	queryer rowsQueryer,
+	controller PRDevelopmentController,
+	fence PRDevelopmentAttemptReviewFence,
+) (prDevelopmentReviewRetryPlan, error) {
+	session, err := loadPRDevelopmentRepairSessionByID(
+		ctx,
+		queryer,
+		controller.OwnerSessionID,
+	)
+	if err != nil {
+		return prDevelopmentReviewRetryPlan{}, err
+	}
+	if session.CaseID == "" || len(session.Attempts) == 0 ||
+		session.Attempts[len(session.Attempts)-1].ID != fence.AttemptID ||
+		session.Attempts[len(session.Attempts)-1].Status != PRDevelopmentRepairCompleted ||
+		activePRDevelopmentRepairAttempt(&session) != nil {
+		return prDevelopmentReviewRetryPlan{}, fmt.Errorf(
+			"%w: reviewed attempt is no longer the terminal session tail",
+			ErrPRDevelopmentLedgerConflict,
+		)
+	}
+	if len(session.Attempts) >= MaxPRDevelopmentRepairAttempts ||
+		session.Version > maxPRDevelopmentRepairVersionBeforeAdmission(
+			session.HeadRepository != "",
+		) || controller.LineVersion >= MaxPRDevelopmentControllerFences ||
+		controller.Revision+1 > MaxPRDevelopmentControllerRevision-
+			prDevelopmentControllerMutationRevisionReserve {
+		return prDevelopmentReviewRetryPlan{}, fmt.Errorf(
+			"%w: changes-required review has no repair-attempt headroom",
+			ErrPRDevelopmentRepairCapacity,
+		)
+	}
+	idempotencyKey := normalizePRDevelopmentReviewRetryIdentity(fence.AttemptID)
+	if _, found := findPRDevelopmentRepairIdempotency(&session, idempotencyKey); found {
+		return prDevelopmentReviewRetryPlan{}, fmt.Errorf(
+			"%w: review retry already exists before atomic completion",
+			ErrPRDevelopmentLedgerConflict,
+		)
+	}
+	conversation, err := loadPRDevelopmentConversation(ctx, queryer, session.CaseID)
+	if err != nil {
+		return prDevelopmentReviewRetryPlan{}, err
+	}
+	return prDevelopmentReviewRetryPlan{
+		Session: session,
+		Admission: PRDevelopmentRepairAdmit{
+			CaseID:                      session.CaseID,
+			ExpectedConversationVersion: conversation.Conversation.Version,
+			ExpectedRepairVersion:       session.Version,
+			IdempotencyKey:              idempotencyKey,
+			AgentID:                     session.AgentID,
+			Instruction:                 prDevelopmentReviewRetryInstruction,
+		},
+	}, nil
+}
+
+func loadExactPRDevelopmentReviewRetry(
+	ctx context.Context,
+	queryer rowsQueryer,
+	sessionID string,
+	fence PRDevelopmentAttemptReviewFence,
+	outcome PRDevelopmentLedgerReviewOutcome,
+) (*PRDevelopmentRepairAttempt, error) {
+	if outcome != PRDevelopmentLedgerReviewChangesRequired {
+		if err := requireNoPRDevelopmentReviewRetry(
+			ctx,
+			queryer,
+			sessionID,
+			fence.AttemptID,
+		); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	session, err := loadPRDevelopmentRepairSessionByID(ctx, queryer, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	idempotencyKey := normalizePRDevelopmentReviewRetryIdentity(fence.AttemptID)
+	next, found := findPRDevelopmentRepairIdempotency(&session, idempotencyKey)
+	if !found {
+		return nil, fmt.Errorf(
+			"%w: changes-required review has no atomic repair retry",
+			ErrPRDevelopmentLedgerConflict,
+		)
+	}
+	reviewed := findPRDevelopmentRepairAttempt(&session, fence.AttemptID)
+	if reviewed == nil || next.Ordinal != reviewed.Ordinal+1 ||
+		next.Instruction != prDevelopmentReviewRetryInstruction ||
+		next.ConversationVersion < reviewed.ConversationVersion {
+		return nil, fmt.Errorf(
+			"%w: changes-required review retry differs from its deterministic binding",
+			ErrPRDevelopmentLedgerConflict,
+		)
+	}
+	cloned := next
+	return &cloned, nil
+}
+
+func requireNoPRDevelopmentReviewRetry(
+	ctx context.Context,
+	queryer rowQueryer,
+	sessionID, attemptID string,
+) error {
+	var retries int
+	if err := queryer.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM pr_development_repair_attempts
+		WHERE session_id = ? AND idempotency_key = ?`,
+		sessionID,
+		normalizePRDevelopmentReviewRetryIdentity(attemptID),
+	).Scan(&retries); err != nil {
+		return err
+	}
+	if retries != 0 {
+		return fmt.Errorf(
+			"%w: non-retry review outcome is bound to a repair retry",
+			ErrPRDevelopmentLedgerConflict,
+		)
+	}
+	return nil
 }
 
 // AppendPRDevelopmentLedgerCheckpoint logically compacts an exact reviewed
