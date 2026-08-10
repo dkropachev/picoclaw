@@ -37,7 +37,10 @@ const prDevelopmentControllerSuspensionColumns = `
 	new_mutation_lease_token_digest, new_mutation_lease_until,
 	final_resume_revision, resume_final_hash, resumed_at, created_at, updated_at`
 
-const maxPRDevelopmentSuspensionChangedFiles = 1000
+// Keep this content-addressed evidence bound aligned with gitworkspace's
+// maxPinnedCandidateChangedFiles. A successful Git suspension must never
+// become impossible to finalize solely because eventing chose a lower cap.
+const maxPRDevelopmentSuspensionChangedFiles = 10_000
 
 var _ PRDevelopmentControllerSuspensionExecutionStore = (*Store)(nil)
 

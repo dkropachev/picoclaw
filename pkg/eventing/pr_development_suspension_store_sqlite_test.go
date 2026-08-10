@@ -251,6 +251,23 @@ func TestStorePRDevelopmentControllerSuspensionClaimReclaimFinalizeAndReplay(
 	assert.False(t, found)
 }
 
+func TestPRDevelopmentControllerSuspensionChangedFileLimitMatchesGit(t *testing.T) {
+	fixture := newStagedPRDevelopmentSuspensionFixture(t)
+	result := suspensionResultForTest(fixture.Suspension)
+	result.ChangedFileCount = maxPRDevelopmentSuspensionChangedFiles
+	_, err := normalizePRDevelopmentControllerSuspensionResult(
+		fixture.Suspension,
+		result,
+	)
+	require.NoError(t, err)
+	result.ChangedFileCount++
+	_, err = normalizePRDevelopmentControllerSuspensionResult(
+		fixture.Suspension,
+		result,
+	)
+	assert.ErrorIs(t, err, ErrPRDevelopmentControllerConflict)
+}
+
 func TestPRDevelopmentControllerSuspensionRequestCodecsNeverRetainRawBearers(
 	t *testing.T,
 ) {

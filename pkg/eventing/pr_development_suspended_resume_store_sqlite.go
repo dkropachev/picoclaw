@@ -746,7 +746,8 @@ func normalizePRDevelopmentControllerSuspendedResumeFinalize(
 			input.Result.Tree,
 			input.Result.CandidateTree,
 		) || !validPRDevelopmentHex(input.Result.CandidateDigest, sha256.Size*2) ||
-		input.Result.ChangedFileCount < 0 || input.Result.ChangedFileCount > 1000 ||
+		input.Result.ChangedFileCount < 0 ||
+		input.Result.ChangedFileCount > maxPRDevelopmentSuspensionChangedFiles ||
 		!validPRDevelopmentHex(input.Result.SuspensionHash, sha256.Size*2) ||
 		!validPRDevelopmentHex(input.Result.RotationHash, sha256.Size*2) {
 		return PRDevelopmentControllerSuspendedResumeFinalize{}, fmt.Errorf(
