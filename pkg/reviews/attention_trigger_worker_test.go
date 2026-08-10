@@ -389,13 +389,46 @@ func TestAttentionTriggerWorkerLeaseLossDefersCompletionAndRetryFindsRun(t *test
 		Agents:       agent,
 	}, policies)
 	queue := newAttentionTriggerQueueFake(now, detail.Case.ID, detail.Case.Version)
-	queue.renewErr = eventing.ErrStaleLease
 	worker := &AttentionTriggerWorker{
 		Queue: queue, Launcher: launcher, LeaseDuration: 20 * time.Millisecond,
 		Now: func() time.Time { return now },
 	}
 
-	processed, err := worker.ProcessOne(context.Background())
+	type processResult struct {
+		processed bool
+		err       error
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan processResult, 1)
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		processed, err := worker.ProcessOne(ctx)
+		done <- processResult{processed: processed, err: err}
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-exited:
+		case <-time.After(5 * time.Second):
+			t.Error("attention delivery goroutine did not exit")
+		}
+	}()
+	select {
+	case <-agent.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("attention workflow did not reach the blocking agent")
+	}
+	queue.mu.Lock()
+	queue.renewErr = eventing.ErrStaleLease
+	queue.mu.Unlock()
+	var first processResult
+	select {
+	case first = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("lease loss did not stop attention delivery")
+	}
+	processed, err := first.processed, first.err
 	callsAfterLoss := agent.calls.Load()
 	if !processed || !errors.Is(err, eventing.ErrStaleLease) ||
 		len(queue.completions) != 0 || len(queue.releases) != 0 ||
