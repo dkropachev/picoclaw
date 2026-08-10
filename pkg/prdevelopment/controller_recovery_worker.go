@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
@@ -237,11 +238,11 @@ func (worker *ControllerRecoveryWorker) ProcessOne(ctx context.Context) (bool, e
 	if found || err != nil {
 		return processed, err
 	}
-	if _, err := worker.store.StageExpiredPRDevelopmentControllerRecoveries(
+	if _, stageErr := worker.store.StageExpiredPRDevelopmentControllerRecoveries(
 		ctx,
 		controllerRecoveryStageBatch,
-	); err != nil {
-		return false, fmt.Errorf("stage expired controller recoveries: %w", err)
+	); stageErr != nil {
+		return false, fmt.Errorf("stage expired controller recoveries: %w", stageErr)
 	}
 	processed, found, err = worker.processNextSuspension(ctx)
 	if found || err != nil {
@@ -421,8 +422,7 @@ func (worker *ControllerRecoveryWorker) processNextSuspensionFor(
 func (worker *ControllerRecoveryWorker) processNextSuspendedResumeRecovery(
 	ctx context.Context,
 ) (processed, found bool, err error) {
-	candidate, found, err :=
-		worker.store.NextPRDevelopmentControllerSuspendedResumeRecovery(ctx)
+	candidate, found, err := worker.store.NextPRDevelopmentControllerSuspendedResumeRecovery(ctx)
 	if err != nil {
 		return false, false, fmt.Errorf("scan suspended resume recoveries: %w", err)
 	}
@@ -613,20 +613,19 @@ func (worker *ControllerRecoveryWorker) processSuspendedResumeRecovery(
 				return nil, effectErr
 			}
 			return func(finalizeCtx context.Context) error {
-				transition, changed, finalizeErr :=
-					worker.store.FinalizePRDevelopmentControllerSuspendedResumeRecovery(
-						finalizeCtx,
-						eventing.PRDevelopmentControllerSuspendedResumeRecoveryFinalize{
-							SuspensionID:     resume.ID,
-							ControllerID:     resume.ControllerID,
-							AttemptID:        resume.ResumeAttemptID,
-							ExpectedRevision: lease.Controller.Revision,
-							ClaimID:          resume.ResumeClaimID,
-							ClaimToken:       resume.ResumeClaimToken,
-							ClaimEpoch:       resume.ResumeClaimEpoch,
-							Result:           result,
-						},
-					)
+				transition, changed, finalizeErr := worker.store.FinalizePRDevelopmentControllerSuspendedResumeRecovery(
+					finalizeCtx,
+					eventing.PRDevelopmentControllerSuspendedResumeRecoveryFinalize{
+						SuspensionID:     resume.ID,
+						ControllerID:     resume.ControllerID,
+						AttemptID:        resume.ResumeAttemptID,
+						ExpectedRevision: lease.Controller.Revision,
+						ClaimID:          resume.ResumeClaimID,
+						ClaimToken:       resume.ResumeClaimToken,
+						ClaimEpoch:       resume.ResumeClaimEpoch,
+						Result:           result,
+					},
+				)
 				if finalizeErr != nil {
 					return fmt.Errorf("finalize suspended resume recovery: %w", finalizeErr)
 				}
@@ -645,13 +644,12 @@ func (worker *ControllerRecoveryWorker) processSuspendedResumeRecovery(
 						Suspension: transition.NextSuspension,
 						Reclaimed:  true,
 					}
-					ownsTransferredClaim :=
-						controllerSuspendedResumeRecoveryOwnsTransferredChild(
-							transition.Resumed,
-							lease.Suspension,
-							worker.workerLabel,
-							transition.NextSuspension,
-						)
+					ownsTransferredClaim := controllerSuspendedResumeRecoveryOwnsTransferredChild(
+						transition.Resumed,
+						lease.Suspension,
+						worker.workerLabel,
+						transition.NextSuspension,
+					)
 					if !ownsTransferredClaim {
 						if changed {
 							return errors.New(
@@ -1567,16 +1565,9 @@ func validateControllerSuspendedResumeRecoveryTransition(
 	expectedResult.AlreadyResumed = false
 	expectedRequest := claimed.ResumeRequest
 	expectedRequest.ReservationKey = ""
-	if resumed.ID != claimed.ID || resumed.ControllerID != claimed.ControllerID ||
-		resumed.ThreadID != claimed.ThreadID ||
-		resumed.OwnerSessionID != claimed.OwnerSessionID ||
-		resumed.AttemptID != claimed.AttemptID || resumed.Ordinal != claimed.Ordinal ||
-		resumed.SourceKind != claimed.SourceKind ||
-		resumed.SourceRecoveryID != claimed.SourceRecoveryID ||
-		resumed.SourceOperationID != claimed.SourceOperationID ||
-		resumed.SourceOperationKind != claimed.SourceOperationKind ||
-		resumed.SourceFinalRevision != claimed.SourceFinalRevision ||
-		resumed.SourceFinalHash != claimed.SourceFinalHash || resumed.Mode != claimed.Mode ||
+	resumedIdentity := controllerSuspensionRetainedIdentityOf(resumed)
+	claimedIdentity := controllerSuspensionRetainedIdentityOf(claimed)
+	if resumedIdentity != claimedIdentity ||
 		resumed.AgentID != claimed.AgentID || resumed.WorkspaceID != claimed.WorkspaceID ||
 		resumed.LineID != claimed.LineID ||
 		resumed.SourceCloneURL != claimed.SourceCloneURL ||
@@ -2049,6 +2040,42 @@ func sameControllerOptionalTime(left, right *time.Time) bool {
 	return left.Equal(*right)
 }
 
+type controllerSuspensionRetainedIdentity struct {
+	id                  string
+	controllerID        string
+	threadID            string
+	ownerSessionID      string
+	attemptID           string
+	ordinal             int
+	sourceKind          eventing.PRDevelopmentControllerSuspensionSourceKind
+	sourceRecoveryID    string
+	sourceOperationID   string
+	sourceOperationKind eventing.PRDevelopmentControllerOperationKind
+	sourceFinalRevision int64
+	sourceFinalHash     string
+	mode                eventing.PRDevelopmentControllerSuspensionMode
+}
+
+func controllerSuspensionRetainedIdentityOf(
+	suspension eventing.PRDevelopmentControllerSuspension,
+) controllerSuspensionRetainedIdentity {
+	return controllerSuspensionRetainedIdentity{
+		id:                  suspension.ID,
+		controllerID:        suspension.ControllerID,
+		threadID:            suspension.ThreadID,
+		ownerSessionID:      suspension.OwnerSessionID,
+		attemptID:           suspension.AttemptID,
+		ordinal:             suspension.Ordinal,
+		sourceKind:          suspension.SourceKind,
+		sourceRecoveryID:    suspension.SourceRecoveryID,
+		sourceOperationID:   suspension.SourceOperationID,
+		sourceOperationKind: suspension.SourceOperationKind,
+		sourceFinalRevision: suspension.SourceFinalRevision,
+		sourceFinalHash:     suspension.SourceFinalHash,
+		mode:                suspension.Mode,
+	}
+}
+
 func validateControllerSuspendedTransition(
 	transition eventing.PRDevelopmentControllerSuspensionTransition,
 	claimed eventing.PRDevelopmentControllerSuspension,
@@ -2072,17 +2099,9 @@ func validateControllerSuspendedTransition(
 		controller.MutationReservationKey != "" {
 		return errors.New("controller suspension did not return a bearer-free suspended controller")
 	}
-	if suspension.ID != claimed.ID || suspension.ControllerID != claimed.ControllerID ||
-		suspension.ThreadID != claimed.ThreadID ||
-		suspension.OwnerSessionID != claimed.OwnerSessionID ||
-		suspension.AttemptID != claimed.AttemptID || suspension.Ordinal != claimed.Ordinal ||
-		suspension.SourceKind != claimed.SourceKind ||
-		suspension.SourceRecoveryID != claimed.SourceRecoveryID ||
-		suspension.SourceOperationID != claimed.SourceOperationID ||
-		suspension.SourceOperationKind != claimed.SourceOperationKind ||
-		suspension.SourceFinalRevision != claimed.SourceFinalRevision ||
-		suspension.SourceFinalHash != claimed.SourceFinalHash ||
-		suspension.Mode != claimed.Mode ||
+	suspensionIdentity := controllerSuspensionRetainedIdentityOf(suspension)
+	claimedIdentity := controllerSuspensionRetainedIdentityOf(claimed)
+	if suspensionIdentity != claimedIdentity ||
 		suspension.Status != eventing.PRDevelopmentControllerSuspensionStatusSuspended ||
 		suspension.SuspendIntentID != claimed.SuspendIntentID ||
 		suspension.SuspendClaimID != claimed.SuspendClaimID ||
@@ -2347,7 +2366,7 @@ func controllerSuspendedResumeRecoveryChildClaimID(
 		hex.EncodeToString(digest.Sum(nil)[:16])
 }
 
-func writeControllerRecoveryHashField(digest interface{ Write([]byte) (int, error) }, value string) {
+func writeControllerRecoveryHashField(digest io.Writer, value string) {
 	var length [8]byte
 	binary.BigEndian.PutUint64(length[:], uint64(len(value)))
 	_, _ = digest.Write(length[:])

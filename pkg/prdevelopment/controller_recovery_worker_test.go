@@ -8,10 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg/eventing"
-	"github.com/sipeed/picoclaw/pkg/gitworkspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sipeed/picoclaw/pkg/eventing"
+	"github.com/sipeed/picoclaw/pkg/gitworkspace"
 )
 
 type fakeControllerRecoveryStore struct {
@@ -529,6 +530,8 @@ func TestControllerRecoveryWorkerSuspensionPriority(t *testing.T) {
 	)
 	claimErr := errors.New("stop after priority claim")
 	t.Run("existing handoff precedes staging", func(t *testing.T) {
+		t.Parallel()
+
 		stageCalled := false
 		recoveryScanned := false
 		store := &fakeControllerRecoveryStore{
@@ -570,6 +573,8 @@ func TestControllerRecoveryWorkerSuspensionPriority(t *testing.T) {
 	})
 
 	t.Run("staged handoff precedes recovery scan", func(t *testing.T) {
+		t.Parallel()
+
 		staged := false
 		suspensionScans := 0
 		recoveryScanned := false
@@ -1115,8 +1120,7 @@ func TestControllerRecoveryWorkerSuspendedResumeTerminalBindsCandidateEvidence(t
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "retained candidate evidence")
 
-	transition.NextSuspension.SuspendResult.CandidateDigest =
-		transition.Resumed.ResumeResult.CandidateDigest
+	transition.NextSuspension.SuspendResult.CandidateDigest = transition.Resumed.ResumeResult.CandidateDigest
 	transition.NextSuspension.SuspendResult.SuspensionHash = "malformed"
 	err = validateControllerSuspendedResumeRecoveryTerminalChild(transition, resume)
 	require.Error(t, err)
@@ -1302,6 +1306,8 @@ func TestControllerRecoveryWorkerSuspensionSecurityBoundaries(t *testing.T) {
 	t.Parallel()
 
 	t.Run("changed bearer fails before Git", func(t *testing.T) {
+		t.Parallel()
+
 		candidate, controller, suspension := controllerSuspensionFixture(
 			eventing.PRDevelopmentControllerSuspensionCandidate,
 		)
@@ -1376,6 +1382,8 @@ func TestControllerRecoveryWorkerSuspensionSecurityBoundaries(t *testing.T) {
 	}
 	for _, test := range transitionTests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			candidate, controller, suspension := controllerSuspensionFixture(
 				eventing.PRDevelopmentControllerSuspensionCandidate,
 			)
@@ -1591,8 +1599,7 @@ func TestControllerRecoveryWorkerRequiresExactPostRecoverySuspensionHandoff(t *t
 				intent.ID,
 			)
 			if test.wrongSource {
-				handoffCandidate.SourceKind =
-					eventing.PRDevelopmentControllerSuspensionSourceOperationRecovery
+				handoffCandidate.SourceKind = eventing.PRDevelopmentControllerSuspensionSourceOperationRecovery
 			}
 			scans := 0
 			claimedChild := false
@@ -1917,6 +1924,8 @@ func TestControllerRecoveryWorkerHeartbeatRenewsAndCancelsOnLoss(t *testing.T) {
 	t.Parallel()
 
 	t.Run("renews exact reservation claim", func(t *testing.T) {
+		t.Parallel()
+
 		candidate, controller, intent := reservationRecoveryFixture()
 		renewed := make(chan eventing.PRDevelopmentControllerRecoveryRenew, 1)
 		releaseGit := make(chan struct{})
@@ -1967,6 +1976,8 @@ func TestControllerRecoveryWorkerHeartbeatRenewsAndCancelsOnLoss(t *testing.T) {
 	})
 
 	t.Run("renewal loss cancels Git and leaves claim reclaimable", func(t *testing.T) {
+		t.Parallel()
+
 		candidate, controller, intent := reservationRecoveryFixture()
 		renewErr := errors.New("claim lost")
 		store := reservationRecoveryStore(candidate, controller, intent)
@@ -2002,6 +2013,8 @@ func TestControllerRecoveryWorkerHeartbeatRenewsAndCancelsOnLoss(t *testing.T) {
 	})
 
 	t.Run("terminal barrier drains in-flight renewal loss before finalization", func(t *testing.T) {
+		t.Parallel()
+
 		candidate, controller, intent := reservationRecoveryFixture()
 		renewErr := errors.New("in-flight claim loss")
 		renewStarted := make(chan struct{})

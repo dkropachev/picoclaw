@@ -6,9 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sipeed/picoclaw/pkg/eventing"
 	"github.com/sipeed/picoclaw/pkg/gitworkspace"
-	"github.com/stretchr/testify/require"
 )
 
 type suspendedResumeGitFake struct {
