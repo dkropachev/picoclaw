@@ -2484,6 +2484,7 @@ func validatePRDevelopmentControllerAggregate(
 			return errors.New("stored controller current attempt belongs to another session")
 		}
 		if controller.Phase != PRDevelopmentControllerReady &&
+			controller.Phase != PRDevelopmentControllerSuspended &&
 			controller.CurrentAttemptID != session.Attempts[len(session.Attempts)-1].ID {
 			return errors.New("stored active controller attempt is not owner-session latest")
 		}
