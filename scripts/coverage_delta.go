@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 type coverageSummary struct {
@@ -1102,7 +1103,122 @@ func trimCommandOutput(out []byte) string {
 	if len(text) <= max {
 		return text
 	}
-	return text[len(text)-max:]
+
+	const tailBytes = 4000
+	const separator = "\n... command output truncated; failure context preserved above ...\n"
+	failureBytes := max - tailBytes - len(separator)
+	failures := commandFailureExcerpt(text, failureBytes)
+	if failures == "" {
+		return commandOutputTail(text, max)
+	}
+	return failures + separator + commandOutputTail(text, tailBytes)
+}
+
+func commandFailureExcerpt(text string, maxBytes int) string {
+	lines := strings.Split(text, "\n")
+	markers := make([]int, 0)
+	keep := make([]bool, len(lines))
+	for index, line := range lines {
+		if !isCommandFailureLine(line) {
+			continue
+		}
+		markers = append(markers, index)
+		start := index - 6
+		if start < 0 {
+			start = 0
+		}
+		end := index + 4
+		if end > len(lines) {
+			end = len(lines)
+		}
+		for contextIndex := start; contextIndex < end; contextIndex++ {
+			keep[contextIndex] = true
+		}
+	}
+	if len(markers) == 0 || maxBytes <= 0 {
+		return ""
+	}
+
+	var excerpt strings.Builder
+	excerpt.WriteString("failure markers:")
+	for _, index := range markers {
+		line := clipCommandFailureLine(lines[index])
+		if excerpt.Len()+1+len(line) > maxBytes {
+			break
+		}
+		excerpt.WriteByte('\n')
+		excerpt.WriteString(line)
+	}
+	if excerpt.Len() == len("failure markers:") {
+		return ""
+	}
+
+	contextHeader := "\nfailure context:"
+	if excerpt.Len()+len(contextHeader) > maxBytes {
+		return excerpt.String()
+	}
+	excerpt.WriteString(contextHeader)
+	previous := -2
+	for index, line := range lines {
+		if !keep[index] || isCommandFailureLine(line) || isCommandCoverageNoise(line) {
+			continue
+		}
+		line = clipCommandFailureLine(line)
+		separator := "\n"
+		if previous >= 0 && index != previous+1 {
+			separator = "\n...\n"
+		}
+		if excerpt.Len()+len(separator)+len(line) > maxBytes {
+			continue
+		}
+		excerpt.WriteString(separator)
+		excerpt.WriteString(line)
+		previous = index
+	}
+	return strings.TrimSpace(excerpt.String())
+}
+
+func clipCommandFailureLine(line string) string {
+	const max = 512
+	if len(line) <= max {
+		return line
+	}
+	const separator = " ... "
+	head := (max - len(separator)) / 2
+	tail := max - len(separator) - head
+	for head > 0 && !utf8.RuneStart(line[head]) {
+		head--
+	}
+	tailStart := len(line) - tail
+	for tailStart < len(line) && !utf8.RuneStart(line[tailStart]) {
+		tailStart++
+	}
+	return line[:head] + separator + line[tailStart:]
+}
+
+func commandOutputTail(text string, maxBytes int) string {
+	if len(text) <= maxBytes {
+		return text
+	}
+	start := len(text) - maxBytes
+	for start < len(text) && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	return text[start:]
+}
+
+func isCommandCoverageNoise(line string) bool {
+	line = strings.TrimSpace(line)
+	return strings.HasPrefix(line, "coverage:") ||
+		((strings.HasPrefix(line, "ok\t") || strings.HasPrefix(line, "ok  \t")) &&
+			strings.Contains(line, "coverage:"))
+}
+
+func isCommandFailureLine(line string) bool {
+	line = strings.TrimSpace(line)
+	return strings.HasPrefix(line, "--- FAIL:") || line == "FAIL" ||
+		strings.HasPrefix(line, "FAIL\t") || strings.HasPrefix(line, "panic:") ||
+		strings.HasPrefix(line, "fatal error:")
 }
 
 func fail(format string, args ...any) {
