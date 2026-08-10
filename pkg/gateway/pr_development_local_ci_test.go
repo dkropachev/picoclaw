@@ -48,6 +48,27 @@ func TestNewPRDevelopmentLocalCIRuntimeUsesPrivateEventState(t *testing.T) {
 	}
 }
 
+func TestNewPRDevelopmentLocalCIEvidenceRuntimeNeedsNoSandbox(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := &config.Config{}
+	cfg.Agents.Defaults.Workspace = workspace
+	cfg.Events.Ingress.Enabled = true
+	cfg.Events.Ingress.DatabasePath = filepath.Join("state", "events.db")
+
+	ciRuntime, err := newPRDevelopmentLocalCIEvidenceRuntime(cfg)
+	if err != nil {
+		t.Fatalf("newPRDevelopmentLocalCIEvidenceRuntime() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := ciRuntime.Close(); closeErr != nil {
+			t.Errorf("Close() error = %v", closeErr)
+		}
+	})
+	if ciRuntime.runner != nil || ciRuntime.evidence == nil {
+		t.Fatalf("evidence-only local CI runtime = %#v", ciRuntime)
+	}
+}
+
 func TestEnsurePrivatePRDevelopmentDirectoryRejectsSymlink(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target")

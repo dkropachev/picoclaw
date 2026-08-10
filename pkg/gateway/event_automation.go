@@ -301,6 +301,17 @@ func newEventAutomationServiceWithReviews(
 				"error": err.Error(),
 			})
 			prLocalCI = nil
+			if reviewRuntimeConfigured {
+				prLocalCI, err = newPRDevelopmentLocalCIEvidenceRuntime(cfg)
+				if err != nil {
+					logger.WarnCF(
+						"eventing",
+						"PR development local review evidence is unavailable",
+						map[string]any{"error": err.Error()},
+					)
+					prLocalCI = nil
+				}
+			}
 		}
 	}
 	closeSetup := func(setupErr error) error {

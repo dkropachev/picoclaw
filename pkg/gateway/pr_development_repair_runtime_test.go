@@ -26,8 +26,11 @@ type gatewayReviewGenerationLease struct {
 	released chan struct{}
 }
 
-func TestPRDevelopmentPendingReviewRuntimeDoesNotRequireProviderMCP(t *testing.T) {
+func TestPRDevelopmentPendingReviewRuntimeNeedsNeitherProviderMCPNorSandbox(t *testing.T) {
 	workspace := t.TempDir()
+	// Parked review consumes persisted evidence only. Force the mutation-time
+	// sandbox probe unavailable even on a developer host that has Bubblewrap.
+	t.Setenv("PATH", t.TempDir())
 	cfg := eventAutomationTestConfig(
 		workspace,
 		workspace+"/eventing/events.db",
