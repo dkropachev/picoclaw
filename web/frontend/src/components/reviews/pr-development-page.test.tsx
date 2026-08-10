@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { useState } from "react"
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
@@ -15,6 +15,13 @@ import {
   listPRDevelopmentCases,
   startPRDevelopmentRepair,
 } from "@/api/pr-development"
+import {
+  PRDevelopmentAttentionAPIError,
+  type PRDevelopmentAttentionProjection,
+  getPRDevelopmentAttention,
+  respondToPRDevelopmentAttention,
+} from "@/api/pr-development-attention"
+import { parseExactJSON } from "@/api/review-attention-json"
 import { PRDevelopmentPage } from "@/components/reviews/pr-development-page"
 import { SidebarProvider } from "@/components/ui/sidebar"
 
@@ -30,14 +37,26 @@ vi.mock("@/api/pr-development", async (importOriginal) => {
   }
 })
 
+vi.mock("@/api/pr-development-attention", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/api/pr-development-attention")>()
+  return {
+    ...actual,
+    getPRDevelopmentAttention: vi.fn(),
+    respondToPRDevelopmentAttention: vi.fn(),
+  }
+})
+
 const mockedList = vi.mocked(listPRDevelopmentCases)
 const mockedGet = vi.mocked(getPRDevelopmentCase)
 const mockedChat = vi.mocked(chatAboutPRDevelopmentCase)
 const mockedRepairRequestID = vi.mocked(createPRDevelopmentRepairRequestID)
 const mockedStartRepair = vi.mocked(startPRDevelopmentRepair)
+const mockedGetAttention = vi.mocked(getPRDevelopmentAttention)
+const mockedRespondToAttention = vi.mocked(respondToPRDevelopmentAttention)
 const caseID = `pdc_${"1".repeat(32)}`
 const replayCaseID = `pdc_${"2".repeat(32)}`
-const summary = {
+const baseSummary = {
   id: caseID,
   repository: "octo/repo",
   pull_number: 42,
@@ -56,10 +75,14 @@ const summary = {
   review_url: "https://github.com/octo/repo/pull/42#pullrequestreview-7",
   captured_at: "2026-08-05T12:00:01Z",
 } as const
+const summary = {
+  ...baseSummary,
+  attention_required: false,
+} as const
 const feedback =
   'Fix this <a href="https://evil.test">steal</a>\n<script>alert(1)</script>'
 const developmentCase = {
-  ...summary,
+  ...baseSummary,
   base_repository: "octo/repo",
   base_ref: "main",
   base_sha: "b".repeat(40),
@@ -167,6 +190,25 @@ const recoveryRequiredRepairDetail = {
   },
 } satisfies PRDevelopmentCaseDetail
 const replaySummary = { ...summary, id: replayCaseID } as const
+const attentionResponseToken = `sha256:${"e".repeat(64)}`
+
+function waitingAttention(): PRDevelopmentAttentionProjection {
+  return {
+    case_version: 2,
+    status: "waiting",
+    can_respond: true,
+    turns: [
+      {
+        status: "waiting",
+        title: "Choose how to address the review",
+        questions: parseExactJSON(
+          '{"gate_id":"owner_input","reason":"The repair direction is ambiguous.","questions":["Preserve compatibility?"]}',
+        ),
+        response_token: attentionResponseToken,
+      },
+    ],
+  }
+}
 
 describe("PR development page", () => {
   beforeAll(() => {
@@ -183,6 +225,21 @@ describe("PR development page", () => {
         dispatchEvent: vi.fn(),
       })),
     })
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn(),
+    })
+    Object.defineProperty(window, "requestAnimationFrame", {
+      configurable: true,
+      value: (callback: FrameRequestCallback) => {
+        callback(0)
+        return 1
+      },
+    })
+    Object.defineProperty(window, "cancelAnimationFrame", {
+      configurable: true,
+      value: vi.fn(),
+    })
   })
 
   beforeEach(() => {
@@ -192,11 +249,86 @@ describe("PR development page", () => {
     mockedChat.mockReset()
     mockedRepairRequestID.mockReset()
     mockedStartRepair.mockReset()
+    mockedGetAttention.mockReset()
+    mockedRespondToAttention.mockReset()
     mockedRepairRequestID.mockReturnValue(`prq_${"5".repeat(32)}`)
     mockedList.mockResolvedValue({
       cases: [summary, summary, replaySummary],
     })
     mockedGet.mockResolvedValue(detail)
+    mockedGetAttention.mockResolvedValue({
+      case_version: 2,
+      status: "none",
+      can_respond: false,
+      turns: [],
+    })
+  })
+
+  it("opens a case-owned attention handoff in chat and sends one fenced reply", async () => {
+    mockedGetAttention.mockResolvedValue(waitingAttention())
+    mockedRespondToAttention.mockResolvedValue({
+      case_version: 2,
+      status: "completed",
+      can_respond: false,
+      turns: [
+        {
+          status: "answered",
+          title: "Choose how to address the review",
+          questions: parseExactJSON('["Preserve compatibility?"]'),
+          response: "Preserve it.",
+        },
+      ],
+    })
+    const user = userEvent.setup()
+    renderPage({ view: "development", case: caseID, focus: "chat" })
+
+    const response = await screen.findByLabelText(
+      "Reply to the AI attention request",
+    )
+    await waitFor(() => expect(response).toHaveFocus())
+    expect(screen.getByText("Gate owner_input")).toBeVisible()
+    expect(document.body).not.toHaveTextContent(attentionResponseToken)
+
+    await user.type(response, " Preserve it. ")
+    await user.click(
+      screen.getByRole("button", { name: "Send attention reply" }),
+    )
+
+    await waitFor(() => {
+      expect(mockedRespondToAttention).toHaveBeenCalledWith(
+        caseID,
+        2,
+        attentionResponseToken,
+        "Preserve it.",
+      )
+    })
+    expect(
+      await screen.findByText("The attention conversation is complete."),
+    ).toBeVisible()
+  })
+
+  it("reloads an attention conflict without losing the reply draft", async () => {
+    mockedGetAttention.mockResolvedValue(waitingAttention())
+    mockedRespondToAttention.mockRejectedValue(
+      new PRDevelopmentAttentionAPIError(
+        "pr_development_attention_conflict",
+        409,
+      ),
+    )
+    const user = userEvent.setup()
+    renderPage({ view: "development", case: caseID, focus: "chat" })
+
+    const response = await screen.findByLabelText(
+      "Reply to the AI attention request",
+    )
+    await user.type(response, "Keep my direction")
+    await user.click(
+      screen.getByRole("button", { name: "Send attention reply" }),
+    )
+
+    expect(await screen.findByText(/attention request changed/i)).toBeVisible()
+    expect(response).toHaveValue("Keep my direction")
+    await waitFor(() => expect(mockedGetAttention).toHaveBeenCalledTimes(2))
   })
 
   it("renders captured feedback and advisory conversation as plain text", async () => {
@@ -1521,6 +1653,46 @@ describe("PR development page", () => {
     expect(onSearchChange).toHaveBeenLastCalledWith({ view: "policies" })
   })
 
+  it("polls for AI attention on an unselected case and opens its canonical chat", async () => {
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+    })
+    try {
+      setWideLayoutForTest(false)
+      const onSearchChange = vi.fn()
+      mockedList
+        .mockResolvedValueOnce({ cases: [summary, replaySummary] })
+        .mockResolvedValue({
+          cases: [summary, { ...replaySummary, attention_required: true }],
+        })
+
+      renderPage({ view: "development" }, onSearchChange)
+      await act(async () => {
+        await Promise.resolve()
+      })
+      expect(mockedList).toHaveBeenCalledTimes(1)
+      expect(screen.queryByText("AI attention")).not.toBeInTheDocument()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000)
+      })
+
+      expect(mockedList).toHaveBeenCalledTimes(2)
+      const attentionMarker = screen.getByText("AI attention")
+      fireEvent.click(attentionMarker.closest("button")!)
+      expect(onSearchChange).toHaveBeenLastCalledWith(
+        {
+          view: "development",
+          case: replayCaseID,
+          focus: "chat",
+        },
+        false,
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("passes canonical route filters to the read-only list and resets both", async () => {
     const onSearchChange = vi.fn()
     const user = userEvent.setup()
@@ -1555,6 +1727,7 @@ function renderPage(
     case?: string
     repository?: string
     pull_number?: number
+    focus?: "chat"
   },
   onSearchChange = vi.fn(),
   client = newTestQueryClient(),

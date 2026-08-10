@@ -29,6 +29,8 @@ clipboard-only reuse without editing or invoking anything. A structured Jobs &
 actions builder consumes those targets beside the typed trigger builder while
 retaining raw YAML as the authoritative advanced surface, and every draft test
 requires an exact-scenario review of projected and unknown possible effects.
+The draft-test review action retains accessible contrast while its availability
+changes.
 Its Develop/Operate mode, filter query, selected workflow, and selected run are
 normalized route search state so event and dispatch dashboards can deep-link to
 one exact run and browser navigation restores the same operator context.

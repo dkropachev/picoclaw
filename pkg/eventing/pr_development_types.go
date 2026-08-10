@@ -2,6 +2,7 @@ package eventing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -98,6 +99,11 @@ const (
 	// MaxPRDevelopmentLedgerCheckpointSummaryBytes bounds one logical
 	// compaction summary. Raw ledger records are never removed.
 	MaxPRDevelopmentLedgerCheckpointSummaryBytes = 32 << 10
+
+	// PRDevelopmentAttentionDecisionReviewRequired is the one automatic
+	// attention decision emitted when the local review worker cannot safely
+	// continue without a configured gate decision.
+	PRDevelopmentAttentionDecisionReviewRequired = "pr_development.review_attention_required"
 )
 
 var (
@@ -200,6 +206,22 @@ var (
 	// the corresponding durable decision-run link committed.
 	ErrPRDevelopmentAttentionAdmissionUncertain = errors.New(
 		"pull request development attention decision run admission outcome is uncertain",
+	)
+	// ErrInvalidPRDevelopmentAttentionTrigger reports malformed automatic
+	// attention occurrence, lease, policy-pin, or terminal input.
+	ErrInvalidPRDevelopmentAttentionTrigger = errors.New(
+		"invalid pull request development attention trigger",
+	)
+	// ErrPRDevelopmentAttentionTriggerConflict reports an immutable occurrence
+	// or policy pin that differs from the already-durable value.
+	ErrPRDevelopmentAttentionTriggerConflict = errors.New(
+		"pull request development attention trigger conflict",
+	)
+	// ErrPRDevelopmentAttentionSuperseded reports that a claimed occurrence no
+	// longer names the current review/controller tail and cannot admit a new
+	// decision run. Historical exact linked-run replay remains separately valid.
+	ErrPRDevelopmentAttentionSuperseded = errors.New(
+		"pull request development attention trigger was superseded",
 	)
 )
 
@@ -364,11 +386,20 @@ type PRDevelopmentCaseFilter struct {
 	Limit      int
 }
 
+// PRDevelopmentCaseListItem is one immutable capture plus the only mutable,
+// browser-safe list hint. AttentionRequired is derived atomically by the
+// SQLite list projection; no trigger identity, status, workflow run, or lease
+// authority crosses this boundary.
+type PRDevelopmentCaseListItem struct {
+	PRDevelopmentCase
+	AttentionRequired bool `json:"-"`
+}
+
 // PRDevelopmentCasePage is one stable keyset-paginated development-case
-// result.
+// result. Attention changes never affect its immutable capture ordering.
 type PRDevelopmentCasePage struct {
-	Cases []PRDevelopmentCase      `json:"cases"`
-	Next  *PRDevelopmentCaseCursor `json:"next,omitempty"`
+	Cases []PRDevelopmentCaseListItem `json:"cases"`
+	Next  *PRDevelopmentCaseCursor    `json:"next,omitempty"`
 }
 
 // PRDevelopmentMessageRole identifies the author side of one append-only
@@ -1500,6 +1531,107 @@ type PRDevelopmentAttentionSnapshot struct {
 	HighWater    PRDevelopmentAttentionHighWater `json:"-"`
 }
 
+// PRDevelopmentAttentionTriggerStatus is the durable lifecycle of one
+// automatically emitted attention-required review occurrence.
+type PRDevelopmentAttentionTriggerStatus string
+
+const (
+	PRDevelopmentAttentionTriggerPending          PRDevelopmentAttentionTriggerStatus = "pending"
+	PRDevelopmentAttentionTriggerClaimed          PRDevelopmentAttentionTriggerStatus = "claimed"
+	PRDevelopmentAttentionTriggerDelivered        PRDevelopmentAttentionTriggerStatus = "delivered"
+	PRDevelopmentAttentionTriggerNoop             PRDevelopmentAttentionTriggerStatus = "noop"
+	PRDevelopmentAttentionTriggerSuperseded       PRDevelopmentAttentionTriggerStatus = "superseded"
+	PRDevelopmentAttentionTriggerRecoveryRequired PRDevelopmentAttentionTriggerStatus = "recovery_required"
+	PRDevelopmentAttentionTriggerFailed           PRDevelopmentAttentionTriggerStatus = "failed"
+)
+
+// PRDevelopmentAttentionTrigger is one immutable local-review occurrence plus
+// its private leased launch state. Every field is JSON-private: a later
+// case-owned projection must reconstruct only its bounded public status and
+// must never expose policy, subject, workflow, retry, or lease authority.
+type PRDevelopmentAttentionTrigger struct {
+	ReviewEntryID       string                              `json:"-"`
+	ReviewEntryHash     string                              `json:"-"`
+	CaseID              string                              `json:"-"`
+	ConversationVersion int64                               `json:"-"`
+	TranscriptDigest    string                              `json:"-"`
+	DecisionPoint       string                              `json:"-"`
+	Status              PRDevelopmentAttentionTriggerStatus `json:"-"`
+	LeaseToken          string                              `json:"-"`
+	LeaseUntil          *time.Time                          `json:"-"`
+	Attempts            int                                 `json:"-"`
+	AvailableAt         time.Time                           `json:"-"`
+	PolicyRevision      string                              `json:"-"`
+	PinnedPolicy        json.RawMessage                     `json:"-"`
+	SubjectRevision     string                              `json:"-"`
+	RunID               string                              `json:"-"`
+	LastError           string                              `json:"-"`
+	CreatedAt           time.Time                           `json:"-"`
+	UpdatedAt           time.Time                           `json:"-"`
+	CompletedAt         *time.Time                          `json:"-"`
+}
+
+// PRDevelopmentAttentionTriggerCaseSnapshot is one atomic, integrity-checked
+// bridge read. AttentionRequired distinguishes a historical pre-v16 missing
+// occurrence from a case whose current review does not require attention;
+// TriggerCurrent reports whether the latest durable trigger still owns the
+// current review/controller tail.
+type PRDevelopmentAttentionTriggerCaseSnapshot struct {
+	CaseID                 string                           `json:"-"`
+	ConversationVersion    int64                            `json:"-"`
+	CurrentReviewEntryID   string                           `json:"-"`
+	CurrentReviewEntryHash string                           `json:"-"`
+	CurrentReviewOutcome   PRDevelopmentLedgerReviewOutcome `json:"-"`
+	AttentionRequired      bool                             `json:"-"`
+	Trigger                *PRDevelopmentAttentionTrigger   `json:"-"`
+	TriggerCurrent         bool                             `json:"-"`
+}
+
+// PRDevelopmentAttentionPolicyPin immutably binds a live trigger claim to its
+// canonical configured policy. Snapshot is revalidated in the same SQLite
+// transaction as the pin. An all-zero policy may then complete as Noop;
+// active policies separately pin their projected subject before admission.
+type PRDevelopmentAttentionPolicyPin struct {
+	ReviewEntryID  string                          `json:"-"`
+	LeaseToken     string                          `json:"-"`
+	PolicyRevision string                          `json:"-"`
+	PinnedPolicy   json.RawMessage                 `json:"-"`
+	Snapshot       PRDevelopmentAttentionHighWater `json:"-"`
+}
+
+// PRDevelopmentAttentionSubjectPin adds the immutable subject revision for an
+// already policy-pinned active composition. PolicyRevision prevents a subject
+// prepared for another policy from crossing the second pin boundary.
+type PRDevelopmentAttentionSubjectPin struct {
+	ReviewEntryID   string                          `json:"-"`
+	LeaseToken      string                          `json:"-"`
+	PolicyRevision  string                          `json:"-"`
+	SubjectRevision string                          `json:"-"`
+	Snapshot        PRDevelopmentAttentionHighWater `json:"-"`
+}
+
+// PRDevelopmentAttentionTriggerRelease returns a live claim to pending while
+// retaining its immutable policy/subject pin. Error is sanitized and bounded
+// by the store before persistence.
+type PRDevelopmentAttentionTriggerRelease struct {
+	ReviewEntryID string    `json:"-"`
+	LeaseToken    string    `json:"-"`
+	AvailableAt   time.Time `json:"-"`
+	Error         string    `json:"-"`
+}
+
+// PRDevelopmentAttentionTriggerCompletion retires one live claim. Delivered
+// requires the exact linked private workflow run; Noop requires a pinned
+// all-zero composition as verified by the trusted caller. Other terminal
+// states never carry a run ID.
+type PRDevelopmentAttentionTriggerCompletion struct {
+	ReviewEntryID string                              `json:"-"`
+	LeaseToken    string                              `json:"-"`
+	Status        PRDevelopmentAttentionTriggerStatus `json:"-"`
+	RunID         string                              `json:"-"`
+	Error         string                              `json:"-"`
+}
+
 // PRDevelopmentAttentionDecisionKey is the semantic identity of one exact
 // attention decision. SubjectRevision and PolicyRevision are canonical
 // lowercase SHA-256 revisions supplied by trusted workflow preparation.
@@ -1818,6 +1950,65 @@ type PRDevelopmentAttentionSnapshotReader interface {
 		ctx context.Context,
 		caseID string,
 	) (PRDevelopmentAttentionSnapshot, error)
+}
+
+// PRDevelopmentAttentionTriggerSnapshotReader returns the immutable claimed
+// occurrence together with its exact rich subject snapshot. The queue lease is
+// scheduling authority only and grants no controller or repository mutation.
+type PRDevelopmentAttentionTriggerSnapshotReader interface {
+	GetClaimedPRDevelopmentAttentionSnapshot(
+		ctx context.Context,
+		reviewEntryID string,
+		leaseToken string,
+	) (PRDevelopmentAttentionTrigger, PRDevelopmentAttentionSnapshot, error)
+}
+
+// PRDevelopmentAttentionTriggerCaseReader provides the later case-owned chat
+// bridge one atomic status read without stitching ledger and trigger rows.
+type PRDevelopmentAttentionTriggerCaseReader interface {
+	GetCurrentPRDevelopmentAttentionTriggerForCase(
+		ctx context.Context,
+		caseID string,
+	) (PRDevelopmentAttentionTriggerCaseSnapshot, error)
+}
+
+// PRDevelopmentAttentionTriggerQueue owns automatic attention occurrence
+// delivery. Every mutation and claimed snapshot read is fenced by a live opaque
+// lease token; a completed trigger is never reclaimable.
+type PRDevelopmentAttentionTriggerQueue interface {
+	PRDevelopmentAttentionTriggerSnapshotReader
+	GetPRDevelopmentAttentionTrigger(
+		ctx context.Context,
+		reviewEntryID string,
+	) (PRDevelopmentAttentionTrigger, error)
+	ClaimPRDevelopmentAttentionTriggers(
+		ctx context.Context,
+		workerLabel string,
+		limit int,
+		lease time.Duration,
+	) ([]PRDevelopmentAttentionTrigger, error)
+	RenewPRDevelopmentAttentionTriggerLease(
+		ctx context.Context,
+		reviewEntryID string,
+		leaseToken string,
+		lease time.Duration,
+	) error
+	PinPRDevelopmentAttentionTriggerPolicy(
+		ctx context.Context,
+		input PRDevelopmentAttentionPolicyPin,
+	) (PRDevelopmentAttentionTrigger, error)
+	PinPRDevelopmentAttentionTriggerSubject(
+		ctx context.Context,
+		input PRDevelopmentAttentionSubjectPin,
+	) (PRDevelopmentAttentionTrigger, error)
+	ReleasePRDevelopmentAttentionTrigger(
+		ctx context.Context,
+		input PRDevelopmentAttentionTriggerRelease,
+	) error
+	CompletePRDevelopmentAttentionTrigger(
+		ctx context.Context,
+		input PRDevelopmentAttentionTriggerCompletion,
+	) error
 }
 
 // PRDevelopmentAttentionDecisionRunStore atomically fences one external

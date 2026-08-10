@@ -44,7 +44,21 @@ import {
   normalizePRDevelopmentChatContent,
   startPRDevelopmentRepair,
 } from "@/api/pr-development"
+import {
+  PRDevelopmentAttentionAPIError,
+  PR_DEVELOPMENT_ATTENTION_RESPONSE_MAXIMUM_BYTES,
+  getPRDevelopmentAttention,
+  respondToPRDevelopmentAttention,
+} from "@/api/pr-development-attention"
+import { trimGoSpace } from "@/api/review-attention-json"
 import { PageHeader } from "@/components/page-header"
+import { AttentionConversation } from "@/components/reviews/attention-conversation"
+import {
+  attentionProjectionContainsResponse,
+  attentionProjectionIsVisible,
+  attentionProjectionPollInterval,
+  findActionableAttentionTurn,
+} from "@/components/reviews/attention-conversation-model"
 import { ReviewWorkbenchTabs } from "@/components/reviews/review-workbench-tabs"
 import type { ReviewsRouteSearch } from "@/components/reviews/reviews-page"
 import {
@@ -65,6 +79,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 
 const DEVELOPMENT_PAGE_SIZE = 40
+const DEVELOPMENT_LIST_POLL_INTERVAL_MS = 5_000
 const MAXIMUM_PULL_NUMBER = 2_147_483_647
 
 export function PRDevelopmentPage({
@@ -102,6 +117,7 @@ export function PRDevelopmentPage({
       }),
     getNextPageParam: (lastPage: PRDevelopmentCasePage) =>
       lastPage.next_cursor || undefined,
+    refetchInterval: DEVELOPMENT_LIST_POLL_INTERVAL_MS,
   })
   const cases = useMemo(
     () =>
@@ -279,20 +295,31 @@ export function PRDevelopmentPage({
               error={casesQuery.error}
               hasMore={Boolean(casesQuery.hasNextPage)}
               loadingMore={casesQuery.isFetchingNextPage}
-              onSelect={(caseID) =>
-                onSearchChange({ ...search, case: caseID }, false)
-              }
+              onSelect={(caseID, attentionRequired) => {
+                if (attentionRequired) {
+                  onSearchChange(
+                    { view: "development", case: caseID, focus: "chat" },
+                    false,
+                  )
+                  return
+                }
+                const next = { ...search, case: caseID }
+                delete next.focus
+                onSearchChange(next, false)
+              }}
               onRetry={() => void casesQuery.refetch()}
               onLoadMore={() => void casesQuery.fetchNextPage()}
             />
             <DevelopmentDetailPanel
               caseID={search.case}
+              focusChat={search.focus === "chat"}
               hiddenOnMobile={!search.case}
               focusOnOpen={!wideLayout}
               onBack={() => {
                 restoreFocusCaseRef.current = search.case ?? null
                 const next = { ...search }
                 delete next.case
+                delete next.focus
                 onSearchChange(next, true)
               }}
             />
@@ -322,7 +349,7 @@ function DevelopmentCaseList({
   error: unknown
   hasMore: boolean
   loadingMore: boolean
-  onSelect: (caseID: string) => void
+  onSelect: (caseID: string, attentionRequired: boolean) => void
   onRetry: () => void
   onLoadMore: () => void
 }) {
@@ -396,7 +423,12 @@ function DevelopmentCaseList({
                   key={developmentCase.id}
                   data-pr-development-case-id={developmentCase.id}
                   aria-current={selected ? "true" : undefined}
-                  onClick={() => onSelect(developmentCase.id)}
+                  onClick={() =>
+                    onSelect(
+                      developmentCase.id,
+                      developmentCase.attention_required,
+                    )
+                  }
                   className={cn(
                     "border-border/70 hover:bg-muted/60 focus-visible:border-ring focus-visible:ring-ring/30 grid min-w-0 gap-1.5 rounded-md border px-3 py-2 text-left outline-none focus-visible:ring-2",
                     selected && "bg-accent/70 text-accent-foreground",
@@ -408,6 +440,14 @@ function DevelopmentCaseList({
                       {developmentCase.pull_number}
                     </span>
                     <div className="flex shrink-0 items-center gap-1">
+                      {developmentCase.attention_required ? (
+                        <Badge variant="secondary">
+                          {t(
+                            "pages.reviews.development.ai_attention",
+                            "AI attention",
+                          )}
+                        </Badge>
+                      ) : null}
                       <span className="text-muted-foreground text-[10px]">
                         {t(
                           "pages.reviews.development.at_capture",
@@ -524,25 +564,29 @@ function mergePRDevelopmentDetail(
   }
 }
 
-type DevelopmentMutationKind = "repair" | "chat"
+type DevelopmentMutationKind = "repair" | "chat" | "attention"
 
 interface DevelopmentMutationState {
   repair: boolean
   chat: boolean
+  attention: boolean
 }
 
 const idleDevelopmentMutationState: DevelopmentMutationState = {
   repair: false,
   chat: false,
+  attention: false,
 }
 
 function DevelopmentDetailPanel({
   caseID,
+  focusChat,
   hiddenOnMobile,
   focusOnOpen,
   onBack,
 }: {
   caseID?: string
+  focusChat: boolean
   hiddenOnMobile: boolean
   focusOnOpen: boolean
   onBack: () => void
@@ -586,8 +630,9 @@ function DevelopmentDetailPanel({
 
         const nextState = { ...currentState, [kind]: pending }
         const next = new Map(current)
-        if (!nextState.repair && !nextState.chat) next.delete(id)
-        else next.set(id, nextState)
+        if (!nextState.repair && !nextState.chat && !nextState.attention) {
+          next.delete(id)
+        } else next.set(id, nextState)
         return next
       })
     },
@@ -706,6 +751,7 @@ function DevelopmentDetailPanel({
         ) : detail ? (
           <DevelopmentCaseDetail
             detail={detail}
+            focusRequested={focusChat}
             refreshError={detailQuery.isRefetchError ? detailQuery.error : null}
             refreshing={detailQuery.isFetching}
             repairDraft={repairDrafts.get(detail.case.id) ?? ""}
@@ -731,6 +777,7 @@ function DevelopmentDetailPanel({
 
 function DevelopmentCaseDetail({
   detail,
+  focusRequested,
   refreshError,
   refreshing,
   repairDraft,
@@ -742,6 +789,7 @@ function DevelopmentCaseDetail({
   onRetryRefresh,
 }: {
   detail: PRDevelopmentCaseDetail
+  focusRequested: boolean
   refreshError: unknown
   refreshing: boolean
   repairDraft: string
@@ -832,7 +880,7 @@ function DevelopmentCaseDetail({
         storedDraft={repairDraft}
         storedIntent={repairIntent}
         mutationPending={mutationState.repair}
-        otherMutationPending={mutationState.chat}
+        otherMutationPending={mutationState.chat || mutationState.attention}
         onRememberDraft={onRememberRepairDraft}
         onRememberIntent={onRememberRepairIntent}
         onRememberMutationPending={onRememberMutationPending}
@@ -842,8 +890,9 @@ function DevelopmentCaseDetail({
       <DevelopmentConversation
         key={`chat-${developmentCase.id}`}
         detail={detail}
+        focusRequested={focusRequested}
         mutationPending={mutationState.chat}
-        otherMutationPending={mutationState.repair}
+        otherMutationPending={mutationState.repair || mutationState.attention}
         onRememberMutationPending={onRememberMutationPending}
       />
 
@@ -1444,11 +1493,13 @@ function RepairAttemptCard({
 
 function DevelopmentConversation({
   detail,
+  focusRequested,
   mutationPending,
   otherMutationPending,
   onRememberMutationPending,
 }: {
   detail: PRDevelopmentCaseDetail
+  focusRequested: boolean
   mutationPending: boolean
   otherMutationPending: boolean
   onRememberMutationPending: (
@@ -1460,9 +1511,17 @@ function DevelopmentConversation({
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [draft, setDraft] = useState("")
+  const [attentionResponse, setAttentionResponse] = useState("")
+  const [attentionError, setAttentionError] = useState<string>()
+  const [attentionPending, setAttentionPending] = useState(false)
   const [failedMessageCommitted, setFailedMessageCommitted] = useState(false)
   const [restoreFocusAfterRetry, setRestoreFocusAfterRetry] = useState(false)
+  const sectionRef = useRef<HTMLElement>(null)
+  const headingRef = useRef<HTMLHeadingElement>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  const attentionInputRef = useRef<HTMLTextAreaElement>(null)
+  const recoveryButtonRef = useRef<HTMLButtonElement>(null)
+  const focusedTargetsRef = useRef(new Set<string>())
   const [uncertainSubmission, setUncertainSubmission] = useState<{
     expectedVersion: number
     content: string
@@ -1473,6 +1532,26 @@ function DevelopmentConversation({
     "detail",
     developmentCase.id,
   ] as const
+  const attentionQueryKey = [
+    "pr-development",
+    "attention",
+    developmentCase.id,
+  ] as const
+  const attentionQuery = useQuery({
+    queryKey: attentionQueryKey,
+    queryFn: ({ signal }) =>
+      getPRDevelopmentAttention(developmentCase.id, signal),
+    retry: false,
+    refetchInterval: (query) =>
+      attentionProjectionPollInterval(query.state.data),
+  })
+  const attention = attentionQuery.data
+  const actionableAttentionTurn = findActionableAttentionTurn(attention)
+  const showAttention =
+    focusRequested ||
+    attentionQuery.isPending ||
+    Boolean(attentionQuery.error) ||
+    attentionProjectionIsVisible(attention)
   const normalizedDraft = normalizePRDevelopmentChatContent(draft)
   const draftBytes = new TextEncoder().encode(normalizedDraft).byteLength
   const draftInvalid =
@@ -1546,6 +1625,35 @@ function DevelopmentConversation({
   const chatPending = mutationPending || chatMutation.isPending
 
   useEffect(() => {
+    if (!focusRequested) return
+    const responseToken = actionableAttentionTurn?.response_token
+    const focusKey = responseToken
+      ? `${developmentCase.id}:${responseToken}`
+      : `${developmentCase.id}:chat`
+    if (focusedTargetsRef.current.has(focusKey)) return
+    const target =
+      actionableAttentionTurn?.status === "waiting" && attention?.can_respond
+        ? attentionInputRef.current
+        : actionableAttentionTurn?.status === "recovery_required" &&
+            attention?.can_respond
+          ? recoveryButtonRef.current
+          : (composerRef.current ?? headingRef.current)
+    if (!target || !sectionRef.current) return
+    const frame = window.requestAnimationFrame(() => {
+      if (!target.isConnected || !sectionRef.current) return
+      sectionRef.current.scrollIntoView({ block: "start" })
+      target.focus({ preventScroll: true })
+      focusedTargetsRef.current.add(focusKey)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [
+    actionableAttentionTurn,
+    attention?.can_respond,
+    developmentCase.id,
+    focusRequested,
+  ])
+
+  useEffect(() => {
     if (uncertainSubmission == null || !uncertainMessageCommitted) {
       return
     }
@@ -1578,6 +1686,7 @@ function DevelopmentConversation({
     event?.preventDefault()
     if (
       chatPending ||
+      attentionPending ||
       otherMutationPending ||
       draftInvalid ||
       (messageWasCommitted && uncertainSubmission?.content === normalizedDraft)
@@ -1590,11 +1699,77 @@ function DevelopmentConversation({
     })
   }
 
+  const respondToAttention = async (response: string) => {
+    if (
+      !attention?.can_respond ||
+      !actionableAttentionTurn?.response_token ||
+      attentionPending ||
+      chatPending ||
+      otherMutationPending
+    ) {
+      return
+    }
+    const targetIndex = attention.turns.lastIndexOf(actionableAttentionTurn)
+    setAttentionPending(true)
+    setAttentionError(undefined)
+    onRememberMutationPending(developmentCase.id, "attention", true)
+    try {
+      const next = await respondToPRDevelopmentAttention(
+        developmentCase.id,
+        attention.case_version,
+        actionableAttentionTurn.response_token,
+        response,
+      )
+      queryClient.setQueryData(attentionQueryKey, next)
+      setAttentionResponse("")
+    } catch (error) {
+      setAttentionError(prDevelopmentAttentionErrorMessage(error, t))
+      const refreshed = await attentionQuery.refetch()
+      if (
+        !refreshed.isError &&
+        targetIndex >= 0 &&
+        attentionProjectionContainsResponse(
+          refreshed.data,
+          targetIndex,
+          trimGoSpace(response),
+          actionableAttentionTurn.status,
+        )
+      ) {
+        setAttentionError(undefined)
+        setAttentionResponse("")
+      }
+    } finally {
+      setAttentionPending(false)
+      onRememberMutationPending(developmentCase.id, "attention", false)
+    }
+  }
+
+  const submitAttention = (event: FormEvent) => {
+    event.preventDefault()
+    const normalized = trimGoSpace(attentionResponse)
+    const responseBytes = new TextEncoder().encode(normalized).byteLength
+    if (
+      normalized !== "" &&
+      responseBytes <= PR_DEVELOPMENT_ATTENTION_RESPONSE_MAXIMUM_BYTES
+    ) {
+      void respondToAttention(normalized)
+    }
+  }
+
   return (
-    <section className="border-border rounded-lg border p-4">
+    <section
+      ref={sectionRef}
+      aria-labelledby={`development-chat-heading-${developmentCase.id}`}
+      className="border-border scroll-mt-3 rounded-lg border p-4"
+    >
       <div className="flex items-center gap-2">
         <IconMessageCircle className="text-muted-foreground size-4" />
-        <h3 className="text-sm font-semibold">
+        <h3
+          ref={headingRef}
+          id={`development-chat-heading-${developmentCase.id}`}
+          tabIndex={-1}
+          className="text-sm font-semibold outline-none"
+        >
           {t("pages.reviews.development.chat_title", "Discuss with AI")}
         </h3>
       </div>
@@ -1604,6 +1779,29 @@ function DevelopmentConversation({
           "AI advice is based on this captured snapshot and conversation. It cannot inspect a checkout, read current GitHub state, edit code, run checks, or push changes.",
         )}
       </p>
+
+      {showAttention ? (
+        <AttentionConversation
+          projection={attention}
+          loading={attentionQuery.isPending}
+          loadError={attentionQuery.error}
+          actionError={attentionError}
+          response={attentionResponse}
+          pending={attentionPending || chatPending || otherMutationPending}
+          maximumResponseBytes={PR_DEVELOPMENT_ATTENTION_RESPONSE_MAXIMUM_BYTES}
+          idPrefix={`pr-development-attention-${developmentCase.id}`}
+          attentionInputRef={attentionInputRef}
+          recoveryButtonRef={recoveryButtonRef}
+          onResponseChange={setAttentionResponse}
+          onSubmit={submitAttention}
+          onRetryLoad={() => void attentionQuery.refetch()}
+          onRetryContinuation={() => {
+            if (actionableAttentionTurn?.response) {
+              void respondToAttention(actionableAttentionTurn.response)
+            }
+          }}
+        />
+      ) : null}
 
       {detail.messages.length === 0 ? (
         <p className="text-muted-foreground bg-muted/30 mt-3 rounded-md p-3 text-sm">
@@ -1618,7 +1816,7 @@ function DevelopmentConversation({
         aria-live="polite"
         aria-relevant="additions text"
         aria-atomic="false"
-        aria-busy={chatPending}
+        aria-busy={chatPending || attentionPending}
         aria-label={t(
           "pages.reviews.development.chat_history",
           "Development conversation",
@@ -1660,7 +1858,7 @@ function DevelopmentConversation({
             "Ask a question or steer the discussion…",
           )}
           onChange={(event) => setDraft(event.target.value)}
-          disabled={chatPending || otherMutationPending}
+          disabled={chatPending || attentionPending || otherMutationPending}
         />
         {draftBytes > MAXIMUM_PR_DEVELOPMENT_CHAT_BYTES ? (
           <p className="text-destructive text-xs" role="alert">
@@ -1694,7 +1892,12 @@ function DevelopmentConversation({
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={draftInvalid || chatPending || otherMutationPending}
+                disabled={
+                  draftInvalid ||
+                  chatPending ||
+                  attentionPending ||
+                  otherMutationPending
+                }
                 onClick={() => {
                   setRestoreFocusAfterRetry(true)
                   send()
@@ -1723,7 +1926,12 @@ function DevelopmentConversation({
         <div className="flex justify-end">
           <Button
             type="submit"
-            disabled={draftInvalid || chatPending || otherMutationPending}
+            disabled={
+              draftInvalid ||
+              chatPending ||
+              attentionPending ||
+              otherMutationPending
+            }
           >
             <IconSend className="size-4" />
             {chatPending
@@ -1982,6 +2190,22 @@ function repairErrorLabel(
   }
 }
 
+function prDevelopmentAttentionErrorMessage(
+  error: unknown,
+  t: Translate,
+): string {
+  if (error instanceof PRDevelopmentAttentionAPIError && error.status === 409) {
+    return t(
+      "pages.reviews.development.attention_conflict",
+      "This attention request changed. The latest state was loaded and your reply is preserved.",
+    )
+  }
+  return t(
+    "pages.reviews.development.attention_respond_error",
+    "The reply could not be sent. The latest state was loaded and your text is preserved.",
+  )
+}
+
 function useWideDevelopmentLayout(): boolean {
   const query = "(min-width: 1024px)"
   const [wide, setWide] = useState(() =>
@@ -2000,3 +2224,9 @@ function useWideDevelopmentLayout(): boolean {
 
   return wide
 }
+
+type Translate = (
+  key: string,
+  fallback: string,
+  options?: Record<string, unknown>,
+) => string

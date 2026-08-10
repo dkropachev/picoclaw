@@ -52,16 +52,22 @@ type PrivateRunnerConfig struct {
 	Runs      workflows.RunStore
 	Policies  PolicySource
 	Decisions DecisionBinding
+	// ProjectLinkedAdmissionQuarantine is a compatibility mode for consumers
+	// whose durable trigger schema predates an explicit recovery terminal. It
+	// projects only an exact linked terminal quarantine as an existing failed
+	// run; unlinked and running ambiguity remains unavailable or uncertain.
+	ProjectLinkedAdmissionQuarantine bool
 }
 
 // PrivateRunner compiles and executes shared gate primitives in an authenticated
 // private workflow root. Product adapters retain ownership of subjects,
 // working-session projection, and durable decision-key meaning.
 type PrivateRunner struct {
-	executor  *workflows.Executor
-	runs      workflows.RunStore
-	policies  PolicySource
-	decisions DecisionBinding
+	executor                         *workflows.Executor
+	runs                             workflows.RunStore
+	policies                         PolicySource
+	decisions                        DecisionBinding
+	projectLinkedAdmissionQuarantine bool
 }
 
 type PrivateLaunchRequest struct {
@@ -98,10 +104,11 @@ func NewPrivateRunner(config PrivateRunnerConfig) (*PrivateRunner, error) {
 		runs = workflows.NewFileRunStore(config.Executor.WorkspaceDir)
 	}
 	return &PrivateRunner{
-		executor:  config.Executor,
-		runs:      runs,
-		policies:  config.Policies,
-		decisions: config.Decisions,
+		executor:                         config.Executor,
+		runs:                             runs,
+		policies:                         config.Policies,
+		decisions:                        config.Decisions,
+		projectLinkedAdmissionQuarantine: config.ProjectLinkedAdmissionQuarantine,
 	}, nil
 }
 
@@ -146,6 +153,14 @@ func (runner *PrivateRunner) FindExisting(
 	ctx context.Context,
 	key string,
 ) (PrivateLaunchResult, bool, error) {
+	return runner.findExisting(ctx, key, true)
+}
+
+func (runner *PrivateRunner) findExisting(
+	ctx context.Context,
+	key string,
+	detectOrphan bool,
+) (PrivateLaunchResult, bool, error) {
 	if !runner.Available() {
 		return PrivateLaunchResult{}, false, ErrPrivateRunUnavailable
 	}
@@ -162,16 +177,43 @@ func (runner *PrivateRunner) FindExisting(
 	}
 	if !found {
 		if linkedRunID != "" {
+			return PrivateLaunchResult{}, false, ErrPrivateRunAdmissionUncertain
+		}
+		if !detectOrphan {
+			return PrivateLaunchResult{}, false, nil
+		}
+		// A deterministic run without its decision link can only be a
+		// create/commit crash boundary. Discover it before callers consult
+		// mutable product state or attempt another admission.
+		if _, orphanErr := runner.runs.GetRun(ctx, runID); orphanErr == nil {
+			return PrivateLaunchResult{}, false, ErrPrivateRunAdmissionUncertain
+		} else if !errors.Is(orphanErr, os.ErrNotExist) {
 			return PrivateLaunchResult{}, false, ErrPrivateRunUnavailable
 		}
 		return PrivateLaunchResult{}, false, nil
 	}
 	if linkedRunID != runID {
-		return PrivateLaunchResult{}, false, ErrPrivateRunUnavailable
+		return PrivateLaunchResult{}, false, ErrPrivateRunAdmissionUncertain
 	}
 	run, err := runner.runs.GetRun(ctx, runID)
-	if err != nil || !ValidPrivateRun(run, runID) {
+	if errors.Is(err, os.ErrNotExist) {
+		return PrivateLaunchResult{}, false, ErrPrivateRunAdmissionUncertain
+	}
+	if err != nil {
 		return PrivateLaunchResult{}, false, ErrPrivateRunUnavailable
+	}
+	if !ValidPrivateRun(run, runID) {
+		return PrivateLaunchResult{}, false, ErrPrivateRunAdmissionUncertain
+	}
+	// A durable decision link does not make an admission-quarantined run safe
+	// to replay as a delivered gate result. Its fixed private marker is the
+	// durable recovery boundary for every later lookup.
+	if run.Status == workflows.RunStatusFailed &&
+		run.Error == privateRunAdmissionUncertainFailure {
+		if !isExactAdmissionQuarantine(run) ||
+			!runner.projectLinkedAdmissionQuarantine {
+			return PrivateLaunchResult{}, false, ErrPrivateRunAdmissionUncertain
+		}
 	}
 	// Launch executes synchronously until the run is waiting or terminal. A
 	// linked run that is still running is therefore either owned by another
@@ -194,7 +236,30 @@ func (runner *PrivateRunner) Launch(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if existing, found, err := runner.FindExisting(ctx, request.DecisionKey); err != nil {
+	// A canonical zero-only policy has no durable run identity or effect. Keep
+	// it independent of any impossible orphan at a caller-reused key.
+	if request.Policy.IsNoop() {
+		compilation, err := workflows.CompileGateWorkflow(
+			WorkflowName,
+			request.Policy.EffectiveGates(),
+			nil,
+		)
+		if err != nil || compilation == nil || !compilation.Noop ||
+			compilation.Workflow != nil || compilation.PrivateRoot != nil ||
+			compilation.RequiresSession || compilation.RequiredSessionAgentID != "" ||
+			request.ReadOnlySession != nil {
+			return PrivateLaunchResult{}, ErrPrivateRunUnavailable
+		}
+		return PrivateLaunchResult{Noop: true}, nil
+	}
+	// Launch itself lets DecisionBinding.Admit serialize a legitimate
+	// concurrent create-before-link window. The public exact lookup remains
+	// stricter and classifies the same state as recovery when no owner is known.
+	if existing, found, err := runner.findExisting(
+		ctx,
+		request.DecisionKey,
+		false,
+	); err != nil {
 		return PrivateLaunchResult{}, err
 	} else if found {
 		return existing, nil
@@ -450,12 +515,19 @@ func (runner *PrivateRunner) quarantineUncertainRun(ctx context.Context, runID s
 	// caller still receives only the fixed uncertainty sentinel on any outcome.
 	reloaded, err := runner.runs.GetRun(quarantineCtx, runID)
 	if err != nil || !ValidPrivateRun(reloaded, runID) ||
-		reloaded.Status != workflows.RunStatusFailed ||
-		reloaded.Error != privateRunAdmissionUncertainFailure ||
-		reloaded.CompletedAt == nil || len(reloaded.Jobs) != 0 ||
-		len(reloaded.Steps) != 0 || len(reloaded.Outputs) != 0 {
+		!isExactAdmissionQuarantine(reloaded) {
 		return
 	}
+}
+
+func isExactAdmissionQuarantine(run *workflows.Run) bool {
+	return run != nil && run.Status == workflows.RunStatusFailed &&
+		run.Error == privateRunAdmissionUncertainFailure &&
+		run.CompletedAt != nil && !run.CreatedAt.IsZero() &&
+		!run.UpdatedAt.IsZero() && !run.UpdatedAt.Before(*run.CompletedAt) &&
+		!run.CompletedAt.Before(run.CreatedAt) && len(run.Jobs) == 0 &&
+		len(run.Steps) == 0 && len(run.Outputs) == 0 &&
+		run.CancelReason == "" && run.CancelRequestedAt == nil
 }
 
 func withRevalidatedPolicy(

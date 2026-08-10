@@ -352,6 +352,8 @@ func (s *Store) PinReviewAttentionTriggerPolicy(
 
 // ReleaseReviewAttentionTrigger returns a live owned claim to pending while
 // retaining any immutable policy pin for an exact retry.
+//
+//nolint:dupl // Separate schema-specific lease updates keep keys and statuses explicit.
 func (s *Store) ReleaseReviewAttentionTrigger(
 	ctx context.Context,
 	input ReviewAttentionTriggerRelease,

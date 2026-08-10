@@ -51,8 +51,7 @@ describe("reviews route search", () => {
     ).toEqual({
       view: "development",
       case: developmentCaseID,
-      repository: "octo/repo",
-      pull_number: 84,
+      focus: "chat",
     })
 
     expect(
@@ -72,6 +71,26 @@ describe("reviews route search", () => {
         }),
       ).toEqual({ view: "development" })
     }
+  })
+
+  it("keeps development chat focus only with one valid public case", () => {
+    expect(
+      normalizeReviewsSearch({
+        view: "development",
+        case: developmentCaseID,
+        focus: "chat",
+        run: "private",
+        task: "private",
+        response_token: "private",
+      }),
+    ).toEqual({
+      view: "development",
+      case: developmentCaseID,
+      focus: "chat",
+    })
+    expect(
+      normalizeReviewsSearch({ view: "development", focus: "chat" }),
+    ).toEqual({ view: "development" })
   })
 
   it("canonicalizes every present invalid or repeated view to the empty inbox URL", () => {

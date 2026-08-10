@@ -31,7 +31,8 @@ var errInvalidChatMediaType = errors.New("invalid development chat media type")
 // Handler exposes one immutable Service generation over exact read routes and
 // one bounded, case-owned advisory chat mutation.
 type Handler struct {
-	Service *Service
+	Service   *Service
+	Attention *AttentionBridge
 }
 
 func (handler *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) {
@@ -93,6 +94,23 @@ func (handler *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) 
 			return
 		}
 		writeJSON(w, http.StatusOK, detail)
+	case len(segments) == 2 && segments[1] == "attention":
+		if request.Method != http.MethodGet {
+			writeMethod(w, http.MethodGet)
+			return
+		}
+		if invalidReadRequest(request) {
+			writeError(w, http.StatusBadRequest, "invalid development attention request")
+			return
+		}
+		handler.getAttention(w, request, caseID)
+	case len(segments) == 3 && segments[1] == "attention" &&
+		segments[2] == "respond":
+		if request.Method != http.MethodPost {
+			writeMethod(w, http.MethodPost)
+			return
+		}
+		handler.respondAttention(w, request, caseID)
 	case len(segments) == 2 && segments[1] == "chat":
 		if request.Method != http.MethodPost {
 			writeMethod(w, http.MethodPost)
@@ -108,6 +126,78 @@ func (handler *Handler) ServeHTTP(w http.ResponseWriter, request *http.Request) 
 	default:
 		writeError(w, http.StatusNotFound, "not found")
 	}
+}
+
+func (handler *Handler) getAttention(
+	w http.ResponseWriter,
+	request *http.Request,
+	caseID string,
+) {
+	if handler.Attention == nil {
+		writeOperationError(w, ErrUnavailable, nil)
+		return
+	}
+	view, err := handler.Attention.Project(request.Context(), caseID)
+	if err != nil {
+		writeOperationError(w, err, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+func (handler *Handler) respondAttention(
+	w http.ResponseWriter,
+	request *http.Request,
+	caseID string,
+) {
+	if hasChatBrowserProvenance(request.Header) {
+		writeError(w, http.StatusForbidden, "cross-site development attention response rejected")
+		return
+	}
+	if handler.Attention == nil {
+		writeOperationError(w, ErrUnavailable, nil)
+		return
+	}
+	var body struct {
+		ExpectedCaseVersion *int64  `json:"expected_case_version"`
+		ResponseToken       *string `json:"response_token"`
+		Response            *string `json:"response"`
+	}
+	if err := decodeAttentionResponseBody(w, request, &body); err != nil {
+		var maximum *http.MaxBytesError
+		switch {
+		case errors.As(err, &maximum):
+			writeError(w, http.StatusRequestEntityTooLarge, "development attention response is too large")
+		case errors.Is(err, errInvalidChatMediaType):
+			writeError(
+				w,
+				http.StatusUnsupportedMediaType,
+				"development attention response requires JSON with identity encoding",
+			)
+		default:
+			writeError(w, http.StatusBadRequest, "invalid development attention response")
+		}
+		return
+	}
+	if body.ExpectedCaseVersion == nil || body.ResponseToken == nil ||
+		body.Response == nil {
+		writeError(w, http.StatusBadRequest, "invalid development attention response")
+		return
+	}
+	view, err := handler.Attention.Respond(
+		request.Context(),
+		AttentionResponseRequest{
+			CaseID:              caseID,
+			ExpectedCaseVersion: *body.ExpectedCaseVersion,
+			ResponseToken:       *body.ResponseToken,
+			Response:            *body.Response,
+		},
+	)
+	if err != nil {
+		writeOperationError(w, err, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (handler *Handler) repair(
@@ -304,6 +394,19 @@ func decodeRepairBody(
 	)
 }
 
+func decodeAttentionResponseBody(
+	w http.ResponseWriter,
+	request *http.Request,
+	target any,
+) error {
+	return decodeDevelopmentMutationBody(
+		w,
+		request,
+		target,
+		validateExactAttentionResponseJSONFields,
+	)
+}
+
 func decodeDevelopmentMutationBody(
 	w http.ResponseWriter,
 	request *http.Request,
@@ -374,6 +477,23 @@ func validateExactChatJSONFields(raw []byte) error {
 	}
 	if _, ok := fields["content"]; !ok {
 		return ErrInvalidRequest
+	}
+	return nil
+}
+
+func validateExactAttentionResponseJSONFields(raw []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || len(fields) != 3 {
+		return ErrInvalidRequest
+	}
+	for _, name := range []string{
+		"expected_case_version",
+		"response_token",
+		"response",
+	} {
+		if _, ok := fields[name]; !ok {
+			return ErrInvalidRequest
+		}
 	}
 	return nil
 }

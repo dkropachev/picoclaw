@@ -443,6 +443,19 @@ func (s *Store) migrate(ctx context.Context) (err error) {
 	} else if err = validateSchemaV15(ctx, conn); err != nil {
 		return fmt.Errorf("validate eventing schema v15: %w", err)
 	}
+	if version < 16 {
+		if _, err = conn.ExecContext(ctx, schemaV16); err != nil {
+			return fmt.Errorf("create eventing schema v16: %w", err)
+		}
+		if err = validateSchemaV16(ctx, conn); err != nil {
+			return fmt.Errorf("validate eventing schema v16: %w", err)
+		}
+		if _, err = conn.ExecContext(ctx, "PRAGMA user_version = 16"); err != nil {
+			return fmt.Errorf("record eventing schema v16: %w", err)
+		}
+	} else if err = validateSchemaV16(ctx, conn); err != nil {
+		return fmt.Errorf("validate eventing schema v16: %w", err)
+	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit eventing migration: %w", err)
 	}

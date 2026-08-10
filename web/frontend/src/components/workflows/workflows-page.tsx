@@ -2606,6 +2606,7 @@ function DevelopSurface({
           <Button
             variant="outline"
             size="sm"
+            className="disabled:opacity-60"
             onClick={requestDraftTest}
             disabled={
               !canTestDraft || draftActionDisabled || !triggerReviewReady

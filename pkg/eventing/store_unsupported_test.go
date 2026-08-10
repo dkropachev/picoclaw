@@ -365,12 +365,66 @@ func TestStorePRDevelopmentAttentionUnsupported(t *testing.T) {
 
 	ctx := context.Background()
 	var store Store
+	assertUnsupported := func(name string, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrUnsupportedPlatform) {
+			t.Fatalf("%s error = %v, want %v", name, err, ErrUnsupportedPlatform)
+		}
+	}
 	if _, err := store.GetPRDevelopmentAttentionSnapshot(
 		ctx,
 		"pdc_00000000000000000000000000000000",
 	); !errors.Is(err, ErrUnsupportedPlatform) {
 		t.Fatalf("GetPRDevelopmentAttentionSnapshot() error = %v, want %v", err, ErrUnsupportedPlatform)
 	}
+	_, err := store.GetPRDevelopmentAttentionTrigger(ctx, "pdl_00000000000000000000000000000000")
+	assertUnsupported("GetPRDevelopmentAttentionTrigger()", err)
+	_, err = store.GetCurrentPRDevelopmentAttentionTriggerForCase(
+		ctx,
+		"pdc_00000000000000000000000000000000",
+	)
+	assertUnsupported("GetCurrentPRDevelopmentAttentionTriggerForCase()", err)
+	_, _, err = store.GetClaimedPRDevelopmentAttentionSnapshot(
+		ctx,
+		"pdl_00000000000000000000000000000000",
+		"lease",
+	)
+	assertUnsupported("GetClaimedPRDevelopmentAttentionSnapshot()", err)
+	_, err = store.ClaimPRDevelopmentAttentionTriggers(ctx, "worker", 1, time.Minute)
+	assertUnsupported("ClaimPRDevelopmentAttentionTriggers()", err)
+	assertUnsupported(
+		"RenewPRDevelopmentAttentionTriggerLease()",
+		store.RenewPRDevelopmentAttentionTriggerLease(
+			ctx,
+			"pdl_00000000000000000000000000000000",
+			"lease",
+			time.Minute,
+		),
+	)
+	_, err = store.PinPRDevelopmentAttentionTriggerPolicy(
+		ctx,
+		PRDevelopmentAttentionPolicyPin{},
+	)
+	assertUnsupported("PinPRDevelopmentAttentionTriggerPolicy()", err)
+	_, err = store.PinPRDevelopmentAttentionTriggerSubject(
+		ctx,
+		PRDevelopmentAttentionSubjectPin{},
+	)
+	assertUnsupported("PinPRDevelopmentAttentionTriggerSubject()", err)
+	assertUnsupported(
+		"ReleasePRDevelopmentAttentionTrigger()",
+		store.ReleasePRDevelopmentAttentionTrigger(
+			ctx,
+			PRDevelopmentAttentionTriggerRelease{},
+		),
+	)
+	assertUnsupported(
+		"CompletePRDevelopmentAttentionTrigger()",
+		store.CompletePRDevelopmentAttentionTrigger(
+			ctx,
+			PRDevelopmentAttentionTriggerCompletion{},
+		),
+	)
 	if _, err := store.GetPRDevelopmentAttentionDecisionRun(
 		ctx,
 		PRDevelopmentAttentionDecisionKey{},

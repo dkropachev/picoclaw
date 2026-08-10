@@ -125,8 +125,11 @@ func TestServiceProjectsOnlyBrowserSafeCapturedSnapshot(t *testing.T) {
 	}
 	reader := &fakeReader{
 		page: eventing.PRDevelopmentCasePage{
-			Cases: []eventing.PRDevelopmentCase{captured},
-			Next:  &next,
+			Cases: []eventing.PRDevelopmentCaseListItem{{
+				PRDevelopmentCase: captured,
+				AttentionRequired: true,
+			}},
+			Next: &next,
 		},
 		detail: captured,
 	}
@@ -153,7 +156,8 @@ func TestServiceProjectsOnlyBrowserSafeCapturedSnapshot(t *testing.T) {
 	}
 	if page.Cases[0].CapturedAt != captured.CreatedAt ||
 		page.Cases[0].HeadSHA != captured.HeadSHA ||
-		page.Cases[0].ReviewURL != captured.ReviewURL {
+		page.Cases[0].ReviewURL != captured.ReviewURL ||
+		!page.Cases[0].AttentionRequired {
 		t.Fatalf("summary = %#v", page.Cases[0])
 	}
 
@@ -754,7 +758,10 @@ func TestHandlerServesExactReadOnlyRoutesAndPlainFeedback(t *testing.T) {
 	captured := testCapturedDevelopmentCase()
 	reader := &fakeReader{
 		page: eventing.PRDevelopmentCasePage{
-			Cases: []eventing.PRDevelopmentCase{captured},
+			Cases: []eventing.PRDevelopmentCaseListItem{{
+				PRDevelopmentCase: captured,
+				AttentionRequired: true,
+			}},
 		},
 		detail: captured,
 	}
@@ -779,6 +786,13 @@ func TestHandlerServesExactReadOnlyRoutesAndPlainFeedback(t *testing.T) {
 		reader.listFilter.Limit != 25 {
 		t.Fatalf("list filter = %#v", reader.listFilter)
 	}
+	if !strings.Contains(list.Body.String(), `"attention_required":true`) ||
+		strings.Contains(list.Body.String(), captured.DispatchID) ||
+		strings.Contains(list.Body.String(), `"review_entry_id"`) ||
+		strings.Contains(list.Body.String(), `"run_id"`) ||
+		strings.Contains(list.Body.String(), `"status"`) {
+		t.Fatalf("list body = %s", list.Body.String())
+	}
 
 	detail := httptest.NewRecorder()
 	handler.ServeHTTP(detail, httptest.NewRequest(
@@ -791,7 +805,8 @@ func TestHandlerServesExactReadOnlyRoutesAndPlainFeedback(t *testing.T) {
 	}
 	assertDevelopmentHeaders(t, detail)
 	if !strings.Contains(detail.Body.String(), `\u003cscript\u003e`) ||
-		strings.Contains(detail.Body.String(), captured.DispatchID) {
+		strings.Contains(detail.Body.String(), captured.DispatchID) ||
+		strings.Contains(detail.Body.String(), `"attention_required"`) {
 		t.Fatalf("detail body = %s", detail.Body.String())
 	}
 }

@@ -194,6 +194,69 @@ func TestAttentionTriggerWorkerCompletesAdmittedFailedRun(t *testing.T) {
 	}
 }
 
+func TestAttentionTriggerWorkerQuarantinedLinkedRunTerminatesOnRetry(t *testing.T) {
+	now := serviceTestTime.Add(70 * time.Minute)
+	detail := submittedAttentionTestDetail(serviceTestCaseID, 12)
+	store := newAttentionTestStore(detail)
+	service := newAttentionTestService(t, store, nil, nil)
+	agent := &attentionTestAgent{taskByAgent: map[string]bool{"reviewer": false}}
+	workspace := t.TempDir()
+	runStore := workflows.NewFileRunStore(workspace)
+	policies := &attentionTestPolicySource{snapshots: []AttentionPolicySnapshot{
+		attentionTestPolicy("quarantined-linked-generation", []workflows.GateSpec{{
+			ID: "isolated", Kind: workflows.GateAIIsolatedContext,
+			AgentID: "reviewer", Criteria: "ask when uncertain", Title: "Clarify",
+		}}),
+	}}
+	executor := &workflows.Executor{WorkspaceDir: workspace, Store: runStore, Agents: agent}
+	executor.AdmittedRunCreate = func(
+		_ context.Context,
+		_ *workflows.Run,
+		create func() error,
+	) error {
+		if err := create(); err != nil {
+			return err
+		}
+		return errors.New("post-create admission acknowledgement failed")
+	}
+	launcher := newAttentionTestLauncher(t, service, executor, policies)
+	queue := newAttentionTriggerQueueFake(now, detail.Case.ID, detail.Case.Version)
+	worker := &AttentionTriggerWorker{
+		Queue: queue, Launcher: launcher, Now: func() time.Time { return now },
+	}
+
+	processed, err := worker.ProcessOne(context.Background())
+	first := queue.snapshot()
+	if !processed || err == nil || first.Status != eventing.ReviewAttentionPending ||
+		first.PolicyRevision == "" || len(queue.releases) != 1 ||
+		len(store.linksSnapshot()) != 1 {
+		t.Fatalf(
+			"first ProcessOne()=(%v,%v) trigger=%#v releases=%d links=%d",
+			processed, err, first, len(queue.releases), len(store.linksSnapshot()),
+		)
+	}
+	now = now.Add(time.Minute)
+	queue.setNow(now)
+	processed, err = worker.ProcessOne(context.Background())
+	terminal := queue.snapshot()
+	if !processed || err != nil || terminal.Status != eventing.ReviewAttentionDelivered ||
+		terminal.RunID == "" || len(queue.releases) != 1 || len(queue.completions) != 1 {
+		t.Fatalf(
+			"retry ProcessOne()=(%v,%v) trigger=%#v releases=%d completions=%d",
+			processed, err, terminal, len(queue.releases), len(queue.completions),
+		)
+	}
+	run, getErr := runStore.GetRun(context.Background(), terminal.RunID)
+	requests, captures := agent.observations()
+	if getErr != nil || run.Status != workflows.RunStatusFailed ||
+		len(requests) != 0 || len(captures) != 0 {
+		t.Fatalf(
+			"quarantined run=(%#v,%v) requests=%d captures=%d",
+			run, getErr, len(requests), len(captures),
+		)
+	}
+}
+
 func TestAttentionTriggerWorkerReleasesPreAdmissionFailureThenPinsCurrentPolicy(t *testing.T) {
 	now := serviceTestTime.Add(75 * time.Minute)
 	detail := submittedAttentionTestDetail(serviceTestCaseID, 12)

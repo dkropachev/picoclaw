@@ -19,7 +19,7 @@ vi.mock("@/api/http", () => ({
 
 const mockedLauncherFetch = vi.mocked(launcherFetch)
 const caseID = `pdc_${"1".repeat(32)}`
-const summary = {
+const baseSummary = {
   id: caseID,
   repository: "octo/repo",
   pull_number: 42,
@@ -38,8 +38,12 @@ const summary = {
   review_url: "https://github.com/octo/repo/pull/42#pullrequestreview-7",
   captured_at: "2026-08-05T12:00:01Z",
 } as const
+const summary = {
+  ...baseSummary,
+  attention_required: false,
+} as const
 const developmentCase = {
-  ...summary,
+  ...baseSummary,
   base_repository: "octo/repo",
   base_ref: "main",
   base_sha: "b".repeat(40),
@@ -797,6 +801,10 @@ describe("PR development API", () => {
   it("rejects internal fields and inconsistent safe projections", async () => {
     for (const invalid of [
       { ...summary, event_id: `ev_${"2".repeat(32)}` },
+      { ...summary, attention_required: "false" },
+      Object.fromEntries(
+        Object.entries(summary).filter(([key]) => key !== "attention_required"),
+      ),
       { ...summary, id: `prc_${"1".repeat(32)}` },
       { ...summary, pull_url: "http://github.com/octo/repo/pull/42" },
       { ...summary, pull_number: Number.MAX_SAFE_INTEGER + 1 },
@@ -822,6 +830,7 @@ describe("PR development API", () => {
   it("rejects unsafe detail additions, mismatched base, and oversized feedback", async () => {
     for (const invalid of [
       { ...developmentCase, review_id: "7" },
+      { ...developmentCase, attention_required: false },
       { ...developmentCase, trigger_review_node_id: "private" },
       { ...developmentCase, base_repository: "another/repo" },
       { ...developmentCase, review_commit_sha: "z".repeat(40) },

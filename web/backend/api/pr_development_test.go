@@ -184,6 +184,13 @@ func TestPRDevelopmentRoutesProxyExactReadOnlyContract(t *testing.T) {
 			path:         prDevelopmentAPIPath + "/" + testPRDevelopmentCaseID,
 			upstreamPath: prDevelopmentRuntimePath + "/" + testPRDevelopmentCaseID,
 		},
+		{
+			name: "attention",
+			path: prDevelopmentAPIPath + "/" + testPRDevelopmentCaseID +
+				"/attention",
+			upstreamPath: prDevelopmentRuntimePath + "/" +
+				testPRDevelopmentCaseID + "/attention",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -266,6 +273,8 @@ func TestPRDevelopmentRoutesRejectMalformedOrMutableRequests(t *testing.T) {
 	for _, target := range []string{
 		prDevelopmentAPIPath + "/" + testPRDevelopmentCaseID + "/unknown",
 		prDevelopmentAPIPath + "/" + testPRDevelopmentCaseID + "/chat/extra",
+		prDevelopmentAPIPath + "/" + testPRDevelopmentCaseID +
+			"/attention/respond/extra",
 	} {
 		recorder := httptest.NewRecorder()
 		mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
@@ -277,6 +286,7 @@ func TestPRDevelopmentRoutesRejectMalformedOrMutableRequests(t *testing.T) {
 	for _, path := range []string{
 		prDevelopmentAPIPath,
 		prDevelopmentAPIPath + "/" + testPRDevelopmentCaseID,
+		prDevelopmentAPIPath + "/" + testPRDevelopmentCaseID + "/attention",
 	} {
 		for _, method := range []string{http.MethodPost, http.MethodPatch, http.MethodDelete} {
 			recorder := httptest.NewRecorder()
@@ -289,20 +299,185 @@ func TestPRDevelopmentRoutesRejectMalformedOrMutableRequests(t *testing.T) {
 		}
 	}
 	for _, method := range []string{http.MethodGet, http.MethodPatch, http.MethodDelete} {
-		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(
-			method,
-			prDevelopmentAPIPath+"/"+testPRDevelopmentCaseID+"/chat",
-			nil,
-		)
-		mux.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusMethodNotAllowed ||
-			recorder.Header().Get("Allow") != http.MethodPost {
-			t.Fatalf("%s chat = %d %#v", method, recorder.Code, recorder.Header())
+		for _, suffix := range []string{"/chat", "/attention/respond"} {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(
+				method,
+				prDevelopmentAPIPath+"/"+testPRDevelopmentCaseID+suffix,
+				nil,
+			)
+			mux.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusMethodNotAllowed ||
+				recorder.Header().Get("Allow") != http.MethodPost {
+				t.Fatalf("%s %s = %d %#v", method, suffix, recorder.Code, recorder.Header())
+			}
 		}
 	}
 	if upstreamCalls != 0 {
 		t.Fatalf("invalid requests reached upstream %d time(s)", upstreamCalls)
+	}
+}
+
+func TestPRDevelopmentAttentionResponseProxiesOneHardenedMutation(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+
+	type capturedRequest struct {
+		method        string
+		path          string
+		body          string
+		timeout       time.Duration
+		authorization string
+		contentType   string
+		cookie        string
+	}
+	var captured capturedRequest
+	installEventProxyStubs(
+		t,
+		func(request *http.Request, timeout time.Duration) (*http.Response, error) {
+			body, err := io.ReadAll(request.Body)
+			if err != nil {
+				t.Fatalf("read upstream body: %v", err)
+			}
+			captured = capturedRequest{
+				method:        request.Method,
+				path:          request.URL.Path,
+				body:          string(body),
+				timeout:       timeout,
+				authorization: request.Header.Get("Authorization"),
+				contentType:   request.Header.Get("Content-Type"),
+				cookie:        request.Header.Get("Cookie"),
+			}
+			return eventUpstreamResponse(
+				http.StatusOK,
+				`{"case_version":2,"status":"continuing","can_respond":false,"turns":[]}`,
+			), nil
+		},
+	)
+	mux := http.NewServeMux()
+	NewHandler(configPath).RegisterRoutes(mux)
+
+	body := `{"expected_case_version":2,"response_token":"sha256:` +
+		strings.Repeat("a", 64) + `","response":"Keep the compatibility path."}`
+	request := httptest.NewRequest(
+		http.MethodPost,
+		prDevelopmentAPIPath+"/"+testPRDevelopmentCaseID+"/attention/respond",
+		strings.NewReader(body),
+	)
+	request.Header.Set("Content-Type", "application/json; charset=utf-8")
+	request.Header.Set("Content-Encoding", "identity")
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	request.Header.Set("Authorization", "Bearer browser-token")
+	request.Header.Set("Cookie", "launcher=browser-secret")
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	if captured.method != http.MethodPost ||
+		captured.path != prDevelopmentRuntimePath+"/"+testPRDevelopmentCaseID+
+			"/attention/respond" ||
+		captured.body != body || captured.timeout != reviewGatewayAIRequestTimeout ||
+		captured.authorization != "Bearer gateway-pid-token" ||
+		captured.contentType != "application/json" || captured.cookie != "" {
+		t.Fatalf("upstream = %#v", captured)
+	}
+}
+
+func TestPRDevelopmentAttentionResponseRejectsInvalidIntentBeforeProxy(t *testing.T) {
+	configPath, cleanup := setupOAuthTestEnv(t)
+	defer cleanup()
+	upstreamCalls := 0
+	installEventProxyStubs(
+		t,
+		func(*http.Request, time.Duration) (*http.Response, error) {
+			upstreamCalls++
+			return eventUpstreamResponse(http.StatusOK, `{}`), nil
+		},
+	)
+	mux := http.NewServeMux()
+	NewHandler(configPath).RegisterRoutes(mux)
+	responsePath := prDevelopmentAPIPath + "/" + testPRDevelopmentCaseID +
+		"/attention/respond"
+	valid := `{"expected_case_version":0,"response_token":"sha256:` +
+		strings.Repeat("a", 64) + `","response":"Proceed."}`
+	tests := []struct {
+		name       string
+		target     string
+		body       string
+		fetchSite  string
+		wantStatus int
+	}{
+		{
+			name:       "missing provenance",
+			target:     responsePath,
+			body:       valid,
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name: "query", target: responsePath + "?x=1", body: valid,
+			fetchSite: "same-origin", wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "unknown field", target: responsePath,
+			body:      strings.TrimSuffix(valid, "}") + `,"run_id":"private"}`,
+			fetchSite: "same-origin", wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "duplicate field", target: responsePath,
+			body:      strings.Replace(valid, `"response":`, `"response":"first","response":`, 1),
+			fetchSite: "same-origin", wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "bad token", target: responsePath,
+			body: strings.Replace(valid, "sha256:"+strings.Repeat("a", 64),
+				"sha256:"+strings.Repeat("A", 64), 1),
+			fetchSite: "same-origin", wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "version above capacity", target: responsePath,
+			body: strings.Replace(valid, `"expected_case_version":0`,
+				`"expected_case_version":257`, 1),
+			fetchSite: "same-origin", wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "unnormalized response", target: responsePath,
+			body:      strings.Replace(valid, "Proceed.", " Proceed. ", 1),
+			fetchSite: "same-origin", wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "oversized response", target: responsePath,
+			body: strings.Replace(valid, "Proceed.",
+				strings.Repeat("x", prDevelopmentChatBytes+1), 1),
+			fetchSite: "same-origin", wantStatus: http.StatusBadRequest,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(
+				http.MethodPost,
+				test.target,
+				strings.NewReader(test.body),
+			)
+			request.Header.Set("Content-Type", "application/json")
+			if test.fetchSite != "" {
+				request.Header.Set("Sec-Fetch-Site", test.fetchSite)
+			}
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(recorder, request)
+			if recorder.Code != test.wantStatus {
+				t.Fatalf(
+					"status = %d, want %d, body=%s",
+					recorder.Code,
+					test.wantStatus,
+					recorder.Body.String(),
+				)
+			}
+		})
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("invalid attention responses reached upstream %d time(s)", upstreamCalls)
 	}
 }
 

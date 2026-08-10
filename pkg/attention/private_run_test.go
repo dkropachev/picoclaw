@@ -251,9 +251,13 @@ func TestPrivateRunnerQuarantinesPostCreateAdmissionFaultAndConverges(t *testing
 			}
 
 			second, secondErr := runner.Launch(ctx, request)
-			if secondErr != nil || second.RunID != wantRunID ||
-				second.Status != workflows.RunStatusFailed || !second.Existing {
-				t.Fatalf("second Launch() = (%#v, %v)", second, secondErr)
+			if second != (PrivateLaunchResult{}) ||
+				!errors.Is(secondErr, ErrPrivateRunAdmissionUncertain) {
+				t.Fatalf(
+					"second Launch() = (%#v, %v), want durable admission uncertainty",
+					second,
+					secondErr,
+				)
 			}
 			if got := baseAdmissions.Load(); got != 1 {
 				t.Fatalf("base admissions = %d, want 1", got)
@@ -524,6 +528,16 @@ func TestPrivateRunnerQuarantinesUnlinkedDeterministicRunAfterFailedReadmission(
 		persisted.CompletedAt == nil {
 		t.Fatalf("unlinked run = (%#v, %v)", persisted, loadErr)
 	}
+	exact, found, exactErr := runner.FindExisting(ctx, key)
+	if exact != (PrivateLaunchResult{}) || found ||
+		!errors.Is(exactErr, ErrPrivateRunAdmissionUncertain) {
+		t.Fatalf(
+			"FindExisting(unlinked) = (%#v, %t, %v), want uncertainty",
+			exact,
+			found,
+			exactErr,
+		)
+	}
 	second, secondErr := runner.Launch(ctx, request)
 	if second != (PrivateLaunchResult{}) ||
 		!errors.Is(secondErr, ErrPrivateRunAdmissionUncertain) {
@@ -549,6 +563,143 @@ func TestPrivateRunnerQuarantinesUnlinkedDeterministicRunAfterFailedReadmission(
 	}
 	if got := binding.admissions.Load(); got != 2 {
 		t.Fatalf("zero gate changed decision admissions to %d", got)
+	}
+}
+
+func TestPrivateRunnerFindExistingTreatsMissingLinkedRunAsRecovery(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspace := t.TempDir()
+	runs := workflows.NewFileRunStore(workspace)
+	key, err := CanonicalDecisionKey(map[string]any{"decision": "missing-linked-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := RunIDForDecisionKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := &testDecisionBinding{links: map[string]string{key: runID}}
+	runner, err := NewPrivateRunner(PrivateRunnerConfig{
+		Executor: &workflows.Executor{WorkspaceDir: workspace, Store: runs},
+		Runs:     runs,
+		Policies: PolicySourceFunc(func(context.Context, PolicySelector, PolicyUse) error {
+			return ErrInvalidPolicySource
+		}),
+		Decisions: binding,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, found, findErr := runner.FindExisting(ctx, key)
+	if result != (PrivateLaunchResult{}) || found ||
+		!errors.Is(findErr, ErrPrivateRunAdmissionUncertain) {
+		t.Fatalf(
+			"FindExisting(missing linked run) = (%#v, %t, %v)",
+			result,
+			found,
+			findErr,
+		)
+	}
+}
+
+func TestPrivateRunnerCompatibilityProjectsOnlyExactLinkedAdmissionQuarantine(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, test := range []struct {
+		name      string
+		malformed bool
+	}{
+		{name: "exact"},
+		{name: "malformed marker shape", malformed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			workspace := t.TempDir()
+			baseRuns := workflows.NewFileRunStore(workspace)
+			var runs workflows.RunStore = baseRuns
+			if test.malformed {
+				runs = &malformedAttentionQuarantineRunStore{RunStore: baseRuns}
+			}
+			binding := &testDecisionBinding{links: make(map[string]string)}
+			prepared, err := PrepareSnapshot(PolicySnapshot{
+				Revision: "linked-quarantine-compatibility-v1",
+				Global: []workflows.GateSpec{{
+					ID: "automatic", Kind: workflows.GateDeterministic,
+					When: "false", Title: "Automatic", Questions: []any{"Continue?"},
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner, err := NewPrivateRunner(PrivateRunnerConfig{
+				Executor: &workflows.Executor{
+					WorkspaceDir: workspace,
+					Store:        runs,
+					AdmittedRunCreate: func(
+						_ context.Context,
+						_ *workflows.Run,
+						create func() error,
+					) error {
+						if createErr := create(); createErr != nil {
+							return createErr
+						}
+						return errors.New("post-create acknowledgement failed")
+					},
+				},
+				Runs: runs,
+				Policies: PolicySourceFunc(func(
+					context.Context,
+					PolicySelector,
+					PolicyUse,
+				) error {
+					return ErrInvalidPolicySource
+				}),
+				Decisions:                        binding,
+				ProjectLinkedAdmissionQuarantine: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			key, err := CanonicalDecisionKey(map[string]any{"decision": test.name})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			first, firstErr := runner.Launch(ctx, PrivateLaunchRequest{
+				DecisionKey: key,
+				Policy:      prepared,
+			})
+			if first != (PrivateLaunchResult{}) ||
+				!errors.Is(firstErr, ErrPrivateRunAdmissionUncertain) {
+				t.Fatalf("Launch() = (%#v, %v), want quarantine", first, firstErr)
+			}
+			existing, found, findErr := runner.FindExisting(ctx, key)
+			if test.malformed {
+				if existing != (PrivateLaunchResult{}) || found ||
+					!errors.Is(findErr, ErrPrivateRunAdmissionUncertain) {
+					t.Fatalf(
+						"FindExisting(malformed) = (%#v, %t, %v)",
+						existing,
+						found,
+						findErr,
+					)
+				}
+				return
+			}
+			if findErr != nil || !found || !existing.Existing ||
+				existing.Status != workflows.RunStatusFailed || existing.RunID == "" {
+				t.Fatalf(
+					"FindExisting(exact) = (%#v, %t, %v)",
+					existing,
+					found,
+					findErr,
+				)
+			}
+		})
 	}
 }
 
@@ -707,6 +858,21 @@ type testDecisionBinding struct {
 type failingAttentionUpdateRunStore struct {
 	workflows.RunStore
 	failUpdates atomic.Int32
+}
+
+type malformedAttentionQuarantineRunStore struct {
+	workflows.RunStore
+}
+
+func (store *malformedAttentionQuarantineRunStore) UpdateRun(
+	ctx context.Context,
+	run *workflows.Run,
+) error {
+	if run != nil && run.Status == workflows.RunStatusFailed &&
+		run.Error == privateRunAdmissionUncertainFailure {
+		run.Jobs = map[string]workflows.JobExecution{"unexpected": {}}
+	}
+	return store.RunStore.UpdateRun(ctx, run)
 }
 
 func (store *failingAttentionUpdateRunStore) UpdateRun(

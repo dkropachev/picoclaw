@@ -129,16 +129,14 @@ describe("reviews route navigation", () => {
       expect(router.state.location.search).toEqual({
         view: "development",
         case: developmentCaseID,
-        repository: "octo/repo",
-        pull_number: 84,
+        focus: "chat",
       })
     })
     expect(screen.getByTestId("development-search")).toHaveTextContent(
       JSON.stringify({
         view: "development",
         case: developmentCaseID,
-        repository: "octo/repo",
-        pull_number: 84,
+        focus: "chat",
       }),
     )
     expect(screen.queryByTestId("reviews-search")).not.toBeInTheDocument()

@@ -594,6 +594,26 @@ func (s *Store) appendPRDevelopmentLedgerReview(
 		); validateErr != nil {
 			return validateErr
 		}
+		if enqueueChanges &&
+			normalized.Outcome == PRDevelopmentLedgerReviewAttentionRequired {
+			conversation, conversationErr := loadPRDevelopmentConversation(
+				ctx,
+				conn,
+				normalized.CaseID,
+			)
+			if conversationErr != nil {
+				return conversationErr
+			}
+			if enqueueErr := enqueuePRDevelopmentAttentionTrigger(
+				ctx,
+				conn,
+				candidate,
+				conversation,
+				now,
+			); enqueueErr != nil {
+				return enqueueErr
+			}
+		}
 		completion.Entry = candidate
 		completion.Controller = redactPRDevelopmentControllerAuthority(controller)
 		changed = true
